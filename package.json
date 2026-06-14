@@ -1,0 +1,13 @@
+{
+  "name": "fanhao-local-library",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local LAN video library browser for a G: drive collection.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

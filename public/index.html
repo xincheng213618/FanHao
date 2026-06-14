@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>个人视频资料库</title>
+    <link rel="stylesheet" href="/styles.css?v=20260614-21" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="人物分类">
+        <div class="brand">
+          <div>
+            <h1>个人视频资料库</h1>
+            <p id="librarySummary">正在扫描资料库</p>
+          </div>
+          <button class="icon-button" id="rescanButton" type="button" title="重新扫描" aria-label="重新扫描">
+            <span aria-hidden="true">↻</span>
+          </button>
+        </div>
+
+        <label class="search-box">
+          <span aria-hidden="true">⌕</span>
+          <input id="personSearch" type="search" placeholder="搜索人物" autocomplete="off" />
+        </label>
+
+        <nav class="view-tabs" aria-label="资料库视图">
+          <button class="view-tab active" type="button" data-view="people">人物</button>
+          <button class="view-tab" type="button" data-view="favorites">收藏</button>
+          <button class="view-tab" type="button" data-view="history">继续观看</button>
+        </nav>
+
+        <div class="person-list" id="personList"></div>
+      </aside>
+
+      <main class="main">
+        <header class="toolbar">
+          <div>
+            <div class="eyebrow" id="currentPath">G:\</div>
+            <h2 id="currentTitle">全部人物</h2>
+          </div>
+          <label class="search-box work-search">
+            <span aria-hidden="true">⌕</span>
+            <input id="workSearch" type="search" placeholder="搜索番号 / 标题 / 文件名" autocomplete="off" />
+          </label>
+          <div class="toolbar-controls">
+            <select id="sortSelect" title="排序">
+              <option value="title">标题</option>
+              <option value="updated">最近更新</option>
+              <option value="progress">最近观看</option>
+              <option value="videos">视频数量</option>
+            </select>
+            <select id="filterSelect" title="筛选">
+              <option value="all">全部</option>
+              <option value="playable">可播放</option>
+              <option value="favorite">已收藏</option>
+              <option value="progress">有进度</option>
+              <option value="info">有资料</option>
+              <option value="missingCover">无封面</option>
+            </select>
+          </div>
+        </header>
+
+        <section class="person-profile" id="personProfile" hidden></section>
+        <section class="stats-row" id="statsRow"></section>
+        <section class="work-grid" id="workGrid" aria-live="polite"></section>
+      </main>
+    </div>
+
+    <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+    <section class="detail-drawer" id="detailDrawer" aria-label="作品详情" aria-hidden="true">
+      <header class="drawer-header">
+        <div>
+          <div class="eyebrow" id="drawerPath"></div>
+          <h3 id="drawerTitle"></h3>
+        </div>
+        <button class="icon-button" id="closeDrawer" type="button" title="关闭" aria-label="关闭">
+          <span aria-hidden="true">×</span>
+        </button>
+      </header>
+
+      <div class="drawer-content">
+        <div class="player-area" id="playerArea"></div>
+        <div class="meta-area" id="metaArea"></div>
+        <div class="info-area" id="infoArea"></div>
+      </div>
+    </section>
+
+    <template id="placeholderTemplate">
+      <div class="placeholder-cover">
+        <span>NO COVER</span>
+      </div>
+    </template>
+
+    <script src="/app.js?v=20260614-21" type="module"></script>
+  </body>
+</html>
