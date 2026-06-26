@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f6f7f9" />
+    <title>资料库</title>
+    <link rel="stylesheet" href="./styles.css?v=20260627-rating-cache-01" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <form id="searchForm" class="search-bar" autocomplete="off">
+        <span aria-hidden="true">⌕</span>
+        <input id="searchInput" type="search" placeholder="搜索番号、标题、人物、类别" />
+      </form>
+      <div id="searchHistory" class="search-history" aria-label="搜索记录" hidden></div>
+
+      <nav class="quick-strip" aria-label="快捷入口">
+        <button type="button" data-open-view="history">
+          <strong>继续观看</strong>
+          <span id="historyCount">0</span>
+        </button>
+        <button type="button" data-open-view="favorites">
+          <strong>收藏</strong>
+          <span id="favoriteCount">0</span>
+        </button>
+        <button type="button" data-open-view="people">
+          <strong>人物</strong>
+          <span id="peopleCount">0</span>
+        </button>
+        <button type="button" data-open-view="works">
+          <strong>作品</strong>
+          <span id="worksCount">0</span>
+        </button>
+        <button type="button" data-open-view="rankings">
+          <strong>排行榜</strong>
+          <span id="rankingsCount">TOP</span>
+        </button>
+        <button type="button" data-open-url="/">
+          <strong>网页资料库</strong>
+          <span>打开</span>
+        </button>
+      </nav>
+
+      <section id="continueSection" class="continue-section" aria-labelledby="continueTitle" hidden>
+        <div class="section-head">
+          <div>
+            <p class="section-label">继续观看</p>
+            <h2 id="continueTitle">最近进度</h2>
+          </div>
+          <button class="text-button" type="button" data-open-view="history">全部</button>
+        </div>
+        <div id="continuePreview" class="continue-preview" aria-live="polite"></div>
+      </section>
+
+      <section class="status-card" aria-labelledby="statusTitle">
+        <div class="status-head">
+          <div>
+            <p id="statusTitle" class="section-label">当前服务</p>
+            <strong id="serverLabel">http://192.168.31.86:29998</strong>
+          </div>
+          <span id="connectionBadge" class="badge">连接中</span>
+        </div>
+
+        <div class="stats-grid" aria-label="资料库统计">
+          <div>
+            <strong id="statRoots">-</strong>
+            <span>盘</span>
+          </div>
+          <div>
+            <strong id="statPeople">-</strong>
+            <span>人物</span>
+          </div>
+          <div>
+            <strong id="statVideos">-</strong>
+            <span>视频</span>
+          </div>
+          <div>
+            <strong id="statInfo">-</strong>
+            <span>资料</span>
+          </div>
+        </div>
+
+        <button id="openLibraryButton" class="primary-action" type="button">浏览人物</button>
+      </section>
+
+      <section class="preview-section" aria-labelledby="previewTitle">
+        <div class="section-head">
+          <div>
+            <p class="section-label">人物索引</p>
+            <h2 id="previewTitle">常用入口</h2>
+          </div>
+          <button class="text-button" type="button" data-open-view="people">全部</button>
+        </div>
+        <div id="personPreview" class="person-preview" aria-live="polite">
+          <div class="loading-row">正在读取资料库</div>
+        </div>
+      </section>
+
+      <section id="contentPanel" class="content-panel" hidden>
+        <div class="section-head">
+          <div>
+            <p id="viewKicker" class="section-label">资料库</p>
+            <h2 id="viewTitle">浏览</h2>
+          </div>
+          <div class="section-actions">
+            <button id="viewBack" class="text-button" type="button" hidden>返回</button>
+            <button id="viewOpenAll" class="text-button" type="button">网页打开</button>
+          </div>
+        </div>
+        <div id="viewMeta" class="view-meta"></div>
+        <div id="viewContent" class="content-list" aria-live="polite"></div>
+      </section>
+
+      <section id="settingsPanel" class="settings-panel" hidden>
+        <section class="settings-group" aria-labelledby="serverSettingsTitle">
+          <div class="settings-group-head">
+            <p class="section-label">连接</p>
+            <strong id="serverSettingsTitle">电脑端服务</strong>
+          </div>
+
+          <form id="connectForm" autocomplete="off">
+            <label for="serverUrl">服务地址</label>
+            <div class="address-row">
+              <input id="serverUrl" name="serverUrl" type="url" inputmode="url" autocomplete="url" placeholder="192.168.31.86:29998" required />
+              <button type="submit">保存</button>
+            </div>
+            <p id="statusText" class="status-text" role="status">电脑端需要保持 29998 服务运行。</p>
+          </form>
+
+          <div class="service-health" aria-label="服务状态">
+            <span id="serviceHealthStatus" class="settings-meta">正在检查服务状态</span>
+            <div class="service-health-metrics">
+              <div>
+                <strong id="healthMode">-</strong>
+                <span>模式</span>
+              </div>
+              <div>
+                <strong id="healthRoots">-</strong>
+                <span>根目录</span>
+              </div>
+              <div>
+                <strong id="healthWorks">-</strong>
+                <span>作品</span>
+              </div>
+              <div>
+                <strong id="healthScannedAt">-</strong>
+                <span>索引</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="server-list" aria-label="可选地址">
+            <button type="button" data-url="http://xc213618.ddns.me:29998">xc213618.ddns.me</button>
+            <button type="button" data-url="http://192.168.31.86:29998">192.168.31.86</button>
+            <button type="button" data-url="http://192.168.192.50:29998">192.168.192.50</button>
+            <button type="button" data-url="http://172.21.96.1:29998">172.21.96.1</button>
+          </div>
+        </section>
+
+        <section class="settings-group" aria-labelledby="themeTitle">
+          <div class="settings-group-head">
+            <p class="section-label">外观</p>
+            <strong id="themeTitle">主题</strong>
+          </div>
+          <div class="segmented-control" aria-label="主题设置">
+            <button type="button" data-theme-choice="system">跟随系统</button>
+            <button type="button" data-theme-choice="light">浅色</button>
+            <button type="button" data-theme-choice="dark">深色</button>
+          </div>
+        </section>
+
+        <section class="settings-group" aria-labelledby="cacheTitle">
+          <div class="settings-group-head">
+            <p class="section-label">本地缓存</p>
+            <strong id="cacheTitle">手机数据</strong>
+          </div>
+          <span id="cacheStatus" class="settings-meta">正在检查</span>
+          <div class="cache-metrics" aria-label="缓存统计">
+            <div>
+              <strong id="cacheBytes">-</strong>
+              <span>占用</span>
+            </div>
+            <div>
+              <strong id="cacheResponseCount">-</strong>
+              <span>数据</span>
+            </div>
+            <div>
+              <strong id="cacheImageCount">-</strong>
+              <span>图片</span>
+            </div>
+            <div>
+              <strong id="cacheUpdated">-</strong>
+              <span>最近</span>
+            </div>
+          </div>
+          <div class="settings-action-row">
+            <button id="refreshCacheButton" type="button">刷新缓存</button>
+            <button id="clearCacheButton" type="button">清理缓存</button>
+          </div>
+        </section>
+      </section>
+
+      <nav class="bottom-nav" aria-label="底部导航">
+        <button class="active" type="button" data-home>
+          <span>首页</span>
+        </button>
+        <button type="button" data-open-view="works">
+          <span>作品</span>
+        </button>
+        <button type="button" data-open-view="rankings">
+          <span>榜单</span>
+        </button>
+        <button type="button" data-open-view="people">
+          <span>人物</span>
+        </button>
+        <button type="button" data-open-view="favorites">
+          <span>收藏</span>
+        </button>
+        <button type="button" data-settings>
+          <span>设置</span>
+        </button>
+      </nav>
+    </main>
+
+    <script src="./app.js?v=20260627-route-return-01" type="module"></script>
+  </body>
+</html>

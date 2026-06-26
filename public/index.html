@@ -2,9 +2,15 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#1f7a62" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="application-name" content="资料库" />
     <title>个人视频资料库</title>
-    <link rel="stylesheet" href="/styles.css?v=20260614-21" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260626-rank-return-07" />
+    <link rel="icon" href="/app-icon.svg?v=20260626-rank-return-07" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/app-icon.svg?v=20260626-rank-return-07" />
+    <link rel="stylesheet" href="/styles.css?v=20260626-rank-return-07" />
   </head>
   <body>
     <div class="app-shell">
@@ -14,20 +20,24 @@
             <h1>个人视频资料库</h1>
             <p id="librarySummary">正在扫描资料库</p>
           </div>
-          <button class="icon-button" id="rescanButton" type="button" title="重新扫描" aria-label="重新扫描">
+          <button class="icon-button" id="rescanButton" type="button" title="全库重新扫描（较慢）" aria-label="全库重新扫描（较慢）">
             <span aria-hidden="true">↻</span>
+          </button>
+          <button class="icon-button" id="adminButton" type="button" title="后台管理" aria-label="后台管理">
+            <span aria-hidden="true">⚙</span>
           </button>
         </div>
 
         <label class="search-box">
           <span aria-hidden="true">⌕</span>
-          <input id="personSearch" type="search" placeholder="搜索人物" autocomplete="off" />
+          <input id="personSearch" type="search" placeholder="搜索人物" autocomplete="off" aria-label="搜索人物" />
         </label>
 
         <nav class="view-tabs" aria-label="资料库视图">
-          <button class="view-tab active" type="button" data-view="people">人物</button>
-          <button class="view-tab" type="button" data-view="favorites">收藏</button>
-          <button class="view-tab" type="button" data-view="history">继续观看</button>
+          <button class="view-tab active" type="button" data-view="people" aria-pressed="true">人物</button>
+          <button class="view-tab" type="button" data-view="favorites" aria-pressed="false">收藏</button>
+          <button class="view-tab" type="button" data-view="history" aria-pressed="false">继续观看</button>
+          <button class="view-tab" type="button" data-view="rankings" aria-pressed="false">排行榜</button>
         </nav>
 
         <div class="person-list" id="personList"></div>
@@ -35,29 +45,51 @@
 
       <main class="main">
         <header class="toolbar">
-          <div>
+          <div class="toolbar-title">
+            <button class="toolbar-back" id="backToPeopleIndex" type="button" hidden>返回索引</button>
             <div class="eyebrow" id="currentPath">G:\</div>
             <h2 id="currentTitle">全部人物</h2>
           </div>
           <label class="search-box work-search">
             <span aria-hidden="true">⌕</span>
-            <input id="workSearch" type="search" placeholder="搜索番号 / 标题 / 文件名" autocomplete="off" />
+            <input id="workSearch" type="search" placeholder="搜索番号 / 标题 / 人物 / 类别 / 片商" autocomplete="off" aria-label="搜索番号、标题、人物、类别或片商" />
           </label>
           <div class="toolbar-controls">
-            <select id="sortSelect" title="排序">
+            <select id="sortSelect" title="排序" aria-label="作品排序">
               <option value="title">标题</option>
+              <option value="ranking">排行</option>
+              <option value="releaseDesc">发行最新</option>
+              <option value="releaseAsc">发行最早</option>
               <option value="updated">最近更新</option>
+              <option value="ratingDesc">评分最高</option>
+              <option value="ratingAsc">评分最低</option>
               <option value="progress">最近观看</option>
+              <option value="sizeDesc">文件大小</option>
+              <option value="durationDesc">时长</option>
               <option value="videos">视频数量</option>
             </select>
-            <select id="filterSelect" title="筛选">
+            <select id="filterSelect" title="筛选" aria-label="作品筛选">
               <option value="all">全部</option>
               <option value="playable">可播放</option>
               <option value="favorite">已收藏</option>
               <option value="progress">有进度</option>
               <option value="info">有资料</option>
+              <option value="localOnly">本地</option>
+              <option value="rated">有评分</option>
+              <option value="highRating">高分</option>
+              <option value="vr">VR</option>
+              <option value="missingLocal">未下载</option>
               <option value="missingCover">无封面</option>
             </select>
+            <label class="toggle-control" title="显示 JavDB 有记录但本地没有文件的作品">
+              <input id="missingLocalToggle" type="checkbox" checked />
+              <span>显示未下载</span>
+            </label>
+            <label class="toggle-control" title="显示 OFJE 等合集作品">
+              <input id="collectionToggle" type="checkbox" />
+              <span>显示合集</span>
+            </label>
+            <button class="filter-rule-button" id="compilationConfigButton" type="button">规则</button>
           </div>
         </header>
 
@@ -68,7 +100,77 @@
     </div>
 
     <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
-    <section class="detail-drawer" id="detailDrawer" aria-label="作品详情" aria-hidden="true">
+    <div class="admin-backdrop" id="adminBackdrop" hidden></div>
+    <section class="admin-modal" id="adminModal" role="dialog" aria-modal="true" aria-labelledby="adminTitle" aria-hidden="true" tabindex="-1">
+      <header class="admin-header">
+        <div>
+          <div class="eyebrow">本机后台</div>
+          <h3 id="adminTitle">后台管理</h3>
+        </div>
+        <button class="icon-button" id="closeAdmin" type="button" title="关闭" aria-label="关闭">
+          <span aria-hidden="true">×</span>
+        </button>
+      </header>
+      <div class="admin-content">
+        <section class="admin-section">
+          <label class="admin-field">
+            <span>人物</span>
+            <select id="adminPersonSelect" aria-label="选择人物"></select>
+          </label>
+          <div class="admin-actions">
+            <button class="folder-button" id="adminRescanPerson" type="button">刷新本地检测</button>
+            <button class="folder-button" id="adminRefreshActor" type="button">刷新缺失检测</button>
+            <button class="folder-button" id="adminRefreshRankings" type="button">刷新排行榜</button>
+          </div>
+          <p class="admin-status" id="adminStatus"></p>
+        </section>
+        <section class="admin-section">
+          <div class="admin-section-title">演员头像</div>
+          <label class="admin-field">
+            <span>本地头像目录（需包含 Filetree.json 与 Content）</span>
+            <input id="adminActorAvatarDataPath" type="text" spellcheck="false" placeholder="F:\movie\actors" />
+          </label>
+          <div class="admin-actions">
+            <button class="folder-button" id="adminPreviewActorAvatars" type="button">预览候选</button>
+            <button class="folder-button" id="adminImportActorAvatars" type="button">扫描本地头像</button>
+          </div>
+          <div class="admin-avatar-candidates" id="adminActorAvatarCandidates"></div>
+        </section>
+        <section class="admin-section">
+          <div class="admin-section-title">封面缓存</div>
+          <label class="admin-field compact">
+            <span>本次生成数量</span>
+            <input id="adminCoverLimit" type="number" min="1" max="200" step="1" value="20" />
+          </label>
+          <div class="admin-actions">
+            <button class="folder-button" id="adminGenerateCovers" type="button">批量补封面</button>
+          </div>
+          <p class="admin-status" id="adminCoverStatus"></p>
+        </section>
+        <section class="admin-section" id="adminCompilationSection">
+          <div class="admin-section-title">合集规则</div>
+          <div class="admin-config-grid">
+            <label class="admin-field">
+              <span>番号前缀</span>
+              <textarea id="adminCompilationPrefixes" rows="5" spellcheck="false"></textarea>
+            </label>
+            <label class="admin-field">
+              <span>标题关键词</span>
+              <textarea id="adminCompilationKeywords" rows="5" spellcheck="false"></textarea>
+            </label>
+          </div>
+          <div class="admin-actions">
+            <button class="folder-button" id="adminSaveCompilationConfig" type="button">保存合集规则</button>
+          </div>
+          <p class="admin-status" id="adminConfigStatus"></p>
+        </section>
+        <section class="admin-section">
+          <div class="admin-section-title">任务日志</div>
+          <div class="admin-task-list" id="adminTaskList"></div>
+        </section>
+      </div>
+    </section>
+    <section class="detail-drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" aria-hidden="true" tabindex="-1">
       <header class="drawer-header">
         <div>
           <div class="eyebrow" id="drawerPath"></div>
@@ -81,8 +183,10 @@
 
       <div class="drawer-content">
         <div class="player-area" id="playerArea"></div>
-        <div class="meta-area" id="metaArea"></div>
-        <div class="info-area" id="infoArea"></div>
+        <aside class="drawer-side">
+          <div class="meta-area" id="metaArea"></div>
+          <div class="info-area" id="infoArea"></div>
+        </aside>
       </div>
     </section>
 
@@ -92,6 +196,6 @@
       </div>
     </template>
 
-    <script src="/app.js?v=20260614-21" type="module"></script>
+    <script src="/app.js?v=20260627-route-return-01" type="module"></script>
   </body>
 </html>

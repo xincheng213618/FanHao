@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">个人视频资料库</string>
+    <string name="title_activity_main">个人视频资料库</string>
+    <string name="package_name">local.fanhao.library</string>
+    <string name="custom_url_scheme">local.fanhao.library</string>
+</resources>

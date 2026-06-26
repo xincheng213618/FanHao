@@ -1,0 +1,46 @@
+{
+  "name": "个人视频资料库",
+  "short_name": "资料库",
+  "description": "局域网访问个人视频资料库",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f6f7f4",
+  "theme_color": "#1f7a62",
+  "icons": [
+    {
+      "src": "/app-icon.svg?v=20260624-filter-reset-05",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["entertainment", "video"],
+  "shortcuts": [
+    {
+      "name": "继续观看",
+      "short_name": "继续观看",
+      "url": "/?view=history",
+      "icons": [
+        {
+          "src": "/app-icon.svg?v=20260624-filter-reset-05",
+          "sizes": "any",
+          "type": "image/svg+xml"
+        }
+      ]
+    },
+    {
+      "name": "收藏",
+      "short_name": "收藏",
+      "url": "/?view=favorites",
+      "icons": [
+        {
+          "src": "/app-icon.svg?v=20260624-filter-reset-05",
+          "sizes": "any",
+          "type": "image/svg+xml"
+        }
+      ]
+    }
+  ]
+}

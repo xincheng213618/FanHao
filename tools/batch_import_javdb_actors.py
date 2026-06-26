@@ -1,6 +1,7 @@
 import argparse
 import json
 import mimetypes
+import random
 import re
 import sqlite3
 import sys
@@ -11,6 +12,7 @@ from urllib.parse import quote, urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
+from code_parser import normalize_code
 from import_javdb_actor import (
     DEFAULT_CHROME_BINARY,
     DEFAULT_DB,
@@ -32,9 +34,6 @@ from import_javdb_actor import (
 SKIP_PERSON_NAMES = {"noactor", "VR"}
 SKIP_ACTOR_IDS = {"censored", "uncensored", "western"}
 SEARCH_URL = "https://javdb.com/search?q={query}&f=actor"
-CODE_REGEX = re.compile(r"([A-Z]{2,10})[-_\s﹣－–—]?(\d{2,7})", re.IGNORECASE)
-
-
 class AccessBlockedError(RuntimeError):
     pass
 
@@ -75,6 +74,29 @@ def person_source_priority(person: dict) -> int:
     return min((source_priority(path) for path in paths if path), default=9)
 
 
+def normalize_source_path(value: str) -> str:
+    path = str(value or "").strip().replace("\\", "/").lower()
+    path = re.sub(r"/+$", "", path)
+    if re.fullmatch(r"[a-z]", path):
+        path = f"{path}:"
+    return path
+
+
+def source_path_matches(path: str, prefix: str) -> bool:
+    normalized_path = normalize_source_path(path)
+    normalized_prefix = normalize_source_path(prefix)
+    if not normalized_path or not normalized_prefix:
+        return False
+    return normalized_path == normalized_prefix or normalized_path.startswith(normalized_prefix + "/")
+
+
+def person_matches_source(person: dict, prefixes: list[str]) -> bool:
+    if not prefixes:
+        return True
+    paths = [*(person.get("sourcePaths") or []), person.get("relativePath") or ""]
+    return any(source_path_matches(path, prefix) for path in paths for prefix in prefixes)
+
+
 def is_special_person(person: dict) -> bool:
     name = str(person.get("name") or "").strip()
     if not name or name in SKIP_PERSON_NAMES:
@@ -82,25 +104,17 @@ def is_special_person(person: dict) -> bool:
     return bool(re.fullmatch(r"\[[^\]]*]", name))
 
 
-def normalize_code(value: str) -> str:
-    match = CODE_REGEX.search(str(value or ""))
-    if not match:
-        return ""
-    prefix = match.group(1).upper()
-    number = int(match.group(2))
-    return f"{prefix}-{number:03d}"
-
-
 def work_code(work: dict) -> str:
     return normalize_code(f"{work.get('directoryName') or ''} {work.get('title') or ''}")
 
 
-def load_people(library_index: Path, include_special: bool, min_work_count: int) -> list[dict]:
+def load_people(library_index: Path, include_special: bool, min_work_count: int, source_prefixes: list[str]) -> list[dict]:
     data = json.loads(library_index.read_text(encoding="utf-8"))
     people = [
         person
         for person in data.get("people", [])
         if int(person.get("workCount") or 0) >= min_work_count and (include_special or not is_special_person(person))
+        and person_matches_source(person, source_prefixes)
     ]
     return sorted(
         people,
@@ -174,9 +188,9 @@ def save_error(db_path: Path, person: dict, error: str, javdb_url: str = "", dis
               javdb_actor_id = COALESCE(excluded.javdb_actor_id, actor_profiles.javdb_actor_id),
               javdb_url = COALESCE(excluded.javdb_url, actor_profiles.javdb_url),
               display_name = COALESCE(excluded.display_name, actor_profiles.display_name, excluded.person_name),
-              avatar_url = CASE WHEN actor_profiles.avatar_url LIKE '%/avatars/%' THEN actor_profiles.avatar_url ELSE NULL END,
-              avatar_mime = CASE WHEN actor_profiles.avatar_url LIKE '%/avatars/%' THEN actor_profiles.avatar_mime ELSE NULL END,
-              avatar_blob = CASE WHEN actor_profiles.avatar_url LIKE '%/avatars/%' THEN actor_profiles.avatar_blob ELSE NULL END,
+              avatar_url = CASE WHEN actor_profiles.source = 'local-avatar' OR actor_profiles.avatar_url LIKE '%/avatars/%' THEN actor_profiles.avatar_url ELSE NULL END,
+              avatar_mime = CASE WHEN actor_profiles.source = 'local-avatar' OR actor_profiles.avatar_url LIKE '%/avatars/%' THEN actor_profiles.avatar_mime ELSE NULL END,
+              avatar_blob = CASE WHEN actor_profiles.source = 'local-avatar' OR actor_profiles.avatar_url LIKE '%/avatars/%' THEN actor_profiles.avatar_blob ELSE NULL END,
               source = excluded.source,
               status = excluded.status,
               error = excluded.error,
@@ -433,17 +447,20 @@ def main() -> None:
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--refresh", action="store_true", help="刷新已经有头像缓存的人物")
     parser.add_argument("--include-special", action="store_true", help="包含 [A]、[]、noactor 等特殊目录")
+    parser.add_argument("--source-prefix", action="append", default=[], help="只处理这些本机路径前缀；可重复。不传则所有来源。例：F:/ 或 O:/[珍藏]")
     parser.add_argument("--min-work-count", type=int, default=1)
     parser.add_argument("--max", type=int, default=0, help="最多处理多少个人物；0 表示不限制")
     parser.add_argument("--search-wait-seconds", type=int, default=20)
     parser.add_argument("--profile-wait-seconds", type=int, default=45)
-    parser.add_argument("--sleep", type=float, default=1.0)
+    parser.add_argument("--sleep", type=float, default=8.0, help="每个人物处理后的基础等待秒数；默认偏慢，避免触发风控。")
+    parser.add_argument("--jitter", type=float, default=4.0, help="额外随机等待秒数上限。")
+    parser.add_argument("--fast", action="store_true", help="允许低于 5 秒的等待间隔；一般不建议。")
     parser.add_argument("--log", type=Path, default=None)
     parser.add_argument("--cache-covers", action="store_true", help="顺手缓存本地缺封面的作品封面；默认关闭")
     args = parser.parse_args()
 
     log_path = args.log or (args.db.parent / f"actor-profile-batch-{time.strftime('%Y%m%d-%H%M%S')}.jsonl")
-    people = load_people(args.library_index, args.include_special, args.min_work_count)
+    people = load_people(args.library_index, args.include_special, args.min_work_count, args.source_prefix)
     works_by_id = load_works_by_id(args.library_index) if args.cache_covers else {}
     if args.max > 0:
         people = people[: args.max]
@@ -471,7 +488,7 @@ def main() -> None:
                     save_error(args.db, person, message)
                     write_jsonl(log_path, {"status": "not_found", "personId": person["id"], "name": name, "searchUrl": search_url, "candidates": candidates[:5]})
                     print(f"[{index}/{summary['total']}] MISS {name} ({len(candidates)} candidates)", flush=True)
-                    time.sleep(args.sleep)
+                    pause(args)
                     continue
 
                 driver.get(candidate["url"])
@@ -503,7 +520,7 @@ def main() -> None:
                             },
                         )
                         print(f"[{index}/{summary['total']}] COVERS {name} ({covers_cached})", flush=True)
-                        time.sleep(args.sleep)
+                        pause(args)
                         continue
                     raise RuntimeError(f"演员页资料不完整: {profile}")
 
@@ -536,11 +553,20 @@ def main() -> None:
                 save_error(args.db, person, str(error))
                 write_jsonl(log_path, {"status": "error", "personId": person.get("id"), "name": name, "error": str(error)})
                 print(f"[{index}/{summary['total']}] ERROR {name}: {error}", flush=True)
-            time.sleep(args.sleep)
+            pause(args)
     finally:
         driver.quit()
 
     print("批量完成: " + json.dumps(summary, ensure_ascii=False), flush=True)
+
+
+def pause(args: argparse.Namespace) -> None:
+    base_sleep = max(0.0, float(args.sleep or 0))
+    if not args.fast and base_sleep < 5.0:
+        base_sleep = 5.0
+    total_sleep = base_sleep + random.uniform(0, max(0.0, float(args.jitter or 0)))
+    if total_sleep > 0:
+        time.sleep(total_sleep)
 
 
 if __name__ == "__main__":
