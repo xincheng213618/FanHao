@@ -2,12 +2,20 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame } from "./lib/cover-frame.js";
+import { ADMIN_SCRIPT_DEFINITIONS } from "./lib/admin-script-registry.js";
 import { normalizeWorkCode as parseNormalizedWorkCode, workCodeKey } from "./lib/code-parser.js";
 import { decodeInfoBuffer, isSubtitleLikeInfoText, parseInfoMetadata, renderInfoMetadataText } from "./lib/info-metadata.js";
+import { createAuthServices } from "./src/server/auth.js";
+import { sendJson, sendText, sendHtml, redirect, notFound } from "./src/server/responses.js";
+import { createStaticFileServer } from "./src/server/static-files.js";
+import { routeAdminApi } from "./src/server/routes/admin-api.js";
+import { routeGalleryApi } from "./src/server/routes/gallery-api.js";
+import { routeToolsApi } from "./src/server/routes/tools-api.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,15 +25,27 @@ const HOST = process.env.HOST || "0.0.0.0";
 const LIBRARY_ROOTS = parseLibraryRoots();
 const PUBLIC_DIR = path.join(__dirname, "public");
 const DATA_DIR = path.join(__dirname, "data");
+const LOG_DIR = path.join(__dirname, "logs");
+const MANGA_LIBRARY_ROOT = process.env.FANHAO_MANGA_ROOT || "E:\\https-smtt6-com-man-hua-yue";
+const PHOTO_SET_ROOTS = parsePhotoSetRoots();
+const GALLERY_MEDIA_SOURCES = galleryMediaSources();
 const INDEX_CACHE_PATH = path.join(DATA_DIR, "library-index.json");
+const IMAGE_LIBRARY_INDEX_PATH = path.join(DATA_DIR, "image-library-index.json");
 const USER_STATE_PATH = path.join(DATA_DIR, "user-state.json");
 const ACTOR_PROFILE_DB_PATH = path.join(DATA_DIR, "actor-profiles.sqlite");
+const IMAGE_GALLERY_DB_PATH = path.join(DATA_DIR, "image-gallery.sqlite");
 const APP_CONFIG_PATH = path.join(DATA_DIR, "app-config.json");
+const AUTH_SECRET_PATH = path.join(DATA_DIR, "auth-secret.txt");
+const ACCESS_LOG_PATH = path.join(LOG_DIR, "access.log");
+const ADMIN_TASKS_PATH = path.join(DATA_DIR, "admin-tasks.json");
+const TOOL_DOWNLOAD_DIR = path.join(DATA_DIR, "tool-downloads");
+const IMAGE_READER_CACHE_DIR = path.join(DATA_DIR, "image-reader-cache");
 const FFMPEG_PATH = process.env.FFMPEG_PATH || "ffmpeg";
 const FFPROBE_PATH = process.env.FFPROBE_PATH || "ffprobe";
+const REMOTE_WEB_PASSWORD = process.env.FANHAO_WEB_PASSWORD || "xincheng";
 
 const EXCLUDED_DIRS = new Set(["$RECYCLE.BIN", "System Volume Information", "Recovery"]);
-const VIDEO_EXTS = new Set([".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".ts", ".webm", ".iso"]);
+const VIDEO_EXTS = new Set([".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".ts", ".m2ts", ".webm", ".iso"]);
 const PLAYABLE_VIDEO_EXTS = new Set([".mp4", ".m4v", ".mov", ".webm"]);
 const DIRECT_VIDEO_EXTS = new Set([".mp4", ".m4v", ".webm"]);
 const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"]);
@@ -38,18 +58,36 @@ const MAX_WORK_LIMIT = 1200;
 const HAS_NVENC = detectNvenc();
 const VIDEO_PROBE_CACHE_LIMIT = 512;
 const videoProbeCache = new Map();
+const DEFAULT_IMAGE_READER_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+const MIN_IMAGE_READER_CACHE_MAX_BYTES = 128 * 1024 * 1024;
+const MAX_IMAGE_READER_CACHE_MAX_BYTES = 200 * 1024 * 1024 * 1024;
+const IMAGE_READER_CACHE_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+const IMAGE_READER_CACHE_CLEANUP_TARGET_RATIO = 0.9;
+const IMAGE_READER_CACHE_TOUCH_THROTTLE_MS = 30 * 1000;
+const IMAGE_READER_LIST_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const ARCHIVE_IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"]);
+const ARCHIVE_EXTS = new Set([".zip", ".cbz", ".rar", ".7z"]);
+const IMAGE_GALLERY_COVER_MAX_BYTES = 1024 * 1024;
+const IMAGE_GALLERY_COVER_BOX_SIZE = 640;
 const DEFAULT_APP_CONFIG = {
   compilationPrefixes: ["OFJE", "THN", "THU"],
   compilationKeywords: ["合集", "総集編", "総集", "コンプリート", "全タイトル", "ベスト盤"],
-  actorAvatarDataPath: ""
+  actorAvatarDataPath: "",
+  imageReaderCacheMaxBytes: DEFAULT_IMAGE_READER_CACHE_MAX_BYTES
 };
 const LOCAL_ACTOR_AVATAR_SOURCE = "local-avatar";
 const MAX_ACTOR_AVATAR_BYTES = 8 * 1024 * 1024;
+const MAX_REMOTE_IMAGE_BYTES = 8 * 1024 * 1024;
 const ACTOR_AVATAR_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
 const DEFAULT_FAVORITE_FOLDER_ID = "default";
 const DEFAULT_FAVORITE_FOLDER_NAME = "默认收藏";
 const MAX_FAVORITE_FOLDERS = 30;
 const RECENT_WATCHED_DAYS = 30;
+const ADMIN_TASK_HISTORY_LIMIT = 100;
+const TOOL_DOWNLOAD_TTL_MS = 10 * 60 * 1000;
+const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
+const TXT_TOOL_MAX_BODY_BYTES = Math.ceil(TXT_TOOL_MAX_FILE_BYTES * 1.4) + 128 * 1024;
+const TXT_TOOL_PREVIEW_BYTES = 256 * 1024;
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -72,6 +110,7 @@ const MIME_TYPES = {
   ".wmv": "video/x-ms-wmv",
   ".flv": "video/x-flv",
   ".ts": "video/mp2t",
+  ".m2ts": "video/mp2t",
   ".iso": "application/octet-stream",
   ".txt": "text/plain; charset=utf-8",
   ".nfo": "text/plain; charset=utf-8",
@@ -83,11 +122,19 @@ const MIME_TYPES = {
   ".csv": "text/csv; charset=utf-8"
 };
 
+const { serveStatic } = createStaticFileServer({
+  publicDir: PUBLIC_DIR,
+  mimeTypes: MIME_TYPES,
+  normalizeExt,
+  notFound
+});
+
 let library = emptyLibrary();
 let lastScanError = null;
 let userState = emptyUserState();
 let appConfig = defaultAppConfig();
 let actorDb = null;
+let imageGalleryDb = null;
 let workInfoCache = null;
 let actorProfileCache = null;
 let actorMovieCache = null;
@@ -96,8 +143,22 @@ let localWorkByCodeKeyCache = null;
 let rankingMissingSearchCache = null;
 let actorMissingSearchCache = null;
 let workSearchTextCache = null;
+let tableStampCache = new Map();
 let adminTaskSeq = 0;
-const adminTasks = [];
+const adminTasks = loadAdminTaskHistory();
+let adminTaskPersistTimer = null;
+const toolDownloads = new Map();
+const toolDownloadTimers = new Map();
+const imageReaderCacheTouchTimes = new Map();
+const archiveImageListCache = new Map();
+let imageLibraryCache = null;
+let imageReaderCacheCleanupPending = false;
+let imageReaderCacheCleanupActive = false;
+const remoteImageWarmQueue = [];
+const remoteImageWarmQueued = new Set();
+let remoteImageWarmActive = 0;
+const REMOTE_IMAGE_WARM_CONCURRENCY = 6;
+const TABLE_STAMP_CACHE_MS = 1000;
 
 function parseLibraryRoots() {
   const raw =
@@ -156,7 +217,9 @@ function emptyUserState() {
 function defaultAppConfig() {
   return {
     compilationPrefixes: [...DEFAULT_APP_CONFIG.compilationPrefixes],
-    compilationKeywords: [...DEFAULT_APP_CONFIG.compilationKeywords]
+    compilationKeywords: [...DEFAULT_APP_CONFIG.compilationKeywords],
+    actorAvatarDataPath: DEFAULT_APP_CONFIG.actorAvatarDataPath,
+    imageReaderCacheMaxBytes: DEFAULT_APP_CONFIG.imageReaderCacheMaxBytes
   };
 }
 
@@ -198,8 +261,19 @@ function normalizeAppConfig(value = {}) {
   return {
     compilationPrefixes: prefixes.length ? prefixes : fallback.compilationPrefixes,
     compilationKeywords: keywords.length ? keywords : fallback.compilationKeywords,
-    actorAvatarDataPath: String(input.actorAvatarDataPath || "").trim().slice(0, 1000)
+    actorAvatarDataPath: String(input.actorAvatarDataPath || "").trim().slice(0, 1000),
+    imageReaderCacheMaxBytes: normalizeImageReaderCacheLimit(
+      input.imageReaderCacheMaxBytes ?? input.mangaImageCacheMaxBytes,
+      fallback.imageReaderCacheMaxBytes
+    )
   };
+}
+
+function normalizeImageReaderCacheLimit(value, fallback = DEFAULT_IMAGE_READER_CACHE_MAX_BYTES) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed <= 0) return 0;
+  return Math.min(MAX_IMAGE_READER_CACHE_MAX_BYTES, Math.max(MIN_IMAGE_READER_CACHE_MAX_BYTES, Math.floor(parsed)));
 }
 
 function loadAppConfig() {
@@ -223,9 +297,34 @@ function publicAppConfig() {
   return {
     compilationPrefixes: [...appConfig.compilationPrefixes],
     compilationKeywords: [...appConfig.compilationKeywords],
-    actorAvatarDataPath: appConfig.actorAvatarDataPath || ""
+    actorAvatarDataPath: appConfig.actorAvatarDataPath || "",
+    imageReaderCacheMaxBytes: normalizeImageReaderCacheLimit(appConfig.imageReaderCacheMaxBytes)
   };
 }
+
+function ensureLogDir() {
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+}
+
+const {
+  applyAppCookie,
+  attachAccessLogger,
+  isSameLocalOrigin,
+  requestAccess,
+  requestAuthState,
+  routeAuth,
+  sendLoginRequired
+} = createAuthServices({
+  authSecretPath: AUTH_SECRET_PATH,
+  accessLogPath: ACCESS_LOG_PATH,
+  remoteWebPassword: REMOTE_WEB_PASSWORD,
+  ensureDataDir,
+  ensureLogDir,
+  readBodyText,
+  sendJson,
+  sendHtml,
+  redirect
+});
 
 function isExcludedDirName(name) {
   const lower = name.toLowerCase();
@@ -562,6 +661,37 @@ function splitPersonNameParts(value) {
     .split(/[、,，/|;；]+/g)
     .map(cleanPersonNamePart)
     .filter(Boolean);
+}
+
+function parseRootList(rawValue, fallback) {
+  const raw = rawValue || fallback;
+  const seen = new Set();
+  return raw
+    .split(/[;,|]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const parsed = path.parse(item);
+      return parsed.root && parsed.root.toLowerCase() === item.toLowerCase() ? parsed.root : path.resolve(item);
+    })
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function parsePhotoSetRoots() {
+  return parseRootList(process.env.FANHAO_PHOTO_SET_ROOTS, "T:\\;T:\\[套图1]");
+}
+
+function galleryMediaSources() {
+  return [
+    { kind: "western", label: "欧美", roots: parseRootList(process.env.FANHAO_WESTERN_ROOTS, "R:\\") },
+    { kind: "movie", label: "电影", roots: parseRootList(process.env.FANHAO_MOVIE_ROOTS, "Z:\\") },
+    { kind: "tv", label: "电视剧", roots: parseRootList(process.env.FANHAO_TV_ROOTS, "Y:\\") }
+  ];
 }
 
 function uniquePersonNames(values) {
@@ -902,6 +1032,7 @@ function importActorAvatarCandidate(rootPath, personId, relPath, options = {}) {
     const now = new Date().toISOString();
     const existing = actorProfileRow(person.id);
     upsertActorAvatar(person, entry, existing, now);
+    invalidateTableStamp("actor_profiles");
     actorProfileCache = null;
   }
   return {
@@ -955,6 +1086,7 @@ function importActorAvatarsFromFiletree(rootPath, options = {}) {
   }
 
   actorProfileCache = null;
+  if (imported) invalidateTableStamp("actor_profiles");
   return {
     root,
     replace,
@@ -1085,6 +1217,7 @@ function getActorDb() {
   if (!actorDb) {
     ensureDataDir();
     actorDb = new DatabaseSync(ACTOR_PROFILE_DB_PATH);
+    actorDb.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
     actorDb.exec(`
       CREATE TABLE IF NOT EXISTS actor_profiles (
         person_id TEXT PRIMARY KEY,
@@ -1105,6 +1238,7 @@ function getActorDb() {
       );
       CREATE INDEX IF NOT EXISTS idx_actor_profiles_name ON actor_profiles(person_name);
       CREATE INDEX IF NOT EXISTS idx_actor_profiles_javdb_actor_id ON actor_profiles(javdb_actor_id);
+      CREATE INDEX IF NOT EXISTS idx_actor_profiles_updated_at ON actor_profiles(updated_at);
       CREATE TABLE IF NOT EXISTS work_covers (
         work_id TEXT PRIMARY KEY,
         person_id TEXT NOT NULL,
@@ -1157,6 +1291,7 @@ function getActorDb() {
       CREATE INDEX IF NOT EXISTS idx_work_info_rating ON work_info(rating);
       CREATE INDEX IF NOT EXISTS idx_work_info_release_date ON work_info(release_date);
       CREATE INDEX IF NOT EXISTS idx_work_info_status ON work_info(status);
+      CREATE INDEX IF NOT EXISTS idx_work_info_updated_at ON work_info(updated_at);
       CREATE TABLE IF NOT EXISTS actor_movies (
         person_id TEXT NOT NULL,
         person_name TEXT NOT NULL,
@@ -1180,6 +1315,7 @@ function getActorDb() {
       CREATE INDEX IF NOT EXISTS idx_actor_movies_code_key ON actor_movies(code_key);
       CREATE INDEX IF NOT EXISTS idx_actor_movies_actor_url ON actor_movies(actor_url);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_actor_movies_person_code_key ON actor_movies(person_id, code_key);
+      CREATE INDEX IF NOT EXISTS idx_actor_movies_updated_at ON actor_movies(updated_at);
       CREATE TABLE IF NOT EXISTS javdb_rankings (
         list_type TEXT NOT NULL,
         list_key TEXT NOT NULL DEFAULT '',
@@ -1200,6 +1336,36 @@ function getActorDb() {
       );
       CREATE INDEX IF NOT EXISTS idx_javdb_rankings_list ON javdb_rankings(list_type, list_key, rank_no);
       CREATE INDEX IF NOT EXISTS idx_javdb_rankings_code_key ON javdb_rankings(code_key);
+      CREATE INDEX IF NOT EXISTS idx_javdb_rankings_updated_at ON javdb_rankings(updated_at);
+      CREATE TABLE IF NOT EXISTS remote_image_cache (
+        url TEXT PRIMARY KEY,
+        url_hash TEXT NOT NULL,
+        content_type TEXT,
+        image_blob BLOB,
+        byte_length INTEGER,
+        status TEXT NOT NULL DEFAULT 'ok',
+        error TEXT,
+        fetched_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_remote_image_cache_hash ON remote_image_cache(url_hash);
+      CREATE INDEX IF NOT EXISTS idx_remote_image_cache_status ON remote_image_cache(status);
+      CREATE TABLE IF NOT EXISTS local_image_cache (
+        file_id TEXT PRIMARY KEY,
+        file_path TEXT NOT NULL,
+        relative_path TEXT,
+        content_type TEXT,
+        image_blob BLOB,
+        byte_length INTEGER,
+        source_size INTEGER,
+        source_mtime TEXT,
+        status TEXT NOT NULL DEFAULT 'ok',
+        error TEXT,
+        cached_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_local_image_cache_path ON local_image_cache(file_path);
+      CREATE INDEX IF NOT EXISTS idx_local_image_cache_status ON local_image_cache(status);
     `);
     ensureColumn(actorDb, "work_info", "javdb_url", "TEXT");
     ensureColumn(actorDb, "work_info", "preview_images_json", "TEXT");
@@ -1215,9 +1381,68 @@ function getActorDb() {
     ensureColumn(actorDb, "javdb_rankings", "rating", "REAL");
     ensureColumn(actorDb, "javdb_rankings", "rating_count", "INTEGER");
     ensureColumn(actorDb, "javdb_rankings", "page_url", "TEXT");
+    ensureColumn(actorDb, "remote_image_cache", "url_hash", "TEXT");
+    ensureColumn(actorDb, "remote_image_cache", "content_type", "TEXT");
+    ensureColumn(actorDb, "remote_image_cache", "image_blob", "BLOB");
+    ensureColumn(actorDb, "remote_image_cache", "byte_length", "INTEGER");
+    ensureColumn(actorDb, "remote_image_cache", "status", "TEXT NOT NULL DEFAULT 'ok'");
+    ensureColumn(actorDb, "remote_image_cache", "error", "TEXT");
+    ensureColumn(actorDb, "remote_image_cache", "fetched_at", "TEXT");
+    ensureColumn(actorDb, "remote_image_cache", "updated_at", "TEXT");
+    ensureColumn(actorDb, "local_image_cache", "file_path", "TEXT");
+    ensureColumn(actorDb, "local_image_cache", "relative_path", "TEXT");
+    ensureColumn(actorDb, "local_image_cache", "content_type", "TEXT");
+    ensureColumn(actorDb, "local_image_cache", "image_blob", "BLOB");
+    ensureColumn(actorDb, "local_image_cache", "byte_length", "INTEGER");
+    ensureColumn(actorDb, "local_image_cache", "source_size", "INTEGER");
+    ensureColumn(actorDb, "local_image_cache", "source_mtime", "TEXT");
+    ensureColumn(actorDb, "local_image_cache", "status", "TEXT NOT NULL DEFAULT 'ok'");
+    ensureColumn(actorDb, "local_image_cache", "error", "TEXT");
+    ensureColumn(actorDb, "local_image_cache", "cached_at", "TEXT");
+    ensureColumn(actorDb, "local_image_cache", "updated_at", "TEXT");
     actorDb.exec("CREATE INDEX IF NOT EXISTS idx_work_info_javdb_url ON work_info(javdb_url)");
   }
   return actorDb;
+}
+
+function getImageGalleryDb() {
+  if (!imageGalleryDb) {
+    ensureDataDir();
+    imageGalleryDb = new DatabaseSync(IMAGE_GALLERY_DB_PATH);
+    imageGalleryDb.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
+    imageGalleryDb.exec(`
+      CREATE TABLE IF NOT EXISTS photo_set_covers (
+        album_id TEXT PRIMARY KEY,
+        archive_path TEXT NOT NULL,
+        archive_size INTEGER,
+        archive_mtime_ms INTEGER,
+        member_path TEXT,
+        cover_mime TEXT,
+        cover_blob BLOB,
+        cover_bytes INTEGER,
+        source_bytes INTEGER,
+        status TEXT NOT NULL DEFAULT 'ok',
+        error TEXT,
+        generated_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_photo_set_covers_archive_path ON photo_set_covers(archive_path);
+      CREATE INDEX IF NOT EXISTS idx_photo_set_covers_status ON photo_set_covers(status);
+      CREATE INDEX IF NOT EXISTS idx_photo_set_covers_updated_at ON photo_set_covers(updated_at);
+    `);
+    ensureColumn(imageGalleryDb, "photo_set_covers", "archive_size", "INTEGER");
+    ensureColumn(imageGalleryDb, "photo_set_covers", "archive_mtime_ms", "INTEGER");
+    ensureColumn(imageGalleryDb, "photo_set_covers", "member_path", "TEXT");
+    ensureColumn(imageGalleryDb, "photo_set_covers", "cover_mime", "TEXT");
+    ensureColumn(imageGalleryDb, "photo_set_covers", "cover_blob", "BLOB");
+    ensureColumn(imageGalleryDb, "photo_set_covers", "cover_bytes", "INTEGER");
+    ensureColumn(imageGalleryDb, "photo_set_covers", "source_bytes", "INTEGER");
+    ensureColumn(imageGalleryDb, "photo_set_covers", "status", "TEXT NOT NULL DEFAULT 'ok'");
+    ensureColumn(imageGalleryDb, "photo_set_covers", "error", "TEXT");
+    ensureColumn(imageGalleryDb, "photo_set_covers", "generated_at", "TEXT");
+    ensureColumn(imageGalleryDb, "photo_set_covers", "updated_at", "TEXT");
+  }
+  return imageGalleryDb;
 }
 
 function ensureColumn(db, table, column, definition) {
@@ -1228,7 +1453,7 @@ function ensureColumn(db, table, column, definition) {
 }
 
 function actorProfileRowsById() {
-  const stamp = workInfoStamp();
+  const stamp = actorProfileStamp();
   if (actorProfileCache?.stamp === stamp) return actorProfileCache.rows;
 
   const rows = new Map();
@@ -1239,6 +1464,7 @@ function actorProfileRowsById() {
     }
   } catch (error) {
     console.warn("[actor-db]", error.message);
+    if (actorProfileCache?.rows) return actorProfileCache.rows;
   }
 
   actorProfileCache = { stamp, rows };
@@ -1449,14 +1675,56 @@ function generateWorkCover(work) {
   return publicWorkCover(workCoverRow(work.id));
 }
 
+function invalidateTableStamp(...tables) {
+  if (!tables.length) {
+    tableStampCache = new Map();
+    return;
+  }
+  for (const table of tables) tableStampCache.delete(table);
+}
+
+function tableDataStamp(table) {
+  const now = Date.now();
+  const cached = tableStampCache.get(table);
+  if (cached && now - cached.checkedAt < TABLE_STAMP_CACHE_MS) return cached.stamp;
+
+  try {
+    const row = getActorDb()
+      .prepare(`SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS updated_at FROM ${table}`)
+      .get();
+    const stamp = `${Number(row?.count || 0)}:${row?.updated_at || ""}`;
+    tableStampCache.set(table, { checkedAt: now, stamp });
+    return stamp;
+  } catch (error) {
+    console.warn("[actor-db-stamp]", table, error.message);
+    if (cached?.stamp) {
+      tableStampCache.set(table, { checkedAt: now, stamp: cached.stamp });
+      return cached.stamp;
+    }
+    const fallback = `${table}:unavailable`;
+    tableStampCache.set(table, { checkedAt: now, stamp: fallback });
+    return fallback;
+  }
+}
+
+function actorProfileStamp() {
+  return tableDataStamp("actor_profiles");
+}
+
 function workInfoStamp() {
-  const main = safeStat(ACTOR_PROFILE_DB_PATH)?.mtimeMs || 0;
-  const wal = safeStat(`${ACTOR_PROFILE_DB_PATH}-wal`)?.mtimeMs || 0;
-  return `${main}:${wal}`;
+  return tableDataStamp("work_info");
+}
+
+function actorMovieStamp() {
+  return tableDataStamp("actor_movies");
+}
+
+function rankingStamp() {
+  return tableDataStamp("javdb_rankings");
 }
 
 function searchSourceStamp() {
-  return `${library.scannedAt || ""}:${workInfoStamp()}`;
+  return `${library.scannedAt || ""}:${workInfoStamp()}:${actorMovieStamp()}:${rankingStamp()}`;
 }
 
 function clearSearchSourceCaches() {
@@ -1477,6 +1745,7 @@ function workInfoRowsById() {
     }
   } catch (error) {
     console.warn("[work-info]", error.message);
+    if (workInfoCache?.rows) return workInfoCache.rows;
   }
 
   workInfoCache = { stamp, rows };
@@ -1488,7 +1757,7 @@ function workInfoRow(workId) {
 }
 
 function actorMovieRowsByPerson() {
-  const stamp = workInfoStamp();
+  const stamp = actorMovieStamp();
   if (actorMovieCache?.stamp === stamp) return actorMovieCache.rows;
 
   const rowsByPerson = new Map();
@@ -1509,6 +1778,7 @@ function actorMovieRowsByPerson() {
     }
   } catch (error) {
     console.warn("[actor-movies]", error.message);
+    if (actorMovieCache?.rows) return actorMovieCache.rows;
   }
 
   actorMovieCache = { stamp, rows: rowsByPerson };
@@ -1671,7 +1941,7 @@ function rankingWorkFromRow(row, localByCode = localWorkByCodeKey()) {
     directoryName: code,
     relativePath: "",
     coverId: null,
-    remoteCoverUrl: row.image_url || "",
+    remoteCoverUrl: proxiedRemoteImageUrl(row.image_url),
     videoCount: 0,
     playableCount: 0,
     imageCount: 0,
@@ -1707,6 +1977,7 @@ function rankingWorksPayload(url, listType = "top") {
   const limit = clampInteger(url.searchParams.get("limit"), MAX_WORK_LIMIT, 1, MAX_WORK_LIMIT);
   const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
   const page = sourceWorks.slice(offset, offset + limit).map((work) => publicWork(work));
+  prewarmRemoteImagesForWorks(page);
   for (const work of page) {
     const source = sourceWorks.find((item) => item.id === work.id);
     if (source?.ranking) work.ranking = source.ranking;
@@ -1772,7 +2043,7 @@ function actorMissingWorkFromRow(person, row, codeKey = "") {
     directoryName: code,
     relativePath: "",
     coverId: null,
-    remoteCoverUrl: row.image_url || "",
+    remoteCoverUrl: proxiedRemoteImageUrl(row.image_url),
     videoCount: 0,
     playableCount: 0,
     imageCount: 0,
@@ -1882,6 +2153,84 @@ function publicRemoteUrl(value) {
   }
 }
 
+function isAllowedRemoteImageUrl(parsed) {
+  const hostname = String(parsed.hostname || "").toLowerCase();
+  return (
+    (parsed.protocol === "https:" || parsed.protocol === "http:") &&
+    (hostname === "jdbstatic.com" ||
+      hostname.endsWith(".jdbstatic.com") ||
+      hostname === "javdb.com" ||
+      hostname.endsWith(".javdb.com"))
+  );
+}
+
+function proxiedRemoteImageUrl(value) {
+  const remoteUrl = publicRemoteUrl(value);
+  if (!remoteUrl) return "";
+  try {
+    const parsed = new URL(remoteUrl);
+    if (!isAllowedRemoteImageUrl(parsed)) return remoteUrl;
+    return `/media/remote-image?url=${encodeURIComponent(remoteUrl)}`;
+  } catch {
+    return "";
+  }
+}
+
+function remoteImageTargetUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  try {
+    if (raw.startsWith("/media/remote-image")) {
+      const parsed = new URL(raw, "http://localhost");
+      const target = publicRemoteUrl(parsed.searchParams.get("url"));
+      return target && isAllowedRemoteImageUrl(new URL(target)) ? target : "";
+    }
+
+    const target = publicRemoteUrl(raw);
+    return target && isAllowedRemoteImageUrl(new URL(target)) ? target : "";
+  } catch {
+    return "";
+  }
+}
+
+function prewarmRemoteImagesForWorks(works, limit = 1000) {
+  const seen = new Set();
+  let count = 0;
+  for (const work of works || []) {
+    const previewImages = [
+      ...(Array.isArray(work.infoSummary?.previewImages) ? work.infoSummary.previewImages : []),
+      ...(Array.isArray(work.infoMetadata?.previewImages) ? work.infoMetadata.previewImages : [])
+    ].slice(0, 12);
+    const candidates = [
+      ...(!work.coverId && !work.cachedCover?.coverUrl ? [work.remoteCoverUrl, work.infoSummary?.imageUrl, work.infoMetadata?.imageUrl] : []),
+      ...previewImages
+    ];
+    for (const candidate of candidates) {
+      const remoteUrl = remoteImageTargetUrl(candidate);
+      if (!remoteUrl || seen.has(remoteUrl)) continue;
+      seen.add(remoteUrl);
+      enqueueRemoteImageWarm(remoteUrl);
+      count += 1;
+      if (count >= limit) return count;
+    }
+  }
+  return count;
+}
+
+function proxiedRemoteImageUrlArray(values) {
+  const urls = [];
+  const seen = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const targetUrl = remoteImageTargetUrl(value);
+    const url = targetUrl ? proxiedRemoteImageUrl(targetUrl) : proxiedRemoteImageUrl(value);
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    urls.push(url);
+  }
+  return urls;
+}
+
 function publicRemoteUrlArray(values) {
   const urls = [];
   const seen = new Set();
@@ -1919,7 +2268,7 @@ function publicWorkInfoSummary(row, fallback = null) {
   if (!row && !fallback) return null;
   const actors = parseJsonTextArray(row?.actors_json);
   const tags = parseJsonTextArray(row?.tags_json);
-  const previewImages = publicRemoteUrlArray(parseJsonArray(row?.preview_images_json));
+  const previewImages = proxiedRemoteImageUrlArray(parseJsonArray(row?.preview_images_json));
   return {
     code: firstPresentText(row?.code, fallback?.code),
     title: firstPresentText(row?.title, fallback?.title),
@@ -1933,8 +2282,8 @@ function publicWorkInfoSummary(row, fallback = null) {
     series: firstPresentText(row?.series, fallback?.series),
     actors: actors.length ? actors : uniqueTextArray(fallback?.actors),
     tags: tags.length ? tags : uniqueTextArray(fallback?.tags),
-    imageUrl: publicRemoteUrl(firstPresentValue(row?.image_url, fallback?.imageUrl)),
-    previewImages: previewImages.length ? previewImages : publicRemoteUrlArray(fallback?.previewImages),
+    imageUrl: proxiedRemoteImageUrl(firstPresentValue(row?.image_url, fallback?.imageUrl)),
+    previewImages: previewImages.length ? previewImages : proxiedRemoteImageUrlArray(fallback?.previewImages),
     previewVideoUrl: publicRemoteUrl(firstPresentValue(row?.preview_video_url, fallback?.previewVideoUrl))
   };
 }
@@ -1953,8 +2302,8 @@ function publicWorkInfoMetadata(row) {
     label: row.label || "",
     series: row.series || "",
     javdbUrl: row.javdb_url || "",
-    imageUrl: publicRemoteUrl(row.image_url),
-    previewImages: publicRemoteUrlArray(parseJsonArray(row.preview_images_json)),
+    imageUrl: proxiedRemoteImageUrl(row.image_url),
+    previewImages: proxiedRemoteImageUrlArray(parseJsonArray(row.preview_images_json)),
     previewVideoUrl: publicRemoteUrl(row.preview_video_url),
     actors: parseJsonTextArray(row.actors_json),
     tags: parseJsonTextArray(row.tags_json),
@@ -2062,6 +2411,7 @@ function upsertActorProfile(person, payload) {
   if (javdbUrl && existing?.javdb_url && canonicalJavdbActorUrl(existing.javdb_url) !== javdbUrl) {
     getActorDb().prepare("DELETE FROM actor_movies WHERE person_id = ?").run(person.id);
   }
+  invalidateTableStamp("actor_profiles", "actor_movies");
   actorProfileCache = null;
   actorMovieCache = null;
 
@@ -2341,6 +2691,7 @@ function invalidateLibraryDerivedCaches() {
   actorMovieCache = null;
   localWorkCodeKeyCache = null;
   localWorkByCodeKeyCache = null;
+  invalidateTableStamp();
   clearSearchSourceCaches();
   videoProbeCache.clear();
 }
@@ -2441,17 +2792,341 @@ function refreshPersonLibrary(personId) {
   return nextPerson;
 }
 
+function adminScriptById(scriptId) {
+  return ADMIN_SCRIPT_DEFINITIONS.find((script) => script.id === scriptId) || null;
+}
+
+function publicAdminScriptField(field) {
+  return {
+    name: field.name,
+    label: field.label,
+    type: field.type,
+    flag: field.flag || "",
+    positional: Boolean(field.positional),
+    default: field.default ?? "",
+    placeholder: field.placeholder || "",
+    help: field.help || "",
+    required: Boolean(field.required),
+    min: field.min ?? null,
+    max: field.max ?? null,
+    step: field.step ?? null,
+    options: Array.isArray(field.options) ? field.options.map((option) => ({ ...option })) : []
+  };
+}
+
+function adminScriptRisk(script) {
+  if (script.risk) return script.risk;
+  const category = script.category || "";
+  if (category === "验证" || category === "报表") return "safe";
+  if (category === "维护" || /清理|覆盖|删除/.test(`${script.title} ${script.description}`)) return "danger";
+  if ((script.fields || []).some((field) => field.flag === "--write" && field.default === false)) return "danger";
+  if ((script.fields || []).some((field) => field.flag === "--overwrite" || field.flag === "--force" || field.flag === "--delete-zero-byte")) return "careful";
+  if ((script.invalidates || []).length) return "write";
+  return "normal";
+}
+
+function adminScriptRiskLabel(risk) {
+  return {
+    safe: "安全",
+    normal: "常规",
+    write: "写入",
+    careful: "谨慎",
+    danger: "高风险"
+  }[risk] || "常规";
+}
+
+function publicAdminScript(script) {
+  const risk = adminScriptRisk(script);
+  return {
+    id: script.id,
+    title: script.title,
+    category: script.category,
+    description: script.description,
+    runtime: script.runtime,
+    script: script.script,
+    risk,
+    riskLabel: adminScriptRiskLabel(risk),
+    invalidates: [...(script.invalidates || [])],
+    refreshHints: [...(script.refreshHints || [])],
+    fields: (script.fields || []).map(publicAdminScriptField)
+  };
+}
+
+function adminScriptCategories() {
+  return [...new Set(ADMIN_SCRIPT_DEFINITIONS.map((script) => script.category || "其他"))];
+}
+
+function normalizeAdminListValue(value) {
+  const rawItems = Array.isArray(value)
+    ? value
+    : String(value || "")
+        .split(/\r?\n|,/)
+        .map((item) => item.trim());
+  const seen = new Set();
+  const result = [];
+  for (const item of rawItems) {
+    const text = String(item || "").trim();
+    if (!text || text.length > 1000 || seen.has(text)) continue;
+    seen.add(text);
+    result.push(text);
+    if (result.length >= 100) break;
+  }
+  return result;
+}
+
+function normalizeAdminNumberValue(value, field) {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return field.default === "" || field.default === undefined ? "" : field.default;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return field.default === "" || field.default === undefined ? "" : field.default;
+  }
+  const min = Number.isFinite(Number(field.min)) ? Number(field.min) : Number.MIN_SAFE_INTEGER;
+  const max = Number.isFinite(Number(field.max)) ? Number(field.max) : Number.MAX_SAFE_INTEGER;
+  const clamped = Math.max(min, Math.min(max, number));
+  return Number(field.step) && Number(field.step) < 1 ? clamped : Math.floor(clamped);
+}
+
+function normalizeAdminScriptFieldValue(field, input) {
+  const value = input[field.name] ?? field.default ?? "";
+  if (field.type === "checkbox") return Boolean(value);
+  if (field.type === "number") return normalizeAdminNumberValue(value, field);
+  if (field.type === "textarea-list") return normalizeAdminListValue(value);
+  if (field.type === "select") {
+    const allowed = (field.options || []).map((option) => option.value);
+    const selected = String(value || field.default || "");
+    return allowed.includes(selected) ? selected : allowed[0] || "";
+  }
+  if (field.type === "person") {
+    const personId = String(value || "").trim();
+    if (!personId) {
+      if (field.required) {
+        const error = new Error(`${field.label || "人物"}不能为空`);
+        error.statusCode = 400;
+        throw error;
+      }
+      return "";
+    }
+    if (!library.peopleById.has(personId)) {
+      const error = new Error("选择的人物不存在");
+      error.statusCode = 400;
+      throw error;
+    }
+    return personId;
+  }
+  const text = String(value || "").trim().slice(0, field.maxLength || 4000);
+  if (field.required && !text) {
+    const error = new Error(`${field.label || field.name}不能为空`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return text;
+}
+
+function normalizeAdminScriptOptions(script, input = {}) {
+  const options = {};
+  for (const field of script.fields || []) {
+    options[field.name] = normalizeAdminScriptFieldValue(field, input);
+  }
+  return options;
+}
+
+function appendAdminScriptFieldArgs(args, field, value) {
+  if (field.type === "checkbox") {
+    if (value && field.flag) args.push(field.flag);
+    return;
+  }
+  if (field.type === "textarea-list") {
+    for (const item of Array.isArray(value) ? value : []) {
+      if (field.flag) args.push(field.flag, item);
+      else args.push(item);
+    }
+    return;
+  }
+  if (value === "" || value === null || value === undefined) return;
+  if (field.positional) {
+    args.push(String(value));
+    return;
+  }
+  if (field.flag) args.push(field.flag, String(value));
+}
+
+function buildAdminScriptCommand(script, options) {
+  const args = [];
+  if (script.runtime === "python") {
+    args.push("-u", script.script);
+  } else if (script.runtime === "node") {
+    args.push(script.script);
+  } else {
+    const error = new Error(`不支持的脚本运行时：${script.runtime}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  for (const field of script.fields || []) {
+    appendAdminScriptFieldArgs(args, field, options[field.name]);
+  }
+
+  return {
+    command: script.runtime === "python" ? "python" : process.execPath,
+    args
+  };
+}
+
+function quoteCommandPart(value) {
+  const text = String(value || "");
+  return /\s/.test(text) ? `"${text.replace(/"/g, '\\"')}"` : text;
+}
+
+function commandPreview(command, args) {
+  return [command, ...args].map(quoteCommandPart).join(" ");
+}
+
+function applyAdminTaskInvalidations(task) {
+  const script = task.scriptId ? adminScriptById(task.scriptId) : null;
+  const invalidates = new Set(script?.invalidates || task.invalidates || []);
+  if (invalidates.has("actorProfiles")) {
+    invalidateTableStamp("actor_profiles");
+    actorProfileCache = null;
+  }
+  if (invalidates.has("actorMovies")) {
+    invalidateTableStamp("actor_movies");
+    actorMovieCache = null;
+    localWorkCodeKeyCache = null;
+    localWorkByCodeKeyCache = null;
+    clearSearchSourceCaches();
+  }
+  if (invalidates.has("workInfo")) {
+    invalidateTableStamp("work_info");
+    workInfoCache = null;
+    clearSearchSourceCaches();
+  }
+  if (invalidates.has("workCovers")) {
+    invalidateTableStamp("work_covers");
+    workInfoCache = null;
+    clearSearchSourceCaches();
+  }
+  if (invalidates.has("rankings")) {
+    invalidateTableStamp("javdb_rankings");
+    rankingMissingSearchCache = null;
+    localWorkCodeKeyCache = null;
+    localWorkByCodeKeyCache = null;
+    clearSearchSourceCaches();
+  }
+  if (invalidates.has("localImages")) invalidateTableStamp("local_image_cache");
+  if (invalidates.has("remoteImages")) invalidateTableStamp("remote_image_cache");
+  if (invalidates.has("userState")) loadUserState();
+}
+
+function normalizeAdminTaskStatus(status) {
+  return ["running", "stopping", "stopped", "done", "error"].includes(status) ? status : "error";
+}
+
+function adminTaskDurationMs(task) {
+  const started = Date.parse(task.startedAt || "");
+  const ended = Date.parse(task.finishedAt || "") || Date.now();
+  if (!Number.isFinite(started)) return null;
+  return Math.max(0, ended - started);
+}
+
+function persistedAdminTask(task) {
+  return {
+    id: String(task.id || ""),
+    type: String(task.type || ""),
+    scriptId: String(task.scriptId || ""),
+    label: String(task.label || "任务"),
+    personId: String(task.personId || ""),
+    personName: String(task.personName || ""),
+    status: normalizeAdminTaskStatus(task.status),
+    exitCode: task.exitCode ?? null,
+    pid: task.pid || null,
+    refreshHints: Array.isArray(task.refreshHints) ? task.refreshHints.slice(0, 20) : [],
+    invalidates: Array.isArray(task.invalidates) ? task.invalidates.slice(0, 20) : [],
+    startedAt: String(task.startedAt || ""),
+    finishedAt: String(task.finishedAt || ""),
+    logs: Array.isArray(task.logs) ? task.logs.slice(-400).map((line) => String(line).slice(0, 4000)) : []
+  };
+}
+
+function loadAdminTaskHistory() {
+  try {
+    ensureDataDir();
+    if (!fs.existsSync(ADMIN_TASKS_PATH)) return [];
+    const parsed = JSON.parse(fs.readFileSync(ADMIN_TASKS_PATH, "utf8"));
+    const rawTasks = Array.isArray(parsed?.tasks) ? parsed.tasks : Array.isArray(parsed) ? parsed : [];
+    const now = new Date().toISOString();
+    const tasks = [];
+    let maxSeq = 0;
+    for (const rawTask of rawTasks.slice(0, ADMIN_TASK_HISTORY_LIMIT)) {
+      const task = persistedAdminTask(rawTask);
+      if (!task.id) continue;
+      const seq = Number(String(task.id).replace(/^task_/, ""));
+      if (Number.isFinite(seq)) maxSeq = Math.max(maxSeq, seq);
+      if (task.status === "running" || task.status === "stopping") {
+        task.status = "stopped";
+        task.finishedAt = task.finishedAt || now;
+        task.logs.push("服务重启，未完成任务已标记为中断");
+      }
+      tasks.push(task);
+    }
+    adminTaskSeq = maxSeq;
+    return tasks;
+  } catch (error) {
+    console.warn("[admin] 读取任务历史失败：", error.message);
+    return [];
+  }
+}
+
+function persistAdminTaskHistory() {
+  try {
+    ensureDataDir();
+    const payload = {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      tasks: adminTasks.slice(0, ADMIN_TASK_HISTORY_LIMIT).map(persistedAdminTask)
+    };
+    const tempPath = `${ADMIN_TASKS_PATH}.tmp`;
+    fs.writeFileSync(tempPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    fs.renameSync(tempPath, ADMIN_TASKS_PATH);
+  } catch (error) {
+    console.warn("[admin] 保存任务历史失败：", error.message);
+  }
+}
+
+function scheduleAdminTaskPersist() {
+  if (adminTaskPersistTimer) return;
+  adminTaskPersistTimer = setTimeout(() => {
+    adminTaskPersistTimer = null;
+    persistAdminTaskHistory();
+  }, 250);
+}
+
+function adminTaskSummary() {
+  const summary = { total: adminTasks.length, running: 0, stopping: 0, done: 0, error: 0, stopped: 0 };
+  for (const task of adminTasks) {
+    const status = normalizeAdminTaskStatus(task.status);
+    summary[status] = (summary[status] || 0) + 1;
+  }
+  return summary;
+}
+
 function publicAdminTask(task) {
   return {
     id: task.id,
     type: task.type,
+    scriptId: task.scriptId || "",
     label: task.label,
     personId: task.personId || "",
     personName: task.personName || "",
     status: task.status,
     exitCode: task.exitCode ?? null,
+    pid: task.pid || null,
+    canStop: Boolean(task.child && (task.status === "running" || task.status === "stopping")),
+    refreshHints: [...(task.refreshHints || [])],
     startedAt: task.startedAt,
     finishedAt: task.finishedAt || "",
+    durationMs: adminTaskDurationMs(task),
     logs: task.logs.slice(-120)
   };
 }
@@ -2462,41 +3137,87 @@ function pushAdminLog(task, chunk) {
     task.logs.push(line);
   }
   if (task.logs.length > 400) task.logs.splice(0, task.logs.length - 400);
+  scheduleAdminTaskPersist();
 }
 
-function startAdminProcessTask({ type, label, person, command, args, onDone }) {
+function startAdminProcessTask({ type, label, person, command, args, scriptId = "", refreshHints = [], invalidates = [], onDone }) {
   const task = {
     id: `task_${++adminTaskSeq}`,
     type,
+    scriptId,
     label,
     personId: person?.id || "",
     personName: person?.name || "",
     status: "running",
     exitCode: null,
+    pid: null,
+    child: null,
+    stopRequested: false,
+    refreshHints,
+    invalidates,
     startedAt: new Date().toISOString(),
     finishedAt: "",
     logs: []
   };
   adminTasks.unshift(task);
-  if (adminTasks.length > 20) adminTasks.length = 20;
+  if (adminTasks.length > ADMIN_TASK_HISTORY_LIMIT) adminTasks.length = ADMIN_TASK_HISTORY_LIMIT;
 
-  pushAdminLog(task, `${command} ${args.join(" ")}`);
-  const child = spawn(command, args, { cwd: __dirname, windowsHide: true });
+  pushAdminLog(task, commandPreview(command, args));
+  const child = spawn(command, args, {
+    cwd: __dirname,
+    windowsHide: true,
+    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" }
+  });
+  task.child = child;
+  task.pid = child.pid || null;
+  if (task.pid) pushAdminLog(task, `PID ${task.pid}`);
   child.stdout.on("data", (chunk) => pushAdminLog(task, chunk));
   child.stderr.on("data", (chunk) => pushAdminLog(task, chunk));
   child.on("error", (error) => {
     task.status = "error";
     task.finishedAt = new Date().toISOString();
     pushAdminLog(task, error.message);
+    persistAdminTaskHistory();
   });
   child.on("close", (code) => {
     task.exitCode = code;
-    task.status = code === 0 ? "done" : "error";
+    task.status = task.stopRequested ? "stopped" : code === 0 ? "done" : "error";
     task.finishedAt = new Date().toISOString();
+    task.child = null;
     pushAdminLog(task, `退出码 ${code}`);
+    if (task.status === "done") applyAdminTaskInvalidations(task);
     onDone?.(task);
+    persistAdminTaskHistory();
   });
+  persistAdminTaskHistory();
 
+  return task;
+}
+
+function stopAdminTask(taskId) {
+  const task = adminTasks.find((item) => item.id === taskId);
+  if (!task) {
+    const error = new Error("任务不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (!task.child || (task.status !== "running" && task.status !== "stopping")) {
+    const error = new Error("任务已经不在运行");
+    error.statusCode = 400;
+    throw error;
+  }
+  task.stopRequested = true;
+  task.status = "stopping";
+  pushAdminLog(task, "收到停止请求");
+  persistAdminTaskHistory();
+  if (process.platform === "win32" && task.pid) {
+    const killer = spawn("taskkill", ["/PID", String(task.pid), "/T", "/F"], { windowsHide: true });
+    killer.stdout.on("data", (chunk) => pushAdminLog(task, chunk));
+    killer.stderr.on("data", (chunk) => pushAdminLog(task, chunk));
+    killer.on("error", (error) => pushAdminLog(task, error.message));
+  } else {
+    task.child.kill("SIGTERM");
+  }
   return task;
 }
 
@@ -2679,93 +3400,1825 @@ function userStateSummary() {
   };
 }
 
-function readJsonBody(req) {
+function readBodyText(req, maxBytes = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let body = "";
+    let done = false;
     req.setEncoding("utf8");
     req.on("data", (chunk) => {
+      if (done) return;
       body += chunk;
-      if (body.length > 1024 * 1024) {
+      if (body.length > maxBytes) {
+        done = true;
         reject(new Error("请求体太大"));
         req.destroy();
       }
     });
     req.on("end", () => {
-      if (!body.trim()) {
-        resolve({});
-        return;
-      }
-
-      try {
-        resolve(JSON.parse(body));
-      } catch {
-        reject(new Error("JSON 格式无效"));
-      }
+      if (done) return;
+      done = true;
+      resolve(body);
     });
-    req.on("error", reject);
+    req.on("error", (error) => {
+      if (done) return;
+      done = true;
+      reject(error);
+    });
   });
 }
 
-function sendJson(res, status, payload) {
-  const body = JSON.stringify(payload);
-  res.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store",
-    "Content-Length": Buffer.byteLength(body)
-  });
-  res.end(body);
-}
+async function readJsonBody(req, maxBytes = 1024 * 1024) {
+  const body = await readBodyText(req, maxBytes);
+  if (!body.trim()) return {};
 
-function sendText(res, status, text) {
-  res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
-  res.end(text);
-}
-
-function notFound(res) {
-  sendJson(res, 404, { error: "Not found" });
-}
-
-function publicFilePath(urlPath) {
-  const requested = urlPath === "/" ? "/index.html" : urlPath;
-  const decoded = decodeURIComponent(requested);
-  const normalized = path.normalize(decoded).replace(/^(\.\.[/\\])+/, "");
-  const target = path.join(PUBLIC_DIR, normalized);
-  const relative = path.relative(PUBLIC_DIR, target);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    return null;
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new Error("JSON 格式无效");
   }
+}
+
+function readJsonFile(filePath, fallback = null) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function safeChildPath(rootDir, relativePath) {
+  const root = path.resolve(rootDir);
+  const normalizedRelative = String(relativePath || "").replace(/[\\/]+/g, path.sep);
+  const target = path.resolve(root, normalizedRelative);
+  const relative = path.relative(root, target);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
   return target;
 }
 
-function serveStatic(req, res, urlPath) {
-  const target = publicFilePath(urlPath);
-  if (!target || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
+function mangaRootStatus() {
+  const root = path.resolve(MANGA_LIBRARY_ROOT);
+  const stat = safeStat(root);
+  return {
+    root,
+    exists: Boolean(stat?.isDirectory())
+  };
+}
+
+function isMangaCacheDirName(name) {
+  return /^(?:smtt6|jmd9)_cache_[A-Za-z0-9_-]+$/i.test(String(name || ""));
+}
+
+function mangaSiteFromDirName(name) {
+  const lower = String(name || "").toLowerCase();
+  if (lower.startsWith("smtt6_")) return "smtt6";
+  if (lower.startsWith("jmd9_")) return "jmd9";
+  return "local";
+}
+
+function mangaCacheDirs() {
+  const status = mangaRootStatus();
+  if (!status.exists) return [];
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(status.root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  return entries
+    .filter((entry) => entry.isDirectory() && isMangaCacheDirName(entry.name))
+    .map((entry) => path.join(status.root, entry.name))
+    .filter((dirPath) => fs.existsSync(path.join(dirPath, "manifest.json")))
+    .sort((a, b) => path.basename(a).localeCompare(path.basename(b), undefined, { numeric: true, sensitivity: "base" }));
+}
+
+function mangaIdForDir(dirPath) {
+  return createId("mg", path.resolve(dirPath));
+}
+
+function mangaCacheById(id) {
+  const targetId = String(id || "");
+  if (!targetId) return null;
+  for (const dirPath of mangaCacheDirs()) {
+    if (mangaIdForDir(dirPath) === targetId) return dirPath;
+  }
+  return null;
+}
+
+function mangaChapterImageStats(chapter) {
+  const images = Array.isArray(chapter?.images) ? chapter.images : [];
+  const downloaded = Number(chapter?.downloaded_count || 0) || images.filter((image) => image?.status === "downloaded").length || images.length;
+  return {
+    imageCount: Number(chapter?.image_count || 0) || images.length,
+    downloadedCount: downloaded,
+    failedCount: Number(chapter?.failed_count || 0)
+  };
+}
+
+function mangaChapterIndex(chapter, fallbackIndex = 0) {
+  const value = Number(chapter?.index);
+  return Number.isFinite(value) && value > 0 ? value : fallbackIndex + 1;
+}
+
+function mangaFirstImage(chapter) {
+  const images = Array.isArray(chapter?.images) ? chapter.images : [];
+  return images.find((image) => image?.local_path) || images[0] || null;
+}
+
+function mangaImageUrl(mangaId, chapterIndex, imageIndex) {
+  return `/media/manga/${encodeURIComponent(mangaId)}/${encodeURIComponent(String(chapterIndex))}/${encodeURIComponent(String(imageIndex))}`;
+}
+
+function publicMangaSummary(cacheDir) {
+  const id = mangaIdForDir(cacheDir);
+  const dirName = path.basename(cacheDir);
+  const catalog = readJsonFile(path.join(cacheDir, "catalog.json"), {});
+  const manifest = readJsonFile(path.join(cacheDir, "manifest.json"), {});
+  const chapters = Array.isArray(manifest.chapters) ? manifest.chapters : [];
+  let imageTotal = 0;
+  let downloadedTotal = 0;
+  let failedTotal = 0;
+  let doneChapterTotal = 0;
+  let coverUrl = "";
+
+  for (let index = 0; index < chapters.length; index += 1) {
+    const chapter = chapters[index];
+    const stats = mangaChapterImageStats(chapter);
+    imageTotal += stats.imageCount;
+    downloadedTotal += stats.downloadedCount;
+    failedTotal += stats.failedCount;
+    if (String(chapter?.status || "").toLowerCase() === "done" || stats.failedCount === 0) doneChapterTotal += 1;
+    if (!coverUrl && mangaFirstImage(chapter)) {
+      coverUrl = mangaImageUrl(id, mangaChapterIndex(chapter, index), Number(mangaFirstImage(chapter)?.index || 1));
+    }
+  }
+
+  return {
+    id,
+    title: String(catalog.title || dirName).trim() || dirName,
+    dirName,
+    site: mangaSiteFromDirName(dirName),
+    sourceUrl: String(catalog.url || "").trim(),
+    updatedAt: String(catalog.updated_at || manifest.created_at || "").trim(),
+    chapterCount: chapters.length,
+    doneChapterCount: doneChapterTotal,
+    imageCount: imageTotal,
+    downloadedCount: downloadedTotal,
+    failedCount: failedTotal,
+    coverUrl
+  };
+}
+
+function publicMangaChapterSummary(mangaId, chapter, index) {
+  const chapterIndex = mangaChapterIndex(chapter, index);
+  const stats = mangaChapterImageStats(chapter);
+  const firstImage = mangaFirstImage(chapter);
+  return {
+    index: chapterIndex,
+    title: String(chapter?.title || `第 ${chapterIndex} 话`).trim(),
+    slug: String(chapter?.slug || "").trim(),
+    status: String(chapter?.status || "").trim(),
+    imageCount: stats.imageCount,
+    downloadedCount: stats.downloadedCount,
+    failedCount: stats.failedCount,
+    coverUrl: firstImage ? mangaImageUrl(mangaId, chapterIndex, Number(firstImage.index || 1)) : ""
+  };
+}
+
+function publicMangaDetail(cacheDir) {
+  const summary = publicMangaSummary(cacheDir);
+  const manifest = readJsonFile(path.join(cacheDir, "manifest.json"), {});
+  const chapters = Array.isArray(manifest.chapters) ? manifest.chapters : [];
+  return {
+    ...summary,
+    createdAt: String(manifest.created_at || "").trim(),
+    chapters: chapters.map((chapter, index) => publicMangaChapterSummary(summary.id, chapter, index))
+  };
+}
+
+function findMangaChapter(cacheDir, requestedIndex) {
+  const detail = readJsonFile(path.join(cacheDir, "manifest.json"), {});
+  const chapters = Array.isArray(detail.chapters) ? detail.chapters : [];
+  const target = Number(requestedIndex);
+  for (let index = 0; index < chapters.length; index += 1) {
+    const chapter = chapters[index];
+    if (mangaChapterIndex(chapter, index) === target) {
+      return { chapter, arrayIndex: index, chapterIndex: target };
+    }
+  }
+  return null;
+}
+
+function publicMangaChapter(cacheDir, requestedIndex) {
+  const manga = publicMangaSummary(cacheDir);
+  const found = findMangaChapter(cacheDir, requestedIndex);
+  if (!found) return null;
+  const images = Array.isArray(found.chapter.images) ? found.chapter.images : [];
+  return {
+    ...publicMangaChapterSummary(manga.id, found.chapter, found.arrayIndex),
+    images: images.map((image, index) => {
+      const imageIndex = Number(image?.index || index + 1);
+      return {
+        index: imageIndex,
+        name: path.basename(String(image?.local_path || "")) || `${String(imageIndex).padStart(3, "0")}`,
+        localPath: String(image?.local_path || ""),
+        contentType: String(image?.content_type || "").trim(),
+        bytes: Number(image?.bytes || 0),
+        status: String(image?.status || "").trim(),
+        url: mangaImageUrl(manga.id, found.chapterIndex, imageIndex)
+      };
+    })
+  };
+}
+
+function mangaImageRecord(cacheDir, chapterIndex, imageIndex) {
+  const found = findMangaChapter(cacheDir, chapterIndex);
+  if (!found) return null;
+  const images = Array.isArray(found.chapter.images) ? found.chapter.images : [];
+  const targetImageIndex = Number(imageIndex);
+  const image = images.find((item, index) => Number(item?.index || index + 1) === targetImageIndex);
+  if (!image?.local_path) return null;
+  return { chapter: found.chapter, image, chapterIndex: found.chapterIndex, imageIndex: targetImageIndex || 1 };
+}
+
+function mangaChapterDirFromRecord(cacheDir, chapter, image) {
+  const candidates = [];
+  if (chapter?.html_path) candidates.push(path.dirname(String(chapter.html_path)));
+  if (image?.local_path) {
+    const imageDir = path.dirname(String(image.local_path));
+    candidates.push(path.dirname(imageDir));
+  }
+  for (const candidate of candidates) {
+    if (!candidate || candidate === "." || candidate === path.sep) continue;
+    const target = safeChildPath(cacheDir, candidate);
+    if (target) return target;
+  }
+  return null;
+}
+
+function archiveReaderHelperPath() {
+  return path.join(__dirname, "tools", "archive_image_reader.py");
+}
+
+function runArchiveImageHelper(args, options = {}) {
+  const result = spawnSync(process.env.PYTHON || "python", [archiveReaderHelperPath(), ...args], {
+    cwd: __dirname,
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: options.timeout || 120000
+  });
+
+  let payload = null;
+  try {
+    payload = JSON.parse(result.stdout || "{}");
+  } catch {}
+  if (result.status !== 0 || !payload?.ok) {
+    const message = payload?.error || `${result.stderr || result.stdout || "archive helper failed"}`.trim();
+    throw new Error(message || `archive helper failed: ${result.status}`);
+  }
+  return payload;
+}
+
+function archiveListCacheKey(archivePath) {
+  const stat = safeStat(archivePath);
+  if (!stat?.isFile()) return "";
+  return `${path.resolve(archivePath)}|${stat.size}|${Math.floor(stat.mtimeMs || 0)}`;
+}
+
+function listArchiveImages(archivePath, options = {}) {
+  const key = archiveListCacheKey(archivePath);
+  if (!key) return [];
+  const now = Date.now();
+  const cached = archiveImageListCache.get(key);
+  if (cached && now - cached.createdAt < IMAGE_READER_LIST_CACHE_TTL_MS) {
+    return cached.images;
+  }
+  const args = ["list", archivePath];
+  if (options.limit) args.push("--limit", String(options.limit));
+  const payload = runArchiveImageHelper(args, { timeout: options.timeout || 120000 });
+  const images = Array.isArray(payload.images) ? payload.images : [];
+  archiveImageListCache.set(key, { createdAt: now, images, imageCount: Number(payload.imageCount || images.length) });
+  if (archiveImageListCache.size > 300) {
+    const firstKey = archiveImageListCache.keys().next().value;
+    if (firstKey) archiveImageListCache.delete(firstKey);
+  }
+  return images;
+}
+
+function archiveImageCacheFile(sourceType, archivePath, memberPath) {
+  const stat = safeStat(archivePath);
+  const archiveKey = `${path.resolve(archivePath)}|${stat?.size || 0}|${Math.floor(stat?.mtimeMs || 0)}`;
+  const archiveHash = crypto.createHash("sha1").update(archiveKey).digest("hex").slice(0, 24);
+  const memberHash = crypto.createHash("sha1").update(String(memberPath || "")).digest("hex").slice(0, 24);
+  const ext = ARCHIVE_IMAGE_EXTS.has(normalizeExt(memberPath)) ? normalizeExt(memberPath) : ".img";
+  return path.join(IMAGE_READER_CACHE_DIR, sourceType, archiveHash, `${memberHash}${ext}`);
+}
+
+function touchImageReaderCacheFile(filePath) {
+  const now = Date.now();
+  const key = path.resolve(filePath);
+  if (now - (imageReaderCacheTouchTimes.get(key) || 0) < IMAGE_READER_CACHE_TOUCH_THROTTLE_MS) return;
+  imageReaderCacheTouchTimes.set(key, now);
+  try {
+    const date = new Date(now);
+    fs.utimesSync(filePath, date, date);
+  } catch {}
+}
+
+function extractArchiveMemberToCache(archivePath, memberPath, cachePath) {
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  runArchiveImageHelper(["extract", archivePath, memberPath, cachePath], { timeout: 120000 });
+}
+
+function compressImageFileToJpeg(filePath) {
+  const result = spawnSync(
+    FFMPEG_PATH,
+    [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      filePath,
+      "-frames:v",
+      "1",
+      "-vf",
+      `scale=${IMAGE_GALLERY_COVER_BOX_SIZE}:${IMAGE_GALLERY_COVER_BOX_SIZE}:force_original_aspect_ratio=decrease`,
+      "-q:v",
+      "5",
+      "-f",
+      "image2pipe",
+      "-vcodec",
+      "mjpeg",
+      "pipe:1"
+    ],
+    {
+      windowsHide: true,
+      maxBuffer: IMAGE_GALLERY_COVER_MAX_BYTES,
+      timeout: 30000
+    }
+  );
+
+  if (result.error) {
+    throw new Error(result.error.code === "ENOBUFS" ? "压缩后的封面超过大小限制" : `FFmpeg 启动失败：${result.error.message}`);
+  }
+  if (result.status !== 0 || !result.stdout?.length) {
+    const detail = String(result.stderr || "").trim();
+    throw new Error(detail ? `封面压缩失败：${detail}` : "封面压缩失败");
+  }
+  if (result.stdout.length > IMAGE_GALLERY_COVER_MAX_BYTES) {
+    throw new Error("压缩后的封面超过大小限制");
+  }
+  if (result.stdout[0] !== 0xff || result.stdout[1] !== 0xd8) {
+    throw new Error("FFmpeg 没有生成有效的 JPEG 封面");
+  }
+  return result.stdout;
+}
+
+function serveInlineFile(res, filePath, contentType = "") {
+  const stat = safeStat(filePath);
+  if (!stat?.isFile()) {
+    notFound(res);
+    return false;
+  }
+  const ext = normalizeExt(filePath);
+  res.writeHead(200, {
+    "Content-Type": contentType || MIME_TYPES[ext] || "application/octet-stream",
+    "Content-Length": stat.size,
+    "Cache-Control": "public, max-age=3600",
+    "Content-Disposition": "inline"
+  });
+  fs.createReadStream(filePath).pipe(res);
+  return true;
+}
+
+function serveArchiveMemberImage(res, options) {
+  const archivePath = options.archivePath;
+  const memberPath = String(options.memberPath || "").replace(/[\\/]+/g, "/");
+  const stat = safeStat(archivePath);
+  if (!stat?.isFile() || !memberPath || !ARCHIVE_IMAGE_EXTS.has(normalizeExt(memberPath))) {
+    if (options.fallbackPath && serveInlineFile(res, options.fallbackPath, options.contentType)) return;
     notFound(res);
     return;
   }
 
-  const ext = normalizeExt(target);
+  const cachePath = archiveImageCacheFile(options.sourceType || "common", archivePath, memberPath);
+  if (!safeStat(cachePath)?.isFile()) {
+    try {
+      extractArchiveMemberToCache(archivePath, memberPath, cachePath);
+    } catch (error) {
+      console.warn("[image-reader-extract]", error.message || error);
+      sendText(res, 500, error.message || "图片缓存抽取失败");
+      return;
+    }
+  }
+
+  touchImageReaderCacheFile(cachePath);
+  scheduleImageReaderCacheCleanup();
+  serveInlineFile(res, cachePath, options.contentType || MIME_TYPES[normalizeExt(memberPath)] || "");
+}
+
+function collectImageReaderCacheEntries() {
+  const root = path.resolve(IMAGE_READER_CACHE_DIR);
+  const entries = [];
+  const stack = [root];
+  if (!safeStat(root)?.isDirectory()) return entries;
+
+  while (stack.length) {
+    const current = stack.pop();
+    let dirEntries = [];
+    try {
+      dirEntries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of dirEntries) {
+      const fullPath = path.join(current, entry.name);
+      const relative = path.relative(root, fullPath);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+        continue;
+      }
+      if (entry.isFile()) {
+        const stat = safeStat(fullPath);
+        entries.push({
+          path: fullPath,
+          relativePath: relative,
+          bytes: stat?.size || 0,
+          touchedAt: stat?.mtimeMs || stat?.ctimeMs || 0
+        });
+      }
+    }
+  }
+  entries.sort((a, b) => a.touchedAt - b.touchedAt || a.relativePath.localeCompare(b.relativePath, undefined, { numeric: true }));
+  return entries;
+}
+
+function removeEmptyCacheParents(filePath) {
+  const root = path.resolve(IMAGE_READER_CACHE_DIR);
+  let current = path.dirname(path.resolve(filePath));
+  while (current.startsWith(root) && current !== root) {
+    try {
+      if (fs.readdirSync(current).length) break;
+      fs.rmdirSync(current);
+    } catch {
+      break;
+    }
+    current = path.dirname(current);
+  }
+}
+
+function imageReaderCacheStatus() {
+  const entries = collectImageReaderCacheEntries();
+  const currentBytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
+  const maxBytes = normalizeImageReaderCacheLimit(appConfig.imageReaderCacheMaxBytes);
+  return {
+    root: IMAGE_READER_CACHE_DIR,
+    exists: Boolean(safeStat(IMAGE_READER_CACHE_DIR)?.isDirectory()),
+    maxBytes,
+    currentBytes,
+    overBytes: Math.max(0, currentBytes - maxBytes),
+    fileCount: entries.length,
+    cleanupIntervalMs: IMAGE_READER_CACHE_CLEANUP_INTERVAL_MS,
+    entries: entries.slice(-12).reverse().map((entry) => ({
+      relativePath: entry.relativePath,
+      bytes: entry.bytes,
+      touchedAt: new Date(entry.touchedAt || 0).toISOString()
+    }))
+  };
+}
+
+function cleanupImageReaderCache(options = {}) {
+  if (imageReaderCacheCleanupActive) {
+    return { ok: false, skipped: "active", status: imageReaderCacheStatus() };
+  }
+  imageReaderCacheCleanupActive = true;
+  try {
+    const maxBytes = normalizeImageReaderCacheLimit(appConfig.imageReaderCacheMaxBytes);
+    const entries = collectImageReaderCacheEntries();
+    let currentBytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
+    const targetBytes = options.force ? 0 : Math.floor(maxBytes * IMAGE_READER_CACHE_CLEANUP_TARGET_RATIO);
+    const removed = [];
+    let removedBytes = 0;
+
+    if (options.force || currentBytes > maxBytes) {
+      for (const entry of entries) {
+        if (currentBytes <= targetBytes) break;
+        try {
+          fs.rmSync(entry.path, { force: true });
+          removeEmptyCacheParents(entry.path);
+          currentBytes -= entry.bytes;
+          removedBytes += entry.bytes;
+          removed.push({ relativePath: entry.relativePath, bytes: entry.bytes });
+        } catch (error) {
+          console.warn("[image-reader-cache-cleanup]", entry.path, error.message || error);
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      maxBytes,
+      targetBytes,
+      removedCount: removed.length,
+      removedBytes,
+      removed,
+      status: imageReaderCacheStatus()
+    };
+  } finally {
+    imageReaderCacheCleanupActive = false;
+  }
+}
+
+function scheduleImageReaderCacheCleanup() {
+  if (imageReaderCacheCleanupPending) return;
+  imageReaderCacheCleanupPending = true;
+  setTimeout(() => {
+    imageReaderCacheCleanupPending = false;
+    try {
+      cleanupImageReaderCache();
+    } catch (error) {
+      console.warn("[image-reader-cache-cleanup]", error.message || error);
+    }
+  }, 1000);
+}
+
+function startImageReaderCacheCleanupTimer() {
+  setInterval(() => {
+    try {
+      cleanupImageReaderCache();
+    } catch (error) {
+      console.warn("[image-reader-cache-cleanup]", error.message || error);
+    }
+  }, IMAGE_READER_CACHE_CLEANUP_INTERVAL_MS).unref?.();
+  scheduleImageReaderCacheCleanup();
+}
+
+function serveMangaImage(res, mangaId, chapterIndex, imageIndex) {
+  const cacheDir = mangaCacheById(decodeURIComponent(mangaId));
+  if (!cacheDir) {
+    notFound(res);
+    return;
+  }
+  const record = mangaImageRecord(cacheDir, decodeURIComponent(chapterIndex), decodeURIComponent(imageIndex));
+  if (!record) {
+    notFound(res);
+    return;
+  }
+
+  const chapterDir = mangaChapterDirFromRecord(cacheDir, record.chapter, record.image);
+  const sourceImagePath = safeChildPath(cacheDir, record.image.local_path);
+  if (!chapterDir || !sourceImagePath) {
+    notFound(res);
+    return;
+  }
+  const memberPath = path.relative(chapterDir, sourceImagePath).replace(/\\/g, "/");
+  const archivePath = `${chapterDir}.zip`;
+  serveArchiveMemberImage(res, {
+    sourceType: "manga",
+    archivePath,
+    memberPath,
+    fallbackPath: sourceImagePath,
+    contentType: record.image.content_type || MIME_TYPES[normalizeExt(memberPath)] || ""
+  });
+}
+
+function isArchiveFile(fileName) {
+  return ARCHIVE_EXTS.has(normalizeExt(fileName));
+}
+
+function imageLibraryRootLabel(rootPath) {
+  const parsed = path.parse(rootPath);
+  const trimmed = String(rootPath || "").replace(/[\\/]+$/g, "");
+  return path.basename(trimmed) || parsed.root || rootPath;
+}
+
+function photoSetImageUrl(albumId, imageIndex) {
+  return `/media/gallery/${encodeURIComponent(albumId)}/${encodeURIComponent(String(imageIndex))}`;
+}
+
+function photoSetCoverUrl(albumId, updatedAt = "") {
+  const suffix = updatedAt ? `?v=${encodeURIComponent(updatedAt)}` : "";
+  return `/media/gallery-cover/${encodeURIComponent(albumId)}${suffix}`;
+}
+
+function photoSetArchiveSignature(archivePath) {
+  const stat = safeStat(archivePath);
+  if (!stat?.isFile()) return null;
+  return {
+    archivePath: path.resolve(archivePath),
+    archiveSize: stat.size || 0,
+    archiveMtimeMs: Math.floor(stat.mtimeMs || 0)
+  };
+}
+
+function photoSetCoverRow(album) {
+  try {
+    return getImageGalleryDb().prepare("SELECT * FROM photo_set_covers WHERE album_id = ?").get(album.id) || null;
+  } catch (error) {
+    console.warn("[image-gallery-cover-db]", error.message || error);
+    return null;
+  }
+}
+
+function photoSetCoverMatches(row, signature) {
+  return (
+    row &&
+    signature &&
+    path.resolve(row.archive_path || "") === signature.archivePath &&
+    Number(row.archive_size || 0) === signature.archiveSize &&
+    Number(row.archive_mtime_ms || 0) === signature.archiveMtimeMs
+  );
+}
+
+function upsertPhotoSetCoverError(album, signature, error) {
+  const now = new Date().toISOString();
+  try {
+    getImageGalleryDb()
+      .prepare(
+        `
+        INSERT INTO photo_set_covers (
+          album_id, archive_path, archive_size, archive_mtime_ms, member_path,
+          cover_mime, cover_blob, cover_bytes, source_bytes, status, error, generated_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(album_id) DO UPDATE SET
+          archive_path = excluded.archive_path,
+          archive_size = excluded.archive_size,
+          archive_mtime_ms = excluded.archive_mtime_ms,
+          member_path = excluded.member_path,
+          cover_mime = excluded.cover_mime,
+          cover_blob = excluded.cover_blob,
+          cover_bytes = excluded.cover_bytes,
+          source_bytes = excluded.source_bytes,
+          status = excluded.status,
+          error = excluded.error,
+          generated_at = excluded.generated_at,
+          updated_at = excluded.updated_at
+        `
+      )
+      .run(
+        album.id,
+        signature?.archivePath || "",
+        signature?.archiveSize || 0,
+        signature?.archiveMtimeMs || 0,
+        "",
+        "",
+        null,
+        0,
+        0,
+        "error",
+        error.message || String(error || "封面生成失败"),
+        now,
+        now
+      );
+  } catch (dbError) {
+    console.warn("[image-gallery-cover-db]", dbError.message || dbError);
+  }
+}
+
+function upsertPhotoSetCover(album, signature, image, coverBlob) {
+  const now = new Date().toISOString();
+  getImageGalleryDb()
+    .prepare(
+      `
+      INSERT INTO photo_set_covers (
+        album_id, archive_path, archive_size, archive_mtime_ms, member_path,
+        cover_mime, cover_blob, cover_bytes, source_bytes, status, error, generated_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(album_id) DO UPDATE SET
+        archive_path = excluded.archive_path,
+        archive_size = excluded.archive_size,
+        archive_mtime_ms = excluded.archive_mtime_ms,
+        member_path = excluded.member_path,
+        cover_mime = excluded.cover_mime,
+        cover_blob = excluded.cover_blob,
+        cover_bytes = excluded.cover_bytes,
+        source_bytes = excluded.source_bytes,
+        status = excluded.status,
+        error = excluded.error,
+        generated_at = excluded.generated_at,
+        updated_at = excluded.updated_at
+      `
+    )
+    .run(
+      album.id,
+      signature.archivePath,
+      signature.archiveSize,
+      signature.archiveMtimeMs,
+      image.path || "",
+      "image/jpeg",
+      coverBlob,
+      coverBlob.length,
+      Number(image.bytes || 0),
+      "ok",
+      "",
+      now,
+      now
+    );
+  return photoSetCoverRow(album);
+}
+
+function generatePhotoSetCover(album) {
+  const archivePath = photoSetArchivePath(album);
+  const signature = photoSetArchiveSignature(archivePath);
+  if (!signature) {
+    const error = new Error("图包压缩文件不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const cached = photoSetCoverRow(album);
+  if (photoSetCoverMatches(cached, signature)) {
+    if (cached.status === "ok" && cached.cover_blob) return cached;
+    const error = new Error(cached.error || "图包封面生成失败");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const images = listArchiveImages(archivePath, { limit: 1, timeout: 120000 });
+  const firstImage = images[0];
+  if (!firstImage?.path) {
+    const error = new Error("图包里没有可用图片");
+    error.statusCode = 404;
+    upsertPhotoSetCoverError(album, signature, error);
+    throw error;
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-gallery-cover-"));
+  const tempExt = ARCHIVE_IMAGE_EXTS.has(normalizeExt(firstImage.path)) ? normalizeExt(firstImage.path) : ".img";
+  const tempPath = path.join(tempDir, `source${tempExt}`);
+  try {
+    extractArchiveMemberToCache(archivePath, firstImage.path, tempPath);
+    const coverBlob = compressImageFileToJpeg(tempPath);
+    return upsertPhotoSetCover(album, signature, firstImage, coverBlob);
+  } catch (error) {
+    upsertPhotoSetCoverError(album, signature, error);
+    error.statusCode = error.statusCode || 500;
+    throw error;
+  } finally {
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+function cleanPhotoPersonCandidate(value) {
+  let text = String(value || "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[【\[][^【】\[\]]*(?:\d+\s*[PpVv]|[KMGT]B|[KMGT])[^\]】]*[】\]]\s*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[\s._-]+|[\s._-]+$/g, "");
+  const bracketOnly = text.match(/^\[([^\]]+)\]$/);
+  if (bracketOnly) text = bracketOnly[1].trim() || text;
+  return text;
+}
+
+function isPhotoSetNumberBucket(value) {
+  const text = cleanPhotoPersonCandidate(value).toLowerCase();
+  return !text || /^(?:vol|no)\.?\s*\d*$/.test(text) || /^第?\d+[期辑部卷]?$/.test(text);
+}
+
+function isPhotoSetOrganizationPart(value) {
+  const text = cleanPhotoPersonCandidate(value).toLowerCase();
+  return /(?:写真|专辑|影像|女神|美腿|尤果|尤物|丝社|爱秀|丽柜|秀人|雅拉伊|ugirls|beautyleg|graphis|ssa|ligui|xiuren|yalayi|ishow|mygirl|tukmo)/i.test(text);
+}
+
+function photoPersonFromTail(value) {
+  const text = cleanPhotoPersonCandidate(value);
+  if (!text) return "";
+  const appearance = text.match(/(?:出镜(?:妹子|模特|者)?|模特|model|coser|cn)[:：]\s*([^/|,，;；\[\]【】()（）]+)/i);
+  if (appearance) return cleanPhotoPersonCandidate(appearance[1]);
+  const tokens = text.split(/\s+/).map(cleanPhotoPersonCandidate).filter(Boolean);
+  if (tokens.length > 1) {
+    for (let index = tokens.length - 1; index >= 0; index -= 1) {
+      if (!isPhotoSetNumberBucket(tokens[index])) return tokens[index];
+    }
+  }
+  return isPhotoSetNumberBucket(text) ? "" : text;
+}
+
+function inferPhotoSetPersonFromTitle(title) {
+  const base = cleanPhotoPersonCandidate(
+    String(title || "")
+      .replace(/\.(?:zip|cbz|rar|7z)$/i, "")
+      .replace(/^\[[^\]]+\]\s*/g, "")
+  );
+  if (!base) return "";
+  const appearance = base.match(/(?:出镜(?:妹子|模特|者)?|模特|model|coser|cn)[:：]\s*([^/|,，;；\[\]【】()（）]+)/i);
+  if (appearance) return cleanPhotoPersonCandidate(appearance[1]);
+  const numbered =
+    base.match(/(?:VOL|NO)\.?\s*\d+[\s._-]+(.+)$/i) ||
+    base.match(/\d{4}[._-]\d{2}[._-]\d{2}[\s._-]+(.+)$/);
+  if (numbered) return photoPersonFromTail(numbered[1]);
+  const codePrefix = base.match(/^[A-Za-z]{1,6}-?\d+\s+(.+)$/);
+  if (codePrefix) return photoPersonFromTail(codePrefix[1]);
+  const leadingNumber = base.match(/^\d{2,}[\s._-]+(.+)$/);
+  if (leadingNumber) return photoPersonFromTail(leadingNumber[1]);
+  const nameBeforeNumber = base.match(/^([^\d].*?)\d{2,}\s+.+$/);
+  if (nameBeforeNumber) return cleanPhotoPersonCandidate(nameBeforeNumber[1]);
+  return "";
+}
+
+function inferPhotoSetPersonFromCategory(category) {
+  const text = cleanPhotoPersonCandidate(category);
+  const numberedName = text.match(/-\s*\d+\s+(.+)$/);
+  return numberedName ? cleanPhotoPersonCandidate(numberedName[1]) : "";
+}
+
+function inferPhotoSetPerson(parts, title) {
+  const cleanedParts = parts.map((part) => String(part || "").trim()).filter(Boolean);
+  const category = cleanedParts[0] || "";
+  const isXiuren = category.toLowerCase().includes("xiuren") || category.includes("秀人");
+  const pathPersonParts = cleanedParts.slice(1).filter((part) => !isPhotoSetNumberBucket(part));
+  const titlePerson = inferPhotoSetPersonFromTitle(title);
+  if (category.toLowerCase().includes("cos") && pathPersonParts[0]) return cleanPhotoPersonCandidate(pathPersonParts[0]);
+  if (!isXiuren && pathPersonParts.length) {
+    const pathPerson = cleanPhotoPersonCandidate(pathPersonParts[pathPersonParts.length - 1]);
+    const pathLooksLikeOrganization =
+      isPhotoSetOrganizationPart(category) || pathPersonParts.some((part) => isPhotoSetOrganizationPart(part));
+    if (titlePerson && pathLooksLikeOrganization) return titlePerson;
+    return pathPerson;
+  }
+  if (titlePerson) return titlePerson;
+
+  if (!isXiuren) return inferPhotoSetPersonFromCategory(category);
+  return "";
+}
+
+function publicPhotoSetArchive(filePath, rootPath) {
+  const stat = safeStat(filePath);
+  const relativePath = path.relative(rootPath, filePath);
+  const dirParts = path
+    .dirname(relativePath)
+    .split(/[\\/]+/)
+    .filter((part) => part && part !== ".");
+  const title = path.basename(filePath, path.extname(filePath));
+  const id = createId("ps", path.resolve(filePath));
+  const category = dirParts[0] || imageLibraryRootLabel(rootPath);
+  const updatedAt = stat ? new Date(stat.mtimeMs).toISOString() : "";
+  return {
+    id,
+    type: "photoSet",
+    title,
+    category,
+    subCategory: dirParts[1] || "",
+    personName: inferPhotoSetPerson(dirParts, title),
+    rootLabel: imageLibraryRootLabel(rootPath),
+    sourceRoot: rootPath,
+    relativePath,
+    archiveExt: normalizeExt(filePath).slice(1),
+    size: stat?.size || 0,
+    updatedAt,
+    imageCount: null,
+    coverUrl: photoSetCoverUrl(id, updatedAt)
+  };
+}
+
+function photoSetRootStatuses() {
+  return PHOTO_SET_ROOTS.map((root) => {
+    const stat = safeStat(root);
+    return {
+      root,
+      label: imageLibraryRootLabel(root),
+      exists: Boolean(stat?.isDirectory())
+    };
+  });
+}
+
+function galleryMediaRootStatuses() {
+  return GALLERY_MEDIA_SOURCES.flatMap((source) =>
+    source.roots.map((root) => {
+      const stat = safeStat(root);
+      return {
+        kind: source.kind,
+        label: source.label,
+        root,
+        rootLabel: imageLibraryRootLabel(root),
+        exists: Boolean(stat?.isDirectory())
+      };
+    })
+  );
+}
+
+function walkArchiveFiles(rootPath) {
+  const results = [];
+  const root = path.resolve(rootPath);
+  if (!safeStat(root)?.isDirectory()) return results;
+  const stack = [root];
+  while (stack.length) {
+    const current = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (isExcludedDirName(entry.name)) continue;
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        try {
+          const lstat = fs.lstatSync(fullPath);
+          if (lstat.isSymbolicLink()) continue;
+        } catch {
+          continue;
+        }
+        stack.push(fullPath);
+        continue;
+      }
+      if (entry.isFile() && isArchiveFile(entry.name)) {
+        results.push(fullPath);
+      }
+    }
+  }
+  results.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  return results;
+}
+
+function walkVideoFiles(rootPath) {
+  const results = [];
+  const root = path.resolve(rootPath);
+  if (!safeStat(root)?.isDirectory()) return results;
+  const stack = [root];
+  while (stack.length) {
+    const current = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (isExcludedDirName(entry.name)) continue;
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        try {
+          const lstat = fs.lstatSync(fullPath);
+          if (lstat.isSymbolicLink()) continue;
+        } catch {
+          continue;
+        }
+        stack.push(fullPath);
+        continue;
+      }
+      if (entry.isFile() && isVideo(entry.name)) {
+        results.push(fullPath);
+      }
+    }
+  }
+  results.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  return results;
+}
+
+function mediaKindPrefix(kind) {
+  if (kind === "western") return "gw";
+  if (kind === "movie") return "gf";
+  if (kind === "tv") return "gt";
+  return "gm";
+}
+
+function mediaTitleFromFile(filePath) {
+  return path.basename(filePath, path.extname(filePath)).replace(/[._]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function publicGalleryMediaFile(filePath, rootPath, source) {
+  const stat = safeStat(filePath);
+  const relativePath = path.relative(rootPath, filePath);
+  const dirParts = path
+    .dirname(relativePath)
+    .split(/[\\/]+/)
+    .filter((part) => part && part !== ".");
+  const ext = normalizeExt(filePath);
+  const title = mediaTitleFromFile(filePath);
+  const id = createId(mediaKindPrefix(source.kind), `${source.kind}|${path.resolve(filePath)}`);
+  const parentName = dirParts[dirParts.length - 1] || "";
+  const category = dirParts[0] || source.label;
+  const seriesName = source.kind === "tv" ? parentName || category : source.kind === "movie" ? parentName : "";
+  const personName = source.kind === "western" ? category : source.kind === "tv" ? seriesName : "";
+  return {
+    id,
+    type: "media",
+    mediaKind: source.kind,
+    kindLabel: source.label,
+    title,
+    category,
+    subCategory: dirParts[1] || "",
+    personName,
+    seriesName,
+    rootLabel: source.label,
+    sourceRoot: rootPath,
+    relativePath,
+    ext: ext.slice(1),
+    size: stat?.size || 0,
+    updatedAt: stat ? new Date(stat.mtimeMs).toISOString() : "",
+    playable: DIRECT_VIDEO_EXTS.has(ext),
+    streamUrl: `/media/gallery-video/${encodeURIComponent(id)}`,
+    coverUrl: ""
+  };
+}
+
+function scanGalleryMediaLibrary() {
+  const roots = galleryMediaRootStatuses();
+  const items = [];
+  const seen = new Set();
+  for (const source of GALLERY_MEDIA_SOURCES) {
+    for (const rootPath of source.roots) {
+      if (!safeStat(rootPath)?.isDirectory()) continue;
+      for (const filePath of walkVideoFiles(rootPath)) {
+        const key = path.resolve(filePath).toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        items.push(publicGalleryMediaFile(filePath, rootPath, source));
+      }
+    }
+  }
+  items.sort((a, b) => {
+    if (a.mediaKind !== b.mediaKind) return a.mediaKind.localeCompare(b.mediaKind);
+    const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
+    return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+  });
+  return {
+    mediaRoots: roots,
+    mediaItems: items
+  };
+}
+
+function scanPhotoSetLibrary() {
+  const roots = photoSetRootStatuses();
+  const albums = [];
+  const seen = new Set();
+  for (const root of roots) {
+    if (!root.exists) continue;
+    for (const filePath of walkArchiveFiles(root.root)) {
+      const key = path.resolve(filePath).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      albums.push(publicPhotoSetArchive(filePath, root.root));
+    }
+  }
+  albums.sort((a, b) => {
+    const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
+    return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+  });
+  return {
+    scannedAt: new Date().toISOString(),
+    roots,
+    photoSets: albums
+  };
+}
+
+function scanImageLibrary() {
+  const photo = scanPhotoSetLibrary();
+  const media = scanGalleryMediaLibrary();
+  return {
+    schemaVersion: 2,
+    scannedAt: new Date().toISOString(),
+    roots: photo.roots,
+    photoSets: photo.photoSets,
+    mediaRoots: media.mediaRoots,
+    mediaItems: media.mediaItems
+  };
+}
+
+function loadImageLibraryIndexCache() {
+  if (imageLibraryCache) return imageLibraryCache;
+  const cached = readJsonFile(IMAGE_LIBRARY_INDEX_PATH, null);
+  if (cached && Array.isArray(cached.photoSets)) {
+    imageLibraryCache = cached;
+    return imageLibraryCache;
+  }
+  return null;
+}
+
+function saveImageLibraryIndexCache(index) {
+  ensureDataDir();
+  fs.writeFileSync(IMAGE_LIBRARY_INDEX_PATH, JSON.stringify(index, null, 2), "utf8");
+}
+
+function getImageLibraryIndex(options = {}) {
+  if (!options.refresh) {
+    const cached = loadImageLibraryIndexCache();
+    if (cached && Array.isArray(cached.mediaItems)) return cached;
+    if (cached) {
+      const media = scanGalleryMediaLibrary();
+      imageLibraryCache = {
+        ...cached,
+        schemaVersion: 2,
+        scannedAt: new Date().toISOString(),
+        mediaRoots: media.mediaRoots,
+        mediaItems: media.mediaItems
+      };
+      saveImageLibraryIndexCache(imageLibraryCache);
+      return imageLibraryCache;
+    }
+  }
+  imageLibraryCache = scanImageLibrary();
+  saveImageLibraryIndexCache(imageLibraryCache);
+  return imageLibraryCache;
+}
+
+function facetCounts(items, fieldName) {
+  const counts = new Map();
+  for (const item of items) {
+    const value = String(item[fieldName] || "").trim();
+    if (!value) continue;
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value, undefined, { numeric: true, sensitivity: "base" }));
+}
+
+function mediaItemsByKind(items, kind) {
+  return items.filter((item) => item.mediaKind === kind);
+}
+
+function mediaFacets(items) {
+  return {
+    categories: facetCounts(items, "category"),
+    subCategories: facetCounts(items, "subCategory"),
+    people: facetCounts(items, "personName"),
+    series: facetCounts(items, "seriesName"),
+    roots: facetCounts(items, "rootLabel")
+  };
+}
+
+function imageLibraryPayload(options = {}) {
+  const index = getImageLibraryIndex(options);
+  const photoSets = (index.photoSets || []).map((item) => ({
+    ...item,
+    coverUrl: item.coverUrl || photoSetCoverUrl(item.id, item.updatedAt || "")
+  }));
+  const mediaItems = Array.isArray(index.mediaItems) ? index.mediaItems : [];
+  const westernItems = mediaItemsByKind(mediaItems, "western");
+  const movieItems = mediaItemsByKind(mediaItems, "movie");
+  const tvItems = mediaItemsByKind(mediaItems, "tv");
+  const manga = mangaCacheDirs().map(publicMangaSummary);
+  return {
+    schemaVersion: 2,
+    scannedAt: index.scannedAt || "",
+    mangaRoot: mangaRootStatus(),
+    photoRoots: index.roots || photoSetRootStatuses(),
+    mediaRoots: index.mediaRoots || galleryMediaRootStatuses(),
+    cache: imageReaderCacheStatus(),
+    totals: {
+      manga: manga.length,
+      photoSets: photoSets.length,
+      western: westernItems.length,
+      movies: movieItems.length,
+      tv: tvItems.length,
+      media: mediaItems.length,
+      photoBytes: photoSets.reduce((sum, item) => sum + Number(item.size || 0), 0),
+      mediaBytes: mediaItems.reduce((sum, item) => sum + Number(item.size || 0), 0)
+    },
+    facets: {
+      categories: facetCounts(photoSets, "category"),
+      subCategories: facetCounts(photoSets, "subCategory"),
+      people: facetCounts(photoSets, "personName"),
+      roots: facetCounts(photoSets, "rootLabel"),
+      western: mediaFacets(westernItems),
+      movie: mediaFacets(movieItems),
+      tv: mediaFacets(tvItems)
+    },
+    manga,
+    photoSets,
+    mediaItems
+  };
+}
+
+function imageLibrarySummaryPayload(options = {}) {
+  const index = getImageLibraryIndex(options);
+  const photoSets = Array.isArray(index.photoSets) ? index.photoSets : [];
+  const mediaItems = Array.isArray(index.mediaItems) ? index.mediaItems : [];
+  const westernItems = mediaItemsByKind(mediaItems, "western");
+  const movieItems = mediaItemsByKind(mediaItems, "movie");
+  const tvItems = mediaItemsByKind(mediaItems, "tv");
+  const manga = mangaCacheDirs().map(publicMangaSummary);
+  const cache = imageReaderCacheStatus();
+  return {
+    schemaVersion: 1,
+    scannedAt: index.scannedAt || "",
+    mangaRoot: mangaRootStatus(),
+    photoRoots: index.roots || photoSetRootStatuses(),
+    mediaRoots: index.mediaRoots || galleryMediaRootStatuses(),
+    cache: {
+      root: cache.root,
+      exists: cache.exists,
+      maxBytes: cache.maxBytes,
+      currentBytes: cache.currentBytes,
+      overBytes: cache.overBytes,
+      fileCount: cache.fileCount,
+      cleanupIntervalMs: cache.cleanupIntervalMs
+    },
+    totals: {
+      manga: manga.length,
+      photoSets: photoSets.length,
+      western: westernItems.length,
+      movies: movieItems.length,
+      tv: tvItems.length,
+      media: mediaItems.length,
+      photoBytes: photoSets.reduce((sum, item) => sum + Number(item.size || 0), 0),
+      mediaBytes: mediaItems.reduce((sum, item) => sum + Number(item.size || 0), 0)
+    },
+    facets: {
+      categories: facetCounts(photoSets, "category").slice(0, 12),
+      people: facetCounts(photoSets, "personName").slice(0, 12),
+      western: mediaFacets(westernItems),
+      movie: mediaFacets(movieItems),
+      tv: mediaFacets(tvItems)
+    }
+  };
+}
+
+function imageLibraryItemsPayload(url, options = {}) {
+  const mode = normalizeImageLibraryMode(url.searchParams.get("mode"));
+  const limit = clampInteger(url.searchParams.get("limit"), 48, 1, 120);
+  const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+  const query = String(url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
+  const sort = String(url.searchParams.get("sort") || "updated").trim();
+  const index = getImageLibraryIndex(options);
+  const mediaItems = Array.isArray(index.mediaItems) ? index.mediaItems : [];
+
+  let source = [];
+  if (mode === "photo") {
+    source = (index.photoSets || []).map((item) => publicImageLibraryListItem(item, "photo"));
+  } else if (mode === "manga") {
+    source = mangaCacheDirs().map((cacheDir) => publicImageLibraryListItem(publicMangaSummary(cacheDir), "manga"));
+  } else if (["western", "movie", "tv"].includes(mode)) {
+    source = mediaItemsByKind(mediaItems, mode).map((item) => publicImageLibraryListItem(item, mode));
+  }
+
+  const filtered = filterImageLibraryItems(source, query);
+  const sorted = sortImageLibraryItems(filtered, sort);
+  const items = sorted.slice(offset, offset + limit);
+  return {
+    schemaVersion: 1,
+    mode,
+    query,
+    sort,
+    count: items.length,
+    total: sorted.length,
+    limit,
+    offset,
+    scannedAt: index.scannedAt || "",
+    items
+  };
+}
+
+function normalizeImageLibraryMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  if (mode === "photos" || mode === "photo-set" || mode === "photo-sets") return "photo";
+  if (mode === "movies") return "movie";
+  if (["photo", "manga", "western", "movie", "tv"].includes(mode)) return mode;
+  return "photo";
+}
+
+function publicImageLibraryListItem(item, mode) {
+  const normalizedMode = normalizeImageLibraryMode(mode || item?.mediaKind || item?.type);
+  return {
+    id: String(item?.id || ""),
+    type: normalizedMode,
+    title: String(item?.title || item?.dirName || "").trim(),
+    category: String(item?.category || item?.site || item?.kindLabel || "").trim(),
+    subCategory: String(item?.subCategory || "").trim(),
+    personName: String(item?.personName || "").trim(),
+    seriesName: String(item?.seriesName || "").trim(),
+    rootLabel: String(item?.rootLabel || item?.kindLabel || "").trim(),
+    ext: String(item?.archiveExt || item?.ext || "").trim(),
+    size: Number(item?.size || 0),
+    updatedAt: String(item?.updatedAt || "").trim(),
+    imageCount: item?.imageCount === null || item?.imageCount === undefined ? null : Number(item.imageCount || 0),
+    chapterCount: item?.chapterCount === undefined ? null : Number(item.chapterCount || 0),
+    doneChapterCount: item?.doneChapterCount === undefined ? null : Number(item.doneChapterCount || 0),
+    downloadedCount: item?.downloadedCount === undefined ? null : Number(item.downloadedCount || 0),
+    failedCount: item?.failedCount === undefined ? null : Number(item.failedCount || 0),
+    playable: Boolean(item?.playable),
+    coverUrl: String(item?.coverUrl || "").trim(),
+    routePath: imageLibraryItemRoutePath(normalizedMode, item?.id)
+  };
+}
+
+function imageLibraryItemRoutePath(mode, id) {
+  const encoded = encodeURIComponent(String(id || ""));
+  if (!encoded) return "/";
+  if (mode === "photo") return `/photo/set/${encoded}`;
+  if (mode === "manga") return `/manga/${encoded}`;
+  if (mode === "western") return `/western/${encoded}`;
+  if (mode === "movie") return `/movies/${encoded}`;
+  if (mode === "tv") return `/tv/${encoded}`;
+  return "/";
+}
+
+function filterImageLibraryItems(items, query) {
+  const needle = query.toLowerCase();
+  if (!needle) return items;
+  return items.filter((item) =>
+    [
+      item.title,
+      item.category,
+      item.subCategory,
+      item.personName,
+      item.seriesName,
+      item.rootLabel,
+      item.ext
+    ]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(needle))
+  );
+}
+
+function sortImageLibraryItems(items, sort) {
+  const list = [...items];
+  if (sort === "title") {
+    return list.sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
+  }
+  if (sort === "size") {
+    return list.sort((a, b) => Number(b.size || 0) - Number(a.size || 0) || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
+  }
+  return list.sort((a, b) => {
+    const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
+    return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+  });
+}
+
+function photoSetById(id) {
+  const target = String(id || "");
+  if (!target) return null;
+  const index = getImageLibraryIndex();
+  return (index.photoSets || []).find((item) => item.id === target) || null;
+}
+
+function galleryMediaById(id) {
+  const target = String(id || "");
+  if (!target) return null;
+  const index = getImageLibraryIndex();
+  return (index.mediaItems || []).find((item) => item.id === target) || null;
+}
+
+function galleryMediaPath(item) {
+  if (!item) return "";
+  return safeChildPath(item.sourceRoot, item.relativePath);
+}
+
+function photoSetArchivePath(album) {
+  if (!album) return "";
+  return safeChildPath(album.sourceRoot, album.relativePath);
+}
+
+function publicPhotoSetDetail(album) {
+  const archivePath = photoSetArchivePath(album);
+  const images = listArchiveImages(archivePath);
+  return {
+    ...album,
+    imageCount: images.length,
+    images: images.map((image, index) => ({
+      index: index + 1,
+      name: image.name || path.basename(image.path || ""),
+      archivePath: image.path || "",
+      bytes: Number(image.bytes || 0),
+      url: photoSetImageUrl(album.id, index + 1)
+    }))
+  };
+}
+
+function publicGalleryMediaDetail(item) {
+  const filePath = galleryMediaPath(item);
+  const stat = safeStat(filePath);
+  return {
+    ...item,
+    size: stat?.size || item.size || 0,
+    updatedAt: stat ? new Date(stat.mtimeMs).toISOString() : item.updatedAt || "",
+    exists: Boolean(stat?.isFile()),
+    streamUrl: `/media/gallery-video/${encodeURIComponent(item.id)}`
+  };
+}
+
+function servePhotoSetImage(res, albumId, imageIndex) {
+  const album = photoSetById(decodeURIComponent(albumId));
+  if (!album) {
+    notFound(res);
+    return;
+  }
+  const archivePath = photoSetArchivePath(album);
+  const images = listArchiveImages(archivePath);
+  const image = images[Number(decodeURIComponent(imageIndex)) - 1];
+  if (!image?.path) {
+    notFound(res);
+    return;
+  }
+  serveArchiveMemberImage(res, {
+    sourceType: "photo-set",
+    archivePath,
+    memberPath: image.path,
+    contentType: MIME_TYPES[normalizeExt(image.path)] || ""
+  });
+}
+
+function serveGalleryVideo(req, res, mediaId) {
+  const item = galleryMediaById(decodeURIComponent(mediaId));
+  const filePath = galleryMediaPath(item);
+  if (!item || !filePath || !safeStat(filePath)?.isFile()) {
+    notFound(res);
+    return;
+  }
+  serveVideo(req, res, {
+    id: item.id,
+    path: filePath,
+    name: path.basename(filePath),
+    ext: normalizeExt(filePath)
+  });
+}
+
+function ensureToolDownloadDir() {
+  fs.mkdirSync(TOOL_DOWNLOAD_DIR, { recursive: true });
+}
+
+function cleanupToolDownloadDir() {
+  try {
+    fs.rmSync(TOOL_DOWNLOAD_DIR, { recursive: true, force: true });
+    ensureToolDownloadDir();
+  } catch (error) {
+    console.warn("[tool-downloads] 清理临时目录失败：", error.message || error);
+  }
+}
+
+function sanitizeDownloadFileName(value, fallback = "formatted.txt") {
+  const raw = String(value || "").replaceAll("\\", "/");
+  const name = path
+    .basename(raw)
+    .replace(/[\x00-\x1f<>:"/\\|?*]+/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[. ]+$/g, "");
+  return (name || fallback).slice(0, 140);
+}
+
+function formattedTxtFileName(fileName) {
+  const safeName = sanitizeDownloadFileName(fileName, "文本.txt");
+  const parsed = path.parse(safeName);
+  const base = (parsed.name || "文本").slice(0, 120);
+  return `${base}_格式化.txt`;
+}
+
+function attachmentDisposition(fileName) {
+  const fallback = sanitizeDownloadFileName(fileName, "download.txt").replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  return `attachment; filename="${fallback || "download.txt"}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+}
+
+function toolDownloadDirForId(id) {
+  return path.join(TOOL_DOWNLOAD_DIR, id);
+}
+
+function removeToolDownload(id) {
+  if (!id) return;
+  const timer = toolDownloadTimers.get(id);
+  if (timer) clearTimeout(timer);
+  toolDownloadTimers.delete(id);
+  const record = toolDownloads.get(id);
+  toolDownloads.delete(id);
+  const dir = record?.dirPath || toolDownloadDirForId(id);
+  try {
+    const resolved = path.resolve(dir);
+    const root = path.resolve(TOOL_DOWNLOAD_DIR);
+    if (resolved === root || !resolved.startsWith(root + path.sep)) return;
+    fs.rmSync(resolved, { recursive: true, force: true });
+  } catch (error) {
+    console.warn("[tool-downloads] 删除临时文件失败：", error.message || error);
+  }
+}
+
+function registerToolDownload(record) {
+  toolDownloads.set(record.id, record);
+  const delay = Math.max(0, record.expiresAt - Date.now());
+  const timer = setTimeout(() => removeToolDownload(record.id), delay);
+  if (typeof timer.unref === "function") timer.unref();
+  toolDownloadTimers.set(record.id, timer);
+}
+
+function txtToolOptions(input = {}) {
+  return {
+    indent: input.indent !== false,
+    cleanJunk: input.cleanJunk !== false
+  };
+}
+
+function txtToolInputBuffer(body = {}) {
+  const fileName = sanitizeDownloadFileName(body.fileName || body.name || "文本.txt", "文本.txt");
+  if (body.contentBase64) {
+    const base64 = String(body.contentBase64 || "").replace(/^data:[^,]+,/, "");
+    const buffer = Buffer.from(base64, "base64");
+    return { fileName, buffer, source: "file" };
+  }
+  const text = String(body.text || "");
+  return { fileName, buffer: Buffer.from(text, "utf8"), source: "text" };
+}
+
+function runNovelTextFormatter(inputPath, outputPath, options = {}) {
+  return new Promise((resolve, reject) => {
+    const args = ["-u", path.join("tools", "novel_text_formatter.py"), inputPath, "--output", outputPath];
+    if (!options.indent) args.push("--no-indent");
+    if (!options.cleanJunk) args.push("--no-clean-junk");
+
+    const child = spawn("python", args, {
+      cwd: __dirname,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: "utf-8",
+        PYTHONUTF8: "1"
+      }
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) {
+        const error = new Error(stderr.trim() || stdout.trim() || "TXT 格式化失败");
+        error.statusCode = 500;
+        reject(error);
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout.trim() || "{}"));
+      } catch (error) {
+        error.statusCode = 500;
+        error.message = `格式化统计解析失败：${error.message}`;
+        reject(error);
+      }
+    });
+  });
+}
+
+async function createTxtFormatDownload(body = {}) {
+  const options = txtToolOptions(body.options || body);
+  const { fileName, buffer, source } = txtToolInputBuffer(body);
+  if (!buffer.length) {
+    const error = new Error("TXT 内容为空");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (buffer.length > TXT_TOOL_MAX_FILE_BYTES) {
+    const error = new Error(`TXT 文件不能超过 ${Math.round(TXT_TOOL_MAX_FILE_BYTES / 1024 / 1024)} MB`);
+    error.statusCode = 413;
+    throw error;
+  }
+  if (source === "file" && path.extname(fileName).toLowerCase() !== ".txt") {
+    const error = new Error("只支持 .txt 文档");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  ensureToolDownloadDir();
+  const id = crypto.randomBytes(16).toString("base64url");
+  const dirPath = toolDownloadDirForId(id);
+  fs.mkdirSync(dirPath, { recursive: true });
+  const inputPath = path.join(dirPath, "source.txt");
+  const outputFileName = formattedTxtFileName(fileName);
+  const outputPath = path.join(dirPath, outputFileName);
+  fs.writeFileSync(inputPath, buffer);
+
+  try {
+    const stats = await runNovelTextFormatter(inputPath, outputPath, options);
+    fs.rmSync(inputPath, { force: true });
+    const outputBuffer = fs.readFileSync(outputPath);
+    const now = Date.now();
+    const record = {
+      id,
+      dirPath,
+      filePath: outputPath,
+      fileName: outputFileName,
+      size: outputBuffer.length,
+      createdAt: now,
+      expiresAt: now + TOOL_DOWNLOAD_TTL_MS
+    };
+    registerToolDownload(record);
+    const previewText =
+      outputBuffer.length <= TXT_TOOL_PREVIEW_BYTES
+        ? outputBuffer.toString("utf8")
+        : `${outputBuffer.subarray(0, TXT_TOOL_PREVIEW_BYTES).toString("utf8")}\n\n……`;
+    return {
+      ok: true,
+      id,
+      fileName: outputFileName,
+      size: outputBuffer.length,
+      downloadUrl: `/api/tools/txt-format/download/${encodeURIComponent(id)}`,
+      expiresAt: new Date(record.expiresAt).toISOString(),
+      expiresInSeconds: Math.floor(TOOL_DOWNLOAD_TTL_MS / 1000),
+      previewText,
+      previewTruncated: outputBuffer.length > TXT_TOOL_PREVIEW_BYTES,
+      stats: {
+        ...stats,
+        input_path: undefined,
+        output_path: undefined,
+        inputBytes: buffer.length,
+        outputBytes: outputBuffer.length
+      }
+    };
+  } catch (error) {
+    removeToolDownload(id);
+    throw error;
+  }
+}
+
+function serveTxtToolDownload(req, res, id) {
+  const record = toolDownloads.get(id);
+  if (!record) {
+    sendJson(res, 404, { error: "下载文件不存在或已过期" });
+    return;
+  }
+  if (Date.now() >= record.expiresAt) {
+    removeToolDownload(id);
+    sendJson(res, 410, { error: "下载文件已过期" });
+    return;
+  }
+  if (!fs.existsSync(record.filePath)) {
+    removeToolDownload(id);
+    sendJson(res, 404, { error: "下载文件不存在或已过期" });
+    return;
+  }
+
+  const stat = fs.statSync(record.filePath);
   res.writeHead(200, {
-    "Content-Type": MIME_TYPES[ext] || "application/octet-stream",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Content-Length": stat.size,
+    "Content-Disposition": attachmentDisposition(record.fileName),
     "Cache-Control": "no-store"
   });
-  fs.createReadStream(target).pipe(res);
+  fs.createReadStream(record.filePath).pipe(res);
+}
+
+function localImageMime(file) {
+  return MIME_TYPES[file.ext] || "application/octet-stream";
+}
+
+function localImageCacheRow(file) {
+  try {
+    return (
+      getActorDb()
+        .prepare(
+          `
+          SELECT *
+          FROM local_image_cache
+          WHERE file_id = ?
+            AND image_blob IS NOT NULL
+            AND length(image_blob) > 0
+            AND source_size = ?
+            AND source_mtime = ?
+          `
+        )
+        .get(file.id, Number(file.size || 0), file.modifiedAt || "") || null
+    );
+  } catch (error) {
+    console.warn("[local-image-cache]", error.message || error);
+    return null;
+  }
+}
+
+function serveLocalImageCacheRow(res, row) {
+  if (!row?.image_blob) return false;
+  const buffer = Buffer.from(row.image_blob);
+  if (!buffer.length) return false;
+  res.writeHead(200, {
+    "Content-Type": row.content_type || "application/octet-stream",
+    "Content-Length": buffer.length,
+    "Cache-Control": "public, max-age=86400",
+    "Content-Disposition": "inline"
+  });
+  res.end(buffer);
+  return true;
+}
+
+function upsertLocalImageCache(file, stat, buffer) {
+  const now = new Date().toISOString();
+  const sourceMtime = stat?.mtime?.toISOString() || file.modifiedAt || "";
+  const sourceSize = Number(stat?.size ?? file.size ?? buffer.length) || 0;
+  const contentType = localImageMime(file);
+  getActorDb()
+    .prepare(
+      `
+      INSERT INTO local_image_cache (
+        file_id, file_path, relative_path, content_type, image_blob, byte_length,
+        source_size, source_mtime, status, error, cached_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ok', '', ?, ?)
+      ON CONFLICT(file_id) DO UPDATE SET
+        file_path = excluded.file_path,
+        relative_path = excluded.relative_path,
+        content_type = excluded.content_type,
+        image_blob = excluded.image_blob,
+        byte_length = excluded.byte_length,
+        source_size = excluded.source_size,
+        source_mtime = excluded.source_mtime,
+        status = 'ok',
+        error = '',
+        cached_at = COALESCE(local_image_cache.cached_at, excluded.cached_at),
+        updated_at = excluded.updated_at
+      `
+    )
+    .run(
+      file.id,
+      file.path || "",
+      file.relativePath || "",
+      contentType,
+      buffer,
+      buffer.length,
+      sourceSize,
+      sourceMtime,
+      now,
+      now
+    );
+  return {
+    content_type: contentType,
+    image_blob: buffer,
+    byte_length: buffer.length
+  };
+}
+
+function upsertLocalImageCacheError(file, error) {
+  try {
+    const now = new Date().toISOString();
+    getActorDb()
+      .prepare(
+        `
+        INSERT INTO local_image_cache (
+          file_id, file_path, relative_path, content_type, image_blob, byte_length,
+          source_size, source_mtime, status, error, cached_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, NULL, 0, ?, ?, 'error', ?, NULL, ?)
+        ON CONFLICT(file_id) DO UPDATE SET
+          file_path = excluded.file_path,
+          relative_path = excluded.relative_path,
+          status = 'error',
+          error = excluded.error,
+          updated_at = excluded.updated_at
+        `
+      )
+      .run(
+        file.id,
+        file.path || "",
+        file.relativePath || "",
+        localImageMime(file),
+        Number(file.size || 0),
+        file.modifiedAt || "",
+        String(error?.message || error || "local image cache failed").slice(0, 1000),
+        now
+      );
+  } catch (cacheError) {
+    console.warn("[local-image-cache]", cacheError.message || cacheError);
+  }
 }
 
 function serveImage(res, file) {
+  if (serveLocalImageCacheRow(res, localImageCacheRow(file))) {
+    return;
+  }
+
   const stat = safeStat(file.path);
   if (!stat) {
     notFound(res);
     return;
   }
+  if (stat.size <= 0) {
+    upsertLocalImageCacheError(file, new Error("empty local image"));
+    notFound(res);
+    return;
+  }
+
+  let buffer = null;
+  try {
+    buffer = fs.readFileSync(file.path);
+  } catch (error) {
+    upsertLocalImageCacheError(file, error);
+    console.warn("[local-image-cache]", error.message || error);
+    sendText(res, 500, "Local image read failed");
+    return;
+  }
+
+  try {
+    if (serveLocalImageCacheRow(res, upsertLocalImageCache(file, stat, buffer))) return;
+  } catch (error) {
+    console.warn("[local-image-cache]", error.message || error);
+  }
 
   res.writeHead(200, {
-    "Content-Type": MIME_TYPES[file.ext] || "application/octet-stream",
-    "Content-Length": stat.size,
+    "Content-Type": localImageMime(file),
+    "Content-Length": buffer.length,
     "Cache-Control": "public, max-age=3600",
     "Content-Disposition": "inline"
   });
-  fs.createReadStream(file.path).pipe(res);
+  res.end(buffer);
 }
 
 function serveActorAvatar(res, personId) {
@@ -2800,6 +5253,192 @@ function serveWorkCover(res, workId) {
     "Content-Disposition": "inline"
   });
   res.end(buffer);
+}
+
+function servePhotoSetCover(res, albumId) {
+  const album = photoSetById(albumId);
+  if (!album) {
+    notFound(res);
+    return;
+  }
+
+  let row = photoSetCoverRow(album);
+  const signature = photoSetArchiveSignature(photoSetArchivePath(album));
+  if (!photoSetCoverMatches(row, signature) || !row?.cover_blob) {
+    try {
+      row = generatePhotoSetCover(album);
+    } catch (error) {
+      console.warn("[image-gallery-cover]", album.relativePath || album.id, error.message || error);
+      notFound(res);
+      return;
+    }
+  }
+
+  if (!row?.cover_blob) {
+    notFound(res);
+    return;
+  }
+
+  const buffer = Buffer.from(row.cover_blob);
+  res.writeHead(200, {
+    "Content-Type": row.cover_mime || "image/jpeg",
+    "Content-Length": buffer.length,
+    "Cache-Control": "public, max-age=86400",
+    "Content-Disposition": "inline"
+  });
+  res.end(buffer);
+}
+
+function remoteImageCacheKey(remoteUrl) {
+  return crypto.createHash("sha256").update(remoteUrl).digest("hex");
+}
+
+function remoteImageCacheRow(remoteUrl) {
+  try {
+    return getActorDb().prepare("SELECT * FROM remote_image_cache WHERE url = ?").get(remoteUrl) || null;
+  } catch (error) {
+    console.warn("[remote-image-cache]", error.message || error);
+    return null;
+  }
+}
+
+function remoteImageMimeFromUrl(remoteUrl) {
+  try {
+    const ext = normalizeExt(new URL(remoteUrl).pathname);
+    return MIME_TYPES[ext] || "";
+  } catch {
+    return "";
+  }
+}
+
+function normalizeRemoteImageMime(contentType, remoteUrl) {
+  const mime = String(contentType || "").split(";", 1)[0].trim().toLowerCase();
+  if (["image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"].includes(mime)) return mime;
+  return remoteImageMimeFromUrl(remoteUrl) || "image/jpeg";
+}
+
+function serveRemoteImageRow(res, row) {
+  if (!row?.image_blob) return false;
+  const buffer = Buffer.from(row.image_blob);
+
+  res.writeHead(200, {
+    "Content-Type": row.content_type || "image/jpeg",
+    "Content-Length": buffer.length,
+    "Cache-Control": "public, max-age=86400",
+    "Content-Disposition": "inline"
+  });
+  res.end(buffer);
+  return true;
+}
+
+async function downloadRemoteImage(remoteUrl) {
+  const response = await fetch(remoteUrl, {
+    signal: AbortSignal.timeout(15000),
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
+      Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+      Referer: "https://javdb.com/"
+    }
+  });
+
+  if (!response.ok) {
+    const error = new Error(`远程图片请求失败：${response.status}`);
+    error.statusCode = 502;
+    throw error;
+  }
+
+  const declaredLength = Number(response.headers.get("content-length") || 0);
+  if (declaredLength > MAX_REMOTE_IMAGE_BYTES) {
+    const error = new Error("远程图片过大");
+    error.statusCode = 413;
+    throw error;
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (buffer.length > MAX_REMOTE_IMAGE_BYTES) {
+    const error = new Error("远程图片过大");
+    error.statusCode = 413;
+    throw error;
+  }
+
+  return {
+    buffer,
+    contentType: normalizeRemoteImageMime(response.headers.get("content-type"), remoteUrl)
+  };
+}
+
+function enqueueRemoteImageWarm(remoteUrl) {
+  if (remoteImageCacheRow(remoteUrl)?.image_blob || remoteImageWarmQueued.has(remoteUrl)) return;
+  remoteImageWarmQueued.add(remoteUrl);
+  remoteImageWarmQueue.push(remoteUrl);
+  drainRemoteImageWarmQueue();
+}
+
+function drainRemoteImageWarmQueue() {
+  while (remoteImageWarmActive < REMOTE_IMAGE_WARM_CONCURRENCY && remoteImageWarmQueue.length) {
+    const remoteUrl = remoteImageWarmQueue.shift();
+    remoteImageWarmActive += 1;
+    warmRemoteImage(remoteUrl)
+      .catch((error) => {
+        console.warn("[remote-image-cache]", error.message || error);
+      })
+      .finally(() => {
+        remoteImageWarmActive -= 1;
+        remoteImageWarmQueued.delete(remoteUrl);
+        drainRemoteImageWarmQueue();
+      });
+  }
+}
+
+async function warmRemoteImage(remoteUrl) {
+  if (remoteImageCacheRow(remoteUrl)?.image_blob) return;
+  const downloaded = await downloadRemoteImage(remoteUrl);
+  const now = new Date().toISOString();
+  getActorDb()
+    .prepare(
+      `
+      INSERT INTO remote_image_cache (
+        url, url_hash, content_type, image_blob, byte_length, status, error, fetched_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, 'ok', '', ?, ?)
+      ON CONFLICT(url) DO UPDATE SET
+        url_hash = excluded.url_hash,
+        content_type = excluded.content_type,
+        image_blob = excluded.image_blob,
+        byte_length = excluded.byte_length,
+        status = 'ok',
+        error = '',
+        fetched_at = excluded.fetched_at,
+        updated_at = excluded.updated_at
+      `
+    )
+    .run(remoteUrl, remoteImageCacheKey(remoteUrl), downloaded.contentType, downloaded.buffer, downloaded.buffer.length, now, now);
+}
+
+async function serveCachedRemoteImage(req, res, url) {
+  const remoteUrl = publicRemoteUrl(url.searchParams.get("url"));
+  if (!remoteUrl) {
+    sendText(res, 400, "Missing remote image URL");
+    return;
+  }
+
+  const parsed = new URL(remoteUrl);
+  if (!isAllowedRemoteImageUrl(parsed)) {
+    sendText(res, 403, "Remote image host is not allowed");
+    return;
+  }
+
+  if (serveRemoteImageRow(res, remoteImageCacheRow(remoteUrl))) {
+    return;
+  }
+
+  enqueueRemoteImageWarm(remoteUrl);
+  res.writeHead(302, {
+    Location: remoteUrl,
+    "Cache-Control": "no-store"
+  });
+  res.end();
 }
 
 function parseRange(rangeHeader, size) {
@@ -2973,7 +5612,7 @@ function publicWork(work, includeFiles = false) {
       relativePath: work.relativePath || "",
       coverId: null,
       cachedCover: null,
-      remoteCoverUrl: work.remoteCoverUrl || "",
+      remoteCoverUrl: proxiedRemoteImageUrl(work.remoteCoverUrl) || work.remoteCoverUrl || "",
       videoCount: 0,
       playableCount: 0,
       imageCount: 0,
@@ -3069,61 +5708,6 @@ function favoriteWorks(folderId = "") {
 
 function historyWorks(options = {}) {
   return historyEntries(options).map((item) => item.work);
-}
-
-function requestHostName(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  try {
-    return new URL(`http://${raw}`).hostname.toLowerCase();
-  } catch {
-    return raw.split(":")[0].toLowerCase();
-  }
-}
-
-function isLocalHostName(host) {
-  return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(host);
-}
-
-function isSameLocalOrigin(req) {
-  const origin = String(req.headers.origin || "").trim();
-  if (!origin) return true;
-
-  try {
-    const originUrl = new URL(origin);
-    const requestHost = String(req.headers.host || "").toLowerCase();
-    return originUrl.host.toLowerCase() === requestHost && isLocalHostName(originUrl.hostname.toLowerCase());
-  } catch {
-    return false;
-  }
-}
-
-function requestAccess(req) {
-  const host = requestHostName(req.headers.host);
-  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
-  const remote = forwarded || req.socket.remoteAddress || "";
-  const isLocalHost = isLocalHostName(host);
-  const isLan = isLanHost(host);
-  const mode = isLocalHost ? "local" : isLan ? "lan" : "remote";
-  return {
-    mode,
-    isLocal: mode === "local",
-    host,
-    clientAddress: remote,
-    hints: {
-      workPageSize: mode === "local" ? 1000 : 80,
-      videoPreload: mode === "local" ? "metadata" : "none",
-      transcode: mode === "local" ? "manual" : "prefer"
-    }
-  };
-}
-
-function isLanHost(host) {
-  const match = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host || "");
-  if (!match) return false;
-  const first = Number(match[1]);
-  const second = Number(match[2]);
-  return first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168) || (first === 169 && second === 254);
 }
 
 function clampInteger(value, fallback, min, max) {
@@ -3257,6 +5841,7 @@ function pagedWorksPayload(works, url, extra = {}) {
   const sort = url.searchParams.get("sort") || "updated";
   const total = works.length;
   const page = works.slice(offset, offset + limit).map((work) => publicWork(work));
+  prewarmRemoteImagesForWorks(page);
   return { ...extra, count: page.length, total, limit, offset, sort, works: page };
 }
 
@@ -3387,6 +5972,28 @@ async function routeApi(req, res, url) {
     return true;
   }
 
+  if (await routeGalleryApi(req, res, url, {
+    cleanupImageReaderCache,
+    galleryMediaById,
+    imageLibraryItemsPayload,
+    imageLibraryPayload,
+    imageLibrarySummaryPayload,
+    imageReaderCacheStatus,
+    mangaCacheById,
+    mangaCacheDirs,
+    mangaRootStatus,
+    notFound,
+    photoSetById,
+    publicAppConfig,
+    publicGalleryMediaDetail,
+    publicMangaChapter,
+    publicMangaDetail,
+    publicMangaSummary,
+    publicPhotoSetDetail,
+    requireLocalAdmin,
+    sendJson
+  })) return true;
+
   if (url.pathname === "/api/rescan" && req.method === "POST") {
     refreshLibrary();
     sendJson(res, lastScanError ? 500 : 200, {
@@ -3402,213 +6009,62 @@ async function routeApi(req, res, url) {
     return true;
   }
 
-  if (url.pathname === "/api/admin/tasks" && req.method === "GET") {
-    if (!requireLocalAdmin(req, res)) return true;
-    sendJson(res, 200, { tasks: adminTasks.map(publicAdminTask) });
-    return true;
-  }
+  if (await routeToolsApi(req, res, url, {
+    createTxtFormatDownload,
+    readJsonBody,
+    sendJson,
+    serveTxtToolDownload,
+    txtToolMaxBodyBytes: TXT_TOOL_MAX_BODY_BYTES
+  })) return true;
 
-  if (url.pathname === "/api/admin/config" && req.method === "GET") {
-    if (!requireLocalAdmin(req, res)) return true;
-    sendJson(res, 200, { config: publicAppConfig() });
-    return true;
-  }
-
-  if (url.pathname === "/api/admin/config" && req.method === "PUT") {
-    if (!requireLocalAdmin(req, res)) return true;
-    const body = await readJsonBody(req);
-    appConfig = normalizeAppConfig(body.config || body);
-    saveAppConfig();
-    sendJson(res, 200, { ok: true, config: publicAppConfig() });
-    return true;
-  }
-
-  if (url.pathname === "/api/admin/import-actor-avatars" && req.method === "POST") {
-    if (!requireLocalAdmin(req, res)) return true;
-    const body = await readJsonBody(req);
-    const nextConfig = normalizeAppConfig({
-      ...appConfig,
-      actorAvatarDataPath: body.rootPath ?? body.actorAvatarDataPath ?? appConfig.actorAvatarDataPath
-    });
-    appConfig = nextConfig;
-    saveAppConfig();
-
-    try {
-      const summary = importActorAvatarsFromFiletree(appConfig.actorAvatarDataPath, { replace: Boolean(body.replace) });
-      sendJson(res, 200, { ok: true, config: publicAppConfig(), summary });
-    } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "扫描演员头像失败", config: publicAppConfig() });
-    }
-    return true;
-  }
-
-  if (url.pathname === "/api/admin/actor-avatar-candidates" && req.method === "POST") {
-    if (!requireLocalAdmin(req, res)) return true;
-    const body = await readJsonBody(req);
-    appConfig = normalizeAppConfig({
-      ...appConfig,
-      actorAvatarDataPath: body.rootPath ?? body.actorAvatarDataPath ?? appConfig.actorAvatarDataPath
-    });
-    saveAppConfig();
-    try {
-      const summary = actorAvatarCandidatesFromFiletree(appConfig.actorAvatarDataPath, {
-        personId: body.personId,
-        limit: clampInteger(body.limit, 24, 1, 200)
-      });
-      sendJson(res, 200, { ok: true, config: publicAppConfig(), summary });
-    } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "读取演员头像候选失败", config: publicAppConfig() });
-    }
-    return true;
-  }
-
-  if (url.pathname === "/api/admin/apply-actor-avatar-candidate" && req.method === "POST") {
-    if (!requireLocalAdmin(req, res)) return true;
-    const body = await readJsonBody(req);
-    appConfig = normalizeAppConfig({
-      ...appConfig,
-      actorAvatarDataPath: body.rootPath ?? body.actorAvatarDataPath ?? appConfig.actorAvatarDataPath
-    });
-    saveAppConfig();
-    try {
-      const result = importActorAvatarCandidate(appConfig.actorAvatarDataPath, body.personId, body.relPath, { dryRun: Boolean(body.dryRun) });
-      sendJson(res, 200, { ok: true, config: publicAppConfig(), ...result });
-    } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "应用演员头像候选失败", config: publicAppConfig() });
-    }
-    return true;
-  }
-
-  if (url.pathname === "/api/admin/rescan-person" && req.method === "POST") {
-    if (!requireLocalAdmin(req, res)) return true;
-    const body = await readJsonBody(req);
-    const person = library.peopleById.get(body.personId);
-    if (!person) {
-      sendJson(res, 404, { error: "人物不存在" });
-      return true;
-    }
-
-    try {
-      const nextPerson = refreshPersonLibrary(person.id);
-      const works = sortWorkList(
-        nextPerson.works
-          .map((workId) => library.worksById.get(workId))
-          .filter(Boolean),
-        url.searchParams.get("sort") || "title"
-      );
-      sendJson(res, 200, {
-        ok: true,
-        person: publicPerson(nextPerson),
-        ...pagedWorksPayload(works, url, {})
-      });
-    } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "刷新人物失败" });
-    }
-    return true;
-  }
-
-  if (url.pathname === "/api/admin/refresh-actor-movies" && req.method === "POST") {
-    if (!requireLocalAdmin(req, res)) return true;
-    const body = await readJsonBody(req);
-    const person = library.peopleById.get(body.personId);
-    if (!person) {
-      sendJson(res, 404, { error: "人物不存在" });
-      return true;
-    }
-
-    const profile = actorProfileRow(person.id);
-    if (!profile?.javdb_url) {
-      sendJson(res, 400, { error: "这个人物还没有配置 JavDB actor 页" });
-      return true;
-    }
-
-    const sleep = clampInteger(body.sleep, 2, 0, 60);
-    const args = [
-      "-u",
-      path.join("tools", "backfill_javdb_actor_page.py"),
-      "--write",
-      "--all-sources",
-      "--person-id",
-      person.id,
-      "--actor-movies-only",
-      "--fast",
-      "--sleep",
-      String(sleep),
-      "--jitter",
-      "0"
-    ];
-    const task = startAdminProcessTask({
-      type: "actor-movies",
-      label: "刷新缺失检测",
-      person,
-      command: "python",
-      args,
-      onDone: () => {
-        actorMovieCache = null;
-        localWorkCodeKeyCache = null;
-        localWorkByCodeKeyCache = null;
-        clearSearchSourceCaches();
-      }
-    });
-    sendJson(res, 202, { ok: true, task: publicAdminTask(task) });
-    return true;
-  }
-
-  if (url.pathname === "/api/admin/refresh-rankings" && req.method === "POST") {
-    if (!requireLocalAdmin(req, res)) return true;
-    const body = await readJsonBody(req);
-    const rawKeys = Array.isArray(body.keys) ? body.keys : [body.key || "y2025"];
-    const keys = rawKeys
-      .map((item) => String(item || "").trim())
-      .filter((item, index, list) => list.indexOf(item) === index)
-      .slice(0, 12);
-    const sleep = clampInteger(body.sleep, 2, 0, 60);
-    const args = ["-u", path.join("tools", "cache_javdb_rankings.py"), "--write", "--fast", "--sleep", String(sleep), "--jitter", "0.5"];
-    for (const key of keys.length ? keys : ["y2025"]) {
-      args.push("--list", key || "all");
-    }
-    const task = startAdminProcessTask({
-      type: "rankings",
-      label: "刷新排行榜缓存",
-      person: null,
-      command: "python",
-      args,
-      onDone: () => {
-        localWorkCodeKeyCache = null;
-        localWorkByCodeKeyCache = null;
-        clearSearchSourceCaches();
-      }
-    });
-    sendJson(res, 202, { ok: true, task: publicAdminTask(task) });
-    return true;
-  }
-
-  if (url.pathname === "/api/admin/cover-cache-status" && req.method === "GET") {
-    if (!requireLocalAdmin(req, res)) return true;
-    const sampleLimit = clampInteger(url.searchParams.get("limit"), 8, 0, 50);
-    sendJson(res, 200, coverGenerationStatus(sampleLimit));
-    return true;
-  }
-
-  if (url.pathname === "/api/admin/generate-missing-covers" && req.method === "POST") {
-    if (!requireLocalAdmin(req, res)) return true;
-    const body = await readJsonBody(req);
-    const limit = clampInteger(body.limit, 20, 1, 200);
-    const args = [path.join("tools", "generate_missing_covers.mjs"), "--write", "--limit", String(limit)];
-    const task = startAdminProcessTask({
-      type: "covers",
-      label: `批量补封面 ${limit}`,
-      person: null,
-      command: process.execPath,
-      args,
-      onDone: () => {
-        workInfoCache = null;
-        clearSearchSourceCaches();
-      }
-    });
-    sendJson(res, 202, { ok: true, task: publicAdminTask(task) });
-    return true;
-  }
+  if (await routeAdminApi(req, res, url, {
+    actorAvatarCandidatesFromFiletree,
+    actorProfileRow,
+    adminScriptById,
+    adminScriptCategories,
+    adminTaskHistoryLimit: ADMIN_TASK_HISTORY_LIMIT,
+    adminTaskSummary,
+    adminTasks,
+    buildAdminScriptCommand,
+    clearSearchSourceCaches,
+    clampInteger,
+    coverGenerationStatus,
+    getAppConfig: () => appConfig,
+    importActorAvatarCandidate,
+    importActorAvatarsFromFiletree,
+    invalidateTableStamp,
+    library,
+    normalizeAdminScriptOptions,
+    normalizeAppConfig,
+    publicAdminScript,
+    publicAdminTask,
+    publicAppConfig,
+    publicPerson,
+    pagedWorksPayload,
+    readJsonBody,
+    refreshPersonLibrary,
+    requireLocalAdmin,
+    scriptDefinitions: ADMIN_SCRIPT_DEFINITIONS,
+    sendJson,
+    setActorMovieCache: (value) => {
+      actorMovieCache = value;
+    },
+    setAppConfig: (value) => {
+      appConfig = value;
+      saveAppConfig();
+      return appConfig;
+    },
+    setLocalWorkCachesDirty: () => {
+      localWorkCodeKeyCache = null;
+      localWorkByCodeKeyCache = null;
+    },
+    setWorkInfoCache: (value) => {
+      workInfoCache = value;
+    },
+    sortWorkList,
+    startAdminProcessTask,
+    stopAdminTask
+  })) return true;
 
   if (url.pathname === "/api/open-folder" && req.method === "POST") {
     const access = requestAccess(req);
@@ -3890,7 +6346,9 @@ async function routeApi(req, res, url) {
     }
 
     const person = library.peopleById.get(work.personId);
-    sendJson(res, 200, { work: publicWork(work, true), person: person ? publicPerson(person) : null });
+    const publicItem = publicWork(work, true);
+    prewarmRemoteImagesForWorks([publicItem], 100);
+    sendJson(res, 200, { work: publicItem, person: person ? publicPerson(person) : null });
     return true;
   }
 
@@ -3909,7 +6367,12 @@ async function routeApi(req, res, url) {
   return false;
 }
 
-function routeMedia(req, res, url) {
+async function routeMedia(req, res, url) {
+  if (url.pathname === "/media/remote-image" && req.method === "GET") {
+    await serveCachedRemoteImage(req, res, url);
+    return true;
+  }
+
   const actorAvatarMatch = /^\/media\/actor\/([^/]+)\/avatar$/.exec(url.pathname);
   if (actorAvatarMatch && req.method === "GET") {
     serveActorAvatar(res, decodeURIComponent(actorAvatarMatch[1]));
@@ -3919,6 +6382,30 @@ function routeMedia(req, res, url) {
   const workCoverMatch = /^\/media\/work\/([^/]+)\/cover$/.exec(url.pathname);
   if (workCoverMatch && req.method === "GET") {
     serveWorkCover(res, decodeURIComponent(workCoverMatch[1]));
+    return true;
+  }
+
+  const photoSetCoverMatch = /^\/media\/gallery-cover\/([^/]+)$/.exec(url.pathname);
+  if (photoSetCoverMatch && req.method === "GET") {
+    servePhotoSetCover(res, decodeURIComponent(photoSetCoverMatch[1]));
+    return true;
+  }
+
+  const mangaImageMatch = /^\/media\/manga\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+  if (mangaImageMatch && req.method === "GET") {
+    serveMangaImage(res, mangaImageMatch[1], mangaImageMatch[2], mangaImageMatch[3]);
+    return true;
+  }
+
+  const photoSetImageMatch = /^\/media\/gallery\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+  if (photoSetImageMatch && req.method === "GET") {
+    servePhotoSetImage(res, photoSetImageMatch[1], photoSetImageMatch[2]);
+    return true;
+  }
+
+  const galleryVideoMatch = /^\/media\/gallery-video\/([^/]+)$/.exec(url.pathname);
+  if (galleryVideoMatch && req.method === "GET") {
+    serveGalleryVideo(req, res, galleryVideoMatch[1]);
     return true;
   }
 
@@ -3962,10 +6449,11 @@ function routeMedia(req, res, url) {
 }
 
 async function requestHandler(req, res) {
+  const startedAt = Date.now();
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Accept,Range");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Accept,Range,X-FanHao-Client");
   res.setHeader("Access-Control-Expose-Headers", "Content-Length,Content-Range,Accept-Ranges");
 
   if (req.method === "OPTIONS") {
@@ -3974,9 +6462,19 @@ async function requestHandler(req, res) {
     return;
   }
 
+  const authState = requestAuthState(req, url);
+  applyAppCookie(res, authState);
+  attachAccessLogger(req, res, url, authState, startedAt);
+
   try {
+    if (await routeAuth(req, res, url, authState)) return;
+    if (!authState.allowed) {
+      sendLoginRequired(req, res, url, authState);
+      return;
+    }
+
     if (await routeApi(req, res, url)) return;
-    if (routeMedia(req, res, url)) return;
+    if (await routeMedia(req, res, url)) return;
 
     if (req.method !== "GET" && req.method !== "HEAD") {
       sendText(res, 405, "Method not allowed");
@@ -4004,6 +6502,8 @@ function getLanAddresses() {
 
 loadUserState();
 loadAppConfig();
+cleanupToolDownloadDir();
+startImageReaderCacheCleanupTimer();
 const cachedLibrary = loadLibraryCache();
 if (cachedLibrary) {
   library = cachedLibrary;

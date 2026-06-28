@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
+import requests
 from bs4 import BeautifulSoup
 from selenium.common.exceptions import TimeoutException
 
@@ -23,6 +24,7 @@ from backfill_javdb_metadata import (  # noqa: E402
     JavDbClient,
     blocked_reason,
 )
+from remote_image_cache import cache_remote_images, ensure_remote_image_schema  # noqa: E402
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -89,10 +91,11 @@ def main() -> None:
 
     runtime_profile = prepare_runtime_profile(args)
     client = JavDbClient(args)
-    stats = {"ok": 0, "error": 0, "blocked": 0, "written": 0}
+    stats = {"ok": 0, "error": 0, "blocked": 0, "written": 0, "images_cached": 0, "images_skipped": 0, "images_failed": 0}
     try:
         with sqlite3.connect(args.db, timeout=30) as conn:
             ensure_schema(conn)
+            ensure_remote_image_schema(conn)
             prepared_pages = {}
             if args.discover_lists:
                 try:
@@ -121,6 +124,16 @@ def main() -> None:
                     )
                     if args.write:
                         saved = save_rankings(conn, "top", canonical_list_key(list_key), entries)
+                        if not args.no_cache_images:
+                            image_stats = cache_remote_images(
+                                conn,
+                                [entry.image_url for entry in entries],
+                                session=image_session(client),
+                                referer=current_url,
+                            )
+                            stats["images_cached"] += image_stats["cached"]
+                            stats["images_skipped"] += image_stats["skipped"]
+                            stats["images_failed"] += image_stats["failed"]
                         conn.commit()
                         stats["written"] += saved
                     else:
@@ -135,10 +148,14 @@ def main() -> None:
                             "count": len(entries),
                             "pages": page_count,
                             "written": saved,
+                            "imagesCached": image_stats["cached"] if args.write and not args.no_cache_images else 0,
+                            "imagesSkipped": image_stats["skipped"] if args.write and not args.no_cache_images else 0,
+                            "imagesFailed": image_stats["failed"] if args.write and not args.no_cache_images else 0,
                         },
                     )
                     print(
-                        f"[{index}/{len(list_keys)}] OK {ranking_label(list_key)} pages={page_count} entries={len(entries)} written={saved}",
+                        f"[{index}/{len(list_keys)}] OK {ranking_label(list_key)} pages={page_count} entries={len(entries)} "
+                        f"written={saved} images={stats_text(image_stats) if args.write and not args.no_cache_images else '-'}",
                         flush=True,
                     )
                 except AccessBlockedError as error:
@@ -179,6 +196,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search-wait-seconds", type=int, default=25)
     parser.add_argument("--detail-wait-seconds", type=int, default=35)
     parser.add_argument("--target-count", type=int, default=250, help="每个 TOP 榜单期望抓到的条数；数量稳定后会提前结束。")
+    parser.add_argument("--no-cache-images", action="store_true", help="只写榜单 URL，不下载封面到 remote_image_cache。")
     parser.add_argument("--log", type=Path, default=None)
     return parser.parse_args()
 
@@ -680,6 +698,17 @@ def save_rankings(conn: sqlite3.Connection, list_type: str, list_key: str, entri
         )
         saved += 1
     return saved
+
+
+def image_session(client: JavDbClient) -> requests.Session:
+    session = requests.Session()
+    session.cookies = client.browser_cookies()
+    session.headers.update({"User-Agent": client.user_agent()})
+    return session
+
+
+def stats_text(stats: dict) -> str:
+    return f"{stats.get('cached', 0)} cached, {stats.get('skipped', 0)} skipped, {stats.get('failed', 0)} failed"
 
 
 def pause(args: argparse.Namespace) -> None:

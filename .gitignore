@@ -14,8 +14,13 @@ __pycache__/
 *.sqlite-wal
 *.log
 data/app-config.json
+data/admin-tasks.json
+data/auth-secret.txt
 data/library-index.json
+data/image-library-index.json
+data/image-reader-cache/
 data/user-state.json
+data/remote-image-cache/
 data/actor-profile-batch-*.jsonl
 data/*.sqlite
 data/javdb-actor-page-backfill-*.jsonl

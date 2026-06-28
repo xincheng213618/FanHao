@@ -1,3 +1,14 @@
+import { createApiClient, addQueryParam } from "./js/api.js";
+import { createAdminModal } from "./js/pages/admin-modal.js";
+import { createGalleryPage } from "./js/pages/gallery-page.js";
+import { createGalleryRenderer } from "./js/pages/gallery-renderer.js";
+import { createPeoplePage } from "./js/pages/people-page.js";
+import { createPersonProfile } from "./js/pages/person-profile.js";
+import { createRankingPage } from "./js/pages/ranking-page.js";
+import { createToolsPage } from "./js/pages/tools-page.js";
+import { createWorkDetailPage } from "./js/pages/work-detail-page.js";
+import { URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js";
+
 const state = {
   library: null,
   people: [],
@@ -54,11 +65,49 @@ const state = {
   lastFocusedElement: null,
   adminPollTimer: null,
   handledAdminTaskIds: new Set(),
+  adminTasks: [],
+  adminScripts: [],
+  adminScriptCategories: [],
+  selectedAdminScriptId: "",
+  adminScriptCategory: "all",
+  txtTool: {
+    fileName: "",
+    fileSize: 0,
+    fileBase64: "",
+    text: "",
+    indent: readStoredFlag("fanhao.txtTool.indent", true),
+    cleanJunk: readStoredFlag("fanhao.txtTool.cleanJunk", true),
+    processing: false,
+    result: null,
+    status: ""
+  },
+  gallery: {
+    mode: "photo",
+    photoView: "albums",
+    photoCollection: null,
+    query: "",
+    category: "all",
+    subCategory: "all",
+    person: "all",
+    visibleLimit: 80,
+    loading: false,
+    data: null,
+    cache: null,
+    comic: null,
+    chapter: null,
+    album: null,
+    media: null,
+    fitWidth: readStoredFlag("fanhao.gallery.fitWidth", true),
+    status: ""
+  },
   routeReady: false,
   restoringRoute: false
 };
 
 const els = {
+  productTabs: [...document.querySelectorAll("[data-product-view]")],
+  topRescanButton: document.querySelector("#topRescanButton"),
+  topAdminLink: document.querySelector("#topAdminLink"),
   librarySummary: document.querySelector("#librarySummary"),
   rescanButton: document.querySelector("#rescanButton"),
   adminButton: document.querySelector("#adminButton"),
@@ -107,19 +156,208 @@ const els = {
   adminCompilationSection: document.querySelector("#adminCompilationSection"),
   adminConfigStatus: document.querySelector("#adminConfigStatus"),
   adminStatus: document.querySelector("#adminStatus"),
-  adminTaskList: document.querySelector("#adminTaskList")
+  adminTaskList: document.querySelector("#adminTaskList"),
+  adminScriptCount: document.querySelector("#adminScriptCount"),
+  adminRunningCount: document.querySelector("#adminRunningCount"),
+  adminDoneCount: document.querySelector("#adminDoneCount"),
+  adminErrorCount: document.querySelector("#adminErrorCount"),
+  adminScriptCategory: document.querySelector("#adminScriptCategory"),
+  adminRefreshScripts: document.querySelector("#adminRefreshScripts"),
+  adminScriptList: document.querySelector("#adminScriptList"),
+  adminScriptForm: document.querySelector("#adminScriptForm"),
+  adminSelectedScriptCategory: document.querySelector("#adminSelectedScriptCategory"),
+  adminSelectedScriptTitle: document.querySelector("#adminSelectedScriptTitle"),
+  adminSelectedScriptRuntime: document.querySelector("#adminSelectedScriptRuntime"),
+  adminSelectedScriptDescription: document.querySelector("#adminSelectedScriptDescription"),
+  adminScriptFields: document.querySelector("#adminScriptFields"),
+  adminRunScript: document.querySelector("#adminRunScript"),
+  adminScriptStatus: document.querySelector("#adminScriptStatus")
 };
 
 const formatter = new Intl.NumberFormat("zh-CN");
-let peopleIndexLoadObserver = null;
+let workRenderTimer = null;
+let workRenderSeq = 0;
+let coverLoadQueue = [];
+let coverLoadTimer = null;
+let coverLoadObserver = null;
+const WORK_RENDER_INITIAL_COUNT = 96;
+const WORK_RENDER_BATCH_SIZE = 96;
+const WORK_RENDER_BATCH_DELAY = 16;
+const COVER_LOAD_BATCH_SIZE = 16;
+const COVER_LOAD_BATCH_DELAY = 45;
+const COVER_EAGER_COUNT = 48;
+const COVER_HIGH_PRIORITY_COUNT = 24;
+const COVER_OBSERVER_ROOT_MARGIN = "900px 0px";
+const COVER_RETRY_DELAYS = [700, 1400, 2400, 4000, 6500, 9000];
 const initialParams = new URLSearchParams(window.location.search);
 const isAndroidClient = initialParams.get("client") === "android";
-const URL_VIEW_NAMES = new Set(["people", "favorites", "history", "rankings"]);
+const api = createApiClient({ isAndroidClient });
+const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
 const HISTORY_RANGE_OPTIONS = [
   { value: "30", label: "30 天" },
   { value: "7", label: "7 天" },
   { value: "all", label: "全部" }
 ];
+const peoplePage = createPeoplePage({
+  api,
+  appendEmpty,
+  cancelScheduledWorkRendering,
+  clearWorkFilter,
+  clearWorkSearch,
+  closeDrawer,
+  coverUrl,
+  createInfoChip,
+  currentPageScrollTop,
+  displayPersonName,
+  els,
+  formatLibraryPaths,
+  formatNumber,
+  hidePersonProfile,
+  includesText,
+  personSearchText,
+  renderPersonProfile,
+  renderPersonWorkStats,
+  renderWorks,
+  resetProgressiveCoverLoading,
+  resetWorkPaging,
+  restorePageScrollTop,
+  setMainHeader,
+  state,
+  syncNavigationState,
+  syncRouteAfterNavigation
+});
+const personProfilePage = createPersonProfile({
+  api,
+  coverUrl,
+  els,
+  formatLibraryPath,
+  formatLibraryPaths,
+  formatNumber,
+  linesFromTextarea,
+  normalizeSourcePath,
+  renderPeople,
+  selectPerson,
+  sourcePriority,
+  state
+});
+const adminModal = createAdminModal({
+  api,
+  displayPersonName,
+  els,
+  formatBytes,
+  formatDateTime,
+  formatNumber,
+  linesFromTextarea,
+  loadFavorites,
+  loadHistory,
+  loadLibrary,
+  loadRankings,
+  normalizeUiConfig,
+  personWorkPageSize,
+  renderMeta,
+  renderPeopleIndex,
+  renderPeopleIndexStats,
+  renderPlayer,
+  renderWorks,
+  resetWorkPaging,
+  selectPerson,
+  state,
+  updateWorkSnapshot
+});
+const toolsPage = createToolsPage({
+  api,
+  cancelScheduledWorkRendering,
+  disconnectPeopleIndexAutoload,
+  els,
+  formatBytes,
+  formatDateTime,
+  formatNumber,
+  resetProgressiveCoverLoading,
+  state,
+  toastInline,
+  txtToolMaxFileBytes: TXT_TOOL_MAX_FILE_BYTES,
+  writeStoredFlag
+});
+const galleryPage = createGalleryPage({
+  api,
+  clearPersonSelection: () => {
+    state.selectedPersonId = null;
+    state.selectedPerson = null;
+    state.works = [];
+    state.personWorksTotal = 0;
+    state.personWorksFacets = null;
+  },
+  els,
+  formatDateTime,
+  galleryModeLabel,
+  hidePersonProfile,
+  normalizeUiConfig,
+  pushRoute,
+  renderGalleryStats,
+  renderGalleryView,
+  replaceRoute,
+  setMainHeader,
+  state,
+  syncRouteAfterNavigation
+});
+const galleryRenderer = createGalleryRenderer({
+  api,
+  cancelScheduledWorkRendering,
+  disconnectPeopleIndexAutoload,
+  els,
+  formatBytes,
+  formatDateTime,
+  formatNumber,
+  getGalleryPage: () => galleryPage,
+  includesText,
+  normalizeUiConfig,
+  resetProgressiveCoverLoading,
+  setAdminBusy: adminModal.setBusy,
+  state,
+  writeStoredFlag
+});
+const rankingPage = createRankingPage({
+  adminRefreshRankings: adminModal.refreshRankings,
+  api,
+  clearPersonSelection: () => {
+    state.selectedPersonId = null;
+    state.selectedPerson = null;
+    state.personWorksTotal = 0;
+    state.personWorksFacets = null;
+  },
+  clearWorkFilter,
+  els,
+  formatDate,
+  formatNumber,
+  hidePersonProfile,
+  renderEmpty,
+  renderWorks,
+  resetWorkPaging,
+  setMainHeader,
+  state,
+  syncRouteAfterNavigation,
+  visibleWorks
+});
+const workDetailPage = createWorkDetailPage({
+  addQueryParam,
+  api,
+  coverRetryDelays: COVER_RETRY_DELAYS,
+  els,
+  formatBytes,
+  formatLibraryPath,
+  formatTime,
+  goToPerson,
+  openWorkCard,
+  renderFavoriteFolderControls,
+  renderStatsForWorks,
+  renderSummary,
+  renderWorks,
+  retryCoverUrl,
+  state,
+  syncRouteAfterNavigation,
+  workCoverUrl,
+  workPersonDisplayName
+});
 document.documentElement.classList.toggle("android-client", isAndroidClient);
 
 function readStoredFlag(key, fallback = false) {
@@ -141,7 +379,8 @@ function defaultUiConfig() {
   return {
     compilationPrefixes: ["OFJE", "THN", "THU"],
     compilationKeywords: ["合集", "総集編", "総集", "コンプリート", "全タイトル", "ベスト盤"],
-    actorAvatarDataPath: ""
+    actorAvatarDataPath: "",
+    imageReaderCacheMaxBytes: 2 * 1024 * 1024 * 1024
   };
 }
 
@@ -177,8 +416,16 @@ function normalizeUiConfig(config = {}) {
   return {
     compilationPrefixes: prefixes.length ? prefixes : fallback.compilationPrefixes,
     compilationKeywords: keywords.length ? keywords : fallback.compilationKeywords,
-    actorAvatarDataPath: String(input.actorAvatarDataPath || "").trim()
+    actorAvatarDataPath: String(input.actorAvatarDataPath || "").trim(),
+    imageReaderCacheMaxBytes: normalizeCacheBytes(input.imageReaderCacheMaxBytes, fallback.imageReaderCacheMaxBytes)
   };
+}
+
+function normalizeCacheBytes(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed <= 0) return 0;
+  return Math.max(128 * 1024 * 1024, Math.min(200 * 1024 * 1024 * 1024, Math.floor(parsed)));
 }
 
 function linesFromTextarea(value) {
@@ -202,24 +449,20 @@ function restorePageScrollTop(top) {
   });
 }
 
-function routeFromUrl(url = window.location.href) {
-  const parsed = new URL(url, window.location.href);
-  const params = parsed.searchParams;
-  const query = params.get("q") || params.get("search") || "";
-  const rawView = params.get("view");
-  return {
-    view: query ? "search" : URL_VIEW_NAMES.has(rawView) ? rawView : "people",
-    personId: params.get("personId") || params.get("person") || "",
-    q: query,
-    workId: params.get("workId") || params.get("work") || "",
-    videoId: params.get("videoId") || params.get("video") || ""
-  };
-}
-
 function currentRouteSnapshot(overrides = {}) {
   const drawerOpen = els.detailDrawer?.classList.contains("open");
   const route = {
     view: state.activeView || "people",
+    galleryMode: state.activeView === "gallery" ? state.gallery.mode || "photo" : "",
+    galleryPhotoView: state.activeView === "gallery" ? state.gallery.photoView || "albums" : "",
+    galleryPhotoCollection: state.activeView === "gallery" ? state.gallery.photoCollection || "" : "",
+    galleryAlbumId: state.activeView === "gallery" ? state.gallery.album?.id || "" : "",
+    galleryComicId: state.activeView === "gallery" ? state.gallery.comic?.id || "" : "",
+    galleryChapterIndex: state.activeView === "gallery" ? state.gallery.chapter?.index || "" : "",
+    galleryMediaId: state.activeView === "gallery" ? state.gallery.media?.id || "" : "",
+    galleryQuery: state.activeView === "gallery" ? state.gallery.query || "" : "",
+    galleryCategory: state.activeView === "gallery" ? state.gallery.category || "all" : "all",
+    galleryPerson: state.activeView === "gallery" ? state.gallery.person || "all" : "all",
     personId: state.activeView === "people" ? state.selectedPersonId || "" : "",
     q: state.activeView === "search" ? state.searchQuery || state.workQuery || "" : "",
     workId: drawerOpen ? state.currentWork?.id || "" : "",
@@ -228,38 +471,10 @@ function currentRouteSnapshot(overrides = {}) {
   return normalizeRoute({ ...route, ...overrides });
 }
 
-function normalizeRoute(route = {}) {
-  const view = route.q ? "search" : URL_VIEW_NAMES.has(route.view) ? route.view : "people";
-  return {
-    view,
-    personId: view === "people" ? route.personId || "" : "",
-    q: view === "search" ? String(route.q || "").trim() : "",
-    workId: route.workId || "",
-    videoId: route.videoId || ""
-  };
-}
-
-function routeUrl(route) {
-  const next = normalizeRoute(route);
-  const params = new URLSearchParams();
-  for (const key of ["client", "returnTo"]) {
-    const value = initialParams.get(key);
-    if (value) params.set(key, value);
-  }
-  if (next.view && next.view !== "people" && next.view !== "search") params.set("view", next.view);
-  if (next.personId) params.set("personId", next.personId);
-  if (next.q) params.set("q", next.q);
-  if (next.workId) params.set("workId", next.workId);
-  if (next.videoId) params.set("videoId", next.videoId);
-
-  const query = params.toString();
-  return `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash || ""}`;
-}
-
 function writeRoute(route, mode = "push") {
   if (!state.routeReady || state.restoringRoute || !window.history?.pushState) return;
   const next = normalizeRoute(route);
-  const url = routeUrl(next);
+  const url = routeUrl(next, { initialParams });
   const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash || ""}`;
   const historyState = { fanhaoRoute: true, ...next };
   if (mode === "replace" || url === currentUrl) {
@@ -293,6 +508,14 @@ function initializeRouteHistory() {
   replaceRoute();
 }
 
+function applyGalleryRouteState(route) {
+  galleryPage.applyRouteState(route);
+}
+
+async function openGalleryRouteTarget(route) {
+  await galleryPage.openRouteTarget(route);
+}
+
 async function applyRoute(route) {
   const next = normalizeRoute(route);
   state.restoringRoute = true;
@@ -312,6 +535,11 @@ async function applyRoute(route) {
       } else {
         showPeopleIndex({ restoreScroll: true, skipRoute: true });
       }
+    } else if (next.view === "gallery") {
+      clearWorkSearch();
+      applyGalleryRouteState(next);
+      setActiveView("gallery", { skipRoute: true });
+      await openGalleryRouteTarget(next);
     } else {
       clearWorkSearch();
       setActiveView(next.view, { skipRoute: true });
@@ -476,7 +704,7 @@ function coverUrl(coverId) {
 }
 
 function workCoverUrl(work) {
-  return coverUrl(work.coverId) || work.cachedCover?.coverUrl || work.remoteCoverUrl || "";
+  return coverUrl(work.coverId) || work.cachedCover?.coverUrl || work.remoteCoverUrl || work.infoSummary?.imageUrl || "";
 }
 
 function formatLibraryPath(value) {
@@ -490,54 +718,7 @@ function formatLibraryPaths(values) {
   return paths.length ? paths.join(" · ") : "G:\\ / F:\\ / O:\\ / V:\\";
 }
 
-function uniqueSourcePaths(person) {
-  const seen = new Set();
-  return [...(person.sourcePaths || []), person.relativePath]
-    .filter(Boolean)
-    .filter((sourcePath) => {
-      const key = normalizeSourcePath(sourcePath);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .sort((a, b) => sourcePriority(a) - sourcePriority(b));
-}
-
-function sourceButtonLabel(sourcePath) {
-  const normalized = normalizeSourcePath(sourcePath);
-  if (normalized === "v:/[a]" || normalized.startsWith("v:/[a]/")) return "打开 VR · V:[A]";
-  if (normalized === "v:/[a1]" || normalized.startsWith("v:/[a1]/")) return "打开 VR · V:[A1]";
-  if (normalized === "v:/av" || normalized.startsWith("v:/av/")) return "打开 VR · V:AV";
-  if (normalized.startsWith("v:/")) return "打开 VR";
-  if (normalized === "o:/[珍藏]" || normalized.startsWith("o:/[珍藏]/")) return "打开珍藏 · O:";
-  if (normalized === "o:/[珍藏1]" || normalized.startsWith("o:/[珍藏1]/")) return "打开珍藏1 · O:";
-  if (normalized.startsWith("g:/")) return "打开普通 · G:";
-  if (normalized.startsWith("f:/")) return "打开普通 · F:";
-  if (normalized.startsWith("o:/")) return "打开普通 · O:";
-  return "打开文件夹";
-}
-
-async function api(path, options = {}) {
-  const init = { ...options };
-  if (init.body && typeof init.body !== "string") {
-    init.body = JSON.stringify(init.body);
-    init.headers = { "Content-Type": "application/json", ...(init.headers || {}) };
-  }
-
-  const response = await fetch(path, init);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.error || `请求失败：${response.status}`);
-  }
-  return payload;
-}
-
-function addQueryParam(url, key, value) {
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
-}
-
-async function loadLibrary() {
+async function loadLibrary(options = {}) {
   els.librarySummary.textContent = "正在读取索引";
   const data = await api("/api/library");
   state.library = data;
@@ -545,6 +726,8 @@ async function loadLibrary() {
   state.accessHints = data.access?.hints || {};
   state.uiConfig = normalizeUiConfig(data.uiConfig || state.uiConfig);
   if (els.adminButton) els.adminButton.hidden = state.accessMode !== "local";
+  if (els.topAdminLink) els.topAdminLink.hidden = state.accessMode !== "local";
+  if (els.topRescanButton) els.topRescanButton.hidden = state.accessMode !== "local";
   if (els.missingLocalToggle) els.missingLocalToggle.checked = state.showMissingLocalWorks;
   if (els.collectionToggle) els.collectionToggle.checked = state.showCompilationWorks;
   state.workPageSize = Number(state.accessHints.workPageSize) || (state.accessMode === "lan" ? 60 : 1000);
@@ -558,7 +741,11 @@ async function loadLibrary() {
   }
 
   renderSummary();
-  setActiveView(state.activeView || "people");
+  if (options.deferMainRender) {
+    renderPeople();
+  } else {
+    setActiveView(state.activeView || "people");
+  }
 }
 
 function normalizeSourcePath(value) {
@@ -601,439 +788,32 @@ function renderSummary() {
   els.librarySummary.textContent = `${mode} · ${formatNumber(rootCount)} 盘 · ${formatNumber(totals.people)} 人 · ${formatNumber(totals.videos)} 视频 · ${formatNumber(favoriteCount)} 收藏`;
 }
 
-function openAdminModal(options = {}) {
-  if (state.accessMode !== "local") return;
-  populateAdminPeople();
-  populateAdminConfig();
-  els.adminStatus.textContent = "";
-  if (els.adminConfigStatus) els.adminConfigStatus.textContent = "";
-  els.adminBackdrop.hidden = false;
-  els.adminModal.classList.add("open");
-  els.adminModal.setAttribute("aria-hidden", "false");
-  startAdminPolling();
-  refreshCoverCacheStatus();
-  window.setTimeout(() => {
-    if (options.section === "compilation") {
-      els.adminCompilationSection?.scrollIntoView({ block: "start" });
-      els.adminCompilationPrefixes?.focus();
-      return;
-    }
-    els.adminPersonSelect?.focus();
-  }, 0);
+function productViewForActiveView(view = state.activeView) {
+  if (view === "gallery") return "gallery";
+  if (view === "tools") return "tools";
+  return "people";
 }
 
-function closeAdminModal() {
-  els.adminModal.classList.remove("open");
-  els.adminModal.setAttribute("aria-hidden", "true");
-  els.adminBackdrop.hidden = true;
-  stopAdminPolling();
+function productButtonActive(button, view = state.activeView) {
+  const productView = button.dataset.productView || "people";
+  if (productView === "gallery") {
+    return view === "gallery" && (button.dataset.galleryMode || "photo") === state.gallery.mode;
+  }
+  return productViewForActiveView(view) === productView;
 }
 
-function populateAdminPeople() {
-  if (!els.adminPersonSelect) return;
-  const selected = state.selectedPersonId || els.adminPersonSelect.value;
-  els.adminPersonSelect.innerHTML = "";
-  for (const person of state.people) {
-    const option = document.createElement("option");
-    option.value = person.id;
-    option.textContent = `${displayPersonName(person)} · ${formatNumber(person.workCount)} 部`;
-    els.adminPersonSelect.append(option);
+function syncNavigationState(view = state.activeView) {
+  for (const button of els.productTabs || []) {
+    const active = productButtonActive(button, view);
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
   }
-  if (selected && state.people.some((person) => person.id === selected)) {
-    els.adminPersonSelect.value = selected;
-  }
-}
-
-function adminPersonId() {
-  return els.adminPersonSelect?.value || state.selectedPersonId || "";
-}
-
-function populateAdminConfig() {
-  const config = normalizeUiConfig(state.uiConfig);
-  if (els.adminActorAvatarDataPath) {
-    els.adminActorAvatarDataPath.value = config.actorAvatarDataPath || "";
-  }
-  if (els.adminCompilationPrefixes) {
-    els.adminCompilationPrefixes.value = config.compilationPrefixes.join("\n");
-  }
-  if (els.adminCompilationKeywords) {
-    els.adminCompilationKeywords.value = config.compilationKeywords.join("\n");
-  }
-}
-
-function setAdminBusy(button, busy, text = "处理中") {
-  if (!button) return "";
-  const original = button.dataset.originalText || button.textContent;
-  button.dataset.originalText = original;
-  button.disabled = busy;
-  button.textContent = busy ? text : original;
-  return original;
-}
-
-async function adminRescanSelectedPerson() {
-  const personId = adminPersonId();
-  if (!personId) return;
-  setAdminBusy(els.adminRescanPerson, true, "扫描中");
-  els.adminStatus.textContent = "正在重新扫描这个人物的本地文件";
-  try {
-    await api(`/api/admin/rescan-person?limit=${personWorkPageSize()}&sort=${encodeURIComponent(state.sortMode || "title")}`, {
-      method: "POST",
-      body: { personId }
-    });
-    await loadLibrary();
-    els.adminStatus.textContent = "本地检测已刷新";
-    if (state.selectedPersonId === personId) {
-      await selectPerson(personId, { resetFilter: false });
-    }
-    populateAdminPeople();
-  } catch (error) {
-    els.adminStatus.textContent = error.message || "刷新失败";
-  } finally {
-    setAdminBusy(els.adminRescanPerson, false);
-  }
-}
-
-async function adminRefreshActorMovies() {
-  const personId = adminPersonId();
-  if (!personId) return;
-  setAdminBusy(els.adminRefreshActor, true, "启动中");
-  els.adminStatus.textContent = "正在启动缺失检测任务";
-  try {
-    const data = await api("/api/admin/refresh-actor-movies", {
-      method: "POST",
-      body: { personId, sleep: 2 }
-    });
-    els.adminStatus.textContent = `已启动：${data.task?.label || "任务"}`;
-    await refreshAdminTasks();
-    startAdminPolling();
-  } catch (error) {
-    els.adminStatus.textContent = error.message || "启动失败";
-  } finally {
-    setAdminBusy(els.adminRefreshActor, false);
-  }
-}
-
-async function adminRefreshRankings() {
-  setAdminBusy(els.adminRefreshRankings, true, "启动中");
-  els.adminStatus.textContent = "正在启动排行榜缓存任务";
-  try {
-    const data = await api("/api/admin/refresh-rankings", {
-      method: "POST",
-      body: { key: state.selectedRankingKey || "y2025", sleep: 2 }
-    });
-    els.adminStatus.textContent = `已启动：${data.task?.label || "任务"}`;
-    await refreshAdminTasks();
-    startAdminPolling();
-  } catch (error) {
-    els.adminStatus.textContent = error.message || "启动失败";
-  } finally {
-    setAdminBusy(els.adminRefreshRankings, false);
-  }
-}
-
-async function adminSaveCompilationConfig() {
-  const config = normalizeUiConfig({
-    ...state.uiConfig,
-    compilationPrefixes: linesFromTextarea(els.adminCompilationPrefixes?.value),
-    compilationKeywords: linesFromTextarea(els.adminCompilationKeywords?.value)
-  });
-  setAdminBusy(els.adminSaveCompilationConfig, true, "保存中");
-  if (els.adminConfigStatus) els.adminConfigStatus.textContent = "";
-  try {
-    await saveCompilationConfig(config);
-    populateAdminConfig();
-    if (els.adminConfigStatus) els.adminConfigStatus.textContent = "已保存";
-  } catch (error) {
-    if (els.adminConfigStatus) els.adminConfigStatus.textContent = error.message || "保存失败";
-  } finally {
-    setAdminBusy(els.adminSaveCompilationConfig, false);
-  }
-}
-
-async function adminImportActorAvatars() {
-  const rootPath = String(els.adminActorAvatarDataPath?.value || "").trim();
-  setAdminBusy(els.adminImportActorAvatars, true, "扫描中");
-  els.adminStatus.textContent = "正在扫描本地演员头像";
-  try {
-    const data = await api("/api/admin/import-actor-avatars", {
-      method: "POST",
-      body: { rootPath, replace: false }
-    });
-    state.uiConfig = normalizeUiConfig(data.config);
-    populateAdminConfig();
-    await loadLibrary();
-    const summary = data.summary || {};
-    const imported = formatNumber(summary.imported || 0);
-    const matched = formatNumber(summary.matched || 0);
-    const skipped = formatNumber(summary.skippedExisting || 0);
-    els.adminStatus.textContent = `头像扫描完成：导入 ${imported}，匹配 ${matched}，已有头像跳过 ${skipped}`;
-  } catch (error) {
-    els.adminStatus.textContent = error.message || "扫描演员头像失败";
-  } finally {
-    setAdminBusy(els.adminImportActorAvatars, false);
-  }
-}
-
-async function adminPreviewActorAvatarCandidates() {
-  const rootPath = String(els.adminActorAvatarDataPath?.value || "").trim();
-  setAdminBusy(els.adminPreviewActorAvatars, true, "读取中");
-  els.adminStatus.textContent = "正在读取头像候选";
-  if (els.adminActorAvatarCandidates) els.adminActorAvatarCandidates.innerHTML = "";
-  try {
-    const data = await api("/api/admin/actor-avatar-candidates", {
-      method: "POST",
-      body: { rootPath, limit: 40 }
-    });
-    state.uiConfig = normalizeUiConfig(data.config);
-    populateAdminConfig();
-    renderActorAvatarCandidates(data.summary || {});
-  } catch (error) {
-    els.adminStatus.textContent = error.message || "读取头像候选失败";
-  } finally {
-    setAdminBusy(els.adminPreviewActorAvatars, false);
-  }
-}
-
-function renderActorAvatarCandidates(summary = {}) {
-  if (!els.adminActorAvatarCandidates) return;
-  els.adminActorAvatarCandidates.innerHTML = "";
-  const people = summary.people || [];
-  const matched = formatNumber(summary.matched || 0);
-  const matchedPeople = formatNumber(summary.matchedPeople || 0);
-  const returnedPeople = formatNumber(summary.returnedPeople || people.length);
-  els.adminStatus.textContent = `头像候选：匹配 ${matched} 个文件，涉及 ${matchedPeople} 人，显示 ${returnedPeople} 人`;
-
-  const note = document.createElement("p");
-  note.className = "admin-avatar-note";
-  note.textContent = `可用 ${formatNumber(summary.usable || 0)}，未匹配 ${formatNumber(summary.skippedUnmatched || 0)}，重名跳过 ${formatNumber(summary.skippedAmbiguous || 0)}`;
-  els.adminActorAvatarCandidates.append(note);
-
-  if (!people.length) {
-    const empty = document.createElement("div");
-    empty.className = "admin-avatar-empty";
-    empty.textContent = "没有可选择的头像候选。";
-    els.adminActorAvatarCandidates.append(empty);
-    return;
-  }
-
-  for (const person of people) {
-    const card = document.createElement("article");
-    card.className = "admin-avatar-person";
-    const header = document.createElement("div");
-    header.className = "admin-avatar-person-header";
-    const name = document.createElement("strong");
-    name.textContent = person.displayName || person.personName || person.personId;
-    const meta = document.createElement("span");
-    meta.textContent = `${formatNumber((person.candidates || []).length)} 个候选${person.hasAvatar ? " · 已有头像" : ""}`;
-    header.append(name, meta);
-    card.append(header);
-
-    for (const candidate of (person.candidates || []).slice(0, 4)) {
-      card.append(createActorAvatarCandidateRow(person, candidate));
-    }
-
-    if ((person.candidates || []).length > 4) {
-      const more = document.createElement("div");
-      more.className = "admin-avatar-more";
-      more.textContent = `还有 ${formatNumber(person.candidates.length - 4)} 个候选未显示`;
-      card.append(more);
-    }
-    els.adminActorAvatarCandidates.append(card);
-  }
-}
-
-function createActorAvatarCandidateRow(person, candidate) {
-  const row = document.createElement("div");
-  row.className = "admin-avatar-candidate";
-  const text = document.createElement("div");
-  text.className = "admin-avatar-candidate-text";
-  const pathLine = document.createElement("span");
-  pathLine.textContent = candidate.relPath || "";
-  pathLine.title = candidate.relPath || "";
-  const metaLine = document.createElement("small");
-  metaLine.textContent = `${candidate.actorName || "未命名"} · ${formatBytes(candidate.size || 0)}`;
-  text.append(pathLine, metaLine);
-
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "folder-button compact";
-  button.textContent = "设为头像";
-  button.addEventListener("click", () => applyActorAvatarCandidate(person.personId, candidate.relPath, button));
-  row.append(text, button);
-  return row;
-}
-
-async function applyActorAvatarCandidate(personId, relPath, button) {
-  const rootPath = String(els.adminActorAvatarDataPath?.value || "").trim();
-  setAdminBusy(button, true, "写入中");
-  try {
-    const data = await api("/api/admin/apply-actor-avatar-candidate", {
-      method: "POST",
-      body: { rootPath, personId, relPath }
-    });
-    state.uiConfig = normalizeUiConfig(data.config);
-    populateAdminConfig();
-    await loadLibrary();
-    els.adminStatus.textContent = `已设置头像：${data.person?.actorProfile?.displayName || data.person?.name || personId}`;
-    await adminPreviewActorAvatarCandidates();
-  } catch (error) {
-    els.adminStatus.textContent = error.message || "设置头像失败";
-  } finally {
-    setAdminBusy(button, false);
-  }
-}
-
-async function refreshCoverCacheStatus() {
-  if (!els.adminCoverStatus || els.adminModal.getAttribute("aria-hidden") === "true") return;
-  els.adminCoverStatus.textContent = "正在统计缺封面";
-  try {
-    const data = await api("/api/admin/cover-cache-status?limit=0");
-    const candidates = Number(data.candidates || 0);
-    const ready = Number(data.ready || 0);
-    const missingVideo = Number(data.missingVideo || 0);
-    if (!candidates) {
-      els.adminCoverStatus.textContent = "当前没有需要补齐的封面";
-      return;
-    }
-    els.adminCoverStatus.textContent = `缺封面候选 ${formatNumber(candidates)}，可生成 ${formatNumber(ready)}，视频不可读 ${formatNumber(missingVideo)}`;
-  } catch (error) {
-    els.adminCoverStatus.textContent = error.message || "封面状态读取失败";
-  }
-}
-
-async function adminGenerateMissingCovers() {
-  const limit = Math.max(1, Math.min(200, Number(els.adminCoverLimit?.value || 20) || 20));
-  if (els.adminCoverLimit) els.adminCoverLimit.value = String(limit);
-  setAdminBusy(els.adminGenerateCovers, true, "启动中");
-  els.adminStatus.textContent = "正在启动缺封面补齐任务";
-  try {
-    const data = await api("/api/admin/generate-missing-covers", {
-      method: "POST",
-      body: { limit }
-    });
-    els.adminStatus.textContent = `已启动：${data.task?.label || "任务"}`;
-    if (els.adminCoverStatus) els.adminCoverStatus.textContent = "任务运行中，完成后刷新封面统计";
-    await refreshAdminTasks();
-    startAdminPolling();
-  } catch (error) {
-    els.adminStatus.textContent = error.message || "启动失败";
-  } finally {
-    setAdminBusy(els.adminGenerateCovers, false);
-  }
-}
-
-async function saveCompilationConfig(config) {
-  const data = await api("/api/admin/config", {
-    method: "PUT",
-    body: { config: normalizeUiConfig(config) }
-  });
-  state.uiConfig = normalizeUiConfig(data.config);
-  resetWorkPaging();
-  if (state.activeView === "people" && !state.selectedPersonId) {
-    renderPeopleIndexStats();
-    renderPeopleIndex();
-  } else {
-    renderWorks();
-  }
-  return state.uiConfig;
-}
-
-function openCompilationConfig() {
-  openAdminModal({ section: "compilation" });
-}
-
-function startAdminPolling() {
-  stopAdminPolling();
-  refreshAdminTasks();
-  state.adminPollTimer = window.setInterval(refreshAdminTasks, 2500);
-}
-
-function stopAdminPolling() {
-  if (state.adminPollTimer) {
-    window.clearInterval(state.adminPollTimer);
-    state.adminPollTimer = null;
-  }
-}
-
-async function refreshAdminTasks() {
-  if (!els.adminTaskList || els.adminModal.getAttribute("aria-hidden") === "true") return;
-  try {
-    const data = await api("/api/admin/tasks");
-    const tasks = data.tasks || [];
-    renderAdminTasks(tasks);
-    await handleCompletedAdminTasks(tasks);
-  } catch (error) {
-    els.adminTaskList.innerHTML = `<div class="admin-empty">${error.message || "任务读取失败"}</div>`;
-  }
-}
-
-async function handleCompletedAdminTasks(tasks) {
-  for (const task of tasks) {
-    if (task.status === "running" || state.handledAdminTaskIds.has(task.id)) continue;
-    state.handledAdminTaskIds.add(task.id);
-    if (task.status === "done" && task.type === "rankings") {
-      state.rankingLists = [];
-      if (state.activeView === "rankings") await loadRankings();
-      els.adminStatus.textContent = "排行榜缓存已刷新";
-      continue;
-    }
-    if (task.status === "done" && task.type === "covers") {
-      await refreshCurrentWorkViewAfterAdminTask();
-      await refreshCoverCacheStatus();
-      els.adminStatus.textContent = "缺封面补齐任务已完成";
-      continue;
-    }
-    if (task.status === "done" && task.personId && task.personId === state.selectedPersonId) {
-      await selectPerson(task.personId, { resetFilter: false });
-      els.adminStatus.textContent = "缺失检测已完成，当前人物已刷新";
-    }
-  }
-}
-
-async function refreshCurrentWorkViewAfterAdminTask() {
-  if (state.currentWork?.id) {
-    try {
-      const data = await api(`/api/works/${encodeURIComponent(state.currentWork.id)}`);
-      state.currentWork = data.work || state.currentWork;
-      updateWorkSnapshot(state.currentWork);
-      renderPlayer(state.currentWork, state.currentVideo?.id);
-      renderMeta(state.currentWork);
-    } catch {}
-  }
-  if (state.selectedPersonId && state.activeView === "people") {
-    await selectPerson(state.selectedPersonId, { resetFilter: false });
-    return;
-  }
-  if (state.activeView === "favorites") {
-    await loadFavorites();
-    return;
-  }
-  if (state.activeView === "history") {
-    await loadHistory();
-    return;
-  }
-  renderWorks();
-}
-
-function renderAdminTasks(tasks) {
-  els.adminTaskList.innerHTML = "";
-  if (!tasks.length) {
-    els.adminTaskList.innerHTML = `<div class="admin-empty">暂无任务</div>`;
-    return;
-  }
-
-  for (const task of tasks) {
-    const item = document.createElement("article");
-    item.className = `admin-task ${task.status}`;
-    const title = document.createElement("div");
-    title.className = "admin-task-title";
-    const targetName = task.personName || (task.type === "rankings" ? "全局" : "未指定人物");
-    title.textContent = `${task.label} · ${targetName} · ${task.status}`;
-
-    const log = document.createElement("pre");
-    log.textContent = (task.logs || []).slice(-18).join("\n");
-    item.append(title, log);
-    els.adminTaskList.append(item);
+  for (const button of els.viewTabs || []) {
+    const active = button.dataset.view === view;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
   }
 }
 
@@ -1050,12 +830,8 @@ function setActiveView(view, options = {}) {
     state.searchFacets = null;
     state.searchTotal = 0;
   }
-  els.viewTabs.forEach((button) => {
-    const active = button.dataset.view === view;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
-  });
-  renderPeople();
+  syncNavigationState(view);
+  updateActivePersonButton();
 
   if (view === "favorites") {
     loadFavorites();
@@ -1070,10 +846,25 @@ function setActiveView(view, options = {}) {
   }
 
   if (view === "rankings") {
-    clearWorkFilter();
-    state.sortMode = "ranking";
-    els.sortSelect.value = "ranking";
-    loadRankings();
+    rankingPage.enter(options);
+    return;
+  }
+
+  if (view === "gallery") {
+    galleryPage.enter(options);
+    return;
+  }
+
+  if (view === "tools") {
+    state.selectedPersonId = null;
+    state.selectedPerson = null;
+    state.works = [];
+    state.personWorksTotal = 0;
+    state.personWorksFacets = null;
+    hidePersonProfile();
+    setMainHeader("小工具", "TXT 文档处理");
+    toolsPage.renderStats();
+    toolsPage.renderView();
     syncRouteAfterNavigation(options);
     return;
   }
@@ -1082,268 +873,46 @@ function setActiveView(view, options = {}) {
   syncRouteAfterNavigation(options);
 }
 
-function filteredPeople() {
-  return state.people.filter((person) => includesText(personSearchText(person), state.personQuery));
+function renderPeople() {
+  peoplePage.renderPeople();
 }
 
-function renderPeople() {
-  const filtered = filteredPeople();
-  els.personList.innerHTML = "";
-
-  if (!filtered.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = "没有匹配的人物";
-    els.personList.append(empty);
-    return;
-  }
-
-  const fragment = document.createDocumentFragment();
-  for (const person of filtered) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `person-button${person.id === state.selectedPersonId && state.activeView === "people" ? " active" : ""}`;
-    button.addEventListener("click", () => {
-      clearWorkSearch();
-      state.activeView = "people";
-      selectPerson(person.id);
-    });
-
-    const name = document.createElement("span");
-    name.className = "person-name";
-    name.textContent = displayPersonName(person);
-
-    const count = document.createElement("span");
-    count.className = "person-count";
-    count.textContent =
-      person.sourceCount > 1 ? `${formatNumber(person.workCount)} 部 · ${person.sourceCount} 处` : `${formatNumber(person.workCount)} 部`;
-
-    button.append(name, count);
-    fragment.append(button);
-  }
-  els.personList.append(fragment);
+function updateActivePersonButton() {
+  peoplePage.updateActivePersonButton();
 }
 
 function showPeopleIndex(options = {}) {
-  state.activeView = "people";
-  state.selectedPersonId = null;
-  state.selectedPerson = null;
-  state.searchPeople = [];
-  state.works = [];
-  state.personWorksTotal = 0;
-  state.personWorksFacets = null;
-  renderPeople();
-  els.viewTabs.forEach((button) => {
-    const active = button.dataset.view === "people";
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
-  });
-  hidePersonProfile();
-  setMainHeader("人物索引", "按人物浏览全部资料库");
-  renderPeopleIndexStats();
-  renderPeopleIndex();
-  if (options.restoreScroll !== false) {
-    restorePageScrollTop(state.peopleIndexScrollTop);
-  }
-  syncRouteAfterNavigation({
-    ...options,
-    routeOverrides: { view: "people", personId: "", q: "", workId: "", videoId: "" }
-  });
+  peoplePage.showIndex(options);
 }
 
 function renderPeopleIndexStats() {
-  const people = filteredPeople();
-  const stats = [
-    ["人物", people.length],
-    ["有头像", people.filter((person) => actorAvatarUrl(person)).length],
-    ["作品", people.reduce((sum, person) => sum + (person.workCount || 0), 0)],
-    ["多来源", people.filter((person) => (person.sourceCount || 0) > 1).length]
-  ];
-
-  els.statsRow.innerHTML = "";
-  for (const [label, value] of stats) {
-    const stat = document.createElement("div");
-    stat.className = "stat";
-    stat.innerHTML = `<strong>${formatNumber(value)}</strong><span>${label}</span>`;
-    els.statsRow.append(stat);
-  }
+  peoplePage.renderIndexStats();
 }
 
 function renderPeopleIndex() {
-  disconnectPeopleIndexAutoload();
-  const people = filteredPeople();
-  els.workGrid.innerHTML = "";
-
-  if (!people.length) {
-    appendEmpty("没有匹配的人物。");
-    return;
-  }
-
-  const fragment = document.createDocumentFragment();
-  const visible = people.slice(0, state.personVisibleLimit);
-  for (const person of visible) {
-    fragment.append(createPersonIndexCard(person));
-  }
-  els.workGrid.append(fragment);
-
-  if (visible.length < people.length) {
-    appendPeopleIndexLoadMore(visible.length, people.length);
-  }
+  peoplePage.renderIndex();
 }
 
 function disconnectPeopleIndexAutoload() {
-  if (!peopleIndexLoadObserver) return;
-  peopleIndexLoadObserver.disconnect();
-  peopleIndexLoadObserver = null;
-}
-
-function loadMorePeopleIndex() {
-  if (state.activeView !== "people" || state.selectedPersonId) return;
-  const people = filteredPeople();
-  if (state.personVisibleLimit >= people.length) return;
-  state.personVisibleLimit = Math.min(people.length, state.personVisibleLimit + state.personPageSize);
-  renderPeopleIndex();
-}
-
-function observePeopleIndexLoadMore(target) {
-  if (!("IntersectionObserver" in window)) return;
-  peopleIndexLoadObserver = new IntersectionObserver(
-    (entries) => {
-      if (!entries.some((entry) => entry.isIntersecting)) return;
-      window.setTimeout(loadMorePeopleIndex, 80);
-    },
-    { root: null, rootMargin: "720px 0px", threshold: 0 }
-  );
-  peopleIndexLoadObserver.observe(target);
-}
-
-function appendPeopleIndexLoadMore(visibleCount, totalCount) {
-  const wrap = document.createElement("div");
-  wrap.className = "load-more-row";
-
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "text-button";
-  button.textContent = `显示更多人物 ${formatNumber(visibleCount)} / ${formatNumber(totalCount)}`;
-  button.addEventListener("click", loadMorePeopleIndex);
-
-  wrap.append(button);
-  els.workGrid.append(wrap);
-  observePeopleIndexLoadMore(wrap);
-}
-
-function actorAvatarUrl(person) {
-  return person?.actorProfile?.avatarUrl || coverUrl(person?.coverId);
-}
-
-function createPersonIndexCard(person) {
-  const card = document.createElement("button");
-  card.type = "button";
-  card.className = "person-index-card";
-  card.addEventListener("click", () => {
-    clearWorkSearch();
-    selectPerson(person.id);
-  });
-
-  const avatar = document.createElement("div");
-  avatar.className = "person-index-avatar";
-  const avatarUrl = actorAvatarUrl(person);
-  if (avatarUrl) {
-    const img = document.createElement("img");
-    img.loading = "lazy";
-    img.decoding = "async";
-    img.alt = "";
-    img.src = avatarUrl;
-    img.addEventListener("error", () => {
-      img.remove();
-      avatar.classList.add("empty");
-      avatar.textContent = person.name.slice(0, 2);
-    });
-    avatar.append(img);
-  } else {
-    avatar.classList.add("empty");
-    avatar.textContent = person.name.slice(0, 2);
-  }
-
-  const body = document.createElement("div");
-  body.className = "person-index-body";
-
-  const name = document.createElement("div");
-  name.className = "person-index-name";
-  name.textContent = person.actorProfile?.displayName || person.name;
-
-  const sub = document.createElement("div");
-  sub.className = "person-index-sub";
-  const aliases = person.actorProfile?.aliases || [];
-  sub.textContent = aliases.length ? aliases.slice(0, 3).join("、") : formatLibraryPaths(person.sourcePaths || [person.relativePath]);
-
-  const metrics = document.createElement("div");
-  metrics.className = "person-index-metrics";
-  metrics.append(createInfoChip(`${formatNumber(person.workCount)} 部`, "code"));
-  metrics.append(createInfoChip(`${formatNumber(person.videoCount)} 视频`));
-
-  body.append(name, sub, metrics);
-  card.append(avatar, body);
-  return card;
+  peoplePage.disconnectIndexAutoload();
 }
 
 async function selectPerson(personId, options = {}) {
-  disconnectPeopleIndexAutoload();
-  if (state.activeView === "people" && !state.selectedPersonId && options.captureIndexScroll !== false) {
-    state.peopleIndexScrollTop = currentPageScrollTop();
-  }
-  state.selectedPersonId = personId;
-  state.activeView = "people";
-  state.searchPeople = [];
-  if (options.resetFilter !== false) {
-    clearWorkFilter();
-  }
-  els.viewTabs.forEach((button) => {
-    const active = button.dataset.view === "people";
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
-  });
-  renderPeople();
-  els.workGrid.innerHTML = `<div class="empty-state">正在加载作品</div>`;
-
-  const data = await fetchPersonWorksPage(personId, 0);
-  state.selectedPerson = data.person;
-  state.works = data.works || [];
-  state.personWorksTotal = data.total || state.works.length;
-  state.personWorksFacets = data.facets || null;
-  resetWorkPaging();
-  setMainHeader(state.selectedPerson.name, formatLibraryPaths(state.selectedPerson.sourcePaths || [state.selectedPerson.relativePath]));
-  renderPersonProfile(state.selectedPerson);
-  renderPersonWorkStats();
-  renderWorks();
-  syncRouteAfterNavigation({
-    ...options,
-    routeOverrides: { view: "people", personId, q: "", workId: "", videoId: "" }
-  });
+  await peoplePage.selectPerson(personId, options);
 }
 
 function personWorkPageSize() {
-  return Math.max(80, Number(state.workPageSize || 160));
+  return peoplePage.personWorkPageSize();
 }
 
 async function fetchPersonWorksPage(personId, offset = 0) {
-  const params = new URLSearchParams({
-    limit: String(personWorkPageSize()),
-    offset: String(offset || 0),
-    sort: state.sortMode || "updated",
-    filter: state.filterMode || "all"
-  });
-  return api(`/api/people/${encodeURIComponent(personId)}?${params}`);
+  return peoplePage.fetchPersonWorksPage(personId, offset);
 }
 
 async function goToPerson(personId) {
-  if (!personId) return;
-  if (els.detailDrawer.classList.contains("open")) {
-    closeDrawer();
-  }
-  clearWorkSearch();
-  await selectPerson(personId);
+  await peoplePage.goToPerson(personId);
 }
+
 
 async function loadFavorites() {
   els.workGrid.innerHTML = `<div class="empty-state">正在加载收藏</div>`;
@@ -1492,121 +1061,15 @@ function renderHistoryRangeControls(data = {}) {
 }
 
 async function loadRankings() {
-  els.workGrid.innerHTML = `<div class="empty-state">正在加载排行榜</div>`;
-  state.selectedPersonId = null;
-  state.selectedPerson = null;
-  state.searchPeople = [];
-  state.personWorksTotal = 0;
-  state.personWorksFacets = null;
-  setMainHeader("排行榜", "JavDB TOP250 缓存");
-
-  try {
-    const summary = await api("/api/rankings");
-    state.rankingLists = summary.lists || [];
-    if (state.rankingLists.length && !state.rankingLists.some((item) => item.key === state.selectedRankingKey)) {
-      state.selectedRankingKey = state.rankingLists.find((item) => item.key === "y2025")?.key || state.rankingLists[0].key || "";
-    }
-    await loadRankingWorks();
-  } catch (error) {
-    hidePersonProfile();
-    renderEmpty(error.message || "排行榜读取失败");
-  }
+  await rankingPage.loadRankings();
 }
 
 async function loadRankingWorks() {
-  const key = state.selectedRankingKey || "";
-  const params = new URLSearchParams({
-    key,
-    limit: "1000"
-  });
-  const data = await api(`/api/rankings/top?${params}`);
-  state.works = data.works || [];
-  state.rankingTotal = data.rankingTotal || data.total || state.works.length;
-  state.rankingMissingTotal = data.missingTotal || 0;
-  state.rankingLocalTotal = data.localTotal || 0;
-  state.rankingUpdatedAt = data.updatedAt || "";
-  state.rankingPageUrl = data.pageUrl || "";
-  resetWorkPaging();
-  renderRankingPanel(data);
-  renderRankingStats(data);
-  renderWorks(state.rankingLists.length ? "这个榜单没有匹配项目。" : "还没有缓存排行榜。");
-}
-
-function renderRankingPanel(data = {}) {
-  if (!els.personProfile) return;
-  els.personProfile.hidden = false;
-  els.personProfile.classList.add("ranking-profile-panel");
-  els.personProfile.innerHTML = "";
-
-  const header = document.createElement("div");
-  header.className = "ranking-panel-header";
-  const title = document.createElement("h3");
-  title.textContent = data.label || "TOP250";
-  const meta = document.createElement("div");
-  meta.className = "ranking-panel-meta";
-  meta.textContent = data.updatedAt ? `更新 ${formatDate(data.updatedAt) || data.updatedAt}` : "未缓存";
-  header.append(title, meta);
-
-  const actions = document.createElement("div");
-  actions.className = "ranking-panel-actions";
-  if (state.rankingPageUrl) {
-    const link = document.createElement("a");
-    link.href = state.rankingPageUrl;
-    link.target = "_blank";
-    link.rel = "noreferrer";
-    link.className = "folder-button";
-    link.textContent = "打开 JavDB";
-    actions.append(link);
-  }
-  if (state.accessMode === "local") {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "folder-button";
-    button.textContent = "刷新缓存";
-    button.addEventListener("click", adminRefreshRankings);
-    actions.append(button);
-  }
-  header.append(actions);
-
-  const list = document.createElement("div");
-  list.className = "ranking-chip-list";
-  if (!state.rankingLists.length) {
-    const empty = document.createElement("div");
-    empty.className = "ranking-empty-note";
-    empty.textContent = "后台刷新后会出现在这里";
-    list.append(empty);
-  } else {
-    for (const item of state.rankingLists) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `ranking-chip${item.key === state.selectedRankingKey ? " active" : ""}`;
-      button.textContent = `${item.label} · 缺 ${formatNumber(item.missingTotal)}`;
-      button.addEventListener("click", async () => {
-        state.selectedRankingKey = item.key || "";
-        await loadRankingWorks();
-      });
-      list.append(button);
-    }
-  }
-
-  els.personProfile.append(header, list);
+  await rankingPage.loadRankingWorks();
 }
 
 function renderRankingStats(data = {}) {
-  const stats = [
-    ["榜单", data.rankingTotal || state.rankingTotal || 0],
-    ["本地已有", data.localTotal || state.rankingLocalTotal || 0],
-    ["未下载", data.missingTotal || state.rankingMissingTotal || 0],
-    ["当前显示", visibleWorks().length]
-  ];
-
-  els.statsRow.innerHTML = "";
-  for (const [label, value] of stats) {
-    const stat = document.createElement("div");
-    stat.className = "stat";
-    stat.innerHTML = `<strong>${formatNumber(value)}</strong><span>${label}</span>`;
-    els.statsRow.append(stat);
-  }
+  rankingPage.renderStats(data);
 }
 
 function setMainHeader(title, pathText) {
@@ -1616,8 +1079,14 @@ function setMainHeader(title, pathText) {
 }
 
 function updateBackToPeopleIndexButton() {
+  const productView = productViewForActiveView();
+  document.body.classList.toggle("fanhao-view", productView === "people");
+  document.body.classList.toggle("person-detail-view", state.activeView === "people" && Boolean(state.selectedPersonId));
+  document.body.classList.toggle("tools-view", state.activeView === "tools");
+  document.body.classList.toggle("gallery-view", state.activeView === "gallery");
+  syncNavigationState();
   if (!els.backToPeopleIndex) return;
-  els.backToPeopleIndex.hidden = !(state.activeView === "people" && state.selectedPersonId);
+  els.backToPeopleIndex.hidden = true;
 }
 
 function returnToPeopleIndex() {
@@ -1626,246 +1095,11 @@ function returnToPeopleIndex() {
 }
 
 function hidePersonProfile() {
-  if (!els.personProfile) return;
-  els.personProfile.hidden = true;
-  els.personProfile.classList.remove("ranking-profile-panel");
-  els.personProfile.innerHTML = "";
+  personProfilePage.hide();
 }
 
 function renderPersonProfile(person) {
-  if (!els.personProfile || !person) return;
-
-  const profile = person.actorProfile || null;
-  const avatarUrl = profile?.avatarUrl || coverUrl(person.coverId);
-  const displayName = profile?.displayName || person.name;
-  const aliases = profile?.aliases || [];
-
-  els.personProfile.hidden = false;
-  els.personProfile.classList.remove("ranking-profile-panel");
-  els.personProfile.innerHTML = "";
-
-  const avatar = document.createElement("div");
-  avatar.className = "person-avatar";
-  if (avatarUrl) {
-    const img = document.createElement("img");
-    img.alt = "";
-    img.src = avatarUrl;
-    img.addEventListener("error", () => {
-      img.remove();
-      avatar.textContent = person.name.slice(0, 2);
-      avatar.classList.add("empty");
-    });
-    avatar.append(img);
-  } else {
-    avatar.classList.add("empty");
-    avatar.textContent = person.name.slice(0, 2);
-  }
-
-  const copy = document.createElement("div");
-  copy.className = "person-profile-copy";
-
-  const nameRow = document.createElement("div");
-  nameRow.className = "person-profile-name-row";
-
-  const title = document.createElement("h3");
-  title.textContent = displayName;
-  nameRow.append(title);
-
-  if (profile?.javdbUrl) {
-    const link = document.createElement("a");
-    link.className = "person-profile-link";
-    link.href = profile.javdbUrl;
-    link.target = "_blank";
-    link.rel = "noreferrer";
-    link.title = "打开外部资料页";
-    link.textContent = "资料页";
-    nameRow.append(link);
-  }
-
-  if (state.accessMode === "local") {
-    const editButton = document.createElement("button");
-    editButton.type = "button";
-    editButton.className = "person-profile-link";
-    editButton.textContent = profile?.javdbUrl ? "编辑映射" : "配置资料页";
-    nameRow.append(editButton);
-  }
-
-  const sub = document.createElement("div");
-  sub.className = "person-profile-sub";
-  sub.textContent = aliases.length ? aliases.join("、") : formatLibraryPaths(person.sourcePaths || [person.relativePath]);
-
-  const metrics = document.createElement("div");
-  metrics.className = "person-profile-metrics";
-  const hasActorCache = (person.actorMovieCount ?? profile?.movieCount ?? 0) > 0 || Boolean(profile?.javdbUrl);
-  metrics.append(createProfileMetric("作品", person.workCount), createProfileMetric("视频", person.videoCount));
-  if (hasActorCache) {
-    metrics.append(
-      createProfileMetric("JavDB", person.actorMovieCount ?? profile?.movieCount ?? 0),
-      createProfileMetric("未下载", person.missingLocalWorkCount ?? 0)
-    );
-  } else {
-    metrics.append(createProfileMetric("可播", person.playableCount));
-  }
-
-  copy.append(nameRow, sub, metrics);
-  const editor = state.accessMode === "local" ? createActorProfileEditor(person, profile) : null;
-  const actions = createPersonProfileActions(person);
-  if (editor) {
-    copy.append(editor);
-    const editButton = nameRow.querySelector("button.person-profile-link");
-    editButton?.addEventListener("click", () => {
-      editor.hidden = !editor.hidden;
-      if (!editor.hidden) editor.querySelector("input")?.focus();
-    });
-  }
-  if (actions) copy.append(actions);
-  els.personProfile.append(avatar, copy);
-}
-
-function createActorProfileEditor(person, profile) {
-  const form = document.createElement("form");
-  form.className = "actor-config-form";
-  form.hidden = Boolean(profile?.javdbUrl);
-
-  const urlLabel = document.createElement("label");
-  urlLabel.className = "actor-config-field wide";
-  const urlText = document.createElement("span");
-  urlText.textContent = "JavDB actor 页";
-  const urlInput = document.createElement("input");
-  urlInput.type = "url";
-  urlInput.placeholder = "https://javdb.com/actors/BzpA";
-  urlInput.value = profile?.javdbUrl || "";
-  urlInput.required = true;
-  urlLabel.append(urlText, urlInput);
-
-  const nameLabel = document.createElement("label");
-  nameLabel.className = "actor-config-field";
-  const nameText = document.createElement("span");
-  nameText.textContent = "显示名";
-  const nameInput = document.createElement("input");
-  nameInput.type = "text";
-  nameInput.value = profile?.displayName || person.name;
-  nameLabel.append(nameText, nameInput);
-
-  const aliasesLabel = document.createElement("label");
-  aliasesLabel.className = "actor-config-field wide";
-  const aliasesText = document.createElement("span");
-  aliasesText.textContent = "别名 / 曾用名";
-  const aliasesInput = document.createElement("textarea");
-  aliasesInput.rows = 3;
-  aliasesInput.spellcheck = false;
-  aliasesInput.placeholder = "一行一个，也可用逗号、顿号分隔";
-  aliasesInput.value = (profile?.aliases || []).join("\n");
-  aliasesLabel.append(aliasesText, aliasesInput);
-
-  const submit = document.createElement("button");
-  submit.type = "submit";
-  submit.className = "folder-button";
-  submit.textContent = "保存映射";
-
-  const status = document.createElement("span");
-  status.className = "actor-config-status";
-
-  form.append(urlLabel, nameLabel, aliasesLabel, submit, status);
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await saveActorProfileMapping(person, {
-      javdbUrl: urlInput.value,
-      displayName: nameInput.value,
-      aliases: linesFromTextarea(aliasesInput.value),
-      button: submit,
-      status
-    });
-  });
-  return form;
-}
-
-async function saveActorProfileMapping(person, options) {
-  const originalText = options.button.textContent;
-  options.button.disabled = true;
-  options.button.textContent = "保存中";
-  options.status.textContent = "";
-
-  try {
-    const data = await api(`/api/actor-profiles/${encodeURIComponent(person.id)}`, {
-      method: "PUT",
-      body: {
-        javdbUrl: options.javdbUrl,
-        displayName: options.displayName || person.name,
-        aliases: options.aliases || [],
-        source: "manual",
-        status: "ok"
-      }
-    });
-    updatePersonActorProfile(person.id, data.profile);
-    options.status.textContent = "已保存";
-    await selectPerson(person.id, { resetFilter: false });
-  } catch (error) {
-    options.status.textContent = error.message || "保存失败";
-  } finally {
-    options.button.disabled = false;
-    options.button.textContent = originalText;
-  }
-}
-
-function updatePersonActorProfile(personId, profile) {
-  state.people = state.people.map((person) => (person.id === personId ? { ...person, actorProfile: profile } : person));
-  if (state.selectedPerson?.id === personId) {
-    state.selectedPerson = { ...state.selectedPerson, actorProfile: profile, actorMovieCount: 0, missingLocalWorkCount: 0 };
-  }
-  renderPeople();
-}
-
-function createPersonProfileActions(person) {
-  if (state.accessMode !== "local") return null;
-  const paths = uniqueSourcePaths(person);
-  if (!paths.length) return null;
-
-  const actions = document.createElement("div");
-  actions.className = "person-profile-actions";
-
-  for (const sourcePath of paths) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "folder-button";
-    button.textContent = sourceButtonLabel(sourcePath);
-    button.title = formatLibraryPath(sourcePath);
-    button.addEventListener("click", () => openLocalFolder(sourcePath, button));
-    actions.append(button);
-  }
-
-  return actions;
-}
-
-async function openLocalFolder(sourcePath, button) {
-  const originalText = button.textContent;
-  button.disabled = true;
-  button.textContent = "打开中";
-
-  try {
-    await api("/api/open-folder", { method: "POST", body: { sourcePath } });
-    button.textContent = "已打开";
-    window.setTimeout(() => {
-      button.textContent = originalText;
-      button.disabled = false;
-    }, 1200);
-  } catch (error) {
-    button.textContent = "打开失败";
-    button.title = error.message || "打开失败";
-    window.setTimeout(() => {
-      button.textContent = originalText;
-      button.disabled = false;
-      button.title = formatLibraryPath(sourcePath);
-    }, 2000);
-  }
-}
-
-function createProfileMetric(label, value) {
-  const item = document.createElement("span");
-  item.innerHTML = `<strong></strong><small></small>`;
-  item.querySelector("strong").textContent = formatNumber(value);
-  item.querySelector("small").textContent = label;
-  return item;
+  personProfilePage.render(person);
 }
 
 function createStatCard(label, value) {
@@ -2156,21 +1390,26 @@ function resetWorkPaging() {
 }
 
 function resetPersonPaging() {
-  state.personVisibleLimit = state.personPageSize;
+  peoplePage.resetPaging();
 }
 
 function clearWorkSearch() {
+  window.clearTimeout(state.searchTimer);
   state.workQuery = "";
   els.workSearch.value = "";
 }
 
-function applyWorkSearch(query) {
+function submitWorkSearch(query, options = {}) {
   const value = String(query || "").trim();
+  window.clearTimeout(state.searchTimer);
   state.workQuery = value;
   els.workSearch.value = value;
-  window.clearTimeout(state.searchTimer);
   resetWorkPaging();
-  return loadSearchResults(value);
+  return loadSearchResults(value, options);
+}
+
+function applyWorkSearch(query) {
+  return submitWorkSearch(query);
 }
 
 function clearWorkFilter() {
@@ -2180,6 +1419,10 @@ function clearWorkFilter() {
 
 async function loadSearchResults(query, options = {}) {
   const normalizedQuery = String(query || "").trim();
+  state.workQuery = normalizedQuery;
+  if (els.workSearch && els.workSearch.value !== normalizedQuery) {
+    els.workSearch.value = normalizedQuery;
+  }
   if (!normalizedQuery) {
     state.searchPeople = [];
     state.searchQuery = "";
@@ -2210,10 +1453,7 @@ async function loadSearchResults(query, options = {}) {
   }
 
   state.activeView = "search";
-  els.viewTabs.forEach((button) => {
-    button.classList.remove("active");
-    button.setAttribute("aria-pressed", "false");
-  });
+  syncNavigationState("search");
   renderPeople();
   hidePersonProfile();
   setMainHeader(`搜索：${normalizedQuery}`, "全库 · 番号 / 标题 / 文件名 / 人物 / 类别 / 片商");
@@ -2349,6 +1589,9 @@ function toastInline(button, message, restoreText) {
 
 function renderWorks(emptyMessage = "没有匹配的作品。") {
   disconnectPeopleIndexAutoload();
+  cancelScheduledWorkRendering();
+  resetProgressiveCoverLoading();
+  const renderSeq = ++workRenderSeq;
   const works = visibleWorks();
   els.workGrid.innerHTML = "";
   renderSearchPeoplePanel();
@@ -2362,15 +1605,50 @@ function renderWorks(emptyMessage = "没有匹配的作品。") {
   }
 
   const visible = works.slice(0, state.workVisibleLimit);
-  const fragment = document.createDocumentFragment();
-  visible.forEach((work, index) => {
-    fragment.append(createWorkCard(work, index));
-  });
-  els.workGrid.append(fragment);
+  const nextIndex = appendWorkCardBatch(visible, 0, Math.min(visible.length, WORK_RENDER_INITIAL_COUNT));
+  if (nextIndex < visible.length) {
+    scheduleRemainingWorkCards(visible, nextIndex, renderSeq, () => {
+      if (visible.length < works.length || hasServerMore) {
+        appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore });
+      }
+    });
+    return;
+  }
 
   if (visible.length < works.length || hasServerMore) {
     appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore });
   }
+}
+
+function cancelScheduledWorkRendering() {
+  if (workRenderTimer) {
+    window.clearTimeout(workRenderTimer);
+    workRenderTimer = null;
+  }
+}
+
+function appendWorkCardBatch(visible, start, end) {
+  const fragment = document.createDocumentFragment();
+  for (let index = start; index < end; index += 1) {
+    fragment.append(createWorkCard(visible[index], index));
+  }
+  els.workGrid.append(fragment);
+  activateProgressiveCoverImages(els.workGrid);
+  return end;
+}
+
+function scheduleRemainingWorkCards(visible, nextIndex, renderSeq, onComplete) {
+  workRenderTimer = window.setTimeout(() => {
+    workRenderTimer = null;
+    if (renderSeq !== workRenderSeq) return;
+    const end = Math.min(visible.length, nextIndex + WORK_RENDER_BATCH_SIZE);
+    const afterIndex = appendWorkCardBatch(visible, nextIndex, end);
+    if (afterIndex < visible.length) {
+      scheduleRemainingWorkCards(visible, afterIndex, renderSeq, onComplete);
+    } else {
+      onComplete?.();
+    }
+  }, WORK_RENDER_BATCH_DELAY);
 }
 
 function appendLoadMore(visibleCount, totalCount, options = {}) {
@@ -2431,6 +1709,58 @@ function appendEmpty(message) {
   els.workGrid.append(empty);
 }
 
+function setGalleryStatus(message) {
+  galleryRenderer.setStatus(message);
+}
+
+function renderGalleryStats() {
+  galleryRenderer.renderStats();
+}
+
+async function loadImageLibrary(options = {}) {
+  await galleryRenderer.loadImageLibrary(options);
+}
+
+function resetGalleryReader() {
+  galleryRenderer.resetReader();
+}
+
+function syncGalleryRoute(mode = "push") {
+  galleryRenderer.syncRoute(mode);
+}
+
+function galleryModeLabel(mode) {
+  return galleryRenderer.modeLabel(mode);
+}
+
+function galleryMediaKindForMode(mode) {
+  return galleryRenderer.mediaKindForMode(mode);
+}
+
+async function openPhotoSet(albumId, options = {}) {
+  await galleryRenderer.openPhotoSet(albumId, options);
+}
+
+async function openMangaComic(comicId, options = {}) {
+  await galleryRenderer.openMangaComic(comicId, options);
+}
+
+async function openMangaChapter(chapterIndex, options = {}) {
+  await galleryRenderer.openMangaChapter(chapterIndex, options);
+}
+
+async function openGalleryMedia(mediaId, options = {}) {
+  await galleryRenderer.openGalleryMedia(mediaId, options);
+}
+
+function renderGalleryView() {
+  galleryRenderer.renderView();
+}
+
+async function saveCompilationConfig(config) {
+  return adminModal.saveCompilationConfigData(config);
+}
+
 function renderSearchPeoplePanel() {
   if (state.activeView !== "search" || !state.searchPeople.length) return;
 
@@ -2460,6 +1790,129 @@ function renderSearchPeoplePanel() {
   els.workGrid.append(panel);
 }
 
+function resetProgressiveCoverLoading() {
+  if (coverLoadTimer) {
+    window.clearTimeout(coverLoadTimer);
+    coverLoadTimer = null;
+  }
+  if (coverLoadObserver) {
+    coverLoadObserver.disconnect();
+    coverLoadObserver = null;
+  }
+  coverLoadQueue = [];
+}
+
+function appendProgressiveCoverImage(cover, src, index = 0) {
+  const placeholder = els.placeholderTemplate.content.firstElementChild.cloneNode(true);
+  placeholder.classList.add("loading-cover");
+  placeholder.textContent = "";
+  placeholder.setAttribute("aria-hidden", "true");
+  cover.append(placeholder);
+
+  const img = document.createElement("img");
+  img.className = "progressive-cover-image";
+  img.loading = index < COVER_EAGER_COUNT ? "eager" : "lazy";
+  img.decoding = "async";
+  img.fetchPriority = index < COVER_HIGH_PRIORITY_COUNT ? "high" : index < COVER_EAGER_COUNT ? "auto" : "low";
+  img.referrerPolicy = "no-referrer";
+  img.alt = "";
+  img.dataset.src = src;
+  cover.append(img);
+}
+
+function queueCoverImage(img) {
+  if (!img?.dataset?.src || img.dataset.queued === "1" || img.dataset.loaded === "1") return;
+  coverLoadObserver?.unobserve(img);
+  img.dataset.queued = "1";
+  coverLoadQueue.push(img);
+  scheduleCoverLoadDrain();
+}
+
+function activateProgressiveCoverImages(root) {
+  const images = [...root.querySelectorAll('img.progressive-cover-image[data-src]')];
+  const observer = ensureCoverLoadObserver();
+  images.forEach((img, index) => {
+    if (index < COVER_EAGER_COUNT || !observer) {
+      queueCoverImage(img);
+    } else {
+      observer.observe(img);
+    }
+  });
+}
+
+function ensureCoverLoadObserver() {
+  if (!("IntersectionObserver" in window)) return null;
+  if (!coverLoadObserver) {
+    coverLoadObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) queueCoverImage(entry.target);
+        }
+      },
+      { rootMargin: COVER_OBSERVER_ROOT_MARGIN, threshold: 0.01 }
+    );
+  }
+  return coverLoadObserver;
+}
+
+function retryCoverImage(img, src) {
+  const retryCount = Number(img.dataset.retryCount || 0);
+  const delay = COVER_RETRY_DELAYS[Math.min(retryCount, COVER_RETRY_DELAYS.length - 1)];
+  img.dataset.retryCount = String(retryCount + 1);
+  img.classList.remove("loaded");
+  window.setTimeout(() => {
+    if (!img.isConnected || img.classList.contains("loaded")) return;
+    img.src = retryCoverUrl(src, retryCount + 1);
+  }, delay);
+}
+
+function retryCoverUrl(src, retryCount) {
+  if (!src) return "";
+  const separator = src.includes("?") ? "&" : "?";
+  return `${src}${separator}_coverRetry=${retryCount}`;
+}
+
+function scheduleCoverLoadDrain(delay = 0) {
+  if (coverLoadTimer) return;
+  coverLoadTimer = window.setTimeout(drainCoverLoadQueue, delay);
+}
+
+function drainCoverLoadQueue() {
+  coverLoadTimer = null;
+  let count = 0;
+  while (coverLoadQueue.length && count < COVER_LOAD_BATCH_SIZE) {
+    const img = coverLoadQueue.shift();
+    if (!img?.isConnected || !img.dataset.src || img.dataset.loaded === "1") continue;
+    loadQueuedCoverImage(img);
+    count += 1;
+  }
+  if (coverLoadQueue.length) scheduleCoverLoadDrain(COVER_LOAD_BATCH_DELAY);
+}
+
+function loadQueuedCoverImage(img) {
+  const src = img.dataset.src;
+  const cover = img.closest(".cover-wrap");
+  coverLoadObserver?.unobserve(img);
+  img.dataset.loaded = "1";
+  delete img.dataset.src;
+
+  img.addEventListener(
+    "load",
+    () => {
+      cover?.querySelector(".placeholder-cover")?.remove();
+      img.classList.add("loaded");
+    },
+    { once: true }
+  );
+  img.addEventListener(
+    "error",
+    () => {
+      retryCoverImage(img, src);
+    }
+  );
+  img.src = src;
+}
+
 function createWorkCard(work, index = 0) {
   const card = document.createElement("article");
   card.className = `work-card${work.missingLocal ? " missing-local" : ""}`;
@@ -2473,16 +1926,7 @@ function createWorkCard(work, index = 0) {
 
   const resolvedCoverUrl = workCoverUrl(work);
   if (resolvedCoverUrl) {
-    const img = document.createElement("img");
-    img.loading = index < 12 ? "eager" : "lazy";
-    img.decoding = "async";
-    img.fetchPriority = index < 8 ? "high" : "auto";
-    img.alt = "";
-    img.src = resolvedCoverUrl;
-    img.addEventListener("error", () => {
-      img.replaceWith(els.placeholderTemplate.content.cloneNode(true));
-    });
-    cover.append(img);
+    appendProgressiveCoverImage(cover, resolvedCoverUrl, index);
   } else {
     cover.append(els.placeholderTemplate.content.cloneNode(true));
   }
@@ -2655,6 +2099,18 @@ function formatDate(value) {
   return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
 }
 
+function formatDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return formatDate(value) || String(value);
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
 function extractWorkCode(work) {
   const text = `${work.directoryName || ""} ${work.title || ""}`;
   const match = text.match(/(?:\[[^\]]+\][._\s-]*)?([a-z]{2,10})[-_\s]?(\d{2,6})/i);
@@ -2691,899 +2147,40 @@ function createInfoChip(text, variant = "") {
   return chip;
 }
 
-function createMetaPart(text) {
-  const span = document.createElement("span");
-  span.className = "meta-part";
-  span.textContent = text;
-  return span;
-}
-
-function createPersonLink(name, personId) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "meta-person-link";
-  button.textContent = name;
-  button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    goToPerson(personId);
-  });
-  return button;
-}
-
-function createBadge(text, variant = "") {
-  const badge = document.createElement("span");
-  badge.className = `badge${variant ? ` ${variant}` : ""}`;
-  badge.textContent = text;
-  return badge;
-}
-
 async function openWork(workId, videoId = null, options = {}) {
-  const cachedWork = state.works.find((work) => work.id === workId);
-  if (cachedWork?.missingLocal) {
-    openWorkCard(cachedWork);
-    return;
-  }
-
-  const seq = ++state.openWorkSeq;
-  reportCurrentProgress();
-  stopProgressReporting();
-  stopTimelineSync();
-  stopPendingInfoRender();
-  state.currentWork = null;
-  state.currentVideo = null;
-  state.currentPlayInfo = null;
-  state.currentStreamOffset = 0;
-
-  openDrawerFrame("正在加载作品", "");
-  resetDrawerSideScroll();
-  els.playerArea.innerHTML = `<div class="unsupported">正在读取作品</div>`;
-  els.metaArea.innerHTML = "";
-  els.infoArea.innerHTML = "";
-
-  try {
-    const data = await api(`/api/works/${encodeURIComponent(workId)}`);
-    if (seq !== state.openWorkSeq || !els.detailDrawer.classList.contains("open")) return;
-
-    const work = data.work;
-    state.currentWork = work;
-    els.drawerTitle.textContent = work.title;
-    els.drawerPath.textContent = formatLibraryPath(work.relativePath);
-    renderPlayer(work, videoId);
-    renderMeta(work);
-    scheduleInfoRender(work);
-    resetDrawerSideScroll();
-    syncRouteAfterNavigation({
-      ...options,
-      routeOverrides: { workId: work.id, videoId: videoId || state.currentVideo?.id || "" }
-    });
-  } catch (error) {
-    if (seq !== state.openWorkSeq) return;
-    els.drawerTitle.textContent = "打开失败";
-    els.drawerPath.textContent = "";
-    els.playerArea.innerHTML = "";
-    const notice = document.createElement("div");
-    notice.className = "unsupported";
-    notice.textContent = error.message;
-    els.playerArea.append(notice);
-  }
-}
-
-function resetDrawerSideScroll() {
-  if (!els.drawerSide) return;
-  els.drawerSide.scrollTop = 0;
-}
-
-function openDrawerFrame(title, pathText) {
-  if (!els.detailDrawer.classList.contains("open")) {
-    state.lastFocusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  }
-  els.drawerTitle.textContent = title;
-  els.drawerPath.textContent = pathText;
-  els.drawerBackdrop.hidden = false;
-  els.detailDrawer.classList.add("open");
-  els.detailDrawer.setAttribute("aria-hidden", "false");
-  document.body.style.overflow = "hidden";
-  window.setTimeout(() => {
-    if (els.detailDrawer.classList.contains("open")) {
-      els.closeDrawer.focus({ preventScroll: true });
-    }
-  }, 0);
-}
-
-function scheduleInfoRender(work) {
-  stopPendingInfoRender();
-  els.infoArea.innerHTML = `<div class="unsupported inline-info-loading">正在准备资料</div>`;
-
-  const render = () => {
-    state.infoRenderTimer = null;
-    if (state.currentWork?.id !== work.id || !els.detailDrawer.classList.contains("open")) return;
-    renderInfo(work);
-  };
-
-  if ("requestIdleCallback" in window) {
-    state.infoRenderTimer = window.requestIdleCallback(render, { timeout: 700 });
-  } else {
-    state.infoRenderTimer = window.setTimeout(render, 120);
-  }
-}
-
-function stopPendingInfoRender() {
-  if (!state.infoRenderTimer) return;
-  window.cancelIdleCallback?.(state.infoRenderTimer);
-  window.clearTimeout(state.infoRenderTimer);
-  state.infoRenderTimer = null;
+  await workDetailPage.openWork(workId, videoId, options);
 }
 
 function closeDrawer(options = {}) {
-  state.openWorkSeq += 1;
-  reportCurrentProgress();
-  stopProgressReporting();
-  stopTimelineSync();
-  stopPendingInfoRender();
-  els.detailDrawer.classList.remove("open");
-  els.detailDrawer.setAttribute("aria-hidden", "true");
-  els.drawerBackdrop.hidden = true;
-  document.body.style.overflow = "";
-  els.playerArea.innerHTML = "";
-  state.currentWork = null;
-  state.currentVideo = null;
-  state.currentPlayInfo = null;
-  state.currentStreamOffset = 0;
-
-  const restoreTarget = state.lastFocusedElement;
-  state.lastFocusedElement = null;
-  if (restoreTarget?.isConnected) {
-    window.setTimeout(() => restoreTarget.focus({ preventScroll: true }), 0);
-  }
-  syncRouteAfterNavigation({
-    ...options,
-    replaceRoute: options.replaceRoute !== false,
-    routeOverrides: { workId: "", videoId: "" }
-  });
-}
-
-function drawerFocusableElements() {
-  return [
-    ...els.detailDrawer.querySelectorAll(
-      'a[href], button, input, select, textarea, video[controls], [tabindex]:not([tabindex="-1"])'
-    )
-  ].filter((element) => !element.disabled && element.getAttribute("aria-hidden") !== "true");
+  workDetailPage.closeDrawer(options);
 }
 
 function trapDrawerFocus(event) {
-  const focusable = drawerFocusableElements();
-  if (!focusable.length) {
-    event.preventDefault();
-    els.detailDrawer.focus({ preventScroll: true });
-    return;
-  }
-
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault();
-    last.focus({ preventScroll: true });
-    return;
-  }
-
-  if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault();
-    first.focus({ preventScroll: true });
-  }
-}
-
-function createPlayerActions(work) {
-  const actions = document.createElement("div");
-  actions.className = "player-actions";
-
-  const favoriteButton = document.createElement("button");
-  favoriteButton.type = "button";
-  favoriteButton.className = `text-button${work.favorite ? " active" : ""}`;
-  favoriteButton.textContent = work.favorite ? "★ 已收藏" : "☆ 收藏";
-  favoriteButton.setAttribute("aria-label", work.favorite ? "取消收藏" : "收藏");
-  favoriteButton.addEventListener("click", () => toggleFavorite(work.id));
-  actions.append(favoriteButton);
-
-  if (!workCoverUrl(work) && work.canGenerateCover) {
-    const coverButton = document.createElement("button");
-    coverButton.type = "button";
-    coverButton.className = "text-button";
-    coverButton.textContent = "生成封面";
-    coverButton.setAttribute("aria-label", "生成封面");
-    coverButton.addEventListener("click", () => generateWorkCover(work.id, coverButton));
-    actions.append(coverButton);
-  }
-
-  return actions;
+  workDetailPage.trapDrawerFocus(event);
 }
 
 async function renderPlayer(work, requestedVideoId = null, startAt = null, autoplay = false) {
-  stopProgressReporting();
-  stopTimelineSync();
-  els.playerArea.innerHTML = "";
-
-  els.playerArea.append(createPlayerActions(work));
-
-  const streamableVideos = work.videos.filter(canTryWebPlay);
-  if (!streamableVideos.length) {
-    const unsupported = document.createElement("div");
-    unsupported.className = "unsupported";
-    unsupported.innerHTML = "<strong>这个作品的文件格式暂不支持网页播放。</strong><span>可以用本地播放器打开原文件。</span>";
-    els.playerArea.append(unsupported);
-    return;
-  }
-
-  const progressVideoId = work.progress?.videoId;
-  const selected =
-    streamableVideos.find((video) => video.id === requestedVideoId) ||
-    streamableVideos.find((video) => video.id === progressVideoId) ||
-    streamableVideos.find((video) => video.playable) ||
-    streamableVideos[0];
-  state.currentVideo = selected;
-  state.currentPlayInfo = null;
-  state.currentStreamOffset = 0;
-
-  const loading = document.createElement("div");
-  loading.className = "unsupported";
-  loading.textContent = "正在探测播放方式";
-  els.playerArea.append(loading);
-
-  let playInfo;
-  try {
-    playInfo = await api(`/api/playinfo/${encodeURIComponent(selected.id)}`);
-  } catch (error) {
-    loading.textContent = error.message;
-    return;
-  }
-
-  if (state.currentVideo?.id !== selected.id || state.currentWork?.id !== work.id) return;
-
-  state.currentPlayInfo = playInfo;
-  loading.remove();
-
-  const video = document.createElement("video");
-  video.className = "video-player";
-  const isSegmentedStream = playInfo.mode !== "direct";
-  video.controls = !isSegmentedStream;
-  video.preload = state.accessHints.videoPreload || "metadata";
-
-  const savedProgress = selected.progress || (work.progress?.videoId === selected.id ? work.progress : null);
-  const requestedStart = Number(startAt);
-  const resumePosition = Number.isFinite(requestedStart) ? requestedStart : savedProgress?.position > 5 ? savedProgress.position : 0;
-  let streamUrl = playInfo.streamUrl;
-  if (isSegmentedStream && resumePosition > 0) {
-    state.currentStreamOffset = resumePosition;
-    streamUrl = addQueryParam(streamUrl, "t", Math.floor(resumePosition));
-  }
-  video.src = streamUrl;
-
-  if (!isSegmentedStream && resumePosition > 5) {
-    video.addEventListener(
-      "loadedmetadata",
-      () => {
-        if (resumePosition < video.duration - 8) {
-          video.currentTime = resumePosition;
-        }
-      },
-      { once: true }
-    );
-  }
-
-  if (autoplay) {
-    video.addEventListener("canplay", () => video.play().catch(() => {}), { once: true });
-  }
-
-  video.addEventListener("pause", reportCurrentProgress);
-  video.addEventListener("ended", reportCurrentProgress);
-  els.playerArea.append(video);
-  if (isSegmentedStream) {
-    els.playerArea.append(createTranscodeControls(video, playInfo, work, selected.id));
-  }
-  startProgressReporting();
-}
-
-function currentPlaybackPosition(video = activeVideoElement()) {
-  const offset = Number(state.currentStreamOffset || 0);
-  const current = Number(video?.currentTime || 0);
-  return Math.max(0, offset + current);
-}
-
-function timelineDuration(video = activeVideoElement()) {
-  const candidates = [
-    state.currentPlayInfo?.duration,
-    state.currentVideo?.progress?.duration,
-    state.currentWork?.progress?.duration
-  ];
-  for (const value of candidates) {
-    const duration = Number(value);
-    if (Number.isFinite(duration) && duration > 0) return duration;
-  }
-
-  const elementDuration = Number(video?.duration || 0);
-  return Number.isFinite(elementDuration) && elementDuration > 0 ? elementDuration + state.currentStreamOffset : 0;
-}
-
-function createTranscodeControls(video, playInfo, work, videoId) {
-  const controls = document.createElement("div");
-  controls.className = "transcode-controls";
-  const abortController = new AbortController();
-  state.timelineAbortController = abortController;
-  const listenerOptions = { signal: abortController.signal };
-
-  const playButton = document.createElement("button");
-  playButton.type = "button";
-  playButton.className = "transcode-button";
-
-  const timeLabel = document.createElement("span");
-  timeLabel.className = "transcode-time";
-
-  const seek = document.createElement("input");
-  seek.className = "transcode-seek";
-  seek.type = "range";
-  seek.min = "0";
-  seek.step = "1";
-  seek.setAttribute("aria-label", "播放进度");
-
-  const modeLabel = document.createElement("span");
-  modeLabel.className = "transcode-mode";
-  const codecText = [playInfo.videoCodec, playInfo.audioCodec].filter(Boolean).join(" / ");
-  modeLabel.textContent = `${playInfo.label}${codecText ? ` · ${codecText}` : ""}`;
-
-  const muteButton = document.createElement("button");
-  muteButton.type = "button";
-  muteButton.className = "transcode-button";
-
-  const fullButton = document.createElement("button");
-  fullButton.type = "button";
-  fullButton.className = "transcode-button";
-  fullButton.textContent = "全屏";
-  fullButton.setAttribute("aria-label", "进入全屏");
-
-  let seeking = false;
-
-  const update = (previewValue = null) => {
-    const duration = timelineDuration(video);
-    const current = previewValue ?? currentPlaybackPosition(video);
-    playButton.textContent = video.paused ? "播放" : "暂停";
-    playButton.setAttribute("aria-label", video.paused ? "播放" : "暂停");
-    muteButton.textContent = video.muted ? "开声" : "静音";
-    muteButton.setAttribute("aria-label", video.muted ? "打开声音" : "静音");
-    timeLabel.textContent = duration > 0 ? `${formatTime(current)} / ${formatTime(duration)}` : formatTime(current);
-
-    if (duration > 0) {
-      seek.disabled = false;
-      seek.max = String(Math.floor(duration));
-      if (!seeking) seek.value = String(Math.min(Math.floor(current), Math.floor(duration)));
-    } else {
-      seek.disabled = true;
-      seek.max = "1";
-      seek.value = "0";
-    }
-  };
-
-  playButton.addEventListener("click", () => {
-    if (video.paused) {
-      video.play().catch(() => {});
-    } else {
-      video.pause();
-    }
-    update();
-  }, listenerOptions);
-
-  video.addEventListener("click", () => {
-    if (video.paused) {
-      video.play().catch(() => {});
-    } else {
-      video.pause();
-    }
-    update();
-  }, listenerOptions);
-
-  seek.addEventListener("input", () => {
-    seeking = true;
-    update(Number(seek.value || 0));
-  }, listenerOptions);
-
-  seek.addEventListener("change", () => {
-    const nextPosition = Number(seek.value || 0);
-    const shouldKeepPlaying = !video.paused;
-    seeking = false;
-    reportCurrentProgress({ force: true });
-    renderPlayer(work, videoId, nextPosition, shouldKeepPlaying);
-  }, listenerOptions);
-
-  seek.addEventListener("pointerup", () => {
-    seeking = false;
-  }, listenerOptions);
-
-  muteButton.addEventListener("click", () => {
-    video.muted = !video.muted;
-    update();
-  }, listenerOptions);
-
-  fullButton.addEventListener("click", () => {
-    const target = els.playerArea;
-    if (document.fullscreenElement) {
-      document.exitFullscreen?.();
-    } else {
-      target.requestFullscreen?.();
-    }
-  }, listenerOptions);
-
-  video.addEventListener("timeupdate", () => update(), listenerOptions);
-  video.addEventListener("play", () => update(), listenerOptions);
-  video.addEventListener("pause", () => update(), listenerOptions);
-  video.addEventListener("loadedmetadata", () => update(), listenerOptions);
-  document.addEventListener("fullscreenchange", () => {
-    fullButton.textContent = document.fullscreenElement ? "退出" : "全屏";
-    fullButton.setAttribute("aria-label", document.fullscreenElement ? "退出全屏" : "进入全屏");
-  }, listenerOptions);
-
-  state.timelineTimer = window.setInterval(() => update(), 500);
-  update();
-
-  controls.append(playButton, timeLabel, seek, modeLabel, muteButton, fullButton);
-  return controls;
-}
-
-function canTryWebPlay(video) {
-  return video.playable || [".mkv", ".wmv", ".avi", ".flv", ".ts"].includes(video.ext);
+  await workDetailPage.renderPlayer(work, requestedVideoId, startAt, autoplay);
 }
 
 function renderMeta(work) {
-  els.metaArea.innerHTML = "";
-
-  if (work.personId && (work.personName || work.personDisplayName)) {
-    const personJump = document.createElement("div");
-    personJump.className = "person-jump";
-
-    const text = document.createElement("div");
-    text.innerHTML = `<span>人物</span><strong></strong>`;
-    text.querySelector("strong").textContent = workPersonDisplayName(work);
-
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "text-button";
-    button.textContent = "查看人物";
-    button.addEventListener("click", () => {
-      goToPerson(work.personId);
-    });
-
-    personJump.append(text, button);
-    els.metaArea.append(personJump);
-  }
-
-  const heading = document.createElement("h4");
-  heading.className = "section-title";
-  heading.textContent = "视频文件";
-
-  const list = document.createElement("div");
-  list.className = "file-list video-picker";
-
-  for (const video of work.videos) {
-    const item = document.createElement("div");
-    item.className = `file-item${state.currentVideo?.id === video.id ? " active" : ""}`;
-
-    const main = document.createElement("div");
-    main.innerHTML = `<div class="file-name"></div><div class="file-sub"></div>`;
-    main.querySelector(".file-name").textContent = video.name;
-    const progress = video.progress ? ` · 看到 ${Math.floor(video.progress.percent)}%` : "";
-    main.querySelector(".file-sub").textContent = `${formatLibraryPath(video.relativePath)} · ${formatBytes(video.size)}${progress}`;
-
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "text-button";
-    button.textContent = video.playable ? "播放" : canTryWebPlay(video) ? "智能播放" : "暂不支持";
-    button.disabled = !canTryWebPlay(video);
-    if (canTryWebPlay(video)) {
-      button.addEventListener("click", () => {
-        reportCurrentProgress();
-        renderPlayer(work, video.id);
-        renderMeta(work);
-      });
-    }
-
-    item.append(main, button);
-    list.append(item);
-  }
-
-  els.metaArea.append(heading, list);
-}
-
-function renderInfo(work) {
-  els.infoArea.innerHTML = "";
-  const preview = createPreviewMediaSection(work);
-  if (preview) els.infoArea.append(preview);
-
-  if (hasStructuredInfo(work.infoMetadata)) {
-    const heading = document.createElement("h4");
-    heading.className = "section-title";
-    heading.textContent = "作品资料";
-    els.infoArea.append(heading);
-
-    const wrapper = document.createElement("div");
-    wrapper.className = "info-block inline-info-block";
-    els.infoArea.append(wrapper);
-    renderStructuredInfo(wrapper, work.infoMetadata);
-    return;
-  }
-
-  if (!work.infos.length) {
-    const empty = document.createElement("div");
-    empty.className = "unsupported";
-    empty.textContent = "这个作品没有资料。";
-    els.infoArea.append(empty);
-    return;
-  }
-
-  const heading = document.createElement("h4");
-  heading.className = "section-title";
-  heading.textContent = "作品资料";
-  els.infoArea.append(heading);
-
-  const wrapper = document.createElement("div");
-  wrapper.className = "info-block inline-info-block";
-  els.infoArea.append(wrapper);
-  loadInlineInfoContent(wrapper, primaryInfoFile(work).id);
-}
-
-function createPreviewMediaSection(work) {
-  const info = work.infoMetadata || work.infoSummary || {};
-  const images = uniquePreviewImageUrls([...(info.previewImages || []), ...localPreviewImageUrls(work)]).slice(0, 12);
-  const videoUrl = cleanRemoteUrl(info.previewVideoUrl);
-  if (!images.length && !videoUrl) return null;
-
-  const section = document.createElement("section");
-  section.className = "preview-media-section";
-
-  const heading = document.createElement("h4");
-  heading.className = "section-title";
-  heading.textContent = "预览媒体";
-  section.append(heading);
-
-  if (images.length) {
-    const grid = document.createElement("div");
-    grid.className = "preview-media-grid";
-    for (const imageUrl of images) {
-      const link = document.createElement("a");
-      link.className = "preview-media-thumb";
-      link.href = imageUrl;
-      link.target = "_blank";
-      link.rel = "noreferrer";
-      const img = document.createElement("img");
-      img.loading = "lazy";
-      img.decoding = "async";
-      img.alt = "";
-      img.src = imageUrl;
-      link.append(img);
-      grid.append(link);
-    }
-    section.append(grid);
-  }
-
-  if (videoUrl) {
-    const actions = document.createElement("div");
-    actions.className = "preview-media-actions";
-    const link = document.createElement("a");
-    link.className = "text-button preview-media-link";
-    link.href = videoUrl;
-    link.target = "_blank";
-    link.rel = "noreferrer";
-    link.textContent = "打开预览视频";
-    actions.append(link);
-    section.append(actions);
-  }
-
-  return section;
-}
-
-function localPreviewImageUrls(work) {
-  return [...(work.images || [])]
-    .filter((image) => image?.id && image.id !== work.coverId)
-    .sort(comparePreviewImageFiles)
-    .map((image) => `/media/image/${encodeURIComponent(image.id)}`);
-}
-
-function comparePreviewImageFiles(a, b) {
-  return previewImageRank(a) - previewImageRank(b) || String(a.relativePath || a.name || "").localeCompare(String(b.relativePath || b.name || ""));
-}
-
-function previewImageRank(image) {
-  const text = `${image?.relativePath || ""} ${image?.name || ""}`.toLowerCase();
-  if (/(?:extra[-_ ]?fanart|sample|screenshot|preview|fanart)/.test(text)) return 0;
-  if (/(?:poster|cover|folder|front|thumb|thumbnail)/.test(text)) return 2;
-  return 1;
-}
-
-function cleanRemoteUrl(value) {
-  const text = String(value || "").trim();
-  if (!/^https?:\/\//i.test(text)) return "";
-  return text;
-}
-
-function cleanPreviewImageUrl(value) {
-  const text = String(value || "").trim();
-  if (/^https?:\/\//i.test(text) || /^\/media\/image\//i.test(text)) return text;
-  return "";
-}
-
-function uniquePreviewImageUrls(values) {
-  const seen = new Set();
-  const urls = [];
-  for (const value of Array.isArray(values) ? values : []) {
-    const url = cleanPreviewImageUrl(value);
-    const key = url.toLowerCase();
-    if (!url || seen.has(key)) continue;
-    seen.add(key);
-    urls.push(url);
-  }
-  return urls;
-}
-
-function primaryInfoFile(work) {
-  const infos = work.infos || [];
-  return infos.find((info) => /^info\.(txt|json|nfo)$/i.test(info.name || "")) || infos[0];
-}
-
-async function loadInlineInfoContent(wrapper, infoId) {
-  wrapper.innerHTML = `<div class="unsupported inline-info-loading">正在读取资料</div>`;
-  try {
-    const data = await api(`/api/info/${encodeURIComponent(infoId)}`);
-    if (data.displayable === false) {
-      const notice = document.createElement("div");
-      notice.className = "unsupported";
-      notice.textContent = "这个作品没有可显示的作品资料。";
-      wrapper.replaceChildren(notice);
-      return;
-    }
-
-    if (hasStructuredInfo(data.metadata)) {
-      renderStructuredInfo(wrapper, data.metadata);
-      return;
-    }
-
-    const pre = document.createElement("pre");
-    pre.className = "info-content inline-info-content";
-    pre.textContent = data.content || "这个作品没有可显示内容。";
-    wrapper.replaceChildren(pre);
-  } catch (error) {
-    const notice = document.createElement("div");
-    notice.className = "unsupported info-error";
-    notice.textContent = error.message;
-    wrapper.replaceChildren(notice);
-  }
-}
-
-function hasStructuredInfo(metadata) {
-  return Boolean(metadata && ((metadata.fields || []).length || metadata.rawText));
-}
-
-function renderStructuredInfo(mount, metadata) {
-  mount.innerHTML = "";
-  const panel = document.createElement("div");
-  panel.className = "structured-info-panel";
-
-  const fields = metadata.fields || [];
-  if (fields.length) {
-    const grid = document.createElement("dl");
-    grid.className = "structured-info-grid";
-    for (const field of fields) {
-      const label = document.createElement("dt");
-      label.textContent = field.label;
-      const value = document.createElement("dd");
-      value.textContent = field.value;
-      grid.append(label, value);
-    }
-    panel.append(grid);
-  } else {
-    const pre = document.createElement("pre");
-    pre.className = "info-content inline-info-content";
-    pre.textContent = metadata.rawText || "这个作品没有可显示内容。";
-    panel.append(pre);
-  }
-
-  if (metadata.rawTextTruncated) {
-    const note = document.createElement("div");
-    note.className = "info-preview-note";
-    note.textContent = "资料较长，已显示主要字段。";
-    panel.append(note);
-  }
-
-  mount.append(panel);
-}
-
-async function loadInfoContent(wrapper, infoId, button) {
-  const existing = wrapper.querySelector(".info-content");
-  if (existing) return;
-
-  button.textContent = "读取中";
-  try {
-    const data = await api(`/api/info/${encodeURIComponent(infoId)}`);
-    const pre = document.createElement("pre");
-    pre.className = "info-content";
-    pre.textContent = data.content || "";
-    wrapper.append(pre);
-    button.textContent = "收起";
-  } catch (error) {
-    button.textContent = "展开";
-    const notice = document.createElement("div");
-    notice.className = "unsupported info-error";
-    notice.textContent = error.message;
-    wrapper.append(notice);
-  }
-}
-
-function toggleInfoContent(wrapper, infoId, button) {
-  const existing = wrapper.querySelector(".info-content, .info-error");
-  if (existing) {
-    existing.remove();
-    button.textContent = "展开";
-    return;
-  }
-
-  loadInfoContent(wrapper, infoId, button);
-}
-
-async function generateWorkCover(workId, button) {
-  const originalText = button.textContent;
-  button.disabled = true;
-  button.textContent = "生成中";
-  try {
-    const data = await api(`/api/works/${encodeURIComponent(workId)}/cover/generate`, { method: "POST" });
-    if (data.work) {
-      updateWorkSnapshot(data.work);
-      state.currentWork = data.work;
-      renderPlayer(state.currentWork, state.currentVideo?.id);
-      renderMeta(state.currentWork);
-      renderWorks();
-    }
-  } catch (error) {
-    alert(error.message);
-    button.disabled = false;
-    button.textContent = originalText;
-  }
+  workDetailPage.renderMeta(work);
 }
 
 async function toggleFavorite(workId) {
-  const data = await api(`/api/favorites/${encodeURIComponent(workId)}`, { method: "POST" });
-  state.favoriteFolders = data.folders || state.favoriteFolders;
-  updateWorkFavorite(workId, data.favorite, data.favoriteFolder);
-  state.library.user = data.user;
-  renderSummary();
-
-  if (state.currentWork?.id === workId) {
-    state.currentWork.favorite = data.favorite;
-    if (data.favoriteFolder) {
-      state.currentWork.favoriteFolderId = data.favoriteFolder.folderId;
-      state.currentWork.favoriteFolderName = data.favoriteFolder.folderName;
-    } else {
-      state.currentWork.favoriteFolderId = "";
-      state.currentWork.favoriteFolderName = "";
-    }
-    renderPlayer(state.currentWork, state.currentVideo?.id);
-  }
-
-  if (state.activeView === "favorites" && !data.favorite) {
-    state.works = state.works.filter((work) => work.id !== workId);
-  }
-
-  if (state.activeView === "favorites") {
-    renderStatsForWorks(state.works);
-    renderFavoriteFolderControls();
-  }
-  renderWorks(state.activeView === "favorites" ? "还没有收藏。" : "没有匹配的作品。");
+  await workDetailPage.toggleFavorite(workId);
 }
 
 async function moveFavoriteToFolder(work, folderId, control) {
-  const previous = work.favoriteFolderId || "default";
-  control.disabled = true;
-  try {
-    const data = await api(`/api/favorites/${encodeURIComponent(work.id)}/folder`, { method: "PUT", body: { folderId } });
-    state.favoriteFolders = data.folders || state.favoriteFolders;
-    updateWorkFavoriteFolder(work.id, data.favorite);
-    state.library.user = data.user;
-    renderSummary();
-
-    if (state.currentWork?.id === work.id) {
-      state.currentWork.favoriteFolderId = data.favorite.folderId;
-      state.currentWork.favoriteFolderName = data.favorite.folderName;
-    }
-
-    if (state.activeView === "favorites" && state.selectedFavoriteFolderId !== "all" && data.favorite.folderId !== state.selectedFavoriteFolderId) {
-      state.works = state.works.filter((item) => item.id !== work.id);
-    }
-    renderStatsForWorks(state.works);
-    renderFavoriteFolderControls();
-    renderWorks("还没有收藏。");
-  } catch (error) {
-    control.value = previous;
-    alert(error.message);
-  } finally {
-    control.disabled = false;
-  }
-}
-
-function updateWorkFavorite(workId, favorite, favoriteFolder = null) {
-  for (const work of state.works) {
-    if (work.id !== workId) continue;
-    work.favorite = favorite;
-    if (favorite && favoriteFolder) {
-      work.favoriteFolderId = favoriteFolder.folderId;
-      work.favoriteFolderName = favoriteFolder.folderName;
-    }
-    if (!favorite) {
-      work.favoriteFolderId = "";
-      work.favoriteFolderName = "";
-    }
-  }
-}
-
-function updateWorkFavoriteFolder(workId, favoriteFolder) {
-  for (const work of state.works) {
-    if (work.id !== workId) continue;
-    work.favoriteFolderId = favoriteFolder.folderId;
-    work.favoriteFolderName = favoriteFolder.folderName;
-  }
+  await workDetailPage.moveFavoriteToFolder(work, folderId, control);
 }
 
 function updateWorkSnapshot(nextWork) {
-  const index = state.works.findIndex((work) => work.id === nextWork.id);
-  if (index >= 0) state.works[index] = { ...state.works[index], ...nextWork };
-}
-
-function startProgressReporting() {
-  stopProgressReporting();
-  state.progressTimer = window.setInterval(reportCurrentProgress, 5000);
-}
-
-function stopProgressReporting() {
-  if (state.progressTimer) {
-    window.clearInterval(state.progressTimer);
-    state.progressTimer = null;
-  }
-}
-
-function stopTimelineSync() {
-  if (state.timelineTimer) {
-    window.clearInterval(state.timelineTimer);
-    state.timelineTimer = null;
-  }
-  if (state.timelineAbortController) {
-    state.timelineAbortController.abort();
-    state.timelineAbortController = null;
-  }
-}
-
-function activeVideoElement() {
-  return els.playerArea.querySelector("video");
+  workDetailPage.updateWorkSnapshot(nextWork);
 }
 
 function reportCurrentProgress(options = {}) {
-  const video = activeVideoElement();
-  const duration = timelineDuration(video);
-  if (!state.currentVideo || !state.currentWork || !video || !Number.isFinite(duration) || duration <= 0) {
-    return;
-  }
-
-  const now = Date.now();
-  if (!options.force && now - state.lastProgressReport < 1400) return;
-  state.lastProgressReport = now;
-
-  api(`/api/progress/${encodeURIComponent(state.currentVideo.id)}`, {
-    method: "POST",
-    body: {
-      workId: state.currentWork.id,
-      position: currentPlaybackPosition(video),
-      duration
-    }
-  })
-    .then((data) => {
-      state.currentVideo.progress = data.progress;
-      state.currentWork.progress = data.progress;
-      state.library.user = data.user;
-      renderSummary();
-    })
-    .catch(() => {});
+  workDetailPage.reportCurrentProgress(options);
 }
 
 els.personSearch.addEventListener("input", (event) => {
@@ -3599,12 +2196,21 @@ els.personSearch.addEventListener("input", (event) => {
   }, 140);
 });
 
-els.workSearch.addEventListener("input", (event) => {
-  state.workQuery = event.target.value;
+els.workSearch.addEventListener("input", () => {
   window.clearTimeout(state.searchTimer);
-  state.searchTimer = window.setTimeout(() => {
-    loadSearchResults(state.workQuery);
-  }, 180);
+});
+
+els.workSearch.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    submitWorkSearch(event.currentTarget.value);
+    return;
+  }
+  if (event.key === "Escape" && event.currentTarget.value) {
+    event.preventDefault();
+    event.currentTarget.value = "";
+    submitWorkSearch("");
+  }
 });
 
 els.sortSelect.addEventListener("change", (event) => {
@@ -3662,6 +2268,27 @@ els.collectionToggle?.addEventListener("change", (event) => {
 
 els.backToPeopleIndex?.addEventListener("click", returnToPeopleIndex);
 
+for (const button of els.productTabs || []) {
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    clearWorkSearch();
+    if (button.dataset.productView === "gallery") {
+      const mode = button.dataset.galleryMode || "photo";
+      const changed = state.activeView !== "gallery" || state.gallery.mode !== mode;
+      state.gallery.mode = mode;
+      resetGalleryReader();
+      if (changed || mode !== "photo") state.gallery.photoView = "albums";
+      state.gallery.photoCollection = null;
+      state.gallery.category = "all";
+      state.gallery.person = "all";
+      state.gallery.visibleLimit = 80;
+      setActiveView("gallery");
+      return;
+    }
+    setActiveView(button.dataset.productView || "people");
+  });
+}
+
 for (const button of els.viewTabs) {
   button.addEventListener("click", () => {
     clearWorkSearch();
@@ -3669,11 +2296,11 @@ for (const button of els.viewTabs) {
   });
 }
 
-els.rescanButton.addEventListener("click", async () => {
+async function rescanFullLibrary(button) {
   const confirmed = window.confirm("全库重新扫描会遍历所有盘和文件，可能很慢。确定现在开始吗？");
   if (!confirmed) return;
 
-  els.rescanButton.disabled = true;
+  if (button) button.disabled = true;
   els.librarySummary.textContent = "正在重新扫描";
   try {
     const data = await api("/api/rescan", { method: "POST" });
@@ -3682,27 +2309,36 @@ els.rescanButton.addEventListener("click", async () => {
   } catch (error) {
     alert(error.message);
   } finally {
-    els.rescanButton.disabled = false;
+    if (button) button.disabled = false;
   }
-});
+}
 
-els.adminButton?.addEventListener("click", openAdminModal);
-els.closeAdmin?.addEventListener("click", closeAdminModal);
-els.adminBackdrop?.addEventListener("click", closeAdminModal);
-els.adminRescanPerson?.addEventListener("click", adminRescanSelectedPerson);
-els.adminRefreshActor?.addEventListener("click", adminRefreshActorMovies);
-els.adminRefreshRankings?.addEventListener("click", adminRefreshRankings);
-els.adminPreviewActorAvatars?.addEventListener("click", adminPreviewActorAvatarCandidates);
-els.adminImportActorAvatars?.addEventListener("click", adminImportActorAvatars);
-els.adminGenerateCovers?.addEventListener("click", adminGenerateMissingCovers);
-els.adminSaveCompilationConfig?.addEventListener("click", adminSaveCompilationConfig);
-els.compilationConfigButton?.addEventListener("click", openCompilationConfig);
+els.rescanButton?.addEventListener("click", () => rescanFullLibrary(els.rescanButton));
+els.topRescanButton?.addEventListener("click", () => rescanFullLibrary(els.topRescanButton));
+
+els.adminButton?.addEventListener("click", adminModal.openPage);
+els.closeAdmin?.addEventListener("click", adminModal.closeModal);
+els.adminBackdrop?.addEventListener("click", adminModal.closeModal);
+els.adminRescanPerson?.addEventListener("click", adminModal.rescanSelectedPerson);
+els.adminRefreshActor?.addEventListener("click", adminModal.refreshActorMovies);
+els.adminRefreshRankings?.addEventListener("click", adminModal.refreshRankings);
+els.adminPreviewActorAvatars?.addEventListener("click", adminModal.previewActorAvatarCandidates);
+els.adminImportActorAvatars?.addEventListener("click", adminModal.importActorAvatars);
+els.adminGenerateCovers?.addEventListener("click", adminModal.generateMissingCovers);
+els.adminSaveCompilationConfig?.addEventListener("click", adminModal.saveCompilationConfig);
+els.adminScriptForm?.addEventListener("submit", adminModal.runSelectedScript);
+els.adminRefreshScripts?.addEventListener("click", adminModal.loadScripts);
+els.adminScriptCategory?.addEventListener("change", () => {
+  state.adminScriptCategory = els.adminScriptCategory.value || "all";
+  adminModal.renderScripts();
+});
+els.compilationConfigButton?.addEventListener("click", adminModal.openCompilationConfig);
 
 els.closeDrawer.addEventListener("click", closeDrawer);
 els.drawerBackdrop.addEventListener("click", closeDrawer);
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && els.adminModal?.classList.contains("open")) {
-    closeAdminModal();
+    adminModal.closeModal();
     return;
   }
 
@@ -3713,6 +2349,18 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.key === "Tab" && drawerOpen) {
     trapDrawerFocus(event);
+  }
+
+  if (state.activeView === "gallery" && state.gallery.comic && state.gallery.chapter && !["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName)) {
+    const chapters = state.gallery.comic.chapters || [];
+    const currentIndex = chapters.findIndex((item) => item.index === state.gallery.chapter.index);
+    if (event.key === "ArrowLeft" && currentIndex > 0) {
+      event.preventDefault();
+      openMangaChapter(chapters[currentIndex - 1].index);
+    } else if (event.key === "ArrowRight" && currentIndex >= 0 && currentIndex < chapters.length - 1) {
+      event.preventDefault();
+      openMangaChapter(chapters[currentIndex + 1].index);
+    }
   }
 });
 
@@ -3730,7 +2378,7 @@ async function applyInitialUrlState() {
   await applyRoute(routeFromUrl());
 }
 
-loadLibrary()
+loadLibrary({ deferMainRender: true })
   .then(async () => {
     await applyInitialUrlState();
     initializeRouteHistory();
@@ -3739,3 +2387,4 @@ loadLibrary()
     els.librarySummary.textContent = "索引读取失败";
     renderEmpty(error.message);
   });
+

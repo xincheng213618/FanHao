@@ -14,6 +14,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from code_parser import loose_code_key, normalize_code
+from remote_image_cache import cache_remote_images, ensure_remote_image_schema, upsert_remote_image
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -131,10 +132,22 @@ def main() -> None:
         print("当前是 dry-run：会访问 JavDB 验证解析，但不会写入数据库。真正写入请加 --write。", flush=True)
 
     client = JavDbClient(args)
-    stats = {"ok": 0, "skip": 0, "miss": 0, "error": 0, "blocked": 0, "written_info": 0, "written_cover": 0}
+    stats = {
+        "ok": 0,
+        "skip": 0,
+        "miss": 0,
+        "error": 0,
+        "blocked": 0,
+        "written_info": 0,
+        "written_cover": 0,
+        "images_cached": 0,
+        "images_skipped": 0,
+        "images_failed": 0,
+    }
     try:
         with sqlite3.connect(args.db, timeout=30) as conn:
             ensure_schema(conn)
+            ensure_remote_image_schema(conn)
             for index, target in enumerate(targets, 1):
                 try:
                     meta = client.fetch_by_code(target.code)
@@ -151,6 +164,8 @@ def main() -> None:
                         cover_bytes, cover_mime = client.download_image(meta.image_url, meta.detail_url)
 
                     if args.write:
+                        if not args.no_cache_images:
+                            cache_meta_image(conn, client, meta, cover_bytes, cover_mime, stats)
                         if target.needs_info:
                             upsert_work_info(conn, target, meta)
                             stats["written_info"] += 1
@@ -210,6 +225,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refresh", action="store_true", help="忽略现有数据库缓存，重新抓取并覆盖")
     parser.add_argument("--mode", choices=["missing", "info", "cover", "both"], default="missing")
     parser.add_argument("--list-missing", action="store_true", help="只统计缺失项，不访问网络")
+    parser.add_argument("--no-cache-images", action="store_true", help="只写 work_info/work_covers，不同步封面/预览图到 remote_image_cache。")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--code", action="append", default=[], help="只处理指定番号，可重复")
     parser.add_argument("--work-id", action="append", default=[], help="只处理指定 work_id，可重复")
@@ -994,6 +1010,38 @@ def upsert_work_cover(conn: sqlite3.Connection, target: WorkTarget, meta: JavDbM
             now,
         ),
     )
+
+
+def image_session(client: JavDbClient) -> requests.Session:
+    session = requests.Session()
+    session.cookies = client.browser_cookies()
+    session.headers.update({"User-Agent": client.user_agent()})
+    return session
+
+
+def cache_meta_image(
+    conn: sqlite3.Connection,
+    client: JavDbClient,
+    meta: JavDbMeta,
+    cover_bytes: bytes,
+    cover_mime: str,
+    stats: dict,
+) -> None:
+    urls = []
+    if meta.image_url:
+        if cover_bytes:
+            if upsert_remote_image(conn, meta.image_url, cover_bytes, cover_mime):
+                stats["images_cached"] += 1
+        else:
+            urls.append(meta.image_url)
+    urls.extend((meta.preview_images or [])[:12])
+    if not urls:
+        return
+
+    image_stats = cache_remote_images(conn, urls, session=image_session(client), referer=meta.detail_url)
+    stats["images_cached"] += image_stats["cached"]
+    stats["images_skipped"] += image_stats["skipped"]
+    stats["images_failed"] += image_stats["failed"]
 
 
 def public_fields(meta: JavDbMeta) -> list[dict]:

@@ -29,6 +29,7 @@ from import_javdb_actor import (
     save_profile,
     wait_for_actor_page,
 )
+from remote_image_cache import ensure_remote_image_schema, upsert_remote_image
 
 
 SKIP_PERSON_NAMES = {"noactor", "VR"}
@@ -382,6 +383,7 @@ def save_work_cover(db_path: Path, person: dict, work: dict, cover: dict, cover_
     now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     with sqlite3.connect(db_path) as conn:
         ensure_schema(conn)
+        ensure_remote_image_schema(conn)
         conn.execute(
             """
             INSERT INTO work_covers (
@@ -414,6 +416,7 @@ def save_work_cover(db_path: Path, person: dict, work: dict, cover: dict, cover_
                 now,
             ),
         )
+        upsert_remote_image(conn, cover.get("cover_url") or "", cover_bytes, cover_mime)
 
 
 def cache_missing_work_covers(db_path: Path, person: dict, works: list[dict], html: str, base_url: str, driver) -> int:

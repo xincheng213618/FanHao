@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#1f2937" />
+    <title>FanHao 运维后台</title>
+    <link rel="icon" href="/app-icon.svg?v=20260628-admin-pro-02" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css?v=20260628-admin-pro-02" />
+  </head>
+  <body class="admin-page">
+    <div class="admin-shell">
+      <aside class="admin-side" aria-label="后台导航">
+        <a class="admin-brand-link" href="/">
+          <span class="admin-brand-mark">FH</span>
+          <span>
+            <strong>FanHao Console</strong>
+            <small id="adminServiceMode">本机控制台</small>
+          </span>
+        </a>
+
+        <nav class="admin-nav" aria-label="后台模块">
+          <button type="button" data-admin-nav="overview" class="active">
+            <span class="admin-nav-index">01</span>
+            <span><strong>系统总览</strong><small>健康、指标、快捷作业</small></span>
+          </button>
+          <button type="button" data-admin-nav="scripts">
+            <span class="admin-nav-index">02</span>
+            <span><strong>作业中心</strong><small><b id="adminNavScriptCount">-</b> 个脚本</small></span>
+          </button>
+          <button type="button" data-admin-nav="tasks">
+            <span class="admin-nav-index">03</span>
+            <span><strong>任务队列</strong><small><b id="adminNavTaskCount">-</b> 条历史</small></span>
+          </button>
+          <button type="button" data-admin-nav="maintenance">
+            <span class="admin-nav-index">04</span>
+            <span><strong>数据维护</strong><small>演员、封面、缓存</small></span>
+          </button>
+          <button type="button" data-admin-nav="rules">
+            <span class="admin-nav-index">05</span>
+            <span><strong>规则配置</strong><small>合集识别规则</small></span>
+          </button>
+        </nav>
+
+        <div class="admin-side-status">
+          <span id="adminSideHealth">正在检查服务</span>
+          <strong id="adminSideTotals">-</strong>
+          <small id="adminLastRefresh">-</small>
+        </div>
+      </aside>
+
+      <main class="admin-main">
+        <header class="admin-topbar">
+          <div class="admin-title-block">
+            <div class="eyebrow" id="adminViewEyebrow">后台</div>
+            <h1 id="adminViewTitle">系统总览</h1>
+          </div>
+          <label class="admin-global-search">
+            <span>搜索</span>
+            <input id="adminQuickSearch" type="search" placeholder="脚本、人物、任务" autocomplete="off" />
+          </label>
+          <div class="admin-topbar-actions">
+            <a class="folder-button compact" href="/">返回资料库</a>
+            <button class="folder-button compact" id="adminRefreshAll" type="button">刷新</button>
+          </div>
+        </header>
+
+        <section class="admin-view active" id="adminViewOverview" data-admin-view="overview">
+          <div class="admin-page-metrics">
+            <article class="admin-page-metric accent">
+              <span>登记脚本</span>
+              <strong id="adminScriptCount">-</strong>
+              <small id="adminScriptCategorySummary">-</small>
+            </article>
+            <article class="admin-page-metric blue">
+              <span>运行中</span>
+              <strong id="adminRunningCount">-</strong>
+              <small>实时轮询</small>
+            </article>
+            <article class="admin-page-metric green">
+              <span>最近完成</span>
+              <strong id="adminDoneCount">-</strong>
+              <small>历史任务</small>
+            </article>
+            <article class="admin-page-metric rust">
+              <span>异常</span>
+              <strong id="adminErrorCount">-</strong>
+              <small id="adminErrorSummary">-</small>
+            </article>
+          </div>
+
+          <div class="admin-dashboard-grid">
+            <section class="admin-panel admin-service-panel">
+              <div class="admin-panel-head">
+                <h2>服务状态</h2>
+                <span id="adminHealthBadge" class="admin-badge">检查中</span>
+              </div>
+              <div class="admin-health-grid">
+                <div>
+                  <span>访问模式</span>
+                  <strong id="adminHealthMode">-</strong>
+                </div>
+                <div>
+                  <span>磁盘来源</span>
+                  <strong id="adminHealthRoots">-</strong>
+                </div>
+                <div>
+                  <span>作品</span>
+                  <strong id="adminHealthWorks">-</strong>
+                </div>
+                <div>
+                  <span>索引时间</span>
+                  <strong id="adminHealthScannedAt">-</strong>
+                </div>
+              </div>
+              <p class="admin-inline-status" id="adminHealthStatus"></p>
+            </section>
+
+            <section class="admin-panel">
+              <div class="admin-panel-head">
+                <h2>快捷作业</h2>
+                <a href="#scripts">进入作业中心</a>
+              </div>
+              <div class="admin-quick-grid">
+                <button type="button" data-quick-script="verify-code-parsers">验证番号解析</button>
+                <button type="button" data-quick-script="metadata-quality-report">资料质量报告</button>
+                <button type="button" data-quick-script="generate-missing-covers">补本地封面</button>
+                <button type="button" data-quick-script="ranking-cache">刷新排行榜</button>
+              </div>
+            </section>
+
+            <section class="admin-panel">
+              <div class="admin-panel-head">
+                <h2>任务队列</h2>
+                <a href="#tasks">查看全部</a>
+              </div>
+              <div class="admin-task-list compact" id="adminTaskRail"></div>
+            </section>
+
+            <section class="admin-panel">
+              <div class="admin-panel-head">
+                <h2>最近异常</h2>
+                <a href="#tasks">任务日志</a>
+              </div>
+              <div class="admin-task-list compact" id="adminFailureRail"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="admin-view" id="adminViewScripts" data-admin-view="scripts">
+          <div class="admin-view-toolbar">
+            <div>
+              <h2>作业中心</h2>
+              <p>脚本按运维场景、写入风险和运行状态管理。</p>
+            </div>
+            <div class="admin-chip-row" id="adminScriptChips"></div>
+          </div>
+
+          <div class="admin-scripts-layout">
+            <section class="admin-panel admin-script-index">
+              <div class="admin-panel-head">
+                <h2>脚本目录</h2>
+                <button class="folder-button compact" id="adminRefreshScripts" type="button">刷新</button>
+              </div>
+              <div class="admin-script-filters">
+                <label class="admin-field">
+                  <span>分类</span>
+                  <select id="adminScriptCategory" aria-label="脚本分类"></select>
+                </label>
+                <label class="admin-field">
+                  <span>风险</span>
+                  <select id="adminScriptRisk" aria-label="风险等级">
+                    <option value="all">全部</option>
+                    <option value="safe">安全</option>
+                    <option value="normal">常规</option>
+                    <option value="write">写入</option>
+                    <option value="careful">谨慎</option>
+                    <option value="danger">高风险</option>
+                  </select>
+                </label>
+                <label class="admin-field wide">
+                  <span>搜索</span>
+                  <input id="adminScriptSearch" type="search" placeholder="脚本名 / 分类 / 说明" autocomplete="off" />
+                </label>
+              </div>
+              <div class="admin-script-list" id="adminScriptList" aria-label="脚本列表"></div>
+            </section>
+
+            <section class="admin-panel admin-script-workbench">
+              <form id="adminScriptForm">
+                <div class="admin-script-panel-head">
+                  <div>
+                    <div class="eyebrow" id="adminSelectedScriptCategory">脚本</div>
+                    <h2 id="adminSelectedScriptTitle">选择一个脚本</h2>
+                  </div>
+                  <div class="admin-script-badges">
+                    <span id="adminSelectedScriptRuntime" class="admin-script-runtime">-</span>
+                    <span id="adminSelectedScriptRisk" class="admin-badge">-</span>
+                  </div>
+                </div>
+                <p class="admin-script-description" id="adminSelectedScriptDescription">-</p>
+                <div class="admin-script-meta" id="adminSelectedScriptMeta"></div>
+                <div class="admin-script-fields" id="adminScriptFields"></div>
+                <div class="admin-danger-box" id="adminDangerBox" hidden>
+                  <label class="admin-field checkbox">
+                    <input id="adminDangerConfirm" type="checkbox" />
+                    <span>确认执行会写入、覆盖或清理数据的作业</span>
+                  </label>
+                </div>
+                <div class="admin-command-preview">
+                  <span>命令预览</span>
+                  <code id="adminCommandPreview">-</code>
+                </div>
+                <div class="admin-actions">
+                  <button class="folder-button" id="adminRunScript" type="submit">运行作业</button>
+                  <button class="folder-button subtle" id="adminResetScriptFields" type="button">重置参数</button>
+                </div>
+                <p class="admin-status" id="adminScriptStatus"></p>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section class="admin-view" id="adminViewTasks" data-admin-view="tasks">
+          <section class="admin-panel">
+            <div class="admin-panel-head">
+              <h2>任务队列</h2>
+              <button class="folder-button compact" id="adminRefreshTasks" type="button">刷新任务</button>
+            </div>
+            <div class="admin-task-filters" id="adminTaskFilters">
+              <button type="button" data-task-filter="all" class="active">全部</button>
+              <button type="button" data-task-filter="running">运行中</button>
+              <button type="button" data-task-filter="done">完成</button>
+              <button type="button" data-task-filter="error">异常</button>
+              <button type="button" data-task-filter="stopped">已停止</button>
+            </div>
+            <div class="admin-task-monitor">
+              <div class="admin-task-list board" id="adminTaskList"></div>
+              <aside class="admin-task-detail" id="adminTaskDetail"></aside>
+            </div>
+          </section>
+        </section>
+
+        <section class="admin-view" id="adminViewMaintenance" data-admin-view="maintenance">
+          <div class="admin-view-toolbar">
+            <div>
+              <h2>数据维护</h2>
+              <p>人物检测、演员头像、本地封面和缓存状态集中处理。</p>
+            </div>
+          </div>
+          <div class="admin-maintenance-grid">
+            <section class="admin-panel">
+              <div class="admin-panel-head">
+                <h2>人物维护</h2>
+              </div>
+              <label class="admin-field">
+                <span>人物</span>
+                <select id="adminPersonSelect" aria-label="选择人物"></select>
+              </label>
+              <div class="admin-actions">
+                <button class="folder-button" id="adminRescanPerson" type="button">刷新本地检测</button>
+                <button class="folder-button" id="adminRefreshActor" type="button">刷新缺失检测</button>
+                <button class="folder-button" id="adminRefreshRankings" type="button">刷新排行榜</button>
+              </div>
+              <p class="admin-status" id="adminStatus"></p>
+            </section>
+
+            <section class="admin-panel">
+              <div class="admin-panel-head">
+                <h2>演员头像</h2>
+              </div>
+              <label class="admin-field">
+                <span>本地头像目录</span>
+                <input id="adminActorAvatarDataPath" type="text" spellcheck="false" placeholder="F:\movie\actors" />
+              </label>
+              <div class="admin-actions">
+                <button class="folder-button" id="adminPreviewActorAvatars" type="button">预览候选</button>
+                <button class="folder-button" id="adminImportActorAvatars" type="button">扫描本地头像</button>
+              </div>
+              <div class="admin-avatar-candidates" id="adminActorAvatarCandidates"></div>
+            </section>
+
+            <section class="admin-panel">
+              <div class="admin-panel-head">
+                <h2>封面缓存</h2>
+                <button class="folder-button compact" id="adminRefreshCoverStatus" type="button">刷新统计</button>
+              </div>
+              <label class="admin-field compact">
+                <span>本次生成数量</span>
+                <input id="adminCoverLimit" type="number" min="1" max="200" step="1" value="20" />
+              </label>
+              <div class="admin-actions">
+                <button class="folder-button" id="adminGenerateCovers" type="button">批量补封面</button>
+              </div>
+              <p class="admin-status" id="adminCoverStatus"></p>
+            </section>
+
+            <section class="admin-panel">
+              <div class="admin-panel-head">
+                <h2>图库阅读缓存</h2>
+                <button class="folder-button compact" id="adminRefreshImageReaderCache" type="button">刷新状态</button>
+              </div>
+              <div class="admin-health-grid admin-cache-grid">
+                <div>
+                  <span>缓存目录</span>
+                  <strong id="adminImageReaderCacheRoot">-</strong>
+                </div>
+                <div>
+                  <span>当前大小</span>
+                  <strong id="adminImageReaderCacheSize">-</strong>
+                </div>
+                <div>
+                  <span>缓存文件</span>
+                  <strong id="adminImageReaderCacheFiles">-</strong>
+                </div>
+                <div>
+                  <span>上限</span>
+                  <strong id="adminImageReaderCacheLimit">-</strong>
+                </div>
+              </div>
+              <label class="admin-field compact">
+                <span>缓存上限 GB</span>
+                <input id="adminImageReaderCacheLimitInput" type="number" min="0.125" step="0.25" />
+              </label>
+              <div class="admin-actions">
+                <button class="folder-button" id="adminSaveImageReaderCacheLimit" type="button">保存上限</button>
+                <button class="folder-button subtle" id="adminCleanupImageReaderCache" type="button">清空阅读缓存</button>
+              </div>
+              <p class="admin-status" id="adminImageReaderCacheStatus"></p>
+            </section>
+          </div>
+        </section>
+
+        <section class="admin-view" id="adminViewRules" data-admin-view="rules">
+          <section class="admin-panel">
+            <div class="admin-panel-head">
+              <h2>合集规则</h2>
+              <span class="admin-badge">本地配置</span>
+            </div>
+            <div class="admin-config-grid">
+              <label class="admin-field">
+                <span>番号前缀</span>
+                <textarea id="adminCompilationPrefixes" rows="12" spellcheck="false"></textarea>
+              </label>
+              <label class="admin-field">
+                <span>标题关键词</span>
+                <textarea id="adminCompilationKeywords" rows="12" spellcheck="false"></textarea>
+              </label>
+            </div>
+            <div class="admin-actions">
+              <button class="folder-button" id="adminSaveCompilationConfig" type="button">保存合集规则</button>
+            </div>
+            <p class="admin-status" id="adminConfigStatus"></p>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="/admin.js?v=20260628-admin-pro-02" type="module"></script>
+  </body>
+</html>

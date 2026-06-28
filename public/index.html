@@ -7,12 +7,34 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="application-name" content="资料库" />
     <title>个人视频资料库</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=20260626-rank-return-07" />
-    <link rel="icon" href="/app-icon.svg?v=20260626-rank-return-07" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="/app-icon.svg?v=20260626-rank-return-07" />
-    <link rel="stylesheet" href="/styles.css?v=20260626-rank-return-07" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260628-gallery-13" />
+    <link rel="icon" href="/app-icon.svg?v=20260628-gallery-13" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/app-icon.svg?v=20260628-gallery-13" />
+    <link rel="stylesheet" href="/styles.css?v=20260628-gallery-13" />
   </head>
   <body>
+    <header class="product-topbar" aria-label="资料库模块">
+      <a class="product-brand" href="/" aria-label="返回 FanHao 番号库">
+        <span class="product-logo">FH</span>
+        <span class="product-brand-text">
+          <strong>FanHao</strong>
+          <small>个人资料库</small>
+        </span>
+      </a>
+      <nav class="product-nav" aria-label="主模块切换">
+        <a class="product-tab active" href="/" data-product-view="people" aria-current="page">番号</a>
+        <a class="product-tab" href="/photo" data-product-view="gallery" data-gallery-mode="photo">套图</a>
+        <a class="product-tab" href="/manga" data-product-view="gallery" data-gallery-mode="manga">韩漫</a>
+        <a class="product-tab" href="/western" data-product-view="gallery" data-gallery-mode="western">欧美</a>
+        <a class="product-tab" href="/movies" data-product-view="gallery" data-gallery-mode="movie">电影</a>
+        <a class="product-tab" href="/tv" data-product-view="gallery" data-gallery-mode="tv">电视剧</a>
+        <a class="product-tab" href="/tools" data-product-view="tools">小工具</a>
+      </nav>
+      <div class="product-actions">
+        <button class="product-action" id="topRescanButton" type="button">刷新索引</button>
+        <a class="product-action" id="topAdminLink" href="/admin">设置</a>
+      </div>
+    </header>
     <div class="app-shell">
       <aside class="sidebar" aria-label="人物分类">
         <div class="brand">
@@ -104,14 +126,65 @@
     <section class="admin-modal" id="adminModal" role="dialog" aria-modal="true" aria-labelledby="adminTitle" aria-hidden="true" tabindex="-1">
       <header class="admin-header">
         <div>
-          <div class="eyebrow">本机后台</div>
-          <h3 id="adminTitle">后台管理</h3>
+          <div class="eyebrow">本机后台控制台</div>
+          <h3 id="adminTitle">脚本与维护后台</h3>
         </div>
         <button class="icon-button" id="closeAdmin" type="button" title="关闭" aria-label="关闭">
           <span aria-hidden="true">×</span>
         </button>
       </header>
       <div class="admin-content">
+        <section class="admin-overview" aria-label="后台概览">
+          <div class="admin-metric">
+            <span>登记脚本</span>
+            <strong id="adminScriptCount">-</strong>
+          </div>
+          <div class="admin-metric">
+            <span>运行中</span>
+            <strong id="adminRunningCount">-</strong>
+          </div>
+          <div class="admin-metric">
+            <span>最近完成</span>
+            <strong id="adminDoneCount">-</strong>
+          </div>
+          <div class="admin-metric">
+            <span>异常</span>
+            <strong id="adminErrorCount">-</strong>
+          </div>
+        </section>
+        <section class="admin-section admin-script-section">
+          <div class="admin-section-head">
+            <div>
+              <div class="admin-section-title">脚本控制</div>
+              <p class="admin-section-subtitle">登记过的工具脚本可以在这里配置参数、启动、停止并查看日志。</p>
+            </div>
+            <div class="admin-script-toolbar">
+              <label class="admin-field compact">
+                <span>分类</span>
+                <select id="adminScriptCategory" aria-label="脚本分类"></select>
+              </label>
+              <button class="folder-button compact" id="adminRefreshScripts" type="button">刷新</button>
+            </div>
+          </div>
+          <div class="admin-script-console">
+            <div class="admin-script-list" id="adminScriptList" aria-label="脚本列表"></div>
+            <form class="admin-script-panel" id="adminScriptForm">
+              <div class="admin-script-panel-head">
+                <div>
+                  <div class="eyebrow" id="adminSelectedScriptCategory">脚本</div>
+                  <h4 id="adminSelectedScriptTitle">选择一个脚本</h4>
+                </div>
+                <span id="adminSelectedScriptRuntime" class="admin-script-runtime">-</span>
+              </div>
+              <p class="admin-script-description" id="adminSelectedScriptDescription">从左侧选择脚本后，可以调整参数并启动任务。</p>
+              <div class="admin-script-fields" id="adminScriptFields"></div>
+              <div class="admin-actions">
+                <button class="folder-button" id="adminRunScript" type="submit">运行脚本</button>
+              </div>
+              <p class="admin-status" id="adminScriptStatus"></p>
+            </form>
+          </div>
+        </section>
         <section class="admin-section">
           <label class="admin-field">
             <span>人物</span>
@@ -196,6 +269,6 @@
       </div>
     </template>
 
-    <script src="/app.js?v=20260627-route-return-01" type="module"></script>
+    <script src="/app.js?v=20260628-gallery-13" type="module"></script>
   </body>
 </html>

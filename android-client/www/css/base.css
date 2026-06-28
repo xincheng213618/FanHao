@@ -225,6 +225,16 @@ h2 {
   font-weight: 800;
 }
 
+.search-bar.channel-mode {
+  border-color: rgba(47, 128, 237, 0.24);
+  background: var(--button-soft);
+}
+
+.search-bar.channel-mode span,
+.search-bar.channel-mode input::placeholder {
+  color: var(--blue);
+}
+
 .search-history {
   display: flex;
   gap: 8px;
@@ -257,6 +267,127 @@ h2 {
   border-color: color-mix(in srgb, var(--green) 35%, var(--line));
   background: var(--success-soft);
   color: var(--green);
+}
+
+.library-channel-strip {
+  display: grid;
+  grid-auto-columns: minmax(92px, 112px);
+  grid-auto-flow: column;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 14px 0 2px;
+  scrollbar-width: none;
+}
+
+.library-channel-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.library-channel-strip button {
+  display: grid;
+  min-height: 58px;
+  align-content: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 10px 11px;
+  text-align: left;
+}
+
+.library-channel-strip strong,
+.library-channel-strip span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-channel-strip strong {
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.library-channel-strip span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.omni-section {
+  display: grid;
+  gap: 12px;
+  padding: 18px 0 4px;
+}
+
+.omni-section .section-head {
+  align-items: flex-end;
+}
+
+.omni-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.omni-grid > .loading-row {
+  grid-column: 1 / -1;
+}
+
+.omni-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto;
+  min-height: 112px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  padding: 12px;
+  text-align: left;
+  box-shadow: 0 8px 18px rgba(20, 29, 40, 0.06);
+}
+
+.omni-card-label,
+.omni-card-detail {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.omni-card-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.omni-card-value {
+  align-self: end;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: clamp(22px, 7vw, 30px);
+  line-height: 1.05;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.omni-card-unit {
+  align-self: end;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 950;
+  padding-bottom: 3px;
+}
+
+.omni-card-detail {
+  align-self: end;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .quick-strip {

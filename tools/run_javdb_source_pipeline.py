@@ -77,6 +77,7 @@ def main() -> None:
                 *flag_args("--refresh", args.refresh),
                 *flag_args("--refresh-actor", args.refresh_actor),
                 *flag_args("--include-special", args.include_special),
+                *flag_args("--no-cache-images", args.no_cache_images),
                 *flag_args("--no-write-files", args.no_write_files),
                 *flag_args("--overwrite-files", args.overwrite_files),
             ],
@@ -125,6 +126,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refresh", action="store_true", help="重新抓作品信息/封面。")
     parser.add_argument("--refresh-actor", action="store_true", help="重新搜索/刷新 actor 页映射。")
     parser.add_argument("--cache-covers-during-actor-import", action="store_true")
+    parser.add_argument("--no-cache-images", action="store_true", help="actor页补全时不下载远端封面/预览图到 remote_image_cache。")
     parser.add_argument("--no-write-files", action="store_true")
     parser.add_argument("--overwrite-files", action="store_true")
     parser.add_argument("--no-import-actors", action="store_true")

@@ -1,27 +1,34 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260629-tools-native-01";
 import { fetchJson } from "./js/api.js";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js";
+import { createChannelViews } from "./js/channel-views.js?v=20260629-tools-native-01";
 import { createDetailViews } from "./js/detail-views.js";
-import { getElements } from "./js/dom.js";
+import { getElements } from "./js/dom.js?v=20260629-tools-native-01";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { createMediaViewer } from "./js/media-viewer.js";
 import { createPeopleViews } from "./js/people-views.js";
 import { createSearchHistory } from "./js/search-history.js";
+import { createToolViews } from "./js/tool-views.js?v=20260629-tools-native-01";
 import { createWorkViews } from "./js/work-views.js";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
-const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "favorites", "history", "search", "personDetail", "workDetail"]);
+const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "favorites", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "tools"]);
 const initialViewState = readInitialViewState();
 let library = null;
 let currentView = initialViewState.view;
 let currentViewParams = initialViewState.params;
 let peopleLimit = 80;
 let worksLimit = defaultWorksLimitForView(initialViewState.view);
+let channelLimit = defaultChannelLimitForView(initialViewState.view);
+let photoImageLimit = defaultPhotoImageLimitForView(initialViewState.view);
+let mangaImageLimit = defaultMangaImageLimitForView(initialViewState.view);
 let viewStack = [];
 let detailViews = null;
 let peopleViews = null;
 let workViews = null;
+let channelViews = null;
+let toolViews = null;
 let mediaViewer = null;
 let searchHistory = null;
 let viewRenderToken = 0;
@@ -29,7 +36,9 @@ let activeViewController = null;
 let pendingScrollRestore = null;
 const HISTORY_MARKER = "fanhao-android";
 const LIBRARY_CACHE_PATH = "/api/library";
+const IMAGE_LIBRARY_SUMMARY_CACHE_PATH = "/api/image-library/summary";
 let themePreference = localStorage.getItem(THEME_STORAGE_KEY) || "system";
+let imageLibrarySummary = null;
 
 function readInitialViewState() {
   return readViewStateFromHash() || readLastViewState();
@@ -60,6 +69,11 @@ function shouldRememberView(view, params = {}) {
   if (view === "search") return Boolean(String(params.query || "").trim());
   if (view === "personDetail") return Boolean(params.personId);
   if (view === "workDetail") return Boolean(params.workId);
+  if (view === "channel") return Boolean(params.mode);
+  if (view === "photoDetail") return Boolean(params.id);
+  if (view === "mangaDetail") return Boolean(params.id);
+  if (view === "mangaChapter") return Boolean(params.id && params.chapterIndex);
+  if (view === "mediaDetail") return Boolean(params.id);
   return true;
 }
 
@@ -67,7 +81,24 @@ function sanitizeViewParams(view, params = {}) {
   if (view === "search") return { query: String(params.query || "").trim() };
   if (view === "personDetail") return { personId: String(params.personId || "") };
   if (view === "workDetail") return { workId: String(params.workId || "") };
+  if (view === "photoDetail") return { id: String(params.id || "") };
+  if (view === "mangaDetail") return { id: String(params.id || "") };
+  if (view === "mangaChapter") return { id: String(params.id || ""), chapterIndex: String(params.chapterIndex || params.chapter || "") };
+  if (view === "mediaDetail") return { id: String(params.id || "") };
+  if (view === "channel") {
+    const query = String(params.q || params.query || "").trim();
+    return {
+      mode: normalizeChannelMode(params.mode),
+      ...(query ? { query } : {})
+    };
+  }
   return {};
+}
+
+function normalizeChannelMode(value) {
+  const mode = String(value || "").trim();
+  if (mode === "movies") return "movie";
+  return ["photo", "manga", "western", "movie", "tv"].includes(mode) ? mode : "";
 }
 
 function readViewStateFromHash(hash = window.location.hash) {
@@ -236,6 +267,177 @@ function setCacheActionsDisabled(disabled) {
   if (els.clearCacheButton) els.clearCacheButton.disabled = disabled;
 }
 
+async function loadImageLibrarySummary() {
+  if (!els.omniGrid) return false;
+  const requestUrl = activeUrl;
+  if (!imageLibrarySummary) renderOmniSummary(null, { loading: true });
+
+  const cached = await readCachedJson(requestUrl, IMAGE_LIBRARY_SUMMARY_CACHE_PATH).catch(() => null);
+  if (requestUrl !== activeUrl) return false;
+  if (cached?.payload) {
+    imageLibrarySummary = cached.payload;
+    renderOmniSummary(imageLibrarySummary, { cachedAt: cached.updatedAt });
+  }
+
+  try {
+    const summary = await fetchJson(requestUrl, IMAGE_LIBRARY_SUMMARY_CACHE_PATH, { timeoutMs: 12000 });
+    if (requestUrl !== activeUrl) return false;
+    imageLibrarySummary = summary;
+    writeCachedJson(requestUrl, IMAGE_LIBRARY_SUMMARY_CACHE_PATH, summary).catch(() => {});
+    renderOmniSummary(imageLibrarySummary);
+    return true;
+  } catch (error) {
+    if (requestUrl !== activeUrl) return false;
+    renderOmniSummary(imageLibrarySummary, { error });
+    return false;
+  }
+}
+
+function renderOmniSummary(summary, state = {}) {
+  if (!els.omniGrid) return;
+  syncChannelCounts(summary);
+  els.omniGrid.innerHTML = "";
+
+  if (!summary && state.loading) {
+    els.omniMeta.textContent = "正在读取";
+    els.omniGrid.innerHTML = `<div class="loading-row">正在读取图像和媒体资料库</div>`;
+    return;
+  }
+
+  if (!summary) {
+    els.omniMeta.textContent = state.error ? "暂不可用" : "等待数据";
+    els.omniGrid.innerHTML = `<div class="loading-row">图像和媒体资料库暂时不可用</div>`;
+    return;
+  }
+
+  els.omniMeta.textContent = omniMetaText(summary, state);
+  for (const channel of omniChannels(summary)) {
+    els.omniGrid.append(createOmniCard(channel));
+  }
+}
+
+function omniMetaText(summary, state = {}) {
+  if (state.error) return "离线缓存";
+  if (state.cachedAt) return `缓存 ${cacheAgeText(state.cachedAt)}`;
+  if (summary.scannedAt) return `更新 ${cacheAgeText(summary.scannedAt)}`;
+  return "已连接";
+}
+
+function omniChannels(summary = {}) {
+  const totals = summary.totals || {};
+  const workTotals = library?.totals || {};
+  return [
+    {
+      label: "番号库",
+      value: formatCompact(workTotals.works),
+      unit: "作品",
+      detail: `${formatCompact(workTotals.videos)} 视频 · ${formatCompact(workTotals.infoFiles)} 资料`,
+      view: "works"
+    },
+    {
+      label: "套图",
+      value: formatCompact(totals.photoSets),
+      unit: "图包",
+      detail: [formatBytes(totals.photoBytes), rootStatusText(summary.photoRoots)].filter(Boolean).join(" · "),
+      mode: "photo"
+    },
+    {
+      label: "韩漫",
+      value: formatCompact(totals.manga),
+      unit: "部",
+      detail: rootStatusText(summary.mangaRoot),
+      mode: "manga"
+    },
+    {
+      label: "欧美",
+      value: formatCompact(totals.western),
+      unit: "视频",
+      detail: mediaRootText(summary, "western"),
+      mode: "western"
+    },
+    {
+      label: "电影",
+      value: formatCompact(totals.movies),
+      unit: "影片",
+      detail: mediaRootText(summary, "movie"),
+      mode: "movie"
+    },
+    {
+      label: "电视剧",
+      value: formatCompact(totals.tv),
+      unit: "集",
+      detail: mediaRootText(summary, "tv"),
+      mode: "tv"
+    },
+    {
+      label: "TXT 工具",
+      value: "排版",
+      unit: "工具",
+      detail: "小说文本整理",
+      view: "tools"
+    }
+  ];
+}
+
+function createOmniCard(channel) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "omni-card";
+  card.addEventListener("click", () => {
+    if (channel.view) {
+      showView(channel.view, {}, { resetStack: true });
+      return;
+    }
+    if (channel.mode) {
+      showView("channel", { mode: channel.mode }, { resetStack: true });
+      return;
+    }
+    openInLibrary(channel.path || "/");
+  });
+
+  const head = document.createElement("span");
+  head.className = "omni-card-label";
+  head.textContent = channel.label;
+
+  const value = document.createElement("strong");
+  value.className = "omni-card-value";
+  value.textContent = channel.value || "0";
+
+  const unit = document.createElement("span");
+  unit.className = "omni-card-unit";
+  unit.textContent = channel.unit || "";
+
+  const detail = document.createElement("span");
+  detail.className = "omni-card-detail";
+  detail.textContent = channel.detail || "打开频道";
+
+  card.append(head, value, unit, detail);
+  return card;
+}
+
+function rootStatusText(roots) {
+  const list = Array.isArray(roots) ? roots : roots ? [roots] : [];
+  if (!list.length) return "";
+  const available = list.filter((item) => item.exists !== false).length;
+  if (available === list.length) return `${formatNumber(available)} 个目录可用`;
+  return `${formatNumber(available)}/${formatNumber(list.length)} 目录可用`;
+}
+
+function mediaRootText(summary = {}, kind) {
+  const roots = (summary.mediaRoots || []).filter((item) => item.kind === kind);
+  return rootStatusText(roots) || "媒体目录";
+}
+
+function syncChannelCounts(summary = imageLibrarySummary) {
+  const totals = summary?.totals || {};
+  if (els.channelWorksCount) els.channelWorksCount.textContent = library?.totals?.works ? `${formatCompact(library.totals.works)} 作品` : "默认库";
+  if (els.channelPhotoCount) els.channelPhotoCount.textContent = totals.photoSets ? `${formatCompact(totals.photoSets)} 图包` : "图包 / 合集";
+  if (els.channelMangaCount) els.channelMangaCount.textContent = totals.manga ? `${formatCompact(totals.manga)} 部` : "章节阅读";
+  if (els.channelWesternCount) els.channelWesternCount.textContent = totals.western ? `${formatCompact(totals.western)} 视频` : "视频";
+  if (els.channelMovieCount) els.channelMovieCount.textContent = totals.movies ? `${formatCompact(totals.movies)} 影片` : "影片";
+  if (els.channelTvCount) els.channelTvCount.textContent = totals.tv ? `${formatCompact(totals.tv)} 集` : "剧集";
+}
+
 async function updateServiceHealth() {
   if (!els.serviceHealthStatus) return;
   const requestUrl = activeUrl;
@@ -312,18 +514,22 @@ function updateServer(url) {
   localStorage.setItem(STORAGE_KEY, activeUrl);
   els.serverUrl.value = activeUrl;
   els.serverLabel.textContent = activeUrl;
+  imageLibrarySummary = null;
+  renderOmniSummary(null, { loading: true });
 
   for (const button of els.quickServers) {
     button.classList.toggle("active", normalizeUrl(button.dataset.url) === activeUrl);
   }
 }
 
-function openInLibrary(params = {}) {
-  const url = new URL(activeUrl);
+function openInLibrary(target = {}) {
+  const options = typeof target === "string" ? { path: target } : target;
+  const url = new URL(options.path || "/", activeUrl);
   url.searchParams.set("client", "android");
   url.searchParams.set("appv", CLIENT_VERSION);
   url.searchParams.set("returnTo", androidReturnUrl());
-  for (const [key, value] of Object.entries(params)) {
+  for (const [key, value] of Object.entries(options)) {
+    if (key === "path") continue;
     if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
   }
   window.location.assign(url.toString());
@@ -346,6 +552,7 @@ function androidReturnUrl() {
 async function loadDashboard() {
   setConnection("连接中", true);
   els.personPreview.innerHTML = `<div class="loading-row">正在读取资料库</div>`;
+  loadImageLibrarySummary();
 
   const cached = await readCachedJson(activeUrl, LIBRARY_CACHE_PATH).catch(() => null);
   if (cached?.payload) {
@@ -402,6 +609,8 @@ function renderDashboard(data) {
   els.peopleCount.textContent = formatNumber(totals.people);
   if (els.worksCount) els.worksCount.textContent = formatCompact(totals.works);
   if (els.rankingsCount) els.rankingsCount.textContent = "TOP";
+  syncChannelCounts(imageLibrarySummary);
+  renderOmniSummary(imageLibrarySummary, { loading: !imageLibrarySummary });
 
   const previewPeople = [...people]
     .sort((a, b) => {
@@ -427,6 +636,8 @@ function showHome(options = {}) {
   els.quickStrip.hidden = false;
   els.continueSection.hidden = els.continuePreview.dataset.hasItems !== "1";
   els.statusCard.hidden = false;
+  if (els.omniSection) els.omniSection.hidden = false;
+  if (els.libraryChannelStrip) els.libraryChannelStrip.hidden = false;
   els.previewSection.hidden = false;
   els.contentPanel.hidden = true;
   els.settingsPanel.hidden = true;
@@ -446,6 +657,8 @@ function showSettings(options = {}) {
   els.quickStrip.hidden = true;
   els.continueSection.hidden = true;
   els.statusCard.hidden = true;
+  if (els.omniSection) els.omniSection.hidden = true;
+  if (els.libraryChannelStrip) els.libraryChannelStrip.hidden = true;
   els.previewSection.hidden = true;
   els.contentPanel.hidden = true;
   els.settingsPanel.hidden = false;
@@ -458,7 +671,7 @@ function showSettings(options = {}) {
 }
 
 function showView(view, params = {}, navigation = {}) {
-  if (!library && view !== "home") {
+  if (!library && view !== "home" && view !== "tools") {
     toggleSettings(true);
     return;
   }
@@ -473,9 +686,13 @@ function showView(view, params = {}, navigation = {}) {
   currentViewParams = sanitizeViewParams(view, params);
   peopleLimit = 80;
   worksLimit = defaultWorksLimitForView(view);
+  channelLimit = defaultChannelLimitForView(view);
+  photoImageLimit = defaultPhotoImageLimitForView(view);
+  mangaImageLimit = defaultMangaImageLimitForView(view);
   els.settingsPanel.hidden = true;
   rememberViewState(currentView, currentViewParams);
   if (shouldWriteHistory) pushViewHistory(view, currentViewParams, navigation.restoreScrollY ?? 0);
+  else if (navigation.replaceHistory) replaceCurrentHistory();
   renderCurrentView();
   queueScrollRestore(navigation.restoreScrollY ?? 0);
 }
@@ -485,6 +702,18 @@ function defaultWorksLimitForView(view) {
   if (view === "works") return 80;
   if (view === "search" || view === "personDetail") return 60;
   return 40;
+}
+
+function defaultChannelLimitForView(view) {
+  return view === "channel" ? 48 : 40;
+}
+
+function defaultPhotoImageLimitForView(view) {
+  return view === "photoDetail" ? 24 : 12;
+}
+
+function defaultMangaImageLimitForView(view) {
+  return view === "mangaChapter" ? 12 : 8;
 }
 
 function goBack() {
@@ -568,6 +797,8 @@ function renderCurrentView() {
   }
 
   els.statusCard.hidden = true;
+  if (els.omniSection) els.omniSection.hidden = true;
+  if (els.libraryChannelStrip) els.libraryChannelStrip.hidden = true;
   els.previewSection.hidden = true;
   els.continueSection.hidden = true;
   els.quickStrip.hidden = true;
@@ -608,6 +839,30 @@ function renderCurrentView() {
   }
   if (currentView === "workDetail") {
     detailViews.renderWorkDetail(currentViewParams.workId, renderGuard);
+    return;
+  }
+  if (currentView === "channel") {
+    channelViews.renderChannel(currentViewParams, renderGuard);
+    return;
+  }
+  if (currentView === "photoDetail") {
+    channelViews.renderPhotoDetail(currentViewParams.id, renderGuard);
+    return;
+  }
+  if (currentView === "mangaDetail") {
+    channelViews.renderMangaDetail(currentViewParams.id, renderGuard);
+    return;
+  }
+  if (currentView === "mangaChapter") {
+    channelViews.renderMangaChapter(currentViewParams.id, currentViewParams.chapterIndex, renderGuard);
+    return;
+  }
+  if (currentView === "mediaDetail") {
+    channelViews.renderMediaDetail(currentViewParams.id, renderGuard);
+    return;
+  }
+  if (currentView === "tools") {
+    toolViews.renderTxtTool(renderGuard);
   }
 }
 
@@ -621,6 +876,7 @@ function renderOffline() {
   els.peopleCount.textContent = "0";
   if (els.worksCount) els.worksCount.textContent = "0";
   if (els.rankingsCount) els.rankingsCount.textContent = "TOP";
+  syncChannelCounts(imageLibrarySummary);
   els.continueSection.hidden = true;
   els.continuePreview.dataset.hasItems = "0";
   els.continuePreview.innerHTML = "";
@@ -646,10 +902,18 @@ function setActiveBottom(name) {
 
 function syncSearchSurface() {
   const isSearch = currentView === "search";
+  const isChannel = currentView === "channel";
   if (els.searchHistory) els.searchHistory.hidden = !isSearch;
   if (els.bottomNavBar) els.bottomNavBar.hidden = isSearch;
   els.searchForm.classList.toggle("search-mode", isSearch);
+  els.searchForm.classList.toggle("channel-mode", isChannel);
   document.body.classList.toggle("search-view", isSearch);
+  const channelLabel = isChannel ? channelViews?.channelLabel(currentViewParams.mode) : "";
+  els.searchInput.placeholder = isChannel ? `搜${channelLabel || "频道"}` : "搜作品/人物，频道看图包";
+  if (isChannel) {
+    els.searchInput.value = currentViewParams.query || "";
+    return;
+  }
   if (!isSearch) {
     els.searchInput.value = "";
     if (document.activeElement === els.searchInput) els.searchInput.blur();
@@ -668,6 +932,41 @@ workViews = createWorkViews({
   setActiveBottom,
   renderCurrentView,
   isHomeView: () => currentView === "home"
+});
+
+channelViews = createChannelViews({
+  els,
+  getActiveUrl: () => activeUrl,
+  getChannelLimit: () => channelLimit,
+  increaseChannelLimit: (amount) => {
+    channelLimit += amount;
+  },
+  getPhotoImageLimit: () => photoImageLimit,
+  increasePhotoImageLimit: (amount) => {
+    photoImageLimit += amount;
+  },
+  getMangaImageLimit: () => mangaImageLimit,
+  increaseMangaImageLimit: (amount) => {
+    mangaImageLimit += amount;
+  },
+  openInLibrary,
+  showPhotoDetail: (id) => showView("photoDetail", { id }, { push: true }),
+  showMangaDetail: (id) => showView("mangaDetail", { id }, { push: true }),
+  showMangaChapter: (id, chapterIndex) => showView("mangaChapter", { id, chapterIndex }, { push: true }),
+  showMediaDetail: (id) => showView("mediaDetail", { id }, { push: true }),
+  setActiveBottom,
+  renderCurrentView,
+  getMediaViewer: () => mediaViewer,
+  updateChannelQuery: (query) => {
+    showView("channel", { ...currentViewParams, query }, { skipHistory: true, replaceHistory: true });
+  }
+});
+
+toolViews = createToolViews({
+  els,
+  getActiveUrl: () => activeUrl,
+  openInLibrary,
+  setActiveBottom
 });
 
 mediaViewer = createMediaViewer();
@@ -701,6 +1000,10 @@ detailViews = createDetailViews({
 });
 
 function runSearch(query) {
+  if (currentView === "channel") {
+    showView("channel", { ...currentViewParams, query: String(query || "").trim() }, { skipHistory: true, replaceHistory: true });
+    return;
+  }
   const navigation = currentView === "search"
     ? { skipHistory: true }
     : { resetStack: true };
@@ -742,11 +1045,16 @@ els.openLibraryButton.addEventListener("click", () => {
 
 els.searchForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (currentView === "channel") {
+    runSearch(els.searchInput.value);
+    return;
+  }
   searchHistory.run(els.searchInput.value);
 });
 
 els.searchInput.addEventListener("focus", () => {
   if (currentView === "search") return;
+  if (currentView === "channel") return;
   const navigation = currentView === "home" || currentView === "settings"
     ? { resetStack: true }
     : { push: true };
@@ -811,7 +1119,11 @@ for (const button of els.openTargets) {
       showView(button.dataset.openView, {}, { resetStack: true });
       return;
     }
-    openInLibrary();
+    if (button.dataset.openChannel) {
+      showView("channel", { mode: button.dataset.openChannel }, { resetStack: true });
+      return;
+    }
+    openInLibrary(button.dataset.openUrl || "/");
   });
 }
 

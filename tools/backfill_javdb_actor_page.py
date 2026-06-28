@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
+import requests
 from bs4 import BeautifulSoup
 from selenium.common.exceptions import TimeoutException
 
@@ -44,6 +45,7 @@ from import_javdb_actor import (  # noqa: E402
     profile_looks_ready,
     save_profile,
 )
+from remote_image_cache import cache_remote_images, ensure_remote_image_schema, upsert_remote_image  # noqa: E402
 
 
 DEFAULT_LOG_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -83,6 +85,7 @@ def main() -> None:
         ensure_actor_schema(conn)
         ensure_work_schema(conn)
         ensure_actor_movie_schema(conn)
+        ensure_remote_image_schema(conn)
         actor_specs = resolve_actor_specs(conn, people, args.actor_url)
         if not actor_specs:
             actor_specs = actor_specs_from_cache(conn, people)
@@ -118,6 +121,9 @@ def main() -> None:
         "written_info_files": 0,
         "written_cover_files": 0,
         "file_errors": 0,
+        "images_cached": 0,
+        "images_skipped": 0,
+        "images_failed": 0,
     }
 
     try:
@@ -125,6 +131,7 @@ def main() -> None:
             ensure_actor_schema(conn)
             ensure_work_schema(conn)
             ensure_actor_movie_schema(conn)
+            ensure_remote_image_schema(conn)
             for person_index, job in enumerate(actor_jobs, 1):
                 person = job["person"]
                 actor_url = job["actor_url"]
@@ -139,6 +146,16 @@ def main() -> None:
                     actor_html, actor_profile, movies = crawl_actor_movies(client, actor_url, args)
                     if args.write:
                         stats["written_actor_movies"] += save_actor_movies(conn, person, actor_url, actor_profile, movies, replace=not bool(args.max_pages))
+                        if not args.no_cache_images:
+                            image_stats = cache_remote_images(
+                                conn,
+                                [movie.image_url for movie in movies],
+                                session=image_session(client),
+                                referer=actor_url,
+                            )
+                            stats["images_cached"] += image_stats["cached"]
+                            stats["images_skipped"] += image_stats["skipped"]
+                            stats["images_failed"] += image_stats["failed"]
                         conn.commit()
                     if args.write and not args.actor_movies_only and (args.refresh_actor or not job["actor_cached_ok"]):
                         if profile_looks_ready(actor_profile):
@@ -166,6 +183,9 @@ def main() -> None:
                             "matchedMovies": len(movie_by_code),
                             "actorTitle": actor_profile.get("display_name"),
                             "actorPageBytes": len(actor_html.encode("utf-8")),
+                            "imagesCached": image_stats["cached"] if args.write and not args.no_cache_images else 0,
+                            "imagesSkipped": image_stats["skipped"] if args.write and not args.no_cache_images else 0,
+                            "imagesFailed": image_stats["failed"] if args.write and not args.no_cache_images else 0,
                         },
                     )
                 except AccessBlockedError as error:
@@ -208,6 +228,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refresh-actor", action="store_true", help="刷新 actor_profiles 头像和资料页映射。")
     parser.add_argument("--actor-movies-only", action="store_true", help="只缓存 actor 页作品列表，用于统计/网站灰色未下载卡片；不进详情页。")
     parser.add_argument("--write", action="store_true", help="实际写入 SQLite；不加时为 dry-run。")
+    parser.add_argument("--no-cache-images", action="store_true", help="只写 URL，不下载 actor 页/详情页图片到 remote_image_cache。")
     parser.add_argument("--no-write-files", action="store_true", help="只写 SQLite，不回写 info.txt 和 cover.* 到作品目录。")
     parser.add_argument("--overwrite-files", action="store_true", help="允许覆盖作品目录里的 info.txt / cover.*。默认不覆盖。")
     parser.add_argument("--list-targets", action="store_true", help="只列出待补项目，不访问 JavDB。")
@@ -745,6 +766,8 @@ def process_targets(
                 cover_bytes, cover_mime = client.download_image(meta.image_url, meta.detail_url)
 
             if args.write:
+                if not args.no_cache_images:
+                    cache_meta_image(conn, client, meta, cover_bytes, cover_mime, stats)
                 if target.needs_info:
                     upsert_work_info(conn, target, meta)
                     stats["written_info"] += 1
@@ -789,6 +812,38 @@ def process_targets(
             write_jsonl(log_path, result_payload("error", target, {"error": str(error), "javdbUrl": movie.detail_url}))
             print(f"  [{index}/{len(targets)}] ERROR {target.code}: {error}", flush=True)
         pause(args)
+
+
+def image_session(client: JavDbClient) -> requests.Session:
+    session = requests.Session()
+    session.cookies = client.browser_cookies()
+    session.headers.update({"User-Agent": client.user_agent()})
+    return session
+
+
+def cache_meta_image(
+    conn: sqlite3.Connection,
+    client: JavDbClient,
+    meta: JavDbMeta,
+    cover_bytes: bytes,
+    cover_mime: str,
+    stats: dict,
+) -> None:
+    urls = []
+    if meta.image_url:
+        if cover_bytes:
+            if upsert_remote_image(conn, meta.image_url, cover_bytes, cover_mime):
+                stats["images_cached"] += 1
+        else:
+            urls.append(meta.image_url)
+    urls.extend((meta.preview_images or [])[:12])
+    if not urls:
+        return
+
+    image_stats = cache_remote_images(conn, urls, session=image_session(client), referer=meta.detail_url)
+    stats["images_cached"] += image_stats["cached"]
+    stats["images_skipped"] += image_stats["skipped"]
+    stats["images_failed"] += image_stats["failed"]
 
 
 def metadata_from_movie(client: JavDbClient, movie: ActorMovie, target: WorkTarget, args: argparse.Namespace) -> JavDbMeta:

@@ -12,7 +12,10 @@ export async function fetchJson(baseUrl, path, options = {}) {
   let response;
   try {
     response = await fetch(`${baseUrl}${path}`, {
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        "X-FanHao-Client": "android"
+      },
       signal: controller.signal
     });
   } catch (error) {
@@ -57,7 +60,8 @@ export async function postJson(baseUrl, path, body = {}) {
     method: "POST",
     headers: {
       Accept: "application/json",
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "X-FanHao-Client": "android"
     },
     body: JSON.stringify(body)
   });
