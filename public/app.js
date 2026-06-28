@@ -1,13 +1,13 @@
-import { createApiClient, addQueryParam } from "./js/api.js?v=20260629-search-01";
-import { createAdminModal } from "./js/pages/admin-modal.js?v=20260629-search-01";
-import { createGalleryPage } from "./js/pages/gallery-page.js?v=20260629-search-01";
-import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260629-search-01";
-import { createPeoplePage } from "./js/pages/people-page.js?v=20260629-search-01";
-import { createPersonProfile } from "./js/pages/person-profile.js?v=20260629-search-01";
-import { createRankingPage } from "./js/pages/ranking-page.js?v=20260629-search-01";
-import { createToolsPage } from "./js/pages/tools-page.js?v=20260629-search-01";
-import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260629-search-01";
-import { URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260629-search-01";
+import { createApiClient, addQueryParam } from "./js/api.js?v=20260629-tv-metadata-01";
+import { createAdminModal } from "./js/pages/admin-modal.js?v=20260629-tv-metadata-01";
+import { createGalleryPage } from "./js/pages/gallery-page.js?v=20260629-tv-metadata-01";
+import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260629-tv-metadata-01";
+import { createPeoplePage } from "./js/pages/people-page.js?v=20260629-tv-metadata-01";
+import { createPersonProfile } from "./js/pages/person-profile.js?v=20260629-tv-metadata-01";
+import { createRankingPage } from "./js/pages/ranking-page.js?v=20260629-tv-metadata-01";
+import { createToolsPage } from "./js/pages/tools-page.js?v=20260629-tv-metadata-01";
+import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260629-tv-metadata-01";
+import { DEFAULT_GALLERY_PHOTO_CATEGORY, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260629-tv-metadata-01";
 
 const state = {
   library: null,
@@ -86,7 +86,7 @@ const state = {
     photoView: "albums",
     photoCollection: null,
     query: "",
-    category: "all",
+    category: DEFAULT_GALLERY_PHOTO_CATEGORY,
     subCategory: "all",
     person: "all",
     visibleLimit: 80,
@@ -250,6 +250,7 @@ const adminModal = createAdminModal({
   linesFromTextarea,
   loadFavorites,
   loadHistory,
+  loadImageLibrary,
   loadLibrary,
   loadRankings,
   normalizeUiConfig,
@@ -311,6 +312,7 @@ const galleryRenderer = createGalleryRenderer({
   getGalleryPage: () => galleryPage,
   includesText,
   normalizeUiConfig,
+  openAdminScript,
   resetProgressiveCoverLoading,
   setAdminBusy: adminModal.setBusy,
   state,
@@ -462,6 +464,7 @@ function currentRouteSnapshot(overrides = {}) {
     galleryMediaId: state.activeView === "gallery" ? state.gallery.media?.id || "" : "",
     galleryQuery: state.activeView === "gallery" ? state.gallery.query || "" : "",
     galleryCategory: state.activeView === "gallery" ? state.gallery.category || "all" : "all",
+    gallerySubCategory: state.activeView === "gallery" ? state.gallery.subCategory || "all" : "all",
     galleryPerson: state.activeView === "gallery" ? state.gallery.person || "all" : "all",
     personId: state.activeView === "people" ? state.selectedPersonId || "" : "",
     q: state.activeView === "search" ? state.searchQuery || state.workQuery || "" : "",
@@ -1733,6 +1736,10 @@ async function loadImageLibrary(options = {}) {
   await galleryRenderer.loadImageLibrary(options);
 }
 
+function openAdminScript(scriptId = "") {
+  adminModal.openModal({ scriptId });
+}
+
 function resetGalleryReader() {
   galleryRenderer.resetReader();
 }
@@ -2291,7 +2298,8 @@ for (const button of els.productTabs || []) {
       resetGalleryReader();
       if (changed || mode !== "photo") state.gallery.photoView = "albums";
       state.gallery.photoCollection = null;
-      state.gallery.category = "all";
+      state.gallery.category = mode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all";
+      state.gallery.subCategory = "all";
       state.gallery.person = "all";
       state.gallery.visibleLimit = 80;
       setActiveView("gallery");
@@ -2309,20 +2317,7 @@ for (const button of els.viewTabs) {
 }
 
 async function rescanFullLibrary(button) {
-  const confirmed = window.confirm("全库重新扫描会遍历所有盘和文件，可能很慢。确定现在开始吗？");
-  if (!confirmed) return;
-
-  if (button) button.disabled = true;
-  els.librarySummary.textContent = "正在重新扫描";
-  try {
-    const data = await api("/api/rescan", { method: "POST" });
-    state.library = { ...(state.library || {}), ...data };
-    await loadLibrary();
-  } catch (error) {
-    alert(error.message);
-  } finally {
-    if (button) button.disabled = false;
-  }
+  openAdminScript(state.activeView === "gallery" ? "image-library-rescan" : "");
 }
 
 els.rescanButton?.addEventListener("click", () => rescanFullLibrary(els.rescanButton));

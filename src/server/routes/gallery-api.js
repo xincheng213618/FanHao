@@ -50,11 +50,7 @@ export async function routeGalleryApi(req, res, url, deps) {
 
   if (url.pathname === "/api/image-library/rescan" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
-    try {
-      sendJson(res, 200, { ok: true, ...imageLibraryPayload({ refresh: true }) });
-    } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "图像资料库扫描失败" });
-    }
+    sendJson(res, 409, { error: "图库索引刷新已移到后台作业中心，请启动“刷新图库索引”作业。" });
     return true;
   }
 

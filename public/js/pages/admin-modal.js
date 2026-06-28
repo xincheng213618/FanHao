@@ -9,6 +9,7 @@ export function createAdminModal(deps) {
     linesFromTextarea,
     loadFavorites,
     loadHistory,
+    loadImageLibrary,
     loadLibrary,
     loadRankings,
     normalizeUiConfig,
@@ -35,8 +36,14 @@ function openAdminModal(options = {}) {
   els.adminModal.setAttribute("aria-hidden", "false");
   startAdminPolling();
   refreshCoverCacheStatus();
-  loadAdminScripts();
+  const scriptsPromise = loadAdminScripts();
+  if (options.scriptId) scriptsPromise.then(() => selectAdminScript(options.scriptId));
   window.setTimeout(() => {
+    if (options.scriptId) {
+      els.adminScriptForm?.scrollIntoView({ block: "start" });
+      els.adminRunScript?.focus();
+      return;
+    }
     if (options.section === "compilation") {
       els.adminCompilationSection?.scrollIntoView({ block: "start" });
       els.adminCompilationPrefixes?.focus();
@@ -96,6 +103,22 @@ function setAdminBusy(button, busy, text = "处理中") {
 
 function currentAdminScript() {
   return state.adminScripts.find((script) => script.id === state.selectedAdminScriptId) || state.adminScripts[0] || null;
+}
+
+function selectAdminScript(scriptId) {
+  if (!scriptId) return null;
+  const script = state.adminScripts.find((item) => item.id === scriptId);
+  if (!script) {
+    state.selectedAdminScriptId = scriptId;
+    return null;
+  }
+  state.selectedAdminScriptId = script.id;
+  state.adminScriptCategory = script.category || "all";
+  renderAdminScriptCategories();
+  renderAdminScripts();
+  renderAdminScriptPanel();
+  if (els.adminScriptStatus) els.adminScriptStatus.textContent = `已选择：${script.title}`;
+  return script;
 }
 
 async function loadAdminScripts() {
@@ -684,6 +707,11 @@ async function applyAdminTaskRefreshHints(task) {
   if (hints.has("library")) {
     await loadLibrary();
   }
+  if (hints.has("image-library")) {
+    state.gallery.data = null;
+    state.gallery.status = "图库索引已刷新";
+    if (state.activeView === "gallery") await loadImageLibrary({ reload: true });
+  }
   if (hints.has("rankings")) {
     state.rankingLists = [];
     if (state.activeView === "rankings") await loadRankings();
@@ -797,6 +825,7 @@ function taskStatusLabel(status) {
     runSelectedScript: runSelectedAdminScript,
     saveCompilationConfig: adminSaveCompilationConfig,
     saveCompilationConfigData: saveCompilationConfig,
+    selectScript: selectAdminScript,
     setBusy: setAdminBusy,
     startPolling: startAdminPolling,
     stopPolling: stopAdminPolling

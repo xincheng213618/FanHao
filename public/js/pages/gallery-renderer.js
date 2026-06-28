@@ -1,4 +1,20 @@
 const PHOTO_COLLECTION_ROOT_VALUE = "__fanhao_photo_collection_root__";
+const DEFAULT_GALLERY_PHOTO_CATEGORY = "我喜欢的";
+const PHOTO_QUICK_CATEGORIES = [
+  DEFAULT_GALLERY_PHOTO_CATEGORY,
+  "[XIUREN] 秀人网",
+  "[COS]",
+  "内购私拍",
+  "日本写真集",
+  "韩国写真集",
+  "国模"
+];
+const PHOTO_CATEGORY_LABELS = new Map([
+  [DEFAULT_GALLERY_PHOTO_CATEGORY, "我喜欢的"],
+  ["[XIUREN] 秀人网", "秀人网"],
+  ["[COS]", "COS"]
+]);
+const TV_QUICK_REGION_LIMIT = 10;
 
 export function createGalleryRenderer(deps) {
   const {
@@ -12,6 +28,7 @@ export function createGalleryRenderer(deps) {
     getGalleryPage,
     includesText,
     normalizeUiConfig,
+    openAdminScript,
     resetProgressiveCoverLoading,
     setAdminBusy,
     state,
@@ -89,12 +106,104 @@ function galleryPhotoViewButton(view, label) {
     state.gallery.photoView = view;
     state.gallery.photoCollection = null;
     state.gallery.person = "all";
+    state.gallery.subCategory = "all";
     state.gallery.visibleLimit = 80;
     resetGalleryReader();
     renderGalleryView();
     syncGalleryRoute();
   });
   return button;
+}
+
+function photoCategoryDisplayName(value) {
+  const text = String(value || "").trim();
+  if (!text) return "未归类";
+  if (PHOTO_CATEGORY_LABELS.has(text)) return PHOTO_CATEGORY_LABELS.get(text);
+  const bracketOnly = text.match(/^\[([^\]]+)\]$/);
+  return bracketOnly ? bracketOnly[1].trim() || text : text;
+}
+
+function photoCategoryCounts() {
+  const counts = new Map();
+  for (const item of state.gallery.data?.photoSets || []) {
+    const value = String(item.category || "").trim();
+    if (!value) continue;
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+  return counts;
+}
+
+function createPhotoCategoryStrip() {
+  const counts = photoCategoryCounts();
+  const strip = document.createElement("div");
+  strip.className = "gallery-category-strip";
+
+  const addChip = (value, label, count) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `gallery-category-chip${state.gallery.category === value ? " active" : ""}`;
+    button.textContent = count === undefined ? label : `${label} ${formatNumber(count)}`;
+    button.addEventListener("click", () => {
+      state.gallery.category = value;
+      state.gallery.subCategory = "all";
+      state.gallery.photoCollection = null;
+      state.gallery.person = "all";
+      state.gallery.visibleLimit = 80;
+      resetGalleryReader();
+      renderGalleryView();
+      syncGalleryRoute();
+    });
+    strip.append(button);
+  };
+
+  addChip(DEFAULT_GALLERY_PHOTO_CATEGORY, "我喜欢的", counts.get(DEFAULT_GALLERY_PHOTO_CATEGORY) || 0);
+  addChip("all", "全部", state.gallery.data?.totals?.photoSets || (state.gallery.data?.photoSets || []).length);
+  for (const value of PHOTO_QUICK_CATEGORIES.filter((item) => item !== DEFAULT_GALLERY_PHOTO_CATEGORY)) {
+    addChip(value, photoCategoryDisplayName(value), counts.get(value) || 0);
+  }
+
+  if (state.gallery.category !== "all" && !PHOTO_QUICK_CATEGORIES.includes(state.gallery.category)) {
+    addChip(state.gallery.category, photoCategoryDisplayName(state.gallery.category), counts.get(state.gallery.category) || 0);
+  }
+
+  return strip;
+}
+
+function mediaItemsForMode(mode = state.gallery.mode) {
+  const kind = galleryMediaKindForMode(mode);
+  return kind ? (state.gallery.data?.mediaItems || []).filter((item) => item.mediaKind === kind) : [];
+}
+
+function createTvRegionStrip() {
+  const regions = localGalleryFacets(mediaItemsForMode("tv"), "category").slice(0, TV_QUICK_REGION_LIMIT);
+  const total = mediaItemsForMode("tv").length;
+  const strip = document.createElement("div");
+  strip.className = "gallery-category-strip gallery-tv-region-strip";
+
+  const addChip = (value, label, count) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `gallery-category-chip${state.gallery.category === value ? " active" : ""}`;
+    button.textContent = `${label} ${formatNumber(count)}`;
+    button.addEventListener("click", () => {
+      state.gallery.category = value;
+      state.gallery.person = "all";
+      state.gallery.visibleLimit = 80;
+      resetGalleryReader();
+      renderGalleryView();
+      syncGalleryRoute();
+    });
+    strip.append(button);
+  };
+
+  addChip("all", "全部地区", total);
+  for (const item of regions) addChip(item.value, item.value, item.count);
+  if (state.gallery.category !== "all" && !regions.some((item) => item.value === state.gallery.category)) {
+    const count = mediaItemsForMode("tv").filter((item) => item.category === state.gallery.category).length;
+    addChip(state.gallery.category, state.gallery.category, count);
+  }
+
+  return strip;
 }
 
 function renderGalleryControls(options = {}) {
@@ -125,14 +234,47 @@ function renderGalleryControls(options = {}) {
 
   const category = document.createElement("select");
   category.className = "gallery-select";
-  category.append(new Option("全部分类", "all"));
-  for (const item of currentGalleryCategoryFacets()) {
+  category.append(new Option(state.gallery.mode === "photo" ? "全部大类" : state.gallery.mode === "tv" ? "全部地区" : "全部分类", "all"));
+  const categoryFacets = currentGalleryCategoryFacets();
+  for (const item of categoryFacets) {
     category.append(new Option(`${item.value} · ${formatNumber(item.count)}`, item.value));
+  }
+  if (
+    state.gallery.category !== "all" &&
+    !categoryFacets.some((item) => item.value === state.gallery.category)
+  ) {
+    category.append(new Option(photoCategoryDisplayName(state.gallery.category), state.gallery.category));
   }
   category.value = state.gallery.category;
   category.addEventListener("change", () => {
     state.gallery.category = category.value || "all";
     state.gallery.subCategory = "all";
+    state.gallery.photoCollection = null;
+    state.gallery.person = "all";
+    state.gallery.visibleLimit = 80;
+    resetGalleryReader();
+    renderGalleryView();
+    syncGalleryRoute();
+  });
+
+  const subCategory = document.createElement("select");
+  subCategory.className = "gallery-select gallery-subcategory-select";
+  subCategory.append(new Option("全部文件夹", "all"));
+  const subCategoryFacets = currentPhotoSubCategoryFacets().slice(0, 500);
+  for (const item of subCategoryFacets) {
+    subCategory.append(new Option(`${photoPersonDisplayName(item.value)} · ${formatNumber(item.count)}`, item.value));
+  }
+  if (
+    state.gallery.subCategory !== "all" &&
+    !subCategoryFacets.some((item) => item.value === state.gallery.subCategory)
+  ) {
+    subCategory.append(new Option(photoPersonDisplayName(state.gallery.subCategory), state.gallery.subCategory));
+  }
+  subCategory.value = state.gallery.subCategory || "all";
+  subCategory.addEventListener("change", () => {
+    state.gallery.subCategory = subCategory.value || "all";
+    state.gallery.photoCollection = null;
+    state.gallery.person = "all";
     state.gallery.visibleLimit = 80;
     resetGalleryReader();
     renderGalleryView();
@@ -141,8 +283,8 @@ function renderGalleryControls(options = {}) {
 
   const people = document.createElement("select");
   people.className = "gallery-select";
-  people.append(new Option(state.gallery.mode === "tv" ? "全部系列" : "全部人物", "all"));
-  const peopleFacets = currentGalleryPeopleFacets().slice(0, 300);
+  people.append(new Option(state.gallery.mode === "tv" ? "全部作品" : "全部人物", "all"));
+  const peopleFacets = currentGalleryPeopleFacets().slice(0, state.gallery.mode === "tv" ? 1000 : 300);
   for (const item of peopleFacets) {
     people.append(new Option(`${item.value} · ${formatNumber(item.count)}`, item.value));
   }
@@ -166,17 +308,19 @@ function renderGalleryControls(options = {}) {
   const refresh = document.createElement("button");
   refresh.type = "button";
   refresh.className = "text-button";
-  refresh.textContent = state.gallery.loading ? "刷新中" : "刷新索引";
+  refresh.textContent = "后台刷新";
   refresh.disabled = state.gallery.loading;
-  refresh.addEventListener("click", () => loadImageLibrary({ refresh: true }));
+  refresh.addEventListener("click", () => openAdminScript?.("image-library-rescan"));
 
   const status = document.createElement("span");
   status.className = "gallery-status";
   status.textContent = state.gallery.status || "";
 
-  if (state.gallery.mode === "photo") controls.append(photoViews);
+  if (state.gallery.mode === "photo") controls.append(createPhotoCategoryStrip(), photoViews);
+  if (state.gallery.mode === "tv") controls.append(createTvRegionStrip());
   controls.append(search);
   if (["photo", "western", "movie", "tv"].includes(state.gallery.mode)) controls.append(category);
+  if (state.gallery.mode === "photo") controls.append(subCategory);
   if (["western", "tv"].includes(state.gallery.mode)) controls.append(people);
   controls.append(refresh, status);
   return controls;
@@ -272,9 +416,25 @@ function currentGalleryPeopleFacets() {
   const facets = state.gallery.data?.facets || {};
   if (state.gallery.mode === "photo") return facets.people || [];
   const kind = galleryMediaKindForMode(state.gallery.mode);
-  if (kind === "tv") return facets.tv?.series || facets.tv?.people || [];
+  if (kind === "tv") return currentTvSeriesFacets();
   if (kind === "western") return facets.western?.people || [];
   return [];
+}
+
+function currentTvSeriesFacets() {
+  let items = mediaItemsForMode("tv");
+  if (state.gallery.category !== "all") items = items.filter((item) => item.category === state.gallery.category);
+  const query = state.gallery.query.trim();
+  if (query) items = items.filter((item) => includesText(galleryText(item), query));
+  return localGalleryFacets(items, "seriesName");
+}
+
+function currentPhotoSubCategoryFacets() {
+  let items = state.gallery.data?.photoSets || [];
+  if (state.gallery.category !== "all") items = items.filter((item) => item.category === state.gallery.category);
+  const query = state.gallery.query.trim();
+  if (query) items = items.filter((item) => includesText(galleryText(item), query));
+  return localGalleryFacets(items, "subCategory");
 }
 
 function galleryText(item) {
@@ -314,6 +474,7 @@ function photoCollectionPathLabel(group) {
 function filteredPhotoSets(options = {}) {
   let items = state.gallery.data?.photoSets || [];
   if (state.gallery.category !== "all") items = items.filter((item) => item.category === state.gallery.category);
+  if (state.gallery.subCategory !== "all") items = items.filter((item) => item.subCategory === state.gallery.subCategory);
   if (!options.ignorePerson && state.gallery.person !== "all") {
     items = items.filter((item) => item.personName === state.gallery.person);
   }
@@ -367,6 +528,7 @@ function photoCollectionAlbums(collectionValue, options = {}) {
   let items = state.gallery.data?.photoSets || [];
   items = items.filter((item) => photoCollectionValue(item) === collectionValue);
   if (!options.ignoreCategory && state.gallery.category !== "all") items = items.filter((item) => item.category === state.gallery.category);
+  if (!options.ignoreSubCategory && state.gallery.subCategory !== "all") items = items.filter((item) => item.subCategory === state.gallery.subCategory);
   const query = options.ignoreQuery ? "" : state.gallery.query.trim();
   if (query) items = items.filter((item) => includesText(galleryText(item), query));
   return items;
@@ -385,7 +547,7 @@ function localGalleryFacets(items, fieldName) {
 }
 
 function photoCollectionSummary(collectionValue) {
-  const items = photoCollectionAlbums(collectionValue, { ignoreCategory: true, ignoreQuery: true });
+  const items = photoCollectionAlbums(collectionValue, { ignoreCategory: true, ignoreSubCategory: true, ignoreQuery: true });
   const first = items[0] || {};
   const dir = first.relativePath ? photoCollectionDir(first) : "";
   return {
@@ -420,7 +582,7 @@ function filteredManga() {
 
 function filteredMediaItems() {
   const kind = galleryMediaKindForMode(state.gallery.mode);
-  let items = (state.gallery.data?.mediaItems || []).filter((item) => item.mediaKind === kind);
+  let items = mediaItemsForMode(state.gallery.mode);
   if (state.gallery.category !== "all") items = items.filter((item) => item.category === state.gallery.category);
   if (state.gallery.person !== "all") {
     items = items.filter((item) => (kind === "tv" ? item.seriesName : item.personName) === state.gallery.person);
@@ -428,6 +590,150 @@ function filteredMediaItems() {
   const query = state.gallery.query.trim();
   if (query) items = items.filter((item) => includesText(galleryText(item), query));
   return items;
+}
+
+function filteredTvItemsForGroups() {
+  let items = mediaItemsForMode("tv");
+  if (state.gallery.category !== "all") items = items.filter((item) => item.category === state.gallery.category);
+  const query = state.gallery.query.trim();
+  if (query) items = items.filter((item) => includesText(galleryText(item), query));
+  return items;
+}
+
+function tvSeriesGroups() {
+  const groups = new Map();
+  for (const item of filteredTvItemsForGroups()) {
+    const seriesName = String(item.seriesName || item.subCategory || item.category || "未归类").trim();
+    const region = String(item.category || "电视剧").trim();
+    const value = `${region}\n${seriesName}`;
+    let group = groups.get(value);
+    if (!group) {
+      group = {
+        value,
+        title: seriesName,
+        category: region,
+        count: 0,
+        size: 0,
+        updatedAt: "",
+        samples: [],
+        coverUrl: item.tvSeries?.coverUrl || item.coverUrl || "",
+        tvSeries: item.tvSeries || null
+      };
+      groups.set(value, group);
+    }
+    group.count += 1;
+    group.size += Number(item.size || 0);
+    if (!group.tvSeries && item.tvSeries) group.tvSeries = item.tvSeries;
+    if (!group.coverUrl && (item.tvSeries?.coverUrl || item.coverUrl)) group.coverUrl = item.tvSeries?.coverUrl || item.coverUrl;
+    if (group.samples.length < 2 && item.title) group.samples.push(item.title);
+    const itemTime = new Date(item.updatedAt || 0).getTime();
+    const groupTime = new Date(group.updatedAt || 0).getTime();
+    if (itemTime > groupTime) group.updatedAt = item.updatedAt || group.updatedAt;
+  }
+  return [...groups.values()].sort((a, b) => {
+    const regionDiff = a.category.localeCompare(b.category, undefined, { numeric: true, sensitivity: "base" });
+    if (state.gallery.category === "all" && regionDiff) return regionDiff;
+    const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
+    return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+  });
+}
+
+function selectedTvSeriesMetadata() {
+  if (state.gallery.mode !== "tv" || state.gallery.person === "all") return null;
+  return filteredMediaItems().find((item) => item.tvSeries)?.tvSeries || null;
+}
+
+function renderTvSeriesBar(container, total) {
+  if (state.gallery.mode !== "tv" || state.gallery.person === "all") return;
+  const metadata = selectedTvSeriesMetadata();
+  const bar = document.createElement("div");
+  bar.className = "gallery-person-bar";
+
+  const text = document.createElement("div");
+  text.className = "gallery-person-bar-text";
+  const title = document.createElement("strong");
+  title.textContent = state.gallery.person;
+  const meta = document.createElement("span");
+  meta.textContent = [
+    state.gallery.category !== "all" ? state.gallery.category : "",
+    metadata?.year || "",
+    metadata?.rating ? `豆瓣 ${Number(metadata.rating).toFixed(1)}` : "",
+    `${formatNumber(total)} 集`
+  ].filter(Boolean).join(" · ");
+  text.append(title, meta);
+  if (metadata?.summary) {
+    const summary = document.createElement("small");
+    summary.className = "gallery-tv-summary";
+    summary.textContent = metadata.summary;
+    text.append(summary);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "gallery-person-bar-actions";
+  const allButton = document.createElement("button");
+  allButton.type = "button";
+  allButton.className = "text-button";
+  allButton.textContent = "全部作品";
+  allButton.addEventListener("click", () => {
+    state.gallery.person = "all";
+    state.gallery.visibleLimit = 80;
+    renderGalleryView();
+    syncGalleryRoute("replace");
+  });
+  actions.append(allButton);
+  bar.append(text, actions);
+  container.append(bar);
+}
+
+function renderTvSeriesShelf(container) {
+  const groups = tvSeriesGroups();
+  const visible = groups.slice(0, state.gallery.visibleLimit);
+  const grid = document.createElement("div");
+  grid.className = "gallery-grid media-grid gallery-tv-series-grid";
+  for (const group of visible) {
+    const card = createGalleryCard(
+      { title: group.title, coverUrl: group.coverUrl || "" },
+      {
+        meta: [group.category, group.tvSeries?.year, `${formatNumber(group.count)} 集`].filter(Boolean).join(" · "),
+        extra: [
+          group.tvSeries?.rating ? `豆瓣 ${Number(group.tvSeries.rating).toFixed(1)}` : "",
+          formatBytes(group.size),
+          group.updatedAt ? `最近 ${formatDateTime(group.updatedAt)}` : group.samples.join(" / ")
+        ].filter(Boolean).join(" · "),
+        badges: group.tvSeries?.rating ? [`豆瓣 ${Number(group.tvSeries.rating).toFixed(1)}`] : [],
+        placeholder: "作品",
+        onOpen: () => {
+          state.gallery.category = group.category || state.gallery.category;
+          state.gallery.person = group.title;
+          state.gallery.visibleLimit = 80;
+          renderGalleryView();
+          window.scrollTo({ top: 0, behavior: "smooth" });
+          syncGalleryRoute();
+        }
+      }
+    );
+    card.classList.add("gallery-tv-series-card");
+    grid.append(card);
+  }
+  container.append(grid);
+  activateGalleryLazyImages(grid);
+
+  if (!groups.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = state.gallery.data ? "没有匹配的电视剧作品" : "正在等待图像资料库索引";
+    container.append(empty);
+  } else if (visible.length < groups.length) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "text-button gallery-more";
+    more.textContent = `显示更多作品 ${formatNumber(visible.length)} / ${formatNumber(groups.length)}`;
+    more.addEventListener("click", () => {
+      state.gallery.visibleLimit += 80;
+      renderGalleryView();
+    });
+    container.append(more);
+  }
 }
 
 function activateGalleryLazyImages(root) {
@@ -519,6 +825,16 @@ function createGalleryCard(item, options = {}) {
   } else {
     cover.classList.add("empty");
     cover.dataset.placeholder = options.placeholder || "封面";
+  }
+  if (Array.isArray(options.badges) && options.badges.length) {
+    const badges = document.createElement("div");
+    badges.className = "gallery-card-badges";
+    for (const label of options.badges.slice(0, 2)) {
+      const badge = document.createElement("span");
+      badge.textContent = label;
+      badges.append(badge);
+    }
+    cover.append(badges);
   }
 
   const body = document.createElement("div");
@@ -641,6 +957,7 @@ function renderPhotoCollectionPage(container) {
     clear.addEventListener("click", () => {
       state.gallery.query = "";
       state.gallery.category = "all";
+      state.gallery.subCategory = "all";
       state.gallery.visibleLimit = 80;
       renderGalleryView();
       syncGalleryRoute("replace");
@@ -709,6 +1026,7 @@ function renderPhotoPersonBar(container, total) {
   allButton.textContent = "全部图包";
   allButton.addEventListener("click", () => {
     state.gallery.person = "all";
+    state.gallery.subCategory = "all";
     state.gallery.visibleLimit = 80;
     renderGalleryView();
     syncGalleryRoute("replace");
@@ -721,6 +1039,7 @@ function renderPhotoPersonBar(container, total) {
   peopleButton.addEventListener("click", () => {
     state.gallery.photoView = "collections";
     state.gallery.person = "all";
+    state.gallery.subCategory = "all";
     state.gallery.visibleLimit = 80;
     renderGalleryView();
     syncGalleryRoute("replace");
@@ -854,8 +1173,13 @@ function renderMangaShelf(container) {
 }
 
 function renderMediaShelf(container) {
+  if (state.gallery.mode === "tv" && state.gallery.person === "all") {
+    renderTvSeriesShelf(container);
+    return;
+  }
   const items = filteredMediaItems();
   const visible = items.slice(0, state.gallery.visibleLimit);
+  renderTvSeriesBar(container, items.length);
   const grid = document.createElement("div");
   grid.className = "gallery-grid media-grid";
   for (const item of visible) {
@@ -864,12 +1188,14 @@ function renderMediaShelf(container) {
       createGalleryCard(item, {
         meta,
         extra: `${formatBytes(item.size)} · ${formatDateTime(item.updatedAt)}`,
+        badges: item.tvSeries?.rating ? [`豆瓣 ${Number(item.tvSeries.rating).toFixed(1)}`] : [],
         placeholder: item.kindLabel || galleryModeLabel(state.gallery.mode),
         onOpen: () => openGalleryMedia(item.id)
       })
     );
   }
   container.append(grid);
+  activateGalleryLazyImages(grid);
 
   if (!items.length) {
     const empty = document.createElement("div");
@@ -1031,6 +1357,7 @@ function renderMediaReader(container) {
     const video = document.createElement("video");
     video.controls = true;
     video.preload = "metadata";
+    if (media.coverUrl) video.poster = media.coverUrl;
     video.src = media.streamUrl;
     panel.append(video);
   }
@@ -1038,9 +1365,12 @@ function renderMediaReader(container) {
   const meta = document.createElement("div");
   meta.className = "gallery-media-meta";
   for (const [label, value] of [
+    ["豆瓣", media.tvSeries?.rating ? `${Number(media.tvSeries.rating).toFixed(1)}${media.tvSeries.year ? ` · ${media.tvSeries.year}` : ""}` : ""],
     ["类型", media.kindLabel],
     ["分类", media.category],
     ["系列", media.seriesName],
+    ["简介", media.tvSeries?.summary],
+    ["演职员", (media.tvSeries?.actors || []).slice(0, 6).join(" / ")],
     ["人物", media.personName],
     ["格式", media.ext],
     ["大小", formatBytes(media.size)],

@@ -77,6 +77,13 @@ export async function routeAdminApi(req, res, url, deps) {
         sendJson(res, 404, { error: "脚本不存在" });
         return true;
       }
+      if (
+        script.id === "image-library-rescan" &&
+        adminTasks.some((task) => task.scriptId === script.id && (task.status === "running" || task.status === "stopping"))
+      ) {
+        sendJson(res, 409, { error: "图库索引刷新已经在后台运行" });
+        return true;
+      }
       const options = normalizeAdminScriptOptions(script, body.options || {});
       const { command, args } = buildAdminScriptCommand(script, options);
       const person = options.personId ? library.peopleById.get(options.personId) : null;

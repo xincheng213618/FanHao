@@ -1,5 +1,6 @@
 export const URL_VIEW_NAMES = new Set(["people", "favorites", "history", "rankings", "gallery", "tools"]);
 export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "movie", "tv"]);
+export const DEFAULT_GALLERY_PHOTO_CATEGORY = "我喜欢的";
 
 const GALLERY_MODE_PATHS = {
   photo: "/photo",
@@ -73,7 +74,8 @@ export function normalizeRoute(route = {}) {
     galleryChapterIndex: view === "gallery" ? String(route.galleryChapterIndex || "").trim() : "",
     galleryMediaId: view === "gallery" ? String(route.galleryMediaId || "").trim() : "",
     galleryQuery: view === "gallery" ? String(route.galleryQuery || "").trim() : "",
-    galleryCategory: view === "gallery" ? String(route.galleryCategory || "all").trim() || "all" : "all",
+    galleryCategory: view === "gallery" ? normalizeGalleryCategory(route) : "all",
+    gallerySubCategory: view === "gallery" ? String(route.gallerySubCategory || "all").trim() || "all" : "all",
     galleryPerson: view === "gallery" ? String(route.galleryPerson || "all").trim() || "all" : "all",
     personId: view === "people" ? route.personId || "" : "",
     q: view === "search" ? searchQuery : "",
@@ -95,8 +97,11 @@ export function routeUrl(route, options = {}) {
   if (next.personId) params.set("personId", next.personId);
   if (next.view === "gallery") {
     if (next.galleryQuery) params.set("q", next.galleryQuery);
-    if (next.galleryCategory && next.galleryCategory !== "all") params.set("category", next.galleryCategory);
-    if (next.galleryPerson && next.galleryPerson !== "all") params.set("person", next.galleryPerson);
+    if (next.galleryCategory && shouldWriteGalleryCategory(next)) params.set("category", next.galleryCategory);
+    if (next.gallerySubCategory && next.gallerySubCategory !== "all") params.set("subCategory", next.gallerySubCategory);
+    if (next.galleryPerson && next.galleryPerson !== "all") {
+      params.set(next.galleryMode === "tv" ? "series" : "person", next.galleryPerson);
+    }
   } else if (next.q) {
     params.set("q", next.q);
   }
@@ -125,6 +130,17 @@ function decodeRouteSegment(value) {
   }
 }
 
+function normalizeGalleryCategory(route = {}) {
+  const category = String(route.galleryCategory || "").trim();
+  if (category) return category;
+  return route.galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all";
+}
+
+function shouldWriteGalleryCategory(route = {}) {
+  if (route.galleryMode !== "photo") return route.galleryCategory !== "all";
+  return route.galleryCategory !== DEFAULT_GALLERY_PHOTO_CATEGORY;
+}
+
 function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
   const segments = normalizeRoutePath(routePath).split("/").filter(Boolean);
   if (!segments.length) return null;
@@ -150,8 +166,9 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     galleryChapterIndex: "",
     galleryMediaId: "",
     galleryQuery: params.get("q") || params.get("search") || "",
-    galleryCategory: params.get("category") || "all",
-    galleryPerson: params.get("person") || "all",
+    galleryCategory: params.has("category") ? params.get("category") || "all" : galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all",
+    gallerySubCategory: params.get("subCategory") || params.get("folder") || "all",
+    galleryPerson: galleryMode === "tv" ? params.get("series") || params.get("person") || "all" : params.get("person") || "all",
     personId: "",
     q: "",
     workId: "",
@@ -165,6 +182,7 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     } else if (section === "collection") {
       route.galleryPhotoView = "collections";
       route.galleryPhotoCollection = decodeRouteSegment(rest.slice(1).join("/"));
+      if (!params.has("category")) route.galleryCategory = "all";
     } else if (["set", "sets", "album", "albums", "photo-set"].includes(section)) {
       route.galleryAlbumId = decodeRouteSegment(rest[1] || "");
     } else if (section) {

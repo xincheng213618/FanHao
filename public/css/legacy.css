@@ -1124,6 +1124,35 @@ body.gallery-view .gallery-controls {
   color: var(--accent-strong);
 }
 
+.gallery-category-strip {
+  display: flex;
+  flex: 1 0 100%;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 0 0 2px;
+  scrollbar-width: thin;
+}
+
+.gallery-category-chip {
+  flex: 0 0 auto;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.gallery-category-chip.active {
+  border-color: rgba(31, 122, 98, 0.32);
+  background: var(--accent);
+  color: #fff;
+}
+
 .gallery-search,
 .gallery-select,
 .gallery-cache-form input {
@@ -1145,6 +1174,10 @@ body.gallery-view .gallery-controls {
   flex: 0 1 210px;
 }
 
+.gallery-subcategory-select {
+  flex-basis: 240px;
+}
+
 .gallery-status {
   color: var(--muted);
   font-size: 12px;
@@ -1153,6 +1186,7 @@ body.gallery-view .gallery-controls {
 
 .gallery-content {
   min-width: 0;
+  padding-top: 36px;
 }
 
 .gallery-grid {
@@ -1252,6 +1286,17 @@ body.gallery-view .gallery-controls {
   font-weight: 750;
 }
 
+.gallery-tv-summary {
+  display: -webkit-box;
+  max-width: 920px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .gallery-person-bar-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1299,8 +1344,33 @@ body.gallery-view .gallery-controls {
   display: block;
 }
 
+.gallery-card-badges {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  justify-content: flex-end;
+  max-width: calc(100% - 16px);
+}
+
+.gallery-card-badges span {
+  border-radius: 999px;
+  background: rgba(31, 122, 98, 0.92);
+  color: #fff;
+  padding: 4px 7px;
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1;
+}
+
 .gallery-collection-card .gallery-card-cover {
   aspect-ratio: 1 / 1;
+}
+
+.media-grid:not(.gallery-tv-series-grid) .gallery-card-cover {
+  aspect-ratio: 16 / 9;
 }
 
 .gallery-collection-card .gallery-card-cover.empty::after {

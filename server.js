@@ -50,7 +50,7 @@ const PLAYABLE_VIDEO_EXTS = new Set([".mp4", ".m4v", ".mov", ".webm"]);
 const DIRECT_VIDEO_EXTS = new Set([".mp4", ".m4v", ".webm"]);
 const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"]);
 const INFO_EXTS = new Set([".nfo", ".txt", ".json", ".xml", ".html", ".htm", ".csv", ".md", ".srt", ".ass", ".ssa"]);
-const COVER_HINTS = new Set(["cover", "poster", "folder", "front", "fanart", "thumb", "thumbnail"]);
+const COVER_HINTS = new Set(["cover", "poster", "folder", "front", "fanart", "thumb", "thumbnail", "封面"]);
 const MAX_INFO_BYTES = 1024 * 1024;
 const MAX_GENERATED_COVER_BYTES = DEFAULT_MAX_COVER_BYTES;
 const DEFAULT_WORK_LIMIT = 160;
@@ -67,6 +67,8 @@ const IMAGE_READER_CACHE_TOUCH_THROTTLE_MS = 30 * 1000;
 const IMAGE_READER_LIST_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const ARCHIVE_IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"]);
 const ARCHIVE_EXTS = new Set([".zip", ".cbz", ".rar", ".7z"]);
+const PHOTO_SET_COVER_GENERATOR_VERSION = 2;
+const GALLERY_MEDIA_COVER_GENERATOR_VERSION = 1;
 const IMAGE_GALLERY_COVER_MAX_BYTES = 1024 * 1024;
 const IMAGE_GALLERY_COVER_BOX_SIZE = 640;
 const DEFAULT_APP_CONFIG = {
@@ -88,6 +90,7 @@ const TOOL_DOWNLOAD_TTL_MS = 10 * 60 * 1000;
 const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
 const TXT_TOOL_MAX_BODY_BYTES = Math.ceil(TXT_TOOL_MAX_FILE_BYTES * 1.4) + 128 * 1024;
 const TXT_TOOL_PREVIEW_BYTES = 256 * 1024;
+const PHOTO_COLLECTION_ROOT_VALUE = "__fanhao_photo_collection_root__";
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -1421,6 +1424,7 @@ function getImageGalleryDb() {
         cover_blob BLOB,
         cover_bytes INTEGER,
         source_bytes INTEGER,
+        generator_version INTEGER NOT NULL DEFAULT 1,
         status TEXT NOT NULL DEFAULT 'ok',
         error TEXT,
         generated_at TEXT,
@@ -1429,6 +1433,48 @@ function getImageGalleryDb() {
       CREATE INDEX IF NOT EXISTS idx_photo_set_covers_archive_path ON photo_set_covers(archive_path);
       CREATE INDEX IF NOT EXISTS idx_photo_set_covers_status ON photo_set_covers(status);
       CREATE INDEX IF NOT EXISTS idx_photo_set_covers_updated_at ON photo_set_covers(updated_at);
+      CREATE TABLE IF NOT EXISTS tv_series_metadata (
+        series_key TEXT PRIMARY KEY,
+        category TEXT,
+        series_name TEXT NOT NULL,
+        douban_id TEXT,
+        douban_url TEXT,
+        douban_title TEXT,
+        year TEXT,
+        rating REAL,
+        rating_count INTEGER,
+        genres_json TEXT,
+        actors_json TEXT,
+        summary TEXT,
+        cover_url TEXT,
+        cover_mime TEXT,
+        cover_blob BLOB,
+        cover_bytes INTEGER,
+        source TEXT,
+        status TEXT NOT NULL DEFAULT 'ok',
+        error TEXT,
+        fetched_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_tv_series_metadata_category ON tv_series_metadata(category);
+      CREATE INDEX IF NOT EXISTS idx_tv_series_metadata_douban_id ON tv_series_metadata(douban_id);
+      CREATE INDEX IF NOT EXISTS idx_tv_series_metadata_status ON tv_series_metadata(status);
+      CREATE TABLE IF NOT EXISTS gallery_media_covers (
+        media_id TEXT PRIMARY KEY,
+        source_path TEXT NOT NULL,
+        source_size INTEGER,
+        source_mtime_ms INTEGER,
+        cover_mime TEXT,
+        cover_blob BLOB,
+        cover_bytes INTEGER,
+        generator_version INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'ok',
+        error TEXT,
+        generated_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_gallery_media_covers_status ON gallery_media_covers(status);
+      CREATE INDEX IF NOT EXISTS idx_gallery_media_covers_updated_at ON gallery_media_covers(updated_at);
     `);
     ensureColumn(imageGalleryDb, "photo_set_covers", "archive_size", "INTEGER");
     ensureColumn(imageGalleryDb, "photo_set_covers", "archive_mtime_ms", "INTEGER");
@@ -1437,10 +1483,42 @@ function getImageGalleryDb() {
     ensureColumn(imageGalleryDb, "photo_set_covers", "cover_blob", "BLOB");
     ensureColumn(imageGalleryDb, "photo_set_covers", "cover_bytes", "INTEGER");
     ensureColumn(imageGalleryDb, "photo_set_covers", "source_bytes", "INTEGER");
+    ensureColumn(imageGalleryDb, "photo_set_covers", "generator_version", "INTEGER NOT NULL DEFAULT 1");
     ensureColumn(imageGalleryDb, "photo_set_covers", "status", "TEXT NOT NULL DEFAULT 'ok'");
     ensureColumn(imageGalleryDb, "photo_set_covers", "error", "TEXT");
     ensureColumn(imageGalleryDb, "photo_set_covers", "generated_at", "TEXT");
     ensureColumn(imageGalleryDb, "photo_set_covers", "updated_at", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "category", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "series_name", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "douban_id", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "douban_url", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "douban_title", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "year", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "rating", "REAL");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "rating_count", "INTEGER");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "genres_json", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "actors_json", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "summary", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "cover_url", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "cover_mime", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "cover_blob", "BLOB");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "cover_bytes", "INTEGER");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "source", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "status", "TEXT NOT NULL DEFAULT 'ok'");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "error", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "fetched_at", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "updated_at", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(imageGalleryDb, "gallery_media_covers", "source_path", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(imageGalleryDb, "gallery_media_covers", "source_size", "INTEGER");
+    ensureColumn(imageGalleryDb, "gallery_media_covers", "source_mtime_ms", "INTEGER");
+    ensureColumn(imageGalleryDb, "gallery_media_covers", "cover_mime", "TEXT");
+    ensureColumn(imageGalleryDb, "gallery_media_covers", "cover_blob", "BLOB");
+    ensureColumn(imageGalleryDb, "gallery_media_covers", "cover_bytes", "INTEGER");
+    ensureColumn(imageGalleryDb, "gallery_media_covers", "generator_version", "INTEGER NOT NULL DEFAULT 1");
+    ensureColumn(imageGalleryDb, "gallery_media_covers", "status", "TEXT NOT NULL DEFAULT 'ok'");
+    ensureColumn(imageGalleryDb, "gallery_media_covers", "error", "TEXT");
+    ensureColumn(imageGalleryDb, "gallery_media_covers", "generated_at", "TEXT");
+    ensureColumn(imageGalleryDb, "gallery_media_covers", "updated_at", "TEXT NOT NULL DEFAULT ''");
   }
   return imageGalleryDb;
 }
@@ -3016,6 +3094,13 @@ function applyAdminTaskInvalidations(task) {
   }
   if (invalidates.has("localImages")) invalidateTableStamp("local_image_cache");
   if (invalidates.has("remoteImages")) invalidateTableStamp("remote_image_cache");
+  if (invalidates.has("imageLibrary")) {
+    imageLibraryCache = null;
+    archiveImageListCache.clear();
+  }
+  if (invalidates.has("tvMetadata") || invalidates.has("galleryMediaCovers")) {
+    imageLibraryCache = null;
+  }
   if (invalidates.has("userState")) loadUserState();
 }
 
@@ -3690,18 +3775,21 @@ function listArchiveImages(archivePath, options = {}) {
   const key = archiveListCacheKey(archivePath);
   if (!key) return [];
   const now = Date.now();
+  const limit = Number(options.limit || 0) || 0;
   const cached = archiveImageListCache.get(key);
   if (cached && now - cached.createdAt < IMAGE_READER_LIST_CACHE_TTL_MS) {
-    return cached.images;
+    return limit > 0 ? cached.images.slice(0, limit) : cached.images;
   }
   const args = ["list", archivePath];
-  if (options.limit) args.push("--limit", String(options.limit));
+  if (limit > 0) args.push("--limit", String(limit));
   const payload = runArchiveImageHelper(args, { timeout: options.timeout || 120000 });
   const images = Array.isArray(payload.images) ? payload.images : [];
-  archiveImageListCache.set(key, { createdAt: now, images, imageCount: Number(payload.imageCount || images.length) });
-  if (archiveImageListCache.size > 300) {
-    const firstKey = archiveImageListCache.keys().next().value;
-    if (firstKey) archiveImageListCache.delete(firstKey);
+  if (limit <= 0) {
+    archiveImageListCache.set(key, { createdAt: now, images, imageCount: Number(payload.imageCount || images.length) });
+    if (archiveImageListCache.size > 300) {
+      const firstKey = archiveImageListCache.keys().next().value;
+      if (firstKey) archiveImageListCache.delete(firstKey);
+    }
   }
   return images;
 }
@@ -3772,6 +3860,51 @@ function compressImageFileToJpeg(filePath) {
   if (result.stdout[0] !== 0xff || result.stdout[1] !== 0xd8) {
     throw new Error("FFmpeg 没有生成有效的 JPEG 封面");
   }
+  return result.stdout;
+}
+
+function galleryMediaCoverSeekSeconds(duration) {
+  const seconds = Number(duration || 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) return 8;
+  if (seconds < 20) return Math.max(0.1, Math.min(seconds * 0.5, Math.max(0.1, seconds - 0.25)));
+  return Math.floor(Math.min(180, Math.max(8, seconds * 0.08)));
+}
+
+function extractGalleryMediaCoverFrame(filePath, duration) {
+  const seek = galleryMediaCoverSeekSeconds(duration);
+  const args = ["-hide_banner", "-loglevel", "error"];
+  if (seek > 0) args.push("-ss", String(seek));
+  args.push(
+    "-i",
+    filePath,
+    "-map",
+    "0:v:0",
+    "-frames:v",
+    "1",
+    "-vf",
+    `scale=${IMAGE_GALLERY_COVER_BOX_SIZE}:-2`,
+    "-q:v",
+    "5",
+    "-f",
+    "image2pipe",
+    "-vcodec",
+    "mjpeg",
+    "pipe:1"
+  );
+  const result = spawnSync(FFMPEG_PATH, args, {
+    windowsHide: true,
+    maxBuffer: IMAGE_GALLERY_COVER_MAX_BYTES,
+    timeout: 30000
+  });
+  if (result.error) {
+    throw new Error(result.error.code === "ENOBUFS" ? "生成的分集封面超过大小限制" : `FFmpeg 启动失败：${result.error.message}`);
+  }
+  if (result.status !== 0 || !result.stdout?.length) {
+    const detail = String(result.stderr || "").trim();
+    throw new Error(detail ? `FFmpeg 抽帧失败：${detail}` : "FFmpeg 抽帧失败");
+  }
+  if (result.stdout.length > IMAGE_GALLERY_COVER_MAX_BYTES) throw new Error("生成的分集封面超过大小限制");
+  if (result.stdout[0] !== 0xff || result.stdout[1] !== 0xd8) throw new Error("FFmpeg 没有生成有效的 JPEG 封面");
   return result.stdout;
 }
 
@@ -4022,13 +4155,79 @@ function photoSetCoverRow(album) {
   }
 }
 
+function archiveMemberBaseName(memberPath) {
+  const parts = String(memberPath || "").replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts.pop() || "";
+}
+
+function archiveMemberDepth(memberPath) {
+  return String(memberPath || "").replace(/\\/g, "/").split("/").filter(Boolean).length;
+}
+
+function archiveImageMime(memberPath) {
+  return MIME_TYPES[normalizeExt(memberPath)] || "application/octet-stream";
+}
+
+function photoSetCoverHintScore(image) {
+  const baseName = archiveMemberBaseName(image?.path || image?.name || "");
+  const stem = fileBase(baseName).toLowerCase();
+  const tokens = stem.split(/[\s._\-()[\]{}【】]+/).filter(Boolean);
+  if (!stem) return 0;
+
+  if (stem === "cover" || stem === "封面") return 1000;
+  if (tokens.includes("cover") || tokens.includes("封面")) return 940;
+  if (stem.includes("cover") || stem.includes("封面")) return 880;
+  if (COVER_HINTS.has(stem)) return 760;
+  if (tokens.some((token) => COVER_HINTS.has(token))) return 700;
+  return 0;
+}
+
+function selectPhotoSetCoverImage(images = []) {
+  const candidates = images.filter((image) => image?.path);
+  if (!candidates.length) return null;
+
+  const explicit = candidates
+    .map((image, index) => {
+      const hintScore = photoSetCoverHintScore(image);
+      const depth = archiveMemberDepth(image.path);
+      const ext = normalizeExt(image.path);
+      const tieScore = (depth <= 1 ? 40 : Math.max(0, 30 - depth * 5)) + ([".jpg", ".jpeg", ".webp", ".png"].includes(ext) ? 10 : 0);
+      return { image, index, score: hintScore + tieScore, hintScore };
+    })
+    .filter((item) => item.hintScore > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)[0];
+
+  if (explicit) return { image: explicit.image, isExplicitCover: true };
+  return { image: candidates[0], isExplicitCover: false };
+}
+
+function photoSetCoverBlobFromFile(filePath, image, isExplicitCover) {
+  const sourceBytes = safeStat(filePath)?.size || Number(image?.bytes || 0);
+  const mime = archiveImageMime(image?.path || image?.name || "");
+  if (isExplicitCover && sourceBytes > 0 && sourceBytes <= IMAGE_GALLERY_COVER_MAX_BYTES) {
+    return {
+      blob: fs.readFileSync(filePath),
+      mime,
+      sourceBytes
+    };
+  }
+
+  const blob = compressImageFileToJpeg(filePath);
+  return {
+    blob,
+    mime: "image/jpeg",
+    sourceBytes
+  };
+}
+
 function photoSetCoverMatches(row, signature) {
   return (
     row &&
     signature &&
     path.resolve(row.archive_path || "") === signature.archivePath &&
     Number(row.archive_size || 0) === signature.archiveSize &&
-    Number(row.archive_mtime_ms || 0) === signature.archiveMtimeMs
+    Number(row.archive_mtime_ms || 0) === signature.archiveMtimeMs &&
+    Number(row.generator_version || 1) === PHOTO_SET_COVER_GENERATOR_VERSION
   );
 }
 
@@ -4040,8 +4239,8 @@ function upsertPhotoSetCoverError(album, signature, error) {
         `
         INSERT INTO photo_set_covers (
           album_id, archive_path, archive_size, archive_mtime_ms, member_path,
-          cover_mime, cover_blob, cover_bytes, source_bytes, status, error, generated_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          cover_mime, cover_blob, cover_bytes, source_bytes, generator_version, status, error, generated_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(album_id) DO UPDATE SET
           archive_path = excluded.archive_path,
           archive_size = excluded.archive_size,
@@ -4051,6 +4250,7 @@ function upsertPhotoSetCoverError(album, signature, error) {
           cover_blob = excluded.cover_blob,
           cover_bytes = excluded.cover_bytes,
           source_bytes = excluded.source_bytes,
+          generator_version = excluded.generator_version,
           status = excluded.status,
           error = excluded.error,
           generated_at = excluded.generated_at,
@@ -4067,6 +4267,7 @@ function upsertPhotoSetCoverError(album, signature, error) {
         null,
         0,
         0,
+        PHOTO_SET_COVER_GENERATOR_VERSION,
         "error",
         error.message || String(error || "封面生成失败"),
         now,
@@ -4077,15 +4278,16 @@ function upsertPhotoSetCoverError(album, signature, error) {
   }
 }
 
-function upsertPhotoSetCover(album, signature, image, coverBlob) {
+function upsertPhotoSetCover(album, signature, image, cover) {
   const now = new Date().toISOString();
+  const coverBlob = Buffer.from(cover.blob);
   getImageGalleryDb()
     .prepare(
       `
       INSERT INTO photo_set_covers (
         album_id, archive_path, archive_size, archive_mtime_ms, member_path,
-        cover_mime, cover_blob, cover_bytes, source_bytes, status, error, generated_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        cover_mime, cover_blob, cover_bytes, source_bytes, generator_version, status, error, generated_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(album_id) DO UPDATE SET
         archive_path = excluded.archive_path,
         archive_size = excluded.archive_size,
@@ -4095,6 +4297,7 @@ function upsertPhotoSetCover(album, signature, image, coverBlob) {
         cover_blob = excluded.cover_blob,
         cover_bytes = excluded.cover_bytes,
         source_bytes = excluded.source_bytes,
+        generator_version = excluded.generator_version,
         status = excluded.status,
         error = excluded.error,
         generated_at = excluded.generated_at,
@@ -4107,10 +4310,11 @@ function upsertPhotoSetCover(album, signature, image, coverBlob) {
       signature.archiveSize,
       signature.archiveMtimeMs,
       image.path || "",
-      "image/jpeg",
+      cover.mime || "image/jpeg",
       coverBlob,
       coverBlob.length,
-      Number(image.bytes || 0),
+      Number(cover.sourceBytes || image.bytes || 0),
+      PHOTO_SET_COVER_GENERATOR_VERSION,
       "ok",
       "",
       now,
@@ -4136,9 +4340,9 @@ function generatePhotoSetCover(album) {
     throw error;
   }
 
-  const images = listArchiveImages(archivePath, { limit: 1, timeout: 120000 });
-  const firstImage = images[0];
-  if (!firstImage?.path) {
+  const images = listArchiveImages(archivePath);
+  const selected = selectPhotoSetCoverImage(images);
+  if (!selected?.image?.path) {
     const error = new Error("图包里没有可用图片");
     error.statusCode = 404;
     upsertPhotoSetCoverError(album, signature, error);
@@ -4146,12 +4350,12 @@ function generatePhotoSetCover(album) {
   }
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-gallery-cover-"));
-  const tempExt = ARCHIVE_IMAGE_EXTS.has(normalizeExt(firstImage.path)) ? normalizeExt(firstImage.path) : ".img";
+  const tempExt = ARCHIVE_IMAGE_EXTS.has(normalizeExt(selected.image.path)) ? normalizeExt(selected.image.path) : ".img";
   const tempPath = path.join(tempDir, `source${tempExt}`);
   try {
-    extractArchiveMemberToCache(archivePath, firstImage.path, tempPath);
-    const coverBlob = compressImageFileToJpeg(tempPath);
-    return upsertPhotoSetCover(album, signature, firstImage, coverBlob);
+    extractArchiveMemberToCache(archivePath, selected.image.path, tempPath);
+    const cover = photoSetCoverBlobFromFile(tempPath, selected.image, selected.isExplicitCover);
+    return upsertPhotoSetCover(album, signature, selected.image, cover);
   } catch (error) {
     upsertPhotoSetCoverError(album, signature, error);
     error.statusCode = error.statusCode || 500;
@@ -4160,6 +4364,221 @@ function generatePhotoSetCover(album) {
     try {
       fs.rmSync(tempDir, { recursive: true, force: true });
     } catch {}
+  }
+}
+
+function tvSeriesKey(category, seriesName) {
+  return createId("tvs", `${String(category || "").trim()}|${String(seriesName || "").trim()}`);
+}
+
+function galleryMediaSeriesKey(item) {
+  if (!item || item.mediaKind !== "tv") return "";
+  return tvSeriesKey(item.category || "", item.seriesName || item.personName || item.subCategory || item.title || "");
+}
+
+function tvSeriesCoverUrl(seriesKey, updatedAt = "") {
+  if (!seriesKey) return "";
+  const suffix = updatedAt ? `?v=${encodeURIComponent(updatedAt)}` : "";
+  return `/media/tv-series-cover/${encodeURIComponent(seriesKey)}${suffix}`;
+}
+
+function galleryMediaCoverUrl(mediaId, updatedAt = "") {
+  if (!mediaId) return "";
+  const suffix = updatedAt ? `?v=${encodeURIComponent(updatedAt)}` : "";
+  return `/media/gallery-media-cover/${encodeURIComponent(mediaId)}${suffix}`;
+}
+
+function safeJsonArray(value) {
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function tvSeriesMetadataRowsMap() {
+  try {
+    const rows = getImageGalleryDb().prepare("SELECT * FROM tv_series_metadata").all();
+    return new Map(rows.map((row) => [row.series_key, row]));
+  } catch (error) {
+    console.warn("[tv-series-metadata-db]", error.message || error);
+    return new Map();
+  }
+}
+
+function tvSeriesMetadataRow(seriesKey) {
+  if (!seriesKey) return null;
+  try {
+    return getImageGalleryDb().prepare("SELECT * FROM tv_series_metadata WHERE series_key = ?").get(seriesKey) || null;
+  } catch (error) {
+    console.warn("[tv-series-metadata-db]", error.message || error);
+    return null;
+  }
+}
+
+function publicTvSeriesMetadata(row) {
+  if (!row || row.status !== "ok") return null;
+  return {
+    seriesKey: row.series_key || "",
+    category: row.category || "",
+    seriesName: row.series_name || "",
+    doubanId: row.douban_id || "",
+    doubanUrl: row.douban_url || "",
+    title: row.douban_title || row.series_name || "",
+    year: row.year || "",
+    rating: row.rating === null || row.rating === undefined ? null : Number(row.rating || 0),
+    ratingCount: Number(row.rating_count || 0),
+    genres: safeJsonArray(row.genres_json),
+    actors: safeJsonArray(row.actors_json),
+    summary: row.summary || "",
+    coverUrl: row.cover_blob ? tvSeriesCoverUrl(row.series_key, row.updated_at || "") : "",
+    fetchedAt: row.fetched_at || "",
+    updatedAt: row.updated_at || ""
+  };
+}
+
+function galleryMediaCoverRow(mediaId) {
+  if (!mediaId) return null;
+  try {
+    return getImageGalleryDb().prepare("SELECT * FROM gallery_media_covers WHERE media_id = ?").get(mediaId) || null;
+  } catch (error) {
+    console.warn("[gallery-media-cover-db]", error.message || error);
+    return null;
+  }
+}
+
+function galleryMediaSignature(item) {
+  const filePath = galleryMediaPath(item);
+  const stat = safeStat(filePath);
+  if (!stat?.isFile()) return null;
+  return {
+    filePath,
+    sourcePath: path.resolve(filePath),
+    sourceSize: stat.size || 0,
+    sourceMtimeMs: Math.floor(stat.mtimeMs || 0)
+  };
+}
+
+function galleryMediaCoverMatches(row, signature) {
+  return (
+    row &&
+    signature &&
+    path.resolve(row.source_path || "") === signature.sourcePath &&
+    Number(row.source_size || 0) === signature.sourceSize &&
+    Number(row.source_mtime_ms || 0) === signature.sourceMtimeMs &&
+    Number(row.generator_version || 1) === GALLERY_MEDIA_COVER_GENERATOR_VERSION
+  );
+}
+
+function upsertGalleryMediaCoverError(item, signature, error) {
+  const now = new Date().toISOString();
+  try {
+    getImageGalleryDb()
+      .prepare(
+        `
+        INSERT INTO gallery_media_covers (
+          media_id, source_path, source_size, source_mtime_ms, cover_mime,
+          cover_blob, cover_bytes, generator_version, status, error, generated_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(media_id) DO UPDATE SET
+          source_path = excluded.source_path,
+          source_size = excluded.source_size,
+          source_mtime_ms = excluded.source_mtime_ms,
+          cover_mime = excluded.cover_mime,
+          cover_blob = excluded.cover_blob,
+          cover_bytes = excluded.cover_bytes,
+          generator_version = excluded.generator_version,
+          status = excluded.status,
+          error = excluded.error,
+          generated_at = excluded.generated_at,
+          updated_at = excluded.updated_at
+        `
+      )
+      .run(
+        item?.id || "",
+        signature?.sourcePath || "",
+        signature?.sourceSize || 0,
+        signature?.sourceMtimeMs || 0,
+        "",
+        null,
+        0,
+        GALLERY_MEDIA_COVER_GENERATOR_VERSION,
+        "error",
+        String(error?.message || error || "分集封面生成失败").slice(0, 1000),
+        now,
+        now
+      );
+  } catch (dbError) {
+    console.warn("[gallery-media-cover-db]", dbError.message || dbError);
+  }
+}
+
+function upsertGalleryMediaCover(item, signature, coverBlob) {
+  const now = new Date().toISOString();
+  const blob = Buffer.from(coverBlob);
+  getImageGalleryDb()
+    .prepare(
+      `
+      INSERT INTO gallery_media_covers (
+        media_id, source_path, source_size, source_mtime_ms, cover_mime,
+        cover_blob, cover_bytes, generator_version, status, error, generated_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(media_id) DO UPDATE SET
+        source_path = excluded.source_path,
+        source_size = excluded.source_size,
+        source_mtime_ms = excluded.source_mtime_ms,
+        cover_mime = excluded.cover_mime,
+        cover_blob = excluded.cover_blob,
+        cover_bytes = excluded.cover_bytes,
+        generator_version = excluded.generator_version,
+        status = excluded.status,
+        error = excluded.error,
+        generated_at = excluded.generated_at,
+        updated_at = excluded.updated_at
+      `
+    )
+    .run(
+      item.id,
+      signature.sourcePath,
+      signature.sourceSize,
+      signature.sourceMtimeMs,
+      "image/jpeg",
+      blob,
+      blob.length,
+      GALLERY_MEDIA_COVER_GENERATOR_VERSION,
+      "ok",
+      "",
+      now,
+      now
+    );
+  return galleryMediaCoverRow(item.id);
+}
+
+function generateGalleryMediaCover(item) {
+  const signature = galleryMediaSignature(item);
+  if (!signature) {
+    const error = new Error("视频文件不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const cached = galleryMediaCoverRow(item.id);
+  if (galleryMediaCoverMatches(cached, signature)) {
+    if (cached.status === "ok" && cached.cover_blob) return cached;
+    const error = new Error(cached.error || "分集封面生成失败");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  try {
+    const probe = videoProbeCached({ id: item.id, path: signature.filePath }) || {};
+    const coverBlob = extractGalleryMediaCoverFrame(signature.filePath, probe.duration);
+    return upsertGalleryMediaCover(item, signature, coverBlob);
+  } catch (error) {
+    upsertGalleryMediaCoverError(item, signature, error);
+    error.statusCode = error.statusCode || 500;
+    throw error;
   }
 }
 
@@ -4537,6 +4956,17 @@ function mediaItemsByKind(items, kind) {
   return items.filter((item) => item.mediaKind === kind);
 }
 
+function publicGalleryMediaItem(item, tvMetadataByKey = null) {
+  const seriesKey = galleryMediaSeriesKey(item);
+  const tvSeries = seriesKey ? publicTvSeriesMetadata(tvMetadataByKey?.get(seriesKey) || tvSeriesMetadataRow(seriesKey)) : null;
+  return {
+    ...item,
+    seriesKey,
+    tvSeries,
+    coverUrl: item.mediaKind === "tv" ? galleryMediaCoverUrl(item.id, item.updatedAt || "") : item.coverUrl || ""
+  };
+}
+
 function mediaFacets(items) {
   return {
     categories: facetCounts(items, "category"),
@@ -4553,7 +4983,8 @@ function imageLibraryPayload(options = {}) {
     ...item,
     coverUrl: item.coverUrl || photoSetCoverUrl(item.id, item.updatedAt || "")
   }));
-  const mediaItems = Array.isArray(index.mediaItems) ? index.mediaItems : [];
+  const tvMetadataByKey = tvSeriesMetadataRowsMap();
+  const mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey));
   const westernItems = mediaItemsByKind(mediaItems, "western");
   const movieItems = mediaItemsByKind(mediaItems, "movie");
   const tvItems = mediaItemsByKind(mediaItems, "tv");
@@ -4640,16 +5071,31 @@ function imageLibraryItemsPayload(url, options = {}) {
   const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
   const query = String(url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
   const sort = String(url.searchParams.get("sort") || "updated").trim();
+  const photoView = normalizePhotoLibraryView(url.searchParams.get("photoView") || url.searchParams.get("view"));
+  const category = String(url.searchParams.get("category") || "all").trim() || "all";
+  const person = String(url.searchParams.get("person") || "all").trim() || "all";
+  const collection = String(url.searchParams.get("collection") || "").trim();
   const index = getImageLibraryIndex(options);
-  const mediaItems = Array.isArray(index.mediaItems) ? index.mediaItems : [];
+  const tvMetadataByKey = tvSeriesMetadataRowsMap();
+  const mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey));
 
   let source = [];
+  let facetsSource = [];
+  let collectionSummary = null;
   if (mode === "photo") {
-    source = (index.photoSets || []).map((item) => publicImageLibraryListItem(item, "photo"));
+    const photoSets = Array.isArray(index.photoSets) ? index.photoSets : [];
+    const filteredPhotoSets = filterPhotoSetsForList(photoSets, { category, person, collection });
+    facetsSource = collection ? filteredPhotoSets : filterPhotoSetsForList(photoSets, { collection: "", category: "all", person: "all" });
+    if (collection) collectionSummary = photoCollectionSummary(filteredPhotoSets, collection);
+    source = photoView === "collections" && !collection
+      ? photoCollectionGroups(filteredPhotoSets).map(publicPhotoCollectionListItem)
+      : filteredPhotoSets.map((item) => publicImageLibraryListItem(item, "photo"));
   } else if (mode === "manga") {
     source = mangaCacheDirs().map((cacheDir) => publicImageLibraryListItem(publicMangaSummary(cacheDir), "manga"));
   } else if (["western", "movie", "tv"].includes(mode)) {
-    source = mediaItemsByKind(mediaItems, mode).map((item) => publicImageLibraryListItem(item, mode));
+    const mediaSource = mediaItemsByKind(mediaItems, mode).map((item) => publicImageLibraryListItem(item, mode));
+    facetsSource = mediaSource;
+    source = filterMediaItemsForList(mediaSource, { category });
   }
 
   const filtered = filterImageLibraryItems(source, query);
@@ -4660,6 +5106,12 @@ function imageLibraryItemsPayload(url, options = {}) {
     mode,
     query,
     sort,
+    photoView: mode === "photo" ? (collection ? "albums" : photoView) : "",
+    category: ["photo", "western", "movie", "tv"].includes(mode) ? category : "",
+    person: mode === "photo" ? person : "",
+    collection: mode === "photo" ? collection : "",
+    collectionSummary,
+    facets: mode === "photo" ? photoLibraryFacets(facetsSource) : mediaLibraryFacets(facetsSource),
     count: items.length,
     total: sorted.length,
     limit,
@@ -4667,6 +5119,11 @@ function imageLibraryItemsPayload(url, options = {}) {
     scannedAt: index.scannedAt || "",
     items
   };
+}
+
+function normalizePhotoLibraryView(value) {
+  const view = String(value || "").trim().toLowerCase();
+  return view === "collections" || view === "collection" ? "collections" : "albums";
 }
 
 function normalizeImageLibraryMode(value) {
@@ -4687,6 +5144,8 @@ function publicImageLibraryListItem(item, mode) {
     subCategory: String(item?.subCategory || "").trim(),
     personName: String(item?.personName || "").trim(),
     seriesName: String(item?.seriesName || "").trim(),
+    seriesKey: String(item?.seriesKey || "").trim(),
+    tvSeries: item?.tvSeries || null,
     rootLabel: String(item?.rootLabel || item?.kindLabel || "").trim(),
     ext: String(item?.archiveExt || item?.ext || "").trim(),
     size: Number(item?.size || 0),
@@ -4696,9 +5155,35 @@ function publicImageLibraryListItem(item, mode) {
     doneChapterCount: item?.doneChapterCount === undefined ? null : Number(item.doneChapterCount || 0),
     downloadedCount: item?.downloadedCount === undefined ? null : Number(item.downloadedCount || 0),
     failedCount: item?.failedCount === undefined ? null : Number(item.failedCount || 0),
+    albumCount: item?.albumCount === undefined ? null : Number(item.albumCount || 0),
+    collectionId: normalizedMode === "photo" ? photoCollectionValue(item) : "",
+    collectionTitle: normalizedMode === "photo" ? photoCollectionDisplayName(photoCollectionDir(item)) : "",
     playable: Boolean(item?.playable),
-    coverUrl: String(item?.coverUrl || "").trim(),
+    coverUrl: String(item?.coverUrl || (normalizedMode === "photo" ? photoSetCoverUrl(item?.id, item?.updatedAt || "") : "")).trim(),
     routePath: imageLibraryItemRoutePath(normalizedMode, item?.id)
+  };
+}
+
+function publicPhotoCollectionListItem(group) {
+  return {
+    id: group.value,
+    type: "photoCollection",
+    title: group.title,
+    category: group.categories.slice(0, 3).join(" · "),
+    subCategory: group.subCategories.slice(0, 3).join(" · "),
+    personName: "",
+    seriesName: "",
+    rootLabel: group.rootLabel,
+    ext: "",
+    size: group.size,
+    updatedAt: group.updatedAt,
+    imageCount: group.imageCount,
+    albumCount: group.count,
+    collectionId: group.value,
+    collectionTitle: group.title,
+    playable: false,
+    coverUrl: group.coverUrl,
+    routePath: `/photo/collection/${encodeURIComponent(group.value)}`
   };
 }
 
@@ -4729,6 +5214,115 @@ function filterImageLibraryItems(items, query) {
       .filter(Boolean)
       .some((value) => String(value).toLowerCase().includes(needle))
   );
+}
+
+function filterPhotoSetsForList(items, filters = {}) {
+  return (items || []).filter((item) => {
+    if (filters.category && filters.category !== "all" && item.category !== filters.category) return false;
+    if (filters.person && filters.person !== "all" && item.personName !== filters.person) return false;
+    if (filters.collection && photoCollectionValue(item) !== filters.collection) return false;
+    return true;
+  });
+}
+
+function photoLibraryFacets(items = []) {
+  return {
+    categories: facetCounts(items, "category").slice(0, 20),
+    people: facetCounts(items, "personName").slice(0, 20)
+  };
+}
+
+function mediaLibraryFacets(items = []) {
+  return {
+    categories: facetCounts(items, "category").slice(0, 24),
+    people: facetCounts(items, "personName").slice(0, 20),
+    roots: facetCounts(items, "rootLabel").slice(0, 12)
+  };
+}
+
+function filterMediaItemsForList(items, filters = {}) {
+  return (items || []).filter((item) => {
+    if (filters.category && filters.category !== "all" && item.category !== filters.category) return false;
+    return true;
+  });
+}
+
+function photoCollectionDir(item) {
+  const relativePath = String(item?.relativePath || "").replace(/[\\/]+/g, "/");
+  const parts = relativePath.split("/").filter(Boolean);
+  if (parts.length <= 1) return PHOTO_COLLECTION_ROOT_VALUE;
+  return parts.slice(0, -1).join("/");
+}
+
+function photoCollectionValue(item) {
+  return [item?.sourceRoot || item?.rootLabel || "", photoCollectionDir(item)].join("|");
+}
+
+function photoCollectionDisplayName(dirValue) {
+  const dir = String(dirValue || "").trim();
+  if (!dir || dir === PHOTO_COLLECTION_ROOT_VALUE) return "根目录合集";
+  const last = dir.split("/").filter(Boolean).pop() || dir;
+  const bracketOnly = last.match(/^\[([^\]]+)\]$/);
+  return bracketOnly ? bracketOnly[1].trim() || last : last;
+}
+
+function photoCollectionGroups(items = []) {
+  const groups = new Map();
+  for (const item of items) {
+    const dir = photoCollectionDir(item);
+    const value = photoCollectionValue(item);
+    let group = groups.get(value);
+    if (!group) {
+      group = {
+        value,
+        title: photoCollectionDisplayName(dir),
+        dir,
+        rootLabel: item.rootLabel || "",
+        count: 0,
+        size: 0,
+        imageCount: 0,
+        updatedAt: "",
+        coverUrl: item.coverUrl || photoSetCoverUrl(item.id, item.updatedAt || ""),
+        categories: new Set(),
+        subCategories: new Set()
+      };
+      groups.set(value, group);
+    }
+    group.count += 1;
+    group.size += Number(item.size || 0);
+    group.imageCount += Number(item.imageCount || 0);
+    if (!group.coverUrl && item.coverUrl) group.coverUrl = item.coverUrl;
+    if (item.category) group.categories.add(item.category);
+    if (item.subCategory) group.subCategories.add(item.subCategory);
+    const itemTime = new Date(item.updatedAt || 0).getTime();
+    const groupTime = new Date(group.updatedAt || 0).getTime();
+    if (itemTime > groupTime) group.updatedAt = item.updatedAt || group.updatedAt;
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      categories: [...group.categories],
+      subCategories: [...group.subCategories]
+    }))
+    .sort((a, b) => b.count - a.count || new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime() || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
+}
+
+function photoCollectionSummary(items = [], collectionValue = "") {
+  if (!collectionValue) return null;
+  const first = items[0] || {};
+  return {
+    id: collectionValue,
+    title: photoCollectionDisplayName(photoCollectionDir(first)),
+    rootLabel: first.rootLabel || "",
+    count: items.length,
+    size: items.reduce((sum, item) => sum + Number(item.size || 0), 0),
+    imageCount: items.reduce((sum, item) => sum + Number(item.imageCount || 0), 0),
+    updatedAt: items.reduce((latest, item) => {
+      const itemTime = new Date(item.updatedAt || 0).getTime();
+      const latestTime = new Date(latest || 0).getTime();
+      return itemTime > latestTime ? item.updatedAt : latest;
+    }, "")
+  };
 }
 
 function sortImageLibraryItems(items, sort) {
@@ -4786,10 +5380,11 @@ function publicPhotoSetDetail(album) {
 }
 
 function publicGalleryMediaDetail(item) {
+  const publicItem = publicGalleryMediaItem(item);
   const filePath = galleryMediaPath(item);
   const stat = safeStat(filePath);
   return {
-    ...item,
+    ...publicItem,
     size: stat?.size || item.size || 0,
     updatedAt: stat ? new Date(stat.mtimeMs).toISOString() : item.updatedAt || "",
     exists: Boolean(stat?.isFile()),
@@ -5269,6 +5864,56 @@ function servePhotoSetCover(res, albumId) {
       row = generatePhotoSetCover(album);
     } catch (error) {
       console.warn("[image-gallery-cover]", album.relativePath || album.id, error.message || error);
+      notFound(res);
+      return;
+    }
+  }
+
+  if (!row?.cover_blob) {
+    notFound(res);
+    return;
+  }
+
+  const buffer = Buffer.from(row.cover_blob);
+  res.writeHead(200, {
+    "Content-Type": row.cover_mime || "image/jpeg",
+    "Content-Length": buffer.length,
+    "Cache-Control": "public, max-age=86400",
+    "Content-Disposition": "inline"
+  });
+  res.end(buffer);
+}
+
+function serveTvSeriesCover(res, seriesKey) {
+  const row = tvSeriesMetadataRow(seriesKey);
+  if (!row?.cover_blob || row.status !== "ok") {
+    notFound(res);
+    return;
+  }
+  const buffer = Buffer.from(row.cover_blob);
+  res.writeHead(200, {
+    "Content-Type": row.cover_mime || "image/jpeg",
+    "Content-Length": buffer.length,
+    "Cache-Control": "public, max-age=86400",
+    "Content-Disposition": "inline"
+  });
+  res.end(buffer);
+}
+
+function serveGalleryMediaCover(res, mediaId) {
+  const item = galleryMediaById(decodeURIComponent(mediaId));
+  if (!item) {
+    notFound(res);
+    return;
+  }
+
+  let row = galleryMediaCoverRow(item.id);
+  const signature = galleryMediaSignature(item);
+  if (!galleryMediaCoverMatches(row, signature) || !row?.cover_blob) {
+    try {
+      row = generateGalleryMediaCover(item);
+    } catch (error) {
+      console.warn("[gallery-media-cover]", item.relativePath || item.id, error.message || error);
       notFound(res);
       return;
     }
@@ -5995,6 +6640,7 @@ async function routeApi(req, res, url) {
   })) return true;
 
   if (url.pathname === "/api/rescan" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
     refreshLibrary();
     sendJson(res, lastScanError ? 500 : 200, {
       ok: !lastScanError,
@@ -6388,6 +7034,18 @@ async function routeMedia(req, res, url) {
   const photoSetCoverMatch = /^\/media\/gallery-cover\/([^/]+)$/.exec(url.pathname);
   if (photoSetCoverMatch && req.method === "GET") {
     servePhotoSetCover(res, decodeURIComponent(photoSetCoverMatch[1]));
+    return true;
+  }
+
+  const tvSeriesCoverMatch = /^\/media\/tv-series-cover\/([^/]+)$/.exec(url.pathname);
+  if (tvSeriesCoverMatch && req.method === "GET") {
+    serveTvSeriesCover(res, decodeURIComponent(tvSeriesCoverMatch[1]));
+    return true;
+  }
+
+  const galleryMediaCoverMatch = /^\/media\/gallery-media-cover\/([^/]+)$/.exec(url.pathname);
+  if (galleryMediaCoverMatch && req.method === "GET") {
+    serveGalleryMediaCover(res, galleryMediaCoverMatch[1]);
     return true;
   }
 

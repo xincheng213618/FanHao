@@ -1,3 +1,5 @@
+const DEFAULT_GALLERY_PHOTO_CATEGORY = "我喜欢的";
+
 export function createGalleryPage(deps) {
   const {
     api,
@@ -32,9 +34,9 @@ export function createGalleryPage(deps) {
     state.gallery.photoView = route.galleryPhotoView || "albums";
     state.gallery.photoCollection = route.galleryPhotoCollection || null;
     state.gallery.query = route.galleryQuery || "";
-    state.gallery.category = route.galleryCategory || "all";
+    state.gallery.category = route.galleryCategory || (state.gallery.mode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all");
+    state.gallery.subCategory = route.gallerySubCategory || "all";
     state.gallery.person = route.galleryPerson || "all";
-    state.gallery.subCategory = "all";
     state.gallery.visibleLimit = 80;
     resetReader();
   }
@@ -79,7 +81,7 @@ export function createGalleryPage(deps) {
 
   async function loadImageLibrary(options = {}) {
     if (state.gallery.loading) return;
-    if (state.gallery.data && !options.refresh) {
+    if (state.gallery.data && !options.refresh && !options.reload) {
       state.gallery.status = state.gallery.data.scannedAt ? `索引 ${formatDateTime(state.gallery.data.scannedAt)}` : state.gallery.status;
       refreshGalleryAfterLibraryChange();
       return;

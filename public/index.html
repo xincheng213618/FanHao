@@ -7,10 +7,10 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="application-name" content="资料库" />
     <title>个人视频资料库</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=20260629-search-01" />
-    <link rel="icon" href="/app-icon.svg?v=20260629-search-01" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="/app-icon.svg?v=20260629-search-01" />
-    <link rel="stylesheet" href="/styles.css?v=20260629-search-01" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260629-tv-metadata-01" />
+    <link rel="icon" href="/app-icon.svg?v=20260629-tv-metadata-01" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/app-icon.svg?v=20260629-tv-metadata-01" />
+    <link rel="stylesheet" href="/styles.css?v=20260629-tv-metadata-01" />
   </head>
   <body>
     <header class="product-topbar" aria-label="资料库模块">
@@ -31,7 +31,7 @@
         <a class="product-tab" href="/tools" data-product-view="tools">小工具</a>
       </nav>
       <div class="product-actions">
-        <button class="product-action" id="topRescanButton" type="button">刷新索引</button>
+        <button class="product-action" id="topRescanButton" type="button">后台作业</button>
         <a class="product-action" id="topAdminLink" href="/admin">设置</a>
       </div>
     </header>
@@ -42,7 +42,7 @@
             <h1>个人视频资料库</h1>
             <p id="librarySummary">正在扫描资料库</p>
           </div>
-          <button class="icon-button" id="rescanButton" type="button" title="全库重新扫描（较慢）" aria-label="全库重新扫描（较慢）">
+          <button class="icon-button" id="rescanButton" type="button" title="打开后台刷新作业" aria-label="打开后台刷新作业">
             <span aria-hidden="true">↻</span>
           </button>
           <button class="icon-button" id="adminButton" type="button" title="后台管理" aria-label="后台管理">
@@ -269,6 +269,6 @@
       </div>
     </template>
 
-    <script src="/app.js?v=20260629-search-01" type="module"></script>
+    <script src="/app.js?v=20260629-tv-metadata-01" type="module"></script>
   </body>
 </html>
