@@ -1,13 +1,13 @@
-import { createApiClient, addQueryParam } from "./js/api.js";
-import { createAdminModal } from "./js/pages/admin-modal.js";
-import { createGalleryPage } from "./js/pages/gallery-page.js";
-import { createGalleryRenderer } from "./js/pages/gallery-renderer.js";
-import { createPeoplePage } from "./js/pages/people-page.js";
-import { createPersonProfile } from "./js/pages/person-profile.js";
-import { createRankingPage } from "./js/pages/ranking-page.js";
-import { createToolsPage } from "./js/pages/tools-page.js";
-import { createWorkDetailPage } from "./js/pages/work-detail-page.js";
-import { URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js";
+import { createApiClient, addQueryParam } from "./js/api.js?v=20260629-search-01";
+import { createAdminModal } from "./js/pages/admin-modal.js?v=20260629-search-01";
+import { createGalleryPage } from "./js/pages/gallery-page.js?v=20260629-search-01";
+import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260629-search-01";
+import { createPeoplePage } from "./js/pages/people-page.js?v=20260629-search-01";
+import { createPersonProfile } from "./js/pages/person-profile.js?v=20260629-search-01";
+import { createRankingPage } from "./js/pages/ranking-page.js?v=20260629-search-01";
+import { createToolsPage } from "./js/pages/tools-page.js?v=20260629-search-01";
+import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260629-search-01";
+import { URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260629-search-01";
 
 const state = {
   library: null,
@@ -555,7 +555,19 @@ async function applyRoute(route) {
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => {});
+    navigator.serviceWorker.getRegistrations?.().then((registrations) => {
+      for (const registration of registrations) registration.unregister().catch(() => {});
+    }).catch(() => {});
+  });
+}
+
+if ("caches" in window) {
+  window.addEventListener("load", () => {
+    caches.keys().then((names) => {
+      for (const name of names) {
+        if (name.startsWith("fanhao-shell-")) caches.delete(name).catch(() => {});
+      }
+    }).catch(() => {});
   });
 }
 
@@ -2387,4 +2399,3 @@ loadLibrary({ deferMainRender: true })
     els.librarySummary.textContent = "索引读取失败";
     renderEmpty(error.message);
   });
-

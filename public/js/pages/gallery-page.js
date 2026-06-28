@@ -62,12 +62,26 @@ export function createGalleryPage(deps) {
     if (node) node.textContent = state.gallery.status;
   }
 
+  function hasUnsubmittedGallerySearchDraft() {
+    const active = document.activeElement;
+    if (!active?.classList?.contains("gallery-search")) return false;
+    return String(active.value || "").trim() !== String(state.gallery.query || "").trim();
+  }
+
+  function refreshGalleryAfterLibraryChange() {
+    renderGalleryStats();
+    if (!hasUnsubmittedGallerySearchDraft()) {
+      renderGalleryView();
+    } else {
+      setStatus(state.gallery.status);
+    }
+  }
+
   async function loadImageLibrary(options = {}) {
     if (state.gallery.loading) return;
     if (state.gallery.data && !options.refresh) {
       state.gallery.status = state.gallery.data.scannedAt ? `索引 ${formatDateTime(state.gallery.data.scannedAt)}` : state.gallery.status;
-      renderGalleryStats();
-      renderGalleryView();
+      refreshGalleryAfterLibraryChange();
       return;
     }
     state.gallery.loading = true;
@@ -81,12 +95,11 @@ export function createGalleryPage(deps) {
       state.uiConfig = normalizeUiConfig({ ...state.uiConfig, ...(data.config || {}), ...(data.cache ? { imageReaderCacheMaxBytes: data.cache.maxBytes } : {}) });
       state.gallery.status = data.scannedAt ? `索引 ${formatDateTime(data.scannedAt)}` : "";
       state.gallery.loading = false;
-      renderGalleryStats();
-      renderGalleryView();
+      refreshGalleryAfterLibraryChange();
     } catch (error) {
       state.gallery.loading = false;
       setStatus(error.message || "图像资料库读取失败");
-      renderGalleryView();
+      if (!hasUnsubmittedGallerySearchDraft()) renderGalleryView();
     } finally {
       state.gallery.loading = false;
     }
