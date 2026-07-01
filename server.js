@@ -13,8 +13,10 @@ import { decodeInfoBuffer, isSubtitleLikeInfoText, parseInfoMetadata, renderInfo
 import { createAuthServices } from "./src/server/auth.js";
 import { sendJson, sendText, sendHtml, redirect, notFound } from "./src/server/responses.js";
 import { createStaticFileServer } from "./src/server/static-files.js";
+import { createNovelStore } from "./src/server/novel-store.js";
 import { routeAdminApi } from "./src/server/routes/admin-api.js";
 import { routeGalleryApi } from "./src/server/routes/gallery-api.js";
+import { routeNovelApi } from "./src/server/routes/novel-api.js";
 import { routeToolsApi } from "./src/server/routes/tools-api.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -34,11 +36,14 @@ const IMAGE_LIBRARY_INDEX_PATH = path.join(DATA_DIR, "image-library-index.json")
 const USER_STATE_PATH = path.join(DATA_DIR, "user-state.json");
 const ACTOR_PROFILE_DB_PATH = path.join(DATA_DIR, "actor-profiles.sqlite");
 const IMAGE_GALLERY_DB_PATH = path.join(DATA_DIR, "image-gallery.sqlite");
+const NOVEL_DB_PATH = path.join(DATA_DIR, "novels.sqlite");
+const NOVEL_UPLOAD_MAX_BODY_BYTES = 80 * 1024 * 1024;
 const APP_CONFIG_PATH = path.join(DATA_DIR, "app-config.json");
 const AUTH_SECRET_PATH = path.join(DATA_DIR, "auth-secret.txt");
 const ACCESS_LOG_PATH = path.join(LOG_DIR, "access.log");
 const ADMIN_TASKS_PATH = path.join(DATA_DIR, "admin-tasks.json");
 const TOOL_DOWNLOAD_DIR = path.join(DATA_DIR, "tool-downloads");
+const ANDROID_UPDATE_DIR = path.join(DATA_DIR, "android-update");
 const IMAGE_READER_CACHE_DIR = path.join(DATA_DIR, "image-reader-cache");
 const FFMPEG_PATH = process.env.FFMPEG_PATH || "ffmpeg";
 const FFPROBE_PATH = process.env.FFPROBE_PATH || "ffprobe";
@@ -54,7 +59,8 @@ const COVER_HINTS = new Set(["cover", "poster", "folder", "front", "fanart", "th
 const MAX_INFO_BYTES = 1024 * 1024;
 const MAX_GENERATED_COVER_BYTES = DEFAULT_MAX_COVER_BYTES;
 const DEFAULT_WORK_LIMIT = 160;
-const MAX_WORK_LIMIT = 1200;
+const MAX_WORK_LIMIT = 16000;
+const MAX_IMAGE_LIBRARY_ITEM_LIMIT = 12000;
 const HAS_NVENC = detectNvenc();
 const VIDEO_PROBE_CACHE_LIMIT = 512;
 const videoProbeCache = new Map();
@@ -97,6 +103,7 @@ const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".apk": "application/vnd.android.package-archive",
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -131,6 +138,7 @@ const { serveStatic } = createStaticFileServer({
   normalizeExt,
   notFound
 });
+const novelStore = createNovelStore({ dbPath: NOVEL_DB_PATH });
 
 let library = emptyLibrary();
 let lastScanError = null;
@@ -167,7 +175,7 @@ function parseLibraryRoots() {
   const raw =
     process.env.LIBRARY_ROOTS ||
     process.env.LIBRARY_ROOT ||
-    "G:\\;F:\\;O:\\;O:\\[珍藏]\\;O:\\[珍藏1]\\;V:\\[A]\\;V:\\[A1]\\;V:\\AV\\";
+    "G:\\;F:\\;O:\\;O:\\[珍藏]\\;O:\\[珍藏1]\\;O:\\[稀有]\\;O:\\[动漫]\\;V:\\[A]\\;V:\\[A1]\\;V:\\AV\\";
   const roots = raw
     .split(/[;,|]/)
     .map((item) => item.trim())
@@ -1433,6 +1441,16 @@ function getImageGalleryDb() {
       CREATE INDEX IF NOT EXISTS idx_photo_set_covers_archive_path ON photo_set_covers(archive_path);
       CREATE INDEX IF NOT EXISTS idx_photo_set_covers_status ON photo_set_covers(status);
       CREATE INDEX IF NOT EXISTS idx_photo_set_covers_updated_at ON photo_set_covers(updated_at);
+      CREATE TABLE IF NOT EXISTS photo_set_image_indexes (
+        archive_path TEXT PRIMARY KEY,
+        archive_size INTEGER,
+        archive_mtime_ms INTEGER,
+        image_count INTEGER,
+        images_json TEXT NOT NULL,
+        indexed_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_photo_set_image_indexes_updated_at ON photo_set_image_indexes(updated_at);
       CREATE TABLE IF NOT EXISTS tv_series_metadata (
         series_key TEXT PRIMARY KEY,
         category TEXT,
@@ -1440,17 +1458,36 @@ function getImageGalleryDb() {
         douban_id TEXT,
         douban_url TEXT,
         douban_title TEXT,
+        original_title TEXT,
+        aka_json TEXT,
+        official_site TEXT,
         year TEXT,
         rating REAL,
         rating_count INTEGER,
+        rating_stars_json TEXT,
+        rating_better_than_json TEXT,
+        directors_json TEXT,
+        writers_json TEXT,
         genres_json TEXT,
         actors_json TEXT,
+        countries_json TEXT,
+        languages_json TEXT,
+        pubdate TEXT,
+        release_dates_json TEXT,
+        season_count INTEGER,
+        episode_count INTEGER,
+        episode_duration TEXT,
+        durations_json TEXT,
+        imdb_id TEXT,
+        info_json TEXT,
+        json_ld_json TEXT,
         summary TEXT,
         cover_url TEXT,
         cover_mime TEXT,
         cover_blob BLOB,
         cover_bytes INTEGER,
         source TEXT,
+        detail_source TEXT,
         status TEXT NOT NULL DEFAULT 'ok',
         error TEXT,
         fetched_at TEXT,
@@ -1459,6 +1496,51 @@ function getImageGalleryDb() {
       CREATE INDEX IF NOT EXISTS idx_tv_series_metadata_category ON tv_series_metadata(category);
       CREATE INDEX IF NOT EXISTS idx_tv_series_metadata_douban_id ON tv_series_metadata(douban_id);
       CREATE INDEX IF NOT EXISTS idx_tv_series_metadata_status ON tv_series_metadata(status);
+      CREATE TABLE IF NOT EXISTS movie_metadata (
+        media_id TEXT PRIMARY KEY,
+        category TEXT,
+        movie_title TEXT NOT NULL,
+        douban_id TEXT,
+        douban_url TEXT,
+        douban_title TEXT,
+        original_title TEXT,
+        aka_json TEXT,
+        official_site TEXT,
+        year TEXT,
+        rating REAL,
+        rating_count INTEGER,
+        rating_stars_json TEXT,
+        rating_better_than_json TEXT,
+        directors_json TEXT,
+        writers_json TEXT,
+        genres_json TEXT,
+        actors_json TEXT,
+        countries_json TEXT,
+        languages_json TEXT,
+        pubdate TEXT,
+        release_dates_json TEXT,
+        season_count INTEGER,
+        episode_count INTEGER,
+        episode_duration TEXT,
+        durations_json TEXT,
+        imdb_id TEXT,
+        info_json TEXT,
+        json_ld_json TEXT,
+        summary TEXT,
+        cover_url TEXT,
+        cover_mime TEXT,
+        cover_blob BLOB,
+        cover_bytes INTEGER,
+        source TEXT,
+        detail_source TEXT,
+        status TEXT NOT NULL DEFAULT 'ok',
+        error TEXT,
+        fetched_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_movie_metadata_category ON movie_metadata(category);
+      CREATE INDEX IF NOT EXISTS idx_movie_metadata_douban_id ON movie_metadata(douban_id);
+      CREATE INDEX IF NOT EXISTS idx_movie_metadata_status ON movie_metadata(status);
       CREATE TABLE IF NOT EXISTS gallery_media_covers (
         media_id TEXT PRIMARY KEY,
         source_path TEXT NOT NULL,
@@ -1488,26 +1570,91 @@ function getImageGalleryDb() {
     ensureColumn(imageGalleryDb, "photo_set_covers", "error", "TEXT");
     ensureColumn(imageGalleryDb, "photo_set_covers", "generated_at", "TEXT");
     ensureColumn(imageGalleryDb, "photo_set_covers", "updated_at", "TEXT");
+    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "archive_path", "TEXT");
+    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "archive_size", "INTEGER");
+    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "archive_mtime_ms", "INTEGER");
+    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "image_count", "INTEGER");
+    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "images_json", "TEXT");
+    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "indexed_at", "TEXT");
+    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "updated_at", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "category", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "series_name", "TEXT NOT NULL DEFAULT ''");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "douban_id", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "douban_url", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "douban_title", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "original_title", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "aka_json", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "official_site", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "year", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "rating", "REAL");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "rating_count", "INTEGER");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "rating_stars_json", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "rating_better_than_json", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "directors_json", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "writers_json", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "genres_json", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "actors_json", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "countries_json", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "languages_json", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "pubdate", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "release_dates_json", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "season_count", "INTEGER");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "episode_count", "INTEGER");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "episode_duration", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "durations_json", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "imdb_id", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "info_json", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "json_ld_json", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "summary", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "cover_url", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "cover_mime", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "cover_blob", "BLOB");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "cover_bytes", "INTEGER");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "source", "TEXT");
+    ensureColumn(imageGalleryDb, "tv_series_metadata", "detail_source", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "status", "TEXT NOT NULL DEFAULT 'ok'");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "error", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "fetched_at", "TEXT");
     ensureColumn(imageGalleryDb, "tv_series_metadata", "updated_at", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(imageGalleryDb, "movie_metadata", "category", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "movie_title", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(imageGalleryDb, "movie_metadata", "douban_id", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "douban_url", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "douban_title", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "original_title", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "aka_json", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "official_site", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "year", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "rating", "REAL");
+    ensureColumn(imageGalleryDb, "movie_metadata", "rating_count", "INTEGER");
+    ensureColumn(imageGalleryDb, "movie_metadata", "rating_stars_json", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "rating_better_than_json", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "directors_json", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "writers_json", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "genres_json", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "actors_json", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "countries_json", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "languages_json", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "pubdate", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "release_dates_json", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "season_count", "INTEGER");
+    ensureColumn(imageGalleryDb, "movie_metadata", "episode_count", "INTEGER");
+    ensureColumn(imageGalleryDb, "movie_metadata", "episode_duration", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "durations_json", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "imdb_id", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "info_json", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "json_ld_json", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "summary", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "cover_url", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "cover_mime", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "cover_blob", "BLOB");
+    ensureColumn(imageGalleryDb, "movie_metadata", "cover_bytes", "INTEGER");
+    ensureColumn(imageGalleryDb, "movie_metadata", "source", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "detail_source", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "status", "TEXT NOT NULL DEFAULT 'ok'");
+    ensureColumn(imageGalleryDb, "movie_metadata", "error", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "fetched_at", "TEXT");
+    ensureColumn(imageGalleryDb, "movie_metadata", "updated_at", "TEXT NOT NULL DEFAULT ''");
     ensureColumn(imageGalleryDb, "gallery_media_covers", "source_path", "TEXT NOT NULL DEFAULT ''");
     ensureColumn(imageGalleryDb, "gallery_media_covers", "source_size", "INTEGER");
     ensureColumn(imageGalleryDb, "gallery_media_covers", "source_mtime_ms", "INTEGER");
@@ -3098,8 +3245,11 @@ function applyAdminTaskInvalidations(task) {
     imageLibraryCache = null;
     archiveImageListCache.clear();
   }
-  if (invalidates.has("tvMetadata") || invalidates.has("galleryMediaCovers")) {
+  if (invalidates.has("tvMetadata") || invalidates.has("movieMetadata") || invalidates.has("galleryMediaCovers")) {
     imageLibraryCache = null;
+  }
+  if (invalidates.has("novels")) {
+    novelStore.invalidate();
   }
   if (invalidates.has("userState")) loadUserState();
 }
@@ -3765,33 +3915,136 @@ function runArchiveImageHelper(args, options = {}) {
   return payload;
 }
 
-function archiveListCacheKey(archivePath) {
+function archiveImageListSignature(archivePath) {
   const stat = safeStat(archivePath);
-  if (!stat?.isFile()) return "";
-  return `${path.resolve(archivePath)}|${stat.size}|${Math.floor(stat.mtimeMs || 0)}`;
+  if (!stat?.isFile()) return null;
+  return {
+    archivePath: path.resolve(archivePath),
+    archiveSize: stat.size || 0,
+    archiveMtimeMs: Math.floor(stat.mtimeMs || 0)
+  };
 }
 
-function listArchiveImages(archivePath, options = {}) {
-  const key = archiveListCacheKey(archivePath);
-  if (!key) return [];
+function archiveListCacheKeyFromSignature(signature) {
+  if (!signature) return "";
+  return `${signature.archivePath}|${signature.archiveSize}|${signature.archiveMtimeMs}`;
+}
+
+function archiveListCacheKey(archivePath) {
+  return archiveListCacheKeyFromSignature(archiveImageListSignature(archivePath));
+}
+
+function sliceArchiveImagePayload(payload, limit = 0) {
+  const images = Array.isArray(payload?.images) ? payload.images : [];
+  const safeLimit = Math.max(0, Math.floor(Number(limit || 0)) || 0);
+  return {
+    imageCount: Number(payload?.imageCount || images.length || 0),
+    images: safeLimit > 0 ? images.slice(0, safeLimit) : images
+  };
+}
+
+function archiveImageIndexRow(signature) {
+  if (!signature) return null;
+  try {
+    return getImageGalleryDb()
+      .prepare("SELECT * FROM photo_set_image_indexes WHERE archive_path = ?")
+      .get(signature.archivePath) || null;
+  } catch {
+    return null;
+  }
+}
+
+function archiveImageIndexMatches(row, signature) {
+  return Boolean(
+    row &&
+    signature &&
+    path.resolve(row.archive_path || "") === signature.archivePath &&
+    Number(row.archive_size || 0) === signature.archiveSize &&
+    Number(row.archive_mtime_ms || 0) === signature.archiveMtimeMs
+  );
+}
+
+function cachedArchiveImagesPayload(signature) {
+  const row = archiveImageIndexRow(signature);
+  if (!archiveImageIndexMatches(row, signature)) return null;
+  try {
+    const images = JSON.parse(row.images_json || "[]");
+    if (!Array.isArray(images)) return null;
+    return {
+      imageCount: Number(row.image_count || images.length || 0),
+      images
+    };
+  } catch {
+    return null;
+  }
+}
+
+function rememberArchiveImagesPayload(key, signature, payload) {
+  const images = Array.isArray(payload?.images) ? payload.images : [];
+  const imageCount = Number(payload?.imageCount || images.length || 0);
+  archiveImageListCache.set(key, { createdAt: Date.now(), images, imageCount });
+  if (archiveImageListCache.size > 300) {
+    const firstKey = archiveImageListCache.keys().next().value;
+    if (firstKey) archiveImageListCache.delete(firstKey);
+  }
+  if (!signature || !images.length) return;
+  try {
+    const now = new Date().toISOString();
+    getImageGalleryDb()
+      .prepare(`
+        INSERT INTO photo_set_image_indexes (
+          archive_path, archive_size, archive_mtime_ms, image_count,
+          images_json, indexed_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(archive_path) DO UPDATE SET
+          archive_size = excluded.archive_size,
+          archive_mtime_ms = excluded.archive_mtime_ms,
+          image_count = excluded.image_count,
+          images_json = excluded.images_json,
+          indexed_at = excluded.indexed_at,
+          updated_at = excluded.updated_at
+      `)
+      .run(
+        signature.archivePath,
+        signature.archiveSize,
+        signature.archiveMtimeMs,
+        imageCount,
+        JSON.stringify(images),
+        now,
+        now
+      );
+  } catch (error) {
+    console.warn("[archive-image-index-cache]", error.message || error);
+  }
+}
+
+function archiveImagesPayload(archivePath, options = {}) {
+  const signature = archiveImageListSignature(archivePath);
+  const key = archiveListCacheKeyFromSignature(signature);
+  if (!key) return { imageCount: 0, images: [] };
   const now = Date.now();
   const limit = Number(options.limit || 0) || 0;
   const cached = archiveImageListCache.get(key);
   if (cached && now - cached.createdAt < IMAGE_READER_LIST_CACHE_TTL_MS) {
-    return limit > 0 ? cached.images.slice(0, limit) : cached.images;
+    return sliceArchiveImagePayload(cached, limit);
   }
-  const args = ["list", archivePath];
-  if (limit > 0) args.push("--limit", String(limit));
-  const payload = runArchiveImageHelper(args, { timeout: options.timeout || 120000 });
+
+  const persisted = cachedArchiveImagesPayload(signature);
+  if (persisted) {
+    rememberArchiveImagesPayload(key, signature, persisted);
+    return sliceArchiveImagePayload(persisted, limit);
+  }
+
+  const payload = runArchiveImageHelper(["list", archivePath], { timeout: options.timeout || 120000 });
   const images = Array.isArray(payload.images) ? payload.images : [];
-  if (limit <= 0) {
-    archiveImageListCache.set(key, { createdAt: now, images, imageCount: Number(payload.imageCount || images.length) });
-    if (archiveImageListCache.size > 300) {
-      const firstKey = archiveImageListCache.keys().next().value;
-      if (firstKey) archiveImageListCache.delete(firstKey);
-    }
-  }
-  return images;
+  const fullPayload = { images, imageCount: Number(payload.imageCount || images.length) };
+  rememberArchiveImagesPayload(key, signature, fullPayload);
+  return sliceArchiveImagePayload(fullPayload, limit);
+}
+
+function listArchiveImages(archivePath, options = {}) {
+  return archiveImagesPayload(archivePath, options).images;
 }
 
 function archiveImageCacheFile(sourceType, archivePath, memberPath) {
@@ -4388,12 +4641,27 @@ function galleryMediaCoverUrl(mediaId, updatedAt = "") {
   return `/media/gallery-media-cover/${encodeURIComponent(mediaId)}${suffix}`;
 }
 
+function movieMetadataCoverUrl(mediaId, updatedAt = "") {
+  if (!mediaId) return "";
+  const suffix = updatedAt ? `?v=${encodeURIComponent(updatedAt)}` : "";
+  return `/media/movie-cover/${encodeURIComponent(mediaId)}${suffix}`;
+}
+
 function safeJsonArray(value) {
   try {
     const parsed = JSON.parse(value || "[]");
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
+  }
+}
+
+function safeJsonObject(value) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
   }
 }
 
@@ -4417,6 +4685,65 @@ function tvSeriesMetadataRow(seriesKey) {
   }
 }
 
+function movieMetadataRowsMap() {
+  try {
+    const rows = getImageGalleryDb().prepare("SELECT * FROM movie_metadata").all();
+    return new Map(rows.map((row) => [row.media_id, row]));
+  } catch (error) {
+    console.warn("[movie-metadata-db]", error.message || error);
+    return new Map();
+  }
+}
+
+function movieMetadataRow(mediaId) {
+  if (!mediaId) return null;
+  try {
+    return getImageGalleryDb().prepare("SELECT * FROM movie_metadata WHERE media_id = ?").get(mediaId) || null;
+  } catch (error) {
+    console.warn("[movie-metadata-db]", error.message || error);
+    return null;
+  }
+}
+
+function publicMovieMetadata(row) {
+  if (!row || row.status !== "ok") return null;
+  return {
+    mediaId: row.media_id || "",
+    category: row.category || "",
+    movieTitle: row.movie_title || "",
+    doubanId: row.douban_id || "",
+    doubanUrl: row.douban_url || "",
+    title: row.douban_title || row.movie_title || "",
+    originalTitle: row.original_title || "",
+    aliases: safeJsonArray(row.aka_json),
+    officialSite: row.official_site || "",
+    year: row.year || "",
+    rating: row.rating === null || row.rating === undefined ? null : Number(row.rating || 0),
+    ratingCount: Number(row.rating_count || 0),
+    ratingStars: safeJsonObject(row.rating_stars_json),
+    ratingBetterThan: safeJsonArray(row.rating_better_than_json),
+    directors: safeJsonArray(row.directors_json),
+    writers: safeJsonArray(row.writers_json),
+    genres: safeJsonArray(row.genres_json),
+    actors: safeJsonArray(row.actors_json),
+    countries: safeJsonArray(row.countries_json),
+    languages: safeJsonArray(row.languages_json),
+    pubdate: row.pubdate || "",
+    releaseDates: safeJsonArray(row.release_dates_json),
+    seasonCount: row.season_count === null || row.season_count === undefined ? null : Number(row.season_count || 0),
+    episodeCount: row.episode_count === null || row.episode_count === undefined ? null : Number(row.episode_count || 0),
+    episodeDuration: row.episode_duration || "",
+    durations: safeJsonArray(row.durations_json),
+    imdbId: row.imdb_id || "",
+    info: safeJsonObject(row.info_json),
+    detailSource: row.detail_source || "",
+    summary: row.summary || "",
+    coverUrl: row.cover_blob ? movieMetadataCoverUrl(row.media_id, row.updated_at || "") : "",
+    fetchedAt: row.fetched_at || "",
+    updatedAt: row.updated_at || ""
+  };
+}
+
 function publicTvSeriesMetadata(row) {
   if (!row || row.status !== "ok") return null;
   return {
@@ -4426,11 +4753,29 @@ function publicTvSeriesMetadata(row) {
     doubanId: row.douban_id || "",
     doubanUrl: row.douban_url || "",
     title: row.douban_title || row.series_name || "",
+    originalTitle: row.original_title || "",
+    aliases: safeJsonArray(row.aka_json),
+    officialSite: row.official_site || "",
     year: row.year || "",
     rating: row.rating === null || row.rating === undefined ? null : Number(row.rating || 0),
     ratingCount: Number(row.rating_count || 0),
+    ratingStars: safeJsonObject(row.rating_stars_json),
+    ratingBetterThan: safeJsonArray(row.rating_better_than_json),
+    directors: safeJsonArray(row.directors_json),
+    writers: safeJsonArray(row.writers_json),
     genres: safeJsonArray(row.genres_json),
     actors: safeJsonArray(row.actors_json),
+    countries: safeJsonArray(row.countries_json),
+    languages: safeJsonArray(row.languages_json),
+    pubdate: row.pubdate || "",
+    releaseDates: safeJsonArray(row.release_dates_json),
+    seasonCount: row.season_count === null || row.season_count === undefined ? null : Number(row.season_count || 0),
+    episodeCount: row.episode_count === null || row.episode_count === undefined ? null : Number(row.episode_count || 0),
+    episodeDuration: row.episode_duration || "",
+    durations: safeJsonArray(row.durations_json),
+    imdbId: row.imdb_id || "",
+    info: safeJsonObject(row.info_json),
+    detailSource: row.detail_source || "",
     summary: row.summary || "",
     coverUrl: row.cover_blob ? tvSeriesCoverUrl(row.series_key, row.updated_at || "") : "",
     fetchedAt: row.fetched_at || "",
@@ -4956,14 +5301,18 @@ function mediaItemsByKind(items, kind) {
   return items.filter((item) => item.mediaKind === kind);
 }
 
-function publicGalleryMediaItem(item, tvMetadataByKey = null) {
+function publicGalleryMediaItem(item, tvMetadataByKey = null, movieMetadataById = null) {
   const seriesKey = galleryMediaSeriesKey(item);
   const tvSeries = seriesKey ? publicTvSeriesMetadata(tvMetadataByKey?.get(seriesKey) || tvSeriesMetadataRow(seriesKey)) : null;
+  const movieMetadata = item?.mediaKind === "movie" ? publicMovieMetadata(movieMetadataById?.get(item.id) || movieMetadataRow(item.id)) : null;
+  const movieCoverUrl = movieMetadata?.coverUrl || "";
+  const fallbackCoverUrl = item.mediaKind === "tv" || item.mediaKind === "movie" ? galleryMediaCoverUrl(item.id, item.updatedAt || "") : "";
   return {
     ...item,
     seriesKey,
     tvSeries,
-    coverUrl: item.mediaKind === "tv" ? galleryMediaCoverUrl(item.id, item.updatedAt || "") : item.coverUrl || ""
+    movieMetadata,
+    coverUrl: movieCoverUrl || fallbackCoverUrl || item.coverUrl || ""
   };
 }
 
@@ -4984,7 +5333,8 @@ function imageLibraryPayload(options = {}) {
     coverUrl: item.coverUrl || photoSetCoverUrl(item.id, item.updatedAt || "")
   }));
   const tvMetadataByKey = tvSeriesMetadataRowsMap();
-  const mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey));
+  const movieMetadataById = movieMetadataRowsMap();
+  const mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById));
   const westernItems = mediaItemsByKind(mediaItems, "western");
   const movieItems = mediaItemsByKind(mediaItems, "movie");
   const tvItems = mediaItemsByKind(mediaItems, "tv");
@@ -5067,21 +5417,25 @@ function imageLibrarySummaryPayload(options = {}) {
 
 function imageLibraryItemsPayload(url, options = {}) {
   const mode = normalizeImageLibraryMode(url.searchParams.get("mode"));
-  const limit = clampInteger(url.searchParams.get("limit"), 48, 1, 120);
+  const limit = clampInteger(url.searchParams.get("limit"), 48, 1, MAX_IMAGE_LIBRARY_ITEM_LIMIT);
   const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
   const query = String(url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
   const sort = String(url.searchParams.get("sort") || "updated").trim();
   const photoView = normalizePhotoLibraryView(url.searchParams.get("photoView") || url.searchParams.get("view"));
+  const tvView = normalizeTvLibraryView(url.searchParams.get("tvView") || url.searchParams.get("view"));
   const category = String(url.searchParams.get("category") || "all").trim() || "all";
   const person = String(url.searchParams.get("person") || "all").trim() || "all";
   const collection = String(url.searchParams.get("collection") || "").trim();
+  const seriesKey = String(url.searchParams.get("seriesKey") || "").trim();
   const index = getImageLibraryIndex(options);
   const tvMetadataByKey = tvSeriesMetadataRowsMap();
-  const mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey));
+  const movieMetadataById = movieMetadataRowsMap();
+  const mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById));
 
   let source = [];
   let facetsSource = [];
   let collectionSummary = null;
+  let seriesSummary = null;
   if (mode === "photo") {
     const photoSets = Array.isArray(index.photoSets) ? index.photoSets : [];
     const filteredPhotoSets = filterPhotoSetsForList(photoSets, { category, person, collection });
@@ -5094,8 +5448,22 @@ function imageLibraryItemsPayload(url, options = {}) {
     source = mangaCacheDirs().map((cacheDir) => publicImageLibraryListItem(publicMangaSummary(cacheDir), "manga"));
   } else if (["western", "movie", "tv"].includes(mode)) {
     const mediaSource = mediaItemsByKind(mediaItems, mode).map((item) => publicImageLibraryListItem(item, mode));
-    facetsSource = mediaSource;
-    source = filterMediaItemsForList(mediaSource, { category });
+    const categorySource = filterMediaItemsForList(mediaSource, { category });
+    if (mode === "tv") {
+      const tvSeriesSource = tvSeriesGroups(mediaSource).map(publicTvSeriesListItem);
+      facetsSource = tvSeriesSource;
+      if (seriesKey) {
+        source = categorySource.filter((item) => item.seriesKey === seriesKey);
+        seriesSummary = publicTvSeriesListItem(tvSeriesGroups(mediaSource).find((group) => group.seriesKey === seriesKey) || null);
+      } else if (tvView === "episodes") {
+        source = categorySource;
+      } else {
+        source = tvSeriesGroups(categorySource).map(publicTvSeriesListItem);
+      }
+    } else {
+      facetsSource = mediaSource;
+      source = categorySource;
+    }
   }
 
   const filtered = filterImageLibraryItems(source, query);
@@ -5107,10 +5475,13 @@ function imageLibraryItemsPayload(url, options = {}) {
     query,
     sort,
     photoView: mode === "photo" ? (collection ? "albums" : photoView) : "",
+    tvView: mode === "tv" ? (seriesKey || tvView === "episodes" ? "episodes" : "series") : "",
     category: ["photo", "western", "movie", "tv"].includes(mode) ? category : "",
     person: mode === "photo" ? person : "",
     collection: mode === "photo" ? collection : "",
     collectionSummary,
+    seriesKey: mode === "tv" ? seriesKey : "",
+    seriesSummary,
     facets: mode === "photo" ? photoLibraryFacets(facetsSource) : mediaLibraryFacets(facetsSource),
     count: items.length,
     total: sorted.length,
@@ -5126,6 +5497,11 @@ function normalizePhotoLibraryView(value) {
   return view === "collections" || view === "collection" ? "collections" : "albums";
 }
 
+function normalizeTvLibraryView(value) {
+  const view = String(value || "").trim().toLowerCase();
+  return view === "episodes" || view === "episode" || view === "items" ? "episodes" : "series";
+}
+
 function normalizeImageLibraryMode(value) {
   const mode = String(value || "").trim().toLowerCase();
   if (mode === "photos" || mode === "photo-set" || mode === "photo-sets") return "photo";
@@ -5134,18 +5510,50 @@ function normalizeImageLibraryMode(value) {
   return "photo";
 }
 
+function hasCjkText(value) {
+  return /[\u3400-\u9FFF\uF900-\uFAFF]/.test(String(value || ""));
+}
+
+function movieChineseTitle(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!hasCjkText(text)) return text;
+  const parts = text.split(" ");
+  const lastCjk = parts.reduce((last, part, index) => (hasCjkText(part) ? index : last), -1);
+  return lastCjk >= 0 ? parts.slice(0, lastCjk + 1).join(" ").trim() : text;
+}
+
+function moviePrimaryDisplayTitle(item, metadata) {
+  const aliases = Array.isArray(metadata?.aliases) ? metadata.aliases : [];
+  const candidates = [
+    metadata?.title,
+    metadata?.movieTitle,
+    ...aliases.filter(hasCjkText),
+    item?.title,
+    item?.dirName
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+  const title = candidates.find(hasCjkText) || candidates[0] || "";
+  return movieChineseTitle(title);
+}
+
 function publicImageLibraryListItem(item, mode) {
   const normalizedMode = normalizeImageLibraryMode(mode || item?.mediaKind || item?.type);
+  const movieMetadata = item?.movieMetadata || null;
+  const movieTitle = normalizedMode === "movie" ? moviePrimaryDisplayTitle(item, movieMetadata) : "";
+  const displayTitle =
+    normalizedMode === "movie" && movieTitle
+      ? [movieTitle, movieMetadata?.year ? `(${movieMetadata.year})` : ""].filter(Boolean).join(" ")
+      : String(item?.title || item?.dirName || "").trim();
   return {
     id: String(item?.id || ""),
     type: normalizedMode,
-    title: String(item?.title || item?.dirName || "").trim(),
+    title: displayTitle,
     category: String(item?.category || item?.site || item?.kindLabel || "").trim(),
     subCategory: String(item?.subCategory || "").trim(),
     personName: String(item?.personName || "").trim(),
     seriesName: String(item?.seriesName || "").trim(),
     seriesKey: String(item?.seriesKey || "").trim(),
     tvSeries: item?.tvSeries || null,
+    movieMetadata,
     rootLabel: String(item?.rootLabel || item?.kindLabel || "").trim(),
     ext: String(item?.archiveExt || item?.ext || "").trim(),
     size: Number(item?.size || 0),
@@ -5160,6 +5568,10 @@ function publicImageLibraryListItem(item, mode) {
     collectionTitle: normalizedMode === "photo" ? photoCollectionDisplayName(photoCollectionDir(item)) : "",
     playable: Boolean(item?.playable),
     coverUrl: String(item?.coverUrl || (normalizedMode === "photo" ? photoSetCoverUrl(item?.id, item?.updatedAt || "") : "")).trim(),
+    rating: item?.movieMetadata?.rating === null || item?.movieMetadata?.rating === undefined ? item?.rating ?? null : Number(item.movieMetadata.rating || 0),
+    ratingCount: item?.movieMetadata?.ratingCount === null || item?.movieMetadata?.ratingCount === undefined ? item?.ratingCount ?? null : Number(item.movieMetadata.ratingCount || 0),
+    year: String(item?.movieMetadata?.year || item?.year || "").trim(),
+    genres: Array.isArray(item?.movieMetadata?.genres) ? item.movieMetadata.genres : Array.isArray(item?.genres) ? item.genres : [],
     routePath: imageLibraryItemRoutePath(normalizedMode, item?.id)
   };
 }
@@ -5187,6 +5599,77 @@ function publicPhotoCollectionListItem(group) {
   };
 }
 
+function tvSeriesGroups(items = []) {
+  const groups = new Map();
+  for (const item of items) {
+    const seriesKey = String(item?.seriesKey || "").trim() || tvSeriesKey(item?.category || "", item?.seriesName || item?.personName || item?.subCategory || item?.title || "");
+    if (!seriesKey) continue;
+    let group = groups.get(seriesKey);
+    if (!group) {
+      group = {
+        seriesKey,
+        type: "tvSeries",
+        title: item?.tvSeries?.title || item?.seriesName || item?.personName || item?.subCategory || item?.title || "电视剧",
+        seriesName: item?.seriesName || item?.personName || item?.subCategory || "",
+        category: item?.category || "",
+        rootLabel: item?.rootLabel || "",
+        tvSeries: item?.tvSeries || null,
+        coverUrl: item?.tvSeries?.coverUrl || "",
+        size: 0,
+        episodeCount: 0,
+        playableCount: 0,
+        updatedAt: "",
+        firstEpisodeId: item?.id || ""
+      };
+      groups.set(seriesKey, group);
+    }
+    group.episodeCount += 1;
+    if (item?.playable) group.playableCount += 1;
+    group.size += Number(item?.size || 0);
+    if (!group.coverUrl && item?.tvSeries?.coverUrl) group.coverUrl = item.tvSeries.coverUrl;
+    if (!group.tvSeries && item?.tvSeries) group.tvSeries = item.tvSeries;
+    if (!group.firstEpisodeId && item?.id) group.firstEpisodeId = item.id;
+    if (String(item?.updatedAt || "") > String(group.updatedAt || "")) group.updatedAt = String(item.updatedAt || "");
+  }
+  return [...groups.values()];
+}
+
+function publicTvSeriesListItem(group) {
+  if (!group) return null;
+  const meta = group.tvSeries || {};
+  return {
+    id: group.seriesKey,
+    type: "tvSeries",
+    title: String(meta.title || group.title || group.seriesName || "电视剧").trim(),
+    category: String(group.category || meta.category || "").trim(),
+    subCategory: String(group.seriesName || "").trim(),
+    personName: String(group.seriesName || group.title || "").trim(),
+    seriesName: String(group.seriesName || group.title || "").trim(),
+    seriesKey: String(group.seriesKey || "").trim(),
+    tvSeries: group.tvSeries || null,
+    rootLabel: String(group.rootLabel || "").trim(),
+    ext: "",
+    size: Number(group.size || 0),
+    updatedAt: String(group.updatedAt || meta.updatedAt || "").trim(),
+    imageCount: null,
+    chapterCount: Number(group.episodeCount || 0),
+    doneChapterCount: Number(group.playableCount || 0),
+    downloadedCount: null,
+    failedCount: null,
+    albumCount: null,
+    collectionId: "",
+    collectionTitle: "",
+    playable: Boolean(group.playableCount),
+    coverUrl: String(group.coverUrl || meta.coverUrl || "").trim(),
+    firstEpisodeId: String(group.firstEpisodeId || "").trim(),
+    rating: meta.rating === null || meta.rating === undefined ? null : Number(meta.rating || 0),
+    ratingCount: meta.ratingCount === null || meta.ratingCount === undefined ? null : Number(meta.ratingCount || 0),
+    year: String(meta.year || "").trim(),
+    genres: Array.isArray(meta.genres) ? meta.genres : [],
+    routePath: `/tv?seriesKey=${encodeURIComponent(String(group.seriesKey || ""))}`
+  };
+}
+
 function imageLibraryItemRoutePath(mode, id) {
   const encoded = encodeURIComponent(String(id || ""));
   if (!encoded) return "/";
@@ -5209,7 +5692,15 @@ function filterImageLibraryItems(items, query) {
       item.personName,
       item.seriesName,
       item.rootLabel,
-      item.ext
+      item.ext,
+      item.movieMetadata?.title,
+      item.movieMetadata?.originalTitle,
+      item.movieMetadata?.imdbId,
+      ...(item.movieMetadata?.aliases || []),
+      ...(item.movieMetadata?.directors || []),
+      ...(item.movieMetadata?.writers || []),
+      ...(item.movieMetadata?.actors || []),
+      ...(item.movieMetadata?.genres || [])
     ]
       .filter(Boolean)
       .some((value) => String(value).toLowerCase().includes(needle))
@@ -5227,7 +5718,7 @@ function filterPhotoSetsForList(items, filters = {}) {
 
 function photoLibraryFacets(items = []) {
   return {
-    categories: facetCounts(items, "category").slice(0, 20),
+    categories: facetCounts(items, "category"),
     people: facetCounts(items, "personName").slice(0, 20)
   };
 }
@@ -5333,6 +5824,17 @@ function sortImageLibraryItems(items, sort) {
   if (sort === "size") {
     return list.sort((a, b) => Number(b.size || 0) - Number(a.size || 0) || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
   }
+  if (sort === "rating") {
+    return list.sort((a, b) => {
+      const aRating = Number(a.rating || a.tvSeries?.rating || 0);
+      const bRating = Number(b.rating || b.tvSeries?.rating || 0);
+      const aHasRating = aRating > 0;
+      const bHasRating = bRating > 0;
+      if (aHasRating !== bHasRating) return aHasRating ? -1 : 1;
+      if (aRating !== bRating) return bRating - aRating;
+      return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+    });
+  }
   return list.sort((a, b) => {
     const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
     return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
@@ -5363,18 +5865,33 @@ function photoSetArchivePath(album) {
   return safeChildPath(album.sourceRoot, album.relativePath);
 }
 
-function publicPhotoSetDetail(album) {
+function publicPhotoSetDetail(album, options = {}) {
   const archivePath = photoSetArchivePath(album);
-  const images = listArchiveImages(archivePath);
+  const imageOffset = Math.max(0, Math.floor(Number(options.imageOffset || 0)) || 0);
+  const rawImageLimit = options.imageLimit;
+  const imageLimit = Number.isFinite(Number(rawImageLimit)) && Number(rawImageLimit) > 0
+    ? Math.floor(Number(rawImageLimit))
+    : 0;
+  const payload = archiveImagesPayload(archivePath, {
+    limit: imageLimit > 0 ? imageOffset + imageLimit : 0
+  });
+  const images = Array.isArray(payload.images) ? payload.images : [];
+  const imageCount = Number(payload.imageCount || images.length || 0);
+  const visibleImages = imageLimit > 0
+    ? images.slice(imageOffset, imageOffset + imageLimit)
+    : images;
   return {
     ...album,
-    imageCount: images.length,
-    images: images.map((image, index) => ({
-      index: index + 1,
+    imageCount,
+    imageOffset,
+    imageLimit: imageLimit || images.length,
+    imagesTruncated: imageLimit > 0 && imageOffset + visibleImages.length < imageCount,
+    images: visibleImages.map((image, index) => ({
+      index: imageOffset + index + 1,
       name: image.name || path.basename(image.path || ""),
       archivePath: image.path || "",
       bytes: Number(image.bytes || 0),
-      url: photoSetImageUrl(album.id, index + 1)
+      url: photoSetImageUrl(album.id, imageOffset + index + 1)
     }))
   };
 }
@@ -5462,6 +5979,172 @@ function formattedTxtFileName(fileName) {
 function attachmentDisposition(fileName) {
   const fallback = sanitizeDownloadFileName(fileName, "download.txt").replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
   return `attachment; filename="${fallback || "download.txt"}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+}
+
+function normalizeAndroidUpdateChannel(value) {
+  const channel = String(value || "debug").trim().toLowerCase();
+  return channel === "release" ? "release" : "debug";
+}
+
+function androidUpdateChannelDir(channel) {
+  return path.join(ANDROID_UPDATE_DIR, normalizeAndroidUpdateChannel(channel));
+}
+
+function androidUpdateManifestPath(channel) {
+  return path.join(androidUpdateChannelDir(channel), "latest.json");
+}
+
+function requestBaseUrl(req) {
+  const protocol = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() || (req.socket.encrypted ? "https" : "http");
+  const host = req.headers.host || `127.0.0.1:${PORT}`;
+  return `${protocol}://${host}`;
+}
+
+function htmlEscape(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatAndroidUpdateBytes(size) {
+  const value = Number(size || 0);
+  if (!Number.isFinite(value) || value <= 0) return "-";
+  if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${value} B`;
+}
+
+function publicAndroidUpdateManifest(req, url) {
+  const channel = normalizeAndroidUpdateChannel(url.searchParams.get("channel"));
+  const currentVersionCode = clampInteger(url.searchParams.get("currentVersionCode"), 0, 0, Number.MAX_SAFE_INTEGER);
+  const manifest = readJsonFile(androidUpdateManifestPath(channel), null);
+  if (!manifest || !Number(manifest.versionCode)) {
+    return {
+      ok: true,
+      channel,
+      available: false,
+      currentVersionCode,
+      message: channel === "debug" ? "还没有发布调试版 APK" : "还没有发布正式版 APK"
+    };
+  }
+
+  const fileName = sanitizeDownloadFileName(manifest.apkFile || `fanhao-${channel}.apk`, `fanhao-${channel}.apk`);
+  const apkPath = safeChildPath(androidUpdateChannelDir(channel), fileName);
+  const exists = Boolean(apkPath && fs.existsSync(apkPath));
+  const versionCode = Number(manifest.versionCode || 0);
+  const available = exists && versionCode > currentVersionCode;
+  const downloadPath = `/api/android/update/apk/${encodeURIComponent(channel)}/${encodeURIComponent(fileName)}`;
+  return {
+    ok: true,
+    channel,
+    available,
+    currentVersionCode,
+    versionCode,
+    versionName: String(manifest.versionName || versionCode),
+    minVersionCode: Number(manifest.minVersionCode || 0),
+    required: Boolean(manifest.required),
+    notes: Array.isArray(manifest.notes) ? manifest.notes.slice(0, 12) : [],
+    updatedAt: String(manifest.updatedAt || ""),
+    size: Number(manifest.size || (exists ? fs.statSync(apkPath).size : 0)),
+    sha256: String(manifest.sha256 || ""),
+    fileName,
+    downloadUrl: `${requestBaseUrl(req)}${downloadPath}`,
+    message: exists ? "" : "更新包文件不存在"
+  };
+}
+
+function renderAndroidUpdatePage(req, url) {
+  const update = publicAndroidUpdateManifest(req, url);
+  const channel = normalizeAndroidUpdateChannel(update.channel);
+  const title = channel === "debug" ? "FanHao 调试版更新" : "FanHao 正式版更新";
+  const status = update.versionCode
+    ? (update.message || `最新版本 ${update.versionName || update.versionCode}`)
+    : update.message;
+  const notes = update.notes?.length
+    ? update.notes.map((item) => `<li>${htmlEscape(item)}</li>`).join("")
+    : "<li>暂无更新说明</li>";
+  const downloadButton = update.downloadUrl && !update.message
+    ? `<a class="primary" href="${htmlEscape(update.downloadUrl)}">下载 APK</a>`
+    : `<button class="primary" type="button" disabled>暂无可下载 APK</button>`;
+  const apiUrl = `/api/android/update?channel=${encodeURIComponent(channel)}`;
+
+  return `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>${htmlEscape(title)}</title>
+    <style>
+      :root { color-scheme: light dark; --brand: #1f7a62; --text: #17231f; --muted: #64746f; --line: #d9e1de; --panel: #ffffff; --bg: #f5f7f6; }
+      @media (prefers-color-scheme: dark) { :root { --text: #edf4f1; --muted: #a6b5b0; --line: #263631; --panel: #101916; --bg: #08110e; } }
+      body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      main { width: min(680px, calc(100vw - 32px)); margin: 0 auto; padding: 40px 0; }
+      .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 24px; }
+      h1 { margin: 0 0 8px; font-size: clamp(26px, 6vw, 38px); letter-spacing: 0; }
+      p { margin: 0; color: var(--muted); }
+      dl { display: grid; grid-template-columns: 96px 1fr; gap: 10px 16px; margin: 24px 0; }
+      dt { color: var(--muted); }
+      dd { margin: 0; word-break: break-all; }
+      ul { margin: 8px 0 24px; padding-left: 20px; }
+      .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+      a, button { border-radius: 8px; padding: 11px 16px; font: inherit; text-decoration: none; }
+      .primary { border: 1px solid var(--brand); background: var(--brand); color: #fff; }
+      button.primary:disabled { opacity: .55; }
+      .secondary { border: 1px solid var(--line); color: var(--text); background: transparent; }
+      .hint { margin-top: 16px; font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <h1>${htmlEscape(title)}</h1>
+        <p>${htmlEscape(status || "等待发布更新包")}</p>
+        <dl>
+          <dt>通道</dt><dd>${htmlEscape(channel)}</dd>
+          <dt>版本</dt><dd>${htmlEscape(update.versionName || "-")}${update.versionCode ? ` (${htmlEscape(update.versionCode)})` : ""}</dd>
+          <dt>大小</dt><dd>${htmlEscape(formatAndroidUpdateBytes(update.size))}</dd>
+          <dt>更新时间</dt><dd>${htmlEscape(update.updatedAt || "-")}</dd>
+          <dt>文件</dt><dd>${htmlEscape(update.fileName || "-")}</dd>
+        </dl>
+        <h2>更新说明</h2>
+        <ul>${notes}</ul>
+        <div class="actions">
+          ${downloadButton}
+          <a class="secondary" href="${htmlEscape(apiUrl)}">查看 JSON</a>
+          <a class="secondary" href="/">返回网页端</a>
+        </div>
+        <p class="hint">调试阶段使用 debug 包；手机端也会从同一通道检查更新。</p>
+      </section>
+    </main>
+  </body>
+</html>`;
+}
+
+function serveAndroidUpdateApk(req, res, channel, fileName) {
+  const normalizedChannel = normalizeAndroidUpdateChannel(channel);
+  const safeName = sanitizeDownloadFileName(decodeURIComponent(fileName || ""), `fanhao-${normalizedChannel}.apk`);
+  const apkPath = safeChildPath(androidUpdateChannelDir(normalizedChannel), safeName);
+  if (!apkPath || !fs.existsSync(apkPath) || normalizeExt(apkPath) !== ".apk") {
+    notFound(res);
+    return;
+  }
+
+  const stat = fs.statSync(apkPath);
+  res.writeHead(200, {
+    "Content-Type": "application/vnd.android.package-archive",
+    "Content-Length": stat.size,
+    "Content-Disposition": attachmentDisposition(safeName),
+    "Cache-Control": "no-store"
+  });
+  if (req.method === "HEAD") {
+    res.end();
+    return;
+  }
+  fs.createReadStream(apkPath).pipe(res);
 }
 
 function toolDownloadDirForId(id) {
@@ -5886,6 +6569,22 @@ function servePhotoSetCover(res, albumId) {
 
 function serveTvSeriesCover(res, seriesKey) {
   const row = tvSeriesMetadataRow(seriesKey);
+  if (!row?.cover_blob || row.status !== "ok") {
+    notFound(res);
+    return;
+  }
+  const buffer = Buffer.from(row.cover_blob);
+  res.writeHead(200, {
+    "Content-Type": row.cover_mime || "image/jpeg",
+    "Content-Length": buffer.length,
+    "Cache-Control": "public, max-age=86400",
+    "Content-Disposition": "inline"
+  });
+  res.end(buffer);
+}
+
+function serveMovieMetadataCover(res, mediaId) {
+  const row = movieMetadataRow(mediaId);
   if (!row?.cover_blob || row.status !== "ok") {
     notFound(res);
     return;
@@ -6589,6 +7288,17 @@ async function routeApi(req, res, url) {
     return true;
   }
 
+  if (url.pathname === "/api/android/update" && req.method === "GET") {
+    sendJson(res, 200, publicAndroidUpdateManifest(req, url));
+    return true;
+  }
+
+  const androidUpdateApkMatch = /^\/api\/android\/update\/apk\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+  if (androidUpdateApkMatch && (req.method === "GET" || req.method === "HEAD")) {
+    serveAndroidUpdateApk(req, res, androidUpdateApkMatch[1], androidUpdateApkMatch[2]);
+    return true;
+  }
+
   if (url.pathname === "/api/library" && req.method === "GET") {
     const user = userStateSummary();
     sendJson(res, 200, {
@@ -6636,6 +7346,14 @@ async function routeApi(req, res, url) {
     publicMangaSummary,
     publicPhotoSetDetail,
     requireLocalAdmin,
+    sendJson
+  })) return true;
+
+  if (await routeNovelApi(req, res, url, {
+    notFound,
+    novelStore,
+    novelUploadMaxBodyBytes: NOVEL_UPLOAD_MAX_BODY_BYTES,
+    readJsonBody,
     sendJson
   })) return true;
 
@@ -7043,6 +7761,12 @@ async function routeMedia(req, res, url) {
     return true;
   }
 
+  const movieCoverMatch = /^\/media\/movie-cover\/([^/]+)$/.exec(url.pathname);
+  if (movieCoverMatch && req.method === "GET") {
+    serveMovieMetadataCover(res, decodeURIComponent(movieCoverMatch[1]));
+    return true;
+  }
+
   const galleryMediaCoverMatch = /^\/media\/gallery-media-cover\/([^/]+)$/.exec(url.pathname);
   if (galleryMediaCoverMatch && req.method === "GET") {
     serveGalleryMediaCover(res, galleryMediaCoverMatch[1]);
@@ -7133,6 +7857,10 @@ async function requestHandler(req, res) {
 
     if (await routeApi(req, res, url)) return;
     if (await routeMedia(req, res, url)) return;
+    if (url.pathname === "/android-update" && req.method === "GET") {
+      sendHtml(res, 200, renderAndroidUpdatePage(req, url));
+      return;
+    }
 
     if (req.method !== "GET" && req.method !== "HEAD") {
       sendText(res, 405, "Method not allowed");

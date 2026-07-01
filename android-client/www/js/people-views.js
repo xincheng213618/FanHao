@@ -17,9 +17,9 @@ export function createPeopleViews(context) {
     getPeopleLimit,
     increasePeopleLimit,
     showView,
-    openInLibrary,
     setActiveBottom,
-    createLoadMoreButton
+    createLoadMoreButton,
+    renderCurrentViewPreservingScroll
   } = context;
 
   function renderPreviewPeople(people) {
@@ -43,8 +43,6 @@ export function createPeopleViews(context) {
     els.viewKicker.textContent = "人物索引";
     els.viewTitle.textContent = "全部人物";
     els.viewMeta.textContent = `${formatNumber(people.length)} 人 · ${sortDescription(sortMode)}`;
-    els.viewOpenAll.textContent = "网页打开";
-    els.viewOpenAll.onclick = () => openInLibrary({ view: "people" });
     els.viewContent.innerHTML = "";
     els.viewContent.append(createPeopleSortControls(sortMode));
 
@@ -54,8 +52,9 @@ export function createPeopleViews(context) {
     els.viewContent.append(grid);
 
     if (visible.length < people.length) {
-      els.viewContent.append(createLoadMoreButton(`显示更多 ${formatNumber(visible.length)} / ${formatNumber(people.length)}`, () => {
+      els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(people.length)}`, () => {
         increasePeopleLimit(80);
+        if (renderCurrentViewPreservingScroll) return renderCurrentViewPreservingScroll();
         renderPeopleIndex();
       }));
     }

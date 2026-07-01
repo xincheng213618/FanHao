@@ -3,4 +3,7 @@ export const STORAGE_KEY = "fanhao.serverUrl";
 export const THEME_STORAGE_KEY = "fanhao.theme";
 export const SEARCH_HISTORY_STORAGE_KEY = "fanhao.android.searchHistory";
 export const LAST_VIEW_STORAGE_KEY = "fanhao.android.lastView";
-export const CLIENT_VERSION = "20260629-tools-native-01";
+export const CLIENT_VERSION = "20260701-novel-reader-05";
+
+
+

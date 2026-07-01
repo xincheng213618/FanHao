@@ -205,8 +205,6 @@ export function createWorkDetailPage(deps) {
     stopTimelineSync();
     els.playerArea.innerHTML = "";
 
-    els.playerArea.append(createPlayerActions(work));
-
     const streamableVideos = work.videos.filter(canTryWebPlay);
     if (!streamableVideos.length) {
       const unsupported = document.createElement("div");
@@ -247,8 +245,9 @@ export function createWorkDetailPage(deps) {
     const video = document.createElement("video");
     video.className = "video-player";
     const isSegmentedStream = playInfo.mode !== "direct";
-    video.controls = !isSegmentedStream;
+    video.controls = false;
     video.preload = state.accessHints.videoPreload || "metadata";
+    video.playsInline = true;
 
     const savedProgress = selected.progress || (work.progress?.videoId === selected.id ? work.progress : null);
     const requestedStart = Number(startAt);
@@ -278,10 +277,10 @@ export function createWorkDetailPage(deps) {
 
     video.addEventListener("pause", reportCurrentProgress);
     video.addEventListener("ended", reportCurrentProgress);
-    els.playerArea.append(video);
-    if (isSegmentedStream) {
-      els.playerArea.append(createTranscodeControls(video, playInfo, work, selected.id));
-    }
+    const playerShell = document.createElement("div");
+    playerShell.className = "web-player-shell";
+    playerShell.append(video, createPlayerChrome(video, playInfo, work, selected, { isSegmentedStream, shell: playerShell }));
+    els.playerArea.append(playerShell);
     startProgressReporting();
   }
 
@@ -306,49 +305,84 @@ export function createWorkDetailPage(deps) {
     return Number.isFinite(elementDuration) && elementDuration > 0 ? elementDuration + state.currentStreamOffset : 0;
   }
 
-  function createTranscodeControls(video, playInfo, work, videoId) {
-    const controls = document.createElement("div");
-    controls.className = "transcode-controls";
+  function createPlayerChrome(video, playInfo, work, videoFile, options = {}) {
+    const shell = options.shell || els.playerArea;
+    const isSegmentedStream = Boolean(options.isSegmentedStream);
+    const chrome = document.createElement("div");
+    chrome.className = "player-chrome";
     const abortController = new AbortController();
     state.timelineAbortController = abortController;
     const listenerOptions = { signal: abortController.signal };
+    let hideTimer = null;
+    let seeking = false;
+    abortController.signal.addEventListener("abort", () => window.clearTimeout(hideTimer), { once: true });
+
+    const top = document.createElement("div");
+    top.className = "player-chrome-top";
+    const backButton = document.createElement("button");
+    backButton.type = "button";
+    backButton.className = "player-chrome-button player-chrome-back";
+    backButton.textContent = "返回";
+    backButton.addEventListener("click", () => closeDrawer(), listenerOptions);
+    const title = document.createElement("div");
+    title.className = "player-chrome-title";
+    const titleText = document.createElement("strong");
+    titleText.textContent = work.title || videoFile.title || videoFile.name || "播放";
+    const subtitle = document.createElement("span");
+    const codecText = [playInfo.videoCodec, playInfo.audioCodec].filter(Boolean).join(" / ");
+    subtitle.textContent = [
+      workPersonDisplayName(work),
+      videoFile.ext,
+      playInfo.label,
+      codecText
+    ].filter(Boolean).join(" · ");
+    title.append(titleText, subtitle);
+    const actions = createPlayerActions(work);
+    actions.classList.add("player-chrome-actions");
+    top.append(backButton, title, actions);
+
+    const center = document.createElement("button");
+    center.type = "button";
+    center.className = "player-chrome-center";
+    center.setAttribute("aria-label", "播放或暂停");
 
     const playButton = document.createElement("button");
     playButton.type = "button";
-    playButton.className = "transcode-button";
+    playButton.className = "player-chrome-button";
 
     const timeLabel = document.createElement("span");
-    timeLabel.className = "transcode-time";
+    timeLabel.className = "player-chrome-time";
 
     const seek = document.createElement("input");
-    seek.className = "transcode-seek";
+    seek.className = "player-chrome-seek";
     seek.type = "range";
     seek.min = "0";
     seek.step = "1";
     seek.setAttribute("aria-label", "播放进度");
 
     const modeLabel = document.createElement("span");
-    modeLabel.className = "transcode-mode";
-    const codecText = [playInfo.videoCodec, playInfo.audioCodec].filter(Boolean).join(" / ");
+    modeLabel.className = "player-chrome-mode";
     modeLabel.textContent = `${playInfo.label}${codecText ? ` · ${codecText}` : ""}`;
 
     const muteButton = document.createElement("button");
     muteButton.type = "button";
-    muteButton.className = "transcode-button";
+    muteButton.className = "player-chrome-button";
 
     const fullButton = document.createElement("button");
     fullButton.type = "button";
-    fullButton.className = "transcode-button";
+    fullButton.className = "player-chrome-button";
     fullButton.textContent = "全屏";
     fullButton.setAttribute("aria-label", "进入全屏");
 
-    let seeking = false;
+    const bottom = document.createElement("div");
+    bottom.className = "player-chrome-bottom";
 
     const update = (previewValue = null) => {
       const duration = timelineDuration(video);
       const current = previewValue ?? currentPlaybackPosition(video);
       playButton.textContent = video.paused ? "播放" : "暂停";
       playButton.setAttribute("aria-label", video.paused ? "播放" : "暂停");
+      center.textContent = video.paused ? "播放" : "暂停";
       muteButton.textContent = video.muted ? "开声" : "静音";
       muteButton.setAttribute("aria-label", video.muted ? "打开声音" : "静音");
       timeLabel.textContent = duration > 0 ? `${formatTime(current)} / ${formatTime(duration)}` : formatTime(current);
@@ -363,28 +397,35 @@ export function createWorkDetailPage(deps) {
         seek.value = "0";
       }
     };
-
-    playButton.addEventListener("click", () => {
+    const scheduleHide = () => {
+      window.clearTimeout(hideTimer);
+      hideTimer = window.setTimeout(() => shell.classList.add("chrome-hidden"), 2500);
+    };
+    const showChrome = () => {
+      shell.classList.remove("chrome-hidden");
+      scheduleHide();
+    };
+    const togglePlayback = () => {
       if (video.paused) {
         video.play().catch(() => {});
       } else {
         video.pause();
       }
       update();
-    }, listenerOptions);
+      showChrome();
+    };
 
-    video.addEventListener("click", () => {
-      if (video.paused) {
-        video.play().catch(() => {});
-      } else {
-        video.pause();
-      }
-      update();
-    }, listenerOptions);
+    playButton.addEventListener("click", togglePlayback, listenerOptions);
+    center.addEventListener("click", togglePlayback, listenerOptions);
+    video.addEventListener("click", togglePlayback, listenerOptions);
+    shell.addEventListener("pointermove", showChrome, listenerOptions);
+    shell.addEventListener("pointerdown", showChrome, listenerOptions);
+    shell.addEventListener("keydown", showChrome, listenerOptions);
 
     seek.addEventListener("input", () => {
       seeking = true;
       update(Number(seek.value || 0));
+      showChrome();
     }, listenerOptions);
 
     seek.addEventListener("change", () => {
@@ -392,16 +433,26 @@ export function createWorkDetailPage(deps) {
       const shouldKeepPlaying = !video.paused;
       seeking = false;
       reportCurrentProgress({ force: true });
-      renderPlayer(work, videoId, nextPosition, shouldKeepPlaying);
+      if (isSegmentedStream) {
+        renderPlayer(work, videoFile.id, nextPosition, shouldKeepPlaying);
+        return;
+      }
+      const duration = timelineDuration(video);
+      if (duration > 0) video.currentTime = Math.min(Math.max(nextPosition, 0), duration);
+      if (shouldKeepPlaying) video.play().catch(() => {});
+      update();
+      showChrome();
     }, listenerOptions);
 
     seek.addEventListener("pointerup", () => {
       seeking = false;
+      showChrome();
     }, listenerOptions);
 
     muteButton.addEventListener("click", () => {
       video.muted = !video.muted;
       update();
+      showChrome();
     }, listenerOptions);
 
     fullButton.addEventListener("click", () => {
@@ -411,22 +462,33 @@ export function createWorkDetailPage(deps) {
       } else {
         target.requestFullscreen?.();
       }
+      showChrome();
     }, listenerOptions);
 
     video.addEventListener("timeupdate", () => update(), listenerOptions);
-    video.addEventListener("play", () => update(), listenerOptions);
-    video.addEventListener("pause", () => update(), listenerOptions);
+    video.addEventListener("play", () => {
+      update();
+      showChrome();
+    }, listenerOptions);
+    video.addEventListener("pause", () => {
+      update();
+      showChrome();
+    }, listenerOptions);
     video.addEventListener("loadedmetadata", () => update(), listenerOptions);
+    video.addEventListener("canplay", () => update(), listenerOptions);
     document.addEventListener("fullscreenchange", () => {
       fullButton.textContent = document.fullscreenElement ? "退出" : "全屏";
       fullButton.setAttribute("aria-label", document.fullscreenElement ? "退出全屏" : "进入全屏");
+      showChrome();
     }, listenerOptions);
 
     state.timelineTimer = window.setInterval(() => update(), 500);
     update();
+    showChrome();
 
-    controls.append(playButton, timeLabel, seek, modeLabel, muteButton, fullButton);
-    return controls;
+    bottom.append(playButton, timeLabel, seek, modeLabel, muteButton, fullButton);
+    chrome.append(top, center, bottom);
+    return chrome;
   }
 
   function canTryWebPlay(video) {

@@ -97,7 +97,14 @@ const els = {
   compilationPrefixes: document.querySelector("#adminCompilationPrefixes"),
   compilationKeywords: document.querySelector("#adminCompilationKeywords"),
   saveCompilationConfig: document.querySelector("#adminSaveCompilationConfig"),
-  configStatus: document.querySelector("#adminConfigStatus")
+  configStatus: document.querySelector("#adminConfigStatus"),
+  doubanCookieBadge: document.querySelector("#adminDoubanCookieBadge"),
+  doubanCookieInput: document.querySelector("#adminDoubanCookieInput"),
+  doubanCookieState: document.querySelector("#adminDoubanCookieState"),
+  doubanCookieMeta: document.querySelector("#adminDoubanCookieMeta"),
+  saveDoubanCookie: document.querySelector("#adminSaveDoubanCookie"),
+  testDoubanCookie: document.querySelector("#adminTestDoubanCookie"),
+  doubanCookieStatus: document.querySelector("#adminDoubanCookieStatus")
 };
 
 const formatter = new Intl.NumberFormat("zh-CN");
@@ -289,7 +296,7 @@ async function refreshTasks() {
 async function refreshAll() {
   setBusy(els.refreshAll, true, "刷新中");
   try {
-    await Promise.all([loadHealth(), loadLibrary(), loadScripts(), refreshTasks(), loadImageReaderCache({ quiet: true })]);
+    await Promise.all([loadHealth(), loadLibrary(), loadScripts(), refreshTasks(), loadImageReaderCache({ quiet: true }), loadDoubanCookieStatus({ quiet: true })]);
     await refreshCoverCacheStatus({ quiet: true });
     renderLastRefresh();
   } finally {
@@ -894,6 +901,71 @@ async function saveCompilationConfig() {
   }
 }
 
+function renderDoubanCookieStatus(cookie = {}, test = null) {
+  const exists = Boolean(cookie.exists);
+  const ok = test?.ok;
+  const stateText = ok === true ? "详情页可访问" : exists ? "已保存 Cookie" : "未保存 Cookie";
+  const badgeText = ok === true ? "可用" : exists ? "已保存" : "未配置";
+  setText(els.doubanCookieState, stateText);
+  setText(els.doubanCookieBadge, badgeText);
+  if (els.doubanCookieBadge) {
+    els.doubanCookieBadge.className = `admin-badge${ok === true ? " success" : exists ? "" : " muted"}`;
+  }
+  const names = (cookie.cookieNames || []).join(" / ");
+  const meta = [
+    cookie.updatedAt ? `更新：${formatDateTime(cookie.updatedAt)}` : "",
+    cookie.bytes ? `大小：${formatBytes(cookie.bytes)}` : "",
+    names ? `包含：${names}` : "",
+    test?.title ? `测试：${test.title}` : ""
+  ].filter(Boolean);
+  setText(els.doubanCookieMeta, meta.join(" · ") || "不会回显 Cookie 内容");
+}
+
+async function loadDoubanCookieStatus(options = {}) {
+  try {
+    const data = await api("/api/admin/douban-cookie");
+    renderDoubanCookieStatus(data.cookie || {});
+    if (!options.quiet) setText(els.doubanCookieStatus, "状态已更新");
+  } catch (error) {
+    if (!options.quiet) setText(els.doubanCookieStatus, error.message || "读取 Cookie 状态失败");
+  }
+}
+
+async function saveDoubanCookie() {
+  const cookie = String(els.doubanCookieInput?.value || "").trim();
+  if (!cookie) {
+    setText(els.doubanCookieStatus, "先粘贴从浏览器复制的 douban.com Cookie");
+    return;
+  }
+  setBusy(els.saveDoubanCookie, true, "保存中");
+  setText(els.doubanCookieStatus, "正在保存 Cookie");
+  try {
+    const data = await api("/api/admin/douban-cookie", { method: "PUT", body: { cookie } });
+    renderDoubanCookieStatus(data.cookie || {});
+    if (els.doubanCookieInput) els.doubanCookieInput.value = "";
+    setText(els.doubanCookieStatus, "已保存，正在测试详情页");
+    await testDoubanCookie();
+  } catch (error) {
+    setText(els.doubanCookieStatus, error.message || "保存 Cookie 失败");
+  } finally {
+    setBusy(els.saveDoubanCookie, false);
+  }
+}
+
+async function testDoubanCookie() {
+  setBusy(els.testDoubanCookie, true, "测试中");
+  try {
+    const data = await api("/api/admin/douban-cookie/test", { method: "POST" });
+    renderDoubanCookieStatus(data.cookie || {}, data.test || null);
+    setText(els.doubanCookieStatus, data.test?.ok ? "测试通过，电视剧资料脚本会自动读取这个 Cookie。" : data.test?.error || "Cookie 不可用");
+  } catch (error) {
+    await loadDoubanCookieStatus({ quiet: true });
+    setText(els.doubanCookieStatus, error.message || "Cookie 测试失败，可能已过期。");
+  } finally {
+    setBusy(els.testDoubanCookie, false);
+  }
+}
+
 function renderImageReaderCache() {
   const cache = state.readerCache || {};
   setText(els.imageReaderCacheRoot, cache.root || "data\\image-reader-cache");
@@ -1146,6 +1218,8 @@ function bindEvents() {
   els.saveImageReaderCacheLimit?.addEventListener("click", saveImageReaderCacheLimit);
   els.cleanupImageReaderCache?.addEventListener("click", cleanupImageReaderCache);
   els.saveCompilationConfig?.addEventListener("click", saveCompilationConfig);
+  els.saveDoubanCookie?.addEventListener("click", saveDoubanCookie);
+  els.testDoubanCookie?.addEventListener("click", testDoubanCookie);
   for (const button of els.navButtons) {
     button.addEventListener("click", () => setView(button.dataset.adminNav, { pushHash: true }));
   }

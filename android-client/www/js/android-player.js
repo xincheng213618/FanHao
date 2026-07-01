@@ -1,10 +1,10 @@
-import { fetchJson, postJson } from "./api.js";
+import { fetchJson, postJson } from "./api.js?v=20260701-novel-reader-05";
 import { formatBytes, formatNumber, formatTime } from "./format.js";
 import { absoluteUrl } from "./image.js";
 import { createDetailSectionTitle, revealDetailBlock } from "./detail-ui.js";
 
 export function createAndroidVideoSection(context) {
-  const { getActiveUrl, openInLibrary } = context;
+  const { getActiveUrl } = context;
 
   function createVideoList(work, options = {}) {
     const showFiles = options.showFiles !== false;
@@ -53,11 +53,11 @@ export function createAndroidVideoSection(context) {
     return section;
   }
 
-  function playDefaultVideo(section, work) {
+  async function playDefaultVideo(section, work) {
     const mount = section?.querySelector(".android-player-mount");
     const video = selectDefaultVideo(work);
     if (!mount || !video) return false;
-    playVideo(mount, work, video, { autoplay: true });
+    await playVideo(mount, work, video, { autoplay: true });
     return true;
   }
 
@@ -72,18 +72,23 @@ export function createAndroidVideoSection(context) {
     mount.innerHTML = `<div class="loading-row">正在准备播放</div>`;
     revealDetailBlock(mount);
 
-    const opened = await openNativePlayer(activeUrl, work, videoFile, null, resume);
+    let playInfo = null;
+    try {
+      playInfo = await fetchJson(activeUrl, `/api/playinfo/${encodeURIComponent(videoFile.id)}`);
+    } catch {
+      playInfo = null;
+    }
+
+    const opened = await openNativePlayer(activeUrl, work, videoFile, playInfo, resume);
     if (opened) {
-      showNativeOpened(mount, work, videoFile, null, resume);
+      mount.innerHTML = "";
       return;
     }
 
-    try {
-      const playInfo = await fetchJson(activeUrl, `/api/playinfo/${encodeURIComponent(videoFile.id)}`);
-      renderAndroidPlayer(mount, work, videoFile, { ...options, playInfo, startAt: resume });
-    } catch {
-      renderAndroidPlayer(mount, work, videoFile, options);
+    if (playInfo) {
+      return renderAndroidPlayer(mount, work, videoFile, { ...options, playInfo, startAt: resume });
     }
+    return renderAndroidPlayer(mount, work, videoFile, options);
   }
 
   async function openNativePlayer(activeUrl, work, videoFile, playInfo, resume) {
@@ -94,13 +99,13 @@ export function createAndroidVideoSection(context) {
     const fallbackOffset = playInfo?.mode === "direct" ? 0 : resume;
     const fallbackUrl = playInfo ? streamUrlFor(activeUrl, playInfo, fallbackOffset) : "";
     const progressUrl = absoluteUrl(activeUrl, `/api/progress/${encodeURIComponent(videoFile.id)}`);
-    const subtitle = [work.personDisplayName || work.personName, videoFile.ext, playInfo ? playModeText(playInfo) : "原生直连"].filter(Boolean).join(" · ");
+    const subtitle = [work.personDisplayName || work.personName, videoFile.ext, playInfo ? playModeText(playInfo) : "直连播放"].filter(Boolean).join(" · ");
 
     try {
       await plugin.play({
         url: directUrl,
         fallbackUrl,
-        title: work.title || work.directoryName || videoFile.title || videoFile.name || "原生播放",
+        title: work.title || work.directoryName || videoFile.title || videoFile.name || "播放",
         subtitle,
         progressUrl,
         workId: work.id,
@@ -117,35 +122,6 @@ export function createAndroidVideoSection(context) {
 
   function nativePlayerPlugin() {
     return window.Capacitor?.Plugins?.FanHaoPlayer || null;
-  }
-
-  function showNativeOpened(mount, work, videoFile, playInfo, resume) {
-    mount.innerHTML = "";
-    const box = document.createElement("div");
-    box.className = "native-player-card";
-
-    const text = document.createElement("div");
-    const title = document.createElement("strong");
-    title.textContent = "已打开原生播放器";
-    const meta = document.createElement("span");
-    const position = resume > 5 ? ` · 从 ${formatTime(resume)} 继续` : "";
-    meta.textContent = `${playInfo ? playModeText(playInfo) : "原生直连"}${position}`;
-    text.append(title, meta);
-
-    const actions = document.createElement("div");
-    actions.className = "player-action-row";
-    actions.append(
-      createPlayerButton("网页内播放", () => renderAndroidPlayer(mount, work, videoFile, {
-        autoplay: true,
-        ...(playInfo ? { playInfo } : {}),
-        startAt: resume
-      })),
-      createPlayerButton("网页备用", () => openWebFallback(work))
-    );
-
-    box.append(text, actions);
-    mount.append(box);
-    revealDetailBlock(mount);
   }
 
   async function renderAndroidPlayer(mount, work, videoFile, options = {}) {
@@ -239,8 +215,7 @@ export function createAndroidVideoSection(context) {
               playInfo: transcodePlayInfo(playInfo, videoFile),
               startAt: currentPlaybackPosition(video, streamOffset) || resume
             }))]
-            : []),
-          createPlayerButton("网页备用", () => openWebFallback(work))
+            : [])
         );
       });
 
@@ -273,16 +248,14 @@ export function createAndroidVideoSection(context) {
               video.play().catch(() => {
                 status.textContent = "仍无法自动播放，请直接点画面";
               });
-            }),
-            createPlayerButton("网页备用", () => openWebFallback(work))
+            })
           );
         });
       }
     } catch (error) {
       mount.innerHTML = "";
       mount.append(createPlayerErrorBox(error.message, {
-        retry: () => renderAndroidPlayer(mount, work, videoFile, { autoplay: true }),
-        fallback: () => openWebFallback(work)
+        retry: () => renderAndroidPlayer(mount, work, videoFile, { autoplay: true })
       }));
       revealDetailBlock(mount);
     }
@@ -365,23 +338,9 @@ export function createAndroidVideoSection(context) {
     text.textContent = message || "播放失败";
     const actionRow = document.createElement("div");
     actionRow.className = "player-action-row error-actions";
-    actionRow.append(
-      createPlayerButton("重试", handlers.retry),
-      createPlayerButton("网页备用", handlers.fallback)
-    );
+    actionRow.append(createPlayerButton("重试", handlers.retry));
     box.append(text, actionRow);
     return box;
-  }
-
-  function openWebFallback(work) {
-    if (openInLibrary) {
-      openInLibrary({ workId: work.id });
-      return;
-    }
-    const activeUrl = getActiveUrl();
-    const url = new URL(activeUrl);
-    url.searchParams.set("workId", work.id);
-    window.location.assign(url.toString());
   }
 
   function createSegmentedControls({ video, playInfo, streamOffset, status, onSeek }) {
@@ -485,3 +444,6 @@ export function createAndroidVideoSection(context) {
     playDefaultVideo
   };
 }
+
+
+

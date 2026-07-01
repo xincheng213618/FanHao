@@ -1,6 +1,7 @@
-import { fetchJson } from "./api.js";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js";
-import { formatDate, formatNumber } from "./format.js";
+import { fetchJson } from "./api.js?v=20260701-novel-reader-05";
+import { enhanceAutoLoadMore } from "./auto-load.js?v=20260701-novel-reader-05";
+import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js?v=20260701-novel-reader-05";
+import { formatBytes, formatDate, formatNumber } from "./format.js";
 import { absoluteUrl, imageUrlForWork, loadPreviewImage, precacheImage } from "./image.js";
 import { createWorkListState } from "./work-filtering.js";
 
@@ -10,6 +11,14 @@ const RANKING_LIMIT = 1000;
 const RANKING_IMAGE_CACHE_LIMIT = 48;
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
+const SEARCH_CHANNELS = [
+  { key: "photoCollections", label: "套图合集", mode: "photo", unit: "合集", params: { photoView: "collections" } },
+  { key: "photo", label: "套图", mode: "photo", unit: "图包" },
+  { key: "manga", label: "套图 · 韩漫", mode: "manga", unit: "部" },
+  { key: "western", label: "欧美", mode: "western", unit: "视频" },
+  { key: "movie", label: "电影", mode: "movie", unit: "影片" },
+  { key: "tv", label: "电视剧", mode: "tv", unit: "集" }
+];
 
 export function createWorkViews(context) {
   const {
@@ -21,8 +30,10 @@ export function createWorkViews(context) {
     openInLibrary,
     setActiveBottom,
     renderCurrentView,
+    renderCurrentViewPreservingScroll = renderCurrentView,
     isHomeView = () => false
   } = context;
+  const renderFavoriteExtras = context.renderFavoriteExtras || (() => {});
   const workListState = createWorkListState({ renderCurrentView });
   let rankingLists = [];
   let selectedRankingKey = readStoredRankingKey();
@@ -87,8 +98,6 @@ export function createWorkViews(context) {
     els.viewKicker.textContent = isFavorites ? "收藏" : "继续观看";
     els.viewTitle.textContent = isFavorites ? "已收藏作品" : "观看进度";
     els.viewMeta.textContent = "正在读取";
-    els.viewOpenAll.textContent = "网页打开";
-    els.viewOpenAll.onclick = () => openInLibrary({ view });
     els.viewContent.innerHTML = `<div class="loading-row">正在加载列表</div>`;
     const path = isFavorites ? favoriteCollectionPath() : "/api/history";
     const activeUrl = getActiveUrl();
@@ -105,6 +114,7 @@ export function createWorkViews(context) {
         : `${formatNumber(works.length)} 个作品${suffix}`;
       els.viewContent.innerHTML = "";
       if (isFavorites) renderFavoriteFolderStrip(data.folders || []);
+      if (isFavorites) renderFavoriteExtras();
       renderWorks(works, isFavorites ? "还没有收藏作品。" : "暂无继续观看记录。");
     };
 
@@ -161,7 +171,9 @@ export function createWorkViews(context) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = selectedFavoriteFolderId === folderId ? "active" : "";
-    button.textContent = `${name} ${formatNumber(count || 0)}`;
+    button.textContent = name;
+    button.title = `${name} · ${formatNumber(count || 0)}`;
+    button.setAttribute("aria-label", `${name}，${formatNumber(count || 0)} 个作品`);
     button.addEventListener("click", () => {
       if (selectedFavoriteFolderId === folderId) return;
       selectedFavoriteFolderId = folderId;
@@ -176,8 +188,6 @@ export function createWorkViews(context) {
     els.viewKicker.textContent = "作品";
     els.viewTitle.textContent = "片库";
     els.viewMeta.textContent = "正在加载";
-    els.viewOpenAll.textContent = "网页打开";
-    els.viewOpenAll.onclick = () => openInLibrary({ view: "works" });
     els.viewContent.innerHTML = `<div class="loading-row">正在加载作品</div>`;
 
     const limit = getWorksLimit();
@@ -195,9 +205,9 @@ export function createWorkViews(context) {
       els.viewContent.innerHTML = "";
       renderWorks(works, "资料库里还没有作品。", { compactMeta: true, facets: data.facets, total });
       if (works.length < total) {
-        els.viewContent.append(createLoadMoreButton(`显示更多 ${formatNumber(works.length)} / ${formatNumber(total)}`, () => {
+        els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(works.length)} / ${formatNumber(total)}`, () => {
           increaseWorksLimit(80);
-          renderCurrentView();
+          return renderCurrentViewPreservingScroll();
         }));
       }
     };
@@ -231,13 +241,11 @@ export function createWorkViews(context) {
     setActiveBottom("search");
     els.viewKicker.textContent = "搜索";
     els.viewTitle.textContent = text ? `搜索：${text}` : "搜索资料库";
-    els.viewMeta.textContent = text ? "正在搜索" : "输入番号、标题或人物后搜索";
-    els.viewOpenAll.textContent = "网页打开";
-    els.viewOpenAll.onclick = () => openInLibrary(text ? { q: text } : {});
+    els.viewMeta.textContent = text ? "正在全库搜索" : "输入番号、标题、人物或频道内容后搜索";
     els.contentPanel.hidden = false;
 
     if (!text) {
-      renderMessage("可以搜索番号、标题、文件名或人物。", "quiet");
+      renderMessage("可以搜索番号、标题、文件名、人物、套图、漫画或媒体。", "quiet");
       return;
     }
 
@@ -252,19 +260,28 @@ export function createWorkViews(context) {
     const renderSearchData = (data, cacheEntry = null) => {
       const people = data.people || [];
       const works = data.works || [];
+      const channels = data.channels || [];
+      const channelTotal = channels.reduce((sum, item) => sum + Number(item.total || 0), 0);
       const total = Number(data.total || works.length);
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-      els.viewMeta.textContent = `${formatNumber(total)} 个作品 · ${formatNumber(people.length)} 个人物命中${suffix}`;
+      els.viewMeta.textContent = `${formatNumber(total)} 个作品 · ${formatNumber(people.length)} 个人物 · ${formatNumber(channelTotal)} 个频道内容${suffix}`;
       els.viewContent.innerHTML = "";
       renderSearchPeople(people);
-      renderWorks(works, `没有搜到「${text}」。`, {
-        facets: data.facets,
-        total
-      });
+      renderChannelSearchResults(channels, text);
+      const hasChannelResults = channels.some((channel) => (channel.items || []).length);
+      const hasSideResults = people.length || hasChannelResults;
+      if (works.length || total || !hasSideResults) {
+        renderWorks(works, `没有搜到「${text}」。`, {
+          facets: data.facets,
+          total
+        });
+      } else {
+        renderMessage("作品库没有匹配，已显示频道内容。", "quiet", false);
+      }
       if (works.length < total) {
-        els.viewContent.append(createLoadMoreButton(`继续加载搜索结果 ${formatNumber(works.length)} / ${formatNumber(total)}`, () => {
+        els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(works.length)} / ${formatNumber(total)}`, () => {
           increaseWorksLimit(80);
-          renderCurrentView();
+          return renderCurrentViewPreservingScroll();
         }));
       }
     };
@@ -277,7 +294,7 @@ export function createWorkViews(context) {
     }
 
     try {
-      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
+      const data = await fetchSearchBundle(activeUrl, path, text, isActive.signal);
       writeCachedJson(activeUrl, path, data).catch(() => {});
       if (!isActive()) return;
       renderSearchData(data);
@@ -291,13 +308,53 @@ export function createWorkViews(context) {
     }
   }
 
+  async function fetchSearchBundle(activeUrl, path, query, signal = undefined) {
+    const [worksData, channels] = await Promise.all([
+      fetchJson(activeUrl, path, { timeoutMs: 12000, signal }),
+      fetchChannelSearchResults(activeUrl, query, signal)
+    ]);
+    return { ...worksData, channels };
+  }
+
+  async function fetchChannelSearchResults(activeUrl, query, signal = undefined) {
+    const results = await Promise.allSettled(
+      SEARCH_CHANNELS.map(async (channel) => {
+        const path = channelSearchPath(channel, query);
+        const cached = await readCachedJson(activeUrl, path).catch(() => null);
+        try {
+          const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal });
+          writeCachedJson(activeUrl, path, data).catch(() => {});
+          return { ...channel, ...data, fromCache: false };
+        } catch (error) {
+          if (cached?.payload) return { ...channel, ...cached.payload, fromCache: true };
+          return { ...channel, error: error.message || "读取失败", items: [], total: 0, count: 0 };
+        }
+      })
+    );
+    return results
+      .filter((result) => result.status === "fulfilled")
+      .map((result) => result.value)
+      .filter((result) => result.error || Number(result.total || 0) > 0 || (result.items || []).length > 0);
+  }
+
+  function channelSearchPath(channel, query) {
+    const params = new URLSearchParams({
+      mode: channel.mode,
+      q: query,
+      limit: "8",
+      offset: "0"
+    });
+    for (const [key, value] of Object.entries(channel.params || {})) {
+      if (value !== undefined && value !== null && value !== "") params.set(key, value);
+    }
+    return `/api/image-library/items?${params}`;
+  }
+
   async function renderRankings(isActive = () => true) {
     setActiveBottom("rankings");
     els.viewKicker.textContent = "排行榜";
     els.viewTitle.textContent = "JavDB TOP250";
     els.viewMeta.textContent = "正在读取榜单";
-    els.viewOpenAll.textContent = "网页打开";
-    els.viewOpenAll.onclick = () => openInLibrary({ view: "rankings" });
     els.viewContent.innerHTML = `<div class="loading-row">正在加载排行榜</div>`;
 
     const activeUrl = getActiveUrl();
@@ -613,6 +670,128 @@ export function createWorkViews(context) {
     els.viewContent.append(panel);
   }
 
+  function renderChannelSearchResults(channels, query) {
+    const visibleChannels = (channels || []).filter((channel) => channel.error || (channel.items || []).length);
+    if (!visibleChannels.length) return;
+
+    const wrap = document.createElement("section");
+    wrap.className = "global-search-panel";
+    const head = document.createElement("div");
+    head.className = "global-search-head";
+    const title = document.createElement("strong");
+    title.textContent = "频道内容";
+    const meta = document.createElement("span");
+    const total = channels.reduce((sum, channel) => sum + Number(channel.total || 0), 0);
+    meta.textContent = `${formatNumber(total)} 个匹配`;
+    head.append(title, meta);
+    wrap.append(head);
+
+    for (const channel of visibleChannels) {
+      wrap.append(createChannelSearchSection(channel, query));
+    }
+    els.viewContent.append(wrap);
+  }
+
+  function createChannelSearchSection(channel, query) {
+    const section = document.createElement("div");
+    section.className = "global-search-section";
+
+    const head = document.createElement("div");
+    head.className = "global-search-section-head";
+    const title = document.createElement("strong");
+    title.textContent = channel.label;
+    const open = document.createElement("button");
+    open.type = "button";
+    open.textContent = channel.fromCache ? "缓存" : `${formatNumber(channel.total || 0)} ${channel.unit || "项"}`;
+    open.addEventListener("click", () => openChannelSearch(channel, query));
+    head.append(title, open);
+    section.append(head);
+
+    if (channel.error) {
+      const error = document.createElement("div");
+      error.className = "global-search-error";
+      error.textContent = channel.error;
+      section.append(error);
+      return section;
+    }
+
+    const row = document.createElement("div");
+    row.className = "global-search-row";
+    for (const item of (channel.items || []).slice(0, 8)) {
+      row.append(createChannelSearchCard(channel, item));
+    }
+    section.append(row);
+    return section;
+  }
+
+  function createChannelSearchCard(channel, item) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = `global-result-card ${channel.mode}`;
+    card.addEventListener("click", () => openChannelSearchItem(channel, item));
+
+    const thumb = document.createElement("div");
+    thumb.className = "global-result-thumb";
+    thumb.textContent = thumbFallbackText(item.title || channel.label);
+    const cover = item.coverUrl ? absoluteUrl(getActiveUrl(), item.coverUrl) : "";
+    if (cover) loadPreviewImage(thumb, cover, { cacheBaseUrl: getActiveUrl() });
+
+    const title = document.createElement("strong");
+    title.textContent = item.title || item.collectionTitle || channel.label;
+    const meta = document.createElement("span");
+    meta.textContent = channelSearchItemMeta(channel, item);
+    card.append(thumb, title, meta);
+    return card;
+  }
+
+  function channelSearchItemMeta(channel, item) {
+    if (item.type === "photoCollection") {
+      return [hasNumber(item.albumCount) ? `${formatNumber(item.albumCount)} 期` : "", formatBytes(item.size)].filter(Boolean).join(" · ");
+    }
+    if (channel.mode === "photo") return [item.category, item.personName, formatBytes(item.size)].filter(Boolean).join(" · ");
+    if (channel.mode === "manga") {
+      return [
+        hasNumber(item.chapterCount) ? `${formatNumber(item.chapterCount)} 话` : "",
+        hasNumber(item.imageCount) ? `${formatNumber(item.imageCount)} 张` : ""
+      ].filter(Boolean).join(" · ");
+    }
+    return [item.category, item.seriesName || item.personName, formatBytes(item.size)].filter(Boolean).join(" · ");
+  }
+
+  function hasNumber(value) {
+    return value !== undefined && value !== null && value !== "";
+  }
+
+  function openChannelSearch(channel, query) {
+    const params = { mode: channel.mode, query };
+    if (channel.params?.photoView) params.photoView = channel.params.photoView;
+    showView("channel", params, { push: true });
+  }
+
+  function openChannelSearchItem(channel, item) {
+    if (item.type === "photoCollection") {
+      showView("channel", { mode: "photo", collection: item.collectionId || item.id }, { push: true });
+      return;
+    }
+    if (channel.mode === "photo" && item.id) {
+      showView("photoDetail", { id: item.id }, { push: true });
+      return;
+    }
+    if (channel.mode === "manga" && item.id) {
+      showView("mangaDetail", { id: item.id }, { push: true });
+      return;
+    }
+    if (["western", "movie", "tv"].includes(channel.mode) && item.id) {
+      showView("mediaDetail", { id: item.id }, { push: true });
+      return;
+    }
+    if (item.routePath) openInLibrary(item.routePath);
+  }
+
+  function thumbFallbackText(value) {
+    return String(value || "?").trim().slice(0, 2) || "?";
+  }
+
   function renderWorks(works, emptyMessage, options = {}) {
     if (!options.allowRankingSort) leaveRankingSort();
     const source = works || [];
@@ -632,9 +811,9 @@ export function createWorkViews(context) {
     els.viewContent.append(grid);
 
     if (visible.length < list.length) {
-      els.viewContent.append(createLoadMoreButton(`显示更多 ${formatNumber(visible.length)} / ${formatNumber(list.length)}`, () => {
+      els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(list.length)}`, () => {
         increaseWorksLimit(40);
-        renderCurrentView();
+        return renderCurrentViewPreservingScroll();
       }));
     }
   }
@@ -643,6 +822,48 @@ export function createWorkViews(context) {
     if (value === null || value === undefined || value === "") return null;
     const rating = Number(value);
     return Number.isFinite(rating) ? rating : null;
+  }
+
+  function decorateWorkFallbackThumb(thumb, work) {
+    const code = workCode(work);
+    const label = code || thumbFallbackText(workPersonName(work) || displayWorkTitle(work, true));
+    const meta = workThumbMeta(work);
+
+    thumb.classList.add("fallback-cover");
+    thumb.textContent = "";
+
+    const codeLine = document.createElement("strong");
+    codeLine.className = "work-thumb-code";
+    codeLine.textContent = label;
+    thumb.append(codeLine);
+
+    if (meta) {
+      const metaLine = document.createElement("span");
+      metaLine.className = "work-thumb-meta";
+      metaLine.textContent = meta;
+      thumb.append(metaLine);
+    }
+  }
+
+  function workThumbMeta(work) {
+    const date = displayCardDate(work.infoSummary?.releaseDate || work.modifiedAt);
+    const year = /^(\d{4})/.exec(date || "")?.[1] || "";
+    const rating = numericRating(work.infoSummary?.rating);
+    const percent = progressPercent(work);
+    const parts = [];
+
+    if (year) parts.push(year);
+    if (rating !== null) parts.push(`${formatCompactRating(rating)}分`);
+    if (rating === null && percent) parts.push(`已看 ${displayPercent(percent)}%`);
+    if (work.missingLocal) parts.push("未下载");
+
+    return parts.slice(0, 2).join(" · ");
+  }
+
+  function formatCompactRating(value) {
+    const rating = Number(value);
+    if (!Number.isFinite(rating)) return "";
+    return Number.isInteger(rating) ? rating.toFixed(1) : rating.toFixed(2).replace(/0$/u, "");
   }
 
   function createWorkCard(work, options = {}) {
@@ -659,10 +880,10 @@ export function createWorkViews(context) {
       openWorkCard(work);
     });
 
+    const imagePath = imageUrlForWork(work);
     const thumb = document.createElement("div");
     thumb.className = "work-thumb";
-    thumb.textContent = "NO COVER";
-    const imagePath = imageUrlForWork(work);
+    decorateWorkFallbackThumb(thumb, work);
     if (imagePath) {
       const activeUrl = getActiveUrl();
       loadPreviewImage(thumb, absoluteUrl(activeUrl, imagePath), { cacheBaseUrl: activeUrl });
@@ -777,12 +998,44 @@ export function createWorkViews(context) {
     const rawTitle = work.title || work.directoryName || "未命名作品";
     if (!compactMeta) return rawTitle;
 
-    const cleaned = String(rawTitle)
-      .replace(/^\[[^\]]+\][\s._-]*/u, "")
-      .replace(/^[A-Z]{2,10}[\s._-]*\d{2,6}[A-Z]?[\s._-]*/iu, "")
-      .replace(/^[\s._\-:：・]+/u, "")
-      .trim();
+    let cleaned = String(rawTitle).trim();
+    for (let index = 0; index < 4; index += 1) {
+      const previous = cleaned;
+      cleaned = cleaned
+        .replace(/^\[[^\]]+\][\s._-]*/u, "")
+        .replace(/^【[^】]+】[\s._-]*/u, "")
+        .replace(/^[A-Z]{2,10}[\s._-]*\d{2,6}[A-Z]?[\s._-]*/iu, "")
+        .replace(/^[\s._\-:：・]+/u, "")
+        .trim();
+      if (cleaned === previous) break;
+    }
+    cleaned = cleaned.replace(/\s*生写真\d+枚セット\s*$/u, "").trim();
     return cleaned || rawTitle;
+  }
+
+  function workCode(work) {
+    const candidates = [
+      work?.infoSummary?.code,
+      work?.code,
+      work?.directoryName,
+      work?.title,
+      work?.relativePath
+    ];
+
+    for (const candidate of candidates) {
+      const code = extractWorkCode(candidate);
+      if (code) return code;
+    }
+
+    return "";
+  }
+
+  function extractWorkCode(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    const match = /(?:^|[^A-Z0-9])([A-Z]{2,10})[\s._-]*(\d{2,6}[A-Z]?)(?=$|[^A-Z0-9])/iu.exec(text);
+    if (!match) return "";
+    return `${match[1].toUpperCase()}-${match[2].toUpperCase()}`;
   }
 
   function createChip(text, variant = "") {
@@ -855,9 +1108,12 @@ export function createWorkViews(context) {
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = text;
-    button.addEventListener("click", handler);
     wrap.append(button);
-    return wrap;
+    return enhanceAutoLoadMore(wrap, handler, {
+      idleText: text,
+      loadingText: "正在接着加载",
+      retryText: "加载停住了，点一下重试"
+    });
   }
 
   function renderMessage(message, tone = "quiet", replace = true) {
@@ -881,3 +1137,6 @@ export function createWorkViews(context) {
     renderMessage
   };
 }
+
+
+

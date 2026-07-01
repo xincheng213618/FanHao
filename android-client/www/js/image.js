@@ -1,4 +1,4 @@
-import { readCachedImage, writeCachedImage } from "./cache.js";
+import { readCachedImage, writeCachedImage } from "./cache.js?v=20260701-novel-reader-05";
 
 export function absoluteUrl(baseUrl, path) {
   if (!path) return "";
@@ -17,6 +17,7 @@ export async function loadPreviewImage(target, imageUrl, options = {}) {
   let currentNode = target;
   let renderedCache = false;
   let renderSequence = 0;
+  const cacheReadTimeoutMs = Math.max(0, Number(options.cacheReadTimeoutMs ?? 140));
 
   const renderBlob = (blob, source = "network") => {
     if (!blob || !currentNode?.isConnected) return;
@@ -26,6 +27,7 @@ export async function loadPreviewImage(target, imageUrl, options = {}) {
     const objectUrl = URL.createObjectURL(blob);
     const img = document.createElement("img");
     img.alt = "";
+    img.decoding = "async";
     img.src = objectUrl;
     img.dataset.objectUrl = objectUrl;
     img.dataset.imageSource = source;
@@ -55,6 +57,7 @@ export async function loadPreviewImage(target, imageUrl, options = {}) {
     const sequence = renderSequence;
     const img = document.createElement("img");
     img.alt = "";
+    img.decoding = "async";
     img.referrerPolicy = "no-referrer";
     img.src = imageUrl;
     img.dataset.imageSource = "direct";
@@ -72,10 +75,14 @@ export async function loadPreviewImage(target, imageUrl, options = {}) {
   };
 
   try {
-    const cached = await readCachedImage(imageUrl, { baseUrl: options.cacheBaseUrl }).catch(() => null);
+    const cacheRead = readCachedImage(imageUrl, { baseUrl: options.cacheBaseUrl }).catch(() => null);
+    const cached = cacheReadTimeoutMs > 0
+      ? await Promise.race([cacheRead, delay(cacheReadTimeoutMs, null)])
+      : await cacheRead;
     if (cached?.blob) {
       renderedCache = true;
       renderBlob(cached.blob, "cache");
+      if (options.refresh !== true) return;
     }
 
     const response = await fetch(imageUrl, { mode: "cors" });
@@ -88,6 +95,12 @@ export async function loadPreviewImage(target, imageUrl, options = {}) {
     if (renderedCache) return;
     if (/^https?:\/\//i.test(imageUrl)) renderDirect();
   }
+}
+
+function delay(ms, value = null) {
+  return new Promise((resolve) => {
+    window.setTimeout(() => resolve(value), ms);
+  });
 }
 
 export async function precacheImage(imageUrl, options = {}) {
@@ -121,3 +134,6 @@ export function createFallbackCover(name) {
   fallback.textContent = String(name || "?").slice(0, 2);
   return fallback;
 }
+
+
+

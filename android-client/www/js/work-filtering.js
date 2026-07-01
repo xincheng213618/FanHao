@@ -83,10 +83,13 @@ export function createWorkListState(context) {
     filterStrip.className = "work-filter-strip";
     const counts = { ...filterCounts(sourceWorks), ...(options.facets || {}) };
     for (const option of WORK_FILTERS) {
+      const count = counts[option.value] || 0;
       const button = document.createElement("button");
       button.type = "button";
       button.className = activeFilter === option.value ? "active" : "";
-      button.textContent = `${option.label} ${formatNumber(counts[option.value] || 0)}`;
+      button.textContent = option.label;
+      button.title = `${option.label} · ${formatNumber(count)}`;
+      button.setAttribute("aria-label", `${option.label}，${formatNumber(count)} 个作品`);
       button.addEventListener("click", () => {
         if (typeof options.onFilterChange === "function") {
           options.onFilterChange(option.value);

@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#1f2937" />
     <title>FanHao 运维后台</title>
-    <link rel="icon" href="/app-icon.svg?v=20260628-admin-pro-02" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=20260628-admin-pro-02" />
+    <link rel="icon" href="/app-icon.svg?v=20260629-douban-cookie-01" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css?v=20260629-douban-cookie-01" />
   </head>
   <body class="admin-page">
     <div class="admin-shell">
@@ -128,6 +128,7 @@
                 <button type="button" data-quick-script="ranking-cache">刷新排行榜</button>
                 <button type="button" data-quick-script="image-library-rescan">刷新图库索引</button>
                 <button type="button" data-quick-script="douban-tv-metadata">补电视剧资料</button>
+                <button type="button" data-quick-script="douban-movie-metadata">补电影资料</button>
               </div>
             </section>
 
@@ -354,10 +355,35 @@
             </div>
             <p class="admin-status" id="adminConfigStatus"></p>
           </section>
+
+          <section class="admin-panel">
+            <div class="admin-panel-head">
+              <h2>豆瓣 Cookie</h2>
+              <span class="admin-badge" id="adminDoubanCookieBadge">未检测</span>
+            </div>
+            <div class="admin-config-grid">
+              <label class="admin-field">
+                <span>Cookie</span>
+                <textarea id="adminDoubanCookieInput" rows="6" spellcheck="false" placeholder="从浏览器复制 douban.com 的 Cookie 字符串，保存后只存在本机 data/douban-cookie.txt"></textarea>
+              </label>
+              <div class="admin-field">
+                <span>状态</span>
+                <div class="admin-inline-card">
+                  <strong id="adminDoubanCookieState">-</strong>
+                  <small id="adminDoubanCookieMeta">不会回显 Cookie 内容</small>
+                </div>
+              </div>
+            </div>
+            <div class="admin-actions">
+              <button class="folder-button" id="adminSaveDoubanCookie" type="button">保存 Cookie</button>
+              <button class="folder-button subtle" id="adminTestDoubanCookie" type="button">测试详情页</button>
+            </div>
+            <p class="admin-status" id="adminDoubanCookieStatus"></p>
+          </section>
         </section>
       </main>
     </div>
 
-    <script src="/admin.js?v=20260629-tv-metadata-01" type="module"></script>
+    <script src="/admin.js?v=20260629-douban-cookie-01" type="module"></script>
   </body>
 </html>

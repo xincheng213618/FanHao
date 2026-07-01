@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "build:debug": "powershell -ExecutionPolicy Bypass -File ./build-debug.ps1",
+    "build:debug:update": "powershell -ExecutionPolicy Bypass -File ./publish-debug-update.ps1",
     "install:debug": "powershell -ExecutionPolicy Bypass -File ./build-debug.ps1 -Install",
+    "publish:debug": "powershell -ExecutionPolicy Bypass -File ./publish-debug-update.ps1",
     "sync": "cap sync android",
     "open": "cap open android",
     "run:android": "cap run android"

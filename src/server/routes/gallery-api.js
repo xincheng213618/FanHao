@@ -122,7 +122,13 @@ export async function routeGalleryApi(req, res, url, deps) {
       return true;
     }
     try {
-      sendJson(res, 200, { album: publicPhotoSetDetail(album), cache: imageReaderCacheStatus() });
+      const rawLimit = String(url.searchParams.get("imageLimit") || url.searchParams.get("imagesLimit") || "").trim().toLowerCase();
+      const imageLimit = rawLimit && rawLimit !== "all" ? Number(rawLimit) : 0;
+      const imageOffset = Number(url.searchParams.get("imageOffset") || url.searchParams.get("imagesOffset") || 0);
+      sendJson(res, 200, {
+        album: publicPhotoSetDetail(album, { imageLimit, imageOffset }),
+        cache: imageReaderCacheStatus()
+      });
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "图包读取失败" });
     }

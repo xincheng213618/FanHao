@@ -16,9 +16,11 @@ __pycache__/
 data/app-config.json
 data/admin-tasks.json
 data/auth-secret.txt
+data/douban-cookie.txt
 data/library-index.json
 data/image-library-index.json
 data/image-reader-cache/
+data/android-update/
 data/user-state.json
 data/remote-image-cache/
 data/actor-profile-batch-*.jsonl

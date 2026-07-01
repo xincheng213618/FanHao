@@ -5,17 +5,35 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#f6f7f9" />
     <title>资料库</title>
-    <link rel="stylesheet" href="./styles.css?v=20260629-tools-native-01" />
+    <link rel="stylesheet" href="./styles.css?v=20260701-novel-reader-05" />
   </head>
   <body>
     <main class="app-shell">
-      <form id="searchForm" class="search-bar" autocomplete="off">
+      <header id="topChannelBar" class="top-channel-bar" aria-label="顶部工具栏">
+        <button id="topMenuButton" class="top-icon-button" type="button" aria-label="打开设置">
+          <span class="top-menu-lines" aria-hidden="true"></span>
+        </button>
+        <nav id="fanhaoSectionNav" class="fanhao-section-nav top-secondary-nav" aria-label="顶部二级导航">
+          <button class="active" type="button" data-fanhao-view="works">作品</button>
+          <button type="button" data-fanhao-view="rankings">榜单</button>
+          <button type="button" data-fanhao-view="people">人物</button>
+          <button type="button" data-fanhao-view="favorites">收藏</button>
+        </nav>
+        <strong id="topPrimaryLabel" class="top-primary-label" hidden>番号</strong>
+        <button id="topSearchButton" class="top-icon-button top-search-button" type="button" aria-label="搜索">
+          <span aria-hidden="true">⌕</span>
+        </button>
+      </header>
+
+      <form id="searchForm" class="search-bar" autocomplete="off" hidden>
+        <button id="searchCloseButton" class="search-close-button" type="button" aria-label="关闭搜索">‹</button>
         <span aria-hidden="true">⌕</span>
-        <input id="searchInput" type="search" placeholder="搜作品/人物，频道看图包" />
+        <input id="searchInput" type="search" placeholder="搜全库：作品/人物/频道" />
+        <button class="search-submit-button" type="submit">搜索</button>
       </form>
       <div id="searchHistory" class="search-history" aria-label="搜索记录" hidden></div>
 
-      <nav class="library-channel-strip" aria-label="网页频道">
+      <nav class="library-channel-strip" aria-label="内容频道">
         <button type="button" data-open-view="works">
           <strong>番号库</strong>
           <span id="channelWorksCount">默认库</span>
@@ -24,9 +42,9 @@
           <strong>套图</strong>
           <span id="channelPhotoCount">图包 / 合集</span>
         </button>
-        <button type="button" data-open-channel="manga">
-          <strong>韩漫</strong>
-          <span id="channelMangaCount">章节阅读</span>
+        <button type="button" data-open-view="novels">
+          <strong>小说</strong>
+          <span id="channelNovelCount">TXT 阅读</span>
         </button>
         <button type="button" data-open-channel="western">
           <strong>欧美</strong>
@@ -39,10 +57,6 @@
         <button type="button" data-open-channel="tv">
           <strong>电视剧</strong>
           <span id="channelTvCount">剧集</span>
-        </button>
-        <button type="button" data-open-view="tools">
-          <strong>小工具</strong>
-          <span>TXT</span>
         </button>
       </nav>
 
@@ -91,6 +105,17 @@
           <button class="text-button" type="button" data-open-view="history">全部</button>
         </div>
         <div id="continuePreview" class="continue-preview" aria-live="polite"></div>
+      </section>
+
+      <section id="recentContentSection" class="recent-content-section" aria-labelledby="recentContentTitle" hidden>
+        <div class="section-head">
+          <div>
+            <p class="section-label">跨频道</p>
+            <h2 id="recentContentTitle">最近打开</h2>
+          </div>
+          <button id="recentContentClear" class="text-button" type="button">清空</button>
+        </div>
+        <div id="recentContentPreview" class="recent-content-preview" aria-live="polite"></div>
       </section>
 
       <section class="status-card" aria-labelledby="statusTitle">
@@ -145,7 +170,6 @@
           </div>
           <div class="section-actions">
             <button id="viewBack" class="text-button" type="button" hidden>返回</button>
-            <button id="viewOpenAll" class="text-button" type="button">网页打开</button>
           </div>
         </div>
         <div id="viewMeta" class="view-meta"></div>
@@ -210,6 +234,28 @@
           </div>
         </section>
 
+        <section class="settings-group" aria-labelledby="appUpdateTitle">
+          <div class="settings-group-head">
+            <p class="section-label">更新</p>
+            <strong id="appUpdateTitle">手机 App</strong>
+          </div>
+          <span id="appUpdateStatus" class="settings-meta">等待检查更新</span>
+          <div class="cache-metrics app-update-metrics" aria-label="应用版本">
+            <div>
+              <strong id="appCurrentVersion">-</strong>
+              <span>当前</span>
+            </div>
+            <div>
+              <strong id="appLatestVersion">-</strong>
+              <span>最新</span>
+            </div>
+          </div>
+          <div class="settings-action-row">
+            <button id="checkAppUpdateButton" type="button">检查更新</button>
+            <button id="installAppUpdateButton" type="button" disabled>下载安装</button>
+          </div>
+        </section>
+
         <section class="settings-group" aria-labelledby="cacheTitle">
           <div class="settings-group-head">
             <p class="section-label">本地缓存</p>
@@ -241,28 +287,31 @@
         </section>
       </section>
 
-      <nav class="bottom-nav" aria-label="底部导航">
-        <button class="active" type="button" data-home>
-          <span>首页</span>
+      <nav class="bottom-nav channel-bottom-nav" aria-label="底部导航">
+        <button class="active" type="button" data-fanhao-home data-bottom-key="fanhao">
+          <span>番号</span>
         </button>
-        <button type="button" data-open-view="works">
-          <span>作品</span>
+        <button type="button" data-open-channel="photo" data-bottom-key="photo">
+          <span>套图</span>
         </button>
-        <button type="button" data-open-view="rankings">
-          <span>榜单</span>
+        <button type="button" data-open-view="novels" data-bottom-key="novels">
+          <span>小说</span>
         </button>
-        <button type="button" data-open-view="people">
-          <span>人物</span>
+        <button type="button" data-open-channel="western" data-bottom-key="western">
+          <span>欧美</span>
         </button>
-        <button type="button" data-open-view="favorites">
-          <span>收藏</span>
+        <button type="button" data-open-channel="movie" data-bottom-key="movie">
+          <span>电影</span>
         </button>
-        <button type="button" data-settings>
-          <span>设置</span>
+        <button type="button" data-open-channel="tv" data-bottom-key="tv">
+          <span>电视剧</span>
         </button>
       </nav>
     </main>
 
-    <script src="./app.js?v=20260629-tools-native-01" type="module"></script>
+    <script src="./app.js?v=20260701-novel-reader-05" type="module"></script>
   </body>
 </html>
+
+
+

@@ -1,0 +1,712 @@
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+
+const DEFAULT_LIMIT = 5000;
+const MAX_LIMIT = 5000;
+const MAX_CHAPTER_CHARS = 12000;
+const MAX_UPLOAD_TEXT_CHARS = 50 * 1024 * 1024;
+const UPLOAD_SOURCE_ROOT = "上传";
+
+export function createNovelStore(options = {}) {
+  const dbPath = options.dbPath;
+  if (!dbPath) throw new Error("novel dbPath is required");
+  let db = null;
+
+  function getDb() {
+    if (!db) {
+      fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+      db = new DatabaseSync(dbPath);
+      ensureSchema(db);
+    }
+    return db;
+  }
+
+  function withDb(callback) {
+    const database = getDb();
+    try {
+      return callback(database);
+    } finally {
+      invalidate();
+    }
+  }
+
+  function invalidate() {
+    if (!db) return;
+    try {
+      db.close();
+    } catch {}
+    db = null;
+  }
+
+  function summary() {
+    return withDb((database) => summaryFromDb(database));
+  }
+
+  function summaryFromDb(database) {
+    const totals =
+      database
+        .prepare(
+          `
+          SELECT
+            COUNT(*) AS books,
+            COALESCE(SUM(chapter_count), 0) AS chapters,
+            COALESCE(SUM(char_count), 0) AS chars,
+            COALESCE(SUM(size_bytes), 0) AS bytes,
+            COALESCE(MAX(updated_at), '') AS updated_at
+          FROM novel_books
+          WHERE status = 'ok'
+        `
+        )
+        .get() || {};
+    const categories = database
+      .prepare(
+        `
+        SELECT COALESCE(category, '全部') AS name, COUNT(*) AS count
+        FROM novel_books
+        WHERE status = 'ok'
+        GROUP BY COALESCE(category, '全部')
+        ORDER BY count DESC, name COLLATE NOCASE
+      `
+      )
+      .all();
+    const roots = database
+      .prepare(
+        `
+        SELECT source_root AS path, COUNT(*) AS count
+        FROM novel_books
+        GROUP BY source_root
+        ORDER BY count DESC, path COLLATE NOCASE
+      `
+      )
+      .all();
+    const recent = database
+      .prepare(
+        `
+        SELECT b.*, s.chapter_index AS progress_chapter_index, s.scroll_ratio AS progress_scroll_ratio, s.updated_at AS progress_updated_at
+        FROM novel_reading_state s
+        JOIN novel_books b ON b.id = s.book_id
+        WHERE b.status = 'ok'
+        ORDER BY s.updated_at DESC
+        LIMIT 6
+      `
+      )
+      .all()
+      .map(publicBook);
+    return {
+      dbPath,
+      scannedAt: metaValue(database, "scanned_at"),
+      roots,
+      totals: {
+        books: Number(totals.books || 0),
+        chapters: Number(totals.chapters || 0),
+        chars: Number(totals.chars || 0),
+        bytes: Number(totals.bytes || 0),
+        updatedAt: totals.updated_at || ""
+      },
+      categories: categories.map((row) => ({ name: row.name || "全部", count: Number(row.count || 0) })),
+      recent
+    };
+  }
+
+  function listBooks(url) {
+    return withDb((database) => {
+      const query = String(url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
+      const category = String(url.searchParams.get("category") || "all").trim() || "all";
+      const sort = normalizeSort(url.searchParams.get("sort"));
+      const limit = clampInteger(url.searchParams.get("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
+      const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+      const ftsBookIds = query.length >= 3 ? matchingBookIds(database, query) : [];
+      const conditions = ["b.status = 'ok'"];
+      const params = [];
+      if (category !== "all") {
+        conditions.push("COALESCE(b.category, '全部') = ?");
+        params.push(category);
+      }
+      if (query) {
+        const like = `%${escapeLike(query)}%`;
+        const parts = [
+          "b.title LIKE ? ESCAPE '\\'",
+          "COALESCE(b.author, '') LIKE ? ESCAPE '\\'",
+          "COALESCE(b.category, '') LIKE ? ESCAPE '\\'",
+          "COALESCE(b.latest_chapter_title, '') LIKE ? ESCAPE '\\'",
+          "COALESCE(b.summary, '') LIKE ? ESCAPE '\\'"
+        ];
+        params.push(like, like, like, like, like);
+        if (ftsBookIds.length) {
+          parts.push(`b.id IN (${ftsBookIds.map(() => "?").join(", ")})`);
+          params.push(...ftsBookIds);
+        }
+        conditions.push(`(${parts.join(" OR ")})`);
+      }
+      const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+      const order = bookOrderSql(sort);
+      const countRow = database.prepare(`SELECT COUNT(*) AS count FROM novel_books b ${where}`).get(...params);
+      const rows = database
+        .prepare(
+          `
+          SELECT b.*, s.chapter_index AS progress_chapter_index, s.scroll_ratio AS progress_scroll_ratio, s.updated_at AS progress_updated_at
+          FROM novel_books b
+          LEFT JOIN novel_reading_state s ON s.book_id = b.id
+          ${where}
+          ${order}
+          LIMIT ? OFFSET ?
+        `
+        )
+        .all(...params, limit, offset);
+      const facets = database
+        .prepare(
+          `
+          SELECT COALESCE(category, '全部') AS name, COUNT(*) AS count
+          FROM novel_books
+          WHERE status = 'ok'
+          GROUP BY COALESCE(category, '全部')
+          ORDER BY count DESC, name COLLATE NOCASE
+        `
+        )
+        .all()
+        .map((row) => ({ name: row.name || "全部", count: Number(row.count || 0) }));
+      return {
+        books: rows.map(publicBook),
+        total: Number(countRow?.count || 0),
+        limit,
+        offset,
+        query,
+        category,
+        sort,
+        facets,
+        summary: summaryFromDb(database)
+      };
+    });
+  }
+
+  function bookDetail(bookId) {
+    return withDb((database) => bookDetailFromDb(database, bookId));
+  }
+
+  function bookDetailFromDb(database, bookId) {
+    const row = database
+      .prepare(
+        `
+        SELECT b.*, s.chapter_index AS progress_chapter_index, s.scroll_ratio AS progress_scroll_ratio, s.updated_at AS progress_updated_at
+        FROM novel_books b
+        LEFT JOIN novel_reading_state s ON s.book_id = b.id
+        WHERE b.id = ? AND b.status = 'ok'
+      `
+      )
+      .get(bookId);
+    if (!row) return null;
+    return {
+      book: publicBook(row),
+      chapters: chapterList(database, bookId)
+    };
+  }
+
+  function chapterDetail(bookId, chapterIndex) {
+    return withDb((database) => {
+      const book = bookDetailFromDb(database, bookId);
+      if (!book) return null;
+      const chapter = database
+        .prepare(
+          `
+          SELECT id, book_id, chapter_index, title, content, char_count, updated_at
+          FROM novel_chapters
+          WHERE book_id = ? AND chapter_index = ?
+        `
+        )
+        .get(bookId, clampInteger(chapterIndex, 1, 1, Number.MAX_SAFE_INTEGER));
+      if (!chapter) return null;
+      const chapters = book.chapters;
+      const currentIndex = chapters.findIndex((item) => item.index === Number(chapter.chapter_index));
+      return {
+        book: book.book,
+        chapter: publicChapter(chapter, true),
+        chapters,
+        prev: currentIndex > 0 ? chapters[currentIndex - 1] : null,
+        next: currentIndex >= 0 && currentIndex < chapters.length - 1 ? chapters[currentIndex + 1] : null
+      };
+    });
+  }
+
+  function saveProgress(bookId, body = {}) {
+    return withDb((database) => {
+      const chapterIndex = clampInteger(body.chapterIndex ?? body.chapter_index, 1, 1, Number.MAX_SAFE_INTEGER);
+      const chapter = database.prepare("SELECT id, chapter_index FROM novel_chapters WHERE book_id = ? AND chapter_index = ?").get(bookId, chapterIndex);
+      if (!chapter) return null;
+      const ratio = Math.max(0, Math.min(1, Number(body.scrollRatio ?? body.scroll_ratio ?? 0) || 0));
+      const updatedAt = new Date().toISOString();
+      database
+        .prepare(
+          `
+          INSERT INTO novel_reading_state (book_id, chapter_id, chapter_index, scroll_ratio, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(book_id) DO UPDATE SET
+            chapter_id = excluded.chapter_id,
+            chapter_index = excluded.chapter_index,
+            scroll_ratio = excluded.scroll_ratio,
+            updated_at = excluded.updated_at
+        `
+        )
+        .run(bookId, chapter.id, Number(chapter.chapter_index), ratio, updatedAt);
+      return { bookId, chapterId: chapter.id, chapterIndex: Number(chapter.chapter_index), scrollRatio: ratio, updatedAt };
+    });
+  }
+
+  function downloadBook(bookId) {
+    return withDb((database) => {
+      const detail = bookDetailFromDb(database, bookId);
+      if (!detail) return null;
+      const chapters = database
+        .prepare(
+          `
+          SELECT chapter_index, title, content
+          FROM novel_chapters
+          WHERE book_id = ?
+          ORDER BY chapter_index
+        `
+        )
+        .all(bookId);
+      const lines = [detail.book.title];
+      if (detail.book.author) lines.push(`作者：${detail.book.author}`);
+      if (detail.book.category) lines.push(`分类：${detail.book.category}`);
+      lines.push("");
+      for (const chapter of chapters) {
+        lines.push(chapter.title || `第 ${chapter.chapter_index} 章`, "", String(chapter.content || "").trim(), "");
+      }
+      return {
+        book: detail.book,
+        content: `${lines.join("\n").replace(/\n{3,}/g, "\n\n").trim()}\n`,
+        fileName: safeFileName(`${detail.book.title || "小说"}.txt`)
+      };
+    });
+  }
+
+  function uploadBook(body = {}) {
+    return withDb((database) => {
+      const bookId = uploadBookIntoDb(database, body);
+      return bookDetailFromDb(database, bookId);
+    });
+  }
+
+  return {
+    bookDetail,
+    chapterDetail,
+    dbPath,
+    downloadBook,
+    invalidate,
+    listBooks,
+    saveProgress,
+    summary,
+    uploadBook
+  };
+}
+
+function ensureSchema(db) {
+  db.exec(`
+    PRAGMA busy_timeout = 5000;
+    PRAGMA journal_mode = WAL;
+    CREATE TABLE IF NOT EXISTS novel_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS novel_books (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      author TEXT,
+      category TEXT,
+      source_root TEXT NOT NULL,
+      source_path TEXT NOT NULL UNIQUE,
+      relative_path TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      size_bytes INTEGER,
+      mtime_ms INTEGER,
+      encoding TEXT,
+      char_count INTEGER,
+      chapter_count INTEGER,
+      first_chapter_id TEXT,
+      latest_chapter_id TEXT,
+      latest_chapter_title TEXT,
+      summary TEXT,
+      tags_json TEXT,
+      status TEXT NOT NULL DEFAULT 'ok',
+      error TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_novel_books_title ON novel_books(title);
+    CREATE INDEX IF NOT EXISTS idx_novel_books_category ON novel_books(category);
+    CREATE INDEX IF NOT EXISTS idx_novel_books_updated ON novel_books(updated_at);
+    CREATE TABLE IF NOT EXISTS novel_chapters (
+      id TEXT PRIMARY KEY,
+      book_id TEXT NOT NULL,
+      chapter_index INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      char_count INTEGER NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(book_id, chapter_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_novel_chapters_book ON novel_chapters(book_id, chapter_index);
+    CREATE TABLE IF NOT EXISTS novel_reading_state (
+      book_id TEXT PRIMARY KEY,
+      chapter_id TEXT,
+      chapter_index INTEGER,
+      scroll_ratio REAL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS novel_search USING fts5(
+      book_id UNINDEXED,
+      chapter_id UNINDEXED,
+      title,
+      author,
+      category,
+      chapter_title,
+      tokenize='trigram'
+    );
+  `);
+}
+
+function metaValue(db, key) {
+  try {
+    return db.prepare("SELECT value FROM novel_meta WHERE key = ?").get(key)?.value || "";
+  } catch {
+    return "";
+  }
+}
+
+function chapterList(db, bookId) {
+  return db
+    .prepare(
+      `
+      SELECT id, book_id, chapter_index, title, '' AS content, char_count, updated_at
+      FROM novel_chapters
+      WHERE book_id = ?
+      ORDER BY chapter_index
+    `
+    )
+    .all(bookId)
+    .map((row) => publicChapter(row, false));
+}
+
+function uploadBookIntoDb(database, body = {}) {
+  const fileName = safeFileName(body.fileName || body.file_name || body.name || "上传小说.txt");
+  const text = normalizeUploadText(body.text ?? body.content ?? decodeBase64Text(body.contentBase64 ?? body.content_base64));
+  if (!text) throw httpError(400, "上传内容为空");
+  if (text.length > MAX_UPLOAD_TEXT_CHARS) throw httpError(413, "上传文本太大");
+
+  const title = cleanTitle(body.title || path.parse(fileName).name);
+  const author = String(body.author || detectAuthor(text) || "").trim().slice(0, 80);
+  const category = String(body.category || UPLOAD_SOURCE_ROOT).trim().slice(0, 80) || UPLOAD_SOURCE_ROOT;
+  const now = new Date().toISOString();
+  const uploadKey = `${Date.now()}-${crypto.randomBytes(5).toString("hex")}`;
+  const sourcePath = `upload://${uploadKey}/${fileName}`;
+  const bookId = crypto.createHash("sha1").update(sourcePath).digest("hex").slice(0, 20);
+  const chapters = splitUploadedChapters(text);
+  const firstChapter = chapters[0] || null;
+  const latestChapter = chapters[chapters.length - 1] || null;
+  const summary = summarizeNovelText(chapters.slice(0, 2).map((chapter) => chapter.content).join("\n\n") || text);
+  const sizeBytes = clampInteger(body.sizeBytes ?? body.size_bytes, Buffer.byteLength(text, "utf8"), 0, Number.MAX_SAFE_INTEGER);
+  const tags = [category, UPLOAD_SOURCE_ROOT].filter(Boolean);
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database
+      .prepare(
+        `
+        INSERT INTO novel_books (
+          id, title, author, category, source_root, source_path, relative_path, file_name,
+          size_bytes, mtime_ms, encoding, char_count, chapter_count, first_chapter_id,
+          latest_chapter_id, latest_chapter_title, summary, tags_json, status, error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `
+      )
+      .run(
+        bookId,
+        title,
+        author,
+        category,
+        UPLOAD_SOURCE_ROOT,
+        sourcePath,
+        fileName,
+        fileName,
+        sizeBytes,
+        Date.now(),
+        body.encoding || "browser-text",
+        text.length,
+        chapters.length,
+        firstChapter ? chapterId(bookId, firstChapter.index) : "",
+        latestChapter ? chapterId(bookId, latestChapter.index) : "",
+        latestChapter?.title || "",
+        summary,
+        JSON.stringify(tags),
+        "ok",
+        "",
+        now
+      );
+
+    const insertChapter = database.prepare(
+      `
+      INSERT INTO novel_chapters (id, book_id, chapter_index, title, content, char_count, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `
+    );
+    const insertSearch = database.prepare(
+      `
+      INSERT INTO novel_search (book_id, chapter_id, title, author, category, chapter_title)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `
+    );
+    for (const chapter of chapters) {
+      const id = chapterId(bookId, chapter.index);
+      insertChapter.run(id, bookId, chapter.index, chapter.title, chapter.content, chapter.content.length, now);
+      insertSearch.run(bookId, id, title, author, category, chapter.title);
+    }
+    database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)").run(now);
+    database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('last_uploaded_at', ?)").run(now);
+    database.exec("COMMIT");
+  } catch (error) {
+    try {
+      database.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+
+  return bookId;
+}
+
+function publicBook(row) {
+  return {
+    id: row.id,
+    title: row.title || "",
+    author: row.author || "",
+    category: row.category || "全部",
+    sourceRoot: row.source_root || "",
+    sourcePath: row.source_path || "",
+    relativePath: row.relative_path || "",
+    fileName: row.file_name || "",
+    sizeBytes: Number(row.size_bytes || 0),
+    mtimeMs: Number(row.mtime_ms || 0),
+    encoding: row.encoding || "",
+    charCount: Number(row.char_count || 0),
+    chapterCount: Number(row.chapter_count || 0),
+    firstChapterId: row.first_chapter_id || "",
+    latestChapterId: row.latest_chapter_id || "",
+    latestChapterTitle: row.latest_chapter_title || "",
+    summary: row.summary || "",
+    tags: parseJsonArray(row.tags_json),
+    updatedAt: row.updated_at || "",
+    progress: row.progress_chapter_index
+      ? {
+          chapterIndex: Number(row.progress_chapter_index || 0),
+          scrollRatio: Number(row.progress_scroll_ratio || 0),
+          updatedAt: row.progress_updated_at || ""
+        }
+      : null
+  };
+}
+
+function publicChapter(row, includeContent) {
+  return {
+    id: row.id,
+    bookId: row.book_id,
+    index: Number(row.chapter_index || 0),
+    title: row.title || `第 ${row.chapter_index || ""} 章`,
+    content: includeContent ? row.content || "" : "",
+    charCount: Number(row.char_count || 0),
+    updatedAt: row.updated_at || ""
+  };
+}
+
+function parseJsonArray(value) {
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed.filter(Boolean).map(String).slice(0, 20) : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeSort(value) {
+  const sort = String(value || "updated").trim();
+  return ["updated", "title", "size", "chapters", "progress"].includes(sort) ? sort : "updated";
+}
+
+function bookOrderSql(sort) {
+  if (sort === "title") return "ORDER BY b.title COLLATE NOCASE ASC";
+  if (sort === "size") return "ORDER BY b.size_bytes DESC, b.title COLLATE NOCASE ASC";
+  if (sort === "chapters") return "ORDER BY b.chapter_count DESC, b.title COLLATE NOCASE ASC";
+  if (sort === "progress") return "ORDER BY s.updated_at IS NULL ASC, s.updated_at DESC, b.updated_at DESC";
+  return "ORDER BY b.updated_at DESC, b.title COLLATE NOCASE ASC";
+}
+
+function matchingBookIds(db, query) {
+  try {
+    const term = `"${String(query).replace(/"/g, '""')}"`;
+    return db
+      .prepare("SELECT DISTINCT book_id FROM novel_search WHERE novel_search MATCH ? LIMIT 1000")
+      .all(term)
+      .map((row) => row.book_id)
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function escapeLike(value) {
+  return String(value || "").replace(/[\\%_]/g, (item) => `\\${item}`);
+}
+
+function decodeBase64Text(value) {
+  if (!value) return "";
+  const payload = String(value).replace(/^data:[^,]+,/, "");
+  try {
+    return Buffer.from(payload, "base64").toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
+function normalizeUploadText(value) {
+  return String(value || "")
+    .replace(/^\uFEFF/, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\u0000/g, "")
+    .split("\n")
+    .map((line) => line.replace(/[ \t　]+$/g, ""))
+    .join("\n")
+    .replace(/\n{4,}/g, "\n\n\n")
+    .trim();
+}
+
+function cleanTitle(value) {
+  const stem = String(value || "小说").trim();
+  const cleaned = stem
+    .replace(/[_\-\s]*(?:fixed|format|formatted|utf8|utf-8|精校|校对版|完结)\s*$/iu, "")
+    .replace(/^[\[(【（].{1,16}[\])】）]\s*/u, "")
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_");
+  return cleaned || stem || "小说";
+}
+
+function safeFileName(value) {
+  const parsed = path.basename(String(value || "小说.txt")).replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim();
+  const fileName = parsed || "小说.txt";
+  const baseName = path.parse(fileName).name || "小说";
+  return `${baseName.slice(0, 176)}.txt`;
+}
+
+function detectAuthor(text) {
+  const lines = String(text || "").split("\n").slice(0, 120);
+  for (const line of lines) {
+    const match = line.trim().match(/^(?:作者|原作者|Author|writer)\s*[:：]\s*(.+)$/iu);
+    if (match?.[1] && match[1].trim().length <= 80) return match[1].trim();
+  }
+  return "";
+}
+
+function splitUploadedChapters(text) {
+  const chapters = [];
+  let currentTitle = "";
+  let currentLines = [];
+  const leadingLines = [];
+
+  function flush() {
+    if (!currentTitle) return;
+    const content = chapterContentFromLines(currentLines) || currentTitle;
+    chapters.push({ index: chapters.length + 1, title: currentTitle, content });
+    currentTitle = "";
+    currentLines = [];
+  }
+
+  for (const rawLine of String(text || "").split("\n")) {
+    const line = rawLine.trim();
+    if (line && line.length <= 90 && isChapterTitle(line)) {
+      if (!currentTitle && leadingLines.some((item) => item.trim())) {
+        currentTitle = "序章";
+        currentLines = leadingLines.splice(0, leadingLines.length);
+      }
+      flush();
+      currentTitle = line;
+      currentLines = [];
+      continue;
+    }
+    if (currentTitle) currentLines.push(rawLine);
+    else leadingLines.push(rawLine);
+  }
+  flush();
+  return chapters.length ? chapters : chunkPlainText(text);
+}
+
+function chunkPlainText(text) {
+  const paragraphs = paragraphsFromNovelText(text);
+  const chapters = [];
+  let current = [];
+  let currentLength = 0;
+  for (const paragraph of paragraphs) {
+    if (current.length && currentLength + paragraph.length > MAX_CHAPTER_CHARS) {
+      const index = chapters.length + 1;
+      chapters.push({ index, title: chapters.length ? `正文 ${index}` : "正文", content: current.join("\n\n") });
+      current = [];
+      currentLength = 0;
+    }
+    current.push(paragraph);
+    currentLength += paragraph.length;
+  }
+  if (current.length) {
+    const index = chapters.length + 1;
+    chapters.push({ index, title: chapters.length ? `正文 ${index}` : "正文", content: current.join("\n\n") });
+  }
+  if (!chapters.length) chapters.push({ index: 1, title: "正文", content: String(text || "").trim() || "空白章节" });
+  return chapters;
+}
+
+function chapterContentFromLines(lines) {
+  return String(lines.join("\n") || "")
+    .split(/\n\s*\n+/)
+    .flatMap((part) => part.split("\n").map((line) => line.trim()).filter(Boolean))
+    .join("\n\n")
+    .trim();
+}
+
+function paragraphsFromNovelText(text) {
+  const source = String(text || "").trim();
+  if (!source) return [];
+  const blocks = source.split(/\n\s*\n+/).map((part) => part.trim()).filter(Boolean);
+  if (blocks.length > 1) return blocks;
+  return source.split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+function summarizeNovelText(text) {
+  const parts = [];
+  for (const paragraph of paragraphsFromNovelText(text)) {
+    if (isChapterTitle(paragraph)) continue;
+    if (/^(?:作者|书名|标题|来源|网址|链接)\s*[:：]/iu.test(paragraph)) continue;
+    if (/(?:本作品来自互联网|内容版权归作者所有|更多好书|推广链接|https?:\/\/)/iu.test(paragraph)) continue;
+    parts.push(paragraph);
+    if (parts.join("").length >= 260) break;
+  }
+  return parts.join("").replace(/\s+/g, " ").trim().slice(0, 280);
+}
+
+function isChapterTitle(value) {
+  const text = String(value || "").trim();
+  if (!text || text.length > 90) return false;
+  return /^(?:第\s*[\d零〇一二两兩三四五六七八九十百千万萬壹贰貳叁參肆伍陆陸柒捌玖拾佰仟\s]{1,18}\s*(?:章|章节|节|回|话|卷|部|篇|幕)|(?:序章|序言|楔子|正文|尾声|后记|後記|番外|番外篇|外传|外傳|前传|前傳|间章|間章|特别篇|特别章|大结局|全书完|全文完)(?:\s|$|[:：]))/iu.test(text);
+}
+
+function chapterId(bookId, index) {
+  return `${bookId}-${String(index).padStart(5, "0")}`;
+}
+
+function httpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function clampInteger(value, fallback, min, max) {
+  if (value === null || value === undefined || String(value).trim() === "") return fallback;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(number)));
+}

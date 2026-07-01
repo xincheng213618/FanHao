@@ -14,6 +14,7 @@ const ARCHIVE_EXTS = new Set([".zip", ".cbz", ".rar", ".7z"]);
 const VIDEO_EXTS = new Set([".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".ts", ".m2ts", ".webm", ".iso"]);
 const DIRECT_VIDEO_EXTS = new Set([".mp4", ".m4v", ".webm"]);
 const PHOTO_COLLECTION_ROOT_VALUE = "__fanhao_photo_collection_root__";
+const VALID_SCAN_SCOPES = new Set(["all", "photo", "media", "western", "movie", "tv"]);
 
 function normalizeExt(fileName) {
   return path.extname(fileName).toLowerCase();
@@ -68,9 +69,17 @@ function parseArgs(argv) {
       options.scope = "photo";
     } else if (arg === "--media-only") {
       options.scope = "media";
+    } else if (arg === "--western-only") {
+      options.scope = "western";
+    } else if (arg === "--movie-only") {
+      options.scope = "movie";
+    } else if (arg === "--tv-only") {
+      options.scope = "tv";
     }
   }
-  if (!["all", "photo", "media"].includes(options.scope)) options.scope = "all";
+  if (options.scope === "movies") options.scope = "movie";
+  if (options.scope === "television") options.scope = "tv";
+  if (!VALID_SCAN_SCOPES.has(options.scope)) options.scope = "all";
   return options;
 }
 
@@ -378,6 +387,14 @@ function scanGalleryMediaLibrary(sources) {
   return { mediaRoots: roots, mediaItems: items };
 }
 
+function sortGalleryMediaItems(items) {
+  return (items || []).slice().sort((a, b) => {
+    if (a.mediaKind !== b.mediaKind) return a.mediaKind.localeCompare(b.mediaKind);
+    const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
+    return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+  });
+}
+
 function writeIndex(index) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tempPath = path.join(DATA_DIR, `image-library-index.${process.pid}.${Date.now()}.tmp`);
@@ -395,15 +412,34 @@ function buildIndex(options) {
   ];
 
   const scanPhoto = options.scope === "all" || options.scope === "photo";
-  const scanMedia = options.scope === "all" || options.scope === "media";
+  const scanMedia = options.scope === "all" || options.scope === "media" || ["western", "movie", "tv"].includes(options.scope);
+  const selectedMediaSources = ["western", "movie", "tv"].includes(options.scope)
+    ? mediaSources.filter((source) => source.kind === options.scope)
+    : mediaSources;
   const photo = scanPhoto ? scanPhotoSetLibrary(photoRoots) : {
     roots: existing.roots || rootStatuses(photoRoots),
     photoSets: Array.isArray(existing.photoSets) ? existing.photoSets : []
   };
-  const media = scanMedia ? scanGalleryMediaLibrary(mediaSources) : {
-    mediaRoots: existing.mediaRoots || mediaRootStatuses(mediaSources),
-    mediaItems: Array.isArray(existing.mediaItems) ? existing.mediaItems : []
-  };
+  let media;
+  if (scanMedia) {
+    const scannedMedia = scanGalleryMediaLibrary(selectedMediaSources);
+    if (["western", "movie", "tv"].includes(options.scope)) {
+      media = {
+        mediaRoots: mediaRootStatuses(mediaSources),
+        mediaItems: sortGalleryMediaItems([
+          ...(Array.isArray(existing.mediaItems) ? existing.mediaItems.filter((item) => item.mediaKind !== options.scope) : []),
+          ...scannedMedia.mediaItems
+        ])
+      };
+    } else {
+      media = scannedMedia;
+    }
+  } else {
+    media = {
+      mediaRoots: existing.mediaRoots || mediaRootStatuses(mediaSources),
+      mediaItems: Array.isArray(existing.mediaItems) ? existing.mediaItems : []
+    };
+  }
 
   return {
     schemaVersion: 2,

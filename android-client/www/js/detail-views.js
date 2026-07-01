@@ -1,11 +1,13 @@
-import { fetchJson, postJson } from "./api.js";
+import { fetchJson, postJson } from "./api.js?v=20260701-novel-reader-05";
 import { createAndroidVideoSection } from "./android-player.js";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js";
+import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js?v=20260701-novel-reader-05";
 import { createDetailSectionTitle } from "./detail-ui.js";
 import { extractWorkCode, formatDate, formatNumber } from "./format.js";
 import { createInfoPreviewSection } from "./info-preview.js";
 import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "./image.js";
 import { getWorkSource } from "./work-source.js";
+
+const PLAY_OPEN_COOLDOWN_MS = 1400;
 
 export function createDetailViews(context) {
   const {
@@ -19,6 +21,7 @@ export function createDetailViews(context) {
     renderMessage,
     createChip,
     mediaViewer,
+    goBack = () => window.history.back(),
     onUserStateChange
   } = context;
   const videoSection = createAndroidVideoSection({ getActiveUrl, openInLibrary });
@@ -30,8 +33,6 @@ export function createDetailViews(context) {
     els.viewKicker.textContent = "人物";
     els.viewTitle.textContent = "正在加载";
     els.viewMeta.textContent = "";
-    els.viewOpenAll.textContent = "网页打开";
-    els.viewOpenAll.onclick = () => openInLibrary({ personId });
     els.viewContent.innerHTML = `<div class="loading-row">正在加载人物资料</div>`;
     const path = `/api/people/${encodeURIComponent(personId)}?limit=2000&offset=0`;
     let renderedCache = false;
@@ -181,12 +182,10 @@ export function createDetailViews(context) {
 
   async function renderWorkDetail(workId, isActive = () => true) {
     const activeUrl = getActiveUrl();
-    setActiveBottom("");
+    setActiveBottom("works");
     els.viewKicker.textContent = "作品详情";
     els.viewTitle.textContent = "正在加载";
     els.viewMeta.textContent = "";
-    els.viewOpenAll.textContent = "网页备用";
-    els.viewOpenAll.onclick = () => openInLibrary({ workId });
     els.viewContent.innerHTML = `<div class="loading-row">正在加载作品详情</div>`;
     const path = `/api/works/${encodeURIComponent(workId)}`;
     let renderedCache = false;
@@ -249,7 +248,6 @@ export function createDetailViews(context) {
     cover.type = "button";
     cover.className = "work-detail-cover work-detail-play-cover";
     cover.disabled = !(work.videos || []).length;
-    cover.addEventListener("click", () => onDirectPlay?.());
     const coverVisual = document.createElement("div");
     coverVisual.className = "work-detail-cover-visual";
     coverVisual.textContent = "NO COVER";
@@ -259,7 +257,28 @@ export function createDetailViews(context) {
     const playMark = document.createElement("span");
     playMark.className = "cover-play-mark";
     playMark.setAttribute("aria-hidden", "true");
-    cover.append(coverVisual, playMark);
+    const playLabel = document.createElement("span");
+    playLabel.className = "work-detail-play-label";
+    const idlePlayLabel = cover.disabled ? "暂无视频" : work.progress?.percent ? "继续播放" : "点击播放";
+    playLabel.textContent = idlePlayLabel;
+    cover.append(coverVisual, playMark, playLabel);
+    cover.addEventListener("click", async () => {
+      if (cover.disabled) return;
+      const startedAt = performance.now();
+      cover.disabled = true;
+      cover.setAttribute("aria-busy", "true");
+      playLabel.textContent = "正在打开";
+      try {
+        await onDirectPlay?.();
+      } catch {
+        // The player mount will render any detailed fallback state; keep the cover stable.
+      } finally {
+        await waitForMinimumOpenTime(startedAt);
+        cover.disabled = !(work.videos || []).length;
+        cover.removeAttribute("aria-busy");
+        playLabel.textContent = idlePlayLabel;
+      }
+    });
 
     const body = document.createElement("div");
     body.className = "detail-hero-body";
@@ -275,6 +294,10 @@ export function createDetailViews(context) {
       author.addEventListener("click", () => showView("personDetail", { personId: work.personId }, { push: true }));
     }
 
+    const titleBlock = document.createElement("div");
+    titleBlock.className = "work-detail-title-block";
+    titleBlock.append(title, author);
+
     const actions = document.createElement("div");
     actions.className = "detail-action-row";
     const favoriteButton = document.createElement("button");
@@ -282,34 +305,31 @@ export function createDetailViews(context) {
     favoriteButton.className = "favorite-action";
     syncFavoriteButton(favoriteButton, work.favorite);
     favoriteButton.addEventListener("click", () => toggleFavorite(work, favoriteButton));
-    const playButton = document.createElement("button");
-    playButton.type = "button";
-    playButton.className = "play-action";
-    playButton.textContent = work.progress?.percent ? "继续播放" : "直接播放";
-    playButton.disabled = !(work.videos || []).length;
-    playButton.addEventListener("click", () => onDirectPlay?.());
-    const webButton = document.createElement("button");
-    webButton.type = "button";
-    webButton.className = "web-fallback-action";
-    webButton.textContent = "网页备用";
-    webButton.addEventListener("click", () => openInLibrary({ workId: work.id }));
-    actions.append(favoriteButton, playButton, webButton);
+    const backButton = document.createElement("button");
+    backButton.type = "button";
+    backButton.className = "detail-back-action";
+    backButton.textContent = "返回";
+    backButton.addEventListener("click", goBack);
+    actions.append(backButton, favoriteButton);
 
     const highlights = createWorkDetailHighlights(work);
+    body.append(titleBlock, actions);
+    if (highlights) body.append(highlights);
     if (work.modifiedAt) {
       const updated = document.createElement("span");
       updated.className = "work-detail-updated";
       updated.textContent = `更新：${formatDate(work.modifiedAt)}`;
-      body.append(title, author);
-      if (highlights) body.append(highlights);
-      body.append(updated, actions);
-    } else {
-      body.append(title, author);
-      if (highlights) body.append(highlights);
-      body.append(actions);
+      body.append(updated);
     }
-    hero.append(cover, body);
+    hero.append(body, cover);
     return hero;
+  }
+
+  function waitForMinimumOpenTime(startedAt) {
+    const elapsed = performance.now() - startedAt;
+    const remaining = PLAY_OPEN_COOLDOWN_MS - elapsed;
+    if (remaining <= 0) return Promise.resolve();
+    return new Promise((resolve) => window.setTimeout(resolve, remaining));
   }
 
   function createWorkDetailHighlights(work) {
@@ -933,3 +953,6 @@ export function createDetailViews(context) {
     renderWorkDetail
   };
 }
+
+
+

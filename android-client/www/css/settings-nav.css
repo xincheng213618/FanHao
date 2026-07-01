@@ -206,18 +206,30 @@ label {
   transform: translateX(-50%);
   border-top: 1px solid var(--line);
   background: var(--nav-surface);
-  padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+  padding: 7px 5px calc(7px + env(safe-area-inset-bottom));
   backdrop-filter: blur(12px);
 }
 
 .bottom-nav button {
-  min-height: 48px;
+  display: grid;
+  min-height: 46px;
+  place-items: center;
+  padding: 0 2px;
+  overflow: hidden;
   border: 0;
   border-radius: 8px;
   background: transparent;
   color: #4d5661;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 900;
+  line-height: 1.1;
+}
+
+.bottom-nav button span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bottom-nav button.active {

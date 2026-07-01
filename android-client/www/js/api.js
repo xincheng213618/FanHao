@@ -32,24 +32,14 @@ export async function fetchJson(baseUrl, path, options = {}) {
 }
 
 function requestTimeout(baseUrl, timeoutMs) {
-  if (timeoutMs <= 0 || !isRemoteBaseUrl(baseUrl)) return timeoutMs;
+  if (timeoutMs <= 0 || isLocalBaseUrl(baseUrl)) return timeoutMs;
   return Math.max(timeoutMs, 22000);
 }
 
-function isRemoteBaseUrl(baseUrl) {
+function isLocalBaseUrl(baseUrl) {
   try {
     const host = new URL(baseUrl).hostname.toLowerCase();
-    if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]" || host.endsWith(".local")) return false;
-    const ipv4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-    if (!ipv4) return true;
-
-    const first = Number(ipv4[1]);
-    const second = Number(ipv4[2]);
-    if (first === 10) return false;
-    if (first === 172 && second >= 16 && second <= 31) return false;
-    if (first === 192 && second === 168) return false;
-    if (first === 169 && second === 254) return false;
-    return true;
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
   } catch {
     return false;
   }

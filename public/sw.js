@@ -1,10 +1,10 @@
-const CACHE_NAME = "fanhao-shell-20260626-rank-return-07";
+const CACHE_NAME = "fanhao-shell-20260701-gallery-merge-01";
 const SHELL_ASSETS = [
   "/index.html",
-  "/styles.css?v=20260626-rank-return-07",
-  "/app.js?v=20260626-rank-return-07",
-  "/manifest.webmanifest?v=20260626-rank-return-07",
-  "/app-icon.svg?v=20260626-rank-return-07"
+  "/styles.css?v=20260701-gallery-merge-01",
+  "/app.js?v=20260701-gallery-merge-01",
+  "/manifest.webmanifest?v=20260701-gallery-merge-01",
+  "/app-icon.svg?v=20260701-gallery-merge-01"
 ];
 
 self.addEventListener("install", (event) => {

@@ -1,0 +1,714 @@
+.novel-mobile-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 118px;
+  gap: 9px;
+}
+
+.novel-mobile-controls input[type="search"],
+.novel-mobile-controls select {
+  min-width: 0;
+  height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  padding: 0 11px;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.novel-mobile-upload {
+  grid-column: 1 / -1;
+  min-height: 38px;
+  border: 1px solid rgba(47, 128, 237, 0.28);
+  border-radius: 8px;
+  background: var(--button-soft);
+  color: var(--blue);
+  font-weight: 950;
+}
+
+.novel-mobile-upload:disabled {
+  opacity: 0.55;
+}
+
+.novel-mobile-upload-input {
+  display: none;
+}
+
+.novel-mobile-category-row {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.novel-mobile-category-row::-webkit-scrollbar {
+  display: none;
+}
+
+.novel-mobile-category-row button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--muted);
+  padding: 0 10px;
+  font-size: 11.5px;
+  font-weight: 900;
+}
+
+.novel-mobile-category-row button.active {
+  border-color: rgba(47, 128, 237, 0.3);
+  background: var(--button-soft);
+  color: var(--blue);
+}
+
+.novel-mobile-recent {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.novel-mobile-recent > strong {
+  font-size: 15px;
+}
+
+.novel-mobile-recent > div {
+  display: grid;
+  grid-auto-columns: minmax(150px, 1fr);
+  grid-auto-flow: column;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.novel-mobile-recent-card {
+  display: grid;
+  gap: 5px;
+  min-height: 68px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.novel-mobile-recent-card strong,
+.novel-mobile-recent-card span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.novel-mobile-recent-card span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.novel-mobile-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: 16px 10px;
+}
+
+.novel-mobile-card {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+}
+
+.novel-mobile-card:active {
+  transform: translateY(1px);
+}
+
+.novel-mobile-card .novel-mobile-cover {
+  width: 100%;
+  min-width: 0;
+}
+
+.novel-mobile-cover {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  width: 72px;
+  aspect-ratio: 3 / 4;
+  border-radius: 5px;
+  background:
+    linear-gradient(135deg, rgba(237, 66, 89, 0.2), rgba(255, 255, 255, 0.04)),
+    linear-gradient(160deg, #f8f0df, #d7e6ef 58%, #ffffff);
+  color: #1f2735;
+  padding: 8px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.58), 0 8px 18px rgba(28, 34, 45, 0.16);
+}
+
+.novel-mobile-cover.large {
+  width: 96px;
+}
+
+.novel-mobile-cover span {
+  align-self: flex-end;
+  border-radius: 3px;
+  background: #ed4259;
+  color: #fff;
+  padding: 2px 4px;
+  font-size: 10px;
+  font-weight: 950;
+}
+
+.novel-mobile-cover strong {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.22;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+}
+
+.novel-mobile-card-body {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 4px;
+}
+
+.novel-mobile-card-body > strong,
+.novel-mobile-detail-body > strong {
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+  font-weight: 950;
+}
+
+.novel-mobile-card-body > strong {
+  display: -webkit-box;
+  white-space: normal;
+  font-size: 13px;
+  line-height: 1.25;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.novel-mobile-card-body > span,
+.novel-mobile-card-body > small,
+.novel-mobile-detail-body > span,
+.novel-mobile-detail-body > small {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.novel-mobile-card-body p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.novel-mobile-card .novel-mobile-card-body > span,
+.novel-mobile-card .novel-mobile-card-body p,
+.novel-mobile-card .novel-mobile-card-actions {
+  display: none;
+}
+
+.novel-mobile-card .novel-mobile-card-body > small {
+  display: -webkit-box;
+  white-space: normal;
+  line-height: 1.35;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.novel-mobile-card-progress {
+  color: #a8adb5;
+}
+
+.novel-mobile-card-chapter {
+  color: #d8624b;
+}
+
+.novel-mobile-card-actions,
+.novel-mobile-detail-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.novel-mobile-card-actions button,
+.novel-mobile-detail-actions button,
+.novel-reader-toolbar button,
+.novel-reader-settings-panel button,
+.novel-reader-catalog-drawer button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.novel-mobile-detail-actions button.primary {
+  border-color: #ed4259;
+  background: #ed4259;
+  color: #fff;
+}
+
+.novel-mobile-detail-hero,
+.novel-mobile-summary-panel,
+.novel-mobile-catalog {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.novel-mobile-detail-hero {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 13px;
+  padding: 13px;
+}
+
+.novel-mobile-detail-body {
+  display: grid;
+  min-width: 0;
+  align-content: center;
+  gap: 7px;
+}
+
+.novel-mobile-summary-panel {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+}
+
+.novel-mobile-summary-panel p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.75;
+}
+
+.novel-mobile-catalog {
+  display: grid;
+  gap: 8px;
+  padding: 13px;
+}
+
+.novel-mobile-catalog > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+}
+
+.novel-mobile-catalog > div:last-child {
+  display: grid;
+}
+
+.novel-mobile-chapter {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 44px;
+  gap: 10px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  padding: 0;
+  text-align: left;
+}
+
+.novel-mobile-chapter strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+}
+
+.novel-mobile-chapter span {
+  color: var(--quiet);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.novel-mobile-chapter.active strong {
+  color: #ed4259;
+}
+
+body.novel-reader-view {
+  background: #e7decd;
+}
+
+body.novel-reader-view .top-channel-bar,
+body.novel-reader-view .bottom-nav {
+  display: none;
+}
+
+body.novel-reader-view .app-shell {
+  width: 100%;
+  min-height: 100dvh;
+  padding: 0;
+}
+
+.content-panel[data-view="novelReader"] {
+  min-height: 100dvh;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.content-panel[data-view="novelReader"] > .section-head,
+.content-panel[data-view="novelReader"] > .view-meta {
+  display: none;
+}
+
+.novel-reader-screen {
+  --novel-reader-font: 20px;
+  --novel-reader-line: 1.9;
+  --novel-reader-dim: 0;
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  gap: 10px;
+  min-height: 100dvh;
+  border: 0;
+  border-radius: 0;
+  background: #f1e6d2;
+  color: #2f2a24;
+  padding:
+    max(24px, calc(env(safe-area-inset-top) + 18px))
+    18px
+    calc(34px + env(safe-area-inset-bottom));
+}
+
+.novel-reader-screen.theme-green {
+  background: #e9f2e3;
+}
+
+.novel-reader-screen.theme-white {
+  background: #fbfbfb;
+}
+
+.novel-reader-screen.theme-rose {
+  background: #f2e2dc;
+}
+
+.novel-reader-screen.eye-care {
+  background: #dfecd8;
+}
+
+.novel-reader-screen.night {
+  background: #1d222b;
+  color: #cbd2dc;
+}
+
+.novel-reader-dimmer {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+  pointer-events: none;
+  background: rgba(0, 0, 0, var(--novel-reader-dim));
+}
+
+.novel-reader-topbar,
+.novel-reader-toolbar,
+.novel-reader-settings-panel,
+.novel-reader-catalog-drawer {
+  position: fixed;
+  left: 50%;
+  width: min(100%, 560px);
+  transform: translateX(-50%);
+}
+
+.novel-reader-topbar,
+.novel-reader-toolbar {
+  z-index: 32;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.novel-reader-screen.menu-open .novel-reader-topbar,
+.novel-reader-screen.menu-open .novel-reader-toolbar {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.novel-reader-topbar {
+  top: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: calc(58px + env(safe-area-inset-top));
+  padding: calc(8px + env(safe-area-inset-top)) 14px 8px;
+  background: rgba(32, 30, 28, 0.88);
+  color: #fff;
+  backdrop-filter: blur(14px);
+}
+
+.novel-reader-top-title {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.novel-reader-top-title strong,
+.novel-reader-top-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.novel-reader-top-title strong {
+  font-size: 15px;
+}
+
+.novel-reader-top-title span {
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 12px;
+}
+
+.novel-reader-topbar .novel-reader-back,
+.novel-reader-toolbar .novel-reader-page-button,
+.novel-reader-toolbar .novel-reader-tool-button,
+.novel-reader-settings-panel button {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+}
+
+.novel-reader-toolbar {
+  bottom: 0;
+  display: grid;
+  gap: 14px;
+  padding: 12px 14px calc(14px + env(safe-area-inset-bottom));
+  background: rgba(32, 30, 28, 0.9);
+  color: #fff;
+  backdrop-filter: blur(14px);
+}
+
+.novel-reader-progress-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.novel-reader-progress-row input {
+  width: 100%;
+  accent-color: #ed4259;
+}
+
+.novel-reader-page-button {
+  min-width: 56px;
+}
+
+.novel-reader-action-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.novel-reader-action-row .novel-reader-tool-button {
+  display: grid;
+  min-height: 54px;
+  place-items: center;
+}
+
+.novel-reader-toolbar button:disabled {
+  opacity: 0.42;
+}
+
+.novel-reader-screen h1 {
+  margin: 0 0 4px;
+  font-size: 23px;
+  line-height: 1.35;
+}
+
+.novel-reader-meta {
+  color: #8a8175;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.novel-reader-screen.night .novel-reader-meta {
+  color: #8e99aa;
+}
+
+.novel-reader-content {
+  font-family: "Microsoft YaHei", "PingFang SC", "Noto Serif SC", serif;
+  font-size: var(--novel-reader-font);
+  line-height: var(--novel-reader-line);
+}
+
+.novel-reader-content p {
+  margin: 0 0 1.05em;
+  overflow-wrap: anywhere;
+  text-indent: 2em;
+}
+
+.novel-reader-screen.mode-page {
+  overflow: hidden;
+}
+
+.novel-reader-screen.mode-page .novel-reader-content {
+  height: calc(100dvh - 154px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  column-width: calc(100vw - 36px);
+  column-gap: 28px;
+  scrollbar-width: none;
+  scroll-snap-type: x mandatory;
+}
+
+.novel-reader-screen.mode-page .novel-reader-content::-webkit-scrollbar {
+  display: none;
+}
+
+.novel-reader-screen.mode-page .novel-reader-content p {
+  break-inside: avoid;
+}
+
+.novel-reader-catalog-drawer {
+  inset: auto auto 0 50%;
+  z-index: 34;
+  display: grid;
+  max-height: min(72dvh, 560px);
+  border: 0;
+  border-radius: 14px 14px 0 0;
+  background: var(--surface);
+  box-shadow: 0 18px 40px rgba(16, 24, 36, 0.26);
+  padding: 14px 14px calc(14px + env(safe-area-inset-bottom));
+}
+
+.novel-reader-catalog-drawer > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.novel-reader-catalog-drawer > div:last-child {
+  overflow: auto;
+}
+
+.novel-reader-settings-panel {
+  bottom: calc(142px + env(safe-area-inset-bottom));
+  z-index: 33;
+  display: grid;
+  max-height: min(52dvh, 430px);
+  overflow-y: auto;
+  gap: 10px;
+  border-radius: 14px 14px 0 0;
+  background: rgba(35, 33, 31, 0.94);
+  color: #fff;
+  padding: 14px;
+  box-shadow: 0 -16px 40px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(16px);
+}
+
+.novel-reader-setting-row {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+}
+
+.novel-reader-setting-row > span {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.novel-reader-setting-row > strong {
+  justify-self: end;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+}
+
+.novel-reader-slider-row {
+  grid-template-columns: 74px auto minmax(0, 1fr);
+}
+
+.novel-reader-stepper-row {
+  grid-template-columns: 74px auto minmax(0, 1fr);
+}
+
+.novel-reader-slider-row input {
+  width: 100%;
+  accent-color: #ed4259;
+}
+
+.novel-reader-stepper-row > div,
+.novel-reader-option-row > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  justify-content: flex-end;
+}
+
+.novel-reader-option-row {
+  grid-template-columns: 74px minmax(0, 1fr);
+}
+
+.novel-reader-switch-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.novel-reader-settings-panel button.active {
+  border-color: rgba(237, 66, 89, 0.68);
+  background: #ed4259;
+  color: #fff;
+}
+
+@media (max-width: 390px) {
+  .novel-mobile-card {
+    gap: 6px;
+    padding: 0;
+  }
+
+  .novel-mobile-card .novel-mobile-cover {
+    width: 100%;
+  }
+
+  .novel-mobile-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .novel-mobile-detail-hero {
+    grid-template-columns: 86px minmax(0, 1fr);
+  }
+
+  .novel-mobile-cover.large {
+    width: 84px;
+  }
+}

@@ -1,9 +1,10 @@
 package local.fanhao.library;
 
 import android.app.DownloadManager;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
-import android.net.Uri;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.URLUtil;
@@ -13,13 +14,20 @@ import androidx.activity.OnBackPressedCallback;
 
 import com.getcapacitor.BridgeActivity;
 
+import java.net.URLDecoder;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 public class MainActivity extends BridgeActivity {
   @Override
   protected void onCreate(Bundle savedInstanceState) {
     registerPlugin(FanHaoPlayerPlugin.class);
+    registerPlugin(FanHaoUpdaterPlugin.class);
+    registerPlugin(FanHaoNovelPlugin.class);
     super.onCreate(savedInstanceState);
 
     configureWebViewPlayback();
+    dispatchTextIntentToWebView(getIntent());
 
     getOnBackPressedDispatcher().addCallback(
       this,
@@ -35,6 +43,13 @@ public class MainActivity extends BridgeActivity {
   @Override
   public void onBackPressed() {
     dispatchBackToWebView();
+  }
+
+  @Override
+  protected void onNewIntent(Intent intent) {
+    super.onNewIntent(intent);
+    setIntent(intent);
+    dispatchTextIntentToWebView(intent);
   }
 
   private void configureWebViewPlayback() {
@@ -55,8 +70,9 @@ public class MainActivity extends BridgeActivity {
         return;
       }
 
-      String fileName = URLUtil.guessFileName(url, contentDisposition, mimeType);
-      DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
+      Uri uri = Uri.parse(url);
+      String fileName = resolveDownloadFileName(uri, contentDisposition, mimeType);
+      DownloadManager.Request request = new DownloadManager.Request(uri);
       if (userAgentValue != null && !userAgentValue.isEmpty()) {
         request.addRequestHeader("User-Agent", userAgentValue);
       }
@@ -68,6 +84,52 @@ public class MainActivity extends BridgeActivity {
       downloadManager.enqueue(request);
       Toast.makeText(this, "已加入下载队列", Toast.LENGTH_SHORT).show();
     });
+  }
+
+  private String resolveDownloadFileName(Uri uri, String contentDisposition, String mimeType) {
+    String fromHeader = contentDispositionFileName(contentDisposition);
+    if (fromHeader != null && !fromHeader.trim().isEmpty()) {
+      return sanitizeDownloadFileName(fromHeader);
+    }
+
+    String fromQuery = uri.getQueryParameter("filename");
+    if (fromQuery != null && !fromQuery.trim().isEmpty()) {
+      return sanitizeDownloadFileName(fromQuery);
+    }
+
+    return sanitizeDownloadFileName(URLUtil.guessFileName(uri.toString(), contentDisposition, mimeType));
+  }
+
+  private String contentDispositionFileName(String contentDisposition) {
+    if (contentDisposition == null || contentDisposition.trim().isEmpty()) return null;
+
+    Matcher encoded = Pattern
+      .compile("filename\\*\\s*=\\s*(?:UTF-8'')?\"?([^\";]+)\"?", Pattern.CASE_INSENSITIVE)
+      .matcher(contentDisposition);
+    if (encoded.find()) {
+      try {
+        return URLDecoder.decode(encoded.group(1), "UTF-8");
+      } catch (Exception ignored) {
+        return encoded.group(1);
+      }
+    }
+
+    Matcher quoted = Pattern
+      .compile("filename\\s*=\\s*\"([^\"]+)\"", Pattern.CASE_INSENSITIVE)
+      .matcher(contentDisposition);
+    if (quoted.find()) return quoted.group(1);
+
+    Matcher bare = Pattern
+      .compile("filename\\s*=\\s*([^;]+)", Pattern.CASE_INSENSITIVE)
+      .matcher(contentDisposition);
+    if (bare.find()) return bare.group(1);
+
+    return null;
+  }
+
+  private String sanitizeDownloadFileName(String fileName) {
+    String clean = fileName == null ? "" : fileName.replaceAll("[\\\\/:*?\"<>|\\r\\n]+", "_").trim();
+    return clean.isEmpty() ? "download.txt" : clean;
   }
 
   private void dispatchBackToWebView() {
@@ -85,5 +147,15 @@ public class MainActivity extends BridgeActivity {
         }
       }
     );
+  }
+
+  private void dispatchTextIntentToWebView(Intent intent) {
+    if (!FanHaoNovelPlugin.looksLikeTextIntent(intent)) return;
+    WebView webView = getBridge() == null ? null : getBridge().getWebView();
+    if (webView == null) return;
+    webView.post(() -> webView.evaluateJavascript(
+      "window.dispatchEvent(new CustomEvent('fanhaoNativeTextFile'));",
+      null
+    ));
   }
 }

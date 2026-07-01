@@ -11,6 +11,7 @@ export function createAdminModal(deps) {
     loadHistory,
     loadImageLibrary,
     loadLibrary,
+    loadNovels,
     loadRankings,
     normalizeUiConfig,
     personWorkPageSize,
@@ -25,8 +26,11 @@ export function createAdminModal(deps) {
     updateWorkSnapshot
   } = deps;
 
+let pendingAdminScriptDefaults = {};
+
 function openAdminModal(options = {}) {
   if (state.accessMode !== "local") return;
+  pendingAdminScriptDefaults = options.scriptDefaults || options.defaults || {};
   populateAdminPeople();
   populateAdminConfig();
   els.adminStatus.textContent = "";
@@ -37,7 +41,12 @@ function openAdminModal(options = {}) {
   startAdminPolling();
   refreshCoverCacheStatus();
   const scriptsPromise = loadAdminScripts();
-  if (options.scriptId) scriptsPromise.then(() => selectAdminScript(options.scriptId));
+  if (options.scriptId) {
+    scriptsPromise.then(() => {
+      selectAdminScript(options.scriptId);
+      applyAdminScriptDefaults();
+    });
+  }
   window.setTimeout(() => {
     if (options.scriptId) {
       els.adminScriptForm?.scrollIntoView({ block: "start" });
@@ -119,6 +128,19 @@ function selectAdminScript(scriptId) {
   renderAdminScriptPanel();
   if (els.adminScriptStatus) els.adminScriptStatus.textContent = `已选择：${script.title}`;
   return script;
+}
+
+function applyAdminScriptDefaults() {
+  const defaults = pendingAdminScriptDefaults || {};
+  pendingAdminScriptDefaults = {};
+  if (!defaults || !Object.keys(defaults).length) return;
+  for (const [name, value] of Object.entries(defaults)) {
+    const wrapper = els.adminScriptFields?.querySelector(`[data-field-name="${CSS.escape(name)}"]`);
+    const control = wrapper?.querySelector("input, select, textarea");
+    if (!control) continue;
+    if (control.type === "checkbox") control.checked = Boolean(value);
+    else control.value = String(value ?? "");
+  }
 }
 
 async function loadAdminScripts() {
@@ -711,6 +733,16 @@ async function applyAdminTaskRefreshHints(task) {
     state.gallery.data = null;
     state.gallery.status = "图库索引已刷新";
     if (state.activeView === "gallery") await loadImageLibrary({ reload: true });
+  }
+  if (hints.has("novels")) {
+    if (state.novel) {
+      state.novel.data = null;
+      state.novel.summary = null;
+      state.novel.book = null;
+      state.novel.chapter = null;
+      state.novel.status = "小说书库已刷新";
+    }
+    if (state.activeView === "novels" && loadNovels) await loadNovels({ reload: true });
   }
   if (hints.has("rankings")) {
     state.rankingLists = [];

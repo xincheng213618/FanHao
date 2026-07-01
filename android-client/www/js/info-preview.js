@@ -1,4 +1,4 @@
-import { fetchJson } from "./api.js";
+import { fetchJson } from "./api.js?v=20260701-novel-reader-05";
 import { formatBytes, formatNumber } from "./format.js";
 import { createDetailSectionTitle, revealDetailBlock } from "./detail-ui.js";
 
@@ -186,3 +186,6 @@ export function createInfoPreviewSection(context) {
     createInlineInfoPanel
   };
 }
+
+
+

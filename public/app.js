@@ -1,13 +1,14 @@
-import { createApiClient, addQueryParam } from "./js/api.js?v=20260629-tv-metadata-01";
-import { createAdminModal } from "./js/pages/admin-modal.js?v=20260629-tv-metadata-01";
-import { createGalleryPage } from "./js/pages/gallery-page.js?v=20260629-tv-metadata-01";
-import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260629-tv-metadata-01";
-import { createPeoplePage } from "./js/pages/people-page.js?v=20260629-tv-metadata-01";
-import { createPersonProfile } from "./js/pages/person-profile.js?v=20260629-tv-metadata-01";
-import { createRankingPage } from "./js/pages/ranking-page.js?v=20260629-tv-metadata-01";
-import { createToolsPage } from "./js/pages/tools-page.js?v=20260629-tv-metadata-01";
-import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260629-tv-metadata-01";
-import { DEFAULT_GALLERY_PHOTO_CATEGORY, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260629-tv-metadata-01";
+import { createApiClient, addQueryParam } from "./js/api.js?v=20260701-gallery-merge-01";
+import { createAdminModal } from "./js/pages/admin-modal.js?v=20260701-gallery-merge-01";
+import { createGalleryPage } from "./js/pages/gallery-page.js?v=20260701-gallery-merge-01";
+import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260701-gallery-merge-01";
+import { createNovelPage } from "./js/pages/novel-page.js?v=20260701-gallery-merge-01";
+import { createPeoplePage } from "./js/pages/people-page.js?v=20260701-gallery-merge-01";
+import { createPersonProfile } from "./js/pages/person-profile.js?v=20260701-gallery-merge-01";
+import { createRankingPage } from "./js/pages/ranking-page.js?v=20260701-gallery-merge-01";
+import { createToolsPage } from "./js/pages/tools-page.js?v=20260701-gallery-merge-01";
+import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260701-gallery-merge-01";
+import { DEFAULT_GALLERY_PHOTO_CATEGORY, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260701-gallery-merge-01";
 
 const state = {
   library: null,
@@ -83,12 +84,13 @@ const state = {
   },
   gallery: {
     mode: "photo",
-    photoView: "albums",
+    photoView: "collections",
     photoCollection: null,
     query: "",
     category: DEFAULT_GALLERY_PHOTO_CATEGORY,
     subCategory: "all",
     person: "all",
+    sort: "updated",
     visibleLimit: 80,
     loading: false,
     data: null,
@@ -99,6 +101,25 @@ const state = {
     media: null,
     fitWidth: readStoredFlag("fanhao.gallery.fitWidth", true),
     status: ""
+  },
+  novel: {
+    query: "",
+    category: "all",
+    sort: "updated",
+    data: null,
+    summary: null,
+    book: null,
+    chapters: [],
+    chapter: null,
+    prev: null,
+    next: null,
+    loading: false,
+    uploading: false,
+    status: "",
+    catalogOpen: false,
+    settingsOpen: false,
+    pendingScrollRatio: 0,
+    settings: null
   },
   routeReady: false,
   restoringRoute: false
@@ -177,12 +198,17 @@ const els = {
 const formatter = new Intl.NumberFormat("zh-CN");
 let workRenderTimer = null;
 let workRenderSeq = 0;
+let workLoadMoreObserver = null;
+let workLoadMoreScrollCleanup = null;
 let coverLoadQueue = [];
 let coverLoadTimer = null;
 let coverLoadObserver = null;
 const WORK_RENDER_INITIAL_COUNT = 96;
 const WORK_RENDER_BATCH_SIZE = 96;
 const WORK_RENDER_BATCH_DELAY = 16;
+const WORK_AUTO_LOAD_ROOT_MARGIN = "0px 0px 1400px 0px";
+const WORK_AUTO_LOAD_DISTANCE = 1400;
+const WORK_AUTO_LOAD_RECHECK_DELAYS = [120, 480, 900];
 const COVER_LOAD_BATCH_SIZE = 16;
 const COVER_LOAD_BATCH_DELAY = 45;
 const COVER_EAGER_COUNT = 48;
@@ -240,6 +266,7 @@ const personProfilePage = createPersonProfile({
   sourcePriority,
   state
 });
+let novelPage = null;
 const adminModal = createAdminModal({
   api,
   displayPersonName,
@@ -252,6 +279,7 @@ const adminModal = createAdminModal({
   loadHistory,
   loadImageLibrary,
   loadLibrary,
+  loadNovels: (options = {}) => novelPage?.loadNovels?.(options),
   loadRankings,
   normalizeUiConfig,
   personWorkPageSize,
@@ -278,6 +306,23 @@ const toolsPage = createToolsPage({
   toastInline,
   txtToolMaxFileBytes: TXT_TOOL_MAX_FILE_BYTES,
   writeStoredFlag
+});
+novelPage = createNovelPage({
+  api,
+  cancelScheduledWorkRendering,
+  disconnectPeopleIndexAutoload,
+  els,
+  formatBytes,
+  formatDateTime,
+  formatNumber,
+  hidePersonProfile,
+  openAdminScript,
+  pushRoute,
+  replaceRoute,
+  resetProgressiveCoverLoading,
+  setMainHeader,
+  state,
+  syncRouteAfterNavigation
 });
 const galleryPage = createGalleryPage({
   api,
@@ -456,7 +501,7 @@ function currentRouteSnapshot(overrides = {}) {
   const route = {
     view: state.activeView || "people",
     galleryMode: state.activeView === "gallery" ? state.gallery.mode || "photo" : "",
-    galleryPhotoView: state.activeView === "gallery" ? state.gallery.photoView || "albums" : "",
+    galleryPhotoView: state.activeView === "gallery" ? state.gallery.photoView || "collections" : "",
     galleryPhotoCollection: state.activeView === "gallery" ? state.gallery.photoCollection || "" : "",
     galleryAlbumId: state.activeView === "gallery" ? state.gallery.album?.id || "" : "",
     galleryComicId: state.activeView === "gallery" ? state.gallery.comic?.id || "" : "",
@@ -466,6 +511,12 @@ function currentRouteSnapshot(overrides = {}) {
     galleryCategory: state.activeView === "gallery" ? state.gallery.category || "all" : "all",
     gallerySubCategory: state.activeView === "gallery" ? state.gallery.subCategory || "all" : "all",
     galleryPerson: state.activeView === "gallery" ? state.gallery.person || "all" : "all",
+    gallerySort: state.activeView === "gallery" ? state.gallery.sort || "updated" : "updated",
+    novelBookId: state.activeView === "novels" ? state.novel.chapter?.bookId || state.novel.book?.id || "" : "",
+    novelChapterIndex: state.activeView === "novels" ? String(state.novel.chapter?.index || "") : "",
+    novelQuery: state.activeView === "novels" ? state.novel.query || "" : "",
+    novelCategory: state.activeView === "novels" ? state.novel.category || "all" : "all",
+    novelSort: state.activeView === "novels" ? state.novel.sort || "updated" : "updated",
     personId: state.activeView === "people" ? state.selectedPersonId || "" : "",
     q: state.activeView === "search" ? state.searchQuery || state.workQuery || "" : "",
     workId: drawerOpen ? state.currentWork?.id || "" : "",
@@ -543,6 +594,11 @@ async function applyRoute(route) {
       applyGalleryRouteState(next);
       setActiveView("gallery", { skipRoute: true });
       await openGalleryRouteTarget(next);
+    } else if (next.view === "novels") {
+      clearWorkSearch();
+      novelPage.applyRouteState(next);
+      setActiveView("novels", { skipRoute: true });
+      await novelPage.openRouteTarget(next);
     } else {
       clearWorkSearch();
       setActiveView(next.view, { skipRoute: true });
@@ -745,7 +801,7 @@ async function loadLibrary(options = {}) {
   if (els.topRescanButton) els.topRescanButton.hidden = state.accessMode !== "local";
   if (els.missingLocalToggle) els.missingLocalToggle.checked = state.showMissingLocalWorks;
   if (els.collectionToggle) els.collectionToggle.checked = state.showCompilationWorks;
-  state.workPageSize = Number(state.accessHints.workPageSize) || (state.accessMode === "lan" ? 60 : 1000);
+  state.workPageSize = Number(state.accessHints.workPageSize) || (state.accessMode === "remote" ? 80 : 1000);
   state.personPageSize = state.accessMode === "lan" ? 80 : 96;
   resetWorkPaging();
   state.people = sortPeopleForList(data.people || []);
@@ -773,12 +829,14 @@ function sourcePriority(value) {
   if (sourcePath.startsWith("f:/")) return 1;
   if (sourcePath === "o:/[珍藏]" || sourcePath.startsWith("o:/[珍藏]/")) return 2;
   if (sourcePath === "o:/[珍藏1]" || sourcePath.startsWith("o:/[珍藏1]/")) return 3;
-  if (sourcePath.startsWith("o:/")) return 4;
-  if (sourcePath === "v:/[a]" || sourcePath.startsWith("v:/[a]/")) return 5;
-  if (sourcePath === "v:/[a1]" || sourcePath.startsWith("v:/[a1]/")) return 6;
-  if (sourcePath === "v:/av" || sourcePath.startsWith("v:/av/")) return 7;
-  if (sourcePath.startsWith("v:/")) return 8;
-  return 9;
+  if (sourcePath === "o:/[稀有]" || sourcePath.startsWith("o:/[稀有]/")) return 4;
+  if (sourcePath === "o:/[动漫]" || sourcePath.startsWith("o:/[动漫]/")) return 5;
+  if (sourcePath.startsWith("o:/")) return 6;
+  if (sourcePath === "v:/[a]" || sourcePath.startsWith("v:/[a]/")) return 7;
+  if (sourcePath === "v:/[a1]" || sourcePath.startsWith("v:/[a1]/")) return 8;
+  if (sourcePath === "v:/av" || sourcePath.startsWith("v:/av/")) return 9;
+  if (sourcePath.startsWith("v:/")) return 10;
+  return 11;
 }
 
 function personSourcePriority(person) {
@@ -805,6 +863,7 @@ function renderSummary() {
 
 function productViewForActiveView(view = state.activeView) {
   if (view === "gallery") return "gallery";
+  if (view === "novels") return "novels";
   if (view === "tools") return "tools";
   return "people";
 }
@@ -812,7 +871,9 @@ function productViewForActiveView(view = state.activeView) {
 function productButtonActive(button, view = state.activeView) {
   const productView = button.dataset.productView || "people";
   if (productView === "gallery") {
-    return view === "gallery" && (button.dataset.galleryMode || "photo") === state.gallery.mode;
+    const mode = button.dataset.galleryMode || "photo";
+    if (mode === "photo") return view === "gallery" && ["photo", "manga"].includes(state.gallery.mode);
+    return view === "gallery" && mode === state.gallery.mode;
   }
   return productViewForActiveView(view) === productView;
 }
@@ -867,6 +928,16 @@ function setActiveView(view, options = {}) {
 
   if (view === "gallery") {
     galleryPage.enter(options);
+    return;
+  }
+
+  if (view === "novels") {
+    state.selectedPersonId = null;
+    state.selectedPerson = null;
+    state.works = [];
+    state.personWorksTotal = 0;
+    state.personWorksFacets = null;
+    novelPage.enter(options);
     return;
   }
 
@@ -1099,6 +1170,8 @@ function updateBackToPeopleIndexButton() {
   document.body.classList.toggle("person-detail-view", state.activeView === "people" && Boolean(state.selectedPersonId));
   document.body.classList.toggle("tools-view", state.activeView === "tools");
   document.body.classList.toggle("gallery-view", state.activeView === "gallery");
+  document.body.classList.toggle("novel-view", state.activeView === "novels");
+  document.body.classList.toggle("novel-reader-active", state.activeView === "novels" && Boolean(state.novel?.chapter));
   syncNavigationState();
   if (!els.backToPeopleIndex) return;
   els.backToPeopleIndex.hidden = true;
@@ -1505,7 +1578,7 @@ async function loadSearchResults(query, options = {}) {
 }
 
 function searchPageSize() {
-  return state.accessMode === "lan" ? 80 : 1000;
+  return Math.max(40, Math.min(1000, Number(state.workPageSize) || 80));
 }
 
 async function fetchSearchPage(query, offset) {
@@ -1604,6 +1677,7 @@ function toastInline(button, message, restoreText) {
 
 function renderWorks(emptyMessage = "没有匹配的作品。") {
   disconnectPeopleIndexAutoload();
+  disconnectWorkLoadMoreAutoload();
   cancelScheduledWorkRendering();
   resetProgressiveCoverLoading();
   const renderSeq = ++workRenderSeq;
@@ -1690,26 +1764,97 @@ function appendLoadMore(visibleCount, totalCount, options = {}) {
   if (visibleCount < totalCount) {
     button.textContent =
       state.activeView === "search"
-        ? `显示更多 ${formatNumber(visibleCount)} / ${formatNumber(loadedCount)} · 总 ${formatNumber(targetCount)}`
-        : `显示更多 ${formatNumber(visibleCount)} / ${formatNumber(targetCount)}`;
+        ? `向下滑动继续加载 ${formatNumber(visibleCount)} / ${formatNumber(loadedCount)} · 总 ${formatNumber(targetCount)}`
+        : `向下滑动继续加载 ${formatNumber(visibleCount)} / ${formatNumber(targetCount)}`;
   } else {
-    button.textContent = `继续加载 ${formatNumber(loadedCount)} / ${formatNumber(targetCount)}`;
+    button.textContent = `向下滑动继续加载 ${formatNumber(loadedCount)} / ${formatNumber(targetCount)}`;
   }
-  button.addEventListener("click", () => {
+  const loadNext = () => {
     if (visibleCount < totalCount) {
       state.workVisibleLimit += state.workPageSize;
       renderWorks();
       return;
     }
     if (hasSearchServerMore) {
-      loadMoreSearchResults(button);
+      return loadMoreSearchResults(button);
     } else if (hasPersonServerMore) {
-      loadMorePersonWorks(button);
+      return loadMorePersonWorks(button);
     }
-  });
+  };
+  button.addEventListener("click", loadNext);
 
   wrap.append(button);
   els.workGrid.append(wrap);
+  setupWorkLoadMoreAutoload(wrap, button, loadNext);
+}
+
+function disconnectWorkLoadMoreAutoload() {
+  if (workLoadMoreObserver) {
+    workLoadMoreObserver.disconnect();
+    workLoadMoreObserver = null;
+  }
+  if (workLoadMoreScrollCleanup) {
+    workLoadMoreScrollCleanup();
+    workLoadMoreScrollCleanup = null;
+  }
+}
+
+function setupWorkLoadMoreAutoload(trigger, button, loadNext) {
+  if (!trigger || !button || typeof loadNext !== "function") return;
+  trigger.dataset.autoLoad = "ready";
+
+  const run = () => {
+    if (!trigger.isConnected || !button.isConnected || button.disabled || trigger.dataset.autoConsumed === "1") return;
+    trigger.dataset.autoConsumed = "1";
+    button.dataset.autoloading = "1";
+    button.textContent = button.textContent.replace(/^向下滑动继续加载/u, "正在接着加载");
+    try {
+      const result = loadNext();
+      Promise.resolve(result).finally(() => {
+        if (button.isConnected) delete button.dataset.autoloading;
+      });
+    } catch (error) {
+      if (button.isConnected) delete button.dataset.autoloading;
+      throw error;
+    }
+  };
+
+  let scheduled = false;
+  const check = () => {
+    scheduled = false;
+    if (!trigger.isConnected) {
+      disconnectWorkLoadMoreAutoload();
+      return;
+    }
+    const rect = trigger.getBoundingClientRect();
+    if (rect.top <= window.innerHeight + WORK_AUTO_LOAD_DISTANCE && rect.bottom >= -WORK_AUTO_LOAD_DISTANCE) {
+      run();
+    }
+  };
+  const scheduleCheck = () => {
+    if (scheduled) return;
+    scheduled = true;
+    window.requestAnimationFrame(check);
+  };
+
+  window.addEventListener("scroll", scheduleCheck, { passive: true });
+  window.addEventListener("resize", scheduleCheck, { passive: true });
+  workLoadMoreScrollCleanup = () => {
+    window.removeEventListener("scroll", scheduleCheck);
+    window.removeEventListener("resize", scheduleCheck);
+  };
+
+  if ("IntersectionObserver" in window) {
+    workLoadMoreObserver = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) run();
+      },
+      { root: null, rootMargin: WORK_AUTO_LOAD_ROOT_MARGIN, threshold: 0 }
+    );
+    workLoadMoreObserver.observe(trigger);
+  }
+
+  for (const delay of WORK_AUTO_LOAD_RECHECK_DELAYS) window.setTimeout(scheduleCheck, delay);
 }
 
 function renderEmpty(message) {
@@ -1736,8 +1881,8 @@ async function loadImageLibrary(options = {}) {
   await galleryRenderer.loadImageLibrary(options);
 }
 
-function openAdminScript(scriptId = "") {
-  adminModal.openModal({ scriptId });
+function openAdminScript(scriptId = "", options = {}) {
+  adminModal.openModal({ scriptId, scriptDefaults: options.defaults || options.scriptDefaults || {} });
 }
 
 function resetGalleryReader() {
@@ -2296,7 +2441,7 @@ for (const button of els.productTabs || []) {
       const changed = state.activeView !== "gallery" || state.gallery.mode !== mode;
       state.gallery.mode = mode;
       resetGalleryReader();
-      if (changed || mode !== "photo") state.gallery.photoView = "albums";
+      if (changed || mode !== "photo") state.gallery.photoView = mode === "photo" ? "collections" : "albums";
       state.gallery.photoCollection = null;
       state.gallery.category = mode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all";
       state.gallery.subCategory = "all";
@@ -2317,7 +2462,15 @@ for (const button of els.viewTabs) {
 }
 
 async function rescanFullLibrary(button) {
-  openAdminScript(state.activeView === "gallery" ? "image-library-rescan" : "");
+  if (state.activeView === "gallery") {
+    openAdminScript("image-library-rescan");
+    return;
+  }
+  if (state.activeView === "novels") {
+    openAdminScript("novel-library-rescan");
+    return;
+  }
+  openAdminScript("");
 }
 
 els.rescanButton?.addEventListener("click", () => rescanFullLibrary(els.rescanButton));
@@ -2367,6 +2520,16 @@ window.addEventListener("keydown", (event) => {
     } else if (event.key === "ArrowRight" && currentIndex >= 0 && currentIndex < chapters.length - 1) {
       event.preventDefault();
       openMangaChapter(chapters[currentIndex + 1].index);
+    }
+  }
+
+  if (state.activeView === "novels" && state.novel.chapter && !["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName)) {
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      novelPage.openAdjacent(-1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      novelPage.openAdjacent(1);
     }
   }
 });

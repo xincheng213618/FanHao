@@ -1,4 +1,10 @@
 const DEFAULT_GALLERY_PHOTO_CATEGORY = "我喜欢的";
+const PHOTO_READER_LIMITS = {
+  local: 160,
+  lan: 160,
+  remote: 24,
+  fallback: 48
+};
 
 export function createGalleryPage(deps) {
   const {
@@ -22,7 +28,8 @@ export function createGalleryPage(deps) {
     if (state.gallery.mode === "cache") state.gallery.mode = "photo";
     clearPersonSelection();
     hidePersonProfile();
-    setMainHeader("图库", "漫画 / 套图");
+    const imageModule = ["photo", "manga"].includes(state.gallery.mode);
+    setMainHeader(imageModule ? "套图" : galleryModeLabel(state.gallery.mode), imageModule ? "图包 / 韩漫" : "本地媒体");
     renderGalleryStats();
     renderGalleryView();
     loadImageLibrary();
@@ -31,12 +38,13 @@ export function createGalleryPage(deps) {
 
   function applyRouteState(route) {
     state.gallery.mode = route.galleryMode || "photo";
-    state.gallery.photoView = route.galleryPhotoView || "albums";
+    state.gallery.photoView = state.gallery.mode === "photo" && route.galleryPhotoView !== "albums" ? "collections" : "albums";
     state.gallery.photoCollection = route.galleryPhotoCollection || null;
     state.gallery.query = route.galleryQuery || "";
     state.gallery.category = route.galleryCategory || (state.gallery.mode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all");
     state.gallery.subCategory = route.gallerySubCategory || "all";
     state.gallery.person = route.galleryPerson || "all";
+    state.gallery.sort = route.gallerySort || "updated";
     state.gallery.visibleLimit = 80;
     resetReader();
   }
@@ -123,7 +131,7 @@ export function createGalleryPage(deps) {
   async function openPhotoSet(albumId, options = {}) {
     setStatus("正在读取图包");
     try {
-      const data = await api(`/api/photo-sets/${encodeURIComponent(albumId)}`);
+      const data = await api(photoSetPath(albumId, { imageLimit: photoReaderInitialLimit() }));
       resetReader();
       state.gallery.album = data.album;
       state.gallery.cache = data.cache || state.gallery.cache;
@@ -134,6 +142,24 @@ export function createGalleryPage(deps) {
     } catch (error) {
       setStatus(error.message || "图包读取失败");
     }
+  }
+
+  function photoSetPath(albumId, options = {}) {
+    const params = new URLSearchParams();
+    if (options.imageLimit === "all") {
+      params.set("imageLimit", "all");
+    } else if (Number.isFinite(Number(options.imageLimit)) && Number(options.imageLimit) > 0) {
+      params.set("imageLimit", String(Math.floor(Number(options.imageLimit))));
+    }
+    const query = params.toString();
+    return `/api/photo-sets/${encodeURIComponent(albumId)}${query ? `?${query}` : ""}`;
+  }
+
+  function photoReaderInitialLimit() {
+    const mode = String(state.accessMode || "").trim();
+    if (mode === "local" || mode === "lan") return PHOTO_READER_LIMITS[mode];
+    if (mode === "remote") return PHOTO_READER_LIMITS.remote;
+    return PHOTO_READER_LIMITS.fallback;
   }
 
   async function openMangaComic(comicId, options = {}) {

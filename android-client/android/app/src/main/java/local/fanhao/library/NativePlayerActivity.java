@@ -3,18 +3,22 @@ package local.fanhao.library;
 import android.app.Activity;
 import android.content.pm.ActivityInfo;
 import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import androidx.annotation.Nullable;
@@ -37,6 +41,7 @@ import java.util.concurrent.Executors;
 @UnstableApi
 public class NativePlayerActivity extends Activity {
   private static final String TAG = "FanHaoNativePlayer";
+  private static final int CHROME_HIDE_TIMEOUT_MS = 2500;
   public static final String EXTRA_URL = "url";
   public static final String EXTRA_FALLBACK_URL = "fallbackUrl";
   public static final String EXTRA_TITLE = "title";
@@ -53,6 +58,9 @@ public class NativePlayerActivity extends Activity {
   private ExoPlayer player;
   private PlayerView playerView;
   private TextView statusView;
+  private View topOverlay;
+  private TextView titleView;
+  private TextView subtitleView;
   private String title;
   private String subtitle;
   private String progressUrl;
@@ -66,6 +74,13 @@ public class NativePlayerActivity extends Activity {
     @Override
     public void run() {
       if (statusView != null) statusView.setVisibility(View.GONE);
+    }
+  };
+
+  private final Runnable overlayHideRunnable = new Runnable() {
+    @Override
+    public void run() {
+      hidePlayerChrome();
     }
   };
 
@@ -102,8 +117,7 @@ public class NativePlayerActivity extends Activity {
         if (playbackState == Player.STATE_READY) {
           showStatus("正在播放", false);
           playerView.postDelayed(() -> {
-            hideSystemBars();
-            playerView.hideController();
+            hidePlayerChrome();
           }, 900);
         } else if (playbackState == Player.STATE_BUFFERING) {
           showStatus("正在缓冲", true);
@@ -153,6 +167,7 @@ public class NativePlayerActivity extends Activity {
     reportProgress(true);
     handler.removeCallbacks(progressTicker);
     handler.removeCallbacks(statusHideRunnable);
+    handler.removeCallbacks(overlayHideRunnable);
     if (player != null) {
       player.release();
       player = null;
@@ -168,16 +183,28 @@ public class NativePlayerActivity extends Activity {
     playerView = new PlayerView(this);
     playerView.setUseController(true);
     playerView.setControllerAutoShow(false);
-    playerView.setControllerHideOnTouch(true);
-    playerView.setControllerShowTimeoutMs(2500);
+    playerView.setControllerHideOnTouch(false);
+    playerView.setControllerShowTimeoutMs(CHROME_HIDE_TIMEOUT_MS);
+    playerView.setControllerAnimationEnabled(false);
     playerView.setKeepContentOnPlayerReset(true);
+    playerView.setControllerVisibilityListener((PlayerView.ControllerVisibilityListener) visibility ->
+      syncPlayerChrome(visibility == View.VISIBLE)
+    );
     root.addView(playerView, new FrameLayout.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
       ViewGroup.LayoutParams.MATCH_PARENT
     ));
 
+    topOverlay = createTopOverlay();
+    root.addView(topOverlay, new FrameLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.WRAP_CONTENT,
+      Gravity.TOP
+    ));
+    topOverlay.setVisibility(View.GONE);
+
     statusView = new TextView(this);
-    statusView.setText("正在启动原生播放器");
+    statusView.setText("正在启动播放");
     statusView.setTextColor(Color.WHITE);
     statusView.setTextSize(12);
     statusView.setGravity(Gravity.CENTER);
@@ -195,6 +222,107 @@ public class NativePlayerActivity extends Activity {
     root.addView(statusView, statusParams);
 
     setContentView(root);
+  }
+
+  @Override
+  public boolean dispatchTouchEvent(MotionEvent event) {
+    if (playerView != null) {
+      int action = event.getActionMasked();
+      if (action == MotionEvent.ACTION_DOWN) {
+        showPlayerChrome();
+      } else if (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_UP) {
+        schedulePlayerChromeHide();
+      }
+    }
+    return super.dispatchTouchEvent(event);
+  }
+
+  private View createTopOverlay() {
+    LinearLayout bar = new LinearLayout(this);
+    bar.setOrientation(LinearLayout.HORIZONTAL);
+    bar.setGravity(Gravity.CENTER_VERTICAL);
+    bar.setPadding(dp(14), dp(10), dp(18), dp(30));
+    bar.setBackground(new GradientDrawable(
+      GradientDrawable.Orientation.TOP_BOTTOM,
+      new int[] { 0xCC000000, 0x00000000 }
+    ));
+
+    TextView back = new TextView(this);
+    back.setText("‹");
+    back.setTextColor(Color.WHITE);
+    back.setTextSize(38);
+    back.setTypeface(Typeface.DEFAULT_BOLD);
+    back.setGravity(Gravity.CENTER);
+    back.setBackgroundColor(Color.TRANSPARENT);
+    back.setContentDescription("返回");
+    back.setOnClickListener(view -> finish());
+    bar.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
+
+    LinearLayout textColumn = new LinearLayout(this);
+    textColumn.setOrientation(LinearLayout.VERTICAL);
+    textColumn.setGravity(Gravity.CENTER_VERTICAL);
+    textColumn.setPadding(dp(10), 0, 0, 0);
+
+    titleView = new TextView(this);
+    titleView.setText(hasText(title) ? title : "播放");
+    titleView.setTextColor(Color.WHITE);
+    titleView.setTextSize(18);
+    titleView.setTypeface(Typeface.DEFAULT_BOLD);
+    titleView.setSingleLine(true);
+    titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+
+    subtitleView = new TextView(this);
+    subtitleView.setText(subtitle);
+    subtitleView.setTextColor(0xCCFFFFFF);
+    subtitleView.setTextSize(12);
+    subtitleView.setSingleLine(true);
+    subtitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+    subtitleView.setVisibility(hasText(subtitle) ? View.VISIBLE : View.GONE);
+
+    textColumn.addView(titleView, new LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.WRAP_CONTENT
+    ));
+    textColumn.addView(subtitleView, new LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.WRAP_CONTENT
+    ));
+    bar.addView(textColumn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+    return bar;
+  }
+
+  private void syncPlayerChrome(boolean visible) {
+    handler.removeCallbacks(overlayHideRunnable);
+    if (topOverlay == null) return;
+    if (visible) {
+      showTopOverlay();
+    } else {
+      topOverlay.setVisibility(View.GONE);
+      hideSystemBars();
+    }
+  }
+
+  private void showPlayerChrome() {
+    if (playerView != null && !playerView.isControllerFullyVisible()) playerView.showController();
+    showTopOverlay();
+  }
+
+  private void showTopOverlay() {
+    if (topOverlay == null) return;
+    topOverlay.setVisibility(View.VISIBLE);
+    schedulePlayerChromeHide();
+  }
+
+  private void schedulePlayerChromeHide() {
+    handler.removeCallbacks(overlayHideRunnable);
+    handler.postDelayed(overlayHideRunnable, CHROME_HIDE_TIMEOUT_MS);
+  }
+
+  private void hidePlayerChrome() {
+    handler.removeCallbacks(overlayHideRunnable);
+    if (playerView != null) playerView.hideController();
+    if (topOverlay != null) topOverlay.setVisibility(View.GONE);
+    hideSystemBars();
   }
 
   private void playUrl(String url, long positionMs) {

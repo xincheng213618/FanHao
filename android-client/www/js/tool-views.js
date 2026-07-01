@@ -1,4 +1,4 @@
-import { postJson } from "./api.js";
+import { postJson } from "./api.js?v=20260701-novel-reader-05";
 import { formatBytes, formatNumber } from "./format.js";
 import { absoluteUrl } from "./image.js";
 
@@ -10,7 +10,6 @@ export function createToolViews(context) {
   const {
     els,
     getActiveUrl,
-    openInLibrary,
     setActiveBottom
   } = context;
 
@@ -29,11 +28,9 @@ export function createToolViews(context) {
 
   function renderTxtTool(isActive = () => true) {
     activeGuard = isActive;
-    setActiveBottom("home");
+    setActiveBottom("tools");
     els.viewKicker.textContent = "小工具";
     els.viewTitle.textContent = "TXT 文档格式化";
-    els.viewOpenAll.textContent = "网页备用";
-    els.viewOpenAll.onclick = () => openInLibrary("/tools");
     renderMeta();
     renderBody();
   }
@@ -407,7 +404,10 @@ export function createToolViews(context) {
 
   function openDownload() {
     const url = downloadUrl();
-    if (url) window.open(url, "_blank", "noreferrer");
+    if (!url) return;
+    const download = new URL(url);
+    if (state.result?.fileName) download.searchParams.set("filename", state.result.fileName);
+    window.open(download.toString(), "_blank", "noreferrer");
   }
 
   function downloadUrl() {
@@ -429,3 +429,6 @@ function readStoredFlag(key, fallback) {
   if (value === null) return fallback;
   return value === "1" || value === "true";
 }
+
+
+

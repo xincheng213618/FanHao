@@ -1,6 +1,8 @@
 param(
   [switch]$Install,
-  [switch]$NoSync
+  [switch]$NoSync,
+  [int]$VersionCode = 0,
+  [string]$VersionName = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,7 +52,14 @@ if (-not $NoSync) {
 
 Push-Location $AndroidDir
 try {
-  .\gradlew.bat assembleDebug --no-daemon
+  $gradleArgs = @("assembleDebug", "--no-daemon")
+  if ($VersionCode -gt 0) {
+    $gradleArgs += "-PfanhaoVersionCode=$VersionCode"
+  }
+  if ($VersionName) {
+    $gradleArgs += "-PfanhaoVersionName=$VersionName"
+  }
+  .\gradlew.bat @gradleArgs
 } finally {
   Pop-Location
 }

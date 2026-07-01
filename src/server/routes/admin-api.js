@@ -1,4 +1,89 @@
+import fs from "node:fs";
 import path from "node:path";
+
+const DOUBAN_COOKIE_PATH = path.join(process.cwd(), "data", "douban-cookie.txt");
+const DOUBAN_TEST_SUBJECT_URL = "https://movie.douban.com/subject/35321946/";
+const DOUBAN_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
+
+function normalizeDoubanCookieText(value) {
+  return String(value || "")
+    .replace(/^Cookie:\s*/i, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .join("; ")
+    .trim();
+}
+
+function readDoubanCookieFile() {
+  try {
+    return normalizeDoubanCookieText(fs.readFileSync(DOUBAN_COOKIE_PATH, "utf8"));
+  } catch {
+    return "";
+  }
+}
+
+function doubanCookieStatus(extra = {}) {
+  let stat = null;
+  try {
+    stat = fs.statSync(DOUBAN_COOKIE_PATH);
+  } catch {}
+  const cookie = readDoubanCookieFile();
+  return {
+    exists: Boolean(stat && cookie),
+    filePath: DOUBAN_COOKIE_PATH,
+    bytes: stat?.size || 0,
+    updatedAt: stat?.mtime ? stat.mtime.toISOString() : "",
+    cookieNames: cookie
+      ? cookie
+          .split(";")
+          .map((part) => part.trim().split("=")[0])
+          .filter(Boolean)
+          .slice(0, 12)
+      : [],
+    ...extra
+  };
+}
+
+function isDoubanSecurityHtml(finalUrl, html) {
+  if (/^https:\/\/sec\.douban\.com\//i.test(finalUrl || "")) return true;
+  return /<form[^>]+name=["']sec["']/i.test(html || "") && /sec\.douban\.com|action=["']\/c["']/i.test(html || "");
+}
+
+async function testDoubanCookie(cookie) {
+  if (!cookie) {
+    const error = new Error("还没有保存豆瓣 Cookie");
+    error.statusCode = 400;
+    throw error;
+  }
+  const response = await fetch(DOUBAN_TEST_SUBJECT_URL, {
+    headers: {
+      "User-Agent": DOUBAN_USER_AGENT,
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+      Referer: "https://www.douban.com/",
+      Cookie: cookie
+    }
+  });
+  const html = await response.text();
+  const finalUrl = response.url || DOUBAN_TEST_SUBJECT_URL;
+  const title = html
+    .match(/<title>([\s\S]*?)<\/title>/i)?.[1]
+    ?.replace(/\s+/g, " ")
+    .trim() || "";
+  const hasSubjectDetail =
+    !isDoubanSecurityHtml(finalUrl, html) &&
+    (html.includes("application/ld+json") || html.includes("v:average") || html.includes("v:summary"));
+  return {
+    ok: response.ok && hasSubjectDetail,
+    status: response.status,
+    finalUrl,
+    title,
+    hasSubjectDetail,
+    error: response.ok && hasSubjectDetail ? "" : "Cookie 不能访问豆瓣详情页，可能已过期或需要重新复制。"
+  };
+}
 
 export async function routeAdminApi(req, res, url, deps) {
   const {
@@ -115,6 +200,41 @@ export async function routeAdminApi(req, res, url, deps) {
     const body = await readJsonBody(req);
     setAppConfig(normalizeAppConfig(body.config || body));
     sendJson(res, 200, { ok: true, config: publicAppConfig() });
+    return true;
+  }
+
+  if (url.pathname === "/api/admin/douban-cookie" && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    sendJson(res, 200, { ok: true, cookie: doubanCookieStatus() });
+    return true;
+  }
+
+  if (url.pathname === "/api/admin/douban-cookie" && req.method === "PUT") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      const cookie = normalizeDoubanCookieText(body.cookie || body.value || "");
+      if (!cookie || cookie.length < 20 || !cookie.includes("=")) {
+        sendJson(res, 400, { error: "Cookie 内容看起来不完整" });
+        return true;
+      }
+      fs.mkdirSync(path.dirname(DOUBAN_COOKIE_PATH), { recursive: true });
+      fs.writeFileSync(DOUBAN_COOKIE_PATH, cookie, "utf8");
+      sendJson(res, 200, { ok: true, cookie: doubanCookieStatus({ saved: true }) });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "保存豆瓣 Cookie 失败" });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/admin/douban-cookie/test" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const result = await testDoubanCookie(readDoubanCookieFile());
+      sendJson(res, result.ok ? 200 : 409, { ok: result.ok, cookie: doubanCookieStatus(), test: result });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "测试豆瓣 Cookie 失败", cookie: doubanCookieStatus() });
+    }
     return true;
   }
 

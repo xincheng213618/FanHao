@@ -7,10 +7,10 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="application-name" content="资料库" />
     <title>个人视频资料库</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=20260629-tv-metadata-01" />
-    <link rel="icon" href="/app-icon.svg?v=20260629-tv-metadata-01" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="/app-icon.svg?v=20260629-tv-metadata-01" />
-    <link rel="stylesheet" href="/styles.css?v=20260629-tv-metadata-01" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260701-gallery-merge-01" />
+    <link rel="icon" href="/app-icon.svg?v=20260701-gallery-merge-01" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/app-icon.svg?v=20260701-gallery-merge-01" />
+    <link rel="stylesheet" href="/styles.css?v=20260701-gallery-merge-01" />
   </head>
   <body>
     <header class="product-topbar" aria-label="资料库模块">
@@ -24,14 +24,15 @@
       <nav class="product-nav" aria-label="主模块切换">
         <a class="product-tab active" href="/" data-product-view="people" aria-current="page">番号</a>
         <a class="product-tab" href="/photo" data-product-view="gallery" data-gallery-mode="photo">套图</a>
-        <a class="product-tab" href="/manga" data-product-view="gallery" data-gallery-mode="manga">韩漫</a>
         <a class="product-tab" href="/western" data-product-view="gallery" data-gallery-mode="western">欧美</a>
         <a class="product-tab" href="/movies" data-product-view="gallery" data-gallery-mode="movie">电影</a>
         <a class="product-tab" href="/tv" data-product-view="gallery" data-gallery-mode="tv">电视剧</a>
+        <a class="product-tab" href="/novels" data-product-view="novels">小说</a>
         <a class="product-tab" href="/tools" data-product-view="tools">小工具</a>
       </nav>
       <div class="product-actions">
         <button class="product-action" id="topRescanButton" type="button">后台作业</button>
+        <a class="product-action" href="/android-update">手机端</a>
         <a class="product-action" id="topAdminLink" href="/admin">设置</a>
       </div>
     </header>
@@ -269,6 +270,6 @@
       </div>
     </template>
 
-    <script src="/app.js?v=20260629-tv-metadata-01" type="module"></script>
+    <script src="/app.js?v=20260701-gallery-merge-01" type="module"></script>
   </body>
 </html>

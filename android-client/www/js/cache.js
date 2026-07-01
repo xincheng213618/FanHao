@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js";
+import { CLIENT_VERSION } from "./config.js?v=20260701-novel-reader-05";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;
@@ -11,6 +11,7 @@ const RESPONSE_CACHE_MAX_ENTRIES = 600;
 const MAX_CACHED_IMAGE_BYTES = 5 * 1024 * 1024;
 const IMAGE_CACHE_MAX_BYTES = 250 * 1024 * 1024;
 const IMAGE_CACHE_MAX_ENTRIES = 2500;
+const CACHE_OPEN_TIMEOUT_MS = 1600;
 
 let dbPromise = null;
 let responseTrimPromise = null;
@@ -142,6 +143,26 @@ function openCacheDb() {
 
   dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      fail(new Error("本地缓存暂时不可用"));
+    }, CACHE_OPEN_TIMEOUT_MS);
+
+    const finish = (callback) => {
+      if (settled) return false;
+      settled = true;
+      window.clearTimeout(timer);
+      callback();
+      return true;
+    };
+
+    const fail = (error) => {
+      finish(() => {
+        dbPromise = null;
+        reject(error || new Error("本地缓存打开失败"));
+      });
+    };
+
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(RESPONSE_STORE)) {
@@ -156,10 +177,13 @@ function openCacheDb() {
       }
     };
     request.onsuccess = () => {
-      scheduleStaleResponsePrune(request.result).catch(() => {});
-      resolve(request.result);
+      finish(() => {
+        scheduleStaleResponsePrune(request.result).catch(() => {});
+        resolve(request.result);
+      }) || request.result?.close?.();
     };
-    request.onerror = () => reject(request.error || new Error("本地缓存打开失败"));
+    request.onerror = () => fail(request.error || new Error("本地缓存打开失败"));
+    request.onblocked = () => fail(new Error("本地缓存升级被占用"));
   });
 
   return dbPromise;
@@ -339,3 +363,6 @@ function estimateEntrySize(entry) {
     return JSON.stringify(entry).length;
   }
 }
+
+
+
