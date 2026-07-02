@@ -1,0 +1,12 @@
+Upstream: https://github.com/jeantimex/hua-rong-dao-html
+Commit: 602a7195403deeca50229cad9971e4387b152b1f
+Integrated path: app/ static AngularJS web app
+License: no license file found in upstream repository
+
+Local changes:
+- Removed Google Analytics and unused Bootstrap JavaScript reference for offline packaging.
+- Added a "返回资料库" link.
+- Changed the document title.
+- Added AngularJS hash-prefix compatibility for the packaged Angular version.
+- Replaced deprecated $http success/error usage with then().
+- Removed the fixed 450px body minimum width and added mobile layout overrides.

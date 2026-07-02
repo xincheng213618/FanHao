@@ -1,6 +1,6 @@
-import { fetchJson } from "./api.js?v=20260701-novel-reader-05";
-import { enhanceAutoLoadMore } from "./auto-load.js?v=20260701-novel-reader-05";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js?v=20260701-novel-reader-05";
+import { fetchJson } from "./api.js?v=20260702-novel-local-manage-74";
+import { enhanceAutoLoadMore } from "./auto-load.js?v=20260702-novel-local-manage-74";
+import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js?v=20260702-novel-local-manage-74";
 import { isChannelFavorite, toggleChannelFavorite } from "./channel-favorites.js";
 import { formatBytes, formatDate, formatNumber } from "./format.js";
 import { absoluteUrl, loadPreviewImage } from "./image.js";
@@ -9,6 +9,7 @@ const CHANNELS = {
   photo: { label: "套图", path: "/photo", empty: "还没有索引到图包。", unit: "图包" },
   manga: { label: "韩漫", path: "/photo/manga", empty: "还没有缓存漫画。", unit: "部" },
   western: { label: "欧美", path: "/western", empty: "还没有索引到欧美视频。", unit: "视频" },
+  media: { label: "影视作品", path: "/media", empty: "还没有索引到影视作品。", unit: "部" },
   movie: { label: "电影", path: "/movies", empty: "还没有索引到电影。", unit: "影片" },
   tv: { label: "电视剧", path: "/tv", empty: "还没有索引到电视剧。", unit: "剧" }
 };
@@ -21,9 +22,41 @@ const LAZY_PHOTO_DETAIL_ROOT_MARGIN = "240px 0px 560px 0px";
 const LAZY_CHANNEL_PREVIEW_ROOT_MARGIN = "900px 0px 1200px 0px";
 const PLAY_OPEN_COOLDOWN_MS = 1400;
 
+function channelDataSignature(data = {}) {
+  const items = Array.isArray(data.items) ? data.items : [];
+  return JSON.stringify({
+    total: Number(data.total || items.length),
+    mode: data.mode || "",
+    query: data.query || "",
+    photoView: data.photoView || "",
+    category: data.category || "",
+    person: data.person || "",
+    collection: data.collection || "",
+    tvView: data.tvView || "",
+    seriesKey: data.seriesKey || "",
+    sort: data.sort || "",
+    facets: data.facets || null,
+    items: items.map((item) => [
+      item.id || "",
+      item.type || "",
+      item.title || "",
+      item.coverUrl || "",
+      item.routePath || "",
+      item.updatedAt || "",
+      item.size || 0,
+      item.collectionId || "",
+      item.seriesKey || "",
+      item.chapterCount ?? "",
+      item.imageCount ?? "",
+      item.doneChapterCount ?? ""
+    ])
+  });
+}
+
 export function normalizeChannelMode(value) {
   const mode = String(value || "").trim();
   if (mode === "movies") return "movie";
+  if (["video", "videos", "screen", "film", "films"].includes(mode)) return "media";
   return CHANNELS[mode] ? mode : "photo";
 }
 
@@ -79,10 +112,11 @@ export function createChannelViews(context) {
     const path = channelItemsPath(normalizedMode, limit, { query, photoView, category, person, collection, tvView, seriesKey, sort });
     const activeUrl = getActiveUrl();
     let renderedCache = false;
+    let renderedCacheSignature = "";
 
     setActiveBottom(normalizedMode);
     if (normalizedMode === "photo") setTopSecondaryTabs("photo", { category });
-    else if (normalizedMode === "tv") setTopSecondaryTabs("tv", { category });
+    else if (["media", "movie", "tv"].includes(normalizedMode)) setTopSecondaryTabs("media", { mode: normalizedMode });
     else setTopSecondaryTabs("none");
     els.viewKicker.textContent = query ? "频道搜索" : "内容频道";
     els.viewTitle.textContent = query ? `${channel.label}：${query}` : channel.label;
@@ -93,6 +127,7 @@ export function createChannelViews(context) {
     if (!isActive()) return;
     if (cached?.payload) {
       renderedCache = true;
+      renderedCacheSignature = channelDataSignature(cached.payload);
       renderChannelData(normalizedMode, cached.payload, cached);
     }
 
@@ -100,6 +135,10 @@ export function createChannelViews(context) {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
       writeCachedJson(activeUrl, path, data).catch(() => {});
       if (!isActive()) return;
+      if (renderedCache && channelDataSignature(data) === renderedCacheSignature) {
+        applyChannelHeader(normalizedMode, data);
+        return;
+      }
       renderChannelData(normalizedMode, data);
     } catch (error) {
       if (!isActive()) return;
@@ -111,7 +150,7 @@ export function createChannelViews(context) {
     }
   }
 
-  function renderChannelData(mode, data = {}, cacheEntry = null) {
+  function applyChannelHeader(mode, data = {}, cacheEntry = null) {
     const channel = channelConfig(mode);
     const items = data.items || [];
     const total = Number(data.total || items.length);
@@ -126,14 +165,29 @@ export function createChannelViews(context) {
     const sort = normalizeChannelSort(data.sort);
     const collectionTitle = data.collectionSummary?.title || "";
     const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : data.scannedAt ? ` · 更新 ${cacheAgeText(data.scannedAt)}` : "";
-    const unit = mode === "tv" ? (seriesKey ? "集" : "部剧") : photoView === "collections" && mode === "photo" ? "合集" : channel.unit;
+    const unit = mode === "tv" || mode === "media" ? (seriesKey ? "集" : "部") : photoView === "collections" && mode === "photo" ? "合集" : channel.unit;
     if (mode === "photo") setTopSecondaryTabs("photo", { category, facets: data.facets || {} });
-    else if (mode === "tv") setTopSecondaryTabs("tv", { category, facets: data.facets || {} });
+    else if (["media", "movie", "tv"].includes(mode)) setTopSecondaryTabs("media", { mode });
     else setTopSecondaryTabs("none");
     els.viewTitle.textContent = channelTitle(channel, { query, mode, photoView, collectionTitle, category, seriesSummary });
     els.viewMeta.textContent = query
       ? `${formatNumber(total)} 个匹配 · 已显示 ${formatNumber(items.length)}${suffix}`
       : `${formatNumber(items.length)} / ${formatNumber(total)} ${unit}${suffix}`;
+  }
+
+  function renderChannelData(mode, data = {}, cacheEntry = null) {
+    const channel = channelConfig(mode);
+    const items = data.items || [];
+    const total = Number(data.total || items.length);
+    const query = String(data.query || "").trim();
+    const photoView = String(data.photoView || "") === "collections" ? "collections" : "albums";
+    const category = String(data.category || "").trim();
+    const person = String(data.person || "").trim();
+    const collection = String(data.collection || "").trim();
+    const seriesKey = String(data.seriesKey || "").trim();
+    const seriesSummary = data.seriesSummary || null;
+    const sort = normalizeChannelSort(data.sort);
+    applyChannelHeader(mode, data, cacheEntry);
     resetPreviewImageObserver();
     els.viewContent.innerHTML = "";
 
@@ -144,11 +198,18 @@ export function createChannelViews(context) {
     if (mode === "photo") {
       if (collection) els.viewContent.append(createCollectionContextRow(data.collectionSummary));
       els.viewContent.append(createPhotoFilterStrip(data.facets || {}, { category, person, collection, photoView }));
-    } else if (mode === "tv") {
+    } else if (mode === "tv" || mode === "media") {
       if (seriesKey) {
-        els.viewContent.append(createTvSeriesContextRow(seriesSummary, { total }));
+        els.viewContent.append(createTvSeriesContextRow(seriesSummary, { total, mode }));
       } else {
-        els.viewContent.append(createTvFilterStrip(data.facets || {}, { category, sort, seriesKey }));
+        els.viewContent.append(mode === "media"
+          ? createMediaFilterStrip(data.facets || {}, { category, sort }, [
+            { value: "updated", label: "最近" },
+            { value: "rating", label: "评分" },
+            { value: "title", label: "标题" },
+            { value: "size", label: "大小" }
+          ])
+          : createTvFilterStrip(data.facets || {}, { category, sort, seriesKey }));
       }
     } else if (["western", "movie"].includes(mode)) {
       els.viewContent.append(createMediaFilterStrip(data.facets || {}, { category, sort }));
@@ -197,6 +258,13 @@ export function createChannelViews(context) {
         );
         return;
       }
+      if (mode === "media" && item.type === "tvSeries") {
+        updateChannelParams(
+          { mode: "media", tvView: "episodes", seriesKey: item.seriesKey || item.id, category: item.category || "", query: "", sort: "title" },
+          { skipHistory: false, replaceHistory: false, push: true }
+        );
+        return;
+      }
       if (mode === "photo" && item.id && showPhotoDetail) {
         showPhotoDetail(item.id);
         return;
@@ -205,8 +273,8 @@ export function createChannelViews(context) {
         showMangaDetail(item.id);
         return;
       }
-      if (["western", "movie", "tv"].includes(mode) && item.id && showMediaDetail) {
-        showMediaDetail(item.id, mode);
+      if ((["western", "movie", "tv", "media"].includes(mode)) && item.id && showMediaDetail) {
+        showMediaDetail(item.id, mediaDetailModeForItem(mode, item));
         return;
       }
       openInLibrary(item.routePath || channel.path);
@@ -372,6 +440,9 @@ export function createChannelViews(context) {
     if (mode === "photo" && item.type === "photoCollection") return [item.category, item.rootLabel].filter(Boolean).join(" · ") || "合集";
     if (mode === "manga") return [item.category, chapterProgressText(item)].filter(Boolean).join(" · ") || "漫画";
     if (mode === "photo") return [item.category, item.personName].filter(Boolean).join(" · ") || "图包";
+    if (mode === "media" && item.type === "tvSeries") return ["电视剧", item.category, item.year].filter(Boolean).join(" · ");
+    if (mode === "media" && item.type === "movie") return ["电影", item.category, item.year].filter(Boolean).join(" · ");
+    if (mode === "media" && item.type === "tv") return [item.tvSeries?.title || item.seriesName, item.category].filter(Boolean).slice(0, 2).join(" · ") || "电视剧";
     if (mode === "tv" && item.type === "tvSeries") return [item.category, item.year].filter(Boolean).join(" · ") || "电视剧";
     if (mode === "tv") return [item.tvSeries?.title, item.seriesName].filter(Boolean).slice(0, 1).join(" · ") || "电视剧";
     return [item.category, item.seriesName || item.personName].filter(Boolean).join(" · ") || channelConfig(mode).label;
@@ -379,11 +450,13 @@ export function createChannelViews(context) {
 
   function channelCardTitle(mode, item, channel) {
     if (mode === "photo" && item.type !== "photoCollection") return photoAlbumCardTitle(item);
+    if (mode === "media" && item.type === "tv") return tvEpisodeTitle(item);
     if (mode === "tv" && item.type !== "tvSeries") return tvEpisodeTitle(item);
     return item.title || channel.label;
   }
 
   function channelCardSubtitle(mode, item) {
+    if (mode === "media" && item.type === "tv") return tvEpisodeFileLabel(item);
     if (mode === "tv" && item.type !== "tvSeries") return tvEpisodeFileLabel(item);
     return "";
   }
@@ -444,6 +517,20 @@ export function createChannelViews(context) {
         formatBytes(item.size)
       ];
     }
+    if (mode === "media" && item.type === "tvSeries") {
+      return [
+        item.chapterCount !== null ? `${formatNumber(item.chapterCount)} 集` : "",
+        item.rating ? `豆瓣 ${Number(item.rating).toFixed(1)}` : "",
+        formatBytes(item.size)
+      ];
+    }
+    if (mode === "media" && item.type === "movie") {
+      return [
+        item.rating ? `豆瓣 ${Number(item.rating).toFixed(1)}` : "",
+        item.year || "",
+        formatBytes(item.size)
+      ];
+    }
     return [
       item.ext ? item.ext.toUpperCase() : "",
       formatBytes(item.size),
@@ -474,13 +561,13 @@ export function createChannelViews(context) {
       if (filters.category && filters.category !== "all") params.set("category", filters.category);
       if (filters.person && filters.person !== "all") params.set("person", filters.person);
       if (filters.collection) params.set("collection", filters.collection);
-    } else if (["western", "movie", "tv"].includes(mode)) {
+    } else if (["western", "media", "movie", "tv"].includes(mode)) {
       if (filters.category && filters.category !== "all") params.set("category", filters.category);
-      if (mode === "tv") {
+      if (mode === "tv" || mode === "media") {
         if (filters.seriesKey) {
           params.set("tvView", "episodes");
           params.set("seriesKey", filters.seriesKey);
-        } else if (filters.tvView === "episodes") {
+        } else if (mode === "tv" && filters.tvView === "episodes") {
           params.set("tvView", "episodes");
         }
       }
@@ -495,7 +582,7 @@ export function createChannelViews(context) {
     if (filters.mode === "photo" && filters.photoView === "collections") {
       return filters.query ? `套图合集：${filters.query}` : "套图合集";
     }
-    if (filters.mode === "tv" && filters.seriesSummary?.title) {
+    if ((filters.mode === "tv" || filters.mode === "media") && filters.seriesSummary?.title) {
       return filters.query ? `${filters.seriesSummary.title}：${filters.query}` : filters.seriesSummary.title;
     }
     if (filters.mode !== "photo" && filters.category && filters.category !== "all") {
@@ -567,14 +654,18 @@ export function createChannelViews(context) {
     return row;
   }
 
-  function createMediaFilterStrip(facets = {}, state = {}) {
+  function createMediaFilterStrip(facets = {}, state = {}, sortOptions = null) {
     const wrap = document.createElement("div");
     wrap.className = "channel-filter-wrap";
     const categories = facets.categories || [];
     if (categories.length) {
       wrap.append(createFacetRow("分类", categories, state.category || "all", (value) => updateChannelParams({ category: value === "all" ? "" : value })));
     }
-    wrap.append(createSortRow(state.sort || "updated"));
+    wrap.append(createSortRow(state.sort || "updated", sortOptions || [
+      { value: "updated", label: "最近" },
+      { value: "title", label: "标题" },
+      { value: "size", label: "大小" }
+    ]));
     return wrap;
   }
 
@@ -602,8 +693,8 @@ export function createChannelViews(context) {
     text.textContent = summary?.title ? `${summary.title} · ${parts.join(" · ")}` : parts.join(" · ") || "当前剧集";
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = "返回剧集";
-    button.addEventListener("click", () => updateChannelParams({ tvView: "series", seriesKey: "", query: "" }));
+    button.textContent = state.mode === "media" ? "返回影视" : "返回剧集";
+    button.addEventListener("click", () => updateChannelParams({ mode: state.mode || "tv", tvView: "series", seriesKey: "", query: "" }));
     row.append(text, button);
     return row;
   }
@@ -983,7 +1074,7 @@ export function createChannelViews(context) {
     const mediaId = String(id || "").trim();
     const path = mediaDetailPath(mediaId);
     const activeUrl = getActiveUrl();
-    const loadingMode = ["western", "movie", "tv"].includes(normalizeChannelMode(initialMode))
+    const loadingMode = ["western", "media", "movie", "tv"].includes(normalizeChannelMode(initialMode))
       ? normalizeChannelMode(initialMode)
       : "movie";
     const loadingChannel = channelConfig(loadingMode);
@@ -1026,13 +1117,14 @@ export function createChannelViews(context) {
   function renderGalleryMedia(item = {}, cacheEntry = null) {
     const mode = normalizeChannelMode(item.mediaKind || item.type);
     const channel = channelConfig(mode);
+    const bottomMode = mode === "movie" || mode === "tv" ? "media" : mode;
     const streamUrl = absoluteUrl(getActiveUrl(), item.streamUrl);
     const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
     const meta = [item.ext ? item.ext.toUpperCase() : "", formatBytes(item.size), item.exists === false ? "文件不可用" : ""]
       .filter(Boolean)
       .join(" · ");
 
-    setActiveBottom(mode);
+    setActiveBottom(bottomMode);
     if (els.contentPanel) els.contentPanel.dataset.channelMode = mode;
     els.viewKicker.textContent = [channel.label, item.seriesName || item.category].filter(Boolean).join(" · ");
     els.viewTitle.textContent = mediaDisplayTitle(item, channel);
@@ -1080,6 +1172,13 @@ export function createChannelViews(context) {
       return [mediaSeriesTitle(item, channel), tvEpisodeDisplayTitle(item)].filter(Boolean).join(" · ") || item.title || channel.label;
     }
     return item.seriesName || item.category || item.personName || item.title || channel.label;
+  }
+
+  function mediaDetailModeForItem(mode, item = {}) {
+    if (mode !== "media") return mode;
+    if (item.type === "movie" || item.mediaKind === "movie") return "movie";
+    if (item.type === "tv" || item.mediaKind === "tv") return "tv";
+    return mode;
   }
 
   function createMediaPlayerPanel(item = {}, streamUrl = "", channel = CHANNELS.movie) {
@@ -1657,6 +1756,10 @@ export function createChannelViews(context) {
     channelLabel: (mode) => channelConfig(mode).label
   };
 }
+
+
+
+
 
 
 

@@ -61,7 +61,7 @@ export function createGalleryPage(deps) {
       });
       return;
     }
-    if (["western", "movie", "tv"].includes(route.galleryMode) && route.galleryMediaId) {
+    if (["western", "media", "movie", "tv"].includes(route.galleryMode) && route.galleryMediaId) {
       await openGalleryMedia(route.galleryMediaId, { skipRoute: true });
     }
   }

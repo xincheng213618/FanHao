@@ -1,4 +1,4 @@
-import { postJson } from "./api.js?v=20260701-novel-reader-05";
+import { postJson } from "./api.js?v=20260702-novel-local-manage-74";
 import { formatBytes, formatNumber } from "./format.js";
 import { absoluteUrl } from "./image.js";
 
@@ -30,7 +30,7 @@ export function createToolViews(context) {
     activeGuard = isActive;
     setActiveBottom("tools");
     els.viewKicker.textContent = "小工具";
-    els.viewTitle.textContent = "TXT 文档格式化";
+    els.viewTitle.textContent = "工具箱";
     renderMeta();
     renderBody();
   }
@@ -38,6 +38,7 @@ export function createToolViews(context) {
   function renderMeta() {
     const bytes = inputBytes();
     const parts = [
+      "开源小游戏 2 个",
       bytes ? `输入 ${formatBytes(bytes)}` : "等待输入",
       state.result?.size ? `输出 ${formatBytes(state.result.size)}` : "",
       state.result ? "保留 10 分钟" : ""
@@ -49,8 +50,61 @@ export function createToolViews(context) {
     els.viewContent.innerHTML = "";
     const panel = document.createElement("section");
     panel.className = "txt-native-tool";
-    panel.append(createMetrics(), createInputPanel(), createOptions(), createActions(), createStatus(), createResult());
+    panel.append(createGameLauncher(), createMetrics(), createInputPanel(), createOptions(), createActions(), createStatus(), createResult());
     els.viewContent.append(panel);
+  }
+
+  function createGameLauncher() {
+    const wrap = document.createElement("section");
+    wrap.className = "tool-launch-grid";
+    wrap.append(
+      createLaunchCard({
+        title: "2048 AI Engine",
+        meta: "game-difficulty · GPL-3.0",
+        detail: "带 WASM AI，可手玩、一步建议或自动运行。",
+        action: "开始",
+        onClick: () => {
+          window.location.assign("./games/2048/index.html");
+        }
+      }),
+      createLaunchCard({
+        title: "华容道",
+        meta: "jeantimex · source",
+        detail: "经典滑块关卡，带 AI 自动解，离线点按游玩。",
+        action: "开始",
+        onClick: () => {
+          window.location.assign("./games/huarongdao/index.html#/game");
+        }
+      })
+    );
+    return wrap;
+  }
+
+  function createLaunchCard(item) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "tool-launch-card";
+    button.addEventListener("click", item.onClick);
+
+    const body = document.createElement("span");
+    body.className = "tool-launch-body";
+
+    const title = document.createElement("strong");
+    title.textContent = item.title;
+
+    const meta = document.createElement("span");
+    meta.textContent = item.meta;
+
+    const detail = document.createElement("small");
+    detail.textContent = item.detail;
+
+    const action = document.createElement("span");
+    action.className = "tool-launch-action";
+    action.textContent = item.action;
+
+    body.append(title, meta, detail);
+    button.append(body, action);
+    return button;
   }
 
   function createMetrics() {
@@ -429,6 +483,10 @@ function readStoredFlag(key, fallback) {
   if (value === null) return fallback;
   return value === "1" || value === "true";
 }
+
+
+
+
 
 
 

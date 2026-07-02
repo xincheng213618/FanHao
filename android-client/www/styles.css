@@ -1,9 +1,13 @@
-@import "./css/base.css";
-@import "./css/sections.css";
-@import "./css/lists.css";
-@import "./css/novels.css?v=20260701-novel-reader-05";
-@import "./css/settings-nav.css";
-@import "./css/media-viewer.css";
+@import "./css/base.css?v=20260702-novel-local-manage-74";
+@import "./css/sections.css?v=20260702-novel-local-manage-74";
+@import "./css/lists.css?v=20260702-novel-local-manage-74";
+@import "./css/novels.css?v=20260702-novel-local-manage-74";
+@import "./css/settings-nav.css?v=20260702-novel-local-manage-74";
+@import "./css/media-viewer.css?v=20260702-novel-local-manage-74";
+
+
+
+
 
 
 

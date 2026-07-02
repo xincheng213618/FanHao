@@ -1,4 +1,4 @@
-import { fetchJson, postJson } from "./api.js?v=20260701-novel-reader-05";
+import { fetchJson, postJson } from "./api.js?v=20260702-novel-local-manage-74";
 import { formatBytes, formatNumber, formatTime } from "./format.js";
 import { absoluteUrl } from "./image.js";
 import { createDetailSectionTitle, revealDetailBlock } from "./detail-ui.js";
@@ -444,6 +444,10 @@ export function createAndroidVideoSection(context) {
     playDefaultVideo
   };
 }
+
+
+
+
 
 
 

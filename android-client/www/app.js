@@ -1,19 +1,19 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260701-novel-reader-05";
-import { fetchJson } from "./js/api.js?v=20260701-novel-reader-05";
-import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260701-novel-reader-05";
-import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260701-novel-reader-05";
-import { createChannelViews } from "./js/channel-views.js?v=20260701-novel-reader-05";
-import { createDetailViews } from "./js/detail-views.js?v=20260701-novel-reader-05";
-import { getElements } from "./js/dom.js?v=20260701-novel-reader-05";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260702-novel-local-manage-74";
+import { fetchJson } from "./js/api.js?v=20260702-novel-local-manage-74";
+import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260702-novel-local-manage-74";
+import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
+import { createChannelViews } from "./js/channel-views.js?v=20260702-novel-local-manage-74";
+import { createDetailViews } from "./js/detail-views.js?v=20260702-novel-local-manage-74";
+import { getElements } from "./js/dom.js?v=20260702-novel-local-manage-74";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
-import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260701-novel-reader-05";
-import { createMediaViewer } from "./js/media-viewer.js?v=20260701-novel-reader-05";
-import { createNovelViews } from "./js/novel-views.js?v=20260701-novel-reader-05";
+import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260702-novel-local-manage-74";
+import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
+import { createNovelViews } from "./js/novel-views.js?v=20260702-novel-local-manage-74";
 import { createPeopleViews } from "./js/people-views.js";
-import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260701-novel-reader-05";
+import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
-import { createToolViews } from "./js/tool-views.js?v=20260701-novel-reader-05";
-import { createWorkViews } from "./js/work-views.js?v=20260701-novel-reader-05";
+import { createToolViews } from "./js/tool-views.js?v=20260702-novel-local-manage-74";
+import { createWorkViews } from "./js/work-views.js?v=20260702-novel-local-manage-74";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
@@ -26,6 +26,14 @@ const FANHAO_TOP_TABS = [
   { label: "榜单", view: "rankings" },
   { label: "人物", view: "people" },
   { label: "收藏", view: "favorites" }
+];
+const NOVEL_TOP_TABS = [
+  { label: "本地", value: "local", dataset: { novelSource: "local" } },
+  { label: "远端", value: "bookstore", dataset: { novelSource: "bookstore" } }
+];
+const MEDIA_TOP_TABS = [
+  { label: "电影", value: "movie", dataset: { mediaBranch: "movie" } },
+  { label: "电视剧", value: "tv", dataset: { mediaBranch: "tv" } }
 ];
 const DEFAULT_PHOTO_CATEGORY = "我喜欢的";
 const PHOTO_TOP_CATEGORY_PRIORITY = [
@@ -50,6 +58,7 @@ const PRIMARY_LABELS = {
   photo: "套图",
   manga: "套图",
   western: "欧美",
+  media: "影视",
   movie: "电影",
   tv: "电视剧",
   novels: "小说",
@@ -160,7 +169,7 @@ function sanitizeViewParams(view, params = {}) {
     const mode = normalizeChannelMode(params.mode || params.type);
     return {
       id: String(params.id || ""),
-      ...(mode && ["western", "movie", "tv"].includes(mode) ? { mode } : {})
+      ...(mode && ["western", "media", "movie", "tv"].includes(mode) ? { mode } : {})
     };
   }
   if (view === "channel") {
@@ -175,16 +184,17 @@ function sanitizeViewParams(view, params = {}) {
     const person = String(params.person || "").trim();
     const seriesKey = String(params.seriesKey || "").trim();
     const rawSort = String(params.sort || "").trim();
-    const sort = normalizeChannelSort(rawSort || (mode === "tv" && seriesKey ? "title" : ""));
+    const isSeriesMode = mode === "tv" || mode === "media";
+    const sort = normalizeChannelSort(rawSort || (isSeriesMode && seriesKey ? "title" : ""));
     return {
       mode,
       ...(query ? { query } : {}),
       ...(sort !== "updated" ? { sort } : {}),
       ...(mode === "photo" ? { photoView: collection ? "albums" : photoView } : {}),
       ...(mode === "tv" && tvView === "episodes" && !seriesKey ? { tvView } : {}),
-      ...(mode === "tv" && seriesKey ? { tvView: "episodes", seriesKey } : {}),
+      ...(isSeriesMode && seriesKey ? { tvView: "episodes", seriesKey } : {}),
       ...(mode === "photo" && category ? { category } : {}),
-      ...(["western", "movie", "tv"].includes(mode) && category && category !== "all" ? { category } : {}),
+      ...(["western", "media", "movie", "tv"].includes(mode) && category && category !== "all" ? { category } : {}),
       ...(mode === "photo" && person && person !== "all" ? { person } : {}),
       ...(mode === "photo" && collection ? { collection } : {})
     };
@@ -200,7 +210,8 @@ function normalizeChannelSort(value) {
 function normalizeChannelMode(value) {
   const mode = String(value || "").trim();
   if (mode === "movies") return "movie";
-  return ["photo", "manga", "western", "movie", "tv"].includes(mode) ? mode : "";
+  if (["video", "videos", "screen", "film", "films"].includes(mode)) return "media";
+  return ["photo", "manga", "western", "media", "movie", "tv"].includes(mode) ? mode : "";
 }
 
 function readViewStateFromHash(hash = window.location.hash) {
@@ -354,6 +365,10 @@ function sameViewParams(a = {}, b = {}) {
 
 function currentScrollY() {
   return Math.max(0, Math.round(window.scrollY || document.documentElement.scrollTop || 0));
+}
+
+function scrollToTopInstant() {
+  window.scrollTo({ top: 0, behavior: "auto" });
 }
 
 function queueScrollRestore(value = 0) {
@@ -537,24 +552,22 @@ function omniChannels(summary = {}) {
       mode: "western"
     },
     {
-      label: "电影",
-      value: formatCompact(totals.movies),
-      unit: "影片",
-      detail: mediaRootText(summary, "movie"),
-      mode: "movie"
+      label: "影视",
+      value: formatCompact(Number(totals.movies || 0) + Number(totals.tv || 0)),
+      unit: "作品",
+      detail: [
+        totals.movies ? `${formatCompact(totals.movies)} 电影` : "",
+        totals.tv ? `${formatCompact(totals.tv)} 集` : "",
+        mediaRootText(summary, "movie"),
+        mediaRootText(summary, "tv")
+      ].filter(Boolean).join(" · "),
+      mode: "media"
     },
     {
-      label: "电视剧",
-      value: formatCompact(totals.tv),
-      unit: "集",
-      detail: mediaRootText(summary, "tv"),
-      mode: "tv"
-    },
-    {
-      label: "TXT 工具",
-      value: "排版",
+      label: "小工具",
+      value: "4",
       unit: "工具",
-      detail: "小说文本整理",
+      detail: "开源小游戏 / TXT 排版",
       view: "tools"
     }
   ];
@@ -618,8 +631,11 @@ function syncChannelCounts(summary = imageLibrarySummary) {
       : "图包 / 韩漫";
   }
   if (els.channelWesternCount) els.channelWesternCount.textContent = totals.western ? `${formatCompact(totals.western)} 视频` : "视频";
-  if (els.channelMovieCount) els.channelMovieCount.textContent = totals.movies ? `${formatCompact(totals.movies)} 影片` : "影片";
-  if (els.channelTvCount) els.channelTvCount.textContent = totals.tv ? `${formatCompact(totals.tv)} 集` : "剧集";
+  if (els.channelMediaCount) {
+    els.channelMediaCount.textContent = totals.movies || totals.tv
+      ? [`${formatCompact(totals.movies || 0)} 电影`, `${formatCompact(totals.tv || 0)} 集`].join(" · ")
+      : "电影 / 电视剧";
+  }
   syncNovelCounts();
 }
 
@@ -909,8 +925,8 @@ function openNativeLibraryRoute(options = {}) {
     showView("novels", {}, navigation);
     return true;
   }
-  if (first === "western" || first === "movie" || first === "movies" || first === "tv") {
-    const mode = first === "movies" ? "movie" : first;
+  if (first === "western" || first === "media" || first === "video" || first === "videos" || first === "movie" || first === "movies" || first === "tv") {
+    const mode = first === "movies" ? "movie" : normalizeChannelMode(first);
     if (segments[1]) {
       showView("mediaDetail", { id: segments[1], mode }, navigation);
       return true;
@@ -1183,7 +1199,7 @@ function showSettings(options = {}) {
 }
 
 function showView(view, params = {}, navigation = {}) {
-  if (!library && view !== "home" && view !== "tools") {
+  if (!library && !canRenderWithoutLibrary(view)) {
     toggleSettings(true);
     return;
   }
@@ -1204,6 +1220,14 @@ function showView(view, params = {}, navigation = {}) {
   else if (navigation.replaceHistory) replaceCurrentHistory();
   renderCurrentView();
   queueScrollRestore(navigation.restoreScrollY ?? 0);
+}
+
+function canRenderWithoutLibrary(view = "") {
+  return view === "home"
+    || view === "tools"
+    || view === "novels"
+    || view === "novelDetail"
+    || view === "novelReader";
 }
 
 function defaultWorksLimitForView(view) {
@@ -1261,7 +1285,7 @@ function applyBackState() {
 
 function exitNovelReader() {
   const id = String(currentViewParams.id || "");
-  if (id && !id.startsWith("local:")) {
+  if (id) {
     showView("novelDetail", { id }, { skipHistory: true, replaceHistory: true });
     return;
   }
@@ -1416,6 +1440,7 @@ function syncContentPanelMode() {
   els.contentPanel.dataset.view = currentView;
   els.contentPanel.dataset.feedView = FEED_VIEWS.has(currentView) ? "true" : "false";
   els.contentPanel.dataset.channelMode = currentView === "channel" ? normalizeChannelMode(currentViewParams.mode) : "";
+  document.body.classList.toggle("novel-library-view", isNovelNavigationView(currentView) && currentView !== "novelReader");
   document.body.classList.toggle("novel-reader-view", currentView === "novelReader");
   dispatchAppViewChanged();
 }
@@ -1452,6 +1477,16 @@ function toggleSettings(force) {
   else showHome();
 }
 
+function showPrimaryView(view, navigation = {}) {
+  if (view === "novels") novelViews?.focusLocalSource?.();
+  showView(view, {}, navigation);
+}
+
+function primaryChannelMode(mode) {
+  const normalized = normalizeChannelMode(mode);
+  return normalized === "media" ? "movie" : normalized;
+}
+
 function isRootNavigationView(view = currentView) {
   return FANHAO_ROOT_VIEWS.has(view) || view === "channel" || view === "novels";
 }
@@ -1472,6 +1507,11 @@ function syncFanhaoSectionNav() {
     return;
   }
 
+  if (currentView === "channel" && isMediaBranchMode(currentViewParams.mode)) {
+    renderMediaTopBranchTabs(currentViewParams.mode);
+    return;
+  }
+
   if (currentView === "channel" && normalizeChannelMode(currentViewParams.mode) === "tv") {
     renderTvTopCategoryTabs(currentViewParams.category || "all");
     return;
@@ -1479,6 +1519,11 @@ function syncFanhaoSectionNav() {
 
   if (currentView === "channel" && normalizeChannelMode(currentViewParams.mode) === "photo") {
     renderPhotoCategoryTabs(currentViewParams.category || DEFAULT_PHOTO_CATEGORY);
+    return;
+  }
+
+  if (currentView === "novels" || currentView === "novelDetail" || currentView === "novelReader") {
+    renderNovelTopSourceTabs();
     return;
   }
 
@@ -1493,14 +1538,18 @@ function hideTopSecondaryNav() {
 
 function renderTopSecondaryTabs(tabs = [], activeValue = "") {
   if (!els.fanhaoSectionNav) return;
-  els.fanhaoSectionNav.dataset.secondaryKind = tabs.some((tab) => tab.dataset?.tvCategory)
-    ? "tv"
-    : tabs.some((tab) => tab.dataset?.photoCategory)
-      ? "photo"
-      : "fanhao";
+  els.fanhaoSectionNav.dataset.secondaryKind = secondaryKindForTabs(tabs);
   els.fanhaoSectionNav.replaceChildren(...tabs.map((tab) => createTopSecondaryButton(tab, activeValue)));
   els.fanhaoSectionNav.hidden = false;
   if (els.topPrimaryLabel) els.topPrimaryLabel.hidden = true;
+}
+
+function secondaryKindForTabs(tabs = []) {
+  if (tabs.some((tab) => tab.dataset?.tvCategory)) return "tv";
+  if (tabs.some((tab) => tab.dataset?.photoCategory)) return "photo";
+  if (tabs.some((tab) => tab.dataset?.mediaBranch)) return "media";
+  if (tabs.some((tab) => tab.dataset?.novelSource)) return "novel";
+  return "fanhao";
 }
 
 function createTopSecondaryButton(tab, activeValue) {
@@ -1525,6 +1574,23 @@ function renderTvTopCategoryTabs(activeCategory = "all") {
 function renderPhotoCategoryTabs(activeCategory = DEFAULT_PHOTO_CATEGORY) {
   const active = activeCategory || DEFAULT_PHOTO_CATEGORY;
   renderTopSecondaryTabs(photoTopCategoryTabs(active), active);
+}
+
+function renderNovelTopSourceTabs() {
+  renderTopSecondaryTabs(NOVEL_TOP_TABS, novelViews?.getLibrarySource?.() || "local");
+}
+
+function isNovelNavigationView(view = currentView) {
+  return view === "novels" || view === "novelDetail" || view === "novelReader";
+}
+
+function renderMediaTopBranchTabs(activeMode = "movie") {
+  renderTopSecondaryTabs(MEDIA_TOP_TABS, normalizeChannelMode(activeMode) === "tv" ? "tv" : "movie");
+}
+
+function isMediaBranchMode(mode) {
+  const normalized = normalizeChannelMode(mode);
+  return normalized === "media" || normalized === "movie" || normalized === "tv";
 }
 
 function photoTopCategoryTabs(activeCategory = DEFAULT_PHOTO_CATEGORY) {
@@ -1583,6 +1649,12 @@ function setTopSecondaryTabs(kind, options = {}) {
     }
     return;
   }
+  if (kind === "media") {
+    if (currentView === "channel" && isMediaBranchMode(currentViewParams.mode)) {
+      renderMediaTopBranchTabs(options.mode || currentViewParams.mode || "movie");
+    }
+    return;
+  }
   syncFanhaoSectionNav();
 }
 
@@ -1590,12 +1662,16 @@ function bottomNavKeyFor(name = currentView, params = currentViewParams) {
   const view = String(name || currentView || "").trim();
   if (view === "channel") {
     const mode = normalizeChannelMode(params.mode);
-    return mode === "manga" ? "photo" : mode;
+    if (mode === "manga") return "photo";
+    if (mode === "movie" || mode === "tv") return "media";
+    return mode;
   }
   if (view === "photo" || view === "photoDetail") return "photo";
   if (view === "manga" || view === "mangaDetail" || view === "mangaChapter") return "photo";
   if (view === "novels" || view === "novelDetail" || view === "novelReader") return "novels";
-  if (view === "western" || view === "movie" || view === "tv") return view;
+  if (view === "tools") return "tools";
+  if (view === "western" || view === "media") return view;
+  if (view === "movie" || view === "tv") return "media";
   if (FANHAO_SECTION_VIEWS.has(view) || view === "home" || view === "search") return "fanhao";
   return "";
 }
@@ -1800,6 +1876,11 @@ searchHistory = createSearchHistory({
 });
 
 window.addEventListener("popstate", (event) => restoreFromHistoryState(event.state));
+window.addEventListener("fanhaoNovelSourceChanged", () => {
+  if (isNovelNavigationView()) {
+    renderNovelTopSourceTabs();
+  }
+});
 
 window.fanhaoHandleNativeBack = () => {
   if (mediaViewer?.close()) return true;
@@ -1832,7 +1913,7 @@ els.viewBack.addEventListener("click", goBack);
 els.openLibraryButton.addEventListener("click", () => {
   els.settingsPanel.hidden = true;
   showView("people", {}, { resetStack: true });
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  scrollToTopInstant();
 });
 
 els.searchForm.addEventListener("submit", (event) => {
@@ -1926,11 +2007,11 @@ for (const button of els.openTargets) {
   if (button.closest(".bottom-nav") || button.closest("#fanhaoSectionNav")) continue;
   button.addEventListener("click", () => {
     if (button.dataset.openView) {
-      showView(button.dataset.openView, {}, { resetStack: true });
+      showPrimaryView(button.dataset.openView, { resetStack: true });
       return;
     }
     if (button.dataset.openChannel) {
-      showView("channel", { mode: button.dataset.openChannel }, { resetStack: true });
+      showView("channel", { mode: primaryChannelMode(button.dataset.openChannel) }, { resetStack: true });
       return;
     }
     openInLibrary(button.dataset.openUrl || "/");
@@ -1943,7 +2024,7 @@ els.fanhaoSectionNav?.addEventListener("click", (event) => {
   if (button.dataset.fanhaoView) {
     const view = button.dataset.fanhaoView || DEFAULT_VIEW;
     showView(view, {}, { resetStack: true });
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    scrollToTopInstant();
     return;
   }
   if (button.dataset.tvCategory) {
@@ -1960,7 +2041,7 @@ els.fanhaoSectionNav?.addEventListener("click", (event) => {
       },
       { skipHistory: true, replaceHistory: true }
     );
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    scrollToTopInstant();
     return;
   }
   if (button.dataset.photoCategory) {
@@ -1978,7 +2059,26 @@ els.fanhaoSectionNav?.addEventListener("click", (event) => {
       },
       { skipHistory: true, replaceHistory: true }
     );
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    scrollToTopInstant();
+    return;
+  }
+  if (button.dataset.novelSource) {
+    novelViews?.setLibrarySource?.(button.dataset.novelSource);
+    if (currentView === "novels") {
+      renderCurrentView();
+      scrollToTopInstant();
+    } else if (isNovelNavigationView()) {
+      showView("novels", {}, { resetStack: true });
+      scrollToTopInstant();
+    } else {
+      showView("novels", {}, { resetStack: true });
+      scrollToTopInstant();
+    }
+  }
+  if (button.dataset.mediaBranch) {
+    showView("channel", { mode: button.dataset.mediaBranch }, { resetStack: true });
+    scrollToTopInstant();
+    return;
   }
 });
 
@@ -1992,19 +2092,19 @@ for (const button of els.bottomNav) {
     if (button.dataset.fanhaoHome !== undefined) {
       els.settingsPanel.hidden = true;
       showView(DEFAULT_VIEW, {}, { resetStack: true });
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      scrollToTopInstant();
       return;
     }
     if (button.dataset.openView) {
       els.settingsPanel.hidden = true;
-      showView(button.dataset.openView, {}, { resetStack: true });
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      showPrimaryView(button.dataset.openView, { resetStack: true });
+      scrollToTopInstant();
       return;
     }
     if (button.dataset.openChannel) {
       els.settingsPanel.hidden = true;
-      showView("channel", { mode: button.dataset.openChannel }, { resetStack: true });
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      showView("channel", { mode: primaryChannelMode(button.dataset.openChannel) }, { resetStack: true });
+      scrollToTopInstant();
       return;
     }
   });
@@ -2017,6 +2117,10 @@ for (const button of els.themeButtons) {
 updateServer(activeUrl);
 updateCacheStatus();
 loadDashboard();
+
+
+
+
 
 
 

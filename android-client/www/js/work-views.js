@@ -1,6 +1,6 @@
-import { fetchJson } from "./api.js?v=20260701-novel-reader-05";
-import { enhanceAutoLoadMore } from "./auto-load.js?v=20260701-novel-reader-05";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js?v=20260701-novel-reader-05";
+import { fetchJson } from "./api.js?v=20260702-novel-local-manage-74";
+import { enhanceAutoLoadMore } from "./auto-load.js?v=20260702-novel-local-manage-74";
+import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js?v=20260702-novel-local-manage-74";
 import { formatBytes, formatDate, formatNumber } from "./format.js";
 import { absoluteUrl, imageUrlForWork, loadPreviewImage, precacheImage } from "./image.js";
 import { createWorkListState } from "./work-filtering.js";
@@ -16,9 +16,32 @@ const SEARCH_CHANNELS = [
   { key: "photo", label: "套图", mode: "photo", unit: "图包" },
   { key: "manga", label: "套图 · 韩漫", mode: "manga", unit: "部" },
   { key: "western", label: "欧美", mode: "western", unit: "视频" },
-  { key: "movie", label: "电影", mode: "movie", unit: "影片" },
-  { key: "tv", label: "电视剧", mode: "tv", unit: "集" }
+  { key: "media", label: "影视", mode: "media", unit: "作品" }
 ];
+
+function workDataSignature(data = {}) {
+  const works = Array.isArray(data.works) ? data.works : [];
+  const folders = Array.isArray(data.folders) ? data.folders : [];
+  return JSON.stringify({
+    total: Number(data.total || works.length),
+    selectedFolderId: data.selectedFolderId || "",
+    facets: data.facets || null,
+    folders: folders.map((folder) => [folder.id || "", folder.name || "", folder.count || 0]),
+    works: works.map((work) => [
+      work.id || "",
+      work.title || "",
+      work.directoryName || "",
+      work.modifiedAt || "",
+      work.favorite ? 1 : 0,
+      work.progress || 0,
+      work.missingLocal ? 1 : 0,
+      work.infoSummary?.rating || "",
+      work.infoSummary?.ratingCount || 0,
+      work.infoSummary?.releaseDate || "",
+      work.ranking?.rankNo || ""
+    ])
+  });
+}
 
 export function createWorkViews(context) {
   const {
@@ -102,8 +125,9 @@ export function createWorkViews(context) {
     const path = isFavorites ? favoriteCollectionPath() : "/api/history";
     const activeUrl = getActiveUrl();
     let renderedCache = false;
+    let renderedCacheSignature = "";
 
-    const renderCollectionData = (data, cacheEntry = null) => {
+    const applyCollectionHeader = (data, cacheEntry = null) => {
       const works = data.works || [];
       if (isFavorites && data.selectedFolderId) selectedFavoriteFolderId = data.selectedFolderId;
       const folder = isFavorites ? favoriteFolderById(data.folders || [], selectedFavoriteFolderId) : null;
@@ -112,6 +136,10 @@ export function createWorkViews(context) {
       els.viewMeta.textContent = isFavorites && folder
         ? `${formatNumber(works.length)} / ${formatNumber(folder.count || works.length)} 个作品${suffix}`
         : `${formatNumber(works.length)} 个作品${suffix}`;
+    };
+
+    const renderCollectionData = (data, cacheEntry = null) => {
+      applyCollectionHeader(data, cacheEntry);
       els.viewContent.innerHTML = "";
       if (isFavorites) renderFavoriteFolderStrip(data.folders || []);
       if (isFavorites) renderFavoriteExtras();
@@ -122,6 +150,7 @@ export function createWorkViews(context) {
     if (!isActive()) return;
     if (cached?.payload) {
       renderedCache = true;
+      renderedCacheSignature = workDataSignature(cached.payload);
       renderCollectionData(cached.payload, cached);
     }
 
@@ -129,6 +158,10 @@ export function createWorkViews(context) {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
       writeCachedJson(activeUrl, path, data).catch(() => {});
       if (!isActive()) return;
+      if (renderedCache && workDataSignature(data) === renderedCacheSignature) {
+        applyCollectionHeader(data);
+        return;
+      }
       renderCollectionData(data);
     } catch (error) {
       if (!isActive()) return;
@@ -196,12 +229,19 @@ export function createWorkViews(context) {
     const path = `/api/works?limit=${limit}&offset=0&sort=${encodeURIComponent(serverSort)}&filter=${encodeURIComponent(serverFilter)}`;
     const activeUrl = getActiveUrl();
     let renderedCache = false;
+    let renderedCacheSignature = "";
 
-    const renderWorksData = (data, cacheEntry = null) => {
+    const applyWorksHeader = (data, cacheEntry = null) => {
       const works = data.works || [];
       const total = Number(data.total || works.length);
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
       els.viewMeta.textContent = `${formatNumber(works.length)} / ${formatNumber(total)} 个作品${suffix}`;
+    };
+
+    const renderWorksData = (data, cacheEntry = null) => {
+      const works = data.works || [];
+      const total = Number(data.total || works.length);
+      applyWorksHeader(data, cacheEntry);
       els.viewContent.innerHTML = "";
       renderWorks(works, "资料库里还没有作品。", { compactMeta: true, facets: data.facets, total });
       if (works.length < total) {
@@ -216,6 +256,7 @@ export function createWorkViews(context) {
     if (!isActive()) return;
     if (cached?.payload) {
       renderedCache = true;
+      renderedCacheSignature = workDataSignature(cached.payload);
       renderWorksData(cached.payload, cached);
     }
 
@@ -223,6 +264,10 @@ export function createWorkViews(context) {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
       writeCachedJson(activeUrl, path, data).catch(() => {});
       if (!isActive()) return;
+      if (renderedCache && workDataSignature(data) === renderedCacheSignature) {
+        applyWorksHeader(data);
+        return;
+      }
       renderWorksData(data);
     } catch (error) {
       if (!isActive()) return;
@@ -755,6 +800,12 @@ export function createWorkViews(context) {
         hasNumber(item.imageCount) ? `${formatNumber(item.imageCount)} 张` : ""
       ].filter(Boolean).join(" · ");
     }
+    if (channel.mode === "media" && item.type === "tvSeries") {
+      return ["电视剧", item.category, hasNumber(item.chapterCount) ? `${formatNumber(item.chapterCount)} 集` : "", item.rating ? `豆瓣 ${Number(item.rating).toFixed(1)}` : ""].filter(Boolean).join(" · ");
+    }
+    if (channel.mode === "media" && item.type === "movie") {
+      return ["电影", item.category, item.year, item.rating ? `豆瓣 ${Number(item.rating).toFixed(1)}` : ""].filter(Boolean).join(" · ");
+    }
     return [item.category, item.seriesName || item.personName, formatBytes(item.size)].filter(Boolean).join(" · ");
   }
 
@@ -781,8 +832,13 @@ export function createWorkViews(context) {
       showView("mangaDetail", { id: item.id }, { push: true });
       return;
     }
-    if (["western", "movie", "tv"].includes(channel.mode) && item.id) {
-      showView("mediaDetail", { id: item.id }, { push: true });
+    if (channel.mode === "media" && item.type === "tvSeries") {
+      showView("channel", { mode: "media", seriesKey: item.seriesKey || item.id, category: item.category || "", sort: "title" }, { push: true });
+      return;
+    }
+    if (["western", "media", "movie", "tv"].includes(channel.mode) && item.id) {
+      const itemMode = item.type === "movie" ? "movie" : item.type === "tv" ? "tv" : channel.mode;
+      showView("mediaDetail", { id: item.id, mode: itemMode }, { push: true });
       return;
     }
     if (item.routePath) openInLibrary(item.routePath);
@@ -1137,6 +1193,10 @@ export function createWorkViews(context) {
     renderMessage
   };
 }
+
+
+
+
 
 
 

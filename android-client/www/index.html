@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#f6f7f9" />
     <title>资料库</title>
-    <link rel="stylesheet" href="./styles.css?v=20260701-novel-reader-05" />
+    <link rel="stylesheet" href="./styles.css?v=20260702-novel-local-manage-74" />
   </head>
   <body>
     <main class="app-shell">
@@ -50,13 +50,9 @@
           <strong>欧美</strong>
           <span id="channelWesternCount">视频</span>
         </button>
-        <button type="button" data-open-channel="movie">
-          <strong>电影</strong>
-          <span id="channelMovieCount">影片</span>
-        </button>
-        <button type="button" data-open-channel="tv">
-          <strong>电视剧</strong>
-          <span id="channelTvCount">剧集</span>
+        <button type="button" data-open-channel="media">
+          <strong>影视</strong>
+          <span id="channelMediaCount">电影 / 电视剧</span>
         </button>
       </nav>
 
@@ -93,6 +89,10 @@
         <button type="button" data-open-view="rankings">
           <strong>排行榜</strong>
           <span id="rankingsCount">TOP</span>
+        </button>
+        <button type="button" data-open-view="tools">
+          <strong>小游戏</strong>
+          <span>2 个</span>
         </button>
       </nav>
 
@@ -300,18 +300,22 @@
         <button type="button" data-open-channel="western" data-bottom-key="western">
           <span>欧美</span>
         </button>
-        <button type="button" data-open-channel="movie" data-bottom-key="movie">
-          <span>电影</span>
+        <button type="button" data-open-channel="media" data-bottom-key="media">
+          <span>影视</span>
         </button>
-        <button type="button" data-open-channel="tv" data-bottom-key="tv">
-          <span>电视剧</span>
+        <button type="button" data-open-view="tools" data-bottom-key="tools">
+          <span>游戏</span>
         </button>
       </nav>
     </main>
 
-    <script src="./app.js?v=20260701-novel-reader-05" type="module"></script>
+    <script src="./app.js?v=20260702-novel-local-manage-74" type="module"></script>
   </body>
 </html>
+
+
+
+
 
 
 

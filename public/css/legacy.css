@@ -2988,7 +2988,8 @@ body.gallery-view .gallery-reader-toolbar {
 }
 
 .tool-rail,
-.txt-tool-panel {
+.txt-tool-panel,
+.game-tool-panel {
   min-width: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -3000,6 +3001,7 @@ body.gallery-view .gallery-reader-toolbar {
   top: 92px;
   display: grid;
   gap: 8px;
+  grid-row: span 2;
   padding: 12px;
 }
 
@@ -3033,9 +3035,78 @@ body.gallery-view .gallery-reader-toolbar {
   font-size: 12px;
 }
 
-.txt-tool-panel {
+.txt-tool-panel,
+.game-tool-panel {
   display: grid;
   overflow: hidden;
+}
+
+.game-launch-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 18px;
+}
+
+.game-launch-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 118px;
+  border: 1px solid rgba(31, 122, 98, 0.2);
+  border-radius: var(--radius);
+  background: var(--panel-soft);
+  color: var(--ink);
+  padding: 14px;
+  text-decoration: none;
+}
+
+.game-launch-card > span {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.game-launch-card strong,
+.game-launch-card span span,
+.game-launch-card small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.game-launch-card strong {
+  font-size: 19px;
+  line-height: 1.15;
+}
+
+.game-launch-card span span {
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.game-launch-card small {
+  display: -webkit-box;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.game-launch-card b {
+  display: grid;
+  min-width: 58px;
+  min-height: 36px;
+  place-items: center;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
 }
 
 .txt-tool-head {
@@ -5492,8 +5563,13 @@ body.admin-page {
 
   .tool-rail {
     position: static;
+    grid-row: auto;
     grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
+  }
+
+  .game-launch-grid {
+    grid-template-columns: 1fr;
   }
 
   .txt-tool-result-head {

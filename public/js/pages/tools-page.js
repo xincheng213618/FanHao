@@ -23,7 +23,7 @@ export function createToolsPage(deps) {
     const bytes = inputBytes();
     const result = state.txtTool.result;
     const stats = [
-      ["小工具", 1],
+      ["小游戏", 2],
       ["输入", bytes ? formatBytes(bytes) : "待上传"],
       ["输出", result?.size ? formatBytes(result.size) : "-"],
       ["保留", "10 分钟"]
@@ -56,11 +56,11 @@ export function createToolsPage(deps) {
     const railTitle = document.createElement("div");
     railTitle.className = "tool-rail-title";
     railTitle.textContent = "小工具";
-    const railItem = document.createElement("button");
-    railItem.type = "button";
-    railItem.className = "tool-rail-item active";
-    railItem.innerHTML = "<strong>TXT 格式化</strong><span>小说 / 长文本</span>";
-    rail.append(railTitle, railItem);
+    rail.append(
+      railTitle,
+      createRailItem("离线小游戏", "开源项目移植", true),
+      createRailItem("TXT 格式化", "小说 / 长文本", false)
+    );
 
     const panel = document.createElement("article");
     panel.className = "txt-tool-panel";
@@ -86,8 +86,65 @@ export function createToolsPage(deps) {
     body.append(createDropZone(), createEditor(), createOptions(), createActions(), createStatus());
 
     panel.append(head, body, renderResult());
-    hub.append(rail, panel);
+    hub.append(rail, createGamePanel(), panel);
     els.workGrid.append(hub);
+  }
+
+  function createRailItem(title, meta, active) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = `tool-rail-item${active ? " active" : ""}`;
+    item.innerHTML = `<strong>${title}</strong><span>${meta}</span>`;
+    return item;
+  }
+
+  function createGamePanel() {
+    const panel = document.createElement("article");
+    panel.className = "game-tool-panel";
+
+    const head = document.createElement("header");
+    head.className = "txt-tool-head";
+    const copy = document.createElement("div");
+    const eyebrow = document.createElement("div");
+    eyebrow.className = "eyebrow";
+    eyebrow.textContent = "Games";
+    const title = document.createElement("h3");
+    title.textContent = "离线小游戏";
+    const subtitle = document.createElement("p");
+    subtitle.textContent = "不需要电脑端服务，网页端和安卓端都可直接打开。";
+    copy.append(eyebrow, title, subtitle);
+    const badge = document.createElement("span");
+    badge.className = "txt-tool-badge";
+    badge.textContent = "离线";
+    head.append(copy, badge);
+
+    const grid = document.createElement("div");
+    grid.className = "game-launch-grid";
+    grid.append(
+      createGameCard("2048 AI Engine", "game-difficulty/2048EndgameTablebase · GPL-3.0", "带 WASM AI 的 2048 静态版，可手玩、一步建议或自动运行。", "/games/2048/index.html"),
+      createGameCard("华容道", "jeantimex/hua-rong-dao-html", "经典滑块关卡，内置多关卡和 AI 自动解，可离线点按游玩。", "/games/huarongdao/index.html#/game")
+    );
+
+    panel.append(head, grid);
+    return panel;
+  }
+
+  function createGameCard(title, meta, detail, href) {
+    const card = document.createElement("a");
+    card.className = "game-launch-card";
+    card.href = href;
+    const body = document.createElement("span");
+    const name = document.createElement("strong");
+    name.textContent = title;
+    const metaNode = document.createElement("span");
+    metaNode.textContent = meta;
+    const detailNode = document.createElement("small");
+    detailNode.textContent = detail;
+    body.append(name, metaNode, detailNode);
+    const action = document.createElement("b");
+    action.textContent = "打开";
+    card.append(body, action);
+    return card;
   }
 
   function createDropZone() {

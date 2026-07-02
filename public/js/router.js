@@ -1,11 +1,12 @@
 export const URL_VIEW_NAMES = new Set(["people", "favorites", "history", "rankings", "gallery", "novels", "tools"]);
-export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "movie", "tv"]);
+export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "media", "movie", "tv"]);
 export const DEFAULT_GALLERY_PHOTO_CATEGORY = "我喜欢的";
 
 const GALLERY_MODE_PATHS = {
   photo: "/photo",
   manga: "/photo/manga",
   western: "/western",
+  media: "/media",
   movie: "/movies",
   tv: "/tv"
 };
@@ -17,6 +18,9 @@ const PATH_GALLERY_MODES = new Map([
   ["/photo-sets", "photo"],
   ["/manga", "manga"],
   ["/western", "western"],
+  ["/media", "media"],
+  ["/video", "media"],
+  ["/videos", "media"],
   ["/movie", "movie"],
   ["/movies", "movie"],
   ["/tv", "tv"]
@@ -115,7 +119,7 @@ export function routeUrl(route, options = {}) {
     if (next.galleryCategory && shouldWriteGalleryCategory(next)) params.set("category", next.galleryCategory);
     if (next.gallerySubCategory && next.gallerySubCategory !== "all") params.set("subCategory", next.gallerySubCategory);
     if (next.galleryPerson && next.galleryPerson !== "all") {
-      params.set(next.galleryMode === "tv" ? "series" : "person", next.galleryPerson);
+      params.set(["tv", "media"].includes(next.galleryMode) ? "series" : "person", next.galleryPerson);
     }
     if (next.gallerySort && next.gallerySort !== "updated") params.set("sort", next.gallerySort);
   } else if (next.view === "novels") {
@@ -202,7 +206,7 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     galleryQuery: params.get("q") || params.get("search") || "",
     galleryCategory: params.has("category") ? params.get("category") || "all" : galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all",
     gallerySubCategory: params.get("subCategory") || params.get("folder") || "all",
-    galleryPerson: galleryMode === "tv" ? params.get("series") || params.get("person") || "all" : params.get("person") || "all",
+    galleryPerson: ["tv", "media"].includes(galleryMode) ? params.get("series") || params.get("person") || "all" : params.get("person") || "all",
     gallerySort: normalizeGallerySort(params.get("sort")),
     personId: "",
     q: "",
@@ -228,7 +232,7 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
   } else if (galleryMode === "manga") {
     route.galleryComicId = decodeRouteSegment(rest[0] || "");
     route.galleryChapterIndex = decodeRouteSegment(rest[1] || "");
-  } else if (["western", "movie", "tv"].includes(galleryMode)) {
+  } else if (["western", "media", "movie", "tv"].includes(galleryMode)) {
     route.galleryMediaId = decodeRouteSegment(rest[0] || "");
   }
 
@@ -280,7 +284,7 @@ function routePath(route) {
       const chapter = route.galleryChapterIndex ? `/${encodeRouteSegment(route.galleryChapterIndex)}` : "";
       return `${base}/${encodeRouteSegment(route.galleryComicId)}${chapter}`;
     }
-    if (["western", "movie", "tv"].includes(mode) && route.galleryMediaId) {
+    if (["western", "media", "movie", "tv"].includes(mode) && route.galleryMediaId) {
       return `${base}/${encodeRouteSegment(route.galleryMediaId)}`;
     }
     return base;

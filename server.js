@@ -5301,6 +5301,11 @@ function mediaItemsByKind(items, kind) {
   return items.filter((item) => item.mediaKind === kind);
 }
 
+function mediaItemsByKinds(items, kinds = []) {
+  const selected = new Set(kinds);
+  return items.filter((item) => selected.has(item.mediaKind));
+}
+
 function publicGalleryMediaItem(item, tvMetadataByKey = null, movieMetadataById = null) {
   const seriesKey = galleryMediaSeriesKey(item);
   const tvSeries = seriesKey ? publicTvSeriesMetadata(tvMetadataByKey?.get(seriesKey) || tvSeriesMetadataRow(seriesKey)) : null;
@@ -5338,6 +5343,7 @@ function imageLibraryPayload(options = {}) {
   const westernItems = mediaItemsByKind(mediaItems, "western");
   const movieItems = mediaItemsByKind(mediaItems, "movie");
   const tvItems = mediaItemsByKind(mediaItems, "tv");
+  const screenItems = mediaItemsByKinds(mediaItems, ["movie", "tv"]);
   const manga = mangaCacheDirs().map(publicMangaSummary);
   return {
     schemaVersion: 2,
@@ -5363,7 +5369,8 @@ function imageLibraryPayload(options = {}) {
       roots: facetCounts(photoSets, "rootLabel"),
       western: mediaFacets(westernItems),
       movie: mediaFacets(movieItems),
-      tv: mediaFacets(tvItems)
+      tv: mediaFacets(tvItems),
+      media: mediaFacets(screenItems)
     },
     manga,
     photoSets,
@@ -5378,6 +5385,7 @@ function imageLibrarySummaryPayload(options = {}) {
   const westernItems = mediaItemsByKind(mediaItems, "western");
   const movieItems = mediaItemsByKind(mediaItems, "movie");
   const tvItems = mediaItemsByKind(mediaItems, "tv");
+  const screenItems = mediaItemsByKinds(mediaItems, ["movie", "tv"]);
   const manga = mangaCacheDirs().map(publicMangaSummary);
   const cache = imageReaderCacheStatus();
   return {
@@ -5410,7 +5418,8 @@ function imageLibrarySummaryPayload(options = {}) {
       people: facetCounts(photoSets, "personName").slice(0, 12),
       western: mediaFacets(westernItems),
       movie: mediaFacets(movieItems),
-      tv: mediaFacets(tvItems)
+      tv: mediaFacets(tvItems),
+      media: mediaFacets(screenItems)
     }
   };
 }
@@ -5446,6 +5455,19 @@ function imageLibraryItemsPayload(url, options = {}) {
       : filteredPhotoSets.map((item) => publicImageLibraryListItem(item, "photo"));
   } else if (mode === "manga") {
     source = mangaCacheDirs().map((cacheDir) => publicImageLibraryListItem(publicMangaSummary(cacheDir), "manga"));
+  } else if (mode === "media") {
+    const movieSource = mediaItemsByKind(mediaItems, "movie").map((item) => publicImageLibraryListItem(item, item.mediaKind));
+    const tvSource = mediaItemsByKind(mediaItems, "tv").map((item) => publicImageLibraryListItem(item, item.mediaKind));
+    const tvSeriesSource = tvSeriesGroups(tvSource).map(publicTvSeriesListItem).filter(Boolean);
+    const screenWorksSource = [...movieSource, ...tvSeriesSource];
+    facetsSource = screenWorksSource;
+    if (seriesKey) {
+      const categorySource = filterMediaItemsForList(tvSource, { category });
+      source = categorySource.filter((item) => item.seriesKey === seriesKey);
+      seriesSummary = publicTvSeriesListItem(tvSeriesGroups(tvSource).find((group) => group.seriesKey === seriesKey) || null);
+    } else {
+      source = filterMediaItemsForList(screenWorksSource, { category });
+    }
   } else if (["western", "movie", "tv"].includes(mode)) {
     const mediaSource = mediaItemsByKind(mediaItems, mode).map((item) => publicImageLibraryListItem(item, mode));
     const categorySource = filterMediaItemsForList(mediaSource, { category });
@@ -5475,12 +5497,12 @@ function imageLibraryItemsPayload(url, options = {}) {
     query,
     sort,
     photoView: mode === "photo" ? (collection ? "albums" : photoView) : "",
-    tvView: mode === "tv" ? (seriesKey || tvView === "episodes" ? "episodes" : "series") : "",
-    category: ["photo", "western", "movie", "tv"].includes(mode) ? category : "",
+    tvView: mode === "tv" ? (seriesKey || tvView === "episodes" ? "episodes" : "series") : mode === "media" && seriesKey ? "episodes" : "",
+    category: ["photo", "western", "movie", "tv", "media"].includes(mode) ? category : "",
     person: mode === "photo" ? person : "",
     collection: mode === "photo" ? collection : "",
     collectionSummary,
-    seriesKey: mode === "tv" ? seriesKey : "",
+    seriesKey: ["tv", "media"].includes(mode) ? seriesKey : "",
     seriesSummary,
     facets: mode === "photo" ? photoLibraryFacets(facetsSource) : mediaLibraryFacets(facetsSource),
     count: items.length,
@@ -5506,6 +5528,7 @@ function normalizeImageLibraryMode(value) {
   const mode = String(value || "").trim().toLowerCase();
   if (mode === "photos" || mode === "photo-set" || mode === "photo-sets") return "photo";
   if (mode === "movies") return "movie";
+  if (["media", "video", "screen", "film", "films"].includes(mode)) return "media";
   if (["photo", "manga", "western", "movie", "tv"].includes(mode)) return mode;
   return "photo";
 }
@@ -5700,7 +5723,15 @@ function filterImageLibraryItems(items, query) {
       ...(item.movieMetadata?.directors || []),
       ...(item.movieMetadata?.writers || []),
       ...(item.movieMetadata?.actors || []),
-      ...(item.movieMetadata?.genres || [])
+      ...(item.movieMetadata?.genres || []),
+      item.tvSeries?.title,
+      item.tvSeries?.originalTitle,
+      item.tvSeries?.imdbId,
+      ...(item.tvSeries?.aliases || []),
+      ...(item.tvSeries?.directors || []),
+      ...(item.tvSeries?.writers || []),
+      ...(item.tvSeries?.actors || []),
+      ...(item.tvSeries?.genres || [])
     ]
       .filter(Boolean)
       .some((value) => String(value).toLowerCase().includes(needle))

@@ -1,6 +1,6 @@
-import { fetchJson, postJson } from "./api.js?v=20260701-novel-reader-05";
+import { fetchJson, postJson } from "./api.js?v=20260702-novel-local-manage-74";
 import { createAndroidVideoSection } from "./android-player.js";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js?v=20260701-novel-reader-05";
+import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js?v=20260702-novel-local-manage-74";
 import { createDetailSectionTitle } from "./detail-ui.js";
 import { extractWorkCode, formatDate, formatNumber } from "./format.js";
 import { createInfoPreviewSection } from "./info-preview.js";
@@ -953,6 +953,10 @@ export function createDetailViews(context) {
     renderWorkDetail
   };
 }
+
+
+
+
 
 
 

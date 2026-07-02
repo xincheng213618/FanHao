@@ -873,6 +873,7 @@ function productButtonActive(button, view = state.activeView) {
   if (productView === "gallery") {
     const mode = button.dataset.galleryMode || "photo";
     if (mode === "photo") return view === "gallery" && ["photo", "manga"].includes(state.gallery.mode);
+    if (mode === "media") return view === "gallery" && ["media", "movie", "tv"].includes(state.gallery.mode);
     return view === "gallery" && mode === state.gallery.mode;
   }
   return productViewForActiveView(view) === productView;
@@ -948,7 +949,7 @@ function setActiveView(view, options = {}) {
     state.personWorksTotal = 0;
     state.personWorksFacets = null;
     hidePersonProfile();
-    setMainHeader("小工具", "TXT 文档处理");
+    setMainHeader("小工具", "离线小游戏 / TXT 文档处理");
     toolsPage.renderStats();
     toolsPage.renderView();
     syncRouteAfterNavigation(options);

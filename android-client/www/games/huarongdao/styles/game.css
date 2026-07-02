@@ -1,0 +1,208 @@
+/* Styles for game.html */
+.nav, a { cursor: pointer; }
+
+.col-xs-5,
+.col-sm-5,
+.col-md-5,
+.col-lg-5 {
+  position: relative;
+  min-height: 1px;
+  padding-right: 10px;
+  padding-left: 10px;
+}
+
+.col-xs-5 {
+  width: 20%;
+  float: left;
+}
+@media (min-width: 768px) {
+  .col-sm-5 {
+    width: 20%;
+    float: left;
+  }
+}
+@media (min-width: 992px) {
+  .col-md-5 {
+    width: 20%;
+    float: left;
+  }
+}
+@media (min-width: 1200px) {
+  .col-lg-5 {
+    width: 20%;
+    float: left;
+  }
+}
+
+a.thumbnail {
+  text-decoration: none;
+  height: 140px;
+}
+
+a.thumbnail .caption p {
+  font-size: 1em !important;
+}
+
+span.title {
+  font-size: 1.5em;
+  text-decoration: none;
+}
+
+.board-container {
+  width: 340px;
+  position: relative;
+}
+
+.game-wrapper {
+  border-width: 60px 10px 10px 10px;
+  border-style: solid;
+  border-color: #536B75;
+  border-radius: 5px;
+}
+
+.board-game {
+  width: 320px;
+  height: 400px;
+  background-color: white;
+  position: relative;
+}
+
+.game-title {
+  position: absolute;
+  width: 340px;
+  top: 10px;
+  color: #F7F6F6;
+}
+
+.game-door {
+  position: absolute;
+  width: 160px;
+  height: 10px;
+  background-color: white;
+  bottom: 0px;
+  left: 90px;
+}
+
+.board-thumbnail {
+  width: 80px;
+  height: 100px;
+  background-color: white;
+  position: relative;
+}
+
+.level-thumbnail {
+  display: inline-block;
+  width: 100px;
+  height: 140px;
+  margin: 20px 5px;
+}
+
+.tile {
+  border: 1px solid white;
+
+  cursor: pointer;
+
+  position: absolute;
+  transition-property: top, left;
+  transition-duration: 0.1s, 0.1s;
+  transition-timing-function: ease-out;
+
+  -webkit-transform: translateZ(0);
+     -moz-transform: translateZ(0);
+       -o-transform: translateZ(0);
+          transform: translateZ(0);
+
+  -webkit-box-sizing: border-box;
+     -moz-box-sizing: border-box;
+       -o-box-sizing: border-box;
+          box-sizing: border-box;
+
+  -webkit-border-radius: 0 !important;
+     -moz-border-radius: 0 !important;
+       -o-border-radius: 0 !important;
+          border-radius: 0 !important;
+}
+
+.tile.thumbnail {
+  border: 1px solid white;
+}
+
+.t1 {
+  width: 25%;
+  height: 20%;
+  background-color: #2CC283 !important;
+}
+.t1.s0 {
+  background-color: #EE7DA0;
+}
+.t1.s1 {
+  background-color: #A097BD;
+}
+.t1.s2 {
+  background-color: #F98D25;
+}
+.t1.s3 {
+  background-color: #76C2BE;
+}
+.t1.thumbnail {
+  background-color: #2CC283;
+}
+
+.t2 {
+  width: 50%;
+  height: 20%;
+  background-color: #41A5E0 !important;
+}
+.t2.s0 {
+  background-color: #46B6CA;
+}
+.t2.s1 {
+  background-color: #FDB42D;
+}
+.t2.s2 {
+  background-color: #D88E68;
+}
+.t2.s3 {
+  background-color: #ED734E;
+}
+.t2.s4 {
+  background-color: #86ACBB;
+}
+.t2.thumbnail {
+  background-color: #41A5E0 !important;
+}
+
+.t3 {
+  width: 25%;
+  height: 40%;
+  background-color: #FAC458 !important;
+}
+.t3.s0 {
+  background-color: #C794AF;
+}
+.t3.s1 {
+  background-color: #2CC283;
+}
+.t3.s2 {
+  background-color: #99AB43;
+}
+.t3.s3 {
+  background-color: #FDB42D;
+}
+.t3.s4 {
+  background-color: #1D3960;
+}
+.t3.thumbnail {
+  background-color: #FAC458 !important;
+}
+
+.t9 {
+  width: 50%;
+  height: 40%;
+}
+.t9.s0 {
+  background-color: #E63A4F !important;
+}
+
+
+/* end */

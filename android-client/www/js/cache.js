@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=20260701-novel-reader-05";
+import { CLIENT_VERSION } from "./config.js?v=20260702-novel-local-manage-74";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;
@@ -363,6 +363,10 @@ function estimateEntrySize(entry) {
     return JSON.stringify(entry).length;
   }
 }
+
+
+
+
 
 
 

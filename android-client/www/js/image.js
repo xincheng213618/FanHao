@@ -1,4 +1,4 @@
-import { readCachedImage, writeCachedImage } from "./cache.js?v=20260701-novel-reader-05";
+import { readCachedImage, writeCachedImage } from "./cache.js?v=20260702-novel-local-manage-74";
 
 export function absoluteUrl(baseUrl, path) {
   if (!path) return "";
@@ -134,6 +134,10 @@ export function createFallbackCover(name) {
   fallback.textContent = String(name || "?").slice(0, 2);
   return fallback;
 }
+
+
+
+
 
 
 
