@@ -1356,7 +1356,7 @@ const WORK_SORT_OPTIONS = [
 
 const WORK_FILTER_OPTIONS = [
   ["all", "全部"],
-  ["localMarkedA", "A 标记"],
+  ["localMarkedA", "显示A"],
   ["playable", "可播放"],
   ["favorite", "已收藏"],
   ["progress", "有进度"],
@@ -1565,14 +1565,14 @@ function appendLocalMarkerQuickFilters(works, wrap) {
   group.className = "stat-filter-group";
   const heading = document.createElement("span");
   heading.className = "stat-filter-label";
-  heading.textContent = "标记";
+  heading.textContent = "显示";
   group.append(heading);
 
   const button = document.createElement("button");
   button.type = "button";
   button.className = `stat-filter-chip${workFilterIsActive("localMarkedA") ? " active" : ""}`;
-  button.textContent = `A ${formatNumber(count)}`;
-  button.title = "筛选 A 标记作品";
+  button.textContent = `显示A ${formatNumber(count)}`;
+  button.title = "只显示 A 标记作品";
   button.addEventListener("click", () => setLocalMarkerFilter("A"));
   group.append(button);
 
@@ -1591,7 +1591,7 @@ function workFilterLabel(filter) {
     highRating: "高分",
     vr: "VR",
     hasMagnet: "有磁链",
-    localMarkedA: "A 标记",
+    localMarkedA: "显示A",
     missingLocal: "未下载",
     missingCover: "无封面"
   }[filter] || "当前";
@@ -1707,7 +1707,7 @@ function clientWorkMatchesFilter(work, filter) {
     return rating !== null && rating >= 4;
   }
   if (filter === "vr") return isVrWork(work);
-  if (filter === "hasMagnet") return Boolean(work.missingLocal && work.availability?.hasMagnet);
+  if (filter === "hasMagnet") return Boolean(work.availability?.hasMagnet);
   if (filter === "localMarkedA") return (work.localMarkers || []).includes("A");
   if (filter === "missingLocal") return Boolean(work.missingLocal);
   if (filter === "missingCover") return !workCoverUrl(work);
@@ -2577,7 +2577,7 @@ function createLocalMarkerButton(work, marker) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = `local-marker-button${active ? " active" : ""}`;
-  button.textContent = key;
+  button.textContent = localMarkerButtonLabel(key, active);
   button.title = active ? `移除 ${key} 标记` : `添加 ${key} 标记`;
   button.setAttribute("aria-label", button.title);
   button.addEventListener("click", (event) => {
@@ -2585,6 +2585,10 @@ function createLocalMarkerButton(work, marker) {
     toggleWorkLocalMarker(work, key, button);
   });
   return button;
+}
+
+function localMarkerButtonLabel(key, active) {
+  return active ? key : `标记${key}`;
 }
 
 function createFavoriteFolderSelect(work) {
@@ -2613,7 +2617,7 @@ async function toggleWorkLocalMarker(work, marker, button) {
   const originalText = button.textContent;
   const compactButton = button.classList.contains("local-marker-button");
   button.disabled = true;
-  button.textContent = compactButton ? key : (nextEnabled ? "标记中" : "移除中");
+  button.textContent = compactButton ? localMarkerButtonLabel(key, nextEnabled) : (nextEnabled ? "标记中" : "移除中");
   try {
     const data = await api(`/api/works/${encodeURIComponent(work.id)}/local-marker`, {
       method: "POST",
@@ -2771,8 +2775,8 @@ function createInfoChip(text, variant = "") {
 
 function createAvailabilityChips(work) {
   const availability = work.availability || {};
-  if (work.missingLocal && availability.hasMagnet === true) {
-    return [createInfoChip(availability.hasSubtitles ? "中字磁链" : "含磁链", "magnet")];
+  if (availability.hasMagnet === true) {
+    return [createInfoChip(availability.hasSubtitles ? "中字磁链" : "有磁链", "magnet")];
   }
   return [];
 }

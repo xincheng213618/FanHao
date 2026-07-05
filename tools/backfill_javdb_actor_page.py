@@ -6,7 +6,7 @@ import re
 import sqlite3
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -23,6 +23,7 @@ from backfill_javdb_metadata import (  # noqa: E402
     DEFAULT_CHROME_BINARY,
     DEFAULT_DB,
     DEFAULT_LIBRARY_INDEX,
+    DEFAULT_SCRAPER_CONFIG_PATH,
     DEFAULT_SHARED_PROFILE,
     AccessBlockedError,
     JavDbClient,
@@ -31,6 +32,7 @@ from backfill_javdb_metadata import (  # noqa: E402
     blocked_reason,
     ensure_schema as ensure_work_schema,
     extract_work_code,
+    load_scraper_config,
     parse_detail_page,
     render_raw_text,
     upsert_work_cover,
@@ -69,13 +71,28 @@ class ActorMovie:
     release_date: str = ""
     rating: float | None = None
     rating_count: int | None = None
+    has_magnet: bool | None = None
+    is_streamable: bool | None = None
+    has_subtitles: bool | None = None
+    tags: list[str] = field(default_factory=list)
     page_index: int = 0
     position_index: int = 0
+
+
+@dataclass
+class ActorMovieCrawl:
+    html: str
+    profile: dict
+    movies: list[ActorMovie]
+    duplicate_count: int = 0
+    scanned_pages: int = 0
+    stopped_on_existing: bool = False
 
 
 def main() -> None:
     configure_stdout()
     args = parse_args()
+    args.scraper_config_data = load_scraper_config(args.scraper_config)
     library = load_library(args.library_index)
     people = scoped_people(library, args)
     people_by_id = {person.get("id"): person for person in library.get("people", [])}
@@ -143,9 +160,12 @@ def main() -> None:
 
                 try:
                     print(f"[{person_index}/{len(actor_jobs)}] actor {person['name']} -> {actor_url}", flush=True)
-                    actor_html, actor_profile, movies = crawl_actor_movies(client, actor_url, args)
+                    crawl = crawl_actor_movies(client, conn, person, actor_url, args)
+                    actor_html = crawl.html
+                    actor_profile = crawl.profile
+                    movies = crawl.movies
                     if args.write:
-                        stats["written_actor_movies"] += save_actor_movies(conn, person, actor_url, actor_profile, movies, replace=not bool(args.max_pages))
+                        stats["written_actor_movies"] += save_actor_movies(conn, person, actor_url, actor_profile, movies, replace=not incremental_actor_movies(args))
                         if not args.no_cache_images:
                             image_stats = cache_remote_images(
                                 conn,
@@ -157,6 +177,11 @@ def main() -> None:
                             stats["images_skipped"] += image_stats["skipped"]
                             stats["images_failed"] += image_stats["failed"]
                         conn.commit()
+                    print(
+                        f"  actor片单: pages={crawl.scanned_pages} new={len(movies)} "
+                        f"duplicates={crawl.duplicate_count} stop={'Y' if crawl.stopped_on_existing else '-'}",
+                        flush=True,
+                    )
                     if args.write and not args.actor_movies_only and (args.refresh_actor or not job["actor_cached_ok"]):
                         if profile_looks_ready(actor_profile):
                             avatar_bytes, avatar_mime = download_avatar(actor_profile.get("avatar_url", ""), client.get_driver())
@@ -181,6 +206,9 @@ def main() -> None:
                             "javdbUrl": actor_url,
                             "targets": len(targets),
                             "matchedMovies": len(movie_by_code),
+                            "scannedPages": crawl.scanned_pages,
+                            "duplicates": crawl.duplicate_count,
+                            "stoppedOnExisting": crawl.stopped_on_existing,
                             "actorTitle": actor_profile.get("display_name"),
                             "actorPageBytes": len(actor_html.encode("utf-8")),
                             "imagesCached": image_stats["cached"] if args.write and not args.no_cache_images else 0,
@@ -205,6 +233,8 @@ def main() -> None:
         client.close()
 
     print("actor页补全结束: " + json.dumps(stats, ensure_ascii=False), flush=True)
+    if stats["blocked"] or stats["error"]:
+        raise SystemExit(1)
 
 
 def parse_args() -> argparse.Namespace:
@@ -214,6 +244,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile-dir", type=Path, default=DEFAULT_SHARED_PROFILE)
     parser.add_argument("--chrome-binary", type=Path, default=DEFAULT_CHROME_BINARY)
     parser.add_argument("--driver-path", type=Path, default=None)
+    parser.add_argument("--cookie-profile-dir", type=Path, default=None, help="从 Chromium/115Chrome User Data 读取 Cookie 并注入当前 Selenium。")
+    parser.add_argument("--cookie-profile-name", default="Default", help="Cookie 所在的 Chromium profile，默认 Default。")
+    parser.add_argument("--cookie-domain", action="append", default=[], help="只注入这些域名的 Cookie；默认 javdb.com。可重复。")
     parser.add_argument("--proxy", default="http://127.0.0.1:10809")
     parser.add_argument("--no-proxy", action="store_true")
     parser.add_argument("--headless", action="store_true")
@@ -227,6 +260,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refresh", action="store_true", help="忽略已有作品信息/封面缓存。")
     parser.add_argument("--refresh-actor", action="store_true", help="刷新 actor_profiles 头像和资料页映射。")
     parser.add_argument("--actor-movies-only", action="store_true", help="只缓存 actor 页作品列表，用于统计/网站灰色未下载卡片；不进详情页。")
+    parser.add_argument("--incremental-actor-movies", action="store_true", help="增量刷新 actor 片单：页内去重，遇到已有番号停止翻页，保存时不删除旧缓存。")
     parser.add_argument("--write", action="store_true", help="实际写入 SQLite；不加时为 dry-run。")
     parser.add_argument("--no-cache-images", action="store_true", help="只写 URL，不下载 actor 页/详情页图片到 remote_image_cache。")
     parser.add_argument("--no-write-files", action="store_true", help="只写 SQLite，不回写 info.txt 和 cover.* 到作品目录。")
@@ -236,7 +270,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit-people", type=int, default=0, help="最多处理多少个人物；0 不限制。")
     parser.add_argument("--max-pages", type=int, default=0, help="每个 actor 页最多翻多少页；0 表示一直翻到没有下一页。")
     parser.add_argument("--actor-wait-seconds", type=int, default=35)
+    parser.add_argument("--search-wait-seconds", type=int, default=25)
     parser.add_argument("--detail-wait-seconds", type=int, default=35)
+    parser.add_argument("--scraper-config", type=Path, default=DEFAULT_SCRAPER_CONFIG_PATH, help="JavDB selector/label 配置 JSON")
     parser.add_argument("--sleep", type=float, default=8.0, help="每次页面访问/作品处理后的基础等待秒数；默认偏慢，避免触发风控。")
     parser.add_argument("--jitter", type=float, default=4.0, help="额外随机等待秒数上限；默认 0-4 秒随机抖动。")
     parser.add_argument("--fast", action="store_true", help="允许低于 5 秒的等待间隔；一般不建议。")
@@ -285,6 +321,10 @@ def ensure_actor_movie_schema(conn: sqlite3.Connection) -> None:
         ("release_date", "TEXT"),
         ("rating", "REAL"),
         ("rating_count", "INTEGER"),
+        ("has_magnet", "INTEGER"),
+        ("is_streamable", "INTEGER"),
+        ("has_subtitles", "INTEGER"),
+        ("javdb_tags_json", "TEXT"),
         ("page_index", "INTEGER"),
         ("position_index", "INTEGER"),
     ):
@@ -508,14 +548,17 @@ def print_job_summary(jobs: list[dict]) -> None:
             print(f"  ... +{len(targets) - 12}")
 
 
-def crawl_actor_movies(client: JavDbClient, actor_url: str, args: argparse.Namespace) -> tuple[str, dict, list[ActorMovie]]:
+def crawl_actor_movies(client: JavDbClient, conn: sqlite3.Connection, person: dict, actor_url: str, args: argparse.Namespace) -> ActorMovieCrawl:
     driver = client.get_driver()
     seen_pages = set()
     seen_codes = set()
+    existing_codes = existing_actor_movie_code_keys(conn, person) if incremental_actor_movies(args) else set()
     page_url = canonical_actor_url(actor_url)
     all_movies = []
     first_html = ""
     first_profile = {}
+    duplicate_count = 0
+    stopped_on_existing = False
 
     page_limit = max(0, int(args.max_pages or 0))
     page_index = 0
@@ -536,11 +579,21 @@ def crawl_actor_movies(client: JavDbClient, actor_url: str, args: argparse.Names
             if not first_profile.get("javdb_actor_id"):
                 first_profile["javdb_actor_id"] = actor_id_from_url(actor_url)
 
-        for movie in parse_actor_movies(html, driver.current_url, page_index):
-            key = loose_code_key(movie.code)
-            if key and key not in seen_codes:
+        page_movies = dedupe_actor_movies(parse_actor_movies(html, driver.current_url, page_index))
+        for movie in page_movies:
+            key = (loose_code_key(movie.code) or "").lower()
+            if not key:
+                continue
+            if key in existing_codes:
+                duplicate_count += 1
+                stopped_on_existing = True
+                continue
+            if key not in seen_codes:
                 seen_codes.add(key)
                 all_movies.append(movie)
+
+        if stopped_on_existing and incremental_actor_movies(args):
+            break
 
         next_url = next_actor_page_url(html, driver.current_url)
         if not next_url:
@@ -548,7 +601,38 @@ def crawl_actor_movies(client: JavDbClient, actor_url: str, args: argparse.Names
         page_url = next_url
         pause(args)
 
-    return first_html, first_profile, all_movies
+    return ActorMovieCrawl(
+        html=first_html,
+        profile=first_profile,
+        movies=all_movies,
+        duplicate_count=duplicate_count,
+        scanned_pages=page_index,
+        stopped_on_existing=stopped_on_existing,
+    )
+
+
+def incremental_actor_movies(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "incremental_actor_movies", False))
+
+
+def existing_actor_movie_code_keys(conn: sqlite3.Connection, person: dict) -> set[str]:
+    person_id = person.get("id") or ""
+    if not person_id:
+        return set()
+    rows = conn.execute("SELECT code_key FROM actor_movies WHERE person_id = ?", (person_id,)).fetchall()
+    return {str(row[0] or "").strip().lower() for row in rows if row and row[0]}
+
+
+def dedupe_actor_movies(movies: list[ActorMovie]) -> list[ActorMovie]:
+    seen = set()
+    output = []
+    for movie in movies:
+        key = (loose_code_key(movie.code) or "").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        output.append(movie)
+    return output
 
 
 def wait_for_actor_page(client: JavDbClient, wait_seconds: int) -> str:
@@ -557,7 +641,7 @@ def wait_for_actor_page(client: JavDbClient, wait_seconds: int) -> str:
     last_html = ""
     while time.time() < deadline:
         last_html = driver.page_source or ""
-        reason = blocked_reason(last_html)
+        reason = blocked_reason(last_html, driver.current_url)
         if reason:
             raise AccessBlockedError(reason)
         if parse_actor_movies(last_html, driver.current_url) or parse_actor_page(last_html, driver.current_url).get("display_name"):
@@ -614,6 +698,10 @@ def parse_actor_movies(html: str, base_url: str, page_index: int = 0) -> list[Ac
                 release_date=facts["release_date"],
                 rating=facts["rating"],
                 rating_count=facts["rating_count"],
+                has_magnet=facts["has_magnet"],
+                is_streamable=facts["is_streamable"],
+                has_subtitles=facts["has_subtitles"],
+                tags=facts["tags"],
                 page_index=page_index,
                 position_index=position_index,
             )
@@ -645,11 +733,94 @@ def parse_actor_movie_facts(item) -> dict:
         except ValueError:
             rating_count = None
 
-    return {"release_date": release_date, "rating": rating, "rating_count": rating_count}
+    tags = parse_actor_movie_tags(item, text)
+    combined = " ".join(tags)
+    has_magnet = any("磁" in tag or "magnet" in tag.lower() for tag in tags)
+    is_streamable = any("可播放" in tag or "播放" == tag or "stream" in tag.lower() for tag in tags)
+    has_subtitles = bool(re.search(r"(?:中字|字幕|中文)", combined, flags=re.I))
+
+    return {
+        "release_date": release_date,
+        "rating": rating,
+        "rating_count": rating_count,
+        "has_magnet": has_magnet if has_magnet or tags else None,
+        "is_streamable": is_streamable if is_streamable or tags else None,
+        "has_subtitles": has_subtitles if has_subtitles or tags else None,
+        "tags": tags,
+    }
+
+
+def parse_actor_movie_tags(item, text: str) -> list[str]:
+    raw_tags = []
+    selectors = [
+        ".tags .tag",
+        ".tag",
+        ".label",
+        ".button",
+        ".meta .tag",
+        ".video-meta .tag",
+        "[class*='tag']",
+        "[class*='label']",
+    ]
+    for selector in selectors:
+        for tag in item.select(selector):
+            value = normalize_spaces(tag.get_text(" ", strip=True))
+            if value:
+                raw_tags.append(value)
+
+    patterns = [
+        r"含中文字幕磁链",
+        r"含中文字幕磁鏈",
+        r"含中文磁链",
+        r"含中文磁鏈",
+        r"中文字幕磁链",
+        r"中文磁链",
+        r"中文字幕磁鏈",
+        r"中文磁鏈",
+        r"含中字磁链",
+        r"中字磁链",
+        r"中字磁鏈",
+        r"含磁链",
+        r"含磁鏈",
+        r"中字可播放",
+        r"中文字幕可播放",
+        r"可播放",
+        r"含字幕",
+        r"中文字幕",
+        r"中字",
+        r"字幕",
+        r"无码",
+        r"無碼",
+        r"有码",
+        r"有碼",
+        r"VR",
+        r"單體作品",
+        r"单体作品",
+    ]
+    for value in re.findall("|".join(f"(?:{pattern})" for pattern in patterns), text or "", flags=re.I):
+        raw_tags.append(normalize_spaces(value))
+
+    output = []
+    seen = set()
+    for tag in raw_tags:
+        clean = normalize_spaces(tag)
+        if not clean or len(clean) > 20:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(clean)
+    return output[:12]
+
+
+def normalize_spaces(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def next_actor_page_url(html: str, base_url: str) -> str:
     soup = BeautifulSoup(html or "", "html.parser")
+    base_actor_id = actor_id_from_url(base_url)
     candidates = []
     selectors = [
         "a[rel='next'][href]",
@@ -668,7 +839,10 @@ def next_actor_page_url(html: str, base_url: str) -> str:
     for link in candidates:
         href = link.get("href")
         if href and not link.has_attr("disabled") and "disabled" not in (link.get("class") or []):
-            return urljoin(base_url, href)
+            next_url = urljoin(base_url, href)
+            if base_actor_id and actor_id_from_url(next_url) != base_actor_id:
+                continue
+            return next_url
     return ""
 
 
@@ -697,10 +871,12 @@ def save_actor_movies(
             """
             INSERT INTO actor_movies (
               person_id, person_name, javdb_actor_id, actor_url, code, code_key, title,
-              detail_url, image_url, release_date, rating, rating_count, page_index, position_index,
+              detail_url, image_url, release_date, rating, rating_count,
+              has_magnet, is_streamable, has_subtitles, javdb_tags_json,
+              page_index, position_index,
               fetched_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(person_id, code_key) DO UPDATE SET
               person_name = excluded.person_name,
               javdb_actor_id = excluded.javdb_actor_id,
@@ -712,6 +888,10 @@ def save_actor_movies(
               release_date = excluded.release_date,
               rating = excluded.rating,
               rating_count = excluded.rating_count,
+              has_magnet = excluded.has_magnet,
+              is_streamable = excluded.is_streamable,
+              has_subtitles = excluded.has_subtitles,
+              javdb_tags_json = excluded.javdb_tags_json,
               page_index = excluded.page_index,
               position_index = excluded.position_index,
               updated_at = excluded.updated_at
@@ -729,6 +909,10 @@ def save_actor_movies(
                 movie.release_date or None,
                 movie.rating,
                 movie.rating_count,
+                db_bool(movie.has_magnet),
+                db_bool(movie.is_streamable),
+                db_bool(movie.has_subtitles),
+                tags_json(movie.tags),
                 movie.page_index or None,
                 movie.position_index or None,
                 now,
@@ -738,6 +922,17 @@ def save_actor_movies(
         saved += 1
 
     return saved
+
+
+def db_bool(value: bool | None) -> int | None:
+    if value is None:
+        return None
+    return 1 if value else 0
+
+
+def tags_json(tags: list[str]) -> str | None:
+    clean = [normalize_spaces(tag) for tag in tags or [] if normalize_spaces(tag)]
+    return json.dumps(clean, ensure_ascii=False) if clean else None
 
 
 def process_targets(
