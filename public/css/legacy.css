@@ -3812,34 +3812,26 @@ body.gallery-view .gallery-reader-toolbar {
 }
 
 .local-marker-button {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  z-index: 2;
   display: inline-flex;
-  height: 30px;
-  max-width: calc(100% - 56px);
+  min-height: 24px;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.46);
+  border: 1px solid rgba(31, 122, 98, 0.2);
   border-radius: 999px;
-  background: rgba(16, 28, 23, 0.68);
-  box-shadow: 0 8px 18px rgba(16, 28, 23, 0.18);
-  color: rgba(255, 255, 255, 0.88);
+  background: rgba(31, 122, 98, 0.08);
+  color: var(--accent-strong);
   cursor: pointer;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 900;
-  line-height: 1;
-  padding: 0 10px;
+  padding: 2px 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .local-marker-button:hover {
-  border-color: rgba(255, 255, 255, 0.72);
-  background: rgba(16, 28, 23, 0.82);
-  color: #fff;
+  border-color: rgba(31, 122, 98, 0.42);
+  background: rgba(31, 122, 98, 0.14);
 }
 
 .local-marker-button:disabled {
@@ -3980,9 +3972,9 @@ body.gallery-view .gallery-reader-toolbar {
 
 .inline-rule-button.active,
 .local-marker-button.active {
-  border-color: rgba(255, 255, 255, 0.62);
-  background: rgba(31, 122, 98, 0.92);
-  color: #fff;
+  border-color: rgba(31, 122, 98, 0.48);
+  background: rgba(31, 122, 98, 0.16);
+  color: var(--accent-strong);
 }
 
 .inline-rule-button:disabled {

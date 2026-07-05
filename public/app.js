@@ -2543,6 +2543,7 @@ function createWorkCard(work, index = 0) {
   flags.className = "work-card-flags";
   if (work.ranking?.rankNo) flags.append(createInfoChip(`TOP ${formatNumber(work.ranking.rankNo)}`, "rank"));
   for (const chip of createAvailabilityChips(work)) flags.append(chip);
+  if (!work.missingLocal) flags.append(createLocalMarkerButton(work, "A"));
   if (work.infoCount > 0) flags.append(createInfoChip(`${formatNumber(work.infoCount)} 资料`));
   if (work.progress?.percent) flags.append(createInfoChip(`看到 ${Math.floor(work.progress.percent)}%`, "progress"));
   if (work.missingLocal && state.accessMode === "local") {
@@ -2566,7 +2567,7 @@ function createWorkCard(work, index = 0) {
   if (work.missingLocal) {
     card.append(cover, body);
   } else {
-    card.append(cover, favorite, createLocalMarkerButton(work, "A"), body);
+    card.append(cover, favorite, body);
   }
   return card;
 }
