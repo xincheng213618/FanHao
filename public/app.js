@@ -262,9 +262,11 @@ const personProfilePage = createPersonProfile({
   coverUrl,
   els,
   formatLibraryPath,
+  formatLibraryPaths,
   formatNumber,
   linesFromTextarea,
   normalizeSourcePath,
+  renderPeople: renderPeopleIndex,
   selectPerson,
   sourcePriority,
   state
