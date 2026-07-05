@@ -11,7 +11,8 @@ export function createPersonProfile(deps) {
     renderPeople,
     selectPerson,
     sourcePriority,
-    state
+    state,
+    workCoverUrl
   } = deps;
 
 function uniqueSourcePaths(person) {
@@ -272,6 +273,25 @@ async function openActorMappingModal(person) {
   sourceList.className = "mapping-source-list";
   sourceSection.append(sourceHead, manualRow, sourceList);
 
+  const coverSection = document.createElement("section");
+  coverSection.className = "mapping-section mapping-cover-section";
+  const coverHead = document.createElement("div");
+  coverHead.className = "mapping-section-head";
+  coverHead.innerHTML = "<strong>人物封面</strong><span>从作品封面复制，或上传一张图片</span>";
+  const coverActions = document.createElement("div");
+  coverActions.className = "mapping-cover-actions";
+  const chooseCover = mappingButton("选择作品封面", "folder-button compact");
+  const uploadCover = mappingButton("上传封面", "folder-button compact");
+  const uploadInput = document.createElement("input");
+  uploadInput.type = "file";
+  uploadInput.accept = "image/*";
+  uploadInput.hidden = true;
+  const resetCover = mappingButton("恢复默认", "folder-button compact");
+  coverActions.append(chooseCover, uploadCover, resetCover, uploadInput);
+  const currentCover = document.createElement("div");
+  currentCover.className = "mapping-cover-current";
+  coverSection.append(coverHead, currentCover, coverActions);
+
   const footer = document.createElement("footer");
   footer.className = "mapping-modal-footer";
   const status = document.createElement("span");
@@ -282,15 +302,26 @@ async function openActorMappingModal(person) {
   const save = mappingButton("保存映射");
   footer.append(status, syncLocal, refreshJavdb, refreshAllJavdb, save);
 
-  content.append(javdbSection, sourceSection);
+  content.append(javdbSection, coverSection, sourceSection);
   modal.append(header, content, footer);
   overlay.append(modal);
   document.body.append(overlay);
 
   let manualSourcePaths = [];
   let modalPerson = person;
+  let coverCandidateWorks = [];
+  let coverCandidatesLoaded = false;
+  let coverPickerOverlay = null;
+  let coverPickerGrid = null;
+  let coverPickerStatus = null;
 
-  const closeModal = () => overlay.remove();
+  const closeModal = () => {
+    coverPickerOverlay?.remove();
+    coverPickerOverlay = null;
+    coverPickerGrid = null;
+    coverPickerStatus = null;
+    overlay.remove();
+  };
   close.addEventListener("click", closeModal);
 
   async function loadMapping() {
@@ -300,6 +331,197 @@ async function openActorMappingModal(person) {
     modalPerson = data.person || modalPerson;
     renderSourceCandidates(data.sourceCandidates || []);
     status.textContent = "映射已同步";
+  }
+
+  async function loadCoverCandidates() {
+    if (!coverPickerGrid) return;
+    coverPickerGrid.innerHTML = `<div class="mapping-source-empty">正在读取作品封面</div>`;
+    if (coverPickerStatus) coverPickerStatus.textContent = "正在读取作品封面";
+    try {
+      const params = new URLSearchParams({
+        limit: "120",
+        sort: "releaseDesc",
+        filter: "all"
+      });
+      const data = await api(`/api/people/${encodeURIComponent(modalPerson.id)}?${params}`);
+      coverCandidateWorks = (data.works || []).filter((work) => workCoverUrl(work));
+      if (data.person) modalPerson = { ...modalPerson, ...data.person };
+      coverCandidatesLoaded = true;
+      if (coverPickerStatus) coverPickerStatus.textContent = `${formatNumber(coverCandidateWorks.length)} 张可选封面`;
+      renderCoverPicker();
+    } catch (error) {
+      coverPickerGrid.innerHTML = "";
+      const empty = document.createElement("div");
+      empty.className = "mapping-source-empty";
+      empty.textContent = error.message || "封面候选读取失败";
+      coverPickerGrid.append(empty);
+      if (coverPickerStatus) coverPickerStatus.textContent = "封面候选读取失败";
+    }
+  }
+
+  function renderCoverPicker() {
+    renderCurrentCover();
+    if (!coverPickerGrid) return;
+    coverPickerGrid.innerHTML = "";
+    if (!coverCandidateWorks.length) {
+      const empty = document.createElement("div");
+      empty.className = "mapping-source-empty";
+      empty.textContent = "当前人物还没有可用作品封面。";
+      coverPickerGrid.append(empty);
+      return;
+    }
+
+    for (const work of coverCandidateWorks) {
+      const selected = modalPerson.manualCoverWorkId === work.id;
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = `mapping-cover-option${selected ? " selected" : ""}`;
+      item.title = selected ? "当前人物封面" : `设为人物封面：${work.title}`;
+      item.setAttribute("aria-label", item.title);
+      item.disabled = selected;
+
+      const thumb = document.createElement("span");
+      thumb.className = "mapping-cover-thumb";
+      const img = document.createElement("img");
+      img.alt = "";
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.src = workCoverUrl(work);
+      thumb.append(img);
+
+      const text = document.createElement("span");
+      text.className = "mapping-cover-option-title";
+      text.textContent = work.title || work.directoryName || work.id;
+
+      const meta = document.createElement("span");
+      meta.className = "mapping-cover-option-meta";
+      meta.textContent = selected ? "当前封面" : formatLibraryPath(work.relativePath || "");
+
+      item.append(thumb, text, meta);
+      if (!selected) item.addEventListener("click", () => setPersonCover({ workId: work.id, button: item }));
+      coverPickerGrid.append(item);
+    }
+  }
+
+  async function openCoverPicker() {
+    if (coverPickerOverlay) return;
+    coverPickerOverlay = document.createElement("div");
+    coverPickerOverlay.className = "mapping-cover-picker-backdrop";
+    coverPickerOverlay.setAttribute("role", "presentation");
+
+    const picker = document.createElement("section");
+    picker.className = "mapping-cover-picker-modal";
+    picker.setAttribute("role", "dialog");
+    picker.setAttribute("aria-modal", "true");
+    picker.setAttribute("aria-label", "选择人物封面");
+
+    const pickerHeader = document.createElement("header");
+    pickerHeader.className = "mapping-modal-header";
+    const pickerTitle = document.createElement("div");
+    const heading = document.createElement("h3");
+    heading.textContent = "选择人物封面";
+    const subtitle = document.createElement("p");
+    subtitle.textContent = modalPerson.actorProfile?.displayName || modalPerson.name;
+    pickerTitle.append(heading, subtitle);
+    const pickerClose = mappingButton("关闭", "folder-button compact");
+    pickerHeader.append(pickerTitle, pickerClose);
+
+    coverPickerStatus = document.createElement("div");
+    coverPickerStatus.className = "mapping-cover-picker-status";
+    coverPickerStatus.textContent = coverCandidatesLoaded ? `${formatNumber(coverCandidateWorks.length)} 张可选封面` : "准备读取作品封面";
+
+    coverPickerGrid = document.createElement("div");
+    coverPickerGrid.className = "mapping-cover-grid";
+
+    picker.append(pickerHeader, coverPickerStatus, coverPickerGrid);
+    coverPickerOverlay.append(picker);
+    document.body.append(coverPickerOverlay);
+
+    const closePicker = () => {
+      coverPickerOverlay?.remove();
+      coverPickerOverlay = null;
+      coverPickerGrid = null;
+      coverPickerStatus = null;
+    };
+    pickerClose.addEventListener("click", closePicker);
+    coverPickerOverlay.addEventListener("click", (event) => {
+      if (event.target === coverPickerOverlay) closePicker();
+    });
+
+    if (coverCandidatesLoaded) renderCoverPicker();
+    else await loadCoverCandidates();
+  }
+
+  function renderCurrentCover() {
+    currentCover.innerHTML = "";
+    const avatarUrl = modalPerson.avatarUrl || modalPerson.actorProfile?.avatarUrl || coverUrl(modalPerson.coverId);
+    const preview = document.createElement("div");
+    preview.className = "mapping-cover-current-preview";
+    if (avatarUrl) {
+      const img = document.createElement("img");
+      img.alt = "";
+      img.src = avatarUrl;
+      preview.append(img);
+    } else {
+      preview.classList.add("empty");
+      preview.textContent = (modalPerson.actorProfile?.displayName || modalPerson.name || "").slice(0, 2);
+    }
+    const copy = document.createElement("div");
+    copy.className = "mapping-cover-current-copy";
+    const title = document.createElement("strong");
+    title.textContent = modalPerson.manualCoverWorkId ? "手动作品封面" : modalPerson.avatarImage?.source === "manual_upload" ? "手动上传封面" : "默认封面";
+    const source = document.createElement("span");
+    source.textContent = modalPerson.manualCoverWorkId
+      ? coverCandidateWorks.find((work) => work.id === modalPerson.manualCoverWorkId)?.title || modalPerson.manualCoverWorkId
+      : modalPerson.avatarImage?.sourceAvatarUrl || "按现有资料自动选择";
+    copy.append(title, source);
+    currentCover.append(preview, copy);
+  }
+
+  async function setPersonCover(options = {}) {
+    const { workId = "", imageBase64 = "", imageMime = "", fileName = "", button = null } = options;
+    setButtonBusy(button, true, workId ? "设置中" : imageBase64 ? "上传中" : "恢复中");
+    status.textContent = workId ? "正在复制作品封面" : imageBase64 ? "正在上传封面" : "正在恢复默认封面";
+    try {
+      const body = imageBase64 ? { imageBase64, imageMime, fileName } : { workId };
+      const data = await api(`/api/people/${encodeURIComponent(modalPerson.id)}/cover`, {
+        method: "PUT",
+        body
+      });
+      applyPersonCoverState(data.person);
+      status.textContent = workId || imageBase64 ? "人物封面已更新" : "已恢复默认封面";
+      renderCurrentCover();
+      if (coverPickerGrid) renderCoverPicker();
+    } catch (error) {
+      status.textContent = error.message || "封面设置失败";
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }
+
+  function applyPersonCoverState(personData) {
+    if (!personData) return;
+    modalPerson = {
+      ...modalPerson,
+      ...personData,
+      actorMovieCount: personData.actorMovieCount ?? modalPerson.actorMovieCount ?? null,
+      missingLocalWorkCount: personData.missingLocalWorkCount ?? modalPerson.missingLocalWorkCount ?? null
+    };
+    state.people = state.people.map((item) => (item.id === modalPerson.id ? { ...item, ...modalPerson } : item));
+    if (state.selectedPerson?.id === modalPerson.id) {
+      state.selectedPerson = { ...state.selectedPerson, ...modalPerson };
+      renderPersonProfile(state.selectedPerson);
+    }
+    if (state.activeView === "people" && !state.selectedPersonId) renderPeople();
+  }
+
+  function readImageFileAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.addEventListener("load", () => resolve(String(reader.result || "")));
+      reader.addEventListener("error", () => reject(reader.error || new Error("图片读取失败")));
+      reader.readAsDataURL(file);
+    });
   }
 
   function renderSourceCandidates(candidates) {
@@ -345,6 +567,40 @@ async function openActorMappingModal(person) {
       status.textContent = error.message || "加入候选失败";
     }
   });
+
+  uploadCover.addEventListener("click", () => {
+    uploadInput.value = "";
+    uploadInput.click();
+  });
+
+  chooseCover.addEventListener("click", () => {
+    openCoverPicker().catch((error) => {
+      status.textContent = error.message || "封面选择器打开失败";
+    });
+  });
+
+  uploadInput.addEventListener("change", async () => {
+    const file = uploadInput.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      status.textContent = "请选择图片文件";
+      return;
+    }
+    try {
+      const dataUrl = await readImageFileAsDataUrl(file);
+      const imageBase64 = dataUrl.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "");
+      await setPersonCover({
+        imageBase64,
+        imageMime: file.type,
+        fileName: file.name,
+        button: uploadCover
+      });
+    } catch (error) {
+      status.textContent = error.message || "上传失败";
+    }
+  });
+
+  resetCover.addEventListener("click", () => setPersonCover({ workId: "", button: resetCover }));
 
   save.addEventListener("click", async () => {
     await saveActorProfileMapping(modalPerson, {
@@ -435,6 +691,7 @@ async function openActorMappingModal(person) {
 
   try {
     await loadMapping();
+    renderCurrentCover();
   } catch (error) {
     status.textContent = error.message || "映射读取失败";
   }

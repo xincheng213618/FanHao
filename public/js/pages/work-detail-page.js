@@ -713,25 +713,41 @@ export function createWorkDetailPage(deps) {
 
   function createPreviewMediaSection(work) {
     const info = work.infoMetadata || work.infoSummary || {};
-    const images = uniquePreviewImageUrls([...(info.previewImages || []), ...localPreviewImageUrls(work)]).slice(0, 12);
+    const images = uniquePreviewMediaItems([...localPreviewImageItems(work), ...remotePreviewImageItems(info.previewImages || [])]).slice(0, 12);
     const videoUrl = cleanRemoteUrl(info.previewVideoUrl);
     if (!images.length && !videoUrl) return null;
 
     const section = document.createElement("section");
     section.className = "preview-media-section";
 
+    const header = document.createElement("div");
+    header.className = "preview-media-header";
     const heading = document.createElement("h4");
     heading.className = "section-title";
     heading.textContent = "预览媒体";
-    section.append(heading);
+    header.append(heading);
+
+    if (work.manualCoverId) {
+      const reset = document.createElement("button");
+      reset.type = "button";
+      reset.className = "text-button preview-cover-reset";
+      reset.textContent = "恢复默认封面";
+      reset.addEventListener("click", () => setManualWorkCover(work, "", reset));
+      header.append(reset);
+    }
+
+    section.append(header);
 
     if (images.length) {
       const grid = document.createElement("div");
       grid.className = "preview-media-grid";
-      for (const imageUrl of images) {
+      for (const item of images) {
+        const frame = document.createElement("div");
+        frame.className = `preview-media-item${item.imageId && item.imageId === work.manualCoverId ? " selected" : ""}`;
+
         const link = document.createElement("a");
         link.className = "preview-media-thumb";
-        link.href = imageUrl;
+        link.href = item.url;
         link.target = "_blank";
         link.rel = "noreferrer";
         const img = document.createElement("img");
@@ -742,11 +758,30 @@ export function createWorkDetailPage(deps) {
           img.dataset.loaded = "1";
         });
         img.addEventListener("error", () => {
-          retryPreviewImage(img, imageUrl);
+          retryPreviewImage(img, item.url);
         });
-        img.src = imageUrl;
+        img.src = item.url;
         link.append(img);
-        grid.append(link);
+        frame.append(link);
+
+        if (item.imageId) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "text-button preview-cover-button";
+          if (item.imageId === work.manualCoverId) {
+            button.textContent = "当前封面";
+            button.disabled = true;
+          } else if (!work.manualCoverId && item.imageId === work.coverId) {
+            button.textContent = "默认封面";
+            button.disabled = true;
+          } else {
+            button.textContent = "设为封面";
+            button.addEventListener("click", () => setManualWorkCover(work, item.imageId, button));
+          }
+          frame.append(button);
+        }
+
+        grid.append(frame);
       }
       section.append(grid);
     }
@@ -767,6 +802,34 @@ export function createWorkDetailPage(deps) {
     return section;
   }
 
+  async function setManualWorkCover(work, imageId, button) {
+    const originalText = button?.textContent || "";
+    if (button) {
+      button.disabled = true;
+      button.textContent = imageId ? "设置中" : "恢复中";
+    }
+    try {
+      const data = await api(`/api/works/${encodeURIComponent(work.id)}/cover`, {
+        method: "PUT",
+        body: { imageId }
+      });
+      if (data.work) {
+        updateWorkSnapshot(data.work);
+        state.currentWork = data.work;
+        state.library.user = data.user || state.library.user;
+        renderMeta(state.currentWork);
+        renderInfo(state.currentWork);
+        renderWorks();
+      }
+    } catch (error) {
+      alert(error.message);
+      if (button) {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    }
+  }
+
   function retryPreviewImage(img, src) {
     if (!img?.isConnected || img.dataset.loaded === "1") return;
     const retryCount = Number(img.dataset.retryCount || 0);
@@ -779,11 +842,14 @@ export function createWorkDetailPage(deps) {
     }, delay);
   }
 
-  function localPreviewImageUrls(work) {
+  function localPreviewImageItems(work) {
     return [...(work.images || [])]
-      .filter((image) => image?.id && image.id !== work.coverId)
+      .filter((image) => image?.id)
       .sort(comparePreviewImageFiles)
-      .map((image) => `/media/image/${encodeURIComponent(image.id)}`);
+      .map((image) => ({
+        imageId: image.id,
+        url: `/media/image/${encodeURIComponent(image.id)}`
+      }));
   }
 
   function comparePreviewImageFiles(a, b) {
@@ -820,6 +886,24 @@ export function createWorkDetailPage(deps) {
       urls.push(url);
     }
     return urls;
+  }
+
+  function remotePreviewImageItems(values) {
+    return uniquePreviewImageUrls(values).map((url) => ({ imageId: "", url }));
+  }
+
+  function uniquePreviewMediaItems(items) {
+    const seen = new Set();
+    const result = [];
+    for (const item of Array.isArray(items) ? items : []) {
+      const imageId = String(item?.imageId || "");
+      const url = cleanPreviewImageUrl(item?.url);
+      const key = imageId ? `image:${imageId}` : `url:${url.toLowerCase()}`;
+      if (!url || seen.has(key)) continue;
+      seen.add(key);
+      result.push({ imageId, url });
+    }
+    return result;
   }
 
   function primaryInfoFile(work) {

@@ -225,6 +225,7 @@ function emptyUserState() {
       }
     },
     favorites: {},
+    manualCovers: {},
     progress: {}
   };
 }
@@ -431,6 +432,28 @@ function normalizeFavorites(value, folders) {
     favorites[workId] = normalizeFavoriteRecord(favorite, folders);
   }
   return favorites;
+}
+
+function normalizeManualCoverRecord(value) {
+  const record = value && typeof value === "object" ? value : { imageId: value };
+  const imageId = String(record.imageId || "").trim();
+  if (!imageId || imageId.length > 1024) return null;
+  return {
+    imageId,
+    updatedAt: String(record.updatedAt || "")
+  };
+}
+
+function normalizeManualCovers(value) {
+  const covers = {};
+  if (!value || typeof value !== "object") return covers;
+  for (const [workId, cover] of Object.entries(value)) {
+    const id = String(workId || "").trim();
+    const record = normalizeManualCoverRecord(cover);
+    if (!id || !record) continue;
+    covers[id] = record;
+  }
+  return covers;
 }
 
 function rootLabel(rootPath) {
@@ -1760,8 +1783,13 @@ function corePersonAvatarRow(personId, options = {}) {
           AND kind = 'avatar'
           ${source ? "AND source = ?" : ""}
         ORDER BY
+          CASE
+            WHEN source IN ('manual_upload', 'manual_person_cover', 'manual') THEN 0
+            WHEN source = 'actor_profiles' THEN 1
+            ELSE 2
+          END,
           CASE WHEN image_blob IS NOT NULL THEN 0 ELSE 1 END,
-          CASE WHEN source = 'actor_profiles' THEN 0 ELSE 1 END,
+          updated_at DESC,
           id ASC
         LIMIT 1
         `
@@ -1782,7 +1810,8 @@ function publicPersonAvatar(personId) {
     avatarUrl,
     sourceAvatarUrl: row.remote_url || row.local_path || "",
     source: row.source || "",
-    updatedAt: row.updated_at || ""
+    updatedAt: row.updated_at || "",
+    coverWorkId: row.source === "manual_person_cover" ? String(row.legacy_key || "") : ""
   };
 }
 
@@ -5349,6 +5378,7 @@ function loadUserState() {
       version: 2,
       favoriteFolders,
       favorites: normalizeFavorites(data.favorites, favoriteFolders),
+      manualCovers: normalizeManualCovers(data.manualCovers),
       progress: data.progress && typeof data.progress === "object" ? data.progress : {}
     };
   } catch (error) {
@@ -6237,6 +6267,270 @@ function publicFavoriteForWork(workId) {
     createdAt: favorite.createdAt || "",
     folderId,
     folderName: favoriteFolderName(folderId)
+  };
+}
+
+function manualCoverRecord(workId) {
+  const record = normalizeManualCoverRecord(userState.manualCovers?.[workId]);
+  return record || null;
+}
+
+function manualCoverForWork(work) {
+  if (!work?.id) return null;
+  const record = manualCoverRecord(work.id);
+  if (!record) return null;
+  const image = (work.images || []).find((item) => item.id === record.imageId);
+  return image ? { image, record } : null;
+}
+
+function setWorkManualCover(workId, imageId) {
+  const work = resolveLibraryWorkByPublicId(workId);
+  if (!work || work.missingLocal) {
+    const error = new Error("作品不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const id = String(imageId || "").trim();
+  userState.manualCovers = userState.manualCovers && typeof userState.manualCovers === "object" ? userState.manualCovers : {};
+
+  if (!id) {
+    delete userState.manualCovers[work.id];
+  } else {
+    const image = (work.images || []).find((item) => item.id === id);
+    if (!image) {
+      const error = new Error("只能选择这个作品自己的图片作为封面");
+      error.statusCode = 400;
+      throw error;
+    }
+    userState.manualCovers[work.id] = {
+      imageId: image.id,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  saveUserState();
+  return {
+    manualCoverId: manualCoverRecord(work.id)?.imageId || "",
+    work: publicWork(work, true),
+    user: userStateSummary()
+  };
+}
+
+function cleanAvatarMime(value, fallback = "image/jpeg") {
+  const mime = String(value || "").trim().toLowerCase();
+  return /^image\/(?:jpeg|png|webp|gif|bmp)$/.test(mime) ? mime : fallback;
+}
+
+function localImageBlobForAvatar(file) {
+  const stat = safeStat(file?.path);
+  if (!stat?.isFile() || stat.size <= 0 || stat.size > MAX_ACTOR_AVATAR_BYTES) return null;
+  return fs.readFileSync(file.path);
+}
+
+function personAvatarPayloadFromWork(work) {
+  if (!work || work.missingLocal) return null;
+  const now = new Date().toISOString();
+  const manualCover = manualCoverForWork(work);
+  const manualImage = manualCover?.image || null;
+  if (manualImage?.id) {
+    const blob = localImageBlobForAvatar(manualImage);
+    if (!blob) return null;
+    return {
+      sourceType: "copied",
+      localPath: "",
+      remoteUrl: "",
+      mime: localImageMime(manualImage),
+      blob,
+      byteSize: blob?.length || manualImage.size || null,
+      source: "manual_person_cover",
+      legacyKey: work.id,
+      now
+    };
+  }
+
+  const coreCover = coreWorkCoverRow(work.id);
+  if (coreCover) {
+    const blob = coreCover.image_blob ? Buffer.from(coreCover.image_blob) : null;
+    if (!blob && coreCover.local_path && !coreCover.remote_url) return null;
+    return {
+      sourceType: blob ? "copied" : coreCover.remote_url ? "remote" : coreCover.local_path ? "local" : "unknown",
+      localPath: coreCover.local_path || "",
+      remoteUrl: coreCover.remote_url || "",
+      mime: cleanAvatarMime(coreCover.mime),
+      blob,
+      byteSize: blob?.length || coreCover.byte_size || null,
+      source: "manual_person_cover",
+      legacyKey: work.id,
+      now
+    };
+  }
+
+  if (work.coverId) {
+    const image = (work.images || []).find((item) => item.id === work.coverId);
+    if (image) {
+      const blob = localImageBlobForAvatar(image);
+      if (!blob) return null;
+      return {
+        sourceType: "copied",
+        localPath: "",
+        remoteUrl: "",
+        mime: localImageMime(image),
+        blob,
+        byteSize: blob?.length || image.size || null,
+        source: "manual_person_cover",
+        legacyKey: work.id,
+        now
+      };
+    }
+  }
+
+  const cachedCover = workCoverRow(work.id);
+  if (cachedCover?.cover_blob) {
+    const blob = Buffer.from(cachedCover.cover_blob);
+    return {
+      sourceType: "copied",
+      localPath: "",
+      remoteUrl: cachedCover.cover_url || "",
+      mime: cleanAvatarMime(cachedCover.cover_mime),
+      blob,
+      byteSize: blob.length,
+      source: "manual_person_cover",
+      legacyKey: work.id,
+      now
+    };
+  }
+
+  const infoSummary = publicWorkInfoSummary(workInfoRow(work.id), work.infoSummary);
+  const remoteUrl = work.remoteCoverUrl || infoSummary?.imageUrl || "";
+  if (!remoteUrl) return null;
+  return {
+    sourceType: "remote",
+    localPath: "",
+    remoteUrl,
+    mime: "image/jpeg",
+    blob: null,
+    byteSize: null,
+    source: "manual_person_cover",
+    legacyKey: work.id,
+    now
+  };
+}
+
+function personAvatarPayloadFromUpload(payload) {
+  const base64 = String(payload.imageBase64 || payload.avatarBase64 || "").replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "");
+  if (!base64) return null;
+  const blob = Buffer.from(base64, "base64");
+  if (!blob.length || blob.length > MAX_ACTOR_AVATAR_BYTES) {
+    const error = new Error(`图片不能超过 ${Math.floor(MAX_ACTOR_AVATAR_BYTES / 1024 / 1024)}MB`);
+    error.statusCode = 413;
+    throw error;
+  }
+  const now = new Date().toISOString();
+  return {
+    sourceType: "uploaded",
+    localPath: "",
+    remoteUrl: "",
+    mime: cleanAvatarMime(payload.imageMime || payload.avatarMime),
+    blob,
+    byteSize: blob.length,
+    source: "manual_upload",
+    legacyKey: String(payload.fileName || payload.name || "uploaded-avatar").slice(0, 260),
+    now
+  };
+}
+
+function replaceManualPersonAvatar(personId, payload) {
+  const corePersonId = Number(personId);
+  if (!Number.isFinite(corePersonId)) {
+    const error = new Error("人物不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  const db = getCoreDb();
+  db.prepare("DELETE FROM images WHERE owner_type = 'person' AND owner_id = ? AND kind = 'avatar' AND source IN ('manual_person_cover', 'manual_upload')").run(corePersonId);
+  if (!payload) {
+    invalidateTableStamp("actor_profiles");
+    actorProfileCache = null;
+    return;
+  }
+  db.prepare(
+    `
+    INSERT INTO images (
+      owner_type, owner_id, kind, source_type, local_path, remote_url, mime, image_blob, byte_size,
+      sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
+    )
+    VALUES ('person', ?, 'avatar', ?, ?, ?, ?, ?, ?, 0, 'ok', ?, 'manual_person_avatar', ?, ?, ?)
+    `
+  ).run(
+    corePersonId,
+    payload.sourceType || "unknown",
+    payload.localPath || "",
+    payload.remoteUrl || "",
+    payload.mime || "image/jpeg",
+    payload.blob || null,
+    payload.byteSize || null,
+    payload.source || "manual",
+    payload.legacyKey || String(personId),
+    payload.now,
+    payload.now
+  );
+  invalidateTableStamp("actor_profiles");
+  actorProfileCache = null;
+}
+
+function setPersonManualCover(personId, workId) {
+  const person = resolveLibraryPersonByPublicId(personId) || corePersonFallbackRecord(personId);
+  const mergedPerson = mergedPersonRecord(person);
+  if (!mergedPerson) {
+    const error = new Error("人物不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const id = String(workId || "").trim();
+  if (!id) {
+    replaceManualPersonAvatar(mergedPerson.id, null);
+  } else {
+    const work = library.worksById.get(id);
+    if (!work || !(mergedPerson.works || []).includes(work.id)) {
+      const error = new Error("只能选择这个人物自己的作品封面");
+      error.statusCode = 400;
+      throw error;
+    }
+    const avatar = personAvatarPayloadFromWork(work);
+    if (!avatar) {
+      const error = new Error("这个作品没有可用封面");
+      error.statusCode = 400;
+      throw error;
+    }
+    replaceManualPersonAvatar(mergedPerson.id, avatar);
+  }
+
+  return {
+    person: publicPerson(mergedPerson),
+    user: userStateSummary()
+  };
+}
+
+function setPersonUploadedCover(personId, payload) {
+  const person = resolveLibraryPersonByPublicId(personId) || corePersonFallbackRecord(personId);
+  const mergedPerson = mergedPersonRecord(person);
+  if (!mergedPerson) {
+    const error = new Error("人物不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  const avatar = personAvatarPayloadFromUpload(payload);
+  if (!avatar) {
+    const error = new Error("请选择要上传的图片");
+    error.statusCode = 400;
+    throw error;
+  }
+  replaceManualPersonAvatar(mergedPerson.id, avatar);
+  return {
+    person: publicPerson(mergedPerson),
+    user: userStateSummary()
   };
 }
 
@@ -9700,30 +9994,73 @@ function publicPersonFallbackAvatar(person) {
     const work = library.worksById.get(workId);
     if (!work || work.missingLocal) continue;
 
-    const coreCover = publicCoreWorkCover(work.id);
-    if (coreCover?.coverUrl) {
-      return {
-        personId: String(person.id || ""),
-        avatarUrl: coreCover.coverUrl,
-        sourceAvatarUrl: coreCover.sourceCoverUrl || "",
-        source: coreCover.source || "work_cover",
-        updatedAt: coreCover.updatedAt || "",
-        fallbackWorkId: String(work.id || "")
-      };
-    }
-
-    if (work.coverId) {
-      return {
-        personId: String(person.id || ""),
-        avatarUrl: `/media/image/${encodeURIComponent(work.coverId)}`,
-        sourceAvatarUrl: work.relativePath || "",
-        source: "work_cover",
-        updatedAt: work.modifiedAt || "",
-        fallbackWorkId: String(work.id || "")
-      };
-    }
+    const cover = publicWorkCoverAvatar(work, person.id);
+    if (cover) return { ...cover, fallbackWorkId: String(work.id || "") };
   }
   return null;
+}
+
+function publicWorkCoverAvatar(work, personId, source = "work_cover") {
+  if (!work || work.missingLocal) return null;
+
+  const manualCover = manualCoverForWork(work);
+  if (manualCover?.image?.id) {
+    return {
+      personId: String(personId || ""),
+      avatarUrl: `/media/image/${encodeURIComponent(manualCover.image.id)}`,
+      sourceAvatarUrl: manualCover.image.relativePath || manualCover.image.path || "",
+      source: "manual_work_cover",
+      updatedAt: manualCover.record?.updatedAt || manualCover.image.modifiedAt || "",
+      coverWorkId: String(work.id || "")
+    };
+  }
+
+  const coreCover = publicCoreWorkCover(work.id);
+  if (coreCover?.coverUrl) {
+    return {
+      personId: String(personId || ""),
+      avatarUrl: coreCover.coverUrl,
+      sourceAvatarUrl: coreCover.sourceCoverUrl || "",
+      source: coreCover.source || source,
+      updatedAt: coreCover.updatedAt || "",
+      coverWorkId: String(work.id || "")
+    };
+  }
+
+  if (work.coverId) {
+    return {
+      personId: String(personId || ""),
+      avatarUrl: `/media/image/${encodeURIComponent(work.coverId)}`,
+      sourceAvatarUrl: work.relativePath || "",
+      source,
+      updatedAt: work.modifiedAt || "",
+      coverWorkId: String(work.id || "")
+    };
+  }
+
+  const cachedCover = publicWorkCover(workCoverRow(work.id));
+  if (cachedCover?.coverUrl) {
+    return {
+      personId: String(personId || ""),
+      avatarUrl: cachedCover.coverUrl,
+      sourceAvatarUrl: cachedCover.sourceCoverUrl || "",
+      source: cachedCover.source || source,
+      updatedAt: cachedCover.updatedAt || "",
+      coverWorkId: String(work.id || "")
+    };
+  }
+
+  const infoSummary = publicWorkInfoSummary(workInfoRow(work.id), work.infoSummary);
+  const remoteUrl = proxiedRemoteImageUrl(work.remoteCoverUrl) || work.remoteCoverUrl || infoSummary?.imageUrl || "";
+  if (!remoteUrl) return null;
+  return {
+    personId: String(personId || ""),
+    avatarUrl: remoteUrl,
+    sourceAvatarUrl: work.remoteCoverUrl || infoSummary?.imageUrl || "",
+    source,
+    updatedAt: work.modifiedAt || "",
+    coverWorkId: String(work.id || "")
+  };
 }
 
 function publicPerson(person, options = {}) {
@@ -9749,6 +10086,7 @@ function publicPerson(person, options = {}) {
     missingLocalWorkCount: options.missingLocalWorkCount ?? null,
     avatarUrl: avatar?.avatarUrl || actorProfile?.avatarUrl || fallbackAvatar?.avatarUrl || "",
     avatarImage: avatar || fallbackAvatar,
+    manualCoverWorkId: avatar?.source === "manual_person_cover" ? avatar.coverWorkId || "" : "",
     actorProfile
   };
 }
@@ -9781,6 +10119,8 @@ function publicWork(work, includeFiles = false) {
       relativePath: work.relativePath || "",
       localMarkers: markers,
       coverId: null,
+      manualCoverId: "",
+      autoCoverId: "",
       cachedCover: null,
       remoteCoverUrl: proxiedRemoteImageUrl(work.remoteCoverUrl) || work.remoteCoverUrl || "",
       videoCount: 0,
@@ -9813,7 +10153,8 @@ function publicWork(work, includeFiles = false) {
   const person = displayPersonForWork(work.personId);
   const profileRow = person ? actorProfileRow(person.id) : null;
   const coreCover = publicCoreWorkCover(work.id);
-  const cachedCover = coreCover || (work.coverId ? null : publicWorkCover(workCoverRow(work.id)));
+  const manualCover = manualCoverForWork(work);
+  const cachedCover = manualCover ? null : coreCover || (work.coverId ? null : publicWorkCover(workCoverRow(work.id)));
   const infoRow = workInfoRow(work.id);
   const infoSummary = publicWorkInfoSummary(infoRow, work.infoSummary);
   const videos = work.videos || [];
@@ -9828,14 +10169,16 @@ function publicWork(work, includeFiles = false) {
     directoryName: displayWorkTitle(work.directoryName),
     relativePath: work.relativePath,
     localMarkers: markers,
-    coverId: coreCover ? null : work.coverId,
+    coverId: manualCover?.image.id || (coreCover ? null : work.coverId),
+    manualCoverId: manualCover?.image.id || "",
+    autoCoverId: work.coverId || "",
     cachedCover,
     videoCount: work.videoCount,
     playableCount: work.playableCount,
     imageCount: work.imageCount,
     infoCount: work.infoCount,
     videoSize: videos.reduce((sum, video) => sum + Number(video.size || 0), 0),
-    canGenerateCover: !work.coverId && !cachedCover && videos.length > 0,
+    canGenerateCover: !manualCover && !work.coverId && !cachedCover && videos.length > 0,
     modifiedAt: work.modifiedAt,
     infoSummary,
     availability: publicWorkAvailability(work, infoSummary),
@@ -10545,6 +10888,21 @@ async function routeApi(req, res, url) {
     return true;
   }
 
+  const personCoverMatch = /^\/api\/people\/([^/]+)\/cover$/.exec(url.pathname);
+  if (personCoverMatch && req.method === "PUT") {
+    const personId = decodeURIComponent(personCoverMatch[1]);
+    const body = await readJsonBody(req, Math.ceil(MAX_ACTOR_AVATAR_BYTES * 1.4) + 128 * 1024);
+    try {
+      const result = body.imageBase64 || body.avatarBase64
+        ? setPersonUploadedCover(personId, body)
+        : setPersonManualCover(personId, body.workId || "");
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "设置人物封面失败" });
+    }
+    return true;
+  }
+
   const personMatch = /^\/api\/people\/([^/]+)$/.exec(url.pathname);
   if (personMatch && req.method === "GET") {
     const rawPerson = resolveLibraryPersonByPublicId(decodeURIComponent(personMatch[1])) || corePersonFallbackRecord(decodeURIComponent(personMatch[1]));
@@ -10626,6 +10984,19 @@ async function routeApi(req, res, url) {
       sendJson(res, 200, { ok: true, cover, work: publicWork(work, true) });
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "生成封面失败", work: publicWork(work, true) });
+    }
+    return true;
+  }
+
+  const workCoverMatch = /^\/api\/works\/([^/]+)\/cover$/.exec(url.pathname);
+  if (workCoverMatch && req.method === "PUT") {
+    const workId = decodeURIComponent(workCoverMatch[1]);
+    const body = await readJsonBody(req);
+    try {
+      const result = setWorkManualCover(workId, body.imageId || "");
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "设置封面失败" });
     }
     return true;
   }

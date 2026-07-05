@@ -269,7 +269,8 @@ const personProfilePage = createPersonProfile({
   renderPeople: renderPeopleIndex,
   selectPerson,
   sourcePriority,
-  state
+  state,
+  workCoverUrl
 });
 let novelPage = null;
 const adminModal = createAdminModal({
