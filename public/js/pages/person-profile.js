@@ -272,7 +272,7 @@ async function openActorMappingModal(person) {
   status.className = "mapping-status";
   const syncLocal = mappingButton("扫描本地并同步表单");
   const refreshJavdb = mappingButton("访问 JavDB 更新片单");
-  const refreshAllJavdb = mappingButton("全量扫描有链接人物");
+  const refreshAllJavdb = mappingButton("全量扫描当前人物");
   const save = mappingButton("保存映射");
   footer.append(status, syncLocal, refreshJavdb, refreshAllJavdb, save);
 
@@ -399,19 +399,26 @@ async function openActorMappingModal(person) {
 
   refreshAllJavdb.addEventListener("click", async () => {
     setButtonBusy(refreshAllJavdb, true, "扫描中");
-    status.textContent = "正在启动全量 JavDB 扫描";
+    status.textContent = "正在启动当前人物全量 JavDB 扫描";
     try {
+      await saveActorProfileMapping(modalPerson, {
+        javdbUrl: urlInput.value,
+        displayName: nameInput.value,
+        aliases: linesFromTextarea(aliasesInput.value),
+        status: null,
+        throwOnError: true
+      });
       const data = await api("/api/admin/refresh-actor-movies", {
         method: "POST",
-        body: { fullScan: true, sleep: 1, maxPages: 0 }
+        body: { personId: modalPerson.id, sleep: 1, maxPages: 0 }
       });
-      status.textContent = `全量任务已启动：${data.task?.id || ""}`;
+      status.textContent = `当前人物全量任务已启动：${data.task?.id || ""}`;
       await waitForAdminTask(data.task?.id, status);
       await selectPerson(modalPerson.id, { resetFilter: false });
       await loadMapping();
-      status.textContent = "全量 JavDB 扫描已完成";
+      status.textContent = "当前人物全量 JavDB 扫描已完成";
     } catch (error) {
-      status.textContent = error.message || "全量扫描失败";
+      status.textContent = error.message || "当前人物全量扫描失败";
     } finally {
       setButtonBusy(refreshAllJavdb, false);
     }
