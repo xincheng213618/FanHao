@@ -52,9 +52,8 @@ function renderPersonProfile(person) {
   if (!els.personProfile || !person) return;
 
   const profile = person.actorProfile || null;
-  const avatarUrl = profile?.avatarUrl || coverUrl(person.coverId);
+  const avatarUrl = person.avatarUrl || profile?.avatarUrl || coverUrl(person.coverId);
   const displayName = profile?.displayName || person.name;
-  const aliases = profile?.aliases || [];
 
   els.personProfile.hidden = false;
   els.personProfile.classList.remove("ranking-profile-panel");
@@ -68,13 +67,13 @@ function renderPersonProfile(person) {
     img.src = avatarUrl;
     img.addEventListener("error", () => {
       img.remove();
-      avatar.textContent = person.name.slice(0, 2);
+      avatar.textContent = displayName.slice(0, 2);
       avatar.classList.add("empty");
     });
     avatar.append(img);
   } else {
     avatar.classList.add("empty");
-    avatar.textContent = person.name.slice(0, 2);
+    avatar.textContent = displayName.slice(0, 2);
   }
 
   const copy = document.createElement("div");
@@ -103,104 +102,25 @@ function renderPersonProfile(person) {
     editButton.type = "button";
     editButton.className = "person-profile-link";
     editButton.textContent = profile?.javdbUrl ? "编辑映射" : "配置资料页";
+    editButton.addEventListener("click", () => openActorMappingModal(person));
     nameRow.append(editButton);
   }
 
-  const sub = document.createElement("div");
-  sub.className = "person-profile-sub";
-  sub.textContent = aliases.length ? aliases.join("、") : formatLibraryPaths(person.sourcePaths || [person.relativePath]);
+  const summary = createProfileSummary(person, profile);
 
-  const metrics = document.createElement("div");
-  metrics.className = "person-profile-metrics";
-  const hasActorCache = (person.actorMovieCount ?? profile?.movieCount ?? 0) > 0 || Boolean(profile?.javdbUrl);
-  metrics.append(createProfileMetric("作品", person.workCount), createProfileMetric("视频", person.videoCount));
-  if (hasActorCache) {
-    metrics.append(
-      createProfileMetric("JavDB", person.actorMovieCount ?? profile?.movieCount ?? 0),
-      createProfileMetric("未下载", person.missingLocalWorkCount ?? 0)
-    );
-  } else {
-    metrics.append(createProfileMetric("可播", person.playableCount));
-  }
-
-  copy.append(nameRow, sub, metrics);
-  const editor = state.accessMode === "local" ? createActorProfileEditor(person, profile) : null;
+  copy.append(nameRow, summary);
   const actions = createPersonProfileActions(person);
-  if (editor) {
-    copy.append(editor);
-    const editButton = nameRow.querySelector("button.person-profile-link");
-    editButton?.addEventListener("click", () => {
-      editor.hidden = !editor.hidden;
-      if (!editor.hidden) editor.querySelector("input")?.focus();
-    });
-  }
   if (actions) copy.append(actions);
   els.personProfile.append(avatar, copy);
 }
 
-function createActorProfileEditor(person, profile) {
-  const form = document.createElement("form");
-  form.className = "actor-config-form";
-  form.hidden = Boolean(profile?.javdbUrl);
-
-  const urlLabel = document.createElement("label");
-  urlLabel.className = "actor-config-field wide";
-  const urlText = document.createElement("span");
-  urlText.textContent = "JavDB actor 页";
-  const urlInput = document.createElement("input");
-  urlInput.type = "url";
-  urlInput.placeholder = "https://javdb.com/actors/BzpA";
-  urlInput.value = profile?.javdbUrl || "";
-  urlInput.required = true;
-  urlLabel.append(urlText, urlInput);
-
-  const nameLabel = document.createElement("label");
-  nameLabel.className = "actor-config-field";
-  const nameText = document.createElement("span");
-  nameText.textContent = "显示名";
-  const nameInput = document.createElement("input");
-  nameInput.type = "text";
-  nameInput.value = profile?.displayName || person.name;
-  nameLabel.append(nameText, nameInput);
-
-  const aliasesLabel = document.createElement("label");
-  aliasesLabel.className = "actor-config-field wide";
-  const aliasesText = document.createElement("span");
-  aliasesText.textContent = "别名 / 曾用名";
-  const aliasesInput = document.createElement("textarea");
-  aliasesInput.rows = 3;
-  aliasesInput.spellcheck = false;
-  aliasesInput.placeholder = "一行一个，也可用逗号、顿号分隔";
-  aliasesInput.value = (profile?.aliases || []).join("\n");
-  aliasesLabel.append(aliasesText, aliasesInput);
-
-  const submit = document.createElement("button");
-  submit.type = "submit";
-  submit.className = "folder-button";
-  submit.textContent = "保存映射";
-
-  const status = document.createElement("span");
-  status.className = "actor-config-status";
-
-  form.append(urlLabel, nameLabel, aliasesLabel, submit, status);
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await saveActorProfileMapping(person, {
-      javdbUrl: urlInput.value,
-      displayName: nameInput.value,
-      aliases: linesFromTextarea(aliasesInput.value),
-      button: submit,
-      status
-    });
-  });
-  return form;
-}
-
 async function saveActorProfileMapping(person, options) {
-  const originalText = options.button.textContent;
-  options.button.disabled = true;
-  options.button.textContent = "保存中";
-  options.status.textContent = "";
+  const originalText = options.button?.textContent || "";
+  if (options.button) {
+    options.button.disabled = true;
+    options.button.textContent = "保存中";
+  }
+  if (options.status) options.status.textContent = "";
 
   try {
     const data = await api(`/api/actor-profiles/${encodeURIComponent(person.id)}`, {
@@ -214,14 +134,312 @@ async function saveActorProfileMapping(person, options) {
       }
     });
     updatePersonActorProfile(person.id, data.profile);
-    options.status.textContent = "已保存";
+    if (options.status) options.status.textContent = "已保存";
     await selectPerson(person.id, { resetFilter: false });
   } catch (error) {
-    options.status.textContent = error.message || "保存失败";
+    if (options.status) options.status.textContent = error.message || "保存失败";
+    if (options.throwOnError) throw error;
   } finally {
-    options.button.disabled = false;
-    options.button.textContent = originalText;
+    if (options.button) {
+      options.button.disabled = false;
+      options.button.textContent = originalText;
+    }
   }
+}
+
+function createMappingField(labelText, control) {
+  const label = document.createElement("label");
+  label.className = "mapping-field";
+  const text = document.createElement("span");
+  text.textContent = labelText;
+  label.append(text, control);
+  return label;
+}
+
+function mappingButton(label, className = "folder-button") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = label;
+  return button;
+}
+
+function selectedSourcePaths(container) {
+  return [...container.querySelectorAll("input[data-source-path]:checked")]
+    .map((input) => input.dataset.sourcePath)
+    .filter(Boolean);
+}
+
+function setButtonBusy(button, busy, text = "") {
+  if (!button) return;
+  if (busy) {
+    button.dataset.originalText = button.textContent;
+    button.disabled = true;
+    if (text) button.textContent = text;
+  } else {
+    button.disabled = false;
+    if (button.dataset.originalText) button.textContent = button.dataset.originalText;
+    delete button.dataset.originalText;
+  }
+}
+
+function mappingAliasValues(person, profile) {
+  const primaryNames = new Set([person?.name, profile?.displayName, profile?.personName].filter(Boolean).map(normalizePersonNameValue));
+  return (profile?.aliases || []).filter((alias) => {
+    const key = normalizePersonNameValue(alias);
+    return key && !primaryNames.has(key);
+  });
+}
+
+function normalizePersonNameValue(value) {
+  return String(value || "").replace(/\s+/g, "").trim().toLowerCase();
+}
+
+async function openActorMappingModal(person) {
+  const initialProfile = person.actorProfile || {};
+  const overlay = document.createElement("div");
+  overlay.className = "mapping-modal-backdrop";
+  overlay.setAttribute("role", "presentation");
+
+  const modal = document.createElement("section");
+  modal.className = "mapping-modal";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-label", "编辑人物映射");
+
+  const header = document.createElement("header");
+  header.className = "mapping-modal-header";
+  const heading = document.createElement("div");
+  const title = document.createElement("h3");
+  title.textContent = "编辑映射";
+  const subtitle = document.createElement("p");
+  subtitle.textContent = person.actorProfile?.displayName || person.name;
+  heading.append(title, subtitle);
+  const close = mappingButton("关闭", "folder-button compact");
+  header.append(heading, close);
+
+  const content = document.createElement("div");
+  content.className = "mapping-modal-content";
+
+  const urlInput = document.createElement("input");
+  urlInput.type = "url";
+  urlInput.placeholder = "https://javdb.com/actors/BzpA";
+  urlInput.value = initialProfile.javdbUrl || "";
+
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.value = initialProfile.displayName || person.name;
+
+  const aliasesInput = document.createElement("textarea");
+  aliasesInput.rows = 4;
+  aliasesInput.spellcheck = false;
+  aliasesInput.placeholder = "一行一个，也可用逗号、顿号分隔";
+  aliasesInput.value = mappingAliasValues(person, initialProfile).join("\n");
+
+  const javdbSection = document.createElement("section");
+  javdbSection.className = "mapping-section";
+  const javdbHead = document.createElement("div");
+  javdbHead.className = "mapping-section-head";
+  javdbHead.innerHTML = "<strong>JavDB 映射</strong><span>保存 actor 页、显示名和别名</span>";
+  const javdbGrid = document.createElement("div");
+  javdbGrid.className = "mapping-grid";
+  javdbGrid.append(
+    createMappingField("JavDB actor 页", urlInput),
+    createMappingField("显示名", nameInput),
+    createMappingField("别名 / 曾用名", aliasesInput)
+  );
+  javdbSection.append(javdbHead, javdbGrid);
+
+  const sourceSection = document.createElement("section");
+  sourceSection.className = "mapping-section";
+  const sourceHead = document.createElement("div");
+  sourceHead.className = "mapping-section-head";
+  sourceHead.innerHTML = "<strong>本地来源</strong><span>选择这个人物对应的盘符和文件夹</span>";
+  const manualRow = document.createElement("div");
+  manualRow.className = "mapping-source-manual";
+  const manualInput = document.createElement("input");
+  manualInput.type = "text";
+  manualInput.placeholder = "例如 O:/[珍藏1]/本庄鈴";
+  const addManual = mappingButton("加入候选", "folder-button compact");
+  manualRow.append(manualInput, addManual);
+  const sourceList = document.createElement("div");
+  sourceList.className = "mapping-source-list";
+  sourceSection.append(sourceHead, manualRow, sourceList);
+
+  const footer = document.createElement("footer");
+  footer.className = "mapping-modal-footer";
+  const status = document.createElement("span");
+  status.className = "mapping-status";
+  const syncLocal = mappingButton("扫描本地并同步表单");
+  const refreshJavdb = mappingButton("访问 JavDB 更新片单");
+  const refreshAllJavdb = mappingButton("全量扫描有链接人物");
+  const save = mappingButton("保存映射");
+  footer.append(status, syncLocal, refreshJavdb, refreshAllJavdb, save);
+
+  content.append(javdbSection, sourceSection);
+  modal.append(header, content, footer);
+  overlay.append(modal);
+  document.body.append(overlay);
+
+  let manualSourcePaths = [];
+  let modalPerson = person;
+
+  const closeModal = () => overlay.remove();
+  close.addEventListener("click", closeModal);
+
+  async function loadMapping() {
+    status.textContent = "正在同步映射";
+    const query = manualSourcePaths.map((sourcePath) => `sourcePath=${encodeURIComponent(sourcePath)}`).join("&");
+    const data = await api(`/api/admin/person-mapping/${encodeURIComponent(modalPerson.id)}${query ? `?${query}` : ""}`);
+    modalPerson = data.person || modalPerson;
+    renderSourceCandidates(data.sourceCandidates || []);
+    status.textContent = "映射已同步";
+  }
+
+  function renderSourceCandidates(candidates) {
+    sourceList.innerHTML = "";
+    const visibleCandidates = candidates.filter((candidate) => candidate.selected || manualSourcePaths.some((item) => normalizeSourcePath(item) === normalizeSourcePath(candidate.sourcePath)));
+    if (!visibleCandidates.length) {
+      const empty = document.createElement("div");
+      empty.className = "mapping-source-empty";
+      empty.textContent = "未选择本地来源。需要时在上方手动添加路径。";
+      sourceList.append(empty);
+      return;
+    }
+
+    for (const candidate of visibleCandidates) {
+      const row = document.createElement("label");
+      row.className = `mapping-source-row${candidate.exists ? "" : " missing"}`;
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.dataset.sourcePath = candidate.sourcePath;
+      checkbox.checked = Boolean((candidate.selected || manualSourcePaths.some((item) => normalizeSourcePath(item) === normalizeSourcePath(candidate.sourcePath))) && candidate.exists);
+      checkbox.disabled = !candidate.exists;
+      const main = document.createElement("span");
+      main.className = "mapping-source-main";
+      main.textContent = candidate.sourcePath;
+      const meta = document.createElement("span");
+      meta.className = "mapping-source-meta";
+      meta.textContent = `${candidate.root || "资料库"} · ${candidate.exists ? "已存在" : "未找到"}`;
+      row.append(checkbox, main, meta);
+      sourceList.append(row);
+    }
+  }
+
+  addManual.addEventListener("click", async () => {
+    const value = manualInput.value.trim();
+    if (!value) return;
+    if (!manualSourcePaths.some((item) => normalizeSourcePath(item) === normalizeSourcePath(value))) {
+      manualSourcePaths.push(value);
+    }
+    manualInput.value = "";
+    try {
+      await loadMapping();
+    } catch (error) {
+      status.textContent = error.message || "加入候选失败";
+    }
+  });
+
+  save.addEventListener("click", async () => {
+    await saveActorProfileMapping(modalPerson, {
+      javdbUrl: urlInput.value,
+      displayName: nameInput.value,
+      aliases: linesFromTextarea(aliasesInput.value),
+      button: save,
+      status
+    });
+  });
+
+  syncLocal.addEventListener("click", async () => {
+    setButtonBusy(syncLocal, true, "扫描中");
+    status.textContent = "正在扫描选中的本地来源";
+    try {
+      const sourcePaths = selectedSourcePaths(sourceList);
+      const data = await api(`/api/admin/rescan-person?limit=1&sort=releaseDesc`, {
+        method: "POST",
+        body: { personId: modalPerson.id, sourcePaths }
+      });
+      modalPerson = data.person || modalPerson;
+      await selectPerson(modalPerson.id, { resetFilter: false });
+      await loadMapping();
+      status.textContent = `本地已同步：${formatNumber(modalPerson.workCount)} 部`;
+    } catch (error) {
+      status.textContent = error.message || "扫描失败";
+    } finally {
+      setButtonBusy(syncLocal, false);
+    }
+  });
+
+  refreshJavdb.addEventListener("click", async () => {
+    setButtonBusy(refreshJavdb, true, "访问中");
+    status.textContent = "正在启动 JavDB 更新";
+    try {
+      await saveActorProfileMapping(modalPerson, {
+        javdbUrl: urlInput.value,
+        displayName: nameInput.value,
+        aliases: linesFromTextarea(aliasesInput.value),
+        status: null,
+        throwOnError: true
+      });
+      const data = await api("/api/admin/refresh-actor-movies", {
+        method: "POST",
+        body: { personId: modalPerson.id, sleep: 1, maxPages: 1 }
+      });
+      status.textContent = `JavDB 任务已启动：${data.task?.id || ""}`;
+      await waitForAdminTask(data.task?.id, status);
+      await selectPerson(modalPerson.id, { resetFilter: false });
+      await loadMapping();
+      status.textContent = "JavDB 片单已更新";
+    } catch (error) {
+      status.textContent = error.message || "JavDB 更新失败";
+    } finally {
+      setButtonBusy(refreshJavdb, false);
+    }
+  });
+
+  refreshAllJavdb.addEventListener("click", async () => {
+    setButtonBusy(refreshAllJavdb, true, "扫描中");
+    status.textContent = "正在启动全量 JavDB 扫描";
+    try {
+      const data = await api("/api/admin/refresh-actor-movies", {
+        method: "POST",
+        body: { fullScan: true, sleep: 1, maxPages: 0 }
+      });
+      status.textContent = `全量任务已启动：${data.task?.id || ""}`;
+      await waitForAdminTask(data.task?.id, status);
+      await selectPerson(modalPerson.id, { resetFilter: false });
+      await loadMapping();
+      status.textContent = "全量 JavDB 扫描已完成";
+    } catch (error) {
+      status.textContent = error.message || "全量扫描失败";
+    } finally {
+      setButtonBusy(refreshAllJavdb, false);
+    }
+  });
+
+  try {
+    await loadMapping();
+  } catch (error) {
+    status.textContent = error.message || "映射读取失败";
+  }
+
+  window.setTimeout(() => urlInput.focus(), 0);
+}
+
+async function waitForAdminTask(taskId, status) {
+  if (!taskId) return;
+  for (let index = 0; index < 180; index += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    const data = await api("/api/admin/tasks");
+    const task = (data.tasks || []).find((item) => item.id === taskId);
+    if (!task) continue;
+    status.textContent = `JavDB ${task.status}${task.logs?.length ? ` · ${task.logs.at(-1)}` : ""}`;
+    if (task.status === "done") return;
+    if (task.status === "error" || task.status === "stopped") {
+      throw new Error(task.logs?.at(-1) || "JavDB 更新失败");
+    }
+  }
+  throw new Error("JavDB 更新还在运行，请稍后刷新查看");
 }
 
 function updatePersonActorProfile(personId, profile) {
@@ -276,11 +494,19 @@ async function openLocalFolder(sourcePath, button) {
   }
 }
 
-function createProfileMetric(label, value) {
-  const item = document.createElement("span");
-  item.innerHTML = `<strong></strong><small></small>`;
-  item.querySelector("strong").textContent = formatNumber(value);
-  item.querySelector("small").textContent = label;
+function createProfileSummary(person, profile) {
+  const item = document.createElement("div");
+  item.className = "person-profile-summary";
+  const parts = [`本地 ${formatNumber(person.workCount)} 部 / ${formatNumber(person.videoCount)} 视频`];
+  const actorCount = person.actorMovieCount ?? profile?.movieCount ?? 0;
+  if (actorCount > 0 || profile?.javdbUrl) {
+    parts.push(`JavDB ${formatNumber(actorCount)}`);
+    const missing = person.missingLocalWorkCount ?? 0;
+    if (missing > 0) parts.push(`未下载 ${formatNumber(missing)}`);
+  } else if (person.playableCount) {
+    parts.push(`可播 ${formatNumber(person.playableCount)}`);
+  }
+  item.textContent = parts.join(" · ");
   return item;
 }
 

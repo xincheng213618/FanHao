@@ -1,14 +1,16 @@
 import { createApiClient, addQueryParam } from "./js/api.js?v=20260701-gallery-merge-01";
 import { createAdminModal } from "./js/pages/admin-modal.js?v=20260701-gallery-merge-01";
 import { createGalleryPage } from "./js/pages/gallery-page.js?v=20260701-gallery-merge-01";
-import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260701-gallery-merge-01";
+import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260705-movie-sidebar-label-01";
 import { createNovelPage } from "./js/pages/novel-page.js?v=20260701-gallery-merge-01";
-import { createPeoplePage } from "./js/pages/people-page.js?v=20260701-gallery-merge-01";
-import { createPersonProfile } from "./js/pages/person-profile.js?v=20260701-gallery-merge-01";
-import { createRankingPage } from "./js/pages/ranking-page.js?v=20260701-gallery-merge-01";
+import { createPeoplePage } from "./js/pages/people-page.js?v=20260705-remove-fanhao-sidebar-02";
+import { createPersonProfile } from "./js/pages/person-profile.js?v=20260706-person-sync-after-javdb-01";
+import { createRankingPage } from "./js/pages/ranking-page.js?v=20260704-ranking-controls-01";
 import { createToolsPage } from "./js/pages/tools-page.js?v=20260701-gallery-merge-01";
-import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260701-gallery-merge-01";
-import { DEFAULT_GALLERY_PHOTO_CATEGORY, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260701-gallery-merge-01";
+import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260705-local-marker-a-01";
+import { DEFAULT_GALLERY_PHOTO_CATEGORY, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260705-top-subnav-01";
+
+repairLegacyShell();
 
 const state = {
   library: null,
@@ -18,9 +20,8 @@ const state = {
   works: [],
   activeView: "people",
   peopleIndexScrollTop: 0,
-  personQuery: "",
   workQuery: "",
-  sortMode: "title",
+  sortMode: "releaseDesc",
   filterMode: "all",
   showMissingLocalWorks: readStoredFlag("fanhao.showMissingLocalWorks", true),
   showCompilationWorks: readStoredFlag("fanhao.showCompilationWorks", false),
@@ -55,12 +56,14 @@ const state = {
   favoriteFolders: [],
   selectedFavoriteFolderId: "all",
   selectedHistoryRange: "30",
+  studios: [],
+  selectedStudio: null,
+  selectedStudioSeriesId: "all",
   personWorksTotal: 0,
   personWorksFacets: null,
   personWorksLoadingMore: false,
   personPageSize: 120,
   personVisibleLimit: 120,
-  personSearchTimer: null,
   openWorkSeq: 0,
   infoRenderTimer: null,
   lastFocusedElement: null,
@@ -125,19 +128,23 @@ const state = {
   restoringRoute: false
 };
 
+function repairLegacyShell() {
+  const legacySidebar = document.querySelector(".app-shell > aside.sidebar");
+  if (legacySidebar) {
+    legacySidebar.remove();
+    document.querySelector(".app-shell")?.style.setProperty("display", "block");
+  }
+  document.querySelector(".product-actions")?.style.setProperty("display", "flex");
+}
+
 const els = {
   productTabs: [...document.querySelectorAll("[data-product-view]")],
   topRescanButton: document.querySelector("#topRescanButton"),
   topAdminLink: document.querySelector("#topAdminLink"),
-  librarySummary: document.querySelector("#librarySummary"),
-  rescanButton: document.querySelector("#rescanButton"),
-  adminButton: document.querySelector("#adminButton"),
-  personSearch: document.querySelector("#personSearch"),
-  personList: document.querySelector("#personList"),
   viewTabs: [...document.querySelectorAll(".view-tab")],
   workSearch: document.querySelector("#workSearch"),
-  sortSelect: document.querySelector("#sortSelect"),
-  filterSelect: document.querySelector("#filterSelect"),
+  sortSelect: null,
+  filterList: null,
   missingLocalToggle: document.querySelector("#missingLocalToggle"),
   collectionToggle: document.querySelector("#collectionToggle"),
   compilationConfigButton: document.querySelector("#compilationConfigButton"),
@@ -232,15 +239,13 @@ const peoplePage = createPeoplePage({
   clearWorkSearch,
   closeDrawer,
   coverUrl,
-  createInfoChip,
   currentPageScrollTop,
   displayPersonName,
   els,
   formatLibraryPaths,
   formatNumber,
+  getWorkFilterMode: serializedWorkFilterMode,
   hidePersonProfile,
-  includesText,
-  personSearchText,
   renderPersonProfile,
   renderPersonWorkStats,
   renderWorks,
@@ -257,11 +262,9 @@ const personProfilePage = createPersonProfile({
   coverUrl,
   els,
   formatLibraryPath,
-  formatLibraryPaths,
   formatNumber,
   linesFromTextarea,
   normalizeSourcePath,
-  renderPeople,
   selectPerson,
   sourcePriority,
   state
@@ -394,10 +397,10 @@ const workDetailPage = createWorkDetailPage({
   formatLibraryPath,
   formatTime,
   goToPerson,
+  searchWorksByText,
   openWorkCard,
   renderFavoriteFolderControls,
   renderStatsForWorks,
-  renderSummary,
   renderWorks,
   retryCoverUrl,
   state,
@@ -526,7 +529,8 @@ function currentRouteSnapshot(overrides = {}) {
 }
 
 function writeRoute(route, mode = "push") {
-  if (!state.routeReady || state.restoringRoute || !window.history?.pushState) return;
+  if (!state.routeReady || !window.history?.pushState) return;
+  if (state.restoringRoute && mode !== "replace") return;
   const next = normalizeRoute(route);
   const url = routeUrl(next, { initialParams });
   const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash || ""}`;
@@ -584,8 +588,22 @@ async function applyRoute(route) {
       await loadSearchResults(next.q, { skipRoute: true });
     } else if (next.view === "people") {
       clearWorkSearch();
-      if (next.personId && state.people.some((person) => person.id === next.personId)) {
-        await selectPerson(next.personId, { resetFilter: false, captureIndexScroll: false, skipRoute: true });
+      const routePerson = next.personId
+        ? state.people.find((person) => person.id === next.personId)
+        : null;
+      if (routePerson) {
+        await selectPerson(routePerson.id, {
+          resetFilter: false,
+          captureIndexScroll: false,
+          skipRoute: routePerson.id === next.personId,
+          replaceRoute: routePerson.id !== next.personId
+        });
+      } else if (next.personId) {
+        await selectPerson(next.personId, {
+          resetFilter: false,
+          captureIndexScroll: false,
+          replaceRoute: true
+        });
       } else {
         showPeopleIndex({ restoreScroll: true, skipRoute: true });
       }
@@ -605,7 +623,7 @@ async function applyRoute(route) {
     }
 
     if (next.workId) {
-      await openWork(next.workId, next.videoId || null, { skipRoute: true });
+      window.location.href = playerPageUrl(next.workId, next.videoId || "");
     }
   } finally {
     state.restoringRoute = false;
@@ -735,15 +753,6 @@ function displayPersonName(person) {
   return person?.actorProfile?.displayName || person?.name || "";
 }
 
-function personSearchText(person) {
-  return [
-    person?.name,
-    person?.actorProfile?.displayName,
-    person?.actorProfile?.personName,
-    ...(person?.actorProfile?.aliases || [])
-  ].filter(Boolean).join("\n");
-}
-
 function workPersonDisplayName(work) {
   return work?.personDisplayName || work?.personName || "";
 }
@@ -790,13 +799,11 @@ function formatLibraryPaths(values) {
 }
 
 async function loadLibrary(options = {}) {
-  els.librarySummary.textContent = "正在读取索引";
   const data = await api("/api/library");
   state.library = data;
   state.accessMode = data.access?.mode || "local";
   state.accessHints = data.access?.hints || {};
   state.uiConfig = normalizeUiConfig(data.uiConfig || state.uiConfig);
-  if (els.adminButton) els.adminButton.hidden = state.accessMode !== "local";
   if (els.topAdminLink) els.topAdminLink.hidden = state.accessMode !== "local";
   if (els.topRescanButton) els.topRescanButton.hidden = state.accessMode !== "local";
   if (els.missingLocalToggle) els.missingLocalToggle.checked = state.showMissingLocalWorks;
@@ -811,10 +818,7 @@ async function loadLibrary(options = {}) {
     state.selectedPersonId = null;
   }
 
-  renderSummary();
-  if (options.deferMainRender) {
-    renderPeople();
-  } else {
+  if (!options.deferMainRender) {
     setActiveView(state.activeView || "people");
   }
 }
@@ -853,14 +857,6 @@ function sortPeopleForList(people) {
   });
 }
 
-function renderSummary() {
-  const totals = state.library?.totals || {};
-  const rootCount = state.library?.availableRoots?.length || 0;
-  const favoriteCount = state.library?.user?.favoriteCount || 0;
-  const mode = state.accessMode === "lan" ? "局域网" : "本机";
-  els.librarySummary.textContent = `${mode} · ${formatNumber(rootCount)} 盘 · ${formatNumber(totals.people)} 人 · ${formatNumber(totals.videos)} 视频 · ${formatNumber(favoriteCount)} 收藏`;
-}
-
 function productViewForActiveView(view = state.activeView) {
   if (view === "gallery") return "gallery";
   if (view === "novels") return "novels";
@@ -868,12 +864,21 @@ function productViewForActiveView(view = state.activeView) {
   return "people";
 }
 
+function searchWorksByText(value) {
+  const query = String(value || "").trim();
+  if (!query) return;
+  if (els.workSearch) els.workSearch.value = query;
+  closeDrawer({ replaceRoute: false });
+  loadSearchResults(query);
+}
+
 function productButtonActive(button, view = state.activeView) {
   const productView = button.dataset.productView || "people";
   if (productView === "gallery") {
     const mode = button.dataset.galleryMode || "photo";
-    if (mode === "photo") return view === "gallery" && ["photo", "manga"].includes(state.gallery.mode);
-    if (mode === "media") return view === "gallery" && ["media", "movie", "tv"].includes(state.gallery.mode);
+    const isPrimaryTab = button.classList.contains("product-tab");
+    if (isPrimaryTab && mode === "photo") return view === "gallery" && ["photo", "manga"].includes(state.gallery.mode);
+    if (isPrimaryTab && mode === "media") return view === "gallery" && ["media", "movie", "tv"].includes(state.gallery.mode);
     return view === "gallery" && mode === state.gallery.mode;
   }
   return productViewForActiveView(view) === productView;
@@ -896,10 +901,11 @@ function syncNavigationState(view = state.activeView) {
 
 function setActiveView(view, options = {}) {
   view = URL_VIEW_NAMES.has(view) ? view : "people";
+  const previousView = state.activeView;
   state.activeView = view;
   if (view !== "rankings" && state.sortMode === "ranking") {
-    state.sortMode = "title";
-    els.sortSelect.value = "title";
+    state.sortMode = "releaseDesc";
+    if (els.sortSelect) els.sortSelect.value = "releaseDesc";
   }
   if (view !== "search") {
     state.searchPeople = [];
@@ -908,7 +914,6 @@ function setActiveView(view, options = {}) {
     state.searchTotal = 0;
   }
   syncNavigationState(view);
-  updateActivePersonButton();
 
   if (view === "favorites") {
     loadFavorites();
@@ -924,6 +929,19 @@ function setActiveView(view, options = {}) {
 
   if (view === "rankings") {
     rankingPage.enter(options);
+    return;
+  }
+
+  if (view === "studios") {
+    loadStudios();
+    syncRouteAfterNavigation(options);
+    return;
+  }
+
+  if (view === "vr") {
+    if (previousView !== "vr" && !options.keepFilter) state.filterMode = "all";
+    loadVrWorks();
+    syncRouteAfterNavigation(options);
     return;
   }
 
@@ -958,14 +976,6 @@ function setActiveView(view, options = {}) {
 
   showPeopleIndex({ skipRoute: true });
   syncRouteAfterNavigation(options);
-}
-
-function renderPeople() {
-  peoplePage.renderPeople();
-}
-
-function updateActivePersonButton() {
-  peoplePage.updateActivePersonButton();
 }
 
 function showPeopleIndex(options = {}) {
@@ -1105,6 +1115,129 @@ async function loadHistory() {
   renderWorks("暂无观看记录。");
 }
 
+async function loadVrWorks() {
+  els.workGrid.innerHTML = `<div class="empty-state">正在加载 VR 作品</div>`;
+  const params = new URLSearchParams({
+    filter: "vr",
+    sort: state.sortMode || "releaseDesc",
+    limit: "2000"
+  });
+  const data = await api(`/api/works?${params}`);
+  state.selectedPersonId = null;
+  state.selectedPerson = null;
+  state.selectedStudio = null;
+  state.selectedStudioSeriesId = "all";
+  state.searchPeople = [];
+  state.personWorksTotal = 0;
+  state.personWorksFacets = null;
+  hidePersonProfile();
+  state.works = data.works || [];
+  resetWorkPaging();
+  const total = data.total ?? state.works.length;
+  setMainHeader("VR", `全库 VR 作品 · ${formatNumber(total)} 部`);
+  renderStatsForWorks(state.works);
+  renderWorks("没有 VR 作品。");
+}
+
+async function loadStudios() {
+  els.workGrid.innerHTML = `<div class="empty-state">正在加载片商</div>`;
+  const data = await api("/api/studios?limit=500");
+  state.selectedPersonId = null;
+  state.selectedPerson = null;
+  state.selectedStudio = null;
+  state.selectedStudioSeriesId = "all";
+  state.works = [];
+  state.searchPeople = [];
+  state.personWorksTotal = 0;
+  state.personWorksFacets = null;
+  hidePersonProfile();
+  state.studios = data.makers || [];
+  setMainHeader("片商", "按片商浏览本地作品");
+  renderStudioIndex(data);
+}
+
+function renderStudioIndex(data = {}) {
+  els.statsRow.innerHTML = "";
+  els.workGrid.innerHTML = "";
+  if (!state.studios.length) {
+    appendEmpty("还没有片商数据。");
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const studio of state.studios) {
+    fragment.append(createStudioCard(studio));
+  }
+  els.workGrid.append(fragment);
+}
+
+function createStudioCard(studio) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "studio-card";
+  button.addEventListener("click", () => loadStudioDetail(studio.id));
+
+  const name = document.createElement("strong");
+  name.textContent = studio.name || "未命名片商";
+
+  const count = document.createElement("span");
+  count.textContent = `(${formatNumber(studio.localWorkCount || studio.workCount || 0)})`;
+
+  button.append(name, count);
+  return button;
+}
+
+async function loadStudioDetail(studioId, seriesId = "all") {
+  const params = new URLSearchParams({
+    seriesId,
+    sort: state.sortMode || "releaseDesc",
+    limit: "2000"
+  });
+  const data = await api(`/api/studios/${encodeURIComponent(studioId)}?${params}`);
+  state.selectedStudio = data.studio || null;
+  state.selectedStudioSeriesId = data.selectedSeriesId || seriesId || "all";
+  state.works = data.works || [];
+  resetWorkPaging();
+  const studio = state.selectedStudio;
+  const selectedSeries = (studio?.series || []).find((item) => item.id === state.selectedStudioSeriesId);
+  setMainHeader(studio?.name || "片商", selectedSeries ? `${selectedSeries.name} · ${formatNumber(data.total || 0)} 部` : `${formatNumber(data.total || 0)} 部本地作品`);
+  renderStatsForWorks(state.works);
+  renderStudioSeriesControls(studio);
+  renderWorks("这个片商暂无本地作品。");
+}
+
+function renderStudioSeriesControls(studio) {
+  if (state.activeView !== "studios" || !studio) return;
+  const series = (studio.series || []).filter((item) => Number(item.localWorkCount || 0) > 0);
+  const wrap = document.createElement("div");
+  wrap.className = "stat-quick-filters studio-series-controls";
+
+  const group = document.createElement("div");
+  group.className = "stat-filter-group";
+  const heading = document.createElement("span");
+  heading.className = "stat-filter-label";
+  heading.textContent = "系列";
+  group.append(heading);
+
+  const all = document.createElement("button");
+  all.type = "button";
+  all.className = `stat-filter-chip${state.selectedStudioSeriesId === "all" ? " active" : ""}`;
+  all.textContent = `全部 ${formatNumber(studio.localWorkCount || 0)}`;
+  all.addEventListener("click", () => loadStudioDetail(studio.id, "all"));
+  group.append(all);
+
+  for (const item of series) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `stat-filter-chip${state.selectedStudioSeriesId === item.id ? " active" : ""}`;
+    button.textContent = `${item.name} ${formatNumber(item.localWorkCount || 0)}`;
+    button.addEventListener("click", () => loadStudioDetail(studio.id, item.id));
+    group.append(button);
+  }
+
+  wrap.append(group);
+  els.statsRow.append(wrap);
+}
+
 function historyPath() {
   const params = new URLSearchParams();
   if (state.selectedHistoryRange && state.selectedHistoryRange !== "all") {
@@ -1168,9 +1301,14 @@ function setMainHeader(title, pathText) {
 function updateBackToPeopleIndexButton() {
   const productView = productViewForActiveView();
   document.body.classList.toggle("fanhao-view", productView === "people");
+  document.body.classList.toggle("people-index-view", state.activeView === "people" && !state.selectedPersonId);
   document.body.classList.toggle("person-detail-view", state.activeView === "people" && Boolean(state.selectedPersonId));
+  document.body.classList.toggle("ranking-view", state.activeView === "rankings");
+  document.body.classList.toggle("studio-index-view", state.activeView === "studios" && !state.selectedStudio);
   document.body.classList.toggle("tools-view", state.activeView === "tools");
   document.body.classList.toggle("gallery-view", state.activeView === "gallery");
+  document.body.classList.toggle("gallery-photo-view", state.activeView === "gallery" && ["photo", "manga"].includes(state.gallery.mode));
+  document.body.classList.toggle("gallery-media-view", state.activeView === "gallery" && ["media", "movie", "tv"].includes(state.gallery.mode));
   document.body.classList.toggle("novel-view", state.activeView === "novels");
   document.body.classList.toggle("novel-reader-active", state.activeView === "novels" && Boolean(state.novel?.chapter));
   syncNavigationState();
@@ -1202,6 +1340,117 @@ function createStatCard(label, value) {
   return stat;
 }
 
+const WORK_SORT_OPTIONS = [
+  ["releaseDesc", "发行最新"],
+  ["updated", "最近更新"],
+  ["title", "标题"],
+  ["ranking", "排行"],
+  ["releaseAsc", "发行最早"],
+  ["ratingDesc", "评分最高"],
+  ["ratingAsc", "评分最低"],
+  ["progress", "最近观看"],
+  ["sizeDesc", "文件大小"],
+  ["durationDesc", "时长"],
+  ["videos", "视频数量"]
+];
+
+const WORK_FILTER_OPTIONS = [
+  ["all", "全部"],
+  ["localMarkedA", "A 标记"],
+  ["playable", "可播放"],
+  ["favorite", "已收藏"],
+  ["progress", "有进度"],
+  ["info", "有资料"],
+  ["localOnly", "本地"],
+  ["rated", "有评分"],
+  ["highRating", "高分"],
+  ["vr", "VR"],
+  ["hasMagnet", "有磁链"],
+  ["missingLocal", "未下载"],
+  ["missingCover", "无封面"]
+];
+
+function createWorkSortControls() {
+  const group = document.createElement("div");
+  group.className = "stat-filter-group stat-sort-group";
+
+  const label = document.createElement("label");
+  label.className = "stat-filter-label";
+  label.htmlFor = "sortSelect";
+  label.textContent = "排序";
+
+  const select = document.createElement("select");
+  select.id = "sortSelect";
+  select.className = "stat-sort-select";
+  select.title = "排序";
+  select.setAttribute("aria-label", "作品排序");
+  for (const [value, text] of WORK_SORT_OPTIONS) {
+    select.append(new Option(text, value));
+  }
+  select.value = state.sortMode || "releaseDesc";
+  select.addEventListener("change", handleSortModeChange);
+  els.sortSelect = select;
+
+  group.append(label, select);
+  return group;
+}
+
+function createWorkFilterControls() {
+  const group = document.createElement("div");
+  group.className = "stat-filter-group stat-filter-list-group";
+
+  const list = document.createElement("div");
+  list.className = "stat-filter-list";
+  list.setAttribute("role", "list");
+  list.setAttribute("aria-label", "作品筛选");
+  for (const [value, text] of WORK_FILTER_OPTIONS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `stat-filter-chip${workFilterIsActive(value) ? " active" : ""}`;
+    button.textContent = text;
+    button.setAttribute("aria-pressed", String(workFilterIsActive(value)));
+    button.addEventListener("click", () => toggleWorkFilter(value));
+    list.append(button);
+  }
+  els.filterList = list;
+
+  group.append(list);
+  return group;
+}
+
+function handleSortModeChange(event) {
+  state.sortMode = event.target.value;
+  resetWorkPaging();
+  if (state.activeView === "search" && state.searchQuery) {
+    loadSearchResults(state.searchQuery);
+    return;
+  }
+  if (state.activeView === "people" && state.selectedPersonId) {
+    selectPerson(state.selectedPersonId, { resetFilter: false });
+    return;
+  }
+  if (state.activeView === "rankings") {
+    renderRankingStats();
+  }
+  renderWorks();
+}
+
+function handleFilterModeChange() {
+  resetWorkPaging();
+  if (state.activeView === "search" && state.searchQuery) {
+    loadSearchResults(state.searchQuery);
+    return;
+  }
+  if (state.activeView === "people" && state.selectedPersonId) {
+    selectPerson(state.selectedPersonId, { resetFilter: false });
+    return;
+  }
+  if (state.activeView === "rankings") {
+    renderRankingStats();
+  }
+  renderWorks();
+}
+
 function renderStatsForWorks(works, person = null) {
   const hasActorCache = person
     ? (person.actorMovieCount ?? person.actorProfile?.movieCount ?? 0) > 0 || Boolean(person.actorProfile?.javdbUrl)
@@ -1231,7 +1480,7 @@ function renderStatsForWorks(works, person = null) {
   for (const [label, value] of stats) {
     els.statsRow.append(createStatCard(label, value));
   }
-  appendMetadataQuickFilters(works);
+  appendWorkControls(works);
 }
 
 function renderSearchStats() {
@@ -1248,13 +1497,12 @@ function renderSearchStats() {
   for (const [label, value] of stats) {
     els.statsRow.append(createStatCard(label, value));
   }
-  appendMetadataQuickFilters(state.works);
+  appendWorkControls(state.works);
 }
 
 function searchFilterLabel() {
-  const option = els.filterSelect?.selectedOptions?.[0];
-  if (!option || state.filterMode === "all") return "当前筛选";
-  return `${option.textContent || "当前"}结果`;
+  const labels = selectedWorkFilters().map(workFilterLabel);
+  return labels.length ? `${labels.join(" + ")}结果` : "当前筛选";
 }
 
 function searchVisibleCount() {
@@ -1268,34 +1516,24 @@ function renderPersonWorkStats() {
     return;
   }
 
-  const facets = state.personWorksFacets || {};
-  const stats = [
-    ["人物作品", facets.all ?? person.workCount ?? state.personWorksTotal],
-    [searchFilterLabel(), state.personWorksTotal || state.works.length],
-    ["已显示", searchVisibleCount()],
-    ["本地", facets.localOnly ?? state.works.filter((work) => !work.missingLocal).length],
-    ["未下载", facets.missingLocal ?? person.missingLocalWorkCount ?? state.works.filter((work) => work.missingLocal).length],
-    ["有评分", facets.rated ?? state.works.filter((work) => numericRating(work.infoSummary?.rating) !== null).length]
-  ];
-
   els.statsRow.innerHTML = "";
-  for (const [label, value] of stats) {
-    els.statsRow.append(createStatCard(label, value));
-  }
-  appendMetadataQuickFilters(state.works);
+  appendWorkControls(state.works);
 }
 
-function appendMetadataQuickFilters(works) {
-  const groups = [
-    ["类别", topInfoValues(works, (info) => info.tags, 8)],
-    ["片商", topInfoValues(works, (info) => [info.maker, info.label], 6)],
-    ["系列", topInfoValues(works, (info) => info.series, 4)]
-  ].filter(([, items]) => items.length);
-
-  if (!groups.length) return;
-
+function appendWorkControls(works) {
   const wrap = document.createElement("div");
   wrap.className = "stat-quick-filters";
+  wrap.append(createWorkFilterControls(), createWorkSortControls());
+  appendMetadataQuickFilters(works, wrap);
+  els.statsRow.append(wrap);
+}
+
+function appendMetadataQuickFilters(works, wrap) {
+  appendLocalMarkerQuickFilters(works, wrap);
+
+  const groups = [
+    ["片商", topInfoValues(works, (info) => [info.maker, info.label], 6)]
+  ].filter(([, items]) => items.length);
 
   for (const [label, items] of groups) {
     const group = document.createElement("div");
@@ -1317,8 +1555,81 @@ function appendMetadataQuickFilters(works) {
 
     wrap.append(group);
   }
+}
 
-  els.statsRow.append(wrap);
+function appendLocalMarkerQuickFilters(works, wrap) {
+  const count = (works || []).filter((work) => (work.localMarkers || []).includes("A")).length;
+  if (!count) return;
+
+  const group = document.createElement("div");
+  group.className = "stat-filter-group";
+  const heading = document.createElement("span");
+  heading.className = "stat-filter-label";
+  heading.textContent = "标记";
+  group.append(heading);
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `stat-filter-chip${workFilterIsActive("localMarkedA") ? " active" : ""}`;
+  button.textContent = `A ${formatNumber(count)}`;
+  button.title = "筛选 A 标记作品";
+  button.addEventListener("click", () => setLocalMarkerFilter("A"));
+  group.append(button);
+
+  wrap.append(group);
+}
+
+function workFilterLabel(filter) {
+  return {
+    all: "全部",
+    playable: "可播放",
+    favorite: "已收藏",
+    progress: "有进度",
+    info: "有资料",
+    localOnly: "本地",
+    rated: "有评分",
+    highRating: "高分",
+    vr: "VR",
+    hasMagnet: "有磁链",
+    localMarkedA: "A 标记",
+    missingLocal: "未下载",
+    missingCover: "无封面"
+  }[filter] || "当前";
+}
+
+function selectedWorkFilters() {
+  return normalizeWorkFilters(state.filterMode);
+}
+
+function normalizeWorkFilters(value) {
+  const values = Array.isArray(value) ? value : String(value || "all").split(",");
+  return [...new Set(values.map((item) => String(item || "").trim()).filter((item) => item && item !== "all"))];
+}
+
+function serializedWorkFilterMode() {
+  const filters = selectedWorkFilters();
+  return filters.length ? filters.join(",") : "all";
+}
+
+function workFilterIsActive(value) {
+  const filters = selectedWorkFilters();
+  return value === "all" ? filters.length === 0 : filters.includes(value);
+}
+
+function setWorkFilters(filters) {
+  const normalized = normalizeWorkFilters(filters);
+  state.filterMode = normalized.length ? normalized.join(",") : "all";
+  handleFilterModeChange();
+}
+
+function toggleWorkFilter(value) {
+  if (value === "all") {
+    setWorkFilters([]);
+    return;
+  }
+  const filters = selectedWorkFilters();
+  const next = filters.includes(value) ? filters.filter((item) => item !== value) : [...filters, value];
+  setWorkFilters(next);
 }
 
 function topInfoValues(works, selectValues, limit) {
@@ -1360,26 +1671,12 @@ function visibleWorks() {
     works = works.filter((work) => !isCompilationWork(work));
   }
 
-  if (!state.showMissingLocalWorks && state.filterMode !== "missingLocal") {
+  const activeFilters = selectedWorkFilters();
+  if (!state.showMissingLocalWorks && !activeFilters.includes("missingLocal")) {
     works = works.filter((work) => !work.missingLocal);
   }
 
-  works = works.filter((work) => {
-    if (state.filterMode === "playable") return work.playableCount > 0;
-    if (state.filterMode === "favorite") return work.favorite;
-    if (state.filterMode === "progress") return Boolean(work.progress);
-    if (state.filterMode === "info") return work.infoCount > 0;
-    if (state.filterMode === "localOnly") return !work.missingLocal;
-    if (state.filterMode === "rated") return numericRating(work.infoSummary?.rating) !== null;
-    if (state.filterMode === "highRating") {
-      const rating = numericRating(work.infoSummary?.rating);
-      return rating !== null && rating >= 4;
-    }
-    if (state.filterMode === "vr") return isVrWork(work);
-    if (state.filterMode === "missingLocal") return Boolean(work.missingLocal);
-    if (state.filterMode === "missingCover") return !workCoverUrl(work);
-    return true;
-  });
+  works = works.filter((work) => activeFilters.every((filter) => clientWorkMatchesFilter(work, filter)));
 
   works.sort((a, b) => {
     if (state.sortMode === "ranking") return compareWorkRanking(a, b) || compareWorkTitle(a, b);
@@ -1396,6 +1693,25 @@ function visibleWorks() {
   });
 
   return works;
+}
+
+function clientWorkMatchesFilter(work, filter) {
+  if (filter === "playable") return work.playableCount > 0;
+  if (filter === "favorite") return work.favorite;
+  if (filter === "progress") return Boolean(work.progress);
+  if (filter === "info") return work.infoCount > 0;
+  if (filter === "localOnly") return !work.missingLocal;
+  if (filter === "rated") return numericRating(work.infoSummary?.rating) !== null;
+  if (filter === "highRating") {
+    const rating = numericRating(work.infoSummary?.rating);
+    return rating !== null && rating >= 4;
+  }
+  if (filter === "vr") return isVrWork(work);
+  if (filter === "hasMagnet") return Boolean(work.missingLocal && work.availability?.hasMagnet);
+  if (filter === "localMarkedA") return (work.localMarkers || []).includes("A");
+  if (filter === "missingLocal") return Boolean(work.missingLocal);
+  if (filter === "missingCover") return !workCoverUrl(work);
+  return true;
 }
 
 function compareWorkRanking(a, b) {
@@ -1503,7 +1819,24 @@ function applyWorkSearch(query) {
 
 function clearWorkFilter() {
   state.filterMode = "all";
-  els.filterSelect.value = "all";
+}
+
+function setLocalMarkerFilter(marker = "A") {
+  const nextFilter = String(marker || "").toUpperCase() === "A" ? "localMarkedA" : "all";
+  state.filterMode = nextFilter;
+  resetWorkPaging();
+  if (state.activeView === "search" && state.searchQuery) {
+    loadSearchResults(state.searchQuery);
+    return;
+  }
+  if (state.activeView === "people" && state.selectedPersonId) {
+    selectPerson(state.selectedPersonId, { resetFilter: false });
+    return;
+  }
+  if (state.activeView === "rankings") {
+    renderRankingStats();
+  }
+  renderWorks();
 }
 
 async function loadSearchResults(query, options = {}) {
@@ -1531,19 +1864,17 @@ async function loadSearchResults(query, options = {}) {
   const enteringSearch = state.activeView !== "search";
   if (state.activeView !== "search") {
     state.searchReturnView = state.activeView || "people";
-    if (state.filterMode !== "all") {
+    if (selectedWorkFilters().length) {
       state.filterMode = "all";
-      els.filterSelect.value = "all";
     }
     if (state.sortMode === "ranking") {
-      state.sortMode = "title";
-      els.sortSelect.value = "title";
+      state.sortMode = "releaseDesc";
+      if (els.sortSelect) els.sortSelect.value = "releaseDesc";
     }
   }
 
   state.activeView = "search";
   syncNavigationState("search");
-  renderPeople();
   hidePersonProfile();
   setMainHeader(`搜索：${normalizedQuery}`, "全库 · 番号 / 标题 / 文件名 / 人物 / 类别 / 片商");
   els.statsRow.innerHTML = "";
@@ -1587,8 +1918,8 @@ async function fetchSearchPage(query, offset) {
     q: query,
     limit: String(searchPageSize()),
     offset: String(offset || 0),
-    sort: state.sortMode || "updated",
-    filter: state.filterMode || "all"
+    sort: state.sortMode || "releaseDesc",
+    filter: serializedWorkFilterMode()
   });
   return api(`/api/search?${params}`);
 }
@@ -1866,12 +2197,98 @@ function renderEmpty(message) {
 function appendEmpty(message) {
   const empty = document.createElement("div");
   empty.className = "empty-state";
-  empty.textContent = message;
+  const stateInfo = emptyStateInfo(message);
+
+  const copy = document.createElement("div");
+  copy.className = "empty-state-copy";
+
+  const title = document.createElement("strong");
+  title.textContent = stateInfo.title;
+  const detail = document.createElement("span");
+  detail.textContent = stateInfo.detail;
+  copy.append(title, detail);
+  empty.append(copy);
+
+  if (stateInfo.actions.length) {
+    const actions = document.createElement("div");
+    actions.className = "empty-state-actions";
+    for (const action of stateInfo.actions) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = action.primary ? "folder-button" : "text-button";
+      button.textContent = action.label;
+      button.addEventListener("click", action.run);
+      actions.append(button);
+    }
+    empty.append(actions);
+  }
   els.workGrid.append(empty);
 }
 
-function setGalleryStatus(message) {
-  galleryRenderer.setStatus(message);
+function emptyStateInfo(message) {
+  const activeFilters = selectedWorkFilters();
+  const hasFilteredWorks = state.works.length > 0;
+  const isPerson = state.activeView === "people" && Boolean(state.selectedPersonId);
+  const actions = [];
+
+  if (isPerson) {
+    if (hasFilteredWorks || activeFilters.length || state.workQuery.trim()) {
+      actions.push({ label: "清除筛选", primary: true, run: clearEmptyStateFilters });
+      if (!state.showMissingLocalWorks) actions.push({ label: "显示未下载", run: showMissingLocalFromEmptyState });
+      return {
+        title: "当前筛选没有作品",
+        detail: "这个人物仍在资料库中，换个筛选条件可以继续查看。",
+        actions
+      };
+    }
+
+    actions.push({ label: "返回人物列表", primary: true, run: returnToPeopleIndex });
+    if (!state.showMissingLocalWorks) actions.push({ label: "显示未下载", run: showMissingLocalFromEmptyState });
+    return {
+      title: "本地作品已清空",
+      detail: `${state.selectedPerson?.name || "这个人物"}还保留在资料库中，目前没有本地视频文件。`,
+      actions
+    };
+  }
+
+  if (state.activeView === "search") {
+    actions.push({ label: "清空搜索", primary: true, run: () => submitWorkSearch("") });
+    return {
+      title: "没有搜到结果",
+      detail: message || "换一个番号、标题、人物或片商继续搜索。",
+      actions
+    };
+  }
+
+  if (activeFilters.length || state.workQuery.trim()) {
+    actions.push({ label: "清除筛选", primary: true, run: clearEmptyStateFilters });
+    if (!state.showMissingLocalWorks) actions.push({ label: "显示未下载", run: showMissingLocalFromEmptyState });
+    return {
+      title: "当前条件没有作品",
+      detail: message || "调整筛选或搜索条件后再试。",
+      actions
+    };
+  }
+
+  return {
+    title: message || "这里暂时没有内容",
+    detail: "资料库更新后会显示在这里。",
+    actions
+  };
+}
+
+function clearEmptyStateFilters() {
+  clearWorkSearch();
+  resetWorkPaging();
+  setWorkFilters([]);
+}
+
+function showMissingLocalFromEmptyState() {
+  state.showMissingLocalWorks = true;
+  writeStoredFlag("fanhao.showMissingLocalWorks", true);
+  if (els.missingLocalToggle) els.missingLocalToggle.checked = true;
+  resetWorkPaging();
+  renderWorks();
 }
 
 function renderGalleryStats() {
@@ -1890,16 +2307,8 @@ function resetGalleryReader() {
   galleryRenderer.resetReader();
 }
 
-function syncGalleryRoute(mode = "push") {
-  galleryRenderer.syncRoute(mode);
-}
-
 function galleryModeLabel(mode) {
   return galleryRenderer.modeLabel(mode);
-}
-
-function galleryMediaKindForMode(mode) {
-  return galleryRenderer.mediaKindForMode(mode);
 }
 
 async function openPhotoSet(albumId, options = {}) {
@@ -2133,7 +2542,7 @@ function createWorkCard(work, index = 0) {
   const flags = document.createElement("div");
   flags.className = "work-card-flags";
   if (work.ranking?.rankNo) flags.append(createInfoChip(`TOP ${formatNumber(work.ranking.rankNo)}`, "rank"));
-  if (work.missingLocal) flags.append(createInfoChip("未下载", "missing"));
+  for (const chip of createAvailabilityChips(work)) flags.append(chip);
   if (work.infoCount > 0) flags.append(createInfoChip(`${formatNumber(work.infoCount)} 资料`));
   if (work.progress?.percent) flags.append(createInfoChip(`看到 ${Math.floor(work.progress.percent)}%`, "progress"));
   if (work.missingLocal && state.accessMode === "local") {
@@ -2151,14 +2560,31 @@ function createWorkCard(work, index = 0) {
     flags.append(createFavoriteFolderSelect(work));
   }
 
-  body.append(title, facts);
+  body.append(title);
+  body.append(facts);
   if (flags.childElementCount) body.append(flags);
   if (work.missingLocal) {
     card.append(cover, body);
   } else {
-    card.append(cover, favorite, body);
+    card.append(cover, favorite, createLocalMarkerButton(work, "A"), body);
   }
   return card;
+}
+
+function createLocalMarkerButton(work, marker) {
+  const key = String(marker || "").toUpperCase();
+  const active = (work.localMarkers || []).includes(key);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `local-marker-button${active ? " active" : ""}`;
+  button.textContent = key;
+  button.title = active ? `移除 ${key} 标记` : `添加 ${key} 标记`;
+  button.setAttribute("aria-label", button.title);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleWorkLocalMarker(work, key, button);
+  });
+  return button;
 }
 
 function createFavoriteFolderSelect(work) {
@@ -2181,6 +2607,31 @@ function createFavoriteFolderSelect(work) {
   return select;
 }
 
+async function toggleWorkLocalMarker(work, marker, button) {
+  const key = String(marker || "").toUpperCase();
+  const nextEnabled = !(work.localMarkers || []).includes(key);
+  const originalText = button.textContent;
+  const compactButton = button.classList.contains("local-marker-button");
+  button.disabled = true;
+  button.textContent = compactButton ? key : (nextEnabled ? "标记中" : "移除中");
+  try {
+    const data = await api(`/api/works/${encodeURIComponent(work.id)}/local-marker`, {
+      method: "POST",
+      body: { marker: key, enabled: nextEnabled }
+    });
+    if (data.work) {
+      updateWorkSnapshot(data.work);
+      renderStatsForWorks(state.works, state.selectedPerson);
+      if (state.activeView === "favorites") renderFavoriteFolderControls();
+      renderWorks();
+    }
+  } catch (error) {
+    alert(error.message);
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
 function openWorkCard(work) {
   if (work.missingLocal) {
     if (work.javdbUrl) {
@@ -2188,7 +2639,13 @@ function openWorkCard(work) {
     }
     return;
   }
-  openWork(work.id);
+  window.open(playerPageUrl(work.id), "_blank", "noopener");
+}
+
+function playerPageUrl(workId, videoId = "") {
+  const params = new URLSearchParams({ workId: String(workId || "") });
+  if (videoId) params.set("videoId", String(videoId));
+  return `/player.html?${params.toString()}`;
 }
 
 function workCodePrefix(work) {
@@ -2312,6 +2769,14 @@ function createInfoChip(text, variant = "") {
   return chip;
 }
 
+function createAvailabilityChips(work) {
+  const availability = work.availability || {};
+  if (work.missingLocal && availability.hasMagnet === true) {
+    return [createInfoChip(availability.hasSubtitles ? "中字磁链" : "含磁链", "magnet")];
+  }
+  return [];
+}
+
 async function openWork(workId, videoId = null, options = {}) {
   await workDetailPage.openWork(workId, videoId, options);
 }
@@ -2348,19 +2813,6 @@ function reportCurrentProgress(options = {}) {
   workDetailPage.reportCurrentProgress(options);
 }
 
-els.personSearch.addEventListener("input", (event) => {
-  state.personQuery = event.target.value;
-  window.clearTimeout(state.personSearchTimer);
-  state.personSearchTimer = window.setTimeout(() => {
-    resetPersonPaging();
-    renderPeople();
-    if (state.activeView === "people" && !state.selectedPersonId) {
-      renderPeopleIndexStats();
-      renderPeopleIndex();
-    }
-  }, 140);
-});
-
 els.workSearch.addEventListener("input", () => {
   window.clearTimeout(state.searchTimer);
 });
@@ -2376,40 +2828,6 @@ els.workSearch.addEventListener("keydown", (event) => {
     event.currentTarget.value = "";
     submitWorkSearch("");
   }
-});
-
-els.sortSelect.addEventListener("change", (event) => {
-  state.sortMode = event.target.value;
-  resetWorkPaging();
-  if (state.activeView === "search" && state.searchQuery) {
-    loadSearchResults(state.searchQuery);
-    return;
-  }
-  if (state.activeView === "people" && state.selectedPersonId) {
-    selectPerson(state.selectedPersonId, { resetFilter: false });
-    return;
-  }
-  if (state.activeView === "rankings") {
-    renderRankingStats();
-  }
-  renderWorks();
-});
-
-els.filterSelect.addEventListener("change", (event) => {
-  state.filterMode = event.target.value;
-  resetWorkPaging();
-  if (state.activeView === "search" && state.searchQuery) {
-    loadSearchResults(state.searchQuery);
-    return;
-  }
-  if (state.activeView === "people" && state.selectedPersonId) {
-    selectPerson(state.selectedPersonId, { resetFilter: false });
-    return;
-  }
-  if (state.activeView === "rankings") {
-    renderRankingStats();
-  }
-  renderWorks();
 });
 
 els.missingLocalToggle?.addEventListener("change", (event) => {
@@ -2474,10 +2892,8 @@ async function rescanFullLibrary(button) {
   openAdminScript("");
 }
 
-els.rescanButton?.addEventListener("click", () => rescanFullLibrary(els.rescanButton));
 els.topRescanButton?.addEventListener("click", () => rescanFullLibrary(els.topRescanButton));
 
-els.adminButton?.addEventListener("click", adminModal.openPage);
 els.closeAdmin?.addEventListener("click", adminModal.closeModal);
 els.adminBackdrop?.addEventListener("click", adminModal.closeModal);
 els.adminRescanPerson?.addEventListener("click", adminModal.rescanSelectedPerson);
@@ -2555,6 +2971,5 @@ loadLibrary({ deferMainRender: true })
     initializeRouteHistory();
   })
   .catch((error) => {
-    els.librarySummary.textContent = "索引读取失败";
     renderEmpty(error.message);
   });

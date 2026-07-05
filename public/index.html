@@ -10,7 +10,7 @@
     <link rel="manifest" href="/manifest.webmanifest?v=20260701-gallery-merge-01" />
     <link rel="icon" href="/app-icon.svg?v=20260701-gallery-merge-01" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/app-icon.svg?v=20260701-gallery-merge-01" />
-    <link rel="stylesheet" href="/styles.css?v=20260701-gallery-merge-01" />
+    <link rel="stylesheet" href="/styles.css?v=20260705-person-index-clean-01" />
   </head>
   <body>
     <header class="product-topbar" aria-label="资料库模块">
@@ -77,32 +77,6 @@
             <input id="workSearch" type="search" placeholder="搜索番号 / 标题 / 人物 / 类别 / 片商" autocomplete="off" aria-label="搜索番号、标题、人物、类别或片商" />
           </label>
           <div class="toolbar-controls">
-            <select id="sortSelect" title="排序" aria-label="作品排序">
-              <option value="title">标题</option>
-              <option value="ranking">排行</option>
-              <option value="releaseDesc">发行最新</option>
-              <option value="releaseAsc">发行最早</option>
-              <option value="updated">最近更新</option>
-              <option value="ratingDesc">评分最高</option>
-              <option value="ratingAsc">评分最低</option>
-              <option value="progress">最近观看</option>
-              <option value="sizeDesc">文件大小</option>
-              <option value="durationDesc">时长</option>
-              <option value="videos">视频数量</option>
-            </select>
-            <select id="filterSelect" title="筛选" aria-label="作品筛选">
-              <option value="all">全部</option>
-              <option value="playable">可播放</option>
-              <option value="favorite">已收藏</option>
-              <option value="progress">有进度</option>
-              <option value="info">有资料</option>
-              <option value="localOnly">本地</option>
-              <option value="rated">有评分</option>
-              <option value="highRating">高分</option>
-              <option value="vr">VR</option>
-              <option value="missingLocal">未下载</option>
-              <option value="missingCover">无封面</option>
-            </select>
             <label class="toggle-control" title="显示 JavDB 有记录但本地没有文件的作品">
               <input id="missingLocalToggle" type="checkbox" checked />
               <span>显示未下载</span>
@@ -269,6 +243,6 @@
       </div>
     </template>
 
-    <script src="/app.js?v=20260701-gallery-merge-01" type="module"></script>
+    <script src="/app.js?v=20260705-current-links-01" type="module"></script>
   </body>
 </html>

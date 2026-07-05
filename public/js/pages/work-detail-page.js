@@ -8,10 +8,10 @@ export function createWorkDetailPage(deps) {
     formatLibraryPath,
     formatTime,
     goToPerson,
+    searchWorksByText,
     openWorkCard,
     renderFavoriteFolderControls,
     renderStatsForWorks,
-    renderSummary,
     renderWorks,
     retryCoverUrl,
     state,
@@ -216,8 +216,8 @@ export function createWorkDetailPage(deps) {
 
     const progressVideoId = work.progress?.videoId;
     const selected =
-      streamableVideos.find((video) => video.id === requestedVideoId) ||
-      streamableVideos.find((video) => video.id === progressVideoId) ||
+      streamableVideos.find((video) => video.id === requestedVideoId || video.legacyId === requestedVideoId) ||
+      streamableVideos.find((video) => video.id === progressVideoId || video.legacyId === progressVideoId) ||
       streamableVideos.find((video) => video.playable) ||
       streamableVideos[0];
     state.currentVideo = selected;
@@ -498,25 +498,8 @@ export function createWorkDetailPage(deps) {
   function renderMeta(work) {
     els.metaArea.innerHTML = "";
 
-    if (work.personId && (work.personName || work.personDisplayName)) {
-      const personJump = document.createElement("div");
-      personJump.className = "person-jump";
-
-      const text = document.createElement("div");
-      text.innerHTML = `<span>人物</span><strong></strong>`;
-      text.querySelector("strong").textContent = workPersonDisplayName(work);
-
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "text-button";
-      button.textContent = "查看人物";
-      button.addEventListener("click", () => {
-        goToPerson(work.personId);
-      });
-
-      personJump.append(text, button);
-      els.metaArea.append(personJump);
-    }
+    const entityPanel = createWorkEntityPanel(work);
+    if (entityPanel) els.metaArea.append(entityPanel);
 
     const heading = document.createElement("h4");
     heading.className = "section-title";
@@ -553,6 +536,142 @@ export function createWorkDetailPage(deps) {
     }
 
     els.metaArea.append(heading, list);
+  }
+
+  function createWorkEntityPanel(work) {
+    const info = work.infoSummary || {};
+    const workLinks = workJavdbItems(work);
+    const actors = workActorItems(work);
+    const studios = studioItems(work);
+    const tags = tagItems(work).slice(0, 10);
+    if (!workLinks.length && !actors.length && !studios.length && !tags.length) return null;
+
+    const panel = document.createElement("div");
+    panel.className = "work-entity-panel";
+    if (workLinks.length) panel.append(createEntityRow("作品", workLinks));
+    if (actors.length) panel.append(createEntityRow("人物", actors));
+    if (studios.length) panel.append(createEntityRow("片商", studios));
+    if (tags.length) panel.append(createEntityRow("标签", tags));
+    return panel;
+  }
+
+  function createEntityRow(labelText, items) {
+    const row = document.createElement("div");
+    row.className = "work-entity-row";
+    const label = document.createElement("span");
+    label.textContent = labelText;
+    const chips = document.createElement("div");
+    chips.className = "work-entity-chips";
+    for (const item of items) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "work-entity-chip";
+      button.textContent = item.name;
+      button.title = item.personId ? `查看人物：${item.name}` : `搜索：${item.name}`;
+      if (item.url && !item.personId) button.title = `打开：${item.url}`;
+      button.addEventListener("click", () => {
+        if (item.personId) {
+          goToPerson(item.personId);
+        } else if (item.url) {
+          window.open(item.url, "_blank", "noreferrer");
+        } else {
+          searchWorksByText?.(item.name);
+        }
+      });
+      chips.append(button);
+    }
+    row.append(label, chips);
+    return row;
+  }
+
+  function workJavdbItems(work) {
+    const info = work.infoSummary || {};
+    const url = cleanRemoteUrl(info.javdbUrl || work.javdbUrl || work.infoMetadata?.javdbUrl);
+    return url ? [{ name: "JavDB 影片页", url }] : [];
+  }
+
+  function workActorItems(work) {
+    const info = work.infoSummary || {};
+    const linkMap = entityLinkMap(info.actorLinks || work.infoMetadata?.actorLinks || []);
+    const actors = uniqueTextList(info.actors || []);
+    if (actors.length) {
+      return actors.map((name) => ({ name, personId: matchingPersonId(name, work), url: linkMap.get(entityKey(name)) || "" }));
+    }
+    const fallback = workPersonDisplayName(work);
+    return fallback ? [{ name: fallback, personId: work.personId || "" }] : [];
+  }
+
+  function studioItems(work) {
+    const info = work.infoSummary || {};
+    const items = [];
+    if (info.maker) items.push({ name: info.maker, url: cleanRemoteUrl(info.makerUrl || work.infoMetadata?.makerUrl) });
+    if (info.label && !sameText(info.label, info.maker)) items.push({ name: info.label, url: cleanRemoteUrl(info.labelUrl || work.infoMetadata?.labelUrl) });
+    if (info.series) items.push({ name: info.series, url: cleanRemoteUrl(info.seriesUrl || work.infoMetadata?.seriesUrl) });
+    return uniqueEntityItems(items);
+  }
+
+  function tagItems(work) {
+    const info = work.infoSummary || {};
+    const linkMap = entityLinkMap(info.tagLinks || work.infoMetadata?.tagLinks || []);
+    return uniqueTextList(info.tags || []).map((name) => ({ name, url: linkMap.get(entityKey(name)) || "" }));
+  }
+
+  function matchingPersonId(name, work) {
+    if (sameText(name, workPersonDisplayName(work))) return work.personId || "";
+    return (
+      state.people.find((person) =>
+        [
+          person.name,
+          person.actorProfile?.displayName,
+          person.actorProfile?.personName,
+          ...(person.actorProfile?.aliases || [])
+        ].some((value) => sameText(value, name))
+      )?.id || ""
+    );
+  }
+
+  function uniqueTextList(values) {
+    const seen = new Set();
+    const list = [];
+    for (const value of Array.isArray(values) ? values : []) {
+      const text = String(value || "").trim();
+      const key = text.toLowerCase();
+      if (!text || seen.has(key)) continue;
+      seen.add(key);
+      list.push(text);
+    }
+    return list;
+  }
+
+  function uniqueEntityItems(items) {
+    const seen = new Set();
+    const result = [];
+    for (const item of items) {
+      const name = String(item?.name || "").trim();
+      const key = entityKey(name);
+      if (!name || seen.has(key)) continue;
+      seen.add(key);
+      result.push({ name, url: cleanRemoteUrl(item?.url || ""), personId: item?.personId || "" });
+    }
+    return result;
+  }
+
+  function entityLinkMap(items) {
+    const map = new Map();
+    for (const item of Array.isArray(items) ? items : []) {
+      const name = String(item?.name || "").trim();
+      const url = cleanRemoteUrl(item?.url || "");
+      if (name && url) map.set(entityKey(name), url);
+    }
+    return map;
+  }
+
+  function entityKey(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  function sameText(a, b) {
+    return String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
   }
 
   function renderInfo(work) {
@@ -800,7 +919,6 @@ export function createWorkDetailPage(deps) {
     state.favoriteFolders = data.folders || state.favoriteFolders;
     updateWorkFavorite(workId, data.favorite, data.favoriteFolder);
     state.library.user = data.user;
-    renderSummary();
 
     if (state.currentWork?.id === workId) {
       state.currentWork.favorite = data.favorite;
@@ -833,7 +951,6 @@ export function createWorkDetailPage(deps) {
       state.favoriteFolders = data.folders || state.favoriteFolders;
       updateWorkFavoriteFolder(work.id, data.favorite);
       state.library.user = data.user;
-      renderSummary();
 
       if (state.currentWork?.id === work.id) {
         state.currentWork.favoriteFolderId = data.favorite.folderId;
@@ -932,7 +1049,6 @@ export function createWorkDetailPage(deps) {
         state.currentVideo.progress = data.progress;
         state.currentWork.progress = data.progress;
         state.library.user = data.user;
-        renderSummary();
       })
       .catch(() => {});
   }

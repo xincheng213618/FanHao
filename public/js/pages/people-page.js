@@ -7,15 +7,13 @@ export function createPeoplePage(deps) {
     clearWorkSearch,
     closeDrawer,
     coverUrl,
-    createInfoChip,
     currentPageScrollTop,
     displayPersonName,
     els,
     formatLibraryPaths,
     formatNumber,
+    getWorkFilterMode,
     hidePersonProfile,
-    includesText,
-    personSearchText,
     renderPersonProfile,
     renderPersonWorkStats,
     renderWorks,
@@ -31,59 +29,7 @@ export function createPeoplePage(deps) {
   let peopleIndexLoadObserver = null;
 
 function filteredPeople() {
-  return state.people.filter((person) => includesText(personSearchText(person), state.personQuery));
-}
-
-function renderPeople() {
-  const filtered = filteredPeople();
-  els.personList.innerHTML = "";
-
-  if (!filtered.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = "没有匹配的人物";
-    els.personList.append(empty);
-    return;
-  }
-
-  const fragment = document.createDocumentFragment();
-  for (const person of filtered) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `person-button${person.id === state.selectedPersonId && state.activeView === "people" ? " active" : ""}`;
-    button.dataset.personId = person.id;
-    button.addEventListener("click", () => {
-      clearWorkSearch();
-      state.activeView = "people";
-      selectPerson(person.id);
-    });
-
-    const name = document.createElement("span");
-    name.className = "person-name";
-    name.textContent = displayPersonName(person);
-
-    const count = document.createElement("span");
-    count.className = "person-count";
-    count.textContent =
-      person.sourceCount > 1 ? `${formatNumber(person.workCount)} 部 · ${person.sourceCount} 处` : `${formatNumber(person.workCount)} 部`;
-
-    button.append(name, count);
-    fragment.append(button);
-  }
-  els.personList.append(fragment);
-}
-
-function updateActivePersonButton() {
-  const buttons = els.personList.querySelectorAll(".person-button");
-  if (!buttons.length) {
-    renderPeople();
-    return;
-  }
-
-  const activePersonId = state.activeView === "people" ? state.selectedPersonId || "" : "";
-  for (const button of buttons) {
-    button.classList.toggle("active", Boolean(activePersonId) && button.dataset.personId === activePersonId);
-  }
+  return state.people.filter((person) => person?.actorProfile?.gender !== "male");
 }
 
 function showPeopleIndex(options = {}) {
@@ -94,7 +40,6 @@ function showPeopleIndex(options = {}) {
   state.works = [];
   state.personWorksTotal = 0;
   state.personWorksFacets = null;
-  updateActivePersonButton();
   syncNavigationState("people");
   hidePersonProfile();
   setMainHeader("人物索引", "按人物浏览全部资料库");
@@ -193,10 +138,11 @@ function appendPeopleIndexLoadMore(visibleCount, totalCount) {
 }
 
 function actorAvatarUrl(person) {
-  return person?.actorProfile?.avatarUrl || coverUrl(person?.coverId);
+  return person?.avatarUrl || person?.actorProfile?.avatarUrl || coverUrl(person?.coverId);
 }
 
 function createPersonIndexCard(person) {
+  const displayName = displayPersonName(person);
   const card = document.createElement("button");
   card.type = "button";
   card.className = "person-index-card";
@@ -217,12 +163,12 @@ function createPersonIndexCard(person) {
     img.addEventListener("error", () => {
       img.remove();
       avatar.classList.add("empty");
-      avatar.textContent = person.name.slice(0, 2);
+      avatar.textContent = displayName.slice(0, 2);
     });
     avatar.append(img);
   } else {
     avatar.classList.add("empty");
-    avatar.textContent = person.name.slice(0, 2);
+    avatar.textContent = displayName.slice(0, 2);
   }
 
   const body = document.createElement("div");
@@ -230,19 +176,9 @@ function createPersonIndexCard(person) {
 
   const name = document.createElement("div");
   name.className = "person-index-name";
-  name.textContent = person.actorProfile?.displayName || person.name;
+  name.textContent = displayName;
 
-  const sub = document.createElement("div");
-  sub.className = "person-index-sub";
-  const aliases = person.actorProfile?.aliases || [];
-  sub.textContent = aliases.length ? aliases.slice(0, 3).join("、") : formatLibraryPaths(person.sourcePaths || [person.relativePath]);
-
-  const metrics = document.createElement("div");
-  metrics.className = "person-index-metrics";
-  metrics.append(createInfoChip(`${formatNumber(person.workCount)} 部`, "code"));
-  metrics.append(createInfoChip(`${formatNumber(person.videoCount)} 视频`));
-
-  body.append(name, sub, metrics);
+  body.append(name);
   card.append(avatar, body);
   return card;
 }
@@ -259,11 +195,12 @@ async function selectPerson(personId, options = {}) {
     clearWorkFilter();
   }
   syncNavigationState("people");
-  updateActivePersonButton();
   els.workGrid.innerHTML = `<div class="empty-state">正在加载作品</div>`;
 
   const data = await fetchPersonWorksPage(personId, 0);
   state.selectedPerson = data.person;
+  const resolvedPersonId = state.selectedPerson?.id || personId;
+  state.selectedPersonId = resolvedPersonId;
   state.works = data.works || [];
   state.personWorksTotal = data.total || state.works.length;
   state.personWorksFacets = data.facets || null;
@@ -274,7 +211,7 @@ async function selectPerson(personId, options = {}) {
   renderWorks();
   syncRouteAfterNavigation({
     ...options,
-    routeOverrides: { view: "people", personId, q: "", workId: "", videoId: "" }
+    routeOverrides: { view: "people", personId: resolvedPersonId, q: "", workId: "", videoId: "" }
   });
 }
 
@@ -286,8 +223,8 @@ async function fetchPersonWorksPage(personId, offset = 0) {
   const params = new URLSearchParams({
     limit: String(personWorkPageSize()),
     offset: String(offset || 0),
-    sort: state.sortMode || "updated",
-    filter: state.filterMode || "all"
+    sort: state.sortMode || "releaseDesc",
+    filter: typeof getWorkFilterMode === "function" ? getWorkFilterMode() : state.filterMode || "all"
   });
   return api(`/api/people/${encodeURIComponent(personId)}?${params}`);
 }
@@ -312,10 +249,8 @@ function resetPersonPaging() {
     personWorkPageSize,
     renderIndex: renderPeopleIndex,
     renderIndexStats: renderPeopleIndexStats,
-    renderPeople,
     resetPaging: resetPersonPaging,
     selectPerson,
-    showIndex: showPeopleIndex,
-    updateActivePersonButton
+    showIndex: showPeopleIndex
   };
 }
