@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const DOUBAN_COOKIE_PATH = path.join(process.cwd(), "data", "douban-cookie.txt");
+const JAVDB_115_COOKIE_PROFILE_DIR = path.join(process.env.LOCALAPPDATA || "", "115Chrome", "User Data");
 const DOUBAN_TEST_SUBJECT_URL = "https://movie.douban.com/subject/35321946/";
 const DOUBAN_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
@@ -88,6 +89,7 @@ async function testDoubanCookie(cookie) {
 export async function routeAdminApi(req, res, url, deps) {
   const {
     actorAvatarCandidatesFromFiletree,
+    actorMovieRows,
     actorProfileRow,
     adminScriptById,
     adminScriptCategories,
@@ -101,17 +103,21 @@ export async function routeAdminApi(req, res, url, deps) {
     getAppConfig,
     importActorAvatarCandidate,
     importActorAvatarsFromFiletree,
+    enrichLocalWorksWithActorMovieInfo,
     invalidateTableStamp,
     library,
     normalizeAdminScriptOptions,
     normalizeAppConfig,
+    personSourceCandidates,
     publicAdminScript,
     publicAdminTask,
     publicAppConfig,
     publicPerson,
     pagedWorksPayload,
+    resolveLibraryPersonByPublicId = (personId) => library.peopleById.get(personId),
     readJsonBody,
     refreshPersonLibrary,
+    refreshLibrary,
     requireLocalAdmin,
     scriptDefinitions,
     sendJson,
@@ -171,7 +177,7 @@ export async function routeAdminApi(req, res, url, deps) {
       }
       const options = normalizeAdminScriptOptions(script, body.options || {});
       const { command, args } = buildAdminScriptCommand(script, options);
-      const person = options.personId ? library.peopleById.get(options.personId) : null;
+      const person = options.personId ? resolveLibraryPersonByPublicId(options.personId) : null;
       const task = startAdminProcessTask({
         type: `script:${script.id}`,
         scriptId: script.id,
@@ -264,7 +270,7 @@ export async function routeAdminApi(req, res, url, deps) {
     }));
     try {
       const summary = actorAvatarCandidatesFromFiletree(getAppConfig().actorAvatarDataPath, {
-        personId: body.personId,
+        personId: resolveLibraryPersonByPublicId(body.personId)?.id || body.personId,
         limit: clampInteger(body.limit, 24, 1, 200)
       });
       sendJson(res, 200, { ok: true, config: publicAppConfig(), summary });
@@ -282,7 +288,7 @@ export async function routeAdminApi(req, res, url, deps) {
       actorAvatarDataPath: body.rootPath ?? body.actorAvatarDataPath ?? getAppConfig().actorAvatarDataPath
     }));
     try {
-      const result = importActorAvatarCandidate(getAppConfig().actorAvatarDataPath, body.personId, body.relPath, { dryRun: Boolean(body.dryRun) });
+      const result = importActorAvatarCandidate(getAppConfig().actorAvatarDataPath, resolveLibraryPersonByPublicId(body.personId)?.id || body.personId, body.relPath, { dryRun: Boolean(body.dryRun) });
       sendJson(res, 200, { ok: true, config: publicAppConfig(), ...result });
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "应用演员头像候选失败", config: publicAppConfig() });
@@ -290,21 +296,43 @@ export async function routeAdminApi(req, res, url, deps) {
     return true;
   }
 
+  const personMappingMatch = /^\/api\/admin\/person-mapping\/([^/]+)$/.exec(url.pathname);
+  if (personMappingMatch && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    const personId = decodeURIComponent(personMappingMatch[1]);
+    const person = resolveLibraryPersonByPublicId(personId);
+    if (!person) {
+      sendJson(res, 404, { error: "人物不存在" });
+      return true;
+    }
+    const extraSourcePaths = url.searchParams.getAll("sourcePath");
+    sendJson(res, 200, {
+      ok: true,
+      person: publicPerson(person),
+      sourceCandidates: personSourceCandidates(person, { extraSourcePaths })
+    });
+    return true;
+  }
+
   if (url.pathname === "/api/admin/rescan-person" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     const body = await readJsonBody(req);
-    const person = library.peopleById.get(body.personId);
+    const person = resolveLibraryPersonByPublicId(body.personId);
     if (!person) {
       sendJson(res, 404, { error: "人物不存在" });
       return true;
     }
 
     try {
-      const nextPerson = refreshPersonLibrary(person.id);
+      const nextPerson = refreshPersonLibrary(person.id, {
+        sourcePaths: Array.isArray(body.sourcePaths) ? body.sourcePaths : []
+      });
+      const actorRows = actorMovieRows(nextPerson.id);
+      const rawWorks = nextPerson.works
+        .map((workId) => library.worksById.get(workId))
+        .filter(Boolean);
       const works = sortWorkList(
-        nextPerson.works
-          .map((workId) => library.worksById.get(workId))
-          .filter(Boolean),
+        enrichLocalWorksWithActorMovieInfo(rawWorks, actorRows),
         url.searchParams.get("sort") || "title"
       );
       sendJson(res, 200, {
@@ -321,44 +349,61 @@ export async function routeAdminApi(req, res, url, deps) {
   if (url.pathname === "/api/admin/refresh-actor-movies" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     const body = await readJsonBody(req);
-    const person = library.peopleById.get(body.personId);
-    if (!person) {
+    const fullScan = Boolean(body.fullScan || body.full || body.all);
+    const person = fullScan ? null : resolveLibraryPersonByPublicId(body.personId);
+    if (!fullScan && !person) {
       sendJson(res, 404, { error: "人物不存在" });
       return true;
     }
 
-    const profile = actorProfileRow(person.id);
-    if (!profile?.javdb_url) {
+    const profile = person ? actorProfileRow(person.id) : null;
+    if (person && !profile?.javdb_url) {
       sendJson(res, 400, { error: "这个人物还没有配置 JavDB actor 页" });
       return true;
     }
 
     const sleep = clampInteger(body.sleep, 2, 0, 60);
+    const maxPages = clampInteger(body.maxPages, fullScan ? 0 : 1, 0, 1000);
+    const fullActorScan = maxPages === 0;
     const args = [
       "-u",
-      path.join("tools", "backfill_javdb_actor_page.py"),
+      path.join("tools", "refresh_core_javdb_actor_movies.py"),
+      "--profile-dir",
+      path.resolve("data", "selenium-core-actor-refresh-profile"),
       "--write",
-      "--all-sources",
-      "--person-id",
-      person.id,
-      "--actor-movies-only",
+      "--max-pages",
+      String(maxPages),
       "--fast",
       "--sleep",
       String(sleep),
       "--jitter",
       "0"
     ];
+    if (person) args.push("--person-id", person.id);
+    if (fullScan) args.push("--all-linked-people");
+    if (JAVDB_115_COOKIE_PROFILE_DIR && fs.existsSync(JAVDB_115_COOKIE_PROFILE_DIR)) {
+      args.push(
+        "--cookie-profile-dir",
+        JAVDB_115_COOKIE_PROFILE_DIR,
+        "--cookie-profile-name",
+        "Default",
+        "--cookie-domain",
+        "javdb.com"
+      );
+    }
     const task = startAdminProcessTask({
       type: "actor-movies",
-      label: "刷新缺失检测",
+      label: fullScan ? "全量刷新全部 JavDB 人物" : fullActorScan ? "全量刷新当前 JavDB 人物" : "刷新 JavDB 片单",
       person,
       command: "python",
       args,
       refreshHints: ["current-view"],
+      invalidates: ["actorProfiles", "actorMovies", "workInfo", "workCovers"],
       onDone: () => {
         invalidateTableStamp("actor_movies");
         setActorMovieCache(null);
         setLocalWorkCachesDirty();
+        refreshLibrary?.();
         clearSearchSourceCaches();
       }
     });
@@ -368,6 +413,9 @@ export async function routeAdminApi(req, res, url, deps) {
 
   if (url.pathname === "/api/admin/refresh-rankings" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
+    sendJson(res, 410, { error: "旧缓存库已移除；排行榜刷新需要 core DB 原生脚本。" });
+    return true;
+    /*
     const body = await readJsonBody(req);
     const rawKeys = Array.isArray(body.keys) ? body.keys : [body.key || "y2025"];
     const keys = rawKeys
@@ -394,6 +442,7 @@ export async function routeAdminApi(req, res, url, deps) {
     });
     sendJson(res, 202, { ok: true, task: publicAdminTask(task) });
     return true;
+    */
   }
 
   if (url.pathname === "/api/admin/cover-cache-status" && req.method === "GET") {

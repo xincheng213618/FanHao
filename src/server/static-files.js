@@ -15,6 +15,8 @@ const APP_PAGE_PATHS = new Set([
   "/movie",
   "/movies",
   "/tv",
+  "/studios",
+  "/vr",
   "/favorites",
   "/history",
   "/rankings",
@@ -34,6 +36,8 @@ const APP_PAGE_PREFIXES = [
   "/videos/",
   "/movie/",
   "/movies/",
+  "/studios/",
+  "/vr/",
   "/novels/",
   "/tv/"
 ];

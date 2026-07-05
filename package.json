@@ -6,12 +6,6 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "cleanup:metadata": "node tools/cleanup_metadata_cache.mjs",
-    "cleanup:user-state": "node tools/cleanup_user_state.mjs",
-    "covers:missing": "node tools/generate_missing_covers.mjs",
-    "quality:metadata": "node tools/report_metadata_quality.mjs",
-    "scan:noise": "node tools/report_scan_noise.mjs",
-    "sync:sidecars": "python tools/sync_javdb_sidecars.py",
     "verify": "npm run verify:codes && npm run verify:metadata",
     "verify:codes": "node tools/verify_code_parsers.mjs",
     "verify:metadata": "node tools/verify_metadata_parsers.mjs"

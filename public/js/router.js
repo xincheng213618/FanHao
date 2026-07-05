@@ -1,4 +1,4 @@
-export const URL_VIEW_NAMES = new Set(["people", "favorites", "history", "rankings", "gallery", "novels", "tools"]);
+export const URL_VIEW_NAMES = new Set(["people", "studios", "vr", "favorites", "history", "rankings", "gallery", "novels", "tools"]);
 export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "media", "movie", "tv"]);
 export const DEFAULT_GALLERY_PHOTO_CATEGORY = "我喜欢的";
 
@@ -27,6 +27,8 @@ const PATH_GALLERY_MODES = new Map([
 ]);
 
 const VIEW_PATHS = {
+  studios: "/studios",
+  vr: "/vr",
   favorites: "/favorites",
   history: "/history",
   rankings: "/rankings",

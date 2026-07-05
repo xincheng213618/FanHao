@@ -161,25 +161,8 @@ export function createPeopleViews(context) {
       body.append(name);
     }
 
-    const meta = document.createElement("div");
-    meta.className = "index-person-metrics";
-    meta.append(
-      createPersonMetric(`${formatNumber(person.workCount)} 部`, "作品"),
-      createPersonMetric(`${formatNumber(person.videoCount)} 个`, "视频")
-    );
-    const sources = person.sourceCount > 1 ? ` · ${formatNumber(person.sourceCount)} 处` : "";
-    if (sources) meta.append(createPersonMetric(`${formatNumber(person.sourceCount)} 处`, "来源"));
-
-    body.append(meta);
     button.append(body);
     return button;
-  }
-
-  function createPersonMetric(value, label) {
-    const metric = document.createElement("span");
-    metric.className = "index-person-metric";
-    metric.textContent = `${value}${label}`;
-    return metric;
   }
 
   return {

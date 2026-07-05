@@ -1,9 +1,9 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260702-novel-local-manage-74";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260705-mobile-actions-01";
 import { fetchJson } from "./js/api.js?v=20260702-novel-local-manage-74";
-import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260702-novel-local-manage-74";
+import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260705-mobile-actions-01";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
 import { createChannelViews } from "./js/channel-views.js?v=20260702-novel-local-manage-74";
-import { createDetailViews } from "./js/detail-views.js?v=20260702-novel-local-manage-74";
+import { createDetailViews } from "./js/detail-views.js?v=20260705-mobile-actions-01";
 import { getElements } from "./js/dom.js?v=20260702-novel-local-manage-74";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260702-novel-local-manage-74";
@@ -13,17 +13,19 @@ import { createPeopleViews } from "./js/people-views.js";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
 import { createToolViews } from "./js/tool-views.js?v=20260702-novel-local-manage-74";
-import { createWorkViews } from "./js/work-views.js?v=20260702-novel-local-manage-74";
+import { createWorkViews } from "./js/work-views.js?v=20260705-mobile-sync-01";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
-const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "favorites", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "tools"]);
+const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "studios", "studioDetail", "vr", "favorites", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "tools"]);
 const DEFAULT_VIEW = "works";
-const FANHAO_ROOT_VIEWS = new Set(["works", "rankings", "people", "favorites"]);
-const FANHAO_SECTION_VIEWS = new Set(["works", "rankings", "people", "favorites", "history", "personDetail", "workDetail"]);
+const FANHAO_ROOT_VIEWS = new Set(["works", "rankings", "studios", "vr", "people", "favorites"]);
+const FANHAO_SECTION_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "vr", "people", "favorites", "history", "personDetail", "workDetail"]);
 const FANHAO_TOP_TABS = [
   { label: "作品", view: "works" },
   { label: "榜单", view: "rankings" },
+  { label: "片商", view: "studios" },
+  { label: "VR", view: "vr" },
   { label: "人物", view: "people" },
   { label: "收藏", view: "favorites" }
 ];
@@ -110,7 +112,7 @@ let novelSummary = null;
 let topTvCategoryFacets = [];
 let androidVersionInfo = null;
 let androidUpdateInfo = null;
-const FEED_VIEWS = new Set(["works", "rankings", "people", "favorites", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail"]);
+const FEED_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "vr", "people", "favorites", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail"]);
 
 function readInitialViewState() {
   return readViewStateFromHash() || readLastViewState();
@@ -146,6 +148,7 @@ function shouldRememberView(view, params = {}) {
   if (view === "search") return Boolean(String(params.query || "").trim());
   if (view === "personDetail") return Boolean(params.personId);
   if (view === "workDetail") return Boolean(params.workId);
+  if (view === "studioDetail") return Boolean(params.studioId);
   if (view === "channel") return Boolean(params.mode);
   if (view === "photoDetail") return Boolean(params.id);
   if (view === "mangaDetail") return Boolean(params.id);
@@ -160,6 +163,7 @@ function sanitizeViewParams(view, params = {}) {
   if (view === "search") return { query: String(params.query || "").trim() };
   if (view === "personDetail") return { personId: String(params.personId || "") };
   if (view === "workDetail") return { workId: String(params.workId || "") };
+  if (view === "studioDetail") return { studioId: String(params.studioId || ""), seriesId: String(params.seriesId || "all") || "all" };
   if (view === "photoDetail") return { id: String(params.id || "") };
   if (view === "mangaDetail") return { id: String(params.id || "") };
   if (view === "mangaChapter") return { id: String(params.id || ""), chapterIndex: String(params.chapterIndex || params.chapter || "") };
@@ -1233,7 +1237,7 @@ function canRenderWithoutLibrary(view = "") {
 function defaultWorksLimitForView(view) {
   const fast = isFastServerUrl();
   if (view === "rankings") return 120;
-  if (view === "works") return fast ? FAST_WORK_LIMIT : 60;
+  if (view === "works" || view === "vr" || view === "studioDetail") return fast ? FAST_WORK_LIMIT : 60;
   if (view === "search" || view === "personDetail") return fast ? 480 : 48;
   if (view === "favorites" || view === "history") return fast ? 480 : 48;
   return fast ? 160 : 40;
@@ -1386,6 +1390,15 @@ function renderCurrentView(options = {}) {
   if (currentView === "rankings") {
     return restoreAfterRender(workViews.renderRankings(renderGuard));
   }
+  if (currentView === "studios") {
+    return restoreAfterRender(workViews.renderStudios(renderGuard));
+  }
+  if (currentView === "studioDetail") {
+    return restoreAfterRender(workViews.renderStudioDetail(currentViewParams.studioId, currentViewParams.seriesId, renderGuard));
+  }
+  if (currentView === "vr") {
+    return restoreAfterRender(workViews.renderVrWorks(renderGuard));
+  }
   if (currentView === "favorites") {
     return restoreAfterRender(workViews.renderWorkCollection("favorites", renderGuard));
   }
@@ -1493,6 +1506,8 @@ function isRootNavigationView(view = currentView) {
 
 function fanhaoTabForView(view = currentView) {
   if (view === "rankings") return "rankings";
+  if (view === "studios" || view === "studioDetail") return "studios";
+  if (view === "vr") return "vr";
   if (view === "people" || view === "personDetail") return "people";
   if (view === "favorites") return "favorites";
   return "works";

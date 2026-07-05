@@ -39,6 +39,27 @@ def is_actor_avatar_url(value: str) -> bool:
     return "/avatars/" in lower or "avatar" in lower
 
 
+def split_actor_names(value: str) -> tuple[str, list[str]]:
+    parts = [item.strip() for item in re.split(r"[,，、]", value or "") if item.strip()]
+    if len(parts) > 1:
+        return parts[0], parts[1:]
+    return str(value or "").strip(), []
+
+
+def unique_actor_names(values: list[str], primary: str = "") -> list[str]:
+    names = []
+    seen = set()
+    primary_key = primary.strip().lower()
+    for value in values:
+        name = str(value or "").strip()
+        key = name.lower()
+        if not key or key == primary_key or key in seen:
+            continue
+        seen.add(key)
+        names.append(name)
+    return names
+
+
 def resolve_person(library_index: Path, name: str = "", person_id: str = "") -> dict:
     data = json.loads(library_index.read_text(encoding="utf-8"))
     people = data.get("people", [])
@@ -114,18 +135,14 @@ def parse_actor_page(html: str, url: str) -> dict:
             title = re.sub(r"\s*\d+\s*部影片.*$", "", tag.get_text(" ", strip=True)).strip()
             break
 
+    title, title_aliases = split_actor_names(title)
     aliases = []
     alias_container = soup.select_one(".actor-section-aliases, .actor-aliases, .section-aliases")
     if alias_container:
         alias_text = alias_container.get_text(" ", strip=True)
         aliases = [item.strip() for item in re.split(r"[,，、]", alias_text) if item.strip()]
 
-    if not aliases and title and any(mark in title for mark in [",", "，", "、"]):
-        parts = [item.strip() for item in re.split(r"[,，、]", title) if item.strip()]
-        if len(parts) > 1:
-            aliases = parts[1:]
-
-    aliases = [alias for alias in aliases if alias and alias != title]
+    aliases = unique_actor_names([*title_aliases, *aliases], title)
 
     movie_count = None
     for selector in [".section-meta", ".actor-section-meta"]:
@@ -181,11 +198,48 @@ def parse_actor_page(html: str, url: str) -> dict:
     return {
         "display_name": title,
         "aliases": aliases,
+        "gender": parse_actor_gender(soup),
         "movie_count": movie_count,
         "avatar_url": avatar_url,
         "javdb_actor_id": actor_id_from_url(url),
         "javdb_url": url,
     }
+
+
+def parse_actor_gender(soup: BeautifulSoup) -> str:
+    containers = [
+        soup.select_one(".actor-section"),
+        soup.select_one(".actor-profile"),
+        soup.select_one("main"),
+        soup,
+    ]
+    texts = []
+    for container in containers:
+        if container:
+            text = container.get_text(" ", strip=True)
+            if text:
+                texts.append(text)
+
+    for text in texts:
+        match = re.search(r"(?:性別|性别|Gender)\s*[:：]?\s*(男|女|male|female|男優|男优|女優|女优)", text, re.I)
+        if match:
+            return normalize_actor_gender(match.group(1))
+
+    for text in texts[:3]:
+        if re.search(r"(^|[\s/｜|,，、])男(?:優|优)($|[\s/｜|,，、])", text):
+            return "male"
+        if re.search(r"(^|[\s/｜|,，、])女(?:優|优)($|[\s/｜|,，、])", text):
+            return "female"
+    return "unknown"
+
+
+def normalize_actor_gender(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"male", "m"} or "男" in text:
+        return "male"
+    if text in {"female", "f"} or "女" in text:
+        return "female"
+    return "unknown"
 
 
 def profile_looks_ready(profile: dict) -> bool:

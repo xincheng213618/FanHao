@@ -485,7 +485,7 @@
   grid-template-columns: 84px minmax(0, 1fr);
   gap: 13px;
   align-items: center;
-  min-height: 112px;
+  min-height: 104px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-raised);
@@ -505,7 +505,7 @@
 .index-person-body {
   display: grid;
   min-width: 0;
-  gap: 7px;
+  gap: 4px;
   align-content: center;
 }
 
@@ -532,23 +532,6 @@
   font-weight: 800;
   line-height: 1.25;
   white-space: nowrap;
-}
-
-.index-person-metrics {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.index-person-metric {
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--stat-surface);
-  color: var(--muted);
-  padding: 4px 8px;
-  font-size: 11px;
-  font-weight: 900;
-  line-height: 1;
 }
 
 .detail-hero {
@@ -906,6 +889,18 @@ button.work-detail-author {
   border-color: rgba(233, 138, 44, 0.28);
   background: var(--favorite-soft);
   color: var(--orange);
+}
+
+.detail-action-row .local-marker-action.active {
+  border-color: rgba(47, 128, 237, 0.3);
+  background: var(--button-soft);
+  color: var(--blue);
+}
+
+.detail-action-row .delete-local-action {
+  border-color: rgba(204, 72, 72, 0.22);
+  background: rgba(204, 72, 72, 0.08);
+  color: var(--danger);
 }
 
 .detail-action-row button:disabled {

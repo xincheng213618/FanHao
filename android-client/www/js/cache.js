@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=20260702-novel-local-manage-74";
+import { CLIENT_VERSION } from "./config.js?v=20260705-mobile-actions-01";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;

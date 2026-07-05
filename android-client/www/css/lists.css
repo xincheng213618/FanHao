@@ -83,6 +83,73 @@
   color: var(--blue);
 }
 
+.studio-list {
+  display: grid;
+  gap: 8px;
+}
+
+.studio-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 52px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.studio-card strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+
+.studio-card span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.studio-series-strip {
+  display: flex;
+  gap: 5px;
+  overflow-x: auto;
+  padding-bottom: 1px;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+}
+
+.studio-series-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.studio-series-strip button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--muted);
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.studio-series-strip button.active {
+  border-color: rgba(47, 128, 237, 0.28);
+  background: var(--button-soft);
+  color: var(--blue);
+}
+
 .channel-list {
   display: grid;
   gap: 10px;
@@ -1080,6 +1147,8 @@
 }
 
 .content-panel[data-view="works"] .work-list,
+.content-panel[data-view="vr"] .work-list,
+.content-panel[data-view="studioDetail"] .work-list,
 .content-panel[data-view="rankings"] .work-list,
 .content-panel[data-view="favorites"] .work-list,
 .content-panel[data-view="history"] .work-list {
@@ -1087,6 +1156,8 @@
 }
 
 .content-panel[data-view="works"] .work-card,
+.content-panel[data-view="vr"] .work-card,
+.content-panel[data-view="studioDetail"] .work-card,
 .content-panel[data-view="rankings"] .work-card,
 .content-panel[data-view="favorites"] .work-card,
 .content-panel[data-view="history"] .work-card {

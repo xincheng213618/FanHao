@@ -20,9 +20,11 @@ from backfill_javdb_metadata import (  # noqa: E402
     AccessBlockedError,
     DEFAULT_CHROME_BINARY,
     DEFAULT_DB,
+    DEFAULT_SCRAPER_CONFIG_PATH,
     DEFAULT_SHARED_PROFILE,
     JavDbClient,
     blocked_reason,
+    load_scraper_config,
 )
 from remote_image_cache import cache_remote_images, ensure_remote_image_schema  # noqa: E402
 
@@ -83,6 +85,7 @@ class RankingEntry:
 def main() -> None:
     configure_stdout()
     args = parse_args()
+    args.scraper_config_data = load_scraper_config(args.scraper_config)
     list_keys = normalize_list_keys(args)
     log_path = args.log or Path("data") / f"javdb-rankings-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
     print(f"排行榜缓存开始: lists={list_keys} write={args.write} log={log_path}", flush=True)
@@ -195,6 +198,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wait-seconds", type=int, default=35)
     parser.add_argument("--search-wait-seconds", type=int, default=25)
     parser.add_argument("--detail-wait-seconds", type=int, default=35)
+    parser.add_argument("--scraper-config", type=Path, default=DEFAULT_SCRAPER_CONFIG_PATH, help="JavDB selector/label 配置 JSON")
     parser.add_argument("--target-count", type=int, default=250, help="每个 TOP 榜单期望抓到的条数；数量稳定后会提前结束。")
     parser.add_argument("--no-cache-images", action="store_true", help="只写榜单 URL，不下载封面到 remote_image_cache。")
     parser.add_argument("--log", type=Path, default=None)

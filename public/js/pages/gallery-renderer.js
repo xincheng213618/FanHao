@@ -1882,7 +1882,7 @@ function renderMovieExploreSidebar(aside, items) {
   const allItems = state.gallery.mode === "media" ? filteredMediaItemsForSidebar() : mediaItemsForMode("movie");
   const ratedCount = allItems.filter((item) => Number(screenMetadata(item)?.rating || 0) > 0).length;
   const totalSize = allItems.reduce((sum, item) => sum + Number(item.size || 0), 0);
-  const label = state.gallery.mode === "media" ? "影视" : "电影";
+  const mediaLabel = state.gallery.mode === "media" ? "影视" : "电影";
 
   const summary = document.createElement("section");
   summary.className = "gallery-movie-sidebar-section";
@@ -1890,16 +1890,16 @@ function renderMovieExploreSidebar(aside, items) {
   summaryTitle.textContent = state.gallery.mode === "media" ? "本地影视" : "本地片库";
   const summaryList = document.createElement("div");
   summaryList.className = "gallery-movie-sidebar-stats";
-  for (const [label, value] of [
+  for (const [statLabel, value] of [
     ["当前筛选", `${formatNumber(items.length)} 部`],
-    [`全部${label}`, `${formatNumber(allItems.length)} 部`],
+    [`全部${mediaLabel}`, `${formatNumber(allItems.length)} 部`],
     ["豆瓣资料", `${formatNumber(ratedCount)} 部`],
     ["总大小", formatBytes(totalSize)]
   ]) {
     const row = document.createElement("span");
     row.innerHTML = "<strong></strong><small></small>";
     row.querySelector("strong").textContent = value;
-    row.querySelector("small").textContent = label;
+    row.querySelector("small").textContent = statLabel;
     summaryList.append(row);
   }
   summary.append(summaryTitle, summaryList);

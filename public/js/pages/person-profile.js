@@ -128,6 +128,7 @@ async function saveActorProfileMapping(person, options) {
       body: {
         javdbUrl: options.javdbUrl,
         displayName: options.displayName || person.name,
+        gender: options.gender || person.actorProfile?.gender || "unknown",
         aliases: options.aliases || [],
         source: "manual",
         status: "ok"
@@ -230,6 +231,10 @@ async function openActorMappingModal(person) {
   nameInput.type = "text";
   nameInput.value = initialProfile.displayName || person.name;
 
+  const genderSelect = document.createElement("select");
+  genderSelect.append(new Option("未知", "unknown"), new Option("女", "female"), new Option("男", "male"));
+  genderSelect.value = initialProfile.gender || "unknown";
+
   const aliasesInput = document.createElement("textarea");
   aliasesInput.rows = 4;
   aliasesInput.spellcheck = false;
@@ -246,6 +251,7 @@ async function openActorMappingModal(person) {
   javdbGrid.append(
     createMappingField("JavDB actor 页", urlInput),
     createMappingField("显示名", nameInput),
+    createMappingField("性别", genderSelect),
     createMappingField("别名 / 曾用名", aliasesInput)
   );
   javdbSection.append(javdbHead, javdbGrid);
@@ -344,6 +350,7 @@ async function openActorMappingModal(person) {
     await saveActorProfileMapping(modalPerson, {
       javdbUrl: urlInput.value,
       displayName: nameInput.value,
+      gender: genderSelect.value,
       aliases: linesFromTextarea(aliasesInput.value),
       button: save,
       status
@@ -377,6 +384,7 @@ async function openActorMappingModal(person) {
       await saveActorProfileMapping(modalPerson, {
         javdbUrl: urlInput.value,
         displayName: nameInput.value,
+        gender: genderSelect.value,
         aliases: linesFromTextarea(aliasesInput.value),
         status: null,
         throwOnError: true
@@ -404,6 +412,7 @@ async function openActorMappingModal(person) {
       await saveActorProfileMapping(modalPerson, {
         javdbUrl: urlInput.value,
         displayName: nameInput.value,
+        gender: genderSelect.value,
         aliases: linesFromTextarea(aliasesInput.value),
         status: null,
         throwOnError: true

@@ -20,7 +20,7 @@ export function createRankingPage(deps) {
   function enter(options = {}) {
     clearWorkFilter();
     state.sortMode = "ranking";
-    els.sortSelect.value = "ranking";
+    if (els.sortSelect) els.sortSelect.value = "ranking";
     loadRankings();
     syncRouteAfterNavigation(options);
   }
@@ -99,45 +99,120 @@ export function createRankingPage(deps) {
     }
     header.append(actions);
 
-    const list = document.createElement("div");
-    list.className = "ranking-chip-list";
+    const selector = document.createElement("div");
+    selector.className = "ranking-selector";
     if (!state.rankingLists.length) {
       const empty = document.createElement("div");
       empty.className = "ranking-empty-note";
       empty.textContent = "后台刷新后会出现在这里";
-      list.append(empty);
+      selector.append(empty);
     } else {
-      for (const item of state.rankingLists) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = `ranking-chip${item.key === state.selectedRankingKey ? " active" : ""}`;
-        button.textContent = `${item.label} · 缺 ${formatNumber(item.missingTotal)}`;
-        button.addEventListener("click", async () => {
-          state.selectedRankingKey = item.key || "";
-          await loadRankingWorks();
-        });
-        list.append(button);
-      }
+      selector.append(createRankingSelect(), createRankingShortcutRow());
     }
 
-    els.personProfile.append(header, list);
+    els.personProfile.append(header, selector);
   }
 
   function renderStats(data = {}) {
-    const stats = [
-      ["榜单", data.rankingTotal || state.rankingTotal || 0],
-      ["本地已有", data.localTotal || state.rankingLocalTotal || 0],
-      ["未下载", data.missingTotal || state.rankingMissingTotal || 0],
-      ["当前显示", visibleWorks().length]
-    ];
-
     els.statsRow.innerHTML = "";
-    for (const [label, value] of stats) {
-      const stat = document.createElement("div");
-      stat.className = "stat";
-      stat.innerHTML = `<strong>${formatNumber(value)}</strong><span>${label}</span>`;
-      els.statsRow.append(stat);
+    const bar = document.createElement("div");
+    bar.className = "ranking-toolbar";
+
+    const summary = document.createElement("div");
+    summary.className = "ranking-toolbar-summary";
+    summary.textContent = [
+      `${formatNumber(data.rankingTotal || state.rankingTotal || 0)} 榜单`,
+      `${formatNumber(data.localTotal || state.rankingLocalTotal || 0)} 本地`,
+      `${formatNumber(data.missingTotal || state.rankingMissingTotal || 0)} 未下载`,
+      `${formatNumber(visibleWorks().length)} 显示`
+    ].join(" · ");
+
+    bar.append(summary, createRankingSortControl());
+    els.statsRow.append(bar);
+  }
+
+  function createRankingSelect() {
+    const wrap = document.createElement("label");
+    wrap.className = "ranking-select-wrap";
+    const label = document.createElement("span");
+    label.textContent = "榜单";
+    const select = document.createElement("select");
+    select.className = "ranking-select";
+    select.setAttribute("aria-label", "选择排行榜榜单");
+    for (const item of state.rankingLists) {
+      const option = new Option(rankingOptionLabel(item), item.key || "");
+      select.append(option);
     }
+    select.value = state.selectedRankingKey || "";
+    select.addEventListener("change", async () => {
+      state.selectedRankingKey = select.value;
+      await loadRankingWorks();
+    });
+    wrap.append(label, select);
+    return wrap;
+  }
+
+  function createRankingShortcutRow() {
+    const row = document.createElement("div");
+    row.className = "ranking-shortcut-row";
+    const preferred = preferredRankingShortcuts(state.rankingLists);
+    for (const item of preferred) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `ranking-chip${item.key === state.selectedRankingKey ? " active" : ""}`;
+      button.textContent = rankingShortLabel(item);
+      button.title = rankingOptionLabel(item);
+      button.addEventListener("click", async () => {
+        if ((item.key || "") === (state.selectedRankingKey || "")) return;
+        state.selectedRankingKey = item.key || "";
+        await loadRankingWorks();
+      });
+      row.append(button);
+    }
+    return row;
+  }
+
+  function createRankingSortControl() {
+    const wrap = document.createElement("label");
+    wrap.className = "ranking-sort-wrap";
+    const label = document.createElement("span");
+    label.textContent = "排序";
+    const select = document.createElement("select");
+    select.className = "ranking-sort-select";
+    select.setAttribute("aria-label", "排行榜排序");
+    for (const [value, text] of [
+      ["ranking", "榜单顺序"],
+      ["releaseDesc", "发行最新"],
+      ["ratingDesc", "评分最高"],
+      ["title", "标题"]
+    ]) {
+      select.append(new Option(text, value));
+    }
+    select.value = ["ranking", "releaseDesc", "ratingDesc", "title"].includes(state.sortMode) ? state.sortMode : "ranking";
+    select.addEventListener("change", () => {
+      state.sortMode = select.value;
+      resetWorkPaging();
+      renderStats();
+      renderWorks();
+    });
+    wrap.append(label, select);
+    return wrap;
+  }
+
+  function preferredRankingShortcuts(items) {
+    const years = items.filter((item) => /^y\d{4}$/.test(item.key || "")).sort((a, b) => String(b.key).localeCompare(String(a.key)));
+    const nonYears = items.filter((item) => !/^y\d{4}$/.test(item.key || ""));
+    return [...years, ...nonYears];
+  }
+
+  function rankingOptionLabel(item) {
+    return `${item.label} · 本地 ${formatNumber(item.localTotal)} · 缺 ${formatNumber(item.missingTotal)}`;
+  }
+
+  function rankingShortLabel(item) {
+    const year = /^y(\d{4})$/.exec(item.key || "")?.[1];
+    const label = year || item.label.replace(/^TOP250\s*/i, "") || "全部";
+    return `${label} · 缺 ${formatNumber(item.missingTotal)}`;
   }
 
   return {

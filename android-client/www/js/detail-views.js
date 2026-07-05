@@ -1,6 +1,6 @@
 import { fetchJson, postJson } from "./api.js?v=20260702-novel-local-manage-74";
 import { createAndroidVideoSection } from "./android-player.js";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js?v=20260702-novel-local-manage-74";
+import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js?v=20260705-mobile-actions-01";
 import { createDetailSectionTitle } from "./detail-ui.js";
 import { extractWorkCode, formatDate, formatNumber } from "./format.js";
 import { createInfoPreviewSection } from "./info-preview.js";
@@ -300,17 +300,27 @@ export function createDetailViews(context) {
 
     const actions = document.createElement("div");
     actions.className = "detail-action-row";
+    const markerButton = document.createElement("button");
+    markerButton.type = "button";
+    markerButton.className = "local-marker-action";
+    syncLocalMarkerButton(markerButton, work, "A");
+    markerButton.addEventListener("click", () => toggleLocalMarker(work, "A", markerButton));
     const favoriteButton = document.createElement("button");
     favoriteButton.type = "button";
     favoriteButton.className = "favorite-action";
     syncFavoriteButton(favoriteButton, work.favorite);
     favoriteButton.addEventListener("click", () => toggleFavorite(work, favoriteButton));
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "delete-local-action danger";
+    syncDeleteLocalButton(deleteButton, work);
+    deleteButton.addEventListener("click", () => deleteLocalFiles(work, deleteButton));
     const backButton = document.createElement("button");
     backButton.type = "button";
     backButton.className = "detail-back-action";
     backButton.textContent = "返回";
     backButton.addEventListener("click", goBack);
-    actions.append(backButton, favoriteButton);
+    actions.append(backButton, markerButton, favoriteButton, deleteButton);
 
     const highlights = createWorkDetailHighlights(work);
     body.append(titleBlock, actions);
@@ -928,6 +938,93 @@ export function createDetailViews(context) {
   function syncFavoriteButton(button, favorite) {
     button.textContent = favorite ? "已收藏" : "收藏";
     button.classList.toggle("active", Boolean(favorite));
+  }
+
+  function syncLocalMarkerButton(button, work, marker = "A") {
+    const key = String(marker || "A").toUpperCase();
+    const active = (work.localMarkers || []).includes(key);
+    button.hidden = Boolean(work.missingLocal);
+    button.textContent = active ? `${key} 已标记` : `标记 ${key}`;
+    button.title = active ? `移除 ${key} 标记` : `添加 ${key} 标记`;
+    button.classList.toggle("active", active);
+  }
+
+  function syncDeleteLocalButton(button, work) {
+    const available = Boolean(work?.id && !work.missingLocal);
+    button.hidden = !available;
+    button.disabled = !available;
+    button.textContent = "删除文件";
+    button.title = available ? "删除这个作品的本地文件夹，数据库资料会保留" : "";
+  }
+
+  async function toggleLocalMarker(work, marker, button) {
+    const activeUrl = getActiveUrl();
+    const key = String(marker || "A").toUpperCase();
+    const markers = new Set(work.localMarkers || []);
+    const nextEnabled = !markers.has(key);
+    const previousMarkers = [...markers];
+    button.disabled = true;
+    button.textContent = nextEnabled ? "标记中" : "移除中";
+    try {
+      const data = await postJson(activeUrl, `/api/works/${encodeURIComponent(work.id)}/local-marker`, {
+        marker: key,
+        enabled: nextEnabled
+      });
+      const nextWork = data.work || null;
+      if (nextWork) Object.assign(work, nextWork);
+      else {
+        if (nextEnabled) markers.add(key);
+        else markers.delete(key);
+        work.localMarkers = [...markers];
+      }
+      syncLocalMarkerButton(button, work, key);
+      updateCachedWorkDetail(work).catch(() => {});
+      renderMessage(nextEnabled ? `${key} 标记已添加。` : `${key} 标记已移除。`, "quiet", false);
+    } catch (error) {
+      work.localMarkers = previousMarkers;
+      syncLocalMarkerButton(button, work, key);
+      renderMessage(error.message || "更新作品标记失败", "error", false);
+    } finally {
+      button.disabled = false;
+      syncLocalMarkerButton(button, work, key);
+    }
+  }
+
+  async function deleteLocalFiles(work, button) {
+    if (!work?.id || work.missingLocal) return;
+    const title = work.title || work.directoryName || extractWorkCode(work) || "这个作品";
+    const confirmed = window.confirm(`确认删除「${title}」的本地文件夹？\n\n数据库资料会保留，删除后会显示为未下载。`);
+    if (!confirmed) return;
+
+    const activeUrl = getActiveUrl();
+    button.disabled = true;
+    button.textContent = "删除中";
+    try {
+      const data = await postJson(activeUrl, `/api/works/${encodeURIComponent(work.id)}/local-files/delete`);
+      if (data.work) Object.assign(work, data.work);
+      else work.missingLocal = true;
+      await updateCachedWorkDetail(work).catch(() => null);
+      const removedEmpty = data.emptyRemovedPaths?.length ? `，并清理 ${formatNumber(data.emptyRemovedPaths.length)} 个空目录` : "";
+      renderMessage(`本地文件已删除${removedEmpty}。`, "quiet", false);
+      renderWorkDetail(work.id);
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = "删除失败";
+      renderMessage(error.message || "删除本地文件失败", "error", false);
+      window.setTimeout(() => syncDeleteLocalButton(button, work), 1400);
+    }
+  }
+
+  async function updateCachedWorkDetail(work) {
+    if (!work?.id) return null;
+    const activeUrl = getActiveUrl();
+    const path = `/api/works/${encodeURIComponent(work.id)}`;
+    const cached = await readCachedJson(activeUrl, path).catch(() => null);
+    const payload = {
+      ...(cached?.payload || {}),
+      work
+    };
+    return writeCachedJson(activeUrl, path, payload);
   }
 
   async function toggleFavorite(work, button) {

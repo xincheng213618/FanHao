@@ -35,14 +35,14 @@ const WORK_SORTS = [
 
 export function createWorkListState(context) {
   const { renderCurrentView } = context;
-  let filterMode = validValue(localStorage.getItem(FILTER_STORAGE_KEY), WORK_FILTERS, "all");
+  let filterMode = normalizeFilterMode(localStorage.getItem(FILTER_STORAGE_KEY));
   let sortMode = validValue(localStorage.getItem(SORT_STORAGE_KEY), WORK_SORTS, "updated");
 
   function visibleWorks(works, options = {}) {
-    const activeFilter = validValue(options.filterMode, WORK_FILTERS, filterMode);
+    const activeFilter = normalizeFilterMode(options.filterMode ?? filterMode);
     const activeSort = validValue(options.sortMode, WORK_SORTS, sortMode);
     return [...works]
-      .filter((work) => workMatchesFilter(work, activeFilter))
+      .filter((work) => workMatchesFilters(work, activeFilter))
       .sort((a, b) => compareWorks(a, b, activeSort));
   }
 
@@ -56,9 +56,9 @@ export function createWorkListState(context) {
   }
 
   function setFilterMode(value, options = {}) {
-    if (!validValue(value, WORK_FILTERS, "")) return false;
-    if (filterMode === value) return false;
-    filterMode = value;
+    const next = options.replace ? normalizeFilterMode(value) : nextFilterMode(filterMode, value);
+    if (filterMode === next) return false;
+    filterMode = next;
     if (options.persist !== false) localStorage.setItem(FILTER_STORAGE_KEY, filterMode);
     if (options.rerender !== false) renderCurrentView();
     return true;
@@ -76,7 +76,8 @@ export function createWorkListState(context) {
   function createWorkControls(sourceWorks, visibleList, options = {}) {
     const controls = document.createElement("div");
     controls.className = "work-controls";
-    const activeFilter = validValue(options.filterMode, WORK_FILTERS, filterMode);
+    const activeFilter = normalizeFilterMode(options.filterMode ?? filterMode);
+    const activeFilters = new Set(normalizeFilterList(activeFilter));
     const activeSort = validValue(options.sortMode, WORK_SORTS, sortMode);
 
     const filterStrip = document.createElement("div");
@@ -86,7 +87,8 @@ export function createWorkListState(context) {
       const count = counts[option.value] || 0;
       const button = document.createElement("button");
       button.type = "button";
-      button.className = activeFilter === option.value ? "active" : "";
+      const active = option.value === "all" ? activeFilters.size === 0 : activeFilters.has(option.value);
+      button.className = active ? "active" : "";
       button.textContent = option.label;
       button.title = `${option.label} · ${formatNumber(count)}`;
       button.setAttribute("aria-label", `${option.label}，${formatNumber(count)} 个作品`);
@@ -107,7 +109,12 @@ export function createWorkListState(context) {
       ? Number(options.displayedCount)
       : visibleList.length;
     const allTotal = Number.isFinite(Number(options.total)) ? Number(options.total) : sourceWorks.length;
-    const activeTotalValue = activeFilter === "all" ? allTotal : counts[activeFilter];
+    const singleActiveFilter = activeFilters.size === 1 ? [...activeFilters][0] : "";
+    const activeTotalValue = activeFilters.size === 0
+      ? allTotal
+      : singleActiveFilter
+        ? counts[singleActiveFilter]
+        : visibleList.length;
     const activeTotal = Number.isFinite(Number(activeTotalValue)) ? Number(activeTotalValue) : allTotal;
     summary.textContent = `显示 ${formatNumber(displayedCount)} / ${formatNumber(activeTotal)}`;
     const select = document.createElement("select");
@@ -160,6 +167,12 @@ export function createWorkListState(context) {
     if (mode === "missingCover") return !work.missingLocal && !imageUrlForWork(work);
     if (mode === "vr") return isVrWork(work);
     return true;
+  }
+
+  function workMatchesFilters(work, mode) {
+    const filters = normalizeFilterList(mode);
+    if (!filters.length) return true;
+    return filters.every((filter) => workMatchesFilter(work, filter));
   }
 
   function compareWorks(a, b, activeSort = sortMode) {
@@ -246,4 +259,31 @@ export function createWorkListState(context) {
 
 function validValue(value, options, fallback) {
   return options.some((option) => option.value === value) ? value : fallback;
+}
+
+function validFilterValue(value) {
+  return WORK_FILTERS.some((option) => option.value === value);
+}
+
+function normalizeFilterList(value) {
+  const raw = Array.isArray(value) ? value : String(value || "all").split(",");
+  return [...new Set(raw
+    .map((item) => String(item || "").trim())
+    .filter((item) => item && item !== "all" && validFilterValue(item)))];
+}
+
+function normalizeFilterMode(value) {
+  const filters = normalizeFilterList(value);
+  return filters.length ? filters.join(",") : "all";
+}
+
+function nextFilterMode(current, value) {
+  const target = String(value || "").trim();
+  if (!validFilterValue(target)) return normalizeFilterMode(current);
+  if (target === "all") return "all";
+
+  const filters = normalizeFilterList(current);
+  const exists = filters.includes(target);
+  const next = exists ? filters.filter((item) => item !== target) : [...filters, target];
+  return normalizeFilterMode(next);
 }

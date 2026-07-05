@@ -1,4 +1,6 @@
 import argparse
+import base64
+import hashlib
 import json
 import mimetypes
 import random
@@ -12,6 +14,7 @@ from urllib.parse import quote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from code_parser import loose_code_key, normalize_code
 from remote_image_cache import cache_remote_images, ensure_remote_image_schema, upsert_remote_image
@@ -25,6 +28,11 @@ DEFAULT_SCRAPER_CONFIG_PATH = PROJECT_ROOT / "tools" / "scrapers" / "javdb.json"
 DEFAULT_SHARED_PROFILE = Path(r"C:\Users\17917\Desktop\Tool\data\selenium_user_data")
 DEFAULT_CHROME_BINARY = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
 DEFAULT_WDM_CHROMEDRIVER_ROOT = Path.home() / ".wdm" / "drivers" / "chromedriver" / "win64"
+JAVDB_PERSISTENT_COOKIES = [
+    {"domain": "javdb.com", "name": "over18", "value": "1", "path": "/", "secure": False, "http_only": False, "expires": 2147483647},
+    {"domain": "javdb.com", "name": "comment_warning", "value": "1", "path": "/", "secure": False, "http_only": False, "expires": 2147483647},
+    {"domain": "javdb.com", "name": "locale", "value": "zh", "path": "/", "secure": False, "http_only": False, "expires": 2147483647},
+]
 JAVDB_SEARCH_URL = "https://javdb.com/search?q={query}&f=all"
 SOURCE_NAME = "javdb-backfill"
 BAD_CODE_PREFIXES = {"DIR", "FILE", "IMG", "IMAGE", "VIDEO"}
@@ -75,6 +83,7 @@ class WorkTarget:
     code: str
     needs_info: bool
     needs_cover: bool
+    detail_url: str = ""
 
 
 @dataclass
@@ -97,6 +106,11 @@ class JavDbMeta:
     preview_video_url: str = ""
     actors: list[str] | None = None
     tags: list[str] | None = None
+    actor_links: list[dict] | None = None
+    tag_links: list[dict] | None = None
+    maker_url: str = ""
+    label_url: str = ""
+    series_url: str = ""
 
 
 class AccessBlockedError(RuntimeError):
@@ -150,7 +164,7 @@ def main() -> None:
             ensure_remote_image_schema(conn)
             for index, target in enumerate(targets, 1):
                 try:
-                    meta = client.fetch_by_code(target.code)
+                    meta = client.fetch_by_code(target.code, target.detail_url)
                     if not meta:
                         stats["miss"] += 1
                         write_jsonl(log_path, result_payload("miss", target, {"reason": "no exact JavDB match"}))
@@ -218,6 +232,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile-dir", type=Path, default=DEFAULT_SHARED_PROFILE)
     parser.add_argument("--chrome-binary", type=Path, default=DEFAULT_CHROME_BINARY)
     parser.add_argument("--driver-path", type=Path, default=None)
+    parser.add_argument("--cookie-profile-dir", type=Path, default=None, help="从 Chromium/115Chrome User Data 读取 Cookie 并注入当前 Selenium。")
+    parser.add_argument("--cookie-profile-name", default="Default", help="Cookie 所在的 Chromium profile，默认 Default。")
+    parser.add_argument("--cookie-domain", action="append", default=[], help="只注入这些域名的 Cookie；默认 javdb.com。可重复。")
+    parser.add_argument("--cookie-cache", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--proxy", default="http://127.0.0.1:10809")
     parser.add_argument("--no-proxy", action="store_true")
     parser.add_argument("--headless", action="store_true")
@@ -333,7 +351,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           preview_images_json TEXT,
           preview_video_url TEXT,
           actors_json TEXT,
+          actor_links_json TEXT,
           tags_json TEXT,
+          tag_links_json TEXT,
+          maker_url TEXT,
+          label_url TEXT,
+          series_url TEXT,
           fields_json TEXT,
           raw_text TEXT,
           raw_truncated INTEGER NOT NULL DEFAULT 0,
@@ -350,6 +373,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "work_info", "javdb_url", "TEXT")
     ensure_column(conn, "work_info", "preview_images_json", "TEXT")
     ensure_column(conn, "work_info", "preview_video_url", "TEXT")
+    ensure_column(conn, "work_info", "actor_links_json", "TEXT")
+    ensure_column(conn, "work_info", "tag_links_json", "TEXT")
+    ensure_column(conn, "work_info", "maker_url", "TEXT")
+    ensure_column(conn, "work_info", "label_url", "TEXT")
+    ensure_column(conn, "work_info", "series_url", "TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_work_info_javdb_url ON work_info(javdb_url)")
 
 
@@ -414,11 +442,32 @@ def build_targets(conn: sqlite3.Connection, works: list[dict], people_by_id: dic
                     code=code,
                     needs_info=needs_info,
                     needs_cover=needs_cover,
+                    detail_url=cached_detail_url(conn, code),
                 )
             )
 
     targets.sort(key=lambda item: (source_priority(item.work.get("relativePath")), item.code, item.work.get("title") or ""))
     return targets
+
+
+def cached_detail_url(conn: sqlite3.Connection, code: str) -> str:
+    code_key = loose_code_key(code)
+    if not code_key:
+        return ""
+
+    queries = [
+        ("SELECT javdb_url FROM work_info WHERE code = ? AND javdb_url IS NOT NULL AND javdb_url <> '' LIMIT 1", (code,)),
+        ("SELECT detail_url FROM actor_movies WHERE code_key = ? AND detail_url IS NOT NULL AND detail_url <> '' LIMIT 1", (code_key,)),
+        ("SELECT detail_url FROM javdb_rankings WHERE code_key = ? AND detail_url IS NOT NULL AND detail_url <> '' LIMIT 1", (code_key,)),
+    ]
+    for sql, params in queries:
+        try:
+            row = conn.execute(sql, params).fetchone()
+        except sqlite3.Error:
+            continue
+        if row and row[0]:
+            return str(row[0]).strip()
+    return ""
 
 
 def source_prefixes(args: argparse.Namespace) -> list[str]:
@@ -500,8 +549,13 @@ class JavDbClient:
         self.scraper_config = args.scraper_config_data
         self.driver = None
 
-    def fetch_by_code(self, code: str) -> JavDbMeta | None:
+    def fetch_by_code(self, code: str, detail_url: str = "") -> JavDbMeta | None:
         driver = self.get_driver()
+        if detail_url:
+            driver.get(detail_url)
+            detail_html = self.wait_for_detail_page()
+            return parse_detail_page(detail_html, driver.current_url, driver.title or "", fallback_code=code, config=self.scraper_config)
+
         search_url = JAVDB_SEARCH_URL.format(query=quote(code))
         driver.get(search_url)
         html = self.wait_for_search_page()
@@ -548,7 +602,7 @@ class JavDbClient:
         last_html = ""
         while time.time() < deadline:
             last_html = self.driver.page_source or ""
-            reason = blocked_reason(last_html)
+            reason = blocked_reason(last_html, self.driver.current_url)
             if reason:
                 raise AccessBlockedError(reason)
             if ready(last_html):
@@ -600,7 +654,52 @@ class JavDbClient:
         except Exception:
             pass
 
+        self.inject_external_cookies()
         return self.driver
+
+    def inject_external_cookies(self) -> None:
+        profile_dir = getattr(self.args, "cookie_profile_dir", None)
+        cookies = []
+        source_count = 0
+        try:
+            if profile_dir:
+                cookies = load_chromium_cookies(
+                    Path(profile_dir),
+                    getattr(self.args, "cookie_profile_name", "Default") or "Default",
+                    getattr(self.args, "cookie_domain", None) or ["javdb.com"],
+                )
+                source_count = len(cookies)
+                if not cookies:
+                    print(f"JavDB Cookie 注入: {profile_dir} 没有找到匹配 Cookie。", flush=True)
+        except Exception as error:
+            print(f"JavDB Cookie 读取跳过: {error}", flush=True)
+
+        cookies = merge_javdb_persistent_cookies(cookies)
+        persistent_count = max(0, len(cookies) - source_count)
+        try:
+            driver = self.driver
+            driver.get("https://javdb.com/")
+            added = 0
+            for cookie in cookies:
+                selenium_cookie = {
+                    "name": cookie["name"],
+                    "value": cookie["value"],
+                    "domain": cookie["domain"],
+                    "path": cookie["path"] or "/",
+                    "secure": bool(cookie["secure"]),
+                    "httpOnly": bool(cookie["http_only"]),
+                }
+                if cookie.get("expires"):
+                    selenium_cookie["expiry"] = int(cookie["expires"])
+                try:
+                    driver.add_cookie(selenium_cookie)
+                    added += 1
+                except Exception:
+                    pass
+            print(f"JavDB Cookie 注入: 准备 {len(cookies)} 条，成功注入 {added} 条。", flush=True)
+            print(f"JavDB Cookie 注入详情: 115读取 {source_count} 条，固定确认 {persistent_count} 条。", flush=True)
+        except Exception as error:
+            print(f"JavDB Cookie 注入跳过: {error}", flush=True)
 
     def browser_cookies(self) -> requests.cookies.RequestsCookieJar:
         jar = requests.cookies.RequestsCookieJar()
@@ -635,9 +734,128 @@ def version_key(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in re.findall(r"\d+", value))
 
 
-def blocked_reason(html: str) -> str:
+def merge_javdb_persistent_cookies(cookies: list[dict]) -> list[dict]:
+    merged = list(cookies or [])
+    existing = {(normalize_cookie_domain(cookie.get("domain", "")), cookie.get("name")) for cookie in merged if cookie.get("name")}
+    for cookie in JAVDB_PERSISTENT_COOKIES:
+        key = (normalize_cookie_domain(cookie["domain"]), cookie["name"])
+        if key not in existing:
+            merged.append(dict(cookie))
+            existing.add(key)
+    return merged
+
+
+def load_chromium_cookies(user_data_dir: Path, profile_name: str, domains: list[str]) -> list[dict]:
+    profile_dir = user_data_dir / profile_name
+    cookie_db = profile_dir / "Network" / "Cookies"
+    if not cookie_db.exists():
+        cookie_db = profile_dir / "Cookies"
+    local_state = user_data_dir / "Local State"
+    if not cookie_db.exists():
+        raise RuntimeError(f"找不到 Cookies 数据库: {cookie_db}")
+    if not local_state.exists():
+        raise RuntimeError(f"找不到 Local State: {local_state}")
+
+    domain_filters = [normalize_cookie_domain(item) for item in domains if str(item or "").strip()] or ["javdb.com"]
+    key = chromium_cookie_key(local_state)
+    rows = read_cookie_rows(cookie_db, domain_filters)
+    cookies = []
+    for row in rows:
+        value = row["value"] or decrypt_chromium_cookie(row["encrypted_value"], key, row["host_key"])
+        if not value:
+            continue
+        cookies.append(
+            {
+                "domain": row["host_key"],
+                "name": row["name"],
+                "value": value,
+                "path": row["path"] or "/",
+                "secure": bool(row["is_secure"]),
+                "http_only": bool(row["is_httponly"]),
+                "expires": chrome_time_to_unix(row["expires_utc"]),
+            }
+        )
+    return cookies
+
+
+def read_cookie_rows(cookie_db: Path, domains: list[str]) -> list[sqlite3.Row]:
+    clauses = []
+    params = []
+    for domain in domains:
+        clauses.append("host_key = ? OR host_key = ? OR host_key LIKE ?")
+        params.extend([domain, f".{domain}", f"%.{domain}"])
+    sql = (
+        "SELECT host_key, name, value, encrypted_value, path, expires_utc, is_secure, is_httponly "
+        f"FROM cookies WHERE {' OR '.join(f'({clause})' for clause in clauses)} ORDER BY host_key, name"
+    )
+    try:
+        conn = sqlite3.connect(f"file:{cookie_db.as_posix()}?mode=ro", uri=True, timeout=1)
+    except sqlite3.OperationalError as error:
+        raise RuntimeError(f"Cookies 数据库正在被浏览器锁定，请关闭 115Chrome 后同步一次: {cookie_db}") from error
+    try:
+        conn.row_factory = sqlite3.Row
+        return list(conn.execute(sql, params).fetchall())
+    finally:
+        conn.close()
+
+
+def chromium_cookie_key(local_state: Path) -> bytes:
+    state = json.loads(local_state.read_text(encoding="utf-8"))
+    encrypted_key = state.get("os_crypt", {}).get("encrypted_key")
+    if not encrypted_key:
+        raise RuntimeError("Local State 里没有 os_crypt.encrypted_key")
+    blob = base64.b64decode(encrypted_key)
+    if blob.startswith(b"DPAPI"):
+        blob = blob[5:]
+    import win32crypt
+
+    return win32crypt.CryptUnprotectData(blob, None, None, None, 0)[1]
+
+
+def decrypt_chromium_cookie(encrypted_value: bytes, key: bytes, host_key: str) -> str:
+    if not encrypted_value:
+        return ""
+    import win32crypt
+
+    try:
+        if encrypted_value.startswith((b"v10", b"v11", b"v20")):
+            nonce = encrypted_value[3:15]
+            payload = encrypted_value[15:]
+            plain = AESGCM(key).decrypt(nonce, payload, None)
+            host_hash = hashlib.sha256(host_key.encode("utf-8")).digest()
+            if plain.startswith(host_hash):
+                plain = plain[len(host_hash) :]
+            return plain.decode("utf-8", errors="ignore")
+        return win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1].decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def chrome_time_to_unix(value: int | None) -> int | None:
+    try:
+        ticks = int(value or 0)
+    except (TypeError, ValueError):
+        return None
+    if ticks <= 0:
+        return None
+    return max(0, int(ticks / 1_000_000 - 11644473600))
+
+
+def normalize_cookie_domain(value: str) -> str:
+    host = urlparse(value if "://" in value else f"https://{value}").hostname or value
+    return host.lstrip(".").lower()
+
+
+def blocked_reason(html: str, current_url: str = "") -> str:
     text = BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True)
     lower = text.lower()
+    path = urlparse(current_url or "").path.lower()
+    if path.startswith("/login"):
+        return "JavDB 重定向到登录页，请先在共享 Chrome profile 登录后重试。"
+    if "此內容需要登入才能查看或操作" in text or "此内容需要登入才能查看或操作" in text:
+        return "JavDB 提示该内容需要登录后才能查看或操作。"
+    if "attention required! | cloudflare" in lower or "please enable cookies" in lower or "sorry, you have been blocked" in lower:
+        return "JavDB Cloudflare 阻断了本次访问，请先用共享 Chrome profile 手动打开并通过验证。"
     if "banned your access" in lower or "禁止了你的訪問" in text or "禁止了你的访问" in text:
         return text[:500]
     if "rucaptcha" in lower:
@@ -740,8 +958,13 @@ def parse_detail_page(html: str, url: str, browser_title: str, fallback_code: st
     if not title or loose_code_key(title.split(maxsplit=1)[0] if title.split() else "") != loose_code_key(code):
         title = h2_text or code
 
-    actors = label_links(soup, *label_config(config, "actors"))
-    tags = label_links(soup, *label_config(config, "tags"))
+    actor_links = label_link_items(soup, url, *label_config(config, "actors"))
+    tag_links = label_link_items(soup, url, *label_config(config, "tags"))
+    maker_links = label_link_items(soup, url, *label_config(config, "maker"))
+    label_links_data = label_link_items(soup, url, *label_config(config, "label"))
+    series_links = label_link_items(soup, url, *label_config(config, "series"))
+    actors = [item["name"] for item in actor_links] or label_links(soup, *label_config(config, "actors"))
+    tags = [item["name"] for item in tag_links] or label_links(soup, *label_config(config, "tags"))
     image_url = ""
     image = first_select(soup, config_list(config, "coverSelectors"))
     if image and image.get("src"):
@@ -772,6 +995,11 @@ def parse_detail_page(html: str, url: str, browser_title: str, fallback_code: st
         preview_video_url=preview_video_url,
         actors=actors,
         tags=tags,
+        actor_links=actor_links,
+        tag_links=tag_links,
+        maker_url=maker_links[0]["url"] if maker_links else "",
+        label_url=label_links_data[0]["url"] if label_links_data else "",
+        series_url=series_links[0]["url"] if series_links else "",
     )
 
 
@@ -857,6 +1085,23 @@ def label_links(soup: BeautifulSoup, *labels: str) -> list[str]:
     return unique_texts(item.strip() for item in re.split(r"[,，、/|]", text) if item.strip())
 
 
+def label_link_items(soup: BeautifulSoup, base_url: str, *labels: str) -> list[dict]:
+    container = label_container(soup, *labels)
+    if not container:
+        return []
+    result = []
+    seen = set()
+    for link in container.select("a[href]"):
+        name = re.sub(r"\s+", " ", link.get_text(" ", strip=True)).strip()
+        url = http_url(link.get("href"), base_url)
+        key = (name.casefold(), url)
+        if not name or not url or key in seen:
+            continue
+        seen.add(key)
+        result.append({"name": name, "url": url})
+    return result
+
+
 def label_text_or_links(soup: BeautifulSoup, *labels: str) -> str:
     links = label_links(soup, *labels)
     return ", ".join(links) if links else label_value(soup, *labels)
@@ -908,10 +1153,11 @@ def upsert_work_info(conn: sqlite3.Connection, target: WorkTarget, meta: JavDbMe
           work_id, person_id, person_name, source_info_id, source_name, source_path,
           source_size, source_mtime, code, title, release_date, duration_minutes,
           rating, rating_count, director, maker, label, series, javdb_url, image_url,
-          preview_images_json, preview_video_url, actors_json, tags_json, fields_json, raw_text, raw_truncated,
+          preview_images_json, preview_video_url, actors_json, actor_links_json, tags_json, tag_links_json,
+          maker_url, label_url, series_url, fields_json, raw_text, raw_truncated,
           status, error, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'ok', NULL, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'ok', NULL, ?)
         ON CONFLICT(work_id) DO UPDATE SET
           person_id = excluded.person_id,
           person_name = excluded.person_name,
@@ -935,7 +1181,12 @@ def upsert_work_info(conn: sqlite3.Connection, target: WorkTarget, meta: JavDbMe
           preview_images_json = excluded.preview_images_json,
           preview_video_url = excluded.preview_video_url,
           actors_json = excluded.actors_json,
+          actor_links_json = excluded.actor_links_json,
           tags_json = excluded.tags_json,
+          tag_links_json = excluded.tag_links_json,
+          maker_url = excluded.maker_url,
+          label_url = excluded.label_url,
+          series_url = excluded.series_url,
           fields_json = excluded.fields_json,
           raw_text = excluded.raw_text,
           raw_truncated = excluded.raw_truncated,
@@ -967,7 +1218,12 @@ def upsert_work_info(conn: sqlite3.Connection, target: WorkTarget, meta: JavDbMe
             json.dumps(meta.preview_images or [], ensure_ascii=False),
             meta.preview_video_url or None,
             json.dumps(meta.actors or [], ensure_ascii=False),
+            json.dumps(meta.actor_links or [], ensure_ascii=False),
             json.dumps(meta.tags or [], ensure_ascii=False),
+            json.dumps(meta.tag_links or [], ensure_ascii=False),
+            meta.maker_url or None,
+            meta.label_url or None,
+            meta.series_url or None,
             json.dumps(fields, ensure_ascii=False),
             raw_text,
             now,
@@ -1084,10 +1340,15 @@ def render_raw_text(meta: JavDbMeta) -> str:
         ("rating", meta.rating_text or rating_text(meta)),
         ("导演", meta.director),
         ("制作商", meta.maker),
+        ("制作商URL", meta.maker_url),
         ("发行商", meta.label),
+        ("发行商URL", meta.label_url),
         ("系列", meta.series),
+        ("系列URL", meta.series_url),
         ("actor_names", meta.actors or []),
+        ("actor_links", [f"{item.get('name')} {item.get('url')}" for item in meta.actor_links or []]),
         ("tags", meta.tags or []),
+        ("tag_links", [f"{item.get('name')} {item.get('url')}" for item in meta.tag_links or []]),
         ("image_url", meta.image_url),
         ("preview_images", meta.preview_images or []),
         ("preview_video_url", meta.preview_video_url),

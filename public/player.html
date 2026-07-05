@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FanHao 播放</title>
+    <link rel="stylesheet" href="/css/legacy.css?v=20260705-local-marker-a-01" />
+    <style>
+      body.player-page {
+        min-height: 100vh;
+        margin: 0;
+        background: #0b0f0d;
+        color: #eef7f2;
+      }
+      .player-shell-page {
+        display: grid;
+        min-height: 100vh;
+        grid-template-rows: auto 1fr;
+      }
+      .player-page-header {
+        padding: 18px 22px 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(10, 14, 12, 0.96);
+      }
+      .player-page-header h1 {
+        margin: 0;
+        overflow: hidden;
+        font-size: 20px;
+        line-height: 1.35;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .player-page-main {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 320px;
+        gap: 18px;
+        padding: 18px 22px 22px;
+      }
+      .player-stage {
+        display: grid;
+        min-height: 0;
+        align-content: start;
+        gap: 12px;
+      }
+      .player-stage video {
+        width: 100%;
+        max-height: calc(100vh - 140px);
+        border-radius: 8px;
+        background: #000;
+      }
+      .player-stage video[hidden],
+      .player-notice[hidden] {
+        display: none !important;
+      }
+      .player-notice {
+        display: grid;
+        min-height: 420px;
+        place-items: center;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 8px;
+        background: #050706;
+        color: rgba(238, 247, 242, 0.72);
+        font-weight: 800;
+      }
+      .player-side {
+        display: grid;
+        align-content: start;
+        gap: 14px;
+      }
+      .player-panel {
+        border: 1px solid rgba(255, 255, 255, 0.11);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.05);
+        padding: 12px;
+      }
+      .player-panel h2 {
+        margin: 0 0 10px;
+        font-size: 14px;
+      }
+      .player-file-button {
+        display: grid;
+        width: 100%;
+        gap: 4px;
+        margin-top: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.06);
+        color: inherit;
+        cursor: pointer;
+        padding: 10px;
+        text-align: left;
+      }
+      .player-file-button.active {
+        border-color: rgba(96, 211, 170, 0.6);
+        background: rgba(96, 211, 170, 0.13);
+      }
+      .player-file-button strong,
+      .player-file-button span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .player-file-button span {
+        color: rgba(238, 247, 242, 0.62);
+        font-size: 12px;
+      }
+      .player-meta-row {
+        display: grid;
+        grid-template-columns: 64px minmax(0, 1fr);
+        gap: 10px;
+        padding: 8px 0;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 13px;
+      }
+      .player-meta-row:first-of-type {
+        border-top: 0;
+      }
+      .player-meta-row span:first-child {
+        color: rgba(238, 247, 242, 0.62);
+        font-weight: 800;
+      }
+      .player-meta-row span:last-child {
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .player-entity-row {
+        display: grid;
+        grid-template-columns: 64px minmax(0, 1fr);
+        gap: 10px;
+        padding: 8px 0;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 13px;
+      }
+      .player-entity-row > span {
+        color: rgba(238, 247, 242, 0.62);
+        font-weight: 800;
+      }
+      .player-entity-chips {
+        display: flex;
+        min-width: 0;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .player-entity-chip {
+        border: 1px solid rgba(96, 211, 170, 0.26);
+        border-radius: 8px;
+        background: rgba(96, 211, 170, 0.08);
+        color: #bff5de;
+        cursor: pointer;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 800;
+        line-height: 1.25;
+        padding: 5px 8px;
+      }
+      .player-actions-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .player-actions-row a,
+      .player-actions-row button {
+        border: 1px solid rgba(96, 211, 170, 0.28);
+        border-radius: 8px;
+        background: rgba(96, 211, 170, 0.09);
+        color: #bff5de;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 900;
+        padding: 8px 10px;
+        text-decoration: none;
+      }
+      .player-actions-row button.active {
+        border-color: rgba(96, 211, 170, 0.54);
+        background: rgba(96, 211, 170, 0.18);
+      }
+      .player-actions-row button.danger {
+        border-color: rgba(245, 113, 113, 0.44);
+        background: rgba(245, 113, 113, 0.12);
+        color: #ffd1d1;
+      }
+      .player-actions-row button.danger:hover {
+        background: rgba(245, 113, 113, 0.2);
+      }
+      .player-actions-row button:disabled {
+        cursor: progress;
+        opacity: 0.72;
+      }
+      .player-move-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        display: grid;
+        place-items: center;
+        padding: 18px;
+        background: rgba(0, 0, 0, 0.62);
+      }
+      .player-move-dialog {
+        width: min(560px, 100%);
+        max-height: calc(100vh - 36px);
+        overflow: auto;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 8px;
+        background: #111815;
+        color: #eef7f2;
+        box-shadow: 0 24px 72px rgba(0, 0, 0, 0.42);
+      }
+      .player-move-head,
+      .player-move-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      }
+      .player-move-foot {
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        border-bottom: 0;
+      }
+      .player-move-head h2 {
+        margin: 0;
+        font-size: 16px;
+      }
+      .player-move-body {
+        display: grid;
+        gap: 12px;
+        padding: 14px;
+      }
+      .player-move-tabs {
+        display: inline-flex;
+        width: fit-content;
+        overflow: hidden;
+        border: 1px solid rgba(96, 211, 170, 0.26);
+        border-radius: 8px;
+      }
+      .player-move-tabs button,
+      .player-move-foot button,
+      .player-move-head button {
+        border: 0;
+        background: transparent;
+        color: #bff5de;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 900;
+        padding: 8px 10px;
+      }
+      .player-move-tabs button.active {
+        background: rgba(96, 211, 170, 0.17);
+        color: #eef7f2;
+      }
+      .player-move-field {
+        display: grid;
+        gap: 6px;
+      }
+      .player-move-field span {
+        color: rgba(238, 247, 242, 0.66);
+        font-size: 12px;
+        font-weight: 900;
+      }
+      .player-move-field input,
+      .player-move-field select {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.06);
+        color: #eef7f2;
+        font: inherit;
+        padding: 10px;
+      }
+      .player-move-field select option {
+        background: #111815;
+      }
+      .player-move-status {
+        min-height: 18px;
+        color: rgba(238, 247, 242, 0.7);
+        font-size: 12px;
+        font-weight: 800;
+      }
+      .player-move-foot button.primary {
+        border-radius: 8px;
+        background: rgba(96, 211, 170, 0.18);
+      }
+      .player-move-foot button:disabled {
+        cursor: progress;
+        opacity: 0.7;
+      }
+      @media (max-width: 900px) {
+        .player-page-main {
+          grid-template-columns: 1fr;
+          padding: 12px;
+        }
+        .player-page-header {
+          padding: 14px 12px;
+        }
+        .player-stage video {
+          max-height: 58vh;
+        }
+      }
+    </style>
+  </head>
+  <body class="player-page">
+    <div class="player-shell-page">
+      <header class="player-page-header">
+        <h1 id="playerTitle">FanHao 播放</h1>
+      </header>
+      <main class="player-page-main">
+        <section class="player-stage">
+          <div class="player-notice" id="playerNotice">正在读取作品</div>
+          <video id="playerVideo" controls playsinline preload="metadata" hidden></video>
+        </section>
+        <aside class="player-side">
+          <section class="player-panel">
+            <h2>视频文件</h2>
+            <div id="playerFiles"></div>
+          </section>
+          <section class="player-panel">
+            <h2>作品资料</h2>
+            <div id="playerMeta"></div>
+          </section>
+          <section class="player-panel">
+            <h2>操作</h2>
+            <div class="player-actions-row">
+              <button id="backButton" type="button">返回资料库</button>
+              <button id="markerAButton" type="button">标记 A</button>
+              <button id="correctActorButton" type="button" hidden>订正演员</button>
+              <button id="moveToPersonButton" type="button" hidden>迁移演员</button>
+              <button id="openFileButton" type="button" hidden>打开文件夹</button>
+              <button id="deleteLocalButton" type="button" class="danger" hidden>删除本地文件</button>
+              <a id="javdbLink" href="#" target="_blank" rel="noreferrer" hidden>JavDB</a>
+            </div>
+          </section>
+        </aside>
+      </main>
+    </div>
+    <script type="module" src="/js/player-page.js?v=20260706-move-person-create-01"></script>
+  </body>
+</html>

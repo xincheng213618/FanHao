@@ -1709,7 +1709,7 @@ function clientWorkMatchesFilter(work, filter) {
     return rating !== null && rating >= 4;
   }
   if (filter === "vr") return isVrWork(work);
-  if (filter === "hasMagnet") return Boolean(work.availability?.hasMagnet);
+  if (filter === "hasMagnet") return Boolean(work.missingLocal && work.availability?.hasMagnet);
   if (filter === "localMarkedA") return (work.localMarkers || []).includes("A");
   if (filter === "missingLocal") return Boolean(work.missingLocal);
   if (filter === "missingCover") return !workCoverUrl(work);
@@ -2545,7 +2545,6 @@ function createWorkCard(work, index = 0) {
   flags.className = "work-card-flags";
   if (work.ranking?.rankNo) flags.append(createInfoChip(`TOP ${formatNumber(work.ranking.rankNo)}`, "rank"));
   for (const chip of createAvailabilityChips(work)) flags.append(chip);
-  if (!work.missingLocal) flags.append(createLocalMarkerButton(work, "A"));
   if (work.infoCount > 0) flags.append(createInfoChip(`${formatNumber(work.infoCount)} 资料`));
   if (work.progress?.percent) flags.append(createInfoChip(`看到 ${Math.floor(work.progress.percent)}%`, "progress"));
   if (work.missingLocal && state.accessMode === "local") {
@@ -2569,7 +2568,7 @@ function createWorkCard(work, index = 0) {
   if (work.missingLocal) {
     card.append(cover, body);
   } else {
-    card.append(cover, favorite, body);
+    card.append(cover, favorite, createLocalMarkerButton(work, "A"), body);
   }
   return card;
 }
@@ -2591,7 +2590,7 @@ function createLocalMarkerButton(work, marker) {
 }
 
 function localMarkerButtonLabel(key, active) {
-  return active ? key : `标记${key}`;
+  return key;
 }
 
 function createFavoriteFolderSelect(work) {
@@ -2778,8 +2777,8 @@ function createInfoChip(text, variant = "") {
 
 function createAvailabilityChips(work) {
   const availability = work.availability || {};
-  if (availability.hasMagnet === true) {
-    return [createInfoChip(availability.hasSubtitles ? "中字磁链" : "有磁链", "magnet")];
+  if (work.missingLocal && availability.hasMagnet === true) {
+    return [createInfoChip(availability.hasSubtitles ? "中字磁链" : "含磁链", "magnet")];
   }
   return [];
 }

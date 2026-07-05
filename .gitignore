@@ -31,6 +31,14 @@ data/javdb-rankings-*.jsonl
 data/javdb-rankings-categories-*.jsonl
 data/javdb-rankings-run-*.jsonl
 data/selenium-profile-runs/
+data/selenium-core-actor-refresh*/
+data/core-javdb-actor-refresh-*.jsonl
+data/javdb-115-cookie-cache.json
+data/move-*.manifest.txt
+data/move-*.status.json
+data/move-probe.txt
+artifacts/
+tmp/
 tmp-apk-labels/
 npm-debug.log*
 yarn-debug.log*

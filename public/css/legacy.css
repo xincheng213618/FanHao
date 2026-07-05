@@ -3812,31 +3812,39 @@ body.gallery-view .gallery-reader-toolbar {
 }
 
 .local-marker-button {
-  display: inline-flex;
-  min-height: 24px;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  border: 1px solid rgba(31, 122, 98, 0.2);
+  position: absolute;
+  top: 46px;
+  right: 8px;
+  z-index: 2;
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.38);
   border-radius: 999px;
-  background: rgba(31, 122, 98, 0.08);
-  color: var(--accent-strong);
+  background: rgba(16, 28, 23, 0.58);
+  color: rgba(255, 255, 255, 0.72);
   cursor: pointer;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 900;
-  padding: 2px 8px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1;
 }
 
 .local-marker-button:hover {
-  border-color: rgba(31, 122, 98, 0.42);
-  background: rgba(31, 122, 98, 0.14);
+  border-color: rgba(255, 255, 255, 0.5);
+  background: rgba(31, 122, 98, 0.78);
+  color: #ffffff;
+}
+
+.local-marker-button.active {
+  border-color: rgba(255, 255, 255, 0.46);
+  background: rgba(31, 122, 98, 0.94);
+  color: #ffffff;
 }
 
 .local-marker-button:disabled {
   cursor: progress;
-  opacity: 0.78;
+  opacity: 0.76;
 }
 
 .progress-track {
@@ -3970,8 +3978,7 @@ body.gallery-view .gallery-reader-toolbar {
   background: rgba(31, 122, 98, 0.14);
 }
 
-.inline-rule-button.active,
-.local-marker-button.active {
+.inline-rule-button.active {
   border-color: rgba(31, 122, 98, 0.48);
   background: rgba(31, 122, 98, 0.16);
   color: var(--accent-strong);

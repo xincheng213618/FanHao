@@ -31,10 +31,9 @@ const LOG_DIR = path.join(__dirname, "logs");
 const MANGA_LIBRARY_ROOT = process.env.FANHAO_MANGA_ROOT || "E:\\https-smtt6-com-man-hua-yue";
 const PHOTO_SET_ROOTS = parsePhotoSetRoots();
 const GALLERY_MEDIA_SOURCES = galleryMediaSources();
-const INDEX_CACHE_PATH = path.join(DATA_DIR, "library-index.json");
 const IMAGE_LIBRARY_INDEX_PATH = path.join(DATA_DIR, "image-library-index.json");
 const USER_STATE_PATH = path.join(DATA_DIR, "user-state.json");
-const ACTOR_PROFILE_DB_PATH = path.join(DATA_DIR, "actor-profiles.sqlite");
+const CORE_DB_PATH = path.join(DATA_DIR, "fanhao-core-v2.sqlite");
 const IMAGE_GALLERY_DB_PATH = path.join(DATA_DIR, "image-gallery.sqlite");
 const NOVEL_DB_PATH = path.join(DATA_DIR, "novels.sqlite");
 const NOVEL_UPLOAD_MAX_BODY_BYTES = 80 * 1024 * 1024;
@@ -63,6 +62,7 @@ const MAX_WORK_LIMIT = 16000;
 const MAX_IMAGE_LIBRARY_ITEM_LIMIT = 12000;
 const HAS_NVENC = detectNvenc();
 const VIDEO_PROBE_CACHE_LIMIT = 512;
+const DEFAULT_VIDEO_CHUNK_BYTES = 1024 * 1024;
 const videoProbeCache = new Map();
 const DEFAULT_IMAGE_READER_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const MIN_IMAGE_READER_CACHE_MAX_BYTES = 128 * 1024 * 1024;
@@ -144,11 +144,15 @@ let library = emptyLibrary();
 let lastScanError = null;
 let userState = emptyUserState();
 let appConfig = defaultAppConfig();
-let actorDb = null;
+let coreDb = null;
 let imageGalleryDb = null;
 let workInfoCache = null;
 let actorProfileCache = null;
+let coreMapCache = null;
 let actorMovieCache = null;
+let actorMovieByCodeKeyCache = null;
+let personMergeCache = null;
+let studioHierarchyCache = null;
 let localWorkCodeKeyCache = null;
 let localWorkByCodeKeyCache = null;
 let rankingMissingSearchCache = null;
@@ -486,10 +490,47 @@ function resolveLocalFolderTarget(sourcePath) {
   return { folderPath: stat.isDirectory() ? absolutePath : path.dirname(absolutePath) };
 }
 
+function resolveLocalFileTarget(sourcePath) {
+  const absolutePath = sourcePathToAbsolute(sourcePath);
+  if (!absolutePath) {
+    return { error: "缺少文件路径" };
+  }
+
+  const allowed = libraryOpenRoots().some((rootPath) => pathWithinRoot(absolutePath, rootPath));
+  if (!allowed) {
+    return { error: "只能打开资料库根目录内的文件" };
+  }
+
+  const stat = safeStat(absolutePath);
+  if (!stat) {
+    return { error: "本地文件不存在" };
+  }
+  if (!stat.isFile()) {
+    return { error: "目标不是本地文件" };
+  }
+
+  return { filePath: absolutePath };
+}
+
 function openFolderInSystem(folderPath) {
   const platform = process.platform;
   const command = platform === "win32" ? process.env.ComSpec || "cmd.exe" : platform === "darwin" ? "open" : "xdg-open";
   const args = platform === "win32" ? ["/d", "/c", "start", "", folderPath] : [folderPath];
+  const child = spawn(command, args, {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true
+  });
+  child.unref();
+}
+
+function openFileInSystem(filePath) {
+  const platform = process.platform;
+  const command = platform === "win32" ? "powershell.exe" : platform === "darwin" ? "open" : "xdg-open";
+  const args =
+    platform === "win32"
+      ? ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Start-Process -LiteralPath $args[0]", filePath]
+      : [filePath];
   const child = spawn(command, args, {
     detached: true,
     stdio: "ignore",
@@ -504,6 +545,16 @@ function scheduleOpenFolder(folderPath) {
       openFolderInSystem(folderPath);
     } catch (error) {
       console.warn("[open-folder]", error.message);
+    }
+  }, 25);
+}
+
+function scheduleOpenFile(filePath) {
+  setTimeout(() => {
+    try {
+      openFileInSystem(filePath);
+    } catch (error) {
+      console.warn("[open-file]", error.message);
     }
   }, 25);
 }
@@ -663,15 +714,75 @@ function normalizePersonSearchValue(value) {
   return String(value || "").trim().toLowerCase().replace(/\s+/g, "");
 }
 
+function normalizePersonGender(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "unknown";
+  if (["male", "m", "man", "boy"].includes(text) || /男|男優|男优/.test(text)) return "male";
+  if (["female", "f", "woman", "girl"].includes(text) || /女|女優|女优/.test(text)) return "female";
+  return "unknown";
+}
+
 function cleanPersonNamePart(value) {
   return String(value || "").trim();
 }
 
-function splitPersonNameParts(value) {
-  return cleanPersonNamePart(value)
-    .split(/[、,，/|;；]+/g)
-    .map(cleanPersonNamePart)
-    .filter(Boolean);
+function localWorkMarkerKey(value) {
+  const key = String(value || "").trim().toUpperCase();
+  return key === "A" ? "A" : "";
+}
+
+function localWorkMarkersFromName(value) {
+  const name = String(value || "").trim();
+  const markers = [];
+  if (/^\[A\](?:[.\s_-]*)/i.test(name)) markers.push("A");
+  return markers;
+}
+
+function stripLocalWorkMarkerPrefix(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^\[A\][.\s_-]*/i, "")
+    .trim();
+}
+
+function localWorkMarkers(work) {
+  const names = [work?.directoryName, path.basename(String(work?.relativePath || ""))].filter(Boolean);
+  const markers = new Set();
+  for (const name of names) {
+    for (const marker of localWorkMarkersFromName(name)) markers.add(marker);
+  }
+  return [...markers];
+}
+
+function workHasLocalMarker(work, marker) {
+  const key = localWorkMarkerKey(marker);
+  return Boolean(key && localWorkMarkers(work).includes(key));
+}
+
+function markerDirectoryName(name, marker, enabled) {
+  const key = localWorkMarkerKey(marker);
+  if (!key) return String(name || "");
+  const clean = stripLocalWorkMarkerPrefix(name);
+  if (enabled) return `[${key}].${clean || String(name || "").trim()}`;
+  return clean || String(name || "").trim();
+}
+
+function displayWorkTitle(value) {
+  return stripLocalWorkMarkerPrefix(value);
+}
+
+function preferredPersonDisplayName(rowOrPerson, fallback = "") {
+  const aliases = rowOrPerson?.aliases_json ? actorProfileAliases(rowOrPerson) : rowOrPerson?.actorProfile?.aliases || [];
+  const candidates = uniquePersonNames([
+    rowOrPerson?.display_name,
+    rowOrPerson?.displayName,
+    rowOrPerson?.person_name,
+    rowOrPerson?.personName,
+    rowOrPerson?.name,
+    ...aliases,
+    fallback
+  ]);
+  return candidates[0] || cleanPersonNamePart(fallback);
 }
 
 function parseRootList(rawValue, fallback) {
@@ -708,7 +819,8 @@ function galleryMediaSources() {
 function uniquePersonNames(values) {
   const names = [];
   const seen = new Set();
-  for (const value of values.flatMap((item) => splitPersonNameParts(item))) {
+  for (const item of values) {
+    const value = cleanPersonNamePart(item);
     const key = normalizePersonSearchValue(value);
     if (!key || seen.has(key)) continue;
     seen.add(key);
@@ -732,7 +844,7 @@ function actorProfileAliases(personOrRow) {
 
 function actorProfileDisplayName(person) {
   const row = person?.id ? actorProfileRow(person.id) : null;
-  return cleanPersonNamePart(row?.display_name) || person?.name || "";
+  return row ? preferredPersonDisplayName(row, person?.name || "") : person?.name || "";
 }
 
 function actorProfileSearchNames(person) {
@@ -742,7 +854,8 @@ function actorProfileSearchNames(person) {
     person.name,
     row?.person_name,
     row?.display_name,
-    ...actorProfileAliases(row)
+    ...actorProfileAliases(row),
+    ...mergedPersonAliasNames(person.id)
   ]);
 }
 
@@ -967,47 +1080,35 @@ function publicActorAvatarCandidate(entry) {
 }
 
 function upsertActorAvatar(person, entry, existing, now) {
-  const db = getActorDb();
-  const upsert = db.prepare(`
-    INSERT INTO actor_profiles (
-      person_id, person_name, javdb_actor_id, javdb_url, display_name, aliases_json,
-      movie_count, avatar_url, avatar_mime, avatar_blob, source, status, error, fetched_at, updated_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', NULL, ?, ?)
-    ON CONFLICT(person_id) DO UPDATE SET
-      person_name = excluded.person_name,
-      javdb_actor_id = COALESCE(actor_profiles.javdb_actor_id, excluded.javdb_actor_id),
-      javdb_url = COALESCE(actor_profiles.javdb_url, excluded.javdb_url),
-      display_name = COALESCE(actor_profiles.display_name, excluded.display_name),
-      aliases_json = COALESCE(actor_profiles.aliases_json, excluded.aliases_json),
-      movie_count = COALESCE(actor_profiles.movie_count, excluded.movie_count),
-      avatar_url = excluded.avatar_url,
-      avatar_mime = excluded.avatar_mime,
-      avatar_blob = excluded.avatar_blob,
-      source = excluded.source,
-      status = excluded.status,
-      error = excluded.error,
-      fetched_at = COALESCE(actor_profiles.fetched_at, excluded.fetched_at),
-      updated_at = excluded.updated_at
-  `);
-
   const buffer = fs.readFileSync(entry.fullPath);
-  const aliases = existing?.aliases_json || JSON.stringify(actorProfileAliases(existing));
-  upsert.run(
-    person.id,
-    person.name,
-    existing?.javdb_actor_id || null,
-    existing?.javdb_url || null,
-    existing?.display_name || person.name,
-    aliases,
-    existing?.movie_count ?? null,
-    `${LOCAL_ACTOR_AVATAR_SOURCE}:${entry.relPath}`,
-    entry.mime,
-    buffer,
-    LOCAL_ACTOR_AVATAR_SOURCE,
-    existing?.fetched_at || now,
-    now
-  );
+  const corePersonId = Number(person.id);
+  const db = getCoreDb();
+  db.prepare(
+    `
+    UPDATE people
+    SET display_name = COALESCE(display_name, ?),
+        updated_at = ?
+    WHERE id = ?
+    `
+  ).run(existing?.display_name || person.name, now, corePersonId);
+  db.prepare(
+    `
+    INSERT INTO images (
+      owner_type, owner_id, kind, source_type, local_path, mime, image_blob, byte_size,
+      sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
+    )
+    VALUES ('person', ?, 'avatar', 'local', ?, ?, ?, ?, 0, 'ok', ?, 'local-avatar', ?, ?, ?)
+    ON CONFLICT DO UPDATE SET
+      mime = excluded.mime,
+      image_blob = excluded.image_blob,
+      byte_size = excluded.byte_size,
+      status = excluded.status,
+      source = excluded.source,
+      legacy_table = excluded.legacy_table,
+      legacy_key = excluded.legacy_key,
+      updated_at = excluded.updated_at
+    `
+  ).run(corePersonId, entry.fullPath, entry.mime, buffer, buffer.length, LOCAL_ACTOR_AVATAR_SOURCE, person.id, now, now);
 }
 
 function importActorAvatarCandidate(rootPath, personId, relPath, options = {}) {
@@ -1045,6 +1146,7 @@ function importActorAvatarCandidate(rootPath, personId, relPath, options = {}) {
     upsertActorAvatar(person, entry, existing, now);
     invalidateTableStamp("actor_profiles");
     actorProfileCache = null;
+    personMergeCache = null;
   }
   return {
     dryRun: Boolean(options.dryRun),
@@ -1085,7 +1187,7 @@ function importActorAvatarsFromFiletree(rootPath, options = {}) {
     }
 
     const existing = actorProfileRow(person.id);
-    if (existing?.avatar_blob && !replace) {
+    if (existing?.avatar_url && !replace) {
       skippedExisting += 1;
       continue;
     }
@@ -1097,6 +1199,7 @@ function importActorAvatarsFromFiletree(rootPath, options = {}) {
   }
 
   actorProfileCache = null;
+  personMergeCache = null;
   if (imported) invalidateTableStamp("actor_profiles");
   return {
     root,
@@ -1125,12 +1228,25 @@ function searchPeople(rawQuery) {
   const bracketed = isBracketedSearch(query);
   const exact = [];
   const fuzzy = [];
+  const exactSourceIds = new Set();
+  const fuzzySourceIds = new Set();
+  const exactCanonicalIds = new Set();
+  const fuzzyCanonicalIds = new Set();
   const lowerQuery = query.toLowerCase();
+
+  const addPersonMatch = (list, canonicalIds, person) => {
+    const merged = mergedPersonRecord(person);
+    if (!merged || canonicalIds.has(merged.id)) return;
+    canonicalIds.add(merged.id);
+    list.push(merged);
+  };
 
   for (const person of library.people) {
     const names = actorProfileSearchNames(person);
     if (names.some((name) => normalizePersonSearchValue(name) === exactName)) {
-      exact.push(person);
+      exactSourceIds.add(person.id);
+      for (const member of mergedPersonMembers(person.id)) exactSourceIds.add(member.id);
+      addPersonMatch(exact, exactCanonicalIds, person);
       continue;
     }
 
@@ -1141,7 +1257,9 @@ function searchPeople(rawQuery) {
       const normalizedName = normalizeSearchValue(name);
       return lowerName.includes(lowerQuery) || (normalizedQuery.length >= 2 && normalizedName.includes(normalizedQuery));
     })) {
-      fuzzy.push(person);
+      fuzzySourceIds.add(person.id);
+      for (const member of mergedPersonMembers(person.id)) fuzzySourceIds.add(member.id);
+      addPersonMatch(fuzzy, fuzzyCanonicalIds, person);
     }
   }
 
@@ -1150,7 +1268,12 @@ function searchPeople(rawQuery) {
 
   sortPeople(exact);
   sortPeople(fuzzy);
-  return { exact, fuzzy, people: exact.length ? exact : fuzzy.slice(0, 20) };
+  return {
+    exact,
+    fuzzy,
+    matchedPersonIds: [...(exact.length ? exactSourceIds : fuzzySourceIds)],
+    people: exact.length ? exact : fuzzy.slice(0, 20)
+  };
 }
 
 function buildWorkSearchText(work) {
@@ -1224,196 +1347,83 @@ function ensureDataDir() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-function getActorDb() {
-  if (!actorDb) {
+function getCoreDb() {
+  if (!coreDb) {
     ensureDataDir();
-    actorDb = new DatabaseSync(ACTOR_PROFILE_DB_PATH);
-    actorDb.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
-    actorDb.exec(`
-      CREATE TABLE IF NOT EXISTS actor_profiles (
-        person_id TEXT PRIMARY KEY,
-        person_name TEXT NOT NULL,
-        javdb_actor_id TEXT,
-        javdb_url TEXT,
-        display_name TEXT,
-        aliases_json TEXT,
-        movie_count INTEGER,
-        avatar_url TEXT,
-        avatar_mime TEXT,
-        avatar_blob BLOB,
-        source TEXT,
-        status TEXT NOT NULL DEFAULT 'ok',
-        error TEXT,
-        fetched_at TEXT,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_actor_profiles_name ON actor_profiles(person_name);
-      CREATE INDEX IF NOT EXISTS idx_actor_profiles_javdb_actor_id ON actor_profiles(javdb_actor_id);
-      CREATE INDEX IF NOT EXISTS idx_actor_profiles_updated_at ON actor_profiles(updated_at);
-      CREATE TABLE IF NOT EXISTS work_covers (
-        work_id TEXT PRIMARY KEY,
-        person_id TEXT NOT NULL,
-        person_name TEXT NOT NULL,
-        video_id TEXT,
-        title TEXT,
-        cover_url TEXT,
-        cover_mime TEXT,
-        cover_blob BLOB,
-        source TEXT,
-        fetched_at TEXT,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_work_covers_person_id ON work_covers(person_id);
-      CREATE INDEX IF NOT EXISTS idx_work_covers_video_id ON work_covers(video_id);
-      CREATE TABLE IF NOT EXISTS work_info (
-        work_id TEXT PRIMARY KEY,
-        person_id TEXT NOT NULL,
-        person_name TEXT NOT NULL,
-        source_info_id TEXT,
-        source_name TEXT,
-        source_path TEXT,
-        source_size INTEGER,
-        source_mtime TEXT,
-        code TEXT,
-        title TEXT,
-        release_date TEXT,
-        duration_minutes INTEGER,
-        rating REAL,
-        rating_count INTEGER,
-        director TEXT,
-        maker TEXT,
-        label TEXT,
-        series TEXT,
-        javdb_url TEXT,
-        image_url TEXT,
-        preview_images_json TEXT,
-        preview_video_url TEXT,
-        actors_json TEXT,
-        tags_json TEXT,
-        fields_json TEXT,
-        raw_text TEXT,
-        raw_truncated INTEGER NOT NULL DEFAULT 0,
-        status TEXT NOT NULL DEFAULT 'ok',
-        error TEXT,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_work_info_person_id ON work_info(person_id);
-      CREATE INDEX IF NOT EXISTS idx_work_info_code ON work_info(code);
-      CREATE INDEX IF NOT EXISTS idx_work_info_rating ON work_info(rating);
-      CREATE INDEX IF NOT EXISTS idx_work_info_release_date ON work_info(release_date);
-      CREATE INDEX IF NOT EXISTS idx_work_info_status ON work_info(status);
-      CREATE INDEX IF NOT EXISTS idx_work_info_updated_at ON work_info(updated_at);
-      CREATE TABLE IF NOT EXISTS actor_movies (
-        person_id TEXT NOT NULL,
-        person_name TEXT NOT NULL,
-        javdb_actor_id TEXT,
-        actor_url TEXT NOT NULL,
-        code TEXT NOT NULL,
-        code_key TEXT NOT NULL,
-        title TEXT,
-        detail_url TEXT,
-        image_url TEXT,
-        release_date TEXT,
-        rating REAL,
-        rating_count INTEGER,
-        page_index INTEGER,
-        position_index INTEGER,
-        fetched_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY(person_id, code_key)
-      );
-      CREATE INDEX IF NOT EXISTS idx_actor_movies_person_id ON actor_movies(person_id);
-      CREATE INDEX IF NOT EXISTS idx_actor_movies_code_key ON actor_movies(code_key);
-      CREATE INDEX IF NOT EXISTS idx_actor_movies_actor_url ON actor_movies(actor_url);
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_actor_movies_person_code_key ON actor_movies(person_id, code_key);
-      CREATE INDEX IF NOT EXISTS idx_actor_movies_updated_at ON actor_movies(updated_at);
-      CREATE TABLE IF NOT EXISTS javdb_rankings (
-        list_type TEXT NOT NULL,
-        list_key TEXT NOT NULL DEFAULT '',
-        list_label TEXT,
-        rank_no INTEGER NOT NULL,
-        code TEXT NOT NULL,
-        code_key TEXT NOT NULL,
-        title TEXT,
-        detail_url TEXT,
-        image_url TEXT,
-        release_date TEXT,
-        rating REAL,
-        rating_count INTEGER,
-        page_url TEXT,
-        fetched_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY(list_type, list_key, code_key)
-      );
-      CREATE INDEX IF NOT EXISTS idx_javdb_rankings_list ON javdb_rankings(list_type, list_key, rank_no);
-      CREATE INDEX IF NOT EXISTS idx_javdb_rankings_code_key ON javdb_rankings(code_key);
-      CREATE INDEX IF NOT EXISTS idx_javdb_rankings_updated_at ON javdb_rankings(updated_at);
-      CREATE TABLE IF NOT EXISTS remote_image_cache (
-        url TEXT PRIMARY KEY,
-        url_hash TEXT NOT NULL,
-        content_type TEXT,
-        image_blob BLOB,
-        byte_length INTEGER,
-        status TEXT NOT NULL DEFAULT 'ok',
-        error TEXT,
-        fetched_at TEXT,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_remote_image_cache_hash ON remote_image_cache(url_hash);
-      CREATE INDEX IF NOT EXISTS idx_remote_image_cache_status ON remote_image_cache(status);
-      CREATE TABLE IF NOT EXISTS local_image_cache (
-        file_id TEXT PRIMARY KEY,
-        file_path TEXT NOT NULL,
-        relative_path TEXT,
-        content_type TEXT,
-        image_blob BLOB,
-        byte_length INTEGER,
-        source_size INTEGER,
-        source_mtime TEXT,
-        status TEXT NOT NULL DEFAULT 'ok',
-        error TEXT,
-        cached_at TEXT,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_local_image_cache_path ON local_image_cache(file_path);
-      CREATE INDEX IF NOT EXISTS idx_local_image_cache_status ON local_image_cache(status);
-    `);
-    ensureColumn(actorDb, "work_info", "javdb_url", "TEXT");
-    ensureColumn(actorDb, "work_info", "preview_images_json", "TEXT");
-    ensureColumn(actorDb, "work_info", "preview_video_url", "TEXT");
-    ensureColumn(actorDb, "actor_movies", "code_key", "TEXT");
-    ensureColumn(actorDb, "actor_movies", "release_date", "TEXT");
-    ensureColumn(actorDb, "actor_movies", "rating", "REAL");
-    ensureColumn(actorDb, "actor_movies", "rating_count", "INTEGER");
-    ensureColumn(actorDb, "actor_movies", "page_index", "INTEGER");
-    ensureColumn(actorDb, "actor_movies", "position_index", "INTEGER");
-    ensureColumn(actorDb, "javdb_rankings", "list_label", "TEXT");
-    ensureColumn(actorDb, "javdb_rankings", "release_date", "TEXT");
-    ensureColumn(actorDb, "javdb_rankings", "rating", "REAL");
-    ensureColumn(actorDb, "javdb_rankings", "rating_count", "INTEGER");
-    ensureColumn(actorDb, "javdb_rankings", "page_url", "TEXT");
-    ensureColumn(actorDb, "remote_image_cache", "url_hash", "TEXT");
-    ensureColumn(actorDb, "remote_image_cache", "content_type", "TEXT");
-    ensureColumn(actorDb, "remote_image_cache", "image_blob", "BLOB");
-    ensureColumn(actorDb, "remote_image_cache", "byte_length", "INTEGER");
-    ensureColumn(actorDb, "remote_image_cache", "status", "TEXT NOT NULL DEFAULT 'ok'");
-    ensureColumn(actorDb, "remote_image_cache", "error", "TEXT");
-    ensureColumn(actorDb, "remote_image_cache", "fetched_at", "TEXT");
-    ensureColumn(actorDb, "remote_image_cache", "updated_at", "TEXT");
-    ensureColumn(actorDb, "local_image_cache", "file_path", "TEXT");
-    ensureColumn(actorDb, "local_image_cache", "relative_path", "TEXT");
-    ensureColumn(actorDb, "local_image_cache", "content_type", "TEXT");
-    ensureColumn(actorDb, "local_image_cache", "image_blob", "BLOB");
-    ensureColumn(actorDb, "local_image_cache", "byte_length", "INTEGER");
-    ensureColumn(actorDb, "local_image_cache", "source_size", "INTEGER");
-    ensureColumn(actorDb, "local_image_cache", "source_mtime", "TEXT");
-    ensureColumn(actorDb, "local_image_cache", "status", "TEXT NOT NULL DEFAULT 'ok'");
-    ensureColumn(actorDb, "local_image_cache", "error", "TEXT");
-    ensureColumn(actorDb, "local_image_cache", "cached_at", "TEXT");
-    ensureColumn(actorDb, "local_image_cache", "updated_at", "TEXT");
-    actorDb.exec("CREATE INDEX IF NOT EXISTS idx_work_info_javdb_url ON work_info(javdb_url)");
+    coreDb = new DatabaseSync(CORE_DB_PATH);
+    coreDb.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+    try {
+      ensureColumn(coreDb, "people", "gender", "TEXT NOT NULL DEFAULT 'unknown'");
+      ensureColumn(coreDb, "works", "has_magnet", "INTEGER");
+      ensureColumn(coreDb, "works", "is_streamable", "INTEGER");
+      ensureColumn(coreDb, "works", "has_subtitles", "INTEGER");
+      ensureColumn(coreDb, "works", "javdb_tags_json", "TEXT");
+      ensureColumn(coreDb, "images", "image_blob", "BLOB");
+      ensureCoreCacheTables(coreDb);
+    } catch (error) {
+      console.warn("[core-db]", error.message);
+    }
   }
-  return actorDb;
+  return coreDb;
+}
+
+function ensureCoreCacheTables(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS remote_image_cache (
+      url TEXT PRIMARY KEY,
+      url_hash TEXT NOT NULL,
+      content_type TEXT,
+      image_blob BLOB,
+      byte_length INTEGER,
+      status TEXT NOT NULL DEFAULT 'ok',
+      error TEXT,
+      fetched_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_remote_image_cache_hash ON remote_image_cache(url_hash);
+    CREATE INDEX IF NOT EXISTS idx_remote_image_cache_status ON remote_image_cache(status);
+    CREATE TABLE IF NOT EXISTS local_image_cache (
+      file_id TEXT PRIMARY KEY,
+      file_path TEXT NOT NULL,
+      relative_path TEXT,
+      content_type TEXT,
+      image_blob BLOB,
+      byte_length INTEGER,
+      source_size INTEGER,
+      source_mtime TEXT,
+      status TEXT NOT NULL DEFAULT 'ok',
+      error TEXT,
+      cached_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_image_cache_path ON local_image_cache(file_path);
+    CREATE INDEX IF NOT EXISTS idx_local_image_cache_status ON local_image_cache(status);
+    CREATE TABLE IF NOT EXISTS local_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+      local_work_id INTEGER REFERENCES local_works(id) ON DELETE CASCADE,
+      file_id TEXT NOT NULL UNIQUE,
+      file_type TEXT NOT NULL CHECK(file_type IN ('video', 'image', 'info')),
+      file_path TEXT NOT NULL,
+      name TEXT NOT NULL,
+      title TEXT,
+      ext TEXT,
+      relative_path TEXT,
+      size INTEGER,
+      modified_at TEXT,
+      playable INTEGER NOT NULL DEFAULT 0,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_files_work ON local_files(work_id, file_type, sort_order);
+    CREATE INDEX IF NOT EXISTS idx_local_files_local_work ON local_files(local_work_id);
+    CREATE INDEX IF NOT EXISTS idx_local_files_path ON local_files(file_path);
+  `);
+}
+
+function hasCoreDb() {
+  return fs.existsSync(CORE_DB_PATH);
 }
 
 function getImageGalleryDb() {
@@ -1677,18 +1687,226 @@ function ensureColumn(db, table, column, definition) {
   }
 }
 
+function resolveLibraryPersonByPublicId(personId) {
+  const value = String(personId || "");
+  return library.peopleById.get(value) || null;
+}
+
+function resolveLibraryWorkByPublicId(workId) {
+  return library.worksById.get(String(workId || "")) || null;
+}
+
+function resolveVideoFileByPublicId(videoId) {
+  const value = decodeURIComponent(String(videoId || ""));
+  const direct = library.filesById.get(value);
+  if (direct?.type === "video") return direct;
+  return null;
+}
+
+function corePersonRow(personId) {
+  const coreId = Number(personId);
+  if (!Number.isFinite(coreId) || !hasCoreDb()) return null;
+  try {
+    return getCoreDb().prepare("SELECT * FROM people WHERE id = ?").get(coreId) || null;
+  } catch (error) {
+    console.warn("[core-person]", error.message);
+    return null;
+  }
+}
+
+function corePersonFallbackRecord(personId) {
+  const row = corePersonRow(personId);
+  if (!row?.id) return null;
+  const sourcePaths = uniqueTextArray([row.folder_path], { maxLength: 260, maxItems: 4 });
+  return {
+    id: String(row.id),
+    name: row.display_name || row.name || String(row.id),
+    relativePath: sourcePaths[0] || "",
+    sourcePaths,
+    sourceCount: sourcePaths.length,
+    coverId: null,
+    workCount: 0,
+    videoCount: 0,
+    playableCount: 0,
+    imageCount: 0,
+    infoCount: 0,
+    modifiedAt: row.updated_at || row.created_at || null,
+    works: []
+  };
+}
+
+function coreImageUrl(row) {
+  if (!row) return "";
+  if (row.image_blob) return `/media/core-image/${encodeURIComponent(String(row.id))}?v=${encodeURIComponent(row.updated_at || "")}`;
+  if (row.remote_url) return proxiedRemoteImageUrl(row.remote_url) || row.remote_url || "";
+  if (row.local_path) return row.local_path;
+  return "";
+}
+
+function corePersonAvatarRow(personId, options = {}) {
+  const coreId = Number(personId);
+  if (!Number.isFinite(coreId) || !hasCoreDb()) return null;
+  const source = String(options.source || "").trim();
+  try {
+    const params = [Number(coreId)];
+    if (source) params.push(source);
+    return getCoreDb()
+      .prepare(
+        `
+        SELECT *
+        FROM images
+        WHERE owner_type = 'person'
+          AND owner_id = ?
+          AND kind = 'avatar'
+          ${source ? "AND source = ?" : ""}
+        ORDER BY
+          CASE WHEN image_blob IS NOT NULL THEN 0 ELSE 1 END,
+          CASE WHEN source = 'actor_profiles' THEN 0 ELSE 1 END,
+          id ASC
+        LIMIT 1
+        `
+      )
+      .get(...params) || null;
+  } catch (error) {
+    console.warn("[core-image]", error.message);
+    return null;
+  }
+}
+
+function publicPersonAvatar(personId) {
+  const row = corePersonAvatarRow(personId);
+  const avatarUrl = coreImageUrl(row);
+  if (!row || !avatarUrl) return null;
+  return {
+    personId: String(personId || ""),
+    avatarUrl,
+    sourceAvatarUrl: row.remote_url || row.local_path || "",
+    source: row.source || "",
+    updatedAt: row.updated_at || ""
+  };
+}
+
+function coreWorkCoverRow(workId) {
+  const coreId = Number(workId);
+  if (!Number.isFinite(coreId) || !hasCoreDb()) return null;
+  try {
+    return getCoreDb()
+      .prepare(
+        `
+        SELECT *
+        FROM images
+        WHERE owner_type = 'work'
+          AND owner_id = ?
+          AND kind = 'cover'
+        ORDER BY CASE WHEN image_blob IS NOT NULL THEN 0 ELSE 1 END, sort_order ASC, id ASC
+        LIMIT 1
+        `
+      )
+      .get(Number(coreId)) || null;
+  } catch (error) {
+    console.warn("[core-image]", error.message);
+    return null;
+  }
+}
+
+function publicCoreWorkCover(workId) {
+  const row = coreWorkCoverRow(workId);
+  const coverUrl = coreImageUrl(row);
+  if (!row || !coverUrl) return null;
+  return {
+    workId: String(workId || ""),
+    coverUrl,
+    sourceCoverUrl: row.remote_url || row.local_path || "",
+    source: row.source || "",
+    updatedAt: row.updated_at || ""
+  };
+}
+
+function coreImageRow(imageId) {
+  if (!hasCoreDb()) return null;
+  try {
+    return getCoreDb().prepare("SELECT * FROM images WHERE id = ?").get(Number(imageId)) || null;
+  } catch (error) {
+    console.warn("[core-image]", error.message);
+    return null;
+  }
+}
+
+function serveCoreImage(res, imageId) {
+  const row = coreImageRow(imageId);
+  if (!row?.image_blob) {
+    notFound(res);
+    return;
+  }
+
+  const buffer = Buffer.from(row.image_blob);
+  res.writeHead(200, {
+    "Content-Type": row.mime || "image/jpeg",
+    "Content-Length": buffer.length,
+    "Cache-Control": "public, max-age=86400",
+    "Content-Disposition": "inline"
+  });
+  res.end(buffer);
+}
+
 function actorProfileRowsById() {
   const stamp = actorProfileStamp();
   if (actorProfileCache?.stamp === stamp) return actorProfileCache.rows;
 
   const rows = new Map();
   try {
-    const db = getActorDb();
-    for (const row of db.prepare("SELECT * FROM actor_profiles").all()) {
-      rows.set(row.person_id, row);
+    const db = getCoreDb();
+    for (const row of db
+      .prepare(
+        `
+        SELECT
+          p.id AS core_person_id,
+          CAST(p.id AS TEXT) AS person_id,
+          p.name AS person_name,
+          p.display_name,
+          p.gender,
+          p.movie_count,
+          p.source,
+          p.status,
+          p.error,
+          p.created_at AS fetched_at,
+          p.updated_at,
+          ref.external_key AS javdb_actor_id,
+          ref.url AS javdb_url,
+          avatar.remote_url AS avatar_url,
+          avatar.mime AS avatar_mime,
+          NULL AS avatar_blob,
+          (
+            SELECT json_group_array(alias)
+            FROM person_aliases pa
+            WHERE pa.person_id = p.id
+          ) AS aliases_json
+        FROM people p
+        LEFT JOIN person_external_refs ref
+          ON ref.person_id = p.id
+         AND ref.provider = 'javdb-actor'
+        LEFT JOIN images avatar
+          ON avatar.id = (
+            SELECT i.id
+            FROM images i
+            WHERE i.owner_type = 'person'
+              AND i.owner_id = p.id
+              AND i.kind = 'avatar'
+              AND i.source = 'actor_profiles'
+            ORDER BY CASE WHEN i.image_blob IS NOT NULL THEN 0 ELSE 1 END, i.id ASC
+            LIMIT 1
+          )
+        WHERE ref.external_key IS NOT NULL
+           OR avatar.id IS NOT NULL
+           OR EXISTS (SELECT 1 FROM person_aliases pa WHERE pa.person_id = p.id)
+           OR COALESCE(NULLIF(LOWER(TRIM(p.gender)), ''), 'unknown') <> 'unknown'
+        `
+      )
+      .all()) {
+      rows.set(String(row.core_person_id), { ...row, person_id: String(row.core_person_id) });
     }
   } catch (error) {
-    console.warn("[actor-db]", error.message);
+    console.warn("[core-actor-profile]", error.message);
     if (actorProfileCache?.rows) return actorProfileCache.rows;
   }
 
@@ -1703,18 +1921,22 @@ function actorProfileRow(personId) {
 function publicActorProfile(row) {
   if (!row) return null;
 
-  const aliases = actorProfileAliases(row);
+  const aliases = uniquePersonNames([...actorProfileAliases(row), ...mergedPersonAliasNames(row.person_id)]);
+  const displayName = preferredPersonDisplayName(row, row.person_name);
+  const avatar = publicPersonAvatar(row.person_id);
+  const avatarUrl = avatar?.avatarUrl || (row.avatar_blob ? `/media/actor/${encodeURIComponent(row.person_id)}/avatar?v=${encodeURIComponent(row.updated_at || "")}` : "");
 
   return {
-    personId: row.person_id,
+    personId: String(row.person_id || ""),
     personName: row.person_name,
     javdbActorId: row.javdb_actor_id || "",
     javdbUrl: row.javdb_url || "",
-    displayName: cleanPersonNamePart(row.display_name) || row.person_name,
+    displayName,
     aliases,
+    gender: normalizePersonGender(row.gender),
     movieCount: row.movie_count ?? null,
-    avatarUrl: row.avatar_blob ? `/media/actor/${encodeURIComponent(row.person_id)}/avatar?v=${encodeURIComponent(row.updated_at || "")}` : "",
-    sourceAvatarUrl: row.avatar_url || "",
+    avatarUrl,
+    sourceAvatarUrl: avatar?.sourceAvatarUrl || row.avatar_url || "",
     source: row.source || "",
     status: row.status || "ok",
     error: row.error || "",
@@ -1755,23 +1977,35 @@ function storedWorkCodeKey(value) {
 }
 
 function workCoverRow(workId) {
-  try {
-    return getActorDb().prepare("SELECT * FROM work_covers WHERE work_id = ?").get(workId) || null;
-  } catch (error) {
-    console.warn("[work-cover-db]", error.message);
-    return null;
-  }
+  const coreRow = coreWorkCoverRow(workId);
+  if (!coreRow?.image_blob) return null;
+  const work = resolveLibraryWorkByPublicId(workId);
+  return {
+    work_id: work?.id || String(workId || ""),
+    person_id: work?.personId || "",
+    person_name: work ? library.peopleById.get(work.personId)?.name || "" : "",
+    video_id: work?.videos?.[0]?.id || "",
+    title: work?.title || "",
+    cover_url: coreRow.remote_url || coreRow.local_path || "",
+    cover_mime: coreRow.mime || "image/jpeg",
+    cover_blob: coreRow.image_blob,
+    source: coreRow.source || "",
+    fetched_at: coreRow.created_at || "",
+    updated_at: coreRow.updated_at || ""
+  };
 }
 
 function publicWorkCover(row) {
   if (!row?.cover_blob) return null;
 
+  const coreRow = coreWorkCoverRow(row.work_id);
+  const coverUrl = coreImageUrl(coreRow) || `/media/work/${encodeURIComponent(row.work_id)}/cover?v=${encodeURIComponent(row.updated_at || "")}`;
   return {
-    workId: row.work_id,
-    personId: row.person_id,
+    workId: String(row.work_id || ""),
+    personId: String(row.person_id || ""),
     videoId: row.video_id || "",
     title: row.title || "",
-    coverUrl: `/media/work/${encodeURIComponent(row.work_id)}/cover?v=${encodeURIComponent(row.updated_at || "")}`,
+    coverUrl,
     sourceCoverUrl: row.cover_url || "",
     source: row.source || "",
     fetchedAt: row.fetched_at || "",
@@ -1781,12 +2015,21 @@ function publicWorkCover(row) {
 
 function cachedWorkCoverIds() {
   try {
-    const rows = getActorDb()
-      .prepare("SELECT work_id FROM work_covers WHERE cover_blob IS NOT NULL AND length(cover_blob) > 0")
+    const rows = getCoreDb()
+      .prepare(
+        `
+        SELECT CAST(i.owner_id AS TEXT) AS work_id
+        FROM images i
+        WHERE i.owner_type = 'work'
+          AND i.kind = 'cover'
+          AND i.image_blob IS NOT NULL
+          AND length(i.image_blob) > 0
+        `
+      )
       .all();
     return new Set(rows.map((row) => row.work_id));
   } catch (error) {
-    console.warn("[work-cover-db]", error.message);
+    console.warn("[core-work-cover]", error.message);
     return new Set();
   }
 }
@@ -1861,43 +2104,40 @@ function generateWorkCover(work) {
   }
   const now = new Date().toISOString();
   const person = library.peopleById.get(work.personId);
-  getActorDb()
+  const coreWorkId = Number(work.id);
+  getCoreDb()
     .prepare(
       `
-      INSERT INTO work_covers (
-        work_id, person_id, person_name, video_id, title,
-        cover_url, cover_mime, cover_blob, source, fetched_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(work_id) DO UPDATE SET
-        person_id = excluded.person_id,
-        person_name = excluded.person_name,
-        video_id = excluded.video_id,
-        title = excluded.title,
-        cover_url = excluded.cover_url,
-        cover_mime = excluded.cover_mime,
-        cover_blob = excluded.cover_blob,
+      INSERT INTO images (
+        owner_type, owner_id, kind, source_type, local_path, mime, image_blob,
+        byte_size, sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
+      ) VALUES ('work', ?, 'cover', 'generated', ?, ?, ?, ?, 0, 'ok', ?, 'generated', ?, ?, ?)
+      ON CONFLICT DO UPDATE SET
+        mime = excluded.mime,
+        image_blob = excluded.image_blob,
+        byte_size = excluded.byte_size,
+        status = excluded.status,
         source = excluded.source,
-        fetched_at = excluded.fetched_at,
+        legacy_table = excluded.legacy_table,
+        legacy_key = excluded.legacy_key,
         updated_at = excluded.updated_at
       `
     )
     .run(
-      work.id,
-      work.personId || "",
-      person?.name || "",
-      video.id,
-      work.title || work.directoryName || video.title || "",
+      coreWorkId,
       video.relativePath || video.path || "",
       "image/jpeg",
       coverBlob,
+      coverBlob.length,
       "ffmpeg-frame",
+      work.id,
       now,
       now
     );
 
   workInfoCache = null;
   workSearchTextCache = null;
-  return publicWorkCover(workCoverRow(work.id));
+  return publicCoreWorkCover(work.id) || publicWorkCover(workCoverRow(work.id));
 }
 
 function invalidateTableStamp(...tables) {
@@ -1914,14 +2154,23 @@ function tableDataStamp(table) {
   if (cached && now - cached.checkedAt < TABLE_STAMP_CACHE_MS) return cached.stamp;
 
   try {
-    const row = getActorDb()
-      .prepare(`SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS updated_at FROM ${table}`)
-      .get();
+    const tableMap = {
+      actor_profiles: "people",
+      actor_movies: "work_people",
+      work_info: "works",
+      work_covers: "images",
+      javdb_rankings: "collection_items",
+      local_image_cache: "local_image_cache",
+      remote_image_cache: "remote_image_cache"
+    };
+    const safeTable = tableMap[table] || table;
+    if (!/^[A-Za-z0-9_]+$/.test(safeTable)) throw new Error(`Invalid table: ${table}`);
+    const row = getCoreDb().prepare(`SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS updated_at FROM ${safeTable}`).get();
     const stamp = `${Number(row?.count || 0)}:${row?.updated_at || ""}`;
     tableStampCache.set(table, { checkedAt: now, stamp });
     return stamp;
   } catch (error) {
-    console.warn("[actor-db-stamp]", table, error.message);
+    console.warn("[core-db-stamp]", table, error.message);
     if (cached?.stamp) {
       tableStampCache.set(table, { checkedAt: now, stamp: cached.stamp });
       return cached.stamp;
@@ -1964,12 +2213,103 @@ function workInfoRowsById() {
 
   const rows = new Map();
   try {
-    const db = getActorDb();
-    for (const row of db.prepare("SELECT * FROM work_info WHERE status = 'ok'").all()) {
+    const db = getCoreDb();
+    for (const row of db
+      .prepare(
+        `
+        SELECT
+          CAST(w.id AS TEXT) AS work_id,
+          CAST(p.id AS TEXT) AS person_id,
+          COALESCE(p.name, '') AS person_name,
+          lw.source_info_id,
+          lw.source_name,
+          lw.source_info_path AS source_path,
+          lw.source_size,
+          lw.source_mtime,
+          w.code,
+          w.title,
+          w.release_date,
+          w.duration_minutes,
+          w.rating,
+          w.rating_count,
+          w.director,
+          maker.name AS maker,
+          label.name AS label,
+          series.name AS series,
+          vref.url AS javdb_url,
+          cover.remote_url AS image_url,
+          (
+            SELECT json_group_array(i.remote_url)
+            FROM images i
+            WHERE i.owner_type = 'work'
+              AND i.owner_id = w.id
+              AND i.kind = 'preview'
+              AND i.remote_url IS NOT NULL
+              AND i.remote_url <> ''
+          ) AS preview_images_json,
+          NULL AS preview_video_url,
+          (
+            SELECT json_group_array(pp.name)
+            FROM work_people wpa
+            JOIN people pp ON pp.id = wpa.person_id
+            WHERE wpa.work_id = w.id
+              AND wpa.role = 'actor'
+          ) AS actors_json,
+          (
+            SELECT json_group_array(json_object('name', pp.name, 'url', COALESCE(pref.url, '')))
+            FROM work_people wpa
+            JOIN people pp ON pp.id = wpa.person_id
+            LEFT JOIN person_external_refs pref
+              ON pref.person_id = pp.id
+             AND pref.provider = 'javdb-actor'
+            WHERE wpa.work_id = w.id
+              AND wpa.role = 'actor'
+          ) AS actor_links_json,
+          '[]' AS tags_json,
+          '[]' AS tag_links_json,
+          maker_ref.url AS maker_url,
+          label_ref.url AS label_url,
+          series_ref.url AS series_url,
+          w.fields_json,
+          w.raw_text,
+          0 AS raw_truncated,
+          w.status,
+          w.error,
+          w.updated_at
+        FROM works w
+        LEFT JOIN local_works lw ON lw.work_id = w.id
+        LEFT JOIN work_people wp ON wp.work_id = w.id AND wp.role = 'actor'
+        LEFT JOIN people p ON p.id = wp.person_id
+        LEFT JOIN work_external_refs vref ON vref.work_id = w.id AND vref.provider = 'javdb-video'
+        LEFT JOIN images cover
+          ON cover.id = (
+            SELECT i.id
+            FROM images i
+            WHERE i.owner_type = 'work'
+              AND i.owner_id = w.id
+              AND i.kind = 'cover'
+            ORDER BY CASE WHEN i.image_blob IS NOT NULL THEN 0 ELSE 1 END, i.id ASC
+            LIMIT 1
+          )
+        LEFT JOIN work_makers maker_link ON maker_link.work_id = w.id AND maker_link.role = 'maker'
+        LEFT JOIN makers maker ON maker.id = maker_link.maker_id
+        LEFT JOIN maker_external_refs maker_ref ON maker_ref.maker_id = maker.id AND maker_ref.provider = 'javdb-maker'
+        LEFT JOIN work_makers label_link ON label_link.work_id = w.id AND label_link.role = 'label'
+        LEFT JOIN makers label ON label.id = label_link.maker_id
+        LEFT JOIN maker_external_refs label_ref ON label_ref.maker_id = label.id AND label_ref.provider = 'javdb-maker'
+        LEFT JOIN work_series ws ON ws.work_id = w.id
+        LEFT JOIN series ON series.id = ws.series_id
+        LEFT JOIN series_external_refs series_ref ON series_ref.series_id = series.id AND series_ref.provider = 'javdb-series'
+        WHERE w.status = 'ok'
+          AND lw.id IS NOT NULL
+        GROUP BY w.id
+        `
+      )
+      .all()) {
       rows.set(row.work_id, row);
     }
   } catch (error) {
-    console.warn("[work-info]", error.message);
+    console.warn("[core-work-info]", error.message);
     if (workInfoCache?.rows) return workInfoCache.rows;
   }
 
@@ -1981,28 +2321,300 @@ function workInfoRow(workId) {
   return workInfoRowsById().get(workId) || null;
 }
 
+function studioCatalogStamp() {
+  return `${library.scannedAt || ""}:${workInfoStamp()}:studio-v1`;
+}
+
+function normalizeStudioName(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function workCodePrefix(value) {
+  const code = normalizeWorkCode(value) || String(value || "").trim();
+  const match = /^([A-Za-z0-9]{2,12})[-_]/.exec(code);
+  return match ? match[1].toUpperCase() : "";
+}
+
+function studioMakerId(name, url = "") {
+  return createId("mk", `${normalizeStudioName(name)}|${publicRemoteUrl(url)}`);
+}
+
+function studioSeriesId(makerId, name, kind = "series", url = "") {
+  return createId("sr", `${makerId}|${normalizeStudioName(name)}|${kind}|${publicRemoteUrl(url)}`);
+}
+
+function countLocalWork(workId) {
+  return library.worksById.has(workId) ? 1 : 0;
+}
+
+function dateRangePush(stats, releaseDate) {
+  const value = String(releaseDate || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return;
+  if (!stats.firstReleaseDate || value < stats.firstReleaseDate) stats.firstReleaseDate = value;
+  if (!stats.latestReleaseDate || value > stats.latestReleaseDate) stats.latestReleaseDate = value;
+}
+
+function incrementStudioStats(stats, row) {
+  stats.workCount += 1;
+  stats.localWorkCount += countLocalWork(row.work_id);
+  dateRangePush(stats, row.release_date);
+}
+
+function incrementPrefixStats(stats, row) {
+  stats.workCount += 1;
+  stats.localWorkCount += countLocalWork(row.work_id);
+}
+
+function ensureStudioCatalog({ force = false } = {}) {
+  const stamp = studioCatalogStamp();
+  if (!force && studioHierarchyCache?.stamp === stamp) return studioHierarchyCache;
+  const db = getCoreDb();
+  const counts = db
+    .prepare(
+      `
+      SELECT
+        (SELECT COUNT(*) FROM makers) AS maker_count,
+        (SELECT COUNT(*) FROM series) AS series_count,
+        (SELECT COUNT(*) FROM work_makers) AS link_count
+      `
+    )
+    .get();
+  studioHierarchyCache = {
+    stamp,
+    makerCount: Number(counts?.maker_count || 0),
+    seriesCount: Number(counts?.series_count || 0),
+    prefixCount: 0,
+    linkCount: Number(counts?.link_count || 0),
+    syncedAt: new Date().toISOString()
+  };
+  return studioHierarchyCache;
+}
+
+function studioPrefixRowsForMaker(makerId) {
+  return [];
+}
+
+function studioSeriesRowsForMaker(makerId) {
+  return getCoreDb()
+    .prepare(
+      `
+      SELECT
+        CAST(s.id AS TEXT) AS series_id,
+        CAST(s.maker_id AS TEXT) AS maker_id,
+        s.name,
+        s.name_search AS normalized_name,
+        s.kind,
+        ref.url AS javdb_url,
+        '' AS primary_prefix,
+        s.source,
+        COUNT(DISTINCT ws.work_id) AS work_count,
+        COUNT(DISTINCT lw.work_id) AS local_work_count,
+        MIN(w.release_date) AS first_release_date,
+        MAX(w.release_date) AS latest_release_date
+      FROM series s
+      LEFT JOIN series_external_refs ref ON ref.series_id = s.id
+      LEFT JOIN work_series ws ON ws.series_id = s.id
+      LEFT JOIN works w ON w.id = ws.work_id
+      LEFT JOIN local_works lw ON lw.work_id = ws.work_id
+      WHERE maker_id = ?
+      GROUP BY s.id
+      ORDER BY work_count DESC, s.name
+      `
+    )
+    .all(Number(makerId));
+}
+
+function publicStudioSeries(row, prefixRows = []) {
+  const prefixes = prefixRows
+    .filter((item) => item.series_id === row.series_id)
+    .map((item) => ({
+      prefix: item.prefix,
+      source: item.source || "",
+      confidence: item.confidence ?? 1,
+      workCount: item.work_count || 0,
+      localWorkCount: item.local_work_count || 0
+    }));
+  return {
+    id: row.series_id,
+    makerId: row.maker_id,
+    name: row.name || "",
+    kind: row.kind || "series",
+    url: publicRemoteUrl(row.javdb_url),
+    primaryPrefix: row.primary_prefix || prefixes[0]?.prefix || "",
+    prefixes,
+    source: row.source || "",
+    workCount: row.work_count || 0,
+    localWorkCount: row.local_work_count || 0,
+    firstReleaseDate: row.first_release_date || "",
+    latestReleaseDate: row.latest_release_date || ""
+  };
+}
+
+function publicStudioMaker(row, seriesRows = [], prefixRows = []) {
+  return {
+    id: row.maker_id,
+    name: row.name || "",
+    url: publicRemoteUrl(row.javdb_url),
+    source: row.source || "",
+    workCount: row.work_count || 0,
+    localWorkCount: row.local_work_count || 0,
+    firstReleaseDate: row.first_release_date || "",
+    latestReleaseDate: row.latest_release_date || "",
+    series: seriesRows.map((seriesRow) => publicStudioSeries(seriesRow, prefixRows)),
+    prefixes: prefixRows
+      .filter((item) => !item.series_id)
+      .map((item) => ({
+        prefix: item.prefix,
+        source: item.source || "",
+        confidence: item.confidence ?? 1,
+        workCount: item.work_count || 0,
+        localWorkCount: item.local_work_count || 0
+      }))
+  };
+}
+
+function studioSummaries(url) {
+  const sync = ensureStudioCatalog();
+  const limit = clampInteger(url.searchParams.get("limit"), 120, 1, 1000);
+  const q = String(url.searchParams.get("q") || "").trim().toLowerCase();
+  const rows = getCoreDb()
+    .prepare(
+      `
+      SELECT
+        CAST(m.id AS TEXT) AS maker_id,
+        m.name,
+        m.name_search AS normalized_name,
+        ref.url AS javdb_url,
+        m.source,
+        COUNT(DISTINCT wm.work_id) AS work_count,
+        COUNT(DISTINCT lw.work_id) AS local_work_count,
+        MIN(w.release_date) AS first_release_date,
+        MAX(w.release_date) AS latest_release_date
+      FROM makers m
+      LEFT JOIN maker_external_refs ref ON ref.maker_id = m.id
+      LEFT JOIN work_makers wm ON wm.maker_id = m.id
+      LEFT JOIN works w ON w.id = wm.work_id
+      LEFT JOIN local_works lw ON lw.work_id = wm.work_id
+      WHERE (? = '' OR m.name_search LIKE ? OR m.name LIKE ?)
+      GROUP BY m.id
+      ORDER BY work_count DESC, name
+      LIMIT ?
+      `
+    )
+    .all(q, `%${q}%`, `%${q}%`, limit);
+  const makers = rows.map((row) => publicStudioMaker(row, studioSeriesRowsForMaker(row.maker_id), studioPrefixRowsForMaker(row.maker_id)));
+  return { sync, count: makers.length, makers };
+}
+
+function studioDetailPayload(makerId, url) {
+  const sync = ensureStudioCatalog();
+  const db = getCoreDb();
+  const row = db
+    .prepare(
+      `
+      SELECT
+        CAST(m.id AS TEXT) AS maker_id,
+        m.name,
+        m.name_search AS normalized_name,
+        ref.url AS javdb_url,
+        m.source,
+        COUNT(DISTINCT wm.work_id) AS work_count,
+        COUNT(DISTINCT lw.work_id) AS local_work_count,
+        MIN(w.release_date) AS first_release_date,
+        MAX(w.release_date) AS latest_release_date
+      FROM makers m
+      LEFT JOIN maker_external_refs ref ON ref.maker_id = m.id
+      LEFT JOIN work_makers wm ON wm.maker_id = m.id
+      LEFT JOIN works w ON w.id = wm.work_id
+      LEFT JOIN local_works lw ON lw.work_id = wm.work_id
+      WHERE m.id = ?
+      GROUP BY m.id
+      `
+    )
+    .get(Number(makerId));
+  if (!row) return null;
+  const seriesRows = studioSeriesRowsForMaker(makerId);
+  const prefixRows = studioPrefixRowsForMaker(makerId);
+  const selectedSeriesId = String(url.searchParams.get("seriesId") || "all").trim() || "all";
+  const filterBySeries = selectedSeriesId !== "all";
+  const linkRows = filterBySeries
+    ? db.prepare("SELECT DISTINCT CAST(wm.work_id AS TEXT) AS work_id FROM work_makers wm JOIN work_series ws ON ws.work_id = wm.work_id JOIN local_works lw ON lw.work_id = wm.work_id WHERE wm.maker_id = ? AND ws.series_id = ?").all(Number(makerId), Number(selectedSeriesId))
+    : db.prepare("SELECT DISTINCT CAST(wm.work_id AS TEXT) AS work_id FROM work_makers wm JOIN local_works lw ON lw.work_id = wm.work_id WHERE wm.maker_id = ?").all(Number(makerId));
+  const works = enrichLocalWorksWithActorMovieIndex(linkRows.map((item) => library.worksById.get(item.work_id)).filter(Boolean));
+  const sorted = sortWorkList(works, url.searchParams.get("sort") || "releaseDesc");
+  return {
+    sync,
+    studio: publicStudioMaker(row, seriesRows, prefixRows),
+    selectedSeriesId,
+    ...pagedWorksPayload(sorted, url, { facets: workFacets(works) })
+  };
+}
+
 function actorMovieRowsByPerson() {
   const stamp = actorMovieStamp();
   if (actorMovieCache?.stamp === stamp) return actorMovieCache.rows;
 
   const rowsByPerson = new Map();
   try {
-    const db = getActorDb();
+    const db = getCoreDb();
     const rows = db
       .prepare(
         `
-        SELECT *
-        FROM actor_movies
-        ORDER BY person_id, COALESCE(page_index, 999999), COALESCE(position_index, 999999), code
+        SELECT
+          CAST(p.id AS TEXT) AS person_id,
+          p.name AS person_name,
+          pref.external_key AS javdb_actor_id,
+          pref.url AS actor_url,
+          w.code,
+          w.code_search AS code_key,
+          w.title,
+          wref.url AS detail_url,
+          cover.remote_url AS image_url,
+          w.release_date,
+          w.rating,
+          w.rating_count,
+          w.has_magnet,
+          w.is_streamable,
+          w.has_subtitles,
+          w.javdb_tags_json,
+          0 AS page_index,
+          wp.sort_order AS position_index,
+          wp.created_at AS fetched_at,
+          wp.updated_at
+        FROM work_people wp
+        JOIN people p ON p.id = wp.person_id
+        JOIN works w ON w.id = wp.work_id
+        LEFT JOIN person_external_refs pref
+          ON pref.person_id = p.id
+         AND pref.provider = 'javdb-actor'
+        LEFT JOIN work_external_refs wref
+          ON wref.work_id = w.id
+         AND wref.provider = 'javdb-video'
+        LEFT JOIN images cover
+          ON cover.id = (
+            SELECT i.id
+            FROM images i
+            WHERE i.owner_type = 'work'
+              AND i.owner_id = w.id
+              AND i.kind = 'cover'
+            ORDER BY CASE WHEN i.source = 'actor_movies' THEN 0 ELSE 1 END, i.id ASC
+            LIMIT 1
+          )
+        WHERE wp.source = 'actor_movies'
+        ORDER BY person_id, COALESCE(position_index, 999999), code
         `
       )
       .all();
     for (const row of rows) {
-      if (!rowsByPerson.has(row.person_id)) rowsByPerson.set(row.person_id, []);
-      rowsByPerson.get(row.person_id).push(row);
+      const personId = String(row.person_id || "");
+      if (!rowsByPerson.has(personId)) rowsByPerson.set(personId, []);
+      rowsByPerson.get(personId).push({ ...row, person_id: personId });
     }
   } catch (error) {
-    console.warn("[actor-movies]", error.message);
+    console.warn("[core-actor-movies]", error.message);
     if (actorMovieCache?.rows) return actorMovieCache.rows;
   }
 
@@ -2012,6 +2624,279 @@ function actorMovieRowsByPerson() {
 
 function actorMovieRows(personId) {
   return actorMovieRowsByPerson().get(personId) || [];
+}
+
+function looksLikeVrPersonMergeText(value) {
+  return /(^|[\\/[\]【】()\s._-])vr($|[\\/[\]【】()\s._-])/i.test(String(value || ""));
+}
+
+function personHasVrMergeContent(person) {
+  if (!person) return false;
+  const paths = [person.relativePath, ...(person.sourcePaths || [])];
+  if (paths.some(looksLikeVrPersonMergeText)) return true;
+  return (person.works || [])
+    .map((workId) => library.worksById.get(workId))
+    .filter(Boolean)
+    .some((work) => looksLikeVrPersonMergeText(`${work.title || ""}\n${work.directoryName || ""}\n${work.relativePath || ""}`));
+}
+
+function personMergeStamp() {
+  return `${library.scannedAt || ""}:${actorProfileStamp()}:${actorMovieStamp()}`;
+}
+
+function preferCanonicalMergePerson(a, b) {
+  const aF = (a.sourcePaths || []).some((item) => /^f:\//i.test(String(item || "").replaceAll("\\", "/")));
+  const bF = (b.sourcePaths || []).some((item) => /^f:\//i.test(String(item || "").replaceAll("\\", "/")));
+  return (
+    Number(bF) - Number(aF) ||
+    actorMovieRows(b.id).length - actorMovieRows(a.id).length ||
+    Number(b.workCount || 0) - Number(a.workCount || 0) ||
+    Number(b.sourceCount || 0) - Number(a.sourceCount || 0) ||
+    String(a.name || "").localeCompare(String(b.name || ""), undefined, { numeric: true, sensitivity: "base" })
+  );
+}
+
+function personMergeMaps() {
+  const stamp = personMergeStamp();
+  if (personMergeCache?.stamp === stamp) return personMergeCache.maps;
+
+  const parent = new Map();
+  const ensureParent = (personId) => {
+    if (!parent.has(personId)) parent.set(personId, personId);
+  };
+  const find = (personId) => {
+    ensureParent(personId);
+    const next = parent.get(personId);
+    if (next === personId) return personId;
+    const root = find(next);
+    parent.set(personId, root);
+    return root;
+  };
+  const union = (a, b) => {
+    const rootA = find(a);
+    const rootB = find(b);
+    if (rootA !== rootB) parent.set(rootB, rootA);
+  };
+  for (const person of library.people) ensureParent(person.id);
+
+  const byActorId = new Map();
+  for (const person of library.people) {
+    const actorId = String(actorProfileRow(person.id)?.javdb_actor_id || "").trim();
+    if (!actorId) continue;
+    if (!byActorId.has(actorId)) byActorId.set(actorId, []);
+    byActorId.get(actorId).push(person);
+  }
+
+  for (const people of byActorId.values()) {
+    if (people.length < 2 || people.some(personHasVrMergeContent)) continue;
+    for (const person of people.slice(1)) union(people[0].id, person.id);
+  }
+
+  const aliasOwners = new Map();
+  for (const person of library.people) {
+    const row = actorProfileRow(person.id);
+    if (!row) continue;
+    for (const alias of actorProfileAliases(row)) {
+      const key = normalizePersonSearchValue(alias);
+      if (!key) continue;
+      if (!aliasOwners.has(key)) aliasOwners.set(key, []);
+      aliasOwners.get(key).push(person);
+    }
+  }
+
+  for (const person of library.people) {
+    const key = normalizePersonSearchValue(person.name);
+    const owners = aliasOwners.get(key) || [];
+    for (const owner of owners) {
+      if (owner.id === person.id) continue;
+      const ownerActorId = String(actorProfileRow(owner.id)?.javdb_actor_id || "").trim();
+      const personActorId = String(actorProfileRow(person.id)?.javdb_actor_id || "").trim();
+      if (ownerActorId && personActorId && ownerActorId !== personActorId) continue;
+      union(owner.id, person.id);
+    }
+  }
+
+  const components = new Map();
+  for (const person of library.people) {
+    const root = find(person.id);
+    if (!components.has(root)) components.set(root, []);
+    components.get(root).push(person);
+  }
+
+  const aliasToCanonical = new Map();
+  const groupsByCanonical = new Map();
+  for (const people of components.values()) {
+    if (people.length < 2) continue;
+    const canonical = [...people].sort(preferCanonicalMergePerson)[0];
+    const memberIds = people.map((person) => person.id);
+    groupsByCanonical.set(canonical.id, memberIds);
+    for (const memberId of memberIds) aliasToCanonical.set(memberId, canonical.id);
+  }
+
+  const maps = { aliasToCanonical, groupsByCanonical };
+  personMergeCache = { stamp, maps };
+  return maps;
+}
+
+function canonicalPersonId(personId) {
+  const id = String(personId || "");
+  return personMergeMaps().aliasToCanonical.get(id) || id;
+}
+
+function mergedPersonMembers(personId) {
+  const canonicalId = canonicalPersonId(personId);
+  const ids = personMergeMaps().groupsByCanonical.get(canonicalId) || [canonicalId];
+  return ids.map((id) => library.peopleById.get(id)).filter(Boolean);
+}
+
+function mergedPersonAliasNames(personId) {
+  const canonicalId = canonicalPersonId(personId);
+  const canonicalRow = actorProfileRow(canonicalId);
+  const primary = new Set(
+    uniquePersonNames([
+      library.peopleById.get(canonicalId)?.name,
+      canonicalRow?.person_name,
+      canonicalRow?.display_name
+    ]).map(normalizePersonSearchValue)
+  );
+  const names = [];
+  for (const person of mergedPersonMembers(canonicalId)) {
+    const row = actorProfileRow(person.id);
+    names.push(person.name, row?.person_name, row?.display_name, ...actorProfileAliases(row));
+  }
+  return uniquePersonNames(names).filter((name) => {
+    const key = normalizePersonSearchValue(name);
+    return key && !primary.has(key);
+  });
+}
+
+function mergedActorMovieRows(personId) {
+  const rows = [];
+  const seen = new Set();
+  for (const person of mergedPersonMembers(personId)) {
+    for (const row of actorMovieRows(person.id)) {
+      const key = storedWorkCodeKey(row.code_key) || looseWorkCodeKey(row.code) || row.detail_url || `${row.person_id}:${row.code}:${row.title}`;
+      if (key && seen.has(key)) continue;
+      if (key) seen.add(key);
+      rows.push(row);
+    }
+  }
+  return rows;
+}
+
+function mergedPersonRecord(person) {
+  if (!person) return null;
+  const canonicalId = canonicalPersonId(person.id);
+  const canonical = library.peopleById.get(canonicalId) || person;
+  const members = mergedPersonMembers(canonicalId);
+  if (members.length <= 1) return canonical;
+
+  const sourcePaths = [];
+  const sourceSeen = new Set();
+  const addSourcePath = (value) => {
+    const text = String(value || "").trim();
+    const key = normalizeSourcePath(text);
+    if (!text || !key || sourceSeen.has(key)) return;
+    sourceSeen.add(key);
+    sourcePaths.push(text);
+  };
+  for (const member of [canonical, ...members.filter((item) => item.id !== canonical.id)]) {
+    for (const sourcePath of [...(member.sourcePaths || []), member.relativePath]) addSourcePath(sourcePath);
+  }
+
+  const works = [];
+  const workSeen = new Set();
+  for (const member of [canonical, ...members.filter((item) => item.id !== canonical.id)]) {
+    for (const workId of member.works || []) {
+      if (!workId || workSeen.has(workId)) continue;
+      workSeen.add(workId);
+      works.push(workId);
+    }
+  }
+
+  const workRows = works.map((workId) => library.worksById.get(workId)).filter(Boolean);
+  const modifiedAt = members
+    .map((member) => member.modifiedAt)
+    .filter(Boolean)
+    .sort()
+    .at(-1) || canonical.modifiedAt;
+
+  return {
+    ...canonical,
+    relativePath: sourcePaths[0] || canonical.relativePath,
+    sourcePaths,
+    sourceCount: sourcePaths.length,
+    works,
+    workCount: works.length,
+    videoCount: workRows.reduce((sum, work) => sum + Number(work.videoCount || 0), 0),
+    playableCount: workRows.reduce((sum, work) => sum + Number(work.playableCount || 0), 0),
+    imageCount: workRows.reduce((sum, work) => sum + Number(work.imageCount || 0), 0),
+    infoCount: workRows.reduce((sum, work) => sum + Number(work.infoCount || 0), 0),
+    modifiedAt
+  };
+}
+
+function mainLibraryPeople() {
+  const people = [];
+  const seen = new Set();
+  for (const person of library.people) {
+    const merged = mergedPersonRecord(person);
+    if (!merged || seen.has(merged.id)) continue;
+    seen.add(merged.id);
+    if (shouldShowPersonInMainList(merged)) people.push(merged);
+  }
+  return people;
+}
+
+function shouldShowPersonInMainList(person) {
+  if (!person) return false;
+  if (Number(person.workCount || 0) > 0) return true;
+  if (actorProfileRow(person.id)) return true;
+  return mergedActorMovieRows(person.id).length > 0;
+}
+
+function displayPersonForWork(personId) {
+  return mergedPersonRecord(library.peopleById.get(canonicalPersonId(personId)));
+}
+
+function actorMovieRowsByCodeKey() {
+  const stamp = actorMovieStamp();
+  if (actorMovieByCodeKeyCache?.stamp === stamp) return actorMovieByCodeKeyCache.rows;
+
+  const rows = new Map();
+  for (const personRows of actorMovieRowsByPerson().values()) {
+    for (const row of personRows) {
+      const codeKey = storedWorkCodeKey(row.code_key) || looseWorkCodeKey(row.code);
+      if (codeKey && !rows.has(codeKey)) rows.set(codeKey, row);
+    }
+  }
+
+  actorMovieByCodeKeyCache = { stamp, rows };
+  return rows;
+}
+
+function actorMovieRowsForWorks(works = []) {
+  if (!works.length) return [];
+  const rowsByCodeKey = actorMovieRowsByCodeKey();
+  if (!rowsByCodeKey.size) return [];
+
+  const rows = [];
+  const seen = new Set();
+  for (const work of works) {
+    for (const codeKey of workCodeKeys(work)) {
+      if (!codeKey || seen.has(codeKey)) continue;
+      const row = rowsByCodeKey.get(codeKey);
+      if (!row) continue;
+      seen.add(codeKey);
+      rows.push(row);
+      break;
+    }
+  }
+  return rows;
+}
+
+function enrichLocalWorksWithActorMovieIndex(localWorks) {
+  return enrichLocalWorksWithActorMovieInfo(localWorks, actorMovieRowsForWorks(localWorks));
 }
 
 function localWorkCodeKeys() {
@@ -2086,29 +2971,44 @@ function rankingSummaries() {
   const localKeys = localWorkCodeKeys();
   const summaries = [];
   try {
-    const rows = getActorDb()
+    const rows = getCoreDb()
       .prepare(
         `
-        SELECT list_type, list_key, COALESCE(NULLIF(list_label, ''), '') AS list_label,
-               COUNT(*) AS total, MAX(updated_at) AS updated_at, MAX(page_url) AS page_url
-        FROM javdb_rankings
-        GROUP BY list_type, list_key
+        SELECT
+          c.id AS collection_id,
+          c.name AS list_label,
+          c.source_key,
+          COUNT(ci.work_id) AS total,
+          MAX(ci.updated_at) AS updated_at,
+          MAX(c.source_url) AS page_url
+        FROM collections c
+        JOIN collection_items ci ON ci.collection_id = c.id
+        WHERE c.type = 'ranking'
+        GROUP BY c.id
         ORDER BY
-          CASE WHEN list_key GLOB 'y[0-9][0-9][0-9][0-9]' THEN 0 ELSE 1 END,
-          list_key DESC
+          CASE WHEN c.source_key GLOB 'top:y[0-9][0-9][0-9][0-9]' THEN 0 ELSE 1 END,
+          c.source_key DESC
         `
       )
       .all();
 
     for (const row of rows) {
-      const listRows = getActorDb()
-        .prepare("SELECT code_key FROM javdb_rankings WHERE list_type = ? AND list_key = ?")
-        .all(row.list_type, row.list_key || "");
+      const { listType, listKey } = rankingSourceParts(row.source_key);
+      const listRows = getCoreDb()
+        .prepare(
+          `
+          SELECT w.code_search AS code_key
+          FROM collection_items ci
+          JOIN works w ON w.id = ci.work_id
+          WHERE ci.collection_id = ?
+          `
+        )
+        .all(row.collection_id);
       const localTotal = listRows.filter((item) => localKeys.has(storedWorkCodeKey(item.code_key))).length;
       summaries.push({
-        type: row.list_type,
-        key: row.list_key || "",
-        label: rankingListLabel(row.list_type, row.list_key, row.list_label),
+        type: listType,
+        key: listKey,
+        label: rankingListLabel(listType, listKey, row.list_label),
         total: Number(row.total || 0),
         localTotal,
         missingTotal: Math.max(0, Number(row.total || 0) - localTotal),
@@ -2122,18 +3022,52 @@ function rankingSummaries() {
   return summaries;
 }
 
+function rankingSourceParts(sourceKey = "") {
+  const [listType = "top", ...rest] = String(sourceKey || "top:").split(":");
+  return { listType: listType || "top", listKey: rest.join(":") || "" };
+}
+
 function rankingRows(listType = "top", listKey = "") {
   try {
-    return getActorDb()
+    return getCoreDb()
       .prepare(
         `
-        SELECT *
-        FROM javdb_rankings
-        WHERE list_type = ? AND list_key = ?
-        ORDER BY rank_no ASC, code ASC
+        SELECT
+          ? AS list_type,
+          ? AS list_key,
+          c.name AS list_label,
+          ci.rank_no,
+          w.code,
+          w.code_search AS code_key,
+          COALESCE(ci.title_snapshot, w.title) AS title,
+          wref.url AS detail_url,
+          cover.remote_url AS image_url,
+          w.release_date,
+          COALESCE(ci.rating_snapshot, w.rating) AS rating,
+          COALESCE(ci.rating_count_snapshot, w.rating_count) AS rating_count,
+          c.source_url AS page_url,
+          ci.fetched_at,
+          ci.updated_at
+        FROM collections c
+        JOIN collection_items ci ON ci.collection_id = c.id
+        JOIN works w ON w.id = ci.work_id
+        LEFT JOIN work_external_refs wref ON wref.work_id = w.id AND wref.provider = 'javdb-video'
+        LEFT JOIN images cover
+          ON cover.id = (
+            SELECT i.id
+            FROM images i
+            WHERE i.owner_type = 'work'
+              AND i.owner_id = w.id
+              AND i.kind = 'cover'
+            ORDER BY CASE WHEN i.source = 'javdb_rankings' THEN 0 ELSE 1 END, i.id ASC
+            LIMIT 1
+          )
+        WHERE c.type = 'ranking'
+          AND c.source_key = ?
+        ORDER BY ci.rank_no ASC, w.code ASC
         `
       )
-      .all(listType, listKey || "");
+      .all(listType, listKey || "", `${listType}:${listKey || ""}`);
   } catch (error) {
     console.warn("[rankings]", error.message);
     return [];
@@ -2185,7 +3119,11 @@ function rankingWorkFromRow(row, localByCode = localWorkByCodeKey()) {
       releaseDate: row.release_date || "",
       durationMinutes: null,
       rating: row.rating ?? null,
-      ratingCount: row.rating_count ?? null
+      ratingCount: row.rating_count ?? null,
+      hasMagnet: dbBoolOrNull(row.has_magnet),
+      isStreamable: dbBoolOrNull(row.is_streamable),
+      hasSubtitles: dbBoolOrNull(row.has_subtitles),
+      javdbTags: parseJsonTextArray(row.javdb_tags_json)
     }
   };
 }
@@ -2233,12 +3171,41 @@ function rankingMissingSearchWorks() {
   const works = [];
 
   try {
-    const rows = getActorDb()
+    const rows = getCoreDb()
       .prepare(
         `
-        SELECT *
-        FROM javdb_rankings
-        ORDER BY rank_no ASC, updated_at DESC, list_key DESC, code ASC
+        SELECT
+          substr(c.source_key, 1, instr(c.source_key || ':', ':') - 1) AS list_type,
+          substr(c.source_key, instr(c.source_key || ':', ':') + 1) AS list_key,
+          c.name AS list_label,
+          ci.rank_no,
+          w.code,
+          w.code_search AS code_key,
+          COALESCE(ci.title_snapshot, w.title) AS title,
+          wref.url AS detail_url,
+          cover.remote_url AS image_url,
+          w.release_date,
+          COALESCE(ci.rating_snapshot, w.rating) AS rating,
+          COALESCE(ci.rating_count_snapshot, w.rating_count) AS rating_count,
+          c.source_url AS page_url,
+          ci.fetched_at,
+          ci.updated_at
+        FROM collections c
+        JOIN collection_items ci ON ci.collection_id = c.id
+        JOIN works w ON w.id = ci.work_id
+        LEFT JOIN work_external_refs wref ON wref.work_id = w.id AND wref.provider = 'javdb-video'
+        LEFT JOIN images cover
+          ON cover.id = (
+            SELECT i.id
+            FROM images i
+            WHERE i.owner_type = 'work'
+              AND i.owner_id = w.id
+              AND i.kind = 'cover'
+            ORDER BY CASE WHEN i.source = 'javdb_rankings' THEN 0 ELSE 1 END, i.id ASC
+            LIMIT 1
+          )
+        WHERE c.type = 'ranking'
+        ORDER BY ci.rank_no ASC, ci.updated_at DESC, c.source_key DESC, w.code ASC
         `
       )
       .all();
@@ -2280,15 +3247,204 @@ function actorMissingWorkFromRow(person, row, codeKey = "") {
     missingLocal: true,
     javdbUrl: row.detail_url || "",
     actorUrl: row.actor_url || "",
+    infoSummary: actorMovieInfoSummary(row, code)
+  };
+}
+
+function coreMissingWorkFromRow(person, row) {
+  const code = normalizeWorkCode(row.code) || row.code || "";
+  const title = row.title && row.title !== row.code ? row.title : code || row.title || "未下载作品";
+  return {
+    id: String(row.work_id || row.id || ""),
+    personId: person.id,
+    personName: person.name,
+    title,
+    directoryName: code,
+    relativePath: "",
+    coverId: null,
+    remoteCoverUrl: proxiedRemoteImageUrl(row.image_url),
+    videoCount: 0,
+    playableCount: 0,
+    imageCount: 0,
+    infoCount: 0,
+    videos: [],
+    images: [],
+    infos: [],
+    modifiedAt: row.updated_at || "",
+    missingLocal: true,
+    javdbUrl: publicRemoteUrl(row.detail_url),
+    actorUrl: row.actor_url || "",
     infoSummary: {
       code,
       title: row.title || "",
+      javdbUrl: publicRemoteUrl(row.detail_url),
       releaseDate: row.release_date || "",
-      durationMinutes: null,
+      durationMinutes: row.duration_minutes ?? null,
       rating: row.rating ?? null,
-      ratingCount: row.rating_count ?? null
+      ratingCount: row.rating_count ?? null,
+      hasMagnet: dbBoolOrNull(row.has_magnet),
+      isStreamable: dbBoolOrNull(row.is_streamable),
+      hasSubtitles: dbBoolOrNull(row.has_subtitles),
+      javdbTags: parseJsonTextArray(row.javdb_tags_json)
     }
   };
+}
+
+function coreMissingWorksForPerson(person, excludedCodeKeys = new Set()) {
+  if (!person?.id || !hasCoreDb()) return [];
+  const corePersonId = Number(person.id);
+  if (!Number.isFinite(corePersonId)) return [];
+
+  try {
+    const rows = getCoreDb()
+      .prepare(
+        `
+        SELECT
+          w.id AS work_id,
+          w.code,
+          w.code_search AS code_key,
+          w.title,
+          w.release_date,
+          w.duration_minutes,
+          w.rating,
+          w.rating_count,
+          w.has_magnet,
+          w.is_streamable,
+          w.has_subtitles,
+          w.javdb_tags_json,
+          w.updated_at,
+          wref.url AS detail_url,
+          pref.url AS actor_url,
+          cover.remote_url AS image_url
+        FROM work_people wp
+        JOIN works w ON w.id = wp.work_id
+        LEFT JOIN work_external_refs wref
+          ON wref.work_id = w.id
+         AND wref.provider = 'javdb-video'
+        LEFT JOIN person_external_refs pref
+          ON pref.person_id = wp.person_id
+         AND pref.provider = 'javdb-actor'
+        LEFT JOIN images cover
+          ON cover.id = (
+            SELECT i.id
+            FROM images i
+            WHERE i.owner_type = 'work'
+              AND i.owner_id = w.id
+              AND i.kind = 'cover'
+            ORDER BY CASE WHEN i.image_blob IS NOT NULL THEN 0 ELSE 1 END, i.id ASC
+            LIMIT 1
+          )
+        WHERE wp.person_id = ?
+          AND wp.role = 'actor'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM local_works lw
+            WHERE lw.work_id = w.id
+          )
+        ORDER BY COALESCE(w.release_date, '') DESC, w.id DESC
+        `
+      )
+      .all(corePersonId);
+    const localKeys = combinedLocalWorkCodeKeys(excludedCodeKeys);
+    return rows
+      .filter((row) => {
+        const codeKey = storedWorkCodeKey(row.code_key) || looseWorkCodeKey(row.code);
+        return !codeKey || !localKeys.has(codeKey);
+      })
+      .map((row) => coreMissingWorkFromRow(person, row));
+  } catch (error) {
+    console.warn("[core-missing-works]", error.message);
+    return [];
+  }
+}
+
+function actorMovieInfoSummary(row, fallbackCode = "") {
+  return {
+    code: normalizeWorkCode(row?.code) || fallbackCode || row?.code || "",
+    title: row?.title || "",
+    javdbUrl: publicRemoteUrl(row?.detail_url),
+    releaseDate: row?.release_date || "",
+    durationMinutes: null,
+    rating: row?.rating ?? null,
+    ratingCount: row?.rating_count ?? null,
+    hasMagnet: dbBoolOrNull(row?.has_magnet),
+    isStreamable: dbBoolOrNull(row?.is_streamable),
+    hasSubtitles: dbBoolOrNull(row?.has_subtitles),
+    javdbTags: parseJsonTextArray(row?.javdb_tags_json)
+  };
+}
+
+function workCodeKeys(work) {
+  const info = workInfoRow(work.id);
+  const values = [
+    info?.code,
+    work.infoSummary?.code,
+    work.title,
+    work.directoryName,
+    work.relativePath,
+    ...(work.videos || []).flatMap((video) => [video.name, video.title, video.relativePath]),
+    ...(work.images || []).flatMap((image) => [image.name, image.title]),
+    ...(work.infos || []).flatMap((infoFile) => [infoFile.name, infoFile.title])
+  ];
+
+  const keys = [];
+  const seen = new Set();
+  for (const value of values) {
+    const key = looseWorkCodeKey(value);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    keys.push(key);
+  }
+  return keys;
+}
+
+function workCodeKeySetForWorks(works = []) {
+  const keys = new Set();
+  for (const work of works || []) {
+    for (const codeKey of workCodeKeys(work)) keys.add(codeKey);
+  }
+  return keys;
+}
+
+function combinedLocalWorkCodeKeys(extraKeys = new Set()) {
+  const keys = new Set(localWorkCodeKeys());
+  for (const key of extraKeys || []) {
+    const codeKey = storedWorkCodeKey(key);
+    if (codeKey) keys.add(codeKey);
+  }
+  return keys;
+}
+
+function enrichLocalWorksWithActorMovieInfo(localWorks, actorRows = []) {
+  if (!actorRows.length || !localWorks.length) return localWorks;
+
+  const localByCodeKey = new Map();
+  for (const work of localWorks) {
+    for (const codeKey of workCodeKeys(work)) {
+      if (!localByCodeKey.has(codeKey)) localByCodeKey.set(codeKey, work);
+    }
+  }
+
+  const fallbackByWorkId = new Map();
+  for (const row of actorRows) {
+    const codeKey = storedWorkCodeKey(row.code_key) || looseWorkCodeKey(row.code);
+    const work = codeKey ? localByCodeKey.get(codeKey) : null;
+    if (!work || fallbackByWorkId.has(work.id)) continue;
+    fallbackByWorkId.set(work.id, actorMovieInfoSummary(row, codeKey));
+  }
+
+  if (!fallbackByWorkId.size) return localWorks;
+  return localWorks.map((work) => {
+    const fallback = fallbackByWorkId.get(work.id);
+    if (!fallback) return work;
+    return {
+      ...work,
+      infoSummary: {
+        ...fallback,
+        ...(work.infoSummary || {})
+      }
+    };
+  });
 }
 
 function actorMissingSearchWorks(excludedCodeKeys = new Set()) {
@@ -2324,8 +3480,8 @@ function filterExcludedMissingWorks(works, excludedCodeKeys = new Set()) {
   });
 }
 
-function missingActorWorksForPerson(person, rows = actorMovieRows(person.id)) {
-  const localKeys = localWorkCodeKeys();
+function missingActorWorksForPerson(person, rows = actorMovieRows(person.id), excludedCodeKeys = new Set()) {
+  const localKeys = combinedLocalWorkCodeKeys(excludedCodeKeys);
   const seen = new Set();
   const missing = [];
 
@@ -2489,6 +3645,11 @@ function firstPresentNumber(...values) {
   return Number.isFinite(number) ? number : null;
 }
 
+function dbBoolOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
+  return Boolean(Number(value));
+}
+
 function publicWorkInfoSummary(row, fallback = null) {
   if (!row && !fallback) return null;
   const actors = parseJsonTextArray(row?.actors_json);
@@ -2496,17 +3657,27 @@ function publicWorkInfoSummary(row, fallback = null) {
   const previewImages = proxiedRemoteImageUrlArray(parseJsonArray(row?.preview_images_json));
   return {
     code: firstPresentText(row?.code, fallback?.code),
-    title: firstPresentText(row?.title, fallback?.title),
+    title: displayWorkTitle(firstPresentText(row?.title, fallback?.title)),
+    javdbUrl: publicRemoteUrl(firstPresentValue(row?.javdb_url, fallback?.javdbUrl)),
     releaseDate: firstPresentText(row?.release_date, fallback?.releaseDate),
     durationMinutes: firstPresentNumber(row?.duration_minutes, fallback?.durationMinutes),
     rating: firstPresentNumber(row?.rating, fallback?.rating),
     ratingCount: firstPresentNumber(row?.rating_count, fallback?.ratingCount),
+    hasMagnet: firstPresentValue(dbBoolOrNull(row?.has_magnet), fallback?.hasMagnet),
+    isStreamable: firstPresentValue(dbBoolOrNull(row?.is_streamable), fallback?.isStreamable),
+    hasSubtitles: firstPresentValue(dbBoolOrNull(row?.has_subtitles), fallback?.hasSubtitles),
+    javdbTags: uniqueTextArray([...parseJsonTextArray(row?.javdb_tags_json), ...(fallback?.javdbTags || [])], { maxLength: 40, maxItems: 16 }),
     director: firstPresentText(row?.director, fallback?.director),
     maker: firstPresentText(row?.maker, fallback?.maker),
+    makerUrl: publicRemoteUrl(firstPresentValue(row?.maker_url, fallback?.makerUrl)),
     label: firstPresentText(row?.label, fallback?.label),
+    labelUrl: publicRemoteUrl(firstPresentValue(row?.label_url, fallback?.labelUrl)),
     series: firstPresentText(row?.series, fallback?.series),
+    seriesUrl: publicRemoteUrl(firstPresentValue(row?.series_url, fallback?.seriesUrl)),
     actors: actors.length ? actors : uniqueTextArray(fallback?.actors),
+    actorLinks: publicEntityLinks(parseJsonArray(row?.actor_links_json), fallback?.actorLinks),
     tags: tags.length ? tags : uniqueTextArray(fallback?.tags),
+    tagLinks: publicEntityLinks(parseJsonArray(row?.tag_links_json), fallback?.tagLinks),
     imageUrl: proxiedRemoteImageUrl(firstPresentValue(row?.image_url, fallback?.imageUrl)),
     previewImages: previewImages.length ? previewImages : proxiedRemoteImageUrlArray(fallback?.previewImages),
     previewVideoUrl: publicRemoteUrl(firstPresentValue(row?.preview_video_url, fallback?.previewVideoUrl))
@@ -2517,21 +3688,26 @@ function publicWorkInfoMetadata(row) {
   if (!row) return null;
   const info = {
     code: row.code || "",
-    title: row.title || "",
+    title: displayWorkTitle(row.title || ""),
     releaseDate: row.release_date || "",
     durationMinutes: row.duration_minutes ?? null,
     rating: row.rating ?? null,
     ratingCount: row.rating_count ?? null,
     director: row.director || "",
     maker: row.maker || "",
+    makerUrl: publicRemoteUrl(row.maker_url),
     label: row.label || "",
+    labelUrl: publicRemoteUrl(row.label_url),
     series: row.series || "",
+    seriesUrl: publicRemoteUrl(row.series_url),
     javdbUrl: row.javdb_url || "",
     imageUrl: proxiedRemoteImageUrl(row.image_url),
     previewImages: proxiedRemoteImageUrlArray(parseJsonArray(row.preview_images_json)),
     previewVideoUrl: publicRemoteUrl(row.preview_video_url),
     actors: parseJsonTextArray(row.actors_json),
+    actorLinks: publicEntityLinks(parseJsonArray(row.actor_links_json)),
     tags: parseJsonTextArray(row.tags_json),
+    tagLinks: publicEntityLinks(parseJsonArray(row.tag_links_json)),
     fields: parseJsonArray(row.fields_json),
     rawText: row.raw_text || "",
     rawTextTruncated: Boolean(row.raw_truncated),
@@ -2540,6 +3716,21 @@ function publicWorkInfoMetadata(row) {
   };
   if (!info.rawText && info.fields?.length) info.rawText = renderInfoMetadataText(info);
   return info;
+}
+
+function publicEntityLinks(rows, fallback = []) {
+  const candidates = Array.isArray(rows) && rows.length ? rows : Array.isArray(fallback) ? fallback : [];
+  const seen = new Set();
+  const links = [];
+  for (const item of candidates) {
+    const name = String(item?.name || item?.label || item?.text || "").trim();
+    const url = publicRemoteUrl(item?.url || item?.href || "");
+    const key = `${name.toLowerCase()}\n${url.toLowerCase()}`;
+    if (!name || !url || seen.has(key)) continue;
+    seen.add(key);
+    links.push({ name, url });
+  }
+  return links;
 }
 
 function actorIdFromJavdbUrl(value) {
@@ -2563,6 +3754,142 @@ function canonicalJavdbActorUrl(value) {
   return actorId ? `https://javdb.com/actors/${actorId}` : "";
 }
 
+function safeDirectoryName(value, fallback = "新人物") {
+  const clean = cleanPersonNamePart(value) || fallback;
+  const safe = clean
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "")
+    .replace(/[. ]+$/g, "")
+    .trim();
+  return (safe || fallback).slice(0, 120);
+}
+
+function libraryRootForNewPerson(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    const error = new Error("请选择保存硬盘");
+    error.statusCode = 400;
+    throw error;
+  }
+  const root = sourcePathToAbsolute(raw);
+  const matchedRoot = libraryOpenRoots().find((rootPath) => path.resolve(rootPath).toLowerCase() === path.resolve(root).toLowerCase());
+  if (!matchedRoot) {
+    const error = new Error("保存硬盘不在资料库根目录中");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!safeStat(matchedRoot)?.isDirectory()) {
+    const error = new Error("保存硬盘不可用");
+    error.statusCode = 404;
+    throw error;
+  }
+  return matchedRoot;
+}
+
+function createOrUpdateMoveTargetPerson(db, payload = {}) {
+  const displayName = cleanPersonNamePart(payload.displayName || payload.name);
+  const name = cleanPersonNamePart(payload.name || displayName);
+  const nameSearch = normalizePersonSearchValue(name);
+  if (!name || !nameSearch) {
+    const error = new Error("请填写演员名");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const inputActorUrl = String(payload.javdbUrl || payload.actorUrl || "").trim();
+  const javdbUrl = canonicalJavdbActorUrl(inputActorUrl);
+  if (inputActorUrl && !javdbUrl) {
+    const error = new Error("请输入 JavDB actor 页面链接，例如 https://javdb.com/actors/BzpA");
+    error.statusCode = 400;
+    throw error;
+  }
+  const actorKey = actorIdFromJavdbUrl(javdbUrl);
+
+  const root = libraryRootForNewPerson(payload.rootPath || payload.root);
+  const folderName = safeDirectoryName(payload.folderName || displayName || name, name);
+  const folderPath = ensureLibraryDirectoryPath(path.join(root, folderName), "目标人物文件夹");
+  fs.mkdirSync(folderPath, { recursive: true });
+
+  const now = new Date().toISOString();
+  const existing = db
+    .prepare(
+      `
+      SELECT *
+      FROM people
+      WHERE name_search = ?
+         OR lower(trim(name)) = lower(trim(?))
+         OR lower(trim(COALESCE(display_name, ''))) = lower(trim(?))
+      ORDER BY
+        CASE WHEN name = ? OR display_name = ? THEN 0 ELSE 1 END,
+        id ASC
+      LIMIT 1
+      `
+    )
+    .get(nameSearch, name, displayName || name, name, displayName || name);
+
+  let personId;
+  if (existing?.id) {
+    personId = Number(existing.id);
+    db
+      .prepare(
+        `
+        UPDATE people
+        SET
+          display_name = COALESCE(NULLIF(?, ''), display_name),
+          folder_path = COALESCE(NULLIF(?, ''), folder_path),
+          gender = COALESCE(NULLIF(?, ''), gender),
+          source = CASE WHEN source IS NULL OR source = '' THEN 'manual_move' ELSE source END,
+          updated_at = ?
+        WHERE id = ?
+        `
+      )
+      .run(displayName || name, folderPath, normalizePersonGender(payload.gender || existing.gender || "unknown"), now, personId);
+  } else {
+    const result = db
+      .prepare(
+        `
+        INSERT INTO people (name, name_search, display_name, folder_path, movie_count, status, error, source, created_at, updated_at, gender)
+        VALUES (?, ?, ?, ?, 0, 'ok', NULL, 'manual_move', ?, ?, ?)
+        `
+      )
+      .run(name, nameSearch, displayName || name, folderPath, now, now, normalizePersonGender(payload.gender || "unknown"));
+    personId = Number(result.lastInsertRowid);
+  }
+
+  if (actorKey) {
+    db.prepare(
+      `
+      INSERT INTO person_external_refs(person_id, provider, external_key, url, source, created_at, updated_at)
+      VALUES (?, 'javdb-actor', ?, ?, 'manual_move', ?, ?)
+      ON CONFLICT(provider, external_key) DO UPDATE SET
+        person_id = excluded.person_id,
+        url = excluded.url,
+        source = excluded.source,
+        updated_at = excluded.updated_at
+      `
+    ).run(personId, actorKey, javdbUrl, now, now);
+  }
+
+  const aliases = uniquePersonNames(Array.isArray(payload.aliases) ? payload.aliases : []);
+  if (aliases.length) {
+    const insertAlias = db.prepare("INSERT OR IGNORE INTO person_aliases(person_id, alias, alias_search, source) VALUES (?, ?, ?, 'manual_move')");
+    const primaryKey = normalizePersonSearchValue(displayName || name);
+    for (const alias of aliases) {
+      const key = normalizePersonSearchValue(alias);
+      if (key && key !== primaryKey) insertAlias.run(personId, alias, key);
+    }
+  }
+
+  invalidateTableStamp("actor_profiles", "actor_movies");
+  actorProfileCache = null;
+  personMergeCache = null;
+  return {
+    id: String(personId),
+    name: displayName || name,
+    targetDirectory: folderPath,
+    created: !existing?.id
+  };
+}
+
 function upsertActorProfile(person, payload) {
   const now = new Date().toISOString();
   const inputActorUrl = typeof payload.javdbUrl === "string" ? payload.javdbUrl.trim() : "";
@@ -2580,6 +3907,7 @@ function upsertActorProfile(person, payload) {
   const existing = actorProfileRow(person.id);
   const existingAliases = actorProfileAliases(existing);
   const displayName = cleanPersonNamePart(payload.displayName) || existing?.display_name || person.name;
+  const gender = normalizePersonGender(payload.gender || existing?.gender || person.gender || "unknown");
   const hasAliasesInput = Array.isArray(payload.aliases) || typeof payload.aliases === "string";
   const inputAliases = Array.isArray(payload.aliases)
     ? payload.aliases
@@ -2590,55 +3918,91 @@ function upsertActorProfile(person, payload) {
   const aliases = uniquePersonNames(inputAliases).filter((alias) => normalizePersonSearchValue(alias) !== displayNameKey);
   const avatarMime = payload.avatarMime || (avatarBlob ? "image/jpeg" : existing?.avatar_mime || null);
 
-  getActorDb()
+  const corePersonId = Number(person.id);
+  const db = getCoreDb();
+  db
     .prepare(
       `
-      INSERT INTO actor_profiles (
-        person_id, person_name, javdb_actor_id, javdb_url, display_name, aliases_json,
-        movie_count, avatar_url, avatar_mime, avatar_blob, source, status, error, fetched_at, updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(person_id) DO UPDATE SET
-        person_name = excluded.person_name,
-        javdb_actor_id = excluded.javdb_actor_id,
-        javdb_url = excluded.javdb_url,
-        display_name = excluded.display_name,
-        aliases_json = excluded.aliases_json,
-        movie_count = excluded.movie_count,
-        avatar_url = excluded.avatar_url,
-        avatar_mime = excluded.avatar_mime,
-        avatar_blob = COALESCE(excluded.avatar_blob, actor_profiles.avatar_blob),
-        source = excluded.source,
-        status = excluded.status,
-        error = excluded.error,
-        fetched_at = excluded.fetched_at,
-        updated_at = excluded.updated_at
+      UPDATE people
+      SET
+        name = COALESCE(NULLIF(?, ''), name),
+        name_search = COALESCE(NULLIF(?, ''), name_search),
+        display_name = COALESCE(NULLIF(?, ''), display_name),
+        gender = ?,
+        movie_count = ?,
+        source = COALESCE(NULLIF(?, ''), source),
+        status = ?,
+        error = ?,
+        updated_at = ?
+      WHERE id = ?
       `
     )
-    .run(
-      person.id,
-      person.name,
-      payload.javdbActorId || actorIdFromJavdbUrl(javdbUrl) || existing?.javdb_actor_id || null,
-      javdbUrl || existing?.javdb_url || null,
-      displayName,
-      JSON.stringify(hasAliasesInput ? aliases : existingAliases),
-      movieCount,
-      payload.sourceAvatarUrl || payload.avatarUrl || existing?.avatar_url || null,
-      avatarMime,
+    .run(person.name, normalizePersonSearchValue(person.name), displayName, gender, movieCount, payload.source || existing?.source || "manual", payload.status || "ok", payload.error || null, now, corePersonId);
+
+  const actorKey = payload.javdbActorId || actorIdFromJavdbUrl(javdbUrl) || existing?.javdb_actor_id || "";
+  const finalJavdbUrl = javdbUrl || existing?.javdb_url || (actorKey ? `https://javdb.com/actors/${actorKey}` : "");
+  if (actorKey) {
+    db.prepare(
+      `
+      INSERT INTO person_external_refs(person_id, provider, external_key, url, source, created_at, updated_at)
+      VALUES (?, 'javdb-actor', ?, ?, ?, ?, ?)
+      ON CONFLICT(provider, external_key) DO UPDATE SET
+        person_id = excluded.person_id,
+        url = COALESCE(NULLIF(excluded.url, ''), person_external_refs.url),
+        updated_at = excluded.updated_at
+      `
+    ).run(corePersonId, actorKey, finalJavdbUrl, payload.source || "manual", now, now);
+  }
+
+  if (hasAliasesInput) {
+    db.prepare("DELETE FROM person_aliases WHERE person_id = ?").run(corePersonId);
+    const insertAlias = db.prepare("INSERT OR IGNORE INTO person_aliases(person_id, alias, alias_search, source) VALUES (?, ?, ?, ?)");
+    for (const alias of aliases) insertAlias.run(corePersonId, alias, normalizePersonSearchValue(alias), payload.source || "manual");
+  }
+
+  const avatarUrl = payload.sourceAvatarUrl || payload.avatarUrl || existing?.avatar_url || "";
+  if (avatarBlob || avatarUrl) {
+    db.prepare(
+      `
+      INSERT INTO images (
+        owner_type, owner_id, kind, source_type, remote_url, mime, image_blob, byte_size,
+        sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
+      )
+      VALUES ('person', ?, 'avatar', ?, ?, ?, ?, ?, 0, 'ok', ?, 'manual', ?, ?, ?)
+      ON CONFLICT DO UPDATE SET
+        remote_url = excluded.remote_url,
+        mime = COALESCE(excluded.mime, images.mime),
+        image_blob = COALESCE(excluded.image_blob, images.image_blob),
+        byte_size = COALESCE(excluded.byte_size, images.byte_size),
+        status = excluded.status,
+        source = excluded.source,
+        legacy_table = excluded.legacy_table,
+        legacy_key = excluded.legacy_key,
+        updated_at = excluded.updated_at
+      `
+    ).run(
+      corePersonId,
+      avatarUrl.startsWith("http://") || avatarUrl.startsWith("https://") ? "remote" : avatarUrl ? "local" : "unknown",
+      avatarUrl,
+      avatarMime || "image/jpeg",
       avatarBlob,
-      payload.source || existing?.source || "manual",
-      payload.status || "ok",
-      payload.error || null,
-      payload.fetchedAt || now,
+      avatarBlob?.length || null,
+      payload.source || "manual",
+      person.id,
+      now,
       now
     );
+  }
 
   if (javdbUrl && existing?.javdb_url && canonicalJavdbActorUrl(existing.javdb_url) !== javdbUrl) {
-    getActorDb().prepare("DELETE FROM actor_movies WHERE person_id = ?").run(person.id);
+    actorMovieCache = null;
+    actorMovieByCodeKeyCache = null;
   }
   invalidateTableStamp("actor_profiles", "actor_movies");
   actorProfileCache = null;
   actorMovieCache = null;
+  actorMovieByCodeKeyCache = null;
+  personMergeCache = null;
 
   return publicActorProfile(actorProfileRow(person.id));
 }
@@ -2680,30 +4044,1296 @@ function hydrateLibrary(data) {
 }
 
 function loadLibraryCache() {
-  try {
-    if (!fs.existsSync(INDEX_CACHE_PATH)) {
-      return null;
-    }
-
-    const data = JSON.parse(fs.readFileSync(INDEX_CACHE_PATH, "utf8"));
-    if (!Array.isArray(data.roots) || data.roots.join(";") !== LIBRARY_ROOTS.join(";")) {
-      return null;
-    }
-
-    return hydrateLibrary(data);
-  } catch (error) {
-    console.warn("[cache]", error.message);
-    return null;
-  }
+  return null;
 }
 
 function saveLibraryCache(index) {
-  try {
-    ensureDataDir();
-    fs.writeFileSync(INDEX_CACHE_PATH, JSON.stringify(serializeLibrary(index)), "utf8");
-  } catch (error) {
-    console.warn("[cache]", error.message);
+  return index;
+}
+
+function coreLocalPathPersonName(localPath) {
+  const fullPath = sourcePathToAbsolute(localPath);
+  if (!fullPath) return "";
+  const matchingRoot = [...LIBRARY_ROOTS]
+    .sort((a, b) => b.length - a.length)
+    .find((rootPath) => pathWithinRoot(fullPath, rootPath));
+  if (!matchingRoot) {
+    return path.basename(path.dirname(fullPath)) || path.basename(fullPath);
   }
+  const relative = path.relative(matchingRoot, fullPath);
+  return relative.split(/[\\/]+/).filter(Boolean)[0] || path.basename(fullPath);
+}
+
+function coreLocalPersonSourcePath(localPath) {
+  const fullPath = sourcePathToAbsolute(localPath);
+  const personName = coreLocalPathPersonName(fullPath);
+  if (!fullPath || !personName) return relativeFromRoot(fullPath);
+  const matchingRoot = [...LIBRARY_ROOTS]
+    .sort((a, b) => b.length - a.length)
+    .find((rootPath) => pathWithinRoot(fullPath, rootPath));
+  return matchingRoot ? relativeFromRoot(path.join(matchingRoot, personName)) : relativeFromRoot(path.dirname(fullPath));
+}
+
+function corePeopleByFolderName(db) {
+  const people = new Map();
+  const rows = db.prepare("SELECT id, name, display_name FROM people").all();
+  for (const row of rows) {
+    const names = uniquePersonNames([row.name, row.display_name]);
+    for (const name of names) {
+      const key = normalizePersonSearchValue(name);
+      if (!key) continue;
+      if (!people.has(key)) people.set(key, []);
+      const entries = people.get(key);
+      if (!entries.some((entry) => Number(entry.id) === Number(row.id))) {
+        entries.push({
+          id: row.id,
+          name: row.name || "",
+          displayName: row.display_name || row.name || ""
+        });
+      }
+    }
+  }
+  return people;
+}
+
+function corePersonFromLocalPath(peopleByFolderName, localPath) {
+  const folderName = coreLocalPathPersonName(localPath);
+  const matches = peopleByFolderName.get(normalizePersonSearchValue(folderName)) || [];
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function backfillCoreLocalWorkPeopleFromFolders(db) {
+  const peopleByFolderName = corePeopleByFolderName(db);
+  const rows = db
+    .prepare(
+      `
+      SELECT lw.work_id, lw.local_path
+      FROM local_works lw
+      WHERE lw.local_path IS NOT NULL
+        AND lw.local_path <> ''
+        AND NOT EXISTS (
+          SELECT 1
+          FROM work_people wp
+          WHERE wp.work_id = lw.work_id
+            AND wp.role = 'actor'
+        )
+      `
+    )
+    .all();
+  if (!rows.length) return peopleByFolderName;
+
+  const now = new Date().toISOString();
+  const insert = db.prepare(
+    `
+    INSERT INTO work_people (work_id, person_id, role, sort_order, source, created_at, updated_at)
+    VALUES (?, ?, 'actor', 0, 'local_folder', ?, ?)
+    ON CONFLICT(work_id, person_id, role) DO NOTHING
+    `
+  );
+
+  db.exec("BEGIN");
+  try {
+    for (const row of rows) {
+      const person = corePersonFromLocalPath(peopleByFolderName, row.local_path);
+      if (!person?.id) continue;
+      insert.run(Number(row.work_id), Number(person.id), now, now);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return peopleByFolderName;
+}
+
+function coreFileToMediaFile(row) {
+  const filePath = String(row.file_path || "");
+  const name = String(row.name || path.basename(filePath));
+  const type = String(row.file_type || "");
+  return {
+    id: String(row.file_id || createId(type[0] || "f", filePath)),
+    type,
+    name,
+    title: String(row.title || fileBase(name)),
+    ext: String(row.ext || normalizeExt(name)),
+    path: filePath,
+    relativePath: String(row.relative_path || relativeFromRoot(filePath)),
+    size: Number(row.size || 0),
+    modifiedAt: row.modified_at || null,
+    playable: type === "video" ? Boolean(row.playable) : undefined
+  };
+}
+
+function coreWorkIdForScannedWork(personId, work) {
+  if (!hasCoreDb() || !personId || !work) return null;
+  const corePersonId = Number(personId);
+  if (!Number.isFinite(corePersonId)) return null;
+  const codeKeys = workCodeKeys(work);
+  if (!codeKeys.length) return null;
+
+  const db = getCoreDb();
+  const lookup = db.prepare(
+    `
+    SELECT w.id
+    FROM works w
+    JOIN work_people wp ON wp.work_id = w.id
+    WHERE w.code_search = ?
+      AND wp.person_id = ?
+      AND wp.role = 'actor'
+    ORDER BY wp.sort_order ASC, w.id ASC
+    LIMIT 1
+    `
+  );
+  for (const codeKey of codeKeys) {
+    const row = lookup.get(codeKey, corePersonId);
+    if (row?.id) return String(row.id);
+  }
+  return null;
+}
+
+function coreLinkedScannedWork(personId, work) {
+  const coreWorkId = coreWorkIdForScannedWork(personId, work);
+  return coreWorkId ? { ...work, id: coreWorkId } : work;
+}
+
+function coreWorkInfoFallback(row) {
+  return {
+    code: row.code || "",
+    title: row.work_title || "",
+    releaseDate: row.release_date || "",
+    durationMinutes: row.duration_minutes ?? null,
+    rating: row.rating ?? null,
+    ratingCount: row.rating_count ?? null,
+    hasMagnet: dbBoolOrNull(row.has_magnet),
+    isStreamable: dbBoolOrNull(row.is_streamable),
+    hasSubtitles: dbBoolOrNull(row.has_subtitles),
+    javdbTags: parseJsonTextArray(row.javdb_tags_json),
+    director: row.director || "",
+    imageUrl: "",
+    actors: [],
+    tags: [],
+    fields: []
+  };
+}
+
+function loadLibraryFromCoreDb() {
+  if (!hasCoreDb()) return null;
+
+  const db = getCoreDb();
+  const peopleByFolderName = backfillCoreLocalWorkPeopleFromFolders(db);
+  const index = emptyLibrary();
+  for (const rootPath of LIBRARY_ROOTS) {
+    if (fs.existsSync(rootPath)) {
+      index.availableRoots.push(rootPath);
+    } else {
+      index.missingRoots.push(rootPath);
+    }
+  }
+
+  const filesByLocalWorkId = new Map();
+  for (const row of db
+    .prepare(
+      `
+      SELECT local_work_id, file_id, file_type, file_path, name, title, ext,
+             relative_path, size, modified_at, playable, sort_order
+      FROM local_files
+      ORDER BY local_work_id, file_type, sort_order, name
+      `
+    )
+    .all()) {
+    const localWorkId = String(row.local_work_id || "");
+    if (!localWorkId) continue;
+    if (!filesByLocalWorkId.has(localWorkId)) filesByLocalWorkId.set(localWorkId, []);
+    filesByLocalWorkId.get(localWorkId).push(coreFileToMediaFile(row));
+  }
+
+  const personBuckets = new Map();
+  const localRows = db
+    .prepare(
+      `
+      SELECT
+        lw.id AS local_work_id,
+        lw.work_id AS core_work_id,
+        lw.local_path,
+        lw.source_mtime,
+        owner.id AS core_person_id,
+        owner.name AS core_person_name,
+        owner.display_name AS core_person_display_name,
+        w.code,
+        w.title AS work_title,
+          w.release_date,
+          w.duration_minutes,
+          w.rating,
+          w.rating_count,
+          w.has_magnet,
+          w.is_streamable,
+          w.has_subtitles,
+          w.javdb_tags_json,
+          w.director,
+        w.updated_at AS work_updated_at
+      FROM local_works lw
+      JOIN works w ON w.id = lw.work_id
+      LEFT JOIN people owner
+        ON owner.id = (
+          SELECT wp.person_id
+          FROM work_people wp
+          JOIN people owner_candidate ON owner_candidate.id = wp.person_id
+          WHERE wp.work_id = w.id
+            AND wp.role = 'actor'
+          ORDER BY
+            CASE WHEN owner_candidate.source IN ('manual', 'manual_move') THEN 0 ELSE 1 END,
+            CASE WHEN EXISTS (
+              SELECT 1
+              FROM person_external_refs pref
+              WHERE pref.person_id = owner_candidate.id
+                AND pref.provider = 'javdb-actor'
+            ) THEN 0 ELSE 1 END,
+            CASE WHEN EXISTS (
+              SELECT 1
+              FROM images avatar
+              WHERE avatar.owner_type = 'person'
+                AND avatar.owner_id = owner_candidate.id
+                AND avatar.kind = 'avatar'
+            ) THEN 0 ELSE 1 END,
+            wp.sort_order ASC,
+            wp.person_id ASC
+          LIMIT 1
+        )
+      WHERE lw.local_path IS NOT NULL
+        AND lw.local_path <> ''
+      ORDER BY lw.local_path
+      `
+    )
+    .all();
+
+  for (const row of localRows) {
+    const fallbackPerson = row.core_person_id ? null : corePersonFromLocalPath(peopleByFolderName, row.local_path);
+    const corePersonId = row.core_person_id ? String(row.core_person_id) : fallbackPerson?.id ? String(fallbackPerson.id) : "";
+    if (!corePersonId) continue;
+    const personName = row.core_person_display_name || row.core_person_name || fallbackPerson?.displayName || fallbackPerson?.name || "";
+    if (!personName) continue;
+    const personId = corePersonId;
+    const sourcePath = coreLocalPersonSourcePath(row.local_path);
+    if (!personBuckets.has(personId)) {
+      personBuckets.set(personId, {
+        id: personId,
+        name: personName,
+        sourcePaths: [],
+        works: []
+      });
+    }
+    const bucket = personBuckets.get(personId);
+    if (sourcePath && !bucket.sourcePaths.includes(sourcePath)) bucket.sourcePaths.push(sourcePath);
+
+    const files = filesByLocalWorkId.get(String(row.local_work_id)) || [];
+    const videos = files.filter((file) => file.type === "video").sort(compareNaturalName);
+    const images = files.filter((file) => file.type === "image").sort(compareNaturalName);
+    const infos = files.filter((file) => file.type === "info").sort(compareNaturalName);
+    videos.forEach((video, index) => {
+      video.id = `${row.core_work_id}-${index + 1}`;
+    });
+    const title = row.work_title || path.basename(sourcePathToAbsolute(row.local_path)) || row.code || "";
+    const cover = chooseCover(images, fileBase(title), sourcePathToAbsolute(row.local_path));
+    const modifiedAt = [...videos, ...images, ...infos]
+      .map((file) => file.modifiedAt)
+      .filter(Boolean)
+      .sort()
+      .at(-1) || row.source_mtime || row.work_updated_at || null;
+    const work = {
+      id: String(row.core_work_id),
+      personId,
+      title,
+      directoryName: path.basename(sourcePathToAbsolute(row.local_path)),
+      relativePath: relativeFromRoot(sourcePathToAbsolute(row.local_path)),
+      coverId: cover?.id || null,
+      videoCount: videos.length,
+      playableCount: videos.filter((video) => video.playable).length,
+      imageCount: images.length,
+      infoCount: infos.length,
+      modifiedAt,
+      videos,
+      images,
+      infos,
+      infoSummary: coreWorkInfoFallback(row)
+    };
+    bucket.works.push(work);
+    index.worksById.set(work.id, work);
+    registerFiles(index, [...videos, ...images, ...infos]);
+  }
+
+  for (const bucket of personBuckets.values()) {
+    const person = personRecordFromWorks(bucket, bucket.sourcePaths, bucket.works);
+    index.people.push(person);
+    index.peopleById.set(person.id, person);
+  }
+
+  index.people.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+  index.scannedAt = new Date().toISOString();
+  index.totals.people = index.people.length;
+  index.totals.works = index.worksById.size;
+  const files = [...index.filesById.values()];
+  index.totals.videos = files.filter((file) => file.type === "video").length;
+  index.totals.playableVideos = files.filter((file) => file.type === "video" && file.playable).length;
+  index.totals.images = files.filter((file) => file.type === "image").length;
+  index.totals.infoFiles = files.filter((file) => file.type === "info").length;
+  return index;
+}
+
+function replaceCoreLocalFilesForWork(work) {
+  if (!hasCoreDb() || !work?.id) return;
+  const db = getCoreDb();
+  const coreWorkId = Number(work.id);
+  if (!Number.isFinite(coreWorkId)) return;
+  const localPath = sourcePathToAbsolute(work.relativePath) || work.relativePath || "";
+  if (!localPath) return;
+
+  const now = new Date().toISOString();
+  const insert = db.prepare(
+    `
+    INSERT INTO local_files (
+      work_id, local_work_id, file_id, file_type, file_path, name, title, ext,
+      relative_path, size, modified_at, playable, sort_order, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(file_id) DO UPDATE SET
+      work_id = excluded.work_id,
+      local_work_id = excluded.local_work_id,
+      file_type = excluded.file_type,
+      file_path = excluded.file_path,
+      name = excluded.name,
+      title = excluded.title,
+      ext = excluded.ext,
+      relative_path = excluded.relative_path,
+      size = excluded.size,
+      modified_at = excluded.modified_at,
+      playable = excluded.playable,
+      sort_order = excluded.sort_order,
+      updated_at = excluded.updated_at
+    `
+  );
+  const files = [
+    ...(work.videos || []).map((file, index) => ({ file, type: "video", index })),
+    ...(work.images || []).map((file, index) => ({ file, type: "image", index })),
+    ...(work.infos || []).map((file, index) => ({ file, type: "info", index }))
+  ];
+  const sourceInfo = work.infos?.[0] || null;
+  const sourceVideo = work.videos?.[0] || null;
+  const detectedCode = normalizeWorkCode(work.infoSummary?.code || work.title || work.directoryName || work.relativePath);
+  const detectedCodeSearch = workCodeKeys(work)[0] || storedWorkCodeKey(detectedCode);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    let localWork = db
+      .prepare(
+        `
+        SELECT id
+        FROM local_works
+        WHERE work_id = ?
+        ORDER BY CASE WHEN local_path = ? THEN 0 ELSE 1 END, id ASC
+        LIMIT 1
+        `
+      )
+      .get(coreWorkId, localPath);
+    if (!localWork?.id) {
+      const result = db
+        .prepare(
+          `
+          INSERT INTO local_works (
+            work_id, local_path, source_info_path, source_info_id, source_name,
+            source_size, source_mtime, detected_code, detected_code_search,
+            matched_by, confidence, created_at, updated_at
+          )
+          VALUES (?, ?, ?, ?, 'local_scan', ?, ?, ?, ?, 'person_scan_code', 1, ?, ?)
+          `
+        )
+        .run(
+          coreWorkId,
+          localPath,
+          sourceInfo?.path || "",
+          sourceInfo?.id || "",
+          Number(sourceVideo?.size || 0),
+          sourceVideo?.modifiedAt || work.modifiedAt || null,
+          detectedCode || "",
+          detectedCodeSearch || "",
+          now,
+          now
+        );
+      localWork = { id: Number(result.lastInsertRowid) };
+    } else {
+      db
+        .prepare(
+          `
+          UPDATE local_works
+          SET local_path = ?,
+              source_info_path = ?,
+              source_info_id = ?,
+              source_name = 'local_scan',
+              source_size = ?,
+              source_mtime = ?,
+              detected_code = ?,
+              detected_code_search = ?,
+              matched_by = 'person_scan_code',
+              confidence = 1,
+              updated_at = ?
+          WHERE id = ?
+          `
+        )
+        .run(
+          localPath,
+          sourceInfo?.path || "",
+          sourceInfo?.id || "",
+          Number(sourceVideo?.size || 0),
+          sourceVideo?.modifiedAt || work.modifiedAt || null,
+          detectedCode || "",
+          detectedCodeSearch || "",
+          now,
+          Number(localWork.id)
+        );
+    }
+    db.prepare("DELETE FROM local_files WHERE local_work_id = ?").run(localWork.id);
+    for (const item of files) {
+      insert.run(
+        coreWorkId,
+        localWork.id,
+        item.file.id,
+        item.type,
+        item.file.path,
+        item.file.name,
+        item.file.title || fileBase(item.file.name),
+        item.file.ext || normalizeExt(item.file.name),
+        item.file.relativePath || relativeFromRoot(item.file.path),
+        Number(item.file.size || 0),
+        item.file.modifiedAt || null,
+        item.type === "video" && item.file.playable ? 1 : 0,
+        item.index,
+        now,
+        now
+      );
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // Ignore rollback failures; the original write error is more useful.
+    }
+    throw error;
+  }
+}
+
+function replacePathPrefix(value, fromDir, toDir) {
+  const text = String(value || "");
+  if (!text) return text;
+  const from = path.resolve(fromDir);
+  const target = path.resolve(text);
+  const relative = path.relative(from, target);
+  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+    return relative ? path.join(toDir, relative) : toDir;
+  }
+  return text;
+}
+
+function updateMemoryWorkPath(work, oldDir, newDir) {
+  work.directoryName = path.basename(newDir);
+  work.relativePath = relativeFromRoot(newDir);
+  for (const file of [...(work.videos || []), ...(work.images || []), ...(work.infos || [])]) {
+    file.path = replacePathPrefix(file.path, oldDir, newDir);
+    file.relativePath = relativeFromRoot(file.path);
+  }
+}
+
+function ensureLibraryDirectoryPath(dirPath, label = "文件夹") {
+  const fullPath = sourcePathToAbsolute(dirPath);
+  if (!fullPath) {
+    const error = new Error(`${label}路径无效`);
+    error.statusCode = 400;
+    throw error;
+  }
+  const allowed = libraryOpenRoots().some((rootPath) => pathWithinRoot(fullPath, rootPath));
+  if (!allowed) {
+    const error = new Error(`${label}不在资料库根目录内`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return fullPath;
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function isRetryableMoveError(error) {
+  return ["EPERM", "EBUSY", "ENOTEMPTY", "EACCES"].includes(String(error?.code || "").toUpperCase());
+}
+
+function renameDirectoryWithRetry(oldDir, newDir, options = {}) {
+  const attempts = Math.max(1, Number(options.attempts || 1));
+  const delayMs = Math.max(0, Number(options.delayMs || 0));
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      fs.renameSync(oldDir, newDir);
+      return { mode: attempt > 1 ? "rename-retry" : "rename", attempts: attempt };
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableMoveError(error) || attempt >= attempts) throw error;
+      sleepSync(delayMs);
+    }
+  }
+  throw lastError;
+}
+
+function moveDirectorySync(oldDir, newDir) {
+  try {
+    return renameDirectoryWithRetry(oldDir, newDir, { attempts: process.platform === "win32" ? 8 : 2, delayMs: 450 });
+  } catch (error) {
+    if (String(error?.code || "").toUpperCase() !== "EXDEV") throw error;
+  }
+
+  if (process.platform === "win32") {
+    const result = spawnSync("robocopy", [oldDir, newDir, "/E", "/MOVE", "/R:1", "/W:1", "/NFL", "/NDL", "/NP"], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 0,
+      maxBuffer: 8 * 1024 * 1024
+    });
+    const status = Number(result.status);
+    if (!result.error && Number.isFinite(status) && status < 8) {
+      return { mode: "robocopy" };
+    }
+    try {
+      if (fs.existsSync(newDir) && !fs.existsSync(oldDir)) {
+        spawnSync("robocopy", [newDir, oldDir, "/E", "/MOVE", "/R:1", "/W:1", "/NFL", "/NDL", "/NP"], {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: 0,
+          maxBuffer: 8 * 1024 * 1024
+        });
+      }
+    } catch {
+      // Preserve the original move error.
+    }
+    const detail = result.error?.message || result.stderr || result.stdout || `robocopy exit ${result.status}`;
+    throw new Error(detail.trim());
+  }
+
+  try {
+    fs.cpSync(oldDir, newDir, {
+      recursive: true,
+      errorOnExist: true,
+      force: false,
+      preserveTimestamps: true
+    });
+    fs.rmSync(oldDir, { recursive: true, force: false });
+    return { mode: "copy" };
+  } catch (error) {
+    try {
+      if (fs.existsSync(newDir)) fs.rmSync(newDir, { recursive: true, force: true });
+    } catch {
+      // Preserve the original move error.
+    }
+    throw error;
+  }
+}
+
+function targetDirectoryForPerson(person, db, options = {}) {
+  const explicitPath = String(options.targetDirectory || options.targetPath || "").trim();
+  if (explicitPath) {
+    const fullPath = ensureLibraryDirectoryPath(explicitPath, "目标人物文件夹");
+    if (!safeStat(fullPath)?.isDirectory()) {
+      const error = new Error("目标人物文件夹不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    return fullPath;
+  }
+
+  const sourcePaths = uniqueTextArray([person?.relativePath, ...(person?.sourcePaths || [])]);
+  for (const sourcePath of sourcePaths) {
+    const fullPath = ensureLibraryDirectoryPath(sourcePath, "目标人物文件夹");
+    if (safeStat(fullPath)?.isDirectory()) return fullPath;
+  }
+
+  const rows = db
+    .prepare(
+      `
+      SELECT lw.local_path
+      FROM local_works lw
+      JOIN work_people wp ON wp.work_id = lw.work_id
+      WHERE wp.person_id = ?
+        AND wp.role = 'actor'
+        AND lw.local_path IS NOT NULL
+        AND lw.local_path <> ''
+      ORDER BY lw.local_path
+      `
+    )
+    .all(Number(person.id));
+  for (const row of rows) {
+    const fullPath = ensureLibraryDirectoryPath(coreLocalPersonSourcePath(row.local_path), "目标人物文件夹");
+    if (safeStat(fullPath)?.isDirectory()) return fullPath;
+  }
+
+  const personName = String(person?.name || "").trim();
+  for (const rootPath of libraryOpenRoots()) {
+    const candidate = path.join(rootPath, personName);
+    if (personName && safeStat(candidate)?.isDirectory()) return ensureLibraryDirectoryPath(candidate, "目标人物文件夹");
+  }
+
+  const error = new Error("没有找到目标人物文件夹");
+  error.statusCode = 404;
+  throw error;
+}
+
+function setWorkLocalMarker(workId, marker, enabled) {
+  const key = localWorkMarkerKey(marker);
+  if (!key) {
+    const error = new Error("暂时只支持 A 标记");
+    error.statusCode = 400;
+    throw error;
+  }
+  const work = resolveLibraryWorkByPublicId(workId);
+  if (!work || work.missingLocal) {
+    const error = new Error("作品不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (!hasCoreDb()) {
+    const error = new Error("core DB 不可用");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const db = getCoreDb();
+  const row = db
+    .prepare(
+      `
+      SELECT id, local_path, source_info_path
+      FROM local_works
+      WHERE work_id = ?
+        AND local_path IS NOT NULL
+        AND local_path <> ''
+      ORDER BY id
+      LIMIT 1
+      `
+    )
+    .get(Number(work.id));
+  if (!row?.local_path) {
+    const error = new Error("这个作品没有本地文件夹");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const oldDir = sourcePathToAbsolute(row.local_path);
+  const stat = safeStat(oldDir);
+  if (!stat?.isDirectory()) {
+    const error = new Error("本地作品文件夹不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  const allowed = libraryOpenRoots().some((rootPath) => pathWithinRoot(oldDir, rootPath));
+  if (!allowed) {
+    const error = new Error("作品文件夹不在资料库根目录内");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const oldBase = path.basename(oldDir);
+  const newBase = markerDirectoryName(oldBase, key, Boolean(enabled));
+  if (!newBase || newBase === oldBase) {
+    return { changed: false, marker: key, enabled: workHasLocalMarker(work, key), work: publicWork(work, true) };
+  }
+
+  const newDir = path.join(path.dirname(oldDir), newBase);
+  const targetAllowed = libraryOpenRoots().some((rootPath) => pathWithinRoot(newDir, rootPath));
+  if (!targetAllowed) {
+    const error = new Error("目标文件夹不在资料库根目录内");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (fs.existsSync(newDir)) {
+    const error = new Error(`目标文件夹已存在：${relativeFromRoot(newDir)}`);
+    error.statusCode = 409;
+    throw error;
+  }
+
+  try {
+    fs.renameSync(oldDir, newDir);
+  } catch (error) {
+    const wrapped = new Error(`重命名文件夹失败：${error.message}`);
+    wrapped.statusCode = 500;
+    throw wrapped;
+  }
+
+  const now = new Date().toISOString();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const localWorkId = Number(row.id);
+    const fileRows = db.prepare("SELECT id, file_path FROM local_files WHERE local_work_id = ?").all(localWorkId);
+    const imageRows = db
+      .prepare("SELECT id, local_path FROM images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
+      .all(Number(work.id));
+    db
+      .prepare(
+        `
+        UPDATE local_works
+        SET local_path = ?,
+            source_info_path = CASE
+              WHEN source_info_path IS NOT NULL AND source_info_path <> '' THEN ?
+              ELSE source_info_path
+            END,
+            updated_at = ?
+        WHERE id = ?
+        `
+      )
+      .run(newDir, replacePathPrefix(row.source_info_path || "", oldDir, newDir), now, localWorkId);
+    const updateFile = db.prepare("UPDATE local_files SET file_path = ?, relative_path = ?, updated_at = ? WHERE id = ?");
+    for (const fileRow of fileRows) {
+      const nextPath = replacePathPrefix(fileRow.file_path, oldDir, newDir);
+      updateFile.run(nextPath, relativeFromRoot(nextPath), now, fileRow.id);
+    }
+    const updateImage = db.prepare("UPDATE images SET local_path = ?, updated_at = ? WHERE id = ?");
+    for (const imageRow of imageRows) {
+      updateImage.run(replacePathPrefix(imageRow.local_path, oldDir, newDir), now, imageRow.id);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    try {
+      if (fs.existsSync(newDir) && !fs.existsSync(oldDir)) fs.renameSync(newDir, oldDir);
+    } catch {}
+    throw error;
+  }
+
+  updateMemoryWorkPath(work, oldDir, newDir);
+  invalidateLibraryDerivedCaches();
+  return { changed: true, marker: key, enabled: workHasLocalMarker(work, key), work: publicWork(work, true) };
+}
+
+function correctedActorFieldsJson(fieldsJson, actorName) {
+  const fields = parseJsonArray(fieldsJson);
+  const cleanName = String(actorName || "").trim();
+  if (!cleanName) return JSON.stringify(fields);
+
+  let replaced = false;
+  const nextFields = fields.map((field) => {
+    const label = String(field?.label || field?.name || "").trim();
+    if (!/^(演员|演員|女优|女優|actor|actors|actor_names)$/i.test(label)) return field;
+    replaced = true;
+    return { ...field, label: field.label || "演员", value: cleanName };
+  });
+  if (!replaced) nextFields.push({ label: "演员", value: cleanName });
+  return JSON.stringify(nextFields);
+}
+
+function findOrCreateCorePersonByName(db, name, folderPath = "") {
+  const cleanName = String(name || "").trim();
+  const nameSearch = normalizePersonSearchValue(cleanName);
+  if (!cleanName || !nameSearch) {
+    const error = new Error("演员名无效");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const existing = db
+    .prepare(
+      `
+      SELECT *
+      FROM people
+      WHERE name_search = ?
+         OR lower(trim(name)) = lower(trim(?))
+         OR lower(trim(COALESCE(display_name, ''))) = lower(trim(?))
+      ORDER BY
+        CASE WHEN name = ? OR display_name = ? THEN 0 ELSE 1 END,
+        id ASC
+      LIMIT 1
+      `
+    )
+    .get(nameSearch, cleanName, cleanName, cleanName, cleanName);
+  if (existing?.id) return existing;
+
+  const now = new Date().toISOString();
+  const result = db
+    .prepare(
+      `
+      INSERT INTO people (name, name_search, display_name, folder_path, movie_count, status, error, source, created_at, updated_at, gender)
+      VALUES (?, ?, ?, ?, 0, 'ok', NULL, 'local_folder_correction', ?, ?, 'unknown')
+      `
+    )
+    .run(cleanName, nameSearch, cleanName, folderPath || null, now, now);
+  invalidateTableStamp("actor_profiles");
+  actorProfileCache = null;
+  return db.prepare("SELECT * FROM people WHERE id = ?").get(Number(result.lastInsertRowid));
+}
+
+function correctWorkActorFromLocalFolder(workId) {
+  const work = resolveLibraryWorkByPublicId(workId);
+  if (!work || work.missingLocal) {
+    const error = new Error("作品本地文件不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (!hasCoreDb()) {
+    const error = new Error("core DB 不可用");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const db = getCoreDb();
+  const coreWorkId = Number(work.id);
+  if (!Number.isFinite(coreWorkId)) {
+    const error = new Error("作品编号无效");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const row = db
+    .prepare(
+      `
+      SELECT local_path
+      FROM local_works
+      WHERE work_id = ?
+        AND local_path IS NOT NULL
+        AND local_path <> ''
+      ORDER BY id
+      LIMIT 1
+      `
+    )
+    .get(coreWorkId);
+  const actorName = coreLocalPathPersonName(row?.local_path || "");
+  if (!actorName) {
+    const error = new Error("没有从本地文件夹识别出演员名");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const person = findOrCreateCorePersonByName(db, actorName, coreLocalPersonSourcePath(row.local_path));
+  const before = db
+    .prepare(
+      `
+      SELECT CAST(wp.person_id AS TEXT) AS person_id, p.name
+      FROM work_people wp
+      JOIN people p ON p.id = wp.person_id
+      WHERE wp.work_id = ?
+        AND wp.role = 'actor'
+      ORDER BY wp.sort_order, wp.person_id
+      `
+    )
+    .all(coreWorkId);
+
+  const now = new Date().toISOString();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("DELETE FROM work_people WHERE work_id = ? AND role = 'actor' AND person_id <> ?").run(coreWorkId, Number(person.id));
+    db
+      .prepare(
+        `
+        INSERT INTO work_people (work_id, person_id, role, sort_order, source, created_at, updated_at)
+        VALUES (?, ?, 'actor', 0, 'local_folder_correction', ?, ?)
+        ON CONFLICT(work_id, person_id, role) DO UPDATE SET
+          sort_order = 0,
+          source = excluded.source,
+          updated_at = excluded.updated_at
+        `
+      )
+      .run(coreWorkId, Number(person.id), now, now);
+    const workRow = db.prepare("SELECT fields_json FROM works WHERE id = ?").get(coreWorkId);
+    const fieldsJson = correctedActorFieldsJson(workRow?.fields_json, actorName);
+    db.prepare("UPDATE works SET fields_json = ?, updated_at = ? WHERE id = ?").run(fieldsJson, now, coreWorkId);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+
+  invalidateTableStamp("actor_movies", "work_info", "actor_profiles");
+  refreshLibrary();
+  const nextWork = resolveLibraryWorkByPublicId(String(coreWorkId));
+  const nextPerson = resolveLibraryPersonByPublicId(String(person.id));
+  return {
+    actorName,
+    person: nextPerson ? publicPerson(nextPerson) : { id: String(person.id), name: person.name || actorName },
+    before,
+    work: nextWork ? publicWork(nextWork, true) : null
+  };
+}
+
+function moveWorkToPerson(workId, personId, options = {}) {
+  const work = resolveLibraryWorkByPublicId(workId);
+  if (!work || work.missingLocal) {
+    const error = new Error("作品本地文件不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (!hasCoreDb()) {
+    const error = new Error("core DB 不可用");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const db = getCoreDb();
+  const coreWorkId = Number(work.id);
+  if (!Number.isFinite(coreWorkId)) {
+    const error = new Error("作品编号无效");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  let createdPerson = null;
+  if (!personId && options.createPerson) {
+    createdPerson = createOrUpdateMoveTargetPerson(db, options.createPerson);
+    personId = createdPerson.id;
+    options = {
+      ...options,
+      targetDirectory: options.targetDirectory || createdPerson.targetDirectory
+    };
+  }
+
+  const corePersonId = Number(personId);
+  if (!Number.isFinite(corePersonId)) {
+    const error = new Error("人物编号无效");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const targetPerson = resolveLibraryPersonByPublicId(String(corePersonId)) || corePersonFallbackRecord(String(corePersonId));
+  if (!targetPerson?.id) {
+    const error = new Error("目标人物不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const row = db
+    .prepare(
+      `
+      SELECT id, local_path, source_info_path
+      FROM local_works
+      WHERE work_id = ?
+        AND local_path IS NOT NULL
+        AND local_path <> ''
+      ORDER BY id
+      LIMIT 1
+      `
+    )
+    .get(coreWorkId);
+  if (!row?.local_path) {
+    const error = new Error("这个作品没有本地文件夹");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const oldDir = ensureLibraryDirectoryPath(row.local_path, "作品文件夹");
+  if (!safeStat(oldDir)?.isDirectory()) {
+    const error = new Error("本地作品文件夹不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  const personDir = targetDirectoryForPerson(targetPerson, db, options);
+  const newDir = ensureLibraryDirectoryPath(path.join(personDir, path.basename(oldDir)), "目标作品文件夹");
+  if (path.resolve(oldDir).toLowerCase() === path.resolve(newDir).toLowerCase()) {
+    const error = new Error("作品已经在目标人物文件夹中");
+    error.statusCode = 409;
+    throw error;
+  }
+  if (fs.existsSync(newDir)) {
+    const error = new Error(`目标文件夹已存在：${relativeFromRoot(newDir)}`);
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const before = db
+    .prepare(
+      `
+      SELECT CAST(wp.person_id AS TEXT) AS person_id, p.name
+      FROM work_people wp
+      JOIN people p ON p.id = wp.person_id
+      WHERE wp.work_id = ?
+        AND wp.role = 'actor'
+      ORDER BY wp.sort_order, wp.person_id
+      `
+    )
+    .all(coreWorkId);
+
+  let moveResult;
+  try {
+    moveResult = moveDirectorySync(oldDir, newDir);
+  } catch (error) {
+    const hint = isRetryableMoveError(error) ? "。请暂停播放并等待几秒，或关闭这个播放页后重试。" : "";
+    const wrapped = new Error(`移动作品文件夹失败：${error.message}${hint}`);
+    wrapped.statusCode = 500;
+    throw wrapped;
+  }
+
+  const now = new Date().toISOString();
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    const fileRows = db.prepare("SELECT id, file_path FROM local_files WHERE local_work_id = ?").all(Number(row.id));
+    const imageRows = db
+      .prepare("SELECT id, local_path FROM images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
+      .all(coreWorkId);
+
+    db
+      .prepare(
+        `
+        UPDATE local_works
+        SET local_path = ?,
+            source_info_path = CASE
+              WHEN source_info_path IS NOT NULL AND source_info_path <> '' THEN ?
+              ELSE source_info_path
+            END,
+            updated_at = ?
+        WHERE id = ?
+        `
+      )
+      .run(newDir, replacePathPrefix(row.source_info_path || "", oldDir, newDir), now, Number(row.id));
+
+    const updateFile = db.prepare("UPDATE local_files SET file_path = ?, relative_path = ?, updated_at = ? WHERE id = ?");
+    for (const fileRow of fileRows) {
+      const nextPath = replacePathPrefix(fileRow.file_path, oldDir, newDir);
+      updateFile.run(nextPath, relativeFromRoot(nextPath), now, fileRow.id);
+    }
+
+    const updateImage = db.prepare("UPDATE images SET local_path = ?, updated_at = ? WHERE id = ?");
+    for (const imageRow of imageRows) {
+      updateImage.run(replacePathPrefix(imageRow.local_path, oldDir, newDir), now, imageRow.id);
+    }
+
+    db.prepare("DELETE FROM work_people WHERE work_id = ? AND role = 'actor' AND person_id <> ?").run(coreWorkId, corePersonId);
+    db
+      .prepare(
+        `
+        INSERT INTO work_people (work_id, person_id, role, sort_order, source, created_at, updated_at)
+        VALUES (?, ?, 'actor', 0, 'manual_move', ?, ?)
+        ON CONFLICT(work_id, person_id, role) DO UPDATE SET
+          sort_order = 0,
+          source = excluded.source,
+          updated_at = excluded.updated_at
+        `
+      )
+      .run(coreWorkId, corePersonId, now, now);
+
+    const actorName = targetPerson.name || `#${corePersonId}`;
+    const workRow = db.prepare("SELECT fields_json FROM works WHERE id = ?").get(coreWorkId);
+    const fieldsJson = correctedActorFieldsJson(workRow?.fields_json, actorName);
+    db.prepare("UPDATE works SET fields_json = ?, updated_at = ? WHERE id = ?").run(fieldsJson, now, coreWorkId);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    try {
+      if (fs.existsSync(newDir) && !fs.existsSync(oldDir)) moveDirectorySync(newDir, oldDir);
+    } catch (rollbackError) {
+      error.message = `${error.message}; 回滚文件夹移动失败：${rollbackError.message}`;
+    }
+    throw error;
+  }
+
+  refreshLibrary();
+  const nextWork = resolveLibraryWorkByPublicId(String(coreWorkId));
+  const nextPerson = resolveLibraryPersonByPublicId(String(corePersonId));
+  return {
+    moved: true,
+    moveMode: moveResult?.mode || "",
+    oldPath: relativeFromRoot(oldDir),
+    newPath: relativeFromRoot(newDir),
+    createdPerson: createdPerson ? { id: createdPerson.id, name: createdPerson.name, created: createdPerson.created } : null,
+    before,
+    person: nextPerson ? publicPerson(nextPerson) : publicPerson(targetPerson),
+    work: nextWork ? publicWork(nextWork, true) : null
+  };
+}
+
+function removeEmptyLibraryParents(filePath) {
+  const roots = libraryOpenRoots().map((rootPath) => path.resolve(rootPath));
+  let current = path.dirname(path.resolve(filePath));
+  const removed = [];
+
+  while (current) {
+    const root = roots.find((rootPath) => pathWithinRoot(current, rootPath));
+    if (!root || path.resolve(current).toLowerCase() === path.resolve(root).toLowerCase()) break;
+    try {
+      if (fs.readdirSync(current).length) break;
+      fs.rmdirSync(current);
+      removed.push(relativeFromRoot(current));
+    } catch {
+      break;
+    }
+    current = path.dirname(current);
+  }
+
+  return removed;
+}
+
+function clearLocalDbRowsForWork(db, coreWorkId, localWorkIds) {
+  if (!localWorkIds.length) return;
+  const deleteFiles = db.prepare("DELETE FROM local_files WHERE local_work_id = ?");
+  const deleteLocalWork = db.prepare("DELETE FROM local_works WHERE id = ?");
+  const now = new Date().toISOString();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const localWorkId of localWorkIds) {
+      deleteFiles.run(localWorkId);
+      deleteLocalWork.run(localWorkId);
+    }
+    db.prepare("UPDATE works SET updated_at = ? WHERE id = ?").run(now, coreWorkId);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
+function deleteWorkLocalFiles(workId, options = {}) {
+  const work = resolveLibraryWorkByPublicId(workId);
+  if (!work || work.missingLocal) {
+    const error = new Error("作品本地文件不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (!hasCoreDb()) {
+    const error = new Error("core DB 不可用");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const coreWorkId = Number(work.id);
+  if (!Number.isFinite(coreWorkId)) {
+    const error = new Error("作品编号无效");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const db = getCoreDb();
+  const rows = db
+    .prepare(
+      `
+      SELECT id, local_path
+      FROM local_works
+      WHERE work_id = ?
+        AND local_path IS NOT NULL
+        AND local_path <> ''
+      ORDER BY id
+      `
+    )
+    .all(coreWorkId);
+  if (!rows.length) {
+    const error = new Error("这个作品没有本地文件夹");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const deletedPaths = [];
+  const missingPaths = [];
+  const emptyRemovedPaths = [];
+  for (const row of rows) {
+    const dirPath = ensureLibraryDirectoryPath(row.local_path, "作品文件夹");
+    const isRoot = libraryOpenRoots().some((rootPath) => path.resolve(dirPath).toLowerCase() === path.resolve(rootPath).toLowerCase());
+    if (isRoot) {
+      const error = new Error("拒绝删除资料库根目录");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const stat = safeStat(dirPath);
+    if (stat?.isDirectory()) {
+      try {
+        fs.rmSync(dirPath, { recursive: true, force: false });
+        deletedPaths.push(relativeFromRoot(dirPath));
+        emptyRemovedPaths.push(...removeEmptyLibraryParents(dirPath));
+      } catch (error) {
+        const wrapped = new Error(`删除作品文件夹失败：${error.message}`);
+        wrapped.statusCode = 500;
+        throw wrapped;
+      }
+    } else {
+      missingPaths.push(relativeFromRoot(dirPath));
+    }
+  }
+
+  clearLocalDbRowsForWork(db, coreWorkId, rows.map((row) => Number(row.id)));
+  localWorkCodeKeyCache = null;
+  localWorkByCodeKeyCache = null;
+  workSearchTextCache = null;
+  invalidateTableStamp("local_works", "local_files", "work_info");
+  if (options.refresh !== false) refreshLibrary();
+
+  const person = corePersonFallbackRecord(work.personId) || library.peopleById.get(work.personId) || { id: work.personId || "", name: work.personName || "" };
+  const missingWork = coreMissingWorksForPerson(person).find((item) => item.id === String(coreWorkId)) || {
+    ...work,
+    missingLocal: true,
+    relativePath: "",
+    videos: [],
+    images: [],
+    infos: [],
+    videoCount: 0,
+    playableCount: 0,
+    imageCount: 0,
+    infoCount: 0
+  };
+
+  return {
+    deleted: deletedPaths.length > 0 || missingPaths.length > 0,
+    deletedPaths,
+    missingPaths,
+    emptyRemovedPaths: uniqueTextArray(emptyRemovedPaths, { maxLength: 260, maxItems: 80 }),
+    work: publicWork(missingWork, true)
+  };
+}
+
+function deletePersonLocalFiles(personId) {
+  const person = resolveLibraryPersonByPublicId(personId);
+  if (!person) {
+    const error = new Error("人物不存在或没有本地作品");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const workIds = [...(person.works || [])].filter((workId) => {
+    const work = library.worksById.get(workId);
+    return work && !work.missingLocal;
+  });
+  if (!workIds.length) {
+    const error = new Error("这个人物没有可删除的本地作品");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const deleted = [];
+  const failed = [];
+  const emptyRemovedPaths = [];
+  for (const workId of workIds) {
+    const work = library.worksById.get(workId);
+    try {
+      const result = deleteWorkLocalFiles(workId, { refresh: false });
+      deleted.push({
+        workId: String(workId),
+        title: work?.title || work?.directoryName || String(workId),
+        deletedPaths: result.deletedPaths || [],
+        missingPaths: result.missingPaths || []
+      });
+      emptyRemovedPaths.push(...(result.emptyRemovedPaths || []));
+    } catch (error) {
+      failed.push({
+        workId: String(workId),
+        title: work?.title || work?.directoryName || String(workId),
+        error: error.message || "删除失败"
+      });
+    }
+  }
+
+  refreshLibrary();
+  return {
+    deletedCount: deleted.length,
+    failedCount: failed.length,
+    deleted,
+    failed,
+    emptyRemovedPaths: uniqueTextArray(emptyRemovedPaths, { maxLength: 260, maxItems: 80 })
+  };
 }
 
 function loadUserState() {
@@ -2781,7 +5411,7 @@ function scanPersonDirectory(personId, personDir) {
     const childFiles = walkFiles(childDir);
     const work = createWork(personId, path.basename(childDir), childDir, childFiles);
     if (work) {
-      works.push(work);
+      works.push(coreLinkedScannedWork(personId, work));
     }
   }
 
@@ -2795,11 +5425,103 @@ function scanPersonDirectory(personId, personDir) {
     });
     const work = createWork(personId, video.name, personDir, matchingFiles, video);
     if (work) {
-      works.push(work);
+      works.push(coreLinkedScannedWork(personId, work));
     }
   }
 
   return works;
+}
+
+function personSourcePathCandidates(person, options = {}) {
+  if (Array.isArray(options.sourcePaths) && options.sourcePaths.length) {
+    const selected = [];
+    const seenSelected = new Set();
+    for (const sourcePath of options.sourcePaths) {
+      const absolutePath = sourcePathToAbsolute(sourcePath);
+      const stat = absolutePath ? safeStat(absolutePath) : null;
+      if (!stat?.isDirectory() || !libraryOpenRoots().some((rootPath) => pathWithinRoot(absolutePath, rootPath))) continue;
+      const normalized = relativeFromRoot(absolutePath);
+      const key = normalizeSourcePath(normalized);
+      if (!key || seenSelected.has(key)) continue;
+      seenSelected.add(key);
+      selected.push(normalized);
+    }
+    return selected;
+  }
+
+  const sourcePaths = [];
+  const seen = new Set();
+  const addSourcePath = (sourcePath) => {
+    const normalized = String(sourcePath || "").trim();
+    if (!normalized) return;
+    const key = normalizeSourcePath(normalized);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    sourcePaths.push(normalized);
+  };
+
+  for (const name of actorProfileSearchNames(person)) {
+    if (!name || /[\\/]/.test(name)) continue;
+    for (const rootPath of LIBRARY_ROOTS) {
+      const absolutePath = path.join(rootPath, name);
+      const stat = safeStat(absolutePath);
+      if (stat?.isDirectory()) addSourcePath(relativeFromRoot(absolutePath));
+    }
+  }
+
+  for (const sourcePath of [...(person.sourcePaths || []), person.relativePath]) {
+    const absolutePath = sourcePathToAbsolute(sourcePath);
+    const stat = absolutePath ? safeStat(absolutePath) : null;
+    if (stat?.isDirectory()) addSourcePath(relativeFromRoot(absolutePath));
+  }
+
+  return sourcePaths;
+}
+
+function personSourceCandidates(person, options = {}) {
+  const currentKeys = new Set([...(person.sourcePaths || []), person.relativePath].filter(Boolean).map(normalizeSourcePath));
+  const records = [];
+  const seen = new Set();
+  const addRecord = (absolutePath, sourceName, reason) => {
+    if (!absolutePath) return;
+    const sourcePath = relativeFromRoot(absolutePath);
+    const key = normalizeSourcePath(sourcePath);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    const stat = safeStat(absolutePath);
+    const rootIndex = LIBRARY_ROOTS.findIndex((rootPath) => pathWithinRoot(absolutePath, rootPath));
+    records.push({
+      sourcePath,
+      root: rootIndex >= 0 ? rootLabel(LIBRARY_ROOTS[rootIndex]) : "",
+      sourceName: sourceName || path.basename(absolutePath),
+      exists: Boolean(stat?.isDirectory()),
+      selected: currentKeys.has(key),
+      reason,
+      priority: rootIndex >= 0 ? rootIndex : 999
+    });
+  };
+
+  for (const name of actorProfileSearchNames(person)) {
+    if (!name || /[\\/]/.test(name)) continue;
+    for (const rootPath of LIBRARY_ROOTS) {
+      addRecord(path.join(rootPath, name), name, "name");
+    }
+  }
+
+  for (const sourcePath of [...(person.sourcePaths || []), person.relativePath]) {
+    addRecord(sourcePathToAbsolute(sourcePath), path.basename(sourcePathToAbsolute(sourcePath) || sourcePath), "current");
+  }
+
+  for (const sourcePath of Array.isArray(options.extraSourcePaths) ? options.extraSourcePaths : []) {
+    addRecord(sourcePathToAbsolute(sourcePath), path.basename(sourcePathToAbsolute(sourcePath) || sourcePath), "manual");
+  }
+
+  return records.sort((a, b) =>
+    Number(b.selected) - Number(a.selected) ||
+    Number(b.exists) - Number(a.exists) ||
+    a.priority - b.priority ||
+    a.sourcePath.localeCompare(b.sourcePath, undefined, { numeric: true, sensitivity: "base" })
+  );
 }
 
 function scanLibrary() {
@@ -2819,7 +5541,7 @@ function scanLibrary() {
 
     for (const personDir of personDirs) {
       const personName = path.basename(personDir);
-      const personId = createId("p", personName);
+      const personId = personName;
       let bucket = personBuckets.get(personName);
 
       if (!bucket) {
@@ -2897,12 +5619,13 @@ function scanLibrary() {
 
 function refreshLibrary() {
   try {
-    library = scanLibrary();
+    const coreLibrary = loadLibraryFromCoreDb();
+    library = coreLibrary || scanLibrary();
     saveLibraryCache(library);
     invalidateLibraryDerivedCaches();
     lastScanError = null;
     console.log(
-      `[scan] ${library.totals.people} people, ${library.totals.works} works, ${library.totals.videos} videos, ${library.totals.images} images`
+      `[${coreLibrary ? "core" : "scan"}] ${library.totals.people} people, ${library.totals.works} works, ${library.totals.videos} videos, ${library.totals.images} images`
     );
   } catch (error) {
     lastScanError = error;
@@ -2913,7 +5636,10 @@ function refreshLibrary() {
 function invalidateLibraryDerivedCaches() {
   workInfoCache = null;
   actorProfileCache = null;
+  coreMapCache = null;
   actorMovieCache = null;
+  actorMovieByCodeKeyCache = null;
+  personMergeCache = null;
   localWorkCodeKeyCache = null;
   localWorkByCodeKeyCache = null;
   invalidateTableStamp();
@@ -2962,7 +5688,7 @@ function personRecordFromWorks(person, sourcePaths, works) {
   };
 }
 
-function refreshPersonLibrary(personId) {
+function refreshPersonLibrary(personId, options = {}) {
   const person = library.peopleById.get(personId);
   if (!person) {
     const error = new Error("人物不存在");
@@ -2970,7 +5696,7 @@ function refreshPersonLibrary(personId) {
     throw error;
   }
 
-  const sourcePaths = [...new Set([...(person.sourcePaths || []), person.relativePath].filter(Boolean))];
+  const sourcePaths = personSourcePathCandidates(person, options);
   if (!sourcePaths.length) {
     const error = new Error("这个人物没有本地来源路径");
     error.statusCode = 400;
@@ -3005,6 +5731,11 @@ function refreshPersonLibrary(personId) {
   for (const work of works) {
     registerFiles(library, [...work.videos, ...work.images, ...work.infos]);
     library.worksById.set(work.id, work);
+    try {
+      replaceCoreLocalFilesForWork(work);
+    } catch (error) {
+      console.warn("[core-local-files]", error.message);
+    }
   }
 
   const nextPerson = personRecordFromWorks(person, existingSourcePaths, works);
@@ -3214,10 +5945,13 @@ function applyAdminTaskInvalidations(task) {
   if (invalidates.has("actorProfiles")) {
     invalidateTableStamp("actor_profiles");
     actorProfileCache = null;
+    personMergeCache = null;
   }
   if (invalidates.has("actorMovies")) {
     invalidateTableStamp("actor_movies");
     actorMovieCache = null;
+    actorMovieByCodeKeyCache = null;
+    personMergeCache = null;
     localWorkCodeKeyCache = null;
     localWorkByCodeKeyCache = null;
     clearSearchSourceCaches();
@@ -3551,7 +6285,7 @@ function moveFavoriteToFolder(workId, folderId) {
   return publicFavoriteForWork(workId);
 }
 
-function getVideoProgress(videoId) {
+function getVideoProgress(videoId, work = null) {
   const progress = userState.progress[videoId];
   if (!progress || !Number.isFinite(progress.position) || !Number.isFinite(progress.duration) || progress.duration <= 0) {
     return null;
@@ -3570,7 +6304,7 @@ function getVideoProgress(videoId) {
 
 function getWorkProgress(work) {
   const candidates = (work.videos || [])
-    .map((video) => getVideoProgress(video.id))
+    .map((video) => getVideoProgress(video.id, work))
     .filter(Boolean)
     .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   return candidates[0] || null;
@@ -6375,7 +9109,7 @@ function localImageMime(file) {
 function localImageCacheRow(file) {
   try {
     return (
-      getActorDb()
+      getCoreDb()
         .prepare(
           `
           SELECT *
@@ -6414,7 +9148,7 @@ function upsertLocalImageCache(file, stat, buffer) {
   const sourceMtime = stat?.mtime?.toISOString() || file.modifiedAt || "";
   const sourceSize = Number(stat?.size ?? file.size ?? buffer.length) || 0;
   const contentType = localImageMime(file);
-  getActorDb()
+  getCoreDb()
     .prepare(
       `
       INSERT INTO local_image_cache (
@@ -6458,7 +9192,7 @@ function upsertLocalImageCache(file, stat, buffer) {
 function upsertLocalImageCacheError(file, error) {
   try {
     const now = new Date().toISOString();
-    getActorDb()
+    getCoreDb()
       .prepare(
         `
         INSERT INTO local_image_cache (
@@ -6531,15 +9265,15 @@ function serveImage(res, file) {
 }
 
 function serveActorAvatar(res, personId) {
-  const row = actorProfileRow(personId);
-  if (!row?.avatar_blob) {
+  const row = corePersonAvatarRow(personId);
+  if (!row?.image_blob) {
     notFound(res);
     return;
   }
 
-  const buffer = Buffer.from(row.avatar_blob);
+  const buffer = Buffer.from(row.image_blob);
   res.writeHead(200, {
-    "Content-Type": row.avatar_mime || "image/jpeg",
+    "Content-Type": row.mime || "image/jpeg",
     "Content-Length": buffer.length,
     "Cache-Control": "public, max-age=86400",
     "Content-Disposition": "inline"
@@ -6670,7 +9404,7 @@ function remoteImageCacheKey(remoteUrl) {
 
 function remoteImageCacheRow(remoteUrl) {
   try {
-    return getActorDb().prepare("SELECT * FROM remote_image_cache WHERE url = ?").get(remoteUrl) || null;
+    return getCoreDb().prepare("SELECT * FROM remote_image_cache WHERE url = ?").get(remoteUrl) || null;
   } catch (error) {
     console.warn("[remote-image-cache]", error.message || error);
     return null;
@@ -6770,7 +9504,7 @@ async function warmRemoteImage(remoteUrl) {
   if (remoteImageCacheRow(remoteUrl)?.image_blob) return;
   const downloaded = await downloadRemoteImage(remoteUrl);
   const now = new Date().toISOString();
-  getActorDb()
+  getCoreDb()
     .prepare(
       `
       INSERT INTO remote_image_cache (
@@ -6830,6 +9564,26 @@ function parseRange(rangeHeader, size) {
   return { start, end };
 }
 
+function pipeFileRange(req, res, filePath, range) {
+  const stream = fs.createReadStream(filePath, range);
+  let closed = false;
+  const closeStream = () => {
+    if (closed) return;
+    closed = true;
+    stream.destroy();
+  };
+
+  req.on("aborted", closeStream);
+  res.on("close", closeStream);
+  stream.on("error", () => {
+    if (!res.headersSent) {
+      res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+    }
+    res.end();
+  });
+  stream.pipe(res);
+}
+
 function serveVideo(req, res, file) {
   const stat = safeStat(file.path);
   if (!stat) {
@@ -6839,28 +9593,20 @@ function serveVideo(req, res, file) {
 
   const range = parseRange(req.headers.range, stat.size);
   const contentType = MIME_TYPES[file.ext] || "application/octet-stream";
+  const responseRange = range || {
+    start: 0,
+    end: Math.min(stat.size - 1, DEFAULT_VIDEO_CHUNK_BYTES - 1)
+  };
 
-  if (range) {
-    res.writeHead(206, {
-      "Content-Type": contentType,
-      "Accept-Ranges": "bytes",
-      "Content-Range": `bytes ${range.start}-${range.end}/${stat.size}`,
-      "Content-Length": range.end - range.start + 1,
-      "Cache-Control": "no-store",
-      "Content-Disposition": "inline"
-    });
-    fs.createReadStream(file.path, range).pipe(res);
-    return;
-  }
-
-  res.writeHead(200, {
+  res.writeHead(206, {
     "Content-Type": contentType,
     "Accept-Ranges": "bytes",
-    "Content-Length": stat.size,
+    "Content-Range": `bytes ${responseRange.start}-${responseRange.end}/${stat.size}`,
+    "Content-Length": responseRange.end - responseRange.start + 1,
     "Cache-Control": "no-store",
     "Content-Disposition": "inline"
   });
-  fs.createReadStream(file.path).pipe(res);
+  pipeFileRange(req, res, file.path, responseRange);
 }
 
 function serveTranscodedVideo(req, res, file, url) {
@@ -6949,8 +9695,41 @@ function serveInfo(res, file) {
   });
 }
 
+function publicPersonFallbackAvatar(person) {
+  for (const workId of person?.works || []) {
+    const work = library.worksById.get(workId);
+    if (!work || work.missingLocal) continue;
+
+    const coreCover = publicCoreWorkCover(work.id);
+    if (coreCover?.coverUrl) {
+      return {
+        personId: String(person.id || ""),
+        avatarUrl: coreCover.coverUrl,
+        sourceAvatarUrl: coreCover.sourceCoverUrl || "",
+        source: coreCover.source || "work_cover",
+        updatedAt: coreCover.updatedAt || "",
+        fallbackWorkId: String(work.id || "")
+      };
+    }
+
+    if (work.coverId) {
+      return {
+        personId: String(person.id || ""),
+        avatarUrl: `/media/image/${encodeURIComponent(work.coverId)}`,
+        sourceAvatarUrl: work.relativePath || "",
+        source: "work_cover",
+        updatedAt: work.modifiedAt || "",
+        fallbackWorkId: String(work.id || "")
+      };
+    }
+  }
+  return null;
+}
+
 function publicPerson(person, options = {}) {
   const actorProfile = publicActorProfile(actorProfileRow(person.id));
+  const avatar = publicPersonAvatar(person.id);
+  const fallbackAvatar = avatar?.avatarUrl || actorProfile?.avatarUrl ? null : publicPersonFallbackAvatar(person);
   const isGSource = isGPerson(person);
   return {
     id: person.id,
@@ -6968,23 +9747,39 @@ function publicPerson(person, options = {}) {
     isGSource,
     actorMovieCount: options.actorMovieCount ?? null,
     missingLocalWorkCount: options.missingLocalWorkCount ?? null,
+    avatarUrl: avatar?.avatarUrl || actorProfile?.avatarUrl || fallbackAvatar?.avatarUrl || "",
+    avatarImage: avatar || fallbackAvatar,
     actorProfile
   };
 }
 
+function publicWorkAvailability(work, infoSummary = null) {
+  const summary = infoSummary || work?.infoSummary || {};
+  const tags = uniqueTextArray([...(summary.javdbTags || []), ...(work?.javdbTags || [])], { maxLength: 40, maxItems: 16 });
+  return {
+    hasMagnet: firstPresentValue(summary.hasMagnet, work?.hasMagnet, dbBoolOrNull(work?.has_magnet)),
+    hasSubtitles: firstPresentValue(summary.hasSubtitles, work?.hasSubtitles, dbBoolOrNull(work?.has_subtitles)),
+    isStreamable: firstPresentValue(summary.isStreamable, work?.isStreamable, dbBoolOrNull(work?.is_streamable)),
+    tags
+  };
+}
+
 function publicWork(work, includeFiles = false) {
+  const markers = localWorkMarkers(work);
   if (work.missingLocal) {
-    const person = library.peopleById.get(work.personId);
+    const person = displayPersonForWork(work.personId);
     const profileRow = person ? actorProfileRow(person.id) : null;
+    const infoSummary = work.infoSummary || null;
     const base = {
       id: work.id,
-      personId: work.personId,
+      personId: person?.id || work.personId || "",
       personName: work.personName || "",
-      personDisplayName: person ? cleanPersonNamePart(profileRow?.display_name) || person.name : work.personName || "",
-      personAliases: actorProfileAliases(profileRow),
-      title: work.title || work.directoryName || "未下载作品",
-      directoryName: work.directoryName || "",
+      personDisplayName: profileRow ? preferredPersonDisplayName(profileRow, person?.name || work.personName || "") : work.personName || "",
+      personAliases: publicActorProfile(profileRow)?.aliases || [],
+      title: displayWorkTitle(work.title || work.directoryName || "未下载作品"),
+      directoryName: displayWorkTitle(work.directoryName || ""),
       relativePath: work.relativePath || "",
+      localMarkers: markers,
       coverId: null,
       cachedCover: null,
       remoteCoverUrl: proxiedRemoteImageUrl(work.remoteCoverUrl) || work.remoteCoverUrl || "",
@@ -6995,7 +9790,8 @@ function publicWork(work, includeFiles = false) {
       videoSize: 0,
       canGenerateCover: false,
       modifiedAt: work.modifiedAt || "",
-      infoSummary: work.infoSummary || null,
+      infoSummary,
+      availability: publicWorkAvailability(work, infoSummary),
       favorite: false,
       progress: null,
       missingLocal: true,
@@ -7014,22 +9810,25 @@ function publicWork(work, includeFiles = false) {
     return base;
   }
 
-  const person = library.peopleById.get(work.personId);
+  const person = displayPersonForWork(work.personId);
   const profileRow = person ? actorProfileRow(person.id) : null;
-  const cachedCover = work.coverId ? null : publicWorkCover(workCoverRow(work.id));
+  const coreCover = publicCoreWorkCover(work.id);
+  const cachedCover = coreCover || (work.coverId ? null : publicWorkCover(workCoverRow(work.id)));
   const infoRow = workInfoRow(work.id);
+  const infoSummary = publicWorkInfoSummary(infoRow, work.infoSummary);
   const videos = work.videos || [];
   const favorite = publicFavoriteForWork(work.id);
   const base = {
     id: work.id,
-    personId: work.personId,
+    personId: person?.id || work.personId,
     personName: person?.name || "",
-    personDisplayName: person ? cleanPersonNamePart(profileRow?.display_name) || person.name : "",
-    personAliases: actorProfileAliases(profileRow),
-    title: work.title,
-    directoryName: work.directoryName,
+    personDisplayName: profileRow ? preferredPersonDisplayName(profileRow, person?.name || "") : person?.name || "",
+    personAliases: publicActorProfile(profileRow)?.aliases || [],
+    title: displayWorkTitle(work.title || work.directoryName || ""),
+    directoryName: displayWorkTitle(work.directoryName),
     relativePath: work.relativePath,
-    coverId: work.coverId,
+    localMarkers: markers,
+    coverId: coreCover ? null : work.coverId,
     cachedCover,
     videoCount: work.videoCount,
     playableCount: work.playableCount,
@@ -7038,7 +9837,8 @@ function publicWork(work, includeFiles = false) {
     videoSize: videos.reduce((sum, video) => sum + Number(video.size || 0), 0),
     canGenerateCover: !work.coverId && !cachedCover && videos.length > 0,
     modifiedAt: work.modifiedAt,
-    infoSummary: publicWorkInfoSummary(infoRow, work.infoSummary),
+    infoSummary,
+    availability: publicWorkAvailability(work, infoSummary),
     favorite: Boolean(favorite),
     favoriteFolderId: favorite?.folderId || "",
     favoriteFolderName: favorite?.folderName || "",
@@ -7047,16 +9847,16 @@ function publicWork(work, includeFiles = false) {
   if (work.ranking) base.ranking = work.ranking;
 
   if (includeFiles) {
-    base.videos = videos.map(publicMediaFile);
-    base.images = (work.images || []).map(publicMediaFile);
-    base.infos = (work.infos || []).map(publicMediaFile);
+    base.videos = videos.map((video) => publicMediaFile(video, work));
+    base.images = (work.images || []).map((image) => publicMediaFile(image, work));
+    base.infos = (work.infos || []).map((infoFile) => publicMediaFile(infoFile, work));
     base.infoMetadata = publicWorkInfoMetadata(infoRow);
   }
 
   return base;
 }
 
-function publicMediaFile(file) {
+function publicMediaFile(file, work = null) {
   return {
     id: file.id,
     type: file.type,
@@ -7064,10 +9864,11 @@ function publicMediaFile(file) {
     title: file.title,
     ext: file.ext,
     relativePath: file.relativePath,
+    sourcePath: file.path,
     size: file.size,
     modifiedAt: file.modifiedAt,
     playable: file.playable,
-    progress: file.type === "video" ? getVideoProgress(file.id) : null
+    progress: file.type === "video" ? getVideoProgress(file.id, work) : null
   };
 }
 
@@ -7135,6 +9936,10 @@ function workMatchesFilter(work, filter) {
     }
     case "vr":
       return isVrWork(work);
+    case "localMarkedA":
+      return workHasLocalMarker(work, "A");
+    case "hasMagnet":
+      return Boolean(work.missingLocal && publicWorkAvailability(work).hasMagnet);
     case "missingCover":
       if (work.missingLocal) return false;
       return !work.coverId && !workCoverRow(work.id);
@@ -7206,6 +10011,7 @@ function workFacets(works = allWorks()) {
       return rating !== null && rating >= 4;
     }).length,
     vr: works.filter((work) => workMatchesFilter(work, "vr")).length,
+    hasMagnet: works.filter((work) => workMatchesFilter(work, "hasMagnet")).length,
     missingCover: works.filter((work) => workMatchesFilter(work, "missingCover")).length
   };
 }
@@ -7213,7 +10019,7 @@ function workFacets(works = allWorks()) {
 function pagedWorksPayload(works, url, extra = {}) {
   const limit = clampInteger(url.searchParams.get("limit"), DEFAULT_WORK_LIMIT, 1, MAX_WORK_LIMIT);
   const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-  const sort = url.searchParams.get("sort") || "updated";
+  const sort = url.searchParams.get("sort") || "releaseDesc";
   const total = works.length;
   const page = works.slice(offset, offset + limit).map((work) => publicWork(work));
   prewarmRemoteImagesForWorks(page);
@@ -7270,7 +10076,7 @@ function videoProbeCached(file) {
   return result;
 }
 
-function playInfoForFile(file) {
+function playInfoForFile(file, publicVideoId = file.id) {
   const probe = videoProbeCached(file) || {};
   const videoCodec = String(probe.videoCodec || "").toLowerCase();
   const audioCodec = String(probe.audioCodec || "").toLowerCase();
@@ -7280,7 +10086,7 @@ function playInfoForFile(file) {
     return {
       mode: "direct",
       label: "直连播放",
-      streamUrl: `/media/video/${encodeURIComponent(file.id)}`,
+      streamUrl: `/media/video/${encodeURIComponent(publicVideoId)}`,
       duration: probe.duration || null,
       videoCodec,
       audioCodec,
@@ -7297,7 +10103,7 @@ function playInfoForFile(file) {
   return {
     mode,
     label: mode === "remux" ? "快速重封装" : HAS_NVENC ? "GPU 转码" : "智能转码",
-    streamUrl: `/media/video/${encodeURIComponent(file.id)}/transcode?${params}`,
+    streamUrl: `/media/video/${encodeURIComponent(publicVideoId)}/transcode?${params}`,
     duration: probe.duration || null,
     videoCodec,
     audioCodec,
@@ -7332,18 +10138,31 @@ async function routeApi(req, res, url) {
 
   if (url.pathname === "/api/library" && req.method === "GET") {
     const user = userStateSummary();
+    const people = mainLibraryPeople();
     sendJson(res, 200, {
       root: library.root,
       roots: library.roots,
       availableRoots: library.availableRoots,
       missingRoots: library.missingRoots,
       scannedAt: library.scannedAt,
-      totals: library.totals,
+      totals: {
+        ...library.totals,
+        people: people.length
+      },
       user,
       uiConfig: publicAppConfig(),
       access: requestAccess(req),
       lastScanError: lastScanError?.message || null,
-      people: library.people.map(publicPerson)
+      people: people.map(publicPerson)
+    });
+    return true;
+  }
+
+  if (url.pathname === "/api/library/roots" && req.method === "GET") {
+    sendJson(res, 200, {
+      roots: library.roots || [],
+      availableRoots: library.availableRoots || [],
+      defaultRoot: (library.availableRoots || [])[0] || (library.roots || [])[0] || ""
     });
     return true;
   }
@@ -7414,6 +10233,7 @@ async function routeApi(req, res, url) {
 
   if (await routeAdminApi(req, res, url, {
     actorAvatarCandidatesFromFiletree,
+    actorMovieRows,
     actorProfileRow,
     adminScriptById,
     adminScriptCategories,
@@ -7427,10 +10247,12 @@ async function routeApi(req, res, url) {
     getAppConfig: () => appConfig,
     importActorAvatarCandidate,
     importActorAvatarsFromFiletree,
+    enrichLocalWorksWithActorMovieInfo,
     invalidateTableStamp,
     library,
     normalizeAdminScriptOptions,
     normalizeAppConfig,
+    personSourceCandidates,
     publicAdminScript,
     publicAdminTask,
     publicAppConfig,
@@ -7438,11 +10260,15 @@ async function routeApi(req, res, url) {
     pagedWorksPayload,
     readJsonBody,
     refreshPersonLibrary,
+    refreshLibrary,
     requireLocalAdmin,
+    resolveLibraryPersonByPublicId,
     scriptDefinitions: ADMIN_SCRIPT_DEFINITIONS,
     sendJson,
     setActorMovieCache: (value) => {
       actorMovieCache = value;
+      actorMovieByCodeKeyCache = null;
+      personMergeCache = null;
     },
     setAppConfig: (value) => {
       appConfig = value;
@@ -7477,6 +10303,25 @@ async function routeApi(req, res, url) {
 
     sendJson(res, 200, { ok: true, path: relativeFromRoot(target.folderPath) });
     scheduleOpenFolder(target.folderPath);
+    return true;
+  }
+
+  if (url.pathname === "/api/open-file" && req.method === "POST") {
+    const access = requestAccess(req);
+    if (!access.isLocal || !isSameLocalOrigin(req)) {
+      sendJson(res, 403, { error: "只能在本机页面打开本地文件" });
+      return true;
+    }
+
+    const body = await readJsonBody(req);
+    const target = resolveLocalFileTarget(body.sourcePath || body.path);
+    if (target.error) {
+      sendJson(res, 400, { error: target.error });
+      return true;
+    }
+
+    sendJson(res, 200, { ok: true, path: relativeFromRoot(target.filePath) });
+    scheduleOpenFile(target.filePath);
     return true;
   }
 
@@ -7529,10 +10374,34 @@ async function routeApi(req, res, url) {
 
   if (url.pathname === "/api/works" && req.method === "GET") {
     const filter = url.searchParams.get("filter") || "all";
-    const sort = url.searchParams.get("sort") || "updated";
-    const filtered = allWorks().filter((work) => workMatchesFilter(work, filter));
+    const sort = url.searchParams.get("sort") || "releaseDesc";
+    const filtered = enrichLocalWorksWithActorMovieIndex(allWorks()).filter((work) => workMatchesFilter(work, filter));
     const sorted = sortWorkList(filtered, sort);
     sendJson(res, 200, pagedWorksPayload(sorted, url, { filter, facets: workFacets() }));
+    return true;
+  }
+
+  if (url.pathname === "/api/studios" && req.method === "GET") {
+    try {
+      sendJson(res, 200, studioSummaries(url));
+    } catch (error) {
+      sendJson(res, 500, { error: error.message || "读取厂商失败" });
+    }
+    return true;
+  }
+
+  const studioMatch = /^\/api\/studios\/([^/]+)$/.exec(url.pathname);
+  if (studioMatch && req.method === "GET") {
+    try {
+      const payload = studioDetailPayload(decodeURIComponent(studioMatch[1]), url);
+      if (!payload) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, payload);
+    } catch (error) {
+      sendJson(res, 500, { error: error.message || "读取厂商详情失败" });
+    }
     return true;
   }
 
@@ -7540,12 +10409,12 @@ async function routeApi(req, res, url) {
     const rawQuery = (url.searchParams.get("q") || "").trim();
     const query = rawQuery.toLowerCase();
     const filter = url.searchParams.get("filter") || "all";
-    const sort = url.searchParams.get("sort") || "updated";
+    const sort = url.searchParams.get("sort") || "releaseDesc";
     const peopleSearch = searchPeople(rawQuery);
-    const exactPersonIds = new Set(peopleSearch.exact.map((person) => person.id));
-    const localMatches = allWorks().filter((work) => {
+    const exactPersonIds = new Set(peopleSearch.matchedPersonIds || peopleSearch.exact.map((person) => person.id));
+    const localMatches = enrichLocalWorksWithActorMovieIndex(allWorks().filter((work) => {
       return exactPersonIds.has(work.personId) || matchesWorkSearch(work, query);
-    });
+    }));
     const rankingMissingWorks = rankingMissingSearchWorks();
     const rankingMissingKeys = new Set(rankingMissingWorks.map((work) => storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title)).filter(Boolean));
     const rankingMissingMatches = rankingMissingWorks.filter((work) => matchesWorkSearch(work, query));
@@ -7564,19 +10433,18 @@ async function routeApi(req, res, url) {
 
   const actorProfileMatch = /^\/api\/actor-profiles\/([^/]+)$/.exec(url.pathname);
   if (actorProfileMatch && req.method === "GET") {
-    const personId = decodeURIComponent(actorProfileMatch[1]);
-    if (!library.peopleById.has(personId)) {
+    const person = resolveLibraryPersonByPublicId(decodeURIComponent(actorProfileMatch[1]));
+    if (!person) {
       notFound(res);
       return true;
     }
 
-    sendJson(res, 200, { profile: publicActorProfile(actorProfileRow(personId)) });
+    sendJson(res, 200, { profile: publicActorProfile(actorProfileRow(person.id)) });
     return true;
   }
 
   if (actorProfileMatch && req.method === "PUT") {
-    const personId = decodeURIComponent(actorProfileMatch[1]);
-    const person = library.peopleById.get(personId);
+    const person = resolveLibraryPersonByPublicId(decodeURIComponent(actorProfileMatch[1]));
     if (!person) {
       notFound(res);
       return true;
@@ -7648,7 +10516,7 @@ async function routeApi(req, res, url) {
 
   const progressMatch = /^\/api\/progress\/([^/]+)$/.exec(url.pathname);
   if (progressMatch && req.method === "POST") {
-    const videoId = progressMatch[1];
+    const videoId = decodeURIComponent(progressMatch[1]);
     const file = library.filesById.get(videoId);
     if (!file || file.type !== "video") {
       notFound(res);
@@ -7658,7 +10526,8 @@ async function routeApi(req, res, url) {
     const body = await readJsonBody(req);
     const position = Number(body.position || 0);
     const duration = Number(body.duration || body.total || 0);
-    const workId = body.workId && library.worksById.has(body.workId) ? body.workId : null;
+    const bodyWorkId = String(body.workId || "");
+    const workId = bodyWorkId && library.worksById.has(bodyWorkId) ? bodyWorkId : null;
 
     if (!Number.isFinite(position) || !Number.isFinite(duration) || duration <= 0) {
       sendJson(res, 400, { error: "播放进度无效" });
@@ -7672,25 +10541,36 @@ async function routeApi(req, res, url) {
       updatedAt: new Date().toISOString()
     };
     saveUserState();
-    sendJson(res, 200, { ok: true, progress: getVideoProgress(videoId), user: userStateSummary() });
+    sendJson(res, 200, { ok: true, progress: getVideoProgress(videoId, library.worksById.get(workId)), user: userStateSummary() });
     return true;
   }
 
   const personMatch = /^\/api\/people\/([^/]+)$/.exec(url.pathname);
   if (personMatch && req.method === "GET") {
-    const person = library.peopleById.get(personMatch[1]);
+    const rawPerson = resolveLibraryPersonByPublicId(decodeURIComponent(personMatch[1])) || corePersonFallbackRecord(decodeURIComponent(personMatch[1]));
+    const person = mergedPersonRecord(rawPerson);
     if (!person) {
       notFound(res);
       return true;
     }
 
     const filter = url.searchParams.get("filter") || "all";
-    const sort = url.searchParams.get("sort") || "updated";
-    const localWorks = person.works
+    const sort = url.searchParams.get("sort") || "releaseDesc";
+    const actorRows = mergedActorMovieRows(person.id);
+    const rawLocalWorks = person.works
       .map((workId) => library.worksById.get(workId))
       .filter(Boolean);
-    const actorRows = actorMovieRows(person.id);
-    const missingWorks = missingActorWorksForPerson(person, actorRows);
+    const localWorks = enrichLocalWorksWithActorMovieInfo(rawLocalWorks, actorRows);
+    const personLocalCodeKeys = workCodeKeySetForWorks(rawLocalWorks);
+    const coreMissingWorks = coreMissingWorksForPerson(person, personLocalCodeKeys);
+    const coreMissingKeys = new Set(coreMissingWorks.map((work) => storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title)).filter(Boolean));
+    const missingWorks = [
+      ...coreMissingWorks,
+      ...missingActorWorksForPerson(person, actorRows, personLocalCodeKeys).filter((work) => {
+        const key = storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title);
+        return !key || !coreMissingKeys.has(key);
+      })
+    ];
     const allPersonWorks = [...localWorks, ...missingWorks];
     const works = sortWorkList(allPersonWorks.filter((work) => workMatchesFilter(work, filter)), sort);
     sendJson(res, 200, {
@@ -7703,6 +10583,24 @@ async function routeApi(req, res, url) {
     return true;
   }
 
+  const personLocalDeleteMatch = /^\/api\/people\/([^/]+)\/local-files\/delete$/.exec(url.pathname);
+  if (personLocalDeleteMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const result = deletePersonLocalFiles(decodeURIComponent(personLocalDeleteMatch[1]));
+      const rawPerson = resolveLibraryPersonByPublicId(decodeURIComponent(personLocalDeleteMatch[1])) || corePersonFallbackRecord(decodeURIComponent(personLocalDeleteMatch[1]));
+      const person = mergedPersonRecord(rawPerson) || rawPerson;
+      sendJson(res, 200, {
+        ok: result.failedCount === 0,
+        ...result,
+        person: person ? publicPerson(person) : null
+      });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "批量删除本地作品失败" });
+    }
+    return true;
+  }
+
   const playInfoMatch = /^\/api\/playinfo\/([^/]+)$/.exec(url.pathname);
   if (playInfoMatch && req.method === "GET") {
     const videoId = decodeURIComponent(playInfoMatch[1]);
@@ -7712,13 +10610,13 @@ async function routeApi(req, res, url) {
       return true;
     }
 
-    sendJson(res, 200, playInfoForFile(file));
+    sendJson(res, 200, playInfoForFile(file, videoId));
     return true;
   }
 
   const coverGenerateMatch = /^\/api\/works\/([^/]+)\/cover\/generate$/.exec(url.pathname);
   if (coverGenerateMatch && req.method === "POST") {
-    const work = library.worksById.get(decodeURIComponent(coverGenerateMatch[1]));
+    const work = resolveLibraryWorkByPublicId(decodeURIComponent(coverGenerateMatch[1]));
     if (!work) {
       notFound(res);
       return true;
@@ -7732,9 +10630,65 @@ async function routeApi(req, res, url) {
     return true;
   }
 
+  const workMarkerMatch = /^\/api\/works\/([^/]+)\/local-marker$/.exec(url.pathname);
+  if (workMarkerMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    const workId = decodeURIComponent(workMarkerMatch[1]);
+    const body = await readJsonBody(req);
+    try {
+      const result = setWorkLocalMarker(workId, body.marker || "A", Boolean(body.enabled));
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "更新作品标记失败" });
+    }
+    return true;
+  }
+
+  const workCorrectActorMatch = /^\/api\/works\/([^/]+)\/correct-actor-from-folder$/.exec(url.pathname);
+  if (workCorrectActorMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    const workId = decodeURIComponent(workCorrectActorMatch[1]);
+    try {
+      const result = correctWorkActorFromLocalFolder(workId);
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "订正演员失败" });
+    }
+    return true;
+  }
+
+  const workMoveToPersonMatch = /^\/api\/works\/([^/]+)\/move-to-person$/.exec(url.pathname);
+  if (workMoveToPersonMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    const workId = decodeURIComponent(workMoveToPersonMatch[1]);
+    try {
+      const body = await readJsonBody(req);
+      const result = moveWorkToPerson(workId, body.personId, {
+        targetDirectory: body.targetDirectory || body.targetPath || "",
+        createPerson: body.createPerson || null
+      });
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "迁移作品失败" });
+    }
+    return true;
+  }
+
+  const workLocalDeleteMatch = /^\/api\/works\/([^/]+)\/local-files\/delete$/.exec(url.pathname);
+  if (workLocalDeleteMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const result = deleteWorkLocalFiles(decodeURIComponent(workLocalDeleteMatch[1]));
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "删除本地文件失败" });
+    }
+    return true;
+  }
+
   const workMatch = /^\/api\/works\/([^/]+)$/.exec(url.pathname);
   if (workMatch && req.method === "GET") {
-    const work = library.worksById.get(decodeURIComponent(workMatch[1]));
+    const work = resolveLibraryWorkByPublicId(decodeURIComponent(workMatch[1]));
     if (!work) {
       notFound(res);
       return true;
@@ -7804,6 +10758,12 @@ async function routeMedia(req, res, url) {
     return true;
   }
 
+  const coreImageMatch = /^\/media\/core-image\/([^/]+)$/.exec(url.pathname);
+  if (coreImageMatch && req.method === "GET") {
+    serveCoreImage(res, decodeURIComponent(coreImageMatch[1]));
+    return true;
+  }
+
   const mangaImageMatch = /^\/media\/manga\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(url.pathname);
   if (mangaImageMatch && req.method === "GET") {
     serveMangaImage(res, mangaImageMatch[1], mangaImageMatch[2], mangaImageMatch[3]);
@@ -7836,7 +10796,7 @@ async function routeMedia(req, res, url) {
 
   const transcodeMatch = /^\/media\/video\/([^/]+)\/transcode$/.exec(url.pathname);
   if (transcodeMatch && req.method === "GET") {
-    const file = library.filesById.get(decodeURIComponent(transcodeMatch[1]));
+    const file = resolveVideoFileByPublicId(transcodeMatch[1]);
     if (!file || file.type !== "video") {
       notFound(res);
       return true;
@@ -7848,7 +10808,7 @@ async function routeMedia(req, res, url) {
 
   const videoMatch = /^\/media\/video\/([^/]+)$/.exec(url.pathname);
   if (videoMatch && req.method === "GET") {
-    const file = library.filesById.get(decodeURIComponent(videoMatch[1]));
+    const file = resolveVideoFileByPublicId(videoMatch[1]);
     if (!file || file.type !== "video") {
       notFound(res);
       return true;
@@ -7928,7 +10888,17 @@ if (cachedLibrary) {
     `[cache] ${library.totals.people} people, ${library.totals.works} works, ${library.totals.videos} videos, ${library.totals.images} images`
   );
 } else {
-  refreshLibrary();
+  const coreLibrary = loadLibraryFromCoreDb();
+  if (coreLibrary) {
+    library = coreLibrary;
+    invalidateLibraryDerivedCaches();
+    lastScanError = null;
+    console.log(
+      `[core] ${library.totals.people} people, ${library.totals.works} works, ${library.totals.videos} videos, ${library.totals.images} images`
+    );
+  } else {
+    refreshLibrary();
+  }
 }
 
 const server = http.createServer(requestHandler);

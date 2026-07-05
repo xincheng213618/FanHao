@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#f6f7f9" />
     <title>资料库</title>
-    <link rel="stylesheet" href="./styles.css?v=20260702-novel-local-manage-74" />
+    <link rel="stylesheet" href="./styles.css?v=20260705-mobile-actions-01" />
   </head>
   <body>
     <main class="app-shell">
@@ -16,6 +16,8 @@
         <nav id="fanhaoSectionNav" class="fanhao-section-nav top-secondary-nav" aria-label="顶部二级导航">
           <button class="active" type="button" data-fanhao-view="works">作品</button>
           <button type="button" data-fanhao-view="rankings">榜单</button>
+          <button type="button" data-fanhao-view="studios">片商</button>
+          <button type="button" data-fanhao-view="vr">VR</button>
           <button type="button" data-fanhao-view="people">人物</button>
           <button type="button" data-fanhao-view="favorites">收藏</button>
         </nav>
@@ -89,6 +91,14 @@
         <button type="button" data-open-view="rankings">
           <strong>排行榜</strong>
           <span id="rankingsCount">TOP</span>
+        </button>
+        <button type="button" data-open-view="studios">
+          <strong>片商</strong>
+          <span>系列浏览</span>
+        </button>
+        <button type="button" data-open-view="vr">
+          <strong>VR</strong>
+          <span>沉浸作品</span>
         </button>
         <button type="button" data-open-view="tools">
           <strong>小游戏</strong>
@@ -309,7 +319,7 @@
       </nav>
     </main>
 
-    <script src="./app.js?v=20260702-novel-local-manage-74" type="module"></script>
+    <script src="./app.js?v=20260705-mobile-actions-01" type="module"></script>
   </body>
 </html>
 

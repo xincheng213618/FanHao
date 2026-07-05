@@ -3,7 +3,7 @@ import { enhanceAutoLoadMore } from "./auto-load.js?v=20260702-novel-local-manag
 import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js?v=20260702-novel-local-manage-74";
 import { formatBytes, formatDate, formatNumber } from "./format.js";
 import { absoluteUrl, imageUrlForWork, loadPreviewImage, precacheImage } from "./image.js";
-import { createWorkListState } from "./work-filtering.js";
+import { createWorkListState } from "./work-filtering.js?v=20260705-mobile-sync-01";
 
 const RANKING_KEY_STORAGE = "fanhao.android.rankingKey";
 const DEFAULT_RANKING_KEY = "y2025";
@@ -277,6 +277,255 @@ export function createWorkViews(context) {
         renderMessage(error.message, "error");
       }
     }
+  }
+
+  async function renderVrWorks(isActive = () => true) {
+    leaveRankingSort();
+    setActiveBottom("works");
+    els.viewKicker.textContent = "VR";
+    els.viewTitle.textContent = "VR 作品";
+    els.viewMeta.textContent = "正在加载";
+    els.viewContent.innerHTML = `<div class="loading-row">正在加载 VR 作品</div>`;
+
+    const limit = getWorksLimit();
+    const serverFilter = mergeServerFilters("vr", workListState.getServerFilterMode());
+    const serverSort = workListState.getServerSortMode();
+    const path = `/api/works?limit=${limit}&offset=0&sort=${encodeURIComponent(serverSort)}&filter=${encodeURIComponent(serverFilter)}`;
+    const activeUrl = getActiveUrl();
+    let renderedCache = false;
+    let renderedCacheSignature = "";
+
+    const applyHeader = (data, cacheEntry = null) => {
+      const works = data.works || [];
+      const total = Number(data.total || works.length);
+      const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
+      els.viewMeta.textContent = `${formatNumber(works.length)} / ${formatNumber(total)} 个 VR 作品${suffix}`;
+    };
+
+    const renderData = (data, cacheEntry = null) => {
+      const works = data.works || [];
+      const total = Number(data.total || works.length);
+      applyHeader(data, cacheEntry);
+      els.viewContent.innerHTML = "";
+      renderWorks(works, "没有 VR 作品。", { compactMeta: true, facets: data.facets, total });
+      if (works.length < total) {
+        els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(works.length)} / ${formatNumber(total)}`, () => {
+          increaseWorksLimit(80);
+          return renderCurrentViewPreservingScroll();
+        }));
+      }
+    };
+
+    const cached = await readCachedJson(activeUrl, path).catch(() => null);
+    if (!isActive()) return;
+    if (cached?.payload) {
+      renderedCache = true;
+      renderedCacheSignature = workDataSignature(cached.payload);
+      renderData(cached.payload, cached);
+    }
+
+    try {
+      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
+      writeCachedJson(activeUrl, path, data).catch(() => {});
+      if (!isActive()) return;
+      if (renderedCache && workDataSignature(data) === renderedCacheSignature) {
+        applyHeader(data);
+        return;
+      }
+      renderData(data);
+    } catch (error) {
+      if (!isActive()) return;
+      if (renderedCache) {
+        renderMessage("电脑端暂时连不上，当前显示的是本地缓存 VR 作品。", "quiet", false);
+      } else {
+        renderMessage(error.message, "error");
+      }
+    }
+  }
+
+  async function renderStudios(isActive = () => true) {
+    leaveRankingSort();
+    setActiveBottom("works");
+    els.viewKicker.textContent = "片商";
+    els.viewTitle.textContent = "片商索引";
+    els.viewMeta.textContent = "正在加载";
+    els.viewContent.innerHTML = `<div class="loading-row">正在加载片商</div>`;
+
+    const path = "/api/studios?limit=500";
+    const activeUrl = getActiveUrl();
+    let renderedCache = false;
+
+    const renderData = (data, cacheEntry = null) => {
+      const studios = data.makers || [];
+      const total = Number(data.total || studios.length);
+      const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
+      els.viewMeta.textContent = `${formatNumber(studios.length)} / ${formatNumber(total)} 个片商${suffix}`;
+      els.viewContent.innerHTML = "";
+      if (!studios.length) {
+        renderMessage("还没有片商数据。", "quiet", false);
+        return;
+      }
+      const grid = document.createElement("div");
+      grid.className = "studio-list";
+      for (const studio of studios) grid.append(createStudioCard(studio));
+      els.viewContent.append(grid);
+    };
+
+    const cached = await readCachedJson(activeUrl, path).catch(() => null);
+    if (!isActive()) return;
+    if (cached?.payload) {
+      renderedCache = true;
+      renderData(cached.payload, cached);
+    }
+
+    try {
+      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
+      writeCachedJson(activeUrl, path, data).catch(() => {});
+      if (!isActive()) return;
+      renderData(data);
+    } catch (error) {
+      if (!isActive()) return;
+      if (renderedCache) {
+        renderMessage("电脑端暂时连不上，当前显示的是本地缓存片商。", "quiet", false);
+      } else {
+        renderMessage(error.message, "error");
+      }
+    }
+  }
+
+  async function renderStudioDetail(studioId, seriesId = "all", isActive = () => true) {
+    leaveRankingSort();
+    setActiveBottom("works");
+    els.viewKicker.textContent = "片商";
+    els.viewTitle.textContent = "正在加载";
+    els.viewMeta.textContent = "";
+    els.viewContent.innerHTML = `<div class="loading-row">正在加载片商作品</div>`;
+
+    const limit = getWorksLimit();
+    const params = new URLSearchParams({
+      seriesId: seriesId || "all",
+      sort: workListState.getServerSortMode(),
+      limit: String(limit),
+      offset: "0"
+    });
+    const path = `/api/studios/${encodeURIComponent(studioId)}?${params}`;
+    const activeUrl = getActiveUrl();
+    let renderedCache = false;
+    let renderedCacheSignature = "";
+
+    const applyHeader = (data, cacheEntry = null) => {
+      const studio = data.studio || {};
+      const works = data.works || [];
+      const total = Number(data.total || works.length);
+      const selectedSeries = selectedStudioSeries(studio, data.selectedSeriesId || seriesId);
+      const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
+      els.viewTitle.textContent = studio.name || "片商";
+      els.viewMeta.textContent = selectedSeries
+        ? `${selectedSeries.name} · ${formatNumber(works.length)} / ${formatNumber(total)} 部${suffix}`
+        : `${formatNumber(works.length)} / ${formatNumber(total)} 部本地作品${suffix}`;
+    };
+
+    const renderData = (data, cacheEntry = null) => {
+      const studio = data.studio || {};
+      const works = data.works || [];
+      const total = Number(data.total || works.length);
+      applyHeader(data, cacheEntry);
+      els.viewContent.innerHTML = "";
+      renderStudioSeriesStrip(studio, data.selectedSeriesId || seriesId || "all");
+      renderWorks(works, "这个片商暂无本地作品。", { compactMeta: true, total });
+      if (works.length < total) {
+        els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(works.length)} / ${formatNumber(total)}`, () => {
+          increaseWorksLimit(80);
+          return renderCurrentViewPreservingScroll();
+        }));
+      }
+    };
+
+    const cached = await readCachedJson(activeUrl, path).catch(() => null);
+    if (!isActive()) return;
+    if (cached?.payload) {
+      renderedCache = true;
+      renderedCacheSignature = workDataSignature(cached.payload);
+      renderData(cached.payload, cached);
+    }
+
+    try {
+      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
+      writeCachedJson(activeUrl, path, data).catch(() => {});
+      if (!isActive()) return;
+      if (renderedCache && workDataSignature(data) === renderedCacheSignature) {
+        applyHeader(data);
+        return;
+      }
+      renderData(data);
+    } catch (error) {
+      if (!isActive()) return;
+      if (renderedCache) {
+        renderMessage("电脑端暂时连不上，当前显示的是本地缓存片商作品。", "quiet", false);
+      } else {
+        els.viewTitle.textContent = "片商";
+        renderMessage(error.message, "error");
+      }
+    }
+  }
+
+  function mergeServerFilters(...values) {
+    const filters = [];
+    for (const value of values) {
+      for (const item of String(value || "all").split(",")) {
+        const clean = item.trim();
+        if (clean && clean !== "all" && !filters.includes(clean)) filters.push(clean);
+      }
+    }
+    return filters.length ? filters.join(",") : "all";
+  }
+
+  function createStudioCard(studio) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "studio-card";
+    button.addEventListener("click", () => showView("studioDetail", { studioId: studio.id, seriesId: "all" }, { push: true }));
+
+    const name = document.createElement("strong");
+    name.textContent = studio.name || "未命名片商";
+
+    const meta = document.createElement("span");
+    const localCount = Number(studio.localWorkCount || studio.workCount || 0);
+    const seriesCount = Array.isArray(studio.series) ? studio.series.length : Number(studio.seriesCount || 0);
+    meta.textContent = `${formatNumber(localCount)} 部${seriesCount ? ` · ${formatNumber(seriesCount)} 系列` : ""}`;
+
+    button.append(name, meta);
+    return button;
+  }
+
+  function renderStudioSeriesStrip(studio, activeSeriesId = "all") {
+    const series = (studio.series || []).filter((item) => Number(item.localWorkCount || 0) > 0);
+    if (!series.length && !studio.localWorkCount) return;
+
+    const strip = document.createElement("div");
+    strip.className = "studio-series-strip";
+    strip.append(createStudioSeriesChip(studio.id, "all", "全部", studio.localWorkCount || studio.workCount || 0, activeSeriesId));
+    for (const item of series) {
+      strip.append(createStudioSeriesChip(studio.id, item.id, item.name, item.localWorkCount || item.workCount || 0, activeSeriesId));
+    }
+    els.viewContent.append(strip);
+  }
+
+  function createStudioSeriesChip(studioId, seriesId, name, count, activeSeriesId) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = String(activeSeriesId || "all") === String(seriesId || "all") ? "active" : "";
+    button.textContent = `${name} ${formatNumber(count || 0)}`;
+    button.addEventListener("click", () => {
+      showView("studioDetail", { studioId, seriesId: seriesId || "all" }, { skipHistory: true, replaceHistory: true });
+    });
+    return button;
+  }
+
+  function selectedStudioSeries(studio, seriesId) {
+    const id = String(seriesId || "all");
+    if (!id || id === "all") return null;
+    return (studio.series || []).find((item) => String(item.id) === id) || null;
   }
 
   async function renderSearchResults(query, isActive = () => true) {
@@ -1182,6 +1431,9 @@ export function createWorkViews(context) {
 
   return {
     renderAllWorks,
+    renderVrWorks,
+    renderStudios,
+    renderStudioDetail,
     renderContinuePreview,
     renderRankings,
     renderWorkCollection,
