@@ -6837,6 +6837,19 @@ body.short-video-browser-active {
   background: #090a0f;
 }
 
+body.short-video-view .main {
+  padding: 0 36px 42px;
+}
+
+body.short-video-view .toolbar,
+body.short-video-view .stats-row {
+  display: none;
+}
+
+body.short-video-view .work-grid {
+  display: block;
+}
+
 .short-video-home {
   width: min(1440px, calc(100vw - 32px));
   margin: 0 auto;
@@ -7835,6 +7848,10 @@ body.short-video-browser-active {
 }
 
 @media (max-width: 860px) {
+  body.short-video-view .main {
+    padding: 0 14px 28px;
+  }
+
   .short-video-home {
     width: min(100%, calc(100vw - 20px));
     padding-top: 10px;
