@@ -179,17 +179,6 @@ const novelsModule = createNovelsModule({
   readJsonBody,
   sendJson
 });
-const shortVideosModule = createShortVideosModule({
-  dbPath: SHORT_VIDEO_DB_PATH,
-  ffmpegPath: FFMPEG_PATH,
-  roots: SHORT_VIDEO_ROOTS,
-  notFound,
-  readJsonBody,
-  requireLocalAdmin,
-  sendJson,
-  serveImage,
-  serveVideo
-});
 const mangaService = createMangaService({
   root: MANGA_LIBRARY_ROOT,
   mimeTypes: MIME_TYPES,
@@ -257,6 +246,18 @@ const imageReaderCacheService = createImageReaderCacheService({
   rootDir: IMAGE_READER_CACHE_DIR,
   safeStat,
   touchThrottleMs: IMAGE_READER_CACHE_TOUCH_THROTTLE_MS
+});
+const shortVideosModule = createShortVideosModule({
+  dbPath: SHORT_VIDEO_DB_PATH,
+  ffmpegPath: FFMPEG_PATH,
+  roots: SHORT_VIDEO_ROOTS,
+  notFound,
+  readJsonBody,
+  requireLocalAdmin,
+  sendJson,
+  serveImage,
+  serveVideo,
+  sharedCache: imageReaderCacheService
 });
 const imageLibraryService = createImageLibraryService({
   clampInteger,

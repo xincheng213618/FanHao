@@ -31,6 +31,7 @@ export function createShortVideoPage(deps) {
   let eventsInstalled = false;
   let playerClickTimer = 0;
   let listPreviewObserver = null;
+  let loadMoreObserver = null;
   const preheatedVideos = new Map();
 
   function ensureState() {
@@ -211,6 +212,7 @@ export function createShortVideoPage(deps) {
     ensureState();
     if (!els.workGrid) return;
     resetListPreviewObserver();
+    resetLoadMoreObserver();
     els.workGrid.innerHTML = "";
     setBodyClass();
     if (state.shortVideo.current) {
@@ -224,8 +226,7 @@ export function createShortVideoPage(deps) {
     const data = state.shortVideo.data || {};
     const shell = document.createElement("section");
     shell.className = "short-video-home";
-    shell.append(renderHomeHead(data), renderControls(data));
-    if (state.shortVideo.status) {
+    if (state.shortVideo.status && !(data.videos || []).length) {
       const status = document.createElement("div");
       status.className = "short-video-status";
       status.textContent = state.shortVideo.status;
@@ -242,13 +243,11 @@ export function createShortVideoPage(deps) {
     }
     shell.append(grid);
     if (data.hasMore) {
-      const more = document.createElement("button");
-      more.type = "button";
-      more.className = "short-video-load-more";
-      more.textContent = state.shortVideo.loadingMore ? "正在加载更多" : "继续加载";
-      more.disabled = state.shortVideo.loadingMore;
-      more.addEventListener("click", () => loadVideos({ append: true, keepCurrent: true }).catch(showError));
-      shell.append(more);
+      const sentinel = document.createElement("div");
+      sentinel.className = "short-video-load-more";
+      sentinel.setAttribute("aria-hidden", "true");
+      shell.append(sentinel);
+      observeLoadMoreSentinel(sentinel);
     }
     els.workGrid.append(shell);
   }
@@ -329,6 +328,7 @@ export function createShortVideoPage(deps) {
     const thumb = document.createElement("button");
     thumb.type = "button";
     thumb.className = "short-video-thumb";
+    thumb.setAttribute("aria-label", video.title || "打开短视频");
     if (video.coverUrl) {
       const img = document.createElement("img");
       img.src = video.coverUrl;
@@ -363,10 +363,6 @@ export function createShortVideoPage(deps) {
       fallback.textContent = "";
       thumb.append(fallback);
     }
-    const overlay = document.createElement("span");
-    overlay.className = "short-video-thumb-meta";
-    overlay.textContent = [formatDuration(video.durationMs), video.stats?.likes ? `♥ ${formatCompact(video.stats.likes)}` : ""].filter(Boolean).join("  ");
-    thumb.append(overlay);
     thumb.addEventListener("mouseenter", () => {
       loadListPreviewVideo(thumb.querySelector(".short-video-thumb-video"));
       preheatListVideo(video);
@@ -380,20 +376,31 @@ export function createShortVideoPage(deps) {
       preheatListVideo(video);
     }, { passive: true });
     thumb.addEventListener("click", () => openVideo(video.id).catch(showError));
-    const body = document.createElement("div");
-    body.className = "short-video-card-body";
-    const title = document.createElement("h3");
-    title.textContent = video.title || "无标题";
-    const meta = document.createElement("p");
-    meta.textContent = [video.author?.name, video.publishedAt ? formatDate(video.publishedAt) : "", formatBytes(video.size || 0)].filter(Boolean).join(" · ");
-    body.append(title, meta);
-    card.append(thumb, body);
+    card.append(thumb);
     return card;
   }
 
   function resetListPreviewObserver() {
     listPreviewObserver?.disconnect?.();
     listPreviewObserver = null;
+  }
+
+  function resetLoadMoreObserver() {
+    loadMoreObserver?.disconnect?.();
+    loadMoreObserver = null;
+  }
+
+  function observeLoadMoreSentinel(sentinel) {
+    if (!sentinel || !("IntersectionObserver" in window)) {
+      if (state.shortVideo.data?.hasMore) loadVideos({ append: true, keepCurrent: true }).catch(showError);
+      return;
+    }
+    loadMoreObserver = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      if (!state.shortVideo.data?.hasMore || state.shortVideo.loadingMore || state.shortVideo.loading) return;
+      loadVideos({ append: true, keepCurrent: true }).catch(showError);
+    }, { root: null, rootMargin: "900px 0px", threshold: 0.01 });
+    loadMoreObserver.observe(sentinel);
   }
 
   function observeListPreview(preview) {

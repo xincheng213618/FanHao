@@ -141,8 +141,11 @@ export function createShortVideoStore(options = {}) {
     return row ? publicVideo(row, { detail: true }) : null;
   }
 
-  function videoFile(id) {
+  function videoFile(id, options = {}) {
     const row = databaseOrOpen().prepare("SELECT id, source_path FROM short_videos WHERE id = ? OR aweme_id = ?").get(id, id);
+    if (options.allowMissing && row?.source_path) {
+      return { id: row.id || id, path: path.resolve(row.source_path), type: "video", ext: path.extname(row.source_path).toLowerCase() };
+    }
     return fileFromRow(row, "video");
   }
 

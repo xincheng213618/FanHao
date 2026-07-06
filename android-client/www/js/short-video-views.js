@@ -42,6 +42,7 @@ export function createShortVideoViews(deps) {
 
   let eventsInstalled = false;
   let listEventsInstalled = false;
+  let listLoadMoreObserver = null;
   const warmedMedia = new Set();
   const firstFrameCache = new Map();
 
@@ -52,7 +53,7 @@ export function createShortVideoViews(deps) {
     applyListParams(params);
     els.viewKicker.textContent = "抖音点赞";
     els.viewTitle.textContent = "短视频";
-    els.viewMeta.textContent = listState.data?.summary?.scannedAt ? `索引 ${formatDateTime(listState.data.summary.scannedAt)}` : "独立短视频库";
+    els.viewMeta.textContent = "";
     els.viewContent.className = "content-list short-video-mobile-content";
     renderListShell();
     await loadList(renderGuard);
@@ -131,10 +132,10 @@ export function createShortVideoViews(deps) {
 
   function renderListShell() {
     els.viewContent.innerHTML = "";
+    resetListLoadMoreObserver();
     const shell = document.createElement("section");
     shell.className = "short-video-mobile-list";
-    shell.append(renderListHero(), renderControls());
-    if (listState.status) {
+    if (listState.status && !(listState.data?.videos || []).length) {
       const status = document.createElement("div");
       status.className = "short-video-mobile-status";
       status.textContent = listState.status;
@@ -153,17 +154,11 @@ export function createShortVideoViews(deps) {
     }
     shell.append(grid);
     if (listState.data?.hasMore) {
-      const more = document.createElement("button");
-      more.type = "button";
-      more.className = "short-video-mobile-load-more";
-      more.textContent = listState.loadingMore ? "正在加载更多" : "继续加载";
-      more.disabled = listState.loadingMore;
-      more.addEventListener("click", () => loadList(null, { append: true }).catch((error) => {
-        listState.loadingMore = false;
-        listState.status = error.message || "加载失败";
-        renderListShell();
-      }));
-      shell.append(more);
+      const sentinel = document.createElement("div");
+      sentinel.className = "short-video-mobile-load-more";
+      sentinel.setAttribute("aria-hidden", "true");
+      shell.append(sentinel);
+      observeListLoadMore(sentinel);
     }
     els.viewContent.append(shell);
   }
@@ -264,15 +259,31 @@ export function createShortVideoViews(deps) {
       fallback.textContent = "PLAY";
       thumb.append(fallback);
     }
-    const metric = document.createElement("small");
-    metric.textContent = [formatDuration(video.durationMs), video.stats?.likes ? `♥ ${formatCompact(video.stats.likes)}` : ""].filter(Boolean).join(" ");
-    thumb.append(metric);
-    const title = document.createElement("strong");
-    title.textContent = video.title || "无标题";
-    const meta = document.createElement("span");
-    meta.textContent = [video.author?.name || "未知作者", formatDate(video.publishedAt)].filter(Boolean).join(" · ");
-    card.append(thumb, title, meta);
+    card.setAttribute("aria-label", video.title || "打开短视频");
+    card.append(thumb);
     return card;
+  }
+
+  function resetListLoadMoreObserver() {
+    listLoadMoreObserver?.disconnect?.();
+    listLoadMoreObserver = null;
+  }
+
+  function observeListLoadMore(sentinel) {
+    if (!sentinel || !("IntersectionObserver" in window)) {
+      if (listState.data?.hasMore) loadList(null, { append: true }).catch(() => {});
+      return;
+    }
+    listLoadMoreObserver = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      if (!listState.data?.hasMore || listState.loading || listState.loadingMore) return;
+      loadList(null, { append: true }).catch((error) => {
+        listState.loadingMore = false;
+        listState.status = error.message || "加载失败";
+        renderListShell();
+      });
+    }, { root: null, rootMargin: "720px 0px", threshold: 0.01 });
+    listLoadMoreObserver.observe(sentinel);
   }
 
   async function openShortVideoFromList(video) {

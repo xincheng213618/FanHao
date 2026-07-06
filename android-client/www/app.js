@@ -12,7 +12,7 @@ import { createNovelViews } from "./js/novel-views.js?v=20260702-novel-local-man
 import { createPeopleViews } from "./js/people-views.js";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
-import { createShortVideoViews } from "./js/short-video-views.js?v=20260707-short-video-feed-02";
+import { createShortVideoViews } from "./js/short-video-views.js?v=20260707-short-video-cache-grid-01";
 import { createToolViews } from "./js/tool-views.js?v=20260702-novel-local-manage-74";
 import { createWorkViews } from "./js/work-views.js?v=20260705-mobile-sync-01";
 
