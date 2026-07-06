@@ -123,7 +123,7 @@ export function createShortVideoPage(deps) {
     const params = new URLSearchParams();
     if (state.shortVideo.query) params.set("q", state.shortVideo.query);
     if (state.shortVideo.author && state.shortVideo.author !== "all") params.set("author", state.shortVideo.author);
-    if (state.shortVideo.sort && state.shortVideo.sort !== "published") params.set("sort", state.shortVideo.sort);
+    params.set("sort", state.shortVideo.sort || "published");
     params.set("limit", "120");
     if (append) params.set("offset", String(state.shortVideo.data?.videos?.length || 0));
     const data = await api(`/api/short-videos?${params}`);
