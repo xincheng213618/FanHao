@@ -6,12 +6,15 @@ export function createPersonProfile(deps) {
     formatLibraryPath,
     formatLibraryPaths,
     formatNumber,
+    isPersonBulkDeleteActive,
+    isTrustedNetworkFeatureAvailable,
     linesFromTextarea,
     normalizeSourcePath,
     renderPeople,
     selectPerson,
     sourcePriority,
     state,
+    togglePersonBulkDeleteMode,
     workCoverUrl
   } = deps;
 
@@ -136,8 +139,9 @@ async function saveActorProfileMapping(person, options) {
       }
     });
     updatePersonActorProfile(person.id, data.profile);
-    if (options.status) options.status.textContent = "已保存";
-    await selectPerson(person.id, { resetFilter: false });
+    const merged = options.mergePrompt === false ? null : await maybeMergeActorCandidates(person.id, data.mergeCandidates || [], options.status);
+    if (options.status) options.status.textContent = merged ? "已保存并合并人物" : "已保存";
+    await selectPerson(merged?.person?.id || person.id, { resetFilter: false });
   } catch (error) {
     if (options.status) options.status.textContent = error.message || "保存失败";
     if (options.throwOnError) throw error;
@@ -147,6 +151,29 @@ async function saveActorProfileMapping(person, options) {
       options.button.textContent = originalText;
     }
   }
+}
+
+async function maybeMergeActorCandidates(targetPersonId, candidates, status) {
+  const items = (candidates || []).filter((item) => item?.id && String(item.id) !== String(targetPersonId));
+  if (!items.length) return null;
+
+  const summary = items
+    .slice(0, 6)
+    .map((item) => {
+      const matched = (item.matchedNames || []).length ? `（命中：${item.matchedNames.join("、")}）` : "";
+      return `${item.displayName || item.name || item.id}${matched} · ${formatNumber(item.workCount || 0)} 部`;
+    })
+    .join("\n");
+  const more = items.length > 6 ? `\n另有 ${formatNumber(items.length - 6)} 个候选` : "";
+  const ok = window.confirm(`检测到这些人物与当前映射的别名相同，是否合并到当前人物？\n\n${summary}${more}\n\n合并后旧人物会从数据库移除，作品关系会转到当前人物。`);
+  if (!ok) return null;
+
+  if (status) status.textContent = "正在合并人物";
+  const data = await api(`/api/people/${encodeURIComponent(targetPersonId)}/merge`, {
+    method: "POST",
+    body: { sourcePersonIds: items.map((item) => item.id) }
+  });
+  return data || null;
 }
 
 function createMappingField(labelText, control) {
@@ -223,10 +250,11 @@ async function openActorMappingModal(person) {
   const content = document.createElement("div");
   content.className = "mapping-modal-content";
 
-  const urlInput = document.createElement("input");
-  urlInput.type = "url";
-  urlInput.placeholder = "https://javdb.com/actors/BzpA";
-  urlInput.value = initialProfile.javdbUrl || "";
+  const urlInput = document.createElement("textarea");
+  urlInput.rows = 3;
+  urlInput.spellcheck = false;
+  urlInput.placeholder = "一行一个 JavDB actor 页，例如 https://javdb.com/actors/BzpA";
+  urlInput.value = (initialProfile.javdbUrls?.length ? initialProfile.javdbUrls : [initialProfile.javdbUrl]).filter(Boolean).join("\n");
 
   const nameInput = document.createElement("input");
   nameInput.type = "text";
@@ -324,11 +352,20 @@ async function openActorMappingModal(person) {
   };
   close.addEventListener("click", closeModal);
 
-  async function loadMapping() {
+  function applyProfileFields(profile = modalPerson.actorProfile || {}) {
+    const javdbUrls = profile.javdbUrls?.length ? profile.javdbUrls : [profile.javdbUrl];
+    urlInput.value = javdbUrls.filter(Boolean).join("\n");
+    nameInput.value = profile.displayName || modalPerson.name || person.name || "";
+    genderSelect.value = profile.gender || modalPerson.gender || "unknown";
+    aliasesInput.value = mappingAliasValues(modalPerson, profile).join("\n");
+  }
+
+  async function loadMapping(options = {}) {
     status.textContent = "正在同步映射";
     const query = manualSourcePaths.map((sourcePath) => `sourcePath=${encodeURIComponent(sourcePath)}`).join("&");
     const data = await api(`/api/admin/person-mapping/${encodeURIComponent(modalPerson.id)}${query ? `?${query}` : ""}`);
     modalPerson = data.person || modalPerson;
+    if (options.syncProfileFields) applyProfileFields(modalPerson.actorProfile || {});
     renderSourceCandidates(data.sourceCandidates || []);
     status.textContent = "映射已同步";
   }
@@ -624,7 +661,7 @@ async function openActorMappingModal(person) {
       });
       modalPerson = data.person || modalPerson;
       await selectPerson(modalPerson.id, { resetFilter: false });
-      await loadMapping();
+      await loadMapping({ syncProfileFields: true });
       status.textContent = `本地已同步：${formatNumber(modalPerson.workCount)} 部`;
     } catch (error) {
       status.textContent = error.message || "扫描失败";
@@ -652,7 +689,7 @@ async function openActorMappingModal(person) {
       status.textContent = `JavDB 任务已启动：${data.task?.id || ""}`;
       await waitForAdminTask(data.task?.id, status);
       await selectPerson(modalPerson.id, { resetFilter: false });
-      await loadMapping();
+      await loadMapping({ syncProfileFields: true });
       status.textContent = "JavDB 片单已更新";
     } catch (error) {
       status.textContent = error.message || "JavDB 更新失败";
@@ -680,7 +717,7 @@ async function openActorMappingModal(person) {
       status.textContent = `当前人物全量任务已启动：${data.task?.id || ""}`;
       await waitForAdminTask(data.task?.id, status);
       await selectPerson(modalPerson.id, { resetFilter: false });
-      await loadMapping();
+      await loadMapping({ syncProfileFields: true });
       status.textContent = "当前人物全量 JavDB 扫描已完成";
     } catch (error) {
       status.textContent = error.message || "当前人物全量扫描失败";
@@ -690,7 +727,7 @@ async function openActorMappingModal(person) {
   });
 
   try {
-    await loadMapping();
+    await loadMapping({ syncProfileFields: true });
     renderCurrentCover();
   } catch (error) {
     status.textContent = error.message || "映射读取失败";
@@ -724,21 +761,36 @@ function updatePersonActorProfile(personId, profile) {
 }
 
 function createPersonProfileActions(person) {
-  if (state.accessMode !== "local") return null;
+  const canOpenLocalFolders = state.accessMode === "local";
+  const canBulkDelete = typeof isTrustedNetworkFeatureAvailable === "function" && isTrustedNetworkFeatureAvailable();
   const paths = uniqueSourcePaths(person);
-  if (!paths.length) return null;
+  if (!paths.length && !canBulkDelete) return null;
 
   const actions = document.createElement("div");
   actions.className = "person-profile-actions";
 
-  for (const sourcePath of paths) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "folder-button";
-    button.textContent = sourceButtonLabel(sourcePath);
-    button.title = formatLibraryPath(sourcePath);
-    button.addEventListener("click", () => openLocalFolder(sourcePath, button));
-    actions.append(button);
+  if (canOpenLocalFolders) {
+    for (const sourcePath of paths) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "folder-button";
+      button.textContent = sourceButtonLabel(sourcePath);
+      button.title = formatLibraryPath(sourcePath);
+      button.addEventListener("click", () => openLocalFolder(sourcePath, button));
+      actions.append(button);
+    }
+  }
+
+  if (canBulkDelete && (person.workCount || 0) > 0) {
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "folder-button";
+    deleteButton.textContent = typeof isPersonBulkDeleteActive === "function" && isPersonBulkDeleteActive() ? "退出多选删除" : "多选删除";
+    deleteButton.title = "选择这个演员下的本地作品并批量删除文件夹";
+    deleteButton.addEventListener("click", () => {
+      if (typeof togglePersonBulkDeleteMode === "function") togglePersonBulkDeleteMode();
+    });
+    actions.append(deleteButton);
   }
 
   return actions;

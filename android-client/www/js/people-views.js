@@ -22,14 +22,19 @@ export function createPeopleViews(context) {
     renderCurrentViewPreservingScroll
   } = context;
 
+  function visiblePeople(people) {
+    return (people || []).filter((person) => person?.actorProfile?.gender !== "male");
+  }
+
   function renderPreviewPeople(people) {
+    const list = visiblePeople(people);
     els.personPreview.innerHTML = "";
-    if (!people.length) {
+    if (!list.length) {
       els.personPreview.innerHTML = `<div class="loading-row">暂无人物数据</div>`;
       return;
     }
 
-    for (const person of people) {
+    for (const person of list) {
       els.personPreview.append(createPersonCard(person, "preview"));
     }
   }
@@ -37,7 +42,7 @@ export function createPeopleViews(context) {
   function renderPeopleIndex() {
     setActiveBottom("people");
     const sortMode = getPeopleSortMode();
-    const people = [...(getLibrary()?.people || [])].sort((a, b) => comparePeople(a, b, sortMode));
+    const people = visiblePeople(getLibrary()?.people).sort((a, b) => comparePeople(a, b, sortMode));
     const visible = people.slice(0, getPeopleLimit());
 
     els.viewKicker.textContent = "人物索引";

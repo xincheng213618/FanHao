@@ -29,6 +29,7 @@ public class MainActivity extends BridgeActivity {
   @Override
   protected void onCreate(Bundle savedInstanceState) {
     registerPlugin(FanHaoPlayerPlugin.class);
+    registerPlugin(FanHaoSystemPlugin.class);
     registerPlugin(FanHaoUpdaterPlugin.class);
     registerPlugin(FanHaoNovelPlugin.class);
     FanHaoNovelPlugin.capturePendingTextIntent(this, getIntent());

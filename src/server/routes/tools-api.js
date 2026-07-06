@@ -1,16 +1,14 @@
 export async function routeToolsApi(req, res, url, deps) {
   const {
-    createTxtFormatDownload,
     readJsonBody,
     sendJson,
-    serveTxtToolDownload,
-    txtToolMaxBodyBytes
+    txtFormatToolService
   } = deps;
 
   if (url.pathname === "/api/tools/txt-format" && req.method === "POST") {
     try {
-      const body = await readJsonBody(req, txtToolMaxBodyBytes);
-      const result = await createTxtFormatDownload(body);
+      const body = await readJsonBody(req, txtFormatToolService.maxBodyBytes);
+      const result = await txtFormatToolService.createDownload(body);
       sendJson(res, 200, result);
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "TXT 格式化失败" });
@@ -20,7 +18,7 @@ export async function routeToolsApi(req, res, url, deps) {
 
   const txtDownloadMatch = /^\/api\/tools\/txt-format\/download\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
   if (txtDownloadMatch && req.method === "GET") {
-    serveTxtToolDownload(req, res, txtDownloadMatch[1]);
+    txtFormatToolService.serveDownload(req, res, txtDownloadMatch[1]);
     return true;
   }
 

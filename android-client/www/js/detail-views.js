@@ -1,4 +1,4 @@
-import { fetchJson, postJson } from "./api.js?v=20260702-novel-local-manage-74";
+import { fetchJson, postJson, putJson } from "./api.js?v=20260706-mobile-web-sync-01";
 import { createAndroidVideoSection } from "./android-player.js";
 import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js?v=20260705-mobile-actions-01";
 import { createDetailSectionTitle } from "./detail-ui.js";
@@ -426,21 +426,35 @@ export function createDetailViews(context) {
   function createPreviewMediaPanel(work) {
     const info = work.infoMetadata || work.infoSummary || {};
     const activeUrl = getActiveUrl();
-    const images = uniquePreviewImageUrls([
-      ...(info.previewImages || []),
-      ...localPreviewImageUrls(work).map((imagePath) => absoluteUrl(activeUrl, imagePath))
+    const images = uniquePreviewMediaItems([
+      ...localPreviewImageItems(work).map((item) => ({ ...item, url: absoluteUrl(activeUrl, item.url) })),
+      ...remotePreviewImageItems(info.previewImages || [])
     ]).slice(0, 12);
     const videoUrl = cleanRemoteUrl(info.previewVideoUrl);
     if (!images.length && !videoUrl) return null;
 
     const section = document.createElement("div");
     section.className = "detail-block work-preview-media-block";
-    section.append(createDetailSectionTitle("预览媒体", images.length ? `${formatNumber(images.length)} 张` : ""));
+    const titleRow = document.createElement("div");
+    titleRow.className = "work-preview-title-row";
+    titleRow.append(createDetailSectionTitle("预览媒体", images.length ? `${formatNumber(images.length)} 张` : ""));
+    if (work.manualCoverId) {
+      const reset = document.createElement("button");
+      reset.type = "button";
+      reset.className = "work-preview-cover-reset";
+      reset.textContent = "恢复默认封面";
+      reset.addEventListener("click", () => setManualWorkCover(work, "", reset));
+      titleRow.append(reset);
+    }
+    section.append(titleRow);
 
     if (images.length) {
       const strip = document.createElement("div");
       strip.className = "work-preview-strip";
-      for (const imageUrl of images) {
+      for (const item of images) {
+        const frame = document.createElement("div");
+        frame.className = `work-preview-item${item.imageId && item.imageId === work.manualCoverId ? " selected" : ""}`;
+
         const button = document.createElement("button");
         button.type = "button";
         button.className = "work-preview-thumb";
@@ -449,10 +463,29 @@ export function createDetailViews(context) {
         img.loading = "lazy";
         img.decoding = "async";
         img.alt = "";
-        img.src = imageUrl;
+        img.src = item.url;
         button.append(img);
-        button.addEventListener("click", () => mediaViewer?.openImage?.(imageUrl, work.title || work.directoryName || "预览图"));
-        strip.append(button);
+        button.addEventListener("click", () => mediaViewer?.openImage?.(item.url, work.title || work.directoryName || "预览图"));
+        frame.append(button);
+
+        if (item.imageId) {
+          const coverButton = document.createElement("button");
+          coverButton.type = "button";
+          coverButton.className = "work-preview-cover-action";
+          if (item.imageId === work.manualCoverId) {
+            coverButton.textContent = "当前封面";
+            coverButton.disabled = true;
+          } else if (!work.manualCoverId && item.imageId === work.coverId) {
+            coverButton.textContent = "默认封面";
+            coverButton.disabled = true;
+          } else {
+            coverButton.textContent = "设为封面";
+            coverButton.addEventListener("click", () => setManualWorkCover(work, item.imageId, coverButton));
+          }
+          frame.append(coverButton);
+        }
+
+        strip.append(frame);
       }
       section.append(strip);
     }
@@ -472,11 +505,36 @@ export function createDetailViews(context) {
     return section;
   }
 
-  function localPreviewImageUrls(work) {
+  async function setManualWorkCover(work, imageId, button) {
+    if (!work?.id) return;
+    const previousText = button?.textContent || "";
+    if (button) {
+      button.disabled = true;
+      button.textContent = imageId ? "设置中" : "恢复中";
+    }
+    try {
+      const data = await putJson(getActiveUrl(), `/api/works/${encodeURIComponent(work.id)}/cover`, { imageId });
+      if (data.work) Object.assign(work, data.work);
+      await updateCachedWorkDetail(work).catch(() => null);
+      renderMessage(imageId ? "封面已更新。" : "已恢复默认封面。", "quiet", false);
+      renderWorkDetail(work.id);
+    } catch (error) {
+      if (button) {
+        button.disabled = false;
+        button.textContent = previousText;
+      }
+      renderMessage(error.message || "封面设置失败", "error", false);
+    }
+  }
+
+  function localPreviewImageItems(work) {
     return [...(work.images || [])]
-      .filter((image) => image?.id && image.id !== work.coverId)
+      .filter((image) => image?.id)
       .sort(comparePreviewImageFiles)
-      .map((image) => `/media/image/${encodeURIComponent(image.id)}`);
+      .map((image) => ({
+        imageId: image.id,
+        url: `/media/image/${encodeURIComponent(image.id)}`
+      }));
   }
 
   function comparePreviewImageFiles(a, b) {
@@ -511,6 +569,24 @@ export function createDetailViews(context) {
       urls.push(url);
     }
     return urls;
+  }
+
+  function remotePreviewImageItems(values) {
+    return uniquePreviewImageUrls(values).map((url) => ({ imageId: "", url }));
+  }
+
+  function uniquePreviewMediaItems(items) {
+    const seen = new Set();
+    const result = [];
+    for (const item of Array.isArray(items) ? items : []) {
+      const imageId = String(item?.imageId || "");
+      const url = cleanPreviewImageUrl(item?.url);
+      const key = imageId ? `image:${imageId}` : `url:${url.toLowerCase()}`;
+      if (!url || seen.has(key)) continue;
+      seen.add(key);
+      result.push({ imageId, url });
+    }
+    return result;
   }
 
   function fieldMap(fields) {

@@ -155,7 +155,7 @@ def actor_jobs(args: argparse.Namespace) -> list[dict]:
             FROM people p
             JOIN person_external_refs ref ON ref.person_id = p.id
             WHERE {" AND ".join(where)}
-            ORDER BY p.id
+            ORDER BY p.id, ref.id
             """,
             params,
         ).fetchall()
@@ -165,9 +165,10 @@ def actor_jobs(args: argparse.Namespace) -> list[dict]:
     for row in rows:
         actor_url = canonical_actor_url(row["url"] or row["external_key"] or "")
         actor_id = actor_id_from_url(actor_url)
-        if not actor_url or not actor_id or row["id"] in seen:
+        job_key = (int(row["id"]), actor_id)
+        if not actor_url or not actor_id or job_key in seen:
             continue
-        seen.add(row["id"])
+        seen.add(job_key)
         jobs.append(
             {
                 "id": int(row["id"]),
@@ -221,13 +222,13 @@ def crawl_actor(client: JavDbClient, job: dict, args: argparse.Namespace) -> dic
 def save_profile(conn: sqlite3.Connection, job: dict, profile: dict, client: JavDbClient) -> dict:
     now = timestamp()
     display_name = clean_text(profile.get("display_name")) or job["name"]
-    aliases = unique_names([*(profile.get("aliases") or []), job["db_name"]])
+    aliases = unique_names([display_name, *(profile.get("aliases") or []), job["db_name"]])
     movie_count = profile.get("movie_count")
     conn.execute(
         """
         UPDATE people
-        SET display_name = COALESCE(NULLIF(?, ''), display_name),
-            name_search = COALESCE(NULLIF(?, ''), name_search),
+        SET display_name = COALESCE(NULLIF(display_name, ''), NULLIF(?, ''), display_name),
+            name_search = COALESCE(NULLIF(name_search, ''), NULLIF(?, ''), name_search),
             movie_count = COALESCE(?, movie_count),
             status = 'ok',
             error = NULL,
@@ -249,7 +250,7 @@ def save_profile(conn: sqlite3.Connection, job: dict, profile: dict, client: Jav
         (job["id"], job["actor_id"], job["actor_url"], SOURCE, now, now),
     )
     for alias in aliases:
-        if normalize_person_search(alias) == normalize_person_search(display_name):
+        if normalize_person_search(alias) == normalize_person_search(job["name"]):
             continue
         conn.execute(
             """

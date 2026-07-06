@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FanHao 播放</title>
     <link rel="stylesheet" href="/css/legacy.css?v=20260705-local-marker-a-01" />
+    <link rel="stylesheet" href="/vendor/plyr/plyr.css" />
     <style>
       body.player-page {
         min-height: 100vh;
@@ -37,16 +38,195 @@
         padding: 18px 22px 22px;
       }
       .player-stage {
+        position: relative;
         display: grid;
         min-height: 0;
         align-content: start;
         gap: 12px;
+      }
+      .player-stage:fullscreen {
+        align-content: center;
+        background: #000;
+        padding: 14px;
+      }
+      .player-stage:fullscreen video {
+        max-height: calc(100vh - 118px);
+      }
+      .player-stage.native-controls video {
+        max-height: calc(100vh - 140px);
       }
       .player-stage video {
         width: 100%;
         max-height: calc(100vh - 140px);
         border-radius: 8px;
         background: #000;
+      }
+      .player-stage .plyr {
+        position: relative;
+        border-radius: 8px;
+        --plyr-color-main: #60d3aa;
+        --plyr-video-background: #000;
+      }
+      .player-frame-hold {
+        position: absolute;
+        inset: 0;
+        z-index: 3;
+        border-radius: inherit;
+        background: #000;
+        background-position: center;
+        background-repeat: no-repeat;
+        background-size: contain;
+        opacity: 1;
+        pointer-events: none;
+        transition: opacity 180ms ease;
+      }
+      .player-frame-hold[hidden] {
+        display: none !important;
+      }
+      .player-frame-hold.fading {
+        opacity: 0;
+      }
+      .player-stage .plyr__video-wrapper {
+        position: relative;
+        max-height: calc(100vh - 140px);
+        overflow: hidden;
+      }
+      .player-stage.stream-controls .plyr__video-wrapper {
+        aspect-ratio: var(--player-video-aspect, 16 / 9);
+      }
+      .player-stage.stream-switching .plyr__controls {
+        opacity: 1 !important;
+        pointer-events: auto !important;
+        transform: translateY(0) !important;
+      }
+      .player-stage.stream-switching .player-seek-control {
+        opacity: 1 !important;
+      }
+      .player-stage.native-controls .plyr__video-wrapper {
+        max-height: calc(100vh - 140px);
+      }
+      .player-stage:fullscreen .plyr__video-wrapper {
+        max-height: calc(100vh - 118px);
+      }
+      .player-seek-control {
+        display: grid;
+        gap: 8px;
+        min-width: 0;
+        padding: 0;
+      }
+      .player-seek-control[hidden] {
+        display: none !important;
+      }
+      .player-stage.stream-controls .player-seek-control {
+        display: flex;
+        flex: 1 1 auto;
+        align-items: center;
+        gap: 8px;
+        margin: 0 4px;
+        min-width: 180px;
+      }
+      .player-status-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-width: 0;
+      }
+      .player-mode-text {
+        min-width: 0;
+        overflow: hidden;
+        color: rgba(255, 255, 255, 0.78);
+        font-size: 11px;
+        font-weight: 800;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .player-status-text {
+        flex: 0 0 auto;
+        color: rgba(96, 211, 170, 0.95);
+        font-size: 11px;
+        font-weight: 900;
+      }
+      .player-stage.stream-controls .player-status-row {
+        display: none;
+      }
+      .player-timeline-row {
+        display: grid;
+        grid-template-columns: 50px minmax(0, 1fr) 56px;
+        align-items: center;
+        gap: 9px;
+        min-width: 0;
+      }
+      .player-stage.stream-controls .player-timeline-row {
+        flex: 1 1 auto;
+        grid-template-columns: minmax(90px, 1fr) 78px;
+      }
+      .player-seek-time {
+        min-width: 0;
+        color: rgba(255, 255, 255, 0.82);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        font-weight: 800;
+        text-align: center;
+      }
+      .player-seek-range {
+        width: 100%;
+        min-width: 0;
+        height: 18px;
+        accent-color: #60d3aa;
+        cursor: pointer;
+      }
+      .player-stage.stream-controls #playerCurrentTime {
+        display: none;
+      }
+      .player-playback-tools {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-width: 0;
+      }
+      .player-stage.stream-controls .player-playback-tools {
+        flex: 0 0 auto;
+        justify-content: flex-start;
+      }
+      .player-playback-tools[hidden] {
+        display: none !important;
+      }
+      .player-playback-buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .player-playback-buttons button {
+        min-width: 48px;
+        border: 0;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.12);
+        color: rgba(255, 255, 255, 0.92);
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+        font-weight: 900;
+        padding: 5px 8px;
+      }
+      .player-playback-buttons button:hover {
+        background: rgba(96, 211, 170, 0.22);
+      }
+      .player-playback-buttons button:disabled {
+        cursor: progress;
+        opacity: 0.65;
+      }
+      .player-stage.stream-controls .player-playback-buttons button {
+        min-width: 0;
+        background: transparent;
+        border-radius: 3px;
+        color: rgba(255, 255, 255, 0.88);
+        padding: 5px 6px;
+      }
+      .player-stage.stream-controls .player-playback-buttons button:hover {
+        background: rgba(255, 255, 255, 0.12);
+        color: #fff;
       }
       .player-stage video[hidden],
       .player-notice[hidden] {
@@ -289,6 +469,7 @@
       @media (max-width: 900px) {
         .player-page-main {
           grid-template-columns: 1fr;
+          gap: 12px;
           padding: 12px;
         }
         .player-page-header {
@@ -296,6 +477,92 @@
         }
         .player-stage video {
           max-height: 58vh;
+        }
+        .player-playback-tools,
+        .player-status-row {
+          align-items: stretch;
+          flex-direction: column;
+        }
+        .player-timeline-row {
+          grid-template-columns: 46px minmax(0, 1fr) 54px;
+        }
+      }
+      @media (max-width: 640px) {
+        .player-page-header {
+          padding: 10px 12px;
+        }
+        .player-page-header h1 {
+          display: -webkit-box;
+          overflow: hidden;
+          font-size: 16px;
+          white-space: normal;
+          -webkit-box-orient: vertical;
+          -webkit-line-clamp: 2;
+        }
+        .player-page-main {
+          padding: 8px;
+        }
+        .player-stage {
+          gap: 8px;
+        }
+        .player-stage video,
+        .player-stage .plyr__video-wrapper {
+          max-height: 42vh;
+        }
+        .player-stage .plyr {
+          border-radius: 6px;
+        }
+        .player-stage.stream-controls .plyr__controls {
+          flex-wrap: wrap;
+          gap: 6px;
+          padding: 8px;
+        }
+        .player-stage.stream-controls .plyr__volume input[type="range"] {
+          display: none;
+        }
+        .player-stage.stream-controls .player-seek-control {
+          order: 20;
+          display: grid;
+          flex: 0 0 100%;
+          width: 100%;
+          min-width: 0;
+          gap: 6px;
+          margin: 0;
+          box-sizing: border-box;
+          border: 1px solid rgba(255, 255, 255, 0.11);
+          border-radius: 6px;
+          background: rgba(255, 255, 255, 0.05);
+          padding: 8px;
+        }
+        .player-stage.stream-controls .player-timeline-row {
+          width: 100%;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 8px;
+        }
+        .player-stage.stream-controls .player-playback-tools {
+          width: 100%;
+        }
+        .player-stage.stream-controls .player-playback-buttons {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          width: 100%;
+          gap: 6px;
+        }
+        .player-stage.stream-controls .player-playback-buttons button {
+          min-height: 30px;
+          padding: 6px 4px;
+          text-align: center;
+        }
+        .player-side {
+          gap: 10px;
+        }
+        .player-panel {
+          padding: 10px;
+        }
+        .player-meta-row,
+        .player-entity-row {
+          grid-template-columns: 54px minmax(0, 1fr);
+          gap: 8px;
         }
       }
     </style>
@@ -308,7 +575,25 @@
       <main class="player-page-main">
         <section class="player-stage">
           <div class="player-notice" id="playerNotice">正在读取作品</div>
-          <video id="playerVideo" controls playsinline preload="metadata" hidden></video>
+          <video id="playerVideo" playsinline preload="metadata" hidden></video>
+          <div class="player-seek-control" id="playerSeekControl" hidden>
+            <div class="player-status-row">
+              <div class="player-mode-text" id="playerModeText"></div>
+              <div class="player-status-text" id="playerStatusText"></div>
+            </div>
+            <div class="player-timeline-row">
+              <span class="player-seek-time" id="playerCurrentTime">0:00</span>
+              <input class="player-seek-range" id="playerSeekRange" type="range" min="0" max="0" value="0" step="0.1" aria-label="播放进度" />
+              <span class="player-seek-time" id="playerDurationTime">0:00</span>
+            </div>
+            <div class="player-playback-tools" id="playerTools" hidden>
+              <div class="player-playback-buttons">
+                <button id="skipBackButton" type="button">-10s</button>
+                <button id="skipForwardButton" type="button">+30s</button>
+                <button id="reloadStreamButton" type="button">刷新流</button>
+              </div>
+            </div>
+          </div>
         </section>
         <aside class="player-side">
           <section class="player-panel">
@@ -334,6 +619,7 @@
         </aside>
       </main>
     </div>
-    <script type="module" src="/js/player-page.js?v=20260706-move-person-create-01"></script>
+    <script src="/vendor/plyr/plyr.min.js"></script>
+    <script type="module" src="/js/player-page.js?v=20260706-media-player-01"></script>
   </body>
 </html>

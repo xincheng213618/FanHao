@@ -15,6 +15,14 @@ const PHOTO_CATEGORY_LABELS = new Map([
   ["[COS]", "COS"]
 ]);
 const MOVIE_QUICK_CATEGORY_LIMIT = 14;
+const MEDIA_KIND_CATEGORY_VALUES = {
+  movie: "__fanhao_media_kind_movie__",
+  tv: "__fanhao_media_kind_tv__"
+};
+const MEDIA_KIND_CATEGORY_LABELS = {
+  [MEDIA_KIND_CATEGORY_VALUES.movie]: "电影",
+  [MEDIA_KIND_CATEGORY_VALUES.tv]: "电视剧"
+};
 const MEDIA_SORT_OPTIONS = [
   ["updated", "最近更新"],
   ["rating", "豆瓣评分"],
@@ -235,6 +243,44 @@ function mediaItemsForMode(mode = state.gallery.mode) {
   return kind ? (state.gallery.data?.mediaItems || []).filter((item) => item.mediaKind === kind) : [];
 }
 
+function galleryMediaPlayerUrl(item) {
+  const params = new URLSearchParams({ mediaId: String(item?.id || "") });
+  params.set("returnTo", window.location.pathname + window.location.search);
+  return `/player.html?${params.toString()}`;
+}
+
+function openScreenMediaPlayer(item) {
+  if (!item?.id) return;
+  window.location.href = galleryMediaPlayerUrl(item);
+}
+
+function tvSeriesGroupCountForItems(items = []) {
+  const groups = new Set();
+  for (const item of items) {
+    const seriesName = String(item.seriesName || item.subCategory || item.category || "未归类").trim();
+    const region = String(item.category || "电视剧").trim();
+    groups.add(`${region}\n${seriesName}`);
+  }
+  return groups.size;
+}
+
+function mediaKindFromCategory(value) {
+  const entry = Object.entries(MEDIA_KIND_CATEGORY_VALUES).find(([, categoryValue]) => categoryValue === value);
+  return entry ? entry[0] : "";
+}
+
+function galleryCategoryDisplayName(value) {
+  const text = String(value || "").trim();
+  return MEDIA_KIND_CATEGORY_LABELS[text] || text;
+}
+
+function galleryCategoryMatchesItem(item, category = state.gallery.category) {
+  if (!category || category === "all") return true;
+  const mediaKind = mediaKindFromCategory(category);
+  if (mediaKind) return item?.mediaKind === mediaKind;
+  return item?.category === category;
+}
+
 function createTvRegionStrip() {
   const regions = localGalleryFacets(mediaItemsForMode("tv"), "category");
   const total = mediaItemsForMode("tv").length;
@@ -271,8 +317,10 @@ function createTvRegionStrip() {
 
 function createMovieCategoryStrip() {
   const source = state.gallery.mode === "media" ? mediaItemsForMode("media") : mediaItemsForMode("movie");
-  const categories = localGalleryFacets(source, "category").slice(0, MOVIE_QUICK_CATEGORY_LIMIT);
-  const total = source.length;
+  const categories = (state.gallery.mode === "media" ? currentGalleryCategoryFacets() : localGalleryFacets(source, "category")).slice(0, MOVIE_QUICK_CATEGORY_LIMIT);
+  const total = state.gallery.mode === "media"
+    ? mediaItemsForMode("movie").length + tvSeriesGroupCountForItems(mediaItemsForMode("tv"))
+    : source.length;
   const strip = document.createElement("div");
   strip.className = "gallery-category-strip gallery-movie-category-strip";
 
@@ -295,10 +343,10 @@ function createMovieCategoryStrip() {
   };
 
   addChip("all", "全部分类", total);
-  for (const item of categories) addChip(item.value, item.value, item.count);
+  for (const item of categories) addChip(item.value, galleryCategoryDisplayName(item.value), item.count);
   if (state.gallery.category !== "all" && !categories.some((item) => item.value === state.gallery.category)) {
-    const count = source.filter((item) => item.category === state.gallery.category).length;
-    addChip(state.gallery.category, state.gallery.category, count);
+    const count = source.filter((item) => galleryCategoryMatchesItem(item)).length;
+    addChip(state.gallery.category, galleryCategoryDisplayName(state.gallery.category), count);
   }
 
   return strip;
@@ -342,14 +390,15 @@ function renderGalleryControls(options = {}) {
   category.append(new Option(state.gallery.mode === "photo" ? "全部大类" : state.gallery.mode === "tv" ? "全部" : "全部分类", "all"));
   const categoryFacets = currentGalleryCategoryFacets();
   for (const item of categoryFacets) {
-    const label = state.gallery.mode === "photo" ? photoCategoryDisplayName(item.value) : item.value;
+    const label = state.gallery.mode === "photo" ? photoCategoryDisplayName(item.value) : galleryCategoryDisplayName(item.value);
     appendFacetOption(category, label, item.value, item.count);
   }
   if (
     state.gallery.category !== "all" &&
     !categoryFacets.some((item) => item.value === state.gallery.category)
   ) {
-    category.append(new Option(photoCategoryDisplayName(state.gallery.category), state.gallery.category));
+    const label = state.gallery.mode === "photo" ? photoCategoryDisplayName(state.gallery.category) : galleryCategoryDisplayName(state.gallery.category);
+    category.append(new Option(label, state.gallery.category));
   }
   category.value = state.gallery.category;
   category.addEventListener("change", () => {
@@ -539,6 +588,15 @@ function currentGalleryCategoryFacets() {
   const facets = state.gallery.data?.facets || {};
   if (state.gallery.mode === "photo") return facets.categories || [];
   const kind = galleryMediaKindForMode(state.gallery.mode);
+  if (kind === "media") {
+    const typeFacets = [
+      { value: MEDIA_KIND_CATEGORY_VALUES.movie, count: mediaItemsForMode("movie").length },
+      { value: MEDIA_KIND_CATEGORY_VALUES.tv, count: tvSeriesGroupCountForItems(mediaItemsForMode("tv")) }
+    ].filter((item) => item.count > 0);
+    const typeLabels = new Set(Object.values(MEDIA_KIND_CATEGORY_LABELS));
+    const categoryFacets = (facets.media?.categories || []).filter((item) => !typeLabels.has(String(item.value || "").trim()));
+    return [...typeFacets, ...categoryFacets];
+  }
   return kind ? facets[kind]?.categories || [] : [];
 }
 
@@ -553,7 +611,7 @@ function currentGalleryPeopleFacets() {
 
 function currentTvSeriesFacets() {
   let items = mediaItemsForMode("tv");
-  if (state.gallery.category !== "all") items = items.filter((item) => item.category === state.gallery.category);
+  if (state.gallery.category !== "all") items = items.filter((item) => galleryCategoryMatchesItem(item));
   const query = state.gallery.query.trim();
   if (query) items = items.filter((item) => includesText(galleryText(item), query));
   return localGalleryFacets(items, "seriesName");
@@ -743,20 +801,20 @@ function filteredMediaItems() {
   if (kind === "media") {
     if (state.gallery.person !== "all") {
       let episodes = mediaItemsForMode("tv");
-      if (state.gallery.category !== "all") episodes = episodes.filter((item) => item.category === state.gallery.category);
+      if (state.gallery.category !== "all") episodes = episodes.filter((item) => galleryCategoryMatchesItem(item));
       episodes = episodes.filter((item) => item.seriesName === state.gallery.person);
       const query = state.gallery.query.trim();
       if (query) episodes = episodes.filter((item) => includesText(galleryText(item), query));
       return [...episodes].sort((a, b) => String(a.title || "").localeCompare(String(b.title || ""), undefined, { numeric: true, sensitivity: "base" }));
     }
     let movies = mediaItemsForMode("movie");
-    if (state.gallery.category !== "all") movies = movies.filter((item) => item.category === state.gallery.category);
+    if (state.gallery.category !== "all") movies = movies.filter((item) => galleryCategoryMatchesItem(item));
     const query = state.gallery.query.trim();
     if (query) movies = movies.filter((item) => includesText(galleryText(item), query));
     return sortMovieItems([...movies, ...tvSeriesGroups().map(tvSeriesWorkItem)]);
   }
   let items = mediaItemsForMode(state.gallery.mode);
-  if (state.gallery.category !== "all") items = items.filter((item) => item.category === state.gallery.category);
+  if (state.gallery.category !== "all") items = items.filter((item) => galleryCategoryMatchesItem(item));
   if (state.gallery.person !== "all") {
     items = items.filter((item) => (kind === "tv" ? item.seriesName : item.personName) === state.gallery.person);
   }
@@ -909,7 +967,7 @@ function westernPersonGroups() {
 
 function filteredTvItemsForGroups() {
   let items = mediaItemsForMode("tv");
-  if (state.gallery.category !== "all") items = items.filter((item) => item.category === state.gallery.category);
+  if (state.gallery.category !== "all") items = items.filter((item) => galleryCategoryMatchesItem(item));
   const query = state.gallery.query.trim();
   if (query) items = items.filter((item) => includesText(galleryText(item), query));
   return items;
@@ -1136,7 +1194,7 @@ function renderTvSeriesBar(container, total) {
   title.textContent = tvSeriesDisplayTitle(state.gallery.person, metadata);
   const meta = document.createElement("span");
   meta.textContent = [
-    state.gallery.category !== "all" ? state.gallery.category : "",
+    state.gallery.category !== "all" ? galleryCategoryDisplayName(state.gallery.category) : "",
     tvSeriesRatingText(metadata),
     metadata?.pubdate ? `首播 ${metadata.pubdate}` : "",
     metadata?.episodeCount ? `${formatNumber(metadata.episodeCount)} 集` : `${formatNumber(total)} 集`,
@@ -1812,7 +1870,11 @@ function createMovieExploreItem(item, index) {
       syncGalleryRoute();
       return;
     }
-    openGalleryMedia(item.id);
+    if (["movie", "tv"].includes(item.mediaKind)) {
+      openScreenMediaPlayer(item);
+    } else {
+      openGalleryMedia(item.id);
+    }
   });
 
   const poster = document.createElement("div");
@@ -1915,7 +1977,7 @@ function renderMovieExploreSidebar(aside, items) {
     button.type = "button";
     button.className = state.gallery.category === item.value ? "active" : "";
     button.innerHTML = "<span></span><small></small>";
-    button.querySelector("span").textContent = item.value;
+    button.querySelector("span").textContent = galleryCategoryDisplayName(item.value);
     button.querySelector("small").textContent = `${formatNumber(item.count)} 部`;
     button.addEventListener("click", () => {
       state.gallery.category = item.value;
@@ -1955,7 +2017,7 @@ function renderMovieShelf(container) {
   title.textContent = state.gallery.mode === "media" ? "选影视作品" : "选电影";
   const meta = document.createElement("span");
   meta.textContent = [
-    state.gallery.category !== "all" ? state.gallery.category : "全部",
+    state.gallery.category !== "all" ? galleryCategoryDisplayName(state.gallery.category) : "全部",
     state.gallery.sort === "rating" ? "豆瓣高分" : "",
     `${formatNumber(items.length)} 部`
   ].filter(Boolean).join(" / ");
@@ -2032,7 +2094,7 @@ function renderMediaShelf(container) {
         extra,
         badges: doubanMetadata?.rating ? [`豆瓣 ${Number(doubanMetadata.rating).toFixed(1)}`] : [],
         placeholder: item.kindLabel || galleryModeLabel(state.gallery.mode),
-        onOpen: () => openGalleryMedia(item.id)
+        onOpen: () => ["movie", "tv"].includes(item.mediaKind) ? openScreenMediaPlayer(item) : openGalleryMedia(item.id)
       })
     );
   }

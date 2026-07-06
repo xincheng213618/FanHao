@@ -19,6 +19,18 @@
         <item name="android:windowLightNavigationBar">true</item>
     </style>
 
+    <style name="AppTheme.ShortVideo" parent="AppTheme.NoActionBar">
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowAnimationStyle">@style/AppTheme.NoAnimation</item>
+    </style>
+
+    <style name="AppTheme.NoAnimation" parent="@android:style/Animation.Activity">
+        <item name="android:activityOpenEnterAnimation">@anim/no_anim</item>
+        <item name="android:activityOpenExitAnimation">@anim/no_anim</item>
+        <item name="android:activityCloseEnterAnimation">@anim/no_anim</item>
+        <item name="android:activityCloseExitAnimation">@anim/no_anim</item>
+    </style>
 
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
         <item name="android:background">@drawable/splash_screen</item>

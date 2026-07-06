@@ -16,7 +16,7 @@ from code_parser import code_key, normalize_code
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = PROJECT_ROOT / "data" / "fanhao-core-v2.sqlite"
 
-ROOTS = [
+BASE_ROOTS = [
     Path("G:/"),
     Path("F:/"),
     Path("O:/"),
@@ -28,6 +28,8 @@ ROOTS = [
     Path("V:/[A1]"),
     Path("V:/AV"),
 ]
+WESTERN_ROOTS = [Path(item) for item in os.environ.get("FANHAO_WESTERN_ROOTS", "R:/").replace("|", ";").split(";") if item.strip()]
+ROOTS = [*BASE_ROOTS, *WESTERN_ROOTS]
 
 EXCLUDED_DIRS = {"$RECYCLE.BIN", "System Volume Information", "Recovery"}
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".ts", ".m2ts", ".webm", ".iso"}
@@ -78,6 +80,14 @@ def normalize_person_search(value: str) -> str:
 
 def clean_path(value: str | Path) -> str:
     return os.path.abspath(os.path.normpath(str(value)))
+
+
+def selected_roots(scope: str, custom_roots: list[str] | None = None) -> list[Path]:
+    if custom_roots:
+        return [Path(item) for item in custom_roots if str(item or "").strip()]
+    if scope == "western":
+        return WESTERN_ROOTS
+    return ROOTS
 
 
 def path_key(value: str | Path) -> str:
@@ -266,6 +276,17 @@ def load_people(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
             key = normalize_person_search(name)
             if key and key not in people:
                 people[key] = row
+    for row in conn.execute(
+        """
+        SELECT p.id, p.name, p.display_name, p.folder_path, pa.alias
+        FROM person_aliases pa
+        JOIN people p ON p.id = pa.person_id
+        ORDER BY pa.id
+        """
+    ):
+        key = normalize_person_search(row["alias"] or "")
+        if key and key not in people:
+            people[key] = row
     return people
 
 
@@ -799,6 +820,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Full scan local library roots into fanhao-core-v2.sqlite.")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--write", action="store_true")
+    parser.add_argument("--scope", choices=["all", "western"], default="all")
+    parser.add_argument("--root", action="append", default=[], help="Override roots; can be passed multiple times.")
     parser.add_argument("--delete-stale", action="store_true")
     parser.add_argument("--changed-only", action="store_true", help="Inventory all roots, then recursively scan only new/moved/recent person dirs.")
     parser.add_argument("--recent-hours", type=float, default=48)
@@ -814,16 +837,19 @@ def main() -> int:
     modified_since = parse_local_date(args.modified_since)
     if args.modified_since and modified_since is None:
         raise SystemExit(f"invalid --modified-since date: {args.modified_since}")
+    roots = selected_roots(args.scope, args.root)
+    if not roots:
+        raise SystemExit("no roots selected")
     if args.changed_only:
-        candidates = candidate_person_dirs(conn, ROOTS, args.recent_hours, modified_since)
+        candidates = candidate_person_dirs(conn, roots, args.recent_hours, modified_since)
         print(f"[inventory] candidate person dirs={len(candidates)}", flush=True)
         for path in candidates[:30]:
             print(f"  {clean_path(path)}", flush=True)
         if len(candidates) > 30:
             print(f"  ... +{len(candidates) - 30} more", flush=True)
-        stats = scan_candidates(conn, ROOTS, candidates, args.write, args.delete_stale, args.limit_people)
+        stats = scan_candidates(conn, roots, candidates, args.write, args.delete_stale, args.limit_people)
     else:
-        stats = scan_all(conn, ROOTS, args.write, args.delete_stale, args.limit_people)
+        stats = scan_all(conn, roots, args.write, args.delete_stale, args.limit_people)
     conn.close()
     mode = "write" if args.write else "dry-run"
     print(f"[done] mode={mode} stats={stats}", flush=True)

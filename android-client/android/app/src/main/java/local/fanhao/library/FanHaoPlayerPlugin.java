@@ -39,4 +39,28 @@ public class FanHaoPlayerPlugin extends Plugin {
     result.put("opened", true);
     call.resolve(result);
   }
+
+  @PluginMethod
+  public void playShortFeed(PluginCall call) {
+    String videosJson = call.getString("videos");
+    if (videosJson == null || videosJson.trim().isEmpty()) {
+      call.reject("缺少短视频列表");
+      return;
+    }
+
+    Intent intent = new Intent(getActivity(), NativeShortVideoActivity.class);
+    intent.putExtra(NativeShortVideoActivity.EXTRA_VIDEOS_JSON, videosJson);
+    intent.putExtra(NativeShortVideoActivity.EXTRA_START_INDEX, call.getInt("startIndex", 0));
+    intent.putExtra(NativeShortVideoActivity.EXTRA_BASE_URL, call.getString("baseUrl"));
+    intent.putExtra(NativeShortVideoActivity.EXTRA_FEED_URL, call.getString("feedUrl"));
+    intent.putExtra(NativeShortVideoActivity.EXTRA_NEXT_OFFSET, call.getInt("nextOffset", 0));
+    intent.putExtra(NativeShortVideoActivity.EXTRA_HAS_MORE, call.getBoolean("hasMore", false));
+    Log.i(TAG, "Opening native short video feed");
+    getActivity().startActivity(intent);
+    getActivity().overridePendingTransition(0, 0);
+
+    JSObject result = new JSObject();
+    result.put("opened", true);
+    call.resolve(result);
+  }
 }

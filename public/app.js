@@ -1,14 +1,15 @@
 import { createApiClient, addQueryParam } from "./js/api.js?v=20260701-gallery-merge-01";
 import { createAdminModal } from "./js/pages/admin-modal.js?v=20260701-gallery-merge-01";
 import { createGalleryPage } from "./js/pages/gallery-page.js?v=20260701-gallery-merge-01";
-import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260705-movie-sidebar-label-01";
+import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260706-media-player-02";
 import { createNovelPage } from "./js/pages/novel-page.js?v=20260701-gallery-merge-01";
-import { createPeoplePage } from "./js/pages/people-page.js?v=20260705-remove-fanhao-sidebar-02";
-import { createPersonProfile } from "./js/pages/person-profile.js?v=20260706-current-person-full-scan-01";
+import { createPeoplePage } from "./js/pages/people-page.js?v=20260706-western-people-01";
+import { createPersonProfile } from "./js/pages/person-profile.js?v=20260706-multi-javdb-actor-01";
 import { createRankingPage } from "./js/pages/ranking-page.js?v=20260704-ranking-controls-01";
+import { createShortVideoPage } from "./js/pages/short-video-page.js?v=20260707-short-video-swipe-77";
 import { createToolsPage } from "./js/pages/tools-page.js?v=20260701-gallery-merge-01";
 import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260705-local-marker-a-01";
-import { DEFAULT_GALLERY_PHOTO_CATEGORY, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260705-top-subnav-01";
+import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260706-western-people-01";
 
 repairLegacyShell();
 
@@ -19,6 +20,7 @@ const state = {
   selectedPerson: null,
   works: [],
   activeView: "people",
+  peopleScope: "main",
   peopleIndexScrollTop: 0,
   workQuery: "",
   sortMode: "releaseDesc",
@@ -62,6 +64,8 @@ const state = {
   personWorksTotal: 0,
   personWorksFacets: null,
   personWorksLoadingMore: false,
+  personBulkDeleteActive: false,
+  personBulkDeleteSelectedIds: new Set(),
   personPageSize: 120,
   personVisibleLimit: 120,
   openWorkSeq: 0,
@@ -123,6 +127,18 @@ const state = {
     settingsOpen: false,
     pendingScrollRatio: 0,
     settings: null
+  },
+  shortVideo: {
+    query: "",
+    author: "all",
+    sort: "published",
+    data: null,
+    summary: null,
+    current: null,
+    prevId: "",
+    nextId: "",
+    loading: false,
+    status: ""
   },
   routeReady: false,
   restoringRoute: false
@@ -264,12 +280,15 @@ const personProfilePage = createPersonProfile({
   formatLibraryPath,
   formatLibraryPaths,
   formatNumber,
+  isPersonBulkDeleteActive,
+  isTrustedNetworkFeatureAvailable,
   linesFromTextarea,
   normalizeSourcePath,
   renderPeople: renderPeopleIndex,
   selectPerson,
   sourcePriority,
   state,
+  togglePersonBulkDeleteMode,
   workCoverUrl
 });
 let novelPage = null;
@@ -323,6 +342,22 @@ novelPage = createNovelPage({
   formatNumber,
   hidePersonProfile,
   openAdminScript,
+  pushRoute,
+  replaceRoute,
+  resetProgressiveCoverLoading,
+  setMainHeader,
+  state,
+  syncRouteAfterNavigation
+});
+const shortVideoPage = createShortVideoPage({
+  api,
+  cancelScheduledWorkRendering,
+  disconnectPeopleIndexAutoload,
+  els,
+  formatBytes,
+  formatDateTime,
+  formatNumber,
+  hidePersonProfile,
   pushRoute,
   replaceRoute,
   resetProgressiveCoverLoading,
@@ -518,11 +553,16 @@ function currentRouteSnapshot(overrides = {}) {
     gallerySubCategory: state.activeView === "gallery" ? state.gallery.subCategory || "all" : "all",
     galleryPerson: state.activeView === "gallery" ? state.gallery.person || "all" : "all",
     gallerySort: state.activeView === "gallery" ? state.gallery.sort || "updated" : "updated",
+    peopleScope: state.activeView === "people" ? state.peopleScope || "main" : "main",
     novelBookId: state.activeView === "novels" ? state.novel.chapter?.bookId || state.novel.book?.id || "" : "",
     novelChapterIndex: state.activeView === "novels" ? String(state.novel.chapter?.index || "") : "",
     novelQuery: state.activeView === "novels" ? state.novel.query || "" : "",
     novelCategory: state.activeView === "novels" ? state.novel.category || "all" : "all",
     novelSort: state.activeView === "novels" ? state.novel.sort || "updated" : "updated",
+    shortVideoId: state.activeView === "shortVideos" ? state.shortVideo.current?.id || "" : "",
+    shortVideoQuery: state.activeView === "shortVideos" ? state.shortVideo.query || "" : "",
+    shortVideoAuthor: state.activeView === "shortVideos" ? state.shortVideo.author || "all" : "all",
+    shortVideoSort: state.activeView === "shortVideos" ? state.shortVideo.sort || "published" : "published",
     personId: state.activeView === "people" ? state.selectedPersonId || "" : "",
     q: state.activeView === "search" ? state.searchQuery || state.workQuery || "" : "",
     workId: drawerOpen ? state.currentWork?.id || "" : "",
@@ -590,6 +630,7 @@ async function applyRoute(route) {
       els.workSearch.value = next.q;
       await loadSearchResults(next.q, { skipRoute: true });
     } else if (next.view === "people") {
+      await setPeopleScope(next.peopleScope || "main");
       clearWorkSearch();
       const routePerson = next.personId
         ? state.people.find((person) => person.id === next.personId)
@@ -620,6 +661,11 @@ async function applyRoute(route) {
       novelPage.applyRouteState(next);
       setActiveView("novels", { skipRoute: true });
       await novelPage.openRouteTarget(next);
+    } else if (next.view === "shortVideos") {
+      clearWorkSearch();
+      shortVideoPage.applyRouteState(next);
+      setActiveView("shortVideos", { skipRoute: true });
+      await shortVideoPage.openRouteTarget(next);
     } else {
       clearWorkSearch();
       setActiveView(next.view, { skipRoute: true });
@@ -723,6 +769,35 @@ function safeAndroidReturnUrl(value) {
   return "";
 }
 
+function isLocalFileOpenAvailable() {
+  return isTrustedNetworkFeatureAvailable();
+}
+
+function isTrustedNetworkFeatureAvailable() {
+  const host = normalizeHostname(window.location.hostname);
+  return isLocalHostName(host) || isPrivateLanHost(host);
+}
+
+function normalizeHostname(host) {
+  return String(host || "").trim().toLowerCase().replace(/^\[(.*)\]$/, "$1");
+}
+
+function isLocalHostName(host) {
+  return ["127.0.0.1", "localhost", "::1"].includes(normalizeHostname(host));
+}
+
+function isPrivateLanHost(host) {
+  const value = normalizeHostname(host);
+  if (value.endsWith(".local")) return true;
+  if (value.startsWith("fe80:") || (value.includes(":") && (value.startsWith("fc") || value.startsWith("fd")))) return true;
+
+  const match = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!match) return false;
+  const first = Number(match[1]);
+  const second = Number(match[2]);
+  return first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168) || (first === 169 && second === 254);
+}
+
 function formatNumber(value) {
   return formatter.format(value || 0);
 }
@@ -802,8 +877,11 @@ function formatLibraryPaths(values) {
 }
 
 async function loadLibrary(options = {}) {
-  const data = await api("/api/library");
+  const params = new URLSearchParams();
+  if (state.peopleScope && state.peopleScope !== "main") params.set("scope", state.peopleScope);
+  const data = await api(`/api/library${params.toString() ? `?${params}` : ""}`);
   state.library = data;
+  state.peopleScope = normalizePeopleScope(data.scope || state.peopleScope);
   state.accessMode = data.access?.mode || "local";
   state.accessHints = data.access?.hints || {};
   state.uiConfig = normalizeUiConfig(data.uiConfig || state.uiConfig);
@@ -824,6 +902,37 @@ async function loadLibrary(options = {}) {
   if (!options.deferMainRender) {
     setActiveView(state.activeView || "people");
   }
+}
+
+function normalizePeopleScope(value) {
+  return PEOPLE_SCOPE_NAMES.has(value) ? value : "main";
+}
+
+async function setPeopleScope(scope, options = {}) {
+  const nextScope = normalizePeopleScope(scope);
+  const changed = state.peopleScope !== nextScope || options.force;
+  state.peopleScope = nextScope;
+  if (changed) {
+    state.selectedPersonId = null;
+    state.selectedPerson = null;
+    state.works = [];
+    state.personWorksTotal = 0;
+    state.personWorksFacets = null;
+    state.filterMode = "all";
+    await loadLibrary({ deferMainRender: true });
+  }
+}
+
+function isWesternPeopleScope() {
+  return state.activeView === "people" && state.peopleScope === "western";
+}
+
+function peopleScopeTitle() {
+  return state.peopleScope === "western" ? "欧美人物" : "人物索引";
+}
+
+function peopleScopeSubtitle() {
+  return state.peopleScope === "western" ? "按人物浏览欧美本地文件" : "按人物浏览全部资料库";
 }
 
 function normalizeSourcePath(value) {
@@ -863,6 +972,7 @@ function sortPeopleForList(people) {
 function productViewForActiveView(view = state.activeView) {
   if (view === "gallery") return "gallery";
   if (view === "novels") return "novels";
+  if (view === "shortVideos") return "shortVideos";
   if (view === "tools") return "tools";
   return "people";
 }
@@ -877,6 +987,10 @@ function searchWorksByText(value) {
 
 function productButtonActive(button, view = state.activeView) {
   const productView = button.dataset.productView || "people";
+  if (productView === "people") {
+    const buttonScope = button.dataset.peopleScope || "main";
+    return productViewForActiveView(view) === "people" && (state.peopleScope || "main") === buttonScope;
+  }
   if (productView === "gallery") {
     const mode = button.dataset.galleryMode || "photo";
     const isPrimaryTab = button.classList.contains("product-tab");
@@ -960,6 +1074,16 @@ function setActiveView(view, options = {}) {
     state.personWorksTotal = 0;
     state.personWorksFacets = null;
     novelPage.enter(options);
+    return;
+  }
+
+  if (view === "shortVideos") {
+    state.selectedPersonId = null;
+    state.selectedPerson = null;
+    state.works = [];
+    state.personWorksTotal = 0;
+    state.personWorksFacets = null;
+    shortVideoPage.enter(options);
     return;
   }
 
@@ -1314,6 +1438,12 @@ function updateBackToPeopleIndexButton() {
   document.body.classList.toggle("gallery-media-view", state.activeView === "gallery" && ["media", "movie", "tv"].includes(state.gallery.mode));
   document.body.classList.toggle("novel-view", state.activeView === "novels");
   document.body.classList.toggle("novel-reader-active", state.activeView === "novels" && Boolean(state.novel?.chapter));
+  document.body.classList.toggle("short-video-view", state.activeView === "shortVideos");
+  document.body.classList.toggle("short-video-browser-active", state.activeView === "shortVideos" && Boolean(state.shortVideo?.current));
+  const westernScope = isWesternPeopleScope();
+  els.missingLocalToggle?.closest(".toggle-control")?.toggleAttribute("hidden", westernScope);
+  els.collectionToggle?.closest(".toggle-control")?.toggleAttribute("hidden", westernScope);
+  els.compilationConfigButton?.toggleAttribute("hidden", westernScope);
   syncNavigationState();
   if (!els.backToPeopleIndex) return;
   els.backToPeopleIndex.hidden = true;
@@ -1527,8 +1657,130 @@ function appendWorkControls(works) {
   const wrap = document.createElement("div");
   wrap.className = "stat-quick-filters";
   wrap.append(createWorkFilterControls(), createWorkSortControls());
+  appendPersonBulkDeleteControls(works, wrap);
   appendMetadataQuickFilters(works, wrap);
   els.statsRow.append(wrap);
+}
+
+function isPersonBulkDeleteAvailable() {
+  return state.activeView === "people" && Boolean(state.selectedPersonId) && isTrustedNetworkFeatureAvailable();
+}
+
+function isPersonBulkDeleteActive() {
+  return Boolean(state.personBulkDeleteActive && isPersonBulkDeleteAvailable());
+}
+
+function localPersonWorks(works = state.works) {
+  return (works || []).filter((work) => work?.id && !work.missingLocal);
+}
+
+function clearPersonBulkDeleteSelection() {
+  state.personBulkDeleteSelectedIds.clear();
+}
+
+function togglePersonBulkDeleteMode(force = undefined) {
+  if (!isPersonBulkDeleteAvailable()) return;
+  state.personBulkDeleteActive = typeof force === "boolean" ? force : !state.personBulkDeleteActive;
+  clearPersonBulkDeleteSelection();
+  renderPersonProfile(state.selectedPerson);
+  renderPersonWorkStats();
+  renderWorks();
+}
+
+function togglePersonBulkDeleteSelection(workId) {
+  const key = String(workId || "");
+  if (!key) return;
+  if (state.personBulkDeleteSelectedIds.has(key)) {
+    state.personBulkDeleteSelectedIds.delete(key);
+  } else {
+    state.personBulkDeleteSelectedIds.add(key);
+  }
+  renderPersonWorkStats();
+  renderWorks();
+}
+
+function appendPersonBulkDeleteControls(works, wrap) {
+  if (!isPersonBulkDeleteActive()) return;
+  const localWorks = localPersonWorks(works);
+  if (!localWorks.length) return;
+
+  const group = document.createElement("div");
+  group.className = "stat-filter-group bulk-delete-controls";
+
+  const selectedCount = [...state.personBulkDeleteSelectedIds].filter((id) => localWorks.some((work) => String(work.id) === id)).length;
+  const summary = document.createElement("span");
+  summary.className = "stat-inline-summary";
+  summary.textContent = `已选 ${formatNumber(selectedCount)} / ${formatNumber(localWorks.length)}`;
+
+  const selectAll = document.createElement("button");
+  selectAll.type = "button";
+  selectAll.className = "stat-filter-chip";
+  selectAll.textContent = selectedCount === localWorks.length ? "取消全选" : "全选本地";
+  selectAll.addEventListener("click", () => {
+    if (selectedCount === localWorks.length) {
+      clearPersonBulkDeleteSelection();
+    } else {
+      for (const work of localWorks) state.personBulkDeleteSelectedIds.add(String(work.id));
+    }
+    renderPersonWorkStats();
+    renderWorks();
+  });
+
+  const deleteSelected = document.createElement("button");
+  deleteSelected.type = "button";
+  deleteSelected.className = "stat-filter-chip danger";
+  deleteSelected.disabled = selectedCount === 0;
+  deleteSelected.textContent = selectedCount ? `删除已选 ${formatNumber(selectedCount)}` : "删除已选";
+  deleteSelected.addEventListener("click", () => deleteSelectedPersonLocalWorks(deleteSelected));
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "stat-filter-chip";
+  cancel.textContent = "退出多选";
+  cancel.addEventListener("click", () => togglePersonBulkDeleteMode(false));
+
+  group.append(summary, selectAll, deleteSelected, cancel);
+  wrap.append(group);
+}
+
+async function deleteSelectedPersonLocalWorks(button) {
+  if (!isPersonBulkDeleteActive()) return;
+  const selectedIds = [...state.personBulkDeleteSelectedIds].filter((id) => state.works.some((work) => String(work.id) === id && !work.missingLocal));
+  if (!selectedIds.length) return;
+  const personName = state.selectedPerson?.name || "当前演员";
+  if (!window.confirm(`确认删除 ${personName} 下已选的 ${selectedIds.length} 个本地作品文件夹？此操作会移动/删除本地文件，不能从页面撤销。`)) return;
+
+  const originalText = button?.textContent || "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "删除中";
+  }
+
+  const failed = [];
+  for (const workId of selectedIds) {
+    try {
+      await api(`/api/works/${encodeURIComponent(workId)}/local-files/delete`, { method: "POST" });
+    } catch (error) {
+      failed.push(error.message || String(workId));
+    }
+  }
+
+  clearPersonBulkDeleteSelection();
+  if (!failed.length) state.personBulkDeleteActive = false;
+  if (state.selectedPersonId) {
+    await selectPerson(state.selectedPersonId, { resetFilter: false, replaceRoute: true });
+  } else {
+    renderPersonWorkStats();
+    renderWorks();
+  }
+
+  if (failed.length) {
+    alert(`有 ${failed.length} 个作品删除失败：${failed.slice(0, 3).join("；")}`);
+    if (button?.isConnected) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
 }
 
 function appendMetadataQuickFilters(works, wrap) {
@@ -2494,12 +2746,15 @@ function createWorkCard(work, index = 0) {
   const card = document.createElement("article");
   card.className = `work-card${work.missingLocal ? " missing-local" : ""}`;
   card.dataset.workId = work.id;
+  if (isPersonBulkDeleteActive() && state.personBulkDeleteSelectedIds.has(String(work.id))) {
+    card.classList.add("bulk-delete-selected");
+  }
 
   const cover = document.createElement("button");
   cover.type = "button";
   cover.className = "cover-wrap work-card-main";
   cover.setAttribute("aria-label", work.missingLocal ? `打开 JavDB：${work.title}` : `打开作品：${work.title}`);
-  cover.addEventListener("click", () => openWorkCard(work));
+  cover.addEventListener("click", () => handleWorkCardPrimaryClick(work));
 
   const resolvedCoverUrl = workCoverUrl(work);
   if (resolvedCoverUrl) {
@@ -2528,7 +2783,7 @@ function createWorkCard(work, index = 0) {
 
   const body = document.createElement("div");
   body.className = "work-body";
-  body.addEventListener("click", () => openWorkCard(work));
+  body.addEventListener("click", () => handleWorkCardPrimaryClick(work));
 
   const title = document.createElement("div");
   title.className = "work-title";
@@ -2569,9 +2824,35 @@ function createWorkCard(work, index = 0) {
   if (work.missingLocal) {
     card.append(cover, body);
   } else {
-    card.append(cover, favorite, createLocalMarkerButton(work, "A"), body);
+    card.append(cover, favorite, createLocalMarkerButton(work, "A"));
+    if (isPersonBulkDeleteActive()) card.append(createBulkDeleteSelectButton(work));
+    card.append(body);
   }
   return card;
+}
+
+function createBulkDeleteSelectButton(work) {
+  const selected = state.personBulkDeleteSelectedIds.has(String(work.id));
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `bulk-delete-select${selected ? " active" : ""}`;
+  button.textContent = selected ? "✓" : "";
+  button.title = selected ? "取消选择" : "选择删除";
+  button.setAttribute("aria-label", button.title);
+  button.setAttribute("aria-pressed", String(selected));
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    togglePersonBulkDeleteSelection(work.id);
+  });
+  return button;
+}
+
+function handleWorkCardPrimaryClick(work) {
+  if (isPersonBulkDeleteActive() && !work.missingLocal) {
+    togglePersonBulkDeleteSelection(work.id);
+    return;
+  }
+  openWorkCard(work);
 }
 
 function createLocalMarkerButton(work, marker) {
@@ -2862,6 +3143,15 @@ for (const button of els.productTabs || []) {
   button.addEventListener("click", (event) => {
     event.preventDefault();
     clearWorkSearch();
+    if (button.dataset.productView === "people") {
+      setPeopleScope(button.dataset.peopleScope || "main").then(() => {
+        setActiveView("people");
+      }).catch((error) => {
+        console.error(error);
+        renderEmpty(error.message || "切换资料库失败");
+      });
+      return;
+    }
     if (button.dataset.productView === "gallery") {
       const mode = button.dataset.galleryMode || "photo";
       const changed = state.activeView !== "gallery" || state.gallery.mode !== mode;
@@ -2888,12 +3178,23 @@ for (const button of els.viewTabs) {
 }
 
 async function rescanFullLibrary(button) {
+  if (isWesternPeopleScope()) {
+    openAdminScript("core-local-scan");
+    return;
+  }
   if (state.activeView === "gallery") {
     openAdminScript("image-library-rescan");
     return;
   }
   if (state.activeView === "novels") {
     openAdminScript("novel-library-rescan");
+    return;
+  }
+  if (state.activeView === "shortVideos") {
+    shortVideoPage.rescan().catch((error) => {
+      state.shortVideo.status = error.message || "短视频刷新失败";
+      shortVideoPage.renderView();
+    });
     return;
   }
   openAdminScript("");

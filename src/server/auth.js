@@ -8,10 +8,8 @@ const APP_AUTH_MAX_AGE_SECONDS = 180 * 24 * 60 * 60;
 
 export function createAuthServices({
   authSecretPath,
-  accessLogPath,
   remoteWebPassword,
   ensureDataDir,
-  ensureLogDir,
   readBodyText,
   sendJson,
   sendHtml,
@@ -207,7 +205,11 @@ export function createAuthServices({
   }
 
   function isLanHost(host) {
-    const match = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(normalizeRemoteAddress(host));
+    const value = normalizeRemoteAddress(host);
+    if (value.endsWith(".local")) return true;
+    if (value.startsWith("fe80:") || (value.includes(":") && (value.startsWith("fc") || value.startsWith("fd")))) return true;
+
+    const match = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(value);
     if (!match) return false;
     const first = Number(match[1]);
     const second = Number(match[2]);
@@ -243,6 +245,21 @@ export function createAuthServices({
 
   function isTrustedNetworkAccess(access) {
     return Boolean(access?.hostIsLocal || access?.hostIsLan);
+  }
+
+  function isSameTrustedNetworkOrigin(req, access = requestAccess(req)) {
+    const origin = String(req.headers.origin || "").trim();
+    if (!origin) return true;
+    if (!isTrustedNetworkAccess(access)) return false;
+
+    try {
+      const originUrl = new URL(origin);
+      const requestHost = String(req.headers.host || "").toLowerCase();
+      if (originUrl.host.toLowerCase() === requestHost) return true;
+      return isAppClientOrigin(req) && String(req.headers["x-fanhao-client"] || "").toLowerCase() === "android";
+    } catch {
+      return false;
+    }
   }
 
   function isAppClientOrigin(req) {
@@ -367,32 +384,6 @@ export function createAuthServices({
     return false;
   }
 
-  function accessLogEntry(req, res, url, authState, startedAt) {
-    return {
-      time: new Date().toISOString(),
-      method: req.method,
-      path: `${url.pathname}${url.search || ""}`,
-      status: res.statusCode,
-      ms: Date.now() - startedAt,
-      host: authState.access.host,
-      remote: authState.access.clientAddress,
-      access: authState.access.mode,
-      auth: authState.reason,
-      userAgent: String(req.headers["user-agent"] || "").slice(0, 180)
-    };
-  }
-
-  function attachAccessLogger(req, res, url, authState, startedAt) {
-    res.on("finish", () => {
-      try {
-        ensureLogDir();
-        fs.appendFileSync(accessLogPath, `${JSON.stringify(accessLogEntry(req, res, url, authState, startedAt))}\n`, "utf8");
-      } catch (error) {
-        console.warn("[access-log]", error.message || error);
-      }
-    });
-  }
-
   function applyAppCookie(res, authState) {
     if (!authState.setAppCookie) return;
     res.setHeader("Set-Cookie", serializeCookie(APP_AUTH_COOKIE, createAuthToken("app"), { maxAge: APP_AUTH_MAX_AGE_SECONDS }));
@@ -400,8 +391,9 @@ export function createAuthServices({
 
   return {
     applyAppCookie,
-    attachAccessLogger,
     isSameLocalOrigin,
+    isSameTrustedNetworkOrigin,
+    isTrustedNetworkAccess,
     requestAccess,
     requestAuthState,
     routeAuth,

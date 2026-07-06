@@ -1,29 +1,20 @@
 export async function routeGalleryApi(req, res, url, deps) {
   const {
     cleanupImageReaderCache,
-    galleryMediaById,
-    imageLibraryItemsPayload,
-    imageLibraryPayload,
-    imageLibrarySummaryPayload,
+    galleryMediaService,
+    imageLibraryService,
     imageReaderCacheStatus,
-    mangaCacheById,
-    mangaCacheDirs,
-    mangaRootStatus,
+    mangaService,
     notFound,
-    photoSetById,
+    photoSetService,
     publicAppConfig,
-    publicGalleryMediaDetail,
-    publicMangaChapter,
-    publicMangaDetail,
-    publicMangaSummary,
-    publicPhotoSetDetail,
     requireLocalAdmin,
     sendJson
   } = deps;
 
   if (url.pathname === "/api/image-library" && req.method === "GET") {
     try {
-      sendJson(res, 200, imageLibraryPayload());
+      sendJson(res, 200, imageLibraryService.payload());
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "图像资料库读取失败" });
     }
@@ -32,7 +23,7 @@ export async function routeGalleryApi(req, res, url, deps) {
 
   if (url.pathname === "/api/image-library/summary" && req.method === "GET") {
     try {
-      sendJson(res, 200, imageLibrarySummaryPayload());
+      sendJson(res, 200, imageLibraryService.summaryPayload());
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "图像资料库概览读取失败" });
     }
@@ -41,7 +32,7 @@ export async function routeGalleryApi(req, res, url, deps) {
 
   if (url.pathname === "/api/image-library/items" && req.method === "GET") {
     try {
-      sendJson(res, 200, imageLibraryItemsPayload(url));
+      sendJson(res, 200, imageLibraryService.itemsPayload(url));
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "频道列表读取失败" });
     }
@@ -66,41 +57,41 @@ export async function routeGalleryApi(req, res, url, deps) {
   }
 
   if (url.pathname === "/api/manga" && req.method === "GET") {
-    const status = mangaRootStatus();
+    const status = mangaService.rootStatus();
     sendJson(res, 200, {
       root: status.root,
       exists: status.exists,
       cache: imageReaderCacheStatus(),
-      comics: mangaCacheDirs().map(publicMangaSummary)
+      comics: mangaService.cacheDirs().map(mangaService.publicSummary)
     });
     return true;
   }
 
   const mangaDetailMatch = /^\/api\/manga\/([^/]+)$/.exec(url.pathname);
   if (mangaDetailMatch && req.method === "GET") {
-    const cacheDir = mangaCacheById(decodeURIComponent(mangaDetailMatch[1]));
+    const cacheDir = mangaService.cacheById(decodeURIComponent(mangaDetailMatch[1]));
     if (!cacheDir) {
       notFound(res);
       return true;
     }
-    sendJson(res, 200, { comic: publicMangaDetail(cacheDir), cache: imageReaderCacheStatus() });
+    sendJson(res, 200, { comic: mangaService.publicDetail(cacheDir), cache: imageReaderCacheStatus() });
     return true;
   }
 
   const mangaChapterMatch = /^\/api\/manga\/([^/]+)\/chapters\/([^/]+)$/.exec(url.pathname);
   if (mangaChapterMatch && req.method === "GET") {
-    const cacheDir = mangaCacheById(decodeURIComponent(mangaChapterMatch[1]));
-    const chapter = cacheDir ? publicMangaChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2])) : null;
+    const cacheDir = mangaService.cacheById(decodeURIComponent(mangaChapterMatch[1]));
+    const chapter = cacheDir ? mangaService.publicChapter(cacheDir, decodeURIComponent(mangaChapterMatch[2])) : null;
     if (!cacheDir || !chapter) {
       notFound(res);
       return true;
     }
-    sendJson(res, 200, { comic: publicMangaSummary(cacheDir), chapter, cache: imageReaderCacheStatus() });
+    sendJson(res, 200, { comic: mangaService.publicSummary(cacheDir), chapter, cache: imageReaderCacheStatus() });
     return true;
   }
 
   if (url.pathname === "/api/photo-sets" && req.method === "GET") {
-    const payload = imageLibraryPayload();
+    const payload = imageLibraryService.payload();
     sendJson(res, 200, {
       scannedAt: payload.scannedAt,
       roots: payload.photoRoots,
@@ -116,7 +107,7 @@ export async function routeGalleryApi(req, res, url, deps) {
 
   const photoSetMatch = /^\/api\/photo-sets\/([^/]+)$/.exec(url.pathname);
   if (photoSetMatch && req.method === "GET") {
-    const album = photoSetById(decodeURIComponent(photoSetMatch[1]));
+    const album = photoSetService.byId(decodeURIComponent(photoSetMatch[1]));
     if (!album) {
       notFound(res);
       return true;
@@ -126,7 +117,7 @@ export async function routeGalleryApi(req, res, url, deps) {
       const imageLimit = rawLimit && rawLimit !== "all" ? Number(rawLimit) : 0;
       const imageOffset = Number(url.searchParams.get("imageOffset") || url.searchParams.get("imagesOffset") || 0);
       sendJson(res, 200, {
-        album: publicPhotoSetDetail(album, { imageLimit, imageOffset }),
+        album: photoSetService.publicDetail(album, { imageLimit, imageOffset }),
         cache: imageReaderCacheStatus()
       });
     } catch (error) {
@@ -137,12 +128,12 @@ export async function routeGalleryApi(req, res, url, deps) {
 
   const galleryMediaMatch = /^\/api\/gallery-media\/([^/]+)$/.exec(url.pathname);
   if (galleryMediaMatch && req.method === "GET") {
-    const item = galleryMediaById(decodeURIComponent(galleryMediaMatch[1]));
+    const item = galleryMediaService.byId(decodeURIComponent(galleryMediaMatch[1]));
     if (!item) {
       notFound(res);
       return true;
     }
-    sendJson(res, 200, { item: publicGalleryMediaDetail(item) });
+    sendJson(res, 200, { item: galleryMediaService.publicDetail(item) });
     return true;
   }
 

@@ -42,7 +42,8 @@ function showPeopleIndex(options = {}) {
   state.personWorksFacets = null;
   syncNavigationState("people");
   hidePersonProfile();
-  setMainHeader("人物索引", "按人物浏览全部资料库");
+  const westernScope = state.peopleScope === "western";
+  setMainHeader(westernScope ? "欧美人物" : "人物索引", westernScope ? "按人物浏览欧美本地文件" : "按人物浏览全部资料库");
   renderPeopleIndexStats();
   renderPeopleIndex();
   if (options.restoreScroll !== false) {
@@ -50,7 +51,7 @@ function showPeopleIndex(options = {}) {
   }
   syncRouteAfterNavigation({
     ...options,
-    routeOverrides: { view: "people", personId: "", q: "", workId: "", videoId: "" }
+    routeOverrides: { view: "people", peopleScope: state.peopleScope || "main", personId: "", q: "", workId: "", videoId: "" }
   });
 }
 
@@ -211,7 +212,7 @@ async function selectPerson(personId, options = {}) {
   renderWorks();
   syncRouteAfterNavigation({
     ...options,
-    routeOverrides: { view: "people", personId: resolvedPersonId, q: "", workId: "", videoId: "" }
+    routeOverrides: { view: "people", peopleScope: state.peopleScope || "main", personId: resolvedPersonId, q: "", workId: "", videoId: "" }
   });
 }
 
@@ -226,6 +227,7 @@ async function fetchPersonWorksPage(personId, offset = 0) {
     sort: state.sortMode || "releaseDesc",
     filter: typeof getWorkFilterMode === "function" ? getWorkFilterMode() : state.filterMode || "all"
   });
+  if (state.peopleScope && state.peopleScope !== "main") params.set("scope", state.peopleScope);
   return api(`/api/people/${encodeURIComponent(personId)}?${params}`);
 }
 

@@ -10,14 +10,45 @@ import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame } from "./lib/cover-frame.js
 import { ADMIN_SCRIPT_DEFINITIONS } from "./lib/admin-script-registry.js";
 import { normalizeWorkCode as parseNormalizedWorkCode, workCodeKey } from "./lib/code-parser.js";
 import { decodeInfoBuffer, isSubtitleLikeInfoText, parseInfoMetadata, renderInfoMetadataText } from "./lib/info-metadata.js";
+import { createAdminScriptService } from "./src/server/admin-script-service.js";
+import { createAdminTaskService } from "./src/server/admin-task-service.js";
+import { createAccessLogger } from "./src/server/access-log.js";
+import { createActorAvatarService } from "./src/server/actor-avatar-service.js";
+import { createAndroidUpdateService } from "./src/server/android-update-service.js";
+import { createAppConfigService } from "./src/server/app-config-service.js";
 import { createAuthServices } from "./src/server/auth.js";
+import { createDoubanCookieService } from "./src/server/douban-cookie-service.js";
+import { createFileServer } from "./src/server/file-server.js";
+import { createRequestHandler } from "./src/server/http-app.js";
+import { createImageReaderCacheService } from "./src/server/image-reader-cache-service.js";
+import { createImageLibraryIndexService } from "./src/server/image-library-index-service.js";
+import { createGalleryMetadataService } from "./src/server/gallery-metadata-service.js";
+import { createGalleryMediaService } from "./src/server/gallery-media-service.js";
+import { createImageLibraryService } from "./src/server/image-library-service.js";
+import { createLibraryPathServices } from "./src/server/library-paths.js";
+import { createLocalOpenService } from "./src/server/local-open-service.js";
+import { createMangaService } from "./src/server/manga-service.js";
+import { createPersonLibraryService } from "./src/server/person-library-service.js";
+import { createPhotoSetService } from "./src/server/photo-set-service.js";
+import { createAdminModule } from "./src/server/modules/admin.js";
+import { createAndroidUpdateModule } from "./src/server/modules/android-update.js";
+import { createCatalogModule } from "./src/server/modules/catalog.js";
+import { createGalleryModule } from "./src/server/modules/gallery.js";
+import { createLibraryModule } from "./src/server/modules/library.js";
+import { createLocalOpenModule } from "./src/server/modules/local-open.js";
+import { createNovelsModule } from "./src/server/modules/novels.js";
+import { createShortVideosModule } from "./src/server/modules/short-videos.js";
+import { createStatusModule } from "./src/server/modules/status.js";
+import { createToolsModule } from "./src/server/modules/tools.js";
+import { createUserStateModule } from "./src/server/modules/user-state.js";
+import { createVideoLibraryModule } from "./src/server/modules/video-library.js";
+import { galleryMediaSources, parseLibraryRoots, parsePhotoSetRoots, parseRootList, parseShortVideoRoots } from "./src/server/root-config.js";
+import { readBodyText, readJsonBody, readJsonFile, safeChildPath } from "./src/server/request-io.js";
 import { sendJson, sendText, sendHtml, redirect, notFound } from "./src/server/responses.js";
 import { createStaticFileServer } from "./src/server/static-files.js";
-import { createNovelStore } from "./src/server/novel-store.js";
-import { routeAdminApi } from "./src/server/routes/admin-api.js";
-import { routeGalleryApi } from "./src/server/routes/gallery-api.js";
-import { routeNovelApi } from "./src/server/routes/novel-api.js";
-import { routeToolsApi } from "./src/server/routes/tools-api.js";
+import { createTxtFormatToolService } from "./src/server/txt-format-tool-service.js";
+import { createUserStateService } from "./src/server/user-state-service.js";
+import { createVideoProbeService } from "./src/server/video-probe-service.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,20 +58,23 @@ const HOST = process.env.HOST || "0.0.0.0";
 const LIBRARY_ROOTS = parseLibraryRoots();
 const PUBLIC_DIR = path.join(__dirname, "public");
 const DATA_DIR = path.join(__dirname, "data");
-const LOG_DIR = path.join(__dirname, "logs");
 const MANGA_LIBRARY_ROOT = process.env.FANHAO_MANGA_ROOT || "E:\\https-smtt6-com-man-hua-yue";
 const PHOTO_SET_ROOTS = parsePhotoSetRoots();
 const GALLERY_MEDIA_SOURCES = galleryMediaSources();
+const WESTERN_LIBRARY_ROOTS = parseRootList(process.env.FANHAO_WESTERN_ROOTS, "R:\\");
 const IMAGE_LIBRARY_INDEX_PATH = path.join(DATA_DIR, "image-library-index.json");
 const USER_STATE_PATH = path.join(DATA_DIR, "user-state.json");
 const CORE_DB_PATH = path.join(DATA_DIR, "fanhao-core-v2.sqlite");
 const IMAGE_GALLERY_DB_PATH = path.join(DATA_DIR, "image-gallery.sqlite");
 const NOVEL_DB_PATH = path.join(DATA_DIR, "novels.sqlite");
+const SHORT_VIDEO_DB_PATH = path.join(DATA_DIR, "short-videos.sqlite");
+const SHORT_VIDEO_ROOTS = parseShortVideoRoots();
 const NOVEL_UPLOAD_MAX_BODY_BYTES = 80 * 1024 * 1024;
 const APP_CONFIG_PATH = path.join(DATA_DIR, "app-config.json");
 const AUTH_SECRET_PATH = path.join(DATA_DIR, "auth-secret.txt");
-const ACCESS_LOG_PATH = path.join(LOG_DIR, "access.log");
+const ACCESS_LOG_PATH = path.join(__dirname, "logs", "access.log");
 const ADMIN_TASKS_PATH = path.join(DATA_DIR, "admin-tasks.json");
+const DOUBAN_COOKIE_PATH = path.join(DATA_DIR, "douban-cookie.txt");
 const TOOL_DOWNLOAD_DIR = path.join(DATA_DIR, "tool-downloads");
 const ANDROID_UPDATE_DIR = path.join(DATA_DIR, "android-update");
 const IMAGE_READER_CACHE_DIR = path.join(DATA_DIR, "image-reader-cache");
@@ -63,7 +97,6 @@ const MAX_IMAGE_LIBRARY_ITEM_LIMIT = 12000;
 const HAS_NVENC = detectNvenc();
 const VIDEO_PROBE_CACHE_LIMIT = 512;
 const DEFAULT_VIDEO_CHUNK_BYTES = 1024 * 1024;
-const videoProbeCache = new Map();
 const DEFAULT_IMAGE_READER_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const MIN_IMAGE_READER_CACHE_MAX_BYTES = 128 * 1024 * 1024;
 const MAX_IMAGE_READER_CACHE_MAX_BYTES = 200 * 1024 * 1024 * 1024;
@@ -77,12 +110,6 @@ const PHOTO_SET_COVER_GENERATOR_VERSION = 2;
 const GALLERY_MEDIA_COVER_GENERATOR_VERSION = 1;
 const IMAGE_GALLERY_COVER_MAX_BYTES = 1024 * 1024;
 const IMAGE_GALLERY_COVER_BOX_SIZE = 640;
-const DEFAULT_APP_CONFIG = {
-  compilationPrefixes: ["OFJE", "THN", "THU"],
-  compilationKeywords: ["合集", "総集編", "総集", "コンプリート", "全タイトル", "ベスト盤"],
-  actorAvatarDataPath: "",
-  imageReaderCacheMaxBytes: DEFAULT_IMAGE_READER_CACHE_MAX_BYTES
-};
 const LOCAL_ACTOR_AVATAR_SOURCE = "local-avatar";
 const MAX_ACTOR_AVATAR_BYTES = 8 * 1024 * 1024;
 const MAX_REMOTE_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -138,12 +165,323 @@ const { serveStatic } = createStaticFileServer({
   normalizeExt,
   notFound
 });
-const novelStore = createNovelStore({ dbPath: NOVEL_DB_PATH });
-
+const { serveInlineFile, serveRangedFile } = createFileServer({
+  defaultChunkBytes: DEFAULT_VIDEO_CHUNK_BYTES,
+  mimeTypes: MIME_TYPES,
+  normalizeExt,
+  notFound,
+  safeStat
+});
+const novelsModule = createNovelsModule({
+  dbPath: NOVEL_DB_PATH,
+  novelUploadMaxBodyBytes: NOVEL_UPLOAD_MAX_BODY_BYTES,
+  notFound,
+  readJsonBody,
+  sendJson
+});
+const shortVideosModule = createShortVideosModule({
+  dbPath: SHORT_VIDEO_DB_PATH,
+  ffmpegPath: FFMPEG_PATH,
+  roots: SHORT_VIDEO_ROOTS,
+  notFound,
+  readJsonBody,
+  requireLocalAdmin,
+  sendJson,
+  serveImage,
+  serveVideo
+});
+const mangaService = createMangaService({
+  root: MANGA_LIBRARY_ROOT,
+  mimeTypes: MIME_TYPES,
+  normalizeExt,
+  notFound,
+  safeStat,
+  serveArchiveMemberImage
+});
+const imageLibraryIndexService = createImageLibraryIndexService({
+  archiveExts: ARCHIVE_EXTS,
+  createId,
+  directVideoExts: DIRECT_VIDEO_EXTS,
+  ensureDataDir,
+  galleryMediaSources: GALLERY_MEDIA_SOURCES,
+  imageLibraryIndexPath: IMAGE_LIBRARY_INDEX_PATH,
+  isExcludedDirName,
+  isVideo,
+  normalizeExt,
+  photoSetCoverUrl,
+  photoSetRoots: PHOTO_SET_ROOTS,
+  readJsonFile,
+  safeStat
+});
+const photoSetService = createPhotoSetService({
+  archiveImageExts: ARCHIVE_IMAGE_EXTS,
+  archiveImagesPayload,
+  compressImageFileToJpeg,
+  coverGeneratorVersion: PHOTO_SET_COVER_GENERATOR_VERSION,
+  coverHints: COVER_HINTS,
+  coverMaxBytes: IMAGE_GALLERY_COVER_MAX_BYTES,
+  extractArchiveMemberToCache,
+  fileBase,
+  getImageGalleryDb,
+  getImageLibraryIndex: imageLibraryIndexService.getIndex,
+  listArchiveImages,
+  mimeTypes: MIME_TYPES,
+  normalizeExt,
+  notFound,
+  safeChildPath,
+  safeStat,
+  serveArchiveMemberImage
+});
+const galleryMetadataService = createGalleryMetadataService({
+  createId,
+  getImageGalleryDb,
+  notFound
+});
+const appConfigService = createAppConfigService({
+  configPath: APP_CONFIG_PATH,
+  defaultImageReaderCacheMaxBytes: DEFAULT_IMAGE_READER_CACHE_MAX_BYTES,
+  ensureDataDir,
+  maxImageReaderCacheMaxBytes: MAX_IMAGE_READER_CACHE_MAX_BYTES,
+  minImageReaderCacheMaxBytes: MIN_IMAGE_READER_CACHE_MAX_BYTES
+});
+const userStateService = createUserStateService({
+  defaultFavoriteFolderId: DEFAULT_FAVORITE_FOLDER_ID,
+  defaultFavoriteFolderName: DEFAULT_FAVORITE_FOLDER_NAME,
+  ensureDataDir,
+  statePath: USER_STATE_PATH
+});
+const imageReaderCacheService = createImageReaderCacheService({
+  cleanupIntervalMs: IMAGE_READER_CACHE_CLEANUP_INTERVAL_MS,
+  cleanupTargetRatio: IMAGE_READER_CACHE_CLEANUP_TARGET_RATIO,
+  getMaxBytes: () => appConfigService.imageReaderCacheMaxBytes(),
+  rootDir: IMAGE_READER_CACHE_DIR,
+  safeStat,
+  touchThrottleMs: IMAGE_READER_CACHE_TOUCH_THROTTLE_MS
+});
+const imageLibraryService = createImageLibraryService({
+  clampInteger,
+  galleryMediaRootStatuses: imageLibraryIndexService.galleryMediaRootStatuses,
+  getImageLibraryIndex: imageLibraryIndexService.getIndex,
+  imageReaderCacheStatus: imageReaderCacheService.status,
+  mangaService,
+  maxItemLimit: MAX_IMAGE_LIBRARY_ITEM_LIMIT,
+  metadataService: galleryMetadataService,
+  photoCollectionRootValue: PHOTO_COLLECTION_ROOT_VALUE,
+  photoSetRootStatuses: imageLibraryIndexService.photoSetRootStatuses,
+  photoSetService
+});
+const videoProbeService = createVideoProbeService({
+  cacheLimit: VIDEO_PROBE_CACHE_LIMIT,
+  directVideoExts: DIRECT_VIDEO_EXTS,
+  ffprobePath: FFPROBE_PATH,
+  hasNvenc: HAS_NVENC,
+  safeStat
+});
+const galleryMediaService = createGalleryMediaService({
+  coverBoxSize: IMAGE_GALLERY_COVER_BOX_SIZE,
+  coverGeneratorVersion: GALLERY_MEDIA_COVER_GENERATOR_VERSION,
+  coverMaxBytes: IMAGE_GALLERY_COVER_MAX_BYTES,
+  directVideoExts: DIRECT_VIDEO_EXTS,
+  ffmpegPath: FFMPEG_PATH,
+  getImageGalleryDb,
+  getImageLibraryIndex: imageLibraryIndexService.getIndex,
+  getVideoProgress,
+  normalizeExt,
+  notFound,
+  publicGalleryMediaItem: imageLibraryService.publicGalleryMediaItem,
+  safeChildPath,
+  safeStat,
+  serveVideo,
+  videoProbeCached: videoProbeService.probeCached
+});
+const galleryModule = createGalleryModule({
+  cleanupImageReaderCache: imageReaderCacheService.cleanup,
+  galleryMediaService,
+  imageLibraryService,
+  imageReaderCacheStatus: imageReaderCacheService.status,
+  mangaService,
+  notFound,
+  photoSetService,
+  publicAppConfig: appConfigService.publicConfig,
+  requireLocalAdmin,
+  sendJson,
+  galleryMetadataService,
+  serveTranscodedVideo
+});
+const catalogModule = createCatalogModule({
+  notFound,
+  rankingSummaries,
+  rankingWorksPayload,
+  sendJson,
+  studioDetailPayload,
+  studioSummaries
+});
+const videoLibraryModule = createVideoLibraryModule({
+  actorProfileMergeCandidates,
+  actorProfileRow,
+  actorMissingSearchWorks,
+  allWorks,
+  coreMissingWorksForPerson,
+  corePersonFallbackRecord,
+  correctWorkActorFromLocalFolder,
+  dedupeWorksForDisplay,
+  deletePersonLocalFiles,
+  deleteWorkLocalFiles,
+  enrichLocalWorksWithActorMovieIndex,
+  enrichLocalWorksWithActorMovieInfo,
+  galleryMediaService,
+  generateWorkCover,
+  getLibrary: () => library,
+  matchesWorkSearch,
+  maxActorAvatarBytes: MAX_ACTOR_AVATAR_BYTES,
+  mergePeopleIntoTarget,
+  mergedActorMovieRows,
+  mergedPersonRecord,
+  missingActorWorksForPerson,
+  moveWorkToPerson,
+  notFound,
+  normalizePeopleScope,
+  pagedWorksPayload,
+  personMatchesPeopleScope,
+  prewarmRemoteImagesForWorks,
+  publicActorProfile,
+  publicPerson,
+  publicWork,
+  rankingMissingSearchWorks,
+  readJsonBody,
+  requireLocalAdmin,
+  requireTrustedFileMutation,
+  resolveLibraryPersonByPublicId,
+  resolveLibraryWorkByPublicId,
+  resolveVideoFileByPublicId,
+  searchPeople,
+  sendJson,
+  serveActorAvatar,
+  serveCoreImage,
+  serveImage,
+  serveInfo,
+  serveTranscodedVideo,
+  serveVideo,
+  serveWorkCover,
+  setPersonManualCover,
+  setPersonUploadedCover,
+  setWorkLocalMarker,
+  setWorkManualCover,
+  sortWorkList,
+  storedWorkCodeKey,
+  upsertActorProfile,
+  videoProbeService,
+  workCodeKeySetForWorks,
+  workFacets,
+  workMatchesFilter,
+  workMatchesPeopleScope
+});
+const adminScriptService = createAdminScriptService({
+  definitions: ADMIN_SCRIPT_DEFINITIONS,
+  hasPerson: (personId) => library.peopleById.has(String(personId || "")),
+  nodeCommand: process.execPath
+});
+const adminTaskService = createAdminTaskService({
+  cwd: __dirname,
+  ensureDataDir,
+  historyLimit: ADMIN_TASK_HISTORY_LIMIT,
+  onTaskDone: applyAdminTaskInvalidations,
+  tasksPath: ADMIN_TASKS_PATH
+});
+const doubanCookieService = createDoubanCookieService({
+  cookiePath: DOUBAN_COOKIE_PATH
+});
+const txtFormatToolService = createTxtFormatToolService({
+  cwd: __dirname,
+  maxBodyBytes: TXT_TOOL_MAX_BODY_BYTES,
+  maxFileBytes: TXT_TOOL_MAX_FILE_BYTES,
+  previewBytes: TXT_TOOL_PREVIEW_BYTES,
+  sendJson,
+  toolDownloadDir: TOOL_DOWNLOAD_DIR,
+  ttlMs: TOOL_DOWNLOAD_TTL_MS
+});
+const toolsModule = createToolsModule({
+  readJsonBody,
+  sendJson,
+  txtFormatToolService
+});
+const androidUpdateService = createAndroidUpdateService({
+  clampInteger,
+  normalizeExt,
+  notFound,
+  port: PORT,
+  readJsonFile,
+  safeChildPath,
+  updateDir: ANDROID_UPDATE_DIR
+});
+const androidUpdateModule = createAndroidUpdateModule({
+  androidUpdateService,
+  sendJson
+});
+const actorAvatarService = createActorAvatarService({
+  avatarExts: ACTOR_AVATAR_EXTS,
+  fileBase,
+  getCoreDb,
+  getPeople: () => library.people,
+  getPersonById: (personId) => library.peopleById.get(personId),
+  getProfileRow: actorProfileRow,
+  getPublicProfile: (personId) => publicActorProfile(actorProfileRow(personId)),
+  getSearchNames: actorProfileSearchNames,
+  invalidateProfiles: () => {
+    invalidateTableStamp("actor_profiles");
+    actorProfileCache = null;
+    personMergeCache = null;
+  },
+  localAvatarSource: LOCAL_ACTOR_AVATAR_SOURCE,
+  maxBytes: MAX_ACTOR_AVATAR_BYTES,
+  normalizeExt,
+  publicPerson,
+  safeStat
+});
 let library = emptyLibrary();
 let lastScanError = null;
-let userState = emptyUserState();
-let appConfig = defaultAppConfig();
+const statusModule = createStatusModule({
+  getLastScanError: () => lastScanError,
+  getLibrary: () => library,
+  requestAccess: (req) => requestAccess(req),
+  sendJson
+});
+const libraryModule = createLibraryModule({
+  appConfigService,
+  getLastScanError: () => lastScanError,
+  getLibrary: () => library,
+  mainLibraryPeople,
+  normalizePeopleScope,
+  publicPerson,
+  refreshLibrary,
+  requestAccess: (req) => requestAccess(req),
+  requireLocalAdmin,
+  sendJson,
+  userStateSummary
+});
+const userState = userStateService.state;
+const userStateModule = createUserStateModule({
+  clampInteger,
+  createFavoriteFolder,
+  favoriteFolderCounts,
+  favoriteWorks,
+  getLibrary: () => library,
+  getVideoProgress,
+  historyEntries,
+  maxWorkLimit: MAX_WORK_LIMIT,
+  moveFavoriteToFolder,
+  notFound,
+  publicFavoriteFolders,
+  publicFavoriteForWork,
+  publicWork,
+  readJsonBody,
+  recentWatchedDays: RECENT_WATCHED_DAYS,
+  resolvePlayableVideoFile,
+  sendJson,
+  userState,
+  userStateService,
+  userStateSummary
+});
 let coreDb = null;
 let imageGalleryDb = null;
 let workInfoCache = null;
@@ -152,6 +490,7 @@ let coreMapCache = null;
 let actorMovieCache = null;
 let actorMovieByCodeKeyCache = null;
 let personMergeCache = null;
+let peopleScopeIndexCache = null;
 let studioHierarchyCache = null;
 let localWorkCodeKeyCache = null;
 let localWorkByCodeKeyCache = null;
@@ -159,39 +498,91 @@ let rankingMissingSearchCache = null;
 let actorMissingSearchCache = null;
 let workSearchTextCache = null;
 let tableStampCache = new Map();
-let adminTaskSeq = 0;
-const adminTasks = loadAdminTaskHistory();
-let adminTaskPersistTimer = null;
-const toolDownloads = new Map();
-const toolDownloadTimers = new Map();
-const imageReaderCacheTouchTimes = new Map();
 const archiveImageListCache = new Map();
-let imageLibraryCache = null;
-let imageReaderCacheCleanupPending = false;
-let imageReaderCacheCleanupActive = false;
 const remoteImageWarmQueue = [];
 const remoteImageWarmQueued = new Set();
 let remoteImageWarmActive = 0;
 const REMOTE_IMAGE_WARM_CONCURRENCY = 6;
 const TABLE_STAMP_CACHE_MS = 1000;
-
-function parseLibraryRoots() {
-  const raw =
-    process.env.LIBRARY_ROOTS ||
-    process.env.LIBRARY_ROOT ||
-    "G:\\;F:\\;O:\\;O:\\[珍藏]\\;O:\\[珍藏1]\\;O:\\[稀有]\\;O:\\[动漫]\\;V:\\[A]\\;V:\\[A1]\\;V:\\AV\\";
-  const roots = raw
-    .split(/[;,|]/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .map((item) => {
-      const parsed = path.parse(item);
-      const root = item.endsWith("\\") || item.endsWith("/") ? item : item + path.sep;
-      return parsed.root ? root : path.resolve(root);
-    });
-
-  return [...new Set(roots)];
-}
+const {
+  libraryOpenRoots,
+  pathWithinRoot,
+  relativeFromRoot,
+  rootLabel,
+  sourcePathToAbsolute
+} = createLibraryPathServices({
+  libraryRoots: LIBRARY_ROOTS,
+  extraOpenRoots: GALLERY_MEDIA_SOURCES.flatMap((source) => source.roots || []),
+  getAvailableRoots: () => library.availableRoots
+});
+const personLibraryService = createPersonLibraryService({
+  actorProfileSearchNames,
+  compareNaturalTitle,
+  getLibrary: () => library,
+  libraryOpenRoots,
+  libraryRoots: LIBRARY_ROOTS,
+  normalizeSourcePath,
+  pathWithinRoot,
+  registerFiles,
+  relativeFromRoot,
+  replaceCoreLocalFilesForWork,
+  rootLabel,
+  safeStat,
+  saveLibraryCache,
+  scanPersonDirectory,
+  sourcePathToAbsolute,
+  invalidateLibraryDerivedCaches
+});
+const adminModule = createAdminModule({
+  actorMovieRows,
+  actorProfileRow,
+  actorAvatarService,
+  adminScriptService,
+  adminTaskService,
+  clearSearchSourceCaches,
+  clampInteger,
+  coverGenerationStatus,
+  doubanCookieService,
+  enrichLocalWorksWithActorMovieInfo,
+  getLibrary: () => library,
+  invalidateTableStamp,
+  personLibraryService,
+  appConfigService,
+  publicPerson,
+  pagedWorksPayload,
+  readJsonBody,
+  refreshLibrary,
+  requireLocalAdmin,
+  resolveLibraryPersonByPublicId,
+  sendJson,
+  setActorMovieCache: (value) => {
+    actorMovieCache = value;
+    actorMovieByCodeKeyCache = null;
+    personMergeCache = null;
+  },
+  setLocalWorkCachesDirty: () => {
+    localWorkCodeKeyCache = null;
+    localWorkByCodeKeyCache = null;
+  },
+  setWorkInfoCache: (value) => {
+    workInfoCache = value;
+  },
+  sortWorkList
+});
+const localOpenService = createLocalOpenService({
+  libraryOpenRoots,
+  pathWithinRoot,
+  relativeFromRoot,
+  safeStat,
+  sourcePathToAbsolute
+});
+const localOpenModule = createLocalOpenModule({
+  localOpenService,
+  readJsonBody,
+  requireTrustedNetworkPage,
+  resolvePlayableVideoFile,
+  sendJson
+});
 
 function emptyLibrary() {
   return {
@@ -215,132 +606,24 @@ function emptyLibrary() {
   };
 }
 
-function emptyUserState() {
-  return {
-    version: 2,
-    favoriteFolders: {
-      [DEFAULT_FAVORITE_FOLDER_ID]: {
-        name: DEFAULT_FAVORITE_FOLDER_NAME,
-        createdAt: ""
-      }
-    },
-    favorites: {},
-    manualCovers: {},
-    progress: {}
-  };
-}
-
-function defaultAppConfig() {
-  return {
-    compilationPrefixes: [...DEFAULT_APP_CONFIG.compilationPrefixes],
-    compilationKeywords: [...DEFAULT_APP_CONFIG.compilationKeywords],
-    actorAvatarDataPath: DEFAULT_APP_CONFIG.actorAvatarDataPath,
-    imageReaderCacheMaxBytes: DEFAULT_APP_CONFIG.imageReaderCacheMaxBytes
-  };
-}
-
-function uniqueTrimmedStrings(values, options = {}) {
-  const seen = new Set();
-  const result = [];
-  const maxLength = options.maxLength || 40;
-  const transform = options.transform || ((value) => value);
-  for (const value of Array.isArray(values) ? values : []) {
-    const normalized = transform(String(value || "").trim());
-    if (!normalized || normalized.length > maxLength || seen.has(normalized)) continue;
-    seen.add(normalized);
-    result.push(normalized);
-  }
-  return result.slice(0, options.maxItems || 100);
-}
-
-function normalizeCompilationPrefix(value) {
-  return String(value || "")
-    .trim()
-    .replace(/[-_\s]+$/g, "")
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "");
-}
-
-function normalizeAppConfig(value = {}) {
-  const fallback = defaultAppConfig();
-  const input = value && typeof value === "object" ? value : {};
-  const prefixes = uniqueTrimmedStrings(input.compilationPrefixes, {
-    maxLength: 16,
-    maxItems: 80,
-    transform: normalizeCompilationPrefix
-  });
-  const keywords = uniqueTrimmedStrings(input.compilationKeywords, {
-    maxLength: 40,
-    maxItems: 120
-  });
-
-  return {
-    compilationPrefixes: prefixes.length ? prefixes : fallback.compilationPrefixes,
-    compilationKeywords: keywords.length ? keywords : fallback.compilationKeywords,
-    actorAvatarDataPath: String(input.actorAvatarDataPath || "").trim().slice(0, 1000),
-    imageReaderCacheMaxBytes: normalizeImageReaderCacheLimit(
-      input.imageReaderCacheMaxBytes ?? input.mangaImageCacheMaxBytes,
-      fallback.imageReaderCacheMaxBytes
-    )
-  };
-}
-
-function normalizeImageReaderCacheLimit(value, fallback = DEFAULT_IMAGE_READER_CACHE_MAX_BYTES) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  if (parsed <= 0) return 0;
-  return Math.min(MAX_IMAGE_READER_CACHE_MAX_BYTES, Math.max(MIN_IMAGE_READER_CACHE_MAX_BYTES, Math.floor(parsed)));
-}
-
-function loadAppConfig() {
-  appConfig = defaultAppConfig();
-  if (!fs.existsSync(APP_CONFIG_PATH)) return;
-
-  try {
-    appConfig = normalizeAppConfig(JSON.parse(fs.readFileSync(APP_CONFIG_PATH, "utf8")));
-  } catch (error) {
-    console.warn(`[config] failed to load app config: ${error.message}`);
-    appConfig = defaultAppConfig();
-  }
-}
-
-function saveAppConfig() {
-  ensureDataDir();
-  fs.writeFileSync(APP_CONFIG_PATH, JSON.stringify(appConfig, null, 2), "utf8");
-}
-
-function publicAppConfig() {
-  return {
-    compilationPrefixes: [...appConfig.compilationPrefixes],
-    compilationKeywords: [...appConfig.compilationKeywords],
-    actorAvatarDataPath: appConfig.actorAvatarDataPath || "",
-    imageReaderCacheMaxBytes: normalizeImageReaderCacheLimit(appConfig.imageReaderCacheMaxBytes)
-  };
-}
-
-function ensureLogDir() {
-  fs.mkdirSync(LOG_DIR, { recursive: true });
-}
-
 const {
   applyAppCookie,
-  attachAccessLogger,
-  isSameLocalOrigin,
+  isSameTrustedNetworkOrigin,
+  isTrustedNetworkAccess,
   requestAccess,
   requestAuthState,
   routeAuth,
   sendLoginRequired
 } = createAuthServices({
   authSecretPath: AUTH_SECRET_PATH,
-  accessLogPath: ACCESS_LOG_PATH,
   remoteWebPassword: REMOTE_WEB_PASSWORD,
   ensureDataDir,
-  ensureLogDir,
   readBodyText,
   sendJson,
   sendHtml,
   redirect
 });
+const attachAccessLogger = createAccessLogger({ accessLogPath: ACCESS_LOG_PATH });
 
 function isExcludedDirName(name) {
   const lower = name.toLowerCase();
@@ -375,211 +658,121 @@ function createId(prefix, value) {
   return `${prefix}_${Buffer.from(value).toString("base64url")}`;
 }
 
-function cleanFavoriteFolderName(value) {
-  return String(value || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 32);
+function normalizePeopleScope(value) {
+  return String(value || "").trim().toLowerCase() === "western" ? "western" : "main";
 }
 
-function defaultFavoriteFolders() {
-  return {
-    [DEFAULT_FAVORITE_FOLDER_ID]: {
-      name: DEFAULT_FAVORITE_FOLDER_NAME,
-      createdAt: ""
-    }
-  };
+function sourcePathWithinAnyRoot(sourcePath, roots) {
+  const absolutePath = sourcePathToAbsolute(sourcePath);
+  return Boolean(absolutePath && roots.some((rootPath) => pathWithinRoot(absolutePath, rootPath)));
 }
 
-function normalizeFavoriteFolders(value) {
-  const folders = defaultFavoriteFolders();
-  if (!value || typeof value !== "object") return folders;
+function sourcePathInWesternRoots(sourcePath) {
+  return sourcePathWithinAnyRoot(sourcePath, WESTERN_LIBRARY_ROOTS);
+}
 
-  for (const [rawId, rawFolder] of Object.entries(value)) {
-    const id = String(rawId || "").trim();
-    if (!id || id.length > 96) continue;
-    const folder = rawFolder && typeof rawFolder === "object" ? rawFolder : {};
-    const name = cleanFavoriteFolderName(folder.name) || (id === DEFAULT_FAVORITE_FOLDER_ID ? DEFAULT_FAVORITE_FOLDER_NAME : "");
-    if (!name) continue;
-    folders[id] = {
-      name,
-      createdAt: String(folder.createdAt || "")
-    };
+function workInRoots(work, roots) {
+  const paths = [
+    work?.relativePath,
+    ...(work?.videos || []).map((file) => file.relativePath || file.path),
+    ...(work?.images || []).map((file) => file.relativePath || file.path),
+    ...(work?.infos || []).map((file) => file.relativePath || file.path)
+  ];
+  return paths.some((sourcePath) => sourcePathWithinAnyRoot(sourcePath, roots));
+}
+
+function personInRoots(person, roots) {
+  const paths = [person?.relativePath, ...(person?.sourcePaths || [])].filter(Boolean);
+  if (paths.some((sourcePath) => sourcePathWithinAnyRoot(sourcePath, roots))) return true;
+  return (person?.works || []).some((workId) => workInRoots(library.worksById.get(workId), roots));
+}
+
+function personHasNonWesternLocalSource(person) {
+  const paths = [person?.relativePath, ...(person?.sourcePaths || [])].filter(Boolean);
+  if (paths.some((sourcePath) => !sourcePathWithinAnyRoot(sourcePath, WESTERN_LIBRARY_ROOTS))) return true;
+  return (person?.works || []).some((workId) => {
+    const work = library.worksById.get(workId);
+    return work && !workInRoots(work, WESTERN_LIBRARY_ROOTS);
+  });
+}
+
+function personMatchesPeopleScope(person, scope) {
+  const index = peopleScopeIndex();
+  const personId = String(person?.id || "");
+  if (personId && index.knownPersonIds.has(personId)) {
+    return scope === "western" ? index.westernPersonIds.has(personId) : index.mainPersonIds.has(personId);
   }
-
-  folders[DEFAULT_FAVORITE_FOLDER_ID].name = folders[DEFAULT_FAVORITE_FOLDER_ID].name || DEFAULT_FAVORITE_FOLDER_NAME;
-  return folders;
+  if (scope === "western") return personInRoots(person, WESTERN_LIBRARY_ROOTS);
+  return !personInRoots(person, WESTERN_LIBRARY_ROOTS) || personHasNonWesternLocalSource(person);
 }
 
-function normalizeFavoriteFolderId(value, folders = userState.favoriteFolders) {
-  const id = String(value || "").trim();
-  return id && folders?.[id] ? id : DEFAULT_FAVORITE_FOLDER_ID;
+function workMatchesPeopleScope(work, scope) {
+  const index = peopleScopeIndex();
+  const workId = String(work?.id || "");
+  if (workId && index.knownWorkIds.has(workId)) {
+    return scope === "western" ? index.westernWorkIds.has(workId) : index.mainWorkIds.has(workId);
+  }
+  if (scope === "western") return workInRoots(work, WESTERN_LIBRARY_ROOTS);
+  return !workInRoots(work, WESTERN_LIBRARY_ROOTS);
 }
 
-function normalizeFavoriteRecord(value, folders) {
-  const record = value && typeof value === "object" ? value : {};
-  return {
-    createdAt: String(record.createdAt || ""),
-    folderId: normalizeFavoriteFolderId(record.folderId, folders)
-  };
+function peopleScopeCacheKey() {
+  return [
+    library.scannedAt || "",
+    library.people?.length || 0,
+    library.worksById?.size || 0,
+    library.totals?.videos || 0,
+    library.totals?.images || 0,
+    library.totals?.infoFiles || 0,
+    WESTERN_LIBRARY_ROOTS.join("|")
+  ].join("::");
 }
 
-function normalizeFavorites(value, folders) {
-  const favorites = {};
-  if (!value || typeof value !== "object") return favorites;
-  for (const [workId, favorite] of Object.entries(value)) {
+function peopleScopeIndex() {
+  const key = peopleScopeCacheKey();
+  if (peopleScopeIndexCache?.key === key) return peopleScopeIndexCache.index;
+
+  const westernWorkIds = new Set();
+  const mainWorkIds = new Set();
+  const knownWorkIds = new Set();
+  for (const work of library.worksById.values()) {
+    const workId = String(work?.id || "");
     if (!workId) continue;
-    favorites[workId] = normalizeFavoriteRecord(favorite, folders);
-  }
-  return favorites;
-}
-
-function normalizeManualCoverRecord(value) {
-  const record = value && typeof value === "object" ? value : { imageId: value };
-  const imageId = String(record.imageId || "").trim();
-  if (!imageId || imageId.length > 1024) return null;
-  return {
-    imageId,
-    updatedAt: String(record.updatedAt || "")
-  };
-}
-
-function normalizeManualCovers(value) {
-  const covers = {};
-  if (!value || typeof value !== "object") return covers;
-  for (const [workId, cover] of Object.entries(value)) {
-    const id = String(workId || "").trim();
-    const record = normalizeManualCoverRecord(cover);
-    if (!id || !record) continue;
-    covers[id] = record;
-  }
-  return covers;
-}
-
-function rootLabel(rootPath) {
-  return rootPath.replace(/[\\/]+$/, "").replaceAll(path.sep, "/");
-}
-
-function relativeFromRoot(fullPath) {
-  const matchingRoot = [...LIBRARY_ROOTS]
-    .sort((a, b) => b.length - a.length)
-    .find((rootPath) => {
-      const relative = path.relative(rootPath, fullPath);
-      return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-    });
-
-  if (!matchingRoot) {
-    return fullPath.replaceAll(path.sep, "/");
-  }
-
-  const relative = path.relative(matchingRoot, fullPath).replaceAll(path.sep, "/");
-  const label = rootLabel(matchingRoot);
-  return relative ? `${label}/${relative}` : label;
-}
-
-function sourcePathToAbsolute(sourcePath) {
-  const raw = String(sourcePath || "").trim();
-  if (!raw) return "";
-  return path.resolve(raw.replaceAll("/", path.sep));
-}
-
-function pathWithinRoot(targetPath, rootPath) {
-  const target = path.resolve(targetPath).toLowerCase();
-  const root = path.resolve(rootPath).toLowerCase();
-  const relative = path.relative(root, target);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-function libraryOpenRoots() {
-  return [...new Set([...(library.availableRoots || []), ...LIBRARY_ROOTS])];
-}
-
-function resolveLocalFolderTarget(sourcePath) {
-  const absolutePath = sourcePathToAbsolute(sourcePath);
-  if (!absolutePath) {
-    return { error: "缺少文件夹路径" };
-  }
-
-  const allowed = libraryOpenRoots().some((rootPath) => pathWithinRoot(absolutePath, rootPath));
-  if (!allowed) {
-    return { error: "只能打开资料库根目录内的文件夹" };
-  }
-
-  const stat = safeStat(absolutePath);
-  if (!stat) {
-    return { error: "本地文件夹不存在" };
-  }
-
-  return { folderPath: stat.isDirectory() ? absolutePath : path.dirname(absolutePath) };
-}
-
-function resolveLocalFileTarget(sourcePath) {
-  const absolutePath = sourcePathToAbsolute(sourcePath);
-  if (!absolutePath) {
-    return { error: "缺少文件路径" };
-  }
-
-  const allowed = libraryOpenRoots().some((rootPath) => pathWithinRoot(absolutePath, rootPath));
-  if (!allowed) {
-    return { error: "只能打开资料库根目录内的文件" };
-  }
-
-  const stat = safeStat(absolutePath);
-  if (!stat) {
-    return { error: "本地文件不存在" };
-  }
-  if (!stat.isFile()) {
-    return { error: "目标不是本地文件" };
-  }
-
-  return { filePath: absolutePath };
-}
-
-function openFolderInSystem(folderPath) {
-  const platform = process.platform;
-  const command = platform === "win32" ? process.env.ComSpec || "cmd.exe" : platform === "darwin" ? "open" : "xdg-open";
-  const args = platform === "win32" ? ["/d", "/c", "start", "", folderPath] : [folderPath];
-  const child = spawn(command, args, {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
-  });
-  child.unref();
-}
-
-function openFileInSystem(filePath) {
-  const platform = process.platform;
-  const command = platform === "win32" ? "powershell.exe" : platform === "darwin" ? "open" : "xdg-open";
-  const args =
-    platform === "win32"
-      ? ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Start-Process -LiteralPath $args[0]", filePath]
-      : [filePath];
-  const child = spawn(command, args, {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
-  });
-  child.unref();
-}
-
-function scheduleOpenFolder(folderPath) {
-  setTimeout(() => {
-    try {
-      openFolderInSystem(folderPath);
-    } catch (error) {
-      console.warn("[open-folder]", error.message);
+    knownWorkIds.add(workId);
+    if (workInRoots(work, WESTERN_LIBRARY_ROOTS)) {
+      westernWorkIds.add(workId);
+    } else {
+      mainWorkIds.add(workId);
     }
-  }, 25);
-}
+  }
 
-function scheduleOpenFile(filePath) {
-  setTimeout(() => {
-    try {
-      openFileInSystem(filePath);
-    } catch (error) {
-      console.warn("[open-file]", error.message);
-    }
-  }, 25);
+  const westernPersonIds = new Set();
+  const mainPersonIds = new Set();
+  const knownPersonIds = new Set();
+  const seen = new Set();
+  for (const person of library.people) {
+    const merged = mergedPersonRecord(person);
+    const personId = String(merged?.id || "");
+    if (!personId || seen.has(personId)) continue;
+    seen.add(personId);
+    knownPersonIds.add(personId);
+
+    const paths = [merged.relativePath, ...(merged.sourcePaths || [])].filter(Boolean);
+    const hasWesternPath = paths.some(sourcePathInWesternRoots);
+    const hasNonWesternPath = paths.some((sourcePath) => !sourcePathInWesternRoots(sourcePath));
+    const workIds = (merged.works || []).map((workId) => String(workId || "")).filter(Boolean);
+    const hasWesternWork = workIds.some((workId) => westernWorkIds.has(workId));
+    const hasNonWesternWork = workIds.some((workId) => knownWorkIds.has(workId) && !westernWorkIds.has(workId));
+    const isWestern = hasWesternPath || hasWesternWork;
+    const isMain = !isWestern || hasNonWesternPath || hasNonWesternWork;
+
+    if (isWestern) westernPersonIds.add(personId);
+    if (isMain) mainPersonIds.add(personId);
+  }
+
+  const index = { westernWorkIds, mainWorkIds, knownWorkIds, westernPersonIds, mainPersonIds, knownPersonIds };
+  peopleScopeIndexCache = { key, index };
+  return index;
 }
 
 function safeStat(filePath) {
@@ -808,37 +1001,6 @@ function preferredPersonDisplayName(rowOrPerson, fallback = "") {
   return candidates[0] || cleanPersonNamePart(fallback);
 }
 
-function parseRootList(rawValue, fallback) {
-  const raw = rawValue || fallback;
-  const seen = new Set();
-  return raw
-    .split(/[;,|]/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .map((item) => {
-      const parsed = path.parse(item);
-      return parsed.root && parsed.root.toLowerCase() === item.toLowerCase() ? parsed.root : path.resolve(item);
-    })
-    .filter((item) => {
-      const key = item.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-}
-
-function parsePhotoSetRoots() {
-  return parseRootList(process.env.FANHAO_PHOTO_SET_ROOTS, "T:\\;T:\\[套图1]");
-}
-
-function galleryMediaSources() {
-  return [
-    { kind: "western", label: "欧美", roots: parseRootList(process.env.FANHAO_WESTERN_ROOTS, "R:\\") },
-    { kind: "movie", label: "电影", roots: parseRootList(process.env.FANHAO_MOVIE_ROOTS, "Z:\\") },
-    { kind: "tv", label: "电视剧", roots: parseRootList(process.env.FANHAO_TV_ROOTS, "Y:\\") }
-  ];
-}
-
 function uniquePersonNames(values) {
   const names = [];
   const seen = new Set();
@@ -865,6 +1027,25 @@ function actorProfileAliases(personOrRow) {
   return parseActorAliasesJson(personOrRow?.aliases_json);
 }
 
+function actorProfileJavdbRefs(personOrRow) {
+  try {
+    const parsed = personOrRow?.javdb_refs_json ? JSON.parse(personOrRow.javdb_refs_json) : [];
+    if (!Array.isArray(parsed)) return [];
+    const refs = [];
+    const seen = new Set();
+    for (const item of parsed) {
+      const actorId = cleanJavdbActorId(item?.actorId || actorIdFromJavdbUrl(item?.url || ""));
+      const url = canonicalJavdbActorUrl(item?.url || actorId);
+      if (!actorId || !url || seen.has(actorId)) continue;
+      seen.add(actorId);
+      refs.push({ actorId, url });
+    }
+    return refs;
+  } catch {
+    return [];
+  }
+}
+
 function actorProfileDisplayName(person) {
   const row = person?.id ? actorProfileRow(person.id) : null;
   return row ? preferredPersonDisplayName(row, person?.name || "") : person?.name || "";
@@ -880,361 +1061,6 @@ function actorProfileSearchNames(person) {
     ...actorProfileAliases(row),
     ...mergedPersonAliasNames(person.id)
   ]);
-}
-
-function normalizeActorAvatarNameKey(value) {
-  return String(value || "")
-    .toLowerCase()
-    .replace(/[\s._\-()[\]【】（）「」『』"'’‘“”・·,，、|/]+/g, "")
-    .trim();
-}
-
-function actorAvatarNameFromFiletreeKey(value) {
-  const text = String(value || "").split("?", 1)[0].replaceAll("\\", "/").split("/").pop() || "";
-  return fileBase(text);
-}
-
-function actorAvatarMime(filePath) {
-  const ext = normalizeExt(filePath);
-  if (ext === ".png") return "image/png";
-  if (ext === ".webp") return "image/webp";
-  return "image/jpeg";
-}
-
-function resolveInside(baseDir, parts) {
-  const base = path.resolve(baseDir);
-  const target = path.resolve(base, ...parts);
-  const relative = path.relative(base, target);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
-  return target;
-}
-
-function actorAvatarTargetPath(rootPath, groupName, targetValue) {
-  const contentDir = path.resolve(rootPath, "Content");
-  const groupPath = resolveInside(contentDir, [String(groupName || "")]);
-  if (!groupPath) return null;
-
-  const rawTarget = String(targetValue || "").split("?", 1)[0].replaceAll("\\", "/");
-  const parts = rawTarget.split("/").map((part) => part.trim()).filter(Boolean);
-  if (!parts.length) return null;
-  return resolveInside(groupPath, parts);
-}
-
-function actorAvatarPersonIndex() {
-  const index = new Map();
-  const ambiguous = new Set();
-  for (const person of library.people) {
-    for (const name of actorProfileSearchNames(person)) {
-      const key = normalizeActorAvatarNameKey(name);
-      if (!key) continue;
-      const existing = index.get(key);
-      if (existing && existing.id !== person.id) {
-        ambiguous.add(key);
-        index.delete(key);
-        continue;
-      }
-      if (!ambiguous.has(key)) index.set(key, person);
-    }
-  }
-  return { index, ambiguous };
-}
-
-function readActorAvatarFiletree(rootPath) {
-  const root = path.resolve(String(rootPath || "").trim());
-  const filetreePath = path.join(root, "Filetree.json");
-  const contentDir = path.join(root, "Content");
-  if (!rootPath) {
-    const error = new Error("请先填写演员头像目录。");
-    error.statusCode = 400;
-    throw error;
-  }
-  if (!safeStat(filetreePath)?.isFile()) {
-    const error = new Error("该路径下未找到 Filetree.json。");
-    error.statusCode = 400;
-    throw error;
-  }
-  if (!safeStat(contentDir)?.isDirectory()) {
-    const error = new Error("该路径下未找到 Content 目录。");
-    error.statusCode = 400;
-    throw error;
-  }
-
-  let filetree = null;
-  try {
-    filetree = JSON.parse(fs.readFileSync(filetreePath, "utf8"));
-  } catch (error) {
-    const wrapped = new Error(`读取 Filetree.json 失败：${error.message}`);
-    wrapped.statusCode = 400;
-    throw wrapped;
-  }
-
-  const content = filetree?.Content || filetree?.content;
-  if (!content || typeof content !== "object") {
-    const error = new Error("Filetree.json 中未找到 Content 节点。");
-    error.statusCode = 400;
-    throw error;
-  }
-  return { root, content };
-}
-
-function actorAvatarEntriesFromFiletree(rootPath) {
-  const { root, content } = readActorAvatarFiletree(rootPath);
-  const entries = [];
-  const summary = {
-    groups: 0,
-    filetreeItems: 0,
-    usable: 0,
-    missingFiles: 0,
-    unsupported: 0,
-    tooLarge: 0,
-    unsafePath: 0
-  };
-
-  for (const [groupName, mapping] of Object.entries(content)) {
-    if (!mapping || typeof mapping !== "object") continue;
-    summary.groups += 1;
-    for (const [actorKey, targetValue] of Object.entries(mapping)) {
-      const values = Array.isArray(targetValue) ? targetValue : [targetValue];
-      for (const value of values) {
-        summary.filetreeItems += 1;
-        const fullPath = actorAvatarTargetPath(root, groupName, value || actorKey);
-        if (!fullPath) {
-          summary.unsafePath += 1;
-          continue;
-        }
-        const ext = normalizeExt(fullPath);
-        if (!ACTOR_AVATAR_EXTS.has(ext)) {
-          summary.unsupported += 1;
-          continue;
-        }
-        const stat = safeStat(fullPath);
-        if (!stat?.isFile()) {
-          summary.missingFiles += 1;
-          continue;
-        }
-        if (stat.size > MAX_ACTOR_AVATAR_BYTES) {
-          summary.tooLarge += 1;
-          continue;
-        }
-        const actorName = actorAvatarNameFromFiletreeKey(actorKey);
-        const key = normalizeActorAvatarNameKey(actorName);
-        if (!key) continue;
-        const relPath = path.relative(root, fullPath).replaceAll(path.sep, "/");
-        entries.push({
-          actorName,
-          key,
-          fullPath,
-          relPath,
-          mime: actorAvatarMime(fullPath),
-          size: stat.size
-        });
-        summary.usable += 1;
-      }
-    }
-  }
-
-  return { root, entries, summary };
-}
-
-function actorAvatarCandidatesFromFiletree(rootPath, options = {}) {
-  const { root, entries, summary } = actorAvatarEntriesFromFiletree(rootPath);
-  const { index, ambiguous } = actorAvatarPersonIndex();
-  const personIdFilter = String(options.personId || "").trim();
-  const limit = Math.max(0, Number(options.limit || 0) || 0);
-  const byPerson = new Map();
-  let matched = 0;
-  let skippedAmbiguous = 0;
-  let skippedUnmatched = 0;
-
-  for (const entry of entries) {
-    if (ambiguous.has(entry.key)) {
-      skippedAmbiguous += 1;
-      continue;
-    }
-    const person = index.get(entry.key);
-    if (!person) {
-      skippedUnmatched += 1;
-      continue;
-    }
-    if (personIdFilter && person.id !== personIdFilter) continue;
-    matched += 1;
-
-    if (!byPerson.has(person.id)) {
-      const profile = publicActorProfile(actorProfileRow(person.id));
-      byPerson.set(person.id, {
-        personId: person.id,
-        personName: person.name,
-        displayName: profile?.displayName || person.name,
-        hasAvatar: Boolean(profile?.avatarUrl),
-        candidates: []
-      });
-    }
-
-    byPerson.get(person.id).candidates.push(publicActorAvatarCandidate(entry));
-  }
-
-  const people = [...byPerson.values()]
-    .map((person) => ({
-      ...person,
-      candidates: person.candidates.sort((a, b) => a.relPath.localeCompare(b.relPath, undefined, { numeric: true, sensitivity: "base" }))
-    }))
-    .sort((a, b) => Number(a.hasAvatar) - Number(b.hasAvatar) || a.displayName.localeCompare(b.displayName, "zh-Hans-CN"))
-    .slice(0, limit || Number.MAX_SAFE_INTEGER);
-
-  return {
-    root,
-    ...summary,
-    matched,
-    matchedPeople: byPerson.size,
-    returnedPeople: people.length,
-    skippedAmbiguous,
-    skippedUnmatched,
-    people
-  };
-}
-
-function publicActorAvatarCandidate(entry) {
-  return {
-    actorName: entry.actorName,
-    relPath: entry.relPath,
-    size: entry.size,
-    mime: entry.mime
-  };
-}
-
-function upsertActorAvatar(person, entry, existing, now) {
-  const buffer = fs.readFileSync(entry.fullPath);
-  const corePersonId = Number(person.id);
-  const db = getCoreDb();
-  db.prepare(
-    `
-    UPDATE people
-    SET display_name = COALESCE(display_name, ?),
-        updated_at = ?
-    WHERE id = ?
-    `
-  ).run(existing?.display_name || person.name, now, corePersonId);
-  db.prepare(
-    `
-    INSERT INTO images (
-      owner_type, owner_id, kind, source_type, local_path, mime, image_blob, byte_size,
-      sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
-    )
-    VALUES ('person', ?, 'avatar', 'local', ?, ?, ?, ?, 0, 'ok', ?, 'local-avatar', ?, ?, ?)
-    ON CONFLICT DO UPDATE SET
-      mime = excluded.mime,
-      image_blob = excluded.image_blob,
-      byte_size = excluded.byte_size,
-      status = excluded.status,
-      source = excluded.source,
-      legacy_table = excluded.legacy_table,
-      legacy_key = excluded.legacy_key,
-      updated_at = excluded.updated_at
-    `
-  ).run(corePersonId, entry.fullPath, entry.mime, buffer, buffer.length, LOCAL_ACTOR_AVATAR_SOURCE, person.id, now, now);
-}
-
-function importActorAvatarCandidate(rootPath, personId, relPath, options = {}) {
-  const person = library.peopleById.get(String(personId || ""));
-  if (!person) {
-    const error = new Error("人物不存在");
-    error.statusCode = 404;
-    throw error;
-  }
-
-  const cleanRelPath = String(relPath || "").replaceAll("\\", "/").trim();
-  const { entries } = actorAvatarEntriesFromFiletree(rootPath);
-  const { index, ambiguous } = actorAvatarPersonIndex();
-  const entry = entries.find((item) => item.relPath === cleanRelPath);
-  if (!entry) {
-    const error = new Error("候选头像不存在或不可用");
-    error.statusCode = 404;
-    throw error;
-  }
-  if (ambiguous.has(entry.key)) {
-    const error = new Error("候选头像名称匹配到多个人物，请先补充别名后再选择");
-    error.statusCode = 409;
-    throw error;
-  }
-  const matchedPerson = index.get(entry.key);
-  if (matchedPerson?.id !== person.id && !options.force) {
-    const error = new Error("候选头像与当前人物不匹配");
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (!options.dryRun) {
-    const now = new Date().toISOString();
-    const existing = actorProfileRow(person.id);
-    upsertActorAvatar(person, entry, existing, now);
-    invalidateTableStamp("actor_profiles");
-    actorProfileCache = null;
-    personMergeCache = null;
-  }
-  return {
-    dryRun: Boolean(options.dryRun),
-    person: publicPerson(person),
-    candidate: publicActorAvatarCandidate(entry)
-  };
-}
-
-function importActorAvatarsFromFiletree(rootPath, options = {}) {
-  const { root, entries, summary } = actorAvatarEntriesFromFiletree(rootPath);
-  const { index, ambiguous } = actorAvatarPersonIndex();
-  const replace = Boolean(options.replace);
-  const importedPersonIds = new Set();
-  const seenAvatarKeys = new Set();
-  const now = new Date().toISOString();
-  let matched = 0;
-  let imported = 0;
-  let skippedExisting = 0;
-  let skippedDuplicate = 0;
-  let skippedAmbiguous = 0;
-  let skippedUnmatched = 0;
-
-  for (const entry of entries) {
-    if (ambiguous.has(entry.key)) {
-      skippedAmbiguous += 1;
-      continue;
-    }
-    const person = index.get(entry.key);
-    if (!person) {
-      skippedUnmatched += 1;
-      continue;
-    }
-    matched += 1;
-
-    if (importedPersonIds.has(person.id) || seenAvatarKeys.has(`${person.id}:${entry.relPath}`)) {
-      skippedDuplicate += 1;
-      continue;
-    }
-
-    const existing = actorProfileRow(person.id);
-    if (existing?.avatar_url && !replace) {
-      skippedExisting += 1;
-      continue;
-    }
-
-    upsertActorAvatar(person, entry, existing, now);
-    importedPersonIds.add(person.id);
-    seenAvatarKeys.add(`${person.id}:${entry.relPath}`);
-    imported += 1;
-  }
-
-  actorProfileCache = null;
-  personMergeCache = null;
-  if (imported) invalidateTableStamp("actor_profiles");
-  return {
-    root,
-    replace,
-    ...summary,
-    matched,
-    imported,
-    skippedExisting,
-    skippedDuplicate,
-    skippedAmbiguous,
-    skippedUnmatched
-  };
 }
 
 function isBracketedSearch(value) {
@@ -1900,8 +1726,28 @@ function actorProfileRowsById() {
           p.error,
           p.created_at AS fetched_at,
           p.updated_at,
-          ref.external_key AS javdb_actor_id,
-          ref.url AS javdb_url,
+          (
+            SELECT json_group_array(json_object('actorId', pref.external_key, 'url', pref.url))
+            FROM person_external_refs pref
+            WHERE pref.person_id = p.id
+              AND pref.provider = 'javdb-actor'
+          ) AS javdb_refs_json,
+          (
+            SELECT pref.external_key
+            FROM person_external_refs pref
+            WHERE pref.person_id = p.id
+              AND pref.provider = 'javdb-actor'
+            ORDER BY pref.id
+            LIMIT 1
+          ) AS javdb_actor_id,
+          (
+            SELECT pref.url
+            FROM person_external_refs pref
+            WHERE pref.person_id = p.id
+              AND pref.provider = 'javdb-actor'
+            ORDER BY pref.id
+            LIMIT 1
+          ) AS javdb_url,
           avatar.remote_url AS avatar_url,
           avatar.mime AS avatar_mime,
           NULL AS avatar_blob,
@@ -1911,9 +1757,6 @@ function actorProfileRowsById() {
             WHERE pa.person_id = p.id
           ) AS aliases_json
         FROM people p
-        LEFT JOIN person_external_refs ref
-          ON ref.person_id = p.id
-         AND ref.provider = 'javdb-actor'
         LEFT JOIN images avatar
           ON avatar.id = (
             SELECT i.id
@@ -1925,7 +1768,7 @@ function actorProfileRowsById() {
             ORDER BY CASE WHEN i.image_blob IS NOT NULL THEN 0 ELSE 1 END, i.id ASC
             LIMIT 1
           )
-        WHERE ref.external_key IS NOT NULL
+        WHERE EXISTS (SELECT 1 FROM person_external_refs pref WHERE pref.person_id = p.id AND pref.provider = 'javdb-actor')
            OR avatar.id IS NOT NULL
            OR EXISTS (SELECT 1 FROM person_aliases pa WHERE pa.person_id = p.id)
            OR COALESCE(NULLIF(LOWER(TRIM(p.gender)), ''), 'unknown') <> 'unknown'
@@ -1954,12 +1797,16 @@ function publicActorProfile(row) {
   const displayName = preferredPersonDisplayName(row, row.person_name);
   const avatar = publicPersonAvatar(row.person_id);
   const avatarUrl = avatar?.avatarUrl || (row.avatar_blob ? `/media/actor/${encodeURIComponent(row.person_id)}/avatar?v=${encodeURIComponent(row.updated_at || "")}` : "");
+  const javdbRefs = actorProfileJavdbRefs(row);
+  const primaryJavdb = javdbRefs[0] || { actorId: row.javdb_actor_id || "", url: row.javdb_url || "" };
 
   return {
     personId: String(row.person_id || ""),
     personName: row.person_name,
-    javdbActorId: row.javdb_actor_id || "",
-    javdbUrl: row.javdb_url || "",
+    javdbActorId: primaryJavdb.actorId || "",
+    javdbUrl: primaryJavdb.url || "",
+    javdbRefs,
+    javdbUrls: javdbRefs.map((ref) => ref.url),
     displayName,
     aliases,
     gender: normalizePersonGender(row.gender),
@@ -2124,7 +1971,7 @@ function generateWorkCover(work) {
     coverBlob = extractCoverFrame(video.path, {
       ffmpegPath: FFMPEG_PATH,
       ffprobePath: FFPROBE_PATH,
-      duration: videoProbeCached(video)?.duration,
+      duration: videoProbeService.probeCached(video)?.duration,
       maxBytes: MAX_GENERATED_COVER_BYTES
     });
   } catch (error) {
@@ -2617,8 +2464,14 @@ function actorMovieRowsByPerson() {
         JOIN people p ON p.id = wp.person_id
         JOIN works w ON w.id = wp.work_id
         LEFT JOIN person_external_refs pref
-          ON pref.person_id = p.id
-         AND pref.provider = 'javdb-actor'
+          ON pref.id = (
+            SELECT pref2.id
+            FROM person_external_refs pref2
+            WHERE pref2.person_id = p.id
+              AND pref2.provider = 'javdb-actor'
+            ORDER BY pref2.id ASC
+            LIMIT 1
+          )
         LEFT JOIN work_external_refs wref
           ON wref.work_id = w.id
          AND wref.provider = 'javdb-video'
@@ -2865,13 +2718,15 @@ function mergedPersonRecord(person) {
   };
 }
 
-function mainLibraryPeople() {
+function mainLibraryPeople(scope = "main") {
   const people = [];
   const seen = new Set();
+  const normalizedScope = normalizePeopleScope(scope);
   for (const person of library.people) {
     const merged = mergedPersonRecord(person);
     if (!merged || seen.has(merged.id)) continue;
     seen.add(merged.id);
+    if (!personMatchesPeopleScope(merged, normalizedScope)) continue;
     if (shouldShowPersonInMainList(merged)) people.push(merged);
   }
   return people;
@@ -3351,8 +3206,14 @@ function coreMissingWorksForPerson(person, excludedCodeKeys = new Set()) {
           ON wref.work_id = w.id
          AND wref.provider = 'javdb-video'
         LEFT JOIN person_external_refs pref
-          ON pref.person_id = wp.person_id
-         AND pref.provider = 'javdb-actor'
+          ON pref.id = (
+            SELECT pref2.id
+            FROM person_external_refs pref2
+            WHERE pref2.person_id = wp.person_id
+              AND pref2.provider = 'javdb-actor'
+            ORDER BY pref2.id ASC
+            LIMIT 1
+          )
         LEFT JOIN images cover
           ON cover.id = (
             SELECT i.id
@@ -3433,6 +3294,41 @@ function workCodeKeySetForWorks(works = []) {
     for (const codeKey of workCodeKeys(work)) keys.add(codeKey);
   }
   return keys;
+}
+
+function displayWorkDedupeKey(work) {
+  const codeKey = storedWorkCodeKey(work?.infoSummary?.code || work?.directoryName || work?.title);
+  if (codeKey) return `code:${codeKey}`;
+  return work?.id ? `id:${work.id}` : "";
+}
+
+function workHasDisplayCover(work) {
+  return Boolean(work?.coverId || work?.remoteCoverUrl || work?.infoSummary?.imageUrl);
+}
+
+function preferredDisplayWork(existing, next) {
+  if (!existing) return next;
+  if (Boolean(existing.missingLocal) !== Boolean(next?.missingLocal)) {
+    return existing.missingLocal ? next : existing;
+  }
+  if (workHasDisplayCover(existing) !== workHasDisplayCover(next)) {
+    return workHasDisplayCover(next) ? next : existing;
+  }
+  return existing;
+}
+
+function dedupeWorksForDisplay(works = []) {
+  const byKey = new Map();
+  const unkeyed = [];
+  for (const work of works || []) {
+    const key = displayWorkDedupeKey(work);
+    if (!key) {
+      unkeyed.push(work);
+      continue;
+    }
+    byKey.set(key, preferredDisplayWork(byKey.get(key), work));
+  }
+  return [...byKey.values(), ...unkeyed];
 }
 
 function combinedLocalWorkCodeKeys(extraKeys = new Set()) {
@@ -3767,20 +3663,41 @@ function actorIdFromJavdbUrl(value) {
   if (!raw) return "";
   const direct = /^[A-Za-z0-9]{3,24}$/.test(raw) ? raw : "";
   if (direct) return direct;
-  const cleanActorId = (actorId) => (/^[A-Za-z0-9]{3,24}$/.test(actorId || "") ? actorId : "");
   try {
     const url = new URL(raw);
     const match = /^\/actors\/([^/?#]+)/.exec(url.pathname);
-    return match ? cleanActorId(decodeURIComponent(match[1])) : "";
+    return match ? cleanJavdbActorId(decodeURIComponent(match[1])) : "";
   } catch {
     const match = /javdb\.com\/actors\/([^/?#\s]+)/i.exec(raw);
-    return match ? cleanActorId(decodeURIComponent(match[1])) : "";
+    return match ? cleanJavdbActorId(decodeURIComponent(match[1])) : "";
   }
+}
+
+function cleanJavdbActorId(actorId) {
+  return /^[A-Za-z0-9]{3,24}$/.test(actorId || "") ? actorId : "";
 }
 
 function canonicalJavdbActorUrl(value) {
   const actorId = actorIdFromJavdbUrl(value);
   return actorId ? `https://javdb.com/actors/${actorId}` : "";
+}
+
+function canonicalJavdbActorUrls(value) {
+  const rawValues = Array.isArray(value)
+    ? value
+    : String(value || "")
+      .split(/\r?\n|[,，、;]/)
+      .map((item) => item.trim());
+  const urls = [];
+  const seen = new Set();
+  for (const raw of rawValues) {
+    const url = canonicalJavdbActorUrl(raw);
+    const actorId = actorIdFromJavdbUrl(url);
+    if (!raw || !url || !actorId || seen.has(actorId)) continue;
+    seen.add(actorId);
+    urls.push(url);
+  }
+  return urls;
 }
 
 function safeDirectoryName(value, fallback = "新人物") {
@@ -3921,9 +3838,15 @@ function createOrUpdateMoveTargetPerson(db, payload = {}) {
 
 function upsertActorProfile(person, payload) {
   const now = new Date().toISOString();
-  const inputActorUrl = typeof payload.javdbUrl === "string" ? payload.javdbUrl.trim() : "";
-  const javdbUrl = inputActorUrl ? canonicalJavdbActorUrl(inputActorUrl) : "";
-  if (inputActorUrl && !javdbUrl) {
+  const hasActorUrlInput = Object.hasOwn(payload, "javdbUrl") || Object.hasOwn(payload, "javdbUrls") || Object.hasOwn(payload, "actorUrls");
+  const rawActorUrls = Object.hasOwn(payload, "javdbUrls")
+    ? payload.javdbUrls
+    : Object.hasOwn(payload, "actorUrls")
+      ? payload.actorUrls
+      : payload.javdbUrl;
+  const javdbUrls = hasActorUrlInput ? canonicalJavdbActorUrls(rawActorUrls) : [];
+  const inputActorText = Array.isArray(rawActorUrls) ? rawActorUrls.join("\n") : String(rawActorUrls || "").trim();
+  if (inputActorText && !javdbUrls.length) {
     const error = new Error("请输入 JavDB actor 页面链接，例如 https://javdb.com/actors/BzpA");
     error.statusCode = 400;
     throw error;
@@ -3968,25 +3891,44 @@ function upsertActorProfile(person, payload) {
     )
     .run(person.name, normalizePersonSearchValue(person.name), displayName, gender, movieCount, payload.source || existing?.source || "manual", payload.status || "ok", payload.error || null, now, corePersonId);
 
-  const actorKey = payload.javdbActorId || actorIdFromJavdbUrl(javdbUrl) || existing?.javdb_actor_id || "";
-  const finalJavdbUrl = javdbUrl || existing?.javdb_url || (actorKey ? `https://javdb.com/actors/${actorKey}` : "");
-  if (actorKey) {
-    db.prepare(
+  if (hasActorUrlInput) {
+    db.prepare("DELETE FROM person_external_refs WHERE person_id = ? AND provider = 'javdb-actor'").run(corePersonId);
+    const insertRef = db.prepare(
       `
       INSERT INTO person_external_refs(person_id, provider, external_key, url, source, created_at, updated_at)
       VALUES (?, 'javdb-actor', ?, ?, ?, ?, ?)
       ON CONFLICT(provider, external_key) DO UPDATE SET
         person_id = excluded.person_id,
-        url = COALESCE(NULLIF(excluded.url, ''), person_external_refs.url),
+        url = excluded.url,
+        source = excluded.source,
         updated_at = excluded.updated_at
       `
-    ).run(corePersonId, actorKey, finalJavdbUrl, payload.source || "manual", now, now);
+    );
+    for (const url of javdbUrls) {
+      insertRef.run(corePersonId, actorIdFromJavdbUrl(url), url, payload.source || "manual", now, now);
+    }
+  } else if (payload.javdbActorId || existing?.javdb_actor_id) {
+    const actorKey = payload.javdbActorId || existing?.javdb_actor_id || "";
+    const finalJavdbUrl = existing?.javdb_url || (actorKey ? `https://javdb.com/actors/${actorKey}` : "");
+    if (actorKey) {
+      db.prepare(
+        `
+        INSERT INTO person_external_refs(person_id, provider, external_key, url, source, created_at, updated_at)
+        VALUES (?, 'javdb-actor', ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, external_key) DO UPDATE SET
+          person_id = excluded.person_id,
+          url = COALESCE(NULLIF(excluded.url, ''), person_external_refs.url),
+          updated_at = excluded.updated_at
+        `
+      ).run(corePersonId, actorKey, finalJavdbUrl, payload.source || "manual", now, now);
+    }
   }
 
   if (hasAliasesInput) {
-    db.prepare("DELETE FROM person_aliases WHERE person_id = ?").run(corePersonId);
+    const aliasSource = payload.source || "manual";
+    db.prepare("DELETE FROM person_aliases WHERE person_id = ? AND source = ?").run(corePersonId, aliasSource);
     const insertAlias = db.prepare("INSERT OR IGNORE INTO person_aliases(person_id, alias, alias_search, source) VALUES (?, ?, ?, ?)");
-    for (const alias of aliases) insertAlias.run(corePersonId, alias, normalizePersonSearchValue(alias), payload.source || "manual");
+    for (const alias of aliases) insertAlias.run(corePersonId, alias, normalizePersonSearchValue(alias), aliasSource);
   }
 
   const avatarUrl = payload.sourceAvatarUrl || payload.avatarUrl || existing?.avatar_url || "";
@@ -4023,7 +3965,7 @@ function upsertActorProfile(person, payload) {
     );
   }
 
-  if (javdbUrl && existing?.javdb_url && canonicalJavdbActorUrl(existing.javdb_url) !== javdbUrl) {
+  if (hasActorUrlInput) {
     actorMovieCache = null;
     actorMovieByCodeKeyCache = null;
   }
@@ -4034,6 +3976,157 @@ function upsertActorProfile(person, payload) {
   personMergeCache = null;
 
   return publicActorProfile(actorProfileRow(person.id));
+}
+
+function actorProfileMergeCandidates(personId, names = []) {
+  const targetId = String(personId || "");
+  const keys = new Set(uniquePersonNames(names).map(normalizePersonSearchValue).filter(Boolean));
+  if (!targetId || !keys.size || !hasCoreDb()) return [];
+
+  const db = getCoreDb();
+  const matches = new Map();
+  const addMatch = (person, matchedName) => {
+    const id = String(person?.id || "");
+    if (!id || id === targetId) return;
+    if (!matches.has(id)) {
+      matches.set(id, {
+        id,
+        name: person.name || "",
+        displayName: person.display_name || person.name || "",
+        matchedNames: new Set()
+      });
+    }
+    if (matchedName) matches.get(id).matchedNames.add(matchedName);
+  };
+
+  for (const row of db.prepare("SELECT id, name, display_name FROM people WHERE CAST(id AS TEXT) <> ?").all(targetId)) {
+    for (const name of [row.name, row.display_name]) {
+      const key = normalizePersonSearchValue(name);
+      if (key && keys.has(key)) addMatch(row, name);
+    }
+  }
+
+  for (const row of db
+    .prepare(
+      `
+      SELECT pa.person_id AS id, p.name, p.display_name, pa.alias
+      FROM person_aliases pa
+      JOIN people p ON p.id = pa.person_id
+      WHERE CAST(pa.person_id AS TEXT) <> ?
+      `
+    )
+    .all(targetId)) {
+    const key = normalizePersonSearchValue(row.alias);
+    if (key && keys.has(key)) addMatch(row, row.alias);
+  }
+
+  const workCountStmt = db.prepare("SELECT COUNT(DISTINCT work_id) AS count FROM work_people WHERE person_id = ? AND role = 'actor'");
+  return [...matches.values()]
+    .map((item) => ({
+      ...item,
+      matchedNames: [...item.matchedNames],
+      workCount: Number(workCountStmt.get(Number(item.id))?.count || 0)
+    }))
+    .sort((a, b) => b.workCount - a.workCount || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+}
+
+function mergePeopleIntoTarget(targetPersonId, sourcePersonIds = []) {
+  if (!hasCoreDb()) {
+    const error = new Error("core DB 不可用");
+    error.statusCode = 500;
+    throw error;
+  }
+  const targetId = Number(targetPersonId);
+  const sourceIds = uniqueTextArray(sourcePersonIds).map(Number).filter((id) => Number.isFinite(id) && id !== targetId);
+  if (!Number.isFinite(targetId) || !sourceIds.length) {
+    const error = new Error("合并人物参数无效");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const db = getCoreDb();
+  const target = db.prepare("SELECT id, name, display_name FROM people WHERE id = ?").get(targetId);
+  if (!target?.id) {
+    const error = new Error("目标人物不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const sources = sourceIds.map((id) => db.prepare("SELECT id, name, display_name FROM people WHERE id = ?").get(id)).filter(Boolean);
+  if (!sources.length) {
+    const error = new Error("没有可合并的来源人物");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const now = new Date().toISOString();
+  const targetPrimaryKeys = new Set(uniquePersonNames([target.name, target.display_name]).map(normalizePersonSearchValue).filter(Boolean));
+  const insertAlias = db.prepare("INSERT OR IGNORE INTO person_aliases(person_id, alias, alias_search, source) VALUES (?, ?, ?, 'manual_merge')");
+  const sourceAliases = db.prepare("SELECT alias FROM person_aliases WHERE person_id = ? ORDER BY id");
+  const sourceWorkPeople = db.prepare("SELECT work_id, role, sort_order, source, created_at FROM work_people WHERE person_id = ?");
+  const insertWorkPerson = db.prepare(
+    `
+    INSERT OR IGNORE INTO work_people (work_id, person_id, role, sort_order, source, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'manual_merge', ?, ?)
+    `
+  );
+  const sourceRefs = db.prepare("SELECT id, provider, external_key, url, source, created_at FROM person_external_refs WHERE person_id = ?");
+  const targetRefExists = db.prepare("SELECT id FROM person_external_refs WHERE person_id = ? AND provider = ? AND external_key = ?");
+  const updateRef = db.prepare("UPDATE person_external_refs SET person_id = ?, source = 'manual_merge', updated_at = ? WHERE id = ?");
+  const deleteRef = db.prepare("DELETE FROM person_external_refs WHERE id = ?");
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const source of sources) {
+      for (const alias of uniquePersonNames([source.name, source.display_name, ...sourceAliases.all(source.id).map((row) => row.alias)])) {
+        const key = normalizePersonSearchValue(alias);
+        if (key && !targetPrimaryKeys.has(key)) insertAlias.run(targetId, alias, key);
+      }
+
+      for (const row of sourceWorkPeople.all(source.id)) {
+        insertWorkPerson.run(row.work_id, targetId, row.role || "actor", row.sort_order || 0, row.created_at || now, now);
+      }
+      db.prepare("DELETE FROM work_people WHERE person_id = ?").run(source.id);
+
+      for (const ref of sourceRefs.all(source.id)) {
+        if (ref.provider === "javdb-actor" && targetRefExists.get(targetId, ref.provider, ref.external_key)) {
+          deleteRef.run(ref.id);
+          continue;
+        }
+        if (targetRefExists.get(targetId, ref.provider, ref.external_key)) {
+          deleteRef.run(ref.id);
+        } else {
+          updateRef.run(targetId, now, ref.id);
+        }
+      }
+
+      db.prepare("UPDATE images SET owner_id = ?, updated_at = ? WHERE owner_type = 'person' AND owner_id = ?").run(targetId, now, source.id);
+      db.prepare("DELETE FROM person_aliases WHERE person_id = ?").run(source.id);
+      db.prepare("DELETE FROM people WHERE id = ?").run(source.id);
+    }
+    db.prepare("UPDATE people SET updated_at = ? WHERE id = ?").run(now, targetId);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+
+  invalidateTableStamp("actor_profiles", "actor_movies", "work_info", "work_covers");
+  actorProfileCache = null;
+  actorMovieCache = null;
+  actorMovieByCodeKeyCache = null;
+  personMergeCache = null;
+  workSearchTextCache = null;
+  refreshLibrary();
+
+  const nextPerson = resolveLibraryPersonByPublicId(String(targetId)) || corePersonFallbackRecord(String(targetId));
+  return {
+    targetPersonId: String(targetId),
+    mergedPersonIds: sources.map((source) => String(source.id)),
+    person: nextPerson ? publicPerson(mergedPersonRecord(nextPerson) || nextPerson) : null
+  };
 }
 
 function serializeLibrary(index) {
@@ -5279,6 +5372,16 @@ function deleteWorkLocalFiles(workId, options = {}) {
         wrapped.statusCode = 500;
         throw wrapped;
       }
+    } else if (stat?.isFile()) {
+      try {
+        fs.unlinkSync(dirPath);
+        deletedPaths.push(relativeFromRoot(dirPath));
+        emptyRemovedPaths.push(...removeEmptyLibraryParents(dirPath));
+      } catch (error) {
+        const wrapped = new Error(`删除作品文件失败：${error.message}`);
+        wrapped.statusCode = 500;
+        throw wrapped;
+      }
     } else {
       missingPaths.push(relativeFromRoot(dirPath));
     }
@@ -5365,37 +5468,6 @@ function deletePersonLocalFiles(personId) {
   };
 }
 
-function loadUserState() {
-  try {
-    if (!fs.existsSync(USER_STATE_PATH)) {
-      userState = emptyUserState();
-      return;
-    }
-
-    const data = JSON.parse(fs.readFileSync(USER_STATE_PATH, "utf8"));
-    const favoriteFolders = normalizeFavoriteFolders(data.favoriteFolders);
-    userState = {
-      version: 2,
-      favoriteFolders,
-      favorites: normalizeFavorites(data.favorites, favoriteFolders),
-      manualCovers: normalizeManualCovers(data.manualCovers),
-      progress: data.progress && typeof data.progress === "object" ? data.progress : {}
-    };
-  } catch (error) {
-    console.warn("[state]", error.message);
-    userState = emptyUserState();
-  }
-}
-
-function saveUserState() {
-  try {
-    ensureDataDir();
-    fs.writeFileSync(USER_STATE_PATH, JSON.stringify(userState, null, 2), "utf8");
-  } catch (error) {
-    console.warn("[state]", error.message);
-  }
-}
-
 function createWork(personId, title, workDir, files, fallbackVideo = null) {
   const { videos, images, infos } = collectMediaFiles(files);
   if (!videos.length && fallbackVideo) {
@@ -5460,98 +5532,6 @@ function scanPersonDirectory(personId, personDir) {
   }
 
   return works;
-}
-
-function personSourcePathCandidates(person, options = {}) {
-  if (Array.isArray(options.sourcePaths) && options.sourcePaths.length) {
-    const selected = [];
-    const seenSelected = new Set();
-    for (const sourcePath of options.sourcePaths) {
-      const absolutePath = sourcePathToAbsolute(sourcePath);
-      const stat = absolutePath ? safeStat(absolutePath) : null;
-      if (!stat?.isDirectory() || !libraryOpenRoots().some((rootPath) => pathWithinRoot(absolutePath, rootPath))) continue;
-      const normalized = relativeFromRoot(absolutePath);
-      const key = normalizeSourcePath(normalized);
-      if (!key || seenSelected.has(key)) continue;
-      seenSelected.add(key);
-      selected.push(normalized);
-    }
-    return selected;
-  }
-
-  const sourcePaths = [];
-  const seen = new Set();
-  const addSourcePath = (sourcePath) => {
-    const normalized = String(sourcePath || "").trim();
-    if (!normalized) return;
-    const key = normalizeSourcePath(normalized);
-    if (!key || seen.has(key)) return;
-    seen.add(key);
-    sourcePaths.push(normalized);
-  };
-
-  for (const name of actorProfileSearchNames(person)) {
-    if (!name || /[\\/]/.test(name)) continue;
-    for (const rootPath of LIBRARY_ROOTS) {
-      const absolutePath = path.join(rootPath, name);
-      const stat = safeStat(absolutePath);
-      if (stat?.isDirectory()) addSourcePath(relativeFromRoot(absolutePath));
-    }
-  }
-
-  for (const sourcePath of [...(person.sourcePaths || []), person.relativePath]) {
-    const absolutePath = sourcePathToAbsolute(sourcePath);
-    const stat = absolutePath ? safeStat(absolutePath) : null;
-    if (stat?.isDirectory()) addSourcePath(relativeFromRoot(absolutePath));
-  }
-
-  return sourcePaths;
-}
-
-function personSourceCandidates(person, options = {}) {
-  const currentKeys = new Set([...(person.sourcePaths || []), person.relativePath].filter(Boolean).map(normalizeSourcePath));
-  const records = [];
-  const seen = new Set();
-  const addRecord = (absolutePath, sourceName, reason) => {
-    if (!absolutePath) return;
-    const sourcePath = relativeFromRoot(absolutePath);
-    const key = normalizeSourcePath(sourcePath);
-    if (!key || seen.has(key)) return;
-    seen.add(key);
-    const stat = safeStat(absolutePath);
-    const rootIndex = LIBRARY_ROOTS.findIndex((rootPath) => pathWithinRoot(absolutePath, rootPath));
-    records.push({
-      sourcePath,
-      root: rootIndex >= 0 ? rootLabel(LIBRARY_ROOTS[rootIndex]) : "",
-      sourceName: sourceName || path.basename(absolutePath),
-      exists: Boolean(stat?.isDirectory()),
-      selected: currentKeys.has(key),
-      reason,
-      priority: rootIndex >= 0 ? rootIndex : 999
-    });
-  };
-
-  for (const name of actorProfileSearchNames(person)) {
-    if (!name || /[\\/]/.test(name)) continue;
-    for (const rootPath of LIBRARY_ROOTS) {
-      addRecord(path.join(rootPath, name), name, "name");
-    }
-  }
-
-  for (const sourcePath of [...(person.sourcePaths || []), person.relativePath]) {
-    addRecord(sourcePathToAbsolute(sourcePath), path.basename(sourcePathToAbsolute(sourcePath) || sourcePath), "current");
-  }
-
-  for (const sourcePath of Array.isArray(options.extraSourcePaths) ? options.extraSourcePaths : []) {
-    addRecord(sourcePathToAbsolute(sourcePath), path.basename(sourcePathToAbsolute(sourcePath) || sourcePath), "manual");
-  }
-
-  return records.sort((a, b) =>
-    Number(b.selected) - Number(a.selected) ||
-    Number(b.exists) - Number(a.exists) ||
-    a.priority - b.priority ||
-    a.sourcePath.localeCompare(b.sourcePath, undefined, { numeric: true, sensitivity: "base" })
-  );
 }
 
 function scanLibrary() {
@@ -5653,6 +5633,7 @@ function refreshLibrary() {
     library = coreLibrary || scanLibrary();
     saveLibraryCache(library);
     invalidateLibraryDerivedCaches();
+    peopleScopeIndex();
     lastScanError = null;
     console.log(
       `[${coreLibrary ? "core" : "scan"}] ${library.totals.people} people, ${library.totals.works} works, ${library.totals.videos} videos, ${library.totals.images} images`
@@ -5670,22 +5651,12 @@ function invalidateLibraryDerivedCaches() {
   actorMovieCache = null;
   actorMovieByCodeKeyCache = null;
   personMergeCache = null;
+  peopleScopeIndexCache = null;
   localWorkCodeKeyCache = null;
   localWorkByCodeKeyCache = null;
   invalidateTableStamp();
   clearSearchSourceCaches();
-  videoProbeCache.clear();
-}
-
-function recalculateLibraryTotals() {
-  library.scannedAt = new Date().toISOString();
-  library.totals.people = library.people.length;
-  library.totals.works = library.worksById.size;
-  const files = [...library.filesById.values()];
-  library.totals.videos = files.filter((file) => file.type === "video").length;
-  library.totals.playableVideos = files.filter((file) => file.type === "video" && file.playable).length;
-  library.totals.images = files.filter((file) => file.type === "image").length;
-  library.totals.infoFiles = files.filter((file) => file.type === "info").length;
+  videoProbeService.clearCache();
 }
 
 function personRecordFromWorks(person, sourcePaths, works) {
@@ -5718,259 +5689,8 @@ function personRecordFromWorks(person, sourcePaths, works) {
   };
 }
 
-function refreshPersonLibrary(personId, options = {}) {
-  const person = library.peopleById.get(personId);
-  if (!person) {
-    const error = new Error("人物不存在");
-    error.statusCode = 404;
-    throw error;
-  }
-
-  const sourcePaths = personSourcePathCandidates(person, options);
-  if (!sourcePaths.length) {
-    const error = new Error("这个人物没有本地来源路径");
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const works = [];
-  const existingSourcePaths = [];
-  for (const sourcePath of sourcePaths) {
-    const absolutePath = sourcePathToAbsolute(sourcePath);
-    const stat = safeStat(absolutePath);
-    if (!stat?.isDirectory()) continue;
-    existingSourcePaths.push(relativeFromRoot(absolutePath));
-    works.push(...scanPersonDirectory(person.id, absolutePath));
-  }
-
-  if (!existingSourcePaths.length) {
-    const error = new Error("本地人物文件夹不存在");
-    error.statusCode = 404;
-    throw error;
-  }
-
-  for (const workId of person.works || []) {
-    const oldWork = library.worksById.get(workId);
-    if (!oldWork) continue;
-    for (const file of [...(oldWork.videos || []), ...(oldWork.images || []), ...(oldWork.infos || [])]) {
-      library.filesById.delete(file.id);
-    }
-    library.worksById.delete(workId);
-  }
-
-  for (const work of works) {
-    registerFiles(library, [...work.videos, ...work.images, ...work.infos]);
-    library.worksById.set(work.id, work);
-    try {
-      replaceCoreLocalFilesForWork(work);
-    } catch (error) {
-      console.warn("[core-local-files]", error.message);
-    }
-  }
-
-  const nextPerson = personRecordFromWorks(person, existingSourcePaths, works);
-  const personIndex = library.people.findIndex((item) => item.id === person.id);
-  if (personIndex >= 0) library.people[personIndex] = nextPerson;
-  library.peopleById.set(person.id, nextPerson);
-  recalculateLibraryTotals();
-  saveLibraryCache(library);
-  invalidateLibraryDerivedCaches();
-  return nextPerson;
-}
-
-function adminScriptById(scriptId) {
-  return ADMIN_SCRIPT_DEFINITIONS.find((script) => script.id === scriptId) || null;
-}
-
-function publicAdminScriptField(field) {
-  return {
-    name: field.name,
-    label: field.label,
-    type: field.type,
-    flag: field.flag || "",
-    positional: Boolean(field.positional),
-    default: field.default ?? "",
-    placeholder: field.placeholder || "",
-    help: field.help || "",
-    required: Boolean(field.required),
-    min: field.min ?? null,
-    max: field.max ?? null,
-    step: field.step ?? null,
-    options: Array.isArray(field.options) ? field.options.map((option) => ({ ...option })) : []
-  };
-}
-
-function adminScriptRisk(script) {
-  if (script.risk) return script.risk;
-  const category = script.category || "";
-  if (category === "验证" || category === "报表") return "safe";
-  if (category === "维护" || /清理|覆盖|删除/.test(`${script.title} ${script.description}`)) return "danger";
-  if ((script.fields || []).some((field) => field.flag === "--write" && field.default === false)) return "danger";
-  if ((script.fields || []).some((field) => field.flag === "--overwrite" || field.flag === "--force" || field.flag === "--delete-zero-byte")) return "careful";
-  if ((script.invalidates || []).length) return "write";
-  return "normal";
-}
-
-function adminScriptRiskLabel(risk) {
-  return {
-    safe: "安全",
-    normal: "常规",
-    write: "写入",
-    careful: "谨慎",
-    danger: "高风险"
-  }[risk] || "常规";
-}
-
-function publicAdminScript(script) {
-  const risk = adminScriptRisk(script);
-  return {
-    id: script.id,
-    title: script.title,
-    category: script.category,
-    description: script.description,
-    runtime: script.runtime,
-    script: script.script,
-    risk,
-    riskLabel: adminScriptRiskLabel(risk),
-    invalidates: [...(script.invalidates || [])],
-    refreshHints: [...(script.refreshHints || [])],
-    fields: (script.fields || []).map(publicAdminScriptField)
-  };
-}
-
-function adminScriptCategories() {
-  return [...new Set(ADMIN_SCRIPT_DEFINITIONS.map((script) => script.category || "其他"))];
-}
-
-function normalizeAdminListValue(value) {
-  const rawItems = Array.isArray(value)
-    ? value
-    : String(value || "")
-        .split(/\r?\n|,/)
-        .map((item) => item.trim());
-  const seen = new Set();
-  const result = [];
-  for (const item of rawItems) {
-    const text = String(item || "").trim();
-    if (!text || text.length > 1000 || seen.has(text)) continue;
-    seen.add(text);
-    result.push(text);
-    if (result.length >= 100) break;
-  }
-  return result;
-}
-
-function normalizeAdminNumberValue(value, field) {
-  if (value === null || value === undefined || String(value).trim() === "") {
-    return field.default === "" || field.default === undefined ? "" : field.default;
-  }
-  const number = Number(value);
-  if (!Number.isFinite(number)) {
-    return field.default === "" || field.default === undefined ? "" : field.default;
-  }
-  const min = Number.isFinite(Number(field.min)) ? Number(field.min) : Number.MIN_SAFE_INTEGER;
-  const max = Number.isFinite(Number(field.max)) ? Number(field.max) : Number.MAX_SAFE_INTEGER;
-  const clamped = Math.max(min, Math.min(max, number));
-  return Number(field.step) && Number(field.step) < 1 ? clamped : Math.floor(clamped);
-}
-
-function normalizeAdminScriptFieldValue(field, input) {
-  const value = input[field.name] ?? field.default ?? "";
-  if (field.type === "checkbox") return Boolean(value);
-  if (field.type === "number") return normalizeAdminNumberValue(value, field);
-  if (field.type === "textarea-list") return normalizeAdminListValue(value);
-  if (field.type === "select") {
-    const allowed = (field.options || []).map((option) => option.value);
-    const selected = String(value || field.default || "");
-    return allowed.includes(selected) ? selected : allowed[0] || "";
-  }
-  if (field.type === "person") {
-    const personId = String(value || "").trim();
-    if (!personId) {
-      if (field.required) {
-        const error = new Error(`${field.label || "人物"}不能为空`);
-        error.statusCode = 400;
-        throw error;
-      }
-      return "";
-    }
-    if (!library.peopleById.has(personId)) {
-      const error = new Error("选择的人物不存在");
-      error.statusCode = 400;
-      throw error;
-    }
-    return personId;
-  }
-  const text = String(value || "").trim().slice(0, field.maxLength || 4000);
-  if (field.required && !text) {
-    const error = new Error(`${field.label || field.name}不能为空`);
-    error.statusCode = 400;
-    throw error;
-  }
-  return text;
-}
-
-function normalizeAdminScriptOptions(script, input = {}) {
-  const options = {};
-  for (const field of script.fields || []) {
-    options[field.name] = normalizeAdminScriptFieldValue(field, input);
-  }
-  return options;
-}
-
-function appendAdminScriptFieldArgs(args, field, value) {
-  if (field.type === "checkbox") {
-    if (value && field.flag) args.push(field.flag);
-    return;
-  }
-  if (field.type === "textarea-list") {
-    for (const item of Array.isArray(value) ? value : []) {
-      if (field.flag) args.push(field.flag, item);
-      else args.push(item);
-    }
-    return;
-  }
-  if (value === "" || value === null || value === undefined) return;
-  if (field.positional) {
-    args.push(String(value));
-    return;
-  }
-  if (field.flag) args.push(field.flag, String(value));
-}
-
-function buildAdminScriptCommand(script, options) {
-  const args = [];
-  if (script.runtime === "python") {
-    args.push("-u", script.script);
-  } else if (script.runtime === "node") {
-    args.push(script.script);
-  } else {
-    const error = new Error(`不支持的脚本运行时：${script.runtime}`);
-    error.statusCode = 400;
-    throw error;
-  }
-
-  for (const field of script.fields || []) {
-    appendAdminScriptFieldArgs(args, field, options[field.name]);
-  }
-
-  return {
-    command: script.runtime === "python" ? "python" : process.execPath,
-    args
-  };
-}
-
-function quoteCommandPart(value) {
-  const text = String(value || "");
-  return /\s/.test(text) ? `"${text.replace(/"/g, '\\"')}"` : text;
-}
-
-function commandPreview(command, args) {
-  return [command, ...args].map(quoteCommandPart).join(" ");
-}
-
 function applyAdminTaskInvalidations(task) {
-  const script = task.scriptId ? adminScriptById(task.scriptId) : null;
+  const script = task.scriptId ? adminScriptService.byId(task.scriptId) : null;
   const invalidates = new Set(script?.invalidates || task.invalidates || []);
   if (invalidates.has("actorProfiles")) {
     invalidateTableStamp("actor_profiles");
@@ -6006,218 +5726,16 @@ function applyAdminTaskInvalidations(task) {
   if (invalidates.has("localImages")) invalidateTableStamp("local_image_cache");
   if (invalidates.has("remoteImages")) invalidateTableStamp("remote_image_cache");
   if (invalidates.has("imageLibrary")) {
-    imageLibraryCache = null;
+    imageLibraryIndexService.invalidate();
     archiveImageListCache.clear();
   }
   if (invalidates.has("tvMetadata") || invalidates.has("movieMetadata") || invalidates.has("galleryMediaCovers")) {
-    imageLibraryCache = null;
+    imageLibraryIndexService.invalidate();
   }
   if (invalidates.has("novels")) {
-    novelStore.invalidate();
+    novelsModule.invalidate();
   }
-  if (invalidates.has("userState")) loadUserState();
-}
-
-function normalizeAdminTaskStatus(status) {
-  return ["running", "stopping", "stopped", "done", "error"].includes(status) ? status : "error";
-}
-
-function adminTaskDurationMs(task) {
-  const started = Date.parse(task.startedAt || "");
-  const ended = Date.parse(task.finishedAt || "") || Date.now();
-  if (!Number.isFinite(started)) return null;
-  return Math.max(0, ended - started);
-}
-
-function persistedAdminTask(task) {
-  return {
-    id: String(task.id || ""),
-    type: String(task.type || ""),
-    scriptId: String(task.scriptId || ""),
-    label: String(task.label || "任务"),
-    personId: String(task.personId || ""),
-    personName: String(task.personName || ""),
-    status: normalizeAdminTaskStatus(task.status),
-    exitCode: task.exitCode ?? null,
-    pid: task.pid || null,
-    refreshHints: Array.isArray(task.refreshHints) ? task.refreshHints.slice(0, 20) : [],
-    invalidates: Array.isArray(task.invalidates) ? task.invalidates.slice(0, 20) : [],
-    startedAt: String(task.startedAt || ""),
-    finishedAt: String(task.finishedAt || ""),
-    logs: Array.isArray(task.logs) ? task.logs.slice(-400).map((line) => String(line).slice(0, 4000)) : []
-  };
-}
-
-function loadAdminTaskHistory() {
-  try {
-    ensureDataDir();
-    if (!fs.existsSync(ADMIN_TASKS_PATH)) return [];
-    const parsed = JSON.parse(fs.readFileSync(ADMIN_TASKS_PATH, "utf8"));
-    const rawTasks = Array.isArray(parsed?.tasks) ? parsed.tasks : Array.isArray(parsed) ? parsed : [];
-    const now = new Date().toISOString();
-    const tasks = [];
-    let maxSeq = 0;
-    for (const rawTask of rawTasks.slice(0, ADMIN_TASK_HISTORY_LIMIT)) {
-      const task = persistedAdminTask(rawTask);
-      if (!task.id) continue;
-      const seq = Number(String(task.id).replace(/^task_/, ""));
-      if (Number.isFinite(seq)) maxSeq = Math.max(maxSeq, seq);
-      if (task.status === "running" || task.status === "stopping") {
-        task.status = "stopped";
-        task.finishedAt = task.finishedAt || now;
-        task.logs.push("服务重启，未完成任务已标记为中断");
-      }
-      tasks.push(task);
-    }
-    adminTaskSeq = maxSeq;
-    return tasks;
-  } catch (error) {
-    console.warn("[admin] 读取任务历史失败：", error.message);
-    return [];
-  }
-}
-
-function persistAdminTaskHistory() {
-  try {
-    ensureDataDir();
-    const payload = {
-      version: 1,
-      updatedAt: new Date().toISOString(),
-      tasks: adminTasks.slice(0, ADMIN_TASK_HISTORY_LIMIT).map(persistedAdminTask)
-    };
-    const tempPath = `${ADMIN_TASKS_PATH}.tmp`;
-    fs.writeFileSync(tempPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-    fs.renameSync(tempPath, ADMIN_TASKS_PATH);
-  } catch (error) {
-    console.warn("[admin] 保存任务历史失败：", error.message);
-  }
-}
-
-function scheduleAdminTaskPersist() {
-  if (adminTaskPersistTimer) return;
-  adminTaskPersistTimer = setTimeout(() => {
-    adminTaskPersistTimer = null;
-    persistAdminTaskHistory();
-  }, 250);
-}
-
-function adminTaskSummary() {
-  const summary = { total: adminTasks.length, running: 0, stopping: 0, done: 0, error: 0, stopped: 0 };
-  for (const task of adminTasks) {
-    const status = normalizeAdminTaskStatus(task.status);
-    summary[status] = (summary[status] || 0) + 1;
-  }
-  return summary;
-}
-
-function publicAdminTask(task) {
-  return {
-    id: task.id,
-    type: task.type,
-    scriptId: task.scriptId || "",
-    label: task.label,
-    personId: task.personId || "",
-    personName: task.personName || "",
-    status: task.status,
-    exitCode: task.exitCode ?? null,
-    pid: task.pid || null,
-    canStop: Boolean(task.child && (task.status === "running" || task.status === "stopping")),
-    refreshHints: [...(task.refreshHints || [])],
-    startedAt: task.startedAt,
-    finishedAt: task.finishedAt || "",
-    durationMs: adminTaskDurationMs(task),
-    logs: task.logs.slice(-120)
-  };
-}
-
-function pushAdminLog(task, chunk) {
-  const lines = String(chunk || "").split(/\r?\n/).filter(Boolean);
-  for (const line of lines) {
-    task.logs.push(line);
-  }
-  if (task.logs.length > 400) task.logs.splice(0, task.logs.length - 400);
-  scheduleAdminTaskPersist();
-}
-
-function startAdminProcessTask({ type, label, person, command, args, scriptId = "", refreshHints = [], invalidates = [], onDone }) {
-  const task = {
-    id: `task_${++adminTaskSeq}`,
-    type,
-    scriptId,
-    label,
-    personId: person?.id || "",
-    personName: person?.name || "",
-    status: "running",
-    exitCode: null,
-    pid: null,
-    child: null,
-    stopRequested: false,
-    refreshHints,
-    invalidates,
-    startedAt: new Date().toISOString(),
-    finishedAt: "",
-    logs: []
-  };
-  adminTasks.unshift(task);
-  if (adminTasks.length > ADMIN_TASK_HISTORY_LIMIT) adminTasks.length = ADMIN_TASK_HISTORY_LIMIT;
-
-  pushAdminLog(task, commandPreview(command, args));
-  const child = spawn(command, args, {
-    cwd: __dirname,
-    windowsHide: true,
-    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" }
-  });
-  task.child = child;
-  task.pid = child.pid || null;
-  if (task.pid) pushAdminLog(task, `PID ${task.pid}`);
-  child.stdout.on("data", (chunk) => pushAdminLog(task, chunk));
-  child.stderr.on("data", (chunk) => pushAdminLog(task, chunk));
-  child.on("error", (error) => {
-    task.status = "error";
-    task.finishedAt = new Date().toISOString();
-    pushAdminLog(task, error.message);
-    persistAdminTaskHistory();
-  });
-  child.on("close", (code) => {
-    task.exitCode = code;
-    task.status = task.stopRequested ? "stopped" : code === 0 ? "done" : "error";
-    task.finishedAt = new Date().toISOString();
-    task.child = null;
-    pushAdminLog(task, `退出码 ${code}`);
-    if (task.status === "done") applyAdminTaskInvalidations(task);
-    onDone?.(task);
-    persistAdminTaskHistory();
-  });
-  persistAdminTaskHistory();
-
-  return task;
-}
-
-function stopAdminTask(taskId) {
-  const task = adminTasks.find((item) => item.id === taskId);
-  if (!task) {
-    const error = new Error("任务不存在");
-    error.statusCode = 404;
-    throw error;
-  }
-  if (!task.child || (task.status !== "running" && task.status !== "stopping")) {
-    const error = new Error("任务已经不在运行");
-    error.statusCode = 400;
-    throw error;
-  }
-  task.stopRequested = true;
-  task.status = "stopping";
-  pushAdminLog(task, "收到停止请求");
-  persistAdminTaskHistory();
-  if (process.platform === "win32" && task.pid) {
-    const killer = spawn("taskkill", ["/PID", String(task.pid), "/T", "/F"], { windowsHide: true });
-    killer.stdout.on("data", (chunk) => pushAdminLog(task, chunk));
-    killer.stderr.on("data", (chunk) => pushAdminLog(task, chunk));
-    killer.on("error", (error) => pushAdminLog(task, error.message));
-  } else {
-    task.child.kill("SIGTERM");
-  }
-  return task;
+  if (invalidates.has("userState")) userStateService.load();
 }
 
 function isFavoriteWork(workId) {
@@ -6226,7 +5744,7 @@ function isFavoriteWork(workId) {
 
 function favoriteRecord(workId) {
   const favorite = userState.favorites[workId];
-  return favorite ? normalizeFavoriteRecord(favorite, userState.favoriteFolders) : null;
+  return favorite ? userStateService.normalizeFavoriteRecord(favorite, userState.favoriteFolders) : null;
 }
 
 function favoriteFolderName(folderId) {
@@ -6234,10 +5752,10 @@ function favoriteFolderName(folderId) {
 }
 
 function favoriteFolderCounts() {
-  const counts = new Map(Object.keys(userState.favoriteFolders || defaultFavoriteFolders()).map((folderId) => [folderId, 0]));
+  const counts = new Map(Object.keys(userState.favoriteFolders || userStateService.defaultFavoriteFolders()).map((folderId) => [folderId, 0]));
   for (const [workId, favorite] of Object.entries(userState.favorites || {})) {
     if (!library.worksById.has(workId)) continue;
-    const folderId = normalizeFavoriteFolderId(favorite?.folderId);
+    const folderId = userStateService.normalizeFavoriteFolderId(favorite?.folderId);
     counts.set(folderId, (counts.get(folderId) || 0) + 1);
   }
   return counts;
@@ -6245,10 +5763,10 @@ function favoriteFolderCounts() {
 
 function publicFavoriteFolders() {
   const counts = favoriteFolderCounts();
-  return Object.entries(userState.favoriteFolders || defaultFavoriteFolders())
+  return Object.entries(userState.favoriteFolders || userStateService.defaultFavoriteFolders())
     .map(([id, folder]) => ({
       id,
-      name: cleanFavoriteFolderName(folder?.name) || DEFAULT_FAVORITE_FOLDER_NAME,
+      name: userStateService.cleanFavoriteFolderName(folder?.name) || DEFAULT_FAVORITE_FOLDER_NAME,
       count: counts.get(id) || 0,
       createdAt: String(folder?.createdAt || "")
     }))
@@ -6262,7 +5780,7 @@ function publicFavoriteFolders() {
 function publicFavoriteForWork(workId) {
   const favorite = favoriteRecord(workId);
   if (!favorite) return null;
-  const folderId = normalizeFavoriteFolderId(favorite.folderId);
+  const folderId = userStateService.normalizeFavoriteFolderId(favorite.folderId);
   return {
     createdAt: favorite.createdAt || "",
     folderId,
@@ -6271,7 +5789,7 @@ function publicFavoriteForWork(workId) {
 }
 
 function manualCoverRecord(workId) {
-  const record = normalizeManualCoverRecord(userState.manualCovers?.[workId]);
+  const record = userStateService.normalizeManualCoverRecord(userState.manualCovers?.[workId]);
   return record || null;
 }
 
@@ -6309,7 +5827,7 @@ function setWorkManualCover(workId, imageId) {
     };
   }
 
-  saveUserState();
+  userStateService.save();
   return {
     manualCoverId: manualCoverRecord(work.id)?.imageId || "",
     work: publicWork(work, true),
@@ -6535,15 +6053,15 @@ function setPersonUploadedCover(personId, payload) {
 }
 
 function createFavoriteFolder(name) {
-  const cleanName = cleanFavoriteFolderName(name);
+  const cleanName = userStateService.cleanFavoriteFolderName(name);
   if (!cleanName) {
     const error = new Error("请输入收藏夹名称");
     error.statusCode = 400;
     throw error;
   }
 
-  const folders = userState.favoriteFolders || defaultFavoriteFolders();
-  const existing = Object.entries(folders).find(([, folder]) => cleanFavoriteFolderName(folder?.name) === cleanName);
+  const folders = userState.favoriteFolders || userStateService.defaultFavoriteFolders();
+  const existing = Object.entries(folders).find(([, folder]) => userStateService.cleanFavoriteFolderName(folder?.name) === cleanName);
   if (existing) return { id: existing[0], ...existing[1] };
 
   if (Object.keys(folders).length >= MAX_FAVORITE_FOLDERS) {
@@ -6575,7 +6093,7 @@ function moveFavoriteToFolder(workId, folderId) {
     error.statusCode = 400;
     throw error;
   }
-  favorite.folderId = normalizeFavoriteFolderId(folderId);
+  favorite.folderId = userStateService.normalizeFavoriteFolderId(folderId);
   return publicFavoriteForWork(workId);
 }
 
@@ -6661,263 +6179,6 @@ function userStateSummary() {
     latestProgressAt: allHistory[0]?.updatedAt || "",
     favoriteFolders: publicFavoriteFolders()
   };
-}
-
-function readBodyText(req, maxBytes = 1024 * 1024) {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    let done = false;
-    req.setEncoding("utf8");
-    req.on("data", (chunk) => {
-      if (done) return;
-      body += chunk;
-      if (body.length > maxBytes) {
-        done = true;
-        reject(new Error("请求体太大"));
-        req.destroy();
-      }
-    });
-    req.on("end", () => {
-      if (done) return;
-      done = true;
-      resolve(body);
-    });
-    req.on("error", (error) => {
-      if (done) return;
-      done = true;
-      reject(error);
-    });
-  });
-}
-
-async function readJsonBody(req, maxBytes = 1024 * 1024) {
-  const body = await readBodyText(req, maxBytes);
-  if (!body.trim()) return {};
-
-  try {
-    return JSON.parse(body);
-  } catch {
-    throw new Error("JSON 格式无效");
-  }
-}
-
-function readJsonFile(filePath, fallback = null) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch {
-    return fallback;
-  }
-}
-
-function safeChildPath(rootDir, relativePath) {
-  const root = path.resolve(rootDir);
-  const normalizedRelative = String(relativePath || "").replace(/[\\/]+/g, path.sep);
-  const target = path.resolve(root, normalizedRelative);
-  const relative = path.relative(root, target);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
-  return target;
-}
-
-function mangaRootStatus() {
-  const root = path.resolve(MANGA_LIBRARY_ROOT);
-  const stat = safeStat(root);
-  return {
-    root,
-    exists: Boolean(stat?.isDirectory())
-  };
-}
-
-function isMangaCacheDirName(name) {
-  return /^(?:smtt6|jmd9)_cache_[A-Za-z0-9_-]+$/i.test(String(name || ""));
-}
-
-function mangaSiteFromDirName(name) {
-  const lower = String(name || "").toLowerCase();
-  if (lower.startsWith("smtt6_")) return "smtt6";
-  if (lower.startsWith("jmd9_")) return "jmd9";
-  return "local";
-}
-
-function mangaCacheDirs() {
-  const status = mangaRootStatus();
-  if (!status.exists) return [];
-
-  let entries = [];
-  try {
-    entries = fs.readdirSync(status.root, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-
-  return entries
-    .filter((entry) => entry.isDirectory() && isMangaCacheDirName(entry.name))
-    .map((entry) => path.join(status.root, entry.name))
-    .filter((dirPath) => fs.existsSync(path.join(dirPath, "manifest.json")))
-    .sort((a, b) => path.basename(a).localeCompare(path.basename(b), undefined, { numeric: true, sensitivity: "base" }));
-}
-
-function mangaIdForDir(dirPath) {
-  return createId("mg", path.resolve(dirPath));
-}
-
-function mangaCacheById(id) {
-  const targetId = String(id || "");
-  if (!targetId) return null;
-  for (const dirPath of mangaCacheDirs()) {
-    if (mangaIdForDir(dirPath) === targetId) return dirPath;
-  }
-  return null;
-}
-
-function mangaChapterImageStats(chapter) {
-  const images = Array.isArray(chapter?.images) ? chapter.images : [];
-  const downloaded = Number(chapter?.downloaded_count || 0) || images.filter((image) => image?.status === "downloaded").length || images.length;
-  return {
-    imageCount: Number(chapter?.image_count || 0) || images.length,
-    downloadedCount: downloaded,
-    failedCount: Number(chapter?.failed_count || 0)
-  };
-}
-
-function mangaChapterIndex(chapter, fallbackIndex = 0) {
-  const value = Number(chapter?.index);
-  return Number.isFinite(value) && value > 0 ? value : fallbackIndex + 1;
-}
-
-function mangaFirstImage(chapter) {
-  const images = Array.isArray(chapter?.images) ? chapter.images : [];
-  return images.find((image) => image?.local_path) || images[0] || null;
-}
-
-function mangaImageUrl(mangaId, chapterIndex, imageIndex) {
-  return `/media/manga/${encodeURIComponent(mangaId)}/${encodeURIComponent(String(chapterIndex))}/${encodeURIComponent(String(imageIndex))}`;
-}
-
-function publicMangaSummary(cacheDir) {
-  const id = mangaIdForDir(cacheDir);
-  const dirName = path.basename(cacheDir);
-  const catalog = readJsonFile(path.join(cacheDir, "catalog.json"), {});
-  const manifest = readJsonFile(path.join(cacheDir, "manifest.json"), {});
-  const chapters = Array.isArray(manifest.chapters) ? manifest.chapters : [];
-  let imageTotal = 0;
-  let downloadedTotal = 0;
-  let failedTotal = 0;
-  let doneChapterTotal = 0;
-  let coverUrl = "";
-
-  for (let index = 0; index < chapters.length; index += 1) {
-    const chapter = chapters[index];
-    const stats = mangaChapterImageStats(chapter);
-    imageTotal += stats.imageCount;
-    downloadedTotal += stats.downloadedCount;
-    failedTotal += stats.failedCount;
-    if (String(chapter?.status || "").toLowerCase() === "done" || stats.failedCount === 0) doneChapterTotal += 1;
-    if (!coverUrl && mangaFirstImage(chapter)) {
-      coverUrl = mangaImageUrl(id, mangaChapterIndex(chapter, index), Number(mangaFirstImage(chapter)?.index || 1));
-    }
-  }
-
-  return {
-    id,
-    title: String(catalog.title || dirName).trim() || dirName,
-    dirName,
-    site: mangaSiteFromDirName(dirName),
-    sourceUrl: String(catalog.url || "").trim(),
-    updatedAt: String(catalog.updated_at || manifest.created_at || "").trim(),
-    chapterCount: chapters.length,
-    doneChapterCount: doneChapterTotal,
-    imageCount: imageTotal,
-    downloadedCount: downloadedTotal,
-    failedCount: failedTotal,
-    coverUrl
-  };
-}
-
-function publicMangaChapterSummary(mangaId, chapter, index) {
-  const chapterIndex = mangaChapterIndex(chapter, index);
-  const stats = mangaChapterImageStats(chapter);
-  const firstImage = mangaFirstImage(chapter);
-  return {
-    index: chapterIndex,
-    title: String(chapter?.title || `第 ${chapterIndex} 话`).trim(),
-    slug: String(chapter?.slug || "").trim(),
-    status: String(chapter?.status || "").trim(),
-    imageCount: stats.imageCount,
-    downloadedCount: stats.downloadedCount,
-    failedCount: stats.failedCount,
-    coverUrl: firstImage ? mangaImageUrl(mangaId, chapterIndex, Number(firstImage.index || 1)) : ""
-  };
-}
-
-function publicMangaDetail(cacheDir) {
-  const summary = publicMangaSummary(cacheDir);
-  const manifest = readJsonFile(path.join(cacheDir, "manifest.json"), {});
-  const chapters = Array.isArray(manifest.chapters) ? manifest.chapters : [];
-  return {
-    ...summary,
-    createdAt: String(manifest.created_at || "").trim(),
-    chapters: chapters.map((chapter, index) => publicMangaChapterSummary(summary.id, chapter, index))
-  };
-}
-
-function findMangaChapter(cacheDir, requestedIndex) {
-  const detail = readJsonFile(path.join(cacheDir, "manifest.json"), {});
-  const chapters = Array.isArray(detail.chapters) ? detail.chapters : [];
-  const target = Number(requestedIndex);
-  for (let index = 0; index < chapters.length; index += 1) {
-    const chapter = chapters[index];
-    if (mangaChapterIndex(chapter, index) === target) {
-      return { chapter, arrayIndex: index, chapterIndex: target };
-    }
-  }
-  return null;
-}
-
-function publicMangaChapter(cacheDir, requestedIndex) {
-  const manga = publicMangaSummary(cacheDir);
-  const found = findMangaChapter(cacheDir, requestedIndex);
-  if (!found) return null;
-  const images = Array.isArray(found.chapter.images) ? found.chapter.images : [];
-  return {
-    ...publicMangaChapterSummary(manga.id, found.chapter, found.arrayIndex),
-    images: images.map((image, index) => {
-      const imageIndex = Number(image?.index || index + 1);
-      return {
-        index: imageIndex,
-        name: path.basename(String(image?.local_path || "")) || `${String(imageIndex).padStart(3, "0")}`,
-        localPath: String(image?.local_path || ""),
-        contentType: String(image?.content_type || "").trim(),
-        bytes: Number(image?.bytes || 0),
-        status: String(image?.status || "").trim(),
-        url: mangaImageUrl(manga.id, found.chapterIndex, imageIndex)
-      };
-    })
-  };
-}
-
-function mangaImageRecord(cacheDir, chapterIndex, imageIndex) {
-  const found = findMangaChapter(cacheDir, chapterIndex);
-  if (!found) return null;
-  const images = Array.isArray(found.chapter.images) ? found.chapter.images : [];
-  const targetImageIndex = Number(imageIndex);
-  const image = images.find((item, index) => Number(item?.index || index + 1) === targetImageIndex);
-  if (!image?.local_path) return null;
-  return { chapter: found.chapter, image, chapterIndex: found.chapterIndex, imageIndex: targetImageIndex || 1 };
-}
-
-function mangaChapterDirFromRecord(cacheDir, chapter, image) {
-  const candidates = [];
-  if (chapter?.html_path) candidates.push(path.dirname(String(chapter.html_path)));
-  if (image?.local_path) {
-    const imageDir = path.dirname(String(image.local_path));
-    candidates.push(path.dirname(imageDir));
-  }
-  for (const candidate of candidates) {
-    if (!candidate || candidate === "." || candidate === path.sep) continue;
-    const target = safeChildPath(cacheDir, candidate);
-    if (target) return target;
-  }
-  return null;
 }
 
 function archiveReaderHelperPath() {
@@ -7081,18 +6342,7 @@ function archiveImageCacheFile(sourceType, archivePath, memberPath) {
   const archiveHash = crypto.createHash("sha1").update(archiveKey).digest("hex").slice(0, 24);
   const memberHash = crypto.createHash("sha1").update(String(memberPath || "")).digest("hex").slice(0, 24);
   const ext = ARCHIVE_IMAGE_EXTS.has(normalizeExt(memberPath)) ? normalizeExt(memberPath) : ".img";
-  return path.join(IMAGE_READER_CACHE_DIR, sourceType, archiveHash, `${memberHash}${ext}`);
-}
-
-function touchImageReaderCacheFile(filePath) {
-  const now = Date.now();
-  const key = path.resolve(filePath);
-  if (now - (imageReaderCacheTouchTimes.get(key) || 0) < IMAGE_READER_CACHE_TOUCH_THROTTLE_MS) return;
-  imageReaderCacheTouchTimes.set(key, now);
-  try {
-    const date = new Date(now);
-    fs.utimesSync(filePath, date, date);
-  } catch {}
+  return path.join(imageReaderCacheService.rootDir, sourceType, archiveHash, `${memberHash}${ext}`);
 }
 
 function extractArchiveMemberToCache(archivePath, memberPath, cachePath) {
@@ -7144,68 +6394,6 @@ function compressImageFileToJpeg(filePath) {
   return result.stdout;
 }
 
-function galleryMediaCoverSeekSeconds(duration) {
-  const seconds = Number(duration || 0);
-  if (!Number.isFinite(seconds) || seconds <= 0) return 8;
-  if (seconds < 20) return Math.max(0.1, Math.min(seconds * 0.5, Math.max(0.1, seconds - 0.25)));
-  return Math.floor(Math.min(180, Math.max(8, seconds * 0.08)));
-}
-
-function extractGalleryMediaCoverFrame(filePath, duration) {
-  const seek = galleryMediaCoverSeekSeconds(duration);
-  const args = ["-hide_banner", "-loglevel", "error"];
-  if (seek > 0) args.push("-ss", String(seek));
-  args.push(
-    "-i",
-    filePath,
-    "-map",
-    "0:v:0",
-    "-frames:v",
-    "1",
-    "-vf",
-    `scale=${IMAGE_GALLERY_COVER_BOX_SIZE}:-2`,
-    "-q:v",
-    "5",
-    "-f",
-    "image2pipe",
-    "-vcodec",
-    "mjpeg",
-    "pipe:1"
-  );
-  const result = spawnSync(FFMPEG_PATH, args, {
-    windowsHide: true,
-    maxBuffer: IMAGE_GALLERY_COVER_MAX_BYTES,
-    timeout: 30000
-  });
-  if (result.error) {
-    throw new Error(result.error.code === "ENOBUFS" ? "生成的分集封面超过大小限制" : `FFmpeg 启动失败：${result.error.message}`);
-  }
-  if (result.status !== 0 || !result.stdout?.length) {
-    const detail = String(result.stderr || "").trim();
-    throw new Error(detail ? `FFmpeg 抽帧失败：${detail}` : "FFmpeg 抽帧失败");
-  }
-  if (result.stdout.length > IMAGE_GALLERY_COVER_MAX_BYTES) throw new Error("生成的分集封面超过大小限制");
-  if (result.stdout[0] !== 0xff || result.stdout[1] !== 0xd8) throw new Error("FFmpeg 没有生成有效的 JPEG 封面");
-  return result.stdout;
-}
-
-function serveInlineFile(res, filePath, contentType = "") {
-  const stat = safeStat(filePath);
-  if (!stat?.isFile()) {
-    notFound(res);
-    return false;
-  }
-  const ext = normalizeExt(filePath);
-  res.writeHead(200, {
-    "Content-Type": contentType || MIME_TYPES[ext] || "application/octet-stream",
-    "Content-Length": stat.size,
-    "Cache-Control": "public, max-age=3600",
-    "Content-Disposition": "inline"
-  });
-  fs.createReadStream(filePath).pipe(res);
-  return true;
-}
-
 function serveArchiveMemberImage(res, options) {
   const archivePath = options.archivePath;
   const memberPath = String(options.memberPath || "").replace(/[\\/]+/g, "/");
@@ -7227,2173 +6415,21 @@ function serveArchiveMemberImage(res, options) {
     }
   }
 
-  touchImageReaderCacheFile(cachePath);
-  scheduleImageReaderCacheCleanup();
+  imageReaderCacheService.touch(cachePath);
+  imageReaderCacheService.scheduleCleanup();
   serveInlineFile(res, cachePath, options.contentType || MIME_TYPES[normalizeExt(memberPath)] || "");
 }
 
-function collectImageReaderCacheEntries() {
-  const root = path.resolve(IMAGE_READER_CACHE_DIR);
-  const entries = [];
-  const stack = [root];
-  if (!safeStat(root)?.isDirectory()) return entries;
-
-  while (stack.length) {
-    const current = stack.pop();
-    let dirEntries = [];
-    try {
-      dirEntries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of dirEntries) {
-      const fullPath = path.join(current, entry.name);
-      const relative = path.relative(root, fullPath);
-      if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
-      if (entry.isDirectory()) {
-        stack.push(fullPath);
-        continue;
-      }
-      if (entry.isFile()) {
-        const stat = safeStat(fullPath);
-        entries.push({
-          path: fullPath,
-          relativePath: relative,
-          bytes: stat?.size || 0,
-          touchedAt: stat?.mtimeMs || stat?.ctimeMs || 0
-        });
-      }
-    }
-  }
-  entries.sort((a, b) => a.touchedAt - b.touchedAt || a.relativePath.localeCompare(b.relativePath, undefined, { numeric: true }));
-  return entries;
-}
-
-function removeEmptyCacheParents(filePath) {
-  const root = path.resolve(IMAGE_READER_CACHE_DIR);
-  let current = path.dirname(path.resolve(filePath));
-  while (current.startsWith(root) && current !== root) {
-    try {
-      if (fs.readdirSync(current).length) break;
-      fs.rmdirSync(current);
-    } catch {
-      break;
-    }
-    current = path.dirname(current);
-  }
-}
-
-function imageReaderCacheStatus() {
-  const entries = collectImageReaderCacheEntries();
-  const currentBytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
-  const maxBytes = normalizeImageReaderCacheLimit(appConfig.imageReaderCacheMaxBytes);
-  return {
-    root: IMAGE_READER_CACHE_DIR,
-    exists: Boolean(safeStat(IMAGE_READER_CACHE_DIR)?.isDirectory()),
-    maxBytes,
-    currentBytes,
-    overBytes: Math.max(0, currentBytes - maxBytes),
-    fileCount: entries.length,
-    cleanupIntervalMs: IMAGE_READER_CACHE_CLEANUP_INTERVAL_MS,
-    entries: entries.slice(-12).reverse().map((entry) => ({
-      relativePath: entry.relativePath,
-      bytes: entry.bytes,
-      touchedAt: new Date(entry.touchedAt || 0).toISOString()
-    }))
-  };
-}
-
-function cleanupImageReaderCache(options = {}) {
-  if (imageReaderCacheCleanupActive) {
-    return { ok: false, skipped: "active", status: imageReaderCacheStatus() };
-  }
-  imageReaderCacheCleanupActive = true;
-  try {
-    const maxBytes = normalizeImageReaderCacheLimit(appConfig.imageReaderCacheMaxBytes);
-    const entries = collectImageReaderCacheEntries();
-    let currentBytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
-    const targetBytes = options.force ? 0 : Math.floor(maxBytes * IMAGE_READER_CACHE_CLEANUP_TARGET_RATIO);
-    const removed = [];
-    let removedBytes = 0;
-
-    if (options.force || currentBytes > maxBytes) {
-      for (const entry of entries) {
-        if (currentBytes <= targetBytes) break;
-        try {
-          fs.rmSync(entry.path, { force: true });
-          removeEmptyCacheParents(entry.path);
-          currentBytes -= entry.bytes;
-          removedBytes += entry.bytes;
-          removed.push({ relativePath: entry.relativePath, bytes: entry.bytes });
-        } catch (error) {
-          console.warn("[image-reader-cache-cleanup]", entry.path, error.message || error);
-        }
-      }
-    }
-
-    return {
-      ok: true,
-      maxBytes,
-      targetBytes,
-      removedCount: removed.length,
-      removedBytes,
-      removed,
-      status: imageReaderCacheStatus()
-    };
-  } finally {
-    imageReaderCacheCleanupActive = false;
-  }
-}
-
-function scheduleImageReaderCacheCleanup() {
-  if (imageReaderCacheCleanupPending) return;
-  imageReaderCacheCleanupPending = true;
-  setTimeout(() => {
-    imageReaderCacheCleanupPending = false;
-    try {
-      cleanupImageReaderCache();
-    } catch (error) {
-      console.warn("[image-reader-cache-cleanup]", error.message || error);
-    }
-  }, 1000);
-}
-
-function startImageReaderCacheCleanupTimer() {
-  setInterval(() => {
-    try {
-      cleanupImageReaderCache();
-    } catch (error) {
-      console.warn("[image-reader-cache-cleanup]", error.message || error);
-    }
-  }, IMAGE_READER_CACHE_CLEANUP_INTERVAL_MS).unref?.();
-  scheduleImageReaderCacheCleanup();
-}
-
-function serveMangaImage(res, mangaId, chapterIndex, imageIndex) {
-  const cacheDir = mangaCacheById(decodeURIComponent(mangaId));
-  if (!cacheDir) {
-    notFound(res);
-    return;
-  }
-  const record = mangaImageRecord(cacheDir, decodeURIComponent(chapterIndex), decodeURIComponent(imageIndex));
-  if (!record) {
-    notFound(res);
-    return;
-  }
-
-  const chapterDir = mangaChapterDirFromRecord(cacheDir, record.chapter, record.image);
-  const sourceImagePath = safeChildPath(cacheDir, record.image.local_path);
-  if (!chapterDir || !sourceImagePath) {
-    notFound(res);
-    return;
-  }
-  const memberPath = path.relative(chapterDir, sourceImagePath).replace(/\\/g, "/");
-  const archivePath = `${chapterDir}.zip`;
-  serveArchiveMemberImage(res, {
-    sourceType: "manga",
-    archivePath,
-    memberPath,
-    fallbackPath: sourceImagePath,
-    contentType: record.image.content_type || MIME_TYPES[normalizeExt(memberPath)] || ""
-  });
-}
-
-function isArchiveFile(fileName) {
-  return ARCHIVE_EXTS.has(normalizeExt(fileName));
-}
-
-function imageLibraryRootLabel(rootPath) {
-  const parsed = path.parse(rootPath);
-  const trimmed = String(rootPath || "").replace(/[\\/]+$/g, "");
-  return path.basename(trimmed) || parsed.root || rootPath;
-}
-
-function photoSetImageUrl(albumId, imageIndex) {
-  return `/media/gallery/${encodeURIComponent(albumId)}/${encodeURIComponent(String(imageIndex))}`;
-}
-
 function photoSetCoverUrl(albumId, updatedAt = "") {
+  if (!albumId) return "";
   const suffix = updatedAt ? `?v=${encodeURIComponent(updatedAt)}` : "";
   return `/media/gallery-cover/${encodeURIComponent(albumId)}${suffix}`;
 }
 
-function photoSetArchiveSignature(archivePath) {
-  const stat = safeStat(archivePath);
-  if (!stat?.isFile()) return null;
-  return {
-    archivePath: path.resolve(archivePath),
-    archiveSize: stat.size || 0,
-    archiveMtimeMs: Math.floor(stat.mtimeMs || 0)
-  };
-}
-
-function photoSetCoverRow(album) {
-  try {
-    return getImageGalleryDb().prepare("SELECT * FROM photo_set_covers WHERE album_id = ?").get(album.id) || null;
-  } catch (error) {
-    console.warn("[image-gallery-cover-db]", error.message || error);
-    return null;
-  }
-}
-
-function archiveMemberBaseName(memberPath) {
-  const parts = String(memberPath || "").replace(/\\/g, "/").split("/").filter(Boolean);
-  return parts.pop() || "";
-}
-
-function archiveMemberDepth(memberPath) {
-  return String(memberPath || "").replace(/\\/g, "/").split("/").filter(Boolean).length;
-}
-
-function archiveImageMime(memberPath) {
-  return MIME_TYPES[normalizeExt(memberPath)] || "application/octet-stream";
-}
-
-function photoSetCoverHintScore(image) {
-  const baseName = archiveMemberBaseName(image?.path || image?.name || "");
-  const stem = fileBase(baseName).toLowerCase();
-  const tokens = stem.split(/[\s._\-()[\]{}【】]+/).filter(Boolean);
-  if (!stem) return 0;
-
-  if (stem === "cover" || stem === "封面") return 1000;
-  if (tokens.includes("cover") || tokens.includes("封面")) return 940;
-  if (stem.includes("cover") || stem.includes("封面")) return 880;
-  if (COVER_HINTS.has(stem)) return 760;
-  if (tokens.some((token) => COVER_HINTS.has(token))) return 700;
-  return 0;
-}
-
-function selectPhotoSetCoverImage(images = []) {
-  const candidates = images.filter((image) => image?.path);
-  if (!candidates.length) return null;
-
-  const explicit = candidates
-    .map((image, index) => {
-      const hintScore = photoSetCoverHintScore(image);
-      const depth = archiveMemberDepth(image.path);
-      const ext = normalizeExt(image.path);
-      const tieScore = (depth <= 1 ? 40 : Math.max(0, 30 - depth * 5)) + ([".jpg", ".jpeg", ".webp", ".png"].includes(ext) ? 10 : 0);
-      return { image, index, score: hintScore + tieScore, hintScore };
-    })
-    .filter((item) => item.hintScore > 0)
-    .sort((a, b) => b.score - a.score || a.index - b.index)[0];
-
-  if (explicit) return { image: explicit.image, isExplicitCover: true };
-  return { image: candidates[0], isExplicitCover: false };
-}
-
-function photoSetCoverBlobFromFile(filePath, image, isExplicitCover) {
-  const sourceBytes = safeStat(filePath)?.size || Number(image?.bytes || 0);
-  const mime = archiveImageMime(image?.path || image?.name || "");
-  if (isExplicitCover && sourceBytes > 0 && sourceBytes <= IMAGE_GALLERY_COVER_MAX_BYTES) {
-    return {
-      blob: fs.readFileSync(filePath),
-      mime,
-      sourceBytes
-    };
-  }
-
-  const blob = compressImageFileToJpeg(filePath);
-  return {
-    blob,
-    mime: "image/jpeg",
-    sourceBytes
-  };
-}
-
-function photoSetCoverMatches(row, signature) {
-  return (
-    row &&
-    signature &&
-    path.resolve(row.archive_path || "") === signature.archivePath &&
-    Number(row.archive_size || 0) === signature.archiveSize &&
-    Number(row.archive_mtime_ms || 0) === signature.archiveMtimeMs &&
-    Number(row.generator_version || 1) === PHOTO_SET_COVER_GENERATOR_VERSION
-  );
-}
-
-function upsertPhotoSetCoverError(album, signature, error) {
-  const now = new Date().toISOString();
-  try {
-    getImageGalleryDb()
-      .prepare(
-        `
-        INSERT INTO photo_set_covers (
-          album_id, archive_path, archive_size, archive_mtime_ms, member_path,
-          cover_mime, cover_blob, cover_bytes, source_bytes, generator_version, status, error, generated_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(album_id) DO UPDATE SET
-          archive_path = excluded.archive_path,
-          archive_size = excluded.archive_size,
-          archive_mtime_ms = excluded.archive_mtime_ms,
-          member_path = excluded.member_path,
-          cover_mime = excluded.cover_mime,
-          cover_blob = excluded.cover_blob,
-          cover_bytes = excluded.cover_bytes,
-          source_bytes = excluded.source_bytes,
-          generator_version = excluded.generator_version,
-          status = excluded.status,
-          error = excluded.error,
-          generated_at = excluded.generated_at,
-          updated_at = excluded.updated_at
-        `
-      )
-      .run(
-        album.id,
-        signature?.archivePath || "",
-        signature?.archiveSize || 0,
-        signature?.archiveMtimeMs || 0,
-        "",
-        "",
-        null,
-        0,
-        0,
-        PHOTO_SET_COVER_GENERATOR_VERSION,
-        "error",
-        error.message || String(error || "封面生成失败"),
-        now,
-        now
-      );
-  } catch (dbError) {
-    console.warn("[image-gallery-cover-db]", dbError.message || dbError);
-  }
-}
-
-function upsertPhotoSetCover(album, signature, image, cover) {
-  const now = new Date().toISOString();
-  const coverBlob = Buffer.from(cover.blob);
-  getImageGalleryDb()
-    .prepare(
-      `
-      INSERT INTO photo_set_covers (
-        album_id, archive_path, archive_size, archive_mtime_ms, member_path,
-        cover_mime, cover_blob, cover_bytes, source_bytes, generator_version, status, error, generated_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(album_id) DO UPDATE SET
-        archive_path = excluded.archive_path,
-        archive_size = excluded.archive_size,
-        archive_mtime_ms = excluded.archive_mtime_ms,
-        member_path = excluded.member_path,
-        cover_mime = excluded.cover_mime,
-        cover_blob = excluded.cover_blob,
-        cover_bytes = excluded.cover_bytes,
-        source_bytes = excluded.source_bytes,
-        generator_version = excluded.generator_version,
-        status = excluded.status,
-        error = excluded.error,
-        generated_at = excluded.generated_at,
-        updated_at = excluded.updated_at
-      `
-    )
-    .run(
-      album.id,
-      signature.archivePath,
-      signature.archiveSize,
-      signature.archiveMtimeMs,
-      image.path || "",
-      cover.mime || "image/jpeg",
-      coverBlob,
-      coverBlob.length,
-      Number(cover.sourceBytes || image.bytes || 0),
-      PHOTO_SET_COVER_GENERATOR_VERSION,
-      "ok",
-      "",
-      now,
-      now
-    );
-  return photoSetCoverRow(album);
-}
-
-function generatePhotoSetCover(album) {
-  const archivePath = photoSetArchivePath(album);
-  const signature = photoSetArchiveSignature(archivePath);
-  if (!signature) {
-    const error = new Error("图包压缩文件不存在");
-    error.statusCode = 404;
-    throw error;
-  }
-
-  const cached = photoSetCoverRow(album);
-  if (photoSetCoverMatches(cached, signature)) {
-    if (cached.status === "ok" && cached.cover_blob) return cached;
-    const error = new Error(cached.error || "图包封面生成失败");
-    error.statusCode = 404;
-    throw error;
-  }
-
-  const images = listArchiveImages(archivePath);
-  const selected = selectPhotoSetCoverImage(images);
-  if (!selected?.image?.path) {
-    const error = new Error("图包里没有可用图片");
-    error.statusCode = 404;
-    upsertPhotoSetCoverError(album, signature, error);
-    throw error;
-  }
-
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-gallery-cover-"));
-  const tempExt = ARCHIVE_IMAGE_EXTS.has(normalizeExt(selected.image.path)) ? normalizeExt(selected.image.path) : ".img";
-  const tempPath = path.join(tempDir, `source${tempExt}`);
-  try {
-    extractArchiveMemberToCache(archivePath, selected.image.path, tempPath);
-    const cover = photoSetCoverBlobFromFile(tempPath, selected.image, selected.isExplicitCover);
-    return upsertPhotoSetCover(album, signature, selected.image, cover);
-  } catch (error) {
-    upsertPhotoSetCoverError(album, signature, error);
-    error.statusCode = error.statusCode || 500;
-    throw error;
-  } finally {
-    try {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    } catch {}
-  }
-}
-
-function tvSeriesKey(category, seriesName) {
-  return createId("tvs", `${String(category || "").trim()}|${String(seriesName || "").trim()}`);
-}
-
-function galleryMediaSeriesKey(item) {
-  if (!item || item.mediaKind !== "tv") return "";
-  return tvSeriesKey(item.category || "", item.seriesName || item.personName || item.subCategory || item.title || "");
-}
-
-function tvSeriesCoverUrl(seriesKey, updatedAt = "") {
-  if (!seriesKey) return "";
-  const suffix = updatedAt ? `?v=${encodeURIComponent(updatedAt)}` : "";
-  return `/media/tv-series-cover/${encodeURIComponent(seriesKey)}${suffix}`;
-}
-
-function galleryMediaCoverUrl(mediaId, updatedAt = "") {
-  if (!mediaId) return "";
-  const suffix = updatedAt ? `?v=${encodeURIComponent(updatedAt)}` : "";
-  return `/media/gallery-media-cover/${encodeURIComponent(mediaId)}${suffix}`;
-}
-
-function movieMetadataCoverUrl(mediaId, updatedAt = "") {
-  if (!mediaId) return "";
-  const suffix = updatedAt ? `?v=${encodeURIComponent(updatedAt)}` : "";
-  return `/media/movie-cover/${encodeURIComponent(mediaId)}${suffix}`;
-}
-
-function safeJsonArray(value) {
-  try {
-    const parsed = JSON.parse(value || "[]");
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function safeJsonObject(value) {
-  try {
-    const parsed = JSON.parse(value || "{}");
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function tvSeriesMetadataRowsMap() {
-  try {
-    const rows = getImageGalleryDb().prepare("SELECT * FROM tv_series_metadata").all();
-    return new Map(rows.map((row) => [row.series_key, row]));
-  } catch (error) {
-    console.warn("[tv-series-metadata-db]", error.message || error);
-    return new Map();
-  }
-}
-
-function tvSeriesMetadataRow(seriesKey) {
-  if (!seriesKey) return null;
-  try {
-    return getImageGalleryDb().prepare("SELECT * FROM tv_series_metadata WHERE series_key = ?").get(seriesKey) || null;
-  } catch (error) {
-    console.warn("[tv-series-metadata-db]", error.message || error);
-    return null;
-  }
-}
-
-function movieMetadataRowsMap() {
-  try {
-    const rows = getImageGalleryDb().prepare("SELECT * FROM movie_metadata").all();
-    return new Map(rows.map((row) => [row.media_id, row]));
-  } catch (error) {
-    console.warn("[movie-metadata-db]", error.message || error);
-    return new Map();
-  }
-}
-
-function movieMetadataRow(mediaId) {
-  if (!mediaId) return null;
-  try {
-    return getImageGalleryDb().prepare("SELECT * FROM movie_metadata WHERE media_id = ?").get(mediaId) || null;
-  } catch (error) {
-    console.warn("[movie-metadata-db]", error.message || error);
-    return null;
-  }
-}
-
-function publicMovieMetadata(row) {
-  if (!row || row.status !== "ok") return null;
-  return {
-    mediaId: row.media_id || "",
-    category: row.category || "",
-    movieTitle: row.movie_title || "",
-    doubanId: row.douban_id || "",
-    doubanUrl: row.douban_url || "",
-    title: row.douban_title || row.movie_title || "",
-    originalTitle: row.original_title || "",
-    aliases: safeJsonArray(row.aka_json),
-    officialSite: row.official_site || "",
-    year: row.year || "",
-    rating: row.rating === null || row.rating === undefined ? null : Number(row.rating || 0),
-    ratingCount: Number(row.rating_count || 0),
-    ratingStars: safeJsonObject(row.rating_stars_json),
-    ratingBetterThan: safeJsonArray(row.rating_better_than_json),
-    directors: safeJsonArray(row.directors_json),
-    writers: safeJsonArray(row.writers_json),
-    genres: safeJsonArray(row.genres_json),
-    actors: safeJsonArray(row.actors_json),
-    countries: safeJsonArray(row.countries_json),
-    languages: safeJsonArray(row.languages_json),
-    pubdate: row.pubdate || "",
-    releaseDates: safeJsonArray(row.release_dates_json),
-    seasonCount: row.season_count === null || row.season_count === undefined ? null : Number(row.season_count || 0),
-    episodeCount: row.episode_count === null || row.episode_count === undefined ? null : Number(row.episode_count || 0),
-    episodeDuration: row.episode_duration || "",
-    durations: safeJsonArray(row.durations_json),
-    imdbId: row.imdb_id || "",
-    info: safeJsonObject(row.info_json),
-    detailSource: row.detail_source || "",
-    summary: row.summary || "",
-    coverUrl: row.cover_blob ? movieMetadataCoverUrl(row.media_id, row.updated_at || "") : "",
-    fetchedAt: row.fetched_at || "",
-    updatedAt: row.updated_at || ""
-  };
-}
-
-function publicTvSeriesMetadata(row) {
-  if (!row || row.status !== "ok") return null;
-  return {
-    seriesKey: row.series_key || "",
-    category: row.category || "",
-    seriesName: row.series_name || "",
-    doubanId: row.douban_id || "",
-    doubanUrl: row.douban_url || "",
-    title: row.douban_title || row.series_name || "",
-    originalTitle: row.original_title || "",
-    aliases: safeJsonArray(row.aka_json),
-    officialSite: row.official_site || "",
-    year: row.year || "",
-    rating: row.rating === null || row.rating === undefined ? null : Number(row.rating || 0),
-    ratingCount: Number(row.rating_count || 0),
-    ratingStars: safeJsonObject(row.rating_stars_json),
-    ratingBetterThan: safeJsonArray(row.rating_better_than_json),
-    directors: safeJsonArray(row.directors_json),
-    writers: safeJsonArray(row.writers_json),
-    genres: safeJsonArray(row.genres_json),
-    actors: safeJsonArray(row.actors_json),
-    countries: safeJsonArray(row.countries_json),
-    languages: safeJsonArray(row.languages_json),
-    pubdate: row.pubdate || "",
-    releaseDates: safeJsonArray(row.release_dates_json),
-    seasonCount: row.season_count === null || row.season_count === undefined ? null : Number(row.season_count || 0),
-    episodeCount: row.episode_count === null || row.episode_count === undefined ? null : Number(row.episode_count || 0),
-    episodeDuration: row.episode_duration || "",
-    durations: safeJsonArray(row.durations_json),
-    imdbId: row.imdb_id || "",
-    info: safeJsonObject(row.info_json),
-    detailSource: row.detail_source || "",
-    summary: row.summary || "",
-    coverUrl: row.cover_blob ? tvSeriesCoverUrl(row.series_key, row.updated_at || "") : "",
-    fetchedAt: row.fetched_at || "",
-    updatedAt: row.updated_at || ""
-  };
-}
-
-function galleryMediaCoverRow(mediaId) {
-  if (!mediaId) return null;
-  try {
-    return getImageGalleryDb().prepare("SELECT * FROM gallery_media_covers WHERE media_id = ?").get(mediaId) || null;
-  } catch (error) {
-    console.warn("[gallery-media-cover-db]", error.message || error);
-    return null;
-  }
-}
-
-function galleryMediaSignature(item) {
-  const filePath = galleryMediaPath(item);
-  const stat = safeStat(filePath);
-  if (!stat?.isFile()) return null;
-  return {
-    filePath,
-    sourcePath: path.resolve(filePath),
-    sourceSize: stat.size || 0,
-    sourceMtimeMs: Math.floor(stat.mtimeMs || 0)
-  };
-}
-
-function galleryMediaCoverMatches(row, signature) {
-  return (
-    row &&
-    signature &&
-    path.resolve(row.source_path || "") === signature.sourcePath &&
-    Number(row.source_size || 0) === signature.sourceSize &&
-    Number(row.source_mtime_ms || 0) === signature.sourceMtimeMs &&
-    Number(row.generator_version || 1) === GALLERY_MEDIA_COVER_GENERATOR_VERSION
-  );
-}
-
-function upsertGalleryMediaCoverError(item, signature, error) {
-  const now = new Date().toISOString();
-  try {
-    getImageGalleryDb()
-      .prepare(
-        `
-        INSERT INTO gallery_media_covers (
-          media_id, source_path, source_size, source_mtime_ms, cover_mime,
-          cover_blob, cover_bytes, generator_version, status, error, generated_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(media_id) DO UPDATE SET
-          source_path = excluded.source_path,
-          source_size = excluded.source_size,
-          source_mtime_ms = excluded.source_mtime_ms,
-          cover_mime = excluded.cover_mime,
-          cover_blob = excluded.cover_blob,
-          cover_bytes = excluded.cover_bytes,
-          generator_version = excluded.generator_version,
-          status = excluded.status,
-          error = excluded.error,
-          generated_at = excluded.generated_at,
-          updated_at = excluded.updated_at
-        `
-      )
-      .run(
-        item?.id || "",
-        signature?.sourcePath || "",
-        signature?.sourceSize || 0,
-        signature?.sourceMtimeMs || 0,
-        "",
-        null,
-        0,
-        GALLERY_MEDIA_COVER_GENERATOR_VERSION,
-        "error",
-        String(error?.message || error || "分集封面生成失败").slice(0, 1000),
-        now,
-        now
-      );
-  } catch (dbError) {
-    console.warn("[gallery-media-cover-db]", dbError.message || dbError);
-  }
-}
-
-function upsertGalleryMediaCover(item, signature, coverBlob) {
-  const now = new Date().toISOString();
-  const blob = Buffer.from(coverBlob);
-  getImageGalleryDb()
-    .prepare(
-      `
-      INSERT INTO gallery_media_covers (
-        media_id, source_path, source_size, source_mtime_ms, cover_mime,
-        cover_blob, cover_bytes, generator_version, status, error, generated_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(media_id) DO UPDATE SET
-        source_path = excluded.source_path,
-        source_size = excluded.source_size,
-        source_mtime_ms = excluded.source_mtime_ms,
-        cover_mime = excluded.cover_mime,
-        cover_blob = excluded.cover_blob,
-        cover_bytes = excluded.cover_bytes,
-        generator_version = excluded.generator_version,
-        status = excluded.status,
-        error = excluded.error,
-        generated_at = excluded.generated_at,
-        updated_at = excluded.updated_at
-      `
-    )
-    .run(
-      item.id,
-      signature.sourcePath,
-      signature.sourceSize,
-      signature.sourceMtimeMs,
-      "image/jpeg",
-      blob,
-      blob.length,
-      GALLERY_MEDIA_COVER_GENERATOR_VERSION,
-      "ok",
-      "",
-      now,
-      now
-    );
-  return galleryMediaCoverRow(item.id);
-}
-
-function generateGalleryMediaCover(item) {
-  const signature = galleryMediaSignature(item);
-  if (!signature) {
-    const error = new Error("视频文件不存在");
-    error.statusCode = 404;
-    throw error;
-  }
-
-  const cached = galleryMediaCoverRow(item.id);
-  if (galleryMediaCoverMatches(cached, signature)) {
-    if (cached.status === "ok" && cached.cover_blob) return cached;
-    const error = new Error(cached.error || "分集封面生成失败");
-    error.statusCode = 404;
-    throw error;
-  }
-
-  try {
-    const probe = videoProbeCached({ id: item.id, path: signature.filePath }) || {};
-    const coverBlob = extractGalleryMediaCoverFrame(signature.filePath, probe.duration);
-    return upsertGalleryMediaCover(item, signature, coverBlob);
-  } catch (error) {
-    upsertGalleryMediaCoverError(item, signature, error);
-    error.statusCode = error.statusCode || 500;
-    throw error;
-  }
-}
-
-function cleanPhotoPersonCandidate(value) {
-  let text = String(value || "")
-    .replace(/[\u200B-\u200D\uFEFF]/g, "")
-    .replace(/[【\[][^【】\[\]]*(?:\d+\s*[PpVv]|[KMGT]B|[KMGT])[^\]】]*[】\]]\s*$/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/^[\s._-]+|[\s._-]+$/g, "");
-  const bracketOnly = text.match(/^\[([^\]]+)\]$/);
-  if (bracketOnly) text = bracketOnly[1].trim() || text;
-  return text;
-}
-
-function isPhotoSetNumberBucket(value) {
-  const text = cleanPhotoPersonCandidate(value).toLowerCase();
-  return !text || /^(?:vol|no)\.?\s*\d*$/.test(text) || /^第?\d+[期辑部卷]?$/.test(text);
-}
-
-function isPhotoSetOrganizationPart(value) {
-  const text = cleanPhotoPersonCandidate(value).toLowerCase();
-  return /(?:写真|专辑|影像|女神|美腿|尤果|尤物|丝社|爱秀|丽柜|秀人|雅拉伊|ugirls|beautyleg|graphis|ssa|ligui|xiuren|yalayi|ishow|mygirl|tukmo)/i.test(text);
-}
-
-function photoPersonFromTail(value) {
-  const text = cleanPhotoPersonCandidate(value);
-  if (!text) return "";
-  const appearance = text.match(/(?:出镜(?:妹子|模特|者)?|模特|model|coser|cn)[:：]\s*([^/|,，;；\[\]【】()（）]+)/i);
-  if (appearance) return cleanPhotoPersonCandidate(appearance[1]);
-  const tokens = text.split(/\s+/).map(cleanPhotoPersonCandidate).filter(Boolean);
-  if (tokens.length > 1) {
-    for (let index = tokens.length - 1; index >= 0; index -= 1) {
-      if (!isPhotoSetNumberBucket(tokens[index])) return tokens[index];
-    }
-  }
-  return isPhotoSetNumberBucket(text) ? "" : text;
-}
-
-function inferPhotoSetPersonFromTitle(title) {
-  const base = cleanPhotoPersonCandidate(
-    String(title || "")
-      .replace(/\.(?:zip|cbz|rar|7z)$/i, "")
-      .replace(/^\[[^\]]+\]\s*/g, "")
-  );
-  if (!base) return "";
-  const appearance = base.match(/(?:出镜(?:妹子|模特|者)?|模特|model|coser|cn)[:：]\s*([^/|,，;；\[\]【】()（）]+)/i);
-  if (appearance) return cleanPhotoPersonCandidate(appearance[1]);
-  const numbered =
-    base.match(/(?:VOL|NO)\.?\s*\d+[\s._-]+(.+)$/i) ||
-    base.match(/\d{4}[._-]\d{2}[._-]\d{2}[\s._-]+(.+)$/);
-  if (numbered) return photoPersonFromTail(numbered[1]);
-  const codePrefix = base.match(/^[A-Za-z]{1,6}-?\d+\s+(.+)$/);
-  if (codePrefix) return photoPersonFromTail(codePrefix[1]);
-  const leadingNumber = base.match(/^\d{2,}[\s._-]+(.+)$/);
-  if (leadingNumber) return photoPersonFromTail(leadingNumber[1]);
-  const nameBeforeNumber = base.match(/^([^\d].*?)\d{2,}\s+.+$/);
-  if (nameBeforeNumber) return cleanPhotoPersonCandidate(nameBeforeNumber[1]);
-  return "";
-}
-
-function inferPhotoSetPersonFromCategory(category) {
-  const text = cleanPhotoPersonCandidate(category);
-  const numberedName = text.match(/-\s*\d+\s+(.+)$/);
-  return numberedName ? cleanPhotoPersonCandidate(numberedName[1]) : "";
-}
-
-function inferPhotoSetPerson(parts, title) {
-  const cleanedParts = parts.map((part) => String(part || "").trim()).filter(Boolean);
-  const category = cleanedParts[0] || "";
-  const isXiuren = category.toLowerCase().includes("xiuren") || category.includes("秀人");
-  const pathPersonParts = cleanedParts.slice(1).filter((part) => !isPhotoSetNumberBucket(part));
-  const titlePerson = inferPhotoSetPersonFromTitle(title);
-  if (category.toLowerCase().includes("cos") && pathPersonParts[0]) return cleanPhotoPersonCandidate(pathPersonParts[0]);
-  if (!isXiuren && pathPersonParts.length) {
-    const pathPerson = cleanPhotoPersonCandidate(pathPersonParts[pathPersonParts.length - 1]);
-    const pathLooksLikeOrganization =
-      isPhotoSetOrganizationPart(category) || pathPersonParts.some((part) => isPhotoSetOrganizationPart(part));
-    if (titlePerson && pathLooksLikeOrganization) return titlePerson;
-    return pathPerson;
-  }
-  if (titlePerson) return titlePerson;
-
-  if (!isXiuren) return inferPhotoSetPersonFromCategory(category);
-  return "";
-}
-
-function publicPhotoSetArchive(filePath, rootPath) {
-  const stat = safeStat(filePath);
-  const relativePath = path.relative(rootPath, filePath);
-  const dirParts = path
-    .dirname(relativePath)
-    .split(/[\\/]+/)
-    .filter((part) => part && part !== ".");
-  const title = path.basename(filePath, path.extname(filePath));
-  const id = createId("ps", path.resolve(filePath));
-  const category = dirParts[0] || imageLibraryRootLabel(rootPath);
-  const updatedAt = stat ? new Date(stat.mtimeMs).toISOString() : "";
-  return {
-    id,
-    type: "photoSet",
-    title,
-    category,
-    subCategory: dirParts[1] || "",
-    personName: inferPhotoSetPerson(dirParts, title),
-    rootLabel: imageLibraryRootLabel(rootPath),
-    sourceRoot: rootPath,
-    relativePath,
-    archiveExt: normalizeExt(filePath).slice(1),
-    size: stat?.size || 0,
-    updatedAt,
-    imageCount: null,
-    coverUrl: photoSetCoverUrl(id, updatedAt)
-  };
-}
-
-function photoSetRootStatuses() {
-  return PHOTO_SET_ROOTS.map((root) => {
-    const stat = safeStat(root);
-    return {
-      root,
-      label: imageLibraryRootLabel(root),
-      exists: Boolean(stat?.isDirectory())
-    };
-  });
-}
-
-function galleryMediaRootStatuses() {
-  return GALLERY_MEDIA_SOURCES.flatMap((source) =>
-    source.roots.map((root) => {
-      const stat = safeStat(root);
-      return {
-        kind: source.kind,
-        label: source.label,
-        root,
-        rootLabel: imageLibraryRootLabel(root),
-        exists: Boolean(stat?.isDirectory())
-      };
-    })
-  );
-}
-
-function walkArchiveFiles(rootPath) {
-  const results = [];
-  const root = path.resolve(rootPath);
-  if (!safeStat(root)?.isDirectory()) return results;
-  const stack = [root];
-  while (stack.length) {
-    const current = stack.pop();
-    let entries = [];
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-
-    for (const entry of entries) {
-      if (isExcludedDirName(entry.name)) continue;
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        try {
-          const lstat = fs.lstatSync(fullPath);
-          if (lstat.isSymbolicLink()) continue;
-        } catch {
-          continue;
-        }
-        stack.push(fullPath);
-        continue;
-      }
-      if (entry.isFile() && isArchiveFile(entry.name)) {
-        results.push(fullPath);
-      }
-    }
-  }
-  results.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
-  return results;
-}
-
-function walkVideoFiles(rootPath) {
-  const results = [];
-  const root = path.resolve(rootPath);
-  if (!safeStat(root)?.isDirectory()) return results;
-  const stack = [root];
-  while (stack.length) {
-    const current = stack.pop();
-    let entries = [];
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-
-    for (const entry of entries) {
-      if (isExcludedDirName(entry.name)) continue;
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        try {
-          const lstat = fs.lstatSync(fullPath);
-          if (lstat.isSymbolicLink()) continue;
-        } catch {
-          continue;
-        }
-        stack.push(fullPath);
-        continue;
-      }
-      if (entry.isFile() && isVideo(entry.name)) {
-        results.push(fullPath);
-      }
-    }
-  }
-  results.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
-  return results;
-}
-
-function mediaKindPrefix(kind) {
-  if (kind === "western") return "gw";
-  if (kind === "movie") return "gf";
-  if (kind === "tv") return "gt";
-  return "gm";
-}
-
-function mediaTitleFromFile(filePath) {
-  return path.basename(filePath, path.extname(filePath)).replace(/[._]+/g, " ").replace(/\s+/g, " ").trim();
-}
-
-function publicGalleryMediaFile(filePath, rootPath, source) {
-  const stat = safeStat(filePath);
-  const relativePath = path.relative(rootPath, filePath);
-  const dirParts = path
-    .dirname(relativePath)
-    .split(/[\\/]+/)
-    .filter((part) => part && part !== ".");
-  const ext = normalizeExt(filePath);
-  const title = mediaTitleFromFile(filePath);
-  const id = createId(mediaKindPrefix(source.kind), `${source.kind}|${path.resolve(filePath)}`);
-  const parentName = dirParts[dirParts.length - 1] || "";
-  const category = dirParts[0] || source.label;
-  const seriesName = source.kind === "tv" ? parentName || category : source.kind === "movie" ? parentName : "";
-  const personName = source.kind === "western" ? category : source.kind === "tv" ? seriesName : "";
-  return {
-    id,
-    type: "media",
-    mediaKind: source.kind,
-    kindLabel: source.label,
-    title,
-    category,
-    subCategory: dirParts[1] || "",
-    personName,
-    seriesName,
-    rootLabel: source.label,
-    sourceRoot: rootPath,
-    relativePath,
-    ext: ext.slice(1),
-    size: stat?.size || 0,
-    updatedAt: stat ? new Date(stat.mtimeMs).toISOString() : "",
-    playable: DIRECT_VIDEO_EXTS.has(ext),
-    streamUrl: `/media/gallery-video/${encodeURIComponent(id)}`,
-    coverUrl: ""
-  };
-}
-
-function scanGalleryMediaLibrary() {
-  const roots = galleryMediaRootStatuses();
-  const items = [];
-  const seen = new Set();
-  for (const source of GALLERY_MEDIA_SOURCES) {
-    for (const rootPath of source.roots) {
-      if (!safeStat(rootPath)?.isDirectory()) continue;
-      for (const filePath of walkVideoFiles(rootPath)) {
-        const key = path.resolve(filePath).toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        items.push(publicGalleryMediaFile(filePath, rootPath, source));
-      }
-    }
-  }
-  items.sort((a, b) => {
-    if (a.mediaKind !== b.mediaKind) return a.mediaKind.localeCompare(b.mediaKind);
-    const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
-    return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
-  });
-  return {
-    mediaRoots: roots,
-    mediaItems: items
-  };
-}
-
-function scanPhotoSetLibrary() {
-  const roots = photoSetRootStatuses();
-  const albums = [];
-  const seen = new Set();
-  for (const root of roots) {
-    if (!root.exists) continue;
-    for (const filePath of walkArchiveFiles(root.root)) {
-      const key = path.resolve(filePath).toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      albums.push(publicPhotoSetArchive(filePath, root.root));
-    }
-  }
-  albums.sort((a, b) => {
-    const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
-    return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
-  });
-  return {
-    scannedAt: new Date().toISOString(),
-    roots,
-    photoSets: albums
-  };
-}
-
-function scanImageLibrary() {
-  const photo = scanPhotoSetLibrary();
-  const media = scanGalleryMediaLibrary();
-  return {
-    schemaVersion: 2,
-    scannedAt: new Date().toISOString(),
-    roots: photo.roots,
-    photoSets: photo.photoSets,
-    mediaRoots: media.mediaRoots,
-    mediaItems: media.mediaItems
-  };
-}
-
-function loadImageLibraryIndexCache() {
-  if (imageLibraryCache) return imageLibraryCache;
-  const cached = readJsonFile(IMAGE_LIBRARY_INDEX_PATH, null);
-  if (cached && Array.isArray(cached.photoSets)) {
-    imageLibraryCache = cached;
-    return imageLibraryCache;
-  }
-  return null;
-}
-
-function saveImageLibraryIndexCache(index) {
-  ensureDataDir();
-  fs.writeFileSync(IMAGE_LIBRARY_INDEX_PATH, JSON.stringify(index, null, 2), "utf8");
-}
-
-function getImageLibraryIndex(options = {}) {
-  if (!options.refresh) {
-    const cached = loadImageLibraryIndexCache();
-    if (cached && Array.isArray(cached.mediaItems)) return cached;
-    if (cached) {
-      const media = scanGalleryMediaLibrary();
-      imageLibraryCache = {
-        ...cached,
-        schemaVersion: 2,
-        scannedAt: new Date().toISOString(),
-        mediaRoots: media.mediaRoots,
-        mediaItems: media.mediaItems
-      };
-      saveImageLibraryIndexCache(imageLibraryCache);
-      return imageLibraryCache;
-    }
-  }
-  imageLibraryCache = scanImageLibrary();
-  saveImageLibraryIndexCache(imageLibraryCache);
-  return imageLibraryCache;
-}
-
-function facetCounts(items, fieldName) {
-  const counts = new Map();
-  for (const item of items) {
-    const value = String(item[fieldName] || "").trim();
-    if (!value) continue;
-    counts.set(value, (counts.get(value) || 0) + 1);
-  }
-  return [...counts.entries()]
-    .map(([value, count]) => ({ value, count }))
-    .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value, undefined, { numeric: true, sensitivity: "base" }));
-}
-
-function mediaItemsByKind(items, kind) {
-  return items.filter((item) => item.mediaKind === kind);
-}
-
-function mediaItemsByKinds(items, kinds = []) {
-  const selected = new Set(kinds);
-  return items.filter((item) => selected.has(item.mediaKind));
-}
-
-function publicGalleryMediaItem(item, tvMetadataByKey = null, movieMetadataById = null) {
-  const seriesKey = galleryMediaSeriesKey(item);
-  const tvSeries = seriesKey ? publicTvSeriesMetadata(tvMetadataByKey?.get(seriesKey) || tvSeriesMetadataRow(seriesKey)) : null;
-  const movieMetadata = item?.mediaKind === "movie" ? publicMovieMetadata(movieMetadataById?.get(item.id) || movieMetadataRow(item.id)) : null;
-  const movieCoverUrl = movieMetadata?.coverUrl || "";
-  const fallbackCoverUrl = item.mediaKind === "tv" || item.mediaKind === "movie" ? galleryMediaCoverUrl(item.id, item.updatedAt || "") : "";
-  return {
-    ...item,
-    seriesKey,
-    tvSeries,
-    movieMetadata,
-    coverUrl: movieCoverUrl || fallbackCoverUrl || item.coverUrl || ""
-  };
-}
-
-function mediaFacets(items) {
-  return {
-    categories: facetCounts(items, "category"),
-    subCategories: facetCounts(items, "subCategory"),
-    people: facetCounts(items, "personName"),
-    series: facetCounts(items, "seriesName"),
-    roots: facetCounts(items, "rootLabel")
-  };
-}
-
-function imageLibraryPayload(options = {}) {
-  const index = getImageLibraryIndex(options);
-  const photoSets = (index.photoSets || []).map((item) => ({
-    ...item,
-    coverUrl: item.coverUrl || photoSetCoverUrl(item.id, item.updatedAt || "")
-  }));
-  const tvMetadataByKey = tvSeriesMetadataRowsMap();
-  const movieMetadataById = movieMetadataRowsMap();
-  const mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById));
-  const westernItems = mediaItemsByKind(mediaItems, "western");
-  const movieItems = mediaItemsByKind(mediaItems, "movie");
-  const tvItems = mediaItemsByKind(mediaItems, "tv");
-  const screenItems = mediaItemsByKinds(mediaItems, ["movie", "tv"]);
-  const manga = mangaCacheDirs().map(publicMangaSummary);
-  return {
-    schemaVersion: 2,
-    scannedAt: index.scannedAt || "",
-    mangaRoot: mangaRootStatus(),
-    photoRoots: index.roots || photoSetRootStatuses(),
-    mediaRoots: index.mediaRoots || galleryMediaRootStatuses(),
-    cache: imageReaderCacheStatus(),
-    totals: {
-      manga: manga.length,
-      photoSets: photoSets.length,
-      western: westernItems.length,
-      movies: movieItems.length,
-      tv: tvItems.length,
-      media: mediaItems.length,
-      photoBytes: photoSets.reduce((sum, item) => sum + Number(item.size || 0), 0),
-      mediaBytes: mediaItems.reduce((sum, item) => sum + Number(item.size || 0), 0)
-    },
-    facets: {
-      categories: facetCounts(photoSets, "category"),
-      subCategories: facetCounts(photoSets, "subCategory"),
-      people: facetCounts(photoSets, "personName"),
-      roots: facetCounts(photoSets, "rootLabel"),
-      western: mediaFacets(westernItems),
-      movie: mediaFacets(movieItems),
-      tv: mediaFacets(tvItems),
-      media: mediaFacets(screenItems)
-    },
-    manga,
-    photoSets,
-    mediaItems
-  };
-}
-
-function imageLibrarySummaryPayload(options = {}) {
-  const index = getImageLibraryIndex(options);
-  const photoSets = Array.isArray(index.photoSets) ? index.photoSets : [];
-  const mediaItems = Array.isArray(index.mediaItems) ? index.mediaItems : [];
-  const westernItems = mediaItemsByKind(mediaItems, "western");
-  const movieItems = mediaItemsByKind(mediaItems, "movie");
-  const tvItems = mediaItemsByKind(mediaItems, "tv");
-  const screenItems = mediaItemsByKinds(mediaItems, ["movie", "tv"]);
-  const manga = mangaCacheDirs().map(publicMangaSummary);
-  const cache = imageReaderCacheStatus();
-  return {
-    schemaVersion: 1,
-    scannedAt: index.scannedAt || "",
-    mangaRoot: mangaRootStatus(),
-    photoRoots: index.roots || photoSetRootStatuses(),
-    mediaRoots: index.mediaRoots || galleryMediaRootStatuses(),
-    cache: {
-      root: cache.root,
-      exists: cache.exists,
-      maxBytes: cache.maxBytes,
-      currentBytes: cache.currentBytes,
-      overBytes: cache.overBytes,
-      fileCount: cache.fileCount,
-      cleanupIntervalMs: cache.cleanupIntervalMs
-    },
-    totals: {
-      manga: manga.length,
-      photoSets: photoSets.length,
-      western: westernItems.length,
-      movies: movieItems.length,
-      tv: tvItems.length,
-      media: mediaItems.length,
-      photoBytes: photoSets.reduce((sum, item) => sum + Number(item.size || 0), 0),
-      mediaBytes: mediaItems.reduce((sum, item) => sum + Number(item.size || 0), 0)
-    },
-    facets: {
-      categories: facetCounts(photoSets, "category").slice(0, 12),
-      people: facetCounts(photoSets, "personName").slice(0, 12),
-      western: mediaFacets(westernItems),
-      movie: mediaFacets(movieItems),
-      tv: mediaFacets(tvItems),
-      media: mediaFacets(screenItems)
-    }
-  };
-}
-
-function imageLibraryItemsPayload(url, options = {}) {
-  const mode = normalizeImageLibraryMode(url.searchParams.get("mode"));
-  const limit = clampInteger(url.searchParams.get("limit"), 48, 1, MAX_IMAGE_LIBRARY_ITEM_LIMIT);
-  const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-  const query = String(url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
-  const sort = String(url.searchParams.get("sort") || "updated").trim();
-  const photoView = normalizePhotoLibraryView(url.searchParams.get("photoView") || url.searchParams.get("view"));
-  const tvView = normalizeTvLibraryView(url.searchParams.get("tvView") || url.searchParams.get("view"));
-  const category = String(url.searchParams.get("category") || "all").trim() || "all";
-  const person = String(url.searchParams.get("person") || "all").trim() || "all";
-  const collection = String(url.searchParams.get("collection") || "").trim();
-  const seriesKey = String(url.searchParams.get("seriesKey") || "").trim();
-  const index = getImageLibraryIndex(options);
-  const tvMetadataByKey = tvSeriesMetadataRowsMap();
-  const movieMetadataById = movieMetadataRowsMap();
-  const mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById));
-
-  let source = [];
-  let facetsSource = [];
-  let collectionSummary = null;
-  let seriesSummary = null;
-  if (mode === "photo") {
-    const photoSets = Array.isArray(index.photoSets) ? index.photoSets : [];
-    const filteredPhotoSets = filterPhotoSetsForList(photoSets, { category, person, collection });
-    facetsSource = collection ? filteredPhotoSets : filterPhotoSetsForList(photoSets, { collection: "", category: "all", person: "all" });
-    if (collection) collectionSummary = photoCollectionSummary(filteredPhotoSets, collection);
-    source = photoView === "collections" && !collection
-      ? photoCollectionGroups(filteredPhotoSets).map(publicPhotoCollectionListItem)
-      : filteredPhotoSets.map((item) => publicImageLibraryListItem(item, "photo"));
-  } else if (mode === "manga") {
-    source = mangaCacheDirs().map((cacheDir) => publicImageLibraryListItem(publicMangaSummary(cacheDir), "manga"));
-  } else if (mode === "media") {
-    const movieSource = mediaItemsByKind(mediaItems, "movie").map((item) => publicImageLibraryListItem(item, item.mediaKind));
-    const tvSource = mediaItemsByKind(mediaItems, "tv").map((item) => publicImageLibraryListItem(item, item.mediaKind));
-    const tvSeriesSource = tvSeriesGroups(tvSource).map(publicTvSeriesListItem).filter(Boolean);
-    const screenWorksSource = [...movieSource, ...tvSeriesSource];
-    facetsSource = screenWorksSource;
-    if (seriesKey) {
-      const categorySource = filterMediaItemsForList(tvSource, { category });
-      source = categorySource.filter((item) => item.seriesKey === seriesKey);
-      seriesSummary = publicTvSeriesListItem(tvSeriesGroups(tvSource).find((group) => group.seriesKey === seriesKey) || null);
-    } else {
-      source = filterMediaItemsForList(screenWorksSource, { category });
-    }
-  } else if (["western", "movie", "tv"].includes(mode)) {
-    const mediaSource = mediaItemsByKind(mediaItems, mode).map((item) => publicImageLibraryListItem(item, mode));
-    const categorySource = filterMediaItemsForList(mediaSource, { category });
-    if (mode === "tv") {
-      const tvSeriesSource = tvSeriesGroups(mediaSource).map(publicTvSeriesListItem);
-      facetsSource = tvSeriesSource;
-      if (seriesKey) {
-        source = categorySource.filter((item) => item.seriesKey === seriesKey);
-        seriesSummary = publicTvSeriesListItem(tvSeriesGroups(mediaSource).find((group) => group.seriesKey === seriesKey) || null);
-      } else if (tvView === "episodes") {
-        source = categorySource;
-      } else {
-        source = tvSeriesGroups(categorySource).map(publicTvSeriesListItem);
-      }
-    } else {
-      facetsSource = mediaSource;
-      source = categorySource;
-    }
-  }
-
-  const filtered = filterImageLibraryItems(source, query);
-  const sorted = sortImageLibraryItems(filtered, sort);
-  const items = sorted.slice(offset, offset + limit);
-  return {
-    schemaVersion: 1,
-    mode,
-    query,
-    sort,
-    photoView: mode === "photo" ? (collection ? "albums" : photoView) : "",
-    tvView: mode === "tv" ? (seriesKey || tvView === "episodes" ? "episodes" : "series") : mode === "media" && seriesKey ? "episodes" : "",
-    category: ["photo", "western", "movie", "tv", "media"].includes(mode) ? category : "",
-    person: mode === "photo" ? person : "",
-    collection: mode === "photo" ? collection : "",
-    collectionSummary,
-    seriesKey: ["tv", "media"].includes(mode) ? seriesKey : "",
-    seriesSummary,
-    facets: mode === "photo" ? photoLibraryFacets(facetsSource) : mediaLibraryFacets(facetsSource),
-    count: items.length,
-    total: sorted.length,
-    limit,
-    offset,
-    scannedAt: index.scannedAt || "",
-    items
-  };
-}
-
-function normalizePhotoLibraryView(value) {
-  const view = String(value || "").trim().toLowerCase();
-  return view === "collections" || view === "collection" ? "collections" : "albums";
-}
-
-function normalizeTvLibraryView(value) {
-  const view = String(value || "").trim().toLowerCase();
-  return view === "episodes" || view === "episode" || view === "items" ? "episodes" : "series";
-}
-
-function normalizeImageLibraryMode(value) {
-  const mode = String(value || "").trim().toLowerCase();
-  if (mode === "photos" || mode === "photo-set" || mode === "photo-sets") return "photo";
-  if (mode === "movies") return "movie";
-  if (["media", "video", "screen", "film", "films"].includes(mode)) return "media";
-  if (["photo", "manga", "western", "movie", "tv"].includes(mode)) return mode;
-  return "photo";
-}
-
-function hasCjkText(value) {
-  return /[\u3400-\u9FFF\uF900-\uFAFF]/.test(String(value || ""));
-}
-
-function movieChineseTitle(value) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  if (!hasCjkText(text)) return text;
-  const parts = text.split(" ");
-  const lastCjk = parts.reduce((last, part, index) => (hasCjkText(part) ? index : last), -1);
-  return lastCjk >= 0 ? parts.slice(0, lastCjk + 1).join(" ").trim() : text;
-}
-
-function moviePrimaryDisplayTitle(item, metadata) {
-  const aliases = Array.isArray(metadata?.aliases) ? metadata.aliases : [];
-  const candidates = [
-    metadata?.title,
-    metadata?.movieTitle,
-    ...aliases.filter(hasCjkText),
-    item?.title,
-    item?.dirName
-  ].map((value) => String(value || "").trim()).filter(Boolean);
-  const title = candidates.find(hasCjkText) || candidates[0] || "";
-  return movieChineseTitle(title);
-}
-
-function publicImageLibraryListItem(item, mode) {
-  const normalizedMode = normalizeImageLibraryMode(mode || item?.mediaKind || item?.type);
-  const movieMetadata = item?.movieMetadata || null;
-  const movieTitle = normalizedMode === "movie" ? moviePrimaryDisplayTitle(item, movieMetadata) : "";
-  const displayTitle =
-    normalizedMode === "movie" && movieTitle
-      ? [movieTitle, movieMetadata?.year ? `(${movieMetadata.year})` : ""].filter(Boolean).join(" ")
-      : String(item?.title || item?.dirName || "").trim();
-  return {
-    id: String(item?.id || ""),
-    type: normalizedMode,
-    title: displayTitle,
-    category: String(item?.category || item?.site || item?.kindLabel || "").trim(),
-    subCategory: String(item?.subCategory || "").trim(),
-    personName: String(item?.personName || "").trim(),
-    seriesName: String(item?.seriesName || "").trim(),
-    seriesKey: String(item?.seriesKey || "").trim(),
-    tvSeries: item?.tvSeries || null,
-    movieMetadata,
-    rootLabel: String(item?.rootLabel || item?.kindLabel || "").trim(),
-    ext: String(item?.archiveExt || item?.ext || "").trim(),
-    size: Number(item?.size || 0),
-    updatedAt: String(item?.updatedAt || "").trim(),
-    imageCount: item?.imageCount === null || item?.imageCount === undefined ? null : Number(item.imageCount || 0),
-    chapterCount: item?.chapterCount === undefined ? null : Number(item.chapterCount || 0),
-    doneChapterCount: item?.doneChapterCount === undefined ? null : Number(item.doneChapterCount || 0),
-    downloadedCount: item?.downloadedCount === undefined ? null : Number(item.downloadedCount || 0),
-    failedCount: item?.failedCount === undefined ? null : Number(item.failedCount || 0),
-    albumCount: item?.albumCount === undefined ? null : Number(item.albumCount || 0),
-    collectionId: normalizedMode === "photo" ? photoCollectionValue(item) : "",
-    collectionTitle: normalizedMode === "photo" ? photoCollectionDisplayName(photoCollectionDir(item)) : "",
-    playable: Boolean(item?.playable),
-    coverUrl: String(item?.coverUrl || (normalizedMode === "photo" ? photoSetCoverUrl(item?.id, item?.updatedAt || "") : "")).trim(),
-    rating: item?.movieMetadata?.rating === null || item?.movieMetadata?.rating === undefined ? item?.rating ?? null : Number(item.movieMetadata.rating || 0),
-    ratingCount: item?.movieMetadata?.ratingCount === null || item?.movieMetadata?.ratingCount === undefined ? item?.ratingCount ?? null : Number(item.movieMetadata.ratingCount || 0),
-    year: String(item?.movieMetadata?.year || item?.year || "").trim(),
-    genres: Array.isArray(item?.movieMetadata?.genres) ? item.movieMetadata.genres : Array.isArray(item?.genres) ? item.genres : [],
-    routePath: imageLibraryItemRoutePath(normalizedMode, item?.id)
-  };
-}
-
-function publicPhotoCollectionListItem(group) {
-  return {
-    id: group.value,
-    type: "photoCollection",
-    title: group.title,
-    category: group.categories.slice(0, 3).join(" · "),
-    subCategory: group.subCategories.slice(0, 3).join(" · "),
-    personName: "",
-    seriesName: "",
-    rootLabel: group.rootLabel,
-    ext: "",
-    size: group.size,
-    updatedAt: group.updatedAt,
-    imageCount: group.imageCount,
-    albumCount: group.count,
-    collectionId: group.value,
-    collectionTitle: group.title,
-    playable: false,
-    coverUrl: group.coverUrl,
-    routePath: `/photo/collection/${encodeURIComponent(group.value)}`
-  };
-}
-
-function tvSeriesGroups(items = []) {
-  const groups = new Map();
-  for (const item of items) {
-    const seriesKey = String(item?.seriesKey || "").trim() || tvSeriesKey(item?.category || "", item?.seriesName || item?.personName || item?.subCategory || item?.title || "");
-    if (!seriesKey) continue;
-    let group = groups.get(seriesKey);
-    if (!group) {
-      group = {
-        seriesKey,
-        type: "tvSeries",
-        title: item?.tvSeries?.title || item?.seriesName || item?.personName || item?.subCategory || item?.title || "电视剧",
-        seriesName: item?.seriesName || item?.personName || item?.subCategory || "",
-        category: item?.category || "",
-        rootLabel: item?.rootLabel || "",
-        tvSeries: item?.tvSeries || null,
-        coverUrl: item?.tvSeries?.coverUrl || "",
-        size: 0,
-        episodeCount: 0,
-        playableCount: 0,
-        updatedAt: "",
-        firstEpisodeId: item?.id || ""
-      };
-      groups.set(seriesKey, group);
-    }
-    group.episodeCount += 1;
-    if (item?.playable) group.playableCount += 1;
-    group.size += Number(item?.size || 0);
-    if (!group.coverUrl && item?.tvSeries?.coverUrl) group.coverUrl = item.tvSeries.coverUrl;
-    if (!group.tvSeries && item?.tvSeries) group.tvSeries = item.tvSeries;
-    if (!group.firstEpisodeId && item?.id) group.firstEpisodeId = item.id;
-    if (String(item?.updatedAt || "") > String(group.updatedAt || "")) group.updatedAt = String(item.updatedAt || "");
-  }
-  return [...groups.values()];
-}
-
-function publicTvSeriesListItem(group) {
-  if (!group) return null;
-  const meta = group.tvSeries || {};
-  return {
-    id: group.seriesKey,
-    type: "tvSeries",
-    title: String(meta.title || group.title || group.seriesName || "电视剧").trim(),
-    category: String(group.category || meta.category || "").trim(),
-    subCategory: String(group.seriesName || "").trim(),
-    personName: String(group.seriesName || group.title || "").trim(),
-    seriesName: String(group.seriesName || group.title || "").trim(),
-    seriesKey: String(group.seriesKey || "").trim(),
-    tvSeries: group.tvSeries || null,
-    rootLabel: String(group.rootLabel || "").trim(),
-    ext: "",
-    size: Number(group.size || 0),
-    updatedAt: String(group.updatedAt || meta.updatedAt || "").trim(),
-    imageCount: null,
-    chapterCount: Number(group.episodeCount || 0),
-    doneChapterCount: Number(group.playableCount || 0),
-    downloadedCount: null,
-    failedCount: null,
-    albumCount: null,
-    collectionId: "",
-    collectionTitle: "",
-    playable: Boolean(group.playableCount),
-    coverUrl: String(group.coverUrl || meta.coverUrl || "").trim(),
-    firstEpisodeId: String(group.firstEpisodeId || "").trim(),
-    rating: meta.rating === null || meta.rating === undefined ? null : Number(meta.rating || 0),
-    ratingCount: meta.ratingCount === null || meta.ratingCount === undefined ? null : Number(meta.ratingCount || 0),
-    year: String(meta.year || "").trim(),
-    genres: Array.isArray(meta.genres) ? meta.genres : [],
-    routePath: `/tv?seriesKey=${encodeURIComponent(String(group.seriesKey || ""))}`
-  };
-}
-
-function imageLibraryItemRoutePath(mode, id) {
-  const encoded = encodeURIComponent(String(id || ""));
-  if (!encoded) return "/";
-  if (mode === "photo") return `/photo/set/${encoded}`;
-  if (mode === "manga") return `/manga/${encoded}`;
-  if (mode === "western") return `/western/${encoded}`;
-  if (mode === "movie") return `/movies/${encoded}`;
-  if (mode === "tv") return `/tv/${encoded}`;
-  return "/";
-}
-
-function filterImageLibraryItems(items, query) {
-  const needle = query.toLowerCase();
-  if (!needle) return items;
-  return items.filter((item) =>
-    [
-      item.title,
-      item.category,
-      item.subCategory,
-      item.personName,
-      item.seriesName,
-      item.rootLabel,
-      item.ext,
-      item.movieMetadata?.title,
-      item.movieMetadata?.originalTitle,
-      item.movieMetadata?.imdbId,
-      ...(item.movieMetadata?.aliases || []),
-      ...(item.movieMetadata?.directors || []),
-      ...(item.movieMetadata?.writers || []),
-      ...(item.movieMetadata?.actors || []),
-      ...(item.movieMetadata?.genres || []),
-      item.tvSeries?.title,
-      item.tvSeries?.originalTitle,
-      item.tvSeries?.imdbId,
-      ...(item.tvSeries?.aliases || []),
-      ...(item.tvSeries?.directors || []),
-      ...(item.tvSeries?.writers || []),
-      ...(item.tvSeries?.actors || []),
-      ...(item.tvSeries?.genres || [])
-    ]
-      .filter(Boolean)
-      .some((value) => String(value).toLowerCase().includes(needle))
-  );
-}
-
-function filterPhotoSetsForList(items, filters = {}) {
-  return (items || []).filter((item) => {
-    if (filters.category && filters.category !== "all" && item.category !== filters.category) return false;
-    if (filters.person && filters.person !== "all" && item.personName !== filters.person) return false;
-    if (filters.collection && photoCollectionValue(item) !== filters.collection) return false;
-    return true;
-  });
-}
-
-function photoLibraryFacets(items = []) {
-  return {
-    categories: facetCounts(items, "category"),
-    people: facetCounts(items, "personName").slice(0, 20)
-  };
-}
-
-function mediaLibraryFacets(items = []) {
-  return {
-    categories: facetCounts(items, "category").slice(0, 24),
-    people: facetCounts(items, "personName").slice(0, 20),
-    roots: facetCounts(items, "rootLabel").slice(0, 12)
-  };
-}
-
-function filterMediaItemsForList(items, filters = {}) {
-  return (items || []).filter((item) => {
-    if (filters.category && filters.category !== "all" && item.category !== filters.category) return false;
-    return true;
-  });
-}
-
-function photoCollectionDir(item) {
-  const relativePath = String(item?.relativePath || "").replace(/[\\/]+/g, "/");
-  const parts = relativePath.split("/").filter(Boolean);
-  if (parts.length <= 1) return PHOTO_COLLECTION_ROOT_VALUE;
-  return parts.slice(0, -1).join("/");
-}
-
-function photoCollectionValue(item) {
-  return [item?.sourceRoot || item?.rootLabel || "", photoCollectionDir(item)].join("|");
-}
-
-function photoCollectionDisplayName(dirValue) {
-  const dir = String(dirValue || "").trim();
-  if (!dir || dir === PHOTO_COLLECTION_ROOT_VALUE) return "根目录合集";
-  const last = dir.split("/").filter(Boolean).pop() || dir;
-  const bracketOnly = last.match(/^\[([^\]]+)\]$/);
-  return bracketOnly ? bracketOnly[1].trim() || last : last;
-}
-
-function photoCollectionGroups(items = []) {
-  const groups = new Map();
-  for (const item of items) {
-    const dir = photoCollectionDir(item);
-    const value = photoCollectionValue(item);
-    let group = groups.get(value);
-    if (!group) {
-      group = {
-        value,
-        title: photoCollectionDisplayName(dir),
-        dir,
-        rootLabel: item.rootLabel || "",
-        count: 0,
-        size: 0,
-        imageCount: 0,
-        updatedAt: "",
-        coverUrl: item.coverUrl || photoSetCoverUrl(item.id, item.updatedAt || ""),
-        categories: new Set(),
-        subCategories: new Set()
-      };
-      groups.set(value, group);
-    }
-    group.count += 1;
-    group.size += Number(item.size || 0);
-    group.imageCount += Number(item.imageCount || 0);
-    if (!group.coverUrl && item.coverUrl) group.coverUrl = item.coverUrl;
-    if (item.category) group.categories.add(item.category);
-    if (item.subCategory) group.subCategories.add(item.subCategory);
-    const itemTime = new Date(item.updatedAt || 0).getTime();
-    const groupTime = new Date(group.updatedAt || 0).getTime();
-    if (itemTime > groupTime) group.updatedAt = item.updatedAt || group.updatedAt;
-  }
-  return [...groups.values()]
-    .map((group) => ({
-      ...group,
-      categories: [...group.categories],
-      subCategories: [...group.subCategories]
-    }))
-    .sort((a, b) => b.count - a.count || new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime() || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
-}
-
-function photoCollectionSummary(items = [], collectionValue = "") {
-  if (!collectionValue) return null;
-  const first = items[0] || {};
-  return {
-    id: collectionValue,
-    title: photoCollectionDisplayName(photoCollectionDir(first)),
-    rootLabel: first.rootLabel || "",
-    count: items.length,
-    size: items.reduce((sum, item) => sum + Number(item.size || 0), 0),
-    imageCount: items.reduce((sum, item) => sum + Number(item.imageCount || 0), 0),
-    updatedAt: items.reduce((latest, item) => {
-      const itemTime = new Date(item.updatedAt || 0).getTime();
-      const latestTime = new Date(latest || 0).getTime();
-      return itemTime > latestTime ? item.updatedAt : latest;
-    }, "")
-  };
-}
-
-function sortImageLibraryItems(items, sort) {
-  const list = [...items];
-  if (sort === "title") {
-    return list.sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
-  }
-  if (sort === "size") {
-    return list.sort((a, b) => Number(b.size || 0) - Number(a.size || 0) || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
-  }
-  if (sort === "rating") {
-    return list.sort((a, b) => {
-      const aRating = Number(a.rating || a.tvSeries?.rating || 0);
-      const bRating = Number(b.rating || b.tvSeries?.rating || 0);
-      const aHasRating = aRating > 0;
-      const bHasRating = bRating > 0;
-      if (aHasRating !== bHasRating) return aHasRating ? -1 : 1;
-      if (aRating !== bRating) return bRating - aRating;
-      return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
-    });
-  }
-  return list.sort((a, b) => {
-    const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
-    return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
-  });
-}
-
-function photoSetById(id) {
-  const target = String(id || "");
-  if (!target) return null;
-  const index = getImageLibraryIndex();
-  return (index.photoSets || []).find((item) => item.id === target) || null;
-}
-
-function galleryMediaById(id) {
-  const target = String(id || "");
-  if (!target) return null;
-  const index = getImageLibraryIndex();
-  return (index.mediaItems || []).find((item) => item.id === target) || null;
-}
-
-function galleryMediaPath(item) {
-  if (!item) return "";
-  return safeChildPath(item.sourceRoot, item.relativePath);
-}
-
-function photoSetArchivePath(album) {
-  if (!album) return "";
-  return safeChildPath(album.sourceRoot, album.relativePath);
-}
-
-function publicPhotoSetDetail(album, options = {}) {
-  const archivePath = photoSetArchivePath(album);
-  const imageOffset = Math.max(0, Math.floor(Number(options.imageOffset || 0)) || 0);
-  const rawImageLimit = options.imageLimit;
-  const imageLimit = Number.isFinite(Number(rawImageLimit)) && Number(rawImageLimit) > 0
-    ? Math.floor(Number(rawImageLimit))
-    : 0;
-  const payload = archiveImagesPayload(archivePath, {
-    limit: imageLimit > 0 ? imageOffset + imageLimit : 0
-  });
-  const images = Array.isArray(payload.images) ? payload.images : [];
-  const imageCount = Number(payload.imageCount || images.length || 0);
-  const visibleImages = imageLimit > 0
-    ? images.slice(imageOffset, imageOffset + imageLimit)
-    : images;
-  return {
-    ...album,
-    imageCount,
-    imageOffset,
-    imageLimit: imageLimit || images.length,
-    imagesTruncated: imageLimit > 0 && imageOffset + visibleImages.length < imageCount,
-    images: visibleImages.map((image, index) => ({
-      index: imageOffset + index + 1,
-      name: image.name || path.basename(image.path || ""),
-      archivePath: image.path || "",
-      bytes: Number(image.bytes || 0),
-      url: photoSetImageUrl(album.id, imageOffset + index + 1)
-    }))
-  };
-}
-
-function publicGalleryMediaDetail(item) {
-  const publicItem = publicGalleryMediaItem(item);
-  const filePath = galleryMediaPath(item);
-  const stat = safeStat(filePath);
-  return {
-    ...publicItem,
-    size: stat?.size || item.size || 0,
-    updatedAt: stat ? new Date(stat.mtimeMs).toISOString() : item.updatedAt || "",
-    exists: Boolean(stat?.isFile()),
-    streamUrl: `/media/gallery-video/${encodeURIComponent(item.id)}`
-  };
-}
-
-function servePhotoSetImage(res, albumId, imageIndex) {
-  const album = photoSetById(decodeURIComponent(albumId));
-  if (!album) {
-    notFound(res);
-    return;
-  }
-  const archivePath = photoSetArchivePath(album);
-  const images = listArchiveImages(archivePath);
-  const image = images[Number(decodeURIComponent(imageIndex)) - 1];
-  if (!image?.path) {
-    notFound(res);
-    return;
-  }
-  serveArchiveMemberImage(res, {
-    sourceType: "photo-set",
-    archivePath,
-    memberPath: image.path,
-    contentType: MIME_TYPES[normalizeExt(image.path)] || ""
-  });
-}
-
-function serveGalleryVideo(req, res, mediaId) {
-  const item = galleryMediaById(decodeURIComponent(mediaId));
-  const filePath = galleryMediaPath(item);
-  if (!item || !filePath || !safeStat(filePath)?.isFile()) {
-    notFound(res);
-    return;
-  }
-  serveVideo(req, res, {
-    id: item.id,
-    path: filePath,
-    name: path.basename(filePath),
-    ext: normalizeExt(filePath)
-  });
-}
-
-function ensureToolDownloadDir() {
-  fs.mkdirSync(TOOL_DOWNLOAD_DIR, { recursive: true });
-}
-
-function cleanupToolDownloadDir() {
-  try {
-    fs.rmSync(TOOL_DOWNLOAD_DIR, { recursive: true, force: true });
-    ensureToolDownloadDir();
-  } catch (error) {
-    console.warn("[tool-downloads] 清理临时目录失败：", error.message || error);
-  }
-}
-
-function sanitizeDownloadFileName(value, fallback = "formatted.txt") {
-  const raw = String(value || "").replaceAll("\\", "/");
-  const name = path
-    .basename(raw)
-    .replace(/[\x00-\x1f<>:"/\\|?*]+/g, "_")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/[. ]+$/g, "");
-  return (name || fallback).slice(0, 140);
-}
-
-function formattedTxtFileName(fileName) {
-  const safeName = sanitizeDownloadFileName(fileName, "文本.txt");
-  const parsed = path.parse(safeName);
-  const base = (parsed.name || "文本").slice(0, 120);
-  return `${base}_格式化.txt`;
-}
-
-function attachmentDisposition(fileName) {
-  const fallback = sanitizeDownloadFileName(fileName, "download.txt").replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-  return `attachment; filename="${fallback || "download.txt"}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
-}
-
-function normalizeAndroidUpdateChannel(value) {
-  const channel = String(value || "debug").trim().toLowerCase();
-  return channel === "release" ? "release" : "debug";
-}
-
-function androidUpdateChannelDir(channel) {
-  return path.join(ANDROID_UPDATE_DIR, normalizeAndroidUpdateChannel(channel));
-}
-
-function androidUpdateManifestPath(channel) {
-  return path.join(androidUpdateChannelDir(channel), "latest.json");
-}
-
-function requestBaseUrl(req) {
-  const protocol = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() || (req.socket.encrypted ? "https" : "http");
-  const host = req.headers.host || `127.0.0.1:${PORT}`;
-  return `${protocol}://${host}`;
-}
-
-function htmlEscape(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function formatAndroidUpdateBytes(size) {
-  const value = Number(size || 0);
-  if (!Number.isFinite(value) || value <= 0) return "-";
-  if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
-  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
-  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${value} B`;
-}
-
-function publicAndroidUpdateManifest(req, url) {
-  const channel = normalizeAndroidUpdateChannel(url.searchParams.get("channel"));
-  const currentVersionCode = clampInteger(url.searchParams.get("currentVersionCode"), 0, 0, Number.MAX_SAFE_INTEGER);
-  const manifest = readJsonFile(androidUpdateManifestPath(channel), null);
-  if (!manifest || !Number(manifest.versionCode)) {
-    return {
-      ok: true,
-      channel,
-      available: false,
-      currentVersionCode,
-      message: channel === "debug" ? "还没有发布调试版 APK" : "还没有发布正式版 APK"
-    };
-  }
-
-  const fileName = sanitizeDownloadFileName(manifest.apkFile || `fanhao-${channel}.apk`, `fanhao-${channel}.apk`);
-  const apkPath = safeChildPath(androidUpdateChannelDir(channel), fileName);
-  const exists = Boolean(apkPath && fs.existsSync(apkPath));
-  const versionCode = Number(manifest.versionCode || 0);
-  const available = exists && versionCode > currentVersionCode;
-  const downloadPath = `/api/android/update/apk/${encodeURIComponent(channel)}/${encodeURIComponent(fileName)}`;
-  return {
-    ok: true,
-    channel,
-    available,
-    currentVersionCode,
-    versionCode,
-    versionName: String(manifest.versionName || versionCode),
-    minVersionCode: Number(manifest.minVersionCode || 0),
-    required: Boolean(manifest.required),
-    notes: Array.isArray(manifest.notes) ? manifest.notes.slice(0, 12) : [],
-    updatedAt: String(manifest.updatedAt || ""),
-    size: Number(manifest.size || (exists ? fs.statSync(apkPath).size : 0)),
-    sha256: String(manifest.sha256 || ""),
-    fileName,
-    downloadUrl: `${requestBaseUrl(req)}${downloadPath}`,
-    message: exists ? "" : "更新包文件不存在"
-  };
-}
-
-function renderAndroidUpdatePage(req, url) {
-  const update = publicAndroidUpdateManifest(req, url);
-  const channel = normalizeAndroidUpdateChannel(update.channel);
-  const title = channel === "debug" ? "FanHao 调试版更新" : "FanHao 正式版更新";
-  const status = update.versionCode
-    ? (update.message || `最新版本 ${update.versionName || update.versionCode}`)
-    : update.message;
-  const notes = update.notes?.length
-    ? update.notes.map((item) => `<li>${htmlEscape(item)}</li>`).join("")
-    : "<li>暂无更新说明</li>";
-  const downloadButton = update.downloadUrl && !update.message
-    ? `<a class="primary" href="${htmlEscape(update.downloadUrl)}">下载 APK</a>`
-    : `<button class="primary" type="button" disabled>暂无可下载 APK</button>`;
-  const apiUrl = `/api/android/update?channel=${encodeURIComponent(channel)}`;
-
-  return `<!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>${htmlEscape(title)}</title>
-    <style>
-      :root { color-scheme: light dark; --brand: #1f7a62; --text: #17231f; --muted: #64746f; --line: #d9e1de; --panel: #ffffff; --bg: #f5f7f6; }
-      @media (prefers-color-scheme: dark) { :root { --text: #edf4f1; --muted: #a6b5b0; --line: #263631; --panel: #101916; --bg: #08110e; } }
-      body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-      main { width: min(680px, calc(100vw - 32px)); margin: 0 auto; padding: 40px 0; }
-      .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 24px; }
-      h1 { margin: 0 0 8px; font-size: clamp(26px, 6vw, 38px); letter-spacing: 0; }
-      p { margin: 0; color: var(--muted); }
-      dl { display: grid; grid-template-columns: 96px 1fr; gap: 10px 16px; margin: 24px 0; }
-      dt { color: var(--muted); }
-      dd { margin: 0; word-break: break-all; }
-      ul { margin: 8px 0 24px; padding-left: 20px; }
-      .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-      a, button { border-radius: 8px; padding: 11px 16px; font: inherit; text-decoration: none; }
-      .primary { border: 1px solid var(--brand); background: var(--brand); color: #fff; }
-      button.primary:disabled { opacity: .55; }
-      .secondary { border: 1px solid var(--line); color: var(--text); background: transparent; }
-      .hint { margin-top: 16px; font-size: 14px; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <section class="panel">
-        <h1>${htmlEscape(title)}</h1>
-        <p>${htmlEscape(status || "等待发布更新包")}</p>
-        <dl>
-          <dt>通道</dt><dd>${htmlEscape(channel)}</dd>
-          <dt>版本</dt><dd>${htmlEscape(update.versionName || "-")}${update.versionCode ? ` (${htmlEscape(update.versionCode)})` : ""}</dd>
-          <dt>大小</dt><dd>${htmlEscape(formatAndroidUpdateBytes(update.size))}</dd>
-          <dt>更新时间</dt><dd>${htmlEscape(update.updatedAt || "-")}</dd>
-          <dt>文件</dt><dd>${htmlEscape(update.fileName || "-")}</dd>
-        </dl>
-        <h2>更新说明</h2>
-        <ul>${notes}</ul>
-        <div class="actions">
-          ${downloadButton}
-          <a class="secondary" href="${htmlEscape(apiUrl)}">查看 JSON</a>
-          <a class="secondary" href="/">返回网页端</a>
-        </div>
-        <p class="hint">调试阶段使用 debug 包；手机端也会从同一通道检查更新。</p>
-      </section>
-    </main>
-  </body>
-</html>`;
-}
-
-function serveAndroidUpdateApk(req, res, channel, fileName) {
-  const normalizedChannel = normalizeAndroidUpdateChannel(channel);
-  const safeName = sanitizeDownloadFileName(decodeURIComponent(fileName || ""), `fanhao-${normalizedChannel}.apk`);
-  const apkPath = safeChildPath(androidUpdateChannelDir(normalizedChannel), safeName);
-  if (!apkPath || !fs.existsSync(apkPath) || normalizeExt(apkPath) !== ".apk") {
-    notFound(res);
-    return;
-  }
-
-  const stat = fs.statSync(apkPath);
-  res.writeHead(200, {
-    "Content-Type": "application/vnd.android.package-archive",
-    "Content-Length": stat.size,
-    "Content-Disposition": attachmentDisposition(safeName),
-    "Cache-Control": "no-store"
-  });
-  if (req.method === "HEAD") {
-    res.end();
-    return;
-  }
-  fs.createReadStream(apkPath).pipe(res);
-}
-
-function toolDownloadDirForId(id) {
-  return path.join(TOOL_DOWNLOAD_DIR, id);
-}
-
-function removeToolDownload(id) {
-  if (!id) return;
-  const timer = toolDownloadTimers.get(id);
-  if (timer) clearTimeout(timer);
-  toolDownloadTimers.delete(id);
-  const record = toolDownloads.get(id);
-  toolDownloads.delete(id);
-  const dir = record?.dirPath || toolDownloadDirForId(id);
-  try {
-    const resolved = path.resolve(dir);
-    const root = path.resolve(TOOL_DOWNLOAD_DIR);
-    if (resolved === root || !resolved.startsWith(root + path.sep)) return;
-    fs.rmSync(resolved, { recursive: true, force: true });
-  } catch (error) {
-    console.warn("[tool-downloads] 删除临时文件失败：", error.message || error);
-  }
-}
-
-function registerToolDownload(record) {
-  toolDownloads.set(record.id, record);
-  const delay = Math.max(0, record.expiresAt - Date.now());
-  const timer = setTimeout(() => removeToolDownload(record.id), delay);
-  if (typeof timer.unref === "function") timer.unref();
-  toolDownloadTimers.set(record.id, timer);
-}
-
-function txtToolOptions(input = {}) {
-  return {
-    indent: input.indent !== false,
-    cleanJunk: input.cleanJunk !== false
-  };
-}
-
-function txtToolInputBuffer(body = {}) {
-  const fileName = sanitizeDownloadFileName(body.fileName || body.name || "文本.txt", "文本.txt");
-  if (body.contentBase64) {
-    const base64 = String(body.contentBase64 || "").replace(/^data:[^,]+,/, "");
-    const buffer = Buffer.from(base64, "base64");
-    return { fileName, buffer, source: "file" };
-  }
-  const text = String(body.text || "");
-  return { fileName, buffer: Buffer.from(text, "utf8"), source: "text" };
-}
-
-function runNovelTextFormatter(inputPath, outputPath, options = {}) {
-  return new Promise((resolve, reject) => {
-    const args = ["-u", path.join("tools", "novel_text_formatter.py"), inputPath, "--output", outputPath];
-    if (!options.indent) args.push("--no-indent");
-    if (!options.cleanJunk) args.push("--no-clean-junk");
-
-    const child = spawn("python", args, {
-      cwd: __dirname,
-      windowsHide: true,
-      env: {
-        ...process.env,
-        PYTHONIOENCODING: "utf-8",
-        PYTHONUTF8: "1"
-      }
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code !== 0) {
-        const error = new Error(stderr.trim() || stdout.trim() || "TXT 格式化失败");
-        error.statusCode = 500;
-        reject(error);
-        return;
-      }
-      try {
-        resolve(JSON.parse(stdout.trim() || "{}"));
-      } catch (error) {
-        error.statusCode = 500;
-        error.message = `格式化统计解析失败：${error.message}`;
-        reject(error);
-      }
-    });
-  });
-}
-
-async function createTxtFormatDownload(body = {}) {
-  const options = txtToolOptions(body.options || body);
-  const { fileName, buffer, source } = txtToolInputBuffer(body);
-  if (!buffer.length) {
-    const error = new Error("TXT 内容为空");
-    error.statusCode = 400;
-    throw error;
-  }
-  if (buffer.length > TXT_TOOL_MAX_FILE_BYTES) {
-    const error = new Error(`TXT 文件不能超过 ${Math.round(TXT_TOOL_MAX_FILE_BYTES / 1024 / 1024)} MB`);
-    error.statusCode = 413;
-    throw error;
-  }
-  if (source === "file" && path.extname(fileName).toLowerCase() !== ".txt") {
-    const error = new Error("只支持 .txt 文档");
-    error.statusCode = 400;
-    throw error;
-  }
-
-  ensureToolDownloadDir();
-  const id = crypto.randomBytes(16).toString("base64url");
-  const dirPath = toolDownloadDirForId(id);
-  fs.mkdirSync(dirPath, { recursive: true });
-  const inputPath = path.join(dirPath, "source.txt");
-  const outputFileName = formattedTxtFileName(fileName);
-  const outputPath = path.join(dirPath, outputFileName);
-  fs.writeFileSync(inputPath, buffer);
-
-  try {
-    const stats = await runNovelTextFormatter(inputPath, outputPath, options);
-    fs.rmSync(inputPath, { force: true });
-    const outputBuffer = fs.readFileSync(outputPath);
-    const now = Date.now();
-    const record = {
-      id,
-      dirPath,
-      filePath: outputPath,
-      fileName: outputFileName,
-      size: outputBuffer.length,
-      createdAt: now,
-      expiresAt: now + TOOL_DOWNLOAD_TTL_MS
-    };
-    registerToolDownload(record);
-    const previewText =
-      outputBuffer.length <= TXT_TOOL_PREVIEW_BYTES
-        ? outputBuffer.toString("utf8")
-        : `${outputBuffer.subarray(0, TXT_TOOL_PREVIEW_BYTES).toString("utf8")}\n\n……`;
-    return {
-      ok: true,
-      id,
-      fileName: outputFileName,
-      size: outputBuffer.length,
-      downloadUrl: `/api/tools/txt-format/download/${encodeURIComponent(id)}`,
-      expiresAt: new Date(record.expiresAt).toISOString(),
-      expiresInSeconds: Math.floor(TOOL_DOWNLOAD_TTL_MS / 1000),
-      previewText,
-      previewTruncated: outputBuffer.length > TXT_TOOL_PREVIEW_BYTES,
-      stats: {
-        ...stats,
-        input_path: undefined,
-        output_path: undefined,
-        inputBytes: buffer.length,
-        outputBytes: outputBuffer.length
-      }
-    };
-  } catch (error) {
-    removeToolDownload(id);
-    throw error;
-  }
-}
-
-function serveTxtToolDownload(req, res, id) {
-  const record = toolDownloads.get(id);
-  if (!record) {
-    sendJson(res, 404, { error: "下载文件不存在或已过期" });
-    return;
-  }
-  if (Date.now() >= record.expiresAt) {
-    removeToolDownload(id);
-    sendJson(res, 410, { error: "下载文件已过期" });
-    return;
-  }
-  if (!fs.existsSync(record.filePath)) {
-    removeToolDownload(id);
-    sendJson(res, 404, { error: "下载文件不存在或已过期" });
-    return;
-  }
-
-  const stat = fs.statSync(record.filePath);
-  res.writeHead(200, {
-    "Content-Type": "text/plain; charset=utf-8",
-    "Content-Length": stat.size,
-    "Content-Disposition": attachmentDisposition(record.fileName),
-    "Cache-Control": "no-store"
-  });
-  fs.createReadStream(record.filePath).pipe(res);
+function resolvePlayableVideoFile(videoId) {
+  const file = library.filesById.get(String(videoId || ""));
+  if (file?.type === "video") return file;
+  return galleryMediaService.videoFile(galleryMediaService.byId(videoId));
 }
 
 function localImageMime(file) {
@@ -9592,106 +6628,6 @@ function serveWorkCover(res, workId) {
   res.end(buffer);
 }
 
-function servePhotoSetCover(res, albumId) {
-  const album = photoSetById(albumId);
-  if (!album) {
-    notFound(res);
-    return;
-  }
-
-  let row = photoSetCoverRow(album);
-  const signature = photoSetArchiveSignature(photoSetArchivePath(album));
-  if (!photoSetCoverMatches(row, signature) || !row?.cover_blob) {
-    try {
-      row = generatePhotoSetCover(album);
-    } catch (error) {
-      console.warn("[image-gallery-cover]", album.relativePath || album.id, error.message || error);
-      notFound(res);
-      return;
-    }
-  }
-
-  if (!row?.cover_blob) {
-    notFound(res);
-    return;
-  }
-
-  const buffer = Buffer.from(row.cover_blob);
-  res.writeHead(200, {
-    "Content-Type": row.cover_mime || "image/jpeg",
-    "Content-Length": buffer.length,
-    "Cache-Control": "public, max-age=86400",
-    "Content-Disposition": "inline"
-  });
-  res.end(buffer);
-}
-
-function serveTvSeriesCover(res, seriesKey) {
-  const row = tvSeriesMetadataRow(seriesKey);
-  if (!row?.cover_blob || row.status !== "ok") {
-    notFound(res);
-    return;
-  }
-  const buffer = Buffer.from(row.cover_blob);
-  res.writeHead(200, {
-    "Content-Type": row.cover_mime || "image/jpeg",
-    "Content-Length": buffer.length,
-    "Cache-Control": "public, max-age=86400",
-    "Content-Disposition": "inline"
-  });
-  res.end(buffer);
-}
-
-function serveMovieMetadataCover(res, mediaId) {
-  const row = movieMetadataRow(mediaId);
-  if (!row?.cover_blob || row.status !== "ok") {
-    notFound(res);
-    return;
-  }
-  const buffer = Buffer.from(row.cover_blob);
-  res.writeHead(200, {
-    "Content-Type": row.cover_mime || "image/jpeg",
-    "Content-Length": buffer.length,
-    "Cache-Control": "public, max-age=86400",
-    "Content-Disposition": "inline"
-  });
-  res.end(buffer);
-}
-
-function serveGalleryMediaCover(res, mediaId) {
-  const item = galleryMediaById(decodeURIComponent(mediaId));
-  if (!item) {
-    notFound(res);
-    return;
-  }
-
-  let row = galleryMediaCoverRow(item.id);
-  const signature = galleryMediaSignature(item);
-  if (!galleryMediaCoverMatches(row, signature) || !row?.cover_blob) {
-    try {
-      row = generateGalleryMediaCover(item);
-    } catch (error) {
-      console.warn("[gallery-media-cover]", item.relativePath || item.id, error.message || error);
-      notFound(res);
-      return;
-    }
-  }
-
-  if (!row?.cover_blob) {
-    notFound(res);
-    return;
-  }
-
-  const buffer = Buffer.from(row.cover_blob);
-  res.writeHead(200, {
-    "Content-Type": row.cover_mime || "image/jpeg",
-    "Content-Length": buffer.length,
-    "Cache-Control": "public, max-age=86400",
-    "Content-Disposition": "inline"
-  });
-  res.end(buffer);
-}
-
 function remoteImageCacheKey(remoteUrl) {
   return crypto.createHash("sha256").update(remoteUrl).digest("hex");
 }
@@ -9844,63 +6780,8 @@ async function serveCachedRemoteImage(req, res, url) {
   res.end();
 }
 
-function parseRange(rangeHeader, size) {
-  const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader || "");
-  if (!match) return null;
-
-  let start = match[1] ? Number(match[1]) : 0;
-  let end = match[2] ? Number(match[2]) : size - 1;
-
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start < 0 || end >= size) {
-    return null;
-  }
-
-  return { start, end };
-}
-
-function pipeFileRange(req, res, filePath, range) {
-  const stream = fs.createReadStream(filePath, range);
-  let closed = false;
-  const closeStream = () => {
-    if (closed) return;
-    closed = true;
-    stream.destroy();
-  };
-
-  req.on("aborted", closeStream);
-  res.on("close", closeStream);
-  stream.on("error", () => {
-    if (!res.headersSent) {
-      res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
-    }
-    res.end();
-  });
-  stream.pipe(res);
-}
-
 function serveVideo(req, res, file) {
-  const stat = safeStat(file.path);
-  if (!stat) {
-    notFound(res);
-    return;
-  }
-
-  const range = parseRange(req.headers.range, stat.size);
-  const contentType = MIME_TYPES[file.ext] || "application/octet-stream";
-  const responseRange = range || {
-    start: 0,
-    end: Math.min(stat.size - 1, DEFAULT_VIDEO_CHUNK_BYTES - 1)
-  };
-
-  res.writeHead(206, {
-    "Content-Type": contentType,
-    "Accept-Ranges": "bytes",
-    "Content-Range": `bytes ${responseRange.start}-${responseRange.end}/${stat.size}`,
-    "Content-Length": responseRange.end - responseRange.start + 1,
-    "Cache-Control": "no-store",
-    "Content-Disposition": "inline"
-  });
-  pipeFileRange(req, res, file.path, responseRange);
+  serveRangedFile(req, res, file);
 }
 
 function serveTranscodedVideo(req, res, file, url) {
@@ -10066,7 +6947,7 @@ function publicWorkCoverAvatar(work, personId, source = "work_cover") {
 function publicPerson(person, options = {}) {
   const actorProfile = publicActorProfile(actorProfileRow(person.id));
   const avatar = publicPersonAvatar(person.id);
-  const fallbackAvatar = avatar?.avatarUrl || actorProfile?.avatarUrl ? null : publicPersonFallbackAvatar(person);
+  const fallbackAvatar = avatar?.avatarUrl || actorProfile?.avatarUrl || options.skipFallbackAvatar ? null : publicPersonFallbackAvatar(person);
   const isGSource = isGPerson(person);
   return {
     id: person.id,
@@ -10216,11 +7097,11 @@ function publicMediaFile(file, work = null) {
 }
 
 function favoriteWorks(folderId = "") {
-  const selectedFolderId = folderId ? normalizeFavoriteFolderId(folderId) : "";
+  const selectedFolderId = folderId ? userStateService.normalizeFavoriteFolderId(folderId) : "";
   return Object.entries(userState.favorites)
-    .map(([workId, favorite]) => ({ work: library.worksById.get(workId), favorite: normalizeFavoriteRecord(favorite, userState.favoriteFolders) }))
+    .map(([workId, favorite]) => ({ work: library.worksById.get(workId), favorite: userStateService.normalizeFavoriteRecord(favorite, userState.favoriteFolders) }))
     .filter((item) => item.work)
-    .filter((item) => !selectedFolderId || normalizeFavoriteFolderId(item.favorite.folderId) === selectedFolderId)
+    .filter((item) => !selectedFolderId || userStateService.normalizeFavoriteFolderId(item.favorite.folderId) === selectedFolderId)
     .sort((a, b) => String(b.favorite.createdAt || "").localeCompare(String(a.favorite.createdAt || "")))
     .map((item) => item.work);
 }
@@ -10369,720 +7250,49 @@ function pagedWorksPayload(works, url, extra = {}) {
   return { ...extra, count: page.length, total, limit, offset, sort, works: page };
 }
 
-function requireLocalAdmin(req, res) {
+function requireTrustedNetworkPage(req, res, errorMessage) {
   const access = requestAccess(req);
-  if (!access.isLocal || !isSameLocalOrigin(req)) {
-    sendJson(res, 403, { error: "后台管理只能在本机页面使用" });
+  if (!isTrustedNetworkAccess(access) || !isSameTrustedNetworkOrigin(req, access)) {
+    sendJson(res, 403, { error: errorMessage });
     return false;
   }
   return true;
 }
 
-function videoProbe(file) {
-  try {
-    const result = spawnSync(
-      FFPROBE_PATH,
-      ["-v", "error", "-show_entries", "format=duration", "-show_streams", "-of", "json", file.path],
-      { encoding: "utf8", windowsHide: true, timeout: 8000, maxBuffer: 2 * 1024 * 1024 }
-    );
-    if (result.status !== 0 || !result.stdout) return null;
-    const data = JSON.parse(result.stdout);
-    const video = (data.streams || []).find((stream) => stream.codec_type === "video") || {};
-    const audio = (data.streams || []).find((stream) => stream.codec_type === "audio") || {};
-    return {
-      duration: Number(data.format?.duration || 0) || null,
-      videoCodec: video.codec_name || "",
-      audioCodec: audio.codec_name || "",
-      width: video.width || null,
-      height: video.height || null
-    };
-  } catch {
-    return null;
-  }
+function requireLocalAdmin(req, res) {
+  return requireTrustedNetworkPage(req, res, "后台管理只能在本机或局域网同源页面使用");
 }
 
-function videoProbeCached(file) {
-  const stat = safeStat(file.path);
-  const cacheKey = stat ? `${file.id}:${file.path}:${stat.size}:${stat.mtimeMs}` : `${file.id}:${file.path}:missing`;
-  if (videoProbeCache.has(cacheKey)) {
-    const cached = videoProbeCache.get(cacheKey);
-    videoProbeCache.delete(cacheKey);
-    videoProbeCache.set(cacheKey, cached);
-    return cached;
-  }
-
-  const result = stat ? videoProbe(file) : null;
-  videoProbeCache.set(cacheKey, result);
-  if (videoProbeCache.size > VIDEO_PROBE_CACHE_LIMIT) {
-    videoProbeCache.delete(videoProbeCache.keys().next().value);
-  }
-  return result;
-}
-
-function playInfoForFile(file, publicVideoId = file.id) {
-  const probe = videoProbeCached(file) || {};
-  const videoCodec = String(probe.videoCodec || "").toLowerCase();
-  const audioCodec = String(probe.audioCodec || "").toLowerCase();
-  const canDirect = DIRECT_VIDEO_EXTS.has(file.ext) && (!videoCodec || ["h264", "avc1", "hevc", "h265", "vp8", "vp9", "av1"].includes(videoCodec));
-
-  if (canDirect) {
-    return {
-      mode: "direct",
-      label: "直连播放",
-      streamUrl: `/media/video/${encodeURIComponent(publicVideoId)}`,
-      duration: probe.duration || null,
-      videoCodec,
-      audioCodec,
-      hasNvenc: HAS_NVENC
-    };
-  }
-
-  const canRemux = videoCodec === "h264" || videoCodec === "avc1";
-  const mode = canRemux ? "remux" : "transcode";
-  const params = new URLSearchParams({
-    mode,
-    audio: audioCodec === "aac" ? "copy" : "aac"
-  });
-  return {
-    mode,
-    label: mode === "remux" ? "快速重封装" : HAS_NVENC ? "GPU 转码" : "智能转码",
-    streamUrl: `/media/video/${encodeURIComponent(publicVideoId)}/transcode?${params}`,
-    duration: probe.duration || null,
-    videoCodec,
-    audioCodec,
-    hasNvenc: HAS_NVENC
-  };
+function requireTrustedFileMutation(req, res) {
+  return requireTrustedNetworkPage(req, res, "删除本地文件只能在本机或局域网同源页面使用");
 }
 
 async function routeApi(req, res, url) {
-  if (url.pathname === "/api/health" && req.method === "GET") {
-    sendJson(res, 200, {
-      ok: true,
-      scannedAt: library.scannedAt,
-      totals: library.totals,
-      availableRootCount: library.availableRoots.length,
-      missingRootCount: library.missingRoots.length,
-      access: requestAccess(req),
-      lastScanError: lastScanError?.message || null
-    });
-    return true;
-  }
+  if (await statusModule.routeApi(req, res, url)) return true;
 
-  if (url.pathname === "/api/android/update" && req.method === "GET") {
-    sendJson(res, 200, publicAndroidUpdateManifest(req, url));
-    return true;
-  }
+  if (await androidUpdateModule.routeApi(req, res, url)) return true;
 
-  const androidUpdateApkMatch = /^\/api\/android\/update\/apk\/([^/]+)\/([^/]+)$/.exec(url.pathname);
-  if (androidUpdateApkMatch && (req.method === "GET" || req.method === "HEAD")) {
-    serveAndroidUpdateApk(req, res, androidUpdateApkMatch[1], androidUpdateApkMatch[2]);
-    return true;
-  }
+  if (await libraryModule.routeReadApi(req, res, url)) return true;
 
-  if (url.pathname === "/api/library" && req.method === "GET") {
-    const user = userStateSummary();
-    const people = mainLibraryPeople();
-    sendJson(res, 200, {
-      root: library.root,
-      roots: library.roots,
-      availableRoots: library.availableRoots,
-      missingRoots: library.missingRoots,
-      scannedAt: library.scannedAt,
-      totals: {
-        ...library.totals,
-        people: people.length
-      },
-      user,
-      uiConfig: publicAppConfig(),
-      access: requestAccess(req),
-      lastScanError: lastScanError?.message || null,
-      people: people.map(publicPerson)
-    });
-    return true;
-  }
+  if (await catalogModule.routeApi(req, res, url)) return true;
 
-  if (url.pathname === "/api/library/roots" && req.method === "GET") {
-    sendJson(res, 200, {
-      roots: library.roots || [],
-      availableRoots: library.availableRoots || [],
-      defaultRoot: (library.availableRoots || [])[0] || (library.roots || [])[0] || ""
-    });
-    return true;
-  }
+  if (await galleryModule.routeApi(req, res, url)) return true;
 
-  if (url.pathname === "/api/rankings" && req.method === "GET") {
-    sendJson(res, 200, { lists: rankingSummaries() });
-    return true;
-  }
+  if (await shortVideosModule.routeApi(req, res, url)) return true;
 
-  if (url.pathname === "/api/rankings/top" && req.method === "GET") {
-    sendJson(res, 200, rankingWorksPayload(url, "top"));
-    return true;
-  }
+  if (await novelsModule.routeApi(req, res, url)) return true;
 
-  if (await routeGalleryApi(req, res, url, {
-    cleanupImageReaderCache,
-    galleryMediaById,
-    imageLibraryItemsPayload,
-    imageLibraryPayload,
-    imageLibrarySummaryPayload,
-    imageReaderCacheStatus,
-    mangaCacheById,
-    mangaCacheDirs,
-    mangaRootStatus,
-    notFound,
-    photoSetById,
-    publicAppConfig,
-    publicGalleryMediaDetail,
-    publicMangaChapter,
-    publicMangaDetail,
-    publicMangaSummary,
-    publicPhotoSetDetail,
-    requireLocalAdmin,
-    sendJson
-  })) return true;
+  if (await libraryModule.routeMutationApi(req, res, url)) return true;
 
-  if (await routeNovelApi(req, res, url, {
-    notFound,
-    novelStore,
-    novelUploadMaxBodyBytes: NOVEL_UPLOAD_MAX_BODY_BYTES,
-    readJsonBody,
-    sendJson
-  })) return true;
+  if (await toolsModule.routeApi(req, res, url)) return true;
 
-  if (url.pathname === "/api/rescan" && req.method === "POST") {
-    if (!requireLocalAdmin(req, res)) return true;
-    refreshLibrary();
-    sendJson(res, lastScanError ? 500 : 200, {
-      ok: !lastScanError,
-      error: lastScanError?.message || null,
-      scannedAt: library.scannedAt,
-      roots: library.roots,
-      availableRoots: library.availableRoots,
-      missingRoots: library.missingRoots,
-      totals: library.totals,
-      user: userStateSummary()
-    });
-    return true;
-  }
+  if (await adminModule.routeApi(req, res, url)) return true;
 
-  if (await routeToolsApi(req, res, url, {
-    createTxtFormatDownload,
-    readJsonBody,
-    sendJson,
-    serveTxtToolDownload,
-    txtToolMaxBodyBytes: TXT_TOOL_MAX_BODY_BYTES
-  })) return true;
+  if (await localOpenModule.routeApi(req, res, url)) return true;
 
-  if (await routeAdminApi(req, res, url, {
-    actorAvatarCandidatesFromFiletree,
-    actorMovieRows,
-    actorProfileRow,
-    adminScriptById,
-    adminScriptCategories,
-    adminTaskHistoryLimit: ADMIN_TASK_HISTORY_LIMIT,
-    adminTaskSummary,
-    adminTasks,
-    buildAdminScriptCommand,
-    clearSearchSourceCaches,
-    clampInteger,
-    coverGenerationStatus,
-    getAppConfig: () => appConfig,
-    importActorAvatarCandidate,
-    importActorAvatarsFromFiletree,
-    enrichLocalWorksWithActorMovieInfo,
-    invalidateTableStamp,
-    library,
-    normalizeAdminScriptOptions,
-    normalizeAppConfig,
-    personSourceCandidates,
-    publicAdminScript,
-    publicAdminTask,
-    publicAppConfig,
-    publicPerson,
-    pagedWorksPayload,
-    readJsonBody,
-    refreshPersonLibrary,
-    refreshLibrary,
-    requireLocalAdmin,
-    resolveLibraryPersonByPublicId,
-    scriptDefinitions: ADMIN_SCRIPT_DEFINITIONS,
-    sendJson,
-    setActorMovieCache: (value) => {
-      actorMovieCache = value;
-      actorMovieByCodeKeyCache = null;
-      personMergeCache = null;
-    },
-    setAppConfig: (value) => {
-      appConfig = value;
-      saveAppConfig();
-      return appConfig;
-    },
-    setLocalWorkCachesDirty: () => {
-      localWorkCodeKeyCache = null;
-      localWorkByCodeKeyCache = null;
-    },
-    setWorkInfoCache: (value) => {
-      workInfoCache = value;
-    },
-    sortWorkList,
-    startAdminProcessTask,
-    stopAdminTask
-  })) return true;
+  if (await userStateModule.routeApi(req, res, url)) return true;
 
-  if (url.pathname === "/api/open-folder" && req.method === "POST") {
-    const access = requestAccess(req);
-    if (!access.isLocal || !isSameLocalOrigin(req)) {
-      sendJson(res, 403, { error: "只能在本机页面打开本地文件夹" });
-      return true;
-    }
-
-    const body = await readJsonBody(req);
-    const target = resolveLocalFolderTarget(body.sourcePath || body.path);
-    if (target.error) {
-      sendJson(res, 400, { error: target.error });
-      return true;
-    }
-
-    sendJson(res, 200, { ok: true, path: relativeFromRoot(target.folderPath) });
-    scheduleOpenFolder(target.folderPath);
-    return true;
-  }
-
-  if (url.pathname === "/api/open-file" && req.method === "POST") {
-    const access = requestAccess(req);
-    if (!access.isLocal || !isSameLocalOrigin(req)) {
-      sendJson(res, 403, { error: "只能在本机页面打开本地文件" });
-      return true;
-    }
-
-    const body = await readJsonBody(req);
-    const target = resolveLocalFileTarget(body.sourcePath || body.path);
-    if (target.error) {
-      sendJson(res, 400, { error: target.error });
-      return true;
-    }
-
-    sendJson(res, 200, { ok: true, path: relativeFromRoot(target.filePath) });
-    scheduleOpenFile(target.filePath);
-    return true;
-  }
-
-  if (url.pathname === "/api/favorites" && req.method === "GET") {
-    const rawFolderId = url.searchParams.get("folder") || "";
-    const selectedFolderId = rawFolderId ? normalizeFavoriteFolderId(rawFolderId) : "";
-    const works = favoriteWorks(selectedFolderId).map((work) => publicWork(work));
-    sendJson(res, 200, {
-      count: works.length,
-      works,
-      folders: publicFavoriteFolders(),
-      selectedFolderId: selectedFolderId || "all"
-    });
-    return true;
-  }
-
-  if (url.pathname === "/api/favorite-folders" && req.method === "GET") {
-    sendJson(res, 200, { folders: publicFavoriteFolders() });
-    return true;
-  }
-
-  if (url.pathname === "/api/favorite-folders" && req.method === "POST") {
-    const body = await readJsonBody(req);
-    try {
-      const folder = createFavoriteFolder(body.name);
-      saveUserState();
-      sendJson(res, 200, { ok: true, folder: { ...folder, count: favoriteFolderCounts().get(folder.id) || 0 }, folders: publicFavoriteFolders(), user: userStateSummary() });
-    } catch (error) {
-      sendJson(res, error.statusCode || 400, { error: error.message || "创建收藏夹失败" });
-    }
-    return true;
-  }
-
-  if (url.pathname === "/api/history" && req.method === "GET") {
-    const rawDays = String(url.searchParams.get("days") || "").trim().toLowerCase();
-    const days = rawDays && rawDays !== "all" ? clampInteger(rawDays, 0, 1, 3650) : 0;
-    const limit = clampInteger(url.searchParams.get("limit"), 0, 0, MAX_WORK_LIMIT);
-    const entries = historyEntries({ days });
-    const page = limit ? entries.slice(0, limit) : entries;
-    const works = page.map((entry) => publicWork(entry.work));
-    sendJson(res, 200, {
-      count: works.length,
-      total: entries.length,
-      days,
-      recentWatchedDays: RECENT_WATCHED_DAYS,
-      works
-    });
-    return true;
-  }
-
-  if (url.pathname === "/api/works" && req.method === "GET") {
-    const filter = url.searchParams.get("filter") || "all";
-    const sort = url.searchParams.get("sort") || "releaseDesc";
-    const filtered = enrichLocalWorksWithActorMovieIndex(allWorks()).filter((work) => workMatchesFilter(work, filter));
-    const sorted = sortWorkList(filtered, sort);
-    sendJson(res, 200, pagedWorksPayload(sorted, url, { filter, facets: workFacets() }));
-    return true;
-  }
-
-  if (url.pathname === "/api/studios" && req.method === "GET") {
-    try {
-      sendJson(res, 200, studioSummaries(url));
-    } catch (error) {
-      sendJson(res, 500, { error: error.message || "读取厂商失败" });
-    }
-    return true;
-  }
-
-  const studioMatch = /^\/api\/studios\/([^/]+)$/.exec(url.pathname);
-  if (studioMatch && req.method === "GET") {
-    try {
-      const payload = studioDetailPayload(decodeURIComponent(studioMatch[1]), url);
-      if (!payload) {
-        notFound(res);
-        return true;
-      }
-      sendJson(res, 200, payload);
-    } catch (error) {
-      sendJson(res, 500, { error: error.message || "读取厂商详情失败" });
-    }
-    return true;
-  }
-
-  if (url.pathname === "/api/search" && req.method === "GET") {
-    const rawQuery = (url.searchParams.get("q") || "").trim();
-    const query = rawQuery.toLowerCase();
-    const filter = url.searchParams.get("filter") || "all";
-    const sort = url.searchParams.get("sort") || "releaseDesc";
-    const peopleSearch = searchPeople(rawQuery);
-    const exactPersonIds = new Set(peopleSearch.matchedPersonIds || peopleSearch.exact.map((person) => person.id));
-    const localMatches = enrichLocalWorksWithActorMovieIndex(allWorks().filter((work) => {
-      return exactPersonIds.has(work.personId) || matchesWorkSearch(work, query);
-    }));
-    const rankingMissingWorks = rankingMissingSearchWorks();
-    const rankingMissingKeys = new Set(rankingMissingWorks.map((work) => storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title)).filter(Boolean));
-    const rankingMissingMatches = rankingMissingWorks.filter((work) => matchesWorkSearch(work, query));
-    const actorMissingMatches = actorMissingSearchWorks(rankingMissingKeys).filter((work) => matchesWorkSearch(work, query));
-    const matchedWorks = [...localMatches, ...rankingMissingMatches, ...actorMissingMatches];
-    const facets = workFacets(matchedWorks);
-    const works = sortWorkList(matchedWorks.filter((work) => workMatchesFilter(work, filter)), sort);
-    sendJson(res, 200, pagedWorksPayload(works, url, {
-      filter,
-      q: rawQuery,
-      facets,
-      people: peopleSearch.people.map(publicPerson)
-    }));
-    return true;
-  }
-
-  const actorProfileMatch = /^\/api\/actor-profiles\/([^/]+)$/.exec(url.pathname);
-  if (actorProfileMatch && req.method === "GET") {
-    const person = resolveLibraryPersonByPublicId(decodeURIComponent(actorProfileMatch[1]));
-    if (!person) {
-      notFound(res);
-      return true;
-    }
-
-    sendJson(res, 200, { profile: publicActorProfile(actorProfileRow(person.id)) });
-    return true;
-  }
-
-  if (actorProfileMatch && req.method === "PUT") {
-    const person = resolveLibraryPersonByPublicId(decodeURIComponent(actorProfileMatch[1]));
-    if (!person) {
-      notFound(res);
-      return true;
-    }
-
-    const body = await readJsonBody(req);
-    try {
-      const profile = upsertActorProfile(person, body);
-      sendJson(res, 200, { ok: true, profile });
-    } catch (error) {
-      sendJson(res, error.statusCode || 400, { error: error.message || "资料页配置失败" });
-    }
-    return true;
-  }
-
-  const favoriteFolderMatch = /^\/api\/favorites\/([^/]+)\/folder$/.exec(url.pathname);
-  if (favoriteFolderMatch && req.method === "PUT") {
-    const workId = decodeURIComponent(favoriteFolderMatch[1]);
-    if (!library.worksById.has(workId)) {
-      notFound(res);
-      return true;
-    }
-
-    const body = await readJsonBody(req);
-    try {
-      const favorite = moveFavoriteToFolder(workId, body.folderId);
-      saveUserState();
-      sendJson(res, 200, {
-        ok: true,
-        workId,
-        favorite,
-        folders: publicFavoriteFolders(),
-        user: userStateSummary()
-      });
-    } catch (error) {
-      sendJson(res, error.statusCode || 400, { error: error.message || "移动收藏夹失败" });
-    }
-    return true;
-  }
-
-  const favoriteMatch = /^\/api\/favorites\/([^/]+)$/.exec(url.pathname);
-  if (favoriteMatch && req.method === "POST") {
-    const workId = decodeURIComponent(favoriteMatch[1]);
-    if (!library.worksById.has(workId)) {
-      notFound(res);
-      return true;
-    }
-
-    if (userState.favorites[workId]) {
-      delete userState.favorites[workId];
-    } else {
-      const body = await readJsonBody(req);
-      userState.favorites[workId] = {
-        createdAt: new Date().toISOString(),
-        folderId: normalizeFavoriteFolderId(body.folderId)
-      };
-    }
-
-    saveUserState();
-    sendJson(res, 200, {
-      workId,
-      favorite: Boolean(userState.favorites[workId]),
-      favoriteFolder: publicFavoriteForWork(workId),
-      folders: publicFavoriteFolders(),
-      user: userStateSummary()
-    });
-    return true;
-  }
-
-  const progressMatch = /^\/api\/progress\/([^/]+)$/.exec(url.pathname);
-  if (progressMatch && req.method === "POST") {
-    const videoId = decodeURIComponent(progressMatch[1]);
-    const file = library.filesById.get(videoId);
-    if (!file || file.type !== "video") {
-      notFound(res);
-      return true;
-    }
-
-    const body = await readJsonBody(req);
-    const position = Number(body.position || 0);
-    const duration = Number(body.duration || body.total || 0);
-    const bodyWorkId = String(body.workId || "");
-    const workId = bodyWorkId && library.worksById.has(bodyWorkId) ? bodyWorkId : null;
-
-    if (!Number.isFinite(position) || !Number.isFinite(duration) || duration <= 0) {
-      sendJson(res, 400, { error: "播放进度无效" });
-      return true;
-    }
-
-    userState.progress[videoId] = {
-      workId,
-      position: Math.max(0, position),
-      duration,
-      updatedAt: new Date().toISOString()
-    };
-    saveUserState();
-    sendJson(res, 200, { ok: true, progress: getVideoProgress(videoId, library.worksById.get(workId)), user: userStateSummary() });
-    return true;
-  }
-
-  const personCoverMatch = /^\/api\/people\/([^/]+)\/cover$/.exec(url.pathname);
-  if (personCoverMatch && req.method === "PUT") {
-    const personId = decodeURIComponent(personCoverMatch[1]);
-    const body = await readJsonBody(req, Math.ceil(MAX_ACTOR_AVATAR_BYTES * 1.4) + 128 * 1024);
-    try {
-      const result = body.imageBase64 || body.avatarBase64
-        ? setPersonUploadedCover(personId, body)
-        : setPersonManualCover(personId, body.workId || "");
-      sendJson(res, 200, { ok: true, ...result });
-    } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "设置人物封面失败" });
-    }
-    return true;
-  }
-
-  const personMatch = /^\/api\/people\/([^/]+)$/.exec(url.pathname);
-  if (personMatch && req.method === "GET") {
-    const rawPerson = resolveLibraryPersonByPublicId(decodeURIComponent(personMatch[1])) || corePersonFallbackRecord(decodeURIComponent(personMatch[1]));
-    const person = mergedPersonRecord(rawPerson);
-    if (!person) {
-      notFound(res);
-      return true;
-    }
-
-    const filter = url.searchParams.get("filter") || "all";
-    const sort = url.searchParams.get("sort") || "releaseDesc";
-    const actorRows = mergedActorMovieRows(person.id);
-    const rawLocalWorks = person.works
-      .map((workId) => library.worksById.get(workId))
-      .filter(Boolean);
-    const localWorks = enrichLocalWorksWithActorMovieInfo(rawLocalWorks, actorRows);
-    const personLocalCodeKeys = workCodeKeySetForWorks(rawLocalWorks);
-    const coreMissingWorks = coreMissingWorksForPerson(person, personLocalCodeKeys);
-    const coreMissingKeys = new Set(coreMissingWorks.map((work) => storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title)).filter(Boolean));
-    const missingWorks = [
-      ...coreMissingWorks,
-      ...missingActorWorksForPerson(person, actorRows, personLocalCodeKeys).filter((work) => {
-        const key = storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title);
-        return !key || !coreMissingKeys.has(key);
-      })
-    ];
-    const allPersonWorks = [...localWorks, ...missingWorks];
-    const works = sortWorkList(allPersonWorks.filter((work) => workMatchesFilter(work, filter)), sort);
-    sendJson(res, 200, {
-      person: publicPerson(person, {
-        actorMovieCount: actorRows.length,
-        missingLocalWorkCount: missingWorks.length
-      }),
-      ...pagedWorksPayload(works, url, { filter, facets: workFacets(allPersonWorks) })
-    });
-    return true;
-  }
-
-  const personLocalDeleteMatch = /^\/api\/people\/([^/]+)\/local-files\/delete$/.exec(url.pathname);
-  if (personLocalDeleteMatch && req.method === "POST") {
-    if (!requireLocalAdmin(req, res)) return true;
-    try {
-      const result = deletePersonLocalFiles(decodeURIComponent(personLocalDeleteMatch[1]));
-      const rawPerson = resolveLibraryPersonByPublicId(decodeURIComponent(personLocalDeleteMatch[1])) || corePersonFallbackRecord(decodeURIComponent(personLocalDeleteMatch[1]));
-      const person = mergedPersonRecord(rawPerson) || rawPerson;
-      sendJson(res, 200, {
-        ok: result.failedCount === 0,
-        ...result,
-        person: person ? publicPerson(person) : null
-      });
-    } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "批量删除本地作品失败" });
-    }
-    return true;
-  }
-
-  const playInfoMatch = /^\/api\/playinfo\/([^/]+)$/.exec(url.pathname);
-  if (playInfoMatch && req.method === "GET") {
-    const videoId = decodeURIComponent(playInfoMatch[1]);
-    const file = library.filesById.get(videoId);
-    if (!file || file.type !== "video") {
-      notFound(res);
-      return true;
-    }
-
-    sendJson(res, 200, playInfoForFile(file, videoId));
-    return true;
-  }
-
-  const coverGenerateMatch = /^\/api\/works\/([^/]+)\/cover\/generate$/.exec(url.pathname);
-  if (coverGenerateMatch && req.method === "POST") {
-    const work = resolveLibraryWorkByPublicId(decodeURIComponent(coverGenerateMatch[1]));
-    if (!work) {
-      notFound(res);
-      return true;
-    }
-    try {
-      const cover = generateWorkCover(work);
-      sendJson(res, 200, { ok: true, cover, work: publicWork(work, true) });
-    } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "生成封面失败", work: publicWork(work, true) });
-    }
-    return true;
-  }
-
-  const workCoverMatch = /^\/api\/works\/([^/]+)\/cover$/.exec(url.pathname);
-  if (workCoverMatch && req.method === "PUT") {
-    const workId = decodeURIComponent(workCoverMatch[1]);
-    const body = await readJsonBody(req);
-    try {
-      const result = setWorkManualCover(workId, body.imageId || "");
-      sendJson(res, 200, { ok: true, ...result });
-    } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "设置封面失败" });
-    }
-    return true;
-  }
-
-  const workMarkerMatch = /^\/api\/works\/([^/]+)\/local-marker$/.exec(url.pathname);
-  if (workMarkerMatch && req.method === "POST") {
-    if (!requireLocalAdmin(req, res)) return true;
-    const workId = decodeURIComponent(workMarkerMatch[1]);
-    const body = await readJsonBody(req);
-    try {
-      const result = setWorkLocalMarker(workId, body.marker || "A", Boolean(body.enabled));
-      sendJson(res, 200, { ok: true, ...result });
-    } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "更新作品标记失败" });
-    }
-    return true;
-  }
-
-  const workCorrectActorMatch = /^\/api\/works\/([^/]+)\/correct-actor-from-folder$/.exec(url.pathname);
-  if (workCorrectActorMatch && req.method === "POST") {
-    if (!requireLocalAdmin(req, res)) return true;
-    const workId = decodeURIComponent(workCorrectActorMatch[1]);
-    try {
-      const result = correctWorkActorFromLocalFolder(workId);
-      sendJson(res, 200, { ok: true, ...result });
-    } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "订正演员失败" });
-    }
-    return true;
-  }
-
-  const workMoveToPersonMatch = /^\/api\/works\/([^/]+)\/move-to-person$/.exec(url.pathname);
-  if (workMoveToPersonMatch && req.method === "POST") {
-    if (!requireLocalAdmin(req, res)) return true;
-    const workId = decodeURIComponent(workMoveToPersonMatch[1]);
-    try {
-      const body = await readJsonBody(req);
-      const result = moveWorkToPerson(workId, body.personId, {
-        targetDirectory: body.targetDirectory || body.targetPath || "",
-        createPerson: body.createPerson || null
-      });
-      sendJson(res, 200, { ok: true, ...result });
-    } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "迁移作品失败" });
-    }
-    return true;
-  }
-
-  const workLocalDeleteMatch = /^\/api\/works\/([^/]+)\/local-files\/delete$/.exec(url.pathname);
-  if (workLocalDeleteMatch && req.method === "POST") {
-    if (!requireLocalAdmin(req, res)) return true;
-    try {
-      const result = deleteWorkLocalFiles(decodeURIComponent(workLocalDeleteMatch[1]));
-      sendJson(res, 200, { ok: true, ...result });
-    } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "删除本地文件失败" });
-    }
-    return true;
-  }
-
-  const workMatch = /^\/api\/works\/([^/]+)$/.exec(url.pathname);
-  if (workMatch && req.method === "GET") {
-    const work = resolveLibraryWorkByPublicId(decodeURIComponent(workMatch[1]));
-    if (!work) {
-      notFound(res);
-      return true;
-    }
-
-    const person = library.peopleById.get(work.personId);
-    const publicItem = publicWork(work, true);
-    prewarmRemoteImagesForWorks([publicItem], 100);
-    sendJson(res, 200, { work: publicItem, person: person ? publicPerson(person) : null });
-    return true;
-  }
-
-  const infoMatch = /^\/api\/info\/([^/]+)$/.exec(url.pathname);
-  if (infoMatch && req.method === "GET") {
-    const file = library.filesById.get(infoMatch[1]);
-    if (!file || file.type !== "info") {
-      notFound(res);
-      return true;
-    }
-
-    serveInfo(res, file);
-    return true;
-  }
+  if (await videoLibraryModule.routeApi(req, res, url)) return true;
 
   return false;
 }
@@ -11093,147 +7303,13 @@ async function routeMedia(req, res, url) {
     return true;
   }
 
-  const actorAvatarMatch = /^\/media\/actor\/([^/]+)\/avatar$/.exec(url.pathname);
-  if (actorAvatarMatch && req.method === "GET") {
-    serveActorAvatar(res, decodeURIComponent(actorAvatarMatch[1]));
-    return true;
-  }
+  if (await videoLibraryModule.routeMedia(req, res, url)) return true;
 
-  const workCoverMatch = /^\/media\/work\/([^/]+)\/cover$/.exec(url.pathname);
-  if (workCoverMatch && req.method === "GET") {
-    serveWorkCover(res, decodeURIComponent(workCoverMatch[1]));
-    return true;
-  }
+  if (await galleryModule.routeMedia(req, res, url)) return true;
 
-  const photoSetCoverMatch = /^\/media\/gallery-cover\/([^/]+)$/.exec(url.pathname);
-  if (photoSetCoverMatch && req.method === "GET") {
-    servePhotoSetCover(res, decodeURIComponent(photoSetCoverMatch[1]));
-    return true;
-  }
-
-  const tvSeriesCoverMatch = /^\/media\/tv-series-cover\/([^/]+)$/.exec(url.pathname);
-  if (tvSeriesCoverMatch && req.method === "GET") {
-    serveTvSeriesCover(res, decodeURIComponent(tvSeriesCoverMatch[1]));
-    return true;
-  }
-
-  const movieCoverMatch = /^\/media\/movie-cover\/([^/]+)$/.exec(url.pathname);
-  if (movieCoverMatch && req.method === "GET") {
-    serveMovieMetadataCover(res, decodeURIComponent(movieCoverMatch[1]));
-    return true;
-  }
-
-  const galleryMediaCoverMatch = /^\/media\/gallery-media-cover\/([^/]+)$/.exec(url.pathname);
-  if (galleryMediaCoverMatch && req.method === "GET") {
-    serveGalleryMediaCover(res, galleryMediaCoverMatch[1]);
-    return true;
-  }
-
-  const coreImageMatch = /^\/media\/core-image\/([^/]+)$/.exec(url.pathname);
-  if (coreImageMatch && req.method === "GET") {
-    serveCoreImage(res, decodeURIComponent(coreImageMatch[1]));
-    return true;
-  }
-
-  const mangaImageMatch = /^\/media\/manga\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(url.pathname);
-  if (mangaImageMatch && req.method === "GET") {
-    serveMangaImage(res, mangaImageMatch[1], mangaImageMatch[2], mangaImageMatch[3]);
-    return true;
-  }
-
-  const photoSetImageMatch = /^\/media\/gallery\/([^/]+)\/([^/]+)$/.exec(url.pathname);
-  if (photoSetImageMatch && req.method === "GET") {
-    servePhotoSetImage(res, photoSetImageMatch[1], photoSetImageMatch[2]);
-    return true;
-  }
-
-  const galleryVideoMatch = /^\/media\/gallery-video\/([^/]+)$/.exec(url.pathname);
-  if (galleryVideoMatch && req.method === "GET") {
-    serveGalleryVideo(req, res, galleryVideoMatch[1]);
-    return true;
-  }
-
-  const imageMatch = /^\/media\/image\/([^/]+)$/.exec(url.pathname);
-  if (imageMatch && req.method === "GET") {
-    const file = library.filesById.get(imageMatch[1]);
-    if (!file || file.type !== "image") {
-      notFound(res);
-      return true;
-    }
-
-    serveImage(res, file);
-    return true;
-  }
-
-  const transcodeMatch = /^\/media\/video\/([^/]+)\/transcode$/.exec(url.pathname);
-  if (transcodeMatch && req.method === "GET") {
-    const file = resolveVideoFileByPublicId(transcodeMatch[1]);
-    if (!file || file.type !== "video") {
-      notFound(res);
-      return true;
-    }
-
-    serveTranscodedVideo(req, res, file, url);
-    return true;
-  }
-
-  const videoMatch = /^\/media\/video\/([^/]+)$/.exec(url.pathname);
-  if (videoMatch && req.method === "GET") {
-    const file = resolveVideoFileByPublicId(videoMatch[1]);
-    if (!file || file.type !== "video") {
-      notFound(res);
-      return true;
-    }
-
-    serveVideo(req, res, file);
-    return true;
-  }
+  if (await shortVideosModule.routeMedia(req, res, url)) return true;
 
   return false;
-}
-
-async function requestHandler(req, res) {
-  const startedAt = Date.now();
-  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Accept,Range,X-FanHao-Client");
-  res.setHeader("Access-Control-Expose-Headers", "Content-Length,Content-Range,Accept-Ranges");
-
-  if (req.method === "OPTIONS") {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  const authState = requestAuthState(req, url);
-  applyAppCookie(res, authState);
-  attachAccessLogger(req, res, url, authState, startedAt);
-
-  try {
-    if (await routeAuth(req, res, url, authState)) return;
-    if (!authState.allowed) {
-      sendLoginRequired(req, res, url, authState);
-      return;
-    }
-
-    if (await routeApi(req, res, url)) return;
-    if (await routeMedia(req, res, url)) return;
-    if (url.pathname === "/android-update" && req.method === "GET") {
-      sendHtml(res, 200, renderAndroidUpdatePage(req, url));
-      return;
-    }
-
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      sendText(res, 405, "Method not allowed");
-      return;
-    }
-
-    serveStatic(req, res, url.pathname);
-  } catch (error) {
-    console.error("[request]", error);
-    sendJson(res, 500, { error: error.message || "Internal server error" });
-  }
 }
 
 function getLanAddresses() {
@@ -11248,10 +7324,10 @@ function getLanAddresses() {
   return addresses;
 }
 
-loadUserState();
-loadAppConfig();
-cleanupToolDownloadDir();
-startImageReaderCacheCleanupTimer();
+userStateService.load();
+appConfigService.load();
+txtFormatToolService.cleanup();
+imageReaderCacheService.startCleanupTimer();
 const cachedLibrary = loadLibraryCache();
 if (cachedLibrary) {
   library = cachedLibrary;
@@ -11271,6 +7347,21 @@ if (cachedLibrary) {
     refreshLibrary();
   }
 }
+
+const requestHandler = createRequestHandler({
+  applyAppCookie,
+  attachAccessLogger,
+  requestAuthState,
+  routeAuth,
+  sendLoginRequired,
+  routeApi,
+  routeMedia,
+  renderAndroidUpdatePage: androidUpdateService.renderPage,
+  serveStatic,
+  sendHtml,
+  sendJson,
+  sendText
+});
 
 const server = http.createServer(requestHandler);
 server.listen(PORT, HOST, () => {

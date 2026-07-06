@@ -59,3 +59,18 @@ export async function postJson(baseUrl, path, body = {}) {
   if (!response.ok) throw new Error(payload.error || `请求失败：${response.status}`);
   return payload;
 }
+
+export async function putJson(baseUrl, path, body = {}) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "PUT",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-FanHao-Client": "android"
+    },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `请求失败：${response.status}`);
+  return payload;
+}

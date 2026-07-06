@@ -6,7 +6,7 @@ export function absoluteUrl(baseUrl, path) {
 }
 
 export function imageUrlForPerson(person) {
-  return person?.actorProfile?.avatarUrl || (person?.coverId ? `/media/image/${encodeURIComponent(person.coverId)}` : "");
+  return person?.avatarUrl || person?.actorProfile?.avatarUrl || (person?.coverId ? `/media/image/${encodeURIComponent(person.coverId)}` : "");
 }
 
 export function imageUrlForWork(work) {

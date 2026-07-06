@@ -1,140 +1,42 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const DOUBAN_COOKIE_PATH = path.join(process.cwd(), "data", "douban-cookie.txt");
 const JAVDB_115_COOKIE_PROFILE_DIR = path.join(process.env.LOCALAPPDATA || "", "115Chrome", "User Data");
-const DOUBAN_TEST_SUBJECT_URL = "https://movie.douban.com/subject/35321946/";
-const DOUBAN_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
-
-function normalizeDoubanCookieText(value) {
-  return String(value || "")
-    .replace(/^Cookie:\s*/i, "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#"))
-    .join("; ")
-    .trim();
-}
-
-function readDoubanCookieFile() {
-  try {
-    return normalizeDoubanCookieText(fs.readFileSync(DOUBAN_COOKIE_PATH, "utf8"));
-  } catch {
-    return "";
-  }
-}
-
-function doubanCookieStatus(extra = {}) {
-  let stat = null;
-  try {
-    stat = fs.statSync(DOUBAN_COOKIE_PATH);
-  } catch {}
-  const cookie = readDoubanCookieFile();
-  return {
-    exists: Boolean(stat && cookie),
-    filePath: DOUBAN_COOKIE_PATH,
-    bytes: stat?.size || 0,
-    updatedAt: stat?.mtime ? stat.mtime.toISOString() : "",
-    cookieNames: cookie
-      ? cookie
-          .split(";")
-          .map((part) => part.trim().split("=")[0])
-          .filter(Boolean)
-          .slice(0, 12)
-      : [],
-    ...extra
-  };
-}
-
-function isDoubanSecurityHtml(finalUrl, html) {
-  if (/^https:\/\/sec\.douban\.com\//i.test(finalUrl || "")) return true;
-  return /<form[^>]+name=["']sec["']/i.test(html || "") && /sec\.douban\.com|action=["']\/c["']/i.test(html || "");
-}
-
-async function testDoubanCookie(cookie) {
-  if (!cookie) {
-    const error = new Error("还没有保存豆瓣 Cookie");
-    error.statusCode = 400;
-    throw error;
-  }
-  const response = await fetch(DOUBAN_TEST_SUBJECT_URL, {
-    headers: {
-      "User-Agent": DOUBAN_USER_AGENT,
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
-      Referer: "https://www.douban.com/",
-      Cookie: cookie
-    }
-  });
-  const html = await response.text();
-  const finalUrl = response.url || DOUBAN_TEST_SUBJECT_URL;
-  const title = html
-    .match(/<title>([\s\S]*?)<\/title>/i)?.[1]
-    ?.replace(/\s+/g, " ")
-    .trim() || "";
-  const hasSubjectDetail =
-    !isDoubanSecurityHtml(finalUrl, html) &&
-    (html.includes("application/ld+json") || html.includes("v:average") || html.includes("v:summary"));
-  return {
-    ok: response.ok && hasSubjectDetail,
-    status: response.status,
-    finalUrl,
-    title,
-    hasSubjectDetail,
-    error: response.ok && hasSubjectDetail ? "" : "Cookie 不能访问豆瓣详情页，可能已过期或需要重新复制。"
-  };
-}
 
 export async function routeAdminApi(req, res, url, deps) {
   const {
-    actorAvatarCandidatesFromFiletree,
     actorMovieRows,
     actorProfileRow,
-    adminScriptById,
-    adminScriptCategories,
-    adminTaskHistoryLimit,
-    adminTaskSummary,
-    adminTasks,
-    buildAdminScriptCommand,
+    actorAvatarService,
+    adminScriptService,
+    adminTaskService,
+    appConfigService,
     clearSearchSourceCaches,
     clampInteger,
     coverGenerationStatus,
-    getAppConfig,
-    importActorAvatarCandidate,
-    importActorAvatarsFromFiletree,
+    doubanCookieService,
     enrichLocalWorksWithActorMovieInfo,
     invalidateTableStamp,
     library,
-    normalizeAdminScriptOptions,
-    normalizeAppConfig,
-    personSourceCandidates,
-    publicAdminScript,
-    publicAdminTask,
-    publicAppConfig,
+    personLibraryService,
     publicPerson,
     pagedWorksPayload,
     resolveLibraryPersonByPublicId = (personId) => library.peopleById.get(personId),
     readJsonBody,
-    refreshPersonLibrary,
     refreshLibrary,
     requireLocalAdmin,
-    scriptDefinitions,
     sendJson,
     setActorMovieCache,
-    setAppConfig,
     setLocalWorkCachesDirty,
     setWorkInfoCache,
-    sortWorkList,
-    startAdminProcessTask,
-    stopAdminTask
+    sortWorkList
   } = deps;
 
   if (!url.pathname.startsWith("/api/admin/")) return false;
 
   if (url.pathname === "/api/admin/tasks" && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
-    sendJson(res, 200, { tasks: adminTasks.map(publicAdminTask), summary: adminTaskSummary(), historyLimit: adminTaskHistoryLimit });
+    sendJson(res, 200, { tasks: adminTaskService.list().map(adminTaskService.publicTask), summary: adminTaskService.summary(), historyLimit: adminTaskService.historyLimit });
     return true;
   }
 
@@ -142,8 +44,8 @@ export async function routeAdminApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req);
-      const task = stopAdminTask(body.taskId || body.id);
-      sendJson(res, 200, { ok: true, task: publicAdminTask(task) });
+      const task = adminTaskService.stopTask(body.taskId || body.id);
+      sendJson(res, 200, { ok: true, task: adminTaskService.publicTask(task) });
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "停止任务失败" });
     }
@@ -153,8 +55,8 @@ export async function routeAdminApi(req, res, url, deps) {
   if (url.pathname === "/api/admin/scripts" && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
     sendJson(res, 200, {
-      scripts: scriptDefinitions.map(publicAdminScript),
-      categories: adminScriptCategories()
+      scripts: adminScriptService.definitions.map(adminScriptService.publicScript),
+      categories: adminScriptService.categories()
     });
     return true;
   }
@@ -163,22 +65,22 @@ export async function routeAdminApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req);
-      const script = adminScriptById(body.scriptId);
+      const script = adminScriptService.byId(body.scriptId);
       if (!script) {
         sendJson(res, 404, { error: "脚本不存在" });
         return true;
       }
       if (
         script.id === "image-library-rescan" &&
-        adminTasks.some((task) => task.scriptId === script.id && (task.status === "running" || task.status === "stopping"))
+        adminTaskService.hasRunningScript(script.id)
       ) {
         sendJson(res, 409, { error: "图库索引刷新已经在后台运行" });
         return true;
       }
-      const options = normalizeAdminScriptOptions(script, body.options || {});
-      const { command, args } = buildAdminScriptCommand(script, options);
+      const options = adminScriptService.normalizeOptions(script, body.options || {});
+      const { command, args } = adminScriptService.buildCommand(script, options);
       const person = options.personId ? resolveLibraryPersonByPublicId(options.personId) : null;
-      const task = startAdminProcessTask({
+      const task = adminTaskService.startProcessTask({
         type: `script:${script.id}`,
         scriptId: script.id,
         label: script.title,
@@ -188,7 +90,7 @@ export async function routeAdminApi(req, res, url, deps) {
         refreshHints: script.refreshHints || [],
         invalidates: script.invalidates || []
       });
-      sendJson(res, 202, { ok: true, task: publicAdminTask(task), script: publicAdminScript(script) });
+      sendJson(res, 202, { ok: true, task: adminTaskService.publicTask(task), script: adminScriptService.publicScript(script) });
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "启动脚本失败" });
     }
@@ -197,21 +99,21 @@ export async function routeAdminApi(req, res, url, deps) {
 
   if (url.pathname === "/api/admin/config" && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
-    sendJson(res, 200, { config: publicAppConfig() });
+    sendJson(res, 200, { config: appConfigService.publicConfig() });
     return true;
   }
 
   if (url.pathname === "/api/admin/config" && req.method === "PUT") {
     if (!requireLocalAdmin(req, res)) return true;
     const body = await readJsonBody(req);
-    setAppConfig(normalizeAppConfig(body.config || body));
-    sendJson(res, 200, { ok: true, config: publicAppConfig() });
+    appConfigService.set(body.config || body);
+    sendJson(res, 200, { ok: true, config: appConfigService.publicConfig() });
     return true;
   }
 
   if (url.pathname === "/api/admin/douban-cookie" && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
-    sendJson(res, 200, { ok: true, cookie: doubanCookieStatus() });
+    sendJson(res, 200, { ok: true, cookie: doubanCookieService.status() });
     return true;
   }
 
@@ -219,14 +121,7 @@ export async function routeAdminApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req);
-      const cookie = normalizeDoubanCookieText(body.cookie || body.value || "");
-      if (!cookie || cookie.length < 20 || !cookie.includes("=")) {
-        sendJson(res, 400, { error: "Cookie 内容看起来不完整" });
-        return true;
-      }
-      fs.mkdirSync(path.dirname(DOUBAN_COOKIE_PATH), { recursive: true });
-      fs.writeFileSync(DOUBAN_COOKIE_PATH, cookie, "utf8");
-      sendJson(res, 200, { ok: true, cookie: doubanCookieStatus({ saved: true }) });
+      sendJson(res, 200, { ok: true, cookie: doubanCookieService.save(body.cookie || body.value || "") });
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "保存豆瓣 Cookie 失败" });
     }
@@ -236,10 +131,10 @@ export async function routeAdminApi(req, res, url, deps) {
   if (url.pathname === "/api/admin/douban-cookie/test" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      const result = await testDoubanCookie(readDoubanCookieFile());
-      sendJson(res, result.ok ? 200 : 409, { ok: result.ok, cookie: doubanCookieStatus(), test: result });
+      const result = await doubanCookieService.test();
+      sendJson(res, result.ok ? 200 : 409, { ok: result.ok, cookie: doubanCookieService.status(), test: result });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "测试豆瓣 Cookie 失败", cookie: doubanCookieStatus() });
+      sendJson(res, error.statusCode || 500, { error: error.message || "测试豆瓣 Cookie 失败", cookie: doubanCookieService.status() });
     }
     return true;
   }
@@ -247,16 +142,16 @@ export async function routeAdminApi(req, res, url, deps) {
   if (url.pathname === "/api/admin/import-actor-avatars" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     const body = await readJsonBody(req);
-    setAppConfig(normalizeAppConfig({
-      ...getAppConfig(),
-      actorAvatarDataPath: body.rootPath ?? body.actorAvatarDataPath ?? getAppConfig().actorAvatarDataPath
-    }));
+    appConfigService.set({
+      ...appConfigService.current(),
+      actorAvatarDataPath: body.rootPath ?? body.actorAvatarDataPath ?? appConfigService.current().actorAvatarDataPath
+    });
 
     try {
-      const summary = importActorAvatarsFromFiletree(getAppConfig().actorAvatarDataPath, { replace: Boolean(body.replace) });
-      sendJson(res, 200, { ok: true, config: publicAppConfig(), summary });
+      const summary = actorAvatarService.importFromFiletree(appConfigService.current().actorAvatarDataPath, { replace: Boolean(body.replace) });
+      sendJson(res, 200, { ok: true, config: appConfigService.publicConfig(), summary });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "扫描演员头像失败", config: publicAppConfig() });
+      sendJson(res, error.statusCode || 500, { error: error.message || "扫描演员头像失败", config: appConfigService.publicConfig() });
     }
     return true;
   }
@@ -264,18 +159,18 @@ export async function routeAdminApi(req, res, url, deps) {
   if (url.pathname === "/api/admin/actor-avatar-candidates" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     const body = await readJsonBody(req);
-    setAppConfig(normalizeAppConfig({
-      ...getAppConfig(),
-      actorAvatarDataPath: body.rootPath ?? body.actorAvatarDataPath ?? getAppConfig().actorAvatarDataPath
-    }));
+    appConfigService.set({
+      ...appConfigService.current(),
+      actorAvatarDataPath: body.rootPath ?? body.actorAvatarDataPath ?? appConfigService.current().actorAvatarDataPath
+    });
     try {
-      const summary = actorAvatarCandidatesFromFiletree(getAppConfig().actorAvatarDataPath, {
+      const summary = actorAvatarService.candidatesFromFiletree(appConfigService.current().actorAvatarDataPath, {
         personId: resolveLibraryPersonByPublicId(body.personId)?.id || body.personId,
         limit: clampInteger(body.limit, 24, 1, 200)
       });
-      sendJson(res, 200, { ok: true, config: publicAppConfig(), summary });
+      sendJson(res, 200, { ok: true, config: appConfigService.publicConfig(), summary });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "读取演员头像候选失败", config: publicAppConfig() });
+      sendJson(res, error.statusCode || 500, { error: error.message || "读取演员头像候选失败", config: appConfigService.publicConfig() });
     }
     return true;
   }
@@ -283,15 +178,15 @@ export async function routeAdminApi(req, res, url, deps) {
   if (url.pathname === "/api/admin/apply-actor-avatar-candidate" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     const body = await readJsonBody(req);
-    setAppConfig(normalizeAppConfig({
-      ...getAppConfig(),
-      actorAvatarDataPath: body.rootPath ?? body.actorAvatarDataPath ?? getAppConfig().actorAvatarDataPath
-    }));
+    appConfigService.set({
+      ...appConfigService.current(),
+      actorAvatarDataPath: body.rootPath ?? body.actorAvatarDataPath ?? appConfigService.current().actorAvatarDataPath
+    });
     try {
-      const result = importActorAvatarCandidate(getAppConfig().actorAvatarDataPath, resolveLibraryPersonByPublicId(body.personId)?.id || body.personId, body.relPath, { dryRun: Boolean(body.dryRun) });
-      sendJson(res, 200, { ok: true, config: publicAppConfig(), ...result });
+      const result = actorAvatarService.importCandidate(appConfigService.current().actorAvatarDataPath, resolveLibraryPersonByPublicId(body.personId)?.id || body.personId, body.relPath, { dryRun: Boolean(body.dryRun) });
+      sendJson(res, 200, { ok: true, config: appConfigService.publicConfig(), ...result });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "应用演员头像候选失败", config: publicAppConfig() });
+      sendJson(res, error.statusCode || 500, { error: error.message || "应用演员头像候选失败", config: appConfigService.publicConfig() });
     }
     return true;
   }
@@ -309,7 +204,7 @@ export async function routeAdminApi(req, res, url, deps) {
     sendJson(res, 200, {
       ok: true,
       person: publicPerson(person),
-      sourceCandidates: personSourceCandidates(person, { extraSourcePaths })
+      sourceCandidates: personLibraryService.sourceCandidates(person, { extraSourcePaths })
     });
     return true;
   }
@@ -324,7 +219,7 @@ export async function routeAdminApi(req, res, url, deps) {
     }
 
     try {
-      const nextPerson = refreshPersonLibrary(person.id, {
+      const nextPerson = personLibraryService.refreshPerson(person.id, {
         sourcePaths: Array.isArray(body.sourcePaths) ? body.sourcePaths : []
       });
       const actorRows = actorMovieRows(nextPerson.id);
@@ -391,7 +286,7 @@ export async function routeAdminApi(req, res, url, deps) {
         "javdb.com"
       );
     }
-    const task = startAdminProcessTask({
+    const task = adminTaskService.startProcessTask({
       type: "actor-movies",
       label: fullScan ? "全量刷新全部 JavDB 人物" : fullActorScan ? "全量刷新当前 JavDB 人物" : "刷新 JavDB 片单",
       person,
@@ -407,7 +302,7 @@ export async function routeAdminApi(req, res, url, deps) {
         clearSearchSourceCaches();
       }
     });
-    sendJson(res, 202, { ok: true, task: publicAdminTask(task) });
+    sendJson(res, 202, { ok: true, task: adminTaskService.publicTask(task) });
     return true;
   }
 
@@ -427,7 +322,7 @@ export async function routeAdminApi(req, res, url, deps) {
     for (const key of keys.length ? keys : ["y2025"]) {
       args.push("--list", key || "all");
     }
-    const task = startAdminProcessTask({
+    const task = adminTaskService.startProcessTask({
       type: "rankings",
       label: "刷新排行榜缓存",
       person: null,
@@ -440,7 +335,7 @@ export async function routeAdminApi(req, res, url, deps) {
         clearSearchSourceCaches();
       }
     });
-    sendJson(res, 202, { ok: true, task: publicAdminTask(task) });
+    sendJson(res, 202, { ok: true, task: adminTaskService.publicTask(task) });
     return true;
     */
   }
@@ -457,7 +352,7 @@ export async function routeAdminApi(req, res, url, deps) {
     const body = await readJsonBody(req);
     const limit = clampInteger(body.limit, 20, 1, 200);
     const args = [path.join("tools", "generate_missing_covers.mjs"), "--write", "--limit", String(limit)];
-    const task = startAdminProcessTask({
+    const task = adminTaskService.startProcessTask({
       type: "covers",
       label: `批量补封面 ${limit}`,
       person: null,
@@ -470,7 +365,7 @@ export async function routeAdminApi(req, res, url, deps) {
         clearSearchSourceCaches();
       }
     });
-    sendJson(res, 202, { ok: true, task: publicAdminTask(task) });
+    sendJson(res, 202, { ok: true, task: adminTaskService.publicTask(task) });
     return true;
   }
 

@@ -40,10 +40,10 @@ def is_actor_avatar_url(value: str) -> bool:
 
 
 def split_actor_names(value: str) -> tuple[str, list[str]]:
-    parts = [item.strip() for item in re.split(r"[,，、]", value or "") if item.strip()]
+    parts = split_actor_alias_text(value)
     if len(parts) > 1:
         return parts[0], parts[1:]
-    return str(value or "").strip(), []
+    return (parts[0] if parts else str(value or "").strip()), []
 
 
 def unique_actor_names(values: list[str], primary: str = "") -> list[str]:
@@ -53,11 +53,96 @@ def unique_actor_names(values: list[str], primary: str = "") -> list[str]:
     for value in values:
         name = str(value or "").strip()
         key = name.lower()
-        if not key or key == primary_key or key in seen:
+        if not key or key == primary_key or key in seen or looks_like_blocked_actor_text(name):
             continue
         seen.add(key)
         names.append(name)
     return names
+
+
+def looks_like_blocked_actor_text(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    if text in {"sorry", "you have been blocked"} or "you have been blocked" in text:
+        return True
+    if re.search(r"https?://|(?:^|\s)@[\w.]+", text):
+        return True
+    blocked_tokens = [
+        "twitter",
+        "instagram",
+        "facebook",
+        "youtube",
+        "tiktok",
+        "x.com",
+        "收藏",
+        "關注",
+        "关注",
+        "フォロー",
+        "官方",
+        "官網",
+        "官网",
+        "發佈日期",
+        "发布日期",
+        "発売日",
+        "評分",
+        "评分",
+        "熱度",
+        "热度",
+        "部影片",
+    ]
+    return any(token in text for token in blocked_tokens)
+
+
+def strip_actor_alias_metadata(value: str) -> str:
+    text = re.sub(r"https?://\S+", " ", str(value or ""))
+    text = re.split(
+        r"\b(?:Twitter|Instagram|Facebook|YouTube|TikTok)\b|收藏|關注|关注|フォロー|官方|官網|官网|發佈日期|发布日期|発売日|評分|评分|熱度|热度|\d+\s*部影片",
+        text,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    return text.strip()
+
+
+def split_actor_alias_text(value: str) -> list[str]:
+    text = strip_actor_alias_metadata(value)
+    return [item.strip() for item in re.split(r"[,，、]", text) if item.strip()]
+
+
+def actor_text_aliases(soup: BeautifulSoup, primary: str) -> list[str]:
+    containers = [
+        soup.select_one(".actor-section"),
+        soup.select_one(".actor-profile"),
+        soup.select_one("main"),
+    ]
+    primary_key = primary.strip().lower()
+    aliases = []
+    for container in [item for item in containers if item]:
+        lines = [line.strip() for line in container.get_text("\n", strip=True).splitlines() if line.strip()]
+        for index, line in enumerate(lines):
+            if primary_key and line.strip().lower() != primary_key:
+                continue
+            for candidate in lines[index + 1 : index + 5]:
+                if re.search(r"\d+\s*部影片", candidate):
+                    break
+                if not re.search(r"[,，、]", candidate):
+                    continue
+                aliases.extend(split_actor_alias_text(candidate))
+            if aliases:
+                return aliases
+    return aliases
+
+
+def actor_section_meta_aliases(soup: BeautifulSoup) -> list[str]:
+    for tag in soup.select(".section-meta"):
+        text = tag.get_text(" ", strip=True)
+        if not re.search(r"[,，、]", text):
+            continue
+        if re.search(r"\d+\s*部影片|[0-9.]+\s*分|由\d+人|^\d{4}[-/]\d{1,2}[-/]\d{1,2}$", text):
+            continue
+        aliases = split_actor_alias_text(text)
+        if aliases:
+            return aliases
+    return []
 
 
 def resolve_person(library_index: Path, name: str = "", person_id: str = "") -> dict:
@@ -140,9 +225,9 @@ def parse_actor_page(html: str, url: str) -> dict:
     alias_container = soup.select_one(".actor-section-aliases, .actor-aliases, .section-aliases")
     if alias_container:
         alias_text = alias_container.get_text(" ", strip=True)
-        aliases = [item.strip() for item in re.split(r"[,，、]", alias_text) if item.strip()]
+        aliases = split_actor_alias_text(alias_text)
 
-    aliases = unique_actor_names([*title_aliases, *aliases], title)
+    aliases = unique_actor_names([*title_aliases, *aliases, *actor_section_meta_aliases(soup), *actor_text_aliases(soup, title)], title)
 
     movie_count = None
     for selector in [".section-meta", ".actor-section-meta"]:
