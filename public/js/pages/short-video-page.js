@@ -74,6 +74,10 @@ export function createShortVideoPage(deps) {
     setMainHeader("短视频", "抖音点赞本地库");
     setBodyClass();
     renderStats();
+    if (options.deferInitialLoad) {
+      renderView();
+      return;
+    }
     if (!state.shortVideo.data || options.reload) {
       loadVideos({ skipRoute: true }).catch(showError);
     } else {

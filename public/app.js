@@ -6,7 +6,7 @@ import { createNovelPage } from "./js/pages/novel-page.js?v=20260701-gallery-mer
 import { createPeoplePage } from "./js/pages/people-page.js?v=20260706-western-people-01";
 import { createPersonProfile } from "./js/pages/person-profile.js?v=20260706-multi-javdb-actor-01";
 import { createRankingPage } from "./js/pages/ranking-page.js?v=20260704-ranking-controls-01";
-import { createShortVideoPage } from "./js/pages/short-video-page.js?v=20260708-short-video-author-panel-02";
+import { createShortVideoPage } from "./js/pages/short-video-page.js?v=20260708-short-video-route-01";
 import { createToolsPage } from "./js/pages/tools-page.js?v=20260701-gallery-merge-01";
 import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260705-local-marker-a-01";
 import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260707-short-video-sort-01";
@@ -664,7 +664,7 @@ async function applyRoute(route) {
     } else if (next.view === "shortVideos") {
       clearWorkSearch();
       shortVideoPage.applyRouteState(next);
-      setActiveView("shortVideos", { skipRoute: true });
+      setActiveView("shortVideos", { skipRoute: true, deferInitialLoad: Boolean(next.shortVideoId) });
       await shortVideoPage.openRouteTarget(next);
     } else {
       clearWorkSearch();
