@@ -13,7 +13,7 @@ const ffmpegPath = options.ffmpeg || process.env.FFMPEG_PATH || "ffmpeg";
 const write = Boolean(options.write);
 const limit = options.limit === "0" ? 0 : positiveInteger(options.limit) || (write ? 50 : 20);
 const sampleLimit = positiveInteger(options.sample) ?? 10;
-const concurrency = positiveInteger(options.concurrency) || 2;
+const concurrency = positiveInteger(options.concurrency) || positiveInteger(process.env.SHORT_VIDEO_COVER_CONCURRENCY) || 2;
 
 const store = createShortVideoStore({
   dbPath,
@@ -33,7 +33,20 @@ try {
     }
     console.log("\nAdd --write to generate ffmpeg covers. Use --limit 0 to process all missing covers.");
   } else {
-    const result = await store.backfillMissingCoversAsync({ limit, concurrency });
+    let lastProgressAt = 0;
+    const result = await store.backfillMissingCoversAsync({
+      limit,
+      concurrency,
+      onProgress: (progress) => {
+        const now = Date.now();
+        const isDone = progress.processed >= progress.total;
+        if (!isDone && progress.processed % 100 !== 0 && now - lastProgressAt < 30000) return;
+        lastProgressAt = now;
+        console.log(
+          `progress: processed=${progress.processed}/${progress.total} generated=${progress.generated} skipped=${progress.skipped} concurrency=${progress.concurrency}`
+        );
+      }
+    });
     console.log(`short-video-db: ${result.dbPath}`);
     console.log("mode: write");
     console.log(`limit: ${limit === 0 ? "all" : limit}`);
