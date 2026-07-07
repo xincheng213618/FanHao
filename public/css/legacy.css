@@ -9159,14 +9159,15 @@ button.music-track-row {
   bottom: 18px;
   z-index: 20;
   display: grid;
-  grid-template-columns: minmax(220px, 320px) minmax(360px, 1fr) minmax(220px, 300px);
-  gap: 16px;
+  grid-template-columns: minmax(220px, 330px) minmax(360px, 1fr) minmax(190px, 270px);
+  gap: 18px;
   align-items: center;
   width: min(1760px, calc(100vw - 56px));
-  min-height: 72px;
+  min-height: 88px;
   margin: 0;
-  padding: 10px 14px;
-  background: rgba(8, 14, 16, .84);
+  padding: 14px 18px;
+  background: rgba(7, 13, 14, .88);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .38);
   transform: translateX(-50%);
 }
 
@@ -9202,36 +9203,68 @@ button.music-track-row {
   font-size: 12px;
 }
 
-.music-player-controls {
+.music-player-center {
   display: grid;
-  grid-template-columns: 42px 48px 42px minmax(160px, 1fr);
-  gap: 8px;
+  gap: 6px;
+  justify-items: center;
+  min-width: 0;
+}
+
+.music-player-controls {
+  display: flex;
+  gap: 12px;
   align-items: center;
+  justify-content: center;
   min-width: 0;
 }
 
 .music-control-button {
   min-width: 0;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   border: 1px solid rgba(255, 255, 255, .15);
-  border-radius: 6px;
+  border-radius: 999px;
   background: rgba(255, 255, 255, .08);
   color: rgba(237, 244, 240, .78);
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
+  font-size: 17px;
   font-weight: 850;
+  line-height: 1;
+  padding: 0;
+  text-align: center;
 }
 
 .music-control-button.primary {
-  border-color: rgba(62, 218, 147, .52);
-  background: rgba(62, 218, 147, .2);
-  color: #cffff0;
+  width: 46px;
+  height: 46px;
+  border-color: rgba(62, 218, 147, .86);
+  background: #20c276;
+  color: #06201a;
+  font-size: 18px;
+  box-shadow: 0 10px 30px rgba(32, 194, 118, .28);
 }
 
 .music-control-button:hover {
   border-color: rgba(255, 255, 255, .28);
   background: rgba(255, 255, 255, .13);
+}
+
+.music-control-button.primary:hover {
+  border-color: rgba(142, 226, 189, .9);
+  background: #35d486;
+}
+
+.music-control-button.active {
+  border-color: rgba(62, 218, 147, .36);
+  background: rgba(62, 218, 147, .15);
+  color: #8ee2bd;
+}
+
+.music-control-button.heart.active {
+  border-color: rgba(239, 100, 122, .42);
+  background: rgba(239, 100, 122, .16);
+  color: #ffccd3;
 }
 
 .music-control-button:disabled {
@@ -9242,8 +9275,9 @@ button.music-track-row {
 .music-progress {
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr) 42px;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
+  width: min(100%, 560px);
   min-width: 0;
   color: rgba(237, 244, 240, .56);
   font-size: 12px;
@@ -9258,15 +9292,26 @@ button.music-track-row {
 }
 
 .music-player-options {
-  display: grid;
-  grid-template-columns: 58px 68px minmax(74px, 1fr);
+  display: flex;
   gap: 8px;
   align-items: center;
+  justify-content: flex-end;
   min-width: 0;
 }
 
+.music-volume-wrap {
+  display: grid;
+  grid-template-columns: auto minmax(80px, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 118px;
+  color: rgba(237, 244, 240, .52);
+  font-size: 12px;
+  font-weight: 750;
+}
+
 .music-volume {
-  max-width: 120px;
+  max-width: 124px;
 }
 
 @media (max-width: 1180px) {
@@ -9297,7 +9342,6 @@ button.music-track-row {
 
   .music-player-options {
     grid-column: 1 / -1;
-    grid-template-columns: 68px 78px minmax(140px, 220px);
     justify-self: end;
   }
 }
@@ -9357,7 +9401,7 @@ button.music-track-row {
   }
 
   .music-player-controls {
-    grid-template-columns: 42px 48px 42px minmax(0, 1fr);
+    gap: 10px;
   }
 
   .music-player-options {
@@ -9404,7 +9448,7 @@ button.music-track-row {
   }
 
   .music-player-controls {
-    grid-template-columns: 40px 46px 40px;
+    gap: 8px;
   }
 
   .music-progress {
@@ -9412,11 +9456,19 @@ button.music-track-row {
   }
 
   .music-player-options {
-    grid-template-columns: 1fr 1fr;
+    justify-content: stretch;
+  }
+
+  .music-player-options .music-control-button {
+    flex: 0 0 38px;
+  }
+
+  .music-volume-wrap {
+    flex: 1 1 100%;
+    min-width: 0;
   }
 
   .music-volume {
-    grid-column: 1 / -1;
     max-width: none;
   }
 }

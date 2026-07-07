@@ -642,7 +642,7 @@ export function createMusicPage(deps) {
     bar.className = "music-player-bar";
     const identity = document.createElement("div");
     identity.className = "music-player-identity";
-    if (track) identity.append(renderCover(track, "bar"));
+    identity.append(track ? renderCover(track, "bar") : renderCover({ title: "音乐" }, "bar"));
     const text = document.createElement("span");
     const title = document.createElement("strong");
     title.textContent = track?.title || "未播放";
@@ -651,11 +651,23 @@ export function createMusicPage(deps) {
     text.append(title, meta);
     identity.append(text);
 
+    const center = document.createElement("div");
+    center.className = "music-player-center";
     const controls = document.createElement("div");
     controls.className = "music-player-controls";
-    controls.append(controlButton("上一首", () => playAdjacent(-1, { autoplay: true }).catch(showError), !track));
-    controls.append(controlButton(state.music.playing ? "暂停" : "播放", togglePlayback, !track, "primary"));
-    controls.append(controlButton("下一首", () => playAdjacent(1, { autoplay: true }).catch(showError), !track));
+    controls.append(controlButton("⤮", () => {
+      state.music.shuffle = !state.music.shuffle;
+      writeShufflePreference(state.music.shuffle);
+      renderView();
+    }, false, state.music.shuffle ? "active" : "", "随机播放"));
+    controls.append(controlButton("‹", () => playAdjacent(-1, { autoplay: true }).catch(showError), !track, "", "上一首"));
+    controls.append(controlButton(state.music.playing ? "Ⅱ" : "▶", togglePlayback, !track, "primary", state.music.playing ? "暂停" : "播放"));
+    controls.append(controlButton("›", () => playAdjacent(1, { autoplay: true }).catch(showError), !track, "", "下一首"));
+    controls.append(controlButton(repeatIcon(state.music.repeat), () => {
+      state.music.repeat = nextRepeat(state.music.repeat);
+      writeRepeatPreference(state.music.repeat);
+      renderView();
+    }, false, state.music.repeat === "none" ? "" : "active", repeatLabel(state.music.repeat)));
     const progressWrap = document.createElement("label");
     progressWrap.className = "music-progress";
     const current = document.createElement("span");
@@ -673,20 +685,16 @@ export function createMusicPage(deps) {
     const total = document.createElement("span");
     total.textContent = track ? formatClock(track.durationMs || 0) : "0:00";
     progressWrap.append(current, progress, total);
-    controls.append(progressWrap);
+    center.append(controls, progressWrap);
 
     const options = document.createElement("div");
     options.className = "music-player-options";
-    const repeat = controlButton(repeatLabel(state.music.repeat), () => {
-      state.music.repeat = nextRepeat(state.music.repeat);
-      writeRepeatPreference(state.music.repeat);
-      renderView();
-    }, false);
-    const shuffle = controlButton(state.music.shuffle ? "随机开" : "随机关", () => {
-      state.music.shuffle = !state.music.shuffle;
-      writeShufflePreference(state.music.shuffle);
-      renderView();
-    }, false);
+    options.append(controlButton(track?.favorite ? "♥" : "♡", () => toggleFavorite(track.id).catch(showError), !track, track?.favorite ? "active heart" : "", track?.favorite ? "取消收藏" : "收藏"));
+    options.append(controlButton("+", () => addTrackToPlaylist(track.id).catch(showError), !track, "", "加入歌单"));
+    const volumeWrap = document.createElement("label");
+    volumeWrap.className = "music-volume-wrap";
+    const volumeLabel = document.createElement("span");
+    volumeLabel.textContent = "音量";
     const volume = document.createElement("input");
     volume.type = "range";
     volume.min = "0";
@@ -701,18 +709,23 @@ export function createMusicPage(deps) {
       audio.volume = value;
       writeVolumePreference(value);
     });
-    options.append(repeat, shuffle, volume);
-    bar.append(identity, controls, options);
+    volumeWrap.append(volumeLabel, volume);
+    options.append(volumeWrap);
+    bar.append(identity, center, options);
     currentProgressEls = { current, progress, total };
     return bar;
   }
 
-  function controlButton(label, action, disabled = false, kind = "") {
+  function controlButton(label, action, disabled = false, kind = "", ariaLabel = "") {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `music-control-button${kind ? ` ${kind}` : ""}`;
     button.textContent = label;
     button.disabled = disabled;
+    if (ariaLabel) {
+      button.setAttribute("aria-label", ariaLabel);
+      button.title = ariaLabel;
+    }
     button.addEventListener("click", action);
     return button;
   }
@@ -1112,6 +1125,12 @@ function repeatLabel(value) {
   if (value === "one") return "单曲";
   if (value === "none") return "顺序";
   return "循环";
+}
+
+function repeatIcon(value) {
+  if (value === "one") return "1";
+  if (value === "none") return "→";
+  return "↻";
 }
 
 function readVolumePreference() {
