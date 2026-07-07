@@ -1732,9 +1732,25 @@ export function createShortVideoPage(deps) {
     title.className = "short-video-author-title";
     const name = document.createElement("strong");
     name.textContent = author.name || "未知作者";
+    const profileLine = document.createElement("div");
+    profileLine.className = "short-video-author-profile-line";
+    const signature = document.createElement("div");
+    signature.className = "short-video-author-profile-signature";
+    const profileStats = document.createElement("div");
+    profileStats.className = "short-video-author-profile-stats";
     const sub = document.createElement("span");
     sub.textContent = "读取中";
-    title.append(name, sub);
+    title.append(name, profileLine, signature, profileStats, sub);
+    const refreshAuthorHeader = () => {
+      const lineText = authorProfileLineText(author);
+      profileLine.textContent = lineText;
+      profileLine.hidden = !lineText;
+      const signatureText = String(author.signature || "").trim();
+      signature.textContent = signatureText;
+      signature.hidden = !signatureText;
+      renderAuthorProfileStats(profileStats, author);
+    };
+    refreshAuthorHeader();
 
     const actions = document.createElement("div");
     actions.className = "short-video-author-actions";
@@ -1796,13 +1812,20 @@ export function createShortVideoPage(deps) {
     try {
       const params = new URLSearchParams();
       if (author.secUid) params.set("author", author.secUid);
+      params.set("source", "all");
       params.set("sort", "published");
       params.set("limit", "36");
       params.set("facets", "0");
       const data = author.secUid ? await api(`/api/short-videos?${params}`) : { videos: [video], total: 1 };
       authorVideos = data.videos || [];
       authorTotal = Number(data.total || authorVideos.length || 0);
-      sub.textContent = `${formatNumber(authorTotal)} 个本地作品`;
+      const richerAuthor = authorVideos.find((item) => authorHasProfileMeta(item.author))?.author || authorVideos[0]?.author;
+      if (richerAuthor) Object.assign(author, richerAuthor);
+      refreshAuthorHeader();
+      const homeCount = profileNumber(author.awemeCount);
+      sub.textContent = homeCount !== null
+        ? `${formatNumber(authorTotal)} 个本地作品 / 主页 ${formatNumber(homeCount)}`
+        : `${formatNumber(authorTotal)} 个本地作品`;
       renderAuthorTab(activeTab);
     } catch (error) {
       status.textContent = "读取失败";
@@ -1843,6 +1866,7 @@ export function createShortVideoPage(deps) {
     authorLine.className = "short-video-author-detail-owner";
     authorLine.textContent = `@${author.name || "未知作者"} ›`;
     authorLine.addEventListener("click", () => openAuthorDouyinLink(author));
+    const profile = authorProfileBlock(author);
     const title = document.createElement("p");
     appendCaptionText(title, captionTitleWithTags(video));
     const stats = document.createElement("div");
@@ -1874,8 +1898,82 @@ export function createShortVideoPage(deps) {
     home.textContent = "打开抖音主页";
     home.addEventListener("click", () => openAuthorDouyinLink(author));
     actions.append(original, home);
-    detail.append(authorLine, title, stats, actions);
+    detail.append(authorLine);
+    if (profile) detail.append(profile);
+    detail.append(title, stats, actions);
     return detail;
+  }
+
+  function authorProfileLineText(author) {
+    const parts = [];
+    const douyinId = String(author?.shortId || author?.uniqueId || "").trim();
+    if (douyinId) parts.push(`抖音号 ${douyinId}`);
+    const ipLocation = String(author?.ipLocation || "").trim().replace(/^IP属地[:：]?\s*/u, "");
+    if (ipLocation) parts.push(`IP ${ipLocation}`);
+    const age = profileNumber(author?.age);
+    if (age) parts.push(`${age}岁`);
+    const verification = String(author?.verification || "").trim();
+    if (verification) parts.push(verification);
+    return parts.join(" · ");
+  }
+
+  function authorHasProfileMeta(author) {
+    return Boolean(authorProfileLineText(author) || String(author?.signature || "").trim() || profileStatItems(author).length);
+  }
+
+  function profileNumber(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? Math.floor(number) : null;
+  }
+
+  function profileStatItems(author) {
+    return [
+      ["关注", profileNumber(author?.followingCount)],
+      ["粉丝", profileNumber(author?.followerCount)],
+      ["获赞", profileNumber(author?.totalFavorited)],
+      ["作品", profileNumber(author?.awemeCount)]
+    ].filter((item) => item[1] !== null);
+  }
+
+  function renderAuthorProfileStats(target, author) {
+    target.textContent = "";
+    const items = profileStatItems(author);
+    target.hidden = !items.length;
+    for (const [label, value] of items) {
+      const cell = document.createElement("span");
+      const strong = document.createElement("b");
+      strong.textContent = formatCompact(value);
+      const small = document.createElement("small");
+      small.textContent = label;
+      cell.append(strong, small);
+      target.append(cell);
+    }
+  }
+
+  function authorProfileBlock(author) {
+    if (!authorHasProfileMeta(author)) return null;
+    const block = document.createElement("div");
+    block.className = "short-video-author-profile-block";
+    const lineText = authorProfileLineText(author);
+    if (lineText) {
+      const line = document.createElement("div");
+      line.className = "short-video-author-profile-line";
+      line.textContent = lineText;
+      block.append(line);
+    }
+    const signature = String(author?.signature || "").trim();
+    if (signature) {
+      const bio = document.createElement("div");
+      bio.className = "short-video-author-profile-signature";
+      bio.textContent = signature;
+      block.append(bio);
+    }
+    const stats = document.createElement("div");
+    stats.className = "short-video-author-profile-stats";
+    renderAuthorProfileStats(stats, author);
+    if (!stats.hidden) block.append(stats);
+    return block;
   }
 
   function authorComingSoonView(text) {

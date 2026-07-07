@@ -1186,6 +1186,7 @@ function downloadManagerRowToItem(row) {
   const dataPath = firstExistingDownloadManagerPath(localPaths, new Set([".json"]));
   const data = readVideoJson(dataPath) || parseJsonObject(row.metadata_json);
   const rawMetadata = rawAwemeMetadata(data);
+  const rawProfile = parseJsonObject(row.profile_raw_json);
   const video = data?.video || {};
   const statistics = rawMetadata?.statistics || data?.statistics || {};
   const authorData = rawMetadata?.author || data?.author || {};
@@ -1202,20 +1203,34 @@ function downloadManagerRowToItem(row) {
   const musicPath = firstExistingDownloadManagerPath(localPaths, AUDIO_EXTS);
   const durationMs = Number(row.duration_ms || data?.duration || video.duration || 0) || null;
 
-  const authorSecUid = String(row.author_sec_uid || data?.author_sec_uid || authorData.sec_uid || "").trim();
+  const authorSecUid = String(row.author_sec_uid || data?.author_sec_uid || authorData.sec_uid || row.profile_sec_uid || rawProfile.sec_uid || "").trim();
   const authorProfileUrl = normalizedDouyinUserUrl(row.author_url || data?.author_url, authorSecUid);
   return {
     id,
     awemeId,
     author: {
       secUid: authorSecUid,
-      uid: String(row.author_uid || authorData.uid || "").trim(),
-      name: String(row.author_nickname || authorData.nickname || data?.author_name || "").trim() || "未知作者",
-      avatarUrl: firstUrlAny(row.author_avatar_url, data?.author_avatar_url, authorData.avatar_thumb, authorData.avatar_medium, authorData.avatar_larger),
+      uid: String(row.author_uid || authorData.uid || row.profile_uid || rawProfile.uid || "").trim(),
+      name: String(row.author_nickname || authorData.nickname || data?.author_name || row.profile_nickname || rawProfile.nickname || "").trim() || "未知作者",
+      avatarUrl: firstUrlAny(row.author_avatar_url, data?.author_avatar_url, authorData.avatar_thumb, authorData.avatar_medium, authorData.avatar_larger, row.profile_avatar_url, rawProfile.avatar_url),
       profileUrl: authorProfileUrl,
+      uniqueId: String(row.profile_unique_id || authorData.unique_id || authorData.uniqueId || rawProfile.unique_id || "").trim(),
+      shortId: String(row.profile_short_id || authorData.short_id || authorData.shortId || rawProfile.short_id || "").trim(),
+      signature: String(row.profile_signature || authorData.signature || rawProfile.signature || "").trim(),
+      ipLocation: String(row.profile_ip_location || authorData.ip_location || authorData.ipLocation || rawProfile.ip_location || "").trim(),
+      followerCount: optionalInteger(row.profile_follower_count ?? authorData.follower_count ?? authorData.followerCount ?? rawProfile.follower_count),
+      followingCount: optionalInteger(row.profile_following_count ?? authorData.following_count ?? authorData.followingCount ?? rawProfile.following_count),
+      totalFavorited: optionalInteger(row.profile_total_favorited ?? authorData.total_favorited ?? authorData.totalFavorited ?? rawProfile.total_favorited),
+      awemeCount: optionalInteger(row.profile_aweme_count ?? authorData.aweme_count ?? authorData.awemeCount ?? rawProfile.aweme_count),
+      favoritingCount: optionalInteger(row.profile_favoriting_count ?? authorData.favoriting_count ?? authorData.favoritingCount ?? rawProfile.favoriting_count),
+      gender: optionalInteger(row.profile_gender ?? authorData.gender ?? rawProfile.gender),
+      age: optionalInteger(row.profile_age ?? authorData.age ?? rawProfile.age),
+      verification: String(row.profile_verification || authorData.custom_verify || authorData.customVerify || rawProfile.verification || "").trim(),
+      profileCollectedAt: String(row.profile_collected_at || rawProfile.profile_collected_at || "").trim(),
       rawJson: JSON.stringify({
         profileUrl: authorProfileUrl,
         sourceProfileUrl: row.profile_url || "",
+        profile: rawProfile || {},
         metadata: rawMetadata || data || {}
       })
     },
@@ -1359,9 +1374,11 @@ function normalizedUpsertStatements(db, coverCacheDir = "") {
     user: db.prepare(`
       INSERT INTO short_video_users (
         id, platform, sec_uid, uid, nickname, avatar_url, profile_url, signature,
-        follower_count, following_count, raw_json, created_at, updated_at
+        follower_count, following_count, raw_json, unique_id, short_id, ip_location,
+        total_favorited, aweme_count, favoriting_count, gender, age, verification,
+        profile_collected_at, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, '', NULL, NULL, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         platform = COALESCE(NULLIF(excluded.platform, ''), short_video_users.platform),
         sec_uid = COALESCE(NULLIF(excluded.sec_uid, ''), short_video_users.sec_uid),
@@ -1369,10 +1386,23 @@ function normalizedUpsertStatements(db, coverCacheDir = "") {
         nickname = COALESCE(NULLIF(excluded.nickname, ''), short_video_users.nickname),
         avatar_url = COALESCE(NULLIF(excluded.avatar_url, ''), short_video_users.avatar_url),
         profile_url = COALESCE(NULLIF(excluded.profile_url, ''), short_video_users.profile_url),
+        signature = COALESCE(NULLIF(excluded.signature, ''), short_video_users.signature),
+        follower_count = COALESCE(excluded.follower_count, short_video_users.follower_count),
+        following_count = COALESCE(excluded.following_count, short_video_users.following_count),
         raw_json = CASE
           WHEN excluded.raw_json <> '{}' THEN excluded.raw_json
           ELSE short_video_users.raw_json
         END,
+        unique_id = COALESCE(NULLIF(excluded.unique_id, ''), short_video_users.unique_id),
+        short_id = COALESCE(NULLIF(excluded.short_id, ''), short_video_users.short_id),
+        ip_location = COALESCE(NULLIF(excluded.ip_location, ''), short_video_users.ip_location),
+        total_favorited = COALESCE(excluded.total_favorited, short_video_users.total_favorited),
+        aweme_count = COALESCE(excluded.aweme_count, short_video_users.aweme_count),
+        favoriting_count = COALESCE(excluded.favoriting_count, short_video_users.favoriting_count),
+        gender = COALESCE(excluded.gender, short_video_users.gender),
+        age = COALESCE(excluded.age, short_video_users.age),
+        verification = COALESCE(NULLIF(excluded.verification, ''), short_video_users.verification),
+        profile_collected_at = COALESCE(NULLIF(excluded.profile_collected_at, ''), short_video_users.profile_collected_at),
         updated_at = excluded.updated_at
     `),
     videoCore: db.prepare(`
@@ -1460,7 +1490,20 @@ function upsertNormalizedItem(statements, item, now, options = {}) {
     item.author?.name || "未知作者",
     item.author?.avatarUrl || "",
     item.author?.profileUrl || douyinUserUrl(item.author?.secUid),
+    item.author?.signature || "",
+    optionalInteger(item.author?.followerCount),
+    optionalInteger(item.author?.followingCount),
     item.author?.rawJson || "{}",
+    item.author?.uniqueId || "",
+    item.author?.shortId || "",
+    item.author?.ipLocation || "",
+    optionalInteger(item.author?.totalFavorited),
+    optionalInteger(item.author?.awemeCount),
+    optionalInteger(item.author?.favoritingCount),
+    optionalInteger(item.author?.gender),
+    optionalInteger(item.author?.age),
+    item.author?.verification || "",
+    item.author?.profileCollectedAt || "",
     now,
     now
   );
@@ -1564,7 +1607,20 @@ function legacyRowToItem(row) {
       uid: row.author_uid || "",
       name: row.author_name || "未知作者",
       avatarUrl: row.author_avatar_url || "",
-      profileUrl: row.author_profile_url || douyinUserUrl(row.author_sec_uid)
+      profileUrl: row.author_profile_url || douyinUserUrl(row.author_sec_uid),
+      uniqueId: row.author_unique_id || "",
+      shortId: row.author_short_id || "",
+      signature: row.author_signature || "",
+      ipLocation: row.author_ip_location || "",
+      followerCount: optionalInteger(row.author_follower_count),
+      followingCount: optionalInteger(row.author_following_count),
+      totalFavorited: optionalInteger(row.author_total_favorited),
+      awemeCount: optionalInteger(row.author_aweme_count),
+      favoritingCount: optionalInteger(row.author_favoriting_count),
+      gender: optionalInteger(row.author_gender),
+      age: optionalInteger(row.author_age),
+      verification: row.author_verification || "",
+      profileCollectedAt: row.author_profile_collected_at || ""
     },
     sourcePath: row.source_path || "",
     coverPath: row.cover_path || "",
@@ -2095,6 +2151,12 @@ function clampInt(value, fallback, min, max) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(min, Math.min(max, Math.floor(number)));
+}
+
+function optionalInteger(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.floor(number) : null;
 }
 
 function escapeLike(value) {
