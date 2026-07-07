@@ -123,7 +123,7 @@ export function createShortVideosModule({
     if (sourceStateKey === lastSourceStateKey) return;
     syncRunning = true;
     try {
-      const result = store.importDownloadManagerDb(sourceDbPath, { incremental: true, skipSummary: true });
+      const result = store.importDownloadManagerDb(sourceDbPath, { incremental: true, includePosts: true, skipSummary: true });
       lastSourceStateKey = sourceStateKey;
       if (result.imported || result.updated) {
         clearShortVideoListCache();

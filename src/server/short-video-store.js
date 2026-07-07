@@ -850,7 +850,6 @@ function ensureShortVideoColumns(db) {
   `);
   backfillShortVideoShareUrls(db);
   migrateShortVideoCoverSources(db);
-  cleanupPostImportLikeActions(db);
 }
 
 function addColumnIfMissing(db, table, column, definition) {
@@ -897,18 +896,6 @@ function migrateShortVideoCoverSources(db) {
         updated_at = CASE WHEN COALESCE(updated_at, '') = '' THEN ? ELSE updated_at END
     WHERE asset_type = 'cover'
   `).run(now);
-}
-
-function cleanupPostImportLikeActions(db) {
-  db.prepare(`
-    DELETE FROM short_video_user_actions
-    WHERE action_type = 'like'
-      AND video_id IN (
-        SELECT id
-        FROM short_videos
-        WHERE origin = 'douyin_download_manager_post'
-      )
-  `).run();
 }
 
 function recreateShortVideoCatalogView(db) {
@@ -1322,7 +1309,18 @@ function normalizedUpsertStatements(db, coverCacheDir = "") {
     `),
     videoCore: db.prepare(`
       UPDATE short_videos
-      SET owner_user_id = ?, origin = ?, status = ?, visibility = ?, updated_at = ?
+      SET owner_user_id = ?,
+          origin = CASE
+            WHEN origin IN ('douyin_like_import', 'douyin_download_manager_like')
+              AND ? = 'douyin_download_manager_post'
+              THEN origin
+            WHEN ? IN ('douyin_like_import', 'douyin_download_manager_like')
+              THEN ?
+            ELSE ?
+          END,
+          status = ?,
+          visibility = ?,
+          updated_at = ?
       WHERE id = ?
     `),
     stats: db.prepare(`
@@ -1398,7 +1396,8 @@ function upsertNormalizedItem(statements, item, now, options = {}) {
     now,
     now
   );
-  statements.videoCore.run(authorId, shortVideoOrigin(item), "normal", "local_only", now, item.id);
+  const origin = shortVideoOrigin(item);
+  statements.videoCore.run(authorId, origin, origin, origin, origin, "normal", "local_only", now, item.id);
   statements.stats.run(
     item.id,
     Number(item.diggCount || 0),
