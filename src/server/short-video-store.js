@@ -447,7 +447,7 @@ export function createShortVideoStore(options = {}) {
       fs.mkdirSync(coverCacheDir, { recursive: true });
       const coverPath = path.join(coverCacheDir, coverFileName(row));
       if (fs.existsSync(coverPath) && safeStat(coverPath)?.size > 0) return coverPath;
-      tempInput = asciiInputPath(row.source_path, coverCacheDir);
+      tempInput = asciiInputPath(row.source_path, coverCacheDir, row.id || row.aweme_id || "");
       const buffer = extractCoverFrame(tempInput.path, {
         duration: Number(row.duration_ms || 0) > 0 ? Number(row.duration_ms) / 1000 : undefined,
         ffmpegPath,
@@ -471,7 +471,7 @@ export function createShortVideoStore(options = {}) {
       fs.mkdirSync(coverCacheDir, { recursive: true });
       const coverPath = path.join(coverCacheDir, coverFileName(row));
       if (fs.existsSync(coverPath) && safeStat(coverPath)?.size > 0) return coverPath;
-      tempInput = asciiInputPath(row.source_path, coverCacheDir);
+      tempInput = asciiInputPath(row.source_path, coverCacheDir, row.id || row.aweme_id || "");
       const buffer = await extractCoverFrameAsync(tempInput.path, {
         duration: Number(row.duration_ms || 0) > 0 ? Number(row.duration_ms) / 1000 : undefined,
         ffmpegPath,
@@ -2147,10 +2147,10 @@ function coverFileName(row) {
   return `${id}-${hash}.jpg`;
 }
 
-function asciiInputPath(sourcePath, tempDir) {
+function asciiInputPath(sourcePath, tempDir, token = "") {
   if (/^[\x00-\x7F]+$/.test(sourcePath)) return { path: sourcePath, cleanup: null };
   const ext = path.extname(sourcePath) || ".mp4";
-  const tempPath = path.join(tempDir, `_short-video-source-${hashText(sourcePath).slice(0, 16)}${ext}`);
+  const tempPath = path.join(tempDir, `_short-video-source-${hashText(`${sourcePath}:${token}`).slice(0, 16)}${ext}`);
   try {
     fs.rmSync(tempPath, { force: true });
   } catch {}
