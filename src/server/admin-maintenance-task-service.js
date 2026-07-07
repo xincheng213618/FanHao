@@ -106,11 +106,19 @@ export function createAdminMaintenanceTaskService({
   }
 
   function generateMissingShortVideoCoversPayload(body = {}) {
-    const limit = clampInteger(body.limit, 50, 1, 1000);
-    const args = [path.join("tools", "generate_missing_short_video_covers.mjs"), "--write", "--limit", String(limit)];
+    const limit = clampInteger(body.limit, 50, 1, 50000);
+    const concurrency = clampInteger(body.concurrency, 4, 1, 16);
+    const args = [
+      path.join("tools", "generate_missing_short_video_covers.mjs"),
+      "--write",
+      "--limit",
+      String(limit),
+      "--concurrency",
+      String(concurrency)
+    ];
     const task = adminTaskService.startProcessTask({
       type: "short-video-covers",
-      label: `补短视频封面 ${limit}`,
+      label: `补短视频封面 ${limit} x${concurrency}`,
       person: null,
       command: nodeCommand,
       args,
