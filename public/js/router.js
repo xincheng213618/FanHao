@@ -66,6 +66,7 @@ export function routeFromUrl(url = window.location.href) {
       shortVideoId: "",
       shortVideoQuery: "",
       shortVideoAuthor: "all",
+      shortVideoSource: "liked",
       shortVideoSort: "published",
       personId: "",
       q: "",
@@ -113,6 +114,7 @@ export function normalizeRoute(route = {}) {
     shortVideoId: view === "shortVideos" ? String(route.shortVideoId || "").trim() : "",
     shortVideoQuery: view === "shortVideos" ? String(route.shortVideoQuery || route.q || "").trim() : "",
     shortVideoAuthor: view === "shortVideos" ? String(route.shortVideoAuthor || "all").trim() || "all" : "all",
+    shortVideoSource: view === "shortVideos" ? normalizeShortVideoSource(route.shortVideoSource || route.source) : "liked",
     shortVideoSort: view === "shortVideos" ? normalizeShortVideoSort(route.shortVideoSort) : "published",
     personId: view === "people" ? route.personId || "" : "",
     q: view === "search" ? searchQuery : "",
@@ -150,6 +152,7 @@ export function routeUrl(route, options = {}) {
   } else if (next.view === "shortVideos") {
     if (next.shortVideoQuery) params.set("q", next.shortVideoQuery);
     if (next.shortVideoAuthor && next.shortVideoAuthor !== "all") params.set("author", next.shortVideoAuthor);
+    if (next.shortVideoSource && next.shortVideoSource !== "liked") params.set("source", next.shortVideoSource);
     if (next.shortVideoSort && next.shortVideoSort !== "published") params.set("sort", next.shortVideoSort);
   } else if (next.q) {
     params.set("q", next.q);
@@ -232,6 +235,11 @@ function normalizeNovelSort(value) {
 function normalizeShortVideoSort(value) {
   const sort = String(value || "published").trim();
   return ["liked", "published", "likes", "comments", "duration"].includes(sort) ? sort : "published";
+}
+
+function normalizeShortVideoSource(value) {
+  const source = String(value || "liked").trim();
+  return ["liked", "posts", "all", "local"].includes(source) ? source : "liked";
 }
 
 function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
@@ -354,6 +362,7 @@ function shortVideoRouteFromPath(routePath, params = new URLSearchParams()) {
     shortVideoId: decodeRouteSegment(segments[1] || ""),
     shortVideoQuery: params.get("q") || params.get("search") || "",
     shortVideoAuthor: params.get("author") || "all",
+    shortVideoSource: normalizeShortVideoSource(params.get("source") || params.get("origin")),
     shortVideoSort: normalizeShortVideoSort(params.get("sort")),
     personId: "",
     q: "",

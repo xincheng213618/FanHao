@@ -761,6 +761,7 @@ const adminTaskOrchestrationService = createAdminTaskOrchestrationService({
 const adminMaintenanceTaskService = createAdminMaintenanceTaskService({
   actorProfileRow,
   adminTaskService,
+  clearShortVideoListCache: shortVideosModule.clearListCache,
   clearSearchSourceCaches,
   clampInteger,
   coverGenerationStatus: workCoverMutationService.generationStatus,

@@ -363,6 +363,38 @@ body.search-expanded .search-bar {
   color: var(--blue);
 }
 
+.search-bar.short-video-mode {
+  border-color: rgba(254, 44, 85, 0.26);
+  border-radius: 24px;
+  background: var(--field);
+  padding-bottom: 7px;
+}
+
+.search-bar.short-video-mode > span,
+.search-bar.short-video-mode input::placeholder {
+  color: #fe2c55;
+}
+
+.short-video-search-filters {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  padding: 0 7px 0 50px;
+}
+
+.short-video-search-filters select {
+  min-width: 0;
+  height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 850;
+}
+
 .search-history {
   display: flex;
   gap: 7px;

@@ -12,7 +12,7 @@ import { createNovelViews } from "./js/novel-views.js?v=20260702-novel-local-man
 import { createPeopleViews } from "./js/people-views.js";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
-import { createShortVideoViews } from "./js/short-video-views.js?v=20260707-short-video-list-shell-01";
+import { createShortVideoViews } from "./js/short-video-views.js?v=20260708-short-video-direct-search-01";
 import { createToolViews } from "./js/tool-views.js?v=20260702-novel-local-manage-74";
 import { createWorkViews } from "./js/work-views.js?v=20260707-mobile-offline-state-01";
 
@@ -1827,6 +1827,7 @@ function setActiveBottom(name = currentView) {
 function syncSearchSurface() {
   const isSearch = currentView === "search";
   const isChannel = currentView === "channel";
+  const isShortVideoSearch = isShortVideoSearchContext();
   const expanded = isSearch || searchSurfaceExpanded || (isChannel && Boolean(currentViewParams.query));
   if (els.searchHistory) els.searchHistory.hidden = !isSearch;
   if (els.bottomNavBar) els.bottomNavBar.hidden = isSearch;
@@ -1834,10 +1835,22 @@ function syncSearchSurface() {
   if (els.searchForm) els.searchForm.hidden = !expanded;
   els.searchForm.classList.toggle("search-mode", isSearch);
   els.searchForm.classList.toggle("channel-mode", isChannel);
+  els.searchForm.classList.toggle("short-video-mode", isShortVideoSearch);
   document.body.classList.toggle("search-view", isSearch);
   document.body.classList.toggle("search-expanded", expanded);
   const channelLabel = isChannel ? channelViews?.channelLabel(currentViewParams.mode) : "";
-  els.searchInput.placeholder = isChannel ? `搜${channelLabel || "频道"}` : "搜全库：作品/人物/频道";
+  els.searchInput.placeholder = isShortVideoSearch
+    ? "搜短视频标题 / 作者 / 标签"
+    : isChannel ? `搜${channelLabel || "频道"}` : "搜全库：作品/人物/频道";
+  if (isShortVideoSearch) {
+    const searchState = shortVideoViews?.getSearchState?.() || {};
+    if (document.activeElement !== els.searchInput) els.searchInput.value = searchState.query || "";
+    shortVideoViews?.renderSearchFilters?.(els.searchForm, () => {
+      submitShortVideoSearch();
+    });
+    return;
+  }
+  shortVideoViews?.clearSearchFilters?.(els.searchForm);
   if (isChannel) {
     els.searchInput.value = currentViewParams.query || "";
     return;
@@ -1846,6 +1859,10 @@ function syncSearchSurface() {
     els.searchInput.value = "";
     if (document.activeElement === els.searchInput) els.searchInput.blur();
   }
+}
+
+function isShortVideoSearchContext(view = currentView) {
+  return view === "shortVideos" || view === "shortVideoBrowser";
 }
 
 workViews = createWorkViews({
@@ -1960,6 +1977,10 @@ detailViews = createDetailViews({
 });
 
 function runSearch(query) {
+  if (isShortVideoSearchContext()) {
+    submitShortVideoSearch(query);
+    return;
+  }
   if (currentView === "channel") {
     showView("channel", { ...currentViewParams, query: String(query || "").trim() }, { skipHistory: true, replaceHistory: true });
     return;
@@ -1979,6 +2000,11 @@ function focusSearchInput() {
 
 function openSearchSurface() {
   searchSurfaceExpanded = true;
+  if (isShortVideoSearchContext()) {
+    syncSearchSurface();
+    focusSearchInput();
+    return;
+  }
   if (currentView === "channel" || currentView === "search") {
     syncSearchSurface();
     focusSearchInput();
@@ -1993,6 +2019,10 @@ function openSearchSurface() {
 
 function closeSearchSurface() {
   searchSurfaceExpanded = false;
+  if (isShortVideoSearchContext()) {
+    syncSearchSurface();
+    return;
+  }
   if (currentView === "channel") {
     if (String(currentViewParams.query || "").trim()) {
       showView("channel", { ...currentViewParams, query: "" }, { skipHistory: true, replaceHistory: true });
@@ -2012,6 +2042,12 @@ function closeSearchSurface() {
   syncSearchSurface();
 }
 
+function submitShortVideoSearch(query = els.searchInput?.value || "") {
+  searchSurfaceExpanded = false;
+  shortVideoViews?.submitSearch?.(query);
+  syncSearchSurface();
+}
+
 searchHistory = createSearchHistory({
   container: els.searchHistory,
   input: els.searchInput,
@@ -2025,6 +2061,11 @@ window.addEventListener("fanhaoNovelSourceChanged", () => {
   if (isNovelNavigationView()) {
     renderNovelTopSourceTabs();
   }
+});
+
+window.addEventListener("fanhaoOpenShortVideoSearch", () => {
+  if (!isShortVideoSearchContext()) return;
+  openSearchSurface();
 });
 
 window.fanhaoHandleNativeBack = () => {
@@ -2063,6 +2104,10 @@ els.openLibraryButton.addEventListener("click", () => {
 
 els.searchForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (isShortVideoSearchContext()) {
+    submitShortVideoSearch();
+    return;
+  }
   if (currentView === "channel") {
     runSearch(els.searchInput.value);
     return;
@@ -2072,6 +2117,10 @@ els.searchForm.addEventListener("submit", (event) => {
 
 els.searchInput.addEventListener("focus", () => {
   searchSurfaceExpanded = true;
+  if (isShortVideoSearchContext()) {
+    syncSearchSurface();
+    return;
+  }
   if (currentView === "search" || currentView === "channel") {
     syncSearchSurface();
     return;

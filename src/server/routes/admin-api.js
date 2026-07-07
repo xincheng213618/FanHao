@@ -187,5 +187,16 @@ export async function routeAdminApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/admin/generate-missing-short-video-covers" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      sendJson(res, 202, adminMaintenanceTaskService.generateMissingShortVideoCoversPayload(body));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "补短视频封面失败" });
+    }
+    return true;
+  }
+
   return false;
 }

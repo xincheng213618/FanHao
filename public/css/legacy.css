@@ -6856,6 +6856,46 @@ body.short-video-view .work-grid {
   padding: 8px 0 48px;
 }
 
+.short-video-home-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 14px;
+}
+
+.short-video-source-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.short-video-source-tab {
+  height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.short-video-source-tab.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.short-video-home-total {
+  color: var(--muted);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
 .short-video-head,
 .short-video-controls {
   display: flex;
@@ -6934,6 +6974,23 @@ body.short-video-view .work-grid {
   gap: 14px 10px;
 }
 
+.short-video-virtual-grid {
+  position: relative;
+  display: block;
+  min-height: 1px;
+}
+
+.short-video-window {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: grid;
+  gap: 14px 10px;
+  will-change: transform;
+  contain: layout paint style;
+}
+
 .short-video-card {
   display: grid;
   gap: 6px;
@@ -6953,8 +7010,7 @@ body.short-video-view .work-grid {
   padding: 0;
 }
 
-.short-video-thumb img,
-.short-video-thumb-video {
+.short-video-thumb img {
   width: 100%;
   height: 100%;
   display: block;
@@ -6968,10 +7024,6 @@ body.short-video-view .work-grid {
 
 .short-video-cover-image.is-loaded {
   opacity: 1;
-}
-
-.short-video-thumb-video {
-  background: #11131a;
 }
 
 .short-video-like-badge {
@@ -8289,6 +8341,20 @@ body.short-video-view .work-grid {
   .short-video-home {
     width: min(100%, calc(100vw - 8px));
     padding-top: 4px;
+  }
+
+  .short-video-home-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .short-video-source-tabs {
+    width: 100%;
+  }
+
+  .short-video-source-tab {
+    flex: 1 1 0;
+    padding: 0 8px;
   }
 
   .short-video-head {

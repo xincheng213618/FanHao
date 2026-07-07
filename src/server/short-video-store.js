@@ -10,6 +10,8 @@ const AUDIO_EXTS = new Set([".mp3", ".m4a", ".aac", ".wav", ".flac"]);
 const DEFAULT_LIMIT = 72;
 const MAX_LIMIT = 300;
 const DEFAULT_COVER_GENERATE_LIMIT = 0;
+const DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT = 50000;
+const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LOCAL_SHORT_VIDEO_USER_ID = "local:self";
 const LIST_VIDEO_COLUMNS = [
@@ -172,6 +174,7 @@ export function createShortVideoStore(options = {}) {
     }[sort] || "published_at DESC, liked_at DESC";
     const database = databaseOrOpen();
     const total = database.prepare(`SELECT COUNT(*) AS count FROM short_video_catalog ${where}`).get(...filter.args)?.count || 0;
+    const stats = videoStats(database, where, filter.args);
     const rows = database.prepare(`
       SELECT ${LIST_VIDEO_COLUMNS}
       FROM short_video_catalog
@@ -188,7 +191,9 @@ export function createShortVideoStore(options = {}) {
       hasMore: offset + rows.length < Number(total || 0),
       query: filter.q,
       author: filter.author,
+      source: filter.source,
       sort,
+      stats,
       authors: includeFacets ? cachedAuthorFacet(database) : [],
       videos: rows.map(publicVideo)
     };
@@ -198,7 +203,6 @@ export function createShortVideoStore(options = {}) {
     const database = databaseOrOpen();
     const row = database.prepare("SELECT * FROM short_video_catalog WHERE id = ? OR aweme_id = ?").get(id, id);
     if (!row) return null;
-    ensureGeneratedCovers(database, [row], 1);
     const order = adjacentOrder(urlOrOptions);
     const filter = videoFilter(urlOrOptions?.searchParams || new URLSearchParams());
     const prev = adjacentRow(database, row, -1, order, false, filter);
@@ -217,7 +221,6 @@ export function createShortVideoStore(options = {}) {
     const fullCurrent = database.prepare("SELECT * FROM short_video_catalog WHERE id = ?").get(current.id);
     const filter = videoFilter(urlOrOptions?.searchParams || new URLSearchParams());
     const row = adjacentRow(database, fullCurrent, direction, adjacentOrder(urlOrOptions), true, filter);
-    if (row) ensureGeneratedCovers(database, [row], 1);
     return row ? publicVideo(row, { detail: true }) : null;
   }
 
@@ -232,13 +235,79 @@ export function createShortVideoStore(options = {}) {
   function coverFile(id) {
     const database = databaseOrOpen();
     const row = database.prepare("SELECT * FROM short_video_catalog WHERE id = ? OR aweme_id = ?").get(id, id);
-    if (row) ensureGeneratedCovers(database, [row], 1);
     if (!row?.cover_path) return null;
     return safeStoredFile(row.cover_path, "image");
   }
 
+  function coverBackfillStatus(sampleLimit = 8) {
+    const database = databaseOrOpen();
+    const missing = missingCoverCount(database);
+    const sample = missingCoverRows(database, clampInt(sampleLimit, 8, 0, 50)).map((row) => ({
+      id: row.id || "",
+      awemeId: row.aweme_id || "",
+      title: row.title || row.description || row.file_name || "",
+      sourcePath: row.source_path || "",
+      authorName: row.author_name || ""
+    }));
+    return {
+      dbPath,
+      missing,
+      sample
+    };
+  }
+
+  function backfillMissingCovers(options = {}) {
+    const limit = clampInt(options.limit, 50, 0, 50000);
+    const database = databaseOrOpen();
+    const startedAt = new Date().toISOString();
+    const beforeMissing = missingCoverCount(database);
+    const rows = missingCoverRows(database, limit || beforeMissing);
+    const generated = ensureGeneratedCovers(database, rows, rows.length);
+    const afterMissing = missingCoverCount(database);
+    const finishedAt = new Date().toISOString();
+    if (generated > 0) {
+      database.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('cover_backfill_at', ?)").run(finishedAt);
+      catalogCache.key = null;
+      catalogCache.summary = null;
+      catalogCache.authors = null;
+    }
+    return {
+      ok: true,
+      dbPath,
+      startedAt,
+      finishedAt,
+      beforeMissing,
+      selected: rows.length,
+      generated,
+      skipped: Math.max(0, rows.length - generated),
+      afterMissing
+    };
+  }
+
+  function missingCoverCount(database) {
+    return Number(database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM short_video_catalog
+      WHERE COALESCE(TRIM(cover_path), '') = ''
+        AND COALESCE(TRIM(source_path), '') <> ''
+    `).get()?.count || 0);
+  }
+
+  function missingCoverRows(database, limit) {
+    const safeLimit = clampInt(limit, 50, 0, 50000);
+    if (safeLimit <= 0) return [];
+    return database.prepare(`
+      SELECT *
+      FROM short_video_catalog
+      WHERE COALESCE(TRIM(cover_path), '') = ''
+        AND COALESCE(TRIM(source_path), '') <> ''
+      ORDER BY liked_at DESC, published_at DESC, id DESC
+      LIMIT ?
+    `).all(safeLimit);
+  }
+
   function ensureGeneratedCovers(database, rows, maxCount) {
-    if (!maxCount || maxCount <= 0) return;
+    if (!maxCount || maxCount <= 0) return 0;
     let generated = 0;
     for (const row of rows) {
       if (generated >= maxCount) return;
@@ -269,6 +338,7 @@ export function createShortVideoStore(options = {}) {
         mtimeMs: Math.floor(safeStat(coverPath)?.mtimeMs || Date.now())
       }, new Date().toISOString());
     }
+    return generated;
   }
 
   function generateCoverForRow(row) {
@@ -377,8 +447,28 @@ export function createShortVideoStore(options = {}) {
     const includeSummary = !options.skipSummary;
     const profileWhere = includePosts ? "p.tab IN ('like', 'post')" : "p.tab = 'like'";
     const incremental = Boolean(options.incremental);
+    const backfillStatsLimit = incremental
+      ? clampInt(options.backfillStatsLimit, DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT, 0, 100000)
+      : 0;
     const watermarkKey = "download_manager_downloaded_watermark";
+    const statsBackfillWatermarkKey = "download_manager_stats_backfilled_watermark";
     const previousWatermark = incremental ? metaValue(targetDb, watermarkKey) : "";
+    const previousStatsBackfillWatermark = incremental ? metaValue(targetDb, statsBackfillWatermarkKey) : "";
+    const sourceSelect = `
+      SELECT
+        l.*,
+        p.tab AS profile_tab,
+        p.sec_uid AS profile_sec_uid,
+        p.url AS profile_url
+      FROM links l
+      JOIN profiles p ON p.id = l.profile_id
+    `;
+    const sourceHasStatsWhere = `(
+      COALESCE(l.digg_count, 0) > 0 OR
+      COALESCE(l.comment_count, 0) > 0 OR
+      COALESCE(l.collect_count, 0) > 0 OR
+      COALESCE(l.share_count, 0) > 0
+    )`;
     const sourceMaxRow = sourceDb.prepare(`
       SELECT MAX(COALESCE(l.downloaded_at, '')) AS maxDownloadedAt
       FROM links l
@@ -393,17 +483,43 @@ export function createShortVideoStore(options = {}) {
       sourceWhere.push("COALESCE(l.downloaded_at, '') > ?");
       sourceArgs.push(previousWatermark);
     }
-    const sourceRows = sourceDb.prepare(`
-      SELECT
-        l.*,
-        p.tab AS profile_tab,
-        p.sec_uid AS profile_sec_uid,
-        p.url AS profile_url
-      FROM links l
-      JOIN profiles p ON p.id = l.profile_id
+    let sourceRows = sourceDb.prepare(`
+      ${sourceSelect}
       WHERE ${sourceWhere.join(" AND ")}
       ORDER BY COALESCE(l.downloaded_at, ''), l.id ASC
     `).all(...sourceArgs);
+    const incrementalRows = sourceRows.length;
+    let backfillCandidates = 0;
+    let backfillRows = 0;
+
+    const shouldBackfillStats = backfillStatsLimit > 0 && (options.forceStatsBackfill || !previousStatsBackfillWatermark);
+    if (shouldBackfillStats) {
+      const knownAwemeIds = new Set(sourceRows.map((row) => String(row.aweme_id || "").trim()).filter(Boolean));
+      const idsNeedingStats = downloadManagerStatsBackfillIds(targetDb, backfillStatsLimit)
+        .filter((id) => !knownAwemeIds.has(id));
+      backfillCandidates = idsNeedingStats.length;
+      const extraRows = [];
+      for (const chunk of chunkArray(idsNeedingStats, DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE)) {
+        if (!chunk.length) continue;
+        const placeholders = chunk.map(() => "?").join(", ");
+        const rows = sourceDb.prepare(`
+          ${sourceSelect}
+          WHERE ${profileWhere}
+            AND l.status = 'downloaded'
+            AND COALESCE(l.aweme_id, '') IN (${placeholders})
+            AND ${sourceHasStatsWhere}
+          ORDER BY COALESCE(l.downloaded_at, ''), l.id ASC
+        `).all(...chunk);
+        for (const row of rows) {
+          const awemeId = String(row.aweme_id || "").trim();
+          if (!awemeId || knownAwemeIds.has(awemeId)) continue;
+          knownAwemeIds.add(awemeId);
+          extraRows.push(row);
+        }
+      }
+      backfillRows = extraRows.length;
+      if (extraRows.length) sourceRows = sourceRows.concat(extraRows);
+    }
 
     let imported = 0;
     let updated = 0;
@@ -419,6 +535,9 @@ export function createShortVideoStore(options = {}) {
         if (sourceMaxDownloadedAt && sourceMaxDownloadedAt !== previousWatermark) {
           targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(watermarkKey, sourceMaxDownloadedAt);
         }
+        if (shouldBackfillStats && sourceMaxDownloadedAt) {
+          targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(statsBackfillWatermarkKey, sourceMaxDownloadedAt);
+        }
         return {
           ok: true,
           sourceDbPath,
@@ -426,6 +545,10 @@ export function createShortVideoStore(options = {}) {
           incremental,
           sourceWatermark: sourceMaxDownloadedAt,
           scanned: 0,
+          incrementalRows,
+          backfillAttempted: shouldBackfillStats,
+          backfillCandidates,
+          backfillRows,
           imported: 0,
           updated: 0,
           skipped: 0,
@@ -470,7 +593,12 @@ export function createShortVideoStore(options = {}) {
         seenIds.add(item.id);
         const existed = targetDb.prepare("SELECT 1 FROM short_videos WHERE id = ? LIMIT 1").get(item.id);
         upsert.run(...videoRowValues(item, now));
-        upsertNormalizedItem(normalized, item, now, { actionSource: "download_manager" });
+        upsertNormalizedItem(
+          normalized,
+          item,
+          now,
+          item.origin === "douyin_download_manager_like" ? { actionSource: "download_manager" } : {}
+        );
         targetDb.prepare(`
           INSERT OR REPLACE INTO short_video_import_items (
             batch_id, video_id, source_path, data_path, imported_at
@@ -488,6 +616,9 @@ export function createShortVideoStore(options = {}) {
       targetDb.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('download_manager_db_path', ?)").run(sourceDbPath);
       if (sourceMaxDownloadedAt) {
         targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(watermarkKey, sourceMaxDownloadedAt);
+        if (shouldBackfillStats) {
+          targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(statsBackfillWatermarkKey, sourceMaxDownloadedAt);
+        }
       }
       targetDb.exec("COMMIT");
     } catch (error) {
@@ -506,6 +637,10 @@ export function createShortVideoStore(options = {}) {
       incremental,
       sourceWatermark: sourceMaxDownloadedAt,
       scanned: sourceRows.length,
+      incrementalRows,
+      backfillAttempted: shouldBackfillStats,
+      backfillCandidates,
+      backfillRows,
       imported,
       updated,
       skipped,
@@ -524,7 +659,9 @@ export function createShortVideoStore(options = {}) {
 
   return {
     adjacentVideo,
+    backfillMissingCovers,
     close,
+    coverBackfillStatus,
     coverFile,
     dbPath,
     facets,
@@ -713,6 +850,7 @@ function ensureShortVideoColumns(db) {
   `);
   backfillShortVideoShareUrls(db);
   migrateShortVideoCoverSources(db);
+  cleanupPostImportLikeActions(db);
 }
 
 function addColumnIfMissing(db, table, column, definition) {
@@ -759,6 +897,18 @@ function migrateShortVideoCoverSources(db) {
         updated_at = CASE WHEN COALESCE(updated_at, '') = '' THEN ? ELSE updated_at END
     WHERE asset_type = 'cover'
   `).run(now);
+}
+
+function cleanupPostImportLikeActions(db) {
+  db.prepare(`
+    DELETE FROM short_video_user_actions
+    WHERE action_type = 'like'
+      AND video_id IN (
+        SELECT id
+        FROM short_videos
+        WHERE origin = 'douyin_download_manager_post'
+      )
+  `).run();
 }
 
 function recreateShortVideoCatalogView(db) {
@@ -1462,6 +1612,58 @@ function authorFacet(db) {
   `).all().map((row) => ({ secUid: row.secUid || "", name: row.name || "未知作者", count: Number(row.count || 0) }));
 }
 
+function videoStats(db, where = "", args = []) {
+  const row = db.prepare(`
+    SELECT
+      COALESCE(SUM(digg_count), 0) AS likes,
+      COALESCE(SUM(comment_count), 0) AS comments,
+      COALESCE(SUM(collect_count), 0) AS collects,
+      COALESCE(SUM(share_count), 0) AS shares,
+      COALESCE(SUM(play_count), 0) AS plays,
+      COALESCE(SUM(size_bytes), 0) AS bytes,
+      COALESCE(SUM(duration_ms), 0) AS durationMs
+    FROM short_video_catalog
+    ${where}
+  `).get(...args);
+  return {
+    likes: Number(row?.likes || 0),
+    comments: Number(row?.comments || 0),
+    collects: Number(row?.collects || 0),
+    shares: Number(row?.shares || 0),
+    plays: Number(row?.plays || 0),
+    bytes: Number(row?.bytes || 0),
+    durationMs: Number(row?.durationMs || 0)
+  };
+}
+
+function downloadManagerStatsBackfillIds(db, limit) {
+  const safeLimit = clampInt(limit, DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT, 0, 100000);
+  if (!safeLimit) return [];
+  return db.prepare(`
+    SELECT COALESCE(NULLIF(aweme_id, ''), id) AS aweme_id
+    FROM short_video_catalog
+    WHERE COALESCE(NULLIF(aweme_id, ''), id) GLOB '[0-9]*'
+      AND (
+        COALESCE(digg_count, 0) = 0 AND
+        COALESCE(comment_count, 0) = 0 AND
+        COALESCE(collect_count, 0) = 0 AND
+        COALESCE(share_count, 0) = 0
+      )
+    ORDER BY published_at DESC, liked_at DESC, id DESC
+    LIMIT ?
+  `).all(safeLimit)
+    .map((row) => String(row.aweme_id || "").trim())
+    .filter(Boolean);
+}
+
+function chunkArray(values, size) {
+  const result = [];
+  for (let index = 0; index < values.length; index += size) {
+    result.push(values.slice(index, index + size));
+  }
+  return result;
+}
+
 function parseAuthorFolder(root, filePath) {
   const relative = path.relative(root, filePath);
   const first = relative.split(/[\\/]/)[0] || "";
@@ -1753,6 +1955,7 @@ function normalizeSort(value) {
 function videoFilter(params = new URLSearchParams()) {
   const q = String(params.get("q") || params.get("search") || "").trim();
   const author = String(params.get("author") || "").trim();
+  const source = normalizeSourceFilter(params.get("source") || params.get("origin"));
   const whereParts = [];
   const args = [];
   if (q) {
@@ -1770,7 +1973,19 @@ function videoFilter(params = new URLSearchParams()) {
     whereParts.push("author_sec_uid = ?");
     args.push(author);
   }
-  return { q, author, where: whereParts.join(" AND "), args };
+  if (source === "liked") {
+    whereParts.push("origin IN ('douyin_like_import', 'douyin_download_manager_like')");
+  } else if (source === "posts") {
+    whereParts.push("origin = 'douyin_download_manager_post'");
+  } else if (source === "local") {
+    whereParts.push("origin NOT IN ('douyin_like_import', 'douyin_download_manager_like', 'douyin_download_manager_post')");
+  }
+  return { q, author, source, where: whereParts.join(" AND "), args };
+}
+
+function normalizeSourceFilter(value) {
+  const source = String(value || "liked").trim().toLowerCase();
+  return ["liked", "posts", "all", "local"].includes(source) ? source : "liked";
 }
 
 function adjacentOrder(urlOrOptions = {}) {

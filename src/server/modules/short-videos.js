@@ -115,26 +115,36 @@ export function createShortVideosModule({
   }
 
   let syncRunning = false;
-  let lastSourceMtimeMs = 0;
+  let lastSourceStateKey = "";
   function syncDownloadManagerDb(sourceDbPath) {
     if (syncRunning) return;
-    const stat = safeStat(sourceDbPath);
-    if (!stat?.isFile()) return;
-    const sourceMtimeMs = Math.floor(stat.mtimeMs || 0);
-    if (sourceMtimeMs && sourceMtimeMs === lastSourceMtimeMs) return;
+    const sourceStateKey = sourceDbStateKey(sourceDbPath);
+    if (!sourceStateKey) return;
+    if (sourceStateKey === lastSourceStateKey) return;
     syncRunning = true;
     try {
       const result = store.importDownloadManagerDb(sourceDbPath, { incremental: true, skipSummary: true });
-      lastSourceMtimeMs = sourceMtimeMs;
+      lastSourceStateKey = sourceStateKey;
       if (result.imported || result.updated) {
         clearShortVideoListCache();
-        console.log(`[short-video-sync] imported=${result.imported} updated=${result.updated} total=${result.summary?.totals?.videos ?? ""}`);
+        console.log(`[short-video-sync] imported=${result.imported} updated=${result.updated} backfill=${result.backfillRows || 0} total=${result.summary?.totals?.videos ?? ""}`);
       }
     } catch (error) {
       console.warn("[short-video-sync]", error.message || error);
     } finally {
       syncRunning = false;
     }
+  }
+
+  function sourceDbStateKey(sourceDbPath) {
+    const files = [sourceDbPath, `${sourceDbPath}-wal`, `${sourceDbPath}-shm`];
+    const parts = [];
+    for (const filePath of files) {
+      const stat = safeStat(filePath);
+      if (!stat?.isFile()) continue;
+      parts.push(`${path.basename(filePath)}:${stat.size}:${Math.floor(stat.mtimeMs || 0)}`);
+    }
+    return parts.length ? parts.join("|") : "";
   }
 
   function clearShortVideoListCache() {
@@ -222,6 +232,7 @@ export function createShortVideosModule({
   }
 
   return {
+    clearListCache: clearShortVideoListCache,
     routeApi,
     routeMedia,
     store

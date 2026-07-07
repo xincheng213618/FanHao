@@ -10,6 +10,7 @@ function httpError(message, statusCode) {
 export function createAdminMaintenanceTaskService({
   actorProfileRow,
   adminTaskService,
+  clearShortVideoListCache,
   clearSearchSourceCaches,
   clampInteger,
   coverGenerationStatus,
@@ -104,6 +105,24 @@ export function createAdminMaintenanceTaskService({
     return { ok: true, task: adminTaskService.publicTask(task) };
   }
 
+  function generateMissingShortVideoCoversPayload(body = {}) {
+    const limit = clampInteger(body.limit, 50, 1, 1000);
+    const args = [path.join("tools", "generate_missing_short_video_covers.mjs"), "--write", "--limit", String(limit)];
+    const task = adminTaskService.startProcessTask({
+      type: "short-video-covers",
+      label: `补短视频封面 ${limit}`,
+      person: null,
+      command: nodeCommand,
+      args,
+      refreshHints: ["short-videos", "current-view"],
+      onDone: () => {
+        clearShortVideoListCache?.();
+      }
+    });
+
+    return { ok: true, task: adminTaskService.publicTask(task) };
+  }
+
   function coverCacheStatusPayload(limitValue) {
     const sampleLimit = clampInteger(limitValue, 8, 0, 50);
     return coverGenerationStatus(sampleLimit);
@@ -112,6 +131,7 @@ export function createAdminMaintenanceTaskService({
   return {
     coverCacheStatusPayload,
     generateMissingCoversPayload,
+    generateMissingShortVideoCoversPayload,
     refreshActorMoviesPayload
   };
 }
