@@ -29,6 +29,19 @@ const LIST_VIDEO_COLUMNS = [
   "author_name",
   "author_avatar_url",
   "author_profile_url",
+  "author_unique_id",
+  "author_short_id",
+  "author_signature",
+  "author_ip_location",
+  "author_follower_count",
+  "author_following_count",
+  "author_total_favorited",
+  "author_aweme_count",
+  "author_favoriting_count",
+  "author_gender",
+  "author_age",
+  "author_verification",
+  "author_profile_collected_at",
   "published_at",
   "liked_at",
   "duration_ms",
@@ -443,6 +456,10 @@ export function createShortVideoStore(options = {}) {
     const upsert = shortVideoUpsertStatement(targetDb);
     const normalized = normalizedUpsertStatements(targetDb, coverCacheDir);
     const batchId = `download-manager:${hashText(`${sourceDbPath}:${now}`).slice(0, 24)}`;
+    const profileColumns = new Set(sourceDb.prepare("PRAGMA table_info(profiles)").all().map((row) => row.name));
+    const profileColumn = (column, alias = `profile_${column}`) => (
+      profileColumns.has(column) ? `p.${column} AS ${alias}` : `NULL AS ${alias}`
+    );
     const includePosts = Boolean(options.includePosts);
     const includeSummary = !options.skipSummary;
     const profileWhere = includePosts ? "p.tab IN ('like', 'post')" : "p.tab = 'like'";
@@ -459,7 +476,24 @@ export function createShortVideoStore(options = {}) {
         l.*,
         p.tab AS profile_tab,
         p.sec_uid AS profile_sec_uid,
-        p.url AS profile_url
+        p.url AS profile_url,
+        ${profileColumn("uid")},
+        ${profileColumn("nickname")},
+        ${profileColumn("avatar_url")},
+        ${profileColumn("unique_id")},
+        ${profileColumn("short_id")},
+        ${profileColumn("signature")},
+        ${profileColumn("ip_location")},
+        ${profileColumn("following_count")},
+        ${profileColumn("follower_count")},
+        ${profileColumn("total_favorited")},
+        ${profileColumn("aweme_count")},
+        ${profileColumn("favoriting_count")},
+        ${profileColumn("gender")},
+        ${profileColumn("age")},
+        ${profileColumn("verification")},
+        ${profileColumn("profile_collected_at")},
+        ${profileColumn("profile_raw_json")}
       FROM links l
       JOIN profiles p ON p.id = l.profile_id
     `;
@@ -731,9 +765,19 @@ function ensureSchema(db, coverCacheDir = "") {
       nickname TEXT NOT NULL DEFAULT '未知作者',
       avatar_url TEXT NOT NULL DEFAULT '',
       profile_url TEXT NOT NULL DEFAULT '',
+      unique_id TEXT NOT NULL DEFAULT '',
+      short_id TEXT NOT NULL DEFAULT '',
       signature TEXT NOT NULL DEFAULT '',
+      ip_location TEXT NOT NULL DEFAULT '',
       follower_count INTEGER,
       following_count INTEGER,
+      total_favorited INTEGER,
+      aweme_count INTEGER,
+      favoriting_count INTEGER,
+      gender INTEGER,
+      age INTEGER,
+      verification TEXT NOT NULL DEFAULT '',
+      profile_collected_at TEXT NOT NULL DEFAULT '',
       raw_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT ''
@@ -844,9 +888,20 @@ function ensureShortVideoColumns(db) {
   addColumnIfMissing(db, "short_videos", "metadata_json", "TEXT NOT NULL DEFAULT '{}'");
   addColumnIfMissing(db, "short_videos", "cover_source", "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing(db, "short_video_users", "profile_url", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, "short_video_users", "unique_id", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, "short_video_users", "short_id", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, "short_video_users", "ip_location", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, "short_video_users", "total_favorited", "INTEGER");
+  addColumnIfMissing(db, "short_video_users", "aweme_count", "INTEGER");
+  addColumnIfMissing(db, "short_video_users", "favoriting_count", "INTEGER");
+  addColumnIfMissing(db, "short_video_users", "gender", "INTEGER");
+  addColumnIfMissing(db, "short_video_users", "age", "INTEGER");
+  addColumnIfMissing(db, "short_video_users", "verification", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, "short_video_users", "profile_collected_at", "TEXT NOT NULL DEFAULT ''");
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_short_videos_owner ON short_videos(owner_user_id);
     CREATE INDEX IF NOT EXISTS idx_short_videos_origin ON short_videos(origin);
+    CREATE INDEX IF NOT EXISTS idx_short_video_users_unique_id ON short_video_users(unique_id);
   `);
   backfillShortVideoShareUrls(db);
   migrateShortVideoCoverSources(db);
@@ -914,6 +969,19 @@ function recreateShortVideoCatalogView(db) {
       COALESCE(NULLIF(u.nickname, ''), v.author_name, '未知作者') AS author_name,
       COALESCE(NULLIF(u.avatar_url, ''), v.author_avatar_url) AS author_avatar_url,
       COALESCE(NULLIF(u.profile_url, ''), CASE WHEN COALESCE(NULLIF(u.sec_uid, ''), v.author_sec_uid) <> '' THEN 'https://www.douyin.com/user/' || COALESCE(NULLIF(u.sec_uid, ''), v.author_sec_uid) ELSE '' END) AS author_profile_url,
+      COALESCE(NULLIF(u.unique_id, ''), '') AS author_unique_id,
+      COALESCE(NULLIF(u.short_id, ''), '') AS author_short_id,
+      COALESCE(NULLIF(u.signature, ''), '') AS author_signature,
+      COALESCE(NULLIF(u.ip_location, ''), '') AS author_ip_location,
+      u.follower_count AS author_follower_count,
+      u.following_count AS author_following_count,
+      u.total_favorited AS author_total_favorited,
+      u.aweme_count AS author_aweme_count,
+      u.favoriting_count AS author_favoriting_count,
+      u.gender AS author_gender,
+      u.age AS author_age,
+      COALESCE(NULLIF(u.verification, ''), '') AS author_verification,
+      COALESCE(NULLIF(u.profile_collected_at, ''), '') AS author_profile_collected_at,
       v.title,
       v.description,
       v.tags_json,
