@@ -266,8 +266,9 @@ export function createMusicPage(deps) {
     const scan = document.createElement("button");
     scan.type = "button";
     scan.className = "music-primary-button";
-    scan.textContent = "刷新音乐库";
-    scan.addEventListener("click", () => openAdminScript("music-library-rescan"));
+    scan.textContent = state.music.rescanning ? "刷新中" : "刷新音乐库";
+    scan.disabled = Boolean(state.music.rescanning);
+    scan.addEventListener("click", () => startMusicRescan().catch(showError));
     const play = document.createElement("button");
     play.type = "button";
     play.className = "music-secondary-button";
@@ -682,6 +683,37 @@ export function createMusicPage(deps) {
       state.music.data.tracks = state.music.data.tracks.map((track) => (track.id === updated.id ? { ...track, ...updated } : track));
     }
     renderView();
+  }
+
+  async function startMusicRescan() {
+    ensureState();
+    const rootText = (state.music.summary?.roots || state.music.data?.summary?.roots || [])
+      .map((root) => root.path)
+      .filter(Boolean)
+      .join("\n") || "E:\\音乐 MV\\音乐（无损）";
+    state.music.rescanning = true;
+    state.music.status = "正在启动音乐库刷新";
+    renderView();
+    try {
+      await api("/api/admin/scripts/run", {
+        method: "POST",
+        body: {
+          scriptId: "music-library-rescan",
+          options: {
+            roots: rootText,
+            limit: 0,
+            dryRun: false
+          }
+        }
+      });
+      state.music.status = "音乐库刷新已启动，后台作业完成后会自动更新。";
+      openAdminScript("music-library-rescan");
+    } catch (error) {
+      state.music.status = error?.message || "音乐库刷新启动失败";
+    } finally {
+      state.music.rescanning = false;
+      renderView();
+    }
   }
 
   function reportPlayedOnce() {

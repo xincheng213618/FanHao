@@ -11,6 +11,7 @@ export function createAdminModal(deps) {
     loadHistory,
     loadImageLibrary,
     loadLibrary,
+    loadMusic,
     loadNovels,
     loadRankings,
     normalizeUiConfig,
@@ -743,6 +744,14 @@ async function applyAdminTaskRefreshHints(task) {
       state.novel.status = "小说书库已刷新";
     }
     if (state.activeView === "novels" && loadNovels) await loadNovels({ reload: true });
+  }
+  if (hints.has("music")) {
+    if (state.music) {
+      state.music.data = null;
+      state.music.summary = null;
+      state.music.status = "音乐库已刷新";
+    }
+    if (state.activeView === "music" && loadMusic) await loadMusic({ reload: true, keepCurrent: true });
   }
   if (hints.has("rankings")) {
     state.rankingLists = [];

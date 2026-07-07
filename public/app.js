@@ -1,8 +1,8 @@
 import { createApiClient, addQueryParam } from "./js/api.js?v=20260701-gallery-merge-01";
-import { createAdminModal } from "./js/pages/admin-modal.js?v=20260701-gallery-merge-01";
+import { createAdminModal } from "./js/pages/admin-modal.js?v=20260708-music-refresh-01";
 import { createGalleryPage } from "./js/pages/gallery-page.js?v=20260701-gallery-merge-01";
 import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260706-media-player-02";
-import { createMusicPage } from "./js/pages/music-page.js?v=20260708-music-module-01";
+import { createMusicPage } from "./js/pages/music-page.js?v=20260708-music-refresh-01";
 import { createNovelPage } from "./js/pages/novel-page.js?v=20260701-gallery-merge-01";
 import { createPeoplePage } from "./js/pages/people-page.js?v=20260706-western-people-01";
 import { createPersonProfile } from "./js/pages/person-profile.js?v=20260706-multi-javdb-actor-01";
@@ -313,6 +313,7 @@ const personProfilePage = createPersonProfile({
   workCoverUrl
 });
 let novelPage = null;
+let musicPage = null;
 const adminModal = createAdminModal({
   api,
   displayPersonName,
@@ -325,6 +326,7 @@ const adminModal = createAdminModal({
   loadHistory,
   loadImageLibrary,
   loadLibrary,
+  loadMusic: (options = {}) => musicPage?.loadMusic?.(options),
   loadNovels: (options = {}) => novelPage?.loadNovels?.(options),
   loadRankings,
   normalizeUiConfig,
@@ -386,7 +388,7 @@ const shortVideoPage = createShortVideoPage({
   state,
   syncRouteAfterNavigation
 });
-const musicPage = createMusicPage({
+musicPage = createMusicPage({
   api,
   cancelScheduledWorkRendering,
   disconnectPeopleIndexAutoload,

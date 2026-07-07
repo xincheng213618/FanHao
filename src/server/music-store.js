@@ -10,6 +10,7 @@ const DEFAULT_LIMIT = 600;
 const MAX_LIMIT = 2000;
 const MAX_LYRIC_BYTES = 1024 * 1024;
 const MAX_INTRO_BYTES = 512 * 1024;
+const KUWO_UTF16LE_PREFIX = Buffer.from([0x77, 0x91, 0x11, 0x62, 0xf3, 0x97, 0x50, 0x4e]);
 
 export function createMusicStore(options = {}) {
   const dbPath = options.dbPath;
@@ -1056,13 +1057,21 @@ function readSmallText(filePath, maxBytes) {
 }
 
 function decodeTextBuffer(buffer) {
+  const source = Buffer.from(buffer);
+  const hasKuwoPrefix = source.subarray(0, KUWO_UTF16LE_PREFIX.length).equals(KUWO_UTF16LE_PREFIX);
+  const textBuffer = hasKuwoPrefix ? source.subarray(KUWO_UTF16LE_PREFIX.length) : source;
   for (const encoding of ["utf-8", "gb18030", "gbk", "big5"]) {
     try {
-      const text = new TextDecoder(encoding, { fatal: encoding === "utf-8" }).decode(buffer);
-      if (!text.includes("\uFFFD") || encoding !== "utf-8") return text;
+      const text = new TextDecoder(encoding, { fatal: encoding === "utf-8" }).decode(textBuffer);
+      if (!text.includes("\uFFFD") || encoding !== "utf-8") return cleanDecodedText(text, hasKuwoPrefix);
     } catch {}
   }
-  return Buffer.from(buffer).toString("utf8");
+  return cleanDecodedText(textBuffer.toString("utf8"), hasKuwoPrefix);
+}
+
+function cleanDecodedText(text, stripKuwoPrefix) {
+  const cleaned = String(text || "").replace(/^\uFEFF/, "");
+  return stripKuwoPrefix ? cleaned.replace(/^\s*-\s*/, "") : cleaned;
 }
 
 function cachedDirEntries(cache, dir) {
