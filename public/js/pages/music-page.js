@@ -661,7 +661,8 @@ export function createMusicPage(deps) {
       renderView();
     }, false, state.music.shuffle ? "active" : "", "随机播放"));
     controls.append(controlButton("‹", () => playAdjacent(-1, { autoplay: true }).catch(showError), !track, "", "上一首"));
-    controls.append(controlButton(state.music.playing ? "Ⅱ" : "▶", togglePlayback, !track, "primary", state.music.playing ? "暂停" : "播放"));
+    const playButton = controlButton(playIcon(state.music.playing), togglePlayback, !track, "primary", playAriaLabel(state.music.playing));
+    controls.append(playButton);
     controls.append(controlButton("›", () => playAdjacent(1, { autoplay: true }).catch(showError), !track, "", "下一首"));
     controls.append(controlButton(repeatIcon(state.music.repeat), () => {
       state.music.repeat = nextRepeat(state.music.repeat);
@@ -712,7 +713,7 @@ export function createMusicPage(deps) {
     volumeWrap.append(volumeLabel, volume);
     options.append(volumeWrap);
     bar.append(identity, center, options);
-    currentProgressEls = { current, progress, total };
+    currentProgressEls = { current, progress, total, playButton };
     return bar;
   }
 
@@ -967,6 +968,13 @@ export function createMusicPage(deps) {
     currentProgressEls.current.textContent = formatSeconds(current);
     currentProgressEls.total.textContent = formatSeconds(duration);
     currentProgressEls.progress.value = duration > 0 ? String(Math.round((current / duration) * 1000)) : "0";
+    if (currentProgressEls.playButton) {
+      const playing = Boolean(state.music.current && audio && !audio.paused);
+      const label = playAriaLabel(playing);
+      currentProgressEls.playButton.textContent = playIcon(playing);
+      currentProgressEls.playButton.setAttribute("aria-label", label);
+      currentProgressEls.playButton.title = label;
+    }
   }
 
   function updateLyricHighlight(force = false) {
@@ -1131,6 +1139,14 @@ function repeatIcon(value) {
   if (value === "one") return "1";
   if (value === "none") return "→";
   return "↻";
+}
+
+function playIcon(playing) {
+  return playing ? "❚❚" : "▶";
+}
+
+function playAriaLabel(playing) {
+  return playing ? "暂停" : "播放";
 }
 
 function readVolumePreference() {
