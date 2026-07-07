@@ -12,6 +12,39 @@ const MAX_LIMIT = 300;
 const DEFAULT_COVER_GENERATE_LIMIT = 0;
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LOCAL_SHORT_VIDEO_USER_ID = "local:self";
+const LIST_VIDEO_COLUMNS = [
+  "id",
+  "aweme_id",
+  "owner_user_id",
+  "origin",
+  "status",
+  "visibility",
+  "title",
+  "description",
+  "tags_json",
+  "author_sec_uid",
+  "author_uid",
+  "author_name",
+  "author_avatar_url",
+  "author_profile_url",
+  "published_at",
+  "liked_at",
+  "duration_ms",
+  "width",
+  "height",
+  "digg_count",
+  "comment_count",
+  "collect_count",
+  "share_count",
+  "play_count",
+  "share_url",
+  "cover_path",
+  "cover_source",
+  "mtime_ms",
+  "file_name",
+  "relative_path",
+  "size_bytes"
+].join(", ");
 
 export function createShortVideoStore(options = {}) {
   const dbPath = options.dbPath;
@@ -49,25 +82,39 @@ export function createShortVideoStore(options = {}) {
   // 用 scanned_at + download_manager_imported_at 两个 meta 戳做缓存键：
   // scan 写入 scanned_at、import 写入 download_manager_imported_at，自动失效，零额外查询。
   const catalogCache = { key: null, summary: null, authors: null };
+  function ensureCatalogCacheKey(key) {
+    if (catalogCache.key === key) return;
+    catalogCache.key = key;
+    catalogCache.summary = null;
+    catalogCache.authors = null;
+  }
   function catalogStamp() {
     const database = databaseOrOpen();
     return `${metaValue(database, "scanned_at")}::${metaValue(database, "download_manager_imported_at")}`;
   }
   function cachedSummary() {
     const key = catalogStamp();
+    ensureCatalogCacheKey(key);
     if (catalogCache.key === key && catalogCache.summary) return catalogCache.summary;
     const result = summary();
-    catalogCache.key = key;
     catalogCache.summary = result;
     return result;
   }
   function cachedAuthorFacet(database) {
     const key = catalogStamp();
+    ensureCatalogCacheKey(key);
     if (catalogCache.key === key && catalogCache.authors) return catalogCache.authors;
     const result = authorFacet(database);
-    catalogCache.key = key;
     catalogCache.authors = result;
     return result;
+  }
+
+  function facets() {
+    const database = databaseOrOpen();
+    return {
+      summary: cachedSummary(),
+      authors: cachedAuthorFacet(database)
+    };
   }
 
   function summary() {
@@ -114,6 +161,7 @@ export function createShortVideoStore(options = {}) {
     const sort = normalizeSort(params.get("sort"));
     const limit = clampInt(params.get("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
     const offset = clampInt(params.get("offset"), 0, 0, 1000000);
+    const includeFacets = params.get("facets") !== "0";
     const where = filter.where ? `WHERE ${filter.where}` : "";
     const orderBy = {
       liked: "liked_at DESC, mtime_ms DESC",
@@ -125,7 +173,7 @@ export function createShortVideoStore(options = {}) {
     const database = databaseOrOpen();
     const total = database.prepare(`SELECT COUNT(*) AS count FROM short_video_catalog ${where}`).get(...filter.args)?.count || 0;
     const rows = database.prepare(`
-      SELECT *
+      SELECT ${LIST_VIDEO_COLUMNS}
       FROM short_video_catalog
       ${where}
       ORDER BY ${orderBy}, id DESC
@@ -133,7 +181,7 @@ export function createShortVideoStore(options = {}) {
     `).all(...filter.args, limit, offset);
     ensureGeneratedCovers(database, rows, coverGenerateLimit);
     return {
-      summary: cachedSummary(),
+      summary: includeFacets ? cachedSummary() : null,
       total: Number(total || 0),
       limit,
       offset,
@@ -141,7 +189,7 @@ export function createShortVideoStore(options = {}) {
       query: filter.q,
       author: filter.author,
       sort,
-      authors: cachedAuthorFacet(database),
+      authors: includeFacets ? cachedAuthorFacet(database) : [],
       videos: rows.map(publicVideo)
     };
   }
@@ -479,6 +527,7 @@ export function createShortVideoStore(options = {}) {
     close,
     coverFile,
     dbPath,
+    facets,
     importDownloadManagerDb,
     listVideos,
     roots,

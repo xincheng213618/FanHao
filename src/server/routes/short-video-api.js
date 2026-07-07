@@ -10,6 +10,15 @@ export async function routeShortVideoApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/short-videos/facets" && req.method === "GET") {
+    try {
+      sendJson(res, 200, shortVideoStore.facets());
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "短视频筛选信息读取失败" });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/short-videos" && req.method === "GET") {
     try {
       sendJson(res, 200, shortVideoStore.listVideos(url));

@@ -32,7 +32,15 @@ export function createShortVideoPage(deps) {
   let playerClickTimer = 0;
   let listPreviewObserver = null;
   let loadMoreObserver = null;
+  let coverLoadObserver = null;
+  let coverLoadTimer = null;
+  const coverLoadQueue = [];
   const preheatedVideos = new Map();
+  const initialVideoLimit = 48;
+  const appendVideoLimit = 72;
+  const coverEagerCount = 18;
+  const coverLoadBatchSize = 10;
+  const coverLoadBatchDelay = 70;
 
   function ensureState() {
     if (!state.shortVideo) state.shortVideo = {};
@@ -41,6 +49,9 @@ export function createShortVideoPage(deps) {
     state.shortVideo.sort = state.shortVideo.sort || "published";
     state.shortVideo.data = state.shortVideo.data || null;
     state.shortVideo.summary = state.shortVideo.summary || null;
+    state.shortVideo.authors = Array.isArray(state.shortVideo.authors) ? state.shortVideo.authors : [];
+    state.shortVideo.facetsLoaded = Boolean(state.shortVideo.facetsLoaded);
+    state.shortVideo.facetsLoading = Boolean(state.shortVideo.facetsLoading);
     state.shortVideo.current = state.shortVideo.current || null;
     state.shortVideo.prevVideo = state.shortVideo.prevVideo || null;
     state.shortVideo.nextVideo = state.shortVideo.nextVideo || null;
@@ -83,6 +94,7 @@ export function createShortVideoPage(deps) {
     } else {
       renderView();
     }
+    loadShortVideoFacets().catch(showError);
     syncRouteAfterNavigation(options);
   }
 
@@ -129,7 +141,8 @@ export function createShortVideoPage(deps) {
     if (state.shortVideo.query) params.set("q", state.shortVideo.query);
     if (state.shortVideo.author && state.shortVideo.author !== "all") params.set("author", state.shortVideo.author);
     params.set("sort", state.shortVideo.sort || "published");
-    params.set("limit", "120");
+    params.set("limit", String(append ? appendVideoLimit : initialVideoLimit));
+    params.set("facets", "0");
     if (append) params.set("offset", String(state.shortVideo.data?.videos?.length || 0));
     const data = await api(`/api/short-videos?${params}`);
     if (append && state.shortVideo.data) {
@@ -144,6 +157,7 @@ export function createShortVideoPage(deps) {
     } else {
       state.shortVideo.data = data;
     }
+    if (Array.isArray(data.authors) && data.authors.length) state.shortVideo.authors = data.authors;
     state.shortVideo.summary = data.summary || state.shortVideo.summary;
     state.shortVideo.loading = false;
     state.shortVideo.loadingMore = false;
@@ -154,12 +168,37 @@ export function createShortVideoPage(deps) {
       const writer = options.replaceRoute ? replaceRoute : pushRoute;
       writer({ view: "shortVideos", shortVideoId: "" });
     }
+    if (!append) loadShortVideoFacets().catch(showError);
+  }
+
+  async function loadShortVideoFacets(options = {}) {
+    ensureState();
+    if (state.shortVideo.facetsLoading) return;
+    if (state.shortVideo.facetsLoaded && !options.force) return;
+    state.shortVideo.facetsLoading = true;
+    try {
+      const data = await api("/api/short-videos/facets");
+      state.shortVideo.summary = data.summary || state.shortVideo.summary;
+      state.shortVideo.authors = Array.isArray(data.authors) ? data.authors : state.shortVideo.authors;
+      if (state.shortVideo.data) {
+        state.shortVideo.data = {
+          ...state.shortVideo.data,
+          summary: state.shortVideo.summary,
+          authors: state.shortVideo.authors
+        };
+      }
+      state.shortVideo.facetsLoaded = true;
+      renderStats();
+    } finally {
+      state.shortVideo.facetsLoading = false;
+    }
   }
 
   async function rescan() {
     ensureState();
     state.shortVideo.loading = true;
     state.shortVideo.status = "正在扫描点赞目录";
+    state.shortVideo.facetsLoaded = false;
     renderView();
     const data = await api("/api/short-videos/rescan", { method: "POST", body: {} });
     state.shortVideo.summary = data.summary || null;
@@ -217,6 +256,7 @@ export function createShortVideoPage(deps) {
     if (!els.workGrid) return;
     resetListPreviewObserver();
     resetLoadMoreObserver();
+    resetCoverLoadObserver();
     els.workGrid.innerHTML = "";
     setBodyClass();
     if (state.shortVideo.current) {
@@ -238,7 +278,7 @@ export function createShortVideoPage(deps) {
     }
     const grid = document.createElement("div");
     grid.className = "short-video-grid";
-    for (const video of data.videos || []) grid.append(renderVideoCard(video));
+    for (const [index, video] of (data.videos || []).entries()) grid.append(renderVideoCard(video, index));
     if (!(data.videos || []).length) {
       const empty = document.createElement("div");
       empty.className = "short-video-empty";
@@ -254,6 +294,7 @@ export function createShortVideoPage(deps) {
       observeLoadMoreSentinel(sentinel);
     }
     els.workGrid.append(shell);
+    activateShortVideoCovers(grid);
   }
 
   function renderHomeHead(data) {
@@ -300,7 +341,7 @@ export function createShortVideoPage(deps) {
     const author = document.createElement("select");
     author.className = "short-video-select";
     author.append(selectOption("all", "全部作者"));
-    for (const item of data.authors || []) {
+    for (const item of data.authors || state.shortVideo.authors || []) {
       author.append(selectOption(item.secUid, `${item.name} ${formatNumber(item.count)}`));
     }
     author.value = state.shortVideo.author || "all";
@@ -326,7 +367,7 @@ export function createShortVideoPage(deps) {
     return controls;
   }
 
-  function renderVideoCard(video) {
+  function renderVideoCard(video, index = 0) {
     const card = document.createElement("article");
     card.className = "short-video-card";
     const thumb = document.createElement("button");
@@ -335,9 +376,12 @@ export function createShortVideoPage(deps) {
     thumb.setAttribute("aria-label", video.title || "打开短视频");
     if (video.coverUrl) {
       const img = document.createElement("img");
-      img.src = video.coverUrl;
+      img.className = "short-video-cover-image";
+      img.dataset.src = video.coverUrl;
       img.alt = video.title || "短视频封面";
-      img.loading = "lazy";
+      img.loading = index < coverEagerCount ? "eager" : "lazy";
+      img.decoding = "async";
+      img.fetchPriority = index < 8 ? "high" : "low";
       thumb.append(img);
     } else if (video.streamUrl) {
       const preview = document.createElement("video");
@@ -367,6 +411,10 @@ export function createShortVideoPage(deps) {
       fallback.textContent = "";
       thumb.append(fallback);
     }
+    const like = document.createElement("span");
+    like.className = "short-video-like-badge";
+    like.append(createIcon("heart"), document.createTextNode(formatCompact(video.stats?.likes || 0)));
+    thumb.append(like);
     thumb.addEventListener("mouseenter", () => {
       loadListPreviewVideo(thumb.querySelector(".short-video-thumb-video"));
       preheatListVideo(video);
@@ -380,8 +428,15 @@ export function createShortVideoPage(deps) {
       preheatListVideo(video);
     }, { passive: true });
     thumb.addEventListener("click", () => openVideo(video.id).catch(showError));
-    card.append(thumb);
+    const title = document.createElement("div");
+    title.className = "short-video-card-title";
+    title.textContent = cardTitle(video);
+    card.append(thumb, title);
     return card;
+  }
+
+  function cardTitle(video = {}) {
+    return String(video.title || video.description || video.fileName || "无标题").replace(/\s+/g, " ").trim() || "无标题";
   }
 
   function resetListPreviewObserver() {
@@ -392,6 +447,71 @@ export function createShortVideoPage(deps) {
   function resetLoadMoreObserver() {
     loadMoreObserver?.disconnect?.();
     loadMoreObserver = null;
+  }
+
+  function resetCoverLoadObserver() {
+    coverLoadObserver?.disconnect?.();
+    coverLoadObserver = null;
+    if (coverLoadTimer) window.clearTimeout(coverLoadTimer);
+    coverLoadTimer = null;
+    coverLoadQueue.length = 0;
+  }
+
+  function activateShortVideoCovers(root) {
+    const images = [...(root?.querySelectorAll?.("img.short-video-cover-image[data-src]") || [])];
+    const observer = ensureShortVideoCoverObserver();
+    images.forEach((img, index) => {
+      if (index < coverEagerCount || !observer) {
+        queueShortVideoCover(img);
+      } else {
+        observer.observe(img);
+      }
+    });
+  }
+
+  function ensureShortVideoCoverObserver() {
+    if (!("IntersectionObserver" in window)) return null;
+    if (!coverLoadObserver) {
+      coverLoadObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) queueShortVideoCover(entry.target);
+        }
+      }, { rootMargin: "720px 0px", threshold: 0.01 });
+    }
+    return coverLoadObserver;
+  }
+
+  function queueShortVideoCover(img) {
+    if (!img?.dataset?.src || img.dataset.queued === "1" || img.dataset.loaded === "1") return;
+    coverLoadObserver?.unobserve(img);
+    img.dataset.queued = "1";
+    coverLoadQueue.push(img);
+    scheduleShortVideoCoverDrain();
+  }
+
+  function scheduleShortVideoCoverDrain(delay = 0) {
+    if (coverLoadTimer) return;
+    coverLoadTimer = window.setTimeout(drainShortVideoCoverQueue, delay);
+  }
+
+  function drainShortVideoCoverQueue() {
+    coverLoadTimer = null;
+    let loaded = 0;
+    while (coverLoadQueue.length && loaded < coverLoadBatchSize) {
+      const img = coverLoadQueue.shift();
+      if (!img?.isConnected || !img.dataset.src || img.dataset.loaded === "1") continue;
+      loadShortVideoCover(img);
+      loaded += 1;
+    }
+    if (coverLoadQueue.length) scheduleShortVideoCoverDrain(coverLoadBatchDelay);
+  }
+
+  function loadShortVideoCover(img) {
+    const src = img.dataset.src;
+    img.dataset.loaded = "1";
+    delete img.dataset.src;
+    img.addEventListener("load", () => img.classList.add("is-loaded"), { once: true });
+    img.src = src;
   }
 
   function observeLoadMoreSentinel(sentinel) {
@@ -1590,6 +1710,7 @@ export function createShortVideoPage(deps) {
       if (author.secUid) params.set("author", author.secUid);
       params.set("sort", "published");
       params.set("limit", "36");
+      params.set("facets", "0");
       const data = author.secUid ? await api(`/api/short-videos?${params}`) : { videos: [video], total: 1 };
       authorVideos = data.videos || [];
       authorTotal = Number(data.total || authorVideos.length || 0);
@@ -1615,8 +1736,9 @@ export function createShortVideoPage(deps) {
       empty.textContent = "没有视频";
       grid.append(empty);
     } else {
-      for (const item of videos) grid.append(authorVideoTile(item, panel));
+      for (const [index, item] of videos.entries()) grid.append(authorVideoTile(item, panel, index));
     }
+    activateShortVideoCovers(grid);
     wrap.append(label, grid);
     return wrap;
   }
@@ -1671,7 +1793,7 @@ export function createShortVideoPage(deps) {
     return box;
   }
 
-  function authorVideoTile(video, panel) {
+  function authorVideoTile(video, panel, index = 0) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "short-video-author-tile";
@@ -1680,16 +1802,23 @@ export function createShortVideoPage(deps) {
     media.className = "short-video-author-tile-media";
     if (video.coverUrl) {
       const img = document.createElement("img");
-      img.src = video.coverUrl;
+      img.className = "short-video-cover-image";
+      img.dataset.src = video.coverUrl;
       img.alt = video.title || "短视频封面";
-      img.loading = "lazy";
+      img.loading = index < coverEagerCount ? "eager" : "lazy";
+      img.decoding = "async";
+      img.fetchPriority = index < 8 ? "high" : "low";
       media.append(img);
     } else {
       media.textContent = initials(video.author?.name || "");
     }
     const meta = document.createElement("span");
     meta.className = "short-video-author-tile-meta";
-    meta.textContent = [formatCompact(video.stats?.likes || 0), formatDuration(video.durationMs)].filter(Boolean).join(" · ");
+    const like = document.createElement("span");
+    like.className = "short-video-like-badge";
+    like.append(createIcon("heart"), document.createTextNode(formatCompact(video.stats?.likes || 0)));
+    media.append(like);
+    meta.textContent = cardTitle(video);
     button.append(media, meta);
     button.addEventListener("click", () => {
       panel.remove();
