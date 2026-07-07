@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame } from "../../lib/cover-frame.js";
+import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame, extractCoverFrameAsync } from "../../lib/cover-frame.js";
 
 const VIDEO_EXTS = new Set([".mp4", ".m4v", ".mov", ".webm"]);
 const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
@@ -297,6 +297,39 @@ export function createShortVideoStore(options = {}) {
     };
   }
 
+  async function backfillMissingCoversAsync(options = {}) {
+    const limit = clampInt(options.limit, 50, 0, 50000);
+    const concurrency = clampInt(options.concurrency, 2, 1, 16);
+    const database = databaseOrOpen();
+    const startedAt = new Date().toISOString();
+    const beforeMissing = missingCoverCount(database);
+    const rows = missingCoverRows(database, limit || beforeMissing);
+    const generated = await ensureGeneratedCoversAsync(database, rows, rows.length, {
+      concurrency,
+      onProgress: options.onProgress
+    });
+    const afterMissing = missingCoverCount(database);
+    const finishedAt = new Date().toISOString();
+    if (generated > 0) {
+      database.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('cover_backfill_at', ?)").run(finishedAt);
+      catalogCache.key = null;
+      catalogCache.summary = null;
+      catalogCache.authors = null;
+    }
+    return {
+      ok: true,
+      dbPath,
+      startedAt,
+      finishedAt,
+      beforeMissing,
+      selected: rows.length,
+      generated,
+      skipped: Math.max(0, rows.length - generated),
+      afterMissing,
+      concurrency
+    };
+  }
+
   function missingCoverCount(database) {
     return Number(database.prepare(`
       SELECT COUNT(*) AS count
@@ -319,38 +352,91 @@ export function createShortVideoStore(options = {}) {
     `).all(safeLimit);
   }
 
-  function ensureGeneratedCovers(database, rows, maxCount) {
-    if (!maxCount || maxCount <= 0) return 0;
-    let generated = 0;
-    for (const row of rows) {
-      if (generated >= maxCount) return;
-      if (!row || (row.cover_path && fs.existsSync(row.cover_path))) continue;
-      const coverPath = generateCoverForRow(row);
-      if (!coverPath) continue;
-      row.cover_path = coverPath;
-      row.cover_source = "ffmpeg";
-      generated += 1;
-      database.prepare(`
+  function generatedCoverStatements(database) {
+    return {
+      video: database.prepare(`
         UPDATE short_videos
         SET cover_path = ?,
             cover_source = 'ffmpeg',
             updated_at = ?
         WHERE id = ?
           AND COALESCE(cover_source, '') <> 'native'
-      `).run(
-        coverPath,
-        new Date().toISOString(),
-        row.id
-      );
-      upsertAsset(database, {
-        videoId: row.id,
-        assetType: "ffmpeg_cover",
-        localPath: coverPath,
-        fileName: path.basename(coverPath),
-        sizeBytes: safeStat(coverPath)?.size || 0,
-        mtimeMs: Math.floor(safeStat(coverPath)?.mtimeMs || Date.now())
-      }, new Date().toISOString());
+      `),
+      asset: normalizedUpsertStatements(database).asset
+    };
+  }
+
+  function recordGeneratedCover(row, coverPath, statements) {
+    if (!row?.id || !coverPath) return false;
+    const now = new Date().toISOString();
+    const result = statements.video.run(coverPath, now, row.id);
+    if (Number(result?.changes || 0) <= 0) {
+      removeGeneratedCoverFile(coverPath, coverCacheDir);
+      return false;
     }
+    row.cover_path = coverPath;
+    row.cover_source = "ffmpeg";
+    const stat = safeStat(coverPath);
+    runAssetUpsert(statements.asset, {
+      videoId: row.id,
+      assetType: "ffmpeg_cover",
+      localPath: coverPath,
+      fileName: path.basename(coverPath),
+      sizeBytes: stat?.size || 0,
+      mtimeMs: Math.floor(stat?.mtimeMs || Date.now())
+    }, now);
+    return true;
+  }
+
+  function ensureGeneratedCovers(database, rows, maxCount) {
+    if (!maxCount || maxCount <= 0) return 0;
+    let generated = 0;
+    const statements = generatedCoverStatements(database);
+    for (const row of rows) {
+      if (generated >= maxCount) return generated;
+      if (!row || (row.cover_path && fs.existsSync(row.cover_path))) continue;
+      const coverPath = generateCoverForRow(row);
+      if (!coverPath) continue;
+      if (recordGeneratedCover(row, coverPath, statements)) generated += 1;
+    }
+    return generated;
+  }
+
+  async function ensureGeneratedCoversAsync(database, rows, maxCount, options = {}) {
+    if (!maxCount || maxCount <= 0) return 0;
+    const selectedRows = rows.slice(0, maxCount);
+    if (!selectedRows.length) return 0;
+    const concurrency = clampInt(options.concurrency, 2, 1, 16);
+    const workerCount = Math.min(concurrency, selectedRows.length);
+    const statements = generatedCoverStatements(database);
+    let nextIndex = 0;
+    let processed = 0;
+    let generated = 0;
+
+    async function worker() {
+      while (true) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= selectedRows.length) return;
+        const row = selectedRows[index];
+        let didGenerate = false;
+        if (row && !(row.cover_path && fs.existsSync(row.cover_path))) {
+          const coverPath = await generateCoverForRowAsync(row);
+          if (coverPath) didGenerate = recordGeneratedCover(row, coverPath, statements);
+        }
+        processed += 1;
+        if (didGenerate) generated += 1;
+        options.onProgress?.({
+          processed,
+          total: selectedRows.length,
+          generated,
+          skipped: processed - generated,
+          concurrency
+        });
+      }
+    }
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
     return generated;
   }
 
@@ -363,6 +449,30 @@ export function createShortVideoStore(options = {}) {
       if (fs.existsSync(coverPath) && safeStat(coverPath)?.size > 0) return coverPath;
       tempInput = asciiInputPath(row.source_path, coverCacheDir);
       const buffer = extractCoverFrame(tempInput.path, {
+        duration: Number(row.duration_ms || 0) > 0 ? Number(row.duration_ms) / 1000 : undefined,
+        ffmpegPath,
+        maxBytes: coverMaxBytes,
+        timeoutMs: 15000
+      });
+      fs.writeFileSync(coverPath, buffer);
+      return coverPath;
+    } catch (error) {
+      console.warn("[short-video-cover]", row.id || row.source_path, error.message || error);
+      return "";
+    } finally {
+      if (tempInput?.cleanup) tempInput.cleanup();
+    }
+  }
+
+  async function generateCoverForRowAsync(row) {
+    if (!row?.source_path || !fs.existsSync(row.source_path)) return "";
+    let tempInput = null;
+    try {
+      fs.mkdirSync(coverCacheDir, { recursive: true });
+      const coverPath = path.join(coverCacheDir, coverFileName(row));
+      if (fs.existsSync(coverPath) && safeStat(coverPath)?.size > 0) return coverPath;
+      tempInput = asciiInputPath(row.source_path, coverCacheDir);
+      const buffer = await extractCoverFrameAsync(tempInput.path, {
         duration: Number(row.duration_ms || 0) > 0 ? Number(row.duration_ms) / 1000 : undefined,
         ffmpegPath,
         maxBytes: coverMaxBytes,
@@ -694,6 +804,7 @@ export function createShortVideoStore(options = {}) {
   return {
     adjacentVideo,
     backfillMissingCovers,
+    backfillMissingCoversAsync,
     close,
     coverBackfillStatus,
     coverFile,
