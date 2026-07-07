@@ -74,7 +74,7 @@ export function routeFromUrl(url = window.location.href) {
       musicTrackId: "",
       musicArtistId: "",
       musicAlbumId: "",
-      musicMode: "library",
+      musicMode: "home",
       musicPlaylistId: "",
       musicQuery: "",
       musicSort: "album",
@@ -130,7 +130,7 @@ export function normalizeRoute(route = {}) {
     musicTrackId: view === "music" ? String(route.musicTrackId || "").trim() : "",
     musicArtistId: view === "music" ? String(route.musicArtistId || "").trim() : "",
     musicAlbumId: view === "music" ? String(route.musicAlbumId || "").trim() : "",
-    musicMode: view === "music" ? normalizeMusicMode(route.musicMode) : "library",
+    musicMode: view === "music" ? normalizeMusicMode(route.musicMode) : "home",
     musicPlaylistId: view === "music" ? String(route.musicPlaylistId || "").trim() : "",
     musicQuery: view === "music" ? String(route.musicQuery || route.q || "").trim() : "",
     musicSort: view === "music" ? normalizeMusicSort(route.musicSort) : "album",
@@ -271,8 +271,8 @@ function normalizeMusicSort(value) {
 }
 
 function normalizeMusicMode(value) {
-  const mode = String(value || "library").trim();
-  return ["library", "history", "playlist"].includes(mode) ? mode : "library";
+  const mode = String(value || "home").trim();
+  return ["home", "library", "history", "playlist"].includes(mode) ? mode : "home";
 }
 
 function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
@@ -435,7 +435,7 @@ function musicRouteFromPath(routePath, params = new URLSearchParams()) {
     musicTrackId: section === "track" ? decodeRouteSegment(segments[2] || "") : "",
     musicArtistId: section === "artist" ? decodeRouteSegment(segments[2] || "") : "",
     musicAlbumId: section === "album" ? decodeRouteSegment(segments[2] || "") : "",
-    musicMode: section === "history" ? "history" : section === "playlist" ? "playlist" : "library",
+    musicMode: section === "history" ? "history" : section === "playlist" ? "playlist" : ["library", "artist", "album", "track"].includes(section) ? "library" : "home",
     musicPlaylistId: section === "playlist" ? decodeRouteSegment(segments[2] || "") : "",
     musicQuery: params.get("q") || params.get("search") || "",
     musicSort: normalizeMusicSort(params.get("sort")),
@@ -484,6 +484,7 @@ function routePath(route) {
     if (route.musicMode === "playlist" && route.musicPlaylistId) return `/music/playlist/${encodeRouteSegment(route.musicPlaylistId)}`;
     if (route.musicAlbumId) return `/music/album/${encodeRouteSegment(route.musicAlbumId)}`;
     if (route.musicArtistId) return `/music/artist/${encodeRouteSegment(route.musicArtistId)}`;
+    if (route.musicMode === "library") return "/music/library";
     return "/music";
   }
   if (VIEW_PATHS[route.view]) return VIEW_PATHS[route.view];
