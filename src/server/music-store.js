@@ -262,6 +262,141 @@ export function createMusicStore(options = {}) {
     return publicTrack(trackRow(database, row.id), { detail: true });
   }
 
+  function listHistory(urlOrOptions = {}) {
+    const params = urlOrOptions?.searchParams || new URLSearchParams();
+    const limit = clampInt(params.get("limit"), 100, 1, MAX_LIMIT);
+    const database = dbOrOpen();
+    const rows = database
+      .prepare(
+        `
+        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
+               s.favorite, s.position_ms, s.duration_ms AS state_duration_ms,
+               s.play_count, s.last_played_at
+        FROM music_track_state s
+        JOIN music_tracks t ON t.id = s.track_id
+        LEFT JOIN music_artists a ON a.id = t.artist_id
+        LEFT JOIN music_albums al ON al.id = t.album_id
+        WHERE t.status = 'ok' AND COALESCE(s.last_played_at, '') <> ''
+        ORDER BY s.last_played_at DESC
+        LIMIT ?
+      `
+      )
+      .all(limit);
+    return {
+      tracks: rows.map(publicTrack),
+      total: rows.length,
+      limit,
+      summary: summary(),
+      artists: artistFacet(database),
+      albums: albumFacet(database)
+    };
+  }
+
+  function clearHistory() {
+    dbOrOpen()
+      .prepare(
+        `
+        UPDATE music_track_state
+        SET last_played_at = '', play_count = 0, updated_at = ?
+        WHERE COALESCE(last_played_at, '') <> '' OR COALESCE(play_count, 0) > 0
+      `
+      )
+      .run(new Date().toISOString());
+    return { ok: true };
+  }
+
+  function listPlaylists() {
+    const database = dbOrOpen();
+    const rows = database
+      .prepare(
+        `
+        SELECT p.*, COUNT(i.track_id) AS track_count
+        FROM music_playlists p
+        LEFT JOIN music_playlist_items i ON i.playlist_id = p.id
+        GROUP BY p.id
+        ORDER BY p.updated_at DESC, p.created_at DESC
+      `
+      )
+      .all();
+    return { playlists: rows.map(publicPlaylist), total: rows.length };
+  }
+
+  function createPlaylist(input = {}) {
+    const name = String(typeof input === "string" ? input : input.name || "").trim().slice(0, 80);
+    if (!name) throw httpError(400, "歌单名称不能为空");
+    const now = new Date().toISOString();
+    const id = hashText(`playlist:${now}:${name}:${crypto.randomBytes(8).toString("hex")}`).slice(0, 20);
+    dbOrOpen()
+      .prepare("INSERT INTO music_playlists (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+      .run(id, name, String(input.description || "").trim().slice(0, 300), now, now);
+    return playlistDetail(id);
+  }
+
+  function playlistDetail(playlistId) {
+    const database = dbOrOpen();
+    const row = database.prepare("SELECT * FROM music_playlists WHERE id = ?").get(playlistId);
+    if (!row) return null;
+    const tracks = database
+      .prepare(
+        `
+        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
+               s.favorite, s.position_ms, s.duration_ms AS state_duration_ms,
+               s.play_count, s.last_played_at,
+               i.sort_order, i.added_at
+        FROM music_playlist_items i
+        JOIN music_tracks t ON t.id = i.track_id
+        LEFT JOIN music_artists a ON a.id = t.artist_id
+        LEFT JOIN music_albums al ON al.id = t.album_id
+        LEFT JOIN music_track_state s ON s.track_id = t.id
+        WHERE i.playlist_id = ? AND t.status = 'ok'
+        ORDER BY i.sort_order ASC, i.added_at ASC
+      `
+      )
+      .all(row.id)
+      .map(publicTrack);
+    return {
+      playlist: publicPlaylist({ ...row, track_count: tracks.length }),
+      tracks,
+      total: tracks.length,
+      summary: summary(),
+      artists: artistFacet(database),
+      albums: albumFacet(database)
+    };
+  }
+
+  function deletePlaylist(playlistId) {
+    const database = dbOrOpen();
+    const row = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
+    if (!row) return null;
+    database.prepare("DELETE FROM music_playlist_items WHERE playlist_id = ?").run(playlistId);
+    database.prepare("DELETE FROM music_playlists WHERE id = ?").run(playlistId);
+    return { ok: true };
+  }
+
+  function addToPlaylist(playlistId, trackId) {
+    const database = dbOrOpen();
+    const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
+    if (!playlist) return null;
+    const track = database.prepare("SELECT id FROM music_tracks WHERE id = ? AND status = 'ok'").get(trackId);
+    if (!track) throw httpError(404, "歌曲不存在");
+    const now = new Date().toISOString();
+    const nextOrder = Number(database.prepare("SELECT COALESCE(MAX(sort_order), 0) + 1 AS value FROM music_playlist_items WHERE playlist_id = ?").get(playlistId)?.value || 1);
+    database
+      .prepare("INSERT OR IGNORE INTO music_playlist_items (playlist_id, track_id, sort_order, added_at) VALUES (?, ?, ?, ?)")
+      .run(playlistId, track.id, nextOrder, now);
+    database.prepare("UPDATE music_playlists SET updated_at = ? WHERE id = ?").run(now, playlistId);
+    return playlistDetail(playlistId);
+  }
+
+  function removeFromPlaylist(playlistId, trackId) {
+    const database = dbOrOpen();
+    const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
+    if (!playlist) return null;
+    database.prepare("DELETE FROM music_playlist_items WHERE playlist_id = ? AND track_id = ?").run(playlistId, trackId);
+    database.prepare("UPDATE music_playlists SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), playlistId);
+    return playlistDetail(playlistId);
+  }
+
   function trackFile(trackId) {
     const row = dbOrOpen().prepare("SELECT id, source_path, ext FROM music_tracks WHERE id = ? AND status = 'ok'").get(trackId);
     if (!row?.source_path) return null;
@@ -294,9 +429,17 @@ export function createMusicStore(options = {}) {
     dbPath,
     facets,
     invalidate,
+    addToPlaylist,
+    clearHistory,
+    createPlaylist,
+    deletePlaylist,
+    listHistory,
     listAlbums,
     listArtists,
+    listPlaylists,
     listTracks,
+    playlistDetail,
+    removeFromPlaylist,
     saveProgress,
     scan,
     summary,
@@ -680,6 +823,7 @@ function writeScanRecords(db, records, scanRoots, scannedAt) {
     db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('schema_version', '1')").run();
     db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('scanned_at', ?)").run(scannedAt);
     db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('roots_json', ?)").run(JSON.stringify(scanRoots));
+    db.prepare("DELETE FROM music_playlist_items WHERE track_id NOT IN (SELECT id FROM music_tracks)").run();
     db.exec("COMMIT");
     db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   } catch (error) {
@@ -877,6 +1021,17 @@ function publicAlbum(row) {
     trackCount: Number(row.track_count || 0),
     durationMs: Number(row.duration_ms || 0),
     sizeBytes: Number(row.size_bytes || 0),
+    updatedAt: row.updated_at || ""
+  };
+}
+
+function publicPlaylist(row) {
+  return {
+    id: row.id || "",
+    name: row.name || "",
+    description: row.description || "",
+    trackCount: Number(row.track_count || 0),
+    createdAt: row.created_at || "",
     updatedAt: row.updated_at || ""
   };
 }

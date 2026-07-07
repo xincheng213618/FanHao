@@ -8718,6 +8718,7 @@ body.music-view .work-grid {
 }
 
 .music-artist-list,
+.music-playlist-list,
 .music-album-mini-list,
 .music-queue-list {
   display: grid;
@@ -8725,6 +8726,7 @@ body.music-view .work-grid {
 }
 
 .music-filter-button,
+.music-create-playlist,
 .music-album-mini,
 .music-queue-list button {
   width: 100%;
@@ -8763,6 +8765,7 @@ body.music-view .work-grid {
 
 .music-filter-button:hover,
 .music-filter-button.active,
+.music-create-playlist:hover,
 .music-album-mini:hover,
 .music-album-mini.active,
 .music-queue-list button:hover,
@@ -8770,6 +8773,15 @@ body.music-view .work-grid {
   border-color: rgba(62, 218, 147, .28);
   background: rgba(62, 218, 147, .12);
   color: #f6fbf8;
+}
+
+.music-create-playlist {
+  min-height: 34px;
+  padding: 7px 10px;
+  border-style: dashed;
+  color: rgba(237, 244, 240, .68);
+  font-size: 12px;
+  font-weight: 750;
 }
 
 .music-album-mini {
@@ -8810,6 +8822,65 @@ body.music-view .work-grid {
   overflow: hidden;
 }
 
+.music-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 16px 0;
+}
+
+.music-panel-heading > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.music-panel-heading strong {
+  overflow: hidden;
+  color: #f6fbf8;
+  font-size: 17px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-panel-heading small {
+  overflow: hidden;
+  color: rgba(237, 244, 240, .52);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-panel-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.music-inline-button {
+  min-height: 32px;
+  border: 1px solid rgba(255, 255, 255, .15);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .06);
+  color: rgba(237, 244, 240, .78);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.music-inline-button:hover {
+  border-color: rgba(255, 255, 255, .28);
+  background: rgba(255, 255, 255, .12);
+}
+
+.music-inline-button.danger,
+.music-secondary-button.danger {
+  border-color: rgba(239, 100, 122, .42);
+  color: #ffccd3;
+}
+
 .music-controls {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) auto 154px;
@@ -8848,6 +8919,13 @@ body.music-view .work-grid {
 .music-sort:focus {
   border-color: rgba(62, 218, 147, .62);
   box-shadow: 0 0 0 3px rgba(62, 218, 147, .12);
+}
+
+.music-search input:disabled,
+.music-sort:disabled,
+.music-favorite-filter:disabled {
+  cursor: default;
+  opacity: .48;
 }
 
 .music-favorite-filter {

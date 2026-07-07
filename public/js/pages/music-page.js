@@ -27,14 +27,18 @@ export function createMusicPage(deps) {
   function ensureState() {
     if (!state.music) state.music = {};
     state.music.query = state.music.query || "";
+    state.music.mode = ["library", "history", "playlist"].includes(state.music.mode) ? state.music.mode : "library";
     state.music.artistId = state.music.artistId || "all";
     state.music.albumId = state.music.albumId || "all";
+    state.music.activePlaylistId = state.music.activePlaylistId || "";
     state.music.sort = state.music.sort || "album";
     state.music.favorite = Boolean(state.music.favorite);
     state.music.data = state.music.data || null;
     state.music.summary = state.music.summary || null;
     state.music.artists = Array.isArray(state.music.artists) ? state.music.artists : [];
     state.music.albums = Array.isArray(state.music.albums) ? state.music.albums : [];
+    state.music.playlists = Array.isArray(state.music.playlists) ? state.music.playlists : [];
+    state.music.activePlaylist = state.music.activePlaylist || null;
     state.music.current = state.music.current || null;
     state.music.lyrics = state.music.lyrics || { raw: "", lines: [] };
     state.music.queue = Array.isArray(state.music.queue) ? state.music.queue : [];
@@ -123,9 +127,11 @@ export function createMusicPage(deps) {
 
   function applyRouteState(route = {}) {
     ensureState();
+    state.music.mode = route.musicMode || "library";
     state.music.query = route.musicQuery || "";
     state.music.artistId = route.musicArtistId || "all";
     state.music.albumId = route.musicAlbumId || "all";
+    state.music.activePlaylistId = route.musicPlaylistId || "";
     state.music.sort = route.musicSort || "album";
     state.music.favorite = Boolean(route.musicFavorite);
   }
@@ -153,21 +159,41 @@ export function createMusicPage(deps) {
       state.music.nextId = "";
     }
     renderView();
+    const playlistsPromise = loadPlaylists();
     const params = musicListParams();
     params.set("limit", "1000");
-    const data = await api(`/api/music/tracks?${params}`);
+    let data;
+    if (state.music.mode === "history") {
+      data = await api("/api/music/history?limit=1000");
+    } else if (state.music.mode === "playlist" && state.music.activePlaylistId) {
+      data = await api(`/api/music/playlists/${encodeURIComponent(state.music.activePlaylistId)}`);
+    } else {
+      state.music.mode = "library";
+      data = await api(`/api/music/tracks?${params}`);
+    }
+    await playlistsPromise;
     state.music.data = data;
     state.music.summary = data.summary || state.music.summary;
     state.music.artists = data.artists || state.music.artists || [];
     state.music.albums = data.albums || state.music.albums || [];
+    state.music.activePlaylist = data.playlist || null;
     state.music.queue = data.tracks || [];
     state.music.loading = false;
-    state.music.status = data.total ? "" : "这里还没有音乐，先运行“刷新音乐库”。";
+    state.music.status = emptyMusicMessage(data.total || state.music.queue.length);
     renderStats();
     renderView();
     if (!options.skipRoute) {
       const writer = options.replaceRoute ? replaceRoute : pushRoute;
       writer(musicRouteOverrides());
+    }
+  }
+
+  async function loadPlaylists() {
+    try {
+      const data = await api("/api/music/playlists");
+      state.music.playlists = data.playlists || [];
+    } catch {
+      state.music.playlists = state.music.playlists || [];
     }
   }
 
@@ -293,17 +319,45 @@ export function createMusicPage(deps) {
   function renderSidebar() {
     const side = document.createElement("aside");
     side.className = "music-sidebar";
+    const libraryTitle = document.createElement("h3");
+    libraryTitle.textContent = "资料库";
+    const libraryList = document.createElement("div");
+    libraryList.className = "music-artist-list";
+    libraryList.append(filterButton("library", "全部歌曲", state.music.summary?.totals?.tracks || state.music.data?.total || 0, state.music.mode === "library" && !state.music.favorite, () => {
+      selectMusicMode("library");
+    }));
+    libraryList.append(filterButton("history", "最近播放", state.music.summary?.recent?.length || 0, state.music.mode === "history", () => {
+      selectMusicMode("history");
+    }));
+    libraryList.append(filterButton("favorites", "我喜欢", "", state.music.mode === "library" && state.music.favorite, () => {
+      selectMusicMode("library", { favorite: true });
+    }));
+
+    const playlistTitle = document.createElement("h3");
+    playlistTitle.textContent = "歌单";
+    const playlists = document.createElement("div");
+    playlists.className = "music-playlist-list";
+    for (const playlist of state.music.playlists || []) {
+      playlists.append(filterButton(playlist.id, playlist.name, playlist.trackCount, state.music.mode === "playlist" && state.music.activePlaylistId === playlist.id, () => {
+        selectMusicMode("playlist", { playlistId: playlist.id });
+      }));
+    }
+    const createPlaylistButton = document.createElement("button");
+    createPlaylistButton.type = "button";
+    createPlaylistButton.className = "music-create-playlist";
+    createPlaylistButton.textContent = "新建歌单";
+    createPlaylistButton.addEventListener("click", () => createPlaylistFromPrompt().catch(showError));
+    playlists.append(createPlaylistButton);
+
     const artistsTitle = document.createElement("h3");
     artistsTitle.textContent = "歌手";
     const artistList = document.createElement("div");
     artistList.className = "music-artist-list";
-    artistList.append(filterButton("all", "全部歌手", state.music.summary?.totals?.tracks || state.music.data?.total || 0, state.music.artistId === "all", () => {
-      state.music.artistId = "all";
-      state.music.albumId = "all";
-      loadMusic({ replaceRoute: true }).catch(showError);
-    }));
     for (const artist of state.music.artists || []) {
-      artistList.append(filterButton(artist.id, artist.name, artist.trackCount, state.music.artistId === artist.id, () => {
+      artistList.append(filterButton(artist.id, artist.name, artist.trackCount, state.music.mode === "library" && state.music.artistId === artist.id, () => {
+        state.music.mode = "library";
+        state.music.favorite = false;
+        state.music.activePlaylistId = "";
         state.music.artistId = artist.id;
         state.music.albumId = "all";
         loadMusic({ replaceRoute: true }).catch(showError);
@@ -317,7 +371,7 @@ export function createMusicPage(deps) {
     for (const album of (state.music.albums || []).slice(0, 18)) {
       const button = document.createElement("button");
       button.type = "button";
-      button.className = `music-album-mini${state.music.albumId === album.id ? " active" : ""}`;
+      button.className = `music-album-mini${state.music.mode === "library" && state.music.albumId === album.id ? " active" : ""}`;
       button.append(renderCover(album, "tiny"));
       const span = document.createElement("span");
       const strong = document.createElement("strong");
@@ -327,13 +381,16 @@ export function createMusicPage(deps) {
       span.append(strong, small);
       button.append(span);
       button.addEventListener("click", () => {
+        state.music.mode = "library";
+        state.music.favorite = false;
+        state.music.activePlaylistId = "";
         state.music.artistId = album.artistId || state.music.artistId || "all";
         state.music.albumId = album.id;
         loadMusic({ replaceRoute: true }).catch(showError);
       });
       albums.append(button);
     }
-    side.append(artistsTitle, artistList, albumsTitle, albums);
+    side.append(libraryTitle, libraryList, playlistTitle, playlists, artistsTitle, artistList, albumsTitle, albums);
     return side;
   }
 
@@ -353,14 +410,43 @@ export function createMusicPage(deps) {
   function renderTrackPanel() {
     const panel = document.createElement("section");
     panel.className = "music-track-panel";
+    const heading = document.createElement("div");
+    heading.className = "music-panel-heading";
+    const headingText = document.createElement("span");
+    const headingTitle = document.createElement("strong");
+    headingTitle.textContent = currentMusicTitle();
+    const headingMeta = document.createElement("small");
+    headingMeta.textContent = currentMusicMeta();
+    headingText.append(headingTitle, headingMeta);
+    const headingActions = document.createElement("div");
+    headingActions.className = "music-panel-actions";
+    if (state.music.mode === "history" && (state.music.data?.tracks || []).length) {
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "music-inline-button";
+      clear.textContent = "清空";
+      clear.addEventListener("click", () => clearHistory().catch(showError));
+      headingActions.append(clear);
+    }
+    if (state.music.mode === "playlist" && state.music.activePlaylist) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "music-inline-button danger";
+      remove.textContent = "删除歌单";
+      remove.addEventListener("click", () => deleteActivePlaylist().catch(showError));
+      headingActions.append(remove);
+    }
+    heading.append(headingText, headingActions);
+
     const controls = document.createElement("div");
     controls.className = "music-controls";
     const search = document.createElement("label");
     search.className = "music-search";
     const input = document.createElement("input");
     input.type = "search";
-    input.placeholder = "搜索歌曲、歌手、专辑或歌词";
+    input.placeholder = state.music.mode === "library" ? "搜索歌曲、歌手、专辑或歌词" : "当前列表暂不支持搜索";
     input.value = state.music.query || "";
+    input.disabled = state.music.mode !== "library";
     input.addEventListener("input", () => {
       state.music.query = input.value.trim();
       window.clearTimeout(searchTimer);
@@ -371,6 +457,7 @@ export function createMusicPage(deps) {
     favorite.type = "button";
     favorite.className = `music-favorite-filter${state.music.favorite ? " active" : ""}`;
     favorite.textContent = "收藏";
+    favorite.disabled = state.music.mode !== "library";
     favorite.addEventListener("click", () => {
       state.music.favorite = !state.music.favorite;
       loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
@@ -391,6 +478,7 @@ export function createMusicPage(deps) {
       sort.append(option);
     }
     sort.value = state.music.sort || "album";
+    sort.disabled = state.music.mode !== "library";
     sort.addEventListener("change", () => {
       state.music.sort = sort.value;
       loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
@@ -408,7 +496,7 @@ export function createMusicPage(deps) {
     } else {
       tracks.forEach((track, index) => table.append(trackRow(track, index)));
     }
-    panel.append(controls, table);
+    panel.append(heading, controls, table);
     return panel;
   }
 
@@ -486,7 +574,20 @@ export function createMusicPage(deps) {
     fav.className = `music-secondary-button${track.favorite ? " active" : ""}`;
     fav.textContent = track.favorite ? "已收藏" : "收藏";
     fav.addEventListener("click", () => toggleFavorite(track.id).catch(showError));
-    actions.append(play, fav);
+    const playlist = document.createElement("button");
+    playlist.type = "button";
+    playlist.className = "music-secondary-button";
+    playlist.textContent = "加入歌单";
+    playlist.addEventListener("click", () => addTrackToPlaylist(track.id).catch(showError));
+    actions.append(play, fav, playlist);
+    if (state.music.mode === "playlist" && state.music.activePlaylistId) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "music-secondary-button danger";
+      remove.textContent = "移出歌单";
+      remove.addEventListener("click", () => removeTrackFromActivePlaylist(track.id).catch(showError));
+      actions.append(remove);
+    }
     panel.append(title, meta, actions, renderLyricPanel(), renderQueuePanel());
     return panel;
   }
@@ -685,6 +786,106 @@ export function createMusicPage(deps) {
     renderView();
   }
 
+  function selectMusicMode(mode, options = {}) {
+    ensureState();
+    state.music.mode = mode;
+    state.music.activePlaylistId = options.playlistId || "";
+    state.music.activePlaylist = null;
+    state.music.favorite = mode === "library" ? Boolean(options.favorite) : false;
+    if (mode === "library") {
+      state.music.artistId = "all";
+      state.music.albumId = "all";
+    }
+    if (mode !== "library") {
+      state.music.query = "";
+      state.music.artistId = "all";
+      state.music.albumId = "all";
+    }
+    loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+  }
+
+  async function createPlaylistFromPrompt(trackId = "") {
+    const name = window.prompt("歌单名称");
+    if (!name || !name.trim()) return null;
+    state.music.status = "正在创建歌单";
+    renderView();
+    const data = await api("/api/music/playlists", {
+      method: "POST",
+      body: { name: name.trim() }
+    });
+    if (trackId && data.playlist?.id) {
+      await api(`/api/music/playlists/${encodeURIComponent(data.playlist.id)}/tracks`, {
+        method: "POST",
+        body: { trackId }
+      });
+    }
+    await loadPlaylists();
+    if (data.playlist?.id) {
+      state.music.mode = "playlist";
+      state.music.activePlaylistId = data.playlist.id;
+      state.music.favorite = false;
+      state.music.query = "";
+      await loadMusic({ replaceRoute: true, keepCurrent: true });
+    }
+    return data.playlist || null;
+  }
+
+  async function addTrackToPlaylist(trackId) {
+    await loadPlaylists();
+    if (!state.music.playlists.length) {
+      await createPlaylistFromPrompt(trackId);
+      return;
+    }
+    const labels = state.music.playlists.map((playlist, index) => `${index + 1}. ${playlist.name}`).join("\n");
+    const answer = window.prompt(`输入歌单序号，或输入新歌单名称：\n${labels}`, "1");
+    if (!answer || !answer.trim()) return;
+    const selectedIndex = Number(answer.trim()) - 1;
+    let playlist = Number.isInteger(selectedIndex) && selectedIndex >= 0 ? state.music.playlists[selectedIndex] : null;
+    if (!playlist) {
+      const created = await api("/api/music/playlists", {
+        method: "POST",
+        body: { name: answer.trim() }
+      });
+      playlist = created.playlist;
+    }
+    if (!playlist?.id) return;
+    await api(`/api/music/playlists/${encodeURIComponent(playlist.id)}/tracks`, {
+      method: "POST",
+      body: { trackId }
+    });
+    state.music.status = `已加入「${playlist.name}」`;
+    await loadPlaylists();
+    if (state.music.mode === "playlist" && state.music.activePlaylistId === playlist.id) {
+      await loadMusic({ replaceRoute: true, keepCurrent: true });
+    } else {
+      renderView();
+    }
+  }
+
+  async function removeTrackFromActivePlaylist(trackId) {
+    if (!state.music.activePlaylistId) return;
+    await api(`/api/music/playlists/${encodeURIComponent(state.music.activePlaylistId)}/tracks/${encodeURIComponent(trackId)}`, { method: "DELETE" });
+    state.music.status = "已移出歌单";
+    await loadMusic({ replaceRoute: true, keepCurrent: true });
+  }
+
+  async function deleteActivePlaylist() {
+    const playlist = state.music.activePlaylist;
+    if (!playlist?.id) return;
+    if (!window.confirm(`删除歌单「${playlist.name}」？歌曲文件不会被删除。`)) return;
+    await api(`/api/music/playlists/${encodeURIComponent(playlist.id)}`, { method: "DELETE" });
+    state.music.mode = "library";
+    state.music.activePlaylistId = "";
+    state.music.activePlaylist = null;
+    await loadMusic({ replaceRoute: true, keepCurrent: true });
+  }
+
+  async function clearHistory() {
+    if (!window.confirm("清空最近播放记录？播放进度和收藏会保留。")) return;
+    await api("/api/music/history", { method: "DELETE" });
+    await loadMusic({ replaceRoute: true, keepCurrent: true });
+  }
+
   async function startMusicRescan() {
     ensureState();
     const rootText = (state.music.summary?.roots || state.music.data?.summary?.roots || [])
@@ -787,9 +988,41 @@ export function createMusicPage(deps) {
     return params;
   }
 
+  function currentMusicTitle() {
+    if (state.music.mode === "history") return "最近播放";
+    if (state.music.mode === "playlist") return state.music.activePlaylist?.name || "歌单";
+    if (state.music.favorite) return "我喜欢";
+    if (state.music.albumId && state.music.albumId !== "all") {
+      return state.music.albums.find((album) => album.id === state.music.albumId)?.title || "专辑";
+    }
+    if (state.music.artistId && state.music.artistId !== "all") {
+      return state.music.artists.find((artist) => artist.id === state.music.artistId)?.name || "歌手";
+    }
+    return "全部歌曲";
+  }
+
+  function currentMusicMeta() {
+    const total = state.music.data?.total ?? state.music.queue.length;
+    const count = `${formatNumber(total || 0)} 首`;
+    if (state.music.mode === "playlist") return `${count} · 自建歌单`;
+    if (state.music.mode === "history") return `${count} · 按最近播放排序`;
+    if (state.music.favorite) return `${count} · 收藏歌曲`;
+    return `${count} · ${sortLabel(state.music.sort)}`;
+  }
+
+  function emptyMusicMessage(total) {
+    if (total) return "";
+    if (state.music.mode === "history") return "还没有最近播放，先听一首歌。";
+    if (state.music.mode === "playlist") return "这个歌单还没有歌曲，先从右侧当前歌曲加入。";
+    if (state.music.favorite) return "还没有收藏歌曲。";
+    return "这里还没有音乐，先运行“刷新音乐库”。";
+  }
+
   function musicRouteOverrides() {
     return {
       view: "music",
+      musicMode: state.music.mode || "library",
+      musicPlaylistId: state.music.mode === "playlist" ? state.music.activePlaylistId || "" : "",
       musicArtistId: state.music.artistId && state.music.artistId !== "all" ? state.music.artistId : "",
       musicAlbumId: state.music.albumId && state.music.albumId !== "all" ? state.music.albumId : "",
       musicTrackId: "",
@@ -828,6 +1061,17 @@ function qualityLabel(track = {}) {
   if (sample) parts.push(`${Math.round(sample / 1000)}kHz`);
   if (bit) parts.push(`${bit}bit`);
   return parts.join(" · ");
+}
+
+function sortLabel(sort) {
+  return {
+    album: "按专辑",
+    artist: "按歌手",
+    title: "按歌名",
+    duration: "按时长",
+    played: "最近播放",
+    favorite: "收藏优先"
+  }[sort] || "按专辑";
 }
 
 function formatDuration(ms) {
