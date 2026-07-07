@@ -62,6 +62,19 @@ export function createFileServer({ defaultChunkBytes, mimeTypes, normalizeExt, n
 
     const range = parseRange(req.headers.range, stat.size);
     const contentType = mimeTypes[file.ext] || "application/octet-stream";
+
+    if (req.method === "HEAD" && !range) {
+      res.writeHead(200, {
+        "Content-Type": contentType,
+        "Accept-Ranges": "bytes",
+        "Content-Length": stat.size,
+        "Cache-Control": "no-store",
+        "Content-Disposition": "inline"
+      });
+      res.end();
+      return;
+    }
+
     const responseRange = range || {
       start: 0,
       end: Math.min(stat.size - 1, defaultChunkBytes - 1)
@@ -75,6 +88,10 @@ export function createFileServer({ defaultChunkBytes, mimeTypes, normalizeExt, n
       "Cache-Control": "no-store",
       "Content-Disposition": "inline"
     });
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
     pipeFileRange(req, res, file.path, responseRange);
   }
 

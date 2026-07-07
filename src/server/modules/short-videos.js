@@ -61,8 +61,9 @@ export function createShortVideosModule({
     }
 
     const videoMatch = /^\/media\/short-video\/([^/]+)$/.exec(url.pathname);
-    if (videoMatch && req.method === "GET") {
-      const file = videoFileWithCache(decodeURIComponent(videoMatch[1]));
+    if (videoMatch && (req.method === "GET" || req.method === "HEAD")) {
+      const id = decodeURIComponent(videoMatch[1]);
+      const file = req.method === "HEAD" ? store.videoFile(id, { allowMissing: true }) : videoFileWithCache(id);
       if (!file || file.type !== "video") {
         notFound(res);
         return true;
