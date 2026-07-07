@@ -1,26 +1,24 @@
 export async function routeCatalogApi(req, res, url, deps) {
   const {
     notFound,
-    rankingSummaries,
-    rankingWorksPayload,
+    rankingService,
     sendJson,
-    studioDetailPayload,
-    studioSummaries
+    studioService
   } = deps;
 
   if (url.pathname === "/api/rankings" && req.method === "GET") {
-    sendJson(res, 200, { lists: rankingSummaries() });
+    sendJson(res, 200, { lists: rankingService.summaries() });
     return true;
   }
 
   if (url.pathname === "/api/rankings/top" && req.method === "GET") {
-    sendJson(res, 200, rankingWorksPayload(url, "top"));
+    sendJson(res, 200, rankingService.worksPayload(url, "top"));
     return true;
   }
 
   if (url.pathname === "/api/studios" && req.method === "GET") {
     try {
-      sendJson(res, 200, studioSummaries(url));
+      sendJson(res, 200, studioService.summaries(url));
     } catch (error) {
       sendJson(res, 500, { error: error.message || "读取厂商失败" });
     }
@@ -30,7 +28,7 @@ export async function routeCatalogApi(req, res, url, deps) {
   const studioMatch = /^\/api\/studios\/([^/]+)$/.exec(url.pathname);
   if (studioMatch && req.method === "GET") {
     try {
-      const payload = studioDetailPayload(decodeURIComponent(studioMatch[1]), url);
+      const payload = studioService.detailPayload(decodeURIComponent(studioMatch[1]), url);
       if (!payload) {
         notFound(res);
         return true;

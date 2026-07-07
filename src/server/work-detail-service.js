@@ -1,11 +1,11 @@
 export function createWorkDetailService({
   galleryMediaService,
   library,
+  mediaStreamService,
   prewarmRemoteImagesForWorks,
   publicPerson,
   publicWork,
   resolveLibraryWorkByPublicId,
-  serveInfo,
   videoProbeService
 }) {
   function detailPayload(workId) {
@@ -30,7 +30,7 @@ export function createWorkDetailService({
     const file = library.filesById.get(fileId);
     if (!file || file.type !== "info") return false;
 
-    serveInfo(res, file);
+    mediaStreamService.serveInfo(res, file);
     return true;
   }
 

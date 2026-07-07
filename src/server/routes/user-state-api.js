@@ -1,51 +1,46 @@
 export async function routeUserStateApi(req, res, url, deps) {
   const {
     clampInteger,
-    createFavoriteFolder,
-    favoriteFolderCounts,
-    favoriteWorks,
-    getVideoProgress,
-    historyEntries,
+    favoriteStateService,
     library,
     maxWorkLimit,
     notFound,
-    publicFavoriteFolders,
-    publicFavoriteForWork,
+    playbackProgressService,
     publicWork,
     readJsonBody,
     recentWatchedDays,
     resolvePlayableVideoFile,
-    sendJson,
-    userState,
-    userStateService,
-    userStateSummary,
-    moveFavoriteToFolder
+    sendJson
   } = deps;
 
   if (url.pathname === "/api/favorites" && req.method === "GET") {
     const rawFolderId = url.searchParams.get("folder") || "";
-    const selectedFolderId = rawFolderId ? userStateService.normalizeFavoriteFolderId(rawFolderId) : "";
-    const works = favoriteWorks(selectedFolderId).map((work) => publicWork(work));
+    const selectedFolderId = rawFolderId ? favoriteStateService.normalizeFavoriteFolderId(rawFolderId) : "";
+    const works = favoriteStateService.favoriteWorks(selectedFolderId).map((work) => publicWork(work));
     sendJson(res, 200, {
       count: works.length,
       works,
-      folders: publicFavoriteFolders(),
+      folders: favoriteStateService.publicFavoriteFolders(),
       selectedFolderId: selectedFolderId || "all"
     });
     return true;
   }
 
   if (url.pathname === "/api/favorite-folders" && req.method === "GET") {
-    sendJson(res, 200, { folders: publicFavoriteFolders() });
+    sendJson(res, 200, { folders: favoriteStateService.publicFavoriteFolders() });
     return true;
   }
 
   if (url.pathname === "/api/favorite-folders" && req.method === "POST") {
     const body = await readJsonBody(req);
     try {
-      const folder = createFavoriteFolder(body.name);
-      userStateService.save();
-      sendJson(res, 200, { ok: true, folder: { ...folder, count: favoriteFolderCounts().get(folder.id) || 0 }, folders: publicFavoriteFolders(), user: userStateSummary() });
+      const folder = favoriteStateService.createFavoriteFolder(body.name);
+      sendJson(res, 200, {
+        ok: true,
+        folder: { ...folder, count: favoriteStateService.favoriteFolderCounts().get(folder.id) || 0 },
+        folders: favoriteStateService.publicFavoriteFolders(),
+        user: playbackProgressService.userStateSummary()
+      });
     } catch (error) {
       sendJson(res, error.statusCode || 400, { error: error.message || "创建收藏夹失败" });
     }
@@ -56,7 +51,7 @@ export async function routeUserStateApi(req, res, url, deps) {
     const rawDays = String(url.searchParams.get("days") || "").trim().toLowerCase();
     const days = rawDays && rawDays !== "all" ? clampInteger(rawDays, 0, 1, 3650) : 0;
     const limit = clampInteger(url.searchParams.get("limit"), 0, 0, maxWorkLimit);
-    const entries = historyEntries({ days });
+    const entries = playbackProgressService.historyEntries({ days });
     const page = limit ? entries.slice(0, limit) : entries;
     const works = page.map((entry) => publicWork(entry.work));
     sendJson(res, 200, {
@@ -79,14 +74,13 @@ export async function routeUserStateApi(req, res, url, deps) {
 
     const body = await readJsonBody(req);
     try {
-      const favorite = moveFavoriteToFolder(workId, body.folderId);
-      userStateService.save();
+      const favorite = favoriteStateService.moveFavoriteToFolder(workId, body.folderId);
       sendJson(res, 200, {
         ok: true,
         workId,
         favorite,
-        folders: publicFavoriteFolders(),
-        user: userStateSummary()
+        folders: favoriteStateService.publicFavoriteFolders(),
+        user: playbackProgressService.userStateSummary()
       });
     } catch (error) {
       sendJson(res, error.statusCode || 400, { error: error.message || "移动收藏夹失败" });
@@ -102,24 +96,8 @@ export async function routeUserStateApi(req, res, url, deps) {
       return true;
     }
 
-    if (userState.favorites[workId]) {
-      delete userState.favorites[workId];
-    } else {
-      const body = await readJsonBody(req);
-      userState.favorites[workId] = {
-        createdAt: new Date().toISOString(),
-        folderId: userStateService.normalizeFavoriteFolderId(body.folderId)
-      };
-    }
-
-    userStateService.save();
-    sendJson(res, 200, {
-      workId,
-      favorite: Boolean(userState.favorites[workId]),
-      favoriteFolder: publicFavoriteForWork(workId),
-      folders: publicFavoriteFolders(),
-      user: userStateSummary()
-    });
+    const body = await readJsonBody(req);
+    sendJson(res, 200, { ...favoriteStateService.toggleFavorite(workId, body), user: playbackProgressService.userStateSummary() });
     return true;
   }
 
@@ -133,24 +111,11 @@ export async function routeUserStateApi(req, res, url, deps) {
     }
 
     const body = await readJsonBody(req);
-    const position = Number(body.position || 0);
-    const duration = Number(body.duration || body.total || 0);
-    const bodyWorkId = String(body.workId || "");
-    const workId = bodyWorkId && library.worksById.has(bodyWorkId) ? bodyWorkId : null;
-
-    if (!Number.isFinite(position) || !Number.isFinite(duration) || duration <= 0) {
-      sendJson(res, 400, { error: "播放进度无效" });
-      return true;
+    try {
+      sendJson(res, 200, { ok: true, progress: playbackProgressService.saveVideoProgress(videoId, body), user: playbackProgressService.userStateSummary() });
+    } catch (error) {
+      sendJson(res, error.statusCode || 400, { error: error.message || "播放进度无效" });
     }
-
-    userState.progress[videoId] = {
-      workId,
-      position: Math.max(0, position),
-      duration,
-      updatedAt: new Date().toISOString()
-    };
-    userStateService.save();
-    sendJson(res, 200, { ok: true, progress: getVideoProgress(videoId, library.worksById.get(workId)), user: userStateSummary() });
     return true;
   }
 

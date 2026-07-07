@@ -8,13 +8,14 @@ import { createWorkQueryService } from "../work-query-service.js";
 export function createVideoLibraryModule(deps) {
   function requestDeps() {
     const library = deps.getLibrary();
+    const workQueryService = createWorkQueryService({ ...deps, library });
     return {
       ...deps,
       library,
-      personDetailService: createPersonDetailService({ ...deps, library }),
+      personDetailService: createPersonDetailService({ ...deps, library, workQueryService }),
       workDetailService: createWorkDetailService({ ...deps, library }),
       workMutationService: createWorkMutationService(deps),
-      workQueryService: createWorkQueryService(deps)
+      workQueryService
     };
   }
 

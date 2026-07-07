@@ -247,6 +247,14 @@
   padding: 0 2px 10px;
 }
 
+body.search-expanded .content-panel {
+  margin-top: calc(58px + env(safe-area-inset-top));
+}
+
+body.search-view.search-expanded .content-panel {
+  margin-top: calc(110px + env(safe-area-inset-top));
+}
+
 .content-panel[data-feed-view="true"] .section-head {
   display: none;
 }
@@ -291,11 +299,12 @@
 }
 
 .text-button {
-  min-height: 36px;
+  min-width: 44px;
+  min-height: 44px;
   border: 0;
   background: transparent;
   color: var(--muted);
-  padding: 0 4px;
+  padding: 0 8px;
   font-size: 13px;
   font-weight: 900;
 }
@@ -422,15 +431,15 @@
 
 .ranking-chip-strip button {
   flex: 0 0 auto;
-  min-height: 28px;
+  min-height: 44px;
   max-width: 168px;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--surface-raised);
   color: var(--muted);
-  padding: 0 9px;
-  font-size: 11px;
+  padding: 0 12px;
+  font-size: 12px;
   font-weight: 900;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -458,13 +467,13 @@
 
 .people-sort-row button {
   flex: 0 0 auto;
-  min-height: 28px;
+  min-height: 44px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--surface-raised);
   color: var(--muted);
-  padding: 0 9px;
-  font-size: 11px;
+  padding: 0 12px;
+  font-size: 12px;
   font-weight: 900;
 }
 
@@ -696,6 +705,12 @@
   gap: 6px 8px;
 }
 
+@media (max-width: 360px) {
+  .content-panel[data-view="workDetail"] .detail-hero-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .work-detail-title-block {
   display: grid;
   min-width: 0;
@@ -826,7 +841,22 @@
 }
 
 button.work-detail-author {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 40px;
+  align-items: center;
+  border: 1px solid rgba(31, 122, 98, 0.18);
+  border-radius: 999px;
+  background: var(--green-soft);
   color: var(--green);
+  padding: 0 12px;
+}
+
+@media (max-width: 360px) {
+  button.work-detail-author {
+    grid-column: 1 / -1;
+  }
 }
 
 .person-detail-summary {
@@ -841,11 +871,14 @@ button.work-detail-author {
 }
 
 .person-source-chip {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
   border: 1px solid rgba(31, 122, 98, 0.2);
   border-radius: 999px;
   background: var(--green-soft);
   color: var(--green);
-  padding: 5px 9px;
+  padding: 0 10px;
   font-size: 12px;
   font-weight: 900;
   line-height: 1.15;
@@ -859,7 +892,7 @@ button.work-detail-author {
 }
 
 .detail-action-row button {
-  min-height: 38px;
+  min-height: 40px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-soft);
@@ -875,9 +908,9 @@ button.work-detail-author {
 }
 
 .content-panel[data-view="workDetail"] .detail-action-row button {
-  min-height: 32px;
-  padding: 0 8px;
-  font-size: 11.5px;
+  min-height: 40px;
+  padding: 0 11px;
+  font-size: 12px;
 }
 
 .detail-action-row .detail-back-action {
@@ -949,12 +982,12 @@ button.work-detail-author {
 }
 
 .work-fact-copy {
-  min-height: 28px;
+  min-height: 40px;
   border: 1px solid rgba(47, 128, 237, 0.18);
   border-radius: 8px;
   background: var(--button-soft);
   color: var(--blue);
-  padding: 0 9px;
+  padding: 0 13px;
   font-size: 12px;
   font-weight: 900;
 }
@@ -974,12 +1007,15 @@ button.work-detail-author {
 }
 
 .work-fact-chip {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
   max-width: 100%;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--surface-soft);
   color: var(--ink);
-  padding: 5px 9px;
+  padding: 0 11px;
   font-size: 12px;
   font-weight: 850;
   line-height: 1.2;
@@ -1022,11 +1058,12 @@ button.work-fact-chip:active {
 
 .work-preview-cover-reset,
 .work-preview-cover-action {
+  min-height: 40px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-raised);
   color: var(--green);
-  padding: 7px 9px;
+  padding: 0 12px;
   font-size: 11.5px;
   font-weight: 900;
   white-space: nowrap;
@@ -1090,12 +1127,12 @@ button.work-fact-chip:active {
 }
 
 .work-preview-video {
-  min-height: 36px;
+  min-height: 40px;
   border: 1px solid rgba(47, 128, 237, 0.18);
   border-radius: 8px;
   background: var(--button-soft);
   color: var(--blue);
-  padding: 0 12px;
+  padding: 0 14px;
   font-size: 13px;
   font-weight: 900;
 }
@@ -1212,6 +1249,14 @@ button.work-fact-chip:active {
 
 .related-work-strip::-webkit-scrollbar {
   display: none;
+}
+
+@media (max-width: 640px) {
+  .work-preview-strip,
+  .related-work-strip {
+    margin-right: -14px;
+    padding-right: 14px;
+  }
 }
 
 .related-work-card {

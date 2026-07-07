@@ -47,3 +47,6 @@ yarn-error.log*
 reference-projects/
 .references/
 data/short-video-covers/
+short-video-covers/
+.workbuddy/
+nul

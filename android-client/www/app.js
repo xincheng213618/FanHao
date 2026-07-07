@@ -2,8 +2,8 @@ import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STOR
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260705-mobile-actions-01";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
-import { createChannelViews } from "./js/channel-views.js?v=20260702-novel-local-manage-74";
-import { createDetailViews } from "./js/detail-views.js?v=20260706-mobile-web-sync-01";
+import { createChannelViews } from "./js/channel-views.js?v=20260707-mobile-offline-state-01";
+import { createDetailViews } from "./js/detail-views.js?v=20260707-mobile-detail-errors-01";
 import { getElements } from "./js/dom.js?v=20260706-short-video-reel-06";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260706-mobile-web-sync-01";
@@ -12,9 +12,9 @@ import { createNovelViews } from "./js/novel-views.js?v=20260702-novel-local-man
 import { createPeopleViews } from "./js/people-views.js";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
-import { createShortVideoViews } from "./js/short-video-views.js?v=20260707-short-video-cache-grid-01";
+import { createShortVideoViews } from "./js/short-video-views.js?v=20260707-short-video-list-shell-01";
 import { createToolViews } from "./js/tool-views.js?v=20260702-novel-local-manage-74";
-import { createWorkViews } from "./js/work-views.js?v=20260705-mobile-sync-01";
+import { createWorkViews } from "./js/work-views.js?v=20260707-mobile-offline-state-01";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
@@ -425,6 +425,15 @@ function restorePendingScroll() {
   window.setTimeout(restorePendingScroll, pending.attempts < 4 ? 80 : 220);
 }
 
+function cancelPendingScrollRestore() {
+  pendingScrollRestore = null;
+}
+
+function renderCurrentViewIfVisible(options = {}) {
+  if (currentView === "settings") return null;
+  return renderCurrentView(options);
+}
+
 async function updateCacheStatus() {
   if (!els.cacheStatus) return;
   try {
@@ -711,58 +720,19 @@ function syncShortVideoCounts() {
   els.channelShortVideoCount.textContent = totals.videos ? `${formatCompact(totals.videos)} 条` : "刷视频";
 }
 
-async function updateServiceHealth() {
+function updateServiceHealth() {
   if (!els.serviceHealthStatus) return;
-  const requestUrl = activeUrl;
-  els.serviceHealthStatus.textContent = "正在检查服务状态";
-  renderServiceHealth(null);
-  try {
-    const health = await fetchJson(requestUrl, "/api/health", { timeoutMs: 8000 });
-    if (requestUrl !== activeUrl) return;
-    renderServiceHealth(health);
-  } catch (error) {
-    if (requestUrl !== activeUrl) return;
-    renderServiceHealth(null, error);
-  }
+  renderConfiguredService();
 }
 
-function renderServiceHealth(health, error = null) {
+function renderConfiguredService() {
   if (!els.serviceHealthStatus) return;
-  const mode = health?.access ? connectionModeLabel(activeUrl, health.access) : connectionModeLabel(activeUrl);
-
-  if (error) {
-    els.serviceHealthStatus.textContent = `无法连接：${error.message}`;
-    els.serviceHealthStatus.classList.add("error");
-    setHealthMetric(els.healthMode, mode);
-    setHealthMetric(els.healthRoots, "-");
-    setHealthMetric(els.healthWorks, "-");
-    setHealthMetric(els.healthScannedAt, "-");
-    return;
-  }
-
-  if (!health) {
-    els.serviceHealthStatus.textContent = "等待服务状态";
-    els.serviceHealthStatus.classList.remove("error");
-    setHealthMetric(els.healthMode, mode);
-    setHealthMetric(els.healthRoots, "-");
-    setHealthMetric(els.healthWorks, "-");
-    setHealthMetric(els.healthScannedAt, "-");
-    return;
-  }
-
-  const missingCount = Number(health.missingRootCount || 0);
-  const availableCount = Number(health.availableRootCount || 0);
-  const totalRoots = availableCount + missingCount;
-  els.serviceHealthStatus.textContent = health.lastScanError
-    ? `索引异常：${health.lastScanError}`
-    : missingCount
-      ? `有 ${formatNumber(missingCount)} 个根目录不可用`
-      : "服务正常，全部根目录可用";
-  els.serviceHealthStatus.classList.toggle("error", Boolean(health.lastScanError || missingCount));
-  setHealthMetric(els.healthMode, mode);
-  setHealthMetric(els.healthRoots, totalRoots ? `${formatNumber(availableCount)}/${formatNumber(totalRoots)}` : formatNumber(availableCount));
-  setHealthMetric(els.healthWorks, formatCompact(health.totals?.works));
-  setHealthMetric(els.healthScannedAt, health.scannedAt ? cacheAgeText(health.scannedAt) : "-");
+  els.serviceHealthStatus.textContent = "已按当前地址配置，打开内容时会直接使用";
+  els.serviceHealthStatus.classList.remove("error");
+  setHealthMetric(els.healthMode, connectionModeLabel(activeUrl));
+  setHealthMetric(els.healthRoots, "不检测");
+  setHealthMetric(els.healthWorks, "-");
+  setHealthMetric(els.healthScannedAt, "-");
 }
 
 function setHealthMetric(element, text) {
@@ -1039,7 +1009,7 @@ async function loadDashboard() {
     const targetMode = connectionModeLabel(activeUrl);
     setConnection(`${targetMode} · 缓存`, false);
     setStatus(`已显示${targetMode}服务的本地缓存：${cacheAgeText(cached.updatedAt)}，正在连接电脑端。`);
-    renderCurrentView();
+    renderCurrentViewIfVisible();
   }
 
   try {
@@ -1050,7 +1020,7 @@ async function loadDashboard() {
     setConnection(connectionModeLabel(activeUrl, library.access), true);
     setStatus(`索引时间：${library.scannedAt ? new Date(library.scannedAt).toLocaleString() : "未知"}`);
     updateServiceHealth();
-    renderCurrentView();
+    renderCurrentViewIfVisible();
     updateCacheStatus();
     return true;
   } catch (error) {
@@ -1065,8 +1035,10 @@ async function loadDashboard() {
     library = null;
     setStatus(`连接失败：${error.message}`, "error");
     renderOffline();
-    showHome();
-    els.settingsPanel.hidden = false;
+    if (currentView !== "settings") {
+      showHome();
+      els.settingsPanel.hidden = false;
+    }
     updateServiceHealth();
     updateCacheStatus();
     return false;
@@ -1252,6 +1224,7 @@ function showHome(options = {}) {
 
 function showSettings(options = {}) {
   invalidateViewRender();
+  cancelPendingScrollRestore();
   document.body.classList.remove("novel-reader-view");
   currentView = "settings";
   currentViewParams = {};
@@ -1274,9 +1247,10 @@ function showSettings(options = {}) {
   updateCacheStatus();
   updateServiceHealth();
   renderAndroidUpdateState({ version: androidVersionInfo });
-  checkAndroidUpdate({ silent: true });
   if (!options.skipHistory) pushViewHistory("settings", {});
-  queueScrollRestore(options.restoreScrollY ?? 0);
+  if (Number.isFinite(Number(options.restoreScrollY))) {
+    queueScrollRestore(options.restoreScrollY);
+  }
 }
 
 function showView(view, params = {}, navigation = {}) {
@@ -1459,6 +1433,7 @@ function renderCurrentView(options = {}) {
   els.viewContent.className = "content-list";
   syncSearchSurface();
   syncFanhaoSectionNav();
+  renderRouteLoadingState();
   const renderGuard = beginViewRender(currentView, currentViewParams);
 
   if (currentView === "people") {
@@ -1532,6 +1507,62 @@ function renderCurrentView(options = {}) {
 
 function renderCurrentViewPreservingScroll() {
   return renderCurrentView({ restoreScrollY: currentScrollY() });
+}
+
+function renderRouteLoadingState() {
+  const copy = routeLoadingCopy(currentView, currentViewParams);
+  els.viewKicker.textContent = copy.kicker;
+  els.viewTitle.textContent = copy.title;
+  els.viewMeta.textContent = copy.meta;
+  els.viewContent.replaceChildren(createLoadingRow(copy.message));
+}
+
+function createLoadingRow(message) {
+  const row = document.createElement("div");
+  row.className = "loading-row route-loading";
+  const label = document.createElement("span");
+  label.textContent = message;
+  row.append(label);
+  return row;
+}
+
+function routeLoadingCopy(view = currentView, params = currentViewParams) {
+  if (view === "channel") {
+    const mode = normalizeChannelMode(params.mode);
+    const label = channelViews?.channelLabel(mode) || PRIMARY_LABELS[bottomNavKeyFor(view, params)] || "频道";
+    return {
+      kicker: params.query ? "频道搜索" : "内容频道",
+      title: params.query ? `${label}：${params.query}` : label,
+      meta: params.query ? "正在筛选" : "正在读取",
+      message: `正在打开${label}`
+    };
+  }
+
+  if (view === "mediaDetail") {
+    const label = channelViews?.channelLabel(params.mode) || "媒体";
+    return { kicker: label, title: "媒体详情", meta: "正在读取", message: `正在读取${label}详情` };
+  }
+
+  if (view === "photoDetail") return { kicker: "套图", title: "图包详情", meta: "正在读取", message: "正在读取图包" };
+  if (view === "mangaDetail") return { kicker: "韩漫", title: "漫画详情", meta: "正在读取", message: "正在读取漫画" };
+  if (view === "mangaChapter") return { kicker: "韩漫阅读", title: "章节", meta: "正在读取", message: "正在读取章节" };
+  if (view === "personDetail") return { kicker: "人物", title: "人物详情", meta: "正在读取", message: "正在加载人物资料" };
+  if (view === "workDetail") return { kicker: "作品详情", title: "作品详情", meta: "正在读取", message: "正在加载作品详情" };
+  if (view === "novelDetail") return { kicker: "小说", title: "书籍详情", meta: "正在读取", message: "正在读取书籍详情" };
+  if (view === "novelReader") return { kicker: "小说阅读", title: "章节", meta: "正在读取", message: "正在翻开章节" };
+  if (view === "shortVideoBrowser") return { kicker: "短视频", title: "正在播放", meta: "上滑切换", message: "正在打开短视频" };
+  if (view === "rankings") return { kicker: "榜单", title: "排行榜", meta: "正在加载", message: "正在加载排行榜" };
+  if (view === "studios") return { kicker: "片商", title: "片商索引", meta: "正在加载", message: "正在加载片商" };
+  if (view === "studioDetail") return { kicker: "片商", title: "片商作品", meta: "正在加载", message: "正在加载片商作品" };
+  if (view === "vr") return { kicker: "VR", title: "VR 作品", meta: "正在加载", message: "正在加载 VR 作品" };
+  if (view === "favorites") return { kicker: "收藏", title: "已收藏作品", meta: "正在读取", message: "正在加载收藏" };
+  if (view === "history") return { kicker: "继续观看", title: "观看进度", meta: "正在读取", message: "正在加载观看进度" };
+  if (view === "search") return { kicker: "搜索", title: params.query ? `搜索：${params.query}` : "全库搜索", meta: "正在搜索", message: "正在搜索" };
+  if (view === "people") return { kicker: "人物索引", title: "全部人物", meta: "正在整理", message: "正在整理人物索引" };
+  if (view === "novels") return { kicker: "小说", title: "书库", meta: "正在读取", message: "正在读取书库" };
+  if (view === "shortVideos") return { kicker: "抖音点赞", title: "短视频", meta: "正在读取", message: "正在读取短视频" };
+  if (view === "tools") return { kicker: "小工具", title: "工具", meta: "正在准备", message: "正在准备工具" };
+  return { kicker: "作品", title: "片库", meta: "正在加载", message: "正在加载作品" };
 }
 
 function syncContentPanelMode() {
@@ -2056,8 +2087,10 @@ els.connectForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
     updateServer(els.serverUrl.value);
-    setStatus("服务地址已保存，正在刷新状态。");
-    await loadDashboard();
+    androidUpdateInfo = null;
+    updateServiceHealth();
+    renderAndroidUpdateState({ version: androidVersionInfo, update: null });
+    setStatus("服务地址已保存，打开内容时会按这个地址使用。");
   } catch {
     setStatus("地址格式不对，可以写成 192.168.31.86:29998。", "error");
   }
@@ -2111,9 +2144,12 @@ els.recentContentClear?.addEventListener("click", () => {
 });
 
 for (const button of els.quickServers) {
-  button.addEventListener("click", async () => {
+  button.addEventListener("click", () => {
     updateServer(button.dataset.url);
-    await loadDashboard();
+    androidUpdateInfo = null;
+    updateServiceHealth();
+    renderAndroidUpdateState({ version: androidVersionInfo, update: null });
+    setStatus("服务地址已切换，打开内容时会按这个地址使用。");
   });
 }
 

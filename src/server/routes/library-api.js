@@ -1,10 +1,13 @@
+const libraryPeoplePayloadCache = new Map();
+
 export async function routeLibraryReadApi(req, res, url, deps) {
   const {
     appConfigService,
     getLastScanError,
     library,
-    mainLibraryPeople,
-    normalizePeopleScope,
+    peopleScopeService,
+    personListService,
+    peoplePayloadStamp,
     publicPerson,
     requestAccess,
     sendJson,
@@ -12,10 +15,16 @@ export async function routeLibraryReadApi(req, res, url, deps) {
   } = deps;
 
   if (url.pathname === "/api/library" && req.method === "GET") {
-    const scope = normalizePeopleScope(url.searchParams.get("scope"));
+    const scope = peopleScopeService.normalize(url.searchParams.get("scope"));
     const user = userStateSummary();
-    const people = mainLibraryPeople(scope);
+    const people = personListService.mainLibraryPeople(scope);
     const lastScanError = getLastScanError();
+    const publicPeople = cachedPublicPeople({
+      people,
+      publicPerson,
+      scope,
+      stamp: typeof peoplePayloadStamp === "function" ? peoplePayloadStamp(scope) : `${library.scannedAt || ""}:${scope}:${people.length}`
+    });
     sendJson(res, 200, {
       root: library.root,
       roots: library.roots,
@@ -31,7 +40,7 @@ export async function routeLibraryReadApi(req, res, url, deps) {
       access: requestAccess(req),
       lastScanError: lastScanError?.message || null,
       scope,
-      people: people.map((person) => publicPerson(person, { skipFallbackAvatar: scope === "western" }))
+      people: publicPeople
     });
     return true;
   }
@@ -46,6 +55,19 @@ export async function routeLibraryReadApi(req, res, url, deps) {
   }
 
   return false;
+}
+
+function cachedPublicPeople({ people, publicPerson, scope, stamp }) {
+  const cacheKey = `${scope}:${stamp}:${people.length}`;
+  const cached = libraryPeoplePayloadCache.get(cacheKey);
+  if (cached) return cached;
+  const payload = people.map((person) => publicPerson(person, { skipFallbackAvatar: true }));
+  libraryPeoplePayloadCache.set(cacheKey, payload);
+  while (libraryPeoplePayloadCache.size > 6) {
+    const oldest = libraryPeoplePayloadCache.keys().next().value;
+    libraryPeoplePayloadCache.delete(oldest);
+  }
+  return payload;
 }
 
 export async function routeLibraryMutationApi(req, res, url, deps) {

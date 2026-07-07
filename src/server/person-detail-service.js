@@ -1,32 +1,25 @@
 export function createPersonDetailService({
   actorProfileMergeCandidates,
   actorProfileRow,
+  adminCoreMutationService,
   coreMissingWorksForPerson,
   corePersonFallbackRecord,
   dedupeWorksForDisplay,
-  deletePersonLocalFiles,
   enrichLocalWorksWithActorMovieInfo,
   library,
+  manualCoverStateService,
   maxActorAvatarBytes,
-  mergePeopleIntoTarget,
   mergedActorMovieRows,
   mergedPersonRecord,
   missingActorWorksForPerson,
-  normalizePeopleScope,
-  pagedWorksPayload,
-  personMatchesPeopleScope,
+  peopleScopeService,
   publicActorProfile,
   publicPerson,
   resolveLibraryPersonByPublicId,
-  setPersonManualCover,
-  setPersonUploadedCover,
-  sortWorkList,
   storedWorkCodeKey,
-  upsertActorProfile,
+  workLocalMutationService,
   workCodeKeySetForWorks,
-  workFacets,
-  workMatchesFilter,
-  workMatchesPeopleScope
+  workQueryService,
 }) {
   const coverBodyLimit = Math.ceil(maxActorAvatarBytes * 1.4) + 128 * 1024;
 
@@ -40,7 +33,7 @@ export function createPersonDetailService({
     const person = resolveLibraryPersonByPublicId(personId);
     if (!person) return null;
 
-    const profile = upsertActorProfile(person, body);
+    const profile = adminCoreMutationService.upsertActorProfile(person, body);
     const mergeCandidates = actorProfileMergeCandidates(person.id, [
       profile?.displayName,
       ...(profile?.aliases || [])
@@ -50,28 +43,27 @@ export function createPersonDetailService({
 
   function setCover(personId, body) {
     const result = body.imageBase64 || body.avatarBase64
-      ? setPersonUploadedCover(personId, body)
-      : setPersonManualCover(personId, body.workId || "");
+      ? manualCoverStateService.setPersonUploadedCover(personId, body)
+      : manualCoverStateService.setPersonManualCover(personId, body.workId || "");
     return { ok: true, ...result };
   }
 
   function mergeIntoTarget(targetPersonId, body) {
-    const result = mergePeopleIntoTarget(targetPersonId, body.sourcePersonIds || body.sources || []);
+    const result = adminCoreMutationService.mergePeopleIntoTarget(targetPersonId, body.sourcePersonIds || body.sources || []);
     return { ok: true, ...result };
   }
 
   function detailPayload(personId, url) {
-    const scope = normalizePeopleScope(url.searchParams.get("scope"));
+    const scope = peopleScopeService.normalize(url.searchParams.get("scope"));
     const rawPerson = resolveLibraryPersonByPublicId(personId) || corePersonFallbackRecord(personId);
     const person = mergedPersonRecord(rawPerson);
-    if (!person || !personMatchesPeopleScope(person, scope)) return null;
+    if (!person || !peopleScopeService.personMatches(person, scope)) return null;
 
     const filter = url.searchParams.get("filter") || "all";
-    const sort = url.searchParams.get("sort") || "releaseDesc";
     const actorRows = mergedActorMovieRows(person.id);
     const rawLocalWorks = person.works
       .map((workId) => library.worksById.get(workId))
-      .filter((work) => work && workMatchesPeopleScope(work, scope));
+      .filter((work) => work && peopleScopeService.workMatches(work, scope));
     const localWorks = enrichLocalWorksWithActorMovieInfo(rawLocalWorks, actorRows);
     const personLocalCodeKeys = workCodeKeySetForWorks(rawLocalWorks);
     const coreMissingWorks = scope === "western" ? [] : coreMissingWorksForPerson(person, personLocalCodeKeys);
@@ -84,19 +76,21 @@ export function createPersonDetailService({
       })
     ];
     const allPersonWorks = dedupeWorksForDisplay([...localWorks, ...missingWorks]);
-    const works = sortWorkList(allPersonWorks.filter((work) => workMatchesFilter(work, filter)), sort);
     return {
       person: publicPerson(person, {
         actorMovieCount: actorRows.length,
         missingLocalWorkCount: missingWorks.length,
         skipFallbackAvatar: scope === "western"
       }),
-      ...pagedWorksPayload(works, url, { filter, facets: workFacets(allPersonWorks) })
+      ...workQueryService.listFromWorksPayload(allPersonWorks, url, {
+        filter,
+        facets: workQueryService.facets(allPersonWorks)
+      })
     };
   }
 
   function deleteLocalFiles(personId) {
-    const result = deletePersonLocalFiles(personId);
+    const result = workLocalMutationService.deletePersonLocalFiles(personId);
     const rawPerson = resolveLibraryPersonByPublicId(personId) || corePersonFallbackRecord(personId);
     const person = mergedPersonRecord(rawPerson) || rawPerson;
     return {

@@ -45,19 +45,16 @@ export function createPersonLibraryService({
   actorProfileSearchNames,
   compareNaturalTitle,
   getLibrary,
+  libraryIndexService,
   libraryOpenRoots,
   libraryRoots,
   normalizeSourcePath,
   pathWithinRoot,
-  registerFiles,
   relativeFromRoot,
-  replaceCoreLocalFilesForWork,
   rootLabel,
   safeStat,
-  saveLibraryCache,
   scanPersonDirectory,
   sourcePathToAbsolute,
-  invalidateLibraryDerivedCaches,
   warn = console.warn
 }) {
   function sourcePathCandidates(person, options = {}) {
@@ -196,10 +193,10 @@ export function createPersonLibraryService({
     }
 
     for (const work of works) {
-      registerFiles(library, [...work.videos, ...work.images, ...work.infos]);
+      libraryIndexService.registerWorkFiles(library, work);
       library.worksById.set(work.id, work);
       try {
-        replaceCoreLocalFilesForWork(work);
+        libraryIndexService.replaceLocalFilesForWork(work);
       } catch (error) {
         warn("[core-local-files]", error.message);
       }
@@ -210,8 +207,8 @@ export function createPersonLibraryService({
     if (personIndex >= 0) library.people[personIndex] = nextPerson;
     library.peopleById.set(person.id, nextPerson);
     recalculateLibraryTotals(library);
-    saveLibraryCache(library);
-    invalidateLibraryDerivedCaches();
+    libraryIndexService.saveCache(library);
+    libraryIndexService.invalidateDerivedCaches?.();
     return nextPerson;
   }
 

@@ -9,13 +9,13 @@ export function createGalleryMediaService({
   ffmpegPath,
   getImageGalleryDb,
   getImageLibraryIndex,
-  getVideoProgress,
+  mediaStreamService,
   normalizeExt,
   notFound,
+  playbackProgressService,
   publicGalleryMediaItem,
   safeChildPath,
   safeStat,
-  serveVideo,
   videoProbeCached
 }) {
   function byId(id) {
@@ -51,7 +51,7 @@ export function createGalleryMediaService({
     const publicItem = publicGalleryMediaItem(item);
     const filePath = mediaPath(item);
     const stat = safeStat(filePath);
-    const progress = getVideoProgress(item.id);
+    const progress = playbackProgressService.getVideoProgress(item.id);
     return {
       ...publicItem,
       size: stat?.size || item.size || 0,
@@ -268,7 +268,7 @@ export function createGalleryMediaService({
       notFound(res);
       return;
     }
-    serveVideo(req, res, file);
+    mediaStreamService.serveVideo(req, res, file);
   }
 
   function serveCover(res, mediaId) {

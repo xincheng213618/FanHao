@@ -73,7 +73,7 @@ export function createDetailViews(context) {
         return;
       } else {
         els.viewTitle.textContent = "人物";
-        renderMessage(error.message, "error");
+        renderMessage(detailErrorMessage(error, "人物资料读取失败，请检查服务连接"), "error");
       }
     }
   }
@@ -88,7 +88,7 @@ export function createDetailViews(context) {
     els.viewContent.innerHTML = "";
     els.viewContent.append(createPersonDetailHero(person));
     els.viewContent.append(createDetailSectionTitle("作品", "等待电脑端连接"));
-    renderMessage(`作品列表暂时无法加载：${error.message}`, "quiet", false);
+    renderMessage(`作品列表暂时无法加载：${detailErrorMessage(error, "请检查服务连接")}`, "quiet", false);
     return true;
   }
 
@@ -234,7 +234,7 @@ export function createDetailViews(context) {
         renderMessage("电脑端暂时连不上，当前显示的是本地缓存。", "quiet", false);
       } else {
         els.viewTitle.textContent = "作品详情";
-        renderMessage(error.message, "error");
+        renderMessage(detailErrorMessage(error, "作品详情读取失败，请检查服务连接"), "error");
       }
     }
   }
@@ -523,7 +523,7 @@ export function createDetailViews(context) {
         button.disabled = false;
         button.textContent = previousText;
       }
-      renderMessage(error.message || "封面设置失败", "error", false);
+      renderMessage(detailErrorMessage(error, "封面设置失败，请稍后重试"), "error", false);
     }
   }
 
@@ -931,7 +931,7 @@ export function createDetailViews(context) {
       mount.innerHTML = "";
       const box = document.createElement("div");
       box.className = "message-box error";
-      box.textContent = error.message;
+      box.textContent = detailErrorMessage(error, "相关作品读取失败，请检查服务连接");
       mount.append(box);
       if (meta) meta.textContent = "";
     }
@@ -1059,7 +1059,7 @@ export function createDetailViews(context) {
     } catch (error) {
       work.localMarkers = previousMarkers;
       syncLocalMarkerButton(button, work, key);
-      renderMessage(error.message || "更新作品标记失败", "error", false);
+      renderMessage(detailErrorMessage(error, "更新作品标记失败，请稍后重试"), "error", false);
     } finally {
       button.disabled = false;
       syncLocalMarkerButton(button, work, key);
@@ -1086,7 +1086,7 @@ export function createDetailViews(context) {
     } catch (error) {
       button.disabled = false;
       button.textContent = "删除失败";
-      renderMessage(error.message || "删除本地文件失败", "error", false);
+      renderMessage(detailErrorMessage(error, "删除本地文件失败，请稍后重试"), "error", false);
       window.setTimeout(() => syncDeleteLocalButton(button, work), 1400);
     }
   }
@@ -1115,10 +1115,17 @@ export function createDetailViews(context) {
       if (data.user) onUserStateChange?.(data.user);
     } catch (error) {
       syncFavoriteButton(button, previous);
-      renderMessage(error.message, "error", false);
+      renderMessage(detailErrorMessage(error, "收藏状态更新失败，请稍后重试"), "error", false);
     } finally {
       button.disabled = false;
     }
+  }
+
+  function detailErrorMessage(error, fallback) {
+    const message = String(error?.message || "").trim();
+    if (!message) return fallback;
+    if (/failed to fetch|network|timeout/i.test(message)) return fallback;
+    return message;
   }
 
   return {

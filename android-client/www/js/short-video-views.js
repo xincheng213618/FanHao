@@ -125,7 +125,7 @@ export function createShortVideoViews(deps) {
       if (renderGuard && !renderGuard()) return;
       listState.loading = false;
       listState.loadingMore = false;
-      listState.status = error.message || "短视频读取失败";
+      listState.status = shortVideoErrorMessage(error, "短视频读取失败，请检查服务连接");
       renderListShell();
     }
   }
@@ -135,6 +135,7 @@ export function createShortVideoViews(deps) {
     resetListLoadMoreObserver();
     const shell = document.createElement("section");
     shell.className = "short-video-mobile-list";
+    shell.append(renderListHero(), renderControls());
     if (listState.status && !(listState.data?.videos || []).length) {
       const status = document.createElement("div");
       status.className = "short-video-mobile-status";
@@ -149,7 +150,9 @@ export function createShortVideoViews(deps) {
     if (!(listState.data?.videos || []).length) {
       const empty = document.createElement("div");
       empty.className = "short-video-mobile-empty";
-      empty.textContent = listState.loading ? "正在读取短视频" : listState.status || "没有匹配的视频";
+      empty.textContent = listState.loading
+        ? "正在读取短视频"
+        : listState.status ? "可以稍后重试或点刷新" : "没有匹配的视频";
       grid.append(empty);
     }
     shell.append(grid);
@@ -183,7 +186,7 @@ export function createShortVideoViews(deps) {
     refresh.disabled = listState.loading;
     refresh.addEventListener("click", () => rescan().catch((error) => {
       listState.loading = false;
-      listState.status = error.message || "刷新失败";
+      listState.status = shortVideoErrorMessage(error, "刷新失败，请检查服务连接");
       renderListShell();
     }));
     hero.append(body, refresh);
@@ -279,7 +282,7 @@ export function createShortVideoViews(deps) {
       if (!listState.data?.hasMore || listState.loading || listState.loadingMore) return;
       loadList(null, { append: true }).catch((error) => {
         listState.loadingMore = false;
-        listState.status = error.message || "加载失败";
+        listState.status = shortVideoErrorMessage(error, "加载失败，请稍后重试");
         renderListShell();
       });
     }, { root: null, rootMargin: "720px 0px", threshold: 0.01 });
@@ -515,6 +518,8 @@ export function createShortVideoViews(deps) {
     caption.className = "short-video-mobile-caption";
     const author = document.createElement("strong");
     author.textContent = `@${video.author?.name || "未知作者"}`;
+    author.style.cursor = "pointer";
+    author.addEventListener("click", () => showAuthorPanel(video));
     const title = document.createElement("p");
     title.textContent = video.title || "";
     const meta = document.createElement("span");
@@ -526,7 +531,7 @@ export function createShortVideoViews(deps) {
       const rail = document.createElement("aside");
       rail.className = "short-video-mobile-rail";
       rail.append(railButton("", createIcon("ai"), "ai", "AI"));
-      rail.append(authorRailButton(video));
+      rail.append(authorRailButton(video, () => showAuthorPanel(video)));
       rail.append(railMetric("heart", video.stats?.likes, "like", "点赞", toggleRailActive));
       rail.append(railMetric("comment", video.stats?.comments, "comment", "评论"));
       rail.append(railMetric("star", video.stats?.collects, "collect", "收藏", toggleRailActive));
@@ -553,8 +558,15 @@ export function createShortVideoViews(deps) {
     els.viewContent.innerHTML = "";
     const box = document.createElement("div");
     box.className = "short-video-mobile-empty";
-    box.textContent = error?.message || "视频打开失败";
+    box.textContent = shortVideoErrorMessage(error, "视频打开失败，请稍后重试");
     els.viewContent.append(box);
+  }
+
+  function shortVideoErrorMessage(error, fallback) {
+    const message = String(error?.message || "").trim();
+    if (!message) return fallback;
+    if (/failed to fetch|network|timeout/i.test(message)) return fallback;
+    return message;
   }
 
   function showShortVideoListSearch() {
@@ -963,7 +975,7 @@ export function createShortVideoViews(deps) {
     return button;
   }
 
-  function authorRailButton(video) {
+  function authorRailButton(video, action = null) {
     const avatar = document.createElement("span");
     avatar.className = "short-video-mobile-author-avatar";
     if (video.author?.avatarUrl) {
@@ -978,7 +990,7 @@ export function createShortVideoViews(deps) {
     plus.className = "short-video-mobile-author-plus";
     plus.append(createIcon("plusBadge"));
     avatar.append(plus);
-    return railButton("", avatar, "author", video.author?.name ? `作者 ${video.author.name}` : "作者");
+    return railButton("", avatar, "author", video.author?.name ? `作者 ${video.author.name}` : "作者", action);
   }
 
   function railButton(label, icon, kind = "", ariaLabel = "", action = null) {
@@ -999,6 +1011,105 @@ export function createShortVideoViews(deps) {
     }
     if (action) button.addEventListener("click", action);
     return button;
+  }
+
+  let authorPanelEl = null;
+
+  function closeAuthorPanel() {
+    if (!authorPanelEl) return;
+    authorPanelEl.remove();
+    authorPanelEl = null;
+  }
+
+  function shortVideoToast(message) {
+    const existing = document.querySelector(".short-video-mobile-toast");
+    if (existing) existing.remove();
+    const toast = document.createElement("div");
+    toast.className = "short-video-mobile-toast";
+    toast.textContent = message;
+    document.body.append(toast);
+    window.setTimeout(() => toast.remove(), 2200);
+  }
+
+  async function viewAuthorVideos(secUid) {
+    if (!secUid) return;
+    closeAuthorPanel();
+    const stack = activeReelStack();
+    if (stack) stopPanelMedia(stack);
+    document.body.classList.remove("short-video-mobile-browser-view");
+    await renderList({ author: secUid });
+  }
+
+  function showAuthorPanel(video) {
+    const secUid = String(video?.secUid || video?.author?.secUid || "").trim();
+    if (!secUid) {
+      shortVideoToast("该视频没有可识别的作者信息");
+      return;
+    }
+    closeAuthorPanel();
+    const author = video?.author || {};
+    const name = author.name || "未知作者";
+    const avatarUrl = author.avatarUrl || "";
+    const profileUrl = String(author.profileUrl || "").trim() || `https://www.douyin.com/user/${encodeURIComponent(secUid)}`;
+
+    const overlay = document.createElement("div");
+    overlay.className = "short-video-mobile-author-panel";
+    ["touchstart", "touchmove", "touchend", "wheel", "click"].forEach((ev) =>
+      overlay.addEventListener(ev, (event) => event.stopPropagation(), { passive: false })
+    );
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) closeAuthorPanel();
+    });
+
+    const sheet = document.createElement("div");
+    sheet.className = "author-sheet";
+
+    const header = document.createElement("div");
+    header.className = "author-sheet-header";
+    const avatar = document.createElement("span");
+    avatar.className = "short-video-mobile-author-avatar author-sheet-avatar";
+    if (avatarUrl) {
+      const img = document.createElement("img");
+      img.src = avatarUrl;
+      img.alt = name;
+      avatar.append(img);
+    } else {
+      avatar.textContent = initials(name || "?");
+    }
+    const info = document.createElement("div");
+    info.className = "author-sheet-info";
+    const nameEl = document.createElement("strong");
+    nameEl.textContent = `@${name}`;
+    const handle = document.createElement("span");
+    handle.textContent = `抖音号 ${secUid}`;
+    info.append(nameEl, handle);
+    header.append(avatar, info);
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "author-sheet-close";
+    closeBtn.setAttribute("aria-label", "关闭");
+    closeBtn.textContent = "✕";
+    closeBtn.addEventListener("click", closeAuthorPanel);
+
+    const actions = document.createElement("div");
+    actions.className = "author-sheet-actions";
+    const douyinBtn = document.createElement("button");
+    douyinBtn.type = "button";
+    douyinBtn.className = "author-sheet-action";
+    douyinBtn.textContent = "在抖音打开主页";
+    douyinBtn.addEventListener("click", () => window.open(profileUrl, "_system"));
+    const allBtn = document.createElement("button");
+    allBtn.type = "button";
+    allBtn.className = "author-sheet-action is-primary";
+    allBtn.textContent = "查看该作者全部视频";
+    allBtn.addEventListener("click", () => viewAuthorVideos(secUid));
+    actions.append(douyinBtn, allBtn);
+
+    sheet.append(header, closeBtn, actions);
+    overlay.append(sheet);
+    document.body.append(overlay);
+    authorPanelEl = overlay;
   }
 
   function toggleRailActive(event) {

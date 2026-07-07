@@ -39,7 +39,7 @@ body.media-viewer-open .bottom-nav {
   grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 8px;
   align-items: center;
-  min-height: 42px;
+  min-height: 48px;
   padding: 6px 0;
   color: #fff;
   opacity: 1;
@@ -65,8 +65,8 @@ body.media-viewer-open .bottom-nav {
 }
 
 .media-viewer-close {
-  width: 38px;
-  height: 38px;
+  width: 44px;
+  height: 44px;
   border: 1px solid rgba(255, 255, 255, 0.24);
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.12);
@@ -99,8 +99,8 @@ body.media-viewer-open .bottom-nav {
   position: absolute;
   top: 50%;
   display: grid;
-  width: 42px;
-  height: 58px;
+  width: 48px;
+  height: 64px;
   place-items: center;
   transform: translateY(-50%);
   border: 0;
@@ -115,11 +115,11 @@ body.media-viewer-open .bottom-nav {
 }
 
 .media-viewer-nav.prev {
-  left: 8px;
+  left: 6px;
 }
 
 .media-viewer-nav.next {
-  right: 8px;
+  right: 6px;
 }
 
 .media-viewer-nav:disabled {
@@ -134,8 +134,8 @@ body.media-viewer-open .bottom-nav {
   left: 12px;
   z-index: 2;
   display: grid;
-  gap: 8px;
-  padding: 10px 12px 12px;
+  gap: 10px;
+  padding: 12px 12px 14px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 8px;
   background: rgba(5, 8, 12, 0.72);
@@ -171,9 +171,10 @@ body.media-viewer-open .bottom-nav {
 
 .media-viewer-range {
   width: 100%;
-  height: 28px;
+  min-height: 40px;
   margin: 0;
   accent-color: #fff;
+  touch-action: pan-x;
 }
 
 .media-viewer-range:disabled {

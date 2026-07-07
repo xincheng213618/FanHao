@@ -164,7 +164,7 @@ label {
 }
 
 .settings-action-row button {
-  min-height: 46px;
+  min-height: 50px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-raised);
@@ -201,18 +201,18 @@ label {
   z-index: 30;
   display: grid;
   width: min(100%, 560px);
-  grid-template-columns: repeat(7, minmax(0, 1fr));
-  gap: 4px;
+  grid-template-columns: repeat(7, minmax(40px, 1fr));
+  gap: 2px;
   transform: translateX(-50%);
   border-top: 1px solid var(--line);
   background: var(--nav-surface);
-  padding: 7px 5px calc(7px + env(safe-area-inset-bottom));
+  padding: 7px 4px calc(7px + env(safe-area-inset-bottom));
   backdrop-filter: blur(12px);
 }
 
 .bottom-nav button {
   display: grid;
-  min-height: 46px;
+  min-height: 50px;
   place-items: center;
   padding: 0 2px;
   overflow: hidden;
@@ -247,6 +247,22 @@ button:active {
     padding-left: 12px;
   }
 
+  .settings-panel {
+    gap: 10px;
+    margin-top: 12px;
+  }
+
+  .settings-group {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  #connectForm,
+  .service-health,
+  .server-list {
+    gap: 7px;
+  }
+
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -258,5 +274,31 @@ button:active {
 
   .person-preview {
     grid-auto-columns: 138px;
+  }
+
+  .server-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .server-list button {
+    min-height: 44px;
+    min-width: 0;
+    padding: 0 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .service-health-metrics div {
+    min-height: 56px;
+    padding: 8px;
+  }
+}
+
+@media (max-width: 340px) {
+  .bottom-nav button {
+    min-width: 40px;
+    padding: 0 1px;
+    font-size: 11px;
   }
 }

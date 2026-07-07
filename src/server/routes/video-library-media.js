@@ -1,31 +1,27 @@
 export async function routeVideoLibraryMedia(req, res, url, deps) {
   const {
     library,
+    mediaResponseService,
+    mediaStreamService,
     notFound,
-    resolveVideoFileByPublicId,
-    serveActorAvatar,
-    serveCoreImage,
-    serveImage,
-    serveTranscodedVideo,
-    serveVideo,
-    serveWorkCover
+    resolveVideoFileByPublicId
   } = deps;
 
   const actorAvatarMatch = /^\/media\/actor\/([^/]+)\/avatar$/.exec(url.pathname);
   if (actorAvatarMatch && req.method === "GET") {
-    serveActorAvatar(res, decodeURIComponent(actorAvatarMatch[1]));
+    mediaResponseService.serveActorAvatar(res, decodeURIComponent(actorAvatarMatch[1]));
     return true;
   }
 
   const workCoverMatch = /^\/media\/work\/([^/]+)\/cover$/.exec(url.pathname);
   if (workCoverMatch && req.method === "GET") {
-    serveWorkCover(res, decodeURIComponent(workCoverMatch[1]));
+    mediaResponseService.serveWorkCover(res, decodeURIComponent(workCoverMatch[1]));
     return true;
   }
 
   const coreImageMatch = /^\/media\/core-image\/([^/]+)$/.exec(url.pathname);
   if (coreImageMatch && req.method === "GET") {
-    serveCoreImage(res, decodeURIComponent(coreImageMatch[1]));
+    mediaResponseService.serveCoreImage(res, decodeURIComponent(coreImageMatch[1]));
     return true;
   }
 
@@ -37,7 +33,7 @@ export async function routeVideoLibraryMedia(req, res, url, deps) {
       return true;
     }
 
-    serveImage(res, file);
+    mediaResponseService.serveImage(res, file);
     return true;
   }
 
@@ -49,7 +45,7 @@ export async function routeVideoLibraryMedia(req, res, url, deps) {
       return true;
     }
 
-    serveTranscodedVideo(req, res, file, url);
+    mediaStreamService.serveTranscodedVideo(req, res, file, url);
     return true;
   }
 
@@ -61,7 +57,7 @@ export async function routeVideoLibraryMedia(req, res, url, deps) {
       return true;
     }
 
-    serveVideo(req, res, file);
+    mediaStreamService.serveVideo(req, res, file);
     return true;
   }
 

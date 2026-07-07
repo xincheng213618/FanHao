@@ -143,8 +143,10 @@ export function createChannelViews(context) {
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
+        els.viewMeta.textContent = "离线缓存";
         renderMessage("电脑端暂时连不上，当前显示的是本地缓存。", "quiet", false);
       } else {
+        els.viewMeta.textContent = "读取失败";
         renderMessage(error.message || `${channel.label}读取失败`, "error");
       }
     }

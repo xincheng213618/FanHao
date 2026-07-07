@@ -386,8 +386,10 @@ export function createWorkViews(context) {
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
+        els.viewMeta.textContent = "离线缓存";
         renderMessage("电脑端暂时连不上，当前显示的是本地缓存片商。", "quiet", false);
       } else {
+        els.viewMeta.textContent = "加载失败";
         renderMessage(error.message, "error");
       }
     }

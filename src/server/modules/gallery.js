@@ -50,7 +50,7 @@ export function createGalleryModule(deps) {
         return true;
       }
 
-      deps.serveTranscodedVideo(req, res, file, url);
+      deps.mediaStreamService.serveTranscodedVideo(req, res, file, url);
       return true;
     }
 

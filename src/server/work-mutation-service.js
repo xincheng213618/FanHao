@@ -1,12 +1,10 @@
 export function createWorkMutationService({
-  correctWorkActorFromLocalFolder,
-  deleteWorkLocalFiles,
+  adminCoreMutationService,
   generateWorkCover,
-  moveWorkToPerson,
+  manualCoverStateService,
   publicWork,
   resolveLibraryWorkByPublicId,
-  setWorkLocalMarker,
-  setWorkManualCover
+  workLocalMutationService
 }) {
   function generateCover(workId) {
     const work = resolveLibraryWorkByPublicId(workId);
@@ -25,22 +23,22 @@ export function createWorkMutationService({
   }
 
   function setManualCover(workId, body) {
-    const result = setWorkManualCover(workId, body.imageId || "");
+    const result = manualCoverStateService.setWorkManualCover(workId, body.imageId || "");
     return { ok: true, ...result };
   }
 
   function setLocalMarker(workId, body) {
-    const result = setWorkLocalMarker(workId, body.marker || "A", Boolean(body.enabled));
+    const result = workLocalMutationService.setWorkLocalMarker(workId, body.marker || "A", Boolean(body.enabled));
     return { ok: true, ...result };
   }
 
   function correctActorFromFolder(workId) {
-    const result = correctWorkActorFromLocalFolder(workId);
+    const result = adminCoreMutationService.correctWorkActorFromLocalFolder(workId);
     return { ok: true, ...result };
   }
 
   function moveToPerson(workId, body) {
-    const result = moveWorkToPerson(workId, body.personId, {
+    const result = adminCoreMutationService.moveWorkToPerson(workId, body.personId, {
       targetDirectory: body.targetDirectory || body.targetPath || "",
       createPerson: body.createPerson || null
     });
@@ -48,7 +46,7 @@ export function createWorkMutationService({
   }
 
   function deleteLocalFiles(workId) {
-    const result = deleteWorkLocalFiles(workId);
+    const result = workLocalMutationService.deleteWorkLocalFiles(workId);
     return { ok: true, ...result };
   }
 

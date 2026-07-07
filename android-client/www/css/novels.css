@@ -1,28 +1,36 @@
 .novel-mobile-controls {
   display: grid;
-  gap: 4px;
+  gap: 5px;
   padding-bottom: 1px;
 }
 
 .novel-mobile-tool-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px;
+  gap: 5px;
   min-width: 0;
   align-items: center;
+}
+
+.novel-mobile-controls.is-searching .novel-mobile-tool-row {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.novel-mobile-controls.is-searching .novel-mobile-action-group {
+  justify-content: flex-end;
 }
 
 .novel-mobile-controls input[type="search"],
 .novel-mobile-controls select,
 .novel-mobile-tool-button {
   min-width: 0;
-  height: 28px;
+  height: 44px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--surface-raised);
   color: var(--ink);
-  padding: 0 9px;
-  font-size: 11px;
+  padding: 0 12px;
+  font-size: 12px;
   font-weight: 850;
 }
 
@@ -33,21 +41,21 @@
 .novel-mobile-search-box.open {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px;
+  gap: 5px;
 }
 
 .novel-mobile-search-pill {
   display: block;
   width: 100%;
-  height: 28px;
+  min-height: 44px;
   min-width: 0;
   overflow: hidden;
   border: 1px solid transparent;
   border-radius: 999px;
   background: var(--field);
   color: var(--muted);
-  padding: 0 10px;
-  font-size: 11.5px;
+  padding: 0 12px;
+  font-size: 12px;
   font-weight: 900;
   text-align: left;
   text-overflow: ellipsis;
@@ -63,7 +71,7 @@
 .novel-mobile-controls input[type="search"] {
   border-radius: 999px;
   background: var(--field);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .novel-mobile-controls select {
@@ -73,53 +81,54 @@
 .novel-mobile-filter-row {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   min-width: 0;
 }
 
 .novel-mobile-controls .novel-mobile-sort-select {
   flex: 0 0 auto;
-  width: 66px;
-  height: 24px;
+  width: 92px;
+  height: 44px;
   border: 1px solid transparent;
   border-radius: 999px;
   background: var(--surface-soft);
   color: var(--ink);
-  padding: 0 17px 0 7px;
-  font-size: 10.5px;
+  padding: 0 22px 0 10px;
+  font-size: 12px;
   font-weight: 900;
 }
 
 .novel-mobile-action-group {
   display: flex;
   flex: 0 0 auto;
-  gap: 3px;
+  gap: 4px;
   align-items: center;
   padding-left: 1px;
 }
 
 .novel-mobile-tool-button {
-  min-width: 36px;
-  max-width: 56px;
+  height: 44px;
+  min-width: 44px;
+  max-width: 64px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .novel-mobile-tool-button.manage {
-  max-width: 70px;
-  min-width: 50px;
+  max-width: 72px;
+  min-width: 60px;
 }
 
 .novel-mobile-search-cancel {
-  height: 28px;
-  min-width: 38px;
+  min-height: 44px;
+  min-width: 48px;
   border: 1px solid transparent;
   border-radius: 999px;
   background: var(--surface-soft);
   color: var(--muted);
-  padding: 0 8px;
-  font-size: 10.5px;
+  padding: 0 12px;
+  font-size: 12px;
   font-weight: 900;
 }
 
@@ -177,7 +186,7 @@
 }
 
 .novel-mobile-selection-bar button {
-  min-height: 30px;
+  min-height: 36px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--surface);
@@ -203,13 +212,13 @@
 
 .novel-mobile-category-row button {
   flex: 0 0 auto;
-  min-height: 24px;
+  min-height: 40px;
   border: 1px solid transparent;
   border-radius: 999px;
   background: var(--surface-soft);
   color: var(--muted);
-  padding: 0 8px;
-  font-size: 10px;
+  padding: 0 12px;
+  font-size: 12px;
   font-weight: 900;
 }
 
@@ -250,14 +259,14 @@
 }
 
 .novel-mobile-empty-actions button {
-  min-width: 86px;
-  height: 32px;
+  min-width: 100px;
+  height: 40px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--surface-raised);
   color: var(--ink);
-  padding: 0 12px;
-  font-size: 12px;
+  padding: 0 15px;
+  font-size: 13px;
   font-weight: 900;
 }
 
@@ -329,14 +338,14 @@
 }
 
 .novel-scan-confirm-tools button {
-  min-height: 30px;
+  min-height: 44px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--surface-raised);
   color: var(--ink);
   font-size: 12px;
   font-weight: 850;
-  padding: 0 10px;
+  padding: 0 12px;
 }
 
 .novel-scan-confirm-list label {
@@ -344,7 +353,7 @@
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  min-height: 34px;
+  min-height: 44px;
   border-radius: 8px;
   background: var(--surface);
   padding: 6px 8px;
@@ -355,8 +364,8 @@
 }
 
 .novel-scan-confirm-list input {
-  width: 18px;
-  height: 18px;
+  width: 22px;
+  height: 22px;
   accent-color: #ed4259;
 }
 
@@ -386,7 +395,7 @@
 }
 
 .novel-scan-confirm-actions button {
-  height: 38px;
+  min-height: 44px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--surface-raised);
@@ -640,20 +649,20 @@
 
 .novel-mobile-select-mark {
   position: absolute;
-  top: 7px;
-  left: 7px;
+  top: 6px;
+  left: 6px;
   display: grid;
-  width: 24px;
-  height: 24px;
+  width: 30px;
+  height: 30px;
   place-items: center;
   border: 2px solid rgba(255, 255, 255, 0.92);
   border-radius: 999px;
   background: rgba(16, 24, 36, 0.18);
   color: #fff;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 950;
   line-height: 1;
-  box-shadow: 0 4px 10px rgba(16, 24, 36, 0.16);
+  box-shadow: 0 5px 12px rgba(16, 24, 36, 0.18);
 }
 
 .novel-mobile-card.selected .novel-mobile-select-mark {
@@ -719,14 +728,19 @@
 .novel-reader-toolbar button,
 .novel-reader-settings-panel button,
 .novel-reader-catalog-drawer button {
-  min-height: 34px;
+  min-height: 44px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-raised);
   color: var(--ink);
-  padding: 0 11px;
+  padding: 0 12px;
   font-size: 12px;
   font-weight: 950;
+}
+
+.novel-mobile-card-actions button,
+.novel-mobile-detail-actions button {
+  min-height: 40px;
 }
 
 .novel-mobile-detail-actions button.primary {
@@ -964,6 +978,7 @@ body.novel-reader-view .app-shell {
 .novel-reader-toolbar .novel-reader-page-button,
 .novel-reader-toolbar .novel-reader-tool-button,
 .novel-reader-settings-panel button {
+  min-height: 44px;
   border-color: rgba(255, 255, 255, 0.12);
   background: rgba(255, 255, 255, 0.08);
   color: inherit;
@@ -987,6 +1002,7 @@ body.novel-reader-view .app-shell {
 }
 
 .novel-reader-progress-row input {
+  min-height: 44px;
   width: 100%;
   accent-color: #ed4259;
 }
@@ -1105,7 +1121,7 @@ body.novel-reader-view .app-shell {
   grid-template-columns: 74px minmax(0, 1fr);
   align-items: center;
   gap: 10px;
-  min-height: 36px;
+  min-height: 44px;
 }
 
 .novel-reader-setting-row > span {
@@ -1129,7 +1145,7 @@ body.novel-reader-view .app-shell {
 }
 
 .novel-reader-slider-row input {
-  height: 32px;
+  height: 44px;
   width: 100%;
   accent-color: #ed4259;
   touch-action: none;
@@ -1157,6 +1173,11 @@ body.novel-reader-view .app-shell {
   color: #fff;
 }
 
+.novel-reader-stepper-row button,
+.novel-reader-option-row button {
+  min-width: 44px;
+}
+
 @media (max-width: 390px) {
   .novel-reader-screen {
     padding:
@@ -1176,17 +1197,37 @@ body.novel-reader-view .app-shell {
   }
 
   .novel-mobile-tool-row {
+    grid-template-columns: minmax(0, 1fr);
     gap: 6px;
   }
 
+  .novel-mobile-action-group {
+    min-width: 0;
+    overflow-x: auto;
+    padding-bottom: 1px;
+    scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+  }
+
+  .novel-mobile-action-group::-webkit-scrollbar {
+    display: none;
+  }
+
   .novel-mobile-controls .novel-mobile-sort-select {
-    width: 66px;
-    padding-left: 7px;
+    width: 92px;
+    padding-left: 9px;
   }
 
   .novel-mobile-tool-button {
-    min-width: 38px;
-    padding: 0 6px;
+    flex: 0 0 auto;
+    min-width: 62px;
+    max-width: none;
+    padding: 0 12px;
+  }
+
+  .novel-mobile-tool-button.manage {
+    min-width: 66px;
   }
 
   .novel-mobile-detail-hero {
@@ -1195,5 +1236,19 @@ body.novel-reader-view .app-shell {
 
   .novel-mobile-cover.large {
     width: 84px;
+  }
+}
+
+@media (max-width: 360px) {
+  .novel-scan-confirm-tools {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .novel-scan-confirm-tools span {
+    grid-column: 1 / -1;
+  }
+
+  .novel-mobile-search-pill {
+    min-width: 100%;
   }
 }

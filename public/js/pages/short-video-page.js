@@ -583,8 +583,7 @@ export function createShortVideoPage(deps) {
     identify.textContent = "识别画面";
     identify.addEventListener("click", () => showBrowserToast("识别能力待接入"));
     tools.append(recommend, identify);
-    const author = document.createElement("strong");
-    author.textContent = [`@${video.author?.name || "未知作者"}`, formatDate(video.publishedAt)].filter(Boolean).join(" · ");
+    const author = authorCaptionButton(video);
     const title = document.createElement("p");
     appendCaptionText(title, captionTitleWithTags(video));
     const meta = document.createElement("span");
@@ -732,6 +731,11 @@ export function createShortVideoPage(deps) {
     autoNext.className = "short-video-control-auto";
     autoNext.textContent = "连播";
     autoNext.title = "自动播放下一条";
+    const original = document.createElement("button");
+    original.type = "button";
+    original.className = "short-video-control-original";
+    original.textContent = "原视频";
+    original.title = "打开抖音原视频";
     const mute = document.createElement("button");
     mute.type = "button";
     mute.className = "short-video-control-icon";
@@ -752,6 +756,10 @@ export function createShortVideoPage(deps) {
       autoNext.classList.toggle("active", Boolean(state.shortVideo?.autoNext));
       autoNext.setAttribute("aria-pressed", String(Boolean(state.shortVideo?.autoNext)));
       autoNext.setAttribute("aria-label", state.shortVideo?.autoNext ? "关闭连播" : "开启连播");
+      const originalUrl = originalDouyinUrl(state.shortVideo?.current);
+      original.disabled = !originalUrl;
+      original.classList.toggle("is-unavailable", !originalUrl);
+      original.setAttribute("aria-label", originalUrl ? "打开抖音原视频" : "当前视频没有原始链接");
       time.textContent = `${formatSeconds(current)} / ${formatSeconds(duration)}`;
       const progressValue = duration ? Math.round((current / duration) * 1000) : 0;
       if (!scrubbing) progress.value = String(progressValue);
@@ -774,6 +782,7 @@ export function createShortVideoPage(deps) {
       showBrowserToast(state.shortVideo.autoNext ? "已开启连播" : "已关闭连播");
       sync(true);
     });
+    original.addEventListener("click", () => openDouyinLink(state.shortVideo?.current));
     full.addEventListener("click", () => {
       const player = activePlayer();
       const target = player?.closest(".short-video-stage") || player;
@@ -794,7 +803,7 @@ export function createShortVideoPage(deps) {
       player.currentTime = (Number(progress.value || 0) / 1000) * duration;
       sync(true);
     });
-    bar.append(play, time, progress, autoNext, mute, full);
+    bar.append(play, time, progress, autoNext, original, mute, full);
     const tick = () => {
       if (!bar.isConnected) return;
       sync();
@@ -1046,6 +1055,7 @@ export function createShortVideoPage(deps) {
     eventsInstalled = true;
     window.addEventListener("wheel", (event) => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+      if (isShortVideoOverlayTarget(event.target)) return;
       event.preventDefault();
       handleWheelSwipe(event.deltaY);
     }, { passive: false });
@@ -1058,6 +1068,7 @@ export function createShortVideoPage(deps) {
     }, { passive: true });
     window.addEventListener("touchstart", (event) => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+      if (isShortVideoOverlayTarget(event.target)) return;
       touchStartY = event.touches?.[0]?.clientY || 0;
       touchDeltaY = 0;
       state.shortVideo.dragging = true;
@@ -1065,6 +1076,7 @@ export function createShortVideoPage(deps) {
     }, { passive: true });
     window.addEventListener("touchmove", (event) => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+      if (isShortVideoOverlayTarget(event.target)) return;
       const y = event.touches?.[0]?.clientY || 0;
       touchDeltaY = y - touchStartY;
       applyDragDelta(touchDeltaY);
@@ -1072,12 +1084,14 @@ export function createShortVideoPage(deps) {
     }, { passive: false });
     window.addEventListener("touchend", (event) => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+      if (isShortVideoOverlayTarget(event.target)) return;
       const endY = event.changedTouches?.[0]?.clientY || 0;
       const delta = touchDeltaY || endY - touchStartY;
       finishDrag(delta);
     }, { passive: true });
     window.addEventListener("pointerdown", (event) => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+      if (isShortVideoOverlayTarget(event.target)) return;
       if (event.button !== 0 || event.target?.closest?.("button, select, input, textarea, a")) return;
       pointerStartY = event.clientY || 0;
       pointerDeltaY = 0;
@@ -1182,11 +1196,20 @@ export function createShortVideoPage(deps) {
 
   function closeOrRevealBrowser() {
     const browser = els.workGrid?.querySelector?.(".short-video-browser");
+    const authorPanel = browser?.querySelector?.(".short-video-author-panel");
+    if (authorPanel) {
+      authorPanel.remove();
+      return;
+    }
     if (browser?.classList.contains("is-clear-screen")) {
       browser.classList.remove("is-clear-screen");
       return;
     }
     showHome();
+  }
+
+  function isShortVideoOverlayTarget(target) {
+    return Boolean(target?.closest?.(".short-video-author-sheet, .short-video-share-panel"));
   }
 
   function showHeartBurst(stage, event) {
@@ -1329,16 +1352,25 @@ export function createShortVideoPage(deps) {
     }
   }
 
+  function originalDouyinUrl(video) {
+    const awemeId = String(video?.awemeId || video?.id || "").trim();
+    if (/^\d{8,}$/.test(awemeId)) return `https://www.douyin.com/video/${awemeId}`;
+    const url = String(video?.originalUrl || video?.shareUrl || "").trim();
+    if (url) return url;
+    return "";
+  }
+
   function openDouyinLink(video) {
-    if (video?.shareUrl) {
-      window.open(video.shareUrl, "_blank", "noopener,noreferrer");
+    const url = originalDouyinUrl(video);
+    if (url) {
+      window.open(url, "_blank", "noopener,noreferrer");
       return;
     }
     showBrowserToast("当前是本地视频");
   }
 
   async function shareShortVideo(video) {
-    const url = video?.shareUrl || `${window.location.origin}/short-videos/${encodeURIComponent(video?.id || "")}`;
+    const url = originalDouyinUrl(video) || `${window.location.origin}/short-videos/${encodeURIComponent(video?.id || "")}`;
     try {
       if (navigator.clipboard?.writeText) {
         try {
@@ -1409,22 +1441,282 @@ export function createShortVideoPage(deps) {
     return button;
   }
 
-  function authorRailButton(video) {
+  function authorCaptionButton(video) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "short-video-caption-author";
+    button.title = video.author?.name ? `查看 ${video.author.name}` : "查看作者";
+    button.append(authorAvatar(video.author, "short-video-caption-author-avatar"));
+    const copy = document.createElement("span");
+    const name = document.createElement("strong");
+    name.textContent = `@${video.author?.name || "未知作者"}`;
+    const meta = document.createElement("em");
+    meta.textContent = [formatDate(video.publishedAt), video.author?.secUid ? "作者主页" : ""].filter(Boolean).join(" · ");
+    copy.append(name, meta);
+    button.append(copy);
+    button.addEventListener("click", () => showAuthorPanel(video));
+    return button;
+  }
+
+  function authorAvatar(author = {}, className = "short-video-author-avatar") {
     const avatar = document.createElement("span");
-    avatar.className = "short-video-author-avatar";
-    if (video.author?.avatarUrl) {
+    avatar.className = className;
+    if (author?.avatarUrl) {
       const img = document.createElement("img");
-      img.src = video.author.avatarUrl;
-      img.alt = video.author?.name || "作者";
+      img.src = author.avatarUrl;
+      img.alt = author?.name || "作者";
       avatar.append(img);
     } else {
-      avatar.textContent = initials(video.author?.name || "?");
+      avatar.textContent = initials(author?.name || "?");
     }
+    return avatar;
+  }
+
+  async function showAuthorPanel(video) {
+    const browser = els.workGrid?.querySelector?.(".short-video-browser");
+    if (!browser) return;
+    browser.querySelector(".short-video-author-panel")?.remove();
+    const author = video.author || {};
+    const panel = document.createElement("section");
+    panel.className = "short-video-author-panel is-douyin-style";
+    panel.addEventListener("click", (event) => {
+      if (event.target === panel) panel.remove();
+    });
+
+    const sheet = document.createElement("div");
+    sheet.className = "short-video-author-sheet";
+
+    const top = document.createElement("div");
+    top.className = "short-video-author-top";
+    const tabs = document.createElement("div");
+    tabs.className = "short-video-author-tabs";
+    const tabButtons = new Map();
+    for (const item of [
+      ["detail", "详情"],
+      ["works", "TA的作品"],
+      ["comments", "评论"],
+      ["ai", "问AI"],
+      ["related", "相关推荐"]
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = item[1];
+      button.dataset.tab = item[0];
+      button.addEventListener("click", () => renderAuthorTab(item[0]));
+      tabButtons.set(item[0], button);
+      tabs.append(button);
+    }
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "short-video-author-close";
+    close.append(createIcon("close"));
+    close.setAttribute("aria-label", "关闭");
+    close.addEventListener("click", () => panel.remove());
+    top.append(tabs, close);
+
+    const head = document.createElement("header");
+    head.className = "short-video-author-head";
+    head.append(authorAvatar(author, "short-video-author-head-avatar"));
+    const title = document.createElement("div");
+    title.className = "short-video-author-title";
+    const name = document.createElement("strong");
+    name.textContent = author.name || "未知作者";
+    const sub = document.createElement("span");
+    sub.textContent = "读取中";
+    title.append(name, sub);
+
+    const actions = document.createElement("div");
+    actions.className = "short-video-author-actions";
+    const douyin = document.createElement("button");
+    douyin.type = "button";
+    douyin.textContent = "抖音主页";
+    douyin.addEventListener("click", () => openAuthorDouyinLink(author));
+    const filter = document.createElement("button");
+    filter.type = "button";
+    filter.textContent = "全部视频";
+    filter.addEventListener("click", () => {
+      if (!author.secUid) return;
+      panel.remove();
+      state.shortVideo.author = author.secUid;
+      state.shortVideo.query = "";
+      state.shortVideo.current = null;
+      loadVideos({ replaceRoute: true }).catch(showError);
+    });
+    actions.append(douyin, filter);
+    head.append(title, actions);
+
+    const content = document.createElement("div");
+    content.className = "short-video-author-content";
+    const status = document.createElement("div");
+    status.className = "short-video-author-status";
+    status.textContent = "正在读取";
+    content.append(status);
+    sheet.append(top, head, content);
+    panel.append(sheet);
+    browser.append(panel);
+
+    let authorVideos = [];
+    let authorTotal = 0;
+    let activeTab = "works";
+    const renderAuthorTab = (tab) => {
+      activeTab = tab;
+      for (const [key, button] of tabButtons) {
+        button.classList.toggle("active", key === tab);
+        button.setAttribute("aria-selected", String(key === tab));
+      }
+      content.innerHTML = "";
+      if (tab === "works") {
+        content.append(authorWorksView(authorVideos, authorTotal, panel));
+        return;
+      }
+      if (tab === "detail") {
+        content.append(authorDetailView(video, author));
+        return;
+      }
+      content.append(authorComingSoonView({
+        comments: "评论还没有导入",
+        ai: "问 AI 待接入",
+        related: "相关推荐待接入"
+      }[tab] || "内容待接入"));
+    };
+    renderAuthorTab(activeTab);
+
+    try {
+      const params = new URLSearchParams();
+      if (author.secUid) params.set("author", author.secUid);
+      params.set("sort", "published");
+      params.set("limit", "36");
+      const data = author.secUid ? await api(`/api/short-videos?${params}`) : { videos: [video], total: 1 };
+      authorVideos = data.videos || [];
+      authorTotal = Number(data.total || authorVideos.length || 0);
+      sub.textContent = `${formatNumber(authorTotal)} 个本地作品`;
+      renderAuthorTab(activeTab);
+    } catch (error) {
+      status.textContent = "读取失败";
+      showError(error);
+    }
+  }
+
+  function authorWorksView(videos, total, panel) {
+    const wrap = document.createElement("div");
+    wrap.className = "short-video-author-works";
+    const label = document.createElement("div");
+    label.className = "short-video-author-section-title";
+    label.textContent = `${formatNumber(total || videos.length || 0)} 个作品`;
+    const grid = document.createElement("div");
+    grid.className = "short-video-author-grid";
+    if (!videos.length) {
+      const empty = document.createElement("div");
+      empty.className = "short-video-author-status";
+      empty.textContent = "没有视频";
+      grid.append(empty);
+    } else {
+      for (const item of videos) grid.append(authorVideoTile(item, panel));
+    }
+    wrap.append(label, grid);
+    return wrap;
+  }
+
+  function authorDetailView(video, author) {
+    const detail = document.createElement("div");
+    detail.className = "short-video-author-detail";
+    const authorLine = document.createElement("button");
+    authorLine.type = "button";
+    authorLine.className = "short-video-author-detail-owner";
+    authorLine.textContent = `@${author.name || "未知作者"} ›`;
+    authorLine.addEventListener("click", () => openAuthorDouyinLink(author));
+    const title = document.createElement("p");
+    appendCaptionText(title, captionTitleWithTags(video));
+    const stats = document.createElement("div");
+    stats.className = "short-video-author-detail-stats";
+    for (const item of [
+      ["点赞", formatCompact(video.stats?.likes || 0)],
+      ["评论", formatCompact(video.stats?.comments || 0)],
+      ["收藏", formatCompact(video.stats?.collects || 0)],
+      ["分享", formatCompact(video.stats?.shares || 0)],
+      ["时长", formatDuration(video.durationMs) || "-"],
+      ["大小", formatBytes(video.size || 0) || "-"]
+    ]) {
+      const cell = document.createElement("span");
+      const value = document.createElement("b");
+      value.textContent = item[1];
+      const label = document.createElement("small");
+      label.textContent = item[0];
+      cell.append(value, label);
+      stats.append(cell);
+    }
+    const actions = document.createElement("div");
+    actions.className = "short-video-author-detail-actions";
+    const original = document.createElement("button");
+    original.type = "button";
+    original.textContent = "打开原视频";
+    original.addEventListener("click", () => openDouyinLink(video));
+    const home = document.createElement("button");
+    home.type = "button";
+    home.textContent = "打开抖音主页";
+    home.addEventListener("click", () => openAuthorDouyinLink(author));
+    actions.append(original, home);
+    detail.append(authorLine, title, stats, actions);
+    return detail;
+  }
+
+  function authorComingSoonView(text) {
+    const box = document.createElement("div");
+    box.className = "short-video-author-status";
+    box.textContent = text;
+    return box;
+  }
+
+  function authorVideoTile(video, panel) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "short-video-author-tile";
+    button.setAttribute("aria-label", video.title || "打开短视频");
+    const media = document.createElement("span");
+    media.className = "short-video-author-tile-media";
+    if (video.coverUrl) {
+      const img = document.createElement("img");
+      img.src = video.coverUrl;
+      img.alt = video.title || "短视频封面";
+      img.loading = "lazy";
+      media.append(img);
+    } else {
+      media.textContent = initials(video.author?.name || "");
+    }
+    const meta = document.createElement("span");
+    meta.className = "short-video-author-tile-meta";
+    meta.textContent = [formatCompact(video.stats?.likes || 0), formatDuration(video.durationMs)].filter(Boolean).join(" · ");
+    button.append(media, meta);
+    button.addEventListener("click", () => {
+      panel.remove();
+      openVideo(video.id).catch(showError);
+    });
+    return button;
+  }
+
+  function authorDouyinUrl(author) {
+    const url = String(author?.profileUrl || "").trim();
+    if (url) return url;
+    const secUid = String(author?.secUid || "").trim();
+    return secUid ? `https://www.douyin.com/user/${encodeURIComponent(secUid)}` : "";
+  }
+
+  function openAuthorDouyinLink(author) {
+    const url = authorDouyinUrl(author);
+    if (url) {
+      window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    showBrowserToast("没有作者主页");
+  }
+
+  function authorRailButton(video) {
+    const avatar = authorAvatar(video.author, "short-video-author-avatar");
     const plus = document.createElement("span");
     plus.className = "short-video-author-plus";
     plus.append(createIcon("plusBadge"));
     avatar.append(plus);
-    return railButton("", avatar, "author", video.author?.name ? `作者 ${video.author.name}` : "作者");
+    return railButton("", avatar, "author", video.author?.name ? `作者 ${video.author.name}` : "作者", () => showAuthorPanel(video));
   }
 
   function railButton(label, icon, kind = "", ariaLabel = "", action = null) {

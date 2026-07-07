@@ -8,15 +8,18 @@ export function createShortVideosModule({
   dbPath,
   ffmpegPath,
   roots,
+  downloadManagerDbPath,
+  downloadManagerSyncMs,
+  mediaResponseService,
+  mediaStreamService,
   notFound,
   readJsonBody,
   requireLocalAdmin,
   sendJson,
-  serveImage,
-  serveVideo,
   sharedCache
 }) {
   const store = createShortVideoStore({ dbPath, ffmpegPath, roots });
+  startDownloadManagerSync();
 
   async function routeApi(req, res, url) {
     if (url.pathname === "/api/short-videos" && req.method === "GET" && sharedCache) {
@@ -53,7 +56,7 @@ export function createShortVideosModule({
         notFound(res);
         return true;
       }
-      serveImage(res, file);
+      mediaResponseService.serveImage(res, file);
       return true;
     }
 
@@ -64,7 +67,7 @@ export function createShortVideosModule({
         notFound(res);
         return true;
       }
-      serveVideo(req, res, file);
+      mediaStreamService.serveVideo(req, res, file);
       return true;
     }
 
@@ -97,6 +100,47 @@ export function createShortVideosModule({
     } catch {
       return null;
     }
+  }
+
+  function startDownloadManagerSync() {
+    const sourceDbPath = String(downloadManagerDbPath || "").trim();
+    const intervalMs = Number(downloadManagerSyncMs || 0);
+    if (!sourceDbPath || !Number.isFinite(intervalMs) || intervalMs < 60000) return;
+    const run = () => syncDownloadManagerDb(sourceDbPath);
+    const initialTimer = setTimeout(run, Math.min(30000, intervalMs));
+    initialTimer.unref?.();
+    const timer = setInterval(run, intervalMs);
+    timer.unref?.();
+  }
+
+  let syncRunning = false;
+  let lastSourceMtimeMs = 0;
+  function syncDownloadManagerDb(sourceDbPath) {
+    if (syncRunning) return;
+    const stat = safeStat(sourceDbPath);
+    if (!stat?.isFile()) return;
+    const sourceMtimeMs = Math.floor(stat.mtimeMs || 0);
+    if (sourceMtimeMs && sourceMtimeMs === lastSourceMtimeMs) return;
+    syncRunning = true;
+    try {
+      const result = store.importDownloadManagerDb(sourceDbPath, { incremental: true, skipSummary: true });
+      lastSourceMtimeMs = sourceMtimeMs;
+      if (result.imported || result.updated) {
+        clearShortVideoListCache();
+        console.log(`[short-video-sync] imported=${result.imported} updated=${result.updated} total=${result.summary?.totals?.videos ?? ""}`);
+      }
+    } catch (error) {
+      console.warn("[short-video-sync]", error.message || error);
+    } finally {
+      syncRunning = false;
+    }
+  }
+
+  function clearShortVideoListCache() {
+    if (!sharedCache?.rootDir) return;
+    try {
+      fs.rmSync(path.join(sharedCache.rootDir, "short-videos", "lists"), { recursive: true, force: true });
+    } catch {}
   }
 
   function videoFileWithCache(id) {
