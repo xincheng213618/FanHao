@@ -2,6 +2,7 @@ import { createApiClient, addQueryParam } from "./js/api.js?v=20260701-gallery-m
 import { createAdminModal } from "./js/pages/admin-modal.js?v=20260701-gallery-merge-01";
 import { createGalleryPage } from "./js/pages/gallery-page.js?v=20260701-gallery-merge-01";
 import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260706-media-player-02";
+import { createMusicPage } from "./js/pages/music-page.js?v=20260708-music-module-01";
 import { createNovelPage } from "./js/pages/novel-page.js?v=20260701-gallery-merge-01";
 import { createPeoplePage } from "./js/pages/people-page.js?v=20260706-western-people-01";
 import { createPersonProfile } from "./js/pages/person-profile.js?v=20260706-multi-javdb-actor-01";
@@ -9,7 +10,7 @@ import { createRankingPage } from "./js/pages/ranking-page.js?v=20260704-ranking
 import { createShortVideoPage } from "./js/pages/short-video-page.js?v=20260708-short-video-source-01";
 import { createToolsPage } from "./js/pages/tools-page.js?v=20260701-gallery-merge-01";
 import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260705-local-marker-a-01";
-import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260708-short-video-source-01";
+import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260708-music-module-01";
 
 repairLegacyShell();
 
@@ -139,6 +140,25 @@ const state = {
     prevId: "",
     nextId: "",
     loading: false,
+    status: ""
+  },
+  music: {
+    query: "",
+    artistId: "all",
+    albumId: "all",
+    sort: "album",
+    favorite: false,
+    data: null,
+    summary: null,
+    artists: [],
+    albums: [],
+    current: null,
+    lyrics: { raw: "", lines: [] },
+    queue: [],
+    prevId: "",
+    nextId: "",
+    loading: false,
+    playing: false,
     status: ""
   },
   routeReady: false,
@@ -366,6 +386,22 @@ const shortVideoPage = createShortVideoPage({
   state,
   syncRouteAfterNavigation
 });
+const musicPage = createMusicPage({
+  api,
+  cancelScheduledWorkRendering,
+  disconnectPeopleIndexAutoload,
+  els,
+  formatBytes,
+  formatNumber,
+  hidePersonProfile,
+  openAdminScript,
+  pushRoute,
+  replaceRoute,
+  resetProgressiveCoverLoading,
+  setMainHeader,
+  state,
+  syncRouteAfterNavigation
+});
 const galleryPage = createGalleryPage({
   api,
   clearPersonSelection: () => {
@@ -565,6 +601,12 @@ function currentRouteSnapshot(overrides = {}) {
     shortVideoAuthor: state.activeView === "shortVideos" ? state.shortVideo.author || "all" : "all",
     shortVideoSource: state.activeView === "shortVideos" ? state.shortVideo.source || "liked" : "liked",
     shortVideoSort: state.activeView === "shortVideos" ? state.shortVideo.sort || "published" : "published",
+    musicTrackId: state.activeView === "music" ? state.music.current?.id || "" : "",
+    musicArtistId: state.activeView === "music" && state.music.artistId !== "all" ? state.music.artistId || "" : "",
+    musicAlbumId: state.activeView === "music" && state.music.albumId !== "all" ? state.music.albumId || "" : "",
+    musicQuery: state.activeView === "music" ? state.music.query || "" : "",
+    musicSort: state.activeView === "music" ? state.music.sort || "album" : "album",
+    musicFavorite: state.activeView === "music" ? Boolean(state.music.favorite) : false,
     personId: state.activeView === "people" ? state.selectedPersonId || "" : "",
     q: state.activeView === "search" ? state.searchQuery || state.workQuery || "" : "",
     workId: drawerOpen ? state.currentWork?.id || "" : "",
@@ -668,6 +710,11 @@ async function applyRoute(route) {
       shortVideoPage.applyRouteState(next);
       setActiveView("shortVideos", { skipRoute: true, deferInitialLoad: Boolean(next.shortVideoId) });
       await shortVideoPage.openRouteTarget(next);
+    } else if (next.view === "music") {
+      clearWorkSearch();
+      musicPage.applyRouteState(next);
+      setActiveView("music", { skipRoute: true, deferInitialLoad: Boolean(next.musicTrackId) });
+      await musicPage.openRouteTarget(next);
     } else {
       clearWorkSearch();
       setActiveView(next.view, { skipRoute: true });
@@ -975,6 +1022,7 @@ function productViewForActiveView(view = state.activeView) {
   if (view === "gallery") return "gallery";
   if (view === "novels") return "novels";
   if (view === "shortVideos") return "shortVideos";
+  if (view === "music") return "music";
   if (view === "tools") return "tools";
   return "people";
 }
@@ -1086,6 +1134,16 @@ function setActiveView(view, options = {}) {
     state.personWorksTotal = 0;
     state.personWorksFacets = null;
     shortVideoPage.enter(options);
+    return;
+  }
+
+  if (view === "music") {
+    state.selectedPersonId = null;
+    state.selectedPerson = null;
+    state.works = [];
+    state.personWorksTotal = 0;
+    state.personWorksFacets = null;
+    musicPage.enter(options);
     return;
   }
 
@@ -1442,6 +1500,7 @@ function updateBackToPeopleIndexButton() {
   document.body.classList.toggle("novel-reader-active", state.activeView === "novels" && Boolean(state.novel?.chapter));
   document.body.classList.toggle("short-video-view", state.activeView === "shortVideos");
   document.body.classList.toggle("short-video-browser-active", state.activeView === "shortVideos" && Boolean(state.shortVideo?.current));
+  document.body.classList.toggle("music-view", state.activeView === "music");
   const westernScope = isWesternPeopleScope();
   els.missingLocalToggle?.closest(".toggle-control")?.toggleAttribute("hidden", westernScope);
   els.collectionToggle?.closest(".toggle-control")?.toggleAttribute("hidden", westernScope);
@@ -3196,6 +3255,10 @@ async function rescanFullLibrary(button) {
     openAdminScript("");
     return;
   }
+  if (state.activeView === "music") {
+    openAdminScript("music-library-rescan");
+    return;
+  }
   openAdminScript("");
 }
 
@@ -3274,7 +3337,7 @@ async function applyInitialUrlState() {
 
 async function bootApp() {
   const initialRoute = routeFromUrl();
-  if (initialRoute.view === "shortVideos") {
+  if (initialRoute.view === "shortVideos" || initialRoute.view === "music") {
     await applyRoute(initialRoute);
     initializeRouteHistory();
     loadLibrary({ deferMainRender: true }).catch((error) => console.warn(error));

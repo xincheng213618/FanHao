@@ -1,4 +1,4 @@
-export const URL_VIEW_NAMES = new Set(["people", "studios", "vr", "favorites", "history", "rankings", "gallery", "novels", "shortVideos", "tools"]);
+export const URL_VIEW_NAMES = new Set(["people", "studios", "vr", "favorites", "history", "rankings", "gallery", "novels", "shortVideos", "music", "tools"]);
 export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "media", "movie", "tv"]);
 export const PEOPLE_SCOPE_NAMES = new Set(["main", "western"]);
 export const DEFAULT_GALLERY_PHOTO_CATEGORY = "我喜欢的";
@@ -34,6 +34,7 @@ const VIEW_PATHS = {
   rankings: "/rankings",
   novels: "/novels",
   shortVideos: "/short-videos",
+  music: "/music",
   tools: "/tools"
 };
 
@@ -53,6 +54,8 @@ export function routeFromUrl(url = window.location.href) {
   if (novelRoute) return novelRoute;
   const shortVideoRoute = shortVideoRouteFromPath(routePath, params);
   if (shortVideoRoute) return shortVideoRoute;
+  const musicRoute = musicRouteFromPath(routePath, params);
+  if (musicRoute) return musicRoute;
   const pathView = PATH_VIEWS.get(routePath);
   if (pathView) {
     return {
@@ -68,6 +71,12 @@ export function routeFromUrl(url = window.location.href) {
       shortVideoAuthor: "all",
       shortVideoSource: "liked",
       shortVideoSort: "published",
+      musicTrackId: "",
+      musicArtistId: "",
+      musicAlbumId: "",
+      musicQuery: "",
+      musicSort: "album",
+      musicFavorite: false,
       personId: "",
       q: "",
       workId: "",
@@ -116,6 +125,12 @@ export function normalizeRoute(route = {}) {
     shortVideoAuthor: view === "shortVideos" ? String(route.shortVideoAuthor || "all").trim() || "all" : "all",
     shortVideoSource: view === "shortVideos" ? normalizeShortVideoSource(route.shortVideoSource || route.source) : "liked",
     shortVideoSort: view === "shortVideos" ? normalizeShortVideoSort(route.shortVideoSort) : "published",
+    musicTrackId: view === "music" ? String(route.musicTrackId || "").trim() : "",
+    musicArtistId: view === "music" ? String(route.musicArtistId || "").trim() : "",
+    musicAlbumId: view === "music" ? String(route.musicAlbumId || "").trim() : "",
+    musicQuery: view === "music" ? String(route.musicQuery || route.q || "").trim() : "",
+    musicSort: view === "music" ? normalizeMusicSort(route.musicSort) : "album",
+    musicFavorite: view === "music" ? Boolean(route.musicFavorite) : false,
     personId: view === "people" ? route.personId || "" : "",
     q: view === "search" ? searchQuery : "",
     workId: route.workId || "",
@@ -132,7 +147,7 @@ export function routeUrl(route, options = {}) {
     if (value) params.set(key, value);
   }
   const pathname = routePath(next);
-  if (next.view && !["people", "search", "gallery", "novels", "shortVideos", "tools"].includes(next.view)) params.set("view", next.view);
+  if (next.view && !["people", "search", "gallery", "novels", "shortVideos", "music", "tools"].includes(next.view)) params.set("view", next.view);
   if (next.personId) params.set("personId", next.personId);
   if (next.view === "people" && next.peopleScope && next.peopleScope !== "main" && pathname !== "/western") {
     params.set("scope", next.peopleScope);
@@ -154,6 +169,10 @@ export function routeUrl(route, options = {}) {
     if (next.shortVideoAuthor && next.shortVideoAuthor !== "all") params.set("author", next.shortVideoAuthor);
     if (next.shortVideoSource && next.shortVideoSource !== "liked") params.set("source", next.shortVideoSource);
     if (next.shortVideoSort && next.shortVideoSort !== "published") params.set("sort", next.shortVideoSort);
+  } else if (next.view === "music") {
+    if (next.musicQuery) params.set("q", next.musicQuery);
+    if (next.musicSort && next.musicSort !== "album") params.set("sort", next.musicSort);
+    if (next.musicFavorite) params.set("favorite", "1");
   } else if (next.q) {
     params.set("q", next.q);
   }
@@ -240,6 +259,11 @@ function normalizeShortVideoSort(value) {
 function normalizeShortVideoSource(value) {
   const source = String(value || "liked").trim().toLowerCase();
   return ["liked", "posts", "all", "local"].includes(source) ? source : "liked";
+}
+
+function normalizeMusicSort(value) {
+  const sort = String(value || "album").trim();
+  return ["album", "title", "artist", "duration", "played", "favorite"].includes(sort) ? sort : "album";
 }
 
 function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
@@ -371,6 +395,47 @@ function shortVideoRouteFromPath(routePath, params = new URLSearchParams()) {
   };
 }
 
+function musicRouteFromPath(routePath, params = new URLSearchParams()) {
+  const segments = normalizeRoutePath(routePath).split("/").filter(Boolean);
+  if (!segments.length || !["music", "musics", "songs"].includes(segments[0])) return null;
+  const section = segments[1] || "";
+  return {
+    view: "music",
+    galleryMode: "",
+    galleryPhotoView: "collections",
+    galleryPhotoCollection: "",
+    galleryAlbumId: "",
+    galleryComicId: "",
+    galleryChapterIndex: "",
+    galleryMediaId: "",
+    galleryQuery: "",
+    galleryCategory: "all",
+    gallerySubCategory: "all",
+    galleryPerson: "all",
+    gallerySort: "updated",
+    novelBookId: "",
+    novelChapterIndex: "",
+    novelQuery: "",
+    novelCategory: "all",
+    novelSort: "updated",
+    shortVideoId: "",
+    shortVideoQuery: "",
+    shortVideoAuthor: "all",
+    shortVideoSource: "liked",
+    shortVideoSort: "published",
+    musicTrackId: section === "track" ? decodeRouteSegment(segments[2] || "") : "",
+    musicArtistId: section === "artist" ? decodeRouteSegment(segments[2] || "") : "",
+    musicAlbumId: section === "album" ? decodeRouteSegment(segments[2] || "") : "",
+    musicQuery: params.get("q") || params.get("search") || "",
+    musicSort: normalizeMusicSort(params.get("sort")),
+    musicFavorite: ["1", "true", "yes"].includes(String(params.get("favorite") || "").toLowerCase()),
+    personId: "",
+    q: "",
+    workId: "",
+    videoId: ""
+  };
+}
+
 function routePath(route) {
   if (route.view === "gallery") {
     const mode = route.galleryMode || "photo";
@@ -401,6 +466,12 @@ function routePath(route) {
   if (route.view === "shortVideos") {
     if (route.shortVideoId) return `/short-videos/${encodeRouteSegment(route.shortVideoId)}`;
     return "/short-videos";
+  }
+  if (route.view === "music") {
+    if (route.musicTrackId) return `/music/track/${encodeRouteSegment(route.musicTrackId)}`;
+    if (route.musicAlbumId) return `/music/album/${encodeRouteSegment(route.musicAlbumId)}`;
+    if (route.musicArtistId) return `/music/artist/${encodeRouteSegment(route.musicArtistId)}`;
+    return "/music";
   }
   if (VIEW_PATHS[route.view]) return VIEW_PATHS[route.view];
   return "/";

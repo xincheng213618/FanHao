@@ -57,13 +57,14 @@ import { createCatalogModule } from "./src/server/modules/catalog.js";
 import { createGalleryModule } from "./src/server/modules/gallery.js";
 import { createLibraryModule } from "./src/server/modules/library.js";
 import { createLocalOpenModule } from "./src/server/modules/local-open.js";
+import { createMusicModule } from "./src/server/modules/music.js";
 import { createNovelsModule } from "./src/server/modules/novels.js";
 import { createShortVideosModule } from "./src/server/modules/short-videos.js";
 import { createStatusModule } from "./src/server/modules/status.js";
 import { createToolsModule } from "./src/server/modules/tools.js";
 import { createUserStateModule } from "./src/server/modules/user-state.js";
 import { createVideoLibraryModule } from "./src/server/modules/video-library.js";
-import { galleryMediaSources, parseLibraryRoots, parsePhotoSetRoots, parseRootList, parseShortVideoRoots } from "./src/server/root-config.js";
+import { galleryMediaSources, parseLibraryRoots, parseMusicRoots, parsePhotoSetRoots, parseRootList, parseShortVideoRoots } from "./src/server/root-config.js";
 import { readBodyText, readJsonBody, readJsonFile, safeChildPath } from "./src/server/request-io.js";
 import { sendJson, sendText, sendHtml, redirect, notFound } from "./src/server/responses.js";
 import { createStaticFileServer } from "./src/server/static-files.js";
@@ -95,6 +96,8 @@ const USER_STATE_PATH = path.join(DATA_DIR, "user-state.json");
 const CORE_DB_PATH = path.join(DATA_DIR, "fanhao-core-v2.sqlite");
 const IMAGE_GALLERY_DB_PATH = path.join(DATA_DIR, "image-gallery.sqlite");
 const NOVEL_DB_PATH = path.join(DATA_DIR, "novels.sqlite");
+const MUSIC_DB_PATH = path.join(DATA_DIR, "music.sqlite");
+const MUSIC_ROOTS = parseMusicRoots();
 const SHORT_VIDEO_DB_PATH = path.join(DATA_DIR, "short-videos.sqlite");
 const SHORT_VIDEO_ROOTS = parseShortVideoRoots();
 const SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH = process.env.FANHAO_DOUYIN_DOWNLOAD_MANAGER_DB
@@ -179,6 +182,13 @@ const MIME_TYPES = {
   ".flv": "video/x-flv",
   ".ts": "video/mp2t",
   ".m2ts": "video/mp2t",
+  ".flac": "audio/flac",
+  ".mp3": "audio/mpeg",
+  ".m4a": "audio/mp4",
+  ".aac": "audio/aac",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".opus": "audio/ogg",
   ".iso": "application/octet-stream",
   ".txt": "text/plain; charset=utf-8",
   ".nfo": "text/plain; charset=utf-8",
@@ -369,6 +379,17 @@ const shortVideosModule = createShortVideosModule({
   requireLocalAdmin,
   sendJson,
   sharedCache: imageReaderCacheService
+});
+const musicModule = createMusicModule({
+  dbPath: MUSIC_DB_PATH,
+  ffprobePath: FFPROBE_PATH,
+  roots: MUSIC_ROOTS,
+  mediaResponseService,
+  mediaStreamService,
+  notFound,
+  readJsonBody,
+  requireLocalAdmin,
+  sendJson
 });
 const galleryMediaService = createGalleryMediaService({
   coverBoxSize: IMAGE_GALLERY_COVER_BOX_SIZE,
@@ -2323,6 +2344,9 @@ function applyAdminTaskInvalidations(task) {
   if (invalidates.has("novels")) {
     novelsModule.invalidate();
   }
+  if (invalidates.has("music")) {
+    musicModule.invalidate();
+  }
   if (invalidates.has("shortVideos")) {
     shortVideosModule.clearListCache?.();
   }
@@ -2786,6 +2810,8 @@ async function routeApi(req, res, url) {
 
   if (await shortVideosModule.routeApi(req, res, url)) return true;
 
+  if (await musicModule.routeApi(req, res, url)) return true;
+
   if (await novelsModule.routeApi(req, res, url)) return true;
 
   if (await libraryModule.routeMutationApi(req, res, url)) return true;
@@ -2814,6 +2840,8 @@ async function routeMedia(req, res, url) {
   if (await galleryModule.routeMedia(req, res, url)) return true;
 
   if (await shortVideosModule.routeMedia(req, res, url)) return true;
+
+  if (await musicModule.routeMedia(req, res, url)) return true;
 
   return false;
 }

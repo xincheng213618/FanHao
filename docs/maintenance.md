@@ -57,6 +57,7 @@ Windows 下推荐使用自带脚本：
 | `import-info-metadata` | 导入本地 info 元数据 | 文件 | 从本地 info/nfo/txt/json 导入作品资料缓存。 |
 | `import-single-actor` | 导入单个演员 | JavDB | 手动导入 / 修正单个人物。 |
 | `novel-library-rescan` | 刷新小说书库 | 小说 | 扫描本地 TXT 小说重建 `novels.sqlite`（保留阅读进度）。 |
+| `music-library-rescan` | 刷新音乐库 | 音乐 | 扫描本地无损音乐目录重建 `music.sqlite`（保留收藏和播放进度）。 |
 | `format-txt-document` | 格式化 TXT 文档 | 文本 | 把 TXT 整理成标准 UTF-8 章节格式。 |
 | `verify-code-parsers` | 验证番号解析 | 验证 | 运行番号解析器测试。 |
 | `verify-metadata-parsers` | 验证资料解析 | 验证 | 运行 info/nfo 解析器测试。 |

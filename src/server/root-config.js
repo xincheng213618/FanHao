@@ -49,6 +49,11 @@ export function parseShortVideoRoots(env = process.env) {
   return parseRootList(env.FANHAO_SHORT_VIDEO_ROOTS || env.FANHAO_DOUYIN_LIKES_ROOT || fallback, fallback);
 }
 
+export function parseMusicRoots(env = process.env) {
+  const fallback = "E:\\音乐 MV\\音乐（无损）";
+  return parseRootList(env.FANHAO_MUSIC_ROOTS || env.FANHAO_MUSIC_ROOT || fallback, fallback);
+}
+
 export function parsePhotoSetRoots(env = process.env) {
   return parseRootList(env.FANHAO_PHOTO_SET_ROOTS, "T:\\;T:\\[套图1]");
 }

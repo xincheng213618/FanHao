@@ -108,6 +108,22 @@
 | GET | `/api/short-videos/:id` | 公开 | 短视频详情。 |
 | GET | `/api/short-videos/:id/adjacent` | 公开 | 上一条 / 下一条（`?direction=prev\|next`）。 |
 
+## 音乐（Music）
+
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/api/music/summary` | 公开 | 音乐库概览统计与根目录状态。 |
+| GET | `/api/music/facets` | 公开 | 筛选维度（歌手、专辑）。 |
+| GET | `/api/music/artists` | 公开 | 歌手列表。 |
+| GET | `/api/music/albums` | 公开 | 专辑列表。 |
+| GET | `/api/music/tracks` | 公开 | 歌曲列表（搜索、歌手、专辑、收藏、排序）。 |
+| POST | `/api/music/rescan` | 本地管理员 | 扫描本地音乐根目录并重建 `music.sqlite`。 |
+| GET | `/api/music/tracks/:id` | 公开 | 单曲详情、歌词与相邻歌曲。 |
+| POST | `/api/music/tracks/:id/progress` | 公开 | 保存播放进度 / 播放次数。 |
+| POST | `/api/music/tracks/:id/favorite` | 公开 | 切换歌曲收藏。 |
+| GET / HEAD | `/media/music/:id` | 公开 | 音频文件 Range 流式播放。 |
+| GET | `/media/music-cover/:albumId` | 公开 | 专辑封面。 |
+
 ## 小说（Novels）
 
 | 方法 | 路径 | 权限 | 说明 |

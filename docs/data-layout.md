@@ -11,6 +11,7 @@ FanHao 把本地状态放在项目根下的 `data/` 目录，包含若干 SQLite
 | `image-gallery.sqlite` | SQLite | 图库独立库：套图封面、套图图片索引、电视剧 / 电影元数据、图库媒体封面。 |
 | `novels.sqlite` | SQLite | 小说书库：书籍、章节、阅读进度。 |
 | `short-videos.sqlite` | SQLite | 短视频库：点赞短视频索引与元数据。 |
+| `music.sqlite` | SQLite | 音乐独立库：本地音频、歌手、专辑、歌词、收藏与播放进度。 |
 | `user-state.json` | JSON | 用户状态：收藏夹、收藏、播放进度、观看历史、手动封面覆盖。 |
 | `app-config.json` | JSON | App 运行期配置（如图库读取缓存上限）。 |
 | `auth-secret.txt` | 文本 | 访问鉴权 HMAC 密钥（首次启动随机生成）。 |
@@ -48,6 +49,18 @@ FanHao 把本地状态放在项目根下的 `data/` 目录，包含若干 SQLite
 - `photo_set_covers` / `photo_set_image_indexes`：套图封面与图片索引。
 - `tv_series_metadata` / `movie_metadata`：电视剧 / 电影豆瓣元数据（封面以 BLOB 内联存储）。
 - `gallery_media_covers`：欧美 / 电影 / 电视剧媒体封面缓存。
+
+## 音乐库（`music.sqlite`）
+
+音乐模块默认扫描 `E:\音乐 MV\音乐（无损）`，也可通过 `FANHAO_MUSIC_ROOTS` / `FANHAO_MUSIC_ROOT`
+覆盖。扫描会重建歌手、专辑、歌曲、歌词与全文搜索索引，保留 `music_track_state` 中的收藏、播放次数与播放进度。
+
+主要表：
+
+- `music_artists` / `music_albums` / `music_tracks`：歌手、专辑、歌曲索引。
+- `music_lyrics`：同名 `.lrc` 或目录歌词文本解析结果。
+- `music_track_state`：收藏、播放进度、播放次数与最近播放时间。
+- `music_search`：歌曲 / 歌手 / 专辑 / 歌词全文搜索索引。
 
 ## 用户状态（`user-state.json`）
 
