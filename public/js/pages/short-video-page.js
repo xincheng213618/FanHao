@@ -2099,7 +2099,7 @@ function writeAutoNextPreference(enabled) {
 }
 
 function normalizeShortVideoSource(value) {
-  const source = String(value || "liked").trim();
+  const source = String(value || "liked").trim().toLowerCase();
   return ["liked", "posts", "all", "local"].includes(source) ? source : "liked";
 }
 

@@ -2323,6 +2323,9 @@ function applyAdminTaskInvalidations(task) {
   if (invalidates.has("novels")) {
     novelsModule.invalidate();
   }
+  if (invalidates.has("shortVideos")) {
+    shortVideosModule.clearListCache?.();
+  }
   if (invalidates.has("userState")) userStateService.load();
 }
 
