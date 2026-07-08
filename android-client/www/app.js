@@ -8,7 +8,7 @@ import { getElements } from "./js/dom.js?v=20260706-short-video-reel-06";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260706-mobile-web-sync-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
-import { createMusicViews } from "./js/music-views.js?v=20260708-mobile-music-07";
+import { createMusicViews } from "./js/music-views.js?v=20260708-mobile-music-09";
 import { createNovelViews } from "./js/novel-views.js?v=20260702-novel-local-manage-74";
 import { createPeopleViews } from "./js/people-views.js";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
@@ -181,7 +181,9 @@ function sanitizeViewParams(view, params = {}) {
   if (view === "novelDetail") return { id: String(params.id || "") };
   if (view === "novelReader") return { id: String(params.id || ""), chapterIndex: String(params.chapterIndex || params.chapter || "1") };
   if (view === "music") {
-    const mode = String(params.mode || "").trim() === "history" ? "history" : "library";
+    const rawMode = String(params.mode || "").trim();
+    const smartId = String(params.smartId || params.smart || "").trim();
+    const mode = smartId ? "smart" : (rawMode === "history" ? "history" : "library");
     const query = String(params.query || params.q || "").trim();
     const sort = normalizeMusicSort(params.sort);
     const favorite = ["1", "true", "yes"].includes(String(params.favorite || params.fav || "").trim().toLowerCase());
@@ -192,7 +194,8 @@ function sanitizeViewParams(view, params = {}) {
       mode,
       ...(query ? { query } : {}),
       ...(sort !== "album" ? { sort } : {}),
-      ...(favorite ? { favorite: "1" } : {}),
+      ...(favorite && mode !== "smart" ? { favorite: "1" } : {}),
+      ...(smartId ? { smartId } : {}),
       ...(mode === "library" && artistId ? { artistId } : {}),
       ...(mode === "library" && albumId ? { albumId } : {}),
       ...(trackId ? { trackId } : {})
@@ -984,6 +987,7 @@ function openNativeLibraryRoute(options = {}) {
       query: query.get("q") || query.get("query") || "",
       sort: query.get("sort") || "",
       favorite: query.get("favorite") || "",
+      smartId: query.get("smart") || query.get("smartId") || "",
       artistId: query.get("artist") || query.get("artistId") || "",
       albumId: query.get("album") || query.get("albumId") || "",
       trackId: segments[1] || query.get("track") || query.get("trackId") || ""

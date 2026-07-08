@@ -11,6 +11,57 @@ const MAX_LIMIT = 2000;
 const MAX_LYRIC_BYTES = 1024 * 1024;
 const MAX_INTRO_BYTES = 512 * 1024;
 const KUWO_UTF16LE_PREFIX = Buffer.from([0x77, 0x91, 0x11, 0x62, 0xf3, 0x97, 0x50, 0x4e]);
+const REDISCOVER_DAYS = 30;
+const SMART_MIXES = [
+  {
+    id: "recent",
+    name: "最近播放",
+    description: "按最近播放时间自动更新，适合继续刚才的听歌顺序。",
+    badge: "继续听",
+    order: "s.last_played_at DESC, t.album_title COLLATE NOCASE ASC, t.track_no ASC",
+    limit: 120
+  },
+  {
+    id: "favorites",
+    name: "我喜欢",
+    description: "所有已收藏歌曲，按最近收藏或更新靠前。",
+    badge: "收藏",
+    order: "s.updated_at DESC, t.title COLLATE NOCASE ASC",
+    limit: 200
+  },
+  {
+    id: "hires",
+    name: "无损与高解析",
+    description: "FLAC、WAV、ALAC 或 24bit/48kHz 以上音频。",
+    badge: "Hi-Res",
+    order: "COALESCE(t.bit_depth, 0) DESC, COALESCE(t.sample_rate, 0) DESC, t.album_title COLLATE NOCASE ASC, t.track_no ASC",
+    limit: 240
+  },
+  {
+    id: "lyrics",
+    name: "带歌词",
+    description: "已匹配 LRC 歌词的歌曲，适合沉浸播放。",
+    badge: "LRC",
+    order: "t.album_title COLLATE NOCASE ASC, t.disc_no ASC, t.track_no ASC, t.title COLLATE NOCASE ASC",
+    limit: 240
+  },
+  {
+    id: "longform",
+    name: "长曲沉浸",
+    description: "5 分钟以上的长曲，按时长优先。",
+    badge: "5min+",
+    order: "t.duration_ms DESC, t.title COLLATE NOCASE ASC",
+    limit: 160
+  },
+  {
+    id: "rediscover",
+    name: "重温收藏",
+    description: "收藏或听过、但最近 30 天没有播放的歌曲。",
+    badge: "重温",
+    order: "COALESCE(s.last_played_at, '') ASC, COALESCE(s.updated_at, '') DESC, t.title COLLATE NOCASE ASC",
+    limit: 160
+  }
+];
 
 export function createMusicStore(options = {}) {
   const dbPath = options.dbPath;
@@ -161,11 +212,12 @@ export function createMusicStore(options = {}) {
   function listTracks(urlOrOptions = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const filter = catalogFilter(params);
+    const smartMix = findSmartMix(filter.smartId);
     const sort = normalizeTrackSort(params.get("sort"));
     const limit = clampInt(params.get("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
     const offset = clampInt(params.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const where = filter.trackWhere ? `WHERE ${filter.trackWhere}` : "";
-    const order = trackOrderSql(sort);
+    const order = smartMix ? smartMix.order : trackOrderSql(sort);
     const database = dbOrOpen();
     const total = database.prepare(`SELECT COUNT(*) AS count FROM music_tracks t LEFT JOIN music_track_state s ON s.track_id = t.id ${where}`).get(...filter.trackArgs)?.count || 0;
     const rows = database
@@ -194,6 +246,8 @@ export function createMusicStore(options = {}) {
       artistId: filter.artistId,
       albumId: filter.albumId,
       favorite: filter.favorite,
+      smartId: filter.smartId,
+      smartPlaylist: smartMix ? publicSmartPlaylist(smartMix, total) : null,
       sort,
       summary: summary(),
       artists: artistFacet(database),
@@ -321,6 +375,55 @@ export function createMusicStore(options = {}) {
     return { playlists: rows.map(publicPlaylist), total: rows.length };
   }
 
+  function listSmartPlaylists() {
+    const database = dbOrOpen();
+    const smartPlaylists = SMART_MIXES.map((mix) => publicSmartPlaylist(mix, smartMixCount(database, mix)));
+    return {
+      smartPlaylists,
+      total: smartPlaylists.length,
+      summary: summary()
+    };
+  }
+
+  function smartPlaylistDetail(smartPlaylistId, urlOrOptions = {}) {
+    const mix = findSmartMix(smartPlaylistId);
+    if (!mix) return null;
+    const params = urlOrOptions?.searchParams || new URLSearchParams();
+    const limit = clampInt(params.get("limit"), mix.limit || DEFAULT_LIMIT, 1, MAX_LIMIT);
+    const offset = clampInt(params.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+    const database = dbOrOpen();
+    const condition = smartMixCondition(mix);
+    const where = `WHERE t.status = 'ok' AND ${condition.where}`;
+    const total = database.prepare(`SELECT COUNT(*) AS count FROM music_tracks t LEFT JOIN music_track_state s ON s.track_id = t.id ${where}`).get(...condition.args)?.count || 0;
+    const rows = database
+      .prepare(
+        `
+        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
+               s.favorite, s.position_ms, s.duration_ms AS state_duration_ms,
+               s.play_count, s.last_played_at
+        FROM music_tracks t
+        LEFT JOIN music_artists a ON a.id = t.artist_id
+        LEFT JOIN music_albums al ON al.id = t.album_id
+        LEFT JOIN music_track_state s ON s.track_id = t.id
+        ${where}
+        ORDER BY ${mix.order}
+        LIMIT ? OFFSET ?
+      `
+      )
+      .all(...condition.args, limit, offset);
+    return {
+      smartPlaylist: publicSmartPlaylist(mix, total),
+      tracks: rows.map(publicTrack),
+      total: Number(total || 0),
+      limit,
+      offset,
+      hasMore: offset + rows.length < Number(total || 0),
+      summary: summary(),
+      artists: artistFacet(database),
+      albums: albumFacet(database)
+    };
+  }
+
   function createPlaylist(input = {}) {
     const name = String(typeof input === "string" ? input : input.name || "").trim().slice(0, 80);
     if (!name) throw httpError(400, "歌单名称不能为空");
@@ -437,11 +540,13 @@ export function createMusicStore(options = {}) {
     listAlbums,
     listArtists,
     listPlaylists,
+    listSmartPlaylists,
     listTracks,
     playlistDetail,
     removeFromPlaylist,
     saveProgress,
     scan,
+    smartPlaylistDetail,
     summary,
     toggleFavorite,
     trackDetail,
@@ -884,6 +989,7 @@ function lyricsForTrack(db, trackId) {
 function adjacentTracks(db, trackId, urlOrOptions = {}) {
   const params = urlOrOptions?.searchParams || new URLSearchParams();
   const filter = catalogFilter(params);
+  const smartMix = findSmartMix(params.get("smart") || params.get("smartId"));
   const where = filter.trackWhere ? `WHERE ${filter.trackWhere}` : "";
   const rows = db
     .prepare(
@@ -892,7 +998,7 @@ function adjacentTracks(db, trackId, urlOrOptions = {}) {
       FROM music_tracks t
       LEFT JOIN music_track_state s ON s.track_id = t.id
       ${where}
-      ORDER BY ${trackOrderSql(normalizeTrackSort(params.get("sort")))}
+      ORDER BY ${smartMix?.order || trackOrderSql(normalizeTrackSort(params.get("sort")))}
       LIMIT 2000
     `
     )
@@ -908,6 +1014,7 @@ function catalogFilter(params = new URLSearchParams()) {
   const q = String(params.get("q") || params.get("search") || "").trim();
   const artistId = String(params.get("artist") || params.get("artistId") || "").trim();
   const albumId = String(params.get("album") || params.get("albumId") || "").trim();
+  const smartMix = findSmartMix(params.get("smart") || params.get("smartId"));
   const favorite = ["1", "true", "yes"].includes(String(params.get("favorite") || "").trim().toLowerCase());
   const trackWhere = ["t.status = 'ok'"];
   const trackArgs = [];
@@ -925,6 +1032,11 @@ function catalogFilter(params = new URLSearchParams()) {
   }
   if (favorite) {
     trackWhere.push("COALESCE(s.favorite, 0) = 1");
+  }
+  if (smartMix) {
+    const condition = smartMixCondition(smartMix);
+    trackWhere.push(condition.where);
+    trackArgs.push(...condition.args);
   }
   if (q) {
     const like = `%${escapeLike(q)}%`;
@@ -946,6 +1058,7 @@ function catalogFilter(params = new URLSearchParams()) {
     q,
     artistId,
     albumId,
+    smartId: smartMix?.id || "",
     favorite,
     trackWhere: trackWhere.join(" AND "),
     trackArgs,
@@ -991,6 +1104,50 @@ function albumFacet(db, artistId = "") {
     .map(publicAlbum);
 }
 
+function findSmartMix(id) {
+  const value = String(id || "").trim().toLowerCase();
+  return SMART_MIXES.find((mix) => mix.id === value) || null;
+}
+
+function smartMixCondition(mixOrId) {
+  const mix = typeof mixOrId === "string" ? findSmartMix(mixOrId) : mixOrId;
+  if (!mix) return { where: "1 = 0", args: [] };
+  if (mix.id === "recent") return { where: "COALESCE(s.last_played_at, '') <> ''", args: [] };
+  if (mix.id === "favorites") return { where: "COALESCE(s.favorite, 0) = 1", args: [] };
+  if (mix.id === "hires") {
+    return {
+      where: "(LOWER(COALESCE(t.codec, '')) IN ('flac', 'wav', 'alac') OR COALESCE(t.bit_depth, 0) >= 24 OR COALESCE(t.sample_rate, 0) >= 48000)",
+      args: []
+    };
+  }
+  if (mix.id === "lyrics") return { where: "COALESCE(t.has_lrc, 0) = 1", args: [] };
+  if (mix.id === "longform") return { where: "COALESCE(t.duration_ms, 0) >= 300000", args: [] };
+  if (mix.id === "rediscover") {
+    const cutoff = new Date(Date.now() - REDISCOVER_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    return {
+      where: "(COALESCE(s.favorite, 0) = 1 OR COALESCE(s.play_count, 0) > 0) AND (COALESCE(s.last_played_at, '') = '' OR s.last_played_at < ?)",
+      args: [cutoff]
+    };
+  }
+  return { where: "1 = 0", args: [] };
+}
+
+function smartMixCount(db, mix) {
+  const condition = smartMixCondition(mix);
+  return Number(
+    db
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM music_tracks t
+        LEFT JOIN music_track_state s ON s.track_id = t.id
+        WHERE t.status = 'ok' AND ${condition.where}
+      `
+      )
+      .get(...condition.args)?.count || 0
+  );
+}
+
 function publicArtist(row) {
   return {
     id: row.id || "",
@@ -1033,6 +1190,17 @@ function publicPlaylist(row) {
     trackCount: Number(row.track_count || 0),
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || ""
+  };
+}
+
+function publicSmartPlaylist(mix, count = 0) {
+  return {
+    id: mix.id || "",
+    name: mix.name || "",
+    description: mix.description || "",
+    badge: mix.badge || "",
+    trackCount: Number(count || 0),
+    limit: Number(mix.limit || DEFAULT_LIMIT)
   };
 }
 

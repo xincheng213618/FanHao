@@ -19,6 +19,7 @@
 .music-mobile-mini-player,
 .music-mobile-tabs,
 .music-mobile-controls,
+.music-mobile-smart-card,
 .music-mobile-track {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -114,6 +115,106 @@
   background: var(--surface);
   color: var(--green);
   box-shadow: 0 3px 10px rgba(0, 0, 0, 0.08);
+}
+
+.music-mobile-smart {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.music-mobile-smart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 0 2px;
+}
+
+.music-mobile-smart-head strong {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.music-mobile-smart-head small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.music-mobile-smart-scroll {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.music-mobile-smart-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.music-mobile-smart-card {
+  display: grid;
+  flex: 0 0 min(70vw, 224px);
+  gap: 5px;
+  align-content: start;
+  min-height: 116px;
+  padding: 11px;
+  color: var(--ink);
+  text-align: left;
+}
+
+.music-mobile-smart-card.active {
+  border-color: var(--green);
+  background: var(--success-soft);
+}
+
+.music-mobile-smart-card:disabled {
+  opacity: 0.48;
+}
+
+.music-mobile-smart-badge {
+  width: max-content;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: var(--field);
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 950;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-mobile-smart-card strong,
+.music-mobile-smart-card small,
+.music-mobile-smart-card em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-mobile-smart-card strong {
+  font-size: 16px;
+  font-weight: 950;
+}
+
+.music-mobile-smart-card small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.music-mobile-smart-card em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
 }
 
 .music-mobile-controls {

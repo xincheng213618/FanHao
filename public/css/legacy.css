@@ -8848,6 +8848,7 @@ body.music-view .work-grid {
 .music-home-card:hover,
 .music-home-track:hover,
 .music-home-playlist:hover,
+.music-home-smart:hover,
 .music-home-pill:hover,
 .music-home-album:hover,
 .music-playlist-choice:hover {
@@ -8933,6 +8934,7 @@ body.music-view .work-grid {
 
 .music-home-track,
 .music-home-playlist,
+.music-home-smart,
 .music-home-album {
   min-width: 0;
   border: 1px solid transparent;
@@ -8966,6 +8968,8 @@ body.music-view .work-grid {
 .music-home-track em,
 .music-home-playlist strong,
 .music-home-playlist small,
+.music-home-smart strong,
+.music-home-smart small,
 .music-home-album strong,
 .music-home-album small {
   overflow: hidden;
@@ -8975,6 +8979,7 @@ body.music-view .work-grid {
 
 .music-home-track strong,
 .music-home-playlist strong,
+.music-home-smart strong,
 .music-home-album strong {
   color: inherit;
   font-size: 13px;
@@ -8983,6 +8988,7 @@ body.music-view .work-grid {
 
 .music-home-track small,
 .music-home-playlist small,
+.music-home-smart small,
 .music-home-album small,
 .music-home-track em {
   color: rgba(237, 244, 240, .48);
@@ -9004,6 +9010,34 @@ body.music-view .work-grid {
   color: rgba(237, 244, 240, .64);
   font-size: 12px;
   font-weight: 800;
+}
+
+.music-home-smart {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 48px;
+  padding: 6px 9px;
+}
+
+.music-home-smart b {
+  display: inline-grid;
+  min-height: 28px;
+  place-items: center;
+  border: 1px solid rgba(62, 218, 147, .24);
+  border-radius: 999px;
+  background: rgba(62, 218, 147, .1);
+  color: #8df2bf;
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.music-home-smart span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
 }
 
 .music-home-pill-list {
@@ -9034,6 +9068,17 @@ body.music-view .work-grid {
   color: rgba(237, 244, 240, .48);
   font-size: 12px;
   text-align: center;
+}
+
+.music-sidebar-empty {
+  min-height: 34px;
+  border: 1px dashed rgba(255, 255, 255, .11);
+  border-radius: 6px;
+  color: rgba(237, 244, 240, .45);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 750;
 }
 
 .music-panel-heading {

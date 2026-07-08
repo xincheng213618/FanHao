@@ -73,6 +73,30 @@ export async function routeMusicApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/music/smart-playlists" && req.method === "GET") {
+    try {
+      sendJson(res, 200, musicStore.listSmartPlaylists());
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "智能歌单列表读取失败" });
+    }
+    return true;
+  }
+
+  const smartPlaylistMatch = /^\/api\/music\/smart-playlists\/([^/]+)$/.exec(url.pathname);
+  if (smartPlaylistMatch && req.method === "GET") {
+    try {
+      const data = musicStore.smartPlaylistDetail(decodeURIComponent(smartPlaylistMatch[1]), url);
+      if (!data) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "智能歌单详情读取失败" });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/music/playlists" && req.method === "POST") {
     try {
       const body = await readJsonBody(req);

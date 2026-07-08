@@ -2,7 +2,7 @@ import { createApiClient, addQueryParam } from "./js/api.js?v=20260701-gallery-m
 import { createAdminModal } from "./js/pages/admin-modal.js?v=20260708-music-refresh-01";
 import { createGalleryPage } from "./js/pages/gallery-page.js?v=20260701-gallery-merge-01";
 import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260706-media-player-02";
-import { createMusicPage } from "./js/pages/music-page.js?v=20260708-music-queue-01";
+import { createMusicPage } from "./js/pages/music-page.js?v=20260708-music-smart-01";
 import { createNovelPage } from "./js/pages/novel-page.js?v=20260701-gallery-merge-01";
 import { createPeoplePage } from "./js/pages/people-page.js?v=20260706-western-people-01";
 import { createPersonProfile } from "./js/pages/person-profile.js?v=20260706-multi-javdb-actor-01";
@@ -10,7 +10,7 @@ import { createRankingPage } from "./js/pages/ranking-page.js?v=20260704-ranking
 import { createShortVideoPage } from "./js/pages/short-video-page.js?v=20260708-short-video-source-01";
 import { createToolsPage } from "./js/pages/tools-page.js?v=20260701-gallery-merge-01";
 import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260705-local-marker-a-01";
-import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260708-music-absorb-01";
+import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260708-music-smart-01";
 
 repairLegacyShell();
 
@@ -148,6 +148,7 @@ const state = {
     artistId: "all",
     albumId: "all",
     activePlaylistId: "",
+    activeSmartPlaylistId: "",
     sort: "album",
     favorite: false,
     data: null,
@@ -155,7 +156,9 @@ const state = {
     artists: [],
     albums: [],
     playlists: [],
+    smartPlaylists: [],
     activePlaylist: null,
+    activeSmartPlaylist: null,
     current: null,
     lyrics: { raw: "", lines: [] },
     queue: [],
@@ -615,6 +618,7 @@ function currentRouteSnapshot(overrides = {}) {
     musicAlbumId: state.activeView === "music" && state.music.albumId !== "all" ? state.music.albumId || "" : "",
     musicMode: state.activeView === "music" ? state.music.mode || "home" : "home",
     musicPlaylistId: state.activeView === "music" && state.music.mode === "playlist" ? state.music.activePlaylistId || "" : "",
+    musicSmartId: state.activeView === "music" && state.music.mode === "smart" ? state.music.activeSmartPlaylistId || "" : "",
     musicQuery: state.activeView === "music" ? state.music.query || "" : "",
     musicSort: state.activeView === "music" ? state.music.sort || "album" : "album",
     musicFavorite: state.activeView === "music" ? Boolean(state.music.favorite) : false,
