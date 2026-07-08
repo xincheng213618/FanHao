@@ -301,6 +301,8 @@ export function createMusicPage(deps) {
       ["歌曲", formatNumber(totals.tracks || 0)],
       ["歌手", formatNumber(totals.artists || 0)],
       ["专辑", formatNumber(totals.albums || 0)],
+      ["听过", formatNumber(totals.listenedTracks || 0)],
+      ["播放", formatNumber(totals.plays || 0)],
       ["容量", formatBytes(totals.bytes || 0)]
     ]) {
       const stat = document.createElement("div");
@@ -524,7 +526,7 @@ export function createMusicPage(deps) {
     const headingTitle = document.createElement("strong");
     headingTitle.textContent = "发现";
     const headingMeta = document.createElement("small");
-    headingMeta.textContent = "从最近播放、智能歌单、风格、歌手和专辑快速进入";
+    headingMeta.textContent = "从最近播放、常听歌曲、智能歌单、风格、歌手和专辑快速进入";
     headingText.append(headingTitle, headingMeta);
     const headingActions = document.createElement("div");
     headingActions.className = "music-panel-actions";
@@ -543,11 +545,13 @@ export function createMusicPage(deps) {
 
     const summary = state.music.summary || state.music.data?.summary || {};
     const totals = summary.totals || {};
+    const topPlayed = summary.topPlayed?.length ? summary.topPlayed : [];
     const cards = document.createElement("div");
     cards.className = "music-home-cards";
     cards.append(
       homeActionCard("全部歌曲", formatNumber(totals.tracks || state.music.data?.total || 0), "按专辑浏览", () => selectMusicMode("library")),
       homeActionCard("最近播放", formatNumber(summary.recent?.length || 0), "继续听", () => selectMusicMode("history")),
+      homeActionCard("常听歌曲", formatNumber(totals.listenedTracks || topPlayed.length || 0), "按播放次数", () => selectMusicMode("smart", { smartId: "topplayed" })),
       homeActionCard("智能歌单", formatNumber((state.music.smartPlaylists || []).length), "自动整理", () => selectFirstSmartPlaylist()),
       homeActionCard("我喜欢", "♥", "收藏歌曲", () => selectMusicMode("library", { favorite: true }))
     );
@@ -557,6 +561,7 @@ export function createMusicPage(deps) {
     const recent = summary.recent?.length ? summary.recent : (state.music.queue || []).slice(0, 8);
     sections.append(
       homeSection("最近播放", "继续刚才的顺序", homeTrackList(recent.slice(0, 8), "还没有最近播放")),
+      homeSection("常听歌曲", "按播放次数", homeTrackList(topPlayed.slice(0, 8), "还没有播放统计")),
       homeSection("智能歌单", "动态规则", homeSmartPlaylistList()),
       homeSection("歌单", "自建列表", homePlaylistList()),
       homeSection("风格", "按音乐类型进入", homeGenreList()),
@@ -978,7 +983,10 @@ export function createMusicPage(deps) {
       return panel;
     }
 
-    panel.append(renderCover(track, "large"));
+    const summary = document.createElement("div");
+    summary.className = "music-now-summary";
+    const info = document.createElement("div");
+    info.className = "music-now-info";
     const title = document.createElement("h3");
     title.textContent = track.title;
     const meta = document.createElement("p");
@@ -1016,7 +1024,9 @@ export function createMusicPage(deps) {
       remove.addEventListener("click", () => removeTrackFromActivePlaylist(track.id).catch(showError));
       actions.append(remove);
     }
-    panel.append(title, meta, rating, actions, renderLyricPanel(), renderQueuePanel());
+    info.append(title, meta, rating, actions);
+    summary.append(renderCover(track, "large"), info);
+    panel.append(summary, renderLyricPanel(), renderQueuePanel());
     return panel;
   }
 

@@ -175,6 +175,19 @@ export function createMusicStore(options = {}) {
         `
         )
         .get() || {};
+    const listening =
+      database
+        .prepare(
+          `
+          SELECT
+            COUNT(*) AS listenedTracks,
+            COALESCE(SUM(s.play_count), 0) AS plays
+          FROM music_track_state s
+          JOIN music_tracks t ON t.id = s.track_id
+          WHERE t.status = 'ok' AND COALESCE(s.play_count, 0) > 0
+        `
+        )
+        .get() || {};
     const recent = database
       .prepare(
         `
@@ -192,6 +205,23 @@ export function createMusicStore(options = {}) {
       )
       .all()
       .map(publicTrack);
+    const topPlayed = database
+      .prepare(
+        `
+        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
+               s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
+               s.play_count, s.last_played_at
+        FROM music_track_state s
+        JOIN music_tracks t ON t.id = s.track_id
+        LEFT JOIN music_artists a ON a.id = t.artist_id
+        LEFT JOIN music_albums al ON al.id = t.album_id
+        WHERE t.status = 'ok' AND COALESCE(s.play_count, 0) > 0
+        ORDER BY COALESCE(s.play_count, 0) DESC, COALESCE(s.last_played_at, '') DESC, t.title COLLATE NOCASE ASC
+        LIMIT 8
+      `
+      )
+      .all()
+      .map(publicTrack);
     return {
       dbPath,
       roots: roots.map(rootStatus),
@@ -201,9 +231,12 @@ export function createMusicStore(options = {}) {
         artists: Number(totals.artists || 0),
         albums: Number(totals.albums || 0),
         bytes: Number(totals.bytes || 0),
-        durationMs: Number(totals.durationMs || 0)
+        durationMs: Number(totals.durationMs || 0),
+        listenedTracks: Number(listening.listenedTracks || 0),
+        plays: Number(listening.plays || 0)
       },
-      recent
+      recent,
+      topPlayed
     };
   }
 
