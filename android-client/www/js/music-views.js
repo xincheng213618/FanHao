@@ -1,4 +1,4 @@
-import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-10";
+import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-11";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -28,6 +28,7 @@ export function createMusicViews(deps) {
     smartPlaylist: null,
     artistId: "",
     albumId: "",
+    genre: "",
     data: null,
     summary: null,
     current: null,
@@ -85,6 +86,7 @@ export function createMusicViews(deps) {
     state.smartId = String(params.smartId || params.smart || "").trim();
     state.artistId = String(params.artistId || params.artist || "").trim();
     state.albumId = String(params.albumId || params.album || "").trim();
+    state.genre = String(params.genre || params.musicGenre || "").trim();
     if (state.smartId) {
       state.mode = "smart";
       state.favorite = false;
@@ -93,6 +95,7 @@ export function createMusicViews(deps) {
     if (state.mode !== "library") {
       state.artistId = "";
       state.albumId = "";
+      state.genre = "";
     }
   }
 
@@ -443,9 +446,15 @@ export function createMusicViews(deps) {
     }
     const artists = Array.isArray(state.data?.artists) ? state.data.artists : [];
     const albums = Array.isArray(state.data?.albums) ? state.data.albums : [];
-    if (!artists.length && !albums.length) {
+    const genres = Array.isArray(state.data?.genres) ? state.data.genres : [];
+    if (!artists.length && !albums.length && !genres.length) {
       wrap.hidden = true;
       return wrap;
+    }
+    if (genres.length) {
+      wrap.append(renderFacetRow("风格", genreFacetItems(genres), state.genre, (id) => {
+        updateListParams({ genre: id, albumId: "", mode: "library" });
+      }));
     }
     if (artists.length) {
       wrap.append(renderFacetRow("歌手", artistFacetItems(artists), state.artistId, (id) => {
@@ -487,6 +496,17 @@ export function createMusicViews(deps) {
         id: artist.id || "",
         label: artist.name || "未知歌手",
         title: `${artist.name || "未知歌手"} · ${formatNumber(artist.trackCount || 0)} 首`
+      }))
+    ];
+  }
+
+  function genreFacetItems(genres = []) {
+    return [
+      { id: "", label: "全部风格", title: "全部风格" },
+      ...prioritizedFacetItems(genres, state.genre, 18).map((genre) => ({
+        id: genre.name || genre.id || "",
+        label: genre.name || "未知风格",
+        title: `${genre.name || "未知风格"} · ${formatNumber(genre.trackCount || 0)} 首`
       }))
     ];
   }
@@ -896,7 +916,7 @@ export function createMusicViews(deps) {
   function canRestoreLastTrack() {
     if (state.current || state.loading) return false;
     if (state.mode !== "library") return false;
-    return !state.query && !state.favorite && !state.artistId && !state.albumId && state.sort === DEFAULT_SORT;
+    return !state.query && !state.favorite && !state.artistId && !state.albumId && !state.genre && state.sort === DEFAULT_SORT;
   }
 
   function rememberLastTrack(track) {
@@ -1124,6 +1144,7 @@ export function createMusicViews(deps) {
     if (Object.prototype.hasOwnProperty.call(patch, "sort")) state.sort = normalizeSort(patch.sort);
     if (Object.prototype.hasOwnProperty.call(patch, "artistId")) state.artistId = String(patch.artistId || "").trim();
     if (Object.prototype.hasOwnProperty.call(patch, "albumId")) state.albumId = String(patch.albumId || "").trim();
+    if (Object.prototype.hasOwnProperty.call(patch, "genre")) state.genre = String(patch.genre || "").trim();
     if (state.smartId) {
       state.mode = "smart";
       state.favorite = false;
@@ -1132,6 +1153,7 @@ export function createMusicViews(deps) {
     if (state.mode !== "library") {
       state.artistId = "";
       state.albumId = "";
+      state.genre = "";
     }
     if (options.resetSearch) state.searchOpen = false;
     showView("music", musicRouteParams(), {
@@ -1156,6 +1178,7 @@ export function createMusicViews(deps) {
     if (state.smartId) params.set("smart", state.smartId);
     if (state.artistId) params.set("artist", state.artistId);
     if (state.albumId) params.set("album", state.albumId);
+    if (state.genre) params.set("genre", state.genre);
     return params.toString();
   }
 
@@ -1167,13 +1190,15 @@ export function createMusicViews(deps) {
       ...(state.favorite ? { favorite: "1" } : {}),
       ...(state.smartId ? { smartId: state.smartId } : {}),
       ...(state.artistId ? { artistId: state.artistId } : {}),
-      ...(state.albumId ? { albumId: state.albumId } : {})
+      ...(state.albumId ? { albumId: state.albumId } : {}),
+      ...(state.genre ? { genre: state.genre } : {})
     };
   }
 
   function musicTitle() {
     if (state.mode === "history") return "最近播放";
     if (state.smartId) return selectedSmartPlaylist()?.name || "智能歌单";
+    if (state.genre) return state.genre;
     if (state.albumId) return selectedAlbumTitle() || "专辑";
     if (state.artistId) return selectedArtistName() || "歌手";
     if (state.favorite) return "收藏歌曲";
@@ -1184,7 +1209,7 @@ export function createMusicViews(deps) {
     const summary = data?.summary || state.summary || {};
     const total = data?.total ?? state.queue.length;
     const totals = summary.totals || {};
-    const scope = [selectedArtistName(), selectedAlbumTitle()].filter(Boolean).join(" · ");
+    const scope = [selectedArtistName(), selectedAlbumTitle(), state.genre].filter(Boolean).join(" · ");
     if (state.loading) return state.status || "正在读取";
     if (state.mode === "history") return `${formatNumber(total || 0)} 首 · 最近播放`;
     if (state.smartId) {
@@ -1207,7 +1232,7 @@ export function createMusicViews(deps) {
     if (state.mode === "history") return "还没有最近播放";
     if (state.smartId) return "这个智能歌单暂时没有歌曲";
     if (state.favorite) return "还没有收藏歌曲";
-    if (state.artistId || state.albumId) return "这个筛选下没有歌曲";
+    if (state.artistId || state.albumId || state.genre) return "这个筛选下没有歌曲";
     if (state.query) return "没有匹配的歌曲";
     return "这里还没有音乐";
   }

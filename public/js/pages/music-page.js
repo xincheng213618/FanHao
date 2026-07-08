@@ -30,6 +30,7 @@ export function createMusicPage(deps) {
     state.music.mode = ["home", "library", "history", "playlist", "smart"].includes(state.music.mode) ? state.music.mode : "home";
     state.music.artistId = state.music.artistId || "all";
     state.music.albumId = state.music.albumId || "all";
+    state.music.genre = state.music.genre || "all";
     state.music.activePlaylistId = state.music.activePlaylistId || "";
     state.music.activeSmartPlaylistId = state.music.activeSmartPlaylistId || "";
     state.music.sort = state.music.sort || "album";
@@ -38,6 +39,7 @@ export function createMusicPage(deps) {
     state.music.summary = state.music.summary || null;
     state.music.artists = Array.isArray(state.music.artists) ? state.music.artists : [];
     state.music.albums = Array.isArray(state.music.albums) ? state.music.albums : [];
+    state.music.genres = Array.isArray(state.music.genres) ? state.music.genres : [];
     state.music.playlists = Array.isArray(state.music.playlists) ? state.music.playlists : [];
     state.music.smartPlaylists = Array.isArray(state.music.smartPlaylists) ? state.music.smartPlaylists : [];
     state.music.activePlaylist = state.music.activePlaylist || null;
@@ -137,6 +139,7 @@ export function createMusicPage(deps) {
     state.music.query = route.musicQuery || "";
     state.music.artistId = route.musicArtistId || "all";
     state.music.albumId = route.musicAlbumId || "all";
+    state.music.genre = route.musicGenre || "all";
     state.music.activePlaylistId = route.musicPlaylistId || "";
     state.music.activeSmartPlaylistId = route.musicSmartId || "";
     state.music.sort = route.musicSort || "album";
@@ -190,6 +193,7 @@ export function createMusicPage(deps) {
     state.music.summary = data.summary || state.music.summary;
     state.music.artists = data.artists || state.music.artists || [];
     state.music.albums = data.albums || state.music.albums || [];
+    state.music.genres = data.genres || state.music.genres || [];
     state.music.activePlaylist = data.playlist || null;
     state.music.activeSmartPlaylist = data.smartPlaylist || null;
     state.music.queue = data.tracks || [];
@@ -392,6 +396,23 @@ export function createMusicPage(deps) {
     createPlaylistButton.addEventListener("click", () => openPlaylistDialog().catch(showError));
     playlists.append(createPlaylistButton);
 
+    const genresTitle = document.createElement("h3");
+    genresTitle.textContent = "风格";
+    const genreList = document.createElement("div");
+    genreList.className = "music-artist-list";
+    for (const genre of (state.music.genres || []).slice(0, 24)) {
+      genreList.append(filterButton(genre.id || genre.name, genre.name, genre.trackCount, state.music.mode === "library" && state.music.genre === genre.name, () => {
+        state.music.mode = "library";
+        state.music.favorite = false;
+        state.music.activePlaylistId = "";
+        state.music.activeSmartPlaylistId = "";
+        state.music.artistId = "all";
+        state.music.albumId = "all";
+        state.music.genre = genre.name || "all";
+        loadMusic({ replaceRoute: true }).catch(showError);
+      }));
+    }
+
     const artistsTitle = document.createElement("h3");
     artistsTitle.textContent = "歌手";
     const artistList = document.createElement("div");
@@ -404,6 +425,7 @@ export function createMusicPage(deps) {
         state.music.activeSmartPlaylistId = "";
         state.music.artistId = artist.id;
         state.music.albumId = "all";
+        state.music.genre = "all";
         loadMusic({ replaceRoute: true }).catch(showError);
       }));
     }
@@ -431,11 +453,12 @@ export function createMusicPage(deps) {
         state.music.activeSmartPlaylistId = "";
         state.music.artistId = album.artistId || state.music.artistId || "all";
         state.music.albumId = album.id;
+        state.music.genre = "all";
         loadMusic({ replaceRoute: true }).catch(showError);
       });
       albums.append(button);
     }
-    side.append(libraryTitle, libraryList, smartTitle, smartList, playlistTitle, playlists, artistsTitle, artistList, albumsTitle, albums);
+    side.append(libraryTitle, libraryList, smartTitle, smartList, playlistTitle, playlists, genresTitle, genreList, artistsTitle, artistList, albumsTitle, albums);
     return side;
   }
 
@@ -461,7 +484,7 @@ export function createMusicPage(deps) {
     const headingTitle = document.createElement("strong");
     headingTitle.textContent = "发现";
     const headingMeta = document.createElement("small");
-    headingMeta.textContent = "从最近播放、歌单、歌手和专辑快速进入";
+    headingMeta.textContent = "从最近播放、智能歌单、风格、歌手和专辑快速进入";
     headingText.append(headingTitle, headingMeta);
     const headingActions = document.createElement("div");
     headingActions.className = "music-panel-actions";
@@ -496,6 +519,7 @@ export function createMusicPage(deps) {
       homeSection("最近播放", "继续刚才的顺序", homeTrackList(recent.slice(0, 8), "还没有最近播放")),
       homeSection("智能歌单", "动态规则", homeSmartPlaylistList()),
       homeSection("歌单", "自建列表", homePlaylistList()),
+      homeSection("风格", "按音乐类型进入", homeGenreList()),
       homeSection("歌手", "按歌手进入", homeArtistList()),
       homeSection("专辑", "按专辑进入", homeAlbumList())
     );
@@ -611,6 +635,25 @@ export function createMusicPage(deps) {
     return list;
   }
 
+  function homeGenreList() {
+    const list = document.createElement("div");
+    list.className = "music-home-pill-list";
+    const genres = (state.music.genres || []).slice(0, 12);
+    if (!genres.length) {
+      list.append(homeEmpty("还没有风格信息"));
+      return list;
+    }
+    for (const genre of genres) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "music-home-pill";
+      button.textContent = `${genre.name} · ${formatNumber(genre.trackCount || 0)}`;
+      button.addEventListener("click", () => selectGenre(genre.name));
+      list.append(button);
+    }
+    return list;
+  }
+
   function homeArtistList() {
     const list = document.createElement("div");
     list.className = "music-home-pill-list";
@@ -631,6 +674,7 @@ export function createMusicPage(deps) {
         state.music.activeSmartPlaylistId = "";
         state.music.artistId = artist.id;
         state.music.albumId = "all";
+        state.music.genre = "all";
         loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
       });
       list.append(button);
@@ -665,6 +709,7 @@ export function createMusicPage(deps) {
         state.music.activeSmartPlaylistId = "";
         state.music.artistId = album.artistId || "all";
         state.music.albumId = album.id;
+        state.music.genre = "all";
         loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
       });
       list.append(button);
@@ -1368,12 +1413,26 @@ export function createMusicPage(deps) {
     if (mode === "library") {
       state.music.artistId = "all";
       state.music.albumId = "all";
+      state.music.genre = "all";
     }
     if (mode !== "library") {
       state.music.query = "";
       state.music.artistId = "all";
       state.music.albumId = "all";
+      state.music.genre = "all";
     }
+    loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+  }
+
+  function selectGenre(genre) {
+    ensureState();
+    state.music.mode = "library";
+    state.music.favorite = false;
+    state.music.activePlaylistId = "";
+    state.music.activeSmartPlaylistId = "";
+    state.music.artistId = "all";
+    state.music.albumId = "all";
+    state.music.genre = String(genre || "").trim() || "all";
     loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
   }
 
@@ -1594,6 +1653,7 @@ export function createMusicPage(deps) {
     if (state.music.query) params.set("q", state.music.query);
     if (state.music.artistId && state.music.artistId !== "all") params.set("artist", state.music.artistId);
     if (state.music.albumId && state.music.albumId !== "all") params.set("album", state.music.albumId);
+    if (state.music.genre && state.music.genre !== "all") params.set("genre", state.music.genre);
     if (state.music.sort && state.music.sort !== "album") params.set("sort", state.music.sort);
     if (state.music.favorite) params.set("favorite", "1");
     return params;
@@ -1605,6 +1665,7 @@ export function createMusicPage(deps) {
     if (state.music.mode === "playlist") return state.music.activePlaylist?.name || "歌单";
     if (state.music.mode === "smart") return state.music.activeSmartPlaylist?.name || "智能歌单";
     if (state.music.favorite) return "我喜欢";
+    if (state.music.genre && state.music.genre !== "all") return state.music.genre;
     if (state.music.albumId && state.music.albumId !== "all") {
       return state.music.albums.find((album) => album.id === state.music.albumId)?.title || "专辑";
     }
@@ -1622,6 +1683,7 @@ export function createMusicPage(deps) {
     if (state.music.mode === "smart") return `${count} · ${state.music.activeSmartPlaylist?.description || "动态规则"}`;
     if (state.music.mode === "history") return `${count} · 按最近播放排序`;
     if (state.music.favorite) return `${count} · 收藏歌曲`;
+    if (state.music.genre && state.music.genre !== "all") return `${count} · 风格`;
     return `${count} · ${sortLabel(state.music.sort)}`;
   }
 
@@ -1631,6 +1693,7 @@ export function createMusicPage(deps) {
     if (state.music.mode === "history") return "还没有最近播放，先听一首歌。";
     if (state.music.mode === "playlist") return "这个歌单还没有歌曲，先从右侧当前歌曲加入。";
     if (state.music.mode === "smart") return "这个智能歌单当前没有匹配歌曲。";
+    if (state.music.genre && state.music.genre !== "all") return "这个风格下没有歌曲。";
     if (state.music.favorite) return "还没有收藏歌曲。";
     return "这里还没有音乐，先运行“刷新音乐库”。";
   }
@@ -1643,6 +1706,7 @@ export function createMusicPage(deps) {
       musicSmartId: state.music.mode === "smart" ? state.music.activeSmartPlaylistId || "" : "",
       musicArtistId: state.music.artistId && state.music.artistId !== "all" ? state.music.artistId : "",
       musicAlbumId: state.music.albumId && state.music.albumId !== "all" ? state.music.albumId : "",
+      musicGenre: state.music.genre && state.music.genre !== "all" ? state.music.genre : "",
       musicTrackId: "",
       musicQuery: state.music.query || "",
       musicSort: state.music.sort || "album",

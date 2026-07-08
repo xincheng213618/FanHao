@@ -8,7 +8,7 @@ import { getElements } from "./js/dom.js?v=20260706-short-video-reel-06";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260706-mobile-web-sync-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
-import { createMusicViews } from "./js/music-views.js?v=20260708-mobile-music-10";
+import { createMusicViews } from "./js/music-views.js?v=20260708-mobile-music-11";
 import { createNovelViews } from "./js/novel-views.js?v=20260702-novel-local-manage-74";
 import { createPeopleViews } from "./js/people-views.js";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
@@ -189,6 +189,7 @@ function sanitizeViewParams(view, params = {}) {
     const favorite = ["1", "true", "yes"].includes(String(params.favorite || params.fav || "").trim().toLowerCase());
     const artistId = String(params.artistId || params.artist || "").trim();
     const albumId = String(params.albumId || params.album || "").trim();
+    const genre = String(params.genre || params.musicGenre || "").trim();
     const trackId = String(params.trackId || params.track || "").trim();
     return {
       mode,
@@ -198,6 +199,7 @@ function sanitizeViewParams(view, params = {}) {
       ...(smartId ? { smartId } : {}),
       ...(mode === "library" && artistId ? { artistId } : {}),
       ...(mode === "library" && albumId ? { albumId } : {}),
+      ...(mode === "library" && genre ? { genre } : {}),
       ...(trackId ? { trackId } : {})
     };
   }
@@ -987,6 +989,7 @@ function openNativeLibraryRoute(options = {}) {
       query: query.get("q") || query.get("query") || "",
       sort: query.get("sort") || "",
       favorite: query.get("favorite") || "",
+      genre: query.get("genre") || query.get("musicGenre") || "",
       smartId: query.get("smart") || query.get("smartId") || "",
       artistId: query.get("artist") || query.get("artistId") || "",
       albumId: query.get("album") || query.get("albumId") || "",

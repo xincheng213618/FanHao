@@ -74,6 +74,7 @@ export function routeFromUrl(url = window.location.href) {
       musicTrackId: "",
       musicArtistId: "",
       musicAlbumId: "",
+      musicGenre: "",
       musicMode: "home",
       musicPlaylistId: "",
       musicSmartId: "",
@@ -131,6 +132,7 @@ export function normalizeRoute(route = {}) {
     musicTrackId: view === "music" ? String(route.musicTrackId || "").trim() : "",
     musicArtistId: view === "music" ? String(route.musicArtistId || "").trim() : "",
     musicAlbumId: view === "music" ? String(route.musicAlbumId || "").trim() : "",
+    musicGenre: view === "music" ? String(route.musicGenre || route.genre || "").trim() : "",
     musicMode: view === "music" ? normalizeMusicMode(route.musicMode) : "home",
     musicPlaylistId: view === "music" ? String(route.musicPlaylistId || "").trim() : "",
     musicSmartId: view === "music" ? String(route.musicSmartId || "").trim() : "",
@@ -437,7 +439,8 @@ function musicRouteFromPath(routePath, params = new URLSearchParams()) {
     musicTrackId: section === "track" ? decodeRouteSegment(segments[2] || "") : "",
     musicArtistId: section === "artist" ? decodeRouteSegment(segments[2] || "") : "",
     musicAlbumId: section === "album" ? decodeRouteSegment(segments[2] || "") : "",
-    musicMode: section === "history" ? "history" : section === "playlist" ? "playlist" : section === "smart" ? "smart" : ["library", "artist", "album", "track"].includes(section) ? "library" : "home",
+    musicGenre: section === "genre" ? decodeRouteSegment(segments[2] || "") : params.get("genre") || "",
+    musicMode: section === "history" ? "history" : section === "playlist" ? "playlist" : section === "smart" ? "smart" : ["library", "artist", "album", "track", "genre"].includes(section) ? "library" : "home",
     musicPlaylistId: section === "playlist" ? decodeRouteSegment(segments[2] || "") : "",
     musicSmartId: section === "smart" ? decodeRouteSegment(segments[2] || "") : "",
     musicQuery: params.get("q") || params.get("search") || "",
@@ -486,6 +489,7 @@ function routePath(route) {
     if (route.musicMode === "history") return "/music/history";
     if (route.musicMode === "playlist" && route.musicPlaylistId) return `/music/playlist/${encodeRouteSegment(route.musicPlaylistId)}`;
     if (route.musicMode === "smart" && route.musicSmartId) return `/music/smart/${encodeRouteSegment(route.musicSmartId)}`;
+    if (route.musicGenre) return `/music/genre/${encodeRouteSegment(route.musicGenre)}`;
     if (route.musicAlbumId) return `/music/album/${encodeRouteSegment(route.musicAlbumId)}`;
     if (route.musicArtistId) return `/music/artist/${encodeRouteSegment(route.musicArtistId)}`;
     if (route.musicMode === "library") return "/music/library";

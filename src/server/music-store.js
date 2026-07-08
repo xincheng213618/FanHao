@@ -158,7 +158,8 @@ export function createMusicStore(options = {}) {
     return {
       summary: summary(),
       artists: artistFacet(database),
-      albums: albumFacet(database)
+      albums: albumFacet(database),
+      genres: genreFacet(database)
     };
   }
 
@@ -220,6 +221,7 @@ export function createMusicStore(options = {}) {
       total: rows.length,
       query: filter.q,
       artistId: filter.artistId,
+      genre: filter.genre,
       sort,
       summary: summary()
     };
@@ -261,13 +263,15 @@ export function createMusicStore(options = {}) {
       query: filter.q,
       artistId: filter.artistId,
       albumId: filter.albumId,
+      genre: filter.genre,
       favorite: filter.favorite,
       smartId: filter.smartId,
       smartPlaylist: smartMix ? publicSmartPlaylist(smartMix, total) : null,
       sort,
       summary: summary(),
       artists: artistFacet(database),
-      albums: albumFacet(database, filter.artistId)
+      albums: albumFacet(database, filter.artistId, filter.genre),
+      genres: genreFacet(database, filter.artistId)
     };
   }
 
@@ -378,7 +382,8 @@ export function createMusicStore(options = {}) {
       limit,
       summary: summary(),
       artists: artistFacet(database),
-      albums: albumFacet(database)
+      albums: albumFacet(database),
+      genres: genreFacet(database)
     };
   }
 
@@ -456,7 +461,8 @@ export function createMusicStore(options = {}) {
       hasMore: offset + rows.length < Number(total || 0),
       summary: summary(),
       artists: artistFacet(database),
-      albums: albumFacet(database)
+      albums: albumFacet(database),
+      genres: genreFacet(database)
     };
   }
 
@@ -499,7 +505,8 @@ export function createMusicStore(options = {}) {
       total: tracks.length,
       summary: summary(),
       artists: artistFacet(database),
-      albums: albumFacet(database)
+      albums: albumFacet(database),
+      genres: genreFacet(database)
     };
   }
 
@@ -1060,6 +1067,7 @@ function catalogFilter(params = new URLSearchParams()) {
   const q = String(params.get("q") || params.get("search") || "").trim();
   const artistId = String(params.get("artist") || params.get("artistId") || "").trim();
   const albumId = String(params.get("album") || params.get("albumId") || "").trim();
+  const genre = String(params.get("genre") || params.get("musicGenre") || "").trim();
   const smartMix = findSmartMix(params.get("smart") || params.get("smartId"));
   const favorite = ["1", "true", "yes"].includes(String(params.get("favorite") || "").trim().toLowerCase());
   const trackWhere = ["t.status = 'ok'"];
@@ -1076,6 +1084,12 @@ function catalogFilter(params = new URLSearchParams()) {
     trackWhere.push("t.album_id = ?");
     trackArgs.push(albumId);
   }
+  if (genre && genre !== "all") {
+    trackWhere.push("t.genre = ? COLLATE NOCASE");
+    trackArgs.push(genre);
+    albumWhere.push("al.id IN (SELECT album_id FROM music_tracks WHERE status = 'ok' AND genre = ? COLLATE NOCASE)");
+    albumArgs.push(genre);
+  }
   if (favorite) {
     trackWhere.push("COALESCE(s.favorite, 0) = 1");
   }
@@ -1090,10 +1104,11 @@ function catalogFilter(params = new URLSearchParams()) {
       t.title LIKE ? ESCAPE '\\' OR
       t.display_artist LIKE ? ESCAPE '\\' OR
       t.album_title LIKE ? ESCAPE '\\' OR
+      t.genre LIKE ? ESCAPE '\\' OR
       t.file_name LIKE ? ESCAPE '\\' OR
       t.id IN (SELECT track_id FROM music_search WHERE music_search MATCH ?)
     )`);
-    trackArgs.push(like, like, like, like, ftsTerm(q));
+    trackArgs.push(like, like, like, like, like, ftsTerm(q));
     albumWhere.push(`(
       al.title LIKE ? ESCAPE '\\' OR
       a.name LIKE ? ESCAPE '\\'
@@ -1104,6 +1119,7 @@ function catalogFilter(params = new URLSearchParams()) {
     q,
     artistId,
     albumId,
+    genre,
     smartId: smartMix?.id || "",
     favorite,
     trackWhere: trackWhere.join(" AND "),
@@ -1128,12 +1144,16 @@ function artistFacet(db) {
     .map(publicArtist);
 }
 
-function albumFacet(db, artistId = "") {
+function albumFacet(db, artistId = "", genre = "") {
   const args = [];
   const where = [];
   if (artistId && artistId !== "all") {
     where.push("al.artist_id = ?");
     args.push(artistId);
+  }
+  if (genre && genre !== "all") {
+    where.push("al.id IN (SELECT album_id FROM music_tracks WHERE status = 'ok' AND genre = ? COLLATE NOCASE)");
+    args.push(genre);
   }
   return db
     .prepare(
@@ -1148,6 +1168,34 @@ function albumFacet(db, artistId = "") {
     )
     .all(...args)
     .map(publicAlbum);
+}
+
+function genreFacet(db, artistId = "") {
+  const args = [];
+  const where = ["status = 'ok'", "TRIM(COALESCE(genre, '')) <> ''"];
+  if (artistId && artistId !== "all") {
+    where.push("artist_id = ?");
+    args.push(artistId);
+  }
+  return db
+    .prepare(
+      `
+      SELECT
+        TRIM(genre) AS name,
+        COUNT(*) AS track_count,
+        COUNT(DISTINCT artist_id) AS artist_count,
+        COUNT(DISTINCT album_id) AS album_count,
+        COALESCE(SUM(duration_ms), 0) AS duration_ms,
+        COALESCE(SUM(size_bytes), 0) AS size_bytes
+      FROM music_tracks
+      WHERE ${where.join(" AND ")}
+      GROUP BY TRIM(genre) COLLATE NOCASE
+      ORDER BY track_count DESC, name COLLATE NOCASE
+      LIMIT 120
+    `
+    )
+    .all(...args)
+    .map(publicGenre);
 }
 
 function findSmartMix(id) {
@@ -1238,6 +1286,18 @@ function publicPlaylist(row) {
     trackCount: Number(row.track_count || 0),
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || ""
+  };
+}
+
+function publicGenre(row) {
+  return {
+    id: row.name || "",
+    name: row.name || "",
+    trackCount: Number(row.track_count || 0),
+    artistCount: Number(row.artist_count || 0),
+    albumCount: Number(row.album_count || 0),
+    durationMs: Number(row.duration_ms || 0),
+    sizeBytes: Number(row.size_bytes || 0)
   };
 }
 
