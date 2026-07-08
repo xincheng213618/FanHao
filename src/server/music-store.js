@@ -68,6 +68,14 @@ const SMART_MIXES = [
     limit: 240
   },
   {
+    id: "newest",
+    name: "最近入库",
+    description: "按扫描更新时间整理，快速听到新加入音乐库的歌曲。",
+    badge: "新歌",
+    order: "t.updated_at DESC, t.album_title COLLATE NOCASE ASC, t.disc_no ASC, t.track_no ASC, t.title COLLATE NOCASE ASC",
+    limit: 200
+  },
+  {
     id: "favorites",
     name: "我喜欢",
     description: "所有已收藏歌曲，按最近收藏或更新靠前。",
@@ -1471,6 +1479,7 @@ function smartMixCondition(mixOrId) {
   if (mix.id === "recent") return { where: "COALESCE(s.last_played_at, '') <> ''", args: [] };
   if (mix.id === "topplayed") return { where: "COALESCE(s.play_count, 0) > 0", args: [] };
   if (mix.id === "unplayed") return { where: "COALESCE(s.play_count, 0) = 0 AND COALESCE(s.last_played_at, '') = ''", args: [] };
+  if (mix.id === "newest") return { where: "COALESCE(t.updated_at, '') <> ''", args: [] };
   if (mix.id === "favorites") return { where: "COALESCE(s.favorite, 0) = 1", args: [] };
   if (mix.id === "toprated") return { where: "COALESCE(s.rating, 0) >= 4", args: [] };
   if (mix.id === "unrated") return { where: "COALESCE(s.rating, 0) = 0", args: [] };
