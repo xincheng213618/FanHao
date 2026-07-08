@@ -1,4 +1,4 @@
-import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-12";
+import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-13";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -41,6 +41,7 @@ export function createMusicViews(deps) {
     playing: false,
     searchOpen: false,
     fullscreen: false,
+    fullPanel: "lyrics",
     queueOpen: false,
     repeat: readRepeatPreference(),
     shuffle: readShufflePreference(),
@@ -167,6 +168,7 @@ export function createMusicViews(deps) {
       state.playReportedTrackId = "";
       mergeTrackIntoQueue(data.track);
       rememberLastTrack(data.track);
+      if (state.fullscreen && !hasLyrics()) state.fullPanel = "cover";
       loadAudioTrack(data.track, options.autoplay !== false);
       renderShell();
     } catch (error) {
@@ -617,7 +619,9 @@ export function createMusicViews(deps) {
   function renderFullPlayer() {
     const track = state.current || state.queue[0] || null;
     const full = document.createElement("section");
-    full.className = "music-mobile-full-player";
+    const panel = normalizeFullPanel(state.fullPanel, track);
+    state.fullPanel = panel;
+    full.className = `music-mobile-full-player is-${panel}`;
     full.setAttribute("role", "dialog");
     full.setAttribute("aria-modal", "true");
     full.setAttribute("aria-label", "音乐播放");
@@ -639,30 +643,10 @@ export function createMusicViews(deps) {
     topActions.append(favorite, download);
     top.append(close, heading, topActions);
 
-    const coverStage = document.createElement("div");
-    coverStage.className = "music-mobile-full-cover-stage";
-    coverStage.append(renderCover(track || { title: "音乐" }, "cover"));
-
-    const rating = renderRatingControl(track);
-
-    const lyrics = document.createElement("div");
-    lyrics.className = "music-mobile-full-lyrics";
-    const lines = document.createElement("div");
-    lines.className = "music-mobile-full-lyric-lines";
-    const lyricLines = state.lyrics?.lines || [];
-    if (!track) {
-      lines.append(lyricLine("选择歌曲后显示歌词"));
-    } else if (!lyricLines.length) {
-      lines.append(lyricLine("暂无歌词"));
-    } else {
-      lyricLines.slice(0, 160).forEach((line, index) => {
-        const p = lyricLine(line.text || "", { seekMs: line.timeMs || 0 });
-        p.dataset.index = String(index);
-        p.dataset.timeMs = String(line.timeMs || 0);
-        lines.append(p);
-      });
-    }
-    lyrics.append(lines);
+    const switcher = renderFullPanelSwitch(track, panel);
+    const stage = document.createElement("div");
+    stage.className = "music-mobile-full-stage";
+    stage.append(panel === "lyrics" ? renderFullLyricsPanel(track) : renderFullCoverPanel(track));
 
     const controls = document.createElement("div");
     controls.className = "music-mobile-full-controls";
@@ -686,9 +670,67 @@ export function createMusicViews(deps) {
     controls.append(shuffle, prev, play, next, repeat, queue);
 
     const progress = renderProgress("full", track, play);
-    full.append(top, coverStage, rating, lyrics, progress, controls);
+    full.append(top, switcher, stage, progress, controls);
     if (state.queueOpen) full.append(renderQueueSheet());
+    if (panel === "lyrics") window.requestAnimationFrame(() => updateLyricHighlight(true));
     return full;
+  }
+
+  function renderFullPanelSwitch(track, activePanel) {
+    const switcher = document.createElement("div");
+    switcher.className = "music-mobile-full-switch";
+    for (const [panel, label] of [
+      ["lyrics", "歌词"],
+      ["cover", "封面"]
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = panel === activePanel ? "active" : "";
+      button.textContent = label;
+      button.disabled = !track;
+      button.setAttribute("aria-pressed", panel === activePanel ? "true" : "false");
+      button.addEventListener("click", () => {
+        state.fullPanel = panel;
+        renderShell();
+        if (panel === "lyrics") updateLyricHighlight(true);
+      });
+      switcher.append(button);
+    }
+    return switcher;
+  }
+
+  function renderFullCoverPanel(track) {
+    const coverStage = document.createElement("div");
+    coverStage.className = "music-mobile-full-cover-stage";
+    coverStage.append(renderCover(track || { title: "音乐" }, "cover"));
+
+    const rating = renderRatingControl(track);
+    const panel = document.createElement("div");
+    panel.className = "music-mobile-full-cover-panel";
+    panel.append(coverStage, rating);
+    return panel;
+  }
+
+  function renderFullLyricsPanel(track) {
+    const lyrics = document.createElement("div");
+    lyrics.className = "music-mobile-full-lyrics";
+    const lines = document.createElement("div");
+    lines.className = "music-mobile-full-lyric-lines";
+    const lyricLines = state.lyrics?.lines || [];
+    if (!track) {
+      lines.append(lyricLine("选择歌曲后显示歌词"));
+    } else if (!lyricLines.length) {
+      lines.append(lyricLine("暂无歌词"));
+    } else {
+      lyricLines.slice(0, 180).forEach((line, index) => {
+        const p = lyricLine(line.text || "", { seekMs: line.timeMs || 0 });
+        p.dataset.index = String(index);
+        p.dataset.timeMs = String(line.timeMs || 0);
+        lines.append(p);
+      });
+    }
+    lyrics.append(lines);
+    return lyrics;
   }
 
   function renderQueueSheet() {
@@ -869,6 +911,7 @@ export function createMusicViews(deps) {
   }
 
   function openFullscreen() {
+    state.fullPanel = hasLyrics() ? "lyrics" : "cover";
     state.fullscreen = true;
     renderShell();
   }
@@ -1131,7 +1174,7 @@ export function createMusicViews(deps) {
   }
 
   function updateLyricHighlight(force = false) {
-    if (!state.fullscreen || lyricRaf) return;
+    if (!state.fullscreen || state.fullPanel !== "lyrics" || lyricRaf) return;
     lyricRaf = window.requestAnimationFrame(() => {
       lyricRaf = 0;
       const lines = state.lyrics?.lines || [];
@@ -1150,6 +1193,16 @@ export function createMusicViews(deps) {
         if (active) item.scrollIntoView({ block: "center", behavior: "smooth" });
       }
     });
+  }
+
+  function hasLyrics() {
+    return Boolean((state.lyrics?.lines || []).length);
+  }
+
+  function normalizeFullPanel(panel, track) {
+    const value = panel === "cover" ? "cover" : "lyrics";
+    if (!track) return value;
+    return value === "lyrics" || hasLyrics() ? value : "cover";
   }
 
   function updateListParams(patch = {}, options = {}) {
