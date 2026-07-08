@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-30";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-31";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -57,7 +57,8 @@ export function createMusicViews(deps) {
     sleepUntil: 0,
     playReportedTrackId: "",
     restoreAttemptKey: "",
-    mediaSessionTrackId: ""
+    mediaSessionTrackId: "",
+    pendingCurrentReveal: false
   };
 
   let audio = null;
@@ -302,6 +303,15 @@ export function createMusicViews(deps) {
     els.viewMeta.textContent = state.status || musicMeta(state.data);
     updatePlaybackUi();
     if (state.fullscreen) updateLyricHighlight(true);
+    if (state.pendingCurrentReveal && !state.loading && !state.fullscreen) {
+      window.requestAnimationFrame(() => {
+        state.pendingCurrentReveal = false;
+        if (!revealCurrentTrack()) {
+          state.status = "当前歌曲不在当前列表";
+          els.viewMeta.textContent = state.status;
+        }
+      });
+    }
   }
 
   function renderSmartPlaylists() {
@@ -449,6 +459,16 @@ export function createMusicViews(deps) {
       remove.textContent = "删除";
       remove.addEventListener("click", () => deleteCurrentPlaylist().catch(() => {}));
       actions.append(remove);
+    }
+
+    if (state.current) {
+      const locate = document.createElement("button");
+      locate.type = "button";
+      locate.className = "music-mobile-play-all secondary";
+      locate.textContent = "定位";
+      locate.disabled = state.loading;
+      locate.addEventListener("click", () => locateCurrentTrack());
+      actions.append(locate);
     }
 
     const playAll = document.createElement("button");
@@ -669,6 +689,8 @@ export function createMusicViews(deps) {
     const isPlaying = isCurrent && state.playing;
     const row = document.createElement("div");
     row.className = `music-mobile-track${isCurrent ? " active" : ""}${isPlaying ? " playing" : ""}`;
+    row.dataset.trackId = track.id || "";
+    if (isCurrent) row.dataset.current = "true";
     row.tabIndex = 0;
     row.setAttribute("role", "button");
     row.setAttribute("aria-label", `播放 ${track.title || "歌曲"}`);
@@ -1407,6 +1429,32 @@ export function createMusicViews(deps) {
     state.playlistSheetOpen = false;
     state.sleepSheetOpen = false;
     renderShell();
+  }
+
+  function locateCurrentTrack() {
+    if (!state.current) return;
+    if (revealCurrentTrack()) return;
+    state.pendingCurrentReveal = true;
+    updateListParams({
+      mode: "library",
+      favorite: false,
+      query: "",
+      smartId: "",
+      playlistId: "",
+      artistId: "",
+      albumId: "",
+      genre: ""
+    }, { resetSearch: true });
+  }
+
+  function revealCurrentTrack() {
+    const row = els.viewContent?.querySelector(".music-mobile-list .music-mobile-track.active");
+    if (!row) return false;
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    row.classList.remove("locating");
+    window.requestAnimationFrame(() => row.classList.add("locating"));
+    window.setTimeout(() => row.classList.remove("locating"), 1400);
+    return true;
   }
 
   function closeFullscreen() {

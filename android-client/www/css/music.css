@@ -438,6 +438,10 @@
   background: var(--success-soft);
 }
 
+.music-mobile-track.locating {
+  animation: music-current-locate 1.3s ease;
+}
+
 .music-mobile-track.playing .music-mobile-track-index {
   color: var(--green);
 }
@@ -1304,6 +1308,18 @@
 
   50% {
     height: 15px;
+  }
+}
+
+@keyframes music-current-locate {
+  0%,
+  100% {
+    box-shadow: none;
+  }
+
+  22%,
+  68% {
+    box-shadow: 0 0 0 3px var(--success-soft), 0 0 0 5px rgba(19, 129, 97, 0.24);
   }
 }
 
