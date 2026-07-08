@@ -1,4 +1,4 @@
-import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-05";
+import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-06";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -8,6 +8,7 @@ const DEFAULT_LIMIT = 900;
 const MUSIC_VOLUME_KEY = "fanhao.android.music.volume";
 const MUSIC_REPEAT_KEY = "fanhao.android.music.repeat";
 const MUSIC_SHUFFLE_KEY = "fanhao.android.music.shuffle";
+const MUSIC_LAST_TRACK_KEY = "fanhao.android.music.lastTrack";
 
 export function createMusicViews(deps) {
   const {
@@ -40,7 +41,8 @@ export function createMusicViews(deps) {
     repeat: readRepeatPreference(),
     shuffle: readShufflePreference(),
     volume: readVolumePreference(),
-    playReportedTrackId: ""
+    playReportedTrackId: "",
+    restoreAttemptKey: ""
   };
 
   let audio = null;
@@ -65,7 +67,9 @@ export function createMusicViews(deps) {
     await loadMusic(renderGuard);
     if (openedTrackId && state.current?.id !== openedTrackId) {
       await openTrack(openedTrackId, { autoplay: false, renderGuard });
+      return;
     }
+    await restoreLastTrack(renderGuard);
   }
 
   function applyRouteParams(params = {}) {
@@ -131,6 +135,7 @@ export function createMusicViews(deps) {
       state.status = "";
       state.playReportedTrackId = "";
       mergeTrackIntoQueue(data.track);
+      rememberLastTrack(data.track);
       loadAudioTrack(data.track, options.autoplay !== false);
       renderShell();
     } catch (error) {
@@ -248,7 +253,7 @@ export function createMusicViews(deps) {
     const playAll = document.createElement("button");
     playAll.type = "button";
     playAll.className = "music-mobile-play-all";
-    playAll.textContent = "播放";
+    playAll.textContent = state.current ? (state.playing ? "暂停" : "继续") : "播放";
     playAll.disabled = !state.queue.length;
     playAll.addEventListener("click", () => {
       const target = state.current || state.queue[0];
@@ -763,6 +768,34 @@ export function createMusicViews(deps) {
     });
   }
 
+  async function restoreLastTrack(renderGuard = null) {
+    if (!canRestoreLastTrack()) return;
+    const saved = readLastTrackPreference();
+    const trackId = String(saved?.trackId || "").trim();
+    if (!trackId || saved.activeUrl !== getActiveUrl()) return;
+    const key = `${saved.activeUrl}|${trackId}`;
+    if (state.restoreAttemptKey === key) return;
+    state.restoreAttemptKey = key;
+    if (saved.track?.id === trackId) mergeTrackIntoQueue(saved.track);
+    await openTrack(trackId, { autoplay: false, renderGuard });
+  }
+
+  function canRestoreLastTrack() {
+    if (state.current || state.loading) return false;
+    if (state.mode !== "library") return false;
+    return !state.query && !state.favorite && !state.artistId && !state.albumId && state.sort === DEFAULT_SORT;
+  }
+
+  function rememberLastTrack(track) {
+    if (!track?.id) return;
+    writeLastTrackPreference({
+      activeUrl: getActiveUrl(),
+      trackId: track.id,
+      track: compactTrack(track),
+      updatedAt: new Date().toISOString()
+    });
+  }
+
   function seekToLyric(timeMs) {
     if (!state.current) return;
     ensureAudio();
@@ -813,6 +846,7 @@ export function createMusicViews(deps) {
     if (state.data?.tracks) {
       state.data.tracks = state.data.tracks.map((track) => (track.id === updated.id ? { ...track, ...updated } : track));
     }
+    if (state.current?.id === updated.id) rememberLastTrack(state.current);
     renderShell();
   }
 
@@ -1083,5 +1117,35 @@ function readShufflePreference() {
 function writeShufflePreference(value) {
   try {
     window.localStorage?.setItem(MUSIC_SHUFFLE_KEY, value ? "1" : "0");
+  } catch {}
+}
+
+function compactTrack(track = {}) {
+  return {
+    id: track.id || "",
+    title: track.title || "",
+    artist: track.artist || "",
+    album: track.album || "",
+    durationMs: Number(track.durationMs || 0),
+    coverUrl: track.coverUrl || "",
+    streamUrl: track.streamUrl || "",
+    favorite: Boolean(track.favorite),
+    positionMs: Number(track.positionMs || 0),
+    hasLyrics: Boolean(track.hasLyrics)
+  };
+}
+
+function readLastTrackPreference() {
+  try {
+    const parsed = JSON.parse(window.localStorage?.getItem(MUSIC_LAST_TRACK_KEY) || "null");
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastTrackPreference(record) {
+  try {
+    window.localStorage?.setItem(MUSIC_LAST_TRACK_KEY, JSON.stringify(record || {}));
   } catch {}
 }
