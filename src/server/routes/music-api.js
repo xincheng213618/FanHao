@@ -19,6 +19,24 @@ export async function routeMusicApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/music/report" && req.method === "GET") {
+    try {
+      sendJson(res, 200, musicStore.report());
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "听歌报告读取失败" });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/music/suggest" && req.method === "GET") {
+    try {
+      sendJson(res, 200, musicStore.suggest(url));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "搜索联想读取失败" });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/music/artists" && req.method === "GET") {
     try {
       sendJson(res, 200, musicStore.listArtists(url));

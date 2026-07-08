@@ -276,7 +276,7 @@ function normalizeMusicSort(value) {
 
 function normalizeMusicMode(value) {
   const mode = String(value || "home").trim();
-  return ["home", "library", "history", "playlist", "smart"].includes(mode) ? mode : "home";
+  return ["home", "library", "history", "playlist", "smart", "report"].includes(mode) ? mode : "home";
 }
 
 function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
@@ -440,7 +440,7 @@ function musicRouteFromPath(routePath, params = new URLSearchParams()) {
     musicArtistId: section === "artist" ? decodeRouteSegment(segments[2] || "") : "",
     musicAlbumId: section === "album" ? decodeRouteSegment(segments[2] || "") : "",
     musicGenre: section === "genre" ? decodeRouteSegment(segments[2] || "") : params.get("genre") || "",
-    musicMode: section === "history" ? "history" : section === "playlist" ? "playlist" : section === "smart" ? "smart" : ["library", "artist", "album", "track", "genre"].includes(section) ? "library" : "home",
+    musicMode: section === "history" ? "history" : section === "report" ? "report" : section === "playlist" ? "playlist" : section === "smart" ? "smart" : ["library", "artist", "album", "track", "genre"].includes(section) ? "library" : "home",
     musicPlaylistId: section === "playlist" ? decodeRouteSegment(segments[2] || "") : "",
     musicSmartId: section === "smart" ? decodeRouteSegment(segments[2] || "") : "",
     musicQuery: params.get("q") || params.get("search") || "",
@@ -487,6 +487,7 @@ function routePath(route) {
   if (route.view === "music") {
     if (route.musicTrackId) return `/music/track/${encodeRouteSegment(route.musicTrackId)}`;
     if (route.musicMode === "history") return "/music/history";
+    if (route.musicMode === "report") return "/music/report";
     if (route.musicMode === "playlist" && route.musicPlaylistId) return `/music/playlist/${encodeRouteSegment(route.musicPlaylistId)}`;
     if (route.musicMode === "smart" && route.musicSmartId) return `/music/smart/${encodeRouteSegment(route.musicSmartId)}`;
     if (route.musicGenre) return `/music/genre/${encodeRouteSegment(route.musicGenre)}`;

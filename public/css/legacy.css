@@ -8865,7 +8865,7 @@ body.music-view .work-grid {
 
 .music-home-cards {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 10px;
   padding: 14px 16px 8px;
 }
@@ -8922,6 +8922,98 @@ body.music-view .work-grid {
 .music-home-card span {
   align-self: end;
   font-size: 12px;
+}
+
+.music-report-panel {
+  min-height: 620px;
+}
+
+.music-report-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 14px 16px 8px;
+}
+
+.music-report-card {
+  display: grid;
+  min-width: 0;
+  min-height: 92px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .06);
+  color: rgba(237, 244, 240, .7);
+  padding: 12px;
+}
+
+.music-report-card small,
+.music-report-card span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-report-card small {
+  color: rgba(237, 244, 240, .48);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.music-report-card strong {
+  overflow: hidden;
+  color: #f6fbf8;
+  font-size: 24px;
+  font-weight: 950;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-report-card span {
+  align-self: end;
+  font-size: 12px;
+}
+
+.music-report-chart {
+  display: grid;
+  gap: 12px;
+  margin: 10px 16px 8px;
+  border-top: 1px solid rgba(255, 255, 255, .09);
+  padding-top: 13px;
+}
+
+.music-report-bars {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(42px, 1fr));
+  align-items: end;
+  gap: 8px;
+  min-height: 136px;
+}
+
+.music-report-bar {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  gap: 7px;
+  min-width: 0;
+  height: 136px;
+  color: rgba(237, 244, 240, .52);
+  font-size: 11px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.music-report-bar span {
+  align-self: end;
+  min-height: 8px;
+  border-radius: 5px 5px 2px 2px;
+  background: linear-gradient(180deg, rgba(62, 218, 147, .95), rgba(62, 218, 147, .26));
+  box-shadow: 0 0 18px rgba(62, 218, 147, .18);
+}
+
+.music-report-bar small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .music-home-sections {
@@ -9188,6 +9280,11 @@ body.music-view .work-grid {
   border-bottom: 1px solid rgba(255, 255, 255, .09);
 }
 
+.music-search {
+  position: relative;
+  min-width: 0;
+}
+
 .music-search input,
 .music-sort {
   width: 100%;
@@ -9203,6 +9300,79 @@ body.music-view .work-grid {
 
 .music-search input {
   padding: 0 12px;
+}
+
+.music-search-suggestions {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  display: grid;
+  gap: 4px;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, .13);
+  border-radius: 7px;
+  background: rgba(18, 40, 35, .97);
+  box-shadow: 0 18px 36px rgba(0, 0, 0, .3);
+  padding: 8px;
+}
+
+.music-search-suggestions[hidden] {
+  display: none;
+}
+
+.music-search-suggest-heading {
+  padding: 6px 8px 2px;
+  color: rgba(237, 244, 240, .45);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.music-search-suggest-item {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(237, 244, 240, .78);
+  cursor: pointer;
+  font: inherit;
+  padding: 8px;
+  text-align: left;
+}
+
+.music-search-suggest-item:hover,
+.music-search-suggest-item:focus-visible {
+  border-color: rgba(62, 218, 147, .34);
+  background: rgba(62, 218, 147, .12);
+  color: #f6fbf8;
+  outline: none;
+}
+
+.music-search-suggest-item strong,
+.music-search-suggest-item small,
+.music-search-suggest-empty {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-search-suggest-item strong {
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.music-search-suggest-item small,
+.music-search-suggest-empty {
+  color: rgba(237, 244, 240, .5);
+  font-size: 12px;
+}
+
+.music-search-suggest-empty {
+  padding: 10px 8px;
 }
 
 .music-sort {
@@ -10557,6 +10727,7 @@ body.music-view .work-grid {
   }
 
   .music-home-cards,
+  .music-report-cards,
   .music-home-sections {
     grid-template-columns: 1fr 1fr;
   }
@@ -10689,15 +10860,22 @@ body.music-view .work-grid {
   }
 
   .music-home-cards,
+  .music-report-cards,
   .music-home-sections,
   .music-home-pill-list {
     grid-template-columns: 1fr;
   }
 
   .music-home-cards,
+  .music-report-cards,
   .music-home-sections {
     padding-right: 12px;
     padding-left: 12px;
+  }
+
+  .music-report-chart {
+    margin-right: 12px;
+    margin-left: 12px;
   }
 
   .music-playlist-dialog-backdrop {

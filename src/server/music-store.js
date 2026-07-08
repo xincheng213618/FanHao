@@ -250,6 +250,184 @@ export function createMusicStore(options = {}) {
     };
   }
 
+  function report() {
+    const database = dbOrOpen();
+    const overview = summary();
+    const favorites = Number(
+      database
+        .prepare(
+          `
+          SELECT COUNT(*) AS count
+          FROM music_track_state s
+          JOIN music_tracks t ON t.id = s.track_id
+          WHERE t.status = 'ok' AND COALESCE(s.favorite, 0) = 1
+        `
+        )
+        .get()?.count || 0
+    );
+    const topArtists = database
+      .prepare(
+        `
+        SELECT
+          a.id,
+          a.name,
+          COUNT(DISTINCT t.id) AS track_count,
+          COALESCE(SUM(s.play_count), 0) AS plays,
+          MAX(COALESCE(s.last_played_at, '')) AS last_played_at
+        FROM music_tracks t
+        LEFT JOIN music_artists a ON a.id = t.artist_id
+        LEFT JOIN music_track_state s ON s.track_id = t.id
+        WHERE t.status = 'ok'
+        GROUP BY a.id
+        HAVING plays > 0
+        ORDER BY plays DESC, last_played_at DESC, a.name COLLATE NOCASE
+        LIMIT 8
+      `
+      )
+      .all()
+      .map(publicReportArtist);
+    const topAlbums = database
+      .prepare(
+        `
+        SELECT
+          al.*,
+          a.name AS artist_name,
+          COALESCE(SUM(s.play_count), 0) AS plays,
+          MAX(COALESCE(s.last_played_at, '')) AS last_played_at
+        FROM music_tracks t
+        LEFT JOIN music_albums al ON al.id = t.album_id
+        LEFT JOIN music_artists a ON a.id = t.artist_id
+        LEFT JOIN music_track_state s ON s.track_id = t.id
+        WHERE t.status = 'ok'
+        GROUP BY al.id
+        HAVING plays > 0
+        ORDER BY plays DESC, last_played_at DESC, al.title COLLATE NOCASE
+        LIMIT 8
+      `
+      )
+      .all()
+      .map((row) => ({
+        ...publicAlbum(row),
+        plays: Number(row.plays || 0),
+        lastPlayedAt: row.last_played_at || ""
+      }));
+    const topTracks = database
+      .prepare(
+        `
+        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
+               s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
+               s.play_count, s.last_played_at
+        FROM music_track_state s
+        JOIN music_tracks t ON t.id = s.track_id
+        LEFT JOIN music_artists a ON a.id = t.artist_id
+        LEFT JOIN music_albums al ON al.id = t.album_id
+        WHERE t.status = 'ok' AND COALESCE(s.play_count, 0) > 0
+        ORDER BY COALESCE(s.play_count, 0) DESC, COALESCE(s.last_played_at, '') DESC, t.title COLLATE NOCASE ASC
+        LIMIT 12
+      `
+      )
+      .all()
+      .map(publicTrack);
+    const activityMonths = database
+      .prepare(
+        `
+        SELECT
+          substr(s.last_played_at, 1, 7) AS month,
+          COUNT(*) AS track_count,
+          COALESCE(SUM(s.play_count), 0) AS plays
+        FROM music_track_state s
+        JOIN music_tracks t ON t.id = s.track_id
+        WHERE t.status = 'ok' AND COALESCE(s.last_played_at, '') <> ''
+        GROUP BY month
+        ORDER BY month DESC
+        LIMIT 12
+      `
+      )
+      .all()
+      .reverse()
+      .map((row) => ({
+        month: row.month || "",
+        trackCount: Number(row.track_count || 0),
+        plays: Number(row.plays || 0)
+      }));
+    return {
+      summary: overview,
+      counts: {
+        ...(overview.totals || {}),
+        favorites
+      },
+      topArtists,
+      topAlbums,
+      topTracks,
+      recent: overview.recent || [],
+      activityMonths,
+      tracks: topTracks,
+      total: topTracks.length,
+      artists: artistFacet(database),
+      albums: albumFacet(database),
+      genres: genreFacet(database)
+    };
+  }
+
+  function suggest(queryOrUrl = "") {
+    const params = queryOrUrl?.searchParams;
+    const query = String(params ? params.get("q") || params.get("search") || "" : queryOrUrl || "").trim();
+    if (!query) return { query, tracks: [], artists: [], albums: [] };
+    const like = `%${escapeLike(query)}%`;
+    const database = dbOrOpen();
+    const tracks = database
+      .prepare(
+        `
+        SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
+               s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
+               s.play_count, s.last_played_at
+        FROM music_tracks t
+        LEFT JOIN music_artists a ON a.id = t.artist_id
+        LEFT JOIN music_albums al ON al.id = t.album_id
+        LEFT JOIN music_track_state s ON s.track_id = t.id
+        WHERE t.status = 'ok' AND (
+          t.title LIKE ? ESCAPE '\\' OR
+          t.display_artist LIKE ? ESCAPE '\\' OR
+          t.album_title LIKE ? ESCAPE '\\' OR
+          t.file_name LIKE ? ESCAPE '\\'
+        )
+        ORDER BY COALESCE(s.play_count, 0) DESC, t.title COLLATE NOCASE ASC
+        LIMIT 8
+      `
+      )
+      .all(like, like, like, like)
+      .map(publicTrack);
+    const artists = database
+      .prepare(
+        `
+        SELECT *
+        FROM music_artists
+        WHERE track_count > 0 AND name LIKE ? ESCAPE '\\'
+        ORDER BY track_count DESC, name COLLATE NOCASE
+        LIMIT 5
+      `
+      )
+      .all(like)
+      .map(publicArtist);
+    const albums = database
+      .prepare(
+        `
+        SELECT al.*, a.name AS artist_name
+        FROM music_albums al
+        LEFT JOIN music_artists a ON a.id = al.artist_id
+        WHERE al.track_count > 0 AND (
+          al.title LIKE ? ESCAPE '\\' OR
+          a.name LIKE ? ESCAPE '\\'
+        )
+        ORDER BY al.track_count DESC, al.title COLLATE NOCASE
+        LIMIT 5
+      `
+      )
+      .all(like, like)
+      .map(publicAlbum);
+    return { query, tracks, artists, albums };
+  }
+
   function listArtists(urlOrOptions = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const query = String(params.get("q") || params.get("search") || "").trim();
@@ -808,6 +986,8 @@ export function createMusicStore(options = {}) {
     coverFile,
     dbPath,
     facets,
+    report,
+    suggest,
     invalidate,
     addToPlaylist,
     clearHistory,
@@ -1560,6 +1740,16 @@ function publicArtist(row) {
     sizeBytes: Number(row.size_bytes || 0),
     sourcePath: row.source_path || "",
     relativePath: row.relative_path || ""
+  };
+}
+
+function publicReportArtist(row) {
+  return {
+    id: row.id || "",
+    name: row.name || "未知歌手",
+    trackCount: Number(row.track_count || 0),
+    plays: Number(row.plays || 0),
+    lastPlayedAt: row.last_played_at || ""
   };
 }
 
