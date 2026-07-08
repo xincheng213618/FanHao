@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-29";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-30";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -742,8 +742,9 @@ export function createMusicViews(deps) {
 
     const play = iconButton(playIcon(Boolean(state.current && !audio?.paused)), () => togglePlayback(), !track, "primary", playLabel(Boolean(state.current && !audio?.paused)));
     const next = iconButton("›", () => playAdjacent(1).catch(() => {}), !track, "", "下一首");
+    const queue = iconButton("≡", openQueueFromMini, !track, "ghost", "播放队列");
     const progress = renderProgress("mini", track, play);
-    player.append(text, play, next, progress);
+    player.append(text, play, next, queue, progress);
     return player;
   }
 
@@ -1395,6 +1396,16 @@ export function createMusicViews(deps) {
     state.fullPanel = hasLyrics() ? "lyrics" : "cover";
     state.lyricFollowPaused = false;
     state.fullscreen = true;
+    renderShell();
+  }
+
+  function openQueueFromMini() {
+    state.fullPanel = hasLyrics() ? state.fullPanel : "cover";
+    state.lyricFollowPaused = false;
+    state.fullscreen = true;
+    state.queueOpen = true;
+    state.playlistSheetOpen = false;
+    state.sleepSheetOpen = false;
     renderShell();
   }
 

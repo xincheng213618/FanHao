@@ -574,7 +574,7 @@
   z-index: 24;
   display: grid;
   width: min(calc(100% - 24px), 536px);
-  grid-template-columns: 42px minmax(0, 1fr) 42px 42px;
+  grid-template-columns: 42px minmax(0, 1fr) 42px 42px 42px;
   grid-template-rows: auto 10px;
   gap: 9px;
   align-items: center;

@@ -1079,8 +1079,10 @@ export function createMusicPage(deps) {
     const clear = document.createElement("button");
     clear.type = "button";
     clear.className = "music-inline-button";
-    clear.textContent = "清空";
-    clear.disabled = !queueCanClear();
+    clear.textContent = state.music.current ? "清空其他" : "清空";
+    const removable = queueRemovableCount();
+    clear.disabled = removable <= 0;
+    clear.title = removable > 0 ? `清空 ${formatNumber(removable)} 首待播歌曲` : "没有可清空的待播歌曲";
     clear.addEventListener("click", clearQueueAfterCurrent);
     actions.append(clear);
     head.append(titleWrap, actions);
@@ -1570,20 +1572,25 @@ export function createMusicPage(deps) {
 
   function clearQueueAfterCurrent() {
     const current = state.music.current;
+    const removable = queueRemovableCount();
+    if (removable <= 0) return;
+    const ok = window.confirm(current
+      ? `清空队列中的其他 ${formatNumber(removable)} 首歌曲？`
+      : `清空播放队列中的 ${formatNumber(removable)} 首歌曲？`);
+    if (!ok) return;
     if (!current) {
       state.music.queue = [];
     } else {
       state.music.queue = (state.music.queue || []).filter((track) => track.id === current.id);
     }
-    state.music.status = "已清空待播队列";
+    state.music.status = current ? "已清空其他队列歌曲" : "已清空播放队列";
     renderView();
   }
 
-  function queueCanClear() {
+  function queueRemovableCount() {
     const queue = state.music.queue || [];
-    if (!queue.length) return false;
-    if (!state.music.current) return true;
-    return queue.some((track) => track.id !== state.music.current.id);
+    if (!state.music.current) return queue.length;
+    return queue.filter((track) => track.id !== state.music.current.id).length;
   }
 
   function normalizeQueueTrack(track) {
