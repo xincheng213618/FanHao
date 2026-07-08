@@ -2,6 +2,7 @@ const MUSIC_SLEEP_TIMER_OPTIONS = [0, 10, 15, 30, 45, 60, 90];
 const DESKTOP_QUEUE_PREVIEW_LIMIT = 24;
 const MUSIC_KEYBOARD_SEEK_SECONDS = 5;
 const MUSIC_KEYBOARD_FAST_SEEK_SECONDS = 15;
+const MUSIC_LAST_TRACK_KEY = "fanhao.music.lastTrack";
 
 export function createMusicPage(deps) {
   const {
@@ -32,6 +33,7 @@ export function createMusicPage(deps) {
   let sleepTimerInterval = 0;
   let mediaSessionInstalled = false;
   let keyboardShortcutsInstalled = false;
+  let restoreAttemptKey = "";
 
   function ensureState() {
     if (!state.music) state.music = {};
@@ -221,6 +223,7 @@ export function createMusicPage(deps) {
     state.music.queue = data.tracks || [];
     state.music.loading = false;
     state.music.status = emptyMusicMessage(data.total || state.music.queue.length);
+    if (options.restoreLast !== false) await restoreLastTrack();
     renderStats();
     renderView();
     if (!options.skipRoute) {
@@ -266,6 +269,7 @@ export function createMusicPage(deps) {
     if (!state.music.queue.length || !state.music.queue.some((track) => track.id === data.track.id)) {
       state.music.queue = [data.track];
     }
+    rememberLastTrack(data.track);
     loadAudioTrack(data.track, options.autoplay !== false);
     renderStats();
     renderView();
@@ -1593,6 +1597,48 @@ export function createMusicPage(deps) {
     return queue.filter((track) => track.id !== state.music.current.id).length;
   }
 
+  async function restoreLastTrack() {
+    if (!canRestoreLastTrack()) return;
+    const saved = readLastTrackPreference();
+    const trackId = String(saved?.trackId || "").trim();
+    if (!trackId) return;
+    const key = trackId;
+    if (restoreAttemptKey === key) return;
+    restoreAttemptKey = key;
+    if (saved.track?.id === trackId && !(state.music.queue || []).some((track) => track.id === trackId)) {
+      state.music.queue = [normalizeQueueTrack(saved.track), ...(state.music.queue || [])].filter(Boolean);
+    }
+    try {
+      await openTrack(trackId, { autoplay: false, skipRoute: true });
+    } catch {
+      state.music.queue = withoutQueueTrack(state.music.queue || [], trackId);
+      state.music.loading = false;
+      state.music.status = emptyMusicMessage(state.music.data?.total || state.music.queue.length);
+      writeLastTrackPreference({});
+    }
+  }
+
+  function canRestoreLastTrack() {
+    if (state.music.current || state.music.loading) return false;
+    if (state.music.mode !== "home") return false;
+    return !state.music.query
+      && state.music.artistId === "all"
+      && state.music.albumId === "all"
+      && state.music.genre === "all"
+      && !state.music.favorite
+      && !state.music.activePlaylistId
+      && !state.music.activeSmartPlaylistId;
+  }
+
+  function rememberLastTrack(track) {
+    if (!track?.id) return;
+    writeLastTrackPreference({
+      trackId: track.id,
+      track: compactTrack(track),
+      updatedAt: new Date().toISOString()
+    });
+  }
+
   function normalizeQueueTrack(track) {
     if (!track?.id) return null;
     return {
@@ -2251,6 +2297,38 @@ function normalizeSleepTimerMinutes(value) {
 function isKeyboardShortcutTarget(target) {
   if (!target || typeof target.closest !== "function") return false;
   return Boolean(target.closest("input, textarea, select, button, a, [contenteditable='true']"));
+}
+
+function compactTrack(track = {}) {
+  return {
+    id: track.id || "",
+    title: track.title || "",
+    artist: track.artist || "",
+    album: track.album || "",
+    durationMs: Number(track.durationMs || 0),
+    coverUrl: track.coverUrl || "",
+    streamUrl: track.streamUrl || "",
+    downloadUrl: track.downloadUrl || "",
+    favorite: Boolean(track.favorite),
+    rating: Number(track.rating || 0),
+    positionMs: Number(track.positionMs || 0),
+    hasLyrics: Boolean(track.hasLyrics)
+  };
+}
+
+function readLastTrackPreference() {
+  try {
+    const parsed = JSON.parse(window.localStorage?.getItem(MUSIC_LAST_TRACK_KEY) || "null");
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastTrackPreference(record) {
+  try {
+    window.localStorage?.setItem(MUSIC_LAST_TRACK_KEY, JSON.stringify(record || {}));
+  } catch {}
 }
 
 function readVolumePreference() {
