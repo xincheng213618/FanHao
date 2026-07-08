@@ -267,6 +267,21 @@ export async function routeMusicApi(req, res, url, deps) {
     return true;
   }
 
+  if (playlistMatch && (req.method === "PUT" || req.method === "PATCH")) {
+    try {
+      const body = await readJsonBody(req);
+      const data = musicStore.updatePlaylist(decodeURIComponent(playlistMatch[1]), body || {});
+      if (!data) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "更新歌单失败" });
+    }
+    return true;
+  }
+
   const trackMatch = /^\/api\/music\/tracks\/([^/]+)$/.exec(url.pathname);
   if (trackMatch && req.method === "GET") {
     try {

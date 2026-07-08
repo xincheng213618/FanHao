@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson } from "./api.js?v=20260708-mobile-music-16";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-17";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -428,6 +428,12 @@ export function createMusicViews(deps) {
     const actions = document.createElement("span");
     actions.className = "music-mobile-library-actions";
     if (state.mode === "playlist" && state.playlistId) {
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "music-mobile-play-all secondary";
+      edit.textContent = "编辑";
+      edit.addEventListener("click", () => editCurrentPlaylist().catch(() => {}));
+      actions.append(edit);
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "music-mobile-play-all danger";
@@ -1288,6 +1294,28 @@ export function createMusicViews(deps) {
       albumId: "",
       genre: ""
     }, { resetSearch: true });
+  }
+
+  async function editCurrentPlaylist() {
+    const playlist = selectedPlaylist() || state.playlist;
+    const playlistId = String(playlist?.id || state.playlistId || "").trim();
+    if (!playlistId) return;
+    const name = window.prompt("歌单名称", playlist?.name || "");
+    if (name === null) return;
+    const cleanName = String(name || "").trim();
+    if (!cleanName) return;
+    const description = window.prompt("歌单说明", playlist?.description || "");
+    if (description === null) return;
+    const data = await putJson(getActiveUrl(), `/api/music/playlists/${encodeURIComponent(playlistId)}`, {
+      name: cleanName,
+      description: String(description || "").trim()
+    });
+    state.data = data;
+    state.playlist = data.playlist || selectedPlaylist();
+    state.queue = Array.isArray(data.tracks) ? data.tracks : state.queue;
+    state.status = "歌单已更新";
+    await loadPlaylists();
+    renderShell();
   }
 
   function downloadTrack(track) {

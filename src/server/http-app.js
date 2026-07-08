@@ -16,7 +16,7 @@ export function createRequestHandler({
     const startedAt = Date.now();
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type,Accept,Range,X-FanHao-Client");
     res.setHeader("Access-Control-Expose-Headers", "Content-Length,Content-Range,Accept-Ranges");
 

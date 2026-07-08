@@ -507,6 +507,19 @@ export function createMusicStore(options = {}) {
     return playlistDetail(id);
   }
 
+  function updatePlaylist(playlistId, input = {}) {
+    const database = dbOrOpen();
+    const row = database.prepare("SELECT * FROM music_playlists WHERE id = ?").get(playlistId);
+    if (!row) return null;
+    const name = String(input.name ?? row.name ?? "").trim().slice(0, 80);
+    if (!name) throw httpError(400, "歌单名称不能为空");
+    const description = String(input.description ?? row.description ?? "").trim().slice(0, 300);
+    database
+      .prepare("UPDATE music_playlists SET name = ?, description = ?, updated_at = ? WHERE id = ?")
+      .run(name, description, new Date().toISOString(), playlistId);
+    return playlistDetail(playlistId);
+  }
+
   function importM3uPlaylist(input = {}) {
     const source = readM3uInput(input);
     const parsed = parseM3u(source.content);
@@ -702,7 +715,8 @@ export function createMusicStore(options = {}) {
     summary,
     toggleFavorite,
     trackDetail,
-    trackFile
+    trackFile,
+    updatePlaylist
   };
 }
 

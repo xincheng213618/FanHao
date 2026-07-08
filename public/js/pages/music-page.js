@@ -753,6 +753,12 @@ export function createMusicPage(deps) {
       headingActions.append(clear);
     }
     if (state.music.mode === "playlist" && state.music.activePlaylist) {
+      const editPlaylist = document.createElement("button");
+      editPlaylist.type = "button";
+      editPlaylist.className = "music-inline-button";
+      editPlaylist.textContent = "编辑";
+      editPlaylist.addEventListener("click", () => editActivePlaylist().catch(showError));
+      headingActions.append(editPlaylist);
       const exportPlaylist = document.createElement("button");
       exportPlaylist.type = "button";
       exportPlaylist.className = "music-inline-button";
@@ -1562,6 +1568,28 @@ export function createMusicPage(deps) {
     } else {
       renderView();
     }
+    return data.playlist || null;
+  }
+
+  async function editActivePlaylist() {
+    const playlist = state.music.activePlaylist;
+    if (!playlist?.id) return null;
+    const name = window.prompt("歌单名称", playlist.name || "");
+    if (name === null) return null;
+    const cleanName = String(name || "").trim();
+    if (!cleanName) return null;
+    const description = window.prompt("歌单说明", playlist.description || "");
+    if (description === null) return null;
+    const data = await api(`/api/music/playlists/${encodeURIComponent(playlist.id)}`, {
+      method: "PUT",
+      body: {
+        name: cleanName,
+        description: String(description || "").trim()
+      }
+    });
+    state.music.activePlaylist = data.playlist || state.music.activePlaylist;
+    await loadPlaylists();
+    await loadMusic({ replaceRoute: true, keepCurrent: true });
     return data.playlist || null;
   }
 

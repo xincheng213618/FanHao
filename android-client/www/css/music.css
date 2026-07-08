@@ -99,6 +99,13 @@
   color: var(--orange);
 }
 
+.music-mobile-play-all.secondary {
+  min-width: 50px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--green);
+}
+
 .music-mobile-tabs {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
