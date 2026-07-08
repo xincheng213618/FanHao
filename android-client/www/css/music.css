@@ -226,6 +226,11 @@
   text-align: left;
 }
 
+.music-mobile-track:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
 .music-mobile-track.active {
   border-color: var(--green);
   background: var(--success-soft);
@@ -301,7 +306,7 @@
   display: grid;
   min-width: 38px;
   justify-items: end;
-  gap: 4px;
+  gap: 3px;
 }
 
 .music-mobile-track-side small {
@@ -415,6 +420,21 @@
 .music-mobile-icon-button.active {
   border-color: var(--orange);
   background: var(--warning-soft);
+  color: var(--orange);
+}
+
+.music-mobile-icon-button.track-favorite {
+  width: 34px;
+  height: 30px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.music-mobile-icon-button.track-favorite.active {
+  border-color: transparent;
+  background: transparent;
   color: var(--orange);
 }
 

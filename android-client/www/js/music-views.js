@@ -1,4 +1,4 @@
-import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-06";
+import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-07";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -447,9 +447,10 @@ export function createMusicViews(deps) {
   function renderTrackRow(track, index) {
     const isCurrent = state.current?.id === track.id;
     const isPlaying = isCurrent && state.playing;
-    const row = document.createElement("button");
-    row.type = "button";
+    const row = document.createElement("div");
     row.className = `music-mobile-track${isCurrent ? " active" : ""}${isPlaying ? " playing" : ""}`;
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
     row.setAttribute("aria-label", `播放 ${track.title || "歌曲"}`);
     const number = document.createElement("span");
     number.className = "music-mobile-track-index";
@@ -468,12 +469,21 @@ export function createMusicViews(deps) {
     text.append(title, meta);
     const side = document.createElement("span");
     side.className = "music-mobile-track-side";
-    if (track.favorite) side.append(pill("♥"));
+    const favorite = iconButton(track.favorite ? "♥" : "♡", (event) => {
+      event.stopPropagation();
+      toggleFavorite(track.id).catch(() => {});
+    }, false, `track-favorite${track.favorite ? " active" : ""}`, track.favorite ? "取消收藏" : "收藏");
+    side.append(favorite);
     const duration = document.createElement("small");
     duration.textContent = formatClock(track.durationMs || 0);
     side.append(duration);
     row.append(number, cover, text, side);
     row.addEventListener("click", () => openTrack(track.id, { autoplay: true }).catch(() => {}));
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      openTrack(track.id, { autoplay: true }).catch(() => {});
+    });
     return row;
   }
 
