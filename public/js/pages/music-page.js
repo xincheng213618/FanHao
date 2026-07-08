@@ -1,3 +1,5 @@
+const MUSIC_SLEEP_TIMER_OPTIONS = [0, 10, 15, 30, 45, 60, 90];
+
 export function createMusicPage(deps) {
   const {
     api,
@@ -23,6 +25,8 @@ export function createMusicPage(deps) {
   let lyricRaf = 0;
   let currentProgressEls = null;
   let currentLyricIndex = -1;
+  let sleepTimerTimeout = 0;
+  let sleepTimerInterval = 0;
 
   function ensureState() {
     if (!state.music) state.music = {};
@@ -55,6 +59,14 @@ export function createMusicPage(deps) {
     state.music.volume = readVolumePreference();
     state.music.repeat = normalizeRepeat(readRepeatPreference());
     state.music.shuffle = readShufflePreference();
+    state.music.sleepMinutes = normalizeSleepTimerMinutes(state.music.sleepMinutes);
+    state.music.sleepUntil = Number(state.music.sleepUntil || 0);
+    if (!sleepTimerActive()) {
+      state.music.sleepMinutes = 0;
+      state.music.sleepUntil = 0;
+    } else if (!sleepTimerTimeout) {
+      scheduleSleepTimer();
+    }
     state.music.playReportedTrackId = state.music.playReportedTrackId || "";
     state.music.playlistDialogOpen = Boolean(state.music.playlistDialogOpen);
     state.music.playlistDialogTrackId = state.music.playlistDialogTrackId || "";
@@ -1134,6 +1146,7 @@ export function createMusicPage(deps) {
     options.append(controlButton(track?.favorite ? "♥" : "♡", () => toggleFavorite(track.id).catch(showError), !track, track?.favorite ? "active heart" : "", track?.favorite ? "取消收藏" : "收藏"));
     options.append(controlButton("+", () => addTrackToPlaylist(track.id).catch(showError), !track, "", "加入歌单"));
     options.append(controlButton("↓", () => downloadTrack(track), !track?.downloadUrl, "", "下载原文件"));
+    options.append(renderSleepTimerControl(track));
     const volumeWrap = document.createElement("label");
     volumeWrap.className = "music-volume-wrap";
     const volumeLabel = document.createElement("span");
@@ -1157,6 +1170,28 @@ export function createMusicPage(deps) {
     bar.append(identity, center, options);
     currentProgressEls = { current, progress, total, playButton };
     return bar;
+  }
+
+  function renderSleepTimerControl(track) {
+    const wrap = document.createElement("label");
+    wrap.className = "music-sleep-wrap";
+    wrap.setAttribute("aria-label", "睡眠定时");
+    const label = document.createElement("span");
+    label.textContent = "睡眠";
+    const select = document.createElement("select");
+    select.disabled = !track;
+    for (const minutes of MUSIC_SLEEP_TIMER_OPTIONS) {
+      const option = document.createElement("option");
+      option.value = String(minutes);
+      option.textContent = minutes ? `${minutes} 分钟` : "关闭";
+      select.append(option);
+    }
+    select.value = String(sleepTimerActive() ? state.music.sleepMinutes : 0);
+    select.addEventListener("change", () => setSleepTimer(Number(select.value || 0)));
+    const status = document.createElement("em");
+    status.textContent = sleepTimerActive() ? `${sleepTimerText()} 后暂停` : "未开启";
+    wrap.append(label, select, status);
+    return wrap;
   }
 
   function renderPlaylistDialog() {
@@ -1301,6 +1336,83 @@ export function createMusicPage(deps) {
       state.music.status = error?.message || "浏览器阻止了自动播放";
       renderView();
     });
+  }
+
+  function setSleepTimer(minutes) {
+    const normalized = normalizeSleepTimerMinutes(minutes);
+    clearSleepTimerHandle();
+    if (!normalized) {
+      state.music.sleepMinutes = 0;
+      state.music.sleepUntil = 0;
+      state.music.status = "已关闭睡眠定时";
+      renderView();
+      return;
+    }
+    state.music.sleepMinutes = normalized;
+    state.music.sleepUntil = Date.now() + normalized * 60 * 1000;
+    state.music.status = `将在 ${normalized} 分钟后暂停`;
+    scheduleSleepTimer();
+    renderView();
+  }
+
+  function scheduleSleepTimer() {
+    clearSleepTimerHandle();
+    const remaining = sleepTimerRemainingMs();
+    if (remaining <= 0) {
+      expireSleepTimer();
+      return;
+    }
+    sleepTimerTimeout = window.setTimeout(expireSleepTimer, Math.min(remaining, 2147483647));
+    sleepTimerInterval = window.setInterval(() => {
+      if (!sleepTimerActive()) {
+        clearSleepTimerHandle();
+        return;
+      }
+      if (sleepTimerRemainingMs() <= 0) {
+        expireSleepTimer();
+        return;
+      }
+      renderView();
+    }, 30000);
+  }
+
+  function clearSleepTimerHandle() {
+    if (sleepTimerTimeout) {
+      window.clearTimeout(sleepTimerTimeout);
+      sleepTimerTimeout = 0;
+    }
+    if (sleepTimerInterval) {
+      window.clearInterval(sleepTimerInterval);
+      sleepTimerInterval = 0;
+    }
+  }
+
+  function expireSleepTimer() {
+    clearSleepTimerHandle();
+    state.music.sleepMinutes = 0;
+    state.music.sleepUntil = 0;
+    ensureAudio();
+    if (!audio.paused) audio.pause();
+    state.music.status = "睡眠定时已暂停播放";
+    renderView();
+  }
+
+  function sleepTimerActive() {
+    return sleepTimerRemainingMs() > 0;
+  }
+
+  function sleepTimerRemainingMs() {
+    return Math.max(0, Number(state.music.sleepUntil || 0) - Date.now());
+  }
+
+  function sleepTimerText() {
+    const minutes = Math.max(1, Math.ceil(sleepTimerRemainingMs() / 60000));
+    if (minutes >= 60) {
+      const hours = Math.floor(minutes / 60);
+      const rest = minutes % 60;
+      return rest ? `${hours} 小时 ${rest} 分钟` : `${hours} 小时`;
+    }
+    return `${minutes} 分钟`;
   }
 
   async function playAdjacent(direction, options = {}) {
@@ -1911,6 +2023,11 @@ function playIcon(playing) {
 
 function playAriaLabel(playing) {
   return playing ? "暂停" : "播放";
+}
+
+function normalizeSleepTimerMinutes(value) {
+  const minutes = Math.round(Number(value || 0));
+  return MUSIC_SLEEP_TIMER_OPTIONS.includes(minutes) ? minutes : 0;
 }
 
 function readVolumePreference() {

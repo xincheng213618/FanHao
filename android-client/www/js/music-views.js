@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-24";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-25";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -48,6 +48,7 @@ export function createMusicViews(deps) {
     fullPanel: "lyrics",
     queueOpen: false,
     playlistSheetOpen: false,
+    sleepSheetOpen: false,
     repeat: readRepeatPreference(),
     shuffle: readShufflePreference(),
     volume: readVolumePreference(),
@@ -799,10 +800,17 @@ export function createMusicViews(deps) {
     const addToList = iconButton("+", () => {
       state.playlistSheetOpen = !state.playlistSheetOpen;
       state.queueOpen = false;
+      state.sleepSheetOpen = false;
       renderShell();
     }, !track, state.playlistSheetOpen ? "active" : "ghost", "加入歌单");
     const download = iconButton("↓", () => downloadTrack(track), !track?.downloadUrl, "ghost", "下载原文件");
-    topActions.append(favorite, addToList, download);
+    const sleep = iconButton("⏱", () => {
+      state.sleepSheetOpen = !state.sleepSheetOpen;
+      state.queueOpen = false;
+      state.playlistSheetOpen = false;
+      renderShell();
+    }, !track && !sleepTimerActive(), state.sleepSheetOpen || sleepTimerActive() ? "active" : "ghost", sleepTimerActive() ? `定时关闭：${sleepTimerText()}后暂停` : "定时关闭");
+    topActions.append(favorite, addToList, download, sleep);
     top.append(close, heading, topActions);
     attachFullscreenDismissSwipe(top);
 
@@ -830,15 +838,17 @@ export function createMusicViews(deps) {
     const queue = iconButton("≡", () => {
       state.queueOpen = !state.queueOpen;
       state.playlistSheetOpen = false;
+      state.sleepSheetOpen = false;
       renderShell();
     }, !state.queue.length, state.queueOpen ? "active" : "ghost", "播放队列");
     controls.append(shuffle, prev, play, next, repeat, queue);
 
     const progress = renderProgress("full", track, play);
-    full.append(top, switcher, stage, progress, renderVolumeControl(track), renderSleepTimerControl(track), controls);
-    if (state.queueOpen || state.playlistSheetOpen) full.append(renderSheetBackdrop());
+    full.append(top, switcher, stage, progress, renderVolumeControl(track), controls);
+    if (state.queueOpen || state.playlistSheetOpen || state.sleepSheetOpen) full.append(renderSheetBackdrop());
     if (state.queueOpen) full.append(renderQueueSheet());
     if (state.playlistSheetOpen) full.append(renderPlaylistSheet());
+    if (state.sleepSheetOpen) full.append(renderSleepTimerSheet());
     if (panel === "lyrics") window.requestAnimationFrame(() => updateLyricHighlight(true));
     return full;
   }
@@ -1070,6 +1080,62 @@ export function createMusicViews(deps) {
     return sheet;
   }
 
+  function renderSleepTimerSheet() {
+    const sheet = document.createElement("section");
+    sheet.className = "music-mobile-queue-sheet music-mobile-sleep-sheet";
+    sheet.setAttribute("role", "dialog");
+    sheet.setAttribute("aria-label", "定时关闭");
+
+    const head = document.createElement("div");
+    head.className = "music-mobile-queue-head";
+    const title = document.createElement("strong");
+    title.textContent = "定时关闭";
+    const meta = document.createElement("small");
+    meta.textContent = sleepTimerActive() ? sleepTimerText() : "未开启";
+    const close = iconButton("×", () => {
+      state.sleepSheetOpen = false;
+      renderShell();
+    }, false, "ghost", "关闭定时选择");
+    head.append(title, meta, close);
+    attachSheetDismissSwipe(head);
+
+    const list = document.createElement("div");
+    list.className = "music-mobile-queue-list music-mobile-sleep-list";
+    for (const minutes of SLEEP_TIMER_OPTIONS.filter(Boolean)) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = `music-mobile-sleep-choice${sleepTimerActive() && state.sleepMinutes === minutes ? " active" : ""}`;
+      row.addEventListener("click", () => {
+        state.sleepSheetOpen = false;
+        setSleepTimer(minutes);
+      });
+      const label = document.createElement("strong");
+      label.textContent = sleepOptionLabel(minutes);
+      const metaText = document.createElement("small");
+      metaText.textContent = sleepTimerActive() && state.sleepMinutes === minutes ? `剩余 ${sleepTimerText()}` : "到点暂停";
+      row.append(label, metaText);
+      list.append(row);
+    }
+
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "music-mobile-sleep-choice danger";
+    clear.disabled = !sleepTimerActive();
+    clear.addEventListener("click", () => {
+      state.sleepSheetOpen = false;
+      setSleepTimer(0);
+    });
+    const clearLabel = document.createElement("strong");
+    clearLabel.textContent = "关闭定时";
+    const clearMeta = document.createElement("small");
+    clearMeta.textContent = sleepTimerActive() ? "停止倒计时" : "未开启";
+    clear.append(clearLabel, clearMeta);
+    list.append(clear);
+
+    sheet.append(head, list);
+    return sheet;
+  }
+
   function renderQueueItem(track, index) {
     const active = state.current?.id === track.id;
     const row = document.createElement("div");
@@ -1183,28 +1249,6 @@ export function createMusicViews(deps) {
     return wrap;
   }
 
-  function renderSleepTimerControl(track) {
-    const wrap = document.createElement("label");
-    wrap.className = "music-mobile-sleep";
-    wrap.setAttribute("aria-label", "睡眠定时");
-    const label = document.createElement("span");
-    label.textContent = "睡眠";
-    const select = document.createElement("select");
-    select.disabled = !track;
-    for (const minutes of SLEEP_TIMER_OPTIONS) {
-      const option = document.createElement("option");
-      option.value = String(minutes);
-      option.textContent = minutes ? `${minutes} 分钟` : "关闭";
-      select.append(option);
-    }
-    select.value = String(sleepTimerActive() ? state.sleepMinutes : 0);
-    select.addEventListener("change", () => setSleepTimer(Number(select.value || 0)));
-    const status = document.createElement("em");
-    status.textContent = sleepTimerActive() ? `${sleepTimerText()} 后暂停` : "未开启";
-    wrap.append(label, select, status);
-    return wrap;
-  }
-
   function bindProgress(binding) {
     progressBindings.push(binding);
   }
@@ -1300,6 +1344,11 @@ export function createMusicViews(deps) {
   }
 
   function closeFullscreen() {
+    if (state.sleepSheetOpen) {
+      state.sleepSheetOpen = false;
+      renderShell();
+      return true;
+    }
     if (state.playlistSheetOpen) {
       state.playlistSheetOpen = false;
       renderShell();
@@ -1313,14 +1362,16 @@ export function createMusicViews(deps) {
     if (!state.fullscreen) return false;
     state.fullscreen = false;
     state.queueOpen = false;
+    state.sleepSheetOpen = false;
     renderShell();
     return true;
   }
 
   function closeOpenSheet() {
-    if (!state.queueOpen && !state.playlistSheetOpen) return false;
+    if (!state.queueOpen && !state.playlistSheetOpen && !state.sleepSheetOpen) return false;
     state.queueOpen = false;
     state.playlistSheetOpen = false;
+    state.sleepSheetOpen = false;
     renderShell();
     return true;
   }
@@ -1971,6 +2022,7 @@ export function createMusicViews(deps) {
         state.fullscreen = false;
         state.queueOpen = false;
         state.playlistSheetOpen = false;
+        state.sleepSheetOpen = false;
         document.body.classList.remove("music-player-open");
       }
       if (!audio) return;
@@ -2049,6 +2101,16 @@ function nextRepeat(value) {
 function normalizeSleepTimerMinutes(value) {
   const minutes = Math.round(Number(value || 0));
   return SLEEP_TIMER_OPTIONS.includes(minutes) ? minutes : 0;
+}
+
+function sleepOptionLabel(minutes) {
+  const value = Number(minutes || 0);
+  if (value >= 60) {
+    const hours = Math.floor(value / 60);
+    const rest = value % 60;
+    return rest ? `${hours} 小时 ${rest} 分钟` : `${hours} 小时`;
+  }
+  return `${value} 分钟`;
 }
 
 function readVolumePreference() {
