@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-17";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-18";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -739,6 +739,7 @@ export function createMusicViews(deps) {
     full.setAttribute("role", "dialog");
     full.setAttribute("aria-modal", "true");
     full.setAttribute("aria-label", "音乐播放");
+    full.append(renderFullBackdrop(track));
 
     const top = document.createElement("div");
     top.className = "music-mobile-full-top";
@@ -795,6 +796,21 @@ export function createMusicViews(deps) {
     if (state.playlistSheetOpen) full.append(renderPlaylistSheet());
     if (panel === "lyrics") window.requestAnimationFrame(() => updateLyricHighlight(true));
     return full;
+  }
+
+  function renderFullBackdrop(track) {
+    const backdrop = document.createElement("div");
+    backdrop.className = "music-mobile-full-backdrop";
+    backdrop.setAttribute("aria-hidden", "true");
+    if (track?.coverUrl) {
+      const img = document.createElement("img");
+      img.src = absoluteUrl(getActiveUrl(), track.coverUrl);
+      img.alt = "";
+      img.loading = "eager";
+      img.decoding = "async";
+      backdrop.append(img);
+    }
+    return backdrop;
   }
 
   function renderFullPanelSwitch(track, activePanel) {
