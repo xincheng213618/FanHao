@@ -35,6 +35,11 @@ export function pipeFileRange(req, res, filePath, range) {
 }
 
 export function createFileServer({ defaultChunkBytes, mimeTypes, normalizeExt, notFound, safeStat }) {
+  function attachmentDisposition(fileName = "download") {
+    const fallback = String(fileName || "download").replace(/[^\w.-]+/g, "_").slice(0, 180) || "download";
+    return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(String(fileName || fallback))}`;
+  }
+
   function serveInlineFile(res, filePath, contentType = "") {
     const stat = safeStat(filePath);
     if (!stat?.isFile()) {
@@ -50,6 +55,29 @@ export function createFileServer({ defaultChunkBytes, mimeTypes, normalizeExt, n
       "Content-Disposition": "inline"
     });
     fs.createReadStream(filePath).pipe(res);
+    return true;
+  }
+
+  function serveDownloadFile(req, res, file, fileName = "") {
+    const stat = safeStat(file?.path);
+    if (!stat?.isFile()) {
+      notFound(res);
+      return false;
+    }
+
+    const ext = file.ext || normalizeExt(file.path);
+    res.writeHead(200, {
+      "Content-Type": mimeTypes[ext] || "application/octet-stream",
+      "Accept-Ranges": "bytes",
+      "Content-Length": stat.size,
+      "Cache-Control": "no-store",
+      "Content-Disposition": attachmentDisposition(fileName || file.name || file.fileName || "download")
+    });
+    if (req.method === "HEAD") {
+      res.end();
+      return true;
+    }
+    fs.createReadStream(file.path).pipe(res);
     return true;
   }
 
@@ -96,6 +124,7 @@ export function createFileServer({ defaultChunkBytes, mimeTypes, normalizeExt, n
   }
 
   return {
+    serveDownloadFile,
     serveInlineFile,
     serveRangedFile
   };

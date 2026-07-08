@@ -1,4 +1,4 @@
-import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-11";
+import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-12";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -632,8 +632,12 @@ export function createMusicViews(deps) {
     const meta = document.createElement("small");
     meta.textContent = track ? [track.artist || "未知歌手", track.album || "未知专辑"].join(" · ") : "从列表选择歌曲";
     heading.append(title, meta);
+    const topActions = document.createElement("span");
+    topActions.className = "music-mobile-full-actions";
     const favorite = iconButton(track?.favorite ? "♥" : "♡", () => toggleFavorite(track.id).catch(() => {}), !track, track?.favorite ? "active" : "ghost", track?.favorite ? "取消收藏" : "收藏");
-    top.append(close, heading, favorite);
+    const download = iconButton("↓", () => downloadTrack(track), !track?.downloadUrl, "ghost", "下载原文件");
+    topActions.append(favorite, download);
+    top.append(close, heading, topActions);
 
     const coverStage = document.createElement("div");
     coverStage.className = "music-mobile-full-cover-stage";
@@ -986,6 +990,18 @@ export function createMusicViews(deps) {
     if (!updated) return;
     applyTrackUpdate(updated);
     renderShell();
+  }
+
+  function downloadTrack(track) {
+    if (!track?.downloadUrl) return;
+    const target = absoluteUrl(getActiveUrl(), track.downloadUrl);
+    const link = document.createElement("a");
+    link.href = target;
+    link.download = track.fileName || track.title || "music";
+    link.rel = "noopener";
+    document.body.append(link);
+    link.click();
+    link.remove();
   }
 
   function applyTrackUpdate(updated) {
@@ -1380,6 +1396,7 @@ function compactTrack(track = {}) {
     durationMs: Number(track.durationMs || 0),
     coverUrl: track.coverUrl || "",
     streamUrl: track.streamUrl || "",
+    downloadUrl: track.downloadUrl || "",
     favorite: Boolean(track.favorite),
     rating: Number(track.rating || 0),
     positionMs: Number(track.positionMs || 0),

@@ -206,7 +206,7 @@ const { serveStatic } = createStaticFileServer({
   normalizeExt,
   notFound
 });
-const { serveInlineFile, serveRangedFile } = createFileServer({
+const { serveDownloadFile, serveInlineFile, serveRangedFile } = createFileServer({
   defaultChunkBytes: DEFAULT_VIDEO_CHUNK_BYTES,
   mimeTypes: MIME_TYPES,
   normalizeExt,
@@ -386,6 +386,7 @@ const musicModule = createMusicModule({
   roots: MUSIC_ROOTS,
   mediaResponseService,
   mediaStreamService,
+  serveDownloadFile,
   notFound,
   readJsonBody,
   requireLocalAdmin,

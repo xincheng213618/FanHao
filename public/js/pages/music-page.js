@@ -857,7 +857,8 @@ export function createMusicPage(deps) {
     actions.className = "music-track-actions";
     actions.append(
       trackActionButton("下首", `下一首播放 ${track.title}`, () => queueTrackNext(track)),
-      trackActionButton("入队", `加入队列 ${track.title}`, () => appendTrackToQueue(track))
+      trackActionButton("入队", `加入队列 ${track.title}`, () => appendTrackToQueue(track)),
+      trackActionButton("下载", `下载 ${track.title}`, () => downloadTrack(track))
     );
     row.append(number, title, artist, album, quality, duration, actions);
     row.addEventListener("click", () => openTrack(track.id, { autoplay: true }).catch(showError));
@@ -948,7 +949,13 @@ export function createMusicPage(deps) {
     playlist.className = "music-secondary-button";
     playlist.textContent = "加入歌单";
     playlist.addEventListener("click", () => addTrackToPlaylist(track.id).catch(showError));
-    actions.append(play, fav, playlist);
+    const download = document.createElement("button");
+    download.type = "button";
+    download.className = "music-secondary-button";
+    download.textContent = "下载";
+    download.disabled = !track.downloadUrl;
+    download.addEventListener("click", () => downloadTrack(track));
+    actions.append(play, fav, playlist, download);
     if (state.music.mode === "playlist" && state.music.activePlaylistId) {
       const remove = document.createElement("button");
       remove.type = "button";
@@ -1108,6 +1115,7 @@ export function createMusicPage(deps) {
     options.append(renderRatingControl(track, "bar"));
     options.append(controlButton(track?.favorite ? "♥" : "♡", () => toggleFavorite(track.id).catch(showError), !track, track?.favorite ? "active heart" : "", track?.favorite ? "取消收藏" : "收藏"));
     options.append(controlButton("+", () => addTrackToPlaylist(track.id).catch(showError), !track, "", "加入歌单"));
+    options.append(controlButton("↓", () => downloadTrack(track), !track?.downloadUrl, "", "下载原文件"));
     const volumeWrap = document.createElement("label");
     volumeWrap.className = "music-volume-wrap";
     const volumeLabel = document.createElement("span");
@@ -1389,6 +1397,17 @@ export function createMusicPage(deps) {
     if (!updated) return;
     applyTrackUpdate(updated);
     renderView();
+  }
+
+  function downloadTrack(track) {
+    if (!track?.downloadUrl) return;
+    const link = document.createElement("a");
+    link.href = new URL(track.downloadUrl, window.location.href).href;
+    link.download = track.fileName || track.title || "music";
+    link.rel = "noopener";
+    document.body.append(link);
+    link.click();
+    link.remove();
   }
 
   function applyTrackUpdate(updated) {

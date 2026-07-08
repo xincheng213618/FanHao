@@ -9213,7 +9213,7 @@ body.music-view .work-grid {
 
 .music-track-row {
   display: grid;
-  grid-template-columns: 46px minmax(170px, 1.55fr) minmax(116px, .8fr) minmax(132px, .9fr) 116px 70px 92px;
+  grid-template-columns: 46px minmax(170px, 1.55fr) minmax(116px, .8fr) minmax(132px, .9fr) 116px 70px 138px;
   gap: 12px;
   align-items: center;
   width: 100%;
@@ -9866,7 +9866,7 @@ body.music-view .work-grid {
 
 @media (max-width: 1500px) {
   .music-track-row {
-    grid-template-columns: 42px minmax(0, 1fr) minmax(76px, .45fr) 56px 88px;
+    grid-template-columns: 42px minmax(0, 1fr) minmax(76px, .45fr) 56px 132px;
     gap: 8px;
   }
 
@@ -9947,7 +9947,7 @@ body.music-view .work-grid {
   }
 
   .music-track-row {
-    grid-template-columns: 38px minmax(0, 1fr) 64px 86px;
+    grid-template-columns: 38px minmax(0, 1fr) 64px 124px;
     gap: 8px;
   }
 

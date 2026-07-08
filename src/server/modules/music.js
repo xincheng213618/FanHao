@@ -6,6 +6,7 @@ export function createMusicModule({
   ffprobePath,
   mediaResponseService,
   mediaStreamService,
+  serveDownloadFile,
   notFound,
   readJsonBody,
   requireLocalAdmin,
@@ -47,6 +48,19 @@ export function createMusicModule({
       return true;
     }
 
+    const downloadMatch = /^\/media\/music-download\/([^/]+)$/.exec(url.pathname);
+    if (downloadMatch && (req.method === "GET" || req.method === "HEAD")) {
+      const trackId = decodeURIComponent(downloadMatch[1]);
+      const file = store.trackFile(trackId);
+      const detail = store.trackDetail(trackId);
+      if (!file || file.type !== "audio" || !detail?.track) {
+        notFound(res);
+        return true;
+      }
+      serveDownloadFile(req, res, file, musicDownloadFileName(detail.track, file));
+      return true;
+    }
+
     return false;
   }
 
@@ -60,4 +74,11 @@ export function createMusicModule({
     routeMedia,
     store
   };
+}
+
+function musicDownloadFileName(track = {}, file = {}) {
+  const ext = file.ext || "";
+  const base = [track.artist || "", track.title || file.id || "music"].filter(Boolean).join(" - ");
+  const clean = base.replace(/[<>:"/\\|?*\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim() || "music";
+  return `${clean}${ext && !clean.toLowerCase().endsWith(ext.toLowerCase()) ? ext : ""}`;
 }

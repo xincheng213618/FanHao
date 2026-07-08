@@ -557,9 +557,15 @@
 
 .music-mobile-full-top {
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr) 42px;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
+}
+
+.music-mobile-full-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
 }
 
 .music-mobile-full-top strong {

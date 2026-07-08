@@ -12,6 +12,35 @@ const MAX_LYRIC_BYTES = 1024 * 1024;
 const MAX_INTRO_BYTES = 512 * 1024;
 const KUWO_UTF16LE_PREFIX = Buffer.from([0x77, 0x91, 0x11, 0x62, 0xf3, 0x97, 0x50, 0x4e]);
 const REDISCOVER_DAYS = 30;
+const MUSIC_GENRE_ALIASES = new Map([
+  ["c-pop", "华语流行"],
+  ["cpop", "华语流行"],
+  ["mandopop", "华语流行"],
+  ["chinese pop", "华语流行"],
+  ["pop", "流行"],
+  ["folk", "民谣"],
+  ["rock", "摇滚"],
+  ["r&b", "R&B/嘻哈"],
+  ["hip-hop", "R&B/嘻哈"],
+  ["hip hop", "R&B/嘻哈"],
+  ["rap", "R&B/嘻哈"],
+  ["dj", "DJ/Remix"],
+  ["remix", "DJ/Remix"],
+  ["live", "现场"],
+  ["instrumental", "轻音乐"]
+]);
+const MUSIC_TITLE_GENRE_HINTS = [
+  { genre: "DJ/Remix", pattern: /\b(?:dj|remix|club mix|mix)\b|混音|电音|舞曲/iu },
+  { genre: "现场", pattern: /\b(?:live|concert|unplugged)\b|演唱会|现场|巡回|巡演|音乐节|不插电|海宁站|重庆演出/iu },
+  { genre: "伴奏", pattern: /伴奏|karaoke|off vocal/iu },
+  { genre: "轻音乐", pattern: /纯音乐|钢琴曲|piano|instrumental/iu }
+];
+const MUSIC_ARTIST_GENRE_HINTS = [
+  { genre: "民谣", pattern: /许巍|海来阿木|赵雷|马頔|宋冬野|尧十三/iu },
+  { genre: "摇滚", pattern: /崔健|黑豹|唐朝|beyond|逃跑计划|新裤子|万能青年旅店/iu },
+  { genre: "R&B/嘻哈", pattern: /周杰伦|jay\s*chou|陶喆|方大同|王力宏|潘玮柏/iu },
+  { genre: "华语流行", pattern: /s\.?\s*h\.?\s*e|田馥甄|hebe|selina|ella|张韶涵|戴佩妮|梁静茹|孙燕姿|蔡依林|王菲|陈奕迅|五月天|林俊杰/iu }
+];
 const SMART_MIXES = [
   {
     id: "recent",
@@ -714,14 +743,51 @@ function ensureSchema(db) {
       tokenize='trigram'
     );
   `);
+  ensureColumn(db, "music_tracks", "genre", "TEXT");
   ensureColumn(db, "music_track_state", "rating", "INTEGER DEFAULT 0");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_music_tracks_genre ON music_tracks(genre);");
   db.exec("CREATE INDEX IF NOT EXISTS idx_music_track_state_rating ON music_track_state(rating, updated_at);");
+  backfillMissingTrackGenres(db);
 }
 
 function ensureColumn(db, tableName, columnName, definition) {
   const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
   if (columns.some((column) => column.name === columnName)) return;
   db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition};`);
+}
+
+function backfillMissingTrackGenres(db) {
+  const rows = db
+    .prepare(
+      `
+      SELECT id, title, display_artist, album_title, file_name, relative_path, genre
+      FROM music_tracks
+      WHERE status = 'ok' AND TRIM(COALESCE(genre, '')) = ''
+    `
+    )
+    .all();
+  if (!rows.length) return;
+  const update = db.prepare("UPDATE music_tracks SET genre = ? WHERE id = ? AND TRIM(COALESCE(genre, '')) = ''");
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const row of rows) {
+      const genre = musicGenreForTrack({
+        genre: row.genre,
+        artistName: row.display_artist,
+        albumTitle: row.album_title,
+        title: row.title,
+        fileName: row.file_name,
+        relativePath: row.relative_path
+      });
+      if (genre) update.run(genre, row.id);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
 }
 
 function scanMusicRoots(scanRoots, options = {}) {
@@ -763,6 +829,14 @@ function scanMusicRoots(scanRoots, options = {}) {
     const albumId = hashText(`album:${albumDir.toLowerCase()}`).slice(0, 20);
     const trackId = hashText(`track:${path.resolve(filePath).toLowerCase()}`).slice(0, 24);
     const trackTitle = cleanTrackTitle(probe.title || parsedName.title || path.basename(filePath, path.extname(filePath)));
+    const trackGenre = musicGenreForTrack({
+      genre: probe.genre,
+      artistName,
+      albumTitle,
+      title: trackTitle,
+      fileName: path.basename(filePath),
+      relativePath
+    });
     const albumFiles = cachedDirEntries(dirCache, albumDir);
     const lrcPath = findCompanionLyric(albumFiles, albumDir, filePath);
     const lyricText = lrcPath ? readSmallText(lrcPath, MAX_LYRIC_BYTES) : "";
@@ -827,7 +901,7 @@ function scanMusicRoots(scanRoots, options = {}) {
       albumTitle,
       trackNo: probe.trackNo || parsedName.trackNo || 0,
       discNo: probe.discNo || 0,
-      genre: probe.genre || "",
+      genre: trackGenre,
       sourceRoot: root,
       sourcePath: path.resolve(filePath),
       relativePath,
@@ -1333,6 +1407,7 @@ function publicTrack(row, options = {}) {
     channels: Number(row.channels || 0),
     hasLyrics: Boolean(row.has_lrc),
     streamUrl: `/media/music/${encodeURIComponent(id)}`,
+    downloadUrl: `/media/music-download/${encodeURIComponent(id)}`,
     coverUrl: row.cover_path ? `/media/music-cover/${encodeURIComponent(albumId)}${coverStamp ? `?v=${encodeURIComponent(coverStamp)}` : ""}` : "",
     favorite: Boolean(row.favorite),
     rating: Number(row.rating || 0),
@@ -1417,6 +1492,125 @@ function normalizeTags(tags = {}) {
     result[String(key).toLowerCase()] = String(value || "").trim();
   }
   return result;
+}
+
+function musicGenreForTrack(input = {}) {
+  return cleanMusicGenre(input.genre) || inferMusicGenre(input);
+}
+
+function cleanMusicGenre(value) {
+  const raw = String(value || "")
+    .replace(/\0/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!raw) return "";
+  const first = raw.split(/[;,|、]/u).map((item) => item.trim()).find(Boolean) || "";
+  const id3Number = /^\(?(\d{1,3})\)?$/u.exec(first);
+  if (id3Number) {
+    const mapped = id3GenreName(Number(id3Number[1]));
+    if (mapped) return mapped;
+  }
+  const normalized = MUSIC_GENRE_ALIASES.get(first.toLowerCase()) || first;
+  return normalized.slice(0, 32);
+}
+
+function inferMusicGenre(input = {}) {
+  const artistText = [input.artistName, input.displayArtist, input.artist].filter(Boolean).join(" ");
+  const titleText = [input.title, input.albumTitle, input.album, input.fileName, input.relativePath].filter(Boolean).join(" ");
+  for (const hint of MUSIC_TITLE_GENRE_HINTS) {
+    if (hint.pattern.test(titleText)) return hint.genre;
+  }
+  for (const hint of MUSIC_ARTIST_GENRE_HINTS) {
+    if (hint.pattern.test(artistText)) return hint.genre;
+  }
+  const combined = `${artistText} ${titleText}`;
+  return /[\u4e00-\u9fff]/u.test(combined) ? "华语流行" : "其他";
+}
+
+function id3GenreName(value) {
+  const names = [
+    "Blues",
+    "Classic Rock",
+    "Country",
+    "Dance",
+    "Disco",
+    "Funk",
+    "Grunge",
+    "Hip-Hop",
+    "Jazz",
+    "Metal",
+    "New Age",
+    "Oldies",
+    "Other",
+    "流行",
+    "R&B/嘻哈",
+    "Rap",
+    "Reggae",
+    "摇滚",
+    "Techno",
+    "Industrial",
+    "Alternative",
+    "Ska",
+    "Death Metal",
+    "Pranks",
+    "Soundtrack",
+    "Euro-Techno",
+    "Ambient",
+    "Trip-Hop",
+    "Vocal",
+    "Jazz+Funk",
+    "Fusion",
+    "Trance",
+    "Classical",
+    "Instrumental",
+    "Acid",
+    "House",
+    "Game",
+    "Sound Clip",
+    "Gospel",
+    "Noise",
+    "AlternRock",
+    "Bass",
+    "Soul",
+    "Punk",
+    "Space",
+    "Meditative",
+    "Instrumental Pop",
+    "Instrumental Rock",
+    "Ethnic",
+    "Gothic",
+    "Darkwave",
+    "Techno-Industrial",
+    "Electronic",
+    "Pop-Folk",
+    "Eurodance",
+    "Dream",
+    "Southern Rock",
+    "Comedy",
+    "Cult",
+    "Gangsta",
+    "Top 40",
+    "Christian Rap",
+    "流行/摇滚",
+    "Jungle",
+    "Native American",
+    "Cabaret",
+    "New Wave",
+    "Psychadelic",
+    "Rave",
+    "Showtunes",
+    "Trailer",
+    "Lo-Fi",
+    "Tribal",
+    "Acid Punk",
+    "Acid Jazz",
+    "Polka",
+    "Retro",
+    "Musical",
+    "摇滚",
+    "Hard Rock"
+  ];
+  return cleanMusicGenre(names[value] || "");
 }
 
 function parseTrackName(stem) {
