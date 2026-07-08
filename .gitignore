@@ -26,6 +26,7 @@ data/user-state.json
 data/remote-image-cache/
 data/actor-profile-batch-*.jsonl
 data/*.sqlite
+data/*.sqlite.bak*
 data/javdb-actor-page-backfill-*.jsonl
 data/javdb-g-drive-backfill-current.json
 data/javdb-rankings-*.jsonl
