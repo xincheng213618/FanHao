@@ -712,7 +712,7 @@ export function createMusicPage(deps) {
   function trackHeader() {
     const row = document.createElement("div");
     row.className = "music-track-row head";
-    for (const label of ["", "歌曲", "歌手", "专辑", "音质", "时长"]) {
+    for (const label of ["", "歌曲", "歌手", "专辑", "音质", "时长", ""]) {
       const cell = document.createElement("span");
       cell.textContent = label;
       row.append(cell);
@@ -721,9 +721,10 @@ export function createMusicPage(deps) {
   }
 
   function trackRow(track, index) {
-    const row = document.createElement("button");
-    row.type = "button";
+    const row = document.createElement("div");
     row.className = `music-track-row${state.music.current?.id === track.id ? " active" : ""}`;
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
     row.setAttribute("aria-label", `播放 ${track.title}`);
     const number = document.createElement("span");
     number.textContent = state.music.current?.id === track.id && state.music.playing ? "||" : String(index + 1).padStart(2, "0");
@@ -742,9 +743,34 @@ export function createMusicPage(deps) {
     quality.textContent = qualityLabel(track);
     const duration = document.createElement("span");
     duration.textContent = formatClock(track.durationMs || 0);
-    row.append(number, title, artist, album, quality, duration);
+    const actions = document.createElement("span");
+    actions.className = "music-track-actions";
+    actions.append(
+      trackActionButton("下首", `下一首播放 ${track.title}`, () => queueTrackNext(track)),
+      trackActionButton("入队", `加入队列 ${track.title}`, () => appendTrackToQueue(track))
+    );
+    row.append(number, title, artist, album, quality, duration, actions);
     row.addEventListener("click", () => openTrack(track.id, { autoplay: true }).catch(showError));
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      openTrack(track.id, { autoplay: true }).catch(showError);
+    });
     return row;
+  }
+
+  function trackActionButton(label, ariaLabel, action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "music-track-action";
+    button.textContent = label;
+    button.setAttribute("aria-label", ariaLabel);
+    button.title = ariaLabel;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      action();
+    });
+    return button;
   }
 
   function emptyRow(message) {
@@ -829,20 +855,66 @@ export function createMusicPage(deps) {
   function renderQueuePanel() {
     const panel = document.createElement("div");
     panel.className = "music-queue";
+    const head = document.createElement("div");
+    head.className = "music-queue-head";
     const title = document.createElement("strong");
     title.textContent = "播放队列";
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "music-inline-button";
+    clear.textContent = "清空";
+    clear.disabled = !queueCanClear();
+    clear.addEventListener("click", clearQueueAfterCurrent);
+    head.append(title, clear);
     const list = document.createElement("div");
     list.className = "music-queue-list";
-    for (const track of (state.music.queue || []).slice(0, 16)) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = state.music.current?.id === track.id ? "active" : "";
-      button.textContent = `${track.title} - ${track.artist || "未知歌手"}`;
-      button.addEventListener("click", () => openTrack(track.id, { autoplay: true }).catch(showError));
-      list.append(button);
+    const queue = state.music.queue || [];
+    if (!queue.length) {
+      list.append(emptyQueueRow("队列为空"));
+    } else {
+      queue.slice(0, 24).forEach((track, index) => list.append(queueRow(track, index)));
+      if (queue.length > 24) list.append(emptyQueueRow(`还有 ${formatNumber(queue.length - 24)} 首未显示`));
     }
-    panel.append(title, list);
+    panel.append(head, list);
     return panel;
+  }
+
+  function queueRow(track, index) {
+    const row = document.createElement("div");
+    row.className = `music-queue-row${state.music.current?.id === track.id ? " active" : ""}`;
+    const play = document.createElement("button");
+    play.type = "button";
+    play.className = "music-queue-play";
+    play.textContent = `${track.title} - ${track.artist || "未知歌手"}`;
+    play.addEventListener("click", () => openTrack(track.id, { autoplay: true }).catch(showError));
+    const actions = document.createElement("span");
+    actions.className = "music-queue-actions";
+    actions.append(
+      queueActionButton("↑", "上移", () => moveQueueTrack(track.id, -1), index <= 0),
+      queueActionButton("↓", "下移", () => moveQueueTrack(track.id, 1), index >= (state.music.queue || []).length - 1),
+      queueActionButton("×", "移出队列", () => removeTrackFromQueue(track.id), state.music.current?.id === track.id)
+    );
+    row.append(play, actions);
+    return row;
+  }
+
+  function queueActionButton(label, ariaLabel, action, disabled = false) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "music-queue-action";
+    button.textContent = label;
+    button.disabled = disabled;
+    button.setAttribute("aria-label", ariaLabel);
+    button.title = ariaLabel;
+    button.addEventListener("click", action);
+    return button;
+  }
+
+  function emptyQueueRow(message) {
+    const row = document.createElement("div");
+    row.className = "music-queue-empty";
+    row.textContent = message;
+    return row;
   }
 
   function renderPlayerBar() {
@@ -1088,6 +1160,81 @@ export function createMusicPage(deps) {
     }
     const target = queue[nextIndex] || queue[0];
     if (target) await openTrack(target.id, { autoplay: options.autoplay !== false });
+  }
+
+  function queueTrackNext(track) {
+    const item = normalizeQueueTrack(track);
+    if (!item) return;
+    const currentId = state.music.current?.id || "";
+    const queue = withoutQueueTrack(state.music.queue || [], item.id);
+    const currentIndex = currentId ? queue.findIndex((entry) => entry.id === currentId) : -1;
+    queue.splice(currentIndex >= 0 ? currentIndex + 1 : 0, 0, item);
+    state.music.queue = queue;
+    state.music.status = `下一首播放「${item.title || "歌曲"}」`;
+    renderView();
+  }
+
+  function appendTrackToQueue(track) {
+    const item = normalizeQueueTrack(track);
+    if (!item) return;
+    const queue = withoutQueueTrack(state.music.queue || [], item.id);
+    queue.push(item);
+    state.music.queue = queue;
+    state.music.status = `已加入队列「${item.title || "歌曲"}」`;
+    renderView();
+  }
+
+  function moveQueueTrack(trackId, direction) {
+    const queue = [...(state.music.queue || [])];
+    const index = queue.findIndex((track) => track.id === trackId);
+    const nextIndex = index + direction;
+    if (index < 0 || nextIndex < 0 || nextIndex >= queue.length) return;
+    const [item] = queue.splice(index, 1);
+    queue.splice(nextIndex, 0, item);
+    state.music.queue = queue;
+    state.music.status = `已调整「${item.title || "歌曲"}」顺序`;
+    renderView();
+  }
+
+  function removeTrackFromQueue(trackId) {
+    if (!trackId || state.music.current?.id === trackId) return;
+    const queue = state.music.queue || [];
+    const removed = queue.find((track) => track.id === trackId);
+    state.music.queue = queue.filter((track) => track.id !== trackId);
+    state.music.status = removed ? `已移出队列「${removed.title || "歌曲"}」` : "已更新队列";
+    renderView();
+  }
+
+  function clearQueueAfterCurrent() {
+    const current = state.music.current;
+    if (!current) {
+      state.music.queue = [];
+    } else {
+      state.music.queue = (state.music.queue || []).filter((track) => track.id === current.id);
+    }
+    state.music.status = "已清空待播队列";
+    renderView();
+  }
+
+  function queueCanClear() {
+    const queue = state.music.queue || [];
+    if (!queue.length) return false;
+    if (!state.music.current) return true;
+    return queue.some((track) => track.id !== state.music.current.id);
+  }
+
+  function normalizeQueueTrack(track) {
+    if (!track?.id) return null;
+    return {
+      ...track,
+      title: track.title || track.fileName || "未知歌曲",
+      artist: track.artist || "未知歌手",
+      album: track.album || "未知专辑"
+    };
+  }
+
+  function withoutQueueTrack(queue, trackId) {
+    return (queue || []).filter((track) => track.id !== trackId);
   }
 
   async function toggleFavorite(trackId) {

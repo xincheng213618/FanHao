@@ -8728,7 +8728,7 @@ body.music-view .work-grid {
 .music-filter-button,
 .music-create-playlist,
 .music-album-mini,
-.music-queue-list button {
+.music-queue-play {
   width: 100%;
   min-width: 0;
   border: 1px solid transparent;
@@ -8767,9 +8767,7 @@ body.music-view .work-grid {
 .music-filter-button.active,
 .music-create-playlist:hover,
 .music-album-mini:hover,
-.music-album-mini.active,
-.music-queue-list button:hover,
-.music-queue-list button.active {
+.music-album-mini.active {
   border-color: rgba(62, 218, 147, .28);
   background: rgba(62, 218, 147, .12);
   color: #f6fbf8;
@@ -8801,7 +8799,7 @@ body.music-view .work-grid {
 
 .music-album-mini strong,
 .music-album-mini small,
-.music-queue-list button {
+.music-queue-play {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -9170,7 +9168,7 @@ body.music-view .work-grid {
 
 .music-track-row {
   display: grid;
-  grid-template-columns: 46px minmax(170px, 1.55fr) minmax(116px, .8fr) minmax(132px, .9fr) 116px 70px;
+  grid-template-columns: 46px minmax(170px, 1.55fr) minmax(116px, .8fr) minmax(132px, .9fr) 116px 70px 92px;
   gap: 12px;
   align-items: center;
   width: 100%;
@@ -9185,7 +9183,7 @@ body.music-view .work-grid {
   text-align: left;
 }
 
-button.music-track-row {
+.music-track-row[role="button"] {
   cursor: pointer;
 }
 
@@ -9234,6 +9232,32 @@ button.music-track-row {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.music-track-actions {
+  display: flex;
+  gap: 5px;
+  justify-content: flex-end;
+}
+
+.music-track-action {
+  min-height: 28px;
+  min-width: 38px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .06);
+  color: rgba(237, 244, 240, .66);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 850;
+  padding: 0 7px;
+}
+
+.music-track-action:hover {
+  border-color: rgba(62, 218, 147, .34);
+  background: rgba(62, 218, 147, .13);
+  color: #f6fbf8;
 }
 
 .music-empty-row {
@@ -9363,10 +9387,89 @@ button.music-track-row {
   font-weight: 850;
 }
 
-.music-queue-list button {
-  min-height: 30px;
-  padding: 5px 8px;
+.music-queue-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.music-queue-head .music-inline-button {
+  min-height: 28px;
+  padding: 0 8px;
+}
+
+.music-queue-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.music-queue-play {
+  min-width: 0;
+  min-height: 32px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(237, 244, 240, .68);
+  cursor: pointer;
+  font: inherit;
   font-size: 12px;
+  padding: 5px 8px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-queue-row.active .music-queue-play,
+.music-queue-play:hover {
+  border-color: rgba(62, 218, 147, .28);
+  background: rgba(62, 218, 147, .12);
+  color: #f6fbf8;
+}
+
+.music-queue-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.music-queue-action {
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .06);
+  color: rgba(237, 244, 240, .66);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1;
+  padding: 0;
+}
+
+.music-queue-action:hover:not(:disabled) {
+  border-color: rgba(62, 218, 147, .34);
+  background: rgba(62, 218, 147, .13);
+  color: #f6fbf8;
+}
+
+.music-queue-action:disabled {
+  cursor: default;
+  opacity: .34;
+}
+
+.music-queue-empty {
+  min-height: 42px;
+  display: grid;
+  place-items: center;
+  color: rgba(237, 244, 240, .45);
+  font-size: 12px;
+  text-align: center;
 }
 
 .music-player-bar {
@@ -9663,6 +9766,18 @@ button.music-track-row {
   box-shadow: 0 0 0 3px rgba(62, 218, 147, .12);
 }
 
+@media (max-width: 1500px) {
+  .music-track-row {
+    grid-template-columns: 42px minmax(0, 1fr) minmax(76px, .45fr) 56px 88px;
+    gap: 8px;
+  }
+
+  .music-track-row > span:nth-child(4),
+  .music-track-row > span:nth-child(5) {
+    display: none;
+  }
+}
+
 @media (max-width: 1180px) {
   .music-layout {
     grid-template-columns: minmax(190px, 240px) minmax(420px, 1fr);
@@ -9734,7 +9849,7 @@ button.music-track-row {
   }
 
   .music-track-row {
-    grid-template-columns: 38px minmax(0, 1fr) 64px;
+    grid-template-columns: 38px minmax(0, 1fr) 64px 86px;
     gap: 8px;
   }
 

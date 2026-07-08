@@ -1,4 +1,4 @@
-import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-02";
+import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-03";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -355,13 +355,19 @@ export function createMusicViews(deps) {
   }
 
   function renderTrackRow(track, index) {
+    const isCurrent = state.current?.id === track.id;
+    const isPlaying = isCurrent && state.playing;
     const row = document.createElement("button");
     row.type = "button";
-    row.className = `music-mobile-track${state.current?.id === track.id ? " active" : ""}`;
+    row.className = `music-mobile-track${isCurrent ? " active" : ""}${isPlaying ? " playing" : ""}`;
     row.setAttribute("aria-label", `播放 ${track.title || "歌曲"}`);
     const number = document.createElement("span");
     number.className = "music-mobile-track-index";
-    number.textContent = state.current?.id === track.id && state.playing ? "||" : String(index + 1).padStart(2, "0");
+    if (isPlaying) {
+      number.append(renderPlayingBars());
+    } else {
+      number.textContent = String(index + 1).padStart(2, "0");
+    }
     const cover = renderCover(track, "tiny");
     const text = document.createElement("span");
     text.className = "music-mobile-track-text";
@@ -386,7 +392,7 @@ export function createMusicViews(deps) {
     const player = document.createElement("section");
     player.className = "music-mobile-mini-player";
     player.addEventListener("click", (event) => {
-      if (event.target?.closest?.("button,input")) return;
+      if (event.target?.closest?.("button,input,label")) return;
       openFullscreen();
     });
 
@@ -401,8 +407,8 @@ export function createMusicViews(deps) {
 
     const play = iconButton(playIcon(Boolean(state.current && !audio?.paused)), () => togglePlayback(), !track, "primary", playLabel(Boolean(state.current && !audio?.paused)));
     const next = iconButton("›", () => playAdjacent(1).catch(() => {}), !track, "", "下一首");
-    player.append(text, play, next);
-    bindProgress({ playButton: play });
+    const progress = renderProgress("mini", track, play);
+    player.append(text, play, next, progress);
     return player;
   }
 
@@ -419,6 +425,7 @@ export function createMusicViews(deps) {
     const close = iconButton("‹", closeFullscreen, false, "ghost", "返回列表");
     const heading = document.createElement("span");
     const title = document.createElement("strong");
+    title.className = "music-mobile-full-title";
     title.textContent = track?.title || "未播放";
     const meta = document.createElement("small");
     meta.textContent = track ? [track.artist || "未知歌手", track.album || "未知专辑"].join(" · ") : "从列表选择歌曲";
@@ -441,7 +448,7 @@ export function createMusicViews(deps) {
       lines.append(lyricLine("暂无歌词"));
     } else {
       lyricLines.slice(0, 160).forEach((line, index) => {
-        const p = lyricLine(line.text || "");
+        const p = lyricLine(line.text || "", { seekMs: line.timeMs || 0 });
         p.dataset.index = String(index);
         p.dataset.timeMs = String(line.timeMs || 0);
         lines.append(p);
@@ -474,6 +481,7 @@ export function createMusicViews(deps) {
   function renderProgress(kind, track, playButton = null) {
     const progressWrap = document.createElement("label");
     progressWrap.className = `music-mobile-progress ${kind}`;
+    progressWrap.setAttribute("aria-label", "播放进度");
     const current = document.createElement("span");
     current.textContent = "0:00";
     const progress = document.createElement("input");
@@ -498,10 +506,26 @@ export function createMusicViews(deps) {
     progressBindings.push(binding);
   }
 
-  function lyricLine(text) {
-    const p = document.createElement("p");
+  function lyricLine(text, options = {}) {
+    const canSeek = Object.prototype.hasOwnProperty.call(options, "seekMs");
+    const p = canSeek ? document.createElement("button") : document.createElement("p");
+    if (canSeek) {
+      p.type = "button";
+      p.className = "music-mobile-lyric-line";
+      p.addEventListener("click", () => seekToLyric(options.seekMs));
+    }
     p.textContent = text;
     return p;
+  }
+
+  function renderPlayingBars() {
+    const bars = document.createElement("span");
+    bars.className = "music-mobile-playing-bars";
+    bars.setAttribute("aria-label", "正在播放");
+    for (let index = 0; index < 3; index += 1) {
+      bars.append(document.createElement("i"));
+    }
+    return bars;
   }
 
   function renderCover(item = {}, size = "") {
@@ -576,6 +600,17 @@ export function createMusicViews(deps) {
       state.status = error?.message || "播放被系统阻止";
       renderShell();
     });
+  }
+
+  function seekToLyric(timeMs) {
+    if (!state.current) return;
+    ensureAudio();
+    const nextTime = Math.max(0, Number(timeMs || 0) / 1000);
+    if (!Number.isFinite(nextTime)) return;
+    audio.currentTime = nextTime;
+    updatePlaybackUi();
+    updateLyricHighlight(true);
+    if (audio.paused) playAudio();
   }
 
   async function playAdjacent(direction, options = {}) {
@@ -679,7 +714,7 @@ export function createMusicViews(deps) {
       }
       if (!force && index === currentLyricIndex) return;
       currentLyricIndex = index;
-      for (const item of els.viewContent.querySelectorAll(".music-mobile-full-lyric-lines p")) {
+      for (const item of els.viewContent.querySelectorAll(".music-mobile-full-lyric-lines [data-index]")) {
         const active = Number(item.dataset.index || -1) === index;
         item.classList.toggle("active", active);
         if (active) item.scrollIntoView({ block: "center", behavior: "smooth" });

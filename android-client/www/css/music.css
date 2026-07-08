@@ -175,11 +175,40 @@
   background: var(--success-soft);
 }
 
+.music-mobile-track.playing .music-mobile-track-index {
+  color: var(--green);
+}
+
 .music-mobile-track-index {
   color: var(--quiet);
   font-size: 12px;
   font-weight: 950;
   text-align: center;
+}
+
+.music-mobile-playing-bars {
+  display: inline-grid;
+  grid-template-columns: repeat(3, 3px);
+  gap: 2px;
+  align-items: end;
+  height: 16px;
+}
+
+.music-mobile-playing-bars i {
+  display: block;
+  width: 3px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: music-playing-bars 0.84s ease-in-out infinite;
+}
+
+.music-mobile-playing-bars i:nth-child(2) {
+  animation-delay: 0.12s;
+}
+
+.music-mobile-playing-bars i:nth-child(3) {
+  animation-delay: 0.24s;
 }
 
 .music-mobile-track-text,
@@ -283,9 +312,10 @@
   display: grid;
   width: min(calc(100% - 24px), 536px);
   grid-template-columns: 42px minmax(0, 1fr) 42px 42px;
+  grid-template-rows: auto 10px;
   gap: 9px;
   align-items: center;
-  min-height: 66px;
+  min-height: 78px;
   padding: 10px;
   transform: translateX(-50%);
   background: var(--nav-surface);
@@ -396,6 +426,13 @@
 
 .music-mobile-full-lyric-lines p {
   margin: 0;
+}
+
+.music-mobile-full-lyric-lines p,
+.music-mobile-full-lyric-lines button {
+  width: 100%;
+  border: 0;
+  background: transparent;
   color: var(--muted);
   font-size: 15px;
   font-weight: 850;
@@ -403,7 +440,19 @@
   text-align: center;
 }
 
-.music-mobile-full-lyric-lines p.active {
+.music-mobile-full-lyric-lines button {
+  min-height: 30px;
+  padding: 2px 0;
+  font-family: inherit;
+}
+
+.music-mobile-full-lyric-lines button:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 3px;
+}
+
+.music-mobile-full-lyric-lines p.active,
+.music-mobile-full-lyric-lines button.active {
   color: var(--ink);
   font-size: 20px;
   font-weight: 950;
@@ -428,11 +477,38 @@
   accent-color: var(--green);
 }
 
+.music-mobile-progress.mini {
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  height: 10px;
+}
+
+.music-mobile-progress.mini span {
+  display: none;
+}
+
+.music-mobile-progress.mini input {
+  height: 10px;
+  margin: 0;
+}
+
 .music-mobile-full-controls {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 12px;
+}
+
+@keyframes music-playing-bars {
+  0%,
+  100% {
+    height: 6px;
+  }
+
+  50% {
+    height: 15px;
+  }
 }
 
 @media (max-width: 380px) {
