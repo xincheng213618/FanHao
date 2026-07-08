@@ -60,6 +60,14 @@ const SMART_MIXES = [
     limit: 200
   },
   {
+    id: "unplayed",
+    name: "还没听过",
+    description: "从未记录播放的歌曲，适合从本地库里继续发现。",
+    badge: "未听",
+    order: "t.updated_at DESC, t.album_title COLLATE NOCASE ASC, t.track_no ASC, t.title COLLATE NOCASE ASC",
+    limit: 240
+  },
+  {
     id: "favorites",
     name: "我喜欢",
     description: "所有已收藏歌曲，按最近收藏或更新靠前。",
@@ -1462,6 +1470,7 @@ function smartMixCondition(mixOrId) {
   if (!mix) return { where: "1 = 0", args: [] };
   if (mix.id === "recent") return { where: "COALESCE(s.last_played_at, '') <> ''", args: [] };
   if (mix.id === "topplayed") return { where: "COALESCE(s.play_count, 0) > 0", args: [] };
+  if (mix.id === "unplayed") return { where: "COALESCE(s.play_count, 0) = 0 AND COALESCE(s.last_played_at, '') = ''", args: [] };
   if (mix.id === "favorites") return { where: "COALESCE(s.favorite, 0) = 1", args: [] };
   if (mix.id === "toprated") return { where: "COALESCE(s.rating, 0) >= 4", args: [] };
   if (mix.id === "unrated") return { where: "COALESCE(s.rating, 0) = 0", args: [] };
