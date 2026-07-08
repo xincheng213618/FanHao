@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-21";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-23";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -9,6 +9,7 @@ const MUSIC_VOLUME_KEY = "fanhao.android.music.volume";
 const MUSIC_REPEAT_KEY = "fanhao.android.music.repeat";
 const MUSIC_SHUFFLE_KEY = "fanhao.android.music.shuffle";
 const MUSIC_LAST_TRACK_KEY = "fanhao.android.music.lastTrack";
+const SLEEP_TIMER_OPTIONS = [0, 10, 15, 30, 45, 60, 90];
 
 export function createMusicViews(deps) {
   const {
@@ -50,6 +51,8 @@ export function createMusicViews(deps) {
     repeat: readRepeatPreference(),
     shuffle: readShufflePreference(),
     volume: readVolumePreference(),
+    sleepMinutes: 0,
+    sleepUntil: 0,
     playReportedTrackId: "",
     restoreAttemptKey: "",
     mediaSessionTrackId: ""
@@ -62,6 +65,8 @@ export function createMusicViews(deps) {
   let progressBindings = [];
   let currentLyricIndex = -1;
   let mediaSessionInstalled = false;
+  let sleepTimerTimeout = 0;
+  let sleepTimerInterval = 0;
 
   installLifecycle();
 
@@ -793,7 +798,8 @@ export function createMusicViews(deps) {
     controls.append(shuffle, prev, play, next, repeat, queue);
 
     const progress = renderProgress("full", track, play);
-    full.append(top, switcher, stage, progress, renderVolumeControl(track), controls);
+    full.append(top, switcher, stage, progress, renderVolumeControl(track), renderSleepTimerControl(track), controls);
+    if (state.queueOpen || state.playlistSheetOpen) full.append(renderSheetBackdrop());
     if (state.queueOpen) full.append(renderQueueSheet());
     if (state.playlistSheetOpen) full.append(renderPlaylistSheet());
     if (panel === "lyrics") window.requestAnimationFrame(() => updateLyricHighlight(true));
@@ -812,6 +818,15 @@ export function createMusicViews(deps) {
       img.decoding = "async";
       backdrop.append(img);
     }
+    return backdrop;
+  }
+
+  function renderSheetBackdrop() {
+    const backdrop = document.createElement("button");
+    backdrop.type = "button";
+    backdrop.className = "music-mobile-sheet-backdrop";
+    backdrop.setAttribute("aria-label", "关闭弹层");
+    backdrop.addEventListener("click", () => closeOpenSheet());
     return backdrop;
   }
 
@@ -875,6 +890,25 @@ export function createMusicViews(deps) {
     }, { passive: true });
   }
 
+  function attachSheetDismissSwipe(target) {
+    let startX = 0;
+    let startY = 0;
+    target.addEventListener("touchstart", (event) => {
+      const touch = event.touches?.[0];
+      if (!touch) return;
+      startX = touch.clientX;
+      startY = touch.clientY;
+    }, { passive: true });
+    target.addEventListener("touchend", (event) => {
+      const touch = event.changedTouches?.[0];
+      if (!touch) return;
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      if (dy < 58 || Math.abs(dx) > dy * 0.85) return;
+      closeOpenSheet();
+    }, { passive: true });
+  }
+
   function switchFullPanel(panel) {
     const next = normalizeFullPanel(panel, state.current || state.queue[0] || null);
     if (state.fullPanel === next) return;
@@ -934,6 +968,7 @@ export function createMusicViews(deps) {
       renderShell();
     }, false, "ghost", "关闭队列");
     head.append(title, meta, close);
+    attachSheetDismissSwipe(head);
 
     const list = document.createElement("div");
     list.className = "music-mobile-queue-list";
@@ -967,6 +1002,7 @@ export function createMusicViews(deps) {
       renderShell();
     }, false, "ghost", "关闭");
     head.append(title, create, close);
+    attachSheetDismissSwipe(head);
 
     const list = document.createElement("div");
     list.className = "music-mobile-queue-list";
@@ -1110,6 +1146,28 @@ export function createMusicViews(deps) {
     return wrap;
   }
 
+  function renderSleepTimerControl(track) {
+    const wrap = document.createElement("label");
+    wrap.className = "music-mobile-sleep";
+    wrap.setAttribute("aria-label", "睡眠定时");
+    const label = document.createElement("span");
+    label.textContent = "睡眠";
+    const select = document.createElement("select");
+    select.disabled = !track;
+    for (const minutes of SLEEP_TIMER_OPTIONS) {
+      const option = document.createElement("option");
+      option.value = String(minutes);
+      option.textContent = minutes ? `${minutes} 分钟` : "关闭";
+      select.append(option);
+    }
+    select.value = String(sleepTimerActive() ? state.sleepMinutes : 0);
+    select.addEventListener("change", () => setSleepTimer(Number(select.value || 0)));
+    const status = document.createElement("em");
+    status.textContent = sleepTimerActive() ? `${sleepTimerText()} 后暂停` : "未开启";
+    wrap.append(label, select, status);
+    return wrap;
+  }
+
   function bindProgress(binding) {
     progressBindings.push(binding);
   }
@@ -1222,6 +1280,14 @@ export function createMusicViews(deps) {
     return true;
   }
 
+  function closeOpenSheet() {
+    if (!state.queueOpen && !state.playlistSheetOpen) return false;
+    state.queueOpen = false;
+    state.playlistSheetOpen = false;
+    renderShell();
+    return true;
+  }
+
   function togglePlayback() {
     ensureAudio();
     if (!state.current) {
@@ -1247,6 +1313,83 @@ export function createMusicViews(deps) {
     ensureAudio();
     audio.volume = state.volume;
     writeVolumePreference(state.volume);
+  }
+
+  function setSleepTimer(minutes) {
+    const normalized = normalizeSleepTimerMinutes(minutes);
+    clearSleepTimerHandle();
+    if (!normalized) {
+      state.sleepMinutes = 0;
+      state.sleepUntil = 0;
+      state.status = "已关闭睡眠定时";
+      renderShell();
+      return;
+    }
+    state.sleepMinutes = normalized;
+    state.sleepUntil = Date.now() + normalized * 60 * 1000;
+    state.status = `将在 ${normalized} 分钟后暂停`;
+    scheduleSleepTimer();
+    renderShell();
+  }
+
+  function scheduleSleepTimer() {
+    clearSleepTimerHandle();
+    const remaining = sleepTimerRemainingMs();
+    if (remaining <= 0) {
+      expireSleepTimer();
+      return;
+    }
+    sleepTimerTimeout = window.setTimeout(expireSleepTimer, Math.min(remaining, 2147483647));
+    sleepTimerInterval = window.setInterval(() => {
+      if (!sleepTimerActive()) {
+        clearSleepTimerHandle();
+        return;
+      }
+      if (sleepTimerRemainingMs() <= 0) {
+        expireSleepTimer();
+        return;
+      }
+      if (state.fullscreen) renderShell();
+    }, 30000);
+  }
+
+  function clearSleepTimerHandle() {
+    if (sleepTimerTimeout) {
+      window.clearTimeout(sleepTimerTimeout);
+      sleepTimerTimeout = 0;
+    }
+    if (sleepTimerInterval) {
+      window.clearInterval(sleepTimerInterval);
+      sleepTimerInterval = 0;
+    }
+  }
+
+  function expireSleepTimer() {
+    clearSleepTimerHandle();
+    state.sleepMinutes = 0;
+    state.sleepUntil = 0;
+    ensureAudio();
+    if (!audio.paused) audio.pause();
+    state.status = "睡眠定时已暂停播放";
+    renderShell();
+  }
+
+  function sleepTimerActive() {
+    return sleepTimerRemainingMs() > 0;
+  }
+
+  function sleepTimerRemainingMs() {
+    return Math.max(0, Number(state.sleepUntil || 0) - Date.now());
+  }
+
+  function sleepTimerText() {
+    const minutes = Math.max(1, Math.ceil(sleepTimerRemainingMs() / 60000));
+    if (minutes >= 60) {
+      const hours = Math.floor(minutes / 60);
+      const rest = minutes % 60;
+      return rest ? `${hours} 小时 ${rest} 分钟` : `${hours} 小时`;
+    }
+    return `${minutes} 分钟`;
   }
 
   async function restoreLastTrack(renderGuard = null) {
@@ -1864,6 +2007,11 @@ function nextRepeat(value) {
   if (value === "all") return "one";
   if (value === "one") return "none";
   return "all";
+}
+
+function normalizeSleepTimerMinutes(value) {
+  const minutes = Math.round(Number(value || 0));
+  return SLEEP_TIMER_OPTIONS.includes(minutes) ? minutes : 0;
 }
 
 function readVolumePreference() {
