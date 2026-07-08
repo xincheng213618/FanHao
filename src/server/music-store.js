@@ -539,6 +539,31 @@ export function createMusicStore(options = {}) {
     };
   }
 
+  function playlistM3u(playlistId, options = {}) {
+    const database = dbOrOpen();
+    const row = database.prepare("SELECT * FROM music_playlists WHERE id = ?").get(playlistId);
+    if (!row) return null;
+    const mode = String(options.pathMode || options.path || "").trim().toLowerCase() === "relative" ? "relative" : "absolute";
+    const tracks = database
+      .prepare(
+        `
+        SELECT t.title, t.display_artist, t.duration_ms, t.source_path, t.relative_path, t.file_name,
+               i.sort_order, i.added_at
+        FROM music_playlist_items i
+        JOIN music_tracks t ON t.id = i.track_id
+        WHERE i.playlist_id = ? AND t.status = 'ok'
+        ORDER BY i.sort_order ASC, i.added_at ASC
+      `
+      )
+      .all(row.id);
+    return {
+      fileName: `${safePlaylistFileName(row.name)}.m3u8`,
+      content: formatM3uPlaylist(row, tracks, mode),
+      trackCount: tracks.length,
+      pathMode: mode
+    };
+  }
+
   function deletePlaylist(playlistId) {
     const database = dbOrOpen();
     const row = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
@@ -615,6 +640,7 @@ export function createMusicStore(options = {}) {
     listSmartPlaylists,
     listTracks,
     playlistDetail,
+    playlistM3u,
     removeFromPlaylist,
     saveProgress,
     scan,
@@ -1353,14 +1379,46 @@ function publicAlbum(row) {
 }
 
 function publicPlaylist(row) {
+  const id = row.id || "";
   return {
-    id: row.id || "",
+    id,
     name: row.name || "",
     description: row.description || "",
     trackCount: Number(row.track_count || 0),
+    exportUrl: id ? `/api/music/playlists/${encodeURIComponent(id)}/export.m3u8` : "",
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || ""
   };
+}
+
+function formatM3uPlaylist(playlist, tracks = [], pathMode = "absolute") {
+  const lines = ["#EXTM3U", `#PLAYLIST:${m3uText(playlist.name || "FanHao 歌单")}`];
+  for (const track of tracks) {
+    const seconds = Math.round(Number(track.duration_ms || 0) / 1000);
+    const artist = track.display_artist || "";
+    const title = track.title || path.basename(track.file_name || track.source_path || "music", path.extname(track.file_name || ""));
+    const label = artist ? `${artist} - ${title}` : title;
+    const target = pathMode === "relative" ? track.relative_path || track.file_name || track.source_path || "" : track.source_path || track.relative_path || track.file_name || "";
+    lines.push(`#EXTINF:${seconds > 0 ? seconds : -1},${m3uText(label)}`);
+    lines.push(m3uPath(target));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function m3uText(value) {
+  return String(value || "").replace(/[\r\n]+/g, " ").trim();
+}
+
+function m3uPath(value) {
+  return String(value || "").replace(/[\r\n]+/g, " ").trim();
+}
+
+function safePlaylistFileName(value) {
+  return String(value || "FanHao 歌单")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80) || "FanHao 歌单";
 }
 
 function publicGenre(row) {

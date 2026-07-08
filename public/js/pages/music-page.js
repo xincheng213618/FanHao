@@ -747,6 +747,12 @@ export function createMusicPage(deps) {
       headingActions.append(clear);
     }
     if (state.music.mode === "playlist" && state.music.activePlaylist) {
+      const exportPlaylist = document.createElement("button");
+      exportPlaylist.type = "button";
+      exportPlaylist.className = "music-inline-button";
+      exportPlaylist.textContent = "导出 M3U";
+      exportPlaylist.addEventListener("click", () => downloadPlaylistM3u(state.music.activePlaylist));
+      headingActions.append(exportPlaylist);
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "music-inline-button danger";
@@ -1404,6 +1410,18 @@ export function createMusicPage(deps) {
     const link = document.createElement("a");
     link.href = new URL(track.downloadUrl, window.location.href).href;
     link.download = track.fileName || track.title || "music";
+    link.rel = "noopener";
+    document.body.append(link);
+    link.click();
+    link.remove();
+  }
+
+  function downloadPlaylistM3u(playlist) {
+    if (!playlist?.id) return;
+    const href = playlist.exportUrl || `/api/music/playlists/${encodeURIComponent(playlist.id)}/export.m3u8`;
+    const link = document.createElement("a");
+    link.href = new URL(href, window.location.href).href;
+    link.download = `${playlist.name || "playlist"}.m3u8`;
     link.rel = "noopener";
     document.body.append(link);
     link.click();

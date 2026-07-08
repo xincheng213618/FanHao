@@ -1,4 +1,4 @@
-import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-13";
+import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-14";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 

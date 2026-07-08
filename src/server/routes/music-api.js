@@ -202,6 +202,31 @@ export async function routeMusicApi(req, res, url, deps) {
     return true;
   }
 
+  const playlistExportMatch = /^\/api\/music\/playlists\/([^/]+)\/export\.m3u8?$/.exec(url.pathname);
+  if (playlistExportMatch && (req.method === "GET" || req.method === "HEAD")) {
+    try {
+      const data = musicStore.playlistM3u(decodeURIComponent(playlistExportMatch[1]), {
+        pathMode: url.searchParams.get("path")
+      });
+      if (!data) {
+        notFound(res);
+        return true;
+      }
+      const body = data.content || "";
+      res.writeHead(200, {
+        "Content-Type": "audio/x-mpegurl; charset=utf-8",
+        "Content-Length": Buffer.byteLength(body, "utf8"),
+        "Content-Disposition": attachmentDisposition(data.fileName),
+        "Cache-Control": "no-store"
+      });
+      if (req.method === "HEAD") res.end();
+      else res.end(body, "utf8");
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "歌单导出失败" });
+    }
+    return true;
+  }
+
   const playlistMatch = /^\/api\/music\/playlists\/([^/]+)$/.exec(url.pathname);
   if (playlistMatch && req.method === "GET") {
     try {
@@ -247,4 +272,10 @@ export async function routeMusicApi(req, res, url, deps) {
   }
 
   return false;
+}
+
+function attachmentDisposition(fileName) {
+  const name = String(fileName || "playlist.m3u8").replace(/[\\/\u0000-\u001f]/g, "_");
+  const fallback = name.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_") || "playlist.m3u8";
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }

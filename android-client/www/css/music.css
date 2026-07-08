@@ -375,7 +375,7 @@
 
 .music-mobile-track-text,
 .music-mobile-mini-text,
-.music-mobile-full-top span {
+.music-mobile-full-top > span:not(.music-mobile-full-actions) {
   display: grid;
   min-width: 0;
   gap: 3px;
@@ -616,11 +616,12 @@
 
 .music-mobile-full-cover-panel {
   display: grid;
-  align-content: center;
+  align-content: start;
   gap: 18px;
   height: 100%;
   min-height: 0;
   min-width: 0;
+  padding-top: clamp(26px, 6vh, 58px);
 }
 
 .music-mobile-full-cover-stage {
