@@ -743,7 +743,8 @@ export function createMusicPage(deps) {
       ["title", "按歌名"],
       ["duration", "按时长"],
       ["played", "最近播放"],
-      ["favorite", "收藏优先"]
+      ["favorite", "收藏优先"],
+      ["rating", "按评分"]
     ]) {
       const option = document.createElement("option");
       option.value = value;
@@ -797,7 +798,7 @@ export function createMusicPage(deps) {
     const strong = document.createElement("strong");
     strong.textContent = track.title;
     const small = document.createElement("small");
-    small.textContent = track.hasLyrics ? "歌词" : track.fileName || "";
+    small.textContent = [ratingLabel(track.rating), track.hasLyrics ? "歌词" : track.fileName || ""].filter(Boolean).join(" · ");
     title.append(strong, small);
     const artist = document.createElement("span");
     artist.textContent = track.artist || "未知歌手";
@@ -837,6 +838,29 @@ export function createMusicPage(deps) {
     return button;
   }
 
+  function renderRatingControl(track, variant = "") {
+    const rating = Math.max(0, Math.min(5, Number(track?.rating || 0)));
+    const wrap = document.createElement("div");
+    wrap.className = `music-rating${variant ? ` ${variant}` : ""}`;
+    wrap.setAttribute("aria-label", track ? `评分：${rating || "未评分"}` : "评分");
+    for (let value = 1; value <= 5; value += 1) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = value <= rating ? "★" : "☆";
+      button.disabled = !track;
+      button.className = value <= rating ? "active" : "";
+      const nextRating = value === rating ? 0 : value;
+      button.setAttribute("aria-label", nextRating ? `设为 ${value} 星` : "清除评分");
+      button.title = nextRating ? `设为 ${value} 星` : "清除评分";
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        setTrackRating(track.id, nextRating).catch(showError);
+      });
+      wrap.append(button);
+    }
+    return wrap;
+  }
+
   function emptyRow(message) {
     const empty = document.createElement("div");
     empty.className = "music-empty-row";
@@ -861,6 +885,7 @@ export function createMusicPage(deps) {
     title.textContent = track.title;
     const meta = document.createElement("p");
     meta.textContent = `${track.artist || "未知歌手"} · ${track.album || "未知专辑"}`;
+    const rating = renderRatingControl(track, "now");
     const actions = document.createElement("div");
     actions.className = "music-now-actions";
     const play = document.createElement("button");
@@ -887,7 +912,7 @@ export function createMusicPage(deps) {
       remove.addEventListener("click", () => removeTrackFromActivePlaylist(track.id).catch(showError));
       actions.append(remove);
     }
-    panel.append(title, meta, actions, renderLyricPanel(), renderQueuePanel());
+    panel.append(title, meta, rating, actions, renderLyricPanel(), renderQueuePanel());
     return panel;
   }
 
@@ -1035,6 +1060,7 @@ export function createMusicPage(deps) {
 
     const options = document.createElement("div");
     options.className = "music-player-options";
+    options.append(renderRatingControl(track, "bar"));
     options.append(controlButton(track?.favorite ? "♥" : "♡", () => toggleFavorite(track.id).catch(showError), !track, track?.favorite ? "active heart" : "", track?.favorite ? "取消收藏" : "收藏"));
     options.append(controlButton("+", () => addTrackToPlaylist(track.id).catch(showError), !track, "", "加入歌单"));
     const volumeWrap = document.createElement("label");
@@ -1305,12 +1331,27 @@ export function createMusicPage(deps) {
     const data = await api(`/api/music/tracks/${encodeURIComponent(trackId)}/favorite`, { method: "POST", body: {} });
     const updated = data.track;
     if (!updated) return;
+    applyTrackUpdate(updated);
+    renderView();
+  }
+
+  async function setTrackRating(trackId, rating) {
+    const data = await api(`/api/music/tracks/${encodeURIComponent(trackId)}/rating`, {
+      method: "POST",
+      body: { rating }
+    });
+    const updated = data.track;
+    if (!updated) return;
+    applyTrackUpdate(updated);
+    renderView();
+  }
+
+  function applyTrackUpdate(updated) {
     if (state.music.current?.id === updated.id) state.music.current = { ...state.music.current, ...updated };
     state.music.queue = (state.music.queue || []).map((track) => (track.id === updated.id ? { ...track, ...updated } : track));
     if (state.music.data?.tracks) {
       state.music.data.tracks = state.music.data.tracks.map((track) => (track.id === updated.id ? { ...track, ...updated } : track));
     }
-    renderView();
   }
 
   function selectMusicMode(mode, options = {}) {
@@ -1640,6 +1681,11 @@ function qualityLabel(track = {}) {
   return parts.join(" · ");
 }
 
+function ratingLabel(rating) {
+  const value = Math.max(0, Math.min(5, Number(rating || 0)));
+  return value ? `${"★".repeat(value)}${"☆".repeat(5 - value)}` : "";
+}
+
 function sortLabel(sort) {
   return {
     album: "按专辑",
@@ -1647,7 +1693,8 @@ function sortLabel(sort) {
     title: "按歌名",
     duration: "按时长",
     played: "最近播放",
-    favorite: "收藏优先"
+    favorite: "收藏优先",
+    rating: "按评分"
   }[sort] || "按专辑";
 }
 

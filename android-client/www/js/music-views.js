@@ -1,4 +1,4 @@
-import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-09";
+import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-10";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -420,7 +420,8 @@ export function createMusicViews(deps) {
       ["title", "歌名"],
       ["duration", "时长"],
       ["played", "最近"],
-      ["favorite", "收藏"]
+      ["favorite", "收藏"],
+      ["rating", "评分"]
     ]) {
       const option = document.createElement("option");
       option.value = value;
@@ -546,7 +547,7 @@ export function createMusicViews(deps) {
     const title = document.createElement("strong");
     title.textContent = track.title || "未知歌曲";
     const meta = document.createElement("small");
-    meta.textContent = [track.artist || "未知歌手", track.album || "未知专辑"].filter(Boolean).join(" · ");
+    meta.textContent = [track.artist || "未知歌手", track.album || "未知专辑", ratingLabel(track.rating)].filter(Boolean).join(" · ");
     text.append(title, meta);
     const side = document.createElement("span");
     side.className = "music-mobile-track-side";
@@ -618,6 +619,8 @@ export function createMusicViews(deps) {
     coverStage.className = "music-mobile-full-cover-stage";
     coverStage.append(renderCover(track || { title: "音乐" }, "cover"));
 
+    const rating = renderRatingControl(track);
+
     const lyrics = document.createElement("div");
     lyrics.className = "music-mobile-full-lyrics";
     const lines = document.createElement("div");
@@ -659,7 +662,7 @@ export function createMusicViews(deps) {
     controls.append(shuffle, prev, play, next, repeat, queue);
 
     const progress = renderProgress("full", track, play);
-    full.append(top, coverStage, lyrics, progress, controls);
+    full.append(top, coverStage, rating, lyrics, progress, controls);
     if (state.queueOpen) full.append(renderQueueSheet());
     return full;
   }
@@ -807,6 +810,25 @@ export function createMusicViews(deps) {
     return button;
   }
 
+  function renderRatingControl(track) {
+    const rating = Math.max(0, Math.min(5, Number(track?.rating || 0)));
+    const wrap = document.createElement("div");
+    wrap.className = "music-mobile-rating";
+    wrap.setAttribute("aria-label", track ? `评分：${rating || "未评分"}` : "评分");
+    for (let value = 1; value <= 5; value += 1) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = value <= rating ? "★" : "☆";
+      button.className = value <= rating ? "active" : "";
+      button.disabled = !track;
+      const nextRating = value === rating ? 0 : value;
+      button.setAttribute("aria-label", nextRating ? `设为 ${value} 星` : "清除评分");
+      button.addEventListener("click", () => setTrackRating(track.id, nextRating).catch(() => {}));
+      wrap.append(button);
+    }
+    return wrap;
+  }
+
   function pill(text) {
     const span = document.createElement("span");
     span.className = "music-mobile-pill";
@@ -932,13 +954,27 @@ export function createMusicViews(deps) {
     const data = await postJson(getActiveUrl(), `/api/music/tracks/${encodeURIComponent(id)}/favorite`, {});
     const updated = data.track;
     if (!updated) return;
+    applyTrackUpdate(updated);
+    renderShell();
+  }
+
+  async function setTrackRating(trackId, rating) {
+    const id = String(trackId || "").trim();
+    if (!id) return;
+    const data = await postJson(getActiveUrl(), `/api/music/tracks/${encodeURIComponent(id)}/rating`, { rating });
+    const updated = data.track;
+    if (!updated) return;
+    applyTrackUpdate(updated);
+    renderShell();
+  }
+
+  function applyTrackUpdate(updated) {
     if (state.current?.id === updated.id) state.current = { ...state.current, ...updated };
     state.queue = (state.queue || []).map((track) => (track.id === updated.id ? { ...track, ...updated } : track));
     if (state.data?.tracks) {
       state.data.tracks = state.data.tracks.map((track) => (track.id === updated.id ? { ...track, ...updated } : track));
     }
     if (state.current?.id === updated.id) rememberLastTrack(state.current);
-    renderShell();
   }
 
   function reportPlayedOnce() {
@@ -1222,7 +1258,7 @@ function normalizeMode(value) {
 
 function normalizeSort(value) {
   const sort = String(value || DEFAULT_SORT).trim();
-  return ["album", "artist", "title", "duration", "played", "favorite"].includes(sort) ? sort : DEFAULT_SORT;
+  return ["album", "artist", "title", "duration", "played", "favorite", "rating"].includes(sort) ? sort : DEFAULT_SORT;
 }
 
 function formatClock(ms) {
@@ -1305,6 +1341,11 @@ function writeShufflePreference(value) {
   } catch {}
 }
 
+function ratingLabel(rating) {
+  const value = Math.max(0, Math.min(5, Number(rating || 0)));
+  return value ? `${"★".repeat(value)}${"☆".repeat(5 - value)}` : "";
+}
+
 function compactTrack(track = {}) {
   return {
     id: track.id || "",
@@ -1315,6 +1356,7 @@ function compactTrack(track = {}) {
     coverUrl: track.coverUrl || "",
     streamUrl: track.streamUrl || "",
     favorite: Boolean(track.favorite),
+    rating: Number(track.rating || 0),
     positionMs: Number(track.positionMs || 0),
     hasLyrics: Boolean(track.hasLyrics)
   };

@@ -150,6 +150,22 @@ export async function routeMusicApi(req, res, url, deps) {
     return true;
   }
 
+  const ratingMatch = /^\/api\/music\/tracks\/([^/]+)\/rating$/.exec(url.pathname);
+  if (ratingMatch && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const track = musicStore.setRating(decodeURIComponent(ratingMatch[1]), body || {});
+      if (!track) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, { ok: true, track });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "评分保存失败" });
+    }
+    return true;
+  }
+
   const playlistTrackMatch = /^\/api\/music\/playlists\/([^/]+)\/tracks$/.exec(url.pathname);
   if (playlistTrackMatch && req.method === "POST") {
     try {

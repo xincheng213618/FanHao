@@ -8,7 +8,7 @@ import { getElements } from "./js/dom.js?v=20260706-short-video-reel-06";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260706-mobile-web-sync-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
-import { createMusicViews } from "./js/music-views.js?v=20260708-mobile-music-09";
+import { createMusicViews } from "./js/music-views.js?v=20260708-mobile-music-10";
 import { createNovelViews } from "./js/novel-views.js?v=20260702-novel-local-manage-74";
 import { createPeopleViews } from "./js/people-views.js";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
@@ -268,7 +268,7 @@ function normalizeShortVideoSort(value) {
 
 function normalizeMusicSort(value) {
   const sort = String(value || "album").trim();
-  return ["album", "artist", "title", "duration", "played", "favorite"].includes(sort) ? sort : "album";
+  return ["album", "artist", "title", "duration", "played", "favorite", "rating"].includes(sort) ? sort : "album";
 }
 
 function readViewStateFromHash(hash = window.location.hash) {

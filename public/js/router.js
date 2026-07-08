@@ -269,7 +269,7 @@ function normalizeShortVideoSource(value) {
 
 function normalizeMusicSort(value) {
   const sort = String(value || "album").trim();
-  return ["album", "title", "artist", "duration", "played", "favorite"].includes(sort) ? sort : "album";
+  return ["album", "title", "artist", "duration", "played", "favorite", "rating"].includes(sort) ? sort : "album";
 }
 
 function normalizeMusicMode(value) {

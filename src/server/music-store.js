@@ -30,6 +30,22 @@ const SMART_MIXES = [
     limit: 200
   },
   {
+    id: "toprated",
+    name: "高分精选",
+    description: "4 星及以上歌曲，按评分和更新时间排序。",
+    badge: "4★+",
+    order: "COALESCE(s.rating, 0) DESC, s.updated_at DESC, t.title COLLATE NOCASE ASC",
+    limit: 200
+  },
+  {
+    id: "unrated",
+    name: "待评分",
+    description: "还没有评分的歌曲，适合边听边整理。",
+    badge: "待评",
+    order: "t.album_title COLLATE NOCASE ASC, t.disc_no ASC, t.track_no ASC, t.title COLLATE NOCASE ASC",
+    limit: 240
+  },
+  {
     id: "hires",
     name: "无损与高解析",
     description: "FLAC、WAV、ALAC 或 24bit/48kHz 以上音频。",
@@ -109,7 +125,7 @@ export function createMusicStore(options = {}) {
       .prepare(
         `
         SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
-               s.favorite, s.position_ms, s.duration_ms AS state_duration_ms,
+               s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_track_state s
         JOIN music_tracks t ON t.id = s.track_id
@@ -224,7 +240,7 @@ export function createMusicStore(options = {}) {
       .prepare(
         `
         SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
-               s.favorite, s.position_ms, s.duration_ms AS state_duration_ms,
+               s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_tracks t
         LEFT JOIN music_artists a ON a.id = t.artist_id
@@ -316,6 +332,26 @@ export function createMusicStore(options = {}) {
     return publicTrack(trackRow(database, row.id), { detail: true });
   }
 
+  function setRating(trackId, body = {}) {
+    const database = dbOrOpen();
+    const row = database.prepare("SELECT id, duration_ms FROM music_tracks WHERE id = ? AND status = 'ok'").get(trackId);
+    if (!row) return null;
+    const rating = clampInt(body.rating ?? body.stars ?? body.value, 0, 0, 5);
+    const now = new Date().toISOString();
+    database
+      .prepare(
+        `
+        INSERT INTO music_track_state (track_id, favorite, rating, position_ms, duration_ms, play_count, last_played_at, updated_at)
+        VALUES (?, 0, ?, 0, ?, 0, '', ?)
+        ON CONFLICT(track_id) DO UPDATE SET
+          rating = excluded.rating,
+          updated_at = excluded.updated_at
+      `
+      )
+      .run(row.id, rating, Number(row.duration_ms || 0), now);
+    return publicTrack(trackRow(database, row.id), { detail: true });
+  }
+
   function listHistory(urlOrOptions = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const limit = clampInt(params.get("limit"), 100, 1, MAX_LIMIT);
@@ -324,7 +360,7 @@ export function createMusicStore(options = {}) {
       .prepare(
         `
         SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
-               s.favorite, s.position_ms, s.duration_ms AS state_duration_ms,
+               s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_track_state s
         JOIN music_tracks t ON t.id = s.track_id
@@ -399,7 +435,7 @@ export function createMusicStore(options = {}) {
       .prepare(
         `
         SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
-               s.favorite, s.position_ms, s.duration_ms AS state_duration_ms,
+               s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_tracks t
         LEFT JOIN music_artists a ON a.id = t.artist_id
@@ -443,7 +479,7 @@ export function createMusicStore(options = {}) {
       .prepare(
         `
         SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
-               s.favorite, s.position_ms, s.duration_ms AS state_duration_ms,
+               s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at,
                i.sort_order, i.added_at
         FROM music_playlist_items i
@@ -547,6 +583,7 @@ export function createMusicStore(options = {}) {
     saveProgress,
     scan,
     smartPlaylistDetail,
+    setRating,
     summary,
     toggleFavorite,
     trackDetail,
@@ -638,6 +675,7 @@ function ensureSchema(db) {
     CREATE TABLE IF NOT EXISTS music_track_state (
       track_id TEXT PRIMARY KEY,
       favorite INTEGER DEFAULT 0,
+      rating INTEGER DEFAULT 0,
       position_ms INTEGER DEFAULT 0,
       duration_ms INTEGER DEFAULT 0,
       play_count INTEGER DEFAULT 0,
@@ -669,6 +707,14 @@ function ensureSchema(db) {
       tokenize='trigram'
     );
   `);
+  ensureColumn(db, "music_track_state", "rating", "INTEGER DEFAULT 0");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_music_track_state_rating ON music_track_state(rating, updated_at);");
+}
+
+function ensureColumn(db, tableName, columnName, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (columns.some((column) => column.name === columnName)) return;
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition};`);
 }
 
 function scanMusicRoots(scanRoots, options = {}) {
@@ -963,7 +1009,7 @@ function trackRow(db, trackId) {
       .prepare(
         `
         SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
-               s.favorite, s.position_ms, s.duration_ms AS state_duration_ms,
+               s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_tracks t
         LEFT JOIN music_artists a ON a.id = t.artist_id
@@ -1114,6 +1160,8 @@ function smartMixCondition(mixOrId) {
   if (!mix) return { where: "1 = 0", args: [] };
   if (mix.id === "recent") return { where: "COALESCE(s.last_played_at, '') <> ''", args: [] };
   if (mix.id === "favorites") return { where: "COALESCE(s.favorite, 0) = 1", args: [] };
+  if (mix.id === "toprated") return { where: "COALESCE(s.rating, 0) >= 4", args: [] };
+  if (mix.id === "unrated") return { where: "COALESCE(s.rating, 0) = 0", args: [] };
   if (mix.id === "hires") {
     return {
       where: "(LOWER(COALESCE(t.codec, '')) IN ('flac', 'wav', 'alac') OR COALESCE(t.bit_depth, 0) >= 24 OR COALESCE(t.sample_rate, 0) >= 48000)",
@@ -1227,6 +1275,7 @@ function publicTrack(row, options = {}) {
     streamUrl: `/media/music/${encodeURIComponent(id)}`,
     coverUrl: row.cover_path ? `/media/music-cover/${encodeURIComponent(albumId)}${coverStamp ? `?v=${encodeURIComponent(coverStamp)}` : ""}` : "",
     favorite: Boolean(row.favorite),
+    rating: Number(row.rating || 0),
     positionMs: Number(row.position_ms || 0),
     playCount: Number(row.play_count || 0),
     lastPlayedAt: row.last_played_at || "",
@@ -1457,7 +1506,7 @@ function metaValue(db, key) {
 
 function normalizeTrackSort(value) {
   const sort = String(value || "album").trim();
-  return ["album", "title", "artist", "duration", "played", "favorite"].includes(sort) ? sort : "album";
+  return ["album", "title", "artist", "duration", "played", "favorite", "rating"].includes(sort) ? sort : "album";
 }
 
 function normalizeAlbumSort(value) {
@@ -1471,6 +1520,7 @@ function trackOrderSql(sort) {
   if (sort === "duration") return "t.duration_ms DESC, t.title COLLATE NOCASE ASC";
   if (sort === "played") return "s.last_played_at IS NULL ASC, s.last_played_at DESC, t.album_title COLLATE NOCASE ASC, t.track_no ASC";
   if (sort === "favorite") return "COALESCE(s.favorite, 0) DESC, s.updated_at DESC, t.title COLLATE NOCASE ASC";
+  if (sort === "rating") return "COALESCE(s.rating, 0) DESC, s.updated_at DESC, t.title COLLATE NOCASE ASC";
   return "t.album_title COLLATE NOCASE ASC, t.disc_no ASC, t.track_no ASC, t.title COLLATE NOCASE ASC";
 }
 

@@ -9342,6 +9342,58 @@ body.music-view .work-grid {
   white-space: nowrap;
 }
 
+.music-rating {
+  display: inline-flex;
+  min-width: 0;
+  gap: 3px;
+  align-items: center;
+}
+
+.music-rating button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(237, 244, 240, .4);
+  cursor: pointer;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0;
+}
+
+.music-rating button:hover,
+.music-rating button.active {
+  color: #f4c258;
+}
+
+.music-rating button:focus-visible {
+  outline: 2px solid rgba(244, 194, 88, .66);
+  outline-offset: 2px;
+}
+
+.music-rating button:disabled {
+  cursor: default;
+  opacity: .4;
+}
+
+.music-rating.bar {
+  padding-right: 2px;
+}
+
+.music-rating.bar button {
+  width: 22px;
+  height: 28px;
+  font-size: 15px;
+}
+
+.music-rating.now {
+  margin-top: -6px;
+}
+
 .music-now-empty {
   min-height: 260px;
   display: grid;
@@ -9657,6 +9709,7 @@ body.music-view .work-grid {
 
 .music-player-options {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
   justify-content: flex-end;
