@@ -957,7 +957,7 @@
   bottom: calc(10px + env(safe-area-inset-bottom));
   z-index: 3;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   max-height: min(58vh, 430px);
   overflow: hidden;
   border: 1px solid var(--line);
@@ -966,12 +966,27 @@
   box-shadow: 0 -18px 42px rgba(0, 0, 0, 0.22);
 }
 
+.music-mobile-sheet-handle {
+  display: grid;
+  height: 18px;
+  place-items: center;
+  touch-action: pan-y;
+}
+
+.music-mobile-sheet-handle::before {
+  content: "";
+  width: 42px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+}
+
 .music-mobile-queue-head {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto 38px;
   gap: 8px;
   align-items: center;
-  padding: 12px 12px 8px;
+  padding: 3px 12px 8px;
   border-bottom: 1px solid var(--line);
   touch-action: pan-y;
 }

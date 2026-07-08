@@ -27,6 +27,7 @@ export function createMusicPage(deps) {
   let currentLyricIndex = -1;
   let sleepTimerTimeout = 0;
   let sleepTimerInterval = 0;
+  let mediaSessionInstalled = false;
 
   function ensureState() {
     if (!state.music) state.music = {};
@@ -68,6 +69,7 @@ export function createMusicPage(deps) {
       scheduleSleepTimer();
     }
     state.music.playReportedTrackId = state.music.playReportedTrackId || "";
+    state.music.mediaSessionTrackId = state.music.mediaSessionTrackId || "";
     state.music.playlistDialogOpen = Boolean(state.music.playlistDialogOpen);
     state.music.playlistDialogTrackId = state.music.playlistDialogTrackId || "";
     state.music.playlistDialogName = state.music.playlistDialogName || "";
@@ -117,6 +119,7 @@ export function createMusicPage(deps) {
       state.music.status = "音频播放失败";
       renderView();
     });
+    installMediaSessionHandlers();
   }
 
   function enter(options = {}) {
@@ -267,6 +270,7 @@ export function createMusicPage(deps) {
       audio.src = target;
       audio.load();
     }
+    updateMediaSession();
     if (autoplay) playAudio();
   }
 
@@ -1818,19 +1822,116 @@ export function createMusicPage(deps) {
   }
 
   function updatePlaybackUi() {
-    if (!currentProgressEls || !audio) return;
+    if (!audio) return;
     const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : Number(state.music.current?.durationMs || 0) / 1000;
     const current = Number(audio.currentTime || 0);
+    const playing = Boolean(state.music.current && !audio.paused);
+    state.music.playing = playing;
+    updateMediaSession(duration, current);
+    if (!currentProgressEls) return;
     currentProgressEls.current.textContent = formatSeconds(current);
     currentProgressEls.total.textContent = formatSeconds(duration);
     currentProgressEls.progress.value = duration > 0 ? String(Math.round((current / duration) * 1000)) : "0";
     if (currentProgressEls.playButton) {
-      const playing = Boolean(state.music.current && audio && !audio.paused);
       const label = playAriaLabel(playing);
       currentProgressEls.playButton.textContent = playIcon(playing);
       currentProgressEls.playButton.setAttribute("aria-label", label);
       currentProgressEls.playButton.title = label;
     }
+  }
+
+  function installMediaSessionHandlers() {
+    if (mediaSessionInstalled || !supportsMediaSession()) return;
+    mediaSessionInstalled = true;
+    setMediaAction("play", () => {
+      if (!state.music.current) togglePlayback();
+      else if (audio?.paused) playAudio();
+    });
+    setMediaAction("pause", () => {
+      if (audio && !audio.paused) audio.pause();
+    });
+    setMediaAction("previoustrack", () => playAdjacent(-1, { autoplay: true }).catch(showError));
+    setMediaAction("nexttrack", () => playAdjacent(1, { autoplay: true, wrap: state.music.repeat === "all" }).catch(showError));
+    setMediaAction("seekbackward", (details = {}) => seekRelative(-Number(details.seekOffset || 10)));
+    setMediaAction("seekforward", (details = {}) => seekRelative(Number(details.seekOffset || 10)));
+    setMediaAction("seekto", (details = {}) => {
+      if (!audio || typeof details.seekTime !== "number") return;
+      audio.currentTime = Math.max(0, details.seekTime);
+      updatePlaybackUi();
+      updateLyricHighlight(true);
+      saveProgressSoon();
+    });
+  }
+
+  function setMediaAction(action, handler) {
+    const session = getMediaSession();
+    if (!session) return;
+    try {
+      session.setActionHandler(action, handler);
+    } catch {}
+  }
+
+  function seekRelative(offsetSeconds) {
+    if (!audio) return;
+    const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : Number(state.music.current?.durationMs || 0) / 1000;
+    const target = Math.max(0, Math.min(duration || Number.MAX_SAFE_INTEGER, Number(audio.currentTime || 0) + Number(offsetSeconds || 0)));
+    audio.currentTime = target;
+    updatePlaybackUi();
+    updateLyricHighlight(true);
+    saveProgressSoon();
+  }
+
+  function updateMediaSession(duration = 0, current = 0) {
+    const session = getMediaSession();
+    if (!session) return;
+    const track = state.music.current;
+    if (!track) {
+      state.music.mediaSessionTrackId = "";
+      session.playbackState = "none";
+      return;
+    }
+    if (state.music.mediaSessionTrackId !== track.id) {
+      state.music.mediaSessionTrackId = track.id;
+      if (typeof window !== "undefined" && "MediaMetadata" in window) {
+        session.metadata = new window.MediaMetadata({
+          title: track.title || "未知歌曲",
+          artist: track.artist || "未知歌手",
+          album: track.album || "未知专辑",
+          artwork: mediaArtworkForTrack(track)
+        });
+      }
+    }
+    const playing = Boolean(audio && !audio.paused);
+    state.music.playing = playing;
+    session.playbackState = playing ? "playing" : "paused";
+    if (typeof session.setPositionState === "function" && duration > 0) {
+      try {
+        session.setPositionState({
+          duration,
+          playbackRate: audio?.playbackRate || 1,
+          position: Math.max(0, Math.min(duration, current || 0))
+        });
+      } catch {}
+    }
+  }
+
+  function mediaArtworkForTrack(track) {
+    if (!track?.coverUrl) return [];
+    try {
+      return [{ src: new URL(track.coverUrl, window.location.href).href, sizes: "512x512" }];
+    } catch {
+      return [];
+    }
+  }
+
+  function supportsMediaSession() {
+    return Boolean(getMediaSession());
+  }
+
+  function getMediaSession() {
+    if (typeof navigator !== "undefined" && navigator.mediaSession) return navigator.mediaSession;
+    if (typeof window !== "undefined" && window.navigator?.mediaSession) return window.navigator.mediaSession;
+    return null;
   }
 
   function updateLyricHighlight(force = false) {

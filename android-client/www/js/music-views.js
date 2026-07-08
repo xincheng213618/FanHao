@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-25";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-26";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -846,7 +846,10 @@ export function createMusicViews(deps) {
     const progress = renderProgress("full", track, play);
     full.append(top, switcher, stage, progress, renderVolumeControl(track), controls);
     if (state.queueOpen || state.playlistSheetOpen || state.sleepSheetOpen) full.append(renderSheetBackdrop());
-    if (state.queueOpen) full.append(renderQueueSheet());
+    if (state.queueOpen) {
+      full.append(renderQueueSheet());
+      scheduleActiveQueueScroll();
+    }
     if (state.playlistSheetOpen) full.append(renderPlaylistSheet());
     if (state.sleepSheetOpen) full.append(renderSleepTimerSheet());
     if (panel === "lyrics") window.requestAnimationFrame(() => updateLyricHighlight(true));
@@ -956,6 +959,14 @@ export function createMusicViews(deps) {
     }, { passive: true });
   }
 
+  function renderSheetHandle() {
+    const handle = document.createElement("div");
+    handle.className = "music-mobile-sheet-handle";
+    handle.setAttribute("aria-hidden", "true");
+    attachSheetDismissSwipe(handle);
+    return handle;
+  }
+
   function switchFullPanel(panel) {
     const next = normalizeFullPanel(panel, state.current || state.queue[0] || null);
     if (state.fullPanel === next) return;
@@ -1025,7 +1036,7 @@ export function createMusicViews(deps) {
       state.queue.forEach((track, index) => list.append(renderQueueItem(track, index)));
     }
 
-    sheet.append(head, list);
+    sheet.append(renderSheetHandle(), head, list);
     return sheet;
   }
 
@@ -1076,7 +1087,7 @@ export function createMusicViews(deps) {
       }
     }
 
-    sheet.append(head, list);
+    sheet.append(renderSheetHandle(), head, list);
     return sheet;
   }
 
@@ -1132,7 +1143,7 @@ export function createMusicViews(deps) {
     clear.append(clearLabel, clearMeta);
     list.append(clear);
 
-    sheet.append(head, list);
+    sheet.append(renderSheetHandle(), head, list);
     return sheet;
   }
 
@@ -1150,6 +1161,7 @@ export function createMusicViews(deps) {
     } else {
       number.textContent = String(index + 1).padStart(2, "0");
     }
+    if (active) row.dataset.current = "true";
     const text = document.createElement("span");
     text.className = "music-mobile-queue-text";
     const title = document.createElement("strong");
@@ -1374,6 +1386,13 @@ export function createMusicViews(deps) {
     state.sleepSheetOpen = false;
     renderShell();
     return true;
+  }
+
+  function scheduleActiveQueueScroll() {
+    window.requestAnimationFrame(() => {
+      const active = els.viewContent.querySelector(".music-mobile-queue-sheet .music-mobile-queue-item.active");
+      active?.scrollIntoView({ block: "center" });
+    });
   }
 
   function togglePlayback() {
