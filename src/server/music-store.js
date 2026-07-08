@@ -52,6 +52,14 @@ const SMART_MIXES = [
     limit: 120
   },
   {
+    id: "topplayed",
+    name: "常听歌曲",
+    description: "按播放次数自动整理，保留真正反复听过的歌曲。",
+    badge: "常听",
+    order: "COALESCE(s.play_count, 0) DESC, COALESCE(s.last_played_at, '') DESC, t.title COLLATE NOCASE ASC",
+    limit: 200
+  },
+  {
     id: "favorites",
     name: "我喜欢",
     description: "所有已收藏歌曲，按最近收藏或更新靠前。",
@@ -1453,6 +1461,7 @@ function smartMixCondition(mixOrId) {
   const mix = typeof mixOrId === "string" ? findSmartMix(mixOrId) : mixOrId;
   if (!mix) return { where: "1 = 0", args: [] };
   if (mix.id === "recent") return { where: "COALESCE(s.last_played_at, '') <> ''", args: [] };
+  if (mix.id === "topplayed") return { where: "COALESCE(s.play_count, 0) > 0", args: [] };
   if (mix.id === "favorites") return { where: "COALESCE(s.favorite, 0) = 1", args: [] };
   if (mix.id === "toprated") return { where: "COALESCE(s.rating, 0) >= 4", args: [] };
   if (mix.id === "unrated") return { where: "COALESCE(s.rating, 0) = 0", args: [] };
