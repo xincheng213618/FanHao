@@ -9816,7 +9816,19 @@ body.music-view .work-grid {
   font-weight: 750;
 }
 
-.music-sleep-wrap select {
+.music-speed-wrap {
+  display: grid;
+  grid-template-columns: auto minmax(70px, max-content);
+  gap: 8px;
+  align-items: center;
+  min-width: 118px;
+  color: rgba(237, 244, 240, .52);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.music-sleep-wrap select,
+.music-speed-wrap select {
   width: 100%;
   min-width: 0;
   height: 34px;
@@ -9828,7 +9840,8 @@ body.music-view .work-grid {
   font: inherit;
 }
 
-.music-sleep-wrap select:disabled {
+.music-sleep-wrap select:disabled,
+.music-speed-wrap select:disabled {
   opacity: .62;
 }
 
@@ -10169,7 +10182,8 @@ body.music-view .work-grid {
   }
 
   .music-volume-wrap,
-  .music-sleep-wrap {
+  .music-sleep-wrap,
+  .music-speed-wrap {
     flex: 1 1 100%;
     min-width: 0;
   }

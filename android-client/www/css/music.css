@@ -999,6 +999,11 @@
   accent-color: var(--green);
 }
 
+.music-mobile-playback-settings {
+  display: grid;
+  gap: 8px;
+}
+
 .music-mobile-volume {
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr) 42px;
@@ -1020,6 +1025,24 @@
 .music-mobile-volume input {
   width: 100%;
   accent-color: var(--green);
+}
+
+.music-mobile-volume select {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--field);
+  color: var(--ink);
+  padding: 0 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.music-mobile-volume select:disabled {
+  opacity: 0.5;
 }
 
 .music-mobile-progress.mini {

@@ -1,8 +1,10 @@
 const MUSIC_SLEEP_TIMER_OPTIONS = [0, 10, 15, 30, 45, 60, 90];
+const MUSIC_PLAYBACK_SPEED_OPTIONS = [0.75, 1, 1.25, 1.5, 2];
 const DESKTOP_QUEUE_PREVIEW_LIMIT = 24;
 const MUSIC_KEYBOARD_SEEK_SECONDS = 5;
 const MUSIC_KEYBOARD_FAST_SEEK_SECONDS = 15;
 const MUSIC_LAST_TRACK_KEY = "fanhao.music.lastTrack";
+const MUSIC_PLAYBACK_SPEED_KEY = "fanhao.music.playbackSpeed";
 
 export function createMusicPage(deps) {
   const {
@@ -66,6 +68,7 @@ export function createMusicPage(deps) {
     state.music.playing = Boolean(state.music.playing);
     state.music.status = state.music.status || "";
     state.music.volume = readVolumePreference();
+    state.music.playbackSpeed = normalizePlaybackSpeed(state.music.playbackSpeed ?? readPlaybackSpeedPreference());
     state.music.repeat = normalizeRepeat(readRepeatPreference());
     state.music.shuffle = readShufflePreference();
     state.music.sleepMinutes = normalizeSleepTimerMinutes(state.music.sleepMinutes);
@@ -90,6 +93,7 @@ export function createMusicPage(deps) {
       audio = new Audio();
       audio.preload = "metadata";
       audio.volume = readVolumePreference();
+      audio.playbackRate = normalizePlaybackSpeed(state.music?.playbackSpeed ?? readPlaybackSpeedPreference());
     }
     if (audioEventsInstalled) return;
     audioEventsInstalled = true;
@@ -279,6 +283,7 @@ export function createMusicPage(deps) {
   function loadAudioTrack(track, autoplay) {
     ensureAudio();
     const target = new URL(track.streamUrl, window.location.href).href;
+    audio.playbackRate = normalizePlaybackSpeed(state.music.playbackSpeed);
     if (audio.src !== target) {
       audio.src = target;
       audio.load();
@@ -1218,6 +1223,7 @@ export function createMusicPage(deps) {
     options.append(controlButton("+", () => addTrackToPlaylist(track.id).catch(showError), !track, "", "加入歌单"));
     options.append(controlButton("↓", () => downloadTrack(track), !track?.downloadUrl, "", "下载原文件"));
     options.append(renderSleepTimerControl(track));
+    options.append(renderPlaybackSpeedControl(track));
     const volumeWrap = document.createElement("label");
     volumeWrap.className = "music-volume-wrap";
     const volumeLabel = document.createElement("span");
@@ -1241,6 +1247,26 @@ export function createMusicPage(deps) {
     bar.append(identity, center, options);
     currentProgressEls = { current, progress, total, playButton };
     return bar;
+  }
+
+  function renderPlaybackSpeedControl(track) {
+    const wrap = document.createElement("label");
+    wrap.className = "music-speed-wrap";
+    wrap.setAttribute("aria-label", "播放速度");
+    const label = document.createElement("span");
+    label.textContent = "速度";
+    const select = document.createElement("select");
+    select.disabled = !track;
+    for (const speed of MUSIC_PLAYBACK_SPEED_OPTIONS) {
+      const option = document.createElement("option");
+      option.value = String(speed);
+      option.textContent = playbackSpeedLabel(speed);
+      select.append(option);
+    }
+    select.value = String(normalizePlaybackSpeed(state.music.playbackSpeed));
+    select.addEventListener("change", () => setPlaybackSpeed(Number(select.value || 1)));
+    wrap.append(label, select);
+    return wrap;
   }
 
   function renderSleepTimerControl(track) {
@@ -1449,6 +1475,15 @@ export function createMusicPage(deps) {
     state.music.status = `将在 ${normalized} 分钟后暂停`;
     scheduleSleepTimer();
     renderView();
+  }
+
+  function setPlaybackSpeed(value) {
+    const speed = normalizePlaybackSpeed(value);
+    state.music.playbackSpeed = speed;
+    ensureAudio();
+    audio.playbackRate = speed;
+    writePlaybackSpeedPreference(speed);
+    updatePlaybackUi();
   }
 
   function scheduleSleepTimer() {
@@ -2344,6 +2379,31 @@ function writeVolumePreference(value) {
   try {
     window.localStorage?.setItem("fanhao.music.volume", String(value));
   } catch {}
+}
+
+function readPlaybackSpeedPreference() {
+  try {
+    return normalizePlaybackSpeed(window.localStorage?.getItem(MUSIC_PLAYBACK_SPEED_KEY));
+  } catch {
+    return 1;
+  }
+}
+
+function writePlaybackSpeedPreference(value) {
+  try {
+    window.localStorage?.setItem(MUSIC_PLAYBACK_SPEED_KEY, String(normalizePlaybackSpeed(value)));
+  } catch {}
+}
+
+function normalizePlaybackSpeed(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 1;
+  const match = MUSIC_PLAYBACK_SPEED_OPTIONS.find((option) => Math.abs(option - numeric) < 0.001);
+  return match || 1;
+}
+
+function playbackSpeedLabel(value) {
+  return `${normalizePlaybackSpeed(value)}x`;
 }
 
 function readRepeatPreference() {

@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-32";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-33";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -9,7 +9,9 @@ const MUSIC_VOLUME_KEY = "fanhao.android.music.volume";
 const MUSIC_REPEAT_KEY = "fanhao.android.music.repeat";
 const MUSIC_SHUFFLE_KEY = "fanhao.android.music.shuffle";
 const MUSIC_LAST_TRACK_KEY = "fanhao.android.music.lastTrack";
+const MUSIC_PLAYBACK_SPEED_KEY = "fanhao.android.music.playbackSpeed";
 const SLEEP_TIMER_OPTIONS = [0, 10, 15, 30, 45, 60, 90];
+const PLAYBACK_SPEED_OPTIONS = [0.75, 1, 1.25, 1.5, 2];
 
 export function createMusicViews(deps) {
   const {
@@ -53,6 +55,7 @@ export function createMusicViews(deps) {
     repeat: readRepeatPreference(),
     shuffle: readShufflePreference(),
     volume: readVolumePreference(),
+    playbackSpeed: readPlaybackSpeedPreference(),
     sleepMinutes: 0,
     sleepUntil: 0,
     playReportedTrackId: "",
@@ -236,6 +239,7 @@ export function createMusicViews(deps) {
       audio.src = target;
       audio.load();
     }
+    audio.playbackRate = state.playbackSpeed;
     if (autoplay) playAudio();
   }
 
@@ -244,6 +248,7 @@ export function createMusicViews(deps) {
       audio = new Audio();
       audio.preload = "metadata";
       audio.volume = state.volume;
+      audio.playbackRate = state.playbackSpeed;
     }
     installMediaSessionHandlers();
     if (audioEventsInstalled) return;
@@ -304,13 +309,7 @@ export function createMusicViews(deps) {
     updatePlaybackUi();
     if (state.fullscreen) updateLyricHighlight(true);
     if (state.pendingCurrentReveal && !state.loading && !state.fullscreen) {
-      window.requestAnimationFrame(() => {
-        state.pendingCurrentReveal = false;
-        if (!revealCurrentTrack()) {
-          state.status = "当前歌曲不在当前列表";
-          els.viewMeta.textContent = state.status;
-        }
-      });
+      schedulePendingCurrentReveal();
     }
   }
 
@@ -882,7 +881,7 @@ export function createMusicViews(deps) {
     controls.append(shuffle, prev, play, next, repeat, queue);
 
     const progress = renderProgress("full", track, play);
-    full.append(top, switcher, stage, progress, renderVolumeControl(track), controls);
+    full.append(top, switcher, stage, progress, renderPlaybackSettings(track), controls);
     if (state.queueOpen || state.playlistSheetOpen || state.sleepSheetOpen) full.append(renderSheetBackdrop());
     if (state.queueOpen) {
       full.append(renderQueueSheet());
@@ -1338,6 +1337,38 @@ export function createMusicViews(deps) {
     return wrap;
   }
 
+  function renderPlaybackSettings(track) {
+    const wrap = document.createElement("div");
+    wrap.className = "music-mobile-playback-settings";
+    wrap.append(renderPlaybackSpeedControl(track), renderVolumeControl(track));
+    return wrap;
+  }
+
+  function renderPlaybackSpeedControl(track) {
+    const wrap = document.createElement("label");
+    wrap.className = "music-mobile-volume music-mobile-speed";
+    wrap.setAttribute("aria-label", "播放速度");
+    const label = document.createElement("span");
+    label.textContent = "速度";
+    const select = document.createElement("select");
+    select.disabled = !track;
+    for (const speed of PLAYBACK_SPEED_OPTIONS) {
+      const option = document.createElement("option");
+      option.value = String(speed);
+      option.textContent = playbackSpeedLabel(speed);
+      select.append(option);
+    }
+    select.value = String(normalizePlaybackSpeed(state.playbackSpeed));
+    select.addEventListener("change", () => setPlaybackSpeed(Number(select.value || 1)));
+    const value = document.createElement("em");
+    value.textContent = playbackSpeedLabel(state.playbackSpeed);
+    select.addEventListener("change", () => {
+      value.textContent = playbackSpeedLabel(state.playbackSpeed);
+    });
+    wrap.append(label, select, value);
+    return wrap;
+  }
+
   function bindProgress(binding) {
     progressBindings.push(binding);
   }
@@ -1469,6 +1500,18 @@ export function createMusicViews(deps) {
     return true;
   }
 
+  function schedulePendingCurrentReveal() {
+    state.pendingCurrentReveal = false;
+    window.setTimeout(() => {
+      window.requestAnimationFrame(() => {
+        if (!revealCurrentTrack()) {
+          state.status = "当前歌曲不在当前列表";
+          els.viewMeta.textContent = state.status;
+        }
+      });
+    }, 520);
+  }
+
   function closeFullscreen() {
     if (state.sleepSheetOpen) {
       state.sleepSheetOpen = false;
@@ -1534,6 +1577,15 @@ export function createMusicViews(deps) {
     ensureAudio();
     audio.volume = state.volume;
     writeVolumePreference(state.volume);
+  }
+
+  function setPlaybackSpeed(value) {
+    const speed = normalizePlaybackSpeed(value);
+    state.playbackSpeed = speed;
+    ensureAudio();
+    audio.playbackRate = speed;
+    writePlaybackSpeedPreference(speed);
+    updatePlaybackUi();
   }
 
   function setSleepTimer(minutes) {
@@ -2353,6 +2405,31 @@ function writeVolumePreference(value) {
   try {
     window.localStorage?.setItem(MUSIC_VOLUME_KEY, String(Math.max(0, Math.min(1, Number(value || 0)))));
   } catch {}
+}
+
+function readPlaybackSpeedPreference() {
+  try {
+    return normalizePlaybackSpeed(window.localStorage?.getItem(MUSIC_PLAYBACK_SPEED_KEY));
+  } catch {
+    return 1;
+  }
+}
+
+function writePlaybackSpeedPreference(value) {
+  try {
+    window.localStorage?.setItem(MUSIC_PLAYBACK_SPEED_KEY, String(normalizePlaybackSpeed(value)));
+  } catch {}
+}
+
+function normalizePlaybackSpeed(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 1;
+  const match = PLAYBACK_SPEED_OPTIONS.find((option) => Math.abs(option - numeric) < 0.001);
+  return match || 1;
+}
+
+function playbackSpeedLabel(value) {
+  return `${normalizePlaybackSpeed(value)}x`;
 }
 
 function readRepeatPreference() {
