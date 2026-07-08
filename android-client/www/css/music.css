@@ -179,6 +179,16 @@
   font-weight: 950;
 }
 
+.music-mobile-text-button.danger {
+  border-color: transparent;
+  background: var(--warning-soft);
+  color: var(--orange);
+}
+
+.music-mobile-text-button:disabled {
+  opacity: 0.45;
+}
+
 .music-mobile-smart-scroll {
   display: flex;
   min-width: 0;
@@ -1081,6 +1091,18 @@
   color: var(--muted);
   font-size: 12px;
   font-weight: 850;
+}
+
+.music-mobile-queue-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: end;
+  min-width: 0;
+  gap: 6px;
+}
+
+.music-mobile-queue-head-actions small {
+  white-space: nowrap;
 }
 
 .music-mobile-queue-list {

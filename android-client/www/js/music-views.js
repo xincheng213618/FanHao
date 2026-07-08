@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-28";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-29";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -1054,11 +1054,20 @@ export function createMusicViews(deps) {
     title.textContent = "播放队列";
     const meta = document.createElement("small");
     meta.textContent = `${formatNumber(state.queue.length || 0)} 首`;
+    const actions = document.createElement("span");
+    actions.className = "music-mobile-queue-head-actions";
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "music-mobile-text-button danger";
+    clear.textContent = "清空";
+    clear.disabled = queueRemovableCount() <= 0;
+    clear.addEventListener("click", () => clearQueueExceptCurrent());
+    actions.append(meta, clear);
     const close = iconButton("×", () => {
       state.queueOpen = false;
       renderShell();
     }, false, "ghost", "关闭队列");
-    head.append(title, meta, close);
+    head.append(title, actions, close);
     attachSheetDismissSwipe(head);
 
     const list = document.createElement("div");
@@ -1624,6 +1633,24 @@ export function createMusicViews(deps) {
     state.queue = queue.filter((item) => item.id !== trackId);
     state.status = removed ? `已移出队列「${removed.title || "歌曲"}」` : "已更新队列";
     renderShell();
+  }
+
+  function clearQueueExceptCurrent() {
+    const queue = Array.isArray(state.queue) ? state.queue : [];
+    const keep = state.current ? (queue.find((item) => item.id === state.current.id) || state.current) : null;
+    const removable = queueRemovableCount();
+    if (removable <= 0) return;
+    const ok = window.confirm(`清空队列中的其他 ${formatNumber(removable)} 首歌曲？`);
+    if (!ok) return;
+    state.queue = keep ? [keep] : [];
+    state.status = keep ? "已清空其他队列歌曲" : "已清空播放队列";
+    renderShell();
+  }
+
+  function queueRemovableCount() {
+    const queue = Array.isArray(state.queue) ? state.queue : [];
+    if (!state.current) return queue.length;
+    return queue.filter((item) => item.id !== state.current.id).length;
   }
 
   async function toggleFavorite(trackId) {

@@ -1,5 +1,7 @@
 const MUSIC_SLEEP_TIMER_OPTIONS = [0, 10, 15, 30, 45, 60, 90];
 const DESKTOP_QUEUE_PREVIEW_LIMIT = 24;
+const MUSIC_KEYBOARD_SEEK_SECONDS = 5;
+const MUSIC_KEYBOARD_FAST_SEEK_SECONDS = 15;
 
 export function createMusicPage(deps) {
   const {
@@ -29,6 +31,7 @@ export function createMusicPage(deps) {
   let sleepTimerTimeout = 0;
   let sleepTimerInterval = 0;
   let mediaSessionInstalled = false;
+  let keyboardShortcutsInstalled = false;
 
   function ensureState() {
     if (!state.music) state.music = {};
@@ -77,6 +80,7 @@ export function createMusicPage(deps) {
     state.music.playlistDialogTrackId = state.music.playlistDialogTrackId || "";
     state.music.playlistDialogName = state.music.playlistDialogName || "";
     ensureAudio();
+    installKeyboardShortcuts();
   }
 
   function ensureAudio() {
@@ -1399,6 +1403,31 @@ export function createMusicPage(deps) {
     });
   }
 
+  function installKeyboardShortcuts() {
+    if (keyboardShortcutsInstalled) return;
+    keyboardShortcutsInstalled = true;
+    window.addEventListener("keydown", handleKeyboardShortcut);
+  }
+
+  function handleKeyboardShortcut(event) {
+    if (event.defaultPrevented || state.activeView !== "music" || state.music.playlistDialogOpen) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (isKeyboardShortcutTarget(event.target)) return;
+
+    if (event.code === "Space" || event.key === " " || event.key === "Space" || event.key === "Spacebar") {
+      event.preventDefault();
+      if (!event.repeat) togglePlayback();
+      return;
+    }
+
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      if (!state.music.current) return;
+      event.preventDefault();
+      const step = event.shiftKey ? MUSIC_KEYBOARD_FAST_SEEK_SECONDS : MUSIC_KEYBOARD_SEEK_SECONDS;
+      seekRelative(event.key === "ArrowLeft" ? -step : step);
+    }
+  }
+
   function setSleepTimer(minutes) {
     const normalized = normalizeSleepTimerMinutes(minutes);
     clearSleepTimerHandle();
@@ -2210,6 +2239,11 @@ function playAriaLabel(playing) {
 function normalizeSleepTimerMinutes(value) {
   const minutes = Math.round(Number(value || 0));
   return MUSIC_SLEEP_TIMER_OPTIONS.includes(minutes) ? minutes : 0;
+}
+
+function isKeyboardShortcutTarget(target) {
+  if (!target || typeof target.closest !== "function") return false;
+  return Boolean(target.closest("input, textarea, select, button, a, [contenteditable='true']"));
 }
 
 function readVolumePreference() {
