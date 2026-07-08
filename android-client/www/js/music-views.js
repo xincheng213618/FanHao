@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-26";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-27";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -46,6 +46,7 @@ export function createMusicViews(deps) {
     searchOpen: false,
     fullscreen: false,
     fullPanel: "lyrics",
+    lyricFollowPaused: false,
     queueOpen: false,
     playlistSheetOpen: false,
     sleepSheetOpen: false,
@@ -200,6 +201,8 @@ export function createMusicViews(deps) {
       state.loading = false;
       state.status = "";
       state.playReportedTrackId = "";
+      state.lyricFollowPaused = false;
+      currentLyricIndex = -1;
       mergeTrackIntoQueue(data.track);
       rememberLastTrack(data.track);
       if (state.fullscreen && !hasLyrics()) state.fullPanel = "cover";
@@ -971,6 +974,7 @@ export function createMusicViews(deps) {
     const next = normalizeFullPanel(panel, state.current || state.queue[0] || null);
     if (state.fullPanel === next) return;
     state.fullPanel = next;
+    if (next === "lyrics") state.lyricFollowPaused = false;
     renderShell();
     if (next === "lyrics") updateLyricHighlight(true);
   }
@@ -1005,7 +1009,18 @@ export function createMusicViews(deps) {
         lines.append(p);
       });
     }
+    const follow = document.createElement("button");
+    follow.type = "button";
+    follow.className = `music-mobile-lyric-follow${state.lyricFollowPaused ? " visible" : ""}`;
+    follow.textContent = "回到当前";
+    follow.addEventListener("click", () => resumeLyricFollow());
+    if (track && lyricLines.length) {
+      const pauseFollow = () => pauseLyricFollow(follow);
+      lines.addEventListener("touchstart", pauseFollow, { passive: true });
+      lines.addEventListener("wheel", pauseFollow, { passive: true });
+    }
     lyrics.append(lines);
+    if (track && lyricLines.length) lyrics.append(follow);
     return lyrics;
   }
 
@@ -1351,6 +1366,7 @@ export function createMusicViews(deps) {
 
   function openFullscreen() {
     state.fullPanel = hasLyrics() ? "lyrics" : "cover";
+    state.lyricFollowPaused = false;
     state.fullscreen = true;
     renderShell();
   }
@@ -1532,6 +1548,8 @@ export function createMusicViews(deps) {
     ensureAudio();
     const nextTime = Math.max(0, Number(timeMs || 0) / 1000);
     if (!Number.isFinite(nextTime)) return;
+    state.lyricFollowPaused = false;
+    els.viewContent.querySelector(".music-mobile-lyric-follow")?.classList.remove("visible");
     audio.currentTime = nextTime;
     updatePlaybackUi();
     updateLyricHighlight(true);
@@ -1872,9 +1890,22 @@ export function createMusicViews(deps) {
       for (const item of els.viewContent.querySelectorAll(".music-mobile-full-lyric-lines [data-index]")) {
         const active = Number(item.dataset.index || -1) === index;
         item.classList.toggle("active", active);
-        if (active) item.scrollIntoView({ block: "center", behavior: "smooth" });
+        if (active && (!state.lyricFollowPaused || force)) item.scrollIntoView({ block: "center", behavior: "smooth" });
       }
     });
+  }
+
+  function pauseLyricFollow(button = null) {
+    if (state.lyricFollowPaused || !hasLyrics()) return;
+    state.lyricFollowPaused = true;
+    button?.classList.add("visible");
+  }
+
+  function resumeLyricFollow() {
+    state.lyricFollowPaused = false;
+    const button = els.viewContent.querySelector(".music-mobile-lyric-follow");
+    button?.classList.remove("visible");
+    updateLyricHighlight(true);
   }
 
   function hasLyrics() {

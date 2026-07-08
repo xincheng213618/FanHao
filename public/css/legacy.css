@@ -9491,9 +9491,38 @@ body.music-view .work-grid {
   justify-content: space-between;
 }
 
+.music-queue-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.music-queue-title small {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(237, 244, 240, .46);
+  font-size: 11px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-queue-head-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  align-items: center;
+}
+
 .music-queue-head .music-inline-button {
   min-height: 28px;
   padding: 0 8px;
+}
+
+.music-queue-list.expanded {
+  max-height: min(48vh, 520px);
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .music-queue-row {

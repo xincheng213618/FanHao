@@ -805,6 +805,7 @@
 }
 
 .music-mobile-full-lyrics {
+  position: relative;
   height: 100%;
   min-height: 0;
   overflow: hidden;
@@ -872,6 +873,32 @@
   color: var(--ink);
   font-size: 20px;
   font-weight: 950;
+}
+
+.music-mobile-lyric-follow {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  z-index: 1;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 14px;
+  background: var(--surface-raised);
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 950;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(6px);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.16);
+}
+
+.music-mobile-lyric-follow.visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%);
 }
 
 .music-mobile-progress {

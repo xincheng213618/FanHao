@@ -1,4 +1,5 @@
 const MUSIC_SLEEP_TIMER_OPTIONS = [0, 10, 15, 30, 45, 60, 90];
+const DESKTOP_QUEUE_PREVIEW_LIMIT = 24;
 
 export function createMusicPage(deps) {
   const {
@@ -52,6 +53,7 @@ export function createMusicPage(deps) {
     state.music.current = state.music.current || null;
     state.music.lyrics = state.music.lyrics || { raw: "", lines: [] };
     state.music.queue = Array.isArray(state.music.queue) ? state.music.queue : [];
+    state.music.queueExpanded = Boolean(state.music.queueExpanded);
     state.music.prevId = state.music.prevId || "";
     state.music.nextId = state.music.nextId || "";
     state.music.loading = Boolean(state.music.loading);
@@ -1030,28 +1032,67 @@ export function createMusicPage(deps) {
   function renderQueuePanel() {
     const panel = document.createElement("div");
     panel.className = "music-queue";
+    const queue = state.music.queue || [];
     const head = document.createElement("div");
     head.className = "music-queue-head";
+    const titleWrap = document.createElement("span");
+    titleWrap.className = "music-queue-title";
     const title = document.createElement("strong");
     title.textContent = "播放队列";
+    const count = document.createElement("small");
+    count.textContent = queue.length ? `${formatNumber(queue.length)} 首${state.music.queueExpanded ? " · 全部" : ""}` : "空队列";
+    titleWrap.append(title, count);
+    const actions = document.createElement("span");
+    actions.className = "music-queue-head-actions";
+    if (queue.length > DESKTOP_QUEUE_PREVIEW_LIMIT) {
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "music-inline-button";
+      toggle.textContent = state.music.queueExpanded ? "精简" : "全部";
+      toggle.title = state.music.queueExpanded ? "只显示队列摘要" : "显示完整队列";
+      toggle.addEventListener("click", () => {
+        state.music.queueExpanded = !state.music.queueExpanded;
+        renderView();
+      });
+      actions.append(toggle);
+    }
     const clear = document.createElement("button");
     clear.type = "button";
     clear.className = "music-inline-button";
     clear.textContent = "清空";
     clear.disabled = !queueCanClear();
     clear.addEventListener("click", clearQueueAfterCurrent);
-    head.append(title, clear);
+    actions.append(clear);
+    head.append(titleWrap, actions);
     const list = document.createElement("div");
-    list.className = "music-queue-list";
-    const queue = state.music.queue || [];
+    list.className = `music-queue-list${state.music.queueExpanded ? " expanded" : ""}`;
     if (!queue.length) {
       list.append(emptyQueueRow("队列为空"));
     } else {
-      queue.slice(0, 24).forEach((track, index) => list.append(queueRow(track, index)));
-      if (queue.length > 24) list.append(emptyQueueRow(`还有 ${formatNumber(queue.length - 24)} 首未显示`));
+      appendQueueRows(list, queue);
     }
     panel.append(head, list);
     return panel;
+  }
+
+  function appendQueueRows(list, queue) {
+    if (state.music.queueExpanded || queue.length <= DESKTOP_QUEUE_PREVIEW_LIMIT) {
+      queue.forEach((track, index) => list.append(queueRow(track, index)));
+      return;
+    }
+    const shownIndexes = new Set();
+    queue.slice(0, DESKTOP_QUEUE_PREVIEW_LIMIT).forEach((track, index) => {
+      shownIndexes.add(index);
+      list.append(queueRow(track, index));
+    });
+    const currentIndex = queue.findIndex((track) => track.id === state.music.current?.id);
+    if (currentIndex >= DESKTOP_QUEUE_PREVIEW_LIMIT) {
+      shownIndexes.add(currentIndex);
+      list.append(emptyQueueRow(`当前播放在第 ${formatNumber(currentIndex + 1)} 首`));
+      list.append(queueRow(queue[currentIndex], currentIndex));
+    }
+    const hiddenCount = queue.length - shownIndexes.size;
+    if (hiddenCount > 0) list.append(emptyQueueRow(`还有 ${formatNumber(hiddenCount)} 首未显示，点“全部”查看`));
   }
 
   function queueRow(track, index) {
