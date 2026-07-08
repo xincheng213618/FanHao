@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-27";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-28";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -855,7 +855,7 @@ export function createMusicViews(deps) {
     }
     if (state.playlistSheetOpen) full.append(renderPlaylistSheet());
     if (state.sleepSheetOpen) full.append(renderSleepTimerSheet());
-    if (panel === "lyrics") window.requestAnimationFrame(() => updateLyricHighlight(true));
+    if (hasLyrics()) window.requestAnimationFrame(() => updateLyricHighlight(true));
     return full;
   }
 
@@ -984,11 +984,29 @@ export function createMusicViews(deps) {
     coverStage.className = "music-mobile-full-cover-stage";
     coverStage.append(renderCover(track || { title: "音乐" }, "cover"));
 
+    const lyricPeek = renderCoverLyricPeek(track);
     const rating = renderRatingControl(track);
     const panel = document.createElement("div");
     panel.className = "music-mobile-full-cover-panel";
-    panel.append(coverStage, rating);
+    panel.append(coverStage, lyricPeek, rating);
     return panel;
+  }
+
+  function renderCoverLyricPeek(track) {
+    const peek = document.createElement("button");
+    peek.type = "button";
+    peek.className = "music-mobile-cover-lyric";
+    peek.disabled = !track || !hasLyrics();
+    peek.setAttribute("aria-label", "打开完整歌词");
+    peek.addEventListener("click", () => switchFullPanel("lyrics"));
+
+    const current = document.createElement("strong");
+    const next = document.createElement("small");
+    const pair = lyricPair(currentLyricIndex);
+    current.textContent = pair.current || (track && hasLyrics() ? "歌词准备中" : "暂无歌词");
+    next.textContent = pair.next || trackMeta(track || {});
+    peek.append(current, next);
+    return peek;
   }
 
   function renderFullLyricsPanel(track) {
@@ -1874,7 +1892,7 @@ export function createMusicViews(deps) {
   }
 
   function updateLyricHighlight(force = false) {
-    if (!state.fullscreen || state.fullPanel !== "lyrics" || lyricRaf) return;
+    if (!state.fullscreen || lyricRaf) return;
     lyricRaf = window.requestAnimationFrame(() => {
       lyricRaf = 0;
       const lines = state.lyrics?.lines || [];
@@ -1887,12 +1905,37 @@ export function createMusicViews(deps) {
       }
       if (!force && index === currentLyricIndex) return;
       currentLyricIndex = index;
-      for (const item of els.viewContent.querySelectorAll(".music-mobile-full-lyric-lines [data-index]")) {
-        const active = Number(item.dataset.index || -1) === index;
-        item.classList.toggle("active", active);
-        if (active && (!state.lyricFollowPaused || force)) item.scrollIntoView({ block: "center", behavior: "smooth" });
+      updateCoverLyricPeek(index);
+      if (state.fullPanel === "lyrics") {
+        for (const item of els.viewContent.querySelectorAll(".music-mobile-full-lyric-lines [data-index]")) {
+          const active = Number(item.dataset.index || -1) === index;
+          item.classList.toggle("active", active);
+          if (active && (!state.lyricFollowPaused || force)) item.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
       }
     });
+  }
+
+  function updateCoverLyricPeek(index) {
+    const peek = els.viewContent.querySelector(".music-mobile-cover-lyric");
+    if (!peek) return;
+    const pair = lyricPair(index);
+    const current = peek.querySelector("strong");
+    const next = peek.querySelector("small");
+    if (current) current.textContent = pair.current || "暂无歌词";
+    if (next) next.textContent = pair.next || trackMeta(state.current || {});
+  }
+
+  function lyricPair(index) {
+    const lines = state.lyrics?.lines || [];
+    if (!lines.length) return { current: "", next: "" };
+    const safeIndex = Math.max(0, Math.min(lines.length - 1, Number(index || 0)));
+    const current = String(lines[safeIndex]?.text || "").trim();
+    const nextLine = lines.slice(safeIndex + 1).find((line) => String(line?.text || "").trim());
+    return {
+      current,
+      next: String(nextLine?.text || "").trim()
+    };
   }
 
   function pauseLyricFollow(button = null) {

@@ -52,6 +52,7 @@ export function createMusicPage(deps) {
     state.music.activeSmartPlaylist = state.music.activeSmartPlaylist || null;
     state.music.current = state.music.current || null;
     state.music.lyrics = state.music.lyrics || { raw: "", lines: [] };
+    state.music.lyricFollowPaused = Boolean(state.music.lyricFollowPaused);
     state.music.queue = Array.isArray(state.music.queue) ? state.music.queue : [];
     state.music.queueExpanded = Boolean(state.music.queueExpanded);
     state.music.prevId = state.music.prevId || "";
@@ -256,6 +257,8 @@ export function createMusicPage(deps) {
     state.music.loading = false;
     state.music.status = "";
     state.music.playReportedTrackId = "";
+    state.music.lyricFollowPaused = false;
+    currentLyricIndex = -1;
     if (!state.music.queue.length || !state.music.queue.some((track) => track.id === data.track.id)) {
       state.music.queue = [data.track];
     }
@@ -313,7 +316,7 @@ export function createMusicPage(deps) {
     shell.append(renderHero(), renderLibraryLayout(), renderPlayerBar(), renderPlaylistDialog());
     els.workGrid.append(shell);
     updatePlaybackUi();
-    updateLyricHighlight(true);
+    updateLyricHighlight(!state.music.lyricFollowPaused);
   }
 
   function renderHero() {
@@ -1007,8 +1010,11 @@ export function createMusicPage(deps) {
   function renderLyricPanel() {
     const wrap = document.createElement("div");
     wrap.className = "music-lyrics";
+    const head = document.createElement("div");
+    head.className = "music-lyric-head";
     const title = document.createElement("strong");
     title.textContent = "歌词";
+    head.append(title);
     const lines = document.createElement("div");
     lines.className = "music-lyric-lines";
     const lyricLines = state.music.lyrics?.lines || [];
@@ -1018,14 +1024,24 @@ export function createMusicPage(deps) {
       lines.append(empty);
     } else {
       lyricLines.slice(0, 120).forEach((line, index) => {
-        const p = document.createElement("p");
-        p.dataset.index = String(index);
-        p.dataset.timeMs = String(line.timeMs || 0);
-        p.textContent = line.text || "";
-        lines.append(p);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.index = String(index);
+        button.dataset.timeMs = String(line.timeMs || 0);
+        button.textContent = line.text || "";
+        button.addEventListener("click", () => seekToLyricLine(line.timeMs || 0));
+        lines.append(button);
       });
+      const follow = document.createElement("button");
+      follow.type = "button";
+      follow.className = `music-lyric-follow${state.music.lyricFollowPaused ? " visible" : ""}`;
+      follow.textContent = "回到当前";
+      follow.addEventListener("click", resumeLyricFollow);
+      head.append(follow);
+      lines.addEventListener("wheel", () => pauseLyricFollow(follow), { passive: true });
+      lines.addEventListener("pointerdown", () => pauseLyricFollow(follow), { passive: true });
     }
-    wrap.append(title, lines);
+    wrap.append(head, lines);
     return wrap;
   }
 
@@ -1975,6 +1991,30 @@ export function createMusicPage(deps) {
     return null;
   }
 
+  function seekToLyricLine(timeMs) {
+    ensureAudio();
+    const nextTime = Math.max(0, Number(timeMs || 0) / 1000);
+    if (!Number.isFinite(nextTime)) return;
+    state.music.lyricFollowPaused = false;
+    document.querySelector(".music-lyric-follow")?.classList.remove("visible");
+    audio.currentTime = nextTime;
+    updatePlaybackUi();
+    updateLyricHighlight(true);
+    saveProgressSoon();
+  }
+
+  function pauseLyricFollow(button = null) {
+    if (state.music.lyricFollowPaused || !(state.music.lyrics?.lines || []).length) return;
+    state.music.lyricFollowPaused = true;
+    button?.classList.add("visible");
+  }
+
+  function resumeLyricFollow() {
+    state.music.lyricFollowPaused = false;
+    document.querySelector(".music-lyric-follow")?.classList.remove("visible");
+    updateLyricHighlight(true);
+  }
+
   function updateLyricHighlight(force = false) {
     if (lyricRaf) return;
     lyricRaf = window.requestAnimationFrame(() => {
@@ -1989,10 +2029,10 @@ export function createMusicPage(deps) {
       }
       if (!force && index === currentLyricIndex) return;
       currentLyricIndex = index;
-      for (const item of document.querySelectorAll(".music-lyric-lines p")) {
+      for (const item of document.querySelectorAll(".music-lyric-lines [data-index]")) {
         const active = Number(item.dataset.index || -1) === index;
         item.classList.toggle("active", active);
-        if (active) item.scrollIntoView({ block: "center", behavior: "smooth" });
+        if (active && (!state.music.lyricFollowPaused || force)) item.scrollIntoView({ block: "center", behavior: "smooth" });
       }
     });
   }

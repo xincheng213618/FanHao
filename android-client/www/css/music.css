@@ -763,7 +763,7 @@
 .music-mobile-full-cover-panel {
   display: grid;
   align-content: start;
-  gap: 18px;
+  gap: clamp(10px, 2vh, 18px);
   height: 100%;
   min-height: 0;
   min-width: 0;
@@ -774,6 +774,56 @@
   display: grid;
   min-height: 0;
   place-items: center;
+}
+
+.music-mobile-cover-lyric {
+  display: grid;
+  justify-self: center;
+  width: min(100%, 338px);
+  min-height: 66px;
+  gap: 5px;
+  align-content: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--ink);
+  text-align: center;
+  backdrop-filter: blur(14px);
+}
+
+:root[data-theme="dark"] .music-mobile-cover-lyric {
+  background: rgba(27, 32, 40, 0.7);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .music-mobile-cover-lyric {
+    background: rgba(27, 32, 40, 0.7);
+  }
+}
+
+.music-mobile-cover-lyric:disabled {
+  color: var(--muted);
+  opacity: 0.74;
+}
+
+.music-mobile-cover-lyric strong,
+.music-mobile-cover-lyric small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-mobile-cover-lyric strong {
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.music-mobile-cover-lyric small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
 }
 
 .music-mobile-rating {

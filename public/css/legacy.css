@@ -9472,16 +9472,65 @@ body.music-view .work-grid {
   padding-right: 4px;
 }
 
-.music-lyric-lines p {
+.music-lyric-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.music-lyric-lines p,
+.music-lyric-lines button {
   margin: 0;
   color: rgba(237, 244, 240, .5);
   font-size: 13px;
   line-height: 1.45;
 }
 
-.music-lyric-lines p.active {
+.music-lyric-lines button {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  padding: 3px 6px;
+  text-align: left;
+}
+
+.music-lyric-lines button:hover,
+.music-lyric-lines button:focus-visible {
+  background: rgba(255, 255, 255, .06);
+  color: rgba(237, 244, 240, .78);
+  outline: none;
+}
+
+.music-lyric-lines p.active,
+.music-lyric-lines button.active {
   color: #8ee2bd;
   font-weight: 850;
+}
+
+.music-lyric-follow {
+  display: none;
+  min-height: 28px;
+  border: 1px solid rgba(62, 218, 147, .28);
+  border-radius: 999px;
+  background: rgba(62, 218, 147, .11);
+  color: #9cf0c8;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 850;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.music-lyric-follow.visible {
+  display: inline-grid;
+  place-items: center;
 }
 
 .music-queue-head {
