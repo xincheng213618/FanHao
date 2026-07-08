@@ -1,4 +1,4 @@
-import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-04";
+import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-05";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -22,6 +22,8 @@ export function createMusicViews(deps) {
     query: "",
     sort: DEFAULT_SORT,
     favorite: false,
+    artistId: "",
+    albumId: "",
     data: null,
     summary: null,
     current: null,
@@ -70,8 +72,14 @@ export function createMusicViews(deps) {
     state.mode = normalizeMode(params.mode);
     state.query = String(params.query || params.q || "").trim();
     state.sort = normalizeSort(params.sort);
-    state.favorite = Boolean(params.favorite || params.fav);
+    state.favorite = ["1", "true", "yes"].includes(String(params.favorite || params.fav || "").trim().toLowerCase());
+    state.artistId = String(params.artistId || params.artist || "").trim();
+    state.albumId = String(params.albumId || params.album || "").trim();
     if (state.favorite) state.mode = "library";
+    if (state.mode !== "library") {
+      state.artistId = "";
+      state.albumId = "";
+    }
   }
 
   async function loadMusic(renderGuard = null) {
@@ -210,7 +218,7 @@ export function createMusicViews(deps) {
     els.viewContent.innerHTML = "";
     const shell = document.createElement("section");
     shell.className = "music-mobile-shell";
-    shell.append(renderLibraryHeader(), renderTabs(), renderControls(), renderTrackList(), renderMiniPlayer());
+    shell.append(renderLibraryHeader(), renderTabs(), renderControls(), renderFacetFilters(), renderTrackList(), renderMiniPlayer());
     if (state.fullscreen) shell.append(renderFullPlayer());
     els.viewContent.append(shell);
     document.body.classList.toggle("music-player-open", state.fullscreen);
@@ -337,6 +345,82 @@ export function createMusicViews(deps) {
     sort.addEventListener("change", () => updateListParams({ sort: sort.value }));
     wrap.append(sort);
     return wrap;
+  }
+
+  function renderFacetFilters() {
+    const wrap = document.createElement("section");
+    wrap.className = "music-mobile-facets";
+    if (state.mode !== "library") {
+      wrap.hidden = true;
+      return wrap;
+    }
+    const artists = Array.isArray(state.data?.artists) ? state.data.artists : [];
+    const albums = Array.isArray(state.data?.albums) ? state.data.albums : [];
+    if (!artists.length && !albums.length) {
+      wrap.hidden = true;
+      return wrap;
+    }
+    if (artists.length) {
+      wrap.append(renderFacetRow("歌手", artistFacetItems(artists), state.artistId, (id) => {
+        updateListParams({ artistId: id, albumId: "", mode: "library" });
+      }));
+    }
+    if (albums.length) {
+      wrap.append(renderFacetRow("专辑", albumFacetItems(albums), state.albumId, (id) => {
+        updateListParams({ albumId: id, mode: "library" });
+      }));
+    }
+    return wrap;
+  }
+
+  function renderFacetRow(label, items, activeId, onSelect) {
+    const row = document.createElement("div");
+    row.className = "music-mobile-facet-row";
+    const title = document.createElement("strong");
+    title.textContent = label;
+    const scroller = document.createElement("div");
+    scroller.className = "music-mobile-facet-scroll";
+    for (const item of items) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = item.id === activeId ? "active" : "";
+      button.textContent = item.label;
+      button.title = item.title || item.label;
+      button.addEventListener("click", () => onSelect(item.id));
+      scroller.append(button);
+    }
+    row.append(title, scroller);
+    return row;
+  }
+
+  function artistFacetItems(artists = []) {
+    return [
+      { id: "", label: "全部歌手", title: "全部歌手" },
+      ...prioritizedFacetItems(artists, state.artistId, 18).map((artist) => ({
+        id: artist.id || "",
+        label: artist.name || "未知歌手",
+        title: `${artist.name || "未知歌手"} · ${formatNumber(artist.trackCount || 0)} 首`
+      }))
+    ];
+  }
+
+  function albumFacetItems(albums = []) {
+    return [
+      { id: "", label: "全部专辑", title: "全部专辑" },
+      ...prioritizedFacetItems(albums, state.albumId, 18).map((album) => ({
+        id: album.id || "",
+        label: album.title || "未知专辑",
+        title: [album.title || "未知专辑", album.artistName || "", `${formatNumber(album.trackCount || 0)} 首`].filter(Boolean).join(" · ")
+      }))
+    ];
+  }
+
+  function prioritizedFacetItems(items = [], activeId = "", limit = 18) {
+    const clean = (Array.isArray(items) ? items : []).filter((item) => item?.id);
+    if (!activeId) return clean.slice(0, limit);
+    const selected = clean.find((item) => item.id === activeId);
+    const rest = clean.filter((item) => item.id !== activeId).slice(0, Math.max(0, limit - (selected ? 1 : 0)));
+    return selected ? [selected, ...rest] : rest;
   }
 
   function renderTrackList() {
@@ -804,6 +888,12 @@ export function createMusicViews(deps) {
     if (Object.prototype.hasOwnProperty.call(patch, "favorite")) state.favorite = Boolean(patch.favorite);
     if (Object.prototype.hasOwnProperty.call(patch, "query")) state.query = String(patch.query || "").trim();
     if (Object.prototype.hasOwnProperty.call(patch, "sort")) state.sort = normalizeSort(patch.sort);
+    if (Object.prototype.hasOwnProperty.call(patch, "artistId")) state.artistId = String(patch.artistId || "").trim();
+    if (Object.prototype.hasOwnProperty.call(patch, "albumId")) state.albumId = String(patch.albumId || "").trim();
+    if (state.mode !== "library") {
+      state.artistId = "";
+      state.albumId = "";
+    }
     if (options.resetSearch) state.searchOpen = false;
     showView("music", musicRouteParams(), {
       skipHistory: true,
@@ -824,6 +914,8 @@ export function createMusicViews(deps) {
     if (state.query) params.set("q", state.query);
     if (state.sort && state.sort !== DEFAULT_SORT) params.set("sort", state.sort);
     if (state.favorite) params.set("favorite", "1");
+    if (state.artistId) params.set("artist", state.artistId);
+    if (state.albumId) params.set("album", state.albumId);
     return params.toString();
   }
 
@@ -832,12 +924,16 @@ export function createMusicViews(deps) {
       mode: state.mode,
       ...(state.query ? { query: state.query } : {}),
       ...(state.sort !== DEFAULT_SORT ? { sort: state.sort } : {}),
-      ...(state.favorite ? { favorite: "1" } : {})
+      ...(state.favorite ? { favorite: "1" } : {}),
+      ...(state.artistId ? { artistId: state.artistId } : {}),
+      ...(state.albumId ? { albumId: state.albumId } : {})
     };
   }
 
   function musicTitle() {
     if (state.mode === "history") return "最近播放";
+    if (state.albumId) return selectedAlbumTitle() || "专辑";
+    if (state.artistId) return selectedArtistName() || "歌手";
     if (state.favorite) return "收藏歌曲";
     return "音乐";
   }
@@ -846,9 +942,11 @@ export function createMusicViews(deps) {
     const summary = data?.summary || state.summary || {};
     const total = data?.total ?? state.queue.length;
     const totals = summary.totals || {};
+    const scope = [selectedArtistName(), selectedAlbumTitle()].filter(Boolean).join(" · ");
     if (state.loading) return state.status || "正在读取";
     if (state.mode === "history") return `${formatNumber(total || 0)} 首 · 最近播放`;
-    if (state.favorite) return `${formatNumber(total || 0)} 首 · 收藏`;
+    if (state.favorite) return `${formatNumber(total || 0)} 首 · 收藏${scope ? ` · ${scope}` : ""}`;
+    if (scope) return `${formatNumber(total || 0)} 首 · ${scope}`;
     if (totals.tracks) {
       return `${formatCompact(totals.tracks)} 首 · ${formatCompact(totals.albums)} 专辑 · ${formatBytes(totals.bytes || 0)}`;
     }
@@ -862,8 +960,21 @@ export function createMusicViews(deps) {
   function emptyMessage() {
     if (state.mode === "history") return "还没有最近播放";
     if (state.favorite) return "还没有收藏歌曲";
+    if (state.artistId || state.albumId) return "这个筛选下没有歌曲";
     if (state.query) return "没有匹配的歌曲";
     return "这里还没有音乐";
+  }
+
+  function selectedArtistName() {
+    if (!state.artistId) return "";
+    const artists = Array.isArray(state.data?.artists) ? state.data.artists : [];
+    return artists.find((artist) => artist.id === state.artistId)?.name || "";
+  }
+
+  function selectedAlbumTitle() {
+    if (!state.albumId) return "";
+    const albums = Array.isArray(state.data?.albums) ? state.data.albums : [];
+    return albums.find((album) => album.id === state.albumId)?.title || "";
   }
 
   function installLifecycle() {
