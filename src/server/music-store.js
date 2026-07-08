@@ -499,11 +499,31 @@ export function createMusicStore(options = {}) {
   function createPlaylist(input = {}) {
     const name = String(typeof input === "string" ? input : input.name || "").trim().slice(0, 80);
     if (!name) throw httpError(400, "歌单名称不能为空");
+    const trackIds = playlistTrackIdsFromInput(input);
     const now = new Date().toISOString();
     const id = hashText(`playlist:${now}:${name}:${crypto.randomBytes(8).toString("hex")}`).slice(0, 20);
-    dbOrOpen()
-      .prepare("INSERT INTO music_playlists (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
-      .run(id, name, String(input.description || "").trim().slice(0, 300), now, now);
+    const database = dbOrOpen();
+    const insertPlaylist = database.prepare("INSERT INTO music_playlists (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)");
+    const insertItem = database.prepare("INSERT OR IGNORE INTO music_playlist_items (playlist_id, track_id, sort_order, added_at) VALUES (?, ?, ?, ?)");
+    const findTrack = database.prepare("SELECT id FROM music_tracks WHERE id = ? AND status = 'ok'");
+    let addedTracks = 0;
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      insertPlaylist.run(id, name, String(input.description || "").trim().slice(0, 300), now, now);
+      for (const trackId of trackIds) {
+        const track = findTrack.get(trackId);
+        if (!track?.id) continue;
+        addedTracks += 1;
+        insertItem.run(id, track.id, addedTracks, now);
+      }
+      if (trackIds.length && !addedTracks) throw httpError(400, "没有可加入歌单的歌曲");
+      database.exec("COMMIT");
+    } catch (error) {
+      try {
+        database.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
     return playlistDetail(id);
   }
 
@@ -1631,6 +1651,20 @@ function safePlaylistFileName(value) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 80) || "FanHao 歌单";
+}
+
+function playlistTrackIdsFromInput(input = {}) {
+  const source = Array.isArray(input.trackIds) ? input.trackIds : Array.isArray(input.tracks) ? input.tracks : [];
+  const seen = new Set();
+  const result = [];
+  for (const item of source) {
+    const id = String(typeof item === "object" && item ? item.id || item.trackId || item.track_id || "" : item || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    result.push(id);
+    if (result.length >= MAX_LIMIT) break;
+  }
+  return result;
 }
 
 function publicGenre(row) {

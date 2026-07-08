@@ -1085,6 +1085,14 @@ export function createMusicPage(deps) {
       });
       actions.append(toggle);
     }
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "music-inline-button";
+    save.textContent = "存为歌单";
+    save.disabled = !queue.length;
+    save.title = queue.length ? "把当前播放队列保存为新歌单" : "队列为空";
+    save.addEventListener("click", () => saveQueueAsPlaylist().catch(showError));
+    actions.append(save);
     const clear = document.createElement("button");
     clear.type = "button";
     clear.className = "music-inline-button";
@@ -1632,6 +1640,18 @@ export function createMusicPage(deps) {
     return queue.filter((track) => track.id !== state.music.current.id).length;
   }
 
+  function queueTrackIds() {
+    const seen = new Set();
+    const result = [];
+    for (const track of state.music.queue || []) {
+      const id = String(track?.id || "").trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      result.push(id);
+    }
+    return result;
+  }
+
   async function restoreLastTrack() {
     if (!canRestoreLastTrack()) return;
     const saved = readLastTrackPreference();
@@ -1831,6 +1851,43 @@ export function createMusicPage(deps) {
       state.music.query = "";
       await loadMusic({ replaceRoute: true, keepCurrent: true });
     } else {
+      renderView();
+    }
+    return data.playlist || null;
+  }
+
+  async function saveQueueAsPlaylist() {
+    const trackIds = queueTrackIds();
+    if (!trackIds.length) {
+      state.music.status = "播放队列为空";
+      renderView();
+      return null;
+    }
+    const name = window.prompt("歌单名称", defaultQueuePlaylistName());
+    const clean = String(name || "").trim();
+    if (!clean) return null;
+    state.music.status = "正在保存播放队列";
+    renderView();
+    const data = await api("/api/music/playlists", {
+      method: "POST",
+      body: {
+        name: clean,
+        description: "从播放队列保存",
+        trackIds
+      }
+    });
+    await loadPlaylists();
+    if (data.playlist?.id) {
+      state.music.mode = "playlist";
+      state.music.activePlaylistId = data.playlist.id;
+      state.music.favorite = false;
+      state.music.query = "";
+      state.music.artistId = "all";
+      state.music.albumId = "all";
+      state.music.genre = "all";
+      await loadMusic({ replaceRoute: true, keepCurrent: true });
+    } else {
+      state.music.status = "播放队列已保存";
       renderView();
     }
     return data.playlist || null;
@@ -2404,6 +2461,11 @@ function normalizePlaybackSpeed(value) {
 
 function playbackSpeedLabel(value) {
   return `${normalizePlaybackSpeed(value)}x`;
+}
+
+function defaultQueuePlaylistName() {
+  const date = new Date();
+  return `播放队列 ${date.getMonth() + 1}-${date.getDate()}`;
 }
 
 function readRepeatPreference() {

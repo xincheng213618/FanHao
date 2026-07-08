@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-33";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-34";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -1090,13 +1090,19 @@ export function createMusicViews(deps) {
     meta.textContent = `${formatNumber(state.queue.length || 0)} 首`;
     const actions = document.createElement("span");
     actions.className = "music-mobile-queue-head-actions";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "music-mobile-text-button";
+    save.textContent = "存歌单";
+    save.disabled = !state.queue.length;
+    save.addEventListener("click", () => saveQueueAsPlaylist().catch(() => {}));
     const clear = document.createElement("button");
     clear.type = "button";
     clear.className = "music-mobile-text-button danger";
     clear.textContent = "清空";
     clear.disabled = queueRemovableCount() <= 0;
     clear.addEventListener("click", () => clearQueueExceptCurrent());
-    actions.append(meta, clear);
+    actions.append(meta, save, clear);
     const close = iconButton("×", () => {
       state.queueOpen = false;
       renderShell();
@@ -1798,6 +1804,18 @@ export function createMusicViews(deps) {
     return queue.filter((item) => item.id !== state.current.id).length;
   }
 
+  function queueTrackIds() {
+    const seen = new Set();
+    const result = [];
+    for (const track of state.queue || []) {
+      const id = String(track?.id || "").trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      result.push(id);
+    }
+    return result;
+  }
+
   function normalizeQueueTrack(track) {
     if (!track?.id) return null;
     return {
@@ -1855,6 +1873,44 @@ export function createMusicViews(deps) {
         genre: ""
       }, { resetSearch: true });
     } else {
+      renderShell();
+    }
+    return playlist;
+  }
+
+  async function saveQueueAsPlaylist() {
+    const trackIds = queueTrackIds();
+    if (!trackIds.length) {
+      state.status = "播放队列为空";
+      renderShell();
+      return null;
+    }
+    const name = window.prompt("歌单名称", defaultQueuePlaylistName());
+    const clean = String(name || "").trim();
+    if (!clean) return null;
+    state.status = "正在保存播放队列";
+    renderShell();
+    const data = await postJson(getActiveUrl(), "/api/music/playlists", {
+      name: clean,
+      description: "从播放队列保存",
+      trackIds
+    });
+    const playlist = data?.playlist || null;
+    state.queueOpen = false;
+    await loadPlaylists();
+    if (playlist?.id) {
+      updateListParams({
+        mode: "playlist",
+        playlistId: playlist.id,
+        smartId: "",
+        favorite: false,
+        query: "",
+        artistId: "",
+        albumId: "",
+        genre: ""
+      }, { resetSearch: true });
+    } else {
+      state.status = "播放队列已保存";
       renderShell();
     }
     return playlist;
@@ -2345,6 +2401,11 @@ function shortDate(value) {
 function defaultPlaylistName() {
   const date = new Date();
   return `我的歌单 ${date.getMonth() + 1}-${date.getDate()}`;
+}
+
+function defaultQueuePlaylistName() {
+  const date = new Date();
+  return `播放队列 ${date.getMonth() + 1}-${date.getDate()}`;
 }
 
 function initials(value) {
