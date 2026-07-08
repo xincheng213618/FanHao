@@ -574,6 +574,7 @@
   background: var(--nav-surface);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
   backdrop-filter: blur(14px);
+  touch-action: pan-y;
 }
 
 .music-player-open .music-mobile-mini-player {

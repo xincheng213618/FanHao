@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-23";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-24";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -714,9 +714,17 @@ export function createMusicViews(deps) {
     const track = state.current || state.queue[0] || null;
     const player = document.createElement("section");
     player.className = "music-mobile-mini-player";
+    let swiped = false;
     player.addEventListener("click", (event) => {
       if (event.target?.closest?.("button,input,label")) return;
+      if (swiped) return;
       openFullscreen();
+    });
+    attachMiniPlayerSwipe(player, () => {
+      swiped = true;
+      window.setTimeout(() => {
+        swiped = false;
+      }, 260);
     });
 
     player.append(renderCover(track || { title: "音乐" }, "bar"));
@@ -733,6 +741,35 @@ export function createMusicViews(deps) {
     const progress = renderProgress("mini", track, play);
     player.append(text, play, next, progress);
     return player;
+  }
+
+  function attachMiniPlayerSwipe(player, markSwiped) {
+    let startX = 0;
+    let startY = 0;
+    let startedOnControl = false;
+    player.addEventListener("touchstart", (event) => {
+      const touch = event.touches?.[0];
+      if (!touch) return;
+      startedOnControl = Boolean(event.target?.closest?.("button,input,label"));
+      startX = touch.clientX;
+      startY = touch.clientY;
+    }, { passive: true });
+    player.addEventListener("touchend", (event) => {
+      if (startedOnControl) return;
+      const touch = event.changedTouches?.[0];
+      if (!touch) return;
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      const horizontal = Math.abs(dx) >= 58 && Math.abs(dx) > Math.abs(dy) * 1.35;
+      const upward = dy <= -48 && Math.abs(dy) > Math.abs(dx) * 1.2;
+      if (!horizontal && !upward) return;
+      markSwiped();
+      if (horizontal) {
+        playAdjacent(dx < 0 ? 1 : -1).catch(() => {});
+        return;
+      }
+      openFullscreen();
+    }, { passive: true });
   }
 
   function renderFullPlayer() {
