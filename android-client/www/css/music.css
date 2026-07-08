@@ -497,7 +497,119 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  gap: 10px;
+  position: relative;
+  z-index: 1;
+}
+
+.music-mobile-queue-sheet {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(10px + env(safe-area-inset-bottom));
+  z-index: 3;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  max-height: min(58vh, 430px);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px 8px 0 0;
+  background: var(--surface-raised);
+  box-shadow: 0 -18px 42px rgba(0, 0, 0, 0.22);
+}
+
+.music-mobile-queue-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 38px;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 12px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.music-mobile-queue-head strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 950;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-mobile-queue-head small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.music-mobile-queue-list {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px;
+  scrollbar-width: none;
+}
+
+.music-mobile-queue-list::-webkit-scrollbar {
+  display: none;
+}
+
+.music-mobile-queue-item {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 42px;
+  gap: 8px;
+  align-items: center;
+  min-height: 54px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.music-mobile-queue-item.active {
+  background: var(--success-soft);
+  color: var(--green);
+}
+
+.music-mobile-queue-index,
+.music-mobile-queue-duration {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-align: center;
+}
+
+.music-mobile-queue-item.active .music-mobile-queue-index {
+  color: var(--green);
+}
+
+.music-mobile-queue-text {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.music-mobile-queue-text strong,
+.music-mobile-queue-text small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-mobile-queue-text strong {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.music-mobile-queue-text small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
 }
 
 @keyframes music-playing-bars {
@@ -533,6 +645,11 @@
   }
 
   .music-mobile-full-controls {
-    gap: 8px;
+    gap: 6px;
+  }
+
+  .music-mobile-queue-sheet {
+    left: 8px;
+    right: 8px;
   }
 }

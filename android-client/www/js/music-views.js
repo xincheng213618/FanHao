@@ -1,4 +1,4 @@
-import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-03";
+import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-04";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -34,6 +34,7 @@ export function createMusicViews(deps) {
     playing: false,
     searchOpen: false,
     fullscreen: false,
+    queueOpen: false,
     repeat: readRepeatPreference(),
     shuffle: readShufflePreference(),
     volume: readVolumePreference(),
@@ -471,11 +472,81 @@ export function createMusicViews(deps) {
       writeRepeatPreference(state.repeat);
       renderShell();
     }, false, state.repeat === "none" ? "ghost" : "active", repeatLabel(state.repeat));
-    controls.append(shuffle, prev, play, next, repeat);
+    const queue = iconButton("≡", () => {
+      state.queueOpen = !state.queueOpen;
+      renderShell();
+    }, !state.queue.length, state.queueOpen ? "active" : "ghost", "播放队列");
+    controls.append(shuffle, prev, play, next, repeat, queue);
 
     const progress = renderProgress("full", track, play);
     full.append(top, coverStage, lyrics, progress, controls);
+    if (state.queueOpen) full.append(renderQueueSheet());
     return full;
+  }
+
+  function renderQueueSheet() {
+    const sheet = document.createElement("section");
+    sheet.className = "music-mobile-queue-sheet";
+    sheet.setAttribute("role", "dialog");
+    sheet.setAttribute("aria-label", "播放队列");
+
+    const head = document.createElement("div");
+    head.className = "music-mobile-queue-head";
+    const title = document.createElement("strong");
+    title.textContent = "播放队列";
+    const meta = document.createElement("small");
+    meta.textContent = `${formatNumber(state.queue.length || 0)} 首`;
+    const close = iconButton("×", () => {
+      state.queueOpen = false;
+      renderShell();
+    }, false, "ghost", "关闭队列");
+    head.append(title, meta, close);
+
+    const list = document.createElement("div");
+    list.className = "music-mobile-queue-list";
+    if (!state.queue.length) {
+      list.append(messageBox("队列里还没有歌曲"));
+    } else {
+      state.queue.forEach((track, index) => list.append(renderQueueItem(track, index)));
+    }
+
+    sheet.append(head, list);
+    return sheet;
+  }
+
+  function renderQueueItem(track, index) {
+    const active = state.current?.id === track.id;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `music-mobile-queue-item${active ? " active" : ""}`;
+    row.setAttribute("aria-label", `播放 ${track.title || "歌曲"}`);
+    const number = document.createElement("span");
+    number.className = "music-mobile-queue-index";
+    if (active && state.playing) {
+      number.append(renderPlayingBars());
+    } else {
+      number.textContent = String(index + 1).padStart(2, "0");
+    }
+    const text = document.createElement("span");
+    text.className = "music-mobile-queue-text";
+    const title = document.createElement("strong");
+    title.textContent = track.title || "未知歌曲";
+    const meta = document.createElement("small");
+    meta.textContent = trackMeta(track);
+    text.append(title, meta);
+    const duration = document.createElement("small");
+    duration.className = "music-mobile-queue-duration";
+    duration.textContent = formatClock(track.durationMs || 0);
+    row.append(number, text, duration);
+    row.addEventListener("click", () => {
+      if (active) {
+        state.queueOpen = false;
+        renderShell();
+        return;
+      }
+      openTrack(track.id, { autoplay: true }).catch(() => {});
+    });
+    return row;
   }
 
   function renderProgress(kind, track, playButton = null) {
@@ -577,8 +648,14 @@ export function createMusicViews(deps) {
   }
 
   function closeFullscreen() {
+    if (state.queueOpen) {
+      state.queueOpen = false;
+      renderShell();
+      return true;
+    }
     if (!state.fullscreen) return false;
     state.fullscreen = false;
+    state.queueOpen = false;
     renderShell();
     return true;
   }
@@ -794,6 +871,7 @@ export function createMusicViews(deps) {
     window.addEventListener("fanhaoViewChanged", (event) => {
       if (event.detail?.view !== "music" && state.fullscreen) {
         state.fullscreen = false;
+        state.queueOpen = false;
         document.body.classList.remove("music-player-open");
       }
       if (!audio) return;
