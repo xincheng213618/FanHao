@@ -8,6 +8,7 @@ import { getElements } from "./js/dom.js?v=20260706-short-video-reel-06";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260706-mobile-web-sync-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
+import { createMusicViews } from "./js/music-views.js?v=20260708-mobile-music-02";
 import { createNovelViews } from "./js/novel-views.js?v=20260702-novel-local-manage-74";
 import { createPeopleViews } from "./js/people-views.js";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
@@ -18,7 +19,7 @@ import { createWorkViews } from "./js/work-views.js?v=20260707-mobile-offline-st
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
-const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "studios", "studioDetail", "vr", "favorites", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "shortVideos", "shortVideoBrowser", "tools"]);
+const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "studios", "studioDetail", "vr", "favorites", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoBrowser", "tools"]);
 const DEFAULT_VIEW = "works";
 const FANHAO_ROOT_VIEWS = new Set(["works", "rankings", "studios", "vr", "people", "favorites"]);
 const FANHAO_SECTION_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "vr", "people", "favorites", "history", "personDetail", "workDetail"]);
@@ -65,6 +66,7 @@ const PRIMARY_LABELS = {
   movie: "电影",
   tv: "电视剧",
   novels: "小说",
+  music: "音乐",
   shortVideos: "短视频",
   tools: "小工具",
   settings: "设置"
@@ -97,6 +99,7 @@ let workViews = null;
 let channelViews = null;
 let toolViews = null;
 let novelViews = null;
+let musicViews = null;
 let shortVideoViews = null;
 let mediaViewer = null;
 let searchHistory = null;
@@ -108,16 +111,18 @@ const HISTORY_MARKER = "fanhao-android";
 const LIBRARY_CACHE_PATH = "/api/library";
 const IMAGE_LIBRARY_SUMMARY_CACHE_PATH = "/api/image-library/summary";
 const NOVEL_SUMMARY_CACHE_PATH = "/api/novels/summary";
+const MUSIC_SUMMARY_CACHE_PATH = "/api/music/summary";
 const SHORT_VIDEO_SUMMARY_CACHE_PATH = "/api/short-videos/summary";
 const ANDROID_UPDATE_CHANNEL = "debug";
 let themePreference = localStorage.getItem(THEME_STORAGE_KEY) || "system";
 let imageLibrarySummary = null;
 let novelSummary = null;
+let musicSummary = null;
 let shortVideoSummary = null;
 let topTvCategoryFacets = [];
 let androidVersionInfo = null;
 let androidUpdateInfo = null;
-const FEED_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "vr", "people", "favorites", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail"]);
+const FEED_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "vr", "people", "favorites", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail", "music"]);
 
 function readInitialViewState() {
   return readViewStateFromHash() || readLastViewState();
@@ -175,6 +180,20 @@ function sanitizeViewParams(view, params = {}) {
   if (view === "mangaChapter") return { id: String(params.id || ""), chapterIndex: String(params.chapterIndex || params.chapter || "") };
   if (view === "novelDetail") return { id: String(params.id || "") };
   if (view === "novelReader") return { id: String(params.id || ""), chapterIndex: String(params.chapterIndex || params.chapter || "1") };
+  if (view === "music") {
+    const mode = String(params.mode || "").trim() === "history" ? "history" : "library";
+    const query = String(params.query || params.q || "").trim();
+    const sort = normalizeMusicSort(params.sort);
+    const favorite = ["1", "true", "yes"].includes(String(params.favorite || params.fav || "").trim().toLowerCase());
+    const trackId = String(params.trackId || params.track || "").trim();
+    return {
+      mode,
+      ...(query ? { query } : {}),
+      ...(sort !== "album" ? { sort } : {}),
+      ...(favorite ? { favorite: "1" } : {}),
+      ...(trackId ? { trackId } : {})
+    };
+  }
   if (view === "shortVideos") {
     const query = String(params.query || params.q || "").trim();
     const author = String(params.author || "all").trim() || "all";
@@ -238,6 +257,11 @@ function normalizeChannelMode(value) {
 function normalizeShortVideoSort(value) {
   const sort = String(value || "published").trim();
   return ["liked", "published", "likes", "comments", "duration"].includes(sort) ? sort : "published";
+}
+
+function normalizeMusicSort(value) {
+  const sort = String(value || "album").trim();
+  return ["album", "artist", "title", "duration", "played", "favorite"].includes(sort) ? sort : "album";
 }
 
 function readViewStateFromHash(hash = window.location.hash) {
@@ -519,6 +543,31 @@ async function loadNovelSummary() {
   }
 }
 
+async function loadMusicSummary() {
+  const requestUrl = activeUrl;
+  const cached = await readCachedJson(requestUrl, MUSIC_SUMMARY_CACHE_PATH).catch(() => null);
+  if (requestUrl !== activeUrl) return false;
+  if (cached?.payload) {
+    musicSummary = cached.payload;
+    syncMusicCounts();
+    renderOmniSummary(imageLibrarySummary);
+  }
+
+  try {
+    const summary = await fetchJson(requestUrl, MUSIC_SUMMARY_CACHE_PATH, { timeoutMs: 10000 });
+    if (requestUrl !== activeUrl) return false;
+    musicSummary = summary;
+    writeCachedJson(requestUrl, MUSIC_SUMMARY_CACHE_PATH, summary).catch(() => {});
+    syncMusicCounts();
+    renderOmniSummary(imageLibrarySummary);
+    return true;
+  } catch {
+    if (requestUrl !== activeUrl) return false;
+    syncMusicCounts();
+    return false;
+  }
+}
+
 async function loadShortVideoSummary() {
   const requestUrl = activeUrl;
   const cached = await readCachedJson(requestUrl, SHORT_VIDEO_SUMMARY_CACHE_PATH).catch(() => null);
@@ -548,6 +597,7 @@ function renderOmniSummary(summary, state = {}) {
   if (!els.omniGrid) return;
   syncChannelCounts(summary);
   syncNovelCounts();
+  syncMusicCounts();
   syncShortVideoCounts();
   els.omniGrid.innerHTML = "";
 
@@ -604,6 +654,13 @@ function omniChannels(summary = {}) {
       unit: "本",
       detail: novelSummary?.totals?.chapters ? `${formatCompact(novelSummary.totals.chapters)} 章` : "本地 TXT 阅读",
       view: "novels"
+    },
+    {
+      label: "音乐",
+      value: formatCompact(musicSummary?.totals?.tracks || 0),
+      unit: "首",
+      detail: musicSummary?.totals?.albums ? `${formatCompact(musicSummary.totals.albums)} 专辑 · ${formatBytes(musicSummary.totals.bytes || 0)}` : "本地音乐播放",
+      view: "music"
     },
     {
       label: "短视频",
@@ -705,6 +762,7 @@ function syncChannelCounts(summary = imageLibrarySummary) {
       : "电影 / 电视剧";
   }
   syncNovelCounts();
+  syncMusicCounts();
   syncShortVideoCounts();
 }
 
@@ -712,6 +770,12 @@ function syncNovelCounts() {
   if (!els.channelNovelCount) return;
   const totals = novelSummary?.totals || {};
   els.channelNovelCount.textContent = totals.books ? `${formatCompact(totals.books)} 本` : "TXT 阅读";
+}
+
+function syncMusicCounts() {
+  if (!els.channelMusicCount) return;
+  const totals = musicSummary?.totals || {};
+  els.channelMusicCount.textContent = totals.tracks ? `${formatCompact(totals.tracks)} 首` : "本地播放";
 }
 
 function syncShortVideoCounts() {
@@ -869,6 +933,7 @@ function updateServer(url) {
   els.serverLabel.textContent = activeUrl;
   imageLibrarySummary = null;
   novelSummary = null;
+  musicSummary = null;
   shortVideoSummary = null;
   resetViewLimitsForView();
   renderOmniSummary(null, { loading: true });
@@ -907,6 +972,16 @@ function openNativeLibraryRoute(options = {}) {
   }
   if (first === "people") {
     showView("people", {}, navigation);
+    return true;
+  }
+  if (first === "music") {
+    showView("music", {
+      mode: query.get("mode") || "library",
+      query: query.get("q") || query.get("query") || "",
+      sort: query.get("sort") || "",
+      favorite: query.get("favorite") || "",
+      trackId: segments[1] || query.get("track") || query.get("trackId") || ""
+    }, navigation);
     return true;
   }
   if (first === "photo" || first === "photos" || first === "photo-sets") {
@@ -999,6 +1074,7 @@ async function loadDashboard() {
   els.personPreview.innerHTML = `<div class="loading-row">正在读取资料库</div>`;
   loadImageLibrarySummary();
   loadNovelSummary();
+  loadMusicSummary();
   loadShortVideoSummary();
 
   const cached = await readCachedJson(activeUrl, LIBRARY_CACHE_PATH).catch(() => null);
@@ -1283,6 +1359,7 @@ function canRenderWithoutLibrary(view = "") {
     || view === "novels"
     || view === "novelDetail"
     || view === "novelReader"
+    || view === "music"
     || view === "shortVideos"
     || view === "shortVideoBrowser";
 }
@@ -1493,6 +1570,9 @@ function renderCurrentView(options = {}) {
   if (currentView === "novelReader") {
     return restoreAfterRender(novelViews.renderNovelReader(currentViewParams.id, currentViewParams.chapterIndex, renderGuard));
   }
+  if (currentView === "music") {
+    return restoreAfterRender(musicViews.renderMusicList(currentViewParams, renderGuard));
+  }
   if (currentView === "shortVideos") {
     return restoreAfterRender(shortVideoViews.renderList(currentViewParams, renderGuard));
   }
@@ -1550,6 +1630,7 @@ function routeLoadingCopy(view = currentView, params = currentViewParams) {
   if (view === "workDetail") return { kicker: "作品详情", title: "作品详情", meta: "正在读取", message: "正在加载作品详情" };
   if (view === "novelDetail") return { kicker: "小说", title: "书籍详情", meta: "正在读取", message: "正在读取书籍详情" };
   if (view === "novelReader") return { kicker: "小说阅读", title: "章节", meta: "正在读取", message: "正在翻开章节" };
+  if (view === "music") return { kicker: "本地音乐", title: "音乐", meta: "正在读取", message: "正在读取音乐库" };
   if (view === "shortVideoBrowser") return { kicker: "短视频", title: "正在播放", meta: "上滑切换", message: "正在打开短视频" };
   if (view === "rankings") return { kicker: "榜单", title: "排行榜", meta: "正在加载", message: "正在加载排行榜" };
   if (view === "studios") return { kicker: "片商", title: "片商索引", meta: "正在加载", message: "正在加载片商" };
@@ -1572,6 +1653,7 @@ function syncContentPanelMode() {
   els.contentPanel.dataset.channelMode = currentView === "channel" ? normalizeChannelMode(currentViewParams.mode) : "";
   document.body.classList.toggle("novel-library-view", isNovelNavigationView(currentView) && currentView !== "novelReader");
   document.body.classList.toggle("novel-reader-view", currentView === "novelReader");
+  document.body.classList.toggle("music-mobile-view", currentView === "music");
   document.body.classList.toggle("short-video-mobile-view", currentView === "shortVideos");
   document.body.classList.toggle("short-video-mobile-browser-view", currentView === "shortVideoBrowser");
   dispatchAppViewChanged();
@@ -1595,6 +1677,7 @@ function renderOffline() {
   if (els.rankingsCount) els.rankingsCount.textContent = "TOP";
   syncChannelCounts(imageLibrarySummary);
   syncNovelCounts();
+  syncMusicCounts();
   syncShortVideoCounts();
   els.continueSection.hidden = true;
   els.continuePreview.dataset.hasItems = "0";
@@ -1621,7 +1704,7 @@ function primaryChannelMode(mode) {
 }
 
 function isRootNavigationView(view = currentView) {
-  return FANHAO_ROOT_VIEWS.has(view) || view === "channel" || view === "novels" || view === "shortVideos";
+  return FANHAO_ROOT_VIEWS.has(view) || view === "channel" || view === "novels" || view === "music" || view === "shortVideos";
 }
 
 function fanhaoTabForView(view = currentView) {
@@ -1804,6 +1887,7 @@ function bottomNavKeyFor(name = currentView, params = currentViewParams) {
   if (view === "photo" || view === "photoDetail") return "photo";
   if (view === "manga" || view === "mangaDetail" || view === "mangaChapter") return "photo";
   if (view === "novels" || view === "novelDetail" || view === "novelReader") return "novels";
+  if (view === "music") return "music";
   if (view === "shortVideos" || view === "shortVideoBrowser") return "shortVideos";
   if (view === "tools") return "tools";
   if (view === "western" || view === "media") return view;
@@ -1933,6 +2017,13 @@ novelViews = createNovelViews({
   renderCurrentView,
   renderCurrentViewPreservingScroll,
   setStatus
+});
+
+musicViews = createMusicViews({
+  els,
+  getActiveUrl: () => activeUrl,
+  setActiveBottom,
+  showView
 });
 
 shortVideoViews = createShortVideoViews({
@@ -2070,6 +2161,7 @@ window.addEventListener("fanhaoOpenShortVideoSearch", () => {
 
 window.fanhaoHandleNativeBack = () => {
   if (mediaViewer?.close()) return true;
+  if (currentView === "music" && musicViews?.closeFullscreen?.()) return true;
   if (searchSurfaceExpanded || currentView === "search") {
     closeSearchSurface();
     return true;
