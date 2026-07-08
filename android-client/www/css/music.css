@@ -510,9 +510,15 @@
 
 .music-mobile-track-side {
   display: grid;
-  min-width: 38px;
+  min-width: 96px;
   justify-items: end;
   gap: 3px;
+}
+
+.music-mobile-track-actions {
+  display: inline-flex;
+  gap: 3px;
+  justify-content: end;
 }
 
 .music-mobile-track-side small {
@@ -631,8 +637,8 @@
 }
 
 .music-mobile-icon-button.track-favorite {
-  width: 34px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   border-color: transparent;
   background: transparent;
   color: var(--muted);
@@ -646,12 +652,21 @@
 }
 
 .music-mobile-icon-button.track-remove {
-  width: 34px;
+  width: 28px;
   height: 28px;
   border-color: transparent;
   background: transparent;
   color: var(--orange);
   font-size: 18px;
+}
+
+.music-mobile-icon-button.track-queue {
+  width: 28px;
+  height: 28px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--green);
+  font-size: 13px;
 }
 
 .music-mobile-icon-button:disabled {

@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-31";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-32";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -711,21 +711,33 @@ export function createMusicViews(deps) {
     text.append(title, meta);
     const side = document.createElement("span");
     side.className = "music-mobile-track-side";
+    const inlineActions = document.createElement("span");
+    inlineActions.className = "music-mobile-track-actions";
+    const playNext = iconButton("下", (event) => {
+      event.stopPropagation();
+      queueTrackNext(track);
+    }, false, "track-queue", "下一首播放");
+    inlineActions.append(playNext);
+    const enqueue = iconButton("+", (event) => {
+      event.stopPropagation();
+      appendTrackToQueue(track);
+    }, false, "track-queue", "加入队列");
+    inlineActions.append(enqueue);
     if (state.mode === "playlist" && state.playlistId) {
       const remove = iconButton("−", (event) => {
         event.stopPropagation();
         removeTrackFromCurrentPlaylist(track.id).catch(() => {});
       }, false, "track-remove", "移出歌单");
-      side.append(remove);
+      inlineActions.append(remove);
     }
     const favorite = iconButton(track.favorite ? "♥" : "♡", (event) => {
       event.stopPropagation();
       toggleFavorite(track.id).catch(() => {});
     }, false, `track-favorite${track.favorite ? " active" : ""}`, track.favorite ? "取消收藏" : "收藏");
-    side.append(favorite);
+    inlineActions.append(favorite);
     const duration = document.createElement("small");
     duration.textContent = formatClock(track.durationMs || 0);
-    side.append(duration);
+    side.append(inlineActions, duration);
     row.append(number, cover, text, side);
     row.addEventListener("click", () => openTrack(track.id, { autoplay: true }).catch(() => {}));
     row.addEventListener("keydown", (event) => {
@@ -1673,6 +1685,28 @@ export function createMusicViews(deps) {
     }
   }
 
+  function queueTrackNext(track) {
+    const item = normalizeQueueTrack(track);
+    if (!item) return;
+    const currentId = state.current?.id || "";
+    const queue = withoutQueueTrack(state.queue || [], item.id);
+    const currentIndex = currentId ? queue.findIndex((entry) => entry.id === currentId) : -1;
+    queue.splice(currentIndex >= 0 ? currentIndex + 1 : 0, 0, item);
+    state.queue = queue;
+    state.status = `下一首播放「${item.title || "歌曲"}」`;
+    renderShell();
+  }
+
+  function appendTrackToQueue(track) {
+    const item = normalizeQueueTrack(track);
+    if (!item) return;
+    const queue = withoutQueueTrack(state.queue || [], item.id);
+    queue.push(item);
+    state.queue = queue;
+    state.status = `已加入队列「${item.title || "歌曲"}」`;
+    renderShell();
+  }
+
   function moveQueueTrack(trackId, direction) {
     const queue = [...(state.queue || [])];
     const index = queue.findIndex((item) => item.id === trackId);
@@ -1710,6 +1744,20 @@ export function createMusicViews(deps) {
     const queue = Array.isArray(state.queue) ? state.queue : [];
     if (!state.current) return queue.length;
     return queue.filter((item) => item.id !== state.current.id).length;
+  }
+
+  function normalizeQueueTrack(track) {
+    if (!track?.id) return null;
+    return {
+      ...track,
+      title: track.title || track.fileName || "未知歌曲",
+      artist: track.artist || "未知歌手",
+      album: track.album || "未知专辑"
+    };
+  }
+
+  function withoutQueueTrack(queue, trackId) {
+    return (queue || []).filter((track) => track.id !== trackId);
   }
 
   async function toggleFavorite(trackId) {
