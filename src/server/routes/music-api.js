@@ -107,6 +107,17 @@ export async function routeMusicApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/music/playlists/import-m3u" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      sendJson(res, 200, musicStore.importM3uPlaylist(body || {}));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "导入 M3U 歌单失败" });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/music/rescan" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     try {

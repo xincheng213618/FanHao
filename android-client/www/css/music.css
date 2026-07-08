@@ -36,10 +36,16 @@
   box-shadow: var(--shadow);
 }
 
-.music-mobile-library-head span {
+.music-mobile-library-head > span:not(.music-mobile-library-actions) {
   display: grid;
   min-width: 0;
   gap: 3px;
+}
+
+.music-mobile-library-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
 }
 
 .music-mobile-library-head small {
@@ -85,6 +91,12 @@
 
 .music-mobile-play-all:disabled {
   opacity: 0.45;
+}
+
+.music-mobile-play-all.danger {
+  min-width: 50px;
+  background: var(--warning-soft);
+  color: var(--orange);
 }
 
 .music-mobile-tabs {
@@ -609,6 +621,15 @@
   border-color: transparent;
   background: transparent;
   color: var(--orange);
+}
+
+.music-mobile-icon-button.track-remove {
+  width: 34px;
+  height: 28px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--orange);
+  font-size: 18px;
 }
 
 .music-mobile-icon-button:disabled {

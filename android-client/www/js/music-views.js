@@ -1,4 +1,4 @@
-import { fetchJson, postJson } from "./api.js?v=20260708-mobile-music-15";
+import { deleteJson, fetchJson, postJson } from "./api.js?v=20260708-mobile-music-16";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -419,10 +419,22 @@ export function createMusicViews(deps) {
     const title = document.createElement("strong");
     title.textContent = musicTitle();
     const meta = document.createElement("em");
-    meta.textContent = totals.tracks
+    const showLibraryTotals = state.mode === "library" && !state.favorite && !state.query && !state.artistId && !state.albumId && !state.genre;
+    meta.textContent = showLibraryTotals && totals.tracks
       ? `${formatCompact(totals.tracks)} 首 · ${formatCompact(totals.albums)} 专辑 · ${formatBytes(totals.bytes || 0)}`
       : musicMeta(state.data);
     text.append(kicker, title, meta);
+
+    const actions = document.createElement("span");
+    actions.className = "music-mobile-library-actions";
+    if (state.mode === "playlist" && state.playlistId) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "music-mobile-play-all danger";
+      remove.textContent = "删除";
+      remove.addEventListener("click", () => deleteCurrentPlaylist().catch(() => {}));
+      actions.append(remove);
+    }
 
     const playAll = document.createElement("button");
     playAll.type = "button";
@@ -435,8 +447,9 @@ export function createMusicViews(deps) {
       if (state.current) togglePlayback();
       else openTrack(target.id, { autoplay: true }).catch(() => {});
     });
+    actions.append(playAll);
 
-    header.append(text, playAll);
+    header.append(text, actions);
     return header;
   }
 
@@ -661,6 +674,13 @@ export function createMusicViews(deps) {
     text.append(title, meta);
     const side = document.createElement("span");
     side.className = "music-mobile-track-side";
+    if (state.mode === "playlist" && state.playlistId) {
+      const remove = iconButton("−", (event) => {
+        event.stopPropagation();
+        removeTrackFromCurrentPlaylist(track.id).catch(() => {});
+      }, false, "track-remove", "移出歌单");
+      side.append(remove);
+    }
     const favorite = iconButton(track.favorite ? "♥" : "♡", (event) => {
       event.stopPropagation();
       toggleFavorite(track.id).catch(() => {});
@@ -1230,6 +1250,46 @@ export function createMusicViews(deps) {
     renderShell();
   }
 
+  async function removeTrackFromCurrentPlaylist(trackId) {
+    const playlistId = String(state.playlistId || "").trim();
+    const id = String(trackId || "").trim();
+    if (!playlistId || !id) return;
+    const playlistName = selectedPlaylist()?.name || state.playlist?.name || "当前歌单";
+    const track = (state.queue || []).find((item) => item.id === id);
+    const ok = window.confirm(`从「${playlistName}」移出${track?.title ? `《${track.title}》` : "这首歌"}？`);
+    if (!ok) return;
+    const data = await deleteJson(getActiveUrl(), `/api/music/playlists/${encodeURIComponent(playlistId)}/tracks/${encodeURIComponent(id)}`);
+    state.data = data;
+    state.playlist = data.playlist || selectedPlaylist();
+    state.queue = Array.isArray(data.tracks) ? data.tracks : [];
+    state.status = "已移出歌单";
+    await loadPlaylists();
+    renderShell();
+  }
+
+  async function deleteCurrentPlaylist() {
+    const playlistId = String(state.playlistId || "").trim();
+    if (!playlistId) return;
+    const playlistName = selectedPlaylist()?.name || state.playlist?.name || "当前歌单";
+    const ok = window.confirm(`删除歌单「${playlistName}」？不会删除本地歌曲文件。`);
+    if (!ok) return;
+    await deleteJson(getActiveUrl(), `/api/music/playlists/${encodeURIComponent(playlistId)}`);
+    state.status = "歌单已删除";
+    state.playlistId = "";
+    state.playlist = null;
+    await loadPlaylists();
+    updateListParams({
+      mode: "library",
+      playlistId: "",
+      smartId: "",
+      favorite: false,
+      query: "",
+      artistId: "",
+      albumId: "",
+      genre: ""
+    }, { resetSearch: true });
+  }
+
   function downloadTrack(track) {
     if (!track?.downloadUrl) return;
     const target = absoluteUrl(getActiveUrl(), track.downloadUrl);
@@ -1553,6 +1613,7 @@ export function createMusicViews(deps) {
       if (event.detail?.view !== "music" && state.fullscreen) {
         state.fullscreen = false;
         state.queueOpen = false;
+        state.playlistSheetOpen = false;
         document.body.classList.remove("music-player-open");
       }
       if (!audio) return;

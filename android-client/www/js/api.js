@@ -74,3 +74,16 @@ export async function putJson(baseUrl, path, body = {}) {
   if (!response.ok) throw new Error(payload.error || `请求失败：${response.status}`);
   return payload;
 }
+
+export async function deleteJson(baseUrl, path) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "DELETE",
+    headers: {
+      Accept: "application/json",
+      "X-FanHao-Client": "android"
+    }
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `请求失败：${response.status}`);
+  return payload;
+}

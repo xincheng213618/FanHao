@@ -10,6 +10,7 @@ const DEFAULT_LIMIT = 600;
 const MAX_LIMIT = 2000;
 const MAX_LYRIC_BYTES = 1024 * 1024;
 const MAX_INTRO_BYTES = 512 * 1024;
+const MAX_M3U_BYTES = 2 * 1024 * 1024;
 const KUWO_UTF16LE_PREFIX = Buffer.from([0x77, 0x91, 0x11, 0x62, 0xf3, 0x97, 0x50, 0x4e]);
 const REDISCOVER_DAYS = 30;
 const MUSIC_GENRE_ALIASES = new Map([
@@ -506,6 +507,57 @@ export function createMusicStore(options = {}) {
     return playlistDetail(id);
   }
 
+  function importM3uPlaylist(input = {}) {
+    const source = readM3uInput(input);
+    const parsed = parseM3u(source.content);
+    if (!parsed.entries.length) throw httpError(400, "M3U 文件里没有可导入的歌曲路径");
+    const database = dbOrOpen();
+    const matcher = createM3uTrackMatcher(database);
+    const matched = [];
+    const missing = [];
+    const seenTrackIds = new Set();
+    for (const entry of parsed.entries) {
+      const match = matcher.match(entry, source.baseDir);
+      if (match?.id && !seenTrackIds.has(match.id)) {
+        seenTrackIds.add(match.id);
+        matched.push(match.id);
+      } else {
+        missing.push(entry);
+      }
+    }
+    if (!matched.length) throw httpError(400, "没有匹配到音乐库里的歌曲");
+
+    const now = new Date().toISOString();
+    const requestedName = String(input.name || "").trim();
+    const name = (requestedName || parsed.name || source.name || "导入歌单").slice(0, 80);
+    const id = hashText(`playlist:${now}:${name}:${crypto.randomBytes(8).toString("hex")}`).slice(0, 20);
+    const insertPlaylist = database.prepare("INSERT INTO music_playlists (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)");
+    const insertItem = database.prepare("INSERT OR IGNORE INTO music_playlist_items (playlist_id, track_id, sort_order, added_at) VALUES (?, ?, ?, ?)");
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      insertPlaylist.run(id, name, String(input.description || "M3U 导入").trim().slice(0, 300), now, now);
+      matched.forEach((trackId, index) => insertItem.run(id, trackId, index + 1, now));
+      database.exec("COMMIT");
+    } catch (error) {
+      try {
+        database.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+
+    const detail = playlistDetail(id);
+    return {
+      ...detail,
+      importSummary: {
+        source: source.source,
+        matched: matched.length,
+        missing: missing.length,
+        total: parsed.entries.length,
+        missingEntries: missing.slice(0, 20)
+      }
+    };
+  }
+
   function playlistDetail(playlistId) {
     const database = dbOrOpen();
     const row = database.prepare("SELECT * FROM music_playlists WHERE id = ?").get(playlistId);
@@ -639,6 +691,7 @@ export function createMusicStore(options = {}) {
     listPlaylists,
     listSmartPlaylists,
     listTracks,
+    importM3uPlaylist,
     playlistDetail,
     playlistM3u,
     removeFromPlaylist,
@@ -1409,6 +1462,131 @@ function publicPlaylist(row) {
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || ""
   };
+}
+
+function readM3uInput(input = {}) {
+  const rawContent = typeof input.content === "string" ? input.content : "";
+  if (rawContent.trim()) {
+    return {
+      content: rawContent,
+      baseDir: "",
+      name: String(input.name || "").trim(),
+      source: "content"
+    };
+  }
+  const rawPath = String(input.path || input.filePath || "").trim();
+  if (!rawPath) throw httpError(400, "缺少 M3U 文件路径或内容");
+  const filePath = path.resolve(rawPath);
+  const stat = safeStat(filePath);
+  if (!stat?.isFile()) throw httpError(404, "M3U 文件不存在");
+  if (stat.size > MAX_M3U_BYTES) throw httpError(400, "M3U 文件过大");
+  return {
+    content: readSmallText(filePath, MAX_M3U_BYTES),
+    baseDir: path.dirname(filePath),
+    name: path.basename(filePath, path.extname(filePath)),
+    source: filePath
+  };
+}
+
+function parseM3u(content = "") {
+  const entries = [];
+  let name = "";
+  for (const rawLine of String(content || "").replace(/^\uFEFF/u, "").split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (line.startsWith("#")) {
+      if (line.toUpperCase().startsWith("#PLAYLIST:")) name = line.slice(line.indexOf(":") + 1).trim();
+      continue;
+    }
+    entries.push(line);
+  }
+  return { name, entries };
+}
+
+function createM3uTrackMatcher(db) {
+  const rows = db.prepare("SELECT id, source_path, relative_path, file_name FROM music_tracks WHERE status = 'ok'").all();
+  const byAbsolute = new Map();
+  const byRelative = new Map();
+  const byFileName = new Map();
+  for (const row of rows) {
+    addUnique(byAbsolute, normalizeM3uPathKey(row.source_path), row);
+    addUnique(byRelative, normalizeM3uPathKey(row.relative_path), row);
+    addUnique(byFileName, normalizeM3uPathKey(row.file_name), row);
+  }
+  return {
+    match(entry, baseDir = "") {
+      const candidates = m3uCandidateKeys(entry, baseDir);
+      for (const key of candidates.absolute) {
+        const match = byAbsolute.get(key);
+        if (match) return match;
+      }
+      for (const key of candidates.relative) {
+        const match = byRelative.get(key);
+        if (match) return match;
+      }
+      for (const key of candidates.fileName) {
+        const match = byFileName.get(key);
+        if (match) return match;
+      }
+      return null;
+    }
+  };
+}
+
+function addUnique(map, key, row) {
+  if (!key) return;
+  if (map.has(key)) {
+    map.set(key, null);
+    return;
+  }
+  map.set(key, row);
+}
+
+function m3uCandidateKeys(entry, baseDir = "") {
+  const raw = decodeM3uPath(entry);
+  const absolute = new Set();
+  const relative = new Set();
+  const fileName = new Set();
+  const addPath = (value) => {
+    const key = normalizeM3uPathKey(value);
+    if (!key) return;
+    if (looksAbsolutePath(value)) absolute.add(normalizeM3uPathKey(path.resolve(value)));
+    relative.add(key);
+    fileName.add(normalizeM3uPathKey(path.basename(value)));
+    fileName.add(normalizeM3uPathKey(path.win32.basename(value)));
+    fileName.add(normalizeM3uPathKey(path.posix.basename(value)));
+  };
+  addPath(raw);
+  if (baseDir && raw && !looksAbsolutePath(raw) && !/^[a-z][a-z0-9+.-]*:\/\//iu.test(raw)) {
+    absolute.add(normalizeM3uPathKey(path.resolve(baseDir, raw)));
+  }
+  if (looksAbsolutePath(raw)) absolute.add(normalizeM3uPathKey(path.resolve(raw)));
+  return { absolute, relative, fileName };
+}
+
+function decodeM3uPath(value) {
+  const raw = String(value || "").trim();
+  if (/^file:\/\//iu.test(raw)) {
+    try {
+      return decodeURIComponent(new URL(raw).pathname).replace(/^\/([A-Za-z]:\/)/u, "$1");
+    } catch {
+      return raw.replace(/^file:\/+/iu, "");
+    }
+  }
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function normalizeM3uPathKey(value) {
+  return String(value || "").trim().replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
+}
+
+function looksAbsolutePath(value) {
+  const raw = String(value || "");
+  return path.isAbsolute(raw) || /^[A-Za-z]:[\\/]/u.test(raw) || /^\/[A-Za-z]:\//u.test(raw.replace(/\\/g, "/"));
 }
 
 function formatM3uPlaylist(playlist, tracks = [], pathMode = "absolute") {

@@ -395,6 +395,12 @@ export function createMusicPage(deps) {
     createPlaylistButton.textContent = "新建歌单";
     createPlaylistButton.addEventListener("click", () => openPlaylistDialog().catch(showError));
     playlists.append(createPlaylistButton);
+    const importPlaylistButton = document.createElement("button");
+    importPlaylistButton.type = "button";
+    importPlaylistButton.className = "music-create-playlist";
+    importPlaylistButton.textContent = "导入 M3U";
+    importPlaylistButton.addEventListener("click", () => importPlaylistM3uFromPrompt().catch(showError));
+    playlists.append(importPlaylistButton);
 
     const genresTitle = document.createElement("h3");
     genresTitle.textContent = "风格";
@@ -1523,6 +1529,31 @@ export function createMusicPage(deps) {
     }
     await loadPlaylists();
     if (data.playlist?.id) {
+      state.music.mode = "playlist";
+      state.music.activePlaylistId = data.playlist.id;
+      state.music.favorite = false;
+      state.music.query = "";
+      await loadMusic({ replaceRoute: true, keepCurrent: true });
+    } else {
+      renderView();
+    }
+    return data.playlist || null;
+  }
+
+  async function importPlaylistM3uFromPrompt() {
+    const value = window.prompt("输入 .m3u/.m3u8 文件路径，或粘贴 #EXTM3U 内容", "");
+    const source = String(value || "").trim();
+    if (!source) return null;
+    state.music.status = "正在导入 M3U 歌单";
+    renderView();
+    const body = source.includes("\n") || source.toUpperCase().startsWith("#EXTM3U")
+      ? { content: source }
+      : { path: source };
+    const data = await api("/api/music/playlists/import-m3u", { method: "POST", body });
+    await loadPlaylists();
+    if (data.playlist?.id) {
+      const summary = data.importSummary || {};
+      state.music.status = `已导入歌单：匹配 ${formatNumber(summary.matched || 0)} 首，缺失 ${formatNumber(summary.missing || 0)} 项`;
       state.music.mode = "playlist";
       state.music.activePlaylistId = data.playlist.id;
       state.music.favorite = false;
