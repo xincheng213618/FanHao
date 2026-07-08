@@ -682,6 +682,44 @@ export function createMusicStore(options = {}) {
     return playlistDetail(playlistId);
   }
 
+  function reorderPlaylist(playlistId, input = {}) {
+    const database = dbOrOpen();
+    const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
+    if (!playlist) return null;
+    const requested = playlistTrackIdsFromInput(input);
+    if (!requested.length) throw httpError(400, "缺少歌曲排序");
+    const existing = database
+      .prepare(
+        `
+        SELECT track_id
+        FROM music_playlist_items
+        WHERE playlist_id = ?
+        ORDER BY sort_order ASC, added_at ASC
+      `
+      )
+      .all(playlistId)
+      .map((row) => row.track_id);
+    const existingSet = new Set(existing);
+    const ordered = requested.filter((trackId) => existingSet.has(trackId));
+    if (!ordered.length) throw httpError(400, "没有可排序的歌曲");
+    const orderedSet = new Set(ordered);
+    const nextOrder = [...ordered, ...existing.filter((trackId) => !orderedSet.has(trackId))];
+    const now = new Date().toISOString();
+    const updateItem = database.prepare("UPDATE music_playlist_items SET sort_order = ? WHERE playlist_id = ? AND track_id = ?");
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      nextOrder.forEach((trackId, index) => updateItem.run(index + 1, playlistId, trackId));
+      database.prepare("UPDATE music_playlists SET updated_at = ? WHERE id = ?").run(now, playlistId);
+      database.exec("COMMIT");
+    } catch (error) {
+      try {
+        database.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+    return playlistDetail(playlistId);
+  }
+
   function trackFile(trackId) {
     const row = dbOrOpen().prepare("SELECT id, source_path, ext FROM music_tracks WHERE id = ? AND status = 'ok'").get(trackId);
     if (!row?.source_path) return null;
@@ -727,6 +765,7 @@ export function createMusicStore(options = {}) {
     importM3uPlaylist,
     playlistDetail,
     playlistM3u,
+    reorderPlaylist,
     removeFromPlaylist,
     saveProgress,
     scan,

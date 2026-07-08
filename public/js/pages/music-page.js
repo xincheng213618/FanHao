@@ -1606,6 +1606,7 @@ export function createMusicPage(deps) {
     state.music.queue = queue;
     state.music.status = `已调整「${item.title || "歌曲"}」顺序`;
     renderView();
+    persistPlaylistQueueOrder(queue).catch(showError);
   }
 
   function removeTrackFromQueue(trackId) {
@@ -1641,9 +1642,29 @@ export function createMusicPage(deps) {
   }
 
   function queueTrackIds() {
+    return uniqueTrackIds(state.music.queue || []);
+  }
+
+  async function persistPlaylistQueueOrder(queue = state.music.queue || []) {
+    const playlistId = state.music.mode === "playlist" ? String(state.music.activePlaylistId || "").trim() : "";
+    if (!playlistId) return null;
+    const trackIds = uniqueTrackIds(queue);
+    if (!trackIds.length) return null;
+    const data = await api(`/api/music/playlists/${encodeURIComponent(playlistId)}/tracks/order`, {
+      method: "PUT",
+      body: { trackIds }
+    });
+    state.music.activePlaylist = data.playlist || state.music.activePlaylist;
+    if (state.music.data?.playlist?.id === playlistId) state.music.data.playlist = data.playlist || state.music.data.playlist;
+    state.music.status = "歌单顺序已保存";
+    renderView();
+    return data;
+  }
+
+  function uniqueTrackIds(queue = []) {
     const seen = new Set();
     const result = [];
-    for (const track of state.music.queue || []) {
+    for (const track of queue || []) {
       const id = String(track?.id || "").trim();
       if (!id || seen.has(id)) continue;
       seen.add(id);

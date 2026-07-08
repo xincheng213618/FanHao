@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-34";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-35";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -1775,6 +1775,10 @@ export function createMusicViews(deps) {
     state.queue = queue;
     state.status = `已调整「${item.title || "歌曲"}」顺序`;
     renderShell();
+    persistPlaylistQueueOrder(queue).catch((error) => {
+      state.status = error?.message || "歌单顺序保存失败";
+      renderShell();
+    });
   }
 
   function removeTrackFromQueue(trackId) {
@@ -1805,9 +1809,28 @@ export function createMusicViews(deps) {
   }
 
   function queueTrackIds() {
+    return uniqueTrackIds(state.queue || []);
+  }
+
+  async function persistPlaylistQueueOrder(queue = state.queue || []) {
+    const playlistId = state.mode === "playlist" ? String(state.playlistId || "").trim() : "";
+    if (!playlistId) return null;
+    const trackIds = uniqueTrackIds(queue);
+    if (!trackIds.length) return null;
+    const data = await putJson(getActiveUrl(), `/api/music/playlists/${encodeURIComponent(playlistId)}/tracks/order`, {
+      trackIds
+    });
+    state.playlist = data.playlist || state.playlist;
+    if (state.data?.playlist?.id === playlistId) state.data.playlist = data.playlist || state.data.playlist;
+    state.status = "歌单顺序已保存";
+    renderShell();
+    return data;
+  }
+
+  function uniqueTrackIds(queue = []) {
     const seen = new Set();
     const result = [];
-    for (const track of state.queue || []) {
+    for (const track of queue || []) {
       const id = String(track?.id || "").trim();
       if (!id || seen.has(id)) continue;
       seen.add(id);

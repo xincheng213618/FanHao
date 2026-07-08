@@ -198,6 +198,22 @@ export async function routeMusicApi(req, res, url, deps) {
     return true;
   }
 
+  const playlistTrackOrderMatch = /^\/api\/music\/playlists\/([^/]+)\/tracks\/order$/.exec(url.pathname);
+  if (playlistTrackOrderMatch && (req.method === "PUT" || req.method === "PATCH")) {
+    try {
+      const body = await readJsonBody(req);
+      const data = musicStore.reorderPlaylist(decodeURIComponent(playlistTrackOrderMatch[1]), body || {});
+      if (!data) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "歌单排序保存失败" });
+    }
+    return true;
+  }
+
   const playlistTrackDeleteMatch = /^\/api\/music\/playlists\/([^/]+)\/tracks\/([^/]+)$/.exec(url.pathname);
   if (playlistTrackDeleteMatch && req.method === "DELETE") {
     try {
