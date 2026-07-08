@@ -84,6 +84,7 @@ export function createMusicPage(deps) {
     state.music.playlistDialogOpen = Boolean(state.music.playlistDialogOpen);
     state.music.playlistDialogTrackId = state.music.playlistDialogTrackId || "";
     state.music.playlistDialogName = state.music.playlistDialogName || "";
+    state.music.playerStageOpen = Boolean(state.music.playerStageOpen);
     ensureAudio();
     installKeyboardShortcuts();
   }
@@ -329,6 +330,7 @@ export function createMusicPage(deps) {
     const shell = document.createElement("section");
     shell.className = "music-shell";
     shell.append(renderHero(), renderLibraryLayout(), renderPlayerBar(), renderPlaylistDialog());
+    if (state.music.playerStageOpen) shell.append(renderPlayerStage());
     els.workGrid.append(shell);
     updatePlaybackUi();
     updateLyricHighlight(!state.music.lyricFollowPaused);
@@ -1201,6 +1203,7 @@ export function createMusicPage(deps) {
     center.className = "music-player-center";
     const controls = document.createElement("div");
     controls.className = "music-player-controls";
+    controls.append(controlButton("⤢", openPlayerStage, !track, "", "展开播放页"));
     controls.append(controlButton("⤮", () => {
       state.music.shuffle = !state.music.shuffle;
       writeShufflePreference(state.music.shuffle);
@@ -1265,6 +1268,239 @@ export function createMusicPage(deps) {
     bar.append(identity, center, options);
     currentProgressEls = { current, progress, total, playButton };
     return bar;
+  }
+
+  function renderPlayerStage() {
+    const track = state.music.current || state.music.queue[0] || null;
+    const stage = document.createElement("section");
+    stage.className = `music-player-stage${state.music.playing ? " playing" : ""}`;
+    stage.setAttribute("role", "dialog");
+    stage.setAttribute("aria-modal", "true");
+    stage.setAttribute("aria-label", "播放页");
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "music-stage-backdrop";
+    if (track?.coverUrl) {
+      const image = document.createElement("img");
+      image.src = track.coverUrl;
+      image.alt = "";
+      image.decoding = "async";
+      backdrop.append(image);
+    }
+
+    const chrome = document.createElement("header");
+    chrome.className = "music-stage-chrome";
+    const collapse = document.createElement("button");
+    collapse.type = "button";
+    collapse.className = "music-stage-close";
+    collapse.textContent = "⌄";
+    collapse.setAttribute("aria-label", "收起播放页");
+    collapse.addEventListener("click", closePlayerStage);
+    const brand = document.createElement("strong");
+    brand.textContent = "FanHao 音乐";
+    chrome.append(collapse, brand);
+
+    const content = document.createElement("div");
+    content.className = "music-stage-content";
+    content.append(renderStageQueue(track), renderStageNow(track));
+
+    stage.append(backdrop, chrome, content, renderStageWave(), renderStagePlayer(track));
+    return stage;
+  }
+
+  function renderStageQueue(track) {
+    const panel = document.createElement("section");
+    panel.className = "music-stage-queue";
+    const head = document.createElement("div");
+    head.className = "music-stage-list-actions";
+    head.append(stageActionButton("♡ 收藏", () => track && toggleFavorite(track.id).catch(showError), !track));
+    head.append(stageActionButton("+ 加到歌单", () => track && addTrackToPlaylist(track.id).catch(showError), !track));
+    head.append(stageActionButton("↓ 下载", () => downloadTrack(track), !track?.downloadUrl));
+    head.append(stageActionButton("清空列表", clearQueueAfterCurrent, queueRemovableCount() <= 0));
+    panel.append(head);
+
+    const list = document.createElement("div");
+    list.className = "music-stage-track-list";
+    const queue = state.music.queue || [];
+    if (!queue.length) {
+      const empty = document.createElement("div");
+      empty.className = "music-stage-empty";
+      empty.textContent = "播放列表为空";
+      list.append(empty);
+    } else {
+      queue.slice(0, 80).forEach((item, index) => list.append(stageTrackRow(item, index)));
+      if (queue.length > 80) {
+        const more = document.createElement("div");
+        more.className = "music-stage-empty";
+        more.textContent = `还有 ${formatNumber(queue.length - 80)} 首未显示`;
+        list.append(more);
+      }
+    }
+    panel.append(list);
+    return panel;
+  }
+
+  function stageActionButton(label, action, disabled = false) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "music-stage-action";
+    button.textContent = label;
+    button.disabled = disabled;
+    button.addEventListener("click", action);
+    return button;
+  }
+
+  function stageTrackRow(track, index) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `music-stage-track${state.music.current?.id === track.id ? " active" : ""}`;
+    const number = document.createElement("span");
+    number.textContent = state.music.current?.id === track.id && state.music.playing ? "▮▮" : String(index + 1);
+    const title = document.createElement("strong");
+    title.textContent = track.title || "未知歌曲";
+    const artist = document.createElement("small");
+    artist.textContent = track.artist || "未知歌手";
+    const duration = document.createElement("em");
+    duration.textContent = formatClock(track.durationMs || 0);
+    row.append(number, title, artist, duration);
+    row.addEventListener("click", () => openTrack(track.id, { autoplay: true }).catch(showError));
+    return row;
+  }
+
+  function renderStageNow(track) {
+    const panel = document.createElement("section");
+    panel.className = "music-stage-now";
+    if (!track) {
+      const empty = document.createElement("div");
+      empty.className = "music-stage-empty";
+      empty.textContent = "选择一首歌开始播放。";
+      panel.append(empty);
+      return panel;
+    }
+
+    const album = document.createElement("div");
+    album.className = "music-stage-album";
+    album.append(renderCover(track, "stage"));
+    const disc = document.createElement("span");
+    disc.className = "music-stage-disc";
+    album.append(disc);
+
+    const meta = document.createElement("div");
+    meta.className = "music-stage-meta";
+    const title = document.createElement("h2");
+    title.textContent = track.title || "未知歌曲";
+    const artist = document.createElement("p");
+    artist.textContent = `${track.artist || "未知歌手"} · ${track.album || "未知专辑"}`;
+    meta.append(title, artist, renderStageLyrics());
+    panel.append(album, meta);
+    return panel;
+  }
+
+  function renderStageLyrics() {
+    const wrap = document.createElement("div");
+    wrap.className = "music-stage-lyrics";
+    const head = document.createElement("div");
+    head.className = "music-stage-lyrics-head";
+    const title = document.createElement("strong");
+    title.textContent = "歌词";
+    head.append(title);
+    const lines = document.createElement("div");
+    lines.className = "music-lyric-lines music-stage-lyric-lines";
+    const lyricLines = state.music.lyrics?.lines || [];
+    if (!lyricLines.length) {
+      const empty = document.createElement("p");
+      empty.textContent = "暂无歌词";
+      lines.append(empty);
+    } else {
+      const follow = document.createElement("button");
+      follow.type = "button";
+      follow.className = `music-lyric-follow${state.music.lyricFollowPaused ? " visible" : ""}`;
+      follow.textContent = "回到当前";
+      follow.addEventListener("click", resumeLyricFollow);
+      head.append(follow);
+      lyricLines.slice(0, 120).forEach((line, index) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.index = String(index);
+        button.dataset.timeMs = String(line.timeMs || 0);
+        button.textContent = line.text || "";
+        button.addEventListener("click", () => seekToLyricLine(line.timeMs || 0));
+        lines.append(button);
+      });
+      lines.addEventListener("wheel", () => pauseLyricFollow(follow), { passive: true });
+      lines.addEventListener("pointerdown", () => pauseLyricFollow(follow), { passive: true });
+    }
+    wrap.append(head, lines);
+    return wrap;
+  }
+
+  function renderStageWave() {
+    const wave = document.createElement("div");
+    wave.className = "music-stage-wave";
+    for (let i = 0; i < 72; i += 1) {
+      const bar = document.createElement("span");
+      bar.style.setProperty("--i", String(i));
+      bar.style.setProperty("--h", `${18 + Math.round(Math.abs(Math.sin(i * 0.47)) * 46)}px`);
+      wave.append(bar);
+    }
+    return wave;
+  }
+
+  function renderStagePlayer(track) {
+    const footer = document.createElement("footer");
+    footer.className = "music-stage-player";
+    const identity = document.createElement("div");
+    identity.className = "music-stage-player-title";
+    const title = document.createElement("strong");
+    title.textContent = track?.title || "未播放";
+    const artist = document.createElement("small");
+    artist.textContent = track ? `${track.artist || "未知歌手"} · ${track.album || "未知专辑"}` : "从音乐库选择一首歌";
+    identity.append(title, artist);
+
+    const controls = document.createElement("div");
+    controls.className = "music-player-controls";
+    controls.append(controlButton(repeatIcon(state.music.repeat), () => {
+      state.music.repeat = nextRepeat(state.music.repeat);
+      writeRepeatPreference(state.music.repeat);
+      renderView();
+    }, false, state.music.repeat === "none" ? "" : "active", repeatLabel(state.music.repeat)));
+    controls.append(controlButton("‹", () => playAdjacent(-1, { autoplay: true }).catch(showError), !track, "", "上一首"));
+    const playButton = controlButton(playIcon(state.music.playing), togglePlayback, !track, "primary", playAriaLabel(state.music.playing));
+    controls.append(playButton);
+    controls.append(controlButton("›", () => playAdjacent(1, { autoplay: true }).catch(showError), !track, "", "下一首"));
+    controls.append(controlButton("⤮", () => {
+      state.music.shuffle = !state.music.shuffle;
+      writeShufflePreference(state.music.shuffle);
+      renderView();
+    }, false, state.music.shuffle ? "active" : "", "随机播放"));
+
+    const progressWrap = document.createElement("label");
+    progressWrap.className = "music-progress music-stage-progress";
+    const current = document.createElement("span");
+    current.textContent = "0:00";
+    const progress = document.createElement("input");
+    progress.type = "range";
+    progress.min = "0";
+    progress.max = "1000";
+    progress.value = "0";
+    progress.addEventListener("input", () => {
+      if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
+      audio.currentTime = (Number(progress.value || 0) / 1000) * audio.duration;
+      updatePlaybackUi();
+    });
+    const total = document.createElement("span");
+    total.textContent = track ? formatClock(track.durationMs || 0) : "0:00";
+    progressWrap.append(current, progress, total);
+
+    const options = document.createElement("div");
+    options.className = "music-stage-options";
+    options.append(renderRatingControl(track, "bar"));
+    options.append(controlButton(track?.favorite ? "♥" : "♡", () => toggleFavorite(track.id).catch(showError), !track, track?.favorite ? "active heart" : "", track?.favorite ? "取消收藏" : "收藏"));
+    options.append(renderPlaybackSpeedControl(track));
+
+    footer.append(identity, controls, progressWrap, options);
+    currentProgressEls = { current, progress, total, playButton };
+    return footer;
   }
 
   function renderPlaybackSpeedControl(track) {
@@ -1453,6 +1689,23 @@ export function createMusicPage(deps) {
     });
   }
 
+  function openPlayerStage() {
+    if (!state.music.current && state.music.queue[0]?.id) {
+      openTrack(state.music.queue[0].id, { autoplay: false }).then(() => {
+        state.music.playerStageOpen = true;
+        renderView();
+      }).catch(showError);
+      return;
+    }
+    state.music.playerStageOpen = true;
+    renderView();
+  }
+
+  function closePlayerStage() {
+    state.music.playerStageOpen = false;
+    renderView();
+  }
+
   function installKeyboardShortcuts() {
     if (keyboardShortcutsInstalled) return;
     keyboardShortcutsInstalled = true;
@@ -1462,6 +1715,11 @@ export function createMusicPage(deps) {
   function handleKeyboardShortcut(event) {
     if (event.defaultPrevented || state.activeView !== "music" || state.music.playlistDialogOpen) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === "Escape" && state.music.playerStageOpen) {
+      event.preventDefault();
+      closePlayerStage();
+      return;
+    }
     if (isKeyboardShortcutTarget(event.target)) return;
 
     if (event.code === "Space" || event.key === " " || event.key === "Space" || event.key === "Spacebar") {
@@ -2201,7 +2459,7 @@ export function createMusicPage(deps) {
     const nextTime = Math.max(0, Number(timeMs || 0) / 1000);
     if (!Number.isFinite(nextTime)) return;
     state.music.lyricFollowPaused = false;
-    document.querySelector(".music-lyric-follow")?.classList.remove("visible");
+    document.querySelectorAll(".music-lyric-follow").forEach((button) => button.classList.remove("visible"));
     audio.currentTime = nextTime;
     updatePlaybackUi();
     updateLyricHighlight(true);
@@ -2216,7 +2474,7 @@ export function createMusicPage(deps) {
 
   function resumeLyricFollow() {
     state.music.lyricFollowPaused = false;
-    document.querySelector(".music-lyric-follow")?.classList.remove("visible");
+    document.querySelectorAll(".music-lyric-follow").forEach((button) => button.classList.remove("visible"));
     updateLyricHighlight(true);
   }
 
@@ -2312,6 +2570,7 @@ export function createMusicPage(deps) {
 
   function setMusicBodyClass() {
     document.body.classList.toggle("music-view", state.activeView === "music");
+    document.body.classList.toggle("music-stage-open", state.activeView === "music" && Boolean(state.music?.playerStageOpen));
   }
 
   function showError(error) {
