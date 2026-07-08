@@ -8,7 +8,7 @@ import { getElements } from "./js/dom.js?v=20260706-short-video-reel-06";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260706-mobile-web-sync-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
-import { createMusicViews } from "./js/music-views.js?v=20260708-mobile-music-14";
+import { createMusicViews } from "./js/music-views.js?v=20260708-mobile-music-15";
 import { createNovelViews } from "./js/novel-views.js?v=20260702-novel-local-manage-74";
 import { createPeopleViews } from "./js/people-views.js";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
@@ -183,7 +183,8 @@ function sanitizeViewParams(view, params = {}) {
   if (view === "music") {
     const rawMode = String(params.mode || "").trim();
     const smartId = String(params.smartId || params.smart || "").trim();
-    const mode = smartId ? "smart" : (rawMode === "history" ? "history" : "library");
+    const playlistId = String(params.playlistId || params.playlist || "").trim();
+    const mode = playlistId ? "playlist" : smartId ? "smart" : (rawMode === "history" ? "history" : "library");
     const query = String(params.query || params.q || "").trim();
     const sort = normalizeMusicSort(params.sort);
     const favorite = ["1", "true", "yes"].includes(String(params.favorite || params.fav || "").trim().toLowerCase());
@@ -197,6 +198,7 @@ function sanitizeViewParams(view, params = {}) {
       ...(sort !== "album" ? { sort } : {}),
       ...(favorite && mode !== "smart" ? { favorite: "1" } : {}),
       ...(smartId ? { smartId } : {}),
+      ...(mode === "playlist" && playlistId ? { playlistId } : {}),
       ...(mode === "library" && artistId ? { artistId } : {}),
       ...(mode === "library" && albumId ? { albumId } : {}),
       ...(mode === "library" && genre ? { genre } : {}),

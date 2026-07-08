@@ -123,6 +123,12 @@
   gap: 8px;
 }
 
+.music-mobile-playlists {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
 .music-mobile-smart-head {
   display: flex;
   align-items: center;
@@ -143,6 +149,17 @@
   font-weight: 850;
 }
 
+.music-mobile-text-button {
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 12px;
+  background: var(--surface);
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 950;
+}
+
 .music-mobile-smart-scroll {
   display: flex;
   min-width: 0;
@@ -154,6 +171,61 @@
 
 .music-mobile-smart-scroll::-webkit-scrollbar {
   display: none;
+}
+
+.music-mobile-playlist-scroll {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.music-mobile-playlist-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.music-mobile-playlist-card {
+  display: grid;
+  flex: 0 0 min(54vw, 168px);
+  gap: 4px;
+  align-content: center;
+  min-height: 74px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  text-align: left;
+}
+
+.music-mobile-playlist-card.active {
+  border-color: var(--green);
+  background: var(--success-soft);
+}
+
+.music-mobile-playlist-card.empty {
+  border-style: dashed;
+}
+
+.music-mobile-playlist-card strong,
+.music-mobile-playlist-card small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-mobile-playlist-card strong {
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.music-mobile-playlist-card small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .music-mobile-smart-card {
@@ -843,6 +915,43 @@
 
 .music-mobile-queue-item.active .music-mobile-queue-index {
   color: var(--green);
+}
+
+.music-mobile-playlist-choice {
+  display: grid;
+  min-height: 54px;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.music-mobile-playlist-choice.empty {
+  place-items: center;
+  border: 1px dashed var(--line);
+  color: var(--green);
+  font-weight: 950;
+}
+
+.music-mobile-playlist-choice strong,
+.music-mobile-playlist-choice small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-mobile-playlist-choice strong {
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.music-mobile-playlist-choice small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .music-mobile-queue-text {

@@ -1686,6 +1686,7 @@ export function createMusicPage(deps) {
 
   function musicListParams() {
     const params = new URLSearchParams();
+    if (state.music.mode === "playlist" && state.music.activePlaylistId) params.set("playlist", state.music.activePlaylistId);
     if (state.music.mode === "smart" && state.music.activeSmartPlaylistId) params.set("smart", state.music.activeSmartPlaylistId);
     if (state.music.query) params.set("q", state.music.query);
     if (state.music.artistId && state.music.artistId !== "all") params.set("artist", state.music.artistId);

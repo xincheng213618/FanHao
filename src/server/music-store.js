@@ -1141,6 +1141,26 @@ function lyricsForTrack(db, trackId) {
 
 function adjacentTracks(db, trackId, urlOrOptions = {}) {
   const params = urlOrOptions?.searchParams || new URLSearchParams();
+  const playlistId = String(params.get("playlist") || params.get("playlistId") || "").trim();
+  if (playlistId) {
+    const rows = db
+      .prepare(
+        `
+        SELECT t.id
+        FROM music_playlist_items i
+        JOIN music_tracks t ON t.id = i.track_id
+        WHERE i.playlist_id = ? AND t.status = 'ok'
+        ORDER BY i.sort_order ASC, i.added_at ASC
+        LIMIT 2000
+      `
+      )
+      .all(playlistId);
+    const index = rows.findIndex((row) => row.id === trackId);
+    return {
+      prevId: index > 0 ? rows[index - 1].id : "",
+      nextId: index >= 0 && index < rows.length - 1 ? rows[index + 1].id : ""
+    };
+  }
   const filter = catalogFilter(params);
   const smartMix = findSmartMix(params.get("smart") || params.get("smartId"));
   const where = filter.trackWhere ? `WHERE ${filter.trackWhere}` : "";
