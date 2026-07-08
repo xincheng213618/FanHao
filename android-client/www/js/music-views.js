@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-18";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-21";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -762,11 +762,13 @@ export function createMusicViews(deps) {
     const download = iconButton("↓", () => downloadTrack(track), !track?.downloadUrl, "ghost", "下载原文件");
     topActions.append(favorite, addToList, download);
     top.append(close, heading, topActions);
+    attachFullscreenDismissSwipe(top);
 
     const switcher = renderFullPanelSwitch(track, panel);
     const stage = document.createElement("div");
     stage.className = "music-mobile-full-stage";
     stage.append(panel === "lyrics" ? renderFullLyricsPanel(track) : renderFullCoverPanel(track));
+    attachFullPanelSwipe(stage, track);
 
     const controls = document.createElement("div");
     controls.className = "music-mobile-full-controls";
@@ -791,7 +793,7 @@ export function createMusicViews(deps) {
     controls.append(shuffle, prev, play, next, repeat, queue);
 
     const progress = renderProgress("full", track, play);
-    full.append(top, switcher, stage, progress, controls);
+    full.append(top, switcher, stage, progress, renderVolumeControl(track), controls);
     if (state.queueOpen) full.append(renderQueueSheet());
     if (state.playlistSheetOpen) full.append(renderPlaylistSheet());
     if (panel === "lyrics") window.requestAnimationFrame(() => updateLyricHighlight(true));
@@ -827,13 +829,58 @@ export function createMusicViews(deps) {
       button.disabled = !track;
       button.setAttribute("aria-pressed", panel === activePanel ? "true" : "false");
       button.addEventListener("click", () => {
-        state.fullPanel = panel;
-        renderShell();
-        if (panel === "lyrics") updateLyricHighlight(true);
+        switchFullPanel(panel);
       });
       switcher.append(button);
     }
     return switcher;
+  }
+
+  function attachFullPanelSwipe(stage, track) {
+    if (!track) return;
+    let startX = 0;
+    let startY = 0;
+    stage.addEventListener("touchstart", (event) => {
+      const touch = event.touches?.[0];
+      if (!touch) return;
+      startX = touch.clientX;
+      startY = touch.clientY;
+    }, { passive: true });
+    stage.addEventListener("touchend", (event) => {
+      const touch = event.changedTouches?.[0];
+      if (!touch) return;
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      if (Math.abs(dx) < 54 || Math.abs(dx) < Math.abs(dy) * 1.35) return;
+      switchFullPanel(dx < 0 ? "cover" : "lyrics");
+    }, { passive: true });
+  }
+
+  function attachFullscreenDismissSwipe(target) {
+    let startX = 0;
+    let startY = 0;
+    target.addEventListener("touchstart", (event) => {
+      const touch = event.touches?.[0];
+      if (!touch) return;
+      startX = touch.clientX;
+      startY = touch.clientY;
+    }, { passive: true });
+    target.addEventListener("touchend", (event) => {
+      const touch = event.changedTouches?.[0];
+      if (!touch) return;
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      if (dy < 70 || Math.abs(dx) > dy * 0.75) return;
+      closeFullscreen();
+    }, { passive: true });
+  }
+
+  function switchFullPanel(panel) {
+    const next = normalizeFullPanel(panel, state.current || state.queue[0] || null);
+    if (state.fullPanel === next) return;
+    state.fullPanel = next;
+    renderShell();
+    if (next === "lyrics") updateLyricHighlight(true);
   }
 
   function renderFullCoverPanel(track) {
@@ -952,9 +999,10 @@ export function createMusicViews(deps) {
 
   function renderQueueItem(track, index) {
     const active = state.current?.id === track.id;
-    const row = document.createElement("button");
-    row.type = "button";
+    const row = document.createElement("div");
     row.className = `music-mobile-queue-item${active ? " active" : ""}`;
+    row.setAttribute("role", "button");
+    row.setAttribute("tabindex", "0");
     row.setAttribute("aria-label", `播放 ${track.title || "歌曲"}`);
     const number = document.createElement("span");
     number.className = "music-mobile-queue-index";
@@ -973,16 +1021,46 @@ export function createMusicViews(deps) {
     const duration = document.createElement("small");
     duration.className = "music-mobile-queue-duration";
     duration.textContent = formatClock(track.durationMs || 0);
-    row.append(number, text, duration);
-    row.addEventListener("click", () => {
+    const actions = document.createElement("span");
+    actions.className = "music-mobile-queue-actions";
+    actions.append(
+      queueActionButton("↑", "上移", () => moveQueueTrack(track.id, -1), index <= 0),
+      queueActionButton("↓", "下移", () => moveQueueTrack(track.id, 1), index >= state.queue.length - 1),
+      queueActionButton("×", "移出队列", () => removeTrackFromQueue(track.id), active)
+    );
+    row.append(number, text, duration, actions);
+    const play = () => {
       if (active) {
         state.queueOpen = false;
         renderShell();
         return;
       }
       openTrack(track.id, { autoplay: true }).catch(() => {});
+    };
+    row.addEventListener("click", play);
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      play();
     });
     return row;
+  }
+
+  function queueActionButton(label, ariaLabel, action, disabled = false) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `music-mobile-queue-action${disabled ? " disabled" : ""}`;
+    button.textContent = label;
+    button.disabled = disabled;
+    button.setAttribute("aria-label", ariaLabel);
+    button.title = ariaLabel;
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (disabled) return;
+      action();
+    });
+    return button;
   }
 
   function renderProgress(kind, track, playButton = null) {
@@ -1007,6 +1085,29 @@ export function createMusicViews(deps) {
     progressWrap.append(current, progress, total);
     bindProgress({ current, progress, total, playButton });
     return progressWrap;
+  }
+
+  function renderVolumeControl(track) {
+    const wrap = document.createElement("label");
+    wrap.className = "music-mobile-volume";
+    wrap.setAttribute("aria-label", "音量");
+    const icon = document.createElement("span");
+    icon.textContent = state.volume <= 0 ? "静音" : "音量";
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = "0";
+    slider.max = "100";
+    slider.value = String(Math.round(state.volume * 100));
+    slider.disabled = !track;
+    slider.addEventListener("input", () => setVolume(Number(slider.value || 0) / 100));
+    const value = document.createElement("em");
+    value.textContent = `${Math.round(state.volume * 100)}%`;
+    slider.addEventListener("input", () => {
+      value.textContent = `${Math.round(state.volume * 100)}%`;
+      icon.textContent = state.volume <= 0 ? "静音" : "音量";
+    });
+    wrap.append(icon, slider, value);
+    return wrap;
   }
 
   function bindProgress(binding) {
@@ -1140,6 +1241,14 @@ export function createMusicViews(deps) {
     });
   }
 
+  function setVolume(value) {
+    const next = Math.max(0, Math.min(1, Number(value || 0)));
+    state.volume = Number.isFinite(next) ? next : 0.86;
+    ensureAudio();
+    audio.volume = state.volume;
+    writeVolumePreference(state.volume);
+  }
+
   async function restoreLastTrack(renderGuard = null) {
     if (!canRestoreLastTrack()) return;
     const saved = readLastTrackPreference();
@@ -1192,19 +1301,43 @@ export function createMusicViews(deps) {
       if (target) await openTrack(target.id, { autoplay: true });
       return;
     }
+    const index = queue.findIndex((item) => item.id === state.current.id);
+    if (index >= 0) {
+      let nextIndex = index + direction;
+      if (nextIndex < 0 || nextIndex >= queue.length) {
+        if (!options.wrap && state.repeat !== "all") return;
+        nextIndex = nextIndex < 0 ? queue.length - 1 : 0;
+      }
+      const target = queue[nextIndex] || queue[0];
+      if (target) await openTrack(target.id, { autoplay: true });
+      return;
+    }
     const adjacentId = direction > 0 ? state.nextId : state.prevId;
     if (adjacentId) {
       await openTrack(adjacentId, { autoplay: true });
       return;
     }
-    const index = queue.findIndex((item) => item.id === state.current.id);
-    let nextIndex = index + direction;
-    if (nextIndex < 0 || nextIndex >= queue.length) {
-      if (!options.wrap && state.repeat !== "all") return;
-      nextIndex = nextIndex < 0 ? queue.length - 1 : 0;
-    }
-    const target = queue[nextIndex] || queue[0];
-    if (target) await openTrack(target.id, { autoplay: true });
+  }
+
+  function moveQueueTrack(trackId, direction) {
+    const queue = [...(state.queue || [])];
+    const index = queue.findIndex((item) => item.id === trackId);
+    const nextIndex = index + direction;
+    if (index < 0 || nextIndex < 0 || nextIndex >= queue.length) return;
+    const [item] = queue.splice(index, 1);
+    queue.splice(nextIndex, 0, item);
+    state.queue = queue;
+    state.status = `已调整「${item.title || "歌曲"}」顺序`;
+    renderShell();
+  }
+
+  function removeTrackFromQueue(trackId) {
+    if (!trackId || state.current?.id === trackId) return;
+    const queue = state.queue || [];
+    const removed = queue.find((item) => item.id === trackId);
+    state.queue = queue.filter((item) => item.id !== trackId);
+    state.status = removed ? `已移出队列「${removed.title || "歌曲"}」` : "已更新队列";
+    renderShell();
   }
 
   async function toggleFavorite(trackId) {
@@ -1740,6 +1873,12 @@ function readVolumePreference() {
   } catch {
     return 0.86;
   }
+}
+
+function writeVolumePreference(value) {
+  try {
+    window.localStorage?.setItem(MUSIC_VOLUME_KEY, String(Math.max(0, Math.min(1, Number(value || 0)))));
+  } catch {}
 }
 
 function readRepeatPreference() {

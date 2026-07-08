@@ -649,7 +649,7 @@
   z-index: 80;
   isolation: isolate;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
   gap: 14px;
   overflow: hidden;
   padding: calc(14px + env(safe-area-inset-top)) 18px calc(18px + env(safe-area-inset-bottom));
@@ -703,6 +703,7 @@
   grid-template-columns: 42px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
+  touch-action: pan-y;
 }
 
 .music-mobile-full-actions {
@@ -755,6 +756,7 @@
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+  touch-action: pan-y;
 }
 
 .music-mobile-full-cover-panel {
@@ -890,6 +892,29 @@
   accent-color: var(--green);
 }
 
+.music-mobile-volume {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 42px;
+  gap: 8px;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 2px;
+}
+
+.music-mobile-volume span,
+.music-mobile-volume em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 850;
+  text-align: center;
+}
+
+.music-mobile-volume input {
+  width: 100%;
+  accent-color: var(--green);
+}
+
 .music-mobile-progress.mini {
   grid-column: 1 / -1;
   grid-template-columns: minmax(0, 1fr);
@@ -971,7 +996,7 @@
 
 .music-mobile-queue-item {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 42px;
+  grid-template-columns: 34px minmax(0, 1fr) 42px auto;
   gap: 8px;
   align-items: center;
   min-height: 54px;
@@ -997,6 +1022,37 @@
 
 .music-mobile-queue-item.active .music-mobile-queue-index {
   color: var(--green);
+}
+
+.music-mobile-queue-actions {
+  display: inline-grid;
+  grid-template-columns: repeat(3, 30px);
+  gap: 3px;
+  justify-content: end;
+}
+
+.music-mobile-queue-action {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--green);
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.music-mobile-queue-action:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.music-mobile-queue-action.disabled,
+.music-mobile-queue-action:disabled {
+  color: var(--muted);
+  opacity: 0.4;
 }
 
 .music-mobile-playlist-choice {
