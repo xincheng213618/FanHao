@@ -66,7 +66,6 @@ export function createPeopleScopeService({
 
     const library = getLibrary();
     const westernWorkIds = new Set();
-    const mainWorkIds = new Set();
     const knownWorkIds = new Set();
     for (const work of library.worksById.values()) {
       const workId = String(work?.id || "");
@@ -74,13 +73,10 @@ export function createPeopleScopeService({
       knownWorkIds.add(workId);
       if (workInRoots(work, westernRoots)) {
         westernWorkIds.add(workId);
-      } else {
-        mainWorkIds.add(workId);
       }
     }
 
     const westernPersonIds = new Set();
-    const mainPersonIds = new Set();
     const knownPersonIds = new Set();
     const seen = new Set();
     for (const person of library.people) {
@@ -92,42 +88,38 @@ export function createPeopleScopeService({
 
       const paths = [merged.relativePath, ...(merged.sourcePaths || [])].filter(Boolean);
       const hasWesternPath = paths.some(sourcePathInWesternRoots);
-      const hasNonWesternPath = paths.some((sourcePath) => !sourcePathInWesternRoots(sourcePath));
       const workIds = (merged.works || []).map((workId) => String(workId || "")).filter(Boolean);
       const hasWesternWork = workIds.some((workId) => westernWorkIds.has(workId));
-      const hasNonWesternWork = workIds.some((workId) => knownWorkIds.has(workId) && !westernWorkIds.has(workId));
       const isWestern = hasWesternPath || hasWesternWork;
-      const isMain = !isWestern || hasNonWesternPath || hasNonWesternWork;
 
       if (isWestern) westernPersonIds.add(personId);
-      if (isMain) mainPersonIds.add(personId);
     }
 
-    const nextIndex = { westernWorkIds, mainWorkIds, knownWorkIds, westernPersonIds, mainPersonIds, knownPersonIds };
+    const nextIndex = { westernWorkIds, knownWorkIds, westernPersonIds, knownPersonIds };
     peopleScopeIndexCache = { key, index: nextIndex };
     return nextIndex;
   }
 
   function personMatches(person, scope) {
     const normalizedScope = normalize(scope);
+    if (normalizedScope === "main") return true;
     const scopeIndex = index();
     const personId = String(person?.id || "");
     if (personId && scopeIndex.knownPersonIds.has(personId)) {
-      return normalizedScope === "western" ? scopeIndex.westernPersonIds.has(personId) : scopeIndex.mainPersonIds.has(personId);
+      return scopeIndex.westernPersonIds.has(personId);
     }
-    if (normalizedScope === "western") return personInRoots(person, westernRoots);
-    return !personInRoots(person, westernRoots) || personHasNonWesternLocalSource(person);
+    return personInRoots(person, westernRoots);
   }
 
   function workMatches(work, scope) {
     const normalizedScope = normalize(scope);
+    if (normalizedScope === "main") return true;
     const scopeIndex = index();
     const workId = String(work?.id || "");
     if (workId && scopeIndex.knownWorkIds.has(workId)) {
-      return normalizedScope === "western" ? scopeIndex.westernWorkIds.has(workId) : scopeIndex.mainWorkIds.has(workId);
+      return scopeIndex.westernWorkIds.has(workId);
     }
-    if (normalizedScope === "western") return workInRoots(work, westernRoots);
-    return !workInRoots(work, westernRoots);
+    return workInRoots(work, westernRoots);
   }
 
   function invalidate() {

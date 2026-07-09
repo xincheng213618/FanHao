@@ -1,6 +1,9 @@
 package local.fanhao.library;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -10,31 +13,39 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
+import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.text.TextUtils;
 import android.util.LruCache;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
+import androidx.media3.common.VideoSize;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.ExoPlayer;
@@ -50,8 +61,10 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -71,6 +84,15 @@ public class NativeShortVideoActivity extends Activity {
   public static final String EXTRA_FEED_URL = "feedUrl";
   public static final String EXTRA_NEXT_OFFSET = "nextOffset";
   public static final String EXTRA_HAS_MORE = "hasMore";
+  public static final String EXTRA_OPEN_AUTHOR_PANEL = "openAuthorPanel";
+  private static final String PREFS_NAME = "fanhao.shortVideo.native";
+  private static final String PREF_MUTED = "muted";
+  private static final String PREF_AUTO_NEXT = "autoNext";
+  private static final String PREF_LIKED_VIDEO_KEYS = "likedVideoKeys";
+  private static final String PREF_COLLECTED_VIDEO_KEYS = "collectedVideoKeys";
+  private static final String PREF_FOLLOWED_AUTHOR_KEYS = "followedAuthorKeys";
+  private static final long STAGE_DOUBLE_TAP_MS = 280;
+  private static final float HORIZONTAL_GESTURE_RATIO = 1.25f;
 
   private final Handler mainHandler = new Handler(Looper.getMainLooper());
   private final ExecutorService executor = Executors.newFixedThreadPool(4);
@@ -86,17 +108,26 @@ public class NativeShortVideoActivity extends Activity {
   private final Map<Integer, ShortVideoHolder> attachedHolders = new HashMap<>();
   private final Map<Integer, ExoPlayer> playerCache = new HashMap<>();
   private final Map<Integer, PlayerView> playerViews = new HashMap<>();
+  private final Map<String, int[]> decodedVideoSizes = new HashMap<>();
   private final Set<Integer> primedPlayerIndexes = new HashSet<>();
   private final Set<Integer> primeRequestedIndexes = new HashSet<>();
   private final Set<Integer> primeCountdownIndexes = new HashSet<>();
+  private final Set<Integer> failedPlayerIndexes = new HashSet<>();
+  private final Set<String> likedVideoKeys = new HashSet<>();
+  private final Set<String> collectedVideoKeys = new HashSet<>();
+  private final Set<String> followedAuthorKeys = new HashSet<>();
   private final List<ScreenState> navigationStack = new ArrayList<>();
   private ExoPlayer activePlayer;
   private ViewPager2 pager;
   private ShortVideoAdapter adapter;
   private TextView statusView;
+  private TextView topInfoView;
+  private TextView topSearchButton;
   private FrameLayout rootView;
   private View authorOverlay;
+  private View playbackToolbarOverlay;
   private ScreenState currentScreen;
+  private String apiBaseUrl;
   private String pendingFeedUrl;
   private int pendingStartIndex;
   private int nextFeedOffset;
@@ -104,10 +135,23 @@ public class NativeShortVideoActivity extends Activity {
   private boolean loadingMoreVideos;
   private int currentIndex = -1;
   private int pendingPlayIndex = -1;
+  private int pendingAutoAdvanceIndex = -1;
   private Runnable pendingPrepareRunnable;
+  private Runnable progressRunnable;
+  private Runnable systemInfoRunnable;
+  private Runnable pendingStageTapRunnable;
+  private long lastStageTapAt;
+  private int lastStageTapIndex = -1;
   private boolean framePrefetchEnabled;
   private long createdAtMs;
   private boolean loggedFirstFrame;
+  private boolean muted;
+  private boolean autoNext;
+  private boolean controlsHidden;
+  private boolean openAuthorPanelOnStart;
+  private boolean activityResumed;
+  private boolean pausedForLifecycle;
+  private boolean resumePlaybackAfterPause;
 
   @Override
   protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -115,10 +159,14 @@ public class NativeShortVideoActivity extends Activity {
     createdAtMs = SystemClock.elapsedRealtime();
     requestWindowFeature(Window.FEATURE_NO_TITLE);
     setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+    hideSystemBars();
+    readControlPreferences();
+    apiBaseUrl = getIntent().getStringExtra(EXTRA_BASE_URL);
     pendingFeedUrl = getIntent().getStringExtra(EXTRA_FEED_URL);
     pendingStartIndex = Math.max(0, getIntent().getIntExtra(EXTRA_START_INDEX, 0));
     nextFeedOffset = Math.max(0, getIntent().getIntExtra(EXTRA_NEXT_OFFSET, 0));
     hasMoreVideos = getIntent().getBooleanExtra(EXTRA_HAS_MORE, false);
+    openAuthorPanelOnStart = getIntent().getBooleanExtra(EXTRA_OPEN_AUTHOR_PANEL, false);
     readVideos();
     buildUi();
     currentScreen = captureFeedScreen();
@@ -135,12 +183,36 @@ public class NativeShortVideoActivity extends Activity {
   @Override
   protected void onResume() {
     super.onResume();
+    activityResumed = true;
     hideSystemBars();
-    if (activePlayer != null) activePlayer.play();
+    startSystemInfoUpdates();
+    boolean shouldResumePlayback = pausedForLifecycle
+      && resumePlaybackAfterPause
+      && authorOverlay == null
+      && activePlayer != null;
+    Log.i(TAG, "lifecycle resume shouldPlay=" + shouldResumePlayback);
+    if (shouldResumePlayback) {
+      activePlayer.play();
+      startProgressUpdates();
+    } else {
+      updateActiveProgress();
+    }
+    pausedForLifecycle = false;
+    resumePlaybackAfterPause = false;
   }
 
   @Override
   protected void onPause() {
+    resumePlaybackAfterPause = authorOverlay == null
+      && activePlayer != null
+      && activePlayer.getPlayWhenReady()
+      && activePlayer.getPlaybackState() != Player.STATE_ENDED;
+    pausedForLifecycle = true;
+    activityResumed = false;
+    Log.i(TAG, "lifecycle pause resumePlayback=" + resumePlaybackAfterPause);
+    clearPendingStageTap();
+    stopSystemInfoUpdates();
+    stopProgressUpdates();
     for (ExoPlayer cachedPlayer : playerCache.values()) cachedPlayer.pause();
     super.onPause();
   }
@@ -148,6 +220,8 @@ public class NativeShortVideoActivity extends Activity {
   @Override
   protected void onDestroy() {
     Log.i(TAG, "destroy");
+    stopSystemInfoUpdates();
+    stopProgressUpdates();
     releaseAllPlayers();
     executor.shutdownNow();
     super.onDestroy();
@@ -161,6 +235,10 @@ public class NativeShortVideoActivity extends Activity {
 
   @Override
   public void onBackPressed() {
+    if (playbackToolbarOverlay != null) {
+      dismissPlaybackToolbar();
+      return;
+    }
     navigateBack();
   }
 
@@ -204,18 +282,42 @@ public class NativeShortVideoActivity extends Activity {
       ViewGroup.LayoutParams.MATCH_PARENT
     ));
 
-    TextView back = new TextView(this);
-    back.setText("‹");
-    back.setTextColor(Color.WHITE);
-    back.setTextSize(36);
-    back.setTypeface(Typeface.DEFAULT_BOLD);
-    back.setGravity(Gravity.CENTER);
-    back.setBackgroundColor(0x66000000);
-    back.setOnClickListener(view -> navigateBack());
-    FrameLayout.LayoutParams backParams = new FrameLayout.LayoutParams(dp(44), dp(44));
-    backParams.leftMargin = dp(14);
-    backParams.topMargin = dp(18);
-    root.addView(back, backParams);
+    topInfoView = new TextView(this);
+    topInfoView.setTextColor(0xE6FFFFFF);
+    topInfoView.setTextSize(12);
+    topInfoView.setTypeface(Typeface.DEFAULT_BOLD);
+    topInfoView.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+    topInfoView.setShadowLayer(8, 0, 2, 0xAA000000);
+    topInfoView.setPadding(dp(14), dp(8), dp(88), dp(4));
+    FrameLayout.LayoutParams topInfoParams = new FrameLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      dp(42),
+      Gravity.TOP
+    );
+    root.addView(topInfoView, topInfoParams);
+    updateSystemInfo();
+
+    topSearchButton = new TextView(this);
+    topSearchButton.setTextColor(Color.WHITE);
+    topSearchButton.setTextSize(13);
+    topSearchButton.setTypeface(Typeface.DEFAULT_BOLD);
+    topSearchButton.setGravity(Gravity.CENTER);
+    topSearchButton.setSingleLine(true);
+    topSearchButton.setMaxLines(1);
+    topSearchButton.setEllipsize(TextUtils.TruncateAt.END);
+    topSearchButton.setPadding(dp(10), 0, dp(10), 0);
+    topSearchButton.setBackground(roundedDrawable(0x66000000, dp(18)));
+    topSearchButton.setContentDescription("搜索短视频");
+    topSearchButton.setOnClickListener(view -> showFeedSearchDialog());
+    FrameLayout.LayoutParams searchParams = new FrameLayout.LayoutParams(
+      dp(70),
+      dp(34),
+      Gravity.TOP | Gravity.RIGHT
+    );
+    searchParams.topMargin = dp(5);
+    searchParams.rightMargin = dp(12);
+    root.addView(topSearchButton, searchParams);
+    updateTopSearchButton();
 
     statusView = new TextView(this);
     statusView.setTextColor(Color.WHITE);
@@ -236,12 +338,27 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void navigateBack() {
+    dismissPlaybackToolbar();
     if (navigationStack.isEmpty()) {
       finish();
       return;
     }
     ScreenState previous = navigationStack.remove(navigationStack.size() - 1);
+    if (previous instanceof AuthorScreenState) {
+      syncAuthorReturnState((AuthorScreenState) previous);
+    }
     renderScreen(previous);
+  }
+
+  private void syncAuthorReturnState(AuthorScreenState screen) {
+    if (!(currentScreen instanceof FeedScreenState) || currentIndex < 0 || currentIndex >= videos.size()) return;
+    ShortVideoItem current = videos.get(currentIndex);
+    if (!sameAuthor(screen.seed, current)) return;
+    screen.currentItem = current;
+    if (screen.page != null && findVideoIndex(screen.page.items, current.id) < 0) {
+      screen.page.items.add(current);
+      screen.page.total = Math.max(screen.page.total, screen.page.items.size());
+    }
   }
 
   private void pushCurrentScreen() {
@@ -279,9 +396,11 @@ public class NativeShortVideoActivity extends Activity {
     releaseAllPlayers();
     attachedHolders.clear();
     loadingMoreVideos = false;
+    pendingAutoAdvanceIndex = -1;
     currentIndex = -1;
     pendingPlayIndex = -1;
     pendingFeedUrl = screen.feedUrl;
+    updateTopSearchButton();
     nextFeedOffset = Math.max(0, screen.nextOffset);
     hasMoreVideos = screen.hasMore;
     videos.clear();
@@ -313,7 +432,18 @@ public class NativeShortVideoActivity extends Activity {
     pager.post(() -> {
       playAt(safeIndex);
       schedulePrepareAround(safeIndex, 360);
+      openAuthorPanelIfRequested();
     });
+  }
+
+  private void openAuthorPanelIfRequested() {
+    if (!openAuthorPanelOnStart || videos.isEmpty() || authorOverlay != null) return;
+    openAuthorPanelOnStart = false;
+    mainHandler.postDelayed(() -> {
+      if (videos.isEmpty() || authorOverlay != null) return;
+      int index = currentIndex >= 0 ? currentIndex : Math.max(0, Math.min(pendingStartIndex, videos.size() - 1));
+      if (index >= 0 && index < videos.size()) showAuthorPanel(videos.get(index));
+    }, 360);
   }
 
   private void playAt(int index) {
@@ -331,10 +461,12 @@ public class NativeShortVideoActivity extends Activity {
     if (nextPlayer == null) return;
     boolean alreadyActive = activePlayer == nextPlayer;
     if (alreadyActive) {
-      activePlayer.setVolume(1f);
+      activePlayer.setRepeatMode(activeRepeatMode());
+      activePlayer.setVolume(activeVolume());
       ensurePlayerViewAt(index);
       if (activePlayer.getPlaybackState() == Player.STATE_READY) holder.cover.setVisibility(View.GONE);
-      activePlayer.play();
+      if (activePlayer.getPlaybackState() == Player.STATE_ENDED) activePlayer.seekTo(0);
+      startActivePlaybackIfVisible();
       return;
     }
     if (activePlayer != null && activePlayer != nextPlayer) {
@@ -345,8 +477,10 @@ public class NativeShortVideoActivity extends Activity {
     primedPlayerIndexes.remove(index);
     primeRequestedIndexes.remove(index);
     primeCountdownIndexes.remove(index);
-    activePlayer.setVolume(1f);
+    activePlayer.setRepeatMode(activeRepeatMode());
+    activePlayer.setVolume(activeVolume());
     ensurePlayerViewAt(index);
+    if (activePlayer.getPlaybackState() == Player.STATE_ENDED) activePlayer.seekTo(0);
     if (activePlayer.getPlaybackState() == Player.STATE_READY) {
       if (activePlayer.getCurrentPosition() > 0) {
         holder.cover.setVisibility(View.GONE);
@@ -359,15 +493,22 @@ public class NativeShortVideoActivity extends Activity {
       holder.cover.setVisibility(View.VISIBLE);
     }
     framePrefetchEnabled = true;
-    activePlayer.play();
+    startActivePlaybackIfVisible();
     Log.i(TAG, "play " + index + " " + item.streamUrl);
     loadMoreIfNeeded(index);
+  }
+
+  private void startActivePlaybackIfVisible() {
+    if (!activityResumed || authorOverlay != null || activePlayer == null || isFinishing()) return;
+    activePlayer.play();
+    startProgressUpdates();
   }
 
   private ExoPlayer preparePlayerAt(int index) {
     if (index < 0 || index >= videos.size()) return null;
     ExoPlayer cachedPlayer = playerCache.get(index);
     if (cachedPlayer != null) {
+      cachedPlayer.setRepeatMode(activeRepeatMode());
       ensurePlayerViewAt(index);
       return cachedPlayer;
     }
@@ -378,26 +519,44 @@ public class NativeShortVideoActivity extends Activity {
         .setBufferDurationsMs(600, 2000, 100, 220)
         .build())
       .build();
-    preparedPlayer.setRepeatMode(Player.REPEAT_MODE_ONE);
+    preparedPlayer.setRepeatMode(activeRepeatMode());
     preparedPlayer.setVolume(0f);
     preparedPlayer.setMediaItem(MediaItem.fromUri(Uri.parse(item.streamUrl)));
     preparedPlayer.addListener(new Player.Listener() {
       @Override
       public void onRenderedFirstFrame() {
         if (currentIndex != index) return;
+        failedPlayerIndexes.remove(index);
         if (!loggedFirstFrame) {
           loggedFirstFrame = true;
           Log.i(TAG, "first frame in " + (SystemClock.elapsedRealtime() - createdAtMs) + "ms");
         }
         ShortVideoHolder holder = attachedHolders.get(index);
         if (holder != null) holder.cover.setVisibility(View.GONE);
+        hideStatus();
         mainHandler.post(() -> preparePlayersAround(index));
       }
 
       @Override
+      public void onVideoSizeChanged(@NonNull VideoSize videoSize) {
+        mainHandler.post(() -> {
+          rememberDecodedVideoSize(index, videoSize.width, videoSize.height);
+          applyVideoResizeMode(index, videoSize.width, videoSize.height);
+          Log.i(TAG, "video size " + index + " " + videoSize.width + "x" + videoSize.height
+            + " mode=" + (isLandscapeVideo(videoSize.width, videoSize.height) ? "fit" : "zoom"));
+        });
+      }
+
+      @Override
       public void onPlaybackStateChanged(int playbackState) {
+        if (playbackState == Player.STATE_ENDED && currentIndex == index && autoNext) {
+          mainHandler.post(() -> advanceAfterEnded(index));
+          return;
+        }
         if (playbackState != Player.STATE_READY) return;
+        failedPlayerIndexes.remove(index);
         if (currentIndex == index) {
+          hideStatus();
           ShortVideoHolder holder = attachedHolders.get(index);
           if (holder != null) {
             holder.cover.postDelayed(() -> {
@@ -408,6 +567,11 @@ public class NativeShortVideoActivity extends Activity {
           startPrimeCountdown(index, preparedPlayer);
         }
       }
+
+      @Override
+      public void onPlayerError(@NonNull PlaybackException error) {
+        mainHandler.post(() -> handlePlaybackError(index, preparedPlayer, error));
+      }
     });
     preparedPlayer.prepare();
     playerCache.put(index, preparedPlayer);
@@ -417,18 +581,89 @@ public class NativeShortVideoActivity extends Activity {
     return preparedPlayer;
   }
 
+  private void advanceAfterEnded(int index) {
+    if (!activityResumed || authorOverlay != null || !autoNext || currentIndex != index) return;
+    if (index + 1 < videos.size()) {
+      pager.setCurrentItem(index + 1, true);
+      return;
+    }
+    if (hasMoreVideos && pendingFeedUrl != null && pendingFeedUrl.trim().length() > 0) {
+      pendingAutoAdvanceIndex = index;
+      showStatus("正在加载下一条");
+      loadMoreIfNeeded(index);
+      return;
+    }
+    ExoPlayer player = playerCache.get(index);
+    if (player != null) {
+      player.seekTo(0);
+      player.play();
+    }
+  }
+
+  private void handlePlaybackError(int index, ExoPlayer player, PlaybackException error) {
+    if (playerCache.get(index) != player && activePlayer != player) return;
+    if (playerCache.get(index) == player) {
+      playerCache.remove(index);
+      primedPlayerIndexes.remove(index);
+      primeRequestedIndexes.remove(index);
+      primeCountdownIndexes.remove(index);
+      if (activePlayer == player) activePlayer = null;
+      PlayerView view = playerViews.get(index);
+      if (view != null) view.setPlayer(null);
+      player.release();
+    }
+    failedPlayerIndexes.add(index);
+    ShortVideoHolder holder = attachedHolders.get(index);
+    if (holder != null) holder.cover.setVisibility(View.VISIBLE);
+    if (currentIndex == index) {
+      stopProgressUpdates();
+      updateActiveProgress();
+      showStatus("播放失败，点一下重试");
+    }
+    Log.w(TAG, "playback error " + index + " " + error.getErrorCodeName());
+  }
+
+  private void retryPlaybackAt(int index) {
+    if (index < 0 || index >= videos.size()) return;
+    failedPlayerIndexes.remove(index);
+    showStatus("正在重试播放");
+    releasePlayerAt(index);
+    preparePlayerAt(index);
+    pager.post(() -> playAt(index));
+  }
+
+  private void releasePlayerAt(int index) {
+    ExoPlayer player = playerCache.remove(index);
+    primedPlayerIndexes.remove(index);
+    primeRequestedIndexes.remove(index);
+    primeCountdownIndexes.remove(index);
+    failedPlayerIndexes.remove(index);
+    if (player != null) {
+      if (player == activePlayer) activePlayer = null;
+      player.release();
+    }
+    PlayerView view = playerViews.remove(index);
+    if (view != null) {
+      view.setPlayer(null);
+      if (view.getParent() instanceof ViewGroup) {
+        ((ViewGroup) view.getParent()).removeView(view);
+      }
+    }
+  }
+
   @Nullable
   private PlayerView ensurePlayerViewAt(int index) {
     if (index < 0 || index >= videos.size()) return null;
     PlayerView view = playerViews.get(index);
     if (view == null) {
+      int[] dimensions = resolvedVideoSize(index);
       view = (PlayerView) getLayoutInflater().inflate(R.layout.native_short_player_view, pager, false);
       view.setClickable(false);
       view.setFocusable(false);
       view.setEnabled(false);
       view.setUseController(false);
       view.setKeepContentOnPlayerReset(true);
-      view.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_ZOOM);
+      view.setResizeMode(resizeModeFor(dimensions[0], dimensions[1]));
       ExoPlayer cachedPlayer = playerCache.get(index);
       if (cachedPlayer != null) view.setPlayer(cachedPlayer);
       playerViews.put(index, view);
@@ -445,12 +680,55 @@ public class NativeShortVideoActivity extends Activity {
         ViewGroup.LayoutParams.MATCH_PARENT
       ));
     }
+    int[] dimensions = resolvedVideoSize(index);
+    applyVideoResizeMode(index, dimensions[0], dimensions[1]);
     return view;
+  }
+
+  private void rememberDecodedVideoSize(int index, int width, int height) {
+    if (index < 0 || index >= videos.size() || width <= 0 || height <= 0) return;
+    String key = videoInteractionKey(videos.get(index));
+    if (key.length() > 0) decodedVideoSizes.put(key, new int[] { width, height });
+  }
+
+  private int[] resolvedVideoSize(int index) {
+    if (index < 0 || index >= videos.size()) return new int[] { 0, 0 };
+    ShortVideoItem item = videos.get(index);
+    String key = videoInteractionKey(item);
+    int[] decoded = key.length() == 0 ? null : decodedVideoSizes.get(key);
+    if (decoded != null && decoded.length >= 2 && decoded[0] > 0 && decoded[1] > 0) {
+      return decoded;
+    }
+    return new int[] { item.width, item.height };
+  }
+
+  private void applyVideoResizeMode(int index, int width, int height) {
+    if (index < 0 || index >= videos.size() || width <= 0 || height <= 0) return;
+    boolean landscape = isLandscapeVideo(width, height);
+    PlayerView view = playerViews.get(index);
+    if (view != null) view.setResizeMode(landscape
+      ? AspectRatioFrameLayout.RESIZE_MODE_FIT
+      : AspectRatioFrameLayout.RESIZE_MODE_ZOOM);
+    ShortVideoHolder holder = attachedHolders.get(index);
+    if (holder != null) {
+      holder.stage.setBackgroundColor(Color.BLACK);
+      holder.cover.setScaleType(landscape ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
+    }
+  }
+
+  private int resizeModeFor(int width, int height) {
+    return isLandscapeVideo(width, height)
+      ? AspectRatioFrameLayout.RESIZE_MODE_FIT
+      : AspectRatioFrameLayout.RESIZE_MODE_ZOOM;
+  }
+
+  private boolean isLandscapeVideo(int width, int height) {
+    return width > 0 && height > 0 && width / (float) height >= 1.08f;
   }
 
   private void preparePlayersAround(int index) {
     loadMoreIfNeeded(index);
-    for (int i = index - 1; i <= index + 1; i++) {
+    for (int i = index - 1; i <= index + 2; i++) {
       ExoPlayer preparedPlayer = preparePlayerAt(i);
       if (i != index) primeNeighborPlayer(i, preparedPlayer);
     }
@@ -458,7 +736,8 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void runNeighborsDuringDrag(int index) {
-    for (int i = index - 1; i <= index + 1; i++) {
+    if (!activityResumed || authorOverlay != null) return;
+    for (int i = index - 1; i <= index + 2; i++) {
       if (i == index) continue;
       ExoPlayer preparedPlayer = preparePlayerAt(i);
       if (preparedPlayer == null || preparedPlayer == activePlayer) continue;
@@ -479,6 +758,7 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void primeNeighborPlayer(int index, @Nullable ExoPlayer preparedPlayer) {
+    if (!activityResumed || authorOverlay != null) return;
     if (preparedPlayer == null || index < 0 || index >= videos.size()) return;
     if (preparedPlayer == activePlayer || primedPlayerIndexes.contains(index) || primeRequestedIndexes.contains(index)) return;
     if (preparedPlayer.getPlaybackState() == Player.STATE_ENDED) preparedPlayer.seekTo(0);
@@ -508,11 +788,12 @@ public class NativeShortVideoActivity extends Activity {
   private void releaseDistantPlayers(int centerIndex) {
     List<Integer> keys = new ArrayList<>(playerCache.keySet());
     for (int key : keys) {
-      if (Math.abs(key - centerIndex) <= 1) continue;
+      if (key >= centerIndex - 1 && key <= centerIndex + 2) continue;
       ExoPlayer stalePlayer = playerCache.remove(key);
       primedPlayerIndexes.remove(key);
       primeRequestedIndexes.remove(key);
       primeCountdownIndexes.remove(key);
+      failedPlayerIndexes.remove(key);
       if (stalePlayer == null) continue;
       if (stalePlayer == activePlayer) {
         activePlayer = null;
@@ -530,6 +811,9 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void releaseAllPlayers() {
+    clearPendingStageTap();
+    dismissPlaybackToolbar();
+    stopProgressUpdates();
     for (ExoPlayer cachedPlayer : playerCache.values()) cachedPlayer.release();
     for (PlayerView cachedView : playerViews.values()) {
       cachedView.setPlayer(null);
@@ -542,12 +826,527 @@ public class NativeShortVideoActivity extends Activity {
     primedPlayerIndexes.clear();
     primeRequestedIndexes.clear();
     primeCountdownIndexes.clear();
+    failedPlayerIndexes.clear();
     activePlayer = null;
+  }
+
+  private void toggleActivePlayback() {
+    if (activePlayer == null || currentIndex < 0) return;
+    if (activePlayer.getPlaybackState() == Player.STATE_ENDED) activePlayer.seekTo(0);
+    if (activePlayer.isPlaying()) {
+      activePlayer.pause();
+      updateActiveProgress();
+      showTransientStatus("已暂停");
+    } else {
+      activePlayer.play();
+      startProgressUpdates();
+      showTransientStatus("继续播放");
+    }
+  }
+
+  private void handleStageTap(int index) {
+    if (index < 0 || index >= videos.size()) return;
+    long now = SystemClock.uptimeMillis();
+    if (pendingStageTapRunnable != null && lastStageTapIndex == index && now - lastStageTapAt <= STAGE_DOUBLE_TAP_MS) {
+      clearPendingStageTap();
+      activateLike(videos.get(index), true);
+      return;
+    }
+    clearPendingStageTap();
+    lastStageTapAt = now;
+    lastStageTapIndex = index;
+    pendingStageTapRunnable = () -> {
+      pendingStageTapRunnable = null;
+      lastStageTapAt = 0;
+      lastStageTapIndex = -1;
+      if (currentIndex != index) return;
+      if (failedPlayerIndexes.contains(index)) retryPlaybackAt(index);
+      else if (controlsHidden) setControlsHidden(false, true);
+      else toggleActivePlayback();
+    };
+    mainHandler.postDelayed(pendingStageTapRunnable, STAGE_DOUBLE_TAP_MS);
+  }
+
+  private boolean handleStageTouch(ShortVideoHolder holder, View view, MotionEvent event) {
+    if (holder == null || event == null) return false;
+    int action = event.getActionMasked();
+    if (action == MotionEvent.ACTION_DOWN) {
+      holder.touchStartX = event.getX();
+      holder.touchStartY = event.getY();
+      holder.touchActive = true;
+      holder.horizontalGesture = false;
+      holder.longPressTriggered = false;
+      scheduleStageLongPress(holder, view);
+      return false;
+    }
+    if (!holder.touchActive) return false;
+    if (action == MotionEvent.ACTION_MOVE) {
+      float dx = event.getX() - holder.touchStartX;
+      float dy = event.getY() - holder.touchStartY;
+      if (Math.abs(dx) > dp(12) || Math.abs(dy) > dp(12)) cancelStageLongPress(holder);
+      if (!holder.horizontalGesture && Math.abs(dx) > dp(22) && Math.abs(dx) > Math.abs(dy) * HORIZONTAL_GESTURE_RATIO) {
+        holder.horizontalGesture = true;
+        setParentInterceptDisallowed(view, true);
+      }
+      return holder.horizontalGesture;
+    }
+    if (action == MotionEvent.ACTION_UP) {
+      float dx = event.getX() - holder.touchStartX;
+      float dy = event.getY() - holder.touchStartY;
+      boolean horizontal = holder.horizontalGesture || (Math.abs(dx) > dp(72) && Math.abs(dx) > Math.abs(dy) * HORIZONTAL_GESTURE_RATIO);
+      holder.touchActive = false;
+      holder.horizontalGesture = false;
+      boolean consumedLongPress = holder.longPressTriggered;
+      holder.longPressTriggered = false;
+      cancelStageLongPress(holder);
+      setParentInterceptDisallowed(view, false);
+      if (consumedLongPress) return true;
+      if (!horizontal) return false;
+      handleHorizontalSwipe(holder.index, dx);
+      return true;
+    }
+    if (action == MotionEvent.ACTION_CANCEL) {
+      holder.touchActive = false;
+      holder.horizontalGesture = false;
+      holder.longPressTriggered = false;
+      cancelStageLongPress(holder);
+      setParentInterceptDisallowed(view, false);
+    }
+    return false;
+  }
+
+  private boolean handleGestureLayerTouch(ShortVideoHolder holder, View view, MotionEvent event) {
+    if (holder == null || event == null) return true;
+    int action = event.getActionMasked();
+    if (action == MotionEvent.ACTION_DOWN) {
+      holder.touchStartX = event.getRawX();
+      holder.touchStartY = event.getRawY();
+      holder.touchActive = true;
+      holder.horizontalGesture = false;
+      holder.verticalGesture = false;
+      holder.longPressTriggered = false;
+      setParentInterceptDisallowed(view, true);
+      scheduleStageLongPress(holder, view);
+      return true;
+    }
+    if (!holder.touchActive) return true;
+    if (action == MotionEvent.ACTION_MOVE) {
+      float dx = event.getRawX() - holder.touchStartX;
+      float dy = event.getRawY() - holder.touchStartY;
+      if (Math.abs(dx) > dp(32) || Math.abs(dy) > dp(32)) cancelStageLongPress(holder);
+      if (!holder.horizontalGesture && !holder.verticalGesture && Math.abs(dx) > dp(28) && Math.abs(dx) > Math.abs(dy) * HORIZONTAL_GESTURE_RATIO) {
+        holder.horizontalGesture = true;
+        setParentInterceptDisallowed(view, true);
+      } else if (!holder.horizontalGesture && !holder.verticalGesture && Math.abs(dy) > dp(42) && Math.abs(dy) > Math.abs(dx) * 1.1f) {
+        holder.verticalGesture = true;
+        setParentInterceptDisallowed(view, false);
+      }
+      return true;
+    }
+    if (action == MotionEvent.ACTION_UP) {
+      float dx = event.getRawX() - holder.touchStartX;
+      float dy = event.getRawY() - holder.touchStartY;
+      boolean consumedLongPress = holder.longPressTriggered;
+      boolean horizontal = holder.horizontalGesture || (Math.abs(dx) > dp(72) && Math.abs(dx) > Math.abs(dy) * HORIZONTAL_GESTURE_RATIO);
+      boolean vertical = holder.verticalGesture || (Math.abs(dy) > dp(86) && Math.abs(dy) > Math.abs(dx) * 1.1f);
+      holder.touchActive = false;
+      holder.horizontalGesture = false;
+      holder.verticalGesture = false;
+      holder.longPressTriggered = false;
+      cancelStageLongPress(holder);
+      setParentInterceptDisallowed(view, false);
+      if (consumedLongPress) return true;
+      if (horizontal) {
+        handleHorizontalSwipe(holder.index, dx);
+      } else if (!vertical) {
+        handleStageTap(holder.index);
+      }
+      return true;
+    }
+    if (action == MotionEvent.ACTION_CANCEL) {
+      holder.touchActive = false;
+      holder.horizontalGesture = false;
+      holder.verticalGesture = false;
+      holder.longPressTriggered = false;
+      cancelStageLongPress(holder);
+      setParentInterceptDisallowed(view, false);
+    }
+    return true;
+  }
+
+  private void scheduleStageLongPress(ShortVideoHolder holder, View view) {
+    cancelStageLongPress(holder);
+    holder.longPressRunnable = () -> {
+      holder.longPressRunnable = null;
+      if (holder.index < 0 || holder.index >= videos.size()) return;
+      if (attachedHolders.get(holder.index) != holder || holder.horizontalGesture) return;
+      holder.longPressTriggered = true;
+      clearPendingStageTap();
+      if (view != null) view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+      showPlaybackToolbar(videos.get(holder.index));
+    };
+    mainHandler.postDelayed(holder.longPressRunnable, 560);
+  }
+
+  private void cancelStageLongPress(ShortVideoHolder holder) {
+    if (holder != null && holder.longPressRunnable != null) {
+      mainHandler.removeCallbacks(holder.longPressRunnable);
+      holder.longPressRunnable = null;
+    }
+  }
+
+  private void handleHorizontalSwipe(int index, float deltaX) {
+    if (index < 0 || index >= videos.size()) return;
+    clearPendingStageTap();
+    if (deltaX > 0) {
+      boolean authorFeed = isViewingAuthorFeed();
+      Log.i(TAG, "horizontal swipe right index=" + index + " authorFeed=" + authorFeed);
+      if (authorFeed && navigationStack.isEmpty()) {
+        showAuthorPanel(videos.get(index));
+        return;
+      }
+      navigateBack();
+      return;
+    }
+    if (isViewingAuthorFeed()) {
+      Log.i(TAG, "horizontal swipe left blocked in author feed index=" + index);
+      showTransientStatus("已在作者页，右滑返回");
+      return;
+    }
+    Log.i(TAG, "horizontal swipe left open author index=" + index);
+    showAuthorPanel(videos.get(index));
+  }
+
+  private boolean isViewingAuthorFeed() {
+    if (!(currentScreen instanceof FeedScreenState)) return false;
+    if (!navigationStack.isEmpty()
+      && navigationStack.get(navigationStack.size() - 1) instanceof AuthorScreenState) return true;
+    try {
+      Uri uri = Uri.parse(pendingFeedUrl == null ? "" : pendingFeedUrl);
+      return uri.getQueryParameter("author") != null && uri.getQueryParameter("author").trim().length() > 0;
+    } catch (Exception ignored) {
+      return false;
+    }
+  }
+
+  private void clearPendingStageTap() {
+    if (pendingStageTapRunnable != null) {
+      mainHandler.removeCallbacks(pendingStageTapRunnable);
+      pendingStageTapRunnable = null;
+    }
+    lastStageTapAt = 0;
+    lastStageTapIndex = -1;
+  }
+
+  private void activateLike(ShortVideoItem item, boolean showBurst) {
+    String key = videoInteractionKey(item);
+    if (key.length() == 0) return;
+    boolean added = likedVideoKeys.add(key);
+    if (added) persistVideoInteractionKeys(PREF_LIKED_VIDEO_KEYS, likedVideoKeys);
+    refreshVisibleRails();
+    if (showBurst) showLikeBurst(item);
+    showTransientStatus(added ? "已点赞" : "已点过赞");
+  }
+
+  private void toggleLike(ShortVideoItem item) {
+    String key = videoInteractionKey(item);
+    if (key.length() == 0) return;
+    if (!likedVideoKeys.contains(key)) {
+      activateLike(item, true);
+      return;
+    }
+    likedVideoKeys.remove(key);
+    persistVideoInteractionKeys(PREF_LIKED_VIDEO_KEYS, likedVideoKeys);
+    refreshVisibleRails();
+    showTransientStatus("已取消点赞");
+  }
+
+  private long displayLikes(ShortVideoItem item) {
+    return item.likes + (isLiked(item) ? 1 : 0);
+  }
+
+  private boolean isLiked(ShortVideoItem item) {
+    String key = videoInteractionKey(item);
+    return key.length() > 0 && likedVideoKeys.contains(key);
+  }
+
+  private void toggleCollected(ShortVideoItem item) {
+    String key = videoInteractionKey(item);
+    if (key.length() == 0) return;
+    boolean collected;
+    if (collectedVideoKeys.contains(key)) {
+      collectedVideoKeys.remove(key);
+      collected = false;
+    } else {
+      collectedVideoKeys.add(key);
+      collected = true;
+    }
+    persistVideoInteractionKeys(PREF_COLLECTED_VIDEO_KEYS, collectedVideoKeys);
+    refreshVisibleRails();
+    showTransientStatus(collected ? "已收藏" : "已取消收藏");
+  }
+
+  private long displayCollects(ShortVideoItem item) {
+    return item.collects + (isCollected(item) ? 1 : 0);
+  }
+
+  private boolean isCollected(ShortVideoItem item) {
+    String key = videoInteractionKey(item);
+    return key.length() > 0 && collectedVideoKeys.contains(key);
+  }
+
+  private String videoInteractionKey(ShortVideoItem item) {
+    if (item == null) return "";
+    if (item.id.length() > 0) return item.id;
+    if (item.awemeId.length() > 0) return "aweme:" + item.awemeId;
+    if (item.streamUrl.length() > 0) return "stream:" + item.streamUrl;
+    return "";
+  }
+
+  private String authorInteractionKey(ShortVideoItem item) {
+    if (item == null) return "";
+    if (item.authorSecUid.length() > 0) return "sec:" + item.authorSecUid;
+    if (item.authorUid.length() > 0) return "uid:" + item.authorUid;
+    if (item.authorUniqueId.length() > 0) return "unique:" + item.authorUniqueId;
+    if (item.author.length() > 0) return "name:" + item.author;
+    return "";
+  }
+
+  private boolean isFollowingAuthor(ShortVideoItem item) {
+    String key = authorInteractionKey(item);
+    return key.length() > 0 && followedAuthorKeys.contains(key);
+  }
+
+  private void toggleFollowingAuthor(ShortVideoItem item) {
+    String key = authorInteractionKey(item);
+    if (key.length() == 0) {
+      showTransientStatus("这个视频没有作者信息");
+      return;
+    }
+    boolean following;
+    if (followedAuthorKeys.contains(key)) {
+      followedAuthorKeys.remove(key);
+      following = false;
+    } else {
+      followedAuthorKeys.add(key);
+      following = true;
+    }
+    persistVideoInteractionKeys(PREF_FOLLOWED_AUTHOR_KEYS, followedAuthorKeys);
+    refreshVisibleRails();
+    showTransientStatus(following ? "已关注 " + displayAuthor(item) : "已取消关注");
+  }
+
+  private void bindFollowButton(TextView button, ShortVideoItem item) {
+    if (button == null) return;
+    boolean following = isFollowingAuthor(item);
+    button.setText(following ? "已关注" : "+ 关注");
+    button.setTextColor(following ? 0xFF161823 : Color.WHITE);
+    button.setBackground(roundedDrawable(following ? 0xFFEFF1F5 : 0xFFFE2C55, dp(8)));
+    button.setContentDescription((following ? "取消关注 " : "关注 ") + displayAuthor(item));
+  }
+
+  private void showLikeBurst(ShortVideoItem item) {
+    ShortVideoHolder holder = null;
+    if (currentIndex >= 0 && currentIndex < videos.size() && isSameVideo(videos.get(currentIndex), item)) {
+      holder = attachedHolders.get(currentIndex);
+    }
+    if (holder == null) {
+      for (ShortVideoHolder candidate : attachedHolders.values()) {
+        if (candidate.index >= 0 && candidate.index < videos.size() && isSameVideo(videos.get(candidate.index), item)) {
+          holder = candidate;
+          break;
+        }
+      }
+    }
+    if (holder == null) return;
+    TextView burst = holder.likeBurst;
+    burst.animate().cancel();
+    burst.setVisibility(View.VISIBLE);
+    burst.setAlpha(0f);
+    burst.setScaleX(0.62f);
+    burst.setScaleY(0.62f);
+    burst.animate()
+      .alpha(1f)
+      .scaleX(1.12f)
+      .scaleY(1.12f)
+      .setStartDelay(0)
+      .setDuration(120)
+      .withEndAction(() -> burst.animate()
+        .alpha(0f)
+        .scaleX(1.34f)
+        .scaleY(1.34f)
+        .setStartDelay(160)
+        .setDuration(260)
+        .withEndAction(() -> burst.setVisibility(View.GONE))
+        .start())
+      .start();
+  }
+
+  private void resetLikeBurst(ShortVideoHolder holder) {
+    holder.likeBurst.animate().cancel();
+    holder.likeBurst.setVisibility(View.GONE);
+    holder.likeBurst.setAlpha(0f);
+    holder.likeBurst.setScaleX(0.62f);
+    holder.likeBurst.setScaleY(0.62f);
+  }
+
+  private void setControlsHidden(boolean hidden, boolean showToast) {
+    if (controlsHidden == hidden && !showToast) return;
+    controlsHidden = hidden;
+    for (ShortVideoHolder holder : attachedHolders.values()) applyControlsVisibility(holder);
+    if (showToast) showTransientStatus(hidden ? "已清屏，点一下恢复控件" : "已显示控件");
+  }
+
+  private void applyControlsVisibility(ShortVideoHolder holder) {
+    int visibility = controlsHidden ? View.GONE : View.VISIBLE;
+    holder.caption.setVisibility(visibility);
+    holder.rail.setVisibility(visibility);
+    holder.progressTouch.setVisibility(visibility);
+    if (topSearchButton != null) topSearchButton.setVisibility(visibility);
+    if (controlsHidden) hideSeekPreview(holder, false);
+  }
+
+  private void startSystemInfoUpdates() {
+    if (systemInfoRunnable != null) mainHandler.removeCallbacks(systemInfoRunnable);
+    systemInfoRunnable = new Runnable() {
+      @Override
+      public void run() {
+        updateSystemInfo();
+        mainHandler.postDelayed(this, 30000);
+      }
+    };
+    mainHandler.post(systemInfoRunnable);
+  }
+
+  private void stopSystemInfoUpdates() {
+    if (systemInfoRunnable != null) {
+      mainHandler.removeCallbacks(systemInfoRunnable);
+      systemInfoRunnable = null;
+    }
+  }
+
+  private void updateSystemInfo() {
+    if (topInfoView == null) return;
+    String time = new SimpleDateFormat("MM/dd HH:mm", Locale.CHINA).format(new Date());
+    int battery = -1;
+    try {
+      BatteryManager manager = (BatteryManager) getSystemService(BATTERY_SERVICE);
+      if (manager != null) battery = manager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+    } catch (Exception ignored) {}
+    topInfoView.setText(battery >= 0 ? time + "  电量 " + battery + "%" : time);
+  }
+
+  private void startProgressUpdates() {
+    if (progressRunnable != null) mainHandler.removeCallbacks(progressRunnable);
+    progressRunnable = new Runnable() {
+      @Override
+      public void run() {
+        updateActiveProgress();
+        if (activePlayer != null && currentIndex >= 0) {
+          mainHandler.postDelayed(this, activePlayer.isPlaying() ? 250 : 600);
+        }
+      }
+    };
+    mainHandler.post(progressRunnable);
+  }
+
+  private void stopProgressUpdates() {
+    if (progressRunnable != null) {
+      mainHandler.removeCallbacks(progressRunnable);
+      progressRunnable = null;
+    }
+  }
+
+  private void updateActiveProgress() {
+    if (currentIndex < 0) return;
+    ShortVideoHolder holder = attachedHolders.get(currentIndex);
+    if (holder == null || activePlayer == null) return;
+    long duration = activePlayer.getDuration();
+    long position = activePlayer.getCurrentPosition();
+    float ratio = duration > 0 ? Math.max(0f, Math.min(1f, position / (float) duration)) : 0f;
+    holder.progressFill.setScaleX(ratio);
+    holder.progressTrack.setAlpha(duration > 0 ? 1f : 0f);
+  }
+
+  private void resetHolderProgress(ShortVideoHolder holder) {
+    holder.progressFill.setScaleX(0f);
+    holder.progressTrack.setAlpha(0f);
+    hideSeekPreview(holder, false);
+  }
+
+  private boolean seekActivePlayerFromTouch(View view, MotionEvent event) {
+    if (event == null) return true;
+    int action = event.getActionMasked();
+    if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE) {
+      setParentInterceptDisallowed(view, true);
+    } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+      setParentInterceptDisallowed(view, false);
+    }
+    ShortVideoHolder holder = attachedHolders.get(currentIndex);
+    if (activePlayer == null || currentIndex < 0 || holder == null) return true;
+    long duration = activePlayer.getDuration();
+    if (duration <= 0) {
+      hideSeekPreview(holder, false);
+      return true;
+    }
+    if (action == MotionEvent.ACTION_CANCEL) {
+      hideSeekPreview(holder, false);
+      return true;
+    }
+    float width = Math.max(1f, view.getWidth());
+    float ratio = Math.max(0f, Math.min(1f, event.getX() / width));
+    long targetPosition = Math.max(0, Math.min(duration - 1, (long) (duration * ratio)));
+    activePlayer.seekTo(targetPosition);
+    updateActiveProgress();
+    showSeekPreview(holder, targetPosition, duration, action == MotionEvent.ACTION_UP);
+    return true;
+  }
+
+  private void showSeekPreview(ShortVideoHolder holder, long position, long duration, boolean scheduleHide) {
+    if (holder == null) return;
+    if (holder.hideSeekPreviewRunnable != null) {
+      mainHandler.removeCallbacks(holder.hideSeekPreviewRunnable);
+      holder.hideSeekPreviewRunnable = null;
+    }
+    holder.progressTime.animate().cancel();
+    holder.progressTime.setAlpha(1f);
+    holder.progressTime.setText(formatPlaybackTime(position) + " / " + formatPlaybackTime(duration));
+    holder.progressTime.setVisibility(controlsHidden ? View.GONE : View.VISIBLE);
+    if (!scheduleHide) return;
+    holder.hideSeekPreviewRunnable = () -> hideSeekPreview(holder, true);
+    mainHandler.postDelayed(holder.hideSeekPreviewRunnable, 1800);
+  }
+
+  private void hideSeekPreview(ShortVideoHolder holder, boolean animate) {
+    if (holder == null) return;
+    if (holder.hideSeekPreviewRunnable != null) {
+      mainHandler.removeCallbacks(holder.hideSeekPreviewRunnable);
+      holder.hideSeekPreviewRunnable = null;
+    }
+    if (!animate || holder.progressTime.getVisibility() != View.VISIBLE) {
+      holder.progressTime.setVisibility(View.GONE);
+      holder.progressTime.setAlpha(1f);
+      return;
+    }
+    holder.progressTime.animate()
+      .alpha(0f)
+      .setDuration(140)
+      .withEndAction(() -> {
+        holder.progressTime.setVisibility(View.GONE);
+        holder.progressTime.setAlpha(1f);
+      })
+      .start();
+  }
+
+  private void setParentInterceptDisallowed(View view, boolean disallow) {
+    if (view != null && view.getParent() != null) {
+      view.getParent().requestDisallowInterceptTouchEvent(disallow);
+    }
   }
 
   private void loadMoreIfNeeded(int index) {
     if (loadingMoreVideos || !hasMoreVideos || pendingFeedUrl == null || pendingFeedUrl.trim().isEmpty()) return;
-    if (videos.size() - index > 3) return;
+    if (videos.size() - index > 6) return;
     loadingMoreVideos = true;
     String feedUrl = pagedFeedUrl(pendingFeedUrl, nextFeedOffset, 40);
     Log.i(TAG, "load more offset=" + nextFeedOffset);
@@ -557,6 +1356,11 @@ public class NativeShortVideoActivity extends Activity {
         loadingMoreVideos = false;
         if (page.items.isEmpty()) {
           hasMoreVideos = false;
+          if (pendingAutoAdvanceIndex == index) {
+            pendingAutoAdvanceIndex = -1;
+            hideStatus();
+            advanceAfterEnded(index);
+          }
           return;
         }
         Set<String> seen = new HashSet<>();
@@ -568,16 +1372,207 @@ public class NativeShortVideoActivity extends Activity {
           videos.add(item);
           inserted++;
         }
-        nextFeedOffset = page.offset + page.limit;
+        nextFeedOffset = page.nextOffset();
         hasMoreVideos = page.hasMore;
         if (inserted > 0) {
           adapter.notifyItemRangeInserted(videos.size() - inserted, inserted);
           prepareAround(currentIndex);
           preparePlayersAround(currentIndex);
+          if (pendingAutoAdvanceIndex == index && currentIndex == index && index + 1 < videos.size()) {
+            pendingAutoAdvanceIndex = -1;
+            hideStatus();
+            pager.setCurrentItem(index + 1, true);
+          }
         }
         Log.i(TAG, "loaded more inserted=" + inserted + " nextOffset=" + nextFeedOffset + " hasMore=" + hasMoreVideos);
       });
     });
+  }
+
+  private void confirmDeleteVideo(ShortVideoItem item, boolean group) {
+    if (item == null || item.id.length() == 0) {
+      showTransientStatus("没有可删除的视频记录");
+      return;
+    }
+    String title = group ? "删除同组短视频？" : "删除这条短视频？";
+    String message = (item.title.length() > 0 ? item.title : "当前短视频")
+      + "\n\n"
+      + (group
+        ? "会删除同一个本地文件夹下的短视频记录，以及这些记录引用且未被组外引用的本地文件。"
+        : "会删除资料库记录以及这条记录引用的本地视频文件。");
+    AlertDialog dialog = new AlertDialog.Builder(this)
+      .setTitle(title)
+      .setMessage(message)
+      .setNegativeButton("取消", null)
+      .setPositiveButton("删除", (ignored, which) -> deleteVideo(item, group))
+      .create();
+    dialog.setOnDismissListener(ignored -> hideSystemBars());
+    dialog.show();
+  }
+
+  private void deleteVideo(ShortVideoItem item, boolean group) {
+    String url = deleteVideoUrl(item, group);
+    if (url.length() == 0) {
+      showTransientStatus("没有可用的删除接口");
+      return;
+    }
+    showStatus(group ? "正在删除同组短视频" : "正在删除短视频");
+    executor.execute(() -> {
+      try {
+        DeleteResult result = requestDeleteVideo(url, item);
+        mainHandler.post(() -> applyDeleteResult(item, result, group));
+      } catch (Exception error) {
+        String message = error.getMessage() == null || error.getMessage().length() == 0 ? "短视频删除失败" : error.getMessage();
+        mainHandler.post(() -> showTransientStatus(message));
+      }
+    });
+  }
+
+  private DeleteResult requestDeleteVideo(String url, ShortVideoItem item) throws Exception {
+    HttpURLConnection connection = null;
+    try {
+      connection = (HttpURLConnection) new URL(url).openConnection();
+      connection.setRequestMethod("DELETE");
+      connection.setConnectTimeout(8000);
+      connection.setReadTimeout(16000);
+      connection.setRequestProperty("Accept", "application/json");
+      connection.connect();
+      int status = connection.getResponseCode();
+      String body = readConnectionBody(connection, status >= 200 && status < 300);
+      JSONObject data = body.length() > 0 ? new JSONObject(body) : new JSONObject();
+      if (status < 200 || status >= 300) {
+        String message = data.optString("error", "");
+        throw new Exception(message.length() > 0 ? message : "短视频删除失败");
+      }
+      return DeleteResult.fromJson(data, item);
+    } finally {
+      if (connection != null) connection.disconnect();
+    }
+  }
+
+  private String readConnectionBody(HttpURLConnection connection, boolean success) {
+    try (InputStream input = success ? connection.getInputStream() : connection.getErrorStream()) {
+      if (input == null) return "";
+      StringBuilder builder = new StringBuilder();
+      byte[] buffer = new byte[8192];
+      int read;
+      while ((read = input.read(buffer)) >= 0) {
+        builder.append(new String(buffer, 0, read, StandardCharsets.UTF_8));
+      }
+      return builder.toString();
+    } catch (Exception ignored) {
+      return "";
+    }
+  }
+
+  private void applyDeleteResult(ShortVideoItem seed, DeleteResult result, boolean group) {
+    Set<String> ids = result.ids;
+    if (ids.isEmpty() && seed.id.length() > 0) ids.add(seed.id);
+    if (ids.isEmpty()) {
+      showTransientStatus("删除完成");
+      return;
+    }
+
+    List<ShortVideoItem> before = new ArrayList<>(videos);
+    int oldIndex = currentIndex >= 0 ? currentIndex : (pager == null ? 0 : pager.getCurrentItem());
+    ShortVideoItem target = nextVideoAfterDelete(before, ids, oldIndex);
+
+    releaseAllPlayers();
+    attachedHolders.clear();
+    pendingAutoAdvanceIndex = -1;
+    loadingMoreVideos = false;
+    likedVideoKeys.removeAll(ids);
+    collectedVideoKeys.removeAll(ids);
+    persistVideoInteractionKeys(PREF_LIKED_VIDEO_KEYS, likedVideoKeys);
+    persistVideoInteractionKeys(PREF_COLLECTED_VIDEO_KEYS, collectedVideoKeys);
+    videos.clear();
+    for (ShortVideoItem item : before) {
+      if (!ids.contains(item.id)) videos.add(item);
+    }
+    purgeDeletedFromNavigationStack(ids);
+    adapter.notifyDataSetChanged();
+
+    int deletedCount = Math.max(result.count, before.size() - videos.size());
+    String message = group
+      ? "已删除 " + Math.max(1, deletedCount) + " 条"
+      : "已删除";
+    if (result.deletedFiles > 0) message += "，" + result.deletedFiles + " 个文件";
+
+    if (videos.isEmpty()) {
+      currentIndex = -1;
+      currentScreen = captureFeedScreen();
+      if (hasMoreVideos && pendingFeedUrl != null && pendingFeedUrl.trim().length() > 0) {
+        nextFeedOffset = 0;
+        showStatus("正在读取下一批短视频");
+        loadFeedAsync(pendingFeedUrl, 0);
+      } else {
+        showTransientStatus(message);
+      }
+      return;
+    }
+
+    int targetIndex = target == null ? Math.max(0, Math.min(oldIndex, videos.size() - 1)) : findVideoIndex(videos, target.id);
+    if (targetIndex < 0) targetIndex = Math.max(0, Math.min(oldIndex, videos.size() - 1));
+    currentScreen = captureFeedScreen();
+    startPlaybackAt(targetIndex);
+    showTransientStatus(message);
+  }
+
+  @Nullable
+  private ShortVideoItem nextVideoAfterDelete(List<ShortVideoItem> source, Set<String> deletedIds, int oldIndex) {
+    int start = Math.max(0, Math.min(oldIndex, source.size() - 1));
+    for (int i = start + 1; i < source.size(); i++) {
+      ShortVideoItem item = source.get(i);
+      if (!deletedIds.contains(item.id)) return item;
+    }
+    for (int i = start - 1; i >= 0; i--) {
+      ShortVideoItem item = source.get(i);
+      if (!deletedIds.contains(item.id)) return item;
+    }
+    return null;
+  }
+
+  private void purgeDeletedFromNavigationStack(Set<String> deletedIds) {
+    if (deletedIds.isEmpty()) return;
+    for (ScreenState screen : navigationStack) purgeDeletedFromScreen(screen, deletedIds);
+    purgeDeletedFromScreen(currentScreen, deletedIds);
+  }
+
+  private void purgeDeletedFromScreen(@Nullable ScreenState screen, Set<String> deletedIds) {
+    if (screen instanceof FeedScreenState) {
+      ((FeedScreenState) screen).items.removeIf(item -> deletedIds.contains(item.id));
+    } else if (screen instanceof AuthorScreenState) {
+      AuthorScreenState authorScreen = (AuthorScreenState) screen;
+      if (authorScreen.page != null) authorScreen.page.items.removeIf(item -> deletedIds.contains(item.id));
+      if (authorScreen.currentItem != null && deletedIds.contains(authorScreen.currentItem.id)) {
+        authorScreen.currentItem = authorScreen.page != null && !authorScreen.page.items.isEmpty()
+          ? authorScreen.page.items.get(0)
+          : authorScreen.seed;
+      }
+    }
+  }
+
+  private String deleteVideoUrl(ShortVideoItem item, boolean group) {
+    if (item == null || item.id.length() == 0) return "";
+    String base = apiBase();
+    if (base.length() == 0) base = baseFromUrl(item.streamUrl);
+    if (base.length() == 0) return "";
+    Uri.Builder builder = Uri.parse(base).buildUpon()
+      .appendPath("api")
+      .appendPath("short-videos")
+      .appendPath(item.id);
+    if (group) builder.appendQueryParameter("scope", "group");
+    return builder.build().toString();
+  }
+
+  private String apiBase() {
+    String base = baseFromUrl(pendingFeedUrl);
+    if (base.length() > 0) return base;
+    base = baseFromUrl(apiBaseUrl);
+    if (base.length() > 0) return base;
+    String rawBase = apiBaseUrl == null ? "" : apiBaseUrl.trim();
+    if (rawBase.startsWith("http://") || rawBase.startsWith("https://")) return rawBase.replaceAll("/$", "");
+    return "";
   }
 
   private void prepareAround(int index) {
@@ -688,19 +1683,39 @@ public class NativeShortVideoActivity extends Activity {
     JSONObject stats = row.optJSONObject("stats");
     return new ShortVideoItem(
       row.optString("id", fallbackId),
+      row.optString("awemeId", ""),
       streamUrl,
       absoluteUrl(baseUrl, row.optString("coverUrl", "")),
       row.optString("title", ""),
       author == null ? "" : author.optString("name", ""),
       author == null ? "" : author.optString("secUid", ""),
+      author == null ? "" : author.optString("uid", ""),
       absoluteUrl(baseUrl, author == null ? "" : author.optString("avatarUrl", "")),
       author == null ? "" : author.optString("profileUrl", ""),
+      author == null ? "" : author.optString("uniqueId", ""),
+      author == null ? "" : author.optString("shortId", ""),
+      author == null ? "" : author.optString("signature", ""),
+      author == null ? "" : author.optString("ipLocation", ""),
+      author == null ? 0 : author.optLong("followerCount", 0),
+      author == null ? 0 : author.optLong("followingCount", 0),
+      author == null ? 0 : author.optLong("totalFavorited", 0),
+      author == null ? 0 : author.optLong("awemeCount", 0),
+      author == null ? 0 : author.optLong("favoritingCount", 0),
+      author == null ? 0 : author.optInt("gender", 0),
+      author == null ? 0 : author.optInt("age", 0),
+      author == null ? "" : author.optString("verification", ""),
+      author == null ? "" : author.optString("profileCollectedAt", ""),
       row.optString("publishedAt", ""),
       row.optLong("durationMs", 0),
+      row.optInt("width", 0),
+      row.optInt("height", 0),
       stats == null ? 0 : stats.optLong("likes", 0),
       stats == null ? 0 : stats.optLong("comments", 0),
       stats == null ? 0 : stats.optLong("collects", 0),
-      stats == null ? 0 : stats.optLong("shares", 0)
+      stats == null ? 0 : stats.optLong("shares", 0),
+      stats == null ? 0 : stats.optLong("plays", 0),
+      row.optString("shareUrl", ""),
+      row.optString("originalUrl", "")
     );
   }
 
@@ -714,6 +1729,75 @@ public class NativeShortVideoActivity extends Activity {
     if (statusView != null) statusView.setVisibility(View.GONE);
   }
 
+  private void showTransientStatus(String text) {
+    showStatus(text);
+    mainHandler.postDelayed(this::hideStatus, 1400);
+  }
+
+  private void readControlPreferences() {
+    SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+    muted = prefs.getBoolean(PREF_MUTED, false);
+    autoNext = prefs.getBoolean(PREF_AUTO_NEXT, false);
+    likedVideoKeys.clear();
+    likedVideoKeys.addAll(new HashSet<>(prefs.getStringSet(PREF_LIKED_VIDEO_KEYS, Collections.emptySet())));
+    collectedVideoKeys.clear();
+    collectedVideoKeys.addAll(new HashSet<>(prefs.getStringSet(PREF_COLLECTED_VIDEO_KEYS, Collections.emptySet())));
+    followedAuthorKeys.clear();
+    followedAuthorKeys.addAll(new HashSet<>(prefs.getStringSet(PREF_FOLLOWED_AUTHOR_KEYS, Collections.emptySet())));
+  }
+
+  private void writeControlPreference(String key, boolean value) {
+    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean(key, value).apply();
+  }
+
+  private void persistVideoInteractionKeys(String key, Set<String> values) {
+    getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+      .edit()
+      .putStringSet(key, new HashSet<>(values))
+      .apply();
+  }
+
+  private float activeVolume() {
+    return muted ? 0f : 1f;
+  }
+
+  private int activeRepeatMode() {
+    return autoNext ? Player.REPEAT_MODE_OFF : Player.REPEAT_MODE_ONE;
+  }
+
+  private void toggleMuted() {
+    muted = !muted;
+    writeControlPreference(PREF_MUTED, muted);
+    applyPlaybackControlState();
+    refreshVisibleRails();
+    showTransientStatus(muted ? "已静音" : "已开声");
+  }
+
+  private void toggleAutoNext() {
+    autoNext = !autoNext;
+    writeControlPreference(PREF_AUTO_NEXT, autoNext);
+    pendingAutoAdvanceIndex = -1;
+    applyPlaybackControlState();
+    refreshVisibleRails();
+    showTransientStatus(autoNext ? "已开启连播" : "已关闭连播");
+  }
+
+  private void applyPlaybackControlState() {
+    int repeatMode = activeRepeatMode();
+    for (Map.Entry<Integer, ExoPlayer> entry : playerCache.entrySet()) {
+      ExoPlayer player = entry.getValue();
+      player.setRepeatMode(repeatMode);
+      player.setVolume(player == activePlayer ? activeVolume() : 0f);
+    }
+  }
+
+  private void refreshVisibleRails() {
+    for (ShortVideoHolder holder : attachedHolders.values()) {
+      if (holder.index < 0 || holder.index >= videos.size()) continue;
+      bindRail(holder, videos.get(holder.index));
+    }
+  }
+
   private void loadFeedAsync(String feedUrl, int startIndex) {
     String normalizedFeedUrl = normalizeFeedUrl(feedUrl);
     executor.execute(() -> {
@@ -721,7 +1805,7 @@ public class NativeShortVideoActivity extends Activity {
       mainHandler.post(() -> {
         videos.clear();
         videos.addAll(page.items);
-        nextFeedOffset = page.offset + Math.max(page.limit, page.items.size());
+        nextFeedOffset = page.nextOffset();
         hasMoreVideos = page.hasMore;
         currentScreen = captureFeedScreen();
         adapter.notifyDataSetChanged();
@@ -807,23 +1891,89 @@ public class NativeShortVideoActivity extends Activity {
       return;
     }
     pushCurrentScreen();
-    renderAuthorScreen(new AuthorScreenState(seed, null, "works"));
+    renderAuthorScreen(new AuthorScreenState(seed, null, "works", currentFeedSort()));
   }
 
   private void renderAuthorScreen(AuthorScreenState screen) {
     ShortVideoItem seed = screen.seed;
     removeAuthorOverlay();
-    if (activePlayer != null) activePlayer.pause();
+    if (activePlayer != null) {
+      activePlayer.pause();
+      stopProgressUpdates();
+    }
     currentScreen = screen;
 
-    FrameLayout overlay = new FrameLayout(this);
-    overlay.setBackgroundColor(0xFF151720);
+    FrameLayout overlay = new FrameLayout(this) {
+      private float authorTouchStartX;
+      private float authorTouchStartY;
+      private boolean authorHorizontalGesture;
+      private boolean authorTouchActive;
+
+      @Override
+      public boolean onInterceptTouchEvent(MotionEvent event) {
+        if (event == null) return super.onInterceptTouchEvent(event);
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+          authorTouchStartX = event.getX();
+          authorTouchStartY = event.getY();
+          authorTouchActive = true;
+          authorHorizontalGesture = false;
+          return super.onInterceptTouchEvent(event);
+        }
+        if (!authorTouchActive) return super.onInterceptTouchEvent(event);
+        if (action == MotionEvent.ACTION_MOVE) {
+          float dx = event.getX() - authorTouchStartX;
+          float dy = event.getY() - authorTouchStartY;
+          if (Math.abs(dx) > dp(22) && Math.abs(dx) > Math.abs(dy) * HORIZONTAL_GESTURE_RATIO) {
+            authorHorizontalGesture = true;
+            return true;
+          }
+        }
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+          authorTouchActive = false;
+          authorHorizontalGesture = false;
+        }
+        return super.onInterceptTouchEvent(event);
+      }
+
+      @Override
+      public boolean onTouchEvent(MotionEvent event) {
+        if (event == null) return true;
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+          authorTouchStartX = event.getX();
+          authorTouchStartY = event.getY();
+          authorTouchActive = true;
+          authorHorizontalGesture = false;
+          return true;
+        }
+        if (!authorTouchActive) return true;
+        if (action == MotionEvent.ACTION_UP) {
+          float dx = event.getX() - authorTouchStartX;
+          float dy = event.getY() - authorTouchStartY;
+          boolean horizontal = authorHorizontalGesture || (Math.abs(dx) > dp(72) && Math.abs(dx) > Math.abs(dy) * HORIZONTAL_GESTURE_RATIO);
+          authorTouchActive = false;
+          authorHorizontalGesture = false;
+          if (horizontal) {
+            if (dx > 0) navigateBack();
+            return true;
+          }
+        }
+        if (action == MotionEvent.ACTION_CANCEL) {
+          authorTouchActive = false;
+          authorHorizontalGesture = false;
+          return true;
+        }
+        return true;
+      }
+    };
+    overlay.setBackgroundColor(0xFFF7F8FA);
     overlay.setClickable(true);
 
     LinearLayout sheet = new LinearLayout(this);
     sheet.setOrientation(LinearLayout.VERTICAL);
-    sheet.setPadding(dp(16), dp(18), dp(16), dp(18));
-    sheet.setBackgroundColor(0xFF151720);
+    sheet.setPadding(0, 0, 0, dp(10));
+    sheet.setBackgroundColor(0xFFF7F8FA);
     sheet.setClickable(true);
     FrameLayout.LayoutParams sheetParams = new FrameLayout.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
@@ -834,14 +1984,16 @@ public class NativeShortVideoActivity extends Activity {
     LinearLayout top = new LinearLayout(this);
     top.setOrientation(LinearLayout.HORIZONTAL);
     top.setGravity(Gravity.CENTER_VERTICAL);
+    top.setPadding(dp(10), dp(4), dp(10), 0);
     TextView close = iconText("‹", 34, Color.TRANSPARENT);
+    close.setTextColor(0xFF161823);
     close.setContentDescription("返回");
     close.setOnClickListener(view -> navigateBack());
-    top.addView(close, new LinearLayout.LayoutParams(dp(44), dp(44)));
+    top.addView(close, new LinearLayout.LayoutParams(dp(42), dp(42)));
     TextView title = new TextView(this);
-    title.setText("作者主页");
-    title.setTextColor(Color.WHITE);
-    title.setTextSize(16);
+    title.setText("主页");
+    title.setTextColor(0xFF161823);
+    title.setTextSize(15);
     title.setTypeface(Typeface.DEFAULT_BOLD);
     title.setGravity(Gravity.CENTER_VERTICAL);
     LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
@@ -851,62 +2003,175 @@ public class NativeShortVideoActivity extends Activity {
       ViewGroup.LayoutParams.WRAP_CONTENT
     ));
 
-    LinearLayout head = new LinearLayout(this);
-    head.setOrientation(LinearLayout.HORIZONTAL);
-    head.setGravity(Gravity.CENTER_VERTICAL);
-    head.setPadding(0, dp(6), 0, dp(12));
-    head.addView(authorAvatarView(seed, dp(64)), new LinearLayout.LayoutParams(dp(64), dp(64)));
-    LinearLayout info = new LinearLayout(this);
-    info.setOrientation(LinearLayout.VERTICAL);
-    info.setPadding(dp(12), 0, 0, 0);
-    TextView name = new TextView(this);
-    name.setText("@" + displayAuthor(seed));
-    name.setTextColor(Color.WHITE);
-    name.setTextSize(20);
-    name.setTypeface(Typeface.DEFAULT_BOLD);
-    TextView handle = new TextView(this);
-    handle.setText(seed.authorSecUid.length() > 0 ? "抖音号 " + seed.authorSecUid : "本地作者");
-    handle.setTextColor(0xB3FFFFFF);
-    handle.setTextSize(12);
-    handle.setTypeface(Typeface.DEFAULT_BOLD);
-    info.addView(name);
-    info.addView(handle);
-    head.addView(info, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-    sheet.addView(head);
-
-    LinearLayout statsRow = new LinearLayout(this);
-    statsRow.setOrientation(LinearLayout.HORIZONTAL);
-    statsRow.setGravity(Gravity.CENTER);
-    statsRow.setPadding(0, dp(2), 0, dp(10));
-    sheet.addView(statsRow, new LinearLayout.LayoutParams(
+    FrameLayout hero = new FrameLayout(this);
+    hero.setBackgroundColor(0xFF383B42);
+    ImageView heroCover = new ImageView(this);
+    heroCover.setScaleType(ImageView.ScaleType.CENTER_CROP);
+    heroCover.setBackgroundColor(0xFF383B42);
+    hero.addView(heroCover, new FrameLayout.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
-      ViewGroup.LayoutParams.WRAP_CONTENT
+      ViewGroup.LayoutParams.MATCH_PARENT
+    ));
+    String heroImageUrl = seed.coverUrl.length() > 0 ? seed.coverUrl : seed.authorAvatarUrl;
+    if (heroImageUrl.length() > 0) {
+      loadImageInto(heroCover, heroImageUrl, "author-hero:" + authorInteractionKey(seed));
+    }
+    View heroScrim = new View(this);
+    heroScrim.setBackgroundColor(0x66000000);
+    hero.addView(heroScrim, new FrameLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.MATCH_PARENT
     ));
 
-    TextView filter = new TextView(this);
-    filter.setText("只看 TA");
-    filter.setTextColor(Color.WHITE);
-    filter.setTextSize(15);
-    filter.setTypeface(Typeface.DEFAULT_BOLD);
-    filter.setGravity(Gravity.CENTER);
-    filter.setBackground(roundedDrawable(seed.authorSecUid.length() > 0 ? 0xFFFE2C55 : 0xFF2A2D37, dp(10)));
-    filter.setEnabled(seed.authorSecUid.length() > 0);
-    filter.setAlpha(seed.authorSecUid.length() > 0 ? 1f : 0.52f);
-    filter.setOnClickListener(view -> switchToAuthorFeed(screen));
-    LinearLayout.LayoutParams filterParams = new LinearLayout.LayoutParams(
+    LinearLayout heroIdentity = new LinearLayout(this);
+    heroIdentity.setOrientation(LinearLayout.HORIZONTAL);
+    heroIdentity.setGravity(Gravity.BOTTOM);
+    heroIdentity.setPadding(dp(16), dp(10), dp(16), dp(14));
+    FrameLayout heroAvatarShell = new FrameLayout(this);
+    heroAvatarShell.setBackground(circleDrawable(Color.WHITE));
+    heroAvatarShell.addView(authorAvatarView(seed, dp(72)), new FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER));
+    heroIdentity.addView(heroAvatarShell, new LinearLayout.LayoutParams(dp(78), dp(78)));
+    LinearLayout heroInfo = new LinearLayout(this);
+    heroInfo.setOrientation(LinearLayout.VERTICAL);
+    heroInfo.setGravity(Gravity.BOTTOM);
+    heroInfo.setPadding(dp(12), 0, 0, dp(4));
+    TextView heroName = new TextView(this);
+    heroName.setText(displayAuthor(seed));
+    heroName.setTextColor(Color.WHITE);
+    heroName.setTextSize(22);
+    heroName.setTypeface(Typeface.DEFAULT_BOLD);
+    heroName.setSingleLine(true);
+    heroName.setEllipsize(TextUtils.TruncateAt.END);
+    heroName.setShadowLayer(8, 0, 2, 0x99000000);
+    TextView heroHandle = new TextView(this);
+    heroHandle.setText(authorHandleText(seed));
+    heroHandle.setTextColor(0xE6FFFFFF);
+    heroHandle.setTextSize(12);
+    heroHandle.setSingleLine(true);
+    heroHandle.setEllipsize(TextUtils.TruncateAt.END);
+    heroHandle.setShadowLayer(6, 0, 2, 0x99000000);
+    heroInfo.addView(heroName);
+    heroInfo.addView(heroHandle);
+    heroIdentity.addView(heroInfo, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+    hero.addView(heroIdentity, new FrameLayout.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
-      dp(46)
-    );
-    filterParams.bottomMargin = dp(10);
-    sheet.addView(filter, filterParams);
+      ViewGroup.LayoutParams.MATCH_PARENT
+    ));
+    sheet.addView(hero, new LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      dp(164)
+    ));
 
+    LinearLayout head = new LinearLayout(this);
+    head.setOrientation(LinearLayout.VERTICAL);
+    head.setPadding(dp(14), dp(8), dp(14), dp(6));
+
+    if (seed.authorSignature.length() > 0) {
+      TextView signature = new TextView(this);
+      signature.setText(seed.authorSignature);
+      signature.setTextColor(0xFF343840);
+      signature.setTextSize(13);
+      signature.setPadding(0, 0, 0, 0);
+      signature.setMaxLines(3);
+      head.addView(signature);
+    }
+    String metaText = authorMetaLineText(seed);
+    if (metaText.length() > 0) {
+      TextView meta = new TextView(this);
+      meta.setText(metaText);
+      meta.setTextColor(0xFF60646E);
+      meta.setTextSize(11);
+      meta.setGravity(Gravity.CENTER_VERTICAL);
+      meta.setPadding(dp(7), dp(3), dp(7), dp(3));
+      meta.setMaxLines(1);
+      meta.setBackground(roundedDrawable(0xFFEFF1F5, dp(4)));
+      LinearLayout.LayoutParams metaParams = new LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT
+      );
+      metaParams.topMargin = dp(6);
+      head.addView(meta, metaParams);
+    }
+    sheet.addView(head);
+
+    final LinearLayout profileStats = authorProfileStatsRow(seed);
+    if (profileStats != null) {
+      profileStats.setPadding(dp(14), dp(4), dp(14), dp(4));
+      LinearLayout.LayoutParams profileStatsParams = new LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT
+      );
+      profileStatsParams.bottomMargin = dp(8);
+      sheet.addView(profileStats, profileStatsParams);
+    }
+
+    final boolean shouldLoadInitialAuthorPage = screen.page == null || screen.page.items.isEmpty();
+    final FeedPage[] pageRef = new FeedPage[] { shouldLoadInitialAuthorPage ? sortedLocalAuthorPage(seed, screen.sort) : screen.page.copy() };
+    final String[] activeTab = new String[] { screen.activeTab == null ? "works" : screen.activeTab };
+    final Runnable[] render = new Runnable[1];
+    final boolean[] profileCollapsed = new boolean[] { false };
+    final Runnable[] updateAuthorChrome = new Runnable[1];
+
+    LinearLayout actions = new LinearLayout(this);
+    actions.setOrientation(LinearLayout.HORIZONTAL);
+    actions.setGravity(Gravity.CENTER);
+    LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      dp(40)
+    );
+    actionsParams.leftMargin = dp(14);
+    actionsParams.rightMargin = dp(14);
+    actionsParams.bottomMargin = dp(6);
+    sheet.addView(actions, actionsParams);
+
+    TextView follow = authorActionButton("", true, authorInteractionKey(seed).length() > 0, null);
+    follow.setOnClickListener(view -> {
+      toggleFollowingAuthor(seed);
+      bindFollowButton(follow, seed);
+    });
+    bindFollowButton(follow, seed);
+    LinearLayout.LayoutParams followParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+    followParams.rightMargin = dp(6);
+    actions.addView(follow, followParams);
+
+    TextView filter = authorActionButton("只看 TA", false, seed.authorSecUid.length() > 0, view -> switchToAuthorFeed(screen));
+    LinearLayout.LayoutParams filterParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+    filterParams.rightMargin = dp(6);
+    actions.addView(filter, filterParams);
+
+    String authorProfileUrl = authorOriginalUrl(seed);
+    TextView douyin = authorActionButton("抖音主页", false, authorProfileUrl.length() > 0, view -> openAuthorOriginal(seed));
+    actions.addView(douyin, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+
+    LinearLayout tabBar = new LinearLayout(this);
+    tabBar.setOrientation(LinearLayout.HORIZONTAL);
+    tabBar.setGravity(Gravity.CENTER_VERTICAL);
+    tabBar.setPadding(dp(14), 0, dp(14), 0);
     LinearLayout tabs = new LinearLayout(this);
     tabs.setOrientation(LinearLayout.HORIZONTAL);
     tabs.setGravity(Gravity.CENTER);
-    sheet.addView(tabs, new LinearLayout.LayoutParams(
+    tabBar.addView(tabs, new LinearLayout.LayoutParams(0, dp(38), 1f));
+
+    TextView sortButton = authorActionButton("\u21c5 " + authorSortLabel(screen.sort), false, true, view -> showAuthorSortDialog(screen, pageRef, activeTab, render));
+    sortButton.setTextSize(12);
+    LinearLayout.LayoutParams sortParams = new LinearLayout.LayoutParams(dp(108), dp(32));
+    sortParams.gravity = Gravity.CENTER_VERTICAL;
+    tabBar.addView(sortButton, sortParams);
+    sheet.addView(tabBar, new LinearLayout.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
-      dp(42)
+      dp(40)
     ));
+
+    updateAuthorChrome[0] = () -> {
+      boolean collapsed = "works".equals(activeTab[0]) && screen.worksScrollY > dp(24);
+      if (profileCollapsed[0] == collapsed) return;
+      profileCollapsed[0] = collapsed;
+      hero.setVisibility(collapsed ? View.GONE : View.VISIBLE);
+      head.setVisibility(collapsed ? View.GONE : View.VISIBLE);
+      if (profileStats != null) profileStats.setVisibility(collapsed ? View.GONE : View.VISIBLE);
+      actions.setVisibility(collapsed ? View.GONE : View.VISIBLE);
+      title.setText(collapsed ? displayAuthor(seed) : "主页");
+    };
 
     FrameLayout content = new FrameLayout(this);
     sheet.addView(content, new LinearLayout.LayoutParams(
@@ -915,24 +2180,23 @@ public class NativeShortVideoActivity extends Activity {
       1f
     ));
 
-    final FeedPage[] pageRef = new FeedPage[] { screen.page == null ? localAuthorPage(seed) : screen.page.copy() };
-    final String[] activeTab = new String[] { screen.activeTab == null ? "works" : screen.activeTab };
-    final Runnable[] render = new Runnable[1];
     render[0] = () -> {
       screen.page = pageRef[0].copy();
       screen.activeTab = activeTab[0];
       currentScreen = screen;
-      renderAuthorStats(statsRow, pageRef[0]);
-      renderAuthorTabs(tabs, activeTab[0], nextTab -> {
+      sortButton.setText("\u21c5 " + authorSortLabel(screen.sort));
+      int worksTotal = Math.max(pageRef[0].total, pageRef[0].items.size());
+      renderAuthorTabs(tabs, activeTab[0], worksTotal, nextTab -> {
         activeTab[0] = nextTab;
         screen.activeTab = nextTab;
         render[0].run();
       });
       content.removeAllViews();
-      content.addView(authorTabContent(screen, pageRef[0], activeTab[0]), new FrameLayout.LayoutParams(
+      content.addView(authorTabContent(screen, pageRef[0], activeTab[0], () -> loadMoreAuthorPage(screen, pageRef, render), updateAuthorChrome[0]), new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.MATCH_PARENT
       ));
+      updateAuthorChrome[0].run();
     };
     render[0].run();
 
@@ -942,8 +2206,8 @@ public class NativeShortVideoActivity extends Activity {
     ));
     authorOverlay = overlay;
 
-    String authorUrl = authorFeedUrl(seed, 0, 36);
-    if (authorUrl.length() > 0) {
+    String authorUrl = authorFeedUrl(seed, 0, 60, screen.sort);
+    if (shouldLoadInitialAuthorPage && authorUrl.length() > 0) {
       executor.execute(() -> {
         FeedPage loaded = readFeedPage(authorUrl);
         if (loaded.items.isEmpty()) return;
@@ -965,6 +2229,139 @@ public class NativeShortVideoActivity extends Activity {
     hideSystemBars();
   }
 
+  private TextView authorActionButton(String label, boolean primary, boolean enabled, View.OnClickListener listener) {
+    TextView view = new TextView(this);
+    view.setText(label);
+    view.setTextColor(primary ? Color.WHITE : 0xFF161823);
+    view.setTextSize(14);
+    view.setTypeface(Typeface.DEFAULT_BOLD);
+    view.setGravity(Gravity.CENTER);
+    view.setEnabled(enabled);
+    view.setAlpha(enabled ? 1f : 0.52f);
+    view.setBackground(roundedDrawable(primary ? 0xFFFE2C55 : 0xFFEFF1F5, dp(8)));
+    view.setOnClickListener(listener);
+    return view;
+  }
+
+  private String authorOriginalUrl(ShortVideoItem item) {
+    if (item == null) return "";
+    String profileUrl = item.authorProfileUrl.trim();
+    if (profileUrl.startsWith("http://") || profileUrl.startsWith("https://")) return profileUrl;
+    return item.authorSecUid.length() > 0 ? "https://www.douyin.com/user/" + Uri.encode(item.authorSecUid) : "";
+  }
+
+  private void openAuthorOriginal(ShortVideoItem item) {
+    String url = authorOriginalUrl(item);
+    if (url.length() == 0) {
+      showTransientStatus("没有作者主页");
+      return;
+    }
+    try {
+      startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+    } catch (Exception error) {
+      showTransientStatus("无法打开作者主页");
+    }
+  }
+
+  private void showAuthorSortDialog(AuthorScreenState screen, FeedPage[] pageRef, String[] activeTab, Runnable[] render) {
+    String[] labels = new String[] { "时间倒序", "时间正序", "最近点赞", "点赞最多", "点赞最少", "评论最多", "时长最长" };
+    String[] values = new String[] { "published", "publishedAsc", "liked", "likes", "likesAsc", "comments", "duration" };
+    int checked = 0;
+    for (int i = 0; i < values.length; i++) {
+      if (values[i].equals(screen.sort)) {
+        checked = i;
+        break;
+      }
+    }
+    AlertDialog dialog = new AlertDialog.Builder(this)
+      .setTitle("作者作品排序")
+      .setSingleChoiceItems(labels, checked, (choice, which) -> {
+        choice.dismiss();
+        if (which < 0 || which >= values.length || values[which].equals(screen.sort)) return;
+        applyAuthorSort(screen, pageRef, activeTab, render, values[which]);
+      })
+      .setNegativeButton("取消", null)
+      .create();
+    dialog.setOnDismissListener(ignored -> hideSystemBars());
+    dialog.show();
+  }
+
+  private void applyAuthorSort(AuthorScreenState screen, FeedPage[] pageRef, String[] activeTab, Runnable[] render, String sort) {
+    screen.sort = normalizeSortParam(sort);
+    screen.worksScrollY = 0;
+    activeTab[0] = "works";
+    screen.activeTab = "works";
+    String url = authorFeedUrl(screen.seed, 0, 60, screen.sort);
+    if (url.length() == 0) {
+      pageRef[0] = sortedLocalAuthorPage(screen.seed, screen.sort);
+      if (render[0] != null) render[0].run();
+      return;
+    }
+    showStatus("正在按" + authorSortLabel(screen.sort) + "排序");
+    executor.execute(() -> {
+      FeedPage loaded = readFeedPage(url);
+      mainHandler.post(() -> {
+        hideStatus();
+        if (loaded.items.isEmpty()) pageRef[0] = sortedLocalAuthorPage(screen.seed, screen.sort);
+        else pageRef[0] = loaded;
+        screen.page = pageRef[0].copy();
+        if (render[0] != null) render[0].run();
+      });
+    });
+  }
+
+  private void loadMoreAuthorPage(AuthorScreenState screen, FeedPage[] pageRef, Runnable[] render) {
+    FeedPage current = pageRef[0];
+    if (screen.loadingMore || current == null || !current.hasMore) return;
+    int offset = current.nextOffset();
+    String url = authorFeedUrl(screen.seed, offset, 60, screen.sort);
+    if (url.length() == 0) return;
+    screen.loadingMore = true;
+    Log.i(TAG, "load author more author=" + displayAuthor(screen.seed) + " offset=" + offset + " sort=" + screen.sort);
+    if (render[0] != null) render[0].run();
+    executor.execute(() -> {
+      FeedPage loaded = readFeedPage(url);
+      mainHandler.post(() -> {
+        screen.loadingMore = false;
+        if (!loaded.items.isEmpty()) {
+          Set<String> seen = new HashSet<>();
+          for (ShortVideoItem item : current.items) seen.add(item.id);
+          int inserted = 0;
+          for (ShortVideoItem item : loaded.items) {
+            if (seen.contains(item.id)) continue;
+            seen.add(item.id);
+            current.items.add(item);
+            inserted++;
+          }
+          int loadedEnd = loaded.offset + Math.max(loaded.limit, loaded.items.size());
+          current.limit = Math.max(Math.max(current.limit, current.items.size()), loadedEnd - current.offset);
+          current.total = Math.max(loaded.total, current.items.size());
+          current.hasMore = loaded.hasMore;
+          current.stats = loaded.stats == null || loaded.stats.isEmpty() ? FeedStats.fromItems(current.items) : loaded.stats;
+          Log.i(TAG, "author loaded more inserted=" + inserted + " nextOffset=" + current.nextOffset() + " hasMore=" + current.hasMore);
+        } else {
+          current.hasMore = false;
+          Log.i(TAG, "author loaded more empty offset=" + offset);
+        }
+        pageRef[0] = current;
+        screen.page = current.copy();
+        if (render[0] != null) render[0].run();
+      });
+    });
+  }
+
+  private String authorSortLabel(String sort) {
+    switch (normalizeSortParam(sort)) {
+      case "publishedAsc": return "时间正序";
+      case "liked": return "最近点赞";
+      case "likes": return "点赞最多";
+      case "likesAsc": return "点赞最少";
+      case "comments": return "评论最多";
+      case "duration": return "时长最长";
+      default: return "时间倒序";
+    }
+  }
+
   private FeedPage localAuthorPage(ShortVideoItem seed) {
     FeedPage page = new FeedPage();
     for (ShortVideoItem item : videos) {
@@ -974,10 +2371,44 @@ public class NativeShortVideoActivity extends Activity {
     if (page.items.isEmpty()) page.items.add(seed);
     page.total = page.items.size();
     page.limit = page.items.size();
-    page.hasMore = seed.authorSecUid.length() > 0;
+    page.hasMore = false;
     page.stats = FeedStats.fromItems(page.items);
     return page;
   }
+
+  private FeedPage sortedLocalAuthorPage(ShortVideoItem seed, String sort) {
+    FeedPage page = localAuthorPage(seed);
+    sortAuthorItems(page.items, sort);
+    page.stats = FeedStats.fromItems(page.items);
+    return page;
+  }
+
+  private void sortAuthorItems(List<ShortVideoItem> items, String sort) {
+    sortShortVideoItems(items, sort);
+  }
+
+  private void sortShortVideoItems(List<ShortVideoItem> items, String sort) {
+    Collections.sort(items, (left, right) -> {
+      switch (normalizeSortParam(sort)) {
+        case "publishedAsc":
+          return left.publishedAt.compareTo(right.publishedAt);
+        case "liked":
+        case "published":
+          return right.publishedAt.compareTo(left.publishedAt);
+        case "likesAsc":
+          return Long.compare(left.likes, right.likes);
+        case "likes":
+          return Long.compare(right.likes, left.likes);
+        case "comments":
+          return Long.compare(right.comments, left.comments);
+        case "duration":
+          return Long.compare(right.durationMs, left.durationMs);
+        default:
+          return right.publishedAt.compareTo(left.publishedAt);
+      }
+    });
+  }
+
 
   private boolean sameAuthor(ShortVideoItem left, ShortVideoItem right) {
     if (left == null || right == null) return false;
@@ -985,6 +2416,70 @@ public class NativeShortVideoActivity extends Activity {
       return left.authorSecUid.equals(right.authorSecUid);
     }
     return left.author.length() > 0 && left.author.equals(right.author);
+  }
+
+  private boolean isSameVideo(ShortVideoItem left, ShortVideoItem right) {
+    if (left == null || right == null) return false;
+    if (left.id.length() > 0 && right.id.length() > 0 && left.id.equals(right.id)) return true;
+    return left.awemeId.length() > 0 && right.awemeId.length() > 0 && left.awemeId.equals(right.awemeId);
+  }
+
+  private String authorHandleText(ShortVideoItem item) {
+    String handle = item.authorShortId.length() > 0 ? item.authorShortId : item.authorUniqueId;
+    if (handle.length() > 0) return "抖音号 " + handle;
+    if (item.authorSecUid.length() > 0) return "抖音作者";
+    return "本地作者";
+  }
+
+  private String authorMetaLineText(ShortVideoItem item) {
+    List<String> parts = new ArrayList<>();
+    String location = item.authorIpLocation.replaceFirst("^IP属地[:：]?\\s*", "").trim();
+    if (location.length() > 0) parts.add("IP属地 " + location);
+    if (item.authorAge > 0) parts.add(item.authorAge + "岁");
+    if (item.authorVerification.length() > 0) parts.add(item.authorVerification);
+    return joinParts(parts);
+  }
+
+  private LinearLayout authorProfileStatsRow(ShortVideoItem item) {
+    LinearLayout row = new LinearLayout(this);
+    row.setOrientation(LinearLayout.HORIZONTAL);
+    row.setGravity(Gravity.CENTER);
+    row.setPadding(0, dp(4), 0, dp(4));
+    addAuthorProfileStat(row, "获赞", item.authorTotalFavorited);
+    addAuthorProfileStat(row, "关注", item.authorFollowingCount);
+    addAuthorProfileStat(row, "粉丝", item.authorFollowerCount);
+    return row;
+  }
+
+  private void addAuthorProfileStat(LinearLayout row, String label, long value) {
+    LinearLayout cell = new LinearLayout(this);
+    cell.setOrientation(LinearLayout.HORIZONTAL);
+    cell.setGravity(Gravity.CENTER);
+    TextView strong = new TextView(this);
+    strong.setText(compact(Math.max(0, value)));
+    strong.setTextColor(0xFF161823);
+    strong.setTextSize(17);
+    strong.setTypeface(Typeface.DEFAULT_BOLD);
+    strong.setGravity(Gravity.CENTER);
+    TextView small = new TextView(this);
+    small.setText(label);
+    small.setTextColor(0xFF8A8F99);
+    small.setTextSize(11);
+    small.setGravity(Gravity.CENTER);
+    small.setPadding(dp(4), 0, 0, 0);
+    cell.addView(strong);
+    cell.addView(small);
+    row.addView(cell, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+  }
+
+  private String joinParts(List<String> parts) {
+    StringBuilder builder = new StringBuilder();
+    for (String part : parts) {
+      if (part == null || part.length() == 0) continue;
+      if (builder.length() > 0) builder.append(" · ");
+      builder.append(part);
+    }
+    return builder.toString();
   }
 
   private void renderAuthorStats(LinearLayout statsRow, FeedPage page) {
@@ -1002,13 +2497,13 @@ public class NativeShortVideoActivity extends Activity {
       cell.setGravity(Gravity.CENTER);
       TextView value = new TextView(this);
       value.setText(item[0]);
-      value.setTextColor(Color.WHITE);
+      value.setTextColor(0xFF161823);
       value.setTextSize(17);
       value.setTypeface(Typeface.DEFAULT_BOLD);
       value.setGravity(Gravity.CENTER);
       TextView label = new TextView(this);
       label.setText(item[1]);
-      label.setTextColor(0x99FFFFFF);
+      label.setTextColor(0xFF8A8F99);
       label.setTextSize(11);
       label.setGravity(Gravity.CENTER);
       cell.addView(value);
@@ -1017,9 +2512,10 @@ public class NativeShortVideoActivity extends Activity {
     }
   }
 
-  private void renderAuthorTabs(LinearLayout tabs, String activeTab, AuthorTabCallback callback) {
+  private void renderAuthorTabs(LinearLayout tabs, String activeTab, int worksTotal, AuthorTabCallback callback) {
     tabs.removeAllViews();
-    tabs.addView(authorTabButton("作品", "works", activeTab, callback), new LinearLayout.LayoutParams(0, dp(38), 1f));
+    String worksLabel = worksTotal > 0 ? "作品 " + compact(worksTotal) : "作品";
+    tabs.addView(authorTabButton(worksLabel, "works", activeTab, callback), new LinearLayout.LayoutParams(0, dp(38), 1f));
     tabs.addView(authorTabButton("数据", "stats", activeTab, callback), new LinearLayout.LayoutParams(0, dp(38), 1f));
   }
 
@@ -1027,31 +2523,42 @@ public class NativeShortVideoActivity extends Activity {
     boolean active = value.equals(activeTab);
     TextView button = new TextView(this);
     button.setText(label);
-    button.setTextColor(active ? Color.WHITE : 0x99FFFFFF);
-    button.setTextSize(14);
+    button.setTextColor(active ? 0xFF161823 : 0xFF8A8F99);
+    button.setTextSize(15);
     button.setTypeface(Typeface.DEFAULT_BOLD);
     button.setGravity(Gravity.CENTER);
-    button.setBackground(roundedDrawable(active ? 0xFF2A2D37 : Color.TRANSPARENT, dp(10)));
+    button.setBackgroundColor(Color.TRANSPARENT);
+    if (active) button.setPaintFlags(button.getPaintFlags() | android.graphics.Paint.UNDERLINE_TEXT_FLAG);
+    else button.setPaintFlags(button.getPaintFlags() & ~android.graphics.Paint.UNDERLINE_TEXT_FLAG);
     button.setOnClickListener(view -> callback.onTab(value));
     return button;
   }
 
-  private View authorTabContent(AuthorScreenState screen, FeedPage page, String tab) {
-    if ("stats".equals(tab)) return authorStatsContent(screen.seed, page);
-    return authorWorksContent(screen, page);
+  private View authorTabContent(AuthorScreenState screen, FeedPage page, String tab, Runnable loadMore, @Nullable Runnable onAuthorScroll) {
+    if ("stats".equals(tab)) return authorStatsContent(currentAuthorItem(screen), page);
+    return authorWorksContent(screen, page, loadMore, onAuthorScroll);
   }
 
-  private View authorWorksContent(AuthorScreenState screen, FeedPage page) {
+  private View authorWorksContent(AuthorScreenState screen, FeedPage page, Runnable loadMore, @Nullable Runnable onAuthorScroll) {
     ScrollView scroll = new ScrollView(this);
     scroll.setFillViewport(false);
+    scroll.setVerticalScrollBarEnabled(false);
+    scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+    scroll.setBackgroundColor(0xFFF7F8FA);
+    LinearLayout wrap = new LinearLayout(this);
+    wrap.setOrientation(LinearLayout.VERTICAL);
     GridLayout grid = new GridLayout(this);
     grid.setColumnCount(3);
-    grid.setPadding(0, dp(8), 0, dp(22));
+    grid.setPadding(0, dp(6), 0, dp(8));
     int screenWidth = getResources().getDisplayMetrics().widthPixels;
-    int tileWidth = Math.max(dp(92), (screenWidth - dp(40)) / 3);
+    int tileWidth = Math.max(dp(92), (screenWidth - dp(34)) / 3);
     if (page.items.isEmpty()) {
       TextView empty = emptyPanel("没有本地作品");
-      scroll.addView(empty, new ScrollView.LayoutParams(
+      wrap.addView(empty, new LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT
+      ));
+      scroll.addView(wrap, new ScrollView.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.WRAP_CONTENT
       ));
@@ -1060,15 +2567,46 @@ public class NativeShortVideoActivity extends Activity {
     for (ShortVideoItem item : page.items) {
       grid.addView(authorVideoTile(item, tileWidth, page, screen));
     }
-    scroll.addView(grid, new ScrollView.LayoutParams(
+    wrap.addView(grid, new LinearLayout.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
       ViewGroup.LayoutParams.WRAP_CONTENT
     ));
+    if (page.hasMore) {
+      TextView more = emptyPanel(screen.loadingMore ? "正在加载更多作品" : "继续下滑加载更多");
+      more.setMinHeight(dp(72));
+      wrap.addView(more, new LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT
+      ));
+    }
+    scroll.addView(wrap, new ScrollView.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.WRAP_CONTENT
+    ));
+    scroll.setOnScrollChangeListener((view, scrollX, scrollY, oldScrollX, oldScrollY) -> {
+      screen.worksScrollY = Math.max(0, scrollY);
+      if (onAuthorScroll != null) onAuthorScroll.run();
+      if (!page.hasMore || screen.loadingMore || loadMore == null) return;
+      View child = scroll.getChildAt(0);
+      if (child == null) return;
+      int remaining = child.getBottom() - (scroll.getHeight() + scrollY);
+      if (remaining < dp(260)) loadMore.run();
+    });
+    scroll.post(() -> {
+      if (screen.worksScrollY > 0) scroll.scrollTo(0, screen.worksScrollY);
+      if (onAuthorScroll != null) onAuthorScroll.run();
+      if (!page.hasMore || screen.loadingMore || loadMore == null) return;
+      View child = scroll.getChildAt(0);
+      if (child != null && child.getHeight() <= scroll.getHeight() + dp(80)) loadMore.run();
+    });
     return scroll;
   }
 
   private View authorStatsContent(ShortVideoItem seed, FeedPage page) {
     ScrollView scroll = new ScrollView(this);
+    scroll.setVerticalScrollBarEnabled(false);
+    scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+    scroll.setBackgroundColor(0xFFF7F8FA);
     LinearLayout wrap = new LinearLayout(this);
     wrap.setOrientation(LinearLayout.VERTICAL);
     wrap.setPadding(0, dp(10), 0, dp(24));
@@ -1079,6 +2617,7 @@ public class NativeShortVideoActivity extends Activity {
     wrap.addView(statRow("累计评论", compact(stats.comments)));
     wrap.addView(statRow("累计收藏", compact(stats.collects)));
     wrap.addView(statRow("累计分享", compact(stats.shares)));
+    if (stats.plays > 0) wrap.addView(statRow("累计播放", compact(stats.plays)));
     wrap.addView(statRow("总时长", longDuration(stats.durationMs)));
     ShortVideoItem top = topLikedVideo(page.items);
     if (top != null) wrap.addView(statRow("最高点赞", compact(top.likes) + " · " + shortTitle(top.title)));
@@ -1091,18 +2630,26 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private View authorVideoTile(ShortVideoItem item, int width, FeedPage page, AuthorScreenState screen) {
+    boolean current = isSameVideo(item, currentAuthorItem(screen));
     LinearLayout tile = new LinearLayout(this);
     tile.setOrientation(LinearLayout.VERTICAL);
-    tile.setPadding(dp(2), dp(2), dp(2), dp(8));
+    tile.setPadding(dp(1), dp(1), dp(1), dp(2));
     tile.setClickable(true);
-    tile.setOnClickListener(view -> openAuthorVideo(item, page, screen));
+    tile.setBackgroundColor(Color.TRANSPARENT);
+    tile.setOnClickListener(view -> {
+      if (current) {
+        showTransientStatus("正在观看这条");
+        return;
+      }
+      openAuthorVideo(item, page, screen);
+    });
     GridLayout.LayoutParams params = new GridLayout.LayoutParams();
     params.width = width;
     params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
     tile.setLayoutParams(params);
 
     FrameLayout media = new FrameLayout(this);
-    media.setBackgroundColor(0xFF0D0E13);
+    media.setBackgroundColor(0xFFE9ECF1);
     ImageView cover = new ImageView(this);
     cover.setScaleType(ImageView.ScaleType.CENTER_CROP);
     media.addView(cover, new FrameLayout.LayoutParams(
@@ -1129,30 +2676,41 @@ public class NativeShortVideoActivity extends Activity {
     badgeParams.leftMargin = dp(5);
     badgeParams.bottomMargin = dp(5);
     media.addView(badge, badgeParams);
-    tile.addView(media, new LinearLayout.LayoutParams(width - dp(4), Math.round((width - dp(4)) * 1.34f)));
-
-    TextView caption = new TextView(this);
-    caption.setText(shortTitle(item.title));
-    caption.setTextColor(0xE6FFFFFF);
-    caption.setTextSize(11);
-    caption.setMaxLines(2);
-    caption.setPadding(0, dp(5), 0, 0);
-    tile.addView(caption, new LinearLayout.LayoutParams(
-      ViewGroup.LayoutParams.MATCH_PARENT,
-      ViewGroup.LayoutParams.WRAP_CONTENT
-    ));
+    if (current) {
+      TextView currentBadge = new TextView(this);
+      currentBadge.setText("当前");
+      currentBadge.setTextColor(Color.WHITE);
+      currentBadge.setTextSize(11);
+      currentBadge.setTypeface(Typeface.DEFAULT_BOLD);
+      currentBadge.setPadding(dp(7), dp(3), dp(7), dp(3));
+      currentBadge.setBackground(roundedDrawable(0xFFFE2C55, dp(8)));
+      FrameLayout.LayoutParams currentParams = new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        Gravity.RIGHT | Gravity.TOP
+      );
+      currentParams.rightMargin = dp(5);
+      currentParams.topMargin = dp(5);
+      media.addView(currentBadge, currentParams);
+    }
+    tile.addView(media, new LinearLayout.LayoutParams(width - dp(2), Math.round((width - dp(2)) * 1.34f)));
     return tile;
+  }
+
+  private ShortVideoItem currentAuthorItem(AuthorScreenState screen) {
+    if (screen != null && screen.currentItem != null) return screen.currentItem;
+    return screen == null ? null : screen.seed;
   }
 
   private TextView statRow(String label, String value) {
     TextView row = new TextView(this);
     row.setText(label + "  " + value);
-    row.setTextColor(0xE6FFFFFF);
+    row.setTextColor(0xFF161823);
     row.setTextSize(14);
     row.setTypeface(Typeface.DEFAULT_BOLD);
     row.setGravity(Gravity.CENTER_VERTICAL);
     row.setPadding(dp(12), 0, dp(12), 0);
-    row.setBackground(roundedDrawable(0xFF20232C, dp(10)));
+    row.setBackground(roundedDrawable(0xFFFFFFFF, dp(8)));
     LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
       dp(44)
@@ -1165,7 +2723,7 @@ public class NativeShortVideoActivity extends Activity {
   private TextView emptyPanel(String text) {
     TextView empty = new TextView(this);
     empty.setText(text);
-    empty.setTextColor(0x99FFFFFF);
+    empty.setTextColor(0xFF8A8F99);
     empty.setTextSize(14);
     empty.setGravity(Gravity.CENTER);
     empty.setTypeface(Typeface.DEFAULT_BOLD);
@@ -1174,7 +2732,7 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void openAuthorVideo(ShortVideoItem item, FeedPage page, AuthorScreenState authorScreen) {
-    String url = authorFeedUrl(authorScreen.seed, 0, 80);
+    String url = authorFeedUrl(authorScreen.seed, 0, 80, authorScreen.sort);
     if (url.length() == 0) return;
     pushCurrentScreen();
     FeedPage feed = page.copy();
@@ -1194,28 +2752,67 @@ public class NativeShortVideoActivity extends Activity {
     return -1;
   }
 
+  private int findVideoIndex(List<ShortVideoItem> source, ShortVideoItem target) {
+    if (target == null) return -1;
+    for (int i = 0; i < source.size(); i++) {
+      if (isSameVideo(source.get(i), target)) return i;
+    }
+    return -1;
+  }
+
   private void switchToAuthorFeed(AuthorScreenState authorScreen) {
-    String url = authorFeedUrl(authorScreen.seed, 0, 80);
+    String url = authorFeedUrl(authorScreen.seed, 0, 80, authorScreen.sort);
     if (url.length() == 0) return;
     pushCurrentScreen();
     FeedPage feed = authorScreen.page == null ? localAuthorPage(authorScreen.seed) : authorScreen.page.copy();
     if (feed.items.isEmpty()) feed.items.add(authorScreen.seed);
-    renderFeedScreen(new FeedScreenState(feed.items, url, feed.nextOffset(), feed.hasMore, 0));
+    ShortVideoItem target = currentAuthorItem(authorScreen);
+    int startIndex = findVideoIndex(feed.items, target);
+    if (startIndex < 0 && sameAuthor(authorScreen.seed, target)) {
+      feed.items.add(target);
+      startIndex = feed.items.size() - 1;
+    }
+    renderFeedScreen(new FeedScreenState(feed.items, url, feed.nextOffset(), feed.hasMore, Math.max(0, startIndex)));
   }
 
-  private String authorFeedUrl(ShortVideoItem seed, int offset, int limit) {
+  private String authorFeedUrl(ShortVideoItem seed, int offset, int limit, String sort) {
     if (seed == null || seed.authorSecUid.length() == 0) return "";
     String base = baseFromUrl(pendingFeedUrl != null && pendingFeedUrl.length() > 0 ? pendingFeedUrl : seed.streamUrl);
     if (base.length() == 0) return "";
     return Uri.parse(base + "/api/short-videos").buildUpon()
       .appendQueryParameter("author", seed.authorSecUid)
       .appendQueryParameter("source", "all")
-      .appendQueryParameter("sort", "published")
+      .appendQueryParameter("sort", normalizeSortParam(sort))
       .appendQueryParameter("facets", "0")
       .appendQueryParameter("offset", String.valueOf(Math.max(0, offset)))
       .appendQueryParameter("limit", String.valueOf(Math.max(1, limit)))
       .build()
       .toString();
+  }
+
+  private String currentFeedSort() {
+    try {
+      Uri uri = Uri.parse(pendingFeedUrl == null ? "" : pendingFeedUrl);
+      return normalizeSortParam(uri.getQueryParameter("sort"));
+    } catch (Exception ignored) {
+      return "published";
+    }
+  }
+
+  private String normalizeSortParam(String value) {
+    String sort = value == null ? "" : value.trim();
+    switch (sort) {
+      case "liked":
+      case "published":
+      case "publishedAsc":
+      case "likes":
+      case "likesAsc":
+      case "comments":
+      case "duration":
+        return sort;
+      default:
+        return "published";
+    }
   }
 
   private View authorAvatarView(ShortVideoItem item, int size) {
@@ -1226,13 +2823,13 @@ public class NativeShortVideoActivity extends Activity {
     fallback.setTextSize(20);
     fallback.setTypeface(Typeface.DEFAULT_BOLD);
     fallback.setGravity(Gravity.CENTER);
-    fallback.setBackground(circleDrawable(0xFF282B35));
+    fallback.setBackground(circleDrawable(0xFF8E96A3));
     setCircleClip(fallback);
     wrap.addView(fallback, new FrameLayout.LayoutParams(size, size, Gravity.CENTER));
     if (item.authorAvatarUrl.length() > 0) {
       ImageView image = new ImageView(this);
       image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-      image.setBackground(circleDrawable(0xFF282B35));
+      image.setBackground(circleDrawable(0xFF8E96A3));
       setCircleClip(image);
       wrap.addView(image, new FrameLayout.LayoutParams(size, size, Gravity.CENTER));
       loadImageInto(image, item.authorAvatarUrl, item.authorSecUid.length() > 0 ? "avatar:" + item.authorSecUid : item.authorAvatarUrl);
@@ -1352,9 +2949,20 @@ public class NativeShortVideoActivity extends Activity {
 
   private void hideSystemBars() {
     Window window = getWindow();
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+      WindowManager.LayoutParams attrs = window.getAttributes();
+      attrs.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+      window.setAttributes(attrs);
+    }
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+      window.setStatusBarColor(Color.TRANSPARENT);
+      window.setNavigationBarColor(Color.TRANSPARENT);
+    }
     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
       window.setDecorFitsSystemWindows(false);
-      WindowInsetsController controller = window.getInsetsController();
+      View decorView = window.peekDecorView();
+      if (decorView == null) return;
+      WindowInsetsController controller = decorView.getWindowInsetsController();
       if (controller != null) {
         controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
         controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
@@ -1380,6 +2988,558 @@ public class NativeShortVideoActivity extends Activity {
     return String.valueOf(value);
   }
 
+  private String formatPlaybackTime(long valueMs) {
+    long totalSeconds = Math.max(0, valueMs) / 1000;
+    long hours = totalSeconds / 3600;
+    long minutes = (totalSeconds % 3600) / 60;
+    long seconds = totalSeconds % 60;
+    if (hours > 0) return String.format(Locale.CHINA, "%d:%02d:%02d", hours, minutes, seconds);
+    return String.format(Locale.CHINA, "%d:%02d", minutes, seconds);
+  }
+
+  private void bindRail(ShortVideoHolder holder, ShortVideoItem item) {
+    holder.rail.removeAllViews();
+    holder.rail.addView(authorAvatarButton(item));
+    holder.rail.addView(metric("♥", displayLikes(item), isLiked(item), "点赞", view -> toggleLike(item)));
+    holder.rail.addView(metric("●", item.comments, false, "评论", view -> showTransientStatus("评论数据尚未导入")));
+    holder.rail.addView(metric("★", displayCollects(item), isCollected(item), "收藏", view -> toggleCollected(item), 0xFFFFD54F));
+    holder.rail.addView(metric("↗", item.shares, false, "分享", view -> shareVideo(item)));
+  }
+
+  private void showPlaybackToolbar(ShortVideoItem item) {
+    if (item == null) return;
+    clearPendingStageTap();
+    dismissPlaybackToolbar();
+
+    final List<Runnable> toolbarActions = new ArrayList<>();
+    final LinearLayout[] rowRef = new LinearLayout[1];
+    FrameLayout overlay = new FrameLayout(this) {
+      @Override
+      public boolean dispatchTouchEvent(MotionEvent event) {
+        if (event != null && event.getActionMasked() == MotionEvent.ACTION_UP) {
+          LinearLayout actionRow = rowRef[0];
+          if (actionRow != null) {
+            float rawX = event.getRawX();
+            float rawY = event.getRawY();
+            for (int i = 0; i < actionRow.getChildCount() && i < toolbarActions.size(); i++) {
+              View child = actionRow.getChildAt(i);
+              int[] location = new int[2];
+              child.getLocationOnScreen(location);
+              if (rawX >= location[0] && rawX <= location[0] + child.getWidth()
+                && rawY >= location[1] && rawY <= location[1] + child.getHeight()) {
+                toolbarActions.get(i).run();
+                return true;
+              }
+            }
+          }
+          dismissPlaybackToolbar();
+        }
+        return true;
+      }
+    };
+    overlay.setClickable(true);
+    overlay.setFocusable(true);
+    overlay.setBackgroundColor(0x66000000);
+
+    LinearLayout sheet = new LinearLayout(this);
+    sheet.setOrientation(LinearLayout.VERTICAL);
+    sheet.setPadding(dp(16), dp(10), dp(16), dp(18));
+    sheet.setBackground(roundedDrawable(0xF21B1D25, dp(20)));
+    sheet.setClickable(true);
+    sheet.setFocusable(true);
+    sheet.setOnClickListener(view -> {});
+
+    View handle = new View(this);
+    handle.setBackground(roundedDrawable(0x66FFFFFF, dp(2)));
+    LinearLayout.LayoutParams handleParams = new LinearLayout.LayoutParams(dp(42), dp(4));
+    handleParams.gravity = Gravity.CENTER_HORIZONTAL;
+    handleParams.bottomMargin = dp(12);
+    sheet.addView(handle, handleParams);
+
+    LinearLayout row = new LinearLayout(this);
+    row.setOrientation(LinearLayout.HORIZONTAL);
+    row.setGravity(Gravity.CENTER);
+    rowRef[0] = row;
+    sheet.addView(row, new LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      dp(72)
+    ));
+
+    String originalUrl = originalVideoUrl(item);
+    String shareUrl = shareVideoUrl(item);
+    Runnable muteAction = () -> {
+      dismissPlaybackToolbar();
+      toggleMuted();
+    };
+    toolbarActions.add(muteAction);
+    row.addView(toolbarButton(muted ? "♪" : "×", muted ? "开声" : "静音", muted ? "静音中" : "有声", muted, view -> muteAction.run()));
+
+    Runnable autoNextAction = () -> {
+      dismissPlaybackToolbar();
+      toggleAutoNext();
+    };
+    toolbarActions.add(autoNextAction);
+    row.addView(toolbarButton(autoNext ? "↓" : "∞", autoNext ? "连播" : "循环", autoNext ? "下一条" : "单条", autoNext, view -> autoNextAction.run()));
+
+    Runnable clearAction = () -> {
+      dismissPlaybackToolbar();
+      setControlsHidden(!controlsHidden, true);
+    };
+    toolbarActions.add(clearAction);
+    row.addView(toolbarButton(controlsHidden ? "▣" : "□", controlsHidden ? "显示" : "清屏", controlsHidden ? "恢复" : "隐藏", controlsHidden, view -> clearAction.run()));
+
+    Runnable moreAction = () -> {
+      dismissPlaybackToolbar();
+      showMoreActions(item, shareUrl, originalUrl);
+    };
+    toolbarActions.add(moreAction);
+    row.addView(toolbarButton("⋯", "更多", "操作", false, view -> moreAction.run()));
+
+    overlay.addView(sheet, new FrameLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.WRAP_CONTENT,
+      Gravity.BOTTOM
+    ));
+    playbackToolbarOverlay = overlay;
+    rootView.addView(overlay, new FrameLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.MATCH_PARENT
+    ));
+    hideSystemBars();
+  }
+
+  private void dismissPlaybackToolbar() {
+    if (playbackToolbarOverlay == null || rootView == null) return;
+    rootView.removeView(playbackToolbarOverlay);
+    playbackToolbarOverlay = null;
+    hideSystemBars();
+  }
+
+  private TextView toolbarButton(String icon, String title, String subtitle, boolean active, View.OnClickListener listener) {
+    TextView view = new TextView(this);
+    view.setText(icon + "\n" + title + "\n" + subtitle);
+    view.setTextColor(Color.WHITE);
+    view.setTextSize(12);
+    view.setGravity(Gravity.CENTER);
+    view.setTypeface(Typeface.DEFAULT_BOLD);
+    view.setLineSpacing(dp(1), 1f);
+    view.setPadding(dp(4), 0, dp(4), 0);
+    view.setBackground(roundedDrawable(active ? 0xCCFE2C55 : 0xFF2A2D37, dp(14)));
+    view.setClickable(true);
+    view.setFocusable(true);
+    view.setOnClickListener(listener);
+    LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+    params.leftMargin = dp(4);
+    params.rightMargin = dp(4);
+    view.setLayoutParams(params);
+    return view;
+  }
+
+  private void showMoreActions(ShortVideoItem item, String shareUrl, String originalUrl) {
+    List<String> labels = new ArrayList<>();
+    List<Runnable> actions = new ArrayList<>();
+    if (shareUrl.length() > 0) {
+      labels.add("分享短视频");
+      actions.add(() -> shareVideo(item));
+    }
+    if (originalUrl.length() > 0) {
+      labels.add("打开抖音原视频");
+      actions.add(() -> openOriginalVideo(item));
+    }
+    if (item.author.length() > 0 || item.authorSecUid.length() > 0) {
+      labels.add("查看作者主页");
+      actions.add(() -> showAuthorPanel(item));
+    }
+    String authorUrl = authorOriginalUrl(item);
+    if (authorUrl.length() > 0) {
+      labels.add("打开抖音作者页");
+      actions.add(() -> openAuthorOriginal(item));
+    }
+    labels.add("排序作品流");
+    actions.add(this::showFeedSortDialog);
+    labels.add(controlsHidden ? "显示控件" : "清屏观看");
+    actions.add(() -> setControlsHidden(!controlsHidden, true));
+    labels.add("删除当前短视频");
+    actions.add(() -> confirmDeleteVideo(item, false));
+    labels.add("删除同组短视频");
+    actions.add(() -> confirmDeleteVideo(item, true));
+    AlertDialog dialog = new AlertDialog.Builder(this)
+      .setTitle("更多操作")
+      .setItems(labels.toArray(new CharSequence[0]), (ignored, which) -> {
+        if (which >= 0 && which < actions.size()) actions.get(which).run();
+      })
+      .setNegativeButton("取消", null)
+      .create();
+    dialog.setOnDismissListener(ignored -> hideSystemBars());
+    dialog.show();
+  }
+
+  private void showFeedSortDialog() {
+    String[] labels = new String[] { "时间倒序", "时间正序", "最近点赞", "点赞最多", "点赞最少", "评论最多", "时长最长" };
+    String[] values = new String[] { "published", "publishedAsc", "liked", "likes", "likesAsc", "comments", "duration" };
+    String current = currentFeedSort();
+    int checked = 0;
+    for (int i = 0; i < values.length; i++) {
+      if (values[i].equals(current)) {
+        checked = i;
+        break;
+      }
+    }
+    AlertDialog dialog = new AlertDialog.Builder(this)
+      .setTitle("作品流排序")
+      .setSingleChoiceItems(labels, checked, (choice, which) -> {
+        choice.dismiss();
+        if (which < 0 || which >= values.length) return;
+        applyFeedSort(values[which]);
+      })
+      .setNegativeButton("取消", null)
+      .create();
+    dialog.setOnDismissListener(ignored -> hideSystemBars());
+    dialog.show();
+  }
+
+  private void applyFeedSort(String sort) {
+    String normalized = normalizeSortParam(sort);
+    String sortedUrl = feedUrlWithSort(pendingFeedUrl, normalized);
+    if (sortedUrl.length() == 0) {
+      applyLocalFeedSort(normalized, "已按" + authorSortLabel(normalized) + "本地排序");
+      return;
+    }
+    showStatus("正在按" + authorSortLabel(normalized) + "排序");
+    loadingMoreVideos = true;
+    executor.execute(() -> {
+      FeedPage page = readFeedPage(sortedUrl);
+      mainHandler.post(() -> {
+        loadingMoreVideos = false;
+        if (page.items.isEmpty()) {
+          applyLocalFeedSort(normalized, "已按" + authorSortLabel(normalized) + "本地排序");
+          return;
+        }
+        replaceFeedWithPage(page, sortedUrl, 0);
+        showTransientStatus("已按" + authorSortLabel(normalized) + "排序");
+      });
+    });
+  }
+
+  private void applyLocalFeedSort(String sort, String message) {
+    if (videos.isEmpty()) {
+      showTransientStatus("没有可排序的作品");
+      return;
+    }
+    FeedPage page = new FeedPage();
+    page.items.addAll(videos);
+    sortShortVideoItems(page.items, sort);
+    page.total = page.items.size();
+    page.limit = page.items.size();
+    page.offset = 0;
+    page.hasMore = false;
+    page.stats = FeedStats.fromItems(page.items);
+    replaceFeedWithPage(page, pendingFeedUrl, 0);
+    showTransientStatus(message);
+  }
+
+  private void replaceFeedWithPage(FeedPage page, String feedUrl, int startIndex) {
+    releaseAllPlayers();
+    attachedHolders.clear();
+    loadingMoreVideos = false;
+    pendingAutoAdvanceIndex = -1;
+    currentIndex = -1;
+    pendingPlayIndex = -1;
+    pendingFeedUrl = feedUrl == null ? "" : feedUrl;
+    updateTopSearchButton();
+    nextFeedOffset = page.nextOffset();
+    hasMoreVideos = page.hasMore;
+    videos.clear();
+    videos.addAll(page.items);
+    currentScreen = new FeedScreenState(videos, pendingFeedUrl, nextFeedOffset, hasMoreVideos, startIndex);
+    adapter.notifyDataSetChanged();
+    if (videos.isEmpty()) {
+      showStatus("没有可播放的短视频");
+      return;
+    }
+    startPlaybackAt(Math.max(0, Math.min(startIndex, videos.size() - 1)));
+  }
+
+  private String feedUrlWithSort(String feedUrl, String sort) {
+    String raw = feedUrl == null ? "" : feedUrl.trim();
+    if (raw.length() == 0) return "";
+    try {
+      Uri uri = Uri.parse(normalizeFeedUrl(raw));
+      Uri.Builder builder = uri.buildUpon().clearQuery();
+      for (String name : uri.getQueryParameterNames()) {
+        if ("offset".equals(name) || "limit".equals(name) || "sort".equals(name)) continue;
+        List<String> values = uri.getQueryParameters(name);
+        if (values.isEmpty()) builder.appendQueryParameter(name, "");
+        else for (String value : values) builder.appendQueryParameter(name, value);
+      }
+      builder.appendQueryParameter("sort", normalizeSortParam(sort));
+      builder.appendQueryParameter("offset", "0");
+      builder.appendQueryParameter("limit", "80");
+      return builder.build().toString();
+    } catch (Exception ignored) {
+      return "";
+    }
+  }
+
+  private void showFeedSearchDialog() {
+    if (loadingMoreVideos) {
+      showTransientStatus("作品流正在加载");
+      return;
+    }
+    String currentQuery = currentFeedQuery();
+    ExoPlayer dialogPlayer = activePlayer;
+    boolean resumeAfterDialog = dialogPlayer != null
+      && dialogPlayer.getPlayWhenReady()
+      && dialogPlayer.getPlaybackState() != Player.STATE_ENDED;
+    if (dialogPlayer != null) dialogPlayer.pause();
+
+    EditText input = new EditText(this);
+    input.setSingleLine(true);
+    input.setHint("标题、文案或作者");
+    input.setText(currentQuery);
+    input.setSelection(input.getText().length());
+    LinearLayout inputWrap = new LinearLayout(this);
+    inputWrap.setPadding(dp(20), 0, dp(20), 0);
+    inputWrap.addView(input, new LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.WRAP_CONTENT
+    ));
+
+    AlertDialog dialog = new AlertDialog.Builder(this)
+      .setTitle("搜索短视频")
+      .setView(inputWrap)
+      .setNegativeButton("取消", null)
+      .setPositiveButton("搜索", (ignored, which) -> applyFeedSearch(input.getText().toString()))
+      .create();
+    dialog.setOnShowListener(ignored -> {
+      input.requestFocus();
+      Window window = dialog.getWindow();
+      if (window != null) window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+    });
+    dialog.setOnDismissListener(ignored -> {
+      hideSystemBars();
+      if (resumeAfterDialog
+        && activityResumed
+        && authorOverlay == null
+        && activePlayer == dialogPlayer
+        && dialogPlayer.getPlaybackState() != Player.STATE_ENDED) {
+        dialogPlayer.play();
+        startProgressUpdates();
+      }
+    });
+    dialog.show();
+  }
+
+  private void applyFeedSearch(String query) {
+    String normalizedQuery = query == null ? "" : query.trim();
+    if (normalizedQuery.equals(currentFeedQuery())) return;
+    String searchUrl = feedUrlWithQuery(pendingFeedUrl, normalizedQuery);
+    if (searchUrl.length() == 0) {
+      showTransientStatus("没有可用的搜索接口");
+      return;
+    }
+    ScreenState returnScreen = captureCurrentScreen();
+    showStatus(normalizedQuery.length() > 0 ? "正在搜索“" + normalizedQuery + "”" : "正在恢复全部作品");
+    loadingMoreVideos = true;
+    executor.execute(() -> {
+      FeedPage page = readFeedPage(searchUrl);
+      mainHandler.post(() -> {
+        loadingMoreVideos = false;
+        if (page.items.isEmpty()) {
+          showTransientStatus(normalizedQuery.length() > 0 ? "没有找到相关短视频" : "没有可播放的短视频");
+          return;
+        }
+        if (returnScreen != null) navigationStack.add(returnScreen);
+        replaceFeedWithPage(page, searchUrl, 0);
+        showTransientStatus(normalizedQuery.length() > 0 ? "搜索到 " + page.total + " 条" : "已恢复全部作品");
+      });
+    });
+  }
+
+  private String feedUrlWithQuery(String feedUrl, String query) {
+    String raw = feedUrl == null ? "" : feedUrl.trim();
+    if (raw.length() == 0) {
+      String base = apiBase();
+      if (base.length() == 0) return "";
+      raw = Uri.parse(base).buildUpon().appendPath("api").appendPath("short-videos").build().toString();
+    }
+    try {
+      Uri uri = Uri.parse(normalizeFeedUrl(raw));
+      Uri.Builder builder = uri.buildUpon().clearQuery();
+      for (String name : uri.getQueryParameterNames()) {
+        if ("q".equals(name) || "offset".equals(name) || "limit".equals(name)) continue;
+        List<String> values = uri.getQueryParameters(name);
+        if (values.isEmpty()) builder.appendQueryParameter(name, "");
+        else for (String value : values) builder.appendQueryParameter(name, value);
+      }
+      if (query != null && query.trim().length() > 0) builder.appendQueryParameter("q", query.trim());
+      builder.appendQueryParameter("offset", "0");
+      builder.appendQueryParameter("limit", "80");
+      return builder.build().toString();
+    } catch (Exception ignored) {
+      return "";
+    }
+  }
+
+  private String currentFeedQuery() {
+    String raw = pendingFeedUrl == null ? "" : pendingFeedUrl.trim();
+    if (raw.length() == 0) return "";
+    try {
+      String query = Uri.parse(normalizeFeedUrl(raw)).getQueryParameter("q");
+      return query == null ? "" : query.trim();
+    } catch (Exception ignored) {
+      return "";
+    }
+  }
+
+  private void updateTopSearchButton() {
+    if (topSearchButton == null) return;
+    String query = currentFeedQuery();
+    topSearchButton.setText(query.length() > 0 ? query : "搜索");
+    topSearchButton.setContentDescription(query.length() > 0 ? "当前搜索 " + query : "搜索短视频");
+  }
+
+  private View authorAvatarButton(ShortVideoItem item) {
+    FrameLayout button = new FrameLayout(this);
+    button.setClickable(true);
+    button.setFocusable(true);
+    button.setContentDescription(item.author.length() > 0 ? "查看作者 " + item.author : "查看作者");
+    button.setOnClickListener(view -> showAuthorPanel(item));
+    button.setClipChildren(false);
+    button.setClipToPadding(false);
+    button.setLayoutParams(new LinearLayout.LayoutParams(dp(64), dp(64)));
+
+    TextView fallback = new TextView(this);
+    fallback.setText(initials(item.author));
+    fallback.setTextColor(Color.WHITE);
+    fallback.setTextSize(17);
+    fallback.setTypeface(Typeface.DEFAULT_BOLD);
+    fallback.setGravity(Gravity.CENTER);
+    fallback.setBackground(circleDrawable(0xFF22242D));
+    setCircleClip(fallback);
+    FrameLayout.LayoutParams avatarParams = new FrameLayout.LayoutParams(dp(52), dp(52), Gravity.CENTER);
+    button.addView(fallback, avatarParams);
+
+    if (item.authorAvatarUrl.length() > 0) {
+      ImageView avatar = new ImageView(this);
+      avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
+      avatar.setBackground(circleDrawable(0xFF22242D));
+      setCircleClip(avatar);
+      button.addView(avatar, avatarParams);
+      loadImageInto(avatar, item.authorAvatarUrl, item.authorSecUid.length() > 0 ? "avatar:" + item.authorSecUid : item.authorAvatarUrl);
+    }
+    if (!isFollowingAuthor(item) && authorInteractionKey(item).length() > 0) {
+      TextView follow = new TextView(this);
+      follow.setText("+");
+      follow.setTextColor(Color.WHITE);
+      follow.setTextSize(17);
+      follow.setTypeface(Typeface.DEFAULT_BOLD);
+      follow.setGravity(Gravity.CENTER);
+      follow.setIncludeFontPadding(false);
+      follow.setBackground(circleDrawable(0xFFFE2C55));
+      follow.setContentDescription("关注 " + displayAuthor(item));
+      follow.setOnClickListener(view -> toggleFollowingAuthor(item));
+      FrameLayout.LayoutParams followParams = new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+      followParams.bottomMargin = dp(1);
+      button.addView(follow, followParams);
+    }
+    return button;
+  }
+
+  private TextView metric(String icon, long value) {
+    return metric(icon, value, false, "", null);
+  }
+
+  private TextView metric(String icon, long value, boolean active, String label, @Nullable View.OnClickListener listener) {
+    return metric(icon, value, active, label, listener, 0xFFFF4D6D);
+  }
+
+  private TextView metric(String icon, long value, boolean active, String label, @Nullable View.OnClickListener listener, int activeColor) {
+    TextView view = new TextView(this);
+    view.setText(icon + "\n" + compact(value));
+    view.setTextColor(active ? activeColor : Color.WHITE);
+    view.setTextSize(13);
+    view.setGravity(Gravity.CENTER);
+    view.setTypeface(Typeface.DEFAULT_BOLD);
+    view.setShadowLayer(6, 0, 2, 0xAA000000);
+    view.setPadding(0, dp(8), 0, dp(8));
+    view.setMinWidth(dp(52));
+    if (active) view.setBackground(roundedDrawable((activeColor & 0x00FFFFFF) | 0x33000000, dp(18)));
+    if (listener != null) {
+      view.setClickable(true);
+      view.setFocusable(true);
+      view.setContentDescription((label == null || label.length() == 0 ? "短视频指标" : label) + " " + compact(value));
+      view.setOnClickListener(listener);
+      view.setOnTouchListener((target, event) -> {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+          clearPendingStageTap();
+          target.setPressed(true);
+          setParentInterceptDisallowed(target, true);
+          return true;
+        }
+        if (action == MotionEvent.ACTION_UP) {
+          target.setPressed(false);
+          setParentInterceptDisallowed(target, false);
+          target.performClick();
+          return true;
+        }
+        if (action == MotionEvent.ACTION_CANCEL) {
+          target.setPressed(false);
+          setParentInterceptDisallowed(target, false);
+          return true;
+        }
+        return true;
+      });
+    }
+    return view;
+  }
+
+  private String originalVideoUrl(ShortVideoItem item) {
+    String awemeId = item.awemeId.length() > 0 ? item.awemeId : item.id;
+    if (awemeId.matches("\\d{8,}")) return "https://www.douyin.com/video/" + awemeId;
+    String url = item.originalUrl.length() > 0 ? item.originalUrl : item.shareUrl;
+    return url.startsWith("http://") || url.startsWith("https://") ? url : "";
+  }
+
+  private String shareVideoUrl(ShortVideoItem item) {
+    String url = originalVideoUrl(item);
+    if (url.length() > 0) return url;
+    return item.streamUrl.startsWith("http://") || item.streamUrl.startsWith("https://") ? item.streamUrl : "";
+  }
+
+  private void openOriginalVideo(ShortVideoItem item) {
+    String url = originalVideoUrl(item);
+    if (url.length() == 0) {
+      showTransientStatus("没有原始链接");
+      return;
+    }
+    try {
+      startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+    } catch (Exception error) {
+      showTransientStatus("无法打开原始链接");
+    }
+  }
+
+  private void shareVideo(ShortVideoItem item) {
+    String url = shareVideoUrl(item);
+    if (url.length() == 0) {
+      showTransientStatus("没有可分享的链接");
+      return;
+    }
+    String title = item.title.length() > 0 ? item.title : "短视频";
+    Intent intent = new Intent(Intent.ACTION_SEND);
+    intent.setType("text/plain");
+    intent.putExtra(Intent.EXTRA_TITLE, title);
+    intent.putExtra(Intent.EXTRA_SUBJECT, title);
+    intent.putExtra(Intent.EXTRA_TEXT, title + "\n" + url);
+    try {
+      startActivity(Intent.createChooser(intent, "分享短视频"));
+    } catch (Exception error) {
+      showTransientStatus("无法打开分享面板");
+    }
+  }
+
   private final class ShortVideoAdapter extends RecyclerView.Adapter<ShortVideoHolder> {
     @NonNull
     @Override
@@ -1388,6 +3548,8 @@ public class NativeShortVideoActivity extends Activity {
       root.setBackgroundColor(Color.BLACK);
       root.setClipChildren(false);
       root.setClipToPadding(false);
+      root.setClickable(true);
+      root.setFocusable(true);
       root.setLayoutParams(new ViewGroup.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.MATCH_PARENT
@@ -1403,6 +3565,14 @@ public class NativeShortVideoActivity extends Activity {
       cover.setScaleType(ImageView.ScaleType.CENTER_CROP);
       cover.setBackgroundColor(Color.BLACK);
       stage.addView(cover, new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.MATCH_PARENT
+      ));
+
+      FrameLayout gestureLayer = new FrameLayout(parent.getContext());
+      gestureLayer.setClickable(true);
+      gestureLayer.setFocusable(true);
+      root.addView(gestureLayer, new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.MATCH_PARENT
       ));
@@ -1423,6 +3593,21 @@ public class NativeShortVideoActivity extends Activity {
       captionParams.bottomMargin = dp(40);
       root.addView(caption, captionParams);
 
+      TextView likeBurst = new TextView(parent.getContext());
+      likeBurst.setText("♥");
+      likeBurst.setTextColor(0xFFFF4D6D);
+      likeBurst.setTextSize(92);
+      likeBurst.setTypeface(Typeface.DEFAULT_BOLD);
+      likeBurst.setGravity(Gravity.CENTER);
+      likeBurst.setIncludeFontPadding(false);
+      likeBurst.setShadowLayer(20, 0, 4, 0xAA000000);
+      likeBurst.setVisibility(View.GONE);
+      root.addView(likeBurst, new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        Gravity.CENTER
+      ));
+
       LinearLayout rail = new LinearLayout(parent.getContext());
       rail.setOrientation(LinearLayout.VERTICAL);
       rail.setGravity(Gravity.CENTER);
@@ -1432,23 +3617,89 @@ public class NativeShortVideoActivity extends Activity {
       railParams.rightMargin = dp(8);
       root.addView(rail, railParams);
 
-      return new ShortVideoHolder(root, stage, cover, caption, rail);
+      FrameLayout progressTouch = new FrameLayout(parent.getContext());
+      progressTouch.setClickable(true);
+      progressTouch.setFocusable(true);
+      progressTouch.setOnTouchListener((view, event) -> seekActivePlayerFromTouch(view, event));
+      FrameLayout.LayoutParams progressTouchParams = new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        dp(28),
+        Gravity.BOTTOM
+      );
+      root.addView(progressTouch, progressTouchParams);
+
+      FrameLayout progressTrack = new FrameLayout(parent.getContext());
+      progressTrack.setAlpha(0f);
+      progressTrack.setBackgroundColor(0x44FFFFFF);
+      FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        dp(3),
+        Gravity.BOTTOM
+      );
+      progressTouch.addView(progressTrack, progressParams);
+
+      View progressFill = new View(parent.getContext());
+      progressFill.setBackgroundColor(0xFFFE2C55);
+      progressFill.setPivotX(0f);
+      progressFill.setScaleX(0f);
+      progressTrack.addView(progressFill, new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.MATCH_PARENT
+      ));
+
+      TextView progressTime = new TextView(parent.getContext());
+      progressTime.setTextColor(Color.WHITE);
+      progressTime.setTextSize(13);
+      progressTime.setTypeface(Typeface.DEFAULT_BOLD);
+      progressTime.setGravity(Gravity.CENTER);
+      progressTime.setPadding(dp(10), dp(5), dp(10), dp(5));
+      progressTime.setBackground(roundedDrawable(0xCC161823, dp(6)));
+      progressTime.setVisibility(View.GONE);
+      FrameLayout.LayoutParams progressTimeParams = new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL
+      );
+      progressTimeParams.bottomMargin = dp(34);
+      root.addView(progressTime, progressTimeParams);
+
+      return new ShortVideoHolder(root, stage, cover, gestureLayer, caption, rail, progressTouch, progressTrack, progressFill, progressTime, likeBurst);
     }
 
     @Override
     public void onBindViewHolder(@NonNull ShortVideoHolder holder, int position) {
       holder.index = position;
+      holder.touchActive = false;
+      holder.horizontalGesture = false;
+      holder.verticalGesture = false;
+      holder.longPressTriggered = false;
       ShortVideoItem item = videos.get(position);
+      View.OnLongClickListener longPress = view -> {
+        clearPendingStageTap();
+        view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        showPlaybackToolbar(item);
+        return true;
+      };
+      holder.itemView.setOnClickListener(view -> handleStageTap(holder.index));
+      holder.itemView.setOnTouchListener((view, event) -> handleStageTouch(holder, view, event));
+      holder.itemView.setOnLongClickListener(longPress);
+      holder.stage.setOnClickListener(view -> handleStageTap(holder.index));
+      holder.stage.setOnTouchListener((view, event) -> handleStageTouch(holder, view, event));
+      holder.stage.setOnLongClickListener(longPress);
+      holder.cover.setOnClickListener(view -> handleStageTap(holder.index));
+      holder.cover.setOnTouchListener((view, event) -> handleStageTouch(holder, view, event));
+      holder.cover.setOnLongClickListener(longPress);
+      holder.gestureLayer.setOnTouchListener((view, event) -> handleGestureLayerTouch(holder, view, event));
       holder.caption.setText("@" + (item.author.length() > 0 ? item.author : "未知作者") + "\n" + item.title);
       holder.caption.setOnClickListener(view -> showAuthorPanel(item));
-      holder.rail.removeAllViews();
-      holder.rail.addView(authorAvatarButton(item));
-      holder.rail.addView(metric("♥", item.likes));
-      holder.rail.addView(metric("●", item.comments));
-      holder.rail.addView(metric("★", item.collects));
-      holder.rail.addView(metric("↗", item.shares));
+      holder.caption.setOnLongClickListener(longPress);
+      holder.rail.setOnLongClickListener(longPress);
+      bindRail(holder, item);
+      applyControlsVisibility(holder);
       holder.cover.setImageDrawable(null);
       holder.cover.setVisibility(View.VISIBLE);
+      resetHolderProgress(holder);
+      resetLikeBurst(holder);
       attachedHolders.put(position, holder);
       ensurePlayerViewAt(position);
       if (!applyCachedFrame(holder, item) && item.coverUrl.length() > 0) loadCover(holder, item);
@@ -1458,8 +3709,15 @@ public class NativeShortVideoActivity extends Activity {
     @Override
     public void onViewRecycled(@NonNull ShortVideoHolder holder) {
       attachedHolders.remove(holder.index);
+      cancelStageLongPress(holder);
+      hideSeekPreview(holder, false);
+      holder.touchActive = false;
+      holder.horizontalGesture = false;
+      holder.verticalGesture = false;
+      holder.longPressTriggered = false;
       PlayerView cachedView = playerViews.get(holder.index);
       if (cachedView != null && cachedView.getParent() == holder.stage) holder.stage.removeView(cachedView);
+      resetLikeBurst(holder);
       super.onViewRecycled(holder);
     }
 
@@ -1468,65 +3726,41 @@ public class NativeShortVideoActivity extends Activity {
       return videos.size();
     }
 
-    private View authorAvatarButton(ShortVideoItem item) {
-      FrameLayout button = new FrameLayout(NativeShortVideoActivity.this);
-      button.setClickable(true);
-      button.setFocusable(true);
-      button.setContentDescription(item.author.length() > 0 ? "查看作者 " + item.author : "查看作者");
-      button.setOnClickListener(view -> showAuthorPanel(item));
-      button.setClipChildren(false);
-      button.setClipToPadding(false);
-      LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(64), dp(64));
-      button.setLayoutParams(params);
-
-      TextView fallback = new TextView(NativeShortVideoActivity.this);
-      fallback.setText(initials(item.author));
-      fallback.setTextColor(Color.WHITE);
-      fallback.setTextSize(17);
-      fallback.setTypeface(Typeface.DEFAULT_BOLD);
-      fallback.setGravity(Gravity.CENTER);
-      fallback.setBackground(circleDrawable(0xFF22242D));
-      setCircleClip(fallback);
-      FrameLayout.LayoutParams avatarParams = new FrameLayout.LayoutParams(dp(52), dp(52), Gravity.CENTER);
-      button.addView(fallback, avatarParams);
-
-      if (item.authorAvatarUrl.length() > 0) {
-        ImageView avatar = new ImageView(NativeShortVideoActivity.this);
-        avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        avatar.setBackground(circleDrawable(0xFF22242D));
-        setCircleClip(avatar);
-        button.addView(avatar, avatarParams);
-        loadImageInto(avatar, item.authorAvatarUrl, item.authorSecUid.length() > 0 ? "avatar:" + item.authorSecUid : item.authorAvatarUrl);
-      }
-      return button;
-    }
-
-    private TextView metric(String icon, long value) {
-      TextView view = new TextView(NativeShortVideoActivity.this);
-      view.setText(icon + "\n" + compact(value));
-      view.setTextColor(Color.WHITE);
-      view.setTextSize(13);
-      view.setGravity(Gravity.CENTER);
-      view.setTypeface(Typeface.DEFAULT_BOLD);
-      view.setShadowLayer(6, 0, 2, 0xAA000000);
-      view.setPadding(0, dp(8), 0, dp(8));
-      return view;
-    }
   }
 
   private static final class ShortVideoHolder extends RecyclerView.ViewHolder {
     final FrameLayout stage;
     final ImageView cover;
+    final FrameLayout gestureLayer;
     final TextView caption;
     final LinearLayout rail;
+    final FrameLayout progressTouch;
+    final FrameLayout progressTrack;
+    final View progressFill;
+    final TextView progressTime;
+    final TextView likeBurst;
     int index = -1;
+    float touchStartX;
+    float touchStartY;
+    boolean touchActive;
+    boolean horizontalGesture;
+    boolean verticalGesture;
+    boolean longPressTriggered;
+    Runnable longPressRunnable;
+    Runnable hideSeekPreviewRunnable;
 
-    ShortVideoHolder(@NonNull FrameLayout root, FrameLayout stage, ImageView cover, TextView caption, LinearLayout rail) {
+    ShortVideoHolder(@NonNull FrameLayout root, FrameLayout stage, ImageView cover, FrameLayout gestureLayer, TextView caption, LinearLayout rail, FrameLayout progressTouch, FrameLayout progressTrack, View progressFill, TextView progressTime, TextView likeBurst) {
       super(root);
       this.stage = stage;
       this.cover = cover;
+      this.gestureLayer = gestureLayer;
       this.caption = caption;
       this.rail = rail;
+      this.progressTouch = progressTouch;
+      this.progressTrack = progressTrack;
+      this.progressFill = progressFill;
+      this.progressTime = progressTime;
+      this.likeBurst = likeBurst;
     }
   }
 
@@ -1554,17 +3788,27 @@ public class NativeShortVideoActivity extends Activity {
 
   private static final class AuthorScreenState extends ScreenState {
     final ShortVideoItem seed;
+    ShortVideoItem currentItem;
     FeedPage page;
     String activeTab;
+    String sort;
+    boolean loadingMore;
+    int worksScrollY;
 
-    AuthorScreenState(ShortVideoItem seed, @Nullable FeedPage page, String activeTab) {
+    AuthorScreenState(ShortVideoItem seed, @Nullable FeedPage page, String activeTab, String sort) {
       this.seed = seed;
+      this.currentItem = seed;
       this.page = page == null ? null : page.copy();
       this.activeTab = activeTab == null || activeTab.length() == 0 ? "works" : activeTab;
+      this.sort = sort == null || sort.length() == 0 ? "published" : sort;
     }
 
     AuthorScreenState copy() {
-      return new AuthorScreenState(seed, page, activeTab);
+      AuthorScreenState copy = new AuthorScreenState(seed, page, activeTab, sort);
+      copy.currentItem = currentItem;
+      copy.loadingMore = loadingMore;
+      copy.worksScrollY = worksScrollY;
+      return copy;
     }
   }
 
@@ -1577,7 +3821,7 @@ public class NativeShortVideoActivity extends Activity {
     FeedStats stats = new FeedStats();
 
     int nextOffset() {
-      return offset + Math.max(limit, items.size());
+      return offset + limit;
     }
 
     FeedPage copy() {
@@ -1621,6 +3865,7 @@ public class NativeShortVideoActivity extends Activity {
         stats.comments += item.comments;
         stats.collects += item.collects;
         stats.shares += item.shares;
+        stats.plays += item.plays;
         stats.durationMs += Math.max(0, item.durationMs);
       }
       return stats;
@@ -1643,37 +3888,101 @@ public class NativeShortVideoActivity extends Activity {
     }
   }
 
+  private static final class DeleteResult {
+    final Set<String> ids = new HashSet<>();
+    int count;
+    int deletedFiles;
+
+    static DeleteResult fromJson(JSONObject row, ShortVideoItem fallback) {
+      DeleteResult result = new DeleteResult();
+      JSONArray ids = row == null ? null : row.optJSONArray("ids");
+      if (ids != null) {
+        for (int i = 0; i < ids.length(); i++) {
+          String id = ids.optString(i, "").trim();
+          if (id.length() > 0) result.ids.add(id);
+        }
+      }
+      if (result.ids.isEmpty() && fallback != null && fallback.id.length() > 0) {
+        result.ids.add(fallback.id);
+      }
+      result.count = row == null ? result.ids.size() : Math.max(result.ids.size(), row.optInt("count", result.ids.size()));
+      JSONArray files = row == null ? null : row.optJSONArray("deletedFiles");
+      result.deletedFiles = files == null ? 0 : files.length();
+      return result;
+    }
+  }
+
   private static final class ShortVideoItem {
     final String id;
+    final String awemeId;
     final String streamUrl;
     final String coverUrl;
     final String title;
     final String author;
     final String authorSecUid;
+    final String authorUid;
     final String authorAvatarUrl;
     final String authorProfileUrl;
+    final String authorUniqueId;
+    final String authorShortId;
+    final String authorSignature;
+    final String authorIpLocation;
+    final long authorFollowerCount;
+    final long authorFollowingCount;
+    final long authorTotalFavorited;
+    final long authorAwemeCount;
+    final long authorFavoritingCount;
+    final int authorGender;
+    final int authorAge;
+    final String authorVerification;
+    final String authorProfileCollectedAt;
     final String publishedAt;
     final long durationMs;
+    final int width;
+    final int height;
     final long likes;
     final long comments;
     final long collects;
     final long shares;
+    final long plays;
+    final String shareUrl;
+    final String originalUrl;
 
-    ShortVideoItem(String id, String streamUrl, String coverUrl, String title, String author, String authorSecUid, String authorAvatarUrl, String authorProfileUrl, String publishedAt, long durationMs, long likes, long comments, long collects, long shares) {
-      this.id = id;
+    ShortVideoItem(String id, String awemeId, String streamUrl, String coverUrl, String title, String author, String authorSecUid, String authorUid, String authorAvatarUrl, String authorProfileUrl, String authorUniqueId, String authorShortId, String authorSignature, String authorIpLocation, long authorFollowerCount, long authorFollowingCount, long authorTotalFavorited, long authorAwemeCount, long authorFavoritingCount, int authorGender, int authorAge, String authorVerification, String authorProfileCollectedAt, String publishedAt, long durationMs, int width, int height, long likes, long comments, long collects, long shares, long plays, String shareUrl, String originalUrl) {
+      this.id = id == null ? "" : id;
+      this.awemeId = awemeId == null ? "" : awemeId;
       this.streamUrl = streamUrl == null ? "" : streamUrl;
       this.coverUrl = coverUrl == null ? "" : coverUrl;
       this.title = title == null ? "" : title;
       this.author = author == null ? "" : author;
       this.authorSecUid = authorSecUid == null ? "" : authorSecUid;
+      this.authorUid = authorUid == null ? "" : authorUid;
       this.authorAvatarUrl = authorAvatarUrl == null ? "" : authorAvatarUrl;
       this.authorProfileUrl = authorProfileUrl == null ? "" : authorProfileUrl;
+      this.authorUniqueId = authorUniqueId == null ? "" : authorUniqueId;
+      this.authorShortId = authorShortId == null ? "" : authorShortId;
+      this.authorSignature = authorSignature == null ? "" : authorSignature;
+      this.authorIpLocation = authorIpLocation == null ? "" : authorIpLocation;
+      this.authorFollowerCount = authorFollowerCount;
+      this.authorFollowingCount = authorFollowingCount;
+      this.authorTotalFavorited = authorTotalFavorited;
+      this.authorAwemeCount = authorAwemeCount;
+      this.authorFavoritingCount = authorFavoritingCount;
+      this.authorGender = authorGender;
+      this.authorAge = authorAge;
+      this.authorVerification = authorVerification == null ? "" : authorVerification;
+      this.authorProfileCollectedAt = authorProfileCollectedAt == null ? "" : authorProfileCollectedAt;
       this.publishedAt = publishedAt == null ? "" : publishedAt;
       this.durationMs = durationMs;
+      this.width = Math.max(0, width);
+      this.height = Math.max(0, height);
       this.likes = likes;
       this.comments = comments;
       this.collects = collects;
       this.shares = shares;
+      this.plays = plays;
+      this.shareUrl = shareUrl == null ? "" : shareUrl;
+      this.originalUrl = originalUrl == null ? "" : originalUrl;
     }
   }
 }

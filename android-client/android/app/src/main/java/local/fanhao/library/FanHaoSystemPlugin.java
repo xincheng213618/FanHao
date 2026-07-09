@@ -1,6 +1,10 @@
 package local.fanhao.library;
 
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Color;
+import android.os.BatteryManager;
 import android.os.Build;
 import android.view.View;
 import android.view.Window;
@@ -13,6 +17,10 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 
 @CapacitorPlugin(name = "FanHaoSystem")
 public class FanHaoSystemPlugin extends Plugin {
@@ -27,6 +35,16 @@ public class FanHaoSystemPlugin extends Plugin {
       result.put("immersive", immersive);
       call.resolve(result);
     });
+  }
+
+  @PluginMethod
+  public void getStatusInfo(PluginCall call) {
+    JSObject result = new JSObject();
+    int battery = getBatteryPercent();
+    result.put("time", new SimpleDateFormat("MM/dd HH:mm", Locale.CHINA).format(new Date()));
+    if (battery >= 0) result.put("battery", battery);
+    result.put("charging", isCharging());
+    call.resolve(result);
   }
 
   private void hideSystemBars() {
@@ -92,5 +110,41 @@ public class FanHaoSystemPlugin extends Plugin {
         controller.show(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
       }
     }
+  }
+
+  private int getBatteryPercent() {
+    Context context = getPluginContext();
+    if (context == null) return -1;
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+      BatteryManager manager = (BatteryManager) context.getSystemService(Context.BATTERY_SERVICE);
+      if (manager != null) {
+        int value = manager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+        if (value >= 0 && value <= 100) return value;
+      }
+    }
+
+    Intent status = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+    if (status == null) return -1;
+    int level = status.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+    int scale = status.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+    if (level < 0 || scale <= 0) return -1;
+    return Math.round(level * 100f / scale);
+  }
+
+  private boolean isCharging() {
+    Context context = getPluginContext();
+    if (context == null) return false;
+    Intent status = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+    if (status == null) return false;
+    int plugged = status.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
+    return plugged == BatteryManager.BATTERY_PLUGGED_AC
+      || plugged == BatteryManager.BATTERY_PLUGGED_USB
+      || plugged == BatteryManager.BATTERY_PLUGGED_WIRELESS;
+  }
+
+  private Context getPluginContext() {
+    if (getActivity() != null) return getActivity();
+    return getContext();
   }
 }

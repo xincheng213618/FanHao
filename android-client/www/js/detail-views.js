@@ -5,7 +5,7 @@ import { createDetailSectionTitle } from "./detail-ui.js";
 import { extractWorkCode, formatDate, formatNumber } from "./format.js";
 import { createInfoPreviewSection } from "./info-preview.js";
 import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "./image.js";
-import { getWorkSource } from "./work-source.js";
+import { getWorkSource } from "./work-source.js?v=20260710-western-merge-01";
 
 const PLAY_OPEN_COOLDOWN_MS = 1400;
 
@@ -177,6 +177,7 @@ export function createDetailViews(context) {
     if (value.startsWith("o:/[珍藏1]")) return "珍藏1";
     if (value.startsWith("o:/[珍藏]")) return "珍藏";
     if (value.startsWith("g:/") || value.startsWith("f:/") || value.startsWith("o:/")) return "普通";
+    if (value.startsWith("r:/")) return "欧美";
     return "";
   }
 
@@ -670,6 +671,7 @@ export function createDetailViews(context) {
     const source = getWorkSource(work);
     if (source.vr) return "VR";
     if (source.variant?.includes("collection")) return "珍藏";
+    if (source.variant?.includes("western")) return "欧美";
     return "";
   }
 

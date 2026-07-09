@@ -33,7 +33,7 @@ export function createShortVideosModule({
         if (cached) {
           sendJson(res, 200, { ...cached, cached: true, offline: true });
         } else {
-          sendJson(res, error.statusCode || 500, { error: error.message || "短视频列表读取失败" });
+          sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频列表读取失败") });
         }
       }
       return true;
@@ -44,11 +44,23 @@ export function createShortVideosModule({
       readJsonBody,
       requireLocalAdmin,
       sendJson,
-      shortVideoStore: store
+      shortVideoStore: store,
+      onMutation: clearShortVideoListCache
     });
   }
 
   async function routeMedia(req, res, url) {
+    const galleryMatch = /^\/media\/short-video-gallery\/([^/]+)\/(\d+)$/.exec(url.pathname);
+    if (galleryMatch && req.method === "GET") {
+      const file = store.galleryFile(decodeURIComponent(galleryMatch[1]), Number(galleryMatch[2] || 0));
+      if (!file || file.type !== "image") {
+        notFound(res);
+        return true;
+      }
+      mediaResponseService.serveImage(res, file);
+      return true;
+    }
+
     const coverMatch = /^\/media\/short-video-cover\/([^/]+)$/.exec(url.pathname);
     if (coverMatch && req.method === "GET") {
       const file = store.coverFile(decodeURIComponent(coverMatch[1]));
@@ -229,6 +241,21 @@ export function createShortVideosModule({
 
   function safeFilePart(value) {
     return String(value || "").replace(/[^a-z0-9_-]+/gi, "-").slice(0, 96) || "short-video";
+  }
+
+  function shortVideoErrorStatus(error) {
+    if (isShortVideoDatabaseError(error)) return 503;
+    return error.statusCode || 500;
+  }
+
+  function shortVideoErrorMessage(error, fallback) {
+    if (isShortVideoDatabaseError(error)) return "短视频数据库正在恢复，请稍后重试";
+    return error.message || fallback;
+  }
+
+  function isShortVideoDatabaseError(error) {
+    const message = String(error?.message || error || "");
+    return /database disk image|malformed|sqlite/i.test(message);
   }
 
   return {

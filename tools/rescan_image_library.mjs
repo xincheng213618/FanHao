@@ -14,7 +14,7 @@ const ARCHIVE_EXTS = new Set([".zip", ".cbz", ".rar", ".7z"]);
 const VIDEO_EXTS = new Set([".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".ts", ".m2ts", ".webm", ".iso"]);
 const DIRECT_VIDEO_EXTS = new Set([".mp4", ".m4v", ".webm"]);
 const PHOTO_COLLECTION_ROOT_VALUE = "__fanhao_photo_collection_root__";
-const VALID_SCAN_SCOPES = new Set(["all", "photo", "media", "western", "movie", "tv"]);
+const VALID_SCAN_SCOPES = new Set(["all", "photo", "media", "movie", "tv"]);
 
 function normalizeExt(fileName) {
   return path.extname(fileName).toLowerCase();
@@ -70,7 +70,7 @@ function parseArgs(argv) {
     } else if (arg === "--media-only") {
       options.scope = "media";
     } else if (arg === "--western-only") {
-      options.scope = "western";
+      options.scope = "media";
     } else if (arg === "--movie-only") {
       options.scope = "movie";
     } else if (arg === "--tv-only") {
@@ -79,6 +79,7 @@ function parseArgs(argv) {
   }
   if (options.scope === "movies") options.scope = "movie";
   if (options.scope === "television") options.scope = "tv";
+  if (options.scope === "western") options.scope = "media";
   if (!VALID_SCAN_SCOPES.has(options.scope)) options.scope = "all";
   return options;
 }
@@ -406,14 +407,13 @@ function buildIndex(options) {
   const existing = readJsonFile(IMAGE_LIBRARY_INDEX_PATH, {});
   const photoRoots = parseRootList(process.env.FANHAO_PHOTO_SET_ROOTS, "T:\\;T:\\[套图1]");
   const mediaSources = [
-    { kind: "western", label: "欧美", roots: parseRootList(process.env.FANHAO_WESTERN_ROOTS, "R:\\") },
     { kind: "movie", label: "电影", roots: parseRootList(process.env.FANHAO_MOVIE_ROOTS, "Z:\\") },
     { kind: "tv", label: "电视剧", roots: parseRootList(process.env.FANHAO_TV_ROOTS, "Y:\\") }
   ];
 
   const scanPhoto = options.scope === "all" || options.scope === "photo";
-  const scanMedia = options.scope === "all" || options.scope === "media" || ["western", "movie", "tv"].includes(options.scope);
-  const selectedMediaSources = ["western", "movie", "tv"].includes(options.scope)
+  const scanMedia = options.scope === "all" || options.scope === "media" || ["movie", "tv"].includes(options.scope);
+  const selectedMediaSources = ["movie", "tv"].includes(options.scope)
     ? mediaSources.filter((source) => source.kind === options.scope)
     : mediaSources;
   const photo = scanPhoto ? scanPhotoSetLibrary(photoRoots) : {
@@ -423,7 +423,7 @@ function buildIndex(options) {
   let media;
   if (scanMedia) {
     const scannedMedia = scanGalleryMediaLibrary(selectedMediaSources);
-    if (["western", "movie", "tv"].includes(options.scope)) {
+    if (["movie", "tv"].includes(options.scope)) {
       media = {
         mediaRoots: mediaRootStatuses(mediaSources),
         mediaItems: sortGalleryMediaItems([

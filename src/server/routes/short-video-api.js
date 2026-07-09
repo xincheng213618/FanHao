@@ -1,11 +1,11 @@
 export async function routeShortVideoApi(req, res, url, deps) {
-  const { notFound, readJsonBody, requireLocalAdmin, sendJson, shortVideoStore } = deps;
+  const { notFound, onMutation, readJsonBody, requireLocalAdmin, sendJson, shortVideoStore } = deps;
 
   if (url.pathname === "/api/short-videos/summary" && req.method === "GET") {
     try {
       sendJson(res, 200, shortVideoStore.summary());
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "短视频概览读取失败" });
+      sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频概览读取失败") });
     }
     return true;
   }
@@ -14,7 +14,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
     try {
       sendJson(res, 200, shortVideoStore.facets());
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "短视频筛选信息读取失败" });
+      sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频筛选信息读取失败") });
     }
     return true;
   }
@@ -23,7 +23,26 @@ export async function routeShortVideoApi(req, res, url, deps) {
     try {
       sendJson(res, 200, shortVideoStore.listVideos(url));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "短视频列表读取失败" });
+      sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频列表读取失败") });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/short-videos" && req.method === "DELETE") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req).catch(() => ({}));
+      const ids = Array.isArray(body?.ids) ? body.ids : [];
+      const result = shortVideoStore.deleteVideos(ids, {
+        deleteFiles: body?.deleteFiles !== false
+      });
+      onMutation?.();
+      sendJson(res, 200, result);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, {
+        error: error.message || "短视频批量删除失败",
+        ...(error.details ? { details: error.details } : {})
+      });
     }
     return true;
   }
@@ -52,6 +71,28 @@ export async function routeShortVideoApi(req, res, url, deps) {
   }
 
   const detailMatch = /^\/api\/short-videos\/([^/]+)$/.exec(url.pathname);
+  if (detailMatch && req.method === "DELETE") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req).catch(() => ({}));
+      const options = {
+        deleteFiles: body?.deleteFiles !== false
+      };
+      const scope = String(body?.scope || url.searchParams.get("scope") || "").trim().toLowerCase();
+      const result = scope === "group" || scope === "folder"
+        ? shortVideoStore.deleteVideoGroup(decodeURIComponent(detailMatch[1]), options)
+        : shortVideoStore.deleteVideo(decodeURIComponent(detailMatch[1]), options);
+      onMutation?.();
+      sendJson(res, 200, result);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, {
+        error: error.message || "短视频删除失败",
+        ...(error.details ? { details: error.details } : {})
+      });
+    }
+    return true;
+  }
+
   if (detailMatch && req.method === "GET") {
     const data = shortVideoStore.videoDetail(decodeURIComponent(detailMatch[1]), url);
     if (!data) {
@@ -63,4 +104,19 @@ export async function routeShortVideoApi(req, res, url, deps) {
   }
 
   return false;
+}
+
+function shortVideoErrorStatus(error) {
+  if (isShortVideoDatabaseError(error)) return 503;
+  return error.statusCode || 500;
+}
+
+function shortVideoErrorMessage(error, fallback) {
+  if (isShortVideoDatabaseError(error)) return "短视频数据库正在恢复，请稍后重试";
+  return error.message || fallback;
+}
+
+function isShortVideoDatabaseError(error) {
+  const message = String(error?.message || error || "");
+  return /database disk image|malformed|sqlite/i.test(message);
 }

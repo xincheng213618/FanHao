@@ -3,7 +3,7 @@ import { enhanceAutoLoadMore } from "./auto-load.js?v=20260702-novel-local-manag
 import { cacheAgeText, readCachedJson, writeCachedJson } from "./cache.js?v=20260702-novel-local-manage-74";
 import { formatBytes, formatDate, formatNumber } from "./format.js";
 import { absoluteUrl, imageUrlForWork, loadPreviewImage, precacheImage } from "./image.js";
-import { createWorkListState } from "./work-filtering.js?v=20260705-mobile-sync-01";
+import { createWorkListState } from "./work-filtering.js?v=20260710-western-merge-01";
 
 const RANKING_KEY_STORAGE = "fanhao.android.rankingKey";
 const DEFAULT_RANKING_KEY = "y2025";
@@ -15,7 +15,6 @@ const SEARCH_CHANNELS = [
   { key: "photoCollections", label: "套图合集", mode: "photo", unit: "合集", params: { photoView: "collections" } },
   { key: "photo", label: "套图", mode: "photo", unit: "图包" },
   { key: "manga", label: "套图 · 韩漫", mode: "manga", unit: "部" },
-  { key: "western", label: "欧美", mode: "western", unit: "视频" },
   { key: "media", label: "影视", mode: "media", unit: "作品" }
 ];
 

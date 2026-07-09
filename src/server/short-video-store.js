@@ -12,6 +12,7 @@ const MAX_LIMIT = 300;
 const DEFAULT_COVER_GENERATE_LIMIT = 0;
 const DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT = 50000;
 const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
+const DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION = "1";
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LOCAL_SHORT_VIDEO_USER_ID = "local:self";
 const LIST_VIDEO_COLUMNS = [
@@ -53,6 +54,8 @@ const LIST_VIDEO_COLUMNS = [
   "share_count",
   "play_count",
   "share_url",
+  "metadata_json",
+  "source_path",
   "cover_path",
   "cover_source",
   "mtime_ms",
@@ -106,7 +109,7 @@ export function createShortVideoStore(options = {}) {
   }
   function catalogStamp() {
     const database = databaseOrOpen();
-    return `${metaValue(database, "scanned_at")}::${metaValue(database, "download_manager_imported_at")}`;
+    return `${metaValue(database, "scanned_at")}::${metaValue(database, "download_manager_imported_at")}::${metaValue(database, "deleted_at")}`;
   }
   function cachedSummary() {
     const key = catalogStamp();
@@ -133,21 +136,23 @@ export function createShortVideoStore(options = {}) {
     };
   }
 
-  function summary() {
-    const database = databaseOrOpen();
-    const totals = database.prepare(`
-      SELECT
-        COUNT(*) AS videos,
-        COUNT(DISTINCT author_sec_uid) AS authors,
-        COALESCE(SUM(size_bytes), 0) AS bytes,
-        COALESCE(SUM(duration_ms), 0) AS durationMs
-      FROM short_video_catalog
-    `).get();
+function summary() {
+  const database = databaseOrOpen();
+  const totals = database.prepare(`
+    SELECT
+      COUNT(*) AS videos,
+      COUNT(DISTINCT COALESCE(NULLIF(author_sec_uid, ''), NULLIF(author_name, ''), 'unknown')) AS authors,
+      COALESCE(SUM(size_bytes), 0) AS bytes,
+      COALESCE(SUM(duration_ms), 0) AS durationMs
+    FROM short_video_catalog
+    WHERE visibility = 'local_only'
+  `).get();
     const scannedAt = metaValue(database, "scanned_at");
     const sourceRoot = metaValue(database, "source_root");
     const authorRows = database.prepare(`
       SELECT author_sec_uid, author_name, COUNT(*) AS count
       FROM short_video_catalog
+      WHERE visibility = 'local_only'
       GROUP BY author_sec_uid, author_name
       ORDER BY count DESC, author_name COLLATE NOCASE
       LIMIT 30
@@ -182,7 +187,9 @@ export function createShortVideoStore(options = {}) {
     const orderBy = {
       liked: "liked_at DESC, mtime_ms DESC",
       published: "published_at DESC, liked_at DESC",
+      publishedAsc: "COALESCE(NULLIF(published_at, ''), '9999-12-31T23:59:59.999Z') ASC, liked_at ASC",
       likes: "digg_count DESC, liked_at DESC",
+      likesAsc: "digg_count ASC, liked_at ASC",
       comments: "comment_count DESC, liked_at DESC",
       duration: "duration_ms DESC, liked_at DESC"
     }[sort] || "published_at DESC, liked_at DESC";
@@ -238,12 +245,306 @@ export function createShortVideoStore(options = {}) {
     return row ? publicVideo(row, { detail: true }) : null;
   }
 
+  function deleteVideo(id, options = {}) {
+    const database = databaseOrOpen();
+    const row = videoCatalogRowByAnyId(database, id);
+    if (!row) {
+      const error = new Error("短视频不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    const videoId = row.id || id;
+    const fullRow = database.prepare("SELECT * FROM short_videos WHERE id = ?").get(videoId);
+    if (!fullRow) {
+      const error = new Error("短视频记录不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    return deleteShortVideos(database, [fullRow], { ...options, scope: "single" });
+  }
+
+  function deleteVideoGroup(id, options = {}) {
+    const database = databaseOrOpen();
+    const row = videoCatalogRowByAnyId(database, id);
+    if (!row) {
+      const error = new Error("短视频不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    const videoId = row.id || id;
+    const fullRow = database.prepare("SELECT * FROM short_videos WHERE id = ?").get(videoId);
+    if (!fullRow) {
+      const error = new Error("短视频记录不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    const groupDir = shortVideoManagedParentDir(fullRow.source_path || "");
+    if (!groupDir) {
+      const error = new Error("这条视频没有可安全批量删除的本地同组目录");
+      error.statusCode = 400;
+      throw error;
+    }
+    const rows = database.prepare(`
+      SELECT *
+      FROM short_videos
+      WHERE COALESCE(NULLIF(source_path, ''), '') <> ''
+    `).all().filter((item) => shortVideoManagedParentDir(item.source_path || "") === groupDir);
+    return deleteShortVideos(database, rows, { ...options, scope: "group", groupDir });
+  }
+
+  function deleteVideos(ids, options = {}) {
+    const database = databaseOrOpen();
+    const canonicalIds = [];
+    const seen = new Set();
+    for (const id of ids || []) {
+      const value = String(id || "").trim();
+      if (!value) continue;
+      const row = videoCatalogRowByAnyId(database, value, "id");
+      const videoId = row?.id || value;
+      if (seen.has(videoId)) continue;
+      seen.add(videoId);
+      canonicalIds.push(videoId);
+    }
+    if (!canonicalIds.length) {
+      const error = new Error("请选择要删除的短视频");
+      error.statusCode = 400;
+      throw error;
+    }
+    const placeholders = canonicalIds.map(() => "?").join(", ");
+    const rows = database.prepare(`SELECT * FROM short_videos WHERE id IN (${placeholders})`).all(...canonicalIds);
+    if (!rows.length) {
+      const error = new Error("没有找到可删除的短视频记录");
+      error.statusCode = 404;
+      throw error;
+    }
+    return deleteShortVideos(database, rows, { ...options, scope: "batch" });
+  }
+
+  function deleteShortVideos(database, rows, options = {}) {
+    const fullRows = [];
+    const seenIds = new Set();
+    for (const row of rows || []) {
+      const id = String(row?.id || "").trim();
+      if (!id || seenIds.has(id)) continue;
+      seenIds.add(id);
+      fullRows.push(row);
+    }
+    if (!fullRows.length) {
+      const error = new Error("没有可删除的短视频记录");
+      error.statusCode = 404;
+      throw error;
+    }
+    const videoIds = fullRows.map((item) => item.id);
+    const firstRow = fullRows[0];
+    const deleteFiles = options.deleteFiles !== false;
+    const files = deleteFiles ? shortVideoFilesForDelete(database, fullRows) : [];
+    const deletedFiles = [];
+    const deletedFilePaths = [];
+    const missingFiles = [];
+    const skippedFiles = [];
+    const errors = [];
+
+    if (deleteFiles) {
+      for (const filePath of files) {
+        const result = deleteShortVideoFile(database, filePath, videoIds);
+        if (result.deleted) {
+          deletedFiles.push(result.relativePath || result.path);
+          deletedFilePaths.push(result.path);
+        }
+        else if (result.missing) missingFiles.push(result.relativePath || result.path);
+        else if (result.skipped) skippedFiles.push({ path: result.relativePath || result.path, reason: result.reason || "" });
+        else if (result.error) errors.push({ path: result.relativePath || result.path, error: result.error });
+      }
+      if (errors.length) {
+        const error = new Error(`删除本地文件失败：${errors[0].error}`);
+        error.statusCode = 500;
+        error.details = { errors, deletedFiles, skippedFiles };
+        throw error;
+      }
+    }
+
+    const emptyRemovedPaths = deleteFiles ? removeEmptyShortVideoParents(deletedFilePaths) : [];
+    const now = new Date().toISOString();
+    database.exec("BEGIN");
+    try {
+      deleteShortVideoRows(database, videoIds);
+      database.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('deleted_at', ?)").run(now);
+      database.exec("COMMIT");
+    } catch (error) {
+      try {
+        database.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+    catalogCache.key = null;
+    catalogCache.summary = null;
+    catalogCache.authors = null;
+    return {
+      ok: true,
+      id: firstRow.id,
+      ids: videoIds,
+      count: videoIds.length,
+      scope: options.scope || "single",
+      groupDir: options.groupDir ? shortVideoRelativePath(options.groupDir) : "",
+      title: firstRow.title || firstRow.description || firstRow.file_name || "",
+      deletedFiles,
+      missingFiles,
+      skippedFiles,
+      emptyRemovedPaths
+    };
+  }
+
+  function deleteShortVideoRows(database, videoIds) {
+    const ids = uniqueTextArray(videoIds, { maxItems: 10000, maxLength: 200 });
+    if (!ids.length) return;
+    const placeholders = ids.map(() => "?").join(", ");
+    for (const table of [
+      "short_video_stats",
+      "short_video_assets",
+      "short_video_user_actions",
+      "short_video_collection_items",
+      "short_video_watch_history",
+      "short_video_import_items"
+    ]) {
+      database.prepare(`DELETE FROM ${table} WHERE video_id IN (${placeholders})`).run(...ids);
+    }
+    database.prepare(`DELETE FROM short_videos WHERE id IN (${placeholders})`).run(...ids);
+  }
+
+  function shortVideoFilesForDelete(database, rowsOrRow) {
+    const rows = Array.isArray(rowsOrRow) ? rowsOrRow : [rowsOrRow];
+    const ids = uniqueTextArray(rows.map((row) => row?.id || ""), { maxItems: 10000, maxLength: 200 });
+    let assetRows = [];
+    if (ids.length) {
+      const placeholders = ids.map(() => "?").join(", ");
+      assetRows = database.prepare(`
+        SELECT local_path
+        FROM short_video_assets
+        WHERE video_id IN (${placeholders})
+          AND COALESCE(NULLIF(local_path, ''), '') <> ''
+      `).all(...ids);
+    }
+    const rowFiles = [];
+    for (const row of rows) {
+      if (!row) continue;
+      rowFiles.push(row.source_path || "", row.cover_path || "", row.music_path || "", row.data_path || "");
+    }
+    return uniqueTextArray([
+      ...rowFiles,
+      ...assetRows.map((item) => item.local_path || "")
+    ].filter(Boolean), { maxItems: 10000, maxLength: 1000 });
+  }
+
+  function shortVideoManagedParentDir(filePath) {
+    if (!filePath) return "";
+    const resolved = path.resolve(String(filePath || ""));
+    if (!isShortVideoManagedPath(resolved)) return "";
+    const dir = path.dirname(resolved);
+    const rootsResolved = roots.map((item) => path.resolve(item));
+    if (rootsResolved.some((root) => dir === root) || dir === path.resolve(coverCacheDir)) return "";
+    return dir;
+  }
+
+  function deleteShortVideoFile(database, filePath, videoIds) {
+    const resolved = path.resolve(String(filePath || ""));
+    const relativePath = shortVideoRelativePath(resolved);
+    if (!isShortVideoManagedPath(resolved)) return { path: resolved, relativePath, skipped: true, reason: "不在短视频目录内" };
+    if (isFileReferencedByOtherVideo(database, resolved, videoIds)) return { path: resolved, relativePath, skipped: true, reason: "仍被其他短视频引用" };
+    const stat = safeStat(resolved);
+    if (!stat) return { path: resolved, relativePath, missing: true };
+    if (!stat.isFile()) return { path: resolved, relativePath, skipped: true, reason: "不是文件" };
+    try {
+      fs.unlinkSync(resolved);
+      return { path: resolved, relativePath, deleted: true };
+    } catch (error) {
+      return { path: resolved, relativePath, error: error.message || String(error) };
+    }
+  }
+
+  function isFileReferencedByOtherVideo(database, filePath, videoIds) {
+    const ignoredIds = uniqueTextArray(Array.isArray(videoIds) ? videoIds : [videoIds], { maxItems: 10000, maxLength: 200 });
+    const exact = path.resolve(filePath);
+    const ignoreClause = ignoredIds.length ? `id NOT IN (${ignoredIds.map(() => "?").join(", ")}) AND` : "";
+    const row = database.prepare(`
+      SELECT 1
+      FROM short_videos
+      WHERE ${ignoreClause}
+        (
+          source_path = ? OR cover_path = ? OR music_path = ? OR data_path = ?
+        )
+      LIMIT 1
+    `).get(...ignoredIds, exact, exact, exact, exact);
+    if (row) return true;
+    const assetIgnoreClause = ignoredIds.length ? `video_id NOT IN (${ignoredIds.map(() => "?").join(", ")}) AND` : "";
+    const asset = database.prepare(`
+      SELECT 1
+      FROM short_video_assets
+      WHERE ${assetIgnoreClause}
+        local_path = ?
+      LIMIT 1
+    `).get(...ignoredIds, exact);
+    return Boolean(asset);
+  }
+
+  function removeEmptyShortVideoParents(filePaths) {
+    const removed = [];
+    const rootsResolved = roots.map((item) => path.resolve(item));
+    for (const filePath of filePaths || []) {
+      let current = path.dirname(path.resolve(filePath));
+      while (current && rootsResolved.some((root) => isPathInsideRoot(current, root)) && !rootsResolved.some((root) => current === root)) {
+        try {
+          const entries = fs.readdirSync(current);
+          if (entries.length) break;
+          fs.rmdirSync(current);
+          removed.push(shortVideoRelativePath(current));
+          current = path.dirname(current);
+        } catch {
+          break;
+        }
+      }
+    }
+    return uniqueTextArray(removed, { maxItems: 80, maxLength: 1000 });
+  }
+
+  function isShortVideoManagedPath(filePath) {
+    const resolved = path.resolve(filePath);
+    return roots.some((root) => isPathInsideRoot(resolved, path.resolve(root)))
+      || isPathInsideRoot(resolved, path.resolve(coverCacheDir));
+  }
+
+  function shortVideoRelativePath(filePath) {
+    const resolved = path.resolve(filePath);
+    for (const root of roots) {
+      const rootPath = path.resolve(root);
+      if (isPathInsideRoot(resolved, rootPath)) return path.relative(rootPath, resolved);
+    }
+    const cacheRoot = path.resolve(coverCacheDir);
+    if (isPathInsideRoot(resolved, cacheRoot)) return path.join("[封面缓存]", path.relative(cacheRoot, resolved));
+    return resolved;
+  }
+
   function videoFile(id, options = {}) {
     const row = videoCatalogRowByAnyId(databaseOrOpen(), id, "id, source_path");
     if (options.allowMissing && row?.source_path) {
       return { id: row.id || id, path: path.resolve(row.source_path), type: "video", ext: path.extname(row.source_path).toLowerCase() };
     }
     return fileFromRow(row, "video");
+  }
+
+  function galleryFile(id, index = 0) {
+    const database = databaseOrOpen();
+    const row = videoCatalogRowByAnyId(database, id, "id, source_path, cover_path");
+    if (!row) return null;
+    const normalizedIndex = clampInt(index, 0, 0, 9999);
+    const asset = database.prepare(`
+      SELECT local_path
+      FROM short_video_assets
+      WHERE video_id = ?
+        AND asset_type = ?
+      LIMIT 1
+    `).get(row.id, galleryAssetType(normalizedIndex));
+    const fallbackPath = normalizedIndex === 0 ? (row.cover_path || row.source_path || "") : "";
+    return safeStoredFile(asset?.local_path || fallbackPath, "image", `${row.id}:gallery:${normalizedIndex}`);
   }
 
   function coverFile(id) {
@@ -583,8 +884,10 @@ export function createShortVideoStore(options = {}) {
       : 0;
     const watermarkKey = "download_manager_downloaded_watermark";
     const statsBackfillWatermarkKey = "download_manager_stats_backfilled_watermark";
+    const galleryImportVersionKey = "download_manager_gallery_import_version";
     const previousWatermark = incremental ? metaValue(targetDb, watermarkKey) : "";
     const previousStatsBackfillWatermark = incremental ? metaValue(targetDb, statsBackfillWatermarkKey) : "";
+    const needsGalleryBackfill = metaValue(targetDb, galleryImportVersionKey) !== DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION;
     const sourceSelect = `
       SELECT
         l.*,
@@ -637,6 +940,31 @@ export function createShortVideoStore(options = {}) {
       ORDER BY COALESCE(l.downloaded_at, ''), l.id ASC
     `).all(...sourceArgs);
     const incrementalRows = sourceRows.length;
+    const galleryBackfillIds = needsGalleryBackfill
+      ? sourceDb.prepare(`
+          SELECT DISTINCT l.aweme_id
+          FROM links l
+          JOIN profiles p ON p.id = l.profile_id
+          WHERE ${profileWhere}
+            AND l.status = 'downloaded'
+            AND COALESCE(l.aweme_id, '') <> ''
+            AND (
+              LOWER(COALESCE(l.kind, '')) = 'note' OR
+              LOWER(COALESCE(l.media_type, '')) IN ('gallery', 'image', 'images')
+            )
+          ORDER BY l.aweme_id
+        `).all().map((row) => String(row.aweme_id || "").trim()).filter(Boolean)
+      : [];
+    const galleryBackfillRow = needsGalleryBackfill
+      ? sourceDb.prepare(`
+          ${sourceSelect}
+          WHERE ${profileWhere}
+            AND l.status = 'downloaded'
+            AND l.aweme_id = ?
+          ORDER BY COALESCE(l.downloaded_at, '') DESC, l.id DESC
+          LIMIT 1
+        `)
+      : null;
     let backfillCandidates = 0;
     let backfillRows = 0;
 
@@ -675,10 +1003,11 @@ export function createShortVideoStore(options = {}) {
     let skippedNoPlayableVideo = 0;
     let skippedNotDownloaded = 0;
     let skippedDuplicate = 0;
+    let galleryBackfillRows = 0;
     const seenIds = new Set();
     const importedIds = new Set();
 
-    if (!sourceRows.length) {
+    if (!sourceRows.length && !galleryBackfillIds.length) {
       try {
         if (sourceMaxDownloadedAt && sourceMaxDownloadedAt !== previousWatermark) {
           targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(watermarkKey, sourceMaxDownloadedAt);
@@ -686,6 +1015,10 @@ export function createShortVideoStore(options = {}) {
         if (shouldBackfillStats && sourceMaxDownloadedAt) {
           targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(statsBackfillWatermarkKey, sourceMaxDownloadedAt);
         }
+        targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(
+          galleryImportVersionKey,
+          DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION
+        );
         return {
           ok: true,
           sourceDbPath,
@@ -697,6 +1030,7 @@ export function createShortVideoStore(options = {}) {
           backfillAttempted: shouldBackfillStats,
           backfillCandidates,
           backfillRows,
+          galleryBackfill: needsGalleryBackfill,
           imported: 0,
           updated: 0,
           skipped: 0,
@@ -712,6 +1046,44 @@ export function createShortVideoStore(options = {}) {
       }
     }
 
+    const importSourceRow = (row) => {
+      if (row.status !== "downloaded") {
+        skipped += 1;
+        skippedNotDownloaded += 1;
+        return;
+      }
+      const item = downloadManagerRowToItem(row);
+      if (!item) {
+        skipped += 1;
+        skippedNoPlayableVideo += 1;
+        return;
+      }
+      if (seenIds.has(item.id)) {
+        skipped += 1;
+        skippedDuplicate += 1;
+        return;
+      }
+      seenIds.add(item.id);
+      const existed = targetDb.prepare("SELECT 1 FROM short_videos WHERE id = ? LIMIT 1").get(item.id);
+      upsert.run(...videoRowValues(item, now));
+      upsertNormalizedItem(
+        normalized,
+        item,
+        now,
+        item.origin === "douyin_download_manager_like" ? { actionSource: "download_manager" } : {}
+      );
+      targetDb.prepare(`
+        INSERT OR REPLACE INTO short_video_import_items (
+          batch_id, video_id, source_path, data_path, imported_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+      `).run(batchId, item.id, item.sourcePath || "", item.dataPath || "", now);
+      pruneSourcePathDuplicates(targetDb, item);
+      importedIds.add(item.id);
+      if (existed) updated += 1;
+      else imported += 1;
+    };
+
     targetDb.exec("BEGIN");
     try {
       targetDb.prepare(`
@@ -721,42 +1093,12 @@ export function createShortVideoStore(options = {}) {
         VALUES (?, ?, 0, ?, '', 'download-manager-v1')
       `).run(batchId, sourceDbPath, now);
 
-      for (const row of sourceRows) {
-        if (row.status !== "downloaded") {
-          skipped += 1;
-          skippedNotDownloaded += 1;
-          continue;
-        }
-        const item = downloadManagerRowToItem(row);
-        if (!item) {
-          skipped += 1;
-          skippedNoPlayableVideo += 1;
-          continue;
-        }
-        if (seenIds.has(item.id)) {
-          skipped += 1;
-          skippedDuplicate += 1;
-          continue;
-        }
-        seenIds.add(item.id);
-        const existed = targetDb.prepare("SELECT 1 FROM short_videos WHERE id = ? LIMIT 1").get(item.id);
-        upsert.run(...videoRowValues(item, now));
-        upsertNormalizedItem(
-          normalized,
-          item,
-          now,
-          item.origin === "douyin_download_manager_like" ? { actionSource: "download_manager" } : {}
-        );
-        targetDb.prepare(`
-          INSERT OR REPLACE INTO short_video_import_items (
-            batch_id, video_id, source_path, data_path, imported_at
-          )
-          VALUES (?, ?, ?, ?, ?)
-        `).run(batchId, item.id, item.sourcePath || "", item.dataPath || "", now);
-        pruneSourcePathDuplicates(targetDb, item);
-        importedIds.add(item.id);
-        if (existed) updated += 1;
-        else imported += 1;
+      for (const row of sourceRows) importSourceRow(row);
+      for (const awemeId of galleryBackfillIds) {
+        const row = galleryBackfillRow?.get(awemeId);
+        if (!row) continue;
+        galleryBackfillRows += 1;
+        importSourceRow(row);
       }
 
       targetDb.prepare("UPDATE short_video_import_batches SET imported_count = ?, finished_at = ? WHERE id = ?")
@@ -769,6 +1111,10 @@ export function createShortVideoStore(options = {}) {
           targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(statsBackfillWatermarkKey, sourceMaxDownloadedAt);
         }
       }
+      targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(
+        galleryImportVersionKey,
+        DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION
+      );
       targetDb.exec("COMMIT");
     } catch (error) {
       try {
@@ -785,11 +1131,13 @@ export function createShortVideoStore(options = {}) {
       batchId,
       incremental,
       sourceWatermark: sourceMaxDownloadedAt,
-      scanned: sourceRows.length,
+      scanned: sourceRows.length + galleryBackfillRows,
       incrementalRows,
       backfillAttempted: shouldBackfillStats,
       backfillCandidates,
       backfillRows,
+      galleryBackfill: needsGalleryBackfill,
+      galleryBackfillRows,
       imported,
       updated,
       skipped,
@@ -814,7 +1162,11 @@ export function createShortVideoStore(options = {}) {
     coverBackfillStatus,
     coverFile,
     dbPath,
+    deleteVideo,
+    deleteVideoGroup,
+    deleteVideos,
     facets,
+    galleryFile,
     importDownloadManagerDb,
     listVideos,
     roots,
@@ -1295,7 +1647,13 @@ function downloadManagerRowToItem(row) {
   const outputDir = String(row.output_dir || "").trim() ? path.resolve(String(row.output_dir).trim()) : "";
   const localPaths = parseDownloadManagerPaths(row.local_file_paths)
     .map((filePath) => resolveDownloadManagerPath(outputDir, filePath));
-  const sourcePath = firstExistingDownloadManagerPath(localPaths, VIDEO_EXTS);
+  const galleryPaths = isDownloadManagerGallery(row)
+    ? localPaths.filter((filePath) => IMAGE_EXTS.has(path.extname(filePath).toLowerCase()) && safeStat(filePath)?.isFile())
+    : [];
+  const mediaType = galleryPaths.length ? "gallery" : "video";
+  const sourcePath = mediaType === "gallery"
+    ? galleryPaths[0]
+    : firstExistingDownloadManagerPath(localPaths, VIDEO_EXTS);
   if (!sourcePath) return null;
 
   const stat = safeStat(sourcePath);
@@ -1316,9 +1674,25 @@ function downloadManagerRowToItem(row) {
   const likedAt = normalizeIsoDate(row.discovered_at || row.last_seen_at || row.downloaded_at || data?.recorded_at)
     || new Date(stat.mtimeMs || Date.now()).toISOString();
   const publishedAt = isoFromCreateTime(createTime) || dateOnlyIso(data?.date) || "";
-  const coverPath = downloadManagerCoverPath(row, localPaths, sourcePath, outputDir);
+  const coverPath = mediaType === "gallery"
+    ? galleryPaths[0]
+    : downloadManagerCoverPath(row, localPaths, sourcePath, outputDir);
   const musicPath = firstExistingDownloadManagerPath(localPaths, AUDIO_EXTS);
-  const durationMs = Number(row.duration_ms || data?.duration || video.duration || 0) || null;
+  const durationMs = mediaType === "gallery" ? null : (Number(row.duration_ms || data?.duration || video.duration || 0) || null);
+  const galleryStats = galleryPaths.map((filePath) => safeStat(filePath)).filter(Boolean);
+  const mediaSizeBytes = mediaType === "gallery"
+    ? galleryStats.reduce((sum, item) => sum + Number(item.size || 0), 0)
+    : stat.size;
+  const mediaMtimeMs = mediaType === "gallery"
+    ? Math.max(0, ...galleryStats.map((item) => Math.floor(item.mtimeMs || 0)))
+    : Math.floor(stat.mtimeMs || 0);
+  const mediaMetadata = {
+    ...(data && typeof data === "object" && !Array.isArray(data) ? data : {}),
+    fanhaoMedia: {
+      type: mediaType,
+      galleryCount: galleryPaths.length
+    }
+  };
 
   const authorSecUid = String(row.author_sec_uid || data?.author_sec_uid || authorData.sec_uid || row.profile_sec_uid || rawProfile.sec_uid || "").trim();
   const authorProfileUrl = normalizedDouyinUserUrl(row.author_url || data?.author_url, authorSecUid);
@@ -1357,6 +1731,8 @@ function downloadManagerRowToItem(row) {
     createTime,
     publishedAt,
     likedAt,
+    mediaType,
+    galleryPaths,
     durationMs,
     width: Number(video.width || video.play_addr?.width || 0) || null,
     height: Number(video.height || video.play_addr?.height || 0) || null,
@@ -1366,7 +1742,7 @@ function downloadManagerRowToItem(row) {
     shareCount: Number(row.share_count ?? statistics.share_count ?? 0) || 0,
     playCount: Number(statistics.play_count || 0) || 0,
     shareUrl: normalizedDouyinShareUrl(row.url || data?.share_url, awemeId),
-    metadataJson: JSON.stringify(data || {}),
+    metadataJson: JSON.stringify(mediaMetadata),
     sourcePath,
     coverPath,
     coverSource: coverPath ? "native" : "",
@@ -1374,8 +1750,8 @@ function downloadManagerRowToItem(row) {
     dataPath,
     relativePath: outputDir ? path.relative(outputDir, sourcePath) : sourcePath,
     fileName: path.basename(sourcePath),
-    sizeBytes: stat.size,
-    mtimeMs: Math.floor(stat.mtimeMs || 0),
+    sizeBytes: mediaSizeBytes,
+    mtimeMs: mediaMtimeMs,
     origin: row.profile_tab === "post" ? "douyin_download_manager_post" : "douyin_download_manager_like"
   };
 }
@@ -1930,6 +2306,16 @@ function normalizedUpsertStatements(db, coverCacheDir = "") {
       WHERE video_id = ?
         AND asset_type = 'ffmpeg_cover'
     `),
+    deleteVideoAsset: db.prepare(`
+      DELETE FROM short_video_assets
+      WHERE video_id = ?
+        AND asset_type = 'video'
+    `),
+    deleteGalleryAssets: db.prepare(`
+      DELETE FROM short_video_assets
+      WHERE video_id = ?
+        AND asset_type LIKE 'gallery_image:%'
+    `),
     action: db.prepare(`
       INSERT INTO short_video_user_actions (
         local_user_id, video_id, action_type, active, source, acted_at, updated_at
@@ -1984,15 +2370,33 @@ function upsertNormalizedItem(statements, item, now, options = {}) {
     now,
     now
   );
-  runAssetUpsert(statements.asset, {
-    videoId: item.id,
-    assetType: "video",
-    localPath: item.sourcePath || "",
-    fileName: item.fileName || path.basename(item.sourcePath || ""),
-    sizeBytes: Number(item.sizeBytes || 0),
-    mtimeMs: Number(item.mtimeMs || 0),
-    mimeType: mimeTypeForPath(item.sourcePath || item.fileName || "")
-  }, now);
+  statements.deleteGalleryAssets.run(item.id);
+  if (item.mediaType === "gallery" && Array.isArray(item.galleryPaths) && item.galleryPaths.length) {
+    statements.deleteVideoAsset.run(item.id);
+    item.galleryPaths.forEach((localPath, index) => {
+      const stat = safeStat(localPath);
+      if (!stat?.isFile()) return;
+      runAssetUpsert(statements.asset, {
+        videoId: item.id,
+        assetType: galleryAssetType(index),
+        localPath,
+        fileName: path.basename(localPath),
+        sizeBytes: Number(stat.size || 0),
+        mtimeMs: Math.floor(stat.mtimeMs || 0),
+        mimeType: mimeTypeForPath(localPath)
+      }, now);
+    });
+  } else {
+    runAssetUpsert(statements.asset, {
+      videoId: item.id,
+      assetType: "video",
+      localPath: item.sourcePath || "",
+      fileName: item.fileName || path.basename(item.sourcePath || ""),
+      sizeBytes: Number(item.sizeBytes || 0),
+      mtimeMs: Number(item.mtimeMs || 0),
+      mimeType: mimeTypeForPath(item.sourcePath || item.fileName || "")
+    }, now);
+  }
   if (item.coverPath) {
     const stat = safeStat(item.coverPath);
     const coverAssetType = item.coverSource === "ffmpeg" ? "ffmpeg_cover" : "native_cover";
@@ -2161,8 +2565,18 @@ function videoCatalogRowByAnyId(db, id, columns = "*") {
 
 function publicVideo(row, options = {}) {
   const id = row.id || row.aweme_id || "";
-  const shareUrl = normalizedDouyinShareUrl(row.share_url, row.aweme_id || id);
-  const originalUrl = douyinVideoUrl(row.aweme_id || id) || shareUrl;
+  const metadata = parseJsonObject(row.metadata_json);
+  const media = publicVideoMedia(row, metadata);
+  const rawShareUrl = String(row.share_url || "").trim();
+  const shareUrl = rawShareUrl || (media.type === "gallery"
+    ? douyinNoteUrl(row.aweme_id || id)
+    : douyinVideoUrl(row.aweme_id || id));
+  const originalUrl = shareUrl || (media.type === "gallery"
+    ? douyinNoteUrl(row.aweme_id || id)
+    : douyinVideoUrl(row.aweme_id || id));
+  const remoteCoverUrl = typeof metadata.cover_url === "string" && /^https?:\/\//i.test(metadata.cover_url)
+    ? metadata.cover_url
+    : (typeof metadata.coverUrl === "string" && /^https?:\/\//i.test(metadata.coverUrl) ? metadata.coverUrl : "");
   return {
     id,
     awemeId: row.aweme_id || "",
@@ -2170,6 +2584,14 @@ function publicVideo(row, options = {}) {
     origin: row.origin || "",
     status: row.status || "normal",
     visibility: row.visibility || "local_only",
+    mediaType: media.type,
+    galleryCount: media.galleryCount,
+    galleryImages: media.galleryCount
+      ? Array.from({ length: media.galleryCount }, (_, index) => ({
+        index,
+        url: `/media/short-video-gallery/${encodeURIComponent(id)}/${index}`
+      }))
+      : [],
     title: row.title || row.description || row.file_name || "",
     description: row.description || "",
     tags: parseJsonArray(row.tags_json),
@@ -2207,8 +2629,8 @@ function publicVideo(row, options = {}) {
     },
     shareUrl,
     originalUrl,
-    streamUrl: `/media/short-video/${encodeURIComponent(id)}`,
-    coverUrl: row.cover_path ? `/media/short-video-cover/${encodeURIComponent(id)}?v=${encodeURIComponent(String(row.mtime_ms || ""))}` : "",
+    streamUrl: media.type === "video" ? `/media/short-video/${encodeURIComponent(id)}` : "",
+    coverUrl: row.cover_path ? `/media/short-video-cover/${encodeURIComponent(id)}?v=${encodeURIComponent(String(row.mtime_ms || ""))}` : remoteCoverUrl,
     coverSource: row.cover_source || "",
     fileName: row.file_name || "",
     relativePath: row.relative_path || "",
@@ -2217,19 +2639,55 @@ function publicVideo(row, options = {}) {
       sourcePath: row.source_path || "",
       dataPath: row.data_path || "",
       musicPath: row.music_path || "",
-      metadata: parseJsonObject(row.metadata_json)
+      metadata
     } : {})
+  };
+}
+
+function publicVideoMedia(row, metadata = {}) {
+  const fanhaoMedia = metadata?.fanhaoMedia && typeof metadata.fanhaoMedia === "object"
+    ? metadata.fanhaoMedia
+    : {};
+  const declaredType = String(fanhaoMedia.type || "").trim().toLowerCase();
+  const galleryCount = clampInt(fanhaoMedia.galleryCount, 0, 0, 1000);
+  const sourceExt = path.extname(String(row.source_path || "")).toLowerCase();
+  const inferredGallery = IMAGE_EXTS.has(sourceExt) && galleryCount > 0;
+  return {
+    type: declaredType === "gallery" || inferredGallery ? "gallery" : "video",
+    galleryCount: declaredType === "gallery" || inferredGallery ? galleryCount : 0
   };
 }
 
 function authorFacet(db) {
   return db.prepare(`
-    SELECT author_sec_uid AS secUid, author_name AS name, COUNT(*) AS count
-    FROM short_video_catalog
-    GROUP BY author_sec_uid, author_name
+    SELECT
+      MAX(secUid) AS secUid,
+      COALESCE(MAX(name), '未知作者') AS name,
+      MAX(NULLIF(author_avatar_url, '')) AS avatarUrl,
+      MAX(coverId) AS coverId,
+      MAX(coverMtimeMs) AS coverMtimeMs,
+      COUNT(*) AS count
+    FROM (
+      SELECT
+        COALESCE(NULLIF(author_sec_uid, ''), NULLIF(author_name, ''), 'unknown') AS authorKey,
+        NULLIF(author_sec_uid, '') AS secUid,
+        NULLIF(author_name, '') AS name,
+        author_avatar_url,
+        CASE WHEN COALESCE(NULLIF(cover_path, ''), '') <> '' THEN id ELSE '' END AS coverId,
+        CASE WHEN COALESCE(NULLIF(cover_path, ''), '') <> '' THEN mtime_ms ELSE 0 END AS coverMtimeMs
+      FROM short_video_catalog
+      WHERE visibility = 'local_only'
+        AND (NULLIF(author_sec_uid, '') IS NOT NULL OR NULLIF(author_name, '') IS NOT NULL)
+    )
+    GROUP BY authorKey
     ORDER BY count DESC, name COLLATE NOCASE
-    LIMIT 160
-  `).all().map((row) => ({ secUid: row.secUid || "", name: row.name || "未知作者", count: Number(row.count || 0) }));
+  `).all().map((row) => ({
+    secUid: row.secUid || "",
+    name: row.name || "未知作者",
+    avatarUrl: row.avatarUrl || "",
+    fallbackCoverUrl: row.coverId ? `/media/short-video-cover/${encodeURIComponent(row.coverId)}?v=${encodeURIComponent(String(row.coverMtimeMs || ""))}` : "",
+    count: Number(row.count || 0)
+  }));
 }
 
 function videoStats(db, where = "", args = []) {
@@ -2318,15 +2776,31 @@ function findCompanion(files, dir, videoPath, ext, predicate) {
 }
 
 function findCover(files, dir, videoPath, data) {
-  const videoBase = path.basename(videoPath, path.extname(videoPath)).toLowerCase();
+  const coverBases = companionCoverBases(videoPath);
   const local = files.find((name) => {
     const ext = path.extname(name).toLowerCase();
     if (!IMAGE_EXTS.has(ext)) return false;
     const base = path.basename(name, ext).toLowerCase();
-    return base.includes("cover") || base.includes("封面") || base.startsWith(videoBase);
+    return coverBases.some((item) => base === item || base.startsWith(`${item}_`) || base.startsWith(`${item}-`));
+  }) || files.find((name) => {
+    const ext = path.extname(name).toLowerCase();
+    if (!IMAGE_EXTS.has(ext)) return false;
+    const base = path.basename(name, ext).toLowerCase();
+    return base.includes("cover") || base.includes("封面");
   }) || files.find((name) => IMAGE_EXTS.has(path.extname(name).toLowerCase()));
   if (local) return path.join(dir, local);
   return "";
+}
+
+function companionCoverBases(videoPath) {
+  const videoBase = path.basename(videoPath, path.extname(videoPath)).toLowerCase();
+  const bases = new Set([videoBase]);
+  const liveMatch = /^(.*)_live_(\d+)$/i.exec(videoBase);
+  if (liveMatch) {
+    bases.add(`${liveMatch[1]}_${Number(liveMatch[2])}`);
+    bases.add(`${liveMatch[1]}_${liveMatch[2]}`);
+  }
+  return [...bases].filter(Boolean);
 }
 
 function parseDownloadManagerPaths(value) {
@@ -2338,6 +2812,16 @@ function parseDownloadManagerPaths(value) {
     if (typeof parsed === "string" && parsed.trim()) return [parsed.trim()];
   } catch {}
   return raw.split(/\r?\n|;/).map((item) => item.trim()).filter(Boolean);
+}
+
+function isDownloadManagerGallery(row = {}) {
+  const kind = String(row.kind || "").trim().toLowerCase();
+  const mediaType = String(row.media_type || "").trim().toLowerCase();
+  return kind === "note" || mediaType === "gallery" || mediaType === "image" || mediaType === "images";
+}
+
+function galleryAssetType(index) {
+  return `gallery_image:${String(Math.max(0, Number(index) || 0)).padStart(4, "0")}`;
 }
 
 function resolveDownloadManagerPath(outputDir, filePath) {
@@ -2361,8 +2845,10 @@ function downloadManagerCoverPath(row, localPaths, sourcePath, outputDir) {
   }
   const localCover = firstExistingDownloadManagerPath(localPaths, IMAGE_EXTS, (filePath) => {
     const base = path.basename(filePath, path.extname(filePath)).toLowerCase();
-    const videoBase = path.basename(sourcePath, path.extname(sourcePath)).toLowerCase();
-    return base.includes("cover") || base.includes("封面") || base.startsWith(videoBase);
+    const coverBases = companionCoverBases(sourcePath);
+    return coverBases.some((item) => base === item || base.startsWith(`${item}_`) || base.startsWith(`${item}-`))
+      || base.includes("cover")
+      || base.includes("封面");
   }) || firstExistingDownloadManagerPath(localPaths, IMAGE_EXTS);
   if (localCover) return localCover;
   const previewPath = row.preview_path ? resolveDownloadManagerPath(outputDir, row.preview_path) : "";
@@ -2413,6 +2899,12 @@ function douyinVideoUrl(awemeId) {
   const id = String(awemeId || "").trim();
   if (!/^\d{8,}$/.test(id)) return "";
   return `https://www.douyin.com/video/${id}`;
+}
+
+function douyinNoteUrl(awemeId) {
+  const id = String(awemeId || "").trim();
+  if (!/^\d{8,}$/.test(id)) return "";
+  return `https://www.douyin.com/note/${id}`;
 }
 
 function douyinUserUrl(secUid) {
@@ -2569,7 +3061,7 @@ function metaValue(db, key) {
 
 function normalizeSort(value) {
   const sort = String(value || "published").trim();
-  return ["liked", "published", "likes", "comments", "duration"].includes(sort) ? sort : "published";
+  return ["liked", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
 }
 
 function videoFilter(params = new URLSearchParams()) {
@@ -2578,6 +3070,9 @@ function videoFilter(params = new URLSearchParams()) {
   const source = normalizeSourceFilter(params.get("source") || params.get("origin"));
   const whereParts = [];
   const args = [];
+  if (!includePendingShortVideos(params)) {
+    whereParts.push("visibility = 'local_only'");
+  }
   if (q) {
     const like = `%${escapeLike(q)}%`;
     whereParts.push(`(
@@ -2590,8 +3085,13 @@ function videoFilter(params = new URLSearchParams()) {
     args.push(like, like, like, like, like);
   }
   if (author && author !== "all") {
-    whereParts.push("author_sec_uid = ?");
-    args.push(author);
+    if (author.startsWith("name:")) {
+      whereParts.push("author_name = ?");
+      args.push(author.slice(5));
+    } else {
+      whereParts.push("author_sec_uid = ?");
+      args.push(author);
+    }
   }
   if (source === "liked") {
     whereParts.push("origin IN ('douyin_like_import', 'douyin_download_manager_like')");
@@ -2601,6 +3101,11 @@ function videoFilter(params = new URLSearchParams()) {
     whereParts.push("origin NOT IN ('douyin_like_import', 'douyin_download_manager_like', 'douyin_download_manager_post')");
   }
   return { q, author, source, where: whereParts.join(" AND "), args };
+}
+
+function includePendingShortVideos(params = new URLSearchParams()) {
+  const value = String(params.get("includePending") || params.get("pending") || "").trim().toLowerCase();
+  return ["1", "true", "yes", "on"].includes(value);
 }
 
 function normalizeSourceFilter(value) {
@@ -2614,7 +3119,16 @@ function adjacentOrder(urlOrOptions = {}) {
   return {
     liked: { column: "liked_at", fallback: "mtime_ms", numeric: false },
     published: { column: "published_at", fallback: "liked_at", numeric: false },
+    publishedAsc: {
+      column: "published_at",
+      expression: "COALESCE(NULLIF(published_at, ''), '9999-12-31T23:59:59.999Z')",
+      fallback: "liked_at",
+      numeric: false,
+      direction: "ASC",
+      value: (item) => item.published_at || "9999-12-31T23:59:59.999Z"
+    },
     likes: { column: "digg_count", fallback: "liked_at", numeric: true },
+    likesAsc: { column: "digg_count", fallback: "liked_at", numeric: true, direction: "ASC" },
     comments: { column: "comment_count", fallback: "liked_at", numeric: true },
     duration: { column: "duration_ms", fallback: "liked_at", numeric: true }
   }[sort] || { column: "published_at", fallback: "liked_at", numeric: false };
@@ -2622,13 +3136,17 @@ function adjacentOrder(urlOrOptions = {}) {
 
 function adjacentRow(database, row, direction, order, includeAllColumns = false, filter = null) {
   if (!row) return null;
-  const column = order.column;
+  const column = order.expression || order.column;
   const fallback = order.fallback;
-  const value = row[column] ?? (order.numeric ? 0 : "");
+  const value = order.value ? order.value(row) : row[order.column] ?? (order.numeric ? 0 : "");
   const fallbackValue = row[fallback] ?? (order.numeric ? "" : "");
   const select = includeAllColumns ? "*" : "id";
-  const operator = direction < 0 ? ">" : "<";
-  const sortDirection = direction < 0 ? "ASC" : "DESC";
+  const ascending = String(order.direction || "DESC").toUpperCase() === "ASC";
+  const movingNext = direction > 0;
+  const operator = movingNext === ascending ? ">" : "<";
+  const sortDirection = movingNext
+    ? (ascending ? "ASC" : "DESC")
+    : (ascending ? "DESC" : "ASC");
   const filterWhere = filter?.where ? `${filter.where} AND ` : "";
   const filterArgs = filter?.args || [];
   return database.prepare(`
@@ -2681,6 +3199,27 @@ function optionalInteger(value) {
 
 function escapeLike(value) {
   return String(value || "").replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+function uniqueTextArray(values, options = {}) {
+  const maxItems = clampInt(options.maxItems, 1000, 0, 10000);
+  const maxLength = clampInt(options.maxLength, 1000, 1, 10000);
+  const seen = new Set();
+  const result = [];
+  for (const item of values || []) {
+    const value = String(item || "").trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    result.push(value.length > maxLength ? value.slice(0, maxLength) : value);
+    if (result.length >= maxItems) break;
+  }
+  return result;
+}
+
+function isPathInsideRoot(filePath, rootPath) {
+  const resolvedFile = path.resolve(filePath).toLowerCase();
+  const resolvedRoot = path.resolve(rootPath).toLowerCase();
+  return resolvedFile === resolvedRoot || resolvedFile.startsWith(`${resolvedRoot}${path.sep.toLowerCase()}`);
 }
 
 function hashText(value) {

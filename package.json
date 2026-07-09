@@ -6,9 +6,10 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "verify": "npm run verify:codes && npm run verify:metadata",
+    "verify": "npm run verify:codes && npm run verify:metadata && npm run verify:library-merge",
     "verify:codes": "node tools/verify_code_parsers.mjs",
-    "verify:metadata": "node tools/verify_metadata_parsers.mjs"
+    "verify:metadata": "node tools/verify_metadata_parsers.mjs",
+    "verify:library-merge": "node tools/verify_library_merge.mjs"
   },
   "engines": {
     "node": ">=24"

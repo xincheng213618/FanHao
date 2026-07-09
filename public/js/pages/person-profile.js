@@ -42,6 +42,7 @@ function sourceButtonLabel(sourcePath) {
   if (normalized.startsWith("g:/")) return "打开普通 · G:";
   if (normalized.startsWith("f:/")) return "打开普通 · F:";
   if (normalized.startsWith("o:/")) return "打开普通 · O:";
+  if (normalized.startsWith("r:/")) return "打开欧美 · R:";
   return "打开文件夹";
 }
 

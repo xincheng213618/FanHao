@@ -60,7 +60,6 @@ export function parsePhotoSetRoots(env = process.env) {
 
 export function galleryMediaSources(env = process.env) {
   return [
-    { kind: "western", label: "欧美", roots: parseRootList(env.FANHAO_WESTERN_ROOTS, "R:\\") },
     { kind: "movie", label: "电影", roots: parseRootList(env.FANHAO_MOVIE_ROOTS, "Z:\\") },
     { kind: "tv", label: "电视剧", roots: parseRootList(env.FANHAO_TV_ROOTS, "Y:\\") }
   ];
