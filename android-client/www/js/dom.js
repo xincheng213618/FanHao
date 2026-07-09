@@ -48,7 +48,6 @@ export function getElements() {
     channelNovelCount: document.querySelector("#channelNovelCount"),
     channelMusicCount: document.querySelector("#channelMusicCount"),
     channelShortVideoCount: document.querySelector("#channelShortVideoCount"),
-    channelWesternCount: document.querySelector("#channelWesternCount"),
     channelMediaCount: document.querySelector("#channelMediaCount"),
     continueSection: document.querySelector("#continueSection"),
     continuePreview: document.querySelector("#continuePreview"),

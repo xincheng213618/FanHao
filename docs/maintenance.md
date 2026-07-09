@@ -40,7 +40,7 @@ Windows 下推荐使用自带脚本：
 | `metadata-backfill` | 作品资料 / 封面补全 | JavDB | 对本地作品补 JavDB 资料、评分、封面。 |
 | `batch-import-actors` | 批量导入演员资料 | JavDB | 按本地人物搜索并缓存 JavDB 头像、别名、映射。 |
 | `ranking-cache` | 排行榜缓存 | 缓存 | 抓取 JavDB 排行榜写入本地缓存。 |
-| `image-library-rescan` | 刷新图库索引 | 图库 | 重建套图 / 欧美 / 电影 / 电视剧索引（只更新 `image-library-index.json`）。 |
+| `image-library-rescan` | 刷新图库索引 | 图库 | 重建套图 / 电影 / 电视剧索引（只更新 `image-library-index.json`）；欧美由核心番号库扫描。 |
 | `core-local-scan` | 核心本地扫描 | 本地 | 把本地根目录按人物 / 作品写入核心 SQLite。 |
 | `douban-tv-metadata` | 补全电视剧豆瓣资料 | 图库 | 从豆瓣补电视剧封面 / 评分 / 简介 / 演员。 |
 | `douban-movie-metadata` | 补全电影豆瓣资料 | 图库 | 用可视 Chrome 从豆瓣补电影资料。 |

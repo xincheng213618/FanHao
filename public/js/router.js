@@ -1,6 +1,6 @@
 export const URL_VIEW_NAMES = new Set(["people", "studios", "vr", "favorites", "history", "rankings", "gallery", "novels", "shortVideos", "music", "tools"]);
 export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "media", "movie", "tv"]);
-export const PEOPLE_SCOPE_NAMES = new Set(["main", "western"]);
+export const PEOPLE_SCOPE_NAMES = new Set(["main"]);
 export const DEFAULT_GALLERY_PHOTO_CATEGORY = "我喜欢的";
 
 const GALLERY_MODE_PATHS = {
@@ -18,6 +18,7 @@ const PATH_GALLERY_MODES = new Map([
   ["/photos", "photo"],
   ["/photo-sets", "photo"],
   ["/manga", "manga"],
+  ["/western", "western"],
   ["/media", "media"],
   ["/video", "media"],
   ["/videos", "media"],
@@ -67,6 +68,7 @@ export function routeFromUrl(url = window.location.href) {
       novelCategory: "all",
       novelSort: "updated",
       shortVideoId: "",
+      shortVideoAuthorPage: "",
       shortVideoQuery: "",
       shortVideoAuthor: "all",
       shortVideoSource: "liked",
@@ -125,6 +127,7 @@ export function normalizeRoute(route = {}) {
     novelCategory: view === "novels" ? String(route.novelCategory || "all").trim() || "all" : "all",
     novelSort: view === "novels" ? normalizeNovelSort(route.novelSort) : "updated",
     shortVideoId: view === "shortVideos" ? String(route.shortVideoId || "").trim() : "",
+    shortVideoAuthorPage: view === "shortVideos" ? String(route.shortVideoAuthorPage || "").trim() : "",
     shortVideoQuery: view === "shortVideos" ? String(route.shortVideoQuery || route.q || "").trim() : "",
     shortVideoAuthor: view === "shortVideos" ? String(route.shortVideoAuthor || "all").trim() || "all" : "all",
     shortVideoSource: view === "shortVideos" ? normalizeShortVideoSource(route.shortVideoSource || route.source) : "liked",
@@ -157,9 +160,6 @@ export function routeUrl(route, options = {}) {
   const pathname = routePath(next);
   if (next.view && !["people", "search", "gallery", "novels", "shortVideos", "music", "tools"].includes(next.view)) params.set("view", next.view);
   if (next.personId) params.set("personId", next.personId);
-  if (next.view === "people" && next.peopleScope && next.peopleScope !== "main" && pathname !== "/western") {
-    params.set("scope", next.peopleScope);
-  }
   if (next.view === "gallery") {
     if (next.galleryQuery) params.set("q", next.galleryQuery);
     if (next.galleryCategory && shouldWriteGalleryCategory(next)) params.set("category", next.galleryCategory);
@@ -174,8 +174,13 @@ export function routeUrl(route, options = {}) {
     if (next.novelSort && next.novelSort !== "updated") params.set("sort", next.novelSort);
   } else if (next.view === "shortVideos") {
     if (next.shortVideoQuery) params.set("q", next.shortVideoQuery);
-    if (next.shortVideoAuthor && next.shortVideoAuthor !== "all") params.set("author", next.shortVideoAuthor);
-    if (next.shortVideoSource && next.shortVideoSource !== "liked") params.set("source", next.shortVideoSource);
+    if (next.shortVideoId && next.shortVideoAuthor && next.shortVideoAuthor !== "all") {
+      params.set("author", next.shortVideoAuthor);
+    } else if (!next.shortVideoAuthorPage && next.shortVideoAuthor && next.shortVideoAuthor !== "all") {
+      params.set("author", next.shortVideoAuthor);
+    }
+    const defaultSource = next.shortVideoAuthorPage && !next.shortVideoId ? "all" : "liked";
+    if (next.shortVideoSource && next.shortVideoSource !== defaultSource) params.set("source", next.shortVideoSource);
     if (next.shortVideoSort && next.shortVideoSort !== "published") params.set("sort", next.shortVideoSort);
   } else if (next.view === "music") {
     if (next.musicQuery) params.set("q", next.musicQuery);
@@ -202,7 +207,7 @@ function peopleRouteFromPath(routePath, params = new URLSearchParams()) {
   return {
     view: "people",
     galleryMode: "",
-    peopleScope: "western",
+    peopleScope: "main",
     galleryPhotoView: "collections",
     galleryPhotoCollection: "",
     galleryAlbumId: "",
@@ -261,12 +266,12 @@ function normalizeNovelSort(value) {
 
 function normalizeShortVideoSort(value) {
   const sort = String(value || "published").trim();
-  return ["liked", "published", "likes", "comments", "duration"].includes(sort) ? sort : "published";
+  return ["liked", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
 }
 
 function normalizeShortVideoSource(value) {
   const source = String(value || "liked").trim().toLowerCase();
-  return ["liked", "posts", "all", "local"].includes(source) ? source : "liked";
+  return ["liked", "posts", "authors", "all", "local"].includes(source) ? source : "liked";
 }
 
 function normalizeMusicSort(value) {
@@ -377,6 +382,11 @@ function novelRouteFromPath(routePath, params = new URLSearchParams()) {
 function shortVideoRouteFromPath(routePath, params = new URLSearchParams()) {
   const segments = normalizeRoutePath(routePath).split("/").filter(Boolean);
   if (!segments.length || !["short-videos", "short-video", "douyin"].includes(segments[0])) return null;
+  const pathAuthorPage = segments[1] === "authors" ? decodeRouteSegment(segments[2] || "") : "";
+  const requestedAuthor = params.get("author") || "all";
+  const requestedSource = params.get("source") || params.get("origin") || "";
+  const legacyAuthorPage = !segments[1] && requestedSource === "authors" && requestedAuthor !== "all" ? requestedAuthor : "";
+  const authorPage = pathAuthorPage || legacyAuthorPage;
   return {
     view: "shortVideos",
     galleryMode: "",
@@ -396,10 +406,13 @@ function shortVideoRouteFromPath(routePath, params = new URLSearchParams()) {
     novelQuery: "",
     novelCategory: "all",
     novelSort: "updated",
-    shortVideoId: decodeRouteSegment(segments[1] || ""),
+    shortVideoId: pathAuthorPage ? "" : decodeRouteSegment(segments[1] || ""),
+    shortVideoAuthorPage: authorPage,
     shortVideoQuery: params.get("q") || params.get("search") || "",
-    shortVideoAuthor: params.get("author") || "all",
-    shortVideoSource: normalizeShortVideoSource(params.get("source") || params.get("origin")),
+    shortVideoAuthor: authorPage || requestedAuthor,
+    shortVideoSource: authorPage
+      ? normalizeShortVideoSource(requestedSource === "authors" ? "all" : requestedSource || "all")
+      : normalizeShortVideoSource(requestedSource),
     shortVideoSort: normalizeShortVideoSort(params.get("sort")),
     personId: "",
     q: "",
@@ -432,6 +445,7 @@ function musicRouteFromPath(routePath, params = new URLSearchParams()) {
     novelCategory: "all",
     novelSort: "updated",
     shortVideoId: "",
+    shortVideoAuthorPage: "",
     shortVideoQuery: "",
     shortVideoAuthor: "all",
     shortVideoSource: "liked",
@@ -472,7 +486,6 @@ function routePath(route) {
     }
     return base;
   }
-  if (route.view === "people" && route.peopleScope === "western") return "/western";
   if (route.view === "novels") {
     if (route.novelBookId && route.novelChapterIndex) {
       return `/novels/${encodeRouteSegment(route.novelBookId)}/${encodeRouteSegment(route.novelChapterIndex)}`;
@@ -482,6 +495,7 @@ function routePath(route) {
   }
   if (route.view === "shortVideos") {
     if (route.shortVideoId) return `/short-videos/${encodeRouteSegment(route.shortVideoId)}`;
+    if (route.shortVideoAuthorPage) return `/short-videos/authors/${encodeRouteSegment(route.shortVideoAuthorPage)}`;
     return "/short-videos";
   }
   if (route.view === "music") {

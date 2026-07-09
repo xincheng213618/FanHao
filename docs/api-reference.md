@@ -33,7 +33,7 @@
 | GET | `/api/library/roots` | 公开 | 返回所有根目录与默认根。 |
 | POST | `/api/rescan` | 本地管理员 | 重新扫描全部资料库根目录，返回新扫描结果与统计。 |
 
-`scope` 查询参数：`main`（默认，番号人物）、`western`（欧美）、`all` 等，由 `people-scope-service.js` 规范化。
+`scope` 查询参数：`main`（默认，番号与欧美合并后的完整人物/作品库）；`western` 仅为旧客户端兼容筛选，由 `people-scope-service.js` 规范化。
 
 ## 作品与视频库（Video Library）
 
@@ -85,7 +85,7 @@
 | --- | --- | --- | --- |
 | GET | `/api/image-library` | 公开 | 图像资料库全量 payload（频道、根、统计、facets、缓存状态）。 |
 | GET | `/api/image-library/summary` | 公开 | 图库概览。 |
-| GET | `/api/image-library/items` | 公开 | 频道列表（套图 / 欧美 / 电影 / 电视剧，分页筛选）。 |
+| GET | `/api/image-library/items` | 公开 | 频道列表（套图 / 电影 / 电视剧，分页筛选）。 |
 | GET | `/api/image-reader/cache` | 公开 | 图片读取器缓存状态与 App 配置。 |
 | POST | `/api/image-reader/cache/cleanup` | 本地管理员 | 清理图片读取器缓存（`?force=1` 强制）。 |
 | GET | `/api/manga` | 公开 | 漫画根状态与已缓存漫画列表。 |
@@ -93,7 +93,7 @@
 | GET | `/api/manga/:id/chapters/:chapter` | 公开 | 漫画章节图片列表。 |
 | GET | `/api/photo-sets` | 公开 | 套图列表。 |
 | GET | `/api/photo-sets/:id` | 公开 | 单个套图详情（`?imageLimit=&imageOffset=` 分页）。 |
-| GET | `/api/gallery-media/:id` | 公开 | 欧美 / 电影 / 电视剧单条媒体详情。 |
+| GET | `/api/gallery-media/:id` | 公开 | 电影 / 电视剧单条媒体详情（兼容读取旧版欧美索引项）。 |
 
 > 图库索引刷新已迁移到后台作业中心（见 [维护与作业](./maintenance.md)），旧 `/api/image-library/rescan` 直接调用会返回 409 提示去作业中心。
 

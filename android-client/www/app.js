@@ -3,19 +3,19 @@ import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260705-mobile-actions-01";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
 import { createChannelViews } from "./js/channel-views.js?v=20260707-mobile-offline-state-01";
-import { createDetailViews } from "./js/detail-views.js?v=20260707-mobile-detail-errors-01";
+import { createDetailViews } from "./js/detail-views.js?v=20260710-western-merge-01";
 import { getElements } from "./js/dom.js?v=20260706-short-video-reel-06";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260706-mobile-web-sync-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
-import { createMusicViews } from "./js/music-views.js?v=20260708-mobile-music-35";
+import { createMusicViews } from "./js/music-views.js?v=20260708-mobile-music-36";
 import { createNovelViews } from "./js/novel-views.js?v=20260702-novel-local-manage-74";
 import { createPeopleViews } from "./js/people-views.js";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
-import { createShortVideoViews } from "./js/short-video-views.js?v=20260708-short-video-direct-search-01";
+import { createShortVideoViews } from "./js/short-video-views.js?v=20260709-short-video-android-feed-20";
 import { createToolViews } from "./js/tool-views.js?v=20260702-novel-local-manage-74";
-import { createWorkViews } from "./js/work-views.js?v=20260707-mobile-offline-state-01";
+import { createWorkViews } from "./js/work-views.js?v=20260710-western-merge-01";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
@@ -122,10 +122,13 @@ let shortVideoSummary = null;
 let topTvCategoryFacets = [];
 let androidVersionInfo = null;
 let androidUpdateInfo = null;
-const FEED_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "vr", "people", "favorites", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail", "music"]);
+const FEED_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "vr", "people", "favorites", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail", "music", "shortVideos"]);
 
 function readInitialViewState() {
-  return readViewStateFromHash() || readLastViewState();
+  const state = readViewStateFromHash() || readLastViewState();
+  return state.view === "channel" && normalizeChannelMode(state.params?.mode) === "western"
+    ? defaultViewState()
+    : state;
 }
 
 function defaultViewState() {
@@ -208,14 +211,29 @@ function sanitizeViewParams(view, params = {}) {
   if (view === "shortVideos") {
     const query = String(params.query || params.q || "").trim();
     const author = String(params.author || "all").trim() || "all";
+    const source = normalizeShortVideoSource(params.source || params.origin);
     const sort = normalizeShortVideoSort(params.sort);
     return {
       ...(query ? { query } : {}),
       ...(author !== "all" ? { author } : {}),
+      ...(source !== "liked" ? { source } : {}),
       ...(sort !== "published" ? { sort } : {})
     };
   }
-  if (view === "shortVideoBrowser") return { id: String(params.id || "") };
+  if (view === "shortVideoBrowser") {
+    const id = String(params.id || "").trim();
+    const query = String(params.query || params.q || "").trim();
+    const author = String(params.author || "all").trim() || "all";
+    const source = normalizeShortVideoSource(params.source || params.origin);
+    const sort = normalizeShortVideoSort(params.sort);
+    return {
+      id,
+      ...(query ? { query } : {}),
+      ...(author !== "all" ? { author } : {}),
+      ...(source !== "liked" ? { source } : {}),
+      ...(sort !== "published" ? { sort } : {})
+    };
+  }
   if (view === "mediaDetail") {
     const mode = normalizeChannelMode(params.mode || params.type);
     return {
@@ -267,7 +285,12 @@ function normalizeChannelMode(value) {
 
 function normalizeShortVideoSort(value) {
   const sort = String(value || "published").trim();
-  return ["liked", "published", "likes", "comments", "duration"].includes(sort) ? sort : "published";
+  return ["liked", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
+}
+
+function normalizeShortVideoSource(value) {
+  const source = String(value || "liked").trim().toLowerCase();
+  return ["liked", "posts", "all", "local"].includes(source) ? source : "liked";
 }
 
 function normalizeMusicSort(value) {
@@ -677,15 +700,8 @@ function omniChannels(summary = {}) {
       label: "短视频",
       value: formatCompact(shortVideoSummary?.totals?.videos || 0),
       unit: "条",
-      detail: shortVideoSummary?.totals?.authors ? `${formatCompact(shortVideoSummary.totals.authors)} 作者 · 可刷视频` : "抖音点赞本地库",
+      detail: shortVideoSummary?.totals?.authors ? `${formatCompact(shortVideoSummary.totals.authors)} 作者 · 可刷视频` : "本地短视频库",
       view: "shortVideos"
-    },
-    {
-      label: "欧美",
-      value: formatCompact(totals.western),
-      unit: "视频",
-      detail: mediaRootText(summary, "western"),
-      mode: "western"
     },
     {
       label: "影视",
@@ -766,7 +782,6 @@ function syncChannelCounts(summary = imageLibrarySummary) {
       ? [`${formatCompact(totals.photoSets)} 图包`, totals.manga ? `${formatCompact(totals.manga)} 韩漫` : ""].filter(Boolean).join(" · ")
       : "图包 / 韩漫";
   }
-  if (els.channelWesternCount) els.channelWesternCount.textContent = totals.western ? `${formatCompact(totals.western)} 视频` : "视频";
   if (els.channelMediaCount) {
     els.channelMediaCount.textContent = totals.movies || totals.tv
       ? [`${formatCompact(totals.movies || 0)} 电影`, `${formatCompact(totals.tv || 0)} 集`].join(" · ")
@@ -1058,17 +1073,28 @@ function openNativeLibraryRoute(options = {}) {
       showView("mediaDetail", { id: segments[1], mode }, navigation);
       return true;
     }
+    if (mode === "western") {
+      showView("works", {}, navigation);
+      return true;
+    }
     showView("channel", { mode: primaryChannelMode(mode), category: query.get("category") || undefined }, navigation);
     return true;
   }
   if (first === "short-videos" || first === "short-video" || first === "douyin") {
     if (segments[1]) {
-      showView("shortVideoBrowser", { id: segments[1] }, navigation);
+      showView("shortVideoBrowser", {
+        id: segments[1],
+        query: query.get("q") || query.get("search") || "",
+        author: query.get("author") || "all",
+        source: query.get("source") || query.get("origin") || "liked",
+        sort: query.get("sort") || "published"
+      }, navigation);
       return true;
     }
     showView("shortVideos", {
       query: query.get("q") || query.get("search") || "",
       author: query.get("author") || "all",
+      source: query.get("source") || query.get("origin") || "liked",
       sort: query.get("sort") || "published"
     }, navigation);
     return true;
@@ -1345,6 +1371,10 @@ function showSettings(options = {}) {
 }
 
 function showView(view, params = {}, navigation = {}) {
+  if (view === "channel" && normalizeChannelMode(params.mode) === "western") {
+    view = "works";
+    params = {};
+  }
   if (!library && !canRenderWithoutLibrary(view)) {
     toggleSettings(true);
     return;
@@ -1592,7 +1622,7 @@ function renderCurrentView(options = {}) {
     return restoreAfterRender(shortVideoViews.renderList(currentViewParams, renderGuard));
   }
   if (currentView === "shortVideoBrowser") {
-    return restoreAfterRender(shortVideoViews.renderBrowser(currentViewParams.id, renderGuard));
+    return restoreAfterRender(shortVideoViews.renderBrowser(currentViewParams, renderGuard));
   }
   if (currentView === "tools") {
     return restoreAfterRender(toolViews.renderTxtTool(renderGuard));
@@ -1656,7 +1686,7 @@ function routeLoadingCopy(view = currentView, params = currentViewParams) {
   if (view === "search") return { kicker: "搜索", title: params.query ? `搜索：${params.query}` : "全库搜索", meta: "正在搜索", message: "正在搜索" };
   if (view === "people") return { kicker: "人物索引", title: "全部人物", meta: "正在整理", message: "正在整理人物索引" };
   if (view === "novels") return { kicker: "小说", title: "书库", meta: "正在读取", message: "正在读取书库" };
-  if (view === "shortVideos") return { kicker: "抖音点赞", title: "短视频", meta: "正在读取", message: "正在读取短视频" };
+  if (view === "shortVideos") return { kicker: "短视频", title: "短视频", meta: "正在读取", message: "正在读取短视频" };
   if (view === "tools") return { kicker: "小工具", title: "工具", meta: "正在准备", message: "正在准备工具" };
   return { kicker: "作品", title: "片库", meta: "正在加载", message: "正在加载作品" };
 }
@@ -2169,8 +2199,21 @@ window.addEventListener("fanhaoNovelSourceChanged", () => {
   }
 });
 
-window.addEventListener("fanhaoOpenShortVideoSearch", () => {
+window.addEventListener("fanhaoOpenShortVideoSearch", (event) => {
   if (!isShortVideoSearchContext()) return;
+  if (currentView === "shortVideoBrowser") {
+    const state = event.detail?.state || shortVideoViews?.getSearchState?.() || {};
+    showView("shortVideos", {
+      query: state.query || "",
+      author: state.author || "all",
+      source: state.source || "liked",
+      sort: state.sort || "published"
+    }, { skipHistory: true, replaceHistory: true });
+    searchSurfaceExpanded = true;
+    syncSearchSurface();
+    focusSearchInput();
+    return;
+  }
   openSearchSurface();
 });
 

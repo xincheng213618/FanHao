@@ -11,6 +11,7 @@ export function getWorkSource(work) {
   if (sourcePath.startsWith("f:/")) return { label: "F:", variant: "source", vr: false };
   if (sourcePath.startsWith("o:/")) return { label: "O:", variant: "source collection", vr: false };
   if (sourcePath.startsWith("v:/")) return { label: "VR", variant: "source vr", vr: true };
+  if (sourcePath.startsWith("r:/")) return { label: "欧美 · R:", variant: "source western", vr: false };
   return { label: "", variant: "", vr: false };
 }
 

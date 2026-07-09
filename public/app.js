@@ -4,13 +4,13 @@ import { createGalleryPage } from "./js/pages/gallery-page.js?v=20260701-gallery
 import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260706-media-player-02";
 import { createMusicPage } from "./js/pages/music-page.js?v=20260708-music-playlist-order-01";
 import { createNovelPage } from "./js/pages/novel-page.js?v=20260701-gallery-merge-01";
-import { createPeoplePage } from "./js/pages/people-page.js?v=20260706-western-people-01";
-import { createPersonProfile } from "./js/pages/person-profile.js?v=20260706-multi-javdb-actor-01";
+import { createPeoplePage } from "./js/pages/people-page.js?v=20260710-western-merge-01";
+import { createPersonProfile } from "./js/pages/person-profile.js?v=20260710-western-merge-01";
 import { createRankingPage } from "./js/pages/ranking-page.js?v=20260704-ranking-controls-01";
-import { createShortVideoPage } from "./js/pages/short-video-page.js?v=20260708-short-video-source-01";
+import { createShortVideoPage } from "./js/pages/short-video-page.js?v=20260710-short-video-feed-web-06";
 import { createToolsPage } from "./js/pages/tools-page.js?v=20260701-gallery-merge-01";
 import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260705-local-marker-a-01";
-import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260708-music-genre-01";
+import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260710-western-merge-01";
 
 repairLegacyShell();
 
@@ -132,6 +132,7 @@ const state = {
   shortVideo: {
     query: "",
     author: "all",
+    authorPage: "",
     source: "liked",
     sort: "published",
     data: null,
@@ -611,6 +612,7 @@ function currentRouteSnapshot(overrides = {}) {
     novelCategory: state.activeView === "novels" ? state.novel.category || "all" : "all",
     novelSort: state.activeView === "novels" ? state.novel.sort || "updated" : "updated",
     shortVideoId: state.activeView === "shortVideos" ? state.shortVideo.current?.id || "" : "",
+    shortVideoAuthorPage: state.activeView === "shortVideos" ? state.shortVideo.authorPage || "" : "",
     shortVideoQuery: state.activeView === "shortVideos" ? state.shortVideo.query || "" : "",
     shortVideoAuthor: state.activeView === "shortVideos" ? state.shortVideo.author || "all" : "all",
     shortVideoSource: state.activeView === "shortVideos" ? state.shortVideo.source || "liked" : "liked",
@@ -726,7 +728,7 @@ async function applyRoute(route) {
     } else if (next.view === "shortVideos") {
       clearWorkSearch();
       shortVideoPage.applyRouteState(next);
-      setActiveView("shortVideos", { skipRoute: true, deferInitialLoad: Boolean(next.shortVideoId) });
+      setActiveView("shortVideos", { skipRoute: true, deferInitialLoad: Boolean(next.shortVideoId || next.shortVideoAuthorPage) });
       await shortVideoPage.openRouteTarget(next);
     } else if (next.view === "music") {
       clearWorkSearch();
@@ -990,18 +992,6 @@ async function setPeopleScope(scope, options = {}) {
   }
 }
 
-function isWesternPeopleScope() {
-  return state.activeView === "people" && state.peopleScope === "western";
-}
-
-function peopleScopeTitle() {
-  return state.peopleScope === "western" ? "欧美人物" : "人物索引";
-}
-
-function peopleScopeSubtitle() {
-  return state.peopleScope === "western" ? "按人物浏览欧美本地文件" : "按人物浏览全部资料库";
-}
-
 function normalizeSourcePath(value) {
   return String(value || "").replaceAll("\\", "/").toLowerCase();
 }
@@ -1019,7 +1009,8 @@ function sourcePriority(value) {
   if (sourcePath === "v:/[a1]" || sourcePath.startsWith("v:/[a1]/")) return 8;
   if (sourcePath === "v:/av" || sourcePath.startsWith("v:/av/")) return 9;
   if (sourcePath.startsWith("v:/")) return 10;
-  return 11;
+  if (sourcePath.startsWith("r:/")) return 11;
+  return 12;
 }
 
 function personSourcePriority(person) {
@@ -1519,10 +1510,9 @@ function updateBackToPeopleIndexButton() {
   document.body.classList.toggle("short-video-view", state.activeView === "shortVideos");
   document.body.classList.toggle("short-video-browser-active", state.activeView === "shortVideos" && Boolean(state.shortVideo?.current));
   document.body.classList.toggle("music-view", state.activeView === "music");
-  const westernScope = isWesternPeopleScope();
-  els.missingLocalToggle?.closest(".toggle-control")?.toggleAttribute("hidden", westernScope);
-  els.collectionToggle?.closest(".toggle-control")?.toggleAttribute("hidden", westernScope);
-  els.compilationConfigButton?.toggleAttribute("hidden", westernScope);
+  els.missingLocalToggle?.closest(".toggle-control")?.removeAttribute("hidden");
+  els.collectionToggle?.closest(".toggle-control")?.removeAttribute("hidden");
+  els.compilationConfigButton?.removeAttribute("hidden");
   syncNavigationState();
   if (!els.backToPeopleIndex) return;
   els.backToPeopleIndex.hidden = true;
@@ -3117,6 +3107,7 @@ function workSourceLabel(work) {
   if (sourcePath.startsWith("g:/")) return { label: "G:", vr: false };
   if (sourcePath.startsWith("f:/")) return { label: "F:", vr: false };
   if (sourcePath.startsWith("o:/")) return { label: "O:", vr: false };
+  if (sourcePath.startsWith("r:/")) return { label: "欧美 · R:", vr: false };
   return { label: "", vr: false };
 }
 
@@ -3257,10 +3248,6 @@ for (const button of els.viewTabs) {
 }
 
 async function rescanFullLibrary(button) {
-  if (isWesternPeopleScope()) {
-    openAdminScript("core-local-scan");
-    return;
-  }
   if (state.activeView === "gallery") {
     openAdminScript("image-library-rescan");
     return;

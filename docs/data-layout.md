@@ -18,7 +18,7 @@ FanHao 把本地状态放在项目根下的 `data/` 目录，包含若干 SQLite
 | `douban-cookie.txt` | 文本 | 豆瓣 Cookie（供电视剧 / 电影资料补全作业使用）。 |
 | `admin-tasks.json` | JSON | 后台作业历史与状态。 |
 | `library-index.json` | JSON | 旧版扫描索引缓存（核心库时代已被 `fanhao-core-v2.sqlite` 取代，但兼容读取）。 |
-| `image-library-index.json` | JSON | 图库索引缓存（套图 / 欧美 / 电影 / 电视剧扫描结果）。 |
+| `image-library-index.json` | JSON | 图库索引缓存（套图 / 电影 / 电视剧扫描结果；旧文件可能暂存欧美兼容项）。 |
 | `android-update/` | 目录 | 安卓 APK 更新通道文件（debug / release）。 |
 | `image-reader-cache/` | 目录 | 图片读取器运行时缓存（受 `app-config` 上限约束，可随时清理）。 |
 | `tool-downloads/` | 目录 | 工具临时下载（如 TXT 格式化结果，带 TTL）。 |
@@ -48,7 +48,7 @@ FanHao 把本地状态放在项目根下的 `data/` 目录，包含若干 SQLite
 
 - `photo_set_covers` / `photo_set_image_indexes`：套图封面与图片索引。
 - `tv_series_metadata` / `movie_metadata`：电视剧 / 电影豆瓣元数据（封面以 BLOB 内联存储）。
-- `gallery_media_covers`：欧美 / 电影 / 电视剧媒体封面缓存。
+- `gallery_media_covers`：电影 / 电视剧媒体封面缓存（可能保留旧版欧美缓存记录）。
 
 ## 音乐库（`music.sqlite`）
 

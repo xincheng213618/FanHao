@@ -1,6 +1,6 @@
 import { formatNumber } from "./format.js";
 import { imageUrlForWork } from "./image.js";
-import { isVrWork } from "./work-source.js";
+import { isVrWork } from "./work-source.js?v=20260710-western-merge-01";
 
 const FILTER_STORAGE_KEY = "fanhao.android.workFilter";
 const SORT_STORAGE_KEY = "fanhao.android.workSort";

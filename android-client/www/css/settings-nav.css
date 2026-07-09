@@ -201,7 +201,7 @@ label {
   z-index: 30;
   display: grid;
   width: min(100%, 560px);
-  grid-template-columns: repeat(8, minmax(36px, 1fr));
+  grid-template-columns: repeat(7, minmax(40px, 1fr));
   gap: 2px;
   transform: translateX(-50%);
   border-top: 1px solid var(--line);

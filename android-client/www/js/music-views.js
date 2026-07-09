@@ -1,4 +1,4 @@
-import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-35";
+import { deleteJson, fetchJson, postJson, putJson } from "./api.js?v=20260708-mobile-music-36";
 import { absoluteUrl } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "./format.js";
 
@@ -2175,9 +2175,20 @@ export function createMusicViews(deps) {
         for (const item of els.viewContent.querySelectorAll(".music-mobile-full-lyric-lines [data-index]")) {
           const active = Number(item.dataset.index || -1) === index;
           item.classList.toggle("active", active);
-          if (active && (!state.lyricFollowPaused || force)) item.scrollIntoView({ block: "center", behavior: "smooth" });
+          if (active && (!state.lyricFollowPaused || force)) centerLyricLine(item, { smooth: !force });
         }
       }
+    });
+  }
+
+  function centerLyricLine(item, options = {}) {
+    const container = item?.closest?.(".music-mobile-full-lyric-lines");
+    if (!container) return;
+    const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+    const target = Math.max(0, Math.min(maxScroll, item.offsetTop - ((container.clientHeight - item.offsetHeight) / 2)));
+    container.scrollTo({
+      top: target,
+      behavior: options.smooth ? "smooth" : "auto"
     });
   }
 

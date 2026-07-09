@@ -67,7 +67,7 @@ Current/near-term modules:
 - `person-library-service.js`: owns local person source-path candidates and single-person library refresh/index repair.
 - `person-list-service.js`: owns merged/scoped main person-list assembly for library summary responses.
 - `person-merge-service.js`: owns canonical person maps, merged person records, merged aliases, and actor-profile display/search names.
-- `people-scope-service.js`: owns main/western scope normalization, root membership checks, scope indexes, and person/work scope matching.
+- `people-scope-service.js`: owns the unified main scope plus the legacy western compatibility filter, root membership checks, and person/work scope matching.
 - `ranking-service.js`: owns JavDB ranking summaries, ranking row reads, ranking work payloads, and ranking missing-work search payloads.
 - `studio-service.js`: owns studio/maker catalog summaries, series rows, public studio payloads, and studio detail work listings.
 - `video-library-image-service.js`: owns core image row reads and public person-avatar/work-cover payloads used by video-library presentation and media responses.
