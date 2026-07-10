@@ -486,7 +486,7 @@ function musicRouteFromPath(routePath, params = new URLSearchParams()) {
     musicArtistId: section === "artist" ? decodeRouteSegment(segments[2] || "") : "",
     musicAlbumId: section === "album" ? decodeRouteSegment(segments[2] || "") : "",
     musicGenre: section === "genre" ? decodeRouteSegment(segments[2] || "") : params.get("genre") || "",
-    musicMode: section === "history" ? "history" : section === "report" ? "report" : section === "playlist" ? "playlist" : section === "smart" ? "smart" : "library",
+    musicMode: section === "history" ? "history" : section === "report" ? "report" : section === "playlist" ? "playlist" : section === "smart" ? "smart" : section ? "library" : "home",
     musicPlaylistId: section === "playlist" ? decodeRouteSegment(segments[2] || "") : "",
     musicSmartId: section === "smart" ? decodeRouteSegment(segments[2] || "") : "",
     musicQuery: params.get("q") || params.get("search") || "",
@@ -539,6 +539,7 @@ function routePath(route) {
     if (route.musicGenre) return `/music/genre/${encodeRouteSegment(route.musicGenre)}`;
     if (route.musicAlbumId) return `/music/album/${encodeRouteSegment(route.musicAlbumId)}`;
     if (route.musicArtistId) return `/music/artist/${encodeRouteSegment(route.musicArtistId)}`;
+    if (route.musicMode === "library") return "/music/library";
     return "/music";
   }
   if (VIEW_PATHS[route.view]) return VIEW_PATHS[route.view];

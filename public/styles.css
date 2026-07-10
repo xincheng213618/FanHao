@@ -1,1 +1,23 @@
-@import "./css/legacy.css?v=20260710-standalone-modules-music-qq-04";
+/* Shared application foundation. Keep imports in cascade order. */
+@import "./css/foundation.css?v=20260710-web-css-modules-01";
+@import "./modules/novels/styles.css?v=20260710-web-css-modules-01";
+@import "./css/shell.css?v=20260710-web-css-modules-01";
+
+/* Main library modules. */
+@import "./modules/fanhao/styles.css?v=20260710-web-css-modules-01";
+@import "./modules/content-index/styles.css?v=20260710-web-css-modules-01";
+@import "./modules/tools/styles.css?v=20260710-web-css-modules-01";
+@import "./modules/fanhao/work-cards.css?v=20260710-web-css-modules-01";
+@import "./modules/system/admin.css?v=20260710-web-css-modules-01";
+@import "./css/player.css?v=20260710-web-css-modules-01";
+@import "./css/responsive.css?v=20260710-web-css-modules-01";
+
+/* Standalone feature modules. */
+@import "./modules/short-videos/styles/list.css?v=20260710-web-css-modules-01";
+@import "./modules/short-videos/styles/viewer.css?v=20260710-web-css-modules-01";
+@import "./modules/short-videos/styles/panels.css?v=20260710-web-css-modules-01";
+@import "./modules/short-videos/styles/responsive.css?v=20260710-web-css-modules-01";
+@import "./modules/music/styles/foundation.css?v=20260710-web-css-modules-01";
+@import "./modules/music/styles/library.css?v=20260710-web-css-modules-01";
+@import "./modules/music/styles/player.css?v=20260710-web-css-modules-01";
+@import "./modules/music/styles/responsive.css?v=20260710-web-css-modules-01";

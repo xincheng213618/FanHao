@@ -1,0 +1,331 @@
+.tool-rail {
+  position: sticky;
+  top: 92px;
+  display: grid;
+  gap: 8px;
+  grid-row: span 2;
+  padding: 12px;
+}
+
+.tool-rail-title {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.tool-rail-item {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  border: 1px solid rgba(31, 122, 98, 0.35);
+  border-radius: var(--radius);
+  background: var(--panel-soft);
+  color: var(--accent-strong);
+  padding: 10px;
+  text-align: left;
+}
+
+.tool-rail-item strong,
+.tool-rail-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-rail-item span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.txt-tool-panel,
+.game-tool-panel {
+  display: grid;
+  overflow: hidden;
+}
+
+.game-launch-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 18px;
+}
+
+.game-launch-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 118px;
+  border: 1px solid rgba(31, 122, 98, 0.2);
+  border-radius: var(--radius);
+  background: var(--panel-soft);
+  color: var(--ink);
+  padding: 14px;
+  text-decoration: none;
+}
+
+.game-launch-card > span {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.game-launch-card strong,
+.game-launch-card span span,
+.game-launch-card small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.game-launch-card strong {
+  font-size: 19px;
+  line-height: 1.15;
+}
+
+.game-launch-card span span {
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.game-launch-card small {
+  display: -webkit-box;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.game-launch-card b {
+  display: grid;
+  min-width: 58px;
+  min-height: 36px;
+  place-items: center;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+}
+
+.txt-tool-head {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfa;
+  padding: 18px;
+}
+
+.txt-tool-head h3 {
+  margin: 2px 0 6px;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.txt-tool-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.txt-tool-badge {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  border: 1px solid rgba(31, 122, 98, 0.22);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 900;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+.txt-tool-body {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.txt-drop-zone {
+  display: grid;
+  min-height: 148px;
+  place-items: center;
+  gap: 7px;
+  border: 1px dashed rgba(31, 122, 98, 0.5);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, #f7fbf8 0%, #eef5f0 100%);
+  color: var(--ink);
+  padding: 18px;
+  text-align: center;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    transform 140ms ease;
+}
+
+.txt-drop-zone.drag-over {
+  border-color: var(--accent);
+  background: #e8f3ee;
+  transform: translateY(-1px);
+}
+
+.txt-drop-zone strong {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.txt-drop-zone span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.txt-drop-button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  border: 1px solid rgba(31, 122, 98, 0.32);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--accent-strong) !important;
+  font-weight: 800;
+  padding: 6px 12px;
+}
+
+.txt-tool-editor {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.txt-tool-editor textarea,
+.txt-tool-preview {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  color: var(--ink);
+  font-family:
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "Segoe UI",
+    system-ui,
+    sans-serif;
+  line-height: 1.7;
+  resize: vertical;
+}
+
+.txt-tool-editor textarea {
+  min-height: 220px;
+  padding: 12px;
+}
+
+.txt-tool-options,
+.txt-tool-actions,
+.txt-tool-result-actions,
+.txt-tool-result-stats {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.txt-tool-toggle {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-soft);
+  color: var(--accent-strong);
+  font-size: 13px;
+  font-weight: 800;
+  padding: 7px 10px;
+}
+
+.txt-tool-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.txt-tool-status {
+  min-height: 20px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.txt-tool-result {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding: 18px;
+}
+
+.txt-tool-empty {
+  display: grid;
+  min-height: 88px;
+  place-items: center;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.txt-tool-result-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.txt-tool-result-head > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.txt-tool-result-head strong,
+.txt-tool-result-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.txt-tool-result-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.txt-tool-result-stats span {
+  min-height: 28px;
+  border: 1px solid rgba(31, 122, 98, 0.18);
+  border-radius: 999px;
+  background: #f4f8f5;
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 5px 10px;
+}
+
+.txt-tool-preview {
+  min-height: 240px;
+  max-height: 460px;
+  padding: 12px;
+}
+

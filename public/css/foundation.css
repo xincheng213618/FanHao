@@ -1,0 +1,61 @@
+:root {
+  color-scheme: light;
+  --bg: #f6f7f4;
+  --panel: #ffffff;
+  --panel-soft: #eef3ef;
+  --ink: #1c2520;
+  --muted: #66716c;
+  --line: #d8dfd9;
+  --accent: #1f7a62;
+  --accent-strong: #155845;
+  --rust: #a85232;
+  --yellow: #d8b44b;
+  --shadow: 0 18px 50px rgba(24, 35, 30, 0.12);
+  --radius: 8px;
+  font-family:
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "Segoe UI",
+    system-ui,
+    sans-serif;
+}
+
+html {
+  scrollbar-color: rgba(104, 117, 128, .58) rgba(18, 24, 30, .08);
+  scrollbar-width: thin;
+}
+
+* {
+  scrollbar-color: rgba(104, 117, 128, .52) rgba(18, 24, 30, .08);
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: rgba(18, 24, 30, .06);
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 42px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(132, 145, 157, .74), rgba(84, 96, 109, .66))
+    padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background:
+    linear-gradient(180deg, rgba(154, 168, 181, .86), rgba(102, 116, 130, .78))
+    padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+

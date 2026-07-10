@@ -100,6 +100,12 @@ export function createShortVideoPage(deps) {
     state.shortVideo.data = state.shortVideo.data || null;
     state.shortVideo.summary = state.shortVideo.summary || null;
     state.shortVideo.authors = Array.isArray(state.shortVideo.authors) ? state.shortVideo.authors : [];
+    state.shortVideo.authorDetail = state.shortVideo.authorDetail && typeof state.shortVideo.authorDetail === "object"
+      ? state.shortVideo.authorDetail
+      : null;
+    state.shortVideo.authorVideo = state.shortVideo.authorVideo && typeof state.shortVideo.authorVideo === "object"
+      ? state.shortVideo.authorVideo
+      : null;
     state.shortVideo.facetsLoaded = Boolean(state.shortVideo.facetsLoaded);
     state.shortVideo.facetsLoading = Boolean(state.shortVideo.facetsLoading);
     state.shortVideo.summaryLoading = Boolean(state.shortVideo.summaryLoading);
@@ -162,11 +168,16 @@ export function createShortVideoPage(deps) {
 
   function applyRouteState(route = {}) {
     ensureState();
+    const nextAuthorPage = route.shortVideoAuthorPage || "";
+    if (state.shortVideo.authorPage && state.shortVideo.authorPage !== nextAuthorPage) {
+      state.shortVideo.authorDetail = null;
+      state.shortVideo.authorVideo = null;
+    }
     state.shortVideo.query = route.shortVideoQuery || "";
     state.shortVideo.topic = normalizeShortVideoTopic(route.shortVideoTopic);
     state.shortVideo.sound = normalizeShortVideoSound(route.shortVideoSound);
     if (!state.shortVideo.sound) state.shortVideo.soundInfo = null;
-    state.shortVideo.authorPage = route.shortVideoAuthorPage || "";
+    state.shortVideo.authorPage = nextAuthorPage;
     state.shortVideo.author = state.shortVideo.authorPage || route.shortVideoAuthor || "all";
     state.shortVideo.media = normalizeShortVideoMedia(route.shortVideoMedia);
     state.shortVideo.source = normalizeShortVideoSource(route.shortVideoSource);
@@ -752,7 +763,7 @@ export function createShortVideoPage(deps) {
     const label = document.createElement("label");
     label.className = "short-video-sort-control";
     const text = document.createElement("span");
-    text.textContent = "排序";
+    text.textContent = isShortVideoAuthorDetailPage() ? "日期" : "排序";
     const select = document.createElement("select");
     select.className = "short-video-sort-select";
     for (const item of [
@@ -817,13 +828,28 @@ export function createShortVideoPage(deps) {
 
   function renderAuthorDetailHome(data = {}) {
     const author = currentShortVideoAuthorDetail(data);
-    const authorVideo = (data.videos || []).find((video) => video?.ownerUserId || video?.author?.id) || null;
+    const visibleAuthorVideo = (data.videos || []).find((video) => video?.ownerUserId || video?.author?.id) || null;
+    if (visibleAuthorVideo) state.shortVideo.authorVideo = visibleAuthorVideo;
+    const authorVideo = visibleAuthorVideo || state.shortVideo.authorVideo || null;
     const head = document.createElement("section");
     head.className = "short-video-author-page-head";
+    const heroCoverUrl = shortVideoCardCoverUrl(authorVideo || {});
+    if (heroCoverUrl) {
+      const hero = document.createElement("div");
+      hero.className = "short-video-author-page-hero";
+      hero.setAttribute("aria-hidden", "true");
+      const heroImage = document.createElement("img");
+      heroImage.src = heroCoverUrl;
+      heroImage.alt = "";
+      heroImage.loading = "eager";
+      heroImage.decoding = "async";
+      hero.append(heroImage);
+      head.append(hero);
+    }
     const back = document.createElement("button");
     back.type = "button";
     back.className = "short-video-author-page-back";
-    back.append(createIcon("chevronLeft"), document.createTextNode("返回作者"));
+    back.append(createIcon("chevronLeft"), document.createTextNode("返回"));
     back.addEventListener("click", () => returnToShortVideoAuthorIndex());
     const avatar = authorAvatar(author, "short-video-author-page-avatar");
     const copy = document.createElement("div");
@@ -885,14 +911,14 @@ export function createShortVideoPage(deps) {
       collected.textContent = `资料更新 ${collectedAt}`;
       libraryMeta.append(collected);
     }
-    copy.append(eyebrow, nameRow, identity, signature, stats, libraryMeta);
+    copy.append(eyebrow, nameRow, stats, identity, signature, libraryMeta);
     const actions = document.createElement("div");
     actions.className = "short-video-author-page-actions";
     const follow = createAuthorFollowButton(authorVideo, author, "page");
     const douyin = document.createElement("button");
     douyin.type = "button";
     douyin.className = "short-video-author-page-secondary";
-    douyin.textContent = "打开抖音主页";
+    douyin.textContent = "抖音主页";
     douyin.addEventListener("click", () => openAuthorDouyinLink(author));
     actions.append(follow, douyin);
     head.append(back, avatar, copy, actions);
@@ -904,13 +930,42 @@ export function createShortVideoPage(deps) {
     section.className = "short-video-author-workspace";
     const heading = document.createElement("div");
     heading.className = "short-video-author-workspace-heading";
-    const title = document.createElement("h2");
-    title.textContent = "作品";
-    const summary = document.createElement("span");
-    summary.textContent = state.shortVideo.loading
-      ? "正在读取"
-      : `共 ${formatNumber(data.total || 0)} 条`;
-    heading.append(title, summary);
+    heading.setAttribute("role", "tablist");
+    heading.setAttribute("aria-label", "作者作品来源");
+    const author = currentShortVideoAuthorDetail(data);
+    const authorTotal = author.count || data.total || 0;
+    const activeSource = ["all", "posts", "liked", "local"].includes(state.shortVideo.source)
+      ? state.shortVideo.source
+      : "all";
+    for (const [value, label] of [
+      ["all", "作品"],
+      ["posts", "发布"],
+      ["liked", "喜欢"],
+      ["local", "本地"]
+    ]) {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "short-video-author-workspace-tab";
+      tab.classList.toggle("active", activeSource === value);
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", String(activeSource === value));
+      tab.append(document.createTextNode(label));
+      if (value === "all") {
+        const count = document.createElement("small");
+        count.textContent = state.shortVideo.loading ? "…" : formatNumber(authorTotal);
+        tab.append(count);
+      } else if (value === "liked") {
+        tab.append(createIcon("eyeOff"));
+      }
+      tab.addEventListener("click", () => {
+        if (value === state.shortVideo.source) return;
+        state.shortVideo.source = value;
+        state.shortVideo.data = null;
+        clearShortVideoDeleteSelection();
+        loadVideos({ replaceRoute: true }).catch(showError);
+      });
+      heading.append(tab);
+    }
 
     const filters = document.createElement("div");
     filters.className = "short-video-author-filters";
@@ -920,41 +975,15 @@ export function createShortVideoPage(deps) {
       ariaLabel: "搜索作者作品",
       params: () => ({ author: state.shortVideo.authorPage || state.shortVideo.author })
     });
-
-    const sourceLabel = document.createElement("label");
-    sourceLabel.className = "short-video-author-source-filter";
-    const sourceText = document.createElement("span");
-    sourceText.textContent = "来源";
-    const sourceSelect = document.createElement("select");
-    sourceSelect.setAttribute("aria-label", "筛选作者作品来源");
-    for (const [value, label] of [
-      ["all", "全部本地"],
-      ["liked", "我的喜欢"],
-      ["posts", "作者发布"],
-      ["local", "其他本地"]
-    ]) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = label;
-      sourceSelect.append(option);
-    }
-    sourceSelect.value = ["all", "liked", "posts", "local"].includes(state.shortVideo.source) ? state.shortVideo.source : "all";
-    sourceSelect.addEventListener("change", () => {
-      const source = ["all", "liked", "posts", "local"].includes(sourceSelect.value) ? sourceSelect.value : "all";
-      if (source === state.shortVideo.source) return;
-      state.shortVideo.source = source;
-      state.shortVideo.data = null;
-      clearShortVideoDeleteSelection();
-      loadVideos({ replaceRoute: true }).catch(showError);
-    });
-    sourceLabel.append(sourceText, sourceSelect);
-    filters.append(search, sourceLabel, renderDeleteSelectionActions(data));
+    filters.append(search, renderDeleteSelectionActions(data));
     section.append(heading, filters);
     return section;
   }
 
   function returnToShortVideoAuthorIndex() {
     state.shortVideo.authorPage = "";
+    state.shortVideo.authorDetail = null;
+    state.shortVideo.authorVideo = null;
     state.shortVideo.source = "authors";
     state.shortVideo.author = "all";
     state.shortVideo.query = "";
@@ -985,6 +1014,8 @@ export function createShortVideoPage(deps) {
     authorPanelReturnFeed = null;
     state.shortVideo.authorPage = authorId;
     state.shortVideo.author = authorId;
+    state.shortVideo.authorDetail = { ...(video?.author || {}), ...author, secUid: authorId };
+    state.shortVideo.authorVideo = video?.id ? video : null;
     state.shortVideo.source = "all";
     state.shortVideo.query = "";
     state.shortVideo.topic = "";
@@ -1080,7 +1111,23 @@ export function createShortVideoPage(deps) {
     const filter = String(state.shortVideo.author || "").trim();
     const fromVideo = (data.videos || []).find((video) => video?.author)?.author || {};
     const fromFacet = (state.shortVideo.authors || []).find((author) => shortVideoAuthorFilterValue(author) === filter) || {};
-    return { ...fromFacet, ...fromVideo, name: fromVideo.name || fromFacet.name || authorNameFromFilter(filter) };
+    const cached = state.shortVideo.authorDetail || {};
+    const fromCache = shortVideoAuthorFilterValue(cached) === filter ? cached : {};
+    const fresh = { ...fromVideo, ...fromFacet };
+    const preserveCachedProfile = Boolean(fromCache.secUid || fromCache.name) && state.shortVideo.source !== "all";
+    const detail = preserveCachedProfile
+      ? { ...fresh, ...fromCache }
+      : { ...fromCache, ...fresh };
+    detail.name = preserveCachedProfile
+      ? (fromCache.name || fromFacet.name || fromVideo.name || authorNameFromFilter(filter))
+      : (fromFacet.name || fromVideo.name || fromCache.name || authorNameFromFilter(filter));
+    if (state.shortVideo.source === "all" && Number.isFinite(Number(data.total))) {
+      detail.count = Math.max(0, Number(data.total));
+    }
+    if (detail.secUid || detail.name) {
+      state.shortVideo.authorDetail = { ...detail };
+    }
+    return detail;
   }
 
   function shortVideoAuthorFilterValue(author = {}) {
@@ -4177,6 +4224,9 @@ export function createShortVideoPage(deps) {
       if (authorFollowKey({}, item) !== authorKey) continue;
       item.following = Boolean(following);
     }
+    if (state.shortVideo?.authorDetail && authorFollowKey({}, state.shortVideo.authorDetail) === authorKey) {
+      state.shortVideo.authorDetail.following = Boolean(following);
+    }
     const buttons = els.workGrid?.querySelectorAll?.("[data-author-follow-key]") || [];
     for (const followButton of buttons) {
       if (String(followButton.dataset.authorFollowKey || "") !== authorKey) continue;
@@ -6443,6 +6493,10 @@ export function createShortVideoPage(deps) {
   function setBodyClass() {
     document.body.classList.toggle("short-video-view", state.activeView === "shortVideos");
     document.body.classList.toggle("short-video-browser-active", state.activeView === "shortVideos" && Boolean(state.shortVideo?.current));
+    document.body.classList.toggle(
+      "short-video-author-page-active",
+      state.activeView === "shortVideos" && isShortVideoAuthorDetailPage() && !state.shortVideo?.current
+    );
   }
 
   function showError(error) {

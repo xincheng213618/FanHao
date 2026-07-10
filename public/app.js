@@ -6,12 +6,12 @@ import { createPeoplePage } from "./modules/fanhao/people-page.js?v=20260710-mod
 import { createPersonProfile } from "./modules/fanhao/person-profile.js?v=20260710-module-registry-01";
 import { createRankingPage } from "./modules/fanhao/ranking-page.js?v=20260710-module-registry-01";
 import { createWorkDetailPage } from "./modules/fanhao/work-detail-page.js?v=20260710-module-registry-01";
-import { createMusicPage } from "./modules/music/music-page.js?v=20260710-music-qq-desktop-02";
+import { createMusicPage } from "./modules/music/music-page.js?v=20260710-music-qq-desktop-06";
 import { createNovelPage } from "./modules/novels/novel-page.js?v=20260710-module-registry-01";
 import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20260710-short-video-search-01";
 import { createAdminModal } from "./modules/system/admin-modal.js?v=20260710-module-registry-01";
 import { createToolsPage } from "./modules/tools/tools-page.js?v=20260710-module-registry-01";
-import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260710-fanhao-sidebar-01";
+import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260710-fanhao-sidebar-music-home-01";
 
 prepareAppShell();
 
@@ -146,7 +146,7 @@ const state = {
   },
   music: {
     query: "",
-    mode: "library",
+    mode: "home",
     artistId: "all",
     albumId: "all",
     genre: "all",
@@ -627,7 +627,7 @@ function currentRouteSnapshot(overrides = {}) {
     musicArtistId: state.activeView === "music" && state.music.artistId !== "all" ? state.music.artistId || "" : "",
     musicAlbumId: state.activeView === "music" && state.music.albumId !== "all" ? state.music.albumId || "" : "",
     musicGenre: state.activeView === "music" && state.music.genre !== "all" ? state.music.genre || "" : "",
-    musicMode: state.activeView === "music" ? state.music.mode || "library" : "library",
+    musicMode: state.activeView === "music" ? state.music.mode || "home" : "library",
     musicPlaylistId: state.activeView === "music" && state.music.mode === "playlist" ? state.music.activePlaylistId || "" : "",
     musicSmartId: state.activeView === "music" && state.music.mode === "smart" ? state.music.activeSmartPlaylistId || "" : "",
     musicQuery: state.activeView === "music" ? state.music.query || "" : "",

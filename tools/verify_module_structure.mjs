@@ -68,6 +68,45 @@ for (const [link] of fallbackModuleLinks) {
   assert(link.includes('rel="noopener"'), `fallback Web module link must isolate the opener: ${link}`);
 }
 
+const webStylePaths = [
+  "css/foundation.css",
+  "modules/novels/styles.css",
+  "css/shell.css",
+  "modules/fanhao/styles.css",
+  "modules/content-index/styles.css",
+  "modules/tools/styles.css",
+  "modules/fanhao/work-cards.css",
+  "modules/system/admin.css",
+  "css/player.css",
+  "css/responsive.css",
+  "modules/short-videos/styles/list.css",
+  "modules/short-videos/styles/viewer.css",
+  "modules/short-videos/styles/panels.css",
+  "modules/short-videos/styles/responsive.css",
+  "modules/music/styles/foundation.css",
+  "modules/music/styles/library.css",
+  "modules/music/styles/player.css",
+  "modules/music/styles/responsive.css"
+];
+const webStyleEntrySource = fs.readFileSync(path.join(root, "public", "styles.css"), "utf8");
+const webStyleImports = [...webStyleEntrySource.matchAll(/@import\s+["'](\.\/[^"'?]+)(?:\?[^"']*)?["'];/g)]
+  .map((match) => match[1]);
+assert.deepEqual(
+  webStyleImports,
+  webStylePaths.map((relativePath) => `./${relativePath}`),
+  "Web CSS entry imports must preserve the modular cascade order"
+);
+assert(
+  !fs.statSync(path.join(root, "public", "css", "legacy.css"), { throwIfNoEntry: false }),
+  "legacy Web CSS bundle must not return"
+);
+for (const relativePath of webStylePaths) {
+  const filePath = path.join(root, "public", relativePath);
+  assert(fs.statSync(filePath, { throwIfNoEntry: false })?.isFile(), `missing Web CSS module: ${relativePath}`);
+  const lineCount = fs.readFileSync(filePath, "utf8").split(/\r?\n/).length;
+  assert(lineCount <= 4000, `Web CSS module is too large (${lineCount} lines): public/${relativePath}`);
+}
+
 const shortVideoClientDir = path.join(root, "android-client", "www", "modules", "short-videos");
 const requiredShortVideoParts = [
   "api.js",
