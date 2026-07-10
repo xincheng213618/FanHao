@@ -13,8 +13,53 @@ const DEFAULT_COVER_GENERATE_LIMIT = 0;
 const DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT = 50000;
 const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
 const DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION = "1";
+const SHORT_VIDEO_TOPIC_INDEX_VERSION = "1";
+const SHORT_VIDEO_SOUND_INDEX_VERSION = "1";
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LOCAL_SHORT_VIDEO_USER_ID = "local:self";
+const IMPORTED_SHORT_VIDEO_ACTION_SOURCES = new Set(["imported", "download_manager"]);
+const SHORT_VIDEO_MEDIA_TYPE_SQL = `CASE
+  WHEN LOWER(COALESCE(json_extract(v.metadata_json, '$.fanhaoMedia.type'), json_extract(v.metadata_json, '$.media_type'), '')) = 'gallery'
+    THEN 'gallery'
+  ELSE 'video'
+END`;
+const SHORT_VIDEO_RECOMMENDATION_SCORE_SQL = `(
+  CASE
+    WHEN COALESCE(user_follow.active, 0) = 1 THEN 8000000000000
+    ELSE 0
+  END
+  + CASE
+    WHEN (
+      COALESCE(s.digg_count, v.digg_count, 0)
+      + COALESCE(s.comment_count, v.comment_count, 0) * 6
+      + COALESCE(s.collect_count, v.collect_count, 0) * 4
+      + COALESCE(s.share_count, v.share_count, 0) * 3
+    ) >= 1000000 THEN 5000000000000
+    WHEN (
+      COALESCE(s.digg_count, v.digg_count, 0)
+      + COALESCE(s.comment_count, v.comment_count, 0) * 6
+      + COALESCE(s.collect_count, v.collect_count, 0) * 4
+      + COALESCE(s.share_count, v.share_count, 0) * 3
+    ) >= 100000 THEN 4000000000000
+    WHEN (
+      COALESCE(s.digg_count, v.digg_count, 0)
+      + COALESCE(s.comment_count, v.comment_count, 0) * 6
+      + COALESCE(s.collect_count, v.collect_count, 0) * 4
+      + COALESCE(s.share_count, v.share_count, 0) * 3
+    ) >= 10000 THEN 3000000000000
+    WHEN (
+      COALESCE(s.digg_count, v.digg_count, 0)
+      + COALESCE(s.comment_count, v.comment_count, 0) * 6
+      + COALESCE(s.collect_count, v.collect_count, 0) * 4
+      + COALESCE(s.share_count, v.share_count, 0) * 3
+    ) >= 1000 THEN 2000000000000
+    ELSE 1000000000000
+  END
+  + (
+    ABS(CAST(SUBSTR(v.id, -9) AS INTEGER) * 1103515245 + 12345) % 1000000000
+  ) * 1000
+  + COALESCE(v.create_time, 0)
+)`;
 const LIST_VIDEO_COLUMNS = [
   "id",
   "aweme_id",
@@ -43,6 +88,7 @@ const LIST_VIDEO_COLUMNS = [
   "author_age",
   "author_verification",
   "author_profile_collected_at",
+  "author_following",
   "published_at",
   "liked_at",
   "duration_ms",
@@ -53,8 +99,27 @@ const LIST_VIDEO_COLUMNS = [
   "collect_count",
   "share_count",
   "play_count",
+  "user_like_active",
+  "user_like_source",
+  "user_collect_active",
+  "user_collect_source",
+  "user_dislike_active",
+  "user_dislike_source",
+  "recommendation_score",
+  "recommendation_author_rank",
+  "recommendation_order_score",
+  "watch_progress_ms",
+  "watch_completed_count",
+  "last_watched_at",
   "share_url",
   "metadata_json",
+  "sound_key",
+  "sound_id",
+  "sound_title",
+  "sound_author",
+  "sound_cover_url",
+  "sound_preview_url",
+  "sound_local_available",
   "source_path",
   "cover_path",
   "cover_source",
@@ -94,6 +159,7 @@ export function createShortVideoStore(options = {}) {
     catalogCache.key = null;
     catalogCache.summary = null;
     catalogCache.authors = null;
+    recommendationCache = { key: "", ids: [] };
   }
 
   // 列表的 summary() 与 authorFacet() 每次分页都会重算（聚合 + GROUP BY），
@@ -101,6 +167,8 @@ export function createShortVideoStore(options = {}) {
   // 用 scanned_at + download_manager_imported_at 两个 meta 戳做缓存键：
   // scan 写入 scanned_at、import 写入 download_manager_imported_at，自动失效，零额外查询。
   const catalogCache = { key: null, summary: null, authors: null };
+  let recommendationRevision = 0;
+  let recommendationCache = { key: "", ids: [] };
   function ensureCatalogCacheKey(key) {
     if (catalogCache.key === key) return;
     catalogCache.key = key;
@@ -128,12 +196,169 @@ export function createShortVideoStore(options = {}) {
     return result;
   }
 
+  function recommendedVideoIds(database, filter = {}) {
+    const cacheKey = `${catalogStamp()}::${recommendationRevision}::${filter.q || ""}::${filter.topic || ""}::${filter.sound || ""}::${filter.author || "all"}::${filter.media || "all"}`;
+    if (recommendationCache.key === cacheKey) return recommendationCache.ids;
+    const where = [
+      "v.visibility = 'local_only'",
+      "COALESCE(user_dislike.active, 0) = 0"
+    ];
+    const args = [];
+    if (filter.q) {
+      const like = `%${escapeLike(filter.q)}%`;
+      where.push(`(
+        v.title LIKE ? ESCAPE '\\' OR
+        v.description LIKE ? ESCAPE '\\' OR
+        v.author_name LIKE ? ESCAPE '\\' OR
+        v.aweme_id LIKE ? ESCAPE '\\' OR
+        v.tags_text LIKE ? ESCAPE '\\'
+      )`);
+      args.push(like, like, like, like, like);
+    }
+    if (filter.topic) {
+      where.push("v.id IN (SELECT video_id FROM short_video_topics WHERE topic_key = LOWER(?))");
+      args.push(filter.topic);
+    }
+    if (filter.soundKey) {
+      where.push("v.id IN (SELECT video_id FROM short_video_sounds WHERE sound_key = ?)");
+      args.push(filter.soundKey);
+    }
+    if (filter.author && filter.author !== "all") {
+      if (filter.author.startsWith("name:")) {
+        where.push("v.author_name = ?");
+        args.push(filter.author.slice(5));
+      } else {
+        where.push("v.author_sec_uid = ?");
+        args.push(filter.author);
+      }
+    }
+    if (filter.media && filter.media !== "all") {
+      where.push(`${SHORT_VIDEO_MEDIA_TYPE_SQL} = ?`);
+      args.push(filter.media);
+    }
+    const rows = database.prepare(`
+      SELECT
+        v.id,
+        MAX(${SHORT_VIDEO_RECOMMENDATION_SCORE_SQL}) AS recommendation_group_score
+      FROM short_videos v
+      LEFT JOIN short_video_stats s ON s.video_id = v.id
+      LEFT JOIN short_video_follows user_follow
+        ON user_follow.target_user_id = v.owner_user_id
+       AND user_follow.local_user_id = '${LOCAL_SHORT_VIDEO_USER_ID}'
+      LEFT JOIN short_video_user_actions user_dislike
+        ON user_dislike.video_id = v.id
+       AND user_dislike.local_user_id = '${LOCAL_SHORT_VIDEO_USER_ID}'
+       AND user_dislike.action_type = 'dislike'
+      WHERE ${where.join(" AND ")}
+      GROUP BY COALESCE(NULLIF(v.owner_user_id, ''), NULLIF(v.author_sec_uid, ''), NULLIF(v.author_name, ''), v.id)
+      ORDER BY recommendation_group_score DESC, v.published_at DESC, v.id DESC
+    `).all(...args);
+    recommendationCache = {
+      key: cacheKey,
+      ids: rows.map((row) => String(row.id || "")).filter(Boolean)
+    };
+    return recommendationCache.ids;
+  }
+
+  function invalidateRecommendationCache() {
+    recommendationRevision += 1;
+    recommendationCache = { key: "", ids: [] };
+  }
+
+  function recommendedAdjacentRow(database, row, direction, includeAllColumns, filter, fallbackOrder) {
+    const ids = recommendedVideoIds(database, filter);
+    const currentIndex = ids.indexOf(String(row?.id || ""));
+    if (currentIndex < 0) {
+      return adjacentRow(database, row, direction, fallbackOrder, includeAllColumns, filter);
+    }
+    const targetId = ids[currentIndex + (direction > 0 ? 1 : -1)];
+    if (!targetId) return null;
+    const select = includeAllColumns ? "*" : "id";
+    return database.prepare(`SELECT ${select} FROM short_video_catalog WHERE id = ?`).get(targetId) || null;
+  }
+
   function facets() {
     const database = databaseOrOpen();
     return {
       summary: cachedSummary(),
       authors: cachedAuthorFacet(database)
     };
+  }
+
+  function searchSuggestions(urlOrOptions = {}) {
+    const params = urlOrOptions?.searchParams || new URLSearchParams();
+    const query = String(params.get("q") || params.get("search") || "").trim().slice(0, 120);
+    const media = normalizeMediaFilter(params.get("media") || params.get("type"));
+    const limit = clampInt(params.get("limit"), 8, 1, 12);
+    if (!query) return { query, media, suggestions: [] };
+    const database = databaseOrOpen();
+    const like = `%${escapeLike(query)}%`;
+    const mediaWhere = media === "all" ? "" : `AND ${SHORT_VIDEO_MEDIA_TYPE_SQL} = ?`;
+    const mediaArgs = media === "all" ? [] : [media];
+    const authorRows = database.prepare(`
+      SELECT author_name AS label, COUNT(*) AS count
+      FROM short_videos v
+      WHERE v.visibility = 'local_only'
+        AND COALESCE(v.author_name, '') <> ''
+        AND v.author_name LIKE ? ESCAPE '\\'
+        ${mediaWhere}
+      GROUP BY v.author_name
+      ORDER BY count DESC, v.author_name ASC
+      LIMIT ?
+    `).all(like, ...mediaArgs, limit);
+    const tagRows = database.prepare(`
+      SELECT tags_json
+      FROM short_videos v
+      WHERE v.visibility = 'local_only'
+        AND v.tags_text LIKE ? ESCAPE '\\'
+        ${mediaWhere}
+      ORDER BY v.published_at DESC, v.id DESC
+      LIMIT 160
+    `).all(like, ...mediaArgs);
+    const titleRows = database.prepare(`
+      SELECT title, author_name
+      FROM short_videos v
+      WHERE v.visibility = 'local_only'
+        AND COALESCE(v.title, '') <> ''
+        AND v.title LIKE ? ESCAPE '\\'
+        ${mediaWhere}
+      ORDER BY v.published_at DESC, v.id DESC
+      LIMIT ?
+    `).all(like, ...mediaArgs, limit * 2);
+    const suggestions = [];
+    const seen = new Set();
+    const append = (item) => {
+      const value = String(item?.query || item?.label || "").trim();
+      const key = value.toLocaleLowerCase();
+      if (!value || seen.has(key) || suggestions.length >= limit) return;
+      seen.add(key);
+      suggestions.push({ ...item, query: value });
+    };
+    for (const row of authorRows) {
+      append({ kind: "author", label: row.label, query: row.label, detail: `${formatSuggestionCount(row.count)} 条作品` });
+    }
+    const tagCounts = new Map();
+    const normalizedQuery = query.toLocaleLowerCase();
+    for (const row of tagRows) {
+      for (const tag of recommendationTagList(row.tags_json)) {
+        const label = String(tag || "").replace(/^#/, "").trim();
+        if (!label || !label.toLocaleLowerCase().includes(normalizedQuery)) continue;
+        tagCounts.set(label, (tagCounts.get(label) || 0) + 1);
+      }
+    }
+    for (const [label, count] of [...tagCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "zh-CN"))) {
+      append({ kind: "tag", label: `#${label}`, query: label, detail: `${formatSuggestionCount(count)} 条相关作品` });
+    }
+    for (const row of titleRows) {
+      const title = String(row.title || "").trim();
+      append({
+        kind: "title",
+        label: title.length > 56 ? `${title.slice(0, 56)}…` : title,
+        query: title,
+        detail: row.author_name ? `@${row.author_name}` : "作品"
+      });
+    }
+    return { query, media, suggestions };
   }
 
 function summary() {
@@ -144,14 +369,14 @@ function summary() {
       COUNT(DISTINCT COALESCE(NULLIF(author_sec_uid, ''), NULLIF(author_name, ''), 'unknown')) AS authors,
       COALESCE(SUM(size_bytes), 0) AS bytes,
       COALESCE(SUM(duration_ms), 0) AS durationMs
-    FROM short_video_catalog
+    FROM short_videos
     WHERE visibility = 'local_only'
   `).get();
     const scannedAt = metaValue(database, "scanned_at");
     const sourceRoot = metaValue(database, "source_root");
     const authorRows = database.prepare(`
       SELECT author_sec_uid, author_name, COUNT(*) AS count
-      FROM short_video_catalog
+      FROM short_videos
       WHERE visibility = 'local_only'
       GROUP BY author_sec_uid, author_name
       ORDER BY count DESC, author_name COLLATE NOCASE
@@ -179,13 +404,17 @@ function summary() {
   function listVideos(urlOrOptions = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const filter = videoFilter(params);
-    const sort = normalizeSort(params.get("sort"));
+    const requestedSort = normalizeSort(params.get("sort"));
+    const sort = filter.source === "recommended" && !params.has("sort") ? "recommended" : requestedSort;
     const limit = clampInt(params.get("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
     const offset = clampInt(params.get("offset"), 0, 0, 1000000);
     const includeFacets = params.get("facets") !== "0";
+    const includeStats = params.get("stats") !== "0";
     const where = filter.where ? `WHERE ${filter.where}` : "";
     const orderBy = {
+      recommended: "recommendation_order_score DESC, published_at DESC",
       liked: "liked_at DESC, mtime_ms DESC",
+      watched: "last_watched_at DESC, published_at DESC",
       published: "published_at DESC, liked_at DESC",
       publishedAsc: "COALESCE(NULLIF(published_at, ''), '9999-12-31T23:59:59.999Z') ASC, liked_at ASC",
       likes: "digg_count DESC, liked_at DESC",
@@ -194,15 +423,35 @@ function summary() {
       duration: "duration_ms DESC, liked_at DESC"
     }[sort] || "published_at DESC, liked_at DESC";
     const database = databaseOrOpen();
-    const total = database.prepare(`SELECT COUNT(*) AS count FROM short_video_catalog ${where}`).get(...filter.args)?.count || 0;
-    const stats = videoStats(database, where, filter.args);
-    const rows = database.prepare(`
-      SELECT ${LIST_VIDEO_COLUMNS}
-      FROM short_video_catalog
-      ${where}
-      ORDER BY ${orderBy}, id DESC
-      LIMIT ? OFFSET ?
-    `).all(...filter.args, limit, offset);
+    const recommendationIds = filter.source === "recommended" ? recommendedVideoIds(database, filter) : null;
+    const total = recommendationIds
+      ? recommendationIds.length
+      : database.prepare(`SELECT COUNT(*) AS count FROM short_video_catalog ${where}`).get(...filter.args)?.count || 0;
+    const stats = !includeStats || recommendationIds ? null : videoStats(database, where, filter.args);
+    let rows;
+    if (recommendationIds) {
+      const pageIds = recommendationIds.slice(offset, offset + limit);
+      if (!pageIds.length) {
+        rows = [];
+      } else {
+        const placeholders = pageIds.map(() => "?").join(", ");
+        const fetched = database.prepare(`
+          SELECT ${LIST_VIDEO_COLUMNS}
+          FROM short_video_catalog
+          WHERE id IN (${placeholders})
+        `).all(...pageIds);
+        const byId = new Map(fetched.map((row) => [String(row.id || ""), row]));
+        rows = pageIds.map((id) => byId.get(id)).filter(Boolean);
+      }
+    } else {
+      rows = database.prepare(`
+          SELECT ${LIST_VIDEO_COLUMNS}
+          FROM short_video_catalog
+          ${where}
+          ORDER BY ${orderBy}, id DESC
+          LIMIT ? OFFSET ?
+        `).all(...filter.args, limit, offset);
+    }
     ensureGeneratedCovers(database, rows, coverGenerateLimit);
     return {
       summary: includeFacets ? cachedSummary() : null,
@@ -211,7 +460,10 @@ function summary() {
       offset,
       hasMore: offset + rows.length < Number(total || 0),
       query: filter.q,
+      topic: filter.topic,
+      sound: filter.sound,
       author: filter.author,
+      media: filter.media,
       source: filter.source,
       sort,
       stats,
@@ -226,8 +478,13 @@ function summary() {
     if (!row) return null;
     const order = adjacentOrder(urlOrOptions);
     const filter = videoFilter(urlOrOptions?.searchParams || new URLSearchParams());
-    const prev = adjacentRow(database, row, -1, order, false, filter);
-    const next = adjacentRow(database, row, 1, order, false, filter);
+    const recommended = filter.source === "recommended";
+    const prev = recommended
+      ? recommendedAdjacentRow(database, row, -1, false, filter, order)
+      : adjacentRow(database, row, -1, order, false, filter);
+    const next = recommended
+      ? recommendedAdjacentRow(database, row, 1, false, filter, order)
+      : adjacentRow(database, row, 1, order, false, filter);
     return {
       video: publicVideo(row, { detail: true }),
       prevId: prev?.id || "",
@@ -241,8 +498,355 @@ function summary() {
     if (!current) return null;
     const fullCurrent = database.prepare("SELECT * FROM short_video_catalog WHERE id = ?").get(current.id);
     const filter = videoFilter(urlOrOptions?.searchParams || new URLSearchParams());
-    const row = adjacentRow(database, fullCurrent, direction, adjacentOrder(urlOrOptions), true, filter);
-    return row ? publicVideo(row, { detail: true }) : null;
+    const order = adjacentOrder(urlOrOptions);
+    const adjacent = filter.source === "recommended"
+      ? recommendedAdjacentRow(database, fullCurrent, direction, false, filter, order)
+      : adjacentRow(database, fullCurrent, direction, order, false, filter);
+    if (!adjacent?.id) return null;
+    const row = database.prepare("SELECT * FROM short_video_catalog WHERE id = ?").get(adjacent.id);
+    return row ? publicVideo(row) : null;
+  }
+
+  function relatedVideos(id, urlOrOptions = {}) {
+    const database = databaseOrOpen();
+    const current = videoCatalogRowByAnyId(database, id);
+    if (!current) return null;
+    const params = urlOrOptions?.searchParams || new URLSearchParams();
+    const limit = clampInt(params.get("limit"), 24, 1, 72);
+    const currentTags = recommendationTagList(current.tags_json).slice(0, 8);
+    const currentTagMap = new Map(currentTags.map((tag) => [tag.toLocaleLowerCase(), tag]));
+    const authorSecUid = String(current.author_sec_uid || "").trim();
+    const authorName = String(current.author_name || "").trim();
+    const affinity = [];
+    const affinityArgs = [];
+    if (authorSecUid) {
+      affinity.push("author_sec_uid = ?");
+      affinityArgs.push(authorSecUid);
+    } else if (authorName && authorName !== "未知作者") {
+      affinity.push("author_name = ?");
+      affinityArgs.push(authorName);
+    }
+    for (const tag of currentTags) {
+      affinity.push("tags_text LIKE ? ESCAPE '\\'");
+      affinityArgs.push(`%${escapeLike(tag)}%`);
+    }
+
+    const candidateLimit = Math.min(720, Math.max(144, limit * 14));
+    let candidates = [];
+    if (affinity.length) {
+      candidates = database.prepare(`
+        SELECT ${LIST_VIDEO_COLUMNS}
+        FROM short_video_catalog
+        WHERE visibility = 'local_only'
+          AND id <> ?
+          AND (${affinity.join(" OR ")})
+        ORDER BY published_at DESC, liked_at DESC, id DESC
+        LIMIT ?
+      `).all(current.id, ...affinityArgs, candidateLimit);
+    }
+
+    const seen = new Set(candidates.map((item) => String(item.id || "")));
+    if (candidates.length < Math.min(candidateLimit, limit * 4)) {
+      const fallback = database.prepare(`
+        SELECT ${LIST_VIDEO_COLUMNS}
+        FROM short_video_catalog
+        WHERE visibility = 'local_only'
+          AND id <> ?
+        ORDER BY
+          COALESCE(digg_count, 0) DESC,
+          COALESCE(comment_count, 0) DESC,
+          published_at DESC,
+          id DESC
+        LIMIT ?
+      `).all(current.id, Math.max(120, limit * 5));
+      for (const item of fallback) {
+        const candidateId = String(item.id || "");
+        if (!candidateId || seen.has(candidateId)) continue;
+        seen.add(candidateId);
+        candidates.push(item);
+      }
+    }
+
+    const currentAuthorKey = shortVideoRecommendationAuthorKey(current);
+    const currentMediaType = publicVideoMedia(current, parseJsonObject(current.metadata_json)).type;
+    const scored = candidates.map((candidate) => {
+      const candidateTags = recommendationTagList(candidate.tags_json);
+      const sharedTags = [];
+      const sharedSeen = new Set();
+      for (const tag of candidateTags) {
+        const normalized = tag.toLocaleLowerCase();
+        if (!currentTagMap.has(normalized) || sharedSeen.has(normalized)) continue;
+        sharedSeen.add(normalized);
+        sharedTags.push(currentTagMap.get(normalized));
+      }
+      const sameAuthor = Boolean(currentAuthorKey && currentAuthorKey === shortVideoRecommendationAuthorKey(candidate));
+      const candidateMediaType = publicVideoMedia(candidate, parseJsonObject(candidate.metadata_json)).type;
+      const engagement = Math.max(0,
+        Number(candidate.digg_count || 0)
+        + Number(candidate.comment_count || 0) * 2
+        + Number(candidate.collect_count || 0)
+      );
+      const score = sharedTags.length * 36
+        + (sameAuthor ? 12 : 0)
+        + (candidateMediaType === currentMediaType ? 3 : 0)
+        + Math.log10(engagement + 2) * 2.4;
+      const reason = sharedTags.length
+        ? `共同话题 #${sharedTags[0]}${sharedTags.length > 1 ? ` 等 ${sharedTags.length} 个` : ""}`
+        : (sameAuthor ? "同一作者" : "本地高赞");
+      return { candidate, score, sharedTags, sameAuthor, reason };
+    }).sort((left, right) => (
+      right.score - left.score
+      || Number(right.candidate.digg_count || 0) - Number(left.candidate.digg_count || 0)
+      || String(right.candidate.published_at || "").localeCompare(String(left.candidate.published_at || ""))
+    ));
+
+    const selected = [];
+    const selectedIds = new Set();
+    const authorCounts = new Map();
+    for (const item of scored) {
+      if (selected.length >= limit) break;
+      const candidateId = String(item.candidate.id || "");
+      const authorKey = shortVideoRecommendationAuthorKey(item.candidate) || `video:${candidateId}`;
+      if (!candidateId || selectedIds.has(candidateId) || Number(authorCounts.get(authorKey) || 0) >= 3) continue;
+      selected.push(item);
+      selectedIds.add(candidateId);
+      authorCounts.set(authorKey, Number(authorCounts.get(authorKey) || 0) + 1);
+    }
+    for (const item of scored) {
+      if (selected.length >= limit) break;
+      const candidateId = String(item.candidate.id || "");
+      if (!candidateId || selectedIds.has(candidateId)) continue;
+      selected.push(item);
+      selectedIds.add(candidateId);
+    }
+
+    return {
+      video: publicVideo(current),
+      basis: {
+        tags: currentTags,
+        author: authorName || "未知作者"
+      },
+      total: selected.length,
+      videos: selected.map((item) => ({
+        ...publicVideo(item.candidate),
+        recommendation: {
+          score: Number(item.score.toFixed(2)),
+          reason: item.reason,
+          sharedTags: item.sharedTags,
+          sameAuthor: item.sameAuthor
+        }
+      }))
+    };
+  }
+
+  function setUserAction(id, actionType, options = {}) {
+    const database = databaseOrOpen();
+    const type = String(actionType || "").trim().toLowerCase();
+    if (!new Set(["like", "collect", "dislike"]).has(type)) {
+      const error = new Error("不支持的短视频互动类型");
+      error.statusCode = 400;
+      throw error;
+    }
+    const currentVideo = videoCatalogRowByAnyId(database, id, "id");
+    if (!currentVideo?.id) {
+      const error = new Error("短视频不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    const existing = database.prepare(`
+      SELECT active, source, acted_at
+      FROM short_video_user_actions
+      WHERE local_user_id = ? AND video_id = ? AND action_type = ?
+    `).get(LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id, type);
+    const active = Object.prototype.hasOwnProperty.call(options || {}, "active")
+      ? Boolean(options.active)
+      : !Boolean(existing?.active);
+    const now = new Date().toISOString();
+    const source = String(existing?.source || "").trim() || "local_web";
+    database.prepare(`
+      INSERT INTO short_video_user_actions (
+        local_user_id, video_id, action_type, active, source, acted_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(local_user_id, video_id, action_type) DO UPDATE SET
+        active = excluded.active,
+        source = CASE
+          WHEN COALESCE(short_video_user_actions.source, '') = '' THEN excluded.source
+          ELSE short_video_user_actions.source
+        END,
+        acted_at = excluded.acted_at,
+        updated_at = excluded.updated_at
+    `).run(LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id, type, active ? 1 : 0, source, now, now);
+    if (type === "dislike") invalidateRecommendationCache();
+    const updated = videoCatalogRowByAnyId(database, currentVideo.id);
+    return {
+      ok: true,
+      videoId: currentVideo.id,
+      actionType: type,
+      active,
+      video: publicVideo(updated, { detail: true })
+    };
+  }
+
+  function setAuthorFollow(id, options = {}) {
+    const database = databaseOrOpen();
+    const currentVideo = videoCatalogRowByAnyId(database, id, "id, owner_user_id, author_sec_uid, author_name");
+    if (!currentVideo?.id) {
+      const error = new Error("短视频不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    const targetUserId = String(currentVideo.owner_user_id || "").trim();
+    if (!targetUserId) {
+      const error = new Error("当前作品没有可关注的作者资料");
+      error.statusCode = 400;
+      throw error;
+    }
+    const existing = database.prepare(`
+      SELECT active, followed_at
+      FROM short_video_follows
+      WHERE local_user_id = ? AND target_user_id = ?
+    `).get(LOCAL_SHORT_VIDEO_USER_ID, targetUserId);
+    const active = Object.prototype.hasOwnProperty.call(options || {}, "active")
+      ? Boolean(options.active)
+      : !Boolean(existing?.active);
+    const now = new Date().toISOString();
+    database.prepare(`
+      INSERT INTO short_video_follows (
+        local_user_id, target_user_id, active, followed_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(local_user_id, target_user_id) DO UPDATE SET
+        active = excluded.active,
+        followed_at = CASE
+          WHEN excluded.active = 1 THEN excluded.followed_at
+          ELSE short_video_follows.followed_at
+        END,
+        updated_at = excluded.updated_at
+    `).run(LOCAL_SHORT_VIDEO_USER_ID, targetUserId, active ? 1 : 0, active ? now : (existing?.followed_at || ""), now);
+    catalogCache.authors = null;
+    invalidateRecommendationCache();
+    const updated = videoCatalogRowByAnyId(database, currentVideo.id);
+    return {
+      ok: true,
+      videoId: currentVideo.id,
+      targetUserId,
+      active,
+      video: publicVideo(updated, { detail: true })
+    };
+  }
+
+  function recordWatch(id, options = {}) {
+    const database = databaseOrOpen();
+    const currentVideo = videoCatalogRowByAnyId(database, id, "id, duration_ms");
+    if (!currentVideo?.id) {
+      const error = new Error("短视频不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    const rawDurationMs = Number(currentVideo.duration_ms || 0);
+    const rawProgressMs = Number(options.progressMs || 0);
+    const durationMs = Number.isFinite(rawDurationMs) ? Math.max(0, rawDurationMs) : 0;
+    const requestedProgress = Number.isFinite(rawProgressMs) ? Math.max(0, rawProgressMs) : 0;
+    const progressMs = Math.round(durationMs > 0 ? Math.min(durationMs, requestedProgress) : requestedProgress);
+    const completed = options.completed === true
+      || (durationMs > 0 && progressMs >= Math.max(1000, durationMs - 1000));
+    const now = new Date().toISOString();
+    database.prepare(`
+      INSERT INTO short_video_watch_history (
+        local_user_id, video_id, progress_ms, completed_count, last_watched_at
+      )
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(local_user_id, video_id) DO UPDATE SET
+        progress_ms = excluded.progress_ms,
+        completed_count = CASE
+          WHEN excluded.completed_count > 0 THEN MAX(short_video_watch_history.completed_count, 1)
+          ELSE short_video_watch_history.completed_count
+        END,
+        last_watched_at = excluded.last_watched_at
+    `).run(LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id, progressMs, completed ? 1 : 0, now);
+    const updated = videoCatalogRowByAnyId(database, currentVideo.id);
+    return {
+      ok: true,
+      videoId: currentVideo.id,
+      progressMs,
+      completed,
+      watchedAt: now,
+      video: publicVideo(updated, { detail: true })
+    };
+  }
+
+  function localComments(id) {
+    const database = databaseOrOpen();
+    const currentVideo = videoCatalogRowByAnyId(database, id, "id");
+    if (!currentVideo?.id) return null;
+    const rows = database.prepare(`
+      SELECT id, body, created_at, updated_at
+      FROM short_video_local_comments
+      WHERE local_user_id = ? AND video_id = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT 200
+    `).all(LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id);
+    return {
+      videoId: currentVideo.id,
+      total: rows.length,
+      comments: rows.map(publicLocalComment)
+    };
+  }
+
+  function createLocalComment(id, options = {}) {
+    const database = databaseOrOpen();
+    const currentVideo = videoCatalogRowByAnyId(database, id, "id");
+    if (!currentVideo?.id) {
+      const error = new Error("短视频不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    const body = normalizeLocalCommentBody(options.body ?? options.text);
+    if (!body) {
+      const error = new Error("请输入评论内容");
+      error.statusCode = 400;
+      throw error;
+    }
+    const commentId = `local:${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+    database.prepare(`
+      INSERT INTO short_video_local_comments (
+        id, local_user_id, video_id, body, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(commentId, LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id, body, now, now);
+    return {
+      ok: true,
+      videoId: currentVideo.id,
+      comment: publicLocalComment({ id: commentId, body, created_at: now, updated_at: now }),
+      ...localComments(currentVideo.id)
+    };
+  }
+
+  function deleteLocalComment(id, commentId) {
+    const database = databaseOrOpen();
+    const currentVideo = videoCatalogRowByAnyId(database, id, "id");
+    if (!currentVideo?.id) {
+      const error = new Error("短视频不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    const normalizedCommentId = String(commentId || "").trim();
+    const result = database.prepare(`
+      DELETE FROM short_video_local_comments
+      WHERE id = ? AND local_user_id = ? AND video_id = ?
+    `).run(normalizedCommentId, LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id);
+    if (!Number(result.changes || 0)) {
+      const error = new Error("本地评论不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    return {
+      ok: true,
+      deletedId: normalizedCommentId,
+      ...localComments(currentVideo.id)
+    };
   }
 
   function deleteVideo(id, options = {}) {
@@ -404,6 +1008,7 @@ function summary() {
       "short_video_user_actions",
       "short_video_collection_items",
       "short_video_watch_history",
+      "short_video_local_comments",
       "short_video_import_items"
     ]) {
       database.prepare(`DELETE FROM ${table} WHERE video_id IN (${placeholders})`).run(...ids);
@@ -529,6 +1134,11 @@ function summary() {
       return { id: row.id || id, path: path.resolve(row.source_path), type: "video", ext: path.extname(row.source_path).toLowerCase() };
     }
     return fileFromRow(row, "video");
+  }
+
+  function musicFile(id) {
+    const row = videoCatalogRowByAnyId(databaseOrOpen(), id, "id, music_path");
+    return safeStoredFile(row?.music_path || "", "audio", row?.id || id);
   }
 
   function galleryFile(id, index = 0) {
@@ -1169,12 +1779,34 @@ function summary() {
     galleryFile,
     importDownloadManagerDb,
     listVideos,
+    localComments,
+    createLocalComment,
+    deleteLocalComment,
+    musicFile,
+    relatedVideos,
+    recordWatch,
     roots,
     scan,
+    searchSuggestions,
+    setAuthorFollow,
+    setUserAction,
     summary: cachedSummary,
     videoDetail,
     videoFile
   };
+}
+
+function publicLocalComment(row = {}) {
+  return {
+    id: String(row.id || ""),
+    body: String(row.body || ""),
+    createdAt: String(row.created_at || ""),
+    updatedAt: String(row.updated_at || row.created_at || "")
+  };
+}
+
+function normalizeLocalCommentBody(value) {
+  return Array.from(String(value || "").trim()).slice(0, 500).join("");
 }
 
 function ensureSchema(db, coverCacheDir = "") {
@@ -1327,6 +1959,16 @@ function ensureSchema(db, coverCacheDir = "") {
       PRIMARY KEY(local_user_id, video_id)
     );
     CREATE INDEX IF NOT EXISTS idx_short_video_watch_history_recent ON short_video_watch_history(local_user_id, last_watched_at);
+    CREATE TABLE IF NOT EXISTS short_video_local_comments (
+      id TEXT PRIMARY KEY,
+      local_user_id TEXT NOT NULL,
+      video_id TEXT NOT NULL,
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_short_video_local_comments_video
+      ON short_video_local_comments(local_user_id, video_id, created_at DESC);
     CREATE TABLE IF NOT EXISTS short_video_import_batches (
       id TEXT PRIMARY KEY,
       source_root TEXT NOT NULL DEFAULT '',
@@ -1374,6 +2016,191 @@ function ensureShortVideoColumns(db) {
   `);
   backfillShortVideoShareUrls(db);
   migrateShortVideoCoverSources(db);
+  ensureShortVideoTopics(db);
+  ensureShortVideoSounds(db);
+}
+
+function ensureShortVideoTopics(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS short_video_topics (
+      video_id TEXT NOT NULL,
+      topic TEXT NOT NULL,
+      topic_key TEXT NOT NULL,
+      PRIMARY KEY (video_id, topic_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_short_video_topics_key ON short_video_topics(topic_key, video_id);
+    CREATE INDEX IF NOT EXISTS idx_short_video_topics_video ON short_video_topics(video_id);
+
+    CREATE TRIGGER IF NOT EXISTS trg_short_video_topics_insert
+    AFTER INSERT ON short_videos
+    BEGIN
+      INSERT OR REPLACE INTO short_video_topics (video_id, topic, topic_key)
+      SELECT
+        NEW.id,
+        TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')),
+        LOWER(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')))
+      FROM json_each(CASE WHEN json_valid(NEW.tags_json) THEN NEW.tags_json ELSE '[]' END) AS topic_tag
+      WHERE LENGTH(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#'))) BETWEEN 1 AND 48;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_short_video_topics_update
+    AFTER UPDATE OF tags_json ON short_videos
+    BEGIN
+      DELETE FROM short_video_topics WHERE video_id = NEW.id;
+      INSERT OR REPLACE INTO short_video_topics (video_id, topic, topic_key)
+      SELECT
+        NEW.id,
+        TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')),
+        LOWER(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')))
+      FROM json_each(CASE WHEN json_valid(NEW.tags_json) THEN NEW.tags_json ELSE '[]' END) AS topic_tag
+      WHERE LENGTH(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#'))) BETWEEN 1 AND 48;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_short_video_topics_delete
+    AFTER DELETE ON short_videos
+    BEGIN
+      DELETE FROM short_video_topics WHERE video_id = OLD.id;
+    END;
+  `);
+  if (metaValue(db, "short_video_topic_index_version") === SHORT_VIDEO_TOPIC_INDEX_VERSION) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      DELETE FROM short_video_topics;
+      INSERT OR REPLACE INTO short_video_topics (video_id, topic, topic_key)
+      SELECT
+        v.id,
+        TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')),
+        LOWER(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')))
+      FROM short_videos v
+      JOIN json_each(CASE WHEN json_valid(v.tags_json) THEN v.tags_json ELSE '[]' END) AS topic_tag
+      WHERE LENGTH(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#'))) BETWEEN 1 AND 48;
+      INSERT OR REPLACE INTO short_video_meta (key, value)
+      VALUES ('short_video_topic_index_version', '${SHORT_VIDEO_TOPIC_INDEX_VERSION}');
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
+function ensureShortVideoSounds(db) {
+  const insertNew = shortVideoSoundIndexSelect("NEW");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS short_video_sounds (
+      video_id TEXT PRIMARY KEY,
+      sound_key TEXT NOT NULL,
+      sound_id TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL DEFAULT '',
+      author TEXT NOT NULL DEFAULT '',
+      cover_url TEXT NOT NULL DEFAULT '',
+      preview_url TEXT NOT NULL DEFAULT '',
+      local_available INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_short_video_sounds_key ON short_video_sounds(sound_key, video_id);
+
+    CREATE TRIGGER IF NOT EXISTS trg_short_video_sounds_insert
+    AFTER INSERT ON short_videos
+    BEGIN
+      INSERT OR REPLACE INTO short_video_sounds (
+        video_id, sound_key, sound_id, title, author, cover_url, preview_url, local_available
+      )
+      ${insertNew};
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_short_video_sounds_update
+    AFTER UPDATE OF metadata_json, music_path, author_name ON short_videos
+    BEGIN
+      DELETE FROM short_video_sounds WHERE video_id = NEW.id;
+      INSERT OR REPLACE INTO short_video_sounds (
+        video_id, sound_key, sound_id, title, author, cover_url, preview_url, local_available
+      )
+      ${insertNew};
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_short_video_sounds_delete
+    AFTER DELETE ON short_videos
+    BEGIN
+      DELETE FROM short_video_sounds WHERE video_id = OLD.id;
+    END;
+  `);
+  if (metaValue(db, "short_video_sound_index_version") === SHORT_VIDEO_SOUND_INDEX_VERSION) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      DELETE FROM short_video_sounds;
+      INSERT OR REPLACE INTO short_video_sounds (
+        video_id, sound_key, sound_id, title, author, cover_url, preview_url, local_available
+      )
+      ${shortVideoSoundIndexSelect("v", "FROM short_videos v")};
+      INSERT OR REPLACE INTO short_video_meta (key, value)
+      VALUES ('short_video_sound_index_version', '${SHORT_VIDEO_SOUND_INDEX_VERSION}');
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
+function shortVideoSoundIndexSelect(rowReference, fromClause = "") {
+  const row = String(rowReference || "v");
+  return `
+    SELECT
+      indexed.video_id,
+      indexed.sound_key,
+      indexed.sound_id,
+      indexed.title,
+      indexed.author,
+      indexed.cover_url,
+      indexed.preview_url,
+      indexed.local_available
+    FROM (
+      SELECT
+        source.*,
+        CASE
+          WHEN source.title <> ''
+            AND source.author <> ''
+            AND source.is_original_sound = 0
+            AND source.title NOT LIKE '%创作的原声%'
+            AND LOWER(source.title) <> '模板音乐'
+            THEN 'track:' || LOWER(source.title) || CHAR(31) || LOWER(source.author)
+          WHEN source.sound_id <> '' THEN 'id:' || source.sound_id
+          WHEN source.local_available = 1 THEN 'local:' || source.video_id
+          ELSE ''
+        END AS sound_key
+      FROM (
+        SELECT
+          ${row}.id AS video_id,
+          TRIM(COALESCE(
+            CAST(json_extract(${row}.metadata_json, '$.music.id_str') AS TEXT),
+            CAST(json_extract(${row}.metadata_json, '$.music.mid') AS TEXT),
+            ''
+          )) AS sound_id,
+          TRIM(COALESCE(CAST(json_extract(${row}.metadata_json, '$.music.title') AS TEXT), '')) AS title,
+          TRIM(COALESCE(CAST(json_extract(${row}.metadata_json, '$.music.author') AS TEXT), '')) AS author,
+          TRIM(COALESCE(
+            CAST(json_extract(${row}.metadata_json, '$.music.cover_medium.url_list[0]') AS TEXT),
+            CAST(json_extract(${row}.metadata_json, '$.music.cover_thumb.url_list[0]') AS TEXT),
+            ''
+          )) AS cover_url,
+          TRIM(COALESCE(
+            CAST(json_extract(${row}.metadata_json, '$.music.play_url.url_list[0]') AS TEXT),
+            CAST(json_extract(${row}.metadata_json, '$.music.play_url.uri') AS TEXT),
+            ''
+          )) AS preview_url,
+          CASE WHEN COALESCE(TRIM(${row}.music_path), '') <> '' THEN 1 ELSE 0 END AS local_available,
+          CASE WHEN COALESCE(CAST(json_extract(${row}.metadata_json, '$.music.is_original_sound') AS INTEGER), 0) = 1 THEN 1 ELSE 0 END AS is_original_sound
+        ${fromClause}
+      ) AS source
+    ) AS indexed
+    WHERE indexed.sound_key <> ''
+  `;
 }
 
 function addColumnIfMissing(db, table, column, definition) {
@@ -1423,9 +2250,11 @@ function migrateShortVideoCoverSources(db) {
 }
 
 function recreateShortVideoCatalogView(db) {
+  const recommendationScoreSql = SHORT_VIDEO_RECOMMENDATION_SCORE_SQL;
   db.exec(`
     DROP VIEW IF EXISTS short_video_catalog;
-    CREATE VIEW short_video_catalog AS
+    DROP VIEW IF EXISTS short_video_catalog_base;
+    CREATE VIEW short_video_catalog_base AS
     SELECT
       v.id,
       v.aweme_id,
@@ -1433,6 +2262,7 @@ function recreateShortVideoCatalogView(db) {
       v.origin,
       v.status,
       v.visibility,
+      ${SHORT_VIDEO_MEDIA_TYPE_SQL} AS media_type,
       COALESCE(NULLIF(u.sec_uid, ''), v.author_sec_uid) AS author_sec_uid,
       COALESCE(NULLIF(u.uid, ''), v.author_uid) AS author_uid,
       COALESCE(NULLIF(u.nickname, ''), v.author_name, '未知作者') AS author_name,
@@ -1451,6 +2281,7 @@ function recreateShortVideoCatalogView(db) {
       u.age AS author_age,
       COALESCE(NULLIF(u.verification, ''), '') AS author_verification,
       COALESCE(NULLIF(u.profile_collected_at, ''), '') AS author_profile_collected_at,
+      COALESCE(user_follow.active, 0) AS author_following,
       v.title,
       v.description,
       v.tags_json,
@@ -1466,8 +2297,25 @@ function recreateShortVideoCatalogView(db) {
       COALESCE(s.collect_count, v.collect_count, 0) AS collect_count,
       COALESCE(s.share_count, v.share_count, 0) AS share_count,
       COALESCE(s.play_count, v.play_count, 0) AS play_count,
+      COALESCE(user_like.active, 0) AS user_like_active,
+      COALESCE(user_like.source, '') AS user_like_source,
+      COALESCE(user_collect.active, 0) AS user_collect_active,
+      COALESCE(user_collect.source, '') AS user_collect_source,
+      COALESCE(user_dislike.active, 0) AS user_dislike_active,
+      COALESCE(user_dislike.source, '') AS user_dislike_source,
+      ${recommendationScoreSql} AS recommendation_score,
+      COALESCE(watch_history.progress_ms, 0) AS watch_progress_ms,
+      COALESCE(watch_history.completed_count, 0) AS watch_completed_count,
+      COALESCE(watch_history.last_watched_at, '') AS last_watched_at,
       v.share_url,
       v.metadata_json,
+      COALESCE(sound_index.sound_key, '') AS sound_key,
+      COALESCE(sound_index.sound_id, '') AS sound_id,
+      COALESCE(sound_index.title, '') AS sound_title,
+      COALESCE(sound_index.author, '') AS sound_author,
+      COALESCE(sound_index.cover_url, '') AS sound_cover_url,
+      COALESCE(sound_index.preview_url, '') AS sound_preview_url,
+      COALESCE(sound_index.local_available, 0) AS sound_local_available,
       COALESCE(NULLIF(video_asset.local_path, ''), v.source_path) AS source_path,
       COALESCE(
         NULLIF(native_cover_asset.local_path, ''),
@@ -1499,11 +2347,37 @@ function recreateShortVideoCatalogView(db) {
     FROM short_videos v
     LEFT JOIN short_video_users u ON u.id = v.owner_user_id
     LEFT JOIN short_video_stats s ON s.video_id = v.id
+    LEFT JOIN short_video_user_actions user_like
+      ON user_like.video_id = v.id
+     AND user_like.local_user_id = 'local:self'
+     AND user_like.action_type = 'like'
+    LEFT JOIN short_video_user_actions user_collect
+      ON user_collect.video_id = v.id
+     AND user_collect.local_user_id = 'local:self'
+     AND user_collect.action_type = 'collect'
+    LEFT JOIN short_video_user_actions user_dislike
+      ON user_dislike.video_id = v.id
+     AND user_dislike.local_user_id = 'local:self'
+     AND user_dislike.action_type = 'dislike'
+    LEFT JOIN short_video_follows user_follow
+      ON user_follow.target_user_id = v.owner_user_id
+     AND user_follow.local_user_id = 'local:self'
+    LEFT JOIN short_video_watch_history watch_history
+      ON watch_history.video_id = v.id
+     AND watch_history.local_user_id = 'local:self'
     LEFT JOIN short_video_assets video_asset ON video_asset.video_id = v.id AND video_asset.asset_type = 'video'
     LEFT JOIN short_video_assets native_cover_asset ON native_cover_asset.video_id = v.id AND native_cover_asset.asset_type = 'native_cover'
     LEFT JOIN short_video_assets ffmpeg_cover_asset ON ffmpeg_cover_asset.video_id = v.id AND ffmpeg_cover_asset.asset_type = 'ffmpeg_cover'
     LEFT JOIN short_video_assets legacy_cover_asset ON legacy_cover_asset.video_id = v.id AND legacy_cover_asset.asset_type = 'cover'
-    LEFT JOIN short_video_assets music_asset ON music_asset.video_id = v.id AND music_asset.asset_type = 'music';
+    LEFT JOIN short_video_assets music_asset ON music_asset.video_id = v.id AND music_asset.asset_type = 'music'
+    LEFT JOIN short_video_sounds sound_index ON sound_index.video_id = v.id;
+
+    CREATE VIEW short_video_catalog AS
+    SELECT
+      short_video_catalog_base.*,
+      1 AS recommendation_author_rank,
+      recommendation_score AS recommendation_order_score
+    FROM short_video_catalog_base;
   `);
 }
 
@@ -1992,6 +2866,7 @@ function mergeDuplicateShortVideoRow(db, duplicateId, keepId) {
   mergeDuplicateShortVideoAssets(db, duplicateId, keepId, now);
   mergeDuplicateShortVideoActions(db, duplicateId, keepId, now);
   mergeDuplicateShortVideoCollectionItems(db, duplicateId, keepId);
+  mergeDuplicateShortVideoLocalComments(db, duplicateId, keepId, now);
   mergeDuplicateShortVideoWatchHistory(db, duplicateId, keepId);
   mergeDuplicateShortVideoImportItems(db, duplicateId, keepId);
   db.prepare("DELETE FROM short_videos WHERE id = ?").run(duplicateId);
@@ -2114,6 +2989,14 @@ function mergeDuplicateShortVideoCollectionItems(db, duplicateId, keepId) {
     `).run(row.collection_id, keepId, row.added_at || "");
     db.prepare("DELETE FROM short_video_collection_items WHERE collection_id = ? AND video_id = ?").run(row.collection_id, duplicateId);
   }
+}
+
+function mergeDuplicateShortVideoLocalComments(db, duplicateId, keepId, now) {
+  db.prepare(`
+    UPDATE short_video_local_comments
+    SET video_id = ?, updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+    WHERE video_id = ?
+  `).run(keepId, now, duplicateId);
 }
 
 function mergeDuplicateShortVideoWatchHistory(db, duplicateId, keepId) {
@@ -2538,10 +3421,32 @@ function deleteNormalizedVideoRows(db, videoIds) {
     ["short_video_user_actions", "video_id"],
     ["short_video_collection_items", "video_id"],
     ["short_video_watch_history", "video_id"],
+    ["short_video_local_comments", "video_id"],
     ["short_video_import_items", "video_id"]
   ]) {
     db.prepare(`DELETE FROM ${table} WHERE ${column} IN (${placeholders})`).run(...videoIds);
   }
+}
+
+function recommendationTagList(value) {
+  const tags = parseJsonArray(value);
+  const result = [];
+  const seen = new Set();
+  for (const item of tags) {
+    const tag = String(item || "").trim().replace(/^#+/, "");
+    const normalized = tag.toLocaleLowerCase();
+    if (!tag || tag.length > 48 || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(tag);
+  }
+  return result;
+}
+
+function shortVideoRecommendationAuthorKey(row = {}) {
+  const secUid = String(row.author_sec_uid || "").trim();
+  if (secUid) return `uid:${secUid}`;
+  const name = String(row.author_name || "").trim().toLocaleLowerCase();
+  return name && name !== "未知作者" ? `name:${name}` : "";
 }
 
 function videoCatalogRowByAnyId(db, id, columns = "*") {
@@ -2567,6 +3472,15 @@ function publicVideo(row, options = {}) {
   const id = row.id || row.aweme_id || "";
   const metadata = parseJsonObject(row.metadata_json);
   const media = publicVideoMedia(row, metadata);
+  const userActions = {
+    liked: Boolean(row.user_like_active),
+    collected: Boolean(row.user_collect_active),
+    disliked: Boolean(row.user_dislike_active)
+  };
+  const likeDelta = shortVideoActionMetricDelta(row.user_like_active, row.user_like_source);
+  const collectDelta = shortVideoActionMetricDelta(row.user_collect_active, row.user_collect_source);
+  const watchProgressMs = Math.max(0, Number(row.watch_progress_ms || 0));
+  const watchCompletedCount = Math.max(0, Number(row.watch_completed_count || 0));
   const rawShareUrl = String(row.share_url || "").trim();
   const shareUrl = rawShareUrl || (media.type === "gallery"
     ? douyinNoteUrl(row.aweme_id || id)
@@ -2596,6 +3510,7 @@ function publicVideo(row, options = {}) {
     description: row.description || "",
     tags: parseJsonArray(row.tags_json),
     author: {
+      id: row.owner_user_id || "",
       secUid: row.author_sec_uid || "",
       uid: row.author_uid || "",
       name: row.author_name || "未知作者",
@@ -2613,7 +3528,8 @@ function publicVideo(row, options = {}) {
       gender: optionalInteger(row.author_gender),
       age: optionalInteger(row.author_age),
       verification: row.author_verification || "",
-      profileCollectedAt: row.author_profile_collected_at || ""
+      profileCollectedAt: row.author_profile_collected_at || "",
+      following: Boolean(row.author_following)
     },
     publishedAt: row.published_at || "",
     likedAt: row.liked_at || "",
@@ -2621,12 +3537,21 @@ function publicVideo(row, options = {}) {
     width: Number(row.width || 0) || null,
     height: Number(row.height || 0) || null,
     stats: {
-      likes: Number(row.digg_count || 0),
+      likes: Math.max(0, Number(row.digg_count || 0) + likeDelta),
       comments: Number(row.comment_count || 0),
-      collects: Number(row.collect_count || 0),
+      collects: Math.max(0, Number(row.collect_count || 0) + collectDelta),
       shares: Number(row.share_count || 0),
       plays: Number(row.play_count || 0)
     },
+    actions: userActions,
+    watch: {
+      progressMs: watchProgressMs,
+      completedCount: watchCompletedCount,
+      completed: watchCompletedCount > 0,
+      lastWatchedAt: row.last_watched_at || ""
+    },
+    recommendation: publicShortVideoRecommendation(row),
+    sound: publicShortVideoSound(row, id),
     shareUrl,
     originalUrl,
     streamUrl: media.type === "video" ? `/media/short-video/${encodeURIComponent(id)}` : "",
@@ -2641,6 +3566,54 @@ function publicVideo(row, options = {}) {
       musicPath: row.music_path || "",
       metadata
     } : {})
+  };
+}
+
+function shortVideoActionMetricDelta(active, source) {
+  const baselineActive = IMPORTED_SHORT_VIDEO_ACTION_SOURCES.has(String(source || "").trim());
+  return Number(Boolean(active)) - Number(baselineActive);
+}
+
+function publicShortVideoRecommendation(row = {}) {
+  const engagement = Math.max(0,
+    Number(row.digg_count || 0)
+    + Number(row.comment_count || 0) * 6
+    + Number(row.collect_count || 0) * 4
+    + Number(row.share_count || 0) * 3
+  );
+  const reason = Boolean(row.author_following)
+    ? "关注作者"
+    : engagement >= 1000000
+      ? "百万热度"
+      : engagement >= 100000
+        ? "本地高赞"
+        : engagement >= 10000
+          ? "近期热门"
+          : "发现新内容";
+  return {
+    score: Math.max(0, Number(row.recommendation_score || 0)),
+    reason
+  };
+}
+
+function publicShortVideoSound(row = {}, id = "") {
+  const rawKey = String(row.sound_key || "");
+  if (!rawKey) return null;
+  const localAvailable = Boolean(row.sound_local_available && row.music_path);
+  const remotePreview = /^https?:\/\//i.test(String(row.sound_preview_url || "")) ? String(row.sound_preview_url) : "";
+  const title = String(row.sound_title || "").trim() || (localAvailable ? "本地提取音频" : "作品原声");
+  const author = String(row.sound_author || row.author_name || "").trim() || "未知作者";
+  const remoteCover = /^https?:\/\//i.test(String(row.sound_cover_url || "")) ? String(row.sound_cover_url) : "";
+  return {
+    key: encodeShortVideoSoundKey(rawKey),
+    id: String(row.sound_id || ""),
+    title,
+    author,
+    coverUrl: remoteCover || row.author_avatar_url || (row.cover_path ? `/media/short-video-cover/${encodeURIComponent(id)}?v=${encodeURIComponent(String(row.mtime_ms || ""))}` : ""),
+    previewUrl: localAvailable ? `/media/short-video-music/${encodeURIComponent(id)}` : remotePreview,
+    previewSource: localAvailable ? "local" : (remotePreview ? "remote" : ""),
+    localAvailable,
+    original: /创作的原声/.test(title)
   };
 }
 
@@ -2664,6 +3637,8 @@ function authorFacet(db) {
       MAX(secUid) AS secUid,
       COALESCE(MAX(name), '未知作者') AS name,
       MAX(NULLIF(author_avatar_url, '')) AS avatarUrl,
+      MAX(NULLIF(targetUserId, '')) AS targetUserId,
+      MAX(following) AS following,
       MAX(coverId) AS coverId,
       MAX(coverMtimeMs) AS coverMtimeMs,
       COUNT(*) AS count
@@ -2673,6 +3648,8 @@ function authorFacet(db) {
         NULLIF(author_sec_uid, '') AS secUid,
         NULLIF(author_name, '') AS name,
         author_avatar_url,
+        owner_user_id AS targetUserId,
+        COALESCE(author_following, 0) AS following,
         CASE WHEN COALESCE(NULLIF(cover_path, ''), '') <> '' THEN id ELSE '' END AS coverId,
         CASE WHEN COALESCE(NULLIF(cover_path, ''), '') <> '' THEN mtime_ms ELSE 0 END AS coverMtimeMs
       FROM short_video_catalog
@@ -2685,6 +3662,8 @@ function authorFacet(db) {
     secUid: row.secUid || "",
     name: row.name || "未知作者",
     avatarUrl: row.avatarUrl || "",
+    id: row.targetUserId || "",
+    following: Boolean(row.following),
     fallbackCoverUrl: row.coverId ? `/media/short-video-cover/${encodeURIComponent(row.coverId)}?v=${encodeURIComponent(String(row.coverMtimeMs || ""))}` : "",
     count: Number(row.count || 0)
   }));
@@ -3061,13 +4040,17 @@ function metaValue(db, key) {
 
 function normalizeSort(value) {
   const sort = String(value || "published").trim();
-  return ["liked", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
+  return ["recommended", "liked", "watched", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
 }
 
 function videoFilter(params = new URLSearchParams()) {
   const q = String(params.get("q") || params.get("search") || "").trim();
+  const topic = normalizeTopicFilter(params.get("topic") || params.get("tag"));
+  const sound = normalizeSoundFilter(params.get("sound") || params.get("music"));
+  const soundKey = decodeShortVideoSoundKey(sound);
   const author = String(params.get("author") || "").trim();
   const source = normalizeSourceFilter(params.get("source") || params.get("origin"));
+  const media = normalizeMediaFilter(params.get("media") || params.get("type"));
   const whereParts = [];
   const args = [];
   if (!includePendingShortVideos(params)) {
@@ -3084,6 +4067,14 @@ function videoFilter(params = new URLSearchParams()) {
     )`);
     args.push(like, like, like, like, like);
   }
+  if (topic) {
+    whereParts.push("id IN (SELECT video_id FROM short_video_topics WHERE topic_key = LOWER(?))");
+    args.push(topic);
+  }
+  if (soundKey) {
+    whereParts.push("id IN (SELECT video_id FROM short_video_sounds WHERE sound_key = ?)");
+    args.push(soundKey);
+  }
   if (author && author !== "all") {
     if (author.startsWith("name:")) {
       whereParts.push("author_name = ?");
@@ -3093,14 +4084,56 @@ function videoFilter(params = new URLSearchParams()) {
       args.push(author);
     }
   }
-  if (source === "liked") {
+  if (media !== "all") {
+    whereParts.push("media_type = ?");
+    args.push(media);
+  }
+  if (source === "recommended") {
+    whereParts.push("user_dislike_active = 0");
+  } else if (source === "liked") {
     whereParts.push("origin IN ('douyin_like_import', 'douyin_download_manager_like')");
+  } else if (source === "following") {
+    whereParts.push("author_following = 1");
+  } else if (source === "history") {
+    whereParts.push("last_watched_at <> ''");
   } else if (source === "posts") {
     whereParts.push("origin = 'douyin_download_manager_post'");
   } else if (source === "local") {
     whereParts.push("origin NOT IN ('douyin_like_import', 'douyin_download_manager_like', 'douyin_download_manager_post')");
   }
-  return { q, author, source, where: whereParts.join(" AND "), args };
+  return { q, topic, sound, soundKey, author, media, source, where: whereParts.join(" AND "), args };
+}
+
+function normalizeTopicFilter(value) {
+  return String(value || "").trim().replace(/^#+/, "").slice(0, 48);
+}
+
+function normalizeSoundFilter(value) {
+  const token = String(value || "").trim();
+  return /^[A-Za-z0-9_-]{1,1000}$/.test(token) ? token : "";
+}
+
+function encodeShortVideoSoundKey(value) {
+  const key = String(value || "");
+  return key ? Buffer.from(key, "utf8").toString("base64url") : "";
+}
+
+function decodeShortVideoSoundKey(value) {
+  try {
+    const decoded = Buffer.from(normalizeSoundFilter(value), "base64url").toString("utf8");
+    return decoded.length <= 600 ? decoded : "";
+  } catch {
+    return "";
+  }
+}
+
+function normalizeMediaFilter(value) {
+  const media = String(value || "all").trim().toLowerCase();
+  return ["video", "gallery"].includes(media) ? media : "all";
+}
+
+function formatSuggestionCount(value) {
+  return new Intl.NumberFormat("zh-CN").format(Math.max(0, Number(value || 0)));
 }
 
 function includePendingShortVideos(params = new URLSearchParams()) {
@@ -3110,14 +4143,16 @@ function includePendingShortVideos(params = new URLSearchParams()) {
 
 function normalizeSourceFilter(value) {
   const source = String(value || "liked").trim().toLowerCase();
-  return ["liked", "posts", "all", "local"].includes(source) ? source : "liked";
+  return ["recommended", "liked", "following", "history", "posts", "all", "local"].includes(source) ? source : "liked";
 }
 
 function adjacentOrder(urlOrOptions = {}) {
   const params = urlOrOptions?.searchParams || new URLSearchParams();
   const sort = normalizeSort(params.get("sort"));
   return {
+    recommended: { column: "recommendation_order_score", fallback: "published_at", numeric: true },
     liked: { column: "liked_at", fallback: "mtime_ms", numeric: false },
+    watched: { column: "last_watched_at", fallback: "published_at", numeric: false },
     published: { column: "published_at", fallback: "liked_at", numeric: false },
     publishedAsc: {
       column: "published_at",

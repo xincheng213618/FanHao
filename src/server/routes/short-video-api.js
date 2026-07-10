@@ -19,6 +19,15 @@ export async function routeShortVideoApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/short-videos/suggestions" && req.method === "GET") {
+    try {
+      sendJson(res, 200, shortVideoStore.searchSuggestions(url));
+    } catch (error) {
+      sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频搜索建议读取失败") });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/short-videos" && req.method === "GET") {
     try {
       sendJson(res, 200, shortVideoStore.listVideos(url));
@@ -55,6 +64,95 @@ export async function routeShortVideoApi(req, res, url, deps) {
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "短视频点赞目录扫描失败" });
     }
+    return true;
+  }
+
+  const actionMatch = /^\/api\/short-videos\/([^/]+)\/actions\/(like|collect|dislike)$/.exec(url.pathname);
+  if (actionMatch && (req.method === "PUT" || req.method === "POST")) {
+    try {
+      const body = await readJsonBody(req).catch(() => ({}));
+      const data = shortVideoStore.setUserAction(
+        decodeURIComponent(actionMatch[1]),
+        actionMatch[2],
+        body || {}
+      );
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "短视频互动状态保存失败" });
+    }
+    return true;
+  }
+
+  const followMatch = /^\/api\/short-videos\/([^/]+)\/author-follow$/.exec(url.pathname);
+  if (followMatch && (req.method === "PUT" || req.method === "POST")) {
+    try {
+      const body = await readJsonBody(req).catch(() => ({}));
+      const data = shortVideoStore.setAuthorFollow(decodeURIComponent(followMatch[1]), body || {});
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "作者关注状态保存失败" });
+    }
+    return true;
+  }
+
+  const watchMatch = /^\/api\/short-videos\/([^/]+)\/watch$/.exec(url.pathname);
+  if (watchMatch && (req.method === "PUT" || req.method === "POST")) {
+    try {
+      const body = await readJsonBody(req).catch(() => ({}));
+      const data = shortVideoStore.recordWatch(decodeURIComponent(watchMatch[1]), body || {});
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "观看进度保存失败" });
+    }
+    return true;
+  }
+
+  const commentsMatch = /^\/api\/short-videos\/([^/]+)\/comments$/.exec(url.pathname);
+  if (commentsMatch && req.method === "GET") {
+    try {
+      const data = shortVideoStore.localComments(decodeURIComponent(commentsMatch[1]));
+      if (!data) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "本地评论读取失败" });
+    }
+    return true;
+  }
+
+  if (commentsMatch && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req).catch(() => ({}));
+      sendJson(res, 201, shortVideoStore.createLocalComment(decodeURIComponent(commentsMatch[1]), body || {}));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "本地评论保存失败" });
+    }
+    return true;
+  }
+
+  const commentMatch = /^\/api\/short-videos\/([^/]+)\/comments\/([^/]+)$/.exec(url.pathname);
+  if (commentMatch && req.method === "DELETE") {
+    try {
+      sendJson(res, 200, shortVideoStore.deleteLocalComment(
+        decodeURIComponent(commentMatch[1]),
+        decodeURIComponent(commentMatch[2])
+      ));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "本地评论删除失败" });
+    }
+    return true;
+  }
+
+  const relatedMatch = /^\/api\/short-videos\/([^/]+)\/related$/.exec(url.pathname);
+  if (relatedMatch && req.method === "GET") {
+    const data = shortVideoStore.relatedVideos(decodeURIComponent(relatedMatch[1]), url);
+    if (!data) {
+      notFound(res);
+      return true;
+    }
+    sendJson(res, 200, data);
     return true;
   }
 

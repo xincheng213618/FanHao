@@ -61,6 +61,17 @@ export function createShortVideosModule({
       return true;
     }
 
+    const musicMatch = /^\/media\/short-video-music\/([^/]+)$/.exec(url.pathname);
+    if (musicMatch && (req.method === "GET" || req.method === "HEAD")) {
+      const file = store.musicFile(decodeURIComponent(musicMatch[1]));
+      if (!file || file.type !== "audio") {
+        notFound(res);
+        return true;
+      }
+      mediaStreamService.serveVideo(req, res, file);
+      return true;
+    }
+
     const coverMatch = /^\/media\/short-video-cover\/([^/]+)$/.exec(url.pathname);
     if (coverMatch && req.method === "GET") {
       const file = store.coverFile(decodeURIComponent(coverMatch[1]));

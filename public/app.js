@@ -7,7 +7,7 @@ import { createNovelPage } from "./js/pages/novel-page.js?v=20260701-gallery-mer
 import { createPeoplePage } from "./js/pages/people-page.js?v=20260710-western-merge-01";
 import { createPersonProfile } from "./js/pages/person-profile.js?v=20260710-western-merge-01";
 import { createRankingPage } from "./js/pages/ranking-page.js?v=20260704-ranking-controls-01";
-import { createShortVideoPage } from "./js/pages/short-video-page.js?v=20260710-short-video-feed-web-06";
+import { createShortVideoPage } from "./js/pages/short-video-page.js?v=20260710-short-video-first-paint-49";
 import { createToolsPage } from "./js/pages/tools-page.js?v=20260701-gallery-merge-01";
 import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260705-local-marker-a-01";
 import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260710-western-merge-01";
@@ -614,7 +614,10 @@ function currentRouteSnapshot(overrides = {}) {
     shortVideoId: state.activeView === "shortVideos" ? state.shortVideo.current?.id || "" : "",
     shortVideoAuthorPage: state.activeView === "shortVideos" ? state.shortVideo.authorPage || "" : "",
     shortVideoQuery: state.activeView === "shortVideos" ? state.shortVideo.query || "" : "",
+    shortVideoTopic: state.activeView === "shortVideos" ? state.shortVideo.topic || "" : "",
+    shortVideoSound: state.activeView === "shortVideos" ? state.shortVideo.sound || "" : "",
     shortVideoAuthor: state.activeView === "shortVideos" ? state.shortVideo.author || "all" : "all",
+    shortVideoMedia: state.activeView === "shortVideos" ? state.shortVideo.media || "all" : "all",
     shortVideoSource: state.activeView === "shortVideos" ? state.shortVideo.source || "liked" : "liked",
     shortVideoSort: state.activeView === "shortVideos" ? state.shortVideo.sort || "published" : "published",
     musicTrackId: state.activeView === "music" ? state.music.current?.id || "" : "",

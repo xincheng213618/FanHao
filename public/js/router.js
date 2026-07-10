@@ -129,7 +129,10 @@ export function normalizeRoute(route = {}) {
     shortVideoId: view === "shortVideos" ? String(route.shortVideoId || "").trim() : "",
     shortVideoAuthorPage: view === "shortVideos" ? String(route.shortVideoAuthorPage || "").trim() : "",
     shortVideoQuery: view === "shortVideos" ? String(route.shortVideoQuery || route.q || "").trim() : "",
+    shortVideoTopic: view === "shortVideos" ? normalizeShortVideoTopic(route.shortVideoTopic || route.topic || route.tag) : "",
+    shortVideoSound: view === "shortVideos" ? normalizeShortVideoSound(route.shortVideoSound || route.sound || route.music) : "",
     shortVideoAuthor: view === "shortVideos" ? String(route.shortVideoAuthor || "all").trim() || "all" : "all",
+    shortVideoMedia: view === "shortVideos" ? normalizeShortVideoMedia(route.shortVideoMedia || route.media) : "all",
     shortVideoSource: view === "shortVideos" ? normalizeShortVideoSource(route.shortVideoSource || route.source) : "liked",
     shortVideoSort: view === "shortVideos" ? normalizeShortVideoSort(route.shortVideoSort) : "published",
     musicTrackId: view === "music" ? String(route.musicTrackId || "").trim() : "",
@@ -174,11 +177,14 @@ export function routeUrl(route, options = {}) {
     if (next.novelSort && next.novelSort !== "updated") params.set("sort", next.novelSort);
   } else if (next.view === "shortVideos") {
     if (next.shortVideoQuery) params.set("q", next.shortVideoQuery);
+    if (next.shortVideoTopic) params.set("topic", next.shortVideoTopic);
+    if (next.shortVideoSound) params.set("sound", next.shortVideoSound);
     if (next.shortVideoId && next.shortVideoAuthor && next.shortVideoAuthor !== "all") {
       params.set("author", next.shortVideoAuthor);
     } else if (!next.shortVideoAuthorPage && next.shortVideoAuthor && next.shortVideoAuthor !== "all") {
       params.set("author", next.shortVideoAuthor);
     }
+    if (next.shortVideoMedia && next.shortVideoMedia !== "all") params.set("media", next.shortVideoMedia);
     const defaultSource = next.shortVideoAuthorPage && !next.shortVideoId ? "all" : "liked";
     if (next.shortVideoSource && next.shortVideoSource !== defaultSource) params.set("source", next.shortVideoSource);
     if (next.shortVideoSort && next.shortVideoSort !== "published") params.set("sort", next.shortVideoSort);
@@ -266,12 +272,26 @@ function normalizeNovelSort(value) {
 
 function normalizeShortVideoSort(value) {
   const sort = String(value || "published").trim();
-  return ["liked", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
+  return ["recommended", "liked", "watched", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
+}
+
+function normalizeShortVideoMedia(value) {
+  const media = String(value || "all").trim().toLowerCase();
+  return ["video", "gallery"].includes(media) ? media : "all";
+}
+
+function normalizeShortVideoTopic(value) {
+  return String(value || "").trim().replace(/^#+/, "").slice(0, 48);
+}
+
+function normalizeShortVideoSound(value) {
+  const sound = String(value || "").trim();
+  return /^[A-Za-z0-9_-]{1,1000}$/.test(sound) ? sound : "";
 }
 
 function normalizeShortVideoSource(value) {
   const source = String(value || "liked").trim().toLowerCase();
-  return ["liked", "posts", "authors", "all", "local"].includes(source) ? source : "liked";
+  return ["recommended", "liked", "following", "history", "posts", "authors", "all", "local"].includes(source) ? source : "liked";
 }
 
 function normalizeMusicSort(value) {
@@ -409,7 +429,10 @@ function shortVideoRouteFromPath(routePath, params = new URLSearchParams()) {
     shortVideoId: pathAuthorPage ? "" : decodeRouteSegment(segments[1] || ""),
     shortVideoAuthorPage: authorPage,
     shortVideoQuery: params.get("q") || params.get("search") || "",
+    shortVideoTopic: normalizeShortVideoTopic(params.get("topic") || params.get("tag")),
+    shortVideoSound: normalizeShortVideoSound(params.get("sound") || params.get("music")),
     shortVideoAuthor: authorPage || requestedAuthor,
+    shortVideoMedia: normalizeShortVideoMedia(params.get("media") || params.get("type")),
     shortVideoSource: authorPage
       ? normalizeShortVideoSource(requestedSource === "authors" ? "all" : requestedSource || "all")
       : normalizeShortVideoSource(requestedSource),
