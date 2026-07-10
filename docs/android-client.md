@@ -63,7 +63,7 @@ npm run run:android      # 直接跑起来
 客户端在应用内检查更新并从该通道拉取 APK，无需走应用商店。
 
 `publish-debug-update.ps1` 负责把构建好的 APK 放到 `data/android-update/`（服务端从该目录读取清单与文件），
-配合 `src/server/android-update-service.js` 对外提供更新服务。
+配合 `src/modules/system/server/android-update/service.js` 对外提供更新服务。
 
 ## 网络与权限要点
 

@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=20260705-mobile-actions-01";
+import { CLIENT_VERSION } from "./config.js?v=20260710-short-video-modules-04";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;

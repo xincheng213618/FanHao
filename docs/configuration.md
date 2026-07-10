@@ -39,7 +39,7 @@ FanHao 服务端通过**环境变量**控制资料库根目录、端口、外部
 | `FANHAO_DOUYIN_SYNC_MS` | `300000`（5 分钟） | 短视频从下载管理器同步的轮询间隔。 |
 | `FANHAO_MUSIC_ROOTS` / `FANHAO_MUSIC_ROOT` | `E:\音乐 MV\音乐（无损）` | 音乐模块扫描根目录，多个根用分号或逗号分隔。 |
 
-> 解析逻辑见 `src/server/root-config.js`。环境变量优先于硬编码默认值；未设置时回退到默认盘符。
+> 解析逻辑见 `src/platform/server/root-config.js`。环境变量优先于硬编码默认值；未设置时回退到默认盘符。
 
 ## 外部工具路径
 
@@ -55,7 +55,7 @@ FanHao 服务端通过**环境变量**控制资料库根目录、端口、外部
 | --- | --- | --- |
 | `FANHAO_WEB_PASSWORD` | `xincheng` | 远程（非局域网）网页访问密码。本地 / 局域网访问默认免密。 |
 
-服务端按请求 Host / 客户端 IP 判定访问模式（`local` / `lan` / `remote`），见 `src/server/auth.js`：
+服务端按请求 Host / 客户端 IP 判定访问模式（`local` / `lan` / `remote`），见 `src/platform/server/auth.js`：
 
 - **local**：`localhost` / `127.0.0.1` —— 免密，页面尺寸与预加载最宽松。
 - **lan**：私有网段（如 `192.168.*.*`、`10.*.*.*`、`.local`）—— 免密。

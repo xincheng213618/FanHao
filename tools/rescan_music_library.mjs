@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createMusicStore } from "../src/server/music-store.js";
-import { parseMusicRoots } from "../src/server/root-config.js";
+import { createMusicStore } from "../src/modules/music/server/store.js";
+import { parseMusicRoots } from "../src/platform/server/root-config.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

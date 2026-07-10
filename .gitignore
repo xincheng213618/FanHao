@@ -3,7 +3,7 @@ android-client/node_modules/
 android-client/android/.gradle/
 android-client/android/app/build/
 android-client/android/build/
-dist/
+/dist/
 .vscode/
 .env
 logs/
@@ -52,3 +52,12 @@ data/short-video-covers/
 short-video-covers/
 .workbuddy/
 nul
+/.codex-audit/
+/.codex-design-qa/
+/design-qa.md
+/douyin-follow-*.png
+/fanhao-author-before-cover.png
+/follow-*.png
+/lifecycle-*.png
+/search-*.png
+/fanhao_mobile_audit_*/

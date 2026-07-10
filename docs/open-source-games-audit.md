@@ -6,7 +6,8 @@
 - 必须能离线运行在当前 WebView 里。
 - 优先选择有明确开源许可证的项目；如用户确认仅本地自用，可集成无许可证但来源清楚的 source-available 项目。
 - 优先选择成熟、维护历史清楚、移动端交互简单的项目。
-- 审计不充分的项目不进 `public/games` 和 `android-client/www/games`。
+- 审计不充分的项目不进 `public/games`。
+- `public/games` 是唯一受版本控制的游戏资产源；Android 构建通过 `npm run sync:assets` 生成 `android-client/www/games`，避免两份副本漂移。
 
 ## 已集成
 

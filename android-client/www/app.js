@@ -1,21 +1,22 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260710-short-video-feed-fix-04";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260710-short-video-modules-04";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260705-mobile-actions-01";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
-import { createChannelViews } from "./js/channel-views.js?v=20260707-mobile-offline-state-01";
-import { createDetailViews } from "./js/detail-views.js?v=20260710-western-merge-01";
+import { createChannelViews } from "./modules/content-index/channel-views.js?v=20260710-module-registry-01";
+import { createDetailViews } from "./modules/fanhao/detail-views.js?v=20260710-module-registry-01";
 import { getElements } from "./js/dom.js?v=20260706-short-video-reel-06";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260706-mobile-web-sync-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
-import { createMusicViews } from "./js/music-views.js?v=20260708-mobile-music-36";
-import { createNovelViews } from "./js/novel-views.js?v=20260702-novel-local-manage-74";
-import { createPeopleViews } from "./js/people-views.js";
+import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=20260710-module-registry-01";
+import { createMusicViews } from "./modules/music/music-views.js?v=20260710-module-registry-01";
+import { createNovelViews } from "./modules/novels/novel-views.js?v=20260710-module-registry-01";
+import { createPeopleViews } from "./modules/fanhao/people-views.js?v=20260710-module-registry-01";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
-import { createShortVideoViews } from "./js/short-video-views.js?v=20260710-short-video-feed-fix-04";
-import { createToolViews } from "./js/tool-views.js?v=20260702-novel-local-manage-74";
-import { createWorkViews } from "./js/work-views.js?v=20260710-western-merge-01";
+import { createShortVideoViews } from "./modules/short-videos/short-video-views.js?v=20260710-short-video-modules-04";
+import { createToolViews } from "./modules/tools/tool-views.js?v=20260710-module-registry-01";
+import { createWorkViews } from "./modules/fanhao/work-views.js?v=20260710-module-registry-01";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
@@ -1530,6 +1531,9 @@ function renderCurrentView(options = {}) {
     Promise.resolve(task).finally(() => queueScrollRestore(restoreScrollY));
     return task;
   };
+  if (currentView !== "shortVideos" && currentView !== "shortVideoBrowser") {
+    shortVideoViews?.deactivate?.();
+  }
 
   if (currentView === "home") {
     const task = showHome();
@@ -2075,7 +2079,6 @@ shortVideoViews = createShortVideoViews({
   els,
   getActiveUrl: () => activeUrl,
   goBack,
-  renderCurrentView,
   setActiveBottom,
   showView
 });
@@ -2431,41 +2434,53 @@ els.fanhaoSectionNav?.addEventListener("click", (event) => {
   }
 });
 
-for (const button of els.bottomNav) {
-  button.addEventListener("click", () => {
-    if (button.dataset.focusSearch !== undefined) {
-      searchHistory.run(els.searchInput.value);
-      els.searchInput.focus();
-      return;
-    }
-    if (button.dataset.fanhaoHome !== undefined) {
-      els.settingsPanel.hidden = true;
-      showView(DEFAULT_VIEW, {}, { resetStack: true });
-      scrollToTopInstant();
-      return;
-    }
-    if (button.dataset.openView) {
-      els.settingsPanel.hidden = true;
-      showPrimaryView(button.dataset.openView, { resetStack: true });
-      scrollToTopInstant();
-      return;
-    }
-    if (button.dataset.openChannel) {
-      els.settingsPanel.hidden = true;
-      showView("channel", { mode: primaryChannelMode(button.dataset.openChannel) }, { resetStack: true });
-      scrollToTopInstant();
-      return;
-    }
-  });
-}
+els.bottomNavBar?.addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button || !els.bottomNavBar.contains(button)) return;
+  if (button.dataset.focusSearch !== undefined) {
+    searchHistory.run(els.searchInput.value);
+    els.searchInput.focus();
+    return;
+  }
+  if (button.dataset.fanhaoHome !== undefined) {
+    els.settingsPanel.hidden = true;
+    showView(DEFAULT_VIEW, {}, { resetStack: true });
+    scrollToTopInstant();
+    return;
+  }
+  if (button.dataset.openView) {
+    els.settingsPanel.hidden = true;
+    showPrimaryView(button.dataset.openView, { resetStack: true });
+    scrollToTopInstant();
+    return;
+  }
+  if (button.dataset.openChannel) {
+    els.settingsPanel.hidden = true;
+    showView("channel", { mode: primaryChannelMode(button.dataset.openChannel) }, { resetStack: true });
+    scrollToTopInstant();
+  }
+});
 
 for (const button of els.themeButtons) {
   button.addEventListener("click", () => applyTheme(button.dataset.themeChoice));
 }
 
-updateServer(activeUrl);
-updateCacheStatus();
-loadDashboard();
+async function bootApp() {
+  updateServer(activeUrl);
+  updateCacheStatus();
+  try {
+    const modules = await loadModuleCatalog(() => fetchJson(activeUrl, "/api/modules"));
+    els.bottomNav = renderAndroidModuleNavigation(els.bottomNavBar, modules);
+  } catch (error) {
+    console.warn("[modules]", error.message || error);
+  }
+  await loadDashboard();
+}
+
+bootApp().catch((error) => {
+  if (els.statusText) els.statusText.textContent = error.message || "加载失败";
+  console.error(error);
+});
 
 
 

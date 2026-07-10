@@ -44,22 +44,14 @@ $env:HOST = "0.0.0.0"
 npm start
 ```
 
-## 维护脚本
+## 维护与验证
 
-这些脚本默认以 dry-run 或只读方式运行，确认输出后再加对应的 `--write` 参数：
+批量扫描、资料补全、封面生成、缓存清理等维护任务统一从 `/admin` 的后台作业中心运行。脚本定义和参数来源是 `lib/admin-script-registry.js`，详细说明见 `docs/maintenance.md`；不要再使用已经移除的旧 `npm run cleanup:*` 等入口。
 
-```powershell
-npm run cleanup:metadata
-npm run cleanup:user-state
-npm run covers:missing
-npm run scan:noise
-npm run sync:sidecars
-```
-
-`npm run scan:noise` 只报告疑似扫描噪音，例如很小的视频或名称包含 sample/trailer/preview 的文件，不会修改索引或删除文件。
-
-`npm run sync:sidecars` 只统计会回写的 `info.txt` / `cover.*`；需要真正写入本地作品文件夹时使用：
+提交结构调整前运行：
 
 ```powershell
-npm run sync:sidecars -- --write
+npm run verify
 ```
+
+该命令会验证番号解析、元数据解析、资料库合并语义和图库数据库建表/升级逻辑。

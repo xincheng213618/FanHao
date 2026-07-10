@@ -20,7 +20,9 @@
 | [安卓客户端](./android-client.md) | Capacitor 构建、调试包、自动更新通道 |
 | [数据布局](./data-layout.md) | `data/` 目录、各 SQLite 数据库与索引文件说明 |
 | [技术亮点](./technical-highlights.md) | 流畅滑动 / 虚拟滚动、分批渲染、封面懒加载、服务端字节范围流式等实现剖析 |
-| [服务端架构](./server-architecture.md) | 服务端职责分层、服务依赖方向与迁移路线（已有） |
+| [代码结构评估](./code-structure-assessment.md) | 当前热点、边界规则与后续重构顺序 |
+| [服务端架构](./server-architecture.md) | 反射式模块装配、职责分层与依赖方向 |
+| [模块开发](./module-development.md) | 新增业务形态时的目录、描述符、运行时协议和校验流程 |
 | [核心数据库](./fanhao-core-database.md) | `fanhao-core-v2.sqlite` 的表设计与原则（已有） |
 | [开源小游戏审计](./open-source-games-audit.md) | 集成到 WebView 的离线小游戏的选型与合规记录（已有） |
 
@@ -28,17 +30,24 @@
 
 ```
 FanHao/
-├── server.js              # 组合根：装配所有服务与模块
+├── server.js              # FanHao 壳层：共享服务装配、HTTP 启动
 ├── package.json
 ├── start-fanhao.ps1       # 启动脚本（Windows）
 ├── lib/                   # 跨领域纯函数（番号解析、info 元数据解析、脚本注册表）
-├── src/server/            # 可复用服务 + 领域服务 + 路由模块
-│   ├── modules/           # 各业务模块的路由装配（video-library / gallery / novels ...）
-│   ├── routes/            # 纯 HTTP 路由（路径匹配 + 参数解析 + 权限 + 响应）
-│   └── *.service.js       # 领域服务（缓存、payload 整形、变更逻辑）
+├── src/fanhao/            # 模块发现器与 FanHao 模块协议
+├── src/modules/           # 按业务形态隔离的模块目录
+│   ├── fanhao/            # 番号
+│   ├── photos/            # 套图
+│   ├── media/             # 影视
+│   ├── novels/            # 小说
+│   ├── short-videos/      # 短视频
+│   ├── tools/             # 小工具
+│   ├── music/             # 音乐（现有附加模块）
+│   └── system/            # 不展示的系统模块
+├── src/platform/          # 与业务形态无关的 HTTP、鉴权、文件和媒体基础设施
 ├── tools/                 # 批量 / 维护脚本（Python + Node）
-├── public/                # Web 前端静态资源
-├── android-client/        # Capacitor 安卓工程
+├── public/modules/        # Web 端按模块归档的页面控制器
+├── android-client/www/modules/ # Android WebView 端按模块归档的页面控制器与样式
 ├── data/                  # 本地状态：SQLite、JSON、日志、缓存
 └── docs/                  # 本目录
 ```

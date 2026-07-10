@@ -8,9 +8,10 @@
     "build:debug:update": "powershell -ExecutionPolicy Bypass -File ./publish-debug-update.ps1",
     "install:debug": "powershell -ExecutionPolicy Bypass -File ./build-debug.ps1 -Install",
     "publish:debug": "powershell -ExecutionPolicy Bypass -File ./publish-debug-update.ps1",
-    "sync": "cap sync android",
+    "sync": "npm run sync:assets && cap sync android",
+    "sync:assets": "node scripts/sync-shared-assets.mjs",
     "open": "cap open android",
-    "run:android": "cap run android"
+    "run:android": "npm run sync:assets && cap run android"
   },
   "dependencies": {
     "@capacitor/android": "^8.4.1",

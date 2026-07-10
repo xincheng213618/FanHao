@@ -10,7 +10,7 @@
 
 短视频页没有用任何虚拟滚动库，而是手写了一套 **windowing（窗口化）** 方案，几千条视频也能丝滑滚动。
 
-**核心思路**（`public/js/pages/short-video-page.js`）：
+**核心思路**（`public/modules/short-videos/short-video-page.js`）：
 
 1. 外层 `grid` 撑满整个列表的**真实总高度**（`totalRows * svRowH`），保留原生滚动条与滚动惯性；
 2. 内层 `.short-video-window` 只渲染「当前视口内的若干行 + 缓冲区」，用 **GPU 加速的 transform** 定位到正确偏移：
@@ -142,7 +142,7 @@ state.personPageSize = state.accessMode === "lan" ? 80 : 96;
 
 视频播放支持 **Range 请求**，所以「拖动进度条跳转」「断点续传」都不需要下载整文件。
 
-`src/server/file-server.js` 的 `serveRangedFile`：
+`src/platform/server/file-server.js` 的 `serveRangedFile`：
 
 ```js
 const range = parseRange(req.headers.range, stat.size); // "bytes=start-end"
@@ -199,4 +199,4 @@ caches.keys().then((names) =>
 | 弱网可用 | 访问模式自适应批量、远程更小批 / 更少缓冲行 |
 | 视频即拖即播 | 服务端 `206` 字节范围流式 + 中断优雅销毁 + 转码定点起播 |
 
-这些实现分散在 `public/app.js`、`public/js/pages/*` 与 `src/server/file-server.js`、`src/server/media-stream-service.js`，是本项目体验顺滑的主要来源。
+这些实现分散在 `public/app.js`、`public/modules/*` 与 `src/platform/server/file-server.js`、`src/platform/server/media-stream-service.js`，是本项目体验顺滑的主要来源。

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { createPeopleScopeService } from "../src/server/people-scope-service.js";
-import { galleryMediaSources } from "../src/server/root-config.js";
+import { createPeopleScopeService } from "../src/modules/fanhao/server/people-scope-service.js";
+import { galleryMediaSources } from "../src/platform/server/root-config.js";
 
 globalThis.window = { location: { href: "http://localhost/", search: "", hash: "" } };
 const { routeFromUrl, routeUrl } = await import("../public/js/router.js");
@@ -66,7 +66,19 @@ assert.deepEqual(
 const legacyRoute = routeFromUrl("http://localhost/western");
 assert.equal(legacyRoute.view, "people");
 assert.equal(legacyRoute.peopleScope, "main");
-assert.equal(routeUrl(legacyRoute, { initialParams: new URLSearchParams(), hash: "" }), "/");
+assert.equal(routeUrl(legacyRoute, { initialParams: new URLSearchParams(), hash: "" }), "/fanhao");
+const fanhaoRoute = routeFromUrl("http://localhost/fanhao");
+assert.equal(fanhaoRoute.view, "people");
+assert.equal(routeUrl(fanhaoRoute, { initialParams: new URLSearchParams(), hash: "" }), "/fanhao");
+const fanhaoSearchRoute = routeFromUrl("http://localhost/fanhao?q=ABP-123");
+assert.equal(fanhaoSearchRoute.view, "search");
+assert.equal(routeUrl(fanhaoSearchRoute, { initialParams: new URLSearchParams(), hash: "" }), "/fanhao?q=ABP-123");
+const rankingRoute = routeFromUrl("http://localhost/fanhao/rankings");
+assert.equal(rankingRoute.view, "rankings");
+assert.equal(routeUrl(rankingRoute, { initialParams: new URLSearchParams(), hash: "" }), "/fanhao/rankings");
+const legacyRankingRoute = routeFromUrl("http://localhost/rankings");
+assert.equal(legacyRankingRoute.view, "rankings");
+assert.equal(routeUrl(legacyRankingRoute, { initialParams: new URLSearchParams(), hash: "" }), "/fanhao/rankings");
 const legacyDetailRoute = routeFromUrl("http://localhost/western/gw_legacy");
 assert.equal(legacyDetailRoute.view, "gallery");
 assert.equal(legacyDetailRoute.galleryMode, "western");

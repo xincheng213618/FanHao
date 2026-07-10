@@ -17,6 +17,8 @@ npm run sync
 npm run open
 ```
 
+`npm run sync` 会先把仓库根目录 `public\games` 同步到 `www\games`，再执行 Capacitor 同步。`www\games` 是生成目录，不直接维护；小游戏只修改 `public\games` 中的源文件。
+
 如果要直接安装到手机，需要本机有 Android SDK / platform-tools，并且手机已开启 USB 调试：
 
 ```powershell

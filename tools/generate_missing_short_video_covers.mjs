@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createShortVideoStore } from "../src/server/short-video-store.js";
-import { parseShortVideoRoots } from "../src/server/root-config.js";
+import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
+import { parseShortVideoRoots } from "../src/platform/server/root-config.js";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_DB_PATH = path.join(PROJECT_ROOT, "data", "short-videos.sqlite");

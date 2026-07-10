@@ -71,9 +71,14 @@ Windows 下推荐使用自带脚本：
 
 ```powershell
 npm start                 # node server.js
-npm run verify            # 同时跑 verify:codes 与 verify:metadata
+npm run verify            # 跑解析、资料库合并、图库数据库和模块边界验证
 npm run verify:codes      # 番号解析器测试
 npm run verify:metadata   # 资料解析器测试
+npm run verify:library-merge # 主资料库/欧美兼容范围验证
+npm run verify:gallery-db # 图库 SQLite 建表与升级验证
+npm run verify:modules    # 反射发现、六个业务模块和旧目录清理验证
+npm run verify:short-video-client # Android 短视频模块结构、入口协议和生命周期验证
+npm run verify:imports    # 检查重构后 JS/CSS 相对引用没有悬空
 ```
 
 其余维护作业请走作业中心，不要在 `package.json` 里直接加长命令。

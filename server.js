@@ -4,80 +4,65 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { ADMIN_SCRIPT_DEFINITIONS } from "./lib/admin-script-registry.js";
 import { normalizeWorkCode as parseNormalizedWorkCode, workCodeKey } from "./lib/code-parser.js";
 import { decodeInfoBuffer, isSubtitleLikeInfoText, parseInfoMetadata, renderInfoMetadataText } from "./lib/info-metadata.js";
-import { createAdminActorAvatarService } from "./src/server/admin-actor-avatar-service.js";
-import { createAdminMaintenanceTaskService } from "./src/server/admin-maintenance-task-service.js";
-import { createAdminSettingsService } from "./src/server/admin-settings-service.js";
-import { createAdminScriptService } from "./src/server/admin-script-service.js";
-import { createAdminTaskService } from "./src/server/admin-task-service.js";
-import { createAdminTaskOrchestrationService } from "./src/server/admin-task-orchestration-service.js";
-import { createAccessLogger } from "./src/server/access-log.js";
-import { createAdminCoreMutationService } from "./src/server/admin-core-mutation-service.js";
-import { createAdminPersonService } from "./src/server/admin-person-service.js";
-import { createActorAvatarService } from "./src/server/actor-avatar-service.js";
-import { createActorMovieService } from "./src/server/actor-movie-service.js";
-import { createActorProfileService } from "./src/server/actor-profile-service.js";
-import { createAndroidUpdateService } from "./src/server/android-update-service.js";
-import { createAppConfigService } from "./src/server/app-config-service.js";
-import { createAuthServices } from "./src/server/auth.js";
-import { createCoreDbService } from "./src/server/core-db-service.js";
-import { createCoreLibraryService } from "./src/server/core-library-service.js";
-import { createCoreLibrarySyncService } from "./src/server/core-library-sync-service.js";
-import { createDoubanCookieService } from "./src/server/douban-cookie-service.js";
-import { createFavoriteStateService } from "./src/server/favorite-state-service.js";
-import { createFileServer } from "./src/server/file-server.js";
-import { createRequestHandler } from "./src/server/http-app.js";
-import { createImageReaderCacheService } from "./src/server/image-reader-cache-service.js";
-import { createImageLibraryIndexService } from "./src/server/image-library-index-service.js";
-import { createGalleryMetadataService } from "./src/server/gallery-metadata-service.js";
-import { createGalleryMediaService } from "./src/server/gallery-media-service.js";
-import { createImageLibraryService } from "./src/server/image-library-service.js";
-import { createLibraryPathServices } from "./src/server/library-paths.js";
-import { createLocalLibraryIndexService } from "./src/server/local-library-index-service.js";
-import { createLocalLibraryScanService } from "./src/server/local-library-scan-service.js";
-import { createLocalOpenService } from "./src/server/local-open-service.js";
-import { createMangaService } from "./src/server/manga-service.js";
-import { createManualCoverStateService } from "./src/server/manual-cover-state-service.js";
-import { createMediaResponseService } from "./src/server/media-response-service.js";
-import { createMediaStreamService } from "./src/server/media-stream-service.js";
-import { createPersonLibraryService } from "./src/server/person-library-service.js";
-import { createPersonListService } from "./src/server/person-list-service.js";
-import { createPlaybackProgressService } from "./src/server/playback-progress-service.js";
-import { createPersonMergeService } from "./src/server/person-merge-service.js";
-import { createPeopleScopeService } from "./src/server/people-scope-service.js";
-import { createPhotoSetService } from "./src/server/photo-set-service.js";
-import { createRankingService } from "./src/server/ranking-service.js";
-import { createAdminModule } from "./src/server/modules/admin.js";
-import { createAndroidUpdateModule } from "./src/server/modules/android-update.js";
-import { createCatalogModule } from "./src/server/modules/catalog.js";
-import { createGalleryModule } from "./src/server/modules/gallery.js";
-import { createLibraryModule } from "./src/server/modules/library.js";
-import { createLocalOpenModule } from "./src/server/modules/local-open.js";
-import { createMusicModule } from "./src/server/modules/music.js";
-import { createNovelsModule } from "./src/server/modules/novels.js";
-import { createShortVideosModule } from "./src/server/modules/short-videos.js";
-import { createStatusModule } from "./src/server/modules/status.js";
-import { createToolsModule } from "./src/server/modules/tools.js";
-import { createUserStateModule } from "./src/server/modules/user-state.js";
-import { createVideoLibraryModule } from "./src/server/modules/video-library.js";
-import { galleryMediaSources, parseLibraryRoots, parseMusicRoots, parsePhotoSetRoots, parseRootList, parseShortVideoRoots } from "./src/server/root-config.js";
-import { readBodyText, readJsonBody, readJsonFile, safeChildPath } from "./src/server/request-io.js";
-import { sendJson, sendText, sendHtml, redirect, notFound } from "./src/server/responses.js";
-import { createStaticFileServer } from "./src/server/static-files.js";
-import { createStudioService } from "./src/server/studio-service.js";
-import { createTxtFormatToolService } from "./src/server/txt-format-tool-service.js";
-import { createUserStateService } from "./src/server/user-state-service.js";
-import { createVideoLibraryImageService } from "./src/server/video-library-image-service.js";
-import { createVideoLibraryPresenterService } from "./src/server/video-library-presenter-service.js";
-import { createVideoProbeService } from "./src/server/video-probe-service.js";
-import { createWorkCodeIndexService } from "./src/server/work-code-index-service.js";
-import { createWorkCoverMutationService } from "./src/server/work-cover-mutation-service.js";
-import { createWorkInfoService } from "./src/server/work-info-service.js";
-import { createWorkLocalMutationService } from "./src/server/work-local-mutation-service.js";
+import { discoverFanHaoModules } from "./src/fanhao/module-registry.js";
+import { createImageGalleryDbService } from "./src/modules/content-index/server/image-gallery-db-service.js";
+import { createImageLibraryIndexService } from "./src/modules/content-index/server/image-library-index-service.js";
+import { createImageLibraryService } from "./src/modules/content-index/server/image-library-service.js";
+import { createActorAvatarService } from "./src/modules/fanhao/server/actor-avatar-service.js";
+import { createActorMovieService } from "./src/modules/fanhao/server/actor-movie-service.js";
+import { createActorProfileService } from "./src/modules/fanhao/server/actor-profile-service.js";
+import { createAdminActorAvatarService } from "./src/modules/fanhao/server/admin-actor-avatar-service.js";
+import { createAdminCoreMutationService } from "./src/modules/fanhao/server/admin-core-mutation-service.js";
+import { createAdminMaintenanceTaskService } from "./src/modules/fanhao/server/admin-maintenance-task-service.js";
+import { createAdminPersonService } from "./src/modules/fanhao/server/admin-person-service.js";
+import { createCoreDbService } from "./src/modules/fanhao/server/core-db-service.js";
+import { createCoreLibraryService } from "./src/modules/fanhao/server/core-library-service.js";
+import { createCoreLibrarySyncService } from "./src/modules/fanhao/server/core-library-sync-service.js";
+import { createFavoriteStateService } from "./src/modules/fanhao/server/favorite-state-service.js";
+import { createLibraryPathServices } from "./src/modules/fanhao/server/library-paths.js";
+import { createLocalLibraryIndexService } from "./src/modules/fanhao/server/local-library-index-service.js";
+import { createLocalLibraryScanService } from "./src/modules/fanhao/server/local-library-scan-service.js";
+import { createManualCoverStateService } from "./src/modules/fanhao/server/manual-cover-state-service.js";
+import { createPeopleScopeService } from "./src/modules/fanhao/server/people-scope-service.js";
+import { createPersonLibraryService } from "./src/modules/fanhao/server/person-library-service.js";
+import { createPersonListService } from "./src/modules/fanhao/server/person-list-service.js";
+import { createPersonMergeService } from "./src/modules/fanhao/server/person-merge-service.js";
+import { createPlaybackProgressService } from "./src/modules/fanhao/server/playback-progress-service.js";
+import { createRankingService } from "./src/modules/fanhao/server/ranking-service.js";
+import { createStudioService } from "./src/modules/fanhao/server/studio-service.js";
+import { createUserStateService } from "./src/modules/fanhao/server/user-state-service.js";
+import { createVideoLibraryImageService } from "./src/modules/fanhao/server/video-library-image-service.js";
+import { createVideoLibraryPresenterService } from "./src/modules/fanhao/server/video-library-presenter-service.js";
+import { createWorkCodeIndexService } from "./src/modules/fanhao/server/work-code-index-service.js";
+import { createWorkCoverMutationService } from "./src/modules/fanhao/server/work-cover-mutation-service.js";
+import { createWorkInfoService } from "./src/modules/fanhao/server/work-info-service.js";
+import { createWorkLocalMutationService } from "./src/modules/fanhao/server/work-local-mutation-service.js";
+import { createGalleryMediaService } from "./src/modules/media/server/gallery-media-service.js";
+import { createGalleryMetadataService } from "./src/modules/media/server/gallery-metadata-service.js";
+import { createMangaService } from "./src/modules/photos/server/manga-service.js";
+import { createPhotoSetService } from "./src/modules/photos/server/photo-set-service.js";
+import { createAdminScriptService } from "./src/modules/system/server/admin-script-service.js";
+import { createAdminSettingsService } from "./src/modules/system/server/admin-settings-service.js";
+import { createAdminTaskOrchestrationService } from "./src/modules/system/server/admin-task-orchestration-service.js";
+import { createAdminTaskService } from "./src/modules/system/server/admin-task-service.js";
+import { createAppConfigService } from "./src/modules/system/server/app-config-service.js";
+import { createDoubanCookieService } from "./src/modules/system/server/douban-cookie-service.js";
+import { createAccessLogger } from "./src/platform/server/access-log.js";
+import { createAuthServices } from "./src/platform/server/auth.js";
+import { createFileServer } from "./src/platform/server/file-server.js";
+import { createRequestHandler } from "./src/platform/server/http-app.js";
+import { createImageReaderCacheService } from "./src/platform/server/image-reader-cache-service.js";
+import { createMediaResponseService } from "./src/platform/server/media-response-service.js";
+import { createMediaStreamService } from "./src/platform/server/media-stream-service.js";
+import { readBodyText, readJsonBody, readJsonFile, safeChildPath } from "./src/platform/server/request-io.js";
+import { sendJson, sendText, sendHtml, redirect, notFound } from "./src/platform/server/responses.js";
+import { galleryMediaSources, parseLibraryRoots, parseMusicRoots, parsePhotoSetRoots, parseRootList, parseShortVideoRoots } from "./src/platform/server/root-config.js";
+import { createStaticFileServer } from "./src/platform/server/static-files.js";
+import { createVideoProbeService } from "./src/platform/server/video-probe-service.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -213,13 +198,6 @@ const { serveDownloadFile, serveInlineFile, serveRangedFile } = createFileServer
   notFound,
   safeStat
 });
-const novelsModule = createNovelsModule({
-  dbPath: NOVEL_DB_PATH,
-  novelUploadMaxBodyBytes: NOVEL_UPLOAD_MAX_BODY_BYTES,
-  notFound,
-  readJsonBody,
-  sendJson
-});
 const mangaService = createMangaService({
   root: MANGA_LIBRARY_ROOT,
   mimeTypes: MIME_TYPES,
@@ -243,6 +221,11 @@ const imageLibraryIndexService = createImageLibraryIndexService({
   readJsonFile,
   safeStat
 });
+const imageGalleryDbService = createImageGalleryDbService({
+  dbPath: IMAGE_GALLERY_DB_PATH,
+  ensureDataDir
+});
+const getImageGalleryDb = imageGalleryDbService.getDb;
 const photoSetService = createPhotoSetService({
   archiveImageExts: ARCHIVE_IMAGE_EXTS,
   archiveImagesPayload,
@@ -365,32 +348,6 @@ const mediaStreamService = createMediaStreamService({
   safeStat,
   sendJson,
   serveRangedFile
-});
-const shortVideosModule = createShortVideosModule({
-  dbPath: SHORT_VIDEO_DB_PATH,
-  ffmpegPath: FFMPEG_PATH,
-  roots: SHORT_VIDEO_ROOTS,
-  downloadManagerDbPath: SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH,
-  downloadManagerSyncMs: SHORT_VIDEO_DOWNLOAD_MANAGER_SYNC_MS,
-  mediaResponseService,
-  mediaStreamService,
-  notFound,
-  readJsonBody,
-  requireLocalAdmin,
-  sendJson,
-  sharedCache: imageReaderCacheService
-});
-const musicModule = createMusicModule({
-  dbPath: MUSIC_DB_PATH,
-  ffprobePath: FFPROBE_PATH,
-  roots: MUSIC_ROOTS,
-  mediaResponseService,
-  mediaStreamService,
-  serveDownloadFile,
-  notFound,
-  readJsonBody,
-  requireLocalAdmin,
-  sendJson
 });
 const galleryMediaService = createGalleryMediaService({
   coverBoxSize: IMAGE_GALLERY_COVER_BOX_SIZE,
@@ -689,80 +646,6 @@ const videoLibraryPresenterService = createVideoLibraryPresenterService({
   workCoverRow,
   workInfoRow
 });
-const galleryModule = createGalleryModule({
-  cleanupImageReaderCache: imageReaderCacheService.cleanup,
-  galleryMediaService,
-  imageLibraryService,
-  imageReaderCacheStatus: imageReaderCacheService.status,
-  mangaService,
-  notFound,
-  photoSetService,
-  publicAppConfig: appConfigService.publicConfig,
-  requireLocalAdmin,
-  sendJson,
-  galleryMetadataService,
-  mediaStreamService
-});
-const catalogModule = createCatalogModule({
-  notFound,
-  rankingService,
-  sendJson,
-  studioService
-});
-const videoLibraryModule = createVideoLibraryModule({
-  adminCoreMutationService,
-  actorProfileMergeCandidates,
-  actorProfileRow,
-  actorMissingSearchWorks,
-  clampInteger,
-  coreMissingWorksForPerson: coreLibraryService.missingWorksForPerson,
-  corePersonFallbackRecord: coreLibraryService.personFallbackRecord,
-  defaultWorkLimit: DEFAULT_WORK_LIMIT,
-  dedupeWorksForDisplay,
-  enrichLocalWorksWithActorMovieIndex,
-  enrichLocalWorksWithActorMovieInfo,
-  favoriteStateService,
-  galleryMediaService,
-  generateWorkCover: workCoverMutationService.generateWorkCover,
-  getLibrary: () => library,
-  isVrWork,
-  matchesWorkSearch,
-  maxActorAvatarBytes: MAX_ACTOR_AVATAR_BYTES,
-  maxWorkLimit: MAX_WORK_LIMIT,
-  manualCoverStateService,
-  mediaResponseService,
-  mediaStreamService,
-  mergedActorMovieRows,
-  mergedPersonRecord,
-  missingActorWorksForPerson,
-  notFound,
-  peopleScopeService,
-  prewarmRemoteImagesForWorks,
-  publicActorProfile,
-  publicPerson,
-  publicWork,
-  publicWorkAvailability,
-  rankingMissingSearchWorks,
-  readJsonBody,
-  requireLocalAdmin,
-  requireTrustedFileMutation,
-  resolveLibraryPersonByPublicId,
-  resolveLibraryWorkByPublicId,
-  resolveVideoFileByPublicId,
-  searchPeople,
-  sendJson,
-  storedWorkCodeKey,
-  videoProbeService,
-  workLocalMutationService,
-  workCoverRow,
-  workCodeKeySetForWorks,
-  workHasLocalMarker,
-  workInfoRow,
-  playbackProgressService,
-  workRating,
-  workRatingCount,
-  workReleaseDate
-});
 const adminScriptService = createAdminScriptService({
   definitions: ADMIN_SCRIPT_DEFINITIONS,
   hasPerson: (personId) => library.peopleById.has(String(personId || "")),
@@ -783,7 +666,7 @@ const adminTaskOrchestrationService = createAdminTaskOrchestrationService({
 const adminMaintenanceTaskService = createAdminMaintenanceTaskService({
   actorProfileRow,
   adminTaskService,
-  clearShortVideoListCache: shortVideosModule.clearListCache,
+  clearShortVideoListCache: () => moduleRegistry.get("short-videos")?.clearListCache?.(),
   clearSearchSourceCaches,
   clampInteger,
   coverGenerationStatus: workCoverMutationService.generationStatus,
@@ -809,33 +692,6 @@ const doubanCookieService = createDoubanCookieService({
 const adminSettingsService = createAdminSettingsService({
   appConfigService,
   doubanCookieService
-});
-const txtFormatToolService = createTxtFormatToolService({
-  cwd: __dirname,
-  maxBodyBytes: TXT_TOOL_MAX_BODY_BYTES,
-  maxFileBytes: TXT_TOOL_MAX_FILE_BYTES,
-  previewBytes: TXT_TOOL_PREVIEW_BYTES,
-  sendJson,
-  toolDownloadDir: TOOL_DOWNLOAD_DIR,
-  ttlMs: TOOL_DOWNLOAD_TTL_MS
-});
-const toolsModule = createToolsModule({
-  readJsonBody,
-  sendJson,
-  txtFormatToolService
-});
-const androidUpdateService = createAndroidUpdateService({
-  clampInteger,
-  normalizeExt,
-  notFound,
-  port: PORT,
-  readJsonFile,
-  safeChildPath,
-  updateDir: ANDROID_UPDATE_DIR
-});
-const androidUpdateModule = createAndroidUpdateModule({
-  androidUpdateService,
-  sendJson
 });
 const actorAvatarService = createActorAvatarService({
   avatarExts: ACTOR_AVATAR_EXTS,
@@ -863,26 +719,6 @@ const adminActorAvatarService = createAdminActorAvatarService({
   clampInteger,
   resolveLibraryPersonByPublicId
 });
-const statusModule = createStatusModule({
-  getLastScanError: () => lastScanError,
-  getLibrary: () => library,
-  requestAccess: (req) => requestAccess(req),
-  sendJson
-});
-const userStateModule = createUserStateModule({
-  clampInteger,
-  favoriteStateService,
-  getLibrary: () => library,
-  maxWorkLimit: MAX_WORK_LIMIT,
-  notFound,
-  playbackProgressService,
-  publicWork,
-  readJsonBody,
-  recentWatchedDays: RECENT_WATCHED_DAYS,
-  resolvePlayableVideoFile,
-  sendJson
-});
-let imageGalleryDb = null;
 let coreMapCache = null;
 let workSearchTextCache = null;
 const archiveImageListCache = new Map();
@@ -940,20 +776,6 @@ const personLibraryService = createPersonLibraryService({
   scanPersonDirectory: localLibraryScanService.scanPersonDirectory,
   sourcePathToAbsolute
 });
-const libraryModule = createLibraryModule({
-  appConfigService,
-  getLastScanError: () => lastScanError,
-  getLibrary: () => library,
-  peopleScopeService,
-  personListService,
-  peoplePayloadStamp: libraryPeopleStamp,
-  publicPerson,
-  refreshLibrary,
-  requestAccess: (req) => requestAccess(req),
-  requireLocalAdmin,
-  sendJson,
-  userStateSummary: () => playbackProgressService.userStateSummary()
-});
 const adminPersonService = createAdminPersonService({
   actorMovieService,
   enrichLocalWorksWithActorMovieInfo,
@@ -964,29 +786,210 @@ const adminPersonService = createAdminPersonService({
   resolveLibraryPersonByPublicId,
   sortWorkList
 });
-const adminModule = createAdminModule({
-  adminActorAvatarService,
-  adminMaintenanceTaskService,
-  adminPersonService,
-  adminSettingsService,
-  adminTaskOrchestrationService,
-  getLibrary: () => library,
-  readJsonBody,
-  requireLocalAdmin,
-  sendJson
-});
-const localOpenService = createLocalOpenService({
-  libraryOpenRoots,
-  pathWithinRoot,
-  relativeFromRoot,
-  safeStat,
-  sourcePathToAbsolute
-});
-const localOpenModule = createLocalOpenModule({
-  localOpenService,
-  readJsonBody,
-  requireTrustedNetworkPage,
-  resolvePlayableVideoFile,
+const moduleRegistry = await discoverFanHaoModules({
+  modulesDir: path.join(__dirname, "src", "modules"),
+  context: {
+    moduleDeps: {
+      system: {
+        admin: {
+          adminActorAvatarService,
+          adminMaintenanceTaskService,
+          adminPersonService,
+          adminSettingsService,
+          adminTaskOrchestrationService,
+          getLibrary: () => library,
+          readJsonBody,
+          requireLocalAdmin,
+          sendJson
+        },
+        androidUpdate: {
+          clampInteger,
+          normalizeExt,
+          notFound,
+          port: PORT,
+          readJsonFile,
+          safeChildPath,
+          sendJson,
+          updateDir: ANDROID_UPDATE_DIR
+        },
+        localOpen: {
+          readJsonBody,
+          requireTrustedNetworkPage,
+          resolvePlayableVideoFile,
+          sendJson,
+          service: {
+            libraryOpenRoots,
+            pathWithinRoot,
+            relativeFromRoot,
+            safeStat,
+            sourcePathToAbsolute
+          }
+        },
+        mediaResponseService,
+        status: {
+          getLastScanError: () => lastScanError,
+          getLibrary: () => library,
+          requestAccess: (req) => requestAccess(req),
+          sendJson
+        }
+      },
+      fanhao: {
+        catalog: {
+          notFound,
+          rankingService,
+          sendJson,
+          studioService
+        },
+        library: {
+          appConfigService,
+          getLastScanError: () => lastScanError,
+          getLibrary: () => library,
+          peopleScopeService,
+          personListService,
+          peoplePayloadStamp: libraryPeopleStamp,
+          publicPerson,
+          refreshLibrary,
+          requestAccess: (req) => requestAccess(req),
+          requireLocalAdmin,
+          sendJson,
+          userStateSummary: () => playbackProgressService.userStateSummary()
+        },
+        userState: {
+          clampInteger,
+          favoriteStateService,
+          getLibrary: () => library,
+          maxWorkLimit: MAX_WORK_LIMIT,
+          notFound,
+          playbackProgressService,
+          publicWork,
+          readJsonBody,
+          recentWatchedDays: RECENT_WATCHED_DAYS,
+          resolvePlayableVideoFile,
+          sendJson
+        },
+        videoLibrary: {
+          adminCoreMutationService,
+          actorProfileMergeCandidates,
+          actorProfileRow,
+          actorMissingSearchWorks,
+          clampInteger,
+          coreMissingWorksForPerson: coreLibraryService.missingWorksForPerson,
+          corePersonFallbackRecord: coreLibraryService.personFallbackRecord,
+          defaultWorkLimit: DEFAULT_WORK_LIMIT,
+          dedupeWorksForDisplay,
+          enrichLocalWorksWithActorMovieIndex,
+          enrichLocalWorksWithActorMovieInfo,
+          favoriteStateService,
+          galleryMediaService,
+          generateWorkCover: workCoverMutationService.generateWorkCover,
+          getLibrary: () => library,
+          isVrWork,
+          matchesWorkSearch,
+          maxActorAvatarBytes: MAX_ACTOR_AVATAR_BYTES,
+          maxWorkLimit: MAX_WORK_LIMIT,
+          manualCoverStateService,
+          mediaResponseService,
+          mediaStreamService,
+          mergedActorMovieRows,
+          mergedPersonRecord,
+          missingActorWorksForPerson,
+          notFound,
+          peopleScopeService,
+          playbackProgressService,
+          prewarmRemoteImagesForWorks,
+          publicActorProfile,
+          publicPerson,
+          publicWork,
+          publicWorkAvailability,
+          rankingMissingSearchWorks,
+          readJsonBody,
+          requireLocalAdmin,
+          requireTrustedFileMutation,
+          resolveLibraryPersonByPublicId,
+          resolveLibraryWorkByPublicId,
+          resolveVideoFileByPublicId,
+          searchPeople,
+          sendJson,
+          storedWorkCodeKey,
+          videoProbeService,
+          workCodeKeySetForWorks,
+          workCoverRow,
+          workHasLocalMarker,
+          workInfoRow,
+          workLocalMutationService,
+          workRating,
+          workRatingCount,
+          workReleaseDate
+        }
+      },
+      contentIndex: {
+        imageLibraryService,
+        requireLocalAdmin,
+        sendJson
+      },
+      photos: {
+        cleanupImageReaderCache: imageReaderCacheService.cleanup,
+        imageLibraryService,
+        imageReaderCacheStatus: imageReaderCacheService.status,
+        mangaService,
+        notFound,
+        photoSetService,
+        publicAppConfig: appConfigService.publicConfig,
+        requireLocalAdmin,
+        sendJson
+      },
+      media: {
+        galleryMediaService,
+        galleryMetadataService,
+        mediaStreamService,
+        notFound,
+        sendJson
+      },
+      novels: {
+        dbPath: NOVEL_DB_PATH,
+        novelUploadMaxBodyBytes: NOVEL_UPLOAD_MAX_BODY_BYTES,
+        notFound,
+        readJsonBody,
+        sendJson
+      },
+      shortVideos: {
+        dbPath: SHORT_VIDEO_DB_PATH,
+        downloadManagerDbPath: SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH,
+        downloadManagerSyncMs: SHORT_VIDEO_DOWNLOAD_MANAGER_SYNC_MS,
+        ffmpegPath: FFMPEG_PATH,
+        mediaResponseService,
+        mediaStreamService,
+        notFound,
+        readJsonBody,
+        requireLocalAdmin,
+        roots: SHORT_VIDEO_ROOTS,
+        sendJson,
+        sharedCache: imageReaderCacheService
+      },
+      music: {
+        dbPath: MUSIC_DB_PATH,
+        ffprobePath: FFPROBE_PATH,
+        mediaResponseService,
+        mediaStreamService,
+        notFound,
+        readJsonBody,
+        requireLocalAdmin,
+        roots: MUSIC_ROOTS,
+        sendJson,
+        serveDownloadFile
+      },
+      tools: {
+        cwd: __dirname,
+        maxBodyBytes: TXT_TOOL_MAX_BODY_BYTES,
+        maxFileBytes: TXT_TOOL_MAX_FILE_BYTES,
+        previewBytes: TXT_TOOL_PREVIEW_BYTES,
+        readJsonBody,
+        sendJson,
+        toolDownloadDir: TOOL_DOWNLOAD_DIR,
+        ttlMs: TOOL_DOWNLOAD_TTL_MS
+      }
+    }
+  },
   sendJson
 });
 
@@ -1340,10 +1343,6 @@ function workSearchTextEntry(work) {
   return entry;
 }
 
-function workSearchText(work) {
-  return workSearchTextEntry(work).text;
-}
-
 function matchesWorkSearch(work, query) {
   if (!query) return true;
   const { text, normalized } = workSearchTextEntry(work);
@@ -1363,267 +1362,6 @@ function hasCoreDb() {
   return coreDbService.hasDb();
 }
 
-function getImageGalleryDb() {
-  if (!imageGalleryDb) {
-    ensureDataDir();
-    imageGalleryDb = new DatabaseSync(IMAGE_GALLERY_DB_PATH);
-    imageGalleryDb.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
-    imageGalleryDb.exec(`
-      CREATE TABLE IF NOT EXISTS photo_set_covers (
-        album_id TEXT PRIMARY KEY,
-        archive_path TEXT NOT NULL,
-        archive_size INTEGER,
-        archive_mtime_ms INTEGER,
-        member_path TEXT,
-        cover_mime TEXT,
-        cover_blob BLOB,
-        cover_bytes INTEGER,
-        source_bytes INTEGER,
-        generator_version INTEGER NOT NULL DEFAULT 1,
-        status TEXT NOT NULL DEFAULT 'ok',
-        error TEXT,
-        generated_at TEXT,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_photo_set_covers_archive_path ON photo_set_covers(archive_path);
-      CREATE INDEX IF NOT EXISTS idx_photo_set_covers_status ON photo_set_covers(status);
-      CREATE INDEX IF NOT EXISTS idx_photo_set_covers_updated_at ON photo_set_covers(updated_at);
-      CREATE TABLE IF NOT EXISTS photo_set_image_indexes (
-        archive_path TEXT PRIMARY KEY,
-        archive_size INTEGER,
-        archive_mtime_ms INTEGER,
-        image_count INTEGER,
-        images_json TEXT NOT NULL,
-        indexed_at TEXT,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_photo_set_image_indexes_updated_at ON photo_set_image_indexes(updated_at);
-      CREATE TABLE IF NOT EXISTS tv_series_metadata (
-        series_key TEXT PRIMARY KEY,
-        category TEXT,
-        series_name TEXT NOT NULL,
-        douban_id TEXT,
-        douban_url TEXT,
-        douban_title TEXT,
-        original_title TEXT,
-        aka_json TEXT,
-        official_site TEXT,
-        year TEXT,
-        rating REAL,
-        rating_count INTEGER,
-        rating_stars_json TEXT,
-        rating_better_than_json TEXT,
-        directors_json TEXT,
-        writers_json TEXT,
-        genres_json TEXT,
-        actors_json TEXT,
-        countries_json TEXT,
-        languages_json TEXT,
-        pubdate TEXT,
-        release_dates_json TEXT,
-        season_count INTEGER,
-        episode_count INTEGER,
-        episode_duration TEXT,
-        durations_json TEXT,
-        imdb_id TEXT,
-        info_json TEXT,
-        json_ld_json TEXT,
-        summary TEXT,
-        cover_url TEXT,
-        cover_mime TEXT,
-        cover_blob BLOB,
-        cover_bytes INTEGER,
-        source TEXT,
-        detail_source TEXT,
-        status TEXT NOT NULL DEFAULT 'ok',
-        error TEXT,
-        fetched_at TEXT,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_tv_series_metadata_category ON tv_series_metadata(category);
-      CREATE INDEX IF NOT EXISTS idx_tv_series_metadata_douban_id ON tv_series_metadata(douban_id);
-      CREATE INDEX IF NOT EXISTS idx_tv_series_metadata_status ON tv_series_metadata(status);
-      CREATE TABLE IF NOT EXISTS movie_metadata (
-        media_id TEXT PRIMARY KEY,
-        category TEXT,
-        movie_title TEXT NOT NULL,
-        douban_id TEXT,
-        douban_url TEXT,
-        douban_title TEXT,
-        original_title TEXT,
-        aka_json TEXT,
-        official_site TEXT,
-        year TEXT,
-        rating REAL,
-        rating_count INTEGER,
-        rating_stars_json TEXT,
-        rating_better_than_json TEXT,
-        directors_json TEXT,
-        writers_json TEXT,
-        genres_json TEXT,
-        actors_json TEXT,
-        countries_json TEXT,
-        languages_json TEXT,
-        pubdate TEXT,
-        release_dates_json TEXT,
-        season_count INTEGER,
-        episode_count INTEGER,
-        episode_duration TEXT,
-        durations_json TEXT,
-        imdb_id TEXT,
-        info_json TEXT,
-        json_ld_json TEXT,
-        summary TEXT,
-        cover_url TEXT,
-        cover_mime TEXT,
-        cover_blob BLOB,
-        cover_bytes INTEGER,
-        source TEXT,
-        detail_source TEXT,
-        status TEXT NOT NULL DEFAULT 'ok',
-        error TEXT,
-        fetched_at TEXT,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_movie_metadata_category ON movie_metadata(category);
-      CREATE INDEX IF NOT EXISTS idx_movie_metadata_douban_id ON movie_metadata(douban_id);
-      CREATE INDEX IF NOT EXISTS idx_movie_metadata_status ON movie_metadata(status);
-      CREATE TABLE IF NOT EXISTS gallery_media_covers (
-        media_id TEXT PRIMARY KEY,
-        source_path TEXT NOT NULL,
-        source_size INTEGER,
-        source_mtime_ms INTEGER,
-        cover_mime TEXT,
-        cover_blob BLOB,
-        cover_bytes INTEGER,
-        generator_version INTEGER NOT NULL DEFAULT 1,
-        status TEXT NOT NULL DEFAULT 'ok',
-        error TEXT,
-        generated_at TEXT,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_gallery_media_covers_status ON gallery_media_covers(status);
-      CREATE INDEX IF NOT EXISTS idx_gallery_media_covers_updated_at ON gallery_media_covers(updated_at);
-    `);
-    ensureColumn(imageGalleryDb, "photo_set_covers", "archive_size", "INTEGER");
-    ensureColumn(imageGalleryDb, "photo_set_covers", "archive_mtime_ms", "INTEGER");
-    ensureColumn(imageGalleryDb, "photo_set_covers", "member_path", "TEXT");
-    ensureColumn(imageGalleryDb, "photo_set_covers", "cover_mime", "TEXT");
-    ensureColumn(imageGalleryDb, "photo_set_covers", "cover_blob", "BLOB");
-    ensureColumn(imageGalleryDb, "photo_set_covers", "cover_bytes", "INTEGER");
-    ensureColumn(imageGalleryDb, "photo_set_covers", "source_bytes", "INTEGER");
-    ensureColumn(imageGalleryDb, "photo_set_covers", "generator_version", "INTEGER NOT NULL DEFAULT 1");
-    ensureColumn(imageGalleryDb, "photo_set_covers", "status", "TEXT NOT NULL DEFAULT 'ok'");
-    ensureColumn(imageGalleryDb, "photo_set_covers", "error", "TEXT");
-    ensureColumn(imageGalleryDb, "photo_set_covers", "generated_at", "TEXT");
-    ensureColumn(imageGalleryDb, "photo_set_covers", "updated_at", "TEXT");
-    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "archive_path", "TEXT");
-    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "archive_size", "INTEGER");
-    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "archive_mtime_ms", "INTEGER");
-    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "image_count", "INTEGER");
-    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "images_json", "TEXT");
-    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "indexed_at", "TEXT");
-    ensureColumn(imageGalleryDb, "photo_set_image_indexes", "updated_at", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "category", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "series_name", "TEXT NOT NULL DEFAULT ''");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "douban_id", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "douban_url", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "douban_title", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "original_title", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "aka_json", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "official_site", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "year", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "rating", "REAL");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "rating_count", "INTEGER");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "rating_stars_json", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "rating_better_than_json", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "directors_json", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "writers_json", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "genres_json", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "actors_json", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "countries_json", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "languages_json", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "pubdate", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "release_dates_json", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "season_count", "INTEGER");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "episode_count", "INTEGER");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "episode_duration", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "durations_json", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "imdb_id", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "info_json", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "json_ld_json", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "summary", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "cover_url", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "cover_mime", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "cover_blob", "BLOB");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "cover_bytes", "INTEGER");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "source", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "detail_source", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "status", "TEXT NOT NULL DEFAULT 'ok'");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "error", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "fetched_at", "TEXT");
-    ensureColumn(imageGalleryDb, "tv_series_metadata", "updated_at", "TEXT NOT NULL DEFAULT ''");
-    ensureColumn(imageGalleryDb, "movie_metadata", "category", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "movie_title", "TEXT NOT NULL DEFAULT ''");
-    ensureColumn(imageGalleryDb, "movie_metadata", "douban_id", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "douban_url", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "douban_title", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "original_title", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "aka_json", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "official_site", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "year", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "rating", "REAL");
-    ensureColumn(imageGalleryDb, "movie_metadata", "rating_count", "INTEGER");
-    ensureColumn(imageGalleryDb, "movie_metadata", "rating_stars_json", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "rating_better_than_json", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "directors_json", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "writers_json", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "genres_json", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "actors_json", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "countries_json", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "languages_json", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "pubdate", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "release_dates_json", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "season_count", "INTEGER");
-    ensureColumn(imageGalleryDb, "movie_metadata", "episode_count", "INTEGER");
-    ensureColumn(imageGalleryDb, "movie_metadata", "episode_duration", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "durations_json", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "imdb_id", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "info_json", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "json_ld_json", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "summary", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "cover_url", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "cover_mime", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "cover_blob", "BLOB");
-    ensureColumn(imageGalleryDb, "movie_metadata", "cover_bytes", "INTEGER");
-    ensureColumn(imageGalleryDb, "movie_metadata", "source", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "detail_source", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "status", "TEXT NOT NULL DEFAULT 'ok'");
-    ensureColumn(imageGalleryDb, "movie_metadata", "error", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "fetched_at", "TEXT");
-    ensureColumn(imageGalleryDb, "movie_metadata", "updated_at", "TEXT NOT NULL DEFAULT ''");
-    ensureColumn(imageGalleryDb, "gallery_media_covers", "source_path", "TEXT NOT NULL DEFAULT ''");
-    ensureColumn(imageGalleryDb, "gallery_media_covers", "source_size", "INTEGER");
-    ensureColumn(imageGalleryDb, "gallery_media_covers", "source_mtime_ms", "INTEGER");
-    ensureColumn(imageGalleryDb, "gallery_media_covers", "cover_mime", "TEXT");
-    ensureColumn(imageGalleryDb, "gallery_media_covers", "cover_blob", "BLOB");
-    ensureColumn(imageGalleryDb, "gallery_media_covers", "cover_bytes", "INTEGER");
-    ensureColumn(imageGalleryDb, "gallery_media_covers", "generator_version", "INTEGER NOT NULL DEFAULT 1");
-    ensureColumn(imageGalleryDb, "gallery_media_covers", "status", "TEXT NOT NULL DEFAULT 'ok'");
-    ensureColumn(imageGalleryDb, "gallery_media_covers", "error", "TEXT");
-    ensureColumn(imageGalleryDb, "gallery_media_covers", "generated_at", "TEXT");
-    ensureColumn(imageGalleryDb, "gallery_media_covers", "updated_at", "TEXT NOT NULL DEFAULT ''");
-  }
-  return imageGalleryDb;
-}
-
-function ensureColumn(db, table, column, definition) {
-  const rows = db.prepare(`PRAGMA table_info(${table})`).all();
-  if (!rows.some((row) => row.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-  }
-}
-
 function resolveLibraryPersonByPublicId(personId) {
   const value = String(personId || "");
   return library.peopleById.get(value) || null;
@@ -1638,10 +1376,6 @@ function resolveVideoFileByPublicId(videoId) {
   const direct = library.filesById.get(value);
   if (direct?.type === "video") return direct;
   return null;
-}
-
-function corePersonRow(personId) {
-  return coreLibraryService.personRow(personId);
 }
 
 function coreImageUrl(row) {
@@ -1666,10 +1400,6 @@ function publicCoreWorkCover(workId) {
 
 function coreImageRow(imageId) {
   return videoLibraryImageService.coreImageRow(imageId);
-}
-
-function actorProfileRowsById() {
-  return actorProfileService.rowsById();
 }
 
 function actorProfileRow(personId) {
@@ -1769,83 +1499,12 @@ function clearSearchSourceCaches() {
   workSearchTextCache = null;
 }
 
-function workInfoRowsById() {
-  return workInfoService.rowsById();
-}
-
 function workInfoRow(workId) {
   return workInfoService.row(workId);
 }
 
 function studioCatalogStamp() {
   return `${library.scannedAt || ""}:${workInfoStamp()}:studio-v1`;
-}
-
-function normalizeStudioName(value) {
-  return String(value || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
-function workCodePrefix(value) {
-  const code = normalizeWorkCode(value) || String(value || "").trim();
-  const match = /^([A-Za-z0-9]{2,12})[-_]/.exec(code);
-  return match ? match[1].toUpperCase() : "";
-}
-
-function studioMakerId(name, url = "") {
-  return createId("mk", `${normalizeStudioName(name)}|${publicRemoteUrl(url)}`);
-}
-
-function studioSeriesId(makerId, name, kind = "series", url = "") {
-  return createId("sr", `${makerId}|${normalizeStudioName(name)}|${kind}|${publicRemoteUrl(url)}`);
-}
-
-function countLocalWork(workId) {
-  return library.worksById.has(workId) ? 1 : 0;
-}
-
-function dateRangePush(stats, releaseDate) {
-  const value = String(releaseDate || "").trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return;
-  if (!stats.firstReleaseDate || value < stats.firstReleaseDate) stats.firstReleaseDate = value;
-  if (!stats.latestReleaseDate || value > stats.latestReleaseDate) stats.latestReleaseDate = value;
-}
-
-function incrementStudioStats(stats, row) {
-  stats.workCount += 1;
-  stats.localWorkCount += countLocalWork(row.work_id);
-  dateRangePush(stats, row.release_date);
-}
-
-function incrementPrefixStats(stats, row) {
-  stats.workCount += 1;
-  stats.localWorkCount += countLocalWork(row.work_id);
-}
-
-function ensureStudioCatalog({ force = false } = {}) {
-  return studioService.ensureCatalog({ force });
-}
-
-function studioPrefixRowsForMaker(makerId) {
-  return studioService.prefixRowsForMaker(makerId);
-}
-
-function studioSeriesRowsForMaker(makerId) {
-  return studioService.seriesRowsForMaker(makerId);
-}
-
-function publicStudioSeries(row, prefixRows = []) {
-  return studioService.publicSeries(row, prefixRows);
-}
-
-function publicStudioMaker(row, seriesRows = [], prefixRows = []) {
-  return studioService.publicMaker(row, seriesRows, prefixRows);
-}
-
-function actorMovieRowsByPerson() {
-  return actorMovieService.rowsByPerson();
 }
 
 function actorMovieRows(personId) {
@@ -1870,26 +1529,6 @@ function personMergeStamp() {
   return `${library.scannedAt || ""}:${actorProfileStamp()}:${actorMovieStamp()}`;
 }
 
-function preferCanonicalMergePerson(a, b) {
-  const aF = (a.sourcePaths || []).some((item) => /^f:\//i.test(String(item || "").replaceAll("\\", "/")));
-  const bF = (b.sourcePaths || []).some((item) => /^f:\//i.test(String(item || "").replaceAll("\\", "/")));
-  return (
-    Number(bF) - Number(aF) ||
-    actorMovieRows(b.id).length - actorMovieRows(a.id).length ||
-    Number(b.workCount || 0) - Number(a.workCount || 0) ||
-    Number(b.sourceCount || 0) - Number(a.sourceCount || 0) ||
-    String(a.name || "").localeCompare(String(b.name || ""), undefined, { numeric: true, sensitivity: "base" })
-  );
-}
-
-function personMergeMaps() {
-  return personMergeService.maps();
-}
-
-function canonicalPersonId(personId) {
-  return personMergeService.canonicalId(personId);
-}
-
 function mergedPersonMembers(personId) {
   return personMergeService.members(personId);
 }
@@ -1910,14 +1549,6 @@ function displayPersonForWork(personId) {
   return personMergeService.displayPersonForWork(personId);
 }
 
-function actorMovieRowsByCodeKey() {
-  return actorMovieService.rowsByCodeKey();
-}
-
-function actorMovieRowsForWorks(works = []) {
-  return actorMovieService.rowsForWorks(works);
-}
-
 function enrichLocalWorksWithActorMovieIndex(localWorks) {
   return actorMovieService.enrichLocalWorksWithIndex(localWorks);
 }
@@ -1932,14 +1563,6 @@ function localWorkByCodeKey() {
 
 function rankingMissingSearchWorks() {
   return rankingService.missingSearchWorks();
-}
-
-function actorMissingWorkFromRow(person, row, codeKey = "") {
-  return actorMovieService.missingWorkFromRow(person, row, codeKey);
-}
-
-function actorMovieInfoSummary(row, fallbackCode = "") {
-  return actorMovieService.infoSummary(row, fallbackCode);
 }
 
 function workCodeKeys(work) {
@@ -1995,14 +1618,6 @@ function enrichLocalWorksWithActorMovieInfo(localWorks, actorRows = []) {
 
 function actorMissingSearchWorks(excludedCodeKeys = new Set()) {
   return actorMovieService.missingSearchWorks(excludedCodeKeys);
-}
-
-function filterExcludedMissingWorks(works, excludedCodeKeys = new Set()) {
-  if (!excludedCodeKeys?.size) return works;
-  return works.filter((work) => {
-    const codeKey = storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title);
-    return !codeKey || !excludedCodeKeys.has(codeKey);
-  });
 }
 
 function missingActorWorksForPerson(person, rows = actorMovieRows(person.id), excludedCodeKeys = new Set()) {
@@ -2083,18 +1698,6 @@ function proxiedRemoteImageUrlArray(values) {
   return mediaResponseService.proxiedRemoteImageUrlArray(values);
 }
 
-function publicRemoteUrlArray(values) {
-  const urls = [];
-  const seen = new Set();
-  for (const value of Array.isArray(values) ? values : []) {
-    const url = publicRemoteUrl(value);
-    if (!url || seen.has(url)) continue;
-    seen.add(url);
-    urls.push(url);
-  }
-  return urls;
-}
-
 function firstPresentValue(...values) {
   for (const value of values) {
     if (value === null || value === undefined) continue;
@@ -2127,10 +1730,6 @@ function publicWorkInfoSummary(row, fallback = null) {
 
 function publicWorkInfoMetadata(row) {
   return workInfoService.publicMetadata(row);
-}
-
-function publicEntityLinks(rows, fallback = []) {
-  return workInfoService.entityLinks(rows, fallback);
 }
 
 function actorIdFromJavdbUrl(value) {
@@ -2343,13 +1942,13 @@ function applyAdminTaskInvalidations(task) {
     imageLibraryIndexService.invalidate();
   }
   if (invalidates.has("novels")) {
-    novelsModule.invalidate();
+    moduleRegistry.get("novels")?.invalidate?.();
   }
   if (invalidates.has("music")) {
-    musicModule.invalidate();
+    moduleRegistry.get("music")?.invalidate?.();
   }
   if (invalidates.has("shortVideos")) {
-    shortVideosModule.clearListCache?.();
+    moduleRegistry.get("short-videos")?.clearListCache?.();
   }
   if (invalidates.has("userState")) userStateService.load();
 }
@@ -2390,10 +1989,6 @@ function archiveImageListSignature(archivePath) {
 function archiveListCacheKeyFromSignature(signature) {
   if (!signature) return "";
   return `${signature.archivePath}|${signature.archiveSize}|${signature.archiveMtimeMs}`;
-}
-
-function archiveListCacheKey(archivePath) {
-  return archiveListCacheKeyFromSignature(archiveImageListSignature(archivePath));
 }
 
 function sliceArchiveImagePayload(payload, limit = 0) {
@@ -2799,52 +2394,11 @@ function requireTrustedFileMutation(req, res) {
 }
 
 async function routeApi(req, res, url) {
-  if (await statusModule.routeApi(req, res, url)) return true;
-
-  if (await androidUpdateModule.routeApi(req, res, url)) return true;
-
-  if (await libraryModule.routeReadApi(req, res, url)) return true;
-
-  if (await catalogModule.routeApi(req, res, url)) return true;
-
-  if (await galleryModule.routeApi(req, res, url)) return true;
-
-  if (await shortVideosModule.routeApi(req, res, url)) return true;
-
-  if (await musicModule.routeApi(req, res, url)) return true;
-
-  if (await novelsModule.routeApi(req, res, url)) return true;
-
-  if (await libraryModule.routeMutationApi(req, res, url)) return true;
-
-  if (await toolsModule.routeApi(req, res, url)) return true;
-
-  if (await adminModule.routeApi(req, res, url)) return true;
-
-  if (await localOpenModule.routeApi(req, res, url)) return true;
-
-  if (await userStateModule.routeApi(req, res, url)) return true;
-
-  if (await videoLibraryModule.routeApi(req, res, url)) return true;
-
-  return false;
+  return moduleRegistry.routeApi(req, res, url);
 }
 
 async function routeMedia(req, res, url) {
-  if (url.pathname === "/media/remote-image" && req.method === "GET") {
-    await mediaResponseService.serveCachedRemoteImage(req, res, url);
-    return true;
-  }
-
-  if (await videoLibraryModule.routeMedia(req, res, url)) return true;
-
-  if (await galleryModule.routeMedia(req, res, url)) return true;
-
-  if (await shortVideosModule.routeMedia(req, res, url)) return true;
-
-  if (await musicModule.routeMedia(req, res, url)) return true;
-
-  return false;
+  return moduleRegistry.routeMedia(req, res, url);
 }
 
 function getLanAddresses() {
@@ -2861,9 +2415,9 @@ function getLanAddresses() {
 
 userStateService.load();
 appConfigService.load();
-txtFormatToolService.cleanup();
 imageReaderCacheService.startCleanupTimer();
 localLibraryIndexService.initializeLibrary();
+await moduleRegistry.start();
 
 const requestHandler = createRequestHandler({
   applyAppCookie,
@@ -2873,7 +2427,7 @@ const requestHandler = createRequestHandler({
   sendLoginRequired,
   routeApi,
   routeMedia,
-  renderAndroidUpdatePage: androidUpdateService.renderPage,
+  renderAndroidUpdatePage: moduleRegistry.get("system").renderAndroidUpdatePage,
   serveStatic,
   sendHtml,
   sendJson,
@@ -2881,6 +2435,29 @@ const requestHandler = createRequestHandler({
 });
 
 const server = http.createServer(requestHandler);
+let shuttingDown = false;
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal}`);
+  const forceTimer = setTimeout(() => process.exit(1), 5000);
+  forceTimer.unref?.();
+  server.close(async () => {
+    try {
+      await moduleRegistry.stop();
+      clearTimeout(forceTimer);
+      process.exit(0);
+    } catch (error) {
+      console.error("[shutdown]", error);
+      process.exit(1);
+    }
+  });
+}
+
+process.once("SIGINT", () => shutdown("SIGINT"));
+process.once("SIGTERM", () => shutdown("SIGTERM"));
+
 server.listen(PORT, HOST, () => {
   console.log(`Local:   http://127.0.0.1:${PORT}`);
   for (const address of getLanAddresses()) {

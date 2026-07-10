@@ -10,11 +10,17 @@
     <link rel="manifest" href="/manifest.webmanifest?v=20260701-gallery-merge-01" />
     <link rel="icon" href="/app-icon.svg?v=20260701-gallery-merge-01" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/app-icon.svg?v=20260701-gallery-merge-01" />
-    <link rel="stylesheet" href="/styles.css?v=20260710-short-video-first-paint-49" />
+    <link rel="stylesheet" href="/styles.css?v=20260710-standalone-modules-music-qq-04" />
   </head>
   <body>
+    <script>
+      if (/^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novels|short-videos|short-video|douyin|music|musics|songs|tools)(?:\/|$)/.test(window.location.pathname)) {
+        document.body.classList.add("standalone-module-view");
+      }
+      if (/^\/music(?:\/|$)/.test(window.location.pathname)) document.body.classList.add("music-view");
+    </script>
     <header class="product-topbar" aria-label="资料库模块">
-      <a class="product-brand" href="/" aria-label="返回 FanHao 番号库">
+      <a class="product-brand" href="/fanhao" aria-label="返回 FanHao 番号库">
         <span class="product-logo">FH</span>
         <span class="product-brand-text">
           <strong>FanHao</strong>
@@ -22,13 +28,13 @@
         </span>
       </a>
       <nav class="product-nav" aria-label="主模块切换">
-        <a class="product-tab active" href="/" data-product-view="people" aria-current="page">番号</a>
-        <a class="product-tab" href="/photo" data-product-view="gallery" data-gallery-mode="photo">套图</a>
-        <a class="product-tab" href="/media" data-product-view="gallery" data-gallery-mode="media">影视</a>
-        <a class="product-tab" href="/novels" data-product-view="novels">小说</a>
-        <a class="product-tab" href="/short-videos" data-product-view="shortVideos">短视频</a>
-        <a class="product-tab" href="/music" data-product-view="music">音乐</a>
-        <a class="product-tab" href="/tools" data-product-view="tools">小工具</a>
+        <a class="product-tab active" href="/fanhao" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="people" aria-current="page">番号</a>
+        <a class="product-tab" href="/photo" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="gallery" data-gallery-mode="photo">套图</a>
+        <a class="product-tab" href="/media" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="gallery" data-gallery-mode="media">影视</a>
+        <a class="product-tab" href="/novels" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="novels">小说</a>
+        <a class="product-tab" href="/short-videos" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="shortVideos">短视频</a>
+        <a class="product-tab" href="/music" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="music">音乐</a>
+        <a class="product-tab" href="/tools" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="tools">小工具</a>
       </nav>
       <div class="product-actions">
         <button class="product-action" id="topRescanButton" type="button">后台作业</button>
@@ -37,33 +43,19 @@
       </div>
     </header>
     <div class="app-shell">
-      <aside class="sidebar" aria-label="人物分类">
-        <div class="brand">
-          <div>
-            <h1>个人视频资料库</h1>
-            <p id="librarySummary">正在扫描资料库</p>
-          </div>
-          <button class="icon-button" id="rescanButton" type="button" title="打开后台刷新作业" aria-label="打开后台刷新作业">
-            <span aria-hidden="true">↻</span>
-          </button>
-          <button class="icon-button" id="adminButton" type="button" title="后台管理" aria-label="后台管理">
-            <span aria-hidden="true">⚙</span>
-          </button>
+      <aside class="sidebar fanhao-sidebar" aria-label="番号二级菜单">
+        <div class="fanhao-sidebar-heading">
+          <span class="eyebrow">番号</span>
+          <h2>资料库</h2>
         </div>
-
-        <label class="search-box">
-          <span aria-hidden="true">⌕</span>
-          <input id="personSearch" type="search" placeholder="搜索人物" autocomplete="off" aria-label="搜索人物" />
-        </label>
-
-        <nav class="view-tabs" aria-label="资料库视图">
+        <nav class="view-tabs fanhao-subnav" aria-label="番号资料库视图">
           <button class="view-tab active" type="button" data-view="people" aria-pressed="true">人物</button>
+          <button class="view-tab" type="button" data-view="studios" aria-pressed="false">厂商</button>
+          <button class="view-tab" type="button" data-view="rankings" aria-pressed="false">排行</button>
+          <button class="view-tab" type="button" data-view="vr" aria-pressed="false">VR</button>
           <button class="view-tab" type="button" data-view="favorites" aria-pressed="false">收藏</button>
-          <button class="view-tab" type="button" data-view="history" aria-pressed="false">继续观看</button>
-          <button class="view-tab" type="button" data-view="rankings" aria-pressed="false">排行榜</button>
+          <button class="view-tab" type="button" data-view="history" aria-pressed="false">历史</button>
         </nav>
-
-        <div class="person-list" id="personList"></div>
       </aside>
 
       <main class="main">
@@ -244,6 +236,6 @@
       </div>
     </template>
 
-    <script src="/app.js?v=20260710-short-video-first-paint-49" type="module"></script>
+    <script src="/app.js?v=20260710-standalone-modules-music-qq-03" type="module"></script>
   </body>
 </html>

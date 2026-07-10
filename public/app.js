@@ -1,18 +1,19 @@
 import { createApiClient, addQueryParam } from "./js/api.js?v=20260701-gallery-merge-01";
-import { createAdminModal } from "./js/pages/admin-modal.js?v=20260708-music-refresh-01";
-import { createGalleryPage } from "./js/pages/gallery-page.js?v=20260701-gallery-merge-01";
-import { createGalleryRenderer } from "./js/pages/gallery-renderer.js?v=20260706-media-player-02";
-import { createMusicPage } from "./js/pages/music-page.js?v=20260708-music-playlist-order-01";
-import { createNovelPage } from "./js/pages/novel-page.js?v=20260701-gallery-merge-01";
-import { createPeoplePage } from "./js/pages/people-page.js?v=20260710-western-merge-01";
-import { createPersonProfile } from "./js/pages/person-profile.js?v=20260710-western-merge-01";
-import { createRankingPage } from "./js/pages/ranking-page.js?v=20260704-ranking-controls-01";
-import { createShortVideoPage } from "./js/pages/short-video-page.js?v=20260710-short-video-first-paint-49";
-import { createToolsPage } from "./js/pages/tools-page.js?v=20260701-gallery-merge-01";
-import { createWorkDetailPage } from "./js/pages/work-detail-page.js?v=20260705-local-marker-a-01";
-import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260710-western-merge-01";
+import { loadModuleCatalog, renderWebModuleNavigation } from "./js/module-navigation.js?v=20260710-module-windows-01";
+import { createGalleryPage } from "./modules/content-index/gallery-page.js?v=20260710-module-registry-01";
+import { createGalleryRenderer } from "./modules/content-index/gallery-renderer.js?v=20260710-module-registry-01";
+import { createPeoplePage } from "./modules/fanhao/people-page.js?v=20260710-module-registry-01";
+import { createPersonProfile } from "./modules/fanhao/person-profile.js?v=20260710-module-registry-01";
+import { createRankingPage } from "./modules/fanhao/ranking-page.js?v=20260710-module-registry-01";
+import { createWorkDetailPage } from "./modules/fanhao/work-detail-page.js?v=20260710-module-registry-01";
+import { createMusicPage } from "./modules/music/music-page.js?v=20260710-music-qq-desktop-02";
+import { createNovelPage } from "./modules/novels/novel-page.js?v=20260710-module-registry-01";
+import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20260710-short-video-search-01";
+import { createAdminModal } from "./modules/system/admin-modal.js?v=20260710-module-registry-01";
+import { createToolsPage } from "./modules/tools/tools-page.js?v=20260710-module-registry-01";
+import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260710-fanhao-sidebar-01";
 
-repairLegacyShell();
+prepareAppShell();
 
 const state = {
   library: null,
@@ -145,7 +146,7 @@ const state = {
   },
   music: {
     query: "",
-    mode: "home",
+    mode: "library",
     artistId: "all",
     albumId: "all",
     genre: "all",
@@ -178,16 +179,12 @@ const state = {
   restoringRoute: false
 };
 
-function repairLegacyShell() {
-  const legacySidebar = document.querySelector(".app-shell > aside.sidebar");
-  if (legacySidebar) {
-    legacySidebar.remove();
-    document.querySelector(".app-shell")?.style.setProperty("display", "block");
-  }
+function prepareAppShell() {
   document.querySelector(".product-actions")?.style.setProperty("display", "flex");
 }
 
 const els = {
+  productNav: document.querySelector(".product-nav"),
   productTabs: [...document.querySelectorAll("[data-product-view]")],
   topRescanButton: document.querySelector("#topRescanButton"),
   topAdminLink: document.querySelector("#topAdminLink"),
@@ -275,6 +272,15 @@ const COVER_RETRY_DELAYS = [700, 1400, 2400, 4000, 6500, 9000];
 const initialParams = new URLSearchParams(window.location.search);
 const isAndroidClient = initialParams.get("client") === "android";
 const api = createApiClient({ isAndroidClient });
+
+async function initializeModuleNavigation() {
+  try {
+    const modules = await loadModuleCatalog(() => api("/api/modules"));
+    els.productTabs = renderWebModuleNavigation(els.productNav, modules);
+  } catch (error) {
+    console.warn("[modules]", error.message || error);
+  }
+}
 const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
 const HISTORY_RANGE_OPTIONS = [
   { value: "30", label: "30 天" },
@@ -312,7 +318,6 @@ const personProfilePage = createPersonProfile({
   coverUrl,
   els,
   formatLibraryPath,
-  formatLibraryPaths,
   formatNumber,
   isPersonBulkDeleteActive,
   isTrustedNetworkFeatureAvailable,
@@ -449,10 +454,8 @@ const galleryRenderer = createGalleryRenderer({
   formatNumber,
   getGalleryPage: () => galleryPage,
   includesText,
-  normalizeUiConfig,
   openAdminScript,
   resetProgressiveCoverLoading,
-  setAdminBusy: adminModal.setBusy,
   state,
   writeStoredFlag
 });
@@ -624,7 +627,7 @@ function currentRouteSnapshot(overrides = {}) {
     musicArtistId: state.activeView === "music" && state.music.artistId !== "all" ? state.music.artistId || "" : "",
     musicAlbumId: state.activeView === "music" && state.music.albumId !== "all" ? state.music.albumId || "" : "",
     musicGenre: state.activeView === "music" && state.music.genre !== "all" ? state.music.genre || "" : "",
-    musicMode: state.activeView === "music" ? state.music.mode || "home" : "home",
+    musicMode: state.activeView === "music" ? state.music.mode || "library" : "library",
     musicPlaylistId: state.activeView === "music" && state.music.mode === "playlist" ? state.music.activePlaylistId || "" : "",
     musicSmartId: state.activeView === "music" && state.music.mode === "smart" ? state.music.activeSmartPlaylistId || "" : "",
     musicQuery: state.activeView === "music" ? state.music.query || "" : "",
@@ -841,10 +844,6 @@ function safeAndroidReturnUrl(value) {
   return "";
 }
 
-function isLocalFileOpenAvailable() {
-  return isTrustedNetworkFeatureAvailable();
-}
-
 function isTrustedNetworkFeatureAvailable() {
   const host = normalizeHostname(window.location.hostname);
   return isLocalHostName(host) || isPrivateLanHost(host);
@@ -1039,6 +1038,12 @@ function productViewForActiveView(view = state.activeView) {
   return "people";
 }
 
+function syncProductShell(view = state.activeView) {
+  const isFanhaoView = productViewForActiveView(view) === "people";
+  document.body.classList.toggle("fanhao-view", isFanhaoView);
+  document.body.classList.toggle("standalone-module-view", !isFanhaoView);
+}
+
 function searchWorksByText(value) {
   const query = String(value || "").trim();
   if (!query) return;
@@ -1064,6 +1069,7 @@ function productButtonActive(button, view = state.activeView) {
 }
 
 function syncNavigationState(view = state.activeView) {
+  syncProductShell(view);
   for (const button of els.productTabs || []) {
     const active = productButtonActive(button, view);
     button.classList.toggle("active", active);
@@ -1072,7 +1078,8 @@ function syncNavigationState(view = state.activeView) {
     else button.removeAttribute("aria-current");
   }
   for (const button of els.viewTabs || []) {
-    const active = button.dataset.view === view;
+    const activeView = view === "search" ? state.searchReturnView || "people" : view;
+    const active = button.dataset.view === activeView;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   }
@@ -1498,8 +1505,7 @@ function setMainHeader(title, pathText) {
 }
 
 function updateBackToPeopleIndexButton() {
-  const productView = productViewForActiveView();
-  document.body.classList.toggle("fanhao-view", productView === "people");
+  syncProductShell();
   document.body.classList.toggle("people-index-view", state.activeView === "people" && !state.selectedPersonId);
   document.body.classList.toggle("person-detail-view", state.activeView === "people" && Boolean(state.selectedPersonId));
   document.body.classList.toggle("ranking-view", state.activeView === "rankings");
@@ -3212,37 +3218,6 @@ els.collectionToggle?.addEventListener("change", (event) => {
 
 els.backToPeopleIndex?.addEventListener("click", returnToPeopleIndex);
 
-for (const button of els.productTabs || []) {
-  button.addEventListener("click", (event) => {
-    event.preventDefault();
-    clearWorkSearch();
-    if (button.dataset.productView === "people") {
-      setPeopleScope(button.dataset.peopleScope || "main").then(() => {
-        setActiveView("people");
-      }).catch((error) => {
-        console.error(error);
-        renderEmpty(error.message || "切换资料库失败");
-      });
-      return;
-    }
-    if (button.dataset.productView === "gallery") {
-      const mode = button.dataset.galleryMode || "photo";
-      const changed = state.activeView !== "gallery" || state.gallery.mode !== mode;
-      state.gallery.mode = mode;
-      resetGalleryReader();
-      if (changed || mode !== "photo") state.gallery.photoView = mode === "photo" ? "collections" : "albums";
-      state.gallery.photoCollection = null;
-      state.gallery.category = mode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all";
-      state.gallery.subCategory = "all";
-      state.gallery.person = "all";
-      state.gallery.visibleLimit = 80;
-      setActiveView("gallery");
-      return;
-    }
-    setActiveView(button.dataset.productView || "people");
-  });
-}
-
 for (const button of els.viewTabs) {
   button.addEventListener("click", () => {
     clearWorkSearch();
@@ -3339,11 +3314,8 @@ window.addEventListener("popstate", () => {
 window.addEventListener("beforeunload", reportCurrentProgress);
 installAndroidClientReturn();
 
-async function applyInitialUrlState() {
-  await applyRoute(routeFromUrl());
-}
-
 async function bootApp() {
+  await initializeModuleNavigation();
   const initialRoute = routeFromUrl();
   if (initialRoute.view === "shortVideos" || initialRoute.view === "music") {
     await applyRoute(initialRoute);

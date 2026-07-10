@@ -6,10 +6,14 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "verify": "npm run verify:codes && npm run verify:metadata && npm run verify:library-merge",
+    "verify": "npm run verify:codes && npm run verify:metadata && npm run verify:library-merge && npm run verify:gallery-db && npm run verify:short-video-client && npm run verify:modules && npm run verify:imports",
     "verify:codes": "node tools/verify_code_parsers.mjs",
     "verify:metadata": "node tools/verify_metadata_parsers.mjs",
-    "verify:library-merge": "node tools/verify_library_merge.mjs"
+    "verify:library-merge": "node tools/verify_library_merge.mjs",
+    "verify:gallery-db": "node tools/verify_image_gallery_db.mjs",
+    "verify:modules": "node tools/verify_module_structure.mjs",
+    "verify:short-video-client": "node tools/verify_short_video_client_structure.mjs",
+    "verify:imports": "node tools/verify_relative_imports.mjs"
   },
   "engines": {
     "node": ">=24"

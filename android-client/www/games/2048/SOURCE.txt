@@ -1,8 +1,0 @@
-Upstream: https://github.com/game-difficulty/2048EndgameTablebase
-Commit: 3dc4d241cc6f7aacdc7e6ac792952a26048b1649
-Integrated path: docs/ static web build
-License: GPL-3.0
-
-Local changes:
-- Added a "返回资料库" link.
-- Changed the document title for the host app.
