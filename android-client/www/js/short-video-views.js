@@ -2,10 +2,12 @@ import { fetchJson } from "./api.js?v=20260706-mobile-web-sync-01";
 import { absoluteUrl, loadPreviewImage } from "./image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact } from "./format.js";
 
-const DEFAULT_LIMIT = 80;
+const DEFAULT_LIMIT = 21;
 const AUTHOR_PAGE_LIMIT = 36;
+const AUTHOR_INITIAL_COUNT = 36;
+const AUTHOR_APPEND_COUNT = 30;
 const DEFAULT_SORT = "published";
-const DEFAULT_SOURCE = "all";
+const DEFAULT_SOURCE = "liked";
 const SHORT_VIDEO_SORT_OPTIONS = [
   ["published", "时间倒序"],
   ["publishedAsc", "时间正序"],
@@ -35,7 +37,8 @@ export function createShortVideoViews(deps) {
     loading: false,
     loadingMore: false,
     status: "",
-    searchFiltersEl: null
+    searchFiltersEl: null,
+    authorVisibleCount: AUTHOR_INITIAL_COUNT
   };
   const browserState = {
     video: null,
@@ -123,10 +126,25 @@ export function createShortVideoViews(deps) {
   }
 
   function applyListParams(params = {}) {
-    listState.query = String(params.query || params.q || "").trim();
-    listState.author = String(params.author || "all").trim() || "all";
-    listState.source = normalizeSource(params.source || params.origin);
-    listState.sort = normalizeSort(params.sort);
+    const nextQuery = String(params.query || params.q || "").trim();
+    let nextAuthor = String(params.author || "all").trim() || "all";
+    let nextSource = normalizeSource(params.source || params.origin);
+    const nextSort = normalizeSort(params.sort);
+    if (nextSource === "authors") nextAuthor = "all";
+    if (nextAuthor === "all" && !["liked", "authors"].includes(nextSource)) nextSource = DEFAULT_SOURCE;
+    const scopeChanged = nextQuery !== listState.query
+      || nextAuthor !== listState.author
+      || nextSource !== listState.source
+      || nextSort !== listState.sort;
+    listState.query = nextQuery;
+    listState.author = nextAuthor;
+    listState.source = nextSource;
+    listState.sort = nextSort;
+    if (scopeChanged) {
+      listState.data = null;
+      listState.status = "";
+      listState.authorVisibleCount = AUTHOR_INITIAL_COUNT;
+    }
   }
 
   async function loadList(renderGuard = null, options = {}) {
@@ -138,7 +156,9 @@ export function createShortVideoViews(deps) {
     if (listState.author && listState.author !== "all") params.set("author", listState.author);
     params.set("source", shortVideoApiSource());
     params.set("sort", listState.sort || DEFAULT_SORT);
-    params.set("limit", String(DEFAULT_LIMIT));
+    params.set("limit", String(isAuthorIndexView() ? 1 : DEFAULT_LIMIT));
+    params.set("facets", isAuthorIndexView() ? "1" : "0");
+    params.set("stats", "0");
     if (append) params.set("offset", String(listState.data?.videos?.length || 0));
     if (append) {
       listState.loadingMore = true;
@@ -162,7 +182,7 @@ export function createShortVideoViews(deps) {
       } else {
         listState.data = data;
       }
-      listState.source = normalizeSource(data.source || listState.source);
+      if (!isAuthorIndexView()) listState.source = normalizeSource(data.source || listState.source);
       listState.loading = false;
       listState.loadingMore = false;
       listState.status = data.total ? "" : "还没有短视频。";
@@ -185,9 +205,12 @@ export function createShortVideoViews(deps) {
     resetListLoadMoreObserver();
     const shell = document.createElement("section");
     shell.className = "short-video-mobile-list";
-    shell.append(renderInlineFilters());
-    const authorModule = renderAuthorModule();
-    if (authorModule) shell.append(authorModule);
+    shell.append(renderLibraryTabs(), renderListToolbar());
+    if (isAuthorIndexView()) {
+      shell.append(renderAuthorIndex());
+      els.viewContent.append(shell);
+      return;
+    }
     if (listState.status && !(listState.data?.videos || []).length) {
       const status = document.createElement("div");
       status.className = "short-video-mobile-status";
@@ -218,87 +241,199 @@ export function createShortVideoViews(deps) {
     els.viewContent.append(shell);
   }
 
-  function renderInlineFilters() {
-    const filters = document.createElement("div");
-    filters.className = "short-video-mobile-filterbar";
-
-    const source = document.createElement("select");
-    source.setAttribute("aria-label", "短视频范围");
-    for (const item of [
-      ["all", "全部"],
-      ["liked", "我的喜欢"],
-      ["posts", "作者作品"],
-      ["local", "本地"]
-    ]) source.append(selectOption(item[0], item[1]));
-    source.value = normalizeSource(listState.source);
-
-    const sort = document.createElement("select");
-    sort.setAttribute("aria-label", "短视频排序");
-    for (const item of SHORT_VIDEO_SORT_OPTIONS) sort.append(selectOption(item[0], item[1]));
-    sort.value = listState.sort || DEFAULT_SORT;
-
-    const author = document.createElement("select");
-    author.setAttribute("aria-label", "短视频作者");
-    author.append(selectOption("all", "全部作者"));
-    for (const item of listState.data?.authors || []) {
-      author.append(selectOption(item.secUid, `${item.name || "未知作者"} ${formatCompact(item.count || 0)}`));
-    }
-    author.value = listState.author || "all";
-
-    const apply = () => {
-      showView("shortVideos", {
-        query: listState.query,
-        author: author.value || "all",
-        source: normalizeSource(source.value),
-        sort: sort.value || DEFAULT_SORT
-      }, { resetStack: true, skipHistory: true, replaceHistory: true });
-    };
-    source.addEventListener("change", apply);
-    sort.addEventListener("change", apply);
-    author.addEventListener("change", apply);
-    filters.append(source, sort, author);
-    return filters;
-  }
-
-  function renderAuthorModule() {
-    const authors = (listState.data?.authors || []).filter((item) => item?.secUid).slice(0, 18);
-    if (!authors.length) return null;
-    const wrap = document.createElement("div");
-    wrap.className = "short-video-mobile-author-strip";
-    for (const author of authors) {
+  function renderLibraryTabs() {
+    const tabs = document.createElement("div");
+    tabs.className = "short-video-mobile-tabs";
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "短视频分组");
+    const activeGroup = activeLibraryGroup();
+    for (const [value, label] of [["liked", "我的喜欢"], ["authors", "作者"]]) {
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "short-video-mobile-author-chip";
-      button.classList.toggle("active", listState.author === author.secUid);
-      button.setAttribute("aria-label", `查看 ${author.name || "未知作者"} 的主页`);
-      const avatar = document.createElement("span");
-      avatar.className = "short-video-mobile-author-chip-avatar";
-      if (author.avatarUrl) {
-        const img = document.createElement("img");
-        img.src = author.avatarUrl;
-        img.alt = author.name || "作者";
-        avatar.append(img);
-      } else {
-        avatar.textContent = initials(author.name || "?");
-      }
-      const name = document.createElement("strong");
-      name.textContent = author.name || "未知作者";
-      const count = document.createElement("small");
-      count.textContent = `${formatCompact(author.count || 0)} 条`;
-      button.append(avatar, name, count);
+      button.className = "short-video-mobile-tab";
+      const active = activeGroup === value;
+      button.classList.toggle("active", active);
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", String(active));
+      button.textContent = label;
       button.addEventListener("click", () => {
-        showAuthorPanel({
-          secUid: author.secUid,
-          author: {
-            name: author.name || "",
-            secUid: author.secUid,
-            avatarUrl: author.avatarUrl || ""
-          }
-        });
+        if (active && !(value === "authors" && isAuthorFeedView())) return;
+        showView("shortVideos", {
+          query: "",
+          author: "all",
+          source: value,
+          sort: listState.sort || DEFAULT_SORT
+        }, { resetStack: true });
       });
-      wrap.append(button);
+      tabs.append(button);
+    }
+    return tabs;
+  }
+
+  function renderListToolbar() {
+    const toolbar = document.createElement("div");
+    toolbar.className = "short-video-mobile-toolbar";
+    const copy = document.createElement("div");
+    copy.className = "short-video-mobile-toolbar-copy";
+    const title = document.createElement("strong");
+    const meta = document.createElement("span");
+    if (isAuthorIndexView()) {
+      title.textContent = "按作者浏览";
+      meta.textContent = listState.loading && !(listState.data?.authors || []).length
+        ? "正在读取作者"
+        : `${formatCompact(sortedAuthorFacets({ ignoreQuery: true }).length)} 位作者`;
+    } else if (isAuthorFeedView()) {
+      const author = currentAuthorFacet();
+      title.textContent = author.name || "作者作品";
+      meta.textContent = `${formatCompact(listState.data?.total || 0)} 条作品`;
+      const back = document.createElement("button");
+      back.type = "button";
+      back.className = "short-video-mobile-author-back";
+      back.setAttribute("aria-label", "返回作者列表");
+      back.append(createIcon("chevronLeft"));
+      back.addEventListener("click", () => {
+        showView("shortVideos", { query: "", author: "all", source: "authors", sort: listState.sort }, { resetStack: true });
+      });
+      toolbar.append(back);
+    } else {
+      title.textContent = "我的喜欢";
+      meta.textContent = listState.loading && !listState.data
+        ? "正在读取"
+        : `${formatCompact(listState.data?.total || 0)} 条`;
+    }
+    copy.append(title, meta);
+    toolbar.append(copy);
+
+    if (!isAuthorIndexView()) {
+      const sort = document.createElement("select");
+      sort.className = "short-video-mobile-sort";
+      sort.setAttribute("aria-label", "短视频排序");
+      for (const item of SHORT_VIDEO_SORT_OPTIONS) sort.append(selectOption(item[0], item[1]));
+      sort.value = listState.sort || DEFAULT_SORT;
+      sort.addEventListener("change", () => updateListParams({ sort: sort.value || DEFAULT_SORT }));
+      toolbar.append(sort);
+    }
+    if (listState.query) {
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "short-video-mobile-query-clear";
+      clear.textContent = `清除“${listState.query}”`;
+      clear.addEventListener("click", () => updateListParams({ query: "" }));
+      toolbar.append(clear);
+    }
+    return toolbar;
+  }
+
+  function renderAuthorIndex() {
+    const wrap = document.createElement("div");
+    wrap.className = "short-video-mobile-author-index";
+    const authors = sortedAuthorFacets();
+    if (listState.loading && !(listState.data?.authors || []).length) {
+      for (let index = 0; index < 9; index += 1) {
+        const skeleton = document.createElement("span");
+        skeleton.className = "short-video-mobile-author-card is-loading";
+        skeleton.setAttribute("aria-hidden", "true");
+        wrap.append(skeleton);
+      }
+      return wrap;
+    }
+    if (!authors.length) {
+      const status = document.createElement("div");
+      status.className = "short-video-mobile-author-index-status";
+      status.textContent = listState.query ? `没有匹配“${listState.query}”的作者` : "还没有作者数据";
+      wrap.append(status);
+      return wrap;
+    }
+    const visibleCount = Math.min(listState.authorVisibleCount || AUTHOR_INITIAL_COUNT, authors.length);
+    for (const author of authors.slice(0, visibleCount)) wrap.append(renderAuthorIndexCard(author));
+    if (visibleCount < authors.length) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "short-video-mobile-author-index-more";
+      more.textContent = `继续加载（${formatCompact(visibleCount)} / ${formatCompact(authors.length)}）`;
+      more.addEventListener("click", () => appendVisibleAuthors(true));
+      wrap.append(more);
     }
     return wrap;
+  }
+
+  function renderAuthorIndexCard(author = {}) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "short-video-mobile-author-card";
+    button.setAttribute("aria-label", `查看 ${author.name || "未知作者"} 的作品`);
+    const avatar = document.createElement("span");
+    avatar.className = "short-video-mobile-author-card-avatar";
+    const imageUrl = author.avatarUrl || author.fallbackCoverUrl || "";
+    if (imageUrl) {
+      const img = document.createElement("img");
+      img.src = absoluteUrl(getActiveUrl(), imageUrl);
+      img.alt = author.name || "作者头像";
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.addEventListener("error", () => {
+        img.remove();
+        avatar.textContent = initials(author.name || "?");
+      }, { once: true });
+      avatar.append(img);
+    } else {
+      avatar.textContent = initials(author.name || "?");
+    }
+    const name = document.createElement("strong");
+    name.textContent = author.name || "未知作者";
+    const count = document.createElement("span");
+    count.textContent = `${formatCompact(author.count || 0)} 条视频`;
+    button.append(avatar, name, count);
+    bindReliableTap(button, () => showAuthorPanel({ authorFilter: shortVideoAuthorFilterValue(author), author }));
+    return button;
+  }
+
+  function sortedAuthorFacets(options = {}) {
+    const query = options.ignoreQuery ? "" : listState.query.toLocaleLowerCase("zh-CN");
+    return [...(listState.data?.authors || [])]
+      .filter((author) => author && shortVideoAuthorFilterValue(author))
+      .filter((author) => !query || `${author.name || ""} ${author.secUid || ""}`.toLocaleLowerCase("zh-CN").includes(query))
+      .sort((a, b) => Number(b.count || 0) - Number(a.count || 0) || String(a.name || "").localeCompare(String(b.name || ""), "zh-CN"));
+  }
+
+  function appendVisibleAuthors(force = false) {
+    if (!isAuthorIndexView()) return;
+    const total = sortedAuthorFacets().length;
+    const current = listState.authorVisibleCount || AUTHOR_INITIAL_COUNT;
+    if (!total || current >= total) return;
+    if (!force) {
+      const doc = document.documentElement;
+      const remaining = doc.scrollHeight - window.scrollY - window.innerHeight;
+      if (remaining > 700) return;
+    }
+    listState.authorVisibleCount = Math.min(total, current + AUTHOR_APPEND_COUNT);
+    renderListShell();
+  }
+
+  function currentAuthorFacet() {
+    const filter = String(listState.author || "").trim();
+    return (listState.data?.authors || []).find((author) => shortVideoAuthorFilterValue(author) === filter)
+      || (listState.data?.videos || []).find((video) => video?.author)?.author
+      || {};
+  }
+
+  function shortVideoAuthorFilterValue(author = {}) {
+    const secUid = String(author.secUid || "").trim();
+    if (secUid) return secUid;
+    const name = String(author.name || "").trim();
+    return name ? `name:${name}` : "";
+  }
+
+  function isAuthorIndexView() {
+    return listState.source === "authors" && listState.author === "all";
+  }
+
+  function isAuthorFeedView() {
+    return listState.author !== "all";
+  }
+
+  function activeLibraryGroup() {
+    return isAuthorIndexView() || isAuthorFeedView() ? "authors" : "liked";
   }
 
   function updateListParams(patch = {}, navigation = {}) {
@@ -323,10 +458,16 @@ export function createShortVideoViews(deps) {
   }
 
   function submitSearch(query = "", overrides = {}) {
+    const group = overrides.source ?? selectedSearchFilterValue("source", activeLibraryGroup());
+    const currentAuthor = overrides.author ?? (listState.author || "all");
+    const author = group === "authors" ? currentAuthor : "all";
+    const source = group === "authors"
+      ? (author !== "all" ? "all" : "authors")
+      : "liked";
     updateListParams({
       query: String(query || "").trim(),
-      author: overrides.author ?? selectedSearchFilterValue("author", listState.author || "all"),
-      source: overrides.source ?? selectedSearchFilterValue("source", listState.source || DEFAULT_SOURCE),
+      author,
+      source,
       sort: overrides.sort ?? selectedSearchFilterValue("sort", listState.sort || DEFAULT_SORT)
     });
   }
@@ -347,25 +488,14 @@ export function createShortVideoViews(deps) {
     const filters = document.createElement("div");
     filters.className = "short-video-search-filters";
 
-    const author = document.createElement("select");
-    author.dataset.shortVideoSearchAuthor = "1";
-    author.setAttribute("aria-label", "短视频作者");
-    author.append(selectOption("all", "全部作者"));
-    for (const item of listState.data?.authors || []) {
-      author.append(selectOption(item.secUid, `${item.name} ${formatCompact(item.count)}`));
-    }
-    author.value = listState.author || "all";
-
     const source = document.createElement("select");
     source.dataset.shortVideoSearchSource = "1";
-    source.setAttribute("aria-label", "短视频范围");
+    source.setAttribute("aria-label", "短视频分组");
     for (const item of [
-      ["all", "全部"],
       ["liked", "我的喜欢"],
-      ["posts", "作者作品"],
-      ["local", "本地"]
+      ["authors", "作者"]
     ]) source.append(selectOption(item[0], item[1]));
-    source.value = normalizeSource(listState.source);
+    source.value = activeLibraryGroup();
 
     const sort = document.createElement("select");
     sort.dataset.shortVideoSearchSort = "1";
@@ -374,15 +504,12 @@ export function createShortVideoViews(deps) {
     sort.value = listState.sort || DEFAULT_SORT;
 
     const apply = () => {
-      listState.author = author.value || "all";
-      listState.source = normalizeSource(source.value);
       listState.sort = sort.value || DEFAULT_SORT;
       if (onSubmit) onSubmit();
     };
-    author.addEventListener("change", apply);
     source.addEventListener("change", apply);
     sort.addEventListener("change", apply);
-    filters.append(author, source, sort);
+    filters.append(source, sort);
     form.append(filters);
     listState.searchFiltersEl = filters;
   }
@@ -419,6 +546,10 @@ export function createShortVideoViews(deps) {
       fallback.textContent = "PLAY";
       thumb.append(fallback);
     }
+    const metric = document.createElement("span");
+    metric.className = "short-video-mobile-thumb-metric";
+    metric.append(createIcon("heart"), document.createTextNode(formatCompact(video.stats?.likes || 0)));
+    thumb.append(metric);
     card.setAttribute("aria-label", video.title || "打开短视频");
     card.append(thumb);
     return card;
@@ -486,7 +617,7 @@ export function createShortVideoViews(deps) {
         listState.status = shortVideoErrorMessage(error, "加载失败，请稍后重试");
         renderListShell();
       });
-    }, { root: null, rootMargin: "720px 0px", threshold: 0.01 });
+    }, { root: null, rootMargin: "180px 0px", threshold: 0.01 });
     listLoadMoreObserver.observe(sentinel);
   }
 
@@ -499,13 +630,21 @@ export function createShortVideoViews(deps) {
   async function openNativeShortVideoFeed(video) {
     const plugin = nativePlayerPlugin();
     if (!plugin?.playShortFeed || !video?.id) return false;
+    if (!String(video.streamUrl || "").trim()) {
+      shortVideoToast("这条视频缺少本地文件，暂时无法播放");
+      return true;
+    }
     const videos = listState.data?.videos || [];
-    const index = videos.findIndex((item) => item.id === video.id);
+    const playableEntries = videos
+      .map((item, apiIndex) => ({ item, apiIndex }))
+      .filter(({ item }) => String(item?.streamUrl || "").trim());
+    const index = playableEntries.findIndex(({ item }) => item === video || item.id === video.id);
     if (index < 0) return false;
     const start = Math.max(0, index - 20);
-    const end = Math.min(videos.length, index + 31);
+    const end = Math.min(playableEntries.length, index + 31);
+    const feedEntries = playableEntries.slice(start, end);
     const feedUrl = nativeShortVideoFeedUrl();
-    const payload = videos.slice(start, end).map((item) => ({
+    const payload = feedEntries.map(({ item }) => ({
       id: item.id,
       awemeId: item.awemeId || "",
       title: item.title || "",
@@ -548,9 +687,10 @@ export function createShortVideoViews(deps) {
       await plugin.playShortFeed({
         baseUrl: getActiveUrl(),
         feedUrl,
-        hasMore: Boolean(listState.data?.hasMore || end < videos.length),
-        nextOffset: end,
+        hasMore: Boolean(listState.data?.hasMore || end < playableEntries.length),
+        nextOffset: feedEntries.length ? feedEntries[feedEntries.length - 1].apiIndex + 1 : videos.length,
         startIndex: index - start,
+        startId: video.id,
         videos: JSON.stringify(payload)
       });
       return true;
@@ -900,6 +1040,10 @@ export function createShortVideoViews(deps) {
     listEventsInstalled = true;
     window.addEventListener("scroll", () => {
       if (!document.body.classList.contains("short-video-mobile-view") || document.body.classList.contains("short-video-mobile-browser-view")) return;
+      if (isAuthorIndexView()) {
+        appendVisibleAuthors();
+        return;
+      }
       if (!listState.data?.hasMore || listState.loading || listState.loadingMore) return;
       const doc = document.documentElement;
       const remaining = doc.scrollHeight - window.scrollY - window.innerHeight;
@@ -963,7 +1107,8 @@ export function createShortVideoViews(deps) {
   }
 
   function shortVideoApiSource() {
-    return normalizeSource(listState.source);
+    const source = normalizeSource(listState.source);
+    return source === "authors" ? "liked" : source;
   }
 
   function cachedListVideo(id) {
@@ -1791,18 +1936,22 @@ export function createShortVideoViews(deps) {
 
   function showAuthorPanel(video, options = {}) {
     const secUid = String(video?.secUid || video?.author?.secUid || "").trim();
-    if (!secUid) {
+    const authorName = String(video?.author?.name || "").trim();
+    const authorFilter = String(video?.authorFilter || secUid || (authorName ? `name:${authorName}` : "")).trim();
+    if (!authorFilter) {
       shortVideoToast("该视频没有可识别的作者信息");
       return;
     }
     closeAuthorPanel({ resume: false });
     pauseActiveVideoForAuthorPanel();
-    const restoreSnapshot = options.snapshot?.author?.secUid === secUid ? options.snapshot : null;
+    const snapshotFilter = String(options.snapshot?.authorFilter || options.snapshot?.author?.secUid || "").trim();
+    const restoreSnapshot = snapshotFilter === authorFilter ? options.snapshot : null;
     const author = { ...(video?.author || {}), ...(restoreSnapshot?.author || {}), secUid };
     const name = author.name || "未知作者";
     const avatarUrl = author.avatarUrl || "";
     const panelState = {
       author,
+      authorFilter,
       videos: Array.isArray(restoreSnapshot?.videos) ? restoreSnapshot.videos.map(cloneShortVideo) : [],
       total: Math.max(0, Number(restoreSnapshot?.total || 0), Array.isArray(restoreSnapshot?.videos) ? restoreSnapshot.videos.length : 0),
       hasMore: Boolean(restoreSnapshot?.hasMore),
@@ -1863,7 +2012,7 @@ export function createShortVideoViews(deps) {
     const nameEl = document.createElement("strong");
     nameEl.textContent = `@${name}`;
     const handle = document.createElement("span");
-    handle.textContent = authorProfileLineText(author) || `抖音号 ${secUid}`;
+    handle.textContent = authorProfileLineText(author) || (secUid ? `抖音号 ${secUid}` : "本地作者资料");
     const signature = document.createElement("span");
     signature.className = "author-sheet-signature";
     signature.textContent = String(author.signature || "").trim();
@@ -1887,7 +2036,7 @@ export function createShortVideoViews(deps) {
     allBtn.type = "button";
     allBtn.className = "author-sheet-action is-primary";
     allBtn.textContent = "只看 TA";
-    allBtn.addEventListener("click", () => viewAuthorVideos(secUid, panelState.sort));
+    allBtn.addEventListener("click", () => viewAuthorVideos(authorFilter, panelState.sort));
     const douyinBtn = document.createElement("button");
     douyinBtn.type = "button";
     douyinBtn.className = "author-sheet-action";
@@ -1920,7 +2069,7 @@ export function createShortVideoViews(deps) {
       const richer = panelState.videos.find((item) => authorHasProfileMeta(item.author))?.author || panelState.videos[0]?.author;
       if (richer) Object.assign(author, richer, { secUid });
       nameEl.textContent = `@${author.name || name}`;
-      handle.textContent = authorProfileLineText(author) || `抖音号 ${secUid}`;
+      handle.textContent = authorProfileLineText(author) || (secUid ? `抖音号 ${secUid}` : "本地作者资料");
       signature.textContent = String(author.signature || "").trim();
       signature.hidden = !signature.textContent;
       renderAuthorStats(stats, author);
@@ -1948,7 +2097,7 @@ export function createShortVideoViews(deps) {
       renderWorks();
       try {
         const params = new URLSearchParams();
-        params.set("author", secUid);
+        params.set("author", authorFilter);
         params.set("source", "all");
         params.set("sort", panelState.sort || DEFAULT_SORT);
         params.set("limit", String(AUTHOR_PAGE_LIMIT));
@@ -2074,10 +2223,12 @@ export function createShortVideoViews(deps) {
       return;
     }
     const secUid = panelState.author?.secUid || video.author?.secUid || "";
+    const authorFilter = panelState.authorFilter || secUid || shortVideoAuthorFilterValue(video.author || {});
     const sheet = authorPanelEl?.querySelector?.(".author-sheet");
     const videosSnapshot = panelState.videos.map(cloneShortVideo);
     browserState.authorReturnPanel = {
       author: { ...(panelState.author || {}), secUid },
+      authorFilter,
       sort: panelState.sort || DEFAULT_SORT,
       videos: videosSnapshot,
       total: panelState.total || videosSnapshot.length,
@@ -2087,7 +2238,7 @@ export function createShortVideoViews(deps) {
       currentId: video.id || video.awemeId || ""
     };
     listState.query = "";
-    listState.author = secUid || "all";
+    listState.author = authorFilter || "all";
     listState.source = "all";
     listState.sort = panelState.sort || DEFAULT_SORT;
     listState.data = {
@@ -2111,15 +2262,17 @@ export function createShortVideoViews(deps) {
 
   function restoreAuthorReturnPanel() {
     const snapshot = browserState.authorReturnPanel;
-    if (!snapshot?.author?.secUid) return false;
+    const authorFilter = String(snapshot?.authorFilter || snapshot?.author?.secUid || "").trim();
+    if (!authorFilter) return false;
     browserState.authorReturnPanel = null;
     const current = browserState.video || {};
     const video = {
       ...current,
+      authorFilter,
       author: {
         ...(current.author || {}),
         ...snapshot.author,
-        secUid: snapshot.author.secUid
+        secUid: snapshot.author.secUid || ""
       }
     };
     showAuthorPanel(video, { sort: snapshot.sort, snapshot });
@@ -2325,6 +2478,7 @@ export function createShortVideoViews(deps) {
     const line = "fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"";
     const icons = {
       ai: `<svg viewBox="0 0 34 34" aria-hidden="true"><path d="M22.94 21.309l.58 1.364a45.819 45.819 0 0 0 2.125 4.34l.528.947-.108.056-1.077.543-.102.052-.054-.102-.576-1.087a44.077 44.077 0 0 1-.22-.423 7.704 7.704 0 0 0-3.902.001c-.087.169-.154.3-.219.422l-.576 1.087-.054.102-.102-.052-1.077-.543-.108-.056.059-.106.468-.841a45.902 45.902 0 0 0 2.125-4.34l.58-1.364.038-.086.091.017c.482.086.97.086 1.451 0l.093-.017.037.086zm6.011-.019a3.731 3.731 0 0 0-.173.9c-.022.342-.034.69-.034 1.035v3.067c0 .345.012.694.034 1.035l.022.227c.029.226.08.452.151.673l.05.153h-1.92l.049-.153c.095-.295.153-.597.173-.9.022-.345.033-.694.033-1.035v-3.067c0-.34-.01-.689-.033-1.034a3.753 3.753 0 0 0-.173-.9l-.05-.154h1.921l-.05.153zM17.161 5.395l.123.008a4.527 4.527 0 0 1 3.14 1.602 4.367 4.367 0 0 1 1.033 2.978l-.005.109c-.015.284-.063.56-.13.828l-.117.447 1.964-.504.113-.027c2.38-.549 4.824.818 5.465 3.136l.05.184a4.368 4.368 0 0 1-.534 3.265l-.06.097a4.495 4.495 0 0 1-1.965 1.674c-3.71 1.444-5.893-1.51-6.663-3.187l.134-.034 2.236-.575c.033.329.136.661.333.984a2.5 2.5 0 0 0 2.51 1.157l.113-.021a2.456 2.456 0 0 0 1.384-.825l.297-.448a2.37 2.37 0 0 0 .209-1.637l-.018-.075c-.334-1.268-1.63-2.035-2.914-1.753h-.01l-7.51 1.916h-.022a.056.056 0 0 1-.02-.01.048.048 0 0 1-.017-.037l.014-.205.136-2.238c.327.071.682.079 1.054-.008.973-.227 1.74-1.006 1.894-1.992a2.371 2.371 0 0 0-.303-1.578l-.055-.09a2.46 2.46 0 0 0-1.855-1.118l-.076-.006c-1.323-.076-2.469.897-2.596 2.188v.009l-.47 7.62a.047.047 0 0 1-.053.04l-.013-.002-.166-.065-2.15-.83c.169-.284.285-.612.316-.987l.007-.092a2.443 2.443 0 0 0-1.263-2.256l-.084-.043-.105-.048a2.482 2.482 0 0 0-1.508-.155l-.104.024a2.443 2.443 0 0 0-1.683 1.46c-.487 1.219.104 2.59 1.31 3.109l.008.003 7.22 2.797c.03.012.036.048.02.068l-.114.136-1.467 1.759a2.335 2.335 0 0 0-.79-.573l-.068-.03-.086-.034c-.873-.321-1.878-.147-2.566.484l-.069.065a2.407 2.407 0 0 0 .188 3.584 2.49 2.49 0 0 0 3.404-.268l.006-.006 3.485-4.165v3.166l-.5.607v-.004l-1.29 1.543c-1.559 1.868-4.346 2.229-6.28.782l-.092-.07a4.41 4.41 0 0 1-1.668-3.076l-.009-.113a4.384 4.384 0 0 1 1.619-3.688l.357-.297-1.892-.729c-2.323-.895-3.535-3.457-2.656-5.739a4.475 4.475 0 0 1 2.565-2.555 4.577 4.577 0 0 1 4.068.373l.393.244.12-1.995h-.001c.146-2.447 2.248-4.375 4.728-4.258zm4.679 17.909a45.987 45.987 0 0 1-.964 2.191 9.16 9.16 0 0 1 2.417 0 45.878 45.878 0 0 1-.963-2.191l-.245-.6-.245.6z" fill="#fff"/></svg>`,
+      chevronLeft: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M15 18l-6-6 6-6"/></svg>`,
       chevronDown: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M7 10l5 5 5-5"/></svg>`,
       chevronUp: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M7 14l5-5 5 5"/></svg>`,
       comment: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.8571 17.3202C20.8406 15.3333 22 13.2638 22 10.8541C22 5.96406 17.5232 2 12 2C6.47686 2 2 5.96406 2 10.8542C2 16.8002 8 19.2002 11.429 19.2002V20.7211C11.429 22.3041 12.3493 22.1732 13.1196 21.7347C14.586 20.9 17.4106 18.7693 18.8571 17.3202ZM8.57142 11.0778C8.57142 11.8619 7.93154 12.4971 7.1422 12.4971C6.35418 12.4971 5.71427 11.8619 5.71427 11.0778C5.71427 10.2953 6.35418 9.66007 7.1422 9.66007C7.93154 9.66007 8.57142 10.2953 8.57142 11.0778ZM12 12.4971C11.2112 12.4971 10.5715 11.8619 10.5715 11.0778C10.5715 10.2953 11.2111 9.66007 12 9.66007C12.789 9.66007 13.4286 10.2953 13.4286 11.0778C13.4286 11.8619 12.789 12.4971 12 12.4971ZM18.2857 11.0778C18.2857 11.8619 17.6467 12.4971 16.8575 12.4971C16.0683 12.4971 15.4284 11.8619 15.4285 11.0778C15.4285 10.2953 16.0683 9.66007 16.8575 9.66007C17.6467 9.66007 18.2857 10.2953 18.2857 11.0778Z"/></svg>`,
@@ -2362,7 +2516,7 @@ function shortVideoSortLabel(value) {
 
 function normalizeSource(value) {
   const source = String(value || DEFAULT_SOURCE).trim().toLowerCase();
-  return ["liked", "posts", "all", "local"].includes(source) ? source : DEFAULT_SOURCE;
+  return ["liked", "authors", "posts", "all", "local"].includes(source) ? source : DEFAULT_SOURCE;
 }
 
 function selectOption(value, label) {

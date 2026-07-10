@@ -1,4 +1,4 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260706-short-video-reel-06";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260710-short-video-feed-fix-04";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260705-mobile-actions-01";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
@@ -13,7 +13,7 @@ import { createNovelViews } from "./js/novel-views.js?v=20260702-novel-local-man
 import { createPeopleViews } from "./js/people-views.js";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
-import { createShortVideoViews } from "./js/short-video-views.js?v=20260709-short-video-android-feed-20";
+import { createShortVideoViews } from "./js/short-video-views.js?v=20260710-short-video-feed-fix-04";
 import { createToolViews } from "./js/tool-views.js?v=20260702-novel-local-manage-74";
 import { createWorkViews } from "./js/work-views.js?v=20260710-western-merge-01";
 
@@ -290,7 +290,7 @@ function normalizeShortVideoSort(value) {
 
 function normalizeShortVideoSource(value) {
   const source = String(value || "liked").trim().toLowerCase();
-  return ["liked", "posts", "all", "local"].includes(source) ? source : "liked";
+  return ["liked", "authors", "posts", "all", "local"].includes(source) ? source : "liked";
 }
 
 function normalizeMusicSort(value) {

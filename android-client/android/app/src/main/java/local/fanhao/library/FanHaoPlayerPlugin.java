@@ -51,6 +51,7 @@ public class FanHaoPlayerPlugin extends Plugin {
     Intent intent = new Intent(getActivity(), NativeShortVideoActivity.class);
     intent.putExtra(NativeShortVideoActivity.EXTRA_VIDEOS_JSON, videosJson);
     intent.putExtra(NativeShortVideoActivity.EXTRA_START_INDEX, call.getInt("startIndex", 0));
+    intent.putExtra(NativeShortVideoActivity.EXTRA_START_ID, call.getString("startId"));
     intent.putExtra(NativeShortVideoActivity.EXTRA_BASE_URL, call.getString("baseUrl"));
     intent.putExtra(NativeShortVideoActivity.EXTRA_FEED_URL, call.getString("feedUrl"));
     intent.putExtra(NativeShortVideoActivity.EXTRA_NEXT_OFFSET, call.getInt("nextOffset", 0));

@@ -2,6 +2,7 @@ package local.fanhao.library;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.res.ColorStateList;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
@@ -19,6 +20,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.text.Layout;
 import android.text.TextUtils;
 import android.util.LruCache;
 import android.util.Log;
@@ -80,6 +82,7 @@ public class NativeShortVideoActivity extends Activity {
 
   public static final String EXTRA_VIDEOS_JSON = "videosJson";
   public static final String EXTRA_START_INDEX = "startIndex";
+  public static final String EXTRA_START_ID = "startId";
   public static final String EXTRA_BASE_URL = "baseUrl";
   public static final String EXTRA_FEED_URL = "feedUrl";
   public static final String EXTRA_NEXT_OFFSET = "nextOffset";
@@ -168,6 +171,9 @@ public class NativeShortVideoActivity extends Activity {
     hasMoreVideos = getIntent().getBooleanExtra(EXTRA_HAS_MORE, false);
     openAuthorPanelOnStart = getIntent().getBooleanExtra(EXTRA_OPEN_AUTHOR_PANEL, false);
     readVideos();
+    String requestedStartId = String.valueOf(getIntent().getStringExtra(EXTRA_START_ID));
+    int requestedStartIndex = findVideoIndex(videos, requestedStartId);
+    if (requestedStartIndex >= 0) pendingStartIndex = requestedStartIndex;
     buildUi();
     currentScreen = captureFeedScreen();
     if (!videos.isEmpty()) {
@@ -566,6 +572,12 @@ public class NativeShortVideoActivity extends Activity {
         } else if (primeRequestedIndexes.contains(index)) {
           startPrimeCountdown(index, preparedPlayer);
         }
+        mainHandler.post(() -> syncPlayIndicator(index, preparedPlayer));
+      }
+
+      @Override
+      public void onIsPlayingChanged(boolean isPlaying) {
+        mainHandler.post(() -> syncPlayIndicator(index, preparedPlayer));
       }
 
       @Override
@@ -836,12 +848,11 @@ public class NativeShortVideoActivity extends Activity {
     if (activePlayer.isPlaying()) {
       activePlayer.pause();
       updateActiveProgress();
-      showTransientStatus("已暂停");
     } else {
       activePlayer.play();
       startProgressUpdates();
-      showTransientStatus("继续播放");
     }
+    syncPlayIndicator(currentIndex, activePlayer);
   }
 
   private void handleStageTap(int index) {
@@ -1159,7 +1170,7 @@ public class NativeShortVideoActivity extends Activity {
       }
     }
     if (holder == null) return;
-    TextView burst = holder.likeBurst;
+    ImageView burst = holder.likeBurst;
     burst.animate().cancel();
     burst.setVisibility(View.VISIBLE);
     burst.setAlpha(0f);
@@ -1202,8 +1213,24 @@ public class NativeShortVideoActivity extends Activity {
     holder.caption.setVisibility(visibility);
     holder.rail.setVisibility(visibility);
     holder.progressTouch.setVisibility(visibility);
+    syncPlayIndicator(holder.index, playerCache.get(holder.index));
     if (topSearchButton != null) topSearchButton.setVisibility(visibility);
     if (controlsHidden) hideSeekPreview(holder, false);
+  }
+
+  private void syncPlayIndicator(int index, @Nullable ExoPlayer player) {
+    ShortVideoHolder holder = attachedHolders.get(index);
+    if (holder == null) return;
+    boolean paused = !controlsHidden
+      && currentIndex == index
+      && player != null
+      && player.getPlaybackState() == Player.STATE_READY
+      && !player.isPlaying();
+    holder.playIndicator.animate().cancel();
+    holder.playIndicator.setVisibility(paused ? View.VISIBLE : View.GONE);
+    holder.playIndicator.setAlpha(paused ? 1f : 0f);
+    holder.playIndicator.setScaleX(1f);
+    holder.playIndicator.setScaleY(1f);
   }
 
   private void startSystemInfoUpdates() {
@@ -3000,10 +3027,10 @@ public class NativeShortVideoActivity extends Activity {
   private void bindRail(ShortVideoHolder holder, ShortVideoItem item) {
     holder.rail.removeAllViews();
     holder.rail.addView(authorAvatarButton(item));
-    holder.rail.addView(metric("♥", displayLikes(item), isLiked(item), "点赞", view -> toggleLike(item)));
-    holder.rail.addView(metric("●", item.comments, false, "评论", view -> showTransientStatus("评论数据尚未导入")));
-    holder.rail.addView(metric("★", displayCollects(item), isCollected(item), "收藏", view -> toggleCollected(item), 0xFFFFD54F));
-    holder.rail.addView(metric("↗", item.shares, false, "分享", view -> shareVideo(item)));
+    holder.rail.addView(metric(R.drawable.ic_short_heart, displayLikes(item), isLiked(item), "点赞", view -> toggleLike(item)));
+    holder.rail.addView(metric(R.drawable.ic_short_comment, item.comments, false, "评论", view -> showTransientStatus("评论数据尚未导入")));
+    holder.rail.addView(metric(R.drawable.ic_short_star, displayCollects(item), isCollected(item), "收藏", view -> toggleCollected(item), 0xFFFFD54F));
+    holder.rail.addView(metric(R.drawable.ic_short_share, item.shares, false, "分享", view -> shareVideo(item)));
   }
 
   private void showPlaybackToolbar(ShortVideoItem item) {
@@ -3446,46 +3473,67 @@ public class NativeShortVideoActivity extends Activity {
     return button;
   }
 
-  private TextView metric(String icon, long value) {
-    return metric(icon, value, false, "", null);
+  private View metric(int iconResource, long value, boolean active, String label, @Nullable View.OnClickListener listener) {
+    return metric(iconResource, value, active, label, listener, 0xFFFF4D6D);
   }
 
-  private TextView metric(String icon, long value, boolean active, String label, @Nullable View.OnClickListener listener) {
-    return metric(icon, value, active, label, listener, 0xFFFF4D6D);
-  }
-
-  private TextView metric(String icon, long value, boolean active, String label, @Nullable View.OnClickListener listener, int activeColor) {
-    TextView view = new TextView(this);
-    view.setText(icon + "\n" + compact(value));
-    view.setTextColor(active ? activeColor : Color.WHITE);
-    view.setTextSize(13);
+  private View metric(int iconResource, long value, boolean active, String label, @Nullable View.OnClickListener listener, int activeColor) {
+    LinearLayout view = new LinearLayout(this);
+    view.setOrientation(LinearLayout.VERTICAL);
     view.setGravity(Gravity.CENTER);
-    view.setTypeface(Typeface.DEFAULT_BOLD);
-    view.setShadowLayer(6, 0, 2, 0xAA000000);
-    view.setPadding(0, dp(8), 0, dp(8));
-    view.setMinWidth(dp(52));
-    if (active) view.setBackground(roundedDrawable((activeColor & 0x00FFFFFF) | 0x33000000, dp(18)));
+    view.setPadding(0, dp(5), 0, dp(5));
+    view.setMinimumWidth(dp(56));
+    view.setMinimumHeight(dp(58));
+
+    ImageView icon = new ImageView(this);
+    icon.setImageResource(iconResource);
+    icon.setImageTintList(ColorStateList.valueOf(active ? activeColor : Color.WHITE));
+    icon.setBackground(circleDrawable(0x2E000000));
+    icon.setPadding(dp(3), dp(3), dp(3), dp(3));
+    icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+    view.addView(icon, new LinearLayout.LayoutParams(dp(34), dp(34)));
+
+    TextView count = new TextView(this);
+    count.setText(compact(value));
+    count.setTextColor(Color.WHITE);
+    count.setTextSize(12);
+    count.setGravity(Gravity.CENTER);
+    count.setTypeface(Typeface.DEFAULT_BOLD);
+    count.setShadowLayer(6, 0, 2, 0xAA000000);
+    count.setIncludeFontPadding(false);
+    LinearLayout.LayoutParams countParams = new LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      dp(18)
+    );
+    countParams.topMargin = dp(1);
+    view.addView(count, countParams);
+
     if (listener != null) {
       view.setClickable(true);
       view.setFocusable(true);
-      view.setContentDescription((label == null || label.length() == 0 ? "短视频指标" : label) + " " + compact(value));
+      view.setContentDescription((label == null || label.length() == 0 ? "短视频指标" : label)
+        + " " + compact(value) + (active ? "，已选择" : ""));
       view.setOnClickListener(listener);
       view.setOnTouchListener((target, event) -> {
         int action = event.getActionMasked();
         if (action == MotionEvent.ACTION_DOWN) {
           clearPendingStageTap();
           target.setPressed(true);
+          target.setAlpha(0.7f);
           setParentInterceptDisallowed(target, true);
           return true;
         }
         if (action == MotionEvent.ACTION_UP) {
           target.setPressed(false);
+          target.setAlpha(1f);
           setParentInterceptDisallowed(target, false);
+          target.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
           target.performClick();
           return true;
         }
         if (action == MotionEvent.ACTION_CANCEL) {
           target.setPressed(false);
+          target.setAlpha(1f);
           setParentInterceptDisallowed(target, false);
           return true;
         }
@@ -3540,6 +3588,56 @@ public class NativeShortVideoActivity extends Activity {
     }
   }
 
+  private void bindCaption(ShortVideoHolder holder, ShortVideoItem item, View.OnLongClickListener longPress) {
+    String author = item.author.length() > 0 ? item.author : "未知作者";
+    String title = item.title.length() > 0 ? item.title : "未命名视频";
+    holder.captionAuthor.setText("@" + author);
+    holder.captionAuthor.setContentDescription("查看作者 " + author);
+    holder.captionAuthor.setOnClickListener(view -> showAuthorPanel(item));
+    holder.captionAuthor.setOnLongClickListener(longPress);
+    holder.captionTitle.setText(title);
+    holder.captionTitle.setContentDescription("视频说明");
+    holder.captionTitle.setOnClickListener(view -> toggleCaptionExpanded(holder));
+    holder.captionTitle.setOnLongClickListener(longPress);
+    holder.captionToggle.setOnClickListener(view -> toggleCaptionExpanded(holder));
+    holder.captionToggle.setOnLongClickListener(longPress);
+    holder.caption.setOnLongClickListener(longPress);
+    setCaptionExpanded(holder, false, false);
+    holder.captionTitle.post(() -> updateCaptionExpansionAvailability(holder));
+  }
+
+  private void toggleCaptionExpanded(ShortVideoHolder holder) {
+    if (holder == null || !holder.captionCanExpand) return;
+    holder.caption.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+    setCaptionExpanded(holder, !holder.captionExpanded, true);
+  }
+
+  private void setCaptionExpanded(ShortVideoHolder holder, boolean expanded, boolean announce) {
+    if (holder == null) return;
+    holder.captionExpanded = expanded;
+    holder.captionTitle.setMaxLines(expanded ? 8 : 2);
+    holder.captionTitle.setEllipsize(expanded ? null : TextUtils.TruncateAt.END);
+    holder.captionToggle.setText(expanded ? "收起" : "展开");
+    holder.captionToggle.setContentDescription(expanded ? "收起视频说明" : "展开视频说明");
+    holder.captionToggle.setVisibility(holder.captionCanExpand ? View.VISIBLE : View.GONE);
+    holder.captionTitle.setContentDescription(holder.captionCanExpand
+      ? (expanded ? "视频说明，点按收起" : "视频说明，点按展开")
+      : "视频说明");
+    if (announce) holder.caption.announceForAccessibility(expanded ? "已展开视频说明" : "已收起视频说明");
+  }
+
+  private void updateCaptionExpansionAvailability(ShortVideoHolder holder) {
+    if (holder == null || holder.index < 0 || attachedHolders.get(holder.index) != holder) return;
+    boolean needsExpansion = false;
+    Layout layout = holder.captionTitle.getLayout();
+    if (layout != null && layout.getLineCount() > 0) {
+      int lastLine = layout.getLineCount() - 1;
+      needsExpansion = needsExpansion || layout.getEllipsisCount(lastLine) > 0;
+    }
+    holder.captionCanExpand = needsExpansion;
+    setCaptionExpanded(holder, false, false);
+  }
+
   private final class ShortVideoAdapter extends RecyclerView.Adapter<ShortVideoHolder> {
     @NonNull
     @Override
@@ -3556,6 +3654,7 @@ public class NativeShortVideoActivity extends Activity {
       ));
 
       FrameLayout stage = new FrameLayout(parent.getContext());
+      stage.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
       root.addView(stage, new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.MATCH_PARENT
@@ -3564,6 +3663,7 @@ public class NativeShortVideoActivity extends Activity {
       ImageView cover = new ImageView(parent.getContext());
       cover.setScaleType(ImageView.ScaleType.CENTER_CROP);
       cover.setBackgroundColor(Color.BLACK);
+      cover.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
       stage.addView(cover, new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.MATCH_PARENT
@@ -3571,18 +3671,80 @@ public class NativeShortVideoActivity extends Activity {
 
       FrameLayout gestureLayer = new FrameLayout(parent.getContext());
       gestureLayer.setClickable(true);
-      gestureLayer.setFocusable(true);
+      gestureLayer.setFocusable(false);
+      gestureLayer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
       root.addView(gestureLayer, new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.MATCH_PARENT
       ));
 
-      TextView caption = new TextView(parent.getContext());
-      caption.setTextColor(Color.WHITE);
-      caption.setTextSize(15);
-      caption.setTypeface(Typeface.DEFAULT_BOLD);
-      caption.setMaxLines(4);
-      caption.setShadowLayer(6, 0, 2, 0xAA000000);
+      ImageView playIndicator = new ImageView(parent.getContext());
+      playIndicator.setImageResource(R.drawable.ic_short_play);
+      playIndicator.setImageTintList(ColorStateList.valueOf(Color.WHITE));
+      playIndicator.setPadding(dp(20), dp(20), dp(18), dp(20));
+      playIndicator.setBackground(circleDrawable(0x73000000));
+      playIndicator.setClickable(false);
+      playIndicator.setFocusable(false);
+      playIndicator.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+      playIndicator.setVisibility(View.GONE);
+      root.addView(playIndicator, new FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER));
+
+      LinearLayout caption = new LinearLayout(parent.getContext());
+      caption.setOrientation(LinearLayout.VERTICAL);
+      caption.setGravity(Gravity.LEFT);
+      caption.setClipChildren(false);
+      caption.setClipToPadding(false);
+
+      TextView captionAuthor = new TextView(parent.getContext());
+      captionAuthor.setTextColor(Color.WHITE);
+      captionAuthor.setTextSize(16);
+      captionAuthor.setTypeface(Typeface.DEFAULT_BOLD);
+      captionAuthor.setShadowLayer(6, 0, 2, 0xAA000000);
+      captionAuthor.setMinHeight(dp(48));
+      captionAuthor.setGravity(Gravity.CENTER_VERTICAL);
+      captionAuthor.setClickable(true);
+      captionAuthor.setFocusable(true);
+      caption.addView(captionAuthor, new LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT
+      ));
+
+      TextView captionTitle = new TextView(parent.getContext());
+      captionTitle.setTextColor(0xF2FFFFFF);
+      captionTitle.setTextSize(15);
+      captionTitle.setTypeface(Typeface.DEFAULT_BOLD);
+      captionTitle.setLineSpacing(dp(2), 1f);
+      captionTitle.setMaxLines(2);
+      captionTitle.setEllipsize(TextUtils.TruncateAt.END);
+      captionTitle.setShadowLayer(6, 0, 2, 0xAA000000);
+      captionTitle.setMinHeight(dp(48));
+      captionTitle.setClickable(true);
+      captionTitle.setFocusable(true);
+      caption.addView(captionTitle, new LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT
+      ));
+
+      TextView captionToggle = new TextView(parent.getContext());
+      captionToggle.setText("展开");
+      captionToggle.setTextColor(0xCCFFFFFF);
+      captionToggle.setTextSize(12);
+      captionToggle.setTypeface(Typeface.DEFAULT_BOLD);
+      captionToggle.setGravity(Gravity.CENTER);
+      captionToggle.setMinWidth(dp(48));
+      captionToggle.setMinHeight(dp(48));
+      captionToggle.setPadding(dp(8), 0, dp(8), 0);
+      captionToggle.setBackground(roundedDrawable(0x52000000, dp(16)));
+      captionToggle.setClickable(true);
+      captionToggle.setFocusable(true);
+      captionToggle.setVisibility(View.GONE);
+      LinearLayout.LayoutParams toggleParams = new LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        dp(48)
+      );
+      toggleParams.topMargin = dp(4);
+      caption.addView(captionToggle, toggleParams);
+
       FrameLayout.LayoutParams captionParams = new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -3590,21 +3752,18 @@ public class NativeShortVideoActivity extends Activity {
       );
       captionParams.leftMargin = dp(14);
       captionParams.rightMargin = dp(96);
-      captionParams.bottomMargin = dp(40);
+      captionParams.bottomMargin = dp(54);
       root.addView(caption, captionParams);
 
-      TextView likeBurst = new TextView(parent.getContext());
-      likeBurst.setText("♥");
-      likeBurst.setTextColor(0xFFFF4D6D);
-      likeBurst.setTextSize(92);
-      likeBurst.setTypeface(Typeface.DEFAULT_BOLD);
-      likeBurst.setGravity(Gravity.CENTER);
-      likeBurst.setIncludeFontPadding(false);
-      likeBurst.setShadowLayer(20, 0, 4, 0xAA000000);
+      ImageView likeBurst = new ImageView(parent.getContext());
+      likeBurst.setImageResource(R.drawable.ic_short_heart);
+      likeBurst.setImageTintList(ColorStateList.valueOf(0xFFFF4D6D));
+      likeBurst.setPadding(dp(10), dp(10), dp(10), dp(10));
+      likeBurst.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
       likeBurst.setVisibility(View.GONE);
       root.addView(likeBurst, new FrameLayout.LayoutParams(
-        ViewGroup.LayoutParams.WRAP_CONTENT,
-        ViewGroup.LayoutParams.WRAP_CONTENT,
+        dp(116),
+        dp(116),
         Gravity.CENTER
       ));
 
@@ -3620,10 +3779,11 @@ public class NativeShortVideoActivity extends Activity {
       FrameLayout progressTouch = new FrameLayout(parent.getContext());
       progressTouch.setClickable(true);
       progressTouch.setFocusable(true);
+      progressTouch.setContentDescription("播放进度，拖动调整");
       progressTouch.setOnTouchListener((view, event) -> seekActivePlayerFromTouch(view, event));
       FrameLayout.LayoutParams progressTouchParams = new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
-        dp(28),
+        dp(48),
         Gravity.BOTTOM
       );
       root.addView(progressTouch, progressTouchParams);
@@ -3663,7 +3823,7 @@ public class NativeShortVideoActivity extends Activity {
       progressTimeParams.bottomMargin = dp(34);
       root.addView(progressTime, progressTimeParams);
 
-      return new ShortVideoHolder(root, stage, cover, gestureLayer, caption, rail, progressTouch, progressTrack, progressFill, progressTime, likeBurst);
+      return new ShortVideoHolder(root, stage, cover, gestureLayer, caption, captionAuthor, captionTitle, captionToggle, playIndicator, rail, progressTouch, progressTrack, progressFill, progressTime, likeBurst);
     }
 
     @Override
@@ -3674,6 +3834,10 @@ public class NativeShortVideoActivity extends Activity {
       holder.verticalGesture = false;
       holder.longPressTriggered = false;
       ShortVideoItem item = videos.get(position);
+      holder.itemView.setContentDescription("短视频，作者 "
+        + (item.author.length() > 0 ? item.author : "未知作者")
+        + "，" + shortTitle(item.title)
+        + "。点按播放或暂停，使用右侧按钮互动，上下滑切换");
       View.OnLongClickListener longPress = view -> {
         clearPendingStageTap();
         view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
@@ -3690,9 +3854,7 @@ public class NativeShortVideoActivity extends Activity {
       holder.cover.setOnTouchListener((view, event) -> handleStageTouch(holder, view, event));
       holder.cover.setOnLongClickListener(longPress);
       holder.gestureLayer.setOnTouchListener((view, event) -> handleGestureLayerTouch(holder, view, event));
-      holder.caption.setText("@" + (item.author.length() > 0 ? item.author : "未知作者") + "\n" + item.title);
-      holder.caption.setOnClickListener(view -> showAuthorPanel(item));
-      holder.caption.setOnLongClickListener(longPress);
+      bindCaption(holder, item, longPress);
       holder.rail.setOnLongClickListener(longPress);
       bindRail(holder, item);
       applyControlsVisibility(holder);
@@ -3700,6 +3862,7 @@ public class NativeShortVideoActivity extends Activity {
       holder.cover.setVisibility(View.VISIBLE);
       resetHolderProgress(holder);
       resetLikeBurst(holder);
+      holder.playIndicator.setVisibility(View.GONE);
       attachedHolders.put(position, holder);
       ensurePlayerViewAt(position);
       if (!applyCachedFrame(holder, item) && item.coverUrl.length() > 0) loadCover(holder, item);
@@ -3715,6 +3878,10 @@ public class NativeShortVideoActivity extends Activity {
       holder.horizontalGesture = false;
       holder.verticalGesture = false;
       holder.longPressTriggered = false;
+      holder.captionExpanded = false;
+      holder.captionCanExpand = false;
+      holder.playIndicator.animate().cancel();
+      holder.playIndicator.setVisibility(View.GONE);
       PlayerView cachedView = playerViews.get(holder.index);
       if (cachedView != null && cachedView.getParent() == holder.stage) holder.stage.removeView(cachedView);
       resetLikeBurst(holder);
@@ -3732,13 +3899,17 @@ public class NativeShortVideoActivity extends Activity {
     final FrameLayout stage;
     final ImageView cover;
     final FrameLayout gestureLayer;
-    final TextView caption;
+    final LinearLayout caption;
+    final TextView captionAuthor;
+    final TextView captionTitle;
+    final TextView captionToggle;
+    final ImageView playIndicator;
     final LinearLayout rail;
     final FrameLayout progressTouch;
     final FrameLayout progressTrack;
     final View progressFill;
     final TextView progressTime;
-    final TextView likeBurst;
+    final ImageView likeBurst;
     int index = -1;
     float touchStartX;
     float touchStartY;
@@ -3746,15 +3917,21 @@ public class NativeShortVideoActivity extends Activity {
     boolean horizontalGesture;
     boolean verticalGesture;
     boolean longPressTriggered;
+    boolean captionExpanded;
+    boolean captionCanExpand;
     Runnable longPressRunnable;
     Runnable hideSeekPreviewRunnable;
 
-    ShortVideoHolder(@NonNull FrameLayout root, FrameLayout stage, ImageView cover, FrameLayout gestureLayer, TextView caption, LinearLayout rail, FrameLayout progressTouch, FrameLayout progressTrack, View progressFill, TextView progressTime, TextView likeBurst) {
+    ShortVideoHolder(@NonNull FrameLayout root, FrameLayout stage, ImageView cover, FrameLayout gestureLayer, LinearLayout caption, TextView captionAuthor, TextView captionTitle, TextView captionToggle, ImageView playIndicator, LinearLayout rail, FrameLayout progressTouch, FrameLayout progressTrack, View progressFill, TextView progressTime, ImageView likeBurst) {
       super(root);
       this.stage = stage;
       this.cover = cover;
       this.gestureLayer = gestureLayer;
       this.caption = caption;
+      this.captionAuthor = captionAuthor;
+      this.captionTitle = captionTitle;
+      this.captionToggle = captionToggle;
+      this.playIndicator = playIndicator;
       this.rail = rail;
       this.progressTouch = progressTouch;
       this.progressTrack = progressTrack;
