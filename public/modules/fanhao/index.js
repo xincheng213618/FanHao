@@ -1,4 +1,4 @@
-export { createPeoplePage } from "./people-page.js";
+export { createPeoplePage } from "./people-page.js?v=20260712-fanhao-home-01";
 export { createPersonProfile } from "./person-profile.js";
 export { createRankingPage } from "./ranking-page.js";
 export { createWorkDetailPage } from "./work-detail-page.js";

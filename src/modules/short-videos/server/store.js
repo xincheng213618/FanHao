@@ -16,7 +16,7 @@ const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
 const DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION = "4";
 const SHORT_VIDEO_TOPIC_INDEX_VERSION = "1";
 const SHORT_VIDEO_SOUND_INDEX_VERSION = "1";
-const SHORT_VIDEO_SCHEMA_VERSION = "20260712-1";
+const SHORT_VIDEO_SCHEMA_VERSION = "20260712-2";
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LOCAL_SHORT_VIDEO_USER_ID = "local:self";
 const IMPORTED_SHORT_VIDEO_ACTION_SOURCES = new Set(["imported", "download_manager"]);
@@ -2504,14 +2504,12 @@ function recreateShortVideoCatalogView(db) {
       COALESCE(
         NULLIF(liked_membership.first_seen_at, ''),
         NULLIF(v.imported_at, ''),
-        NULLIF(v.liked_at, ''),
         NULLIF(v.published_at, ''),
         ''
       ) AS liked_sort_at,
       julianday(COALESCE(
         NULLIF(liked_membership.first_seen_at, ''),
         NULLIF(v.imported_at, ''),
-        NULLIF(v.liked_at, ''),
         NULLIF(v.published_at, '')
       )) AS liked_sort_time,
       v.duration_ms,

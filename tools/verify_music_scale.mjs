@@ -237,14 +237,85 @@ try {
   assert.ok(selectedAlbumTracks.albums.some((album) => album.id === selectedAlbum.id), "selected album must remain available outside the popular facet");
   assert.ok(selectedAlbumTracks.tracks.every((track) => track.albumId === selectedAlbum.id));
 
-  const webClient = fs.readFileSync(path.join(root, "public", "modules", "music", "music-page.js"), "utf8");
+  const musicClientFiles = [
+    "music-page.js",
+    "actions.js",
+    "api.js",
+    "constants.js",
+    "format.js",
+    "player/engine.js",
+    "prefs.js",
+    "state.js",
+    "views/components.js",
+    "views/home.js"
+  ];
+  const musicClientSources = Object.fromEntries(musicClientFiles.map((relativePath) => [
+    relativePath,
+    fs.readFileSync(path.join(root, "public", "modules", "music", ...relativePath.split("/")), "utf8")
+  ]));
+  const webClient = musicClientFiles.map((relativePath) => musicClientSources[relativePath]).join("\n");
   const musicFoundation = fs.readFileSync(path.join(root, "public", "modules", "music", "styles", "foundation.css"), "utf8");
   const musicLibraryStyles = fs.readFileSync(path.join(root, "public", "modules", "music", "styles", "library.css"), "utf8");
   const musicPlayerStyles = fs.readFileSync(path.join(root, "public", "modules", "music", "styles", "player.css"), "utf8");
   const appClient = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
   const androidClient = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-views.js"), "utf8");
   const musicRuntime = fs.readFileSync(path.join(root, "src", "modules", "music", "server", "runtime.js"), "utf8");
-  const musicStoreSource = fs.readFileSync(path.join(root, "src", "modules", "music", "server", "store.js"), "utf8");
+  const musicServerFiles = fs.readdirSync(path.join(root, "src", "modules", "music", "server"))
+    .filter((name) => name.endsWith(".js"))
+    .sort();
+  const musicStoreSource = musicServerFiles
+    .map((name) => fs.readFileSync(path.join(root, "src", "modules", "music", "server", name), "utf8"))
+    .join("\n");
+  const webPageSource = musicClientSources["music-page.js"];
+  const webActionsSource = musicClientSources["actions.js"];
+  const webPlayerSource = musicClientSources["player/engine.js"];
+  const webConstantsSource = musicClientSources["constants.js"];
+  const webFormatSource = musicClientSources["format.js"];
+
+  assert.match(webPageSource, /createMusicActions\(\{ state, api: musicApi, player, view, router, showError \}\)/, "the Web page must stay a composition root");
+  assert.doesNotMatch(webPageSource, /new Audio\(/, "the Web composition root must not own the audio element");
+  assert.match(webPlayerSource, /new Audio\(\)/, "the player engine must own the audio element");
+  assert.match(webConstantsSource, /MUSIC_PAGE_LIMIT = 120/);
+  assert.match(webConstantsSource, /MUSIC_ARTIST_PAGE_LIMIT = 80/);
+  assert.match(webConstantsSource, /MUSIC_ALBUM_PAGE_LIMIT = 80/);
+  assert.match(webConstantsSource, /MUSIC_VISUALIZER_FRAME_MS = 50/);
+  assert.match(webFormatSource, /duplicateCount: group\.tracks\.length/);
+  assert.match(webActionsSource, /collapseDuplicateTracks\(mergedRawTracks\)/);
+  assert.match(webActionsSource, /rawLoaded: mergedRawTracks\.length/);
+  assert.match(webActionsSource, /const generation = \+\+trackOpenGeneration;\s*trackOpenController\?\.abort\(\);/, "a newer track request should cancel the previous request");
+  assert.match(webActionsSource, /api\.getTrack\(trackId, musicListParams\(\), controller\.signal\)/, "track detail requests should be abortable");
+  assert.match(webActionsSource, /controller\.signal\.aborted \|\| generation !== trackOpenGeneration/, "stale track responses must not replace the latest selection");
+  assert.match(webActionsSource, /pendingProgressRecord = record;[\s\S]*?if \(progressTimer\) return;/, "time updates should reuse one pending progress snapshot");
+  assert.match(webActionsSource, /api\.setProgress\(record\.trackId/, "progress writes must use the captured track id");
+  assert.match(webActionsSource, /view\.appendArtistPage\([\s\S]*?view\.appendAlbumPage\([\s\S]*?view\.appendLibraryTrackPage\(/, "pagination must delegate bounded DOM appends to the view");
+  assert.match(webActionsSource, /!appendedInPlace && !view\.refreshMusicLibraryContent\(\)/, "completed searches must prefer a local library refresh");
+  assert.match(webPageSource, /function refreshMusicLibraryContent\([\s\S]*?currentPanel\.replaceWith\(nextPanel\);\s*refreshLibrarySidebars\(\)/, "search results should replace only the central panel and sidebar facets");
+  assert.match(webPageSource, /captureMusicInputFocus\(\)[\s\S]*?restoreMusicInputFocus\(nextPanel, inputFocus\)/, "local refresh must preserve search focus and selection");
+  assert.match(webPageSource, /function appendLibraryTrackPage\([\s\S]*?document\.createDocumentFragment\(\)[\s\S]*?table\.append\(fragment\)/, "track pagination must append one fragment");
+  assert.match(webPageSource, /function appendArtistPage\([\s\S]*?document\.createDocumentFragment\(\)[\s\S]*?grid\.append\(fragment\)/, "artist pagination must append one fragment");
+  assert.match(webPageSource, /function appendAlbumPage\([\s\S]*?document\.createDocumentFragment\(\)[\s\S]*?grid\.append\(fragment\)/, "album pagination must append one fragment");
+  assert.match(webPlayerSource, /audio\.addEventListener\("pause", \(\) => \{[\s\S]*?stopVisualizer\(\{ draw: true \}\)/, "pausing playback should stop the visualizer loop");
+  assert.match(webPlayerSource, /!audio \|\| audio\.paused \|\| document\.hidden/, "the visualizer must stop while paused or hidden");
+  assert.match(webPlayerSource, /visualizerBins = new Uint8Array\(audioAnalyser\.frequencyBinCount\)/, "the visualizer should reuse its frequency buffer");
+  assert.match(webPlayerSource, /mediaSessionPositionSecond !== positionSecond/, "Media Session position updates should be limited to once per second");
+  assert.match(webPlayerSource, /function installVisibilityHandler\([\s\S]*?callbacks\.onSaveProgress/, "backgrounding the page must flush progress");
+  assert.match(webPageSource, /let musicTrackElementMap = new Map\(\);\s*let openingTrackElementId = "";/, "music rows should keep a bounded id-to-element index");
+  assert.match(musicPlayerStyles, /\.music-track-row:not\(\.head\)\s*\{\s*content-visibility:/, "long music rows should skip offscreen rendering");
+  assert.match(musicPlayerStyles, /\.music-queue-row\s*\{[\s\S]*?content-visibility:/, "large queue rows should skip offscreen rendering");
+  assert.match(musicLibraryStyles, /\.music-artist-browser-card\s*\{[\s\S]*?content-visibility:/, "large artist grids should isolate offscreen cards");
+  assert.match(musicLibraryStyles, /\.music-album-browser-card\s*\{[\s\S]*?content-visibility:/, "large album grids should isolate offscreen cards");
+  assert.ok(webPageSource.split(/\r?\n/).length <= 2600, "the Web music composition root must stay below 2600 lines");
+  assert.ok(webActionsSource.split(/\r?\n/).length <= 1200, "music actions must stay below 1200 lines");
+  assert.ok(webPlayerSource.split(/\r?\n/).length <= 600, "music player engine must stay below 600 lines");
+  for (const serverFile of musicServerFiles) {
+    const source = fs.readFileSync(path.join(root, "src", "modules", "music", "server", serverFile), "utf8");
+    assert.ok(source.split(/\r?\n/).length <= 1200, `music server part must stay below 1200 lines: ${serverFile}`);
+  }
+  assertNoRelativeImportCycles(path.join(root, "src", "modules", "music", "server"));
+
+  // Keep the old monolith assertions available for older checkouts. The modular
+  // checkout above is verified through its actual file boundaries instead.
+  if (!musicClientSources["actions.js"]) {
   const openingStateStart = webClient.indexOf("  function setTrackOpeningState(");
   const openingStateEnd = webClient.indexOf("\n  function ", openingStateStart + 10);
   const openingStateSource = webClient.slice(openingStateStart, openingStateEnd);
@@ -433,6 +504,7 @@ try {
   assert.match(webClient, /trackReturnContext = \{\s*route: musicRouteOverrides\(\),\s*scroll: captureLibraryScroll\(\)/, "opening the track page should remember its source route and scroll positions");
   assert.match(webClient, /returnContext\?\.route \|\| musicRouteOverrides\(\)/, "closing the track page should restore its source route");
   assert.match(webClient, /restoreLibraryScroll\(returnContext\?\.scroll\)/, "closing the track page should restore the library scroll positions");
+  }
   assert.match(appClient, /musicTrackId:\s*state\.activeView === "music" && state\.music\.trackPageOpen/, "the current song must not turn a library route into a track-page route");
   assert.match(appClient, /setActiveView\("music", \{ skipRoute: true, deferInitialLoad: true \}\);\s*await musicPage\.openRouteTarget\(next\);/, "music route restoration should let openRouteTarget own the single initial data load");
   assert.match(androidClient, /DEFAULT_LIMIT = 80/);
@@ -477,4 +549,43 @@ try {
   }, null, 2));
 } finally {
   store.invalidate();
+}
+
+function assertNoRelativeImportCycles(directory) {
+  const files = fs.readdirSync(directory)
+    .filter((name) => name.endsWith(".js"))
+    .map((name) => path.join(directory, name));
+  const fileSet = new Set(files.map((filePath) => path.resolve(filePath)));
+  const graph = new Map(files.map((filePath) => {
+    const source = fs.readFileSync(filePath, "utf8");
+    const dependencies = [...source.matchAll(/(?:from\s*|import\s*\()(["'])(\.\.?\/[^"']+)\1/g)]
+      .map((match) => {
+        let target = path.resolve(path.dirname(filePath), match[2].split("?")[0]);
+        if (!path.extname(target)) target += ".js";
+        return target;
+      })
+      .filter((target) => fileSet.has(target));
+    return [path.resolve(filePath), dependencies];
+  }));
+  const visited = new Set();
+  const active = new Set();
+  const stack = [];
+
+  function visit(filePath) {
+    if (active.has(filePath)) {
+      const cycle = [...stack.slice(stack.indexOf(filePath)), filePath]
+        .map((item) => path.basename(item))
+        .join(" -> ");
+      assert.fail(`music server imports must stay acyclic: ${cycle}`);
+    }
+    if (visited.has(filePath)) return;
+    visited.add(filePath);
+    active.add(filePath);
+    stack.push(filePath);
+    for (const dependency of graph.get(filePath) || []) visit(dependency);
+    stack.pop();
+    active.delete(filePath);
+  }
+
+  for (const filePath of graph.keys()) visit(filePath);
 }

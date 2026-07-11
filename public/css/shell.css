@@ -547,7 +547,8 @@ body.people-index-view .main {
 
 body.people-index-view .toolbar {
   position: static;
-  margin: 0 -28px;
+  width: min(100%, 1440px);
+  margin: 0 auto;
   padding-top: 12px;
   padding-bottom: 12px;
 }

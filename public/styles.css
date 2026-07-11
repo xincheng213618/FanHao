@@ -1,10 +1,10 @@
 /* Shared application foundation. Keep imports in cascade order. */
 @import "./css/foundation.css?v=20260710-web-css-modules-01";
 @import "./modules/novels/styles.css?v=20260712-novel-menu-bar-16";
-@import "./css/shell.css?v=20260711-photo-reader-sticky-16";
+@import "./css/shell.css?v=20260712-fanhao-home-01";
 
 /* Main library modules. */
-@import "./modules/fanhao/styles.css?v=20260710-web-css-modules-01";
+@import "./modules/fanhao/styles.css?v=20260712-fanhao-home-01";
 @import "./modules/content-index/styles.css?v=20260711-photo-reader-sticky-15";
 @import "./modules/tools/styles.css?v=20260710-web-css-modules-01";
 @import "./modules/fanhao/work-cards.css?v=20260710-web-css-modules-01";

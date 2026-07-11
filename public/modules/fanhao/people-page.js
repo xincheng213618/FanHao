@@ -27,6 +27,7 @@ export function createPeoplePage(deps) {
   } = deps;
 
   let peopleIndexLoadObserver = null;
+  let peopleIndexLoadPending = false;
 
 function filteredPeople() {
   return state.people.filter((person) => person?.actorProfile?.gender !== "male");
@@ -106,16 +107,40 @@ function loadMorePeopleIndex() {
   if (state.activeView !== "people" || state.selectedPersonId) return;
   const people = filteredPeople();
   if (state.personVisibleLimit >= people.length) return;
-  state.personVisibleLimit = Math.min(people.length, state.personVisibleLimit + state.personPageSize);
-  renderPeopleIndex();
+  disconnectPeopleIndexAutoload();
+
+  const start = Math.max(0, state.personVisibleLimit);
+  const nextLimit = Math.min(people.length, start + state.personPageSize);
+  const loadMoreRow = els.workGrid.querySelector(".people-index-load-more");
+  const fragment = document.createDocumentFragment();
+  for (const person of people.slice(start, nextLimit)) {
+    fragment.append(createPersonIndexCard(person));
+  }
+  if (loadMoreRow) loadMoreRow.before(fragment);
+  else els.workGrid.append(fragment);
+  state.personVisibleLimit = nextLimit;
+
+  if (!loadMoreRow) return;
+  if (nextLimit >= people.length) {
+    loadMoreRow.remove();
+    return;
+  }
+  const button = loadMoreRow.querySelector("button");
+  if (button) button.textContent = `显示更多人物 ${formatNumber(nextLimit)} / ${formatNumber(people.length)}`;
+  observePeopleIndexLoadMore(loadMoreRow);
 }
 
 function observePeopleIndexLoadMore(target) {
   if (!("IntersectionObserver" in window)) return;
   peopleIndexLoadObserver = new IntersectionObserver(
     (entries) => {
-      if (!entries.some((entry) => entry.isIntersecting)) return;
-      window.setTimeout(loadMorePeopleIndex, 80);
+      if (peopleIndexLoadPending || !entries.some((entry) => entry.isIntersecting)) return;
+      peopleIndexLoadPending = true;
+      peopleIndexLoadObserver?.disconnect();
+      window.setTimeout(() => {
+        peopleIndexLoadPending = false;
+        loadMorePeopleIndex();
+      }, 80);
     },
     { root: null, rootMargin: "720px 0px", threshold: 0 }
   );
@@ -124,7 +149,7 @@ function observePeopleIndexLoadMore(target) {
 
 function appendPeopleIndexLoadMore(visibleCount, totalCount) {
   const wrap = document.createElement("div");
-  wrap.className = "load-more-row";
+  wrap.className = "load-more-row people-index-load-more";
 
   const button = document.createElement("button");
   button.type = "button";

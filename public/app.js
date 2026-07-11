@@ -9,7 +9,7 @@ import {
   createStudioPage,
   createWorkDetailPage,
   selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260712-fanhao-refactor-01";
+} from "./modules/fanhao/index.js?v=20260712-fanhao-home-01";
 import { createAdminModal } from "./modules/system/admin-modal.js?v=20260710-module-registry-01";
 import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260712-novel-mine-07";
 

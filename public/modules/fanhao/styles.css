@@ -699,8 +699,6 @@
     transform 140ms ease,
     box-shadow 140ms ease,
     border-color 140ms ease;
-  content-visibility: auto;
-  contain-intrinsic-size: 190px;
 }
 
 .person-index-card:hover {
@@ -933,6 +931,11 @@
   min-width: 0;
   grid-template-columns: repeat(auto-fill, minmax(198px, 1fr));
   gap: 14px;
+}
+
+body.people-index-view .work-grid {
+  width: min(100%, 1440px);
+  margin-inline: auto;
 }
 
 .tools-view .work-grid {

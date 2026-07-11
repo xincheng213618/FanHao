@@ -52,6 +52,13 @@ assert(!/function createPreviewMediaSection\s*\(/.test(workDetail), "Web preview
 assert(workDetail.includes("createWorkPreviewMedia"), "Web work detail must compose the preview feature");
 assert(lines("public/modules/fanhao/work-detail-page.js") <= 1000, "Web work detail must stay below 1000 lines");
 assert(lines("public/app.js") <= 3000, "Web composition root must stay below 3000 lines");
+const peoplePage = read("public/modules/fanhao/people-page.js");
+const loadMorePeopleSource = /function loadMorePeopleIndex\(\)\s*\{([\s\S]*?)\n\}/.exec(peoplePage)?.[1] || "";
+assert(loadMorePeopleSource.includes("loadMoreRow.before(fragment)"), "people pagination must append cards without replacing the grid");
+assert(!loadMorePeopleSource.includes("renderPeopleIndex()"), "people pagination must not rerender the full index");
+const fanhaoStyles = read("public/modules/fanhao/styles.css");
+const personCardStyles = /\.person-index-card\s*\{([\s\S]*?)\n\}/.exec(fanhaoStyles)?.[1] || "";
+assert(!personCardStyles.includes("content-visibility"), "people cards must not flash in while scrolling");
 
 const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");

@@ -150,9 +150,6 @@ export function createMusicPage(deps) {
     refreshLibrarySidebars,
     refreshPlaylistDialog,
     refreshMusicLibraryContent,
-    appendLibraryTrackPage,
-    appendArtistPage,
-    appendAlbumPage,
     restoreMusicPanelScroll,
     clearMusicSuggestions,
     renderStats,
@@ -795,18 +792,6 @@ export function createMusicPage(deps) {
     return more;
   }
 
-  function appendArtistPage(artists, startIndex) {
-    const grid = els.workGrid?.querySelector?.(".music-artist-browser-grid");
-    if (!grid) return false;
-    grid.querySelector(".music-load-more")?.remove();
-    const fragment = document.createDocumentFragment();
-    for (const artist of artists) fragment.append(renderArtistCard(artist));
-    const more = renderArtistLoadMore(startIndex + artists.length);
-    if (more) fragment.append(more);
-    grid.append(fragment);
-    return true;
-  }
-
   function renderAlbumLoadMore(albumCount) {
     if (!state.music.hasMore) return null;
     const more = document.createElement("button");
@@ -816,18 +801,6 @@ export function createMusicPage(deps) {
     more.disabled = state.music.loadingMore;
     more.addEventListener("click", () => actions.loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
     return more;
-  }
-
-  function appendAlbumPage(albums, startIndex) {
-    const grid = els.workGrid?.querySelector?.(".music-album-browser-grid");
-    if (!grid) return false;
-    grid.querySelector(".music-load-more")?.remove();
-    const fragment = document.createDocumentFragment();
-    for (const album of albums) fragment.append(renderAlbumCard(album));
-    const more = renderAlbumLoadMore(startIndex + albums.length);
-    if (more) fragment.append(more);
-    grid.append(fragment);
-    return true;
   }
 
   // ================= 曲目列表 =================
@@ -968,18 +941,6 @@ export function createMusicPage(deps) {
     more.disabled = state.music.loadingMore;
     more.addEventListener("click", () => actions.loadMusic({ append: true, skipRoute: true, keepCurrent: true }).catch(showError));
     return more;
-  }
-
-  function appendLibraryTrackPage(tracks, startIndex) {
-    const table = els.workGrid?.querySelector?.(".music-track-panel .music-track-table");
-    if (!table) return false;
-    table.querySelector(".music-load-more")?.remove();
-    const fragment = document.createDocumentFragment();
-    tracks.forEach((track, index) => fragment.append(h.trackRow(track, startIndex + index)));
-    const more = renderTrackLoadMore(startIndex + tracks.length);
-    if (more) fragment.append(more);
-    table.append(fragment);
-    return true;
   }
 
   function restoreMusicPanelScroll(scrollTop) {
