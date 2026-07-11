@@ -12,8 +12,7 @@ export function createShortVideoListView(context = {}) {
   const observeListLoadMore = (...args) => context.observeListLoadMore(...args);
   const openShortVideoFromList = (...args) => context.openShortVideoFromList(...args);
   const resetListLoadMoreObserver = (...args) => context.resetListLoadMoreObserver(...args);
-  const shortVideoAuthorFilterValue = (...args) => context.shortVideoAuthorFilterValue(...args);
-  const showAuthorPanel = (...args) => context.showAuthorPanel(...args);
+  const openShortVideoAuthor = (...args) => context.openShortVideoAuthor(...args);
   const sortedAuthorFacets = (...args) => context.sortedAuthorFacets(...args);
   const submitSearch = (...args) => context.submitSearch(...args);
   const updateListParams = (...args) => context.updateListParams(...args);
@@ -266,7 +265,7 @@ export function createShortVideoListView(context = {}) {
     const name = document.createElement("strong");
     name.textContent = author.name || "未知作者";
     button.append(avatar, name);
-    bindReliableTap(button, () => showAuthorPanel({ authorFilter: shortVideoAuthorFilterValue(author), author }));
+    bindReliableTap(button, () => openShortVideoAuthor(author));
     return button;
   }
 
@@ -354,12 +353,22 @@ export function createShortVideoListView(context = {}) {
     }, { passive: true });
   }
 
+  function shortVideoToast(message) {
+    document.querySelector(".short-video-mobile-toast")?.remove();
+    const toast = document.createElement("div");
+    toast.className = "short-video-mobile-toast";
+    toast.textContent = message;
+    document.body.append(toast);
+    window.setTimeout(() => toast.remove(), 2200);
+  }
+
   return {
     renderListShell,
     renderListToolbar,
     renderAuthorIndex,
     renderAuthorIndexCard,
     renderCard,
-    bindReliableTap
+    bindReliableTap,
+    shortVideoToast
   };
 }

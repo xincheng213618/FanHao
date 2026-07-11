@@ -223,6 +223,47 @@ export function createShortVideoListController(context = {}) {
     return opened;
   }
 
+  async function openShortVideoAuthor(author = {}) {
+    const authorFilter = shortVideoAuthorFilterValue(author);
+    if (!authorFilter) {
+      shortVideoToast("该作者缺少可识别信息");
+      return false;
+    }
+    const params = new URLSearchParams({
+      author: authorFilter,
+      source: "all",
+      sort: listState.sort || DEFAULT_SORT,
+      limit: String(DEFAULT_LIMIT),
+      facets: "0",
+      stats: "0"
+    });
+    try {
+      const data = await api.fetchCached(getActiveUrl(), `/api/short-videos?${params}`, {
+        timeoutMs: 16000,
+        cacheMaxAgeMs: 5 * 60 * 1000
+      });
+      const first = data.videos?.[0];
+      if (!first) {
+        shortVideoToast("该作者还没有本地作品");
+        return false;
+      }
+      const opened = await openNativeShortVideoFeed(first, {
+        videos: data.videos || [],
+        hasMore: data.hasMore,
+        query: "",
+        author: authorFilter,
+        source: "all",
+        sort: listState.sort || DEFAULT_SORT,
+        openAuthorPanel: true
+      });
+      if (!opened) shortVideoToast("当前设备无法打开原生作者主页");
+      return opened;
+    } catch (error) {
+      shortVideoToast(shortVideoErrorMessage(error, "作者主页打开失败，请稍后重试"));
+      return false;
+    }
+  }
+
   function shortVideoErrorMessage(error, fallback) {
     const message = String(error?.message || "").trim();
     if (!message || /failed to fetch|network|timeout/i.test(message)) return fallback;
@@ -247,6 +288,7 @@ export function createShortVideoListController(context = {}) {
     observeListLoadMore,
     installListEvents,
     openShortVideoFromList,
+    openShortVideoAuthor,
     shortVideoErrorMessage,
     shortVideoApiSource
   };

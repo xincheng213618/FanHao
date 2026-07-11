@@ -94,6 +94,7 @@ export function createShortVideoNativeFeed(context = {}) {
         nextOffset: feedEntries.length ? feedEntries[feedEntries.length - 1].apiIndex + 1 : videos.length,
         startIndex: index - start,
         startId: video.id,
+        openAuthorPanel: Boolean(options.openAuthorPanel),
         videos: JSON.stringify(payload)
       });
       return true;

@@ -12,17 +12,15 @@ const requiredParts = [
   "shared.js",
   "list/controller.js",
   "list/view.js",
-  "panels/author-panel.js",
   "player/native-feed.js",
   "ui/icons.js",
-  "styles/list.css",
-  "styles/author-panel.css"
+  "styles/list.css"
 ];
 
 for (const relativePath of requiredParts) {
   assert(fs.statSync(path.join(moduleDir, relativePath), { throwIfNoEntry: false })?.isFile(), `missing short-video part: ${relativePath}`);
 }
-const obsoletePlayerParts = ["panels/playback-panels.js", "platform/native-player.js", "player/interactions.js", "player/media-cache.js", "player/reel-controller.js", "styles/reel.css", "styles/playback-panels.css"];
+const obsoletePlayerParts = ["panels/author-panel.js", "panels/playback-panels.js", "platform/native-player.js", "player/interactions.js", "player/media-cache.js", "player/reel-controller.js", "styles/author-panel.css", "styles/reel.css", "styles/playback-panels.css"];
 for (const relativePath of obsoletePlayerParts) {
   assert(!fs.statSync(path.join(moduleDir, relativePath), { throwIfNoEntry: false }), `legacy Android WebView player must stay removed: ${relativePath}`);
 }
@@ -38,14 +36,15 @@ verifySharedImports();
 verifyWebDedicatedEntry();
 
 const styles = fs.readFileSync(path.join(moduleDir, "styles.css"), "utf8");
-for (const style of ["list", "author-panel"]) {
+for (const style of ["list"]) {
   assert(styles.includes(`./styles/${style}.css`), `missing short-video CSS import: ${style}`);
 }
 
 const androidEntrySource = fs.readFileSync(path.join(moduleDir, "android-module.js"), "utf8");
 const androidListSource = fs.readFileSync(path.join(moduleDir, "list", "view.js"), "utf8");
 const androidListControllerSource = fs.readFileSync(path.join(moduleDir, "list", "controller.js"), "utf8");
-const androidAuthorSource = fs.readFileSync(path.join(moduleDir, "panels", "author-panel.js"), "utf8");
+const androidNativeFeedSource = fs.readFileSync(path.join(moduleDir, "player", "native-feed.js"), "utf8");
+const androidPlayerPluginSource = fs.readFileSync(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "FanHaoPlayerPlugin.java"), "utf8");
 assert(androidEntrySource.includes('view: "shortVideoSearch"'), "Android short-video search must use a dedicated route");
 assert(androidEntrySource.includes("short-video-chrome-row"), "Android short-video chrome must keep search and groups in one compact row");
 assert(!androidEntrySource.includes("short-video-chrome-sort"), "Android short-video chrome must not reserve a separate sorting tag");
@@ -60,8 +59,10 @@ assert(!androidListSource.includes("shell.append(renderLibraryTabs()"), "Android
 assert(!androidEntrySource.includes('view: "shortVideoBrowser"'), "Android short videos must not expose the legacy WebView playback route");
 assert(androidListControllerSource.includes("await openNativeShortVideoFeed(video)"), "Android short-video cards must open the native feed");
 assert(!androidListControllerSource.includes('showView("shortVideoBrowser"'), "Android list playback must not fall back to the legacy WebView player");
-assert(androidAuthorSource.includes("await openNativeShortVideoFeed(video, {"), "Android author pages must open the same native feed as direct playback");
-assert(!androidAuthorSource.includes("skipNative"), "Android author playback must not force the legacy WebView player");
+assert(androidListSource.includes("openShortVideoAuthor(author)"), "Android author cards must delegate to the native author entry");
+assert(androidListControllerSource.includes("openAuthorPanel: true"), "Android author index must request the native author homepage");
+assert(androidNativeFeedSource.includes("openAuthorPanel: Boolean(options.openAuthorPanel)"), "Android native feed bridge must forward the author homepage request");
+assert(androidPlayerPluginSource.includes("EXTRA_OPEN_AUTHOR_PANEL") && androidPlayerPluginSource.includes('call.getBoolean("openAuthorPanel", false)'), "Android player plugin must pass the native author homepage flag");
 
 const views = createShortVideoViews({
   els: {},

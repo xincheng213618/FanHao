@@ -1,8 +1,7 @@
 import { createShortVideoApi } from "./api.js?v=20260711-short-video-cache-09";
-import { createShortVideoListController } from "./list/controller.js?v=20260712-native-short-video-only-01";
-import { createShortVideoListView } from "./list/view.js?v=20260712-native-short-video-only-01";
-import { createShortVideoAuthorPanel } from "./panels/author-panel.js?v=20260712-native-short-video-only-01";
-import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260712-native-short-video-only-01";
+import { createShortVideoListController } from "./list/controller.js?v=20260712-native-short-video-only-02";
+import { createShortVideoListView } from "./list/view.js?v=20260712-native-short-video-only-02";
+import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260712-native-short-video-only-02";
 import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=20260712-short-video-search-page-07";
 import { createShortVideoIcons } from "./ui/icons.js?v=20260711-short-video-cache-08";
 
@@ -27,7 +26,6 @@ export function createShortVideoViews(deps) {
   Object.assign(context, createShortVideoListController(context));
   Object.assign(context, createShortVideoListView(context));
   Object.assign(context, createShortVideoNativeFeed(context));
-  Object.assign(context, createShortVideoAuthorPanel(context));
 
   async function renderList(params = {}, renderGuard = null) {
     deactivateTransientUi();
@@ -63,7 +61,6 @@ export function createShortVideoViews(deps) {
   }
 
   function deactivateTransientUi() {
-    context.closeAuthorPanel();
     document.querySelector(".short-video-sort-overlay")?.remove();
     context.resetListLoadMoreObserver();
   }

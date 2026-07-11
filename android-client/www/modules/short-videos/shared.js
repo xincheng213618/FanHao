@@ -1,5 +1,4 @@
 export const DEFAULT_LIMIT = 12;
-export const AUTHOR_PAGE_LIMIT = 12;
 export const AUTHOR_INITIAL_COUNT = 24;
 export const AUTHOR_APPEND_COUNT = 18;
 export const DEFAULT_SORT = "published";

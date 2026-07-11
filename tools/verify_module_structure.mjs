@@ -171,11 +171,9 @@ const requiredShortVideoParts = [
   "shared.js",
   "list/controller.js",
   "list/view.js",
-  "panels/author-panel.js",
   "player/native-feed.js",
   "ui/icons.js",
-  "styles/list.css",
-  "styles/author-panel.css"
+  "styles/list.css"
 ];
 for (const relativePath of requiredShortVideoParts) {
   assert(
@@ -183,7 +181,7 @@ for (const relativePath of requiredShortVideoParts) {
     `missing Android short-video module part: ${relativePath}`
   );
 }
-for (const obsoletePath of ["panels/playback-panels.js", "platform/native-player.js", "player/interactions.js", "player/media-cache.js", "player/reel-controller.js", "styles/reel.css", "styles/playback-panels.css"]) {
+for (const obsoletePath of ["panels/author-panel.js", "panels/playback-panels.js", "platform/native-player.js", "player/interactions.js", "player/media-cache.js", "player/reel-controller.js", "styles/author-panel.css", "styles/reel.css", "styles/playback-panels.css"]) {
   assert(!fs.statSync(path.join(shortVideoClientDir, obsoletePath), { throwIfNoEntry: false }), `legacy Android WebView player must stay removed: ${obsoletePath}`);
 }
 const shortVideoFacade = fs.readFileSync(path.join(shortVideoClientDir, "short-video-views.js"), "utf8").trim();

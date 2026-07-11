@@ -743,3 +743,19 @@ body.short-video-search-page-view .bottom-nav {
 .short-video-mobile-load-more:disabled {
   opacity: .62;
 }
+
+.short-video-mobile-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(80px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 160;
+  max-width: 80vw;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, .82);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 850;
+  white-space: nowrap;
+}

@@ -1,4 +1,4 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260712-native-short-video-only-01";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260712-native-short-video-only-02";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260705-mobile-actions-01";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
