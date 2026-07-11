@@ -5,8 +5,10 @@ import { fileURLToPath } from "node:url";
 import { discoverFanHaoModuleDefinitions } from "../src/fanhao/module-registry.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const bootstrapDir = path.join(root, "src", "bootstrap");
 const modulesDir = path.join(root, "src", "modules");
 const platformDir = path.join(root, "src", "platform");
+const webModulesDir = path.join(root, "public", "modules");
 const androidClientDir = path.join(root, "android-client", "www");
 const androidModulesDir = path.join(androidClientDir, "modules");
 const androidPlatformDir = path.join(androidClientDir, "platform");
@@ -54,6 +56,18 @@ assert.equal(legacyFiles.length, 0, "legacy src/server files must stay empty");
 const serverSource = fs.readFileSync(path.join(root, "server.js"), "utf8");
 assert(!serverSource.includes("/src/server/"), "server.js must not import the legacy src/server tree");
 assert(!/create[A-Za-z]+Module\s*\(/.test(serverSource), "server.js must not construct business modules directly");
+assert(!/["']node:http["']/.test(serverSource), "server.js must not import node:http");
+assert(!/["']node:os["']/.test(serverSource), "server.js must not import node:os");
+assert(!/from\s+["'][^"']*root-config\.js["']/.test(serverSource), "server.js must not import root-config directly");
+assert(!/\bcreateServer\s*\(/.test(serverSource), "server.js must delegate HTTP server construction to createServerHost()");
+assert(!/process\.(?:once|on)\(\s*["']SIG(?:INT|TERM)["']/.test(serverSource), "server.js must delegate signal handling to createServerHost()");
+assert(serverSource.includes("createServerHost({"), "server.js must use the shared server host");
+
+for (const filePath of sourceFiles(bootstrapDir)) {
+  for (const target of relativeImportTargets(filePath)) {
+    assert(!isWithin(target, modulesDir), `bootstrap must not import a business module: ${relative(filePath)} -> ${relative(target)}`);
+  }
+}
 
 const webAppSource = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
 assert(
@@ -194,6 +208,16 @@ for (const filePath of sourceFiles(shortVideoClientDir)) {
 for (const filePath of sourceFiles(platformDir)) {
   for (const target of relativeImportTargets(filePath)) {
     assert(!isWithin(target, modulesDir), `platform must not import a business module: ${relative(filePath)} -> ${relative(target)}`);
+  }
+}
+
+for (const definition of definitions) {
+  const ownDir = path.join(webModulesDir, definition.id);
+  for (const filePath of sourceFiles(ownDir)) {
+    for (const target of relativeImportTargets(filePath)) {
+      if (!isWithin(target, webModulesDir) || isWithin(target, ownDir)) continue;
+      assert.fail(`Web module must not import another module's internals: ${relative(filePath)} -> ${relative(target)}`);
+    }
   }
 }
 

@@ -2,11 +2,13 @@
 
 ## 当前结构
 
-FanHao 现在由一个壳层、一个反射式模块注册表和若干业务模块组成。`server.js` 不再手工挂载各模块路由；它创建共享依赖后，交给 `src/fanhao/module-registry.js` 扫描 `src/modules/*/module.js`，再按模块声明的顺序统一启动和分发。
+FanHao 现在由启动配置、服务壳层、反射式模块注册表和若干业务模块组成。`server.js` 不再手工挂载各模块路由；它读取 `src/bootstrap/server-config.js` 的统一配置、创建共享依赖后，交给 `src/fanhao/module-registry.js` 扫描 `src/modules/*/module.js`，再按模块声明的顺序统一启动和分发。HTTP Server、监听地址、信号处理和优雅停机由 `src/platform/server/server-host.js` 负责。
 
 ```mermaid
 flowchart TD
-  Shell["server.js FanHao 壳层"] --> Registry["module-registry.js 自动发现"]
+  Config["bootstrap/server-config.js 配置"] --> Shell["server.js 服务壳层"]
+  Shell --> Registry["module-registry.js 自动发现"]
+  Shell --> Host["platform/server/server-host.js HTTP 生命周期"]
   Registry --> System["system 隐藏模块"]
   Registry --> Fanhao["fanhao 番号"]
   Registry --> Photos["photos 套图"]
@@ -21,11 +23,13 @@ flowchart TD
 
 主要目录：
 
+- `src/bootstrap/`：启动配置和环境变量解析，不引用具体业务模块。
 - `src/fanhao/`：模块发现、校验、排序、生命周期和统一分发。
 - `src/modules/<id>/module.js`：模块唯一入口和公开描述符。
 - `src/modules/<id>/server/`：模块自己的路由、运行时、存储和领域服务。
 - `src/platform/server/`：HTTP、鉴权、文件响应、静态资源和媒体流等通用能力。
 - `public/modules/<id>/`：Web 页面控制器。
+- `public/app.js`：只负责 FanHao 番号页面；`public/standalone-app.js` 与 `public/js/standalone-host.js` 为图库/影视、小说、音乐和小工具提供独立页面宿主。
 - `android-client/www/modules/<id>/`：Android WebView 页面控制器和模块样式。
 
 旧的 `src/server/` 已不再承载源码；`npm run verify:modules` 会阻止代码重新流回该目录。
@@ -56,6 +60,10 @@ flowchart TD
 ```
 
 这些方法均为可选。路由方法处理请求后返回 `true`，未匹配返回 `false`。
+
+## Web 宿主边界
+
+顶层 Web 页面按产品形态选择入口：`public/fanhao-app.js` 加载 `public/app.js`，后者只拥有 FanHao 番号状态与交互；图库/影视、小说、音乐和小工具统一经 `public/standalone-app.js` 启动，由 `public/js/standalone-host.js` 按当前路由动态加载对应页面模块。短视频保留自己的独立入口 `public/short-video-app.js`。宿主只提供路由、共享 UI 依赖和生命周期，不应重新吸收模块领域状态。
 
 ## 模块边界
 
@@ -95,16 +103,15 @@ flowchart LR
 每轮结构调整至少运行：
 
 ```powershell
+npm run verify:repo-hygiene
 npm run verify:modules
 npm run verify
 ```
 
-`verify:modules` 会检查六个核心形态、双端客户端声明、稳定排序、各自的 `server/` 目录、旧目录清空，以及 `server.js` 不再直接手工创建业务模块。完整验证后还应启动服务，检查 `/api/health`、`/api/modules` 和各模块代表接口。
+`verify:repo-hygiene` 会阻止生成目录、服务抓取副本和含 NUL 字节的源码进入版本库。`verify:modules` 会检查七个可见业务模块、双端客户端声明、稳定排序、各自的 `server/` 目录、旧目录清空、模块化 CSS，以及启动配置和 HTTP 生命周期没有重新流回 `server.js`。完整验证后还应启动服务，检查 `/api/health`、`/api/modules` 和各模块代表接口。
 
 ## 后续收缩顺序
 
-1. 把 `server.js` 中仍然集中的番号服务构造迁到 `fanhao/server/composition.js`。
-2. 把套图/影视共享的归档图片读取抽成 `content-index` 的窄接口，减少壳层桥接。
-3. 拆分 `short-videos/server/store.js` 的 schema、repository、同步和封面职责。
-4. 拆分 Web/Android 的短视频大控制器，但保持模块公开入口不变。
-5. 功能迭代触及 `public/css/legacy.css` 时，把对应规则迁入模块样式；不做一次性高风险 CSS 重写。
+1. 把 `server.js` 中仍然集中的 FanHao 领域服务构造迁到 `src/modules/fanhao/server/composition.js`，让壳层最终只装配平台上下文和模块注册表。
+2. 拆分 `src/modules/short-videos/server/store.js` 的 schema、repository、同步、查询和封面职责。
+3. 拆分 `public/modules/short-videos/short-video-page.js` 的数据控制、播放器生命周期、交互和视图，但保持模块入口与 URL 不变。

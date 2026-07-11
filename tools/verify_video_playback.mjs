@@ -21,12 +21,12 @@ assertPlaybackMode({ ext: ".mkv", videoCodec: "h264", audioCodec: "aac", expecte
 assertPlaybackMode({ ext: ".mkv", videoCodec: "hevc", audioCodec: "aac", expected: "transcode" });
 assertPlaybackMode({ ext: ".wmv", videoCodec: "vc1", audioCodec: "wmapro", expected: "transcode" });
 
-const serverSource = fs.readFileSync(path.join(root, "server.js"), "utf8");
+const serverConfigSource = fs.readFileSync(path.join(root, "src", "bootstrap", "server-config.js"), "utf8");
 const routeSource = fs.readFileSync(path.join(root, "src", "modules", "fanhao", "server", "works", "routes-media.js"), "utf8");
 const streamSource = fs.readFileSync(path.join(root, "src", "platform", "server", "media-stream-service.js"), "utf8");
 const playerSource = fs.readFileSync(path.join(root, "public", "js", "player-page.js"), "utf8");
 
-assert(serverSource.includes("const DEFAULT_VIDEO_CHUNK_BYTES = 4 * 1024 * 1024;"), "video initial ranges should avoid 1 MB request churn");
+assert(serverConfigSource.includes("DEFAULT_VIDEO_CHUNK_BYTES: 4 * 1024 * 1024"), "video initial ranges should avoid 1 MB request churn");
 assert(routeSource.includes('cacheControl: "private, max-age=0, must-revalidate"'), "native video ranges should be reusable with validators");
 assert(playerSource.includes('els.video.preload = mode === "direct" ? "auto" : "none";'), "native MP4 should preload while generated streams start on demand");
 assert(playerSource.includes("if (customControls && autoPlay)"), "generated stream seeks should restart playback without waiting for metadata preload");

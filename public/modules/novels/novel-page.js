@@ -92,7 +92,9 @@ export function createNovelPage(deps) {
     setMainHeader("小说", "本地 TXT 阅读器");
     setReaderBodyClass();
     renderStats();
-    if (!state.novel.data || options.reload) {
+    if (options.deferInitialLoad) {
+      renderView();
+    } else if (!state.novel.data || options.reload) {
       loadNovels({ skipRoute: true }).catch((error) => {
         state.novel.status = error.message || "小说书库读取失败";
         renderView();

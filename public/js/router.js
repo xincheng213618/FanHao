@@ -209,7 +209,15 @@ export function routeUrl(route, options = {}) {
     if (next.shortVideoSource && next.shortVideoSource !== defaultSource) params.set("source", next.shortVideoSource);
     if (next.shortVideoSort && next.shortVideoSort !== "published") params.set("sort", next.shortVideoSort);
   } else if (next.view === "music") {
-    if (!["artists", "albums"].includes(next.musicMode)) {
+    if (next.musicMode === "artists") {
+      if (next.musicQuery) params.set("q", next.musicQuery);
+      if (next.musicLanguage) params.set("language", next.musicLanguage);
+      if (next.musicArtistSort === "name") params.set("sort", "name");
+    } else if (next.musicMode === "albums") {
+      if (next.musicQuery) params.set("q", next.musicQuery);
+      if (next.musicLanguage) params.set("language", next.musicLanguage);
+      if (next.musicAlbumSort && next.musicAlbumSort !== "updated") params.set("sort", next.musicAlbumSort);
+    } else {
       if (next.musicQuery) params.set("q", next.musicQuery);
       if (next.musicSort && next.musicSort !== "album") params.set("sort", next.musicSort);
       if (next.musicFavorite) params.set("favorite", "1");
@@ -228,6 +236,25 @@ export function routeUrl(route, options = {}) {
 function normalizeRoutePath(pathname) {
   const value = String(pathname || "/").replace(/\/+$/g, "");
   return value || "/";
+}
+
+function encodeRouteSegment(value) {
+  return encodeURIComponent(String(value || ""));
+}
+
+function decodeRouteSegment(value) {
+  try {
+    return decodeURIComponent(String(value || ""));
+  } catch {
+    return String(value || "");
+  }
+}
+
+function normalizeGalleryCategory(route = {}) {
+  const category = String(route.galleryCategory || "").trim();
+  if (category) return category;
+  if (route.galleryMode === "photo" && String(route.galleryQuery || "").trim()) return "all";
+  return route.galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all";
 }
 
 function peopleRouteFromPath(routePath, params = new URLSearchParams()) {
@@ -257,25 +284,6 @@ function peopleRouteFromPath(routePath, params = new URLSearchParams()) {
     workId: params.get("workId") || params.get("work") || "",
     videoId: params.get("videoId") || params.get("video") || ""
   };
-}
-
-function encodeRouteSegment(value) {
-  return encodeURIComponent(String(value || ""));
-}
-
-function decodeRouteSegment(value) {
-  try {
-    return decodeURIComponent(String(value || ""));
-  } catch {
-    return String(value || "");
-  }
-}
-
-function normalizeGalleryCategory(route = {}) {
-  const category = String(route.galleryCategory || "").trim();
-  if (category) return category;
-  if (route.galleryMode === "photo" && String(route.galleryQuery || "").trim()) return "all";
-  return route.galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all";
 }
 
 function shouldWriteGalleryCategory(route = {}) {
@@ -558,6 +566,7 @@ function routePath(route) {
       const chapter = route.galleryChapterIndex ? `/${encodeRouteSegment(route.galleryChapterIndex)}` : "";
       return `${base}/${encodeRouteSegment(route.galleryComicId)}${chapter}`;
     }
+    if (mode === "western" && !route.galleryMediaId) return "/gallery/western";
     if (["western", "media", "movie", "tv"].includes(mode) && route.galleryMediaId) {
       return `${base}/${encodeRouteSegment(route.galleryMediaId)}`;
     }
@@ -585,22 +594,8 @@ function routePath(route) {
     if (route.musicTrackId) return `/music/track/${encodeRouteSegment(route.musicTrackId)}`;
     if (route.musicMode === "history") return "/music/history";
     if (route.musicMode === "report") return "/music/report";
-    if (route.musicMode === "artists") {
-      const params = new URLSearchParams();
-      if (route.musicQuery) params.set("q", route.musicQuery);
-      if (route.musicLanguage) params.set("language", route.musicLanguage);
-      if (route.musicArtistSort === "name") params.set("sort", "name");
-      const query = params.toString();
-      return `/music/artists${query ? `?${query}` : ""}`;
-    }
-    if (route.musicMode === "albums") {
-      const params = new URLSearchParams();
-      if (route.musicQuery) params.set("q", route.musicQuery);
-      if (route.musicLanguage) params.set("language", route.musicLanguage);
-      if (route.musicAlbumSort && route.musicAlbumSort !== "updated") params.set("sort", route.musicAlbumSort);
-      const query = params.toString();
-      return `/music/albums${query ? `?${query}` : ""}`;
-    }
+    if (route.musicMode === "artists") return "/music/artists";
+    if (route.musicMode === "albums") return "/music/albums";
     if (route.musicMode === "playlist" && route.musicPlaylistId) return `/music/playlist/${encodeRouteSegment(route.musicPlaylistId)}`;
     if (route.musicMode === "smart" && route.musicSmartId) return `/music/smart/${encodeRouteSegment(route.musicSmartId)}`;
     if (route.musicGenre) return `/music/genre/${encodeRouteSegment(route.musicGenre)}`;

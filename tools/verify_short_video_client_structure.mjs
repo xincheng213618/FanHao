@@ -142,7 +142,7 @@ function verifyWebDedicatedEntry() {
   const panelSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "styles", "panels.css"), "utf8");
   const responsiveSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "styles", "responsive.css"), "utf8");
   const staticServerSource = fs.readFileSync(path.join(root, "src", "platform", "server", "static-files.js"), "utf8");
-  const serverSource = fs.readFileSync(path.join(root, "server.js"), "utf8");
+  const serverConfigSource = fs.readFileSync(path.join(root, "src", "bootstrap", "server-config.js"), "utf8");
 
   assert(
     indexSource.includes("const shortVideoEntry =") && indexSource.includes('import("/short-video-app.js?v='),
@@ -234,7 +234,7 @@ function verifyWebDedicatedEntry() {
   assert(playerSource.includes("video.galleryItems"), "gallery rendering must accept ordered image and video items");
   assert(playerSource.includes("scheduleLocalSoundPoll"), "open galleries must detect background music downloaded after page load");
   assert(playerSource.includes("}, 15000);"), "gallery background-music polling must stay lightweight");
-  assert(serverSource.includes("FANHAO_DOUYIN_SYNC_MS || 60 * 1000"), "download-manager changes must be detected within one minute by default");
+  assert(serverConfigSource.includes("FANHAO_DOUYIN_SYNC_MS || 60 * 1000"), "download-manager changes must be detected within one minute by default");
   assert(responsiveSource.includes(".short-video-gallery-progress") && responsiveSource.includes("display: none;"), "mobile gallery must keep the image counter without the desktop progress strip");
   assert(playerSource.includes("SHORT_VIDEO_GALLERY_GESTURE_HINT_KEY") && playerSource.includes("左右滑动翻图 · 上下滑动切作品") && playerSource.includes("sessionStorage?.setItem"), "mobile galleries must explain both navigation gestures once per browsing session");
   assert(viewerSource.includes(".short-video-gallery-gesture-hint") && responsiveSource.includes(".short-video-gallery-gesture-hint.is-visible"), "the mobile gallery gesture hint must stay hidden on desktop and fade in without blocking media input");

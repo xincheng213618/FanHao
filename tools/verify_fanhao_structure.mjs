@@ -10,13 +10,38 @@ const lines = (relativePath) => read(relativePath).split(/\r?\n/).length;
 
 const indexHtml = read("public/index.html");
 const fanhaoEntry = read("public/fanhao-app.js");
+const standaloneEntry = read("public/standalone-app.js");
+const standaloneHost = read("public/js/standalone-host.js");
 const webApp = read("public/app.js");
 assert(indexHtml.includes('import("/fanhao-app.js'), "FanHao must have a dedicated Web entry");
+assert(indexHtml.includes('import("/standalone-app.js'), "standalone modules must have a dedicated Web entry");
+assert(indexHtml.includes('/^\\/western\\/.+/'), "western detail routes must use the standalone gallery host");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-for (const modulePath of ["content-index/gallery-page", "content-index/gallery-renderer", "music/music-page", "novels/novel-page", "short-videos/short-video-page", "tools/tools-page"]) {
-  assert(!new RegExp(`^import .*${modulePath}`, "m").test(webApp), `FanHao startup must not statically import ${modulePath}`);
+assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
+assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
+assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
+assert(standaloneHost.includes("routeApplication.catch(() => {}).then(() => applyRouteNow(next))"), "standalone history restores must be serialized");
+for (const modulePath of ["content-index/gallery-page", "content-index/gallery-renderer", "music/music-page", "novels/novel-page", "tools/tools-page"]) {
+  assert(standaloneHost.includes(`modules/${modulePath}.js`), `standalone host must route ${modulePath}`);
+  assert(!webApp.includes(`modules/${modulePath}`), `FanHao runtime must not load ${modulePath}`);
 }
-assert(webApp.includes("loadStandaloneFactories"), "standalone Web modules must be loaded lazily");
+assert(!webApp.includes("loadStandaloneFactories"), "FanHao runtime must not own standalone factory loading");
+assert(!webApp.includes("standaloneFactories"), "FanHao runtime must not retain standalone factories");
+for (const factoryName of ["createGalleryPage", "createGalleryRenderer", "createNovelPage", "createMusicPage", "createToolsPage"]) {
+  assert(!webApp.includes(factoryName), `FanHao runtime must not compose ${factoryName}`);
+}
+const staticFiles = read("src/platform/server/static-files.js");
+for (const alias of ["/novel", "/novel/", "/musics", "/musics/", "/songs", "/songs/"]) {
+  assert(staticFiles.includes(`"${alias}"`), `static app fallback must preserve ${alias}`);
+}
+const webRouter = read("public/js/router.js");
+assert(webRouter.includes('if (routePath !== "/western") return null'), "exact /western must remain a FanHao people route");
+assert(webRouter.includes('return "/gallery/western"'), "western gallery index must keep a refresh-safe standalone URL");
+assert(!webRouter.includes("return `/music/artists${query"), "music artist route must not embed its own query string");
+assert(!webRouter.includes("return `/music/albums${query"), "music album route must not embed its own query string");
+const novelPage = read("public/modules/novels/novel-page.js");
+assert(novelPage.includes("if (options.deferInitialLoad)"), "novel host must be able to defer its implicit list request");
+assert(standaloneHost.includes("deferInitialLoad: true"), "standalone route restore must own the initial novel and music request");
 
 for (const relativePath of [
   "public/modules/fanhao/index.js",
@@ -51,7 +76,8 @@ const workDetail = read("public/modules/fanhao/work-detail-page.js");
 assert(!/function createPreviewMediaSection\s*\(/.test(workDetail), "Web preview media must stay in its feature module");
 assert(workDetail.includes("createWorkPreviewMedia"), "Web work detail must compose the preview feature");
 assert(lines("public/modules/fanhao/work-detail-page.js") <= 1000, "Web work detail must stay below 1000 lines");
-assert(lines("public/app.js") <= 3000, "Web composition root must stay below 3000 lines");
+assert(lines("public/app.js") <= 2500, "FanHao Web composition root must stay below 2500 lines");
+assert(lines("public/js/standalone-host.js") <= 650, "standalone Web host must stay below 650 lines");
 const peoplePage = read("public/modules/fanhao/people-page.js");
 const loadMorePeopleSource = /function loadMorePeopleIndex\(\)\s*\{([\s\S]*?)\n\}/.exec(peoplePage)?.[1] || "";
 assert(loadMorePeopleSource.includes("loadMoreRow.before(fragment)"), "people pagination must append cards without replacing the grid");

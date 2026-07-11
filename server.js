@@ -1,13 +1,11 @@
 import fs from "node:fs";
-import http from "node:http";
-import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { ADMIN_SCRIPT_DEFINITIONS } from "./lib/admin-script-registry.js";
 import { normalizeWorkCode as parseNormalizedWorkCode, workCodeKey } from "./lib/code-parser.js";
 import { decodeInfoBuffer, isSubtitleLikeInfoText, parseInfoMetadata, renderInfoMetadataText } from "./lib/info-metadata.js";
+import { SERVER_CONFIG } from "./src/bootstrap/server-config.js";
 import { discoverFanHaoModules } from "./src/fanhao/module-registry.js";
 import { createImageGalleryDbService } from "./src/modules/content-index/server/image-gallery-db-service.js";
 import { createImageLibraryIndexService } from "./src/modules/content-index/server/image-library-index-service.js";
@@ -61,130 +59,91 @@ import { createMediaResponseService } from "./src/platform/server/media-response
 import { createMediaStreamService } from "./src/platform/server/media-stream-service.js";
 import { readBodyText, readJsonBody, readJsonFile, safeChildPath } from "./src/platform/server/request-io.js";
 import { sendJson, sendText, sendHtml, redirect, notFound } from "./src/platform/server/responses.js";
-import { galleryMediaSources, parseLibraryRoots, parseMusicRoots, parsePhotoSetRoots, parseRootList, parseShortVideoRoots } from "./src/platform/server/root-config.js";
+import { createServerHost } from "./src/platform/server/server-host.js";
 import { createStaticFileServer } from "./src/platform/server/static-files.js";
 import { createVideoProbeService } from "./src/platform/server/video-probe-service.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const PORT = Number(process.env.PORT || 29998);
-const HOST = process.env.HOST || "0.0.0.0";
-const LIBRARY_ROOTS = parseLibraryRoots();
-const PUBLIC_DIR = path.join(__dirname, "public");
-const DATA_DIR = path.join(__dirname, "data");
-const MANGA_LIBRARY_ROOT = process.env.FANHAO_MANGA_ROOT || "E:\\https-smtt6-com-man-hua-yue";
-const PHOTO_SET_ROOTS = parsePhotoSetRoots();
-const GALLERY_MEDIA_SOURCES = galleryMediaSources();
-const WESTERN_LIBRARY_ROOTS = parseRootList(process.env.FANHAO_WESTERN_ROOTS, "R:\\");
-const IMAGE_LIBRARY_INDEX_PATH = path.join(DATA_DIR, "image-library-index.json");
-const USER_STATE_PATH = path.join(DATA_DIR, "user-state.json");
-const CORE_DB_PATH = path.join(DATA_DIR, "fanhao-core-v2.sqlite");
-const IMAGE_GALLERY_DB_PATH = path.join(DATA_DIR, "image-gallery.sqlite");
-const NOVEL_DB_PATH = path.join(DATA_DIR, "novels.sqlite");
-const MUSIC_DB_PATH = path.join(DATA_DIR, "music.sqlite");
-const MUSIC_ROOTS = parseMusicRoots();
-const SHORT_VIDEO_DB_PATH = path.join(DATA_DIR, "short-videos.sqlite");
-const SHORT_VIDEO_ROOTS = parseShortVideoRoots();
-const SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH = process.env.FANHAO_DOUYIN_DOWNLOAD_MANAGER_DB
-  || path.join(os.homedir(), "Desktop", "Tool", "douyin-download-manager", "data", "douyin_downloads.sqlite");
-const SHORT_VIDEO_DOWNLOAD_MANAGER_SYNC_MS = Number(process.env.FANHAO_DOUYIN_SYNC_MS || 60 * 1000);
-const NOVEL_UPLOAD_MAX_BODY_BYTES = 80 * 1024 * 1024;
-const APP_CONFIG_PATH = path.join(DATA_DIR, "app-config.json");
-const AUTH_SECRET_PATH = path.join(DATA_DIR, "auth-secret.txt");
-const ACCESS_LOG_PATH = path.join(__dirname, "logs", "access.log");
-const ADMIN_TASKS_PATH = path.join(DATA_DIR, "admin-tasks.json");
-const DOUBAN_COOKIE_PATH = path.join(DATA_DIR, "douban-cookie.txt");
-const JAVDB_115_COOKIE_PROFILE_DIR = path.join(process.env.LOCALAPPDATA || "", "115Chrome", "User Data");
-const TOOL_DOWNLOAD_DIR = path.join(DATA_DIR, "tool-downloads");
-const ANDROID_UPDATE_DIR = path.join(DATA_DIR, "android-update");
-const IMAGE_READER_CACHE_DIR = path.join(DATA_DIR, "image-reader-cache");
-const FFMPEG_PATH = process.env.FFMPEG_PATH || "ffmpeg";
-const FFPROBE_PATH = process.env.FFPROBE_PATH || "ffprobe";
-const REMOTE_WEB_PASSWORD = process.env.FANHAO_WEB_PASSWORD || "xincheng";
-
-const EXCLUDED_DIRS = new Set(["$RECYCLE.BIN", "System Volume Information", "Recovery"]);
-const VIDEO_EXTS = new Set([".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".ts", ".m2ts", ".webm", ".iso"]);
-const PLAYABLE_VIDEO_EXTS = new Set([".mp4", ".m4v", ".mov", ".webm"]);
-const DIRECT_VIDEO_EXTS = new Set([".mp4", ".m4v", ".webm"]);
-const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"]);
-const INFO_EXTS = new Set([".nfo", ".txt", ".json", ".xml", ".html", ".htm", ".csv", ".md", ".srt", ".ass", ".ssa"]);
-const COVER_HINTS = new Set(["cover", "poster", "folder", "front", "fanart", "thumb", "thumbnail", "封面"]);
-const MAX_INFO_BYTES = 1024 * 1024;
-const DEFAULT_WORK_LIMIT = 160;
-const MAX_WORK_LIMIT = 16000;
-const MAX_IMAGE_LIBRARY_ITEM_LIMIT = 12000;
-const HAS_NVENC = detectNvenc();
-const VIDEO_PROBE_CACHE_LIMIT = 512;
-const DEFAULT_VIDEO_CHUNK_BYTES = 4 * 1024 * 1024;
-const DEFAULT_IMAGE_READER_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
-const MIN_IMAGE_READER_CACHE_MAX_BYTES = 128 * 1024 * 1024;
-const MAX_IMAGE_READER_CACHE_MAX_BYTES = 200 * 1024 * 1024 * 1024;
-const IMAGE_READER_CACHE_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
-const IMAGE_READER_CACHE_CLEANUP_TARGET_RATIO = 0.9;
-const IMAGE_READER_CACHE_TOUCH_THROTTLE_MS = 30 * 1000;
-const IMAGE_READER_LIST_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const ARCHIVE_IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"]);
-const ARCHIVE_EXTS = new Set([".zip", ".cbz", ".rar", ".7z"]);
-const PHOTO_SET_COVER_GENERATOR_VERSION = 2;
-const GALLERY_MEDIA_COVER_GENERATOR_VERSION = 1;
-const IMAGE_GALLERY_COVER_MAX_BYTES = 1024 * 1024;
-const IMAGE_GALLERY_COVER_BOX_SIZE = 640;
-const LOCAL_ACTOR_AVATAR_SOURCE = "local-avatar";
-const MAX_ACTOR_AVATAR_BYTES = 8 * 1024 * 1024;
-const MAX_REMOTE_IMAGE_BYTES = 8 * 1024 * 1024;
-const ACTOR_AVATAR_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
-const DEFAULT_FAVORITE_FOLDER_ID = "default";
-const DEFAULT_FAVORITE_FOLDER_NAME = "默认收藏";
-const MAX_FAVORITE_FOLDERS = 30;
-const RECENT_WATCHED_DAYS = 30;
-const ADMIN_TASK_HISTORY_LIMIT = 100;
-const TOOL_DOWNLOAD_TTL_MS = 10 * 60 * 1000;
-const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
-const TXT_TOOL_MAX_BODY_BYTES = Math.ceil(TXT_TOOL_MAX_FILE_BYTES * 1.4) + 128 * 1024;
-const TXT_TOOL_PREVIEW_BYTES = 256 * 1024;
-const PHOTO_COLLECTION_ROOT_VALUE = "__fanhao_photo_collection_root__";
-
-const MIME_TYPES = {
-  ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".apk": "application/vnd.android.package-archive",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".webp": "image/webp",
-  ".gif": "image/gif",
-  ".bmp": "image/bmp",
-  ".mp4": "video/mp4",
-  ".m4v": "video/mp4",
-  ".mov": "video/quicktime",
-  ".webm": "video/webm",
-  ".mkv": "video/x-matroska",
-  ".avi": "video/x-msvideo",
-  ".wmv": "video/x-ms-wmv",
-  ".flv": "video/x-flv",
-  ".ts": "video/mp2t",
-  ".m2ts": "video/mp2t",
-  ".flac": "audio/flac",
-  ".mp3": "audio/mpeg",
-  ".m4a": "audio/mp4",
-  ".aac": "audio/aac",
-  ".wav": "audio/wav",
-  ".ogg": "audio/ogg",
-  ".opus": "audio/ogg",
-  ".iso": "application/octet-stream",
-  ".txt": "text/plain; charset=utf-8",
-  ".nfo": "text/plain; charset=utf-8",
-  ".srt": "text/plain; charset=utf-8",
-  ".ass": "text/plain; charset=utf-8",
-  ".ssa": "text/plain; charset=utf-8",
-  ".md": "text/markdown; charset=utf-8",
-  ".xml": "application/xml; charset=utf-8",
-  ".csv": "text/csv; charset=utf-8"
-};
+const {
+  ACCESS_LOG_PATH,
+  ACTOR_AVATAR_EXTS,
+  ADMIN_TASK_HISTORY_LIMIT,
+  ADMIN_TASKS_PATH,
+  ANDROID_UPDATE_DIR,
+  APP_CONFIG_PATH,
+  ARCHIVE_EXTS,
+  ARCHIVE_IMAGE_EXTS,
+  ARCHIVE_READER_HELPER_PATH,
+  AUTH_SECRET_PATH,
+  CORE_DB_PATH,
+  COVER_HINTS,
+  DATA_DIR,
+  DEFAULT_FAVORITE_FOLDER_ID,
+  DEFAULT_FAVORITE_FOLDER_NAME,
+  DEFAULT_IMAGE_READER_CACHE_MAX_BYTES,
+  DEFAULT_VIDEO_CHUNK_BYTES,
+  DEFAULT_WORK_LIMIT,
+  DIRECT_VIDEO_EXTS,
+  DOUBAN_COOKIE_PATH,
+  EXCLUDED_DIRS,
+  FFMPEG_PATH,
+  FFPROBE_PATH,
+  GALLERY_MEDIA_COVER_GENERATOR_VERSION,
+  GALLERY_MEDIA_SOURCES,
+  HAS_NVENC,
+  HOST,
+  IMAGE_EXTS,
+  IMAGE_GALLERY_COVER_BOX_SIZE,
+  IMAGE_GALLERY_COVER_MAX_BYTES,
+  IMAGE_GALLERY_DB_PATH,
+  IMAGE_LIBRARY_INDEX_PATH,
+  IMAGE_READER_CACHE_CLEANUP_INTERVAL_MS,
+  IMAGE_READER_CACHE_CLEANUP_TARGET_RATIO,
+  IMAGE_READER_CACHE_DIR,
+  IMAGE_READER_CACHE_TOUCH_THROTTLE_MS,
+  IMAGE_READER_LIST_CACHE_TTL_MS,
+  INFO_EXTS,
+  JAVDB_115_COOKIE_PROFILE_DIR,
+  LIBRARY_ROOTS,
+  LOCAL_ACTOR_AVATAR_SOURCE,
+  MANGA_LIBRARY_ROOT,
+  MAX_ACTOR_AVATAR_BYTES,
+  MAX_FAVORITE_FOLDERS,
+  MAX_IMAGE_LIBRARY_ITEM_LIMIT,
+  MAX_IMAGE_READER_CACHE_MAX_BYTES,
+  MAX_INFO_BYTES,
+  MAX_REMOTE_IMAGE_BYTES,
+  MAX_WORK_LIMIT,
+  MIME_TYPES,
+  MIN_IMAGE_READER_CACHE_MAX_BYTES,
+  MODULES_DIR,
+  MUSIC_DB_PATH,
+  MUSIC_ROOTS,
+  NOVEL_DB_PATH,
+  NOVEL_UPLOAD_MAX_BODY_BYTES,
+  PHOTO_COLLECTION_ROOT_VALUE,
+  PHOTO_SET_COVER_GENERATOR_VERSION,
+  PHOTO_SET_ROOTS,
+  PLAYABLE_VIDEO_EXTS,
+  PORT,
+  PROJECT_ROOT,
+  PUBLIC_DIR,
+  PYTHON_PATH,
+  RECENT_WATCHED_DAYS,
+  REMOTE_WEB_PASSWORD,
+  SHORT_VIDEO_DB_PATH,
+  SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH,
+  SHORT_VIDEO_DOWNLOAD_MANAGER_SYNC_MS,
+  SHORT_VIDEO_ROOTS,
+  TOOL_DOWNLOAD_DIR,
+  TOOL_DOWNLOAD_TTL_MS,
+  TXT_TOOL_MAX_BODY_BYTES,
+  TXT_TOOL_MAX_FILE_BYTES,
+  TXT_TOOL_PREVIEW_BYTES,
+  USER_STATE_PATH,
+  VIDEO_EXTS,
+  VIDEO_PROBE_CACHE_LIMIT,
+  WESTERN_LIBRARY_ROOTS
+} = SERVER_CONFIG;
 
 const { serveStatic } = createStaticFileServer({
   publicDir: PUBLIC_DIR,
@@ -653,7 +612,7 @@ const adminScriptService = createAdminScriptService({
   nodeCommand: process.execPath
 });
 const adminTaskService = createAdminTaskService({
-  cwd: __dirname,
+  cwd: PROJECT_ROOT,
   ensureDataDir,
   historyLimit: ADMIN_TASK_HISTORY_LIMIT,
   onTaskDone: applyAdminTaskInvalidations,
@@ -788,7 +747,7 @@ const adminPersonService = createAdminPersonService({
   sortWorkList
 });
 const moduleRegistry = await discoverFanHaoModules({
-  modulesDir: path.join(__dirname, "src", "modules"),
+  modulesDir: MODULES_DIR,
   context: {
     moduleDeps: {
       system: {
@@ -956,7 +915,7 @@ const moduleRegistry = await discoverFanHaoModules({
         serveDownloadFile
       },
       tools: {
-        cwd: __dirname,
+        cwd: PROJECT_ROOT,
         maxBodyBytes: TXT_TOOL_MAX_BODY_BYTES,
         maxFileBytes: TXT_TOOL_MAX_FILE_BYTES,
         previewBytes: TXT_TOOL_PREVIEW_BYTES,
@@ -1058,20 +1017,6 @@ function compareNaturalName(a, b) {
 
 function compareNaturalTitle(a, b) {
   return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
-}
-
-function detectNvenc() {
-  if (process.env.FANHAO_DISABLE_NVENC === "1") return false;
-  try {
-    const result = spawnSync(FFMPEG_PATH, ["-hide_banner", "-encoders"], {
-      encoding: "utf8",
-      windowsHide: true,
-      timeout: 3000
-    });
-    return `${result.stdout || ""}${result.stderr || ""}`.includes("h264_nvenc");
-  } catch {
-    return false;
-  }
 }
 
 function normalizeSearchValue(value) {
@@ -1930,13 +1875,9 @@ function applyAdminTaskInvalidations(task) {
   if (invalidates.has("userState")) userStateService.load();
 }
 
-function archiveReaderHelperPath() {
-  return path.join(__dirname, "tools", "archive_image_reader.py");
-}
-
 function runArchiveImageHelper(args, options = {}) {
-  const result = spawnSync(process.env.PYTHON || "python", [archiveReaderHelperPath(), ...args], {
-    cwd: __dirname,
+  const result = spawnSync(PYTHON_PATH, [ARCHIVE_READER_HELPER_PATH, ...args], {
+    cwd: PROJECT_ROOT,
     encoding: "utf8",
     windowsHide: true,
     timeout: options.timeout || 120000
@@ -2378,18 +2319,6 @@ async function routeMedia(req, res, url) {
   return moduleRegistry.routeMedia(req, res, url);
 }
 
-function getLanAddresses() {
-  const addresses = [];
-  for (const entries of Object.values(os.networkInterfaces())) {
-    for (const entry of entries || []) {
-      if (entry.family === "IPv4" && !entry.internal) {
-        addresses.push(entry.address);
-      }
-    }
-  }
-  return addresses;
-}
-
 userStateService.load();
 appConfigService.load();
 imageReaderCacheService.startCleanupTimer();
@@ -2411,37 +2340,12 @@ const requestHandler = createRequestHandler({
   sendText
 });
 
-const server = http.createServer(requestHandler);
-let shuttingDown = false;
-
-async function shutdown(signal) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log(`[shutdown] ${signal}`);
-  const forceTimer = setTimeout(() => process.exit(1), 5000);
-  forceTimer.unref?.();
-  server.close(async () => {
-    try {
-      await moduleRegistry.stop();
-      clearTimeout(forceTimer);
-      process.exit(0);
-    } catch (error) {
-      console.error("[shutdown]", error);
-      process.exit(1);
-    }
-  });
-}
-
-process.once("SIGINT", () => shutdown("SIGINT"));
-process.once("SIGTERM", () => shutdown("SIGTERM"));
-
-server.listen(PORT, HOST, () => {
-  console.log(`Local:   http://127.0.0.1:${PORT}`);
-  for (const address of getLanAddresses()) {
-    console.log(`LAN:     http://${address}:${PORT}`);
-  }
-  console.log(`Library: ${library.availableRoots.join("; ")}`);
-  if (library.missingRoots.length) {
-    console.log(`Missing: ${library.missingRoots.join("; ")}`);
-  }
+const serverHost = createServerHost({
+  requestHandler,
+  port: PORT,
+  host: HOST,
+  getLibraryState: () => library,
+  stop: () => moduleRegistry.stop()
 });
+
+serverHost.listen();

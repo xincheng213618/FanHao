@@ -62,6 +62,7 @@ export function createMusicPage(deps) {
   let lyricLineEls = [];
   let lyricFollowButtonEls = [];
   let activeLyricElement = null;
+  let lyricRaf = 0;
   let currentLyricIndex = -1;
   let visibilityInstalled = false;
   let keyboardShortcutsInstalled = false;

@@ -14,7 +14,7 @@
   </head>
   <body>
     <script>
-      if (/^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novels|short-videos|short-video|douyin|music|musics|songs|tools)(?:\/|$)/.test(window.location.pathname)) {
+      if (/^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|short-videos|short-video|douyin|music|musics|songs|tools)(?:\/|$)/.test(window.location.pathname) || /^\/western\/.+/.test(window.location.pathname)) {
         document.body.classList.add("standalone-module-view");
       }
       if (/^\/music(?:\/|$)/.test(window.location.pathname)) document.body.classList.add("music-view");
@@ -237,13 +237,15 @@
     </template>
 
     <script type="module">
-      const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
+      const pathname = window.location.pathname;
+      const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
+      const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
         await import("/short-video-app.js?v=20260711-liked-count-race-106");
-      } else if (/^\/(?:$|fanhao(?:\/|$))/.test(window.location.pathname)) {
-        await import("/fanhao-app.js?v=20260712-fanhao-home-01");
+      } else if (standaloneEntry) {
+        await import("/standalone-app.js?v=20260712-project-refactor-03");
       } else {
-        await import("/app.js?v=20260712-fanhao-refactor-01");
+        await import("/fanhao-app.js?v=20260712-project-refactor-03");
       }
     </script>
   </body>

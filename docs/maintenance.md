@@ -21,7 +21,7 @@ Windows 下推荐使用自带脚本：
 脚本会检测端口占用：若已运行且健康则直接退出；否则停止旧进程后在 `127.0.0.1:<port>` 探活。
 日志位于 `logs/fanhao.out.log` 与 `logs/fanhao.err.log`，另有 `logs/access.log` 访问日志。
 
-也可直接 `node server.js`（需先设好环境变量，见 [项目配置](./configuration.md)）。
+也可直接 `node server.js`（需先设好环境变量，见 [项目配置](./configuration.md)）。启动配置集中在 `src/bootstrap/server-config.js`，HTTP 监听、局域网地址输出、信号处理和优雅停机集中在 `src/platform/server/server-host.js`；业务模块不应自行接管这些职责。
 
 ## 后台作业中心
 
@@ -71,12 +71,13 @@ Windows 下推荐使用自带脚本：
 
 ```powershell
 npm start                 # node server.js
-npm run verify            # 跑解析、资料库合并、图库数据库和模块边界验证
+npm run verify            # 先检查仓库卫生，再运行解析、存储、客户端和模块边界的完整验证
+npm run verify:repo-hygiene # 阻止生成目录、服务抓取副本和含 NUL 字节的源码进入版本库
 npm run verify:codes      # 番号解析器测试
 npm run verify:metadata   # 资料解析器测试
 npm run verify:library-merge # 主资料库/欧美兼容范围验证
 npm run verify:gallery-db # 图库 SQLite 建表与升级验证
-npm run verify:modules    # 反射发现、六个业务模块和旧目录清理验证
+npm run verify:modules    # 反射发现、七个可见业务模块、宿主边界和旧目录清理验证
 npm run verify:short-video-client # Android 短视频模块结构、入口协议和生命周期验证
 npm run verify:imports    # 检查重构后 JS/CSS 相对引用没有悬空
 ```
