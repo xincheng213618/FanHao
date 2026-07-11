@@ -1,9 +1,10 @@
 import { createShortVideoApi } from "./api.js?v=20260711-short-video-cache-09";
-import { createShortVideoListController } from "./list/controller.js?v=20260712-author-pagination-03";
-import { createShortVideoListView } from "./list/view.js?v=20260712-author-pagination-03";
+import { createShortVideoListController } from "./list/controller.js?v=20260712-douyin-search-05";
+import { createShortVideoListView } from "./list/view.js?v=20260712-douyin-search-05";
 import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260712-native-short-video-only-02";
-import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=20260712-short-video-search-page-07";
-import { createShortVideoIcons } from "./ui/icons.js?v=20260711-short-video-cache-08";
+import { createShortVideoSearch } from "./search.js?v=20260712-douyin-search-05";
+import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=20260712-douyin-search-05";
+import { createShortVideoIcons } from "./ui/icons.js?v=20260712-douyin-search-05";
 
 export function createShortVideoViews(deps) {
   const { els, getActiveUrl, setActiveBottom } = deps;
@@ -17,12 +18,15 @@ export function createShortVideoViews(deps) {
     loadingMore: false,
     status: "",
     searchPage: false,
+    searchTab: "all",
+    searchAuthors: [],
     allowLoadMore: false
   };
   const context = { ...deps, listState };
   context.api = createShortVideoApi({ getActiveUrl });
   Object.assign(context, createShortVideoIcons(context));
   Object.assign(context, createShortVideoListController(context));
+  Object.assign(context, createShortVideoSearch(context));
   Object.assign(context, createShortVideoListView(context));
   Object.assign(context, createShortVideoNativeFeed(context));
 

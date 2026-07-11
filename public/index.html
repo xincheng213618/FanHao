@@ -10,7 +10,7 @@
     <link rel="manifest" href="/manifest.webmanifest?v=20260701-gallery-merge-01" />
     <link rel="icon" href="/app-icon.svg?v=20260701-gallery-merge-01" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/app-icon.svg?v=20260701-gallery-merge-01" />
-    <link rel="stylesheet" href="/styles.css?v=20260712-module-settings-02" />
+    <link rel="stylesheet" href="/styles.css?v=20260712-video-contain-blur-114" />
   </head>
   <body>
     <script>
@@ -226,7 +226,7 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        await import("/short-video-app.js?v=20260712-author-pagination-107");
+        await import("/short-video-app.js?v=20260712-video-contain-blur-114");
       } else if (standaloneEntry) {
         await import("/standalone-app.js?v=20260712-module-settings-02");
       } else {

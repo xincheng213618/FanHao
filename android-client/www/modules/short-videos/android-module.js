@@ -1,5 +1,5 @@
-import { createShortVideoViews } from "./index.js?v=20260712-author-pagination-03";
-import { DEFAULT_SORT, SHORT_VIDEO_SORT_OPTIONS, normalizeSort } from "./shared.js?v=20260712-short-video-search-page-07";
+import { createShortVideoViews } from "./index.js?v=20260712-douyin-search-05";
+import { DEFAULT_SORT, SHORT_VIDEO_SORT_OPTIONS, normalizeSearchTab, normalizeSort } from "./shared.js?v=20260712-douyin-search-05";
 
 export function createAndroidModule({ host }) {
   const shortVideoViews = createShortVideoViews({
@@ -62,7 +62,7 @@ function renderShortVideoChrome({ container, view, params }, host, shortVideoVie
   search.type = "button";
   search.className = "short-video-chrome-icon";
   search.setAttribute("aria-label", "搜索短视频");
-  search.innerHTML = '<span aria-hidden="true">⌕</span>';
+  search.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
   search.addEventListener("click", () => openShortVideoSearch(host, shortVideoViews));
   row.append(search);
 
@@ -75,7 +75,8 @@ function openShortVideoSearch(host, shortVideoViews, overrides = {}) {
   host.navigation.showView("shortVideoSearch", {
     query: "",
     author: "all",
-    source: overrides.source || "all",
+    source: "all",
+    tab: normalizeSearchTab(state.searchTab),
     sort: normalizeSort(state.sort)
   }, { push: true });
   host.ui.scrollToTop();

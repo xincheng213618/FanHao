@@ -1,6 +1,6 @@
 import { createApiClient } from "./js/api.js?v=20260701-gallery-merge-01";
 import { normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260712-project-refactor-03";
-import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20260712-author-pagination-107";
+import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20260712-video-contain-blur-114";
 
 const formatter = new Intl.NumberFormat("zh-CN");
 const initialParams = new URLSearchParams(window.location.search);

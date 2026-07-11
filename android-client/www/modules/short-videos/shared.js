@@ -29,6 +29,11 @@ export function normalizeSource(value) {
   return ["liked", "authors", "posts", "all", "local"].includes(source) ? source : DEFAULT_SOURCE;
 }
 
+export function normalizeSearchTab(value) {
+  const tab = String(value || "all").trim().toLowerCase();
+  return ["all", "videos", "authors"].includes(tab) ? tab : "all";
+}
+
 export function selectOption(value, label) {
   const option = document.createElement("option");
   option.value = value;

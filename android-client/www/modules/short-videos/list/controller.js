@@ -1,6 +1,6 @@
-import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeSort, normalizeSource } from "../shared.js";
+import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeSearchTab, normalizeSort, normalizeSource } from "../shared.js";
 export function createShortVideoListController(context = {}) {
-  const { api, getActiveUrl, listState } = context;
+  const { api, getActiveUrl, listState, showView } = context;
   let listLoadMoreObserver = null;
   let listEventsInstalled = false;
   const openNativeShortVideoFeed = (...args) => context.openNativeShortVideoFeed(...args);
@@ -16,19 +16,23 @@ export function createShortVideoListController(context = {}) {
     let nextAuthor = String(params.author || "all").trim() || "all";
     let nextSource = normalizeSource(params.source || params.origin);
     const nextSort = normalizeSort(params.sort);
+    const nextSearchTab = normalizeSearchTab(params.searchTab || params.tab || (nextSource === "authors" ? "authors" : listState.searchTab));
     if (nextSource === "authors") nextAuthor = "all";
     if (nextAuthor === "all" && !["all", "liked", "authors"].includes(nextSource)) nextSource = DEFAULT_SOURCE;
     const scopeChanged = nextQuery !== listState.query
       || nextAuthor !== listState.author
       || nextSource !== listState.source
-      || nextSort !== listState.sort;
+      || nextSort !== listState.sort
+      || nextSearchTab !== listState.searchTab;
     listState.query = nextQuery;
     listState.author = nextAuthor;
     listState.source = nextSource;
     listState.sort = nextSort;
+    listState.searchTab = nextSearchTab;
     if (scopeChanged) {
       listState.data = null;
       listState.status = "";
+      listState.searchAuthors = [];
       listState.allowLoadMore = false;
     }
   }
@@ -62,11 +66,20 @@ export function createShortVideoListController(context = {}) {
     renderListShell();
     try {
       const endpoint = authorIndex ? "/api/short-videos/authors" : "/api/short-videos";
-      const data = await api.fetchCached(requestUrl, `${endpoint}?${params}`, {
+      const relatedAuthorsRequest = listState.searchPage
+        && listState.searchTab === "all"
+        && Boolean(listState.query)
+        && !append
+        ? api.fetchCached(requestUrl, `/api/short-videos/authors?${new URLSearchParams({ q: listState.query, limit: "6", offset: "0" })}`, {
+            timeoutMs: 10000,
+            cacheMaxAgeMs: 5 * 60 * 1000
+          }).catch(() => null)
+        : Promise.resolve(null);
+      const [data, relatedAuthors] = await Promise.all([api.fetchCached(requestUrl, `${endpoint}?${params}`, {
         timeoutMs: 16000,
         cacheMaxAgeMs: append ? 2 * 60 * 1000 : 5 * 60 * 1000,
         staleWhileRevalidate: !append
-      });
+      }), relatedAuthorsRequest]);
       if (renderGuard && !renderGuard()) return;
       if (append && listState.data && authorIndex) {
         const merged = [...(listState.data.authors || [])];
@@ -89,6 +102,9 @@ export function createShortVideoListController(context = {}) {
         listState.data = { ...data, videos: merged, offset: 0, limit: merged.length };
       } else {
         listState.data = data;
+      }
+      if (!append) {
+        listState.searchAuthors = Array.isArray(relatedAuthors?.authors) ? relatedAuthors.authors : [];
       }
       if (!isAuthorIndexView()) listState.source = normalizeSource(data.source || listState.source);
       listState.loading = false;
@@ -149,17 +165,13 @@ export function createShortVideoListController(context = {}) {
     return listState.author !== "all";
   }
 
-  function activeLibraryGroup() {
-    if (isAuthorIndexView() || isAuthorFeedView()) return "authors";
-    return listState.source === "all" ? "all" : "liked";
-  }
-
   function updateListParams(patch = {}, navigation = {}) {
     const next = {
       query: listState.query,
       author: listState.author,
       source: listState.source,
       sort: listState.sort,
+      searchTab: listState.searchTab,
       ...patch
     };
     const targetView = listState.searchPage ? "shortVideoSearch" : "shortVideos";
@@ -175,23 +187,9 @@ export function createShortVideoListController(context = {}) {
       author: listState.author || "all",
       source: listState.source || DEFAULT_SOURCE,
       sort: listState.sort || DEFAULT_SORT,
+      searchTab: listState.searchTab || "all",
       authors: listState.data?.authors || []
     };
-  }
-
-  function submitSearch(query = "", overrides = {}) {
-    const group = overrides.source ?? activeLibraryGroup();
-    const currentAuthor = overrides.author ?? (listState.author || "all");
-    const author = group === "authors" ? currentAuthor : "all";
-    const source = group === "authors"
-      ? (author !== "all" ? "all" : "authors")
-      : group === "all" ? "all" : "liked";
-    updateListParams({
-      query: String(query || "").trim(),
-      author,
-      source,
-      sort: overrides.sort ?? (listState.sort || DEFAULT_SORT)
-    });
   }
 
   function resetListLoadMoreObserver() {
@@ -297,10 +295,8 @@ export function createShortVideoListController(context = {}) {
     shortVideoAuthorFilterValue,
     isAuthorIndexView,
     isAuthorFeedView,
-    activeLibraryGroup,
     updateListParams,
     getSearchState,
-    submitSearch,
     resetListLoadMoreObserver,
     observeListLoadMore,
     installListEvents,

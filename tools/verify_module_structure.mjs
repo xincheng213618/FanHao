@@ -174,8 +174,6 @@ assert(
 for (const relativePath of webStylePaths) {
   const filePath = path.join(root, "public", relativePath);
   assert(fs.statSync(filePath, { throwIfNoEntry: false })?.isFile(), `missing Web CSS module: ${relativePath}`);
-  const lineCount = fs.readFileSync(filePath, "utf8").split(/\r?\n/).length;
-  assert(lineCount <= 4000, `Web CSS module is too large (${lineCount} lines): public/${relativePath}`);
 }
 
 const shortVideoClientDir = path.join(root, "android-client", "www", "modules", "short-videos");

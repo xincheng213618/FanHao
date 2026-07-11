@@ -381,6 +381,130 @@
   animation: shortVideoToast .22s ease both;
 }
 
+.short-video-search-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  display: grid;
+  place-items: start center;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: rgba(8, 9, 13, .58);
+  backdrop-filter: blur(13px) saturate(.72);
+  padding: max(52px, calc(env(safe-area-inset-top) + 34px)) 24px 32px;
+  animation: shortVideoSearchOverlayEnter .16s ease both;
+}
+
+.short-video-search-dialog {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 420px);
+  align-items: start;
+  justify-content: center;
+  width: min(560px, 100%);
+  gap: 18px;
+}
+
+.short-video-search-dialog-close {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 50%;
+  background: rgba(31, 33, 42, .78);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .22);
+  color: rgba(255, 255, 255, .78);
+  cursor: pointer;
+  backdrop-filter: blur(16px);
+}
+
+.short-video-search-dialog-close:hover,
+.short-video-search-dialog-close:focus-visible {
+  outline: none;
+  border-color: rgba(255, 255, 255, .34);
+  background: rgba(45, 47, 58, .92);
+  color: #fff;
+}
+
+.short-video-search-dialog-close .short-video-icon {
+  width: 23px;
+  height: 23px;
+}
+
+.short-video-search-dialog-form {
+  width: 100%;
+  max-width: none;
+  padding-top: 4px;
+}
+
+.short-video-search-dialog-form .short-video-search-field {
+  height: 52px;
+  border-color: rgba(255, 255, 255, .2);
+  border-radius: 12px;
+  background: rgba(35, 37, 47, .94);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, .25);
+  color: rgba(255, 255, 255, .64);
+}
+
+.short-video-search-dialog-form .short-video-search-field:focus-within {
+  border-color: rgba(254, 44, 85, .78);
+  box-shadow: 0 0 0 2px rgba(254, 44, 85, .18), 0 18px 40px rgba(0, 0, 0, .28);
+}
+
+.short-video-search-dialog-form .short-video-search-field input {
+  height: 50px;
+  color: #fff;
+  font-size: 16px;
+}
+
+.short-video-search-dialog-form .short-video-search-field input::placeholder {
+  color: rgba(255, 255, 255, .48);
+}
+
+.short-video-search-dialog-form .short-video-search-clear {
+  color: rgba(255, 255, 255, .54);
+}
+
+.short-video-search-dialog-form .short-video-search-submit {
+  height: 52px;
+  border-radius: 12px;
+  background: #fff;
+  color: #242630;
+  font-size: 16px;
+}
+
+.short-video-search-dialog-form .short-video-search-suggestions {
+  top: calc(100% + 8px);
+  border-color: rgba(255, 255, 255, .08);
+  background: rgba(31, 33, 43, .98);
+  box-shadow: 0 22px 52px rgba(0, 0, 0, .38);
+  color: rgba(255, 255, 255, .9);
+}
+
+.short-video-search-dialog-form .short-video-search-suggestion-heading,
+.short-video-search-dialog-form .short-video-search-suggestion small {
+  color: rgba(255, 255, 255, .5);
+}
+
+.short-video-search-dialog-form .short-video-search-suggestion-heading button {
+  color: rgba(255, 255, 255, .62);
+}
+
+.short-video-search-dialog-form .short-video-search-suggestion {
+  color: rgba(255, 255, 255, .9);
+}
+
+.short-video-search-dialog-form .short-video-search-suggestion:hover,
+.short-video-search-dialog-form .short-video-search-suggestion:focus-visible,
+.short-video-search-dialog-form .short-video-search-suggestion.active {
+  background: rgba(255, 255, 255, .08);
+}
+
+@keyframes shortVideoSearchOverlayEnter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 .short-video-more-overlay {
   position: absolute;
   inset: 0;

@@ -1,4 +1,4 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260712-native-short-video-only-02";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260712-douyin-search-05";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260705-mobile-actions-01";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
@@ -179,11 +179,15 @@ function sanitizeViewParams(view, params = {}) {
     const author = String(params.author || "all").trim() || "all";
     const source = normalizeShortVideoSource(params.source || params.origin);
     const sort = normalizeShortVideoSort(params.sort);
+    const searchTab = ["all", "videos", "authors"].includes(String(params.searchTab || params.tab || "").trim())
+      ? String(params.searchTab || params.tab).trim()
+      : "all";
     return {
       ...(query ? { query } : {}),
       ...(author !== "all" ? { author } : {}),
       ...(source !== "liked" ? { source } : {}),
-      ...(sort !== "published" ? { sort } : {})
+      ...(sort !== "published" ? { sort } : {}),
+      ...(view === "shortVideoSearch" && searchTab !== "all" ? { tab: searchTab } : {})
     };
   }
   if (view === "mediaDetail") {

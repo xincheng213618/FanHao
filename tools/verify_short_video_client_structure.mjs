@@ -10,6 +10,7 @@ const requiredParts = [
   "api.js",
   "index.js",
   "shared.js",
+  "search.js",
   "list/controller.js",
   "list/view.js",
   "player/native-feed.js",
@@ -54,8 +55,8 @@ assert(androidEntrySource.indexOf('row.append(search)') > androidEntrySource.ind
 assert(androidEntrySource.includes("short-video-sort-overlay"), "Android short-video sorting must open a compact dialog");
 assert(androidListSource.includes("short-video-search-page-form"), "Android short-video search route must render its own search form");
 assert(!androidListSource.includes("renderSearchFilters"), "Android short-video search must not retain the shared shell filter renderer");
-assert(!androidListSource.includes("`${formatCompact(listState.data?.total || 0)} 条"), "Android short-video lists must not render total video counts");
-assert(!androidListSource.includes("author.count || 0"), "Android short-video author cards must not render author totals");
+assert(androidListSource.includes("short-video-search-result-meta") && androidListSource.includes("条相关内容"), "Android Douyin-style search must expose result context without adding counts to the normal feed chrome");
+assert(androidListSource.includes('`${formatCompact(author.count || 0)} 条作品`'), "Android search-related users must expose their local work counts");
 assert(!androidListSource.includes("shell.append(renderLibraryTabs()"), "Android short-video group tabs must live in module chrome, not a second row");
 assert(!androidEntrySource.includes('view: "shortVideoBrowser"'), "Android short videos must not expose the legacy WebView playback route");
 assert(androidListControllerSource.includes("await openNativeShortVideoFeed(video)"), "Android short-video cards must open the native feed");
@@ -66,6 +67,8 @@ assert(androidNativeFeedSource.includes("openAuthorPanel: Boolean(options.openAu
 assert(androidPlayerPluginSource.includes("EXTRA_OPEN_AUTHOR_PANEL") && androidPlayerPluginSource.includes('call.getBoolean("openAuthorPanel", false)'), "Android player plugin must pass the native author homepage flag");
 assert(androidNativePlayerSource.includes("grid.setPadding(gridHorizontalPadding, dp(6), gridHorizontalPadding, dp(8))"), "Android native author works grid must keep equal horizontal padding");
 assert(androidNativePlayerSource.includes("(screenWidth - gridHorizontalPadding * 2) / 3"), "Android native author works tiles must share the centered grid width");
+assert(androidListControllerSource.includes("const { api, getActiveUrl, listState, showView } = context"), "Android short-video search submit must receive the showView navigation dependency");
+assert(androidListSource.includes("搜索历史") && androidListSource.includes("short-video-search-suggestions"), "Android short-video search must expose history and live suggestions");
 
 const views = createShortVideoViews({
   els: {},
@@ -177,8 +180,13 @@ function verifyWebDedicatedEntry() {
   assert(playerSource.includes("is-gallery-timing-paused") && viewerSource.includes("shortVideoGallerySegmentProgress"), "gallery progress must animate with playback time and pause with page visibility");
   assert(playerSource.includes("const projectedDelta = rawDelta + velocity * 180;") && playerSource.includes("--short-video-gallery-settle-duration"), "gallery drag release must use velocity projection and motion-adaptive settling");
   assert(viewerSource.includes(".short-video-reel-panel.is-gallery-post") && viewerSource.includes(".short-video-stage.is-gallery-stage"), "gallery pages must keep a stable full-canvas stage across portrait and landscape items");
-  assert(playerSource.includes("function activeShortVideoFullscreenTarget()") && playerSource.includes('querySelector?.(".short-video-browser")') && playerSource.includes('fullscreenElement.classList?.contains?.("short-video-browser")') && playerSource.includes("async function toggleShortVideoFullscreen()") && playerSource.includes('document.addEventListener("fullscreenchange", syncShortVideoFullscreenControls)'), "short-video fullscreen must include captions, action rail, controls, and stay synchronized after Escape");
-  assert(viewerSource.includes(".short-video-browser:fullscreen") && viewerSource.includes("width: 100vw") && viewerSource.includes("height: 100vh"), "short-video fullscreen shell must fill the display without dropping player controls");
+  assert(playerSource.includes("function activeShortVideoFullscreenTarget()") && playerSource.includes("return browser ? els.workGrid : null") && playerSource.includes("fullscreenElement === els.workGrid") && playerSource.includes("async function toggleShortVideoFullscreen()") && playerSource.includes('document.addEventListener("fullscreenchange", syncShortVideoFullscreenControls)'), "short-video fullscreen must use the stable work grid so reel replacement cannot exit fullscreen");
+  assert(viewerSource.includes(".work-grid:fullscreen") && viewerSource.includes("width: 100vw") && viewerSource.includes("height: 100vh"), "short-video fullscreen shell must fill the display without dropping player controls");
+  assert(playerSource.includes("function toggleShortVideoSmartFill()") && playerSource.includes('control.textContent = "智能"') && playerSource.includes('smartFill.className = "short-video-control-smart-fill"') && playerSource.includes("SHORT_VIDEO_SMART_FILL_KEY"), "short-video controls must expose and remember a dedicated Douyin-style smart fill switch");
+  assert(playerSource.includes('original.textContent = "原视频"') && playerSource.includes('original.addEventListener("click", () => openDouyinLink'), "the original-video link must remain separate from the smart-fill switch");
+  assert(viewerSource.includes(".short-video-browser.is-smart-fill .short-video-reel-panel:not(.is-gallery-post)") && viewerSource.includes(".short-video-browser.is-smart-fill .short-video-stage.is-portrait-video"), "smart fill must expand portrait video into the full reel canvas without changing gallery layout");
+  assert(viewerSource.includes(".short-video-browser.is-smart-fill .short-video-stage:not(.is-gallery-stage) .short-video-player") && viewerSource.includes("position: absolute") && viewerSource.includes("max-height: 100%") && viewerSource.includes("object-fit: contain"), "smart display mode must keep the foreground video inside the viewport and preserve the complete frame across screen orientations");
+  assert(viewerSource.includes(".short-video-stage.is-landscape-video::before") && viewerSource.includes("filter: blur(30px) saturate(.9) brightness(.56)") && viewerSource.includes("transform: scale(1.08)"), "contained short videos must soften enlarged background imagery with an edge-safe Gaussian blur");
   assert(playerSource.includes("当前浏览器不支持网页全屏"), "short-video fullscreen must explain unsupported browser environments instead of failing silently");
   assert(playerSource.indexOf("rail.append(authorRailButton(video))") < playerSource.indexOf("rail.append(aiButton)"), "short-video rail must keep the author and primary actions above auxiliary AI tools like Douyin");
   assert(playerSource.includes("animateRailActionButton(button, nextActive)") && viewerSource.includes("shortVideoRailActionPulse"), "short-video like and collect actions must provide optimistic Douyin-style motion feedback");
@@ -199,6 +207,9 @@ function verifyWebDedicatedEntry() {
   assert(responsiveSource.includes("inset: auto 0 -8px;"), "mobile idle playback progress must stay pinned inside the viewport bottom edge");
   assert(responsiveSource.includes(".short-video-stage.is-gallery-stage.is-sound-blocked.is-sound-hint-visible::after") && responsiveSource.includes("bottom: max(126px"), "desktop gallery sound prompts must stay above the page counter instead of covering it");
   assert(responsiveSource.includes(".short-video-close,") && responsiveSource.includes(".short-video-browser-search") && responsiveSource.includes("background: rgba(8, 9, 13, .66)") && responsiveSource.includes("backdrop-filter: blur(14px)"), "top playback navigation must remain legible over bright video frames");
+  assert(playerSource.includes("showShortVideoSearchOverlay(event.currentTarget)") && playerSource.includes("closeShortVideoSearchOverlay") && !playerSource.includes('search.addEventListener("click", showHomeAndFocusSearch)'), "player search must open over the current video instead of returning to the short-video home first");
+  assert(playerSource.includes('overlay.className = "short-video-search-overlay"') && playerSource.includes("isolateShortVideoTransientModal(overlay)") && panelSource.includes(".short-video-search-overlay") && panelSource.includes("backdrop-filter: blur(13px)"), "player search must keep the current video under an accessible dimmed search overlay");
+  assert(playerSource.includes('commitShortVideoSearch(query, { global: true, pushRoute: true })') && playerSource.includes('state.shortVideo.author = "all"') && playerSource.includes("replaceRoute: !options.pushRoute"), "player search submission must search globally and preserve the detail route for browser back navigation");
   assert(responsiveSource.includes(".short-video-more-sheet .short-video-more-head") && responsiveSource.includes("position: sticky;") && responsiveSource.includes("top: -17px;"), "short mobile playback sheets must keep their heading and close control reachable while scrolling");
   assert(playerSource.includes('`评论 ${formatShortVideoMetric(video, "comments")}`'), "short-video side panels must expose the current comment count in the primary tab without presenting unknown statistics as zero");
   assert(playerSource.includes("function shortVideoAuthorHandle") && playerSource.includes('replace(/^(?:@\\s*)+/u, "")') && playerSource.includes("name.textContent = shortVideoAuthorHandle(video.author?.name)"), "short-video author handles must normalize imported leading @ signs instead of rendering @@ names");
@@ -209,6 +220,7 @@ function verifyWebDedicatedEntry() {
   assert(listSource.includes(".short-video-sort-select option") && listSource.includes("color-scheme: dark;"), "author sort options must stay readable in the dark short-video workspace");
   assert(playerSource.includes("formatShortVideoMetric(video, \"likes\")") && listSource.includes(".short-video-like-badge.is-unknown"), "unknown short-video statistics must render as a pending placeholder instead of a fake zero");
   assert(playerSource.includes("short-video-caption-context-button") && viewerSource.includes(".short-video-caption-context"), "short-video caption tools must stay visible and touch-accessible");
+  assert(playerSource.includes('sort.className = "short-video-author-sort-select"') && playerSource.includes('sort.setAttribute("aria-label", "作者作品排序")') && playerSource.includes('params.set("sort", nextSort)') && playerSource.includes("switchToAuthorWorksFeed(video, author, panel, authorWorksSort)") && viewerSource.includes(".short-video-author-sort-select"), "author side-panel works must expose server-backed sorting and preserve that order when entering the author feed");
   assert(playerSource.includes("disposeShortVideoMedia") && playerSource.includes('querySelectorAll?.("video, audio")'), "short-video work switches must explicitly stop both video and gallery background audio");
   const activePlayerSource = playerSource.slice(playerSource.indexOf("function activePlayer()"), playerSource.indexOf("function closeTransientPlayerControls()"));
   assert(!activePlayerSource.includes("short-video-gallery-image"), "gallery live-photo clips must not become the global sound player");
