@@ -12,35 +12,36 @@ import { discoverFanHaoModules } from "./src/fanhao/module-registry.js";
 import { createImageGalleryDbService } from "./src/modules/content-index/server/image-gallery-db-service.js";
 import { createImageLibraryIndexService } from "./src/modules/content-index/server/image-library-index-service.js";
 import { createImageLibraryService } from "./src/modules/content-index/server/image-library-service.js";
-import { createActorAvatarService } from "./src/modules/fanhao/server/actor-avatar-service.js";
-import { createActorMovieService } from "./src/modules/fanhao/server/actor-movie-service.js";
-import { createActorProfileService } from "./src/modules/fanhao/server/actor-profile-service.js";
-import { createAdminActorAvatarService } from "./src/modules/fanhao/server/admin-actor-avatar-service.js";
-import { createAdminCoreMutationService } from "./src/modules/fanhao/server/admin-core-mutation-service.js";
-import { createAdminMaintenanceTaskService } from "./src/modules/fanhao/server/admin-maintenance-task-service.js";
-import { createAdminPersonService } from "./src/modules/fanhao/server/admin-person-service.js";
-import { createCoreDbService } from "./src/modules/fanhao/server/core-db-service.js";
-import { createCoreLibraryService } from "./src/modules/fanhao/server/core-library-service.js";
-import { createCoreLibrarySyncService } from "./src/modules/fanhao/server/core-library-sync-service.js";
-import { createFavoriteStateService } from "./src/modules/fanhao/server/favorite-state-service.js";
-import { createLibraryPathServices } from "./src/modules/fanhao/server/library-paths.js";
-import { createLocalLibraryIndexService } from "./src/modules/fanhao/server/local-library-index-service.js";
-import { createLocalLibraryScanService } from "./src/modules/fanhao/server/local-library-scan-service.js";
-import { createManualCoverStateService } from "./src/modules/fanhao/server/manual-cover-state-service.js";
-import { createPeopleScopeService } from "./src/modules/fanhao/server/people-scope-service.js";
-import { createPersonLibraryService } from "./src/modules/fanhao/server/person-library-service.js";
-import { createPersonListService } from "./src/modules/fanhao/server/person-list-service.js";
-import { createPersonMergeService } from "./src/modules/fanhao/server/person-merge-service.js";
-import { createPlaybackProgressService } from "./src/modules/fanhao/server/playback-progress-service.js";
-import { createRankingService } from "./src/modules/fanhao/server/ranking-service.js";
-import { createStudioService } from "./src/modules/fanhao/server/studio-service.js";
-import { createUserStateService } from "./src/modules/fanhao/server/user-state-service.js";
-import { createVideoLibraryImageService } from "./src/modules/fanhao/server/video-library-image-service.js";
-import { createVideoLibraryPresenterService } from "./src/modules/fanhao/server/video-library-presenter-service.js";
-import { createWorkCodeIndexService } from "./src/modules/fanhao/server/work-code-index-service.js";
-import { createWorkCoverMutationService } from "./src/modules/fanhao/server/work-cover-mutation-service.js";
-import { createWorkInfoService } from "./src/modules/fanhao/server/work-info-service.js";
-import { createWorkLocalMutationService } from "./src/modules/fanhao/server/work-local-mutation-service.js";
+import { createActorAvatarService } from "./src/modules/fanhao/server/people/actor-avatar-service.js";
+import { createActorMovieService } from "./src/modules/fanhao/server/people/actor-movie-service.js";
+import { createActorProfileService } from "./src/modules/fanhao/server/people/actor-profile-service.js";
+import { createAdminActorAvatarService } from "./src/modules/fanhao/server/admin/admin-actor-avatar-service.js";
+import { createAdminCoreMutationService } from "./src/modules/fanhao/server/admin/admin-core-mutation-service.js";
+import { createAdminMaintenanceTaskService } from "./src/modules/fanhao/server/admin/admin-maintenance-task-service.js";
+import { createAdminPersonService } from "./src/modules/fanhao/server/admin/admin-person-service.js";
+import { createCoreDbService } from "./src/modules/fanhao/server/library/core-db-service.js";
+import { createCoreLibraryService } from "./src/modules/fanhao/server/library/core-library-service.js";
+import { createCoreLibrarySyncService } from "./src/modules/fanhao/server/library/core-library-sync-service.js";
+import { createFanhaoDependencies } from "./src/modules/fanhao/server/composition.js";
+import { createFavoriteStateService } from "./src/modules/fanhao/server/collections/favorite-state-service.js";
+import { createLibraryPathServices } from "./src/modules/fanhao/server/library/library-paths.js";
+import { createLocalLibraryIndexService } from "./src/modules/fanhao/server/library/local-library-index-service.js";
+import { createLocalLibraryScanService } from "./src/modules/fanhao/server/library/local-library-scan-service.js";
+import { createManualCoverStateService } from "./src/modules/fanhao/server/works/manual-cover-state-service.js";
+import { createPeopleScopeService } from "./src/modules/fanhao/server/people/people-scope-service.js";
+import { createPersonLibraryService } from "./src/modules/fanhao/server/people/person-library-service.js";
+import { createPersonListService } from "./src/modules/fanhao/server/people/person-list-service.js";
+import { createPersonMergeService } from "./src/modules/fanhao/server/people/person-merge-service.js";
+import { createPlaybackProgressService } from "./src/modules/fanhao/server/playback/playback-progress-service.js";
+import { createRankingService } from "./src/modules/fanhao/server/catalog/ranking-service.js";
+import { createStudioService } from "./src/modules/fanhao/server/catalog/studio-service.js";
+import { createUserStateService } from "./src/modules/fanhao/server/collections/user-state-service.js";
+import { createWorkImageService } from "./src/modules/fanhao/server/works/image-service.js";
+import { createWorkPresenterService } from "./src/modules/fanhao/server/works/presenter-service.js";
+import { createWorkCodeIndexService } from "./src/modules/fanhao/server/works/work-code-index-service.js";
+import { createWorkCoverMutationService } from "./src/modules/fanhao/server/works/work-cover-mutation-service.js";
+import { createWorkInfoService } from "./src/modules/fanhao/server/works/work-info-service.js";
+import { createWorkLocalMutationService } from "./src/modules/fanhao/server/works/work-local-mutation-service.js";
 import { createGalleryMediaService } from "./src/modules/media/server/gallery-media-service.js";
 import { createGalleryMetadataService } from "./src/modules/media/server/gallery-metadata-service.js";
 import { createMangaService } from "./src/modules/photos/server/manga-service.js";
@@ -115,7 +116,7 @@ const MAX_WORK_LIMIT = 16000;
 const MAX_IMAGE_LIBRARY_ITEM_LIMIT = 12000;
 const HAS_NVENC = detectNvenc();
 const VIDEO_PROBE_CACHE_LIMIT = 512;
-const DEFAULT_VIDEO_CHUNK_BYTES = 1024 * 1024;
+const DEFAULT_VIDEO_CHUNK_BYTES = 4 * 1024 * 1024;
 const DEFAULT_IMAGE_READER_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const MIN_IMAGE_READER_CACHE_MAX_BYTES = 128 * 1024 * 1024;
 const MAX_IMAGE_READER_CACHE_MAX_BYTES = 200 * 1024 * 1024 * 1024;
@@ -315,7 +316,7 @@ const videoProbeService = createVideoProbeService({
   hasNvenc: HAS_NVENC,
   safeStat
 });
-const videoLibraryImageService = createVideoLibraryImageService({
+const workImageService = createWorkImageService({
   getCoreDb,
   getPersonById: (personId) => library.peopleById.get(String(personId || "")) || null,
   getWorkById: (workId) => library.worksById.get(String(workId || "")) || null,
@@ -622,7 +623,7 @@ const workCoverMutationService = createWorkCoverMutationService({
   workCoverRow,
   workInfoService
 });
-const videoLibraryPresenterService = createVideoLibraryPresenterService({
+const workPresenterService = createWorkPresenterService({
   actorProfileRow,
   dbBoolOrNull,
   displayPersonForWork,
@@ -833,95 +834,71 @@ const moduleRegistry = await discoverFanHaoModules({
           sendJson
         }
       },
-      fanhao: {
-        catalog: {
-          notFound,
-          rankingService,
-          sendJson,
-          studioService
-        },
-        library: {
-          appConfigService,
-          getLastScanError: () => lastScanError,
-          getLibrary: () => library,
-          peopleScopeService,
-          personListService,
-          peoplePayloadStamp: libraryPeopleStamp,
-          publicPerson,
-          refreshLibrary,
-          requestAccess: (req) => requestAccess(req),
-          requireLocalAdmin,
-          sendJson,
-          userStateSummary: () => playbackProgressService.userStateSummary()
-        },
-        userState: {
-          clampInteger,
-          favoriteStateService,
-          getLibrary: () => library,
-          maxWorkLimit: MAX_WORK_LIMIT,
-          notFound,
-          playbackProgressService,
-          publicWork,
-          readJsonBody,
-          recentWatchedDays: RECENT_WATCHED_DAYS,
-          resolvePlayableVideoFile,
-          sendJson
-        },
-        videoLibrary: {
-          adminCoreMutationService,
-          actorProfileMergeCandidates,
-          actorProfileRow,
-          actorMissingSearchWorks,
-          clampInteger,
-          coreMissingWorksForPerson: coreLibraryService.missingWorksForPerson,
-          corePersonFallbackRecord: coreLibraryService.personFallbackRecord,
-          defaultWorkLimit: DEFAULT_WORK_LIMIT,
-          dedupeWorksForDisplay,
-          enrichLocalWorksWithActorMovieIndex,
-          enrichLocalWorksWithActorMovieInfo,
-          favoriteStateService,
-          galleryMediaService,
-          generateWorkCover: workCoverMutationService.generateWorkCover,
-          getLibrary: () => library,
-          isVrWork,
-          matchesWorkSearch,
-          maxActorAvatarBytes: MAX_ACTOR_AVATAR_BYTES,
-          maxWorkLimit: MAX_WORK_LIMIT,
-          manualCoverStateService,
-          mediaResponseService,
-          mediaStreamService,
-          mergedActorMovieRows,
-          mergedPersonRecord,
-          missingActorWorksForPerson,
-          notFound,
-          peopleScopeService,
-          playbackProgressService,
-          prewarmRemoteImagesForWorks,
-          publicActorProfile,
-          publicPerson,
-          publicWork,
-          publicWorkAvailability,
-          rankingMissingSearchWorks,
-          readJsonBody,
-          requireLocalAdmin,
-          requireTrustedFileMutation,
-          resolveLibraryPersonByPublicId,
-          resolveLibraryWorkByPublicId,
-          resolveVideoFileByPublicId,
-          searchPeople,
-          sendJson,
-          storedWorkCodeKey,
-          videoProbeService,
-          workCodeKeySetForWorks,
-          workCoverRow,
-          workHasLocalMarker,
-          workInfoRow,
-          workLocalMutationService,
-          workRating,
-          workRatingCount,
-          workReleaseDate
-        }
-      },
+      fanhao: createFanhaoDependencies({
+        adminCoreMutationService,
+        actorProfileMergeCandidates,
+        actorProfileRow,
+        actorMissingSearchWorks,
+        appConfigService,
+        clampInteger,
+        coreMissingWorksForPerson: coreLibraryService.missingWorksForPerson,
+        corePersonFallbackRecord: coreLibraryService.personFallbackRecord,
+        defaultWorkLimit: DEFAULT_WORK_LIMIT,
+        dedupeWorksForDisplay,
+        enrichLocalWorksWithActorMovieIndex,
+        enrichLocalWorksWithActorMovieInfo,
+        favoriteStateService,
+        galleryMediaService,
+        generateWorkCover: workCoverMutationService.generateWorkCover,
+        getLastScanError: () => lastScanError,
+        getLibrary: () => library,
+        isVrWork,
+        matchesWorkSearch,
+        maxActorAvatarBytes: MAX_ACTOR_AVATAR_BYTES,
+        maxWorkLimit: MAX_WORK_LIMIT,
+        manualCoverStateService,
+        mediaResponseService,
+        mediaStreamService,
+        mergedActorMovieRows,
+        mergedPersonRecord,
+        missingActorWorksForPerson,
+        notFound,
+        peoplePayloadStamp: libraryPeopleStamp,
+        peopleScopeService,
+        personListService,
+        playbackProgressService,
+        prewarmRemoteImagesForWorks,
+        publicActorProfile,
+        publicPerson,
+        publicWork,
+        publicWorkAvailability,
+        rankingMissingSearchWorks,
+        rankingService,
+        readJsonBody,
+        recentWatchedDays: RECENT_WATCHED_DAYS,
+        refreshLibrary,
+        requestAccess: (req) => requestAccess(req),
+        requireLocalAdmin,
+        requireTrustedFileMutation,
+        resolveLibraryPersonByPublicId,
+        resolveLibraryWorkByPublicId,
+        resolvePlayableVideoFile,
+        resolveVideoFileByPublicId,
+        searchPeople,
+        sendJson,
+        storedWorkCodeKey,
+        studioService,
+        userStateSummary: () => playbackProgressService.userStateSummary(),
+        videoProbeService,
+        workCodeKeySetForWorks,
+        workCoverRow,
+        workHasLocalMarker,
+        workInfoRow,
+        workLocalMutationService,
+        workRating,
+        workRatingCount,
+        workReleaseDate
+      }),
       contentIndex: {
         imageLibraryService,
         requireLocalAdmin,
@@ -1379,27 +1356,27 @@ function resolveVideoFileByPublicId(videoId) {
 }
 
 function coreImageUrl(row) {
-  return videoLibraryImageService.coreImageUrl(row);
+  return workImageService.coreImageUrl(row);
 }
 
 function corePersonAvatarRow(personId, options = {}) {
-  return videoLibraryImageService.corePersonAvatarRow(personId, options);
+  return workImageService.corePersonAvatarRow(personId, options);
 }
 
 function publicPersonAvatar(personId) {
-  return videoLibraryImageService.publicPersonAvatar(personId);
+  return workImageService.publicPersonAvatar(personId);
 }
 
 function coreWorkCoverRow(workId) {
-  return videoLibraryImageService.coreWorkCoverRow(workId);
+  return workImageService.coreWorkCoverRow(workId);
 }
 
 function publicCoreWorkCover(workId) {
-  return videoLibraryImageService.publicCoreWorkCover(workId);
+  return workImageService.publicCoreWorkCover(workId);
 }
 
 function coreImageRow(imageId) {
-  return videoLibraryImageService.coreImageRow(imageId);
+  return workImageService.coreImageRow(imageId);
 }
 
 function actorProfileRow(personId) {
@@ -1442,11 +1419,11 @@ function storedWorkCodeKey(value) {
 }
 
 function workCoverRow(workId) {
-  return videoLibraryImageService.workCoverRow(workId);
+  return workImageService.workCoverRow(workId);
 }
 
 function publicWorkCover(row) {
-  return videoLibraryImageService.publicWorkCover(row);
+  return workImageService.publicWorkCover(row);
 }
 
 function invalidateTableStamp(...tables) {
@@ -2213,27 +2190,27 @@ function serveLocalImageCacheRow(res, row) {
 }
 
 function publicPersonFallbackAvatar(person) {
-  return videoLibraryPresenterService.publicPersonFallbackAvatar(person);
+  return workPresenterService.publicPersonFallbackAvatar(person);
 }
 
 function publicWorkCoverAvatar(work, personId, source = "work_cover") {
-  return videoLibraryPresenterService.publicWorkCoverAvatar(work, personId, source);
+  return workPresenterService.publicWorkCoverAvatar(work, personId, source);
 }
 
 function publicPerson(person, options = {}) {
-  return videoLibraryPresenterService.publicPerson(person, options);
+  return workPresenterService.publicPerson(person, options);
 }
 
 function publicWorkAvailability(work, infoSummary = null) {
-  return videoLibraryPresenterService.publicWorkAvailability(work, infoSummary);
+  return workPresenterService.publicWorkAvailability(work, infoSummary);
 }
 
 function publicWork(work, includeFiles = false) {
-  return videoLibraryPresenterService.publicWork(work, includeFiles);
+  return workPresenterService.publicWork(work, includeFiles);
 }
 
 function publicMediaFile(file, work = null) {
-  return videoLibraryPresenterService.publicMediaFile(file, work);
+  return workPresenterService.publicMediaFile(file, work);
 }
 
 function clampInteger(value, fallback, min, max) {

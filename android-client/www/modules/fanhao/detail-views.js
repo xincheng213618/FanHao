@@ -1,4 +1,4 @@
-import { fetchJson, postJson, putJson } from "../../js/api.js?v=20260706-mobile-web-sync-01";
+import { fetchJson } from "../../js/api.js?v=20260706-mobile-web-sync-01";
 import { createAndroidVideoSection } from "../../js/android-player.js";
 import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260705-mobile-actions-01";
 import { createDetailSectionTitle } from "../../js/detail-ui.js";
@@ -6,6 +6,8 @@ import { extractWorkCode, formatDate, formatNumber } from "../../js/format.js";
 import { createInfoPreviewSection } from "../../js/info-preview.js";
 import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "../../js/image.js";
 import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-01";
+import { createWorkActions } from "./features/works/actions.js?v=20260712-fanhao-refactor-01";
+import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
 
 const PLAY_OPEN_COOLDOWN_MS = 1400;
 
@@ -26,6 +28,22 @@ export function createDetailViews(context) {
   } = context;
   const videoSection = createAndroidVideoSection({ getActiveUrl, openInLibrary });
   const infoSection = createInfoPreviewSection({ getActiveUrl });
+  const workActions = createWorkActions({
+    detailErrorMessage,
+    extractWorkCode,
+    formatNumber,
+    getActiveUrl,
+    onUserStateChange,
+    renderMessage,
+    renderWorkDetail
+  });
+  const previewMedia = createWorkPreviewMedia({
+    detailErrorMessage,
+    getActiveUrl,
+    mediaViewer,
+    renderMessage,
+    renderWorkDetail
+  });
 
   async function renderPersonDetail(personId, isActive = () => true) {
     const activeUrl = getActiveUrl();
@@ -204,7 +222,7 @@ export function createDetailViews(context) {
       els.viewContent.append(createWorkDetailHero(work, () => videoSection.playDefaultVideo(playbackSection, work)));
       const factPanel = createWorkFactPanel(work);
       if (factPanel) els.viewContent.append(factPanel);
-      const previewPanel = createPreviewMediaPanel(work);
+      const previewPanel = previewMedia.render(work);
       if (previewPanel) els.viewContent.append(previewPanel);
       els.viewContent.append(playbackSection);
       if (!factPanel) {
@@ -299,29 +317,7 @@ export function createDetailViews(context) {
     titleBlock.className = "work-detail-title-block";
     titleBlock.append(title, author);
 
-    const actions = document.createElement("div");
-    actions.className = "detail-action-row";
-    const markerButton = document.createElement("button");
-    markerButton.type = "button";
-    markerButton.className = "local-marker-action";
-    syncLocalMarkerButton(markerButton, work, "A");
-    markerButton.addEventListener("click", () => toggleLocalMarker(work, "A", markerButton));
-    const favoriteButton = document.createElement("button");
-    favoriteButton.type = "button";
-    favoriteButton.className = "favorite-action";
-    syncFavoriteButton(favoriteButton, work.favorite);
-    favoriteButton.addEventListener("click", () => toggleFavorite(work, favoriteButton));
-    const deleteButton = document.createElement("button");
-    deleteButton.type = "button";
-    deleteButton.className = "delete-local-action danger";
-    syncDeleteLocalButton(deleteButton, work);
-    deleteButton.addEventListener("click", () => deleteLocalFiles(work, deleteButton));
-    const backButton = document.createElement("button");
-    backButton.type = "button";
-    backButton.className = "detail-back-action";
-    backButton.textContent = "返回";
-    backButton.addEventListener("click", goBack);
-    actions.append(backButton, markerButton, favoriteButton, deleteButton);
+    const actions = workActions.createActionRow(work, goBack);
 
     const highlights = createWorkDetailHighlights(work);
     body.append(titleBlock, actions);
@@ -422,172 +418,6 @@ export function createDetailViews(context) {
 
     section.append(panel);
     return section;
-  }
-
-  function createPreviewMediaPanel(work) {
-    const info = work.infoMetadata || work.infoSummary || {};
-    const activeUrl = getActiveUrl();
-    const images = uniquePreviewMediaItems([
-      ...localPreviewImageItems(work).map((item) => ({ ...item, url: absoluteUrl(activeUrl, item.url) })),
-      ...remotePreviewImageItems(info.previewImages || [])
-    ]).slice(0, 12);
-    const videoUrl = cleanRemoteUrl(info.previewVideoUrl);
-    if (!images.length && !videoUrl) return null;
-
-    const section = document.createElement("div");
-    section.className = "detail-block work-preview-media-block";
-    const titleRow = document.createElement("div");
-    titleRow.className = "work-preview-title-row";
-    titleRow.append(createDetailSectionTitle("预览媒体", images.length ? `${formatNumber(images.length)} 张` : ""));
-    if (work.manualCoverId) {
-      const reset = document.createElement("button");
-      reset.type = "button";
-      reset.className = "work-preview-cover-reset";
-      reset.textContent = "恢复默认封面";
-      reset.addEventListener("click", () => setManualWorkCover(work, "", reset));
-      titleRow.append(reset);
-    }
-    section.append(titleRow);
-
-    if (images.length) {
-      const strip = document.createElement("div");
-      strip.className = "work-preview-strip";
-      for (const item of images) {
-        const frame = document.createElement("div");
-        frame.className = `work-preview-item${item.imageId && item.imageId === work.manualCoverId ? " selected" : ""}`;
-
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "work-preview-thumb";
-        button.setAttribute("aria-label", "打开预览图");
-        const img = document.createElement("img");
-        img.loading = "lazy";
-        img.decoding = "async";
-        img.alt = "";
-        img.src = item.url;
-        button.append(img);
-        button.addEventListener("click", () => mediaViewer?.openImage?.(item.url, work.title || work.directoryName || "预览图"));
-        frame.append(button);
-
-        if (item.imageId) {
-          const coverButton = document.createElement("button");
-          coverButton.type = "button";
-          coverButton.className = "work-preview-cover-action";
-          if (item.imageId === work.manualCoverId) {
-            coverButton.textContent = "当前封面";
-            coverButton.disabled = true;
-          } else if (!work.manualCoverId && item.imageId === work.coverId) {
-            coverButton.textContent = "默认封面";
-            coverButton.disabled = true;
-          } else {
-            coverButton.textContent = "设为封面";
-            coverButton.addEventListener("click", () => setManualWorkCover(work, item.imageId, coverButton));
-          }
-          frame.append(coverButton);
-        }
-
-        strip.append(frame);
-      }
-      section.append(strip);
-    }
-
-    if (videoUrl) {
-      const actions = document.createElement("div");
-      actions.className = "work-preview-actions";
-      const link = document.createElement("button");
-      link.type = "button";
-      link.className = "work-preview-video";
-      link.textContent = "打开预览视频";
-      link.addEventListener("click", () => window.open(videoUrl, "_blank", "noreferrer"));
-      actions.append(link);
-      section.append(actions);
-    }
-
-    return section;
-  }
-
-  async function setManualWorkCover(work, imageId, button) {
-    if (!work?.id) return;
-    const previousText = button?.textContent || "";
-    if (button) {
-      button.disabled = true;
-      button.textContent = imageId ? "设置中" : "恢复中";
-    }
-    try {
-      const data = await putJson(getActiveUrl(), `/api/works/${encodeURIComponent(work.id)}/cover`, { imageId });
-      if (data.work) Object.assign(work, data.work);
-      await updateCachedWorkDetail(work).catch(() => null);
-      renderMessage(imageId ? "封面已更新。" : "已恢复默认封面。", "quiet", false);
-      renderWorkDetail(work.id);
-    } catch (error) {
-      if (button) {
-        button.disabled = false;
-        button.textContent = previousText;
-      }
-      renderMessage(detailErrorMessage(error, "封面设置失败，请稍后重试"), "error", false);
-    }
-  }
-
-  function localPreviewImageItems(work) {
-    return [...(work.images || [])]
-      .filter((image) => image?.id)
-      .sort(comparePreviewImageFiles)
-      .map((image) => ({
-        imageId: image.id,
-        url: `/media/image/${encodeURIComponent(image.id)}`
-      }));
-  }
-
-  function comparePreviewImageFiles(a, b) {
-    return previewImageRank(a) - previewImageRank(b) || String(a.relativePath || a.name || "").localeCompare(String(b.relativePath || b.name || ""));
-  }
-
-  function previewImageRank(image) {
-    const text = `${image?.relativePath || ""} ${image?.name || ""}`.toLowerCase();
-    if (/(?:extra[-_ ]?fanart|sample|screenshot|preview|fanart)/.test(text)) return 0;
-    if (/(?:poster|cover|folder|front|thumb|thumbnail)/.test(text)) return 2;
-    return 1;
-  }
-
-  function cleanRemoteUrl(value) {
-    const text = String(value || "").trim();
-    return /^https?:\/\//i.test(text) ? text : "";
-  }
-
-  function cleanPreviewImageUrl(value) {
-    const text = String(value || "").trim();
-    return /^https?:\/\//i.test(text) ? text : "";
-  }
-
-  function uniquePreviewImageUrls(values) {
-    const seen = new Set();
-    const urls = [];
-    for (const value of Array.isArray(values) ? values : []) {
-      const url = cleanPreviewImageUrl(value);
-      const key = url.toLowerCase();
-      if (!url || seen.has(key)) continue;
-      seen.add(key);
-      urls.push(url);
-    }
-    return urls;
-  }
-
-  function remotePreviewImageItems(values) {
-    return uniquePreviewImageUrls(values).map((url) => ({ imageId: "", url }));
-  }
-
-  function uniquePreviewMediaItems(items) {
-    const seen = new Set();
-    const result = [];
-    for (const item of Array.isArray(items) ? items : []) {
-      const imageId = String(item?.imageId || "");
-      const url = cleanPreviewImageUrl(item?.url);
-      const key = imageId ? `image:${imageId}` : `url:${url.toLowerCase()}`;
-      if (!url || seen.has(key)) continue;
-      seen.add(key);
-      result.push({ imageId, url });
-    }
-    return result;
   }
 
   function fieldMap(fields) {
@@ -1011,116 +841,6 @@ export function createDetailViews(context) {
     if (value === null || value === undefined || value === "") return null;
     const rating = Number(value);
     return Number.isFinite(rating) ? rating : null;
-  }
-
-  function syncFavoriteButton(button, favorite) {
-    button.textContent = favorite ? "已收藏" : "收藏";
-    button.classList.toggle("active", Boolean(favorite));
-  }
-
-  function syncLocalMarkerButton(button, work, marker = "A") {
-    const key = String(marker || "A").toUpperCase();
-    const active = (work.localMarkers || []).includes(key);
-    button.hidden = Boolean(work.missingLocal);
-    button.textContent = active ? `${key} 已标记` : `标记 ${key}`;
-    button.title = active ? `移除 ${key} 标记` : `添加 ${key} 标记`;
-    button.classList.toggle("active", active);
-  }
-
-  function syncDeleteLocalButton(button, work) {
-    const available = Boolean(work?.id && !work.missingLocal);
-    button.hidden = !available;
-    button.disabled = !available;
-    button.textContent = "删除文件";
-    button.title = available ? "删除这个作品的本地文件夹，数据库资料会保留" : "";
-  }
-
-  async function toggleLocalMarker(work, marker, button) {
-    const activeUrl = getActiveUrl();
-    const key = String(marker || "A").toUpperCase();
-    const markers = new Set(work.localMarkers || []);
-    const nextEnabled = !markers.has(key);
-    const previousMarkers = [...markers];
-    button.disabled = true;
-    button.textContent = nextEnabled ? "标记中" : "移除中";
-    try {
-      const data = await postJson(activeUrl, `/api/works/${encodeURIComponent(work.id)}/local-marker`, {
-        marker: key,
-        enabled: nextEnabled
-      });
-      const nextWork = data.work || null;
-      if (nextWork) Object.assign(work, nextWork);
-      else {
-        if (nextEnabled) markers.add(key);
-        else markers.delete(key);
-        work.localMarkers = [...markers];
-      }
-      syncLocalMarkerButton(button, work, key);
-      updateCachedWorkDetail(work).catch(() => {});
-      renderMessage(nextEnabled ? `${key} 标记已添加。` : `${key} 标记已移除。`, "quiet", false);
-    } catch (error) {
-      work.localMarkers = previousMarkers;
-      syncLocalMarkerButton(button, work, key);
-      renderMessage(detailErrorMessage(error, "更新作品标记失败，请稍后重试"), "error", false);
-    } finally {
-      button.disabled = false;
-      syncLocalMarkerButton(button, work, key);
-    }
-  }
-
-  async function deleteLocalFiles(work, button) {
-    if (!work?.id || work.missingLocal) return;
-    const title = work.title || work.directoryName || extractWorkCode(work) || "这个作品";
-    const confirmed = window.confirm(`确认删除「${title}」的本地文件夹？\n\n数据库资料会保留，删除后会显示为未下载。`);
-    if (!confirmed) return;
-
-    const activeUrl = getActiveUrl();
-    button.disabled = true;
-    button.textContent = "删除中";
-    try {
-      const data = await postJson(activeUrl, `/api/works/${encodeURIComponent(work.id)}/local-files/delete`);
-      if (data.work) Object.assign(work, data.work);
-      else work.missingLocal = true;
-      await updateCachedWorkDetail(work).catch(() => null);
-      const removedEmpty = data.emptyRemovedPaths?.length ? `，并清理 ${formatNumber(data.emptyRemovedPaths.length)} 个空目录` : "";
-      renderMessage(`本地文件已删除${removedEmpty}。`, "quiet", false);
-      renderWorkDetail(work.id);
-    } catch (error) {
-      button.disabled = false;
-      button.textContent = "删除失败";
-      renderMessage(detailErrorMessage(error, "删除本地文件失败，请稍后重试"), "error", false);
-      window.setTimeout(() => syncDeleteLocalButton(button, work), 1400);
-    }
-  }
-
-  async function updateCachedWorkDetail(work) {
-    if (!work?.id) return null;
-    const activeUrl = getActiveUrl();
-    const path = `/api/works/${encodeURIComponent(work.id)}`;
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    const payload = {
-      ...(cached?.payload || {}),
-      work
-    };
-    return writeCachedJson(activeUrl, path, payload);
-  }
-
-  async function toggleFavorite(work, button) {
-    const activeUrl = getActiveUrl();
-    const previous = Boolean(work.favorite);
-    button.disabled = true;
-    button.textContent = previous ? "取消中" : "收藏中";
-    try {
-      const data = await postJson(activeUrl, `/api/favorites/${encodeURIComponent(work.id)}`);
-      work.favorite = Boolean(data.favorite);
-      syncFavoriteButton(button, work.favorite);
-      if (data.user) onUserStateChange?.(data.user);
-    } catch (error) {
-      syncFavoriteButton(button, previous);
-      renderMessage(detailErrorMessage(error, "收藏状态更新失败，请稍后重试"), "error", false);
-    } finally {
-      button.disabled = false;
-    }
   }
 
   function detailErrorMessage(error, fallback) {

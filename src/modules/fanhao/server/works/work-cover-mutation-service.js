@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame } from "../../../../lib/cover-frame.js";
+import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame } from "../../../../../lib/cover-frame.js";
 
 export function createWorkCoverMutationService({
   ffmpegPath,

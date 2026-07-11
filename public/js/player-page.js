@@ -19,6 +19,10 @@ const els = {
   tools: document.querySelector("#playerTools"),
   modeText: document.querySelector("#playerModeText"),
   statusText: document.querySelector("#playerStatusText"),
+  sidebar: document.querySelector("#playerSidebar"),
+  toggleSidebar: document.querySelector("#toggleSidebarButton"),
+  toggleSidebarLabel: document.querySelector("#toggleSidebarButton .player-sidebar-toggle-label"),
+  streamStart: document.querySelector("#playerStreamStart"),
   skipBack: document.querySelector("#skipBackButton"),
   skipForward: document.querySelector("#skipForwardButton"),
   reloadStream: document.querySelector("#reloadStreamButton"),
@@ -44,10 +48,18 @@ let player = null;
 let playerControlMode = "";
 let frameHoldCanvas = null;
 let frameHoldTimer = null;
+let uiIdleTimer = null;
+let pointerMoveFrame = null;
+let sidebarCollapsed = false;
+let streamNeedsActivation = false;
 
 const PLYR_DIRECT_CONTROLS = ["play-large", "play", "progress", "current-time", "duration", "mute", "volume", "settings", "fullscreen"];
 const PLYR_STREAM_CONTROLS = ["play-large", "play", "mute", "volume", "fullscreen"];
 const mobileStreamControlsQuery = window.matchMedia("(max-width: 640px)");
+const mobileSidebarQuery = window.matchMedia("(max-width: 900px)");
+const PLAYER_SIDEBAR_STORAGE_KEY = "fanhao.player.sidebar-collapsed";
+
+initializePlayerExperience();
 
 els.back?.addEventListener("click", () => {
   if (window.opener && !window.opener.closed) {
@@ -76,6 +88,12 @@ els.correctActor?.addEventListener("click", () => {
 els.moveToPerson?.addEventListener("click", () => {
   moveCurrentWorkToPerson();
 });
+
+els.toggleSidebar?.addEventListener("click", () => {
+  setSidebarCollapsed(!sidebarCollapsed, { persist: true });
+});
+
+els.streamStart?.addEventListener("click", startDeferredStream);
 
 els.video?.addEventListener("loadedmetadata", () => {
   updateVideoAspect();
@@ -120,9 +138,14 @@ els.video?.addEventListener("waiting", () => {
 });
 
 els.video?.addEventListener("playing", () => {
+  streamNeedsActivation = false;
   setPlaybackStatus("");
   hideFrameHold();
+  scheduleUiIdle();
 });
+
+els.video?.addEventListener("pause", revealPlayerUi);
+els.video?.addEventListener("ended", revealPlayerUi);
 
 els.video?.addEventListener("error", () => {
   setPlaybackStatus(videoErrorMessage());
@@ -136,7 +159,119 @@ mobileStreamControlsQuery.addEventListener?.("change", () => {
   placeStreamSeekControl();
 });
 
+window.addEventListener("resize", updateVideoAspect);
+document.addEventListener("keydown", handlePlayerKeyboard);
+document.addEventListener("pointerdown", revealPlayerUi, { passive: true });
+document.addEventListener("pointermove", handlePlayerPointerMove, { passive: true });
+
 load();
+
+function initializePlayerExperience() {
+  let storedPreference = null;
+  try {
+    storedPreference = window.localStorage.getItem(PLAYER_SIDEBAR_STORAGE_KEY);
+  } catch {}
+  const collapsedByDefault = mobileSidebarQuery.matches;
+  setSidebarCollapsed(storedPreference == null ? collapsedByDefault : storedPreference === "1");
+  revealPlayerUi();
+}
+
+function setSidebarCollapsed(collapsed, options = {}) {
+  sidebarCollapsed = Boolean(collapsed);
+  document.body.classList.toggle("player-sidebar-collapsed", sidebarCollapsed);
+  if (els.toggleSidebar) {
+    els.toggleSidebar.setAttribute("aria-expanded", sidebarCollapsed ? "false" : "true");
+    els.toggleSidebar.title = sidebarCollapsed ? "显示资料与操作（I）" : "隐藏资料与操作（I）";
+  }
+  if (els.toggleSidebarLabel) {
+    els.toggleSidebarLabel.textContent = sidebarCollapsed ? "显示资料" : "隐藏资料";
+  }
+  if (els.sidebar) {
+    if (sidebarCollapsed && els.sidebar.contains(document.activeElement)) {
+      els.toggleSidebar?.focus({ preventScroll: true });
+    }
+    els.sidebar.inert = sidebarCollapsed;
+    els.sidebar.setAttribute("aria-hidden", sidebarCollapsed ? "true" : "false");
+  }
+  if (options.persist) {
+    try {
+      window.localStorage.setItem(PLAYER_SIDEBAR_STORAGE_KEY, sidebarCollapsed ? "1" : "0");
+    } catch {}
+  }
+  window.requestAnimationFrame(updateVideoAspect);
+  window.setTimeout(updateVideoAspect, 220);
+}
+
+function handlePlayerPointerMove() {
+  if (pointerMoveFrame) return;
+  pointerMoveFrame = window.requestAnimationFrame(() => {
+    pointerMoveFrame = null;
+    revealPlayerUi();
+  });
+}
+
+function revealPlayerUi() {
+  document.body.classList.remove("player-ui-idle");
+  scheduleUiIdle();
+}
+
+function scheduleUiIdle() {
+  window.clearTimeout(uiIdleTimer);
+  if (!els.video || els.video.paused || els.video.ended) return;
+  uiIdleTimer = window.setTimeout(() => {
+    if (!els.video.paused && !els.video.ended) document.body.classList.add("player-ui-idle");
+  }, 2200);
+}
+
+function handlePlayerKeyboard(event) {
+  if (shouldIgnorePlayerShortcut(event)) return;
+  const key = String(event.key || "").toLowerCase();
+  if (key === "i") {
+    event.preventDefault();
+    setSidebarCollapsed(!sidebarCollapsed, { persist: true });
+    revealPlayerUi();
+    return;
+  }
+  if (!currentVideo || !currentPlayInfo || !els.video) return;
+  if (key === " " || key === "k") {
+    event.preventDefault();
+    if (els.video.paused && streamNeedsActivation && usesCustomControls()) {
+      startDeferredStream();
+    } else if (els.video.paused) requestVideoPlayback();
+    else els.video.pause();
+  } else if (key === "arrowleft") {
+    event.preventDefault();
+    seekTo(mediaPosition() - 10);
+  } else if (key === "arrowright") {
+    event.preventDefault();
+    seekTo(mediaPosition() + 10);
+  } else if (key === "arrowup") {
+    event.preventDefault();
+    els.video.volume = Math.min(1, Number(els.video.volume || 0) + 0.05);
+  } else if (key === "arrowdown") {
+    event.preventDefault();
+    els.video.volume = Math.max(0, Number(els.video.volume || 0) - 0.05);
+  } else if (key === "m") {
+    event.preventDefault();
+    els.video.muted = !els.video.muted;
+  } else if (key === "f") {
+    event.preventDefault();
+    player?.fullscreen?.toggle?.();
+  } else if (key === "escape" && mobileSidebarQuery.matches && !sidebarCollapsed) {
+    setSidebarCollapsed(true, { persist: true });
+  } else {
+    return;
+  }
+  revealPlayerUi();
+}
+
+function shouldIgnorePlayerShortcut(event) {
+  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return true;
+  const target = event.target;
+  if (!(target instanceof Element)) return false;
+  if (target.closest("input, textarea, select, [contenteditable='true'], .player-move-dialog")) return true;
+  return target.matches("button, a") && [" ", "enter"].includes(String(event.key || "").toLowerCase());
+}
 
 async function load() {
   if (!workId && !mediaId) {
@@ -167,6 +302,21 @@ async function load() {
   } catch (error) {
     showNotice(error.message || "读取作品失败");
   }
+}
+
+function startDeferredStream() {
+  if (!streamNeedsActivation || !usesCustomControls() || !els.video) return;
+  streamNeedsActivation = false;
+  setStreamPending(false);
+  beginStreamSwitch(false);
+  setPlaybackStatus("加载中");
+  requestVideoPlayback();
+}
+
+function setStreamPending(pending) {
+  const active = Boolean(pending);
+  els.stage?.classList.toggle("stream-pending", active);
+  if (els.streamStart) els.streamStart.hidden = !active;
 }
 
 async function loadGalleryMedia() {
@@ -299,12 +449,21 @@ function setVideoSourceAt(position, options = {}) {
   const mode = currentPlayInfo.mode || "direct";
   const autoPlay = Boolean(options.autoPlay);
   const customControls = mode !== "direct";
+  const deferGeneratedStream = customControls && !autoPlay;
   let streamUrl = currentPlayInfo.streamUrl;
+  els.video.preload = mode === "direct" ? "auto" : "none";
+  els.video.setAttribute("preload", els.video.preload);
+  updateVideoAspect();
   configurePlyrForCurrentMode();
+  els.video.preload = mode === "direct" ? "auto" : "none";
   playbackOffset = mode === "direct" ? 0 : target;
-  if (customControls) {
+  streamNeedsActivation = deferGeneratedStream;
+  setStreamPending(deferGeneratedStream);
+  if (customControls && !deferGeneratedStream) {
     beginStreamSwitch(options.holdFrame);
     setPlaybackStatus(target > 0 ? "跳转中" : "加载中");
+  } else if (deferGeneratedStream) {
+    setPlaybackStatus("");
   }
 
   if (mode !== "direct" && target > 0) {
@@ -316,6 +475,11 @@ function setVideoSourceAt(position, options = {}) {
   els.video.hidden = false;
   els.notice.hidden = true;
 
+  if (deferGeneratedStream) {
+    updateSeekControl(target);
+    return;
+  }
+
   els.video.addEventListener(
     "loadedmetadata",
     () => {
@@ -324,7 +488,7 @@ function setVideoSourceAt(position, options = {}) {
       }
       updateSeekControl(target);
       if (autoPlay) {
-        els.video.play().catch(() => {});
+        requestVideoPlayback();
       }
     },
     { once: true }
@@ -336,7 +500,7 @@ function setVideoSourceAt(position, options = {}) {
       () => {
         setPlaybackStatus("");
         if (autoPlay) {
-          els.video.play().catch(() => {});
+          requestVideoPlayback();
         }
         endStreamSwitchSoon();
       },
@@ -345,7 +509,30 @@ function setVideoSourceAt(position, options = {}) {
   }
 
   els.video.load();
+  if (customControls && autoPlay) {
+    requestVideoPlayback();
+  }
   updateSeekControl(target);
+}
+
+function requestVideoPlayback() {
+  const attempt = els.video?.play?.();
+  if (!attempt?.then) return;
+  attempt.then(() => {
+    if (els.video) delete els.video.dataset.playbackError;
+    streamNeedsActivation = false;
+    setStreamPending(false);
+  }).catch((error) => {
+    const name = String(error?.name || "PlaybackError");
+    const message = String(error?.message || "播放启动失败").trim();
+    if (els.video) els.video.dataset.playbackError = `${name}: ${message}`;
+    if (usesCustomControls()) {
+      streamNeedsActivation = true;
+      setStreamPending(true);
+      setPlaybackStatus(name === "NotAllowedError" ? "点击播放" : "播放启动失败，点击重试");
+    }
+    console.warn("[player-play]", name, message);
+  });
 }
 
 function usesCustomControls() {
@@ -453,8 +640,21 @@ function showFrameHold() {
 }
 
 function updateVideoAspect() {
-  if (!els.stage || !els.video?.videoWidth || !els.video?.videoHeight) return;
-  els.stage.style.setProperty("--player-video-aspect", `${els.video.videoWidth} / ${els.video.videoHeight}`);
+  if (!els.stage) return;
+  const sourceWidth = Number(els.video?.videoWidth || currentPlayInfo?.width || 16);
+  const sourceHeight = Number(els.video?.videoHeight || currentPlayInfo?.height || 9);
+  const safeWidth = Number.isFinite(sourceWidth) && sourceWidth > 0 ? sourceWidth : 16;
+  const safeHeight = Number.isFinite(sourceHeight) && sourceHeight > 0 ? sourceHeight : 9;
+  const ratio = safeWidth / safeHeight;
+  const availableWidth = Math.max(0, els.stage.clientWidth || 0);
+  const availableHeight = Math.max(0, els.stage.clientHeight || 0);
+  const fittedWidth = availableWidth && availableHeight
+    ? Math.min(availableWidth, availableHeight * ratio)
+    : availableWidth;
+  els.stage.style.setProperty("--player-video-aspect", `${safeWidth} / ${safeHeight}`);
+  if (fittedWidth > 0) {
+    els.stage.style.setProperty("--player-video-max-width", `${Math.floor(fittedWidth)}px`);
+  }
 }
 
 function hideFrameHold() {
@@ -616,7 +816,7 @@ function playbackModeText() {
 }
 
 function modeLabel(mode) {
-  if (mode === "direct") return "直连播放";
+  if (mode === "direct") return "原生直连";
   if (mode === "remux") return "快速重封装";
   if (mode === "transcode") return "智能转码";
   return "";
@@ -1329,6 +1529,8 @@ function stopCurrentPlayback() {
   currentPlayInfo = null;
   playbackOffset = 0;
   isSeeking = false;
+  streamNeedsActivation = false;
+  setStreamPending(false);
   try {
     els.video.pause();
     els.video.srcObject = null;

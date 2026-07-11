@@ -29,7 +29,7 @@ export function createMediaStreamService({
     const mode = url.searchParams.get("mode") === "remux" ? "remux" : "transcode";
     const audio = url.searchParams.get("audio") === "copy" ? "copy" : "aac";
     const startAt = Math.max(0, Number(url.searchParams.get("t") || 0) || 0);
-    const args = ["-hide_banner", "-loglevel", "error"];
+    const args = ["-hide_banner", "-loglevel", "error", "-fflags", "+genpts"];
     if (startAt > 0) args.push("-ss", String(Math.floor(startAt)));
     args.push("-i", file.path, "-map", "0:v:0?", "-map", "0:a:0?", "-sn", "-dn");
 
@@ -37,14 +37,21 @@ export function createMediaStreamService({
       args.push("-c:v", "copy", "-c:a", audio === "copy" ? "copy" : "aac", "-b:a", "160k");
     } else {
       if (hasNvenc) {
-        args.push("-c:v", "h264_nvenc", "-preset", "p4", "-cq", "24");
+        args.push("-c:v", "h264_nvenc", "-preset", "p4", "-cq", "24", "-pix_fmt", "yuv420p");
       } else {
-        args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "23");
+        args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p");
       }
       args.push("-c:a", "aac", "-b:a", "160k");
     }
 
-    args.push("-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1");
+    args.push(
+      "-map_metadata", "-1",
+      "-max_muxing_queue_size", "1024",
+      "-avoid_negative_ts", "make_zero",
+      "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+      "-f", "mp4",
+      "pipe:1"
+    );
 
     res.writeHead(200, {
       "Content-Type": "video/mp4",
@@ -63,7 +70,7 @@ export function createMediaStreamService({
       if (!res.headersSent) sendJson(res, 500, { error: "FFmpeg 启动失败" });
       else res.destroy(error);
     });
-    req.on("close", () => {
+    res.on("close", () => {
       if (!child.killed) child.kill("SIGKILL");
     });
   }

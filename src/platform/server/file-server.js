@@ -4,10 +4,23 @@ export function parseRange(rangeHeader, size) {
   const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader || "");
   if (!match) return null;
 
-  const start = match[1] ? Number(match[1]) : 0;
-  const end = match[2] ? Number(match[2]) : size - 1;
+  const sizeValue = Math.max(0, Number(size || 0) || 0);
+  if (!sizeValue || (!match[1] && !match[2])) return null;
 
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start < 0 || end >= size) {
+  if (!match[1]) {
+    const suffixLength = Number(match[2]);
+    if (!Number.isFinite(suffixLength) || suffixLength <= 0) return null;
+    return {
+      start: Math.max(0, sizeValue - suffixLength),
+      end: sizeValue - 1
+    };
+  }
+
+  const start = Number(match[1]);
+  const requestedEnd = match[2] ? Number(match[2]) : sizeValue - 1;
+  const end = Math.min(requestedEnd, sizeValue - 1);
+
+  if (!Number.isFinite(start) || !Number.isFinite(requestedEnd) || start > end || start < 0 || start >= sizeValue) {
     return null;
   }
 

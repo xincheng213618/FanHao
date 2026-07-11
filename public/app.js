@@ -1,78 +1,23 @@
 import { createApiClient, addQueryParam } from "./js/api.js?v=20260701-gallery-merge-01";
 import { loadModuleCatalog, renderWebModuleNavigation } from "./js/module-navigation.js?v=20260710-module-windows-01";
-import { createGalleryPage } from "./modules/content-index/gallery-page.js?v=20260711-photo-search-top-09";
-import { createGalleryRenderer } from "./modules/content-index/gallery-renderer.js?v=20260711-photo-reader-sticky-15";
-import { createPeoplePage } from "./modules/fanhao/people-page.js?v=20260710-module-registry-01";
-import { createPersonProfile } from "./modules/fanhao/person-profile.js?v=20260710-module-registry-01";
-import { createRankingPage } from "./modules/fanhao/ranking-page.js?v=20260710-module-registry-01";
-import { createWorkDetailPage } from "./modules/fanhao/work-detail-page.js?v=20260710-module-registry-01";
-import { createMusicPage } from "./modules/music/music-page.js?v=20260711-music-stats-key-44";
-import { createNovelPage } from "./modules/novels/novel-page.js?v=20260712-novel-author-23";
-import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20260711-liked-count-race-106";
+import {
+  createFanhaoState,
+  createCollectionPage,
+  createPeoplePage,
+  createPersonProfile,
+  createRankingPage,
+  createStudioPage,
+  createWorkDetailPage,
+  selectVisibleWorks
+} from "./modules/fanhao/index.js?v=20260712-fanhao-refactor-01";
 import { createAdminModal } from "./modules/system/admin-modal.js?v=20260710-module-registry-01";
-import { createToolsPage } from "./modules/tools/tools-page.js?v=20260710-module-registry-01";
 import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260712-novel-mine-07";
 
 prepareAppShell();
 
 const state = {
-  library: null,
-  people: [],
-  selectedPersonId: null,
-  selectedPerson: null,
-  works: [],
-  activeView: "people",
-  peopleScope: "main",
-  peopleIndexScrollTop: 0,
-  workQuery: "",
-  sortMode: "releaseDesc",
-  filterMode: "all",
-  showMissingLocalWorks: readStoredFlag("fanhao.showMissingLocalWorks", true),
-  showCompilationWorks: readStoredFlag("fanhao.showCompilationWorks", false),
+  ...createFanhaoState({ readStoredFlag }),
   uiConfig: defaultUiConfig(),
-  currentWork: null,
-  currentVideo: null,
-  currentPlayInfo: null,
-  currentStreamOffset: 0,
-  progressTimer: null,
-  timelineTimer: null,
-  timelineAbortController: null,
-  lastProgressReport: 0,
-  searchReturnView: "people",
-  searchTimer: null,
-  searchSeq: 0,
-  searchPeople: [],
-  searchQuery: "",
-  searchFacets: null,
-  accessMode: "local",
-  accessHints: {},
-  workPageSize: 1000,
-  workVisibleLimit: 1000,
-  searchTotal: 0,
-  searchLoadingMore: false,
-  rankingLists: [],
-  selectedRankingKey: "y2025",
-  rankingTotal: 0,
-  rankingMissingTotal: 0,
-  rankingLocalTotal: 0,
-  rankingUpdatedAt: "",
-  rankingPageUrl: "",
-  favoriteFolders: [],
-  selectedFavoriteFolderId: "all",
-  selectedHistoryRange: "30",
-  studios: [],
-  selectedStudio: null,
-  selectedStudioSeriesId: "all",
-  personWorksTotal: 0,
-  personWorksFacets: null,
-  personWorksLoadingMore: false,
-  personBulkDeleteActive: false,
-  personBulkDeleteSelectedIds: new Set(),
-  personPageSize: 120,
-  personVisibleLimit: 120,
-  openWorkSeq: 0,
-  infoRenderTimer: null,
-  lastFocusedElement: null,
   adminPollTimer: null,
   handledAdminTaskIds: new Set(),
   adminTasks: [],
@@ -133,20 +78,6 @@ const state = {
     settingsOpen: false,
     pendingScrollRatio: 0,
     settings: null
-  },
-  shortVideo: {
-    query: "",
-    author: "all",
-    authorPage: "",
-    source: "liked",
-    sort: "published",
-    data: null,
-    summary: null,
-    current: null,
-    prevId: "",
-    nextId: "",
-    loading: false,
-    status: ""
   },
   music: {
     query: "",
@@ -276,6 +207,22 @@ const COVER_RETRY_DELAYS = [700, 1400, 2400, 4000, 6500, 9000];
 const initialParams = new URLSearchParams(window.location.search);
 const isAndroidClient = initialParams.get("client") === "android";
 const api = createApiClient({ isAndroidClient });
+const initialModuleView = routeFromUrl().view;
+const standaloneFactories = await loadStandaloneFactories(initialModuleView);
+
+async function loadStandaloneFactories(view) {
+  if (view === "gallery") {
+    const [page, renderer] = await Promise.all([
+      import("./modules/content-index/gallery-page.js?v=20260711-photo-search-top-09"),
+      import("./modules/content-index/gallery-renderer.js?v=20260711-photo-reader-sticky-15")
+    ]);
+    return { createGalleryPage: page.createGalleryPage, createGalleryRenderer: renderer.createGalleryRenderer };
+  }
+  if (view === "novels") return import("./modules/novels/novel-page.js?v=20260712-novel-author-23");
+  if (view === "music") return import("./modules/music/music-page.js?v=20260711-music-stats-key-44");
+  if (view === "tools") return import("./modules/tools/tools-page.js?v=20260710-module-registry-01");
+  return {};
+}
 
 async function initializeModuleNavigation() {
   try {
@@ -286,11 +233,6 @@ async function initializeModuleNavigation() {
   }
 }
 const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
-const HISTORY_RANGE_OPTIONS = [
-  { value: "30", label: "30 天" },
-  { value: "7", label: "7 天" },
-  { value: "all", label: "全部" }
-];
 const peoplePage = createPeoplePage({
   api,
   appendEmpty,
@@ -336,6 +278,9 @@ const personProfilePage = createPersonProfile({
 });
 let novelPage = null;
 let musicPage = null;
+let toolsPage = null;
+let galleryPage = null;
+let galleryRenderer = null;
 const adminModal = createAdminModal({
   api,
   displayPersonName,
@@ -363,7 +308,7 @@ const adminModal = createAdminModal({
   state,
   updateWorkSnapshot
 });
-const toolsPage = createToolsPage({
+if (standaloneFactories.createToolsPage) toolsPage = standaloneFactories.createToolsPage({
   api,
   cancelScheduledWorkRendering,
   disconnectPeopleIndexAutoload,
@@ -377,7 +322,30 @@ const toolsPage = createToolsPage({
   txtToolMaxFileBytes: TXT_TOOL_MAX_FILE_BYTES,
   writeStoredFlag
 });
-novelPage = createNovelPage({
+const collectionPage = createCollectionPage({
+  api,
+  els,
+  formatNumber,
+  hidePersonProfile,
+  renderStatsForWorks,
+  renderWorks,
+  resetWorkPaging,
+  setMainHeader,
+  state
+});
+const studioPage = createStudioPage({
+  api,
+  appendEmpty,
+  els,
+  formatNumber,
+  hidePersonProfile,
+  renderStatsForWorks,
+  renderWorks,
+  resetWorkPaging,
+  setMainHeader,
+  state
+});
+if (standaloneFactories.createNovelPage) novelPage = standaloneFactories.createNovelPage({
   api,
   cancelScheduledWorkRendering,
   disconnectPeopleIndexAutoload,
@@ -394,23 +362,7 @@ novelPage = createNovelPage({
   state,
   syncRouteAfterNavigation
 });
-const shortVideoPage = createShortVideoPage({
-  api,
-  cancelScheduledWorkRendering,
-  disconnectPeopleIndexAutoload,
-  els,
-  formatBytes,
-  formatDateTime,
-  formatNumber,
-  hidePersonProfile,
-  pushRoute,
-  replaceRoute,
-  resetProgressiveCoverLoading,
-  setMainHeader,
-  state,
-  syncRouteAfterNavigation
-});
-musicPage = createMusicPage({
+if (standaloneFactories.createMusicPage) musicPage = standaloneFactories.createMusicPage({
   api,
   cancelScheduledWorkRendering,
   disconnectPeopleIndexAutoload,
@@ -426,7 +378,7 @@ musicPage = createMusicPage({
   state,
   syncRouteAfterNavigation
 });
-const galleryPage = createGalleryPage({
+if (standaloneFactories.createGalleryPage) galleryPage = standaloneFactories.createGalleryPage({
   api,
   clearPersonSelection: () => {
     state.selectedPersonId = null;
@@ -448,7 +400,7 @@ const galleryPage = createGalleryPage({
   state,
   syncRouteAfterNavigation
 });
-const galleryRenderer = createGalleryRenderer({
+if (standaloneFactories.createGalleryRenderer) galleryRenderer = standaloneFactories.createGalleryRenderer({
   api,
   cancelScheduledWorkRendering,
   disconnectPeopleIndexAutoload,
@@ -621,15 +573,6 @@ function currentRouteSnapshot(overrides = {}) {
     novelMode: state.activeView === "novels" ? state.novel.mode || "books" : "books",
     novelAuthor: state.activeView === "novels" ? state.novel.author || "" : "",
     novelPage: state.activeView === "novels" ? Math.max(0, Number(state.novel.page || 0)) : 0,
-    shortVideoId: state.activeView === "shortVideos" ? state.shortVideo.current?.id || "" : "",
-    shortVideoAuthorPage: state.activeView === "shortVideos" ? state.shortVideo.authorPage || "" : "",
-    shortVideoQuery: state.activeView === "shortVideos" ? state.shortVideo.query || "" : "",
-    shortVideoTopic: state.activeView === "shortVideos" ? state.shortVideo.topic || "" : "",
-    shortVideoSound: state.activeView === "shortVideos" ? state.shortVideo.sound || "" : "",
-    shortVideoAuthor: state.activeView === "shortVideos" ? state.shortVideo.author || "all" : "all",
-    shortVideoMedia: state.activeView === "shortVideos" ? state.shortVideo.media || "all" : "all",
-    shortVideoSource: state.activeView === "shortVideos" ? state.shortVideo.source || "liked" : "liked",
-    shortVideoSort: state.activeView === "shortVideos" ? state.shortVideo.sort || "published" : "published",
     musicTrackId: state.activeView === "music" && state.music.trackPageOpen ? state.music.current?.id || "" : "",
     musicArtistId: state.activeView === "music" && state.music.artistId !== "all" ? state.music.artistId || "" : "",
     musicAlbumId: state.activeView === "music" && state.music.albumId !== "all" ? state.music.albumId || "" : "",
@@ -745,10 +688,8 @@ async function applyRoute(route) {
       setActiveView("novels", { skipRoute: true });
       await novelPage.openRouteTarget(next);
     } else if (next.view === "shortVideos") {
-      clearWorkSearch();
-      shortVideoPage.applyRouteState(next);
-      setActiveView("shortVideos", { skipRoute: true, deferInitialLoad: Boolean(next.shortVideoId || next.shortVideoAuthorPage) });
-      await shortVideoPage.openRouteTarget(next);
+      window.location.replace(routeUrl(next));
+      return;
     } else if (next.view === "music") {
       clearWorkSearch();
       musicPage.applyRouteState(next);
@@ -1063,7 +1004,6 @@ function sortPeopleForList(people) {
 function productViewForActiveView(view = state.activeView) {
   if (view === "gallery") return "gallery";
   if (view === "novels") return "novels";
-  if (view === "shortVideos") return "shortVideos";
   if (view === "music") return "music";
   if (view === "tools") return "tools";
   return "people";
@@ -1177,16 +1117,6 @@ function setActiveView(view, options = {}) {
     return;
   }
 
-  if (view === "shortVideos") {
-    state.selectedPersonId = null;
-    state.selectedPerson = null;
-    state.works = [];
-    state.personWorksTotal = 0;
-    state.personWorksFacets = null;
-    shortVideoPage.enter(options);
-    return;
-  }
-
   if (view === "music") {
     state.selectedPersonId = null;
     state.selectedPerson = null;
@@ -1249,272 +1179,27 @@ async function goToPerson(personId) {
 
 
 async function loadFavorites() {
-  els.workGrid.innerHTML = `<div class="empty-state">正在加载收藏</div>`;
-  const params = new URLSearchParams();
-  if (state.selectedFavoriteFolderId && state.selectedFavoriteFolderId !== "all") {
-    params.set("folder", state.selectedFavoriteFolderId);
-  }
-  const query = params.toString();
-  const data = await api(`/api/favorites${query ? `?${query}` : ""}`);
-  state.selectedPerson = null;
-  state.searchPeople = [];
-  state.personWorksTotal = 0;
-  state.personWorksFacets = null;
-  hidePersonProfile();
-  state.works = data.works || [];
-  state.favoriteFolders = data.folders || [];
-  state.selectedFavoriteFolderId = data.selectedFolderId || state.selectedFavoriteFolderId || "all";
-  resetWorkPaging();
-  const folder = favoriteFolderById(state.selectedFavoriteFolderId);
-  setMainHeader("收藏", folder ? `${folder.name} · ${formatNumber(folder.count || 0)} 部` : "已收藏的作品");
-  renderStatsForWorks(state.works);
-  renderFavoriteFolderControls();
-  renderWorks("还没有收藏。");
-}
-
-function favoriteFolderById(folderId) {
-  return (state.favoriteFolders || []).find((folder) => folder.id === folderId) || null;
-}
-
-function favoriteFolderTotal() {
-  return (state.favoriteFolders || []).reduce((sum, folder) => sum + Number(folder.count || 0), 0);
+  await collectionPage.loadFavorites();
 }
 
 function renderFavoriteFolderControls() {
-  if (state.activeView !== "favorites") return;
-  const folders = state.favoriteFolders || [];
-  const wrap = document.createElement("div");
-  wrap.className = "stat-quick-filters favorite-folder-controls";
-
-  const group = document.createElement("div");
-  group.className = "stat-filter-group";
-  const heading = document.createElement("span");
-  heading.className = "stat-filter-label";
-  heading.textContent = "收藏夹";
-  group.append(heading);
-
-  const allButton = createFavoriteFolderFilterButton("all", "全部", favoriteFolderTotal());
-  group.append(allButton);
-  for (const folder of folders) {
-    group.append(createFavoriteFolderFilterButton(folder.id, folder.name, folder.count || 0));
-  }
-
-  const addButton = document.createElement("button");
-  addButton.type = "button";
-  addButton.className = "stat-filter-chip";
-  addButton.textContent = "新建";
-  addButton.addEventListener("click", createFavoriteFolder);
-
-  wrap.append(group, addButton);
-  els.statsRow.append(wrap);
-}
-
-function createFavoriteFolderFilterButton(folderId, name, count) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = `stat-filter-chip${state.selectedFavoriteFolderId === folderId ? " active" : ""}`;
-  button.textContent = `${name} ${formatNumber(count || 0)}`;
-  button.addEventListener("click", () => {
-    if (state.selectedFavoriteFolderId === folderId) return;
-    state.selectedFavoriteFolderId = folderId;
-    loadFavorites();
-  });
-  return button;
-}
-
-async function createFavoriteFolder() {
-  const name = window.prompt("新收藏夹名称");
-  if (!name || !name.trim()) return;
-  try {
-    const data = await api("/api/favorite-folders", { method: "POST", body: { name } });
-    state.favoriteFolders = data.folders || state.favoriteFolders;
-    await loadFavorites();
-  } catch (error) {
-    alert(error.message);
-  }
+  collectionPage.renderFavoriteFolderControls();
 }
 
 async function loadHistory() {
-  els.workGrid.innerHTML = `<div class="empty-state">正在加载观看记录</div>`;
-  const data = await api(historyPath());
-  state.selectedPerson = null;
-  state.searchPeople = [];
-  state.personWorksTotal = 0;
-  state.personWorksFacets = null;
-  hidePersonProfile();
-  state.works = data.works || [];
-  resetWorkPaging();
-  const rangeLabel = historyRangeLabel(state.selectedHistoryRange);
-  const total = data.total ?? data.count ?? state.works.length;
-  setMainHeader("继续观看", state.selectedHistoryRange === "all" ? "全部有播放进度的作品" : `${rangeLabel}有播放进度的作品 · ${formatNumber(total)} 部`);
-  renderStatsForWorks(state.works);
-  renderHistoryRangeControls(data);
-  renderWorks("暂无观看记录。");
+  await collectionPage.loadHistory();
 }
 
 async function loadVrWorks() {
-  els.workGrid.innerHTML = `<div class="empty-state">正在加载 VR 作品</div>`;
-  const params = new URLSearchParams({
-    filter: "vr",
-    sort: state.sortMode || "releaseDesc",
-    limit: "2000"
-  });
-  const data = await api(`/api/works?${params}`);
-  state.selectedPersonId = null;
-  state.selectedPerson = null;
-  state.selectedStudio = null;
-  state.selectedStudioSeriesId = "all";
-  state.searchPeople = [];
-  state.personWorksTotal = 0;
-  state.personWorksFacets = null;
-  hidePersonProfile();
-  state.works = data.works || [];
-  resetWorkPaging();
-  const total = data.total ?? state.works.length;
-  setMainHeader("VR", `全库 VR 作品 · ${formatNumber(total)} 部`);
-  renderStatsForWorks(state.works);
-  renderWorks("没有 VR 作品。");
+  await collectionPage.loadVrWorks();
 }
 
 async function loadStudios() {
-  els.workGrid.innerHTML = `<div class="empty-state">正在加载片商</div>`;
-  const data = await api("/api/studios?limit=500");
-  state.selectedPersonId = null;
-  state.selectedPerson = null;
-  state.selectedStudio = null;
-  state.selectedStudioSeriesId = "all";
-  state.works = [];
-  state.searchPeople = [];
-  state.personWorksTotal = 0;
-  state.personWorksFacets = null;
-  hidePersonProfile();
-  state.studios = data.makers || [];
-  setMainHeader("片商", "按片商浏览本地作品");
-  renderStudioIndex(data);
-}
-
-function renderStudioIndex(data = {}) {
-  els.statsRow.innerHTML = "";
-  els.workGrid.innerHTML = "";
-  if (!state.studios.length) {
-    appendEmpty("还没有片商数据。");
-    return;
-  }
-  const fragment = document.createDocumentFragment();
-  for (const studio of state.studios) {
-    fragment.append(createStudioCard(studio));
-  }
-  els.workGrid.append(fragment);
-}
-
-function createStudioCard(studio) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "studio-card";
-  button.addEventListener("click", () => loadStudioDetail(studio.id));
-
-  const name = document.createElement("strong");
-  name.textContent = studio.name || "未命名片商";
-
-  const count = document.createElement("span");
-  count.textContent = `(${formatNumber(studio.localWorkCount || studio.workCount || 0)})`;
-
-  button.append(name, count);
-  return button;
+  await studioPage.loadStudios();
 }
 
 async function loadStudioDetail(studioId, seriesId = "all") {
-  const params = new URLSearchParams({
-    seriesId,
-    sort: state.sortMode || "releaseDesc",
-    limit: "2000"
-  });
-  const data = await api(`/api/studios/${encodeURIComponent(studioId)}?${params}`);
-  state.selectedStudio = data.studio || null;
-  state.selectedStudioSeriesId = data.selectedSeriesId || seriesId || "all";
-  state.works = data.works || [];
-  resetWorkPaging();
-  const studio = state.selectedStudio;
-  const selectedSeries = (studio?.series || []).find((item) => item.id === state.selectedStudioSeriesId);
-  setMainHeader(studio?.name || "片商", selectedSeries ? `${selectedSeries.name} · ${formatNumber(data.total || 0)} 部` : `${formatNumber(data.total || 0)} 部本地作品`);
-  renderStatsForWorks(state.works);
-  renderStudioSeriesControls(studio);
-  renderWorks("这个片商暂无本地作品。");
-}
-
-function renderStudioSeriesControls(studio) {
-  if (state.activeView !== "studios" || !studio) return;
-  const series = (studio.series || []).filter((item) => Number(item.localWorkCount || 0) > 0);
-  const wrap = document.createElement("div");
-  wrap.className = "stat-quick-filters studio-series-controls";
-
-  const group = document.createElement("div");
-  group.className = "stat-filter-group";
-  const heading = document.createElement("span");
-  heading.className = "stat-filter-label";
-  heading.textContent = "系列";
-  group.append(heading);
-
-  const all = document.createElement("button");
-  all.type = "button";
-  all.className = `stat-filter-chip${state.selectedStudioSeriesId === "all" ? " active" : ""}`;
-  all.textContent = `全部 ${formatNumber(studio.localWorkCount || 0)}`;
-  all.addEventListener("click", () => loadStudioDetail(studio.id, "all"));
-  group.append(all);
-
-  for (const item of series) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `stat-filter-chip${state.selectedStudioSeriesId === item.id ? " active" : ""}`;
-    button.textContent = `${item.name} ${formatNumber(item.localWorkCount || 0)}`;
-    button.addEventListener("click", () => loadStudioDetail(studio.id, item.id));
-    group.append(button);
-  }
-
-  wrap.append(group);
-  els.statsRow.append(wrap);
-}
-
-function historyPath() {
-  const params = new URLSearchParams();
-  if (state.selectedHistoryRange && state.selectedHistoryRange !== "all") {
-    params.set("days", state.selectedHistoryRange);
-  }
-  const query = params.toString();
-  return `/api/history${query ? `?${query}` : ""}`;
-}
-
-function historyRangeLabel(value) {
-  return HISTORY_RANGE_OPTIONS.find((item) => item.value === value)?.label || "30 天";
-}
-
-function renderHistoryRangeControls(data = {}) {
-  if (state.activeView !== "history") return;
-  const wrap = document.createElement("div");
-  wrap.className = "stat-quick-filters history-range-controls";
-
-  const group = document.createElement("div");
-  group.className = "stat-filter-group";
-  const heading = document.createElement("span");
-  heading.className = "stat-filter-label";
-  heading.textContent = "最近观看";
-  group.append(heading);
-
-  for (const option of HISTORY_RANGE_OPTIONS) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `stat-filter-chip${state.selectedHistoryRange === option.value ? " active" : ""}`;
-    button.textContent = option.value === state.selectedHistoryRange ? `${option.label} ${formatNumber(data.total ?? state.works.length)}` : option.label;
-    button.addEventListener("click", () => {
-      if (state.selectedHistoryRange === option.value) return;
-      state.selectedHistoryRange = option.value;
-      loadHistory();
-    });
-    group.append(button);
-  }
-
-  wrap.append(group);
-  els.statsRow.append(wrap);
+  await studioPage.loadStudioDetail(studioId, seriesId);
 }
 
 async function loadRankings() {
@@ -1547,8 +1232,6 @@ function updateBackToPeopleIndexButton() {
   document.body.classList.toggle("gallery-media-view", state.activeView === "gallery" && ["media", "movie", "tv"].includes(state.gallery.mode));
   document.body.classList.toggle("novel-view", state.activeView === "novels");
   document.body.classList.toggle("novel-reader-active", state.activeView === "novels" && Boolean(state.novel?.chapter));
-  document.body.classList.toggle("short-video-view", state.activeView === "shortVideos");
-  document.body.classList.toggle("short-video-browser-active", state.activeView === "shortVideos" && Boolean(state.shortVideo?.current));
   document.body.classList.toggle("music-view", state.activeView === "music");
   els.missingLocalToggle?.closest(".toggle-control")?.removeAttribute("hidden");
   els.collectionToggle?.closest(".toggle-control")?.removeAttribute("hidden");
@@ -2019,44 +1702,18 @@ function topInfoValues(works, selectValues, limit) {
 }
 
 function visibleWorks() {
-  const query = state.activeView === "search" ? "" : state.workQuery.trim().toLowerCase();
-  let works = state.works.filter((work) => {
-    if (!query) return true;
-    return (
-      includesText(work.title, query) ||
-      includesText(workInfoSearchText(work), query) ||
-      includesText(work.directoryName, query) ||
-      includesText(work.relativePath, query) ||
-      includesText(workPersonSearchText(work), query)
-    );
+  return selectVisibleWorks(state.works, {
+    query: state.activeView === "search" ? "" : state.workQuery,
+    filters: selectedWorkFilters(),
+    sortMode: state.sortMode,
+    showCompilationWorks: state.showCompilationWorks,
+    showMissingLocalWorks: state.showMissingLocalWorks,
+    includesText,
+    workSearchText: (work) => `${workInfoSearchText(work)} ${workPersonSearchText(work)}`,
+    isCompilation: isCompilationWork,
+    matchesFilter: clientWorkMatchesFilter,
+    compareTitle: compareWorkTitle
   });
-
-  if (!state.showCompilationWorks) {
-    works = works.filter((work) => !isCompilationWork(work));
-  }
-
-  const activeFilters = selectedWorkFilters();
-  if (!state.showMissingLocalWorks && !activeFilters.includes("missingLocal")) {
-    works = works.filter((work) => !work.missingLocal);
-  }
-
-  works = works.filter((work) => activeFilters.every((filter) => clientWorkMatchesFilter(work, filter)));
-
-  works.sort((a, b) => {
-    if (state.sortMode === "ranking") return compareWorkRanking(a, b) || compareWorkTitle(a, b);
-    if (state.sortMode === "releaseDesc") return compareWorkReleaseDate(a, b, "desc") || compareWorkTitle(a, b);
-    if (state.sortMode === "releaseAsc") return compareWorkReleaseDate(a, b, "asc") || compareWorkTitle(a, b);
-    if (state.sortMode === "updated") return String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || ""));
-    if (state.sortMode === "ratingDesc") return compareWorkRating(a, b, "desc") || compareWorkTitle(a, b);
-    if (state.sortMode === "ratingAsc") return compareWorkRating(a, b, "asc") || compareWorkTitle(a, b);
-    if (state.sortMode === "progress") return String(b.progress?.updatedAt || "").localeCompare(String(a.progress?.updatedAt || ""));
-    if (state.sortMode === "sizeDesc") return compareWorkSize(a, b) || compareWorkTitle(a, b);
-    if (state.sortMode === "durationDesc") return compareWorkDuration(a, b) || compareWorkTitle(a, b);
-    if (state.sortMode === "videos") return b.videoCount - a.videoCount || a.title.localeCompare(b.title, undefined, { numeric: true });
-    return compareWorkTitle(a, b);
-  });
-
-  return works;
 }
 
 function clientWorkMatchesFilter(work, filter) {
@@ -2076,53 +1733,6 @@ function clientWorkMatchesFilter(work, filter) {
   if (filter === "missingLocal") return Boolean(work.missingLocal);
   if (filter === "missingCover") return !workCoverUrl(work);
   return true;
-}
-
-function compareWorkRanking(a, b) {
-  const aRank = Number(a.ranking?.rankNo || 0);
-  const bRank = Number(b.ranking?.rankNo || 0);
-  const aHas = Number.isFinite(aRank) && aRank > 0;
-  const bHas = Number.isFinite(bRank) && bRank > 0;
-  if (aHas !== bHas) return aHas ? -1 : 1;
-  if (aHas && aRank !== bRank) return aRank - bRank;
-  return 0;
-}
-
-function compareWorkRating(a, b, direction = "desc") {
-  const aRating = numericRating(a.infoSummary?.rating);
-  const bRating = numericRating(b.infoSummary?.rating);
-  const aHas = aRating !== null;
-  const bHas = bRating !== null;
-  if (aHas !== bHas) return aHas ? -1 : 1;
-  if (!aHas && !bHas) return String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || ""));
-  if (aRating !== bRating) return direction === "asc" ? aRating - bRating : bRating - aRating;
-
-  const aCount = Number(a.infoSummary?.ratingCount || 0);
-  const bCount = Number(b.infoSummary?.ratingCount || 0);
-  if (aCount !== bCount) return bCount - aCount;
-  return String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || ""));
-}
-
-function compareWorkReleaseDate(a, b, direction = "desc") {
-  const aDate = workReleaseDate(a);
-  const bDate = workReleaseDate(b);
-  const aHas = Boolean(aDate);
-  const bHas = Boolean(bDate);
-  if (aHas !== bHas) return aHas ? -1 : 1;
-  if (aDate !== bDate) return direction === "asc" ? aDate.localeCompare(bDate) : bDate.localeCompare(aDate);
-  return String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || ""));
-}
-
-function compareWorkSize(a, b) {
-  return Number(b.videoSize || 0) - Number(a.videoSize || 0);
-}
-
-function compareWorkDuration(a, b) {
-  return Number(b.infoSummary?.durationMinutes || 0) - Number(a.infoSummary?.durationMinutes || 0);
-}
-
-function workReleaseDate(work) {
-  return String(work.infoSummary?.releaseDate || "").trim();
 }
 
 function isCompilationWork(work) {
@@ -3265,10 +2875,6 @@ async function rescanFullLibrary(button) {
     openAdminScript("novel-library-rescan");
     return;
   }
-  if (state.activeView === "shortVideos") {
-    openAdminScript("");
-    return;
-  }
   if (state.activeView === "music") {
     openAdminScript("music-library-rescan");
     return;
@@ -3348,7 +2954,7 @@ installAndroidClientReturn();
 async function bootApp() {
   await initializeModuleNavigation();
   const initialRoute = routeFromUrl();
-  if (initialRoute.view === "shortVideos" || initialRoute.view === "music") {
+  if (initialRoute.view === "music") {
     await applyRoute(initialRoute);
     initializeRouteHistory();
     return;

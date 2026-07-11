@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createPeopleScopeService } from "../src/modules/fanhao/server/people-scope-service.js";
+import { createPeopleScopeService } from "../src/modules/fanhao/server/people/people-scope-service.js";
 import { galleryMediaSources } from "../src/platform/server/root-config.js";
 
 globalThis.window = { location: { href: "http://localhost/", search: "", hash: "" } };

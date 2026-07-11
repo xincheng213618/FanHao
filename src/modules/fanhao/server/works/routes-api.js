@@ -1,4 +1,4 @@
-export async function routeVideoLibraryApi(req, res, url, deps) {
+export async function routeWorksApi(req, res, url, deps) {
   const {
     notFound,
     personDetailService,

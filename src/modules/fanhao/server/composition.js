@@ -1,0 +1,93 @@
+export function createFanhaoDependencies(deps) {
+  return {
+    catalog: pick(deps, ["notFound", "rankingService", "sendJson", "studioService"]),
+    library: pick(deps, [
+      "appConfigService",
+      "getLastScanError",
+      "getLibrary",
+      "peopleScopeService",
+      "personListService",
+      "peoplePayloadStamp",
+      "publicPerson",
+      "refreshLibrary",
+      "requestAccess",
+      "requireLocalAdmin",
+      "sendJson",
+      "userStateSummary"
+    ]),
+    userState: pick(deps, [
+      "clampInteger",
+      "favoriteStateService",
+      "getLibrary",
+      "maxWorkLimit",
+      "notFound",
+      "playbackProgressService",
+      "publicWork",
+      "readJsonBody",
+      "recentWatchedDays",
+      "resolvePlayableVideoFile",
+      "sendJson"
+    ]),
+    works: pick(deps, [
+      "adminCoreMutationService",
+      "actorProfileMergeCandidates",
+      "actorProfileRow",
+      "actorMissingSearchWorks",
+      "clampInteger",
+      "coreMissingWorksForPerson",
+      "corePersonFallbackRecord",
+      "defaultWorkLimit",
+      "dedupeWorksForDisplay",
+      "enrichLocalWorksWithActorMovieIndex",
+      "enrichLocalWorksWithActorMovieInfo",
+      "favoriteStateService",
+      "galleryMediaService",
+      "generateWorkCover",
+      "getLibrary",
+      "isVrWork",
+      "matchesWorkSearch",
+      "maxActorAvatarBytes",
+      "maxWorkLimit",
+      "manualCoverStateService",
+      "mediaResponseService",
+      "mediaStreamService",
+      "mergedActorMovieRows",
+      "mergedPersonRecord",
+      "missingActorWorksForPerson",
+      "notFound",
+      "peopleScopeService",
+      "playbackProgressService",
+      "prewarmRemoteImagesForWorks",
+      "publicActorProfile",
+      "publicPerson",
+      "publicWork",
+      "publicWorkAvailability",
+      "rankingMissingSearchWorks",
+      "readJsonBody",
+      "requireLocalAdmin",
+      "requireTrustedFileMutation",
+      "resolveLibraryPersonByPublicId",
+      "resolveLibraryWorkByPublicId",
+      "resolveVideoFileByPublicId",
+      "searchPeople",
+      "sendJson",
+      "storedWorkCodeKey",
+      "videoProbeService",
+      "workCodeKeySetForWorks",
+      "workCoverRow",
+      "workHasLocalMarker",
+      "workInfoRow",
+      "workLocalMutationService",
+      "workRating",
+      "workRatingCount",
+      "workReleaseDate"
+    ])
+  };
+}
+
+function pick(source, keys) {
+  return Object.fromEntries(keys.map((key) => {
+    if (source[key] === undefined) throw new TypeError(`Missing FanHao dependency: ${key}`);
+    return [key, source[key]];
+  }));
+}

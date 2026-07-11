@@ -240,8 +240,10 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
       if (shortVideoEntry) {
         await import("/short-video-app.js?v=20260711-liked-count-race-106");
+      } else if (/^\/(?:$|fanhao(?:\/|$))/.test(window.location.pathname)) {
+        await import("/fanhao-app.js?v=20260712-fanhao-refactor-01");
       } else {
-        await import("/app.js?v=20260712-novel-author-102");
+        await import("/app.js?v=20260712-fanhao-refactor-01");
       }
     </script>
   </body>

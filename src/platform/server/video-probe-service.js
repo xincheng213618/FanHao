@@ -55,17 +55,27 @@ export function createVideoProbeService({
     const mediaProbe = probeCached(file) || {};
     const videoCodec = String(mediaProbe.videoCodec || "").toLowerCase();
     const audioCodec = String(mediaProbe.audioCodec || "").toLowerCase();
-    const canDirect = directVideoExts.has(file.ext) && (!videoCodec || ["h264", "avc1", "hevc", "h265", "vp8", "vp9", "av1"].includes(videoCodec));
+    const ext = String(file.ext || "").toLowerCase();
+    const probeUnavailable = !videoCodec && !audioCodec;
+    const mp4Compatible = [".mp4", ".m4v"].includes(ext)
+      && ["h264", "avc1"].includes(videoCodec)
+      && (!audioCodec || ["aac", "mp3"].includes(audioCodec));
+    const webmCompatible = ext === ".webm"
+      && ["vp8", "vp9", "av1"].includes(videoCodec)
+      && (!audioCodec || ["opus", "vorbis"].includes(audioCodec));
+    const canDirect = directVideoExts.has(ext) && (probeUnavailable || mp4Compatible || webmCompatible);
     const streamBase = options.streamBase || "/media/video";
 
     if (canDirect) {
       return {
         mode: "direct",
-        label: "直连播放",
+        label: "原生直连",
         streamUrl: `${streamBase}/${encodeURIComponent(publicVideoId)}`,
         duration: mediaProbe.duration || null,
         videoCodec,
         audioCodec,
+        width: mediaProbe.width || null,
+        height: mediaProbe.height || null,
         hasNvenc
       };
     }
@@ -83,6 +93,8 @@ export function createVideoProbeService({
       duration: mediaProbe.duration || null,
       videoCodec,
       audioCodec,
+      width: mediaProbe.width || null,
+      height: mediaProbe.height || null,
       hasNvenc
     };
   }

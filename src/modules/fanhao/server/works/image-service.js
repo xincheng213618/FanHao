@@ -1,4 +1,4 @@
-export function createVideoLibraryImageService({
+export function createWorkImageService({
   getCoreDb,
   getPersonById,
   getWorkById,

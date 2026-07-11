@@ -8,62 +8,129 @@
     <link rel="stylesheet" href="/vendor/plyr/plyr.css" />
     <style>
       body.player-page {
-        min-height: 100vh;
+        height: 100vh;
         margin: 0;
+        overflow: hidden;
         background: #0b0f0d;
         color: #eef7f2;
       }
       .player-shell-page {
-        display: grid;
-        min-height: 100vh;
-        grid-template-rows: auto 1fr;
+        height: 100vh;
       }
       .player-page-header {
-        padding: 18px 22px 14px;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-        background: rgba(10, 14, 12, 0.96);
+        position: absolute;
+        inset: 0 0 auto;
+        z-index: 8;
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 18px;
+        box-sizing: border-box;
+        padding: 16px 18px 54px;
+        border: 0;
+        background: linear-gradient(180deg, rgba(0, 0, 0, 0.82), rgba(0, 0, 0, 0.34) 58%, transparent);
+        pointer-events: none;
+        transition: opacity 180ms ease, transform 180ms ease;
       }
       .player-page-header h1 {
         margin: 0;
+        max-width: min(1100px, calc(100% - 150px));
         overflow: hidden;
-        font-size: 20px;
-        line-height: 1.35;
+        color: #fff;
+        font-size: clamp(15px, 1.25vw, 21px);
+        line-height: 1.4;
+        text-shadow: 0 2px 14px rgba(0, 0, 0, 0.82);
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      .player-sidebar-toggle {
+        display: inline-flex;
+        flex: 0 0 auto;
+        align-items: center;
+        gap: 7px;
+        min-height: 36px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 999px;
+        background: rgba(6, 10, 8, 0.62);
+        color: #eef7f2;
+        cursor: pointer;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 900;
+        padding: 7px 11px;
+        pointer-events: auto;
+        backdrop-filter: blur(12px);
+        transition: border-color 150ms ease, background 150ms ease, transform 150ms ease;
+      }
+      .player-sidebar-toggle:hover,
+      .player-sidebar-toggle:focus-visible {
+        border-color: rgba(96, 211, 170, 0.72);
+        background: rgba(19, 61, 46, 0.74);
+        outline: none;
+      }
+      .player-sidebar-toggle:active {
+        transform: scale(0.97);
+      }
+      .player-sidebar-toggle svg {
+        width: 17px;
+        height: 17px;
+        fill: none;
+        stroke: currentColor;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-width: 1.7;
+      }
+      body.player-ui-idle .player-page-header:not(:focus-within) {
+        opacity: 0;
+        transform: translateY(-8px);
+      }
       .player-page-main {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 320px;
-        gap: 18px;
-        padding: 18px 22px 22px;
+        height: 100vh;
+        grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
+        gap: 10px;
+        box-sizing: border-box;
+        padding: 8px;
+        transition: grid-template-columns 200ms ease, gap 200ms ease;
+      }
+      body.player-sidebar-collapsed .player-page-main {
+        grid-template-columns: minmax(0, 1fr) 0;
+        gap: 0;
       }
       .player-stage {
         position: relative;
         display: grid;
+        width: 100%;
+        height: calc(100vh - 16px);
         min-height: 0;
-        align-content: start;
-        gap: 12px;
+        place-items: center;
+        overflow: hidden;
+        border-radius: 10px;
+        background: #000;
       }
       .player-stage:fullscreen {
-        align-content: center;
+        width: 100vw;
+        height: 100vh;
         background: #000;
-        padding: 14px;
-      }
-      .player-stage:fullscreen video {
-        max-height: calc(100vh - 118px);
-      }
-      .player-stage.native-controls video {
-        max-height: calc(100vh - 140px);
+        border-radius: 0;
       }
       .player-stage video {
         width: 100%;
-        max-height: calc(100vh - 140px);
-        border-radius: 8px;
+        height: 100%;
+        max-height: none;
+        border-radius: 0;
         background: #000;
+        object-fit: contain;
       }
       .player-stage .plyr {
         position: relative;
-        border-radius: 8px;
+        display: block;
+        width: min(100%, var(--player-video-max-width, 100%));
+        height: auto;
+        max-height: 100%;
+        overflow: hidden;
+        border-radius: 0;
+        aspect-ratio: var(--player-video-aspect, 16 / 9);
         --plyr-color-main: #60d3aa;
         --plyr-video-background: #000;
       }
@@ -88,8 +155,11 @@
       }
       .player-stage .plyr__video-wrapper {
         position: relative;
-        max-height: calc(100vh - 140px);
+        width: 100%;
+        height: 100%;
+        max-height: none;
         overflow: hidden;
+        aspect-ratio: var(--player-video-aspect, 16 / 9) !important;
       }
       .player-stage.stream-controls .plyr__video-wrapper {
         aspect-ratio: var(--player-video-aspect, 16 / 9);
@@ -101,12 +171,6 @@
       }
       .player-stage.stream-switching .player-seek-control {
         opacity: 1 !important;
-      }
-      .player-stage.native-controls .plyr__video-wrapper {
-        max-height: calc(100vh - 140px);
-      }
-      .player-stage:fullscreen .plyr__video-wrapper {
-        max-height: calc(100vh - 118px);
       }
       .player-seek-control {
         display: grid;
@@ -229,23 +293,72 @@
         color: #fff;
       }
       .player-stage video[hidden],
-      .player-notice[hidden] {
+      .player-notice[hidden],
+      .player-stream-start[hidden] {
         display: none !important;
       }
-      .player-notice {
+      .player-stream-start {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        z-index: 7;
         display: grid;
-        min-height: 420px;
+        width: 64px;
+        height: 64px;
         place-items: center;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 8px;
+        border: 0;
+        border-radius: 50%;
+        background: rgba(96, 211, 170, 0.94);
+        color: #fff;
+        cursor: pointer;
+        transform: translate(-50%, -50%);
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.34);
+        transition: transform 150ms ease, background 150ms ease;
+      }
+      .player-stream-start:hover,
+      .player-stream-start:focus-visible {
+        background: #75e3bc;
+        outline: 2px solid rgba(255, 255, 255, 0.82);
+        outline-offset: 3px;
+        transform: translate(-50%, -50%) scale(1.06);
+      }
+      .player-stream-start svg {
+        width: 28px;
+        height: 28px;
+        fill: currentColor;
+        transform: translateX(2px);
+      }
+      .player-stage.stream-pending .plyr__control--overlaid {
+        display: none;
+      }
+      .player-notice {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        min-height: 0;
+        place-items: center;
+        border: 0;
+        border-radius: inherit;
         background: #050706;
         color: rgba(238, 247, 242, 0.72);
         font-weight: 800;
       }
       .player-side {
         display: grid;
+        height: calc(100vh - 16px);
+        min-width: 0;
         align-content: start;
         gap: 14px;
+        overflow: auto;
+        box-sizing: border-box;
+        scrollbar-color: rgba(96, 211, 170, 0.32) transparent;
+        transition: opacity 160ms ease, transform 200ms ease, visibility 200ms ease;
+      }
+      body.player-sidebar-collapsed .player-side {
+        visibility: hidden;
+        opacity: 0;
+        pointer-events: none;
+        transform: translateX(18px);
       }
       .player-panel {
         border: 1px solid rgba(255, 255, 255, 0.11);
@@ -469,14 +582,37 @@
       @media (max-width: 900px) {
         .player-page-main {
           grid-template-columns: 1fr;
-          gap: 12px;
-          padding: 12px;
+          gap: 0;
+          padding: 0;
+        }
+        body.player-sidebar-collapsed .player-page-main {
+          grid-template-columns: 1fr;
+        }
+        .player-stage {
+          height: 100vh;
+          border-radius: 0;
         }
         .player-page-header {
-          padding: 14px 12px;
+          padding: 12px 12px 48px;
         }
-        .player-stage video {
-          max-height: 58vh;
+        .player-page-header h1 {
+          max-width: calc(100% - 118px);
+        }
+        .player-side {
+          position: fixed;
+          inset: 58px 8px 8px auto;
+          z-index: 12;
+          width: min(360px, calc(100vw - 24px));
+          height: auto;
+          padding: 10px;
+          border: 1px solid rgba(255, 255, 255, 0.12);
+          border-radius: 12px;
+          background: rgba(11, 17, 14, 0.96);
+          box-shadow: -18px 0 64px rgba(0, 0, 0, 0.42);
+          backdrop-filter: blur(18px);
+        }
+        body.player-sidebar-collapsed .player-side {
+          transform: translateX(calc(100% + 18px));
         }
         .player-playback-tools,
         .player-status-row {
@@ -489,28 +625,25 @@
       }
       @media (max-width: 640px) {
         .player-page-header {
-          padding: 10px 12px;
+          padding: 10px 10px 44px;
         }
         .player-page-header h1 {
           display: -webkit-box;
           overflow: hidden;
-          font-size: 16px;
+          max-width: calc(100% - 62px);
+          font-size: 14px;
           white-space: normal;
           -webkit-box-orient: vertical;
           -webkit-line-clamp: 2;
         }
-        .player-page-main {
-          padding: 8px;
+        .player-sidebar-toggle {
+          width: 38px;
+          min-height: 38px;
+          justify-content: center;
+          padding: 0;
         }
-        .player-stage {
-          gap: 8px;
-        }
-        .player-stage video,
-        .player-stage .plyr__video-wrapper {
-          max-height: 42vh;
-        }
-        .player-stage .plyr {
-          border-radius: 6px;
+        .player-sidebar-toggle-label {
+          display: none;
         }
         .player-stage.stream-controls .plyr__controls {
           flex-wrap: wrap;
@@ -521,10 +654,14 @@
           display: none;
         }
         .player-stage.stream-controls .player-seek-control {
+          position: absolute;
+          right: 8px;
+          bottom: 8px;
+          left: 8px;
+          z-index: 6;
           order: 20;
           display: grid;
-          flex: 0 0 100%;
-          width: 100%;
+          width: auto;
           min-width: 0;
           gap: 6px;
           margin: 0;
@@ -569,13 +706,23 @@
   </head>
   <body class="player-page">
     <div class="player-shell-page">
-      <header class="player-page-header">
-        <h1 id="playerTitle">FanHao 播放</h1>
-      </header>
       <main class="player-page-main">
         <section class="player-stage">
+          <header class="player-page-header">
+            <h1 id="playerTitle">FanHao 播放</h1>
+            <button class="player-sidebar-toggle" id="toggleSidebarButton" type="button" aria-controls="playerSidebar" aria-expanded="true" title="隐藏资料与操作（I）">
+              <svg viewBox="0 0 20 20" aria-hidden="true">
+                <rect x="2.5" y="3" width="15" height="14" rx="2"></rect>
+                <path d="M13 3v14M5.5 7h4M5.5 10h4M5.5 13h4"></path>
+              </svg>
+              <span class="player-sidebar-toggle-label">隐藏资料</span>
+            </button>
+          </header>
           <div class="player-notice" id="playerNotice">正在读取作品</div>
           <video id="playerVideo" playsinline preload="metadata" hidden></video>
+          <button class="player-stream-start" id="playerStreamStart" type="button" aria-label="开始播放" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z"></path></svg>
+          </button>
           <div class="player-seek-control" id="playerSeekControl" hidden>
             <div class="player-status-row">
               <div class="player-mode-text" id="playerModeText"></div>
@@ -595,7 +742,7 @@
             </div>
           </div>
         </section>
-        <aside class="player-side">
+        <aside class="player-side" id="playerSidebar" aria-label="作品资料与操作">
           <section class="player-panel">
             <h2>视频文件</h2>
             <div id="playerFiles"></div>
@@ -620,6 +767,6 @@
       </main>
     </div>
     <script src="/vendor/plyr/plyr.min.js"></script>
-    <script type="module" src="/js/player-page.js?v=20260706-media-player-01"></script>
+    <script type="module" src="/js/player-page.js?v=20260712-native-playback-11"></script>
   </body>
 </html>

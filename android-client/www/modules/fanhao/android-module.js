@@ -1,6 +1,4 @@
-import { createDetailViews } from "./detail-views.js?v=20260710-module-registry-01";
-import { createPeopleViews } from "./people-views.js?v=20260710-module-registry-01";
-import { createWorkViews } from "./work-views.js?v=20260710-module-registry-01";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260712-fanhao-refactor-01";
 
 const ROOT_VIEWS = ["works", "rankings", "studios", "vr", "people", "favorites"];
 const CHROME_TABS = [

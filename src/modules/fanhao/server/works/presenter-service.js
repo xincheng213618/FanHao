@@ -1,4 +1,4 @@
-export function createVideoLibraryPresenterService({
+export function createWorkPresenterService({
   actorProfileRow,
   dbBoolOrNull,
   displayPersonForWork,

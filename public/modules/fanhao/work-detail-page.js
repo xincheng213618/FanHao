@@ -1,3 +1,5 @@
+import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
+
 export function createWorkDetailPage(deps) {
   const {
     addQueryParam,
@@ -19,6 +21,19 @@ export function createWorkDetailPage(deps) {
     workCoverUrl,
     workPersonDisplayName
   } = deps;
+  const previewMedia = createWorkPreviewMedia({
+    api,
+    coverRetryDelays,
+    retryCoverUrl,
+    onWorkUpdated(work, user) {
+      updateWorkSnapshot(work);
+      state.currentWork = work;
+      state.library.user = user || state.library.user;
+      renderMeta(work);
+      renderInfo(work);
+      renderWorks();
+    }
+  });
 
   async function openWork(workId, videoId = null, options = {}) {
     const cachedWork = state.works.find((work) => work.id === workId);
@@ -676,7 +691,7 @@ export function createWorkDetailPage(deps) {
 
   function renderInfo(work) {
     els.infoArea.innerHTML = "";
-    const preview = createPreviewMediaSection(work);
+    const preview = previewMedia.render(work);
     if (preview) els.infoArea.append(preview);
 
     if (hasStructuredInfo(work.infoMetadata)) {
@@ -709,201 +724,6 @@ export function createWorkDetailPage(deps) {
     wrapper.className = "info-block inline-info-block";
     els.infoArea.append(wrapper);
     loadInlineInfoContent(wrapper, primaryInfoFile(work).id);
-  }
-
-  function createPreviewMediaSection(work) {
-    const info = work.infoMetadata || work.infoSummary || {};
-    const images = uniquePreviewMediaItems([...localPreviewImageItems(work), ...remotePreviewImageItems(info.previewImages || [])]).slice(0, 12);
-    const videoUrl = cleanRemoteUrl(info.previewVideoUrl);
-    if (!images.length && !videoUrl) return null;
-
-    const section = document.createElement("section");
-    section.className = "preview-media-section";
-
-    const header = document.createElement("div");
-    header.className = "preview-media-header";
-    const heading = document.createElement("h4");
-    heading.className = "section-title";
-    heading.textContent = "预览媒体";
-    header.append(heading);
-
-    if (work.manualCoverId) {
-      const reset = document.createElement("button");
-      reset.type = "button";
-      reset.className = "text-button preview-cover-reset";
-      reset.textContent = "恢复默认封面";
-      reset.addEventListener("click", () => setManualWorkCover(work, "", reset));
-      header.append(reset);
-    }
-
-    section.append(header);
-
-    if (images.length) {
-      const grid = document.createElement("div");
-      grid.className = "preview-media-grid";
-      for (const item of images) {
-        const frame = document.createElement("div");
-        frame.className = `preview-media-item${item.imageId && item.imageId === work.manualCoverId ? " selected" : ""}`;
-
-        const link = document.createElement("a");
-        link.className = "preview-media-thumb";
-        link.href = item.url;
-        link.target = "_blank";
-        link.rel = "noreferrer";
-        const img = document.createElement("img");
-        img.loading = "lazy";
-        img.decoding = "async";
-        img.alt = "";
-        img.addEventListener("load", () => {
-          img.dataset.loaded = "1";
-        });
-        img.addEventListener("error", () => {
-          retryPreviewImage(img, item.url);
-        });
-        img.src = item.url;
-        link.append(img);
-        frame.append(link);
-
-        if (item.imageId) {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "text-button preview-cover-button";
-          if (item.imageId === work.manualCoverId) {
-            button.textContent = "当前封面";
-            button.disabled = true;
-          } else if (!work.manualCoverId && item.imageId === work.coverId) {
-            button.textContent = "默认封面";
-            button.disabled = true;
-          } else {
-            button.textContent = "设为封面";
-            button.addEventListener("click", () => setManualWorkCover(work, item.imageId, button));
-          }
-          frame.append(button);
-        }
-
-        grid.append(frame);
-      }
-      section.append(grid);
-    }
-
-    if (videoUrl) {
-      const actions = document.createElement("div");
-      actions.className = "preview-media-actions";
-      const link = document.createElement("a");
-      link.className = "text-button preview-media-link";
-      link.href = videoUrl;
-      link.target = "_blank";
-      link.rel = "noreferrer";
-      link.textContent = "打开预览视频";
-      actions.append(link);
-      section.append(actions);
-    }
-
-    return section;
-  }
-
-  async function setManualWorkCover(work, imageId, button) {
-    const originalText = button?.textContent || "";
-    if (button) {
-      button.disabled = true;
-      button.textContent = imageId ? "设置中" : "恢复中";
-    }
-    try {
-      const data = await api(`/api/works/${encodeURIComponent(work.id)}/cover`, {
-        method: "PUT",
-        body: { imageId }
-      });
-      if (data.work) {
-        updateWorkSnapshot(data.work);
-        state.currentWork = data.work;
-        state.library.user = data.user || state.library.user;
-        renderMeta(state.currentWork);
-        renderInfo(state.currentWork);
-        renderWorks();
-      }
-    } catch (error) {
-      alert(error.message);
-      if (button) {
-        button.disabled = false;
-        button.textContent = originalText;
-      }
-    }
-  }
-
-  function retryPreviewImage(img, src) {
-    if (!img?.isConnected || img.dataset.loaded === "1") return;
-    const retryCount = Number(img.dataset.retryCount || 0);
-    if (retryCount >= coverRetryDelays.length) return;
-    const delay = coverRetryDelays[Math.min(retryCount, coverRetryDelays.length - 1)];
-    img.dataset.retryCount = String(retryCount + 1);
-    window.setTimeout(() => {
-      if (!img.isConnected || img.dataset.loaded === "1") return;
-      img.src = retryCoverUrl(src, retryCount + 1);
-    }, delay);
-  }
-
-  function localPreviewImageItems(work) {
-    return [...(work.images || [])]
-      .filter((image) => image?.id)
-      .sort(comparePreviewImageFiles)
-      .map((image) => ({
-        imageId: image.id,
-        url: `/media/image/${encodeURIComponent(image.id)}`
-      }));
-  }
-
-  function comparePreviewImageFiles(a, b) {
-    return previewImageRank(a) - previewImageRank(b) || String(a.relativePath || a.name || "").localeCompare(String(b.relativePath || b.name || ""));
-  }
-
-  function previewImageRank(image) {
-    const text = `${image?.relativePath || ""} ${image?.name || ""}`.toLowerCase();
-    if (/(?:extra[-_ ]?fanart|sample|screenshot|preview|fanart)/.test(text)) return 0;
-    if (/(?:poster|cover|folder|front|thumb|thumbnail)/.test(text)) return 2;
-    return 1;
-  }
-
-  function cleanRemoteUrl(value) {
-    const text = String(value || "").trim();
-    if (!/^https?:\/\//i.test(text)) return "";
-    return text;
-  }
-
-  function cleanPreviewImageUrl(value) {
-    const text = String(value || "").trim();
-    if (/^https?:\/\//i.test(text) || /^\/media\/(?:image|remote-image)\b/i.test(text)) return text;
-    return "";
-  }
-
-  function uniquePreviewImageUrls(values) {
-    const seen = new Set();
-    const urls = [];
-    for (const value of Array.isArray(values) ? values : []) {
-      const url = cleanPreviewImageUrl(value);
-      const key = url.toLowerCase();
-      if (!url || seen.has(key)) continue;
-      seen.add(key);
-      urls.push(url);
-    }
-    return urls;
-  }
-
-  function remotePreviewImageItems(values) {
-    return uniquePreviewImageUrls(values).map((url) => ({ imageId: "", url }));
-  }
-
-  function uniquePreviewMediaItems(items) {
-    const seen = new Set();
-    const result = [];
-    for (const item of Array.isArray(items) ? items : []) {
-      const imageId = String(item?.imageId || "");
-      const url = cleanPreviewImageUrl(item?.url);
-      const key = imageId ? `image:${imageId}` : `url:${url.toLowerCase()}`;
-      if (!url || seen.has(key)) continue;
-      seen.add(key);
-      result.push({ imageId, url });
-    }
-    return result;
   }
 
   function primaryInfoFile(work) {

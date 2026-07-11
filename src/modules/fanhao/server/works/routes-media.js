@@ -1,4 +1,4 @@
-export async function routeVideoLibraryMedia(req, res, url, deps) {
+export async function routeWorksMedia(req, res, url, deps) {
   const {
     library,
     mediaResponseService,
@@ -50,14 +50,17 @@ export async function routeVideoLibraryMedia(req, res, url, deps) {
   }
 
   const videoMatch = /^\/media\/video\/([^/]+)$/.exec(url.pathname);
-  if (videoMatch && req.method === "GET") {
+  if (videoMatch && (req.method === "GET" || req.method === "HEAD")) {
     const file = resolveVideoFileByPublicId(videoMatch[1]);
     if (!file || file.type !== "video") {
       notFound(res);
       return true;
     }
 
-    mediaStreamService.serveVideo(req, res, file);
+    mediaStreamService.serveVideo(req, res, {
+      ...file,
+      cacheControl: "private, max-age=0, must-revalidate"
+    });
     return true;
   }
 
