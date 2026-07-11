@@ -10,6 +10,9 @@ export function createImageLibraryService({
   photoSetRootStatuses,
   photoSetService
 }) {
+  let cachedPhotoCatalog = null;
+  let imageSearchDocumentCache = new WeakMap();
+
   function facetCounts(items, fieldName) {
     const counts = new Map();
     for (const item of items) {
@@ -165,30 +168,42 @@ export function createImageLibraryService({
     const limit = clampInteger(url.searchParams.get("limit"), 48, 1, maxItemLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const query = String(url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
-    const sort = String(url.searchParams.get("sort") || "updated").trim();
+    const requestedSort = String(url.searchParams.get("sort") || "updated").trim();
+    const sort = query && ["photo", "manga"].includes(mode) ? "relevance" : requestedSort;
     const photoView = normalizePhotoLibraryView(url.searchParams.get("photoView") || url.searchParams.get("view"));
     const tvView = normalizeTvLibraryView(url.searchParams.get("tvView") || url.searchParams.get("view"));
     const category = String(url.searchParams.get("category") || "all").trim() || "all";
+    const subCategory = String(url.searchParams.get("subCategory") || "all").trim() || "all";
     const person = String(url.searchParams.get("person") || "all").trim() || "all";
     const collection = String(url.searchParams.get("collection") || "").trim();
     const seriesKey = String(url.searchParams.get("seriesKey") || "").trim();
     const index = getImageLibraryIndex(options);
-    const tvMetadataByKey = metadataService.tvSeriesRowsMap();
-    const movieMetadataById = metadataService.movieRowsMap();
-    const mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById));
+    let mediaItems = [];
+    if (!["photo", "manga"].includes(mode)) {
+      const tvMetadataByKey = metadataService.tvSeriesRowsMap();
+      const movieMetadataById = metadataService.movieRowsMap();
+      mediaItems = (Array.isArray(index.mediaItems) ? index.mediaItems : []).map((item) => publicGalleryMediaItem(item, tvMetadataByKey, movieMetadataById));
+    }
 
     let source = [];
     let facetsSource = [];
+    let photoSubCategoryFacetsSource = [];
+    let photoFacets = null;
     let collectionSummary = null;
     let seriesSummary = null;
     if (mode === "photo") {
-      const photoSets = Array.isArray(index.photoSets) ? index.photoSets : [];
-      const filteredPhotoSets = filterPhotoSetsForList(photoSets, { category, person, collection });
-      facetsSource = collection ? filteredPhotoSets : filterPhotoSetsForList(photoSets, { collection: "", category: "all", person: "all" });
-      if (collection) collectionSummary = photoCollectionSummary(filteredPhotoSets, collection);
+      const catalog = preparedPhotoCatalog(index);
+      const filteredPhotoSets = filterPhotoSetsForList(catalog.items, { category, subCategory, person, collection });
+      photoFacets = preparedPhotoFacets(catalog, category);
+      if (collection) {
+        const collectionItems = filterPhotoSetsForList(catalog.items, { collection, category: "all", subCategory: "all", person: "all" });
+        collectionSummary = photoCollectionSummary(collectionItems, collection);
+      }
       source = photoView === "collections" && !collection
-        ? photoCollectionGroups(filteredPhotoSets).map(publicPhotoCollectionListItem)
-        : filteredPhotoSets.map((item) => publicImageLibraryListItem(item, "photo"));
+        ? photoFiltersAreDefault({ category, subCategory, person })
+          ? catalog.collections
+          : photoCollectionGroups(filteredPhotoSets).map(publicPhotoCollectionListItem)
+        : filteredPhotoSets;
     } else if (mode === "manga") {
       source = mangaService.cacheDirs().map((cacheDir) => publicImageLibraryListItem(mangaService.publicSummary(cacheDir), "manga"));
     } else if (mode === "media") {
@@ -224,9 +239,17 @@ export function createImageLibraryService({
       }
     }
 
-    const filtered = filterImageLibraryItems(source, query);
-    const sorted = sortImageLibraryItems(filtered, sort);
-    const items = sorted.slice(offset, offset + limit);
+    const searchSpec = createImageSearchQuery(query);
+    const searchResults = searchSpec ? searchImageLibraryItems(source, searchSpec) : null;
+    const filtered = searchResults ? searchResults.map((result) => result.item) : source;
+    const sorted = sort === "relevance" && searchResults
+      ? [...searchResults].sort(compareImageSearchResults).map((result) => result.item)
+      : sortImageLibraryItems(filtered, sort);
+    const searchResultsByItem = searchResults ? new Map(searchResults.map((result) => [result.item, result])) : null;
+    const items = sorted.slice(offset, offset + limit).map((item) => {
+      const match = searchResultsByItem?.get(item);
+      return match ? { ...item, matchFields: match.matchFields } : item;
+    });
     return {
       schemaVersion: 1,
       mode,
@@ -235,12 +258,14 @@ export function createImageLibraryService({
       photoView: mode === "photo" ? (collection ? "albums" : photoView) : "",
       tvView: mode === "tv" ? (seriesKey || tvView === "episodes" ? "episodes" : "series") : mode === "media" && seriesKey ? "episodes" : "",
       category: ["photo", "western", "movie", "tv", "media"].includes(mode) ? category : "",
+      subCategory: mode === "photo" ? subCategory : "",
       person: mode === "photo" ? person : "",
       collection: mode === "photo" ? collection : "",
       collectionSummary,
+      searchTerms: searchSpec?.terms || [],
       seriesKey: ["tv", "media"].includes(mode) ? seriesKey : "",
       seriesSummary,
-      facets: mode === "photo" ? photoLibraryFacets(facetsSource) : mediaLibraryFacets(facetsSource),
+      facets: mode === "photo" ? photoFacets || photoLibraryFacets(facetsSource, photoSubCategoryFacetsSource) : mediaLibraryFacets(facetsSource),
       count: items.length,
       total: sorted.length,
       limit,
@@ -440,52 +465,161 @@ export function createImageLibraryService({
     return "/";
   }
 
-  function filterImageLibraryItems(items, query) {
-    const needle = query.toLowerCase();
-    if (!needle) return items;
-    return items.filter((item) =>
-      [
-        item.title,
-        item.category,
-        item.subCategory,
-        item.personName,
-        item.seriesName,
-        item.rootLabel,
-        item.ext,
-        item.movieMetadata?.title,
-        item.movieMetadata?.originalTitle,
-        item.movieMetadata?.imdbId,
-        ...(item.movieMetadata?.aliases || []),
-        ...(item.movieMetadata?.directors || []),
-        ...(item.movieMetadata?.writers || []),
-        ...(item.movieMetadata?.actors || []),
-        ...(item.movieMetadata?.genres || []),
-        item.tvSeries?.title,
-        item.tvSeries?.originalTitle,
-        item.tvSeries?.imdbId,
-        ...(item.tvSeries?.aliases || []),
-        ...(item.tvSeries?.directors || []),
-        ...(item.tvSeries?.writers || []),
-        ...(item.tvSeries?.actors || []),
-        ...(item.tvSeries?.genres || [])
-      ]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(needle))
-    );
+  function preparedPhotoCatalog(index) {
+    if (cachedPhotoCatalog?.index === index) return cachedPhotoCatalog;
+    imageSearchDocumentCache = new WeakMap();
+    const rawItems = Array.isArray(index?.photoSets) ? index.photoSets : [];
+    const items = rawItems.map((item) => publicImageLibraryListItem(item, "photo"));
+    cachedPhotoCatalog = {
+      index,
+      items,
+      collections: photoCollectionGroups(items).map(publicPhotoCollectionListItem),
+      categories: facetCounts(items, "category"),
+      people: facetCounts(items, "personName").slice(0, 20),
+      subCategories: new Map()
+    };
+    return cachedPhotoCatalog;
+  }
+
+  function preparedPhotoFacets(catalog, category = "all") {
+    const key = category && category !== "all" ? category : "all";
+    let subCategories = catalog.subCategories.get(key);
+    if (!subCategories) {
+      const source = key === "all" ? catalog.items : catalog.items.filter((item) => item.category === key);
+      subCategories = facetCounts(source, "subCategory").slice(0, 500);
+      catalog.subCategories.set(key, subCategories);
+    }
+    return {
+      categories: catalog.categories,
+      subCategories,
+      people: catalog.people
+    };
+  }
+
+  function photoFiltersAreDefault(filters = {}) {
+    return (!filters.category || filters.category === "all")
+      && (!filters.subCategory || filters.subCategory === "all")
+      && (!filters.person || filters.person === "all");
+  }
+
+  function normalizeImageSearchValue(value) {
+    return String(value || "")
+      .normalize("NFKC")
+      .toLowerCase()
+      .replace(/[\u200B-\u200D\uFEFF]/g, "")
+      .replace(/[\p{P}\p{S}\s]+/gu, " ")
+      .trim();
+  }
+
+  function compactImageSearchValue(value) {
+    return normalizeImageSearchValue(value).replace(/\s+/g, "");
+  }
+
+  function createImageSearchQuery(query) {
+    const raw = String(query || "").trim();
+    const normalized = normalizeImageSearchValue(query);
+    if (!normalized) return null;
+    const compact = compactImageSearchValue(normalized);
+    const terms = /\s/u.test(raw)
+      ? [...new Set(normalized.split(/\s+/).map(compactImageSearchValue).filter(Boolean))]
+      : [compact];
+    return {
+      normalized,
+      compact,
+      terms
+    };
+  }
+
+  function imageSearchDocument(item) {
+    const cached = imageSearchDocumentCache.get(item);
+    if (cached) return cached;
+    const movieMetadata = item?.movieMetadata || {};
+    const tvSeries = item?.tvSeries || {};
+    const fields = {
+      title: normalizeImageSearchValue(item?.title),
+      person: normalizeImageSearchValue(item?.personName),
+      collection: normalizeImageSearchValue(item?.collectionTitle),
+      category: normalizeImageSearchValue(item?.category),
+      folder: normalizeImageSearchValue(item?.subCategory),
+      metadata: normalizeImageSearchValue([
+        item?.seriesName,
+        item?.rootLabel,
+        item?.ext,
+        movieMetadata.title,
+        movieMetadata.originalTitle,
+        movieMetadata.imdbId,
+        ...(movieMetadata.aliases || []),
+        ...(movieMetadata.directors || []),
+        ...(movieMetadata.writers || []),
+        ...(movieMetadata.actors || []),
+        ...(movieMetadata.genres || []),
+        tvSeries.title,
+        tvSeries.originalTitle,
+        tvSeries.imdbId,
+        ...(tvSeries.aliases || []),
+        ...(tvSeries.directors || []),
+        ...(tvSeries.writers || []),
+        ...(tvSeries.actors || []),
+        ...(tvSeries.genres || [])
+      ].filter(Boolean).join(" "))
+    };
+    const compactFields = Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value.replace(/\s+/g, "")]));
+    const document = { fields, compactFields };
+    imageSearchDocumentCache.set(item, document);
+    return document;
+  }
+
+  function searchImageLibraryItems(items, searchSpec) {
+    const results = [];
+    for (const item of items) {
+      const document = imageSearchDocument(item);
+      const entries = Object.entries(document.compactFields);
+      if (!searchSpec.terms.every((term) => entries.some(([, value]) => value.includes(term)))) continue;
+
+      const matchFields = entries.filter(([, value]) => searchSpec.terms.some((term) => value.includes(term))).map(([field]) => field);
+      const { compactFields } = document;
+      let score = 0;
+      if (compactFields.title === searchSpec.compact) score += 1800;
+      else if (compactFields.title.startsWith(searchSpec.compact)) score += 900;
+      else if (compactFields.title.includes(searchSpec.compact)) score += 420;
+      if (compactFields.person === searchSpec.compact) score += 1200;
+      else if (compactFields.person.includes(searchSpec.compact)) score += 360;
+      if (compactFields.collection === searchSpec.compact) score += 1000;
+      else if (compactFields.collection.includes(searchSpec.compact)) score += 300;
+      if (compactFields.category === searchSpec.compact || compactFields.folder === searchSpec.compact) score += 420;
+      for (const term of searchSpec.terms) {
+        if (compactFields.title.includes(term)) score += 140;
+        if (compactFields.person.includes(term)) score += 110;
+        if (compactFields.collection.includes(term)) score += 90;
+        if (compactFields.category.includes(term) || compactFields.folder.includes(term)) score += 50;
+        if (compactFields.metadata.includes(term)) score += 20;
+      }
+      results.push({ item, matchFields, score });
+    }
+    return results;
+  }
+
+  function compareImageSearchResults(a, b) {
+    const scoreDiff = Number(b.score || 0) - Number(a.score || 0);
+    if (scoreDiff) return scoreDiff;
+    const timeDiff = new Date(b.item?.updatedAt || 0).getTime() - new Date(a.item?.updatedAt || 0).getTime();
+    return timeDiff || String(a.item?.title || "").localeCompare(String(b.item?.title || ""), undefined, { numeric: true, sensitivity: "base" });
   }
 
   function filterPhotoSetsForList(items, filters = {}) {
     return (items || []).filter((item) => {
       if (filters.category && filters.category !== "all" && item.category !== filters.category) return false;
+      if (filters.subCategory && filters.subCategory !== "all" && item.subCategory !== filters.subCategory) return false;
       if (filters.person && filters.person !== "all" && item.personName !== filters.person) return false;
       if (filters.collection && photoCollectionValue(item) !== filters.collection) return false;
       return true;
     });
   }
 
-  function photoLibraryFacets(items = []) {
+  function photoLibraryFacets(items = [], subCategoryItems = items) {
     return {
       categories: facetCounts(items, "category"),
+      subCategories: facetCounts(subCategoryItems, "subCategory").slice(0, 500),
       people: facetCounts(items, "personName").slice(0, 20)
     };
   }
@@ -506,6 +640,9 @@ export function createImageLibraryService({
   }
 
   function photoCollectionDir(item) {
+    const collectionId = String(item?.collectionId || "");
+    const separatorIndex = collectionId.indexOf("|");
+    if (separatorIndex >= 0) return collectionId.slice(separatorIndex + 1) || photoCollectionRootValue;
     const relativePath = String(item?.relativePath || "").replace(/[\\/]+/g, "/");
     const parts = relativePath.split("/").filter(Boolean);
     if (parts.length <= 1) return photoCollectionRootValue;
@@ -513,6 +650,7 @@ export function createImageLibraryService({
   }
 
   function photoCollectionValue(item) {
+    if (item?.collectionId) return String(item.collectionId);
     return [item?.sourceRoot || item?.rootLabel || "", photoCollectionDir(item)].join("|");
   }
 
@@ -533,7 +671,7 @@ export function createImageLibraryService({
       if (!group) {
         group = {
           value,
-          title: photoCollectionDisplayName(dir),
+          title: item.collectionTitle || photoCollectionDisplayName(dir),
           dir,
           rootLabel: item.rootLabel || "",
           count: 0,
@@ -570,7 +708,7 @@ export function createImageLibraryService({
     const first = items[0] || {};
     return {
       id: collectionValue,
-      title: photoCollectionDisplayName(photoCollectionDir(first)),
+      title: first.collectionTitle || photoCollectionDisplayName(photoCollectionDir(first)),
       rootLabel: first.rootLabel || "",
       count: items.length,
       size: items.reduce((sum, item) => sum + Number(item.size || 0), 0),
@@ -585,6 +723,9 @@ export function createImageLibraryService({
 
   function sortImageLibraryItems(items, sort) {
     const list = [...items];
+    if (sort === "count") {
+      return list.sort((a, b) => Number(b.albumCount || 0) - Number(a.albumCount || 0) || Number(b.size || 0) - Number(a.size || 0) || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
+    }
     if (sort === "title") {
       return list.sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
     }

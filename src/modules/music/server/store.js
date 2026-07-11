@@ -3,16 +3,30 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
+import {
+  MUSIC_LANGUAGES,
+  buildArtistLanguageConsensus,
+  musicLanguageForArtist,
+  musicLanguageFromPath,
+  normalizeMusicLanguage
+} from "./language.js";
+import {
+  buildMusicIdentityKnowledge,
+  isUnknownMusicArtist,
+  resolveMusicTrackIdentity
+} from "./identity.js";
 
-const AUDIO_EXTS = new Set([".flac", ".mp3", ".m4a", ".aac", ".wav", ".ogg", ".opus"]);
+const AUDIO_EXTS = new Set([".flac", ".mp3", ".m4a", ".aac", ".wav", ".aiff", ".ape", ".dff", ".dsf", ".ogg", ".opus"]);
 const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
-const DEFAULT_LIMIT = 600;
+const DEFAULT_LIMIT = 120;
+const MAX_PAGE_LIMIT = 300;
 const MAX_LIMIT = 2000;
 const MAX_LYRIC_BYTES = 1024 * 1024;
 const MAX_INTRO_BYTES = 512 * 1024;
 const MAX_M3U_BYTES = 2 * 1024 * 1024;
 const KUWO_UTF16LE_PREFIX = Buffer.from([0x77, 0x91, 0x11, 0x62, 0xf3, 0x97, 0x50, 0x4e]);
 const REDISCOVER_DAYS = 30;
+const MUSIC_FACET_CACHE = new WeakMap();
 const MUSIC_GENRE_ALIASES = new Map([
   ["c-pop", "华语流行"],
   ["cpop", "华语流行"],
@@ -140,6 +154,8 @@ export function createMusicStore(options = {}) {
   if (!dbPath) throw new Error("music dbPath is required");
 
   let db = null;
+  let summaryCache = null;
+  let summaryCachedAt = 0;
 
   function database() {
     if (!db) {
@@ -156,25 +172,28 @@ export function createMusicStore(options = {}) {
       db.close();
     } catch {}
     db = null;
+    summaryCache = null;
+    summaryCachedAt = 0;
   }
 
   function summary() {
+    if (summaryCache && Date.now() - summaryCachedAt < 5000) return summaryCache;
     const database = dbOrOpen();
     const totals =
       database
         .prepare(
           `
           SELECT
-            COUNT(*) AS tracks,
-            COUNT(DISTINCT artist_id) AS artists,
-            COUNT(DISTINCT album_id) AS albums,
+            COALESCE(SUM(track_count), 0) AS tracks,
+            COUNT(*) AS artists,
             COALESCE(SUM(size_bytes), 0) AS bytes,
             COALESCE(SUM(duration_ms), 0) AS durationMs
-          FROM music_tracks
+          FROM music_artists
           WHERE status = 'ok'
         `
         )
         .get() || {};
+    const albumTotal = Number(database.prepare("SELECT COUNT(*) AS count FROM music_albums").get()?.count || 0);
     const listening =
       database
         .prepare(
@@ -183,8 +202,7 @@ export function createMusicStore(options = {}) {
             COUNT(*) AS listenedTracks,
             COALESCE(SUM(s.play_count), 0) AS plays
           FROM music_track_state s
-          JOIN music_tracks t ON t.id = s.track_id
-          WHERE t.status = 'ok' AND COALESCE(s.play_count, 0) > 0
+          WHERE COALESCE(s.play_count, 0) > 0
         `
         )
         .get() || {};
@@ -195,10 +213,10 @@ export function createMusicStore(options = {}) {
                s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_track_state s
-        JOIN music_tracks t ON t.id = s.track_id
+        CROSS JOIN music_tracks t ON t.id = s.track_id
         LEFT JOIN music_artists a ON a.id = t.artist_id
         LEFT JOIN music_albums al ON al.id = t.album_id
-        WHERE t.status = 'ok' AND COALESCE(s.last_played_at, '') <> ''
+        WHERE COALESCE(s.last_played_at, '') <> ''
         ORDER BY s.last_played_at DESC
         LIMIT 8
       `
@@ -212,32 +230,35 @@ export function createMusicStore(options = {}) {
                s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_track_state s
-        JOIN music_tracks t ON t.id = s.track_id
+        CROSS JOIN music_tracks t ON t.id = s.track_id
         LEFT JOIN music_artists a ON a.id = t.artist_id
         LEFT JOIN music_albums al ON al.id = t.album_id
-        WHERE t.status = 'ok' AND COALESCE(s.play_count, 0) > 0
+        WHERE COALESCE(s.play_count, 0) > 0
         ORDER BY COALESCE(s.play_count, 0) DESC, COALESCE(s.last_played_at, '') DESC, t.title COLLATE NOCASE ASC
         LIMIT 8
       `
       )
       .all()
       .map(publicTrack);
-    return {
+    summaryCache = {
       dbPath,
       roots: roots.map(rootStatus),
       scannedAt: metaValue(database, "scanned_at"),
       totals: {
         tracks: Number(totals.tracks || 0),
         artists: Number(totals.artists || 0),
-        albums: Number(totals.albums || 0),
+        albums: albumTotal,
         bytes: Number(totals.bytes || 0),
         durationMs: Number(totals.durationMs || 0),
         listenedTracks: Number(listening.listenedTracks || 0),
         plays: Number(listening.plays || 0)
       },
+      languages: languageFacet(database),
       recent,
       topPlayed
     };
+    summaryCachedAt = Date.now();
+    return summaryCache;
   }
 
   function facets() {
@@ -246,7 +267,8 @@ export function createMusicStore(options = {}) {
       summary: summary(),
       artists: artistFacet(database),
       albums: albumFacet(database),
-      genres: genreFacet(database)
+      genres: genreFacet(database),
+      languages: languageFacet(database)
     };
   }
 
@@ -373,8 +395,15 @@ export function createMusicStore(options = {}) {
     const params = queryOrUrl?.searchParams;
     const query = String(params ? params.get("q") || params.get("search") || "" : queryOrUrl || "").trim();
     if (!query) return { query, tracks: [], artists: [], albums: [] };
-    const like = `%${escapeLike(query)}%`;
     const database = dbOrOpen();
+    const searchKind = musicSearchIndexKind(query);
+    const indexed = Boolean(searchKind);
+    const like = `%${escapeLike(query)}%`;
+    const trackSearch = indexed
+      ? musicSearchIndexCondition(searchKind)
+      : `(t.title LIKE ? ESCAPE '\\' OR t.display_artist LIKE ? ESCAPE '\\' OR t.album_title LIKE ? ESCAPE '\\' OR t.file_name LIKE ? ESCAPE '\\')`;
+    const trackArgs = indexed ? [musicSearchIndexTerm(searchKind, query)] : [like, like, like, like];
+    const rank = indexed ? musicSearchIndexRank(searchKind, query) : searchRankSql(query);
     const tracks = database
       .prepare(
         `
@@ -382,20 +411,16 @@ export function createMusicStore(options = {}) {
                s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_tracks t
+        ${musicSearchIndexJoin(searchKind)}
         LEFT JOIN music_artists a ON a.id = t.artist_id
         LEFT JOIN music_albums al ON al.id = t.album_id
         LEFT JOIN music_track_state s ON s.track_id = t.id
-        WHERE t.status = 'ok' AND (
-          t.title LIKE ? ESCAPE '\\' OR
-          t.display_artist LIKE ? ESCAPE '\\' OR
-          t.album_title LIKE ? ESCAPE '\\' OR
-          t.file_name LIKE ? ESCAPE '\\'
-        )
-        ORDER BY COALESCE(s.play_count, 0) DESC, t.title COLLATE NOCASE ASC
+        WHERE t.status = 'ok' AND ${trackSearch}
+        ORDER BY ${rank.sql}
         LIMIT 8
       `
       )
-      .all(like, like, like, like)
+      .all(...trackArgs, ...rank.args)
       .map(publicTrack);
     const artists = database
       .prepare(
@@ -431,28 +456,56 @@ export function createMusicStore(options = {}) {
   function listArtists(urlOrOptions = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const query = String(params.get("q") || params.get("search") || "").trim();
-    const limit = clampInt(params.get("limit"), 200, 1, MAX_LIMIT);
+    const language = normalizeMusicLanguage(params.get("language") || params.get("lang"));
+    const sort = String(params.get("sort") || "count").trim().toLowerCase() === "name" ? "name" : "count";
+    const limit = clampInt(params.get("limit"), 80, 1, MAX_PAGE_LIMIT);
+    const offset = clampInt(params.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const conditions = ["track_count > 0"];
     const args = [];
+    if (language) {
+      conditions.push("language = ?");
+      args.push(language);
+    }
     if (query) {
       conditions.push("name LIKE ? ESCAPE '\\'");
       args.push(`%${escapeLike(query)}%`);
     }
-    const rows = dbOrOpen()
-      .prepare(
+    const database = dbOrOpen();
+    let total;
+    let rows;
+    if (sort === "name") {
+      const buildSortedRows = () => database
+          .prepare(`SELECT * FROM music_artists WHERE ${conditions.join(" AND ")}`)
+          .all(...args)
+          .sort((left, right) => artistNameForSort(left.name).localeCompare(artistNameForSort(right.name), "zh-CN", { numeric: true, sensitivity: "base" }));
+      const sortedRows = query
+        ? buildSortedRows()
+        : cachedMusicFacet(database, `artist-browser:${language || "all"}:name`, buildSortedRows);
+      total = sortedRows.length;
+      rows = sortedRows.slice(offset, offset + limit);
+    } else {
+      total = Number(database.prepare(`SELECT COUNT(*) AS count FROM music_artists WHERE ${conditions.join(" AND ")}`).get(...args)?.count || 0);
+      rows = database
+        .prepare(
+          `
+          SELECT * FROM music_artists
+          WHERE ${conditions.join(" AND ")}
+          ORDER BY track_count DESC, name COLLATE NOCASE ASC
+          LIMIT ? OFFSET ?
         `
-        SELECT *
-        FROM music_artists
-        WHERE ${conditions.join(" AND ")}
-        ORDER BY track_count DESC, name COLLATE NOCASE
-        LIMIT ?
-      `
-      )
-      .all(...args, limit);
+        )
+        .all(...args, limit, offset);
+    }
     return {
       artists: rows.map(publicArtist),
-      total: rows.length,
+      total,
+      limit,
+      offset,
+      hasMore: offset + rows.length < total,
       query,
+      language,
+      sort,
+      languages: languageFacet(database),
       summary: summary()
     };
   }
@@ -460,7 +513,8 @@ export function createMusicStore(options = {}) {
   function listAlbums(urlOrOptions = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const filter = catalogFilter(params);
-    const limit = clampInt(params.get("limit"), 400, 1, MAX_LIMIT);
+    const limit = clampInt(params.get("limit"), 80, 1, MAX_PAGE_LIMIT);
+    const offset = clampInt(params.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const sort = normalizeAlbumSort(params.get("sort"));
     const where = filter.albumWhere ? `WHERE ${filter.albumWhere}` : "";
     const order = {
@@ -469,7 +523,18 @@ export function createMusicStore(options = {}) {
       tracks: "al.track_count DESC, al.title COLLATE NOCASE ASC",
       updated: "al.updated_at DESC, al.title COLLATE NOCASE ASC"
     }[sort] || "al.updated_at DESC, al.title COLLATE NOCASE ASC";
-    const rows = dbOrOpen()
+    const database = dbOrOpen();
+    const total = Number(database
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM music_albums al
+        LEFT JOIN music_artists a ON a.id = al.artist_id
+        ${where}
+      `
+      )
+      .get(...filter.albumArgs)?.count || 0);
+    const rows = database
       .prepare(
         `
         SELECT al.*, a.name AS artist_name
@@ -477,17 +542,22 @@ export function createMusicStore(options = {}) {
         LEFT JOIN music_artists a ON a.id = al.artist_id
         ${where}
         ORDER BY ${order}
-        LIMIT ?
+        LIMIT ? OFFSET ?
       `
       )
-      .all(...filter.albumArgs, limit);
+      .all(...filter.albumArgs, limit, offset);
     return {
       albums: rows.map(publicAlbum),
-      total: rows.length,
+      total,
+      limit,
+      offset,
+      hasMore: offset + rows.length < total,
       query: filter.q,
       artistId: filter.artistId,
       genre: filter.genre,
+      language: filter.language,
       sort,
+      languages: languageFacet(database),
       summary: summary()
     };
   }
@@ -497,12 +567,19 @@ export function createMusicStore(options = {}) {
     const filter = catalogFilter(params);
     const smartMix = findSmartMix(filter.smartId);
     const sort = normalizeTrackSort(params.get("sort"));
-    const limit = clampInt(params.get("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
+    const limit = clampInt(params.get("limit"), DEFAULT_LIMIT, 1, MAX_PAGE_LIMIT);
     const offset = clampInt(params.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const where = filter.trackWhere ? `WHERE ${filter.trackWhere}` : "";
-    const order = smartMix ? smartMix.order : trackOrderSql(sort);
+    const rank = filter.q && !smartMix && !params.has("sort")
+      ? (filter.searchKind ? musicSearchIndexRank(filter.searchKind, filter.q) : searchRankSql(filter.q))
+      : { sql: "", args: [] };
+    const order = smartMix ? smartMix.order : rank.sql || trackOrderSql(sort);
     const database = dbOrOpen();
-    const total = database.prepare(`SELECT COUNT(*) AS count FROM music_tracks t LEFT JOIN music_track_state s ON s.track_id = t.id ${where}`).get(...filter.trackArgs)?.count || 0;
+    const stateJoin = filter.needsState ? "LEFT JOIN music_track_state s ON s.track_id = t.id" : "";
+    const searchJoin = musicSearchIndexJoin(filter.searchKind);
+    const total = canUseShortVocabularyCount(filter)
+      ? musicShortSearchDocumentCount(database, filter.q)
+      : database.prepare(`SELECT COUNT(*) AS count FROM music_tracks t ${searchJoin} ${stateJoin} ${where}`).get(...filter.trackArgs)?.count || 0;
     const rows = database
       .prepare(
         `
@@ -510,6 +587,7 @@ export function createMusicStore(options = {}) {
                s.favorite, s.rating, s.position_ms, s.duration_ms AS state_duration_ms,
                s.play_count, s.last_played_at
         FROM music_tracks t
+        ${searchJoin}
         LEFT JOIN music_artists a ON a.id = t.artist_id
         LEFT JOIN music_albums al ON al.id = t.album_id
         LEFT JOIN music_track_state s ON s.track_id = t.id
@@ -518,7 +596,7 @@ export function createMusicStore(options = {}) {
         LIMIT ? OFFSET ?
       `
       )
-      .all(...filter.trackArgs, limit, offset);
+      .all(...filter.trackArgs, ...rank.args, limit, offset);
     return {
       tracks: rows.map(publicTrack),
       total: Number(total || 0),
@@ -529,13 +607,16 @@ export function createMusicStore(options = {}) {
       artistId: filter.artistId,
       albumId: filter.albumId,
       genre: filter.genre,
+      language: filter.language,
       favorite: filter.favorite,
       smartId: filter.smartId,
       smartPlaylist: smartMix ? publicSmartPlaylist(smartMix, total) : null,
       sort,
+      relevance: Boolean(rank.sql),
       summary: summary(),
-      artists: artistFacet(database),
-      albums: albumFacet(database, filter.artistId, filter.genre),
+      languages: languageFacet(database),
+      artists: artistFacet(database, filter.language, filter.artistId),
+      albums: albumFacet(database, filter.artistId, filter.genre, filter.language, filter.albumId),
       genres: genreFacet(database, filter.artistId)
     };
   }
@@ -974,7 +1055,11 @@ export function createMusicStore(options = {}) {
     if (!scanRoots.length) throw httpError(400, "没有配置音乐目录");
     const records = scanMusicRoots(scanRoots, { ffprobePath, limit });
     const result = scanSummary(records, scanRoots, dryRun);
-    if (!dryRun) writeScanRecords(dbOrOpen(), records, scanRoots, result.scannedAt);
+    if (!dryRun) {
+      writeScanRecords(dbOrOpen(), records, scanRoots, result.scannedAt);
+      summaryCache = null;
+      summaryCachedAt = 0;
+    }
     return result;
   }
 
@@ -1028,6 +1113,7 @@ function ensureSchema(db) {
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       sort_name TEXT,
+      language TEXT NOT NULL DEFAULT '其他',
       source_root TEXT NOT NULL,
       source_path TEXT NOT NULL,
       relative_path TEXT NOT NULL,
@@ -1069,6 +1155,7 @@ function ensureSchema(db) {
       track_no INTEGER,
       disc_no INTEGER,
       genre TEXT,
+      language TEXT NOT NULL DEFAULT '其他',
       source_root TEXT NOT NULL,
       source_path TEXT NOT NULL UNIQUE,
       relative_path TEXT NOT NULL,
@@ -1131,18 +1218,66 @@ function ensureSchema(db) {
       lyrics,
       tokenize='trigram'
     );
+    CREATE VIRTUAL TABLE IF NOT EXISTS music_search_short USING fts5(
+      track_id UNINDEXED,
+      title,
+      artist,
+      album,
+      genre,
+      file_name,
+      tokenize='unicode61 remove_diacritics 0'
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS music_search_short_vocab USING fts5vocab(
+      music_search_short,
+      'row'
+    );
   `);
   ensureColumn(db, "music_tracks", "genre", "TEXT");
+  ensureColumn(db, "music_tracks", "language", "TEXT NOT NULL DEFAULT '其他'");
+  ensureColumn(db, "music_artists", "language", "TEXT NOT NULL DEFAULT '其他'");
   ensureColumn(db, "music_track_state", "rating", "INTEGER DEFAULT 0");
   db.exec("CREATE INDEX IF NOT EXISTS idx_music_tracks_genre ON music_tracks(genre);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_music_tracks_language ON music_tracks(language, artist_id, album_id);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_music_artists_language ON music_artists(language, track_count DESC, name);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_music_tracks_album_sort ON music_tracks(status, album_title COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_music_tracks_language_album_sort ON music_tracks(language, status, album_title COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_music_tracks_artist_sort ON music_tracks(status, display_artist COLLATE NOCASE, album_title COLLATE NOCASE, track_no, title COLLATE NOCASE);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_music_tracks_title_sort ON music_tracks(status, title COLLATE NOCASE, display_artist COLLATE NOCASE);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_music_albums_track_count ON music_albums(track_count DESC, title COLLATE NOCASE);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_music_artists_track_count ON music_artists(track_count DESC, name COLLATE NOCASE);");
   db.exec("CREATE INDEX IF NOT EXISTS idx_music_track_state_rating ON music_track_state(rating, updated_at);");
   backfillMissingTrackGenres(db);
+  backfillMusicLanguages(db);
+  ensureMusicShortSearchIndex(db);
 }
 
 function ensureColumn(db, tableName, columnName, definition) {
   const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
   if (columns.some((column) => column.name === columnName)) return;
   db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition};`);
+}
+
+function ensureMusicShortSearchIndex(db) {
+  const trackCount = Number(db.prepare("SELECT COUNT(*) AS count FROM music_tracks WHERE status = 'ok'").get()?.count || 0);
+  const indexedCount = Number(db.prepare("SELECT COUNT(*) AS count FROM music_search_short").get()?.count || 0);
+  if (trackCount === indexedCount) return;
+  const rows = db
+    .prepare("SELECT id, title, display_artist, album_title, genre, file_name FROM music_tracks WHERE status = 'ok'")
+    .all();
+  const insert = db.prepare(`
+    INSERT INTO music_search_short (track_id, title, artist, album, genre, file_name)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  db.exec("SAVEPOINT rebuild_music_search_short");
+  try {
+    db.prepare("DELETE FROM music_search_short").run();
+    for (const row of rows) insertMusicShortSearchRow(insert, row);
+    db.exec("RELEASE SAVEPOINT rebuild_music_search_short");
+  } catch (error) {
+    db.exec("ROLLBACK TO SAVEPOINT rebuild_music_search_short");
+    db.exec("RELEASE SAVEPOINT rebuild_music_search_short");
+    throw error;
+  }
 }
 
 function backfillMissingTrackGenres(db) {
@@ -1179,9 +1314,103 @@ function backfillMissingTrackGenres(db) {
   }
 }
 
+function backfillMusicLanguages(db) {
+  if (metaValue(db, "language_backfilled_v1") === "1") return;
+  const tracks = db
+    .prepare("SELECT id, relative_path FROM music_tracks")
+    .all();
+  if (tracks.length) {
+    const updateTrack = db.prepare("UPDATE music_tracks SET language = ? WHERE id = ?");
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of tracks) updateTrack.run(musicLanguageFromPath(row.relative_path), row.id);
+      db.exec("COMMIT");
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+  }
+  db.exec(`
+    UPDATE music_artists
+    SET language = COALESCE((
+      SELECT t.language FROM music_tracks t
+      WHERE t.artist_id = music_artists.id AND t.status = 'ok'
+      GROUP BY t.language ORDER BY COUNT(*) DESC LIMIT 1
+    ), '其他')
+  `);
+  db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('language_backfilled_v1', '1')").run();
+}
+
+function loadManagedMusicCatalogs(scanRoots = []) {
+  const result = new Map();
+  const candidates = [];
+  for (const root of scanRoots) {
+    candidates.push({ libraryRoot: root, dbPath: path.join(root, "_目录", "library.sqlite") });
+    candidates.push({ libraryRoot: path.join(root, "媒体库"), dbPath: path.join(root, "媒体库", "_目录", "library.sqlite") });
+  }
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const dbPath = path.resolve(candidate.dbPath);
+    if (seen.has(dbPath.toLowerCase()) || !safeStat(dbPath)?.isFile()) continue;
+    seen.add(dbPath.toLowerCase());
+    let catalog;
+    try {
+      catalog = new DatabaseSync(dbPath, { readOnly: true });
+      const lyricByMediaId = new Map();
+      for (const row of catalog
+        .prepare("SELECT media_id,target_relative_path,is_primary FROM sidecars WHERE kind='lyrics' AND action='move' AND media_id IS NOT NULL ORDER BY is_primary DESC,sidecar_id")
+        .all()) {
+        if (!lyricByMediaId.has(row.media_id)) lyricByMediaId.set(row.media_id, row.target_relative_path || "");
+      }
+      const rows = catalog
+        .prepare(
+          `
+          SELECT media_id,target_relative_path,artist,title,album,album_artist,
+                 track_number,disc_number,duration_seconds,codec
+          FROM media WHERE media_type='audio'
+          `
+        )
+        .all();
+      for (const row of rows) {
+        const sourcePath = path.join(candidate.libraryRoot, row.target_relative_path || "");
+        const lyricRelativePath = lyricByMediaId.get(row.media_id) || "";
+        const lyricPath = lyricRelativePath ? path.join(candidate.libraryRoot, lyricRelativePath) : "";
+        result.set(normalizedPathKey(sourcePath), {
+          artist: row.artist || row.album_artist || "",
+          title: row.title || "",
+          album: row.album || "",
+          language: musicLanguageFromPath(row.target_relative_path),
+          lrcPath: lyricPath && safeStat(lyricPath)?.isFile() ? lyricPath : "",
+          probe: {
+            title: row.title || "",
+            artist: row.artist || row.album_artist || "",
+            album: row.album || "",
+            genre: "",
+            year: "",
+            trackNo: Number(row.track_number || 0),
+            discNo: Number(row.disc_number || 0),
+            durationMs: Math.max(0, Math.round(Number(row.duration_seconds || 0) * 1000)),
+            codec: row.codec || "",
+            sampleRate: 0,
+            bitDepth: 0,
+            channels: 0,
+            error: ""
+          }
+        });
+      }
+    } catch {
+      // A managed catalog is an optimization; fall back to probing files when unavailable.
+    } finally {
+      try { catalog?.close(); } catch {}
+    }
+  }
+  return result;
+}
+
 function scanMusicRoots(scanRoots, options = {}) {
   const ffprobePath = options.ffprobePath || "ffprobe";
   const limit = Number(options.limit || 0);
+  const catalogMetadata = loadManagedMusicCatalogs(scanRoots);
   const files = [];
   for (const root of scanRoots) {
     if (!safeStat(root)?.isDirectory()) continue;
@@ -1193,6 +1422,20 @@ function scanMusicRoots(scanRoots, options = {}) {
     if (limit > 0 && files.length >= limit) break;
   }
   files.sort((a, b) => a.filePath.localeCompare(b.filePath, undefined, { numeric: true, sensitivity: "base" }));
+
+  const identitySeeds = files.map(({ root, filePath }) => {
+    const relativePath = path.relative(root, filePath);
+    const parts = relativePath.split(/[\\/]/).filter(Boolean);
+    const artistFolder = parts.length >= 3 ? parts[parts.length - 3] : parts[0] || "未知歌手";
+    const managed = catalogMetadata.get(normalizedPathKey(filePath));
+    return {
+      artist: cleanArtistName(managed?.artist || (!isUnknownMusicArtist(artistFolder) ? artistFolder : "")),
+      title: cleanTrackTitle(managed?.title || path.basename(filePath, path.extname(filePath))),
+      language: managed?.language || musicLanguageFromPath(relativePath)
+    };
+  });
+  const identityKnowledge = buildMusicIdentityKnowledge(identitySeeds);
+  const artistLanguageConsensus = buildArtistLanguageConsensus(identitySeeds);
 
   const now = new Date().toISOString();
   const dirCache = new Map();
@@ -1206,18 +1449,35 @@ function scanMusicRoots(scanRoots, options = {}) {
     if (!stat?.isFile()) continue;
     const relativePath = path.relative(root, filePath);
     const parts = relativePath.split(/[\\/]/).filter(Boolean);
-    const artistFolder = parts[0] || "未知歌手";
+    const artistFolder = parts.length >= 3 ? parts[parts.length - 3] : parts[0] || "未知歌手";
     const albumFolder = parts.length > 2 ? parts[parts.length - 2] : "单曲";
     const albumDir = path.dirname(filePath);
-    const probe = probeAudio(filePath, ffprobePath);
-    const parsedName = parseTrackName(path.basename(filePath, path.extname(filePath)));
-    const artistName = cleanArtistName(probe.artist || parsedName.artist || artistFolder);
-    const albumTitle = cleanAlbumTitle(probe.album || albumFolder);
-    const artistPath = path.join(root, artistFolder);
-    const artistId = hashText(`artist:${artistPath.toLowerCase()}`).slice(0, 20);
-    const albumId = hashText(`album:${albumDir.toLowerCase()}`).slice(0, 20);
+    const managed = catalogMetadata.get(normalizedPathKey(filePath));
+    const probe = managed?.probe || probeAudio(filePath, ffprobePath);
+    const fileStem = path.basename(filePath, path.extname(filePath));
+    const parsedName = parseTrackName(fileStem);
+    const identity = resolveMusicTrackIdentity({
+      artist: managed?.artist || probe.artist,
+      title: managed?.title || probe.title,
+      folderArtist: isUnknownMusicArtist(artistFolder) ? "" : artistFolder,
+      parsedArtist: parsedName.artist,
+      parsedTitle: parsedName.title,
+      fileStem
+    }, identityKnowledge);
+    const artistName = cleanArtistName(identity.artist || artistFolder);
+    const recoveredSingle = ["filename-reversed", "filename-suffix", "library-title"].includes(identity.source)
+      && isUnknownMusicArtist(artistFolder)
+      && !(managed?.album || probe.album);
+    const albumTitle = cleanAlbumTitle(recoveredSingle ? "_单曲" : managed?.album || probe.album || albumFolder);
+    const rawLanguage = managed?.language || musicLanguageFromPath(relativePath);
+    const language = identity.source === "filename"
+      ? rawLanguage
+      : musicLanguageForArtist(artistName, rawLanguage, artistLanguageConsensus);
+    const artistPath = path.dirname(albumDir);
+    const artistId = hashText(`artist:${language}:${artistName.normalize("NFKC").toLocaleLowerCase()}`).slice(0, 20);
+    const albumId = hashText(recoveredSingle ? `album:recovered:${artistId}:single` : `album:${albumDir.toLowerCase()}`).slice(0, 20);
     const trackId = hashText(`track:${path.resolve(filePath).toLowerCase()}`).slice(0, 24);
-    const trackTitle = cleanTrackTitle(probe.title || parsedName.title || path.basename(filePath, path.extname(filePath)));
+    const trackTitle = cleanTrackTitle(identity.title || parsedName.title || fileStem);
     const trackGenre = musicGenreForTrack({
       genre: probe.genre,
       artistName,
@@ -1227,7 +1487,7 @@ function scanMusicRoots(scanRoots, options = {}) {
       relativePath
     });
     const albumFiles = cachedDirEntries(dirCache, albumDir);
-    const lrcPath = findCompanionLyric(albumFiles, albumDir, filePath);
+    const lrcPath = managed?.lrcPath || findCompanionLyric(albumFiles, albumDir, filePath);
     const lyricText = lrcPath ? readSmallText(lrcPath, MAX_LYRIC_BYTES) : "";
     const parsedLyrics = parseLrc(lyricText);
 
@@ -1236,6 +1496,7 @@ function scanMusicRoots(scanRoots, options = {}) {
         id: artistId,
         name: artistName,
         sortName: sortKey(artistName),
+        language,
         sourceRoot: root,
         sourcePath: artistPath,
         relativePath: path.relative(root, artistPath),
@@ -1286,11 +1547,12 @@ function scanMusicRoots(scanRoots, options = {}) {
       albumId,
       title: trackTitle,
       sortTitle: sortKey(trackTitle),
-      displayArtist: cleanArtistName(probe.artist || parsedName.artist || artistName),
+      displayArtist: artistName,
       albumTitle,
       trackNo: probe.trackNo || parsedName.trackNo || 0,
       discNo: probe.discNo || 0,
       genre: trackGenre,
+      language,
       sourceRoot: root,
       sourcePath: path.resolve(filePath),
       relativePath,
@@ -1334,6 +1596,7 @@ function writeScanRecords(db, records, scanRoots, scannedAt) {
   db.exec("BEGIN IMMEDIATE");
   try {
     db.prepare("DELETE FROM music_search").run();
+    db.prepare("DELETE FROM music_search_short").run();
     db.prepare("DELETE FROM music_lyrics").run();
     db.prepare("DELETE FROM music_tracks").run();
     db.prepare("DELETE FROM music_albums").run();
@@ -1341,15 +1604,16 @@ function writeScanRecords(db, records, scanRoots, scannedAt) {
 
     const insertArtist = db.prepare(`
       INSERT INTO music_artists (
-        id, name, sort_name, source_root, source_path, relative_path, album_count,
+        id, name, sort_name, language, source_root, source_path, relative_path, album_count,
         track_count, duration_ms, size_bytes, status, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?)
     `);
     for (const artist of records.artists) {
       insertArtist.run(
         artist.id,
         artist.name,
         artist.sortName,
+        artist.language,
         artist.sourceRoot,
         artist.sourcePath,
         artist.relativePath,
@@ -1390,14 +1654,18 @@ function writeScanRecords(db, records, scanRoots, scannedAt) {
     const insertTrack = db.prepare(`
       INSERT INTO music_tracks (
         id, artist_id, album_id, title, sort_title, display_artist, album_title,
-        track_no, disc_no, genre, source_root, source_path, relative_path, file_name,
+        track_no, disc_no, genre, language, source_root, source_path, relative_path, file_name,
         ext, size_bytes, mtime_ms, duration_ms, codec, sample_rate, bit_depth,
         channels, lrc_path, has_lrc, status, error, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertSearch = db.prepare(`
       INSERT INTO music_search (track_id, title, artist, album, lyrics)
       VALUES (?, ?, ?, ?, ?)
+    `);
+    const insertShortSearch = db.prepare(`
+      INSERT INTO music_search_short (track_id, title, artist, album, genre, file_name)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
     const lyricByTrack = new Map(records.lyrics.map((lyric) => [lyric.trackId, lyric]));
     for (const track of records.tracks) {
@@ -1412,6 +1680,7 @@ function writeScanRecords(db, records, scanRoots, scannedAt) {
         track.trackNo,
         track.discNo,
         track.genre,
+        track.language,
         track.sourceRoot,
         track.sourcePath,
         track.relativePath,
@@ -1431,6 +1700,7 @@ function writeScanRecords(db, records, scanRoots, scannedAt) {
         track.updatedAt
       );
       insertSearch.run(track.id, track.title, track.displayArtist, track.albumTitle, lyricByTrack.get(track.id)?.rawText || "");
+      insertMusicShortSearchRow(insertShortSearch, track);
     }
 
     const insertLyric = db.prepare(`
@@ -1444,9 +1714,16 @@ function writeScanRecords(db, records, scanRoots, scannedAt) {
     db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('schema_version', '1')").run();
     db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('scanned_at', ?)").run(scannedAt);
     db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('roots_json', ?)").run(JSON.stringify(scanRoots));
+    db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('smart_static_counts_json', ?)").run(JSON.stringify({
+      newest: records.tracks.length,
+      hires: records.tracks.filter((track) => ["flac", "wav", "alac"].includes(String(track.codec || "").toLowerCase()) || [".flac", ".wav", ".aiff", ".ape", ".dff", ".dsf"].includes(String(track.ext || "").toLowerCase()) || Number(track.bitDepth || 0) >= 24 || Number(track.sampleRate || 0) >= 48000).length,
+      lyrics: records.tracks.filter((track) => Number(track.hasLrc || 0) === 1).length,
+      longform: records.tracks.filter((track) => Number(track.durationMs || 0) >= 300000).length
+    }));
     db.prepare("DELETE FROM music_playlist_items WHERE track_id NOT IN (SELECT id FROM music_tracks)").run();
     db.exec("COMMIT");
     db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    MUSIC_FACET_CACHE.delete(db);
   } catch (error) {
     try {
       db.exec("ROLLBACK");
@@ -1526,19 +1803,24 @@ function adjacentTracks(db, trackId, urlOrOptions = {}) {
   }
   const filter = catalogFilter(params);
   const smartMix = findSmartMix(params.get("smart") || params.get("smartId"));
+  const rank = filter.q && !smartMix && !params.has("sort")
+    ? (filter.searchKind ? musicSearchIndexRank(filter.searchKind, filter.q) : searchRankSql(filter.q))
+    : { sql: "", args: [] };
   const where = filter.trackWhere ? `WHERE ${filter.trackWhere}` : "";
+  const searchJoin = musicSearchIndexJoin(filter.searchKind);
   const rows = db
     .prepare(
       `
       SELECT t.id
       FROM music_tracks t
+      ${searchJoin}
       LEFT JOIN music_track_state s ON s.track_id = t.id
       ${where}
-      ORDER BY ${smartMix?.order || trackOrderSql(normalizeTrackSort(params.get("sort")))}
+      ORDER BY ${smartMix?.order || rank.sql || trackOrderSql(normalizeTrackSort(params.get("sort")))}
       LIMIT 2000
     `
     )
-    .all(...filter.trackArgs);
+    .all(...filter.trackArgs, ...rank.args);
   const index = rows.findIndex((row) => row.id === trackId);
   return {
     prevId: index > 0 ? rows[index - 1].id : "",
@@ -1551,12 +1833,14 @@ function catalogFilter(params = new URLSearchParams()) {
   const artistId = String(params.get("artist") || params.get("artistId") || "").trim();
   const albumId = String(params.get("album") || params.get("albumId") || "").trim();
   const genre = String(params.get("genre") || params.get("musicGenre") || "").trim();
+  const language = normalizeMusicLanguage(params.get("language") || params.get("lang"));
   const smartMix = findSmartMix(params.get("smart") || params.get("smartId"));
   const favorite = ["1", "true", "yes"].includes(String(params.get("favorite") || "").trim().toLowerCase());
   const trackWhere = ["t.status = 'ok'"];
   const trackArgs = [];
   const albumWhere = [];
   const albumArgs = [];
+  let searchKind = "";
   if (artistId && artistId !== "all") {
     trackWhere.push("t.artist_id = ?");
     trackArgs.push(artistId);
@@ -1573,6 +1857,12 @@ function catalogFilter(params = new URLSearchParams()) {
     albumWhere.push("al.id IN (SELECT album_id FROM music_tracks WHERE status = 'ok' AND genre = ? COLLATE NOCASE)");
     albumArgs.push(genre);
   }
+  if (language) {
+    trackWhere.push("t.language = ?");
+    trackArgs.push(language);
+    albumWhere.push("a.language = ?");
+    albumArgs.push(language);
+  }
   if (favorite) {
     trackWhere.push("COALESCE(s.favorite, 0) = 1");
   }
@@ -1583,15 +1873,20 @@ function catalogFilter(params = new URLSearchParams()) {
   }
   if (q) {
     const like = `%${escapeLike(q)}%`;
-    trackWhere.push(`(
-      t.title LIKE ? ESCAPE '\\' OR
-      t.display_artist LIKE ? ESCAPE '\\' OR
-      t.album_title LIKE ? ESCAPE '\\' OR
-      t.genre LIKE ? ESCAPE '\\' OR
-      t.file_name LIKE ? ESCAPE '\\' OR
-      t.id IN (SELECT track_id FROM music_search WHERE music_search MATCH ?)
-    )`);
-    trackArgs.push(like, like, like, like, like, ftsTerm(q));
+    searchKind = musicSearchIndexKind(q);
+    if (searchKind) {
+      trackWhere.push(musicSearchIndexCondition(searchKind));
+      trackArgs.push(musicSearchIndexTerm(searchKind, q));
+    } else {
+      trackWhere.push(`(
+        t.title LIKE ? ESCAPE '\\' OR
+        t.display_artist LIKE ? ESCAPE '\\' OR
+        t.album_title LIKE ? ESCAPE '\\' OR
+        t.genre LIKE ? ESCAPE '\\' OR
+        t.file_name LIKE ? ESCAPE '\\'
+      )`);
+      trackArgs.push(like, like, like, like, like);
+    }
     albumWhere.push(`(
       al.title LIKE ? ESCAPE '\\' OR
       a.name LIKE ? ESCAPE '\\'
@@ -1603,8 +1898,11 @@ function catalogFilter(params = new URLSearchParams()) {
     artistId,
     albumId,
     genre,
+    language,
     smartId: smartMix?.id || "",
     favorite,
+    needsState: favorite || Boolean(smartMix),
+    searchKind,
     trackWhere: trackWhere.join(" AND "),
     trackArgs,
     albumWhere: albumWhere.join(" AND "),
@@ -1612,22 +1910,26 @@ function catalogFilter(params = new URLSearchParams()) {
   };
 }
 
-function artistFacet(db) {
-  return db
+function artistFacet(db, language = "", selectedArtistId = "") {
+  const normalizedLanguage = normalizeMusicLanguage(language);
+  const rows = cachedMusicFacet(db, `artists:${normalizedLanguage || "all"}`, () => db
     .prepare(
       `
-      SELECT id, name, album_count, track_count, duration_ms, size_bytes
+      SELECT id, name, language, album_count, track_count, duration_ms, size_bytes
       FROM music_artists
-      WHERE track_count > 0
+      WHERE track_count > 0${normalizedLanguage ? " AND language = ?" : ""}
       ORDER BY track_count DESC, name COLLATE NOCASE
-      LIMIT 200
+      LIMIT 48
     `
     )
-    .all()
-    .map(publicArtist);
+    .all(...(normalizedLanguage ? [normalizedLanguage] : []))
+    .map(publicArtist));
+  if (!selectedArtistId || selectedArtistId === "all" || rows.some((artist) => artist.id === selectedArtistId)) return rows;
+  const selected = db.prepare("SELECT * FROM music_artists WHERE id = ? AND track_count > 0").get(selectedArtistId);
+  return selected ? [publicArtist(selected), ...rows.slice(0, 47)] : rows;
 }
 
-function albumFacet(db, artistId = "", genre = "") {
+function albumFacet(db, artistId = "", genre = "", language = "", selectedAlbumId = "") {
   const args = [];
   const where = [];
   if (artistId && artistId !== "all") {
@@ -1638,7 +1940,13 @@ function albumFacet(db, artistId = "", genre = "") {
     where.push("al.id IN (SELECT album_id FROM music_tracks WHERE status = 'ok' AND genre = ? COLLATE NOCASE)");
     args.push(genre);
   }
-  return db
+  const normalizedLanguage = normalizeMusicLanguage(language);
+  if (normalizedLanguage) {
+    where.push("al.id IN (SELECT album_id FROM music_tracks WHERE status = 'ok' AND language = ?)");
+    args.push(normalizedLanguage);
+  }
+  const cacheKey = `albums:${artistId || "all"}:${genre || "all"}:${normalizedLanguage || "all"}`;
+  const rows = cachedMusicFacet(db, cacheKey, () => db
     .prepare(
       `
       SELECT al.*, a.name AS artist_name
@@ -1646,11 +1954,16 @@ function albumFacet(db, artistId = "", genre = "") {
       LEFT JOIN music_artists a ON a.id = al.artist_id
       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
       ORDER BY al.track_count DESC, al.title COLLATE NOCASE
-      LIMIT 240
+      LIMIT 60
     `
     )
     .all(...args)
-    .map(publicAlbum);
+    .map(publicAlbum));
+  if (!selectedAlbumId || selectedAlbumId === "all" || rows.some((album) => album.id === selectedAlbumId)) return rows;
+  const selected = db
+    .prepare("SELECT al.*,a.name AS artist_name FROM music_albums al LEFT JOIN music_artists a ON a.id=al.artist_id WHERE al.id=? AND al.track_count>0")
+    .get(selectedAlbumId);
+  return selected ? [publicAlbum(selected), ...rows.slice(0, 59)] : rows;
 }
 
 function genreFacet(db, artistId = "") {
@@ -1660,7 +1973,7 @@ function genreFacet(db, artistId = "") {
     where.push("artist_id = ?");
     args.push(artistId);
   }
-  return db
+  return cachedMusicFacet(db, `genres:${artistId || "all"}`, () => db
     .prepare(
       `
       SELECT
@@ -1674,11 +1987,50 @@ function genreFacet(db, artistId = "") {
       WHERE ${where.join(" AND ")}
       GROUP BY TRIM(genre) COLLATE NOCASE
       ORDER BY track_count DESC, name COLLATE NOCASE
-      LIMIT 120
+      LIMIT 40
     `
     )
     .all(...args)
-    .map(publicGenre);
+    .map(publicGenre));
+}
+
+function languageFacet(db) {
+  return cachedMusicFacet(db, "languages", () => db
+    .prepare(
+      `
+      SELECT a.language AS name, COALESCE(SUM(a.track_count), 0) AS track_count,
+             COUNT(*) AS artist_count,
+             (
+               SELECT COUNT(*)
+               FROM music_albums al
+               JOIN music_artists aa ON aa.id = al.artist_id
+               WHERE aa.status = 'ok' AND aa.track_count > 0
+                 AND aa.language = a.language AND al.track_count > 0
+             ) AS album_count,
+             COALESCE(SUM(a.duration_ms), 0) AS duration_ms,
+             COALESCE(SUM(a.size_bytes), 0) AS size_bytes
+      FROM music_artists a
+      WHERE a.status = 'ok' AND a.track_count > 0
+      GROUP BY a.language
+      ORDER BY CASE a.language
+        WHEN '中文' THEN 1 WHEN '英文' THEN 2 WHEN '日文' THEN 3
+        WHEN '韩文' THEN 4 WHEN '其他' THEN 5 WHEN '待识别' THEN 6 ELSE 7 END
+      `
+    )
+    .all()
+    .map(publicGenre));
+}
+
+function cachedMusicFacet(db, key, build) {
+  let cache = MUSIC_FACET_CACHE.get(db);
+  if (!cache) {
+    cache = new Map();
+    MUSIC_FACET_CACHE.set(db, cache);
+  }
+  if (cache.has(key)) return cache.get(key);
+  const value = build();
+  cache.set(key, value);
+  return value;
 }
 
 function findSmartMix(id) {
@@ -1698,7 +2050,7 @@ function smartMixCondition(mixOrId) {
   if (mix.id === "unrated") return { where: "COALESCE(s.rating, 0) = 0", args: [] };
   if (mix.id === "hires") {
     return {
-      where: "(LOWER(COALESCE(t.codec, '')) IN ('flac', 'wav', 'alac') OR COALESCE(t.bit_depth, 0) >= 24 OR COALESCE(t.sample_rate, 0) >= 48000)",
+      where: "(LOWER(COALESCE(t.codec, '')) IN ('flac', 'wav', 'alac') OR LOWER(COALESCE(t.ext, '')) IN ('.flac', '.wav', '.aiff', '.ape', '.dff', '.dsf') OR COALESCE(t.bit_depth, 0) >= 24 OR COALESCE(t.sample_rate, 0) >= 48000)",
       args: []
     };
   }
@@ -1716,13 +2068,30 @@ function smartMixCondition(mixOrId) {
 
 function smartMixCount(db, mix) {
   const condition = smartMixCondition(mix);
+  if (["newest", "hires", "lyrics", "longform"].includes(mix.id)) {
+    const stored = parseJsonObject(metaValue(db, "smart_static_counts_json"));
+    if (Number.isFinite(Number(stored[mix.id]))) return Number(stored[mix.id]);
+  }
+  if (mix.id === "unplayed") {
+    const total = Number(db.prepare("SELECT COALESCE(SUM(track_count), 0) AS count FROM music_artists WHERE status = 'ok'").get()?.count || 0);
+    const played = Number(db.prepare("SELECT COUNT(*) AS count FROM music_track_state WHERE COALESCE(play_count, 0) > 0 OR COALESCE(last_played_at, '') <> ''").get()?.count || 0);
+    return Math.max(0, total - played);
+  }
+  if (mix.id === "unrated") {
+    const total = Number(db.prepare("SELECT COALESCE(SUM(track_count), 0) AS count FROM music_artists WHERE status = 'ok'").get()?.count || 0);
+    const rated = Number(db.prepare("SELECT COUNT(*) AS count FROM music_track_state WHERE COALESCE(rating, 0) > 0").get()?.count || 0);
+    return Math.max(0, total - rated);
+  }
+  const stateDriven = new Set(["recent", "topplayed", "favorites", "toprated", "rediscover"]);
+  const from = stateDriven.has(mix.id)
+    ? "music_track_state s CROSS JOIN music_tracks t ON t.id = s.track_id"
+    : "music_tracks t";
   return Number(
     db
       .prepare(
         `
         SELECT COUNT(*) AS count
-        FROM music_tracks t
-        LEFT JOIN music_track_state s ON s.track_id = t.id
+        FROM ${from}
         WHERE t.status = 'ok' AND ${condition.where}
       `
       )
@@ -1734,12 +2103,11 @@ function publicArtist(row) {
   return {
     id: row.id || "",
     name: row.name || "",
+    language: row.language || "其他",
     albumCount: Number(row.album_count || 0),
     trackCount: Number(row.track_count || 0),
     durationMs: Number(row.duration_ms || 0),
-    sizeBytes: Number(row.size_bytes || 0),
-    sourcePath: row.source_path || "",
-    relativePath: row.relative_path || ""
+    sizeBytes: Number(row.size_bytes || 0)
   };
 }
 
@@ -1753,9 +2121,9 @@ function publicReportArtist(row) {
   };
 }
 
-function publicAlbum(row) {
+function publicAlbum(row, options = {}) {
   const id = row.id || "";
-  const coverStamp = coverStampFor(row.cover_path);
+  const coverStamp = coverStampFor(row.cover_path, row.updated_at);
   return {
     id,
     artistId: row.artist_id || "",
@@ -1763,14 +2131,16 @@ function publicAlbum(row) {
     title: row.title || "",
     year: row.year || "",
     coverUrl: row.cover_path ? `/media/music-cover/${encodeURIComponent(id)}${coverStamp ? `?v=${encodeURIComponent(coverStamp)}` : ""}` : "",
-    intro: row.intro_text || "",
-    introPath: row.intro_path || "",
-    sourcePath: row.source_path || "",
-    relativePath: row.relative_path || "",
     trackCount: Number(row.track_count || 0),
     durationMs: Number(row.duration_ms || 0),
     sizeBytes: Number(row.size_bytes || 0),
-    updatedAt: row.updated_at || ""
+    updatedAt: row.updated_at || "",
+    ...(options.detail ? {
+      intro: row.intro_text || "",
+      introPath: row.intro_path || "",
+      sourcePath: row.source_path || "",
+      relativePath: row.relative_path || ""
+    } : {})
   };
 }
 
@@ -1982,7 +2352,7 @@ function publicSmartPlaylist(mix, count = 0) {
 function publicTrack(row, options = {}) {
   const id = row.id || "";
   const albumId = row.album_id || "";
-  const coverStamp = coverStampFor(row.cover_path);
+  const coverStamp = coverStampFor(row.cover_path, row.cover_updated_at);
   return {
     id,
     artistId: row.artist_id || "",
@@ -1993,6 +2363,7 @@ function publicTrack(row, options = {}) {
     trackNo: Number(row.track_no || 0),
     discNo: Number(row.disc_no || 0),
     genre: row.genre || "",
+    language: row.language || "其他",
     durationMs: Number(row.duration_ms || row.state_duration_ms || 0),
     codec: row.codec || "",
     sampleRate: Number(row.sample_rate || 0),
@@ -2008,11 +2379,11 @@ function publicTrack(row, options = {}) {
     playCount: Number(row.play_count || 0),
     lastPlayedAt: row.last_played_at || "",
     fileName: row.file_name || "",
-    relativePath: row.relative_path || "",
     sizeBytes: Number(row.size_bytes || 0),
     ...(options.detail
       ? {
           sourcePath: row.source_path || "",
+          relativePath: row.relative_path || "",
           lrcPath: row.lrc_path || "",
           mtimeMs: Number(row.mtime_ms || 0),
           updatedAt: row.updated_at || ""
@@ -2208,7 +2579,7 @@ function id3GenreName(value) {
 
 function parseTrackName(stem) {
   const clean = String(stem || "").trim();
-  const trackNoMatch = /^(\d{1,3})[\s._-]+(.+)$/u.exec(clean);
+  const trackNoMatch = /^(\d{1,4})[\s._-]+(.+)$/u.exec(clean);
   const withoutNo = trackNoMatch ? trackNoMatch[2].trim() : clean;
   const split = /^(.{1,80}?)[\s]*-[\s]*(.+)$/u.exec(withoutNo);
   return {
@@ -2338,9 +2709,8 @@ function safeStoredFile(filePath, type, id = "") {
   };
 }
 
-function coverStampFor(filePath) {
-  const stat = safeStat(filePath);
-  return stat?.isFile() ? `${stat.size}-${Math.floor(stat.mtimeMs || 0)}` : "";
+function coverStampFor(filePath, updatedAt = "") {
+  return filePath ? String(updatedAt || "") : "";
 }
 
 function metaValue(db, key) {
@@ -2378,13 +2748,20 @@ function cleanArtistName(value) {
     .trim() || "未知歌手";
 }
 
+function artistNameForSort(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/^[\s\p{P}\p{S}_]+/gu, "")
+    .trim();
+}
+
 function cleanAlbumTitle(value) {
   return String(value || "单曲").replace(/\s+/g, " ").trim() || "单曲";
 }
 
 function cleanTrackTitle(value) {
   return String(value || "未命名歌曲")
-    .replace(/^\d{1,3}[\s._-]+/u, "")
+    .replace(/^\d{1,4}[\s._-]+/u, "")
     .replace(/\s+/g, " ")
     .trim() || "未命名歌曲";
 }
@@ -2411,8 +2788,171 @@ function isJunkAssetName(name) {
   return /微信公众号|欢迎关注|阿里云盘|达人招募|延期卡|50TB|扫码|二维码/iu.test(String(name || ""));
 }
 
+function musicSearchIndexKind(value) {
+  if (canUseTrigramSearch(value)) return "trigram";
+  if (canUseShortSearch(value)) return "short";
+  return "";
+}
+
+function musicSearchIndexTable(kind) {
+  if (kind === "trigram") return "music_search";
+  if (kind === "short") return "music_search_short";
+  return "";
+}
+
+function musicSearchIndexJoin(kind) {
+  const table = musicSearchIndexTable(kind);
+  return table ? `JOIN ${table} ON ${table}.track_id = t.id` : "";
+}
+
+function musicSearchIndexCondition(kind) {
+  const table = musicSearchIndexTable(kind);
+  if (kind === "short") return `${table} MATCH ? AND ${table}.rank MATCH 'bm25(0,10,6,3,1,0.5)'`;
+  return `${table} MATCH ?`;
+}
+
+function musicSearchIndexTerm(kind, value) {
+  return kind === "short" ? shortSearchFtsTerm(value) : ftsTerm(value);
+}
+
+function musicSearchIndexRank(kind, value) {
+  return kind === "short" ? shortFtsRankOrderSql(value) : ftsRankOrderSql(value);
+}
+
+function canUseShortSearch(value) {
+  return /^[\p{L}\p{N}]{1,2}$/u.test(normalizeSearchText(value));
+}
+
+function canUseShortVocabularyCount(filter) {
+  return filter.searchKind === "short"
+    && (!filter.artistId || filter.artistId === "all")
+    && (!filter.albumId || filter.albumId === "all")
+    && (!filter.genre || filter.genre === "all")
+    && !filter.language
+    && !filter.favorite
+    && !filter.smartId;
+}
+
+function musicShortSearchDocumentCount(db, value) {
+  const term = normalizeSearchText(value).toLocaleLowerCase();
+  return Number(db.prepare("SELECT doc AS count FROM music_search_short_vocab WHERE term = ?").get(term)?.count || 0);
+}
+
+function shortSearchFtsTerm(value) {
+  const normalized = normalizeSearchText(value).toLocaleLowerCase();
+  return `"${normalized.replace(/"/g, '""')}"`;
+}
+
+function shortSearchGrams(value) {
+  const characters = Array.from(String(value || "").normalize("NFKC").toLocaleLowerCase());
+  const grams = new Set();
+  for (let index = 0; index < characters.length; index += 1) {
+    const current = characters[index];
+    if (/^[\p{L}\p{N}]$/u.test(current)) grams.add(current);
+    const pair = `${current}${characters[index + 1] || ""}`;
+    if (/^[\p{L}\p{N}]{2}$/u.test(pair)) grams.add(pair);
+  }
+  return [...grams].join(" ");
+}
+
+function insertMusicShortSearchRow(statement, track) {
+  statement.run(
+    track.id,
+    shortSearchGrams(track.title),
+    shortSearchGrams(track.displayArtist ?? track.display_artist),
+    shortSearchGrams(track.albumTitle ?? track.album_title),
+    shortSearchGrams(track.genre),
+    shortSearchGrams(track.fileName ?? track.file_name)
+  );
+}
+
 function ftsTerm(value) {
+  const normalized = normalizeSearchText(value);
+  const terms = normalized
+    .split(/\s+/u)
+    .map((term) => term.trim())
+    .filter((term) => Array.from(term).length >= 3);
+  if (terms.length > 1) return terms.map(ftsPhrase).join(" AND ");
+  const compact = terms[0] || normalized.replace(/\s+/gu, "");
+  const characters = Array.from(compact);
+  if (characters.length < 6 || /\s/u.test(normalized)) return ftsPhrase(compact);
+  const variants = [ftsPhrase(compact)];
+  for (let index = 3; index <= characters.length - 3; index += 1) {
+    variants.push(`(${ftsPhrase(characters.slice(0, index).join(""))} AND ${ftsPhrase(characters.slice(index).join(""))})`);
+  }
+  return `(${variants.join(" OR ")})`;
+}
+
+function canUseTrigramSearch(value) {
+  return normalizeSearchText(value)
+    .split(/\s+/u)
+    .some((term) => Array.from(term).length >= 3);
+}
+
+function ftsPhrase(value) {
   return `"${String(value || "").replace(/"/g, '""')}"`;
+}
+
+function normalizeSearchText(value) {
+  return String(value || "").normalize("NFKC").replace(/\s+/gu, " ").trim();
+}
+
+function ftsRankOrderSql(value) {
+  const query = normalizeSearchText(value);
+  return {
+    sql: `CASE
+      WHEN t.title = ? COLLATE NOCASE THEN 0
+      WHEN t.display_artist = ? COLLATE NOCASE THEN 1
+      WHEN t.album_title = ? COLLATE NOCASE THEN 2
+      ELSE 3
+    END ASC, bm25(music_search, 0, 10, 6, 3, 0.5) ASC, COALESCE(s.play_count, 0) DESC, t.title COLLATE NOCASE ASC`,
+    args: [query, query, query]
+  };
+}
+
+function shortFtsRankOrderSql(value) {
+  return {
+    sql: "music_search_short.rank ASC",
+    args: []
+  };
+}
+
+function searchRankSql(value) {
+  const query = normalizeSearchText(value);
+  if (!query) return { sql: "", args: [] };
+  const args = [query, query, query];
+  const scores = [
+    "CASE WHEN t.title = ? COLLATE NOCASE THEN 600 ELSE 0 END",
+    "CASE WHEN t.display_artist = ? COLLATE NOCASE THEN 420 ELSE 0 END",
+    "CASE WHEN t.album_title = ? COLLATE NOCASE THEN 220 ELSE 0 END"
+  ];
+  const terms = searchRankTerms(query);
+  for (const term of terms) {
+    const like = `%${escapeLike(term)}%`;
+    scores.push("CASE WHEN t.title LIKE ? ESCAPE '\\' THEN 40 ELSE 0 END");
+    scores.push("CASE WHEN t.display_artist LIKE ? ESCAPE '\\' THEN 24 ELSE 0 END");
+    scores.push("CASE WHEN t.album_title LIKE ? ESCAPE '\\' THEN 12 ELSE 0 END");
+    scores.push("CASE WHEN t.file_name LIKE ? ESCAPE '\\' THEN 6 ELSE 0 END");
+    args.push(like, like, like, like);
+  }
+  return {
+    sql: `(${scores.join(" + ")}) DESC, COALESCE(s.play_count, 0) DESC, t.title COLLATE NOCASE ASC`,
+    args
+  };
+}
+
+function searchRankTerms(value) {
+  const normalized = normalizeSearchText(value);
+  const terms = normalized.split(/\s+/u).filter(Boolean);
+  if (terms.length > 1) return [...new Set(terms)];
+  const characters = Array.from(terms[0] || "");
+  if (characters.length < 6) return terms;
+  const middle = Math.floor(characters.length / 2);
+  return [...new Set([terms[0], characters.slice(0, middle).join(""), characters.slice(middle).join("")])];
+}
+
+function normalizedPathKey(value) {
+  return path.resolve(String(value || "")).normalize("NFKC").toLocaleLowerCase();
 }
 
 function escapeLike(value) {
@@ -2429,6 +2969,15 @@ function parseJsonArray(value) {
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
+  }
+}
+
+function parseJsonObject(value) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
   }
 }
 

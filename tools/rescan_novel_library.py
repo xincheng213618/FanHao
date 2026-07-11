@@ -92,12 +92,17 @@ def iter_txt_files(roots: Iterable[Path], limit: int = 0) -> list[tuple[Path, Pa
 
 
 def clean_title(stem: str) -> str:
-    title = re.sub(r"[_\-\s]*(?:fixed|format|formatted|utf8|utf-8|精校|校对版|完结)\s*$", "", stem, flags=re.I)
+    title = re.sub(r"\s*[，,、]?\s*作者\s*[:：]\s*.+$", "", stem, flags=re.I)
+    title = re.sub(r"[_\-\s]*(?:fixed|format|formatted|utf8|utf-8|精校|校对版|完结|全本)\s*$", "", title, flags=re.I)
+    quoted = re.match(r"^《([^》]+)》", title)
+    if quoted:
+        title = quoted.group(1)
     title = re.sub(r"^[\[\(【（].{1,16}[\]\)】）]\s*", "", title)
+    title = re.sub(r"\s*[\(（【\[].{0,24}(?:精校|校对|全本|完结).{0,12}[\)）】\]]\s*$", "", title, flags=re.I)
     return html.unescape(title.strip(" -_　") or stem)
 
 
-def detect_author(text: str, file_stem: str) -> str:
+def detect_author(text: str, file_stem: str, folder_author: str = "") -> str:
     for line in text.splitlines()[:120]:
         value = line.strip()
         match = re.match(r"^(?:作者|原作者|Author|writer)\s*[:：]\s*(.+)$", value, flags=re.I)
@@ -106,10 +111,30 @@ def detect_author(text: str, file_stem: str) -> str:
             if author and len(author) <= 80:
                 return html.unescape(author)
     match = re.search(r"(?:作者|by)[:：\s]+([^_\-【】\[\]\(\)（）]{1,40})", file_stem, flags=re.I)
-    return html.unescape(match.group(1).strip()) if match else ""
+    if match:
+        return html.unescape(match.group(1).strip())
+    return normalize_author_name(folder_author)
+
+
+def normalize_author_name(value: str) -> str:
+    author = html.unescape(str(value or "").strip())
+    author = re.sub(r"\s*作品(?:集)?$", "", author)
+    return author[:80]
+
+
+def author_folder_for(root: Path, source_path: Path) -> str:
+    if root.name != "小说":
+        return ""
+    try:
+        relative = source_path.relative_to(root)
+    except ValueError:
+        return ""
+    return relative.parts[0] if len(relative.parts) > 1 else ""
 
 
 def category_for(root: Path, source_path: Path) -> str:
+    if root.name == "小说":
+        return "小说"
     try:
         relative = source_path.relative_to(root)
     except ValueError:
@@ -204,7 +229,7 @@ def build_book(root: Path, source_path: Path) -> BookRecord:
         formatted = formatted.strip()
         chapters = split_chapters(formatted)
         title = clean_title(source_path.stem)
-        author = detect_author(raw_text, source_path.stem)
+        author = detect_author(raw_text, source_path.stem, author_folder_for(root, source_path))
         category = category_for(root, source_path)
         summary = summarize_text("\n\n".join(chapter.content for chapter in chapters[:2]) or formatted)
         first_id = f"{book_id}-{chapters[0].index:05d}" if chapters else ""
@@ -331,78 +356,79 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def write_records(db_path: Path, roots: list[Path], records: list[BookRecord]) -> None:
+def write_records(db_path: Path, roots: list[Path], records: Iterable[BookRecord]) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     try:
         ensure_schema(conn)
+        print("[db] schema ready", flush=True)
         conn.execute("BEGIN")
         conn.execute("DELETE FROM novel_search")
         conn.execute("DELETE FROM novel_chapters")
         conn.execute("DELETE FROM novel_books")
-        conn.executemany(
-            """
-            INSERT INTO novel_books (
-              id, title, author, category, source_root, source_path, relative_path, file_name,
-              size_bytes, mtime_ms, encoding, char_count, chapter_count, first_chapter_id,
-              latest_chapter_id, latest_chapter_title, summary, tags_json, status, error, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    item.id,
-                    item.title,
-                    item.author,
-                    item.category,
-                    item.source_root,
-                    item.source_path,
-                    item.relative_path,
-                    item.file_name,
-                    item.size_bytes,
-                    item.mtime_ms,
-                    item.encoding,
-                    item.char_count,
-                    item.chapter_count,
-                    item.first_chapter_id,
-                    item.latest_chapter_id,
-                    item.latest_chapter_title,
-                    item.summary,
-                    item.tags_json,
-                    item.status,
-                    item.error,
-                    item.updated_at,
-                )
-                for item in records
-            ],
-        )
-        chapter_rows = []
-        search_rows = []
+        print("[db] target cleared", flush=True)
+        insert_book = conn.cursor()
+        insert_chapter = conn.cursor()
+        insert_search = conn.cursor()
         for book in records:
+            insert_book.execute(
+                """
+                INSERT INTO novel_books (
+                  id, title, author, category, source_root, source_path, relative_path, file_name,
+                  size_bytes, mtime_ms, encoding, char_count, chapter_count, first_chapter_id,
+                  latest_chapter_id, latest_chapter_title, summary, tags_json, status, error, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    book.id,
+                    book.title,
+                    book.author,
+                    book.category,
+                    book.source_root,
+                    book.source_path,
+                    book.relative_path,
+                    book.file_name,
+                    book.size_bytes,
+                    book.mtime_ms,
+                    book.encoding,
+                    book.char_count,
+                    book.chapter_count,
+                    book.first_chapter_id,
+                    book.latest_chapter_id,
+                    book.latest_chapter_title,
+                    book.summary,
+                    book.tags_json,
+                    book.status,
+                    book.error,
+                    book.updated_at,
+                ),
+            )
+            chapter_rows = []
+            search_rows = []
             for chapter in book.chapters:
                 chapter_id = f"{book.id}-{chapter.index:05d}"
                 chapter_rows.append((chapter_id, book.id, chapter.index, chapter.title, chapter.content, len(chapter.content), book.updated_at))
                 search_rows.append((book.id, chapter_id, book.title, book.author, book.category, chapter.title))
-        conn.executemany(
-            """
-            INSERT INTO novel_chapters (id, book_id, chapter_index, title, content, char_count, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            chapter_rows,
-        )
-        conn.executemany(
-            """
-            INSERT INTO novel_search (book_id, chapter_id, title, author, category, chapter_title)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            search_rows,
-        )
+            insert_chapter.executemany(
+                """
+                INSERT INTO novel_chapters (id, book_id, chapter_index, title, content, char_count, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                chapter_rows,
+            )
+            insert_search.executemany(
+                """
+                INSERT INTO novel_search (book_id, chapter_id, title, author, category, chapter_title)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                search_rows,
+            )
         conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '1')")
         conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)", (now_iso(),))
         conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('roots_json', ?)", (json.dumps([str(root.resolve()) for root in roots], ensure_ascii=False),))
         conn.commit()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        conn.execute("VACUUM")
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("PRAGMA optimize")
     except Exception:
         conn.rollback()
         raise
@@ -414,29 +440,37 @@ def main() -> int:
     args = parse_args()
     roots = [Path(item) for item in (args.roots or [str(root) for root in DEFAULT_ROOTS])]
     files = iter_txt_files(roots, args.limit)
-    records: list[BookRecord] = []
-    for index, (root, path) in enumerate(files, start=1):
-        records.append(build_book(root, path))
-        if index % 25 == 0:
-            print(f"[scan] {index}/{len(files)}")
+    counters = {"books": 0, "parsed": 0, "errors": 0, "chapters": 0, "chars": 0, "bytes": 0}
 
-    ok_records = [item for item in records if item.status == "ok"]
+    def scan_records() -> Iterable[BookRecord]:
+        for index, (root, path) in enumerate(files, start=1):
+            if index == 1 or index % 25 == 0:
+                print(f"[parse] {index}/{len(files)} {path.name}", flush=True)
+            record = build_book(root, path)
+            counters["books"] += 1
+            counters["parsed" if record.status == "ok" else "errors"] += 1
+            counters["chapters"] += record.chapter_count if record.status == "ok" else 0
+            counters["chars"] += record.char_count if record.status == "ok" else 0
+            counters["bytes"] += record.size_bytes
+            if index % 25 == 0 or index == len(files):
+                print(f"[scan] {index}/{len(files)}", flush=True)
+            yield record
+
+    records = scan_records()
+    if args.dry_run:
+        for _record in records:
+            pass
+    else:
+        write_records(Path(args.db), roots, records)
+
     summary = {
         "ok": True,
         "dryRun": bool(args.dry_run),
         "db": str(Path(args.db)),
         "roots": [str(root) for root in roots],
         "files": len(files),
-        "books": len(records),
-        "parsed": len(ok_records),
-        "errors": len(records) - len(ok_records),
-        "chapters": sum(item.chapter_count for item in ok_records),
-        "chars": sum(item.char_count for item in ok_records),
-        "bytes": sum(item.size_bytes for item in records),
+        **counters,
     }
-
-    if not args.dry_run:
-        write_records(Path(args.db), roots, records)
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

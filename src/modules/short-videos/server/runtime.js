@@ -4,6 +4,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+const SHORT_VIDEO_STREAM_CHUNK_BYTES = 2 * 1024 * 1024;
+const SHORT_VIDEO_LIST_CACHE_TTL_MS = 2 * 60 * 1000;
+
 export function createShortVideosRuntime({
   dbPath,
   ffmpegPath,
@@ -19,12 +22,25 @@ export function createShortVideosRuntime({
   sharedCache
 }) {
   const store = createShortVideoStore({ dbPath, ffmpegPath, roots });
+  try {
+    store.warm();
+  } catch (error) {
+    console.warn("[short-video-warmup]", error?.message || error);
+  }
   let initialSyncTimer = null;
   let syncTimer = null;
 
   async function routeApi(req, res, url) {
     if (url.pathname === "/api/short-videos" && req.method === "GET" && sharedCache) {
       const cachePath = listCachePath(url);
+      const forceRefresh = String(url.searchParams.get("refresh") || "").trim() === "1";
+      if (!forceRefresh) {
+        const cached = readJsonCache(cachePath, SHORT_VIDEO_LIST_CACHE_TTL_MS);
+        if (cached) {
+          sendJson(res, 200, { ...cached, cached: true });
+          return true;
+        }
+      }
       try {
         const data = store.listVideos(url);
         writeJsonCache(cachePath, data);
@@ -52,13 +68,26 @@ export function createShortVideosRuntime({
 
   async function routeMedia(req, res, url) {
     const galleryMatch = /^\/media\/short-video-gallery\/([^/]+)\/(\d+)$/.exec(url.pathname);
-    if (galleryMatch && req.method === "GET") {
+    if (galleryMatch && (req.method === "GET" || req.method === "HEAD")) {
       const file = store.galleryFile(decodeURIComponent(galleryMatch[1]), Number(galleryMatch[2] || 0));
-      if (!file || file.type !== "image") {
+      if (!file || !["image", "video"].includes(file.type)) {
         notFound(res);
         return true;
       }
-      mediaResponseService.serveImage(res, file);
+      if (file.type === "video") {
+        const requestedVersion = String(url.searchParams.get("v") || "").trim();
+        const currentVersion = String(file.cacheVersion || "").trim();
+        file.cacheControl = requestedVersion && currentVersion && requestedVersion === currentVersion
+          ? "private, max-age=31536000, immutable"
+          : "private, max-age=0, must-revalidate";
+        file.maxRangeBytes = SHORT_VIDEO_STREAM_CHUNK_BYTES;
+        mediaStreamService.serveVideo(req, res, file);
+      } else if (req.method === "HEAD") {
+        res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": safeStat(file.path)?.size || 0 });
+        res.end();
+      } else {
+        mediaResponseService.serveImage(res, file);
+      }
       return true;
     }
 
@@ -92,6 +121,15 @@ export function createShortVideosRuntime({
         notFound(res);
         return true;
       }
+      const requestedVersion = String(url.searchParams.get("v") || "").trim();
+      const currentVersion = String(file.cacheVersion || "").trim();
+      file.cacheControl = requestedVersion && currentVersion && requestedVersion === currentVersion
+        ? "private, max-age=31536000, immutable"
+        : "private, max-age=0, must-revalidate";
+      const mediaCacheRequest = String(req.headers["x-fanhao-media-cache"] || "").trim() === "1"
+        || String(url.searchParams.get("fhcache") || "").trim() === "1";
+      file.maxRangeBytes = mediaCacheRequest ? 0 : SHORT_VIDEO_STREAM_CHUNK_BYTES;
+      file.fullResponse = mediaCacheRequest;
       mediaStreamService.serveVideo(req, res, file);
       return true;
     }
@@ -101,6 +139,7 @@ export function createShortVideosRuntime({
 
   function listCachePath(url) {
     const normalized = new URLSearchParams(url.searchParams);
+    normalized.delete("refresh");
     normalized.sort?.();
     const hash = hashText(`${url.pathname}?${normalized.toString()}`);
     return path.join(sharedCache.rootDir, "short-videos", "lists", `${hash}.json`);
@@ -117,9 +156,11 @@ export function createShortVideosRuntime({
     }
   }
 
-  function readJsonCache(filePath) {
+  function readJsonCache(filePath, maxAgeMs = 0) {
     try {
       if (!fs.existsSync(filePath)) return null;
+      const stat = fs.statSync(filePath);
+      if (maxAgeMs > 0 && Date.now() - Number(stat.mtimeMs || 0) > maxAgeMs) return null;
       sharedCache.touch(filePath);
       return JSON.parse(fs.readFileSync(filePath, "utf8"));
     } catch {

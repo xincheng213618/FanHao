@@ -2,8 +2,8 @@ import { createPhotosRuntime } from "./server/runtime.js";
 
 export const moduleDefinition = {
   id: "photos",
-  title: "套图",
-  description: "套图、写真和漫画阅读。",
+  title: "图库",
+  description: "套图、写真和韩漫阅读。",
   order: 20,
   client: {
     web: { href: "/photo", view: "gallery", galleryMode: "photo" },

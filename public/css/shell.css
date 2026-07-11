@@ -439,6 +439,10 @@ body.tools-view .main {
   padding: 0 36px 42px;
 }
 
+body.gallery-view .main {
+  overflow: visible;
+}
+
 body.gallery-view .toolbar,
 body.gallery-view .stats-row {
   display: none;

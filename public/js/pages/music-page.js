@@ -385,7 +385,7 @@ export function createMusicPage(deps) {
     const title = document.createElement("h2");
     title.textContent = "音乐";
     const meta = document.createElement("p");
-    const rootText = (summary.roots || []).map((root) => root.path).filter(Boolean)[0] || "E:\\音乐 MV\\音乐（无损）";
+    const rootText = (summary.roots || []).map((root) => root.path).filter(Boolean)[0] || "D:\\Music";
     meta.textContent = `${formatNumber(totals.tracks || 0)} 首 · ${formatNumber(totals.albums || 0)} 张专辑 · ${formatDuration(totals.durationMs || 0)} · ${rootText}`;
     copy.append(eyebrow, title, meta);
 
@@ -2577,7 +2577,7 @@ export function createMusicPage(deps) {
     const rootText = (state.music.summary?.roots || state.music.data?.summary?.roots || [])
       .map((root) => root.path)
       .filter(Boolean)
-      .join("\n") || "E:\\音乐 MV\\音乐（无损）";
+      .join("\n") || "D:\\Music";
     state.music.rescanning = true;
     state.music.status = "正在启动音乐库刷新";
     renderView();

@@ -108,7 +108,7 @@
 
 .music-mobile-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 4px;
   padding: 4px;
   background: var(--surface-soft);
@@ -359,6 +359,164 @@
 .music-mobile-list {
   display: grid;
   gap: 8px;
+}
+
+.music-mobile-load-more {
+  min-height: 46px;
+  margin: 8px 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+}
+
+.music-mobile-load-more:disabled {
+  opacity: 0.62;
+}
+
+.music-mobile-artist-browser {
+  display: grid;
+  gap: 12px;
+}
+
+.music-mobile-artist-languages {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 1px 4px;
+  scrollbar-width: none;
+}
+
+.music-mobile-artist-languages::-webkit-scrollbar {
+  display: none;
+}
+
+.music-mobile-artist-languages button {
+  flex: 0 0 auto;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 13px;
+  font: inherit;
+  font-weight: 700;
+}
+
+.music-mobile-artist-languages button.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, var(--surface));
+  color: var(--accent);
+}
+
+.music-mobile-artist-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.music-mobile-artist-card {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 68px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 10px;
+  text-align: left;
+}
+
+.music-mobile-artist-card b {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--accent);
+  font-size: 16px;
+}
+
+.music-mobile-artist-card span,
+.music-mobile-artist-card strong,
+.music-mobile-artist-card small {
+  min-width: 0;
+}
+
+.music-mobile-artist-card strong,
+.music-mobile-artist-card small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-mobile-artist-card small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.music-mobile-artist-grid > .music-mobile-load-more,
+.music-mobile-artist-grid > .message-box {
+  grid-column: 1 / -1;
+}
+
+.music-mobile-album-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.music-mobile-album-card {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 72px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 10px;
+  text-align: left;
+}
+
+.music-mobile-album-card span,
+.music-mobile-album-card strong,
+.music-mobile-album-card small {
+  min-width: 0;
+}
+
+.music-mobile-album-card strong,
+.music-mobile-album-card small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-mobile-album-card small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.music-mobile-album-grid > .music-mobile-load-more,
+.music-mobile-album-grid > .message-box {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 520px) {
+  .music-mobile-artist-grid,
+  .music-mobile-album-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .music-mobile-facets {

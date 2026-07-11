@@ -121,11 +121,9 @@ export function createShortVideoInteractions(context = {}) {
 
   function formatLocalShortTime() {
     const now = new Date();
-    const month = String(now.getMonth() + 1).padStart(2, "0");
-    const date = String(now.getDate()).padStart(2, "0");
     const hour = String(now.getHours()).padStart(2, "0");
     const minute = String(now.getMinutes()).padStart(2, "0");
-    return `${month}/${date} ${hour}:${minute}`;
+    return `${hour}:${minute}`;
   }
 
   function applyDragDelta(deltaY) {
@@ -134,11 +132,12 @@ export function createShortVideoInteractions(context = {}) {
     activeReelStack()?.style.setProperty("--short-video-mobile-drag-y", `${damped}px`);
   }
 
-  function finishDrag(deltaY) {
-    const direction = deltaY < 0 ? 1 : -1;
+  function finishDrag(deltaY, velocityY = 0) {
+    const flick = Math.abs(velocityY) >= .42;
+    const direction = flick ? (velocityY < 0 ? 1 : -1) : (deltaY < 0 ? 1 : -1);
     browserState.dragging = false;
     activeReelStack()?.classList.remove("is-dragging");
-    if (Math.abs(deltaY) < 78 || (direction > 0 && !browserState.nextId) || (direction < 0 && !browserState.prevId)) {
+    if ((!flick && Math.abs(deltaY) < 64) || (direction > 0 && !browserState.nextId) || (direction < 0 && !browserState.prevId)) {
       snapStackBack();
       return;
     }

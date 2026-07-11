@@ -4,7 +4,7 @@ import { formatBytes, formatCompact, formatNumber } from "../../js/format.js";
 
 const DEFAULT_MODE = "library";
 const DEFAULT_SORT = "album";
-const DEFAULT_LIMIT = 900;
+const DEFAULT_LIMIT = 80;
 const MUSIC_VOLUME_KEY = "fanhao.android.music.volume";
 const MUSIC_REPEAT_KEY = "fanhao.android.music.repeat";
 const MUSIC_SHUFFLE_KEY = "fanhao.android.music.shuffle";
@@ -25,6 +25,8 @@ export function createMusicViews(deps) {
     mode: DEFAULT_MODE,
     query: "",
     sort: DEFAULT_SORT,
+    artistSort: "count",
+    albumSort: "updated",
     favorite: false,
     smartId: "",
     smartPlaylists: [],
@@ -35,6 +37,7 @@ export function createMusicViews(deps) {
     artistId: "",
     albumId: "",
     genre: "",
+    language: "",
     data: null,
     summary: null,
     current: null,
@@ -43,6 +46,8 @@ export function createMusicViews(deps) {
     prevId: "",
     nextId: "",
     loading: false,
+    loadingMore: false,
+    hasMore: false,
     status: "",
     playing: false,
     searchOpen: false,
@@ -98,12 +103,15 @@ export function createMusicViews(deps) {
     state.mode = normalizeMode(params.mode);
     state.query = String(params.query || params.q || "").trim();
     state.sort = normalizeSort(params.sort);
+    state.artistSort = String(params.artistSort || "count") === "name" ? "name" : "count";
+    state.albumSort = normalizeAlbumSort(params.albumSort);
     state.favorite = ["1", "true", "yes"].includes(String(params.favorite || params.fav || "").trim().toLowerCase());
     state.smartId = String(params.smartId || params.smart || "").trim();
     state.playlistId = String(params.playlistId || params.playlist || "").trim();
     state.artistId = String(params.artistId || params.artist || "").trim();
     state.albumId = String(params.albumId || params.album || "").trim();
     state.genre = String(params.genre || params.musicGenre || "").trim();
+    state.language = String(params.language || params.musicLanguage || "").trim();
     if (state.smartId) {
       state.mode = "smart";
       state.favorite = false;
@@ -115,10 +123,11 @@ export function createMusicViews(deps) {
       state.smartId = "";
     }
     if (state.favorite) state.mode = "library";
-    if (state.mode !== "library") {
+    if (!["library", "artists", "albums"].includes(state.mode)) {
       state.artistId = "";
       state.albumId = "";
       state.genre = "";
+      state.language = "";
     }
   }
 
@@ -133,13 +142,22 @@ export function createMusicViews(deps) {
         signal: renderGuard?.signal
       });
       if (renderGuard && !renderGuard()) return;
-      state.data = data;
+      const rawTracks = Array.isArray(data.tracks) ? data.tracks : [];
+      const visibleTracks = state.mode === "library" && state.query ? collapseDuplicateTracks(rawTracks) : rawTracks;
+      state.data = ["artists", "albums"].includes(state.mode)
+        ? data
+        : { ...data, tracks: visibleTracks, rawTracks, rawLoaded: rawTracks.length };
       state.summary = data.summary || state.summary;
       state.smartPlaylist = data.smartPlaylist || selectedSmartPlaylist();
       state.playlist = data.playlist || selectedPlaylist();
-      state.queue = Array.isArray(data.tracks) ? data.tracks : [];
+      if (!["artists", "albums"].includes(state.mode)) state.queue = visibleTracks;
+      state.hasMore = Boolean(data.hasMore);
       state.loading = false;
-      state.status = state.queue.length ? "" : emptyMessage();
+      state.status = state.mode === "artists"
+        ? (Array.isArray(data.artists) && data.artists.length ? "" : "没有匹配的歌手")
+        : state.mode === "albums"
+          ? (Array.isArray(data.albums) && data.albums.length ? "" : "没有匹配的专辑")
+          : (state.queue.length ? "" : emptyMessage());
       els.viewTitle.textContent = musicTitle();
       els.viewMeta.textContent = musicMeta(data);
       renderShell();
@@ -147,6 +165,37 @@ export function createMusicViews(deps) {
       if (renderGuard && !renderGuard()) return;
       state.loading = false;
       state.status = error?.message || "音乐库读取失败";
+      renderShell();
+    }
+  }
+
+  async function loadMoreTracks() {
+    if (state.loadingMore || !state.hasMore || !["library", "artists", "albums"].includes(state.mode)) return;
+    state.loadingMore = true;
+    renderShell();
+    try {
+      const params = new URLSearchParams(musicListQuery());
+      params.set("offset", String(state.mode === "artists"
+        ? state.data?.artists?.length || 0
+        : state.mode === "albums"
+          ? state.data?.albums?.length || 0
+          : state.data?.rawLoaded ?? state.data?.tracks?.length ?? 0));
+      const endpoint = state.mode === "artists" ? "/api/music/artists" : state.mode === "albums" ? "/api/music/albums" : "/api/music/tracks";
+      const data = await fetchJson(getActiveUrl(), `${endpoint}?${params}`, { timeoutMs: 18000 });
+      if (state.mode === "artists") {
+        state.data = { ...data, artists: [...(state.data?.artists || []), ...(data.artists || [])] };
+      } else if (state.mode === "albums") {
+        state.data = { ...data, albums: [...(state.data?.albums || []), ...(data.albums || [])] };
+      } else {
+        const rawTracks = [...(state.data?.rawTracks || state.data?.tracks || []), ...(data.tracks || [])];
+        const tracks = state.mode === "library" && state.query ? collapseDuplicateTracks(rawTracks) : rawTracks;
+        state.data = { ...data, tracks, rawTracks, rawLoaded: rawTracks.length };
+        state.queue = tracks;
+      }
+      state.summary = data.summary || state.summary;
+      state.hasMore = Boolean(data.hasMore);
+    } finally {
+      state.loadingMore = false;
       renderShell();
     }
   }
@@ -299,8 +348,18 @@ export function createMusicViews(deps) {
     lyricRaf = 0;
     els.viewContent.innerHTML = "";
     const shell = document.createElement("section");
-    shell.className = "music-mobile-shell";
-    shell.append(renderLibraryHeader(), renderSmartPlaylists(), renderPlaylists(), renderTabs(), renderControls(), renderFacetFilters(), renderTrackList(), renderMiniPlayer());
+    const searchFocused = Boolean(state.searchOpen || state.query);
+    shell.className = `music-mobile-shell${searchFocused ? " is-search-focused" : ""}`;
+    shell.append(renderLibraryHeader());
+    if (!searchFocused && !["artists", "albums"].includes(state.mode)) shell.append(renderSmartPlaylists(), renderPlaylists());
+    shell.append(renderTabs(), renderControls());
+    if (state.mode === "artists") shell.append(renderArtistBrowser());
+    else if (state.mode === "albums") shell.append(renderAlbumBrowser());
+    else {
+      if (!searchFocused) shell.append(renderFacetFilters());
+      shell.append(renderTrackList());
+    }
+    shell.append(renderMiniPlayer());
     if (state.fullscreen) shell.append(renderFullPlayer());
     els.viewContent.append(shell);
     document.body.classList.toggle("music-player-open", state.fullscreen);
@@ -492,6 +551,8 @@ export function createMusicViews(deps) {
     tabs.className = "music-mobile-tabs";
     for (const tab of [
       { label: "全部", mode: "library", favorite: false },
+      { label: "歌手", mode: "artists", favorite: false },
+      { label: "专辑", mode: "albums", favorite: false },
       { label: "最近", mode: "history", favorite: false },
       { label: "收藏", mode: "library", favorite: true }
     ]) {
@@ -513,10 +574,17 @@ export function createMusicViews(deps) {
 
     const search = document.createElement("input");
     search.type = "search";
-    search.placeholder = "搜索歌曲、歌手或专辑";
+    search.setAttribute("aria-label", state.mode === "artists" ? "搜索歌手" : state.mode === "albums" ? "搜索专辑" : "搜索音乐");
+    search.setAttribute("enterkeyhint", "search");
+    search.autocomplete = "off";
+    search.placeholder = state.mode === "artists" ? "搜索歌手" : state.mode === "albums" ? "搜索专辑或歌手" : "搜索歌曲、歌手或专辑";
     search.value = state.query;
     search.disabled = state.mode === "history";
-    const applySearch = () => updateListParams({ query: search.value.trim(), mode: state.mode === "smart" ? "smart" : "library", favorite: state.favorite });
+    const applySearch = () => updateListParams({
+      query: search.value.trim(),
+      mode: ["artists", "albums"].includes(state.mode) ? state.mode : state.mode === "smart" ? "smart" : "library",
+      favorite: ["artists", "albums"].includes(state.mode) ? false : state.favorite
+    });
     search.addEventListener("change", applySearch);
     search.addEventListener("search", applySearch);
     search.addEventListener("keydown", (event) => {
@@ -552,24 +620,33 @@ export function createMusicViews(deps) {
 
     const sort = document.createElement("select");
     sort.className = "music-mobile-sort";
-    sort.setAttribute("aria-label", "音乐排序");
-    sort.disabled = state.mode !== "library";
-    for (const [value, label] of [
-      ["album", "专辑"],
+    sort.setAttribute("aria-label", state.mode === "artists" ? "歌手排序" : state.mode === "albums" ? "专辑排序" : "音乐排序");
+    sort.disabled = !["library", "artists", "albums"].includes(state.mode);
+    const sortOptions = state.mode === "artists" ? [
+      ["count", "歌曲最多"],
+      ["name", "按名称"]
+    ] : state.mode === "albums" ? [
+      ["updated", "最近入库"],
+      ["title", "按名称"],
+      ["year", "按年份"],
+      ["tracks", "歌曲最多"]
+    ] : [
+      ["album", state.query ? "匹配度" : "专辑"],
       ["artist", "歌手"],
       ["title", "歌名"],
       ["duration", "时长"],
       ["played", "最近"],
       ["favorite", "收藏"],
       ["rating", "评分"]
-    ]) {
+    ];
+    for (const [value, label] of sortOptions) {
       const option = document.createElement("option");
       option.value = value;
       option.textContent = label;
-      option.selected = state.sort === value;
+      option.selected = (state.mode === "artists" ? state.artistSort : state.mode === "albums" ? state.albumSort : state.sort) === value;
       sort.append(option);
     }
-    sort.addEventListener("change", () => updateListParams({ sort: sort.value }));
+    sort.addEventListener("change", () => updateListParams(state.mode === "artists" ? { artistSort: sort.value } : state.mode === "albums" ? { albumSort: sort.value } : { sort: sort.value }));
     wrap.append(sort);
     return wrap;
   }
@@ -584,9 +661,15 @@ export function createMusicViews(deps) {
     const artists = Array.isArray(state.data?.artists) ? state.data.artists : [];
     const albums = Array.isArray(state.data?.albums) ? state.data.albums : [];
     const genres = Array.isArray(state.data?.genres) ? state.data.genres : [];
-    if (!artists.length && !albums.length && !genres.length) {
+    const languages = Array.isArray(state.data?.languages) ? state.data.languages : (state.summary?.languages || []);
+    if (!artists.length && !albums.length && !genres.length && !languages.length) {
       wrap.hidden = true;
       return wrap;
+    }
+    if (languages.length) {
+      wrap.append(renderFacetRow("语种", languageFacetItems(languages), state.language, (id) => {
+        updateListParams({ language: id, artistId: "", albumId: "", genre: "", mode: "library" });
+      }));
     }
     if (genres.length) {
       wrap.append(renderFacetRow("风格", genreFacetItems(genres), state.genre, (id) => {
@@ -637,6 +720,17 @@ export function createMusicViews(deps) {
     ];
   }
 
+  function languageFacetItems(languages = []) {
+    return [
+      { id: "", label: "全部语种", title: "全部语种" },
+      ...languages.map((language) => ({
+        id: language.name || language.id || "",
+        label: language.name || "其他",
+        title: `${language.name || "其他"} · ${formatNumber(language.trackCount || 0)} 首`
+      }))
+    ];
+  }
+
   function genreFacetItems(genres = []) {
     return [
       { id: "", label: "全部风格", title: "全部风格" },
@@ -667,6 +761,131 @@ export function createMusicViews(deps) {
     return selected ? [selected, ...rest] : rest;
   }
 
+  function renderArtistBrowser() {
+    const section = document.createElement("section");
+    section.className = "music-mobile-artist-browser";
+
+    const languages = document.createElement("div");
+    languages.className = "music-mobile-artist-languages";
+    const languageItems = [{ name: "", label: "全部", artistCount: state.summary?.totals?.artists || 0 }, ...(state.summary?.languages || state.data?.languages || []).map((item) => ({ ...item, label: item.name }))];
+    for (const language of languageItems) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = state.language === language.name ? "active" : "";
+      button.textContent = `${language.label} ${formatNumber(language.artistCount || 0)}`;
+      button.addEventListener("click", () => updateListParams({ mode: "artists", language: language.name, query: "" }, { resetSearch: true }));
+      languages.append(button);
+    }
+
+    const grid = document.createElement("div");
+    grid.className = "music-mobile-artist-grid";
+    const artists = Array.isArray(state.data?.artists) ? state.data.artists : [];
+    if (state.loading && !artists.length) {
+      grid.append(messageBox("正在读取歌手资料库"));
+    } else if (!artists.length) {
+      grid.append(messageBox(state.status || "没有匹配的歌手"));
+    } else {
+      artists.forEach((artist) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "music-mobile-artist-card";
+        const avatar = document.createElement("b");
+        avatar.textContent = Array.from(artist.name || "?")[0] || "?";
+        const text = document.createElement("span");
+        const name = document.createElement("strong");
+        name.textContent = artist.name || "未知歌手";
+        const meta = document.createElement("small");
+        meta.textContent = `${artist.language || "其他"} · ${formatNumber(artist.trackCount || 0)} 首 · ${formatNumber(artist.albumCount || 0)} 专辑`;
+        text.append(name, meta);
+        button.append(avatar, text);
+        button.addEventListener("click", () => updateListParams({
+          mode: "library",
+          artistId: artist.id,
+          albumId: "",
+          genre: "",
+          language: artist.language || "",
+          query: ""
+        }, { resetSearch: true }));
+        grid.append(button);
+      });
+    }
+
+    if (state.hasMore) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "music-mobile-load-more";
+      more.textContent = state.loadingMore ? "正在加载…" : `加载更多（已显示 ${formatNumber(artists.length)} 位）`;
+      more.disabled = state.loadingMore;
+      more.addEventListener("click", () => loadMoreTracks().catch(() => {}));
+      grid.append(more);
+    }
+
+    section.append(languages, grid);
+    return section;
+  }
+
+  function renderAlbumBrowser() {
+    const section = document.createElement("section");
+    section.className = "music-mobile-artist-browser music-mobile-album-browser";
+
+    const languages = document.createElement("div");
+    languages.className = "music-mobile-artist-languages";
+    const languageItems = [{ name: "", label: "全部", albumCount: state.summary?.totals?.albums || 0 }, ...(state.summary?.languages || state.data?.languages || []).map((item) => ({ ...item, label: item.name }))];
+    for (const language of languageItems) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = state.language === language.name ? "active" : "";
+      button.textContent = `${language.label} ${formatNumber(language.albumCount || 0)}`;
+      button.addEventListener("click", () => updateListParams({ mode: "albums", language: language.name, query: "" }, { resetSearch: true }));
+      languages.append(button);
+    }
+
+    const grid = document.createElement("div");
+    grid.className = "music-mobile-album-grid";
+    const albums = Array.isArray(state.data?.albums) ? state.data.albums : [];
+    if (state.loading && !albums.length) {
+      grid.append(messageBox("正在读取专辑资料库"));
+    } else if (!albums.length) {
+      grid.append(messageBox(state.status || "没有匹配的专辑"));
+    } else {
+      albums.forEach((album) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "music-mobile-album-card";
+        button.append(renderCover(album, "tiny"));
+        const text = document.createElement("span");
+        const name = document.createElement("strong");
+        name.textContent = album.title || "未知专辑";
+        const meta = document.createElement("small");
+        meta.textContent = [album.artistName || "未知歌手", album.year || "", `${formatNumber(album.trackCount || 0)} 首`].filter(Boolean).join(" · ");
+        text.append(name, meta);
+        button.append(text);
+        button.addEventListener("click", () => updateListParams({
+          mode: "library",
+          artistId: album.artistId || "",
+          albumId: album.id,
+          genre: "",
+          language: state.language,
+          query: ""
+        }, { resetSearch: true }));
+        grid.append(button);
+      });
+    }
+
+    if (state.hasMore) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "music-mobile-load-more";
+      more.textContent = state.loadingMore ? "正在加载…" : `加载更多（已显示 ${formatNumber(albums.length)} 张）`;
+      more.disabled = state.loadingMore;
+      more.addEventListener("click", () => loadMoreTracks().catch(() => {}));
+      grid.append(more);
+    }
+
+    section.append(languages, grid);
+    return section;
+  }
+
   function renderTrackList() {
     const wrap = document.createElement("div");
     wrap.className = "music-mobile-list";
@@ -680,6 +899,15 @@ export function createMusicViews(deps) {
       return wrap;
     }
     tracks.forEach((track, index) => wrap.append(renderTrackRow(track, index)));
+    if (state.hasMore) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "music-mobile-load-more";
+      more.textContent = state.loadingMore ? "正在加载…" : `加载更多（已显示 ${formatNumber(tracks.length)} 首）`;
+      more.disabled = state.loadingMore;
+      more.addEventListener("click", () => loadMoreTracks().catch(() => {}));
+      wrap.append(more);
+    }
     return wrap;
   }
 
@@ -692,7 +920,7 @@ export function createMusicViews(deps) {
     if (isCurrent) row.dataset.current = "true";
     row.tabIndex = 0;
     row.setAttribute("role", "button");
-    row.setAttribute("aria-label", `播放 ${track.title || "歌曲"}`);
+    row.setAttribute("aria-label", `播放 ${track.title || "歌曲"}${Number(track.duplicateCount || 0) > 1 ? `，已合并 ${track.duplicateCount} 个版本` : ""}`);
     const number = document.createElement("span");
     number.className = "music-mobile-track-index";
     if (isPlaying) {
@@ -706,7 +934,12 @@ export function createMusicViews(deps) {
     const title = document.createElement("strong");
     title.textContent = track.title || "未知歌曲";
     const meta = document.createElement("small");
-    meta.textContent = [track.artist || "未知歌手", track.album || "未知专辑", ratingLabel(track.rating)].filter(Boolean).join(" · ");
+    meta.textContent = [
+      track.artist || "未知歌手",
+      track.album || "未知专辑",
+      ratingLabel(track.rating),
+      Number(track.duplicateCount || 0) > 1 ? `${formatNumber(track.duplicateCount)} 个版本` : ""
+    ].filter(Boolean).join(" · ");
     text.append(title, meta);
     const side = document.createElement("span");
     side.className = "music-mobile-track-side";
@@ -2244,9 +2477,12 @@ export function createMusicViews(deps) {
     if (Object.prototype.hasOwnProperty.call(patch, "playlistId")) state.playlistId = String(patch.playlistId || "").trim();
     if (Object.prototype.hasOwnProperty.call(patch, "query")) state.query = String(patch.query || "").trim();
     if (Object.prototype.hasOwnProperty.call(patch, "sort")) state.sort = normalizeSort(patch.sort);
+    if (Object.prototype.hasOwnProperty.call(patch, "artistSort")) state.artistSort = String(patch.artistSort || "count") === "name" ? "name" : "count";
+    if (Object.prototype.hasOwnProperty.call(patch, "albumSort")) state.albumSort = normalizeAlbumSort(patch.albumSort);
     if (Object.prototype.hasOwnProperty.call(patch, "artistId")) state.artistId = String(patch.artistId || "").trim();
     if (Object.prototype.hasOwnProperty.call(patch, "albumId")) state.albumId = String(patch.albumId || "").trim();
     if (Object.prototype.hasOwnProperty.call(patch, "genre")) state.genre = String(patch.genre || "").trim();
+    if (Object.prototype.hasOwnProperty.call(patch, "language")) state.language = String(patch.language || "").trim();
     if (Object.prototype.hasOwnProperty.call(patch, "mode") && state.mode !== "smart" && !Object.prototype.hasOwnProperty.call(patch, "smartId")) state.smartId = "";
     if (Object.prototype.hasOwnProperty.call(patch, "mode") && state.mode !== "playlist" && !Object.prototype.hasOwnProperty.call(patch, "playlistId")) state.playlistId = "";
     if (state.smartId) {
@@ -2260,10 +2496,11 @@ export function createMusicViews(deps) {
     }
     if (state.mode !== "smart") state.smartId = "";
     if (state.mode !== "playlist") state.playlistId = "";
-    if (state.mode !== "library") {
+    if (!["library", "artists", "albums"].includes(state.mode)) {
       state.artistId = "";
       state.albumId = "";
       state.genre = "";
+      state.language = "";
     }
     if (options.resetSearch) state.searchOpen = false;
     showView("music", musicRouteParams(), {
@@ -2277,13 +2514,23 @@ export function createMusicViews(deps) {
     if (state.mode === "history") return `/api/music/history?limit=${DEFAULT_LIMIT}`;
     if (state.mode === "playlist" && state.playlistId) return `/api/music/playlists/${encodeURIComponent(state.playlistId)}`;
     const query = musicListQuery();
-    return `/api/music/tracks?${query}`;
+    return `${state.mode === "artists" ? "/api/music/artists" : state.mode === "albums" ? "/api/music/albums" : "/api/music/tracks"}?${query}`;
   }
 
   function musicListQuery() {
     const params = new URLSearchParams();
     params.set("limit", String(DEFAULT_LIMIT));
     if (state.query) params.set("q", state.query);
+    if (state.mode === "artists") {
+      params.set("sort", state.artistSort);
+      if (state.language) params.set("language", state.language);
+      return params.toString();
+    }
+    if (state.mode === "albums") {
+      params.set("sort", state.albumSort);
+      if (state.language) params.set("language", state.language);
+      return params.toString();
+    }
     if (state.sort && state.sort !== DEFAULT_SORT && state.mode !== "smart") params.set("sort", state.sort);
     if (state.favorite) params.set("favorite", "1");
     if (state.smartId) params.set("smart", state.smartId);
@@ -2291,6 +2538,7 @@ export function createMusicViews(deps) {
     if (state.artistId) params.set("artist", state.artistId);
     if (state.albumId) params.set("album", state.albumId);
     if (state.genre) params.set("genre", state.genre);
+    if (state.language) params.set("language", state.language);
     return params.toString();
   }
 
@@ -2304,17 +2552,23 @@ export function createMusicViews(deps) {
       ...(state.playlistId ? { playlistId: state.playlistId } : {}),
       ...(state.artistId ? { artistId: state.artistId } : {}),
       ...(state.albumId ? { albumId: state.albumId } : {}),
-      ...(state.genre ? { genre: state.genre } : {})
+      ...(state.genre ? { genre: state.genre } : {}),
+      ...(state.language ? { language: state.language } : {}),
+      ...(state.mode === "artists" && state.artistSort !== "count" ? { artistSort: state.artistSort } : {}),
+      ...(state.mode === "albums" && state.albumSort !== "updated" ? { albumSort: state.albumSort } : {})
     };
   }
 
   function musicTitle() {
+    if (state.mode === "artists") return state.language ? `${state.language}歌手` : "歌手浏览";
+    if (state.mode === "albums") return state.language ? `${state.language}专辑` : "专辑浏览";
     if (state.mode === "history") return "最近播放";
     if (state.mode === "playlist") return selectedPlaylist()?.name || state.playlist?.name || "歌单";
     if (state.smartId) return selectedSmartPlaylist()?.name || "智能歌单";
     if (state.genre) return state.genre;
     if (state.albumId) return selectedAlbumTitle() || "专辑";
     if (state.artistId) return selectedArtistName() || "歌手";
+    if (state.language) return `${state.language}音乐`;
     if (state.favorite) return "收藏歌曲";
     return "音乐";
   }
@@ -2323,9 +2577,17 @@ export function createMusicViews(deps) {
     const summary = data?.summary || state.summary || {};
     const total = data?.total ?? state.queue.length;
     const totals = summary.totals || {};
-    const scope = [selectedArtistName(), selectedAlbumTitle(), state.genre].filter(Boolean).join(" · ");
+    const scope = [state.language, selectedArtistName(), selectedAlbumTitle(), state.genre].filter(Boolean).join(" · ");
     if (state.loading) return state.status || "正在读取";
+    if (state.mode === "artists") return `${formatNumber(total || 0)} 位歌手 · ${state.artistSort === "name" ? "按名称" : "歌曲最多"}`;
+    if (state.mode === "albums") return `${formatNumber(total || 0)} 张专辑 · ${{ updated: "最近入库", title: "按名称", year: "按年份", tracks: "歌曲最多" }[state.albumSort] || "最近入库"}`;
     if (state.mode === "history") return `${formatNumber(total || 0)} 首 · 最近播放`;
+    if (data?.relevance) {
+      const visible = Number(data?.tracks?.length || 0);
+      return visible && visible < Number(total || 0)
+        ? `${formatNumber(visible)} 首 · ${formatNumber(total || 0)} 个文件 · 按匹配度`
+        : `${formatNumber(total || 0)} 首 · 按匹配度`;
+    }
     if (state.mode === "playlist") {
       const playlist = selectedPlaylist() || state.playlist;
       return `${formatNumber(total || 0)} 首${playlist?.updatedAt ? ` · 更新于 ${shortDate(playlist.updatedAt)}` : ""}`;
@@ -2347,6 +2609,8 @@ export function createMusicViews(deps) {
   }
 
   function emptyMessage() {
+    if (state.mode === "artists") return "没有匹配的歌手";
+    if (state.mode === "albums") return "没有匹配的专辑";
     if (state.mode === "history") return "还没有最近播放";
     if (state.mode === "playlist") return "这个歌单还没有歌曲";
     if (state.smartId) return "这个智能歌单暂时没有歌曲";
@@ -2405,9 +2669,76 @@ export function createMusicViews(deps) {
   };
 }
 
+function collapseDuplicateTracks(tracks = []) {
+  const groups = new Map();
+  const result = [];
+  for (const source of Array.isArray(tracks) ? tracks : []) {
+    if (!source?.id) continue;
+    const key = duplicateTrackKey(source);
+    const existing = groups.get(key);
+    if (!existing) {
+      const entry = { index: result.length, tracks: [source], selected: source };
+      groups.set(key, entry);
+      result.push(source);
+      continue;
+    }
+    existing.tracks.push(source);
+    if (duplicateTrackScore(source) > duplicateTrackScore(existing.selected)) {
+      existing.selected = source;
+      result[existing.index] = source;
+    }
+  }
+  for (const group of groups.values()) {
+    if (group.tracks.length < 2) continue;
+    const selected = result[group.index];
+    result[group.index] = {
+      ...selected,
+      duplicateCount: group.tracks.length,
+      duplicateIds: group.tracks.map((track) => track.id),
+      favorite: group.tracks.some((track) => Boolean(track.favorite)),
+      rating: Math.max(...group.tracks.map((track) => Number(track.rating || 0))),
+      playCount: Math.max(...group.tracks.map((track) => Number(track.playCount || 0)))
+    };
+  }
+  return result;
+}
+
+function duplicateTrackKey(track = {}) {
+  const title = normalizeDuplicateText(track.title);
+  const artist = normalizeDuplicateText(track.artist);
+  const durationMs = Math.max(0, Number(track.durationMs || 0));
+  if (!title || !artist || durationMs < 10_000) return `id:${track.id || ""}`;
+  return `${title}|${artist}|${Math.round(durationMs / 2000)}`;
+}
+
+function normalizeDuplicateText(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[\s·•]+/gu, "")
+    .trim();
+}
+
+function duplicateTrackScore(track = {}) {
+  const ext = String(track.fileName || "").toLocaleLowerCase().match(/\.[a-z0-9]+$/u)?.[0] || "";
+  const lossless = [".flac", ".wav", ".aiff", ".ape", ".alac", ".dsf", ".dff"].includes(ext) ? 1 : 0;
+  return (track.favorite ? 100_000 : 0)
+    + Math.max(0, Number(track.rating || 0)) * 10_000
+    + lossless * 1_000
+    + (track.hasLyrics ? 200 : 0)
+    + Math.max(0, Number(track.bitDepth || 0)) * 4
+    + Math.max(0, Number(track.sampleRate || 0)) / 1000
+    + Math.log2(Math.max(1, Number(track.sizeBytes || 0)));
+}
+
 function normalizeMode(value) {
   const mode = String(value || DEFAULT_MODE).trim();
-  return ["library", "history", "smart", "playlist"].includes(mode) ? mode : DEFAULT_MODE;
+  return ["library", "artists", "albums", "history", "smart", "playlist"].includes(mode) ? mode : DEFAULT_MODE;
+}
+
+function normalizeAlbumSort(value) {
+  const sort = String(value || "updated").trim();
+  return ["updated", "title", "year", "tracks"].includes(sort) ? sort : "updated";
 }
 
 function normalizeSort(value) {

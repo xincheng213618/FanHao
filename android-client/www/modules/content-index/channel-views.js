@@ -6,7 +6,7 @@ import { formatBytes, formatDate, formatNumber } from "../../js/format.js";
 import { absoluteUrl, loadPreviewImage } from "../../js/image.js";
 
 const CHANNELS = {
-  photo: { label: "套图", path: "/photo", empty: "还没有索引到图包。", unit: "图包" },
+  photo: { label: "套图", path: "/photo", empty: "还没有索引到套图。", unit: "套" },
   manga: { label: "韩漫", path: "/photo/manga", empty: "还没有缓存漫画。", unit: "部" },
   western: { label: "欧美", path: "/western", empty: "还没有索引到欧美视频。", unit: "视频" },
   media: { label: "影视作品", path: "/media", empty: "还没有索引到影视作品。", unit: "部" },
@@ -35,6 +35,7 @@ function channelDataSignature(data = {}) {
     tvView: data.tvView || "",
     seriesKey: data.seriesKey || "",
     sort: data.sort || "",
+    searchTerms: data.searchTerms || [],
     facets: data.facets || null,
     items: items.map((item) => [
       item.id || "",
@@ -45,6 +46,7 @@ function channelDataSignature(data = {}) {
       item.updatedAt || "",
       item.size || 0,
       item.collectionId || "",
+      item.matchFields || [],
       item.seriesKey || "",
       item.chapterCount ?? "",
       item.imageCount ?? "",
@@ -95,6 +97,7 @@ export function createChannelViews(context) {
   let photoDetailImageQueue = [];
   let activePhotoDetailImageLoads = 0;
   let photoDetailImageGeneration = 0;
+  let channelPageState = null;
 
   async function renderChannel(params = {}, isActive = () => true) {
     const normalizedMode = normalizeChannelMode(typeof params === "string" ? params : params.mode);
@@ -109,7 +112,16 @@ export function createChannelViews(context) {
     const sort = normalizeChannelSort(typeof params === "object" ? params.sort || "" : "");
     const channel = channelConfig(normalizedMode);
     const limit = getChannelLimit();
-    const path = channelItemsPath(normalizedMode, limit, { query, photoView, category, person, collection, tvView, seriesKey, sort });
+    const filters = { query, photoView, category, person, collection, tvView, seriesKey, sort };
+    const pageKey = channelPageKey(normalizedMode, filters);
+    const currentPage = channelPageState?.key === pageKey ? channelPageState.data : null;
+    const loadedCount = Array.isArray(currentPage?.items) ? currentPage.items.length : 0;
+    const knownTotal = Number(currentPage?.total || 0);
+    const hasKnownTotal = currentPage && Number.isFinite(Number(currentPage.total));
+    const pageComplete = currentPage && (loadedCount >= limit || (hasKnownTotal && loadedCount >= knownTotal));
+    const offset = pageComplete ? 0 : loadedCount;
+    const requestLimit = Math.max(1, limit - offset);
+    const path = channelItemsPath(normalizedMode, requestLimit, filters, offset);
     const activeUrl = getActiveUrl();
     let renderedCache = false;
     let renderedCacheSignature = "";
@@ -118,6 +130,10 @@ export function createChannelViews(context) {
     if (normalizedMode === "photo") setTopSecondaryTabs("photo", { category });
     else if (["media", "movie", "tv"].includes(normalizedMode)) setTopSecondaryTabs("media", { mode: normalizedMode });
     else setTopSecondaryTabs("none");
+    if (pageComplete) {
+      renderChannelData(normalizedMode, currentPage);
+      return;
+    }
     els.viewKicker.textContent = query ? "频道搜索" : "内容频道";
     els.viewTitle.textContent = query ? `${channel.label}：${query}` : channel.label;
     els.viewMeta.textContent = query ? "正在筛选" : "正在读取";
@@ -127,19 +143,23 @@ export function createChannelViews(context) {
     if (!isActive()) return;
     if (cached?.payload) {
       renderedCache = true;
-      renderedCacheSignature = channelDataSignature(cached.payload);
-      renderChannelData(normalizedMode, cached.payload, cached);
+      const mergedCache = mergeChannelPageData(currentPage, cached.payload, offset);
+      channelPageState = { key: pageKey, data: mergedCache };
+      renderedCacheSignature = channelDataSignature(mergedCache);
+      renderChannelData(normalizedMode, mergedCache, cached);
     }
 
     try {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
       writeCachedJson(activeUrl, path, data).catch(() => {});
       if (!isActive()) return;
-      if (renderedCache && channelDataSignature(data) === renderedCacheSignature) {
-        applyChannelHeader(normalizedMode, data);
+      const mergedData = mergeChannelPageData(currentPage, data, offset);
+      channelPageState = { key: pageKey, data: mergedData };
+      if (renderedCache && channelDataSignature(mergedData) === renderedCacheSignature) {
+        applyChannelHeader(normalizedMode, mergedData);
         return;
       }
-      renderChannelData(normalizedMode, data);
+      renderChannelData(normalizedMode, mergedData);
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
@@ -150,6 +170,38 @@ export function createChannelViews(context) {
         renderMessage(error.message || `${channel.label}读取失败`, "error");
       }
     }
+  }
+
+  function channelPageKey(mode, filters = {}) {
+    return JSON.stringify({
+      mode,
+      query: String(filters.query || "").trim(),
+      photoView: filters.photoView || "",
+      category: filters.category || "",
+      person: filters.person || "",
+      collection: filters.collection || "",
+      tvView: filters.tvView || "",
+      seriesKey: filters.seriesKey || "",
+      sort: normalizeChannelSort(filters.sort)
+    });
+  }
+
+  function mergeChannelPageData(existing = null, incoming = {}, offset = 0) {
+    if (!existing || offset <= 0) return incoming;
+    const merged = new Map();
+    for (const item of [...(existing.items || []), ...(incoming.items || [])]) {
+      const key = `${String(item?.type || "")}:${String(item?.id || item?.collectionId || item?.routePath || "")}`;
+      if (key !== ":") merged.set(key, item);
+    }
+    const items = [...merged.values()];
+    return {
+      ...existing,
+      ...incoming,
+      items,
+      count: items.length,
+      limit: items.length,
+      offset: 0
+    };
   }
 
   function applyChannelHeader(mode, data = {}, cacheEntry = null) {
@@ -173,7 +225,7 @@ export function createChannelViews(context) {
     else setTopSecondaryTabs("none");
     els.viewTitle.textContent = channelTitle(channel, { query, mode, photoView, collectionTitle, category, seriesSummary });
     els.viewMeta.textContent = query
-      ? `${formatNumber(total)} 个匹配 · 已显示 ${formatNumber(items.length)}${suffix}`
+      ? `${formatNumber(total)} 个匹配 · 已显示 ${formatNumber(items.length)}${sort === "relevance" ? " · 相关性排序" : ""}${suffix}`
       : `${formatNumber(items.length)} / ${formatNumber(total)} ${unit}${suffix}`;
   }
 
@@ -218,7 +270,7 @@ export function createChannelViews(context) {
     }
 
     if (query) {
-      els.viewContent.append(createChannelQueryRow(channel, query));
+      els.viewContent.append(createChannelQueryRow(channel, query, data.searchTerms || [], sort));
     }
 
     if (!items.length) {
@@ -394,12 +446,16 @@ export function createChannelViews(context) {
     photoDetailImageGeneration += 1;
   }
 
-  function createChannelQueryRow(channel, query) {
+  function createChannelQueryRow(channel, query, terms = [], sort = "") {
     const row = document.createElement("div");
     row.className = "channel-query-row";
 
     const text = document.createElement("span");
-    text.textContent = `${channel.label}内筛选：${query}`;
+    text.textContent = [
+      `${channel.label}内搜索：${query}`,
+      terms.length > 1 ? `同时包含 ${terms.join(" + ")}` : "",
+      sort === "relevance" ? "按相关性排序" : ""
+    ].filter(Boolean).join(" · ");
 
     const button = document.createElement("button");
     button.type = "button";
@@ -413,6 +469,12 @@ export function createChannelViews(context) {
   function createImageModuleRow(activeMode) {
     const row = document.createElement("div");
     row.className = "channel-mode-row image-module-row";
+    row.setAttribute("role", "group");
+    row.setAttribute("aria-label", "内容类型");
+    const title = document.createElement("span");
+    title.className = "channel-mode-label";
+    title.textContent = "内容";
+    row.append(title);
     for (const option of [
       { value: "photo", label: "套图" },
       { value: "manga", label: "韩漫" }
@@ -421,6 +483,7 @@ export function createChannelViews(context) {
       button.type = "button";
       button.className = option.value === activeMode ? "active" : "";
       button.textContent = option.label;
+      button.setAttribute("aria-pressed", String(option.value === activeMode));
       button.addEventListener("click", () => {
         if (option.value === activeMode) return;
         updateChannelParams({
@@ -441,7 +504,7 @@ export function createChannelViews(context) {
   function channelCardLabel(mode, item) {
     if (mode === "photo" && item.type === "photoCollection") return [item.category, item.rootLabel].filter(Boolean).join(" · ") || "合集";
     if (mode === "manga") return [item.category, chapterProgressText(item)].filter(Boolean).join(" · ") || "漫画";
-    if (mode === "photo") return [item.category, item.personName].filter(Boolean).join(" · ") || "图包";
+    if (mode === "photo") return [item.category, item.personName].filter(Boolean).join(" · ") || "套图";
     if (mode === "media" && item.type === "tvSeries") return ["电视剧", item.category, item.year].filter(Boolean).join(" · ");
     if (mode === "media" && item.type === "movie") return ["电影", item.category, item.year].filter(Boolean).join(" · ");
     if (mode === "media" && item.type === "tv") return [item.tvSeries?.title || item.seriesName, item.category].filter(Boolean).slice(0, 2).join(" · ") || "电视剧";
@@ -479,7 +542,7 @@ export function createChannelViews(context) {
   function photoAlbumCardTitle(item = {}) {
     const raw = String(item.title || "").replace(/\s+/g, " ").trim();
     const person = String(item.personName || "").replace(/[[\]]/g, "").trim();
-    if (!raw || !person) return raw || "图包";
+    if (!raw || !person) return raw || "套图";
     return raw
       .replace(new RegExp(`^${escapeRegExp(person)}\\s*[–—-]\\s*`, "i"), "")
       .replace(new RegExp(`^${escapeRegExp(person)}\\s+`, "i"), "")
@@ -499,14 +562,17 @@ export function createChannelViews(context) {
       ];
     }
     if (mode === "photo") {
+      const match = channelSearchMatchText(item);
       if (item.type === "photoCollection") {
         return [
+          match,
           item.albumCount !== null ? `${formatNumber(item.albumCount)} 期` : "",
           Number(item.imageCount || 0) > 0 ? `${formatNumber(item.imageCount)} 张` : "",
           formatBytes(item.size)
         ];
       }
       return [
+        match,
         item.ext ? item.ext.toUpperCase() : "",
         formatBytes(item.size),
         formatDate(item.updatedAt)
@@ -540,6 +606,19 @@ export function createChannelViews(context) {
     ];
   }
 
+  function channelSearchMatchText(item = {}) {
+    const labels = {
+      title: "标题",
+      person: "人物",
+      collection: "合集",
+      category: "分类",
+      folder: "文件夹",
+      metadata: "资料"
+    };
+    const fields = (Array.isArray(item.matchFields) ? item.matchFields : []).map((field) => labels[field]).filter(Boolean);
+    return fields.length ? `匹配 ${fields.slice(0, 2).join("/")}` : "";
+  }
+
   function chapterProgressText(item) {
     if (item.doneChapterCount === null || item.chapterCount === null) return "";
     return `${formatNumber(item.doneChapterCount)}/${formatNumber(item.chapterCount)} 话`;
@@ -549,14 +628,14 @@ export function createChannelViews(context) {
     return String(value || "?").trim().slice(0, 2) || "?";
   }
 
-  function channelItemsPath(mode, limit, filters = {}) {
+  function channelItemsPath(mode, limit, filters = {}, offset = 0) {
+    const text = String(filters.query || "").trim();
     const params = new URLSearchParams({
       mode,
       limit: String(limit),
-      offset: "0",
-      sort: normalizeChannelSort(filters.sort)
+      offset: String(Math.max(0, Number(offset || 0))),
+      sort: text ? "relevance" : normalizeChannelSort(filters.sort)
     });
-    const text = String(filters.query || "").trim();
     if (text) params.set("q", text);
     if (mode === "photo") {
       if (filters.photoView === "collections" && !filters.collection) params.set("photoView", "collections");
@@ -582,7 +661,10 @@ export function createChannelViews(context) {
       return filters.query ? `${filters.collectionTitle}：${filters.query}` : filters.collectionTitle;
     }
     if (filters.mode === "photo" && filters.photoView === "collections") {
-      return filters.query ? `套图合集：${filters.query}` : "套图合集";
+      return filters.query ? `按合集浏览：${filters.query}` : "按合集浏览";
+    }
+    if (filters.mode === "photo") {
+      return filters.query ? `全部套图：${filters.query}` : "全部套图";
     }
     if ((filters.mode === "tv" || filters.mode === "media") && filters.seriesSummary?.title) {
       return filters.query ? `${filters.seriesSummary.title}：${filters.query}` : filters.seriesSummary.title;
@@ -595,7 +677,7 @@ export function createChannelViews(context) {
 
   function normalizeChannelSort(value) {
     const sort = String(value || "").trim();
-    return ["updated", "title", "size", "rating"].includes(sort) ? sort : "updated";
+    return ["updated", "title", "size", "rating", "relevance"].includes(sort) ? sort : "updated";
   }
 
   function createCollectionContextRow(summary = null) {
@@ -610,7 +692,7 @@ export function createChannelViews(context) {
     text.textContent = parts.length ? parts.join(" · ") : "当前合集";
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = "返回合集";
+    button.textContent = "返回按合集";
     button.addEventListener("click", () => updateChannelParams({ photoView: "collections", collection: "", category: "", person: "" }));
     row.append(text, button);
     return row;
@@ -633,15 +715,22 @@ export function createChannelViews(context) {
   function createPhotoModeRow(state = {}) {
     const row = document.createElement("div");
     row.className = "channel-mode-row photo-mode-row";
+    row.setAttribute("role", "group");
+    row.setAttribute("aria-label", "套图浏览方式");
+    const title = document.createElement("span");
+    title.className = "channel-mode-label";
+    title.textContent = "浏览";
+    row.append(title);
     const activeView = state.collection ? "albums" : state.photoView === "albums" ? "albums" : "collections";
     for (const option of [
-      { value: "collections", label: "合集" },
-      { value: "albums", label: "图包" }
+      { value: "collections", label: "按合集" },
+      { value: "albums", label: "全部套图" }
     ]) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = option.value === activeView ? "active" : "";
       button.textContent = option.label;
+      button.setAttribute("aria-pressed", String(option.value === activeView));
       button.addEventListener("click", () => {
         if (option.value === activeView && !state.collection) return;
         updateChannelParams({
@@ -805,12 +894,12 @@ export function createChannelViews(context) {
 
     setActiveBottom("photo");
     els.viewKicker.textContent = "套图";
-    els.viewTitle.textContent = "图包详情";
+    els.viewTitle.textContent = "套图详情";
     els.viewMeta.textContent = "正在读取";
-    els.viewContent.innerHTML = `<div class="loading-row">正在读取图包</div>`;
+    els.viewContent.innerHTML = `<div class="loading-row">正在读取套图</div>`;
 
     if (!albumId) {
-      renderMessage("图包 ID 无效。", "error");
+      renderMessage("套图 ID 无效。", "error");
       return;
     }
 
@@ -829,44 +918,75 @@ export function createChannelViews(context) {
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
-        renderMessage("电脑端暂时连不上，当前显示的是本地缓存图包。", "quiet", false);
+        renderMessage("电脑端暂时连不上，当前显示的是本地缓存套图。", "quiet", false);
       } else {
-        renderMessage(error.message || "图包读取失败", "error");
+        renderMessage(error.message || "套图读取失败", "error");
       }
     }
   }
 
   function renderPhotoAlbum(album = {}, cacheEntry = null) {
-    const images = Array.isArray(album.images) ? album.images : [];
-    const limit = getPhotoImageLimit();
-    const visible = images.slice(0, limit);
-    const totalImages = Number(album.imageCount || images.length || 0);
+    const loadedImages = Array.isArray(album.images) ? album.images.slice() : [];
+    let totalImages = Number(album.imageCount || loadedImages.length || 0);
     const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
 
     els.viewKicker.textContent = [album.category, album.personName].filter(Boolean).join(" · ") || "套图";
-    els.viewTitle.textContent = album.title || "图包详情";
+    els.viewTitle.textContent = album.title || "套图详情";
     els.viewMeta.textContent = `${formatNumber(totalImages)} 张 · ${formatBytes(album.size)}${suffix}`;
     resetPreviewImageObserver();
     els.viewContent.innerHTML = "";
     recordPhotoRecent(album);
     els.viewContent.append(createPhotoSummary(album, photoContentItem(album)));
 
-    if (!visible.length) {
-      renderMessage("这个图包暂时没有可预览图片。", "quiet", false);
+    if (!loadedImages.length) {
+      renderMessage("这套图暂时没有可预览图片。", "quiet", false);
       return;
     }
 
     const grid = document.createElement("div");
     grid.className = "photo-preview-grid";
-    visible.forEach((image, index) => grid.append(createPhotoTile(album, image, images, { index })));
+    loadedImages.forEach((image, index) => grid.append(createPhotoTile(album, image, loadedImages, { index })));
     els.viewContent.append(grid);
 
-    if (visible.length < totalImages) {
-      els.viewContent.append(createLoadMoreButton(`向下滑动继续显示 ${formatNumber(visible.length)} / ${formatNumber(totalImages)}`, () => {
-        increasePhotoImageLimit(24);
-        return renderCurrentViewPreservingScroll();
-      }));
+    appendPhotoDetailLoadMore(album, loadedImages, grid, totalImages, (nextTotal) => {
+      totalImages = nextTotal;
+    });
+  }
+
+  function appendPhotoDetailLoadMore(album, loadedImages, grid, totalImages, updateTotalImages) {
+    if (!grid?.isConnected || loadedImages.length >= totalImages || !album?.id) return;
+    const text = `向下滑动继续显示 ${formatNumber(loadedImages.length)} / ${formatNumber(totalImages)}`;
+    const more = createLoadMoreButton(text, async () => {
+      const imageOffset = loadedImages.length;
+      increasePhotoImageLimit(24);
+      const imageLimit = Math.max(1, getPhotoImageLimit() - imageOffset);
+      const path = photoDetailPath(album.id, { imageLimit, imageOffset });
+      const data = await fetchJson(getActiveUrl(), path, { timeoutMs: 26000 });
+      if (!grid.isConnected) return;
+
+      const nextAlbum = data.album || {};
+      const mergedImages = mergePhotoDetailImages(loadedImages, nextAlbum.images || []);
+      const appendedImages = mergedImages.slice(loadedImages.length);
+      loadedImages.splice(0, loadedImages.length, ...mergedImages);
+      Object.assign(album, nextAlbum, { images: loadedImages, imageOffset: 0, imageLimit: loadedImages.length });
+      const nextTotal = Math.max(Number(nextAlbum.imageCount || 0), totalImages, loadedImages.length);
+      updateTotalImages(nextTotal);
+      appendedImages.forEach((image, offset) => {
+        grid.append(createPhotoTile(album, image, loadedImages, { index: imageOffset + offset }));
+      });
+      more.remove();
+      appendPhotoDetailLoadMore(album, loadedImages, grid, nextTotal, updateTotalImages);
+    });
+    els.viewContent.append(more);
+  }
+
+  function mergePhotoDetailImages(existing, incoming) {
+    const merged = new Map();
+    for (const image of [...(existing || []), ...(incoming || [])]) {
+      const key = Number(image?.index || 0) > 0 ? `index:${Number(image.index)}` : `url:${String(image?.url || image?.name || "")}`;
+      if (key !== "url:") merged.set(key, image);
     }
+    return [...merged.values()].sort((a, b) => Number(a.index || 0) - Number(b.index || 0));
   }
 
   function createPhotoSummary(album = {}, favoriteItem = null) {
@@ -927,14 +1047,32 @@ export function createChannelViews(context) {
 
     if (imageUrl) {
       const img = document.createElement("img");
-      img.alt = image.name || `${album.title || "图包"} ${image.index || ""}`.trim();
+      img.alt = image.name || `${album.title || "套图"} ${image.index || ""}`.trim();
       img.loading = "lazy";
       img.decoding = "async";
       img.referrerPolicy = "no-referrer";
       if ("fetchPriority" in img) img.fetchPriority = Number(options.index || 0) < EAGER_PHOTO_DETAIL_IMAGE_COUNT ? "high" : "low";
+      img.addEventListener("load", () => {
+        delete img.dataset.photoReleased;
+        delete img.dataset.photoFailed;
+        tile.classList.remove("load-failed");
+        fallback.textContent = formatNumber(image.index || 0);
+        tile.setAttribute("aria-label", `打开第 ${formatNumber(image.index || options.index + 1)} 张`);
+      });
+      img.addEventListener("error", () => {
+        if (img.dataset.photoReleased === "1") return;
+        img.dataset.photoFailed = "1";
+        tile.classList.add("load-failed");
+        fallback.textContent = "加载失败 · 点按重试";
+        tile.setAttribute("aria-label", `第 ${formatNumber(image.index || options.index + 1)} 张加载失败，点按重试`);
+      });
       loadPhotoDetailImage(img, imageUrl, options.index);
       tile.append(img);
       tile.addEventListener("click", () => {
+        if (img.dataset.photoFailed === "1") {
+          retryPhotoDetailImage(img, imageUrl, image.index || options.index + 1, fallback);
+          return;
+        }
         const viewer = getMediaViewer();
         if (!viewer) return;
         const fallbackItems = photoViewerItemsFromImages(album, sourceImages);
@@ -989,14 +1127,16 @@ export function createChannelViews(context) {
     return (Array.isArray(images) ? images : [])
       .map((item) => ({
         url: absoluteUrl(getActiveUrl(), item.url),
-        title: item.name || `${album.title || "图包"} ${item.index || ""}`.trim()
+        title: item.name || `${album.title || "套图"} ${item.index || ""}`.trim()
       }))
       .filter((item) => item.url);
   }
 
   function loadPhotoDetailImage(img, imageUrl, index = 0) {
     if (!img || !imageUrl) return;
+    img.dataset.photoRetrySrc = imageUrl;
     const safeIndex = Math.max(0, Number(index) || 0);
+    if ("IntersectionObserver" in window) getPhotoDetailImageObserver().observe(img);
     if (safeIndex < EAGER_PHOTO_DETAIL_IMAGE_COUNT || !("IntersectionObserver" in window)) {
       img.src = imageUrl;
       return;
@@ -1009,10 +1149,9 @@ export function createChannelViews(context) {
     if (photoDetailImageObserver) return photoDetailImageObserver;
     photoDetailImageObserver = new IntersectionObserver((entries) => {
       for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
         const image = entry.target;
-        photoDetailImageObserver.unobserve(image);
-        loadPendingPhotoDetailImage(image);
+        if (entry.isIntersecting) loadPendingPhotoDetailImage(image);
+        else releasePhotoDetailImage(image);
       }
     }, {
       root: null,
@@ -1023,7 +1162,7 @@ export function createChannelViews(context) {
   }
 
   function loadPendingPhotoDetailImage(image) {
-    const imageUrl = image?.dataset?.photoSrc || "";
+    const imageUrl = image?.dataset?.photoSrc || image?.dataset?.photoRetrySrc || "";
     if (image?.dataset) delete image.dataset.photoSrc;
     if (!imageUrl || !image?.isConnected) return;
     enqueuePhotoDetailImage(image, imageUrl);
@@ -1040,6 +1179,15 @@ export function createChannelViews(context) {
     drainPhotoDetailImageQueue();
   }
 
+  function retryPhotoDetailImage(image, imageUrl = image?.dataset?.photoRetrySrc || "", index = 0, fallback = null) {
+    if (!image || !imageUrl || image.dataset.photoQueued === "1") return;
+    image.removeAttribute("src");
+    delete image.dataset.photoFailed;
+    image.closest(".photo-preview-tile")?.classList.remove("load-failed");
+    if (fallback) fallback.textContent = formatNumber(index || 0);
+    enqueuePhotoDetailImage(image, imageUrl);
+  }
+
   function drainPhotoDetailImageQueue() {
     while (activePhotoDetailImageLoads < PHOTO_DETAIL_IMAGE_CONCURRENCY && photoDetailImageQueue.length) {
       const item = photoDetailImageQueue.shift();
@@ -1048,17 +1196,39 @@ export function createChannelViews(context) {
 
       activePhotoDetailImageLoads += 1;
       delete image.dataset.photoQueued;
-      const settle = () => {
-        image.removeEventListener("load", settle);
-        image.removeEventListener("error", settle);
+      delete image.dataset.photoFailed;
+      delete image.dataset.photoReleased;
+      image.closest(".photo-preview-tile")?.classList.remove("load-failed");
+      const settle = (loaded) => {
+        image.removeEventListener("load", onLoad);
+        image.removeEventListener("error", onError);
         if (generation !== photoDetailImageGeneration) return;
         activePhotoDetailImageLoads = Math.max(0, activePhotoDetailImageLoads - 1);
+        if (loaded && !photoDetailImageNearViewport(image)) releasePhotoDetailImage(image);
         drainPhotoDetailImageQueue();
       };
-      image.addEventListener("load", settle);
-      image.addEventListener("error", settle);
+      const onLoad = () => settle(true);
+      const onError = () => settle(false);
+      image.addEventListener("load", onLoad);
+      image.addEventListener("error", onError);
       image.src = imageUrl;
     }
+  }
+
+  function photoDetailImageNearViewport(image) {
+    const rect = image?.getBoundingClientRect?.();
+    if (!rect) return false;
+    return rect.bottom >= -240 && rect.top <= window.innerHeight + 560;
+  }
+
+  function releasePhotoDetailImage(image) {
+    if (!image?.hasAttribute?.("src") || !image.complete || image.naturalWidth <= 0 || image.dataset.photoQueued === "1") return;
+    image.dataset.photoReleased = "1";
+    image.dataset.photoSrc = image.dataset.photoRetrySrc || image.getAttribute("src") || "";
+    image.removeAttribute("src");
+    window.requestAnimationFrame(() => {
+      if (!image.hasAttribute("src")) delete image.dataset.photoReleased;
+    });
   }
 
   function photoDetailPath(id, options = {}) {
@@ -1067,6 +1237,9 @@ export function createChannelViews(context) {
       params.set("imageLimit", "all");
     } else if (Number.isFinite(Number(options.imageLimit)) && Number(options.imageLimit) > 0) {
       params.set("imageLimit", String(Math.floor(Number(options.imageLimit))));
+    }
+    if (Number.isFinite(Number(options.imageOffset)) && Number(options.imageOffset) > 0) {
+      params.set("imageOffset", String(Math.floor(Number(options.imageOffset))));
     }
     const query = params.toString();
     return `/api/photo-sets/${encodeURIComponent(String(id || ""))}${query ? `?${query}` : ""}`;
@@ -1673,7 +1846,7 @@ export function createChannelViews(context) {
       params: { id: album.id },
       type: "photo",
       label: "套图",
-      title: album.title || album.personName || "图包详情",
+      title: album.title || album.personName || "套图详情",
       subtitle: [album.category, album.personName].filter(Boolean).join(" · "),
       meta: [
         album.imageCount !== null && album.imageCount !== undefined ? `${formatNumber(album.imageCount)} 张` : "",

@@ -28,6 +28,7 @@ export function createShortVideoListController(context = {}) {
       listState.data = null;
       listState.status = "";
       listState.authorVisibleCount = AUTHOR_INITIAL_COUNT;
+      listState.allowLoadMore = false;
     }
   }
 
@@ -47,12 +48,17 @@ export function createShortVideoListController(context = {}) {
     if (append) {
       listState.loadingMore = true;
     } else {
+      listState.allowLoadMore = false;
       listState.loading = true;
       listState.status = listState.data ? "" : "正在读取短视频";
     }
     renderListShell();
     try {
-      const data = await api.fetch(requestUrl, `/api/short-videos?${params}`, { timeoutMs: 16000 });
+      const data = await api.fetchCached(requestUrl, `/api/short-videos?${params}`, {
+        timeoutMs: 16000,
+        cacheMaxAgeMs: append ? 2 * 60 * 1000 : 5 * 60 * 1000,
+        staleWhileRevalidate: !append
+      });
       if (renderGuard && !renderGuard()) return;
       if (append && listState.data) {
         const seen = new Set((listState.data.videos || []).map((video) => video.id));
@@ -188,12 +194,10 @@ export function createShortVideoListController(context = {}) {
   }
 
   function observeListLoadMore(sentinel) {
-    if (!sentinel || !("IntersectionObserver" in window)) {
-      if (listState.data?.hasMore) loadList(null, { append: true }).catch(() => {});
-      return;
-    }
+    if (!sentinel || !("IntersectionObserver" in window)) return;
     listLoadMoreObserver = new IntersectionObserver((entries) => {
       if (!entries.some((entry) => entry.isIntersecting)) return;
+      if (!listState.allowLoadMore) return;
       if (!listState.data?.hasMore || listState.loading || listState.loadingMore) return;
       loadList(null, { append: true }).catch((error) => {
         listState.loadingMore = false;

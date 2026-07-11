@@ -1,7 +1,7 @@
 export const URL_VIEW_NAMES = new Set(["people", "studios", "vr", "favorites", "history", "rankings", "gallery", "novels", "shortVideos", "music", "tools"]);
 export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "media", "movie", "tv"]);
 export const PEOPLE_SCOPE_NAMES = new Set(["main"]);
-export const DEFAULT_GALLERY_PHOTO_CATEGORY = "我喜欢的";
+export const DEFAULT_GALLERY_PHOTO_CATEGORY = "all";
 
 const GALLERY_MODE_PATHS = {
   photo: "/photo",
@@ -84,11 +84,14 @@ export function routeFromUrl(url = window.location.href) {
       musicArtistId: "",
       musicAlbumId: "",
       musicGenre: "",
+      musicLanguage: "",
       musicMode: "library",
       musicPlaylistId: "",
       musicSmartId: "",
       musicQuery: "",
       musicSort: "album",
+      musicArtistSort: "count",
+      musicAlbumSort: "updated",
       musicFavorite: false,
       personId: "",
       q: "",
@@ -133,6 +136,9 @@ export function normalizeRoute(route = {}) {
     novelQuery: view === "novels" ? String(route.novelQuery || route.q || "").trim() : "",
     novelCategory: view === "novels" ? String(route.novelCategory || "all").trim() || "all" : "all",
     novelSort: view === "novels" ? normalizeNovelSort(route.novelSort) : "updated",
+    novelMode: view === "novels" && route.novelMode === "authors" ? "authors" : "books",
+    novelAuthor: view === "novels" ? String(route.novelAuthor || "").trim() : "",
+    novelPage: view === "novels" ? normalizeNovelPage(route.novelPage) : 0,
     shortVideoId: view === "shortVideos" ? String(route.shortVideoId || "").trim() : "",
     shortVideoAuthorPage: view === "shortVideos" ? String(route.shortVideoAuthorPage || "").trim() : "",
     shortVideoQuery: view === "shortVideos" ? String(route.shortVideoQuery || route.q || "").trim() : "",
@@ -146,11 +152,14 @@ export function normalizeRoute(route = {}) {
     musicArtistId: view === "music" ? String(route.musicArtistId || "").trim() : "",
     musicAlbumId: view === "music" ? String(route.musicAlbumId || "").trim() : "",
     musicGenre: view === "music" ? String(route.musicGenre || route.genre || "").trim() : "",
+    musicLanguage: view === "music" ? String(route.musicLanguage || route.language || "").trim() : "",
     musicMode: view === "music" ? normalizeMusicMode(route.musicMode) : "library",
     musicPlaylistId: view === "music" ? String(route.musicPlaylistId || "").trim() : "",
     musicSmartId: view === "music" ? String(route.musicSmartId || "").trim() : "",
     musicQuery: view === "music" ? String(route.musicQuery || route.q || "").trim() : "",
     musicSort: view === "music" ? normalizeMusicSort(route.musicSort) : "album",
+    musicArtistSort: view === "music" ? normalizeMusicArtistSort(route.musicArtistSort || route.artistSort) : "count",
+    musicAlbumSort: view === "music" ? normalizeMusicAlbumSort(route.musicAlbumSort || route.albumSort) : "updated",
     musicFavorite: view === "music" ? Boolean(route.musicFavorite) : false,
     personId: view === "people" ? route.personId || "" : "",
     q: view === "search" ? searchQuery : "",
@@ -184,6 +193,9 @@ export function routeUrl(route, options = {}) {
     if (next.novelQuery) params.set("q", next.novelQuery);
     if (next.novelCategory && next.novelCategory !== "all") params.set("category", next.novelCategory);
     if (next.novelSort && next.novelSort !== "updated") params.set("sort", next.novelSort);
+    if (next.novelMode === "authors") params.set("section", "authors");
+    if (next.novelAuthor) params.set("author", next.novelAuthor);
+    if (next.novelPage > 0) params.set("page", String(next.novelPage + 1));
   } else if (next.view === "shortVideos") {
     if (next.shortVideoQuery) params.set("q", next.shortVideoQuery);
     if (next.shortVideoTopic) params.set("topic", next.shortVideoTopic);
@@ -198,9 +210,11 @@ export function routeUrl(route, options = {}) {
     if (next.shortVideoSource && next.shortVideoSource !== defaultSource) params.set("source", next.shortVideoSource);
     if (next.shortVideoSort && next.shortVideoSort !== "published") params.set("sort", next.shortVideoSort);
   } else if (next.view === "music") {
-    if (next.musicQuery) params.set("q", next.musicQuery);
-    if (next.musicSort && next.musicSort !== "album") params.set("sort", next.musicSort);
-    if (next.musicFavorite) params.set("favorite", "1");
+    if (!["artists", "albums"].includes(next.musicMode)) {
+      if (next.musicQuery) params.set("q", next.musicQuery);
+      if (next.musicSort && next.musicSort !== "album") params.set("sort", next.musicSort);
+      if (next.musicFavorite) params.set("favorite", "1");
+    }
   } else if (next.q) {
     params.set("q", next.q);
   }
@@ -261,11 +275,13 @@ function decodeRouteSegment(value) {
 function normalizeGalleryCategory(route = {}) {
   const category = String(route.galleryCategory || "").trim();
   if (category) return category;
+  if (route.galleryMode === "photo" && String(route.galleryQuery || "").trim()) return "all";
   return route.galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all";
 }
 
 function shouldWriteGalleryCategory(route = {}) {
   if (route.galleryMode !== "photo") return route.galleryCategory !== "all";
+  if (String(route.galleryQuery || "").trim()) return route.galleryCategory !== "all";
   return route.galleryCategory !== DEFAULT_GALLERY_PHOTO_CATEGORY;
 }
 
@@ -276,7 +292,12 @@ function normalizeGallerySort(value) {
 
 function normalizeNovelSort(value) {
   const sort = String(value || "updated").trim();
-  return ["updated", "title", "size", "chapters", "progress"].includes(sort) ? sort : "updated";
+  return ["updated", "title", "size", "chapters", "progress", "books", "name"].includes(sort) ? sort : "updated";
+}
+
+function normalizeNovelPage(value) {
+  const page = Number(value);
+  return Number.isFinite(page) ? Math.max(0, Math.floor(page)) : 0;
 }
 
 function normalizeShortVideoSort(value) {
@@ -310,7 +331,16 @@ function normalizeMusicSort(value) {
 
 function normalizeMusicMode(value) {
   const mode = String(value || "library").trim();
-  return ["home", "library", "history", "playlist", "smart", "report"].includes(mode) ? mode : "library";
+  return ["home", "library", "artists", "albums", "history", "playlist", "smart", "report"].includes(mode) ? mode : "library";
+}
+
+function normalizeMusicArtistSort(value) {
+  return String(value || "count").trim() === "name" ? "name" : "count";
+}
+
+function normalizeMusicAlbumSort(value) {
+  const sort = String(value || "updated").trim();
+  return ["updated", "title", "year", "tracks"].includes(sort) ? sort : "updated";
 }
 
 function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
@@ -331,18 +361,20 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     rest = rest.slice(1);
   }
   if (!galleryMode) return null;
+  const galleryQuery = params.get("q") || params.get("search") || "";
+  const photoSearch = galleryMode === "photo" && Boolean(String(galleryQuery).trim());
 
   const route = {
     view: "gallery",
     galleryMode,
-    galleryPhotoView: galleryMode === "photo" && params.get("photoView") !== "albums" ? "collections" : "albums",
+    galleryPhotoView: galleryMode === "photo" && (params.get("photoView") === "albums" || (photoSearch && !params.has("photoView"))) ? "albums" : "collections",
     galleryPhotoCollection: params.get("collection") || "",
     galleryAlbumId: "",
     galleryComicId: "",
     galleryChapterIndex: "",
     galleryMediaId: "",
-    galleryQuery: params.get("q") || params.get("search") || "",
-    galleryCategory: params.has("category") ? params.get("category") || "all" : galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all",
+    galleryQuery,
+    galleryCategory: params.has("category") ? params.get("category") || "all" : photoSearch ? "all" : galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all",
     gallerySubCategory: params.get("subCategory") || params.get("folder") || "all",
     galleryPerson: ["tv", "media"].includes(galleryMode) ? params.get("series") || params.get("person") || "all" : params.get("person") || "all",
     gallerySort: normalizeGallerySort(params.get("sort")),
@@ -401,6 +433,9 @@ function novelRouteFromPath(routePath, params = new URLSearchParams()) {
     novelQuery: params.get("q") || params.get("search") || "",
     novelCategory: params.get("category") || "all",
     novelSort: normalizeNovelSort(params.get("sort")),
+    novelMode: params.get("section") === "authors" ? "authors" : "books",
+    novelAuthor: params.get("author") || "",
+    novelPage: Math.max(0, Number(params.get("page") || 1) - 1),
     personId: "",
     q: "",
     workId: "",
@@ -486,11 +521,14 @@ function musicRouteFromPath(routePath, params = new URLSearchParams()) {
     musicArtistId: section === "artist" ? decodeRouteSegment(segments[2] || "") : "",
     musicAlbumId: section === "album" ? decodeRouteSegment(segments[2] || "") : "",
     musicGenre: section === "genre" ? decodeRouteSegment(segments[2] || "") : params.get("genre") || "",
-    musicMode: section === "history" ? "history" : section === "report" ? "report" : section === "playlist" ? "playlist" : section === "smart" ? "smart" : section ? "library" : "home",
+    musicLanguage: section === "language" ? decodeRouteSegment(segments[2] || "") : params.get("language") || "",
+    musicMode: section === "history" ? "history" : section === "report" ? "report" : section === "artists" ? "artists" : section === "albums" ? "albums" : section === "playlist" ? "playlist" : section === "smart" ? "smart" : section ? "library" : "home",
     musicPlaylistId: section === "playlist" ? decodeRouteSegment(segments[2] || "") : "",
     musicSmartId: section === "smart" ? decodeRouteSegment(segments[2] || "") : "",
     musicQuery: params.get("q") || params.get("search") || "",
-    musicSort: normalizeMusicSort(params.get("sort")),
+    musicSort: ["artists", "albums"].includes(section) ? "album" : normalizeMusicSort(params.get("sort")),
+    musicArtistSort: normalizeMusicArtistSort(params.get("artistSort") || params.get("sort")),
+    musicAlbumSort: normalizeMusicAlbumSort(params.get("albumSort") || params.get("sort")),
     musicFavorite: ["1", "true", "yes"].includes(String(params.get("favorite") || "").toLowerCase()),
     personId: "",
     q: "",
@@ -534,11 +572,28 @@ function routePath(route) {
     if (route.musicTrackId) return `/music/track/${encodeRouteSegment(route.musicTrackId)}`;
     if (route.musicMode === "history") return "/music/history";
     if (route.musicMode === "report") return "/music/report";
+    if (route.musicMode === "artists") {
+      const params = new URLSearchParams();
+      if (route.musicQuery) params.set("q", route.musicQuery);
+      if (route.musicLanguage) params.set("language", route.musicLanguage);
+      if (route.musicArtistSort === "name") params.set("sort", "name");
+      const query = params.toString();
+      return `/music/artists${query ? `?${query}` : ""}`;
+    }
+    if (route.musicMode === "albums") {
+      const params = new URLSearchParams();
+      if (route.musicQuery) params.set("q", route.musicQuery);
+      if (route.musicLanguage) params.set("language", route.musicLanguage);
+      if (route.musicAlbumSort && route.musicAlbumSort !== "updated") params.set("sort", route.musicAlbumSort);
+      const query = params.toString();
+      return `/music/albums${query ? `?${query}` : ""}`;
+    }
     if (route.musicMode === "playlist" && route.musicPlaylistId) return `/music/playlist/${encodeRouteSegment(route.musicPlaylistId)}`;
     if (route.musicMode === "smart" && route.musicSmartId) return `/music/smart/${encodeRouteSegment(route.musicSmartId)}`;
     if (route.musicGenre) return `/music/genre/${encodeRouteSegment(route.musicGenre)}`;
     if (route.musicAlbumId) return `/music/album/${encodeRouteSegment(route.musicAlbumId)}`;
     if (route.musicArtistId) return `/music/artist/${encodeRouteSegment(route.musicArtistId)}`;
+    if (route.musicLanguage) return `/music/language/${encodeRouteSegment(route.musicLanguage)}`;
     if (route.musicMode === "library") return "/music/library";
     return "/music";
   }

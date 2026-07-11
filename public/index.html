@@ -10,7 +10,7 @@
     <link rel="manifest" href="/manifest.webmanifest?v=20260701-gallery-merge-01" />
     <link rel="icon" href="/app-icon.svg?v=20260701-gallery-merge-01" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/app-icon.svg?v=20260701-gallery-merge-01" />
-    <link rel="stylesheet" href="/styles.css?v=20260710-web-css-modules-01" />
+    <link rel="stylesheet" href="/styles.css?v=20260711-novel-pagination-80" />
   </head>
   <body>
     <script>
@@ -29,7 +29,7 @@
       </a>
       <nav class="product-nav" aria-label="主模块切换">
         <a class="product-tab active" href="/fanhao" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="people" aria-current="page">番号</a>
-        <a class="product-tab" href="/photo" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="gallery" data-gallery-mode="photo">套图</a>
+        <a class="product-tab" href="/photo" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="gallery" data-gallery-mode="photo">图库</a>
         <a class="product-tab" href="/media" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="gallery" data-gallery-mode="media">影视</a>
         <a class="product-tab" href="/novels" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="novels">小说</a>
         <a class="product-tab" href="/short-videos" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="shortVideos">短视频</a>
@@ -236,6 +236,13 @@
       </div>
     </template>
 
-    <script src="/app.js?v=20260710-standalone-modules-music-qq-07" type="module"></script>
+    <script type="module">
+      const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
+      if (shortVideoEntry) {
+        await import("/short-video-app.js?v=20260711-fullscreen-escape-83");
+      } else {
+        await import("/app.js?v=20260711-novel-pagination-84");
+      }
+    </script>
   </body>
 </html>

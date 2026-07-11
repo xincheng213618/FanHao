@@ -481,8 +481,7 @@
   }
 
   .toolbar,
-  body.gallery-view .gallery-controls,
-  body.gallery-view .gallery-reader-toolbar {
+  body.gallery-view .gallery-controls {
     position: static;
   }
 
@@ -584,7 +583,7 @@
   }
 
   .gallery-image-pager-controls {
-    grid-template-columns: auto minmax(92px, auto) minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr);
     gap: 8px;
   }
 
@@ -698,7 +697,9 @@
   }
 
   .gallery-reader-toolbar {
-    top: 122px;
+    position: sticky;
+    top: 0;
+    z-index: 20;
   }
 
   .gallery-reader-images {

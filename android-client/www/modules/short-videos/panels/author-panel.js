@@ -230,8 +230,12 @@ export function createShortVideoAuthorPanel(context = {}) {
         params.set("sort", panelState.sort || DEFAULT_SORT);
         params.set("limit", String(AUTHOR_PAGE_LIMIT));
         params.set("facets", "0");
+        params.set("stats", "0");
         if (options.append) params.set("offset", String(panelState.videos.length));
-        const data = await api.fetch(getActiveUrl(), `/api/short-videos?${params}`, { timeoutMs: 16000 });
+        const data = await api.fetchCached(getActiveUrl(), `/api/short-videos?${params}`, {
+          timeoutMs: 16000,
+          cacheMaxAgeMs: options.append ? 2 * 60 * 1000 : 5 * 60 * 1000
+        });
         const incoming = data.videos || [];
         if (options.append) {
           const seen = new Set(panelState.videos.map((item) => item.id));
@@ -283,7 +287,7 @@ export function createShortVideoAuthorPanel(context = {}) {
     authorPanelLoadObserver = new IntersectionObserver((entries) => {
       if (!entries.some((entry) => entry.isIntersecting)) return;
       loadMore().catch(() => {});
-    }, { root, rootMargin: "520px 0px", threshold: 0.01 });
+    }, { root, rootMargin: "160px 0px", threshold: 0.01 });
     authorPanelLoadObserver.observe(sentinel);
   }
 

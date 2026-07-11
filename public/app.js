@@ -1,17 +1,17 @@
 import { createApiClient, addQueryParam } from "./js/api.js?v=20260701-gallery-merge-01";
 import { loadModuleCatalog, renderWebModuleNavigation } from "./js/module-navigation.js?v=20260710-module-windows-01";
-import { createGalleryPage } from "./modules/content-index/gallery-page.js?v=20260710-module-registry-01";
-import { createGalleryRenderer } from "./modules/content-index/gallery-renderer.js?v=20260710-module-registry-01";
+import { createGalleryPage } from "./modules/content-index/gallery-page.js?v=20260711-photo-search-top-09";
+import { createGalleryRenderer } from "./modules/content-index/gallery-renderer.js?v=20260711-photo-reader-sticky-15";
 import { createPeoplePage } from "./modules/fanhao/people-page.js?v=20260710-module-registry-01";
 import { createPersonProfile } from "./modules/fanhao/person-profile.js?v=20260710-module-registry-01";
 import { createRankingPage } from "./modules/fanhao/ranking-page.js?v=20260710-module-registry-01";
 import { createWorkDetailPage } from "./modules/fanhao/work-detail-page.js?v=20260710-module-registry-01";
-import { createMusicPage } from "./modules/music/music-page.js?v=20260710-music-qq-desktop-06";
-import { createNovelPage } from "./modules/novels/novel-page.js?v=20260710-module-registry-01";
-import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20260710-short-video-search-01";
+import { createMusicPage } from "./modules/music/music-page.js?v=20260711-music-stats-key-44";
+import { createNovelPage } from "./modules/novels/novel-page.js?v=20260711-novel-pagination-05";
+import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20260711-fullscreen-escape-83";
 import { createAdminModal } from "./modules/system/admin-modal.js?v=20260710-module-registry-01";
 import { createToolsPage } from "./modules/tools/tools-page.js?v=20260710-module-registry-01";
-import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260710-fanhao-sidebar-music-home-01";
+import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260711-novel-pagination-04";
 
 prepareAppShell();
 
@@ -103,6 +103,10 @@ const state = {
     visibleLimit: 80,
     loading: false,
     data: null,
+    list: null,
+    listLoadingKey: "",
+    listError: "",
+    listErrorKey: "",
     cache: null,
     comic: null,
     chapter: null,
@@ -614,6 +618,9 @@ function currentRouteSnapshot(overrides = {}) {
     novelQuery: state.activeView === "novels" ? state.novel.query || "" : "",
     novelCategory: state.activeView === "novels" ? state.novel.category || "all" : "all",
     novelSort: state.activeView === "novels" ? state.novel.sort || "updated" : "updated",
+    novelMode: state.activeView === "novels" ? state.novel.mode || "books" : "books",
+    novelAuthor: state.activeView === "novels" ? state.novel.author || "" : "",
+    novelPage: state.activeView === "novels" ? Math.max(0, Number(state.novel.page || 0)) : 0,
     shortVideoId: state.activeView === "shortVideos" ? state.shortVideo.current?.id || "" : "",
     shortVideoAuthorPage: state.activeView === "shortVideos" ? state.shortVideo.authorPage || "" : "",
     shortVideoQuery: state.activeView === "shortVideos" ? state.shortVideo.query || "" : "",
@@ -623,15 +630,18 @@ function currentRouteSnapshot(overrides = {}) {
     shortVideoMedia: state.activeView === "shortVideos" ? state.shortVideo.media || "all" : "all",
     shortVideoSource: state.activeView === "shortVideos" ? state.shortVideo.source || "liked" : "liked",
     shortVideoSort: state.activeView === "shortVideos" ? state.shortVideo.sort || "published" : "published",
-    musicTrackId: state.activeView === "music" ? state.music.current?.id || "" : "",
+    musicTrackId: state.activeView === "music" && state.music.trackPageOpen ? state.music.current?.id || "" : "",
     musicArtistId: state.activeView === "music" && state.music.artistId !== "all" ? state.music.artistId || "" : "",
     musicAlbumId: state.activeView === "music" && state.music.albumId !== "all" ? state.music.albumId || "" : "",
     musicGenre: state.activeView === "music" && state.music.genre !== "all" ? state.music.genre || "" : "",
+    musicLanguage: state.activeView === "music" && state.music.language !== "all" ? state.music.language || "" : "",
     musicMode: state.activeView === "music" ? state.music.mode || "home" : "library",
     musicPlaylistId: state.activeView === "music" && state.music.mode === "playlist" ? state.music.activePlaylistId || "" : "",
     musicSmartId: state.activeView === "music" && state.music.mode === "smart" ? state.music.activeSmartPlaylistId || "" : "",
     musicQuery: state.activeView === "music" ? state.music.query || "" : "",
     musicSort: state.activeView === "music" ? state.music.sort || "album" : "album",
+    musicArtistSort: state.activeView === "music" ? state.music.artistSort || "count" : "count",
+    musicAlbumSort: state.activeView === "music" ? state.music.albumSort || "updated" : "updated",
     musicFavorite: state.activeView === "music" ? Boolean(state.music.favorite) : false,
     personId: state.activeView === "people" ? state.selectedPersonId || "" : "",
     q: state.activeView === "search" ? state.searchQuery || state.workQuery || "" : "",
@@ -689,6 +699,9 @@ async function openGalleryRouteTarget(route) {
 
 async function applyRoute(route) {
   const next = normalizeRoute(route);
+  if (routeNeedsLibrary(next)) {
+    await ensureLibraryLoaded({ deferMainRender: true });
+  }
   state.restoringRoute = true;
   try {
     if (!next.workId && els.detailDrawer.classList.contains("open")) {
@@ -739,7 +752,7 @@ async function applyRoute(route) {
     } else if (next.view === "music") {
       clearWorkSearch();
       musicPage.applyRouteState(next);
-      setActiveView("music", { skipRoute: true, deferInitialLoad: Boolean(next.musicTrackId) });
+      setActiveView("music", { skipRoute: true, deferInitialLoad: true });
       await musicPage.openRouteTarget(next);
     } else {
       clearWorkSearch();
@@ -973,6 +986,24 @@ async function loadLibrary(options = {}) {
   if (!options.deferMainRender) {
     setActiveView(state.activeView || "people");
   }
+}
+
+let libraryLoadPromise = null;
+
+function routeNeedsLibrary(route) {
+  return !["gallery", "novels", "shortVideos", "music", "tools"].includes(route?.view);
+}
+
+async function ensureLibraryLoaded(options = {}) {
+  if (state.library) return state.library;
+  if (!libraryLoadPromise) {
+    libraryLoadPromise = loadLibrary(options)
+      .then(() => state.library)
+      .finally(() => {
+        libraryLoadPromise = null;
+      });
+  }
+  return libraryLoadPromise;
 }
 
 function normalizePeopleScope(value) {
@@ -3320,11 +3351,10 @@ async function bootApp() {
   if (initialRoute.view === "shortVideos" || initialRoute.view === "music") {
     await applyRoute(initialRoute);
     initializeRouteHistory();
-    loadLibrary({ deferMainRender: true }).catch((error) => console.warn(error));
     return;
   }
 
-  await loadLibrary({ deferMainRender: true });
+  await ensureLibraryLoaded({ deferMainRender: true });
   await applyRoute(initialRoute);
   initializeRouteHistory();
 }

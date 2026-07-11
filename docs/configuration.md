@@ -37,7 +37,7 @@ FanHao 服务端通过**环境变量**控制资料库根目录、端口、外部
 | `FANHAO_SHORT_VIDEO_ROOTS` / `FANHAO_DOUYIN_LIKES_ROOT` | `~/Downloads/likes/MS4wLjABAAAA...` | 抖音点赞短视频根目录。 |
 | `FANHAO_DOUYIN_DOWNLOAD_MANAGER_DB` | `~/Desktop/Tool/douyin-download-manager/data/douyin_downloads.sqlite` | 抖音下载管理器数据库路径（短视频模块可选同步来源）。 |
 | `FANHAO_DOUYIN_SYNC_MS` | `300000`（5 分钟） | 短视频从下载管理器同步的轮询间隔。 |
-| `FANHAO_MUSIC_ROOTS` / `FANHAO_MUSIC_ROOT` | `E:\音乐 MV\音乐（无损）` | 音乐模块扫描根目录，多个根用分号或逗号分隔。 |
+| `FANHAO_MUSIC_ROOTS` / `FANHAO_MUSIC_ROOT` | `D:\Music` | 音乐模块扫描根目录，多个根用分号或逗号分隔。 |
 
 > 解析逻辑见 `src/platform/server/root-config.js`。环境变量优先于硬编码默认值；未设置时回退到默认盘符。
 

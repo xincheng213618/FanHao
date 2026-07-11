@@ -19,6 +19,15 @@ export async function routeNovelApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/novels/authors" && req.method === "GET") {
+    try {
+      sendJson(res, 200, novelStore.listAuthors(url));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "作者列表读取失败" });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/novels/upload" && req.method === "POST") {
     try {
       const body = await readJsonBody(req, novelUploadMaxBodyBytes);

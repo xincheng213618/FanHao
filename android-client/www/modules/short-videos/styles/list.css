@@ -491,6 +491,24 @@ body.short-video-mobile-view #viewContent {
   height: 13px;
 }
 
+.short-video-mobile-thumb-type {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex !important;
+  min-height: 24px;
+  align-items: center;
+  border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, .56);
+  color: #fff;
+  padding: 0 7px;
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, .5);
+}
+
 .short-video-mobile-card > strong {
   display: none;
 }

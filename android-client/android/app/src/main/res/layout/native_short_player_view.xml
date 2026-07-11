@@ -5,7 +5,7 @@
     android:layout_height="match_parent"
     android:clickable="false"
     android:focusable="false"
-    app:keep_content_on_player_reset="true"
+    app:keep_content_on_player_reset="false"
     app:resize_mode="zoom"
     app:surface_type="texture_view"
     app:use_controller="false" />

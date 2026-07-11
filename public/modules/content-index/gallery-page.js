@@ -1,4 +1,4 @@
-const DEFAULT_GALLERY_PHOTO_CATEGORY = "我喜欢的";
+const DEFAULT_GALLERY_PHOTO_CATEGORY = "all";
 const PHOTO_READER_LIMITS = {
   local: 160,
   lan: 160,
@@ -24,12 +24,14 @@ export function createGalleryPage(deps) {
     syncRouteAfterNavigation
   } = deps;
 
+  let imageListRequestVersion = 0;
+
   function enter(options = {}) {
     if (state.gallery.mode === "cache") state.gallery.mode = "photo";
     clearPersonSelection();
     hidePersonProfile();
     const imageModule = ["photo", "manga"].includes(state.gallery.mode);
-    setMainHeader(imageModule ? "套图" : galleryModeLabel(state.gallery.mode), imageModule ? "图包 / 韩漫" : "本地媒体");
+    setMainHeader(imageModule ? "图库" : galleryModeLabel(state.gallery.mode), imageModule ? "套图和韩漫" : "本地媒体");
     renderGalleryStats();
     renderGalleryView();
     loadImageLibrary();
@@ -97,7 +99,9 @@ export function createGalleryPage(deps) {
     state.gallery.loading = true;
     setStatus(options.refresh ? "正在刷新图像资料库索引" : "正在读取图像资料库");
     try {
-      const data = await api(options.refresh ? "/api/image-library/rescan" : "/api/image-library", {
+      const imageModule = isImageLibraryMode();
+      const endpoint = imageModule ? "/api/image-library/summary" : "/api/image-library";
+      const data = await api(options.refresh ? "/api/image-library/rescan" : endpoint, {
         method: options.refresh ? "POST" : "GET"
       });
       state.gallery.data = data;
@@ -113,6 +117,115 @@ export function createGalleryPage(deps) {
     } finally {
       state.gallery.loading = false;
     }
+  }
+
+  function isImageLibraryMode() {
+    return ["photo", "manga"].includes(state.gallery.mode);
+  }
+
+  function imageLibraryListKey() {
+    if (!isImageLibraryMode()) return "";
+    return JSON.stringify({
+      mode: state.gallery.mode,
+      photoView: state.gallery.mode === "photo" ? state.gallery.photoCollection ? "albums" : state.gallery.photoView || "collections" : "",
+      collection: state.gallery.mode === "photo" ? state.gallery.photoCollection || "" : "",
+      category: state.gallery.mode === "photo" ? state.gallery.category || "all" : "",
+      subCategory: state.gallery.mode === "photo" ? state.gallery.subCategory || "all" : "",
+      person: state.gallery.mode === "photo" ? state.gallery.person || "all" : "",
+      query: state.gallery.query || ""
+    });
+  }
+
+  function imageLibraryListPath(options = {}) {
+    const collectionIndex = state.gallery.mode === "photo" && !state.gallery.photoCollection && state.gallery.photoView === "collections";
+    const query = String(state.gallery.query || "").trim();
+    const params = new URLSearchParams({
+      mode: state.gallery.mode,
+      limit: String(Math.max(1, Number(options.limit || state.gallery.visibleLimit || 80))),
+      offset: String(Math.max(0, Number(options.offset || 0))),
+      sort: query ? "relevance" : collectionIndex ? "count" : state.gallery.sort || "updated"
+    });
+    if (query) params.set("q", query);
+    if (state.gallery.mode === "photo") {
+      params.set("photoView", state.gallery.photoCollection ? "albums" : state.gallery.photoView || "collections");
+      if (state.gallery.category && state.gallery.category !== "all") params.set("category", state.gallery.category);
+      if (state.gallery.subCategory && state.gallery.subCategory !== "all") params.set("subCategory", state.gallery.subCategory);
+      if (state.gallery.person && state.gallery.person !== "all") params.set("person", state.gallery.person);
+      if (state.gallery.photoCollection) params.set("collection", state.gallery.photoCollection);
+    }
+    return `/api/image-library/items?${params.toString()}`;
+  }
+
+  function imageLibraryListNeedsLoad() {
+    const key = imageLibraryListKey();
+    if (!key || state.gallery.list?.key !== key) return Boolean(key);
+    const loaded = Array.isArray(state.gallery.list.items) ? state.gallery.list.items.length : 0;
+    const target = Math.min(Math.max(1, Number(state.gallery.visibleLimit || 80)), Number(state.gallery.list.total || loaded));
+    return loaded < target;
+  }
+
+  function isImageLibraryListLoading() {
+    return Boolean(state.gallery.listLoadingKey && state.gallery.listLoadingKey === imageLibraryListKey());
+  }
+
+  async function loadImageLibraryItems(options = {}) {
+    if (!isImageLibraryMode()) return null;
+    const key = imageLibraryListKey();
+    if (!key) return null;
+    const currentList = state.gallery.list?.key === key ? state.gallery.list : null;
+    const targetCount = Math.max(1, Number(state.gallery.visibleLimit || 80));
+    const loadedCount = Array.isArray(currentList?.items) ? currentList.items.length : 0;
+    const knownTotal = Number(currentList?.total || 0);
+    const hasKnownTotal = currentList && Number.isFinite(Number(currentList.total));
+    if (!options.force && currentList && (loadedCount >= targetCount || (hasKnownTotal && loadedCount >= knownTotal))) return currentList;
+    if (!options.force && state.gallery.listLoadingKey === key) return null;
+
+    const offset = options.force ? 0 : loadedCount;
+    const requestLimit = Math.max(1, targetCount - offset);
+
+    const requestVersion = ++imageListRequestVersion;
+    state.gallery.listLoadingKey = key;
+    state.gallery.listError = "";
+    state.gallery.listErrorKey = "";
+    if (options.renderStart !== false && !hasUnsubmittedGallerySearchDraft()) renderGalleryView();
+
+    try {
+      const data = await api(imageLibraryListPath({ limit: requestLimit, offset }));
+      if (requestVersion !== imageListRequestVersion || key !== imageLibraryListKey()) return null;
+      const items = offset > 0 ? mergeImageLibraryListItems(currentList?.items, data.items) : Array.isArray(data.items) ? data.items : [];
+      state.gallery.list = {
+        ...(currentList || {}),
+        ...data,
+        items,
+        count: items.length,
+        limit: items.length,
+        offset: 0,
+        key
+      };
+      state.gallery.listLoadingKey = "";
+      state.gallery.listError = "";
+      state.gallery.listErrorKey = "";
+      state.gallery.status = data.scannedAt ? `索引 ${formatDateTime(data.scannedAt)}` : state.gallery.status;
+      refreshGalleryAfterLibraryChange();
+      return state.gallery.list;
+    } catch (error) {
+      if (requestVersion !== imageListRequestVersion || key !== imageLibraryListKey()) return null;
+      state.gallery.listLoadingKey = "";
+      state.gallery.listError = error.message || "图库列表读取失败";
+      state.gallery.listErrorKey = key;
+      setStatus(state.gallery.listError);
+      if (!hasUnsubmittedGallerySearchDraft()) renderGalleryView();
+      return null;
+    }
+  }
+
+  function mergeImageLibraryListItems(existing = [], incoming = []) {
+    const merged = new Map();
+    for (const item of [...(existing || []), ...(incoming || [])]) {
+      const key = `${String(item?.type || "")}:${String(item?.id || item?.collectionId || item?.routePath || "")}`;
+      if (key !== ":") merged.set(key, item);
+    }
+    return [...merged.values()];
   }
 
   function resetReader() {
@@ -136,7 +249,7 @@ export function createGalleryPage(deps) {
   }
 
   async function openPhotoSet(albumId, options = {}) {
-    setStatus("正在读取图包");
+    setStatus("正在读取套图");
     try {
       const data = await api(photoSetPath(albumId, { imageLimit: photoReaderInitialLimit() }));
       resetReader();
@@ -147,7 +260,7 @@ export function createGalleryPage(deps) {
       syncRouteAfterNavigation(options);
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (error) {
-      setStatus(error.message || "图包读取失败");
+      setStatus(error.message || "套图读取失败");
     }
   }
 
@@ -230,7 +343,11 @@ export function createGalleryPage(deps) {
   return {
     applyRouteState,
     enter,
+    imageLibraryListKey,
+    imageLibraryListNeedsLoad,
+    isImageLibraryListLoading,
     loadImageLibrary,
+    loadImageLibraryItems,
     openGalleryMedia,
     openMangaChapter,
     openMangaComic,

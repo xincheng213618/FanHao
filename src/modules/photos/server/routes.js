@@ -87,7 +87,7 @@ export async function routePhotosApi(req, res, url, deps) {
         cache: imageReaderCacheStatus()
       });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "图包读取失败" });
+      sendJson(res, error.statusCode || 500, { error: error.message || "套图读取失败" });
     }
     return true;
   }

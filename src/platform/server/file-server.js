@@ -88,16 +88,29 @@ export function createFileServer({ defaultChunkBytes, mimeTypes, normalizeExt, n
       return;
     }
 
-    const range = parseRange(req.headers.range, stat.size);
+    const requestedRange = parseRange(req.headers.range, stat.size);
+    const maxRangeBytes = Math.max(0, Math.floor(Number(file.maxRangeBytes || 0)));
+    const range = requestedRange && maxRangeBytes
+      ? {
+          start: requestedRange.start,
+          end: Math.min(requestedRange.end, requestedRange.start + maxRangeBytes - 1)
+        }
+      : requestedRange;
     const contentType = mimeTypes[file.ext] || "application/octet-stream";
+    const cacheControl = String(file.cacheControl || "").trim() || "no-store";
+    const validators = {
+      ETag: `"${stat.size.toString(16)}-${Math.max(0, Math.floor(Number(stat.mtimeMs || 0))).toString(16)}"`,
+      "Last-Modified": stat.mtime.toUTCString()
+    };
 
     if (req.method === "HEAD" && !range) {
       res.writeHead(200, {
         "Content-Type": contentType,
         "Accept-Ranges": "bytes",
         "Content-Length": stat.size,
-        "Cache-Control": "no-store",
-        "Content-Disposition": "inline"
+        "Cache-Control": cacheControl,
+        "Content-Disposition": "inline",
+        ...validators
       });
       res.end();
       return;
@@ -105,7 +118,7 @@ export function createFileServer({ defaultChunkBytes, mimeTypes, normalizeExt, n
 
     const responseRange = range || {
       start: 0,
-      end: Math.min(stat.size - 1, defaultChunkBytes - 1)
+      end: file.fullResponse ? stat.size - 1 : Math.min(stat.size - 1, defaultChunkBytes - 1)
     };
 
     res.writeHead(206, {
@@ -113,8 +126,9 @@ export function createFileServer({ defaultChunkBytes, mimeTypes, normalizeExt, n
       "Accept-Ranges": "bytes",
       "Content-Range": `bytes ${responseRange.start}-${responseRange.end}/${stat.size}`,
       "Content-Length": responseRange.end - responseRange.start + 1,
-      "Cache-Control": "no-store",
-      "Content-Disposition": "inline"
+      "Cache-Control": cacheControl,
+      "Content-Disposition": "inline",
+      ...validators
     });
     if (req.method === "HEAD") {
       res.end();

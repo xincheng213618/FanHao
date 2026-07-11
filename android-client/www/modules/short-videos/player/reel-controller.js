@@ -17,6 +17,7 @@ export function createShortVideoReelController(context = {}) {
   const closeAuthorPanel = (...args) => context.closeAuthorPanel(...args);
   const closePlaybackActions = (...args) => context.closePlaybackActions(...args);
   const consumeStageLongPressClick = (...args) => context.consumeStageLongPressClick(...args);
+  const createIcon = (...args) => context.createIcon(...args);
   const displayWebLikes = (...args) => context.displayWebLikes(...args);
   const finishDrag = (...args) => context.finishDrag(...args);
   const formatSystemStatusText = (...args) => context.formatSystemStatusText(...args);
@@ -28,6 +29,8 @@ export function createShortVideoReelController(context = {}) {
   const isWebLiked = (...args) => context.isWebLiked(...args);
   const likeWebVideo = (...args) => context.likeWebVideo(...args);
   const loadList = (...args) => context.loadList(...args);
+  const openDouyinLink = (...args) => context.openDouyinLink(...args);
+  const railButton = (...args) => context.railButton(...args);
   const railMetric = (...args) => context.railMetric(...args);
   const railNav = (...args) => context.railNav(...args);
   const renderListShell = (...args) => context.renderListShell(...args);
@@ -37,6 +40,7 @@ export function createShortVideoReelController(context = {}) {
   const shareShortVideo = (...args) => context.shareShortVideo(...args);
   const shortVideoBrowserParams = (...args) => context.shortVideoBrowserParams(...args);
   const showAuthorPanel = (...args) => context.showAuthorPanel(...args);
+  const showPlaybackActions = (...args) => context.showPlaybackActions(...args);
   const snapStackBack = (...args) => context.snapStackBack(...args);
   const stopPanelMedia = (...args) => context.stopPanelMedia(...args);
   const toggleRailActive = (...args) => context.toggleRailActive(...args);
@@ -220,6 +224,20 @@ export function createShortVideoReelController(context = {}) {
       player.addEventListener("ended", () => {
         if (browserState.autoNext) openAdjacent(1).catch(() => {});
       });
+      const progress = document.createElement("div");
+      progress.className = "short-video-mobile-progress";
+      progress.setAttribute("aria-hidden", "true");
+      const progressValue = document.createElement("span");
+      progress.append(progressValue);
+      const syncProgress = () => {
+        const duration = Number(player.duration || 0);
+        const currentTime = Number(player.currentTime || 0);
+        const ratio = duration > 0 ? Math.max(0, Math.min(1, currentTime / duration)) : 0;
+        progressValue.style.transform = `scaleX(${ratio})`;
+      };
+      player.addEventListener("loadedmetadata", syncProgress);
+      player.addEventListener("durationchange", syncProgress);
+      player.addEventListener("timeupdate", syncProgress);
       playToggle.addEventListener("click", togglePlay);
       stage.addEventListener("click", (event) => {
         if (consumeStageLongPressClick(event)) return;
@@ -227,7 +245,7 @@ export function createShortVideoReelController(context = {}) {
         handleStageClick(video, panel, togglePlay);
       });
       bindStageLongPress(stage, video);
-      stage.append(player, cover, playToggle);
+      stage.append(player, cover, playToggle, progress);
       panel._shortVideoPlayer = player;
       panel._shortVideoSyncPlayToggle = syncPlayToggle;
     }
@@ -238,8 +256,18 @@ export function createShortVideoReelController(context = {}) {
     author.textContent = `@${video.author?.name || "未知作者"}`;
     author.style.cursor = "pointer";
     author.addEventListener("click", () => showAuthorPanel(video));
-    const title = document.createElement("p");
+    const title = document.createElement("button");
+    title.type = "button";
+    title.className = "short-video-mobile-caption-title";
     title.textContent = video.title || "";
+    title.setAttribute("aria-expanded", "false");
+    title.setAttribute("aria-label", "展开视频文案");
+    title.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const expanded = title.classList.toggle("is-expanded");
+      title.setAttribute("aria-expanded", String(expanded));
+      title.setAttribute("aria-label", expanded ? "收起视频文案" : "展开视频文案");
+    });
     const meta = document.createElement("span");
     meta.textContent = [formatDate(video.publishedAt), formatDuration(video.durationMs), formatBytes(video.size || 0)].filter(Boolean).join(" · ");
     caption.append(author, title, meta);
@@ -253,6 +281,8 @@ export function createShortVideoReelController(context = {}) {
       rail.append(railMetric("comment", video.stats?.comments, "comment", "评论"));
       rail.append(railMetric("star", video.stats?.collects, "collect", "收藏", toggleRailActive));
       rail.append(railMetric("share", video.stats?.shares, "share", "分享", () => shareShortVideo(video)));
+      rail.append(railButton("原声", createIcon("headphones"), "listen", "打开抖音原视频", () => openDouyinLink(video)));
+      rail.append(railButton("", createIcon("more"), "more", "更多", () => showPlaybackActions(video)));
       const nav = document.createElement("div");
       nav.className = "short-video-mobile-nav-pair";
       nav.append(
@@ -334,6 +364,9 @@ export function createShortVideoReelController(context = {}) {
       browserState.touchStartY = touch?.clientY || 0;
       browserState.touchDeltaX = 0;
       browserState.touchDeltaY = 0;
+      browserState.touchLastY = browserState.touchStartY;
+      browserState.touchLastAt = event.timeStamp || performance.now();
+      browserState.touchVelocityY = 0;
       browserState.horizontalDragging = false;
       browserState.dragging = true;
       activeReelStack()?.classList.add("is-dragging");
@@ -345,6 +378,12 @@ export function createShortVideoReelController(context = {}) {
       const y = touch?.clientY || 0;
       browserState.touchDeltaX = x - browserState.touchStartX;
       browserState.touchDeltaY = y - browserState.touchStartY;
+      const now = event.timeStamp || performance.now();
+      const elapsed = Math.max(8, now - Number(browserState.touchLastAt || now));
+      const instantVelocity = (y - Number(browserState.touchLastY || y)) / elapsed;
+      browserState.touchVelocityY = browserState.touchVelocityY * .35 + instantVelocity * .65;
+      browserState.touchLastY = y;
+      browserState.touchLastAt = now;
       if (!browserState.horizontalDragging && isHorizontalSwipe(browserState.touchDeltaX, browserState.touchDeltaY, 28)) {
         browserState.horizontalDragging = true;
         activeReelStack()?.classList.remove("is-dragging");
@@ -368,7 +407,7 @@ export function createShortVideoReelController(context = {}) {
         handleHorizontalSwipe(deltaX);
         return;
       }
-      finishDrag(deltaY);
+      finishDrag(deltaY, browserState.touchVelocityY);
     }, { passive: true });
     window.addEventListener("wheel", (event) => {
       if (!isBrowserView() || Math.abs(event.deltaY) < 28) return;
@@ -382,6 +421,7 @@ export function createShortVideoReelController(context = {}) {
     listEventsInstalled = true;
     window.addEventListener("scroll", () => {
       if (!document.body.classList.contains("short-video-mobile-view") || document.body.classList.contains("short-video-mobile-browser-view")) return;
+      listState.allowLoadMore = true;
       if (isAuthorIndexView()) {
         appendVisibleAuthors();
         return;

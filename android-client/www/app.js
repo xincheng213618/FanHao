@@ -1,20 +1,20 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260710-short-video-modules-04";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260711-short-video-cache-08";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260705-mobile-actions-01";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
-import { createChannelViews } from "./modules/content-index/channel-views.js?v=20260710-module-registry-01";
+import { createChannelViews } from "./modules/content-index/channel-views.js?v=20260711-photo-search-page-08";
 import { createDetailViews } from "./modules/fanhao/detail-views.js?v=20260710-module-registry-01";
 import { getElements } from "./js/dom.js?v=20260706-short-video-reel-06";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260706-mobile-web-sync-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
 import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=20260710-module-registry-01";
-import { createMusicViews } from "./modules/music/music-views.js?v=20260710-module-registry-01";
-import { createNovelViews } from "./modules/novels/novel-views.js?v=20260710-module-registry-01";
+import { createMusicViews } from "./modules/music/music-views.js?v=20260711-music-search-focus-06";
+import { createNovelViews } from "./modules/novels/novel-views.js?v=20260711-novel-pagination-04";
 import { createPeopleViews } from "./modules/fanhao/people-views.js?v=20260710-module-registry-01";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
-import { createShortVideoViews } from "./modules/short-videos/short-video-views.js?v=20260710-short-video-modules-04";
+import { createShortVideoViews } from "./modules/short-videos/short-video-views.js?v=20260711-short-video-cache-09";
 import { createToolViews } from "./modules/tools/tool-views.js?v=20260710-module-registry-01";
 import { createWorkViews } from "./modules/fanhao/work-views.js?v=20260710-module-registry-01";
 
@@ -60,8 +60,8 @@ const PHOTO_CATEGORY_LABELS = new Map([
 const TV_TOP_CATEGORY_PRIORITY = ["中国", "美剧", "韩剧", "日本", "欧美", "台湾", "香港", "纪录片", "BBC纪录片合集"];
 const PRIMARY_LABELS = {
   fanhao: "番号",
-  photo: "套图",
-  manga: "套图",
+  photo: "图库",
+  manga: "图库",
   western: "欧美",
   media: "影视",
   movie: "电影",
@@ -188,24 +188,30 @@ function sanitizeViewParams(view, params = {}) {
     const rawMode = String(params.mode || "").trim();
     const smartId = String(params.smartId || params.smart || "").trim();
     const playlistId = String(params.playlistId || params.playlist || "").trim();
-    const mode = playlistId ? "playlist" : smartId ? "smart" : (rawMode === "history" ? "history" : "library");
+    const mode = playlistId ? "playlist" : smartId ? "smart" : (rawMode === "history" ? "history" : rawMode === "artists" ? "artists" : rawMode === "albums" ? "albums" : "library");
     const query = String(params.query || params.q || "").trim();
     const sort = normalizeMusicSort(params.sort);
+    const artistSort = String(params.artistSort || "count") === "name" ? "name" : "count";
+    const albumSort = normalizeMusicAlbumSort(params.albumSort);
     const favorite = ["1", "true", "yes"].includes(String(params.favorite || params.fav || "").trim().toLowerCase());
     const artistId = String(params.artistId || params.artist || "").trim();
     const albumId = String(params.albumId || params.album || "").trim();
     const genre = String(params.genre || params.musicGenre || "").trim();
+    const language = String(params.language || params.musicLanguage || "").trim();
     const trackId = String(params.trackId || params.track || "").trim();
     return {
       mode,
       ...(query ? { query } : {}),
       ...(sort !== "album" ? { sort } : {}),
+      ...(mode === "artists" && artistSort !== "count" ? { artistSort } : {}),
+      ...(mode === "albums" && albumSort !== "updated" ? { albumSort } : {}),
       ...(favorite && mode !== "smart" ? { favorite: "1" } : {}),
       ...(smartId ? { smartId } : {}),
       ...(mode === "playlist" && playlistId ? { playlistId } : {}),
       ...(mode === "library" && artistId ? { artistId } : {}),
       ...(mode === "library" && albumId ? { albumId } : {}),
       ...(mode === "library" && genre ? { genre } : {}),
+      ...(["library", "artists", "albums"].includes(mode) && language ? { language } : {}),
       ...(trackId ? { trackId } : {})
     };
   }
@@ -297,6 +303,11 @@ function normalizeShortVideoSource(value) {
 function normalizeMusicSort(value) {
   const sort = String(value || "album").trim();
   return ["album", "artist", "title", "duration", "played", "favorite", "rating"].includes(sort) ? sort : "album";
+}
+
+function normalizeMusicAlbumSort(value) {
+  const sort = String(value || "updated").trim();
+  return ["updated", "title", "year", "tracks"].includes(sort) ? sort : "updated";
 }
 
 function readViewStateFromHash(hash = window.location.hash) {
@@ -675,7 +686,7 @@ function omniChannels(summary = {}) {
     {
       label: "套图",
       value: formatCompact(totals.photoSets),
-      unit: "图包",
+      unit: "套",
       detail: [
         totals.manga ? `${formatCompact(totals.manga)} 韩漫` : "",
         formatBytes(totals.photoBytes),
@@ -780,8 +791,8 @@ function syncChannelCounts(summary = imageLibrarySummary) {
   if (els.channelWorksCount) els.channelWorksCount.textContent = library?.totals?.works ? `${formatCompact(library.totals.works)} 作品` : "默认库";
   if (els.channelPhotoCount) {
     els.channelPhotoCount.textContent = totals.photoSets || totals.manga
-      ? [`${formatCompact(totals.photoSets)} 图包`, totals.manga ? `${formatCompact(totals.manga)} 韩漫` : ""].filter(Boolean).join(" · ")
-      : "图包 / 韩漫";
+      ? [`${formatCompact(totals.photoSets)} 套图`, totals.manga ? `${formatCompact(totals.manga)} 韩漫` : ""].filter(Boolean).join(" · ")
+      : "套图 / 韩漫";
   }
   if (els.channelMediaCount) {
     els.channelMediaCount.textContent = totals.movies || totals.tv
@@ -1006,8 +1017,10 @@ function openNativeLibraryRoute(options = {}) {
       mode: query.get("mode") || "library",
       query: query.get("q") || query.get("query") || "",
       sort: query.get("sort") || "",
+      artistSort: query.get("artistSort") || "",
       favorite: query.get("favorite") || "",
       genre: query.get("genre") || query.get("musicGenre") || "",
+      language: query.get("language") || query.get("musicLanguage") || "",
       smartId: query.get("smart") || query.get("smartId") || "",
       artistId: query.get("artist") || query.get("artistId") || "",
       albumId: query.get("album") || query.get("albumId") || "",
@@ -1672,7 +1685,7 @@ function routeLoadingCopy(view = currentView, params = currentViewParams) {
     return { kicker: label, title: "媒体详情", meta: "正在读取", message: `正在读取${label}详情` };
   }
 
-  if (view === "photoDetail") return { kicker: "套图", title: "图包详情", meta: "正在读取", message: "正在读取图包" };
+  if (view === "photoDetail") return { kicker: "套图", title: "套图详情", meta: "正在读取", message: "正在读取套图" };
   if (view === "mangaDetail") return { kicker: "韩漫", title: "漫画详情", meta: "正在读取", message: "正在读取漫画" };
   if (view === "mangaChapter") return { kicker: "韩漫阅读", title: "章节", meta: "正在读取", message: "正在读取章节" };
   if (view === "personDetail") return { kicker: "人物", title: "人物详情", meta: "正在读取", message: "正在加载人物资料" };
@@ -2043,7 +2056,13 @@ channelViews = createChannelViews({
   onChannelFavoriteChange: handleChannelFavoriteChange,
   setTopSecondaryTabs,
   updateChannelQuery: (query) => {
-    showView("channel", { ...currentViewParams, query }, { skipHistory: true, replaceHistory: true });
+    const nextQuery = String(query || "").trim();
+    const startingPhotoSearch = normalizeChannelMode(currentViewParams.mode) === "photo" && nextQuery && !String(currentViewParams.query || "").trim();
+    showView("channel", {
+      ...currentViewParams,
+      ...(startingPhotoSearch ? { photoView: "albums", collection: "", category: "", person: "" } : {}),
+      query: nextQuery
+    }, { skipHistory: true, replaceHistory: true });
   },
   updateChannelParams: (params = {}, navigation = {}) => {
     showView("channel", { ...currentViewParams, ...params }, { skipHistory: true, replaceHistory: true, ...navigation });
@@ -2121,7 +2140,13 @@ function runSearch(query) {
     return;
   }
   if (currentView === "channel") {
-    showView("channel", { ...currentViewParams, query: String(query || "").trim() }, { skipHistory: true, replaceHistory: true });
+    const nextQuery = String(query || "").trim();
+    const startingPhotoSearch = normalizeChannelMode(currentViewParams.mode) === "photo" && nextQuery && !String(currentViewParams.query || "").trim();
+    showView("channel", {
+      ...currentViewParams,
+      ...(startingPhotoSearch ? { photoView: "albums", collection: "", category: "", person: "" } : {}),
+      query: nextQuery
+    }, { skipHistory: true, replaceHistory: true });
     return;
   }
   const navigation = currentView === "search"

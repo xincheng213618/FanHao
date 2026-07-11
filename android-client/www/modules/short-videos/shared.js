@@ -1,7 +1,7 @@
-export const DEFAULT_LIMIT = 21;
-export const AUTHOR_PAGE_LIMIT = 36;
-export const AUTHOR_INITIAL_COUNT = 36;
-export const AUTHOR_APPEND_COUNT = 30;
+export const DEFAULT_LIMIT = 12;
+export const AUTHOR_PAGE_LIMIT = 12;
+export const AUTHOR_INITIAL_COUNT = 24;
+export const AUTHOR_APPEND_COUNT = 18;
 export const DEFAULT_SORT = "published";
 export const DEFAULT_SOURCE = "liked";
 export const SHORT_VIDEO_SORT_OPTIONS = [

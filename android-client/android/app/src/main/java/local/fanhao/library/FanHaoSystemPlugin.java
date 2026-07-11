@@ -41,7 +41,7 @@ public class FanHaoSystemPlugin extends Plugin {
   public void getStatusInfo(PluginCall call) {
     JSObject result = new JSObject();
     int battery = getBatteryPercent();
-    result.put("time", new SimpleDateFormat("MM/dd HH:mm", Locale.CHINA).format(new Date()));
+    result.put("time", new SimpleDateFormat("HH:mm", Locale.CHINA).format(new Date()));
     if (battery >= 0) result.put("battery", battery);
     result.put("charging", isCharging());
     call.resolve(result);

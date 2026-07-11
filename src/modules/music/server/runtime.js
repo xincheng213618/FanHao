@@ -1,6 +1,8 @@
 import { createMusicStore } from "./store.js";
 import { routeMusicApi } from "./routes.js";
 
+const MUSIC_STREAM_CHUNK_BYTES = 2 * 1024 * 1024;
+
 export function createMusicRuntime({
   dbPath,
   ffprobePath,
@@ -44,7 +46,7 @@ export function createMusicRuntime({
         notFound(res);
         return true;
       }
-      mediaStreamService.serveVideo(req, res, file);
+      mediaStreamService.serveVideo(req, res, { ...file, maxRangeBytes: MUSIC_STREAM_CHUNK_BYTES });
       return true;
     }
 

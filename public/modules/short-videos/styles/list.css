@@ -1055,6 +1055,12 @@ body.short-video-author-page-active .main {
 
 .short-video-home.is-author-page .short-video-sort-select {
   background: transparent;
+  color-scheme: dark;
+}
+
+.short-video-home.is-author-page .short-video-sort-select option {
+  background: #242630;
+  color: #f1f1f2;
 }
 
 .short-video-home.is-author-page .short-video-search-suggestions {
@@ -1418,6 +1424,15 @@ body.short-video-author-page-active .main {
   padding: 3px 5px;
   text-shadow: 0 1px 4px rgba(0, 0, 0, .68);
   pointer-events: none;
+}
+
+.short-video-like-badge.is-unknown {
+  color: rgba(255, 255, 255, .72);
+  font-weight: 700;
+}
+
+.short-video-like-badge.is-unknown .short-video-icon {
+  opacity: .72;
 }
 
 .short-video-watch-badge {

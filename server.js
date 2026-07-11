@@ -87,7 +87,7 @@ const SHORT_VIDEO_DB_PATH = path.join(DATA_DIR, "short-videos.sqlite");
 const SHORT_VIDEO_ROOTS = parseShortVideoRoots();
 const SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH = process.env.FANHAO_DOUYIN_DOWNLOAD_MANAGER_DB
   || path.join(os.homedir(), "Desktop", "Tool", "douyin-download-manager", "data", "douyin_downloads.sqlite");
-const SHORT_VIDEO_DOWNLOAD_MANAGER_SYNC_MS = Number(process.env.FANHAO_DOUYIN_SYNC_MS || 5 * 60 * 1000);
+const SHORT_VIDEO_DOWNLOAD_MANAGER_SYNC_MS = Number(process.env.FANHAO_DOUYIN_SYNC_MS || 60 * 1000);
 const NOVEL_UPLOAD_MAX_BODY_BYTES = 80 * 1024 * 1024;
 const APP_CONFIG_PATH = path.join(DATA_DIR, "app-config.json");
 const AUTH_SECRET_PATH = path.join(DATA_DIR, "auth-secret.txt");

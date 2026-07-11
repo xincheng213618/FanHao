@@ -24,8 +24,11 @@ export function createShortVideoPage(deps) {
   let touchDeltaY = 0;
   let touchHorizontalDragging = false;
   let touchLastX = 0;
+  let touchLastY = 0;
   let touchLastAt = 0;
   let touchVelocityX = 0;
+  let touchVelocityY = 0;
+  let touchControlInteraction = false;
   let pointerStartX = 0;
   let pointerStartY = 0;
   let pointerDeltaX = 0;
@@ -33,17 +36,28 @@ export function createShortVideoPage(deps) {
   let pointerHorizontalDragging = false;
   let pointerDragging = false;
   let pointerLastX = 0;
+  let pointerLastY = 0;
   let pointerLastAt = 0;
   let pointerVelocityX = 0;
+  let pointerVelocityY = 0;
   let suppressNextPlayerClick = false;
+  let holdSpeedGestureConsumed = false;
+  let holdSpeedGestureBlockUntil = 0;
   let wheelDeltaY = 0;
   let wheelLastAt = 0;
   let wheelResetTimer = 0;
+  let reelDragRaf = 0;
+  let reelDragDeltaY = 0;
+  let reelBoundaryPulseRaf = 0;
+  let reelBoundaryPulseTimer = 0;
+  let reelBoundaryResetTimer = 0;
   let wheelIgnoreUntil = 0;
-  let wheelLockedDeltaY = 0;
+  let wheelGestureConsumed = false;
+  let wheelGestureStartedAt = 0;
   let queuedAdjacentDirection = 0;
   let eventsInstalled = false;
   let playerClickTimer = 0;
+  let pendingPlayerTap = null;
   let loadMoreObserver = null;
   let coverLoadObserver = null;
   let coverLoadTimer = null;
@@ -75,10 +89,42 @@ export function createShortVideoPage(deps) {
   let svScrollRaf = 0;
   let authorPanelReturnFeed = null;
   let authorPanelVideoRequestId = 0;
+  let authorPanelVideoCache = null;
+  let authorPanelTileMap = null;
   let shortVideoAdjacentRequestId = 0;
+  let shortVideoOpenRequestId = 0;
+  let shortVideoOpeningId = "";
+  let shortVideoOpenError = "";
+  let shortVideoNavigationPrefetchTimer = 0;
+  let shortVideoVisibilitySnapshot = null;
   const loadedCoverIds = new Set();
   const shortVideoWatchWrites = new Map();
+  const shortVideoDetailCache = new Map();
+  const shortVideoResolvedDetailCache = new Map();
+  const shortVideoNavigationCache = new Map();
+  const shortVideoVideoCache = new Map();
+  const shortVideoVideoPrefetches = new Map();
+  const shortVideoMediaPrefetches = new Map();
   const SHORT_VIDEO_WATCH_SAVE_INTERVAL = 4000;
+  const SHORT_VIDEO_GALLERY_ADVANCE_MS = 3000;
+  const SHORT_VIDEO_GALLERY_GESTURE_HINT_MS = 3200;
+  const SHORT_VIDEO_GALLERY_GESTURE_HINT_KEY = "fanhao.shortVideo.galleryGestureHintSeen";
+  const SHORT_VIDEO_NAV_CACHE_LIMIT = 32;
+  const SHORT_VIDEO_NEIGHBOR_CACHE_LIMIT = 96;
+  const SHORT_VIDEO_DETAIL_NEIGHBOR_LIMIT = 2;
+  const SHORT_VIDEO_SWIPE_DISTANCE = 44;
+  const SHORT_VIDEO_WHEEL_DISTANCE = 82;
+  const SHORT_VIDEO_SWITCH_ANIMATION_MS = 220;
+  const SHORT_VIDEO_SWITCH_MIN_ANIMATION_MS = 112;
+  const SHORT_VIDEO_SWITCH_MAX_ANIMATION_MS = 232;
+  const SHORT_VIDEO_SWITCH_PRIME_TIMEOUT_MS = 200;
+  const SHORT_VIDEO_BOUNDARY_RESISTANCE = 0.3;
+  const SHORT_VIDEO_BOUNDARY_RANGE = 180;
+  const SHORT_VIDEO_HOLD_ARM_MOVE_TOLERANCE = 12;
+  const SHORT_VIDEO_HOLD_ACTIVE_MOVE_TOLERANCE = 26;
+  const SHORT_VIDEO_DOUBLE_TAP_WINDOW_MS = 520;
+  const WHEEL_GESTURE_IDLE_MS = 220;
+  const WHEEL_NEW_GESTURE_GAP_MS = 160;
   const shortVideoSearch = createShortVideoSearchModule({
     api,
     createIcon,
@@ -195,6 +241,9 @@ export function createShortVideoPage(deps) {
       await openVideo(route.shortVideoId, { skipRoute: true });
       return;
     }
+    shortVideoOpenRequestId += 1;
+    shortVideoOpeningId = "";
+    shortVideoOpenError = "";
     if (route.shortVideoAuthorPage) {
       state.shortVideo.authorPage = route.shortVideoAuthorPage;
       state.shortVideo.author = route.shortVideoAuthorPage;
@@ -350,30 +399,53 @@ export function createShortVideoPage(deps) {
   async function openVideo(videoId, options = {}) {
     ensureState();
     if (!videoId) return;
+    const requestId = ++shortVideoOpenRequestId;
+    shortVideoOpeningId = String(videoId);
+    shortVideoOpenError = "";
     state.shortVideo.loading = true;
     state.shortVideo.status = "正在打开视频";
     if (options.renderLoading !== false) renderView();
-    const data = await api(`/api/short-videos/${encodeURIComponent(videoId)}?${shortVideoFeedParams()}`);
-    state.shortVideo.current = data.video;
-    if (state.shortVideo.sound && data.video?.sound?.key === state.shortVideo.sound) state.shortVideo.soundInfo = data.video.sound;
-    state.shortVideo.prevId = data.prevId || "";
-    state.shortVideo.nextId = data.nextId || "";
-    state.shortVideo.slideDirection = Number(options.slideDirection || 0);
-    state.shortVideo.prevVideo = null;
-    state.shortVideo.nextVideo = null;
-    state.shortVideo.loading = false;
-    state.shortVideo.status = "";
-    renderStats();
-    renderView();
-    resumeActiveSound();
-    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-    if (!options.skipRoute) pushRoute({ view: "shortVideos", shortVideoId: data.video.id });
-    loadShortVideoSummary().catch(handleSummaryLoadError);
-    loadAdjacentVideos(data.video.id).then((loaded) => {
-      if (!loaded) return;
-      refreshAdjacentPanelsDom();
-      syncCurrentNavigationDom();
-    }).catch((error) => console.warn(error));
+    try {
+      const data = await fetchShortVideoDetail(videoId);
+      if (requestId !== shortVideoOpenRequestId) return false;
+      state.shortVideo.current = data.video;
+      if (state.shortVideo.sound && data.video?.sound?.key === state.shortVideo.sound) state.shortVideo.soundInfo = data.video.sound;
+      state.shortVideo.prevId = data.prevId || "";
+      state.shortVideo.nextId = data.nextId || "";
+      state.shortVideo.slideDirection = Number(options.slideDirection || 0);
+      state.shortVideo.prevVideo = null;
+      state.shortVideo.nextVideo = null;
+      state.shortVideo.loading = false;
+      state.shortVideo.status = "";
+      shortVideoOpeningId = "";
+      shortVideoOpenError = "";
+      renderStats();
+      renderView();
+      resumeActiveSound();
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      if (!options.skipRoute) pushRoute({ view: "shortVideos", shortVideoId: data.video.id });
+      loadShortVideoSummary().catch(handleSummaryLoadError);
+      loadAdjacentVideos(data.video.id).then((loaded) => {
+        if (!loaded) return;
+        refreshAdjacentPanelsDom();
+        syncCurrentNavigationDom();
+      }).catch((error) => console.warn(error));
+      return true;
+    } catch (error) {
+      if (requestId !== shortVideoOpenRequestId) return false;
+      state.shortVideo.loading = false;
+      state.shortVideo.status = "";
+      if (state.shortVideo.current) {
+        shortVideoOpeningId = "";
+        shortVideoOpenError = "";
+        renderView();
+        throw error;
+      }
+      shortVideoOpenError = shortVideoFriendlyError(error, "本地视频暂时无法打开");
+      renderView();
+      console.warn(error);
+      return false;
+    }
   }
 
   function renderStats() {
@@ -398,16 +470,39 @@ export function createShortVideoPage(deps) {
     }
   }
 
+  function disposeShortVideoMedia(root, options = {}) {
+    const release = options.release !== false;
+    root?.querySelectorAll?.("video, audio")?.forEach?.((player) => {
+      try {
+        player.muted = true;
+        player.onended = null;
+        player.pause?.();
+        if (release) {
+          player.removeAttribute?.("src");
+          player.load?.();
+        }
+      } catch {}
+    });
+  }
+
   function renderView() {
     ensureState();
     if (!els.workGrid) return;
     resetShortVideoWindow();
     resetLoadMoreObserver();
     resetCoverLoadObserver();
+    clearPendingPlayerClick();
+    els.workGrid.querySelector?.(".short-video-browser")?.shortVideoControlsDispose?.();
+    els.workGrid.querySelector?.(".short-video-control-bar")?.shortVideoDispose?.();
+    disposeShortVideoMedia(els.workGrid);
     els.workGrid.innerHTML = "";
     setBodyClass();
     if (state.shortVideo.current) {
       renderBrowser();
+      return;
+    }
+    if (shortVideoOpeningId) {
+      renderBrowserLoading();
       return;
     }
     renderHome();
@@ -706,6 +801,11 @@ export function createShortVideoPage(deps) {
           : `${formatNumber(authors.length || 0)} 位作者`;
     } else if (isShortVideoAuthorDetailPage()) {
       total.textContent = `${formatNumber(data.total || 0)} 条作品`;
+    } else if (
+      state.shortVideo.source === "liked"
+      && Number(data.relationshipTotal || 0) > Number(data.total || 0)
+    ) {
+      total.textContent = `喜欢关系 ${formatNumber(data.relationshipTotal)} · 本地可看 ${formatNumber(data.total || 0)}`;
     } else {
       total.textContent = `${formatNumber(data.total || 0)} 条`;
     }
@@ -1142,6 +1242,15 @@ export function createShortVideoPage(deps) {
     return text.startsWith("name:") ? text.slice(5) : "";
   }
 
+  function shortVideoAuthorDisplayName(value, fallback = "未知作者") {
+    const name = String(value || "").trim().replace(/^(?:@\s*)+/u, "").trim();
+    return name || fallback;
+  }
+
+  function shortVideoAuthorHandle(value, fallback = "未知作者") {
+    return `@${shortVideoAuthorDisplayName(value, fallback)}`;
+  }
+
   function renderAuthorIndexCard(author = {}) {
     const button = document.createElement("button");
     button.type = "button";
@@ -1332,7 +1441,8 @@ export function createShortVideoPage(deps) {
     open.append(img);
     const like = document.createElement("span");
     like.className = "short-video-like-badge";
-    like.append(createIcon("heart"), document.createTextNode(formatCompact(video.stats?.likes || 0)));
+    like.append(createIcon("heart"), document.createTextNode(formatShortVideoMetric(video, "likes")));
+    applyShortVideoStatsBadgeState(like, video);
     open.append(like);
     if (isGalleryPost(video)) {
       open.append(galleryBadge(video));
@@ -1370,7 +1480,7 @@ export function createShortVideoPage(deps) {
       const duration = document.createElement("span");
       duration.textContent = isGalleryPost(video) ? galleryLabel(video) : (formatDuration(video.durationMs) || "-");
       const comments = document.createElement("span");
-      comments.append(createIcon("comment"), document.createTextNode(formatCompact(video.stats?.comments || 0)));
+      comments.append(createIcon("comment"), document.createTextNode(formatShortVideoMetric(video, "comments")));
       meta.append(date, duration, comments);
       card.append(meta);
     } else {
@@ -1381,7 +1491,7 @@ export function createShortVideoPage(deps) {
         const author = document.createElement("button");
         author.type = "button";
         author.className = "short-video-card-author";
-        author.textContent = `@${authorName}`;
+        author.textContent = shortVideoAuthorHandle(authorName);
         author.title = `查看 ${authorName}`;
         author.disabled = selecting;
         author.addEventListener("click", () => openShortVideoAuthorPage(video.author, video));
@@ -1389,7 +1499,7 @@ export function createShortVideoPage(deps) {
       } else {
         const author = document.createElement("span");
         author.className = "short-video-card-author is-static";
-        author.textContent = `@${authorName}`;
+        author.textContent = shortVideoAuthorHandle(authorName);
         subline.append(author);
       }
       if (state.shortVideo.source === "recommended" && video.recommendation?.reason) {
@@ -1442,14 +1552,20 @@ export function createShortVideoPage(deps) {
   }
 
   function galleryImageEntries(video = {}) {
+    if (Array.isArray(video.galleryItems) && video.galleryItems.length) {
+      return video.galleryItems
+        .filter((item) => item && item.url)
+        .map((item) => ({ ...item, type: item.type === "video" ? "video" : "image" }));
+    }
     return Array.isArray(video.galleryImages)
-      ? video.galleryImages.filter((item) => item && item.url)
+      ? video.galleryImages.filter((item) => item && item.url).map((item) => ({ ...item, type: "image" }))
       : [];
   }
 
   function galleryLabel(video = {}) {
     const count = Number(video.galleryCount || galleryImageEntries(video).length || 0);
-    return `${Math.max(1, count)} 张`;
+    const hasVideo = galleryImageEntries(video).some((item) => item.type === "video");
+    return `${Math.max(1, count)} ${hasVideo ? "项" : "张"}`;
   }
 
   function galleryBadge(video = {}) {
@@ -1574,18 +1690,7 @@ export function createShortVideoPage(deps) {
     loadMoreObserver.observe(sentinel);
   }
 
-  function renderBrowser() {
-    const video = state.shortVideo.current;
-    const page = document.createElement("section");
-    page.className = "short-video-browser";
-    const slideDirection = Number(state.shortVideo.slideDirection || 0);
-    if (slideDirection > 0) page.classList.add("is-slide-next");
-    else if (slideDirection < 0) page.classList.add("is-slide-prev");
-    if (slideDirection) {
-      page.addEventListener("animationend", () => {
-        if (state.shortVideo) state.shortVideo.slideDirection = 0;
-      }, { once: true });
-    }
+  function renderBrowserTop() {
     const top = document.createElement("div");
     top.className = "short-video-browser-top";
     const back = document.createElement("button");
@@ -1608,6 +1713,65 @@ export function createShortVideoPage(deps) {
     search.append(searchText, searchAction);
     search.addEventListener("click", showHomeAndFocusSearch);
     top.append(back, search);
+    return top;
+  }
+
+  function renderBrowserLoading() {
+    const page = document.createElement("section");
+    page.className = `short-video-browser is-loading-shell${shortVideoOpenError ? " is-load-error" : ""}`;
+    const stage = document.createElement("div");
+    stage.className = "short-video-loading-stage";
+    const shimmer = document.createElement("span");
+    shimmer.className = "short-video-loading-shimmer";
+    shimmer.setAttribute("aria-hidden", "true");
+    const status = document.createElement("div");
+    status.className = "short-video-opening-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    const icon = createIcon("repeat");
+    icon.classList.add("short-video-opening-icon");
+    const title = document.createElement("strong");
+    title.textContent = shortVideoOpenError ? "作品暂时打不开" : "正在准备作品";
+    const detail = document.createElement("span");
+    detail.className = "short-video-opening-detail";
+    detail.textContent = shortVideoOpenError || "正在读取本地媒体";
+    status.append(icon, title, detail);
+    if (shortVideoOpenError) {
+      const actions = document.createElement("div");
+      actions.className = "short-video-opening-actions";
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.textContent = "重新加载";
+      retry.addEventListener("click", () => openVideo(shortVideoOpeningId).catch(showError));
+      const back = document.createElement("button");
+      back.type = "button";
+      back.textContent = "返回列表";
+      back.addEventListener("click", showHome);
+      actions.append(retry, back);
+      status.append(actions);
+    }
+    stage.append(shimmer, status);
+    const controls = document.createElement("div");
+    controls.className = "short-video-loading-controls";
+    controls.setAttribute("aria-hidden", "true");
+    controls.append(document.createElement("span"), document.createElement("span"), document.createElement("span"));
+    page.append(renderBrowserTop(), stage, controls);
+    els.workGrid.append(page);
+  }
+
+  function renderBrowser() {
+    const video = state.shortVideo.current;
+    const page = document.createElement("section");
+    page.className = "short-video-browser";
+    const slideDirection = Number(state.shortVideo.slideDirection || 0);
+    if (slideDirection > 0) page.classList.add("is-slide-next");
+    else if (slideDirection < 0) page.classList.add("is-slide-prev");
+    if (slideDirection) {
+      page.addEventListener("animationend", () => {
+        if (state.shortVideo) state.shortVideo.slideDirection = 0;
+      }, { once: true });
+    }
+    const top = renderBrowserTop();
 
     const stack = document.createElement("div");
     stack.className = "short-video-reel-stack";
@@ -1624,6 +1788,7 @@ export function createShortVideoPage(deps) {
     page.append(top, stack, renderBrowserNav(), isGalleryPost(video) ? renderGalleryControlBar(video) : renderControlBar());
     els.workGrid.append(page);
     syncPlayToggle();
+    bindBrowserControlVisibility(page, player);
     if (!player) return;
     window.requestAnimationFrame(() => {
       player.play().then(syncPlayToggle).catch(() => {
@@ -1632,7 +1797,7 @@ export function createShortVideoPage(deps) {
           player.play().then(syncPlayToggle).catch(syncPlayToggle);
           return;
         }
-        player.closest(".short-video-stage")?.classList.add("is-sound-blocked");
+        markPlayerSoundBlocked(player.closest(".short-video-stage"));
         player.muted = true;
         player.play().then(syncPlayToggle).catch(syncPlayToggle);
         syncPlayToggle();
@@ -1645,15 +1810,24 @@ export function createShortVideoPage(deps) {
     const slot = options.slot || "current";
     const panel = document.createElement("div");
     panel.className = `short-video-reel-panel is-${slot}${ghost ? " is-ghost-panel" : ""}`;
-    if (ghost) panel.setAttribute("aria-hidden", "true");
+    panel.dataset.videoId = String(video?.id || "");
+    if (ghost) {
+      panel.setAttribute("aria-hidden", "true");
+      // 相邻作品只用于画面预热和切换动画，不能进入当前作品的键盘顺序。
+      panel.inert = true;
+    }
 
     const gallery = isGalleryPost(video);
     panel.classList.toggle("is-gallery-post", gallery);
-    const backdrop = document.createElement(gallery ? "img" : "video");
+    const staticBackdropUrl = video.coverUrl || (gallery
+      ? galleryImageEntries(video).find((item) => item.type !== "video")?.url || ""
+      : "");
+    const useStaticBackdrop = gallery || Boolean(staticBackdropUrl);
+    const backdrop = document.createElement(useStaticBackdrop ? "img" : "video");
     backdrop.className = "short-video-backdrop-video";
-    if (gallery) {
+    if (useStaticBackdrop) {
       backdrop.classList.add("short-video-backdrop-image");
-      backdrop.src = video.coverUrl || galleryImageEntries(video)[0]?.url || "";
+      backdrop.src = staticBackdropUrl;
       backdrop.alt = "";
       backdrop.setAttribute("aria-hidden", "true");
     } else {
@@ -1668,6 +1842,7 @@ export function createShortVideoPage(deps) {
 
     const stage = document.createElement("div");
     stage.className = gallery ? "short-video-stage is-gallery-stage is-video-ready" : "short-video-stage is-video-loading";
+    stage.setAttribute("aria-busy", String(!gallery));
     stage.tabIndex = -1;
     stage.addEventListener("pointerdown", (event) => {
       if (isShortVideoKeyboardControl(event.target)) return;
@@ -1689,17 +1864,29 @@ export function createShortVideoPage(deps) {
       player.dataset.streamUrl = video.streamUrl;
       if (video.coverUrl) player.poster = video.coverUrl;
       player.controls = false;
-      player.autoplay = true;
+      player.autoplay = !ghost;
       player.muted = ghost ? true : Boolean(state.shortVideo.muted);
       player.volume = currentShortVideoVolume();
       player.playbackRate = normalizePlaybackRate(state.shortVideo.playbackRate);
       player.playsInline = true;
       player.loop = true;
-      player.preload = ghost ? "metadata" : "auto";
-      const markVideoReady = () => {
+      player.preload = ghost ? "none" : "auto";
+      let firstFramePromise = null;
+      const revealVideoFrame = () => {
         stage.classList.remove("is-video-loading", "is-video-buffering", "is-video-error");
         stage.classList.add("is-video-ready");
+        stage.setAttribute("aria-busy", "false");
+        if (!player.dataset.shortVideoMediaReadyAt) player.dataset.shortVideoMediaReadyAt = String(Date.now());
         applyVideoOrientation(panel, stage, player.videoWidth, player.videoHeight);
+      };
+      const markVideoReady = () => {
+        if (stage.classList.contains("is-video-ready") || firstFramePromise) return;
+        firstFramePromise = waitForVideoFirstFrame(player, 420).then((ready) => {
+          firstFramePromise = null;
+          if (!player.isConnected || stage.classList.contains("is-video-ready")) return;
+          if (!ready && player.readyState < 2) return;
+          revealVideoFrame();
+        });
       };
       player.addEventListener("loadedmetadata", () => {
         applyVideoOrientation(panel, stage, player.videoWidth, player.videoHeight);
@@ -1712,7 +1899,7 @@ export function createShortVideoPage(deps) {
       });
       if (ghost) {
         stage.append(player);
-        scheduleAdjacentVideoWarmup(player, video);
+        scheduleAdjacentVideoWarmup(player, video, slot);
       } else {
         syncPlayToggle = attachPrimaryPlayerControls(stage, player, () => rail, video);
       }
@@ -1721,19 +1908,19 @@ export function createShortVideoPage(deps) {
     const info = document.createElement("div");
     info.className = "short-video-caption";
     const tools = document.createElement("div");
-    tools.className = "short-video-caption-tools";
+    tools.className = "short-video-caption-context";
     const recommend = document.createElement("button");
     recommend.type = "button";
-    recommend.className = "short-video-caption-pill";
-    recommend.textContent = "相关推荐 ›";
+    recommend.className = "short-video-caption-context-button";
+    recommend.append(createIcon("repeat"), document.createTextNode("相关推荐"));
     recommend.addEventListener("click", () => showAuthorPanel(video, {
       initialTab: "related",
       switchAuthorFeed: false
     }));
     const identify = document.createElement("button");
     identify.type = "button";
-    identify.className = "short-video-caption-pill short-video-identify-button";
-    identify.textContent = "识别内容";
+    identify.className = "short-video-caption-context-button short-video-identify-button";
+    identify.append(createIcon("ai"), document.createTextNode("识别内容"));
     identify.addEventListener("click", () => showAuthorPanel(video, {
       initialTab: "ai",
       switchAuthorFeed: false
@@ -1748,25 +1935,63 @@ export function createShortVideoPage(deps) {
     const captionToggle = document.createElement("button");
     captionToggle.type = "button";
     captionToggle.className = "short-video-caption-expand";
-    captionToggle.textContent = "展开";
+    captionToggle.textContent = "… 展开";
     captionToggle.hidden = true;
     captionToggle.setAttribute("aria-expanded", "false");
+    captionToggle.setAttribute("aria-label", "展开完整标题");
     captionToggle.setAttribute("aria-controls", title.id);
     const setCaptionExpanded = (expanded) => {
       captionCopy.classList.toggle("is-expanded", expanded);
-      captionToggle.textContent = expanded ? "收起" : "展开";
+      captionToggle.textContent = expanded ? "收起" : "… 展开";
       captionToggle.setAttribute("aria-expanded", String(expanded));
+      captionToggle.setAttribute("aria-label", expanded ? "收起完整标题" : "展开完整标题");
       if (!expanded) title.scrollTop = 0;
     };
+    title.addEventListener("click", (event) => {
+      if (!captionCopy.classList.contains("can-expand") || event.target.closest?.("button")) return;
+      setCaptionExpanded(!captionCopy.classList.contains("is-expanded"));
+    });
     captionToggle.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
       setCaptionExpanded(!captionCopy.classList.contains("is-expanded"));
     });
     captionCopy.append(title, captionToggle);
+    let soundButton = null;
+    if (video.sound) {
+      soundButton = document.createElement("button");
+      soundButton.type = "button";
+      soundButton.className = "short-video-caption-sound";
+      soundButton.setAttribute("aria-label", `查看原声：${video.sound.title || "作品原声"}`);
+      const soundCover = document.createElement("span");
+      soundCover.className = "short-video-caption-sound-cover";
+      if (video.sound.coverUrl) {
+        const soundImage = document.createElement("img");
+        soundImage.src = video.sound.coverUrl;
+        soundImage.alt = "";
+        soundImage.decoding = "async";
+        soundCover.append(soundImage);
+      } else {
+        soundCover.append(createIcon("headphones"));
+      }
+      const soundCopy = document.createElement("span");
+      const soundTitle = document.createElement("strong");
+      soundTitle.textContent = video.sound.title || "作品原声";
+      const soundAuthor = document.createElement("small");
+      soundAuthor.textContent = [video.sound.author || video.author?.name || "", video.sound.localAvailable ? "本地原声" : "原声"].filter(Boolean).join(" · ");
+      soundCopy.append(soundTitle, soundAuthor);
+      soundButton.append(soundCover, soundCopy);
+      soundButton.addEventListener("click", () => showAuthorPanel(video, {
+        initialTab: "sound",
+        switchAuthorFeed: false
+      }).catch(showError));
+    }
     const meta = document.createElement("span");
-    meta.textContent = [gallery ? `图文 · ${galleryLabel(video)}` : formatDuration(video.durationMs), formatBytes(video.size || 0)].filter(Boolean).join(" · ");
-    info.append(tools, author, captionCopy, meta);
+    meta.className = "short-video-caption-meta";
+    meta.textContent = [gallery ? `图集 · ${galleryLabel(video)}` : formatDuration(video.durationMs), formatBytes(video.size || 0)].filter(Boolean).join(" · ");
+    info.append(author, captionCopy);
+    if (soundButton) info.append(soundButton);
+    info.append(meta, tools);
     panel.append(backdrop, stage, info);
     const syncCaptionOverflow = () => {
       if (!title.isConnected) return;
@@ -1778,18 +2003,21 @@ export function createShortVideoPage(deps) {
       captionToggle.hidden = !canExpand;
       if (!canExpand) setCaptionExpanded(false);
     };
-    window.requestAnimationFrame(() => {
-      syncCaptionOverflow();
-      window.requestAnimationFrame(syncCaptionOverflow);
-    });
-    document.fonts?.ready.then(syncCaptionOverflow).catch(() => {});
+    panel.shortVideoSyncCaptionOverflow = syncCaptionOverflow;
+    if (!ghost) {
+      window.requestAnimationFrame(() => {
+        syncCaptionOverflow();
+        window.requestAnimationFrame(syncCaptionOverflow);
+      });
+      document.fonts?.ready.then(syncCaptionOverflow).catch(() => {});
+    }
 
     const rail = document.createElement("aside");
     rail.className = "short-video-rail";
-    rail.append(railButton("识别", createIcon("ai"), "ai", "识别当前内容", () => showAuthorPanel(video, {
+    const aiButton = railButton("识别", createIcon("ai"), "ai", "识别当前内容", () => showAuthorPanel(video, {
       initialTab: "ai",
       switchAuthorFeed: false
-    }).catch(showError)));
+    }).catch(showError));
     rail.append(authorRailButton(video));
     const likeButton = railMetric("heart", video.stats?.likes, "like", "点赞");
     likeButton.dataset.videoId = String(video.id || "");
@@ -1816,16 +2044,23 @@ export function createShortVideoPage(deps) {
       event?.stopPropagation?.();
       shareShortVideo(video, { trigger: event?.currentTarget || null });
     }));
-    rail.append(railButton("", createIcon("trash"), "delete", "删除", () => deleteShortVideo(video, { fromBrowser: true })));
-    rail.append(railButton("", createIcon("folderTrash"), "delete-group", "删同组", () => deleteShortVideo(video, { fromBrowser: true, scope: "group" })));
-    rail.append(railButton(video.sound ? "原声" : "听抖音", createIcon("headphones"), "listen", video.sound ? `原声：${video.sound.title}` : "听抖音", () => {
+    const soundVisual = video.sound?.coverUrl
+      ? Object.assign(document.createElement("img"), {
+        className: "short-video-sound-rail-cover",
+        src: video.sound.coverUrl,
+        alt: ""
+      })
+      : createIcon("headphones");
+    const listenButton = railButton(video.sound ? "原声" : "听抖音", soundVisual, "listen", video.sound ? `原声：${video.sound.title}` : "听抖音", () => {
       if (!video.sound) {
         openDouyinLink(video);
         return;
       }
       showAuthorPanel(video, { initialTab: "sound", switchAuthorFeed: false }).catch(showError);
-    }));
-    rail.append(railButton("", createIcon("more"), "more", "更多播放设置", (event) => {
+    });
+    rail.append(listenButton);
+    rail.append(aiButton);
+    rail.append(railButton("", createIcon("more"), "more", "更多", (event) => {
       event.preventDefault();
       event.stopPropagation();
       showPlaybackSettings(video, { trigger: event.currentTarget });
@@ -1841,47 +2076,95 @@ export function createShortVideoPage(deps) {
     const stage = options.stage;
     const wrap = document.createElement("div");
     wrap.className = `short-video-gallery-player${ghost ? " is-ghost" : ""}`;
+    wrap.setAttribute("role", "group");
+    wrap.setAttribute("aria-label", "图文播放器");
+    if (images.length > 1) wrap.setAttribute("aria-description", "左右滑动翻图，上下滑动切换作品");
     wrap.dataset.galleryIndex = "0";
     wrap.dataset.galleryRequestedIndex = "0";
     wrap.dataset.galleryCount = String(images.length);
+    wrap.style.setProperty("--short-video-gallery-advance-duration", `${SHORT_VIDEO_GALLERY_ADVANCE_MS}ms`);
 
     const track = document.createElement("div");
     track.className = "short-video-gallery-track";
 
     const counter = document.createElement("span");
     counter.className = "short-video-gallery-counter";
+    counter.setAttribute("role", "status");
     counter.setAttribute("aria-live", "polite");
+    counter.setAttribute("aria-atomic", "true");
 
-    const loadStatus = document.createElement("span");
+    const pager = document.createElement("div");
+    pager.className = "short-video-gallery-pager";
+    pager.setAttribute("role", "group");
+    pager.setAttribute("aria-label", "图集翻页");
+
+    const loadStatus = document.createElement("div");
     loadStatus.className = "short-video-gallery-load-status";
-    loadStatus.setAttribute("role", "status");
-    loadStatus.setAttribute("aria-live", "polite");
     loadStatus.setAttribute("aria-hidden", "true");
+    const loadStatusCopy = document.createElement("span");
+    loadStatusCopy.className = "short-video-gallery-load-copy";
+    loadStatusCopy.setAttribute("role", "status");
+    loadStatusCopy.setAttribute("aria-live", "polite");
+    loadStatusCopy.setAttribute("aria-atomic", "true");
+    const loadRetry = document.createElement("button");
+    loadRetry.type = "button";
+    loadRetry.className = "short-video-gallery-load-retry";
+    loadRetry.textContent = "重试";
+    loadRetry.hidden = true;
+    loadStatus.append(loadStatusCopy, loadRetry);
+
+    const gestureHint = document.createElement("div");
+    gestureHint.className = "short-video-gallery-gesture-hint";
+    gestureHint.setAttribute("aria-hidden", "true");
+    gestureHint.textContent = "左右滑动翻图 · 上下滑动切作品";
 
     const progress = document.createElement("div");
     progress.className = "short-video-gallery-progress";
     progress.setAttribute("role", "tablist");
-    progress.setAttribute("aria-label", "图文图片进度");
-    const progressButtons = images.map((_, index) => {
+    progress.setAttribute("aria-label", "图集内容进度");
+    const progressButtons = images.map((item, index) => {
       const button = document.createElement("button");
       button.type = "button";
+      button.dataset.galleryMediaType = item?.type === "video" ? "video" : "image";
       button.setAttribute("role", "tab");
-      button.setAttribute("aria-label", `查看第 ${index + 1} 张图片`);
+      const mediaLabel = item?.type === "video" ? "视频" : "图片";
+      button.setAttribute("aria-label", `查看第 ${index + 1} 项，共 ${images.length} 项，${mediaLabel}`);
       progress.append(button);
       return button;
     });
+
+    const centerPlay = document.createElement("button");
+    centerPlay.type = "button";
+    centerPlay.className = "short-video-center-play is-gallery-center-play";
+    centerPlay.tabIndex = -1;
+    centerPlay.setAttribute("aria-hidden", "true");
+    setIconButton(centerPlay, "play", "继续播放图集");
 
     const previous = document.createElement("button");
     previous.type = "button";
     previous.className = "short-video-gallery-nav is-previous";
     previous.append(createIcon("chevronLeft"));
-    previous.setAttribute("aria-label", "上一张图片");
+    previous.setAttribute("aria-label", "上一项内容");
 
     const next = document.createElement("button");
     next.type = "button";
     next.className = "short-video-gallery-nav is-next";
     next.append(createIcon("chevronLeft"));
-    next.setAttribute("aria-label", "下一张图片");
+    next.setAttribute("aria-label", "下一项内容");
+
+    const edgePrevious = document.createElement("button");
+    edgePrevious.type = "button";
+    edgePrevious.className = "short-video-gallery-edge-nav is-previous";
+    edgePrevious.append(createIcon("chevronLeft"));
+    edgePrevious.setAttribute("aria-label", "上一项图集内容");
+    edgePrevious.title = "上一张（←）";
+
+    const edgeNext = document.createElement("button");
+    edgeNext.type = "button";
+    edgeNext.className = "short-video-gallery-edge-nav is-next";
+    edgeNext.append(createIcon("chevronLeft"));
+    edgeNext.setAttribute("aria-label", "下一项图集内容");
+    edgeNext.title = "下一张（→）";
 
     let currentIndex = 0;
     let requestedIndex = 0;
@@ -1893,21 +2176,68 @@ export function createShortVideoPage(deps) {
     let boundaryTimer = 0;
     let loadStatusTimer = 0;
     let loadStatusHideTimer = 0;
+    let failedLoadIndex = -1;
+    let failedLoadDirection = 0;
     let dragActive = false;
     let dragDirection = 0;
     let dragVisualX = 0;
     let dragPreviewEntry = null;
     let dragPreviewToken = 0;
     let dragSettleTimer = 0;
+    let advanceTimer = 0;
+    let advanceStartedAt = 0;
+    let advanceRemainingMs = SHORT_VIDEO_GALLERY_ADVANCE_MS;
+    let advanceEntry = null;
+    let videoProgressRaf = 0;
+    let galleryVisibilityPaused = false;
+    let galleryUserPaused = false;
+    let backgroundAudio = null;
+    let syncGallerySoundState = () => {};
+    let galleryClickTimer = 0;
+    let captionMetaTimer = 0;
+    let counterMotionTimer = 0;
+    let localSoundPollTimer = 0;
+    let localSoundPollAttempts = 0;
+    let gestureHintTimer = 0;
+    let gestureHintShown = false;
     const imageCache = new Map();
 
+    const dismissGalleryGestureHint = () => {
+      window.clearTimeout(gestureHintTimer);
+      gestureHintTimer = 0;
+      gestureHint.classList.remove("is-visible");
+    };
+    const maybeShowGalleryGestureHint = () => {
+      if (ghost || gestureHintShown || images.length <= 1 || !window.matchMedia?.("(max-width: 680px)")?.matches) return;
+      let alreadySeen = false;
+      try {
+        alreadySeen = window.sessionStorage?.getItem(SHORT_VIDEO_GALLERY_GESTURE_HINT_KEY) === "1";
+      } catch {}
+      if (alreadySeen) return;
+      gestureHintShown = true;
+      try {
+        window.sessionStorage?.setItem(SHORT_VIDEO_GALLERY_GESTURE_HINT_KEY, "1");
+      } catch {}
+      window.requestAnimationFrame(() => gestureHint.classList.add("is-visible"));
+      gestureHintTimer = window.setTimeout(dismissGalleryGestureHint, SHORT_VIDEO_GALLERY_GESTURE_HINT_MS);
+    };
+
     const createGalleryImage = (index) => {
-      const element = document.createElement("img");
+      const mediaType = images[index]?.type === "video" ? "video" : "image";
+      const element = document.createElement(mediaType === "video" ? "video" : "img");
       element.className = "short-video-gallery-image";
-      element.alt = `${video.title || "图文作品"}，第 ${index + 1} 张，共 ${images.length} 张`;
+      if (mediaType === "video") {
+        element.muted = true;
+        element.playsInline = true;
+        element.preload = ghost ? "metadata" : "auto";
+        element.setAttribute("aria-label", `${video.title || "图文作品"}，第 ${index + 1} 项视频，共 ${images.length} 项`);
+      } else {
+        element.alt = `${video.title || "图文作品"}，第 ${index + 1} 张，共 ${images.length} 张`;
+        element.decoding = "async";
+      }
       element.draggable = false;
-      element.decoding = "async";
       element.dataset.galleryImageIndex = String(index);
+      element.dataset.galleryMediaType = mediaType;
       return element;
     };
     const loadImage = (index) => {
@@ -1919,6 +2249,7 @@ export function createShortVideoPage(deps) {
       const element = createGalleryImage(index);
       const entry = {
         index,
+        mediaType: images[index]?.type === "video" ? "video" : "image",
         image: element,
         status: "loading",
         cancelled: false,
@@ -1931,9 +2262,9 @@ export function createShortVideoPage(deps) {
         const finish = async (ready) => {
           if (settled) return;
           settled = true;
-          element.removeEventListener("load", handleLoad);
+          element.removeEventListener(entry.mediaType === "video" ? "canplay" : "load", handleLoad);
           element.removeEventListener("error", handleError);
-          if (ready && !entry.cancelled && typeof element.decode === "function") {
+          if (ready && entry.mediaType === "image" && !entry.cancelled && typeof element.decode === "function") {
             try {
               await element.decode();
             } catch {
@@ -1953,16 +2284,22 @@ export function createShortVideoPage(deps) {
         entry.cancel = () => {
           if (settled) return;
           entry.cancelled = true;
-          element.removeEventListener("load", handleLoad);
+          element.removeEventListener(entry.mediaType === "video" ? "canplay" : "load", handleLoad);
           element.removeEventListener("error", handleError);
+          element.pause?.();
           element.removeAttribute("src");
           settled = true;
           resolve(null);
         };
-        element.addEventListener("load", handleLoad, { once: true });
+        element.addEventListener(entry.mediaType === "video" ? "canplay" : "load", handleLoad, { once: true });
         element.addEventListener("error", handleError, { once: true });
         element.src = images[index].url;
-        if (element.complete && element.naturalWidth) Promise.resolve().then(handleLoad);
+        if (entry.mediaType === "video") {
+          element.load?.();
+          if (element.readyState >= 3) Promise.resolve().then(handleLoad);
+        } else if (element.complete && element.naturalWidth) {
+          Promise.resolve().then(handleLoad);
+        }
       });
       imageCache.set(index, entry);
       return entry;
@@ -1971,6 +2308,7 @@ export function createShortVideoPage(deps) {
       if (!entry || entry.image === image) return false;
       entry.cancelled = true;
       entry.cancel?.();
+      entry.image.pause?.();
       entry.image.removeAttribute("src");
       if (imageCache.get(entry.index) === entry) imageCache.delete(entry.index);
       return true;
@@ -1982,11 +2320,15 @@ export function createShortVideoPage(deps) {
         .sort((a, b) => a.lastUsed - b.lastUsed);
       while (imageCache.size > 7 && candidates.length) releaseEntry(candidates.shift());
     };
+    const resolveGalleryIndex = (index) => {
+      if (!images.length) return 0;
+      return ((Number(index) % images.length) + images.length) % images.length;
+    };
     const preloadAround = (index, direction = 0) => {
       const offsets = direction > 0 ? [1, 2, -1] : (direction < 0 ? [-1, -2, 1] : [-1, 1, -2, 2]);
-      const preloadIndexes = offsets
-        .map((offset) => index + offset)
-        .filter((item) => item >= 0 && item < images.length);
+      const preloadIndexes = [...new Set(offsets
+        .map((offset) => resolveGalleryIndex(index + offset))
+        .filter((item) => item !== index))];
       preloadIndexes.forEach((item) => loadImage(item));
       trimImageCache(new Set([index, ...preloadIndexes]));
     };
@@ -1997,7 +2339,10 @@ export function createShortVideoPage(deps) {
       wrap.setAttribute("aria-busy", "false");
       loadStatus.classList.remove("is-visible", "is-error");
       loadStatus.setAttribute("aria-hidden", "true");
-      loadStatus.textContent = "";
+      loadStatusCopy.textContent = "";
+      loadRetry.hidden = true;
+      failedLoadIndex = -1;
+      failedLoadDirection = 0;
     };
     const showLoadStatus = (index) => {
       window.clearTimeout(loadStatusTimer);
@@ -2006,7 +2351,10 @@ export function createShortVideoPage(deps) {
       wrap.setAttribute("aria-busy", "true");
       loadStatus.classList.remove("is-visible", "is-error");
       loadStatus.setAttribute("aria-hidden", "true");
-      loadStatus.textContent = `正在载入 ${index + 1} / ${images.length}`;
+      loadRetry.hidden = true;
+      loadStatusCopy.textContent = currentReady && currentIndex !== index
+        ? `正在载入 ${index + 1}/${images.length}，当前仍显示 ${currentIndex + 1}/${images.length}`
+        : `正在载入 ${index + 1}/${images.length}`;
       loadStatusTimer = window.setTimeout(() => {
         if (requestedIndex === index && (!currentReady || currentIndex !== index)) {
           loadStatus.setAttribute("aria-hidden", "false");
@@ -2014,21 +2362,22 @@ export function createShortVideoPage(deps) {
         }
       }, 120);
     };
-    const showLoadError = (index) => {
+    const showLoadError = (index, direction = 0) => {
       window.clearTimeout(loadStatusTimer);
       window.clearTimeout(loadStatusHideTimer);
       wrap.classList.remove("is-image-loading");
       wrap.setAttribute("aria-busy", "false");
-      loadStatus.textContent = `第 ${index + 1} 张暂时无法载入`;
+      failedLoadIndex = index;
+      failedLoadDirection = direction || Math.sign(index - currentIndex);
+      requestedIndex = currentIndex;
+      syncRequestedUi();
+      loadStatusCopy.textContent = currentReady
+        ? `第 ${index + 1} 项暂时无法载入，仍显示 ${currentIndex + 1}/${images.length}`
+        : `第 ${index + 1} 项暂时无法载入`;
+      loadRetry.hidden = false;
+      loadRetry.setAttribute("aria-label", `重试载入第 ${index + 1} 项`);
       loadStatus.setAttribute("aria-hidden", "false");
       loadStatus.classList.add("is-visible", "is-error");
-      loadStatusHideTimer = window.setTimeout(() => {
-        if (requestedIndex === index) {
-          loadStatus.classList.remove("is-visible", "is-error");
-          loadStatus.setAttribute("aria-hidden", "true");
-          loadStatus.textContent = "";
-        }
-      }, 2200);
     };
     const animateImage = (direction) => {
       window.clearTimeout(animationTimer);
@@ -2049,10 +2398,39 @@ export function createShortVideoPage(deps) {
         wrap.classList.remove("is-boundary-start", "is-boundary-end");
       }, 280);
     };
-    const syncCommittedUi = () => {
+    const syncGalleryCaptionState = (direction = 0) => {
+      const caption = stage?.closest?.(".short-video-reel-panel")?.querySelector?.(".short-video-caption");
+      const captionMeta = caption?.querySelector?.(".short-video-caption-meta");
+      if (!caption || !captionMeta) return;
+      caption.dataset.galleryIndex = String(currentIndex);
+      captionMeta.textContent = [
+        `图集 · ${currentIndex + 1}/${images.length}`,
+        formatBytes(video.size || 0)
+      ].filter(Boolean).join(" · ");
+      captionMeta.classList.remove("is-page-next", "is-page-previous");
+      window.clearTimeout(captionMetaTimer);
+      if (!direction || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return;
+      captionMeta.getBoundingClientRect();
+      captionMeta.classList.add(direction > 0 ? "is-page-next" : "is-page-previous");
+      captionMetaTimer = window.setTimeout(() => {
+        captionMeta.classList.remove("is-page-next", "is-page-previous");
+      }, 220);
+    };
+    const syncCommittedUi = (direction = 0) => {
       const current = images[currentIndex];
-      counter.textContent = `${currentIndex + 1} / ${images.length}`;
+      counter.textContent = `${currentIndex + 1}/${images.length}`;
+      counter.setAttribute("aria-label", `第 ${currentIndex + 1} 项，共 ${images.length} 项`);
+      counter.classList.remove("is-page-next", "is-page-previous");
+      window.clearTimeout(counterMotionTimer);
+      if (direction && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
+        counter.getBoundingClientRect();
+        counter.classList.add(direction > 0 ? "is-page-next" : "is-page-previous");
+        counterMotionTimer = window.setTimeout(() => {
+          counter.classList.remove("is-page-next", "is-page-previous");
+        }, 220);
+      }
       wrap.dataset.galleryIndex = String(currentIndex);
+      wrap.classList.toggle("is-gallery-video-item", current?.type === "video");
       progressButtons.forEach((button, itemIndex) => {
         const active = itemIndex === currentIndex;
         button.classList.toggle("active", active);
@@ -2062,16 +2440,194 @@ export function createShortVideoPage(deps) {
         else button.removeAttribute("aria-current");
       });
       if (current) stage?.style.setProperty("--short-video-cover", `url(${JSON.stringify(current.url)})`);
+      syncGalleryCaptionState(direction);
+    };
+    const restartProgressTiming = () => {
+      const activeButton = progressButtons[currentIndex];
+      if (!activeButton) return;
+      activeButton.style.setProperty("--short-video-gallery-media-progress", "0");
+      activeButton.classList.remove("active");
+      activeButton.getBoundingClientRect();
+      activeButton.classList.add("active");
     };
     const syncRequestedUi = () => {
       wrap.dataset.galleryRequestedIndex = String(requestedIndex);
-      previous.disabled = requestedIndex <= 0;
-      next.disabled = requestedIndex >= images.length - 1;
+      previous.disabled = images.length <= 1;
+      next.disabled = images.length <= 1;
+      edgePrevious.disabled = images.length <= 1;
+      edgeNext.disabled = images.length <= 1;
     };
+    const stopVideoProgress = () => {
+      if (videoProgressRaf) window.cancelAnimationFrame(videoProgressRaf);
+      videoProgressRaf = 0;
+    };
+    const updateVideoProgress = (entry) => {
+      if (!entry || entry.mediaType !== "video") return 0;
+      const clip = entry.image;
+      const duration = Math.max(0, Number(clip.duration || 0));
+      const currentTime = Math.max(0, Number(clip.currentTime || 0));
+      const ratio = duration > 0 ? Math.max(0, Math.min(1, currentTime / duration)) : 0;
+      progressButtons[entry.index]?.style.setProperty("--short-video-gallery-media-progress", String(ratio));
+      wrap.dataset.galleryVideoProgress = ratio.toFixed(4);
+      return ratio;
+    };
+    const startVideoProgress = (entry) => {
+      stopVideoProgress();
+      if (!entry || entry.mediaType !== "video") {
+        delete wrap.dataset.galleryVideoProgress;
+        return;
+      }
+      const tick = () => {
+        videoProgressRaf = 0;
+        updateVideoProgress(entry);
+        if (!wrap.isConnected
+          || currentIndex !== entry.index
+          || entry.image.paused
+          || entry.image.ended
+          || galleryTimingPaused()) return;
+        videoProgressRaf = window.requestAnimationFrame(tick);
+      };
+      tick();
+    };
+    const clearAdvance = (options = {}) => {
+      window.clearTimeout(advanceTimer);
+      advanceTimer = 0;
+      advanceStartedAt = 0;
+      stopVideoProgress();
+      if (options.detachVideo !== false && image?.tagName === "VIDEO") {
+        image.onended = null;
+        delete wrap.dataset.galleryVideoProgress;
+      }
+      if (options.reset !== false) {
+        advanceRemainingMs = SHORT_VIDEO_GALLERY_ADVANCE_MS;
+        advanceEntry = null;
+      }
+    };
+    const galleryTimingPaused = () => galleryVisibilityPaused || galleryUserPaused;
+    const syncGalleryPlaybackState = () => {
+      const paused = galleryTimingPaused();
+      wrap.classList.toggle("is-gallery-timing-paused", paused);
+      wrap.dataset.galleryPlaybackPaused = galleryUserPaused ? "1" : "0";
+      stage?.classList.toggle("is-paused", galleryUserPaused);
+      const centerVisible = Boolean(galleryUserPaused && currentReady && !ghost);
+      centerPlay.classList.toggle("is-visible", centerVisible);
+      centerPlay.tabIndex = centerVisible ? 0 : -1;
+      centerPlay.setAttribute("aria-hidden", String(!centerVisible));
+      els.workGrid?.querySelector?.(".short-video-control-bar.is-gallery")?.shortVideoSync?.();
+    };
+    const startAdvance = (entry, options = {}) => {
+      if (!entry || ghost || !wrap.isConnected || galleryTimingPaused() || document.hidden) return;
+      if (entry.mediaType === "video") {
+        const clip = entry.image;
+        if (options.restartVideo !== false) clip.currentTime = 0;
+        clip.muted = true;
+        clip.onended = () => {
+          updateVideoProgress(entry);
+          if (images.length > 1 && wrap.isConnected && currentIndex === entry.index) move(1);
+        };
+        clip.play?.().catch(() => {}).finally(() => startVideoProgress(entry));
+        return;
+      }
+      advanceStartedAt = Date.now();
+      advanceTimer = window.setTimeout(() => {
+        advanceTimer = 0;
+        advanceStartedAt = 0;
+        if (wrap.isConnected && currentIndex === entry.index) move(1);
+      }, Math.max(0, advanceRemainingMs));
+    };
+    const scheduleAdvance = (entry) => {
+      clearAdvance();
+      if (!entry) return;
+      advanceEntry = entry;
+      galleryVisibilityPaused = document.hidden;
+      syncGalleryPlaybackState();
+      restartProgressTiming();
+      startAdvance(entry);
+    };
+    const pauseAutoAdvance = (reason = "visibility") => {
+      const wasPaused = galleryTimingPaused();
+      if (reason === "user") galleryUserPaused = true;
+      else galleryVisibilityPaused = true;
+      if (!wasPaused && advanceTimer && advanceStartedAt) {
+        advanceRemainingMs = Math.max(0, advanceRemainingMs - (Date.now() - advanceStartedAt));
+      }
+      if (!wasPaused) {
+        clearAdvance({ reset: false, detachVideo: false });
+        if (advanceEntry?.mediaType === "video") advanceEntry.image.pause?.();
+      }
+      if (reason === "user") backgroundAudio?.pause?.();
+      syncGalleryPlaybackState();
+      if (reason === "user") stage?.closest?.(".short-video-browser")?.shortVideoRevealControls?.(1900);
+    };
+    const resumeAutoAdvance = (reason = "visibility") => {
+      if (reason === "user") galleryUserPaused = false;
+      else galleryVisibilityPaused = false;
+      syncGalleryPlaybackState();
+      if (galleryTimingPaused()) return;
+      const entry = advanceEntry;
+      if (!entry || entry.index !== currentIndex || !currentReady) return;
+      startAdvance(entry, { restartVideo: false });
+      if (reason === "user" && backgroundAudio) playGallerySound();
+      if (reason === "user") stage?.closest?.(".short-video-browser")?.shortVideoRevealControls?.(1900);
+    };
+    const playGallerySound = async () => {
+      if (!backgroundAudio || galleryTimingPaused()) return false;
+      try {
+        await backgroundAudio.play?.();
+        syncGallerySoundState();
+        return !backgroundAudio.paused;
+      } catch {
+        if (!state.shortVideo.muted) markPlayerSoundBlocked(stage);
+        backgroundAudio.muted = true;
+        syncGallerySoundState();
+        try {
+          await backgroundAudio.play?.();
+        } catch {
+          // The environment may block audio playback entirely; keep the blocked state visible.
+        }
+        syncGallerySoundState();
+        return false;
+      }
+    };
+    const restoreGallerySound = async () => {
+      if (!backgroundAudio) return "missing";
+      state.shortVideo.muted = false;
+      writeMutedPreference(false);
+      backgroundAudio.muted = false;
+      backgroundAudio.volume = currentShortVideoVolume();
+      clearPlayerSoundBlocked(stage);
+      syncGallerySoundState();
+      if (galleryTimingPaused()) return "paused";
+      return await playGallerySound() ? "playing" : "blocked";
+    };
+    const toggleGalleryPlayback = () => {
+      if (galleryUserPaused) resumeAutoAdvance("user");
+      else pauseAutoAdvance("user");
+      return galleryUserPaused;
+    };
+    centerPlay.addEventListener("pointerdown", (event) => event.stopPropagation());
+    centerPlay.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!galleryUserPaused) return;
+      resumeAutoAdvance("user");
+      stage?.focus?.({ preventScroll: true });
+    });
+    centerPlay.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
     const commitImage = (entry, direction = 0, commitOptions = {}) => {
       const nextImage = entry.image;
+      clearAdvance();
+      if (image && image !== nextImage) {
+        image.onended = null;
+        image.pause?.();
+      }
       nextImage.className = "short-video-gallery-image";
-      nextImage.alt = `${video.title || "图文作品"}，第 ${entry.index + 1} 张，共 ${images.length} 张`;
+      if (entry.mediaType === "image") {
+        nextImage.alt = `${video.title || "图文作品"}，第 ${entry.index + 1} 张，共 ${images.length} 张`;
+      }
       track.replaceChildren(nextImage);
       image = nextImage;
       dragActive = false;
@@ -2086,13 +2642,20 @@ export function createShortVideoPage(deps) {
       currentIndex = entry.index;
       requestedIndex = entry.index;
       currentReady = true;
-      syncCommittedUi();
+      syncCommittedUi(direction);
       syncRequestedUi();
       hideLoadStatus();
       if (commitOptions.animate !== false) animateImage(direction);
-      applyVideoOrientation(stage?.closest?.(".short-video-reel-panel"), stage, image.naturalWidth, image.naturalHeight);
+      applyVideoOrientation(
+        stage?.closest?.(".short-video-reel-panel"),
+        stage,
+        image.videoWidth || image.naturalWidth,
+        image.videoHeight || image.naturalHeight
+      );
       if (ghost) trimImageCache(new Set([currentIndex]));
       else preloadAround(currentIndex, direction);
+      scheduleAdvance(entry);
+      if (!direction) maybeShowGalleryGestureHint();
     };
     const show = (index, direction = 0) => {
       if (!images.length) return;
@@ -2114,13 +2677,24 @@ export function createShortVideoPage(deps) {
       entry.promise.then((readyEntry) => {
         if (token !== requestToken || requestedIndex !== nextIndex || !wrap.isConnected) return;
         if (!readyEntry) {
-          showLoadError(nextIndex);
+          showLoadError(nextIndex, resolvedDirection);
           return;
         }
         commitImage(readyEntry, resolvedDirection);
       });
       return true;
     };
+    loadRetry.addEventListener("pointerdown", (event) => event.stopPropagation());
+    loadRetry.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (failedLoadIndex < 0) return;
+      show(failedLoadIndex, failedLoadDirection);
+    });
+    loadRetry.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
     const clearDragPreview = () => {
       const previewImage = dragPreviewEntry?.image;
       if (previewImage && previewImage !== image) {
@@ -2133,17 +2707,13 @@ export function createShortVideoPage(deps) {
       const token = ++dragPreviewToken;
       clearDragPreview();
       dragDirection = direction;
-      const targetIndex = currentIndex + direction;
-      if (targetIndex < 0 || targetIndex >= images.length) {
-        delete wrap.dataset.galleryDragTarget;
-        return;
-      }
+      const targetIndex = resolveGalleryIndex(currentIndex + direction);
       wrap.dataset.galleryDragTarget = String(targetIndex);
       const entry = loadImage(targetIndex);
       trimImageCache(new Set([currentIndex, targetIndex]));
       const attach = (readyEntry) => {
         if (!readyEntry || !dragActive || token !== dragPreviewToken || dragDirection !== direction) return;
-        if (readyEntry.index !== currentIndex + direction) return;
+        if (readyEntry.index !== resolveGalleryIndex(currentIndex + direction)) return;
         const previewImage = readyEntry.image;
         previewImage.className = `short-video-gallery-image is-drag-preview ${direction > 0 ? "is-next" : "is-previous"}`;
         dragPreviewEntry = readyEntry;
@@ -2155,6 +2725,8 @@ export function createShortVideoPage(deps) {
     const startDrag = () => {
       if (ghost || images.length <= 1 || !currentReady || dragActive || wrap.classList.contains("is-gallery-settling")) return false;
       window.clearTimeout(dragSettleTimer);
+      clearAdvance();
+      wrap.classList.add("is-gallery-timing-paused");
       requestToken += 1;
       requestedIndex = currentIndex;
       syncRequestedUi();
@@ -2174,8 +2746,8 @@ export function createShortVideoPage(deps) {
       const rawDelta = Number(deltaX || 0);
       const direction = rawDelta < 0 ? 1 : (rawDelta > 0 ? -1 : 0);
       if (direction && direction !== dragDirection) prepareDragPreview(direction);
-      const targetIndex = currentIndex + direction;
-      const canMove = direction && targetIndex >= 0 && targetIndex < images.length;
+      const targetIndex = resolveGalleryIndex(currentIndex + direction);
+      const canMove = Boolean(direction && images.length > 1);
       const width = Math.max(1, wrap.clientWidth || stage?.clientWidth || 1);
       const bounded = Math.sign(rawDelta) * Math.min(Math.abs(rawDelta), width * 1.06);
       dragVisualX = canMove ? bounded : rawDelta * .22;
@@ -2183,10 +2755,14 @@ export function createShortVideoPage(deps) {
       wrap.dataset.galleryDragX = String(Math.round(dragVisualX));
       return true;
     };
-    const settleDrag = (targetX, callback) => {
+    const settleDrag = (targetX, callback, durationMs = 230) => {
       dragActive = false;
       wrap.classList.remove("is-gallery-dragging");
       wrap.classList.add("is-gallery-settling");
+      const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+      const settleDuration = reducedMotion ? 20 : Math.max(120, Math.min(280, Math.round(Number(durationMs) || 230)));
+      wrap.style.setProperty("--short-video-gallery-settle-duration", `${settleDuration}ms`);
+      wrap.dataset.gallerySettleDuration = String(settleDuration);
       dragVisualX = Number(targetX || 0);
       track.style.setProperty("--short-video-gallery-drag-x", `${dragVisualX}px`);
       wrap.dataset.galleryDragX = String(Math.round(dragVisualX));
@@ -2198,52 +2774,56 @@ export function createShortVideoPage(deps) {
         track.style.setProperty("--short-video-gallery-drag-x", "0px");
         wrap.dataset.galleryDragX = "0";
         delete wrap.dataset.galleryDragTarget;
-      }, window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ? 20 : 230);
+      }, settleDuration + 10);
     };
     const endDrag = (deltaX, velocityX = 0) => {
       if (!dragActive) return false;
       const rawDelta = Number(deltaX || dragVisualX || 0);
-      const direction = rawDelta < 0 ? 1 : (rawDelta > 0 ? -1 : dragDirection);
-      const targetIndex = currentIndex + direction;
-      const canMove = direction && targetIndex >= 0 && targetIndex < images.length;
+      const velocity = Math.max(-2.4, Math.min(2.4, Number(velocityX || 0)));
+      const projectedDelta = rawDelta + velocity * 180;
+      const direction = rawDelta < 0 ? 1 : (rawDelta > 0 ? -1 : (velocity < 0 ? 1 : (velocity > 0 ? -1 : dragDirection)));
+      const targetIndex = resolveGalleryIndex(currentIndex + direction);
+      const canMove = Boolean(direction && images.length > 1);
       const width = Math.max(1, wrap.clientWidth || stage?.clientWidth || 1);
-      const distanceReady = Math.abs(rawDelta) >= Math.min(116, width * .24);
-      const velocityReady = Math.abs(Number(velocityX || 0)) >= .5
-        && Math.sign(velocityX) === Math.sign(rawDelta)
-        && Math.abs(rawDelta) >= 24;
-      const shouldCommit = Boolean(canMove && (distanceReady || velocityReady));
+      const distanceReady = Math.abs(rawDelta) >= Math.min(120, width * .22);
+      const projectedReady = Math.abs(projectedDelta) >= Math.min(96, width * .18)
+        && Math.sign(projectedDelta) === Math.sign(rawDelta || projectedDelta);
+      const velocityReady = Math.abs(velocity) >= .45
+        && Math.sign(velocity) === Math.sign(rawDelta)
+        && Math.abs(rawDelta) >= 18;
+      const shouldCommit = Boolean(canMove && (distanceReady || projectedReady || velocityReady));
       const readyEntry = dragPreviewEntry?.index === targetIndex && dragPreviewEntry.status === "ready"
         ? dragPreviewEntry
         : null;
-      const preserveBoundaryNavigation = !canMove && Math.abs(rawDelta) >= 72;
       if (shouldCommit && readyEntry) {
         const settleX = direction > 0 ? -width : width;
-        settleDrag(settleX, () => commitImage(readyEntry, direction, { animate: false }));
+        const remainingRatio = Math.min(1, Math.abs(settleX - rawDelta) / width);
+        const settleDuration = 220 + remainingRatio * 42 - Math.min(92, Math.abs(velocity) * 58);
+        settleDrag(settleX, () => commitImage(readyEntry, direction, { animate: false }), settleDuration);
         return true;
       }
+      const reboundDuration = 148 + Math.min(72, Math.abs(rawDelta) / width * 90) - Math.min(28, Math.abs(velocity) * 18);
       settleDrag(0, () => {
         clearDragPreview();
         dragDirection = 0;
         if (shouldCommit) show(targetIndex, direction);
-      });
-      return !preserveBoundaryNavigation;
+        else scheduleAdvance(imageCache.get(currentIndex));
+      }, reboundDuration);
+      return true;
     };
     const cancelDrag = () => {
       if (!dragActive) return false;
       settleDrag(0, () => {
         clearDragPreview();
         dragDirection = 0;
+        scheduleAdvance(imageCache.get(currentIndex));
       });
       return true;
     };
     const move = (delta) => {
       const direction = Math.sign(Number(delta) || 0);
       if (!direction) return false;
-      const nextIndex = requestedIndex + direction;
-      if (nextIndex < 0 || nextIndex >= images.length) {
-        showBoundary(direction);
-        return false;
-      }
+      const nextIndex = resolveGalleryIndex(requestedIndex + direction);
       return Boolean(show(nextIndex, direction));
     };
     wrap.shortVideoGalleryMove = move;
@@ -2251,6 +2831,11 @@ export function createShortVideoPage(deps) {
     wrap.shortVideoGalleryDragMove = updateDrag;
     wrap.shortVideoGalleryDragEnd = endDrag;
     wrap.shortVideoGalleryDragCancel = cancelDrag;
+    wrap.shortVideoGalleryPause = pauseAutoAdvance;
+    wrap.shortVideoGalleryResume = resumeAutoAdvance;
+    wrap.shortVideoGalleryTogglePlayback = toggleGalleryPlayback;
+    wrap.shortVideoGalleryIsPaused = () => galleryUserPaused;
+    wrap.shortVideoGalleryPlaySound = playGallerySound;
     progressButtons.forEach((button, index) => {
       button.addEventListener("click", (event) => {
         event.preventDefault();
@@ -2266,25 +2851,140 @@ export function createShortVideoPage(deps) {
     };
     previous.addEventListener("click", stopAndMove(-1));
     next.addEventListener("click", stopAndMove(1));
+    edgePrevious.addEventListener("click", stopAndMove(-1));
+    edgeNext.addEventListener("click", stopAndMove(1));
     previous.addEventListener("pointerdown", (event) => event.stopPropagation());
     next.addEventListener("pointerdown", (event) => event.stopPropagation());
+    edgePrevious.addEventListener("pointerdown", (event) => event.stopPropagation());
+    edgeNext.addEventListener("pointerdown", (event) => event.stopPropagation());
     if (!ghost) {
+      wrap.addEventListener("pointerdown", dismissGalleryGestureHint, { passive: true });
       window.requestAnimationFrame(() => {
         persistShortVideoWatch(video, null, { force: true, completed: true });
       });
       stage?.addEventListener("dblclick", (event) => {
+        window.clearTimeout(galleryClickTimer);
+        galleryClickTimer = 0;
+        if (wasClearScreenJustRevealed(stage) || isShortVideoGestureClickBlocked(stage)) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
         toggleShortVideoAction(state.shortVideo?.current, "like", options.railGetter?.(), { forceActive: true, silent: true });
         showHeartBurst(stage, event);
+      });
+      wrap.addEventListener("click", (event) => {
+        if (isShortVideoKeyboardControl(event.target)) return;
+        if (revealShortVideoClearScreen(wrap) || wasClearScreenJustRevealed(wrap)) return;
+        if (isShortVideoGestureClickBlocked(wrap)) return;
+        if (stage?.classList.contains("is-sound-blocked") && backgroundAudio) {
+          window.clearTimeout(galleryClickTimer);
+          galleryClickTimer = 0;
+          restoreGallerySound().then((result) => {
+            if (result === "playing") showBrowserToast("图集音乐已开启");
+            else if (result === "paused") showBrowserToast("图集音乐已开启，继续播放图集后生效");
+            else showBrowserToast("浏览器仍在阻止音乐播放，请再次点击声音按钮");
+          });
+          return;
+        }
+        const browser = wrap.closest(".short-video-browser");
+        if (browser?.dataset?.shortVideoTapReveal === "1") {
+          delete browser.dataset.shortVideoTapReveal;
+          return;
+        }
+        window.clearTimeout(galleryClickTimer);
+        galleryClickTimer = window.setTimeout(() => {
+          galleryClickTimer = 0;
+          toggleGalleryPlayback();
+        }, SHORT_VIDEO_DOUBLE_TAP_WINDOW_MS);
       });
     }
     const initialEntry = loadImage(0);
     image = initialEntry.image;
     track.append(image);
-    wrap.append(track, progress, counter, loadStatus);
-    if (images.length > 1) wrap.append(previous, next);
+    if (images.length > 1) pager.append(previous, counter, next);
+    else pager.append(counter);
+    wrap.append(track, progress, pager);
+    if (images.length > 1) wrap.append(edgePrevious, edgeNext);
+    wrap.append(centerPlay, loadStatus, gestureHint);
+    const attachLocalBackgroundSound = (sound = video.sound) => {
+      const localSoundUrl = !ghost && sound?.localAvailable ? String(sound.previewUrl || "").trim() : "";
+      if (!localSoundUrl || backgroundAudio) return false;
+      const audio = document.createElement("audio");
+      audio.className = "short-video-player short-video-gallery-audio";
+      audio.src = localSoundUrl;
+      audio.dataset.streamUrl = localSoundUrl;
+      audio.loop = true;
+      audio.autoplay = true;
+      audio.preload = "auto";
+      audio.muted = Boolean(state.shortVideo.muted);
+      audio.volume = currentShortVideoVolume();
+      backgroundAudio = audio;
+      video.sound = sound;
+      if (state.shortVideo?.current?.id === video.id) state.shortVideo.current.sound = sound;
+      wrap.append(audio);
+      syncGallerySoundState = () => {
+        const playing = !audio.paused && !audio.ended;
+        const muted = Boolean(audio.muted || audio.volume <= 0);
+        const blocked = Boolean(stage?.classList.contains("is-sound-blocked"));
+        const soundState = blocked ? "blocked" : (playing ? "playing" : "paused");
+        const audible = Boolean(playing && !muted && !blocked);
+        wrap.dataset.gallerySoundState = soundState;
+        wrap.dataset.gallerySoundMuted = muted ? "1" : "0";
+        const railSound = options.railGetter?.()?.querySelector?.(".short-video-rail-button.is-listen");
+        railSound?.classList.toggle("is-playing", audible);
+        railSound?.classList.toggle("is-muted", muted);
+        railSound?.classList.toggle("is-blocked", blocked);
+        const captionSound = stage?.closest?.(".short-video-reel-panel")?.querySelector?.(".short-video-caption-sound-cover");
+        captionSound?.classList.toggle("is-playing", audible);
+        captionSound?.classList.toggle("is-muted", muted);
+        captionSound?.classList.toggle("is-blocked", blocked);
+        els.workGrid?.querySelector?.(".short-video-control-bar.is-gallery")?.shortVideoSync?.();
+      };
+      audio.addEventListener("play", syncGallerySoundState);
+      audio.addEventListener("pause", syncGallerySoundState);
+      audio.addEventListener("ended", syncGallerySoundState);
+      audio.addEventListener("volumechange", syncGallerySoundState);
+      audio.addEventListener("error", syncGallerySoundState);
+      els.workGrid?.querySelector?.(".short-video-control-bar.is-gallery")?.shortVideoEnableGallerySound?.(sound);
+      window.requestAnimationFrame(() => {
+        if (galleryUserPaused) {
+          syncGallerySoundState();
+          return;
+        }
+        playGallerySound();
+        syncGallerySoundState();
+      });
+      return true;
+    };
+    const scheduleLocalSoundPoll = () => {
+      window.clearTimeout(localSoundPollTimer);
+      if (ghost || backgroundAudio || !video.sound?.previewUrl || localSoundPollAttempts >= 48) return;
+      localSoundPollTimer = window.setTimeout(async () => {
+        localSoundPollTimer = 0;
+        if (!wrap.isConnected || backgroundAudio) return;
+        localSoundPollAttempts += 1;
+        try {
+          const params = new URLSearchParams({
+            source: "all",
+            neighbors: "1",
+            metadata: "0",
+            refresh: String(Date.now())
+          });
+          const data = await api(`/api/short-videos/${encodeURIComponent(video.id)}?${params}`);
+          const sound = data?.video?.sound;
+          if (sound?.localAvailable && sound.previewUrl && attachLocalBackgroundSound(sound)) return;
+        } catch {
+          // The downloader or local sync may still be replacing its database row.
+        }
+        scheduleLocalSoundPoll();
+      }, 15000);
+    };
+    if (!attachLocalBackgroundSound(video.sound)) scheduleLocalSoundPoll();
     syncCommittedUi();
     syncRequestedUi();
     show(0);
+    window.requestAnimationFrame(() => syncGalleryCaptionState(0));
     return wrap;
   }
 
@@ -2348,6 +3048,7 @@ export function createShortVideoPage(deps) {
       stage.classList.toggle("is-video-buffering", kind === "buffering");
       stage.classList.toggle("is-video-error", kind === "error");
       if (kind === "loading" || kind === "retrying") stage.classList.remove("is-video-ready");
+      stage.setAttribute("aria-busy", String(kind === "loading" || kind === "buffering" || kind === "retrying"));
       syncPlayToggle();
     };
     const showStatus = (kind, heading, message) => {
@@ -2373,9 +3074,10 @@ export function createShortVideoPage(deps) {
       status.removeAttribute("data-state");
       status.setAttribute("aria-hidden", "true");
       stage.classList.remove("is-video-buffering", "is-video-error");
-      if (player.readyState >= 2) {
+      if (player.readyState >= 2 && player.dataset.shortVideoFrameReady === "1") {
         stage.classList.remove("is-video-loading");
         stage.classList.add("is-video-ready");
+        stage.setAttribute("aria-busy", "false");
       }
       syncPlayToggle();
     };
@@ -2409,8 +3111,17 @@ export function createShortVideoPage(deps) {
       showStatus("error", "视频加载失败", "保留当前进度后重试");
     };
     const rememberProgress = () => {
+      // A failed source reset emits timeupdate with currentTime = 0 and
+      // readyState = HAVE_NOTHING. Do not let that erase the last playable
+      // position that the retry flow promises to restore.
+      if (player.error || player.readyState < 2) return;
       const current = Math.max(0, Number(player.currentTime || 0));
-      if (Number.isFinite(current)) lastGoodTime = current;
+      if (!Number.isFinite(current)) return;
+      const madeForwardProgress = current > lastGoodTime + 0.04;
+      lastGoodTime = current;
+      // Some media stacks resume advancing without another canplay/playing
+      // event. Progress itself is the strongest recovery signal.
+      if (madeForwardProgress && wantsToPlay && status.dataset.state === "buffering") hideStatus();
     };
 
     player.addEventListener("loadstart", handleLoadStart);
@@ -2430,6 +3141,7 @@ export function createShortVideoPage(deps) {
       if (!retrying && !player.error && !stage.classList.contains("is-video-error")) wantsToPlay = false;
     });
     player.addEventListener("timeupdate", rememberProgress);
+    player.addEventListener("seeked", rememberProgress);
 
     retry.addEventListener("pointerdown", (event) => event.stopPropagation());
     retry.addEventListener("dblclick", (event) => {
@@ -2476,6 +3188,8 @@ export function createShortVideoPage(deps) {
         else player.addEventListener("canplay", resume, { once: true });
       };
       player.addEventListener("loadedmetadata", restorePlaybackState, { once: true });
+      delete player.dataset.shortVideoFrameReady;
+      delete player.dataset.shortVideoFrameReadyAt;
       player.src = source;
       player.load();
     });
@@ -2516,6 +3230,9 @@ export function createShortVideoPage(deps) {
     centerPlay.addEventListener("dblclick", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      clearPendingPlayerClick();
+      toggleShortVideoAction(state.shortVideo?.current, "like", railGetter?.(), { forceActive: true, silent: true });
+      showHeartBurst(stage, event);
     });
     if (player.dataset.primaryControlsBound !== "1") {
       const togglePlay = () => {
@@ -2527,28 +3244,91 @@ export function createShortVideoPage(deps) {
         }
       };
       player.dataset.primaryControlsBound = "1";
+      const syncGlobalControlBar = () => {
+        if (player === activePlayer()) syncActiveControlBar();
+      };
       player.addEventListener("play", syncPlayToggle);
+      player.addEventListener("play", syncGlobalControlBar);
       player.addEventListener("play", () => {
-        if (!player.muted) stage.classList.remove("is-sound-blocked");
+        if (!player.muted) clearPlayerSoundBlocked(stage);
       });
       player.addEventListener("pause", syncPlayToggle);
+      player.addEventListener("pause", syncGlobalControlBar);
       player.addEventListener("loadedmetadata", syncPlayToggle);
+      player.addEventListener("loadedmetadata", syncGlobalControlBar);
+      player.addEventListener("ratechange", syncGlobalControlBar);
+      player.addEventListener("volumechange", syncGlobalControlBar);
       player.addEventListener("ended", () => handleAutoNextEnded(player));
       bindHoldToSpeed(stage, player);
-      player.addEventListener("click", () => {
-        window.clearTimeout(playerClickTimer);
+      player.addEventListener("click", (event) => {
         if (suppressNextPlayerClick) {
+          clearPendingPlayerClick();
           suppressNextPlayerClick = false;
           return;
         }
+        if (revealShortVideoClearScreen(stage) || wasClearScreenJustRevealed(stage)) {
+          clearPendingPlayerClick();
+          return;
+        }
+        if (isShortVideoGestureClickBlocked(stage)) {
+          clearPendingPlayerClick();
+          return;
+        }
         if (stage.classList.contains("is-sound-blocked")) {
+          event.preventDefault();
+          clearPendingPlayerClick();
           restorePlayerSound(player, stage);
           return;
         }
-        playerClickTimer = window.setTimeout(togglePlay, 260);
+        if (pendingPlayerTap?.player === player) {
+          window.clearTimeout(playerClickTimer);
+          playerClickTimer = 0;
+          return;
+        }
+        clearPendingPlayerClick();
+        const tapToken = String(Date.now());
+        pendingPlayerTap = {
+          player,
+          wasPlaying: Boolean(!player.paused && !player.ended),
+          token: tapToken
+        };
+        player.dataset.shortVideoTapToken = tapToken;
+        player.dataset.shortVideoTapWasPlaying = pendingPlayerTap.wasPlaying ? "1" : "0";
+        togglePlay();
+        playerClickTimer = window.setTimeout(() => {
+          if (pendingPlayerTap?.player === player && pendingPlayerTap.token === tapToken) {
+            clearPendingPlayerClick();
+          }
+        }, SHORT_VIDEO_DOUBLE_TAP_WINDOW_MS);
       });
       stage.addEventListener("dblclick", (event) => {
-        window.clearTimeout(playerClickTimer);
+        if (wasClearScreenJustRevealed(stage) || isShortVideoGestureClickBlocked(stage)) {
+          clearPendingPlayerClick();
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        const tapWasPlaying = player.dataset.shortVideoTapWasPlaying;
+        clearPendingPlayerClick();
+        if (tapWasPlaying === "1" && player.paused) {
+          player.play().then(syncPlayToggle).catch(syncPlayToggle);
+        } else if (tapWasPlaying === "0") {
+          const pauseGuard = String(Date.now());
+          player.dataset.shortVideoTapPauseGuard = pauseGuard;
+          const enforcePausedTapState = () => {
+            if (player.dataset.shortVideoTapPauseGuard !== pauseGuard) return;
+            player.pause();
+            syncPlayToggle();
+          };
+          player.addEventListener("play", enforcePausedTapState);
+          enforcePausedTapState();
+          window.setTimeout(() => {
+            player.removeEventListener("play", enforcePausedTapState);
+            if (player.dataset.shortVideoTapPauseGuard === pauseGuard) {
+              delete player.dataset.shortVideoTapPauseGuard;
+            }
+          }, 240);
+        }
         toggleShortVideoAction(state.shortVideo?.current, "like", railGetter?.(), { forceActive: true, silent: true });
         showHeartBurst(stage, event);
       });
@@ -2561,6 +3341,17 @@ export function createShortVideoPage(deps) {
     return syncPlayToggle;
   }
 
+  function clearPendingPlayerClick() {
+    const tap = pendingPlayerTap;
+    window.clearTimeout(playerClickTimer);
+    playerClickTimer = 0;
+    pendingPlayerTap = null;
+    if (tap && tap.player?.dataset?.shortVideoTapToken === tap.token) {
+      delete tap.player.dataset.shortVideoTapToken;
+      delete tap.player.dataset.shortVideoTapWasPlaying;
+    }
+  }
+
   function bindShortVideoWatchTracking(stage, player, video, options = {}) {
     const videoId = String(video?.id || "").trim();
     if (!videoId || player.dataset.watchTrackingVideoId === videoId) return;
@@ -2570,6 +3361,7 @@ export function createShortVideoPage(deps) {
     const restore = () => {
       if (player.dataset.watchRestored === "1") return;
       player.dataset.watchRestored = "1";
+      player.dataset.watchRestoredAt = String(Date.now());
       const durationMs = Math.max(0, Number(player.duration || 0) * 1000);
       const canResume = options.resume !== false
         && !resumeCompleted
@@ -2588,12 +3380,34 @@ export function createShortVideoPage(deps) {
       }
       persistShortVideoWatch(video, player, { force: true });
     };
-    player.addEventListener("loadedmetadata", restore, { once: true });
-    player.addEventListener("playing", () => persistShortVideoWatch(video, player));
+    const scheduleRestore = () => {
+      if (player.dataset.watchRestored === "1" || player.dataset.watchRestoreScheduled === "1") return;
+      const durationMs = Math.max(0, Number(player.duration || 0) * 1000);
+      const canResume = options.resume !== false
+        && !resumeCompleted
+        && resumeProgressMs >= 1500
+        && durationMs > 0
+        && durationMs - resumeProgressMs >= 1500;
+      if (!canResume) {
+        restore();
+        return;
+      }
+      player.dataset.watchRestoreScheduled = "1";
+      waitForVideoFirstFrame(player, 1800).finally(() => {
+        window.requestAnimationFrame(() => {
+          if (player.isConnected) restore();
+        });
+      });
+    };
+    player.addEventListener("loadedmetadata", scheduleRestore, { once: true });
+    player.addEventListener("playing", () => {
+      if (player.dataset.watchRestored === "1") persistShortVideoWatch(video, player);
+    });
     player.addEventListener("pause", () => {
       if (player.dataset.watchRestored === "1") persistShortVideoWatch(video, player, { force: true });
     });
     player.addEventListener("timeupdate", () => {
+      if (player.dataset.watchRestored !== "1") return;
       const duration = Math.max(0, Number(player.duration || 0));
       const current = Math.max(0, Number(player.currentTime || 0));
       if (duration > 0 && duration - current <= 0.8) {
@@ -2607,7 +3421,7 @@ export function createShortVideoPage(deps) {
       persistShortVideoWatch(video, player);
     });
     player.addEventListener("ended", () => persistShortVideoWatch(video, player, { force: true, completed: true }));
-    if (player.readyState >= 1) window.requestAnimationFrame(restore);
+    if (player.readyState >= 1) window.requestAnimationFrame(scheduleRestore);
   }
 
   function persistShortVideoWatch(video, player, options = {}) {
@@ -2616,13 +3430,22 @@ export function createShortVideoPage(deps) {
     const now = Date.now();
     let write = shortVideoWatchWrites.get(videoId);
     if (!write) {
-      write = { inFlight: false, lastSavedAt: 0, pending: null };
+      write = { inFlight: false, lastSavedAt: 0, lastPayload: null, pending: null };
       shortVideoWatchWrites.set(videoId, write);
     }
     if (!options.force && now - write.lastSavedAt < SHORT_VIDEO_WATCH_SAVE_INTERVAL) return;
     const progressMs = Math.max(0, Math.round(Number(player?.currentTime || 0) * 1000));
     const payload = { progressMs, completed: Boolean(options.completed) };
+    if (
+      options.force
+      && now - write.lastSavedAt < 600
+      && write.lastPayload?.completed === payload.completed
+      && Math.abs(Number(write.lastPayload?.progressMs || 0) - progressMs) < 1000
+    ) {
+      return;
+    }
     write.lastSavedAt = now;
+    write.lastPayload = payload;
     if (write.inFlight) {
       write.pending = payload;
       return;
@@ -2636,9 +3459,13 @@ export function createShortVideoPage(deps) {
     write.inFlight = true;
     api(`/api/short-videos/${encodeURIComponent(videoId)}/watch`, {
       method: "PUT",
+      keepalive: true,
       body: payload
     }).then((data) => {
       if (data?.video) syncShortVideoWatchVideo(data.video);
+      else if (data?.videoId && data?.watch) {
+        syncShortVideoWatchVideo({ id: data.videoId, watch: data.watch });
+      }
     }).catch((error) => {
       console.warn("观看进度保存失败", error);
     }).finally(() => {
@@ -2647,6 +3474,136 @@ export function createShortVideoPage(deps) {
       write.pending = null;
       if (pending) dispatchShortVideoWatchWrite(video, write, pending);
     });
+  }
+
+  function bindBrowserControlVisibility(browser, player) {
+    if (!browser || browser.dataset.controlsVisibilityBound === "1") return;
+    browser.dataset.controlsVisibilityBound = "1";
+    const finePointer = window.matchMedia?.("(hover: hover) and (pointer: fine)")?.matches !== false;
+    let idleTimer = 0;
+    let readinessTimer = 0;
+    let lastPointerX = -1;
+    let lastPointerY = -1;
+
+    const clearIdleTimer = () => {
+      window.clearTimeout(idleTimer);
+      idleTimer = 0;
+    };
+    const clearReadinessTimer = () => {
+      window.clearTimeout(readinessTimer);
+      readinessTimer = 0;
+    };
+    const controlsPinned = () => {
+      const currentPanel = browser.querySelector(".short-video-reel-panel.is-current");
+      const currentPlayer = currentPanel?.querySelector(".short-video-gallery-audio, .short-video-player:not(.is-ghost)");
+      const gallery = currentPanel?.querySelector(".short-video-gallery-player");
+      const mediaNotReady = currentPlayer
+        ? currentPlayer.readyState < 2
+        : !gallery || gallery.classList.contains("is-image-loading");
+      const playbackPaused = currentPlayer
+        ? currentPlayer.paused
+        : gallery?.dataset?.galleryPlaybackPaused === "1";
+      const focused = document.activeElement;
+      const hasInteractiveFocus = focused && browser.contains(focused) && isShortVideoKeyboardControl(focused);
+      return mediaNotReady
+        || playbackPaused
+        || hasInteractiveFocus
+        || browser.classList.contains("is-author-panel-open")
+        || Boolean(browser.querySelector(".short-video-more-overlay, .short-video-share-panel"));
+    };
+    const hideControls = () => {
+      idleTimer = 0;
+      if (controlsPinned() || !browser.isConnected) return;
+      browser.classList.add("is-controls-idle");
+    };
+    const revealControls = (delay = 1500) => {
+      clearIdleTimer();
+      browser.classList.remove("is-controls-idle");
+      if (controlsPinned()) return;
+      idleTimer = window.setTimeout(hideControls, Math.max(300, Number(delay || 0)));
+    };
+    const pinControls = () => {
+      clearIdleTimer();
+      browser.classList.remove("is-controls-idle");
+    };
+    const handlePointerMove = (event) => {
+      const x = Number(event.clientX || 0);
+      const y = Number(event.clientY || 0);
+      if (lastPointerX >= 0 && Math.hypot(x - lastPointerX, y - lastPointerY) < 3) return;
+      lastPointerX = x;
+      lastPointerY = y;
+      const nearControls = y >= Math.max(0, window.innerHeight - 88);
+      revealControls(nearControls ? 2400 : 1500);
+    };
+    const handlePointerLeave = () => {
+      if (finePointer) revealControls(520);
+    };
+    const handlePointerDown = (event) => {
+      if (!finePointer
+        && browser.classList.contains("is-controls-idle")
+        && !isShortVideoKeyboardControl(event.target)) {
+        browser.dataset.shortVideoTapReveal = "1";
+        suppressNextPlayerClick = true;
+        window.setTimeout(() => {
+          if (browser.dataset.shortVideoTapReveal === "1") delete browser.dataset.shortVideoTapReveal;
+          suppressNextPlayerClick = false;
+        }, 520);
+      }
+      revealControls(finePointer ? 1900 : 2400);
+    };
+    const handleFocusIn = () => pinControls();
+    const handleFocusOut = () => window.setTimeout(() => revealControls(1500));
+    const isActiveMediaEvent = (event) => event.target === browser.querySelector(
+      ".short-video-reel-panel.is-current .short-video-gallery-audio, .short-video-reel-panel.is-current .short-video-player:not(.is-ghost)"
+    );
+    const handlePlay = (event) => {
+      if (isActiveMediaEvent(event)) revealControls(1700);
+    };
+    const handlePause = (event) => {
+      if (isActiveMediaEvent(event)) pinControls();
+    };
+    const handleWaiting = (event) => {
+      if (isActiveMediaEvent(event)) pinControls();
+    };
+    const handlePlaying = (event) => {
+      if (isActiveMediaEvent(event)) revealControls(1500);
+    };
+    const revealWhenReady = (attempt = 0) => {
+      clearReadinessTimer();
+      if (!browser.isConnected) return;
+      if (controlsPinned()) {
+        if (attempt < 28) readinessTimer = window.setTimeout(() => revealWhenReady(attempt + 1), 220);
+        return;
+      }
+      revealControls(finePointer ? 1500 : 2400);
+    };
+
+    browser.addEventListener("pointermove", handlePointerMove, { passive: true });
+    browser.addEventListener("pointerleave", handlePointerLeave, { passive: true });
+    browser.addEventListener("pointerdown", handlePointerDown, { passive: true });
+    browser.addEventListener("focusin", handleFocusIn);
+    browser.addEventListener("focusout", handleFocusOut);
+    browser.addEventListener("play", handlePlay, true);
+    browser.addEventListener("pause", handlePause, true);
+    browser.addEventListener("waiting", handleWaiting, true);
+    browser.addEventListener("playing", handlePlaying, true);
+
+    browser.shortVideoRevealControls = revealControls;
+    browser.shortVideoControlsDispose = () => {
+      clearIdleTimer();
+      clearReadinessTimer();
+      browser.removeEventListener("pointermove", handlePointerMove);
+      browser.removeEventListener("pointerleave", handlePointerLeave);
+      browser.removeEventListener("pointerdown", handlePointerDown);
+      browser.removeEventListener("focusin", handleFocusIn);
+      browser.removeEventListener("focusout", handleFocusOut);
+      browser.removeEventListener("play", handlePlay, true);
+      browser.removeEventListener("pause", handlePause, true);
+      browser.removeEventListener("waiting", handleWaiting, true);
+      browser.removeEventListener("playing", handlePlaying, true);
+    };
+    revealControls(finePointer ? 1800 : 2600);
+    readinessTimer = window.setTimeout(() => revealWhenReady(0), 220);
   }
 
   function syncShortVideoWatchVideo(updated) {
@@ -2729,6 +3686,9 @@ export function createShortVideoPage(deps) {
       holdTimer = 0;
       if (holdPointerId == null || !player.isConnected || player.paused) return;
       holdActive = true;
+      holdSpeedGestureConsumed = true;
+      state.shortVideo.dragging = false;
+      snapStackBack();
       holdBaseRate = normalizePlaybackRate(state.shortVideo?.playbackRate);
       player.dataset.holdSpeedActive = "1";
       player.playbackRate = 2;
@@ -2742,6 +3702,7 @@ export function createShortVideoPage(deps) {
 
     player.addEventListener("pointerdown", (event) => {
       if (event.button !== 0 || event.isPrimary === false || player.paused) return;
+      if (pendingPlayerTap?.player !== player) clearPendingPlayerClick();
       stopHold();
       holdPointerId = event.pointerId;
       holdStartX = Number(event.clientX || 0);
@@ -2752,7 +3713,8 @@ export function createShortVideoPage(deps) {
       if (holdPointerId == null || event.pointerId !== holdPointerId) return;
       const deltaX = Number(event.clientX || 0) - holdStartX;
       const deltaY = Number(event.clientY || 0) - holdStartY;
-      if (Math.hypot(deltaX, deltaY) <= 12) return;
+      const moveTolerance = holdActive ? SHORT_VIDEO_HOLD_ACTIVE_MOVE_TOLERANCE : SHORT_VIDEO_HOLD_ARM_MOVE_TOLERANCE;
+      if (Math.hypot(deltaX, deltaY) <= moveTolerance) return;
       finishPointer(event, { suppressClick: holdActive });
     });
     player.addEventListener("pointerup", (event) => finishPointer(event));
@@ -2792,41 +3754,175 @@ export function createShortVideoPage(deps) {
     stage?.querySelector?.(".short-video-hold-speed-feedback")?.remove();
   }
 
+  function markPlayerSoundBlocked(stage) {
+    if (!stage) return;
+    if (stage.shortVideoSoundHintTimer) window.clearTimeout(stage.shortVideoSoundHintTimer);
+    stage.classList.add("is-sound-blocked", "is-sound-hint-visible");
+    stage.shortVideoSoundHintTimer = window.setTimeout(() => {
+      stage.shortVideoSoundHintTimer = 0;
+      stage.classList.remove("is-sound-hint-visible");
+    }, 2400);
+  }
+
+  function clearPlayerSoundBlocked(stage) {
+    if (!stage) return;
+    if (stage.shortVideoSoundHintTimer) window.clearTimeout(stage.shortVideoSoundHintTimer);
+    stage.shortVideoSoundHintTimer = 0;
+    stage.classList.remove("is-sound-blocked", "is-sound-hint-visible");
+  }
+
   function restorePlayerSound(player, stage = player?.closest?.(".short-video-stage")) {
     if (!player) return;
     state.shortVideo.muted = false;
     writeMutedPreference(false);
     player.muted = false;
     player.volume = currentShortVideoVolume();
-    stage?.classList.remove("is-sound-blocked");
+    clearPlayerSoundBlocked(stage);
     player.play?.().catch(() => {
-      stage?.classList.add("is-sound-blocked");
+      if (!player.paused) {
+        clearPlayerSoundBlocked(stage);
+        return;
+      }
+      markPlayerSoundBlocked(stage);
       player.muted = true;
       player.play?.().catch(() => {});
     });
   }
 
+  function activeShortVideoStage() {
+    return els.workGrid?.querySelector?.(".short-video-reel-panel.is-current .short-video-stage") || null;
+  }
+
+  function shortVideoFullscreenActive() {
+    const fullscreenElement = document.fullscreenElement;
+    return Boolean(fullscreenElement && fullscreenElement.classList?.contains?.("short-video-stage"));
+  }
+
+  function syncShortVideoFullscreenControl(control) {
+    if (!control) return;
+    const active = shortVideoFullscreenActive();
+    control.classList.toggle("active", active);
+    control.setAttribute("aria-pressed", String(active));
+    if (control.dataset.shortVideoFullscreenControl === "settings") {
+      const title = control.querySelector("b");
+      const detail = control.querySelector("small");
+      if (title) title.textContent = active ? "退出全屏" : "全屏播放";
+      if (detail) detail.textContent = active ? "返回普通播放页面" : "沉浸观看当前作品";
+      return;
+    }
+    setIconButton(control, "fullscreen", active ? "退出全屏" : (control.dataset.shortVideoFullscreenLabel || "全屏"));
+  }
+
+  function syncShortVideoFullscreenControls() {
+    els.workGrid?.querySelectorAll?.("[data-short-video-fullscreen-control]")?.forEach(syncShortVideoFullscreenControl);
+  }
+
+  async function toggleShortVideoFullscreen() {
+    const target = activeShortVideoStage();
+    if (!target) return false;
+    const exiting = Boolean(document.fullscreenElement);
+    if (exiting && typeof document.exitFullscreen !== "function") {
+      showBrowserToast("当前浏览器无法退出网页全屏");
+      return false;
+    }
+    if (!exiting && typeof target.requestFullscreen !== "function") {
+      showBrowserToast("当前浏览器不支持网页全屏");
+      return false;
+    }
+    try {
+      if (exiting) await document.exitFullscreen();
+      else await target.requestFullscreen();
+      syncShortVideoFullscreenControls();
+      return true;
+    } catch {
+      showBrowserToast(exiting ? "退出全屏失败" : "全屏启动失败");
+      return false;
+    }
+  }
+
   function renderGalleryControlBar(video) {
     const bar = document.createElement("div");
     bar.className = "short-video-control-bar is-gallery";
+    const hasKnownSound = Boolean(video.sound?.previewUrl);
+    bar.classList.toggle("has-sound-control", hasKnownSound);
+    const play = document.createElement("button");
+    play.type = "button";
+    play.className = "short-video-control-icon short-video-gallery-play-toggle";
     const label = document.createElement("span");
     label.className = "short-video-gallery-control-label";
-    label.append(createIcon("images"), document.createTextNode(`图文 · ${galleryLabel(video)}`));
+    label.append(createIcon("images"), document.createTextNode(`图集 · ${galleryLabel(video)}`));
     const spacer = document.createElement("span");
     spacer.className = "short-video-gallery-control-spacer";
     const original = document.createElement("button");
     original.type = "button";
     original.className = "short-video-control-original";
-    original.textContent = "原图文";
+    original.textContent = "原作品";
     original.addEventListener("click", () => openDouyinLink(video));
+    const mute = document.createElement("button");
+    mute.type = "button";
+    mute.className = "short-video-control-icon short-video-gallery-sound-toggle";
+    const syncSound = () => {
+      const gallery = activeGalleryPlayer();
+      const paused = Boolean(gallery?.shortVideoGalleryIsPaused?.());
+      setIconButton(play, paused ? "play" : "pause", paused ? "继续播放图集" : "暂停图集");
+      const localReady = Boolean(video.sound?.localAvailable && video.sound?.previewUrl);
+      mute.disabled = !localReady;
+      if (!localReady) {
+        setIconButton(mute, "volumeX", "背景音乐下载中");
+        return;
+      }
+      const player = activePlayer();
+      const muted = player ? player.muted : Boolean(state.shortVideo.muted);
+      const blocked = Boolean(gallery?.closest?.(".short-video-stage")?.classList.contains("is-sound-blocked"));
+      const soundState = String(gallery?.dataset?.gallerySoundState || "");
+      const soundLabel = blocked
+        ? "开启图集音乐（浏览器已阻止自动播放）"
+        : (muted
+          ? "开启图集音乐"
+          : (paused ? "关闭图集音乐（图集已暂停）" : (soundState === "paused" ? "播放图集音乐" : "关闭图集音乐")));
+      mute.classList.toggle("is-muted", muted);
+      mute.classList.toggle("is-blocked", blocked);
+      mute.setAttribute("aria-pressed", String(muted));
+      setIconButton(mute, muted ? "volumeX" : "volume2", soundLabel);
+    };
+    mute.addEventListener("click", () => {
+      const gallery = activeGalleryPlayer();
+      const player = activePlayer();
+      if (player && player.paused && !player.muted && !gallery?.shortVideoGalleryIsPaused?.()) {
+        gallery?.shortVideoGalleryPlaySound?.();
+        syncSound();
+        return;
+      }
+      toggleActiveMute();
+      const nextPlayer = activePlayer();
+      if (nextPlayer && !nextPlayer.muted && !gallery?.shortVideoGalleryIsPaused?.()) {
+        gallery?.shortVideoGalleryPlaySound?.();
+      }
+      syncSound();
+    });
+    play.addEventListener("click", () => {
+      activeGalleryPlayer()?.shortVideoGalleryTogglePlayback?.();
+      syncSound();
+    });
+    bar.shortVideoSync = syncSound;
+    bar.shortVideoEnableGallerySound = (sound) => {
+      video.sound = sound;
+      mute.hidden = false;
+      bar.classList.add("has-sound-control");
+      syncSound();
+    };
+    mute.hidden = !hasKnownSound;
+    syncSound();
     const full = document.createElement("button");
     full.type = "button";
     full.className = "short-video-control-icon";
-    setIconButton(full, "fullscreen", "全屏查看图文");
-    full.addEventListener("click", () => {
-      els.workGrid?.querySelector?.(".short-video-reel-panel.is-current .short-video-stage")?.requestFullscreen?.().catch(() => {});
-    });
-    bar.append(label, spacer, original, full);
+    full.dataset.shortVideoFullscreenControl = "icon";
+    full.dataset.shortVideoFullscreenLabel = "全屏查看图文";
+    syncShortVideoFullscreenControl(full);
+    full.addEventListener("click", () => toggleShortVideoFullscreen());
+    bar.append(play, label, spacer);
+    bar.append(mute);
+    bar.append(original, full);
     return bar;
   }
 
@@ -2849,6 +3945,9 @@ export function createShortVideoPage(deps) {
     progress.setAttribute("aria-label", "播放进度");
     const progressWrap = document.createElement("div");
     progressWrap.className = "short-video-control-progress-wrap";
+    const controlSpacer = document.createElement("span");
+    controlSpacer.className = "short-video-control-spacer";
+    controlSpacer.setAttribute("aria-hidden", "true");
     const seekPreview = document.createElement("output");
     seekPreview.className = "short-video-seek-preview";
     seekPreview.textContent = "0:00";
@@ -2877,6 +3976,9 @@ export function createShortVideoPage(deps) {
     volumeControl.className = "short-video-control-volume";
     const volumePopover = document.createElement("div");
     volumePopover.className = "short-video-volume-popover";
+    volumePopover.id = "short-video-volume-popover";
+    volumePopover.setAttribute("role", "group");
+    volumePopover.setAttribute("aria-label", "音量调整");
     const volume = document.createElement("input");
     volume.type = "range";
     volume.className = "short-video-volume-range";
@@ -2888,12 +3990,35 @@ export function createShortVideoPage(deps) {
     volumeReadout.className = "short-video-volume-readout";
     volumePopover.append(volume, volumeReadout);
     volumeControl.append(mute, volumePopover);
+    mute.setAttribute("aria-controls", volumePopover.id);
+    mute.setAttribute("aria-expanded", "false");
     const full = document.createElement("button");
     full.type = "button";
     full.className = "short-video-control-icon";
-    setIconButton(full, "fullscreen", "全屏");
+    full.dataset.shortVideoFullscreenControl = "icon";
+    full.dataset.shortVideoFullscreenLabel = "全屏";
+    syncShortVideoFullscreenControl(full);
     let scrubbing = false;
-    let progressHovering = false;
+    let progressFrameHandle = 0;
+    let progressRaf = 0;
+    let progressPlayer = null;
+    let lastProgressFrameAt = 0;
+    let volumeScrubbing = false;
+    let scrubPlayer = null;
+    let scrubWasPlaying = false;
+    let scrubTargetTime = 0;
+    let scrubSeekRaf = 0;
+
+    const setVolumePopoverOpen = (open) => {
+      const expanded = Boolean(open);
+      volumeControl.classList.toggle("is-open", expanded);
+      mute.setAttribute("aria-expanded", String(expanded));
+      volumePopover.setAttribute("aria-hidden", String(!expanded));
+      volumePopover.inert = !expanded;
+      bar.closest(".short-video-browser")?.classList.toggle("is-volume-open", expanded);
+    };
+    volumeControl.shortVideoSetOpen = setVolumePopoverOpen;
+    setVolumePopoverOpen(false);
 
     const updateSeekPreview = (ratio, duration) => {
       const safeRatio = Math.max(0, Math.min(1, Number(ratio || 0)));
@@ -2916,11 +4041,82 @@ export function createShortVideoPage(deps) {
       updateSeekPreview(ratio, duration);
     };
 
-    const sync = (force = false) => {
+    const applyScrubTarget = (exact = false) => {
+      if (scrubSeekRaf) {
+        window.cancelAnimationFrame(scrubSeekRaf);
+        scrubSeekRaf = 0;
+      }
+      const player = scrubPlayer;
+      if (!player || player !== activePlayer() || !Number.isFinite(scrubTargetTime)) return;
+      try {
+        if (!exact && typeof player.fastSeek === "function") player.fastSeek(scrubTargetTime);
+        else player.currentTime = scrubTargetTime;
+      } catch {
+        try {
+          player.currentTime = scrubTargetTime;
+        } catch {}
+      }
+    };
+
+    const scheduleScrubTarget = (player, target, duration) => {
+      scrubPlayer = player;
+      scrubTargetTime = Math.max(0, Math.min(duration, Number(target || 0)));
+      const ratio = duration ? scrubTargetTime / duration : 0;
+      const timeText = `${formatSeconds(scrubTargetTime)} / ${formatSeconds(duration)}`;
+      progress.value = String(Math.round(ratio * 1000));
+      progress.style.setProperty("--short-video-progress", `${ratio * 100}%`);
+      time.textContent = timeText;
+      progress.setAttribute("aria-valuetext", timeText);
+      updateSeekPreview(ratio, duration);
+      if (scrubSeekRaf) return;
+      scrubSeekRaf = window.requestAnimationFrame(() => {
+        scrubSeekRaf = 0;
+        applyScrubTarget(false);
+      });
+    };
+
+    const seekFromProgressPointer = (event) => {
       const player = activePlayer();
       if (!player) return;
       const duration = Number(player.duration || 0);
+      const rect = progress.getBoundingClientRect();
+      if (!duration || !rect.width) return;
+      const ratio = Math.max(0, Math.min(1, (Number(event.clientX || rect.left) - rect.left) / rect.width));
+      scheduleScrubTarget(player, ratio * duration, duration);
+    };
+
+    const finishProgressScrub = (event, usePointer = false) => {
+      if (!scrubbing) return;
+      if (usePointer) seekFromProgressPointer(event);
+      const player = scrubPlayer;
+      const shouldResume = scrubWasPlaying && player === activePlayer();
+      applyScrubTarget(true);
+      scrubbing = false;
+      progressWrap.classList.remove("is-scrubbing");
+      if (progress.hasPointerCapture?.(event?.pointerId)) progress.releasePointerCapture?.(event.pointerId);
+      scrubPlayer = null;
+      scrubWasPlaying = false;
+      if (shouldResume) player.play?.().catch(() => {});
+      sync(true);
+      scheduleProgressLoop();
+    };
+
+    const syncProgress = (player = activePlayer()) => {
+      if (!player) return;
+      const duration = Number(player.duration || 0);
       const current = Number(player.currentTime || 0);
+      const timeText = `${formatSeconds(current)} / ${formatSeconds(duration)}`;
+      if (time.textContent !== timeText) time.textContent = timeText;
+      const progressValue = duration ? Math.round((current / duration) * 1000) : 0;
+      const progressText = String(progressValue);
+      if (!scrubbing && progress.value !== progressText) progress.value = progressText;
+      progress.style.setProperty("--short-video-progress", `${Math.max(0, Math.min(100, progressValue / 10))}%`);
+      if (progress.getAttribute("aria-valuetext") !== timeText) progress.setAttribute("aria-valuetext", timeText);
+    };
+
+    const sync = (force = false) => {
+      const player = activePlayer();
+      if (!player) return;
       setIconButton(play, player.paused ? "play" : "pause", player.paused ? "播放" : "暂停");
       const volumePercent = player.muted ? 0 : Math.round(currentShortVideoVolume() * 100);
       setIconButton(mute, player.muted ? "volumeX" : "volume2", player.muted ? "取消静音" : "静音");
@@ -2937,14 +4133,60 @@ export function createShortVideoPage(deps) {
       original.disabled = !originalUrl;
       original.classList.toggle("is-unavailable", !originalUrl);
       original.setAttribute("aria-label", originalUrl ? "打开抖音原视频" : "当前视频没有原始链接");
-      time.textContent = `${formatSeconds(current)} / ${formatSeconds(duration)}`;
-      const progressValue = duration ? Math.round((current / duration) * 1000) : 0;
-      if (!scrubbing) progress.value = String(progressValue);
-      progress.style.setProperty("--short-video-progress", `${Math.max(0, Math.min(100, progressValue / 10))}%`);
-      progress.setAttribute("aria-valuetext", `${formatSeconds(current)} / ${formatSeconds(duration)}`);
-      if (!scrubbing && !progressHovering) updateSeekPreview(progressValue / 1000, duration);
+      syncProgress(player);
       player.closest(".short-video-stage")?.classList.toggle("is-paused", player.paused);
       syncActivePlaybackMode(player);
+    };
+
+    const stopProgressLoop = () => {
+      if (progressFrameHandle && progressPlayer?.cancelVideoFrameCallback) {
+        progressPlayer.cancelVideoFrameCallback(progressFrameHandle);
+      }
+      if (progressRaf) window.cancelAnimationFrame(progressRaf);
+      progressFrameHandle = 0;
+      progressRaf = 0;
+      progressPlayer = null;
+      lastProgressFrameAt = 0;
+    };
+
+    const scheduleProgressLoop = () => {
+      if (!bar.isConnected) {
+        stopProgressLoop();
+        return;
+      }
+      const player = activePlayer();
+      if (!player) {
+        stopProgressLoop();
+        return;
+      }
+      if (progressPlayer !== player) {
+        stopProgressLoop();
+        progressPlayer = player;
+      }
+      if (player.paused || player.ended) {
+        stopProgressLoop();
+        syncProgress(player);
+        return;
+      }
+      if (progressFrameHandle || progressRaf) return;
+      const paintProgress = (now) => {
+        progressFrameHandle = 0;
+        progressRaf = 0;
+        if (!bar.isConnected || player !== activePlayer()) {
+          scheduleProgressLoop();
+          return;
+        }
+        if (!lastProgressFrameAt || now - lastProgressFrameAt >= 30) {
+          lastProgressFrameAt = now;
+          syncProgress(player);
+        }
+        scheduleProgressLoop();
+      };
+      if (player.requestVideoFrameCallback) {
+        progressFrameHandle = player.requestVideoFrameCallback(paintProgress);
+      } else {
+        progressRaf = window.requestAnimationFrame(paintProgress);
+      }
     };
     play.addEventListener("click", () => {
       toggleActivePlayer();
@@ -2952,12 +4194,87 @@ export function createShortVideoPage(deps) {
     });
     mute.addEventListener("click", () => {
       toggleActiveMute();
+      setVolumePopoverOpen(true);
       sync(true);
     });
     volume.addEventListener("input", () => {
       setActiveShortVideoVolume(Number(volume.value || 0));
       sync(true);
     });
+    volume.addEventListener("keydown", (event) => {
+      const current = Math.max(0, Math.min(100, Number(volume.value || 0)));
+      const next = {
+        ArrowUp: current + 1,
+        ArrowRight: current + 1,
+        ArrowDown: current - 1,
+        ArrowLeft: current - 1,
+        PageUp: current + 10,
+        PageDown: current - 10,
+        Home: 0,
+        End: 100
+      }[event.key];
+      if (!Number.isFinite(next)) return;
+      event.preventDefault();
+      volume.value = String(Math.max(0, Math.min(100, next)));
+      setActiveShortVideoVolume(Number(volume.value));
+      sync(true);
+    });
+    const setVolumeFromPointer = (event) => {
+      const rect = volume.getBoundingClientRect();
+      if (!rect.height) return;
+      const clientY = Number(event.clientY);
+      const ratio = Math.max(0, Math.min(1, (rect.bottom - (Number.isFinite(clientY) ? clientY : rect.bottom)) / rect.height));
+      volume.value = String(Math.round(ratio * 100));
+      setActiveShortVideoVolume(Number(volume.value || 0));
+      sync(true);
+    };
+    volume.addEventListener("pointerdown", (event) => {
+      volumeScrubbing = true;
+      setVolumePopoverOpen(true);
+      volume.setPointerCapture?.(event.pointerId);
+      volume.focus?.({ preventScroll: true });
+      setVolumeFromPointer(event);
+      event.preventDefault();
+    });
+    volume.addEventListener("pointermove", (event) => {
+      if (!volumeScrubbing) return;
+      setVolumeFromPointer(event);
+      event.preventDefault();
+    });
+    const finishVolumeScrub = (event) => {
+      if (!volumeScrubbing) return;
+      setVolumeFromPointer(event);
+      volumeScrubbing = false;
+      if (volume.hasPointerCapture?.(event.pointerId)) volume.releasePointerCapture?.(event.pointerId);
+    };
+    volume.addEventListener("pointerup", finishVolumeScrub);
+    volume.addEventListener("pointercancel", () => {
+      volumeScrubbing = false;
+      sync(true);
+    });
+    volumeControl.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setVolumePopoverOpen(false);
+      activePlayer()?.closest?.(".short-video-stage")?.focus?.({ preventScroll: true });
+    });
+    volumeControl.addEventListener("pointerenter", (event) => {
+      if (event.pointerType !== "touch") setVolumePopoverOpen(true);
+    });
+    volumeControl.addEventListener("pointerleave", (event) => {
+      if (event.pointerType === "touch") return;
+      if (!volumeScrubbing && !volumeControl.contains(document.activeElement)) setVolumePopoverOpen(false);
+    });
+    volumeControl.addEventListener("focusin", () => setVolumePopoverOpen(true));
+    volumeControl.addEventListener("focusout", () => {
+      window.setTimeout(() => {
+        if (!volumeScrubbing && !volumeControl.contains(document.activeElement)) setVolumePopoverOpen(false);
+      });
+    });
+    const closeVolumeFromOutside = (event) => {
+      if (!volumeControl.contains(event.target)) setVolumePopoverOpen(false);
+    };
+    window.addEventListener("pointerdown", closeVolumeFromOutside, true);
     autoNext.addEventListener("click", () => {
       state.shortVideo.autoNext = !state.shortVideo.autoNext;
       writeAutoNextPreference(state.shortVideo.autoNext);
@@ -2969,38 +4286,32 @@ export function createShortVideoPage(deps) {
       showPlaybackSettings(state.shortVideo?.current, { trigger: event.currentTarget, focusSpeed: true });
     });
     original.addEventListener("click", () => openDouyinLink(state.shortVideo?.current));
-    full.addEventListener("click", () => {
-      const player = activePlayer();
-      const target = player?.closest(".short-video-stage") || player;
-      target?.requestFullscreen?.().catch(() => {});
-    });
+    full.addEventListener("click", () => toggleShortVideoFullscreen());
     progress.addEventListener("pointerenter", (event) => {
-      progressHovering = true;
+      progressWrap.classList.add("is-hovering");
       updateSeekPreviewFromPointer(event);
     });
     progress.addEventListener("pointermove", (event) => {
-      progressHovering = true;
-      updateSeekPreviewFromPointer(event);
+      progressWrap.classList.add("is-hovering");
+      if (scrubbing) seekFromProgressPointer(event);
+      else updateSeekPreviewFromPointer(event);
     });
     progress.addEventListener("pointerleave", () => {
-      progressHovering = false;
+      progressWrap.classList.remove("is-hovering");
       if (!scrubbing) sync(true);
     });
     progress.addEventListener("pointerdown", (event) => {
       scrubbing = true;
+      scrubPlayer = activePlayer();
+      scrubWasPlaying = Boolean(scrubPlayer && !scrubPlayer.paused && !scrubPlayer.ended);
+      scrubTargetTime = Math.max(0, Number(scrubPlayer?.currentTime || 0));
+      scrubPlayer?.pause?.();
+      progress.setPointerCapture?.(event.pointerId);
       progressWrap.classList.add("is-scrubbing");
-      updateSeekPreviewFromPointer(event);
+      seekFromProgressPointer(event);
     });
-    progress.addEventListener("pointerup", () => {
-      scrubbing = false;
-      progressWrap.classList.remove("is-scrubbing");
-      sync(true);
-    });
-    progress.addEventListener("pointercancel", () => {
-      scrubbing = false;
-      progressWrap.classList.remove("is-scrubbing");
-      sync(true);
-    });
+    progress.addEventListener("pointerup", (event) => finishProgressScrub(event, true));
+    progress.addEventListener("pointercancel", (event) => finishProgressScrub(event));
     progress.addEventListener("focus", () => {
       const player = activePlayer();
       const duration = Number(player?.duration || 0);
@@ -3012,50 +4323,63 @@ export function createShortVideoPage(deps) {
       const duration = Number(player.duration || 0);
       if (!duration) return;
       const ratio = Number(progress.value || 0) / 1000;
-      player.currentTime = ratio * duration;
-      updateSeekPreview(ratio, duration);
-      sync(true);
+      if (scrubbing) {
+        scheduleScrubTarget(player, ratio * duration, duration);
+      } else {
+        player.currentTime = ratio * duration;
+        updateSeekPreview(ratio, duration);
+        sync(true);
+      }
     });
-    bar.append(play, time, progressWrap, autoNext, rate, original, volumeControl, full);
-    bar.shortVideoSync = () => sync(true);
-    const tick = () => {
-      if (!bar.isConnected) return;
+    bar.append(play, time, progressWrap, controlSpacer, autoNext, rate, original, volumeControl, full);
+    bar.shortVideoSync = () => {
       sync();
-      window.setTimeout(tick, 500);
+      scheduleProgressLoop();
     };
-    sync(true);
-    window.setTimeout(tick, 500);
+    bar.shortVideoDispose = () => {
+      setVolumePopoverOpen(false);
+      stopProgressLoop();
+      if (scrubSeekRaf) window.cancelAnimationFrame(scrubSeekRaf);
+      scrubSeekRaf = 0;
+      scrubPlayer = null;
+      window.removeEventListener("pointerdown", closeVolumeFromOutside, true);
+    };
+    window.requestAnimationFrame(() => bar.shortVideoSync?.());
     return bar;
   }
 
-  async function openAdjacent(direction) {
+  async function openAdjacent(direction, options = {}) {
     const id = direction < 0 ? state.shortVideo.prevId : state.shortVideo.nextId;
     if (!id) {
       if (queuedAdjacentDirection === direction) queuedAdjacentDirection = 0;
+      pulseBoundaryStack(direction);
       return;
     }
+    clearPendingPlayerClick();
+    closeTransientPlayerControls();
     if (wheelLocked) {
       queuedAdjacentDirection = direction;
       return;
     }
-    const cachedVideo = direction < 0 ? state.shortVideo.prevVideo : state.shortVideo.nextVideo;
+    const cachedVideo = (direction < 0 ? state.shortVideo.prevVideo : state.shortVideo.nextVideo)
+      || cachedShortVideo(id);
     const hasCachedAdjacent = cachedVideo?.id === id;
     const canPromoteVideoPanel = hasCachedAdjacent
       && !isGalleryPost(state.shortVideo.current)
       && !isGalleryPost(cachedVideo);
-    flushActiveShortVideoWatch();
+    if (!canPromoteVideoPanel) flushActiveShortVideoWatch();
     wheelLocked = true;
     wheelDeltaY = 0;
-    wheelLockedDeltaY = 0;
     queuedAdjacentDirection = 0;
-    wheelIgnoreUntil = Date.now() + 480;
+    wheelIgnoreUntil = Date.now() + 180;
     window.clearTimeout(wheelResetTimer);
     try {
-      const adjacentReady = await primeAdjacentSound(direction, cachedVideo);
-      if (hasCachedAdjacent && !isGalleryPost(cachedVideo) && !adjacentReady) {
-        await waitForVideoFirstFrame(adjacentPlayer(direction), 220);
-      }
-      await animateActiveStack(direction);
+      const animationPromise = animateActiveStack(direction, options.motion);
+      const primePromise = primeAdjacentSound(direction, cachedVideo).catch(() => false);
+      await Promise.all([
+        animationPromise,
+        primePromise
+      ]);
       if (canPromoteVideoPanel) {
         promoteAdjacentPanelDom(direction, cachedVideo);
         await promoteAdjacentMedia(cachedVideo, direction);
@@ -3065,18 +4389,16 @@ export function createShortVideoPage(deps) {
         await openVideo(id, { renderLoading: false });
       }
     } finally {
-      wheelIgnoreUntil = Date.now() + 180;
-      window.setTimeout(() => {
-        wheelLocked = false;
-        flushQueuedAdjacent();
-      }, 120);
+      wheelIgnoreUntil = Date.now();
+      wheelLocked = false;
+      scheduleWheelGestureRelease();
+      flushQueuedAdjacent();
     }
   }
 
   function flushQueuedAdjacent() {
     const direction = queuedAdjacentDirection;
     queuedAdjacentDirection = 0;
-    wheelLockedDeltaY = 0;
     if (!direction || state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
     const id = direction < 0 ? state.shortVideo.prevId : state.shortVideo.nextId;
     if (!id) return;
@@ -3089,12 +4411,16 @@ export function createShortVideoPage(deps) {
     const ready = await warmAdjacentVideoPlayer(player, video, {
       forceReload: Boolean(player.error),
       pauseAfter: false,
-      timeout: 800
+      timeout: SHORT_VIDEO_SWITCH_PRIME_TIMEOUT_MS
     });
-    try {
-      player.currentTime = 0;
-    } catch {}
-    player.muted = Boolean(state.shortVideo.muted);
+    if (player.currentTime > 0.12) {
+      try {
+        player.currentTime = 0;
+      } catch {}
+    }
+    // Keep the incoming reel silent until the visual handoff finishes. The
+    // promoted player restores the user's sound preference in one step.
+    player.muted = true;
     player.volume = currentShortVideoVolume();
     player.playbackRate = normalizePlaybackRate(state.shortVideo.playbackRate);
     player.play?.().catch(() => {});
@@ -3117,23 +4443,24 @@ export function createShortVideoPage(deps) {
       if (!pauseAfter || !player.classList.contains("is-ghost")) return;
       player.pause?.();
       player.muted = true;
-      if (player.readyState >= 1) {
-        try {
-          player.currentTime = 0;
-        } catch {}
-      }
+      player.preload = "metadata";
     };
     const shouldReload = Boolean(options.forceReload || player.error || !player.currentSrc);
     if (shouldReload) {
+      delete player.dataset.shortVideoFrameReady;
+      delete player.dataset.shortVideoFrameReadyAt;
       player.src = source;
       player.dataset.streamUrl = source;
       player.load?.();
     }
     player.preload = "auto";
     player.muted = true;
-    if (player.readyState >= 2) {
-      settleGhost();
-      return true;
+    if (player.readyState >= 1 && player.currentTime > 0.12) {
+      delete player.dataset.shortVideoFrameReady;
+      delete player.dataset.shortVideoFrameReadyAt;
+      try {
+        player.currentTime = 0;
+      } catch {}
     }
     const readyPromise = waitForVideoFirstFrame(player, Math.max(200, Number(options.timeout || 1000)));
     player.play?.().catch(() => {});
@@ -3142,7 +4469,7 @@ export function createShortVideoPage(deps) {
     return ready || player.readyState >= 2;
   }
 
-  function scheduleAdjacentVideoWarmup(player, video) {
+  function scheduleAdjacentVideoWarmup(player, video, slot = "next") {
     const startedAt = Date.now();
     const warm = () => {
       if (!player?.isConnected || !player.classList.contains("is-ghost")) return;
@@ -3151,19 +4478,38 @@ export function createShortVideoPage(deps) {
         window.setTimeout(warm, 180);
         return;
       }
+      if (slot === "prev" && Date.now() - startedAt < 2600) {
+        const nextPlayer = player.closest(".short-video-reel-stack")?.querySelector(".short-video-reel-panel.is-next .short-video-player");
+        if (nextPlayer && nextPlayer !== player && !nextPlayer.error && nextPlayer.dataset.shortVideoFrameReady !== "1") {
+          window.setTimeout(warm, 160);
+          return;
+        }
+        const nextReadyAt = Number(nextPlayer?.dataset?.shortVideoFrameReadyAt || 0);
+        const nextCooldown = 600 - (Date.now() - nextReadyAt);
+        if (nextReadyAt && nextCooldown > 0) {
+          window.setTimeout(warm, nextCooldown);
+          return;
+        }
+      }
       warmAdjacentVideoPlayer(player, video, { pauseAfter: true, timeout: 1200 }).catch(() => {});
     };
-    window.setTimeout(warm, 160);
+    window.setTimeout(warm, slot === "next" ? 40 : 220);
   }
 
   function warmVisibleAdjacentVideoPlayers() {
-    const players = els.workGrid?.querySelectorAll?.(".short-video-reel-panel.is-ghost-panel .short-video-player") || [];
-    players.forEach((player) => {
-      warmAdjacentVideoPlayer(player, null, {
-        forceReload: Boolean(player.error),
-        pauseAfter: true,
-        timeout: 1200
-      }).catch(() => {});
+    const stack = activeReelStack();
+    const players = [
+      stack?.querySelector?.(".short-video-reel-panel.is-next .short-video-player"),
+      stack?.querySelector?.(".short-video-reel-panel.is-prev .short-video-player")
+    ].filter(Boolean);
+    players.forEach((player, index) => {
+      window.setTimeout(() => {
+        warmAdjacentVideoPlayer(player, null, {
+          forceReload: Boolean(player.error),
+          pauseAfter: true,
+          timeout: 1200
+        }).catch(() => {});
+      }, index * 360);
     });
   }
 
@@ -3184,13 +4530,39 @@ export function createShortVideoPage(deps) {
     outgoing.classList.remove("is-current");
     outgoing.classList.add(direction > 0 ? "is-prev" : "is-next", "is-ghost-panel");
     outgoing.setAttribute("aria-hidden", "true");
-    stack.getBoundingClientRect();
+    stack.querySelectorAll(".short-video-reel-panel.is-ghost-panel").forEach((panel) => {
+      if (panel !== outgoing) disposeReelPanel(panel);
+    });
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         stack.classList.remove("is-rebasing");
         stack.style.removeProperty("transition");
+        incoming.shortVideoSyncCaptionOverflow?.();
       });
     });
+
+    // Silence the outgoing reel before restoring sound on the incoming one.
+    // The adjacent player may already be running muted for first-frame warmup,
+    // so unmuting it first would briefly leave two audible players alive.
+    const previousPlayer = outgoing.querySelector(".short-video-player");
+    if (previousPlayer) {
+      previousPlayer.classList.add("is-ghost");
+      previousPlayer.muted = true;
+      previousPlayer.pause?.();
+      delete previousPlayer.dataset.shortVideoFrameReady;
+      delete previousPlayer.dataset.shortVideoFrameReadyAt;
+      try {
+        previousPlayer.currentTime = 0;
+      } catch {}
+    }
+    const previousBackdrop = outgoing.querySelector("video.short-video-backdrop-video");
+    if (previousBackdrop) {
+      previousBackdrop.muted = true;
+      previousBackdrop.pause?.();
+      try {
+        previousBackdrop.currentTime = 0;
+      } catch {}
+    }
 
     const player = incoming.querySelector(".short-video-player");
     const stage = incoming.querySelector(".short-video-stage");
@@ -3211,7 +4583,7 @@ export function createShortVideoPage(deps) {
       }
       player.play?.().catch(() => {
         if (!state.shortVideo.muted) {
-          stage.classList.add("is-sound-blocked");
+          markPlayerSoundBlocked(stage);
           player.muted = true;
           player.play?.().catch(() => {});
         }
@@ -3225,66 +4597,59 @@ export function createShortVideoPage(deps) {
       incomingBackdrop.play?.().catch(() => {});
     }
 
-    const previousPlayer = outgoing.querySelector(".short-video-player");
-    if (previousPlayer) {
-      previousPlayer.classList.add("is-ghost");
-      previousPlayer.muted = true;
-      previousPlayer.pause?.();
-      try {
-        previousPlayer.currentTime = 0;
-      } catch {}
-    }
-    const previousBackdrop = outgoing.querySelector("video.short-video-backdrop-video");
-    if (previousBackdrop) {
-      previousBackdrop.muted = true;
-      previousBackdrop.pause?.();
-      try {
-        previousBackdrop.currentTime = 0;
-      } catch {}
-    }
   }
 
-  async function promoteAdjacentMedia(video, direction, options = {}) {
+  function promoteAdjacentMedia(video, direction, options = {}) {
     const previousCurrent = state.shortVideo.current;
+    const navigation = cachedShortVideoNavigation(video.id);
+    const fallbackPrevId = direction > 0 ? previousCurrent?.id || "" : "";
+    const fallbackNextId = direction < 0 ? previousCurrent?.id || "" : "";
     state.shortVideo.current = video;
     state.shortVideo.slideDirection = 0;
     state.shortVideo.loading = false;
     state.shortVideo.status = "";
-    state.shortVideo.prevId = direction > 0 ? previousCurrent?.id || "" : "";
-    state.shortVideo.nextId = direction < 0 ? previousCurrent?.id || "" : "";
-    state.shortVideo.prevVideo = direction > 0 ? previousCurrent : null;
-    state.shortVideo.nextVideo = direction < 0 ? previousCurrent : null;
+    state.shortVideo.prevId = navigation?.prevId || fallbackPrevId;
+    state.shortVideo.nextId = navigation?.nextId || fallbackNextId;
+    state.shortVideo.prevVideo = cachedShortVideo(state.shortVideo.prevId)
+      || (previousCurrent?.id === state.shortVideo.prevId ? previousCurrent : null);
+    state.shortVideo.nextVideo = cachedShortVideo(state.shortVideo.nextId)
+      || (previousCurrent?.id === state.shortVideo.nextId ? previousCurrent : null);
     replaceRoute({ view: "shortVideos", shortVideoId: video.id });
     syncActiveControlBar();
     if (options.renderCurrent) {
       renderStats();
       renderView();
       resumeActiveSound();
+    } else {
+      refreshAdjacentPanelsDom();
     }
+    scheduleAdjacentNavigationPrefetch();
+    hydratePromotedShortVideo(video).catch((error) => console.warn(error));
+  }
 
+  async function hydratePromotedShortVideo(video) {
     try {
-      const detailPromise = api(`/api/short-videos/${encodeURIComponent(video.id)}?${shortVideoFeedParams()}`);
-      const data = await detailPromise;
+      const data = await fetchShortVideoDetail(video.id);
       if (state.shortVideo.current?.id !== video.id) return;
       state.shortVideo.current = data.video || video;
+      cacheAuthorPanelVideo(state.shortVideo.current);
       state.shortVideo.prevId = data.prevId || "";
       state.shortVideo.nextId = data.nextId || "";
+      state.shortVideo.prevVideo = cachedShortVideo(state.shortVideo.prevId);
+      state.shortVideo.nextVideo = cachedShortVideo(state.shortVideo.nextId);
       await loadAdjacentVideos(video.id);
-      await wait(80);
       if (state.shortVideo.current?.id === video.id) {
-        renderStats();
         refreshAdjacentPanelsDom();
         syncAuthorPanelCurrentTile();
       }
       resumeActiveSound();
     } catch (error) {
-      console.warn(error);
       if (state.shortVideo.current?.id === video.id) {
-        renderStats();
         refreshAdjacentPanelsDom();
         syncAuthorPanelCurrentTile();
         resumeActiveSound();
       }
+      throw error;
     }
   }
 
@@ -3294,19 +4659,49 @@ export function createShortVideoPage(deps) {
       renderView();
       return;
     }
-    stack.querySelectorAll(".short-video-reel-panel.is-prev, .short-video-reel-panel.is-next").forEach((panel) => panel.remove());
     const currentPanel = stack.querySelector(".short-video-reel-panel.is-current");
     if (!currentPanel) {
       renderView();
       return;
     }
-    if (state.shortVideo.prevVideo) {
-      stack.insertBefore(renderReelPanel(state.shortVideo.prevVideo, { ghost: true, slot: "prev" }).panel, currentPanel);
-    }
-    if (state.shortVideo.nextVideo) {
-      stack.append(renderReelPanel(state.shortVideo.nextVideo, { ghost: true, slot: "next" }).panel);
-    }
+    const existingGhosts = [...stack.querySelectorAll(".short-video-reel-panel.is-ghost-panel")];
+    const reusedGhosts = new Set();
+    const placeGhost = (video, slot) => {
+      if (!video?.id) return;
+      const videoId = String(video.id);
+      let panel = existingGhosts.find((candidate) => !reusedGhosts.has(candidate) && candidate.dataset.videoId === videoId);
+      if (panel) {
+        reusedGhosts.add(panel);
+        panel.classList.remove("is-current", "is-prev", "is-next");
+        panel.classList.add(`is-${slot}`, "is-ghost-panel");
+        panel.setAttribute("aria-hidden", "true");
+        const player = panel.querySelector(".short-video-player");
+        if (player) {
+          player.classList.add("is-ghost");
+          player.muted = true;
+          player.pause?.();
+        }
+      } else {
+        panel = renderReelPanel(video, { ghost: true, slot }).panel;
+      }
+      if (slot === "prev") stack.insertBefore(panel, currentPanel);
+      else stack.append(panel);
+    };
+    placeGhost(state.shortVideo.prevVideo, "prev");
+    placeGhost(state.shortVideo.nextVideo, "next");
+    existingGhosts.forEach((panel) => {
+      if (!reusedGhosts.has(panel)) disposeReelPanel(panel);
+    });
     syncCurrentNavigationDom();
+  }
+
+  function disposeReelPanel(panel) {
+    if (!panel) return;
+    panel.querySelectorAll?.("video")?.forEach?.((player) => {
+      player.muted = true;
+      player.pause?.();
+    });
+    panel.remove();
   }
 
   function syncCurrentNavigationDom() {
@@ -3345,8 +4740,42 @@ export function createShortVideoPage(deps) {
     state.shortVideo.data = null;
   }
 
+  function clearAuthorPanelCaches() {
+    authorPanelVideoCache = null;
+    authorPanelTileMap = null;
+  }
+
+  function cacheAuthorPanelVideos(videos = []) {
+    const cache = new Map();
+    for (const video of videos) {
+      const id = String(video?.id || "").trim();
+      if (id) {
+        cache.set(id, video);
+        rememberShortVideo(video);
+      }
+    }
+    authorPanelVideoCache = cache.size ? cache : null;
+  }
+
+  function cacheAuthorPanelVideo(video) {
+    const id = String(video?.id || "").trim();
+    if (!id || !authorPanelVideoCache) return;
+    rememberShortVideo(video);
+    authorPanelVideoCache.set(id, video);
+  }
+
+  function cachedAuthorPanelVideo(id) {
+    const key = String(id || "").trim();
+    return key ? authorPanelVideoCache?.get(key) || null : null;
+  }
+
   function closeAuthorPanel(panel, options = {}) {
-    panel?.closest?.(".short-video-browser")?.classList.remove("is-author-panel-open");
+    if (!panel || panel.dataset.closing === "1") return;
+    const browser = panel.closest?.(".short-video-browser");
+    const returnFocus = panel._shortVideoReturnFocus;
+    panel._shortVideoDragAbort?.abort?.();
+    panel._shortVideoDragAbort = null;
+    browser?.classList.remove("is-author-panel-open");
     panel?.querySelectorAll?.(".short-video-sound-audio")?.forEach?.((audio) => {
       try {
         audio.pause?.();
@@ -3355,12 +4784,158 @@ export function createShortVideoPage(deps) {
       } catch {}
     });
     authorPanelVideoRequestId += 1;
-    panel?.remove();
-    if (options.restoreFeed === false) {
-      authorPanelReturnFeed = null;
+    clearAuthorPanelCaches();
+    if (options.restoreFeed === false) authorPanelReturnFeed = null;
+    let finished = false;
+    let handleTransitionEnd = null;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      if (panel._shortVideoCloseTimer) window.clearTimeout(panel._shortVideoCloseTimer);
+      panel._shortVideoCloseTimer = 0;
+      if (handleTransitionEnd) panel.removeEventListener("transitionend", handleTransitionEnd);
+      restoreAuthorPanelModalIsolation(panel);
+      panel.remove();
+      if (options.restoreFocus !== false && returnFocus?.isConnected) {
+        returnFocus.focus?.({ preventScroll: true });
+      }
+      if (options.restoreFeed !== false) restoreAuthorPanelFeed().catch(showError);
+    };
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    if (options.animate === false || reduceMotion || !panel.isConnected) {
+      finish();
       return;
     }
-    restoreAuthorPanelFeed().catch(showError);
+    panel.dataset.closing = "1";
+    panel.classList.add("is-closing");
+    panel.classList.remove("is-open");
+    handleTransitionEnd = (event) => {
+      if (event.propertyName === "transform") finish();
+    };
+    panel.addEventListener("transitionend", handleTransitionEnd);
+    panel._shortVideoCloseTimer = window.setTimeout(finish, 1000);
+  }
+
+  function isolateAuthorPanelAsMobileModal(panel, sheet, browser, initialFocus) {
+    if (!panel || !sheet || !browser || !window.matchMedia?.("(max-width: 680px)")?.matches) return;
+    panel.setAttribute("aria-modal", "true");
+    panel._shortVideoModalSiblings = [...browser.children]
+      .filter((element) => element !== panel)
+      .map((element) => ({ element, wasInert: element.hasAttribute("inert") }));
+    for (const item of panel._shortVideoModalSiblings) item.element.setAttribute("inert", "");
+    bindShortVideoModalFocusLoop(panel, sheet, () => closeAuthorPanel(panel));
+    window.requestAnimationFrame(() => initialFocus?.focus?.({ preventScroll: true }));
+  }
+
+  function restoreAuthorPanelModalIsolation(panel) {
+    for (const item of panel?._shortVideoModalSiblings || []) {
+      if (!item.wasInert && item.element?.isConnected) item.element.removeAttribute("inert");
+    }
+    panel._shortVideoModalSiblings = null;
+  }
+
+  function bindAuthorPanelDragToClose(panel, sheet, handle) {
+    if (!panel || !sheet || !handle) return;
+    panel._shortVideoDragAbort?.abort?.();
+    const dragAbort = new AbortController();
+    panel._shortVideoDragAbort = dragAbort;
+    let pointerId = -1;
+    let startY = 0;
+    let lastY = 0;
+    let lastAt = 0;
+    let velocityY = 0;
+    let dragY = 0;
+    let moved = false;
+    let mouseFallbackActive = false;
+    let suppressClickUntil = 0;
+    const mobileSheet = () => window.matchMedia?.("(max-width: 680px)")?.matches;
+    const clearDrag = () => {
+      pointerId = -1;
+      mouseFallbackActive = false;
+      sheet.classList.remove("is-dragging");
+      handle.removeAttribute("aria-pressed");
+    };
+    const beginDrag = (clientY, nextPointerId, eventTime) => {
+      pointerId = nextPointerId;
+      startY = clientY;
+      lastY = clientY;
+      lastAt = eventTime || Date.now();
+      velocityY = 0;
+      dragY = 0;
+      moved = false;
+      sheet.classList.add("is-dragging");
+      sheet.style.setProperty("--short-video-author-sheet-drag-y", "0px");
+      handle.setAttribute("aria-pressed", "true");
+    };
+    const moveDrag = (clientY, eventTime) => {
+      const nextY = Math.max(0, clientY - startY);
+      const now = eventTime || Date.now();
+      const elapsed = Math.max(1, now - lastAt);
+      velocityY = Math.max(0, (clientY - lastY) / elapsed);
+      lastY = clientY;
+      lastAt = now;
+      dragY = Math.min(nextY, Math.max(180, sheet.clientHeight * .82));
+      moved = moved || dragY > 4;
+      sheet.style.setProperty("--short-video-author-sheet-drag-y", `${dragY}px`);
+    };
+    const settle = (event, cancelled = false) => {
+      if (pointerId < 0 || (event?.pointerId != null && event.pointerId !== pointerId)) return;
+      try {
+        handle.releasePointerCapture?.(pointerId);
+      } catch {}
+      const closeDistance = Math.min(160, Math.max(96, sheet.clientHeight * .2));
+      const shouldClose = !cancelled && (dragY >= closeDistance || (dragY >= 28 && velocityY >= .62));
+      if (moved) suppressClickUntil = Date.now() + 280;
+      clearDrag();
+      if (shouldClose) {
+        sheet.style.setProperty("--short-video-author-sheet-drag-y", `${Math.max(dragY, 120)}px`);
+        closeAuthorPanel(panel);
+        return;
+      }
+      sheet.style.setProperty("--short-video-author-sheet-drag-y", "0px");
+    };
+    handle.addEventListener("pointerdown", (event) => {
+      if (!mobileSheet() || panel.dataset.closing === "1") return;
+      beginDrag(event.clientY, event.pointerId, event.timeStamp);
+      try {
+        handle.setPointerCapture?.(pointerId);
+      } catch {}
+      event.preventDefault();
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== pointerId) return;
+      moveDrag(event.clientY, event.timeStamp);
+      event.preventDefault();
+    });
+    handle.addEventListener("pointerup", (event) => settle(event));
+    handle.addEventListener("pointercancel", (event) => settle(event, true));
+    handle.addEventListener("mousedown", (event) => {
+      if (!mobileSheet() || panel.dataset.closing === "1" || pointerId >= 0) return;
+      mouseFallbackActive = true;
+      beginDrag(event.clientY, -2, event.timeStamp);
+      event.preventDefault();
+    });
+    window.addEventListener("mousemove", (event) => {
+      if (!mouseFallbackActive || pointerId !== -2) return;
+      moveDrag(event.clientY, event.timeStamp);
+      event.preventDefault();
+    }, { signal: dragAbort.signal });
+    window.addEventListener("mouseup", (event) => {
+      if (!mouseFallbackActive || pointerId !== -2) return;
+      settle({ pointerId: -2 });
+      event.preventDefault();
+    }, { signal: dragAbort.signal });
+    handle.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (Date.now() < suppressClickUntil) return;
+      closeAuthorPanel(panel);
+    });
+    handle.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      closeAuthorPanel(panel);
+    });
   }
 
   async function restoreAuthorPanelFeed() {
@@ -3373,7 +4948,7 @@ export function createShortVideoPage(deps) {
       replaceRoute({ view: "shortVideos", shortVideoId: "" });
       return;
     }
-    const data = await api(`/api/short-videos/${encodeURIComponent(currentId)}?${shortVideoFeedParams()}`);
+    const data = await fetchShortVideoDetail(currentId);
     if (state.shortVideo?.current?.id !== currentId) return;
     state.shortVideo.current = data.video || state.shortVideo.current;
     state.shortVideo.prevId = data.prevId || "";
@@ -3391,26 +4966,46 @@ export function createShortVideoPage(deps) {
     const grid = panel?.querySelector?.(".short-video-author-grid");
     const current = state.shortVideo?.current;
     if (!panel || !grid || !current?.id) return;
-    const tiles = [...grid.querySelectorAll(".short-video-author-tile")];
-    for (const tile of tiles) {
-      const matchesCurrent = tileMatchesVideo(tile, current);
-      tile.classList.toggle("is-current", matchesCurrent);
-      if (matchesCurrent) {
-        tile.setAttribute("aria-current", "true");
-        ensureAuthorCurrentBadge(tile);
-      } else {
-        tile.removeAttribute("aria-current");
-        tile.querySelector(".short-video-author-current-badge")?.remove();
-      }
+    const previousTile = grid.querySelector(".short-video-author-tile.is-current");
+    const currentId = String(current.id || "").trim();
+    const currentAwemeId = String(current.awemeId || "").trim();
+    const nextTile = authorPanelTileMap?.get(`id:${currentId}`)
+      || (currentAwemeId ? authorPanelTileMap?.get(`aweme:${currentAwemeId}`) : null)
+      || null;
+    if (previousTile && previousTile !== nextTile) {
+      previousTile.classList.remove("is-current");
+      previousTile.removeAttribute("aria-current");
+      previousTile.querySelector(".short-video-author-current-badge")?.remove();
+    }
+    if (nextTile?.isConnected) {
+      nextTile.classList.add("is-current");
+      nextTile.setAttribute("aria-current", "true");
+      ensureAuthorCurrentBadge(nextTile);
     }
   }
 
-  function tileMatchesVideo(tile, video = {}) {
-    if (!tile || !video) return false;
-    const id = String(video.id || "").trim();
-    if (id && tile.dataset.videoId === id) return true;
-    const awemeId = String(video.awemeId || "").trim();
-    return Boolean(awemeId && tile.dataset.awemeId === awemeId);
+  function syncRelatedPanelCurrentItem(panel = null) {
+    const root = panel?.isConnected ? panel : els.workGrid?.querySelector?.(".short-video-author-panel");
+    if (!root) return;
+    const current = state.shortVideo?.current;
+    for (const item of root.querySelectorAll(".short-video-related-item")) {
+      const selected = isCurrentShortVideo({
+        id: item.dataset.videoId || "",
+        awemeId: item.dataset.awemeId || ""
+      }, current);
+      item.classList.toggle("is-current", selected);
+      if (selected) item.setAttribute("aria-current", "true");
+      else item.removeAttribute("aria-current");
+      const existing = item.querySelector(".short-video-related-current");
+      if (selected && !existing) {
+        const badge = document.createElement("span");
+        badge.className = "short-video-related-current";
+        badge.textContent = "播放中";
+        item.querySelector(".short-video-related-media")?.append(badge);
+      } else if (!selected) {
+        existing?.remove();
+      }
+    }
   }
 
   function ensureAuthorCurrentBadge(tile) {
@@ -3422,12 +5017,10 @@ export function createShortVideoPage(deps) {
     media.append(currentBadge);
   }
 
-  function wait(ms) {
-    return new Promise((resolve) => window.setTimeout(resolve, ms));
-  }
-
   function waitForVideoFirstFrame(player, timeout = 260) {
-    if (!player || player.readyState >= 2) return Promise.resolve(true);
+    if (!player) return Promise.resolve(false);
+    if (player.readyState >= 2 && player.dataset.shortVideoFrameReady === "1") return Promise.resolve(true);
+    if (player.readyState >= 2 && !player.requestVideoFrameCallback) return Promise.resolve(true);
     return new Promise((resolve) => {
       let finished = false;
       let frameHandle = null;
@@ -3440,15 +5033,24 @@ export function createShortVideoPage(deps) {
         if (frameHandle && player.cancelVideoFrameCallback) {
           player.cancelVideoFrameCallback(frameHandle);
         }
+        if (ready) {
+          player.dataset.shortVideoFrameReady = "1";
+          player.dataset.shortVideoFrameReadyAt = String(Date.now());
+        }
         resolve(ready);
       };
-      const onReady = () => done(true);
+      const requestPaintedFrame = () => {
+        if (finished || frameHandle || player.readyState < 2 || !player.requestVideoFrameCallback) return false;
+        frameHandle = player.requestVideoFrameCallback(() => done(true));
+        return true;
+      };
+      const onReady = () => {
+        if (!requestPaintedFrame()) done(true);
+      };
       player.addEventListener("loadeddata", onReady, { once: true });
       player.addEventListener("canplay", onReady, { once: true });
       player.addEventListener("playing", onReady, { once: true });
-      if (player.requestVideoFrameCallback) {
-        frameHandle = player.requestVideoFrameCallback(() => done(true));
-      }
+      requestPaintedFrame();
       window.setTimeout(() => done(player.readyState >= 2), timeout);
     });
   }
@@ -3461,7 +5063,7 @@ export function createShortVideoPage(deps) {
       player.muted = false;
       player.volume = currentShortVideoVolume();
       player.play?.().catch(() => {
-        player.closest(".short-video-stage")?.classList.add("is-sound-blocked");
+        markPlayerSoundBlocked(player.closest(".short-video-stage"));
         player.muted = true;
         player.play?.().catch(() => {});
       });
@@ -3469,6 +5071,10 @@ export function createShortVideoPage(deps) {
   }
 
   function showHome() {
+    shortVideoVisibilitySnapshot = null;
+    shortVideoOpenRequestId += 1;
+    shortVideoOpeningId = "";
+    shortVideoOpenError = "";
     flushActiveShortVideoWatch();
     if (authorPanelReturnFeed) {
       applyShortVideoFeedSnapshot(authorPanelReturnFeed);
@@ -3480,6 +5086,8 @@ export function createShortVideoPage(deps) {
     state.shortVideo.prevId = "";
     state.shortVideo.nextId = "";
     state.shortVideo.slideDirection = 0;
+    state.shortVideo.loading = false;
+    state.shortVideo.status = "";
     setBodyClass();
     renderStats();
     renderView();
@@ -3530,13 +5138,18 @@ export function createShortVideoPage(deps) {
     });
     window.addEventListener("touchstart", (event) => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
-      if (isShortVideoOverlayTarget(event.target)) return;
+      touchControlInteraction = isShortVideoOverlayTarget(event.target) || isShortVideoKeyboardControl(event.target);
+      if (touchControlInteraction) return;
+      holdSpeedGestureConsumed = false;
+      holdSpeedGestureBlockUntil = 0;
       const touch = event.touches?.[0];
       touchStartX = touch?.clientX || 0;
       touchStartY = touch?.clientY || 0;
       touchLastX = touchStartX;
+      touchLastY = touchStartY;
       touchLastAt = Date.now();
       touchVelocityX = 0;
+      touchVelocityY = 0;
       touchDeltaX = 0;
       touchDeltaY = 0;
       touchHorizontalDragging = false;
@@ -3545,6 +5158,7 @@ export function createShortVideoPage(deps) {
     }, { passive: true });
     window.addEventListener("touchmove", (event) => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+      if (touchControlInteraction) return;
       if (isShortVideoOverlayTarget(event.target)) return;
       const touch = event.touches?.[0];
       const x = touch?.clientX || 0;
@@ -3552,11 +5166,22 @@ export function createShortVideoPage(deps) {
       const now = Date.now();
       const elapsed = Math.max(1, now - touchLastAt);
       const instantVelocityX = (x - touchLastX) / elapsed;
+      const instantVelocityY = (y - touchLastY) / elapsed;
       touchVelocityX = touchVelocityX * .35 + instantVelocityX * .65;
+      touchVelocityY = touchVelocityY * .35 + instantVelocityY * .65;
       touchLastX = x;
+      touchLastY = y;
       touchLastAt = now;
       touchDeltaX = x - touchStartX;
       touchDeltaY = y - touchStartY;
+      if (holdSpeedGestureConsumed) {
+        touchDeltaX = 0;
+        touchDeltaY = 0;
+        touchVelocityX = 0;
+        touchVelocityY = 0;
+        event.preventDefault();
+        return;
+      }
       if (!touchHorizontalDragging && isHorizontalSwipe(touchDeltaX, touchDeltaY, 28)) {
         touchHorizontalDragging = true;
         activeReelStack()?.classList.remove("is-dragging");
@@ -3564,18 +5189,38 @@ export function createShortVideoPage(deps) {
         startActiveGalleryDrag();
       }
       if (touchHorizontalDragging) updateActiveGalleryDrag(touchDeltaX);
-      else applyDragDelta(touchDeltaY);
+      else scheduleReelDragDelta(touchDeltaY);
       event.preventDefault();
     }, { passive: false });
     window.addEventListener("touchend", (event) => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+      if (touchControlInteraction) {
+        touchControlInteraction = false;
+        return;
+      }
+      if (holdSpeedGestureConsumed || Date.now() < holdSpeedGestureBlockUntil) {
+        holdSpeedGestureConsumed = false;
+        holdSpeedGestureBlockUntil = Date.now() + 120;
+        state.shortVideo.dragging = false;
+        touchHorizontalDragging = false;
+        activeReelStack()?.classList.remove("is-dragging");
+        snapStackBack();
+        return;
+      }
       if (isShortVideoOverlayTarget(event.target)) return;
       const touch = event.changedTouches?.[0];
       const endX = touch?.clientX || 0;
       const endY = touch?.clientY || 0;
       const deltaX = touchDeltaX || endX - touchStartX;
       const deltaY = touchDeltaY || endY - touchStartY;
-      if (Date.now() - touchLastAt > 80) touchVelocityX *= Math.max(0, 1 - (Date.now() - touchLastAt - 80) / 180);
+      if (Math.hypot(deltaX, deltaY) > 8) {
+        markShortVideoGestureClickBlocked(event.target);
+      }
+      if (Date.now() - touchLastAt > 80) {
+        const velocityDecay = Math.max(0, 1 - (Date.now() - touchLastAt - 80) / 180);
+        touchVelocityX *= velocityDecay;
+        touchVelocityY *= velocityDecay;
+      }
       if (touchHorizontalDragging) {
         state.shortVideo.dragging = false;
         touchHorizontalDragging = false;
@@ -3583,29 +5228,47 @@ export function createShortVideoPage(deps) {
         snapStackBack();
         const handled = finishActiveGalleryDrag(deltaX, touchVelocityX);
         if (!handled && isHorizontalSwipe(deltaX, deltaY, 72)) handleHorizontalSwipe(deltaX);
-        else if (!handled) finishDrag(0);
+        else if (!handled) finishDrag(0, 0);
         return;
       }
-      finishDrag(deltaY);
+      finishDrag(deltaY, touchVelocityY);
     }, { passive: true });
     window.addEventListener("touchcancel", () => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+      if (touchControlInteraction) {
+        touchControlInteraction = false;
+        return;
+      }
+      if (holdSpeedGestureConsumed || Date.now() < holdSpeedGestureBlockUntil) {
+        holdSpeedGestureConsumed = false;
+        holdSpeedGestureBlockUntil = Date.now() + 120;
+        touchHorizontalDragging = false;
+        state.shortVideo.dragging = false;
+        activeReelStack()?.classList.remove("is-dragging");
+        snapStackBack();
+        return;
+      }
       const wasHorizontal = touchHorizontalDragging;
       touchHorizontalDragging = false;
       state.shortVideo.dragging = false;
       activeReelStack()?.classList.remove("is-dragging");
       if (wasHorizontal) cancelActiveGalleryDrag();
-      finishDrag(0);
+      finishDrag(0, 0);
     }, { passive: true });
     window.addEventListener("pointerdown", (event) => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
+      if (event.pointerType === "touch") return;
       if (isShortVideoOverlayTarget(event.target)) return;
       if (event.button !== 0 || event.target?.closest?.("button, select, input, textarea, a")) return;
+      holdSpeedGestureConsumed = false;
+      holdSpeedGestureBlockUntil = 0;
       pointerStartX = event.clientX || 0;
       pointerStartY = event.clientY || 0;
       pointerLastX = pointerStartX;
+      pointerLastY = pointerStartY;
       pointerLastAt = Date.now();
       pointerVelocityX = 0;
+      pointerVelocityY = 0;
       pointerDeltaX = 0;
       pointerDeltaY = 0;
       pointerHorizontalDragging = false;
@@ -3614,16 +5277,29 @@ export function createShortVideoPage(deps) {
       activeReelStack()?.classList.add("is-dragging");
     });
     window.addEventListener("pointermove", (event) => {
+      if (event.pointerType === "touch") return;
       if (!pointerDragging || state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
       const x = event.clientX || 0;
+      const y = event.clientY || 0;
       const now = Date.now();
       const elapsed = Math.max(1, now - pointerLastAt);
       const instantVelocityX = (x - pointerLastX) / elapsed;
+      const instantVelocityY = (y - pointerLastY) / elapsed;
       pointerVelocityX = pointerVelocityX * .35 + instantVelocityX * .65;
+      pointerVelocityY = pointerVelocityY * .35 + instantVelocityY * .65;
       pointerLastX = x;
+      pointerLastY = y;
       pointerLastAt = now;
       pointerDeltaX = x - pointerStartX;
-      pointerDeltaY = (event.clientY || 0) - pointerStartY;
+      pointerDeltaY = y - pointerStartY;
+      if (holdSpeedGestureConsumed) {
+        pointerDeltaX = 0;
+        pointerDeltaY = 0;
+        pointerVelocityX = 0;
+        pointerVelocityY = 0;
+        event.preventDefault();
+        return;
+      }
       if (!pointerHorizontalDragging && isHorizontalSwipe(pointerDeltaX, pointerDeltaY, 28)) {
         pointerHorizontalDragging = true;
         activeReelStack()?.classList.remove("is-dragging");
@@ -3631,19 +5307,34 @@ export function createShortVideoPage(deps) {
         startActiveGalleryDrag();
       }
       if (pointerHorizontalDragging) updateActiveGalleryDrag(pointerDeltaX);
-      else applyDragDelta(pointerDeltaY);
+      else scheduleReelDragDelta(pointerDeltaY);
       event.preventDefault();
     }, { passive: false });
-    window.addEventListener("pointerup", () => {
+    window.addEventListener("pointerup", (event) => {
+      if (event.pointerType === "touch") return;
       if (!pointerDragging) return;
       pointerDragging = false;
+      if (holdSpeedGestureConsumed || Date.now() < holdSpeedGestureBlockUntil) {
+        holdSpeedGestureConsumed = false;
+        holdSpeedGestureBlockUntil = Date.now() + 120;
+        pointerHorizontalDragging = false;
+        state.shortVideo.dragging = false;
+        activeReelStack()?.classList.remove("is-dragging");
+        snapStackBack();
+        return;
+      }
       if (Math.hypot(pointerDeltaX, pointerDeltaY) > 8) {
+        markShortVideoGestureClickBlocked(event.target);
         suppressNextPlayerClick = true;
         window.setTimeout(() => {
           suppressNextPlayerClick = false;
         }, 240);
       }
-      if (Date.now() - pointerLastAt > 80) pointerVelocityX *= Math.max(0, 1 - (Date.now() - pointerLastAt - 80) / 180);
+      if (Date.now() - pointerLastAt > 80) {
+        const velocityDecay = Math.max(0, 1 - (Date.now() - pointerLastAt - 80) / 180);
+        pointerVelocityX *= velocityDecay;
+        pointerVelocityY *= velocityDecay;
+      }
       if (pointerHorizontalDragging) {
         state.shortVideo.dragging = false;
         pointerHorizontalDragging = false;
@@ -3651,19 +5342,30 @@ export function createShortVideoPage(deps) {
         snapStackBack();
         const handled = finishActiveGalleryDrag(pointerDeltaX, pointerVelocityX);
         if (!handled && isHorizontalSwipe(pointerDeltaX, pointerDeltaY, 72)) handleHorizontalSwipe(pointerDeltaX);
-        else if (!handled) finishDrag(0);
+        else if (!handled) finishDrag(0, 0);
         return;
       }
-      finishDrag(pointerDeltaY);
+      finishDrag(pointerDeltaY, pointerVelocityY);
     });
-    window.addEventListener("pointercancel", () => {
+    window.addEventListener("pointercancel", (event) => {
+      if (event.pointerType === "touch") return;
       if (!pointerDragging) return;
       pointerDragging = false;
+      if (holdSpeedGestureConsumed || Date.now() < holdSpeedGestureBlockUntil) {
+        holdSpeedGestureConsumed = false;
+        holdSpeedGestureBlockUntil = Date.now() + 120;
+        pointerHorizontalDragging = false;
+        state.shortVideo.dragging = false;
+        suppressNextPlayerClick = false;
+        activeReelStack()?.classList.remove("is-dragging");
+        snapStackBack();
+        return;
+      }
       const wasHorizontal = pointerHorizontalDragging;
       pointerHorizontalDragging = false;
       suppressNextPlayerClick = false;
       if (wasHorizontal) cancelActiveGalleryDrag();
-      finishDrag(0);
+      finishDrag(0, 0);
     });
     window.addEventListener("keydown", (event) => {
       if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
@@ -3677,6 +5379,9 @@ export function createShortVideoPage(deps) {
         return;
       }
       if (isShortVideoKeyboardControl(event.target)) return;
+      if (["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp", "PageDown", "PageUp", " ", "m", "M", "j", "J", "f", "F", "Escape"].includes(event.key)) {
+        els.workGrid?.querySelector?.(".short-video-browser")?.shortVideoRevealControls?.(1900);
+      }
       if ((event.key === "ArrowLeft" || event.key === "ArrowRight") && isGalleryPost(state.shortVideo.current)) {
         event.preventDefault();
         stepActiveGallery(event.key === "ArrowLeft" ? -1 : 1);
@@ -3698,19 +5403,33 @@ export function createShortVideoPage(deps) {
       } else if (event.key?.toLowerCase?.() === "j") {
         event.preventDefault();
         toggleClearScreen();
+      } else if (event.key?.toLowerCase?.() === "f") {
+        event.preventDefault();
+        toggleShortVideoFullscreen();
       } else if (event.key === "Escape") {
         event.preventDefault();
-        closeOrRevealBrowser();
+        if (document.fullscreenElement) toggleShortVideoFullscreen();
+        else closeOrRevealBrowser();
       }
     });
     document.addEventListener("visibilitychange", handleShortVideoVisibilityChange);
+    document.addEventListener("fullscreenchange", syncShortVideoFullscreenControls);
     window.addEventListener("pagehide", flushActiveShortVideoWatch);
   }
 
   function handleShortVideoVisibilityChange() {
     if (state.activeView !== "shortVideos" || !state.shortVideo?.current) return;
-    const players = els.workGrid?.querySelectorAll?.(".short-video-player") || [];
+    const gallery = activeGalleryPlayer();
+    const players = els.workGrid?.querySelectorAll?.(
+      ".short-video-player, .short-video-gallery-image[data-gallery-media-type='video']"
+    ) || [];
     if (document.hidden) {
+      gallery?.shortVideoGalleryPause?.();
+      const current = activePlayer();
+      shortVideoVisibilitySnapshot = {
+        videoId: current?.closest?.(".short-video-reel-panel")?.dataset?.videoId || "",
+        wasPlaying: Boolean(current && !current.paused && !current.ended)
+      };
       flushActiveShortVideoWatch();
       players.forEach((player) => {
         player.muted = true;
@@ -3718,8 +5437,18 @@ export function createShortVideoPage(deps) {
       });
       return;
     }
+    gallery?.shortVideoGalleryResume?.();
+    const resume = shortVideoVisibilitySnapshot;
+    shortVideoVisibilitySnapshot = null;
     const current = activePlayer();
     if (!current) return;
+    const currentVideoId = current.closest?.(".short-video-reel-panel")?.dataset?.videoId || "";
+    if (!resume?.wasPlaying || resume.videoId !== currentVideoId) {
+      current.muted = Boolean(state.shortVideo.muted);
+      current.volume = currentShortVideoVolume();
+      syncActiveControlBar();
+      return;
+    }
     if (state.shortVideo.muted) {
       current.muted = true;
       current.play?.().catch(() => {});
@@ -3729,11 +5458,31 @@ export function createShortVideoPage(deps) {
   }
 
   function activePlayer() {
-    return els.workGrid?.querySelector?.(".short-video-player:not(.is-ghost)") || null;
+    const panel = els.workGrid?.querySelector?.(".short-video-reel-panel.is-current");
+    return panel?.querySelector?.(".short-video-gallery-audio")
+      || panel?.querySelector?.(".short-video-player:not(.is-ghost)")
+      || null;
+  }
+
+  function closeTransientPlayerControls() {
+    const volumeControl = els.workGrid?.querySelector?.(".short-video-control-volume");
+    const hadVolumeFocus = Boolean(volumeControl?.contains?.(document.activeElement));
+    if (typeof volumeControl?.shortVideoSetOpen === "function") volumeControl.shortVideoSetOpen(false);
+    else {
+      volumeControl?.classList.remove("is-open");
+      volumeControl?.querySelector?.("button")?.setAttribute?.("aria-expanded", "false");
+      const popover = volumeControl?.querySelector?.(".short-video-volume-popover");
+      popover?.setAttribute?.("aria-hidden", "true");
+      if (popover) popover.inert = true;
+    }
+    els.workGrid?.querySelector?.(".short-video-control-progress-wrap")?.classList.remove("is-hovering", "is-scrubbing");
+    if (hadVolumeFocus) {
+      activePlayer()?.closest?.(".short-video-stage")?.focus?.({ preventScroll: true });
+    }
   }
 
   function syncActiveControlBar() {
-    const bar = els.workGrid?.querySelector?.(".short-video-control-bar:not(.is-gallery)");
+    const bar = els.workGrid?.querySelector?.(".short-video-control-bar");
     bar?.shortVideoSync?.();
   }
 
@@ -3769,6 +5518,23 @@ export function createShortVideoPage(deps) {
     return Boolean(target?.closest?.("input, textarea, select, button, a, [contenteditable='true'], [role='button'], [role='tab'], [role='slider']"));
   }
 
+  function markShortVideoGestureClickBlocked(target, durationMs = 420) {
+    const browser = target?.closest?.(".short-video-browser")
+      || els.workGrid?.querySelector?.(".short-video-browser");
+    if (!browser) return;
+    browser.dataset.shortVideoGestureBlockUntil = String(Date.now() + Math.max(120, Number(durationMs) || 420));
+  }
+
+  function isShortVideoGestureClickBlocked(target) {
+    const browser = target?.closest?.(".short-video-browser")
+      || els.workGrid?.querySelector?.(".short-video-browser");
+    const blockedUntil = Number(browser?.dataset?.shortVideoGestureBlockUntil || 0);
+    if (!blockedUntil) return false;
+    if (Date.now() < blockedUntil) return true;
+    delete browser.dataset.shortVideoGestureBlockUntil;
+    return false;
+  }
+
   function seekActiveVideo(deltaSeconds) {
     const player = activePlayer();
     if (!player) return false;
@@ -3779,6 +5545,7 @@ export function createShortVideoPage(deps) {
     const target = Math.max(0, Math.min(duration, current + requestedDelta));
     const actualDelta = target - current;
     player.currentTime = target;
+    syncActiveControlBar();
     showKeyboardSeekFeedback(player.closest(".short-video-stage"), requestedDelta, actualDelta, target, duration);
     return true;
   }
@@ -3804,11 +5571,20 @@ export function createShortVideoPage(deps) {
   }
 
   function toggleActivePlayer() {
+    const gallery = activeGalleryPlayer();
+    if (gallery && isGalleryPost(state.shortVideo?.current)) {
+      gallery.shortVideoGalleryTogglePlayback?.();
+      syncActiveControlBar();
+      return;
+    }
     const player = activePlayer();
     if (!player) return;
-    if (player.paused) player.play().catch(() => {});
-    else player.pause();
-    player.closest(".short-video-stage")?.classList.remove("is-sound-blocked");
+    if (player.paused) player.play().catch(() => {}).finally(syncActiveControlBar);
+    else {
+      player.pause();
+      syncActiveControlBar();
+    }
+    clearPlayerSoundBlocked(player.closest(".short-video-stage"));
   }
 
   function currentShortVideoVolume() {
@@ -3818,6 +5594,7 @@ export function createShortVideoPage(deps) {
   function setActiveShortVideoVolume(percent) {
     const player = activePlayer();
     if (!player) return;
+    const wasPlaying = !player.paused && !player.ended;
     const rawPercent = Math.max(0, Math.min(100, Number(percent || 0)));
     if (rawPercent <= 0) {
       player.muted = true;
@@ -3831,23 +5608,63 @@ export function createShortVideoPage(deps) {
       writeMutedPreference(false);
       player.volume = volume;
       player.muted = false;
+      if (wasPlaying) player.play?.().catch(() => {});
     }
-    player.closest(".short-video-stage")?.classList.remove("is-sound-blocked");
+    clearPlayerSoundBlocked(player.closest(".short-video-stage"));
   }
 
   function toggleActiveMute() {
     const player = activePlayer();
     if (!player) return;
+    const wasPlaying = !player.paused && !player.ended;
     player.muted = !player.muted;
     if (!player.muted) player.volume = currentShortVideoVolume();
     state.shortVideo.muted = player.muted;
     writeMutedPreference(player.muted);
-    player.closest(".short-video-stage")?.classList.remove("is-sound-blocked");
+    clearPlayerSoundBlocked(player.closest(".short-video-stage"));
+    if (wasPlaying && !player.muted) {
+      player.play?.().catch(() => {
+        player.muted = true;
+        state.shortVideo.muted = true;
+        writeMutedPreference(true);
+        player.play?.().catch(() => {});
+      });
+    }
+    syncActiveControlBar();
   }
 
   function toggleClearScreen() {
     const browser = els.workGrid?.querySelector?.(".short-video-browser");
-    browser?.classList.toggle("is-clear-screen");
+    if (!browser) return;
+    closeTransientPlayerControls();
+    const cleared = browser.classList.toggle("is-clear-screen");
+    delete browser.dataset.shortVideoClearScreenRevealAt;
+    if (cleared) {
+      const touchPrimary = window.matchMedia?.("(pointer: coarse)")?.matches;
+      showBrowserToast(touchPrimary ? "轻触画面恢复操作界面" : "按 J 或 Esc 恢复操作界面");
+      return;
+    }
+    browser.shortVideoRevealControls?.(1900);
+    showBrowserToast("已恢复操作界面");
+  }
+
+  function revealShortVideoClearScreen(target) {
+    const browser = target?.closest?.(".short-video-browser");
+    if (!browser?.classList.contains("is-clear-screen")) return false;
+    browser.classList.remove("is-clear-screen");
+    browser.dataset.shortVideoClearScreenRevealAt = String(Date.now());
+    browser.shortVideoRevealControls?.(1900);
+    showBrowserToast("已恢复操作界面");
+    return true;
+  }
+
+  function wasClearScreenJustRevealed(target) {
+    const browser = target?.closest?.(".short-video-browser");
+    const revealedAt = Number(browser?.dataset?.shortVideoClearScreenRevealAt || 0);
+    if (!revealedAt) return false;
+    if (Date.now() - revealedAt <= SHORT_VIDEO_DOUBLE_TAP_WINDOW_MS + 120) return true;
+    delete browser.dataset.shortVideoClearScreenRevealAt;
+    return false;
   }
 
   function closeOrRevealBrowser() {
@@ -3864,6 +5681,8 @@ export function createShortVideoPage(deps) {
     }
     if (browser?.classList.contains("is-clear-screen")) {
       browser.classList.remove("is-clear-screen");
+      browser.shortVideoRevealControls?.(1900);
+      showBrowserToast("已恢复操作界面");
       return;
     }
     showHome();
@@ -3884,18 +5703,200 @@ export function createShortVideoPage(deps) {
     heart.addEventListener("animationend", () => heart.remove(), { once: true });
   }
 
+  function rememberShortVideo(video) {
+    const id = String(video?.id || "").trim();
+    if (!id) return null;
+    shortVideoVideoCache.delete(id);
+    shortVideoVideoCache.set(id, video);
+    while (shortVideoVideoCache.size > SHORT_VIDEO_NAV_CACHE_LIMIT) {
+      shortVideoVideoCache.delete(shortVideoVideoCache.keys().next().value);
+    }
+    return video;
+  }
+
+  function cachedShortVideo(id) {
+    const key = String(id || "").trim();
+    if (!key) return null;
+    return cachedAuthorPanelVideo(key) || shortVideoVideoCache.get(key) || null;
+  }
+
+  function shortVideoNavigationKey(id, params = shortVideoFeedParams()) {
+    const videoId = String(id || "").trim();
+    return videoId ? `${params}::${videoId}` : "";
+  }
+
+  function cachedShortVideoNavigation(id, params = shortVideoFeedParams()) {
+    const key = shortVideoNavigationKey(id, params);
+    return key ? shortVideoNavigationCache.get(key) || null : null;
+  }
+
+  function rememberShortVideoNavigation(data, params = shortVideoFeedParams()) {
+    const current = data?.video;
+    const currentId = String(current?.id || "").trim();
+    if (!currentId) return;
+    const previous = Array.isArray(data?.neighbors?.previous) ? data.neighbors.previous.filter((video) => video?.id) : [];
+    const next = Array.isArray(data?.neighbors?.next) ? data.neighbors.next.filter((video) => video?.id) : [];
+    previous.forEach(rememberShortVideo);
+    rememberShortVideo(current);
+    next.forEach(rememberShortVideo);
+    const chain = [...previous].reverse().concat(current, next);
+    chain.forEach((video, index) => {
+      const id = String(video?.id || "").trim();
+      const key = shortVideoNavigationKey(id, params);
+      if (!key) return;
+      const navigation = { ...(shortVideoNavigationCache.get(key) || {}) };
+      if (index > 0) navigation.prevId = String(chain[index - 1]?.id || "");
+      if (index < chain.length - 1) navigation.nextId = String(chain[index + 1]?.id || "");
+      if (id === currentId) {
+        navigation.prevId = String(data.prevId || "");
+        navigation.nextId = String(data.nextId || "");
+      }
+      shortVideoNavigationCache.delete(key);
+      shortVideoNavigationCache.set(key, navigation);
+    });
+    while (shortVideoNavigationCache.size > SHORT_VIDEO_NEIGHBOR_CACHE_LIMIT) {
+      shortVideoNavigationCache.delete(shortVideoNavigationCache.keys().next().value);
+    }
+  }
+
+  function fetchShortVideoDetail(videoId, params = shortVideoFeedParams()) {
+    const id = String(videoId || "").trim();
+    if (!id) return Promise.resolve(null);
+    const cacheKey = `${params}::${id}`;
+    const cached = shortVideoDetailCache.get(cacheKey);
+    if (cached) return cached;
+    const detailParams = new URLSearchParams(params);
+    detailParams.set("neighbors", String(SHORT_VIDEO_DETAIL_NEIGHBOR_LIMIT));
+    detailParams.set("metadata", "0");
+    const request = api(`/api/short-videos/${encodeURIComponent(id)}?${detailParams}`).then((data) => {
+      rememberShortVideoNavigation(data, params);
+      shortVideoResolvedDetailCache.delete(cacheKey);
+      shortVideoResolvedDetailCache.set(cacheKey, data);
+      while (shortVideoResolvedDetailCache.size > SHORT_VIDEO_NAV_CACHE_LIMIT) {
+        shortVideoResolvedDetailCache.delete(shortVideoResolvedDetailCache.keys().next().value);
+      }
+      return data;
+    }).catch((error) => {
+      shortVideoDetailCache.delete(cacheKey);
+      shortVideoResolvedDetailCache.delete(cacheKey);
+      throw error;
+    });
+    shortVideoDetailCache.set(cacheKey, request);
+    while (shortVideoDetailCache.size > SHORT_VIDEO_NAV_CACHE_LIMIT) {
+      shortVideoDetailCache.delete(shortVideoDetailCache.keys().next().value);
+    }
+    return request;
+  }
+
+  function resolvedShortVideoDetail(videoId, params = shortVideoFeedParams()) {
+    const id = String(videoId || "").trim();
+    if (!id) return null;
+    return shortVideoResolvedDetailCache.get(`${params}::${id}`) || null;
+  }
+
+  function prefetchShortVideoFirstMedia(video = {}) {
+    const galleryEntry = isGalleryPost(video) ? galleryImageEntries(video)[0] : null;
+    const url = String(galleryEntry?.url || shortVideoCardCoverUrl(video) || "").trim();
+    if (!url || shortVideoMediaPrefetches.has(url)) return shortVideoMediaPrefetches.get(url)?.promise || Promise.resolve(false);
+    const image = new Image();
+    image.decoding = "async";
+    image.fetchPriority = "low";
+    const promise = new Promise((resolve) => {
+      const finish = (ready) => resolve(Boolean(ready));
+      image.addEventListener("load", () => finish(true), { once: true });
+      image.addEventListener("error", () => finish(false), { once: true });
+      image.src = url;
+      if (image.complete && image.naturalWidth) Promise.resolve().then(() => finish(true));
+    });
+    shortVideoMediaPrefetches.set(url, { image, promise });
+    while (shortVideoMediaPrefetches.size > 18) {
+      shortVideoMediaPrefetches.delete(shortVideoMediaPrefetches.keys().next().value);
+    }
+    return promise;
+  }
+
+  async function prefetchRelatedVideo(video = {}) {
+    const videoId = String(video?.id || "").trim();
+    if (!videoId) return null;
+    const params = shortVideoFeedParams();
+    const cached = resolvedShortVideoDetail(videoId, params);
+    if (cached?.video) {
+      prefetchShortVideoFirstMedia(cached.video).catch(() => {});
+      return cached;
+    }
+    const detail = await fetchShortVideoDetail(videoId, params);
+    if (detail?.video) {
+      cacheAuthorPanelVideo(detail.video);
+      await prefetchShortVideoFirstMedia(detail.video).catch(() => false);
+    }
+    return detail;
+  }
+
+  function scheduleAdjacentNavigationPrefetch() {
+    window.clearTimeout(shortVideoNavigationPrefetchTimer);
+    const params = shortVideoFeedParams();
+    const candidates = [
+      { direction: 1, video: state.shortVideo?.nextVideo },
+      { direction: -1, video: state.shortVideo?.prevVideo }
+    ].filter((item) => item.video?.id);
+    if (!candidates.length) return;
+    shortVideoNavigationPrefetchTimer = window.setTimeout(() => {
+      candidates.forEach((item, index) => {
+        window.setTimeout(() => {
+          prefetchAdjacentNavigation(item.video, item.direction, params).catch(() => {});
+        }, index * 120);
+      });
+    }, 60);
+  }
+
+  async function prefetchAdjacentNavigation(video, direction, params) {
+    const videoId = String(video?.id || "").trim();
+    if (!videoId) return;
+    rememberShortVideo(video);
+    const detail = await fetchShortVideoDetail(videoId, params);
+    const farId = String(direction > 0 ? detail?.nextId || "" : detail?.prevId || "").trim();
+    if (!farId || cachedShortVideo(farId) || shortVideoVideoPrefetches.has(farId)) return;
+    const request = api(`/api/short-videos/${encodeURIComponent(videoId)}/adjacent?direction=${direction > 0 ? "next" : "prev"}&${params}`)
+      .then((data) => rememberShortVideo(data?.video))
+      .finally(() => shortVideoVideoPrefetches.delete(farId));
+    shortVideoVideoPrefetches.set(farId, request);
+    await request;
+  }
+
   async function loadAdjacentVideos(videoId) {
     const requestId = ++shortVideoAdjacentRequestId;
     const prevId = state.shortVideo.prevId;
     const nextId = state.shortVideo.nextId;
     const params = shortVideoFeedParams();
+    const knownPrev = String(state.shortVideo.prevVideo?.id || "") === String(prevId || "")
+      ? state.shortVideo.prevVideo
+      : cachedShortVideo(prevId);
+    const knownNext = String(state.shortVideo.nextVideo?.id || "") === String(nextId || "")
+      ? state.shortVideo.nextVideo
+      : cachedShortVideo(nextId);
+    const loadAdjacent = (id, known, direction) => {
+      if (!id) return Promise.resolve(null);
+      if (known) return Promise.resolve({ video: known });
+      const prefetched = shortVideoVideoPrefetches.get(String(id));
+      if (prefetched) {
+        return prefetched
+          .then((video) => video ? { video } : null)
+          .catch(() => api(`/api/short-videos/${encodeURIComponent(videoId)}/adjacent?direction=${direction}&${params}`));
+      }
+      return api(`/api/short-videos/${encodeURIComponent(videoId)}/adjacent?direction=${direction}&${params}`);
+    };
     const [prevResult, nextResult] = await Promise.allSettled([
-      prevId ? api(`/api/short-videos/${encodeURIComponent(videoId)}/adjacent?direction=prev&${params}`) : Promise.resolve(null),
-      nextId ? api(`/api/short-videos/${encodeURIComponent(videoId)}/adjacent?direction=next&${params}`) : Promise.resolve(null)
+      loadAdjacent(prevId, knownPrev, "prev"),
+      loadAdjacent(nextId, knownNext, "next")
     ]);
     if (requestId !== shortVideoAdjacentRequestId || state.shortVideo.current?.id !== videoId) return false;
     state.shortVideo.prevVideo = prevResult.status === "fulfilled" ? prevResult.value?.video || null : null;
     state.shortVideo.nextVideo = nextResult.status === "fulfilled" ? nextResult.value?.video || null : null;
+    rememberShortVideo(state.shortVideo.prevVideo);
+    rememberShortVideo(state.shortVideo.nextVideo);
+    cacheAuthorPanelVideo(state.shortVideo.prevVideo);
+    cacheAuthorPanelVideo(state.shortVideo.nextVideo);
+    scheduleAdjacentNavigationPrefetch();
     return true;
   }
 
@@ -3935,92 +5936,256 @@ export function createShortVideoPage(deps) {
 
   function applyDragDelta(deltaY) {
     const hasTarget = deltaY < 0 ? Boolean(state.shortVideo.nextId) : Boolean(state.shortVideo.prevId);
-    const damped = hasTarget ? deltaY : deltaY * 0.22;
     const stack = activeReelStack();
-    if (stack) stack.style.setProperty("--short-video-drag-y", `${damped}px`);
+    if (!stack) return;
+    clearBoundaryPulse(stack);
+    window.clearTimeout(reelBoundaryResetTimer);
+    reelBoundaryResetTimer = 0;
+    stack.classList.remove("is-boundary-rebounding");
+    stack.classList.toggle("is-boundary-start", !hasTarget && deltaY > 0);
+    stack.classList.toggle("is-boundary-end", !hasTarget && deltaY < 0);
+    const distance = Math.abs(deltaY);
+    const resistedDistance = distance * SHORT_VIDEO_BOUNDARY_RESISTANCE / (1 + distance / SHORT_VIDEO_BOUNDARY_RANGE);
+    const damped = hasTarget ? deltaY : Math.sign(deltaY) * resistedDistance;
+    stack.style.setProperty("--short-video-drag-y", `${damped}px`);
+  }
+
+  function scheduleReelDragDelta(deltaY) {
+    reelDragDeltaY = deltaY;
+    if (reelDragRaf) return;
+    reelDragRaf = window.requestAnimationFrame(() => {
+      reelDragRaf = 0;
+      applyDragDelta(reelDragDeltaY);
+    });
+  }
+
+  function flushReelDragDelta() {
+    if (reelDragRaf) window.cancelAnimationFrame(reelDragRaf);
+    reelDragRaf = 0;
+    applyDragDelta(reelDragDeltaY);
+  }
+
+  function cancelReelDragDelta() {
+    if (reelDragRaf) window.cancelAnimationFrame(reelDragRaf);
+    reelDragRaf = 0;
+    reelDragDeltaY = 0;
   }
 
   function handleWheelSwipe(deltaY) {
     const now = Date.now();
-    if (wheelLocked || now < wheelIgnoreUntil || Math.abs(deltaY) < 2) {
-      if ((wheelLocked || now < wheelIgnoreUntil) && Math.abs(deltaY) >= 2) {
-        wheelLockedDeltaY = Math.max(-180, Math.min(180, wheelLockedDeltaY + deltaY));
-        if (Math.abs(wheelLockedDeltaY) >= 85) {
-          queuedAdjacentDirection = wheelLockedDeltaY > 0 ? 1 : -1;
-          wheelLockedDeltaY = 0;
-        }
-      }
-      if (wheelLocked || now < wheelIgnoreUntil) {
-        wheelDeltaY = 0;
-        window.clearTimeout(wheelResetTimer);
-      }
+    if (Math.abs(deltaY) < 2) return;
+    const previousWheelAt = wheelLastAt;
+    wheelLastAt = now;
+    const gestureAge = wheelGestureStartedAt ? now - wheelGestureStartedAt : 0;
+    const isExplicitNewGesture = Math.abs(deltaY) >= 70
+      && (now - previousWheelAt >= WHEEL_NEW_GESTURE_GAP_MS || gestureAge >= 400);
+    if (wheelLocked && now >= wheelIgnoreUntil && isExplicitNewGesture) {
+      queuedAdjacentDirection = deltaY > 0 ? 1 : -1;
+      wheelGestureConsumed = true;
+      wheelGestureStartedAt = now;
+      scheduleWheelGestureRelease();
       return;
     }
-    if (now - wheelLastAt > 260 || Math.sign(wheelDeltaY) !== Math.sign(deltaY)) {
+    const startsExplicitNewGesture = wheelGestureConsumed
+      && !wheelLocked
+      && now >= wheelIgnoreUntil
+      && isExplicitNewGesture;
+    if (startsExplicitNewGesture) {
+      wheelGestureConsumed = false;
       wheelDeltaY = 0;
     }
-    wheelLastAt = now;
+    if (wheelLocked || wheelGestureConsumed || now < wheelIgnoreUntil) {
+      wheelGestureConsumed = true;
+      wheelDeltaY = 0;
+      cancelReelDragDelta();
+      scheduleWheelGestureRelease();
+      return;
+    }
+    if (now - previousWheelAt > 260 || Math.sign(wheelDeltaY) !== Math.sign(deltaY)) {
+      wheelDeltaY = 0;
+    }
     wheelDeltaY = Math.max(-180, Math.min(180, wheelDeltaY + deltaY));
     const visualDelta = wheelDeltaY * -0.55;
     activeReelStack()?.classList.add("is-dragging");
-    applyDragDelta(visualDelta);
+    scheduleReelDragDelta(visualDelta);
     window.clearTimeout(wheelResetTimer);
     wheelResetTimer = window.setTimeout(() => {
       wheelDeltaY = 0;
       snapStackBack();
     }, 160);
-    if (Math.abs(wheelDeltaY) < 95) return;
+    if (Math.abs(wheelDeltaY) < SHORT_VIDEO_WHEEL_DISTANCE) return;
     const direction = wheelDeltaY > 0 ? 1 : -1;
+    const wheelMotion = {
+      dragDistance: Math.abs(visualDelta),
+      velocity: Math.min(1.4, Math.abs(deltaY) / 80)
+    };
     wheelDeltaY = 0;
+    wheelGestureConsumed = true;
+    wheelGestureStartedAt = now;
+    flushReelDragDelta();
+    scheduleWheelGestureRelease();
     activeReelStack()?.classList.remove("is-dragging");
-    openAdjacent(direction).catch(showError);
+    openAdjacent(direction, { motion: wheelMotion }).catch(showError);
   }
 
-  function finishDrag(deltaY) {
-    const direction = deltaY < 0 ? 1 : -1;
-    state.shortVideo.dragging = false;
-    activeReelStack()?.classList.remove("is-dragging");
-    if (Math.abs(deltaY) < 78 || (direction > 0 && !state.shortVideo.nextId) || (direction < 0 && !state.shortVideo.prevId)) {
+  function scheduleWheelGestureRelease() {
+    window.clearTimeout(wheelResetTimer);
+    if (!wheelGestureConsumed) return;
+    const idleFor = Date.now() - wheelLastAt;
+    if (!wheelLocked && idleFor >= WHEEL_GESTURE_IDLE_MS) {
+      wheelGestureConsumed = false;
+      wheelGestureStartedAt = 0;
+      wheelDeltaY = 0;
       snapStackBack();
       return;
     }
-    openAdjacent(direction).catch(showError);
+    const delay = Math.max(16, WHEEL_GESTURE_IDLE_MS - idleFor);
+    wheelResetTimer = window.setTimeout(() => {
+      if (wheelLocked) return;
+      const remaining = WHEEL_GESTURE_IDLE_MS - (Date.now() - wheelLastAt);
+      if (remaining > 0) {
+        scheduleWheelGestureRelease();
+        return;
+      }
+      wheelGestureConsumed = false;
+      wheelGestureStartedAt = 0;
+      wheelDeltaY = 0;
+      snapStackBack();
+    }, delay);
+  }
+
+  function finishDrag(deltaY, velocityY = 0) {
+    flushReelDragDelta();
+    const fastFlick = Math.abs(deltaY) >= 18 && Math.abs(velocityY) >= .32;
+    const directionSignal = Math.abs(deltaY) >= 18 ? deltaY : velocityY * 80;
+    const direction = directionSignal < 0 ? 1 : -1;
+    state.shortVideo.dragging = false;
+    activeReelStack()?.classList.remove("is-dragging");
+    if ((!fastFlick && Math.abs(deltaY) < SHORT_VIDEO_SWIPE_DISTANCE) || (direction > 0 && !state.shortVideo.nextId) || (direction < 0 && !state.shortVideo.prevId)) {
+      snapStackBack();
+      return;
+    }
+    openAdjacent(direction, {
+      motion: {
+        dragDistance: Math.abs(deltaY),
+        velocity: Math.abs(velocityY)
+      }
+    }).catch(showError);
   }
 
   function snapStackBack() {
+    cancelReelDragDelta();
     const stack = activeReelStack();
     if (!stack) return;
-    stack.classList.remove("is-dragging", "is-snap-next", "is-snap-prev", "is-rebasing");
+    clearBoundaryPulse(stack);
+    window.clearTimeout(reelBoundaryResetTimer);
+    reelBoundaryResetTimer = 0;
+    const boundaryRebound = stack.classList.contains("is-boundary-start") || stack.classList.contains("is-boundary-end");
+    stack.classList.remove("is-dragging", "is-snap-next", "is-snap-prev", "is-rebasing", "is-boundary-start", "is-boundary-end");
+    stack.classList.toggle("is-boundary-rebounding", boundaryRebound);
     stack.style.setProperty("--short-video-drag-y", "0px");
+    if (boundaryRebound) {
+      reelBoundaryResetTimer = window.setTimeout(() => {
+        reelBoundaryResetTimer = 0;
+        stack.classList.remove("is-boundary-rebounding");
+      }, 360);
+    }
   }
 
-  function animateActiveStack(direction) {
+  function clearBoundaryPulse(stack = activeReelStack()) {
+    if (reelBoundaryPulseRaf) window.cancelAnimationFrame(reelBoundaryPulseRaf);
+    if (reelBoundaryPulseTimer) window.clearTimeout(reelBoundaryPulseTimer);
+    reelBoundaryPulseRaf = 0;
+    reelBoundaryPulseTimer = 0;
+    stack?.classList.remove("is-boundary-pulse-start", "is-boundary-pulse-end");
+  }
+
+  function pulseBoundaryStack(direction) {
+    cancelReelDragDelta();
+    const stack = activeReelStack();
+    if (!stack) return;
+    clearBoundaryPulse(stack);
+    window.clearTimeout(reelBoundaryResetTimer);
+    reelBoundaryResetTimer = 0;
+    stack.classList.remove("is-dragging", "is-snap-next", "is-snap-prev", "is-rebasing", "is-boundary-start", "is-boundary-end", "is-boundary-rebounding");
+    stack.style.setProperty("--short-video-drag-y", "0px");
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return;
+    reelBoundaryPulseRaf = window.requestAnimationFrame(() => {
+      reelBoundaryPulseRaf = 0;
+      const className = direction < 0 ? "is-boundary-pulse-start" : "is-boundary-pulse-end";
+      stack.classList.add(className);
+      reelBoundaryPulseTimer = window.setTimeout(() => {
+        reelBoundaryPulseTimer = 0;
+        stack.classList.remove(className);
+      }, 340);
+    });
+  }
+
+  function resolveSwitchAnimationDuration(motion = {}) {
+    const dragDistance = Math.max(0, Number(motion?.dragDistance || 0));
+    const velocity = Math.max(0, Number(motion?.velocity || 0));
+    if (!dragDistance && !velocity) return SHORT_VIDEO_SWITCH_ANIMATION_MS;
+    const viewportHeight = Math.max(1, Number(window.innerHeight || 720));
+    const remainingRatio = 1 - Math.min(1, dragDistance / viewportHeight);
+    const velocityRatio = Math.min(1, velocity / 1.4);
+    const duration = SHORT_VIDEO_SWITCH_MIN_ANIMATION_MS
+      + remainingRatio * (SHORT_VIDEO_SWITCH_ANIMATION_MS - SHORT_VIDEO_SWITCH_MIN_ANIMATION_MS)
+      - velocityRatio * 28;
+    return Math.round(Math.max(
+      SHORT_VIDEO_SWITCH_MIN_ANIMATION_MS,
+      Math.min(SHORT_VIDEO_SWITCH_MAX_ANIMATION_MS, duration)
+    ));
+  }
+
+  function animateActiveStack(direction, motion = {}) {
     const stack = activeReelStack();
     if (!stack) return Promise.resolve();
-    stack.classList.remove("is-dragging", "is-snap-next", "is-snap-prev");
-    stack.style.setProperty("--short-video-drag-y", "0px");
+    const duration = resolveSwitchAnimationDuration(motion);
+    clearBoundaryPulse(stack);
+    window.clearTimeout(reelBoundaryResetTimer);
+    reelBoundaryResetTimer = 0;
+    stack.classList.remove("is-dragging", "is-snap-next", "is-snap-prev", "is-boundary-start", "is-boundary-end", "is-boundary-rebounding");
     if (window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
       stack.classList.add(direction > 0 ? "is-snap-next" : "is-snap-prev");
+      stack.style.setProperty("--short-video-drag-y", "0px");
       return Promise.resolve();
     }
+    stack.style.setProperty("--short-video-switch-duration", `${duration}ms`);
     return new Promise((resolve) => {
       let done = false;
+      let animationFrame = 0;
+      let timeoutHandle = 0;
       const finish = () => {
         if (done) return;
         done = true;
+        if (animationFrame) window.cancelAnimationFrame(animationFrame);
+        if (timeoutHandle) window.clearTimeout(timeoutHandle);
+        stack.removeEventListener("transitionend", handleTransitionEnd);
+        stack.style.removeProperty("--short-video-switch-duration");
         resolve();
       };
-      stack.addEventListener("transitionend", finish, { once: true });
-      window.setTimeout(finish, 380);
-      window.requestAnimationFrame(() => {
+      const handleTransitionEnd = (event) => {
+        if (event.propertyName !== "transform") return;
+        finish();
+      };
+      stack.addEventListener("transitionend", handleTransitionEnd);
+      timeoutHandle = window.setTimeout(finish, duration + 70);
+      animationFrame = window.requestAnimationFrame(() => {
+        animationFrame = 0;
+        if (done) return;
         stack.classList.add(direction > 0 ? "is-snap-next" : "is-snap-prev");
+        stack.style.setProperty("--short-video-drag-y", "0px");
       });
     });
   }
 
   function railMetric(icon, value, kind = "", label = "", action = null) {
-    const button = railButton(formatCompact(value || 0), createIcon(icon), kind, label, action);
-    button.dataset.metricValue = String(Number(value || 0));
+    const metric = Math.max(0, Number(value || 0));
+    const metricLabel = formatCompact(metric);
+    const button = railButton(metricLabel, createIcon(icon), kind, label ? `${label}，${metricLabel}` : metricLabel, action);
+    button.dataset.actionLabel = label;
+    button.dataset.metricValue = String(metric);
+    if (label) button.title = label;
     return button;
   }
 
@@ -4033,16 +6198,39 @@ export function createShortVideoPage(deps) {
     if (!button) return;
     const enabled = Boolean(active);
     const metric = Math.max(0, Number(metricValue || 0));
+    const previousMetric = Number(button.dataset.metricValue);
     button.classList.toggle(actionType === "like" ? "is-liked" : "is-active", enabled);
     button.dataset.metricValue = String(metric);
     button.setAttribute("aria-pressed", String(enabled));
     const label = actionType === "like"
       ? (enabled ? "取消点赞" : "点赞")
       : (enabled ? "取消收藏" : "收藏");
-    button.setAttribute("aria-label", label);
+    button.dataset.actionLabel = label;
+    button.setAttribute("aria-label", `${label}，${formatCompact(metric)}`);
     button.title = label;
     const valueLabel = button.querySelector(":scope > span");
-    if (valueLabel) valueLabel.textContent = formatCompact(metric);
+    if (valueLabel) {
+      valueLabel.textContent = formatCompact(metric);
+      if (Number.isFinite(previousMetric) && previousMetric !== metric) {
+        valueLabel.classList.remove("is-metric-up", "is-metric-down");
+        valueLabel.getBoundingClientRect();
+        valueLabel.classList.add(metric > previousMetric ? "is-metric-up" : "is-metric-down");
+        window.clearTimeout(button._railMetricTimer);
+        button._railMetricTimer = window.setTimeout(() => {
+          valueLabel.classList.remove("is-metric-up", "is-metric-down");
+          button._railMetricTimer = 0;
+        }, 380);
+      }
+    }
+  }
+
+  function animateRailActionButton(button, active) {
+    if (!button || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return;
+    button.classList.remove("is-action-pulse", "is-action-release");
+    button.getBoundingClientRect();
+    const className = active ? "is-action-pulse" : "is-action-release";
+    button.classList.add(className);
+    window.setTimeout(() => button.classList.remove(className), 460);
   }
 
   async function toggleShortVideoAction(video, actionType, target, options = {}) {
@@ -4057,6 +6245,7 @@ export function createShortVideoPage(deps) {
     const previousMetric = Math.max(0, Number(button.dataset.metricValue || 0));
     const optimisticMetric = Math.max(0, previousMetric + (nextActive ? 1 : -1));
     applyRailActionButtonState(button, type, nextActive, optimisticMetric);
+    animateRailActionButton(button, nextActive);
     button.setAttribute("aria-busy", "true");
     try {
       const data = await api(`/api/short-videos/${encodeURIComponent(videoId)}/actions/${type}`, {
@@ -4296,7 +6485,50 @@ export function createShortVideoPage(deps) {
   function shortVideoShareText(video, url = localShortVideoUrl(video)) {
     const title = cardTitle(video) || "分享一个本地作品";
     const author = String(video?.author?.name || "").trim();
-    return [title, author ? `@${author}` : "", url].filter(Boolean).join("\n");
+    return [title, author ? shortVideoAuthorHandle(author) : "", url].filter(Boolean).join("\n");
+  }
+
+  function bindShortVideoModalFocusLoop(overlay, sheet, closeModal) {
+    if (!overlay || !sheet) return;
+    const focusableSelector = [
+      "button:not([disabled])",
+      "a[href]",
+      "input:not([disabled])",
+      "select:not([disabled])",
+      "textarea:not([disabled])",
+      "summary",
+      "[tabindex]:not([tabindex='-1'])"
+    ].join(",");
+    const focusableItems = () => [...sheet.querySelectorAll(focusableSelector)].filter((element) => (
+      !element.hidden
+      && element.getAttribute("aria-hidden") !== "true"
+      && element.getClientRects().length > 0
+    ));
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeModal?.();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const items = focusableItems();
+      if (!items.length) {
+        event.preventDefault();
+        sheet.focus?.({ preventScroll: true });
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !sheet.contains(active))) {
+        event.preventDefault();
+        last.focus?.({ preventScroll: true });
+      } else if (!event.shiftKey && (active === last || !sheet.contains(active))) {
+        event.preventDefault();
+        first.focus?.({ preventScroll: true });
+      }
+    });
   }
 
   function showPlaybackSettings(video = state.shortVideo?.current, options = {}) {
@@ -4325,13 +6557,13 @@ export function createShortVideoPage(deps) {
     eyebrow.textContent = "本地播放器";
     const heading = document.createElement("h2");
     heading.id = "short-video-playback-settings-title";
-    heading.textContent = "播放设置";
+    heading.textContent = "更多功能";
     headingWrap.append(eyebrow, heading);
     const close = document.createElement("button");
     close.type = "button";
     close.className = "short-video-more-close";
     close.append(createIcon("close"));
-    close.setAttribute("aria-label", "关闭播放设置");
+    close.setAttribute("aria-label", "关闭更多功能");
     close.addEventListener("click", () => closePlaybackSettings(overlay));
     header.append(headingWrap, close);
 
@@ -4368,7 +6600,7 @@ export function createShortVideoPage(deps) {
     speedSection.append(speedHead, speedGrid);
 
     const actions = document.createElement("div");
-    actions.className = "short-video-more-actions";
+    actions.className = "short-video-more-actions is-primary-actions";
     const player = activePlayer();
     const pictureInPictureAvailable = Boolean(player?.requestPictureInPicture && document.pictureInPictureEnabled);
     const pictureInPictureActive = Boolean(player && document.pictureInPictureElement === player);
@@ -4390,11 +6622,11 @@ export function createShortVideoPage(deps) {
     pip.disabled = !pictureInPictureAvailable;
 
     const fullscreen = playbackSettingsAction("全屏播放", "沉浸观看当前作品", "fullscreen", () => {
-      const target = activePlayer()?.closest?.(".short-video-stage")
-        || els.workGrid?.querySelector?.(".short-video-reel-panel.is-current .short-video-stage");
       closePlaybackSettings(overlay, { restoreFocus: false });
-      target?.requestFullscreen?.().catch(() => showBrowserToast("全屏启动失败"));
+      toggleShortVideoFullscreen();
     });
+    fullscreen.dataset.shortVideoFullscreenControl = "settings";
+    syncShortVideoFullscreenControl(fullscreen);
 
     const autoNext = playbackSettingsAction("连播", "播完自动切换下一条", "repeat", () => {
       state.shortVideo.autoNext = !state.shortVideo.autoNext;
@@ -4451,12 +6683,30 @@ export function createShortVideoPage(deps) {
       deleteShortVideo(video, { fromBrowser: true, scope: "group" }).catch(showError);
     });
     deleteGroup.classList.add("is-danger");
-    actions.append(pip, fullscreen, autoNext, clearScreen, copyLink, original, dislike, deleteCurrent, deleteGroup);
+    const primarySection = document.createElement("section");
+    primarySection.className = "short-video-more-section";
+    const primaryTitle = document.createElement("strong");
+    primaryTitle.textContent = "播放与分享";
+    actions.append(pip, fullscreen, autoNext, clearScreen, copyLink, original);
+    primarySection.append(primaryTitle, actions);
 
-    const shortcuts = document.createElement("section");
+    const manageSection = document.createElement("section");
+    manageSection.className = "short-video-more-section";
+    const manageTitle = document.createElement("strong");
+    manageTitle.textContent = "内容管理";
+    const manageActions = document.createElement("div");
+    manageActions.className = "short-video-more-actions is-manage-actions";
+    manageActions.append(dislike, deleteCurrent, deleteGroup);
+    manageSection.append(manageTitle, manageActions);
+
+    const shortcuts = document.createElement("details");
     shortcuts.className = "short-video-shortcuts";
+    const shortcutsSummary = document.createElement("summary");
     const shortcutsTitle = document.createElement("strong");
     shortcutsTitle.textContent = "快捷操作";
+    const shortcutsHint = document.createElement("span");
+    shortcutsHint.textContent = "键盘与手势";
+    shortcutsSummary.append(shortcutsTitle, shortcutsHint);
     const shortcutGrid = document.createElement("div");
     for (const [key, label] of [
       ["Space", "播放 / 暂停"],
@@ -4473,11 +6723,12 @@ export function createShortVideoPage(deps) {
       item.append(keyboard, document.createTextNode(label));
       shortcutGrid.append(item);
     }
-    shortcuts.append(shortcutsTitle, shortcutGrid);
+    shortcuts.append(shortcutsSummary, shortcutGrid);
 
-    sheet.append(header, speedSection, actions, shortcuts);
+    sheet.append(header, speedSection, primarySection, manageSection, shortcuts);
     overlay.append(sheet);
     browser.append(overlay);
+    bindShortVideoModalFocusLoop(overlay, sheet, () => closePlaybackSettings(overlay));
     syncSpeedButtons();
     window.requestAnimationFrame(() => {
       const target = options.focusSpeed
@@ -4523,7 +6774,9 @@ export function createShortVideoPage(deps) {
     const rate = normalizePlaybackRate(value);
     state.shortVideo.playbackRate = rate;
     writePlaybackRatePreference(rate);
-    const players = els.workGrid?.querySelectorAll?.(".short-video-player") || [];
+    const players = els.workGrid?.querySelectorAll?.(
+      ".short-video-player, .short-video-gallery-image[data-gallery-media-type='video']"
+    ) || [];
     players.forEach((player) => {
       player.playbackRate = rate;
     });
@@ -4691,15 +6944,15 @@ export function createShortVideoPage(deps) {
       media.append(createIcon(isGalleryPost(video) ? "images" : "play"));
     }
     const mediaType = document.createElement("small");
-    mediaType.textContent = isGalleryPost(video) ? `图文 · ${galleryLabel(video)}` : (formatDuration(video.durationMs) || "视频");
+    mediaType.textContent = isGalleryPost(video) ? `图集 · ${galleryLabel(video)}` : (formatDuration(video.durationMs) || "视频");
     media.append(mediaType);
     const previewCopy = document.createElement("div");
     const previewTitle = document.createElement("strong");
     previewTitle.textContent = title;
     const previewAuthor = document.createElement("span");
-    previewAuthor.textContent = authorName ? `@${authorName}` : "本地作品";
+    previewAuthor.textContent = authorName ? shortVideoAuthorHandle(authorName) : "本地作品";
     const previewMeta = document.createElement("small");
-    previewMeta.textContent = `${formatCompact(video?.stats?.likes || 0)} 赞 · ${formatCompact(video?.stats?.comments || 0)} 评论`;
+    previewMeta.textContent = `${formatShortVideoMetric(video, "likes", "待补")} 赞 · ${formatShortVideoMetric(video, "comments", "待补")} 评论`;
     previewCopy.append(previewTitle, previewAuthor, previewMeta);
     preview.append(media, previewCopy);
 
@@ -4730,7 +6983,7 @@ export function createShortVideoPage(deps) {
       try {
         await navigator.share({
           title,
-          text: [title, authorName ? `@${authorName}` : ""].filter(Boolean).join("\n"),
+          text: [title, authorName ? shortVideoAuthorHandle(authorName) : ""].filter(Boolean).join("\n"),
           url: localUrl
         });
         syncShareActionDone(button, "已打开分享");
@@ -4742,15 +6995,15 @@ export function createShortVideoPage(deps) {
     actions.append(copyLocal, copyOriginal, copyText, systemShare);
     actionSection.append(actionTitle, actions);
 
-    const linkSection = document.createElement("section");
+    const linkSection = document.createElement("details");
     linkSection.className = "short-video-share-link";
-    const linkCopy = document.createElement("div");
+    const linkSummary = document.createElement("summary");
     const linkLabel = document.createElement("strong");
-    linkLabel.textContent = "本地观看地址";
+    linkLabel.textContent = "查看本地地址";
     const linkHint = document.createElement("span");
     const localOnly = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
-    linkHint.textContent = localOnly ? "当前地址仅这台设备可用" : "同一局域网可直接打开";
-    linkCopy.append(linkLabel, linkHint);
+    linkHint.textContent = localOnly ? "仅这台设备可用" : "同一局域网可打开";
+    linkSummary.append(linkLabel, linkHint);
     const linkField = document.createElement("div");
     const linkButton = document.createElement("button");
     linkButton.type = "button";
@@ -4767,7 +7020,7 @@ export function createShortVideoPage(deps) {
       });
     });
     linkField.append(input, linkButton);
-    linkSection.append(linkCopy, linkField);
+    linkSection.append(linkSummary, linkField);
 
     const note = document.createElement("p");
     note.className = "short-video-share-note";
@@ -4776,6 +7029,7 @@ export function createShortVideoPage(deps) {
     sheet.append(header, preview, actionSection, linkSection, note);
     overlay.append(sheet);
     browser.append(overlay);
+    bindShortVideoModalFocusLoop(overlay, sheet, () => closePlaybackSettings(overlay));
     window.requestAnimationFrame(() => {
       copyLocal.focus({ preventScroll: true });
     });
@@ -4836,7 +7090,7 @@ export function createShortVideoPage(deps) {
     button.append(authorAvatar(video.author, "short-video-caption-author-avatar"));
     const copy = document.createElement("span");
     const name = document.createElement("strong");
-    name.textContent = `@${video.author?.name || "未知作者"}`;
+    name.textContent = shortVideoAuthorHandle(video.author?.name);
     const meta = document.createElement("em");
     meta.textContent = [formatDate(video.publishedAt), video.author?.secUid ? "作者主页" : ""].filter(Boolean).join(" · ");
     copy.append(name, meta);
@@ -4870,13 +7124,17 @@ export function createShortVideoPage(deps) {
     const browser = els.workGrid?.querySelector?.(".short-video-browser");
     if (!browser) return;
     const existingPanel = browser.querySelector(".short-video-author-panel");
-    if (existingPanel) closeAuthorPanel(existingPanel, { restoreFeed: false });
+    if (existingPanel) closeAuthorPanel(existingPanel, { restoreFeed: false, restoreFocus: false, animate: false });
+    closeTransientPlayerControls();
     authorPanelReturnFeed = shortVideoFeedSnapshot();
     const author = video.author || {};
     const selectedTopic = normalizeShortVideoTopic(options.topic || video.tags?.[0]);
     const selectedSound = options.sound || video.sound || null;
     const panel = document.createElement("section");
     panel.className = "short-video-author-panel is-douyin-style";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "false");
+    panel._shortVideoReturnFocus = document.activeElement;
     panel.setAttribute("aria-label", options.initialTab === "sound" && selectedSound
       ? `原声 ${selectedSound.title || "作品原声"}`
       : options.initialTab === "topic" && selectedTopic
@@ -4892,37 +7150,56 @@ export function createShortVideoPage(deps) {
 
     const sheet = document.createElement("div");
     sheet.className = "short-video-author-sheet";
+    const dragHandle = document.createElement("button");
+    dragHandle.type = "button";
+    dragHandle.className = "short-video-author-drag-handle";
+    dragHandle.setAttribute("aria-label", "向下拖动关闭面板");
+    dragHandle.title = "下滑关闭";
 
     const top = document.createElement("div");
     top.className = "short-video-author-top";
+    const tabNav = document.createElement("div");
+    tabNav.className = "short-video-author-tab-nav";
     const tabs = document.createElement("div");
     tabs.className = "short-video-author-tabs";
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "视频信息视图");
+    const contextTabs = document.createElement("div");
+    contextTabs.className = "short-video-author-context-tabs";
+    contextTabs.setAttribute("role", "toolbar");
+    contextTabs.setAttribute("aria-label", "扩展信息");
     const tabButtons = new Map();
-    const tabItems = [
-      ["detail", "详情"],
-      ["works", "TA的作品"],
-      ["comments", "评论"],
-      ["ai", "识别"],
-      ["related", "相关推荐"]
+    const primaryTabItems = [
+      ["related", "相关推荐"],
+      ["comments", `评论 ${formatShortVideoMetric(video, "comments")}`]
     ];
-    if (selectedSound) tabItems.splice(4, 0, ["sound", "原声"]);
-    if (selectedTopic) tabItems.splice(4, 0, ["topic", "话题"]);
-    for (const item of tabItems) {
+    const contextTabItems = [
+      ["works", "作品"],
+      ["detail", "详情"],
+      ["ai", "识别"]
+    ];
+    if (selectedTopic) contextTabItems.push(["topic", `#${selectedTopic}`]);
+    if (selectedSound) contextTabItems.push(["sound", "原声"]);
+    const appendTabButton = (item, container, role = "tab") => {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = item[1];
       button.dataset.tab = item[0];
+      button.setAttribute("role", role);
       button.addEventListener("click", () => renderAuthorTab(item[0], { userInitiated: true }));
       tabButtons.set(item[0], button);
-      tabs.append(button);
-    }
+      container.append(button);
+    };
+    primaryTabItems.forEach((item) => appendTabButton(item, tabs));
+    contextTabItems.forEach((item) => appendTabButton(item, contextTabs, "button"));
+    tabNav.append(tabs, contextTabs);
     const close = document.createElement("button");
     close.type = "button";
     close.className = "short-video-author-close";
     close.append(createIcon("close"));
     close.setAttribute("aria-label", "关闭");
     close.addEventListener("click", () => closeAuthorPanel(panel));
-    top.append(tabs, close);
+    top.append(tabNav, close);
 
     const head = document.createElement("header");
     head.className = "short-video-author-head";
@@ -4974,13 +7251,16 @@ export function createShortVideoPage(deps) {
     status.className = "short-video-author-status";
     status.textContent = "正在读取";
     content.append(status);
-    sheet.append(top, head, content);
+    sheet.append(dragHandle, head, top, content);
     panel.append(sheet);
-    browser.classList.add("is-author-panel-open");
     browser.append(panel);
+    bindAuthorPanelDragToClose(panel, sheet, dragHandle);
+    isolateAuthorPanelAsMobileModal(panel, sheet, browser, close);
 
     let authorVideos = [];
     let authorTotal = 0;
+    let authorVideosLoaded = false;
+    let authorFeedSwitchRequested = false;
     let activeTab = ["detail", "works", "comments", "ai", "sound", "topic", "related"].includes(options.initialTab)
       && (options.initialTab !== "topic" || selectedTopic)
       && (options.initialTab !== "sound" || selectedSound)
@@ -5004,9 +7284,14 @@ export function createShortVideoPage(deps) {
     let soundLoaded = false;
     let soundError = "";
     const startAuthorFeedSwitch = () => {
-      if (authorFeedSwitchStarted || !authorScopeId(video, author)) return;
+      if (!panel.isConnected || authorFeedSwitchStarted || !authorScopeId(video, author)) return;
+      if (!authorVideosLoaded) {
+        authorFeedSwitchRequested = true;
+        return;
+      }
       authorFeedSwitchStarted = true;
-      switchToAuthorWorksFeed(video, author).catch(showError);
+      authorFeedSwitchRequested = false;
+      switchToAuthorWorksFeed(video, author, panel).catch(showError);
     };
     const loadRelatedRecommendations = async (force = false) => {
       if (relatedLoading || (relatedLoaded && !force)) return;
@@ -5016,6 +7301,7 @@ export function createShortVideoPage(deps) {
         const data = await api(`/api/short-videos/${encodeURIComponent(video.id)}/related?limit=36`);
         if (!panel.isConnected) return;
         relatedItems = Array.isArray(data.videos) ? data.videos : [];
+        for (const item of relatedItems) cacheAuthorPanelVideo(item);
         relatedBasis = data.basis || null;
         relatedLoaded = true;
       } catch (error) {
@@ -5078,11 +7364,15 @@ export function createShortVideoPage(deps) {
     };
     const renderAuthorTab = (tab, renderOptions = {}) => {
       activeTab = tab;
+      panel.dataset.activeTab = tab;
       for (const [key, button] of tabButtons) {
-        button.classList.toggle("active", key === tab);
-        button.setAttribute("aria-selected", String(key === tab));
+        const selected = key === tab;
+        button.classList.toggle("active", selected);
+        if (button.getAttribute("role") === "tab") button.setAttribute("aria-selected", String(selected));
+        else button.setAttribute("aria-pressed", String(selected));
       }
-      content.innerHTML = "";
+      authorPanelTileMap = null;
+      content.replaceChildren();
       if (tab === "works") {
         if (autoSwitchAuthorFeed || renderOptions.userInitiated) startAuthorFeedSwitch();
         content.append(authorWorksView(authorVideos, authorTotal, panel, state.shortVideo?.current || video));
@@ -5117,7 +7407,7 @@ export function createShortVideoPage(deps) {
           loaded: relatedLoaded,
           error: relatedError,
           onRetry: () => loadRelatedRecommendations(true)
-        }, panel, video));
+        }, panel, state.shortVideo?.current || video));
         if (!relatedLoaded && !relatedLoading) loadRelatedRecommendations().catch(() => {});
         return;
       }
@@ -5150,6 +7440,20 @@ export function createShortVideoPage(deps) {
       content.append(authorComingSoonView("内容待接入"));
     };
     renderAuthorTab(activeTab);
+    const commitPanelOpen = () => {
+      if (!panel.isConnected || panel.dataset.openCommitted === "1") return;
+      panel.dataset.openCommitted = "1";
+      browser.classList.add("is-author-panel-open");
+      panel.classList.add("is-open");
+      const focusActiveTab = () => {
+        if (!panel.isConnected) return;
+        tabButtons.get(activeTab)?.focus?.({ preventScroll: true });
+      };
+      window.requestAnimationFrame(focusActiveTab);
+      window.setTimeout(focusActiveTab, 100);
+    };
+    window.requestAnimationFrame(commitPanelOpen);
+    window.setTimeout(commitPanelOpen, 80);
 
     try {
       const params = new URLSearchParams();
@@ -5159,8 +7463,11 @@ export function createShortVideoPage(deps) {
       params.set("limit", "36");
       params.set("facets", "0");
       const data = author.secUid ? await api(`/api/short-videos?${params}`) : { videos: [video], total: 1 };
+      if (!panel.isConnected) return;
       authorVideos = data.videos || [];
       authorTotal = Number(data.total || authorVideos.length || 0);
+      authorVideosLoaded = true;
+      cacheAuthorPanelVideos([video, ...authorVideos]);
       const richerAuthor = authorVideos.find((item) => authorHasProfileMeta(item.author))?.author || authorVideos[0]?.author;
       if (richerAuthor) Object.assign(author, richerAuthor);
       refreshAuthorHeader();
@@ -5168,16 +7475,19 @@ export function createShortVideoPage(deps) {
       sub.textContent = homeCount !== null
         ? `${formatNumber(authorTotal)} 个本地作品 / 主页 ${formatNumber(homeCount)}`
         : `${formatNumber(authorTotal)} 个本地作品`;
-      renderAuthorTab(activeTab);
+      if (activeTab === "works" || activeTab === "detail") renderAuthorTab(activeTab);
     } catch (error) {
+      if (!panel.isConnected) return;
+      authorVideosLoaded = true;
+      if (authorFeedSwitchRequested && activeTab === "works") startAuthorFeedSwitch();
       status.textContent = "读取失败";
       showError(error);
     }
   }
 
-  async function switchToAuthorWorksFeed(video, author = {}) {
+  async function switchToAuthorWorksFeed(video, author = {}, panel = null) {
     const authorId = authorScopeId(video, author);
-    if (!authorId || !isCurrentShortVideo(video)) return;
+    if (!authorId || !panel?.isConnected || !isCurrentShortVideo(video)) return;
     state.shortVideo.author = authorId;
     if (!isShortVideoAuthorDetailPage()) state.shortVideo.source = "all";
     state.shortVideo.query = "";
@@ -5186,14 +7496,14 @@ export function createShortVideoPage(deps) {
     state.shortVideo.soundInfo = null;
     if (!isShortVideoAuthorDetailPage()) state.shortVideo.sort = "published";
     state.shortVideo.data = null;
-    const data = await api(`/api/short-videos/${encodeURIComponent(video.id)}?${shortVideoFeedParams()}`);
-    if (!isCurrentShortVideo(video)) return;
+    const data = await fetchShortVideoDetail(video.id);
+    if (!panel.isConnected || !isCurrentShortVideo(video)) return;
     state.shortVideo.current = data.video || state.shortVideo.current;
+    cacheAuthorPanelVideo(state.shortVideo.current);
     state.shortVideo.prevId = data.prevId || "";
     state.shortVideo.nextId = data.nextId || "";
     await loadAdjacentVideos(state.shortVideo.current.id);
-    if (!isCurrentShortVideo(video)) return;
-    renderStats();
+    if (!panel.isConnected || !isCurrentShortVideo(video)) return;
     refreshAdjacentPanelsDom();
     syncShortVideoBrowserSearchDom();
     syncAuthorPanelCurrentTile();
@@ -5221,6 +7531,7 @@ export function createShortVideoPage(deps) {
     label.textContent = `${formatNumber(total || videos.length || 0)} 个作品`;
     const grid = document.createElement("div");
     grid.className = "short-video-author-grid";
+    const tileMap = new Map();
     const displayVideos = shortVideosWithCovers(videos);
     if (!displayVideos.length) {
       const empty = document.createElement("div");
@@ -5234,9 +7545,16 @@ export function createShortVideoPage(deps) {
           previous: displayVideos[index - 1] || null,
           next: displayVideos[index + 1] || null
         });
-        if (tile) grid.append(tile);
+        if (tile) {
+          const id = String(item.id || "").trim();
+          const awemeId = String(item.awemeId || "").trim();
+          if (id) tileMap.set(`id:${id}`, tile);
+          if (awemeId) tileMap.set(`aweme:${awemeId}`, tile);
+          grid.append(tile);
+        }
       }
     }
+    authorPanelTileMap = tileMap;
     activateShortVideoCovers(grid);
     wrap.append(label, grid);
     return wrap;
@@ -5248,7 +7566,7 @@ export function createShortVideoPage(deps) {
     const authorLine = document.createElement("button");
     authorLine.type = "button";
     authorLine.className = "short-video-author-detail-owner";
-    authorLine.textContent = `@${author.name || "未知作者"} ›`;
+    authorLine.textContent = `${shortVideoAuthorHandle(author.name)} ›`;
     authorLine.addEventListener("click", () => openAuthorDouyinLink(author));
     const profile = authorProfileBlock(author);
     const title = document.createElement("p");
@@ -5256,10 +7574,10 @@ export function createShortVideoPage(deps) {
     const stats = document.createElement("div");
     stats.className = "short-video-author-detail-stats";
     for (const item of [
-      ["点赞", formatCompact(video.stats?.likes || 0)],
-      ["评论", formatCompact(video.stats?.comments || 0)],
-      ["收藏", formatCompact(video.stats?.collects || 0)],
-      ["分享", formatCompact(video.stats?.shares || 0)],
+      ["点赞", formatShortVideoMetric(video, "likes", "待补")],
+      ["评论", formatShortVideoMetric(video, "comments", "待补")],
+      ["收藏", formatShortVideoMetric(video, "collects", "待补")],
+      ["分享", formatShortVideoMetric(video, "shares", "待补")],
       [isGalleryPost(video) ? "图片" : "时长", isGalleryPost(video) ? galleryLabel(video) : (formatDuration(video.durationMs) || "-")],
       ["大小", formatBytes(video.size || 0) || "-"]
     ]) {
@@ -5326,6 +7644,7 @@ export function createShortVideoPage(deps) {
     target.hidden = !items.length;
     for (const [label, value] of items) {
       const cell = document.createElement("span");
+      cell.dataset.profileStat = label;
       const strong = document.createElement("b");
       strong.textContent = formatCompact(value);
       const small = document.createElement("small");
@@ -5399,45 +7718,39 @@ export function createShortVideoPage(deps) {
     remoteIcon.append(createIcon("comment"));
     const remoteCopy = document.createElement("div");
     const remoteTitle = document.createElement("strong");
-    remoteTitle.textContent = commentCount ? "抖音评论正文未同步" : "原视频暂无评论正文";
+    remoteTitle.textContent = commentCount
+      ? `${formatCompact(commentCount)} 条抖音评论未同步`
+      : "原视频暂无评论正文";
     const remoteMessage = document.createElement("p");
     remoteMessage.textContent = commentCount
-      ? `保留了 ${formatCompact(commentCount)} 条评论统计；不会显示或伪造未下载的评论。`
+      ? "这里只显示保存在本机的评论；原评论请前往抖音查看。"
       : "当前资料库没有保存原视频评论正文。";
     remoteCopy.append(remoteTitle, remoteMessage);
-    remote.append(remoteIcon, remoteCopy);
-
-    const metric = document.createElement("div");
-    metric.className = "short-video-comments-metric";
-    const metricValue = document.createElement("strong");
-    metricValue.textContent = formatCompact(commentCount);
-    const metricLabel = document.createElement("span");
-    metricLabel.textContent = "抖音评论数";
-    metric.append(metricValue, metricLabel);
 
     const actions = document.createElement("div");
-    actions.className = "short-video-comments-actions";
+    actions.className = "short-video-comments-remote-actions";
     const open = document.createElement("button");
     open.type = "button";
     open.className = "is-primary";
-    open.textContent = "去抖音看评论";
+    open.textContent = "查看原评论";
     open.disabled = !originalUrl;
     open.title = originalUrl ? "打开抖音原视频" : "当前作品没有原始链接";
     open.addEventListener("click", () => openDouyinLink(video));
     const copy = document.createElement("button");
     copy.type = "button";
-    copy.textContent = originalUrl ? "复制原视频链接" : "复制本地链接";
+    copy.textContent = "复制链接";
     copy.addEventListener("click", () => {
       const value = originalUrl || localShortVideoUrl(video);
       copyShortVideoValue(value, originalUrl ? "已复制抖音原链接" : "已复制本地链接").catch(() => {});
     });
     actions.append(open, copy);
+    remote.append(remoteIcon, remoteCopy, actions);
 
     const note = document.createElement("div");
     note.className = "short-video-comments-note";
     note.append(createIcon("check"), document.createTextNode("“我的本地评论”只保存在这台设备，不会发布到抖音"));
 
-    scroll.append(localSection, remote, metric, actions, note);
+    scroll.append(remote, localSection, note);
 
     const composer = document.createElement("form");
     composer.className = "short-video-comment-composer";
@@ -5449,7 +7762,7 @@ export function createShortVideoPage(deps) {
     const textarea = document.createElement("textarea");
     textarea.rows = 1;
     textarea.maxLength = 500;
-    textarea.placeholder = "留下只保存在本机的评论…";
+    textarea.placeholder = "说点什么，只保存在本机…";
     textarea.setAttribute("aria-label", "输入本地评论");
     const composerFooter = document.createElement("div");
     composerFooter.className = "short-video-comment-composer-footer";
@@ -5583,6 +7896,7 @@ export function createShortVideoPage(deps) {
       const length = Array.from(value).length;
       characterCount.textContent = `${length}/500`;
       submit.disabled = !value.trim() || submit.getAttribute("aria-busy") === "true";
+      composerField.classList.toggle("is-dirty", Boolean(value));
       textarea.style.height = "auto";
       textarea.style.height = `${Math.min(104, Math.max(28, textarea.scrollHeight || 28))}px`;
     };
@@ -5761,7 +8075,7 @@ export function createShortVideoPage(deps) {
     clearShortVideoDeleteSelection();
 
     if (isCurrentShortVideo(video)) {
-      const data = await api(`/api/short-videos/${encodeURIComponent(video.id)}?${shortVideoFeedParams()}`);
+      const data = await fetchShortVideoDetail(video.id);
       if (!isCurrentShortVideo(video)) return;
       state.shortVideo.current = data.video || video;
       state.shortVideo.prevId = data.prevId || "";
@@ -5864,7 +8178,7 @@ export function createShortVideoPage(deps) {
     clearShortVideoDeleteSelection();
 
     if (isCurrentShortVideo(video)) {
-      const data = await api(`/api/short-videos/${encodeURIComponent(video.id)}?${shortVideoFeedParams()}`);
+      const data = await fetchShortVideoDetail(video.id);
       if (!isCurrentShortVideo(video)) return;
       state.shortVideo.current = data.video || video;
       state.shortVideo.prevId = data.prevId || "";
@@ -5931,7 +8245,7 @@ export function createShortVideoPage(deps) {
       media.append(cover);
     }
     const mediaBadge = document.createElement("span");
-    mediaBadge.textContent = gallery ? `图文 · ${galleryLabel(video)}` : "短视频";
+    mediaBadge.textContent = gallery ? `图集 · ${galleryLabel(video)}` : "短视频";
     media.append(mediaBadge);
 
     const heroCopy = document.createElement("div");
@@ -5992,7 +8306,7 @@ export function createShortVideoPage(deps) {
     if (video.author?.name) {
       const author = document.createElement("button");
       author.type = "button";
-      author.textContent = `@${video.author.name}`;
+      author.textContent = shortVideoAuthorHandle(video.author.name);
       author.addEventListener("click", () => {
         closeAuthorPanel(panel, { restoreFeed: false });
         openShortVideoAuthorPage(video.author, video);
@@ -6081,7 +8395,7 @@ export function createShortVideoPage(deps) {
           const itemTitle = document.createElement("strong");
           itemTitle.textContent = cardTitle(item);
           const reason = document.createElement("small");
-          reason.textContent = item.recommendation?.reason || `@${item.author?.name || "未知作者"}`;
+          reason.textContent = item.recommendation?.reason || shortVideoAuthorHandle(item.author?.name);
           copy.append(itemTitle, reason);
           button.append(itemMedia, copy);
           button.addEventListener("click", () => openRelatedVideo(item, panel));
@@ -6099,17 +8413,15 @@ export function createShortVideoPage(deps) {
   function shortVideoRelatedView(data = {}, panel, currentVideo) {
     const wrap = document.createElement("div");
     wrap.className = "short-video-related";
-    const heading = document.createElement("div");
-    heading.className = "short-video-related-heading";
-    const title = document.createElement("strong");
-    title.textContent = "相关推荐";
+    const summary = document.createElement("div");
+    summary.className = "short-video-related-summary";
     const basis = document.createElement("span");
     const basisTags = Array.isArray(data.basis?.tags) ? data.basis.tags.filter(Boolean).slice(0, 2) : [];
     basis.textContent = basisTags.length
       ? `基于 ${basisTags.map((tag) => `#${tag}`).join(" · ")}`
       : `基于 ${data.basis?.author || currentVideo?.author?.name || "当前作品"}`;
-    heading.append(title, basis);
-    wrap.append(heading);
+    summary.append(basis);
+    wrap.append(summary);
 
     if (data.error) {
       const error = document.createElement("div");
@@ -6132,8 +8444,19 @@ export function createShortVideoPage(deps) {
       return wrap;
     }
 
-    const videos = shortVideosWithCovers(Array.isArray(data.videos) ? data.videos : []);
-    if (!videos.length) {
+    const candidates = shortVideosWithCovers([
+      currentVideo,
+      ...(Array.isArray(data.videos) ? data.videos : [])
+    ].filter(Boolean));
+    const seen = new Set();
+    const videos = candidates.filter((item) => {
+      const key = String(item?.id || item?.awemeId || "").trim();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    const recommendations = videos.filter((item) => !isCurrentShortVideo(item, currentVideo));
+    if (!recommendations.length) {
       const empty = document.createElement("div");
       empty.className = "short-video-related-status";
       empty.textContent = "暂时没有可展示的本地相关推荐";
@@ -6141,15 +8464,20 @@ export function createShortVideoPage(deps) {
       return wrap;
     }
 
-    const count = document.createElement("div");
-    count.className = "short-video-related-count";
-    count.textContent = `${formatNumber(videos.length)} 条本地推荐`;
+    const count = document.createElement("strong");
+    count.textContent = `${formatNumber(recommendations.length)} 条本地推荐`;
+    summary.append(count);
     const list = document.createElement("div");
     list.className = "short-video-related-list";
     for (const [index, video] of videos.entries()) {
+      const isCurrent = isCurrentShortVideo(video, currentVideo);
       const button = document.createElement("button");
       button.type = "button";
       button.className = "short-video-related-item";
+      button.classList.toggle("is-current", isCurrent);
+      button.dataset.videoId = String(video.id || "");
+      button.dataset.awemeId = String(video.awemeId || "");
+      if (isCurrent) button.setAttribute("aria-current", "true");
       button.setAttribute("aria-label", `播放推荐：${cardTitle(video)}`);
       const media = document.createElement("span");
       media.className = "short-video-related-media";
@@ -6164,41 +8492,77 @@ export function createShortVideoPage(deps) {
       const type = document.createElement("em");
       type.textContent = isGalleryPost(video) ? galleryLabel(video) : (formatDuration(video.durationMs) || "视频");
       media.append(img, type);
+      if (isCurrent) {
+        const current = document.createElement("span");
+        current.className = "short-video-related-current";
+        current.textContent = "播放中";
+        media.append(current);
+      }
 
       const copy = document.createElement("span");
       copy.className = "short-video-related-copy";
       const itemTitle = document.createElement("strong");
       itemTitle.textContent = cardTitle(video);
-      const author = document.createElement("span");
-      author.textContent = `@${video.author?.name || "未知作者"}`;
-      const reason = document.createElement("span");
-      reason.className = "short-video-related-reason";
-      reason.textContent = video.recommendation?.reason || "本地推荐";
       const metrics = document.createElement("small");
+      metrics.className = "short-video-related-meta";
       const likes = document.createElement("span");
-      likes.append(createIcon("heart"), document.createTextNode(formatCompact(video.stats?.likes || 0)));
-      const comments = document.createElement("span");
-      comments.append(createIcon("comment"), document.createTextNode(formatCompact(video.stats?.comments || 0)));
-      metrics.append(likes, comments);
-      copy.append(itemTitle, author, reason, metrics);
-      button.append(media, copy, createIcon("chevronLeft"));
-      button.addEventListener("click", () => openRelatedVideo(video, panel));
+      likes.append(createIcon("heart"), document.createTextNode(formatShortVideoMetric(video, "likes")));
+      applyShortVideoStatsBadgeState(likes, video);
+      const author = document.createElement("span");
+      author.className = "short-video-related-author";
+      author.textContent = video.author?.name || "未知作者";
+      metrics.append(likes, author);
+      copy.append(itemTitle, metrics);
+      button.append(media, copy);
+      const warmRelatedItem = () => {
+        if (isCurrent || button.dataset.prefetchStarted === "1" || !button.isConnected) return;
+        button.dataset.prefetchStarted = "1";
+        button.classList.add("is-prefetching");
+        prefetchRelatedVideo(video).then((detail) => {
+          if (!button.isConnected || !detail?.video) return;
+          button.dataset.detailReady = "1";
+          button.classList.add("is-prefetched");
+        }).catch(() => {}).finally(() => {
+          button.classList.remove("is-prefetching");
+        });
+      };
+      button.addEventListener("pointerenter", warmRelatedItem, { once: true });
+      button.addEventListener("focus", warmRelatedItem, { once: true });
+      if (!isCurrent && index <= 4) {
+        if (typeof window.requestIdleCallback === "function") {
+          window.requestIdleCallback(warmRelatedItem, { timeout: 900 });
+        } else {
+          window.setTimeout(warmRelatedItem, 80 + index * 55);
+        }
+      }
+      button.addEventListener("click", async () => {
+        button.classList.add("is-opening");
+        panel?.classList.add("is-switching-video");
+        try {
+          await openRelatedVideo(video, panel, {
+            previous: videos[index - 1] || null,
+            next: videos[index + 1] || null
+          });
+        } finally {
+          button.classList.remove("is-opening");
+          panel?.classList.remove("is-switching-video");
+        }
+      });
       list.append(button);
     }
     activateShortVideoCovers(list);
-    wrap.append(count, list);
+    wrap.append(list);
     return wrap;
   }
 
-  function openRelatedVideo(video, panel) {
+  async function openRelatedVideo(video, panel, neighbors = {}) {
     if (!video?.id) return;
     if (isCurrentShortVideo(video)) {
       showBrowserToast("正在观看这条");
       return;
     }
-    if (authorPanelReturnFeed) applyShortVideoFeedSnapshot(authorPanelReturnFeed);
-    closeAuthorPanel(panel, { restoreFeed: false });
-    openVideo(video.id).catch(showError);
+    const resolved = resolvedShortVideoDetail(video.id);
+    await replaceVideoFromAuthorPanel(resolved?.video || video, panel, neighbors);
   }
 
   function authorComingSoonView(text) {
@@ -6235,7 +8599,8 @@ export function createShortVideoPage(deps) {
     meta.className = "short-video-author-tile-meta";
     const like = document.createElement("span");
     like.className = "short-video-like-badge";
-    like.append(createIcon("heart"), document.createTextNode(formatCompact(video.stats?.likes || 0)));
+    like.append(createIcon("heart"), document.createTextNode(formatShortVideoMetric(video, "likes")));
+    applyShortVideoStatsBadgeState(like, video);
     if (isCurrent) {
       const currentBadge = document.createElement("span");
       currentBadge.className = "short-video-author-current-badge";
@@ -6281,23 +8646,31 @@ export function createShortVideoPage(deps) {
     state.shortVideo.prevId = neighbors.previous?.id || "";
     state.shortVideo.nextId = neighbors.next?.id || "";
 
-    replaceCurrentReelDom(video);
+    replaceCurrentReelDom(video, { transition: true });
     syncAuthorPanelCurrentTile();
+    syncRelatedPanelCurrentItem(panel);
     syncCurrentNavigationDom();
     replaceRoute({ view: "shortVideos", shortVideoId: videoId });
     resumeActiveSound();
 
     try {
-      const data = await api(`/api/short-videos/${encodeURIComponent(videoId)}?${shortVideoFeedParams()}`);
+      const data = await fetchShortVideoDetail(videoId);
       if (requestId !== authorPanelVideoRequestId || state.shortVideo.current?.id !== videoId || !panel.isConnected) return;
       state.shortVideo.current = data.video || video;
+      cacheAuthorPanelVideo(state.shortVideo.current);
+      const currentPanel = els.workGrid?.querySelector?.(".short-video-reel-panel.is-current");
+      const needsGallerySoundRefresh = isGalleryPost(state.shortVideo.current)
+        && state.shortVideo.current?.sound?.localAvailable
+        && state.shortVideo.current?.sound?.previewUrl
+        && !currentPanel?.querySelector?.(".short-video-gallery-audio");
+      if (needsGallerySoundRefresh) replaceCurrentReelDom(state.shortVideo.current);
       state.shortVideo.prevId = data.prevId || "";
       state.shortVideo.nextId = data.nextId || "";
       await loadAdjacentVideos(videoId);
       if (requestId !== authorPanelVideoRequestId || state.shortVideo.current?.id !== videoId || !panel.isConnected) return;
-      renderStats();
       refreshAdjacentPanelsDom();
       syncAuthorPanelCurrentTile();
+      syncRelatedPanelCurrentItem(panel);
       syncCurrentNavigationDom();
       resumeActiveSound();
     } catch (error) {
@@ -6312,13 +8685,28 @@ export function createShortVideoPage(deps) {
     }
   }
 
-  function replaceCurrentReelDom(video) {
+  function replaceCurrentReelDom(video, options = {}) {
     const stack = activeReelStack();
     if (!stack) return;
-    stack.querySelectorAll("video").forEach((player) => {
-      player.muted = true;
-      player.pause?.();
-    });
+    const oldCurrent = stack.querySelector(".short-video-reel-panel.is-current");
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    const animateTransition = Boolean(options.transition && oldCurrent && !reducedMotion);
+    let outgoing = null;
+    if (animateTransition && oldCurrent.classList.contains("is-gallery-post")) {
+      outgoing = oldCurrent.cloneNode(true);
+      outgoing.classList.remove("is-current", "is-prev", "is-next", "is-ghost-panel");
+      outgoing.classList.add("is-transition-outgoing");
+      outgoing.setAttribute("aria-hidden", "true");
+      outgoing.querySelectorAll("[id]").forEach((element) => element.removeAttribute("id"));
+      outgoing.querySelectorAll("audio, video").forEach((element) => element.remove());
+      outgoing.querySelectorAll("button, input, a").forEach((element) => {
+        element.setAttribute("tabindex", "-1");
+        element.setAttribute("aria-hidden", "true");
+      });
+    }
+    disposeShortVideoMedia(stack);
+    stack.querySelectorAll(".short-video-reel-panel.is-transition-outgoing").forEach((panel) => panel.remove());
+    if (stack._shortVideoDirectTransitionTimer) window.clearTimeout(stack._shortVideoDirectTransitionTimer);
     stack.classList.remove("is-dragging", "is-snap-next", "is-snap-prev", "is-rebasing");
     stack.style.setProperty("--short-video-drag-y", "0px");
 
@@ -6327,11 +8715,32 @@ export function createShortVideoPage(deps) {
       panels.push(renderReelPanel(state.shortVideo.prevVideo, { ghost: true, slot: "prev" }).panel);
     }
     const current = renderReelPanel(video, { slot: "current" });
+    if (animateTransition) current.panel.classList.add("is-transition-incoming");
     panels.push(current.panel);
     if (state.shortVideo.nextVideo) {
       panels.push(renderReelPanel(state.shortVideo.nextVideo, { ghost: true, slot: "next" }).panel);
     }
     stack.replaceChildren(...panels);
+    if (outgoing) stack.append(outgoing);
+    if (animateTransition) {
+      let transitionFinished = false;
+      const finishTransition = () => {
+        if (transitionFinished) return;
+        transitionFinished = true;
+        window.clearTimeout(stack._shortVideoDirectTransitionTimer);
+        stack._shortVideoDirectTransitionTimer = 0;
+        current.panel.removeEventListener("animationend", handleTransitionEnd);
+        current.panel.classList.remove("is-transition-incoming");
+        outgoing?.remove();
+        stack.classList.remove("is-direct-switching");
+      };
+      const handleTransitionEnd = (event) => {
+        if (event.target === current.panel) finishTransition();
+      };
+      stack.classList.add("is-direct-switching");
+      current.panel.addEventListener("animationend", handleTransitionEnd);
+      stack._shortVideoDirectTransitionTimer = window.setTimeout(finishTransition, 420);
+    }
     current.syncPlayToggle();
     if (current.player) {
       window.requestAnimationFrame(() => {
@@ -6492,7 +8901,7 @@ export function createShortVideoPage(deps) {
 
   function setBodyClass() {
     document.body.classList.toggle("short-video-view", state.activeView === "shortVideos");
-    document.body.classList.toggle("short-video-browser-active", state.activeView === "shortVideos" && Boolean(state.shortVideo?.current));
+    document.body.classList.toggle("short-video-browser-active", state.activeView === "shortVideos" && Boolean(state.shortVideo?.current || shortVideoOpeningId));
     document.body.classList.toggle(
       "short-video-author-page-active",
       state.activeView === "shortVideos" && isShortVideoAuthorDetailPage() && !state.shortVideo?.current
@@ -6540,6 +8949,20 @@ export function createShortVideoPage(deps) {
     renderStats,
     renderView
   };
+}
+
+function formatShortVideoMetric(video, key, unknownLabel = "—") {
+  if (video?.stats?.known === false) return unknownLabel;
+  return formatCompact(video?.stats?.[key] || 0);
+}
+
+function applyShortVideoStatsBadgeState(element, video) {
+  const unknown = video?.stats?.known === false;
+  element?.classList?.toggle("is-unknown", unknown);
+  if (unknown) {
+    element.setAttribute("aria-label", "点赞统计待补");
+    element.title = "统计待补";
+  }
 }
 
 function formatCompact(value) {

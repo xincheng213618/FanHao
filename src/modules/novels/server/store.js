@@ -51,6 +51,7 @@ export function createNovelStore(options = {}) {
           `
           SELECT
             COUNT(*) AS books,
+            COUNT(DISTINCT NULLIF(TRIM(author), '')) AS authors,
             COALESCE(SUM(chapter_count), 0) AS chapters,
             COALESCE(SUM(char_count), 0) AS chars,
             COALESCE(SUM(size_bytes), 0) AS bytes,
@@ -100,6 +101,7 @@ export function createNovelStore(options = {}) {
       roots,
       totals: {
         books: Number(totals.books || 0),
+        authors: Number(totals.authors || 0),
         chapters: Number(totals.chapters || 0),
         chars: Number(totals.chars || 0),
         bytes: Number(totals.bytes || 0),
@@ -114,6 +116,7 @@ export function createNovelStore(options = {}) {
     return withDb((database) => {
       const query = String(url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
       const category = String(url.searchParams.get("category") || "all").trim() || "all";
+      const author = String(url.searchParams.get("author") || "").trim();
       const sort = normalizeSort(url.searchParams.get("sort"));
       const limit = clampInteger(url.searchParams.get("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
       const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
@@ -123,6 +126,10 @@ export function createNovelStore(options = {}) {
       if (category !== "all") {
         conditions.push("COALESCE(b.category, '全部') = ?");
         params.push(category);
+      }
+      if (author) {
+        conditions.push("TRIM(COALESCE(b.author, '')) = ?");
+        params.push(author);
       }
       if (query) {
         const like = `%${escapeLike(query)}%`;
@@ -174,8 +181,62 @@ export function createNovelStore(options = {}) {
         offset,
         query,
         category,
+        author,
         sort,
         facets,
+        summary: summaryFromDb(database)
+      };
+    });
+  }
+
+  function listAuthors(url) {
+    return withDb((database) => {
+      const query = String(url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
+      const sort = normalizeAuthorSort(url.searchParams.get("sort"));
+      const limit = clampInteger(url.searchParams.get("limit"), 5000, 1, 5000);
+      const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+      const conditions = ["status = 'ok'", "TRIM(COALESCE(author, '')) <> ''"];
+      const params = [];
+      if (query) {
+        conditions.push("author LIKE ? ESCAPE '\\'");
+        params.push(`%${escapeLike(query)}%`);
+      }
+      const where = `WHERE ${conditions.join(" AND ")}`;
+      const order = authorOrderSql(sort);
+      const total = database.prepare(`SELECT COUNT(DISTINCT TRIM(author)) AS count FROM novel_books ${where}`).get(...params);
+      const authors = database
+        .prepare(
+          `
+          SELECT
+            TRIM(author) AS name,
+            COUNT(*) AS book_count,
+            COALESCE(SUM(chapter_count), 0) AS chapter_count,
+            COALESCE(SUM(char_count), 0) AS char_count,
+            COALESCE(SUM(size_bytes), 0) AS size_bytes,
+            COALESCE(MAX(updated_at), '') AS updated_at
+          FROM novel_books
+          ${where}
+          GROUP BY TRIM(author)
+          ${order}
+          LIMIT ? OFFSET ?
+        `
+        )
+        .all(...params, limit, offset)
+        .map((row) => ({
+          name: row.name || "",
+          bookCount: Number(row.book_count || 0),
+          chapterCount: Number(row.chapter_count || 0),
+          charCount: Number(row.char_count || 0),
+          sizeBytes: Number(row.size_bytes || 0),
+          updatedAt: row.updated_at || ""
+        }));
+      return {
+        authors,
+        total: Number(total?.count || 0),
+        query,
+        sort,
+        limit,
+        offset,
         summary: summaryFromDb(database)
       };
     });
@@ -295,6 +356,7 @@ export function createNovelStore(options = {}) {
     dbPath,
     downloadBook,
     invalidate,
+    listAuthors,
     listBooks,
     saveProgress,
     summary,
@@ -529,6 +591,19 @@ function parseJsonArray(value) {
 function normalizeSort(value) {
   const sort = String(value || "updated").trim();
   return ["updated", "title", "size", "chapters", "progress"].includes(sort) ? sort : "updated";
+}
+
+function normalizeAuthorSort(value) {
+  const sort = String(value || "books").trim();
+  return ["books", "name", "chapters", "size", "updated"].includes(sort) ? sort : "books";
+}
+
+function authorOrderSql(sort) {
+  if (sort === "name") return "ORDER BY name COLLATE NOCASE ASC";
+  if (sort === "chapters") return "ORDER BY chapter_count DESC, name COLLATE NOCASE ASC";
+  if (sort === "size") return "ORDER BY size_bytes DESC, name COLLATE NOCASE ASC";
+  if (sort === "updated") return "ORDER BY updated_at DESC, name COLLATE NOCASE ASC";
+  return "ORDER BY book_count DESC, name COLLATE NOCASE ASC";
 }
 
 function bookOrderSql(sort) {

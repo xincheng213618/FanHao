@@ -8,14 +8,14 @@ export function createShortVideoNativeFeed(context = {}) {
   async function openNativeShortVideoFeed(video) {
     const plugin = nativePlayerPlugin();
     if (!plugin?.playShortFeed || !video?.id) return false;
-    if (!String(video.streamUrl || "").trim()) {
-      shortVideoToast("这条视频缺少本地文件，暂时无法播放");
+    if (!isNativePlayableItem(video)) {
+      shortVideoToast("这条作品缺少本地媒体，暂时无法打开");
       return true;
     }
     const videos = listState.data?.videos || [];
     const playableEntries = videos
       .map((item, apiIndex) => ({ item, apiIndex }))
-      .filter(({ item }) => String(item?.streamUrl || "").trim());
+      .filter(({ item }) => isNativePlayableItem(item));
     const index = playableEntries.findIndex(({ item }) => item === video || item.id === video.id);
     if (index < 0) return false;
     const start = Math.max(0, index - 20);
@@ -26,8 +26,34 @@ export function createShortVideoNativeFeed(context = {}) {
       id: item.id,
       awemeId: item.awemeId || "",
       title: item.title || "",
+      mediaType: item.mediaType || "video",
       streamUrl: item.streamUrl || "",
       coverUrl: item.coverUrl || "",
+      galleryCount: Number(item.galleryCount || item.galleryImages?.length || 0),
+      galleryItems: Array.isArray(item.galleryItems)
+        ? item.galleryItems.map((entry, galleryIndex) => ({
+            index: Number(entry?.index ?? galleryIndex),
+            type: entry?.type === "video" ? "video" : "image",
+            url: entry?.url || ""
+          })).filter((entry) => entry.url)
+        : [],
+      galleryImages: Array.isArray(item.galleryImages)
+        ? item.galleryImages.map((entry, galleryIndex) => ({
+            index: Number(entry?.index ?? galleryIndex),
+            url: entry?.url || ""
+          })).filter((entry) => entry.url)
+        : [],
+      sound: item.sound ? {
+        key: item.sound.key || "",
+        id: item.sound.id || "",
+        title: item.sound.title || "",
+        author: item.sound.author || "",
+        coverUrl: item.sound.coverUrl || "",
+        previewUrl: item.sound.previewUrl || "",
+        previewSource: item.sound.previewSource || "",
+        localAvailable: Boolean(item.sound.localAvailable),
+        original: Boolean(item.sound.original)
+      } : null,
       shareUrl: item.shareUrl || "",
       originalUrl: item.originalUrl || "",
       author: {
@@ -75,6 +101,15 @@ export function createShortVideoNativeFeed(context = {}) {
     } catch {
       return false;
     }
+  }
+
+  function isNativePlayableItem(item) {
+    if (String(item?.streamUrl || "").trim()) return true;
+    if (String(item?.mediaType || "").toLowerCase() !== "gallery") return false;
+    const entries = Array.isArray(item?.galleryItems) && item.galleryItems.length
+      ? item.galleryItems
+      : item.galleryImages;
+    return Array.isArray(entries) && entries.some((entry) => String(entry?.url || "").trim());
   }
 
   function nativeShortVideoFeedUrl() {

@@ -269,7 +269,16 @@ export function createShortVideoListView(context = {}) {
     metric.className = "short-video-mobile-thumb-metric";
     metric.append(createIcon("heart"), document.createTextNode(formatCompact(video.stats?.likes || 0)));
     thumb.append(metric);
-    card.setAttribute("aria-label", video.title || "打开短视频");
+    const galleryCount = String(video.mediaType || "").toLowerCase() === "gallery"
+      ? Number(video.galleryCount || video.galleryImages?.length || 0)
+      : 0;
+    if (galleryCount > 0) {
+      const badge = document.createElement("span");
+      badge.className = "short-video-mobile-thumb-type";
+      badge.textContent = `图文 · ${galleryCount}`;
+      thumb.append(badge);
+    }
+    card.setAttribute("aria-label", video.title || (galleryCount > 0 ? "打开图文作品" : "打开短视频"));
     card.append(thumb);
     return card;
   }

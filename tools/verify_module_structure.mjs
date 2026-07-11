@@ -81,6 +81,7 @@ const webStylePaths = [
   "css/responsive.css",
   "modules/short-videos/styles/list.css",
   "modules/short-videos/styles/viewer.css",
+  "modules/short-videos/styles/gallery-navigation.css",
   "modules/short-videos/styles/panels.css",
   "modules/short-videos/styles/responsive.css",
   "modules/music/styles/foundation.css",
