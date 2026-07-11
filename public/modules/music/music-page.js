@@ -91,6 +91,7 @@ export function createMusicPage(deps) {
     state.music.albumId = state.music.albumId || "all";
     state.music.genre = state.music.genre || "all";
     state.music.language = state.music.language || "all";
+    state.music.letter = state.music.letter || "";
     state.music.activePlaylistId = state.music.activePlaylistId || "";
     state.music.activeSmartPlaylistId = state.music.activeSmartPlaylistId || "";
     state.music.sort = state.music.sort || "album";
@@ -296,6 +297,7 @@ export function createMusicPage(deps) {
         if (append) artistParams.set("offset", params.get("offset") || "0");
         if (state.music.query) artistParams.set("q", state.music.query);
         if (state.music.language && state.music.language !== "all") artistParams.set("language", state.music.language);
+        if (state.music.letter) artistParams.set("letter", state.music.letter);
         data = await request(`/api/music/artists?${artistParams}`);
       } else if (albumMode) {
         const albumParams = new URLSearchParams();
@@ -304,6 +306,7 @@ export function createMusicPage(deps) {
         if (append) albumParams.set("offset", params.get("offset") || "0");
         if (state.music.query) albumParams.set("q", state.music.query);
         if (state.music.language && state.music.language !== "all") albumParams.set("language", state.music.language);
+        if (state.music.letter) albumParams.set("letter", state.music.letter);
         data = await request(`/api/music/albums?${albumParams}`);
       } else if (state.music.mode === "history") {
         data = await request(`/api/music/history?limit=${MUSIC_PAGE_LIMIT}`);
@@ -1584,6 +1587,25 @@ export function createMusicPage(deps) {
     return empty;
   }
 
+  function renderAlphaIndex(currentLetter) {
+    const bar = document.createElement("div");
+    bar.className = "music-alpha-index";
+    const items = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").concat(["0-9", "待", "#"]);
+    for (const item of items) {
+      const value = item === "0-9" ? "0" : item;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "music-alpha-index-item" + (currentLetter === value ? " active" : "");
+      button.textContent = item;
+      button.addEventListener("click", () => {
+        state.music.letter = state.music.letter === value ? "" : value;
+        loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+      });
+      bar.append(button);
+    }
+    return bar;
+  }
+
   function renderArtistPanel() {
     const panel = document.createElement("section");
     panel.className = "music-track-panel music-artist-browser";
@@ -1629,6 +1651,8 @@ export function createMusicPage(deps) {
     });
     controls.append(search, sort);
 
+    const alphaIndex = renderAlphaIndex(state.music.letter);
+
     const languages = document.createElement("div");
     languages.className = "music-artist-language-tabs";
     const languageItems = [{ name: "all", label: "全部", artistCount: state.music.summary?.totals?.artists || 0 }, ...(state.music.languages || []).map((item) => ({ ...item, label: item.name }))];
@@ -1658,7 +1682,7 @@ export function createMusicPage(deps) {
     const more = renderArtistLoadMore(artists.length);
     if (more) grid.append(more);
 
-    panel.append(heading, controls, languages, grid);
+    panel.append(heading, controls, alphaIndex, languages, grid);
     return panel;
   }
 
@@ -1708,6 +1732,8 @@ export function createMusicPage(deps) {
     });
     controls.append(search, sort);
 
+    const alphaIndex = renderAlphaIndex(state.music.letter);
+
     const languages = document.createElement("div");
     languages.className = "music-artist-language-tabs";
     const languageItems = [{ name: "all", label: "全部", albumCount: state.music.summary?.totals?.albums || 0 }, ...(state.music.languages || []).map((item) => ({ ...item, label: item.name }))];
@@ -1737,7 +1763,7 @@ export function createMusicPage(deps) {
     const more = renderAlbumLoadMore(albums.length);
     if (more) grid.append(more);
 
-    panel.append(heading, controls, languages, grid);
+    panel.append(heading, controls, alphaIndex, languages, grid);
     return panel;
   }
 

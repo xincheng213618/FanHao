@@ -470,6 +470,14 @@ export function createMusicStore(options = {}) {
       conditions.push("name LIKE ? ESCAPE '\\'");
       args.push(`%${escapeLike(query)}%`);
     }
+    const letter = String(params.get("letter") || "").trim();
+    if (letter) {
+      const lc = buildLetterCondition(letter, "name", "name");
+      if (lc) {
+        conditions.push(lc.sql);
+        if (lc.args.length) args.push(...lc.args);
+      }
+    }
     const database = dbOrOpen();
     let total;
     let rows;
@@ -480,7 +488,7 @@ export function createMusicStore(options = {}) {
           .sort((left, right) => artistNameForSort(left.name).localeCompare(artistNameForSort(right.name), "zh-CN", { numeric: true, sensitivity: "base" }));
       const sortedRows = query
         ? buildSortedRows()
-        : cachedMusicFacet(database, `artist-browser:${language || "all"}:name`, buildSortedRows);
+        : cachedMusicFacet(database, `artist-browser:${language || "all"}:${letter || "all"}:name`, buildSortedRows);
       total = sortedRows.length;
       rows = sortedRows.slice(offset, offset + limit);
     } else {
@@ -504,6 +512,7 @@ export function createMusicStore(options = {}) {
       hasMore: offset + rows.length < total,
       query,
       language,
+      letter,
       sort,
       languages: languageFacet(database),
       summary: summary()
@@ -513,10 +522,20 @@ export function createMusicStore(options = {}) {
   function listAlbums(urlOrOptions = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const filter = catalogFilter(params);
+    const letter = String(params.get("letter") || "").trim();
+    let albumWhere = filter.albumWhere;
+    let albumArgs = filter.albumArgs ? [...filter.albumArgs] : [];
+    if (letter) {
+      const lc = buildLetterCondition(letter, "al.title", "a.name");
+      if (lc) {
+        albumWhere = albumWhere ? `${albumWhere} AND ${lc.sql}` : lc.sql;
+        if (lc.args.length) albumArgs.push(...lc.args);
+      }
+    }
     const limit = clampInt(params.get("limit"), 80, 1, MAX_PAGE_LIMIT);
     const offset = clampInt(params.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const sort = normalizeAlbumSort(params.get("sort"));
-    const where = filter.albumWhere ? `WHERE ${filter.albumWhere}` : "";
+    const where = albumWhere ? `WHERE ${albumWhere}` : "";
     const order = {
       title: "al.title COLLATE NOCASE ASC",
       year: "COALESCE(al.year, '') DESC, al.title COLLATE NOCASE ASC",
@@ -533,7 +552,7 @@ export function createMusicStore(options = {}) {
         ${where}
       `
       )
-      .get(...filter.albumArgs)?.count || 0);
+      .get(...albumArgs)?.count || 0);
     const rows = database
       .prepare(
         `
@@ -545,7 +564,7 @@ export function createMusicStore(options = {}) {
         LIMIT ? OFFSET ?
       `
       )
-      .all(...filter.albumArgs, limit, offset);
+      .all(...albumArgs, limit, offset);
     return {
       albums: rows.map(publicAlbum),
       total,
@@ -556,6 +575,7 @@ export function createMusicStore(options = {}) {
       artistId: filter.artistId,
       genre: filter.genre,
       language: filter.language,
+      letter,
       sort,
       languages: languageFacet(database),
       summary: summary()
@@ -1908,6 +1928,23 @@ function catalogFilter(params = new URLSearchParams()) {
     albumWhere: albumWhere.join(" AND "),
     albumArgs
   };
+}
+
+// 歌手/专辑首字母索引导航过滤：A-Z / 0-9 / 待(待识别) / #(其余非字母数字)
+function buildLetterCondition(letter, col, artistCol) {
+  if (/^[A-Za-z]$/.test(letter)) {
+    return { sql: `UPPER(SUBSTR(${col}, 1, 1)) = ?`, args: [letter.toUpperCase()] };
+  }
+  if (/^[0-9]$/.test(letter)) {
+    return { sql: `SUBSTR(${col}, 1, 1) GLOB '[0-9]'`, args: [] };
+  }
+  if (letter === "待") {
+    return { sql: `${artistCol} = '待识别'`, args: [] };
+  }
+  if (letter === "#") {
+    return { sql: `(UPPER(SUBSTR(${col}, 1, 1)) NOT BETWEEN 'A' AND 'Z' AND SUBSTR(${col}, 1, 1) NOT GLOB '[0-9]')`, args: [] };
+  }
+  return null;
 }
 
 function artistFacet(db, language = "", selectedArtistId = "") {

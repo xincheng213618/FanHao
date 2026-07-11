@@ -1271,6 +1271,65 @@
   font-weight: 850;
 }
 
+/* QQ 风格全屏舞台歌词：大字号、当前行高亮居中放大、上下行变暗、平滑滚动 */
+.music-stage-lyrics {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 940px;
+  margin: 0 auto;
+  padding: 6px 16px 28px;
+  min-height: 0;
+}
+
+.music-stage-lyric-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-height: min(64vh, 640px);
+  overflow-y: auto;
+  scroll-behavior: smooth;
+  text-align: center;
+  padding: 20vh 0 26vh;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 16%, #000 84%, transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 16%, #000 84%, transparent);
+}
+
+.music-stage-lyric-lines button {
+  font-size: 17px;
+  line-height: 1.5;
+  color: rgba(237, 244, 240, .4);
+  opacity: .72;
+  transform: scale(.96);
+  transition: color .25s ease, transform .25s ease, opacity .25s ease, font-size .25s ease;
+}
+
+.music-stage-lyric-lines button:hover,
+.music-stage-lyric-lines button:focus-visible {
+  background: transparent;
+  color: rgba(237, 244, 240, .72);
+  opacity: 1;
+  outline: none;
+}
+
+.music-stage-lyric-lines button.active {
+  color: #ffffff;
+  font-weight: 800;
+  font-size: 23px;
+  line-height: 1.45;
+  opacity: 1;
+  transform: scale(1.06);
+  text-shadow: 0 2px 20px rgba(0, 0, 0, .5);
+}
+
+.music-stage-lyrics-head {
+  justify-content: center;
+  opacity: .65;
+}
+
+
 .music-lyric-follow {
   display: none;
   min-height: 28px;
