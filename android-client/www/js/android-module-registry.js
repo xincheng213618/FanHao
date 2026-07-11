@@ -3,8 +3,8 @@ const FALLBACK_MODULES = Object.freeze([
   fallback("fanhao", "番号", 10, "works", "fanhao"),
   fallback("photos", "图库", 20, "channel", "photo", { channel: "photo" }),
   fallback("media", "影视", 30, "channel", "media", { channel: "media" }),
-  fallback("novels", "小说", 40, "novels", "novels"),
-  fallback("short-videos", "短视频", 50, "shortVideos", "shortVideos"),
+  fallback("novels", "小说", 40, "novels", "novels", { order: 50 }),
+  fallback("short-videos", "短视频", 50, "shortVideos", "shortVideos", { order: 40 }),
   fallback("music", "音乐", 60, "music", "music"),
   fallback("tools", "小工具", 70, "tools", "tools", { title: "我的" })
 ]);
@@ -97,6 +97,7 @@ function normalizeModule(value, definition) {
     rootViews,
     bottomKey: String(value.bottomKey || definition.client?.android?.bottomKey || definition.id),
     search: value.search && typeof value.search === "object" ? value.search : null,
+    renderChrome: typeof value.renderChrome === "function" ? value.renderChrome : null,
     deactivate: typeof value.deactivate === "function" ? value.deactivate : null,
     handleBack: typeof value.handleBack === "function" ? value.handleBack : null,
     api: value.api && typeof value.api === "object" ? value.api : Object.freeze({})
@@ -141,6 +142,12 @@ function createRegistry(modules) {
     return module.search;
   }
 
+  function renderChrome(view, params = {}, container) {
+    const module = resolve(view, params)?.module || null;
+    if (!module?.renderChrome || !container) return false;
+    return module.renderChrome({ container, view: String(view || ""), params: params || {} }) !== false;
+  }
+
   function deactivateExcept(view, params = {}) {
     const activeId = resolve(view, params)?.module.id || "";
     for (const module of modules) {
@@ -157,6 +164,7 @@ function createRegistry(modules) {
     get: (id) => byId.get(String(id || "")) || null,
     resolve,
     render,
+    renderChrome,
     searchFor,
     deactivateExcept,
     handleBack

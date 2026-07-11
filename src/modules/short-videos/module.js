@@ -7,7 +7,7 @@ export const moduleDefinition = {
   order: 50,
   client: {
     web: { href: "/short-videos", view: "shortVideos" },
-    android: { view: "shortVideos", bottomKey: "shortVideos", entry: "./modules/short-videos/android-module.js" }
+    android: { view: "shortVideos", bottomKey: "shortVideos", order: 40, entry: "./modules/short-videos/android-module.js" }
   },
   capabilities: ["short-video-feed", "short-video-authors"]
 };

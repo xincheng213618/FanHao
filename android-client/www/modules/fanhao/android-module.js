@@ -3,8 +3,17 @@ import { createPeopleViews } from "./people-views.js?v=20260710-module-registry-
 import { createWorkViews } from "./work-views.js?v=20260710-module-registry-01";
 
 const ROOT_VIEWS = ["works", "rankings", "studios", "vr", "people", "favorites"];
+const CHROME_TABS = [
+  { label: "作品", view: "works" },
+  { label: "榜单", view: "rankings" },
+  { label: "片商", view: "studios" },
+  { label: "VR", view: "vr" },
+  { label: "人物", view: "people" },
+  { label: "收藏", view: "favorites" }
+];
 
 export function createAndroidModule({ host }) {
+  const search = createSearchController(host);
   const workViews = createWorkViews({
     els: host.els,
     getActiveUrl: host.getActiveUrl,
@@ -61,16 +70,56 @@ export function createAndroidModule({ host }) {
       route("personDetail", (params, guard) => detailViews.renderPersonDetail(params.personId, guard)),
       route("workDetail", (params, guard) => detailViews.renderWorkDetail(params.workId, guard))
     ],
-    search: createSearchController(host),
+    search,
+    renderChrome: (context) => renderFanhaoChrome(context, host),
     api: { detailViews, peopleViews, workViews }
   };
+}
+
+function renderFanhaoChrome({ container, view }, host) {
+  container.dataset.module = "fanhao";
+  const nav = document.createElement("nav");
+  nav.className = "module-chrome-tabs fanhao-chrome-tabs";
+  nav.setAttribute("aria-label", "番号分类");
+  const activeView = fanhaoTabForView(view);
+  for (const tab of CHROME_TABS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = tab.label;
+    button.classList.toggle("active", tab.view === activeView);
+    button.addEventListener("click", () => {
+      host.navigation.showView(tab.view, {}, { resetStack: true });
+      host.ui.scrollToTop();
+    });
+    nav.append(button);
+  }
+  container.append(nav, createSearchButton(host, "搜索番号、作品或人物"));
+  return true;
+}
+
+function fanhaoTabForView(view) {
+  if (view === "rankings") return "rankings";
+  if (view === "studios" || view === "studioDetail") return "studios";
+  if (view === "vr") return "vr";
+  if (view === "people" || view === "personDetail") return "people";
+  if (view === "favorites") return "favorites";
+  return "works";
+}
+
+function createSearchButton(host, label) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "module-chrome-search icon-only";
+  button.setAttribute("aria-label", label);
+  button.innerHTML = '<span aria-hidden="true">⌕</span>';
+  button.addEventListener("click", host.ui.openSearch);
+  return button;
 }
 
 function createSearchController(host) {
   return {
     mode: "route",
     useHistory: true,
-    showAction: () => true,
     showHistory: (view) => view === "search",
     hideBottom: (view) => view === "search",
     isExpanded: (view, _params, expanded) => view === "search" || expanded,

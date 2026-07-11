@@ -7,7 +7,7 @@ export const moduleDefinition = {
   order: 40,
   client: {
     web: { href: "/novels", view: "novels" },
-    android: { view: "novels", bottomKey: "novels", entry: "./modules/novels/android-module.js" }
+    android: { view: "novels", bottomKey: "novels", order: 50, entry: "./modules/novels/android-module.js" }
   },
   capabilities: ["novel-library", "novel-reader"]
 };

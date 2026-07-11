@@ -1,6 +1,6 @@
 import { createShortVideoApi } from "./api.js?v=20260711-short-video-cache-09";
-import { createShortVideoListController } from "./list/controller.js?v=20260711-short-video-home-01";
-import { createShortVideoListView } from "./list/view.js?v=20260711-short-video-home-01";
+import { createShortVideoListController } from "./list/controller.js?v=20260712-short-video-search-page-07";
+import { createShortVideoListView } from "./list/view.js?v=20260712-short-video-search-page-07";
 import { createShortVideoAuthorPanel } from "./panels/author-panel.js?v=20260711-short-video-cache-08";
 import { createShortVideoPlaybackPanels } from "./panels/playback-panels.js?v=20260711-short-video-cache-08";
 import { createShortVideoNativePlatform } from "./platform/native-player.js?v=20260711-short-video-cache-08";
@@ -8,7 +8,7 @@ import { createShortVideoInteractions } from "./player/interactions.js?v=2026071
 import { createShortVideoMediaCache } from "./player/media-cache.js?v=20260711-short-video-cache-08";
 import { createShortVideoReelController } from "./player/reel-controller.js?v=20260711-short-video-cache-08";
 import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260711-short-video-cache-08";
-import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=20260711-short-video-cache-08";
+import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=20260712-short-video-search-page-07";
 import { createShortVideoIcons } from "./ui/icons.js?v=20260711-short-video-cache-08";
 
 export function createShortVideoViews(deps) {
@@ -22,7 +22,7 @@ export function createShortVideoViews(deps) {
     loading: false,
     loadingMore: false,
     status: "",
-    searchFiltersEl: null,
+    searchPage: false,
     authorVisibleCount: 24,
     allowLoadMore: false
   };
@@ -78,6 +78,7 @@ export function createShortVideoViews(deps) {
     deactivateTransientUi();
     context.installListEvents();
     setActiveBottom("shortVideos");
+    listState.searchPage = false;
     context.applyListParams(params);
     els.viewKicker.textContent = "短视频";
     els.viewTitle.textContent = "短视频";
@@ -85,6 +86,25 @@ export function createShortVideoViews(deps) {
     els.viewContent.className = "content-list short-video-mobile-content";
     context.renderListShell();
     await context.loadList(renderGuard);
+  }
+
+  async function renderSearch(params = {}, renderGuard = null) {
+    deactivateTransientUi();
+    context.installListEvents();
+    setActiveBottom("shortVideos");
+    listState.searchPage = true;
+    context.applyListParams(params);
+    if (!listState.query) {
+      listState.data = null;
+      listState.loading = false;
+      listState.status = "";
+    }
+    els.viewKicker.textContent = "短视频";
+    els.viewTitle.textContent = "搜索";
+    els.viewMeta.textContent = "";
+    els.viewContent.className = "content-list short-video-mobile-content short-video-search-page-content";
+    context.renderListShell();
+    if (listState.query) await context.loadList(renderGuard);
   }
 
   async function renderBrowser(input, renderGuard = null) {
@@ -111,6 +131,7 @@ export function createShortVideoViews(deps) {
     context.closePlaybackActions();
     context.closePlaybackToolbar();
     context.closeAuthorPanel({ resume: false });
+    document.querySelector(".short-video-sort-overlay")?.remove();
     context.resetListLoadMoreObserver();
     const stack = context.activeReelStack();
     if (stack) context.stopPanelMedia(stack);
@@ -119,12 +140,11 @@ export function createShortVideoViews(deps) {
   }
 
   return Object.freeze({
-    clearSearchFilters: context.clearSearchFilters,
     deactivate: deactivateTransientUi,
     getSearchState: context.getSearchState,
     renderBrowser,
     renderList,
-    renderSearchFilters: context.renderSearchFilters,
+    renderSearch,
     submitSearch: context.submitSearch
   });
 }

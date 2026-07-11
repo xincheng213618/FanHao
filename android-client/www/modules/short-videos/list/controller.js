@@ -1,6 +1,4 @@
-import { loadPreviewImage } from "../../../js/image.js?v=20260706-mobile-web-sync-01";
-import { formatCompact } from "../../../js/format.js";
-import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, SHORT_VIDEO_SORT_OPTIONS, formatDate, formatDuration, initials, normalizeSort, normalizeSource, selectOption, shortVideoSortLabel } from "../shared.js";
+import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeSort, normalizeSource } from "../shared.js";
 export function createShortVideoListController(context = {}) {
   const { api, browserState, els, getActiveUrl, goBack, listState, setActiveBottom, showView } = context;
   let listLoadMoreObserver = null;
@@ -147,7 +145,11 @@ export function createShortVideoListController(context = {}) {
       sort: listState.sort,
       ...patch
     };
-    showView("shortVideos", next, { resetStack: true, skipHistory: true, replaceHistory: true, ...navigation });
+    const targetView = listState.searchPage ? "shortVideoSearch" : "shortVideos";
+    const baseNavigation = listState.searchPage
+      ? { skipHistory: true, replaceHistory: true }
+      : { resetStack: true, skipHistory: true, replaceHistory: true };
+    showView(targetView, next, { ...baseNavigation, ...navigation });
   }
 
   function getSearchState() {
@@ -161,7 +163,7 @@ export function createShortVideoListController(context = {}) {
   }
 
   function submitSearch(query = "", overrides = {}) {
-    const group = overrides.source ?? selectedSearchFilterValue("source", activeLibraryGroup());
+    const group = overrides.source ?? activeLibraryGroup();
     const currentAuthor = overrides.author ?? (listState.author || "all");
     const author = group === "authors" ? currentAuthor : "all";
     const source = group === "authors"
@@ -171,22 +173,8 @@ export function createShortVideoListController(context = {}) {
       query: String(query || "").trim(),
       author,
       source,
-      sort: overrides.sort ?? selectedSearchFilterValue("sort", listState.sort || DEFAULT_SORT)
+      sort: overrides.sort ?? (listState.sort || DEFAULT_SORT)
     });
-  }
-
-  function selectedSearchFilterValue(kind, fallback) {
-    const selector = kind === "author"
-      ? "[data-short-video-search-author]"
-      : kind === "source"
-        ? "[data-short-video-search-source]"
-        : "[data-short-video-search-sort]";
-    return listState.searchFiltersEl?.querySelector?.(selector)?.value || fallback;
-  }
-
-  function clearSearchFilters(form) {
-    form?.querySelector?.(".short-video-search-filters")?.remove();
-    if (listState.searchFiltersEl && !listState.searchFiltersEl.isConnected) listState.searchFiltersEl = null;
   }
 
   function resetListLoadMoreObserver() {
@@ -228,8 +216,6 @@ export function createShortVideoListController(context = {}) {
     updateListParams,
     getSearchState,
     submitSearch,
-    selectedSearchFilterValue,
-    clearSearchFilters,
     resetListLoadMoreObserver,
     observeListLoadMore,
     openShortVideoFromList

@@ -1,9 +1,9 @@
-@import "./css/base.css?v=20260712-android-reflection-01";
+@import "./css/base.css?v=20260712-module-chrome-03";
 @import "./css/sections.css?v=20260707-mobile-filter-targets-01";
 @import "./css/lists.css?v=20260711-photo-search-06";
-@import "./modules/novels/styles.css?v=20260711-novel-lazy-catalog-06";
+@import "./modules/novels/styles.css?v=20260712-module-chrome-03";
 @import "./modules/music/styles.css?v=20260711-music-albums-03";
-@import "./modules/short-videos/styles.css?v=20260711-short-video-home-03";
+@import "./modules/short-videos/styles.css?v=20260712-short-video-search-page-08";
 @import "./css/settings-nav.css?v=20260712-compact-settings-02";
 @import "./css/media-viewer.css?v=20260707-mobile-viewer-short-list-targets-01";
 

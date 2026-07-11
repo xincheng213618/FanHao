@@ -930,7 +930,7 @@ body.novel-reader-view {
   background: #e7decd;
 }
 
-body.novel-reader-view .top-channel-bar,
+body.novel-reader-view .module-chrome,
 body.novel-reader-view .bottom-nav {
   display: none;
 }

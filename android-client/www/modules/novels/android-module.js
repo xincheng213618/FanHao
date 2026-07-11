@@ -11,6 +11,7 @@ export function createAndroidModule({ host }) {
     renderCurrentViewPreservingScroll: host.ui.renderCurrentViewPreservingScroll,
     setStatus: host.ui.setStatus
   });
+  window.addEventListener("fanhaoNovelSourceChanged", host.ui.refreshChrome);
   return {
     bottomKey: "novels",
     rootViews: ["novels"],
@@ -19,6 +20,7 @@ export function createAndroidModule({ host }) {
       { view: "novelDetail", render: (params, guard) => novelViews.renderNovelDetail(params.id, guard) },
       { view: "novelReader", render: (params, guard) => novelViews.renderNovelReader(params.id, params.chapterIndex, guard) }
     ],
+    renderChrome: (context) => renderNovelChrome(context, host, novelViews),
     handleBack(view, params) {
       if (view !== "novelReader") return false;
       if (params.id) host.navigation.showView("novelDetail", { id: params.id }, { skipHistory: true, replaceHistory: true });
@@ -27,4 +29,27 @@ export function createAndroidModule({ host }) {
     },
     api: { novelViews }
   };
+}
+
+function renderNovelChrome({ container, view }, host, novelViews) {
+  if (view !== "novels") return false;
+  const activeSource = novelViews.getLibrarySource?.() || "local";
+  container.dataset.module = "novels";
+  const nav = document.createElement("nav");
+  nav.className = "module-chrome-tabs novel-chrome-tabs";
+  nav.setAttribute("aria-label", "小说来源");
+  for (const item of [{ label: "本地", source: "local" }, { label: "远端", source: "bookstore" }]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = item.label;
+    button.classList.toggle("active", item.source === activeSource);
+    button.addEventListener("click", () => {
+      novelViews.setLibrarySource?.(item.source);
+      host.ui.renderCurrentView();
+      host.ui.scrollToTop();
+    });
+    nav.append(button);
+  }
+  container.append(nav);
+  return true;
 }

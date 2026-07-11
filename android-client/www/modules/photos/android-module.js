@@ -1,7 +1,13 @@
-import { createChannelViews } from "../../platform/content-index/channel-views.js?v=20260712-android-reflection-02";
+import { createChannelViews } from "../../platform/content-index/channel-views.js?v=20260712-module-chrome-03";
+
+const DEFAULT_CATEGORY = "我喜欢的";
+const CATEGORY_PRIORITY = [DEFAULT_CATEGORY, "all", "[XIUREN] 秀人网", "[COS]", "内购私拍", "日本写真集", "韩国写真集", "国模"];
+const CATEGORY_LABELS = new Map([[DEFAULT_CATEGORY, "我喜欢的"], ["all", "全部"], ["[XIUREN] 秀人网", "秀人网"], ["[COS]", "COS"]]);
 
 export function createAndroidModule({ host }) {
-  const channelViews = createChannelViews(createChannelContext(host));
+  const search = createSearchController(host);
+  const chrome = createPhotoChrome(host);
+  const channelViews = createChannelViews(createChannelContext(host, chrome.update));
   return {
     bottomKey: "photo",
     rootViews: ["channel"],
@@ -11,12 +17,13 @@ export function createAndroidModule({ host }) {
       { view: "mangaDetail", render: (params, guard) => channelViews.renderMangaDetail(params.id, guard) },
       { view: "mangaChapter", render: (params, guard) => channelViews.renderMangaChapter(params.id, params.chapterIndex, guard) }
     ],
-    search: createSearchController(host),
+    search,
+    renderChrome: chrome.render,
     api: { channelViews }
   };
 }
 
-function createChannelContext(host) {
+function createChannelContext(host, updateChrome) {
   return {
     els: host.els,
     getActiveUrl: host.getActiveUrl,
@@ -38,16 +45,66 @@ function createChannelContext(host) {
     getMediaViewer: () => host.mediaViewer,
     recordRecentContent: host.recent.record,
     onChannelFavoriteChange: host.favorites.onChannelFavoriteChange,
-    setTopSecondaryTabs: host.ui.setTopSecondaryTabs,
+    updateModuleChrome: updateChrome,
     updateChannelQuery: host.contentIndex.updateChannelQuery,
     updateChannelParams: host.contentIndex.updateChannelParams
   };
 }
 
+function createPhotoChrome(host) {
+  let latestCategory = DEFAULT_CATEGORY;
+  return {
+    update(kind, options = {}) {
+      if (kind === "photo") latestCategory = String(options.category || latestCategory || DEFAULT_CATEGORY);
+      host.ui.refreshChrome();
+    },
+    render({ container, view, params }) {
+      if (view !== "channel" || host.normalizeChannelMode(params.mode) !== "photo") return false;
+      const activeCategory = String(params.category || latestCategory || DEFAULT_CATEGORY);
+      container.dataset.module = "photos";
+      const nav = document.createElement("nav");
+      nav.className = "module-chrome-tabs photo-chrome-tabs";
+      nav.setAttribute("aria-label", "图库分类");
+      const categories = [...CATEGORY_PRIORITY];
+      if (activeCategory && !categories.includes(activeCategory)) categories.push(activeCategory);
+      for (const category of categories) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = CATEGORY_LABELS.get(category) || category.replace(/^\[[^\]]+\]\s*/, "") || category;
+        button.classList.toggle("active", category === activeCategory);
+        button.addEventListener("click", () => {
+          const photoView = params.collection ? "collections" : params.photoView || "collections";
+          host.navigation.showView("channel", {
+            ...params,
+            mode: "photo",
+            photoView,
+            collection: "",
+            category,
+            query: ""
+          }, { skipHistory: true, replaceHistory: true });
+          host.ui.scrollToTop();
+        });
+        nav.append(button);
+      }
+      container.append(nav, createPhotoSearchButton(host));
+      return true;
+    }
+  };
+}
+
+function createPhotoSearchButton(host) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "module-chrome-search icon-only";
+  button.setAttribute("aria-label", "搜索套图、人物或分类");
+  button.innerHTML = '<span aria-hidden="true">⌕</span>';
+  button.addEventListener("click", host.ui.openSearch);
+  return button;
+}
+
 function createSearchController(host) {
   return {
     mode: "channel",
-    showAction: () => true,
     isExpanded: (view, params, expanded) => expanded || (view === "channel" && Boolean(String(params.query || "").trim())),
     placeholder: () => "搜套图、人物或分类",
     value: (view, params) => view === "channel" ? String(params.query || "") : "",

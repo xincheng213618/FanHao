@@ -88,7 +88,7 @@ export function createChannelViews(context) {
     getMediaViewer = () => null,
     recordRecentContent = () => {},
     onChannelFavoriteChange = () => {},
-    setTopSecondaryTabs = () => {},
+    updateModuleChrome = () => {},
     updateChannelQuery = () => {},
     updateChannelParams = () => {}
   } = context;
@@ -127,9 +127,9 @@ export function createChannelViews(context) {
     let renderedCacheSignature = "";
 
     setActiveBottom(normalizedMode);
-    if (normalizedMode === "photo") setTopSecondaryTabs("photo", { category });
-    else if (["media", "movie", "tv"].includes(normalizedMode)) setTopSecondaryTabs("media", { mode: normalizedMode });
-    else setTopSecondaryTabs("none");
+    if (normalizedMode === "photo") updateModuleChrome("photo", { category });
+    else if (["media", "movie", "tv"].includes(normalizedMode)) updateModuleChrome("media", { mode: normalizedMode });
+    else updateModuleChrome("none");
     if (pageComplete) {
       renderChannelData(normalizedMode, currentPage);
       return;
@@ -220,9 +220,9 @@ export function createChannelViews(context) {
     const collectionTitle = data.collectionSummary?.title || "";
     const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : data.scannedAt ? ` · 更新 ${cacheAgeText(data.scannedAt)}` : "";
     const unit = mode === "tv" || mode === "media" ? (seriesKey ? "集" : "部") : photoView === "collections" && mode === "photo" ? "合集" : channel.unit;
-    if (mode === "photo") setTopSecondaryTabs("photo", { category, facets: data.facets || {} });
-    else if (["media", "movie", "tv"].includes(mode)) setTopSecondaryTabs("media", { mode });
-    else setTopSecondaryTabs("none");
+    if (mode === "photo") updateModuleChrome("photo", { category, facets: data.facets || {} });
+    else if (["media", "movie", "tv"].includes(mode)) updateModuleChrome("media", { mode });
+    else updateModuleChrome("none");
     els.viewTitle.textContent = channelTitle(channel, { query, mode, photoView, collectionTitle, category, seriesSummary });
     els.viewMeta.textContent = query
       ? `${formatNumber(total)} 个匹配 · 已显示 ${formatNumber(items.length)}${sort === "relevance" ? " · 相关性排序" : ""}${suffix}`

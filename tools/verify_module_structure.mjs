@@ -81,16 +81,40 @@ assert(!/from\s+["']\.\/modules\//.test(androidAppSource), "Android shell must n
 assert(androidAppSource.includes("loadAndroidModules("), "Android shell must load module entries through the registry");
 const androidRegistrySource = fs.readFileSync(path.join(root, "android-client", "www", "js", "android-module-registry.js"), "utf8");
 assert(androidRegistrySource.includes("await import(entryUrl)"), "Android module registry must dynamically import discovered entries");
+assert(androidRegistrySource.includes("renderChrome(view"), "Android module registry must delegate module chrome rendering");
 const androidIndexSource = fs.readFileSync(path.join(root, "android-client", "www", "index.html"), "utf8");
 assert(!androidIndexSource.includes('id="topSearchButton"'), "Android shell must not own a global search button");
-assert(androidIndexSource.includes('id="topModuleActions"'), "Android shell must expose a module action slot");
+assert(!androidIndexSource.includes('id="topModuleActions"'), "Android shell must not own a shared module action layout");
+assert(!androidIndexSource.includes('id="fanhaoSectionNav"'), "Android shell must not own business secondary navigation");
+assert(/<header id="moduleChrome"[^>]*><\/header>/.test(androidIndexSource), "Android shell must expose only an empty module chrome mount");
 for (const text of ["搜番号、作品或人物", "搜套图、人物或分类", "搜电影或电视剧", "搜短视频标题、作者或标签"]) {
   assert(!androidAppSource.includes(text), `Android shell must not own module search copy: ${text}`);
 }
-for (const id of ["fanhao", "photos", "media", "short-videos"]) {
+for (const id of ["fanhao", "photos", "media"]) {
   const entrySource = fs.readFileSync(path.join(androidModulesDir, id, "android-module.js"), "utf8");
-  assert(entrySource.includes("search: createSearchController"), `Android module must own its shell search controller: ${id}`);
+  assert(entrySource.includes("createSearchController(host"), `Android module must own its search controller: ${id}`);
+  assert(entrySource.includes("renderChrome"), `Android module must own its chrome rendering: ${id}`);
+  assert(entrySource.includes("host.ui.openSearch"), `Android module must wire its own search entry: ${id}`);
 }
+const androidShortVideoEntry = fs.readFileSync(path.join(androidModulesDir, "short-videos", "android-module.js"), "utf8");
+assert(androidShortVideoEntry.includes('view: "shortVideoSearch"'), "short videos must own a dedicated Android search route");
+assert(androidShortVideoEntry.includes("short-video-chrome-row"), "short videos must own its compact one-row chrome");
+assert(!androidShortVideoEntry.includes("host.ui.openSearch"), "short videos must not reopen the shared shell search surface");
+assert(
+  fs.readFileSync(path.join(androidModulesDir, "novels", "android-module.js"), "utf8").includes("renderNovelChrome"),
+  "novels must own its source switcher chrome"
+);
+assert(!androidAppSource.includes("FANHAO_TOP_TABS"), "Android shell must not keep FanHao chrome definitions");
+assert(!androidAppSource.includes("setTopSecondaryTabs"), "Android shell must not implement module secondary tabs");
+const androidNavigationOrder = requiredModules
+  .map((id) => byId.get(id))
+  .sort((a, b) => Number(a.client.android.order ?? a.order) - Number(b.client.android.order ?? b.order))
+  .map((definition) => definition.id);
+assert.deepEqual(
+  androidNavigationOrder,
+  ["fanhao", "photos", "media", "short-videos", "novels", "music", "tools"],
+  "short videos must stay in the center of the seven-item Android navigation"
+);
 assert(
   fs.readFileSync(path.join(androidModulesDir, "music", "music-views.js"), "utf8").includes("music-mobile-search-pill"),
   "music must keep search inside its own module surface"

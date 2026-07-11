@@ -8,7 +8,9 @@ export async function loadModuleCatalog(fetchModules) {
 
 export function renderAndroidModuleNavigation(container, modules) {
   if (!container) return [];
-  const androidModules = modules.filter((module) => module.client?.android);
+  const androidModules = modules
+    .filter((module) => module.client?.android)
+    .sort((a, b) => Number(a.client.android.order ?? a.order ?? 0) - Number(b.client.android.order ?? b.order ?? 0));
   if (!androidModules.length) return [...container.querySelectorAll("button")];
 
   const fragment = document.createDocumentFragment();

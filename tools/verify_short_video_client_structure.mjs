@@ -45,6 +45,26 @@ for (const style of ["list", "reel", "author-panel", "playback-panels"]) {
   assert(styles.includes(`./styles/${style}.css`), `missing short-video CSS import: ${style}`);
 }
 
+const androidEntrySource = fs.readFileSync(path.join(moduleDir, "android-module.js"), "utf8");
+const androidListSource = fs.readFileSync(path.join(moduleDir, "list", "view.js"), "utf8");
+const androidListStyles = fs.readFileSync(path.join(moduleDir, "styles", "list.css"), "utf8");
+assert(androidEntrySource.includes('view: "shortVideoSearch"'), "Android short-video search must use a dedicated route");
+assert(androidEntrySource.includes("short-video-chrome-row"), "Android short-video chrome must keep search and groups in one compact row");
+assert(!androidEntrySource.includes("short-video-chrome-sort"), "Android short-video chrome must not reserve a separate sorting tag");
+assert(androidEntrySource.includes("if (value === activeGroup)") && androidEntrySource.includes("openSortDialog(host, params)"), "tapping the active Android short-video group must open sorting");
+assert(androidEntrySource.indexOf('row.append(search)') > androidEntrySource.indexOf('for (const [value, label]'), "Android short-video search must stay at the far right of the group row");
+assert(androidEntrySource.includes("short-video-sort-overlay"), "Android short-video sorting must open a compact dialog");
+assert(androidListSource.includes("short-video-search-page-form"), "Android short-video search route must render its own search form");
+assert(!androidListSource.includes("renderSearchFilters"), "Android short-video search must not retain the shared shell filter renderer");
+assert(!androidListSource.includes("`${formatCompact(listState.data?.total || 0)} 条"), "Android short-video lists must not render total video counts");
+assert(!androidListSource.includes("author.count || 0"), "Android short-video author cards must not render author totals");
+assert(!androidListSource.includes("shell.append(renderLibraryTabs()"), "Android short-video group tabs must live in module chrome, not a second row");
+const browserPanelStyles = androidListStyles.slice(
+  androidListStyles.indexOf("body.short-video-mobile-browser-view #contentPanel"),
+  androidListStyles.indexOf("body.short-video-mobile-browser-view #viewContent")
+);
+assert(browserPanelStyles.includes("border: 0;") && browserPanelStyles.includes("box-shadow: none;"), "Android short-video playback must clear the shared content panel frame");
+
 const views = createShortVideoViews({
   els: {},
   getActiveUrl: () => "http://127.0.0.1:29998",
@@ -54,7 +74,7 @@ const views = createShortVideoViews({
 });
 assert.deepEqual(
   Object.keys(views).sort(),
-  ["clearSearchFilters", "deactivate", "getSearchState", "renderBrowser", "renderList", "renderSearchFilters", "submitSearch"],
+  ["deactivate", "getSearchState", "renderBrowser", "renderList", "renderSearch", "submitSearch"],
   "short-video public contract changed"
 );
 
@@ -74,7 +94,7 @@ function sourceFiles(dir) {
 }
 
 function verifyFeatureReferences() {
-  const files = sourceFiles(moduleDir).filter((filePath) => !/[\\/]index\.js$/.test(filePath));
+  const files = sourceFiles(moduleDir).filter((filePath) => !/[\\/](?:index|android-module)\.js$/.test(filePath));
   const sources = new Map(files.map((filePath) => [filePath, fs.readFileSync(filePath, "utf8")]));
   const methodNames = new Set();
   const ownMethods = new Map();

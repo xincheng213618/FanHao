@@ -49,7 +49,8 @@ src/modules/<id>/module.js
 
 - `routes`：模块拥有的页面及渲染函数。
 - `rootViews` / `bottomKey`：根页面和底部导航归属。
-- `search`：可选的模块搜索控制器；没有声明就不会生成顶部搜索入口。
+- `search`：可选的模块搜索控制器，负责本模块搜索状态和提交行为。
+- `renderChrome`：可选的模块顶部区域渲染函数；壳只提供空挂载点，标签、搜索入口、布局和是否显示均由模块决定。
 - `handleBack` / `deactivate`：可选的返回键与离开模块生命周期。
 - `api`：仅供组合壳调用的可选扩展，不参与模块间直接依赖。
 
@@ -59,7 +60,7 @@ src/modules/<id>/module.js
 
 1. 创建 `www\modules\<id>\android-module.js`。
 2. 在服务端 `src\modules\<id>\module.js` 中声明同路径 `client.android.entry`。
-3. 在入口中注册路由和本模块的搜索行为。
+3. 在入口中注册路由、搜索行为；需要顶部控件时由模块实现 `renderChrome`。
 4. 运行 `npm run verify:modules`、`npm run verify:imports` 和 `build-debug.ps1`。
 
 未来拆成独立 App 时，可以复用同一个模块入口和 `www\platform`，替换为只加载单个模块的薄 Host；业务模块本身不需要重新接回总壳。

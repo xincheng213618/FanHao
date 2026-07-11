@@ -2,54 +2,20 @@ import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STOR
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260705-mobile-actions-01";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
-import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260712-android-reflection-02";
-import { getElements } from "./js/dom.js?v=20260712-android-reflection-01";
+import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260712-module-chrome-03";
+import { getElements } from "./js/dom.js?v=20260712-module-chrome-03";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260706-mobile-web-sync-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
-import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=20260712-android-reflection-01";
+import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=20260712-module-chrome-03";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
-const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "studios", "studioDetail", "vr", "favorites", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoBrowser", "tools"]);
+const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "studios", "studioDetail", "vr", "favorites", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "shortVideoBrowser", "tools"]);
 const DEFAULT_VIEW = "works";
-const FANHAO_SECTION_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "vr", "people", "favorites", "history", "personDetail", "workDetail"]);
-const FANHAO_TOP_TABS = [
-  { label: "作品", view: "works" },
-  { label: "榜单", view: "rankings" },
-  { label: "片商", view: "studios" },
-  { label: "VR", view: "vr" },
-  { label: "人物", view: "people" },
-  { label: "收藏", view: "favorites" }
-];
-const NOVEL_TOP_TABS = [
-  { label: "本地", value: "local", dataset: { novelSource: "local" } },
-  { label: "远端", value: "bookstore", dataset: { novelSource: "bookstore" } }
-];
-const MEDIA_TOP_TABS = [
-  { label: "电影", value: "movie", dataset: { mediaBranch: "movie" } },
-  { label: "电视剧", value: "tv", dataset: { mediaBranch: "tv" } }
-];
 const DEFAULT_PHOTO_CATEGORY = "我喜欢的";
-const PHOTO_TOP_CATEGORY_PRIORITY = [
-  DEFAULT_PHOTO_CATEGORY,
-  "all",
-  "[XIUREN] 秀人网",
-  "[COS]",
-  "内购私拍",
-  "日本写真集",
-  "韩国写真集",
-  "国模"
-];
-const PHOTO_CATEGORY_LABELS = new Map([
-  [DEFAULT_PHOTO_CATEGORY, "我喜欢的"],
-  ["all", "全部"],
-  ["[XIUREN] 秀人网", "秀人网"],
-  ["[COS]", "COS"]
-]);
-const TV_TOP_CATEGORY_PRIORITY = ["中国", "美剧", "韩剧", "日本", "欧美", "台湾", "香港", "纪录片", "BBC纪录片合集"];
 const PRIMARY_LABELS = {
   fanhao: "番号",
   photo: "图库",
@@ -114,7 +80,6 @@ let imageLibrarySummary = null;
 let novelSummary = null;
 let musicSummary = null;
 let shortVideoSummary = null;
-let topTvCategoryFacets = [];
 let androidVersionInfo = null;
 let androidUpdateInfo = null;
 const FEED_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "vr", "people", "favorites", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail", "music", "shortVideos"]);
@@ -210,7 +175,7 @@ function sanitizeViewParams(view, params = {}) {
       ...(trackId ? { trackId } : {})
     };
   }
-  if (view === "shortVideos") {
+  if (view === "shortVideos" || view === "shortVideoSearch") {
     const query = String(params.query || params.q || "").trim();
     const author = String(params.author || "all").trim() || "all";
     const source = normalizeShortVideoSource(params.source || params.origin);
@@ -1338,7 +1303,6 @@ function showHome(options = {}) {
   els.contentPanel.hidden = true;
   els.viewBack.hidden = true;
   setActiveBottom("home");
-  syncFanhaoSectionNav();
   rememberViewState("home", {});
   if (!options.skipHistory) replaceCurrentHistory();
   queueScrollRestore(options.restoreScrollY ?? 0);
@@ -1413,6 +1377,7 @@ function canRenderWithoutLibrary(view = "") {
     || view === "novelReader"
     || view === "music"
     || view === "shortVideos"
+    || view === "shortVideoSearch"
     || view === "shortVideoBrowser";
 }
 
@@ -1553,7 +1518,6 @@ function renderCurrentView(options = {}) {
   els.viewContent.innerHTML = "";
   els.viewContent.className = "content-list";
   syncSearchSurface();
-  syncFanhaoSectionNav();
   renderRouteLoadingState();
   const renderGuard = beginViewRender(currentView, currentViewParams);
 
@@ -1607,6 +1571,7 @@ function routeLoadingCopy(view = currentView, params = currentViewParams) {
   if (view === "novelReader") return { kicker: "小说阅读", title: "章节", meta: "正在读取", message: "正在翻开章节" };
   if (view === "music") return { kicker: "本地音乐", title: "音乐", meta: "正在读取", message: "正在读取音乐库" };
   if (view === "shortVideoBrowser") return { kicker: "短视频", title: "正在播放", meta: "上滑切换", message: "正在打开短视频" };
+  if (view === "shortVideoSearch") return { kicker: "短视频", title: "搜索", meta: "", message: "正在打开搜索" };
   if (view === "rankings") return { kicker: "榜单", title: "排行榜", meta: "正在加载", message: "正在加载排行榜" };
   if (view === "studios") return { kicker: "片商", title: "片商索引", meta: "正在加载", message: "正在加载片商" };
   if (view === "studioDetail") return { kicker: "片商", title: "片商作品", meta: "正在加载", message: "正在加载片商作品" };
@@ -1630,6 +1595,7 @@ function syncContentPanelMode() {
   document.body.classList.toggle("novel-reader-view", currentView === "novelReader");
   document.body.classList.toggle("music-mobile-view", currentView === "music");
   document.body.classList.toggle("short-video-mobile-view", currentView === "shortVideos");
+  document.body.classList.toggle("short-video-search-page-view", currentView === "shortVideoSearch");
   document.body.classList.toggle("short-video-mobile-browser-view", currentView === "shortVideoBrowser");
   dispatchAppViewChanged();
 }
@@ -1683,173 +1649,18 @@ function isRootNavigationView(view = currentView) {
   return Boolean(resolved?.module.rootViews.has(view));
 }
 
-function fanhaoTabForView(view = currentView) {
-  if (view === "rankings") return "rankings";
-  if (view === "studios" || view === "studioDetail") return "studios";
-  if (view === "vr") return "vr";
-  if (view === "people" || view === "personDetail") return "people";
-  if (view === "favorites") return "favorites";
-  return "works";
-}
-
-function syncFanhaoSectionNav() {
-  if (FANHAO_SECTION_VIEWS.has(currentView)) {
-    renderTopSecondaryTabs(
-      FANHAO_TOP_TABS.map((tab) => ({ ...tab, value: tab.view, dataset: { fanhaoView: tab.view } })),
-      fanhaoTabForView(currentView)
-    );
-    return;
-  }
-
-  if (currentView === "channel" && isMediaBranchMode(currentViewParams.mode)) {
-    renderMediaTopBranchTabs(currentViewParams.mode);
-    return;
-  }
-
-  if (currentView === "channel" && normalizeChannelMode(currentViewParams.mode) === "tv") {
-    renderTvTopCategoryTabs(currentViewParams.category || "all");
-    return;
-  }
-
-  if (currentView === "channel" && normalizeChannelMode(currentViewParams.mode) === "photo") {
-    renderPhotoCategoryTabs(currentViewParams.category || DEFAULT_PHOTO_CATEGORY);
-    return;
-  }
-
-  if (currentView === "novels" || currentView === "novelDetail" || currentView === "novelReader") {
-    renderNovelTopSourceTabs();
-    return;
-  }
-
-  hideTopSecondaryNav();
-}
-
-function hideTopSecondaryNav() {
-  if (els.fanhaoSectionNav) els.fanhaoSectionNav.hidden = true;
-  if (els.fanhaoSectionNav) delete els.fanhaoSectionNav.dataset.secondaryKind;
-  if (els.topPrimaryLabel) els.topPrimaryLabel.hidden = currentView === "shortVideos";
-}
-
-function renderTopSecondaryTabs(tabs = [], activeValue = "") {
-  if (!els.fanhaoSectionNav) return;
-  els.fanhaoSectionNav.dataset.secondaryKind = secondaryKindForTabs(tabs);
-  els.fanhaoSectionNav.replaceChildren(...tabs.map((tab) => createTopSecondaryButton(tab, activeValue)));
-  els.fanhaoSectionNav.hidden = false;
-  if (els.topPrimaryLabel) els.topPrimaryLabel.hidden = true;
-}
-
-function secondaryKindForTabs(tabs = []) {
-  if (tabs.some((tab) => tab.dataset?.tvCategory)) return "tv";
-  if (tabs.some((tab) => tab.dataset?.photoCategory)) return "photo";
-  if (tabs.some((tab) => tab.dataset?.mediaBranch)) return "media";
-  if (tabs.some((tab) => tab.dataset?.novelSource)) return "novel";
-  return "fanhao";
-}
-
-function createTopSecondaryButton(tab, activeValue) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.textContent = tab.label;
-  button.className = tab.value === activeValue ? "active" : "";
-  for (const [key, value] of Object.entries(tab.dataset || {})) {
-    button.dataset[key] = value;
-  }
-  return button;
-}
-
-function renderTvTopCategoryTabs(activeCategory = "all") {
-  const categories = orderedTvTopCategories(topTvCategoryFacets);
-  renderTopSecondaryTabs([
-    { label: "全部", value: "all", dataset: { tvCategory: "all" } },
-    ...categories.map((item) => ({ label: item.value, value: item.value, dataset: { tvCategory: item.value } }))
-  ], activeCategory || "all");
-}
-
-function renderPhotoCategoryTabs(activeCategory = DEFAULT_PHOTO_CATEGORY) {
-  const active = activeCategory || DEFAULT_PHOTO_CATEGORY;
-  renderTopSecondaryTabs(photoTopCategoryTabs(active), active);
-}
-
-function renderNovelTopSourceTabs() {
-  renderTopSecondaryTabs(NOVEL_TOP_TABS, novelViews?.getLibrarySource?.() || "local");
-}
-
 function isNovelNavigationView(view = currentView) {
   return view === "novels" || view === "novelDetail" || view === "novelReader";
 }
 
-function renderMediaTopBranchTabs(activeMode = "movie") {
-  renderTopSecondaryTabs(MEDIA_TOP_TABS, normalizeChannelMode(activeMode) === "tv" ? "tv" : "movie");
-}
-
-function isMediaBranchMode(mode) {
-  const normalized = normalizeChannelMode(mode);
-  return normalized === "media" || normalized === "movie" || normalized === "tv";
-}
-
-function photoTopCategoryTabs(activeCategory = DEFAULT_PHOTO_CATEGORY) {
-  const seen = new Set();
-  const makeTab = (value) => {
-    if (!value || seen.has(value)) return null;
-    seen.add(value);
-    return {
-      label: photoCategoryTabLabel(value),
-      value,
-      dataset: { photoCategory: value }
-    };
-  };
-  const tabs = PHOTO_TOP_CATEGORY_PRIORITY.map(makeTab).filter(Boolean);
-  if (activeCategory && !seen.has(activeCategory)) tabs.push(makeTab(activeCategory));
-  return tabs.filter(Boolean);
-}
-
-function photoCategoryTabLabel(value) {
-  return PHOTO_CATEGORY_LABELS.get(value) || photoCategoryDisplayName(value);
-}
-
-function photoCategoryDisplayName(value) {
-  const text = String(value || "").trim();
-  if (!text || text === "all") return "全部";
-  return text.replace(/^\[[^\]]+\]\s*/, "") || text;
-}
-
-function orderedTvTopCategories(items = []) {
-  const priority = new Map(TV_TOP_CATEGORY_PRIORITY.map((value, index) => [value, index]));
-  return [...items]
-    .filter((item) => item?.value)
-    .sort((a, b) => {
-      const aPriority = priority.has(a.value) ? priority.get(a.value) : 999;
-      const bPriority = priority.has(b.value) ? priority.get(b.value) : 999;
-      return aPriority - bPriority || Number(b.count || 0) - Number(a.count || 0) || String(a.value).localeCompare(String(b.value), undefined, { numeric: true, sensitivity: "base" });
-    });
-}
-
-function setTopSecondaryTabs(kind, options = {}) {
-  if (kind === "none") {
-    hideTopSecondaryNav();
-    return;
-  }
-  if (kind === "photo") {
-    if (currentView === "channel" && normalizeChannelMode(currentViewParams.mode) === "photo") {
-      renderPhotoCategoryTabs(options.category || currentViewParams.category || DEFAULT_PHOTO_CATEGORY);
-    }
-    return;
-  }
-  if (kind === "tv") {
-    const categories = options.facets?.categories;
-    if (Array.isArray(categories) && categories.length) topTvCategoryFacets = categories;
-    if (currentView === "channel" && normalizeChannelMode(currentViewParams.mode) === "tv") {
-      renderTvTopCategoryTabs(options.category || currentViewParams.category || "all");
-    }
-    return;
-  }
-  if (kind === "media") {
-    if (currentView === "channel" && isMediaBranchMode(currentViewParams.mode)) {
-      renderMediaTopBranchTabs(options.mode || currentViewParams.mode || "movie");
-    }
-    return;
-  }
-  syncFanhaoSectionNav();
+function syncModuleChrome() {
+  if (!els.moduleChrome) return false;
+  els.moduleChrome.replaceChildren();
+  delete els.moduleChrome.dataset.module;
+  const rendered = Boolean(androidModuleRegistry?.renderChrome(currentView, currentViewParams, els.moduleChrome));
+  const visible = rendered && els.moduleChrome.childElementCount > 0;
+  els.moduleChrome.hidden = !visible;
+  return visible;
 }
 
 function bottomNavKeyFor(name = currentView, params = currentViewParams) {
@@ -1866,7 +1677,6 @@ function setActiveBottom(name = currentView) {
       || (button.dataset.openChannel ? normalizeChannelMode(button.dataset.openChannel) : "");
     button.classList.toggle("active", Boolean(key && key === activeKey));
   }
-  if (els.topPrimaryLabel) els.topPrimaryLabel.textContent = PRIMARY_LABELS[activeKey] || "资料库";
   if (els.profileSettingsButton) {
     const profileActive = currentView === "tools";
     els.profileSettingsButton.hidden = !profileActive;
@@ -1876,21 +1686,19 @@ function setActiveBottom(name = currentView) {
 
 function syncSearchSurface() {
   const controller = activeSearchController();
-  const context = searchContext();
   const mode = String(controller?.mode || "");
   const expanded = Boolean(controller?.isExpanded?.(currentView, currentViewParams, searchSurfaceExpanded));
-  syncModuleToolbarActions(controller, context);
+  const hasModuleChrome = syncModuleChrome();
   if (renderedSearchController && renderedSearchController !== controller) {
     renderedSearchController.clearFilters?.(els.searchForm);
   }
   renderedSearchController = controller;
   if (els.searchHistory) els.searchHistory.hidden = !(expanded && controller?.showHistory?.(currentView, currentViewParams));
   if (els.bottomNavBar) els.bottomNavBar.hidden = Boolean(expanded && controller?.hideBottom?.(currentView, currentViewParams));
-  if (els.topChannelBar) els.topChannelBar.hidden = expanded;
+  if (els.moduleChrome) els.moduleChrome.hidden = expanded || !hasModuleChrome;
   if (els.searchForm) els.searchForm.hidden = !expanded;
   els.searchForm.classList.toggle("search-mode", mode === "route");
   els.searchForm.classList.toggle("channel-mode", mode === "channel");
-  els.searchForm.classList.toggle("short-video-mode", mode === "short-video");
   document.body.classList.toggle("search-view", mode === "route" && expanded);
   document.body.classList.toggle("search-expanded", expanded);
   els.searchInput.placeholder = controller?.placeholder?.(currentView, currentViewParams) || "搜索";
@@ -1912,24 +1720,6 @@ function activeSearchController() {
 
 function searchContext() {
   return { view: currentView, params: currentViewParams };
-}
-
-function syncModuleToolbarActions(controller = activeSearchController(), context = searchContext()) {
-  if (!els.topModuleActions) return;
-  els.topModuleActions.replaceChildren();
-  els.topSearchButton = null;
-  if (!controller?.showAction?.(context.view, context.params)) return;
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "top-icon-button top-search-button";
-  button.setAttribute("aria-label", controller.actionLabel?.(context.view, context.params) || "搜索");
-  const icon = document.createElement("span");
-  icon.setAttribute("aria-hidden", "true");
-  icon.textContent = "⌕";
-  button.append(icon);
-  button.addEventListener("click", openSearchSurface);
-  els.topModuleActions.append(button);
-  els.topSearchButton = button;
 }
 
 async function initializeAndroidModules(definitions) {
@@ -1978,7 +1768,9 @@ function createAndroidModuleHost() {
     }),
     ui: Object.freeze({
       setActiveBottom,
-      setTopSecondaryTabs,
+      refreshChrome: syncModuleChrome,
+      openSearch: openSearchSurface,
+      scrollToTop: scrollToTopInstant,
       renderCurrentView,
       renderCurrentViewPreservingScroll,
       setStatus,
@@ -2066,13 +1858,6 @@ searchHistory = createSearchHistory({
 });
 
 window.addEventListener("popstate", (event) => restoreFromHistoryState(event.state));
-window.addEventListener("fanhaoNovelSourceChanged", () => {
-  if (isNovelNavigationView()) {
-    renderNovelTopSourceTabs();
-  }
-});
-
-window.addEventListener("fanhaoOpenShortVideoSearch", openSearchSurface);
 
 window.fanhaoHandleNativeBack = () => {
   if (mediaViewer?.close()) return true;
@@ -2194,7 +1979,7 @@ for (const button of els.quickServers) {
 }
 
 for (const button of els.openTargets) {
-  if (button.closest(".bottom-nav") || button.closest("#fanhaoSectionNav")) continue;
+  if (button.closest(".bottom-nav")) continue;
   button.addEventListener("click", () => {
     if (button.dataset.openView) {
       showPrimaryView(button.dataset.openView, { resetStack: true });
@@ -2207,70 +1992,6 @@ for (const button of els.openTargets) {
     openInLibrary(button.dataset.openUrl || "/");
   });
 }
-
-els.fanhaoSectionNav?.addEventListener("click", (event) => {
-  const button = event.target.closest("button");
-  if (!button) return;
-  if (button.dataset.fanhaoView) {
-    const view = button.dataset.fanhaoView || DEFAULT_VIEW;
-    showView(view, {}, { resetStack: true });
-    scrollToTopInstant();
-    return;
-  }
-  if (button.dataset.tvCategory) {
-    const category = button.dataset.tvCategory || "all";
-    showView(
-      "channel",
-      {
-        ...currentViewParams,
-        mode: "tv",
-        category: category === "all" ? "" : category,
-        tvView: "series",
-        seriesKey: "",
-        query: ""
-      },
-      { skipHistory: true, replaceHistory: true }
-    );
-    scrollToTopInstant();
-    return;
-  }
-  if (button.dataset.photoCategory) {
-    const category = button.dataset.photoCategory || DEFAULT_PHOTO_CATEGORY;
-    const photoView = currentViewParams.collection ? "collections" : currentViewParams.photoView || "collections";
-    showView(
-      "channel",
-      {
-        ...currentViewParams,
-        mode: "photo",
-        photoView,
-        collection: "",
-        category,
-        query: ""
-      },
-      { skipHistory: true, replaceHistory: true }
-    );
-    scrollToTopInstant();
-    return;
-  }
-  if (button.dataset.novelSource) {
-    novelViews?.setLibrarySource?.(button.dataset.novelSource);
-    if (currentView === "novels") {
-      renderCurrentView();
-      scrollToTopInstant();
-    } else if (isNovelNavigationView()) {
-      showView("novels", {}, { resetStack: true });
-      scrollToTopInstant();
-    } else {
-      showView("novels", {}, { resetStack: true });
-      scrollToTopInstant();
-    }
-  }
-  if (button.dataset.mediaBranch) {
-    showView("channel", { mode: button.dataset.mediaBranch }, { resetStack: true });
-    scrollToTopInstant();
-    return;
-  }
-});
 
 let suppressBottomNavClick = false;
 let bottomNavLongPressTimer = 0;

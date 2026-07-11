@@ -190,12 +190,11 @@ h2 {
   bottom: -8px;
 }
 
-.top-channel-bar {
+.module-chrome {
   position: sticky;
   top: 0;
   z-index: 28;
-  display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  display: flex;
   align-items: center;
   gap: 8px;
   min-height: calc(44px + env(safe-area-inset-top));
@@ -205,24 +204,12 @@ h2 {
   box-shadow: 0 1px 0 var(--line);
 }
 
-.top-channel-bar[hidden] {
+.module-chrome[hidden] {
   display: none;
 }
 
-.top-bar-spacer {
-  width: 44px;
-  height: 44px;
-}
-
-.top-module-actions {
-  display: grid;
-  width: 44px;
-  min-height: 44px;
-  place-items: center;
-}
-
 @media (max-width: 390px) {
-  .top-channel-bar {
+  .module-chrome {
     margin-right: -12px;
     margin-left: -12px;
     padding-right: 12px;
@@ -230,7 +217,8 @@ h2 {
   }
 }
 
-.top-icon-button {
+.module-chrome-search {
+  flex: 0 0 auto;
   display: grid;
   width: 44px;
   height: 44px;
@@ -239,6 +227,12 @@ h2 {
   border-radius: 8px;
   background: transparent;
   color: var(--ink);
+}
+
+.module-chrome-search span {
+  font-size: 31px;
+  font-weight: 500;
+  line-height: 1;
 }
 
 .profile-settings-button {
@@ -255,56 +249,6 @@ h2 {
 }
 
 .profile-settings-button[hidden] {
-  display: none;
-}
-
-.top-menu-lines {
-  position: relative;
-  width: 26px;
-  height: 3px;
-  border-radius: 99px;
-  background: currentColor;
-}
-
-.top-menu-lines::before,
-.top-menu-lines::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  width: 26px;
-  height: 3px;
-  border-radius: 99px;
-  background: currentColor;
-}
-
-.top-menu-lines::before {
-  top: -9px;
-}
-
-.top-menu-lines::after {
-  bottom: -9px;
-}
-
-.top-search-button span {
-  font-size: 31px;
-  font-weight: 500;
-  line-height: 1;
-}
-
-.top-primary-label {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--ink);
-  font-size: 20px;
-  font-weight: 950;
-  line-height: 1.1;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.top-primary-label[hidden] {
   display: none;
 }
 
@@ -392,38 +336,6 @@ body.search-expanded .search-bar {
   color: var(--blue);
 }
 
-.search-bar.short-video-mode {
-  border-color: rgba(254, 44, 85, 0.26);
-  border-radius: 24px;
-  background: var(--field);
-  padding-bottom: 7px;
-}
-
-.search-bar.short-video-mode > span,
-.search-bar.short-video-mode input::placeholder {
-  color: #fe2c55;
-}
-
-.short-video-search-filters {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 8px;
-  padding: 0 7px 0 50px;
-}
-
-.short-video-search-filters select {
-  min-width: 0;
-  height: 36px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-raised);
-  color: var(--ink);
-  padding: 0 10px;
-  font-size: 12px;
-  font-weight: 850;
-}
-
 .search-history {
   display: flex;
   gap: 7px;
@@ -468,30 +380,26 @@ body.search-expanded .search-history {
   color: var(--green);
 }
 
-.fanhao-section-nav {
+.module-chrome-tabs {
+  flex: 1 1 auto;
   display: flex;
   align-items: center;
   justify-content: flex-start;
   gap: 20px;
   min-width: 0;
   overflow-x: auto;
-  padding: 0 14px;
+  padding: 0;
   scrollbar-width: none;
 }
 
-.fanhao-section-nav[data-secondary-kind="tv"] {
-  justify-content: flex-start;
-  gap: 18px;
-}
-
-.fanhao-section-nav[data-secondary-kind="photo"] {
+.photo-chrome-tabs {
   justify-content: flex-start;
   gap: 10px;
 }
 
-.fanhao-section-nav[data-secondary-kind="novel"],
-.fanhao-section-nav[data-secondary-kind="media"] {
-  justify-self: center;
+.novel-chrome-tabs,
+.media-chrome-tabs {
+  flex: 0 1 214px;
   width: min(214px, 100%);
   justify-content: stretch;
   gap: 0;
@@ -503,15 +411,15 @@ body.search-expanded .search-history {
   box-shadow: 0 8px 18px rgba(237, 66, 89, 0.08);
 }
 
-.fanhao-section-nav[hidden] {
+.module-chrome-tabs[hidden] {
   display: none;
 }
 
-.fanhao-section-nav::-webkit-scrollbar {
+.module-chrome-tabs::-webkit-scrollbar {
   display: none;
 }
 
-.fanhao-section-nav button {
+.module-chrome-tabs button {
   position: relative;
   flex: 0 0 auto;
   min-width: 44px;
@@ -528,7 +436,7 @@ body.search-expanded .search-history {
   white-space: nowrap;
 }
 
-.fanhao-section-nav[data-secondary-kind="photo"] button {
+.photo-chrome-tabs button {
   min-height: 44px;
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -538,8 +446,8 @@ body.search-expanded .search-history {
   line-height: 1;
 }
 
-.fanhao-section-nav[data-secondary-kind="novel"] button,
-.fanhao-section-nav[data-secondary-kind="media"] button {
+.novel-chrome-tabs button,
+.media-chrome-tabs button {
   flex: 1 1 0;
   min-height: 44px;
   border-radius: 999px;
@@ -548,28 +456,28 @@ body.search-expanded .search-history {
   line-height: 1;
 }
 
-.fanhao-section-nav[data-secondary-kind="photo"] button.active {
+.photo-chrome-tabs button.active {
   border-color: color-mix(in srgb, var(--green) 45%, var(--line));
   background: var(--success-soft);
   color: var(--green);
 }
 
-.fanhao-section-nav[data-secondary-kind="novel"] button.active,
-.fanhao-section-nav[data-secondary-kind="media"] button.active {
+.novel-chrome-tabs button.active,
+.media-chrome-tabs button.active {
   background: #ed4259;
   color: #fff;
   box-shadow: 0 6px 14px rgba(237, 66, 89, 0.18);
 }
 
-.fanhao-section-nav button.active {
+.module-chrome-tabs button.active {
   color: var(--ink);
 }
 
-.fanhao-section-nav[data-secondary-kind="photo"] button.active {
+.photo-chrome-tabs button.active {
   color: var(--green);
 }
 
-.fanhao-section-nav button.active::after {
+.module-chrome-tabs button.active::after {
   content: "";
   position: absolute;
   left: 50%;
@@ -581,12 +489,12 @@ body.search-expanded .search-history {
   background: currentColor;
 }
 
-.fanhao-section-nav[data-secondary-kind="photo"] button.active::after {
+.photo-chrome-tabs button.active::after {
   display: none;
 }
 
-.fanhao-section-nav[data-secondary-kind="novel"] button.active::after,
-.fanhao-section-nav[data-secondary-kind="media"] button.active::after {
+.novel-chrome-tabs button.active::after,
+.media-chrome-tabs button.active::after {
   display: none;
 }
 

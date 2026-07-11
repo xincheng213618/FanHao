@@ -1,6 +1,6 @@
 import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=20260706-mobile-web-sync-01";
 import { formatCompact } from "../../../js/format.js";
-import { AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, SHORT_VIDEO_SORT_OPTIONS, formatDate, formatDuration, initials, normalizeSort, normalizeSource, selectOption, shortVideoSortLabel } from "../shared.js";
+import { AUTHOR_INITIAL_COUNT, DEFAULT_SORT, SHORT_VIDEO_SORT_OPTIONS, initials, normalizeSort } from "../shared.js";
 export function createShortVideoListView(context = {}) {
   const { browserState, els, getActiveUrl, listState, openSettings, showView } = context;
   const activeLibraryGroup = (...args) => context.activeLibraryGroup(...args);
@@ -16,6 +16,7 @@ export function createShortVideoListView(context = {}) {
   const shortVideoAuthorFilterValue = (...args) => context.shortVideoAuthorFilterValue(...args);
   const showAuthorPanel = (...args) => context.showAuthorPanel(...args);
   const sortedAuthorFacets = (...args) => context.sortedAuthorFacets(...args);
+  const submitSearch = (...args) => context.submitSearch(...args);
   const updateListParams = (...args) => context.updateListParams(...args);
   function renderListShell() {
     els.viewContent.innerHTML = "";
@@ -23,7 +24,17 @@ export function createShortVideoListView(context = {}) {
     const shell = document.createElement("section");
     shell.className = "short-video-mobile-list";
     bindSettingsLongPress(shell);
-    shell.append(renderLibraryTabs(), renderListToolbar());
+    if (listState.searchPage) shell.append(renderDedicatedSearchHeader());
+    const toolbar = renderListToolbar();
+    if (toolbar) shell.append(toolbar);
+    if (listState.searchPage && !listState.query) {
+      const prompt = document.createElement("div");
+      prompt.className = "short-video-search-page-prompt";
+      prompt.textContent = "输入标题、作者或标签开始搜索";
+      shell.append(prompt);
+      els.viewContent.append(shell);
+      return;
+    }
     if (isAuthorIndexView()) {
       shell.append(renderAuthorIndex());
       els.viewContent.append(shell);
@@ -59,66 +70,58 @@ export function createShortVideoListView(context = {}) {
     els.viewContent.append(shell);
   }
 
-  function renderLibraryTabs() {
-    const navigation = document.createElement("div");
-    navigation.className = "short-video-mobile-tabs";
-    const tabs = document.createElement("div");
-    tabs.className = "short-video-mobile-tab-list";
-    tabs.setAttribute("role", "tablist");
-    tabs.setAttribute("aria-label", "短视频分组");
+  function renderDedicatedSearchHeader() {
+    const wrap = document.createElement("div");
+    wrap.className = "short-video-search-page-head";
+    const form = document.createElement("form");
+    form.className = "short-video-search-page-form";
+    const input = document.createElement("input");
+    input.type = "search";
+    input.value = listState.query || "";
+    input.placeholder = "搜索标题、作者或标签";
+    input.setAttribute("aria-label", "搜索短视频");
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.textContent = "搜索";
+    form.append(input, submit);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitSearch(input.value, { source: activeLibraryGroup(), sort: listState.sort || DEFAULT_SORT });
+    });
+
+    const filters = document.createElement("div");
+    filters.className = "short-video-search-page-filters";
     const activeGroup = activeLibraryGroup();
     for (const [value, label] of [["all", "全部"], ["liked", "我的喜欢"], ["authors", "作者"]]) {
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "short-video-mobile-tab";
-      const active = activeGroup === value;
-      button.classList.toggle("active", active);
-      button.setAttribute("role", "tab");
-      button.setAttribute("aria-selected", String(active));
+      button.className = "short-video-search-page-tag";
+      button.classList.toggle("active", value === activeGroup);
       button.textContent = label;
       button.addEventListener("click", () => {
-        if (active && !(value === "authors" && isAuthorFeedView())) return;
-        showView("shortVideos", {
-          query: "",
-          author: "all",
-          source: value,
-          sort: listState.sort || DEFAULT_SORT
-        }, { resetStack: true });
+        if (value === activeGroup) {
+          openSearchSortDialog();
+          return;
+        }
+        submitSearch(input.value, { source: value, author: "all", sort: listState.sort || DEFAULT_SORT });
       });
-      tabs.append(button);
+      filters.append(button);
     }
-    navigation.append(tabs);
-    if (!isAuthorIndexView()) {
-      const sortWrap = document.createElement("label");
-      sortWrap.className = "short-video-mobile-sort-wrap";
-      sortWrap.setAttribute("aria-label", "短视频排序");
-      const sort = document.createElement("select");
-      sort.className = "short-video-mobile-sort";
-      sort.setAttribute("aria-label", "短视频排序");
-      for (const item of SHORT_VIDEO_SORT_OPTIONS) sort.append(selectOption(item[0], item[1]));
-      sort.value = listState.sort || DEFAULT_SORT;
-      sort.addEventListener("change", () => updateListParams({ sort: sort.value || DEFAULT_SORT }));
-      sortWrap.append(sort);
-      navigation.append(sortWrap);
-    }
-    return navigation;
+    wrap.append(form, filters);
+    requestAnimationFrame(() => input.focus());
+    return wrap;
   }
 
   function renderListToolbar() {
+    if (isAuthorIndexView() || !isAuthorFeedView()) return null;
     const toolbar = document.createElement("div");
-    toolbar.className = "short-video-mobile-toolbar";
+    toolbar.className = "short-video-mobile-toolbar author-context";
     const copy = document.createElement("div");
     copy.className = "short-video-mobile-toolbar-copy";
-    const meta = document.createElement("span");
-    if (isAuthorIndexView()) {
-      meta.textContent = listState.loading && !(listState.data?.authors || []).length
-        ? "正在读取作者"
-        : `${formatCompact(sortedAuthorFacets({ ignoreQuery: true }).length)} 位作者`;
-    } else if (isAuthorFeedView()) {
+    if (isAuthorFeedView()) {
       const author = currentAuthorFacet();
       const title = document.createElement("strong");
       title.textContent = author.name || "作者作品";
-      meta.textContent = `${formatCompact(listState.data?.total || 0)} 条作品`;
       const back = document.createElement("button");
       back.type = "button";
       back.className = "short-video-mobile-author-back";
@@ -129,22 +132,44 @@ export function createShortVideoListView(context = {}) {
       });
       toolbar.append(back);
       copy.append(title);
-    } else {
-      meta.textContent = listState.loading && !listState.data
-        ? "正在读取"
-        : `${formatCompact(listState.data?.total || 0)} 条`;
     }
-    copy.append(meta);
     toolbar.append(copy);
-    if (listState.query) {
-      const clear = document.createElement("button");
-      clear.type = "button";
-      clear.className = "short-video-mobile-query-clear";
-      clear.textContent = `清除“${listState.query}”`;
-      clear.addEventListener("click", () => updateListParams({ query: "" }));
-      toolbar.append(clear);
-    }
     return toolbar;
+  }
+
+  function openSearchSortDialog() {
+    document.querySelector(".short-video-sort-overlay")?.remove();
+    const overlay = document.createElement("div");
+    overlay.className = "short-video-sort-overlay";
+    const backdrop = document.createElement("button");
+    backdrop.type = "button";
+    backdrop.className = "short-video-sort-backdrop";
+    backdrop.setAttribute("aria-label", "关闭排序");
+    const panel = document.createElement("section");
+    panel.className = "short-video-sort-sheet";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    panel.setAttribute("aria-label", "短视频排序");
+    const title = document.createElement("strong");
+    title.textContent = "排序";
+    panel.append(title);
+    const activeSort = normalizeSort(listState.sort || DEFAULT_SORT);
+    for (const [value, label] of SHORT_VIDEO_SORT_OPTIONS) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "short-video-sort-option";
+      button.classList.toggle("active", value === activeSort);
+      button.textContent = label;
+      button.addEventListener("click", () => {
+        overlay.remove();
+        updateListParams({ sort: value });
+      });
+      panel.append(button);
+    }
+    backdrop.addEventListener("click", () => overlay.remove());
+    overlay.append(backdrop, panel);
+    document.body.append(overlay);
+    panel.querySelector(".active")?.focus();
   }
 
   function bindSettingsLongPress(target) {
@@ -210,7 +235,7 @@ export function createShortVideoListView(context = {}) {
       const more = document.createElement("button");
       more.type = "button";
       more.className = "short-video-mobile-author-index-more";
-      more.textContent = `继续加载（${formatCompact(visibleCount)} / ${formatCompact(authors.length)}）`;
+      more.textContent = "继续加载更多作者";
       more.addEventListener("click", () => appendVisibleAuthors(true));
       wrap.append(more);
     }
@@ -241,45 +266,9 @@ export function createShortVideoListView(context = {}) {
     }
     const name = document.createElement("strong");
     name.textContent = author.name || "未知作者";
-    const count = document.createElement("span");
-    count.textContent = `${formatCompact(author.count || 0)} 条视频`;
-    button.append(avatar, name, count);
+    button.append(avatar, name);
     bindReliableTap(button, () => showAuthorPanel({ authorFilter: shortVideoAuthorFilterValue(author), author }));
     return button;
-  }
-
-  function renderSearchFilters(form, onSubmit = null) {
-    if (!form) return;
-    const existing = form.querySelector(".short-video-search-filters");
-    if (existing) existing.remove();
-    const filters = document.createElement("div");
-    filters.className = "short-video-search-filters";
-
-    const source = document.createElement("select");
-    source.dataset.shortVideoSearchSource = "1";
-    source.setAttribute("aria-label", "短视频分组");
-    for (const item of [
-      ["all", "全部"],
-      ["liked", "我的喜欢"],
-      ["authors", "作者"]
-    ]) source.append(selectOption(item[0], item[1]));
-    source.value = activeLibraryGroup();
-
-    const sort = document.createElement("select");
-    sort.dataset.shortVideoSearchSort = "1";
-    sort.setAttribute("aria-label", "短视频排序");
-    for (const item of SHORT_VIDEO_SORT_OPTIONS) sort.append(selectOption(item[0], item[1]));
-    sort.value = listState.sort || DEFAULT_SORT;
-
-    const apply = () => {
-      listState.sort = sort.value || DEFAULT_SORT;
-      if (onSubmit) onSubmit();
-    };
-    source.addEventListener("change", apply);
-    sort.addEventListener("change", apply);
-    filters.append(source, sort);
-    form.append(filters);
-    listState.searchFiltersEl = filters;
   }
 
   function renderCard(video) {
@@ -373,11 +362,9 @@ export function createShortVideoListView(context = {}) {
 
   return {
     renderListShell,
-    renderLibraryTabs,
     renderListToolbar,
     renderAuthorIndex,
     renderAuthorIndexCard,
-    renderSearchFilters,
     renderCard,
     bindReliableTap
   };
