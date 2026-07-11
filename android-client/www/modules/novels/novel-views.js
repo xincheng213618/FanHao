@@ -9,6 +9,7 @@ const NOVEL_CATALOG_PAGE_SIZE = 80;
 const NOVEL_READING_CHARS_PER_MINUTE = 450;
 const NOVEL_REMOTE_PAGE_SIZE = 80;
 const NOVEL_AUTHOR_PAGE_SIZE = 60;
+const NOVEL_CHAPTER_PREFETCH_LIMIT = 6;
 const DEFAULT_QUERY_STATE = {
   query: "",
   category: "all",
@@ -37,10 +38,24 @@ export function createNovelViews(context) {
   const listState = { ...DEFAULT_QUERY_STATE, uploading: false, busyAction: "" };
   const localBooks = new Map();
   const selectedLocalBookIds = new Set();
-  const catalogState = { bookId: "", query: "", page: 0, descending: false };
-  const textSearchState = { bookId: "", query: "", results: [], hasMore: false, loading: false, error: "" };
+  const catalogState = {
+    bookId: "",
+    query: "",
+    page: 0,
+    descending: false,
+    remotePaged: false,
+    total: 0,
+    filteredTotal: 0,
+    offset: 0
+  };
+  let catalogSearchTimer = null;
+  let catalogRequestId = 0;
+  let detailCatalogRequestId = 0;
+  const detailState = { book: null, cacheEntry: null, chapters: [], progressChapterTitle: "" };
   let importingNativeText = false;
   let cachingBookId = "";
+  const prefetchedRemoteChapters = new Map();
+  const remoteChapterPrefetchRequests = new Map();
   const readerState = {
     active: false,
     book: null,
@@ -50,7 +65,8 @@ export function createNovelViews(context) {
     menuOpen: false,
     settingsOpen: false,
     catalogOpen: false,
-    searchOpen: false,
+    catalogLoading: false,
+    catalogError: "",
     pendingScrollRatio: 0,
     nativeBrightnessSet: false,
     nativeImmersiveSet: false,
@@ -1092,7 +1108,8 @@ export function createNovelViews(context) {
   async function renderNovelDetail(id, isActive = () => true) {
     deactivateReader();
     const bookId = String(id || "").trim();
-    const path = novelDetailPath(bookId);
+    const path = novelMetaPath(bookId);
+    const fullDetailPath = novelDetailPath(bookId);
     const activeUrl = getActiveUrl();
     let renderedCache = false;
 
@@ -1121,7 +1138,7 @@ export function createNovelViews(context) {
 
     const cachedRemoteEntry = await ensureLocalNovelEntry(remoteCacheIdFromSourceId(bookId)).catch(() => null);
     if (!isActive()) return;
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
+    const cached = await readCachedJson(activeUrl, fullDetailPath).catch(() => null);
     if (!isActive()) return;
     if (cached?.payload?.book) {
       renderedCache = true;
@@ -1132,7 +1149,7 @@ export function createNovelViews(context) {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 16000, signal: isActive.signal });
       writeCachedJson(activeUrl, path, data).catch(() => {});
       if (!isActive()) return;
-      renderNovelDetailData(data);
+      await renderRemoteNovelDetailMeta(data, isActive);
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
@@ -1147,16 +1164,59 @@ export function createNovelViews(context) {
     }
   }
 
-  function renderNovelDetailData(data = {}, cacheEntry = null) {
+  async function renderRemoteNovelDetailMeta(data = {}, isActive = () => true) {
+    const book = markRemoteBookWithCache(data.book || {});
+    const sameDetailBook = String(detailState.book?.id || "") === String(book.id || "");
+    const fallbackChapters = sameDetailBook
+      ? detailState.chapters
+      : [];
+    if (!sameDetailBook) detailState.progressChapterTitle = "";
+    detailState.book = book;
+    detailState.cacheEntry = null;
+    detailState.chapters = fallbackChapters;
+    catalogState.bookId = String(book.id || "");
+    catalogState.query = "";
+    catalogState.descending = false;
+    catalogState.page = 0;
+    catalogState.remotePaged = true;
+    catalogState.total = Number(book.chapterCount || data.chapterTotal || 0);
+    catalogState.filteredTotal = catalogState.total;
+    catalogState.offset = 0;
+    await loadRemoteDetailCatalogPage({
+      anchor: book.progress?.chapterIndex || 1,
+      isActive,
+      render: true
+    });
+  }
+
+  function renderNovelDetailData(data = {}, cacheEntry = null, options = {}) {
     const book = markRemoteBookWithCache(data.book || {});
     const chapters = Array.isArray(data.chapters) ? data.chapters : [];
+    const remotePaged = Boolean(options.remotePaged);
     const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
+
+    if (String(detailState.book?.id || "") !== String(book.id || "")) detailState.progressChapterTitle = "";
+    detailState.book = book;
+    detailState.cacheEntry = cacheEntry;
+    detailState.chapters = chapters;
+    const detailProgressIndex = Number((book.localProgress || book.progress)?.chapterIndex || 0);
+    const detailProgressChapter = detailProgressIndex
+      ? chapters.find((chapter) => Number(chapter.index) === detailProgressIndex)
+      : null;
+    if (detailProgressChapter?.title) detailState.progressChapterTitle = detailProgressChapter.title;
 
     els.viewKicker.textContent = bookCategoryLabel(book) || "小说";
     els.viewTitle.textContent = book.title || "小说详情";
-    els.viewMeta.textContent = `${formatNumber(chapters.length || book.chapterCount || 0)} 章 · ${formatBytes(book.sizeBytes)}${suffix}`;
+    els.viewMeta.textContent = `${formatNumber(book.chapterCount || chapters.length || 0)} 章 · ${formatBytes(book.sizeBytes)}${suffix}`;
     els.viewContent.innerHTML = "";
     prepareCatalogState(book, chapters, book.progress?.chapterIndex || 1);
+    if (remotePaged) {
+      catalogState.remotePaged = true;
+      catalogState.total = Number(options.catalog?.total || book.chapterCount || 0);
+      catalogState.filteredTotal = Number(options.catalog?.filteredTotal ?? chapters.length);
+      catalogState.offset = Number(options.catalog?.offset || 0);
+      catalogState.page = Math.floor(catalogState.offset / NOVEL_CATALOG_PAGE_SIZE);
+    }
 
     els.viewContent.append(createDetailHero(book, chapters));
     if (book.summary) {
@@ -1176,10 +1236,22 @@ export function createNovelViews(context) {
     const title = document.createElement("strong");
     title.textContent = "目录";
     const meta = document.createElement("span");
-    meta.textContent = `${formatNumber(chapters.length)} 章`;
+    meta.textContent = `${formatNumber(book.chapterCount || chapters.length || 0)} 章`;
     head.append(title, meta);
-    const browser = createCatalogBrowser(book, chapters, { meta });
-    catalog.append(head, browser);
+    catalog.append(head);
+    if (options.catalogError) {
+      const error = document.createElement("div");
+      error.className = "novel-reader-catalog-loading error";
+      error.textContent = options.catalogError;
+      catalog.append(error);
+    } else {
+      catalog.append(createCatalogBrowser(book, chapters, {
+        meta,
+        serverPaged: remotePaged,
+        loadPage: loadRemoteDetailCatalogPage,
+        anchorIndex: book.progress?.chapterIndex || 1
+      }));
+    }
     els.viewContent.append(catalog);
   }
 
@@ -1195,10 +1267,36 @@ export function createNovelViews(context) {
     title.textContent = book.title || "未命名小说";
     const meta = document.createElement("span");
     meta.textContent = [book.author || "未知作者", bookCategoryLabel(book), `${formatNumber(book.chapterCount)} 章`, formatBytes(book.sizeBytes)].filter(Boolean).join(" · ");
-    const latest = document.createElement("small");
-    latest.textContent = cachedRemote
-      ? `已缓存到手机 · ${book.latestChapterTitle ? `最新：${book.latestChapterTitle}` : "可离线阅读"}`
-      : book.latestChapterTitle ? `最新：${book.latestChapterTitle}` : "本地 TXT 导入";
+    const reading = document.createElement("div");
+    reading.className = "novel-mobile-reading-status";
+    if (cachedRemote) {
+      const offline = document.createElement("small");
+      offline.textContent = "已缓存到手机，可离线阅读";
+      reading.append(offline);
+    }
+    const activeProgress = cachedRemote ? book.localProgress || book.progress : book.progress;
+    const progressChapter = activeProgress
+      ? chapters.find((chapter) => Number(chapter.index) === Number(activeProgress.chapterIndex)) || {
+          index: Number(activeProgress.chapterIndex),
+          title: detailState.progressChapterTitle || `第 ${formatNumber(activeProgress.chapterIndex)} 章`
+        }
+      : null;
+    const latestChapter = book.chapterCount
+      ? {
+          index: Number(book.chapterCount),
+          title: book.latestChapterTitle || `第 ${formatNumber(book.chapterCount)} 章`
+        }
+      : null;
+    if (progressChapter) {
+      reading.append(createMobileChapterShortcut("上次读到", book, progressChapter, false));
+    } else {
+      const unread = document.createElement("small");
+      unread.textContent = "还没有阅读记录";
+      reading.append(unread);
+    }
+    if (latestChapter && Number(latestChapter.index) !== Number(progressChapter?.index)) {
+      reading.append(createMobileChapterShortcut("最新章节", book, latestChapter, true));
+    }
 
     const actions = document.createElement("div");
     actions.className = "novel-mobile-detail-actions";
@@ -1208,7 +1306,7 @@ export function createNovelViews(context) {
     read.textContent = cachedRemote
       ? (book.progress ? "继续离线" : "离线阅读")
       : (book.progress ? "继续阅读" : "开始阅读");
-    read.addEventListener("click", () => openReader(book, chapters[0]?.index || 1));
+    read.addEventListener("click", () => openReader(book, 1));
     const download = document.createElement("button");
     download.type = "button";
     download.textContent = book.local || book.cachedLocal ? "导出TXT" : "下载TXT";
@@ -1227,7 +1325,7 @@ export function createNovelViews(context) {
       cache.textContent = book.cachedLocal ? "更新缓存" : cachingBookId === book.id ? "缓存中" : "缓存整本";
       cache.disabled = Boolean(cachingBookId);
       cache.addEventListener("click", () => {
-        cacheWholeBook(book, chapters);
+        cacheBookFromList(book);
       });
       actions.append(cache);
       if (book.cachedLocal) {
@@ -1240,9 +1338,22 @@ export function createNovelViews(context) {
       }
     }
 
-    body.append(title, meta, latest, actions);
+    body.append(title, meta, reading, actions);
     panel.append(body);
     return panel;
+  }
+
+  function createMobileChapterShortcut(label, book, chapter, exactChapter) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "novel-mobile-chapter-shortcut";
+    const caption = document.createElement("span");
+    caption.textContent = label;
+    const title = document.createElement("strong");
+    title.textContent = `${formatNumber(chapter.index)} · ${chapter.title}`;
+    button.append(caption, title);
+    button.addEventListener("click", () => openReader(book, chapter.index, { exactChapter }));
+    return button;
   }
 
   function isCachedRemoteBookForUi(book = {}) {
@@ -1269,10 +1380,16 @@ export function createNovelViews(context) {
     catalogState.query = "";
     catalogState.descending = false;
     catalogState.page = catalogPageForChapter(chapters, chapterIndex, false);
+    catalogState.remotePaged = false;
+    catalogState.total = chapters.length;
+    catalogState.filteredTotal = chapters.length;
+    catalogState.offset = catalogState.page * NOVEL_CATALOG_PAGE_SIZE;
   }
 
   function createCatalogBrowser(book, chapters, options = {}) {
     const source = Array.isArray(chapters) ? chapters : [];
+    const serverPaged = Boolean(options.serverPaged);
+    const loadPage = options.loadPage || loadRemoteReaderCatalogPage;
     prepareCatalogState(book, source, book?.progress?.chapterIndex || readerState.chapter?.index || 1);
     const shell = document.createElement("div");
     shell.className = `novel-mobile-catalog-browser${options.drawer ? " drawer" : ""}`;
@@ -1286,18 +1403,30 @@ export function createNovelViews(context) {
     const order = actionButton(catalogState.descending ? "倒序" : "正序", () => {
       catalogState.descending = !catalogState.descending;
       catalogState.page = 0;
-      refresh();
+      if (serverPaged) {
+        loadPage({ page: 0, anchor: catalogState.query ? 0 : options.anchorIndex || readerState.chapter?.index }).catch(() => {});
+      } else {
+        refresh();
+      }
     });
     order.className = "novel-mobile-catalog-order";
     const previous = actionButton("上一段", () => {
-      catalogState.page = Math.max(0, catalogState.page - 1);
-      refresh();
+      const page = Math.max(0, catalogState.page - 1);
+      if (serverPaged) loadPage({ page }).catch(() => {});
+      else {
+        catalogState.page = page;
+        refresh();
+      }
     });
     const range = document.createElement("select");
     range.setAttribute("aria-label", "目录分段");
     const next = actionButton("下一段", () => {
-      catalogState.page += 1;
-      refresh();
+      const page = catalogState.page + 1;
+      if (serverPaged) loadPage({ page }).catch(() => {});
+      else {
+        catalogState.page = page;
+        refresh();
+      }
     });
     const status = document.createElement("span");
     status.className = "novel-mobile-catalog-status";
@@ -1306,14 +1435,21 @@ export function createNovelViews(context) {
 
     function refresh() {
       const query = String(catalogState.query || "").trim().toLocaleLowerCase("zh-Hans-CN");
-      let filtered = query
-        ? source.filter((chapter) => String(chapter.title || "").toLocaleLowerCase("zh-Hans-CN").includes(query) || String(chapter.index || "").includes(query))
-        : [...source];
-      if (catalogState.descending) filtered.reverse();
-      const pageCount = Math.max(1, Math.ceil(filtered.length / NOVEL_CATALOG_PAGE_SIZE));
+      let filtered = source;
+      let visible = source;
+      let filteredTotal = Number(catalogState.filteredTotal || source.length);
+      if (!serverPaged) {
+        filtered = query
+          ? source.filter((chapter) => String(chapter.title || "").toLocaleLowerCase("zh-Hans-CN").includes(query) || String(chapter.index || "").includes(query))
+          : [...source];
+        if (catalogState.descending) filtered.reverse();
+        filteredTotal = filtered.length;
+      }
+      const pageCount = Math.max(1, Math.ceil(filteredTotal / NOVEL_CATALOG_PAGE_SIZE));
+      if (serverPaged) catalogState.page = Math.floor(Number(catalogState.offset || 0) / NOVEL_CATALOG_PAGE_SIZE);
       catalogState.page = Math.max(0, Math.min(pageCount - 1, Number(catalogState.page || 0)));
       const start = catalogState.page * NOVEL_CATALOG_PAGE_SIZE;
-      const visible = filtered.slice(start, start + NOVEL_CATALOG_PAGE_SIZE);
+      if (!serverPaged) visible = filtered.slice(start, start + NOVEL_CATALOG_PAGE_SIZE);
 
       order.textContent = catalogState.descending ? "倒序" : "正序";
       previous.disabled = catalogState.page <= 0;
@@ -1321,21 +1457,21 @@ export function createNovelViews(context) {
       range.innerHTML = "";
       for (let page = 0; page < pageCount; page += 1) {
         const first = page * NOVEL_CATALOG_PAGE_SIZE + 1;
-        const last = Math.min(filtered.length, first + NOVEL_CATALOG_PAGE_SIZE - 1);
+        const last = Math.min(filteredTotal, first + NOVEL_CATALOG_PAGE_SIZE - 1);
         const option = document.createElement("option");
         option.value = String(page);
-        option.textContent = filtered.length ? `${formatNumber(first)}–${formatNumber(last)}` : "无结果";
+        option.textContent = filteredTotal ? `${formatNumber(first)}–${formatNumber(last)}` : "无结果";
         option.selected = page === catalogState.page;
         range.append(option);
       }
       range.disabled = pageCount <= 1;
       status.textContent = query
-        ? `找到 ${formatNumber(filtered.length)} 章`
+        ? `找到 ${formatNumber(filteredTotal)} 章`
         : `每段 ${formatNumber(NOVEL_CATALOG_PAGE_SIZE)} 章`;
       if (options.meta) {
         options.meta.textContent = query
-          ? `${formatNumber(filtered.length)} / ${formatNumber(source.length)} 章`
-          : `${formatNumber(source.length)} 章`;
+          ? `${formatNumber(filteredTotal)} / ${formatNumber(serverPaged ? catalogState.total : source.length)} 章`
+          : `${formatNumber(serverPaged ? catalogState.total : source.length)} 章`;
       }
       list.innerHTML = "";
       for (const chapter of visible) {
@@ -1354,11 +1490,22 @@ export function createNovelViews(context) {
     search.addEventListener("input", () => {
       catalogState.query = search.value;
       catalogState.page = 0;
-      refresh();
+      if (!serverPaged) {
+        refresh();
+        return;
+      }
+      window.clearTimeout(catalogSearchTimer);
+      catalogSearchTimer = window.setTimeout(() => {
+        loadPage({ page: 0, query: search.value }).catch(() => {});
+      }, 260);
     });
     range.addEventListener("change", () => {
-      catalogState.page = Math.max(0, Number(range.value || 0));
-      refresh();
+      const page = Math.max(0, Number(range.value || 0));
+      if (serverPaged) loadPage({ page }).catch(() => {});
+      else {
+        catalogState.page = page;
+        refresh();
+      }
     });
 
     const pagination = document.createElement("div");
@@ -1370,152 +1517,6 @@ export function createNovelViews(context) {
     return shell;
   }
 
-  function createBookTextSearch(book, options = {}) {
-    ensureTextSearchState(book?.id);
-    const panel = document.createElement("section");
-    panel.className = `novel-mobile-text-search${options.compact ? " compact" : ""}`;
-    const head = document.createElement("div");
-    const title = document.createElement("strong");
-    title.textContent = "书内搜索";
-    const description = document.createElement("span");
-    description.textContent = book?.local || book?.cachedLocal ? "搜索手机内的完整正文" : "搜索电脑书库中的完整正文";
-    head.append(title, description);
-
-    const form = document.createElement("form");
-    form.className = "novel-mobile-text-search-form";
-    const input = document.createElement("input");
-    input.type = "search";
-    input.placeholder = "输入正文关键词";
-    input.setAttribute("aria-label", "搜索书内正文");
-    input.value = textSearchState.query;
-    const submit = document.createElement("button");
-    submit.type = "submit";
-    submit.textContent = "搜索";
-    form.append(input, submit);
-
-    const status = document.createElement("div");
-    status.className = "novel-mobile-text-search-status";
-    const results = document.createElement("div");
-    results.className = "novel-mobile-text-search-results";
-    const more = document.createElement("button");
-    more.type = "button";
-    more.className = "novel-mobile-text-search-more";
-    more.textContent = "继续查找";
-
-    function renderResults() {
-      const items = textSearchState.results || [];
-      submit.disabled = textSearchState.loading;
-      submit.textContent = textSearchState.loading ? "搜索中" : "搜索";
-      status.textContent = textSearchState.error
-        ? textSearchState.error
-        : textSearchState.loading
-          ? "正在扫描这本书"
-          : textSearchState.query
-            ? items.length
-              ? `找到 ${formatNumber(items.length)} 个章节${textSearchState.hasMore ? "，还可以继续查找" : ""}`
-              : "没有找到匹配正文"
-            : "至少输入 2 个字符，结果可直接打开章节";
-      status.classList.toggle("error", Boolean(textSearchState.error));
-      results.innerHTML = "";
-      for (const item of items) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "novel-mobile-text-search-result";
-        const resultHead = document.createElement("span");
-        const strong = document.createElement("strong");
-        strong.textContent = `第 ${formatNumber(item.chapterIndex)} 章 · ${item.chapterTitle}`;
-        const meta = document.createElement("small");
-        meta.textContent = `${formatNumber(item.matchCount || 0)} 处 · ${formatNumber(item.charCount || 0)} 字`;
-        resultHead.append(strong, meta);
-        const excerpt = document.createElement("p");
-        appendHighlightedText(excerpt, item.excerpt || "", textSearchState.query);
-        button.append(resultHead, excerpt);
-        button.addEventListener("click", () => {
-          readerState.searchOpen = false;
-          openReader(book, item.chapterIndex, { exactChapter: true });
-        });
-        results.append(button);
-      }
-      more.hidden = !textSearchState.hasMore || textSearchState.loading;
-    }
-
-    async function search(options = {}) {
-      const query = String(input.value || "").replace(/\s+/g, " ").trim();
-      if (query.length < 2) {
-        textSearchState.error = "请输入至少 2 个字符";
-        renderResults();
-        return;
-      }
-      const append = Boolean(options.append) && query === textSearchState.query;
-      textSearchState.bookId = String(book?.id || "");
-      textSearchState.query = query;
-      textSearchState.loading = true;
-      textSearchState.error = "";
-      if (!append) textSearchState.results = [];
-      renderResults();
-      try {
-        const limit = options.compact ? 20 : 30;
-        const offset = append ? textSearchState.results.length : 0;
-        const data = await searchNovelBook(book, query, { limit, offset });
-        textSearchState.results = append
-          ? [...textSearchState.results, ...(data.items || [])]
-          : data.items || [];
-        textSearchState.hasMore = Boolean(data.hasMore);
-      } catch (error) {
-        textSearchState.error = error.message || "书内搜索失败";
-        textSearchState.hasMore = false;
-      } finally {
-        textSearchState.loading = false;
-        renderResults();
-      }
-    }
-
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      search({ compact: Boolean(options.compact) });
-    });
-    more.addEventListener("click", () => search({ append: true, compact: Boolean(options.compact) }));
-    panel.append(head, form, status, results, more);
-    renderResults();
-    return panel;
-  }
-
-  function ensureTextSearchState(bookId) {
-    const id = String(bookId || "");
-    if (textSearchState.bookId === id) return;
-    textSearchState.bookId = id;
-    textSearchState.query = "";
-    textSearchState.results = [];
-    textSearchState.hasMore = false;
-    textSearchState.loading = false;
-    textSearchState.error = "";
-  }
-
-  async function searchNovelBook(book, query, options = {}) {
-    const target = readableBookForReader(book);
-    const limit = Math.max(1, Math.min(100, Number(options.limit || 30)));
-    const offset = Math.max(0, Number(options.offset || 0));
-    if (isLocalBookId(target?.id)) {
-      const entry = await ensureLocalNovelEntry(target.id);
-      if (!entry) throw new Error("这本本地小说已经不存在");
-      return searchLocalNovelEntry(entry, query, { limit, offset });
-    }
-    const params = new URLSearchParams({ q: query, limit: String(limit), offset: String(offset) });
-    return fetchJson(getActiveUrl(), `/api/novels/${encodeURIComponent(target.id)}/search?${params}`, { timeoutMs: 16000 });
-  }
-
-  function createTextSearchDrawer() {
-    const drawer = document.createElement("aside");
-    drawer.className = "novel-reader-catalog-drawer novel-reader-text-search-drawer";
-    const head = document.createElement("div");
-    const title = document.createElement("strong");
-    title.textContent = "搜索本书正文";
-    const close = actionButton("关闭", () => toggleTextSearch(false));
-    head.append(title, close);
-    drawer.append(head, createBookTextSearch(readerState.book, { compact: true }));
-    return drawer;
-  }
-
   async function renderNovelReader(id, chapterIndex, isActive = () => true) {
     const bookId = String(id || "").trim();
     const index = String(chapterIndex || "1").trim();
@@ -1525,8 +1526,9 @@ export function createNovelViews(context) {
 
     readerState.active = true;
     readerState.catalogOpen = false;
+    readerState.catalogLoading = false;
+    readerState.catalogError = "";
     readerState.settingsOpen = false;
-    readerState.searchOpen = false;
     readerState.menuOpen = false;
     setActiveBottom("novels");
     els.viewKicker.textContent = "小说阅读";
@@ -1551,6 +1553,26 @@ export function createNovelViews(context) {
       return;
     }
 
+    const prefetchKey = remoteChapterPrefetchKey(activeUrl, bookId, index);
+    const prefetched = takePrefetchedRemoteChapter(prefetchKey);
+    if (prefetched?.chapter) {
+      const currentProgress = String(readerState.book?.id || "") === bookId
+        ? readerState.book?.progress || null
+        : null;
+      const data = {
+        ...prefetched,
+        book: {
+          ...prefetched.book,
+          progress: currentProgress || prefetched.book?.progress || null
+        }
+      };
+      writeCachedJson(activeUrl, path, data).catch(() => {});
+      if (!isActive()) return;
+      renderNovelReaderData(data);
+      prefetchNextRemoteChapter(activeUrl, data);
+      return;
+    }
+
     const cached = await readCachedJson(activeUrl, path).catch(() => null);
     if (!isActive()) return;
     if (cached?.payload?.chapter) {
@@ -1559,10 +1581,13 @@ export function createNovelViews(context) {
     }
 
     try {
-      const data = await fetchJson(activeUrl, path, { timeoutMs: 18000, signal: isActive.signal });
+      const pendingPrefetch = remoteChapterPrefetchRequests.get(prefetchKey);
+      const data = await (pendingPrefetch || fetchJson(activeUrl, path, { timeoutMs: 18000, signal: isActive.signal }));
+      prefetchedRemoteChapters.delete(prefetchKey);
       writeCachedJson(activeUrl, path, data).catch(() => {});
       if (!isActive()) return;
       renderNovelReaderData(data);
+      prefetchNextRemoteChapter(activeUrl, data);
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
@@ -1573,17 +1598,60 @@ export function createNovelViews(context) {
     }
   }
 
+  function remoteChapterPrefetchKey(activeUrl, bookId, chapterIndex) {
+    return `${String(activeUrl || "").replace(/\/+$/, "")}|${String(bookId || "")}|${String(chapterIndex || "")}`;
+  }
+
+  function takePrefetchedRemoteChapter(key) {
+    const data = prefetchedRemoteChapters.get(key) || null;
+    if (data) prefetchedRemoteChapters.delete(key);
+    return data;
+  }
+
+  function storePrefetchedRemoteChapter(key, data) {
+    if (!data?.chapter) return;
+    prefetchedRemoteChapters.delete(key);
+    prefetchedRemoteChapters.set(key, data);
+    while (prefetchedRemoteChapters.size > NOVEL_CHAPTER_PREFETCH_LIMIT) {
+      const oldest = prefetchedRemoteChapters.keys().next().value;
+      if (oldest === undefined) break;
+      prefetchedRemoteChapters.delete(oldest);
+    }
+  }
+
+  function prefetchNextRemoteChapter(activeUrl, data = {}) {
+    const bookId = String(data.book?.id || "");
+    const chapterIndex = Number(data.next?.index || 0);
+    if (!bookId || !chapterIndex || remoteChapterPrefetchRequests.size >= NOVEL_CHAPTER_PREFETCH_LIMIT) return;
+    const key = remoteChapterPrefetchKey(activeUrl, bookId, chapterIndex);
+    if (prefetchedRemoteChapters.has(key) || remoteChapterPrefetchRequests.has(key)) return;
+    const path = novelChapterPath(bookId, chapterIndex);
+    const request = fetchJson(activeUrl, path, { timeoutMs: 12000 })
+      .then((chapterData) => {
+        storePrefetchedRemoteChapter(key, chapterData);
+        return chapterData;
+      })
+      .finally(() => remoteChapterPrefetchRequests.delete(key));
+    remoteChapterPrefetchRequests.set(key, request);
+    request.catch(() => {});
+  }
+
   function renderNovelReaderData(data = {}, cacheEntry = null, options = {}) {
     const book = data.book || {};
     const chapter = data.chapter || {};
     const settings = readerState.settings;
     const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
+    const previousBookId = String(readerState.book?.id || "");
+    const previousChapters = Array.isArray(readerState.chapters) ? readerState.chapters : [];
 
     readerState.book = book;
     readerState.chapter = chapter;
     readerState.prev = data.prev || null;
     readerState.next = data.next || null;
-    readerState.chapters = Array.isArray(data.chapters) ? data.chapters : [];
+    const incomingChapters = Array.isArray(data.chapters) ? data.chapters : [];
+    readerState.chapters = incomingChapters.length
+      ? incomingChapters
+      : previousBookId === String(book.id || "") ? previousChapters : [];
     if (options.restore !== false) {
       readerState.pendingScrollRatio = Number(book.progress?.chapterIndex || 0) === Number(chapter.index || 0)
         ? Number(book.progress?.scrollRatio || 0)
@@ -1667,11 +1735,26 @@ export function createNovelViews(context) {
     drawer.className = "novel-reader-catalog-drawer";
     const head = document.createElement("div");
     const title = document.createElement("strong");
-    title.textContent = `目录 · ${formatNumber((readerState.chapters || []).length)} 章`;
+    title.textContent = `目录 · ${formatNumber(readerState.book?.chapterCount || readerState.chapters?.length || 0)} 章`;
     const close = actionButton("关闭", () => toggleCatalog(false));
     head.append(title, close);
-    const browser = createCatalogBrowser(readerState.book, readerState.chapters || [], { drawer: true });
-    drawer.append(head, browser);
+    drawer.append(head);
+    if (readerState.catalogLoading) {
+      const loading = document.createElement("div");
+      loading.className = "novel-reader-catalog-loading";
+      loading.textContent = "正在读取章节目录…";
+      drawer.append(loading);
+    } else if (readerState.catalogError) {
+      const error = document.createElement("div");
+      error.className = "novel-reader-catalog-loading error";
+      error.textContent = readerState.catalogError;
+      drawer.append(error);
+    } else {
+      drawer.append(createCatalogBrowser(readerState.book, readerState.chapters || [], {
+        drawer: true,
+        serverPaged: catalogState.remotePaged
+      }));
+    }
     return drawer;
   }
 
@@ -1858,11 +1941,16 @@ export function createNovelViews(context) {
 
   function toggleCatalog(force) {
     const ratio = captureReaderRatio();
+    prepareCatalogState(readerState.book, readerState.chapters || [], readerState.chapter?.index || 1);
     readerState.catalogOpen = force === undefined ? !readerState.catalogOpen : Boolean(force);
+    const needsCatalog = readerState.catalogOpen && !hasReaderCatalogForCurrentChapter();
+    if (needsCatalog) {
+      readerState.catalogLoading = true;
+      readerState.catalogError = "";
+    }
     if (readerState.catalogOpen) {
       readerState.menuOpen = true;
       readerState.settingsOpen = false;
-      readerState.searchOpen = false;
       if (!catalogState.query) {
         catalogState.page = catalogPageForChapter(readerState.chapters, readerState.chapter?.index, catalogState.descending);
       }
@@ -1874,6 +1962,147 @@ export function createNovelViews(context) {
       prev: readerState.prev,
       next: readerState.next
     }, null, { restoreRatio: ratio });
+    if (needsCatalog) loadReaderCatalog().catch(() => {});
+  }
+
+  function hasReaderCatalogForCurrentChapter() {
+    const total = Number(readerState.book?.chapterCount || 0);
+    if (total > 0 && Number(readerState.chapters?.length || 0) >= total) return true;
+    if (!catalogState.remotePaged || catalogState.bookId !== String(readerState.book?.id || "")) return false;
+    if (catalogState.query) return true;
+    const current = Number(readerState.chapter?.index || 0);
+    return current > 0 && readerState.chapters.some((chapter) => Number(chapter.index) === current);
+  }
+
+  async function loadReaderCatalog() {
+    const book = readerState.book || {};
+    const bookId = String(book.id || "");
+    if (!bookId) return;
+    if (!isLocalBookId(bookId)) {
+      return loadRemoteReaderCatalogPage({ anchor: readerState.chapter?.index || 1 });
+    }
+    try {
+      const entry = await ensureLocalNovelEntry(bookId);
+      const chapters = (entry?.chapters || []).map(({ content, ...summary }) => summary);
+      if (bookId !== String(readerState.book?.id || "")) return;
+      readerState.chapters = chapters;
+      catalogState.remotePaged = false;
+      catalogState.bookId = bookId;
+      catalogState.total = chapters.length;
+      catalogState.filteredTotal = chapters.length;
+      catalogState.offset = 0;
+      readerState.catalogError = "";
+      if (!catalogState.query) {
+        catalogState.page = catalogPageForChapter(readerState.chapters, readerState.chapter?.index, catalogState.descending);
+      }
+    } catch (error) {
+      if (bookId !== String(readerState.book?.id || "")) return;
+      readerState.catalogError = error.message || "章节目录读取失败";
+    } finally {
+      if (bookId !== String(readerState.book?.id || "")) return;
+      readerState.catalogLoading = false;
+      if (readerState.catalogOpen) {
+        const ratio = captureReaderRatio();
+        renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
+      }
+    }
+  }
+
+  async function loadRemoteReaderCatalogPage(options = {}) {
+    const bookId = String(readerState.book?.id || "");
+    if (!bookId) return;
+    const requestId = ++catalogRequestId;
+    const query = String(options.query ?? catalogState.query ?? "").replace(/\s+/g, " ").trim();
+    catalogState.query = query;
+    const params = new URLSearchParams({
+      limit: String(NOVEL_CATALOG_PAGE_SIZE),
+      order: catalogState.descending ? "desc" : "asc"
+    });
+    if (query) params.set("q", query);
+    if (!query && Number(options.anchor || 0) > 0) params.set("anchor", String(options.anchor));
+    else params.set("offset", String(Math.max(0, Number(options.page ?? catalogState.page ?? 0)) * NOVEL_CATALOG_PAGE_SIZE));
+    const ratio = captureReaderRatio();
+    readerState.catalogLoading = true;
+    readerState.catalogError = "";
+    if (readerState.catalogOpen) renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
+    try {
+      const data = await fetchJson(getActiveUrl(), novelCatalogPath(bookId, params), { timeoutMs: 16000 });
+      if (requestId !== catalogRequestId || bookId !== String(readerState.book?.id || "")) return;
+      readerState.chapters = Array.isArray(data.chapters) ? data.chapters : [];
+      catalogState.remotePaged = true;
+      catalogState.bookId = bookId;
+      catalogState.total = Number(data.total || readerState.book?.chapterCount || 0);
+      catalogState.filteredTotal = Number(data.filteredTotal || 0);
+      catalogState.offset = Number(data.offset || 0);
+      catalogState.page = Math.floor(catalogState.offset / NOVEL_CATALOG_PAGE_SIZE);
+      readerState.catalogError = "";
+    } catch (error) {
+      if (requestId !== catalogRequestId || bookId !== String(readerState.book?.id || "")) return;
+      readerState.catalogError = error.message || "章节目录读取失败";
+    } finally {
+      if (requestId !== catalogRequestId || bookId !== String(readerState.book?.id || "")) return;
+      readerState.catalogLoading = false;
+      if (readerState.catalogOpen) {
+        const nextRatio = captureReaderRatio();
+        renderNovelReaderData(currentReaderData(), null, { restoreRatio: nextRatio });
+      }
+    }
+  }
+
+  async function loadRemoteDetailCatalogPage(options = {}) {
+    const book = detailState.book || {};
+    const bookId = String(book.id || "");
+    if (!bookId) return;
+    const requestId = ++detailCatalogRequestId;
+    const isActive = options.isActive || (() => true);
+    const query = String(options.query ?? catalogState.query ?? "").replace(/\s+/g, " ").trim();
+    catalogState.query = query;
+    const params = new URLSearchParams({
+      limit: String(NOVEL_CATALOG_PAGE_SIZE),
+      order: catalogState.descending ? "desc" : "asc"
+    });
+    if (query) params.set("q", query);
+    if (!query && Number(options.anchor || 0) > 0) params.set("anchor", String(options.anchor));
+    else params.set("offset", String(Math.max(0, Number(options.page ?? catalogState.page ?? 0)) * NOVEL_CATALOG_PAGE_SIZE));
+    const path = novelCatalogPath(bookId, params);
+    const scrollY = window.scrollY;
+    try {
+      let data;
+      try {
+        data = await fetchJson(getActiveUrl(), path, { timeoutMs: 16000, signal: isActive.signal });
+        writeCachedJson(getActiveUrl(), path, data).catch(() => {});
+      } catch (error) {
+        const cached = await readCachedJson(getActiveUrl(), path).catch(() => null);
+        if (!cached?.payload?.chapters) throw error;
+        data = cached.payload;
+      }
+      if (!isActive() || requestId !== detailCatalogRequestId || bookId !== String(detailState.book?.id || "")) return;
+      detailState.chapters = Array.isArray(data.chapters) ? data.chapters : [];
+      catalogState.remotePaged = true;
+      catalogState.bookId = bookId;
+      catalogState.total = Number(data.total || book.chapterCount || 0);
+      catalogState.filteredTotal = Number(data.filteredTotal || 0);
+      catalogState.offset = Number(data.offset || 0);
+      catalogState.page = Math.floor(catalogState.offset / NOVEL_CATALOG_PAGE_SIZE);
+      if (options.render !== false) {
+        renderNovelDetailData({ book, chapters: detailState.chapters }, detailState.cacheEntry, {
+          remotePaged: true,
+          catalog: data
+        });
+        window.requestAnimationFrame(() => window.scrollTo({ top: scrollY, behavior: "auto" }));
+      }
+    } catch (error) {
+      if (!isActive() || requestId !== detailCatalogRequestId || bookId !== String(detailState.book?.id || "")) return;
+      if (detailState.chapters.length >= Number(book.chapterCount || 0)) {
+        renderNovelDetailData({ book, chapters: detailState.chapters }, detailState.cacheEntry);
+        renderMessage("目录服务暂时不可用，当前显示完整缓存目录。", "quiet", false);
+      } else {
+        renderNovelDetailData({ book, chapters: detailState.chapters }, detailState.cacheEntry, {
+          remotePaged: true,
+          catalogError: error.message || "章节目录读取失败"
+        });
+      }
+    }
   }
 
   function toggleReaderMenu(force) {
@@ -1882,7 +2111,6 @@ export function createNovelViews(context) {
     if (!readerState.menuOpen) {
       readerState.settingsOpen = false;
       readerState.catalogOpen = false;
-      readerState.searchOpen = false;
     }
     renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
   }
@@ -1893,18 +2121,6 @@ export function createNovelViews(context) {
     readerState.settingsOpen = !readerState.settingsOpen;
     if (readerState.settingsOpen) {
       readerState.catalogOpen = false;
-      readerState.searchOpen = false;
-    }
-    renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
-  }
-
-  function toggleTextSearch(force) {
-    const ratio = captureReaderRatio();
-    readerState.searchOpen = force === undefined ? !readerState.searchOpen : Boolean(force);
-    if (readerState.searchOpen) {
-      readerState.menuOpen = true;
-      readerState.catalogOpen = false;
-      readerState.settingsOpen = false;
     }
     renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
   }
@@ -1921,7 +2137,6 @@ export function createNovelViews(context) {
     readerState.menuOpen = false;
     readerState.settingsOpen = false;
     readerState.catalogOpen = false;
-    readerState.searchOpen = false;
     showView("novels", {}, { resetStack: true });
   }
 
@@ -2318,14 +2533,31 @@ export function createNovelViews(context) {
         setStatus?.("这本本地小说已经不在手机本地库里。", "error");
         return;
       }
-      downloadTextFile(entry.book.fileName || `${entry.book.title || "本地小说"}.txt`, composeLocalNovelText(entry));
+      const fileName = sanitizeTxtFileName(entry.book.fileName || `${entry.book.title || "本地小说"}.txt`);
+      const content = composeLocalNovelText(entry);
+      const plugin = nativeNovelPlugin();
+      if (plugin?.exportTextFile) {
+        setStatus?.(`请选择《${entry.book.title || "本地小说"}》的保存位置`);
+        try {
+          const result = await plugin.exportTextFile({ fileName, text: content });
+          if (result?.canceled) {
+            setStatus?.("已取消导出 TXT");
+          } else {
+            setStatus?.(`已保存 TXT：${result?.fileName || fileName}`);
+          }
+        } catch (error) {
+          setStatus?.(`导出 TXT 失败：${error.message || error}`, "error");
+        }
+        return;
+      }
+      downloadTextFile(fileName, content);
       return;
     }
     const href = `${getActiveUrl()}/api/novels/${encodeURIComponent(bookId)}/download`;
     const link = document.createElement("a");
     link.href = href;
-    link.target = "_blank";
-    link.rel = "noreferrer";
+    link.download = "";
+    link.rel = "noopener";
     document.body.append(link);
     link.click();
     link.remove();
@@ -2745,7 +2977,8 @@ export function createNovelViews(context) {
     readerState.menuOpen = false;
     readerState.settingsOpen = false;
     readerState.catalogOpen = false;
-    readerState.searchOpen = false;
+    readerState.catalogLoading = false;
+    readerState.catalogError = "";
   }
 
   function applyNativeReaderBrightness(percent) {
@@ -2793,9 +3026,9 @@ export function createNovelViews(context) {
 
   function scheduleReaderMenuAutoHide() {
     window.clearTimeout(readerState.menuAutoHideTimer);
-    if (!readerState.active || !readerState.menuOpen || readerState.settingsOpen || readerState.catalogOpen || readerState.searchOpen) return;
+    if (!readerState.active || !readerState.menuOpen || readerState.settingsOpen || readerState.catalogOpen) return;
     readerState.menuAutoHideTimer = window.setTimeout(() => {
-      if (!readerState.active || !readerState.menuOpen || readerState.settingsOpen || readerState.catalogOpen || readerState.searchOpen) return;
+      if (!readerState.active || !readerState.menuOpen || readerState.settingsOpen || readerState.catalogOpen) return;
       const ratio = captureReaderRatio();
       readerState.menuOpen = false;
       renderNovelReaderData(currentReaderData(), null, { restoreRatio: ratio });
@@ -2803,7 +3036,7 @@ export function createNovelViews(context) {
   }
 
   function keepReaderMenuVisible() {
-    if (!readerState.active || !readerState.menuOpen || readerState.settingsOpen || readerState.catalogOpen || readerState.searchOpen) return;
+    if (!readerState.active || !readerState.menuOpen || readerState.settingsOpen || readerState.catalogOpen) return;
     scheduleReaderMenuAutoHide();
   }
 
@@ -2932,6 +3165,14 @@ export function createNovelViews(context) {
   function saveReaderProgress() {
     if (!readerState.active || !readerState.book?.id || !readerState.chapter?.index) return;
     const ratio = captureReaderRatio();
+    readerState.book = {
+      ...readerState.book,
+      progress: {
+        chapterIndex: Number(readerState.chapter.index),
+        scrollRatio: ratio,
+        updatedAt: new Date().toISOString()
+      }
+    };
     if (isLocalBookId(readerState.book.id)) {
       saveLocalNovelProgress(readerState.book.id, {
         chapterIndex: readerState.chapter.index,
@@ -3026,6 +3267,15 @@ export function createNovelViews(context) {
     return `/api/novels/${encodeURIComponent(String(id || ""))}`;
   }
 
+  function novelMetaPath(id) {
+    return `${novelDetailPath(id)}?catalog=0`;
+  }
+
+  function novelCatalogPath(id, params = new URLSearchParams()) {
+    const query = params.toString();
+    return `/api/novels/${encodeURIComponent(String(id || ""))}/catalog${query ? `?${query}` : ""}`;
+  }
+
   function novelChapterPath(id, chapterIndex) {
     return `/api/novels/${encodeURIComponent(String(id || ""))}/chapters/${encodeURIComponent(String(chapterIndex || "1"))}`;
   }
@@ -3102,98 +3352,6 @@ function clampRatio(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return 0;
   return Math.max(0, Math.min(1, number));
-}
-
-export function searchLocalNovelEntry(entry, query, options = {}) {
-  const needle = String(query || "").replace(/\s+/g, " ").trim().slice(0, 80);
-  if (needle.length < 2) throw new Error("请输入至少 2 个字符");
-  const limit = Math.max(1, Math.min(100, Number(options.limit || 30)));
-  const offset = Math.max(0, Number(options.offset || 0));
-  const lowerNeedle = needle.toLocaleLowerCase();
-  const items = [];
-  let matched = 0;
-  let hasMore = false;
-
-  for (const chapter of entry?.chapters || []) {
-    const title = String(chapter?.title || "");
-    const content = String(chapter?.content || "");
-    if (!title.toLocaleLowerCase().includes(lowerNeedle) && !content.toLocaleLowerCase().includes(lowerNeedle)) continue;
-    if (matched >= offset && items.length < limit) {
-      items.push({
-        chapterId: chapter.id || "",
-        bookId: entry?.book?.id || chapter.bookId || "",
-        chapterIndex: Number(chapter.index || 0),
-        chapterTitle: title || `第 ${chapter.index || ""} 章`,
-        excerpt: buildLocalNovelExcerpt(content, needle),
-        matchCount: countLocalTextMatches(title, needle) + countLocalTextMatches(content, needle),
-        charCount: Number(chapter.charCount || content.length || 0),
-        updatedAt: chapter.updatedAt || ""
-      });
-    } else if (matched >= offset + limit) {
-      hasMore = true;
-      break;
-    }
-    matched += 1;
-  }
-
-  return {
-    bookId: entry?.book?.id || "",
-    bookTitle: entry?.book?.title || "",
-    query: needle,
-    items,
-    limit,
-    offset,
-    hasMore
-  };
-}
-
-function buildLocalNovelExcerpt(content, query, contextChars = 92) {
-  const normalized = String(content || "").replace(/\s+/g, " ").trim();
-  if (!normalized) return "";
-  const needle = String(query || "");
-  const matchIndex = Math.max(0, normalized.toLocaleLowerCase().indexOf(needle.toLocaleLowerCase()));
-  const start = Math.max(0, matchIndex - contextChars);
-  const end = Math.min(normalized.length, matchIndex + needle.length + contextChars);
-  return `${start > 0 ? "…" : ""}${normalized.slice(start, end)}${end < normalized.length ? "…" : ""}`;
-}
-
-function countLocalTextMatches(content, query) {
-  const source = String(content || "").toLocaleLowerCase();
-  const needle = String(query || "").toLocaleLowerCase();
-  if (!source || !needle) return 0;
-  let count = 0;
-  let offset = 0;
-  while (offset < source.length) {
-    const index = source.indexOf(needle, offset);
-    if (index < 0) break;
-    count += 1;
-    offset = index + Math.max(1, needle.length);
-  }
-  return count;
-}
-
-function appendHighlightedText(target, text, query) {
-  const source = String(text || "");
-  const needle = String(query || "").trim();
-  if (!needle) {
-    target.textContent = source;
-    return;
-  }
-  const lowerSource = source.toLocaleLowerCase();
-  const lowerNeedle = needle.toLocaleLowerCase();
-  let offset = 0;
-  let highlights = 0;
-  while (offset < source.length && highlights < 20) {
-    const index = lowerSource.indexOf(lowerNeedle, offset);
-    if (index < 0) break;
-    if (index > offset) target.append(document.createTextNode(source.slice(offset, index)));
-    const mark = document.createElement("mark");
-    mark.textContent = source.slice(index, index + needle.length);
-    target.append(mark);
-    highlights += 1;
-    offset = index + Math.max(1, needle.length);
-  }
-  if (offset < source.length) target.append(document.createTextNode(source.slice(offset)));
 }
 
 function paragraphsFromContent(content) {

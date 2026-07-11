@@ -7,9 +7,12 @@ import { discoverFanHaoModuleDefinitions } from "../src/fanhao/module-registry.j
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const modulesDir = path.join(root, "src", "modules");
 const platformDir = path.join(root, "src", "platform");
+const androidClientDir = path.join(root, "android-client", "www");
+const androidModulesDir = path.join(androidClientDir, "modules");
+const androidPlatformDir = path.join(androidClientDir, "platform");
 const definitions = await discoverFanHaoModuleDefinitions({ modulesDir });
 const byId = new Map(definitions.map((definition) => [definition.id, definition]));
-const requiredModules = ["fanhao", "photos", "media", "novels", "short-videos", "tools"];
+const requiredModules = ["fanhao", "photos", "media", "novels", "short-videos", "music", "tools"];
 
 for (const id of requiredModules) {
   const definition = byId.get(id);
@@ -20,6 +23,11 @@ for (const id of requiredModules) {
   assert(fs.statSync(path.join(modulesDir, id, "server"), { throwIfNoEntry: false })?.isDirectory(), `missing server folder: ${id}`);
   assert(fs.statSync(path.join(root, "public", "modules", id), { throwIfNoEntry: false })?.isDirectory(), `missing Web module folder: ${id}`);
   assert(fs.statSync(path.join(root, "android-client", "www", "modules", id), { throwIfNoEntry: false })?.isDirectory(), `missing Android module folder: ${id}`);
+  const androidEntry = String(definition.client.android.entry || "").replace(/^\.\//, "");
+  assert(androidEntry === `modules/${id}/android-module.js`, `Android module entry must follow the module folder convention: ${id}`);
+  const androidEntryPath = path.join(root, "android-client", "www", androidEntry);
+  assert(fs.statSync(androidEntryPath, { throwIfNoEntry: false })?.isFile(), `missing Android module entry: ${androidEntry}`);
+  assert(fs.readFileSync(androidEntryPath, "utf8").includes("createAndroidModule"), `Android module entry must export createAndroidModule(): ${id}`);
 }
 
 assert.equal(new Set(definitions.map((definition) => definition.id)).size, definitions.length, "module ids must be unique");
@@ -67,6 +75,30 @@ for (const [link] of fallbackModuleLinks) {
   assert(link.includes('target="_blank"'), `fallback Web module link must open a new tab or window: ${link}`);
   assert(link.includes('rel="noopener"'), `fallback Web module link must isolate the opener: ${link}`);
 }
+
+const androidAppSource = fs.readFileSync(path.join(root, "android-client", "www", "app.js"), "utf8");
+assert(!/from\s+["']\.\/modules\//.test(androidAppSource), "Android shell must not statically import business modules");
+assert(androidAppSource.includes("loadAndroidModules("), "Android shell must load module entries through the registry");
+const androidRegistrySource = fs.readFileSync(path.join(root, "android-client", "www", "js", "android-module-registry.js"), "utf8");
+assert(androidRegistrySource.includes("await import(entryUrl)"), "Android module registry must dynamically import discovered entries");
+const androidIndexSource = fs.readFileSync(path.join(root, "android-client", "www", "index.html"), "utf8");
+assert(!androidIndexSource.includes('id="topSearchButton"'), "Android shell must not own a global search button");
+assert(androidIndexSource.includes('id="topModuleActions"'), "Android shell must expose a module action slot");
+for (const text of ["搜番号、作品或人物", "搜套图、人物或分类", "搜电影或电视剧", "搜短视频标题、作者或标签"]) {
+  assert(!androidAppSource.includes(text), `Android shell must not own module search copy: ${text}`);
+}
+for (const id of ["fanhao", "photos", "media", "short-videos"]) {
+  const entrySource = fs.readFileSync(path.join(androidModulesDir, id, "android-module.js"), "utf8");
+  assert(entrySource.includes("search: createSearchController"), `Android module must own its shell search controller: ${id}`);
+}
+assert(
+  fs.readFileSync(path.join(androidModulesDir, "music", "music-views.js"), "utf8").includes("music-mobile-search-pill"),
+  "music must keep search inside its own module surface"
+);
+assert(
+  fs.readFileSync(path.join(androidModulesDir, "novels", "novel-views.js"), "utf8").includes("novel-mobile-search-pill"),
+  "novels must keep search inside its own module surface"
+);
 
 const webStylePaths = [
   "css/foundation.css",
@@ -147,12 +179,28 @@ for (const filePath of sourceFiles(platformDir)) {
   }
 }
 
+for (const filePath of sourceFiles(androidPlatformDir)) {
+  for (const target of relativeImportTargets(filePath)) {
+    assert(!isWithin(target, androidModulesDir), `Android platform must not import a business module: ${relative(filePath)} -> ${relative(target)}`);
+  }
+}
+
 for (const definition of definitions) {
   const ownDir = path.join(modulesDir, definition.id);
   for (const filePath of sourceFiles(ownDir)) {
     for (const target of relativeImportTargets(filePath)) {
       if (!isWithin(target, modulesDir) || isWithin(target, ownDir)) continue;
       assert.fail(`module must not import another module's internals: ${relative(filePath)} -> ${relative(target)}`);
+    }
+  }
+}
+
+for (const definition of definitions.filter((item) => item.client.android)) {
+  const ownDir = path.join(androidModulesDir, definition.id);
+  for (const filePath of sourceFiles(ownDir)) {
+    for (const target of relativeImportTargets(filePath)) {
+      if (!isWithin(target, androidModulesDir) || isWithin(target, ownDir)) continue;
+      assert.fail(`Android module must not import another module's internals: ${relative(filePath)} -> ${relative(target)}`);
     }
   }
 }

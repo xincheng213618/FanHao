@@ -1,6 +1,6 @@
 import { createShortVideoApi } from "./api.js?v=20260711-short-video-cache-09";
-import { createShortVideoListController } from "./list/controller.js?v=20260711-short-video-cache-09";
-import { createShortVideoListView } from "./list/view.js?v=20260711-short-video-cache-08";
+import { createShortVideoListController } from "./list/controller.js?v=20260711-short-video-home-01";
+import { createShortVideoListView } from "./list/view.js?v=20260711-short-video-home-01";
 import { createShortVideoAuthorPanel } from "./panels/author-panel.js?v=20260711-short-video-cache-08";
 import { createShortVideoPlaybackPanels } from "./panels/playback-panels.js?v=20260711-short-video-cache-08";
 import { createShortVideoNativePlatform } from "./platform/native-player.js?v=20260711-short-video-cache-08";

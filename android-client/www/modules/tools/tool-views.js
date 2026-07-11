@@ -29,8 +29,8 @@ export function createToolViews(context) {
   function renderTxtTool(isActive = () => true) {
     activeGuard = isActive;
     setActiveBottom("tools");
-    els.viewKicker.textContent = "小工具";
-    els.viewTitle.textContent = "工具箱";
+    els.viewKicker.textContent = "个人中心";
+    els.viewTitle.textContent = "我的";
     renderMeta();
     renderBody();
   }
@@ -38,7 +38,8 @@ export function createToolViews(context) {
   function renderMeta() {
     const bytes = inputBytes();
     const parts = [
-      "开源小游戏 2 个",
+      "小游戏 2 个",
+      "TXT 工具",
       bytes ? `输入 ${formatBytes(bytes)}` : "等待输入",
       state.result?.size ? `输出 ${formatBytes(state.result.size)}` : "",
       state.result ? "保留 10 分钟" : ""

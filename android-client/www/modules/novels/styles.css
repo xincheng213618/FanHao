@@ -553,8 +553,7 @@
 
 .novel-mobile-card-body > span,
 .novel-mobile-card-body > small,
-.novel-mobile-detail-body > span,
-.novel-mobile-detail-body > small {
+.novel-mobile-detail-body > span {
   overflow: hidden;
   color: var(--muted);
   text-overflow: ellipsis;
@@ -758,7 +757,6 @@
 
 .novel-mobile-detail-hero,
 .novel-mobile-summary-panel,
-.novel-mobile-text-search,
 .novel-mobile-catalog {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -780,6 +778,41 @@
   gap: 7px;
 }
 
+.novel-mobile-reading-status {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.novel-mobile-reading-status > small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.novel-mobile-chapter-shortcut {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 0;
+  text-align: left;
+}
+
+.novel-mobile-chapter-shortcut span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.novel-mobile-chapter-shortcut strong {
+  overflow: hidden;
+  color: #c54658;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .novel-mobile-summary-panel {
   display: grid;
   gap: 8px;
@@ -790,126 +823,6 @@
   margin: 0;
   color: var(--muted);
   line-height: 1.75;
-}
-
-.novel-mobile-text-search {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  padding: 13px;
-}
-
-.novel-mobile-text-search > div:first-child {
-  display: grid;
-  gap: 3px;
-}
-
-.novel-mobile-text-search > div:first-child span,
-.novel-mobile-text-search-status {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.novel-mobile-text-search-status.error {
-  color: #ed4259;
-}
-
-.novel-mobile-text-search-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 7px;
-}
-
-.novel-mobile-text-search-form input,
-.novel-mobile-text-search-form button,
-.novel-mobile-text-search-more {
-  min-width: 0;
-  min-height: 42px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface-raised);
-  color: var(--ink);
-  padding: 0 12px;
-}
-
-.novel-mobile-text-search-form button,
-.novel-mobile-text-search-more {
-  border-color: #ed4259;
-  background: #ed4259;
-  color: #fff;
-  font-weight: 900;
-}
-
-.novel-mobile-text-search-form button:disabled {
-  opacity: 0.58;
-}
-
-.novel-mobile-text-search-results {
-  display: grid;
-  gap: 7px;
-  min-width: 0;
-}
-
-.novel-mobile-text-search-result {
-  display: grid;
-  gap: 7px;
-  width: 100%;
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface-raised);
-  color: var(--ink);
-  padding: 11px;
-  text-align: left;
-}
-
-.novel-mobile-text-search-result > span {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.novel-mobile-text-search-result strong {
-  overflow-wrap: anywhere;
-  line-height: 1.45;
-}
-
-.novel-mobile-text-search-result small {
-  flex: 0 0 auto;
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.novel-mobile-text-search-result p {
-  margin: 0;
-  color: var(--muted);
-  line-height: 1.65;
-  overflow-wrap: anywhere;
-}
-
-.novel-mobile-text-search-result mark {
-  border-radius: 3px;
-  background: #ffe38a;
-  color: #4a3822;
-  padding: 0 2px;
-}
-
-.novel-mobile-text-search-more {
-  justify-self: center;
-}
-
-.novel-mobile-text-search-more[hidden] {
-  display: none;
-}
-
-.novel-mobile-text-search.compact {
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  padding: 0;
 }
 
 .novel-mobile-catalog {
@@ -1297,13 +1210,15 @@ body.novel-reader-view .app-shell {
   overflow-y: auto;
 }
 
-.novel-reader-text-search-drawer {
-  max-height: min(78dvh, 620px);
+.novel-reader-catalog-loading {
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+  color: var(--muted);
 }
 
-.novel-reader-text-search-drawer > .novel-mobile-text-search {
-  min-height: 0;
-  overflow-y: auto;
+.novel-reader-catalog-loading.error {
+  color: #ed4259;
 }
 
 .novel-reader-settings-panel {

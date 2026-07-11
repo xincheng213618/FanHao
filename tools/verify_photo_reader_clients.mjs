@@ -41,7 +41,7 @@ for (const marker of [
 const shellStyles = read("public", "css", "shell.css");
 assert.match(shellStyles, /body\.gallery-view \.main\s*\{\s*overflow: visible;/, "gallery main must not create a scroll container that breaks the sticky reader toolbar");
 
-const androidReader = read("android-client", "www", "modules", "content-index", "channel-views.js");
+const androidReader = read("android-client", "www", "platform", "content-index", "channel-views.js");
 for (const marker of [
   "PHOTO_DETAIL_IMAGE_CONCURRENCY = 4",
   "retryPhotoDetailImage",

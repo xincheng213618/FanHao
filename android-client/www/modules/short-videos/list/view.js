@@ -2,7 +2,7 @@ import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=20260706-m
 import { formatCompact } from "../../../js/format.js";
 import { AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, SHORT_VIDEO_SORT_OPTIONS, formatDate, formatDuration, initials, normalizeSort, normalizeSource, selectOption, shortVideoSortLabel } from "../shared.js";
 export function createShortVideoListView(context = {}) {
-  const { browserState, els, getActiveUrl, listState, showView } = context;
+  const { browserState, els, getActiveUrl, listState, openSettings, showView } = context;
   const activeLibraryGroup = (...args) => context.activeLibraryGroup(...args);
   const appendVisibleAuthors = (...args) => context.appendVisibleAuthors(...args);
   const createIcon = (...args) => context.createIcon(...args);
@@ -22,6 +22,7 @@ export function createShortVideoListView(context = {}) {
     resetListLoadMoreObserver();
     const shell = document.createElement("section");
     shell.className = "short-video-mobile-list";
+    bindSettingsLongPress(shell);
     shell.append(renderLibraryTabs(), renderListToolbar());
     if (isAuthorIndexView()) {
       shell.append(renderAuthorIndex());
@@ -59,12 +60,14 @@ export function createShortVideoListView(context = {}) {
   }
 
   function renderLibraryTabs() {
+    const navigation = document.createElement("div");
+    navigation.className = "short-video-mobile-tabs";
     const tabs = document.createElement("div");
-    tabs.className = "short-video-mobile-tabs";
+    tabs.className = "short-video-mobile-tab-list";
     tabs.setAttribute("role", "tablist");
     tabs.setAttribute("aria-label", "短视频分组");
     const activeGroup = activeLibraryGroup();
-    for (const [value, label] of [["liked", "我的喜欢"], ["authors", "作者"]]) {
+    for (const [value, label] of [["all", "全部"], ["liked", "我的喜欢"], ["authors", "作者"]]) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "short-video-mobile-tab";
@@ -84,7 +87,21 @@ export function createShortVideoListView(context = {}) {
       });
       tabs.append(button);
     }
-    return tabs;
+    navigation.append(tabs);
+    if (!isAuthorIndexView()) {
+      const sortWrap = document.createElement("label");
+      sortWrap.className = "short-video-mobile-sort-wrap";
+      sortWrap.setAttribute("aria-label", "短视频排序");
+      const sort = document.createElement("select");
+      sort.className = "short-video-mobile-sort";
+      sort.setAttribute("aria-label", "短视频排序");
+      for (const item of SHORT_VIDEO_SORT_OPTIONS) sort.append(selectOption(item[0], item[1]));
+      sort.value = listState.sort || DEFAULT_SORT;
+      sort.addEventListener("change", () => updateListParams({ sort: sort.value || DEFAULT_SORT }));
+      sortWrap.append(sort);
+      navigation.append(sortWrap);
+    }
+    return navigation;
   }
 
   function renderListToolbar() {
@@ -92,15 +109,14 @@ export function createShortVideoListView(context = {}) {
     toolbar.className = "short-video-mobile-toolbar";
     const copy = document.createElement("div");
     copy.className = "short-video-mobile-toolbar-copy";
-    const title = document.createElement("strong");
     const meta = document.createElement("span");
     if (isAuthorIndexView()) {
-      title.textContent = "按作者浏览";
       meta.textContent = listState.loading && !(listState.data?.authors || []).length
         ? "正在读取作者"
         : `${formatCompact(sortedAuthorFacets({ ignoreQuery: true }).length)} 位作者`;
     } else if (isAuthorFeedView()) {
       const author = currentAuthorFacet();
+      const title = document.createElement("strong");
       title.textContent = author.name || "作者作品";
       meta.textContent = `${formatCompact(listState.data?.total || 0)} 条作品`;
       const back = document.createElement("button");
@@ -112,24 +128,14 @@ export function createShortVideoListView(context = {}) {
         showView("shortVideos", { query: "", author: "all", source: "authors", sort: listState.sort }, { resetStack: true });
       });
       toolbar.append(back);
+      copy.append(title);
     } else {
-      title.textContent = "我的喜欢";
       meta.textContent = listState.loading && !listState.data
         ? "正在读取"
         : `${formatCompact(listState.data?.total || 0)} 条`;
     }
-    copy.append(title, meta);
+    copy.append(meta);
     toolbar.append(copy);
-
-    if (!isAuthorIndexView()) {
-      const sort = document.createElement("select");
-      sort.className = "short-video-mobile-sort";
-      sort.setAttribute("aria-label", "短视频排序");
-      for (const item of SHORT_VIDEO_SORT_OPTIONS) sort.append(selectOption(item[0], item[1]));
-      sort.value = listState.sort || DEFAULT_SORT;
-      sort.addEventListener("change", () => updateListParams({ sort: sort.value || DEFAULT_SORT }));
-      toolbar.append(sort);
-    }
     if (listState.query) {
       const clear = document.createElement("button");
       clear.type = "button";
@@ -139,6 +145,43 @@ export function createShortVideoListView(context = {}) {
       toolbar.append(clear);
     }
     return toolbar;
+  }
+
+  function bindSettingsLongPress(target) {
+    if (!target || typeof openSettings !== "function") return;
+    let timer = 0;
+    let startX = 0;
+    let startY = 0;
+    let fired = false;
+    const blocked = (eventTarget) => Boolean(eventTarget?.closest?.("button, a, input, select, textarea, .short-video-mobile-card, .short-video-mobile-author-card"));
+    const cancel = () => {
+      if (timer) window.clearTimeout(timer);
+      timer = 0;
+    };
+    target.addEventListener("touchstart", (event) => {
+      if (event.touches.length !== 1 || blocked(event.target)) return;
+      startX = event.touches[0].clientX;
+      startY = event.touches[0].clientY;
+      fired = false;
+      cancel();
+      timer = window.setTimeout(() => {
+        fired = true;
+        navigator.vibrate?.(18);
+        openSettings();
+      }, 560);
+    }, { passive: true });
+    target.addEventListener("touchmove", (event) => {
+      const touch = event.touches[0];
+      if (!touch || Math.hypot(touch.clientX - startX, touch.clientY - startY) > 12) cancel();
+    }, { passive: true });
+    target.addEventListener("touchend", cancel, { passive: true });
+    target.addEventListener("touchcancel", cancel, { passive: true });
+    target.addEventListener("contextmenu", (event) => {
+      if (blocked(event.target)) return;
+      event.preventDefault();
+      if (!fired) openSettings();
+      fired = false;
+    });
   }
 
   function renderAuthorIndex() {
@@ -216,6 +259,7 @@ export function createShortVideoListView(context = {}) {
     source.dataset.shortVideoSearchSource = "1";
     source.setAttribute("aria-label", "短视频分组");
     for (const item of [
+      ["all", "全部"],
       ["liked", "我的喜欢"],
       ["authors", "作者"]
     ]) source.append(selectOption(item[0], item[1]));

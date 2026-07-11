@@ -59,7 +59,11 @@ assert.deepEqual(
 );
 
 const appSource = fs.readFileSync(path.join(root, "android-client", "www", "app.js"), "utf8");
-assert(appSource.includes("shortVideoViews?.deactivate?.()"), "Android shell must deactivate short-video transient state when leaving the module");
+assert(
+  appSource.includes("shortVideoViews?.deactivate?.()")
+    || appSource.includes("androidModuleRegistry?.deactivateExcept(currentView, currentViewParams)"),
+  "Android shell must deactivate short-video transient state when leaving the module"
+);
 
 console.log(`short-video-client: ok (${requiredParts.length} parts, ${sourceFiles(moduleDir).length} JS files)`);
 
@@ -115,6 +119,7 @@ function verifyWebDedicatedEntry() {
   const viewerSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "styles", "viewer.css"), "utf8");
   const galleryNavigationSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "styles", "gallery-navigation.css"), "utf8");
   const listSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "styles", "list.css"), "utf8");
+  const panelSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "styles", "panels.css"), "utf8");
   const responsiveSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "styles", "responsive.css"), "utf8");
   const staticServerSource = fs.readFileSync(path.join(root, "src", "platform", "server", "static-files.js"), "utf8");
   const serverSource = fs.readFileSync(path.join(root, "server.js"), "utf8");
@@ -131,7 +136,13 @@ function verifyWebDedicatedEntry() {
     assert(!entrySource.includes(unrelatedModule), `dedicated web entry must not import ${unrelatedModule}`);
   }
   assert(playerSource.includes("keepalive: true"), "short-video watch writes must survive page exit");
-  assert(playerSource.includes("panel.inert = true"), "preloaded adjacent reel panels must stay outside the active keyboard order");
+  assert(playerSource.includes("let shortVideoListRequestId = 0;") && playerSource.includes("const requestId = ++shortVideoListRequestId;") && playerSource.includes("if (requestId !== shortVideoListRequestId) return;"), "short-video list responses must ignore stale source and sort requests");
+  assert(playerSource.includes('state.shortVideo.source === "liked" ? "入库时间" : "发布时间"'), "short-video time sorting must name the active ingestion or publication timestamp");
+  assert(responsiveSource.includes(".short-video-control-volume .short-video-volume-popover") && responsiveSource.includes("display: none;"), "mobile video controls must keep the desktop volume slider out of the caption and action rail");
+  assert(playerSource.includes('toggleActiveMute().then((soundOn) =>') && playerSource.includes('showBrowserToast(soundOn ? "声音已开启" : "已静音")'), "keyboard mute must report the final browser-approved sound state");
+  assert(playerSource.includes('["F", "进入 / 退出全屏"]') && playerSource.includes('["双击画面", "点赞当前作品"]'), "desktop shortcut help must expose fullscreen and Douyin-style double-click liking");
+  assert(playerSource.includes('galleryMode ? "播放 / 暂停图集" : "播放 / 暂停视频"') && playerSource.includes('galleryMode ? "切换图集内容" : "视频快退 / 快进 5 秒"') && playerSource.includes('if (!galleryMode) sheet.append(speedSection);'), "gallery playback settings must describe gallery controls and must not change background-music speed");
+  assert(playerSource.includes("function setReelPanelInteractionState(panel, interactive)") && playerSource.includes("panel.inert = !interactive") && playerSource.includes("setReelPanelInteractionState(incoming, true)") && playerSource.includes("setReelPanelInteractionState(outgoing, false)"), "reel promotion must expose only the current work to keyboard and assistive interaction");
   assert(playerSource.includes("const SHORT_VIDEO_WHEEL_DISTANCE = 82;"), "short-video wheel navigation must use a responsive gesture threshold");
   assert(playerSource.includes("`${currentIndex + 1}/${images.length}`"), "gallery counter must use the compact Douyin-style 1/5 format");
   assert(playerSource.includes("pager.append(previous, counter, next)"), "desktop gallery navigation must group previous, counter, and next controls");
@@ -143,17 +154,29 @@ function verifyWebDedicatedEntry() {
   assert(playerSource.includes("is-gallery-timing-paused") && viewerSource.includes("shortVideoGallerySegmentProgress"), "gallery progress must animate with playback time and pause with page visibility");
   assert(playerSource.includes("const projectedDelta = rawDelta + velocity * 180;") && playerSource.includes("--short-video-gallery-settle-duration"), "gallery drag release must use velocity projection and motion-adaptive settling");
   assert(viewerSource.includes(".short-video-reel-panel.is-gallery-post") && viewerSource.includes(".short-video-stage.is-gallery-stage"), "gallery pages must keep a stable full-canvas stage across portrait and landscape items");
-  assert(playerSource.includes("async function toggleShortVideoFullscreen()") && playerSource.includes('document.addEventListener("fullscreenchange", syncShortVideoFullscreenControls)'), "short-video fullscreen controls must enter, exit, and stay synchronized after Escape");
+  assert(playerSource.includes("function activeShortVideoFullscreenTarget()") && playerSource.includes('querySelector?.(".short-video-browser")') && playerSource.includes('fullscreenElement.classList?.contains?.("short-video-browser")') && playerSource.includes("async function toggleShortVideoFullscreen()") && playerSource.includes('document.addEventListener("fullscreenchange", syncShortVideoFullscreenControls)'), "short-video fullscreen must include captions, action rail, controls, and stay synchronized after Escape");
+  assert(viewerSource.includes(".short-video-browser:fullscreen") && viewerSource.includes("width: 100vw") && viewerSource.includes("height: 100vh"), "short-video fullscreen shell must fill the display without dropping player controls");
   assert(playerSource.includes("当前浏览器不支持网页全屏"), "short-video fullscreen must explain unsupported browser environments instead of failing silently");
   assert(playerSource.indexOf("rail.append(authorRailButton(video))") < playerSource.indexOf("rail.append(aiButton)"), "short-video rail must keep the author and primary actions above auxiliary AI tools like Douyin");
   assert(playerSource.includes("animateRailActionButton(button, nextActive)") && viewerSource.includes("shortVideoRailActionPulse"), "short-video like and collect actions must provide optimistic Douyin-style motion feedback");
   assert(playerSource.includes("short-video-sound-rail-cover") && viewerSource.includes("shortVideoSoundRailSpin"), "short-video sound actions should use the real sound cover and playback motion");
   assert(responsiveSource.includes(".short-video-sound-rail-cover") && responsiveSource.includes("border-width: 2px;"), "mobile short-video sound covers must fit inside the compact action rail");
   assert(playerSource.includes("primaryTabItems") && playerSource.includes("contextTabItems") && viewerSource.includes(".short-video-author-context-tabs"), "short-video side panels must separate primary Douyin-style tabs from local extension tools");
+  assert(playerSource.includes("const syncContextTabOverflow = () =>") && playerSource.includes('"扩展信息，可横向滚动"') && panelSource.includes(".short-video-author-context-tabs.has-overflow.is-scroll-end"), "narrow comment panels must expose horizontally scrollable extension tabs with visible edge affordances");
   assert(responsiveSource.includes("@media (max-width: 680px)") && responsiveSource.includes(".short-video-author-panel.is-open .short-video-author-sheet"), "narrow tablet comment panels must become overlay sheets before the player and sidebar overlap");
   assert(playerSource.includes("bindAuthorPanelDragToClose") && playerSource.includes("mouseFallbackActive") && playerSource.includes("向下拖动关闭面板") && responsiveSource.includes("--short-video-author-sheet-drag-y"), "mobile comment sheets must support pointer and mouse drag handles without hijacking content scrolling");
+  assert(playerSource.includes('window.addEventListener("pointerup", (event) => settle(event)') && playerSource.includes('window.addEventListener("pointercancel", (event) => settle(event, true)') && playerSource.includes("if (pointerId >= 0) {") && playerSource.includes("moveDrag(event.clientY, event.timeStamp);"), "mobile comment sheet dragging must keep moving and settle even when pointer capture switches between pointer and mouse events");
   assert(playerSource.includes("isolateAuthorPanelAsMobileModal") && playerSource.includes("restoreAuthorPanelModalIsolation") && playerSource.includes('element.setAttribute("inert", "")'), "mobile comment sheets must isolate background playback controls and restore them after closing");
+  assert(playerSource.includes("resolveAuthorPanelReturnFocus") && playerSource.includes("panel.dataset.returnFocusTab") && playerSource.includes(".short-video-reel-panel.is-current"), "author and recommendation sheets must restore focus to the matching control after switching the active work");
   assert(playerSource.includes("bindShortVideoModalFocusLoop") && playerSource.includes("focusableSelector") && playerSource.includes("event.shiftKey"), "playback settings and share dialogs must trap keyboard focus inside the active modal");
+  assert(playerSource.includes("isolateShortVideoTransientModal") && playerSource.includes("restoreShortVideoTransientModalIsolation") && playerSource.includes("overlay._shortVideoModalSiblings"), "playback settings and share dialogs must isolate background playback controls and restore them after closing");
+  assert(playerSource.includes("overlay._shortVideoPausedGallery = gallery") && playerSource.includes('gallery.shortVideoGalleryPause?.("modal")') && playerSource.includes('gallery.shortVideoGalleryResume?.("modal")'), "modal overlays must freeze gallery position and resume only after closing");
+  assert(playerSource.includes("focusShortVideoTransientModal") && playerSource.includes("window.requestAnimationFrame(() => window.requestAnimationFrame(focusTarget))"), "playback settings and share dialogs must restore initial focus after inert background processing");
+  assert(responsiveSource.includes(".short-video-browser.is-controls-idle .short-video-control-bar:not(.is-gallery)") && responsiveSource.includes("> :not(.short-video-control-progress-wrap)") && responsiveSource.includes("bottom: -6px;"), "idle video playback must keep a thin bottom progress line while hiding secondary controls");
+  assert(responsiveSource.includes("inset: auto 0 -8px;"), "mobile idle playback progress must stay pinned inside the viewport bottom edge");
+  assert(responsiveSource.includes(".short-video-stage.is-gallery-stage.is-sound-blocked.is-sound-hint-visible::after") && responsiveSource.includes("bottom: max(126px"), "desktop gallery sound prompts must stay above the page counter instead of covering it");
+  assert(responsiveSource.includes(".short-video-close,") && responsiveSource.includes(".short-video-browser-search") && responsiveSource.includes("background: rgba(8, 9, 13, .66)") && responsiveSource.includes("backdrop-filter: blur(14px)"), "top playback navigation must remain legible over bright video frames");
+  assert(responsiveSource.includes(".short-video-more-sheet .short-video-more-head") && responsiveSource.includes("position: sticky;") && responsiveSource.includes("top: -17px;"), "short mobile playback sheets must keep their heading and close control reachable while scrolling");
   assert(playerSource.includes('`评论 ${formatShortVideoMetric(video, "comments")}`'), "short-video side panels must expose the current comment count in the primary tab without presenting unknown statistics as zero");
   assert(playerSource.includes("function shortVideoAuthorHandle") && playerSource.includes('replace(/^(?:@\\s*)+/u, "")') && playerSource.includes("name.textContent = shortVideoAuthorHandle(video.author?.name)"), "short-video author handles must normalize imported leading @ signs instead of rendering @@ names");
   assert(playerSource.includes("syncRelatedPanelCurrentItem") && playerSource.includes("replaceVideoFromAuthorPanel(resolved?.video || video, panel, neighbors)"), "related short-video cards must switch the active work without closing the side panel");
@@ -178,6 +201,8 @@ function verifyWebDedicatedEntry() {
   assert(viewerSource.includes("shortVideoDirectIncoming") && viewerSource.includes("shortVideoDirectOutgoing"), "direct related switches must cross-fade incoming and outgoing work panels");
   assert(playerSource.includes('event.key?.toLowerCase?.() === "f"'), "short-video fullscreen must support the desktop F shortcut");
   assert(playerSource.includes("if (document.fullscreenElement) toggleShortVideoFullscreen();\n        else closeOrRevealBrowser();"), "Escape must leave fullscreen before it is allowed to close the active short-video player");
+  assert(playerSource.includes('window.matchMedia?.("(max-width: 680px)")?.matches') && playerSource.includes("轻触画面恢复操作界面") && playerSource.includes("进入后轻触画面恢复"), "mobile clear-screen playback must explain the touch gesture that restores the interface");
+  assert(playerSource.includes("setVolumePopoverOpen(!compactVolume)") && playerSource.includes("if (!player.paused) {\n          clearPlayerSoundBlocked(stage);") && playerSource.includes("markPlayerSoundBlocked(stage);"), "mobile volume taps must toggle mute without opening the desktop slider or falsely re-muting a player that kept playing");
   assert(playerSource.includes("clip.onended = () =>"), "gallery video items must advance only after playback ends");
   assert(playerSource.includes("if (images.length > 1 && wrap.isConnected"), "single-item gallery videos must finish their progress without trying to navigate away");
   assert(playerSource.includes("currentTime / duration") && playerSource.includes("--short-video-gallery-media-progress"), "gallery live-video progress must follow actual media time instead of appearing complete immediately");

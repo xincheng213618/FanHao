@@ -92,6 +92,7 @@ export function createShortVideoPage(deps) {
   let authorPanelVideoCache = null;
   let authorPanelTileMap = null;
   let shortVideoAdjacentRequestId = 0;
+  let shortVideoListRequestId = 0;
   let shortVideoOpenRequestId = 0;
   let shortVideoOpeningId = "";
   let shortVideoOpenError = "";
@@ -258,6 +259,7 @@ export function createShortVideoPage(deps) {
 
   async function loadVideos(options = {}) {
     ensureState();
+    const requestId = ++shortVideoListRequestId;
     const append = Boolean(options.append);
     if (isShortVideoAuthorIndexPage()) {
       if (append) return;
@@ -271,6 +273,7 @@ export function createShortVideoPage(deps) {
       state.shortVideo.status = state.shortVideo.loading ? "正在读取作者" : "";
       renderView();
       await loadShortVideoFacets();
+      if (requestId !== shortVideoListRequestId) return;
       state.shortVideo.loading = false;
       state.shortVideo.status = "";
       renderStats();
@@ -309,6 +312,7 @@ export function createShortVideoPage(deps) {
     params.set("stats", "0");
     if (append) params.set("offset", String(state.shortVideo.data?.videos?.length || 0));
     const data = await api(`/api/short-videos?${params}`);
+    if (requestId !== shortVideoListRequestId) return;
     if (append && state.shortVideo.data) {
       const seen = new Set((state.shortVideo.data.videos || []).map((video) => video.id));
       const merged = [...(state.shortVideo.data.videos || [])];
@@ -866,11 +870,12 @@ export function createShortVideoPage(deps) {
     text.textContent = isShortVideoAuthorDetailPage() ? "日期" : "排序";
     const select = document.createElement("select");
     select.className = "short-video-sort-select";
+    const timeLabel = state.shortVideo.source === "liked" ? "入库时间" : "发布时间";
     for (const item of [
       ["recommended", "推荐排序"],
       ["watched", "最近观看"],
-      ["published", "时间倒序"],
-      ["publishedAsc", "时间正序"],
+      ["published", `${timeLabel}倒序`],
+      ["publishedAsc", `${timeLabel}正序`],
       ["likes", "点赞最多"],
       ["likesAsc", "点赞最少"],
       ["comments", "评论最多"],
@@ -1811,11 +1816,7 @@ export function createShortVideoPage(deps) {
     const panel = document.createElement("div");
     panel.className = `short-video-reel-panel is-${slot}${ghost ? " is-ghost-panel" : ""}`;
     panel.dataset.videoId = String(video?.id || "");
-    if (ghost) {
-      panel.setAttribute("aria-hidden", "true");
-      // 相邻作品只用于画面预热和切换动画，不能进入当前作品的键盘顺序。
-      panel.inert = true;
-    }
+    setReelPanelInteractionState(panel, !ghost);
 
     const gallery = isGalleryPost(video);
     panel.classList.toggle("is-gallery-post", gallery);
@@ -2068,6 +2069,13 @@ export function createShortVideoPage(deps) {
     panel.append(rail);
 
     return { panel, player, syncPlayToggle };
+  }
+
+  function setReelPanelInteractionState(panel, interactive) {
+    if (!panel) return;
+    panel.inert = !interactive;
+    if (interactive) panel.removeAttribute("aria-hidden");
+    else panel.setAttribute("aria-hidden", "true");
   }
 
   function renderGalleryPlayer(video, options = {}) {
@@ -3789,13 +3797,13 @@ export function createShortVideoPage(deps) {
     });
   }
 
-  function activeShortVideoStage() {
-    return els.workGrid?.querySelector?.(".short-video-reel-panel.is-current .short-video-stage") || null;
+  function activeShortVideoFullscreenTarget() {
+    return els.workGrid?.querySelector?.(".short-video-browser") || null;
   }
 
   function shortVideoFullscreenActive() {
     const fullscreenElement = document.fullscreenElement;
-    return Boolean(fullscreenElement && fullscreenElement.classList?.contains?.("short-video-stage"));
+    return Boolean(fullscreenElement && fullscreenElement.classList?.contains?.("short-video-browser"));
   }
 
   function syncShortVideoFullscreenControl(control) {
@@ -3811,6 +3819,7 @@ export function createShortVideoPage(deps) {
       return;
     }
     setIconButton(control, "fullscreen", active ? "退出全屏" : (control.dataset.shortVideoFullscreenLabel || "全屏"));
+    control.title = `${active ? "退出全屏" : (control.dataset.shortVideoFullscreenLabel || "全屏")}（F）`;
   }
 
   function syncShortVideoFullscreenControls() {
@@ -3818,7 +3827,7 @@ export function createShortVideoPage(deps) {
   }
 
   async function toggleShortVideoFullscreen() {
-    const target = activeShortVideoStage();
+    const target = activeShortVideoFullscreenTarget();
     if (!target) return false;
     const exiting = Boolean(document.fullscreenElement);
     if (exiting && typeof document.exitFullscreen !== "function") {
@@ -4118,8 +4127,10 @@ export function createShortVideoPage(deps) {
       const player = activePlayer();
       if (!player) return;
       setIconButton(play, player.paused ? "play" : "pause", player.paused ? "播放" : "暂停");
+      play.title = `${player.paused ? "播放" : "暂停"}（空格）`;
       const volumePercent = player.muted ? 0 : Math.round(currentShortVideoVolume() * 100);
       setIconButton(mute, player.muted ? "volumeX" : "volume2", player.muted ? "取消静音" : "静音");
+      mute.title = `${player.muted ? "取消静音" : "静音"}（M）`;
       volume.value = String(volumePercent);
       volume.style.setProperty("--short-video-volume", `${volumePercent}%`);
       volume.setAttribute("aria-label", `音量 ${volumePercent}%`);
@@ -4194,7 +4205,8 @@ export function createShortVideoPage(deps) {
     });
     mute.addEventListener("click", () => {
       toggleActiveMute();
-      setVolumePopoverOpen(true);
+      const compactVolume = window.matchMedia?.("(max-width: 680px)")?.matches;
+      setVolumePopoverOpen(!compactVolume);
       sync(true);
     });
     volume.addEventListener("input", () => {
@@ -4526,10 +4538,10 @@ export function createShortVideoPage(deps) {
     stack.style.setProperty("--short-video-drag-y", "0px");
     incoming.classList.remove("is-next", "is-prev", "is-ghost-panel");
     incoming.classList.add("is-current");
-    incoming.removeAttribute("aria-hidden");
+    setReelPanelInteractionState(incoming, true);
     outgoing.classList.remove("is-current");
     outgoing.classList.add(direction > 0 ? "is-prev" : "is-next", "is-ghost-panel");
-    outgoing.setAttribute("aria-hidden", "true");
+    setReelPanelInteractionState(outgoing, false);
     stack.querySelectorAll(".short-video-reel-panel.is-ghost-panel").forEach((panel) => {
       if (panel !== outgoing) disposeReelPanel(panel);
     });
@@ -4674,7 +4686,7 @@ export function createShortVideoPage(deps) {
         reusedGhosts.add(panel);
         panel.classList.remove("is-current", "is-prev", "is-next");
         panel.classList.add(`is-${slot}`, "is-ghost-panel");
-        panel.setAttribute("aria-hidden", "true");
+        setReelPanelInteractionState(panel, false);
         const player = panel.querySelector(".short-video-player");
         if (player) {
           player.classList.add("is-ghost");
@@ -4794,10 +4806,13 @@ export function createShortVideoPage(deps) {
       if (panel._shortVideoCloseTimer) window.clearTimeout(panel._shortVideoCloseTimer);
       panel._shortVideoCloseTimer = 0;
       if (handleTransitionEnd) panel.removeEventListener("transitionend", handleTransitionEnd);
+      panel._shortVideoContextTabsObserver?.disconnect?.();
+      panel._shortVideoContextTabsObserver = null;
+      const fallbackFocus = resolveAuthorPanelReturnFocus(panel, returnFocus);
       restoreAuthorPanelModalIsolation(panel);
       panel.remove();
-      if (options.restoreFocus !== false && returnFocus?.isConnected) {
-        returnFocus.focus?.({ preventScroll: true });
+      if (options.restoreFocus !== false && fallbackFocus?.isConnected) {
+        fallbackFocus.focus?.({ preventScroll: true });
       }
       if (options.restoreFeed !== false) restoreAuthorPanelFeed().catch(showError);
     };
@@ -4814,6 +4829,30 @@ export function createShortVideoPage(deps) {
     };
     panel.addEventListener("transitionend", handleTransitionEnd);
     panel._shortVideoCloseTimer = window.setTimeout(finish, 1000);
+  }
+
+  function resolveAuthorPanelReturnFocus(panel, returnFocus) {
+    const current = panel?.closest?.(".short-video-browser")?.querySelector?.(".short-video-reel-panel.is-current");
+    if (!current) return null;
+    const visible = (element) => Boolean(element?.isConnected && element.getClientRects?.().length);
+    const returnPanel = returnFocus?.closest?.(".short-video-reel-panel");
+    if (visible(returnFocus) && (!returnPanel || returnPanel === current)) return returnFocus;
+    const tab = String(panel.dataset.returnFocusTab || "").trim();
+    const selector = tab === "related"
+      ? ".short-video-caption-context-button:not(.short-video-identify-button)"
+      : tab === "comments"
+      ? ".short-video-rail-button.is-comment"
+      : tab === "ai"
+      ? ".short-video-identify-button, .short-video-rail-button.is-ai"
+      : tab === "sound"
+      ? ".short-video-caption-sound, .short-video-rail-button.is-listen"
+      : tab === "topic"
+      ? ".short-video-caption-tag"
+      : ".short-video-caption-author, .short-video-rail-button.is-author";
+    const candidates = [...current.querySelectorAll(selector)].filter(visible);
+    if (tab !== "topic") return candidates[0] || null;
+    const topic = String(panel.dataset.returnFocusTopic || "").trim();
+    return candidates.find((element) => element.textContent?.trim() === `#${topic}`) || candidates[0] || null;
   }
 
   function isolateAuthorPanelAsMobileModal(panel, sheet, browser, initialFocus) {
@@ -4909,6 +4948,14 @@ export function createShortVideoPage(deps) {
     });
     handle.addEventListener("pointerup", (event) => settle(event));
     handle.addEventListener("pointercancel", (event) => settle(event, true));
+    window.addEventListener("pointerup", (event) => settle(event), {
+      signal: dragAbort.signal,
+      capture: true
+    });
+    window.addEventListener("pointercancel", (event) => settle(event, true), {
+      signal: dragAbort.signal,
+      capture: true
+    });
     handle.addEventListener("mousedown", (event) => {
       if (!mobileSheet() || panel.dataset.closing === "1" || pointerId >= 0) return;
       mouseFallbackActive = true;
@@ -4916,11 +4963,21 @@ export function createShortVideoPage(deps) {
       event.preventDefault();
     });
     window.addEventListener("mousemove", (event) => {
+      if (pointerId >= 0) {
+        moveDrag(event.clientY, event.timeStamp);
+        event.preventDefault();
+        return;
+      }
       if (!mouseFallbackActive || pointerId !== -2) return;
       moveDrag(event.clientY, event.timeStamp);
       event.preventDefault();
     }, { signal: dragAbort.signal });
     window.addEventListener("mouseup", (event) => {
+      if (pointerId >= 0) {
+        settle({ pointerId });
+        event.preventDefault();
+        return;
+      }
       if (!mouseFallbackActive || pointerId !== -2) return;
       settle({ pointerId: -2 });
       event.preventDefault();
@@ -5399,7 +5456,9 @@ export function createShortVideoPage(deps) {
         toggleActivePlayer();
       } else if (event.key?.toLowerCase?.() === "m") {
         event.preventDefault();
-        toggleActiveMute();
+        toggleActiveMute().then((soundOn) => {
+          showBrowserToast(soundOn ? "声音已开启" : "已静音");
+        });
       } else if (event.key?.toLowerCase?.() === "j") {
         event.preventDefault();
         toggleClearScreen();
@@ -5613,24 +5672,35 @@ export function createShortVideoPage(deps) {
     clearPlayerSoundBlocked(player.closest(".short-video-stage"));
   }
 
-  function toggleActiveMute() {
+  async function toggleActiveMute() {
     const player = activePlayer();
-    if (!player) return;
+    if (!player) return false;
+    const stage = player.closest(".short-video-stage");
     const wasPlaying = !player.paused && !player.ended;
     player.muted = !player.muted;
     if (!player.muted) player.volume = currentShortVideoVolume();
     state.shortVideo.muted = player.muted;
     writeMutedPreference(player.muted);
-    clearPlayerSoundBlocked(player.closest(".short-video-stage"));
+    clearPlayerSoundBlocked(stage);
     if (wasPlaying && !player.muted) {
-      player.play?.().catch(() => {
+      try {
+        await player.play?.();
+      } catch {
+        if (!player.paused) {
+          clearPlayerSoundBlocked(stage);
+          syncActiveControlBar();
+          return true;
+        }
         player.muted = true;
         state.shortVideo.muted = true;
         writeMutedPreference(true);
+        markPlayerSoundBlocked(stage);
         player.play?.().catch(() => {});
-      });
+        syncActiveControlBar();
+      }
     }
     syncActiveControlBar();
+    return !player.muted;
   }
 
   function toggleClearScreen() {
@@ -5640,7 +5710,8 @@ export function createShortVideoPage(deps) {
     const cleared = browser.classList.toggle("is-clear-screen");
     delete browser.dataset.shortVideoClearScreenRevealAt;
     if (cleared) {
-      const touchPrimary = window.matchMedia?.("(pointer: coarse)")?.matches;
+      const touchPrimary = window.matchMedia?.("(pointer: coarse)")?.matches
+        || window.matchMedia?.("(max-width: 680px)")?.matches;
       showBrowserToast(touchPrimary ? "轻触画面恢复操作界面" : "按 J 或 Esc 恢复操作界面");
       return;
     }
@@ -6531,10 +6602,45 @@ export function createShortVideoPage(deps) {
     });
   }
 
+  function isolateShortVideoTransientModal(overlay) {
+    const browser = overlay?.parentElement;
+    if (!overlay || !browser) return;
+    const gallery = activeGalleryPlayer();
+    if (gallery) {
+      overlay._shortVideoPausedGallery = gallery;
+      gallery.shortVideoGalleryPause?.("modal");
+    }
+    overlay._shortVideoModalSiblings = [...browser.children]
+      .filter((element) => element !== overlay)
+      .map((element) => ({ element, wasInert: element.hasAttribute("inert") }));
+    for (const item of overlay._shortVideoModalSiblings) item.element.setAttribute("inert", "");
+  }
+
+  function restoreShortVideoTransientModalIsolation(overlay) {
+    for (const item of overlay?._shortVideoModalSiblings || []) {
+      if (!item.wasInert && item.element?.isConnected) item.element.removeAttribute("inert");
+    }
+    const gallery = overlay?._shortVideoPausedGallery;
+    if (gallery?.isConnected) gallery.shortVideoGalleryResume?.("modal");
+    if (overlay) overlay._shortVideoPausedGallery = null;
+    overlay._shortVideoModalSiblings = null;
+  }
+
+  function focusShortVideoTransientModal(sheet, target) {
+    const focusTarget = () => {
+      if (!sheet?.isConnected || !target?.isConnected || sheet.contains(document.activeElement)) return;
+      target.focus?.({ preventScroll: true });
+    };
+    focusTarget();
+    window.requestAnimationFrame(() => window.requestAnimationFrame(focusTarget));
+  }
+
   function showPlaybackSettings(video = state.shortVideo?.current, options = {}) {
     const browser = els.workGrid?.querySelector?.(".short-video-browser");
     if (!browser) return;
-    browser.querySelector(".short-video-more-overlay")?.remove();
+    const galleryMode = isGalleryPost(video);
+    const existingOverlay = browser.querySelector(".short-video-more-overlay");
+    if (existingOverlay) closePlaybackSettings(existingOverlay, { restoreFocus: false });
 
     const overlay = document.createElement("div");
     overlay.className = "short-video-more-overlay";
@@ -6641,7 +6747,10 @@ export function createShortVideoPage(deps) {
     autoNext.setAttribute("aria-pressed", String(Boolean(state.shortVideo.autoNext)));
     if (state.shortVideo.autoNext) autoNext.querySelector("small").textContent = "已开启，播完切换下一条";
 
-    const clearScreen = playbackSettingsAction("清屏播放", "快捷键 J，再按恢复", "clearScreen", () => {
+    const clearScreenHint = window.matchMedia?.("(max-width: 680px)")?.matches
+      ? "进入后轻触画面恢复"
+      : "快捷键 J，再按恢复";
+    const clearScreen = playbackSettingsAction("清屏播放", clearScreenHint, "clearScreen", () => {
       closePlaybackSettings(overlay, { restoreFocus: false });
       toggleClearScreen();
     });
@@ -6708,15 +6817,18 @@ export function createShortVideoPage(deps) {
     shortcutsHint.textContent = "键盘与手势";
     shortcutsSummary.append(shortcutsTitle, shortcutsHint);
     const shortcutGrid = document.createElement("div");
-    for (const [key, label] of [
-      ["Space", "播放 / 暂停"],
-      ["M", "静音"],
+    const shortcutItems = [
+      ["Space", galleryMode ? "播放 / 暂停图集" : "播放 / 暂停视频"],
+      ["M", galleryMode ? "开启 / 关闭图集音乐" : "静音"],
+      ["F", "进入 / 退出全屏"],
       ["J", "清屏"],
-      ["按住画面", "临时 2×，松开恢复"],
-      ["←  →", "视频快退 / 快进 5 秒"],
+      ...(!galleryMode ? [["按住画面", "临时 2×，松开恢复"]] : []),
+      ["双击画面", "点赞当前作品"],
+      ["←  →", galleryMode ? "切换图集内容" : "视频快退 / 快进 5 秒"],
       ["↑  ↓", "切换作品"],
       ["Esc", "关闭 / 返回"]
-    ]) {
+    ];
+    for (const [key, label] of shortcutItems) {
       const item = document.createElement("span");
       const keyboard = document.createElement("kbd");
       keyboard.textContent = key;
@@ -6725,17 +6837,18 @@ export function createShortVideoPage(deps) {
     }
     shortcuts.append(shortcutsSummary, shortcutGrid);
 
-    sheet.append(header, speedSection, primarySection, manageSection, shortcuts);
+    sheet.append(header);
+    if (!galleryMode) sheet.append(speedSection);
+    sheet.append(primarySection, manageSection, shortcuts);
     overlay.append(sheet);
     browser.append(overlay);
+    isolateShortVideoTransientModal(overlay);
     bindShortVideoModalFocusLoop(overlay, sheet, () => closePlaybackSettings(overlay));
-    syncSpeedButtons();
-    window.requestAnimationFrame(() => {
-      const target = options.focusSpeed
-        ? speedButtons.get(normalizePlaybackRate(state.shortVideo?.playbackRate))
-        : close;
-      target?.focus?.({ preventScroll: true });
-    });
+    if (!galleryMode) syncSpeedButtons();
+    const initialFocus = options.focusSpeed && !galleryMode
+      ? speedButtons.get(normalizePlaybackRate(state.shortVideo?.playbackRate))
+      : close;
+    focusShortVideoTransientModal(sheet, initialFocus);
   }
 
   function playbackSettingsAction(label, description, icon, action) {
@@ -6758,6 +6871,7 @@ export function createShortVideoPage(deps) {
   function closePlaybackSettings(overlay, options = {}) {
     if (!overlay) return;
     const returnFocus = overlay._shortVideoReturnFocus;
+    restoreShortVideoTransientModalIsolation(overlay);
     overlay.remove();
     if (options.restoreFocus === false) return;
     if (returnFocus?.isConnected) {
@@ -6884,7 +6998,8 @@ export function createShortVideoPage(deps) {
   function showSharePanel(video = state.shortVideo?.current, options = {}) {
     const browser = els.workGrid?.querySelector?.(".short-video-browser");
     if (!browser || !video?.id) return;
-    browser.querySelector(".short-video-more-overlay")?.remove();
+    const existingOverlay = browser.querySelector(".short-video-more-overlay");
+    if (existingOverlay) closePlaybackSettings(existingOverlay, { restoreFocus: false });
     browser.querySelector(".short-video-share-panel")?.remove();
 
     const localUrl = localShortVideoUrl(video);
@@ -7029,10 +7144,9 @@ export function createShortVideoPage(deps) {
     sheet.append(header, preview, actionSection, linkSection, note);
     overlay.append(sheet);
     browser.append(overlay);
+    isolateShortVideoTransientModal(overlay);
     bindShortVideoModalFocusLoop(overlay, sheet, () => closePlaybackSettings(overlay));
-    window.requestAnimationFrame(() => {
-      copyLocal.focus({ preventScroll: true });
-    });
+    focusShortVideoTransientModal(sheet, copyLocal);
   }
 
   function sharePanelAction(label, description, icon, action) {
@@ -7077,6 +7191,7 @@ export function createShortVideoPage(deps) {
 
   function railNav(icon, action, disabled) {
     const button = railButton("", createIcon(icon === "↑" ? "chevronUp" : "chevronDown"), "nav", icon === "↑" ? "上一个" : "下一个");
+    button.title = icon === "↑" ? "上一个（↑）" : "下一个（↓）";
     button.disabled = disabled;
     button.addEventListener("click", action);
     return button;
@@ -7135,6 +7250,8 @@ export function createShortVideoPage(deps) {
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "false");
     panel._shortVideoReturnFocus = document.activeElement;
+    panel.dataset.returnFocusTab = String(options.initialTab || "works");
+    panel.dataset.returnFocusTopic = selectedTopic;
     panel.setAttribute("aria-label", options.initialTab === "sound" && selectedSound
       ? `原声 ${selectedSound.title || "作品原声"}`
       : options.initialTab === "topic" && selectedTopic
@@ -7193,6 +7310,22 @@ export function createShortVideoPage(deps) {
     primaryTabItems.forEach((item) => appendTabButton(item, tabs));
     contextTabItems.forEach((item) => appendTabButton(item, contextTabs, "button"));
     tabNav.append(tabs, contextTabs);
+    const syncContextTabOverflow = () => {
+      if (!contextTabs.isConnected) return;
+      const overflow = contextTabs.scrollWidth > contextTabs.clientWidth + 2;
+      const atStart = contextTabs.scrollLeft <= 2;
+      const atEnd = contextTabs.scrollLeft + contextTabs.clientWidth >= contextTabs.scrollWidth - 2;
+      contextTabs.classList.toggle("has-overflow", overflow);
+      contextTabs.classList.toggle("is-scroll-start", !overflow || atStart);
+      contextTabs.classList.toggle("is-scroll-end", !overflow || atEnd);
+      contextTabs.setAttribute("aria-label", overflow ? "扩展信息，可横向滚动" : "扩展信息");
+    };
+    contextTabs.addEventListener("scroll", syncContextTabOverflow, { passive: true });
+    if (typeof ResizeObserver === "function") {
+      panel._shortVideoContextTabsObserver = new ResizeObserver(syncContextTabOverflow);
+      panel._shortVideoContextTabsObserver.observe(contextTabs);
+    }
+    window.requestAnimationFrame(syncContextTabOverflow);
     const close = document.createElement("button");
     close.type = "button";
     close.className = "short-video-author-close";
@@ -8696,7 +8829,7 @@ export function createShortVideoPage(deps) {
       outgoing = oldCurrent.cloneNode(true);
       outgoing.classList.remove("is-current", "is-prev", "is-next", "is-ghost-panel");
       outgoing.classList.add("is-transition-outgoing");
-      outgoing.setAttribute("aria-hidden", "true");
+      setReelPanelInteractionState(outgoing, false);
       outgoing.querySelectorAll("[id]").forEach((element) => element.removeAttribute("id"));
       outgoing.querySelectorAll("audio, video").forEach((element) => element.remove());
       outgoing.querySelectorAll("button, input, a").forEach((element) => {

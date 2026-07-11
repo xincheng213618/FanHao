@@ -28,7 +28,7 @@ for (const marker of [
   assert(webRenderer.includes(marker), `Web photo search is missing: ${marker}`);
 }
 
-const androidViews = read("android-client", "www", "modules", "content-index", "channel-views.js");
+const androidViews = read("android-client", "www", "platform", "content-index", "channel-views.js");
 for (const marker of [
   'sort: text ? "relevance"',
   "mergeChannelPageData",

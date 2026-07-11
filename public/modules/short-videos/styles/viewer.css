@@ -1628,6 +1628,8 @@
   color: #fff;
 }
 
+.short-video-browser:fullscreen { width: 100vw; height: 100vh; background: #050508; }
+
 .short-video-caption-context-button .short-video-icon {
   width: 13px;
   height: 13px;

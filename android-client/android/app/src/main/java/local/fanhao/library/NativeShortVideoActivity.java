@@ -113,11 +113,13 @@ public class NativeShortVideoActivity extends Activity {
   public static final String EXTRA_OPEN_AUTHOR_PANEL = "openAuthorPanel";
   private static final String PREFS_NAME = "fanhao.shortVideo.native";
   private static final String PREF_MUTED = "muted";
+  private static final String PREF_VIDEO_FIT_MODE = "videoFitMode";
   private static final String PREF_AUTO_NEXT = "autoNext";
   private static final String PREF_LIKED_VIDEO_KEYS = "likedVideoKeys";
   private static final String PREF_COLLECTED_VIDEO_KEYS = "collectedVideoKeys";
   private static final String PREF_FOLLOWED_AUTHOR_KEYS = "followedAuthorKeys";
   private static final long STAGE_DOUBLE_TAP_MS = 280;
+  private static final long GALLERY_IMAGE_AUTO_ADVANCE_MS = 4000;
   private static final float HORIZONTAL_GESTURE_RATIO = 1.25f;
   private static final int VERTICAL_SWIPE_COMMIT_DISTANCE_DP = 48;
   private static final int LONG_PRESS_CANCEL_DISTANCE_DP = 6;
@@ -209,6 +211,9 @@ public class NativeShortVideoActivity extends Activity {
   private Runnable progressRunnable;
   private Runnable systemInfoRunnable;
   private Runnable pendingStageTapRunnable;
+  private Runnable galleryAutoAdvanceRunnable;
+  private int galleryAutoAdvanceFeedIndex = -1;
+  private int galleryAutoAdvanceMediaIndex = -1;
   private long lastStageTapAt;
   private long pageSelectedAtMs;
   private long loggedFramePageSelectedAtMs;
@@ -222,6 +227,7 @@ public class NativeShortVideoActivity extends Activity {
   private long createdAtMs;
   private boolean loggedFirstFrame;
   private boolean muted;
+  private boolean videoFitMode = true;
   private boolean autoNext;
   private boolean controlsHidden;
   private boolean openAuthorPanelOnStart;
@@ -281,6 +287,8 @@ public class NativeShortVideoActivity extends Activity {
     if (gallerySoundPlayer != null && gallerySoundFeedIndex == currentIndex && authorOverlay == null && commentsOverlay == null) {
       gallerySoundPlayer.play();
     }
+    resumeGalleryAutoAdvanceIfNeeded();
+    if (currentIndex >= 0) mainHandler.post(() -> preparePlayersAround(currentIndex));
     pausedForLifecycle = false;
     resumePlaybackAfterPause = false;
   }
@@ -295,6 +303,7 @@ public class NativeShortVideoActivity extends Activity {
     activityResumed = false;
     Log.i(TAG, "lifecycle pause resumePlayback=" + resumePlaybackAfterPause);
     clearPendingStageTap();
+    cancelGalleryAutoAdvance();
     stopSystemInfoUpdates();
     stopProgressUpdates();
     for (ExoPlayer cachedPlayer : playerCache.values()) cachedPlayer.pause();
@@ -364,8 +373,7 @@ public class NativeShortVideoActivity extends Activity {
         Log.i(TAG, "page selected " + position);
         pendingPlayIndex = position;
         loadMoreIfNeeded(position);
-        if (activePlayer == null) preparePlayerAt(position);
-        else preparePlayersAround(position);
+        preparePlayersAround(position);
         schedulePrepareAround(position, activePlayer == null ? 320 : 120);
         pager.post(() -> playAt(position));
       }
@@ -624,6 +632,7 @@ public class NativeShortVideoActivity extends Activity {
 
   private void playAt(int index) {
     if (index < 0 || index >= videos.size()) return;
+    cancelGalleryAutoAdvance();
     currentIndex = index;
     ShortVideoItem item = videos.get(index);
     ShortVideoHolder holder = attachedHolders.get(index);
@@ -634,8 +643,12 @@ public class NativeShortVideoActivity extends Activity {
 
     if (item.isGallery()) {
       if (activePlayer != null) {
+        int previousIndex = playerIndex(activePlayer);
         activePlayer.pause();
         activePlayer.setVolume(0f);
+        if (previousIndex >= 0 && activePlayer.getPlaybackState() == Player.STATE_READY) {
+          primedPlayerIndexes.add(previousIndex);
+        }
       }
       activePlayer = null;
       stopProgressUpdates();
@@ -666,21 +679,25 @@ public class NativeShortVideoActivity extends Activity {
       return;
     }
     if (activePlayer != null && activePlayer != nextPlayer) {
+      int previousIndex = playerIndex(activePlayer);
       activePlayer.pause();
       activePlayer.setVolume(0f);
+      if (previousIndex >= 0 && activePlayer.getPlaybackState() == Player.STATE_READY) {
+        primedPlayerIndexes.add(previousIndex);
+      }
     }
     activePlayer = nextPlayer;
-    primedPlayerIndexes.remove(index);
+    boolean primed = primedPlayerIndexes.remove(index);
     primeRequestedIndexes.remove(index);
     primeCountdownIndexes.remove(index);
     activePlayer.setRepeatMode(activeRepeatMode());
     activePlayer.setVolume(activeVolume());
     ensurePlayerViewAt(index);
     if (activePlayer.getPlaybackState() == Player.STATE_ENDED) activePlayer.seekTo(0);
-    holder.cover.setVisibility(View.VISIBLE);
+    holder.cover.setVisibility(primed ? View.GONE : View.VISIBLE);
     framePrefetchEnabled = true;
     startActivePlaybackIfVisible();
-    Log.i(TAG, "play " + index + " " + item.streamUrl);
+    Log.i(TAG, "play " + index + (primed ? " primed " : " ") + item.streamUrl);
     loadMoreIfNeeded(index);
   }
 
@@ -823,7 +840,7 @@ public class NativeShortVideoActivity extends Activity {
     }
 
     ShortVideoItem item = videos.get(index);
-    if (activePlayer != null && playerCache.containsValue(activePlayer)) {
+    if (activePlayer != null && playerCache.containsValue(activePlayer) && index == currentIndex) {
       int oldIndex = playerIndex(activePlayer);
       PlayerView oldView = oldIndex < 0 ? null : playerViews.remove(oldIndex);
       if (oldIndex >= 0) {
@@ -891,7 +908,7 @@ public class NativeShortVideoActivity extends Activity {
           rememberDecodedVideoSize(liveIndex, videoSize.width, videoSize.height);
           applyVideoResizeMode(liveIndex, videoSize.width, videoSize.height);
           Log.i(TAG, "video size " + liveIndex + " " + videoSize.width + "x" + videoSize.height
-            + " mode=" + (isLandscapeVideo(videoSize.width, videoSize.height) ? "fit" : "zoom"));
+            + " mode=" + (videoFitMode ? "fit" : "crop"));
         });
       }
 
@@ -906,6 +923,9 @@ public class NativeShortVideoActivity extends Activity {
         if (playbackState != Player.STATE_READY) return;
         failedPlayerIndexes.remove(liveIndex);
         if (currentIndex == liveIndex) hideStatus();
+        if (currentIndex != liveIndex && primeRequestedIndexes.contains(liveIndex)) {
+          mainHandler.post(() -> startPrimeCountdown(liveIndex, preparedPlayer));
+        }
         mainHandler.post(() -> syncPlayIndicator(liveIndex, preparedPlayer));
       }
 
@@ -953,7 +973,7 @@ public class NativeShortVideoActivity extends Activity {
       builder.setMediaSourceFactory(new DefaultMediaSourceFactory(videoCacheDataSourceFactory));
     }
     ExoPlayer player = builder.build();
-    player.setRepeatMode(Player.REPEAT_MODE_ONE);
+    player.setRepeatMode(Player.REPEAT_MODE_OFF);
     player.setVolume(0f);
     player.addListener(new Player.Listener() {
       @Override
@@ -972,16 +992,21 @@ public class NativeShortVideoActivity extends Activity {
       public void onVideoSizeChanged(@NonNull VideoSize videoSize) {
         mainHandler.post(() -> {
           if (gallerySegmentPlayer != player || gallerySegmentView == null) return;
-          gallerySegmentView.setResizeMode(isLandscapeVideo(videoSize.width, videoSize.height)
-            ? AspectRatioFrameLayout.RESIZE_MODE_FIT
-            : AspectRatioFrameLayout.RESIZE_MODE_ZOOM);
+          gallerySegmentView.setResizeMode(activeVideoResizeMode());
         });
       }
 
       @Override
       public void onPlaybackStateChanged(int playbackState) {
-        if (playbackState != Player.STATE_READY) return;
-        mainHandler.post(() -> syncPlayIndicator(gallerySegmentFeedIndex, player));
+        if (playbackState == Player.STATE_ENDED) {
+          int feedIndex = gallerySegmentFeedIndex;
+          int mediaIndex = gallerySegmentMediaIndex;
+          mainHandler.post(() -> advanceGallerySequence(feedIndex, mediaIndex, "video"));
+          return;
+        }
+        if (playbackState == Player.STATE_READY) {
+          mainHandler.post(() -> syncPlayIndicator(gallerySegmentFeedIndex, player));
+        }
       }
 
       @Override
@@ -1015,6 +1040,7 @@ public class NativeShortVideoActivity extends Activity {
     }
     gallerySegmentFeedIndex = holder.index;
     gallerySegmentMediaIndex = mediaIndex;
+    holder.galleryVideo.setResizeMode(activeVideoResizeMode());
     holder.galleryVideo.setVisibility(View.VISIBLE);
     holder.cover.setVisibility(View.VISIBLE);
     if (!media.url.equals(gallerySegmentUrl)) {
@@ -1024,7 +1050,7 @@ public class NativeShortVideoActivity extends Activity {
       player.setMediaItem(MediaItem.fromUri(cachedMediaUri(media.url)));
       player.prepare();
     }
-    player.setRepeatMode(Player.REPEAT_MODE_ONE);
+    player.setRepeatMode(Player.REPEAT_MODE_OFF);
     player.setVolume(0f);
     activePlayer = player;
     if (activityResumed && authorOverlay == null) player.play();
@@ -1261,33 +1287,53 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void applyVideoResizeMode(int index, int width, int height) {
-    if (index < 0 || index >= videos.size() || width <= 0 || height <= 0) return;
-    boolean landscape = isLandscapeVideo(width, height);
+    if (index < 0 || index >= videos.size()) return;
     PlayerView view = playerViews.get(index);
-    if (view != null) view.setResizeMode(landscape
-      ? AspectRatioFrameLayout.RESIZE_MODE_FIT
-      : AspectRatioFrameLayout.RESIZE_MODE_ZOOM);
+    if (view != null) view.setResizeMode(activeVideoResizeMode());
     ShortVideoHolder holder = attachedHolders.get(index);
     if (holder != null) {
       holder.stage.setBackgroundColor(Color.BLACK);
-      holder.cover.setScaleType(landscape ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
-      holder.videoBackdrop.setVisibility(landscape && holder.videoBackdrop.getDrawable() != null ? View.VISIBLE : View.GONE);
+      holder.cover.setScaleType(videoFitMode ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
+      holder.videoBackdrop.setVisibility(View.GONE);
     }
   }
 
   private int resizeModeFor(int width, int height) {
-    return isLandscapeVideo(width, height)
+    return activeVideoResizeMode();
+  }
+
+  private int activeVideoResizeMode() {
+    return videoFitMode
       ? AspectRatioFrameLayout.RESIZE_MODE_FIT
       : AspectRatioFrameLayout.RESIZE_MODE_ZOOM;
   }
 
-  private boolean isLandscapeVideo(int width, int height) {
-    return width > 0 && height > 0 && width / (float) height >= 1.08f;
+  private void applyVideoFitModeToPlayers() {
+    for (Integer index : new ArrayList<>(playerViews.keySet())) {
+      int[] dimensions = resolvedVideoSize(index);
+      applyVideoResizeMode(index, dimensions[0], dimensions[1]);
+    }
+    if (gallerySegmentView != null) gallerySegmentView.setResizeMode(activeVideoResizeMode());
+    for (ShortVideoHolder holder : attachedHolders.values()) {
+      if (holder.index < 0 || holder.index >= videos.size()) continue;
+      ShortVideoItem item = videos.get(holder.index);
+      GalleryMedia media = item.isGallery() ? galleryMediaAt(item, holder.galleryIndex) : null;
+      if (media != null && media.isVideo()) {
+        holder.cover.setScaleType(videoFitMode ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
+        holder.galleryVideo.setResizeMode(activeVideoResizeMode());
+      }
+    }
   }
 
   private void preparePlayersAround(int index) {
     loadMoreIfNeeded(index);
     preparePlayerAt(index);
+    for (int neighbor = index - 1; neighbor <= index + 1; neighbor += 2) {
+      if (neighbor < 0 || neighbor >= videos.size()) continue;
+      ShortVideoItem item = videos.get(neighbor);
+      if (item.isGallery() || item.streamUrl.length() == 0) continue;
+      primeNeighborPlayer(neighbor, preparePlayerAt(neighbor));
+    }
     releaseDistantPlayers(index);
   }
 
@@ -1338,7 +1384,7 @@ public class NativeShortVideoActivity extends Activity {
   private void releaseDistantPlayers(int centerIndex) {
     List<Integer> keys = new ArrayList<>(playerCache.keySet());
     for (int key : keys) {
-      if (key == centerIndex) continue;
+      if (Math.abs(key - centerIndex) <= 1) continue;
       ExoPlayer stalePlayer = playerCache.remove(key);
       primedPlayerIndexes.remove(key);
       primeRequestedIndexes.remove(key);
@@ -1362,6 +1408,7 @@ public class NativeShortVideoActivity extends Activity {
 
   private void releaseAllPlayers() {
     clearPendingStageTap();
+    cancelGalleryAutoAdvance();
     dismissPlaybackToolbar();
     stopProgressUpdates();
     for (PlayerView cachedView : playerViews.values()) {
@@ -1418,7 +1465,9 @@ public class NativeShortVideoActivity extends Activity {
         animateGalleryZoomReset(holder, true);
         return;
       }
-      activateLike(videos.get(index), true);
+      float tapX = holder == null ? Float.NaN : holder.lastTapX;
+      float tapY = holder == null ? Float.NaN : holder.lastTapY;
+      activateLike(videos.get(index), true, tapX, tapY, false);
       return;
     }
     clearPendingStageTap();
@@ -1464,6 +1513,8 @@ public class NativeShortVideoActivity extends Activity {
       return holder.horizontalGesture;
     }
     if (action == MotionEvent.ACTION_UP) {
+      holder.lastTapX = event.getRawX();
+      holder.lastTapY = event.getRawY();
       float dx = event.getX() - holder.touchStartX;
       float dy = event.getY() - holder.touchStartY;
       boolean horizontal = holder.horizontalGesture || (Math.abs(dx) > dp(72) && Math.abs(dx) > Math.abs(dy) * HORIZONTAL_GESTURE_RATIO);
@@ -1502,6 +1553,8 @@ public class NativeShortVideoActivity extends Activity {
       holder.horizontalGesture = false;
       holder.verticalGesture = false;
       holder.longPressTriggered = false;
+      holder.lastTapX = Float.NaN;
+      holder.lastTapY = Float.NaN;
       setParentInterceptDisallowed(view, false);
       scheduleStageLongPress(holder, view);
       return true;
@@ -1524,6 +1577,8 @@ public class NativeShortVideoActivity extends Activity {
       return true;
     }
     if (action == MotionEvent.ACTION_UP) {
+      holder.lastTapX = event.getRawX();
+      holder.lastTapY = event.getRawY();
       float dx = event.getRawX() - holder.touchStartX;
       float dy = event.getRawY() - holder.touchStartY;
       boolean consumedLongPress = holder.longPressTriggered;
@@ -1635,6 +1690,8 @@ public class NativeShortVideoActivity extends Activity {
       return true;
     }
     if (action == MotionEvent.ACTION_UP) {
+      holder.lastTapX = event.getRawX();
+      holder.lastTapY = event.getRawY();
       boolean consumedLongPress = holder.longPressTriggered;
       boolean tap = !holder.galleryPanMoved && !consumedLongPress;
       holder.galleryPanning = false;
@@ -1786,7 +1843,9 @@ public class NativeShortVideoActivity extends Activity {
       ? " · " + String.format(Locale.ROOT, "%.1f×", holder.galleryZoomScale)
       : "";
     GalleryMedia media = galleryMediaAt(item, holder.galleryIndex);
-    String kind = media != null && media.isVideo() ? " · 视频" : "";
+    String kind = media != null && media.isVideo()
+      ? " · 视频播放中"
+      : (item.galleryItems.size() > 1 ? " · 4秒自动播放" : "");
     if (item.sound.isPlayable()) kind += " · 配乐";
     holder.galleryCounter.setText("图文 · " + (holder.galleryIndex + 1) + " / " + item.galleryItems.size() + kind + scale);
     holder.galleryCounter.setContentDescription("图文第 " + (holder.galleryIndex + 1) + " 项，共 " + item.galleryItems.size()
@@ -2054,6 +2113,7 @@ public class NativeShortVideoActivity extends Activity {
 
   private void bindGallery(ShortVideoHolder holder, ShortVideoItem item, int requestedIndex, int direction) {
     if (holder == null || item == null || !item.isGallery()) return;
+    cancelGalleryAutoAdvance();
     resetGalleryZoom(holder, true);
     int galleryIndex = Math.max(0, Math.min(requestedIndex, item.galleryItems.size() - 1));
     holder.galleryIndex = galleryIndex;
@@ -2070,6 +2130,8 @@ public class NativeShortVideoActivity extends Activity {
     holder.progressTouch.setVisibility(View.GONE);
     GalleryMedia media = galleryMediaAt(item, galleryIndex);
     if (media != null && media.isVideo()) {
+      holder.cover.setScaleType(videoFitMode ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
+      holder.galleryVideo.setResizeMode(activeVideoResizeMode());
       holder.cover.setImageDrawable(null);
       holder.cover.setBackgroundColor(Color.BLACK);
       loadGalleryFrame(holder, item, galleryIndex, direction);
@@ -2147,6 +2209,71 @@ public class NativeShortVideoActivity extends Activity {
     holder.galleryCurrentLayer.setAlpha(direction == 0 ? 1f : 0.72f);
     holder.galleryCurrentLayer.setTranslationX(direction == 0 ? 0f : (direction > 0 ? dp(72) : -dp(72)));
     holder.galleryCurrentLayer.animate().alpha(1f).translationX(0f).setDuration(direction == 0 ? 0 : 220).start();
+    GalleryMedia media = galleryMediaAt(item, galleryIndex);
+    if (media != null && !media.isVideo()) scheduleGalleryAutoAdvance(holder, item, galleryIndex);
+  }
+
+  private void scheduleGalleryAutoAdvance(ShortVideoHolder holder, ShortVideoItem item, int mediaIndex) {
+    if (holder == null || item == null || holder.index != currentIndex || item.galleryItems.size() <= 1) return;
+    cancelGalleryAutoAdvance();
+    GalleryMedia media = galleryMediaAt(item, mediaIndex);
+    if (media == null || media.isVideo()) return;
+    galleryAutoAdvanceFeedIndex = holder.index;
+    galleryAutoAdvanceMediaIndex = mediaIndex;
+    galleryAutoAdvanceRunnable = () -> {
+      Runnable liveRunnable = galleryAutoAdvanceRunnable;
+      galleryAutoAdvanceRunnable = null;
+      if (liveRunnable == null) return;
+      int feedIndex = galleryAutoAdvanceFeedIndex;
+      int liveMediaIndex = galleryAutoAdvanceMediaIndex;
+      galleryAutoAdvanceFeedIndex = -1;
+      galleryAutoAdvanceMediaIndex = -1;
+      ShortVideoHolder liveHolder = attachedHolders.get(feedIndex);
+      if (liveHolder == null || currentIndex != feedIndex || liveHolder.galleryIndex != liveMediaIndex) return;
+      if (!activityResumed || authorOverlay != null || commentsOverlay != null || playbackToolbarOverlay != null
+        || liveHolder.touchActive || liveHolder.galleryScaling || liveHolder.galleryPanning
+        || liveHolder.galleryDragActive || liveHolder.galleryDragSettling || liveHolder.galleryZoomScale > 1.001f) {
+        scheduleGalleryAutoAdvance(liveHolder, item, liveMediaIndex);
+        return;
+      }
+      advanceGallerySequence(feedIndex, liveMediaIndex, "image");
+    };
+    mainHandler.postDelayed(galleryAutoAdvanceRunnable, GALLERY_IMAGE_AUTO_ADVANCE_MS);
+    Log.i(TAG, "gallery auto scheduled " + holder.index + " " + (mediaIndex + 1) + "/" + item.galleryItems.size());
+  }
+
+  private void resumeGalleryAutoAdvanceIfNeeded() {
+    if (currentIndex < 0 || currentIndex >= videos.size()) return;
+    ShortVideoItem item = videos.get(currentIndex);
+    if (!item.isGallery()) return;
+    ShortVideoHolder holder = attachedHolders.get(currentIndex);
+    if (holder == null) return;
+    GalleryMedia media = galleryMediaAt(item, holder.galleryIndex);
+    if (media != null && !media.isVideo() && holder.cover.getDrawable() != null) {
+      scheduleGalleryAutoAdvance(holder, item, holder.galleryIndex);
+    }
+  }
+
+  private void cancelGalleryAutoAdvance() {
+    if (galleryAutoAdvanceRunnable != null) mainHandler.removeCallbacks(galleryAutoAdvanceRunnable);
+    galleryAutoAdvanceRunnable = null;
+    galleryAutoAdvanceFeedIndex = -1;
+    galleryAutoAdvanceMediaIndex = -1;
+  }
+
+  private void advanceGallerySequence(int feedIndex, int mediaIndex, String source) {
+    if (feedIndex < 0 || feedIndex >= videos.size() || currentIndex != feedIndex) return;
+    ShortVideoItem item = videos.get(feedIndex);
+    ShortVideoHolder holder = attachedHolders.get(feedIndex);
+    if (!item.isGallery() || item.galleryItems.size() <= 1 || holder == null || holder.galleryIndex != mediaIndex) return;
+    if (!activityResumed || authorOverlay != null || commentsOverlay != null || playbackToolbarOverlay != null) {
+      if ("image".equals(source)) scheduleGalleryAutoAdvance(holder, item, mediaIndex);
+      return;
+    }
+    int nextIndex = (mediaIndex + 1) % item.galleryItems.size();
+    bindGallery(holder, item, nextIndex, 1);
+    Log.i(TAG, "gallery auto " + source + " " + feedIndex + " " + (mediaIndex + 1) + "->" + (nextIndex + 1)
+      + "/" + item.galleryItems.size());
   }
 
   private void prefetchGalleryMedia(ShortVideoItem item, int galleryIndex) {
@@ -2199,20 +2326,24 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void activateLike(ShortVideoItem item, boolean showBurst) {
+    activateLike(item, showBurst, Float.NaN, Float.NaN, true);
+  }
+
+  private void activateLike(ShortVideoItem item, boolean showBurst, float tapX, float tapY, boolean showStatus) {
     String key = videoInteractionKey(item);
     if (key.length() == 0) return;
     boolean added = likedVideoKeys.add(key);
     if (added) persistVideoInteractionKeys(PREF_LIKED_VIDEO_KEYS, likedVideoKeys);
     refreshVisibleRails();
-    if (showBurst) showLikeBurst(item);
-    showTransientStatus(added ? "已点赞" : "已点过赞");
+    if (showBurst) showLikeBurst(item, tapX, tapY);
+    if (showStatus) showTransientStatus(added ? "已点赞" : "已点过赞");
   }
 
   private void toggleLike(ShortVideoItem item) {
     String key = videoInteractionKey(item);
     if (key.length() == 0) return;
     if (!likedVideoKeys.contains(key)) {
-      activateLike(item, true);
+      activateLike(item, false);
       return;
     }
     likedVideoKeys.remove(key);
@@ -2305,7 +2436,7 @@ public class NativeShortVideoActivity extends Activity {
     button.setContentDescription((following ? "取消关注 " : "关注 ") + displayAuthor(item));
   }
 
-  private void showLikeBurst(ShortVideoItem item) {
+  private void showLikeBurst(ShortVideoItem item, float tapX, float tapY) {
     ShortVideoHolder holder = null;
     if (currentIndex >= 0 && currentIndex < videos.size() && isSameVideo(videos.get(currentIndex), item)) {
       holder = attachedHolders.get(currentIndex);
@@ -2321,6 +2452,22 @@ public class NativeShortVideoActivity extends Activity {
     if (holder == null) return;
     ImageView burst = holder.likeBurst;
     burst.animate().cancel();
+    int burstSize = dp(116);
+    int[] rootLocation = new int[2];
+    holder.itemView.getLocationOnScreen(rootLocation);
+    float centerX = Float.isNaN(tapX) ? holder.itemView.getWidth() / 2f : tapX - rootLocation[0];
+    float centerY = Float.isNaN(tapY) ? holder.itemView.getHeight() / 2f : tapY - rootLocation[1];
+    FrameLayout.LayoutParams burstParams = (FrameLayout.LayoutParams) burst.getLayoutParams();
+    burstParams.gravity = Gravity.TOP | Gravity.LEFT;
+    burstParams.leftMargin = Math.round(Math.max(0f, Math.min(holder.itemView.getWidth() - burstSize, centerX - burstSize / 2f)));
+    burstParams.topMargin = Math.round(Math.max(0f, Math.min(holder.itemView.getHeight() - burstSize, centerY - burstSize / 2f)));
+    burst.setLayoutParams(burstParams);
+    burst.setTranslationX(0f);
+    burst.setTranslationY(0f);
+    burst.setRotation((((int) (centerX + centerY)) & 1) == 0 ? -10f : 10f);
+    Log.i(TAG, "like burst tap=" + Math.round(tapX) + "," + Math.round(tapY)
+      + " local=" + Math.round(centerX) + "," + Math.round(centerY)
+      + " root=" + holder.itemView.getWidth() + "x" + holder.itemView.getHeight());
     burst.setVisibility(View.VISIBLE);
     burst.setAlpha(0f);
     burst.setScaleX(0.62f);
@@ -2337,7 +2484,10 @@ public class NativeShortVideoActivity extends Activity {
         .scaleY(1.34f)
         .setStartDelay(160)
         .setDuration(260)
-        .withEndAction(() -> burst.setVisibility(View.GONE))
+        .withEndAction(() -> {
+          burst.setVisibility(View.GONE);
+          burst.setRotation(0f);
+        })
         .start())
       .start();
   }
@@ -2348,6 +2498,7 @@ public class NativeShortVideoActivity extends Activity {
     holder.likeBurst.setAlpha(0f);
     holder.likeBurst.setScaleX(0.62f);
     holder.likeBurst.setScaleY(0.62f);
+    holder.likeBurst.setRotation(0f);
   }
 
   private void setControlsHidden(boolean hidden, boolean showToast) {
@@ -2819,10 +2970,8 @@ public class NativeShortVideoActivity extends Activity {
     if (holder == null || item == null || bitmap == null) return;
     holder.cover.setImageBitmap(bitmap);
     holder.videoBackdrop.setImageBitmap(bitmap);
-    int[] dimensions = resolvedVideoSize(holder.index);
-    boolean landscape = isLandscapeVideo(dimensions[0], dimensions[1])
-      || isLandscapeVideo(item.width, item.height);
-    holder.videoBackdrop.setVisibility(landscape ? View.VISIBLE : View.GONE);
+    holder.cover.setScaleType(videoFitMode ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
+    holder.videoBackdrop.setVisibility(View.GONE);
   }
 
   private void loadCover(int index, ShortVideoItem item) {
@@ -3020,6 +3169,7 @@ public class NativeShortVideoActivity extends Activity {
   private void readControlPreferences() {
     SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
     muted = prefs.getBoolean(PREF_MUTED, false);
+    videoFitMode = prefs.getBoolean(PREF_VIDEO_FIT_MODE, true);
     autoNext = prefs.getBoolean(PREF_AUTO_NEXT, false);
     likedVideoKeys.clear();
     likedVideoKeys.addAll(new HashSet<>(prefs.getStringSet(PREF_LIKED_VIDEO_KEYS, Collections.emptySet())));
@@ -3056,6 +3206,13 @@ public class NativeShortVideoActivity extends Activity {
     showTransientStatus(muted ? "已静音" : "已开声");
   }
 
+  private void toggleVideoFitMode() {
+    videoFitMode = !videoFitMode;
+    writeControlPreference(PREF_VIDEO_FIT_MODE, videoFitMode);
+    applyVideoFitModeToPlayers();
+    showTransientStatus(videoFitMode ? "画面已切换为自适应，完整显示视频" : "画面已切换为裁切，铺满屏幕");
+  }
+
   private void toggleAutoNext() {
     autoNext = !autoNext;
     writeControlPreference(PREF_AUTO_NEXT, autoNext);
@@ -3073,7 +3230,7 @@ public class NativeShortVideoActivity extends Activity {
       player.setVolume(player == activePlayer ? activeVolume() : 0f);
     }
     if (gallerySegmentPlayer != null) {
-      gallerySegmentPlayer.setRepeatMode(Player.REPEAT_MODE_ONE);
+      gallerySegmentPlayer.setRepeatMode(Player.REPEAT_MODE_OFF);
       gallerySegmentPlayer.setVolume(0f);
     }
     if (gallerySoundPlayer != null) {
@@ -3197,6 +3354,7 @@ public class NativeShortVideoActivity extends Activity {
   private void renderAuthorScreen(AuthorScreenState screen) {
     ShortVideoItem seed = screen.seed;
     removeAuthorOverlay();
+    cancelGalleryAutoAdvance();
     if (activePlayer != null) {
       activePlayer.pause();
       stopProgressUpdates();
@@ -3296,61 +3454,44 @@ public class NativeShortVideoActivity extends Activity {
     title.setTextColor(0xFF161823);
     title.setTextSize(15);
     title.setTypeface(Typeface.DEFAULT_BOLD);
-    title.setGravity(Gravity.CENTER_VERTICAL);
+    title.setGravity(Gravity.CENTER);
     LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
     top.addView(title, titleParams);
+    top.addView(new View(this), new LinearLayout.LayoutParams(dp(42), dp(42)));
     sheet.addView(top, new LinearLayout.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
       ViewGroup.LayoutParams.WRAP_CONTENT
     ));
 
     FrameLayout hero = new FrameLayout(this);
-    hero.setBackgroundColor(0xFF383B42);
-    ImageView heroCover = new ImageView(this);
-    heroCover.setScaleType(ImageView.ScaleType.CENTER_CROP);
-    heroCover.setBackgroundColor(0xFF383B42);
-    hero.addView(heroCover, new FrameLayout.LayoutParams(
-      ViewGroup.LayoutParams.MATCH_PARENT,
-      ViewGroup.LayoutParams.MATCH_PARENT
-    ));
-    String heroImageUrl = seed.coverUrl.length() > 0 ? seed.coverUrl : seed.authorAvatarUrl;
-    if (heroImageUrl.length() > 0) {
-      loadImageInto(heroCover, heroImageUrl, "author-hero:" + authorInteractionKey(seed));
-    }
-    View heroScrim = new View(this);
-    heroScrim.setBackgroundColor(0x66000000);
-    hero.addView(heroScrim, new FrameLayout.LayoutParams(
-      ViewGroup.LayoutParams.MATCH_PARENT,
-      ViewGroup.LayoutParams.MATCH_PARENT
-    ));
+    hero.setBackgroundColor(0xFFF7F8FA);
 
     LinearLayout heroIdentity = new LinearLayout(this);
     heroIdentity.setOrientation(LinearLayout.HORIZONTAL);
-    heroIdentity.setGravity(Gravity.BOTTOM);
-    heroIdentity.setPadding(dp(16), dp(10), dp(16), dp(14));
+    heroIdentity.setGravity(Gravity.CENTER_VERTICAL);
+    heroIdentity.setPadding(dp(16), dp(8), dp(16), dp(8));
     FrameLayout heroAvatarShell = new FrameLayout(this);
     heroAvatarShell.setBackground(circleDrawable(Color.WHITE));
-    heroAvatarShell.addView(authorAvatarView(seed, dp(72)), new FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER));
-    heroIdentity.addView(heroAvatarShell, new LinearLayout.LayoutParams(dp(78), dp(78)));
+    heroAvatarShell.addView(authorAvatarView(seed, dp(74)), new FrameLayout.LayoutParams(dp(74), dp(74), Gravity.CENTER));
+    heroIdentity.addView(heroAvatarShell, new LinearLayout.LayoutParams(dp(80), dp(80)));
     LinearLayout heroInfo = new LinearLayout(this);
     heroInfo.setOrientation(LinearLayout.VERTICAL);
-    heroInfo.setGravity(Gravity.BOTTOM);
-    heroInfo.setPadding(dp(12), 0, 0, dp(4));
+    heroInfo.setGravity(Gravity.CENTER_VERTICAL);
+    heroInfo.setPadding(dp(12), 0, 0, 0);
     TextView heroName = new TextView(this);
     heroName.setText(displayAuthor(seed));
-    heroName.setTextColor(Color.WHITE);
-    heroName.setTextSize(22);
+    heroName.setTextColor(0xFF161823);
+    heroName.setTextSize(21);
     heroName.setTypeface(Typeface.DEFAULT_BOLD);
     heroName.setSingleLine(true);
     heroName.setEllipsize(TextUtils.TruncateAt.END);
-    heroName.setShadowLayer(8, 0, 2, 0x99000000);
     TextView heroHandle = new TextView(this);
     heroHandle.setText(authorHandleText(seed));
-    heroHandle.setTextColor(0xE6FFFFFF);
+    heroHandle.setTextColor(0xFF8A8F99);
     heroHandle.setTextSize(12);
+    heroHandle.setPadding(0, dp(5), 0, 0);
     heroHandle.setSingleLine(true);
     heroHandle.setEllipsize(TextUtils.TruncateAt.END);
-    heroHandle.setShadowLayer(6, 0, 2, 0x99000000);
     heroInfo.addView(heroName);
     heroInfo.addView(heroHandle);
     heroIdentity.addView(heroInfo, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
@@ -3360,12 +3501,12 @@ public class NativeShortVideoActivity extends Activity {
     ));
     sheet.addView(hero, new LinearLayout.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
-      dp(164)
+      dp(112)
     ));
 
     LinearLayout head = new LinearLayout(this);
     head.setOrientation(LinearLayout.VERTICAL);
-    head.setPadding(dp(14), dp(8), dp(14), dp(6));
+    head.setPadding(dp(14), dp(4), dp(14), dp(5));
 
     if (seed.authorSignature.length() > 0) {
       TextView signature = new TextView(this);
@@ -3402,7 +3543,7 @@ public class NativeShortVideoActivity extends Activity {
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.WRAP_CONTENT
       );
-      profileStatsParams.bottomMargin = dp(8);
+      profileStatsParams.bottomMargin = dp(6);
       sheet.addView(profileStats, profileStatsParams);
     }
 
@@ -3418,7 +3559,7 @@ public class NativeShortVideoActivity extends Activity {
     actions.setGravity(Gravity.CENTER);
     LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
-      dp(40)
+      dp(42)
     );
     actionsParams.leftMargin = dp(14);
     actionsParams.rightMargin = dp(14);
@@ -3431,18 +3572,18 @@ public class NativeShortVideoActivity extends Activity {
       bindFollowButton(follow, seed);
     });
     bindFollowButton(follow, seed);
-    LinearLayout.LayoutParams followParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+    LinearLayout.LayoutParams followParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.35f);
     followParams.rightMargin = dp(6);
     actions.addView(follow, followParams);
 
-    TextView filter = authorActionButton("只看 TA", false, seed.authorSecUid.length() > 0, view -> switchToAuthorFeed(screen));
-    LinearLayout.LayoutParams filterParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+    TextView filter = authorActionButton("只看TA", false, seed.authorSecUid.length() > 0, view -> switchToAuthorFeed(screen));
+    LinearLayout.LayoutParams filterParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, .85f);
     filterParams.rightMargin = dp(6);
     actions.addView(filter, filterParams);
 
     String authorProfileUrl = authorOriginalUrl(seed);
     TextView douyin = authorActionButton("抖音主页", false, authorProfileUrl.length() > 0, view -> openAuthorOriginal(seed));
-    actions.addView(douyin, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+    actions.addView(douyin, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, .85f));
 
     LinearLayout tabBar = new LinearLayout(this);
     tabBar.setOrientation(LinearLayout.HORIZONTAL);
@@ -3455,7 +3596,7 @@ public class NativeShortVideoActivity extends Activity {
 
     TextView sortButton = authorActionButton("\u21c5 " + authorSortLabel(screen.sort), false, true, view -> showAuthorSortDialog(screen, pageRef, activeTab, render));
     sortButton.setTextSize(12);
-    LinearLayout.LayoutParams sortParams = new LinearLayout.LayoutParams(dp(108), dp(32));
+    LinearLayout.LayoutParams sortParams = new LinearLayout.LayoutParams(dp(100), dp(30));
     sortParams.gravity = Gravity.CENTER_VERTICAL;
     tabBar.addView(sortButton, sortParams);
     sheet.addView(tabBar, new LinearLayout.LayoutParams(
@@ -3820,8 +3961,9 @@ public class NativeShortVideoActivity extends Activity {
     tabs.addView(authorTabButton("数据", "stats", activeTab, callback), new LinearLayout.LayoutParams(0, dp(38), 1f));
   }
 
-  private TextView authorTabButton(String label, String value, String activeTab, AuthorTabCallback callback) {
+  private View authorTabButton(String label, String value, String activeTab, AuthorTabCallback callback) {
     boolean active = value.equals(activeTab);
+    FrameLayout cell = new FrameLayout(this);
     TextView button = new TextView(this);
     button.setText(label);
     button.setTextColor(active ? 0xFF161823 : 0xFF8A8F99);
@@ -3829,10 +3971,19 @@ public class NativeShortVideoActivity extends Activity {
     button.setTypeface(Typeface.DEFAULT_BOLD);
     button.setGravity(Gravity.CENTER);
     button.setBackgroundColor(Color.TRANSPARENT);
-    if (active) button.setPaintFlags(button.getPaintFlags() | android.graphics.Paint.UNDERLINE_TEXT_FLAG);
-    else button.setPaintFlags(button.getPaintFlags() & ~android.graphics.Paint.UNDERLINE_TEXT_FLAG);
-    button.setOnClickListener(view -> callback.onTab(value));
-    return button;
+    cell.addView(button, new FrameLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.MATCH_PARENT
+    ));
+    if (active) {
+      View indicator = new View(this);
+      indicator.setBackground(roundedDrawable(0xFFFE2C55, dp(2)));
+      FrameLayout.LayoutParams indicatorParams = new FrameLayout.LayoutParams(dp(24), dp(3), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+      cell.addView(indicator, indicatorParams);
+    }
+    cell.setClickable(true);
+    cell.setOnClickListener(view -> callback.onTab(value));
+    return cell;
   }
 
   private View authorTabContent(AuthorScreenState screen, FeedPage page, String tab, Runnable loadMore, @Nullable Runnable onAuthorScroll) {
@@ -4360,11 +4511,10 @@ public class NativeShortVideoActivity extends Activity {
     title.setTypeface(Typeface.DEFAULT_BOLD);
     title.setGravity(Gravity.CENTER);
     header.addView(title, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-    TextView close = new TextView(this);
-    close.setText("×");
-    close.setTextColor(0xCCFFFFFF);
-    close.setTextSize(27);
-    close.setGravity(Gravity.CENTER);
+    ImageView close = new ImageView(this);
+    close.setImageResource(android.R.drawable.ic_menu_close_clear_cancel);
+    close.setColorFilter(0xD9FFFFFF);
+    close.setPadding(dp(13), dp(13), dp(13), dp(13));
     close.setContentDescription("关闭评论面板");
     close.setClickable(true);
     close.setFocusable(true);
@@ -4432,12 +4582,24 @@ public class NativeShortVideoActivity extends Activity {
     scroll.addView(commentsList, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     sheet.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
+    LinearLayout privacyRow = new LinearLayout(this);
+    privacyRow.setOrientation(LinearLayout.HORIZONTAL);
+    privacyRow.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+    ImageView privacyIcon = new ImageView(this);
+    privacyIcon.setImageResource(android.R.drawable.checkbox_on_background);
+    privacyIcon.setColorFilter(0xCC5FE1B7);
+    privacyIcon.setContentDescription(null);
+    privacyRow.addView(privacyIcon, new LinearLayout.LayoutParams(dp(16), dp(16)));
     TextView privacyNote = new TextView(this);
-    privacyNote.setText("✓  只保存在这台设备，不会发布到抖音");
+    privacyNote.setText("只保存在这台设备，不会发布到抖音");
     privacyNote.setTextColor(0xB35FE1B7);
     privacyNote.setTextSize(11);
     privacyNote.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
-    sheet.addView(privacyNote, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(30)));
+    LinearLayout.LayoutParams privacyNoteParams = new LinearLayout.LayoutParams(0, dp(30), 1f);
+    privacyNoteParams.leftMargin = dp(6);
+    privacyRow.addView(privacyNote, privacyNoteParams);
+    privacyRow.setContentDescription("只保存在这台设备，不会发布到抖音");
+    sheet.addView(privacyRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(30)));
 
     LinearLayout composer = new LinearLayout(this);
     composer.setOrientation(LinearLayout.VERTICAL);
@@ -4540,6 +4702,7 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void pauseForCommentsOverlay() {
+    cancelGalleryAutoAdvance();
     commentsPausedIndex = currentIndex;
     commentsPausedVideo = activePlayer;
     commentsPausedGallerySegment = gallerySegmentPlayer;
@@ -4583,6 +4746,7 @@ public class NativeShortVideoActivity extends Activity {
     if (sameWork && resumeSegment && pausedSegment == gallerySegmentPlayer) pausedSegment.play();
     if (sameWork && resumeSound && pausedSound == gallerySoundPlayer) pausedSound.play();
     if (sameWork && resumeVideo) startProgressUpdates();
+    if (sameWork) resumeGalleryAutoAdvanceIfNeeded();
     Log.i(TAG, "comments close restore=" + sameWork + " video=" + resumeVideo
       + " segment=" + resumeSegment + " sound=" + resumeSound);
     hideSystemBars();
@@ -4907,14 +5071,33 @@ public class NativeShortVideoActivity extends Activity {
         }
       };
       toolbarActions.add(zoomAction);
-      row.addView(toolbarButton(zoomed ? "1×" : "2.5×", zoomed ? "复位" : "放大", zoomed ? "原图" : "看细节", zoomed, view -> zoomAction.run()));
+      row.addView(toolbarButton(android.R.drawable.ic_menu_zoom, zoomed ? "复位" : "放大", zoomed ? "原图" : "看细节", zoomed, view -> zoomAction.run()));
     } else {
       Runnable muteAction = () -> {
         dismissPlaybackToolbar();
         toggleMuted();
       };
       toolbarActions.add(muteAction);
-      row.addView(toolbarButton(muted ? "♪" : "×", muted ? "开声" : "静音", muted ? "静音中" : "有声", muted, view -> muteAction.run()));
+      row.addView(toolbarButton(
+        muted ? android.R.drawable.ic_lock_silent_mode : android.R.drawable.ic_lock_silent_mode_off,
+        muted ? "开声" : "静音",
+        muted ? "静音中" : "有声",
+        muted,
+        view -> muteAction.run()
+      ));
+
+      Runnable fitModeAction = () -> {
+        dismissPlaybackToolbar();
+        toggleVideoFitMode();
+      };
+      toolbarActions.add(fitModeAction);
+      row.addView(toolbarButton(
+        android.R.drawable.ic_menu_view,
+        videoFitMode ? "自适应" : "裁切",
+        videoFitMode ? "点按裁切" : "点按适应",
+        videoFitMode,
+        view -> fitModeAction.run()
+      ));
     }
 
     Runnable autoNextAction = () -> {
@@ -4922,21 +5105,33 @@ public class NativeShortVideoActivity extends Activity {
       toggleAutoNext();
     };
     toolbarActions.add(autoNextAction);
-    row.addView(toolbarButton(autoNext ? "↓" : "∞", autoNext ? "连播" : "循环", autoNext ? "下一条" : "单条", autoNext, view -> autoNextAction.run()));
+    row.addView(toolbarButton(
+      autoNext ? android.R.drawable.ic_media_next : android.R.drawable.ic_popup_sync,
+      autoNext ? "连播" : "循环",
+      autoNext ? "下一条" : "单条",
+      autoNext,
+      view -> autoNextAction.run()
+    ));
 
     Runnable clearAction = () -> {
       dismissPlaybackToolbar();
       setControlsHidden(!controlsHidden, true);
     };
     toolbarActions.add(clearAction);
-    row.addView(toolbarButton(controlsHidden ? "▣" : "□", controlsHidden ? "显示" : "清屏", controlsHidden ? "恢复" : "隐藏", controlsHidden, view -> clearAction.run()));
+    row.addView(toolbarButton(
+      controlsHidden ? android.R.drawable.ic_menu_view : android.R.drawable.ic_menu_close_clear_cancel,
+      controlsHidden ? "显示" : "清屏",
+      controlsHidden ? "恢复" : "隐藏",
+      controlsHidden,
+      view -> clearAction.run()
+    ));
 
     Runnable moreAction = () -> {
       dismissPlaybackToolbar();
       showMoreActions(item, shareUrl, originalUrl);
     };
     toolbarActions.add(moreAction);
-    row.addView(toolbarButton("⋯", "更多", "操作", false, view -> moreAction.run()));
+    row.addView(toolbarButton(android.R.drawable.ic_menu_manage, "更多", "操作", false, view -> moreAction.run()));
 
     overlay.addView(sheet, new FrameLayout.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
@@ -4948,6 +5143,14 @@ public class NativeShortVideoActivity extends Activity {
       ViewGroup.LayoutParams.MATCH_PARENT,
       ViewGroup.LayoutParams.MATCH_PARENT
     ));
+    sheet.setTranslationY(dp(120));
+    sheet.setAlpha(0.72f);
+    sheet.animate()
+      .translationY(0f)
+      .alpha(1f)
+      .setDuration(220)
+      .setInterpolator(GALLERY_SETTLE_INTERPOLATOR)
+      .start();
     hideSystemBars();
   }
 
@@ -4958,18 +5161,45 @@ public class NativeShortVideoActivity extends Activity {
     hideSystemBars();
   }
 
-  private TextView toolbarButton(String icon, String title, String subtitle, boolean active, View.OnClickListener listener) {
-    TextView view = new TextView(this);
-    view.setText(icon + "\n" + title + "\n" + subtitle);
-    view.setTextColor(Color.WHITE);
-    view.setTextSize(12);
+  private LinearLayout toolbarButton(int iconRes, String title, String subtitle, boolean active, View.OnClickListener listener) {
+    LinearLayout view = new LinearLayout(this);
+    view.setOrientation(LinearLayout.VERTICAL);
     view.setGravity(Gravity.CENTER);
-    view.setTypeface(Typeface.DEFAULT_BOLD);
-    view.setLineSpacing(dp(1), 1f);
-    view.setPadding(dp(4), 0, dp(4), 0);
-    view.setBackground(roundedDrawable(active ? 0xCCFE2C55 : 0xFF2A2D37, dp(14)));
+    view.setPadding(dp(4), dp(7), dp(4), dp(6));
+    view.setBackground(roundedDrawable(0xFF2A2D37, dp(14)));
+
+    ImageView icon = new ImageView(this);
+    icon.setImageResource(iconRes);
+    icon.setColorFilter(active ? 0xFFFE2C55 : Color.WHITE);
+    icon.setContentDescription(null);
+    view.addView(icon, new LinearLayout.LayoutParams(dp(24), dp(24)));
+
+    TextView titleView = new TextView(this);
+    titleView.setText(title);
+    titleView.setTextColor(active ? 0xFFFE6A86 : Color.WHITE);
+    titleView.setTextSize(13);
+    titleView.setTypeface(Typeface.DEFAULT_BOLD);
+    titleView.setGravity(Gravity.CENTER);
+    LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.WRAP_CONTENT
+    );
+    titleParams.topMargin = dp(3);
+    view.addView(titleView, titleParams);
+
+    TextView subtitleView = new TextView(this);
+    subtitleView.setText(subtitle);
+    subtitleView.setTextColor(0xFFB9BDC8);
+    subtitleView.setTextSize(10);
+    subtitleView.setGravity(Gravity.CENTER);
+    view.addView(subtitleView, new LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.WRAP_CONTENT
+    ));
+
     view.setClickable(true);
     view.setFocusable(true);
+    view.setContentDescription(title + "，" + subtitle + (active ? "，已开启" : ""));
     view.setOnClickListener(listener);
     LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
     params.leftMargin = dp(4);
@@ -5386,19 +5616,26 @@ public class NativeShortVideoActivity extends Activity {
       loadImageInto(avatar, item.authorAvatarUrl, item.authorSecUid.length() > 0 ? "avatar:" + item.authorSecUid : item.authorAvatarUrl);
     }
     if (!isFollowingAuthor(item) && authorInteractionKey(item).length() > 0) {
-      TextView follow = new TextView(this);
-      follow.setText("+");
-      follow.setTextColor(Color.WHITE);
-      follow.setTextSize(17);
-      follow.setTypeface(Typeface.DEFAULT_BOLD);
-      follow.setGravity(Gravity.CENTER);
-      follow.setIncludeFontPadding(false);
-      follow.setBackground(circleDrawable(0xFFFE2C55));
-      follow.setContentDescription("关注 " + displayAuthor(item));
-      follow.setOnClickListener(view -> toggleFollowingAuthor(item));
-      FrameLayout.LayoutParams followParams = new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-      followParams.bottomMargin = dp(1);
-      button.addView(follow, followParams);
+      FrameLayout followTarget = new FrameLayout(this);
+      followTarget.setClickable(true);
+      followTarget.setFocusable(true);
+      followTarget.setContentDescription("关注 " + displayAuthor(item));
+      followTarget.setOnClickListener(view -> {
+        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+        toggleFollowingAuthor(item);
+      });
+      ImageView followIcon = new ImageView(this);
+      followIcon.setImageResource(android.R.drawable.ic_input_add);
+      followIcon.setColorFilter(Color.WHITE);
+      followIcon.setPadding(dp(3), dp(3), dp(3), dp(3));
+      followIcon.setBackground(circleDrawable(0xFFFE2C55));
+      followIcon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+      FrameLayout.LayoutParams iconParams = new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+      iconParams.bottomMargin = dp(1);
+      followTarget.addView(followIcon, iconParams);
+      FrameLayout.LayoutParams followParams = new FrameLayout.LayoutParams(dp(36), dp(36), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+      followParams.bottomMargin = dp(-6);
+      button.addView(followTarget, followParams);
     }
     return button;
   }
@@ -5677,7 +5914,7 @@ public class NativeShortVideoActivity extends Activity {
       galleryVideo.setEnabled(false);
       galleryVideo.setUseController(false);
       galleryVideo.setKeepContentOnPlayerReset(false);
-      galleryVideo.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_ZOOM);
+      galleryVideo.setResizeMode(activeVideoResizeMode());
       galleryVideo.setVisibility(View.GONE);
       galleryCurrentLayer.addView(galleryVideo, new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -5737,9 +5974,9 @@ public class NativeShortVideoActivity extends Activity {
       FrameLayout.LayoutParams galleryProgressParams = new FrameLayout.LayoutParams(
         dp(286),
         dp(24),
-        Gravity.TOP | Gravity.CENTER_HORIZONTAL
+        Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL
       );
-      galleryProgressParams.topMargin = dp(90);
+      galleryProgressParams.bottomMargin = dp(196);
       root.addView(galleryProgress, galleryProgressParams);
 
       TextView galleryCounter = new TextView(parent.getContext());
@@ -5753,9 +5990,9 @@ public class NativeShortVideoActivity extends Activity {
       FrameLayout.LayoutParams galleryCounterParams = new FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.WRAP_CONTENT,
         dp(30),
-        Gravity.TOP | Gravity.CENTER_HORIZONTAL
+        Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL
       );
-      galleryCounterParams.topMargin = dp(120);
+      galleryCounterParams.bottomMargin = dp(160);
       root.addView(galleryCounter, galleryCounterParams);
 
       LinearLayout caption = new LinearLayout(parent.getContext());
@@ -6013,6 +6250,8 @@ public class NativeShortVideoActivity extends Activity {
     int index = -1;
     float touchStartX;
     float touchStartY;
+    float lastTapX = Float.NaN;
+    float lastTapY = Float.NaN;
     long touchStartAtMs;
     boolean touchActive;
     boolean horizontalGesture;

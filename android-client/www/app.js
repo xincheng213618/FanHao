@@ -2,27 +2,19 @@ import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STOR
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260705-mobile-actions-01";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
-import { createChannelViews } from "./modules/content-index/channel-views.js?v=20260711-photo-search-page-08";
-import { createDetailViews } from "./modules/fanhao/detail-views.js?v=20260710-module-registry-01";
-import { getElements } from "./js/dom.js?v=20260706-short-video-reel-06";
+import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260712-android-reflection-02";
+import { getElements } from "./js/dom.js?v=20260712-android-reflection-01";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260706-mobile-web-sync-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
-import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=20260710-module-registry-01";
-import { createMusicViews } from "./modules/music/music-views.js?v=20260711-music-search-focus-06";
-import { createNovelViews } from "./modules/novels/novel-views.js?v=20260711-novel-pagination-04";
-import { createPeopleViews } from "./modules/fanhao/people-views.js?v=20260710-module-registry-01";
+import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=20260712-android-reflection-01";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
-import { createShortVideoViews } from "./modules/short-videos/short-video-views.js?v=20260711-short-video-cache-09";
-import { createToolViews } from "./modules/tools/tool-views.js?v=20260710-module-registry-01";
-import { createWorkViews } from "./modules/fanhao/work-views.js?v=20260710-module-registry-01";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
 const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "studios", "studioDetail", "vr", "favorites", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoBrowser", "tools"]);
 const DEFAULT_VIEW = "works";
-const FANHAO_ROOT_VIEWS = new Set(["works", "rankings", "studios", "vr", "people", "favorites"]);
 const FANHAO_SECTION_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "vr", "people", "favorites", "history", "personDetail", "workDetail"]);
 const FANHAO_TOP_TABS = [
   { label: "作品", view: "works" },
@@ -69,8 +61,7 @@ const PRIMARY_LABELS = {
   novels: "小说",
   music: "音乐",
   shortVideos: "短视频",
-  tools: "小工具",
-  settings: "设置"
+  tools: "我的"
 };
 const FAST_WORK_LIMIT = 720;
 const FAST_WORK_STEP = 720;
@@ -85,6 +76,7 @@ const FAST_PHOTO_IMAGE_STEP = 160;
 const FAST_MANGA_IMAGE_LIMIT = 160;
 const FAST_MANGA_IMAGE_STEP = 80;
 const initialViewState = readInitialViewState();
+const initialSettingsRequested = Boolean(initialViewState.settingsRequested);
 let library = null;
 let currentView = initialViewState.view;
 let currentViewParams = initialViewState.params;
@@ -102,8 +94,10 @@ let toolViews = null;
 let novelViews = null;
 let musicViews = null;
 let shortVideoViews = null;
-let mediaViewer = null;
+let androidModuleRegistry = null;
+let mediaViewer = createMediaViewer();
 let searchHistory = null;
+let renderedSearchController = null;
 let viewRenderToken = 0;
 let activeViewController = null;
 let pendingScrollRestore = null;
@@ -127,6 +121,7 @@ const FEED_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "vr"
 
 function readInitialViewState() {
   const state = readViewStateFromHash() || readLastViewState();
+  if (state.view === "settings") return { view: "tools", params: {}, settingsRequested: true };
   return state.view === "channel" && normalizeChannelMode(state.params?.mode) === "western"
     ? defaultViewState()
     : state;
@@ -500,7 +495,6 @@ function cancelPendingScrollRestore() {
 }
 
 function renderCurrentViewIfVisible(options = {}) {
-  if (currentView === "settings") return null;
   return renderCurrentView(options);
 }
 
@@ -1149,7 +1143,7 @@ async function loadDashboard() {
     renderDashboard(library);
     workViews.renderContinuePreview();
     setConnection(connectionModeLabel(activeUrl, library.access), true);
-    setStatus(`索引时间：${library.scannedAt ? new Date(library.scannedAt).toLocaleString() : "未知"}`);
+    setStatus("已连接");
     updateServiceHealth();
     renderCurrentViewIfVisible();
     updateCacheStatus();
@@ -1166,10 +1160,8 @@ async function loadDashboard() {
     library = null;
     setStatus(`连接失败：${error.message}`, "error");
     renderOffline();
-    if (currentView !== "settings") {
-      showHome();
-      els.settingsPanel.hidden = false;
-    }
+    showHome();
+    showSettings({ skipHistory: true });
     updateServiceHealth();
     updateCacheStatus();
     return false;
@@ -1344,7 +1336,6 @@ function showHome(options = {}) {
   if (els.libraryChannelStrip) els.libraryChannelStrip.hidden = false;
   els.previewSection.hidden = false;
   els.contentPanel.hidden = true;
-  els.settingsPanel.hidden = true;
   els.viewBack.hidden = true;
   setActiveBottom("home");
   syncFanhaoSectionNav();
@@ -1354,34 +1345,37 @@ function showHome(options = {}) {
 }
 
 function showSettings(options = {}) {
-  invalidateViewRender();
-  cancelPendingScrollRestore();
-  document.body.classList.remove("novel-reader-view");
-  currentView = "settings";
-  currentViewParams = {};
-  dispatchAppViewChanged();
-  searchSurfaceExpanded = false;
-  viewStack = [];
-  syncSearchSurface();
-  els.quickStrip.hidden = true;
-  els.continueSection.hidden = true;
-  if (els.recentContentSection) els.recentContentSection.hidden = true;
-  els.statusCard.hidden = true;
-  if (els.omniSection) els.omniSection.hidden = true;
-  if (els.libraryChannelStrip) els.libraryChannelStrip.hidden = true;
-  els.previewSection.hidden = true;
-  els.contentPanel.hidden = true;
-  els.settingsPanel.hidden = false;
-  els.viewBack.hidden = true;
-  setActiveBottom("settings");
-  syncFanhaoSectionNav();
+  if (!els.settingsOverlay || !els.settingsOverlay.hidden) return;
+  els.settingsOverlay.hidden = false;
+  document.body.classList.add("settings-open");
+  els.profileSettingsButton?.setAttribute("aria-expanded", "true");
   updateCacheStatus();
   updateServiceHealth();
   renderAndroidUpdateState({ version: androidVersionInfo });
-  if (!options.skipHistory) pushViewHistory("settings", {});
-  if (Number.isFinite(Number(options.restoreScrollY))) {
-    queueScrollRestore(options.restoreScrollY);
+  if (!options.skipHistory && !window.history.state?.settingsOpen) {
+    rememberCurrentScrollInHistory();
+    window.history.pushState({
+      ...routeHistoryState(currentView, currentViewParams),
+      settingsOpen: true
+    }, "", viewRouteHash(currentView, currentViewParams));
   }
+  window.requestAnimationFrame(() => els.settingsCloseButton?.focus({ preventScroll: true }));
+}
+
+function hideSettingsSurface() {
+  if (!els.settingsOverlay || els.settingsOverlay.hidden) return;
+  els.settingsOverlay.hidden = true;
+  document.body.classList.remove("settings-open");
+  els.profileSettingsButton?.setAttribute("aria-expanded", "false");
+}
+
+function closeSettings(options = {}) {
+  if (!els.settingsOverlay || els.settingsOverlay.hidden) return;
+  if (!options.skipHistory && window.history.state?.settingsOpen) {
+    window.history.back();
+    return;
+  }
+  hideSettingsSurface();
 }
 
 function showView(view, params = {}, navigation = {}) {
@@ -1404,7 +1398,6 @@ function showView(view, params = {}, navigation = {}) {
   currentViewParams = sanitizeViewParams(view, params);
   searchSurfaceExpanded = view === "search" || (view === "channel" && Boolean(currentViewParams.query));
   resetViewLimitsForView(view);
-  els.settingsPanel.hidden = true;
   rememberViewState(currentView, currentViewParams);
   if (shouldWriteHistory) pushViewHistory(view, currentViewParams, navigation.restoreScrollY ?? 0);
   else if (navigation.replaceHistory) replaceCurrentHistory();
@@ -1456,10 +1449,7 @@ function defaultMangaImageLimitForView(view) {
 
 function goBack() {
   if (mediaViewer?.close()) return;
-  if (currentView === "novelReader") {
-    exitNovelReader();
-    return;
-  }
+  if (androidModuleRegistry?.handleBack(currentView, currentViewParams)) return;
   if (!isRootNavigationView() && currentView !== "home" && window.history.state?.marker === HISTORY_MARKER && window.history.length > 1) {
     window.history.back();
     return;
@@ -1474,15 +1464,6 @@ function applyBackState() {
     return;
   }
   showView(previous.view, previous.params, { skipHistory: true, replaceHistory: true, restoreScrollY: previous.scrollY ?? 0 });
-}
-
-function exitNovelReader() {
-  const id = String(currentViewParams.id || "");
-  if (id) {
-    showView("novelDetail", { id }, { skipHistory: true, replaceHistory: true });
-    return;
-  }
-  showView("novels", {}, { skipHistory: true, replaceHistory: true });
 }
 
 function routeHistoryState(view, params = {}, scrollY = currentScrollY()) {
@@ -1516,6 +1497,19 @@ function replaceCurrentHistory() {
 function restoreFromHistoryState(historyState) {
   if (mediaViewer?.close()) return;
   const hashState = !historyState || historyState.marker !== HISTORY_MARKER ? readViewStateFromHash() : null;
+  const legacySettingsRoute = hashState?.view === "settings" || historyState?.view === "settings";
+  if (historyState?.settingsOpen || legacySettingsRoute) {
+    const settingsBaseView = legacySettingsRoute
+      ? "tools"
+      : (RESTORABLE_VIEWS.has(historyState?.view) ? historyState.view : "tools");
+    const settingsBaseParams = legacySettingsRoute ? {} : sanitizeViewParams(settingsBaseView, historyState?.params || {});
+    if (currentView !== settingsBaseView) {
+      showView(settingsBaseView, settingsBaseParams, { skipHistory: true });
+    }
+    showSettings({ skipHistory: true });
+    return;
+  }
+  hideSettingsSurface();
   if ((!historyState || historyState.marker !== HISTORY_MARKER) && !hashState) {
     showView(DEFAULT_VIEW, {}, { skipHistory: true });
     return;
@@ -1530,10 +1524,6 @@ function restoreFromHistoryState(historyState) {
     showView(DEFAULT_VIEW, {}, { skipHistory: true, restoreScrollY });
     return;
   }
-  if (view === "settings") {
-    showSettings({ skipHistory: true, restoreScrollY });
-    return;
-  }
   showView(view, params, { skipHistory: true, restoreScrollY });
 }
 
@@ -1544,19 +1534,12 @@ function renderCurrentView(options = {}) {
     Promise.resolve(task).finally(() => queueScrollRestore(restoreScrollY));
     return task;
   };
-  if (currentView !== "shortVideos" && currentView !== "shortVideoBrowser") {
-    shortVideoViews?.deactivate?.();
-  }
+  androidModuleRegistry?.deactivateExcept(currentView, currentViewParams);
 
   if (currentView === "home") {
     const task = showHome();
     return restoreAfterRender(task);
   }
-  if (currentView === "settings") {
-    const task = showSettings({ skipHistory: true, restoreScrollY: restoreScrollY ?? undefined });
-    return restoreAfterRender(task);
-  }
-
   els.statusCard.hidden = true;
   if (els.omniSection) els.omniSection.hidden = true;
   if (els.libraryChannelStrip) els.libraryChannelStrip.hidden = true;
@@ -1564,7 +1547,6 @@ function renderCurrentView(options = {}) {
   els.continueSection.hidden = true;
   if (els.recentContentSection) els.recentContentSection.hidden = true;
   els.quickStrip.hidden = true;
-  els.settingsPanel.hidden = true;
   els.contentPanel.hidden = false;
   syncContentPanelMode();
   els.viewBack.hidden = isRootNavigationView(currentView);
@@ -1575,76 +1557,7 @@ function renderCurrentView(options = {}) {
   renderRouteLoadingState();
   const renderGuard = beginViewRender(currentView, currentViewParams);
 
-  if (currentView === "people") {
-    return restoreAfterRender(peopleViews.renderPeopleIndex());
-  }
-  if (currentView === "works") {
-    return restoreAfterRender(workViews.renderAllWorks(renderGuard));
-  }
-  if (currentView === "rankings") {
-    return restoreAfterRender(workViews.renderRankings(renderGuard));
-  }
-  if (currentView === "studios") {
-    return restoreAfterRender(workViews.renderStudios(renderGuard));
-  }
-  if (currentView === "studioDetail") {
-    return restoreAfterRender(workViews.renderStudioDetail(currentViewParams.studioId, currentViewParams.seriesId, renderGuard));
-  }
-  if (currentView === "vr") {
-    return restoreAfterRender(workViews.renderVrWorks(renderGuard));
-  }
-  if (currentView === "favorites") {
-    return restoreAfterRender(workViews.renderWorkCollection("favorites", renderGuard));
-  }
-  if (currentView === "history") {
-    return restoreAfterRender(workViews.renderWorkCollection("history", renderGuard));
-  }
-  if (currentView === "search") {
-    return restoreAfterRender(workViews.renderSearchResults(currentViewParams.query || "", renderGuard));
-  }
-  if (currentView === "personDetail") {
-    return restoreAfterRender(detailViews.renderPersonDetail(currentViewParams.personId, renderGuard));
-  }
-  if (currentView === "workDetail") {
-    return restoreAfterRender(detailViews.renderWorkDetail(currentViewParams.workId, renderGuard));
-  }
-  if (currentView === "channel") {
-    return restoreAfterRender(channelViews.renderChannel(currentViewParams, renderGuard));
-  }
-  if (currentView === "photoDetail") {
-    return restoreAfterRender(channelViews.renderPhotoDetail(currentViewParams.id, renderGuard));
-  }
-  if (currentView === "mangaDetail") {
-    return restoreAfterRender(channelViews.renderMangaDetail(currentViewParams.id, renderGuard));
-  }
-  if (currentView === "mangaChapter") {
-    return restoreAfterRender(channelViews.renderMangaChapter(currentViewParams.id, currentViewParams.chapterIndex, renderGuard));
-  }
-  if (currentView === "mediaDetail") {
-    return restoreAfterRender(channelViews.renderMediaDetail(currentViewParams.id, currentViewParams.mode, renderGuard));
-  }
-  if (currentView === "novels") {
-    return restoreAfterRender(novelViews.renderNovelList(renderGuard));
-  }
-  if (currentView === "novelDetail") {
-    return restoreAfterRender(novelViews.renderNovelDetail(currentViewParams.id, renderGuard));
-  }
-  if (currentView === "novelReader") {
-    return restoreAfterRender(novelViews.renderNovelReader(currentViewParams.id, currentViewParams.chapterIndex, renderGuard));
-  }
-  if (currentView === "music") {
-    return restoreAfterRender(musicViews.renderMusicList(currentViewParams, renderGuard));
-  }
-  if (currentView === "shortVideos") {
-    return restoreAfterRender(shortVideoViews.renderList(currentViewParams, renderGuard));
-  }
-  if (currentView === "shortVideoBrowser") {
-    return restoreAfterRender(shortVideoViews.renderBrowser(currentViewParams, renderGuard));
-  }
-  if (currentView === "tools") {
-    return restoreAfterRender(toolViews.renderTxtTool(renderGuard));
-  }
-  return restoreAfterRender(undefined);
+  return restoreAfterRender(androidModuleRegistry?.render(currentView, currentViewParams, renderGuard));
 }
 
 function renderCurrentViewPreservingScroll() {
@@ -1704,7 +1617,7 @@ function routeLoadingCopy(view = currentView, params = currentViewParams) {
   if (view === "people") return { kicker: "人物索引", title: "全部人物", meta: "正在整理", message: "正在整理人物索引" };
   if (view === "novels") return { kicker: "小说", title: "书库", meta: "正在读取", message: "正在读取书库" };
   if (view === "shortVideos") return { kicker: "短视频", title: "短视频", meta: "正在读取", message: "正在读取短视频" };
-  if (view === "tools") return { kicker: "小工具", title: "工具", meta: "正在准备", message: "正在准备工具" };
+  if (view === "tools") return { kicker: "个人中心", title: "我的", meta: "正在准备", message: "正在准备我的页面" };
   return { kicker: "作品", title: "片库", meta: "正在加载", message: "正在加载作品" };
 }
 
@@ -1749,10 +1662,9 @@ function renderOffline() {
 }
 
 function toggleSettings(force) {
-  const shouldShow = typeof force === "boolean" ? force : currentView !== "settings";
+  const shouldShow = typeof force === "boolean" ? force : Boolean(els.settingsOverlay?.hidden);
   if (shouldShow) showSettings();
-  else if (library) showView(DEFAULT_VIEW, {}, { resetStack: true });
-  else showHome();
+  else closeSettings();
 }
 
 function showPrimaryView(view, navigation = {}) {
@@ -1766,7 +1678,9 @@ function primaryChannelMode(mode) {
 }
 
 function isRootNavigationView(view = currentView) {
-  return FANHAO_ROOT_VIEWS.has(view) || view === "channel" || view === "novels" || view === "music" || view === "shortVideos";
+  if (view === "home") return true;
+  const resolved = androidModuleRegistry?.resolve(view, currentViewParams);
+  return Boolean(resolved?.module.rootViews.has(view));
 }
 
 function fanhaoTabForView(view = currentView) {
@@ -1813,7 +1727,7 @@ function syncFanhaoSectionNav() {
 function hideTopSecondaryNav() {
   if (els.fanhaoSectionNav) els.fanhaoSectionNav.hidden = true;
   if (els.fanhaoSectionNav) delete els.fanhaoSectionNav.dataset.secondaryKind;
-  if (els.topPrimaryLabel) els.topPrimaryLabel.hidden = false;
+  if (els.topPrimaryLabel) els.topPrimaryLabel.hidden = currentView === "shortVideos";
 }
 
 function renderTopSecondaryTabs(tabs = [], activeValue = "") {
@@ -1940,22 +1854,8 @@ function setTopSecondaryTabs(kind, options = {}) {
 
 function bottomNavKeyFor(name = currentView, params = currentViewParams) {
   const view = String(name || currentView || "").trim();
-  if (view === "channel") {
-    const mode = normalizeChannelMode(params.mode);
-    if (mode === "manga") return "photo";
-    if (mode === "movie" || mode === "tv") return "media";
-    return mode;
-  }
-  if (view === "photo" || view === "photoDetail") return "photo";
-  if (view === "manga" || view === "mangaDetail" || view === "mangaChapter") return "photo";
-  if (view === "novels" || view === "novelDetail" || view === "novelReader") return "novels";
-  if (view === "music") return "music";
-  if (view === "shortVideos" || view === "shortVideoBrowser") return "shortVideos";
-  if (view === "tools") return "tools";
-  if (view === "western" || view === "media") return view;
-  if (view === "movie" || view === "tv") return "media";
-  if (FANHAO_SECTION_VIEWS.has(view) || view === "home" || view === "search") return "fanhao";
-  return "";
+  if (view === "home") return "fanhao";
+  return androidModuleRegistry?.resolve(view, params)?.module.bottomKey || "";
 }
 
 function setActiveBottom(name = currentView) {
@@ -1967,192 +1867,171 @@ function setActiveBottom(name = currentView) {
     button.classList.toggle("active", Boolean(key && key === activeKey));
   }
   if (els.topPrimaryLabel) els.topPrimaryLabel.textContent = PRIMARY_LABELS[activeKey] || "资料库";
-  els.topMenuButton?.setAttribute("aria-label", currentView === "settings" ? "关闭设置" : "打开设置");
+  if (els.profileSettingsButton) {
+    const profileActive = currentView === "tools";
+    els.profileSettingsButton.hidden = !profileActive;
+    els.profileSettingsButton.setAttribute("aria-expanded", profileActive && !els.settingsOverlay?.hidden ? "true" : "false");
+  }
 }
 
 function syncSearchSurface() {
-  const isSearch = currentView === "search";
-  const isChannel = currentView === "channel";
-  const isShortVideoSearch = isShortVideoSearchContext();
-  const expanded = isSearch || searchSurfaceExpanded || (isChannel && Boolean(currentViewParams.query));
-  if (els.searchHistory) els.searchHistory.hidden = !isSearch;
-  if (els.bottomNavBar) els.bottomNavBar.hidden = isSearch;
+  const controller = activeSearchController();
+  const context = searchContext();
+  const mode = String(controller?.mode || "");
+  const expanded = Boolean(controller?.isExpanded?.(currentView, currentViewParams, searchSurfaceExpanded));
+  syncModuleToolbarActions(controller, context);
+  if (renderedSearchController && renderedSearchController !== controller) {
+    renderedSearchController.clearFilters?.(els.searchForm);
+  }
+  renderedSearchController = controller;
+  if (els.searchHistory) els.searchHistory.hidden = !(expanded && controller?.showHistory?.(currentView, currentViewParams));
+  if (els.bottomNavBar) els.bottomNavBar.hidden = Boolean(expanded && controller?.hideBottom?.(currentView, currentViewParams));
   if (els.topChannelBar) els.topChannelBar.hidden = expanded;
   if (els.searchForm) els.searchForm.hidden = !expanded;
-  els.searchForm.classList.toggle("search-mode", isSearch);
-  els.searchForm.classList.toggle("channel-mode", isChannel);
-  els.searchForm.classList.toggle("short-video-mode", isShortVideoSearch);
-  document.body.classList.toggle("search-view", isSearch);
+  els.searchForm.classList.toggle("search-mode", mode === "route");
+  els.searchForm.classList.toggle("channel-mode", mode === "channel");
+  els.searchForm.classList.toggle("short-video-mode", mode === "short-video");
+  document.body.classList.toggle("search-view", mode === "route" && expanded);
   document.body.classList.toggle("search-expanded", expanded);
-  const channelLabel = isChannel ? channelViews?.channelLabel(currentViewParams.mode) : "";
-  els.searchInput.placeholder = isShortVideoSearch
-    ? "搜短视频标题 / 作者 / 标签"
-    : isChannel ? `搜${channelLabel || "频道"}` : "搜全库：作品/人物/频道";
-  if (isShortVideoSearch) {
-    const searchState = shortVideoViews?.getSearchState?.() || {};
-    if (document.activeElement !== els.searchInput) els.searchInput.value = searchState.query || "";
-    shortVideoViews?.renderSearchFilters?.(els.searchForm, () => {
-      submitShortVideoSearch();
-    });
-    return;
-  }
-  shortVideoViews?.clearSearchFilters?.(els.searchForm);
-  if (isChannel) {
-    els.searchInput.value = currentViewParams.query || "";
-    return;
-  }
-  if (!isSearch) {
+  els.searchInput.placeholder = controller?.placeholder?.(currentView, currentViewParams) || "搜索";
+  if (controller) {
+    if (document.activeElement !== els.searchInput) {
+      els.searchInput.value = controller.value?.(currentView, currentViewParams) || "";
+    }
+    controller.renderFilters?.(els.searchForm, () => runSearch(els.searchInput.value));
+  } else {
     els.searchInput.value = "";
     if (document.activeElement === els.searchInput) els.searchInput.blur();
   }
 }
 
-function isShortVideoSearchContext(view = currentView) {
-  return view === "shortVideos" || view === "shortVideoBrowser";
+function activeSearchController() {
+  if (currentView === "home") return androidModuleRegistry?.get("fanhao")?.search || null;
+  return androidModuleRegistry?.searchFor(currentView, currentViewParams) || null;
 }
 
-workViews = createWorkViews({
-  els,
-  getActiveUrl: () => activeUrl,
-  getWorksLimit: () => worksLimit,
-  increaseWorksLimit: (amount) => {
-    worksLimit += worksLimitStepForView(currentView, amount);
-  },
-  showView,
-  openInLibrary,
-  setActiveBottom,
-  renderCurrentView,
-  renderCurrentViewPreservingScroll,
-  isHomeView: () => currentView === "home",
-  renderFavoriteExtras: renderChannelFavoritesPanel
-});
+function searchContext() {
+  return { view: currentView, params: currentViewParams };
+}
 
-channelViews = createChannelViews({
-  els,
-  getActiveUrl: () => activeUrl,
-  getChannelLimit: () => channelLimit,
-  increaseChannelLimit: (amount) => {
-    channelLimit += channelLimitStepForView(currentView, amount, currentViewParams);
-  },
-  getPhotoImageLimit: () => photoImageLimit,
-  increasePhotoImageLimit: (amount) => {
-    photoImageLimit += photoImageLimitStep(amount);
-  },
-  getMangaImageLimit: () => mangaImageLimit,
-  increaseMangaImageLimit: (amount) => {
-    mangaImageLimit += mangaImageLimitStep(amount);
-  },
-  openInLibrary,
-  showPhotoDetail: (id) => showView("photoDetail", { id }, { push: true }),
-  showMangaDetail: (id) => showView("mangaDetail", { id }, { push: true }),
-  showMangaChapter: (id, chapterIndex) => showView("mangaChapter", { id, chapterIndex }, { push: true }),
-  showMediaDetail: (id, mode) => showView("mediaDetail", { id, mode }, { push: true }),
-  setActiveBottom,
-  renderCurrentView,
-  renderCurrentViewPreservingScroll,
-  goBack,
-  getMediaViewer: () => mediaViewer,
-  recordRecentContent: rememberRecentContent,
-  onChannelFavoriteChange: handleChannelFavoriteChange,
-  setTopSecondaryTabs,
-  updateChannelQuery: (query) => {
-    const nextQuery = String(query || "").trim();
-    const startingPhotoSearch = normalizeChannelMode(currentViewParams.mode) === "photo" && nextQuery && !String(currentViewParams.query || "").trim();
-    showView("channel", {
-      ...currentViewParams,
-      ...(startingPhotoSearch ? { photoView: "albums", collection: "", category: "", person: "" } : {}),
-      query: nextQuery
-    }, { skipHistory: true, replaceHistory: true });
-  },
-  updateChannelParams: (params = {}, navigation = {}) => {
-    showView("channel", { ...currentViewParams, ...params }, { skipHistory: true, replaceHistory: true, ...navigation });
-  }
-});
+function syncModuleToolbarActions(controller = activeSearchController(), context = searchContext()) {
+  if (!els.topModuleActions) return;
+  els.topModuleActions.replaceChildren();
+  els.topSearchButton = null;
+  if (!controller?.showAction?.(context.view, context.params)) return;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "top-icon-button top-search-button";
+  button.setAttribute("aria-label", controller.actionLabel?.(context.view, context.params) || "搜索");
+  const icon = document.createElement("span");
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = "⌕";
+  button.append(icon);
+  button.addEventListener("click", openSearchSurface);
+  els.topModuleActions.append(button);
+  els.topSearchButton = button;
+}
 
-toolViews = createToolViews({
-  els,
-  getActiveUrl: () => activeUrl,
-  openInLibrary,
-  setActiveBottom
-});
+async function initializeAndroidModules(definitions) {
+  androidModuleRegistry = await loadAndroidModules(definitions, createAndroidModuleHost());
+  const fanhaoApi = androidModuleRegistry.get("fanhao")?.api || {};
+  const photoApi = androidModuleRegistry.get("photos")?.api || {};
+  const mediaApi = androidModuleRegistry.get("media")?.api || {};
+  workViews = fanhaoApi.workViews || null;
+  peopleViews = fanhaoApi.peopleViews || null;
+  detailViews = fanhaoApi.detailViews || null;
+  novelViews = androidModuleRegistry.get("novels")?.api.novelViews || null;
+  musicViews = androidModuleRegistry.get("music")?.api.musicViews || null;
+  shortVideoViews = androidModuleRegistry.get("short-videos")?.api.shortVideoViews || null;
+  toolViews = androidModuleRegistry.get("tools")?.api.toolViews || null;
+  channelViews = createChannelViewsFacade(photoApi.channelViews, mediaApi.channelViews);
+}
 
-novelViews = createNovelViews({
-  els,
-  getActiveUrl: () => activeUrl,
-  showView,
-  goBack,
-  setActiveBottom,
-  renderCurrentView,
-  renderCurrentViewPreservingScroll,
-  setStatus
-});
+function createAndroidModuleHost() {
+  return Object.freeze({
+    clientVersion: CLIENT_VERSION,
+    onModuleError: (definition, error) => setStatus(`模块 ${definition.title || definition.id} 加载失败：${error.message || error}`, "error"),
+    els,
+    mediaViewer,
+    getActiveUrl: () => activeUrl,
+    getLibrary: () => library,
+    normalizeChannelMode,
+    limits: Object.freeze({
+      getWorks: () => worksLimit,
+      increaseWorks: (amount) => { worksLimit += worksLimitStepForView(currentView, amount); },
+      getPeople: () => peopleLimit,
+      increasePeople: (amount) => { peopleLimit += peopleLimitStep(amount); },
+      getChannel: () => channelLimit,
+      increaseChannel: (amount) => { channelLimit += channelLimitStepForView(currentView, amount, currentViewParams); },
+      getPhotoImages: () => photoImageLimit,
+      increasePhotoImages: (amount) => { photoImageLimit += photoImageLimitStep(amount); },
+      getMangaImages: () => mangaImageLimit,
+      increaseMangaImages: (amount) => { mangaImageLimit += mangaImageLimitStep(amount); }
+    }),
+    navigation: Object.freeze({
+      currentView: () => currentView,
+      currentParams: () => currentViewParams,
+      hasBackStack: () => viewStack.length > 0,
+      showView,
+      goBack,
+      openInLibrary
+    }),
+    ui: Object.freeze({
+      setActiveBottom,
+      setTopSecondaryTabs,
+      renderCurrentView,
+      renderCurrentViewPreservingScroll,
+      setStatus,
+      openSettings: () => toggleSettings(true)
+    }),
+    favorites: Object.freeze({
+      renderPanel: renderChannelFavoritesPanel,
+      onChannelFavoriteChange: handleChannelFavoriteChange,
+      onUserStateChange: renderUserState
+    }),
+    recent: Object.freeze({ record: rememberRecentContent }),
+    contentIndex: Object.freeze({
+      updateChannelQuery: updateCurrentChannelQuery,
+      updateChannelParams: (params = {}, navigation = {}) => {
+        showView("channel", { ...currentViewParams, ...params }, { skipHistory: true, replaceHistory: true, ...navigation });
+      },
+      updateSearch: (params, query) => updateModuleChannelSearch(params, query),
+      updatePhotoSearch: (params, query) => updateModuleChannelSearch(params, query, { photo: true })
+    })
+  });
+}
 
-musicViews = createMusicViews({
-  els,
-  getActiveUrl: () => activeUrl,
-  setActiveBottom,
-  showView
-});
+function createChannelViewsFacade(photoViews, mediaViews) {
+  return {
+    channelLabel(mode) {
+      const normalized = normalizeChannelMode(mode);
+      return ["photo", "manga"].includes(normalized)
+        ? photoViews?.channelLabel(mode)
+        : mediaViews?.channelLabel(mode);
+    }
+  };
+}
 
-shortVideoViews = createShortVideoViews({
-  els,
-  getActiveUrl: () => activeUrl,
-  goBack,
-  setActiveBottom,
-  showView
-});
+function updateCurrentChannelQuery(query) {
+  updateModuleChannelSearch(currentViewParams, query, { photo: normalizeChannelMode(currentViewParams.mode) === "photo" });
+}
 
-mediaViewer = createMediaViewer();
-
-peopleViews = createPeopleViews({
-  els,
-  getActiveUrl: () => activeUrl,
-  getLibrary: () => library,
-  getPeopleLimit: () => peopleLimit,
-  increasePeopleLimit: (amount) => {
-    peopleLimit += peopleLimitStep(amount);
-  },
-  showView,
-  openInLibrary,
-  setActiveBottom,
-  createLoadMoreButton: workViews.createLoadMoreButton,
-  renderCurrentViewPreservingScroll
-});
-
-detailViews = createDetailViews({
-  els,
-  getActiveUrl: () => activeUrl,
-  getLibrary: () => library,
-  openInLibrary,
-  showView,
-  setActiveBottom,
-  renderWorks: workViews.renderWorks,
-  renderMessage: workViews.renderMessage,
-  createChip: workViews.createChip,
-  mediaViewer,
-  goBack,
-  onUserStateChange: renderUserState
-});
+function updateModuleChannelSearch(params, query, options = {}) {
+  const nextQuery = String(query || "").trim();
+  const startingPhotoSearch = options.photo && nextQuery && !String(params.query || "").trim();
+  showView("channel", {
+    ...params,
+    ...(startingPhotoSearch ? { photoView: "albums", collection: "", category: "", person: "" } : {}),
+    query: nextQuery
+  }, { skipHistory: true, replaceHistory: true });
+}
 
 function runSearch(query) {
-  if (isShortVideoSearchContext()) {
-    submitShortVideoSearch(query);
-    return;
-  }
-  if (currentView === "channel") {
-    const nextQuery = String(query || "").trim();
-    const startingPhotoSearch = normalizeChannelMode(currentViewParams.mode) === "photo" && nextQuery && !String(currentViewParams.query || "").trim();
-    showView("channel", {
-      ...currentViewParams,
-      ...(startingPhotoSearch ? { photoView: "albums", collection: "", category: "", person: "" } : {}),
-      query: nextQuery
-    }, { skipHistory: true, replaceHistory: true });
-    return;
-  }
-  const navigation = currentView === "search"
-    ? { skipHistory: true }
-    : { resetStack: true };
-  showView("search", { query }, navigation);
+  const controller = activeSearchController();
+  if (!controller?.submit) return;
+  controller.submit(String(query || "").trim(), searchContext());
+  searchSurfaceExpanded = false;
+  syncSearchSurface();
 }
 
 function focusSearchInput() {
@@ -2163,52 +2042,18 @@ function focusSearchInput() {
 }
 
 function openSearchSurface() {
+  const controller = activeSearchController();
+  if (!controller) return;
   searchSurfaceExpanded = true;
-  if (isShortVideoSearchContext()) {
-    syncSearchSurface();
-    focusSearchInput();
-    return;
-  }
-  if (currentView === "channel" || currentView === "search") {
-    syncSearchSurface();
-    focusSearchInput();
-    return;
-  }
-  const navigation = currentView === "home" || currentView === "settings"
-    ? { resetStack: true }
-    : { push: true };
-  showView("search", { query: "" }, navigation);
+  controller.open?.(searchContext());
+  syncSearchSurface();
   focusSearchInput();
 }
 
 function closeSearchSurface() {
+  const controller = activeSearchController();
   searchSurfaceExpanded = false;
-  if (isShortVideoSearchContext()) {
-    syncSearchSurface();
-    return;
-  }
-  if (currentView === "channel") {
-    if (String(currentViewParams.query || "").trim()) {
-      showView("channel", { ...currentViewParams, query: "" }, { skipHistory: true, replaceHistory: true });
-      return;
-    }
-    syncSearchSurface();
-    return;
-  }
-  if (currentView === "search") {
-    if (viewStack.length) {
-      goBack();
-    } else {
-      showView(DEFAULT_VIEW, {}, { resetStack: true });
-    }
-    return;
-  }
-  syncSearchSurface();
-}
-
-function submitShortVideoSearch(query = els.searchInput?.value || "") {
-  searchSurfaceExpanded = false;
-  shortVideoViews?.submitSearch?.(query);
+  if (controller?.close?.(searchContext())) return;
   syncSearchSurface();
 }
 
@@ -2227,33 +2072,17 @@ window.addEventListener("fanhaoNovelSourceChanged", () => {
   }
 });
 
-window.addEventListener("fanhaoOpenShortVideoSearch", (event) => {
-  if (!isShortVideoSearchContext()) return;
-  if (currentView === "shortVideoBrowser") {
-    const state = event.detail?.state || shortVideoViews?.getSearchState?.() || {};
-    showView("shortVideos", {
-      query: state.query || "",
-      author: state.author || "all",
-      source: state.source || "liked",
-      sort: state.sort || "published"
-    }, { skipHistory: true, replaceHistory: true });
-    searchSurfaceExpanded = true;
-    syncSearchSurface();
-    focusSearchInput();
-    return;
-  }
-  openSearchSurface();
-});
+window.addEventListener("fanhaoOpenShortVideoSearch", openSearchSurface);
 
 window.fanhaoHandleNativeBack = () => {
   if (mediaViewer?.close()) return true;
-  if (currentView === "music" && musicViews?.closeFullscreen?.()) return true;
-  if (searchSurfaceExpanded || currentView === "search") {
-    closeSearchSurface();
+  if (!els.settingsOverlay?.hidden) {
+    closeSettings();
     return true;
   }
-  if (currentView === "novelReader") {
-    exitNovelReader();
+  if (androidModuleRegistry?.handleBack(currentView, currentViewParams)) return true;
+  if (searchSurfaceExpanded || currentView === "search") {
+    closeSearchSurface();
     return true;
   }
   if (currentView === "home" || isRootNavigationView()) return false;
@@ -2268,46 +2097,30 @@ window.fanhaoHandleNativeBack = () => {
 applyTheme(themePreference);
 replaceCurrentHistory();
 
-els.settingsButton?.addEventListener("click", () => toggleSettings());
-els.topMenuButton?.addEventListener("click", () => toggleSettings());
-els.topSearchButton?.addEventListener("click", openSearchSurface);
+els.profileSettingsButton?.addEventListener("click", () => toggleSettings(true));
+els.settingsCloseButton?.addEventListener("click", () => closeSettings());
+els.settingsBackdrop?.addEventListener("click", () => closeSettings());
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.settingsOverlay?.hidden) closeSettings();
+});
 els.searchCloseButton?.addEventListener("click", closeSearchSurface);
 els.viewBack.addEventListener("click", goBack);
 
 els.openLibraryButton.addEventListener("click", () => {
-  els.settingsPanel.hidden = true;
   showView("people", {}, { resetStack: true });
   scrollToTopInstant();
 });
 
 els.searchForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (isShortVideoSearchContext()) {
-    submitShortVideoSearch();
-    return;
-  }
-  if (currentView === "channel") {
-    runSearch(els.searchInput.value);
-    return;
-  }
-  searchHistory.run(els.searchInput.value);
+  const controller = activeSearchController();
+  if (controller?.useHistory) searchHistory.run(els.searchInput.value);
+  else runSearch(els.searchInput.value);
 });
 
 els.searchInput.addEventListener("focus", () => {
   searchSurfaceExpanded = true;
-  if (isShortVideoSearchContext()) {
-    syncSearchSurface();
-    return;
-  }
-  if (currentView === "search" || currentView === "channel") {
-    syncSearchSurface();
-    return;
-  }
-  const navigation = currentView === "home" || currentView === "settings"
-    ? { resetStack: true }
-    : { push: true };
-  showView("search", { query: "" }, navigation);
-  focusSearchInput();
+  syncSearchSurface();
 });
 
 els.connectForm.addEventListener("submit", async (event) => {
@@ -2459,28 +2272,58 @@ els.fanhaoSectionNav?.addEventListener("click", (event) => {
   }
 });
 
+let suppressBottomNavClick = false;
+let bottomNavLongPressTimer = 0;
+let bottomNavTouchX = 0;
+let bottomNavTouchY = 0;
+
+els.bottomNavBar?.addEventListener("touchstart", (event) => {
+  const button = event.target.closest("button[data-open-view='shortVideos']");
+  if (!button || currentView !== "shortVideos" || event.touches.length !== 1) return;
+  bottomNavTouchX = event.touches[0].clientX;
+  bottomNavTouchY = event.touches[0].clientY;
+  window.clearTimeout(bottomNavLongPressTimer);
+  bottomNavLongPressTimer = window.setTimeout(() => {
+    suppressBottomNavClick = true;
+    navigator.vibrate?.(18);
+    toggleSettings(true);
+  }, 560);
+}, { passive: true });
+
+els.bottomNavBar?.addEventListener("touchmove", (event) => {
+  const touch = event.touches[0];
+  if (!touch || Math.hypot(touch.clientX - bottomNavTouchX, touch.clientY - bottomNavTouchY) <= 12) return;
+  window.clearTimeout(bottomNavLongPressTimer);
+}, { passive: true });
+
+for (const eventName of ["touchend", "touchcancel"]) {
+  els.bottomNavBar?.addEventListener(eventName, () => window.clearTimeout(bottomNavLongPressTimer), { passive: true });
+}
+
 els.bottomNavBar?.addEventListener("click", (event) => {
   const button = event.target.closest("button");
   if (!button || !els.bottomNavBar.contains(button)) return;
+  if (suppressBottomNavClick) {
+    suppressBottomNavClick = false;
+    event.preventDefault();
+    return;
+  }
   if (button.dataset.focusSearch !== undefined) {
     searchHistory.run(els.searchInput.value);
     els.searchInput.focus();
     return;
   }
   if (button.dataset.fanhaoHome !== undefined) {
-    els.settingsPanel.hidden = true;
     showView(DEFAULT_VIEW, {}, { resetStack: true });
     scrollToTopInstant();
     return;
   }
   if (button.dataset.openView) {
-    els.settingsPanel.hidden = true;
     showPrimaryView(button.dataset.openView, { resetStack: true });
     scrollToTopInstant();
     return;
   }
   if (button.dataset.openChannel) {
-    els.settingsPanel.hidden = true;
     showView("channel", { mode: primaryChannelMode(button.dataset.openChannel) }, { resetStack: true });
     scrollToTopInstant();
   }
@@ -2493,13 +2336,17 @@ for (const button of els.themeButtons) {
 async function bootApp() {
   updateServer(activeUrl);
   updateCacheStatus();
+  let modules = androidModuleFallbackCatalog();
   try {
-    const modules = await loadModuleCatalog(() => fetchJson(activeUrl, "/api/modules"));
-    els.bottomNav = renderAndroidModuleNavigation(els.bottomNavBar, modules);
+    const remoteModules = await loadModuleCatalog(() => fetchJson(activeUrl, "/api/modules"));
+    modules = mergeAndroidModuleCatalog(remoteModules);
   } catch (error) {
     console.warn("[modules]", error.message || error);
   }
+  await initializeAndroidModules(modules);
+  els.bottomNav = renderAndroidModuleNavigation(els.bottomNavBar, modules);
   await loadDashboard();
+  if (initialSettingsRequested && els.settingsOverlay?.hidden) showSettings({ skipHistory: true });
 }
 
 bootApp().catch((error) => {

@@ -209,6 +209,18 @@ h2 {
   display: none;
 }
 
+.top-bar-spacer {
+  width: 44px;
+  height: 44px;
+}
+
+.top-module-actions {
+  display: grid;
+  width: 44px;
+  min-height: 44px;
+  place-items: center;
+}
+
 @media (max-width: 390px) {
   .top-channel-bar {
     margin-right: -12px;
@@ -227,6 +239,23 @@ h2 {
   border-radius: 8px;
   background: transparent;
   color: var(--ink);
+}
+
+.profile-settings-button {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: 21px;
+  box-shadow: 0 8px 18px rgba(20, 29, 40, 0.08);
+}
+
+.profile-settings-button[hidden] {
+  display: none;
 }
 
 .top-menu-lines {

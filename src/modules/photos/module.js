@@ -7,7 +7,7 @@ export const moduleDefinition = {
   order: 20,
   client: {
     web: { href: "/photo", view: "gallery", galleryMode: "photo" },
-    android: { channel: "photo", bottomKey: "photo" }
+    android: { channel: "photo", bottomKey: "photo", entry: "./modules/photos/android-module.js" }
   },
   capabilities: ["photo-sets", "manga"]
 };

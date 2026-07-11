@@ -1,10 +1,12 @@
 export function getElements() {
   return {
-    settingsButton: document.querySelector("#settingsButton"),
+    settingsOverlay: document.querySelector("#settingsOverlay"),
+    settingsBackdrop: document.querySelector("#settingsBackdrop"),
     settingsPanel: document.querySelector("#settingsPanel"),
+    settingsCloseButton: document.querySelector("#settingsCloseButton"),
     topChannelBar: document.querySelector("#topChannelBar"),
-    topMenuButton: document.querySelector("#topMenuButton"),
-    topSearchButton: document.querySelector("#topSearchButton"),
+    topModuleActions: document.querySelector("#topModuleActions"),
+    topSearchButton: null,
     topPrimaryLabel: document.querySelector("#topPrimaryLabel"),
     searchForm: document.querySelector("#searchForm"),
     searchCloseButton: document.querySelector("#searchCloseButton"),
@@ -61,6 +63,7 @@ export function getElements() {
     viewKicker: document.querySelector("#viewKicker"),
     viewTitle: document.querySelector("#viewTitle"),
     viewMeta: document.querySelector("#viewMeta"),
+    profileSettingsButton: document.querySelector("#profileSettingsButton"),
     viewBack: document.querySelector("#viewBack"),
     viewContent: document.querySelector("#viewContent"),
     bottomNavBar: document.querySelector(".bottom-nav"),

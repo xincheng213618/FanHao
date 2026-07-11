@@ -7,7 +7,7 @@ export const moduleDefinition = {
   order: 30,
   client: {
     web: { href: "/media", view: "gallery", galleryMode: "media" },
-    android: { channel: "media", bottomKey: "media" }
+    android: { channel: "media", bottomKey: "media", entry: "./modules/media/android-module.js" }
   },
   capabilities: ["movies", "tv", "media-playback"]
 };

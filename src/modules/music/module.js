@@ -7,7 +7,7 @@ export const moduleDefinition = {
   order: 60,
   client: {
     web: { href: "/music", view: "music", target: "_blank" },
-    android: { view: "music", bottomKey: "music" }
+    android: { view: "music", bottomKey: "music", entry: "./modules/music/android-module.js" }
   },
   capabilities: ["music-library", "playlists"]
 };

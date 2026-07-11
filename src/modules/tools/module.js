@@ -7,7 +7,7 @@ export const moduleDefinition = {
   order: 70,
   client: {
     web: { href: "/tools", view: "tools" },
-    android: { view: "tools", bottomKey: "tools" }
+    android: { view: "tools", bottomKey: "tools", entry: "./modules/tools/android-module.js", title: "我的" }
   },
   capabilities: ["txt-format", "offline-games"]
 };

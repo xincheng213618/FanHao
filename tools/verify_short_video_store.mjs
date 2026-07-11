@@ -130,6 +130,32 @@ try {
   });
   assert.equal(manualLikes.total, 2, "manual likes should remain visible alongside imported likes");
   assert.equal(manualLikes.relationshipTotal, 2);
+  const targetDb = new DatabaseSync(targetDbPath);
+  targetDb.prepare("UPDATE short_videos SET imported_at = '', liked_at = '' WHERE id = ?").run(galleryId);
+  targetDb.prepare(`
+    UPDATE short_video_source_memberships
+    SET first_seen_at = '2026-07-10T19:16:44+08:00'
+    WHERE aweme_id = ? AND source_type = 'like'
+  `).run(liveId);
+  targetDb.close();
+  const likedByIngestDesc = store.listVideos({
+    searchParams: new URLSearchParams("source=liked&sort=published&limit=10&stats=0&facets=0")
+  });
+  assert.equal(likedByIngestDesc.sort, "liked", "My Likes descending time should resolve to ingestion order");
+  assert.deepEqual(
+    likedByIngestDesc.videos.map((item) => item.id),
+    [liveId, galleryId],
+    "source ingestion time should sort first, with published time filling missing ingestion timestamps"
+  );
+  const likedByIngestAsc = store.listVideos({
+    searchParams: new URLSearchParams("source=liked&sort=publishedAsc&limit=10&stats=0&facets=0")
+  });
+  assert.equal(likedByIngestAsc.sort, "likedAsc", "My Likes ascending time should use the same ingestion field");
+  assert.deepEqual(
+    likedByIngestAsc.videos.map((item) => item.id),
+    [galleryId, liveId],
+    "ascending My Likes order should be the exact reverse of descending ingestion order"
+  );
   const likedGalleryDetail = store.videoDetail(liveId, {
     searchParams: new URLSearchParams("source=liked&media=gallery&sort=published&neighbors=2&metadata=0")
   });
@@ -139,6 +165,10 @@ try {
     [galleryId],
     "fast gallery detail navigation should return the same visible neighbor records"
   );
+  const likedGalleryAscendingDetail = store.videoDetail(galleryId, {
+    searchParams: new URLSearchParams("source=liked&media=gallery&sort=publishedAsc&neighbors=2&metadata=0")
+  });
+  assert.equal(likedGalleryAscendingDetail?.nextId, liveId, "ascending detail navigation should match the liked list order");
 
   store.scan(root);
   const rescannedLive = store.videoDetail(liveId)?.video;

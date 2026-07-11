@@ -7,11 +7,11 @@ import { createPersonProfile } from "./modules/fanhao/person-profile.js?v=202607
 import { createRankingPage } from "./modules/fanhao/ranking-page.js?v=20260710-module-registry-01";
 import { createWorkDetailPage } from "./modules/fanhao/work-detail-page.js?v=20260710-module-registry-01";
 import { createMusicPage } from "./modules/music/music-page.js?v=20260711-music-stats-key-44";
-import { createNovelPage } from "./modules/novels/novel-page.js?v=20260711-novel-pagination-05";
-import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20260711-fullscreen-escape-83";
+import { createNovelPage } from "./modules/novels/novel-page.js?v=20260712-novel-author-23";
+import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20260711-liked-count-race-106";
 import { createAdminModal } from "./modules/system/admin-modal.js?v=20260710-module-registry-01";
 import { createToolsPage } from "./modules/tools/tools-page.js?v=20260710-module-registry-01";
-import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260711-novel-pagination-04";
+import { DEFAULT_GALLERY_PHOTO_CATEGORY, PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260712-novel-mine-07";
 
 prepareAppShell();
 

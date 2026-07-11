@@ -117,12 +117,13 @@ export function createNovelStore(options = {}) {
       const query = String(url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
       const category = String(url.searchParams.get("category") || "all").trim() || "all";
       const author = String(url.searchParams.get("author") || "").trim();
+      const readingOnly = ["1", "true", "yes"].includes(String(url.searchParams.get("reading") || "").toLowerCase());
       const sort = normalizeSort(url.searchParams.get("sort"));
       const limit = clampInteger(url.searchParams.get("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
       const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-      const ftsBookIds = query.length >= 3 ? matchingBookIds(database, query) : [];
       const conditions = ["b.status = 'ok'"];
       const params = [];
+      if (readingOnly) conditions.push("EXISTS (SELECT 1 FROM novel_reading_state rs WHERE rs.book_id = b.id)");
       if (category !== "all") {
         conditions.push("COALESCE(b.category, '全部') = ?");
         params.push(category);
@@ -141,10 +142,6 @@ export function createNovelStore(options = {}) {
           "COALESCE(b.summary, '') LIKE ? ESCAPE '\\'"
         ];
         params.push(like, like, like, like, like);
-        if (ftsBookIds.length) {
-          parts.push(`b.id IN (${ftsBookIds.map(() => "?").join(", ")})`);
-          params.push(...ftsBookIds);
-        }
         conditions.push(`(${parts.join(" OR ")})`);
       }
       const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -182,6 +179,7 @@ export function createNovelStore(options = {}) {
         query,
         category,
         author,
+        readingOnly,
         sort,
         facets,
         summary: summaryFromDb(database)
@@ -242,11 +240,143 @@ export function createNovelStore(options = {}) {
     });
   }
 
+  function authorDetail(authorName, url) {
+    const author = String(authorName || "").trim().slice(0, 80);
+    if (!author) throw httpError(400, "作者名不能为空");
+    const requestUrl = new URL(url.toString());
+    requestUrl.searchParams.set("author", author);
+    const page = listBooks(requestUrl);
+    const profile = withDb((database) => {
+      const row = database
+        .prepare(
+          `
+          SELECT
+            TRIM(author) AS name,
+            COUNT(*) AS book_count,
+            COALESCE(SUM(chapter_count), 0) AS chapter_count,
+            COALESCE(SUM(char_count), 0) AS char_count,
+            COALESCE(SUM(size_bytes), 0) AS size_bytes,
+            COALESCE(MAX(updated_at), '') AS updated_at
+          FROM novel_books
+          WHERE status = 'ok' AND TRIM(COALESCE(author, '')) = ?
+          GROUP BY TRIM(author)
+        `
+        )
+        .get(author);
+      return row
+        ? {
+            name: row.name || author,
+            bookCount: Number(row.book_count || 0),
+            chapterCount: Number(row.chapter_count || 0),
+            charCount: Number(row.char_count || 0),
+            sizeBytes: Number(row.size_bytes || 0),
+            updatedAt: row.updated_at || ""
+          }
+        : null;
+    });
+    if (!profile) return null;
+    return { ...page, author: profile };
+  }
+
   function bookDetail(bookId) {
     return withDb((database) => bookDetailFromDb(database, bookId));
   }
 
+  function bookMeta(bookId) {
+    return withDb((database) => {
+      const book = bookRecordFromDb(database, bookId);
+      return book
+        ? { book, chapters: [], chapterTotal: Number(book.chapterCount || 0), catalogLoaded: false }
+        : null;
+    });
+  }
+
+  function updateBookMetadata(bookId, body = {}) {
+    return withDb((database) => {
+      const current = bookRecordFromDb(database, bookId);
+      if (!current) return null;
+      const title = Object.hasOwn(body, "title") ? String(body.title || "").trim().slice(0, 180) : current.title;
+      const author = Object.hasOwn(body, "author") ? String(body.author || "").trim().slice(0, 80) : current.author;
+      const category = Object.hasOwn(body, "category") ? String(body.category || "").trim().slice(0, 80) : current.category;
+      const summary = Object.hasOwn(body, "summary") ? String(body.summary || "").trim().slice(0, 2000) : current.summary;
+      if (!title) throw httpError(400, "书名不能为空");
+      const updatedAt = new Date().toISOString();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database
+          .prepare(
+            `
+            INSERT INTO novel_book_overrides (book_id, title, author, category, summary, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(book_id) DO UPDATE SET
+              title = excluded.title,
+              author = excluded.author,
+              category = excluded.category,
+              summary = excluded.summary,
+              updated_at = excluded.updated_at
+          `
+          )
+          .run(bookId, title, author, category, summary, updatedAt);
+        database
+          .prepare("UPDATE novel_books SET title = ?, author = ?, category = ?, summary = ?, updated_at = ? WHERE id = ?")
+          .run(title, author, category, summary, updatedAt, bookId);
+        database.exec("COMMIT");
+      } catch (error) {
+        try {
+          database.exec("ROLLBACK");
+        } catch {}
+        throw error;
+      }
+      return bookRecordFromDb(database, bookId);
+    });
+  }
+
+  function deleteBook(bookId) {
+    return withDb((database) => {
+      const book = database
+        .prepare("SELECT id, title, source_path FROM novel_books WHERE id = ? AND status = 'ok'")
+        .get(bookId);
+      if (!book) return null;
+      const deletedAt = new Date().toISOString();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database
+          .prepare(
+            `
+            INSERT INTO novel_book_deletions (book_id, source_path, title, deleted_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(book_id) DO UPDATE SET
+              source_path = excluded.source_path,
+              title = excluded.title,
+              deleted_at = excluded.deleted_at
+          `
+          )
+          .run(book.id, book.source_path || "", book.title || "", deletedAt);
+        database.prepare("DELETE FROM novel_chapters WHERE book_id = ?").run(book.id);
+        database.prepare("DELETE FROM novel_reading_state WHERE book_id = ?").run(book.id);
+        database.prepare("DELETE FROM novel_book_overrides WHERE book_id = ?").run(book.id);
+        database.prepare("DELETE FROM novel_books WHERE id = ?").run(book.id);
+        database.exec("COMMIT");
+      } catch (error) {
+        try {
+          database.exec("ROLLBACK");
+        } catch {}
+        throw error;
+      }
+      return { id: book.id, title: book.title || "", sourcePath: book.source_path || "", deletedAt };
+    });
+  }
+
   function bookDetailFromDb(database, bookId) {
+    const book = bookRecordFromDb(database, bookId);
+    if (!book) return null;
+    return {
+      book,
+      chapters: chapterList(database, bookId)
+    };
+  }
+
+  function bookRecordFromDb(database, bookId) {
     const row = database
       .prepare(
         `
@@ -257,16 +387,12 @@ export function createNovelStore(options = {}) {
       `
       )
       .get(bookId);
-    if (!row) return null;
-    return {
-      book: publicBook(row),
-      chapters: chapterList(database, bookId)
-    };
+    return row ? publicBook(row) : null;
   }
 
   function chapterDetail(bookId, chapterIndex) {
     return withDb((database) => {
-      const book = bookDetailFromDb(database, bookId);
+      const book = bookRecordFromDb(database, bookId);
       if (!book) return null;
       const chapter = database
         .prepare(
@@ -278,14 +404,90 @@ export function createNovelStore(options = {}) {
         )
         .get(bookId, clampInteger(chapterIndex, 1, 1, Number.MAX_SAFE_INTEGER));
       if (!chapter) return null;
-      const chapters = book.chapters;
-      const currentIndex = chapters.findIndex((item) => item.index === Number(chapter.chapter_index));
+      const previous = database
+        .prepare(
+          `
+          SELECT id, book_id, chapter_index, title, '' AS content, char_count, updated_at
+          FROM novel_chapters
+          WHERE book_id = ? AND chapter_index < ?
+          ORDER BY chapter_index DESC
+          LIMIT 1
+        `
+        )
+        .get(bookId, chapter.chapter_index);
+      const following = database
+        .prepare(
+          `
+          SELECT id, book_id, chapter_index, title, '' AS content, char_count, updated_at
+          FROM novel_chapters
+          WHERE book_id = ? AND chapter_index > ?
+          ORDER BY chapter_index ASC
+          LIMIT 1
+        `
+        )
+        .get(bookId, chapter.chapter_index);
       return {
-        book: book.book,
+        book,
         chapter: publicChapter(chapter, true),
+        chapters: [],
+        chapterTotal: Number(book.chapterCount || 0),
+        catalogLoaded: false,
+        prev: previous ? publicChapter(previous, false) : null,
+        next: following ? publicChapter(following, false) : null
+      };
+    });
+  }
+
+  function catalog(bookId, url) {
+    return withDb((database) => {
+      const book = bookRecordFromDb(database, bookId);
+      if (!book) return null;
+      const query = String(url?.searchParams?.get("q") || "").replace(/\s+/g, " ").trim().slice(0, 80);
+      const order = String(url?.searchParams?.get("order") || "asc").toLowerCase() === "desc" ? "desc" : "asc";
+      const limit = clampInteger(url?.searchParams?.get("limit"), 120, 20, 200);
+      const requestedOffset = clampInteger(url?.searchParams?.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+      const anchor = clampInteger(url?.searchParams?.get("anchor"), 0, 0, Number.MAX_SAFE_INTEGER);
+      const where = ["book_id = ?"];
+      const params = [bookId];
+      if (query) {
+        const pattern = `%${escapeLike(query)}%`;
+        where.push("(title LIKE ? ESCAPE '\\' COLLATE NOCASE OR CAST(chapter_index AS TEXT) LIKE ? ESCAPE '\\')");
+        params.push(pattern, pattern);
+      }
+      const filteredTotal = Number(
+        database.prepare(`SELECT COUNT(*) AS count FROM novel_chapters WHERE ${where.join(" AND ")}`).get(...params)?.count || 0
+      );
+      let offset = requestedOffset;
+      if (!query && anchor > 0 && filteredTotal > 0) {
+        const clampedAnchor = Math.max(1, Math.min(filteredTotal, anchor));
+        const position = order === "desc" ? filteredTotal - clampedAnchor : clampedAnchor - 1;
+        offset = Math.floor(position / limit) * limit;
+      }
+      const lastPageOffset = filteredTotal > 0 ? Math.floor((filteredTotal - 1) / limit) * limit : 0;
+      offset = Math.max(0, Math.min(lastPageOffset, offset));
+      const rows = database
+        .prepare(
+          `
+          SELECT id, book_id, chapter_index, title, '' AS content, char_count, updated_at
+          FROM novel_chapters
+          WHERE ${where.join(" AND ")}
+          ORDER BY chapter_index ${order === "desc" ? "DESC" : "ASC"}
+          LIMIT ? OFFSET ?
+        `
+        )
+        .all(...params, limit, offset);
+      const chapters = rows.map((row) => publicChapter(row, false));
+      return {
+        bookId,
         chapters,
-        prev: currentIndex > 0 ? chapters[currentIndex - 1] : null,
-        next: currentIndex >= 0 && currentIndex < chapters.length - 1 ? chapters[currentIndex + 1] : null
+        total: Number(book.chapterCount || 0),
+        filteredTotal,
+        limit,
+        offset,
+        query,
+        order,
+        firstIndex: chapters[0]?.index || 0,
+        lastIndex: chapters[chapters.length - 1]?.index || 0
       };
     });
   }
@@ -314,11 +516,15 @@ export function createNovelStore(options = {}) {
     });
   }
 
-  function downloadBook(bookId) {
-    return withDb((database) => {
-      const detail = bookDetailFromDb(database, bookId);
-      if (!detail) return null;
-      const chapters = database
+  function openDownload(bookId) {
+    const database = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const book = bookRecordFromDb(database, bookId);
+      if (!book) {
+        database.close();
+        return null;
+      }
+      const iterator = database
         .prepare(
           `
           SELECT chapter_index, title, content
@@ -327,20 +533,41 @@ export function createNovelStore(options = {}) {
           ORDER BY chapter_index
         `
         )
-        .all(bookId);
-      const lines = [detail.book.title];
-      if (detail.book.author) lines.push(`作者：${detail.book.author}`);
-      if (detail.book.category) lines.push(`分类：${detail.book.category}`);
-      lines.push("");
-      for (const chapter of chapters) {
-        lines.push(chapter.title || `第 ${chapter.chapter_index} 章`, "", String(chapter.content || "").trim(), "");
-      }
+        .iterate(bookId);
+      let firstChapter = true;
+      let closed = false;
       return {
-        book: detail.book,
-        content: `${lines.join("\n").replace(/\n{3,}/g, "\n\n").trim()}\n`,
-        fileName: safeFileName(`${detail.book.title || "小说"}.txt`)
+        book,
+        fileName: safeFileName(`${book.title || "小说"}.txt`),
+        header: `${book.title || "小说"}\n\n`,
+        nextChunk() {
+          if (closed) return null;
+          const result = iterator.next();
+          if (result.done) return null;
+          const chapter = result.value;
+          const title = chapter.title || `第 ${chapter.chapter_index} 章`;
+          const content = String(chapter.content || "").trim().replace(/\n{3,}/g, "\n\n");
+          const prefix = firstChapter ? "" : "\n\n";
+          firstChapter = false;
+          return `${prefix}${title}${content ? `\n\n${content}` : ""}`;
+        },
+        close() {
+          if (closed) return;
+          closed = true;
+          try {
+            iterator.return?.();
+          } catch {}
+          try {
+            database.close();
+          } catch {}
+        }
       };
-    });
+    } catch (error) {
+      try {
+        database.close();
+      } catch {}
+      throw error;
+    }
   }
 
   function uploadBook(body = {}) {
@@ -351,15 +578,20 @@ export function createNovelStore(options = {}) {
   }
 
   return {
+    authorDetail,
     bookDetail,
+    bookMeta,
+    catalog,
     chapterDetail,
+    deleteBook,
     dbPath,
-    downloadBook,
+    openDownload,
     invalidate,
     listAuthors,
     listBooks,
     saveProgress,
     summary,
+    updateBookMetadata,
     uploadBook
   };
 }
@@ -396,6 +628,7 @@ function ensureSchema(db) {
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_novel_books_title ON novel_books(title);
+    CREATE INDEX IF NOT EXISTS idx_novel_books_author ON novel_books(author);
     CREATE INDEX IF NOT EXISTS idx_novel_books_category ON novel_books(category);
     CREATE INDEX IF NOT EXISTS idx_novel_books_updated ON novel_books(updated_at);
     CREATE TABLE IF NOT EXISTS novel_chapters (
@@ -416,16 +649,26 @@ function ensureSchema(db) {
       scroll_ratio REAL DEFAULT 0,
       updated_at TEXT NOT NULL
     );
-    CREATE VIRTUAL TABLE IF NOT EXISTS novel_search USING fts5(
-      book_id UNINDEXED,
-      chapter_id UNINDEXED,
-      title,
-      author,
-      category,
-      chapter_title,
-      tokenize='trigram'
+    CREATE TABLE IF NOT EXISTS novel_book_overrides (
+      book_id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      author TEXT,
+      category TEXT,
+      summary TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS novel_book_deletions (
+      book_id TEXT PRIMARY KEY,
+      source_path TEXT,
+      title TEXT,
+      deleted_at TEXT NOT NULL
     );
   `);
+  const schemaVersion = Number(metaValue(db, "schema_version") || 0);
+  if (schemaVersion < 2) {
+    db.exec("DROP TABLE IF EXISTS novel_search");
+  }
+  if (schemaVersion < 4) db.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '4')").run();
 }
 
 function metaValue(db, key) {
@@ -512,16 +755,9 @@ function uploadBookIntoDb(database, body = {}) {
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `
     );
-    const insertSearch = database.prepare(
-      `
-      INSERT INTO novel_search (book_id, chapter_id, title, author, category, chapter_title)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `
-    );
     for (const chapter of chapters) {
       const id = chapterId(bookId, chapter.index);
       insertChapter.run(id, bookId, chapter.index, chapter.title, chapter.content, chapter.content.length, now);
-      insertSearch.run(bookId, id, title, author, category, chapter.title);
     }
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)").run(now);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('last_uploaded_at', ?)").run(now);
@@ -590,7 +826,7 @@ function parseJsonArray(value) {
 
 function normalizeSort(value) {
   const sort = String(value || "updated").trim();
-  return ["updated", "title", "size", "chapters", "progress"].includes(sort) ? sort : "updated";
+  return ["updated", "title", "size", "chars", "chapters", "progress"].includes(sort) ? sort : "updated";
 }
 
 function normalizeAuthorSort(value) {
@@ -609,22 +845,10 @@ function authorOrderSql(sort) {
 function bookOrderSql(sort) {
   if (sort === "title") return "ORDER BY b.title COLLATE NOCASE ASC";
   if (sort === "size") return "ORDER BY b.size_bytes DESC, b.title COLLATE NOCASE ASC";
+  if (sort === "chars") return "ORDER BY b.char_count DESC, b.title COLLATE NOCASE ASC";
   if (sort === "chapters") return "ORDER BY b.chapter_count DESC, b.title COLLATE NOCASE ASC";
   if (sort === "progress") return "ORDER BY s.updated_at IS NULL ASC, s.updated_at DESC, b.updated_at DESC";
   return "ORDER BY b.updated_at DESC, b.title COLLATE NOCASE ASC";
-}
-
-function matchingBookIds(db, query) {
-  try {
-    const term = `"${String(query).replace(/"/g, '""')}"`;
-    return db
-      .prepare("SELECT DISTINCT book_id FROM novel_search WHERE novel_search MATCH ? LIMIT 1000")
-      .all(term)
-      .map((row) => row.book_id)
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
 }
 
 function escapeLike(value) {

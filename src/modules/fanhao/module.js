@@ -7,7 +7,7 @@ export const moduleDefinition = {
   order: 10,
   client: {
     web: { href: "/fanhao", view: "people" },
-    android: { view: "works", bottomKey: "fanhao" }
+    android: { view: "works", bottomKey: "fanhao", entry: "./modules/fanhao/android-module.js" }
   },
   capabilities: ["people", "works", "rankings", "studios", "vr", "favorites", "history"]
 };

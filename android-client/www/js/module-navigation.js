@@ -23,7 +23,7 @@ export function renderAndroidModuleNavigation(container, modules) {
     else if (surface.view) button.dataset.openView = surface.view;
 
     const label = document.createElement("span");
-    label.textContent = module.title;
+    label.textContent = surface.title || module.title;
     button.append(label);
     fragment.append(button);
   }

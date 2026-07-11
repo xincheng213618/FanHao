@@ -1,39 +1,93 @@
-.settings-panel {
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
   display: grid;
-  gap: 14px;
-  margin-top: 16px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
+  align-items: end;
+  justify-items: center;
+  padding-top: calc(28px + env(safe-area-inset-top));
 }
 
-.settings-panel[hidden] {
+.settings-overlay[hidden] {
   display: none;
+}
+
+.settings-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  border-radius: 0;
+  background: rgba(8, 12, 18, 0.52);
+  backdrop-filter: blur(3px);
+}
+
+.settings-panel {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 10px;
+  width: min(100%, 560px);
+  max-height: calc(100dvh - 28px - env(safe-area-inset-top));
+  overflow-y: auto;
+  margin: 0;
+  padding: 12px 12px calc(16px + env(safe-area-inset-bottom));
+  border: 1px solid var(--line);
+  border-bottom: 0;
+  border-radius: 20px 20px 0 0;
+  background: var(--bg);
+  box-shadow: 0 -18px 46px rgba(8, 12, 18, 0.22);
+  overscroll-behavior: contain;
+}
+
+.settings-sheet-head {
+  position: sticky;
+  top: -12px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 54px;
+  margin: -12px -12px 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.settings-close-button {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: 27px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+body.settings-open {
+  overflow: hidden;
 }
 
 .settings-group {
   display: grid;
-  gap: 12px;
+  gap: 8px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
-  padding: 14px;
-  box-shadow: var(--shadow);
+  padding: 11px;
 }
 
-.settings-group-head {
-  display: grid;
-  gap: 3px;
-}
-
-.settings-group-head strong {
-  font-size: 17px;
+.settings-group-title {
+  font-size: 15px;
+  font-weight: 950;
 }
 
 #connectForm {
   display: grid;
-  gap: 9px;
+  gap: 6px;
 }
 
 label {
@@ -50,7 +104,7 @@ label {
 
 .address-row input {
   min-width: 0;
-  min-height: 48px;
+  min-height: 44px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-raised);
@@ -62,7 +116,7 @@ label {
 
 .address-row button,
 .server-list button {
-  min-height: 48px;
+  min-height: 42px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-soft);
@@ -77,18 +131,27 @@ label {
 
 .server-list {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.server-list button {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 8px;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .segmented-control {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: 6px;
 }
 
 .segmented-control button {
-  min-height: 44px;
+  min-height: 40px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-raised);
@@ -114,47 +177,18 @@ label {
   color: var(--orange);
 }
 
-.service-health {
-  display: grid;
-  gap: 9px;
-}
-
-.cache-metrics,
-.service-health-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.cache-metrics div,
-.service-health-metrics div {
-  display: grid;
-  min-width: 0;
-  min-height: 64px;
-  align-content: center;
-  gap: 4px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--stat-surface);
-  padding: 9px;
-}
-
-.cache-metrics strong,
-.service-health-metrics strong {
-  overflow: hidden;
-  color: var(--ink);
-  font-size: 16px;
-  font-weight: 950;
-  line-height: 1.1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cache-metrics span,
-.service-health-metrics span {
+.app-version-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 16px;
   color: var(--muted);
   font-size: 11px;
   font-weight: 850;
+}
+
+.app-version-line strong {
+  color: var(--ink);
+  font-size: 12px;
 }
 
 .settings-action-row {
@@ -164,7 +198,7 @@ label {
 }
 
 .settings-action-row button {
-  min-height: 50px;
+  min-height: 42px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-raised);
@@ -180,6 +214,10 @@ label {
 
 .settings-action-row button:disabled {
   opacity: 0.58;
+}
+
+.settings-action-row.single-action {
+  grid-template-columns: 1fr;
 }
 
 .status-text {
@@ -248,28 +286,22 @@ button:active {
   }
 
   .settings-panel {
-    gap: 10px;
-    margin-top: 12px;
+    gap: 8px;
+  }
+
+  .settings-sheet-head {
+    margin-right: -12px;
+    margin-left: -12px;
+    padding-right: 12px;
+    padding-left: 12px;
   }
 
   .settings-group {
-    gap: 10px;
-    padding: 12px;
-  }
-
-  #connectForm,
-  .service-health,
-  .server-list {
-    gap: 7px;
+    padding: 10px;
   }
 
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
-  }
-
-  .cache-metrics,
-  .service-health-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .person-preview {
@@ -289,10 +321,6 @@ button:active {
     white-space: nowrap;
   }
 
-  .service-health-metrics div {
-    min-height: 56px;
-    padding: 8px;
-  }
 }
 
 @media (max-width: 340px) {

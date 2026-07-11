@@ -16,7 +16,7 @@ const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
 const DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION = "4";
 const SHORT_VIDEO_TOPIC_INDEX_VERSION = "1";
 const SHORT_VIDEO_SOUND_INDEX_VERSION = "1";
-const SHORT_VIDEO_SCHEMA_VERSION = "20260711-3";
+const SHORT_VIDEO_SCHEMA_VERSION = "20260712-1";
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LOCAL_SHORT_VIDEO_USER_ID = "local:self";
 const IMPORTED_SHORT_VIDEO_ACTION_SOURCES = new Set(["imported", "download_manager"]);
@@ -478,7 +478,13 @@ function summary() {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const filter = videoFilter(params);
     const requestedSort = normalizeSort(params.get("sort"));
-    const sort = filter.source === "recommended" && !params.has("sort") ? "recommended" : requestedSort;
+    const sort = filter.source === "recommended" && !params.has("sort")
+      ? "recommended"
+      : filter.source === "liked" && requestedSort === "published"
+        ? "liked"
+        : filter.source === "liked" && requestedSort === "publishedAsc"
+          ? "likedAsc"
+          : requestedSort;
     const limit = clampInt(params.get("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
     const offset = clampInt(params.get("offset"), 0, 0, 1000000);
     const includeFacets = params.get("facets") !== "0";
@@ -486,7 +492,8 @@ function summary() {
     const where = filter.where ? `WHERE ${filter.where}` : "";
     const orderBy = {
       recommended: "recommendation_order_score DESC, published_at DESC",
-      liked: "liked_at DESC, mtime_ms DESC",
+      liked: "COALESCE(liked_sort_time, -1) DESC, liked_sort_at DESC, published_at DESC",
+      likedAsc: "COALESCE(liked_sort_time, 1000000000000) ASC, liked_sort_at ASC, published_at ASC",
       watched: "last_watched_at DESC, published_at DESC",
       published: "published_at DESC, liked_at DESC",
       publishedAsc: "COALESCE(NULLIF(published_at, ''), '9999-12-31T23:59:59.999Z') ASC, liked_at ASC",
@@ -2494,6 +2501,19 @@ function recreateShortVideoCatalogView(db) {
       v.create_time,
       v.published_at,
       v.liked_at,
+      COALESCE(
+        NULLIF(liked_membership.first_seen_at, ''),
+        NULLIF(v.imported_at, ''),
+        NULLIF(v.liked_at, ''),
+        NULLIF(v.published_at, ''),
+        ''
+      ) AS liked_sort_at,
+      julianday(COALESCE(
+        NULLIF(liked_membership.first_seen_at, ''),
+        NULLIF(v.imported_at, ''),
+        NULLIF(v.liked_at, ''),
+        NULLIF(v.published_at, '')
+      )) AS liked_sort_time,
       v.duration_ms,
       v.width,
       v.height,
@@ -2570,6 +2590,12 @@ function recreateShortVideoCatalogView(db) {
     LEFT JOIN short_video_watch_history watch_history
       ON watch_history.video_id = v.id
      AND watch_history.local_user_id = 'local:self'
+    LEFT JOIN (
+      SELECT aweme_id, MIN(NULLIF(first_seen_at, '')) AS first_seen_at
+      FROM short_video_source_memberships
+      WHERE source_type = 'like'
+      GROUP BY aweme_id
+    ) liked_membership ON liked_membership.aweme_id = v.aweme_id
     LEFT JOIN short_video_assets video_asset ON video_asset.video_id = v.id AND video_asset.asset_type = 'video'
     LEFT JOIN short_video_assets native_cover_asset ON native_cover_asset.video_id = v.id AND native_cover_asset.asset_type = 'native_cover'
     LEFT JOIN short_video_assets ffmpeg_cover_asset ON ffmpeg_cover_asset.video_id = v.id AND ffmpeg_cover_asset.asset_type = 'ffmpeg_cover'
@@ -4541,7 +4567,7 @@ function metaValue(db, key) {
 
 function normalizeSort(value) {
   const sort = String(value || "published").trim();
-  return ["recommended", "liked", "watched", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
+  return ["recommended", "liked", "likedAsc", "watched", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
 }
 
 function shortVideoMediaVersion(value) {
@@ -4781,10 +4807,38 @@ function normalizeSourceFilter(value) {
 
 function adjacentOrder(urlOrOptions = {}) {
   const params = urlOrOptions?.searchParams || new URLSearchParams();
-  const sort = normalizeSort(params.get("sort"));
+  const requestedSort = normalizeSort(params.get("sort"));
+  const source = normalizeSourceFilter(params.get("source"));
+  const sort = source === "liked" && requestedSort === "published"
+    ? "liked"
+    : source === "liked" && requestedSort === "publishedAsc"
+      ? "likedAsc"
+      : requestedSort;
   return {
     recommended: { column: "recommendation_order_score", fallback: "published_at", numeric: true },
-    liked: { column: "liked_at", fallback: "mtime_ms", numeric: false },
+    liked: {
+      column: "liked_sort_time",
+      fallback: "liked_sort_at",
+      numeric: true,
+      keys: [
+        { expression: "COALESCE(liked_sort_time, -1)", value: (item) => item.liked_sort_time ?? -1, direction: "DESC" },
+        { column: "liked_sort_at", direction: "DESC" },
+        { column: "published_at", direction: "DESC" },
+        { column: "id", direction: "DESC" }
+      ]
+    },
+    likedAsc: {
+      column: "liked_sort_time",
+      fallback: "liked_sort_at",
+      numeric: true,
+      direction: "ASC",
+      keys: [
+        { expression: "COALESCE(liked_sort_time, 1000000000000)", value: (item) => item.liked_sort_time ?? 1000000000000, direction: "ASC" },
+        { column: "liked_sort_at", direction: "ASC" },
+        { column: "published_at", direction: "ASC" },
+        { column: "id", direction: "DESC" }
+      ]
+    },
     watched: { column: "last_watched_at", fallback: "published_at", numeric: false },
     published: { column: "published_at", fallback: "liked_at", numeric: false },
     publishedAsc: {
@@ -4907,6 +4961,9 @@ function fastPublishedAdjacentRows(database, row, direction, filter, order, limi
 
 function adjacentRows(database, row, direction, order, includeAllColumns = false, filter = null, limit = 1) {
   if (!row) return [];
+  if (Array.isArray(order?.keys) && order.keys.length) {
+    return multiColumnAdjacentRows(database, row, direction, order.keys, includeAllColumns, filter, limit);
+  }
   const column = order.expression || order.column;
   const fallback = order.fallback;
   const value = order.value ? order.value(row) : row[order.column] ?? (order.numeric ? 0 : "");
@@ -4931,6 +4988,41 @@ function adjacentRows(database, row, direction, order, includeAllColumns = false
     ORDER BY ${column} ${sortDirection}, ${fallback} ${sortDirection}, id ${sortDirection}
     LIMIT ?
   `).all(...filterArgs, value, value, fallbackValue, value, fallbackValue, row.id || "", Math.max(1, Number(limit || 1)));
+}
+
+function multiColumnAdjacentRows(database, row, direction, keys, includeAllColumns = false, filter = null, limit = 1) {
+  const normalizedKeys = keys.map((key) => ({
+    expression: key.expression || key.column,
+    value: typeof key.value === "function" ? key.value(row) : row[key.column] ?? "",
+    direction: String(key.direction || "DESC").toUpperCase() === "ASC" ? "ASC" : "DESC"
+  }));
+  const movingNext = direction > 0;
+  const conditions = [];
+  const orderArgs = [];
+  for (let index = 0; index < normalizedKeys.length; index += 1) {
+    const current = normalizedKeys[index];
+    const operator = movingNext === (current.direction === "ASC") ? ">" : "<";
+    const equalities = normalizedKeys.slice(0, index).map((key) => `${key.expression} = ?`);
+    conditions.push(`(${[...equalities, `${current.expression} ${operator} ?`].join(" AND ")})`);
+    for (let previous = 0; previous < index; previous += 1) orderArgs.push(normalizedKeys[previous].value);
+    orderArgs.push(current.value);
+  }
+  const orderBy = normalizedKeys.map((key) => {
+    const sqlDirection = movingNext
+      ? key.direction
+      : key.direction === "ASC" ? "DESC" : "ASC";
+    return `${key.expression} ${sqlDirection}`;
+  }).join(", ");
+  const filterWhere = filter?.where ? `${filter.where} AND ` : "";
+  const filterArgs = filter?.args || [];
+  const select = includeAllColumns ? "*" : "id";
+  return database.prepare(`
+    SELECT ${select}
+    FROM short_video_catalog
+    WHERE ${filterWhere}(${conditions.join(" OR ")})
+    ORDER BY ${orderBy}
+    LIMIT ?
+  `).all(...filterArgs, ...orderArgs, Math.max(1, Number(limit || 1)));
 }
 
 function runSqliteBusyRetry(fn, attempts = 8) {

@@ -21,9 +21,21 @@ body.short-video-mobile-view #viewContent {
   padding: 0 0 86px;
 }
 
+body.short-video-mobile-view .top-search-button {
+  grid-column: 3;
+}
+
+body.short-video-mobile-view .short-video-mobile-list,
+body.short-video-mobile-view .bottom-nav,
+body.short-video-mobile-view .bottom-nav * {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 .short-video-mobile-list {
   display: grid;
-  gap: 10px;
+  gap: 0;
 }
 
 .short-video-mobile-tabs {
@@ -31,21 +43,28 @@ body.short-video-mobile-view #viewContent {
   top: calc(54px + env(safe-area-inset-top));
   z-index: 7;
   display: flex;
-  align-items: stretch;
-  justify-content: center;
+  align-items: center;
+  gap: 2px;
   min-height: 50px;
   border-bottom: 1px solid var(--line);
   background: var(--bg);
+  padding: 0 10px;
+}
+
+.short-video-mobile-tab-list {
+  display: flex;
+  align-self: stretch;
+  min-width: 0;
 }
 
 .short-video-mobile-tab {
   position: relative;
-  min-width: 112px;
+  min-width: 52px;
   min-height: 48px;
   border: 0;
   background: transparent;
   color: var(--muted);
-  padding: 0 22px;
+  padding: 0 10px;
   font: inherit;
   font-size: 16px;
   font-weight: 900;
@@ -77,8 +96,8 @@ body.short-video-mobile-view #viewContent {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  min-height: 48px;
-  padding: 0 10px;
+  min-height: 32px;
+  padding: 0 12px;
 }
 
 .short-video-mobile-toolbar-copy {
@@ -106,6 +125,13 @@ body.short-video-mobile-view #viewContent {
   font-weight: 800;
 }
 
+.short-video-mobile-sort-wrap {
+  position: relative;
+  display: grid;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
 .short-video-mobile-author-back {
   width: 44px;
   height: 44px;
@@ -123,15 +149,15 @@ body.short-video-mobile-view #viewContent {
 }
 
 .short-video-mobile-sort {
-  min-width: 106px;
-  height: 40px;
-  border: 1px solid var(--line);
+  width: 96px;
+  height: 34px;
+  border: 0;
   border-radius: 999px;
-  background: var(--surface-raised);
+  background: var(--surface-soft);
   color: var(--ink);
-  padding: 0 12px;
+  padding: 0 9px;
   font: inherit;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 850;
 }
 

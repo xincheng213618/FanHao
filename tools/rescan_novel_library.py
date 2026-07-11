@@ -342,18 +342,27 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           scroll_ratio REAL DEFAULT 0,
           updated_at TEXT NOT NULL
         );
-        DROP TABLE IF EXISTS novel_search;
-        CREATE VIRTUAL TABLE novel_search USING fts5(
-          book_id UNINDEXED,
-          chapter_id UNINDEXED,
-          title,
-          author,
-          category,
-          chapter_title,
-          tokenize='trigram'
+        CREATE TABLE IF NOT EXISTS novel_book_overrides (
+          book_id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          author TEXT,
+          category TEXT,
+          summary TEXT,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS novel_book_deletions (
+          book_id TEXT PRIMARY KEY,
+          source_path TEXT,
+          title TEXT,
+          deleted_at TEXT NOT NULL
         );
         """
     )
+    schema_version = conn.execute("SELECT value FROM novel_meta WHERE key = 'schema_version'").fetchone()
+    if not schema_version or int(schema_version[0] or 0) < 2:
+        conn.execute("DROP TABLE IF EXISTS novel_search")
+    if not schema_version or int(schema_version[0] or 0) < 4:
+        conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '4')")
 
 
 def write_records(db_path: Path, roots: list[Path], records: Iterable[BookRecord]) -> None:
@@ -363,13 +372,11 @@ def write_records(db_path: Path, roots: list[Path], records: Iterable[BookRecord
         ensure_schema(conn)
         print("[db] schema ready", flush=True)
         conn.execute("BEGIN")
-        conn.execute("DELETE FROM novel_search")
         conn.execute("DELETE FROM novel_chapters")
         conn.execute("DELETE FROM novel_books")
         print("[db] target cleared", flush=True)
         insert_book = conn.cursor()
         insert_chapter = conn.cursor()
-        insert_search = conn.cursor()
         for book in records:
             insert_book.execute(
                 """
@@ -404,11 +411,9 @@ def write_records(db_path: Path, roots: list[Path], records: Iterable[BookRecord
                 ),
             )
             chapter_rows = []
-            search_rows = []
             for chapter in book.chapters:
                 chapter_id = f"{book.id}-{chapter.index:05d}"
                 chapter_rows.append((chapter_id, book.id, chapter.index, chapter.title, chapter.content, len(chapter.content), book.updated_at))
-                search_rows.append((book.id, chapter_id, book.title, book.author, book.category, chapter.title))
             insert_chapter.executemany(
                 """
                 INSERT INTO novel_chapters (id, book_id, chapter_index, title, content, char_count, updated_at)
@@ -416,14 +421,23 @@ def write_records(db_path: Path, roots: list[Path], records: Iterable[BookRecord
                 """,
                 chapter_rows,
             )
-            insert_search.executemany(
-                """
-                INSERT INTO novel_search (book_id, chapter_id, title, author, category, chapter_title)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                search_rows,
-            )
-        conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '1')")
+        conn.execute(
+            """
+            UPDATE novel_books
+            SET
+              title = (SELECT title FROM novel_book_overrides WHERE book_id = novel_books.id),
+              author = (SELECT author FROM novel_book_overrides WHERE book_id = novel_books.id),
+              category = (SELECT category FROM novel_book_overrides WHERE book_id = novel_books.id),
+              summary = (SELECT summary FROM novel_book_overrides WHERE book_id = novel_books.id),
+              updated_at = (SELECT updated_at FROM novel_book_overrides WHERE book_id = novel_books.id)
+            WHERE EXISTS (SELECT 1 FROM novel_book_overrides WHERE book_id = novel_books.id)
+            """
+        )
+        conn.execute("DELETE FROM novel_chapters WHERE book_id IN (SELECT book_id FROM novel_book_deletions)")
+        conn.execute("DELETE FROM novel_reading_state WHERE book_id IN (SELECT book_id FROM novel_book_deletions)")
+        conn.execute("DELETE FROM novel_book_overrides WHERE book_id IN (SELECT book_id FROM novel_book_deletions)")
+        conn.execute("DELETE FROM novel_books WHERE id IN (SELECT book_id FROM novel_book_deletions)")
+        conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '4')")
         conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)", (now_iso(),))
         conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('roots_json', ?)", (json.dumps([str(root.resolve()) for root in roots], ensure_ascii=False),))
         conn.commit()

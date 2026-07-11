@@ -36,6 +36,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.URLDecoder;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -211,6 +212,70 @@ public class FanHaoNovelPlugin extends Plugin {
         rejectPluginCall(call, error.getMessage() == null ? "读取 TXT 失败" : error.getMessage(), error);
       }
     }, "FanHaoTextRead").start();
+  }
+
+  @PluginMethod
+  public void exportTextFile(PluginCall call) {
+    if (getActivity() == null) {
+      call.reject("无法打开系统保存窗口");
+      return;
+    }
+
+    String text = call.getString("text", "");
+    byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+    if (bytes.length > MAX_TEXT_BYTES) {
+      call.reject("文本文件太大，暂时只支持 80MB 以内");
+      return;
+    }
+
+    String fileName = sanitizeFileName(call.getString("fileName", "本地小说.txt"));
+    Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+    intent.addCategory(Intent.CATEGORY_OPENABLE);
+    intent.setType("text/plain");
+    intent.putExtra(Intent.EXTRA_TITLE, fileName);
+    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+    try {
+      startActivityForResult(call, intent, "exportTextFileResult");
+    } catch (Exception error) {
+      call.reject("无法打开系统保存窗口", error);
+    }
+  }
+
+  @ActivityCallback
+  private void exportTextFileResult(PluginCall call, ActivityResult result) {
+    if (call == null) return;
+    if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null || result.getData().getData() == null) {
+      JSObject canceled = new JSObject();
+      canceled.put("saved", false);
+      canceled.put("canceled", true);
+      call.resolve(canceled);
+      return;
+    }
+
+    Uri uri = result.getData().getData();
+    String fileName = sanitizeFileName(call.getString("fileName", "本地小说.txt"));
+    String text = call.getString("text", "");
+    new Thread(() -> {
+      try {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > MAX_TEXT_BYTES) throw new IllegalArgumentException("文本文件太大，暂时只支持 80MB 以内");
+        ContentResolver resolver = getContext().getContentResolver();
+        try (OutputStream output = resolver.openOutputStream(uri, "wt")) {
+          if (output == null) throw new IllegalArgumentException("无法写入这个文件位置");
+          output.write(bytes);
+          output.flush();
+        }
+        JSObject response = new JSObject();
+        response.put("saved", true);
+        response.put("canceled", false);
+        response.put("fileName", fileName);
+        response.put("sizeBytes", bytes.length);
+        response.put("uri", uri.toString());
+        resolvePluginCall(call, response);
+      } catch (Exception error) {
+        rejectPluginCall(call, error.getMessage() == null ? "保存 TXT 失败" : error.getMessage(), error);
+      }
+    }, "FanHaoTextExport").start();
   }
 
   @PluginMethod

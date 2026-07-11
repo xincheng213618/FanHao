@@ -1,3 +1,55 @@
+/* Keep temporal context visible when the richer playback controls auto-hide. */
+.short-video-close,
+.short-video-browser-search {
+  border-color: rgba(255, 255, 255, .2);
+  background: rgba(8, 9, 13, .66);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .22);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .48);
+  backdrop-filter: blur(14px) saturate(1.15);
+}
+
+.short-video-close:hover,
+.short-video-browser-search:hover {
+  border-color: rgba(255, 255, 255, .34);
+  background: rgba(8, 9, 13, .8);
+}
+
+.short-video-close:focus-visible,
+.short-video-browser-search:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, .92);
+  outline-offset: 2px;
+}
+
+.short-video-browser.is-controls-idle .short-video-control-bar:not(.is-gallery) {
+  background: transparent;
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+  backdrop-filter: none;
+}
+
+.short-video-control-bar > :not(.short-video-control-progress-wrap) {
+  transition: opacity .18s ease;
+}
+
+.short-video-browser.is-controls-idle .short-video-control-bar:not(.is-gallery) > :not(.short-video-control-progress-wrap) {
+  opacity: 0;
+}
+
+.short-video-browser.is-controls-idle .short-video-control-bar:not(.is-gallery) .short-video-control-progress-wrap {
+  top: auto;
+  bottom: -6px;
+}
+
+.short-video-browser.is-controls-idle .short-video-control-bar:not(.is-gallery) .short-video-control-progress {
+  opacity: .72;
+}
+
+@media (min-width: 681px) {
+  .short-video-stage.is-gallery-stage.is-sound-blocked.is-sound-hint-visible::after {
+    bottom: max(126px, calc(env(safe-area-inset-bottom) + 122px));
+  }
+}
+
 @media (max-width: 860px) {
   body.short-video-view .main {
     padding: 0 14px 28px;
@@ -179,15 +231,8 @@
     display: none;
   }
 
-  .short-video-volume-popover {
-    right: -12px;
-    bottom: 38px;
-    width: 56px;
-    height: 208px;
-  }
-
-  .short-video-volume-range {
-    width: 140px;
+  .short-video-control-volume .short-video-volume-popover {
+    display: none;
   }
 
   .short-video-seek-preview {
@@ -207,6 +252,12 @@
     inset: auto;
     grid-column: 1 / -1;
     grid-row: 1;
+    height: 18px;
+  }
+
+  .short-video-browser.is-controls-idle .short-video-control-bar:not(.is-gallery) .short-video-control-progress-wrap {
+    position: absolute;
+    inset: auto 0 -8px;
     height: 18px;
   }
 
@@ -721,6 +772,19 @@
     border-radius: 18px 18px 0 0;
     padding: 17px 14px max(18px, calc(env(safe-area-inset-bottom) + 12px));
     animation-name: shortVideoMoreSheetEnter;
+  }
+
+  .short-video-more-sheet .short-video-more-head {
+    position: sticky;
+    top: -17px;
+    z-index: 6;
+    margin: -17px -14px 0;
+    padding: 17px 14px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, .08);
+    background:
+      linear-gradient(180deg, rgba(25, 27, 35, .99) 0%, rgba(25, 27, 35, .96) 78%, rgba(25, 27, 35, .88) 100%);
+    box-shadow: 0 9px 18px rgba(0, 0, 0, .14);
+    backdrop-filter: blur(18px) saturate(1.12);
   }
 
   .short-video-share-sheet {

@@ -136,7 +136,7 @@ export function normalizeRoute(route = {}) {
     novelQuery: view === "novels" ? String(route.novelQuery || route.q || "").trim() : "",
     novelCategory: view === "novels" ? String(route.novelCategory || "all").trim() || "all" : "all",
     novelSort: view === "novels" ? normalizeNovelSort(route.novelSort) : "updated",
-    novelMode: view === "novels" && route.novelMode === "authors" ? "authors" : "books",
+    novelMode: view === "novels" && ["mine", "authors", "author", "search", "rankings", "manage"].includes(route.novelMode) ? route.novelMode : "books",
     novelAuthor: view === "novels" ? String(route.novelAuthor || "").trim() : "",
     novelPage: view === "novels" ? normalizeNovelPage(route.novelPage) : 0,
     shortVideoId: view === "shortVideos" ? String(route.shortVideoId || "").trim() : "",
@@ -192,10 +192,9 @@ export function routeUrl(route, options = {}) {
   } else if (next.view === "novels") {
     if (next.novelQuery) params.set("q", next.novelQuery);
     if (next.novelCategory && next.novelCategory !== "all") params.set("category", next.novelCategory);
-    if (next.novelSort && next.novelSort !== "updated") params.set("sort", next.novelSort);
-    if (next.novelMode === "authors") params.set("section", "authors");
-    if (next.novelAuthor) params.set("author", next.novelAuthor);
-    if (next.novelPage > 0) params.set("page", String(next.novelPage + 1));
+    const defaultNovelSort = next.novelMode === "mine" ? "progress" : next.novelMode === "rankings" ? "chars" : next.novelMode === "author" ? "title" : next.novelMode === "authors" ? "books" : "updated";
+    if (next.novelSort && next.novelSort !== defaultNovelSort) params.set("sort", next.novelSort);
+    if (next.novelAuthor && next.novelMode !== "author") params.set("author", next.novelAuthor);
   } else if (next.view === "shortVideos") {
     if (next.shortVideoQuery) params.set("q", next.shortVideoQuery);
     if (next.shortVideoTopic) params.set("topic", next.shortVideoTopic);
@@ -292,7 +291,7 @@ function normalizeGallerySort(value) {
 
 function normalizeNovelSort(value) {
   const sort = String(value || "updated").trim();
-  return ["updated", "title", "size", "chapters", "progress", "books", "name"].includes(sort) ? sort : "updated";
+  return ["updated", "title", "size", "chars", "chapters", "progress", "books", "name"].includes(sort) ? sort : "updated";
 }
 
 function normalizeNovelPage(value) {
@@ -413,7 +412,15 @@ function novelRouteFromPath(routePath, params = new URLSearchParams()) {
   const segments = normalizeRoutePath(routePath).split("/").filter(Boolean);
   if (!segments.length || !["novel", "novels"].includes(segments[0])) return null;
   const rest = segments.slice(1);
-  const chapterSegment = rest[1] === "read" ? rest[2] || "" : rest[1] || "";
+  const authorPage = rest[0] === "authors" ? decodeRouteSegment(rest[1] || "") : "";
+  const legacyAuthor = params.get("author") || "";
+  const authorList = rest[0] === "authors" && !authorPage;
+  const manage = rest[0] === "manage";
+  const mine = ["mine", "my"].includes(rest[0]);
+  const searchPage = rest[0] === "search";
+  const rankings = ["rankings", "ranking", "rank"].includes(rest[0]);
+  const specialRoute = authorList || Boolean(authorPage) || manage || mine || searchPage || rankings;
+  const chapterSegment = specialRoute ? "" : rest[1] === "read" ? rest[2] || "" : rest[1] || "";
   return {
     view: "novels",
     galleryMode: "",
@@ -428,13 +435,13 @@ function novelRouteFromPath(routePath, params = new URLSearchParams()) {
     gallerySubCategory: "all",
     galleryPerson: "all",
     gallerySort: "updated",
-    novelBookId: decodeRouteSegment(rest[0] || ""),
+    novelBookId: specialRoute ? "" : decodeRouteSegment(rest[0] || ""),
     novelChapterIndex: decodeRouteSegment(chapterSegment),
     novelQuery: params.get("q") || params.get("search") || "",
     novelCategory: params.get("category") || "all",
-    novelSort: normalizeNovelSort(params.get("sort")),
-    novelMode: params.get("section") === "authors" ? "authors" : "books",
-    novelAuthor: params.get("author") || "",
+    novelSort: normalizeNovelSort(params.get("sort") || (mine ? "progress" : rankings ? "chars" : authorPage || legacyAuthor ? "title" : authorList ? "books" : "updated")),
+    novelMode: manage ? "manage" : mine ? "mine" : searchPage ? "search" : rankings ? "rankings" : authorPage || legacyAuthor ? "author" : authorList || params.get("section") === "authors" ? "authors" : "books",
+    novelAuthor: authorPage || legacyAuthor,
     novelPage: Math.max(0, Number(params.get("page") || 1) - 1),
     personId: "",
     q: "",
@@ -561,6 +568,12 @@ function routePath(route) {
       return `/novels/${encodeRouteSegment(route.novelBookId)}/${encodeRouteSegment(route.novelChapterIndex)}`;
     }
     if (route.novelBookId) return `/novels/${encodeRouteSegment(route.novelBookId)}`;
+    if (route.novelMode === "author" && route.novelAuthor) return `/novels/authors/${encodeRouteSegment(route.novelAuthor)}`;
+    if (route.novelMode === "mine") return "/novels/mine";
+    if (route.novelMode === "authors") return "/novels/authors";
+    if (route.novelMode === "search") return "/novels/search";
+    if (route.novelMode === "rankings") return "/novels/rankings";
+    if (route.novelMode === "manage") return "/novels/manage";
     return "/novels";
   }
   if (route.view === "shortVideos") {

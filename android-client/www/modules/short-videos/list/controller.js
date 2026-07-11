@@ -15,7 +15,7 @@ export function createShortVideoListController(context = {}) {
     let nextSource = normalizeSource(params.source || params.origin);
     const nextSort = normalizeSort(params.sort);
     if (nextSource === "authors") nextAuthor = "all";
-    if (nextAuthor === "all" && !["liked", "authors"].includes(nextSource)) nextSource = DEFAULT_SOURCE;
+    if (nextAuthor === "all" && !["all", "liked", "authors"].includes(nextSource)) nextSource = DEFAULT_SOURCE;
     const scopeChanged = nextQuery !== listState.query
       || nextAuthor !== listState.author
       || nextSource !== listState.source
@@ -135,7 +135,8 @@ export function createShortVideoListController(context = {}) {
   }
 
   function activeLibraryGroup() {
-    return isAuthorIndexView() || isAuthorFeedView() ? "authors" : "liked";
+    if (isAuthorIndexView() || isAuthorFeedView()) return "authors";
+    return listState.source === "all" ? "all" : "liked";
   }
 
   function updateListParams(patch = {}, navigation = {}) {
@@ -165,7 +166,7 @@ export function createShortVideoListController(context = {}) {
     const author = group === "authors" ? currentAuthor : "all";
     const source = group === "authors"
       ? (author !== "all" ? "all" : "authors")
-      : "liked";
+      : group === "all" ? "all" : "liked";
     updateListParams({
       query: String(query || "").trim(),
       author,

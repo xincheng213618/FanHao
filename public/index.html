@@ -10,7 +10,7 @@
     <link rel="manifest" href="/manifest.webmanifest?v=20260701-gallery-merge-01" />
     <link rel="icon" href="/app-icon.svg?v=20260701-gallery-merge-01" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/app-icon.svg?v=20260701-gallery-merge-01" />
-    <link rel="stylesheet" href="/styles.css?v=20260711-novel-pagination-80" />
+    <link rel="stylesheet" href="/styles.css?v=20260712-novel-menu-bar-114" />
   </head>
   <body>
     <script>
@@ -239,9 +239,9 @@
     <script type="module">
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
       if (shortVideoEntry) {
-        await import("/short-video-app.js?v=20260711-fullscreen-escape-83");
+        await import("/short-video-app.js?v=20260711-liked-count-race-106");
       } else {
-        await import("/app.js?v=20260711-novel-pagination-84");
+        await import("/app.js?v=20260712-novel-author-102");
       }
     </script>
   </body>
