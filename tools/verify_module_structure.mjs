@@ -172,23 +172,19 @@ const requiredShortVideoParts = [
   "list/controller.js",
   "list/view.js",
   "panels/author-panel.js",
-  "panels/playback-panels.js",
-  "platform/native-player.js",
-  "player/interactions.js",
-  "player/media-cache.js",
   "player/native-feed.js",
-  "player/reel-controller.js",
   "ui/icons.js",
   "styles/list.css",
-  "styles/reel.css",
-  "styles/author-panel.css",
-  "styles/playback-panels.css"
+  "styles/author-panel.css"
 ];
 for (const relativePath of requiredShortVideoParts) {
   assert(
     fs.statSync(path.join(shortVideoClientDir, relativePath), { throwIfNoEntry: false })?.isFile(),
     `missing Android short-video module part: ${relativePath}`
   );
+}
+for (const obsoletePath of ["panels/playback-panels.js", "platform/native-player.js", "player/interactions.js", "player/media-cache.js", "player/reel-controller.js", "styles/reel.css", "styles/playback-panels.css"]) {
+  assert(!fs.statSync(path.join(shortVideoClientDir, obsoletePath), { throwIfNoEntry: false }), `legacy Android WebView player must stay removed: ${obsoletePath}`);
 }
 const shortVideoFacade = fs.readFileSync(path.join(shortVideoClientDir, "short-video-views.js"), "utf8").trim();
 assert(/^export \{ createShortVideoViews \} from /.test(shortVideoFacade), "short-video-views.js must stay a compatibility facade");

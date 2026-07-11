@@ -1,4 +1,4 @@
-import { createShortVideoViews } from "./index.js?v=20260712-short-video-search-page-07";
+import { createShortVideoViews } from "./index.js?v=20260712-native-short-video-only-01";
 import { DEFAULT_SORT, SHORT_VIDEO_SORT_OPTIONS, normalizeSort } from "./shared.js?v=20260712-short-video-search-page-07";
 
 export function createAndroidModule({ host }) {
@@ -20,8 +20,7 @@ export function createAndroidModule({ host }) {
     rootViews: ["shortVideos"],
     routes: [
       { view: "shortVideos", render: (params, guard) => shortVideoViews.renderList(params, guard) },
-      { view: "shortVideoSearch", render: (params, guard) => shortVideoViews.renderSearch(params, guard) },
-      { view: "shortVideoBrowser", render: (params, guard) => shortVideoViews.renderBrowser(params, guard) }
+      { view: "shortVideoSearch", render: (params, guard) => shortVideoViews.renderSearch(params, guard) }
     ],
     renderChrome: (context) => renderShortVideoChrome(context, host, shortVideoViews),
     deactivate: () => shortVideoViews.deactivate?.(),

@@ -5,10 +5,9 @@
 - `api.js`：服务端请求适配。
 - `shared.js`：常量、参数规范化和纯格式化函数。
 - `list/`：列表状态、分页、搜索、作者索引和列表 DOM。
-- `player/`：Reel 数据/渲染、媒体预热与首帧缓存、手势与播放交互、原生信息流桥接。
-- `panels/`：作者面板与播放设置/更多操作面板。
-- `platform/`：Capacitor 原生播放器和沉浸模式适配。
+- `player/native-feed.js`：把当前列表范围交给原生短视频播放器。
+- `panels/author-panel.js`：作者资料与本地作品面板。
 - `ui/`：短视频图标。
-- `styles/`：列表、Reel、作者面板和播放面板样式。
+- `styles/`：列表和作者面板样式。
 
-模块运行时公开 `renderList`、`renderBrowser`、搜索方法和 `deactivate`。离开短视频视图时，`deactivate` 负责停止媒体、定时器、观察器、弹层和沉浸模式。
+模块运行时公开列表、搜索和 `deactivate`。短视频播放统一由 `NativeShortVideoActivity` 负责，Android WebView 不再维护第二套播放器。

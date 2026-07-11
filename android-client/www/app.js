@@ -1,4 +1,4 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260711-short-video-cache-08";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260712-native-short-video-only-01";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260705-mobile-actions-01";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
@@ -13,7 +13,7 @@ import { createSearchHistory } from "./js/search-history.js";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
-const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "studios", "studioDetail", "vr", "favorites", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "shortVideoBrowser", "tools"]);
+const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "studios", "studioDetail", "vr", "favorites", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "tools"]);
 const DEFAULT_VIEW = "works";
 const DEFAULT_PHOTO_CATEGORY = "我喜欢的";
 const PRIMARY_LABELS = {
@@ -130,7 +130,6 @@ function shouldRememberView(view, params = {}) {
   if (view === "mediaDetail") return Boolean(params.id);
   if (view === "novelDetail") return Boolean(params.id);
   if (view === "novelReader") return Boolean(params.id && params.chapterIndex);
-  if (view === "shortVideoBrowser") return Boolean(params.id);
   return true;
 }
 
@@ -181,20 +180,6 @@ function sanitizeViewParams(view, params = {}) {
     const source = normalizeShortVideoSource(params.source || params.origin);
     const sort = normalizeShortVideoSort(params.sort);
     return {
-      ...(query ? { query } : {}),
-      ...(author !== "all" ? { author } : {}),
-      ...(source !== "liked" ? { source } : {}),
-      ...(sort !== "published" ? { sort } : {})
-    };
-  }
-  if (view === "shortVideoBrowser") {
-    const id = String(params.id || "").trim();
-    const query = String(params.query || params.q || "").trim();
-    const author = String(params.author || "all").trim() || "all";
-    const source = normalizeShortVideoSource(params.source || params.origin);
-    const sort = normalizeShortVideoSort(params.sort);
-    return {
-      id,
       ...(query ? { query } : {}),
       ...(author !== "all" ? { author } : {}),
       ...(source !== "liked" ? { source } : {}),
@@ -1054,16 +1039,6 @@ function openNativeLibraryRoute(options = {}) {
     return true;
   }
   if (first === "short-videos" || first === "short-video" || first === "douyin") {
-    if (segments[1]) {
-      showView("shortVideoBrowser", {
-        id: segments[1],
-        query: query.get("q") || query.get("search") || "",
-        author: query.get("author") || "all",
-        source: query.get("source") || query.get("origin") || "liked",
-        sort: query.get("sort") || "published"
-      }, navigation);
-      return true;
-    }
     showView("shortVideos", {
       query: query.get("q") || query.get("search") || "",
       author: query.get("author") || "all",
@@ -1377,8 +1352,7 @@ function canRenderWithoutLibrary(view = "") {
     || view === "novelReader"
     || view === "music"
     || view === "shortVideos"
-    || view === "shortVideoSearch"
-    || view === "shortVideoBrowser";
+    || view === "shortVideoSearch";
 }
 
 function defaultWorksLimitForView(view) {
@@ -1570,7 +1544,6 @@ function routeLoadingCopy(view = currentView, params = currentViewParams) {
   if (view === "novelDetail") return { kicker: "小说", title: "书籍详情", meta: "正在读取", message: "正在读取书籍详情" };
   if (view === "novelReader") return { kicker: "小说阅读", title: "章节", meta: "正在读取", message: "正在翻开章节" };
   if (view === "music") return { kicker: "本地音乐", title: "音乐", meta: "正在读取", message: "正在读取音乐库" };
-  if (view === "shortVideoBrowser") return { kicker: "短视频", title: "正在播放", meta: "上滑切换", message: "正在打开短视频" };
   if (view === "shortVideoSearch") return { kicker: "短视频", title: "搜索", meta: "", message: "正在打开搜索" };
   if (view === "rankings") return { kicker: "榜单", title: "排行榜", meta: "正在加载", message: "正在加载排行榜" };
   if (view === "studios") return { kicker: "片商", title: "片商索引", meta: "正在加载", message: "正在加载片商" };
@@ -1596,7 +1569,6 @@ function syncContentPanelMode() {
   document.body.classList.toggle("music-mobile-view", currentView === "music");
   document.body.classList.toggle("short-video-mobile-view", currentView === "shortVideos");
   document.body.classList.toggle("short-video-search-page-view", currentView === "shortVideoSearch");
-  document.body.classList.toggle("short-video-mobile-browser-view", currentView === "shortVideoBrowser");
   dispatchAppViewChanged();
 }
 

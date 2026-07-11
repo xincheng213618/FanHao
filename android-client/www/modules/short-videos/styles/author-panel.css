@@ -229,8 +229,7 @@
   font-weight: 950;
 }
 
-.author-sheet-tile-badge,
-.author-sheet-current {
+.author-sheet-tile-badge {
   position: absolute;
   left: 5px;
   bottom: 5px;
@@ -246,12 +245,6 @@
   white-space: nowrap;
 }
 
-.author-sheet-current {
-  left: auto;
-  right: 5px;
-  background: #fe2c55;
-}
-
 .author-sheet-tile-title {
   display: -webkit-box;
   min-height: 30px;
@@ -262,11 +255,6 @@
   line-height: 1.35;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-}
-
-.author-sheet-tile.is-current .author-sheet-tile-media {
-  outline: 2px solid #fe2c55;
-  outline-offset: -2px;
 }
 
 .short-video-mobile-toast {

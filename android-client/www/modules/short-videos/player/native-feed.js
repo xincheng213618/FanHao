@@ -2,17 +2,16 @@ import { DEFAULT_SORT } from "../shared.js";
 
 export function createShortVideoNativeFeed(context = {}) {
   const { getActiveUrl, listState } = context;
-  const nativePlayerPlugin = (...args) => context.nativePlayerPlugin(...args);
   const shortVideoApiSource = (...args) => context.shortVideoApiSource(...args);
   const shortVideoToast = (...args) => context.shortVideoToast(...args);
-  async function openNativeShortVideoFeed(video) {
+  async function openNativeShortVideoFeed(video, options = {}) {
     const plugin = nativePlayerPlugin();
     if (!plugin?.playShortFeed || !video?.id) return false;
     if (!isNativePlayableItem(video)) {
       shortVideoToast("这条作品缺少本地媒体，暂时无法打开");
       return true;
     }
-    const videos = listState.data?.videos || [];
+    const videos = Array.isArray(options.videos) ? options.videos : (listState.data?.videos || []);
     const playableEntries = videos
       .map((item, apiIndex) => ({ item, apiIndex }))
       .filter(({ item }) => isNativePlayableItem(item));
@@ -21,7 +20,7 @@ export function createShortVideoNativeFeed(context = {}) {
     const start = Math.max(0, index - 20);
     const end = Math.min(playableEntries.length, index + 31);
     const feedEntries = playableEntries.slice(start, end);
-    const feedUrl = nativeShortVideoFeedUrl();
+    const feedUrl = nativeShortVideoFeedUrl(options);
     const payload = feedEntries.map(({ item }) => ({
       id: item.id,
       awemeId: item.awemeId || "",
@@ -91,7 +90,7 @@ export function createShortVideoNativeFeed(context = {}) {
       await plugin.playShortFeed({
         baseUrl: getActiveUrl(),
         feedUrl,
-        hasMore: Boolean(listState.data?.hasMore || end < playableEntries.length),
+        hasMore: Boolean((options.hasMore ?? listState.data?.hasMore) || end < playableEntries.length),
         nextOffset: feedEntries.length ? feedEntries[feedEntries.length - 1].apiIndex + 1 : videos.length,
         startIndex: index - start,
         startId: video.id,
@@ -112,14 +111,22 @@ export function createShortVideoNativeFeed(context = {}) {
     return Array.isArray(entries) && entries.some((entry) => String(entry?.url || "").trim());
   }
 
-  function nativeShortVideoFeedUrl() {
+  function nativeShortVideoFeedUrl(options = {}) {
     const url = new URL("/api/short-videos", getActiveUrl());
-    if (listState.query) url.searchParams.set("q", listState.query);
-    if (listState.author && listState.author !== "all") url.searchParams.set("author", listState.author);
-    url.searchParams.set("source", shortVideoApiSource());
-    url.searchParams.set("sort", listState.sort || DEFAULT_SORT);
+    const query = options.query ?? listState.query;
+    const author = options.author ?? listState.author;
+    const source = options.source ?? shortVideoApiSource();
+    const sort = options.sort ?? listState.sort;
+    if (query) url.searchParams.set("q", query);
+    if (author && author !== "all") url.searchParams.set("author", author);
+    url.searchParams.set("source", source || "all");
+    url.searchParams.set("sort", sort || DEFAULT_SORT);
     url.searchParams.set("facets", "0");
     return url.toString();
+  }
+
+  function nativePlayerPlugin() {
+    return window.Capacitor?.Plugins?.FanHaoPlayer || null;
   }
 
 

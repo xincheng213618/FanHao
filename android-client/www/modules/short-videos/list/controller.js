@@ -1,12 +1,16 @@
 import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeSort, normalizeSource } from "../shared.js";
 export function createShortVideoListController(context = {}) {
-  const { api, browserState, els, getActiveUrl, goBack, listState, setActiveBottom, showView } = context;
+  const { api, getActiveUrl, listState } = context;
   let listLoadMoreObserver = null;
+  let listEventsInstalled = false;
   const openNativeShortVideoFeed = (...args) => context.openNativeShortVideoFeed(...args);
   const renderListShell = (...args) => context.renderListShell(...args);
-  const shortVideoApiSource = (...args) => context.shortVideoApiSource(...args);
-  const shortVideoBrowserParams = (...args) => context.shortVideoBrowserParams(...args);
-  const shortVideoErrorMessage = (...args) => context.shortVideoErrorMessage(...args);
+  const shortVideoToast = (...args) => context.shortVideoToast(...args);
+
+  function shortVideoApiSource() {
+    const source = normalizeSource(listState.source);
+    return source === "authors" ? "liked" : source;
+  }
   function applyListParams(params = {}) {
     const nextQuery = String(params.query || params.q || "").trim();
     let nextAuthor = String(params.author || "all").trim() || "all";
@@ -75,10 +79,6 @@ export function createShortVideoListController(context = {}) {
       listState.loadingMore = false;
       listState.status = data.total ? "" : "还没有短视频。";
       renderListShell();
-      if (!append && options.autoOpenFirst) {
-        const first = data.videos?.[0];
-        if (first) await openShortVideoFromList(first, { replace: Boolean(options.replaceOpen) });
-      }
     } catch (error) {
       if (renderGuard && !renderGuard()) return;
       listState.loading = false;
@@ -197,10 +197,37 @@ export function createShortVideoListController(context = {}) {
     listLoadMoreObserver.observe(sentinel);
   }
 
-  async function openShortVideoFromList(video, options = {}) {
-    const opened = options.skipNative ? false : await openNativeShortVideoFeed(video);
-    if (opened) return;
-    showView("shortVideoBrowser", shortVideoBrowserParams(video.id), options.replace ? { skipHistory: true, replaceHistory: true } : { push: true });
+  function installListEvents() {
+    if (listEventsInstalled) return;
+    listEventsInstalled = true;
+    window.addEventListener("scroll", () => {
+      if (!document.body.classList.contains("short-video-mobile-view")) return;
+      listState.allowLoadMore = true;
+      if (isAuthorIndexView()) {
+        appendVisibleAuthors();
+        return;
+      }
+      if (!listState.data?.hasMore || listState.loading || listState.loadingMore) return;
+      const doc = document.documentElement;
+      const remaining = doc.scrollHeight - window.scrollY - window.innerHeight;
+      if (remaining < 700) loadList(null, { append: true }).catch(() => {
+        listState.loadingMore = false;
+        renderListShell();
+      });
+    }, { passive: true });
+  }
+
+  async function openShortVideoFromList(video) {
+    const opened = await openNativeShortVideoFeed(video);
+    if (!opened) shortVideoToast("当前设备无法打开原生短视频播放器");
+    return opened;
+  }
+
+  function shortVideoErrorMessage(error, fallback) {
+    const message = String(error?.message || "").trim();
+    if (!message || /failed to fetch|network|timeout/i.test(message)) return fallback;
+    if (/database disk image|malformed|sqlite/i.test(message)) return "短视频数据正在恢复，请稍后重试";
+    return message;
   }
 
   return {
@@ -218,6 +245,9 @@ export function createShortVideoListController(context = {}) {
     submitSearch,
     resetListLoadMoreObserver,
     observeListLoadMore,
-    openShortVideoFromList
+    installListEvents,
+    openShortVideoFromList,
+    shortVideoErrorMessage,
+    shortVideoApiSource
   };
 }

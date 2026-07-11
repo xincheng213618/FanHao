@@ -2,46 +2,19 @@ import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=20260706-m
 import { formatCompact } from "../../../js/format.js";
 import { AUTHOR_PAGE_LIMIT, DEFAULT_SORT, SHORT_VIDEO_SORT_OPTIONS, formatDate, formatDuration, initials, normalizeSort, selectOption, shortVideoSortLabel } from "../shared.js";
 export function createShortVideoAuthorPanel(context = {}) {
-  const { api, browserState, getActiveUrl, listState, showView } = context;
+  const { api, getActiveUrl, listState, showView } = context;
   let authorPanelEl = null;
   let authorPanelLoadObserver = null;
-  let authorPanelPausedPlayer = null;
-  let authorPanelResumeOnClose = false;
-  const activeReelStack = (...args) => context.activeReelStack(...args);
   const bindReliableTap = (...args) => context.bindReliableTap(...args);
-  const cachedFirstFrameUrl = (...args) => context.cachedFirstFrameUrl(...args);
-  const isHorizontalSwipe = (...args) => context.isHorizontalSwipe(...args);
-  const openShortVideoFromList = (...args) => context.openShortVideoFromList(...args);
-  const requestVideoFirstFrame = (...args) => context.requestVideoFirstFrame(...args);
+  const openNativeShortVideoFeed = (...args) => context.openNativeShortVideoFeed(...args);
   const shortVideoAuthorFilterValue = (...args) => context.shortVideoAuthorFilterValue(...args);
   const shortVideoErrorMessage = (...args) => context.shortVideoErrorMessage(...args);
-  const stopPanelMedia = (...args) => context.stopPanelMedia(...args);
-  function closeAuthorPanel(options = {}) {
+  function closeAuthorPanel() {
     if (!authorPanelEl) return;
     authorPanelLoadObserver?.disconnect?.();
     authorPanelLoadObserver = null;
     authorPanelEl.remove();
     authorPanelEl = null;
-    const shouldResume = options.resume !== false && authorPanelResumeOnClose;
-    const player = authorPanelPausedPlayer;
-    authorPanelPausedPlayer = null;
-    authorPanelResumeOnClose = false;
-    if (shouldResume && player?.isConnected) {
-      requestAnimationFrame(() => {
-        const promise = player.play?.();
-        promise?.catch?.(() => {});
-      });
-    }
-  }
-
-  function pauseActiveVideoForAuthorPanel() {
-    authorPanelPausedPlayer = null;
-    authorPanelResumeOnClose = false;
-    const player = activeReelStack()?.querySelector?.(".short-video-mobile-reel-panel.is-current video.short-video-mobile-player");
-    if (!player) return;
-    authorPanelPausedPlayer = player;
-    authorPanelResumeOnClose = !player.paused && !player.ended;
-    if (authorPanelResumeOnClose) player.pause?.();
   }
 
   function shortVideoToast(message) {
@@ -56,9 +29,7 @@ export function createShortVideoAuthorPanel(context = {}) {
 
   async function viewAuthorVideos(secUid, sort = DEFAULT_SORT) {
     if (!secUid) return;
-    closeAuthorPanel({ resume: false });
-    const stack = activeReelStack();
-    if (stack) stopPanelMedia(stack);
+    closeAuthorPanel();
     showView("shortVideos", { query: "", author: secUid, source: "all", sort: sort || DEFAULT_SORT }, { push: true });
   }
 
@@ -70,22 +41,19 @@ export function createShortVideoAuthorPanel(context = {}) {
       shortVideoToast("该视频没有可识别的作者信息");
       return;
     }
-    closeAuthorPanel({ resume: false });
-    pauseActiveVideoForAuthorPanel();
-    const snapshotFilter = String(options.snapshot?.authorFilter || options.snapshot?.author?.secUid || "").trim();
-    const restoreSnapshot = snapshotFilter === authorFilter ? options.snapshot : null;
-    const author = { ...(video?.author || {}), ...(restoreSnapshot?.author || {}), secUid };
+    closeAuthorPanel();
+    const author = { ...(video?.author || {}), secUid };
     const name = author.name || "未知作者";
     const avatarUrl = author.avatarUrl || "";
     const panelState = {
       author,
       authorFilter,
-      videos: Array.isArray(restoreSnapshot?.videos) ? restoreSnapshot.videos.map(cloneShortVideo) : [],
-      total: Math.max(0, Number(restoreSnapshot?.total || 0), Array.isArray(restoreSnapshot?.videos) ? restoreSnapshot.videos.length : 0),
-      hasMore: Boolean(restoreSnapshot?.hasMore),
-      offset: Math.max(0, Number(restoreSnapshot?.offset || 0)),
+      videos: [],
+      total: 0,
+      hasMore: false,
+      offset: 0,
       loading: false,
-      sort: normalizeSort(restoreSnapshot?.sort || options.sort || listState.sort || DEFAULT_SORT)
+      sort: normalizeSort(options.sort || listState.sort || DEFAULT_SORT)
     };
     if (panelState.videos.length && !panelState.total) panelState.total = panelState.videos.length;
 
@@ -208,7 +176,7 @@ export function createShortVideoAuthorPanel(context = {}) {
       refreshHeader();
       grid.textContent = "";
       for (const item of panelState.videos) {
-        grid.append(renderAuthorVideoTile(item, panelState, video));
+        grid.append(renderAuthorVideoTile(item, panelState));
       }
       status.textContent = panelState.loading
         ? "正在读取作品"
@@ -272,12 +240,7 @@ export function createShortVideoAuthorPanel(context = {}) {
     document.body.append(overlay);
     authorPanelEl = overlay;
     observeAuthorLoadMore(sentinel, sheet, () => loadAuthorPage({ append: true }));
-    if (panelState.videos.length) {
-      renderWorks();
-      restoreAuthorPanelScroll(sheet, restoreSnapshot?.scrollTop);
-    } else {
-      loadAuthorPage().catch(() => {});
-    }
+    loadAuthorPage().catch(() => {});
   }
 
   function observeAuthorLoadMore(sentinel, root, loadMore) {
@@ -291,14 +254,11 @@ export function createShortVideoAuthorPanel(context = {}) {
     authorPanelLoadObserver.observe(sentinel);
   }
 
-  function renderAuthorVideoTile(video, panelState, currentVideo) {
+  function renderAuthorVideoTile(video, panelState) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "author-sheet-tile";
-    const current = isSameShortVideo(video, currentVideo);
-    button.classList.toggle("is-current", current);
     button.setAttribute("aria-label", video.title || "打开短视频");
-    if (current) button.setAttribute("aria-current", "true");
 
     const media = document.createElement("span");
     media.className = "author-sheet-tile-media";
@@ -314,109 +274,36 @@ export function createShortVideoAuthorPanel(context = {}) {
         }
       }).catch(() => {});
     } else {
-      const firstFrameUrl = cachedFirstFrameUrl(video);
-      if (firstFrameUrl) {
-        const img = document.createElement("img");
-        img.src = firstFrameUrl;
-        img.alt = video.title || "短视频第一帧";
-        img.dataset.shortVideoFrameId = video.id || "";
-        media.append(img);
-      } else {
-        const placeholder = document.createElement("span");
-        placeholder.dataset.shortVideoFrameId = video.id || "";
-        placeholder.textContent = "PLAY";
-        media.append(placeholder);
-        if (video.streamUrl) requestVideoFirstFrame(video).catch(() => {});
-      }
+      const placeholder = document.createElement("span");
+      placeholder.textContent = "PLAY";
+      media.append(placeholder);
     }
 
     const badge = document.createElement("span");
     badge.className = "author-sheet-tile-badge";
     badge.textContent = formatCompact(video.stats?.likes || 0);
     media.append(badge);
-    if (current) {
-      const now = document.createElement("span");
-      now.className = "author-sheet-current";
-      now.textContent = "当前";
-      media.append(now);
-    }
-
     const title = document.createElement("span");
     title.className = "author-sheet-tile-title";
     title.textContent = video.title || formatDate(video.publishedAt) || "未命名视频";
     button.append(media, title);
-    bindReliableTap(button, () => openAuthorPanelVideo(video, panelState, current));
+    bindReliableTap(button, () => openAuthorPanelVideo(video, panelState));
     return button;
   }
 
-  function openAuthorPanelVideo(video, panelState, current) {
-    if (current) {
-      shortVideoToast("正在观看这条");
-      return;
-    }
+  async function openAuthorPanelVideo(video, panelState) {
     const secUid = panelState.author?.secUid || video.author?.secUid || "";
     const authorFilter = panelState.authorFilter || secUid || shortVideoAuthorFilterValue(video.author || {});
-    const sheet = authorPanelEl?.querySelector?.(".author-sheet");
     const videosSnapshot = panelState.videos.map(cloneShortVideo);
-    browserState.authorReturnPanel = {
-      author: { ...(panelState.author || {}), secUid },
-      authorFilter,
-      sort: panelState.sort || DEFAULT_SORT,
+    const opened = await openNativeShortVideoFeed(video, {
       videos: videosSnapshot,
-      total: panelState.total || videosSnapshot.length,
       hasMore: panelState.hasMore,
-      offset: panelState.offset || videosSnapshot.length,
-      scrollTop: Math.max(0, Number(sheet?.scrollTop || 0)),
-      currentId: video.id || video.awemeId || ""
-    };
-    listState.query = "";
-    listState.author = authorFilter || "all";
-    listState.source = "all";
-    listState.sort = panelState.sort || DEFAULT_SORT;
-    listState.data = {
-      videos: videosSnapshot,
-      total: panelState.total || panelState.videos.length,
-      limit: videosSnapshot.length,
-      offset: 0,
-      hasMore: panelState.hasMore,
-      author: listState.author,
+      query: "",
+      author: authorFilter || "all",
       source: "all",
-      sort: listState.sort,
-      authors: listState.data?.authors || []
-    };
-    closeAuthorPanel({ resume: false });
-    const stack = activeReelStack();
-    if (stack) stopPanelMedia(stack);
-    openShortVideoFromList(video, { replace: true, skipNative: true }).catch((error) => {
-      shortVideoToast(shortVideoErrorMessage(error, "视频打开失败"));
+      sort: panelState.sort || DEFAULT_SORT
     });
-  }
-
-  function restoreAuthorReturnPanel() {
-    const snapshot = browserState.authorReturnPanel;
-    const authorFilter = String(snapshot?.authorFilter || snapshot?.author?.secUid || "").trim();
-    if (!authorFilter) return false;
-    browserState.authorReturnPanel = null;
-    const current = browserState.video || {};
-    const video = {
-      ...current,
-      authorFilter,
-      author: {
-        ...(current.author || {}),
-        ...snapshot.author,
-        secUid: snapshot.author.secUid || ""
-      }
-    };
-    showAuthorPanel(video, { sort: snapshot.sort, snapshot });
-    return true;
-  }
-
-  function restoreAuthorPanelScroll(sheet, value) {
-    const scrollTop = Math.max(0, Number(value || 0));
-    if (!sheet || !scrollTop) return;
-    requestAnimationFrame(() => {
-      sheet.scrollTop = scrollTop;
-    });
+    if (!opened) shortVideoToast("当前设备无法打开原生短视频播放器");
   }
 
   function cloneShortVideo(video = {}) {
@@ -425,15 +312,6 @@ export function createShortVideoAuthorPanel(context = {}) {
       author: { ...(video.author || {}) },
       stats: { ...(video.stats || {}) }
     };
-  }
-
-  function isSameShortVideo(a = {}, b = {}) {
-    const idA = String(a?.id || "").trim();
-    const idB = String(b?.id || "").trim();
-    if (idA && idB && idA === idB) return true;
-    const awemeA = String(a?.awemeId || "").trim();
-    const awemeB = String(b?.awemeId || "").trim();
-    return Boolean(awemeA && awemeB && awemeA === awemeB);
   }
 
   function authorProfileLineText(author = {}) {
@@ -499,25 +377,19 @@ export function createShortVideoAuthorPanel(context = {}) {
     if (url) window.open(url, "_system");
   }
 
-  function toggleRailActive(event) {
-    const button = event?.currentTarget;
-    if (!button) return;
-    button.classList.toggle("active");
+  function isHorizontalSwipe(deltaX, deltaY, threshold) {
+    return Math.abs(deltaX) >= threshold && Math.abs(deltaX) > Math.abs(deltaY) * 1.25;
   }
 
   return {
     closeAuthorPanel,
-    pauseActiveVideoForAuthorPanel,
     shortVideoToast,
     viewAuthorVideos,
     showAuthorPanel,
     observeAuthorLoadMore,
     renderAuthorVideoTile,
     openAuthorPanelVideo,
-    restoreAuthorReturnPanel,
-    restoreAuthorPanelScroll,
     cloneShortVideo,
-    isSameShortVideo,
     authorProfileLineText,
     authorHasProfileMeta,
     authorStatItems,
@@ -525,7 +397,6 @@ export function createShortVideoAuthorPanel(context = {}) {
     authorProfileNumber,
     formatAuthorNumber,
     authorDouyinUrl,
-    openAuthorDouyinLink,
-    toggleRailActive
+    openAuthorDouyinLink
   };
 }

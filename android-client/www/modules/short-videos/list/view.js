@@ -2,7 +2,7 @@ import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=20260706-m
 import { formatCompact } from "../../../js/format.js";
 import { AUTHOR_INITIAL_COUNT, DEFAULT_SORT, SHORT_VIDEO_SORT_OPTIONS, initials, normalizeSort } from "../shared.js";
 export function createShortVideoListView(context = {}) {
-  const { browserState, els, getActiveUrl, listState, openSettings, showView } = context;
+  const { els, getActiveUrl, listState, openSettings, showView } = context;
   const activeLibraryGroup = (...args) => context.activeLibraryGroup(...args);
   const appendVisibleAuthors = (...args) => context.appendVisibleAuthors(...args);
   const createIcon = (...args) => context.createIcon(...args);
@@ -11,7 +11,6 @@ export function createShortVideoListView(context = {}) {
   const isAuthorIndexView = (...args) => context.isAuthorIndexView(...args);
   const observeListLoadMore = (...args) => context.observeListLoadMore(...args);
   const openShortVideoFromList = (...args) => context.openShortVideoFromList(...args);
-  const requestVideoFirstFrame = (...args) => context.requestVideoFirstFrame(...args);
   const resetListLoadMoreObserver = (...args) => context.resetListLoadMoreObserver(...args);
   const shortVideoAuthorFilterValue = (...args) => context.shortVideoAuthorFilterValue(...args);
   const showAuthorPanel = (...args) => context.showAuthorPanel(...args);
@@ -288,11 +287,6 @@ export function createShortVideoListView(context = {}) {
           img.alt = video.title || "短视频封面";
         }
       }).catch(() => {});
-    } else if (video.streamUrl) {
-      const frame = document.createElement("span");
-      frame.dataset.shortVideoFrameId = video.id || "";
-      thumb.append(frame);
-      requestVideoFirstFrame(video).catch(() => {});
     } else {
       const fallback = document.createElement("span");
       fallback.textContent = "PLAY";

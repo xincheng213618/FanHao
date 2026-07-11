@@ -13,21 +13,18 @@ const requiredParts = [
   "list/controller.js",
   "list/view.js",
   "panels/author-panel.js",
-  "panels/playback-panels.js",
-  "platform/native-player.js",
-  "player/interactions.js",
-  "player/media-cache.js",
   "player/native-feed.js",
-  "player/reel-controller.js",
   "ui/icons.js",
   "styles/list.css",
-  "styles/reel.css",
-  "styles/author-panel.css",
-  "styles/playback-panels.css"
+  "styles/author-panel.css"
 ];
 
 for (const relativePath of requiredParts) {
   assert(fs.statSync(path.join(moduleDir, relativePath), { throwIfNoEntry: false })?.isFile(), `missing short-video part: ${relativePath}`);
+}
+const obsoletePlayerParts = ["panels/playback-panels.js", "platform/native-player.js", "player/interactions.js", "player/media-cache.js", "player/reel-controller.js", "styles/reel.css", "styles/playback-panels.css"];
+for (const relativePath of obsoletePlayerParts) {
+  assert(!fs.statSync(path.join(moduleDir, relativePath), { throwIfNoEntry: false }), `legacy Android WebView player must stay removed: ${relativePath}`);
 }
 
 const facade = fs.readFileSync(path.join(moduleDir, "short-video-views.js"), "utf8").trim();
@@ -41,13 +38,14 @@ verifySharedImports();
 verifyWebDedicatedEntry();
 
 const styles = fs.readFileSync(path.join(moduleDir, "styles.css"), "utf8");
-for (const style of ["list", "reel", "author-panel", "playback-panels"]) {
+for (const style of ["list", "author-panel"]) {
   assert(styles.includes(`./styles/${style}.css`), `missing short-video CSS import: ${style}`);
 }
 
 const androidEntrySource = fs.readFileSync(path.join(moduleDir, "android-module.js"), "utf8");
 const androidListSource = fs.readFileSync(path.join(moduleDir, "list", "view.js"), "utf8");
-const androidListStyles = fs.readFileSync(path.join(moduleDir, "styles", "list.css"), "utf8");
+const androidListControllerSource = fs.readFileSync(path.join(moduleDir, "list", "controller.js"), "utf8");
+const androidAuthorSource = fs.readFileSync(path.join(moduleDir, "panels", "author-panel.js"), "utf8");
 assert(androidEntrySource.includes('view: "shortVideoSearch"'), "Android short-video search must use a dedicated route");
 assert(androidEntrySource.includes("short-video-chrome-row"), "Android short-video chrome must keep search and groups in one compact row");
 assert(!androidEntrySource.includes("short-video-chrome-sort"), "Android short-video chrome must not reserve a separate sorting tag");
@@ -59,11 +57,11 @@ assert(!androidListSource.includes("renderSearchFilters"), "Android short-video 
 assert(!androidListSource.includes("`${formatCompact(listState.data?.total || 0)} 条"), "Android short-video lists must not render total video counts");
 assert(!androidListSource.includes("author.count || 0"), "Android short-video author cards must not render author totals");
 assert(!androidListSource.includes("shell.append(renderLibraryTabs()"), "Android short-video group tabs must live in module chrome, not a second row");
-const browserPanelStyles = androidListStyles.slice(
-  androidListStyles.indexOf("body.short-video-mobile-browser-view #contentPanel"),
-  androidListStyles.indexOf("body.short-video-mobile-browser-view #viewContent")
-);
-assert(browserPanelStyles.includes("border: 0;") && browserPanelStyles.includes("box-shadow: none;"), "Android short-video playback must clear the shared content panel frame");
+assert(!androidEntrySource.includes('view: "shortVideoBrowser"'), "Android short videos must not expose the legacy WebView playback route");
+assert(androidListControllerSource.includes("await openNativeShortVideoFeed(video)"), "Android short-video cards must open the native feed");
+assert(!androidListControllerSource.includes('showView("shortVideoBrowser"'), "Android list playback must not fall back to the legacy WebView player");
+assert(androidAuthorSource.includes("await openNativeShortVideoFeed(video, {"), "Android author pages must open the same native feed as direct playback");
+assert(!androidAuthorSource.includes("skipNative"), "Android author playback must not force the legacy WebView player");
 
 const views = createShortVideoViews({
   els: {},
@@ -74,11 +72,12 @@ const views = createShortVideoViews({
 });
 assert.deepEqual(
   Object.keys(views).sort(),
-  ["deactivate", "getSearchState", "renderBrowser", "renderList", "renderSearch", "submitSearch"],
+  ["deactivate", "getSearchState", "renderList", "renderSearch", "submitSearch"],
   "short-video public contract changed"
 );
 
 const appSource = fs.readFileSync(path.join(root, "android-client", "www", "app.js"), "utf8");
+assert(!appSource.includes("shortVideoBrowser"), "Android shell must not retain the legacy WebView playback route");
 assert(
   appSource.includes("shortVideoViews?.deactivate?.()")
     || appSource.includes("androidModuleRegistry?.deactivateExcept(currentView, currentViewParams)"),
