@@ -273,6 +273,224 @@
   gap: 10px;
 }
 
+.admin-settings-intro {
+  display: flex;
+  min-width: 0;
+  gap: 18px;
+  align-items: end;
+  justify-content: space-between;
+  border: 1px solid #d7dde5;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #fff 0%, #f0fdfa 100%);
+  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.06);
+  padding: 18px;
+}
+
+.admin-settings-intro h2,
+.admin-settings-module-head h2,
+.admin-settings-section h3 {
+  margin: 0;
+}
+
+.admin-settings-intro h2 {
+  margin-top: 3px;
+  font-size: 24px;
+}
+
+.admin-settings-intro p,
+.admin-settings-module-head p,
+.admin-settings-section-head p {
+  margin: 5px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.admin-settings-intro > strong {
+  flex: none;
+  border-radius: 999px;
+  background: #0f766e;
+  color: #fff;
+  padding: 8px 12px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.admin-settings-layout {
+  display: grid;
+  grid-template-columns: minmax(190px, 230px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.admin-settings-modules {
+  position: sticky;
+  top: 88px;
+  display: grid;
+  gap: 7px;
+  border: 1px solid #d7dde5;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.06);
+  padding: 8px;
+}
+
+.admin-settings-module {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #172033;
+  padding: 9px;
+  text-align: left;
+}
+
+.admin-settings-module:hover,
+.admin-settings-module.active {
+  border-color: rgba(15, 118, 110, 0.25);
+  background: rgba(15, 118, 110, 0.08);
+  color: #0f766e;
+}
+
+.admin-settings-module-index {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 7px;
+  background: #eef2f7;
+  font-size: 11px;
+  font-weight: 950;
+}
+
+.admin-settings-module.active .admin-settings-module-index {
+  background: #0f766e;
+  color: #fff;
+}
+
+.admin-settings-module > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.admin-settings-module strong,
+.admin-settings-module small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-settings-module small {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.admin-settings-content,
+.admin-settings-module-panel {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+}
+
+.admin-settings-module-panel {
+  border: 1px solid #d7dde5;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.06);
+  padding: 16px;
+}
+
+.admin-settings-module-head,
+.admin-settings-section-head {
+  display: flex;
+  min-width: 0;
+  gap: 12px;
+  align-items: start;
+  justify-content: space-between;
+}
+
+.admin-settings-module-head {
+  padding-bottom: 2px;
+}
+
+.admin-settings-module-head h2 {
+  margin-top: 3px;
+  font-size: 22px;
+}
+
+.admin-settings-section {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 14px;
+}
+
+.admin-settings-section h3 {
+  font-size: 16px;
+}
+
+.admin-settings-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.admin-settings-fields > :only-child {
+  grid-column: 1 / -1;
+}
+
+.admin-setting-field {
+  align-content: start;
+  border: 1px solid #dce3ea;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 11px;
+}
+
+.admin-setting-field-title {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.admin-setting-field-title strong {
+  color: #172033;
+  font-size: 12px;
+}
+
+.admin-setting-field-title .admin-badge {
+  min-height: 20px;
+  padding: 2px 7px;
+  font-size: 10px;
+}
+
+.admin-setting-help {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.admin-settings-empty {
+  grid-column: 1 / -1;
+  min-height: 180px;
+}
+
+.admin-status.error {
+  color: #b42318;
+}
+
+.admin-status.success {
+  color: #15803d;
+}
+
 .admin-inline-card {
   display: grid;
   min-height: 124px;

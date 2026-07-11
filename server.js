@@ -651,7 +651,8 @@ const doubanCookieService = createDoubanCookieService({
 });
 const adminSettingsService = createAdminSettingsService({
   appConfigService,
-  doubanCookieService
+  doubanCookieService,
+  getModuleRegistry: () => moduleRegistry
 });
 const actorAvatarService = createActorAvatarService({
   avatarExts: ACTOR_AVATAR_EXTS,
@@ -864,6 +865,7 @@ const moduleRegistry = await discoverFanHaoModules({
         sendJson
       },
       photos: {
+        appConfigService,
         cleanupImageReaderCache: imageReaderCacheService.cleanup,
         imageLibraryService,
         imageReaderCacheStatus: imageReaderCacheService.status,
@@ -875,6 +877,7 @@ const moduleRegistry = await discoverFanHaoModules({
         sendJson
       },
       media: {
+        doubanCookieService,
         galleryMediaService,
         galleryMetadataService,
         mediaStreamService,

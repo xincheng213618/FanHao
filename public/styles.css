@@ -8,9 +8,9 @@
 @import "./modules/content-index/styles.css?v=20260711-photo-reader-sticky-15";
 @import "./modules/tools/styles.css?v=20260710-web-css-modules-01";
 @import "./modules/fanhao/work-cards.css?v=20260710-web-css-modules-01";
-@import "./modules/system/admin.css?v=20260710-web-css-modules-01";
+@import "./modules/system/admin.css?v=20260712-module-settings-02";
 @import "./css/player.css?v=20260710-web-css-modules-01";
-@import "./css/responsive.css?v=20260711-photo-reader-sticky-15";
+@import "./css/responsive.css?v=20260712-module-settings-02";
 
 /* Standalone feature modules. */
 @import "./modules/short-videos/styles/list.css?v=20260711-player-modal-focus-75";

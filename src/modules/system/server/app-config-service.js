@@ -108,6 +108,15 @@ export function createAppConfigService({
     return config;
   }
 
+  function patch(value = {}) {
+    const input = value && typeof value === "object" ? value : {};
+    const next = { ...config };
+    for (const [key, raw] of Object.entries(input)) {
+      if (raw !== undefined) next[key] = raw;
+    }
+    return set(next);
+  }
+
   function current() {
     return config;
   }
@@ -131,6 +140,7 @@ export function createAppConfigService({
     imageReaderCacheMaxBytes,
     load,
     normalize,
+    patch,
     publicConfig,
     save,
     set

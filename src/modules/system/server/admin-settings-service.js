@@ -1,14 +1,42 @@
 export function createAdminSettingsService({
   appConfigService,
-  doubanCookieService
+  doubanCookieService,
+  getModuleRegistry
 }) {
   function configPayload() {
     return { config: appConfigService.publicConfig() };
   }
 
   function updateConfigPayload(body = {}) {
-    appConfigService.set(body.config || body);
+    appConfigService.patch(body.config || body);
     return { ok: true, config: appConfigService.publicConfig() };
+  }
+
+  async function settingsCatalogPayload() {
+    return { modules: await moduleRegistry().settingsCatalog() };
+  }
+
+  async function updateModuleSettingsPayload(moduleId, body = {}) {
+    const values = Object.hasOwn(body || {}, "values") ? body.values : body;
+    const module = await moduleRegistry().updateSettings(moduleId, values);
+    return { ok: true, module };
+  }
+
+  async function runModuleSettingsActionResponse(moduleId, actionId, body = {}) {
+    const payload = Object.hasOwn(body || {}, "payload") ? body.payload : body;
+    const outcome = await moduleRegistry().runSettingsAction(moduleId, actionId, payload);
+    const ok = outcome.result?.ok !== false;
+    return {
+      statusCode: 200,
+      payload: {
+        ok,
+        module: outcome.module,
+        action: {
+          id: actionId,
+          result: outcome.result
+        }
+      }
+    };
   }
 
   function doubanCookiePayload() {
@@ -41,12 +69,30 @@ export function createAdminSettingsService({
     };
   }
 
+  function moduleRegistry() {
+    const registry = getModuleRegistry?.();
+    if (
+      !registry ||
+      typeof registry.settingsCatalog !== "function" ||
+      typeof registry.updateSettings !== "function" ||
+      typeof registry.runSettingsAction !== "function"
+    ) {
+      const error = new Error("模块设置注册表尚未初始化");
+      error.statusCode = 503;
+      throw error;
+    }
+    return registry;
+  }
+
   return {
     configPayload,
     doubanCookiePayload,
     doubanCookieTestErrorResponse,
+    runModuleSettingsActionResponse,
     saveDoubanCookiePayload,
+    settingsCatalogPayload,
     testDoubanCookieResponse,
-    updateConfigPayload
+    updateConfigPayload,
+    updateModuleSettingsPayload
   };
 }

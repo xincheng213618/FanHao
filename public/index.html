@@ -10,7 +10,7 @@
     <link rel="manifest" href="/manifest.webmanifest?v=20260701-gallery-merge-01" />
     <link rel="icon" href="/app-icon.svg?v=20260701-gallery-merge-01" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/app-icon.svg?v=20260701-gallery-merge-01" />
-    <link rel="stylesheet" href="/styles.css?v=20260712-fanhao-home-01" />
+    <link rel="stylesheet" href="/styles.css?v=20260712-module-settings-02" />
   </head>
   <body>
     <script>
@@ -78,7 +78,7 @@
               <input id="collectionToggle" type="checkbox" />
               <span>显示合集</span>
             </label>
-            <button class="filter-rule-button" id="compilationConfigButton" type="button">规则</button>
+            <button class="filter-rule-button" id="compilationConfigButton" type="button">设置</button>
           </div>
         </header>
 
@@ -165,11 +165,13 @@
           <p class="admin-status" id="adminStatus"></p>
         </section>
         <section class="admin-section">
-          <div class="admin-section-title">演员头像</div>
-          <label class="admin-field">
-            <span>本地头像目录（需包含 Filetree.json 与 Content）</span>
-            <input id="adminActorAvatarDataPath" type="text" spellcheck="false" placeholder="F:\movie\actors" />
-          </label>
+          <div class="admin-section-head">
+            <div>
+              <div class="admin-section-title">演员头像</div>
+              <p class="admin-section-subtitle">头像目录在资料库设置中统一维护，这里只执行扫描和导入。</p>
+            </div>
+            <a class="folder-button compact" href="/admin#settings">配置目录</a>
+          </div>
           <div class="admin-actions">
             <button class="folder-button" id="adminPreviewActorAvatars" type="button">预览候选</button>
             <button class="folder-button" id="adminImportActorAvatars" type="button">扫描本地头像</button>
@@ -186,23 +188,6 @@
             <button class="folder-button" id="adminGenerateCovers" type="button">批量补封面</button>
           </div>
           <p class="admin-status" id="adminCoverStatus"></p>
-        </section>
-        <section class="admin-section" id="adminCompilationSection">
-          <div class="admin-section-title">合集规则</div>
-          <div class="admin-config-grid">
-            <label class="admin-field">
-              <span>番号前缀</span>
-              <textarea id="adminCompilationPrefixes" rows="5" spellcheck="false"></textarea>
-            </label>
-            <label class="admin-field">
-              <span>标题关键词</span>
-              <textarea id="adminCompilationKeywords" rows="5" spellcheck="false"></textarea>
-            </label>
-          </div>
-          <div class="admin-actions">
-            <button class="folder-button" id="adminSaveCompilationConfig" type="button">保存合集规则</button>
-          </div>
-          <p class="admin-status" id="adminConfigStatus"></p>
         </section>
         <section class="admin-section">
           <div class="admin-section-title">任务日志</div>
@@ -241,11 +226,11 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        await import("/short-video-app.js?v=20260711-liked-count-race-106");
+        await import("/short-video-app.js?v=20260712-author-pagination-107");
       } else if (standaloneEntry) {
-        await import("/standalone-app.js?v=20260712-project-refactor-03");
+        await import("/standalone-app.js?v=20260712-module-settings-02");
       } else {
-        await import("/fanhao-app.js?v=20260712-project-refactor-03");
+        await import("/fanhao-app.js?v=20260712-module-settings-02");
       }
     </script>
   </body>

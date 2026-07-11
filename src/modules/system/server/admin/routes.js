@@ -46,6 +46,49 @@ export async function routeAdminApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/admin/settings" && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, await adminSettingsService.settingsCatalogPayload());
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "读取模块设置失败" });
+    }
+    return true;
+  }
+
+  const settingsActionMatch = /^\/api\/admin\/settings\/([^/]+)\/actions\/([^/]+)$/.exec(url.pathname);
+  if (settingsActionMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      const response = await adminSettingsService.runModuleSettingsActionResponse(
+        decodeURIComponent(settingsActionMatch[1]),
+        decodeURIComponent(settingsActionMatch[2]),
+        body
+      );
+      sendJson(res, response.statusCode, response.payload);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "执行模块设置操作失败" });
+    }
+    return true;
+  }
+
+  const moduleSettingsMatch = /^\/api\/admin\/settings\/([^/]+)$/.exec(url.pathname);
+  if (moduleSettingsMatch && (req.method === "PATCH" || req.method === "PUT")) {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      sendJson(
+        res,
+        200,
+        await adminSettingsService.updateModuleSettingsPayload(decodeURIComponent(moduleSettingsMatch[1]), body)
+      );
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "保存模块设置失败" });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/admin/config" && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
     sendJson(res, 200, adminSettingsService.configPayload());

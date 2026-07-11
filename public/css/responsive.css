@@ -262,6 +262,15 @@
     grid-template-columns: 1fr;
   }
 
+  .admin-settings-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-settings-modules {
+    position: static;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .admin-overview {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -380,6 +389,22 @@
 }
 
 @media (max-width: 720px) {
+  .admin-settings-intro,
+  .admin-settings-module-head,
+  .admin-settings-section-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .admin-settings-intro > strong {
+    align-self: start;
+  }
+
+  .admin-settings-modules,
+  .admin-settings-fields {
+    grid-template-columns: 1fr;
+  }
+
   .gallery-movie-explore {
     grid-template-columns: 1fr;
     gap: 22px;

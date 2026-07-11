@@ -4,17 +4,17 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#1f2937" />
-    <title>FanHao 运维后台</title>
+    <title>资料库设置与运维</title>
     <link rel="icon" href="/app-icon.svg?v=20260629-douban-cookie-01" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=20260710-web-css-modules-01" />
+    <link rel="stylesheet" href="/styles.css?v=20260712-module-settings-02" />
   </head>
   <body class="admin-page">
     <div class="admin-shell">
       <aside class="admin-side" aria-label="后台导航">
         <a class="admin-brand-link" href="/">
-          <span class="admin-brand-mark">FH</span>
+          <span class="admin-brand-mark">DB</span>
           <span>
-            <strong>FanHao Console</strong>
+            <strong>资料库控制台</strong>
             <small id="adminServiceMode">本机控制台</small>
           </span>
         </a>
@@ -36,9 +36,9 @@
             <span class="admin-nav-index">04</span>
             <span><strong>数据维护</strong><small>演员、封面、缓存</small></span>
           </button>
-          <button type="button" data-admin-nav="rules">
+          <button type="button" data-admin-nav="settings">
             <span class="admin-nav-index">05</span>
-            <span><strong>规则配置</strong><small>合集识别规则</small></span>
+            <span><strong>资料库设置</strong><small>按模块自动汇总</small></span>
           </button>
         </nav>
 
@@ -271,11 +271,9 @@
             <section class="admin-panel">
               <div class="admin-panel-head">
                 <h2>演员头像</h2>
+                <a href="#settings">配置目录</a>
               </div>
-              <label class="admin-field">
-                <span>本地头像目录</span>
-                <input id="adminActorAvatarDataPath" type="text" spellcheck="false" placeholder="F:\movie\actors" />
-              </label>
+              <p class="admin-inline-status">头像目录由“番号”模块提供，在资料库设置中统一维护；这里仅执行扫描和导入。</p>
               <div class="admin-actions">
                 <button class="folder-button" id="adminPreviewActorAvatars" type="button">预览候选</button>
                 <button class="folder-button" id="adminImportActorAvatars" type="button">扫描本地头像</button>
@@ -321,69 +319,30 @@
                   <strong id="adminImageReaderCacheLimit">-</strong>
                 </div>
               </div>
-              <label class="admin-field compact">
-                <span>缓存上限 GB</span>
-                <input id="adminImageReaderCacheLimitInput" type="number" min="0.125" step="0.25" />
-              </label>
               <div class="admin-actions">
-                <button class="folder-button" id="adminSaveImageReaderCacheLimit" type="button">保存上限</button>
                 <button class="folder-button subtle" id="adminCleanupImageReaderCache" type="button">清空阅读缓存</button>
+                <a class="folder-button subtle" href="#settings">调整缓存上限</a>
               </div>
               <p class="admin-status" id="adminImageReaderCacheStatus"></p>
             </section>
           </div>
         </section>
 
-        <section class="admin-view" id="adminViewRules" data-admin-view="rules">
-          <section class="admin-panel">
-            <div class="admin-panel-head">
-              <h2>合集规则</h2>
-              <span class="admin-badge">本地配置</span>
+        <section class="admin-view" id="adminViewSettings" data-admin-view="settings">
+          <section class="admin-settings-intro">
+            <div>
+              <div class="eyebrow">模块注册表</div>
+              <h2>资料库设置</h2>
+              <p>设置项由各模块自行声明，新增模块或设置分组后会自动出现在这里。</p>
             </div>
-            <div class="admin-config-grid">
-              <label class="admin-field">
-                <span>番号前缀</span>
-                <textarea id="adminCompilationPrefixes" rows="12" spellcheck="false"></textarea>
-              </label>
-              <label class="admin-field">
-                <span>标题关键词</span>
-                <textarea id="adminCompilationKeywords" rows="12" spellcheck="false"></textarea>
-              </label>
-            </div>
-            <div class="admin-actions">
-              <button class="folder-button" id="adminSaveCompilationConfig" type="button">保存合集规则</button>
-            </div>
-            <p class="admin-status" id="adminConfigStatus"></p>
+            <strong id="adminSettingsSummary">正在读取模块设置</strong>
           </section>
-
-          <section class="admin-panel">
-            <div class="admin-panel-head">
-              <h2>豆瓣 Cookie</h2>
-              <span class="admin-badge" id="adminDoubanCookieBadge">未检测</span>
-            </div>
-            <div class="admin-config-grid">
-              <label class="admin-field">
-                <span>Cookie</span>
-                <textarea id="adminDoubanCookieInput" rows="6" spellcheck="false" placeholder="从浏览器复制 douban.com 的 Cookie 字符串，保存后只存在本机 data/douban-cookie.txt"></textarea>
-              </label>
-              <div class="admin-field">
-                <span>状态</span>
-                <div class="admin-inline-card">
-                  <strong id="adminDoubanCookieState">-</strong>
-                  <small id="adminDoubanCookieMeta">不会回显 Cookie 内容</small>
-                </div>
-              </div>
-            </div>
-            <div class="admin-actions">
-              <button class="folder-button" id="adminSaveDoubanCookie" type="button">保存 Cookie</button>
-              <button class="folder-button subtle" id="adminTestDoubanCookie" type="button">测试详情页</button>
-            </div>
-            <p class="admin-status" id="adminDoubanCookieStatus"></p>
-          </section>
+          <div class="admin-settings-layout" id="adminSettingsRoot" aria-live="polite"></div>
+          <p class="admin-status" id="adminSettingsStatus"></p>
         </section>
       </main>
     </div>
 
-    <script src="/admin.js?v=20260629-douban-cookie-01" type="module"></script>
+    <script src="/admin.js?v=20260712-module-settings-02" type="module"></script>
   </body>
 </html>

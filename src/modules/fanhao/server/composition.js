@@ -15,6 +15,7 @@ export function createFanhaoDependencies(deps) {
       "sendJson",
       "userStateSummary"
     ]),
+    settings: pick(deps, ["appConfigService"]),
     userState: pick(deps, [
       "clampInteger",
       "favoriteStateService",

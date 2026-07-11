@@ -1,6 +1,9 @@
 import { routePhotosApi } from "./routes.js";
+import { createPhotosSettingsProvider } from "./settings.js";
 
 export function createPhotosRuntime(deps) {
+  const settings = createPhotosSettingsProvider(deps);
+
   async function routeApi(req, res, url) {
     return routePhotosApi(req, res, url, deps);
   }
@@ -27,5 +30,5 @@ export function createPhotosRuntime(deps) {
     return false;
   }
 
-  return { routeApi, routeMedia };
+  return { routeApi, routeMedia, settings };
 }

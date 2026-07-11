@@ -1,6 +1,9 @@
 import { routeMediaApi } from "./routes.js";
+import { createMediaSettingsProvider } from "./settings.js";
 
 export function createMediaRuntime(deps) {
+  const settings = createMediaSettingsProvider(deps);
+
   async function routeApi(req, res, url) {
     return routeMediaApi(req, res, url, deps);
   }
@@ -44,5 +47,5 @@ export function createMediaRuntime(deps) {
     return false;
   }
 
-  return { routeApi, routeMedia };
+  return { routeApi, routeMedia, settings };
 }

@@ -11,7 +11,7 @@ import {
   createWorkDetailPage,
   selectVisibleWorks
 } from "./modules/fanhao/index.js?v=20260712-fanhao-home-01";
-import { createAdminModal } from "./modules/system/admin-modal.js?v=20260710-module-registry-01";
+import { createAdminModal } from "./modules/system/admin-modal.js?v=20260712-module-settings-02";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260712-project-refactor-03";
 
 prepareAppShell();
@@ -70,18 +70,12 @@ const els = {
   adminRescanPerson: document.querySelector("#adminRescanPerson"),
   adminRefreshActor: document.querySelector("#adminRefreshActor"),
   adminRefreshRankings: document.querySelector("#adminRefreshRankings"),
-  adminActorAvatarDataPath: document.querySelector("#adminActorAvatarDataPath"),
   adminPreviewActorAvatars: document.querySelector("#adminPreviewActorAvatars"),
   adminImportActorAvatars: document.querySelector("#adminImportActorAvatars"),
   adminActorAvatarCandidates: document.querySelector("#adminActorAvatarCandidates"),
   adminCoverLimit: document.querySelector("#adminCoverLimit"),
   adminGenerateCovers: document.querySelector("#adminGenerateCovers"),
   adminCoverStatus: document.querySelector("#adminCoverStatus"),
-  adminCompilationPrefixes: document.querySelector("#adminCompilationPrefixes"),
-  adminCompilationKeywords: document.querySelector("#adminCompilationKeywords"),
-  adminSaveCompilationConfig: document.querySelector("#adminSaveCompilationConfig"),
-  adminCompilationSection: document.querySelector("#adminCompilationSection"),
-  adminConfigStatus: document.querySelector("#adminConfigStatus"),
   adminStatus: document.querySelector("#adminStatus"),
   adminTaskList: document.querySelector("#adminTaskList"),
   adminScriptCount: document.querySelector("#adminScriptCount"),
@@ -183,7 +177,6 @@ const adminModal = createAdminModal({
   formatBytes,
   formatDateTime,
   formatNumber,
-  linesFromTextarea,
   loadFavorites,
   loadHistory,
   loadImageLibrary: async () => {},
@@ -2233,7 +2226,6 @@ async function markWorkAsCompilation(work, button) {
       ...config,
       compilationPrefixes: [...config.compilationPrefixes, prefix]
     });
-    if (els.adminConfigStatus) els.adminConfigStatus.textContent = `已添加 ${prefix}`;
   } catch (error) {
     toastInline(button, error.message || "保存失败", original);
   } finally {
@@ -2432,7 +2424,6 @@ els.adminRefreshRankings?.addEventListener("click", adminModal.refreshRankings);
 els.adminPreviewActorAvatars?.addEventListener("click", adminModal.previewActorAvatarCandidates);
 els.adminImportActorAvatars?.addEventListener("click", adminModal.importActorAvatars);
 els.adminGenerateCovers?.addEventListener("click", adminModal.generateMissingCovers);
-els.adminSaveCompilationConfig?.addEventListener("click", adminModal.saveCompilationConfig);
 els.adminScriptForm?.addEventListener("submit", adminModal.runSelectedScript);
 els.adminRefreshScripts?.addEventListener("click", adminModal.loadScripts);
 els.adminScriptCategory?.addEventListener("change", () => {

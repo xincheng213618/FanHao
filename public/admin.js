@@ -1,7 +1,8 @@
+import { createSettingsController } from "./modules/system/settings-controller.js?v=20260712-module-settings-02";
+
 const state = {
   library: null,
   health: null,
-  config: { compilationPrefixes: [], compilationKeywords: [], actorAvatarDataPath: "", imageReaderCacheMaxBytes: 2 * 1024 * 1024 * 1024 },
   people: [],
   scripts: [],
   categories: [],
@@ -77,7 +78,6 @@ const els = {
   refreshActor: document.querySelector("#adminRefreshActor"),
   refreshRankings: document.querySelector("#adminRefreshRankings"),
   status: document.querySelector("#adminStatus"),
-  actorAvatarPath: document.querySelector("#adminActorAvatarDataPath"),
   previewActorAvatars: document.querySelector("#adminPreviewActorAvatars"),
   importActorAvatars: document.querySelector("#adminImportActorAvatars"),
   actorAvatarCandidates: document.querySelector("#adminActorAvatarCandidates"),
@@ -90,21 +90,11 @@ const els = {
   imageReaderCacheSize: document.querySelector("#adminImageReaderCacheSize"),
   imageReaderCacheFiles: document.querySelector("#adminImageReaderCacheFiles"),
   imageReaderCacheLimit: document.querySelector("#adminImageReaderCacheLimit"),
-  imageReaderCacheLimitInput: document.querySelector("#adminImageReaderCacheLimitInput"),
-  saveImageReaderCacheLimit: document.querySelector("#adminSaveImageReaderCacheLimit"),
   cleanupImageReaderCache: document.querySelector("#adminCleanupImageReaderCache"),
   imageReaderCacheStatus: document.querySelector("#adminImageReaderCacheStatus"),
-  compilationPrefixes: document.querySelector("#adminCompilationPrefixes"),
-  compilationKeywords: document.querySelector("#adminCompilationKeywords"),
-  saveCompilationConfig: document.querySelector("#adminSaveCompilationConfig"),
-  configStatus: document.querySelector("#adminConfigStatus"),
-  doubanCookieBadge: document.querySelector("#adminDoubanCookieBadge"),
-  doubanCookieInput: document.querySelector("#adminDoubanCookieInput"),
-  doubanCookieState: document.querySelector("#adminDoubanCookieState"),
-  doubanCookieMeta: document.querySelector("#adminDoubanCookieMeta"),
-  saveDoubanCookie: document.querySelector("#adminSaveDoubanCookie"),
-  testDoubanCookie: document.querySelector("#adminTestDoubanCookie"),
-  doubanCookieStatus: document.querySelector("#adminDoubanCookieStatus")
+  settingsRoot: document.querySelector("#adminSettingsRoot"),
+  settingsSummary: document.querySelector("#adminSettingsSummary"),
+  settingsStatus: document.querySelector("#adminSettingsStatus")
 };
 
 const formatter = new Intl.NumberFormat("zh-CN");
@@ -113,7 +103,7 @@ const VIEW_TITLES = {
   scripts: ["运维", "作业中心"],
   tasks: ["监控", "任务队列"],
   maintenance: ["资料库", "数据维护"],
-  rules: ["配置", "规则配置"]
+  settings: ["设置中心", "资料库设置"]
 };
 
 function formatNumber(value) {
@@ -189,36 +179,6 @@ function displayPersonName(person) {
   return [...new Set(names)].join(", ") || person.id;
 }
 
-function defaultUiConfig() {
-  return {
-    compilationPrefixes: ["OFJE", "THN", "THU"],
-    compilationKeywords: ["合集", "総集編", "総集", "コンプリート", "全タイトル", "ベスト盤"],
-    actorAvatarDataPath: "",
-    imageReaderCacheMaxBytes: 2 * 1024 * 1024 * 1024
-  };
-}
-
-function normalizeUiConfig(config = {}) {
-  const fallback = defaultUiConfig();
-  return {
-    compilationPrefixes: Array.isArray(config.compilationPrefixes) ? config.compilationPrefixes : fallback.compilationPrefixes,
-    compilationKeywords: Array.isArray(config.compilationKeywords) ? config.compilationKeywords : fallback.compilationKeywords,
-    actorAvatarDataPath: String(config.actorAvatarDataPath || ""),
-    imageReaderCacheMaxBytes: normalizeCacheBytes(config.imageReaderCacheMaxBytes, fallback.imageReaderCacheMaxBytes)
-  };
-}
-
-function normalizeCacheBytes(value, fallback) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  if (parsed <= 0) return 0;
-  return Math.max(128 * 1024 * 1024, Math.min(200 * 1024 * 1024 * 1024, Math.floor(parsed)));
-}
-
-function linesFromTextarea(value) {
-  return [...new Set(String(value || "").split(/\r?\n|,/).map((line) => line.trim()).filter(Boolean))];
-}
-
 async function api(path, options = {}) {
   const init = { ...options, headers: { ...(options.headers || {}) } };
   if (init.body && typeof init.body !== "string") {
@@ -233,6 +193,14 @@ async function api(path, options = {}) {
   }
   return payload;
 }
+
+const settingsController = createSettingsController({
+  api,
+  root: els.settingsRoot,
+  summary: els.settingsSummary,
+  status: els.settingsStatus,
+  onSaved: () => loadImageReaderCache({ quiet: true })
+});
 
 function setBusy(button, busy, text = "处理中") {
   if (!button) return;
@@ -250,12 +218,10 @@ async function loadLibrary() {
   const data = await api("/api/library");
   state.library = data;
   state.people = data.people || [];
-  state.config = normalizeUiConfig(data.uiConfig);
   if (!state.selectedPersonId || !state.people.some((person) => person.id === state.selectedPersonId)) {
     state.selectedPersonId = state.people[0]?.id || "";
   }
   renderPeopleSelect();
-  renderConfigFields();
   renderSystemSummary();
   renderScriptPanel();
 }
@@ -296,7 +262,7 @@ async function refreshTasks() {
 async function refreshAll() {
   setBusy(els.refreshAll, true, "刷新中");
   try {
-    await Promise.all([loadHealth(), loadLibrary(), loadScripts(), refreshTasks(), loadImageReaderCache({ quiet: true }), loadDoubanCookieStatus({ quiet: true })]);
+    await Promise.all([loadHealth(), loadLibrary(), loadScripts(), refreshTasks(), loadImageReaderCache({ quiet: true }), settingsController.load({ quiet: true })]);
     await refreshCoverCacheStatus({ quiet: true });
     renderLastRefresh();
   } finally {
@@ -386,17 +352,6 @@ function renderPeopleSelect() {
     els.personSelect.append(option);
   }
   els.personSelect.value = state.selectedPersonId;
-}
-
-function renderConfigFields() {
-  const config = normalizeUiConfig(state.config);
-  if (els.actorAvatarPath) els.actorAvatarPath.value = config.actorAvatarDataPath || "";
-  if (els.compilationPrefixes) els.compilationPrefixes.value = config.compilationPrefixes.join("\n");
-  if (els.compilationKeywords) els.compilationKeywords.value = config.compilationKeywords.join("\n");
-  if (els.imageReaderCacheLimitInput) {
-    const bytes = state.readerCache?.maxBytes ?? config.imageReaderCacheMaxBytes;
-    els.imageReaderCacheLimitInput.value = String((bytes / 1024 / 1024 / 1024).toFixed(2));
-  }
 }
 
 function renderScriptCategories() {
@@ -881,98 +836,12 @@ async function adminRefreshRankings() {
   }
 }
 
-async function saveCompilationConfig() {
-  const config = normalizeUiConfig({
-    ...state.config,
-    compilationPrefixes: linesFromTextarea(els.compilationPrefixes?.value),
-    compilationKeywords: linesFromTextarea(els.compilationKeywords?.value)
-  });
-  setBusy(els.saveCompilationConfig, true, "保存中");
-  setText(els.configStatus, "");
-  try {
-    const data = await api("/api/admin/config", { method: "PUT", body: { config } });
-    state.config = normalizeUiConfig(data.config);
-    renderConfigFields();
-    setText(els.configStatus, "已保存");
-  } catch (error) {
-    setText(els.configStatus, error.message || "保存失败");
-  } finally {
-    setBusy(els.saveCompilationConfig, false);
-  }
-}
-
-function renderDoubanCookieStatus(cookie = {}, test = null) {
-  const exists = Boolean(cookie.exists);
-  const ok = test?.ok;
-  const stateText = ok === true ? "详情页可访问" : exists ? "已保存 Cookie" : "未保存 Cookie";
-  const badgeText = ok === true ? "可用" : exists ? "已保存" : "未配置";
-  setText(els.doubanCookieState, stateText);
-  setText(els.doubanCookieBadge, badgeText);
-  if (els.doubanCookieBadge) {
-    els.doubanCookieBadge.className = `admin-badge${ok === true ? " success" : exists ? "" : " muted"}`;
-  }
-  const names = (cookie.cookieNames || []).join(" / ");
-  const meta = [
-    cookie.updatedAt ? `更新：${formatDateTime(cookie.updatedAt)}` : "",
-    cookie.bytes ? `大小：${formatBytes(cookie.bytes)}` : "",
-    names ? `包含：${names}` : "",
-    test?.title ? `测试：${test.title}` : ""
-  ].filter(Boolean);
-  setText(els.doubanCookieMeta, meta.join(" · ") || "不会回显 Cookie 内容");
-}
-
-async function loadDoubanCookieStatus(options = {}) {
-  try {
-    const data = await api("/api/admin/douban-cookie");
-    renderDoubanCookieStatus(data.cookie || {});
-    if (!options.quiet) setText(els.doubanCookieStatus, "状态已更新");
-  } catch (error) {
-    if (!options.quiet) setText(els.doubanCookieStatus, error.message || "读取 Cookie 状态失败");
-  }
-}
-
-async function saveDoubanCookie() {
-  const cookie = String(els.doubanCookieInput?.value || "").trim();
-  if (!cookie) {
-    setText(els.doubanCookieStatus, "先粘贴从浏览器复制的 douban.com Cookie");
-    return;
-  }
-  setBusy(els.saveDoubanCookie, true, "保存中");
-  setText(els.doubanCookieStatus, "正在保存 Cookie");
-  try {
-    const data = await api("/api/admin/douban-cookie", { method: "PUT", body: { cookie } });
-    renderDoubanCookieStatus(data.cookie || {});
-    if (els.doubanCookieInput) els.doubanCookieInput.value = "";
-    setText(els.doubanCookieStatus, "已保存，正在测试详情页");
-    await testDoubanCookie();
-  } catch (error) {
-    setText(els.doubanCookieStatus, error.message || "保存 Cookie 失败");
-  } finally {
-    setBusy(els.saveDoubanCookie, false);
-  }
-}
-
-async function testDoubanCookie() {
-  setBusy(els.testDoubanCookie, true, "测试中");
-  try {
-    const data = await api("/api/admin/douban-cookie/test", { method: "POST" });
-    renderDoubanCookieStatus(data.cookie || {}, data.test || null);
-    setText(els.doubanCookieStatus, data.test?.ok ? "测试通过，电视剧资料脚本会自动读取这个 Cookie。" : data.test?.error || "Cookie 不可用");
-  } catch (error) {
-    await loadDoubanCookieStatus({ quiet: true });
-    setText(els.doubanCookieStatus, error.message || "Cookie 测试失败，可能已过期。");
-  } finally {
-    setBusy(els.testDoubanCookie, false);
-  }
-}
-
 function renderImageReaderCache() {
   const cache = state.readerCache || {};
   setText(els.imageReaderCacheRoot, cache.root || "data\\image-reader-cache");
   setText(els.imageReaderCacheSize, formatBytes(cache.currentBytes || 0));
   setText(els.imageReaderCacheFiles, formatNumber(cache.fileCount || 0));
-  setText(els.imageReaderCacheLimit, formatBytes(cache.maxBytes ?? state.config.imageReaderCacheMaxBytes));
-  renderConfigFields();
+  setText(els.imageReaderCacheLimit, formatBytes(cache.maxBytes || 0));
 }
 
 async function loadImageReaderCache(options = {}) {
@@ -980,29 +849,10 @@ async function loadImageReaderCache(options = {}) {
   try {
     const data = await api("/api/image-reader/cache");
     state.readerCache = data.cache || null;
-    state.config = normalizeUiConfig({ ...state.config, ...(data.config || {}), ...(data.cache ? { imageReaderCacheMaxBytes: data.cache.maxBytes } : {}) });
     renderImageReaderCache();
     if (!options.quiet) setText(els.imageReaderCacheStatus, "缓存状态已更新");
   } catch (error) {
     if (!options.quiet) setText(els.imageReaderCacheStatus, error.message || "缓存状态读取失败");
-  }
-}
-
-async function saveImageReaderCacheLimit() {
-  const gb = Math.max(0, Number(els.imageReaderCacheLimitInput?.value || 0) || 0);
-  const bytes = gb * 1024 * 1024 * 1024;
-  const config = normalizeUiConfig({ ...state.config, imageReaderCacheMaxBytes: bytes });
-  setBusy(els.saveImageReaderCacheLimit, true, "保存中");
-  setText(els.imageReaderCacheStatus, "");
-  try {
-    const data = await api("/api/admin/config", { method: "PUT", body: { config } });
-    state.config = normalizeUiConfig(data.config);
-    await loadImageReaderCache({ quiet: true });
-    setText(els.imageReaderCacheStatus, "阅读缓存上限已保存");
-  } catch (error) {
-    setText(els.imageReaderCacheStatus, error.message || "保存失败");
-  } finally {
-    setBusy(els.saveImageReaderCacheLimit, false);
   }
 }
 
@@ -1059,14 +909,11 @@ async function generateMissingCovers() {
 }
 
 async function previewActorAvatars() {
-  const rootPath = String(els.actorAvatarPath?.value || "").trim();
   setBusy(els.previewActorAvatars, true, "读取中");
   setText(els.status, "正在读取头像候选");
   if (els.actorAvatarCandidates) els.actorAvatarCandidates.innerHTML = "";
   try {
-    const data = await api("/api/admin/actor-avatar-candidates", { method: "POST", body: { rootPath, limit: 60 } });
-    state.config = normalizeUiConfig(data.config);
-    renderConfigFields();
+    const data = await api("/api/admin/actor-avatar-candidates", { method: "POST", body: { limit: 60 } });
     renderActorAvatarCandidates(data.summary || {});
   } catch (error) {
     setText(els.status, error.message || "读取头像候选失败");
@@ -1076,13 +923,10 @@ async function previewActorAvatars() {
 }
 
 async function importActorAvatars() {
-  const rootPath = String(els.actorAvatarPath?.value || "").trim();
   setBusy(els.importActorAvatars, true, "扫描中");
   setText(els.status, "正在扫描本地演员头像");
   try {
-    const data = await api("/api/admin/import-actor-avatars", { method: "POST", body: { rootPath, replace: false } });
-    state.config = normalizeUiConfig(data.config);
-    renderConfigFields();
+    const data = await api("/api/admin/import-actor-avatars", { method: "POST", body: { replace: false } });
     await loadLibrary();
     const summary = data.summary || {};
     setText(els.status, `头像扫描完成：导入 ${formatNumber(summary.imported || 0)}，匹配 ${formatNumber(summary.matched || 0)}`);
@@ -1145,7 +989,7 @@ async function applyActorAvatarCandidate(personId, relPath, button) {
   try {
     await api("/api/admin/apply-actor-avatar-candidate", {
       method: "POST",
-      body: { rootPath: String(els.actorAvatarPath?.value || "").trim(), personId, relPath }
+      body: { personId, relPath }
     });
     await loadLibrary();
     await previewActorAvatars();
@@ -1157,7 +1001,8 @@ async function applyActorAvatarCandidate(personId, relPath, button) {
 }
 
 function setView(view, options = {}) {
-  state.activeView = VIEW_TITLES[view] ? view : "overview";
+  const normalizedView = view === "rules" ? "settings" : view;
+  state.activeView = VIEW_TITLES[normalizedView] ? normalizedView : "overview";
   const [eyebrow, title] = VIEW_TITLES[state.activeView];
   setText(els.viewEyebrow, eyebrow);
   setText(els.viewTitle, title);
@@ -1173,7 +1018,8 @@ function setView(view, options = {}) {
 }
 
 function viewFromHash() {
-  return window.location.hash.replace(/^#/, "") || "overview";
+  const view = window.location.hash.replace(/^#/, "") || "overview";
+  return view === "rules" ? "settings" : view;
 }
 
 function bindEvents() {
@@ -1215,11 +1061,7 @@ function bindEvents() {
   els.refreshCoverStatus?.addEventListener("click", refreshCoverCacheStatus);
   els.generateCovers?.addEventListener("click", generateMissingCovers);
   els.refreshImageReaderCache?.addEventListener("click", () => loadImageReaderCache());
-  els.saveImageReaderCacheLimit?.addEventListener("click", saveImageReaderCacheLimit);
   els.cleanupImageReaderCache?.addEventListener("click", cleanupImageReaderCache);
-  els.saveCompilationConfig?.addEventListener("click", saveCompilationConfig);
-  els.saveDoubanCookie?.addEventListener("click", saveDoubanCookie);
-  els.testDoubanCookie?.addEventListener("click", testDoubanCookie);
   for (const button of els.navButtons) {
     button.addEventListener("click", () => setView(button.dataset.adminNav, { pushHash: true }));
   }

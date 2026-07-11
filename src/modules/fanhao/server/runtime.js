@@ -1,11 +1,13 @@
 import { createCatalogRuntime } from "./catalog/runtime.js";
 import { createLibraryRuntime } from "./library/runtime.js";
+import { createFanhaoSettingsProvider } from "./settings/index.js";
 import { createUserStateRuntime } from "./user-state/runtime.js";
 import { createWorksRuntime } from "./works/runtime.js";
 
 export function createFanhaoRuntime(deps) {
   const catalog = createCatalogRuntime(deps.catalog);
   const library = createLibraryRuntime(deps.library);
+  const settings = createFanhaoSettingsProvider(deps.settings);
   const userState = createUserStateRuntime(deps.userState);
   const works = createWorksRuntime(deps.works);
 
@@ -19,6 +21,7 @@ export function createFanhaoRuntime(deps) {
 
   return {
     routeApi,
-    routeMedia: works.routeMedia
+    routeMedia: works.routeMedia,
+    settings
   };
 }

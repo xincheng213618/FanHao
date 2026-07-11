@@ -278,7 +278,7 @@ function createHost({ api, els, initialParams, pages, state }) {
 }
 
 async function createStandaloneAdmin({ api, els, page, state }) {
-  const { createAdminModal } = await import("../modules/system/admin-modal.js?v=20260712-project-refactor-01");
+  const { createAdminModal } = await import("../modules/system/admin-modal.js?v=20260712-module-settings-02");
   const admin = createAdminModal({
     api,
     displayPersonName: (person) => person?.actorProfile?.displayName || person?.name || "",
@@ -286,7 +286,6 @@ async function createStandaloneAdmin({ api, els, page, state }) {
     formatBytes,
     formatDateTime,
     formatNumber,
-    linesFromTextarea,
     loadFavorites: noopAsync,
     loadHistory: noopAsync,
     loadImageLibrary: (options) => state.activeView === "gallery" ? page.loadImageLibrary(options) : noopAsync(),
@@ -315,7 +314,6 @@ async function createStandaloneAdmin({ api, els, page, state }) {
   els.adminPreviewActorAvatars?.addEventListener("click", admin.previewActorAvatarCandidates);
   els.adminImportActorAvatars?.addEventListener("click", admin.importActorAvatars);
   els.adminGenerateCovers?.addEventListener("click", admin.generateMissingCovers);
-  els.adminSaveCompilationConfig?.addEventListener("click", admin.saveCompilationConfig);
   els.adminScriptForm?.addEventListener("submit", admin.runSelectedScript);
   els.adminRefreshScripts?.addEventListener("click", admin.loadScripts);
   els.adminScriptCategory?.addEventListener("change", () => {
@@ -398,10 +396,9 @@ function createElementIndex() {
   };
   const adminIds = [
     "adminBackdrop", "adminModal", "closeAdmin", "adminPersonSelect", "adminRescanPerson",
-    "adminRefreshActor", "adminRefreshRankings", "adminActorAvatarDataPath", "adminPreviewActorAvatars",
+    "adminRefreshActor", "adminRefreshRankings", "adminPreviewActorAvatars",
     "adminImportActorAvatars", "adminActorAvatarCandidates", "adminCoverLimit", "adminGenerateCovers",
-    "adminCoverStatus", "adminCompilationPrefixes", "adminCompilationKeywords", "adminSaveCompilationConfig",
-    "adminCompilationSection", "adminConfigStatus", "adminStatus", "adminTaskList", "adminScriptCount",
+    "adminCoverStatus", "adminStatus", "adminTaskList", "adminScriptCount",
     "adminRunningCount", "adminDoneCount", "adminErrorCount", "adminScriptCategory", "adminRefreshScripts",
     "adminScriptList", "adminScriptForm", "adminSelectedScriptCategory", "adminSelectedScriptTitle",
     "adminSelectedScriptRuntime", "adminSelectedScriptDescription", "adminScriptFields", "adminRunScript",
@@ -507,10 +504,6 @@ function normalizeCacheBytes(value, fallback) {
   if (!Number.isFinite(parsed)) return fallback;
   if (parsed <= 0) return 0;
   return Math.max(128 * 1024 * 1024, Math.min(200 * 1024 * 1024 * 1024, Math.floor(parsed)));
-}
-
-function linesFromTextarea(value) {
-  return String(value || "").split(/\r?\n|[,，、;]/).map((line) => line.trim()).filter(Boolean);
 }
 
 function renderFatalError(error) {

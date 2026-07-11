@@ -6,7 +6,6 @@ export function createAdminModal(deps) {
     formatBytes,
     formatDateTime,
     formatNumber,
-    linesFromTextarea,
     loadFavorites,
     loadHistory,
     loadImageLibrary,
@@ -33,9 +32,7 @@ function openAdminModal(options = {}) {
   if (state.accessMode !== "local") return;
   pendingAdminScriptDefaults = options.scriptDefaults || options.defaults || {};
   populateAdminPeople();
-  populateAdminConfig();
   els.adminStatus.textContent = "";
-  if (els.adminConfigStatus) els.adminConfigStatus.textContent = "";
   els.adminBackdrop.hidden = false;
   els.adminModal.classList.add("open");
   els.adminModal.setAttribute("aria-hidden", "false");
@@ -52,11 +49,6 @@ function openAdminModal(options = {}) {
     if (options.scriptId) {
       els.adminScriptForm?.scrollIntoView({ block: "start" });
       els.adminRunScript?.focus();
-      return;
-    }
-    if (options.section === "compilation") {
-      els.adminCompilationSection?.scrollIntoView({ block: "start" });
-      els.adminCompilationPrefixes?.focus();
       return;
     }
     els.adminPersonSelect?.focus();
@@ -87,19 +79,6 @@ function populateAdminPeople() {
 
 function adminPersonId() {
   return els.adminPersonSelect?.value || state.selectedPersonId || "";
-}
-
-function populateAdminConfig() {
-  const config = normalizeUiConfig(state.uiConfig);
-  if (els.adminActorAvatarDataPath) {
-    els.adminActorAvatarDataPath.value = config.actorAvatarDataPath || "";
-  }
-  if (els.adminCompilationPrefixes) {
-    els.adminCompilationPrefixes.value = config.compilationPrefixes.join("\n");
-  }
-  if (els.adminCompilationKeywords) {
-    els.adminCompilationKeywords.value = config.compilationKeywords.join("\n");
-  }
 }
 
 function setAdminBusy(button, busy, text = "处理中") {
@@ -455,36 +434,14 @@ async function adminRefreshRankings() {
   }
 }
 
-async function adminSaveCompilationConfig() {
-  const config = normalizeUiConfig({
-    ...state.uiConfig,
-    compilationPrefixes: linesFromTextarea(els.adminCompilationPrefixes?.value),
-    compilationKeywords: linesFromTextarea(els.adminCompilationKeywords?.value)
-  });
-  setAdminBusy(els.adminSaveCompilationConfig, true, "保存中");
-  if (els.adminConfigStatus) els.adminConfigStatus.textContent = "";
-  try {
-    await saveCompilationConfig(config);
-    populateAdminConfig();
-    if (els.adminConfigStatus) els.adminConfigStatus.textContent = "已保存";
-  } catch (error) {
-    if (els.adminConfigStatus) els.adminConfigStatus.textContent = error.message || "保存失败";
-  } finally {
-    setAdminBusy(els.adminSaveCompilationConfig, false);
-  }
-}
-
 async function adminImportActorAvatars() {
-  const rootPath = String(els.adminActorAvatarDataPath?.value || "").trim();
   setAdminBusy(els.adminImportActorAvatars, true, "扫描中");
   els.adminStatus.textContent = "正在扫描本地演员头像";
   try {
     const data = await api("/api/admin/import-actor-avatars", {
       method: "POST",
-      body: { rootPath, replace: false }
+      body: { replace: false }
     });
-    state.uiConfig = normalizeUiConfig(data.config);
-    populateAdminConfig();
     await loadLibrary();
     const summary = data.summary || {};
     const imported = formatNumber(summary.imported || 0);
@@ -499,17 +456,14 @@ async function adminImportActorAvatars() {
 }
 
 async function adminPreviewActorAvatarCandidates() {
-  const rootPath = String(els.adminActorAvatarDataPath?.value || "").trim();
   setAdminBusy(els.adminPreviewActorAvatars, true, "读取中");
   els.adminStatus.textContent = "正在读取头像候选";
   if (els.adminActorAvatarCandidates) els.adminActorAvatarCandidates.innerHTML = "";
   try {
     const data = await api("/api/admin/actor-avatar-candidates", {
       method: "POST",
-      body: { rootPath, limit: 40 }
+      body: { limit: 40 }
     });
-    state.uiConfig = normalizeUiConfig(data.config);
-    populateAdminConfig();
     renderActorAvatarCandidates(data.summary || {});
   } catch (error) {
     els.adminStatus.textContent = error.message || "读取头像候选失败";
@@ -588,15 +542,12 @@ function createActorAvatarCandidateRow(person, candidate) {
 }
 
 async function applyActorAvatarCandidate(personId, relPath, button) {
-  const rootPath = String(els.adminActorAvatarDataPath?.value || "").trim();
   setAdminBusy(button, true, "写入中");
   try {
     const data = await api("/api/admin/apply-actor-avatar-candidate", {
       method: "POST",
-      body: { rootPath, personId, relPath }
+      body: { personId, relPath }
     });
-    state.uiConfig = normalizeUiConfig(data.config);
-    populateAdminConfig();
     await loadLibrary();
     els.adminStatus.textContent = `已设置头像：${data.person?.actorProfile?.displayName || data.person?.name || personId}`;
     await adminPreviewActorAvatarCandidates();
@@ -647,11 +598,17 @@ async function adminGenerateMissingCovers() {
 }
 
 async function saveCompilationConfig(config) {
-  const data = await api("/api/admin/config", {
-    method: "PUT",
-    body: { config: normalizeUiConfig(config) }
+  const normalized = normalizeUiConfig(config);
+  const data = await api("/api/admin/settings/fanhao", {
+    method: "PATCH",
+    body: {
+      values: {
+        compilationPrefixes: normalized.compilationPrefixes,
+        compilationKeywords: normalized.compilationKeywords
+      }
+    }
   });
-  state.uiConfig = normalizeUiConfig(data.config);
+  state.uiConfig = normalizeUiConfig({ ...state.uiConfig, ...(data.module?.values || {}) });
   resetWorkPaging();
   if (state.activeView === "people" && !state.selectedPersonId) {
     renderPeopleIndexStats();
@@ -663,7 +620,7 @@ async function saveCompilationConfig(config) {
 }
 
 function openCompilationConfig() {
-  window.location.assign("/admin#rules");
+  window.location.assign("/admin#settings");
 }
 
 function openAdminPage() {
@@ -864,7 +821,6 @@ function taskStatusLabel(status) {
     renderScripts: renderAdminScripts,
     rescanSelectedPerson: adminRescanSelectedPerson,
     runSelectedScript: runSelectedAdminScript,
-    saveCompilationConfig: adminSaveCompilationConfig,
     saveCompilationConfigData: saveCompilationConfig,
     selectScript: selectAdminScript,
     setBusy: setAdminBusy,
