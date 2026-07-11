@@ -25,6 +25,16 @@ FanHao 把本地状态放在项目根下的 `data/` 目录，包含若干 SQLite
 
 > 日志不在 `data/` 下，而在项目根 `logs/`（`access.log`、`fanhao.out.log`、`fanhao.err.log`）。
 
+## 抖音采集与下载模块数据
+
+抖音下载管理器作为短视频模块的独立子目录，运行数据位于：
+
+- `src/modules/short-videos/download-manager/data/douyin_downloads.sqlite`：主页、采集链接、下载队列、任务和文件记录。
+- `src/modules/short-videos/download-manager/data/configs/`：下载器临时配置与 cookie 副本。
+- `src/modules/short-videos/download-manager/logs/`：采集、下载、sidecar 和守护日志。
+
+这些运行数据已被 Git 忽略。`data/short-videos.sqlite` 仍是 FanHao 展示层的短视频库，服务会从下载管理器数据库做增量同步；备份或迁移机器时，两份 SQLite 都应保留。
+
 ## 核心库（`fanhao-core-v2.sqlite`）
 
 设计中心是**作品番号（work code）**：`code` 为人可见番号（如 `IPX-247`），内部关系一律绑定整数 `id`。

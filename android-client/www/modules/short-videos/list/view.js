@@ -1,6 +1,6 @@
 import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=20260706-mobile-web-sync-01";
 import { formatCompact } from "../../../js/format.js";
-import { AUTHOR_INITIAL_COUNT, DEFAULT_SORT, SHORT_VIDEO_SORT_OPTIONS, initials, normalizeSort } from "../shared.js";
+import { DEFAULT_SORT, SHORT_VIDEO_SORT_OPTIONS, initials, normalizeSort } from "../shared.js";
 export function createShortVideoListView(context = {}) {
   const { els, getActiveUrl, listState, openSettings, showView } = context;
   const activeLibraryGroup = (...args) => context.activeLibraryGroup(...args);
@@ -227,13 +227,13 @@ export function createShortVideoListView(context = {}) {
       wrap.append(status);
       return wrap;
     }
-    const visibleCount = Math.min(listState.authorVisibleCount || AUTHOR_INITIAL_COUNT, authors.length);
-    for (const author of authors.slice(0, visibleCount)) wrap.append(renderAuthorIndexCard(author));
-    if (visibleCount < authors.length) {
+    for (const author of authors) wrap.append(renderAuthorIndexCard(author));
+    if (listState.data?.hasMore || listState.loadingMore) {
       const more = document.createElement("button");
       more.type = "button";
       more.className = "short-video-mobile-author-index-more";
-      more.textContent = "继续加载更多作者";
+      more.disabled = Boolean(listState.loadingMore);
+      more.textContent = listState.loadingMore ? "正在加载更多作者" : "继续加载更多作者";
       more.addEventListener("click", () => appendVisibleAuthors(true));
       wrap.append(more);
     }

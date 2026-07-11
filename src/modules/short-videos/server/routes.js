@@ -19,6 +19,15 @@ export async function routeShortVideoApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/short-videos/authors" && req.method === "GET") {
+    try {
+      sendJson(res, 200, shortVideoStore.listAuthors(url));
+    } catch (error) {
+      sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频作者读取失败") });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/short-videos/suggestions" && req.method === "GET") {
     try {
       sendJson(res, 200, shortVideoStore.searchSuggestions(url));

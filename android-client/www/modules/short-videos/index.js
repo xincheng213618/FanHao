@@ -1,6 +1,6 @@
 import { createShortVideoApi } from "./api.js?v=20260711-short-video-cache-09";
-import { createShortVideoListController } from "./list/controller.js?v=20260712-native-short-video-only-02";
-import { createShortVideoListView } from "./list/view.js?v=20260712-native-short-video-only-02";
+import { createShortVideoListController } from "./list/controller.js?v=20260712-author-pagination-03";
+import { createShortVideoListView } from "./list/view.js?v=20260712-author-pagination-03";
 import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260712-native-short-video-only-02";
 import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=20260712-short-video-search-page-07";
 import { createShortVideoIcons } from "./ui/icons.js?v=20260711-short-video-cache-08";
@@ -17,7 +17,6 @@ export function createShortVideoViews(deps) {
     loadingMore: false,
     status: "",
     searchPage: false,
-    authorVisibleCount: 24,
     allowLoadMore: false
   };
   const context = { ...deps, listState };

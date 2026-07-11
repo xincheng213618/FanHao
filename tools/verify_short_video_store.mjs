@@ -43,6 +43,18 @@ try {
     searchParams: new URLSearchParams("source=liked&limit=10&stats=0&facets=0")
   });
   assert.equal(scannedLikes.total, 0, "filesystem location must not imply a liked relationship");
+  const firstAuthorPage = store.listAuthors({
+    searchParams: new URLSearchParams("limit=1&offset=0")
+  });
+  assert.equal(firstAuthorPage.total, 1, "author pagination should report the complete matching author count");
+  assert.equal(firstAuthorPage.authors.length, 1, "author pagination should return only the requested page");
+  assert.equal(firstAuthorPage.authors[0]?.name, "测试作者");
+  assert.equal(firstAuthorPage.hasMore, false);
+  const missingAuthorPage = store.listAuthors({
+    searchParams: new URLSearchParams("q=不存在的作者&limit=1")
+  });
+  assert.equal(missingAuthorPage.total, 0, "author pagination should filter by author name or secUid");
+  assert.deepEqual(missingAuthorPage.authors, []);
 
   fs.mkdirSync(liveDir, { recursive: true });
   const liveImage = path.join(liveDir, `live_${liveId}_1.jpg`);

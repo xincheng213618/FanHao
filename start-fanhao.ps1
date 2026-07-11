@@ -1,7 +1,10 @@
 param(
   [int]$Port = 29998,
   [string]$HostName = "0.0.0.0",
+  [int]$DownloadManagerPort = 8765,
   [switch]$Restart,
+  [switch]$RestartDownloadManager,
+  [switch]$SkipDownloadManager,
   [switch]$Foreground
 )
 
@@ -9,6 +12,7 @@ $ErrorActionPreference = "Stop"
 
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ServerFile = Join-Path $ProjectDir "server.js"
+$DownloadManagerScript = Join-Path $ProjectDir "src\modules\short-videos\download-manager\run.ps1"
 $LogDir = Join-Path $ProjectDir "logs"
 $OutLog = Join-Path $LogDir "fanhao.out.log"
 $ErrLog = Join-Path $LogDir "fanhao.err.log"
@@ -22,6 +26,23 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+if (-not $SkipDownloadManager) {
+  if (-not (Test-Path -LiteralPath $DownloadManagerScript)) {
+    throw "Douyin Download Manager launcher not found: $DownloadManagerScript"
+  }
+  $downloadManagerArgs = @(
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", $DownloadManagerScript,
+    "-Port", [string]$DownloadManagerPort
+  )
+  if ($RestartDownloadManager) { $downloadManagerArgs += "-Restart" }
+  & powershell.exe @downloadManagerArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "Douyin Download Manager failed to start. Exit code: $LASTEXITCODE"
+  }
+}
 
 function Test-FanhaoHealth {
   param([int]$HealthPort)

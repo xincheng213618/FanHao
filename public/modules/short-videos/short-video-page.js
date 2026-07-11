@@ -73,8 +73,7 @@ export function createShortVideoPage(deps) {
   const SV_ROW_GAP = 14;
   const SV_BUFFER_ROWS = 12;
   const SV_APPEND_LOOKAHEAD_ROWS = 18;
-  const AUTHOR_INITIAL_COUNT = 240;
-  const AUTHOR_APPEND_COUNT = 240;
+  const AUTHOR_PAGE_SIZE = 96;
   const AUTHOR_APPEND_LOOKAHEAD = 900;
   const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
   let svCols = 0;
@@ -147,14 +146,15 @@ export function createShortVideoPage(deps) {
     state.shortVideo.data = state.shortVideo.data || null;
     state.shortVideo.summary = state.shortVideo.summary || null;
     state.shortVideo.authors = Array.isArray(state.shortVideo.authors) ? state.shortVideo.authors : [];
+    state.shortVideo.authorTotal = Math.max(0, Number(state.shortVideo.authorTotal || 0));
+    state.shortVideo.authorHasMore = Boolean(state.shortVideo.authorHasMore);
+    state.shortVideo.authorLoadingMore = Boolean(state.shortVideo.authorLoadingMore);
     state.shortVideo.authorDetail = state.shortVideo.authorDetail && typeof state.shortVideo.authorDetail === "object"
       ? state.shortVideo.authorDetail
       : null;
     state.shortVideo.authorVideo = state.shortVideo.authorVideo && typeof state.shortVideo.authorVideo === "object"
       ? state.shortVideo.authorVideo
       : null;
-    state.shortVideo.facetsLoaded = Boolean(state.shortVideo.facetsLoaded);
-    state.shortVideo.facetsLoading = Boolean(state.shortVideo.facetsLoading);
     state.shortVideo.summaryLoading = Boolean(state.shortVideo.summaryLoading);
     state.shortVideo.current = state.shortVideo.current || null;
     state.shortVideo.prevVideo = state.shortVideo.prevVideo || null;
@@ -178,7 +178,6 @@ export function createShortVideoPage(deps) {
     state.shortVideo.loading = Boolean(state.shortVideo.loading);
     state.shortVideo.loadingMore = Boolean(state.shortVideo.loadingMore);
     state.shortVideo.status = state.shortVideo.status || "";
-    state.shortVideo.authorVisibleCount = clampNumber(state.shortVideo.authorVisibleCount, AUTHOR_INITIAL_COUNT, AUTHOR_INITIAL_COUNT, 100000);
     state.shortVideo.deleteMode = Boolean(state.shortVideo.deleteMode);
     if (!(state.shortVideo.deleteSelection instanceof Set)) {
       state.shortVideo.deleteSelection = new Set(Array.isArray(state.shortVideo.deleteSelection) ? state.shortVideo.deleteSelection : []);
@@ -259,25 +258,56 @@ export function createShortVideoPage(deps) {
 
   async function loadVideos(options = {}) {
     ensureState();
-    const requestId = ++shortVideoListRequestId;
     const append = Boolean(options.append);
     if (isShortVideoAuthorIndexPage()) {
-      if (append) return;
+      if (append && (state.shortVideo.loading || state.shortVideo.authorLoadingMore || !state.shortVideo.authorHasMore)) return;
+      const requestId = ++shortVideoListRequestId;
       state.shortVideo.current = null;
       state.shortVideo.prevVideo = null;
       state.shortVideo.nextVideo = null;
       state.shortVideo.prevId = "";
       state.shortVideo.nextId = "";
       state.shortVideo.data = null;
-      state.shortVideo.loading = !state.shortVideo.facetsLoaded;
-      state.shortVideo.status = state.shortVideo.loading ? "正在读取作者" : "";
+      if (append) {
+        state.shortVideo.authorLoadingMore = true;
+      } else {
+        state.shortVideo.loading = true;
+        state.shortVideo.authorLoadingMore = false;
+        state.shortVideo.authors = [];
+        state.shortVideo.authorTotal = 0;
+        state.shortVideo.authorHasMore = false;
+      }
+      state.shortVideo.status = append ? "" : "正在读取作者";
       renderView();
-      await loadShortVideoFacets();
+      const params = new URLSearchParams({
+        limit: String(AUTHOR_PAGE_SIZE),
+        offset: String(append ? state.shortVideo.authors.length : 0)
+      });
+      if (state.shortVideo.query) params.set("q", state.shortVideo.query);
+      const data = await api(`/api/short-videos/authors?${params}`);
       if (requestId !== shortVideoListRequestId) return;
+      const nextAuthors = Array.isArray(data.authors) ? data.authors : [];
+      if (append) {
+        const merged = [...state.shortVideo.authors];
+        const seen = new Set(merged.map((author) => shortVideoAuthorFilterValue(author)).filter(Boolean));
+        for (const author of nextAuthors) {
+          const key = shortVideoAuthorFilterValue(author);
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          merged.push(author);
+        }
+        state.shortVideo.authors = merged;
+      } else {
+        state.shortVideo.authors = nextAuthors;
+      }
+      state.shortVideo.authorTotal = Math.max(0, Number(data.total || 0));
+      state.shortVideo.authorHasMore = Boolean(data.hasMore);
       state.shortVideo.loading = false;
+      state.shortVideo.authorLoadingMore = false;
       state.shortVideo.status = "";
       renderStats();
       renderView();
+      loadShortVideoSummary().catch(handleSummaryLoadError);
       if (!options.skipRoute) {
         const writer = options.replaceRoute ? replaceRoute : pushRoute;
         writer({ view: "shortVideos", shortVideoId: "" });
@@ -285,6 +315,7 @@ export function createShortVideoPage(deps) {
       return;
     }
     if (append && (state.shortVideo.loading || state.shortVideo.loadingMore || !state.shortVideo.data?.hasMore)) return;
+    const requestId = ++shortVideoListRequestId;
     if (append) {
       state.shortVideo.loadingMore = true;
     } else {
@@ -374,29 +405,6 @@ export function createShortVideoPage(deps) {
       renderStats();
     } finally {
       state.shortVideo.summaryLoading = false;
-    }
-  }
-
-  async function loadShortVideoFacets(options = {}) {
-    ensureState();
-    if (state.shortVideo.facetsLoading) return;
-    if (state.shortVideo.facetsLoaded && !options.force) return;
-    state.shortVideo.facetsLoading = true;
-    try {
-      const data = await api("/api/short-videos/facets");
-      state.shortVideo.summary = data.summary || state.shortVideo.summary;
-      state.shortVideo.authors = Array.isArray(data.authors) ? data.authors : state.shortVideo.authors;
-      if (state.shortVideo.data) {
-        state.shortVideo.data = {
-          ...state.shortVideo.data,
-          summary: state.shortVideo.summary,
-          authors: state.shortVideo.authors
-        };
-      }
-      state.shortVideo.facetsLoaded = true;
-      renderStats();
-    } finally {
-      state.shortVideo.facetsLoading = false;
     }
   }
 
@@ -773,7 +781,9 @@ export function createShortVideoPage(deps) {
           state.shortVideo.author = "all";
           state.shortVideo.query = "";
           state.shortVideo.media = "all";
-          state.shortVideo.authorVisibleCount = AUTHOR_INITIAL_COUNT;
+          state.shortVideo.authors = [];
+          state.shortVideo.authorTotal = 0;
+          state.shortVideo.authorHasMore = false;
         } else {
           state.shortVideo.author = "all";
         }
@@ -796,13 +806,13 @@ export function createShortVideoPage(deps) {
     const total = document.createElement("div");
     total.className = "short-video-home-total";
     if (isShortVideoAuthorIndexPage()) {
-      const authors = sortedShortVideoAuthors();
-      const visibleCount = Math.min(state.shortVideo.authorVisibleCount || AUTHOR_INITIAL_COUNT, authors.length);
+      const loadedCount = state.shortVideo.authors.length;
+      const authorTotal = state.shortVideo.authorTotal;
       total.textContent = state.shortVideo.loading
         ? "正在读取作者"
-        : visibleCount < authors.length
-          ? `已显示 ${formatNumber(visibleCount)} / ${formatNumber(authors.length)} 位作者`
-          : `${formatNumber(authors.length || 0)} 位作者`;
+        : state.shortVideo.authorHasMore
+          ? `已显示 ${formatNumber(loadedCount)} / ${formatNumber(authorTotal)} 位作者`
+          : `${formatNumber(authorTotal || loadedCount)} 位作者`;
     } else if (isShortVideoAuthorDetailPage()) {
       total.textContent = `${formatNumber(data.total || 0)} 条作品`;
     } else if (
@@ -824,6 +834,13 @@ export function createShortVideoPage(deps) {
     wrap.append(renderShortVideoSortControl());
     const selection = shortVideoDeleteSelection();
     if (!state.shortVideo.deleteMode) {
+      const collect = document.createElement("button");
+      collect.type = "button";
+      collect.className = "short-video-delete-tool";
+      collect.append(createIcon("external"), document.createTextNode("采集管理"));
+      collect.addEventListener("click", () => {
+        window.open("http://localhost:8765/#home", "_blank", "noopener,noreferrer");
+      });
       const start = document.createElement("button");
       start.type = "button";
       start.className = "short-video-delete-tool";
@@ -832,7 +849,7 @@ export function createShortVideoPage(deps) {
         state.shortVideo.deleteMode = true;
         renderView();
       });
-      wrap.append(start);
+      wrap.append(collect, start);
       return wrap;
     }
     const loadedIds = shortVideosWithCovers(data.videos || []).map((video) => String(video.id || "")).filter(Boolean);
@@ -1147,8 +1164,6 @@ export function createShortVideoPage(deps) {
 
   function renderAuthorIndex() {
     const authors = sortedShortVideoAuthors();
-    const visibleCount = Math.min(state.shortVideo.authorVisibleCount || AUTHOR_INITIAL_COUNT, authors.length);
-    const visibleAuthors = authors.slice(0, visibleCount);
     const wrap = document.createElement("div");
     wrap.className = "short-video-author-index";
     if (state.shortVideo.loading && !authors.length) {
@@ -1165,13 +1180,13 @@ export function createShortVideoPage(deps) {
       wrap.append(status);
       return wrap;
     }
-    for (const author of visibleAuthors) {
+    for (const author of authors) {
       wrap.append(renderAuthorIndexCard(author));
     }
-    if (visibleCount < authors.length) {
+    if (state.shortVideo.authorHasMore || state.shortVideo.authorLoadingMore) {
       const status = document.createElement("div");
       status.className = "short-video-author-index-status short-video-author-index-more";
-      status.textContent = "继续下滑加载更多作者";
+      status.textContent = state.shortVideo.authorLoadingMore ? "正在加载更多作者" : "继续下滑加载更多作者";
       wrap.append(status);
     }
     return wrap;
@@ -1185,16 +1200,13 @@ export function createShortVideoPage(deps) {
 
   function appendVisibleAuthorsIfNeeded(force = false) {
     if (state.activeView !== "shortVideos" || state.shortVideo?.current || !isShortVideoAuthorIndexPage()) return;
-    const total = sortedShortVideoAuthors().length;
-    const current = state.shortVideo.authorVisibleCount || AUTHOR_INITIAL_COUNT;
-    if (!total || current >= total) return;
+    if (!state.shortVideo.authorHasMore || state.shortVideo.loading || state.shortVideo.authorLoadingMore) return;
     if (!force) {
       const doc = document.documentElement;
       const bottomDistance = Math.max(0, (doc.scrollHeight || 0) - ((window.scrollY || 0) + (window.innerHeight || 0)));
       if (bottomDistance > AUTHOR_APPEND_LOOKAHEAD) return;
     }
-    state.shortVideo.authorVisibleCount = Math.min(total, current + AUTHOR_APPEND_COUNT);
-    renderView();
+    loadVideos({ append: true, skipRoute: true }).catch(showError);
   }
 
   function isShortVideoAuthorIndexPage() {
@@ -9044,20 +9056,9 @@ export function createShortVideoPage(deps) {
   function showError(error) {
     state.shortVideo.loading = false;
     state.shortVideo.loadingMore = false;
+    state.shortVideo.authorLoadingMore = false;
     state.shortVideo.status = shortVideoFriendlyError(error, "短视频读取失败");
     renderView();
-  }
-
-  function handleFacetLoadError(error) {
-    state.shortVideo.facetsLoaded = false;
-    state.shortVideo.facetsLoading = false;
-    const hasVisibleContent = Boolean(state.shortVideo.current || state.shortVideo.data?.videos?.length);
-    if (!hasVisibleContent) {
-      state.shortVideo.status = shortVideoFriendlyError(error, "短视频筛选暂时不可用");
-      renderView();
-      return;
-    }
-    renderStats();
   }
 
   function handleSummaryLoadError(error) {

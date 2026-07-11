@@ -351,6 +351,28 @@ export function createShortVideoStore(options = {}) {
     };
   }
 
+  function listAuthors(urlOrOptions = {}) {
+    const params = urlOrOptions?.searchParams || new URLSearchParams();
+    const query = String(params.get("q") || params.get("query") || "").trim().slice(0, 120);
+    const limit = clampInt(params.get("limit"), 96, 1, 240);
+    const offset = clampInt(params.get("offset"), 0, 0, 1000000);
+    const normalizedQuery = query.toLocaleLowerCase("zh-CN");
+    const database = databaseOrOpen();
+    const allAuthors = cachedAuthorFacet(database);
+    const matchedAuthors = normalizedQuery
+      ? allAuthors.filter((author) => `${author.name || ""} ${author.secUid || ""}`.toLocaleLowerCase("zh-CN").includes(normalizedQuery))
+      : allAuthors;
+    const authors = matchedAuthors.slice(offset, offset + limit);
+    return {
+      query,
+      total: matchedAuthors.length,
+      limit,
+      offset,
+      hasMore: offset + authors.length < matchedAuthors.length,
+      authors
+    };
+  }
+
   function searchSuggestions(urlOrOptions = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const query = String(params.get("q") || params.get("search") || "").trim().slice(0, 120);
@@ -1952,6 +1974,7 @@ function summary() {
     facets,
     galleryFile,
     importDownloadManagerDb,
+    listAuthors,
     listVideos,
     localComments,
     createLocalComment,

@@ -45,6 +45,7 @@ const androidListSource = fs.readFileSync(path.join(moduleDir, "list", "view.js"
 const androidListControllerSource = fs.readFileSync(path.join(moduleDir, "list", "controller.js"), "utf8");
 const androidNativeFeedSource = fs.readFileSync(path.join(moduleDir, "player", "native-feed.js"), "utf8");
 const androidPlayerPluginSource = fs.readFileSync(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "FanHaoPlayerPlugin.java"), "utf8");
+const androidNativePlayerSource = fs.readFileSync(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoActivity.java"), "utf8");
 assert(androidEntrySource.includes('view: "shortVideoSearch"'), "Android short-video search must use a dedicated route");
 assert(androidEntrySource.includes("short-video-chrome-row"), "Android short-video chrome must keep search and groups in one compact row");
 assert(!androidEntrySource.includes("short-video-chrome-sort"), "Android short-video chrome must not reserve a separate sorting tag");
@@ -63,6 +64,8 @@ assert(androidListSource.includes("openShortVideoAuthor(author)"), "Android auth
 assert(androidListControllerSource.includes("openAuthorPanel: true"), "Android author index must request the native author homepage");
 assert(androidNativeFeedSource.includes("openAuthorPanel: Boolean(options.openAuthorPanel)"), "Android native feed bridge must forward the author homepage request");
 assert(androidPlayerPluginSource.includes("EXTRA_OPEN_AUTHOR_PANEL") && androidPlayerPluginSource.includes('call.getBoolean("openAuthorPanel", false)'), "Android player plugin must pass the native author homepage flag");
+assert(androidNativePlayerSource.includes("grid.setPadding(gridHorizontalPadding, dp(6), gridHorizontalPadding, dp(8))"), "Android native author works grid must keep equal horizontal padding");
+assert(androidNativePlayerSource.includes("(screenWidth - gridHorizontalPadding * 2) / 3"), "Android native author works tiles must share the centered grid width");
 
 const views = createShortVideoViews({
   els: {},

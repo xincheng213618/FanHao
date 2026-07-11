@@ -1,6 +1,6 @@
 import { createApiClient } from "./js/api.js?v=20260701-gallery-merge-01";
 import { normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260712-project-refactor-03";
-import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20260711-liked-count-race-106";
+import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20260712-author-pagination-107";
 
 const formatter = new Intl.NumberFormat("zh-CN");
 const initialParams = new URLSearchParams(window.location.search);
@@ -143,7 +143,7 @@ async function applyShortVideoRoute(route) {
     shortVideoPage.applyRouteState(next);
     shortVideoPage.enter({
       skipRoute: true,
-      deferInitialLoad: Boolean(next.shortVideoId || next.shortVideoAuthorPage)
+      deferInitialLoad: true
     });
     await shortVideoPage.openRouteTarget(next);
   } finally {

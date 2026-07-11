@@ -35,8 +35,8 @@ FanHao 服务端通过**环境变量**控制资料库根目录、端口、外部
 | `FANHAO_MOVIE_ROOTS` | `Z:\` | 图库中的「电影」媒体源。 |
 | `FANHAO_TV_ROOTS` | `Y:\` | 图库中的「电视剧」媒体源。 |
 | `FANHAO_SHORT_VIDEO_ROOTS` / `FANHAO_DOUYIN_LIKES_ROOT` | `~/Downloads/likes/MS4wLjABAAAA...` | 抖音点赞短视频根目录。 |
-| `FANHAO_DOUYIN_DOWNLOAD_MANAGER_DB` | `~/Desktop/Tool/douyin-download-manager/data/douyin_downloads.sqlite` | 抖音下载管理器数据库路径（短视频模块可选同步来源）。 |
-| `FANHAO_DOUYIN_SYNC_MS` | `300000`（5 分钟） | 短视频从下载管理器同步的轮询间隔。 |
+| `FANHAO_DOUYIN_DOWNLOAD_MANAGER_DB` | `src/modules/short-videos/download-manager/data/douyin_downloads.sqlite` | 内置抖音下载管理器数据库路径；仅在需要改用外部库时覆盖。 |
+| `FANHAO_DOUYIN_SYNC_MS` | `60000`（1 分钟） | 短视频从下载管理器同步的轮询间隔。 |
 | `FANHAO_MUSIC_ROOTS` / `FANHAO_MUSIC_ROOT` | `D:\Music` | 音乐模块扫描根目录，多个根用分号或逗号分隔。 |
 
 > 解析逻辑见 `src/platform/server/root-config.js`。环境变量优先于硬编码默认值；未设置时回退到默认盘符。
@@ -81,3 +81,5 @@ npm start
 ```
 
 或在 `start-fanhao.ps1 -Port 29998` 之外，直接用 `node server.js` 并在环境变量中覆盖上述任意项。
+
+`start-fanhao.ps1` 默认也会启动内置抖音下载管理器（8765 端口）。可用 `-DownloadManagerPort` 改端口，`-RestartDownloadManager` 显式重启它，或用 `-SkipDownloadManager` 只启动 FanHao 主服务。

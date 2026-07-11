@@ -1,4 +1,4 @@
-import { createShortVideoViews } from "./index.js?v=20260712-native-short-video-only-02";
+import { createShortVideoViews } from "./index.js?v=20260712-author-pagination-03";
 import { DEFAULT_SORT, SHORT_VIDEO_SORT_OPTIONS, normalizeSort } from "./shared.js?v=20260712-short-video-search-page-07";
 
 export function createAndroidModule({ host }) {

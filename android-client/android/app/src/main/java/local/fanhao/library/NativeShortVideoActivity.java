@@ -4001,9 +4001,10 @@ public class NativeShortVideoActivity extends Activity {
     wrap.setOrientation(LinearLayout.VERTICAL);
     GridLayout grid = new GridLayout(this);
     grid.setColumnCount(3);
-    grid.setPadding(0, dp(6), 0, dp(8));
+    int gridHorizontalPadding = dp(17);
+    grid.setPadding(gridHorizontalPadding, dp(6), gridHorizontalPadding, dp(8));
     int screenWidth = getResources().getDisplayMetrics().widthPixels;
-    int tileWidth = Math.max(dp(92), (screenWidth - dp(34)) / 3);
+    int tileWidth = Math.max(dp(92), (screenWidth - gridHorizontalPadding * 2) / 3);
     if (page.items.isEmpty()) {
       TextView empty = emptyPanel("没有本地作品");
       wrap.addView(empty, new LinearLayout.LayoutParams(

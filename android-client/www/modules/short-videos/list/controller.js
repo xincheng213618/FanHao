@@ -29,7 +29,6 @@ export function createShortVideoListController(context = {}) {
     if (scopeChanged) {
       listState.data = null;
       listState.status = "";
-      listState.authorVisibleCount = AUTHOR_INITIAL_COUNT;
       listState.allowLoadMore = false;
     }
   }
@@ -39,14 +38,20 @@ export function createShortVideoListController(context = {}) {
     if (append && (listState.loading || listState.loadingMore || !listState.data?.hasMore)) return;
     const requestUrl = getActiveUrl();
     const params = new URLSearchParams();
+    const authorIndex = isAuthorIndexView();
     if (listState.query) params.set("q", listState.query);
-    if (listState.author && listState.author !== "all") params.set("author", listState.author);
-    params.set("source", shortVideoApiSource());
-    params.set("sort", listState.sort || DEFAULT_SORT);
-    params.set("limit", String(isAuthorIndexView() ? 1 : DEFAULT_LIMIT));
-    params.set("facets", isAuthorIndexView() ? "1" : "0");
-    params.set("stats", "0");
-    if (append) params.set("offset", String(listState.data?.videos?.length || 0));
+    if (authorIndex) {
+      params.set("limit", String(append ? AUTHOR_APPEND_COUNT : AUTHOR_INITIAL_COUNT));
+      params.set("offset", String(append ? listState.data?.authors?.length || 0 : 0));
+    } else {
+      if (listState.author && listState.author !== "all") params.set("author", listState.author);
+      params.set("source", shortVideoApiSource());
+      params.set("sort", listState.sort || DEFAULT_SORT);
+      params.set("limit", String(DEFAULT_LIMIT));
+      params.set("facets", "0");
+      params.set("stats", "0");
+      if (append) params.set("offset", String(listState.data?.videos?.length || 0));
+    }
     if (append) {
       listState.loadingMore = true;
     } else {
@@ -56,13 +61,24 @@ export function createShortVideoListController(context = {}) {
     }
     renderListShell();
     try {
-      const data = await api.fetchCached(requestUrl, `/api/short-videos?${params}`, {
+      const endpoint = authorIndex ? "/api/short-videos/authors" : "/api/short-videos";
+      const data = await api.fetchCached(requestUrl, `${endpoint}?${params}`, {
         timeoutMs: 16000,
         cacheMaxAgeMs: append ? 2 * 60 * 1000 : 5 * 60 * 1000,
         staleWhileRevalidate: !append
       });
       if (renderGuard && !renderGuard()) return;
-      if (append && listState.data) {
+      if (append && listState.data && authorIndex) {
+        const merged = [...(listState.data.authors || [])];
+        const seen = new Set(merged.map((author) => shortVideoAuthorFilterValue(author)).filter(Boolean));
+        for (const author of data.authors || []) {
+          const key = shortVideoAuthorFilterValue(author);
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          merged.push(author);
+        }
+        listState.data = { ...data, authors: merged, offset: 0 };
+      } else if (append && listState.data) {
         const seen = new Set((listState.data.videos || []).map((video) => video.id));
         const merged = [...(listState.data.videos || [])];
         for (const video of data.videos || []) {
@@ -77,7 +93,7 @@ export function createShortVideoListController(context = {}) {
       if (!isAuthorIndexView()) listState.source = normalizeSource(data.source || listState.source);
       listState.loading = false;
       listState.loadingMore = false;
-      listState.status = data.total ? "" : "还没有短视频。";
+      listState.status = data.total ? "" : (authorIndex ? "还没有作者数据。" : "还没有短视频。");
       renderListShell();
     } catch (error) {
       if (renderGuard && !renderGuard()) return;
@@ -98,16 +114,17 @@ export function createShortVideoListController(context = {}) {
 
   function appendVisibleAuthors(force = false) {
     if (!isAuthorIndexView()) return;
-    const total = sortedAuthorFacets().length;
-    const current = listState.authorVisibleCount || AUTHOR_INITIAL_COUNT;
-    if (!total || current >= total) return;
+    if (!listState.data?.hasMore || listState.loading || listState.loadingMore) return;
     if (!force) {
       const doc = document.documentElement;
       const remaining = doc.scrollHeight - window.scrollY - window.innerHeight;
       if (remaining > 700) return;
     }
-    listState.authorVisibleCount = Math.min(total, current + AUTHOR_APPEND_COUNT);
-    renderListShell();
+    loadList(null, { append: true }).catch((error) => {
+      listState.loadingMore = false;
+      listState.status = shortVideoErrorMessage(error, "加载失败，请稍后重试");
+      renderListShell();
+    });
   }
 
   function currentAuthorFacet() {
