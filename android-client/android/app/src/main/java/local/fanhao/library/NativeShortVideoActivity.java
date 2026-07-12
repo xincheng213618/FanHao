@@ -182,7 +182,7 @@ public class NativeShortVideoActivity extends Activity {
   private ShortVideoAdapter adapter;
   private TextView statusView;
   private TextView topInfoView;
-  private TextView topSearchButton;
+  private ImageView topSearchButton;
   private ImageView topBackButton;
   private View feedSearchOverlay;
   private Dialog feedSearchDialog;
@@ -257,7 +257,9 @@ public class NativeShortVideoActivity extends Activity {
     buildUi();
     currentScreen = captureFeedScreen();
     if (!videos.isEmpty()) {
-      startPlaybackAt(Math.max(0, Math.min(pendingStartIndex, videos.size() - 1)));
+      int initialIndex = Math.max(0, Math.min(pendingStartIndex, videos.size() - 1));
+      if (openAuthorPanelOnStart) openInitialAuthorScreen(initialIndex);
+      else startPlaybackAt(initialIndex);
     } else if (pendingFeedUrl != null && !pendingFeedUrl.trim().isEmpty()) {
       showStatus("正在读取短视频");
       loadFeedAsync(pendingFeedUrl, pendingStartIndex);
@@ -368,6 +370,7 @@ public class NativeShortVideoActivity extends Activity {
     pager.registerOnPageChangeCallback(new ViewPager2.OnPageChangeCallback() {
       @Override
       public void onPageSelected(int position) {
+        if (openAuthorPanelOnStart || authorOverlay != null) return;
         pageSelectedAtMs = SystemClock.elapsedRealtime();
         pageSelectedIndex = position;
         Log.i(TAG, "page selected " + position);
@@ -380,6 +383,7 @@ public class NativeShortVideoActivity extends Activity {
 
       @Override
       public void onPageScrollStateChanged(int state) {
+        if (openAuthorPanelOnStart || authorOverlay != null) return;
         if (state == ViewPager2.SCROLL_STATE_DRAGGING) {
           runNeighborsDuringDrag(pager.getCurrentItem());
           return;
@@ -414,46 +418,33 @@ public class NativeShortVideoActivity extends Activity {
     topBackButton = new ImageView(this);
     topBackButton.setImageResource(androidx.appcompat.R.drawable.abc_ic_ab_back_material);
     topBackButton.setImageTintList(ColorStateList.valueOf(Color.WHITE));
-    topBackButton.setPadding(dp(10), dp(10), dp(10), dp(10));
-    topBackButton.setBackground(circleDrawable(0x30FFFFFF));
+    topBackButton.setPadding(dp(11), dp(11), dp(11), dp(11));
+    topBackButton.setBackgroundColor(Color.TRANSPARENT);
     topBackButton.setContentDescription("返回上一页");
     topBackButton.setOnClickListener(view -> navigateBack());
     FrameLayout.LayoutParams backParams = new FrameLayout.LayoutParams(
-      dp(38),
-      dp(38),
+      dp(44),
+      dp(44),
       Gravity.TOP | Gravity.LEFT
     );
     backParams.topMargin = dp(42);
-    backParams.leftMargin = dp(12);
+    backParams.leftMargin = dp(6);
     root.addView(topBackButton, backParams);
 
-    topSearchButton = new TextView(this);
-    topSearchButton.setTextColor(Color.WHITE);
-    topSearchButton.setTextSize(13);
-    topSearchButton.setTypeface(Typeface.DEFAULT_BOLD);
-    topSearchButton.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
-    topSearchButton.setSingleLine(true);
-    topSearchButton.setMaxLines(1);
-    topSearchButton.setEllipsize(TextUtils.TruncateAt.END);
-    topSearchButton.setPadding(dp(12), 0, dp(14), 0);
-    topSearchButton.setCompoundDrawablePadding(dp(8));
-    android.graphics.drawable.Drawable searchIcon = getDrawable(android.R.drawable.ic_menu_search);
-    if (searchIcon != null) {
-      searchIcon.setTint(Color.WHITE);
-      searchIcon.setBounds(0, 0, dp(20), dp(20));
-      topSearchButton.setCompoundDrawables(searchIcon, null, null, null);
-    }
-    topSearchButton.setBackground(roundedDrawable(0x30FFFFFF, dp(20)));
+    topSearchButton = new ImageView(this);
+    topSearchButton.setImageResource(android.R.drawable.ic_menu_search);
+    topSearchButton.setImageTintList(ColorStateList.valueOf(Color.WHITE));
+    topSearchButton.setPadding(dp(10), dp(10), dp(10), dp(10));
+    topSearchButton.setBackgroundColor(Color.TRANSPARENT);
     topSearchButton.setContentDescription("搜索短视频");
     topSearchButton.setOnClickListener(view -> showFeedSearchDialog());
     FrameLayout.LayoutParams searchParams = new FrameLayout.LayoutParams(
-      ViewGroup.LayoutParams.MATCH_PARENT,
-      dp(38),
-      Gravity.TOP
+      dp(44),
+      dp(44),
+      Gravity.TOP | Gravity.RIGHT
     );
     searchParams.topMargin = dp(42);
-    searchParams.leftMargin = dp(58);
-    searchParams.rightMargin = dp(12);
+    searchParams.rightMargin = dp(6);
     root.addView(topSearchButton, searchParams);
     updateTopSearchButton();
 
@@ -539,6 +530,7 @@ public class NativeShortVideoActivity extends Activity {
     ShortVideoItem current = videos.get(currentIndex);
     if (!sameAuthor(screen.seed, current)) return;
     screen.currentItem = current;
+    screen.hasPlaybackContext = true;
     if (screen.page != null && findVideoIndex(screen.page.items, current.id) < 0) {
       screen.page.items.add(current);
       screen.page.total = Math.max(screen.page.total, screen.page.items.size());
@@ -616,18 +608,23 @@ public class NativeShortVideoActivity extends Activity {
     pager.post(() -> {
       playAt(safeIndex);
       schedulePrepareAround(safeIndex, 360);
-      openAuthorPanelIfRequested();
     });
   }
 
-  private void openAuthorPanelIfRequested() {
-    if (!openAuthorPanelOnStart || videos.isEmpty() || authorOverlay != null) return;
+  private void openInitialAuthorScreen(int index) {
+    if (videos.isEmpty()) return;
+    int safeIndex = Math.max(0, Math.min(index, videos.size() - 1));
+    ShortVideoItem seed = videos.get(safeIndex);
     openAuthorPanelOnStart = false;
-    mainHandler.postDelayed(() -> {
-      if (videos.isEmpty() || authorOverlay != null) return;
-      int index = currentIndex >= 0 ? currentIndex : Math.max(0, Math.min(pendingStartIndex, videos.size() - 1));
-      if (index >= 0 && index < videos.size()) showAuthorPanel(videos.get(index));
-    }, 360);
+    pendingStartIndex = safeIndex;
+    pendingPlayIndex = -1;
+    currentIndex = -1;
+    navigationStack.clear();
+    AuthorScreenState screen = new AuthorScreenState(seed, null, "works", currentFeedSort());
+    screen.currentItem = null;
+    screen.hasPlaybackContext = false;
+    renderAuthorScreen(screen);
+    Log.i(TAG, "author direct " + displayAuthor(seed));
   }
 
   private void playAt(int index) {
@@ -2142,6 +2139,7 @@ public class NativeShortVideoActivity extends Activity {
       }
       holder.galleryVideo.setVisibility(View.GONE);
       loadGalleryImage(holder, item, galleryIndex, direction);
+      scheduleGalleryAutoAdvance(holder, item, galleryIndex);
     }
     prefetchGalleryMedia(item, galleryIndex - 1);
     prefetchGalleryMedia(item, galleryIndex + 1);
@@ -2209,8 +2207,6 @@ public class NativeShortVideoActivity extends Activity {
     holder.galleryCurrentLayer.setAlpha(direction == 0 ? 1f : 0.72f);
     holder.galleryCurrentLayer.setTranslationX(direction == 0 ? 0f : (direction > 0 ? dp(72) : -dp(72)));
     holder.galleryCurrentLayer.animate().alpha(1f).translationX(0f).setDuration(direction == 0 ? 0 : 220).start();
-    GalleryMedia media = galleryMediaAt(item, galleryIndex);
-    if (media != null && !media.isVideo()) scheduleGalleryAutoAdvance(holder, item, galleryIndex);
   }
 
   private void scheduleGalleryAutoAdvance(ShortVideoHolder holder, ShortVideoItem item, int mediaIndex) {
@@ -2340,6 +2336,10 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private void toggleLike(ShortVideoItem item) {
+    if (item.libraryLiked) {
+      showTransientStatus("已在我的喜欢");
+      return;
+    }
     String key = videoInteractionKey(item);
     if (key.length() == 0) return;
     if (!likedVideoKeys.contains(key)) {
@@ -2353,10 +2353,14 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private long displayLikes(ShortVideoItem item) {
-    return item.likes + (isLiked(item) ? 1 : 0);
+    return item.likes + (!item.libraryLiked && isLocallyLiked(item) ? 1 : 0);
   }
 
   private boolean isLiked(ShortVideoItem item) {
+    return item != null && (item.libraryLiked || isLocallyLiked(item));
+  }
+
+  private boolean isLocallyLiked(ShortVideoItem item) {
     String key = videoInteractionKey(item);
     return key.length() > 0 && likedVideoKeys.contains(key);
   }
@@ -3110,6 +3114,7 @@ public class NativeShortVideoActivity extends Activity {
       );
     JSONObject author = row.optJSONObject("author");
     JSONObject stats = row.optJSONObject("stats");
+    JSONObject actions = row.optJSONObject("actions");
     return new ShortVideoItem(
       row.optString("id", fallbackId),
       row.optString("awemeId", ""),
@@ -3146,6 +3151,7 @@ public class NativeShortVideoActivity extends Activity {
       stats == null ? 0 : stats.optLong("collects", 0),
       stats == null ? 0 : stats.optLong("shares", 0),
       stats == null ? 0 : stats.optLong("plays", 0),
+      actions != null && actions.optBoolean("liked", false),
       row.optString("shareUrl", ""),
       row.optString("originalUrl", "")
     );
@@ -3257,8 +3263,13 @@ public class NativeShortVideoActivity extends Activity {
         hasMoreVideos = page.hasMore;
         currentScreen = captureFeedScreen();
         adapter.notifyDataSetChanged();
-        if (videos.isEmpty()) showStatus("短视频读取失败");
-        else startPlaybackAt(Math.max(0, Math.min(startIndex, videos.size() - 1)));
+        if (videos.isEmpty()) {
+          showStatus("短视频读取失败");
+        } else {
+          int safeIndex = Math.max(0, Math.min(startIndex, videos.size() - 1));
+          if (openAuthorPanelOnStart) openInitialAuthorScreen(safeIndex);
+          else startPlaybackAt(safeIndex);
+        }
       });
     });
   }
@@ -3987,7 +3998,7 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private View authorTabContent(AuthorScreenState screen, FeedPage page, String tab, Runnable loadMore, @Nullable Runnable onAuthorScroll) {
-    if ("stats".equals(tab)) return authorStatsContent(currentAuthorItem(screen), page);
+    if ("stats".equals(tab)) return authorStatsContent(screen, page);
     return authorWorksContent(screen, page, loadMore, onAuthorScroll);
   }
 
@@ -4055,7 +4066,8 @@ public class NativeShortVideoActivity extends Activity {
     return scroll;
   }
 
-  private View authorStatsContent(ShortVideoItem seed, FeedPage page) {
+  private View authorStatsContent(AuthorScreenState screen, FeedPage page) {
+    ShortVideoItem seed = currentAuthorItem(screen);
     ScrollView scroll = new ScrollView(this);
     scroll.setVerticalScrollBarEnabled(false);
     scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
@@ -4074,7 +4086,9 @@ public class NativeShortVideoActivity extends Activity {
     wrap.addView(statRow("总时长", longDuration(stats.durationMs)));
     ShortVideoItem top = topLikedVideo(page.items);
     if (top != null) wrap.addView(statRow("最高点赞", compact(top.likes) + " · " + shortTitle(top.title)));
-    wrap.addView(statRow("当前视频", shortTitle(seed.title)));
+    if (screen.hasPlaybackContext && seed != null) {
+      wrap.addView(statRow("当前视频", shortTitle(seed.title)));
+    }
     scroll.addView(wrap, new ScrollView.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
       ViewGroup.LayoutParams.WRAP_CONTENT
@@ -4083,7 +4097,7 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private View authorVideoTile(ShortVideoItem item, int width, FeedPage page, AuthorScreenState screen) {
-    boolean current = isSameVideo(item, currentAuthorItem(screen));
+    boolean current = screen.hasPlaybackContext && isSameVideo(item, currentAuthorItem(screen));
     LinearLayout tile = new LinearLayout(this);
     tile.setOrientation(LinearLayout.VERTICAL);
     tile.setPadding(dp(1), dp(1), dp(1), dp(2));
@@ -4114,20 +4128,37 @@ public class NativeShortVideoActivity extends Activity {
     } else {
       cover.setImageBitmap(frameCache.get(item.id));
     }
-    TextView badge = new TextView(this);
-    badge.setText("♥ " + compact(item.likes));
-    badge.setTextColor(Color.WHITE);
-    badge.setTextSize(11);
-    badge.setTypeface(Typeface.DEFAULT_BOLD);
-    badge.setPadding(dp(6), dp(3), dp(6), dp(3));
-    badge.setBackground(roundedDrawable(0x99000000, dp(8)));
+    boolean liked = isLiked(item);
+    LinearLayout badge = new LinearLayout(this);
+    badge.setOrientation(LinearLayout.HORIZONTAL);
+    badge.setGravity(Gravity.CENTER_VERTICAL);
+    badge.setBackgroundColor(Color.TRANSPARENT);
+
+    ImageView heart = new ImageView(this);
+    heart.setImageResource(liked ? R.drawable.ic_short_heart : R.drawable.ic_short_heart_outline);
+    heart.setImageTintList(ColorStateList.valueOf(liked ? 0xFFFF2C55 : Color.WHITE));
+    heart.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+    badge.addView(heart, new LinearLayout.LayoutParams(dp(17), dp(17)));
+
+    TextView likeCount = new TextView(this);
+    likeCount.setText(compact(displayLikes(item)));
+    likeCount.setTextColor(Color.WHITE);
+    likeCount.setTextSize(11);
+    likeCount.setTypeface(Typeface.DEFAULT_BOLD);
+    likeCount.setIncludeFontPadding(false);
+    LinearLayout.LayoutParams likeCountParams = new LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.WRAP_CONTENT,
+      ViewGroup.LayoutParams.WRAP_CONTENT
+    );
+    likeCountParams.leftMargin = dp(3);
+    badge.addView(likeCount, likeCountParams);
     FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
       ViewGroup.LayoutParams.WRAP_CONTENT,
       ViewGroup.LayoutParams.WRAP_CONTENT,
       Gravity.LEFT | Gravity.BOTTOM
     );
-    badgeParams.leftMargin = dp(5);
-    badgeParams.bottomMargin = dp(5);
+    badgeParams.leftMargin = dp(6);
+    badgeParams.bottomMargin = dp(6);
     media.addView(badge, badgeParams);
     if (current) {
       TextView currentBadge = new TextView(this);
@@ -4460,10 +4491,7 @@ public class NativeShortVideoActivity extends Activity {
     holder.rail.addView(metric(R.drawable.ic_short_share, item.shares, false, "分享", view -> shareVideo(item)));
     if (item.isGallery() && item.sound.isPlayable()) {
       holder.rail.addView(railAction(android.R.drawable.ic_lock_silent_mode_off, muted ? "静音" : "配乐", view -> toggleMuted()));
-    } else {
-      holder.rail.addView(railAction(android.R.drawable.ic_lock_silent_mode_off, "原声", view -> openOriginalVideo(item)));
     }
-    holder.rail.addView(railAction(android.R.drawable.ic_menu_manage, "更多", view -> showPlaybackToolbar(item)));
   }
 
   private void showCommentsOverlay(ShortVideoItem item) {
@@ -5583,7 +5611,6 @@ public class NativeShortVideoActivity extends Activity {
   private void updateTopSearchButton() {
     if (topSearchButton == null) return;
     String query = currentFeedQuery();
-    topSearchButton.setText(query.length() > 0 ? query : "搜索");
     topSearchButton.setContentDescription(query.length() > 0 ? "当前搜索 " + query : "搜索短视频");
   }
 
@@ -5595,17 +5622,17 @@ public class NativeShortVideoActivity extends Activity {
     button.setOnClickListener(view -> showAuthorPanel(item));
     button.setClipChildren(false);
     button.setClipToPadding(false);
-    button.setLayoutParams(new LinearLayout.LayoutParams(dp(64), dp(64)));
+    button.setLayoutParams(new LinearLayout.LayoutParams(dp(56), dp(56)));
 
     TextView fallback = new TextView(this);
     fallback.setText(initials(item.author));
     fallback.setTextColor(Color.WHITE);
-    fallback.setTextSize(17);
+    fallback.setTextSize(15);
     fallback.setTypeface(Typeface.DEFAULT_BOLD);
     fallback.setGravity(Gravity.CENTER);
     fallback.setBackground(circleDrawable(0xFF22242D));
     setCircleClip(fallback);
-    FrameLayout.LayoutParams avatarParams = new FrameLayout.LayoutParams(dp(52), dp(52), Gravity.CENTER);
+    FrameLayout.LayoutParams avatarParams = new FrameLayout.LayoutParams(dp(44), dp(44), Gravity.CENTER);
     button.addView(fallback, avatarParams);
 
     if (item.authorAvatarUrl.length() > 0) {
@@ -5631,11 +5658,11 @@ public class NativeShortVideoActivity extends Activity {
       followIcon.setPadding(dp(3), dp(3), dp(3), dp(3));
       followIcon.setBackground(circleDrawable(0xFFFE2C55));
       followIcon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-      FrameLayout.LayoutParams iconParams = new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+      FrameLayout.LayoutParams iconParams = new FrameLayout.LayoutParams(dp(20), dp(20), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
       iconParams.bottomMargin = dp(1);
       followTarget.addView(followIcon, iconParams);
-      FrameLayout.LayoutParams followParams = new FrameLayout.LayoutParams(dp(36), dp(36), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-      followParams.bottomMargin = dp(-6);
+      FrameLayout.LayoutParams followParams = new FrameLayout.LayoutParams(dp(32), dp(32), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+      followParams.bottomMargin = dp(-5);
       button.addView(followTarget, followParams);
     }
     return button;
@@ -5656,8 +5683,8 @@ public class NativeShortVideoActivity extends Activity {
     ImageView icon = new ImageView(this);
     icon.setImageResource(iconResource);
     icon.setImageTintList(ColorStateList.valueOf(active ? activeColor : Color.WHITE));
-    icon.setBackground(circleDrawable(0x2E000000));
-    icon.setPadding(dp(3), dp(3), dp(3), dp(3));
+    icon.setBackgroundColor(Color.TRANSPARENT);
+    icon.setPadding(dp(2), dp(2), dp(2), dp(2));
     icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
     view.addView(icon, new LinearLayout.LayoutParams(dp(34), dp(34)));
 
@@ -5725,7 +5752,7 @@ public class NativeShortVideoActivity extends Activity {
     ImageView icon = new ImageView(this);
     icon.setImageResource(iconResource);
     icon.setImageTintList(ColorStateList.valueOf(Color.WHITE));
-    icon.setBackground(circleDrawable(0x2E000000));
+    icon.setBackgroundColor(Color.TRANSPARENT);
     icon.setPadding(dp(6), dp(6), dp(6), dp(6));
     icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
     view.addView(icon, new LinearLayout.LayoutParams(dp(32), dp(32)));
@@ -6079,8 +6106,9 @@ public class NativeShortVideoActivity extends Activity {
       rail.setGravity(Gravity.CENTER);
       rail.setClipChildren(false);
       rail.setClipToPadding(false);
-      FrameLayout.LayoutParams railParams = new FrameLayout.LayoutParams(dp(64), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-      railParams.rightMargin = dp(8);
+      FrameLayout.LayoutParams railParams = new FrameLayout.LayoutParams(dp(56), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.RIGHT | Gravity.BOTTOM);
+      railParams.rightMargin = dp(6);
+      railParams.bottomMargin = dp(68);
       root.addView(rail, railParams);
 
       FrameLayout progressTouch = new FrameLayout(parent.getContext());
@@ -6330,6 +6358,7 @@ public class NativeShortVideoActivity extends Activity {
     String activeTab;
     String sort;
     boolean loadingMore;
+    boolean hasPlaybackContext = true;
     int worksScrollY;
 
     AuthorScreenState(ShortVideoItem seed, @Nullable FeedPage page, String activeTab, String sort) {
@@ -6344,6 +6373,7 @@ public class NativeShortVideoActivity extends Activity {
       AuthorScreenState copy = new AuthorScreenState(seed, page, activeTab, sort);
       copy.currentItem = currentItem;
       copy.loadingMore = loadingMore;
+      copy.hasPlaybackContext = hasPlaybackContext;
       copy.worksScrollY = worksScrollY;
       return copy;
     }
@@ -6495,10 +6525,11 @@ public class NativeShortVideoActivity extends Activity {
     final long collects;
     final long shares;
     final long plays;
+    final boolean libraryLiked;
     final String shareUrl;
     final String originalUrl;
 
-    ShortVideoItem(String id, String awemeId, String mediaType, String streamUrl, String coverUrl, List<GalleryMedia> galleryItems, ShortVideoSound sound, String title, String author, String authorSecUid, String authorUid, String authorAvatarUrl, String authorProfileUrl, String authorUniqueId, String authorShortId, String authorSignature, String authorIpLocation, long authorFollowerCount, long authorFollowingCount, long authorTotalFavorited, long authorAwemeCount, long authorFavoritingCount, int authorGender, int authorAge, String authorVerification, String authorProfileCollectedAt, String publishedAt, long durationMs, int width, int height, long likes, long comments, long collects, long shares, long plays, String shareUrl, String originalUrl) {
+    ShortVideoItem(String id, String awemeId, String mediaType, String streamUrl, String coverUrl, List<GalleryMedia> galleryItems, ShortVideoSound sound, String title, String author, String authorSecUid, String authorUid, String authorAvatarUrl, String authorProfileUrl, String authorUniqueId, String authorShortId, String authorSignature, String authorIpLocation, long authorFollowerCount, long authorFollowingCount, long authorTotalFavorited, long authorAwemeCount, long authorFavoritingCount, int authorGender, int authorAge, String authorVerification, String authorProfileCollectedAt, String publishedAt, long durationMs, int width, int height, long likes, long comments, long collects, long shares, long plays, boolean libraryLiked, String shareUrl, String originalUrl) {
       this.id = id == null ? "" : id;
       this.awemeId = awemeId == null ? "" : awemeId;
       this.mediaType = mediaType == null ? "video" : mediaType;
@@ -6536,6 +6567,7 @@ public class NativeShortVideoActivity extends Activity {
       this.collects = collects;
       this.shares = shares;
       this.plays = plays;
+      this.libraryLiked = libraryLiked;
       this.shareUrl = shareUrl == null ? "" : shareUrl;
       this.originalUrl = originalUrl == null ? "" : originalUrl;
     }

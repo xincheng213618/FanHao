@@ -996,21 +996,25 @@ body.short-video-search-page-view .bottom-nav {
   bottom: 6px;
   display: inline-flex !important;
   align-items: center;
-  gap: 4px;
-  min-height: 24px;
-  border-radius: 999px;
-  background: rgba(0, 0, 0, .56);
+  gap: 3px;
+  min-height: 18px;
+  border-radius: 0;
+  background: transparent;
   color: #fff;
-  padding: 0 7px;
-  font-size: 11px;
+  padding: 0;
+  font-size: 12px;
   font-weight: 900;
   line-height: 1;
-  text-shadow: 0 1px 6px rgba(0, 0, 0, .5);
+  text-shadow: none;
 }
 
 .short-video-mobile-thumb-metric .short-video-mobile-icon {
-  width: 13px;
-  height: 13px;
+  width: 17px;
+  height: 17px;
+}
+
+.short-video-mobile-thumb-metric.is-liked .short-video-mobile-icon {
+  color: #fe2c55;
 }
 
 .short-video-mobile-thumb-type {

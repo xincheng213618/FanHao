@@ -472,7 +472,9 @@ export function createShortVideoListView(context = {}) {
     }
     const metric = document.createElement("span");
     metric.className = "short-video-mobile-thumb-metric";
-    metric.append(createIcon("heart"), document.createTextNode(formatCompact(video.stats?.likes || 0)));
+    const liked = Boolean(video.actions?.liked);
+    metric.classList.toggle("is-liked", liked);
+    metric.append(createIcon(liked ? "heart" : "heartOutline"), document.createTextNode(formatCompact(video.stats?.likes || 0)));
     thumb.append(metric);
     const galleryCount = String(video.mediaType || "").toLowerCase() === "gallery"
       ? Number(video.galleryCount || video.galleryImages?.length || 0)

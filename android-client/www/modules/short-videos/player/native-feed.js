@@ -84,6 +84,9 @@ export function createShortVideoNativeFeed(context = {}) {
         collects: Number(item.stats?.collects || 0),
         shares: Number(item.stats?.shares || 0),
         plays: Number(item.stats?.plays || 0)
+      },
+      actions: {
+        liked: Boolean(item.actions?.liked)
       }
     }));
     try {

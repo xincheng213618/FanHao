@@ -65,8 +65,21 @@ assert(androidListSource.includes("openShortVideoAuthor(author)"), "Android auth
 assert(androidListControllerSource.includes("openAuthorPanel: true"), "Android author index must request the native author homepage");
 assert(androidNativeFeedSource.includes("openAuthorPanel: Boolean(options.openAuthorPanel)"), "Android native feed bridge must forward the author homepage request");
 assert(androidPlayerPluginSource.includes("EXTRA_OPEN_AUTHOR_PANEL") && androidPlayerPluginSource.includes('call.getBoolean("openAuthorPanel", false)'), "Android player plugin must pass the native author homepage flag");
+assert(androidNativePlayerSource.includes("if (openAuthorPanelOnStart) openInitialAuthorScreen(initialIndex)"), "Android native author entry must render the author screen before starting playback");
+assert(androidNativePlayerSource.includes('Log.i(TAG, "author direct "') && !androidNativePlayerSource.includes("openAuthorPanelIfRequested()"), "Android native author entry must not expose a delayed first-video transition");
+assert(androidNativePlayerSource.includes("screen.hasPlaybackContext && isSameVideo(item, currentAuthorItem(screen))"), "Direct author entry must not label the seed video as currently playing");
 assert(androidNativePlayerSource.includes("grid.setPadding(gridHorizontalPadding, dp(6), gridHorizontalPadding, dp(8))"), "Android native author works grid must keep equal horizontal padding");
 assert(androidNativePlayerSource.includes("(screenWidth - gridHorizontalPadding * 2) / 3"), "Android native author works tiles must share the centered grid width");
+assert(androidNativePlayerSource.includes("topSearchButton = new ImageView(this)"), "Android native player search should stay a compact icon instead of a wide web-style pill");
+assert(!androidNativePlayerSource.includes('holder.rail.addView(railAction(android.R.drawable.ic_lock_silent_mode_off, "原声"'), "Android native player rail must not expose an external original-video link");
+assert(!androidNativePlayerSource.includes('holder.rail.addView(railAction(android.R.drawable.ic_menu_manage, "更多"'), "Android native player rail must rely on stage long-press for playback tools");
+assert(androidNativePlayerSource.includes("icon.setBackgroundColor(Color.TRANSPARENT)"), "Android native player rail icons must not restore circular shadow backgrounds");
+assert(androidNativePlayerSource.includes("loadGalleryImage(holder, item, galleryIndex, direction);\n      scheduleGalleryAutoAdvance(holder, item, galleryIndex);"), "Android native gallery images must start their four-second timer when each page is bound");
+assert(androidNativePlayerSource.includes("liked ? R.drawable.ic_short_heart : R.drawable.ic_short_heart_outline"), "Android native author tiles must distinguish liked and unliked works with solid and outline hearts");
+assert(!androidNativePlayerSource.includes('badge.setBackground(roundedDrawable(0x99000000'), "Android native author tile hearts must not restore a dark pill background");
+assert(androidListSource.includes("Boolean(video.actions?.liked)") && androidListSource.includes('liked ? "heart" : "heartOutline"'), "Android work grids must render each video's real liked state instead of guessing from the active page");
+assert(androidNativeFeedSource.includes("liked: Boolean(item.actions?.liked)"), "Android native feed bridge must preserve each video's liked state");
+assert(androidNativePlayerSource.includes('actions.optBoolean("liked", false)') && androidNativePlayerSource.includes("item.libraryLiked || isLocallyLiked(item)"), "Android native author and player views must combine library and local liked state");
 assert(androidListControllerSource.includes("const { api, getActiveUrl, listState, showView } = context"), "Android short-video search submit must receive the showView navigation dependency");
 assert(androidListSource.includes("搜索历史") && androidListSource.includes("short-video-search-suggestions"), "Android short-video search must expose history and live suggestions");
 
