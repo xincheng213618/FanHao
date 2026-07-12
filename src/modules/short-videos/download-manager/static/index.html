@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Douyin Download Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=20260712-following-03" />
+    <link rel="stylesheet" href="/styles.css?v=20260712-auth-01" />
   </head>
   <body>
     <main class="shell">
@@ -191,6 +191,41 @@
 
       <section class="page-panel" data-page-panel="settings">
         <div class="settings-layout">
+          <section class="panel auth-panel">
+            <div class="auth-panel-head">
+              <div>
+                <div class="panel-title">抖音登录</div>
+                <div id="authSummary" class="muted">正在检查登录状态…</div>
+              </div>
+              <span id="authStatusBadge" class="auth-status missing">未设置</span>
+            </div>
+            <div class="auth-details">
+              <div>
+                <span>Cookie 文件</span>
+                <strong id="authCookiePath">—</strong>
+              </div>
+              <div>
+                <span>更新时间</span>
+                <strong id="authUpdatedAt">—</strong>
+              </div>
+              <div>
+                <span>登录信息</span>
+                <strong id="authCookieCount">0 项</strong>
+              </div>
+            </div>
+            <div class="actions auth-actions">
+              <button id="authLoginStart" class="primary">打开 Edge 登录</button>
+              <button id="authImportCookie">导入 Cookie</button>
+              <input id="authCookieFile" type="file" accept=".txt,text/plain" hidden />
+              <button id="authCheck">检测状态</button>
+              <button id="authOpenFolder">打开目录</button>
+              <button id="authClear" class="danger">清除登录</button>
+            </div>
+            <div id="authLoginHint" class="auth-login-hint muted">
+              登录成功后会自动保存；Cookie 只保存在当前电脑，不会打进安装包。
+            </div>
+          </section>
+
           <section class="panel">
             <div class="panel-title">下载配置</div>
             <label class="field">
@@ -269,6 +304,6 @@
     </main>
 
     <div id="toast" class="toast"></div>
-    <script src="/app.js?v=20260712-following-03"></script>
+    <script src="/app.js?v=20260712-auth-01"></script>
   </body>
 </html>

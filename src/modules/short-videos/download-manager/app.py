@@ -12,9 +12,11 @@ import socket
 import sqlite3
 import string
 import subprocess
+import sys
 import threading
 import time
 import uuid
+import webbrowser
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -25,11 +27,20 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-BASE_DIR = Path(__file__).resolve().parent
+FROZEN_BUILD = bool(getattr(sys, "frozen", False))
+INSTALL_DIR = Path(sys.executable).resolve().parent if FROZEN_BUILD else Path(__file__).resolve().parent
+BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
 STATIC_DIR = BASE_DIR / "static"
-PROJECT_ROOT = Path(os.environ.get("FANHAO_PROJECT_ROOT", str(BASE_DIR.parents[3]))).resolve()
-DATA_DIR = Path(os.environ.get("DOUYIN_MANAGER_DATA_DIR", str(BASE_DIR / "data"))).resolve()
-LOG_DIR = Path(os.environ.get("DOUYIN_MANAGER_LOG_DIR", str(BASE_DIR / "logs"))).resolve()
+APP_STATE_DIR = (
+    Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+    / "DouyinDownloadManager"
+)
+DEFAULT_PROJECT_ROOT = APP_STATE_DIR if FROZEN_BUILD else BASE_DIR.parents[3]
+DEFAULT_DATA_DIR = APP_STATE_DIR / "data" if FROZEN_BUILD else BASE_DIR / "data"
+DEFAULT_LOG_DIR = APP_STATE_DIR / "logs" if FROZEN_BUILD else BASE_DIR / "logs"
+PROJECT_ROOT = Path(os.environ.get("FANHAO_PROJECT_ROOT", str(DEFAULT_PROJECT_ROOT))).resolve()
+DATA_DIR = Path(os.environ.get("DOUYIN_MANAGER_DATA_DIR", str(DEFAULT_DATA_DIR))).resolve()
+LOG_DIR = Path(os.environ.get("DOUYIN_MANAGER_LOG_DIR", str(DEFAULT_LOG_DIR))).resolve()
 CONFIG_DIR = DATA_DIR / "configs"
 DB_PATH = DATA_DIR / "douyin_downloads.sqlite"
 FANHAO_DB_PATH = Path(
@@ -38,7 +49,7 @@ FANHAO_DB_PATH = Path(
         str(PROJECT_ROOT / "data" / "short-videos.sqlite"),
     )
 ).resolve()
-FANHAO_DIRECT_IMPORT = os.environ.get("FANHAO_DIRECT_IMPORT", "1").lower() not in {
+FANHAO_DIRECT_IMPORT = os.environ.get("FANHAO_DIRECT_IMPORT", "0" if FROZEN_BUILD else "1").lower() not in {
     "0",
     "false",
     "no",
@@ -52,15 +63,20 @@ TEST_PROFILE_URL = (
 DOWNLOADER_ROOT = Path(
     os.environ.get(
         "DOUYIN_DOWNLOADER_ROOT",
-        str(PROJECT_ROOT.parent / "Tool" / "douyin-downloader"),
+        str(INSTALL_DIR / "downloader" if FROZEN_BUILD else PROJECT_ROOT.parent / "Tool" / "douyin-downloader"),
     )
 ).resolve()
+DOWNLOADER_EXE = DOWNLOADER_ROOT / "douyin-downloader.exe"
 DOWNLOADER_PYTHON = DOWNLOADER_ROOT / ".venv" / "Scripts" / "python.exe"
 DOWNLOADER_RUN = DOWNLOADER_ROOT / "run.py"
 DEFAULT_COOKIE_FILE = (
     Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
     / "douyin-downloader-desktop"
     / "custom-batch-douyin-cookies.txt"
+)
+NODE_EXECUTABLE = os.environ.get(
+    "DOUYIN_MANAGER_NODE",
+    str(INSTALL_DIR / "runtime" / "node.exe") if FROZEN_BUILD else "node",
 )
 DEFAULT_OUTPUT_DIR = Path.home() / "Downloads"
 LIBRARY_SEC_UID = os.environ.get(
@@ -84,6 +100,14 @@ extract_thread: threading.Thread | None = None
 extract_job_id: int | None = None
 extract_process: subprocess.Popen[Any] | None = None
 extract_stop_event = threading.Event()
+cookie_login_lock = threading.Lock()
+cookie_login_process: subprocess.Popen[Any] | None = None
+cookie_login_state: dict[str, Any] = {
+    "status": "idle",
+    "message": "",
+    "started_at": "",
+    "finished_at": "",
+}
 download_timing_lock = threading.Lock()
 GALLERY_MUSIC_INTENT = "gallery_music"
 DOWNLOAD_GUARD_STATE_SETTING = "download_guard_state"
@@ -91,6 +115,17 @@ DOWNLOAD_GUARD_STATE_SETTING = "download_guard_state"
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def downloader_command(args: list[str]) -> tuple[list[str], Path]:
+    if DOWNLOADER_EXE.exists():
+        return [str(DOWNLOADER_EXE), *args], DOWNLOADER_ROOT
+    python_exe = Path(setting("downloader_python", str(DOWNLOADER_PYTHON)))
+    run_py = Path(setting("downloader_run", str(DOWNLOADER_RUN)))
+    repo_root = Path(setting("downloader_root", str(DOWNLOADER_ROOT)))
+    if not python_exe.exists() or not run_py.exists():
+        raise RuntimeError("下载器路径不存在，请检查设置")
+    return [str(python_exe), str(run_py), *args], repo_root
 
 
 def iso_from_timestamp(value: float | None) -> str:
@@ -2908,26 +2943,221 @@ def upsert_links(profile_id: int, works: list[dict[str, Any]]) -> tuple[int, int
     return inserted, updated
 
 
+def parse_netscape_cookie_text(text: str) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_") :]
+        elif line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        name = parts[5].strip()
+        value = "\t".join(parts[6:]).strip()
+        if name:
+            cookies[name] = value
+    return cookies
+
+
 def parse_netscape_cookie_dict(file: str) -> dict[str, str]:
     path = Path(file)
     if not path.exists():
         return {}
-    cookies: dict[str, str] = {}
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) < 7:
-                continue
-            name = parts[5].strip()
-            value = "\t".join(parts[6:]).strip()
-            if name:
-                cookies[name] = value
+        return parse_netscape_cookie_text(path.read_text(encoding="utf-8-sig"))
     except OSError:
         return {}
-    return cookies
+
+
+def cookie_file_path() -> Path:
+    return Path(setting("cookie_file", str(DEFAULT_COOKIE_FILE))).expanduser().resolve()
+
+
+def cookie_login_snapshot() -> dict[str, Any]:
+    with cookie_login_lock:
+        state = dict(cookie_login_state)
+        process = cookie_login_process
+        state["active"] = process is not None and process.poll() is None
+    return state
+
+
+def cookie_auth_status() -> dict[str, Any]:
+    path = cookie_file_path()
+    cookies = parse_netscape_cookie_dict(str(path))
+    session_names = sorted(
+        name for name in ("sessionid", "sessionid_ss", "sid_guard", "sid_tt") if cookies.get(name)
+    )
+    exists = path.is_file()
+    modified_at = ""
+    size = 0
+    if exists:
+        try:
+            stat = path.stat()
+            size = stat.st_size
+            modified_at = iso_from_timestamp(stat.st_mtime)
+        except OSError:
+            pass
+    if session_names:
+        status = "ready"
+        message = "已读取抖音登录信息"
+    elif cookies:
+        status = "incomplete"
+        message = "Cookie 已存在，但没有检测到登录凭证"
+    else:
+        status = "missing"
+        message = "尚未设置抖音登录信息"
+    return {
+        "status": status,
+        "message": message,
+        "path": str(path),
+        "exists": exists,
+        "modified_at": modified_at,
+        "size": size,
+        "cookie_count": len(cookies),
+        "has_session": bool(session_names),
+        "has_ms_token": bool(cookies.get("msToken")),
+        "session_cookie_names": session_names,
+        "login": cookie_login_snapshot(),
+    }
+
+
+def invalidate_generated_cookies() -> None:
+    try:
+        (CONFIG_DIR / ".cookies.json").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def import_cookie_text(content: str) -> dict[str, Any]:
+    if not isinstance(content, str) or not content.strip():
+        return {"ok": False, "message": "Cookie 文件内容为空"}
+    if len(content.encode("utf-8")) > 2 * 1024 * 1024:
+        return {"ok": False, "message": "Cookie 文件不能超过 2 MB"}
+    cookies = parse_netscape_cookie_text(content)
+    if not cookies:
+        return {"ok": False, "message": "没有识别到 Netscape 格式 Cookie"}
+    path = cookie_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized.endswith("\n"):
+        normalized += "\n"
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(normalized, encoding="utf-8")
+    temp_path.replace(path)
+    invalidate_generated_cookies()
+    status = cookie_auth_status()
+    add_event("info", f"已导入抖音 Cookie：{status['cookie_count']} 项")
+    return {"ok": True, "message": status["message"], "auth": status}
+
+
+def clear_cookie_auth() -> dict[str, Any]:
+    login = cookie_login_snapshot()
+    if login.get("active"):
+        return {"ok": False, "message": "Edge 登录正在进行，请先完成或关闭登录窗口"}
+    path = cookie_file_path()
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        return {"ok": False, "message": f"无法删除 Cookie 文件：{exc}"}
+    invalidate_generated_cookies()
+    profile_dir = (DATA_DIR / "browser-login-profile").resolve()
+    try:
+        if profile_dir.exists() and str(profile_dir).startswith(str(DATA_DIR.resolve())):
+            shutil.rmtree(profile_dir)
+    except OSError:
+        pass
+    add_event("warn", "抖音登录信息已清除")
+    return {"ok": True, "message": "抖音登录信息已清除", "auth": cookie_auth_status()}
+
+
+def open_cookie_folder() -> dict[str, Any]:
+    path = cookie_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt" or not hasattr(os, "startfile"):
+        return {"ok": False, "message": f"Cookie 目录：{path.parent}"}
+    os.startfile(str(path.parent))
+    return {"ok": True, "message": "已打开 Cookie 目录", "path": str(path.parent)}
+
+
+def monitor_cookie_login(process: subprocess.Popen[Any], log_path: Path) -> None:
+    global cookie_login_process
+    code = process.wait()
+    status = cookie_auth_status()
+    success = code == 0 and status.get("has_session")
+    message = "登录成功，Cookie 已自动保存" if success else "登录未完成"
+    if not success and log_path.exists():
+        tail = tail_text(log_path, 800).strip().splitlines()
+        if tail:
+            message = tail[-1][:300]
+    with cookie_login_lock:
+        if cookie_login_process is process:
+            cookie_login_process = None
+        cookie_login_state.update(
+            {
+                "status": "success" if success else "failed",
+                "message": message,
+                "finished_at": now_iso(),
+            }
+        )
+    add_event("info" if success else "warn", message)
+
+
+def start_cookie_login() -> dict[str, Any]:
+    global cookie_login_process
+    with cookie_login_lock:
+        already_running = cookie_login_process is not None and cookie_login_process.poll() is None
+    if already_running:
+        return {"ok": True, "message": "Edge 登录窗口已经打开", "auth": cookie_auth_status()}
+    node = NODE_EXECUTABLE
+    if not Path(node).exists() and shutil.which(node) is None:
+        return {"ok": False, "message": "未找到内置 Node.js，无法打开 Edge 登录"}
+    script = BASE_DIR / "cookie-login.mjs"
+    if not script.exists():
+        return {"ok": False, "message": "登录助手文件不存在"}
+    path = cookie_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    profile_dir = DATA_DIR / "browser-login-profile"
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / "cookie-login.log"
+    env = os.environ.copy()
+    env.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8:replace"})
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    with log_path.open("w", encoding="utf-8", errors="replace") as log:
+        process = subprocess.Popen(
+            [
+                node,
+                str(script),
+                "--out",
+                str(path),
+                "--profile-dir",
+                str(profile_dir),
+                "--timeout-seconds",
+                "300",
+            ],
+            cwd=str(BASE_DIR),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=env,
+            creationflags=creationflags,
+        )
+    with cookie_login_lock:
+        cookie_login_process = process
+        cookie_login_state.update(
+            {
+                "status": "running",
+                "message": "请在 Edge 中完成抖音登录，成功后窗口会自动关闭",
+                "started_at": now_iso(),
+                "finished_at": "",
+            }
+        )
+    thread = threading.Thread(target=monitor_cookie_login, args=(process, log_path), daemon=True)
+    thread.start()
+    add_event("info", "已打开 Edge，请完成抖音登录")
+    return {"ok": True, "message": "已打开 Edge，请完成抖音登录", "auth": cookie_auth_status()}
 
 
 def fallback_ms_token() -> str:
@@ -3259,14 +3489,14 @@ class DownloadManager:
             )
             return
 
-        python_exe = Path(setting("downloader_python", str(DOWNLOADER_PYTHON)))
-        run_py = Path(setting("downloader_run", str(DOWNLOADER_RUN)))
-        repo_root = Path(setting("downloader_root", str(DOWNLOADER_ROOT)))
-        if not python_exe.exists() or not run_py.exists():
-            self._mark_failed(link, "下载器路径不存在，请检查设置")
+        try:
+            command, downloader_cwd = downloader_command(
+                ["--config", str(write_config(link, output_dir, worker_id)), "--path", output_dir]
+            )
+        except RuntimeError as exc:
+            self._mark_failed(link, str(exc))
             return
 
-        config_path = write_config(link, output_dir, worker_id)
         log_path = LOG_DIR / f"download-link-{link['id']}-w{worker_id}.log"
         err_path = LOG_DIR / f"download-link-{link['id']}-w{worker_id}.err.log"
         env = os.environ.copy()
@@ -3279,8 +3509,8 @@ class DownloadManager:
         )
         with log_path.open("ab") as stdout, err_path.open("ab") as stderr:
             proc = subprocess.Popen(
-                [str(python_exe), str(run_py), "--config", str(config_path), "--path", output_dir],
-                cwd=str(repo_root),
+                command,
+                cwd=str(downloader_cwd),
                 stdout=stdout,
                 stderr=stderr,
                 env=env,
@@ -4017,13 +4247,19 @@ class SidecarDownloadManager(DownloadManager):
         return port
 
     def _start_sidecar(self, output_dir: str, concurrency: int) -> int:
-        python_exe = Path(setting("downloader_python", str(DOWNLOADER_PYTHON)))
-        run_py = Path(setting("downloader_run", str(DOWNLOADER_RUN)))
-        repo_root = Path(setting("downloader_root", str(DOWNLOADER_ROOT)))
-        if not python_exe.exists() or not run_py.exists():
-            raise RuntimeError("下载器路径不存在，请检查设置")
         config_path = write_sidecar_config(output_dir, concurrency)
         port = free_port()
+        command, downloader_cwd = downloader_command(
+            [
+                "--serve",
+                "--config",
+                str(config_path),
+                "--serve-host",
+                "127.0.0.1",
+                "--serve-port",
+                str(port),
+            ]
+        )
         stamp = int(time.time())
         started = time.monotonic()
         log_path = LOG_DIR / f"sidecar-{stamp}.log"
@@ -4048,18 +4284,8 @@ class SidecarDownloadManager(DownloadManager):
         stderr = err_path.open("ab")
         try:
             proc = subprocess.Popen(
-                [
-                    str(python_exe),
-                    str(run_py),
-                    "--serve",
-                    "--config",
-                    str(config_path),
-                    "--serve-host",
-                    "127.0.0.1",
-                    "--serve-port",
-                    str(port),
-                ],
-                cwd=str(repo_root),
+                command,
+                cwd=str(downloader_cwd),
                 stdout=stdout,
                 stderr=stderr,
                 env=env,
@@ -4408,7 +4634,7 @@ def run_extract_job(
     log_path = LOG_DIR / f"extract-job-{job_id}.log"
     cookie_file = setting("cookie_file", str(DEFAULT_COOKIE_FILE))
     cmd = [
-        "node",
+        NODE_EXECUTABLE,
         str(BASE_DIR / "extract-links.mjs"),
         url,
         "--max",
@@ -4944,7 +5170,7 @@ def run_following_import_job(
     out_path = DATA_DIR / f"following-{uuid.uuid4().hex}.json"
     log_path = LOG_DIR / f"following-job-{job_id}.log"
     cmd = [
-        "node",
+        NODE_EXECUTABLE,
         str(BASE_DIR / "extract-following.mjs"),
         url,
         "--max",
@@ -5430,6 +5656,7 @@ def get_state() -> dict[str, Any]:
             "job_id": extract_job_id,
         },
         "download": download_manager.snapshot(),
+        "auth": cookie_auth_status(),
         "jobs": jobs,
         "events": events,
         "paths": {
@@ -5758,6 +5985,8 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/state":
             return self.send_json(get_state())
+        if parsed.path == "/api/auth/status":
+            return self.send_json({"ok": True, "auth": cookie_auth_status()})
         if parsed.path == "/api/profiles":
             return self.send_json(list_profiles(parse_qs(parsed.query)))
         if parsed.path == "/api/links":
@@ -5788,6 +6017,14 @@ class Handler(SimpleHTTPRequestHandler):
             payload = self.read_json()
             if parsed.path == "/api/settings":
                 return self.handle_settings(payload)
+            if parsed.path == "/api/auth/cookie/import":
+                return self.send_json(import_cookie_text(str(payload.get("content") or "")))
+            if parsed.path == "/api/auth/cookie/clear":
+                return self.send_json(clear_cookie_auth())
+            if parsed.path == "/api/auth/cookie/open-folder":
+                return self.send_json(open_cookie_folder())
+            if parsed.path == "/api/auth/login/start":
+                return self.send_json(start_cookie_login())
             if parsed.path == "/api/extract/start":
                 return self.send_json(start_extract(payload))
             if parsed.path == "/api/profiles/refresh":
@@ -6022,6 +6259,10 @@ def main() -> None:
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"Douyin Download Manager: http://localhost:{port}")
     print(f"Database: {DB_PATH}")
+    if FROZEN_BUILD and os.environ.get("DOUYIN_MANAGER_OPEN", "1").lower() not in {"0", "false", "no", "off"}:
+        opener = threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{port}/#home"))
+        opener.daemon = True
+        opener.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
