@@ -1,4 +1,4 @@
-import { createMusicViews } from "./music-views.js?v=20260714-music-search-suggest-27";
+import { createMusicViews } from "./music-views.js?v=20260714-music-search-recovery-28";
 
 export function createAndroidModule({ host }) {
   const musicViews = createMusicViews({

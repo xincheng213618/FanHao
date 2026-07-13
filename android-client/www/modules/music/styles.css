@@ -413,6 +413,125 @@
   display: none;
 }
 
+.music-mobile-search-recovery {
+  display: grid;
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--green) 30%, var(--line));
+  border-radius: 18px;
+  padding: 15px;
+  background: linear-gradient(145deg, var(--success-soft), var(--surface) 68%);
+}
+
+.music-mobile-search-recovery > small:first-child {
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 950;
+}
+
+.music-mobile-search-recovery > strong {
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 950;
+}
+
+.music-mobile-search-recovery > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.5;
+}
+
+.music-mobile-search-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.music-mobile-search-recovery-action {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 14px;
+  background: var(--surface);
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.music-mobile-search-recovery-action.primary {
+  border-color: var(--green);
+  background: var(--green);
+  color: #fff;
+}
+
+.music-mobile-search-recovery-suggestions {
+  display: grid;
+  grid-auto-columns: minmax(190px, 72%);
+  grid-auto-flow: column;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+}
+
+.music-mobile-search-recovery-suggestions::-webkit-scrollbar {
+  display: none;
+}
+
+.music-mobile-search-recovery-suggestions > button {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  min-height: 58px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 8px 10px;
+  background: var(--surface);
+  color: var(--ink);
+  text-align: left;
+  scroll-snap-align: start;
+}
+
+.music-mobile-search-recovery-suggestions > button > small {
+  display: grid;
+  min-height: 34px;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--success-soft);
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 950;
+}
+
+.music-mobile-search-recovery-suggestions > button > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.music-mobile-search-recovery-suggestions strong,
+.music-mobile-search-recovery-suggestions em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-mobile-search-recovery-suggestions strong {
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.music-mobile-search-recovery-suggestions em,
+.music-mobile-search-recovery-error {
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+}
+
 .music-mobile-search-suggestions {
   position: absolute;
   top: 64px;

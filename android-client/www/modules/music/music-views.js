@@ -97,6 +97,7 @@ export function createMusicViews(deps) {
     searchHistory: readSearchHistoryPreference(),
     searchOverview: emptySearchOverview(),
     lyricSearch: emptyLyricSearch(),
+    searchRecovery: emptySearchRecovery(),
     searchSuggestions: [],
     searchSuggestionQuery: "",
     searchSuggestionIndex: -1,
@@ -330,6 +331,49 @@ export function createMusicViews(deps) {
     else renderShell();
   }
 
+  async function loadSearchRecovery(query, signal = null) {
+    const value = String(query || "").trim();
+    if (!value || state.mode !== "library") {
+      state.searchRecovery = emptySearchRecovery();
+      return;
+    }
+    state.searchRecovery = { ...emptySearchRecovery(), loading: true, query: value };
+    refreshMountedSearchUi();
+    try {
+      const params = new URLSearchParams({ q: value });
+      const data = await fetchJson(getActiveUrl(), `/api/music/suggest?${params}`, { timeoutMs: 8000, signal });
+      if (signal?.aborted || state.query !== value || state.mode !== "library") return;
+      const tracks = buildTrackVersionGroups(data?.tracks || []).slice(0, 4).map((group) => ({
+        value: group.baseTitle || group.primary?.title || "",
+        title: group.baseTitle || group.primary?.title || "未知歌曲",
+        meta: [group.artist || group.primary?.artist || "未知歌手", group.tracks.length > 1 ? `${formatNumber(group.tracks.length)} 个版本` : group.primary?.album || "未知专辑"].filter(Boolean).join(" · ")
+      })).filter((item) => item.value);
+      const artists = (data?.artists || []).slice(0, 2).map((artist) => ({
+        value: artist.name || "",
+        title: artist.name || "未知歌手",
+        meta: `${formatNumber(artist.trackCount || 0)} 首歌曲`
+      })).filter((item) => item.value);
+      const albums = (data?.albums || []).filter((album) => String(album.title || "").trim() !== "_单曲").slice(0, 2).map((album) => ({
+        value: album.title || "",
+        title: album.title || "未知专辑",
+        meta: album.artistName || "未知歌手"
+      })).filter((item) => item.value);
+      state.searchRecovery = {
+        loading: false,
+        query: value,
+        correctedTarget: data?.correctedQuery ? searchSuggestionCorrectionTarget(data) : "",
+        tracks,
+        artists,
+        albums,
+        error: ""
+      };
+    } catch (error) {
+      if (signal?.aborted || state.query !== value) return;
+      state.searchRecovery = { ...emptySearchRecovery(), query: value, error: error?.message || "相近建议暂时不可用" };
+    }
+    refreshMountedSearchUi();
+  }
+
   async function loadLyricSearchResults(renderGuard = null, options = {}) {
     const query = String(state.query || "").trim();
     if (state.mode !== "library" || !query) {
@@ -389,6 +433,7 @@ export function createMusicViews(deps) {
     state.searchOverview = state.mode === "library" && value
       ? { ...emptySearchOverview(), loading: true }
       : emptySearchOverview();
+    state.searchRecovery = emptySearchRecovery();
     state.lyricSearch = state.mode === "library" && value && ["all", "lyrics"].includes(state.searchScope)
       ? { ...emptyLyricSearch(), loading: true }
       : emptyLyricSearch();
@@ -408,6 +453,7 @@ export function createMusicViews(deps) {
       state.searchSuggestionIndex = -1;
       state.searchSuggestionLoading = false;
       state.lyricSearch = emptyLyricSearch();
+      state.searchRecovery = emptySearchRecovery();
       refreshMountedSearchUi();
       return;
     }
@@ -419,6 +465,7 @@ export function createMusicViews(deps) {
       state.data = { ...(state.data || {}), query: value, tracks: [], rawTracks: [], rawLoaded: 0, total: 0, hasMore: false };
       refreshMountedSearchUi();
       await loadLyricSearchResults(null, { signal: controller.signal, mounted: true, limit: 40 });
+      if (!state.lyricSearch.matches.length) await loadSearchRecovery(value, controller.signal);
       return;
     }
 
@@ -433,6 +480,7 @@ export function createMusicViews(deps) {
       });
       if (controller.signal.aborted || token !== mountedSearchToken || state.query !== value) return;
       applyLoadedMusicData(data);
+      if (!state.data?.tracks?.length) state.searchRecovery = { ...emptySearchRecovery(), loading: true, query: value };
       els.viewTitle.textContent = musicTitle();
       els.viewMeta.textContent = musicMeta(data);
       refreshMountedSearchUi();
@@ -445,7 +493,8 @@ export function createMusicViews(deps) {
               mounted: true,
               limit: state.searchScope === "lyrics" ? 40 : 4
             })
-            : Promise.resolve()
+            : Promise.resolve(),
+          !state.data?.tracks?.length ? loadSearchRecovery(value, controller.signal) : Promise.resolve()
         ]);
       }
     } catch (error) {
@@ -1040,15 +1089,132 @@ export function createMusicViews(deps) {
     if (!state.query) return renderSearchDiscovery();
     if (state.mode === "artists") return renderArtistBrowser();
     if (state.mode === "albums") return renderAlbumBrowser();
-    if (state.searchScope === "songs") return renderSearchSongResults();
-    if (state.searchScope === "lyrics") return renderLyricSearchResults();
+    if (state.searchScope === "songs") return shouldRenderSearchRecovery() ? renderSearchRecovery() : renderSearchSongResults();
+    if (state.searchScope === "lyrics") return shouldRenderSearchRecovery() ? renderSearchRecovery() : renderLyricSearchResults();
     const fragment = document.createDocumentFragment();
+    if (shouldRenderSearchRecovery()) fragment.append(renderSearchRecovery());
     fragment.append(renderSearchOverview());
     if (state.lyricSearch.loading || state.lyricSearch.matches.length || state.lyricSearch.error) {
       fragment.append(renderLyricSearchResults({ preview: true, collapsible: true }));
     }
     fragment.append(renderSearchSongResults({ preview: true, collapsible: true }));
     return fragment;
+  }
+
+  function shouldRenderSearchRecovery() {
+    if (!state.query || state.mode !== "library") return false;
+    const tracks = Array.isArray(state.data?.tracks) ? state.data.tracks : [];
+    if (state.searchScope === "songs") return !state.loading && !tracks.length;
+    if (state.searchScope === "lyrics") return !state.lyricSearch.loading && !state.lyricSearch.matches.length;
+    if (state.loading) return false;
+    if (hasActiveSearchFilters() && !tracks.length) return true;
+    if (state.searchOverview.loading || state.lyricSearch.loading) return false;
+    return !tracks.length
+      && !state.searchOverview.artists.length
+      && !state.searchOverview.albums.length
+      && !state.lyricSearch.matches.length;
+  }
+
+  function renderSearchRecovery() {
+    const recovery = state.searchRecovery || emptySearchRecovery();
+    const panel = document.createElement("section");
+    panel.className = "music-mobile-search-recovery";
+    const eyebrow = document.createElement("small");
+    eyebrow.textContent = hasActiveSearchFilters() ? "筛选诊断" : state.searchScope !== "all" ? "范围诊断" : "搜索建议";
+    const title = document.createElement("strong");
+    title.textContent = hasActiveSearchFilters()
+      ? "当前筛选把结果挡住了"
+      : state.searchScope !== "all"
+        ? `“${searchScopeLabel(state.searchScope)}”中没有结果`
+        : "没有找到直接匹配";
+    const meta = document.createElement("p");
+    const suggestionCount = searchRecoverySuggestionCount(recovery);
+    meta.textContent = recovery.loading
+      ? "正在检查未筛选结果和相近关键词…"
+      : hasActiveSearchFilters()
+        ? suggestionCount ? `不带当前筛选时找到了 ${formatNumber(suggestionCount)} 条可继续查看的候选。` : "可以先恢复全部结果，再逐个缩小范围。"
+        : suggestionCount ? `为“${state.query}”找到了 ${formatNumber(suggestionCount)} 条相近建议。` : "可以调整关键词，或返回综合结果继续查找。";
+    panel.append(eyebrow, title, meta);
+
+    const actions = document.createElement("div");
+    actions.className = "music-mobile-search-recovery-actions";
+    if (hasActiveSearchFilters()) {
+      actions.append(searchRecoveryAction("清除筛选", () => {
+        resetSearchFilters();
+        refreshMountedSearchResults(state.query).catch(() => {});
+      }, true));
+    }
+    if (state.searchScope !== "all") actions.append(searchRecoveryAction("查看综合", () => switchSearchScope("all"), !hasActiveSearchFilters()));
+    if (recovery.correctedTarget && normalizeSearchComparison(recovery.correctedTarget) !== normalizeSearchComparison(state.query)) {
+      actions.append(searchRecoveryAction(`搜索“${recovery.correctedTarget}”`, () => commitMusicSearch(recovery.correctedTarget, { remember: true }), !actions.childElementCount));
+    }
+    if (!actions.childElementCount && !suggestionCount && !recovery.loading) {
+      actions.append(searchRecoveryAction("修改关键词", focusSearchInputForRetry, true));
+    }
+    if (actions.childElementCount) panel.append(actions);
+    if (suggestionCount) panel.append(renderSearchRecoverySuggestions(recovery));
+    if (recovery.error) {
+      const error = document.createElement("small");
+      error.className = "music-mobile-search-recovery-error";
+      error.textContent = recovery.error;
+      panel.append(error);
+    }
+    return panel;
+  }
+
+  function searchScopeLabel(scope) {
+    return { songs: "歌曲", lyrics: "歌词", artists: "歌手", albums: "专辑" }[scope] || "综合";
+  }
+
+  function searchRecoverySuggestionCount(recovery) {
+    const seen = new Set();
+    for (const item of [...recovery.tracks, ...recovery.artists, ...recovery.albums]) {
+      const key = normalizeSearchComparison(item.value);
+      if (key) seen.add(key);
+    }
+    return seen.size;
+  }
+
+  function searchRecoveryAction(label, action, primary = false) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `music-mobile-search-recovery-action${primary ? " primary" : ""}`;
+    button.textContent = label;
+    button.addEventListener("click", action);
+    return button;
+  }
+
+  function renderSearchRecoverySuggestions(recovery) {
+    const wrap = document.createElement("div");
+    wrap.className = "music-mobile-search-recovery-suggestions";
+    const seen = new Set();
+    for (const [type, items] of [["歌曲", recovery.tracks], ["歌手", recovery.artists], ["专辑", recovery.albums]]) {
+      for (const item of items) {
+        const key = normalizeSearchComparison(item.value);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        const button = document.createElement("button");
+        button.type = "button";
+        const badge = document.createElement("small");
+        badge.textContent = type;
+        const text = document.createElement("span");
+        const title = document.createElement("strong");
+        title.textContent = item.title;
+        const meta = document.createElement("em");
+        meta.textContent = item.meta;
+        text.append(title, meta);
+        button.append(badge, text);
+        button.addEventListener("click", () => commitMusicSearch(item.value, { remember: true }));
+        wrap.append(button);
+      }
+    }
+    return wrap;
+  }
+
+  function focusSearchInputForRetry() {
+    const input = els.viewContent?.querySelector(".music-mobile-search-input");
+    input?.focus();
+    input?.select();
   }
 
   function refreshMountedSearchUi() {
@@ -1899,7 +2065,14 @@ export function createMusicViews(deps) {
       if (["all", "lyrics"].includes(nextScope)) {
         const neededLimit = nextScope === "lyrics" ? 40 : 4;
         if (state.lyricSearch.limit < neededLimit || (!state.lyricSearch.loading && !state.lyricSearch.matches.length && !state.lyricSearch.error)) {
-          loadLyricSearchResults(null, { limit: neededLimit, mounted: true }).catch(() => {});
+          loadLyricSearchResults(null, { limit: neededLimit, mounted: true })
+            .then(() => {
+              if (nextScope === "lyrics" && state.searchScope === "lyrics" && !state.lyricSearch.matches.length) {
+                return loadSearchRecovery(state.query);
+              }
+              return null;
+            })
+            .catch(() => {});
         }
       }
       return;
@@ -5442,6 +5615,18 @@ function emptySearchOverview() {
     albums: [],
     artistTotal: 0,
     albumTotal: 0,
+    error: ""
+  };
+}
+
+function emptySearchRecovery() {
+  return {
+    loading: false,
+    query: "",
+    correctedTarget: "",
+    tracks: [],
+    artists: [],
+    albums: [],
     error: ""
   };
 }
