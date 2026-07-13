@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [ValidatePattern('^[0-9A-Za-z._-]+$')]
-  [string]$Version = "0.3.0-test",
+  [string]$Version = "0.3.1-test",
   [string]$DownloaderRoot = "",
   [string]$OutputDirectory = "",
   [string]$WorkDirectory = "",
@@ -72,6 +72,8 @@ foreach ($required in @(
   (Join-Path $ModuleDir "app.py"),
   (Join-Path $ModuleDir "static"),
   (Join-Path $ModuleDir "node_modules\playwright-core"),
+  (Join-Path $ProjectRoot "public\short-video-app.js"),
+  (Join-Path $ProjectRoot "public\modules\short-videos\short-video-page.js"),
   (Join-Path $DownloaderRoot "cli"),
   $DownloaderSitePackages,
   $DownloaderEntry,
@@ -103,6 +105,7 @@ try {
     "--workpath", $ManagerWork,
     "--specpath", $SpecDir,
     "--add-data", "$(Join-Path $ModuleDir 'static');static",
+    "--add-data", "$(Join-Path $ProjectRoot 'public');fanhao-public",
     "--add-data", "$(Join-Path $ModuleDir 'extract-links.mjs');.",
     "--add-data", "$(Join-Path $ModuleDir 'extract-following.mjs');.",
     "--add-data", "$(Join-Path $ModuleDir 'cookie-login.mjs');.",
@@ -191,6 +194,10 @@ try {
     $html = (Invoke-WebRequest -Uri "http://127.0.0.1:$smokePort/#settings" -TimeoutSec 5).Content
     if ($html -notmatch "打开 Edge 登录") { throw "Packaged settings page is missing the auth controls." }
     if ($html -notmatch "已下载作品") { throw "Packaged page is missing the local library." }
+    $playerHtml = (Invoke-WebRequest -Uri "http://127.0.0.1:$smokePort/short-videos/1" -TimeoutSec 5).Content
+    if ($playerHtml -notmatch "/fanhao/short-video-app.js") { throw "Packaged page is not wired to the shared short-video player." }
+    $sharedPlayer = (Invoke-WebRequest -Uri "http://127.0.0.1:$smokePort/fanhao/modules/short-videos/short-video-page.js" -TimeoutSec 5).Content
+    if ($sharedPlayer -notmatch "createShortVideoPage") { throw "Packaged shared short-video player assets are missing." }
   } finally {
     if ($managerProcess -and -not $managerProcess.HasExited) { Stop-Process -Id $managerProcess.Id -Force }
     foreach ($name in $savedEnvironment.Keys) {

@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.3.0-test"
+#define AppVersion "0.3.1-test"
 #endif
 #ifndef SourceDir
   #error SourceDir must be provided with /DSourceDir=...

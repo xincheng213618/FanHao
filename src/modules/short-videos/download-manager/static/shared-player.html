@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b1412" />
+    <title>已下载作品播放器</title>
+    <link rel="stylesheet" href="/fanhao/styles.css?v=20260713-shared-player-01" />
+    <link rel="stylesheet" href="/shared-player.css?v=20260713-shared-player-02" />
+  </head>
+  <body class="standalone-module-view short-video-view download-manager-shared-player">
+    <a class="download-manager-player-return" href="/#library" aria-label="返回下载管理器">← 返回下载管理</a>
+    <main class="main">
+      <header class="toolbar">
+        <div class="toolbar-title">
+          <div class="eyebrow" id="currentPath">本机已下载</div>
+          <h2 id="currentTitle">短视频播放器</h2>
+        </div>
+      </header>
+      <section class="person-profile" id="personProfile" hidden></section>
+      <section class="stats-row" id="statsRow"></section>
+      <section class="work-grid" id="workGrid" aria-live="polite"></section>
+    </main>
+    <script type="module" src="/fanhao/short-video-app.js?v=20260713-shared-player-01"></script>
+  </body>
+</html>

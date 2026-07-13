@@ -25,8 +25,6 @@ let libraryOffset = 0;
 let libraryHasMore = false;
 let libraryLoading = false;
 let librarySearchTimer = null;
-let activeLibraryItem = null;
-let activeLibraryAssetIndex = 0;
 
 function setInputValue(id, value, options = {}) {
   const node = $(id);
@@ -804,52 +802,9 @@ function showLibraryPage() {
   loadLibrary().catch((err) => toast(err.message));
 }
 
-function renderLibraryViewerAsset() {
-  if (!activeLibraryItem) return;
-  const assets = activeLibraryItem.assets || [];
-  const asset = assets[activeLibraryAssetIndex];
-  if (!asset) return;
-  const media = $("libraryViewerMedia");
-  const music = $("libraryViewerMusic");
-  music.pause();
-  if (asset.kind === "video") {
-    media.innerHTML = `<video src="${escapeHtml(asset.url)}" controls autoplay playsinline></video>`;
-  } else {
-    media.innerHTML = `<img src="${escapeHtml(asset.url)}" alt="${escapeHtml(activeLibraryItem.title || "")}" />`;
-    if (activeLibraryItem.music_url) {
-      music.src = activeLibraryItem.music_url;
-      music.play().catch(() => {});
-    }
-  }
-  $("libraryViewerPrev").hidden = assets.length <= 1;
-  $("libraryViewerNext").hidden = assets.length <= 1;
-  $("libraryViewerMeta").textContent = `${activeLibraryItem.author || "未知作者"} · ${activeLibraryAssetIndex + 1} / ${assets.length}`;
-}
-
-function openLibraryViewer(item) {
-  activeLibraryItem = item;
-  activeLibraryAssetIndex = 0;
-  $("libraryViewerTitle").textContent = item.title || item.aweme_id;
-  $("libraryViewer").hidden = false;
-  document.body.classList.add("viewer-open");
-  renderLibraryViewerAsset();
-}
-
-function closeLibraryViewer() {
-  $("libraryViewerMusic").pause();
-  $("libraryViewerMusic").removeAttribute("src");
-  $("libraryViewerMedia").innerHTML = "";
-  $("libraryViewer").hidden = true;
-  document.body.classList.remove("viewer-open");
-  activeLibraryItem = null;
-}
-
-function moveLibraryViewer(direction) {
-  if (!activeLibraryItem) return;
-  const count = activeLibraryItem.assets?.length || 0;
-  if (count <= 1) return;
-  activeLibraryAssetIndex = (activeLibraryAssetIndex + direction + count) % count;
-  renderLibraryViewerAsset();
+function openLibraryPlayer(item) {
+  if (!item?.id) return;
+  window.location.assign(`/short-videos/${encodeURIComponent(item.id)}`);
 }
 
 async function quitApplication() {
@@ -1079,7 +1034,7 @@ function bind() {
     const card = event.target.closest("[data-library-open]");
     if (!card) return;
     const item = libraryRows.find((row) => Number(row.id) === Number(card.dataset.libraryOpen));
-    if (item) openLibraryViewer(item);
+    if (item) openLibraryPlayer(item);
   });
   $("libraryGrid").addEventListener("keydown", (event) => {
     if (event.key !== "Enter" && event.key !== " ") return;
@@ -1087,25 +1042,7 @@ function bind() {
     if (!card) return;
     event.preventDefault();
     const item = libraryRows.find((row) => Number(row.id) === Number(card.dataset.libraryOpen));
-    if (item) openLibraryViewer(item);
-  });
-  $("libraryViewerClose").addEventListener("click", closeLibraryViewer);
-  $("libraryViewerPrev").addEventListener("click", () => moveLibraryViewer(-1));
-  $("libraryViewerNext").addEventListener("click", () => moveLibraryViewer(1));
-  $("libraryViewerFolder").addEventListener("click", () => {
-    if (!activeLibraryItem) return;
-    post("/api/library/open-folder", { id: activeLibraryItem.id })
-      .then((result) => toast(result.message))
-      .catch((err) => toast(err.message));
-  });
-  $("libraryViewer").addEventListener("click", (event) => {
-    if (event.target === $("libraryViewer")) closeLibraryViewer();
-  });
-  window.addEventListener("keydown", (event) => {
-    if ($("libraryViewer").hidden) return;
-    if (event.key === "Escape") closeLibraryViewer();
-    if (event.key === "ArrowLeft") moveLibraryViewer(-1);
-    if (event.key === "ArrowRight") moveLibraryViewer(1);
+    if (item) openLibraryPlayer(item);
   });
   [
     "profileUrl",

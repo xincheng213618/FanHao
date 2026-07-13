@@ -37,6 +37,11 @@ DESKTOP_MODE = os.environ.get("DOUYIN_MANAGER_DESKTOP", "1" if FROZEN_BUILD else
 INSTALL_DIR = Path(sys.executable).resolve().parent if FROZEN_BUILD else Path(__file__).resolve().parent
 BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
 STATIC_DIR = BASE_DIR / "static"
+FANHAO_PUBLIC_DIR = (
+    BASE_DIR / "fanhao-public"
+    if FROZEN_BUILD
+    else Path(__file__).resolve().parents[4] / "public"
+)
 APP_STATE_DIR = (
     Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
     / "DouyinDownloadManager"
@@ -6102,6 +6107,38 @@ def library_files_for_link(link: sqlite3.Row) -> dict[str, Any] | None:
     }
 
 
+def library_item_from_row(row: sqlite3.Row) -> dict[str, Any] | None:
+    media = library_files_for_link(row)
+    if not media or not media["assets"]:
+        return None
+    link_id = int(row["id"])
+    desc = first_text(row_text(row, "desc"), media["record"].get("desc"), row_text(row, "aweme_id"))
+    assets = [
+        {
+            "kind": str(asset.get("kind") or "file"),
+            "url": f"/api/library/media?id={link_id}&index={index}",
+        }
+        for index, asset in enumerate(media["assets"])
+    ]
+    cover_url = f"/api/library/media?id={link_id}&role=cover" if media["cover"] else row_text(row, "cover_url")
+    return {
+        "id": link_id,
+        "aweme_id": row_text(row, "aweme_id"),
+        "title": desc.splitlines()[0][:160] if desc else row_text(row, "aweme_id"),
+        "description": desc,
+        "author": first_text(row_text(row, "author_nickname"), "未知作者"),
+        "author_id": first_text(row_text(row, "author_sec_uid"), row_text(row, "author_uid")),
+        "downloaded_at": row_text(row, "downloaded_at"),
+        "create_time": row_int(row, "create_time"),
+        "media_type": "gallery" if media["is_gallery"] else "video",
+        "cover_url": cover_url,
+        "assets": assets,
+        "asset_count": len(assets),
+        "music_url": f"/api/library/media?id={link_id}&role=music" if media["music"] else "",
+        "_media": media,
+    }
+
+
 def list_library(query: dict[str, list[str]]) -> dict[str, Any]:
     search = (query.get("q") or [""])[0].strip()
     limit = normalize_int((query.get("limit") or ["48"])[0], 48, 1, 120)
@@ -6132,36 +6169,10 @@ def list_library(query: dict[str, list[str]]) -> dict[str, Any]:
 
     items: list[dict[str, Any]] = []
     for row in rows:
-        media = library_files_for_link(row)
-        if not media or not media["assets"]:
-            continue
-        link_id = int(row["id"])
-        desc = first_text(row_text(row, "desc"), media["record"].get("desc"), row_text(row, "aweme_id"))
-        assets = [
-            {
-                "kind": str(asset.get("kind") or "file"),
-                "url": f"/api/library/media?id={link_id}&index={index}",
-            }
-            for index, asset in enumerate(media["assets"])
-        ]
-        cover_url = f"/api/library/media?id={link_id}&role=cover" if media["cover"] else row_text(row, "cover_url")
-        items.append(
-            {
-                "id": link_id,
-                "aweme_id": row_text(row, "aweme_id"),
-                "title": desc.splitlines()[0][:160] if desc else row_text(row, "aweme_id"),
-                "description": desc,
-                "author": first_text(row_text(row, "author_nickname"), "未知作者"),
-                "author_id": first_text(row_text(row, "author_sec_uid"), row_text(row, "author_uid")),
-                "downloaded_at": row_text(row, "downloaded_at"),
-                "create_time": row_int(row, "create_time"),
-                "media_type": "gallery" if media["is_gallery"] else "video",
-                "cover_url": cover_url,
-                "assets": assets,
-                "asset_count": len(assets),
-                "music_url": f"/api/library/media?id={link_id}&role=music" if media["music"] else "",
-            }
-        )
+        item = library_item_from_row(row)
+        if item:
+            item.pop("_media", None)
+            items.append(item)
     next_offset = offset + len(rows)
     return {
         "ok": True,
@@ -6171,6 +6182,248 @@ def list_library(query: dict[str, list[str]]) -> dict[str, Any]:
         "offset": offset,
         "next_offset": next_offset,
         "has_more": next_offset < total,
+    }
+
+
+def shared_player_video_from_row(row: sqlite3.Row) -> dict[str, Any] | None:
+    item = library_item_from_row(row)
+    if not item:
+        return None
+    media = item.pop("_media")
+    record = media.get("record") if isinstance(media.get("record"), dict) else {}
+    assets = item["assets"]
+    has_video = any(asset.get("kind") == "video" for asset in assets)
+    media_type = "gallery" if item["media_type"] == "gallery" or not has_video else "video"
+    gallery_items = [
+        {
+            "index": index,
+            "type": "video" if asset.get("kind") == "video" else "image",
+            "url": asset["url"],
+        }
+        for index, asset in enumerate(assets)
+    ] if media_type == "gallery" else []
+    stream_url = next(
+        (asset["url"] for asset in assets if asset.get("kind") == "video"),
+        "",
+    ) if media_type == "video" else ""
+    sec_uid = row_text(row, "author_sec_uid")
+    author_uid = row_text(row, "author_uid")
+    author_id = f"douyin:{sec_uid}" if sec_uid else (f"douyin:{author_uid}" if author_uid else "")
+    create_time = row_int(row, "create_time") or int_or_none(record.get("publish_timestamp"))
+    published_at = ""
+    if create_time:
+        try:
+            published_at = datetime.fromtimestamp(create_time, timezone.utc).isoformat().replace("+00:00", "Z")
+        except (OSError, OverflowError, ValueError):
+            published_at = ""
+    fanhao_media = record.get("fanhaoMedia") if isinstance(record.get("fanhaoMedia"), dict) else {}
+    size = 0
+    for asset in media.get("assets") or []:
+        try:
+            size += int(asset["path"].stat().st_size)
+        except (KeyError, OSError, TypeError, ValueError):
+            pass
+    tags = record.get("tags") if isinstance(record.get("tags"), list) else []
+    music_url = item.get("music_url") or ""
+    sound = None
+    if music_url:
+        music = record.get("music") if isinstance(record.get("music"), dict) else {}
+        sound = {
+            "key": first_text(row_text(row, "music_id"), music.get("id_str"), f"local:{item['id']}"),
+            "id": first_text(row_text(row, "music_id"), music.get("id_str")),
+            "title": first_text(row_text(row, "music_title"), music.get("title"), "作品原声"),
+            "author": first_text(row_text(row, "music_author"), music.get("author"), item["author"]),
+            "coverUrl": first_text(row_text(row, "music_cover_url")),
+            "previewUrl": music_url,
+            "previewSource": "local",
+            "localAvailable": True,
+            "original": bool(music.get("is_original_sound")),
+        }
+    first_media = (media.get("assets") or [{}])[0]
+    return {
+        "id": str(item["id"]),
+        "awemeId": item["aweme_id"],
+        "ownerUserId": author_id,
+        "origin": "douyin_download_manager",
+        "status": "normal",
+        "visibility": "local_only",
+        "mediaType": media_type,
+        "galleryCount": len(gallery_items),
+        "galleryItems": gallery_items,
+        "galleryImages": [entry for entry in gallery_items if entry["type"] == "image"],
+        "title": item["title"],
+        "description": item["description"],
+        "tags": [str(tag) for tag in tags if str(tag).strip()][:24],
+        "author": {
+            "id": author_id,
+            "secUid": sec_uid,
+            "uid": author_uid,
+            "name": item["author"],
+            "avatarUrl": row_text(row, "author_avatar_url"),
+            "profileUrl": first_text(row_text(row, "author_url"), f"https://www.douyin.com/user/{sec_uid}" if sec_uid else ""),
+            "following": False,
+        },
+        "publishedAt": published_at,
+        "likedAt": item["downloaded_at"],
+        "durationMs": row_int(row, "duration_ms"),
+        "width": int_or_none(fanhao_media.get("width")) or int_or_none(record.get("width")),
+        "height": int_or_none(fanhao_media.get("height")) or int_or_none(record.get("height")),
+        "stats": {
+            "known": any(row_int(row, key) is not None for key in ("digg_count", "comment_count", "collect_count", "share_count")),
+            "likes": row_int(row, "digg_count") or 0,
+            "comments": row_int(row, "comment_count") or 0,
+            "collects": row_int(row, "collect_count") or 0,
+            "shares": row_int(row, "share_count") or 0,
+            "plays": 0,
+        },
+        "actions": {"liked": False, "collected": False, "disliked": False},
+        "watch": {"progressMs": 0, "completedCount": 0, "completed": False, "lastWatchedAt": ""},
+        "recommendation": {"score": 0, "reason": "本机已下载"},
+        "sound": sound,
+        "shareUrl": row_text(row, "url"),
+        "originalUrl": row_text(row, "url"),
+        "streamUrl": stream_url,
+        "coverUrl": item["cover_url"],
+        "coverSource": "local" if str(item["cover_url"]).startswith("/api/") else "remote",
+        "fileName": first_text(first_media.get("file_name"), Path(str(first_media.get("path") or "")).name),
+        "relativePath": "",
+        "size": size,
+    }
+
+
+def shared_player_row(video_id: str | int) -> sqlite3.Row | None:
+    key = str(video_id or "").strip()
+    if not key:
+        return None
+    with db() as conn:
+        if key.isdigit():
+            row = conn.execute("SELECT * FROM links WHERE id=? AND status='downloaded'", (int(key),)).fetchone()
+            if row:
+                return row
+        return conn.execute(
+            "SELECT * FROM links WHERE aweme_id=? AND status='downloaded' ORDER BY id DESC LIMIT 1",
+            (key,),
+        ).fetchone()
+
+
+def shared_player_neighbor(row: sqlite3.Row, direction: int) -> dict[str, Any] | None:
+    current_order = first_text(
+        row_text(row, "downloaded_at"),
+        row_text(row, "last_started_at"),
+        row_text(row, "last_seen_at"),
+    )
+    current_id = int(row["id"])
+    if direction < 0:
+        comparison = "(COALESCE(downloaded_at, last_started_at, last_seen_at, '') > ? OR (COALESCE(downloaded_at, last_started_at, last_seen_at, '') = ? AND id > ?))"
+        order = "COALESCE(downloaded_at, last_started_at, last_seen_at, '') ASC, id ASC"
+    else:
+        comparison = "(COALESCE(downloaded_at, last_started_at, last_seen_at, '') < ? OR (COALESCE(downloaded_at, last_started_at, last_seen_at, '') = ? AND id < ?))"
+        order = "COALESCE(downloaded_at, last_started_at, last_seen_at, '') DESC, id DESC"
+    with db() as conn:
+        candidates = conn.execute(
+            f"SELECT * FROM links WHERE status='downloaded' AND {comparison} ORDER BY {order} LIMIT 32",
+            (current_order, current_order, current_id),
+        ).fetchall()
+    for candidate in candidates:
+        video = shared_player_video_from_row(candidate)
+        if video:
+            return video
+    return None
+
+
+def shared_player_detail(video_id: str) -> dict[str, Any] | None:
+    row = shared_player_row(video_id)
+    if not row:
+        return None
+    video = shared_player_video_from_row(row)
+    if not video:
+        return None
+    previous = shared_player_neighbor(row, -1)
+    next_video = shared_player_neighbor(row, 1)
+    return {
+        "video": video,
+        "prevId": previous["id"] if previous else "",
+        "nextId": next_video["id"] if next_video else "",
+        "neighbors": {
+            "previous": [previous] if previous else [],
+            "next": [next_video] if next_video else [],
+        },
+    }
+
+
+def shared_player_list(query: dict[str, list[str]]) -> dict[str, Any]:
+    search = (query.get("q") or [""])[0].strip()
+    author = (query.get("author") or [""])[0].strip()
+    media_filter = (query.get("media") or ["all"])[0].strip().lower()
+    limit = normalize_int((query.get("limit") or ["48"])[0], 48, 1, 120)
+    offset = normalize_int((query.get("offset") or ["0"])[0], 0, 0, 1000000)
+    where = ["status='downloaded'"]
+    params: list[Any] = []
+    if search:
+        like = f"%{search}%"
+        where.append("(aweme_id LIKE ? OR desc LIKE ? OR author_nickname LIKE ?)")
+        params.extend([like, like, like])
+    if author and author != "all":
+        normalized_author = author.removeprefix("douyin:")
+        where.append("(author_sec_uid=? OR author_uid=?)")
+        params.extend([normalized_author, normalized_author])
+    if media_filter in {"video", "gallery"}:
+        if media_filter == "gallery":
+            where.append("(LOWER(COALESCE(media_type, ''))='gallery' OR LOWER(COALESCE(kind, ''))='note')")
+        else:
+            where.append("NOT (LOWER(COALESCE(media_type, ''))='gallery' OR LOWER(COALESCE(kind, ''))='note')")
+    where_sql = " AND ".join(where)
+    with db() as conn:
+        total = int(conn.execute(f"SELECT COUNT(*) c FROM links WHERE {where_sql}", params).fetchone()["c"])
+        rows = conn.execute(
+            f"""
+            SELECT * FROM links
+            WHERE {where_sql}
+            ORDER BY COALESCE(downloaded_at, last_started_at, last_seen_at, '') DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, limit, offset],
+        ).fetchall()
+    videos = [video for row in rows if (video := shared_player_video_from_row(row))]
+    return {
+        "summary": None,
+        "total": total,
+        "relationshipTotal": total,
+        "limit": limit,
+        "offset": offset,
+        "hasMore": offset + len(rows) < total,
+        "query": search,
+        "topic": "",
+        "sound": "",
+        "author": author,
+        "media": media_filter if media_filter in {"video", "gallery"} else "all",
+        "source": "liked",
+        "sort": "published",
+        "stats": None,
+        "authors": [],
+        "videos": videos,
+    }
+
+
+def shared_player_summary() -> dict[str, Any]:
+    with db() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) videos,
+                   COUNT(DISTINCT COALESCE(NULLIF(author_sec_uid, ''), NULLIF(author_uid, ''), NULLIF(author_nickname, ''))) authors,
+                   COALESCE(SUM(duration_ms), 0) duration_ms
+            FROM links
+            WHERE status='downloaded'
+            """
+        ).fetchone()
+    return {
+        "totals": {
+            "videos": int(row["videos"] or 0),
+            "authors": int(row["authors"] or 0),
+            "bytes": 0,
+            "durationMs": int(row["duration_ms"] or 0),
+        },
+        "topAuthors": [],
     }
 
 
@@ -6421,6 +6674,34 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/state":
             return self.send_json(get_state())
+        if parsed.path == "/api/short-videos/summary":
+            return self.send_json(shared_player_summary())
+        if parsed.path == "/api/short-videos/suggestions":
+            return self.send_json({"query": (parse_qs(parsed.query).get("q") or [""])[0], "suggestions": []})
+        if parsed.path == "/api/short-videos/authors":
+            return self.send_json({"authors": [], "total": 0, "scopeTotal": 0, "unlikedTotal": 0, "hasMore": False})
+        if parsed.path == "/api/short-videos":
+            return self.send_json(shared_player_list(parse_qs(parsed.query)))
+        adjacent_match = re.fullmatch(r"/api/short-videos/([^/]+)/adjacent", parsed.path)
+        if adjacent_match:
+            row = shared_player_row(adjacent_match.group(1))
+            direction = -1 if (parse_qs(parsed.query).get("direction") or [""])[0] == "prev" else 1
+            video = shared_player_neighbor(row, direction) if row else None
+            if not video:
+                return self.send_error(HTTPStatus.NOT_FOUND, "Adjacent video not found")
+            return self.send_json({"video": video})
+        comments_match = re.fullmatch(r"/api/short-videos/([^/]+)/comments", parsed.path)
+        if comments_match:
+            return self.send_json({"videoId": comments_match.group(1), "total": 0, "comments": []})
+        related_match = re.fullmatch(r"/api/short-videos/([^/]+)/related", parsed.path)
+        if related_match:
+            return self.send_json({"videoId": related_match.group(1), "total": 0, "videos": []})
+        detail_match = re.fullmatch(r"/api/short-videos/([^/]+)", parsed.path)
+        if detail_match:
+            detail = shared_player_detail(detail_match.group(1))
+            if not detail:
+                return self.send_error(HTTPStatus.NOT_FOUND, "Short video not found")
+            return self.send_json(detail)
         if parsed.path == "/api/library":
             return self.send_json(list_library(parse_qs(parsed.query)))
         if parsed.path == "/api/library/media":
@@ -6453,6 +6734,12 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_text("\n".join(urls) + ("\n" if urls else ""), "text/plain; charset=utf-8")
         if parsed.path == "/" or parsed.path == "/index.html":
             return self.serve_file(STATIC_DIR / "index.html")
+        if re.fullmatch(r"/short-videos(?:/[^/?#]+)?", parsed.path):
+            return self.serve_file(STATIC_DIR / "shared-player.html")
+        if parsed.path.startswith("/fanhao/"):
+            shared_path = (FANHAO_PUBLIC_DIR / parsed.path.removeprefix("/fanhao/")).resolve()
+            if str(shared_path).startswith(str(FANHAO_PUBLIC_DIR.resolve())) and shared_path.exists():
+                return self.serve_file(shared_path)
         static_path = (STATIC_DIR / parsed.path.lstrip("/")).resolve()
         if str(static_path).startswith(str(STATIC_DIR.resolve())) and static_path.exists():
             return self.serve_file(static_path)
@@ -6462,6 +6749,8 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             payload = self.read_json()
+            if self.handle_shared_player_mutation(parsed.path, payload):
+                return
             if parsed.path == "/api/settings":
                 return self.handle_settings(payload)
             if parsed.path == "/api/auth/cookie/import":
@@ -6547,6 +6836,56 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as exc:
             return self.send_json({"ok": False, "message": str(exc)}, status=500)
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def do_PUT(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            payload = self.read_json()
+            if self.handle_shared_player_mutation(parsed.path, payload):
+                return
+        except Exception as exc:
+            return self.send_json({"ok": False, "message": str(exc)}, status=500)
+        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def handle_shared_player_mutation(self, path: str, payload: dict[str, Any]) -> bool:
+        watch_match = re.fullmatch(r"/api/short-videos/([^/]+)/watch", path)
+        if watch_match:
+            progress = max(0, normalize_int(payload.get("progressMs", 0), 0, 0, 2147483647))
+            completed = bool(payload.get("completed"))
+            self.send_json(
+                {
+                    "ok": True,
+                    "videoId": watch_match.group(1),
+                    "watch": {
+                        "progressMs": progress,
+                        "completedCount": 1 if completed else 0,
+                        "completed": completed,
+                        "lastWatchedAt": now_iso(),
+                    },
+                }
+            )
+            return True
+        action_match = re.fullmatch(r"/api/short-videos/([^/]+)/actions/(like|collect|dislike)", path)
+        if action_match:
+            active = bool(payload.get("active"))
+            row = shared_player_row(action_match.group(1))
+            video = shared_player_video_from_row(row) if row else None
+            if video:
+                key = {"like": "liked", "collect": "collected", "dislike": "disliked"}[action_match.group(2)]
+                video["actions"][key] = active
+            self.send_json({"ok": True, "active": active, "video": video})
+            return True
+        follow_match = re.fullmatch(r"/api/short-videos/(?:authors/)?([^/]+)/(?:author-follow|follow)", path)
+        if follow_match:
+            active = bool(payload.get("active"))
+            target = follow_match.group(1).removeprefix("douyin:")
+            self.send_json({"ok": True, "active": active, "targetUserId": follow_match.group(1), "secUid": target})
+            return True
+        comments_match = re.fullmatch(r"/api/short-videos/([^/]+)/comments", path)
+        if comments_match:
+            self.send_json({"ok": True, "videoId": comments_match.group(1), "total": 0, "comments": []})
+            return True
+        return False
 
     def handle_settings(self, payload: dict[str, Any]) -> None:
         allowed = {

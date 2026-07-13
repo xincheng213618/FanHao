@@ -1,0 +1,50 @@
+.download-manager-player-return {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top));
+  right: max(14px, env(safe-area-inset-right));
+  z-index: 500;
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(7, 15, 13, 0.72);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.24);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 700;
+  backdrop-filter: blur(14px);
+}
+
+.download-manager-player-return:hover,
+.download-manager-player-return:focus-visible {
+  border-color: rgba(255, 255, 255, 0.42);
+  background: rgba(14, 32, 27, 0.9);
+}
+
+body.download-manager-shared-player .short-video-caption-context,
+body.download-manager-shared-player .short-video-rail-button.is-like,
+body.download-manager-shared-player .short-video-rail-button.is-comment,
+body.download-manager-shared-player .short-video-rail-button.is-collect,
+body.download-manager-shared-player .short-video-rail-button.is-ai,
+body.download-manager-shared-player .short-video-rail-button.is-more,
+body.download-manager-shared-player .short-video-follow-button {
+  display: none !important;
+}
+
+body.download-manager-shared-player.short-video-browser-active > .main > .toolbar,
+body.download-manager-shared-player.short-video-browser-active > .main > .stats-row {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .download-manager-player-return {
+    top: max(8px, env(safe-area-inset-top));
+    right: max(8px, env(safe-area-inset-right));
+    min-height: 34px;
+    padding: 0 11px;
+    font-size: 13px;
+  }
+}

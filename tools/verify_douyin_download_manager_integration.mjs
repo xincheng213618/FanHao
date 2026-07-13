@@ -26,6 +26,8 @@ for (const relativePath of [
   "static/index.html",
   "static/app.js",
   "static/styles.css",
+  "static/shared-player.html",
+  "static/shared-player.css",
   "tools/auto_watchdog.py",
   "tools/backfill_covers.py",
   "tools/batch_profile_download.py"
@@ -53,6 +55,9 @@ assert.match(appSource, /DOUYIN_MANAGER_PORT/);
 assert.match(appSource, /\/api\/auth\/cookie\/import/);
 assert.match(appSource, /\/api\/auth\/login\/start/);
 assert.match(appSource, /\/api\/library\/media/);
+assert.match(appSource, /\/api\/short-videos\/summary/);
+assert.match(appSource, /shared_player_detail/);
+assert.match(appSource, /FANHAO_PUBLIC_DIR/);
 assert.match(appSource, /\/api\/app\/quit/);
 assert.match(appSource, /webview\.create_window/);
 assert.match(appSource, /acquire_single_instance/);
@@ -112,6 +117,7 @@ fs.rmSync(migrationFixture, { recursive: true, force: true });
 
 const managerHtml = fs.readFileSync(path.join(moduleDir, "static", "index.html"), "utf8");
 const managerClient = fs.readFileSync(path.join(moduleDir, "static", "app.js"), "utf8");
+const sharedPlayerHtml = fs.readFileSync(path.join(moduleDir, "static", "shared-player.html"), "utf8");
 assert.match(managerHtml, /打开 Edge 登录/);
 assert.match(managerHtml, /导入 Cookie/);
 assert.match(managerClient, /refreshAuthStatus/);
@@ -120,6 +126,17 @@ assert.match(managerHtml, /已下载作品/);
 assert.match(managerHtml, /退出程序/);
 assert.match(managerClient, /loadLibrary/);
 assert.match(managerClient, /quitApplication/);
+assert.match(managerClient, /\/short-videos\//);
+assert.doesNotMatch(managerClient, /openLibraryViewer|libraryViewer/);
+assert.match(sharedPlayerHtml, /\/fanhao\/short-video-app\.js/);
+assert.match(sharedPlayerHtml, /返回下载管理/);
+
+const sharedWebPlayer = fs.readFileSync(path.join(projectRoot, "public", "modules", "short-videos", "short-video-page.js"), "utf8");
+assert.match(sharedWebPlayer, /export function createShortVideoPage/);
+
+const installerBuilder = fs.readFileSync(path.join(projectRoot, "tools", "build_douyin_manager_installer.ps1"), "utf8");
+assert.match(installerBuilder, /public'\);fanhao-public/);
+assert.match(installerBuilder, /shared short-video player assets are missing/);
 
 const launcherSource = fs.readFileSync(path.join(projectRoot, "start-fanhao.ps1"), "utf8");
 assert.match(launcherSource, /short-videos\\download-manager\\run\.ps1/);
