@@ -20,7 +20,8 @@ const MUSIC_PLAYBACK_QUEUE_KEY = "fanhao.android.music.playbackQueue";
 const MUSIC_REMEMBER_VERSION_KEY = "fanhao.android.music.rememberVersionChoices";
 const MUSIC_VERSION_PREFERENCES_KEY = "fanhao.android.music.versionPreferences";
 const MUSIC_VERSION_STRATEGY_KEY = "fanhao.android.music.versionStrategy";
-const SLEEP_TIMER_OPTIONS = [0, 10, 15, 30, 45, 60, 90];
+const SLEEP_AFTER_CURRENT = -1;
+const SLEEP_TIMER_OPTIONS = [SLEEP_AFTER_CURRENT, 10, 15, 30, 45, 60, 90];
 const PLAYBACK_SPEED_OPTIONS = [0.75, 1, 1.25, 1.5, 2];
 const FADE_SECONDS_OPTIONS = [0, 1, 3, 5];
 const CROSSFADE_SECONDS_OPTIONS = [0, 3, 5, 8];
@@ -698,6 +699,10 @@ export function createMusicViews(deps) {
     target.addEventListener("ended", () => {
       if (target !== audio) return;
       saveProgressSoon(0);
+      if (sleepAfterCurrentTimerActive()) {
+        expireSleepTimer();
+        return;
+      }
       if (state.repeat === "one") {
         target.currentTime = 0;
         playAudio();
@@ -3285,9 +3290,10 @@ export function createMusicViews(deps) {
 
     const list = document.createElement("div");
     list.className = "music-mobile-queue-list music-mobile-sleep-list";
-    for (const minutes of SLEEP_TIMER_OPTIONS.filter(Boolean)) {
+    for (const minutes of SLEEP_TIMER_OPTIONS) {
       const row = document.createElement("button");
       row.type = "button";
+      row.disabled = minutes === SLEEP_AFTER_CURRENT && !state.current;
       row.className = `music-mobile-sleep-choice${sleepTimerActive() && state.sleepMinutes === minutes ? " active" : ""}`;
       row.addEventListener("click", () => {
         state.sleepSheetOpen = false;
@@ -3296,7 +3302,15 @@ export function createMusicViews(deps) {
       const label = document.createElement("strong");
       label.textContent = sleepOptionLabel(minutes);
       const metaText = document.createElement("small");
-      metaText.textContent = sleepTimerActive() && state.sleepMinutes === minutes ? `剩余 ${sleepTimerText()}` : "到点暂停";
+      metaText.textContent = minutes === SLEEP_AFTER_CURRENT
+        ? !state.current
+          ? "需要先播放一首歌"
+          : state.sleepMinutes === minutes
+            ? "当前歌曲结束后暂停"
+            : "不再自动播放下一首"
+        : sleepTimerActive() && state.sleepMinutes === minutes
+          ? `剩余 ${sleepTimerText()}`
+          : "到点暂停";
       row.append(label, metaText);
       list.append(row);
     }
@@ -3312,7 +3326,7 @@ export function createMusicViews(deps) {
     const clearLabel = document.createElement("strong");
     clearLabel.textContent = "关闭定时";
     const clearMeta = document.createElement("small");
-    clearMeta.textContent = sleepTimerActive() ? "停止倒计时" : "未开启";
+    clearMeta.textContent = sleepTimerActive() ? "取消睡眠定时" : "未开启";
     clear.append(clearLabel, clearMeta);
     list.append(clear);
 
@@ -3644,6 +3658,24 @@ export function createMusicViews(deps) {
       renderShell();
     });
     playback.append(settingsRow("恢复播放现场", "下次打开时恢复当前歌曲、播放位置和整理过的队列。", resumeQueue));
+
+    const sleepTimer = document.createElement("button");
+    sleepTimer.type = "button";
+    sleepTimer.className = "music-mobile-settings-action";
+    sleepTimer.textContent = sleepTimerActive() ? sleepTimerText() : "设置";
+    sleepTimer.addEventListener("click", () => {
+      state.settingsOpen = false;
+      state.fullscreen = true;
+      state.sleepSheetOpen = true;
+      state.queueOpen = false;
+      state.playlistSheetOpen = false;
+      renderShell();
+    });
+    playback.append(settingsRow(
+      "睡眠定时",
+      "可以按时间暂停，也可以让当前歌曲完整播完后停止，不再自动切到下一首。",
+      sleepTimer
+    ));
 
     const searchVersions = document.createElement("section");
     searchVersions.className = "music-mobile-settings-group";
@@ -4732,7 +4764,7 @@ export function createMusicViews(deps) {
   }
 
   function transitionPreloadEnabled() {
-    return Boolean((state.gapless || state.crossfadeSeconds > 0) && !state.shuffle);
+    return Boolean((state.gapless || state.crossfadeSeconds > 0) && !state.shuffle && !sleepAfterCurrentTimerActive());
   }
 
   function scheduleGaplessPreload() {
@@ -4884,6 +4916,21 @@ export function createMusicViews(deps) {
       state.sleepMinutes = 0;
       state.sleepUntil = 0;
       state.status = "已关闭睡眠定时";
+      scheduleGaplessPreload();
+      renderShell();
+      return;
+    }
+    if (normalized === SLEEP_AFTER_CURRENT) {
+      if (!state.current) {
+        state.status = "请先播放一首歌，再设置播完当前暂停";
+        renderShell();
+        return;
+      }
+      state.sleepMinutes = SLEEP_AFTER_CURRENT;
+      state.sleepUntil = 0;
+      clearGaplessPreload();
+      cancelCrossfade();
+      state.status = "当前歌曲播完后将暂停播放";
       renderShell();
       return;
     }
@@ -4896,6 +4943,7 @@ export function createMusicViews(deps) {
 
   function scheduleSleepTimer() {
     clearSleepTimerHandle();
+    if (sleepAfterCurrentTimerActive()) return;
     const remaining = sleepTimerRemainingMs();
     if (remaining <= 0) {
       expireSleepTimer();
@@ -4927,17 +4975,23 @@ export function createMusicViews(deps) {
   }
 
   function expireSleepTimer() {
+    const afterCurrent = sleepAfterCurrentTimerActive();
     clearSleepTimerHandle();
     state.sleepMinutes = 0;
     state.sleepUntil = 0;
+    clearGaplessPreload();
     ensureAudio();
     if (!audio.paused) pauseAudio();
-    state.status = "睡眠定时已暂停播放";
+    state.status = afterCurrent ? "当前歌曲已播完，已暂停播放" : "睡眠定时已暂停播放";
     renderShell();
   }
 
   function sleepTimerActive() {
-    return sleepTimerRemainingMs() > 0;
+    return sleepAfterCurrentTimerActive() || sleepTimerRemainingMs() > 0;
+  }
+
+  function sleepAfterCurrentTimerActive() {
+    return state.sleepMinutes === SLEEP_AFTER_CURRENT;
   }
 
   function sleepTimerRemainingMs() {
@@ -4945,6 +4999,7 @@ export function createMusicViews(deps) {
   }
 
   function sleepTimerText() {
+    if (sleepAfterCurrentTimerActive()) return "播完当前歌曲";
     const minutes = Math.max(1, Math.ceil(sleepTimerRemainingMs() / 60000));
     if (minutes >= 60) {
       const hours = Math.floor(minutes / 60);
@@ -6139,6 +6194,7 @@ function normalizeSleepTimerMinutes(value) {
 
 function sleepOptionLabel(minutes) {
   const value = Number(minutes || 0);
+  if (value === SLEEP_AFTER_CURRENT) return "播完当前歌曲";
   if (value >= 60) {
     const hours = Math.floor(value / 60);
     const rest = value % 60;
