@@ -655,7 +655,7 @@
 
 .music-mobile-search-scopes {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 2px;
   padding: 0 2px;
   border-bottom: 1px solid var(--line);
@@ -1308,6 +1308,12 @@
   font-weight: 950;
 }
 
+.music-mobile-search-best-avatar.playlist {
+  border-radius: 16px;
+  font-size: 11px;
+  text-align: center;
+}
+
 .music-mobile-search-best-match > span {
   display: grid;
   min-width: 0;
@@ -1496,6 +1502,102 @@
 .music-mobile-search-album-match strong {
   font-size: 13px;
   font-weight: 900;
+}
+
+.music-mobile-search-playlist-list {
+  display: grid;
+  gap: 9px;
+}
+
+.music-mobile-search-playlist-list.is-preview {
+  grid-auto-columns: minmax(220px, 84%);
+  grid-auto-flow: column;
+  overflow-x: auto;
+  padding-bottom: 3px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+}
+
+.music-mobile-search-playlist-list.is-preview::-webkit-scrollbar {
+  display: none;
+}
+
+.music-mobile-search-playlist-card {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 72px;
+  border: 1px solid var(--line);
+  border-radius: 17px;
+  padding: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  text-align: left;
+  scroll-snap-align: start;
+}
+
+.music-mobile-search-playlist-card > b {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border-radius: 14px;
+  background: var(--success-soft);
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 950;
+  text-align: center;
+}
+
+.music-mobile-search-playlist-card.type-user > b {
+  background: color-mix(in srgb, var(--accent-soft) 70%, var(--surface));
+  color: var(--accent);
+}
+
+.music-mobile-search-playlist-card > span {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.music-mobile-search-playlist-card strong,
+.music-mobile-search-playlist-card small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-mobile-search-playlist-card strong {
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.music-mobile-search-playlist-card small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.music-mobile-search-playlist-card > em {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 6px 8px;
+  background: var(--field);
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 950;
+}
+
+.music-mobile-search-playlist-card mark {
+  padding: 0;
+  background: transparent;
+  color: var(--green);
+}
+
+.music-mobile-search-playlist-results {
+  padding-top: 4px;
 }
 
 .music-mobile-search-song-results {

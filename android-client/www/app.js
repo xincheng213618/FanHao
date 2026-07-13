@@ -1,6 +1,6 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260714-music-search-recovery-23";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260714-music-playlist-search-24";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
-import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260714-music-search-recovery-23";
+import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260714-music-playlist-search-24";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
 import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260712-module-chrome-03";
 import { getElements } from "./js/dom.js?v=20260712-module-chrome-03";
@@ -150,7 +150,7 @@ function sanitizeViewParams(view, params = {}) {
     const mode = playlistId ? "playlist" : smartId ? "smart" : (rawMode === "history" ? "history" : rawMode === "artists" ? "artists" : rawMode === "albums" ? "albums" : "library");
     const query = String(params.query || params.q || "").trim();
     const rawSearchScope = String(params.searchScope || params.scope || "").trim().toLowerCase();
-    const searchScope = mode === "artists" ? "artists" : mode === "albums" ? "albums" : ["songs", "lyrics", "all"].includes(rawSearchScope) ? rawSearchScope : "all";
+    const searchScope = mode === "artists" ? "artists" : mode === "albums" ? "albums" : ["songs", "lyrics", "playlists", "all"].includes(rawSearchScope) ? rawSearchScope : "all";
     const sort = normalizeMusicSort(params.sort);
     const artistSort = String(params.artistSort || "count") === "name" ? "name" : "count";
     const albumSort = normalizeMusicAlbumSort(params.albumSort);

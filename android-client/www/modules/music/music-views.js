@@ -204,6 +204,7 @@ export function createMusicViews(deps) {
     const requestUrl = getActiveUrl();
     const unifiedSearch = state.mode === "library" && Boolean(state.query);
     const lyricOnlySearch = unifiedSearch && state.searchScope === "lyrics";
+    const playlistOnlySearch = unifiedSearch && state.searchScope === "playlists";
     state.searchOverview = unifiedSearch
       ? { ...emptySearchOverview(), loading: true }
       : emptySearchOverview();
@@ -216,6 +217,14 @@ export function createMusicViews(deps) {
       state.data = { ...(state.data || {}), query: state.query, tracks: [], rawTracks: [], rawLoaded: 0, total: 0, hasMore: false };
       renderShell();
       await loadLyricSearchResults(renderGuard, { limit: 40 });
+      return;
+    }
+    if (playlistOnlySearch) {
+      state.loading = false;
+      state.status = "";
+      state.data = { ...(state.data || {}), query: state.query, tracks: [], rawTracks: [], rawLoaded: 0, total: 0, hasMore: false };
+      renderShell();
+      if (!searchPlaylistMatches(state.query).length) await loadSearchRecovery(state.query, renderGuard?.signal);
       return;
     }
     state.loading = true;
@@ -358,6 +367,11 @@ export function createMusicViews(deps) {
         title: album.title || "未知专辑",
         meta: album.artistName || "未知歌手"
       })).filter((item) => item.value);
+      const playlists = searchPlaylistMatches(value).slice(0, 2).map((match) => ({
+        value: match.item.name || "",
+        title: match.item.name || "未命名歌单",
+        meta: `${match.kind === "smart" ? "智能歌单" : "我的歌单"} · ${formatNumber(match.item.trackCount || 0)} 首`
+      })).filter((item) => item.value);
       state.searchRecovery = {
         loading: false,
         query: value,
@@ -365,6 +379,7 @@ export function createMusicViews(deps) {
         tracks,
         artists,
         albums,
+        playlists,
         error: ""
       };
     } catch (error) {
@@ -466,6 +481,17 @@ export function createMusicViews(deps) {
       refreshMountedSearchUi();
       await loadLyricSearchResults(null, { signal: controller.signal, mounted: true, limit: 40 });
       if (!state.lyricSearch.matches.length) await loadSearchRecovery(value, controller.signal);
+      return;
+    }
+
+    if (state.mode === "library" && state.searchScope === "playlists") {
+      state.loading = false;
+      state.status = "";
+      state.searchOverview = emptySearchOverview();
+      state.lyricSearch = emptyLyricSearch();
+      state.data = { ...(state.data || {}), query: value, tracks: [], rawTracks: [], rawLoaded: 0, total: 0, hasMore: false };
+      refreshMountedSearchUi();
+      if (!searchPlaylistMatches(value).length) await loadSearchRecovery(value, controller.signal);
       return;
     }
 
@@ -929,7 +955,7 @@ export function createMusicViews(deps) {
     const searchButton = document.createElement("button");
     searchButton.type = "button";
     searchButton.className = "music-mobile-search-pill";
-    searchButton.textContent = "搜索歌曲、歌手和专辑";
+    searchButton.textContent = "搜索歌曲、歌手、专辑和歌单";
     searchButton.disabled = state.mode === "history";
     searchButton.addEventListener("click", () => {
       state.searchOpen = true;
@@ -1001,15 +1027,17 @@ export function createMusicViews(deps) {
     const meta = document.createElement("small");
     meta.textContent = state.searchScope === "lyrics"
       ? (state.lyricSearch.loading ? "正在搜索歌词" : `${formatNumber(state.lyricSearch.total || 0)} 首歌词命中`)
-      : state.loading ? "正在搜索本地音乐" : musicMeta(state.data);
+      : state.searchScope === "playlists"
+        ? `${formatNumber(searchPlaylistMatches(state.query).length)} 个歌单命中`
+        : state.loading ? "正在搜索本地音乐" : musicMeta(state.data);
     text.append(title, meta);
     resultsHead.append(text);
-    if (state.searchScope !== "lyrics") resultsHead.append(renderMusicSort());
+    if (!["lyrics", "playlists"].includes(state.searchScope)) resultsHead.append(renderMusicSort());
     const hint = document.createElement("p");
     hint.className = "music-mobile-search-sort-hint";
     hint.textContent = searchSortHint();
     region.append(renderSearchScopes());
-    if (state.mode === "library" && state.searchScope !== "lyrics") region.append(renderSearchQuickFilters());
+    if (state.mode === "library" && ["all", "songs"].includes(state.searchScope)) region.append(renderSearchQuickFilters());
     region.append(resultsHead, hint);
     const playbackAction = renderSearchPlaybackAction();
     if (playbackAction) region.append(playbackAction);
@@ -1091,6 +1119,7 @@ export function createMusicViews(deps) {
     if (state.mode === "albums") return renderAlbumBrowser();
     if (state.searchScope === "songs") return shouldRenderSearchRecovery() ? renderSearchRecovery() : renderSearchSongResults();
     if (state.searchScope === "lyrics") return shouldRenderSearchRecovery() ? renderSearchRecovery() : renderLyricSearchResults();
+    if (state.searchScope === "playlists") return shouldRenderSearchRecovery() ? renderSearchRecovery() : renderPlaylistSearchResults();
     const fragment = document.createDocumentFragment();
     if (shouldRenderSearchRecovery()) fragment.append(renderSearchRecovery());
     fragment.append(renderSearchOverview());
@@ -1106,12 +1135,14 @@ export function createMusicViews(deps) {
     const tracks = Array.isArray(state.data?.tracks) ? state.data.tracks : [];
     if (state.searchScope === "songs") return !state.loading && !tracks.length;
     if (state.searchScope === "lyrics") return !state.lyricSearch.loading && !state.lyricSearch.matches.length;
+    if (state.searchScope === "playlists") return !searchPlaylistMatches(state.query).length;
     if (state.loading) return false;
     if (hasActiveSearchFilters() && !tracks.length) return true;
     if (state.searchOverview.loading || state.lyricSearch.loading) return false;
     return !tracks.length
       && !state.searchOverview.artists.length
       && !state.searchOverview.albums.length
+      && !searchPlaylistMatches(state.query).length
       && !state.lyricSearch.matches.length;
   }
 
@@ -1163,12 +1194,12 @@ export function createMusicViews(deps) {
   }
 
   function searchScopeLabel(scope) {
-    return { songs: "歌曲", lyrics: "歌词", artists: "歌手", albums: "专辑" }[scope] || "综合";
+    return { songs: "歌曲", lyrics: "歌词", artists: "歌手", albums: "专辑", playlists: "歌单" }[scope] || "综合";
   }
 
   function searchRecoverySuggestionCount(recovery) {
     const seen = new Set();
-    for (const item of [...recovery.tracks, ...recovery.artists, ...recovery.albums]) {
+    for (const item of [...recovery.tracks, ...recovery.artists, ...recovery.albums, ...recovery.playlists]) {
       const key = normalizeSearchComparison(item.value);
       if (key) seen.add(key);
     }
@@ -1188,7 +1219,7 @@ export function createMusicViews(deps) {
     const wrap = document.createElement("div");
     wrap.className = "music-mobile-search-recovery-suggestions";
     const seen = new Set();
-    for (const [type, items] of [["歌曲", recovery.tracks], ["歌手", recovery.artists], ["专辑", recovery.albums]]) {
+    for (const [type, items] of [["歌曲", recovery.tracks], ["歌手", recovery.artists], ["专辑", recovery.albums], ["歌单", recovery.playlists]]) {
       for (const item of items) {
         const key = normalizeSearchComparison(item.value);
         if (!key || seen.has(key)) continue;
@@ -1333,7 +1364,8 @@ export function createMusicViews(deps) {
       { scope: "songs", label: "歌曲" },
       { scope: "lyrics", label: "歌词" },
       { scope: "artists", label: "歌手" },
-      { scope: "albums", label: "专辑" }
+      { scope: "albums", label: "专辑" },
+      { scope: "playlists", label: "歌单" }
     ]) {
       const button = document.createElement("button");
       button.type = "button";
@@ -1397,6 +1429,7 @@ export function createMusicViews(deps) {
       { label: "搜歌词", meta: "歌词全文定位", action: () => focusSearchDiscoveryScope("lyrics") },
       { label: "搜歌手", meta: "歌手与作品", action: () => focusSearchDiscoveryScope("artists") },
       { label: "搜专辑", meta: "专辑与年份", action: () => focusSearchDiscoveryScope("albums") },
+      { label: "搜歌单", meta: "我的歌单与智能歌单", action: () => focusSearchDiscoveryScope("playlists") },
       { label: "最近播放", meta: "继续上次听歌", action: () => openSearchDiscoveryCollection("history") },
       { label: "我喜欢", meta: "只看已收藏", action: () => openSearchDiscoveryCollection("favorites") }
     ]) {
@@ -1541,8 +1574,91 @@ export function createMusicViews(deps) {
       songs: "搜索歌名或文件名",
       lyrics: "输入一句歌词",
       artists: "搜索歌手",
-      albums: "搜索专辑"
-    }[scope] || "搜索歌曲、歌手或专辑";
+      albums: "搜索专辑",
+      playlists: "搜索我的歌单或智能歌单"
+    }[scope] || "搜索歌曲、歌手、专辑或歌单";
+  }
+
+  function searchPlaylistMatches(query = state.query) {
+    const needle = normalizeSearchComparison(query);
+    if (!needle) return [];
+    const terms = needle.split(" ").filter(Boolean);
+    const candidates = [
+      ...(state.playlists || []).map((item) => ({ kind: "user", item })),
+      ...(state.smartPlaylists || []).map((item) => ({ kind: "smart", item }))
+    ];
+    return candidates.map((candidate, index) => {
+      const name = normalizeSearchComparison(candidate.item?.name);
+      const description = normalizeSearchComparison(candidate.item?.description);
+      const combined = `${name} ${description}`.trim();
+      const score = name === needle
+        ? 12000
+        : name.startsWith(needle)
+          ? 7000
+          : name.includes(needle)
+            ? 5000
+            : description.includes(needle)
+              ? 2200
+              : terms.length > 1 && terms.every((term) => combined.includes(term))
+                ? 1600
+                : 0;
+      return { ...candidate, index, score };
+    }).filter((candidate) => candidate.score > 0)
+      .sort((left, right) => right.score - left.score || left.index - right.index);
+  }
+
+  function renderPlaylistSearchResults(options = {}) {
+    const matches = Array.isArray(options.matches) ? options.matches : searchPlaylistMatches(state.query);
+    const visible = options.preview ? matches.slice(0, 5) : matches;
+    const rail = document.createElement("div");
+    rail.className = `music-mobile-search-playlist-list${options.preview ? " is-preview" : ""}`;
+    for (const match of visible) rail.append(renderPlaylistSearchCard(match));
+    const group = renderSearchResultGroup("playlists", "歌单", `${formatNumber(matches.length)} 个`, rail, {
+      onMore: options.preview && matches.length > visible.length ? () => switchSearchScope("playlists") : null
+    });
+    group.classList.add("music-mobile-search-playlist-results");
+    if (!options.collapsible) {
+      group.querySelector(".music-mobile-search-result-group-toggle")?.remove();
+      group.classList.remove("is-collapsed");
+      if (!group.querySelector(".music-mobile-search-playlist-list")) group.append(rail);
+    }
+    return group;
+  }
+
+  function renderPlaylistSearchCard(match) {
+    const playlist = match.item || {};
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `music-mobile-search-playlist-card type-${match.kind}`;
+    const badge = document.createElement("b");
+    badge.textContent = match.kind === "smart" ? (playlist.badge || "Mix") : "歌单";
+    const text = document.createElement("span");
+    const name = document.createElement("strong");
+    appendHighlightedText(name, playlist.name || "未命名歌单", state.query);
+    const description = document.createElement("small");
+    description.textContent = playlist.description || (match.kind === "smart" ? "自动更新的智能歌单" : "我的歌单");
+    text.append(name, description);
+    const count = document.createElement("em");
+    count.textContent = `${formatNumber(playlist.trackCount || 0)} 首`;
+    button.append(badge, text, count);
+    button.addEventListener("click", () => openPlaylistSearchMatch(match));
+    return button;
+  }
+
+  function openPlaylistSearchMatch(match) {
+    const playlist = match?.item;
+    if (!playlist?.id) return;
+    updateListParams({
+      mode: match.kind === "smart" ? "smart" : "playlist",
+      smartId: match.kind === "smart" ? playlist.id : "",
+      playlistId: match.kind === "user" ? playlist.id : "",
+      query: "",
+      favorite: false,
+      artistId: "",
+      albumId: "",
+      genre: "",
+      language: ""
+    }, { resetSearch: true });
   }
 
   function renderSearchOverview() {
@@ -1616,6 +1732,9 @@ export function createMusicViews(deps) {
         onMore: () => switchSearchScope("albums")
       }));
     }
+    const playlists = searchPlaylistMatches(state.query)
+      .filter((match) => best?.type !== "playlist" || match.kind !== best.playlistKind || match.item.id !== best.item.id);
+    if (playlists.length) overview.append(renderPlaylistSearchResults({ preview: true, collapsible: true, matches: playlists }));
     return overview;
   }
 
@@ -1623,11 +1742,13 @@ export function createMusicViews(deps) {
     const tracks = Array.isArray(state.data?.tracks) ? state.data.tracks : [];
     const artists = Array.isArray(data?.artists) ? data.artists : [];
     const albums = Array.isArray(data?.albums) ? data.albums : [];
+    const playlists = searchPlaylistMatches(state.query);
     const candidates = [
       ...tracks.slice(0, 6).map((item, index) => ({ type: "track", scope: "songs", label: "歌曲", item, index, score: searchEntityScore("track", item) })),
       ...state.lyricSearch.matches.slice(0, 3).map((item, index) => ({ type: "lyric", scope: "lyrics", label: "歌词", item, index, score: 920 + Math.min(60, String(item.text || "").length) })),
       ...artists.slice(0, 4).map((item, index) => ({ type: "artist", scope: "artists", label: "歌手", item, index, score: searchEntityScore("artist", item) })),
-      ...albums.slice(0, 6).map((item, index) => ({ type: "album", scope: "albums", label: "专辑", item, index, score: searchEntityScore("album", item) }))
+      ...albums.slice(0, 6).map((item, index) => ({ type: "album", scope: "albums", label: "专辑", item, index, score: searchEntityScore("album", item) })),
+      ...playlists.slice(0, 5).map((match, index) => ({ type: "playlist", scope: "playlists", label: "歌单", item: match.item, playlistKind: match.kind, index, score: match.score }))
     ].filter((item) => item.score > 0);
     return candidates.sort((left, right) => right.score - left.score || left.index - right.index)[0] || null;
   }
@@ -1656,16 +1777,24 @@ export function createMusicViews(deps) {
       avatar.className = "music-mobile-search-best-avatar";
       avatar.textContent = Array.from(item.name || "?")[0] || "?";
       card.append(avatar);
+    } else if (best.type === "playlist") {
+      const avatar = document.createElement("b");
+      avatar.className = "music-mobile-search-best-avatar playlist";
+      avatar.textContent = best.playlistKind === "smart" ? (item.badge || "Mix") : "歌单";
+      card.append(avatar);
     } else {
       card.append(renderCover(item, "tiny"));
     }
     const text = document.createElement("span");
     const title = document.createElement("strong");
-    const titleValue = best.type === "artist" ? item.name : item.title;
-    appendSearchHighlightedText(title, titleValue || `未知${best.label}`, item, best.type === "artist" ? "name" : "title");
+    const titleValue = ["artist", "playlist"].includes(best.type) ? item.name : item.title;
+    if (best.type === "playlist") appendHighlightedText(title, titleValue || "未命名歌单", state.query);
+    else appendSearchHighlightedText(title, titleValue || `未知${best.label}`, item, best.type === "artist" ? "name" : "title");
     const meta = document.createElement("small");
     if (best.type === "artist") {
       meta.textContent = [item.language || "其他", `${formatNumber(item.trackCount || 0)} 首`, `${formatNumber(item.albumCount || 0)} 专辑`].join(" · ");
+    } else if (best.type === "playlist") {
+      meta.textContent = [best.playlistKind === "smart" ? "智能歌单" : "我的歌单", `${formatNumber(item.trackCount || 0)} 首`, item.description || ""].filter(Boolean).join(" · ");
     } else if (best.type === "album") {
       appendSearchHighlightedText(meta, [item.artistName || "未知歌手", `${formatNumber(item.trackCount || 0)} 首`].join(" · "), item, "artist");
     } else if (best.type === "lyric") {
@@ -1709,6 +1838,10 @@ export function createMusicViews(deps) {
     if (best.type === "track") {
       const versionGroup = searchVersionGroupForTrack(item);
       playSearchTrackVersion(preferredTrackForVersionGroup(versionGroup, item), versionGroup?.tracks || [item]);
+      return;
+    }
+    if (best.type === "playlist") {
+      openPlaylistSearchMatch({ kind: best.playlistKind, item });
       return;
     }
     updateListParams({
@@ -2048,18 +2181,22 @@ export function createMusicViews(deps) {
 
   function switchSearchScope(scope) {
     const nextScope = normalizeSearchScope(scope, "library");
-    if (["all", "songs", "lyrics"].includes(nextScope) && state.mode === "library") {
+    if (["all", "songs", "lyrics", "playlists"].includes(nextScope) && state.mode === "library") {
       const previousScope = state.searchScope;
       state.searchScope = nextScope;
       replaceViewParams?.("music", musicRouteParams(), { replaceHistory: true });
-      if (nextScope === "lyrics") {
+      if (["lyrics", "playlists"].includes(nextScope)) {
         mountedSearchController?.abort();
         state.loading = false;
         state.status = "";
       }
       refreshMountedSearchUi();
-      if (previousScope === "lyrics" && nextScope !== "lyrics") {
+      if (["lyrics", "playlists"].includes(previousScope) && !["lyrics", "playlists"].includes(nextScope)) {
         refreshMountedSearchResults(state.query).catch(() => {});
+        return;
+      }
+      if (nextScope === "playlists") {
+        if (!searchPlaylistMatches(state.query).length) loadSearchRecovery(state.query).catch(() => {});
         return;
       }
       if (["all", "lyrics"].includes(nextScope)) {
@@ -2165,6 +2302,7 @@ export function createMusicViews(deps) {
 
   function searchSortHint() {
     if (state.searchScope === "lyrics") return "点击命中歌词，可从对应时间开始播放并自动打开歌词页。";
+    if (state.searchScope === "playlists") return "同时查找我的歌单与系统生成的智能歌单，点击即可打开。";
     if (state.data?.correctedQuery) {
       return `已自动纠正为“${state.data.correctedQuery}”，并按歌名、歌手、专辑与常听程度排序。`;
     }
@@ -3900,13 +4038,15 @@ export function createMusicViews(deps) {
     const clear = els.viewContent?.querySelector(".music-mobile-search-clear");
     if (clear) clear.hidden = !query;
     scheduleSearchSuggestions(query);
-    searchDebounceTimer = window.setTimeout(() => commitMusicSearch(query), SEARCH_DEBOUNCE_MS);
+    searchDebounceTimer = window.setTimeout(() => commitMusicSearch(query, { preserveSuggestions: true }), SEARCH_DEBOUNCE_MS);
   }
 
   function commitMusicSearch(value, options = {}) {
     window.clearTimeout(searchDebounceTimer);
-    window.clearTimeout(searchSuggestionTimer);
-    searchSuggestionController?.abort();
+    if (!options.preserveSuggestions) {
+      window.clearTimeout(searchSuggestionTimer);
+      searchSuggestionController?.abort();
+    }
     const query = String(value || "").trim();
     if (options.remember && query) rememberSearchQuery(query);
     if (options.remember) {
@@ -4006,7 +4146,7 @@ export function createMusicViews(deps) {
       type: "全部",
       value,
       label: `搜索“${value}”`,
-      meta: "查看歌曲、歌词、歌手和专辑",
+      meta: "查看歌曲、歌词、歌手、专辑和歌单",
       highlights: [value],
       score: Number.MAX_SAFE_INTEGER
     };
@@ -4049,7 +4189,8 @@ export function createMusicViews(deps) {
       buildArtistSuggestionGroup(value, data.artists || [], seenValues),
       buildTrackSuggestionGroup(value, data.tracks || [], seenValues),
       buildAlbumSuggestionGroup(value, data.albums || [], seenValues),
-      suggestionGroupResult(historyItems, 3)
+      buildPlaylistSuggestionGroup(value, seenValues),
+      suggestionGroupResult(historyItems, 4)
     ].filter((group) => group.items.length);
     entityGroups.sort((left, right) => right.score - left.score || left.priority - right.priority);
     let remaining = 8;
@@ -4125,6 +4266,26 @@ export function createMusicViews(deps) {
       });
     }
     return suggestionGroupResult(items, 2);
+  }
+
+  function buildPlaylistSuggestionGroup(query, seenValues) {
+    const items = [];
+    for (const match of searchPlaylistMatches(query).slice(0, 3)) {
+      const value = String(match.item?.name || "").trim();
+      const key = normalizeSearchComparison(value);
+      if (!value || seenValues.has(key)) continue;
+      seenValues.add(key);
+      items.push({
+        group: "playlists",
+        groupLabel: "歌单",
+        type: match.kind === "smart" ? "智能歌单" : "歌单",
+        value,
+        meta: `${formatNumber(match.item?.trackCount || 0)} 首 · ${match.item?.description || (match.kind === "smart" ? "自动更新" : "我的歌单")}`,
+        highlights: [query],
+        score: match.score
+      });
+    }
+    return suggestionGroupResult(items, 3);
   }
 
   function suggestionGroupResult(items, priority) {
@@ -5627,6 +5788,7 @@ function emptySearchRecovery() {
     tracks: [],
     artists: [],
     albums: [],
+    playlists: [],
     error: ""
   };
 }
@@ -5701,7 +5863,7 @@ function normalizeMode(value) {
 function normalizeSearchScope(value, mode = DEFAULT_MODE) {
   const fallback = mode === "artists" ? "artists" : mode === "albums" ? "albums" : "all";
   const scope = String(value || fallback).trim().toLocaleLowerCase();
-  return ["all", "songs", "lyrics", "artists", "albums"].includes(scope) ? scope : fallback;
+  return ["all", "songs", "lyrics", "artists", "albums", "playlists"].includes(scope) ? scope : fallback;
 }
 
 function emptyLyricSearch() {
