@@ -34,10 +34,11 @@ FanHao 服务端通过**环境变量**控制资料库根目录、端口、外部
 | `FANHAO_PHOTO_SET_ROOTS` | `T:\;T:\[套图1]` | 套图（photo set）根目录。 |
 | `FANHAO_MOVIE_ROOTS` | `Z:\` | 图库中的「电影」媒体源。 |
 | `FANHAO_TV_ROOTS` | `Y:\` | 图库中的「电视剧」媒体源。 |
-| `FANHAO_SHORT_VIDEO_ROOTS` / `FANHAO_DOUYIN_LIKES_ROOT` | `~/Downloads/likes/MS4wLjABAAAA...` | 抖音点赞短视频根目录。 |
+| `FANHAO_SHORT_VIDEO_STORAGE_ROOT` | `D:\Media` | 本机短视频下载存储根目录；默认媒体库为其下的 `ShortVideos`。 |
+| `FANHAO_SHORT_VIDEO_ROOTS` / `FANHAO_DOUYIN_LIKES_ROOT` | `D:\Media\ShortVideos` | 短视频扫描根目录。 |
 | `FANHAO_DOUYIN_DOWNLOAD_MANAGER_DB` | `src/modules/short-videos/download-manager/data/douyin_downloads.sqlite` | 内置抖音下载管理器数据库路径；仅在需要改用外部库时覆盖。 |
 | `FANHAO_DOUYIN_SYNC_MS` | `60000`（1 分钟） | 短视频从下载管理器同步的轮询间隔。 |
-| `FANHAO_MUSIC_ROOTS` / `FANHAO_MUSIC_ROOT` | `D:\Music` | 音乐模块扫描根目录，多个根用分号或逗号分隔。 |
+| `FANHAO_MUSIC_ROOTS` / `FANHAO_MUSIC_ROOT` | `D:\Media\Music` | 音乐模块扫描根目录，多个根用分号或逗号分隔。 |
 
 > 解析逻辑见 `src/platform/server/root-config.js`。环境变量优先于硬编码默认值；未设置时回退到默认盘符。
 

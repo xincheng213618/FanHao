@@ -1,4 +1,3 @@
-import os from "node:os";
 import path from "node:path";
 
 export function parseRootList(rawValue, fallback) {
@@ -40,17 +39,13 @@ export function parseLibraryRoots(env = process.env) {
 }
 
 export function parseShortVideoRoots(env = process.env) {
-  const fallback = path.join(
-    os.homedir(),
-    "Downloads",
-    "likes",
-    "MS4wLjABAAAAqiW-0GYj4wFCXymqQZsgY3mF5z4cZWUopJqTUkmYx20"
-  );
+  const storageRoot = env.FANHAO_SHORT_VIDEO_STORAGE_ROOT || "D:\\Media";
+  const fallback = path.join(storageRoot, "ShortVideos");
   return parseRootList(env.FANHAO_SHORT_VIDEO_ROOTS || env.FANHAO_DOUYIN_LIKES_ROOT || fallback, fallback);
 }
 
 export function parseMusicRoots(env = process.env) {
-  const fallback = "D:\\Music";
+  const fallback = "D:\\Media\\Music";
   return parseRootList(env.FANHAO_MUSIC_ROOTS || env.FANHAO_MUSIC_ROOT || fallback, fallback);
 }
 

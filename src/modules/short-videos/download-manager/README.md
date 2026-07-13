@@ -6,6 +6,7 @@
 - 状态接口：`http://localhost:8765/api/state`
 - 数据库：`data/douyin_downloads.sqlite`
 - 日志：`logs/`
+- 默认媒体库：`D:\Media\ShortVideos`
 
 代码、采集器、管理页面和运行脚本都放在当前目录；运行数据通过仓库根目录的 `.gitignore` 排除。FanHao 会定时从这里的 SQLite 同步已采集、已下载作品到 `data/short-videos.sqlite`。
 
@@ -30,5 +31,7 @@
 1. 管理页面采集抖音主页链接并写入本模块 SQLite。
 2. 下载任务复用 `douyin-downloader`，文件仍写到数据库配置的输出目录。
 3. 下载完成或采集更新时，本模块直接补充 FanHao 短视频库；FanHao 服务也会定时做增量同步。
+
+媒体文件与程序数据分开保存：视频、图集、封面和下载清单统一放在 `ShortVideos`；SQLite、日志和有容量上限的播放缓存继续留在 FanHao 工作区。可通过 `FANHAO_SHORT_VIDEO_STORAGE_ROOT` 整体覆盖存储根目录，通过 `FANHAO_SHORT_VIDEO_ROOTS` 只覆盖 FanHao 的扫描目录。
 
 数据库和 cookie 配置从旧的 `Desktop\Tool\douyin-download-manager` 迁移后，旧目录不再作为运行依赖。

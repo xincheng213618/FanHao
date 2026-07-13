@@ -1,5 +1,8 @@
 package local.fanhao.library;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
@@ -3474,6 +3477,14 @@ public class NativeShortVideoActivity extends Activity {
       ViewGroup.LayoutParams.WRAP_CONTENT
     ));
 
+    LinearLayout profileSection = new LinearLayout(this);
+    profileSection.setOrientation(LinearLayout.VERTICAL);
+    profileSection.setBackgroundColor(0xFFF7F8FA);
+    sheet.addView(profileSection, new LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.WRAP_CONTENT
+    ));
+
     FrameLayout hero = new FrameLayout(this);
     hero.setBackgroundColor(0xFFF7F8FA);
 
@@ -3510,7 +3521,7 @@ public class NativeShortVideoActivity extends Activity {
       ViewGroup.LayoutParams.MATCH_PARENT,
       ViewGroup.LayoutParams.MATCH_PARENT
     ));
-    sheet.addView(hero, new LinearLayout.LayoutParams(
+    profileSection.addView(hero, new LinearLayout.LayoutParams(
       ViewGroup.LayoutParams.MATCH_PARENT,
       dp(112)
     ));
@@ -3545,7 +3556,7 @@ public class NativeShortVideoActivity extends Activity {
       metaParams.topMargin = dp(6);
       head.addView(meta, metaParams);
     }
-    sheet.addView(head);
+    profileSection.addView(head);
 
     final LinearLayout profileStats = authorProfileStatsRow(seed);
     if (profileStats != null) {
@@ -3555,14 +3566,18 @@ public class NativeShortVideoActivity extends Activity {
         ViewGroup.LayoutParams.WRAP_CONTENT
       );
       profileStatsParams.bottomMargin = dp(6);
-      sheet.addView(profileStats, profileStatsParams);
+      profileSection.addView(profileStats, profileStatsParams);
     }
 
     final boolean shouldLoadInitialAuthorPage = screen.page == null || screen.page.items.isEmpty();
     final FeedPage[] pageRef = new FeedPage[] { shouldLoadInitialAuthorPage ? sortedLocalAuthorPage(seed, screen.sort) : screen.page.copy() };
     final String[] activeTab = new String[] { screen.activeTab == null ? "works" : screen.activeTab };
     final Runnable[] render = new Runnable[1];
-    final boolean[] profileCollapsed = new boolean[] { false };
+    final boolean[] profileCollapsed = new boolean[] { screen.worksScrollY >= dp(192) };
+    final int[] profileExpandedHeight = new int[] { 0 };
+    final ValueAnimator[] profileAnimator = new ValueAnimator[1];
+    final int[] profileTransitionGestureId = new int[] { -1 };
+    final long[] profileTransitionBlockedUntil = new long[] { 0L };
     final Runnable[] updateAuthorChrome = new Runnable[1];
 
     LinearLayout actions = new LinearLayout(this);
@@ -3575,7 +3590,7 @@ public class NativeShortVideoActivity extends Activity {
     actionsParams.leftMargin = dp(14);
     actionsParams.rightMargin = dp(14);
     actionsParams.bottomMargin = dp(6);
-    sheet.addView(actions, actionsParams);
+    profileSection.addView(actions, actionsParams);
 
     TextView follow = authorActionButton("", true, authorInteractionKey(seed).length() > 0, null);
     follow.setOnClickListener(view -> {
@@ -3616,15 +3631,50 @@ public class NativeShortVideoActivity extends Activity {
     ));
 
     updateAuthorChrome[0] = () -> {
-      boolean collapsed = "works".equals(activeTab[0]) && screen.worksScrollY > dp(24);
-      if (profileCollapsed[0] == collapsed) return;
-      profileCollapsed[0] = collapsed;
-      hero.setVisibility(collapsed ? View.GONE : View.VISIBLE);
-      head.setVisibility(collapsed ? View.GONE : View.VISIBLE);
-      if (profileStats != null) profileStats.setVisibility(collapsed ? View.GONE : View.VISIBLE);
-      actions.setVisibility(collapsed ? View.GONE : View.VISIBLE);
-      title.setText(collapsed ? displayAuthor(seed) : "主页");
+      if (profileAnimator[0] != null && profileAnimator[0].isRunning()) return;
+      long now = System.currentTimeMillis();
+      if (now < profileTransitionBlockedUntil[0]) {
+        profileTransitionGestureId[0] = screen.worksGestureId;
+        return;
+      }
+      boolean worksTab = "works".equals(activeTab[0]);
+      boolean freshGesture = screen.worksGestureId > 0
+        && screen.worksGestureId != profileTransitionGestureId[0];
+      boolean shouldCollapse = worksTab
+        && !profileCollapsed[0]
+        && freshGesture
+        && screen.worksGestureDirection < 0
+        && screen.worksScrollY >= dp(160);
+      boolean shouldExpand = profileCollapsed[0]
+        && (!worksTab || (freshGesture && screen.worksGestureDirection > 0 && screen.worksScrollY <= dp(8)));
+      if (!shouldCollapse && !shouldExpand) return;
+      profileCollapsed[0] = shouldCollapse;
+      if (worksTab) profileTransitionGestureId[0] = screen.worksGestureId;
+      profileTransitionBlockedUntil[0] = now + 520L;
+      title.setText(profileCollapsed[0] ? displayAuthor(seed) : "主页");
+      if (shouldExpand && worksTab) resetAuthorWorksScrollToTop(screen);
+      animateAuthorProfileSection(profileSection, profileCollapsed[0], profileExpandedHeight, profileAnimator);
+      if (shouldExpand && worksTab) {
+        profileSection.postDelayed(() -> {
+          if (!profileCollapsed[0]) resetAuthorWorksScrollToTop(screen);
+        }, 240L);
+        profileSection.postDelayed(() -> {
+          if (!profileCollapsed[0]) resetAuthorWorksScrollToTop(screen);
+        }, 420L);
+      }
     };
+
+    profileSection.post(() -> {
+      if (profileSection.getHeight() > 0) profileExpandedHeight[0] = profileSection.getHeight();
+      if (!profileCollapsed[0]) return;
+      ViewGroup.LayoutParams params = profileSection.getLayoutParams();
+      params.height = 0;
+      profileSection.setLayoutParams(params);
+      profileSection.setAlpha(0f);
+      profileSection.setTranslationY(-dp(12));
+      profileSection.setVisibility(View.INVISIBLE);
+      title.setText(displayAuthor(seed));
+    });
 
     FrameLayout content = new FrameLayout(this);
     sheet.addView(content, new LinearLayout.LayoutParams(
@@ -3680,6 +3730,86 @@ public class NativeShortVideoActivity extends Activity {
       authorOverlay = null;
     }
     hideSystemBars();
+  }
+
+  private void animateAuthorProfileSection(
+    LinearLayout section,
+    boolean collapsed,
+    int[] expandedHeightRef,
+    ValueAnimator[] animatorRef
+  ) {
+    if (section == null || expandedHeightRef == null || animatorRef == null) return;
+    if (animatorRef[0] != null) animatorRef[0].cancel();
+
+    int currentHeight = Math.max(0, section.getHeight());
+    if (!collapsed && currentHeight == 0 && expandedHeightRef[0] <= 0) {
+      ViewGroup.LayoutParams measureParams = section.getLayoutParams();
+      measureParams.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+      section.setLayoutParams(measureParams);
+      section.setVisibility(View.VISIBLE);
+      section.post(() -> {
+        if (section.getHeight() > 0) expandedHeightRef[0] = section.getHeight();
+        animateAuthorProfileSection(section, false, expandedHeightRef, animatorRef);
+      });
+      return;
+    }
+
+    if (collapsed && currentHeight > 0) {
+      expandedHeightRef[0] = Math.max(expandedHeightRef[0], currentHeight);
+    }
+    int targetHeight = collapsed ? 0 : Math.max(1, expandedHeightRef[0]);
+    if (currentHeight == targetHeight) {
+      section.setVisibility(collapsed ? View.INVISIBLE : View.VISIBLE);
+      section.setAlpha(collapsed ? 0f : 1f);
+      section.setTranslationY(collapsed ? -dp(12) : 0f);
+      return;
+    }
+
+    section.setVisibility(View.VISIBLE);
+    ValueAnimator animator = ValueAnimator.ofInt(currentHeight, targetHeight);
+    animatorRef[0] = animator;
+    animator.setDuration(190);
+    animator.setInterpolator(GALLERY_SETTLE_INTERPOLATOR);
+    animator.addUpdateListener(valueAnimator -> {
+      int height = (Integer) valueAnimator.getAnimatedValue();
+      ViewGroup.LayoutParams params = section.getLayoutParams();
+      params.height = height;
+      section.setLayoutParams(params);
+      float progress = expandedHeightRef[0] <= 0 ? (collapsed ? 0f : 1f) : Math.min(1f, height / (float) expandedHeightRef[0]);
+      section.setAlpha(progress);
+      section.setTranslationY(-dp(12) * (1f - progress));
+    });
+    animator.addListener(new AnimatorListenerAdapter() {
+      @Override
+      public void onAnimationEnd(Animator animation) {
+        if (animatorRef[0] != animator) return;
+        ViewGroup.LayoutParams params = section.getLayoutParams();
+        params.height = collapsed ? 0 : ViewGroup.LayoutParams.WRAP_CONTENT;
+        section.setLayoutParams(params);
+        section.setVisibility(collapsed ? View.INVISIBLE : View.VISIBLE);
+        section.setAlpha(collapsed ? 0f : 1f);
+        section.setTranslationY(collapsed ? -dp(12) : 0f);
+        Log.i(TAG, "author profile " + (collapsed ? "collapsed" : "expanded"));
+        animatorRef[0] = null;
+      }
+    });
+    animator.start();
+  }
+
+  private void resetAuthorWorksScrollToTop(AuthorScreenState screen) {
+    if (screen == null || screen.worksScrollView == null) return;
+    ScrollView scroll = screen.worksScrollView;
+    screen.worksScrollY = 0;
+    scroll.fling(0);
+    scroll.requestFocus(View.FOCUS_UP);
+    scroll.fullScroll(View.FOCUS_UP);
+    scroll.scrollTo(0, 0);
+    scroll.postOnAnimation(() -> {
+      if (screen.worksScrollView != scroll) return;
+      screen.worksScrollY = 0;
+      scroll.fullScroll(View.FOCUS_UP);
+      scroll.scrollTo(0, 0);
+    });
   }
 
   private TextView authorActionButton(String label, boolean primary, boolean enabled, View.OnClickListener listener) {
@@ -4003,7 +4133,28 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private View authorWorksContent(AuthorScreenState screen, FeedPage page, Runnable loadMore, @Nullable Runnable onAuthorScroll) {
-    ScrollView scroll = new ScrollView(this);
+    ScrollView scroll = new ScrollView(this) {
+      private float lastTouchY;
+
+      @Override
+      public boolean dispatchTouchEvent(MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+          screen.worksGestureId += 1;
+          screen.worksGestureDirection = 0;
+          lastTouchY = event.getY();
+        } else if (action == MotionEvent.ACTION_MOVE) {
+          float deltaY = event.getY() - lastTouchY;
+          if (Math.abs(deltaY) >= dp(2)) {
+            screen.worksGestureDirection = deltaY > 0f ? 1 : -1;
+            lastTouchY = event.getY();
+          }
+        }
+        return super.dispatchTouchEvent(event);
+      }
+    };
+    screen.worksScrollView = scroll;
+    scroll.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
     scroll.setFillViewport(false);
     scroll.setVerticalScrollBarEnabled(false);
     scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
@@ -6359,7 +6510,10 @@ public class NativeShortVideoActivity extends Activity {
     String sort;
     boolean loadingMore;
     boolean hasPlaybackContext = true;
+    int worksGestureId;
+    int worksGestureDirection;
     int worksScrollY;
+    @Nullable ScrollView worksScrollView;
 
     AuthorScreenState(ShortVideoItem seed, @Nullable FeedPage page, String activeTab, String sort) {
       this.seed = seed;

@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { backup, DatabaseSync } from "node:sqlite";
 
 const args = parseArgs(process.argv.slice(2));
 const dbPath = path.resolve(args.db || path.join(process.cwd(), "data", "music.sqlite"));
@@ -13,6 +13,10 @@ const toRoot = catalogPath ? "" : requireDirectory(args.to, "--to");
 const db = new DatabaseSync(dbPath);
 const sourceDb = sourceDbPath === dbPath ? db : new DatabaseSync(sourceDbPath, { readOnly: true });
 const catalogDb = catalogPath ? new DatabaseSync(catalogPath, { readOnly: true }) : null;
+const backupDir = path.join(path.dirname(dbPath), "backups");
+fs.mkdirSync(backupDir, { recursive: true });
+const backupPath = path.join(backupDir, `music-before-root-migration-${timestampForFile()}.sqlite`);
+await backup(db, backupPath);
 const catalogLibraryRoot = catalogPath ? path.dirname(path.dirname(catalogPath)) : "";
 const catalogTargets = new Map();
 for (const row of catalogDb?.prepare(`
@@ -125,6 +129,7 @@ try {
 }
 
 console.log(JSON.stringify({
+  backupPath,
   dbPath,
   sourceDbPath,
   fromRoot,
@@ -171,4 +176,8 @@ function trackIdForPath(filePath) {
     .update(`track:${path.resolve(filePath).toLowerCase()}`)
     .digest("hex")
     .slice(0, 24);
+}
+
+function timestampForFile() {
+  return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 }

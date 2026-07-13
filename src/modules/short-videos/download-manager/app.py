@@ -78,7 +78,11 @@ NODE_EXECUTABLE = os.environ.get(
     "DOUYIN_MANAGER_NODE",
     str(INSTALL_DIR / "runtime" / "node.exe") if FROZEN_BUILD else "node",
 )
-DEFAULT_OUTPUT_DIR = Path.home() / "Downloads"
+DEFAULT_STORAGE_ROOT = Path(
+    os.environ.get("FANHAO_SHORT_VIDEO_STORAGE_ROOT", r"D:\Media")
+)
+DEFAULT_OUTPUT_DIR = DEFAULT_STORAGE_ROOT
+DEFAULT_LIBRARY_OUTPUT_DIR = DEFAULT_STORAGE_ROOT / "ShortVideos"
 LIBRARY_SEC_UID = os.environ.get(
     "DOUYIN_LIBRARY_SEC_UID",
     "MS4wLjABAAAAqiW-0GYj4wFCXymqQZsgY3mF5z4cZWUopJqTUkmYx20",
@@ -290,7 +294,7 @@ def init_db() -> None:
             "profile_url": TEST_PROFILE_URL,
             "profile_tab": "auto",
             "output_dir": str(DEFAULT_OUTPUT_DIR),
-            "library_output_dir": str(DEFAULT_OUTPUT_DIR / "likes" / safe_path_segment(LIBRARY_SEC_UID)),
+            "library_output_dir": str(DEFAULT_LIBRARY_OUTPUT_DIR),
             "concurrency": "8",
             "scrolls": "12000",
             "idle_rounds": "160",
