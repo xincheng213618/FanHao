@@ -17,6 +17,7 @@ import {
 import { musicSearchValueMatch, phoneticSearchDocument, phoneticSearchFtsTerm } from "../src/modules/music/server/search.js";
 import { createFileServer } from "../src/platform/server/file-server.js";
 import { buildTrackVersionGroups, getTrackVersionInfo } from "../android-client/www/modules/music/track-versions.js";
+import { selectTrackByVersionStrategy } from "../android-client/www/modules/music/music-views.js";
 
 globalThis.window = { location: { href: "http://localhost/", search: "", hash: "" } };
 const { routeFromUrl, routeUrl } = await import("../public/js/router.js");
@@ -29,6 +30,16 @@ const store = createMusicStore({
 });
 
 try {
+  const versionStrategyTracks = [
+    { id: "original", title: "Belief", artist: "S.H.E", fileName: "Belief.mp3", sizeBytes: 8_000_000, bitDepth: 0, sampleRate: 44_100 },
+    { id: "live", title: "Belief (Live)", artist: "S.H.E", fileName: "Belief (Live).flac", sizeBytes: 32_000_000, bitDepth: 24, sampleRate: 96_000 },
+    { id: "remix", title: "Belief (Remix)", artist: "S.H.E", fileName: "Belief (Remix).flac", sizeBytes: 18_000_000, bitDepth: 16, sampleRate: 48_000 }
+  ];
+  assert.equal(selectTrackByVersionStrategy(versionStrategyTracks, "smart", versionStrategyTracks[2]).id, "remix");
+  assert.equal(selectTrackByVersionStrategy(versionStrategyTracks, "original", versionStrategyTracks[2]).id, "original");
+  assert.equal(selectTrackByVersionStrategy(versionStrategyTracks, "quality", versionStrategyTracks[0]).id, "live");
+  assert.equal(selectTrackByVersionStrategy(versionStrategyTracks, "compact", versionStrategyTracks[1]).id, "original");
+
   const identityKnowledge = buildMusicIdentityKnowledge([
     { artist: "刘若英", title: "后来" },
     { artist: "刘若英", title: "后来" },
@@ -443,11 +454,14 @@ try {
   assert.match(androidClient, /function renderSearchSongResults\(options = \{\}\)[\s\S]*?currentSearchVersionGroups\(tracks\)[\s\S]*?versionGroups: visibleGroups/, "Android song search should group recognized versions before rendering bounded previews");
   assert.match(androidClient, /function renderSearchTrackVersionGroup\(group, index\)[\s\S]*?searchExpandedVersionGroups[\s\S]*?renderSearchVersionChoice\(track, group\)/, "Android song results should expand a version group into directly playable choices");
   assert.match(androidClient, /function toggleSearchTrackVersionGroup\(key\)[\s\S]*?searchExpandedVersionGroups\.delete[\s\S]*?searchExpandedVersionGroups\.add[\s\S]*?refreshMountedSearchUi\(\)/, "Android version expansion should preserve the mounted search and player surfaces");
-  assert.match(androidClient, /MUSIC_REMEMBER_VERSION_KEY = "fanhao\.android\.music\.rememberVersionChoices"[\s\S]*?MUSIC_VERSION_PREFERENCES_KEY = "fanhao\.android\.music\.versionPreferences"[\s\S]*?rememberVersionChoices: readRememberVersionChoicesPreference\(\)/, "Android music should persist version-memory settings independently from the playback queue");
-  assert.match(androidClient, /function preferredTrackForVersionGroup\(group, fallback = null\)[\s\S]*?state\.rememberVersionChoices[\s\S]*?versionPreferenceKey\(group\.key\)[\s\S]*?tracks\.find/, "Android search should resolve a saved concrete version with a safe group fallback");
+  assert.match(androidClient, /MUSIC_REMEMBER_VERSION_KEY = "fanhao\.android\.music\.rememberVersionChoices"[\s\S]*?MUSIC_VERSION_PREFERENCES_KEY = "fanhao\.android\.music\.versionPreferences"[\s\S]*?MUSIC_VERSION_STRATEGY_KEY = "fanhao\.android\.music\.versionStrategy"[\s\S]*?rememberVersionChoices: readRememberVersionChoicesPreference\(\)[\s\S]*?versionStrategy: readVersionStrategyPreference\(\)/, "Android music should persist per-song version memory and the global version strategy independently from the playback queue");
+  assert.match(androidClient, /function preferredTrackForVersionGroup\(group, fallback = null\)[\s\S]*?rememberedTrackForVersionGroup\(group\)[\s\S]*?selectTrackByVersionStrategy\(tracks, state\.versionStrategy, defaultTrack\)/, "Android search should let a remembered concrete version override the global strategy and safe fallback");
+  assert.match(androidClient, /function rememberedTrackForVersionGroup\(group\)[\s\S]*?state\.rememberVersionChoices[\s\S]*?versionPreferenceKey\(group\.key\)[\s\S]*?tracks\.find/, "Android search should resolve remembered versions only when version memory is enabled");
   assert.match(androidClient, /function playSearchTrackVersion\(track, tracks\)[\s\S]*?rememberTrackVersionChoice\(track, queue\)[\s\S]*?state\.queue =/, "Choosing a search version should remember it before playback refreshes the mounted search surface");
-  assert.match(androidClient, /function renderSettingsSheet\(\)[\s\S]*?搜索与版本[\s\S]*?记住版本选择[\s\S]*?版本偏好[\s\S]*?clearActiveVersionPreferences/, "Android music settings should manage remembered search versions without leaving the player");
-  assert.match(androidClient, /function readRememberVersionChoicesPreference\(\)[\s\S]*?value === null \? true[\s\S]*?function pruneVersionPreferences\(value\)[\s\S]*?VERSION_PREFERENCE_LIMIT/, "Version memory should default on and cap its local storage footprint");
+  assert.match(androidClient, /function renderSettingsSheet\(\)[\s\S]*?搜索与版本[\s\S]*?默认播放版本策略[\s\S]*?VERSION_STRATEGY_OPTIONS[\s\S]*?记住版本选择[\s\S]*?版本偏好[\s\S]*?clearActiveVersionPreferences/, "Android music settings should manage the global strategy and remembered search versions without leaving the player");
+  assert.match(androidClient, /function readRememberVersionChoicesPreference\(\)[\s\S]*?value === null \? true[\s\S]*?function readVersionStrategyPreference\(\)[\s\S]*?MUSIC_VERSION_STRATEGY_KEY[\s\S]*?function pruneVersionPreferences\(value\)[\s\S]*?VERSION_PREFERENCE_LIMIT/, "Version preferences should use safe local defaults and cap remembered per-song storage");
+  assert.match(androidClient, /VERSION_STRATEGY_OPTIONS = \[[\s\S]*?智能选择[\s\S]*?原版优先[\s\S]*?无损优先[\s\S]*?小文件优先[\s\S]*?function setVersionStrategy\(value\)[\s\S]*?writeVersionStrategyPreference/, "Android music settings should expose and persist four understandable default-version strategies");
+  assert.match(androidClient, /function selectTrackByVersionStrategy\(tracks = \[\], strategy = "smart", fallback = null\)[\s\S]*?kind === "original"[\s\S]*?bestAudioQualityTrack[\s\S]*?sizeBytes[\s\S]*?function audioQualityRank\(track = \{\}\)[\s\S]*?lossless[\s\S]*?bitDepth[\s\S]*?sampleRate/, "Global version selection should implement smart, original, lossless-quality, and compact-file policies from real track metadata");
   assert.match(androidClient, /已合并 \$\{track\.duplicateCount\} 个相同文件[\s\S]*?\$\{formatNumber\(track\.duplicateCount\)\} 个来源/, "Android search should distinguish identical file sources from semantic song versions");
   assert.match(androidMusicStyles, /\.music-mobile-search-best-stack[\s\S]*?\.music-mobile-search-version-rail[\s\S]*?\.music-mobile-search-version-choice\.preferred[\s\S]*?\.music-mobile-search-version-choice-label i[\s\S]*?\.music-mobile-search-track-version-group/, "Android music should style preferred versions and expandable result groups as one visual system");
   assert.match(androidMusicStyles, /\.music-mobile-settings-action[\s\S]*?\.music-mobile-settings-action:disabled/, "Android music settings should expose a bounded clear-version action state");
@@ -471,7 +485,7 @@ try {
   assert.match(androidClient, /function searchSortHint\(\)[\s\S]*?完整匹配优先[\s\S]*?播放次数/, "Android search should explain why relevance-ranked results appear first");
   assert.match(androidClient, /function trackSearchMatchLabel\(track, query\)[\s\S]*?歌名[\s\S]*?歌手[\s\S]*?专辑[\s\S]*?综合匹配/, "Android search rows should explain which metadata field matched the query");
   assert.match(androidClient, /function renderTrackRow\(track, index, options = \{\}\)[\s\S]*?music-mobile-track-title-line[\s\S]*?music-mobile-track-match[\s\S]*?text\.append\(titleLine, meta\)/, "Android search rows should mount their match explanation beside the visible title");
-  assert.match(androidClient, /function playSearchResults\(\)[\s\S]*?state\.queue = tracks\.map[\s\S]*?openTrack\(tracks\[0\]\.id/, "Android search should support playing the visible result queue in one tap");
+  assert.match(androidClient, /function playSearchResults\(\)[\s\S]*?preferredSearchQueue\(tracks\)[\s\S]*?state\.queue = queue[\s\S]*?openTrack\(queue\[0\]\.id/, "Android search should support playing the strategy-resolved result queue in one tap");
   assert.match(androidClient, /track\.artist \|\| "未知歌手", highlight: true[\s\S]*?track\.album \|\| "未知专辑", highlight: true/, "Android music search should highlight matching artist and album metadata as well as titles");
   assert.match(androidClient, /SEARCH_DEBOUNCE_MS = 280[\s\S]*?scheduleLiveSearch\(search\.value\)/, "Android music search should update after a bounded typing debounce");
   assert.match(androidClient, /commitMusicSearch\(query, \{ preserveSuggestions: true \}\)[\s\S]*?if \(!options\.preserveSuggestions\)[\s\S]*?searchSuggestionController\?\.abort\(\)/, "Android live result refreshes should not cancel a slower in-flight type-ahead request");
@@ -506,7 +520,7 @@ try {
   assert.match(androidClient, /function renderSearchRecentBlock\(tracks\)[\s\S]*?playSearchDiscoveryTrack\(track, tracks\)[\s\S]*?function playSearchDiscoveryTrack[\s\S]*?state\.queue =/, "Android search discovery should let recent tracks resume directly with a coherent queue");
   assert.match(androidClient, /function focusSearchDiscoveryScope\(scope\)[\s\S]*?searchScopePlaceholder\(nextScope\)[\s\S]*?input\.focus\(\)/, "Android discovery scope shortcuts should focus the retained search input with contextual prompts");
   assert.match(androidClient, /if \(!\["artists", "albums"\]\.includes\(state\.mode\) && !state\.query\) state\.queue = visibleTracks/, "Typing a search should not replace the active playback queue");
-  assert.match(androidClient, /function activateSearchResultQueue\(trackId\)[\s\S]*?state\.queue = tracks\.map/, "Choosing a search result should intentionally promote its result list to the playback queue");
+  assert.match(androidClient, /function activateSearchResultQueue\(trackId\)[\s\S]*?state\.queue = preferredSearchQueue\(tracks\)[\s\S]*?function preferredSearchQueue\(tracks = state\.data\?\.tracks\)[\s\S]*?currentSearchVersionGroups\(tracks\)[\s\S]*?preferredTrackForVersionGroup/, "Choosing a search result should promote one globally resolved version per result group to the playback queue");
   assert.match(androidClient, /function renderTrackActionsSheet\(\)[\s\S]*?立即播放[\s\S]*?下一首播放[\s\S]*?加入队列[\s\S]*?收藏歌曲[\s\S]*?查看歌手[\s\S]*?查看专辑/, "Android track actions should expose the main post-search listening actions in a touch-friendly sheet");
   assert.match(androidClient, /function renderSearchQuickFilters\(\)[\s\S]*?已收藏[\s\S]*?有歌词[\s\S]*?4 分以上[\s\S]*?无损/, "Android search should expose real quick filters for local music metadata");
   assert.match(androidClient, /function searchSortHint\(\)[\s\S]*?correctedQuery[\s\S]*?已自动纠正[\s\S]*?searchMode === "phonetic"[\s\S]*?已识别拼音或首字母/, "Android search should explain typo recovery and phonetic matching in plain language");

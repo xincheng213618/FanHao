@@ -19,6 +19,7 @@ const MUSIC_RESUME_QUEUE_KEY = "fanhao.android.music.resumeQueue";
 const MUSIC_PLAYBACK_QUEUE_KEY = "fanhao.android.music.playbackQueue";
 const MUSIC_REMEMBER_VERSION_KEY = "fanhao.android.music.rememberVersionChoices";
 const MUSIC_VERSION_PREFERENCES_KEY = "fanhao.android.music.versionPreferences";
+const MUSIC_VERSION_STRATEGY_KEY = "fanhao.android.music.versionStrategy";
 const SLEEP_TIMER_OPTIONS = [0, 10, 15, 30, 45, 60, 90];
 const PLAYBACK_SPEED_OPTIONS = [0.75, 1, 1.25, 1.5, 2];
 const FADE_SECONDS_OPTIONS = [0, 1, 3, 5];
@@ -27,6 +28,12 @@ const SEARCH_HISTORY_LIMIT = 8;
 const SEARCH_DEBOUNCE_MS = 280;
 const SEARCH_SUGGESTION_DEBOUNCE_MS = 90;
 const VERSION_PREFERENCE_LIMIT = 160;
+const VERSION_STRATEGY_OPTIONS = [
+  ["smart", "智能选择"],
+  ["original", "原版优先"],
+  ["quality", "无损优先"],
+  ["compact", "小文件优先"]
+];
 
 export function createMusicViews(deps) {
   const {
@@ -90,6 +97,7 @@ export function createMusicViews(deps) {
     resumeQueue: readResumeQueuePreference(),
     rememberVersionChoices: readRememberVersionChoicesPreference(),
     versionPreferences: readVersionPreferencesPreference(),
+    versionStrategy: readVersionStrategyPreference(),
     searchFavorite: false,
     searchLyrics: false,
     searchMinRating: 0,
@@ -1768,7 +1776,6 @@ export function createMusicViews(deps) {
   function renderBestSearchMatch(best) {
     const item = best.type === "lyric" ? best.item.track : best.item;
     const versionGroup = best.type === "track" ? searchVersionGroupForTrack(item) : null;
-    const preferredVersion = preferredTrackForVersionGroup(versionGroup, item);
     const card = document.createElement("button");
     card.type = "button";
     card.className = `music-mobile-search-best-match type-${best.type}`;
@@ -1802,9 +1809,8 @@ export function createMusicViews(deps) {
     } else {
       appendSearchHighlightedText(meta, [item.artist || "未知歌手", item.album || "未知专辑"].join(" · "), item, "artist");
       if (versionGroup?.tracks?.length > 1) meta.append(document.createTextNode(` · ${formatNumber(versionGroup.tracks.length)} 个版本`));
-      if (preferredVersion?.id && preferredVersion.id !== item.id) {
-        meta.append(document.createTextNode(` · 默认${getTrackVersionInfo(preferredVersion).label}`));
-      }
+      const preferenceLabel = versionGroupPreferenceLabel(versionGroup, item);
+      if (preferenceLabel) meta.append(document.createTextNode(` · ${preferenceLabel}`));
     }
     text.append(title, meta);
     const badge = document.createElement("em");
@@ -1875,15 +1881,27 @@ export function createMusicViews(deps) {
     const defaultTrack = fallback?.id && tracks.some((track) => track.id === fallback.id)
       ? fallback
       : group?.primary || tracks[0] || fallback;
-    if (!state.rememberVersionChoices || tracks.length < 2) return defaultTrack;
-    const preference = state.versionPreferences?.[versionPreferenceKey(group.key)];
-    return tracks.find((track) => track.id === preference?.trackId) || defaultTrack;
+    if (tracks.length < 2) return defaultTrack;
+    return rememberedTrackForVersionGroup(group)
+      || selectTrackByVersionStrategy(tracks, state.versionStrategy, defaultTrack);
   }
 
-  function versionGroupPreferenceLabel(group) {
-    const preferred = preferredTrackForVersionGroup(group, group?.primary);
-    if (!state.rememberVersionChoices || !preferred?.id || preferred.id === group?.primary?.id) return "";
-    return `默认${getTrackVersionInfo(preferred).label}`;
+  function rememberedTrackForVersionGroup(group) {
+    const tracks = Array.isArray(group?.tracks) ? group.tracks : [];
+    if (!state.rememberVersionChoices || tracks.length < 2) return null;
+    const preference = state.versionPreferences?.[versionPreferenceKey(group.key)];
+    return tracks.find((track) => track.id === preference?.trackId) || null;
+  }
+
+  function versionGroupPreferenceBadge(group) {
+    if (rememberedTrackForVersionGroup(group)) return "已记住";
+    return versionStrategyLabel(state.versionStrategy);
+  }
+
+  function versionGroupPreferenceLabel(group, fallback = null) {
+    const preferred = preferredTrackForVersionGroup(group, fallback || group?.primary);
+    if (!preferred?.id || Number(group?.tracks?.length || 0) < 2) return "";
+    return `${versionGroupPreferenceBadge(group)} · ${getTrackVersionInfo(preferred).label}`;
   }
 
   function renderSearchVersionRail(group) {
@@ -1896,7 +1914,7 @@ export function createMusicViews(deps) {
   function renderSearchVersionChoice(track, group, options = {}) {
     const info = getTrackVersionInfo(track);
     const preferred = preferredTrackForVersionGroup(group, group?.primary);
-    const isPreferred = state.rememberVersionChoices && preferred?.id === track.id;
+    const isPreferred = Number(group?.tracks?.length || 0) > 1 && preferred?.id === track.id;
     const button = document.createElement("button");
     button.type = "button";
     button.className = `music-mobile-search-version-choice${options.compact ? " is-compact" : ""}${isPreferred ? " preferred" : ""}${state.current?.id === track.id ? " active" : ""}`;
@@ -1909,7 +1927,7 @@ export function createMusicViews(deps) {
     labelLine.append(label);
     if (isPreferred) {
       const preferredBadge = document.createElement("i");
-      preferredBadge.textContent = "默认";
+      preferredBadge.textContent = versionGroupPreferenceBadge(group);
       labelLine.append(preferredBadge);
     }
     const meta = document.createElement("small");
@@ -2644,7 +2662,8 @@ export function createMusicViews(deps) {
     const versionGroup = options.versionGroup;
     const versionCount = Number(versionGroup?.tracks?.length || 0);
     const preferredVersion = versionCount > 1 ? preferredTrackForVersionGroup(versionGroup, track) : track;
-    const isCurrent = state.current?.id === track.id;
+    const isCurrent = state.current?.id === track.id
+      || (versionCount > 1 && versionGroup.tracks.some((item) => item.id === state.current?.id));
     const isPlaying = isCurrent && state.playing;
     const row = document.createElement("div");
     row.className = `music-mobile-track${isCurrent ? " active" : ""}${isPlaying ? " playing" : ""}`;
@@ -2756,14 +2775,23 @@ export function createMusicViews(deps) {
     if (!state.query || state.mode !== "library") return;
     const tracks = Array.isArray(state.data?.tracks) ? state.data.tracks : [];
     if (!tracks.some((item) => item.id === trackId)) return;
-    state.queue = tracks.map((item) => ({ ...item }));
+    state.queue = preferredSearchQueue(tracks);
   }
 
   function playSearchResults() {
     const tracks = Array.isArray(state.data?.tracks) ? state.data.tracks : [];
-    if (!tracks.length) return;
-    state.queue = tracks.map((item) => ({ ...item }));
-    openTrack(tracks[0].id, { autoplay: true }).catch(() => {});
+    const queue = preferredSearchQueue(tracks);
+    if (!queue.length) return;
+    state.queue = queue;
+    openTrack(queue[0].id, { autoplay: true }).catch(() => {});
+  }
+
+  function preferredSearchQueue(tracks = state.data?.tracks) {
+    const seen = new Set();
+    return currentSearchVersionGroups(tracks)
+      .map((group) => preferredTrackForVersionGroup(group, group.primary))
+      .filter((track) => track?.id && !seen.has(track.id) && seen.add(track.id))
+      .map((track) => ({ ...track }));
   }
 
   function renderMiniPlayer() {
@@ -3601,6 +3629,22 @@ export function createMusicViews(deps) {
     searchVersions.className = "music-mobile-settings-group";
     searchVersions.append(settingsGroupTitle("搜索与版本"));
 
+    const versionStrategy = document.createElement("select");
+    versionStrategy.setAttribute("aria-label", "默认播放版本策略");
+    for (const [value, label] of VERSION_STRATEGY_OPTIONS) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      versionStrategy.append(option);
+    }
+    versionStrategy.value = state.versionStrategy;
+    versionStrategy.addEventListener("change", () => setVersionStrategy(versionStrategy.value));
+    searchVersions.append(settingsRow(
+      "默认播放版本",
+      versionStrategyDescription(state.versionStrategy),
+      versionStrategy
+    ));
+
     const rememberVersions = document.createElement("button");
     rememberVersions.type = "button";
     rememberVersions.className = `music-mobile-settings-switch${state.rememberVersionChoices ? " active" : ""}`;
@@ -3623,7 +3667,7 @@ export function createMusicViews(deps) {
     clearVersions.addEventListener("click", clearActiveVersionPreferences);
     searchVersions.append(settingsRow(
       "版本偏好",
-      preferenceCount ? `当前音乐服务已记住 ${formatNumber(preferenceCount)} 首歌，可随时恢复为原版优先。` : "选择具体版本后会显示在这里。",
+      preferenceCount ? `当前音乐服务已记住 ${formatNumber(preferenceCount)} 首歌，可随时恢复为全局策略。` : "选择具体版本后会显示在这里。",
       clearVersions
     ));
 
@@ -3639,6 +3683,15 @@ export function createMusicViews(deps) {
     writeRememberVersionChoicesPreference(state.rememberVersionChoices);
     state.status = state.rememberVersionChoices ? "已开启版本选择记忆" : "已暂停版本选择记忆";
     renderShell();
+  }
+
+  function setVersionStrategy(value) {
+    state.versionStrategy = normalizeVersionStrategy(value);
+    writeVersionStrategyPreference(state.versionStrategy);
+    state.status = `默认播放版本已设为${versionStrategyLabel(state.versionStrategy)}`;
+    const select = els.viewContent?.querySelector('select[aria-label="默认播放版本策略"]');
+    const description = select?.closest(".music-mobile-settings-row")?.querySelector("small");
+    if (description) description.textContent = versionStrategyDescription(state.versionStrategy);
   }
 
   function activeVersionPreferenceCount() {
@@ -5905,6 +5958,67 @@ function duplicateTrackScore(track = {}) {
     + Math.log2(Math.max(1, Number(track.sizeBytes || 0)));
 }
 
+export function selectTrackByVersionStrategy(tracks = [], strategy = "smart", fallback = null) {
+  const candidates = (Array.isArray(tracks) ? tracks : []).filter((track) => track?.id);
+  const defaultTrack = fallback?.id && candidates.some((track) => track.id === fallback.id)
+    ? fallback
+    : candidates[0] || fallback;
+  const normalized = normalizeVersionStrategy(strategy);
+  if (candidates.length < 2 || normalized === "smart") return defaultTrack;
+  if (normalized === "original") {
+    const originals = candidates.filter((track) => getTrackVersionInfo(track).kind === "original");
+    return originals.length ? bestAudioQualityTrack(originals, defaultTrack) : defaultTrack;
+  }
+  if (normalized === "quality") return bestAudioQualityTrack(candidates, defaultTrack);
+  const compact = candidates.filter((track) => Number(track.sizeBytes || 0) > 0);
+  return compact.reduce((best, track) => Number(track.sizeBytes) < Number(best.sizeBytes) ? track : best, compact[0]) || defaultTrack;
+}
+
+function bestAudioQualityTrack(tracks = [], fallback = null) {
+  return (Array.isArray(tracks) ? tracks : []).reduce((best, track) => {
+    if (!best) return track;
+    return compareAudioQuality(track, best) > 0 ? track : best;
+  }, null) || fallback;
+}
+
+function compareAudioQuality(left = {}, right = {}) {
+  const leftRank = audioQualityRank(left);
+  const rightRank = audioQualityRank(right);
+  for (let index = 0; index < leftRank.length; index += 1) {
+    if (leftRank[index] !== rightRank[index]) return leftRank[index] - rightRank[index];
+  }
+  return 0;
+}
+
+function audioQualityRank(track = {}) {
+  const codec = `${track.codec || ""} ${track.fileName || ""}`.toLocaleLowerCase();
+  const lossless = /(?:\bflac\b|\bwave?\b|\baiff?\b|\bape\b|\balac\b|\bds[fd]\b|\.(?:flac|wav|aiff?|ape|alac|dsf|dff)(?:$|\?))/u.test(codec) ? 1 : 0;
+  return [
+    lossless,
+    Math.max(0, Number(track.bitDepth || 0)),
+    Math.max(0, Number(track.sampleRate || 0)),
+    Math.max(0, Number(track.sizeBytes || 0))
+  ];
+}
+
+function normalizeVersionStrategy(value) {
+  const strategy = String(value || "smart").trim().toLocaleLowerCase();
+  return VERSION_STRATEGY_OPTIONS.some(([candidate]) => candidate === strategy) ? strategy : "smart";
+}
+
+function versionStrategyLabel(value) {
+  const strategy = normalizeVersionStrategy(value);
+  return VERSION_STRATEGY_OPTIONS.find(([candidate]) => candidate === strategy)?.[1] || "智能选择";
+}
+
+function versionStrategyDescription(value) {
+  const strategy = normalizeVersionStrategy(value);
+  if (strategy === "original") return "同名歌曲优先原版；原版有多个来源时选择音质更高的文件。单曲记忆仍优先。";
+  if (strategy === "quality") return "同名歌曲优先无损、位深和采样率更高的版本。单曲记忆仍优先。";
+  if (strategy === "compact") return "同名歌曲优先体积更小的文件，适合节省流量和空间。单曲记忆仍优先。";
+  return "沿用搜索排序推荐的版本；手动记住的单曲选择会覆盖全局策略。";
+}
+
 function normalizeMode(value) {
   const mode = String(value || DEFAULT_MODE).trim();
   return ["library", "artists", "albums", "history", "smart", "playlist"].includes(mode) ? mode : DEFAULT_MODE;
@@ -6200,6 +6314,20 @@ function readRememberVersionChoicesPreference() {
 function writeRememberVersionChoicesPreference(value) {
   try {
     window.localStorage?.setItem(MUSIC_REMEMBER_VERSION_KEY, value ? "1" : "0");
+  } catch {}
+}
+
+function readVersionStrategyPreference() {
+  try {
+    return normalizeVersionStrategy(window.localStorage?.getItem(MUSIC_VERSION_STRATEGY_KEY));
+  } catch {
+    return "smart";
+  }
+}
+
+function writeVersionStrategyPreference(value) {
+  try {
+    window.localStorage?.setItem(MUSIC_VERSION_STRATEGY_KEY, normalizeVersionStrategy(value));
   } catch {}
 }
 
