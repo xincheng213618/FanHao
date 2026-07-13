@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=20260713-music-search-versions-20";
+import { CLIENT_VERSION } from "./config.js?v=20260713-music-version-memory-21";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;

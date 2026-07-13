@@ -17,6 +17,8 @@ const MUSIC_GAPLESS_KEY = "fanhao.android.music.gapless";
 const MUSIC_CROSSFADE_SECONDS_KEY = "fanhao.android.music.crossfadeSeconds";
 const MUSIC_RESUME_QUEUE_KEY = "fanhao.android.music.resumeQueue";
 const MUSIC_PLAYBACK_QUEUE_KEY = "fanhao.android.music.playbackQueue";
+const MUSIC_REMEMBER_VERSION_KEY = "fanhao.android.music.rememberVersionChoices";
+const MUSIC_VERSION_PREFERENCES_KEY = "fanhao.android.music.versionPreferences";
 const SLEEP_TIMER_OPTIONS = [0, 10, 15, 30, 45, 60, 90];
 const PLAYBACK_SPEED_OPTIONS = [0.75, 1, 1.25, 1.5, 2];
 const FADE_SECONDS_OPTIONS = [0, 1, 3, 5];
@@ -24,6 +26,7 @@ const CROSSFADE_SECONDS_OPTIONS = [0, 3, 5, 8];
 const SEARCH_HISTORY_LIMIT = 8;
 const SEARCH_DEBOUNCE_MS = 280;
 const SEARCH_SUGGESTION_DEBOUNCE_MS = 90;
+const VERSION_PREFERENCE_LIMIT = 160;
 
 export function createMusicViews(deps) {
   const {
@@ -85,6 +88,8 @@ export function createMusicViews(deps) {
     gapless: savedGapless && !savedCrossfadeSeconds,
     crossfadeSeconds: savedGapless ? 0 : savedCrossfadeSeconds,
     resumeQueue: readResumeQueuePreference(),
+    rememberVersionChoices: readRememberVersionChoicesPreference(),
+    versionPreferences: readVersionPreferencesPreference(),
     searchFavorite: false,
     searchLyrics: false,
     searchMinRating: 0,
@@ -1428,6 +1433,7 @@ export function createMusicViews(deps) {
   function renderBestSearchMatch(best) {
     const item = best.type === "lyric" ? best.item.track : best.item;
     const versionGroup = best.type === "track" ? searchVersionGroupForTrack(item) : null;
+    const preferredVersion = preferredTrackForVersionGroup(versionGroup, item);
     const card = document.createElement("button");
     card.type = "button";
     card.className = `music-mobile-search-best-match type-${best.type}`;
@@ -1453,6 +1459,9 @@ export function createMusicViews(deps) {
     } else {
       appendSearchHighlightedText(meta, [item.artist || "未知歌手", item.album || "未知专辑"].join(" · "), item, "artist");
       if (versionGroup?.tracks?.length > 1) meta.append(document.createTextNode(` · ${formatNumber(versionGroup.tracks.length)} 个版本`));
+      if (preferredVersion?.id && preferredVersion.id !== item.id) {
+        meta.append(document.createTextNode(` · 默认${getTrackVersionInfo(preferredVersion).label}`));
+      }
     }
     text.append(title, meta);
     const badge = document.createElement("em");
@@ -1485,7 +1494,7 @@ export function createMusicViews(deps) {
     const item = best.item;
     if (best.type === "track") {
       const versionGroup = searchVersionGroupForTrack(item);
-      playSearchTrackVersion(item, versionGroup?.tracks || [item]);
+      playSearchTrackVersion(preferredTrackForVersionGroup(versionGroup, item), versionGroup?.tracks || [item]);
       return;
     }
     updateListParams({
@@ -1508,6 +1517,28 @@ export function createMusicViews(deps) {
     return findTrackVersionGroup(currentSearchVersionGroups(), track.id);
   }
 
+  function versionPreferenceKey(groupKey) {
+    const activeUrl = String(getActiveUrl() || "").replace(/\/+$/u, "");
+    const key = String(groupKey || "").trim();
+    return activeUrl && key ? `${activeUrl}|${key}` : "";
+  }
+
+  function preferredTrackForVersionGroup(group, fallback = null) {
+    const tracks = Array.isArray(group?.tracks) ? group.tracks : [];
+    const defaultTrack = fallback?.id && tracks.some((track) => track.id === fallback.id)
+      ? fallback
+      : group?.primary || tracks[0] || fallback;
+    if (!state.rememberVersionChoices || tracks.length < 2) return defaultTrack;
+    const preference = state.versionPreferences?.[versionPreferenceKey(group.key)];
+    return tracks.find((track) => track.id === preference?.trackId) || defaultTrack;
+  }
+
+  function versionGroupPreferenceLabel(group) {
+    const preferred = preferredTrackForVersionGroup(group, group?.primary);
+    if (!state.rememberVersionChoices || !preferred?.id || preferred.id === group?.primary?.id) return "";
+    return `默认${getTrackVersionInfo(preferred).label}`;
+  }
+
   function renderSearchVersionRail(group) {
     const rail = document.createElement("div");
     rail.className = "music-mobile-search-version-rail";
@@ -1517,16 +1548,26 @@ export function createMusicViews(deps) {
 
   function renderSearchVersionChoice(track, group, options = {}) {
     const info = getTrackVersionInfo(track);
+    const preferred = preferredTrackForVersionGroup(group, group?.primary);
+    const isPreferred = state.rememberVersionChoices && preferred?.id === track.id;
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `music-mobile-search-version-choice${options.compact ? " is-compact" : ""}${state.current?.id === track.id ? " active" : ""}`;
+    button.className = `music-mobile-search-version-choice${options.compact ? " is-compact" : ""}${isPreferred ? " preferred" : ""}${state.current?.id === track.id ? " active" : ""}`;
     button.dataset.trackVersionId = track.id || "";
     const text = document.createElement("span");
+    const labelLine = document.createElement("span");
+    labelLine.className = "music-mobile-search-version-choice-label";
     const label = document.createElement("strong");
     label.textContent = info.label;
+    labelLine.append(label);
+    if (isPreferred) {
+      const preferredBadge = document.createElement("i");
+      preferredBadge.textContent = "默认";
+      labelLine.append(preferredBadge);
+    }
     const meta = document.createElement("small");
     meta.textContent = versionChoiceMeta(track);
-    text.append(label, meta);
+    text.append(labelLine, meta);
     const duration = document.createElement("em");
     duration.textContent = formatClock(track.durationMs || 0);
     button.append(text, duration);
@@ -1545,8 +1586,26 @@ export function createMusicViews(deps) {
   function playSearchTrackVersion(track, tracks) {
     if (!track?.id) return;
     const queue = (Array.isArray(tracks) ? tracks : []).filter((item) => item?.id).map((item) => ({ ...item }));
+    rememberTrackVersionChoice(track, queue);
     state.queue = queue.length ? queue : [{ ...track }];
     openTrack(track.id, { autoplay: true }).catch(() => {});
+  }
+
+  function rememberTrackVersionChoice(track, tracks) {
+    if (!state.rememberVersionChoices || !track?.id) return;
+    const group = findTrackVersionGroup(buildTrackVersionGroups(tracks), track.id);
+    if (!group || group.tracks.length < 2) return;
+    const key = versionPreferenceKey(group.key);
+    if (!key) return;
+    state.versionPreferences = pruneVersionPreferences({
+      ...(state.versionPreferences || {}),
+      [key]: {
+        trackId: track.id,
+        label: getTrackVersionInfo(track).label,
+        updatedAt: Date.now()
+      }
+    });
+    writeVersionPreferencesPreference(state.versionPreferences);
   }
 
   function renderRelatedArtistMatch(artist) {
@@ -2225,6 +2284,7 @@ export function createMusicViews(deps) {
   function renderTrackRow(track, index, options = {}) {
     const versionGroup = options.versionGroup;
     const versionCount = Number(versionGroup?.tracks?.length || 0);
+    const preferredVersion = versionCount > 1 ? preferredTrackForVersionGroup(versionGroup, track) : track;
     const isCurrent = state.current?.id === track.id;
     const isPlaying = isCurrent && state.playing;
     const row = document.createElement("div");
@@ -2234,7 +2294,7 @@ export function createMusicViews(deps) {
     if (isCurrent) row.dataset.current = "true";
     row.tabIndex = 0;
     row.setAttribute("role", "button");
-    row.setAttribute("aria-label", `播放 ${track.title || "歌曲"}${versionCount > 1 ? `，包含 ${versionCount} 个版本` : Number(track.duplicateCount || 0) > 1 ? `，已合并 ${track.duplicateCount} 个相同文件` : ""}`);
+    row.setAttribute("aria-label", `播放 ${preferredVersion?.title || track.title || "歌曲"}${versionCount > 1 ? `，包含 ${versionCount} 个版本` : Number(track.duplicateCount || 0) > 1 ? `，已合并 ${track.duplicateCount} 个相同文件` : ""}`);
     const number = document.createElement("span");
     number.className = "music-mobile-track-index";
     if (isPlaying) {
@@ -2261,7 +2321,7 @@ export function createMusicViews(deps) {
       { value: track.artist || "未知歌手", highlight: true },
       { value: track.album || "未知专辑", highlight: true },
       { value: ratingLabel(track.rating), highlight: false },
-      { value: versionCount > 1 ? `${formatNumber(versionCount)} 个版本` : Number(track.duplicateCount || 0) > 1 ? `${formatNumber(track.duplicateCount)} 个来源` : "", highlight: false }
+      { value: versionCount > 1 ? [`${formatNumber(versionCount)} 个版本`, versionGroupPreferenceLabel(versionGroup)].filter(Boolean).join(" · ") : Number(track.duplicateCount || 0) > 1 ? `${formatNumber(track.duplicateCount)} 个来源` : "", highlight: false }
     ].filter((item) => item.value).forEach((item, itemIndex) => {
       if (itemIndex) meta.append(document.createTextNode(" · "));
       if (item.highlight) appendSearchHighlightedText(meta, item.value, track, itemIndex === 0 ? "artist" : "album");
@@ -2318,7 +2378,7 @@ export function createMusicViews(deps) {
     row.append(number, cover, text, side);
     const play = () => {
       if (versionCount > 1) {
-        playSearchTrackVersion(track, versionGroup.tracks);
+        playSearchTrackVersion(preferredVersion, versionGroup.tracks);
         return;
       }
       activateSearchResultQueue(track.id);
@@ -3057,7 +3117,7 @@ export function createMusicViews(deps) {
     const title = document.createElement("strong");
     title.textContent = "播放设置";
     const meta = document.createElement("small");
-    meta.textContent = "衔接、声音与播放现场";
+    meta.textContent = "衔接、声音、搜索与播放现场";
     text.append(title, meta);
     const close = document.createElement("button");
     close.type = "button";
@@ -3178,11 +3238,63 @@ export function createMusicViews(deps) {
     });
     playback.append(settingsRow("恢复播放现场", "下次打开时恢复当前歌曲、播放位置和整理过的队列。", resumeQueue));
 
+    const searchVersions = document.createElement("section");
+    searchVersions.className = "music-mobile-settings-group";
+    searchVersions.append(settingsGroupTitle("搜索与版本"));
+
+    const rememberVersions = document.createElement("button");
+    rememberVersions.type = "button";
+    rememberVersions.className = `music-mobile-settings-switch${state.rememberVersionChoices ? " active" : ""}`;
+    rememberVersions.setAttribute("role", "switch");
+    rememberVersions.setAttribute("aria-checked", state.rememberVersionChoices ? "true" : "false");
+    rememberVersions.textContent = state.rememberVersionChoices ? "已开启" : "已关闭";
+    rememberVersions.addEventListener("click", () => setRememberVersionChoices(!state.rememberVersionChoices));
+    searchVersions.append(settingsRow(
+      "记住版本选择",
+      "同一首歌有原版、Live 或 Remix 时，下次搜索会默认播放你上次选择的版本。",
+      rememberVersions
+    ));
+
+    const preferenceCount = activeVersionPreferenceCount();
+    const clearVersions = document.createElement("button");
+    clearVersions.type = "button";
+    clearVersions.className = "music-mobile-settings-action";
+    clearVersions.textContent = preferenceCount ? `清除 ${formatNumber(preferenceCount)} 首` : "暂无记录";
+    clearVersions.disabled = preferenceCount < 1;
+    clearVersions.addEventListener("click", clearActiveVersionPreferences);
+    searchVersions.append(settingsRow(
+      "版本偏好",
+      preferenceCount ? `当前音乐服务已记住 ${formatNumber(preferenceCount)} 首歌，可随时恢复为原版优先。` : "选择具体版本后会显示在这里。",
+      clearVersions
+    ));
+
     const note = document.createElement("p");
     note.className = "music-mobile-settings-note";
     note.textContent = "这些设置只保存在当前手机，不会修改电脑端音乐文件。";
-    sheet.append(renderSheetHandle(), head, summary, transition, playback, note);
+    sheet.append(renderSheetHandle(), head, summary, transition, playback, searchVersions, note);
     return sheet;
+  }
+
+  function setRememberVersionChoices(enabled) {
+    state.rememberVersionChoices = Boolean(enabled);
+    writeRememberVersionChoicesPreference(state.rememberVersionChoices);
+    state.status = state.rememberVersionChoices ? "已开启版本选择记忆" : "已暂停版本选择记忆";
+    renderShell();
+  }
+
+  function activeVersionPreferenceCount() {
+    const prefix = `${String(getActiveUrl() || "").replace(/\/+$/u, "")}|`;
+    return Object.keys(state.versionPreferences || {}).filter((key) => prefix !== "|" && key.startsWith(prefix)).length;
+  }
+
+  function clearActiveVersionPreferences() {
+    const prefix = `${String(getActiveUrl() || "").replace(/\/+$/u, "")}|`;
+    if (prefix === "|") return;
+    const next = Object.fromEntries(Object.entries(state.versionPreferences || {}).filter(([key]) => !key.startsWith(prefix)));
+    state.versionPreferences = next;
+    writeVersionPreferencesPreference(next);
+    state.status = "已清除当前音乐服务的版本偏好";
+    renderShell();
   }
 
   function renderSettingsTransitionSummary() {
@@ -5477,6 +5589,49 @@ function writeResumeQueuePreference(value) {
   try {
     window.localStorage?.setItem(MUSIC_RESUME_QUEUE_KEY, value ? "1" : "0");
   } catch {}
+}
+
+function readRememberVersionChoicesPreference() {
+  try {
+    const value = window.localStorage?.getItem(MUSIC_REMEMBER_VERSION_KEY);
+    return value === null ? true : value === "1";
+  } catch {
+    return true;
+  }
+}
+
+function writeRememberVersionChoicesPreference(value) {
+  try {
+    window.localStorage?.setItem(MUSIC_REMEMBER_VERSION_KEY, value ? "1" : "0");
+  } catch {}
+}
+
+function readVersionPreferencesPreference() {
+  try {
+    const parsed = JSON.parse(window.localStorage?.getItem(MUSIC_VERSION_PREFERENCES_KEY) || "{}");
+    return pruneVersionPreferences(parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {});
+  } catch {
+    return {};
+  }
+}
+
+function writeVersionPreferencesPreference(value) {
+  try {
+    window.localStorage?.setItem(MUSIC_VERSION_PREFERENCES_KEY, JSON.stringify(pruneVersionPreferences(value)));
+  } catch {}
+}
+
+function pruneVersionPreferences(value) {
+  const entries = Object.entries(value && typeof value === "object" && !Array.isArray(value) ? value : {})
+    .filter(([key, item]) => String(key || "").trim() && String(item?.trackId || "").trim())
+    .sort((left, right) => Number(right[1]?.updatedAt || 0) - Number(left[1]?.updatedAt || 0))
+    .slice(0, VERSION_PREFERENCE_LIMIT)
+    .map(([key, item]) => [key, {
+      trackId: String(item.trackId).trim(),
+      label: String(item.label || "").trim(),
+      updatedAt: Number(item.updatedAt || 0)
+    }]);
+  return Object.fromEntries(entries);
 }
 
 function readPlaybackQueuePreference() {
