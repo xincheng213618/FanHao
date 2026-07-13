@@ -759,6 +759,13 @@
   font-weight: 800;
 }
 
+.music-mobile-search-playback-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  align-items: center;
+}
+
 .music-mobile-search-playback-action button {
   min-height: 38px;
   flex: 0 0 auto;
@@ -769,6 +776,13 @@
   color: white;
   font-size: 12px;
   font-weight: 950;
+}
+
+.music-mobile-search-playback-action button.secondary {
+  border: 1px solid color-mix(in srgb, var(--green) 34%, var(--line));
+  padding: 0 12px;
+  background: var(--surface);
+  color: var(--green);
 }
 
 .music-mobile-search-discovery,

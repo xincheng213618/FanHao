@@ -1055,20 +1055,29 @@ export function createMusicViews(deps) {
   function renderSearchPlaybackAction() {
     if (!state.query || state.mode !== "library" || !["all", "songs"].includes(state.searchScope)) return null;
     const tracks = Array.isArray(state.data?.tracks) ? state.data.tracks : [];
-    if (!tracks.length) return null;
+    const queue = preferredSearchQueue(tracks);
+    if (!queue.length) return null;
     const action = document.createElement("div");
     action.className = "music-mobile-search-playback-action";
     const text = document.createElement("span");
     const title = document.createElement("strong");
     title.textContent = "播放本次搜索";
     const meta = document.createElement("small");
-    meta.textContent = `${formatNumber(tracks.length)} 首已加入临时队列`;
+    meta.textContent = `${formatNumber(queue.length)} 首 · 同名版本不重复入队`;
     text.append(title, meta);
+    const actions = document.createElement("div");
+    actions.className = "music-mobile-search-playback-actions";
+    const shuffle = document.createElement("button");
+    shuffle.type = "button";
+    shuffle.className = "secondary";
+    shuffle.textContent = "随机播放";
+    shuffle.addEventListener("click", shuffleSearchResults);
     const play = document.createElement("button");
     play.type = "button";
     play.textContent = "播放全部";
     play.addEventListener("click", playSearchResults);
-    action.append(text, play);
+    actions.append(shuffle, play);
+    action.append(text, actions);
     return action;
   }
 
@@ -1950,9 +1959,10 @@ export function createMusicViews(deps) {
 
   function playSearchTrackVersion(track, tracks) {
     if (!track?.id) return;
-    const queue = (Array.isArray(tracks) ? tracks : []).filter((item) => item?.id).map((item) => ({ ...item }));
-    rememberTrackVersionChoice(track, queue);
-    state.queue = queue.length ? queue : [{ ...track }];
+    const versions = (Array.isArray(tracks) ? tracks : []).filter((item) => item?.id).map((item) => ({ ...item }));
+    rememberTrackVersionChoice(track, versions);
+    const searchQueue = preferredSearchQueue(state.data?.tracks, track);
+    state.queue = searchQueue.length ? searchQueue : versions.length ? versions : [{ ...track }];
     openTrack(track.id, { autoplay: true }).catch(() => {});
   }
 
@@ -2786,10 +2796,20 @@ export function createMusicViews(deps) {
     openTrack(queue[0].id, { autoplay: true }).catch(() => {});
   }
 
-  function preferredSearchQueue(tracks = state.data?.tracks) {
+  function shuffleSearchResults() {
+    const tracks = Array.isArray(state.data?.tracks) ? state.data.tracks : [];
+    const queue = shuffleTrackQueue(preferredSearchQueue(tracks));
+    if (!queue.length) return;
+    state.queue = queue;
+    openTrack(queue[0].id, { autoplay: true }).catch(() => {});
+  }
+
+  function preferredSearchQueue(tracks = state.data?.tracks, selectedTrack = null) {
     const seen = new Set();
     return currentSearchVersionGroups(tracks)
-      .map((group) => preferredTrackForVersionGroup(group, group.primary))
+      .map((group) => group.tracks?.some((track) => track.id === selectedTrack?.id)
+        ? selectedTrack
+        : preferredTrackForVersionGroup(group, group.primary))
       .filter((track) => track?.id && !seen.has(track.id) && seen.add(track.id))
       .map((track) => ({ ...track }));
   }
@@ -5972,6 +5992,17 @@ export function selectTrackByVersionStrategy(tracks = [], strategy = "smart", fa
   if (normalized === "quality") return bestAudioQualityTrack(candidates, defaultTrack);
   const compact = candidates.filter((track) => Number(track.sizeBytes || 0) > 0);
   return compact.reduce((best, track) => Number(track.sizeBytes) < Number(best.sizeBytes) ? track : best, compact[0]) || defaultTrack;
+}
+
+export function shuffleTrackQueue(tracks = [], random = Math.random) {
+  const queue = (Array.isArray(tracks) ? tracks : []).filter((track) => track?.id).map((track) => ({ ...track }));
+  for (let index = queue.length - 1; index > 0; index -= 1) {
+    const sample = Number(random());
+    const bounded = Number.isFinite(sample) ? Math.min(0.999999, Math.max(0, sample)) : 0;
+    const target = Math.floor(bounded * (index + 1));
+    [queue[index], queue[target]] = [queue[target], queue[index]];
+  }
+  return queue;
 }
 
 function bestAudioQualityTrack(tracks = [], fallback = null) {
