@@ -3488,7 +3488,7 @@ export function createMusicViews(deps) {
 
     const transition = document.createElement("section");
     transition.className = "music-mobile-settings-group";
-    transition.append(settingsGroupTitle("歌曲衔接"));
+    transition.append(settingsGroupTitle("歌曲衔接"), renderSettingsTransitionPresets());
     const gapless = document.createElement("button");
     gapless.type = "button";
     gapless.className = `music-mobile-settings-switch${state.gapless ? " active" : ""}`;
@@ -3679,6 +3679,38 @@ export function createMusicViews(deps) {
           : "每首歌独立结束后再开始下一首。";
     summary.append(eyebrow, title, meta);
     return summary;
+  }
+
+  function renderSettingsTransitionPresets() {
+    const wrap = document.createElement("div");
+    wrap.className = "music-mobile-settings-transition-presets";
+    wrap.setAttribute("role", "group");
+    wrap.setAttribute("aria-label", "歌曲衔接模式");
+    const activeMode = currentPlaybackTransitionMode();
+    for (const item of [
+      { mode: "standard", label: "标准", meta: "独立切歌" },
+      { mode: "gapless", label: "无缝", meta: "提前预载" },
+      { mode: "smooth", label: "柔和", meta: "重叠淡化" }
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = item.mode === activeMode ? "active" : "";
+      button.dataset.transitionMode = item.mode;
+      button.setAttribute("aria-pressed", item.mode === activeMode ? "true" : "false");
+      const label = document.createElement("strong");
+      label.textContent = item.label;
+      const meta = document.createElement("small");
+      meta.textContent = item.meta;
+      button.append(label, meta);
+      button.addEventListener("click", () => setPlaybackTransitionMode(item.mode));
+      wrap.append(button);
+    }
+    return wrap;
+  }
+
+  function currentPlaybackTransitionMode() {
+    if (state.crossfadeSeconds > 0) return "smooth";
+    return state.gapless ? "gapless" : "standard";
   }
 
   function settingsGroupTitle(label) {
@@ -4582,6 +4614,24 @@ export function createMusicViews(deps) {
     const seconds = normalizeFadeSeconds(value);
     state.fadeSeconds = seconds;
     writeFadeSecondsPreference(seconds);
+  }
+
+  function setPlaybackTransitionMode(mode) {
+    const nextMode = ["gapless", "smooth"].includes(String(mode || "")) ? String(mode) : "standard";
+    state.gapless = nextMode === "gapless";
+    state.crossfadeSeconds = nextMode === "smooth"
+      ? (state.crossfadeSeconds > 0 ? state.crossfadeSeconds : 5)
+      : 0;
+    writeGaplessPreference(state.gapless);
+    writeCrossfadeSecondsPreference(state.crossfadeSeconds);
+    state.status = nextMode === "gapless"
+      ? "已切换为无缝衔接"
+      : nextMode === "smooth"
+        ? `已切换为 ${state.crossfadeSeconds} 秒柔和衔接`
+        : "已切换为标准衔接";
+    if (nextMode === "standard") clearGaplessPreload();
+    else scheduleGaplessPreload();
+    renderShell();
   }
 
   function setCrossfadeSeconds(value) {
