@@ -1,6 +1,6 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260712-douyin-search-05";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260713-music-search-results-19";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
-import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260705-mobile-actions-01";
+import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260713-music-search-results-19";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
 import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260712-module-chrome-03";
 import { getElements } from "./js/dom.js?v=20260712-module-chrome-03";
@@ -149,10 +149,16 @@ function sanitizeViewParams(view, params = {}) {
     const playlistId = String(params.playlistId || params.playlist || "").trim();
     const mode = playlistId ? "playlist" : smartId ? "smart" : (rawMode === "history" ? "history" : rawMode === "artists" ? "artists" : rawMode === "albums" ? "albums" : "library");
     const query = String(params.query || params.q || "").trim();
+    const rawSearchScope = String(params.searchScope || params.scope || "").trim().toLowerCase();
+    const searchScope = mode === "artists" ? "artists" : mode === "albums" ? "albums" : ["songs", "lyrics", "all"].includes(rawSearchScope) ? rawSearchScope : "all";
     const sort = normalizeMusicSort(params.sort);
     const artistSort = String(params.artistSort || "count") === "name" ? "name" : "count";
     const albumSort = normalizeMusicAlbumSort(params.albumSort);
     const favorite = ["1", "true", "yes"].includes(String(params.favorite || params.fav || "").trim().toLowerCase());
+    const searchFavorite = ["1", "true", "yes"].includes(String(params.searchFavorite || "").trim().toLowerCase());
+    const searchLyrics = ["1", "true", "yes"].includes(String(params.searchLyrics || params.lyrics || "").trim().toLowerCase());
+    const searchMinRating = Number(params.searchMinRating || params.minRating || 0) >= 4 ? "4" : "";
+    const searchQuality = String(params.searchQuality || params.quality || "").trim().toLowerCase() === "lossless" ? "lossless" : "";
     const artistId = String(params.artistId || params.artist || "").trim();
     const albumId = String(params.albumId || params.album || "").trim();
     const genre = String(params.genre || params.musicGenre || "").trim();
@@ -161,10 +167,15 @@ function sanitizeViewParams(view, params = {}) {
     return {
       mode,
       ...(query ? { query } : {}),
+      ...(query && searchScope !== "all" ? { searchScope } : {}),
       ...(sort !== "album" ? { sort } : {}),
       ...(mode === "artists" && artistSort !== "count" ? { artistSort } : {}),
       ...(mode === "albums" && albumSort !== "updated" ? { albumSort } : {}),
       ...(favorite && mode !== "smart" ? { favorite: "1" } : {}),
+      ...(query && mode === "library" && searchFavorite ? { searchFavorite: "1" } : {}),
+      ...(query && mode === "library" && searchLyrics ? { searchLyrics: "1" } : {}),
+      ...(query && mode === "library" && searchMinRating ? { searchMinRating } : {}),
+      ...(query && mode === "library" && searchQuality ? { searchQuality } : {}),
       ...(smartId ? { smartId } : {}),
       ...(mode === "playlist" && playlistId ? { playlistId } : {}),
       ...(mode === "library" && artistId ? { artistId } : {}),
@@ -964,9 +975,14 @@ function openNativeLibraryRoute(options = {}) {
     showView("music", {
       mode: query.get("mode") || "library",
       query: query.get("q") || query.get("query") || "",
+      searchScope: query.get("searchScope") || query.get("scope") || "",
       sort: query.get("sort") || "",
       artistSort: query.get("artistSort") || "",
       favorite: query.get("favorite") || "",
+      searchFavorite: query.get("searchFavorite") || "",
+      searchLyrics: query.get("searchLyrics") || query.get("lyrics") || "",
+      searchMinRating: query.get("searchMinRating") || query.get("minRating") || "",
+      searchQuality: query.get("searchQuality") || query.get("quality") || "",
       genre: query.get("genre") || query.get("musicGenre") || "",
       language: query.get("language") || query.get("musicLanguage") || "",
       smartId: query.get("smart") || query.get("smartId") || "",
@@ -1346,6 +1362,14 @@ function showView(view, params = {}, navigation = {}) {
   else if (navigation.replaceHistory) replaceCurrentHistory();
   renderCurrentView();
   queueScrollRestore(navigation.restoreScrollY ?? 0);
+}
+
+function replaceViewParams(view, params = {}, navigation = {}) {
+  if (view !== currentView) return false;
+  currentViewParams = sanitizeViewParams(view, params);
+  rememberViewState(currentView, currentViewParams);
+  if (navigation.replaceHistory !== false) replaceCurrentHistory();
+  return true;
 }
 
 function canRenderWithoutLibrary(view = "") {
@@ -1739,6 +1763,7 @@ function createAndroidModuleHost() {
       currentParams: () => currentViewParams,
       hasBackStack: () => viewStack.length > 0,
       showView,
+      replaceViewParams,
       goBack,
       openInLibrary
     }),

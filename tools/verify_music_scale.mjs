@@ -14,6 +14,7 @@ import {
   buildMusicIdentityKnowledge,
   resolveMusicTrackIdentity
 } from "../src/modules/music/server/identity.js";
+import { musicSearchValueMatch, phoneticSearchDocument, phoneticSearchFtsTerm } from "../src/modules/music/server/search.js";
 import { createFileServer } from "../src/platform/server/file-server.js";
 
 globalThis.window = { location: { href: "http://localhost/", search: "", hash: "" } };
@@ -136,6 +137,81 @@ try {
   assert.ok(combinedSuggest.tracks.slice(0, 5).some((track) => /Love Story/i.test(track.title) && /Taylor/i.test(track.artist)), "suggestions should use the same multi-term relevance logic");
   const exactTitleSearch = store.listTracks(new URL("http://localhost/api/music/tracks?q=青花瓷&limit=10"));
   assert.equal(exactTitleSearch.tracks[0]?.title, "青花瓷", "exact song titles should outrank partial title matches");
+  assert.match(phoneticSearchDocument("周杰伦"), /zhou jie lun/);
+  assert.match(phoneticSearchDocument("周杰伦"), /zhoujielun/);
+  assert.match(phoneticSearchDocument("周杰伦"), /zjl/);
+  assert.match(phoneticSearchFtsTerm("zhou jie lun"), /zhou/);
+  assert.deepEqual(musicSearchValueMatch("青花瓷", "qinghuaci").highlights, ["青花瓷"], "full pinyin should map back to visible Chinese title text");
+  assert.deepEqual(musicSearchValueMatch("周杰伦", "zjl").highlights, ["周杰伦"], "initials should map back to visible Chinese artist text");
+  store.listTracks(new URL("http://localhost/api/music/tracks?q=zhoujielun&limit=10"));
+  const pinyinStartedAt = performance.now();
+  const pinyinArtistSearch = store.listTracks(new URL("http://localhost/api/music/tracks?q=zhoujielun&limit=10"));
+  const pinyinSearchMs = performance.now() - pinyinStartedAt;
+  assert.equal(pinyinArtistSearch.searchMode, "phonetic");
+  assert.ok(pinyinArtistSearch.tracks.slice(0, 5).some((track) => track.artist === "周杰伦"), "full pinyin should find the intended Chinese artist near the top");
+  assert.ok(pinyinSearchMs < 300, `warm pinyin search should finish under 300 ms (actual ${pinyinSearchMs.toFixed(1)} ms)`);
+  const initialArtistSearch = store.listTracks(new URL("http://localhost/api/music/tracks?q=zjl&limit=10"));
+  assert.ok(initialArtistSearch.tracks.slice(0, 5).filter((track) => track.artist === "周杰伦").length >= 3, "artist initials should keep the intended popular artist near the top");
+  const pinyinTitleSearch = store.listTracks(new URL("http://localhost/api/music/tracks?q=qinghuaci&limit=10"));
+  assert.equal(pinyinTitleSearch.tracks[0]?.title, "青花瓷", "full title pinyin should rank the intended song first");
+  assert.deepEqual(pinyinTitleSearch.tracks[0]?.searchMatch?.highlights?.title, ["青花瓷"], "track results should expose server-backed pinyin highlight terms");
+  const homophoneTypoSearch = store.listTracks(new URL(`http://localhost/api/music/tracks?q=${encodeURIComponent("青花次")}&limit=10`));
+  assert.equal(homophoneTypoSearch.tracks[0]?.title, "青花瓷", "a same-pinyin Chinese typo should recover the intended song");
+  const pinyinTypoSearch = store.listTracks(new URL("http://localhost/api/music/tracks?q=zhoujieln&limit=10"));
+  assert.equal(pinyinTypoSearch.correctedQuery, "zhoujielun", "a bounded Latin typo should expose its correction");
+  assert.equal(pinyinTypoSearch.tracks[0]?.artist, "周杰伦");
+  const multiTermTypoSearch = store.listTracks(new URL("http://localhost/api/music/tracks?q=tayor%20love%20story&limit=10"));
+  assert.equal(multiTermTypoSearch.correctedQuery, "taylor love story");
+  assert.ok(multiTermTypoSearch.tracks.some((track) => /Taylor/i.test(track.artist) && /Love Story/i.test(track.title)));
+  const pinyinArtists = store.listArtists(new URL("http://localhost/api/music/artists?q=zjl&limit=5"));
+  assert.equal(pinyinArtists.artists[0]?.name, "周杰伦", "artist browsing should understand initials as well as track search");
+  const typoArtists = store.listArtists(new URL("http://localhost/api/music/artists?q=zhoujieln&limit=5"));
+  assert.equal(typoArtists.artists[0]?.name, "周杰伦", "artist overview should follow the bounded pinyin correction used by track search");
+  const pinyinAlbums = store.listAlbums(new URL("http://localhost/api/music/albums?q=qinghuaci&limit=5"));
+  assert.ok(pinyinAlbums.albums.some((album) => album.title.includes("青花瓷")), "album browsing should understand full pinyin");
+
+  store.searchLyrics(new URL(`http://localhost/api/music/lyrics/search?q=${encodeURIComponent("没有什么能够阻挡")}&limit=5`));
+  const lyricSearchStartedAt = performance.now();
+  const lyricSearch = store.searchLyrics(new URL(`http://localhost/api/music/lyrics/search?q=${encodeURIComponent("没有什么能够阻挡")}&limit=5`));
+  const lyricSearchMs = performance.now() - lyricSearchStartedAt;
+  assert.ok(lyricSearch.total > 0, "full-text lyric search should find matching songs");
+  assert.equal(lyricSearch.matches[0]?.track?.title, "蓝莲花");
+  assert.equal(lyricSearch.matches[0]?.text, "没有什么能够阻挡");
+  assert.ok(Number(lyricSearch.matches[0]?.timeMs || 0) > 0, "lyric matches should expose their playback timestamp");
+  assert.deepEqual(lyricSearch.matches[0]?.highlights, ["没有什么能够阻挡"]);
+  assert.ok(lyricSearchMs < 150, `warm indexed lyric search should finish under 150 ms (actual ${lyricSearchMs.toFixed(1)} ms)`);
+  store.listTracks(new URL(`http://localhost/api/music/tracks?q=${encodeURIComponent("没有什么能够阻挡")}&limit=20`));
+  const lyricPhraseTrackStartedAt = performance.now();
+  const lyricPhraseTracks = store.listTracks(new URL(`http://localhost/api/music/tracks?q=${encodeURIComponent("没有什么能够阻挡")}&limit=20`));
+  const lyricPhraseTrackMs = performance.now() - lyricPhraseTrackStartedAt;
+  assert.equal(lyricPhraseTracks.total, lyricSearch.total, "general search should count the same lyric phrase documents without a join scan");
+  assert.ok(lyricPhraseTrackMs < 150, `warm general lyric phrase search should finish under 150 ms (actual ${lyricPhraseTrackMs.toFixed(1)} ms)`);
+  const shortLyricStartedAt = performance.now();
+  const shortLyricSearch = store.searchLyrics(new URL(`http://localhost/api/music/lyrics/search?q=${encodeURIComponent("爱你")}&limit=20`));
+  const shortLyricMs = performance.now() - shortLyricStartedAt;
+  assert.ok(shortLyricSearch.total > 0, "two-character lyric search should remain available");
+  assert.ok(shortLyricSearch.matches.every((match) => String(match.text || "").includes("爱你")));
+  assert.ok(shortLyricMs < 250, `bounded short lyric search should finish under 250 ms (actual ${shortLyricMs.toFixed(1)} ms)`);
+
+  const favoriteFilter = store.listTracks(new URL("http://localhost/api/music/tracks?favorite=1&limit=300"));
+  assert.ok(favoriteFilter.total > 0, "favorite quick filter should return the persisted favorites fixture");
+  assert.ok(favoriteFilter.tracks.every((track) => track.favorite), "favorite quick filter must exclude non-favorites");
+  const lyricsFilter = store.listTracks(new URL("http://localhost/api/music/tracks?lyrics=1&limit=300"));
+  assert.ok(lyricsFilter.total > 0, "lyrics quick filter should return indexed lyric tracks");
+  assert.ok(lyricsFilter.tracks.every((track) => track.hasLyrics), "lyrics quick filter must exclude tracks without lyrics");
+  const ratingFilter = store.listTracks(new URL("http://localhost/api/music/tracks?minRating=4&limit=300"));
+  assert.ok(ratingFilter.total > 0, "rating quick filter should return the persisted rated fixture");
+  assert.ok(ratingFilter.tracks.every((track) => Number(track.rating || 0) >= 4), "rating quick filter must enforce its minimum rating");
+  const losslessFilter = store.listTracks(new URL("http://localhost/api/music/tracks?quality=lossless&limit=300"));
+  assert.ok(losslessFilter.total > 0, "lossless quick filter should return high-quality local tracks");
+  assert.ok(losslessFilter.tracks.every((track) => {
+    const codec = String(track.codec || "").toLowerCase();
+    const fileName = String(track.fileName || "").toLowerCase();
+    return ["flac", "wav", "alac"].includes(codec)
+      || [".flac", ".wav", ".aiff", ".ape", ".dff", ".dsf"].some((ext) => fileName.endsWith(ext))
+      || Number(track.bitDepth || 0) >= 24
+      || Number(track.sampleRate || 0) >= 48000;
+  }), "lossless quick filter must enforce the server quality predicate");
 
   const shortSearchStartedAt = performance.now();
   const shortSearch = store.listTracks(new URL(`http://localhost/api/music/tracks?q=${encodeURIComponent("许巍")}&limit=120`));
@@ -151,6 +227,9 @@ try {
   try {
     const indexedTracks = Number(verificationDb.prepare("SELECT COUNT(*) AS count FROM music_search_short").get()?.count || 0);
     assert.equal(indexedTracks, Number(summary.totals.tracks || 0), "the short search index should cover every active track");
+    const phoneticIndexedTracks = Number(verificationDb.prepare("SELECT COUNT(*) AS count FROM music_search_phonetic").get()?.count || 0);
+    assert.equal(phoneticIndexedTracks, Number(summary.totals.tracks || 0), "the phonetic search index should cover every active track");
+    assert.equal(verificationDb.prepare("SELECT value FROM music_meta WHERE key = 'music_phonetic_index_version'").get()?.value, "1");
     const legacyShortCount = verificationDb.prepare(`
       SELECT COUNT(*) AS count
       FROM music_tracks
@@ -258,7 +337,9 @@ try {
   const musicLibraryStyles = fs.readFileSync(path.join(root, "public", "modules", "music", "styles", "library.css"), "utf8");
   const musicPlayerStyles = fs.readFileSync(path.join(root, "public", "modules", "music", "styles", "player.css"), "utf8");
   const standaloneHost = fs.readFileSync(path.join(root, "public", "js", "standalone-host.js"), "utf8");
+  const androidApp = fs.readFileSync(path.join(root, "android-client", "www", "app.js"), "utf8");
   const androidClient = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-views.js"), "utf8");
+  const androidMusicStyles = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "styles.css"), "utf8");
   const musicRuntime = fs.readFileSync(path.join(root, "src", "modules", "music", "server", "runtime.js"), "utf8");
   const musicServerFiles = fs.readdirSync(path.join(root, "src", "modules", "music", "server"))
     .filter((name) => name.endsWith(".js"))
@@ -326,12 +407,103 @@ try {
   assert.match(androidClient, /duplicateCount: group\.tracks\.length/);
   assert.match(androidClient, /rawLoaded: rawTracks\.length/);
   assert.match(androidClient, /const searchFocused = Boolean\(state\.searchOpen \|\| state\.query\)/);
-  assert.match(androidClient, /if \(!searchFocused\) shell\.append\(renderFacetFilters\(\)\)/);
+  assert.match(androidClient, /if \(searchFocused\) \{[\s\S]*?shell\.append\(renderSearchSurface\(\), renderSearchContentRegion\(\)\)[\s\S]*?else shell\.append\(renderFacetFilters\(\), renderTrackList\(\)\)/, "Android music search should keep dedicated mounted search and content regions");
+  assert.match(androidClient, /if \(!moduleActive \|\| !els\.viewContent\) return;/, "inactive music requests must not repaint another module");
   assert.match(androidClient, /enterkeyhint/);
   assert.match(androidClient, /hasOwnProperty\.call\(patch, "language"\)/);
+  assert.match(androidClient, /function updateListParams\(patch = \{\}, options = \{\}\) \{[\s\S]*?const searchFocus = captureMusicSearchFocus\(\);\s*if \(searchFocus\) pendingSearchFocus = searchFocus;/, "Android music navigation should capture search focus before the host clears the module DOM");
+  assert.match(androidClient, /function renderShell\(\)[\s\S]*?restoreMusicSearchFocus\(searchFocus\)/, "Android music refreshes should restore search focus and selection");
+  assert.match(androidClient, /function updateStaticPlaybackControls\(playing\)[\s\S]*?music-mobile-playing-bars/, "Android music playback events should reconcile the header and active track row without a full rerender");
+  assert.match(androidClient, /function updateMountedMiniPlayerTrack\(\)[\s\S]*?player\.dataset\.trackKey[\s\S]*?replaceWith\(renderCover[\s\S]*?title\.textContent[\s\S]*?meta\.textContent/, "Android music playback transitions should reconcile mini-player metadata without replacing its mounted node");
+  assert.match(androidClient, /function updatePlaybackUi\(\)[\s\S]*?updateMountedMiniPlayerTrack\(\)/, "Android music playback events should keep mounted mini-player metadata current");
+  assert.match(androidClient, /function renderSearchSurface\(\)[\s\S]*?function renderSearchDiscovery\(\)/, "Android music search should have a dedicated result and discovery surface");
+  assert.match(androidClient, /\{ scope: "all", label: "综合" \}[\s\S]*?\{ scope: "songs", label: "歌曲" \}[\s\S]*?\{ scope: "lyrics", label: "歌词" \}[\s\S]*?function renderSearchOverview\(\)/, "Android music search should expose unified, song, and lyric result scopes");
+  assert.match(androidClient, /Promise\.allSettled\(\[[\s\S]*?\/api\/music\/artists[\s\S]*?\/api\/music\/albums/, "Android unified search should fetch filtered artist and album matches together");
+  assert.match(androidClient, /function renderSearchOverview\(\)[\s\S]*?bestSearchMatch\(data\)[\s\S]*?renderBestSearchMatch\(best\)[\s\S]*?music-mobile-search-album-rail/, "Android unified search should select the strongest typed entity before related results");
+  assert.match(androidClient, /function renderSearchContent\(\)[\s\S]*?renderLyricSearchResults\(\{ preview: true, collapsible: true \}\)[\s\S]*?renderSearchSongResults\(\{ preview: true, collapsible: true \}\)/, "Android unified search should keep lyrics and songs as compact result-group previews");
+  assert.match(androidClient, /function renderSearchPlaybackAction\(\)[\s\S]*?播放本次搜索[\s\S]*?play\.addEventListener\("click", playSearchResults\)/, "Android search should expose one-tap result playback before the long result groups");
+  assert.match(androidClient, /function renderSearchResultGroup\(key, titleText, metaText, content, options = \{\}\)[\s\S]*?aria-expanded[\s\S]*?toggleSearchResultGroup\(groupKey\)/, "Android unified search groups should expose accessible expand and collapse controls");
+  assert.match(androidClient, /function toggleSearchResultGroup\(key\)[\s\S]*?searchCollapsedGroups\.delete[\s\S]*?searchCollapsedGroups\.add[\s\S]*?refreshMountedSearchUi\(\)/, "Android search should retain group-collapse state while refreshing its mounted result surface");
+  assert.match(androidClient, /function refreshMountedSearchResults\(query\)[\s\S]*?normalizeSearchComparison\(state\.query\)[\s\S]*?state\.searchCollapsedGroups = new Set\(\)/, "A new query should reset result groups to a discoverable expanded state");
+  assert.match(androidClient, /function renderTrackList\(options = \{\}\)[\s\S]*?Array\.isArray\(options\.tracks\)[\s\S]*?showLoadMore = options\.showLoadMore !== false/, "Android unified search should be able to render bounded song previews without losing the full songs tab");
+  assert.match(androidMusicStyles, /\.music-mobile-search-playback-action[\s\S]*?\.music-mobile-search-result-group-actions[\s\S]*?\.music-mobile-search-result-group\.is-collapsed/, "Android search styling should distinguish the primary playback action and collapsed result groups");
+  assert.match(androidClient, /function searchEntityScore\(type, item\)[\s\S]*?scores\.title[\s\S]*?scores\.artist[\s\S]*?scores\.album/, "Android best-match intent should compare title, artist, and album evidence");
+  assert.match(androidClient, /function loadLyricSearchResults\(renderGuard = null, options = \{\}\)[\s\S]*?\/api\/music\/lyrics\/search[\s\S]*?function renderLyricSearchResults\(options = \{\}\)/, "Android music search should load and render timed lyric matches");
+  assert.match(androidClient, /const lyricOnlySearch = unifiedSearch && state\.searchScope === "lyrics"[\s\S]*?await loadLyricSearchResults\(renderGuard, \{ limit: 40 \}\)/, "Restored lyric routes should not wait on an irrelevant general track search");
+  assert.match(androidClient, /function renderLyricSearchMatch\(match\)[\s\S]*?music-mobile-lyric-search-context[\s\S]*?formatClock\(match\.timeMs\)/, "Android lyric results should show surrounding context and the matched timestamp");
+  assert.match(androidClient, /function openLyricSearchMatch\(match\)[\s\S]*?seekMs:[\s\S]*?openLyrics: true/, "Android lyric matches should open playback at the matched line");
+  assert.match(androidClient, /function appendSearchHighlightedText\(target, value, item, field\)[\s\S]*?searchMatch\?\.highlights/, "Android search should render server-backed pinyin highlight terms");
+  assert.match(androidClient, /function searchSortHint\(\)[\s\S]*?完整匹配优先[\s\S]*?播放次数/, "Android search should explain why relevance-ranked results appear first");
+  assert.match(androidClient, /function trackSearchMatchLabel\(track, query\)[\s\S]*?歌名[\s\S]*?歌手[\s\S]*?专辑[\s\S]*?综合匹配/, "Android search rows should explain which metadata field matched the query");
+  assert.match(androidClient, /function renderTrackRow\(track, index\)[\s\S]*?music-mobile-track-title-line[\s\S]*?music-mobile-track-match[\s\S]*?text\.append\(titleLine, meta\)/, "Android search rows should mount their match explanation beside the visible title");
+  assert.match(androidClient, /function playSearchResults\(\)[\s\S]*?state\.queue = tracks\.map[\s\S]*?openTrack\(tracks\[0\]\.id/, "Android search should support playing the visible result queue in one tap");
+  assert.match(androidClient, /track\.artist \|\| "未知歌手", highlight: true[\s\S]*?track\.album \|\| "未知专辑", highlight: true/, "Android music search should highlight matching artist and album metadata as well as titles");
+  assert.match(androidClient, /SEARCH_DEBOUNCE_MS = 280[\s\S]*?scheduleLiveSearch\(search\.value\)/, "Android music search should update after a bounded typing debounce");
+  assert.match(androidClient, /MUSIC_SEARCH_HISTORY_KEY[\s\S]*?rememberSearchQuery\(query\)/, "Android music search should persist explicit queries as recent searches");
+  assert.match(androidClient, /search\.addEventListener\("search", \(\) => \{\s*state\.searchSuggestions = \[\];\s*commitMusicSearch\(search\.value, \{ remember: true \}\)/, "Android IME search actions should save the explicit query to recent history");
+  assert.match(androidClient, /clear\.addEventListener\("click", \(\) => \{\s*state\.searchSuggestions = \[\];\s*search\.value = "";\s*commitMusicSearch\(""\)/, "Android mounted search should visibly clear the retained input before refreshing discovery");
+  assert.match(androidClient, /function closeSearch\(\)[\s\S]*?state\.searchSuggestions = \[\];[\s\S]*?state\.searchSuggestionQuery = "";[\s\S]*?state\.searchOpen = false/, "Closing and reopening search should not leak stale type-ahead suggestions into discovery");
+  assert.match(androidApp, /function replaceViewParams\(view, params = \{\}, navigation = \{\}\)[\s\S]*?currentViewParams = sanitizeViewParams[\s\S]*?replaceCurrentHistory\(\)/, "Android modules should be able to synchronize route params without rerendering the host view");
+  assert.match(androidApp, /const rawSearchScope = String\(params\.searchScope \|\| params\.scope[\s\S]*?query && searchScope !== "all" \? \{ searchScope \}/, "Android music routes should retain the selected search result scope");
+  assert.match(androidApp, /showView,\s*replaceViewParams,\s*goBack/, "Android module navigation host should expose mounted-route synchronization");
+  assert.match(androidClient, /function commitMusicSearch\(value, options = \{\}\)[\s\S]*?refreshMountedSearchResults\(query\)/, "Android live search should use the mounted result refresh path");
+  assert.match(androidClient, /function refreshMountedSearchUi\(\)[\s\S]*?summary\.replaceChildren[\s\S]*?content\.replaceChildren[\s\S]*?updatePlaybackUi\(\)/, "Android live search should replace only summary and result regions while retaining the input and mini player");
+  assert.match(androidClient, /function refreshMountedSearchResults\(query\)[\s\S]*?replaceViewParams\?\.\("music", musicRouteParams\(\)[\s\S]*?applyLoadedMusicData\(data\)/, "Android mounted search should synchronize the route and apply fresh data without host navigation");
+  assert.match(androidClient, /SEARCH_SUGGESTION_DEBOUNCE_MS = 90[\s\S]*?function loadSearchSuggestions\(query\)[\s\S]*?\/api\/music\/tracks[\s\S]*?\/api\/music\/artists[\s\S]*?\/api\/music\/albums/, "Android search should load bounded type-ahead suggestions across songs, artists, and albums");
+  assert.match(androidClient, /function renderSearchHistoryChips\(items = \[\]\)[\s\S]*?music-mobile-search-history-remove[\s\S]*?removeSearchHistoryQuery\(text\)/, "Android recent searches should support removing one query without clearing the list");
+  assert.match(androidClient, /function renderSearchDiscovery\(\)[\s\S]*?renderSearchShortcutBlock\(\)[\s\S]*?renderSearchHotBlock\(hotItems\)[\s\S]*?renderSearchRecentBlock\(recent\)/, "Android empty search should be a useful discovery surface instead of a sparse chip list");
+  assert.match(androidClient, /function renderSearchShortcutBlock\(\)[\s\S]*?搜歌曲[\s\S]*?搜歌词[\s\S]*?搜歌手[\s\S]*?搜专辑[\s\S]*?最近播放[\s\S]*?我喜欢/, "Android search discovery should expose the main search scopes and listening collections in one tap");
+  assert.match(androidClient, /function renderSearchHotBlock\(items\)[\s\S]*?track\.playCount[\s\S]*?commitMusicSearch\(track\.title, \{ remember: true \}\)/, "Android local hot search should be grounded in play counts and open a real query");
+  assert.match(androidClient, /function commitMusicSearch\(value, options = \{\}\)[\s\S]*?if \(options\.remember\)[\s\S]*?input\.value = query/, "Explicit discovery and history searches should synchronize the retained visible input");
+  assert.match(androidClient, /function renderSearchRecentBlock\(tracks\)[\s\S]*?playSearchDiscoveryTrack\(track, tracks\)[\s\S]*?function playSearchDiscoveryTrack[\s\S]*?state\.queue =/, "Android search discovery should let recent tracks resume directly with a coherent queue");
+  assert.match(androidClient, /function focusSearchDiscoveryScope\(scope\)[\s\S]*?searchScopePlaceholder\(nextScope\)[\s\S]*?input\.focus\(\)/, "Android discovery scope shortcuts should focus the retained search input with contextual prompts");
+  assert.match(androidClient, /if \(!\["artists", "albums"\]\.includes\(state\.mode\) && !state\.query\) state\.queue = visibleTracks/, "Typing a search should not replace the active playback queue");
+  assert.match(androidClient, /function activateSearchResultQueue\(trackId\)[\s\S]*?state\.queue = tracks\.map/, "Choosing a search result should intentionally promote its result list to the playback queue");
+  assert.match(androidClient, /function renderTrackActionsSheet\(\)[\s\S]*?立即播放[\s\S]*?下一首播放[\s\S]*?加入队列[\s\S]*?收藏歌曲[\s\S]*?查看歌手[\s\S]*?查看专辑/, "Android track actions should expose the main post-search listening actions in a touch-friendly sheet");
+  assert.match(androidClient, /function renderSearchQuickFilters\(\)[\s\S]*?已收藏[\s\S]*?有歌词[\s\S]*?4 分以上[\s\S]*?无损/, "Android search should expose real quick filters for local music metadata");
+  assert.match(androidClient, /function searchSortHint\(\)[\s\S]*?correctedQuery[\s\S]*?已自动纠正[\s\S]*?searchMode === "phonetic"[\s\S]*?已识别拼音或首字母/, "Android search should explain typo recovery and phonetic matching in plain language");
+  assert.match(androidClient, /function trackSearchMatchLabel\(track, query\)[\s\S]*?容错匹配[\s\S]*?拼音匹配/, "Android search rows should distinguish fuzzy and phonetic recall from generic matching");
+  assert.match(androidClient, /function musicListQuery\(\)[\s\S]*?searchFavorite[\s\S]*?params\.set\("lyrics", "1"\)[\s\S]*?params\.set\("minRating"[\s\S]*?params\.set\("quality"/, "Android search quick filters should reach the music API query");
+  assert.match(androidClient, /function renderPlaylistActionsSheet\(\)[\s\S]*?新建歌单[\s\S]*?addTrackToPlaylist\(playlist\.id, track\?\.id\)/, "Android search results should be addable directly to any playlist");
+  assert.match(androidClient, /function renderSettingsSheet\(\)[\s\S]*?无缝播放[\s\S]*?歌曲交叉淡化[\s\S]*?播放 \/ 暂停淡化/, "Android music should expose distinct gapless, track-crossfade, and play-pause fade settings");
+  assert.match(androidClient, /function renderSettingsTransitionSummary\(\)[\s\S]*?当前衔接方式[\s\S]*?歌曲交叉淡化[\s\S]*?无缝播放/, "Android music settings should summarize the active transition strategy in plain language");
+  assert.match(androidClient, /const resumeQueue = document\.createElement\("button"\)[\s\S]*?writeResumeQueuePreference[\s\S]*?rememberPlaybackQueue[\s\S]*?settingsRow\("恢复播放现场"/, "Android music settings should expose configurable queue restoration");
+  assert.match(androidClient, /function restorePlaybackQueue\(renderGuard = null\)[\s\S]*?readPlaybackQueuePreference\(\)[\s\S]*?state\.queue = queue[\s\S]*?openTrack\(trackId, \{ autoplay: false, renderGuard \}\)/, "Android music should restore the saved queue and selected track without autoplay");
+  assert.match(androidClient, /function restorePlaybackQueue\(renderGuard = null\) \{\s*if \(!state\.resumeQueue \|\| state\.current \|\| state\.loading\) return false;/, "Android queue restoration should work from any restored music browse or search route");
+  assert.match(androidClient, /function rememberPlaybackQueue\(\)[\s\S]*?writePlaybackQueuePreference\(\{[\s\S]*?currentTrackId:[\s\S]*?queue:/, "Android music should persist the current track and a bounded playback queue");
+  assert.match(androidClient, /pendingProgressRecord = currentProgressRecord\(positionOverride\);\s*if \(!pendingProgressRecord \|\| progressTimer\) return;[\s\S]*?const record = pendingProgressRecord;[\s\S]*?postProgressRecord\(record\)/, "Android playback progress should use one bounded timer without starving continuous playback writes");
+  assert.match(androidClient, /function currentProgressRecord\(positionOverride = null\)[\s\S]*?trackId: track\.id[\s\S]*?function postProgressRecord\(record\)[\s\S]*?encodeURIComponent\(record\.trackId\)/, "Android progress writes should remain bound to the captured track during fast transitions");
+  assert.match(androidClient, /function renderSettingsVolumeControl\(\)[\s\S]*?type = "range"[\s\S]*?setVolume/, "Android music settings should provide a persistent in-app volume control");
+  assert.match(androidClient, /shuffle\.addEventListener\("click"[\s\S]*?writeShufflePreference[\s\S]*?scheduleGaplessPreload[\s\S]*?playback\.append\(settingsRow\("随机播放"/, "Android music settings should expose shuffle and reconcile gapless preloading");
+  assert.match(androidClient, /function fadeAudioVolume\(target, toVolume, durationMs\)[\s\S]*?requestAnimationFrame\(step\)/, "Android music fade should ramp volume instead of delaying playback with a timer");
+  assert.match(androidClient, /function setCrossfadeSeconds\(value\)[\s\S]*?writeCrossfadeSecondsPreference[\s\S]*?state\.gapless = false[\s\S]*?scheduleGaplessPreload/, "Android crossfade should persist its duration and disable the conflicting gapless strategy");
+  assert.match(androidClient, /function setGaplessPlayback\(enabled\)[\s\S]*?state\.crossfadeSeconds = 0[\s\S]*?writeCrossfadeSecondsPreference\(0\)/, "Android gapless mode should disable the conflicting track crossfade strategy");
+  assert.match(androidClient, /function transitionPreloadEnabled\(\)[\s\S]*?state\.gapless \|\| state\.crossfadeSeconds > 0[\s\S]*?!state\.shuffle/, "Android transition preloading should serve gapless and crossfade modes while remaining bounded under shuffle");
+  assert.match(androidClient, /function scheduleGaplessPreload\(\)[\s\S]*?gaplessPreloadAudio\.preload = "auto"/, "Android transition modes should preload the next queue item");
+  assert.match(androidClient, /const audioEventTargets = new WeakSet\(\)[\s\S]*?function installAudioEvents\(target\)/, "Android music should bind playback events to every promotable audio element");
+  assert.match(androidClient, /function tryPromoteGaplessPreload\(options = \{\}\)[\s\S]*?audio = incoming[\s\S]*?Promise\.resolve\(incoming\.play\(\)\)[\s\S]*?retireAudioElement\(outgoing\)/, "Android gapless mode should promote the ready preload instead of reopening its stream");
+  assert.match(androidClient, /function crossfadeAudioPair\(outgoing, incoming, durationMs\)[\s\S]*?outgoing\.volume = fromOutgoing \* \(1 - progress\)[\s\S]*?incoming\.volume = toIncoming \* progress/, "Android track crossfade should overlap two real audio elements with opposing volume ramps");
+  assert.match(androidClient, /function hydratePromotedTrack\(trackId\)[\s\S]*?fetchJson[\s\S]*?state\.current = data\.track \|\| state\.current/, "Android gapless promotion should hydrate metadata without replacing the promoted player");
+  assert.match(androidMusicStyles, /\.music-mobile-search-surface\s*\{[\s\S]*?\.music-mobile-search-scopes/, "Android music search should use a dedicated mobile layout");
+  assert.match(androidMusicStyles, /\.music-mobile-search-overview\s*,[\s\S]*?\.music-mobile-search-best-match[\s\S]*?\.music-mobile-search-artist-rail[\s\S]*?\.music-mobile-search-album-rail/, "Android unified search overview should have dedicated responsive styling for typed best matches");
+  assert.match(androidMusicStyles, /\.music-mobile-lyric-search-results[\s\S]*?\.music-mobile-lyric-search-card[\s\S]*?\.music-mobile-lyric-search-context/, "Android lyric search should use compact context cards instead of generic song rows");
+  assert.match(androidMusicStyles, /\.music-mobile-search-sort-hint[\s\S]*?\.music-mobile-track-match/, "Android search ranking explanations should have compact dedicated styling");
+  assert.match(androidMusicStyles, /\.music-mobile-search-quick-filters[\s\S]*?\.music-mobile-search-quick-filters button\.active/, "Android search quick filters should use a compact horizontally scrollable mobile layout");
+  assert.match(androidMusicStyles, /\.music-mobile-playlist-actions-sheet[\s\S]*?\.music-mobile-playlist-action-choice\.create/, "Android playlist selection should use a dedicated touch-friendly sheet");
+  assert.match(androidMusicStyles, /\.music-mobile-track-actions-sheet[\s\S]*?\.music-mobile-track-actions-grid[\s\S]*?\.music-mobile-track-action-choice/, "Android track actions should render as a structured mobile bottom sheet");
+  assert.match(androidMusicStyles, /\.music-mobile-settings-volume[\s\S]*?accent-color: var\(--green\)/, "Android music volume settings should use a compact touch-friendly range control");
+  assert.match(androidMusicStyles, /\.music-mobile-search-suggestions\s*\{[\s\S]*?focus-within[\s\S]*?\.music-mobile-search-suggestion/, "Android type-ahead results should render as a focused search overlay");
+  assert.match(androidMusicStyles, /\.music-mobile-search-history-chips\s*\{[\s\S]*?\.music-mobile-search-history-remove/, "Android recent-search removal should use compact dedicated styling");
+  assert.match(androidMusicStyles, /\.music-mobile-search-shortcuts[\s\S]*?grid-template-columns: repeat\(2[\s\S]*?\.music-mobile-search-hot-list[\s\S]*?\.music-mobile-search-recent-rail/, "Android search discovery should use compact shortcut, ranked, and horizontally scrollable recent layouts");
+  assert.match(androidMusicStyles, /\.music-mobile-settings-summary[\s\S]*?当前衔接方式|\.music-mobile-settings-summary[\s\S]*?linear-gradient/, "Android music settings should visually summarize the selected transition strategy");
+  assert.match(androidMusicStyles, /@media \(max-width: 600px\)[\s\S]*?\.music-mobile-settings-sheet\s*\{[\s\S]*?top: 0;[\s\S]*?max-height: none;[\s\S]*?grid-auto-rows: max-content/, "Android music settings should become a dedicated, fully scrollable full-screen surface on phones");
   assert.match(musicRuntime, /MUSIC_STREAM_CHUNK_BYTES = 2 \* 1024 \* 1024/);
   assert.match(musicRuntime, /maxRangeBytes: MUSIC_STREAM_CHUNK_BYTES/, "music streaming should cap open-ended byte ranges");
   assert.match(musicStoreSource, /music_search_short_vocab USING fts5vocab/, "short search totals should come from the FTS vocabulary instead of rescanning tracks");
+  assert.match(musicStoreSource, /music_search_phonetic USING fts5[\s\S]*?music_search_phonetic_vocab USING fts5vocab/, "music search should keep a persistent phonetic FTS index and vocabulary");
+  assert.match(musicStoreSource, /findPhoneticCorrection[\s\S]*?maxDistance = query\.length >= 8 \? 2 : 1/, "music typo correction should remain bounded instead of broadening into an unranked scan");
+  assert.match(musicStoreSource, /export function listLyricMatches[\s\S]*?lyrics: \$\{ftsTerm\(query\)\}[\s\S]*?bestLyricLineIndex/, "lyric search should reuse the persistent music FTS index and map results to timed lines");
+  assert.match(musicStoreSource, /musicIndexedSearchDocumentCount[\s\S]*?SELECT COUNT\(\*\) AS count FROM \$\{table\} WHERE \$\{table\} MATCH/, "unfiltered indexed search totals should count FTS documents without scanning a track join");
   assert.match(musicStoreSource, /rank MATCH 'bm25\(0,10,6,3,1,0\.5\)'/, "short search should let FTS stream results in weighted relevance order");
 
   const albumRoute = routeFromUrl("http://localhost/music/albums?language=中文&q=现场&sort=tracks");

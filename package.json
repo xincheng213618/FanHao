@@ -29,5 +29,8 @@
   },
   "engines": {
     "node": ">=24"
+  },
+  "dependencies": {
+    "pinyin-pro": "3.28.1"
   }
 }

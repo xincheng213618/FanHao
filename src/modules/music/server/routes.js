@@ -37,6 +37,15 @@ export async function routeMusicApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/music/lyrics/search" && req.method === "GET") {
+    try {
+      sendJson(res, 200, musicStore.searchLyrics(url));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "歌词搜索失败" });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/music/artists" && req.method === "GET") {
     try {
       sendJson(res, 200, musicStore.listArtists(url));

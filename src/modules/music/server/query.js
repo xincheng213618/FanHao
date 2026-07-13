@@ -1,9 +1,9 @@
 import { escapeLike } from "./helpers.js";
 import { normalizeMusicLanguage } from "./language.js";
 import { findSmartMix, smartMixCondition } from "./smart-mix.js";
-import { musicSearchIndexCondition, musicSearchIndexKind, musicSearchIndexTerm } from "./search.js";
+import { musicSearchIndexCondition, musicSearchIndexKind, musicSearchIndexTerm, phoneticEntityCondition } from "./search.js";
 
-export function catalogFilter(params = new URLSearchParams()) {
+export function catalogFilter(params = new URLSearchParams(), options = {}) {
   const q = String(params.get("q") || params.get("search") || "").trim();
   const artistId = String(params.get("artist") || params.get("artistId") || "").trim();
   const albumId = String(params.get("album") || params.get("albumId") || "").trim();
@@ -11,11 +11,15 @@ export function catalogFilter(params = new URLSearchParams()) {
   const language = normalizeMusicLanguage(params.get("language") || params.get("lang"));
   const smartMix = findSmartMix(params.get("smart") || params.get("smartId"));
   const favorite = ["1", "true", "yes"].includes(String(params.get("favorite") || "").trim().toLowerCase());
+  const lyrics = ["1", "true", "yes"].includes(String(params.get("lyrics") || params.get("hasLyrics") || "").trim().toLowerCase());
+  const minRating = Math.max(0, Math.min(5, Number(params.get("minRating") || 0) || 0));
+  const quality = String(params.get("quality") || "").trim().toLowerCase() === "lossless" ? "lossless" : "";
   const trackWhere = ["t.status = 'ok'"];
   const trackArgs = [];
   const albumWhere = [];
   const albumArgs = [];
   let searchKind = "";
+  let searchTerm = q;
   if (artistId && artistId !== "all") {
     trackWhere.push("t.artist_id = ?");
     trackArgs.push(artistId);
@@ -39,6 +43,12 @@ export function catalogFilter(params = new URLSearchParams()) {
     albumArgs.push(language);
   }
   if (favorite) trackWhere.push("COALESCE(s.favorite, 0) = 1");
+  if (lyrics) trackWhere.push(smartMixCondition("lyrics").where);
+  if (minRating > 0) {
+    trackWhere.push("COALESCE(s.rating, 0) >= ?");
+    trackArgs.push(minRating);
+  }
+  if (quality) trackWhere.push(smartMixCondition("hires").where);
   if (smartMix) {
     const condition = smartMixCondition(smartMix);
     trackWhere.push(condition.where);
@@ -46,10 +56,11 @@ export function catalogFilter(params = new URLSearchParams()) {
   }
   if (q) {
     const like = `%${escapeLike(q)}%`;
-    searchKind = musicSearchIndexKind(q);
+    searchKind = String(options.searchKind || musicSearchIndexKind(q));
+    searchTerm = String(options.searchTerm || q).trim();
     if (searchKind) {
       trackWhere.push(musicSearchIndexCondition(searchKind));
-      trackArgs.push(musicSearchIndexTerm(searchKind, q));
+      trackArgs.push(musicSearchIndexTerm(searchKind, searchTerm));
     } else {
       trackWhere.push(`(
         t.title LIKE ? ESCAPE '\\' OR
@@ -60,11 +71,15 @@ export function catalogFilter(params = new URLSearchParams()) {
       )`);
       trackArgs.push(like, like, like, like, like);
     }
+    const albumPhonetic = phoneticEntityCondition("album", q);
+    const artistPhonetic = phoneticEntityCondition("artist", q);
     albumWhere.push(`(
       al.title LIKE ? ESCAPE '\\' OR
-      a.name LIKE ? ESCAPE '\\'
+      a.name LIKE ? ESCAPE '\\' OR
+      al.id IN (SELECT DISTINCT album_id FROM music_search_phonetic WHERE ${albumPhonetic.sql}) OR
+      al.artist_id IN (SELECT DISTINCT artist_id FROM music_search_phonetic WHERE ${artistPhonetic.sql})
     )`);
-    albumArgs.push(like, like);
+    albumArgs.push(like, like, albumPhonetic.term, artistPhonetic.term);
   }
   return {
     q,
@@ -74,8 +89,12 @@ export function catalogFilter(params = new URLSearchParams()) {
     language,
     smartId: smartMix?.id || "",
     favorite,
-    needsState: favorite || Boolean(smartMix),
+    lyrics,
+    minRating,
+    quality,
+    needsState: favorite || minRating > 0 || Boolean(smartMix),
     searchKind,
+    searchTerm,
     trackWhere: trackWhere.join(" AND "),
     trackArgs,
     albumWhere: albumWhere.join(" AND "),

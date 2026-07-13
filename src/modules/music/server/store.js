@@ -18,11 +18,25 @@ import {
 
 import { DEFAULT_LIMIT, MAX_LIMIT, MAX_PAGE_LIMIT } from "./constants.js";
 import { SMART_MIXES, findSmartMix, smartMixCondition } from "./smart-mix.js";
-import { canUseShortVocabularyCount, musicSearchIndexCondition, musicSearchIndexJoin, musicSearchIndexKind, musicSearchIndexRank, musicSearchIndexTerm, musicShortSearchDocumentCount, searchRankSql } from "./search.js";
+import {
+  canUseShortVocabularyCount,
+  findPhoneticCorrection,
+  musicSearchIndexCondition,
+  musicSearchIndexJoin,
+  musicSearchIndexKind,
+  musicSearchIndexRank,
+  musicSearchIndexTerm,
+  musicIndexedSearchDocumentCount,
+  musicShortSearchDocumentCount,
+  musicSearchValueMatch,
+  phoneticEntityCondition,
+  searchRankSql
+} from "./search.js";
 import { createM3uTrackMatcher, formatM3uPlaylist, parseM3u, playlistTrackIdsFromInput, readM3uInput, safePlaylistFileName } from "./m3u.js";
 import { adjacentTracks, lyricsForTrack, publicAlbum, publicArtist, publicPlaylist, publicReportArtist, publicSmartPlaylist, publicTrack, trackRow } from "./serializers.js";
 import { albumFacet, artistFacet, cachedMusicFacet, genreFacet, languageFacet, smartMixCount } from "./facets.js";
 import { catalogFilter } from "./query.js";
+import { listLyricMatches } from "./lyrics-search.js";
 import { normalizeRoots, rootStatus, safeStoredFile, scanMusicRoots, scanSummary, writeScanRecords } from "./scan.js";
 import { ensureSchema } from "./schema.js";
 import { artistNameForSort, buildLetterCondition, clampInt, escapeLike, hashText, httpError, metaValue, normalizeAlbumSort, normalizeTrackSort, trackOrderSql } from "./helpers.js";
@@ -276,15 +290,88 @@ export function createMusicStore(options = {}) {
     const query = String(params ? params.get("q") || params.get("search") || "" : queryOrUrl || "").trim();
     if (!query) return { query, tracks: [], artists: [], albums: [] };
     const database = dbOrOpen();
-    const searchKind = musicSearchIndexKind(query);
+    const like = `%${escapeLike(query)}%`;
+    let searchKind = musicSearchIndexKind(query);
+    let searchTerm = query;
+    let tracks = suggestTracks(database, query, searchKind, searchTerm);
+    if (!tracks.length && searchKind !== "phonetic") {
+      searchKind = "phonetic";
+      tracks = suggestTracks(database, query, searchKind, query);
+    }
+    let correctedQuery = "";
+    if (!tracks.length) {
+      correctedQuery = findPhoneticCorrection(database, query);
+      if (correctedQuery) {
+        searchKind = "phonetic";
+        searchTerm = correctedQuery;
+        tracks = suggestTracks(database, query, searchKind, searchTerm);
+      }
+    }
+    const directArtists = database
+      .prepare(
+        `
+        SELECT *
+        FROM music_artists
+        WHERE track_count > 0 AND name LIKE ? ESCAPE '\\'
+        ORDER BY track_count DESC, name COLLATE NOCASE
+        LIMIT 5
+      `
+      )
+      .all(like)
+      .map(publicArtist);
+    const directAlbums = database
+      .prepare(
+        `
+        SELECT al.*, a.name AS artist_name
+        FROM music_albums al
+        LEFT JOIN music_artists a ON a.id = al.artist_id
+        WHERE al.track_count > 0 AND (
+          al.title LIKE ? ESCAPE '\\' OR
+          a.name LIKE ? ESCAPE '\\'
+        )
+        ORDER BY al.track_count DESC, al.title COLLATE NOCASE
+        LIMIT 5
+      `
+      )
+      .all(like, like)
+      .map(publicAlbum);
+    const artistLookup = database.prepare("SELECT * FROM music_artists WHERE id = ? AND track_count > 0");
+    const albumLookup = database.prepare(`
+      SELECT al.*, a.name AS artist_name
+      FROM music_albums al
+      LEFT JOIN music_artists a ON a.id = al.artist_id
+      WHERE al.id = ? AND al.track_count > 0
+    `);
+    const artists = mergeSuggestionEntities(
+      tracks.map((track) => artistLookup.get(track.artistId)).filter(Boolean).map(publicArtist),
+      directArtists,
+      5
+    );
+    const albums = mergeSuggestionEntities(
+      tracks.map((track) => albumLookup.get(track.albumId)).filter(Boolean).map(publicAlbum),
+      directAlbums,
+      5
+    );
+    const matchQuery = correctedQuery || searchTerm || query;
+    return {
+      query,
+      tracks: tracks.map((track) => decorateTrackSearchMatch(track, matchQuery)),
+      artists: artists.map((artist) => decorateArtistSearchMatch(artist, matchQuery)),
+      albums: albums.map((album) => decorateAlbumSearchMatch(album, matchQuery)),
+      searchMode: searchKind,
+      correctedQuery
+    };
+  }
+
+  function suggestTracks(database, query, searchKind, searchTerm) {
     const indexed = Boolean(searchKind);
     const like = `%${escapeLike(query)}%`;
     const trackSearch = indexed
       ? musicSearchIndexCondition(searchKind)
       : `(t.title LIKE ? ESCAPE '\\' OR t.display_artist LIKE ? ESCAPE '\\' OR t.album_title LIKE ? ESCAPE '\\' OR t.file_name LIKE ? ESCAPE '\\')`;
-    const trackArgs = indexed ? [musicSearchIndexTerm(searchKind, query)] : [like, like, like, like];
-    const rank = indexed ? musicSearchIndexRank(searchKind, query) : searchRankSql(query);
-    const tracks = database
+    const trackArgs = indexed ? [musicSearchIndexTerm(searchKind, searchTerm)] : [like, like, like, like];
+    const rank = indexed ? musicSearchIndexRank(searchKind, searchTerm) : searchRankSql(query);
+    return database
       .prepare(
         `
         SELECT t.*, a.name AS artist_name, al.title AS album_name, al.cover_path,
@@ -302,35 +389,6 @@ export function createMusicStore(options = {}) {
       )
       .all(...trackArgs, ...rank.args)
       .map(publicTrack);
-    const artists = database
-      .prepare(
-        `
-        SELECT *
-        FROM music_artists
-        WHERE track_count > 0 AND name LIKE ? ESCAPE '\\'
-        ORDER BY track_count DESC, name COLLATE NOCASE
-        LIMIT 5
-      `
-      )
-      .all(like)
-      .map(publicArtist);
-    const albums = database
-      .prepare(
-        `
-        SELECT al.*, a.name AS artist_name
-        FROM music_albums al
-        LEFT JOIN music_artists a ON a.id = al.artist_id
-        WHERE al.track_count > 0 AND (
-          al.title LIKE ? ESCAPE '\\' OR
-          a.name LIKE ? ESCAPE '\\'
-        )
-        ORDER BY al.track_count DESC, al.title COLLATE NOCASE
-        LIMIT 5
-      `
-      )
-      .all(like, like)
-      .map(publicAlbum);
-    return { query, tracks, artists, albums };
   }
 
   function listArtists(urlOrOptions = {}) {
@@ -340,15 +398,34 @@ export function createMusicStore(options = {}) {
     const sort = String(params.get("sort") || "count").trim().toLowerCase() === "name" ? "name" : "count";
     const limit = clampInt(params.get("limit"), 80, 1, MAX_PAGE_LIMIT);
     const offset = clampInt(params.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+    const database = dbOrOpen();
     const conditions = ["track_count > 0"];
     const args = [];
+    const searchMode = musicSearchIndexKind(query);
+    let correctedQuery = "";
+    let matchQuery = query;
     if (language) {
       conditions.push("language = ?");
       args.push(language);
     }
     if (query) {
-      conditions.push("name LIKE ? ESCAPE '\\'");
-      args.push(`%${escapeLike(query)}%`);
+      if (searchMode === "phonetic") {
+        let phonetic = phoneticEntityCondition("artist", query);
+        const hasPhoneticMatch = Boolean(database.prepare(`SELECT 1 FROM music_search_phonetic WHERE ${phonetic.sql} LIMIT 1`).get(phonetic.term));
+        correctedQuery = hasPhoneticMatch ? "" : findPhoneticCorrection(database, query);
+        if (correctedQuery) {
+          matchQuery = correctedQuery;
+          phonetic = phoneticEntityCondition("artist", correctedQuery);
+        }
+        conditions.push(`(
+          name LIKE ? ESCAPE '\\' OR
+          id IN (SELECT DISTINCT artist_id FROM music_search_phonetic WHERE ${phonetic.sql})
+        )`);
+        args.push(`%${escapeLike(query)}%`, phonetic.term);
+      } else {
+        conditions.push("name LIKE ? ESCAPE '\\'");
+        args.push(`%${escapeLike(query)}%`);
+      }
     }
     const letter = String(params.get("letter") || "").trim();
     if (letter) {
@@ -358,7 +435,6 @@ export function createMusicStore(options = {}) {
         if (lc.args.length) args.push(...lc.args);
       }
     }
-    const database = dbOrOpen();
     let total;
     let rows;
     if (sort === "name") {
@@ -385,7 +461,7 @@ export function createMusicStore(options = {}) {
         .all(...args, limit, offset);
     }
     return {
-      artists: rows.map(publicArtist),
+      artists: rows.map(publicArtist).map((artist) => decorateArtistSearchMatch(artist, matchQuery)),
       total,
       limit,
       offset,
@@ -394,6 +470,8 @@ export function createMusicStore(options = {}) {
       language,
       letter,
       sort,
+      searchMode,
+      correctedQuery,
       languages: languageFacet(database),
       summary: summary()
     };
@@ -446,7 +524,7 @@ export function createMusicStore(options = {}) {
       )
       .all(...albumArgs, limit, offset);
     return {
-      albums: rows.map(publicAlbum),
+      albums: rows.map(publicAlbum).map((album) => decorateAlbumSearchMatch(album, filter.searchTerm || filter.q)),
       total,
       limit,
       offset,
@@ -457,6 +535,7 @@ export function createMusicStore(options = {}) {
       language: filter.language,
       letter,
       sort,
+      searchMode: filter.searchKind,
       languages: languageFacet(database),
       summary: summary()
     };
@@ -464,22 +543,21 @@ export function createMusicStore(options = {}) {
 
   function listTracks(urlOrOptions = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
-    const filter = catalogFilter(params);
+    const database = dbOrOpen();
+    const resolvedSearch = resolveTrackSearch(database, params, catalogFilter(params));
+    const filter = resolvedSearch.filter;
     const smartMix = findSmartMix(filter.smartId);
     const sort = normalizeTrackSort(params.get("sort"));
     const limit = clampInt(params.get("limit"), DEFAULT_LIMIT, 1, MAX_PAGE_LIMIT);
     const offset = clampInt(params.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const where = filter.trackWhere ? `WHERE ${filter.trackWhere}` : "";
     const rank = filter.q && !smartMix && !params.has("sort")
-      ? (filter.searchKind ? musicSearchIndexRank(filter.searchKind, filter.q) : searchRankSql(filter.q))
+      ? (filter.searchKind ? musicSearchIndexRank(filter.searchKind, filter.searchTerm) : searchRankSql(filter.q))
       : { sql: "", args: [] };
     const order = smartMix ? smartMix.order : rank.sql || trackOrderSql(sort);
-    const database = dbOrOpen();
     const stateJoin = filter.needsState ? "LEFT JOIN music_track_state s ON s.track_id = t.id" : "";
     const searchJoin = musicSearchIndexJoin(filter.searchKind);
-    const total = canUseShortVocabularyCount(filter)
-      ? musicShortSearchDocumentCount(database, filter.q)
-      : database.prepare(`SELECT COUNT(*) AS count FROM music_tracks t ${searchJoin} ${stateJoin} ${where}`).get(...filter.trackArgs)?.count || 0;
+    const total = resolvedSearch.total;
     const rows = database
       .prepare(
         `
@@ -498,7 +576,9 @@ export function createMusicStore(options = {}) {
       )
       .all(...filter.trackArgs, ...rank.args, limit, offset);
     return {
-      tracks: rows.map(publicTrack),
+      tracks: rows
+        .map(publicTrack)
+        .map((track) => decorateTrackSearchMatch(track, resolvedSearch.correctedQuery || filter.searchTerm || filter.q)),
       total: Number(total || 0),
       limit,
       offset,
@@ -509,6 +589,11 @@ export function createMusicStore(options = {}) {
       genre: filter.genre,
       language: filter.language,
       favorite: filter.favorite,
+      lyrics: filter.lyrics,
+      minRating: filter.minRating,
+      quality: filter.quality,
+      searchMode: filter.searchKind,
+      correctedQuery: resolvedSearch.correctedQuery,
       smartId: filter.smartId,
       smartPlaylist: smartMix ? publicSmartPlaylist(smartMix, total) : null,
       sort,
@@ -519,6 +604,47 @@ export function createMusicStore(options = {}) {
       albums: albumFacet(database, filter.artistId, filter.genre, filter.language, filter.albumId),
       genres: genreFacet(database, filter.artistId)
     };
+  }
+
+  function searchLyrics(urlOrOptions = {}) {
+    return listLyricMatches(dbOrOpen(), urlOrOptions);
+  }
+
+  function resolveTrackSearch(database, params, initialFilter) {
+    let filter = initialFilter;
+    let total = trackFilterTotal(database, filter);
+    let correctedQuery = "";
+    if (filter.q && total === 0 && filter.searchKind !== "phonetic") {
+      const phoneticFilter = catalogFilter(params, { searchKind: "phonetic", searchTerm: filter.q });
+      const phoneticTotal = trackFilterTotal(database, phoneticFilter);
+      if (phoneticTotal > 0) {
+        filter = phoneticFilter;
+        total = phoneticTotal;
+      }
+    }
+    if (filter.q && total === 0) {
+      const correction = findPhoneticCorrection(database, filter.q);
+      if (correction) {
+        const correctedFilter = catalogFilter(params, { searchKind: "phonetic", searchTerm: correction });
+        const correctedTotal = trackFilterTotal(database, correctedFilter);
+        if (correctedTotal > 0) {
+          filter = correctedFilter;
+          total = correctedTotal;
+          correctedQuery = correction;
+        }
+      }
+    }
+    return { filter, total, correctedQuery };
+  }
+
+  function trackFilterTotal(database, filter) {
+    if (canUseShortVocabularyCount(filter)) return musicShortSearchDocumentCount(database, filter.q);
+    const indexedTotal = musicIndexedSearchDocumentCount(database, filter);
+    if (indexedTotal !== null) return indexedTotal;
+    const searchJoin = musicSearchIndexJoin(filter.searchKind);
+    const stateJoin = filter.needsState ? "LEFT JOIN music_track_state s ON s.track_id = t.id" : "";
+    const where = filter.trackWhere ? `WHERE ${filter.trackWhere}` : "";
+    return Number(database.prepare(`SELECT COUNT(*) AS count FROM music_tracks t ${searchJoin} ${stateJoin} ${where}`).get(...filter.trackArgs)?.count || 0);
   }
 
   function trackDetail(trackId, urlOrOptions = {}) {
@@ -979,6 +1105,7 @@ export function createMusicStore(options = {}) {
     createPlaylist,
     deletePlaylist,
     listHistory,
+    searchLyrics,
     listAlbums,
     listArtists,
     listPlaylists,
@@ -999,4 +1126,62 @@ export function createMusicStore(options = {}) {
     trackFile,
     updatePlaylist
   };
+}
+
+function mergeSuggestionEntities(primary = [], secondary = [], limit = 5) {
+  const result = [];
+  const seen = new Set();
+  for (const item of [...primary, ...secondary]) {
+    if (!item?.id || seen.has(item.id)) continue;
+    seen.add(item.id);
+    result.push(item);
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
+function decorateTrackSearchMatch(track, query) {
+  if (!track || !query) return track;
+  return {
+    ...track,
+    searchMatch: buildEntitySearchMatch({
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      fileName: track.fileName
+    }, query)
+  };
+}
+
+function decorateArtistSearchMatch(artist, query) {
+  if (!artist || !query) return artist;
+  return {
+    ...artist,
+    searchMatch: buildEntitySearchMatch({ name: artist.name }, query)
+  };
+}
+
+function decorateAlbumSearchMatch(album, query) {
+  if (!album || !query) return album;
+  return {
+    ...album,
+    searchMatch: buildEntitySearchMatch({ title: album.title, artist: album.artistName }, query)
+  };
+}
+
+function buildEntitySearchMatch(fields, query) {
+  const scores = {};
+  const highlights = {};
+  let field = "";
+  let score = 0;
+  for (const [name, value] of Object.entries(fields || {})) {
+    const match = musicSearchValueMatch(value, query);
+    scores[name] = match.score;
+    highlights[name] = match.highlights;
+    if (match.score > score) {
+      field = name;
+      score = match.score;
+    }
+  }
+  return { field, score, scores, highlights };
 }

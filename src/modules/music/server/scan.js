@@ -8,7 +8,7 @@ import { AUDIO_EXTS, IMAGE_EXTS, KUWO_UTF16LE_PREFIX, MAX_INTRO_BYTES, MAX_LYRIC
 import { cleanAlbumTitle, cleanArtistName, cleanComparable, cleanTrackTitle, hashText, isJunkAssetName, normalizedPathKey, numberPrefix, safeReadDir, safeReadDirEntries, safeStat, sortKey, yearFromText } from "./helpers.js";
 import { buildMusicIdentityKnowledge, isUnknownMusicArtist, resolveMusicTrackIdentity } from "./identity.js";
 import { buildArtistLanguageConsensus, musicLanguageForArtist, musicLanguageFromPath } from "./language.js";
-import { insertMusicShortSearchRow } from "./search.js";
+import { insertMusicPhoneticSearchRow, insertMusicShortSearchRow, MUSIC_PHONETIC_INDEX_VERSION } from "./search.js";
 
 export function loadManagedMusicCatalogs(scanRoots = []) {
   const result = new Map();
@@ -267,6 +267,7 @@ export function writeScanRecords(db, records, scanRoots, scannedAt) {
   try {
     db.prepare("DELETE FROM music_search").run();
     db.prepare("DELETE FROM music_search_short").run();
+    db.prepare("DELETE FROM music_search_phonetic").run();
     db.prepare("DELETE FROM music_lyrics").run();
     db.prepare("DELETE FROM music_tracks").run();
     db.prepare("DELETE FROM music_albums").run();
@@ -337,6 +338,11 @@ export function writeScanRecords(db, records, scanRoots, scannedAt) {
       INSERT INTO music_search_short (track_id, title, artist, album, genre, file_name)
       VALUES (?, ?, ?, ?, ?, ?)
     `);
+    const insertPhoneticSearch = db.prepare(`
+      INSERT INTO music_search_phonetic (track_id, artist_id, album_id, title, artist, album, file_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const phoneticDocumentCache = new Map();
     const lyricByTrack = new Map(records.lyrics.map((lyric) => [lyric.trackId, lyric]));
     for (const track of records.tracks) {
       insertTrack.run(
@@ -371,6 +377,7 @@ export function writeScanRecords(db, records, scanRoots, scannedAt) {
       );
       insertSearch.run(track.id, track.title, track.displayArtist, track.albumTitle, lyricByTrack.get(track.id)?.rawText || "");
       insertMusicShortSearchRow(insertShortSearch, track);
+      insertMusicPhoneticSearchRow(insertPhoneticSearch, track, phoneticDocumentCache);
     }
 
     const insertLyric = db.prepare(`
@@ -382,6 +389,7 @@ export function writeScanRecords(db, records, scanRoots, scannedAt) {
     }
 
     db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('schema_version', '1')").run();
+    db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('music_phonetic_index_version', ?)").run(MUSIC_PHONETIC_INDEX_VERSION);
     db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('scanned_at', ?)").run(scannedAt);
     db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('roots_json', ?)").run(JSON.stringify(scanRoots));
     db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('smart_static_counts_json', ?)").run(JSON.stringify({

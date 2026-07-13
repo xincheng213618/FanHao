@@ -133,6 +133,10 @@ assert(
   fs.readFileSync(path.join(androidModulesDir, "music", "music-views.js"), "utf8").includes("music-mobile-search-pill"),
   "music must keep search inside its own module surface"
 );
+const androidMusicEntry = fs.readFileSync(path.join(androidModulesDir, "music", "android-module.js"), "utf8");
+const androidMusicViews = fs.readFileSync(path.join(androidModulesDir, "music", "music-views.js"), "utf8");
+assert(androidMusicEntry.includes("deactivate: () => musicViews.deactivate()"), "music must deactivate before another module renders");
+assert(androidMusicViews.includes("if (!moduleActive || !els.viewContent) return;"), "inactive music work must not repaint another module");
 assert(
   fs.readFileSync(path.join(androidModulesDir, "novels", "novel-views.js"), "utf8").includes("novel-mobile-search-pill"),
   "novels must keep search inside its own module surface"

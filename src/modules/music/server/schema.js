@@ -1,6 +1,10 @@
 // Music store sub-module: schema
 import { backfillMissingTrackGenres, backfillMusicLanguages } from "./backfill.js";
-import { insertMusicShortSearchRow } from "./search.js";
+import {
+  insertMusicPhoneticSearchRow,
+  insertMusicShortSearchRow,
+  MUSIC_PHONETIC_INDEX_VERSION
+} from "./search.js";
 
 export function ensureSchema(db) {
   db.exec(`
@@ -132,6 +136,20 @@ export function ensureSchema(db) {
       music_search_short,
       'row'
     );
+    CREATE VIRTUAL TABLE IF NOT EXISTS music_search_phonetic USING fts5(
+      track_id UNINDEXED,
+      artist_id UNINDEXED,
+      album_id UNINDEXED,
+      title,
+      artist,
+      album,
+      file_name,
+      tokenize='unicode61 remove_diacritics 2'
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS music_search_phonetic_vocab USING fts5vocab(
+      music_search_phonetic,
+      'row'
+    );
   `);
   ensureColumn(db, "music_tracks", "genre", "TEXT");
   ensureColumn(db, "music_tracks", "language", "TEXT NOT NULL DEFAULT '其他'");
@@ -150,6 +168,34 @@ export function ensureSchema(db) {
   backfillMissingTrackGenres(db);
   backfillMusicLanguages(db);
   ensureMusicShortSearchIndex(db);
+  ensureMusicPhoneticSearchIndex(db);
+}
+
+
+export function ensureMusicPhoneticSearchIndex(db) {
+  const trackCount = Number(db.prepare("SELECT COUNT(*) AS count FROM music_tracks WHERE status = 'ok'").get()?.count || 0);
+  const indexedCount = Number(db.prepare("SELECT COUNT(*) AS count FROM music_search_phonetic").get()?.count || 0);
+  const version = String(db.prepare("SELECT value FROM music_meta WHERE key = 'music_phonetic_index_version'").get()?.value || "");
+  if (trackCount === indexedCount && version === MUSIC_PHONETIC_INDEX_VERSION) return;
+  const rows = db
+    .prepare("SELECT id, artist_id, album_id, title, display_artist, album_title, file_name FROM music_tracks WHERE status = 'ok'")
+    .all();
+  const insert = db.prepare(`
+    INSERT INTO music_search_phonetic (track_id, artist_id, album_id, title, artist, album, file_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  const documentCache = new Map();
+  db.exec("SAVEPOINT rebuild_music_search_phonetic");
+  try {
+    db.prepare("DELETE FROM music_search_phonetic").run();
+    for (const row of rows) insertMusicPhoneticSearchRow(insert, row, documentCache);
+    db.prepare("INSERT OR REPLACE INTO music_meta (key, value) VALUES ('music_phonetic_index_version', ?)").run(MUSIC_PHONETIC_INDEX_VERSION);
+    db.exec("RELEASE SAVEPOINT rebuild_music_search_phonetic");
+  } catch (error) {
+    db.exec("ROLLBACK TO SAVEPOINT rebuild_music_search_phonetic");
+    db.exec("RELEASE SAVEPOINT rebuild_music_search_phonetic");
+    throw error;
+  }
 }
 
 

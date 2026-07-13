@@ -72,6 +72,7 @@ export function adjacentTracks(db, trackId, urlOrOptions = {}) {
       SELECT t.id
       FROM music_tracks t
       ${searchJoin}
+      LEFT JOIN music_artists a ON a.id = t.artist_id
       LEFT JOIN music_track_state s ON s.track_id = t.id
       ${where}
       ORDER BY ${smartMix?.order || rank.sql || trackOrderSql(normalizeTrackSort(params.get("sort")))}
