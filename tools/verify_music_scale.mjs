@@ -16,6 +16,7 @@ import {
 } from "../src/modules/music/server/identity.js";
 import { musicSearchValueMatch, phoneticSearchDocument, phoneticSearchFtsTerm } from "../src/modules/music/server/search.js";
 import { createFileServer } from "../src/platform/server/file-server.js";
+import { buildTrackVersionGroups, getTrackVersionInfo } from "../android-client/www/modules/music/track-versions.js";
 
 globalThis.window = { location: { href: "http://localhost/", search: "", hash: "" } };
 const { routeFromUrl, routeUrl } = await import("../public/js/router.js");
@@ -49,6 +50,23 @@ try {
   assert.equal(ambiguousHyphen.title, "九黎如嫣 - 少年", "ambiguous A - B pairs should preserve the original title");
   assert.equal(resolveMusicTrackIdentity({ fileStem: "Everything I Do (I Do it for You)", title: "Everything I Do (I Do it for You)" }, identityKnowledge).artist, "待识别");
   assert.equal(resolveMusicTrackIdentity({ fileStem: "容易受伤的女人", title: "容易受伤的女人" }, identityKnowledge).artist, "待识别", "ambiguous cover titles must remain unresolved");
+
+  const versionGroups = buildTrackVersionGroups([
+    { id: "belief-original", title: "Belief", artist: "S.H.E", album: "青春株式会社", durationMs: 271_040 },
+    { id: "belief-live", title: "Belief(Live)", artist: "S.H.E", album: "_单曲", durationMs: 264_307 },
+    { id: "belief-concert", title: "Belief（演唱会版）", artist: "S.H.E", album: "奇幻乐园演唱会", durationMs: 81_187 },
+    { id: "belief-truth", title: "Belief(The Truth)", artist: "S.H.E", album: "_单曲", durationMs: 240_000 }
+  ]);
+  assert.equal(versionGroups.length, 2, "recognized version suffixes should group without absorbing unrelated bracketed titles");
+  assert.deepEqual(versionGroups[0].tracks.map((track) => track.id), ["belief-original", "belief-live", "belief-concert"]);
+  assert.equal(versionGroups[0].primary.id, "belief-original", "the original should lead a same-song version group");
+  assert.equal(getTrackVersionInfo({ title: "Belief - Remix", artist: "S.H.E" }).label, "Remix");
+  assert.equal(getTrackVersionInfo({ title: "Belief (Unplugged)", artist: "S.H.E" }).label, "不插电");
+  assert.equal(getTrackVersionInfo({ title: "后来（现场版）", artist: "刘若英" }).baseTitle, "后来");
+  assert.equal(buildTrackVersionGroups([
+    { id: "unknown-a", title: "同名歌曲", artist: "未知歌手" },
+    { id: "unknown-b", title: "同名歌曲", artist: "未知歌手" }
+  ]).length, 2, "unknown artists should not be merged into a speculative version group");
 
   assert.equal(explicitMusicLanguageForArtist("S.H.E"), "中文");
   assert.equal(explicitMusicLanguageForArtist("坂本龍一"), "日文");
@@ -420,6 +438,13 @@ try {
   assert.match(androidClient, /\{ scope: "all", label: "综合" \}[\s\S]*?\{ scope: "songs", label: "歌曲" \}[\s\S]*?\{ scope: "lyrics", label: "歌词" \}[\s\S]*?function renderSearchOverview\(\)/, "Android music search should expose unified, song, and lyric result scopes");
   assert.match(androidClient, /Promise\.allSettled\(\[[\s\S]*?\/api\/music\/artists[\s\S]*?\/api\/music\/albums/, "Android unified search should fetch filtered artist and album matches together");
   assert.match(androidClient, /function renderSearchOverview\(\)[\s\S]*?bestSearchMatch\(data\)[\s\S]*?renderBestSearchMatch\(best\)[\s\S]*?music-mobile-search-album-rail/, "Android unified search should select the strongest typed entity before related results");
+  assert.match(androidClient, /function renderBestSearchMatch\(best\)[\s\S]*?searchVersionGroupForTrack\(item\)[\s\S]*?选择版本[\s\S]*?renderSearchVersionRail\(versionGroup\)/, "Android best matches should expose same-song versions without leaving the unified result page");
+  assert.match(androidClient, /function renderSearchVersionChoice\(track, group, options = \{\}\)[\s\S]*?getTrackVersionInfo\(track\)[\s\S]*?playSearchTrackVersion\(track, group\.tracks\)/, "Android version choices should label and play the selected concrete track");
+  assert.match(androidClient, /function renderSearchSongResults\(options = \{\}\)[\s\S]*?currentSearchVersionGroups\(tracks\)[\s\S]*?versionGroups: visibleGroups/, "Android song search should group recognized versions before rendering bounded previews");
+  assert.match(androidClient, /function renderSearchTrackVersionGroup\(group, index\)[\s\S]*?searchExpandedVersionGroups[\s\S]*?renderSearchVersionChoice\(track, group\)/, "Android song results should expand a version group into directly playable choices");
+  assert.match(androidClient, /function toggleSearchTrackVersionGroup\(key\)[\s\S]*?searchExpandedVersionGroups\.delete[\s\S]*?searchExpandedVersionGroups\.add[\s\S]*?refreshMountedSearchUi\(\)/, "Android version expansion should preserve the mounted search and player surfaces");
+  assert.match(androidClient, /已合并 \$\{track\.duplicateCount\} 个相同文件[\s\S]*?\$\{formatNumber\(track\.duplicateCount\)\} 个来源/, "Android search should distinguish identical file sources from semantic song versions");
+  assert.match(androidMusicStyles, /\.music-mobile-search-best-stack[\s\S]*?\.music-mobile-search-version-rail[\s\S]*?\.music-mobile-search-version-choice\.active[\s\S]*?\.music-mobile-search-track-version-group/, "Android music should style best-match version choices and expandable result groups as one visual system");
   assert.match(androidClient, /function renderSearchContent\(\)[\s\S]*?renderLyricSearchResults\(\{ preview: true, collapsible: true \}\)[\s\S]*?renderSearchSongResults\(\{ preview: true, collapsible: true \}\)/, "Android unified search should keep lyrics and songs as compact result-group previews");
   assert.match(androidClient, /function renderSearchPlaybackAction\(\)[\s\S]*?播放本次搜索[\s\S]*?play\.addEventListener\("click", playSearchResults\)/, "Android search should expose one-tap result playback before the long result groups");
   assert.match(androidClient, /function renderSearchResultGroup\(key, titleText, metaText, content, options = \{\}\)[\s\S]*?aria-expanded[\s\S]*?toggleSearchResultGroup\(groupKey\)/, "Android unified search groups should expose accessible expand and collapse controls");
@@ -435,7 +460,7 @@ try {
   assert.match(androidClient, /function appendSearchHighlightedText\(target, value, item, field\)[\s\S]*?searchMatch\?\.highlights/, "Android search should render server-backed pinyin highlight terms");
   assert.match(androidClient, /function searchSortHint\(\)[\s\S]*?完整匹配优先[\s\S]*?播放次数/, "Android search should explain why relevance-ranked results appear first");
   assert.match(androidClient, /function trackSearchMatchLabel\(track, query\)[\s\S]*?歌名[\s\S]*?歌手[\s\S]*?专辑[\s\S]*?综合匹配/, "Android search rows should explain which metadata field matched the query");
-  assert.match(androidClient, /function renderTrackRow\(track, index\)[\s\S]*?music-mobile-track-title-line[\s\S]*?music-mobile-track-match[\s\S]*?text\.append\(titleLine, meta\)/, "Android search rows should mount their match explanation beside the visible title");
+  assert.match(androidClient, /function renderTrackRow\(track, index, options = \{\}\)[\s\S]*?music-mobile-track-title-line[\s\S]*?music-mobile-track-match[\s\S]*?text\.append\(titleLine, meta\)/, "Android search rows should mount their match explanation beside the visible title");
   assert.match(androidClient, /function playSearchResults\(\)[\s\S]*?state\.queue = tracks\.map[\s\S]*?openTrack\(tracks\[0\]\.id/, "Android search should support playing the visible result queue in one tap");
   assert.match(androidClient, /track\.artist \|\| "未知歌手", highlight: true[\s\S]*?track\.album \|\| "未知专辑", highlight: true/, "Android music search should highlight matching artist and album metadata as well as titles");
   assert.match(androidClient, /SEARCH_DEBOUNCE_MS = 280[\s\S]*?scheduleLiveSearch\(search\.value\)/, "Android music search should update after a bounded typing debounce");

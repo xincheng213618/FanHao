@@ -1,6 +1,7 @@
 import { deleteJson, fetchJson, postJson, putJson } from "../../js/api.js?v=20260708-mobile-music-36";
 import { absoluteUrl } from "../../js/image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "../../js/format.js";
+import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=20260713-music-search-versions-01";
 
 const DEFAULT_MODE = "library";
 const DEFAULT_SORT = "album";
@@ -94,6 +95,7 @@ export function createMusicViews(deps) {
     searchSuggestions: [],
     searchSuggestionQuery: "",
     searchCollapsedGroups: new Set(),
+    searchExpandedVersionGroups: new Set(),
     sleepMinutes: 0,
     sleepUntil: 0,
     playReportedTrackId: "",
@@ -368,6 +370,7 @@ export function createMusicViews(deps) {
     const value = String(query || "").trim();
     if (normalizeSearchComparison(state.query) !== normalizeSearchComparison(value)) {
       state.searchCollapsedGroups = new Set();
+      state.searchExpandedVersionGroups = new Set();
     }
     mountedSearchController?.abort();
     lyricSearchController?.abort();
@@ -1424,6 +1427,7 @@ export function createMusicViews(deps) {
 
   function renderBestSearchMatch(best) {
     const item = best.type === "lyric" ? best.item.track : best.item;
+    const versionGroup = best.type === "track" ? searchVersionGroupForTrack(item) : null;
     const card = document.createElement("button");
     card.type = "button";
     card.className = `music-mobile-search-best-match type-${best.type}`;
@@ -1448,6 +1452,7 @@ export function createMusicViews(deps) {
       appendHighlightedText(meta, best.item.text || "歌词命中", state.query, best.item.highlights);
     } else {
       appendSearchHighlightedText(meta, [item.artist || "未知歌手", item.album || "未知专辑"].join(" · "), item, "artist");
+      if (versionGroup?.tracks?.length > 1) meta.append(document.createTextNode(` · ${formatNumber(versionGroup.tracks.length)} 个版本`));
     }
     text.append(title, meta);
     const badge = document.createElement("em");
@@ -1458,7 +1463,18 @@ export function createMusicViews(deps) {
         : "查看";
     card.append(text, badge);
     card.addEventListener("click", () => openBestSearchMatch(best));
-    return card;
+    if (!versionGroup || versionGroup.tracks.length < 2) return card;
+    const stack = document.createElement("section");
+    stack.className = "music-mobile-search-best-stack";
+    const versionsHead = document.createElement("div");
+    versionsHead.className = "music-mobile-search-version-head";
+    const label = document.createElement("strong");
+    label.textContent = "选择版本";
+    const count = document.createElement("small");
+    count.textContent = `${formatNumber(versionGroup.tracks.length)} 个版本可直接播放`;
+    versionsHead.append(label, count);
+    stack.append(card, versionsHead, renderSearchVersionRail(versionGroup));
+    return stack;
   }
 
   function openBestSearchMatch(best) {
@@ -1468,7 +1484,8 @@ export function createMusicViews(deps) {
     }
     const item = best.item;
     if (best.type === "track") {
-      openTrack(item.id, { autoplay: true }).catch(() => {});
+      const versionGroup = searchVersionGroupForTrack(item);
+      playSearchTrackVersion(item, versionGroup?.tracks || [item]);
       return;
     }
     updateListParams({
@@ -1480,6 +1497,56 @@ export function createMusicViews(deps) {
       genre: "",
       language: best.type === "artist" ? item.language || "" : ""
     }, { resetSearch: true });
+  }
+
+  function currentSearchVersionGroups(tracks = state.data?.tracks) {
+    return buildTrackVersionGroups(Array.isArray(tracks) ? tracks : []);
+  }
+
+  function searchVersionGroupForTrack(track) {
+    if (!track?.id) return null;
+    return findTrackVersionGroup(currentSearchVersionGroups(), track.id);
+  }
+
+  function renderSearchVersionRail(group) {
+    const rail = document.createElement("div");
+    rail.className = "music-mobile-search-version-rail";
+    for (const track of group.tracks || []) rail.append(renderSearchVersionChoice(track, group, { compact: true }));
+    return rail;
+  }
+
+  function renderSearchVersionChoice(track, group, options = {}) {
+    const info = getTrackVersionInfo(track);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `music-mobile-search-version-choice${options.compact ? " is-compact" : ""}${state.current?.id === track.id ? " active" : ""}`;
+    button.dataset.trackVersionId = track.id || "";
+    const text = document.createElement("span");
+    const label = document.createElement("strong");
+    label.textContent = info.label;
+    const meta = document.createElement("small");
+    meta.textContent = versionChoiceMeta(track);
+    text.append(label, meta);
+    const duration = document.createElement("em");
+    duration.textContent = formatClock(track.durationMs || 0);
+    button.append(text, duration);
+    button.setAttribute("aria-label", `播放${info.label}：${track.title || group.baseTitle || "歌曲"}`);
+    button.addEventListener("click", () => playSearchTrackVersion(track, group.tracks));
+    return button;
+  }
+
+  function versionChoiceMeta(track) {
+    const album = String(track?.album || "").trim();
+    return [album && album !== "_单曲" ? album : "单曲", track?.favorite ? "已收藏" : "", ratingLabel(track?.rating)]
+      .filter(Boolean)
+      .join(" · ");
+  }
+
+  function playSearchTrackVersion(track, tracks) {
+    if (!track?.id) return;
+    const queue = (Array.isArray(tracks) ? tracks : []).filter((item) => item?.id).map((item) => ({ ...item }));
+    state.queue = queue.length ? queue : [{ ...track }];
+    openTrack(track.id, { autoplay: true }).catch(() => {});
   }
 
   function renderRelatedArtistMatch(artist) {
@@ -1571,12 +1638,16 @@ export function createMusicViews(deps) {
   function renderSearchSongResults(options = {}) {
     const preview = Boolean(options.preview);
     const tracks = Array.isArray(state.data?.tracks) ? state.data.tracks : [];
-    const visibleTracks = preview ? tracks.slice(0, 5) : tracks;
-    const content = renderTrackList({ tracks: visibleTracks, showLoadMore: !preview });
-    const total = Number(state.data?.total || tracks.length || 0);
-    const group = renderSearchResultGroup("songs", "歌曲", `${formatNumber(total)} 首匹配`, content, {
+    const versionGroups = currentSearchVersionGroups(tracks);
+    const visibleGroups = preview ? versionGroups.slice(0, 5) : versionGroups;
+    const content = renderTrackList({
+      tracks: visibleGroups.map((item) => item.primary).filter(Boolean),
+      versionGroups: visibleGroups,
+      showLoadMore: !preview
+    });
+    const group = renderSearchResultGroup("songs", "歌曲", searchVersionGroupMeta(versionGroups, tracks.length), content, {
       onPlay: tracks.length ? playSearchResults : null,
-      onMore: preview && (total > visibleTracks.length || state.hasMore) ? () => switchSearchScope("songs") : null
+      onMore: preview && (versionGroups.length > visibleGroups.length || state.hasMore) ? () => switchSearchScope("songs") : null
     });
     group.classList.add("music-mobile-search-song-results");
     if (!options.collapsible) {
@@ -1586,6 +1657,15 @@ export function createMusicViews(deps) {
     }
     const section = group;
     return section;
+  }
+
+  function searchVersionGroupMeta(groups, trackCount) {
+    const versionGroups = (Array.isArray(groups) ? groups : []).filter((item) => item.tracks?.length > 1);
+    if (groups.length === 1 && versionGroups.length === 1) {
+      return `1 首歌曲 · ${formatNumber(versionGroups[0].tracks.length)} 个版本`;
+    }
+    if (versionGroups.length) return `${formatNumber(groups.length)} 首歌曲 · ${formatNumber(versionGroups.length)} 组多版本`;
+    return `${formatNumber(trackCount || groups.length)} 首匹配`;
   }
 
   function renderLyricSearchResults(options = {}) {
@@ -2090,6 +2170,7 @@ export function createMusicViews(deps) {
     const wrap = document.createElement("div");
     wrap.className = "music-mobile-list";
     const tracks = Array.isArray(options.tracks) ? options.tracks : state.data?.tracks || [];
+    const versionGroups = Array.isArray(options.versionGroups) ? options.versionGroups : null;
     const showLoadMore = options.showLoadMore !== false;
     if (state.loading && !tracks.length) {
       wrap.append(messageBox("正在读取音乐库"));
@@ -2099,7 +2180,13 @@ export function createMusicViews(deps) {
       wrap.append(messageBox(state.status || emptyMessage()));
       return wrap;
     }
-    tracks.forEach((track, index) => wrap.append(renderTrackRow(track, index)));
+    if (versionGroups) {
+      versionGroups.forEach((group, index) => wrap.append(
+        group.tracks?.length > 1 ? renderSearchTrackVersionGroup(group, index) : renderTrackRow(group.primary, index)
+      ));
+    } else {
+      tracks.forEach((track, index) => wrap.append(renderTrackRow(track, index)));
+    }
     if (showLoadMore && state.hasMore) {
       const more = document.createElement("button");
       more.type = "button";
@@ -2112,7 +2199,32 @@ export function createMusicViews(deps) {
     return wrap;
   }
 
-  function renderTrackRow(track, index) {
+  function renderSearchTrackVersionGroup(group, index) {
+    const expanded = state.searchExpandedVersionGroups.has(group.key);
+    const section = document.createElement("section");
+    section.className = `music-mobile-search-track-version-group${expanded ? " is-expanded" : ""}`;
+    section.dataset.trackVersionGroup = group.key;
+    section.append(renderTrackRow(group.primary, index, { versionGroup: group, versionExpanded: expanded }));
+    if (expanded) {
+      const list = document.createElement("div");
+      list.className = "music-mobile-search-version-list";
+      for (const track of group.tracks || []) list.append(renderSearchVersionChoice(track, group));
+      section.append(list);
+    }
+    return section;
+  }
+
+  function toggleSearchTrackVersionGroup(key) {
+    const groupKey = String(key || "").trim();
+    if (!groupKey) return;
+    if (state.searchExpandedVersionGroups.has(groupKey)) state.searchExpandedVersionGroups.delete(groupKey);
+    else state.searchExpandedVersionGroups.add(groupKey);
+    refreshMountedSearchUi();
+  }
+
+  function renderTrackRow(track, index, options = {}) {
+    const versionGroup = options.versionGroup;
+    const versionCount = Number(versionGroup?.tracks?.length || 0);
     const isCurrent = state.current?.id === track.id;
     const isPlaying = isCurrent && state.playing;
     const row = document.createElement("div");
@@ -2122,7 +2234,7 @@ export function createMusicViews(deps) {
     if (isCurrent) row.dataset.current = "true";
     row.tabIndex = 0;
     row.setAttribute("role", "button");
-    row.setAttribute("aria-label", `播放 ${track.title || "歌曲"}${Number(track.duplicateCount || 0) > 1 ? `，已合并 ${track.duplicateCount} 个版本` : ""}`);
+    row.setAttribute("aria-label", `播放 ${track.title || "歌曲"}${versionCount > 1 ? `，包含 ${versionCount} 个版本` : Number(track.duplicateCount || 0) > 1 ? `，已合并 ${track.duplicateCount} 个相同文件` : ""}`);
     const number = document.createElement("span");
     number.className = "music-mobile-track-index";
     if (isPlaying) {
@@ -2149,7 +2261,7 @@ export function createMusicViews(deps) {
       { value: track.artist || "未知歌手", highlight: true },
       { value: track.album || "未知专辑", highlight: true },
       { value: ratingLabel(track.rating), highlight: false },
-      { value: Number(track.duplicateCount || 0) > 1 ? `${formatNumber(track.duplicateCount)} 个版本` : "", highlight: false }
+      { value: versionCount > 1 ? `${formatNumber(versionCount)} 个版本` : Number(track.duplicateCount || 0) > 1 ? `${formatNumber(track.duplicateCount)} 个来源` : "", highlight: false }
     ].filter((item) => item.value).forEach((item, itemIndex) => {
       if (itemIndex) meta.append(document.createTextNode(" · "));
       if (item.highlight) appendSearchHighlightedText(meta, item.value, track, itemIndex === 0 ? "artist" : "album");
@@ -2177,11 +2289,24 @@ export function createMusicViews(deps) {
       }, false, "track-remove", "移出歌单");
       inlineActions.append(remove);
     }
-    const favorite = iconButton(track.favorite ? "已收藏" : "收藏", (event) => {
-      event.stopPropagation();
-      toggleFavorite(track.id).catch(() => {});
-    }, false, `track-label track-favorite${track.favorite ? " active" : ""}`, track.favorite ? "取消收藏" : "收藏");
-    inlineActions.append(favorite);
+    if (versionCount > 1) {
+      const versions = document.createElement("button");
+      versions.type = "button";
+      versions.className = "music-mobile-search-version-toggle";
+      versions.textContent = options.versionExpanded ? "收起版本" : `${formatNumber(versionCount)} 个版本`;
+      versions.setAttribute("aria-expanded", options.versionExpanded ? "true" : "false");
+      versions.addEventListener("click", (event) => {
+        event.stopPropagation();
+        toggleSearchTrackVersionGroup(versionGroup.key);
+      });
+      inlineActions.append(versions);
+    } else {
+      const favorite = iconButton(track.favorite ? "已收藏" : "收藏", (event) => {
+        event.stopPropagation();
+        toggleFavorite(track.id).catch(() => {});
+      }, false, `track-label track-favorite${track.favorite ? " active" : ""}`, track.favorite ? "取消收藏" : "收藏");
+      inlineActions.append(favorite);
+    }
     const more = iconButton("更多", (event) => {
       event.stopPropagation();
       openTrackActions(track.id);
@@ -2192,6 +2317,10 @@ export function createMusicViews(deps) {
     side.append(inlineActions, duration);
     row.append(number, cover, text, side);
     const play = () => {
+      if (versionCount > 1) {
+        playSearchTrackVersion(track, versionGroup.tracks);
+        return;
+      }
       activateSearchResultQueue(track.id);
       openTrack(track.id, { autoplay: true }).catch(() => {});
     };

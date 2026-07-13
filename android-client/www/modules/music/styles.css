@@ -1016,6 +1016,101 @@
   text-align: left;
 }
 
+.music-mobile-search-best-stack {
+  display: grid;
+  gap: 9px;
+}
+
+.music-mobile-search-version-head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2px;
+}
+
+.music-mobile-search-version-head strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.music-mobile-search-version-head small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.music-mobile-search-version-rail {
+  display: grid;
+  grid-auto-columns: minmax(156px, 64%);
+  grid-auto-flow: column;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 3px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+}
+
+.music-mobile-search-version-rail::-webkit-scrollbar {
+  display: none;
+}
+
+.music-mobile-search-version-choice {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  min-height: 58px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 9px 11px;
+  background: var(--surface);
+  color: var(--ink);
+  text-align: left;
+}
+
+.music-mobile-search-version-choice.is-compact {
+  scroll-snap-align: start;
+  background: var(--field);
+}
+
+.music-mobile-search-version-choice.active {
+  border-color: var(--green);
+  background: var(--success-soft);
+}
+
+.music-mobile-search-version-choice > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.music-mobile-search-version-choice strong,
+.music-mobile-search-version-choice small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-mobile-search-version-choice strong {
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.music-mobile-search-version-choice small {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.music-mobile-search-version-choice > em {
+  color: var(--green);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 950;
+}
+
 .music-mobile-search-best-match .music-mobile-cover,
 .music-mobile-search-best-avatar {
   width: 58px;
@@ -2779,6 +2874,36 @@
   background: var(--surface);
   color: var(--ink);
   text-align: left;
+}
+
+.music-mobile-search-track-version-group {
+  display: grid;
+}
+
+.music-mobile-search-track-version-group.is-expanded > .music-mobile-track {
+  border-radius: 8px 8px 0 0;
+}
+
+.music-mobile-search-version-list {
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--field) 74%, var(--surface));
+}
+
+.music-mobile-search-version-toggle {
+  min-height: 30px;
+  border: 1px solid color-mix(in srgb, var(--green) 28%, var(--line));
+  border-radius: 999px;
+  padding: 0 9px;
+  background: var(--success-soft);
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 950;
+  white-space: nowrap;
 }
 
 .music-mobile-playlist-action-choice strong {
