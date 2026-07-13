@@ -58,7 +58,6 @@ function Invoke-Checked {
 }
 
 $PyInstaller = Get-RequiredCommand "pyinstaller"
-$Python = Get-RequiredCommand "python"
 $Node = Get-RequiredCommand "node"
 $InnoCompiler = @(
   (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
@@ -94,10 +93,6 @@ $SmokeDir = Join-Path $WorkDirectory "smoke"
 New-Item -ItemType Directory -Force -Path $WorkDirectory, $OutputDirectory, $SpecDir | Out-Null
 
 try {
-  Invoke-Checked -FilePath $Python -ArgumentList @(
-    "-c", "import webview; import clr; import clr_loader"
-  ) -Label "desktop-runtime-check"
-
   $managerArgs = @(
     "--noconfirm", "--clean", "--onedir", "--windowed",
     "--name", "DouyinDownloadManager",
@@ -110,11 +105,6 @@ try {
     "--add-data", "$(Join-Path $ModuleDir 'extract-following.mjs');.",
     "--add-data", "$(Join-Path $ModuleDir 'cookie-login.mjs');.",
     "--add-data", "$(Join-Path $ModuleDir 'node_modules');node_modules",
-    "--collect-all", "webview",
-    "--collect-all", "pythonnet",
-    "--collect-all", "clr_loader",
-    "--hidden-import", "clr",
-    "--hidden-import", "webview.platforms.edgechromium",
     "--exclude-module", "PyQt5",
     "--exclude-module", "PyQt6",
     "--exclude-module", "PySide2",
@@ -172,13 +162,13 @@ try {
     DOUYIN_MANAGER_DATA_DIR = $env:DOUYIN_MANAGER_DATA_DIR
     DOUYIN_MANAGER_LOG_DIR = $env:DOUYIN_MANAGER_LOG_DIR
     DOUYIN_MANAGER_OPEN = $env:DOUYIN_MANAGER_OPEN
-    DOUYIN_MANAGER_DESKTOP = $env:DOUYIN_MANAGER_DESKTOP
+    DOUYIN_MANAGER_SINGLE_INSTANCE = $env:DOUYIN_MANAGER_SINGLE_INSTANCE
   }
   $env:DOUYIN_MANAGER_PORT = [string]$smokePort
   $env:DOUYIN_MANAGER_DATA_DIR = Join-Path $SmokeDir "data"
   $env:DOUYIN_MANAGER_LOG_DIR = Join-Path $SmokeDir "logs"
   $env:DOUYIN_MANAGER_OPEN = "0"
-  $env:DOUYIN_MANAGER_DESKTOP = "0"
+  $env:DOUYIN_MANAGER_SINGLE_INSTANCE = "0"
   $managerProcess = Start-Process -FilePath (Join-Path $PackageDir "DouyinDownloadManager.exe") -WorkingDirectory $PackageDir -WindowStyle Hidden -PassThru
   try {
     $state = $null
@@ -198,6 +188,8 @@ try {
     if ($playerHtml -notmatch "/fanhao/short-video-app.js") { throw "Packaged page is not wired to the shared short-video player." }
     $sharedPlayer = (Invoke-WebRequest -Uri "http://127.0.0.1:$smokePort/fanhao/modules/short-videos/short-video-page.js" -TimeoutSec 5).Content
     if ($sharedPlayer -notmatch "createShortVideoPage") { throw "Packaged shared short-video player assets are missing." }
+    $null = Invoke-RestMethod -Uri "http://127.0.0.1:$smokePort/api/app/quit" -Method Post -ContentType "application/json" -Body "{}" -TimeoutSec 5
+    if (-not $managerProcess.WaitForExit(10000)) { throw "Packaged manager did not exit after /api/app/quit." }
   } finally {
     if ($managerProcess -and -not $managerProcess.HasExited) { Stop-Process -Id $managerProcess.Id -Force }
     foreach ($name in $savedEnvironment.Keys) {

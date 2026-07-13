@@ -28,12 +28,6 @@ from urllib.request import Request, urlopen
 
 
 FROZEN_BUILD = bool(getattr(sys, "frozen", False))
-DESKTOP_MODE = os.environ.get("DOUYIN_MANAGER_DESKTOP", "1" if FROZEN_BUILD else "0").lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
-}
 INSTALL_DIR = Path(sys.executable).resolve().parent if FROZEN_BUILD else Path(__file__).resolve().parent
 BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
 STATIC_DIR = BASE_DIR / "static"
@@ -127,7 +121,6 @@ download_timing_lock = threading.Lock()
 GALLERY_MUSIC_INTENT = "gallery_music"
 DOWNLOAD_GUARD_STATE_SETTING = "download_guard_state"
 ACTIVE_SERVER: ThreadingHTTPServer | None = None
-DESKTOP_WINDOW: Any = None
 APP_QUIT_LOCK = threading.Lock()
 APP_QUIT_REQUESTED = False
 APP_LOCK_FILE: Any = None
@@ -5865,7 +5858,8 @@ def get_state() -> dict[str, Any]:
         ]
     return {
         "app": {
-            "desktop": DESKTOP_MODE,
+            "desktop": False,
+            "browser": FROZEN_BUILD,
             "frozen": FROZEN_BUILD,
         },
         "settings": settings,
@@ -6456,16 +6450,18 @@ def open_library_folder(link_id: int) -> dict[str, Any]:
     return {"ok": False, "message": f"下载目录：{folder}"}
 
 
-def activate_desktop_window() -> dict[str, Any]:
-    window = DESKTOP_WINDOW
-    if window is None:
-        return {"ok": False, "message": "当前使用浏览器模式"}
-    for action in ("restore", "show"):
-        try:
-            getattr(window, action)()
-        except Exception:
-            pass
-    return {"ok": True, "message": "窗口已显示"}
+def activate_application() -> dict[str, Any]:
+    try:
+        payload = json.loads(RUNTIME_INFO_PATH.read_text(encoding="utf-8"))
+        url = str(payload.get("url") or "")
+    except (OSError, ValueError, json.JSONDecodeError):
+        url = ""
+    if not url:
+        return {"ok": False, "message": "没有找到管理页面地址"}
+    opener = threading.Timer(0.05, lambda: webbrowser.open(url))
+    opener.daemon = True
+    opener.start()
+    return {"ok": True, "message": "已在浏览器中打开"}
 
 
 def request_application_quit() -> dict[str, Any]:
@@ -6477,13 +6473,6 @@ def request_application_quit() -> dict[str, Any]:
 
     def close() -> None:
         time.sleep(0.15)
-        window = DESKTOP_WINDOW
-        if window is not None:
-            try:
-                window.destroy()
-                return
-            except Exception:
-                pass
         server = ACTIVE_SERVER
         if server is not None:
             server.shutdown()
@@ -6765,7 +6754,7 @@ class Handler(SimpleHTTPRequestHandler):
                 link_id = normalize_int(payload.get("id", 0), 0, 0, 1000000000)
                 return self.send_json(open_library_folder(link_id))
             if parsed.path == "/api/app/activate":
-                return self.send_json(activate_desktop_window())
+                return self.send_json(activate_application())
             if parsed.path == "/api/app/quit":
                 return self.send_json(request_application_quit())
             if parsed.path == "/api/extract/start":
@@ -7150,7 +7139,13 @@ def activate_existing_instance() -> bool:
 
 def acquire_single_instance() -> bool:
     global APP_LOCK_FILE
-    if os.name != "nt" or not FROZEN_BUILD or not DESKTOP_MODE:
+    single_instance_enabled = os.environ.get("DOUYIN_MANAGER_SINGLE_INSTANCE", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if os.name != "nt" or not FROZEN_BUILD or not single_instance_enabled:
         return True
     import msvcrt
 
@@ -7172,7 +7167,7 @@ def acquire_single_instance() -> bool:
 
 
 def write_runtime_info(port: int, url: str) -> None:
-    if not FROZEN_BUILD or not DESKTOP_MODE:
+    if not FROZEN_BUILD:
         return
     APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
     temp_path = RUNTIME_INFO_PATH.with_name(f".{RUNTIME_INFO_PATH.name}.{uuid.uuid4().hex}.tmp")
@@ -7210,42 +7205,10 @@ def manager_server(host: str, requested_port: int) -> tuple[ThreadingHTTPServer,
     try:
         return ManagerHTTPServer((host, requested_port), Handler), requested_port
     except OSError:
-        if not DESKTOP_MODE or "DOUYIN_MANAGER_PORT" in os.environ:
+        if not FROZEN_BUILD or "DOUYIN_MANAGER_PORT" in os.environ:
             raise
     fallback_port = free_port()
     return ManagerHTTPServer((host, fallback_port), Handler), fallback_port
-
-
-def run_desktop(server: ThreadingHTTPServer, url: str) -> None:
-    global DESKTOP_WINDOW
-    server_thread = threading.Thread(target=server.serve_forever, name="douyin-manager-http", daemon=True)
-    server_thread.start()
-    try:
-        import webview
-
-        DESKTOP_WINDOW = webview.create_window(
-            "抖音下载管理器",
-            url,
-            width=1360,
-            height=900,
-            min_size=(980, 680),
-            background_color="#f4f6f8",
-            text_select=True,
-        )
-        webview.start(
-            gui="edgechromium",
-            debug=False,
-            private_mode=False,
-            storage_path=str(APP_STATE_DIR / "webview"),
-        )
-    except Exception as exc:
-        add_event("warn", f"桌面窗口启动失败，已切换浏览器模式：{str(exc)[:200]}")
-        webbrowser.open(url)
-        server_thread.join()
-    finally:
-        DESKTOP_WINDOW = None
-        server.shutdown()
-        server_thread.join(timeout=5)
 
 
 def main() -> None:
@@ -7267,15 +7230,12 @@ def main() -> None:
         write_runtime_info(port, url)
         print(f"Douyin Download Manager: {url}")
         print(f"Database: {DB_PATH}")
-        if FROZEN_BUILD and not DESKTOP_MODE and os.environ.get("DOUYIN_MANAGER_OPEN", "1").lower() not in {"0", "false", "no", "off"}:
+        if FROZEN_BUILD and os.environ.get("DOUYIN_MANAGER_OPEN", "1").lower() not in {"0", "false", "no", "off"}:
             opener = threading.Timer(1.0, lambda: webbrowser.open(url))
             opener.daemon = True
             opener.start()
         try:
-            if DESKTOP_MODE:
-                run_desktop(server, url)
-            else:
-                server.serve_forever()
+            server.serve_forever()
         except KeyboardInterrupt:
             pass
     finally:

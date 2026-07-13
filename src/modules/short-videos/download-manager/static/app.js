@@ -811,7 +811,16 @@ async function quitApplication() {
   const busy = Boolean(lastState?.extract?.active || lastState?.download?.active);
   if (busy && !window.confirm("采集或下载仍在进行。退出后未完成任务会在下次启动时继续，确定退出吗？")) return;
   await post("/api/app/quit");
-  toast("程序正在退出");
+  document.body.innerHTML = `
+    <main class="quit-screen">
+      <section>
+        <div class="eyebrow">Douyin Tool</div>
+        <h1>下载管理器已退出</h1>
+        <p>后台服务已经停止，现在可以关闭这个浏览器标签页。</p>
+      </section>
+    </main>
+  `;
+  window.setTimeout(() => window.close(), 250);
 }
 
 async function saveSettings() {
