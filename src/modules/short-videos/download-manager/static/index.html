@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Douyin Download Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=20260712-auth-01" />
+    <link rel="stylesheet" href="/styles.css?v=20260713-desktop-library-01" />
   </head>
   <body>
     <main class="shell">
@@ -13,14 +13,19 @@
           <div class="eyebrow">Douyin Tool</div>
           <h1>抖音下载管理</h1>
         </div>
-        <div class="status-line">
-          <span id="extractState">采集空闲</span>
-          <span id="downloadState">下载空闲</span>
+        <div class="topbar-actions">
+          <div class="status-line">
+            <span id="extractState">采集空闲</span>
+            <span id="downloadState">下载空闲</span>
+          </div>
+          <button id="openLibraryQuick" class="topbar-button">查看已下载</button>
+          <button id="quitApp" class="topbar-button danger" hidden>退出程序</button>
         </div>
       </section>
 
       <nav class="module-tabs" aria-label="模块">
         <button class="active" data-page-target="home">首页</button>
+        <button data-page-target="library">已下载</button>
         <button data-page-target="profiles">主页管理</button>
         <button data-page-target="settings">配置</button>
         <button data-page-target="activity">任务日志</button>
@@ -71,6 +76,7 @@
             <div class="actions stacked-actions">
               <button id="downloadStart" class="primary">开始 / 继续</button>
               <button id="downloadStop" class="danger">停止</button>
+              <button id="openLibraryHome">查看已下载</button>
               <button id="resetFailedCurrent">当前失败转待下载</button>
             </div>
             <label class="checkbox-field">
@@ -140,6 +146,25 @@
         </section>
       </section>
 
+      <section class="page-panel" data-page-panel="library">
+        <section class="panel library-panel">
+          <div class="panel-head library-head">
+            <div>
+              <div class="panel-title">已下载作品</div>
+              <div id="librarySummary" class="muted">正在读取本地作品…</div>
+            </div>
+            <div class="library-tools">
+              <input id="librarySearch" type="search" placeholder="搜索标题、作者或作品 ID" />
+              <button id="libraryRefresh">刷新</button>
+            </div>
+          </div>
+          <div id="libraryGrid" class="library-grid"></div>
+          <div class="library-footer">
+            <button id="libraryLoadMore">加载更多</button>
+          </div>
+        </section>
+      </section>
+
       <section class="page-panel" data-page-panel="profiles">
         <section class="panel profile-manager-panel">
           <div class="panel-head profile-manager-head">
@@ -148,7 +173,7 @@
               <div id="profileManagerSummary" class="muted">0 个主页</div>
             </div>
             <div class="profile-manager-actions">
-              <button id="importFollowing">同步关注</button>
+              <button id="importFollowing" title="从当前登录的抖音账号提取关注列表">提取我的关注</button>
               <button id="refreshProfiles" class="primary">一键采集</button>
               <button id="profileRefreshStop" class="danger" hidden>停止采集</button>
             </div>
@@ -303,7 +328,24 @@
       </section>
     </main>
 
+    <div id="libraryViewer" class="library-viewer" hidden>
+      <button id="libraryViewerClose" class="viewer-close" aria-label="关闭">×</button>
+      <button id="libraryViewerPrev" class="viewer-nav viewer-prev" aria-label="上一项">‹</button>
+      <div class="viewer-content">
+        <div id="libraryViewerMedia" class="viewer-media"></div>
+        <div class="viewer-info">
+          <div>
+            <strong id="libraryViewerTitle"></strong>
+            <div id="libraryViewerMeta" class="muted"></div>
+          </div>
+          <button id="libraryViewerFolder">打开目录</button>
+        </div>
+        <audio id="libraryViewerMusic" loop></audio>
+      </div>
+      <button id="libraryViewerNext" class="viewer-nav viewer-next" aria-label="下一项">›</button>
+    </div>
+
     <div id="toast" class="toast"></div>
-    <script src="/app.js?v=20260712-auth-01"></script>
+    <script src="/app.js?v=20260713-desktop-library-01"></script>
   </body>
 </html>

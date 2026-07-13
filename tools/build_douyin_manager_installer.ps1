@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [ValidatePattern('^[0-9A-Za-z._-]+$')]
-  [string]$Version = "0.2.0-test",
+  [string]$Version = "0.3.0-test",
   [string]$DownloaderRoot = "",
   [string]$OutputDirectory = "",
   [string]$WorkDirectory = "",
@@ -15,6 +15,7 @@ $ModuleDir = Join-Path $ProjectRoot "src\modules\short-videos\download-manager"
 $PackagingDir = Join-Path $ModuleDir "packaging"
 $DownloaderEntry = Join-Path $PackagingDir "downloader_entry.py"
 $InstallerScript = Join-Path $PackagingDir "DouyinDownloadManager.iss"
+$BuildRequirements = Join-Path $PackagingDir "requirements-build.txt"
 $AutoWorkDirectory = [string]::IsNullOrWhiteSpace($WorkDirectory)
 
 if ([string]::IsNullOrWhiteSpace($DownloaderRoot)) {
@@ -57,6 +58,7 @@ function Invoke-Checked {
 }
 
 $PyInstaller = Get-RequiredCommand "pyinstaller"
+$Python = Get-RequiredCommand "python"
 $Node = Get-RequiredCommand "node"
 $InnoCompiler = @(
   (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
@@ -73,7 +75,8 @@ foreach ($required in @(
   (Join-Path $DownloaderRoot "cli"),
   $DownloaderSitePackages,
   $DownloaderEntry,
-  $InstallerScript
+  $InstallerScript,
+  $BuildRequirements
 )) {
   if (-not (Test-Path -LiteralPath $required)) { throw "Required build input was not found: $required" }
 }
@@ -89,6 +92,10 @@ $SmokeDir = Join-Path $WorkDirectory "smoke"
 New-Item -ItemType Directory -Force -Path $WorkDirectory, $OutputDirectory, $SpecDir | Out-Null
 
 try {
+  Invoke-Checked -FilePath $Python -ArgumentList @(
+    "-c", "import webview; import clr; import clr_loader"
+  ) -Label "desktop-runtime-check"
+
   $managerArgs = @(
     "--noconfirm", "--clean", "--onedir", "--windowed",
     "--name", "DouyinDownloadManager",
@@ -100,6 +107,16 @@ try {
     "--add-data", "$(Join-Path $ModuleDir 'extract-following.mjs');.",
     "--add-data", "$(Join-Path $ModuleDir 'cookie-login.mjs');.",
     "--add-data", "$(Join-Path $ModuleDir 'node_modules');node_modules",
+    "--collect-all", "webview",
+    "--collect-all", "pythonnet",
+    "--collect-all", "clr_loader",
+    "--hidden-import", "clr",
+    "--hidden-import", "webview.platforms.edgechromium",
+    "--exclude-module", "PyQt5",
+    "--exclude-module", "PyQt6",
+    "--exclude-module", "PySide2",
+    "--exclude-module", "PySide6",
+    "--exclude-module", "cefpython3",
     (Join-Path $ModuleDir "app.py")
   )
   Invoke-Checked -FilePath $PyInstaller -ArgumentList $managerArgs -Label "manager"
@@ -152,11 +169,13 @@ try {
     DOUYIN_MANAGER_DATA_DIR = $env:DOUYIN_MANAGER_DATA_DIR
     DOUYIN_MANAGER_LOG_DIR = $env:DOUYIN_MANAGER_LOG_DIR
     DOUYIN_MANAGER_OPEN = $env:DOUYIN_MANAGER_OPEN
+    DOUYIN_MANAGER_DESKTOP = $env:DOUYIN_MANAGER_DESKTOP
   }
   $env:DOUYIN_MANAGER_PORT = [string]$smokePort
   $env:DOUYIN_MANAGER_DATA_DIR = Join-Path $SmokeDir "data"
   $env:DOUYIN_MANAGER_LOG_DIR = Join-Path $SmokeDir "logs"
   $env:DOUYIN_MANAGER_OPEN = "0"
+  $env:DOUYIN_MANAGER_DESKTOP = "0"
   $managerProcess = Start-Process -FilePath (Join-Path $PackageDir "DouyinDownloadManager.exe") -WorkingDirectory $PackageDir -WindowStyle Hidden -PassThru
   try {
     $state = $null
@@ -171,6 +190,7 @@ try {
     if (-not $state) { throw "Packaged manager did not become ready on port $smokePort" }
     $html = (Invoke-WebRequest -Uri "http://127.0.0.1:$smokePort/#settings" -TimeoutSec 5).Content
     if ($html -notmatch "打开 Edge 登录") { throw "Packaged settings page is missing the auth controls." }
+    if ($html -notmatch "已下载作品") { throw "Packaged page is missing the local library." }
   } finally {
     if ($managerProcess -and -not $managerProcess.HasExited) { Stop-Process -Id $managerProcess.Id -Force }
     foreach ($name in $savedEnvironment.Keys) {

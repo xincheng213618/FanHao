@@ -18,6 +18,7 @@ for (const relativePath of [
   "packaging/downloader_entry.py",
   "packaging/DouyinDownloadManager.iss",
   "packaging/README.md",
+  "packaging/requirements-build.txt",
   "package.json",
   "package-lock.json",
   "run.cmd",
@@ -51,9 +52,18 @@ assert.match(appSource, /FANHAO_PROJECT_ROOT/);
 assert.match(appSource, /DOUYIN_MANAGER_PORT/);
 assert.match(appSource, /\/api\/auth\/cookie\/import/);
 assert.match(appSource, /\/api\/auth\/login\/start/);
+assert.match(appSource, /\/api\/library\/media/);
+assert.match(appSource, /\/api\/app\/quit/);
+assert.match(appSource, /webview\.create_window/);
+assert.match(appSource, /acquire_single_instance/);
+assert.match(appSource, /SO_EXCLUSIVEADDRUSE/);
 assert.doesNotMatch(appSource, /Desktop\\FanHao\\data\\short-videos\.sqlite/);
 assert.match(appSource, /FANHAO_SHORT_VIDEO_STORAGE_ROOT/);
 assert.match(appSource, /DEFAULT_LIBRARY_OUTPUT_DIR/);
+assert.match(appSource, /fanhao_sync_following_profiles/);
+assert.match(appSource, /download_manager_following_imported_at/);
+assert.match(appSource, /INSERT INTO short_video_users/);
+assert.match(appSource, /following_discovered_at/);
 
 assert.equal(fs.existsSync(path.join(projectRoot, "tools", "migrate_short_video_storage.ps1")), true);
 assert.equal(fs.existsSync(path.join(projectRoot, "tools", "rebase_short_video_storage.mjs")), true);
@@ -105,6 +115,11 @@ const managerClient = fs.readFileSync(path.join(moduleDir, "static", "app.js"), 
 assert.match(managerHtml, /打开 Edge 登录/);
 assert.match(managerHtml, /导入 Cookie/);
 assert.match(managerClient, /refreshAuthStatus/);
+assert.match(managerHtml, /提取我的关注/);
+assert.match(managerHtml, /已下载作品/);
+assert.match(managerHtml, /退出程序/);
+assert.match(managerClient, /loadLibrary/);
+assert.match(managerClient, /quitApplication/);
 
 const launcherSource = fs.readFileSync(path.join(projectRoot, "start-fanhao.ps1"), "utf8");
 assert.match(launcherSource, /short-videos\\download-manager\\run\.ps1/);

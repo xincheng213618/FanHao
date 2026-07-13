@@ -18,6 +18,15 @@ let profileManagerEligibleCount = 0;
 let profileManagerLoading = false;
 let profileManagerWasExtractActive = false;
 let previousAuthLoginStatus = "";
+const LIBRARY_PAGE_SIZE = 48;
+let libraryRows = [];
+let libraryTotal = 0;
+let libraryOffset = 0;
+let libraryHasMore = false;
+let libraryLoading = false;
+let librarySearchTimer = null;
+let activeLibraryItem = null;
+let activeLibraryAssetIndex = 0;
 
 function setInputValue(id, value, options = {}) {
   const node = $(id);
@@ -590,6 +599,7 @@ async function refreshState() {
   setInputValue("concurrency", settings.concurrency || 8);
   setInputValue("concurrencyNumber", settings.concurrency || 8);
   renderAuth(state.auth || {});
+  $("quitApp").hidden = !(state.app?.desktop || state.app?.frozen);
   const profiles = state.profiles || [];
   const hasServerQueue = Array.isArray(state.download_queue);
   const queue = hasServerQueue ? state.download_queue : queueFromProfiles(profiles);
@@ -721,6 +731,134 @@ async function refreshLoadedLinks() {
   return loadLinks({ preserve: true });
 }
 
+function libraryCard(item) {
+  const cover = item.cover_url
+    ? `<img src="${escapeHtml(item.cover_url)}" alt="" loading="lazy" />`
+    : `<div class="library-placeholder"><span>${item.media_type === "gallery" ? "▦" : "▶"}</span></div>`;
+  const typeLabel = item.media_type === "gallery" ? `${item.asset_count} 张/段` : "视频";
+  const timestamp = item.create_time ? new Date(Number(item.create_time) * 1000).toLocaleDateString() : "";
+  return `
+    <article class="library-card" data-library-open="${item.id}" tabindex="0">
+      <div class="library-cover">
+        ${cover}
+        <span class="library-type">${escapeHtml(typeLabel)}</span>
+        <span class="library-play">${item.media_type === "gallery" ? "查看" : "播放"}</span>
+      </div>
+      <div class="library-card-body">
+        <strong title="${escapeHtml(item.title || "")}">${escapeHtml(item.title || item.aweme_id)}</strong>
+        <div class="library-card-meta">
+          <span>${escapeHtml(item.author || "未知作者")}</span>
+          <span>${escapeHtml(timestamp)}</span>
+        </div>
+        <button data-library-folder="${item.id}">打开目录</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderLibrary() {
+  const grid = $("libraryGrid");
+  grid.innerHTML = libraryRows.map(libraryCard).join("") || `
+    <div class="library-empty">
+      <strong>${libraryLoading ? "正在读取…" : "还没有可显示的本地作品"}</strong>
+      <span>下载完成并写入 manifest 后，会自动出现在这里。</span>
+    </div>
+  `;
+  $("librarySummary").textContent = `已显示 ${libraryRows.length} / ${libraryTotal} 个本地作品`;
+  $("libraryLoadMore").hidden = !libraryHasMore;
+  $("libraryLoadMore").disabled = libraryLoading;
+  $("libraryLoadMore").textContent = libraryLoading ? "加载中" : "加载更多";
+}
+
+async function loadLibrary(options = {}) {
+  if (libraryLoading) return;
+  const append = Boolean(options.append);
+  const params = new URLSearchParams({
+    limit: String(LIBRARY_PAGE_SIZE),
+    offset: String(append ? libraryOffset : 0),
+  });
+  const search = $("librarySearch").value.trim();
+  if (search) params.set("q", search);
+  if (!append) {
+    libraryRows = [];
+    libraryTotal = 0;
+    libraryOffset = 0;
+    libraryHasMore = false;
+  }
+  libraryLoading = true;
+  renderLibrary();
+  try {
+    const result = await api(`/api/library?${params.toString()}`);
+    libraryTotal = Number(result.total || 0);
+    libraryRows = append ? [...libraryRows, ...(result.items || [])] : result.items || [];
+    libraryOffset = Number(result.next_offset || 0);
+    libraryHasMore = Boolean(result.has_more);
+  } finally {
+    libraryLoading = false;
+    renderLibrary();
+  }
+}
+
+function showLibraryPage() {
+  setActivePage("library");
+  loadLibrary().catch((err) => toast(err.message));
+}
+
+function renderLibraryViewerAsset() {
+  if (!activeLibraryItem) return;
+  const assets = activeLibraryItem.assets || [];
+  const asset = assets[activeLibraryAssetIndex];
+  if (!asset) return;
+  const media = $("libraryViewerMedia");
+  const music = $("libraryViewerMusic");
+  music.pause();
+  if (asset.kind === "video") {
+    media.innerHTML = `<video src="${escapeHtml(asset.url)}" controls autoplay playsinline></video>`;
+  } else {
+    media.innerHTML = `<img src="${escapeHtml(asset.url)}" alt="${escapeHtml(activeLibraryItem.title || "")}" />`;
+    if (activeLibraryItem.music_url) {
+      music.src = activeLibraryItem.music_url;
+      music.play().catch(() => {});
+    }
+  }
+  $("libraryViewerPrev").hidden = assets.length <= 1;
+  $("libraryViewerNext").hidden = assets.length <= 1;
+  $("libraryViewerMeta").textContent = `${activeLibraryItem.author || "未知作者"} · ${activeLibraryAssetIndex + 1} / ${assets.length}`;
+}
+
+function openLibraryViewer(item) {
+  activeLibraryItem = item;
+  activeLibraryAssetIndex = 0;
+  $("libraryViewerTitle").textContent = item.title || item.aweme_id;
+  $("libraryViewer").hidden = false;
+  document.body.classList.add("viewer-open");
+  renderLibraryViewerAsset();
+}
+
+function closeLibraryViewer() {
+  $("libraryViewerMusic").pause();
+  $("libraryViewerMusic").removeAttribute("src");
+  $("libraryViewerMedia").innerHTML = "";
+  $("libraryViewer").hidden = true;
+  document.body.classList.remove("viewer-open");
+  activeLibraryItem = null;
+}
+
+function moveLibraryViewer(direction) {
+  if (!activeLibraryItem) return;
+  const count = activeLibraryItem.assets?.length || 0;
+  if (count <= 1) return;
+  activeLibraryAssetIndex = (activeLibraryAssetIndex + direction + count) % count;
+  renderLibraryViewerAsset();
+}
+
+async function quitApplication() {
+  const busy = Boolean(lastState?.extract?.active || lastState?.download?.active);
+  if (busy && !window.confirm("采集或下载仍在进行。退出后未完成任务会在下次启动时继续，确定退出吗？")) return;
+  await post("/api/app/quit");
+  toast("程序正在退出");
+}
+
 async function saveSettings() {
   const payload = snapshotSettings();
   await post("/api/settings", payload);
@@ -802,7 +940,7 @@ async function importFollowing() {
   $("importFollowing").hidden = true;
   $("refreshProfiles").hidden = true;
   $("profileRefreshStop").hidden = false;
-  toast(`关注列表同步已启动 #${result.job_id}`);
+  toast(`我的关注提取已启动 #${result.job_id}`);
 }
 
 async function stopExtractJob() {
@@ -906,6 +1044,7 @@ function bindPageTabs() {
       const page = button.dataset.pageTarget || "home";
       setActivePage(page);
       if (page === "links") refreshLinks().catch((err) => toast(err.message));
+      if (page === "library") loadLibrary().catch((err) => toast(err.message));
       if (page === "profiles") loadProfileManager({ reset: true }).catch((err) => toast(err.message));
       if (page === "settings") refreshAuthStatus().catch((err) => toast(err.message));
     });
@@ -913,11 +1052,61 @@ function bindPageTabs() {
   window.addEventListener("hashchange", () => setActivePage(location.hash.replace(/^#/, "") || "home"));
   const initialPage = location.hash.replace(/^#/, "") || "home";
   setActivePage(initialPage);
+  if (initialPage === "library") loadLibrary().catch((err) => toast(err.message));
   if (initialPage === "profiles") loadProfileManager({ reset: true }).catch((err) => toast(err.message));
 }
 
 function bind() {
   bindPageTabs();
+  $("openLibraryQuick").addEventListener("click", showLibraryPage);
+  $("openLibraryHome").addEventListener("click", showLibraryPage);
+  $("quitApp").addEventListener("click", () => quitApplication().catch((err) => toast(err.message)));
+  $("libraryRefresh").addEventListener("click", () => loadLibrary().catch((err) => toast(err.message)));
+  $("libraryLoadMore").addEventListener("click", () => loadLibrary({ append: true }).catch((err) => toast(err.message)));
+  $("librarySearch").addEventListener("input", () => {
+    clearTimeout(librarySearchTimer);
+    librarySearchTimer = setTimeout(() => loadLibrary().catch((err) => toast(err.message)), 250);
+  });
+  $("libraryGrid").addEventListener("click", (event) => {
+    const folder = event.target.closest("button[data-library-folder]");
+    if (folder) {
+      event.stopPropagation();
+      post("/api/library/open-folder", { id: Number(folder.dataset.libraryFolder || 0) })
+        .then((result) => toast(result.message))
+        .catch((err) => toast(err.message));
+      return;
+    }
+    const card = event.target.closest("[data-library-open]");
+    if (!card) return;
+    const item = libraryRows.find((row) => Number(row.id) === Number(card.dataset.libraryOpen));
+    if (item) openLibraryViewer(item);
+  });
+  $("libraryGrid").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const card = event.target.closest("[data-library-open]");
+    if (!card) return;
+    event.preventDefault();
+    const item = libraryRows.find((row) => Number(row.id) === Number(card.dataset.libraryOpen));
+    if (item) openLibraryViewer(item);
+  });
+  $("libraryViewerClose").addEventListener("click", closeLibraryViewer);
+  $("libraryViewerPrev").addEventListener("click", () => moveLibraryViewer(-1));
+  $("libraryViewerNext").addEventListener("click", () => moveLibraryViewer(1));
+  $("libraryViewerFolder").addEventListener("click", () => {
+    if (!activeLibraryItem) return;
+    post("/api/library/open-folder", { id: activeLibraryItem.id })
+      .then((result) => toast(result.message))
+      .catch((err) => toast(err.message));
+  });
+  $("libraryViewer").addEventListener("click", (event) => {
+    if (event.target === $("libraryViewer")) closeLibraryViewer();
+  });
+  window.addEventListener("keydown", (event) => {
+    if ($("libraryViewer").hidden) return;
+    if (event.key === "Escape") closeLibraryViewer();
+    if (event.key === "ArrowLeft") moveLibraryViewer(-1);
+    if (event.key === "ArrowRight") moveLibraryViewer(1);
+  });
   [
     "profileUrl",
     "libraryPath",

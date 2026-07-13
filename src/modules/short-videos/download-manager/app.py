@@ -28,6 +28,12 @@ from urllib.request import Request, urlopen
 
 
 FROZEN_BUILD = bool(getattr(sys, "frozen", False))
+DESKTOP_MODE = os.environ.get("DOUYIN_MANAGER_DESKTOP", "1" if FROZEN_BUILD else "0").lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 INSTALL_DIR = Path(sys.executable).resolve().parent if FROZEN_BUILD else Path(__file__).resolve().parent
 BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
 STATIC_DIR = BASE_DIR / "static"
@@ -115,6 +121,12 @@ cookie_login_state: dict[str, Any] = {
 download_timing_lock = threading.Lock()
 GALLERY_MUSIC_INTENT = "gallery_music"
 DOWNLOAD_GUARD_STATE_SETTING = "download_guard_state"
+ACTIVE_SERVER: ThreadingHTTPServer | None = None
+DESKTOP_WINDOW: Any = None
+APP_QUIT_LOCK = threading.Lock()
+APP_QUIT_REQUESTED = False
+APP_LOCK_FILE: Any = None
+RUNTIME_INFO_PATH = APP_STATE_DIR / "runtime.json"
 
 
 def now_iso() -> str:
@@ -1234,11 +1246,202 @@ def fanhao_upsert_source_membership(
         )
 
 
+def manager_profile_is_following(profile_id: Any) -> bool:
+    try:
+        resolved_profile_id = int(profile_id or 0)
+    except (TypeError, ValueError):
+        return False
+    if resolved_profile_id <= 0:
+        return False
+    with db() as conn:
+        row = conn.execute(
+            "SELECT is_following FROM profiles WHERE id=? AND tab='post'",
+            (resolved_profile_id,),
+        ).fetchone()
+    return bool(row and int(row["is_following"] or 0) == 1)
+
+
+def fanhao_upsert_following_relation(conn: sqlite3.Connection, target_user_id: str, now: str) -> None:
+    target_user_id = str(target_user_id or "").strip()
+    if not target_user_id:
+        return
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS short_video_follows (
+          local_user_id TEXT NOT NULL,
+          target_user_id TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 1,
+          followed_at TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY(local_user_id, target_user_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO short_video_follows (
+          local_user_id, target_user_id, active, followed_at, updated_at
+        ) VALUES ('local:self', ?, 1, ?, ?)
+        ON CONFLICT(local_user_id, target_user_id) DO UPDATE SET
+          active=1,
+          followed_at=COALESCE(NULLIF(short_video_follows.followed_at, ''), excluded.followed_at),
+          updated_at=excluded.updated_at
+        """,
+        (target_user_id, now, now),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('download_manager_following_imported_at', ?)",
+        (now,),
+    )
+
+
+def fanhao_sync_following_profiles(users: list[dict[str, Any]]) -> int:
+    if not FANHAO_DIRECT_IMPORT or not users or not FANHAO_DB_PATH.exists():
+        return 0
+    now = now_iso()
+    normalized_by_sec_uid: dict[str, dict[str, Any]] = {}
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        meta = normalize_profile_metadata(user)
+        sec_uid = first_text(meta.get("sec_uid"))
+        if not sec_uid:
+            continue
+        meta["profile_collected_at"] = first_text(user.get("profile_collected_at"))
+        meta["followed_at"] = first_text(
+            user.get("following_discovered_at"),
+            user.get("followed_at"),
+            now,
+        )
+        meta["author_id"] = fanhao_author_id(sec_uid, first_text(meta.get("uid")), first_text(meta.get("nickname")))
+        normalized_by_sec_uid[sec_uid] = meta
+    normalized_users = list(normalized_by_sec_uid.values())
+    if not normalized_users:
+        return 0
+    with fanhao_import_lock:
+        try:
+            conn = sqlite3.connect(FANHAO_DB_PATH, timeout=30)
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            fanhao_ensure_user_profile_columns(conn)
+            with conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS short_video_follows (
+                      local_user_id TEXT NOT NULL,
+                      target_user_id TEXT NOT NULL,
+                      active INTEGER NOT NULL DEFAULT 1,
+                      followed_at TEXT NOT NULL DEFAULT '',
+                      updated_at TEXT NOT NULL DEFAULT '',
+                      PRIMARY KEY(local_user_id, target_user_id)
+                    )
+                    """
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO short_video_users (
+                      id, platform, sec_uid, uid, nickname, avatar_url, profile_url, signature,
+                      follower_count, following_count, raw_json, created_at, updated_at,
+                      unique_id, short_id, ip_location, total_favorited, aweme_count,
+                      favoriting_count, gender, age, verification, profile_collected_at
+                    )
+                    VALUES (?, 'douyin', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                      sec_uid=COALESCE(NULLIF(excluded.sec_uid, ''), short_video_users.sec_uid),
+                      uid=COALESCE(NULLIF(excluded.uid, ''), short_video_users.uid),
+                      nickname=COALESCE(NULLIF(excluded.nickname, ''), short_video_users.nickname),
+                      avatar_url=COALESCE(NULLIF(excluded.avatar_url, ''), short_video_users.avatar_url),
+                      profile_url=COALESCE(NULLIF(excluded.profile_url, ''), short_video_users.profile_url),
+                      signature=COALESCE(NULLIF(excluded.signature, ''), short_video_users.signature),
+                      follower_count=COALESCE(excluded.follower_count, short_video_users.follower_count),
+                      following_count=COALESCE(excluded.following_count, short_video_users.following_count),
+                      raw_json=CASE WHEN excluded.raw_json <> '{}' THEN excluded.raw_json ELSE short_video_users.raw_json END,
+                      unique_id=COALESCE(NULLIF(excluded.unique_id, ''), short_video_users.unique_id),
+                      short_id=COALESCE(NULLIF(excluded.short_id, ''), short_video_users.short_id),
+                      ip_location=COALESCE(NULLIF(excluded.ip_location, ''), short_video_users.ip_location),
+                      total_favorited=COALESCE(excluded.total_favorited, short_video_users.total_favorited),
+                      aweme_count=COALESCE(excluded.aweme_count, short_video_users.aweme_count),
+                      favoriting_count=COALESCE(excluded.favoriting_count, short_video_users.favoriting_count),
+                      gender=COALESCE(excluded.gender, short_video_users.gender),
+                      age=COALESCE(excluded.age, short_video_users.age),
+                      verification=COALESCE(NULLIF(excluded.verification, ''), short_video_users.verification),
+                      profile_collected_at=COALESCE(NULLIF(excluded.profile_collected_at, ''), short_video_users.profile_collected_at),
+                      updated_at=excluded.updated_at
+                    """,
+                    (
+                        (
+                            meta["author_id"],
+                            meta["sec_uid"],
+                            first_text(meta.get("uid")),
+                            first_text(meta.get("nickname"), "未知作者"),
+                            first_text(meta.get("avatar_url")),
+                            first_text(meta.get("profile_url"), douyin_user_url(meta["sec_uid"])),
+                            first_text(meta.get("signature")),
+                            meta.get("follower_count"),
+                            meta.get("following_count"),
+                            first_text(meta.get("profile_raw_json"), "{}"),
+                            now,
+                            now,
+                            first_text(meta.get("unique_id")),
+                            first_text(meta.get("short_id")),
+                            first_text(meta.get("ip_location")),
+                            meta.get("total_favorited"),
+                            meta.get("aweme_count"),
+                            meta.get("favoriting_count"),
+                            meta.get("gender"),
+                            meta.get("age"),
+                            first_text(meta.get("verification")),
+                            first_text(meta.get("profile_collected_at"), now),
+                        )
+                        for meta in normalized_users
+                    ),
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO short_video_follows (
+                      local_user_id, target_user_id, active, followed_at, updated_at
+                    )
+                    VALUES ('local:self', ?, 1, ?, ?)
+                    ON CONFLICT(local_user_id, target_user_id) DO UPDATE SET
+                      active=1,
+                      followed_at=COALESCE(NULLIF(excluded.followed_at, ''), short_video_follows.followed_at),
+                      updated_at=excluded.updated_at
+                    """,
+                    ((meta["author_id"], meta["followed_at"], now) for meta in normalized_users),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('download_manager_following_imported_at', ?)",
+                    (now,),
+                )
+            conn.close()
+            return len(normalized_users)
+        except sqlite3.Error as exc:
+            add_event("warn", f"FanHao 关注作者写入失败: {str(exc)[:180]}")
+            return 0
+
+
+def fanhao_sync_stored_following_profiles() -> int:
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+              sec_uid, uid, nickname, avatar_url, url AS profile_url, unique_id, short_id,
+              signature, ip_location, following_count, follower_count, total_favorited,
+              aweme_count, favoriting_count, gender, age, verification, profile_raw_json,
+              profile_collected_at, following_discovered_at
+            FROM profiles
+            WHERE tab='post' AND is_following=1 AND COALESCE(sec_uid, '') <> ''
+            """
+        ).fetchall()
+    return fanhao_sync_following_profiles([dict(row) for row in rows])
+
+
 def fanhao_upsert_link_placeholders(profile_id: int, works: list[dict[str, Any]]) -> None:
     if not FANHAO_DIRECT_IMPORT or not works or not FANHAO_DB_PATH.exists():
         return
     now = now_iso()
     origin = fanhao_origin(profile_id)
+    profile_following = manager_profile_is_following(profile_id)
     default_liked_at = now if origin == "douyin_download_manager_like" else ""
     rows: list[dict[str, Any]] = []
     for work in works:
@@ -1322,6 +1525,8 @@ def fanhao_upsert_link_placeholders(profile_id: int, works: list[dict[str, Any]]
                             now,
                         ),
                     )
+                    if profile_following:
+                        fanhao_upsert_following_relation(conn, row["author_id"], now)
                     conn.execute(
                         """
                         INSERT INTO short_videos (
@@ -1996,6 +2201,7 @@ def fanhao_upsert_downloaded(link: sqlite3.Row, output_dir: str, record: dict[st
     liked_at = first_text(row_text(link, "last_seen_at"), row_text(link, "downloaded_at"), now)
     relative_path = str(Path(source_path).relative_to(output_dir)) if str(source_path).startswith(str(Path(output_dir))) else source_path
     metadata_json = json_text(record) or "{}"
+    profile_following = manager_profile_is_following(row_text(link, "profile_id"))
 
     with fanhao_import_lock:
         try:
@@ -2033,6 +2239,8 @@ def fanhao_upsert_downloaded(link: sqlite3.Row, output_dir: str, record: dict[st
                         now,
                     ),
                 )
+                if profile_following:
+                    fanhao_upsert_following_relation(conn, author_id, now)
                 conn.execute(
                     """
                     INSERT INTO short_videos (
@@ -5191,7 +5399,7 @@ def run_following_import_job(
     if headed:
         cmd.append("--headed")
     update_job(job_id, message="正在打开本人关注列表")
-    add_event("info", "开始同步本人关注列表")
+    add_event("info", "开始提取本人关注列表")
     seen_sec_uids: set[str] = set()
     inserted_total = 0
     updated_total = 0
@@ -5216,6 +5424,7 @@ def run_following_import_job(
         if not fresh_users:
             return
         inserted, updated = upsert_following_profiles(fresh_users)
+        fanhao_sync_following_profiles(fresh_users)
         inserted_total += inserted
         updated_total += updated
         total = len(seen_sec_uids)
@@ -5225,7 +5434,7 @@ def run_following_import_job(
             processed=total,
             success=inserted_total,
             failed=0,
-            message=f"关注列表同步中：已入库 {total} 人，新 {inserted_total}，更新 {updated_total}",
+            message=f"关注列表提取中：已入库 {total} 人，新 {inserted_total}，更新 {updated_total}",
         )
     try:
         with log_path.open("w", encoding="utf-8", errors="replace") as log:
@@ -5250,16 +5459,16 @@ def run_following_import_job(
                 time.sleep(1.0)
         consume_checkpoint()
         if extract_stop_event.is_set():
-            update_job(job_id, status="stopped", finished_at=now_iso(), message="关注列表同步已停止")
-            add_event("warn", "关注列表同步已停止")
+            update_job(job_id, status="stopped", finished_at=now_iso(), message="关注列表提取已停止")
+            add_event("warn", "关注列表提取已停止")
             return
         if proc.returncode != 0:
-            message = f"关注列表同步失败，退出码 {proc.returncode}: {tail_text(log_path, 1200)}"
+            message = f"关注列表提取失败，退出码 {proc.returncode}: {tail_text(log_path, 1200)}"
             update_job(job_id, status="failed", finished_at=now_iso(), message=message)
             add_event("error", message[:260])
             return
         total = len(seen_sec_uids)
-        message = f"关注列表同步完成：{total} 人，新 {inserted_total}，更新 {updated_total}"
+        message = f"关注列表提取完成：{total} 人，新 {inserted_total}，更新 {updated_total}"
         update_job(
             job_id,
             status="complete",
@@ -5273,7 +5482,7 @@ def run_following_import_job(
         add_event("info", message)
     except Exception as exc:
         update_job(job_id, status="failed", finished_at=now_iso(), message=str(exc)[:2000])
-        add_event("error", f"关注列表同步异常：{exc}")
+        add_event("error", f"关注列表提取异常：{exc}")
     finally:
         try:
             out_path.unlink()
@@ -5297,7 +5506,7 @@ def start_following_import(payload: dict[str, Any]) -> dict[str, Any]:
         if extract_thread is not None and extract_thread.is_alive():
             return {"ok": False, "message": "采集任务已经在运行"}
         extract_stop_event.clear()
-        job_id = create_job("following", "准备同步本人关注列表")
+        job_id = create_job("following", "准备提取本人关注列表")
         extract_job_id = job_id
         extract_thread = threading.Thread(
             target=run_following_import_job,
@@ -5650,6 +5859,10 @@ def get_state() -> dict[str, Any]:
             ).fetchall()
         ]
     return {
+        "app": {
+            "desktop": DESKTOP_MODE,
+            "frozen": FROZEN_BUILD,
+        },
         "settings": settings,
         "current_profile": current_profile,
         "profiles": profiles,
@@ -5817,6 +6030,215 @@ def list_links(query: dict[str, list[str]]) -> dict[str, Any]:
     return {"total": total, "links": [dict(row) for row in rows]}
 
 
+def library_files_for_link(link: sqlite3.Row) -> dict[str, Any] | None:
+    output_dir = row_text(link, "output_dir")
+    stored_paths = flatten_strings(json_value(row_text(link, "local_file_paths"), []))
+    if output_dir and stored_paths:
+        metadata = json_value(row_text(link, "metadata_json"), {})
+        record = dict(metadata) if isinstance(metadata, dict) else {}
+        record.setdefault("aweme_id", row_text(link, "aweme_id"))
+        record.setdefault("url", row_text(link, "url"))
+        record.setdefault("desc", row_text(link, "desc"))
+        record.setdefault("media_type", row_text(link, "media_type"))
+        record["file_paths"] = stored_paths
+        record["file_names"] = flatten_strings(json_value(row_text(link, "local_file_names"), []))
+    else:
+        resolved = downloaded_record_from_link(link)
+        if not resolved:
+            return None
+        output_dir, record = resolved
+    media_type = first_text(row_text(link, "media_type"), record.get("media_type")).lower()
+    is_gallery = media_type in {"gallery", "note", "image", "images"} or row_text(link, "kind").lower() == "note"
+    file_rows = manifest_file_rows(record, output_dir)
+    files: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in file_rows:
+        if not row.get("exists_on_disk") or row.get("kind") not in {"video", "image", "audio"}:
+            continue
+        path = Path(str(row.get("absolute_path") or ""))
+        try:
+            resolved_path = path.resolve()
+        except OSError:
+            continue
+        key = str(resolved_path).lower()
+        if key in seen or not resolved_path.is_file():
+            continue
+        seen.add(key)
+        files.append({**row, "path": resolved_path})
+
+    cover: Path | None = None
+    local_cover = row_text(link, "local_cover_path")
+    if local_cover:
+        candidate = resolve_manifest_file(output_dir, local_cover)
+        try:
+            if candidate.is_file() and file_kind(str(candidate)) == "image":
+                cover = candidate.resolve()
+        except OSError:
+            pass
+    if cover is None:
+        cover_row = next((row for row in files if row.get("role") == "cover" and row.get("kind") == "image"), None)
+        cover = cover_row["path"] if cover_row else None
+
+    if is_gallery:
+        assets = [row for row in files if row.get("kind") in {"image", "video"} and row.get("role") != "cover"]
+        if not assets and cover is not None:
+            assets = [{"kind": "image", "role": "image", "path": cover}]
+    else:
+        assets = [row for row in files if row.get("kind") == "video"]
+        if not assets:
+            assets = [row for row in files if row.get("kind") == "image" and row.get("role") != "cover"]
+
+    if cover is None and is_gallery:
+        image = next((row for row in assets if row.get("kind") == "image"), None)
+        cover = image["path"] if image else None
+    music_row = next((row for row in files if row.get("kind") == "audio"), None)
+    return {
+        "output_dir": output_dir,
+        "record": record,
+        "is_gallery": is_gallery,
+        "assets": assets[:80],
+        "cover": cover,
+        "music": music_row["path"] if music_row else None,
+    }
+
+
+def list_library(query: dict[str, list[str]]) -> dict[str, Any]:
+    search = (query.get("q") or [""])[0].strip()
+    limit = normalize_int((query.get("limit") or ["48"])[0], 48, 1, 120)
+    offset = normalize_int((query.get("offset") or ["0"])[0], 0, 0, 1000000)
+    where = ["links.status='downloaded'"]
+    params: list[Any] = []
+    if search:
+        where.append(
+            "(links.aweme_id LIKE ? OR links.desc LIKE ? OR links.author_nickname LIKE ? "
+            "OR links.author_uid LIKE ? OR links.author_sec_uid LIKE ?)"
+        )
+        like = f"%{search}%"
+        params.extend([like, like, like, like, like])
+    where_sql = " AND ".join(where)
+    with db() as conn:
+        total = int(conn.execute(f"SELECT COUNT(*) c FROM links WHERE {where_sql}", params).fetchone()["c"])
+        rows = conn.execute(
+            f"""
+            SELECT links.*
+            FROM links
+            WHERE {where_sql}
+            ORDER BY COALESCE(links.downloaded_at, links.last_started_at, links.last_seen_at) DESC,
+                     links.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, limit, offset],
+        ).fetchall()
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        media = library_files_for_link(row)
+        if not media or not media["assets"]:
+            continue
+        link_id = int(row["id"])
+        desc = first_text(row_text(row, "desc"), media["record"].get("desc"), row_text(row, "aweme_id"))
+        assets = [
+            {
+                "kind": str(asset.get("kind") or "file"),
+                "url": f"/api/library/media?id={link_id}&index={index}",
+            }
+            for index, asset in enumerate(media["assets"])
+        ]
+        cover_url = f"/api/library/media?id={link_id}&role=cover" if media["cover"] else row_text(row, "cover_url")
+        items.append(
+            {
+                "id": link_id,
+                "aweme_id": row_text(row, "aweme_id"),
+                "title": desc.splitlines()[0][:160] if desc else row_text(row, "aweme_id"),
+                "description": desc,
+                "author": first_text(row_text(row, "author_nickname"), "未知作者"),
+                "author_id": first_text(row_text(row, "author_sec_uid"), row_text(row, "author_uid")),
+                "downloaded_at": row_text(row, "downloaded_at"),
+                "create_time": row_int(row, "create_time"),
+                "media_type": "gallery" if media["is_gallery"] else "video",
+                "cover_url": cover_url,
+                "assets": assets,
+                "asset_count": len(assets),
+                "music_url": f"/api/library/media?id={link_id}&role=music" if media["music"] else "",
+            }
+        )
+    next_offset = offset + len(rows)
+    return {
+        "ok": True,
+        "total": total,
+        "items": items,
+        "limit": limit,
+        "offset": offset,
+        "next_offset": next_offset,
+        "has_more": next_offset < total,
+    }
+
+
+def resolve_library_media(link_id: int, role: str = "", index: int = 0) -> Path | None:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM links WHERE id=? AND status='downloaded'", (link_id,)).fetchone()
+    if not row:
+        return None
+    media = library_files_for_link(row)
+    if not media:
+        return None
+    if role == "cover":
+        return media["cover"]
+    if role == "music":
+        return media["music"]
+    assets = media["assets"]
+    if index < 0 or index >= len(assets):
+        return None
+    return assets[index]["path"]
+
+
+def open_library_folder(link_id: int) -> dict[str, Any]:
+    path = resolve_library_media(link_id)
+    if path is None:
+        return {"ok": False, "message": "没有找到本地文件"}
+    folder = path.parent
+    if os.name == "nt" and hasattr(os, "startfile"):
+        os.startfile(str(folder))
+        return {"ok": True, "message": "已打开下载目录"}
+    return {"ok": False, "message": f"下载目录：{folder}"}
+
+
+def activate_desktop_window() -> dict[str, Any]:
+    window = DESKTOP_WINDOW
+    if window is None:
+        return {"ok": False, "message": "当前使用浏览器模式"}
+    for action in ("restore", "show"):
+        try:
+            getattr(window, action)()
+        except Exception:
+            pass
+    return {"ok": True, "message": "窗口已显示"}
+
+
+def request_application_quit() -> dict[str, Any]:
+    global APP_QUIT_REQUESTED
+    with APP_QUIT_LOCK:
+        if APP_QUIT_REQUESTED:
+            return {"ok": True, "message": "程序正在退出"}
+        APP_QUIT_REQUESTED = True
+
+    def close() -> None:
+        time.sleep(0.15)
+        window = DESKTOP_WINDOW
+        if window is not None:
+            try:
+                window.destroy()
+                return
+            except Exception:
+                pass
+        server = ACTIVE_SERVER
+        if server is not None:
+            server.shutdown()
+
+    threading.Thread(target=close, daemon=True).start()
+    return {"ok": True, "message": "程序正在退出"}
+
+
 def reset_failed_links(payload: dict[str, Any]) -> dict[str, Any]:
     scope = str(payload.get("scope") or "current").strip().lower()
     profile_id = normalize_int(payload.get("profile_id", 0), 0, 0, 1000000)
@@ -5981,6 +6403,16 @@ def delete_failed_links(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "changed": changed, "scope": scope, "state": get_state()}
 
 
+class ManagerHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = False
+    daemon_threads = True
+
+    def server_bind(self) -> None:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 class Handler(SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -5989,6 +6421,17 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/state":
             return self.send_json(get_state())
+        if parsed.path == "/api/library":
+            return self.send_json(list_library(parse_qs(parsed.query)))
+        if parsed.path == "/api/library/media":
+            query = parse_qs(parsed.query)
+            link_id = normalize_int((query.get("id") or ["0"])[0], 0, 0, 1000000000)
+            index = normalize_int((query.get("index") or ["0"])[0], 0, 0, 100000)
+            role = (query.get("role") or [""])[0].strip().lower()
+            path = resolve_library_media(link_id, role, index)
+            if path is None:
+                return self.send_error(HTTPStatus.NOT_FOUND, "Local media not found")
+            return self.serve_media(path)
         if parsed.path == "/api/auth/status":
             return self.send_json({"ok": True, "auth": cookie_auth_status()})
         if parsed.path == "/api/profiles":
@@ -6029,6 +6472,13 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(open_cookie_folder())
             if parsed.path == "/api/auth/login/start":
                 return self.send_json(start_cookie_login())
+            if parsed.path == "/api/library/open-folder":
+                link_id = normalize_int(payload.get("id", 0), 0, 0, 1000000000)
+                return self.send_json(open_library_folder(link_id))
+            if parsed.path == "/api/app/activate":
+                return self.send_json(activate_desktop_window())
+            if parsed.path == "/api/app/quit":
+                return self.send_json(request_application_quit())
             if parsed.path == "/api/extract/start":
                 return self.send_json(start_extract(payload))
             if parsed.path == "/api/profiles/refresh":
@@ -6253,27 +6703,248 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def serve_media(self, path: Path) -> None:
+        try:
+            resolved = path.resolve()
+            size = resolved.stat().st_size
+        except OSError:
+            self.send_error(HTTPStatus.NOT_FOUND, "Local media not found")
+            return
+        start = 0
+        end = max(0, size - 1)
+        status = HTTPStatus.OK
+        range_header = self.headers.get("Range", "").strip()
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+            if not match:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            raw_start, raw_end = match.groups()
+            if raw_start:
+                start = int(raw_start)
+                end = int(raw_end) if raw_end else end
+            elif raw_end:
+                suffix = min(size, int(raw_end))
+                start = max(0, size - suffix)
+            if start >= size or end < start:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            end = min(end, size - 1)
+            status = HTTPStatus.PARTIAL_CONTENT
+        content_length = max(0, end - start + 1)
+        content_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.send_header("Content-Length", str(content_length))
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        try:
+            with resolved.open("rb") as handle:
+                handle.seek(start)
+                remaining = content_length
+                while remaining > 0:
+                    chunk = handle.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+
+def stop_runtime() -> None:
+    global cookie_login_process
+    try:
+        stop_extract()
+    except Exception:
+        pass
+    try:
+        download_manager.stop()
+    except Exception:
+        pass
+    with cookie_login_lock:
+        process = cookie_login_process
+        cookie_login_process = None
+    if process is not None and process.poll() is None:
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except Exception:
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+
+def activate_existing_instance() -> bool:
+    last_url = ""
+    for _ in range(30):
+        try:
+            payload = json.loads(RUNTIME_INFO_PATH.read_text(encoding="utf-8"))
+            last_url = str(payload.get("url") or "")
+            if last_url:
+                base_url = last_url.split("/#", 1)[0].rstrip("/")
+                request = Request(
+                    f"{base_url}/api/app/activate",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=0.8) as response:
+                    result = json.loads(response.read().decode("utf-8") or "{}")
+                if result.get("ok"):
+                    return True
+        except (OSError, ValueError, HTTPError, URLError, json.JSONDecodeError):
+            pass
+        time.sleep(0.15)
+    if last_url:
+        webbrowser.open(last_url)
+    return False
+
+
+def acquire_single_instance() -> bool:
+    global APP_LOCK_FILE
+    if os.name != "nt" or not FROZEN_BUILD or not DESKTOP_MODE:
+        return True
+    import msvcrt
+
+    APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    handle = (APP_STATE_DIR / "app.lock").open("a+b")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"0")
+        handle.flush()
+    handle.seek(0)
+    try:
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        handle.close()
+        activate_existing_instance()
+        return False
+    APP_LOCK_FILE = handle
+    return True
+
+
+def write_runtime_info(port: int, url: str) -> None:
+    if not FROZEN_BUILD or not DESKTOP_MODE:
+        return
+    APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    temp_path = RUNTIME_INFO_PATH.with_name(f".{RUNTIME_INFO_PATH.name}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(
+        json.dumps({"pid": os.getpid(), "port": port, "url": url}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temp_path.replace(RUNTIME_INFO_PATH)
+
+
+def release_single_instance() -> None:
+    global APP_LOCK_FILE
+    try:
+        if RUNTIME_INFO_PATH.exists():
+            payload = json.loads(RUNTIME_INFO_PATH.read_text(encoding="utf-8"))
+            if int(payload.get("pid") or 0) == os.getpid():
+                RUNTIME_INFO_PATH.unlink(missing_ok=True)
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    handle = APP_LOCK_FILE
+    APP_LOCK_FILE = None
+    if handle is None:
+        return
+    try:
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+    handle.close()
+
+
+def manager_server(host: str, requested_port: int) -> tuple[ThreadingHTTPServer, int]:
+    try:
+        return ManagerHTTPServer((host, requested_port), Handler), requested_port
+    except OSError:
+        if not DESKTOP_MODE or "DOUYIN_MANAGER_PORT" in os.environ:
+            raise
+    fallback_port = free_port()
+    return ManagerHTTPServer((host, fallback_port), Handler), fallback_port
+
+
+def run_desktop(server: ThreadingHTTPServer, url: str) -> None:
+    global DESKTOP_WINDOW
+    server_thread = threading.Thread(target=server.serve_forever, name="douyin-manager-http", daemon=True)
+    server_thread.start()
+    try:
+        import webview
+
+        DESKTOP_WINDOW = webview.create_window(
+            "抖音下载管理器",
+            url,
+            width=1360,
+            height=900,
+            min_size=(980, 680),
+            background_color="#f4f6f8",
+            text_select=True,
+        )
+        webview.start(
+            gui="edgechromium",
+            debug=False,
+            private_mode=False,
+            storage_path=str(APP_STATE_DIR / "webview"),
+        )
+    except Exception as exc:
+        add_event("warn", f"桌面窗口启动失败，已切换浏览器模式：{str(exc)[:200]}")
+        webbrowser.open(url)
+        server_thread.join()
+    finally:
+        DESKTOP_WINDOW = None
+        server.shutdown()
+        server_thread.join(timeout=5)
+
 
 def main() -> None:
-    init_db()
-    add_event("info", "服务启动")
-    download_manager.restore_failure_guard()
-    host = os.environ.get("DOUYIN_MANAGER_HOST", "127.0.0.1")
-    port = int(os.environ.get("DOUYIN_MANAGER_PORT", "8765"))
-    server = ThreadingHTTPServer((host, port), Handler)
-    print(f"Douyin Download Manager: http://localhost:{port}")
-    print(f"Database: {DB_PATH}")
-    if FROZEN_BUILD and os.environ.get("DOUYIN_MANAGER_OPEN", "1").lower() not in {"0", "false", "no", "off"}:
-        opener = threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{port}/#home"))
-        opener.daemon = True
-        opener.start()
+    global ACTIVE_SERVER, APP_QUIT_REQUESTED
+    APP_QUIT_REQUESTED = False
+    if not acquire_single_instance():
+        return
+    server: ThreadingHTTPServer | None = None
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+        init_db()
+        fanhao_sync_stored_following_profiles()
+        add_event("info", "服务启动")
+        download_manager.restore_failure_guard()
+        host = os.environ.get("DOUYIN_MANAGER_HOST", "127.0.0.1")
+        requested_port = int(os.environ.get("DOUYIN_MANAGER_PORT", "8765"))
+        server, port = manager_server(host, requested_port)
+        ACTIVE_SERVER = server
+        url = f"http://localhost:{port}/#home"
+        write_runtime_info(port, url)
+        print(f"Douyin Download Manager: {url}")
+        print(f"Database: {DB_PATH}")
+        if FROZEN_BUILD and not DESKTOP_MODE and os.environ.get("DOUYIN_MANAGER_OPEN", "1").lower() not in {"0", "false", "no", "off"}:
+            opener = threading.Timer(1.0, lambda: webbrowser.open(url))
+            opener.daemon = True
+            opener.start()
+        try:
+            if DESKTOP_MODE:
+                run_desktop(server, url)
+            else:
+                server.serve_forever()
+        except KeyboardInterrupt:
+            pass
     finally:
-        download_manager.stop()
-        server.server_close()
+        if server is not None:
+            stop_runtime()
+            server.server_close()
+        ACTIVE_SERVER = None
+        release_single_instance()
 
 
 if __name__ == "__main__":
