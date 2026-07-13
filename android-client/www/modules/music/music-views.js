@@ -99,6 +99,8 @@ export function createMusicViews(deps) {
     lyricSearch: emptyLyricSearch(),
     searchSuggestions: [],
     searchSuggestionQuery: "",
+    searchSuggestionIndex: -1,
+    searchSuggestionLoading: false,
     searchCollapsedGroups: new Set(),
     searchExpandedVersionGroups: new Set(),
     sleepMinutes: 0,
@@ -403,6 +405,8 @@ export function createMusicViews(deps) {
       }
       state.searchSuggestions = [];
       state.searchSuggestionQuery = "";
+      state.searchSuggestionIndex = -1;
+      state.searchSuggestionLoading = false;
       state.lyricSearch = emptyLyricSearch();
       refreshMountedSearchUi();
       return;
@@ -903,20 +907,21 @@ export function createMusicViews(deps) {
     search.className = "music-mobile-search-input";
     search.setAttribute("aria-label", "搜索音乐");
     search.setAttribute("enterkeyhint", "search");
+    search.setAttribute("role", "combobox");
+    search.setAttribute("aria-autocomplete", "list");
+    search.setAttribute("aria-controls", "musicSearchSuggestions");
+    search.setAttribute("aria-expanded", state.searchSuggestions.length || state.searchSuggestionLoading ? "true" : "false");
     search.autocomplete = "off";
     search.placeholder = searchScopePlaceholder(state.searchScope);
     search.value = state.query;
     search.addEventListener("input", () => scheduleLiveSearch(search.value));
     search.addEventListener("search", () => {
       state.searchSuggestions = [];
+      state.searchSuggestionIndex = -1;
+      state.searchSuggestionLoading = false;
       commitMusicSearch(search.value, { remember: true });
     });
-    search.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
-      event.preventDefault();
-      state.searchSuggestions = [];
-      commitMusicSearch(search.value, { remember: true });
-    });
+    search.addEventListener("keydown", (event) => handleSearchSuggestionKeydown(event, search));
 
     const clear = document.createElement("button");
     clear.type = "button";
@@ -925,6 +930,8 @@ export function createMusicViews(deps) {
     clear.hidden = !state.query;
     clear.addEventListener("click", () => {
       state.searchSuggestions = [];
+      state.searchSuggestionIndex = -1;
+      state.searchSuggestionLoading = false;
       search.value = "";
       commitMusicSearch("");
     });
@@ -1077,31 +1084,69 @@ export function createMusicViews(deps) {
   function renderSearchSuggestionsRegion() {
     const region = document.createElement("div");
     region.className = "music-mobile-search-suggestions";
-    for (const item of state.searchSuggestions || []) region.append(renderSearchSuggestion(item));
+    region.id = "musicSearchSuggestions";
+    region.setAttribute("role", "listbox");
+    region.setAttribute("aria-label", "音乐搜索联想");
+    if (state.searchSuggestionLoading) {
+      const loading = document.createElement("div");
+      loading.className = "music-mobile-search-suggestions-loading";
+      loading.textContent = "正在查找本地音乐…";
+      region.append(loading);
+      return region;
+    }
+    const groups = new Map();
+    for (const [index, item] of (state.searchSuggestions || []).entries()) {
+      const key = item.group || "music";
+      if (!groups.has(key)) groups.set(key, { label: item.groupLabel || "音乐", items: [] });
+      groups.get(key).items.push({ item, index });
+    }
+    for (const group of groups.values()) {
+      const section = document.createElement("section");
+      section.className = "music-mobile-search-suggestion-group";
+      const head = document.createElement("div");
+      head.className = "music-mobile-search-suggestion-group-head";
+      const label = document.createElement("strong");
+      label.textContent = group.label;
+      const count = document.createElement("small");
+      count.textContent = `${formatNumber(group.items.length)} 条`;
+      head.append(label, count);
+      section.append(head);
+      for (const entry of group.items) section.append(renderSearchSuggestion(entry.item, entry.index));
+      region.append(section);
+    }
     return region;
   }
 
-  function renderSearchSuggestion(item) {
+  function renderSearchSuggestion(item, index) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "music-mobile-search-suggestion";
+    button.className = `music-mobile-search-suggestion${state.searchSuggestionIndex === index ? " active" : ""}`;
+    button.dataset.searchSuggestionIndex = String(index);
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", state.searchSuggestionIndex === index ? "true" : "false");
     const type = document.createElement("small");
     type.textContent = item.type || "音乐";
     const text = document.createElement("span");
     const title = document.createElement("strong");
-    appendHighlightedText(title, item.value || "", state.searchSuggestionQuery, item.highlights);
+    appendHighlightedText(title, item.label || item.value || "", state.searchSuggestionQuery, item.highlights);
     const meta = document.createElement("em");
     meta.textContent = item.meta || "搜索本地音乐";
     text.append(title, meta);
     button.append(type, text);
     button.addEventListener("pointerdown", (event) => event.preventDefault());
-    button.addEventListener("click", () => {
-      const input = els.viewContent?.querySelector(".music-mobile-search-input");
-      if (input) input.value = item.value || "";
-      state.searchSuggestions = [];
-      commitMusicSearch(item.value, { remember: true });
-    });
+    button.addEventListener("click", () => activateSearchSuggestion(item));
     return button;
+  }
+
+  function activateSearchSuggestion(item) {
+    const value = String(item?.commitValue || item?.value || "").trim();
+    if (!value) return;
+    const input = els.viewContent?.querySelector(".music-mobile-search-input");
+    if (input) input.value = value;
+    state.searchSuggestions = [];
+    state.searchSuggestionIndex = -1;
+    state.searchSuggestionLoading = false;
+    commitMusicSearch(value, { remember: true });
   }
 
   function refreshMountedSearchSuggestions() {
@@ -1109,6 +1154,9 @@ export function createMusicViews(deps) {
     if (!current) return;
     const next = renderSearchSuggestionsRegion();
     current.replaceChildren(...next.childNodes);
+    const input = els.viewContent?.querySelector(".music-mobile-search-input");
+    input?.setAttribute("aria-expanded", current.childElementCount ? "true" : "false");
+    window.requestAnimationFrame(() => current.querySelector(".music-mobile-search-suggestion.active")?.scrollIntoView({ block: "nearest" }));
   }
 
   function renderSearchScopes() {
@@ -3660,6 +3708,8 @@ export function createMusicViews(deps) {
     mountedSearchController?.abort();
     state.searchSuggestions = [];
     state.searchSuggestionQuery = "";
+    state.searchSuggestionIndex = -1;
+    state.searchSuggestionLoading = false;
     state.searchOpen = false;
     state.searchScope = "all";
     updateListParams({
@@ -3707,64 +3757,214 @@ export function createMusicViews(deps) {
     searchSuggestionController?.abort();
     const query = String(value || "").trim();
     state.searchSuggestionQuery = query;
+    state.searchSuggestionIndex = -1;
     if (!query) {
       state.searchSuggestions = [];
+      state.searchSuggestionLoading = false;
       refreshMountedSearchSuggestions();
       return;
     }
+    state.searchSuggestions = [];
+    state.searchSuggestionLoading = true;
+    refreshMountedSearchSuggestions();
     searchSuggestionTimer = window.setTimeout(() => loadSearchSuggestions(query).catch(() => {}), SEARCH_SUGGESTION_DEBOUNCE_MS);
   }
 
   async function loadSearchSuggestions(query) {
     const controller = new AbortController();
     searchSuggestionController = controller;
-    const trackParams = new URLSearchParams({ limit: "4", q: query });
-    const artistParams = new URLSearchParams({ limit: "3", q: query, sort: "count" });
-    const albumParams = new URLSearchParams({ limit: "3", q: query, sort: "updated" });
-    const [trackResult, artistResult, albumResult] = await Promise.allSettled([
-      fetchJson(getActiveUrl(), `/api/music/tracks?${trackParams}`, { timeoutMs: 8000, signal: controller.signal }),
-      fetchJson(getActiveUrl(), `/api/music/artists?${artistParams}`, { timeoutMs: 8000, signal: controller.signal }),
-      fetchJson(getActiveUrl(), `/api/music/albums?${albumParams}`, { timeoutMs: 8000, signal: controller.signal })
-    ]);
-    if (controller.signal.aborted || state.searchSuggestionQuery !== query) return;
-    state.searchSuggestions = buildSearchSuggestions(
-      query,
-      trackResult.status === "fulfilled" ? trackResult.value : null,
-      artistResult.status === "fulfilled" ? artistResult.value : null,
-      albumResult.status === "fulfilled" ? albumResult.value : null
-    );
-    refreshMountedSearchSuggestions();
+    const params = new URLSearchParams({ q: query });
+    try {
+      const data = await fetchJson(getActiveUrl(), `/api/music/suggest?${params}`, { timeoutMs: 8000, signal: controller.signal });
+      if (controller.signal.aborted || state.searchSuggestionQuery !== query) return;
+      state.searchSuggestions = buildSearchSuggestions(query, data);
+      state.searchSuggestionLoading = false;
+      refreshMountedSearchSuggestions();
+    } catch {
+      if (controller.signal.aborted || state.searchSuggestionQuery !== query) return;
+      state.searchSuggestions = buildSearchSuggestions(query, null);
+      state.searchSuggestionLoading = false;
+      refreshMountedSearchSuggestions();
+    }
   }
 
-  function buildSearchSuggestions(query, trackData, artistData, albumData) {
-    const items = [];
-    const seen = new Set();
-    const add = (type, value, meta, match = null, field = "") => {
-      const text = String(value || "").trim();
-      const key = `${type}:${text.toLocaleLowerCase()}`;
-      if (!text || seen.has(key)) return;
-      seen.add(key);
-      items.push({
-        type,
-        value: text,
-        meta: String(meta || "").trim(),
-        score: Number(match?.scores?.[field] || match?.score || 0),
-        highlights: match?.highlights?.[field] || []
-      });
+  function handleSearchSuggestionKeydown(event, input) {
+    const suggestions = state.searchSuggestions || [];
+    if (["ArrowDown", "ArrowUp"].includes(event.key) && suggestions.length) {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const current = Number(state.searchSuggestionIndex);
+      state.searchSuggestionIndex = current < 0
+        ? (direction > 0 ? 0 : suggestions.length - 1)
+        : (current + direction + suggestions.length) % suggestions.length;
+      refreshMountedSearchSuggestions();
+      return;
+    }
+    if (event.key === "Escape" && (suggestions.length || state.searchSuggestionLoading)) {
+      event.preventDefault();
+      event.stopPropagation();
+      searchSuggestionController?.abort();
+      state.searchSuggestions = [];
+      state.searchSuggestionIndex = -1;
+      state.searchSuggestionLoading = false;
+      refreshMountedSearchSuggestions();
+      return;
+    }
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    const selected = suggestions[state.searchSuggestionIndex];
+    if (selected) {
+      activateSearchSuggestion(selected);
+      return;
+    }
+    state.searchSuggestions = [];
+    state.searchSuggestionIndex = -1;
+    state.searchSuggestionLoading = false;
+    commitMusicSearch(input.value, { remember: true });
+  }
+
+  function buildSearchSuggestions(query, data) {
+    const value = String(query || "").trim();
+    if (!value) return [];
+    const normalized = normalizeSearchComparison(value);
+    const action = {
+      group: "search",
+      groupLabel: "搜索",
+      type: "全部",
+      value,
+      label: `搜索“${value}”`,
+      meta: "查看歌曲、歌词、歌手和专辑",
+      highlights: [value],
+      score: Number.MAX_SAFE_INTEGER
     };
-    for (const artist of artistData?.artists || []) {
-      add("歌手", artist.name, `${formatNumber(artist.trackCount || 0)} 首 · ${formatNumber(artist.albumCount || 0)} 专辑`, artist.searchMatch, "name");
+    if (!data) return [action];
+
+    const result = [action];
+    const seenValues = new Set();
+    const correctionTarget = searchSuggestionCorrectionTarget(data);
+    if (data.correctedQuery && correctionTarget && normalizeSearchComparison(correctionTarget) !== normalized) {
+      seenValues.add(normalizeSearchComparison(correctionTarget));
+      result.push({
+        group: "correction",
+        groupLabel: "猜你想搜",
+        type: "纠错",
+        value: correctionTarget,
+        label: correctionTarget,
+        meta: `已识别“${value}”的相近结果`,
+        highlights: [],
+        score: Number.MAX_SAFE_INTEGER - 1
+      });
     }
-    for (const album of albumData?.albums || []) {
-      add("专辑", album.title, album.artistName || "未知歌手", album.searchMatch, "title");
+
+    const historyItems = (state.searchHistory || [])
+      .filter((item) => {
+        const itemValue = normalizeSearchComparison(item);
+        return itemValue && itemValue !== normalized && (itemValue.includes(normalized) || normalized.includes(itemValue));
+      })
+      .slice(0, 2)
+      .map((item) => ({
+        group: "history",
+        groupLabel: "最近搜索",
+        type: "历史",
+        value: item,
+        meta: "再次搜索",
+        highlights: [],
+        score: 700 + Number(normalizeSearchComparison(item).startsWith(normalized)) * 300
+      }));
+
+    const entityGroups = [
+      buildArtistSuggestionGroup(value, data.artists || [], seenValues),
+      buildTrackSuggestionGroup(value, data.tracks || [], seenValues),
+      buildAlbumSuggestionGroup(value, data.albums || [], seenValues),
+      suggestionGroupResult(historyItems, 3)
+    ].filter((group) => group.items.length);
+    entityGroups.sort((left, right) => right.score - left.score || left.priority - right.priority);
+    let remaining = 8;
+    for (const group of entityGroups) {
+      const items = group.items.slice(0, remaining);
+      result.push(...items);
+      remaining -= items.length;
+      if (remaining <= 0) break;
     }
-    for (const track of trackData?.tracks || []) {
-      add("歌曲", track.title, [track.artist || "未知歌手", track.album || "未知专辑"].join(" · "), track.searchMatch, "title");
+    return result;
+  }
+
+  function searchSuggestionCorrectionTarget(data) {
+    return String(data?.artists?.[0]?.name || buildTrackVersionGroups(data?.tracks || [])[0]?.baseTitle || data?.albums?.[0]?.title || data?.correctedQuery || "").trim();
+  }
+
+  function buildArtistSuggestionGroup(query, artists, seenValues) {
+    const items = [];
+    for (const artist of artists.slice(0, 3)) {
+      const value = String(artist.name || "").trim();
+      const key = normalizeSearchComparison(value);
+      if (!value || seenValues.has(key)) continue;
+      seenValues.add(key);
+      items.push({
+        group: "artists",
+        groupLabel: "歌手",
+        type: "歌手",
+        value,
+        meta: `${formatNumber(artist.trackCount || 0)} 首 · ${formatNumber(artist.albumCount || 0)} 专辑`,
+        highlights: artist.searchMatch?.highlights?.name || [],
+        score: searchSuggestionIntentScore(value, artist.searchMatch, "name", query)
+      });
     }
-    const normalized = query.toLocaleLowerCase();
-    return items
-      .sort((a, b) => Number(b.value.toLocaleLowerCase() === normalized) - Number(a.value.toLocaleLowerCase() === normalized) || b.score - a.score)
-      .slice(0, 8);
+    return suggestionGroupResult(items, 1);
+  }
+
+  function buildTrackSuggestionGroup(query, tracks, seenValues) {
+    const items = [];
+    for (const group of buildTrackVersionGroups(tracks).slice(0, 5)) {
+      const best = [...(group.tracks || [])].sort((left, right) => searchSuggestionIntentScore(right.title, right.searchMatch, "title", query) - searchSuggestionIntentScore(left.title, left.searchMatch, "title", query))[0] || group.primary;
+      const value = String(group.baseTitle || best?.title || "").trim();
+      const key = normalizeSearchComparison(value);
+      if (!value || seenValues.has(key)) continue;
+      seenValues.add(key);
+      items.push({
+        group: "tracks",
+        groupLabel: "歌曲",
+        type: "歌曲",
+        value,
+        meta: [best?.artist || group.artist || "未知歌手", group.tracks.length > 1 ? `${formatNumber(group.tracks.length)} 个版本` : best?.album || "未知专辑"].filter(Boolean).join(" · "),
+        highlights: best?.searchMatch?.highlights?.title || [],
+        score: searchSuggestionIntentScore(value, best?.searchMatch, "title", query)
+      });
+    }
+    return suggestionGroupResult(items, 0);
+  }
+
+  function buildAlbumSuggestionGroup(query, albums, seenValues) {
+    const items = [];
+    for (const album of albums.filter((item) => String(item.title || "").trim() !== "_单曲").slice(0, 3)) {
+      const value = String(album.title || "").trim();
+      const key = normalizeSearchComparison(value);
+      if (!value || seenValues.has(key)) continue;
+      seenValues.add(key);
+      items.push({
+        group: "albums",
+        groupLabel: "专辑",
+        type: "专辑",
+        value,
+        meta: album.artistName || "未知歌手",
+        highlights: album.searchMatch?.highlights?.title || [],
+        score: searchSuggestionIntentScore(value, album.searchMatch, "title", query)
+      });
+    }
+    return suggestionGroupResult(items, 2);
+  }
+
+  function suggestionGroupResult(items, priority) {
+    items.sort((left, right) => right.score - left.score);
+    return { items, priority, score: Math.max(0, ...items.map((item) => item.score)) };
+  }
+
+  function searchSuggestionIntentScore(value, match, field, query) {
+    const source = normalizeSearchComparison(value);
+    const needle = normalizeSearchComparison(query);
+    const direct = source === needle ? 10000 : source.startsWith(needle) ? 4000 : source.includes(needle) ? 2000 : 0;
+    const fieldBoost = match?.field === field ? 600 : 0;
+    return direct + fieldBoost + Number(match?.scores?.[field] || match?.score || 0);
   }
 
   function rememberSearchQuery(query) {
