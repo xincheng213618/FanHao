@@ -20,6 +20,10 @@ const shortVideoNavigationQueriesSource = fs.readFileSync(
   new URL("../src/modules/short-videos/server/navigation-queries.js", import.meta.url),
   "utf8"
 );
+const shortVideoPublicVideoMapperSource = fs.readFileSync(
+  new URL("../src/modules/short-videos/server/public-video-mapper.js", import.meta.url),
+  "utf8"
+);
 assert.match(shortVideoStoreSource, /createShortVideoListPageQueries/, "store should delegate list-page query planning to the query component");
 assert.match(shortVideoStoreSource, /createShortVideoImportItemMapper/, "store should delegate filesystem and download-manager item mapping");
 assert.doesNotMatch(
@@ -32,8 +36,20 @@ assert.match(
   /return Object\.freeze\(\{\s*downloadManagerRowToItem,\s*parseGalleryDirectory,\s*parseVideoFile\s*\}\)/,
   "import item mapper should expose the three canonical import entry points"
 );
-assert.ok(shortVideoStoreSource.split(/\r?\n/).length <= 5200, "short-video store exceeded its refactored 5200-line budget");
+assert.match(shortVideoStoreSource, /createShortVideoPublicVideoMapper/, "store should delegate public video presentation mapping");
+assert.doesNotMatch(
+  shortVideoStoreSource,
+  /^function (?:publicVideo|publicVideoMedia|publicShortVideoRecommendation|publicShortVideoSound|shortVideoActionMetricDelta)\b/m,
+  "store should not reintroduce public video presentation mapping"
+);
+assert.match(
+  shortVideoPublicVideoMapperSource,
+  /return Object\.freeze\(\{ publicVideo, publicVideoMedia \}\)/,
+  "public video mapper should expose the canonical row and media mapping entry points"
+);
+assert.ok(shortVideoStoreSource.split(/\r?\n/).length <= 4950, "short-video store exceeded its refactored 4950-line budget");
 assert.ok(shortVideoImportItemMapperSource.split(/\r?\n/).length <= 650, "short-video import item mapper exceeded its 650-line budget");
+assert.ok(shortVideoPublicVideoMapperSource.split(/\r?\n/).length <= 280, "short-video public video mapper exceeded its 280-line budget");
 assert.doesNotMatch(
   shortVideoStoreSource,
   /^function (?:fastHistoryVideoPage|fastFilteredVideoPage|fastPublishedVideoPage|shortVideoRelationshipTotal)\b/m,
