@@ -1,6 +1,8 @@
 import { createShortVideoSearchModule } from "./search/index.js?v=20260710-short-video-search-01";
 import { createShortVideoAuthorPages } from "./author-pages.js?v=20260716-short-video-author-pages-01";
 import { createIcon, railButton, setIconButton } from "./icons.js?v=20260716-short-video-icons-01";
+import { createShortVideoListWindow } from "./list-window.js?v=20260716-short-video-list-window-01";
+import { createShortVideoMediaCache } from "./media-cache.js?v=20260716-short-video-media-cache-01";
 import {
   applyShortVideoLikeBadgeState,
   clampNumber,
@@ -107,42 +109,11 @@ export function createShortVideoPage(deps) {
   let eventsInstalled = false;
   let playerClickTimer = 0;
   let pendingPlayerTap = null;
-  let loadMoreObserver = null;
-  let coverLoadObserver = null;
-  let coverLoadTimer = null;
-  const coverLoadQueue = [];
   const initialVideoLimit = 48;
   const appendVideoLimit = 72;
-  const coverEagerCount = 18;
-  const coverLoadBatchSize = 2;
-  const coverLoadBatchDelay = 24;
-  const SV_FEED_MIN_COL = 320;
-  const SV_AUTHOR_MIN_COL = 176;
-  const SV_COL_GAP = 10;
-  const SV_ROW_GAP = 14;
-  // Keep enough off-screen rows for a fast wheel/touch fling without retaining
-  // dozens of fully interactive cards. Each card owns several listeners and
-  // overlay nodes, so a 12-row buffer made every row boundary rebuild 75-84
-  // cards on a three-column desktop grid.
-  const SV_BUFFER_ROWS = 5;
-  const SV_INITIAL_BUFFER_ROWS = 2;
-  const SV_APPEND_LOOKAHEAD_ROWS = 18;
   const AUTHOR_PAGE_SIZE = 96;
   const AUTHOR_APPEND_LOOKAHEAD = 900;
   const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
-  let svCols = 0;
-  let svCardW = 0;
-  let svCardH = 0;
-  let svRowH = 0;
-  let svReady = false;
-  let svStart = 0;
-  let svEnd = 0;
-  let svTotal = 0;
-  let svGridEl = null;
-  let svInnerEl = null;
-  let svScrollRaf = 0;
-  let svAppendContinuationRaf = 0;
-  let svExpandIdle = 0;
   let authorPanelReturnFeed = null;
   let authorPanelVideoRequestId = 0;
   let authorPanelVideoCache = null;
@@ -154,35 +125,25 @@ export function createShortVideoPage(deps) {
   let shortVideoOpenError = "";
   let shortVideoNavigationPrefetchTimer = 0;
   let shortVideoVisibilitySnapshot = null;
-  let shortVideoPrewarmShelf = null;
   let shortVideoAdjacentWarmDirection = 1;
   let shortVideoAdjacentWarmScheduleId = 0;
   let shortVideoLastNavigationAt = 0;
   let shortVideoCacheSampleCounter = 0;
   const loadedCoverIds = new Set();
   const shortVideoWatchWrites = new Map();
-  const shortVideoDetailCache = new Map();
-  const shortVideoResolvedDetailCache = new Map();
-  const shortVideoNavigationCache = new Map();
-  const shortVideoVideoCache = new Map();
   const shortVideoAuthorMentionCache = new Map();
   const shortVideoVideoPrefetches = new Map();
-  const shortVideoMediaPrefetches = new Map();
-  const shortVideoPlaybackPreloads = new Map();
   const SHORT_VIDEO_WATCH_SAVE_INTERVAL = 4000;
   const SHORT_VIDEO_GALLERY_ADVANCE_MS = 3000;
   const SHORT_VIDEO_GALLERY_GESTURE_HINT_MS = 3200;
   const SHORT_VIDEO_GALLERY_GESTURE_HINT_KEY = "fanhao.shortVideo.galleryGestureHintSeen";
   const SHORT_VIDEO_SMART_FILL_KEY = "fanhao.shortVideo.smartFill";
-  const SHORT_VIDEO_NAV_CACHE_LIMIT = 32;
-  const SHORT_VIDEO_NEIGHBOR_CACHE_LIMIT = 96;
   const SHORT_VIDEO_LOADED_COVER_CACHE_LIMIT = 512;
   const SHORT_VIDEO_WATCH_WRITE_CACHE_LIMIT = 128;
   const SHORT_VIDEO_AUTHOR_MENTION_CACHE_LIMIT = 256;
   // The reel only keeps one previous and one next panel alive. Fetching a
   // second ring here inflated every detail payload by roughly 40%; the next
   // ring is already filled by the deferred adjacent-detail prefetch.
-  const SHORT_VIDEO_DETAIL_NEIGHBOR_LIMIT = 1;
   const SHORT_VIDEO_SWIPE_DISTANCE = 44;
   const SHORT_VIDEO_WHEEL_DISTANCE = 82;
   const SHORT_VIDEO_SWITCH_ANIMATION_MS = 220;
@@ -206,8 +167,6 @@ export function createShortVideoPage(deps) {
   // ring after the visible frame has had a short stable window.
   const SHORT_VIDEO_NAV_PREFETCH_AFTER_FRAME_MS = 320;
   const SHORT_VIDEO_NAV_PREFETCH_MAX_WAIT_MS = 3600;
-  const SHORT_VIDEO_PLAYBACK_PRELOAD_LIMIT = 1;
-  const SHORT_VIDEO_PLAYBACK_PRELOAD_TIMEOUT_MS = 2800;
   const SHORT_VIDEO_FIRST_FRAME_TIMEOUT_MS = 1600;
   const SHORT_VIDEO_FIRST_FRAME_RETRY_LIMIT = 4;
   const SHORT_VIDEO_BOUNDARY_RESISTANCE = 0.3;
@@ -269,6 +228,50 @@ export function createShortVideoPage(deps) {
     showBrowserToast,
     showError,
     state
+  });
+  const {
+    activateCovers: activateShortVideoCovers,
+    attach: attachShortVideoWindow,
+    render: renderShortVideoWindow,
+    reset: resetShortVideoWindow,
+    resize: resizeShortVideoWindow,
+    scheduleAppendContinuation: scheduleShortVideoAppendContinuation,
+    scheduleUpdate: scheduleShortVideoWindowUpdate
+  } = createShortVideoListWindow({
+    getState: () => state,
+    isAuthorDetailPage: isShortVideoAuthorDetailPage,
+    loadVideos,
+    markCacheState: markShortVideoCacheState,
+    markPerformance: markShortVideoPerformance,
+    rememberLoadedCoverId,
+    renderVideoCard: (video, index) => shortVideoListCards?.renderVideoCard(video, index) || null,
+    shortVideoCardCoverUrl,
+    shortVideosWithCovers,
+    showError,
+    wasCoverLoaded: (videoId) => loadedCoverIds.has(videoId)
+  });
+  const {
+    cachedVideo: cachedShortVideo,
+    fetchDetail: fetchShortVideoDetail,
+    prefetchFirstMedia: prefetchShortVideoFirstMedia,
+    prefetchRelatedVideo,
+    prewarmPlayback: prewarmShortVideoPlayback,
+    rememberVideo: rememberShortVideo,
+    resolvedDetail: resolvedShortVideoDetail,
+    stats: shortVideoMediaCacheStats,
+    takePrewarmedPlayer: takePrewarmedShortVideoPlayer
+  } = createShortVideoMediaCache({
+    api,
+    cacheAuthorPanelVideo,
+    cachedAuthorPanelVideo,
+    galleryImageEntries,
+    getFeedParams: shortVideoFeedParams,
+    isGalleryPost,
+    markPerformance: markShortVideoPerformance,
+    shortVideoCardCoverUrl,
+    shortVideoPlaybackUrl,
+    takeDirectPlaybackPrewarm: takeDirectShortVideoPlaybackPrewarm,
+    waitForVideoFirstFrame
   });
 
   function markShortVideoPerformance(name, details = {}) {
@@ -338,13 +341,8 @@ export function createShortVideoPage(deps) {
     markShortVideoPerformance("short-video-cache-state", {
       loadedCovers: loadedCoverIds.size,
       watchWrites: shortVideoWatchWrites.size,
-      videos: shortVideoVideoCache.size,
-      navigation: shortVideoNavigationCache.size,
-      detailRequests: shortVideoDetailCache.size,
-      resolvedDetails: shortVideoResolvedDetailCache.size,
       authorMentions: shortVideoAuthorMentionCache.size,
-      mediaPrefetches: shortVideoMediaPrefetches.size,
-      playbackPreloads: shortVideoPlaybackPreloads.size
+      ...shortVideoMediaCacheStats()
     });
   }
 
@@ -871,8 +869,6 @@ export function createShortVideoPage(deps) {
     ensureState();
     if (!els.workGrid) return;
     resetShortVideoWindow();
-    resetLoadMoreObserver();
-    resetCoverLoadObserver();
     clearPendingPlayerClick();
     els.workGrid.querySelector?.(".short-video-browser")?.shortVideoControlsDispose?.();
     els.workGrid.querySelector?.(".short-video-control-bar")?.shortVideoDispose?.();
@@ -987,22 +983,20 @@ export function createShortVideoPage(deps) {
       shell.append(status);
     }
     const grid = document.createElement("div");
+    let inner = null;
     const displayVideos = shortVideosWithCovers(data.videos || []);
     if (!displayVideos.length) {
       grid.className = "short-video-grid";
       grid.append(renderShortVideoEmpty(data));
     } else {
       grid.className = "short-video-grid short-video-virtual-grid";
-      const inner = document.createElement("div");
+      inner = document.createElement("div");
       inner.className = "short-video-window";
       grid.append(inner);
-      svInnerEl = inner;
     }
     shell.append(grid);
     els.workGrid.append(shell);
-    svGridEl = grid;
-    svStart = 0;
-    svEnd = 0;
+    attachShortVideoWindow(grid, inner);
     renderShortVideoWindow(true);
   }
 
@@ -1688,258 +1682,6 @@ export function createShortVideoPage(deps) {
     renderView();
   }
 
-  function resetShortVideoWindow() {
-    svStart = 0;
-    svEnd = 0;
-    svTotal = 0;
-    svGridEl = null;
-    svInnerEl = null;
-    svReady = false;
-    svCardH = 0;
-    if (svScrollRaf) window.cancelAnimationFrame(svScrollRaf);
-    svScrollRaf = 0;
-    if (svAppendContinuationRaf) window.cancelAnimationFrame(svAppendContinuationRaf);
-    svAppendContinuationRaf = 0;
-    cancelShortVideoWindowExpansion();
-    coverLoadObserver?.disconnect?.();
-    coverLoadObserver = null;
-    if (coverLoadTimer) window.clearTimeout(coverLoadTimer);
-    coverLoadTimer = null;
-    coverLoadQueue.length = 0;
-  }
-
-  function measureShortVideoGrid(grid) {
-    const gw = grid.clientWidth || grid.getBoundingClientRect().width || 800;
-    const authorDetail = isShortVideoAuthorDetailPage();
-    const minCardWidth = authorDetail ? SV_AUTHOR_MIN_COL : SV_FEED_MIN_COL;
-    svCols = Math.max(1, Math.floor((gw + SV_COL_GAP) / (minCardWidth + SV_COL_GAP)));
-    svCardW = (gw - (svCols - 1) * SV_COL_GAP) / svCols;
-    if (!svCardH) svCardH = Math.round(svCardW * (authorDetail ? 14 / 9 : 9 / 16)) + (authorDetail ? 56 : 62);
-    svRowH = svCardH + SV_ROW_GAP;
-  }
-
-  function computeShortVideoWindow(grid, total, bufferRows = SV_BUFFER_ROWS) {
-    if (!svCols || !svRowH) measureShortVideoGrid(grid);
-    const gridTop = grid.getBoundingClientRect().top + window.scrollY;
-    const viewportTop = window.scrollY;
-    const viewportBottom = viewportTop + (window.innerHeight || document.documentElement.clientHeight || 800);
-    const totalRows = Math.ceil(total / svCols) || 1;
-    const rawStartRow = Math.max(0, Math.floor((viewportTop - gridTop) / svRowH));
-    const rawEndRow = Math.min(totalRows, Math.ceil((viewportBottom - gridTop) / svRowH));
-    const startRow = Math.max(0, rawStartRow - bufferRows);
-    const endRow = Math.min(totalRows, rawEndRow + bufferRows);
-    return {
-      start: startRow * svCols,
-      end: Math.min(total, endRow * svCols),
-      startRow,
-      totalRows
-    };
-  }
-
-  function renderShortVideoWindow(force) {
-    const renderStartedAt = Date.now();
-    const grid = svGridEl;
-    const inner = svInnerEl;
-    const videos = shortVideosWithCovers(state.shortVideo?.data?.videos || []);
-    const total = videos.length;
-    if (!grid || !total) {
-      if (grid) grid.style.height = "";
-      svTotal = 0;
-      return;
-    }
-    const previousTotal = svTotal;
-    const totalChanged = total !== previousTotal;
-    svTotal = total;
-    const initialWindow = !svReady;
-    if (initialWindow) measureShortVideoGrid(grid);
-    const bufferRows = initialWindow ? SV_INITIAL_BUFFER_ROWS : SV_BUFFER_ROWS;
-    const { start, end, startRow, totalRows } = computeShortVideoWindow(grid, total, bufferRows);
-    const virtualHeight = Math.max(0, totalRows * svRowH - SV_ROW_GAP);
-    grid.style.height = `${virtualHeight}px`;
-    if (!inner) return;
-    if (document.documentElement.dataset.shortVideoPerfCapture === "1" && totalChanged) {
-      markShortVideoPerformance("short-video-window-total-changed", {
-        previousTotal,
-        total,
-        totalRows,
-        columns: svCols,
-        rowHeight: svRowH,
-        virtualHeight,
-        start,
-        end
-      });
-    }
-    if (!force && !totalChanged && start === svStart && end === svEnd && svReady) return;
-    svStart = start;
-    svEnd = end;
-    inner.style.transform = `translate3d(0, ${startRow * svRowH}px, 0)`;
-    inner.style.gridTemplateColumns = `repeat(${svCols}, minmax(0, 1fr))`;
-    const existingCards = new Map(
-      [...inner.children]
-        .filter((card) => card?.dataset?.videoId)
-        .map((card) => [String(card.dataset.videoId), card])
-    );
-    const cards = [];
-    let createdCount = 0;
-    let reusedCount = 0;
-    const capturePerformance = document.documentElement.dataset.shortVideoPerfCapture === "1";
-    let cardCreateDurationMs = 0;
-    for (let i = start; i < end; i++) {
-      const video = videos[i];
-      if (!video) continue;
-      const videoId = String(video.id || "");
-      let card = existingCards.get(videoId) || null;
-      if (card?.shortVideoCardRecord !== video) card = null;
-      if (card) {
-        existingCards.delete(videoId);
-        reusedCount += 1;
-      } else {
-        const cardCreateStartedAt = capturePerformance ? globalThis.performance?.now?.() || Date.now() : 0;
-        card = renderVideoCard(video, i);
-        if (capturePerformance) cardCreateDurationMs += (globalThis.performance?.now?.() || Date.now()) - cardCreateStartedAt;
-        createdCount += card ? 1 : 0;
-      }
-      if (!card) continue;
-      const coverUrl = shortVideoCardCoverUrl(video);
-      if (coverUrl && loadedCoverIds.has(video.id)) {
-        rememberLoadedCoverId(video.id);
-        const img = card.querySelector("img.short-video-cover-image");
-        if (img) {
-          img.src = coverUrl;
-          img.dataset.loaded = "1";
-          img.classList.add("is-loaded");
-          delete img.dataset.src;
-        }
-      }
-      cards.push(card);
-    }
-    const desiredCards = new Set(cards);
-    const domPatchStartedAt = capturePerformance ? globalThis.performance?.now?.() || Date.now() : 0;
-    let removedCount = 0;
-    for (const card of [...inner.children]) {
-      if (desiredCards.has(card)) continue;
-      card.querySelectorAll?.("img.short-video-cover-image")?.forEach?.((img) => coverLoadObserver?.unobserve?.(img));
-      card.remove();
-      removedCount += 1;
-    }
-    cards.forEach((card, index) => {
-      const current = inner.children[index] || null;
-      if (current !== card) inner.insertBefore(card, current);
-    });
-    for (let index = coverLoadQueue.length - 1; index >= 0; index -= 1) {
-      if (!coverLoadQueue[index]?.isConnected) coverLoadQueue.splice(index, 1);
-    }
-    const domPatchDurationMs = capturePerformance
-      ? (globalThis.performance?.now?.() || Date.now()) - domPatchStartedAt
-      : 0;
-    const coverActivationStartedAt = capturePerformance ? globalThis.performance?.now?.() || Date.now() : 0;
-    activateShortVideoCoversForNodes(cards);
-    const coverActivationDurationMs = capturePerformance
-      ? (globalThis.performance?.now?.() || Date.now()) - coverActivationStartedAt
-      : 0;
-    if (capturePerformance) {
-      markShortVideoPerformance("short-video-window-render", {
-        start,
-        end,
-        created: createdCount,
-        reused: reusedCount,
-        removed: removedCount,
-        initial: initialWindow,
-        bufferRows,
-        cardCreateDurationMs: Math.round(cardCreateDurationMs * 10) / 10,
-        domPatchDurationMs: Math.round(domPatchDurationMs * 10) / 10,
-        coverActivationDurationMs: Math.round(coverActivationDurationMs * 10) / 10,
-        durationMs: Date.now() - renderStartedAt
-      });
-      markShortVideoCacheState();
-    }
-    if (initialWindow) {
-      // Card aspect ratio and metadata height are deterministic CSS values and
-      // are already represented by measureShortVideoGrid(). Reading the first
-      // card here forced layout of the whole freshly inserted window; the live
-      // measurement differed from the estimate by less than half a pixel.
-      svReady = true;
-      scheduleShortVideoWindowExpansion();
-    }
-  }
-
-  function updateShortVideoWindowAndLoadMore() {
-    renderShortVideoWindow(false);
-    const data = state.shortVideo?.data;
-    if (data?.hasMore && !state.shortVideo.loading && !state.shortVideo.loadingMore) {
-      const total = shortVideosWithCovers(data.videos || []).length;
-      if (svEnd >= total - svCols * SV_APPEND_LOOKAHEAD_ROWS) {
-        loadVideos({ append: true, keepCurrent: true }).catch(showError);
-      }
-    }
-  }
-
-  function cancelShortVideoWindowExpansion() {
-    if (!svExpandIdle) return;
-    if (typeof window.cancelIdleCallback === "function") window.cancelIdleCallback(svExpandIdle);
-    else window.clearTimeout(svExpandIdle);
-    svExpandIdle = 0;
-  }
-
-  function scheduleShortVideoWindowExpansion() {
-    cancelShortVideoWindowExpansion();
-    const expand = () => {
-      svExpandIdle = 0;
-      if (state.activeView !== "shortVideos" || state.shortVideo?.current || !svGridEl?.isConnected) return;
-      renderShortVideoWindow(true);
-    };
-    if (typeof window.requestIdleCallback === "function") {
-      svExpandIdle = window.requestIdleCallback(expand, { timeout: 180 });
-    } else {
-      svExpandIdle = window.setTimeout(expand, 60);
-    }
-  }
-
-  function isShortVideoViewportOutsideWindow() {
-    if (!svGridEl || !svCols || !svRowH || svEnd <= svStart) return false;
-    const gridTop = svGridEl.getBoundingClientRect().top + window.scrollY;
-    const viewportTop = Math.max(0, window.scrollY - gridTop);
-    const viewportBottom = viewportTop + (window.innerHeight || document.documentElement.clientHeight || 800);
-    const firstVisibleRow = Math.max(0, Math.floor(viewportTop / svRowH));
-    const lastVisibleRow = Math.max(firstVisibleRow, Math.ceil(viewportBottom / svRowH));
-    const renderedStartRow = Math.floor(svStart / svCols);
-    const renderedEndRow = Math.ceil(svEnd / svCols);
-    return firstVisibleRow < renderedStartRow || lastVisibleRow > renderedEndRow;
-  }
-
-  function scheduleShortVideoWindowUpdate() {
-    // A scrollbar drag or PageDown can jump beyond the buffered window in one
-    // event. Rebuild before the browser's next paint so the viewport never
-    // exposes the empty virtual-grid spacer. Normal wheel/touch scrolling stays
-    // coalesced to one update per animation frame.
-    if (isShortVideoViewportOutsideWindow()) {
-      if (svScrollRaf) window.cancelAnimationFrame(svScrollRaf);
-      svScrollRaf = 0;
-      updateShortVideoWindowAndLoadMore();
-      return;
-    }
-    if (svScrollRaf) return;
-    svScrollRaf = window.requestAnimationFrame(() => {
-      svScrollRaf = 0;
-      updateShortVideoWindowAndLoadMore();
-    });
-  }
-
-  function scheduleShortVideoAppendContinuation() {
-    if (svAppendContinuationRaf) window.cancelAnimationFrame(svAppendContinuationRaf);
-    svAppendContinuationRaf = window.requestAnimationFrame(() => {
-      svAppendContinuationRaf = window.requestAnimationFrame(() => {
-        svAppendContinuationRaf = 0;
-        if (state.activeView !== "shortVideos" || state.shortVideo?.current || !svGridEl?.isConnected) return;
-        updateShortVideoWindowAndLoadMore();
-      });
-    });
-  }
-
-  function renderVideoCard(video, index = 0) {
-    return shortVideoListCards?.renderVideoCard(video, index) || null;
-  }
-
   function shortVideoCardCoverUrl(video = {}) {
     return video.coverUrl || "";
   }
@@ -1978,112 +1720,6 @@ export function createShortVideoPage(deps) {
 
   function cardTitle(video = {}) {
     return String(video.title || video.description || video.fileName || "无标题").replace(/\s+/g, " ").trim() || "无标题";
-  }
-
-  function resetLoadMoreObserver() {
-    loadMoreObserver?.disconnect?.();
-    loadMoreObserver = null;
-  }
-
-  function resetCoverLoadObserver() {
-    coverLoadObserver?.disconnect?.();
-    coverLoadObserver = null;
-    if (coverLoadTimer) window.clearTimeout(coverLoadTimer);
-    coverLoadTimer = null;
-    coverLoadQueue.length = 0;
-  }
-
-  function activateShortVideoCovers(root) {
-    const images = [...(root?.querySelectorAll?.("img.short-video-cover-image[data-src]") || [])];
-    const observer = ensureShortVideoCoverObserver();
-    images.forEach((img, index) => {
-      if (index < coverEagerCount || !observer) {
-        queueShortVideoCover(img);
-      } else {
-        observer.observe(img);
-      }
-    });
-  }
-
-  function activateShortVideoCoversForNodes(nodes) {
-    const observer = ensureShortVideoCoverObserver();
-    for (const node of nodes || []) {
-      for (const img of node?.querySelectorAll?.("img.short-video-cover-image[data-src]") || []) {
-        // Reading every image rect here forced a full style/layout pass before
-        // the first list paint. Eager cards are already known from their
-        // creation index; lazy cards can be classified asynchronously by IO.
-        if (img.loading === "eager" || !observer) queueShortVideoCover(img);
-        else observer.observe(img);
-      }
-    }
-  }
-
-  function ensureShortVideoCoverObserver() {
-    if (!("IntersectionObserver" in window)) return null;
-    if (!coverLoadObserver) {
-      coverLoadObserver = new IntersectionObserver((entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            entry.target.fetchPriority = "high";
-            queueShortVideoCover(entry.target);
-          }
-        }
-      }, { rootMargin: "720px 0px", threshold: 0.01 });
-    }
-    return coverLoadObserver;
-  }
-
-  function queueShortVideoCover(img) {
-    if (!img?.dataset?.src || img.dataset.queued === "1" || img.dataset.loaded === "1") return;
-    coverLoadObserver?.unobserve(img);
-    img.dataset.queued = "1";
-    coverLoadQueue.push(img);
-    scheduleShortVideoCoverDrain();
-  }
-
-  function scheduleShortVideoCoverDrain(delay = 0) {
-    if (coverLoadTimer) return;
-    coverLoadTimer = window.setTimeout(drainShortVideoCoverQueue, delay);
-  }
-
-  function drainShortVideoCoverQueue() {
-    coverLoadTimer = null;
-    let loaded = 0;
-    while (coverLoadQueue.length && loaded < coverLoadBatchSize) {
-      const img = coverLoadQueue.shift();
-      if (!img?.isConnected || !img.dataset.src || img.dataset.loaded === "1") continue;
-      loadShortVideoCover(img);
-      loaded += 1;
-    }
-    if (coverLoadQueue.length) scheduleShortVideoCoverDrain(coverLoadBatchDelay);
-  }
-
-  function loadShortVideoCover(img) {
-    const src = img.dataset.src;
-    img.dataset.loaded = "1";
-    delete img.dataset.src;
-    img.addEventListener("load", () => {
-      img.classList.add("is-loaded");
-      const vid = img.dataset.videoId;
-      if (vid) rememberLoadedCoverId(vid);
-    }, { once: true });
-    img.addEventListener("error", () => {
-      img.classList.add("is-cover-error");
-    }, { once: true });
-    img.src = src;
-  }
-
-  function observeLoadMoreSentinel(sentinel) {
-    if (!sentinel || !("IntersectionObserver" in window)) {
-      if (state.shortVideo.data?.hasMore) loadVideos({ append: true, keepCurrent: true }).catch(showError);
-      return;
-    }
-    loadMoreObserver = new IntersectionObserver((entries) => {
-      if (!entries.some((entry) => entry.isIntersecting)) return;
-      if (!state.shortVideo.data?.hasMore || state.shortVideo.loadingMore || state.shortVideo.loading) return;
-      loadVideos({ append: true, keepCurrent: true }).catch(showError);
-    }, { root: null, rootMargin: "900px 0px", threshold: 0.01 });
-    loadMoreObserver.observe(sentinel);
   }
 
   function renderBrowserTop() {
@@ -5234,11 +4870,7 @@ export function createShortVideoPage(deps) {
       if (resizeRaf) return;
       resizeRaf = window.requestAnimationFrame(() => {
         resizeRaf = 0;
-        svReady = false;
-        svStart = 0;
-        svEnd = 0;
-        svCardH = 0;
-        if (svGridEl) renderShortVideoWindow(true);
+        resizeShortVideoWindow();
       });
     });
     window.addEventListener("touchstart", (event) => {
@@ -5828,294 +5460,6 @@ export function createShortVideoPage(deps) {
     heart.style.top = `${Math.max(28, Math.min(rect.height - 28, (event.clientY || rect.top + rect.height / 2) - rect.top))}px`;
     stage.append(heart);
     heart.addEventListener("animationend", () => heart.remove(), { once: true });
-  }
-
-  function rememberShortVideo(video) {
-    const id = String(video?.id || "").trim();
-    if (!id) return null;
-    shortVideoVideoCache.delete(id);
-    shortVideoVideoCache.set(id, video);
-    while (shortVideoVideoCache.size > SHORT_VIDEO_NAV_CACHE_LIMIT) {
-      shortVideoVideoCache.delete(shortVideoVideoCache.keys().next().value);
-    }
-    return video;
-  }
-
-  function cachedShortVideo(id) {
-    const key = String(id || "").trim();
-    if (!key) return null;
-    return cachedAuthorPanelVideo(key) || shortVideoVideoCache.get(key) || null;
-  }
-
-  function shortVideoNavigationKey(id, params = shortVideoFeedParams()) {
-    const videoId = String(id || "").trim();
-    return videoId ? `${params}::${videoId}` : "";
-  }
-
-  function cachedShortVideoNavigation(id, params = shortVideoFeedParams()) {
-    const key = shortVideoNavigationKey(id, params);
-    return key ? shortVideoNavigationCache.get(key) || null : null;
-  }
-
-  function rememberShortVideoNavigation(data, params = shortVideoFeedParams()) {
-    const current = data?.video;
-    const currentId = String(current?.id || "").trim();
-    if (!currentId) return;
-    const previous = Array.isArray(data?.neighbors?.previous) ? data.neighbors.previous.filter((video) => video?.id) : [];
-    const next = Array.isArray(data?.neighbors?.next) ? data.neighbors.next.filter((video) => video?.id) : [];
-    previous.forEach(rememberShortVideo);
-    rememberShortVideo(current);
-    next.forEach(rememberShortVideo);
-    const chain = [...previous].reverse().concat(current, next);
-    chain.forEach((video, index) => {
-      const id = String(video?.id || "").trim();
-      const key = shortVideoNavigationKey(id, params);
-      if (!key) return;
-      const navigation = { ...(shortVideoNavigationCache.get(key) || {}) };
-      if (index > 0) navigation.prevId = String(chain[index - 1]?.id || "");
-      if (index < chain.length - 1) navigation.nextId = String(chain[index + 1]?.id || "");
-      if (id === currentId) {
-        navigation.prevId = String(data.prevId || "");
-        navigation.nextId = String(data.nextId || "");
-      }
-      shortVideoNavigationCache.delete(key);
-      shortVideoNavigationCache.set(key, navigation);
-    });
-    while (shortVideoNavigationCache.size > SHORT_VIDEO_NEIGHBOR_CACHE_LIMIT) {
-      shortVideoNavigationCache.delete(shortVideoNavigationCache.keys().next().value);
-    }
-  }
-
-  function fetchShortVideoDetail(videoId, params = shortVideoFeedParams()) {
-    const id = String(videoId || "").trim();
-    if (!id) return Promise.resolve(null);
-    const cacheKey = `${params}::${id}`;
-    const cached = shortVideoDetailCache.get(cacheKey);
-    if (cached) {
-      markShortVideoPerformance("video-detail-cache-hit", { videoId: id });
-      return cached;
-    }
-    const detailParams = new URLSearchParams(params);
-    detailParams.set("neighbors", String(SHORT_VIDEO_DETAIL_NEIGHBOR_LIMIT));
-    detailParams.set("metadata", "0");
-    const requestStartedAt = Date.now();
-    markShortVideoPerformance("video-detail-request-start", { videoId: id });
-    const request = api(`/api/short-videos/${encodeURIComponent(id)}?${detailParams}`).then((data) => {
-      markShortVideoPerformance("video-detail-request-finish", {
-        videoId: id,
-        durationMs: Date.now() - requestStartedAt,
-        previousId: String(data?.prevId || ""),
-        nextId: String(data?.nextId || "")
-      });
-      rememberShortVideoNavigation(data, params);
-      shortVideoResolvedDetailCache.delete(cacheKey);
-      shortVideoResolvedDetailCache.set(cacheKey, data);
-      while (shortVideoResolvedDetailCache.size > SHORT_VIDEO_NAV_CACHE_LIMIT) {
-        shortVideoResolvedDetailCache.delete(shortVideoResolvedDetailCache.keys().next().value);
-      }
-      return data;
-    }).catch((error) => {
-      markShortVideoPerformance("video-detail-request-error", {
-        videoId: id,
-        durationMs: Date.now() - requestStartedAt,
-        message: String(error?.message || error || "")
-      });
-      shortVideoDetailCache.delete(cacheKey);
-      shortVideoResolvedDetailCache.delete(cacheKey);
-      throw error;
-    });
-    shortVideoDetailCache.set(cacheKey, request);
-    while (shortVideoDetailCache.size > SHORT_VIDEO_NAV_CACHE_LIMIT) {
-      shortVideoDetailCache.delete(shortVideoDetailCache.keys().next().value);
-    }
-    return request;
-  }
-
-  function resolvedShortVideoDetail(videoId, params = shortVideoFeedParams()) {
-    const id = String(videoId || "").trim();
-    if (!id) return null;
-    return shortVideoResolvedDetailCache.get(`${params}::${id}`) || null;
-  }
-
-  function ensureShortVideoPrewarmShelf() {
-    if (shortVideoPrewarmShelf?.isConnected) return shortVideoPrewarmShelf;
-    shortVideoPrewarmShelf = document.createElement("div");
-    shortVideoPrewarmShelf.className = "short-video-prewarm-shelf";
-    shortVideoPrewarmShelf.setAttribute("aria-hidden", "true");
-    Object.assign(shortVideoPrewarmShelf.style, {
-      position: "fixed",
-      left: "-10000px",
-      top: "0",
-      width: "2px",
-      height: "2px",
-      overflow: "hidden",
-      opacity: "0.001",
-      pointerEvents: "none"
-    });
-    document.body.append(shortVideoPrewarmShelf);
-    return shortVideoPrewarmShelf;
-  }
-
-  function disposeShortVideoPlaybackPreload(entry) {
-    const player = entry?.player;
-    if (!player || entry.taken) return;
-    player.muted = true;
-    player.pause?.();
-    player.removeAttribute("src");
-    player.load?.();
-    player.remove();
-  }
-
-  function trimShortVideoPlaybackPreloads() {
-    while (shortVideoPlaybackPreloads.size > SHORT_VIDEO_PLAYBACK_PRELOAD_LIMIT) {
-      const [source, entry] = shortVideoPlaybackPreloads.entries().next().value || [];
-      if (!source) break;
-      shortVideoPlaybackPreloads.delete(source);
-      disposeShortVideoPlaybackPreload(entry);
-    }
-  }
-
-  function prewarmShortVideoPlayback(video = {}, options = {}) {
-    if (!video?.id || isGalleryPost(video)) return Promise.resolve(false);
-    const source = shortVideoPlaybackUrl(video);
-    if (!source) return Promise.resolve(false);
-    const cached = shortVideoPlaybackPreloads.get(source);
-    if (cached) {
-      shortVideoPlaybackPreloads.delete(source);
-      shortVideoPlaybackPreloads.set(source, cached);
-      markShortVideoPerformance("video-prewarm-cache-hit", {
-        videoId: String(video.id),
-        readyState: Number(cached.player?.readyState || 0)
-      });
-      return cached.promise;
-    }
-
-    const player = document.createElement("video");
-    player.className = "short-video-prewarm-player";
-    player.dataset.streamUrl = source;
-    player.dataset.videoId = String(video.id);
-    player.dataset.shortVideoSlot = "prewarm";
-    player.src = source;
-    player.preload = "auto";
-    player.controls = false;
-    player.autoplay = false;
-    player.loop = false;
-    player.muted = true;
-    player.volume = 0;
-    player.playsInline = true;
-    player.tabIndex = -1;
-    player.setAttribute("aria-hidden", "true");
-    ensureShortVideoPrewarmShelf().append(player);
-    const prewarmStartedAt = Date.now();
-    markShortVideoPerformance("video-prewarm-start", {
-      videoId: String(video.id)
-    });
-
-    const entry = { player, promise: null, taken: false };
-    entry.promise = (async () => {
-      const timeout = Math.max(800, Number(options.timeout || SHORT_VIDEO_PLAYBACK_PRELOAD_TIMEOUT_MS));
-      const readyPromise = waitForVideoFirstFrame(player, timeout);
-      player.load?.();
-      player.play?.().catch(() => {});
-      const ready = await readyPromise;
-      if (!entry.taken) {
-        player.pause?.();
-        player.muted = true;
-      }
-      markShortVideoPerformance("video-prewarm-finish", {
-        videoId: String(video.id),
-        ready: Boolean(ready || player.readyState >= 2),
-        readyState: Number(player.readyState || 0),
-        durationMs: Date.now() - prewarmStartedAt,
-        taken: entry.taken
-      });
-      return ready || player.readyState >= 2;
-    })().catch(() => {
-      if (!entry.taken && shortVideoPlaybackPreloads.get(source) === entry) {
-        shortVideoPlaybackPreloads.delete(source);
-        disposeShortVideoPlaybackPreload(entry);
-      }
-      return false;
-    });
-    shortVideoPlaybackPreloads.set(source, entry);
-    trimShortVideoPlaybackPreloads();
-    return entry.promise;
-  }
-
-  function takePrewarmedShortVideoPlayer(video = {}) {
-    const source = shortVideoPlaybackUrl(video);
-    const directPlayer = takeDirectShortVideoPlaybackPrewarm?.(video, source) || null;
-    if (directPlayer) {
-      markShortVideoPerformance("video-prewarm-taken", {
-        videoId: String(video.id || directPlayer.dataset.videoId || ""),
-        readyState: Number(directPlayer.readyState || 0),
-        frameReady: directPlayer.dataset.shortVideoFrameReady === "1",
-        direct: true
-      });
-      return directPlayer;
-    }
-    const entry = source ? shortVideoPlaybackPreloads.get(source) : null;
-    if (!entry?.player) return null;
-    shortVideoPlaybackPreloads.delete(source);
-    entry.taken = true;
-    const player = entry.player;
-    player.dataset.shortVideoPrewarmed = "1";
-    player.removeAttribute("aria-hidden");
-    player.removeAttribute("tabindex");
-    markShortVideoPerformance("video-prewarm-taken", {
-      videoId: String(video.id || player.dataset.videoId || ""),
-      readyState: Number(player.readyState || 0),
-      frameReady: player.dataset.shortVideoFrameReady === "1"
-    });
-    return player;
-  }
-
-  function prefetchShortVideoFirstMedia(video = {}) {
-    const galleryEntry = isGalleryPost(video) ? galleryImageEntries(video)[0] : null;
-    const url = String(galleryEntry?.url || shortVideoCardCoverUrl(video) || "").trim();
-    const playbackPromise = isGalleryPost(video)
-      ? Promise.resolve(false)
-      : prewarmShortVideoPlayback(video);
-    let imagePromise = Promise.resolve(false);
-    if (url) {
-      const cached = shortVideoMediaPrefetches.get(url);
-      if (cached) {
-        imagePromise = cached.promise;
-      } else {
-        const image = new Image();
-        image.decoding = "async";
-        image.fetchPriority = "low";
-        imagePromise = new Promise((resolve) => {
-          const finish = (ready) => resolve(Boolean(ready));
-          image.addEventListener("load", () => finish(true), { once: true });
-          image.addEventListener("error", () => finish(false), { once: true });
-          image.src = url;
-          if (image.complete && image.naturalWidth) Promise.resolve().then(() => finish(true));
-        });
-        shortVideoMediaPrefetches.set(url, { image, promise: imagePromise });
-        while (shortVideoMediaPrefetches.size > 18) {
-          shortVideoMediaPrefetches.delete(shortVideoMediaPrefetches.keys().next().value);
-        }
-      }
-    }
-    return Promise.all([imagePromise, playbackPromise]).then((results) => results.some(Boolean));
-  }
-
-  async function prefetchRelatedVideo(video = {}) {
-    const videoId = String(video?.id || "").trim();
-    if (!videoId) return null;
-    const params = shortVideoFeedParams();
-    const cached = resolvedShortVideoDetail(videoId, params);
-    if (cached?.video) {
-      prefetchShortVideoFirstMedia(cached.video).catch(() => {});
-      return cached;
-    }
-    const detail = await fetchShortVideoDetail(videoId, params);
-    if (detail?.video) {
-      cacheAuthorPanelVideo(detail.video);
-      await prefetchShortVideoFirstMedia(detail.video).catch(() => false);
-    }
-    return detail;
   }
 
   function scheduleAdjacentNavigationPrefetch() {
