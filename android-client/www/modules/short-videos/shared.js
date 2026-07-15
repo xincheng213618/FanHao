@@ -12,6 +12,11 @@ export const SHORT_VIDEO_SORT_OPTIONS = [
   ["comments", "评论最多"],
   ["duration", "时长最长"]
 ];
+export const FOLLOWING_AUTHOR_SORT_OPTIONS = [
+  ["followed", "最近关注"],
+  ["count", "视频数量"],
+  ["liked", "喜欢视频数"]
+];
 
 export function normalizeSort(value) {
   const sort = String(value || DEFAULT_SORT).trim();
@@ -26,7 +31,16 @@ export function shortVideoSortLabel(value) {
 
 export function normalizeSource(value) {
   const source = String(value || DEFAULT_SOURCE).trim().toLowerCase();
-  return ["liked", "authors", "posts", "all", "local"].includes(source) ? source : DEFAULT_SOURCE;
+  return ["liked", "following", "authors", "posts", "all", "local"].includes(source) ? source : DEFAULT_SOURCE;
+}
+
+export function normalizeFollowingAuthorSort(value) {
+  const sort = String(value || "followed").trim().toLowerCase();
+  return ["followed", "count", "liked"].includes(sort) ? sort : "followed";
+}
+
+export function normalizeFollowingAuthorFilter(value) {
+  return String(value || "all").trim().toLowerCase() === "unliked" ? "unliked" : "all";
 }
 
 export function normalizeSearchTab(value) {

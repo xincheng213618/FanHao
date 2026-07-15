@@ -47,6 +47,7 @@ export function createServerConfig({
     SHORT_VIDEO_ROOTS: parseShortVideoRoots(env),
     SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH: env.FANHAO_DOUYIN_DOWNLOAD_MANAGER_DB
       || path.join(projectRoot, "src", "modules", "short-videos", "download-manager", "data", "douyin_downloads.sqlite"),
+    SHORT_VIDEO_DOWNLOAD_MANAGER_URL: env.FANHAO_DOUYIN_DOWNLOAD_MANAGER_URL || "http://127.0.0.1:8765",
     SHORT_VIDEO_DOWNLOAD_MANAGER_SYNC_MS: Number(env.FANHAO_DOUYIN_SYNC_MS || 60 * 1000),
     NOVEL_UPLOAD_MAX_BODY_BYTES: 80 * 1024 * 1024,
     APP_CONFIG_PATH: path.join(DATA_DIR, "app-config.json"),

@@ -152,11 +152,13 @@ export function createWorkPresenterService({
     };
   }
 
-  function publicWork(work, includeFiles = false) {
+  function publicWork(work, includeFiles = false, options = {}) {
     const markers = localWorkMarkers(work);
     if (work.missingLocal) {
-      const person = displayPersonForWork(work.personId);
-      const profileRow = person ? actorProfileRow(person.id) : null;
+      const person = options.lightweightInfo
+        ? getLibrary().peopleById.get(String(work.personId || "")) || null
+        : displayPersonForWork(work.personId);
+      const profileRow = person && !options.lightweightInfo ? actorProfileRow(person.id) : null;
       const infoSummary = work.infoSummary || null;
       const base = {
         id: work.id,
@@ -200,12 +202,14 @@ export function createWorkPresenterService({
       return base;
     }
 
-    const person = displayPersonForWork(work.personId);
-    const profileRow = person ? actorProfileRow(person.id) : null;
-    const coreCover = publicCoreWorkCover(work.id);
+    const person = options.lightweightInfo
+      ? getLibrary().peopleById.get(String(work.personId || "")) || null
+      : displayPersonForWork(work.personId);
+    const profileRow = person && !options.lightweightInfo ? actorProfileRow(person.id) : null;
+    const coreCover = options.lightweightInfo ? null : publicCoreWorkCover(work.id);
     const manualCover = manualCoverStateService.manualCoverForWork(work);
     const cachedCover = manualCover ? null : coreCover || (work.coverId ? null : publicWorkCover(workCoverRow(work.id)));
-    const infoRow = workInfoRow(work.id);
+    const infoRow = options.lightweightInfo ? null : workInfoRow(work.id);
     const infoSummary = publicWorkInfoSummary(infoRow, work.infoSummary);
     const videos = work.videos || [];
     const favorite = favoriteStateService.publicFavoriteForWork(work.id);

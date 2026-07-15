@@ -15,6 +15,7 @@ const COMPRESSIBLE_EXTENSIONS = new Set([
   ".xml"
 ]);
 const STATIC_COMPRESSION_MIN_BYTES = 1024;
+const CONTENT_HASH_VERSION = /^(?:bundle-|sha256-)[a-f0-9]{12,64}$/i;
 
 const APP_PAGE_PATHS = new Set([
   "/fanhao",
@@ -76,6 +77,15 @@ export function isAppPagePath(routePath) {
   return APP_PAGE_PATHS.has(routePath) || APP_PAGE_PREFIXES.some((prefix) => routePath.startsWith(prefix));
 }
 
+export function staticCacheControl(requestUrl, ext) {
+  if (ext === ".html") return "no-store";
+  const version = /(?:\?|&)v=([^&]+)/.exec(String(requestUrl || ""))?.[1] || "";
+  try {
+    if (CONTENT_HASH_VERSION.test(decodeURIComponent(version))) return "public, max-age=31536000, immutable";
+  } catch {}
+  return "no-store";
+}
+
 export function createStaticFileServer({ publicDir, mimeTypes, normalizeExt, notFound }) {
   function acceptedCompression(req, ext, size) {
     if (!COMPRESSIBLE_EXTENSIONS.has(ext) || size < STATIC_COMPRESSION_MIN_BYTES) return "";
@@ -83,12 +93,6 @@ export function createStaticFileServer({ publicDir, mimeTypes, normalizeExt, not
     if (/(?:^|,)\s*br(?:\s*;|\s*,|$)/.test(accepted)) return "br";
     if (/(?:^|,)\s*gzip(?:\s*;|\s*,|$)/.test(accepted)) return "gzip";
     return "";
-  }
-
-  function cacheControl(req, ext) {
-    const versioned = /(?:\?|&)v=[^&]+/.test(String(req.url || ""));
-    if (versioned && ext !== ".html") return "public, max-age=31536000, immutable";
-    return "no-store";
   }
 
   function publicFilePath(urlPath) {
@@ -119,7 +123,7 @@ export function createStaticFileServer({ publicDir, mimeTypes, normalizeExt, not
     const encoding = acceptedCompression(req, ext, stat.size);
     res.writeHead(200, {
       "Content-Type": mimeTypes[ext] || "application/octet-stream",
-      "Cache-Control": cacheControl(req, ext),
+      "Cache-Control": staticCacheControl(req.url, ext),
       ...(encoding ? { "Content-Encoding": encoding, Vary: "Accept-Encoding" } : { "Content-Length": stat.size })
     });
     if (req.method === "HEAD") {

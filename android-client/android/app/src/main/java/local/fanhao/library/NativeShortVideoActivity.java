@@ -142,6 +142,7 @@ public class NativeShortVideoActivity extends Activity {
   private final ExecutorService executor = Executors.newFixedThreadPool(4);
   private final ExecutorService videoPrefetchExecutor = Executors.newSingleThreadExecutor();
   private final Set<String> pendingFrameIds = Collections.synchronizedSet(new HashSet<>());
+  private final Set<String> pendingAuthorFollowKeys = Collections.synchronizedSet(new HashSet<>());
   private final Set<String> pendingVideoPrefetchIds = Collections.synchronizedSet(new HashSet<>());
   private final Set<String> completedVideoPrefetchIds = Collections.synchronizedSet(new HashSet<>());
   private final LruCache<String, Bitmap> frameCache = new LruCache<String, Bitmap>(FRAME_CACHE_MAX_KB) {
@@ -158,9 +159,6 @@ public class NativeShortVideoActivity extends Activity {
   private final Map<Integer, PlayerView> playerViews = new HashMap<>();
   private final Map<String, int[]> decodedVideoSizes = new HashMap<>();
   private final Map<String, Integer> galleryPositions = new HashMap<>();
-  private final Set<Integer> primedPlayerIndexes = new HashSet<>();
-  private final Set<Integer> primeRequestedIndexes = new HashSet<>();
-  private final Set<Integer> primeCountdownIndexes = new HashSet<>();
   private final Set<Integer> failedPlayerIndexes = new HashSet<>();
   private final Set<String> likedVideoKeys = new HashSet<>();
   private final Set<String> collectedVideoKeys = new HashSet<>();
@@ -646,9 +644,6 @@ public class NativeShortVideoActivity extends Activity {
         int previousIndex = playerIndex(activePlayer);
         activePlayer.pause();
         activePlayer.setVolume(0f);
-        if (previousIndex >= 0 && activePlayer.getPlaybackState() == Player.STATE_READY) {
-          primedPlayerIndexes.add(previousIndex);
-        }
       }
       activePlayer = null;
       stopProgressUpdates();
@@ -676,29 +671,28 @@ public class NativeShortVideoActivity extends Activity {
       ensurePlayerViewAt(index);
       if (activePlayer.getPlaybackState() == Player.STATE_ENDED) activePlayer.seekTo(0);
       startActivePlaybackIfVisible();
+      loadMoreIfNeeded(index);
+      scheduleVideoPrefetch(index + 1);
+      releaseDistantPlayers(index);
       return;
     }
     if (activePlayer != null && activePlayer != nextPlayer) {
       int previousIndex = playerIndex(activePlayer);
       activePlayer.pause();
       activePlayer.setVolume(0f);
-      if (previousIndex >= 0 && activePlayer.getPlaybackState() == Player.STATE_READY) {
-        primedPlayerIndexes.add(previousIndex);
-      }
     }
     activePlayer = nextPlayer;
-    boolean primed = primedPlayerIndexes.remove(index);
-    primeRequestedIndexes.remove(index);
-    primeCountdownIndexes.remove(index);
     activePlayer.setRepeatMode(activeRepeatMode());
     activePlayer.setVolume(activeVolume());
     ensurePlayerViewAt(index);
     if (activePlayer.getPlaybackState() == Player.STATE_ENDED) activePlayer.seekTo(0);
-    holder.cover.setVisibility(primed ? View.GONE : View.VISIBLE);
+    holder.cover.setVisibility(View.VISIBLE);
     framePrefetchEnabled = true;
     startActivePlaybackIfVisible();
-    Log.i(TAG, "play " + index + (primed ? " primed " : " ") + item.streamUrl);
+    Log.i(TAG, "play " + index + " " + item.streamUrl);
     loadMoreIfNeeded(index);
+    scheduleVideoPrefetch(index + 1);
+    releaseDistantPlayers(index);
   }
 
   private void startActivePlaybackIfVisible() {
@@ -840,14 +834,11 @@ public class NativeShortVideoActivity extends Activity {
     }
 
     ShortVideoItem item = videos.get(index);
-    if (activePlayer != null && playerCache.containsValue(activePlayer) && index == currentIndex) {
+    if (activePlayer != null && playerCache.containsValue(activePlayer)) {
       int oldIndex = playerIndex(activePlayer);
       PlayerView oldView = oldIndex < 0 ? null : playerViews.remove(oldIndex);
       if (oldIndex >= 0) {
         playerCache.remove(oldIndex);
-        primedPlayerIndexes.remove(oldIndex);
-        primeRequestedIndexes.remove(oldIndex);
-        primeCountdownIndexes.remove(oldIndex);
         failedPlayerIndexes.remove(oldIndex);
         ShortVideoHolder oldHolder = attachedHolders.get(oldIndex);
         if (oldHolder != null) oldHolder.cover.setVisibility(View.VISIBLE);
@@ -923,9 +914,6 @@ public class NativeShortVideoActivity extends Activity {
         if (playbackState != Player.STATE_READY) return;
         failedPlayerIndexes.remove(liveIndex);
         if (currentIndex == liveIndex) hideStatus();
-        if (currentIndex != liveIndex && primeRequestedIndexes.contains(liveIndex)) {
-          mainHandler.post(() -> startPrimeCountdown(liveIndex, preparedPlayer));
-        }
         mainHandler.post(() -> syncPlayIndicator(liveIndex, preparedPlayer));
       }
 
@@ -1181,9 +1169,6 @@ public class NativeShortVideoActivity extends Activity {
     if (playerCache.get(index) != player && activePlayer != player) return;
     if (playerCache.get(index) == player) {
       playerCache.remove(index);
-      primedPlayerIndexes.remove(index);
-      primeRequestedIndexes.remove(index);
-      primeCountdownIndexes.remove(index);
       if (activePlayer == player) activePlayer = null;
       PlayerView view = playerViews.get(index);
       if (view != null) view.setPlayer(null);
@@ -1211,9 +1196,6 @@ public class NativeShortVideoActivity extends Activity {
 
   private void releasePlayerAt(int index) {
     ExoPlayer player = playerCache.remove(index);
-    primedPlayerIndexes.remove(index);
-    primeRequestedIndexes.remove(index);
-    primeCountdownIndexes.remove(index);
     failedPlayerIndexes.remove(index);
     PlayerView view = playerViews.remove(index);
     if (view != null) {
@@ -1328,12 +1310,7 @@ public class NativeShortVideoActivity extends Activity {
   private void preparePlayersAround(int index) {
     loadMoreIfNeeded(index);
     preparePlayerAt(index);
-    for (int neighbor = index - 1; neighbor <= index + 1; neighbor += 2) {
-      if (neighbor < 0 || neighbor >= videos.size()) continue;
-      ShortVideoItem item = videos.get(neighbor);
-      if (item.isGallery() || item.streamUrl.length() == 0) continue;
-      primeNeighborPlayer(neighbor, preparePlayerAt(neighbor));
-    }
+    scheduleVideoPrefetch(index + 1);
     releaseDistantPlayers(index);
   }
 
@@ -1353,42 +1330,11 @@ public class NativeShortVideoActivity extends Activity {
     }
   }
 
-  private void primeNeighborPlayer(int index, @Nullable ExoPlayer preparedPlayer) {
-    if (!activityResumed || authorOverlay != null) return;
-    if (preparedPlayer == null || index < 0 || index >= videos.size()) return;
-    if (preparedPlayer == activePlayer || primedPlayerIndexes.contains(index) || primeRequestedIndexes.contains(index)) return;
-    if (preparedPlayer.getPlaybackState() == Player.STATE_ENDED) preparedPlayer.seekTo(0);
-    preparedPlayer.setVolume(0f);
-    primeRequestedIndexes.add(index);
-    preparedPlayer.play();
-    if (preparedPlayer.getPlaybackState() == Player.STATE_READY) {
-      startPrimeCountdown(index, preparedPlayer);
-    }
-  }
-
-  private void startPrimeCountdown(int index, ExoPlayer preparedPlayer) {
-    if (preparedPlayer == activePlayer || primeCountdownIndexes.contains(index)) return;
-    primeCountdownIndexes.add(index);
-    mainHandler.postDelayed(() -> {
-      ExoPlayer livePlayer = playerCache.get(index);
-      if (livePlayer == null || livePlayer == activePlayer) return;
-      livePlayer.pause();
-      livePlayer.setVolume(0f);
-      primedPlayerIndexes.add(index);
-      primeRequestedIndexes.remove(index);
-      primeCountdownIndexes.remove(index);
-      Log.i(TAG, "prime " + index + " @" + livePlayer.getCurrentPosition() + "ms");
-    }, 220);
-  }
-
   private void releaseDistantPlayers(int centerIndex) {
     List<Integer> keys = new ArrayList<>(playerCache.keySet());
     for (int key : keys) {
-      if (Math.abs(key - centerIndex) <= 1) continue;
+      if (key == centerIndex) continue;
       ExoPlayer stalePlayer = playerCache.remove(key);
-      primedPlayerIndexes.remove(key);
-      primeRequestedIndexes.remove(key);
-      primeCountdownIndexes.remove(key);
       failedPlayerIndexes.remove(key);
       if (stalePlayer == null) continue;
       if (stalePlayer == activePlayer) {
@@ -1422,9 +1368,6 @@ public class NativeShortVideoActivity extends Activity {
     releaseGallerySoundPlayer();
     playerCache.clear();
     playerViews.clear();
-    primedPlayerIndexes.clear();
-    primeRequestedIndexes.clear();
-    primeCountdownIndexes.clear();
     failedPlayerIndexes.clear();
     activePlayer = null;
   }
@@ -2411,33 +2354,79 @@ public class NativeShortVideoActivity extends Activity {
   }
 
   private boolean isFollowingAuthor(ShortVideoItem item) {
-    String key = authorInteractionKey(item);
-    return key.length() > 0 && followedAuthorKeys.contains(key);
+    return item != null && item.authorFollowing;
   }
 
   private void toggleFollowingAuthor(ShortVideoItem item) {
+    toggleFollowingAuthor(item, null);
+  }
+
+  private void toggleFollowingAuthor(ShortVideoItem item, @Nullable Runnable onChange) {
     String key = authorInteractionKey(item);
     if (key.length() == 0) {
       showTransientStatus("这个视频没有作者信息");
       return;
     }
-    boolean following;
-    if (followedAuthorKeys.contains(key)) {
-      followedAuthorKeys.remove(key);
-      following = false;
-    } else {
-      followedAuthorKeys.add(key);
-      following = true;
+    String endpoint = authorFollowEndpoint(item);
+    if (endpoint.length() == 0) {
+      showTransientStatus("关注状态暂时无法同步");
+      return;
     }
-    persistVideoInteractionKeys(PREF_FOLLOWED_AUTHOR_KEYS, followedAuthorKeys);
+    if (!pendingAuthorFollowKeys.add(key)) return;
+    boolean wasFollowing = isFollowingAuthor(item);
+    boolean nextFollowing = !wasFollowing;
+    applyAuthorFollowingState(item, nextFollowing);
+    if (onChange != null) onChange.run();
     refreshVisibleRails();
-    showTransientStatus(following ? "已关注 " + displayAuthor(item) : "已取消关注");
+    executor.execute(() -> {
+      try {
+        JSONObject payload = new JSONObject();
+        payload.put("active", nextFollowing);
+        JSONObject data = requestComments(endpoint, "PUT", payload);
+        boolean following = data.optBoolean("active", nextFollowing);
+        mainHandler.post(() -> {
+          pendingAuthorFollowKeys.remove(key);
+          applyAuthorFollowingState(item, following);
+          if (onChange != null) onChange.run();
+          refreshVisibleRails();
+          showTransientStatus(following ? "已关注 " + displayAuthor(item) : "已取关 " + displayAuthor(item));
+        });
+      } catch (Exception error) {
+        mainHandler.post(() -> {
+          pendingAuthorFollowKeys.remove(key);
+          applyAuthorFollowingState(item, wasFollowing);
+          if (onChange != null) onChange.run();
+          refreshVisibleRails();
+          showTransientStatus("关注状态保存失败");
+        });
+      }
+    });
+  }
+
+  private void applyAuthorFollowingState(ShortVideoItem item, boolean following) {
+    String key = authorInteractionKey(item);
+    item.authorFollowing = following;
+    for (ShortVideoItem candidate : videos) {
+      if (key.equals(authorInteractionKey(candidate))) candidate.authorFollowing = following;
+    }
+    if (following) followedAuthorKeys.add(key);
+    else followedAuthorKeys.remove(key);
+    persistVideoInteractionKeys(PREF_FOLLOWED_AUTHOR_KEYS, followedAuthorKeys);
+  }
+
+  private String authorFollowEndpoint(ShortVideoItem item) {
+    if (item == null || apiBaseUrl == null) return "";
+    String target = item.authorId.length() > 0 ? item.authorId : item.authorSecUid;
+    if (target.length() == 0) return "";
+    String base = apiBaseUrl.trim();
+    while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
+    return base.length() == 0 ? "" : base + "/api/short-videos/authors/" + Uri.encode(target) + "/follow";
   }
 
   private void bindFollowButton(TextView button, ShortVideoItem item) {
     if (button == null) return;
     boolean following = isFollowingAuthor(item);
-    button.setText(following ? "已关注" : "+ 关注");
+    button.setText(following ? "已关注" : "已取关");
     button.setTextColor(following ? 0xFF161823 : Color.WHITE);
     button.setBackground(roundedDrawable(following ? 0xFFEFF1F5 : 0xFFFE2C55, dp(8)));
     button.setContentDescription((following ? "取消关注 " : "关注 ") + displayAuthor(item));
@@ -3078,86 +3067,10 @@ public class NativeShortVideoActivity extends Activity {
     String json = getIntent().getStringExtra(EXTRA_VIDEOS_JSON);
     if (json == null) return;
     try {
-      JSONArray array = new JSONArray(json);
-      for (int i = 0; i < array.length(); i++) {
-        ShortVideoItem item = itemFromJson(array.optJSONObject(i), baseUrl, String.valueOf(i));
-        if (item != null) videos.add(item);
-      }
-    } catch (Exception ignored) {}
-  }
-
-  private ShortVideoItem itemFromJson(JSONObject row, String baseUrl, String fallbackId) {
-    if (row == null) return null;
-    String mediaType = row.optString("mediaType", "video").trim().toLowerCase(Locale.ROOT);
-    String streamUrl = absoluteUrl(baseUrl, row.optString("streamUrl", ""));
-    List<GalleryMedia> galleryItems = new ArrayList<>();
-    JSONArray galleryMedia = row.optJSONArray("galleryItems");
-    if (galleryMedia == null || galleryMedia.length() == 0) galleryMedia = row.optJSONArray("galleryImages");
-    if (galleryMedia != null) {
-      for (int index = 0; index < galleryMedia.length(); index++) {
-        JSONObject entry = galleryMedia.optJSONObject(index);
-        String url = absoluteUrl(baseUrl, entry == null ? "" : entry.optString("url", ""));
-        if (url.length() > 0) galleryItems.add(new GalleryMedia(entry == null ? "image" : entry.optString("type", "image"), url));
-      }
+      videos.addAll(ShortVideoFeedContract.decode(json, baseUrl));
+    } catch (Exception error) {
+      Log.e(TAG, "Unable to decode initial short-video feed", error);
     }
-    if (streamUrl.length() == 0 && galleryItems.isEmpty()) return null;
-    if (!galleryItems.isEmpty()) mediaType = "gallery";
-    JSONObject soundJson = row.optJSONObject("sound");
-    ShortVideoSound sound = soundJson == null
-      ? ShortVideoSound.EMPTY
-      : new ShortVideoSound(
-        soundJson.optString("key", ""),
-        soundJson.optString("title", ""),
-        soundJson.optString("author", ""),
-        absoluteUrl(baseUrl, soundJson.optString("coverUrl", "")),
-        absoluteUrl(baseUrl, soundJson.optString("previewUrl", "")),
-        soundJson.optString("previewSource", ""),
-        soundJson.optBoolean("localAvailable", false),
-        soundJson.optBoolean("original", false)
-      );
-    JSONObject author = row.optJSONObject("author");
-    JSONObject stats = row.optJSONObject("stats");
-    JSONObject actions = row.optJSONObject("actions");
-    return new ShortVideoItem(
-      row.optString("id", fallbackId),
-      row.optString("awemeId", ""),
-      mediaType,
-      streamUrl,
-      absoluteUrl(baseUrl, row.optString("coverUrl", "")),
-      galleryItems,
-      sound,
-      row.optString("title", ""),
-      author == null ? "" : author.optString("name", ""),
-      author == null ? "" : author.optString("secUid", ""),
-      author == null ? "" : author.optString("uid", ""),
-      absoluteUrl(baseUrl, author == null ? "" : author.optString("avatarUrl", "")),
-      author == null ? "" : author.optString("profileUrl", ""),
-      author == null ? "" : author.optString("uniqueId", ""),
-      author == null ? "" : author.optString("shortId", ""),
-      author == null ? "" : author.optString("signature", ""),
-      author == null ? "" : author.optString("ipLocation", ""),
-      author == null ? 0 : author.optLong("followerCount", 0),
-      author == null ? 0 : author.optLong("followingCount", 0),
-      author == null ? 0 : author.optLong("totalFavorited", 0),
-      author == null ? 0 : author.optLong("awemeCount", 0),
-      author == null ? 0 : author.optLong("favoritingCount", 0),
-      author == null ? 0 : author.optInt("gender", 0),
-      author == null ? 0 : author.optInt("age", 0),
-      author == null ? "" : author.optString("verification", ""),
-      author == null ? "" : author.optString("profileCollectedAt", ""),
-      row.optString("publishedAt", ""),
-      row.optLong("durationMs", 0),
-      row.optInt("width", 0),
-      row.optInt("height", 0),
-      stats == null ? 0 : stats.optLong("likes", 0),
-      stats == null ? 0 : stats.optLong("comments", 0),
-      stats == null ? 0 : stats.optLong("collects", 0),
-      stats == null ? 0 : stats.optLong("shares", 0),
-      stats == null ? 0 : stats.optLong("plays", 0),
-      actions != null && actions.optBoolean("liked", false),
-      row.optString("shareUrl", ""),
-      row.optString("originalUrl", "")
-    );
   }
 
   private void showStatus(String text) {
@@ -3338,7 +3251,7 @@ public class NativeShortVideoActivity extends Activity {
       if (rows == null) return page;
       String baseUrl = baseFromUrl(feedUrl);
       for (int i = 0; i < rows.length(); i++) {
-        ShortVideoItem item = itemFromJson(rows.optJSONObject(i), baseUrl, String.valueOf(i));
+        ShortVideoItem item = ShortVideoFeedContract.itemFromJson(rows.optJSONObject(i), baseUrl, String.valueOf(i));
         if (item != null) page.items.add(item);
       }
       if (page.total == 0) page.total = page.items.size();
@@ -3594,8 +3507,7 @@ public class NativeShortVideoActivity extends Activity {
 
     TextView follow = authorActionButton("", true, authorInteractionKey(seed).length() > 0, null);
     follow.setOnClickListener(view -> {
-      toggleFollowingAuthor(seed);
-      bindFollowButton(follow, seed);
+      toggleFollowingAuthor(seed, () -> bindFollowButton(follow, seed));
     });
     bindFollowButton(follow, seed);
     LinearLayout.LayoutParams followParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.35f);
@@ -4563,15 +4475,6 @@ public class NativeShortVideoActivity extends Activity {
 
   private interface AuthorTabCallback {
     void onTab(String value);
-  }
-
-  private String absoluteUrl(String baseUrl, String value) {
-    if (value == null || value.trim().isEmpty()) return "";
-    String trimmed = value.trim();
-    if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed;
-    if (baseUrl == null || baseUrl.trim().isEmpty()) return trimmed;
-    Uri base = Uri.parse(baseUrl);
-    return base.buildUpon().encodedPath(trimmed.startsWith("/") ? trimmed : "/" + trimmed).encodedQuery(null).fragment(null).build().toString();
   }
 
   private String baseFromUrl(String value) {
@@ -6533,242 +6436,4 @@ public class NativeShortVideoActivity extends Activity {
     }
   }
 
-  private static final class FeedPage {
-    final List<ShortVideoItem> items = new ArrayList<>();
-    int offset = 0;
-    int limit = FEED_PAGE_LIMIT;
-    int total = 0;
-    boolean hasMore = false;
-    FeedStats stats = new FeedStats();
-
-    int nextOffset() {
-      return offset + limit;
-    }
-
-    FeedPage copy() {
-      FeedPage copy = new FeedPage();
-      copy.items.addAll(items);
-      copy.offset = offset;
-      copy.limit = limit;
-      copy.total = total;
-      copy.hasMore = hasMore;
-      copy.stats = stats == null ? new FeedStats() : stats.copy();
-      return copy;
-    }
-  }
-
-  private static final class CachedFeedPage {
-    final FeedPage page;
-    final long cachedAtMs;
-
-    CachedFeedPage(FeedPage page, long cachedAtMs) {
-      this.page = page;
-      this.cachedAtMs = cachedAtMs;
-    }
-  }
-
-  private static final class FeedStats {
-    long likes;
-    long comments;
-    long collects;
-    long shares;
-    long plays;
-    long bytes;
-    long durationMs;
-
-    static FeedStats fromJson(@Nullable JSONObject row) {
-      FeedStats stats = new FeedStats();
-      if (row == null) return stats;
-      stats.likes = row.optLong("likes", 0);
-      stats.comments = row.optLong("comments", 0);
-      stats.collects = row.optLong("collects", 0);
-      stats.shares = row.optLong("shares", 0);
-      stats.plays = row.optLong("plays", 0);
-      stats.bytes = row.optLong("bytes", 0);
-      stats.durationMs = row.optLong("durationMs", 0);
-      return stats;
-    }
-
-    static FeedStats fromItems(List<ShortVideoItem> items) {
-      FeedStats stats = new FeedStats();
-      for (ShortVideoItem item : items) {
-        stats.likes += item.likes;
-        stats.comments += item.comments;
-        stats.collects += item.collects;
-        stats.shares += item.shares;
-        stats.plays += item.plays;
-        stats.durationMs += Math.max(0, item.durationMs);
-      }
-      return stats;
-    }
-
-    boolean isEmpty() {
-      return likes == 0 && comments == 0 && collects == 0 && shares == 0 && plays == 0 && bytes == 0 && durationMs == 0;
-    }
-
-    FeedStats copy() {
-      FeedStats copy = new FeedStats();
-      copy.likes = likes;
-      copy.comments = comments;
-      copy.collects = collects;
-      copy.shares = shares;
-      copy.plays = plays;
-      copy.bytes = bytes;
-      copy.durationMs = durationMs;
-      return copy;
-    }
-  }
-
-  private static final class DeleteResult {
-    final Set<String> ids = new HashSet<>();
-    int count;
-    int deletedFiles;
-
-    static DeleteResult fromJson(JSONObject row, ShortVideoItem fallback) {
-      DeleteResult result = new DeleteResult();
-      JSONArray ids = row == null ? null : row.optJSONArray("ids");
-      if (ids != null) {
-        for (int i = 0; i < ids.length(); i++) {
-          String id = ids.optString(i, "").trim();
-          if (id.length() > 0) result.ids.add(id);
-        }
-      }
-      if (result.ids.isEmpty() && fallback != null && fallback.id.length() > 0) {
-        result.ids.add(fallback.id);
-      }
-      result.count = row == null ? result.ids.size() : Math.max(result.ids.size(), row.optInt("count", result.ids.size()));
-      JSONArray files = row == null ? null : row.optJSONArray("deletedFiles");
-      result.deletedFiles = files == null ? 0 : files.length();
-      return result;
-    }
-  }
-
-  private static final class ShortVideoItem {
-    final String id;
-    final String awemeId;
-    final String mediaType;
-    final String streamUrl;
-    final String coverUrl;
-    final List<GalleryMedia> galleryItems;
-    final ShortVideoSound sound;
-    final String title;
-    final String author;
-    final String authorSecUid;
-    final String authorUid;
-    final String authorAvatarUrl;
-    final String authorProfileUrl;
-    final String authorUniqueId;
-    final String authorShortId;
-    final String authorSignature;
-    final String authorIpLocation;
-    final long authorFollowerCount;
-    final long authorFollowingCount;
-    final long authorTotalFavorited;
-    final long authorAwemeCount;
-    final long authorFavoritingCount;
-    final int authorGender;
-    final int authorAge;
-    final String authorVerification;
-    final String authorProfileCollectedAt;
-    final String publishedAt;
-    final long durationMs;
-    final int width;
-    final int height;
-    final long likes;
-    final long comments;
-    final long collects;
-    final long shares;
-    final long plays;
-    final boolean libraryLiked;
-    final String shareUrl;
-    final String originalUrl;
-
-    ShortVideoItem(String id, String awemeId, String mediaType, String streamUrl, String coverUrl, List<GalleryMedia> galleryItems, ShortVideoSound sound, String title, String author, String authorSecUid, String authorUid, String authorAvatarUrl, String authorProfileUrl, String authorUniqueId, String authorShortId, String authorSignature, String authorIpLocation, long authorFollowerCount, long authorFollowingCount, long authorTotalFavorited, long authorAwemeCount, long authorFavoritingCount, int authorGender, int authorAge, String authorVerification, String authorProfileCollectedAt, String publishedAt, long durationMs, int width, int height, long likes, long comments, long collects, long shares, long plays, boolean libraryLiked, String shareUrl, String originalUrl) {
-      this.id = id == null ? "" : id;
-      this.awemeId = awemeId == null ? "" : awemeId;
-      this.mediaType = mediaType == null ? "video" : mediaType;
-      this.streamUrl = streamUrl == null ? "" : streamUrl;
-      this.coverUrl = coverUrl == null ? "" : coverUrl;
-      this.galleryItems = galleryItems == null
-        ? Collections.emptyList()
-        : Collections.unmodifiableList(new ArrayList<>(galleryItems));
-      this.sound = sound == null ? ShortVideoSound.EMPTY : sound;
-      this.title = title == null ? "" : title;
-      this.author = author == null ? "" : author;
-      this.authorSecUid = authorSecUid == null ? "" : authorSecUid;
-      this.authorUid = authorUid == null ? "" : authorUid;
-      this.authorAvatarUrl = authorAvatarUrl == null ? "" : authorAvatarUrl;
-      this.authorProfileUrl = authorProfileUrl == null ? "" : authorProfileUrl;
-      this.authorUniqueId = authorUniqueId == null ? "" : authorUniqueId;
-      this.authorShortId = authorShortId == null ? "" : authorShortId;
-      this.authorSignature = authorSignature == null ? "" : authorSignature;
-      this.authorIpLocation = authorIpLocation == null ? "" : authorIpLocation;
-      this.authorFollowerCount = authorFollowerCount;
-      this.authorFollowingCount = authorFollowingCount;
-      this.authorTotalFavorited = authorTotalFavorited;
-      this.authorAwemeCount = authorAwemeCount;
-      this.authorFavoritingCount = authorFavoritingCount;
-      this.authorGender = authorGender;
-      this.authorAge = authorAge;
-      this.authorVerification = authorVerification == null ? "" : authorVerification;
-      this.authorProfileCollectedAt = authorProfileCollectedAt == null ? "" : authorProfileCollectedAt;
-      this.publishedAt = publishedAt == null ? "" : publishedAt;
-      this.durationMs = durationMs;
-      this.width = Math.max(0, width);
-      this.height = Math.max(0, height);
-      this.likes = likes;
-      this.comments = comments;
-      this.collects = collects;
-      this.shares = shares;
-      this.plays = plays;
-      this.libraryLiked = libraryLiked;
-      this.shareUrl = shareUrl == null ? "" : shareUrl;
-      this.originalUrl = originalUrl == null ? "" : originalUrl;
-    }
-
-    boolean isGallery() {
-      return "gallery".equals(mediaType) && !galleryItems.isEmpty();
-    }
-  }
-
-  private static final class GalleryMedia {
-    final String type;
-    final String url;
-
-    GalleryMedia(String type, String url) {
-      this.type = "video".equals(type) ? "video" : "image";
-      this.url = url == null ? "" : url;
-    }
-
-    boolean isVideo() {
-      return "video".equals(type);
-    }
-  }
-
-  private static final class ShortVideoSound {
-    static final ShortVideoSound EMPTY = new ShortVideoSound("", "", "", "", "", "", false, false);
-    final String key;
-    final String title;
-    final String author;
-    final String coverUrl;
-    final String previewUrl;
-    final String previewSource;
-    final boolean localAvailable;
-    final boolean original;
-
-    ShortVideoSound(String key, String title, String author, String coverUrl, String previewUrl, String previewSource, boolean localAvailable, boolean original) {
-      this.key = key == null ? "" : key;
-      this.title = title == null ? "" : title;
-      this.author = author == null ? "" : author;
-      this.coverUrl = coverUrl == null ? "" : coverUrl;
-      this.previewUrl = previewUrl == null ? "" : previewUrl;
-      this.previewSource = previewSource == null ? "" : previewSource;
-      this.localAvailable = localAvailable;
-      this.original = original;
-    }
-
-    boolean isPlayable() {
-      return previewUrl.length() > 0;
-    }
-  }
 }

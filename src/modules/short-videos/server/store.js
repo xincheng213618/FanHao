@@ -3,6 +3,26 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame, extractCoverFrameAsync } from "../../../../lib/cover-frame.js";
+import { LOCAL_SHORT_VIDEO_USER_ID, SHORT_VIDEO_RECOMMENDATION_SCORE_SQL } from "./constants.js";
+import { createShortVideoCommentsRepository } from "./comments-repository.js";
+import {
+  ensureShortVideoColumns,
+  ensureShortVideoSearchIndex,
+  recreateShortVideoCatalogView,
+  refreshShortVideoAuthorFollowingFlags,
+  refreshShortVideoRelationshipFlags
+} from "./schema.js";
+import {
+  actualVideoQualityWhere,
+  encodeShortVideoSoundKey,
+  escapeLike,
+  formatSuggestionCount,
+  normalizeMediaFilter,
+  normalizeSourceFilter,
+  shortVideoFtsMatchQuery,
+  shortVideoMediaWhere,
+  videoFilter
+} from "./query-contract.js";
 
 const VIDEO_EXTS = new Set([".mp4", ".m4v", ".mov", ".webm"]);
 const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
@@ -14,54 +34,9 @@ const DEFAULT_COVER_GENERATE_LIMIT = 0;
 const DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT = 50000;
 const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
 const DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION = "4";
-const SHORT_VIDEO_TOPIC_INDEX_VERSION = "1";
-const SHORT_VIDEO_SOUND_INDEX_VERSION = "1";
-const SHORT_VIDEO_SCHEMA_VERSION = "20260712-2";
+const SHORT_VIDEO_SCHEMA_VERSION = "20260715-following-flag-7";
 const NORMALIZED_SCHEMA_VERSION = "2";
-const LOCAL_SHORT_VIDEO_USER_ID = "local:self";
 const IMPORTED_SHORT_VIDEO_ACTION_SOURCES = new Set(["imported", "download_manager"]);
-const SHORT_VIDEO_MEDIA_TYPE_SQL = `CASE
-  WHEN LOWER(COALESCE(json_extract(v.metadata_json, '$.fanhaoMedia.type'), json_extract(v.metadata_json, '$.media_type'), '')) = 'gallery'
-    THEN 'gallery'
-  ELSE 'video'
-END`;
-const SHORT_VIDEO_RECOMMENDATION_SCORE_SQL = `(
-  CASE
-    WHEN COALESCE(user_follow.active, 0) = 1 THEN 8000000000000
-    ELSE 0
-  END
-  + CASE
-    WHEN (
-      COALESCE(s.digg_count, v.digg_count, 0)
-      + COALESCE(s.comment_count, v.comment_count, 0) * 6
-      + COALESCE(s.collect_count, v.collect_count, 0) * 4
-      + COALESCE(s.share_count, v.share_count, 0) * 3
-    ) >= 1000000 THEN 5000000000000
-    WHEN (
-      COALESCE(s.digg_count, v.digg_count, 0)
-      + COALESCE(s.comment_count, v.comment_count, 0) * 6
-      + COALESCE(s.collect_count, v.collect_count, 0) * 4
-      + COALESCE(s.share_count, v.share_count, 0) * 3
-    ) >= 100000 THEN 4000000000000
-    WHEN (
-      COALESCE(s.digg_count, v.digg_count, 0)
-      + COALESCE(s.comment_count, v.comment_count, 0) * 6
-      + COALESCE(s.collect_count, v.collect_count, 0) * 4
-      + COALESCE(s.share_count, v.share_count, 0) * 3
-    ) >= 10000 THEN 3000000000000
-    WHEN (
-      COALESCE(s.digg_count, v.digg_count, 0)
-      + COALESCE(s.comment_count, v.comment_count, 0) * 6
-      + COALESCE(s.collect_count, v.collect_count, 0) * 4
-      + COALESCE(s.share_count, v.share_count, 0) * 3
-    ) >= 1000 THEN 2000000000000
-    ELSE 1000000000000
-  END
-  + (
-    ABS(CAST(SUBSTR(v.id, -9) AS INTEGER) * 1103515245 + 12345) % 1000000000
-  ) * 1000
-  + COALESCE(v.create_time, 0)
-)`;
 const LIST_VIDEO_COLUMNS = [
   "id",
   "aweme_id",
@@ -69,6 +44,7 @@ const LIST_VIDEO_COLUMNS = [
   "origin",
   "status",
   "visibility",
+  "media_type",
   "title",
   "description",
   "tags_json",
@@ -96,6 +72,15 @@ const LIST_VIDEO_COLUMNS = [
   "duration_ms",
   "width",
   "height",
+  "actual_width",
+  "actual_height",
+  "actual_bit_rate",
+  "actual_codec",
+  "actual_frame_rate",
+  "actual_pixels",
+  "actual_long_edge",
+  "actual_probed_at",
+  "actual_probe_error",
   "digg_count",
   "comment_count",
   "collect_count",
@@ -114,7 +99,7 @@ const LIST_VIDEO_COLUMNS = [
   "watch_completed_count",
   "last_watched_at",
   "share_url",
-  "metadata_json",
+  "CASE WHEN media_type = 'gallery' THEN metadata_json ELSE '{}' END AS metadata_json",
   "sound_key",
   "sound_id",
   "sound_title",
@@ -130,9 +115,13 @@ const LIST_VIDEO_COLUMNS = [
   "relative_path",
   "size_bytes"
 ].join(", ");
+const DETAIL_VIDEO_COLUMNS = `${LIST_VIDEO_COLUMNS}, is_liked, liked_sort_at, liked_sort_time, create_time, imported_at, updated_at`;
 
 export function createShortVideoStore(options = {}) {
   const dbPath = options.dbPath;
+  const skipStartupMaintenance = Boolean(options.skipStartupMaintenance);
+  const trustExplicitInvalidation = Boolean(options.trustExplicitInvalidation);
+  const downloadManagerDbPath = String(options.downloadManagerDbPath || "").trim();
   const roots = normalizeRoots(options.roots || []);
   const ffmpegPath = options.ffmpegPath || "ffmpeg";
   const coverCacheDir = options.coverCacheDir || path.join(path.dirname(dbPath || "."), "short-video-covers");
@@ -140,6 +129,15 @@ export function createShortVideoStore(options = {}) {
   const coverGenerateLimit = clampInt(options.coverGenerateLimit, DEFAULT_COVER_GENERATE_LIMIT, 0, MAX_LIMIT);
   if (!dbPath) throw new Error("short video dbPath is required");
   let db = null;
+  const {
+    createLocalComment,
+    deleteLocalComment,
+    importRemoteComments,
+    localComments
+  } = createShortVideoCommentsRepository({
+    database: databaseOrOpen,
+    resolveVideo: (database, id) => videoCatalogRowByAnyId(database, id, "id")
+  });
 
   function database() {
     if (!db) {
@@ -156,8 +154,51 @@ export function createShortVideoStore(options = {}) {
           ensureSchema(opened, coverCacheDir);
           opened.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('schema_version', ?)")
             .run(SHORT_VIDEO_SCHEMA_VERSION);
+        } else if (!skipStartupMaintenance) {
+          recreateShortVideoCatalogView(opened);
         }
-        cleanupSupersededFfmpegCovers(opened, coverCacheDir);
+        opened.exec(`
+          CREATE INDEX IF NOT EXISTS idx_short_videos_owner_visibility
+            ON short_videos(owner_user_id, visibility);
+          CREATE INDEX IF NOT EXISTS idx_short_videos_author_facet
+            ON short_videos(
+              visibility,
+              author_sec_uid,
+              author_name,
+              owner_user_id,
+              author_avatar_url,
+              cover_path,
+              mtime_ms,
+              id
+            );
+          CREATE INDEX IF NOT EXISTS idx_short_videos_summary
+            ON short_videos(visibility, author_sec_uid, author_name, size_bytes, duration_ms);
+          CREATE INDEX IF NOT EXISTS idx_short_videos_distribution
+            ON short_videos(visibility, media_type, actual_pixels, digg_count, id);
+          CREATE INDEX IF NOT EXISTS idx_short_videos_media_digg
+            ON short_videos(media_type, visibility, digg_count DESC, liked_at DESC, id DESC);
+          CREATE INDEX IF NOT EXISTS idx_short_videos_smooth_digg
+            ON short_videos(digg_count DESC, liked_at DESC, id DESC)
+            WHERE visibility = 'local_only'
+              AND media_type = 'video'
+              AND actual_long_edge >= 2160
+              AND source_path <> '';
+          CREATE INDEX IF NOT EXISTS idx_short_videos_following_media_digg
+            ON short_videos(author_following, media_type, visibility, digg_count DESC, liked_at DESC, id DESC);
+          CREATE INDEX IF NOT EXISTS idx_short_videos_following_media_published
+            ON short_videos(author_following, media_type, visibility, published_at DESC, liked_at DESC, id DESC);
+          CREATE INDEX IF NOT EXISTS idx_short_videos_following_stats
+            ON short_videos(owner_user_id, visibility, is_liked, aweme_id, id);
+          CREATE INDEX IF NOT EXISTS idx_short_video_assets_type_video
+            ON short_video_assets(asset_type, video_id);
+          CREATE INDEX IF NOT EXISTS idx_short_video_stats_engagement
+            ON short_video_stats(digg_count DESC, comment_count DESC, video_id);
+          CREATE INDEX IF NOT EXISTS idx_short_video_follows_active_recent
+            ON short_video_follows(local_user_id, active, followed_at DESC, target_user_id);
+          CREATE INDEX IF NOT EXISTS idx_short_video_watch_history_recent_video
+            ON short_video_watch_history(local_user_id, last_watched_at DESC, video_id);
+        `);
+        if (!skipStartupMaintenance) cleanupSupersededFfmpegCovers(opened, coverCacheDir);
         db = opened;
       } catch (error) {
         try {
@@ -169,7 +210,7 @@ export function createShortVideoStore(options = {}) {
     return db;
   }
 
-  function warm() {
+  function warm(options = {}) {
     const database = databaseOrOpen();
     const recent = database.prepare(`
       SELECT video_id AS id
@@ -196,6 +237,30 @@ export function createShortVideoStore(options = {}) {
         })
       });
     }
+    listVideos({
+      searchParams: new URLSearchParams({
+        source: "liked",
+        sort: "published",
+        limit: "42",
+        facets: "0",
+        stats: "0"
+      })
+    });
+    cachedSummary();
+    likeDistribution();
+    cachedAuthorFacet(database);
+    cachedFollowingAuthorFacet(database);
+    if (options.recommendations) {
+      recommendedVideoIds(database, {
+        q: "",
+        topic: "",
+        sound: "",
+        soundKey: "",
+        author: "",
+        media: "all",
+        quality: "all"
+      });
+    }
     return true;
   }
 
@@ -207,26 +272,37 @@ export function createShortVideoStore(options = {}) {
     db = null;
     catalogCache.key = null;
     catalogCache.summary = null;
+    catalogCache.likeDistribution = null;
     catalogCache.authors = null;
+    catalogCache.followingAuthors = null;
+    catalogCache.sourceTotals.clear();
     recommendationCache = { key: "", ids: [] };
+    explicitCatalogStamp = "";
   }
 
   // 列表的 summary() 与 authorFacet() 每次分页都会重算（聚合 + GROUP BY），
   // 但二者只在入库（scan / importDownloadManagerDb）改变行集合时才会变化。
   // 用 scanned_at + download_manager_imported_at 两个 meta 戳做缓存键：
   // scan 写入 scanned_at、import 写入 download_manager_imported_at，自动失效，零额外查询。
-  const catalogCache = { key: null, summary: null, authors: null };
+  const catalogCache = { key: null, summary: null, likeDistribution: null, authors: null, followingAuthors: null, sourceTotals: new Map() };
   let recommendationRevision = 0;
   let recommendationCache = { key: "", ids: [] };
+  let explicitCatalogStamp = "";
   function ensureCatalogCacheKey(key) {
     if (catalogCache.key === key) return;
     catalogCache.key = key;
     catalogCache.summary = null;
+    catalogCache.likeDistribution = null;
     catalogCache.authors = null;
+    catalogCache.followingAuthors = null;
+    catalogCache.sourceTotals.clear();
   }
   function catalogStamp() {
     const database = databaseOrOpen();
-    return `${metaValue(database, "scanned_at")}::${metaValue(database, "download_manager_imported_at")}::${metaValue(database, "deleted_at")}`;
+    const liveStamp = `${metaValue(database, "scanned_at")}::${metaValue(database, "download_manager_imported_at")}::${metaValue(database, "download_manager_following_imported_at")}::${metaValue(database, "deleted_at")}`;
+    if (!trustExplicitInvalidation) return liveStamp;
+    if (!explicitCatalogStamp) explicitCatalogStamp = liveStamp;
+    return explicitCatalogStamp;
   }
   function cachedSummary() {
     const key = catalogStamp();
@@ -240,13 +316,33 @@ export function createShortVideoStore(options = {}) {
     const key = catalogStamp();
     ensureCatalogCacheKey(key);
     if (catalogCache.key === key && catalogCache.authors) return catalogCache.authors;
-    const result = authorFacet(database);
+    const result = prepareAuthorSearchIndex(authorFacet(database));
     catalogCache.authors = result;
     return result;
   }
 
+  function cachedFollowingAuthorFacet(database) {
+    const key = catalogStamp();
+    ensureCatalogCacheKey(key);
+    if (catalogCache.key === key && catalogCache.followingAuthors) return catalogCache.followingAuthors;
+    const result = prepareAuthorSearchIndex(followingAuthorFacet(database));
+    catalogCache.followingAuthors = result;
+    return result;
+  }
+
+  function prepareAuthorSearchIndex(authors = []) {
+    for (const author of authors) {
+      Object.defineProperty(author, "_searchText", {
+        configurable: true,
+        enumerable: false,
+        value: `${author.name || ""} ${author.secUid || ""} ${author.uniqueId || ""} ${author.id || ""}`.toLocaleLowerCase("zh-CN")
+      });
+    }
+    return authors;
+  }
+
   function recommendedVideoIds(database, filter = {}) {
-    const cacheKey = `${catalogStamp()}::${recommendationRevision}::${filter.q || ""}::${filter.topic || ""}::${filter.sound || ""}::${filter.author || "all"}::${filter.media || "all"}`;
+    const cacheKey = `${catalogStamp()}::${recommendationRevision}::${filter.q || ""}::${filter.topic || ""}::${filter.sound || ""}::${filter.author || "all"}::${filter.media || "all"}::${filter.quality || "all"}`;
     if (recommendationCache.key === cacheKey) return recommendationCache.ids;
     const where = [
       "v.visibility = 'local_only'",
@@ -254,15 +350,23 @@ export function createShortVideoStore(options = {}) {
     ];
     const args = [];
     if (filter.q) {
-      const like = `%${escapeLike(filter.q)}%`;
-      where.push(`(
-        v.title LIKE ? ESCAPE '\\' OR
-        v.description LIKE ? ESCAPE '\\' OR
-        v.author_name LIKE ? ESCAPE '\\' OR
-        v.aweme_id LIKE ? ESCAPE '\\' OR
-        v.tags_text LIKE ? ESCAPE '\\'
-      )`);
-      args.push(like, like, like, like, like);
+      const ftsQuery = shortVideoFtsMatchQuery(filter.q);
+      if (ftsQuery) {
+        where.push(`v.id IN (
+          SELECT video_id FROM short_video_search WHERE short_video_search MATCH ?
+        )`);
+        args.push(ftsQuery);
+      } else {
+        const like = `%${escapeLike(filter.q)}%`;
+        where.push(`(
+          v.title LIKE ? ESCAPE '\\' OR
+          v.description LIKE ? ESCAPE '\\' OR
+          v.author_name LIKE ? ESCAPE '\\' OR
+          v.aweme_id LIKE ? ESCAPE '\\' OR
+          v.tags_text LIKE ? ESCAPE '\\'
+        )`);
+        args.push(like, like, like, like, like);
+      }
     }
     if (filter.topic) {
       where.push("v.id IN (SELECT video_id FROM short_video_topics WHERE topic_key = LOWER(?))");
@@ -282,18 +386,18 @@ export function createShortVideoStore(options = {}) {
       }
     }
     if (filter.media && filter.media !== "all") {
-      where.push(`${SHORT_VIDEO_MEDIA_TYPE_SQL} = ?`);
-      args.push(filter.media);
+      where.push(shortVideoMediaWhere(filter.media, "v."));
+    }
+    const qualityWhere = actualVideoQualityWhere(filter.quality, "v.");
+    if (qualityWhere) {
+      if (filter.quality === "unknown") where.push(shortVideoMediaWhere("video", "v."));
+      where.push(qualityWhere);
     }
     const rows = database.prepare(`
       SELECT
         v.id,
         MAX(${SHORT_VIDEO_RECOMMENDATION_SCORE_SQL}) AS recommendation_group_score
       FROM short_videos v
-      LEFT JOIN short_video_stats s ON s.video_id = v.id
-      LEFT JOIN short_video_follows user_follow
-        ON user_follow.target_user_id = v.owner_user_id
-       AND user_follow.local_user_id = '${LOCAL_SHORT_VIDEO_USER_ID}'
       LEFT JOIN short_video_user_actions user_dislike
         ON user_dislike.video_id = v.id
        AND user_dislike.local_user_id = '${LOCAL_SHORT_VIDEO_USER_ID}'
@@ -344,32 +448,156 @@ export function createShortVideoStore(options = {}) {
   }
 
   function facets() {
-    const database = databaseOrOpen();
+    const authorPage = listAuthors({
+      searchParams: new URLSearchParams({ limit: "96", offset: "0" })
+    });
     return {
       summary: cachedSummary(),
-      authors: cachedAuthorFacet(database)
+      authors: authorPage.authors,
+      authorsTotal: authorPage.total,
+      authorsTruncated: authorPage.hasMore
     };
   }
 
   function listAuthors(urlOrOptions = {}) {
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const query = String(params.get("q") || params.get("query") || "").trim().slice(0, 120);
+    const scope = String(params.get("scope") || "all").trim().toLowerCase() === "following" ? "following" : "all";
+    const authorSort = normalizeAuthorSort(params.get("sort"));
+    const authorFilter = normalizeAuthorFilter(params.get("filter"));
     const limit = clampInt(params.get("limit"), 96, 1, 240);
     const offset = clampInt(params.get("offset"), 0, 0, 1000000);
     const normalizedQuery = query.toLocaleLowerCase("zh-CN");
     const database = databaseOrOpen();
-    const allAuthors = cachedAuthorFacet(database);
+    const scopedAuthors = scope === "following"
+      ? cachedFollowingAuthorFacet(database)
+      : cachedAuthorFacet(database);
+    const scopeTotal = scopedAuthors.length;
+    const unlikedTotal = scope === "following"
+      ? scopedAuthors.filter((author) => Number(author.likedCount || 0) === 0).length
+      : 0;
     const matchedAuthors = normalizedQuery
-      ? allAuthors.filter((author) => `${author.name || ""} ${author.secUid || ""}`.toLocaleLowerCase("zh-CN").includes(normalizedQuery))
-      : allAuthors;
-    const authors = matchedAuthors.slice(offset, offset + limit);
+      ? scopedAuthors.filter((author) => author._searchText.includes(normalizedQuery))
+      : [...scopedAuthors];
+    const filteredAuthors = scope === "following" && authorFilter === "unliked"
+      ? matchedAuthors.filter((author) => Number(author.likedCount || 0) === 0)
+      : matchedAuthors;
+    if (scope === "following") filteredAuthors.sort(authorComparator(authorSort));
+    const authors = filteredAuthors.slice(offset, offset + limit);
     return {
       query,
-      total: matchedAuthors.length,
+      scope,
+      sort: scope === "following" ? authorSort : "count",
+      filter: scope === "following" ? authorFilter : "all",
+      scopeTotal,
+      unlikedTotal,
+      total: filteredAuthors.length,
       limit,
       offset,
-      hasMore: offset + authors.length < matchedAuthors.length,
+      hasMore: offset + authors.length < filteredAuthors.length,
       authors
+    };
+  }
+
+  function resolveAuthorMention(value) {
+    const mention = String(value || "").trim().replace(/^@+\s*/u, "").trim().slice(0, 120);
+    if (!mention) return null;
+    const normalizedMention = mention.replace(/[-‐‑‒–—―_·•.。]+$/gu, "").trim();
+    const database = databaseOrOpen();
+    const row = database.prepare(`
+      SELECT
+        users.id,
+        users.sec_uid AS secUid,
+        users.uid,
+        users.nickname AS name,
+        users.avatar_url AS avatarUrl,
+        users.profile_url AS profileUrl,
+        users.unique_id AS uniqueId,
+        users.short_id AS shortId,
+        users.signature,
+        users.ip_location AS ipLocation,
+        users.follower_count AS followerCount,
+        users.following_count AS followingCount,
+        users.total_favorited AS totalFavorited,
+        users.aweme_count AS awemeCount,
+        users.favoriting_count AS favoritingCount,
+        users.gender,
+        users.age,
+        users.verification,
+        users.profile_collected_at AS profileCollectedAt,
+        EXISTS (
+          SELECT 1
+          FROM short_video_follows follows
+          WHERE follows.local_user_id = ?
+            AND follows.target_user_id = users.id
+            AND follows.active = 1
+        ) AS following,
+        (
+          SELECT COUNT(*)
+          FROM short_videos videos
+          WHERE videos.visibility = 'local_only'
+            AND (
+              videos.owner_user_id = users.id
+              OR (COALESCE(videos.owner_user_id, '') = '' AND videos.author_sec_uid = users.sec_uid)
+            )
+        ) AS count
+      FROM short_video_users users
+      WHERE users.platform = 'douyin'
+        AND (
+          users.nickname = ? COLLATE NOCASE
+          OR users.unique_id = ? COLLATE NOCASE
+          OR users.short_id = ?
+          OR users.sec_uid = ?
+          OR RTRIM(TRIM(users.nickname), '-‐‑‒–—―_·•.。 ') = ? COLLATE NOCASE
+        )
+      ORDER BY
+        CASE
+          WHEN users.nickname = ? COLLATE NOCASE THEN 0
+          WHEN users.unique_id = ? COLLATE NOCASE THEN 1
+          WHEN users.short_id = ? THEN 2
+          WHEN users.sec_uid = ? THEN 3
+          WHEN RTRIM(TRIM(users.nickname), '-‐‑‒–—―_·•.。 ') = ? COLLATE NOCASE THEN 4
+          ELSE 5
+        END,
+        count DESC,
+        users.profile_collected_at DESC
+      LIMIT 1
+    `).get(
+      LOCAL_SHORT_VIDEO_USER_ID,
+      mention,
+      mention,
+      mention,
+      mention,
+      normalizedMention,
+      mention,
+      mention,
+      mention,
+      mention,
+      normalizedMention
+    );
+    if (!row?.secUid) return null;
+    return {
+      id: row.id || "",
+      secUid: row.secUid || "",
+      uid: row.uid || "",
+      name: row.name || mention,
+      avatarUrl: row.avatarUrl || "",
+      profileUrl: row.profileUrl || normalizedDouyinUserUrl("", row.secUid),
+      uniqueId: row.uniqueId || "",
+      shortId: row.shortId || "",
+      signature: row.signature || "",
+      ipLocation: row.ipLocation || "",
+      followerCount: optionalInteger(row.followerCount),
+      followingCount: optionalInteger(row.followingCount),
+      totalFavorited: optionalInteger(row.totalFavorited),
+      awemeCount: optionalInteger(row.awemeCount),
+      favoritingCount: optionalInteger(row.favoritingCount),
+      gender: optionalInteger(row.gender),
+      age: optionalInteger(row.age),
+      verification: row.verification || "",
+      profileCollectedAt: row.profileCollectedAt || "",
+      following: Boolean(row.following),
+      count: Number(row.count || 0)
     };
   }
 
@@ -382,11 +610,96 @@ export function createShortVideoStore(options = {}) {
     if (!query) return { query, media, author, suggestions: [] };
     const database = databaseOrOpen();
     const like = `%${escapeLike(query)}%`;
+    if (!author) {
+      const indexedMediaWhere = media === "all" ? "" : `AND ${shortVideoMediaWhere(media, "v.")}`;
+      const indexedAuthorRows = database.prepare(`
+        SELECT label, SUM(video_count) AS count
+        FROM (
+          SELECT
+            u.nickname AS label,
+            (
+              SELECT COUNT(*)
+              FROM short_videos v
+              WHERE v.owner_user_id = u.id
+                AND v.visibility = 'local_only'
+                ${indexedMediaWhere}
+            ) AS video_count
+          FROM short_video_users u
+          WHERE COALESCE(u.nickname, '') <> ''
+            AND u.nickname LIKE ? ESCAPE '\\'
+        )
+        WHERE video_count > 0
+        GROUP BY label
+        ORDER BY count DESC, label ASC
+        LIMIT ?
+      `).all(like, limit);
+      if (indexedAuthorRows.length) {
+        return {
+          query,
+          media,
+          author,
+          suggestions: indexedAuthorRows.map((row) => ({
+            kind: "author",
+            label: row.label,
+            query: row.label,
+            detail: `${formatSuggestionCount(row.count)} 条作品`
+          }))
+        };
+      }
+    }
+    const ftsQuery = shortVideoFtsMatchQuery(query);
+    if (ftsQuery) {
+      const ftsAuthorWhere = author ? `AND ${author.startsWith("name:") ? "author_name" : "author_sec_uid"} = ?` : "";
+      const ftsAuthorArgs = author ? [author.startsWith("name:") ? author.slice(5) : author] : [];
+      const ftsMediaWhere = media === "all" ? "" : `AND ${shortVideoMediaWhere(media)}`;
+      const indexedRows = database.prepare(`
+        SELECT title, author_name, tags_json
+        FROM short_video_search
+        WHERE short_video_search MATCH ?
+          AND visibility = 'local_only'
+          ${ftsAuthorWhere}
+          ${ftsMediaWhere}
+        LIMIT 160
+      `).all(ftsQuery, ...ftsAuthorArgs);
+      if (indexedRows.length) {
+        const suggestions = [];
+        const seen = new Set();
+        const append = (item) => {
+          const value = String(item?.query || item?.label || "").trim();
+          const key = value.toLocaleLowerCase();
+          if (!value || seen.has(key) || suggestions.length >= limit) return;
+          seen.add(key);
+          suggestions.push({ ...item, query: value });
+        };
+        const normalizedQuery = query.toLocaleLowerCase();
+        const tagCounts = new Map();
+        for (const row of indexedRows) {
+          for (const tag of recommendationTagList(row.tags_json)) {
+            const label = String(tag || "").replace(/^#/, "").trim();
+            if (!label || !label.toLocaleLowerCase().includes(normalizedQuery)) continue;
+            tagCounts.set(label, (tagCounts.get(label) || 0) + 1);
+          }
+        }
+        for (const [label, count] of [...tagCounts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0], "zh-CN"))) {
+          append({ kind: "tag", label: `#${label}`, query: label, detail: `${formatSuggestionCount(count)} 条相关作品` });
+        }
+        for (const row of indexedRows) {
+          const title = String(row.title || "").trim();
+          if (!title || !title.toLocaleLowerCase().includes(normalizedQuery)) continue;
+          append({
+            kind: "title",
+            label: title.length > 56 ? `${title.slice(0, 56)}…` : title,
+            query: title,
+            detail: row.author_name ? `@${row.author_name}` : "作品"
+          });
+        }
+        if (suggestions.length) return { query, media, author, suggestions };
+      }
+    }
     const authorWhere = author ? `AND ${author.startsWith("name:") ? "v.author_name" : "v.author_sec_uid"} = ?` : "";
     const authorArgs = author ? [author.startsWith("name:") ? author.slice(5) : author] : [];
-    const mediaWhere = media === "all" ? "" : `AND ${SHORT_VIDEO_MEDIA_TYPE_SQL} = ?`;
-    const mediaArgs = media === "all" ? [] : [media];
-    const filterArgs = [...authorArgs, ...mediaArgs];
+    const mediaWhere = media === "all" ? "" : `AND ${shortVideoMediaWhere(media, "v.")}`;
+    const filterArgs = [...authorArgs];
     const authorRows = database.prepare(`
       SELECT author_name AS label, COUNT(*) AS count
       FROM short_videos v
@@ -464,14 +777,14 @@ function summary() {
       COUNT(DISTINCT COALESCE(NULLIF(author_sec_uid, ''), NULLIF(author_name, ''), 'unknown')) AS authors,
       COALESCE(SUM(size_bytes), 0) AS bytes,
       COALESCE(SUM(duration_ms), 0) AS durationMs
-    FROM short_videos
+    FROM short_videos INDEXED BY idx_short_videos_summary
     WHERE visibility = 'local_only'
   `).get();
     const scannedAt = metaValue(database, "scanned_at");
     const sourceRoot = metaValue(database, "source_root");
     const authorRows = database.prepare(`
       SELECT author_sec_uid, author_name, COUNT(*) AS count
-      FROM short_videos
+      FROM short_videos INDEXED BY idx_short_videos_summary
       WHERE visibility = 'local_only'
       GROUP BY author_sec_uid, author_name
       ORDER BY count DESC, author_name COLLATE NOCASE
@@ -509,7 +822,8 @@ function summary() {
           : requestedSort;
     const limit = clampInt(params.get("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
     const offset = clampInt(params.get("offset"), 0, 0, 1000000);
-    const includeFacets = params.get("facets") !== "0";
+    const listCursor = decodeShortVideoListCursor(params.get("cursor"), sort);
+    const includeFacets = params.get("facets") === "1";
     const includeStats = params.get("stats") !== "0";
     const where = filter.where ? `WHERE ${filter.where}` : "";
     const orderBy = {
@@ -536,9 +850,22 @@ function summary() {
     }[sort] || "published_at DESC, liked_at DESC";
     const database = databaseOrOpen();
     const recommendationIds = filter.source === "recommended" ? recommendedVideoIds(database, filter) : null;
+    const sourceTotalKey = fastSourceTotalCacheKey(filter);
+    let sourceTotalOverride;
+    if (sourceTotalKey) {
+      ensureCatalogCacheKey(catalogStamp());
+      if (catalogCache.sourceTotals.has(sourceTotalKey)) {
+        sourceTotalOverride = catalogCache.sourceTotals.get(sourceTotalKey);
+      }
+    }
     const fastPage = recommendationIds
       ? null
-      : fastPublishedVideoPage(database, filter, sort, limit, offset);
+      : fastHistoryVideoPage(database, filter, sort, limit, offset)
+        ?? fastFilteredVideoPage(database, filter, sort, limit, offset, sourceTotalOverride, listCursor)
+        ?? fastPublishedVideoPage(database, filter, sort, limit, offset, sourceTotalOverride);
+    if (sourceTotalKey && fastPage && sourceTotalOverride === undefined) {
+      catalogCache.sourceTotals.set(sourceTotalKey, Number(fastPage.total || 0));
+    }
     const total = recommendationIds
       ? recommendationIds.length
       : fastPage
@@ -576,46 +903,76 @@ function summary() {
         `).all(...filter.args, limit, offset);
     }
     ensureGeneratedCovers(database, rows, coverGenerateLimit);
+    const userPage = filter.q && params.get("users") !== "0"
+      ? listAuthors({
+          searchParams: new URLSearchParams({
+            q: filter.q,
+            limit: "6",
+            offset: "0"
+          })
+        })
+      : null;
     return {
       summary: includeFacets ? cachedSummary() : null,
       total: Number(total || 0),
       relationshipTotal,
       limit,
       offset,
-      hasMore: offset + rows.length < Number(total || 0),
+      hasMore: typeof fastPage?.hasMore === "boolean"
+        ? fastPage.hasMore
+        : offset + rows.length < Number(total || 0),
+      nextCursor: String(fastPage?.nextCursor || ""),
       query: filter.q,
       topic: filter.topic,
       sound: filter.sound,
       author: filter.author,
       media: filter.media,
+      quality: filter.quality,
       source: filter.source,
       sort,
       stats,
-      authors: includeFacets ? cachedAuthorFacet(database) : [],
+      authors: includeFacets
+        ? listAuthors({ searchParams: new URLSearchParams({ limit: "96", offset: "0" }) }).authors
+        : [],
+      users: userPage?.authors || [],
+      usersTotal: Number(userPage?.total || 0),
+      usersHasMore: Boolean(userPage?.hasMore),
       videos: rows.map(publicVideo)
     };
   }
 
   function videoDetail(id, urlOrOptions = {}) {
     const database = databaseOrOpen();
-    const row = videoCatalogRowByAnyId(database, id);
-    if (!row) return null;
     const params = urlOrOptions?.searchParams || new URLSearchParams();
+    const includeMetadata = params.get("metadata") !== "0";
+    const row = videoCatalogRowByAnyId(database, id, includeMetadata ? "*" : DETAIL_VIDEO_COLUMNS);
+    if (!row) return null;
     const requestedNeighborLimit = params.get("neighbors");
     const neighborLimit = requestedNeighborLimit == null
       ? DETAIL_NEIGHBOR_LIMIT
       : clampInt(requestedNeighborLimit, DETAIL_NEIGHBOR_LIMIT, 1, DETAIL_NEIGHBOR_LIMIT);
-    const includeMetadata = params.get("metadata") !== "0";
     const order = adjacentOrder(urlOrOptions);
     const filter = videoFilter(params);
     const recommended = filter.source === "recommended";
     const collectNeighbors = (direction) => {
-      const fastRows = !recommended
-        ? fastPublishedAdjacentRows(database, row, direction, filter, order, neighborLimit)
-        : null;
-      const rows = fastRows || (recommended
-        ? recommendedAdjacentRows(database, row, direction, true, filter, order, neighborLimit)
-        : adjacentRows(database, row, direction, order, true, filter, neighborLimit));
+      let fastRows = null;
+      if (!recommended) {
+        fastRows = fastHistoryAdjacentRows(database, row, direction, filter, order, neighborLimit);
+        if (fastRows == null) {
+          fastRows = fastLikedAdjacentRows(database, row, direction, filter, order, neighborLimit);
+        }
+        if (fastRows == null) {
+          fastRows = fastPublishedAdjacentRows(database, row, direction, filter, order, neighborLimit);
+        }
+        if (fastRows == null) {
+          fastRows = fastMetricAdjacentRows(database, row, direction, filter, order, neighborLimit);
+        }
+      }
+      const rows = fastRows !== null
+        ? fastRows
+        : recommended
+          ? recommendedAdjacentRows(database, row, direction, true, filter, order, neighborLimit)
+          : adjacentRows(database, row, direction, order, true, filter, neighborLimit);
       return rows.map((adjacent) => publicVideo(adjacent));
     };
     const previousVideos = collectNeighbors(-1);
@@ -631,6 +988,658 @@ function summary() {
     };
   }
 
+  function smoothPlaybackCandidateCount() {
+    const database = databaseOrOpen();
+    return Number(database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM short_videos INDEXED BY idx_short_videos_smooth_digg
+      WHERE visibility = 'local_only'
+        AND media_type = 'video'
+        AND actual_long_edge >= 2160
+        AND source_path <> ''
+    `).get()?.count || 0);
+  }
+
+  function smoothPlaybackCandidates(requestedLimit = 512, requestedOffset = 0) {
+    const database = databaseOrOpen();
+    const limit = clampInt(requestedLimit, 512, 1, 5000);
+    const offset = clampInt(requestedOffset, 0, 0, 1000000);
+    return database.prepare(`
+      SELECT
+        id,
+        source_path,
+        mtime_ms,
+        size_bytes,
+        width,
+        height,
+        actual_width,
+        actual_height,
+        actual_bit_rate,
+        actual_codec,
+        actual_frame_rate,
+        actual_pixels,
+        actual_long_edge,
+        actual_probed_at,
+        actual_probe_error,
+        digg_count
+      FROM short_videos INDEXED BY idx_short_videos_smooth_digg
+      WHERE visibility = 'local_only'
+        AND media_type = 'video'
+        AND actual_long_edge >= 2160
+        AND source_path <> ''
+      ORDER BY digg_count DESC, liked_at DESC, id DESC
+      LIMIT ? OFFSET ?
+    `).all(limit, offset).map((row) => ({
+      id: String(row.id || ""),
+      sourcePath: String(row.source_path || ""),
+      mediaType: "video",
+      size: Math.max(0, Number(row.size_bytes || 0)),
+      streamUrl: shortVideoMediaUrl(row.id, row.mtime_ms),
+      width: Number(row.width || 0) || null,
+      height: Number(row.height || 0) || null,
+      actualVideo: {
+        width: Number(row.actual_width || 0) || null,
+        height: Number(row.actual_height || 0) || null,
+        bitRate: Number(row.actual_bit_rate || 0) || null,
+        codec: row.actual_codec || "",
+        frameRate: Number(row.actual_frame_rate || 0) || null,
+        pixels: Math.max(0, Number(row.actual_pixels || 0)),
+        longEdge: Math.max(0, Number(row.actual_long_edge || 0)),
+        probedAt: row.actual_probed_at || "",
+        probeError: row.actual_probe_error || ""
+      },
+      stats: {
+        likes: Math.max(0, Number(row.digg_count || 0))
+      }
+    }));
+  }
+
+  function likeDistribution() {
+    const key = catalogStamp();
+    ensureCatalogCacheKey(key);
+    if (catalogCache.key === key && catalogCache.likeDistribution) return catalogCache.likeDistribution;
+    const database = databaseOrOpen();
+    const rows = database.prepare(`
+      WITH distribution AS (
+        SELECT
+          COALESCE(s.digg_count, v.digg_count, 0) AS likes,
+          COALESCE(v.actual_pixels, 0) AS actual_pixels
+        FROM short_videos v INDEXED BY idx_short_videos_distribution
+        LEFT JOIN short_video_stats s ON s.video_id = v.id
+        WHERE v.visibility = 'local_only'
+          AND v.media_type = 'video'
+      )
+      SELECT
+        CASE
+          WHEN likes <= 0 THEN -1
+          WHEN likes < 10000 THEN CAST(likes / 1000 AS INTEGER)
+          WHEN likes < 100000 THEN 10 + CAST((likes - 10000) / 10000 AS INTEGER)
+          WHEN likes < 1000000 THEN 19 + CAST((likes - 100000) / 100000 AS INTEGER)
+          WHEN likes < 5000000 THEN 28 + CAST((likes - 1000000) / 1000000 AS INTEGER)
+          ELSE 32
+        END AS bin_index,
+        COUNT(*) AS video_count,
+        SUM(CASE WHEN actual_pixels >= 8294400 THEN 1 ELSE 0 END) AS four_k_count
+      FROM distribution
+      GROUP BY bin_index
+    `).all();
+    const microBins = Array.from({ length: 10 }, (_, index) => ({
+      minLikes: index * 1000,
+      maxLikes: (index + 1) * 1000,
+      label: index === 9 ? "9千-1万" : `${index}-${index + 1}千`,
+      videoCount: 0,
+      fourKCount: 0
+    }));
+    const lowBins = Array.from({ length: 9 }, (_, index) => ({
+      minLikes: 10000 + index * 10000,
+      maxLikes: 20000 + index * 10000,
+      label: `${index + 1}-${index + 2}万`,
+      videoCount: 0,
+      fourKCount: 0
+    }));
+    const denseBins = Array.from({ length: 9 }, (_, index) => ({
+      minLikes: 100000 + index * 100000,
+      maxLikes: 200000 + index * 100000,
+      label: `${10 + index * 10}-${20 + index * 10}万`,
+      videoCount: 0,
+      fourKCount: 0
+    }));
+    const tailBins = Array.from({ length: 4 }, (_, index) => ({
+      minLikes: 1000000 + index * 1000000,
+      maxLikes: 2000000 + index * 1000000,
+      label: `${100 + index * 100}-${200 + index * 100}万`,
+      videoCount: 0,
+      fourKCount: 0
+    }));
+    const bins = [
+      ...microBins,
+      ...lowBins,
+      ...denseBins,
+      ...tailBins,
+      { minLikes: 5000000, maxLikes: null, label: "500万+", videoCount: 0, fourKCount: 0 }
+    ];
+    let total = 0;
+    let knownLikesTotal = 0;
+    let unknownLikesTotal = 0;
+    let fourKTotal = 0;
+    for (const row of rows) {
+      const count = Math.max(0, Number(row.video_count || 0));
+      const fourKCount = Math.max(0, Number(row.four_k_count || 0));
+      const binIndex = Number(row.bin_index);
+      total += count;
+      fourKTotal += fourKCount;
+      if (binIndex < 0) {
+        unknownLikesTotal += count;
+      } else {
+        knownLikesTotal += count;
+        bins[Math.min(32, binIndex)].videoCount += count;
+        bins[Math.min(32, binIndex)].fourKCount += fourKCount;
+      }
+    }
+    const insights = contentStructureInsights(database);
+    const result = {
+      total,
+      knownLikesTotal,
+      unknownLikesTotal,
+      fourKTotal,
+      shape: "right_skewed_long_tail",
+      binning: {
+        strategy: "multiscale_fixed_width",
+        boundary: "[min,max)",
+        microBinWidth: 1000,
+        microMaxLikes: 10000,
+        lowBinWidth: 10000,
+        lowMaxLikes: 100000,
+        denseBinWidth: 100000,
+        denseMaxLikes: 1000000,
+        tailBinWidth: 1000000,
+        overflowMinLikes: 5000000
+      },
+      generatedAt: new Date().toISOString(),
+      bins,
+      insights
+    };
+    catalogCache.likeDistribution = result;
+    return result;
+  }
+
+  function contentStructureInsights(database) {
+    const rows = database.prepare(`
+      WITH base AS (
+        SELECT
+          v.id,
+          v.author_sec_uid,
+          v.author_name,
+          v.actual_pixels,
+          COALESCE(s.digg_count, v.digg_count, 0) AS likes,
+          COALESCE(s.comment_count, v.comment_count, 0) AS comments,
+          COALESCE(s.collect_count, v.collect_count, 0) AS collects,
+          COALESCE(s.share_count, v.share_count, 0) AS shares,
+          COALESCE(s.play_count, v.play_count, 0) AS plays,
+          (
+            COALESCE(s.digg_count, v.digg_count, 0) +
+            COALESCE(s.comment_count, v.comment_count, 0) * 6 +
+            COALESCE(s.collect_count, v.collect_count, 0) * 4 +
+            COALESCE(s.share_count, v.share_count, 0) * 3
+          ) AS engagement_score
+        FROM short_videos v
+        LEFT JOIN short_video_stats s ON s.video_id = v.id
+        WHERE v.visibility = 'local_only'
+          AND v.media_type = 'video'
+          AND (
+            COALESCE(s.digg_count, v.digg_count, 0) > 0 OR
+            COALESCE(s.comment_count, v.comment_count, 0) > 0 OR
+            COALESCE(s.collect_count, v.collect_count, 0) > 0 OR
+            COALESCE(s.share_count, v.share_count, 0) > 0
+          )
+      )
+      SELECT * FROM base
+    `).all();
+
+    // SQLite's PERCENT_RANK window materializes and sorts the entire 40k+
+    // result set before crossing the JS boundary. A single in-memory numeric
+    // sort computes the identical rank-with-ties result with much less setup
+    // and avoids holding a second temporary SQLite result table.
+    rows.sort((left, right) => Number(left.engagement_score || 0) - Number(right.engagement_score || 0));
+    const percentileDenominator = Math.max(1, rows.length - 1);
+    let rankStart = 0;
+    let previousEngagementScore = null;
+    for (const [index, row] of rows.entries()) {
+      const score = Number(row.engagement_score || 0);
+      if (index === 0 || score !== previousEngagementScore) rankStart = index;
+      row.global_percentile = rows.length > 1 ? rankStart / percentileDenominator : 0;
+      previousEngagementScore = score;
+    }
+
+    const typeDefinitions = new Map([
+      ["save", { id: "save", label: "收藏型", description: "藏/赞在同点赞量级内更突出，适合复看或留作参考" }],
+      ["share", { id: "share", label: "传播型", description: "转/赞在同点赞量级内更突出，更容易被主动转给别人" }],
+      ["discuss", { id: "discuss", label: "讨论型", description: "评/赞在同点赞量级内更突出，更容易引发观点和讨论" }],
+      ["balanced", { id: "balanced", label: "均衡型", description: "没有单一互动信号明显高于同量级内容" }]
+    ]);
+    const medianSorted = (sorted) => {
+      if (!sorted.length) return 0;
+      const middle = Math.floor(sorted.length / 2);
+      return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+    };
+    const medianValues = (values) => medianSorted(values.sort((left, right) => left - right));
+    const quantileSorted = (sorted, probability) => {
+      if (!sorted.length) return 0;
+      const position = Math.max(0, Math.min(sorted.length - 1, (sorted.length - 1) * probability));
+      const lower = Math.floor(position);
+      const upper = Math.ceil(position);
+      if (lower === upper) return sorted[lower];
+      return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+    };
+    const popularityBand = (likes) => Math.max(0, Math.min(7, Math.floor(Math.log10(Math.max(1, likes)))));
+    const ratioGroups = new Map();
+    const collectRatios = [];
+    const shareRatios = [];
+    const commentRatios = [];
+    const prepared = rows.map((row) => {
+      const likes = Math.max(0, Number(row.likes || 0));
+      const comments = Math.max(0, Number(row.comments || 0));
+      const collects = Math.max(0, Number(row.collects || 0));
+      const shares = Math.max(0, Number(row.shares || 0));
+      const comparable = likes > 0;
+      const band = comparable ? popularityBand(likes) : -1;
+      const ratios = {
+        collect: comparable ? collects / likes : 0,
+        share: comparable ? shares / likes : 0,
+        comment: comparable ? comments / likes : 0
+      };
+      if (comparable) {
+        const group = ratioGroups.get(band) || { collect: [], share: [], comment: [] };
+        group.collect.push(ratios.collect);
+        group.share.push(ratios.share);
+        group.comment.push(ratios.comment);
+        ratioGroups.set(band, group);
+        collectRatios.push(ratios.collect);
+        shareRatios.push(ratios.share);
+        commentRatios.push(ratios.comment);
+      }
+      return { row, likes, comparable, band, ratios };
+    });
+    for (const group of ratioGroups.values()) {
+      group.collect.sort((left, right) => left - right);
+      group.share.sort((left, right) => left - right);
+      group.comment.sort((left, right) => left - right);
+    }
+    collectRatios.sort((left, right) => left - right);
+    shareRatios.sort((left, right) => left - right);
+    commentRatios.sort((left, right) => left - right);
+    const percentile = (sorted, value) => {
+      if (!sorted?.length) return 0;
+      if (sorted.length === 1) return 0.5;
+      let low = 0;
+      let high = sorted.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (sorted[middle] <= value) low = middle + 1;
+        else high = middle;
+      }
+      return Math.max(0, Math.min(1, (low - 1) / (sorted.length - 1)));
+    };
+    const quadrantMap = new Map([
+      ["priority", { id: "priority", label: "收藏 + 传播", description: "既值得留下，也会被主动分享", count: 0 }],
+      ["personal", { id: "personal", label: "传播驱动", description: "分享突出，收藏相对一般", count: 0 }],
+      ["platform", { id: "platform", label: "收藏驱动", description: "收藏突出，分享相对一般", count: 0 }],
+      ["ordinary", { id: "ordinary", label: "点赞 / 讨论", description: "收藏和分享不突出，需结合评论结构判断", count: 0 }]
+    ]);
+    const typeCounts = new Map([...typeDefinitions.keys()].map((id) => [id, 0]));
+    const cellMap = new Map();
+    const scoredById = new Map();
+    const authorMap = new Map();
+    const collectAxisMax = Math.max(quantileSorted(collectRatios, 0.98), 0.01);
+    const shareAxisMax = Math.max(quantileSorted(shareRatios, 0.98), 0.01);
+    const collectHighRate = quantileSorted(collectRatios, 0.7);
+    const shareHighRate = quantileSorted(shareRatios, 0.7);
+    const ratePosition = (rate, maximum) => Math.max(0, Math.min(1,
+      Math.log1p(Math.max(0, rate) * 100) / Math.log1p(maximum * 100)
+    ));
+    const collectThresholdPosition = ratePosition(collectHighRate, collectAxisMax);
+    const shareThresholdPosition = ratePosition(shareHighRate, shareAxisMax);
+    let ratioComparableTotal = 0;
+    let playKnownTotal = 0;
+    let qualityKnownTotal = 0;
+
+    for (const preparedRow of prepared) {
+      const { row, likes, comparable, band, ratios } = preparedRow;
+      const group = ratioGroups.get(band);
+      const collectPercentile = comparable ? percentile(group.collect, ratios.collect) : 0;
+      const sharePercentile = comparable ? percentile(group.share, ratios.share) : 0;
+      const commentPercentile = comparable ? percentile(group.comment, ratios.comment) : 0;
+      const globalScore = Math.max(0, Math.min(1, Number(row.global_percentile || 0)));
+      let strongestType = "save";
+      let strongestScore = collectPercentile;
+      if (sharePercentile > strongestScore) {
+        strongestType = "share";
+        strongestScore = sharePercentile;
+      }
+      if (commentPercentile > strongestScore) {
+        strongestType = "discuss";
+        strongestScore = commentPercentile;
+      }
+      const contentType = comparable && strongestScore >= 0.72 ? strongestType : "balanced";
+      const actualPixels = Math.max(0, Number(row.actual_pixels || 0));
+      const qualityKnown = actualPixels > 0;
+      const collectPosition = ratePosition(ratios.collect, collectAxisMax);
+      const sharePosition = ratePosition(ratios.share, shareAxisMax);
+      const collectHigh = ratios.collect >= collectHighRate;
+      const shareHigh = ratios.share >= shareHighRate;
+      const quadrant = collectHigh
+        ? (shareHigh ? "priority" : "platform")
+        : (shareHigh ? "personal" : "ordinary");
+
+      if (comparable) {
+        ratioComparableTotal += 1;
+        typeCounts.set(contentType, (typeCounts.get(contentType) || 0) + 1);
+        const xBand = Math.min(9, Math.max(0, Math.floor(collectPosition * 10)));
+        const yBand = Math.min(9, Math.max(0, Math.floor(sharePosition * 10)));
+        const cellKey = `${xBand}:${yBand}`;
+        const cell = cellMap.get(cellKey) || {
+          xBand,
+          yBand,
+          count: 0,
+          likesTotal: 0,
+          discussionScoreTotal: 0,
+          collectRateTotal: 0,
+          shareRateTotal: 0
+        };
+        cell.count += 1;
+        cell.likesTotal += likes;
+        cell.discussionScoreTotal += commentPercentile;
+        cell.collectRateTotal += ratios.collect;
+        cell.shareRateTotal += ratios.share;
+        cellMap.set(cellKey, cell);
+        quadrantMap.get(quadrant).count += 1;
+      }
+      if (Number(row.plays || 0) > 0) playKnownTotal += 1;
+      if (qualityKnown) qualityKnownTotal += 1;
+      const videoId = String(row.id || "");
+      const authorSecUid = String(row.author_sec_uid || "");
+      scoredById.set(videoId, { globalScore, contentType, likes });
+      if (authorSecUid) {
+        const author = authorMap.get(authorSecUid) || {
+          secUid: authorSecUid,
+          name: String(row.author_name || "").trim() || "未知作者",
+          sampleCount: 0,
+          globalTopCount: 0,
+          globalScoreTotal: 0,
+          likes: [],
+          typeCounts: new Map([...typeDefinitions.keys()].map((id) => [id, 0]))
+        };
+        author.sampleCount += 1;
+        if (globalScore >= 0.8) author.globalTopCount += 1;
+        author.globalScoreTotal += globalScore;
+        author.likes.push(likes);
+        author.typeCounts.set(contentType, (author.typeCounts.get(contentType) || 0) + 1);
+        authorMap.set(authorSecUid, author);
+      }
+    }
+
+    const dominantType = (counts) => [...counts.entries()]
+      .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))[0]?.[0] || "balanced";
+    const authorInsights = [...authorMap.values()]
+      .filter((item) => item.sampleCount >= 8)
+      .map((item) => {
+        const globalTopRate = item.globalTopCount / item.sampleCount;
+        const averagePlatformScore = item.globalScoreTotal / item.sampleCount;
+        const confidence = Math.min(1, Math.log1p(item.sampleCount) / Math.log(101));
+        const typeId = dominantType(item.typeCounts);
+        return {
+          secUid: item.secUid,
+          name: item.name,
+          sampleCount: item.sampleCount,
+          globalTopCount: item.globalTopCount,
+          globalTopRate,
+          averagePlatformScore,
+          medianLikes: medianValues(item.likes),
+          dominantType: typeId,
+          dominantTypeLabel: typeDefinitions.get(typeId).label,
+          insightScore: globalTopRate * 0.6 + averagePlatformScore * 0.25 + confidence * 0.15
+        };
+      })
+      .sort((left, right) => right.insightScore - left.insightScore || right.sampleCount - left.sampleCount)
+      .slice(0, 10);
+
+    const topicMap = new Map();
+    const topicRows = database.prepare(`
+      SELECT t.video_id, t.topic, t.topic_key
+      FROM short_video_topics t
+      JOIN short_videos v ON v.id = t.video_id
+      WHERE v.visibility = 'local_only'
+        AND v.media_type = 'video'
+    `).all();
+    for (const topicRow of topicRows) {
+      const video = scoredById.get(String(topicRow.video_id || ""));
+      const topicKey = String(topicRow.topic_key || "").trim();
+      if (!video || !topicKey) continue;
+      const topic = topicMap.get(topicKey) || {
+        key: topicKey,
+        label: String(topicRow.topic || topicKey).trim() || topicKey,
+        sampleCount: 0,
+        globalTopCount: 0,
+        globalScoreTotal: 0,
+        likes: [],
+        typeCounts: new Map([...typeDefinitions.keys()].map((id) => [id, 0]))
+      };
+      topic.sampleCount += 1;
+      if (video.globalScore >= 0.8) topic.globalTopCount += 1;
+      topic.globalScoreTotal += video.globalScore;
+      topic.likes.push(video.likes);
+      topic.typeCounts.set(video.contentType, (topic.typeCounts.get(video.contentType) || 0) + 1);
+      topicMap.set(topicKey, topic);
+    }
+    const topicInsights = [...topicMap.values()]
+      .filter((item) => item.sampleCount >= 20)
+      .map((item) => {
+        const globalTopRate = item.globalTopCount / item.sampleCount;
+        const averagePlatformScore = item.globalScoreTotal / item.sampleCount;
+        const confidence = Math.min(1, Math.log1p(item.sampleCount) / Math.log(201));
+        const typeId = dominantType(item.typeCounts);
+        return {
+          key: item.key,
+          label: item.label,
+          sampleCount: item.sampleCount,
+          globalTopCount: item.globalTopCount,
+          globalTopRate,
+          averagePlatformScore,
+          medianLikes: medianValues(item.likes),
+          dominantType: typeId,
+          dominantTypeLabel: typeDefinitions.get(typeId).label,
+          insightScore: globalTopRate * 0.6 + averagePlatformScore * 0.25 + confidence * 0.15
+        };
+      })
+      .sort((left, right) => right.insightScore - left.insightScore || right.sampleCount - left.sampleCount)
+      .slice(0, 12);
+
+    return {
+      valueMap: {
+        eligibleTotal: rows.length,
+        ratioComparableTotal,
+        playKnownTotal,
+        qualityKnownTotal,
+        ratioScale: "log1p",
+        ratioAxisPercentile: 0.98,
+        collectAxisMax,
+        shareAxisMax,
+        collectHighRate,
+        shareHighRate,
+        collectThresholdPosition,
+        shareThresholdPosition,
+        medianCollectRate: medianSorted(collectRatios),
+        medianShareRate: medianSorted(shareRatios),
+        medianCommentRate: medianSorted(commentRatios),
+        cells: [...cellMap.values()].map((cell) => ({
+          xBand: cell.xBand,
+          yBand: cell.yBand,
+          count: cell.count,
+          averageLikes: cell.count ? Math.round(cell.likesTotal / cell.count) : 0,
+          averageDiscussionScore: cell.count ? cell.discussionScoreTotal / cell.count : 0,
+          averageCollectRate: cell.count ? cell.collectRateTotal / cell.count : 0,
+          averageShareRate: cell.count ? cell.shareRateTotal / cell.count : 0
+        })),
+        quadrants: [...quadrantMap.values()],
+        types: [...typeDefinitions.values()].map((item) => ({
+          ...item,
+          count: typeCounts.get(item.id) || 0
+        }))
+      },
+      authors: authorInsights,
+      topics: topicInsights,
+      method: {
+        platform: "抖音官方作品数据以播放量配合赞、评、转等指标分析；本库目前只有公开累计互动",
+        structure: "藏/赞、转/赞、评/赞先按点赞数量级分组，再转成组内百分位，减少高赞聚合效应",
+        ranking: "作者与题材的强内容指综合互动进入本地全库前 20%，分母只包含已下载样本",
+        limitation: playKnownTotal > 0
+          ? "播放量已有部分覆盖，可继续补充互动率与完播漏斗"
+          : "当前没有播放量，不能计算官方口径的互动率、完播率或流量转化"
+      }
+    };
+  }
+
+  function qualityUpgradeStatuses(awemeIds) {
+    const ids = [...new Set((awemeIds || []).map((item) => String(item || "").trim()).filter(Boolean))];
+    if (!ids.length || !downloadManagerDbPath || !fs.existsSync(downloadManagerDbPath)) return new Map();
+    let managerDb = null;
+    try {
+      managerDb = new DatabaseSync(downloadManagerDbPath, { readOnly: true });
+      const columns = new Set(managerDb.prepare("PRAGMA table_info(links)").all().map((column) => column.name));
+      if (!columns.has("aweme_id") || !columns.has("status") || !columns.has("download_intent")) return new Map();
+      const placeholders = ids.map(() => "?").join(",");
+      const rows = managerDb.prepare(`
+        SELECT aweme_id, status, download_intent, id
+        FROM links
+        WHERE aweme_id IN (${placeholders})
+        ORDER BY id DESC
+      `).all(...ids);
+      const statuses = new Map();
+      for (const row of rows) {
+        const key = String(row.aweme_id || "");
+        if (!key || statuses.has(key)) continue;
+        statuses.set(key, {
+          status: String(row.status || ""),
+          downloadIntent: String(row.download_intent || "")
+        });
+      }
+      return statuses;
+    } catch {
+      return new Map();
+    } finally {
+      try {
+        managerDb?.close();
+      } catch {}
+    }
+  }
+
+  function queueQualityUpgrades(videoIds) {
+    const ids = [...new Set((videoIds || []).map((item) => String(item || "").trim()).filter(Boolean))].slice(0, 100);
+    if (!ids.length) {
+      const error = new Error("请选择要高清重下的视频");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!downloadManagerDbPath || !fs.existsSync(downloadManagerDbPath)) {
+      const error = new Error("下载管理器数据库不可用");
+      error.statusCode = 503;
+      throw error;
+    }
+    const database = databaseOrOpen();
+    const placeholders = ids.map(() => "?").join(",");
+    const videos = database.prepare(`
+      SELECT id, aweme_id, digg_count
+      FROM short_videos
+      WHERE id IN (${placeholders})
+        AND visibility = 'local_only'
+        AND media_type = 'video'
+    `).all(...ids);
+    const foundIds = new Set(videos.map((item) => String(item.id || "")));
+    const missing = ids.filter((id) => !foundIds.has(id));
+    let managerDb = null;
+    try {
+      managerDb = new DatabaseSync(downloadManagerDbPath);
+      managerDb.exec("PRAGMA busy_timeout = 10000");
+      const linkColumns = new Set(managerDb.prepare("PRAGMA table_info(links)").all().map((column) => column.name));
+      const required = ["id", "profile_id", "aweme_id", "status", "download_intent", "digg_count"];
+      if (required.some((column) => !linkColumns.has(column))) {
+        const error = new Error("下载管理器尚未升级到高清重下队列版本");
+        error.statusCode = 503;
+        throw error;
+      }
+      const queueColumns = new Set(managerDb.prepare("PRAGMA table_info(profile_download_queue)").all().map((column) => column.name));
+      if (!queueColumns.has("profile_id")) {
+        const error = new Error("下载管理器缺少主页队列表");
+        error.statusCode = 503;
+        throw error;
+      }
+      const now = new Date().toISOString();
+      const queued = [];
+      const alreadyQueued = [];
+      managerDb.exec("BEGIN IMMEDIATE");
+      try {
+        for (const video of videos) {
+          const link = managerDb.prepare(`
+            SELECT id, profile_id, status, download_intent
+            FROM links
+            WHERE aweme_id = ?
+            ORDER BY
+              CASE WHEN status = 'downloaded' THEN 0 ELSE 1 END,
+              id DESC
+            LIMIT 1
+          `).get(String(video.aweme_id || ""));
+          if (!link?.id) {
+            missing.push(String(video.id || ""));
+            continue;
+          }
+          if (String(link.download_intent || "") === "quality_upgrade" && ["pending", "downloading"].includes(String(link.status || ""))) {
+            alreadyQueued.push(String(video.id || ""));
+          } else {
+            managerDb.prepare(`
+              UPDATE links
+              SET
+                status = 'pending',
+                download_intent = 'quality_upgrade',
+                failed_at = NULL,
+                last_started_at = NULL,
+                last_error = '从 FanHao 内容洞察加入高清重下',
+                digg_count = MAX(COALESCE(digg_count, 0), ?)
+              WHERE id = ?
+            `).run(Math.max(0, Number(video.digg_count || 0)), Number(link.id));
+            queued.push(String(video.id || ""));
+          }
+          managerDb.prepare(`
+            INSERT INTO profile_download_queue(profile_id, sort_order, enabled, created_at, updated_at)
+            VALUES(?, COALESCE((SELECT MAX(sort_order) + 1 FROM profile_download_queue), 0), 1, ?, ?)
+            ON CONFLICT(profile_id) DO UPDATE SET enabled = 1, updated_at = excluded.updated_at
+          `).run(Number(link.profile_id || 0), now, now);
+        }
+        const eventColumns = new Set(managerDb.prepare("PRAGMA table_info(events)").all().map((column) => column.name));
+        if (queued.length && eventColumns.has("ts") && eventColumns.has("level") && eventColumns.has("message")) {
+          managerDb.prepare("INSERT INTO events(ts, level, message) VALUES(?, 'info', ?)")
+            .run(now, `FanHao 内容洞察加入高清重下 ${queued.length} 条`);
+        }
+        managerDb.exec("COMMIT");
+      } catch (error) {
+        try {
+          managerDb.exec("ROLLBACK");
+        } catch {}
+        throw error;
+      }
+      catalogCache.likeDistribution = null;
+      return { ok: true, queued, alreadyQueued, missing: [...new Set(missing)], total: queued.length + alreadyQueued.length };
+    } catch (cause) {
+      if (cause?.statusCode) throw cause;
+      const error = new Error(`高清重下排队失败：${cause?.message || cause}`);
+      error.statusCode = 503;
+      throw error;
+    } finally {
+      try {
+        managerDb?.close();
+      } catch {}
+    }
+  }
+
   function adjacentVideo(id, direction, urlOrOptions = {}) {
     const database = databaseOrOpen();
     const current = videoCatalogRowByAnyId(database, id, "id, liked_at");
@@ -638,35 +1647,66 @@ function summary() {
     const fullCurrent = database.prepare("SELECT * FROM short_video_catalog WHERE id = ?").get(current.id);
     const filter = videoFilter(urlOrOptions?.searchParams || new URLSearchParams());
     const order = adjacentOrder(urlOrOptions);
-    const adjacent = filter.source === "recommended"
-      ? recommendedAdjacentRow(database, fullCurrent, direction, false, filter, order)
-      : adjacentRow(database, fullCurrent, direction, order, false, filter);
+    let fastRows = null;
+    if (filter.source !== "recommended") {
+      fastRows = fastHistoryAdjacentRows(database, fullCurrent, direction, filter, order, 1);
+      if (fastRows == null) {
+        fastRows = fastLikedAdjacentRows(database, fullCurrent, direction, filter, order, 1);
+      }
+      if (fastRows == null) {
+        fastRows = fastPublishedAdjacentRows(database, fullCurrent, direction, filter, order, 1);
+      }
+      if (fastRows == null) {
+        fastRows = fastMetricAdjacentRows(database, fullCurrent, direction, filter, order, 1);
+      }
+    }
+    const adjacent = fastRows !== null
+      ? fastRows[0] || null
+      : filter.source === "recommended"
+        ? recommendedAdjacentRow(database, fullCurrent, direction, false, filter, order)
+        : adjacentRow(database, fullCurrent, direction, order, false, filter);
     if (!adjacent?.id) return null;
+    if (fastRows !== null) return publicVideo(adjacent);
     const row = database.prepare("SELECT * FROM short_video_catalog WHERE id = ?").get(adjacent.id);
     return row ? publicVideo(row) : null;
   }
 
   function relatedVideos(id, urlOrOptions = {}) {
     const database = databaseOrOpen();
-    const current = videoCatalogRowByAnyId(database, id);
+    const current = videoCatalogRowByAnyId(database, id, LIST_VIDEO_COLUMNS);
     if (!current) return null;
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const limit = clampInt(params.get("limit"), 24, 1, 72);
     const currentTags = recommendationTagList(current.tags_json).slice(0, 8);
     const currentTagMap = new Map(currentTags.map((tag) => [tag.toLocaleLowerCase(), tag]));
-    const authorSecUid = String(current.author_sec_uid || "").trim();
-    const authorName = String(current.author_name || "").trim();
+    const baseAuthor = database.prepare("SELECT author_sec_uid, author_name FROM short_videos WHERE id = ?").get(current.id) || current;
+    const authorSecUid = String(baseAuthor.author_sec_uid || current.author_sec_uid || "").trim();
+    const authorName = String(baseAuthor.author_name || current.author_name || "").trim();
+    const effectiveAuthorSecUid = "v.author_sec_uid";
+    const effectiveAuthorName = "COALESCE(v.author_name, '未知作者')";
+    const candidateColumns = `
+      v.id,
+      ${effectiveAuthorSecUid} AS author_sec_uid,
+      ${effectiveAuthorName} AS author_name,
+      v.tags_json,
+      v.media_type,
+      v.published_at,
+      v.liked_at,
+      COALESCE(s.digg_count, v.digg_count, 0) AS digg_count,
+      COALESCE(s.comment_count, v.comment_count, 0) AS comment_count,
+      COALESCE(s.collect_count, v.collect_count, 0) AS collect_count
+    `;
     const affinity = [];
     const affinityArgs = [];
     if (authorSecUid) {
-      affinity.push("author_sec_uid = ?");
+      affinity.push(`${effectiveAuthorSecUid} = ?`);
       affinityArgs.push(authorSecUid);
     } else if (authorName && authorName !== "未知作者") {
-      affinity.push("author_name = ?");
+      affinity.push(`${effectiveAuthorName} = ?`);
       affinityArgs.push(authorName);
     }
     for (const tag of currentTags) {
-      affinity.push("tags_text LIKE ? ESCAPE '\\'");
+      affinity.push("v.tags_text LIKE ? ESCAPE '\\'");
       affinityArgs.push(`%${escapeLike(tag)}%`);
     }
 
@@ -674,12 +1714,13 @@ function summary() {
     let candidates = [];
     if (affinity.length) {
       candidates = database.prepare(`
-        SELECT ${LIST_VIDEO_COLUMNS}
-        FROM short_video_catalog
-        WHERE visibility = 'local_only'
-          AND id <> ?
+        SELECT ${candidateColumns}
+        FROM short_videos v
+        LEFT JOIN short_video_stats s ON s.video_id = v.id
+        WHERE v.visibility = 'local_only'
+          AND v.id <> ?
           AND (${affinity.join(" OR ")})
-        ORDER BY published_at DESC, liked_at DESC, id DESC
+        ORDER BY v.published_at DESC, v.liked_at DESC, v.id DESC
         LIMIT ?
       `).all(current.id, ...affinityArgs, candidateLimit);
     }
@@ -687,15 +1728,16 @@ function summary() {
     const seen = new Set(candidates.map((item) => String(item.id || "")));
     if (candidates.length < Math.min(candidateLimit, limit * 4)) {
       const fallback = database.prepare(`
-        SELECT ${LIST_VIDEO_COLUMNS}
-        FROM short_video_catalog
-        WHERE visibility = 'local_only'
-          AND id <> ?
+        SELECT ${candidateColumns}
+        FROM short_video_stats s INDEXED BY idx_short_video_stats_engagement
+        JOIN short_videos v ON v.id = s.video_id
+        WHERE v.visibility = 'local_only'
+          AND v.id <> ?
         ORDER BY
-          COALESCE(digg_count, 0) DESC,
-          COALESCE(comment_count, 0) DESC,
-          published_at DESC,
-          id DESC
+          s.digg_count DESC,
+          s.comment_count DESC,
+          v.published_at DESC,
+          v.id DESC
         LIMIT ?
       `).all(current.id, Math.max(120, limit * 5));
       for (const item of fallback) {
@@ -707,7 +1749,7 @@ function summary() {
     }
 
     const currentAuthorKey = shortVideoRecommendationAuthorKey(current);
-    const currentMediaType = publicVideoMedia(current, parseJsonObject(current.metadata_json)).type;
+    const currentMediaType = String(current.media_type || publicVideoMedia(current, parseJsonObject(current.metadata_json)).type);
     const scored = candidates.map((candidate) => {
       const candidateTags = recommendationTagList(candidate.tags_json);
       const sharedTags = [];
@@ -719,7 +1761,7 @@ function summary() {
         sharedTags.push(currentTagMap.get(normalized));
       }
       const sameAuthor = Boolean(currentAuthorKey && currentAuthorKey === shortVideoRecommendationAuthorKey(candidate));
-      const candidateMediaType = publicVideoMedia(candidate, parseJsonObject(candidate.metadata_json)).type;
+      const candidateMediaType = String(candidate.media_type || "video");
       const engagement = Math.max(0,
         Number(candidate.digg_count || 0)
         + Number(candidate.comment_count || 0) * 2
@@ -759,6 +1801,15 @@ function summary() {
       selectedIds.add(candidateId);
     }
 
+    const selectedIdsInOrder = selected.map((item) => String(item.candidate.id || "")).filter(Boolean);
+    const selectedRows = selectedIdsInOrder.length
+      ? database.prepare(`
+          SELECT ${LIST_VIDEO_COLUMNS}
+          FROM short_video_catalog
+          WHERE id IN (${selectedIdsInOrder.map(() => "?").join(", ")})
+        `).all(...selectedIdsInOrder)
+      : [];
+    const selectedRowsById = new Map(selectedRows.map((row) => [String(row.id || ""), row]));
     return {
       video: publicVideo(current),
       basis: {
@@ -767,7 +1818,7 @@ function summary() {
       },
       total: selected.length,
       videos: selected.map((item) => ({
-        ...publicVideo(item.candidate),
+        ...publicVideo(selectedRowsById.get(String(item.candidate.id || "")) || item.candidate),
         recommendation: {
           score: Number(item.score.toFixed(2)),
           reason: item.reason,
@@ -816,6 +1867,10 @@ function summary() {
         acted_at = excluded.acted_at,
         updated_at = excluded.updated_at
     `).run(LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id, type, active ? 1 : 0, source, now, now);
+    if (type === "like") {
+      refreshShortVideoRelationshipFlags(database, currentVideo.id);
+      catalogCache.followingAuthors = null;
+    }
     if (type === "dislike") invalidateRecommendationCache();
     const updated = videoCatalogRowByAnyId(database, currentVideo.id);
     return {
@@ -863,7 +1918,9 @@ function summary() {
         END,
         updated_at = excluded.updated_at
     `).run(LOCAL_SHORT_VIDEO_USER_ID, targetUserId, active ? 1 : 0, active ? now : (existing?.followed_at || ""), now);
+    refreshShortVideoAuthorFollowingFlags(database, targetUserId);
     catalogCache.authors = null;
+    catalogCache.followingAuthors = null;
     invalidateRecommendationCache();
     const updated = videoCatalogRowByAnyId(database, currentVideo.id);
     return {
@@ -873,6 +1930,102 @@ function summary() {
       active,
       video: publicVideo(updated, { detail: true })
     };
+  }
+
+  function setAuthorFollowByUser(id, options = {}) {
+    const database = databaseOrOpen();
+    const requestedId = String(id || "").trim();
+    const user = database.prepare(`
+      SELECT id, sec_uid, nickname
+      FROM short_video_users
+      WHERE id = ? OR sec_uid = ?
+      LIMIT 1
+    `).get(requestedId, requestedId);
+    if (!user?.id) {
+      const error = new Error("关注账号不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    const existing = database.prepare(`
+      SELECT active, followed_at
+      FROM short_video_follows
+      WHERE local_user_id = ? AND target_user_id = ?
+    `).get(LOCAL_SHORT_VIDEO_USER_ID, user.id);
+    const active = Object.prototype.hasOwnProperty.call(options || {}, "active")
+      ? Boolean(options.active)
+      : !Boolean(existing?.active);
+    const now = new Date().toISOString();
+    const managerUpdated = syncDownloadManagerAuthorFollow(user.sec_uid, active, now);
+    database.prepare(`
+      INSERT INTO short_video_follows (
+        local_user_id, target_user_id, active, followed_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(local_user_id, target_user_id) DO UPDATE SET
+        active = excluded.active,
+        followed_at = CASE
+          WHEN excluded.active = 1 THEN COALESCE(NULLIF(short_video_follows.followed_at, ''), excluded.followed_at)
+          ELSE short_video_follows.followed_at
+        END,
+        updated_at = excluded.updated_at
+    `).run(
+      LOCAL_SHORT_VIDEO_USER_ID,
+      user.id,
+      active ? 1 : 0,
+      active ? (existing?.followed_at || now) : (existing?.followed_at || ""),
+      now
+    );
+    refreshShortVideoAuthorFollowingFlags(database, user.id);
+    database.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('download_manager_following_imported_at', ?)")
+      .run(now);
+    catalogCache.authors = null;
+    catalogCache.followingAuthors = null;
+    invalidateRecommendationCache();
+    return {
+      ok: true,
+      targetUserId: user.id,
+      secUid: user.sec_uid || "",
+      name: user.nickname || "未知作者",
+      active,
+      managerUpdated
+    };
+  }
+
+  function syncDownloadManagerAuthorFollow(secUid, active, now) {
+    const resolvedSecUid = String(secUid || "").trim();
+    if (!downloadManagerDbPath || !resolvedSecUid || !fs.existsSync(downloadManagerDbPath)) return false;
+    let managerDb = null;
+    try {
+      managerDb = new DatabaseSync(downloadManagerDbPath);
+      managerDb.exec("PRAGMA busy_timeout = 10000");
+      const columns = new Set(managerDb.prepare("PRAGMA table_info(profiles)").all().map((column) => column.name));
+      if (!columns.has("is_following")) return false;
+      const assignments = ["is_following = ?"];
+      const values = [active ? 1 : 0];
+      if (active && columns.has("following_discovered_at")) {
+        assignments.push("following_discovered_at = COALESCE(following_discovered_at, ?)");
+        values.push(now);
+      }
+      if (columns.has("updated_at")) {
+        assignments.push("updated_at = ?");
+        values.push(now);
+      }
+      values.push(resolvedSecUid);
+      const result = managerDb.prepare(`
+        UPDATE profiles
+        SET ${assignments.join(", ")}
+        WHERE sec_uid = ? AND tab = 'post'
+      `).run(...values);
+      return Number(result.changes || 0) > 0;
+    } catch (cause) {
+      const error = new Error(`下载管理器关注状态同步失败：${cause?.message || cause}`);
+      error.statusCode = 503;
+      throw error;
+    } finally {
+      try {
+        managerDb?.close();
+      } catch {}
+    }
   }
 
   function recordWatch(id, options = {}) {
@@ -919,79 +2072,6 @@ function summary() {
         completed: completedCount > 0,
         lastWatchedAt: savedWatch?.last_watched_at || now
       }
-    };
-  }
-
-  function localComments(id) {
-    const database = databaseOrOpen();
-    const currentVideo = videoCatalogRowByAnyId(database, id, "id");
-    if (!currentVideo?.id) return null;
-    const rows = database.prepare(`
-      SELECT id, body, created_at, updated_at
-      FROM short_video_local_comments
-      WHERE local_user_id = ? AND video_id = ?
-      ORDER BY created_at DESC, id DESC
-      LIMIT 200
-    `).all(LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id);
-    return {
-      videoId: currentVideo.id,
-      total: rows.length,
-      comments: rows.map(publicLocalComment)
-    };
-  }
-
-  function createLocalComment(id, options = {}) {
-    const database = databaseOrOpen();
-    const currentVideo = videoCatalogRowByAnyId(database, id, "id");
-    if (!currentVideo?.id) {
-      const error = new Error("短视频不存在");
-      error.statusCode = 404;
-      throw error;
-    }
-    const body = normalizeLocalCommentBody(options.body ?? options.text);
-    if (!body) {
-      const error = new Error("请输入评论内容");
-      error.statusCode = 400;
-      throw error;
-    }
-    const commentId = `local:${crypto.randomUUID()}`;
-    const now = new Date().toISOString();
-    database.prepare(`
-      INSERT INTO short_video_local_comments (
-        id, local_user_id, video_id, body, created_at, updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(commentId, LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id, body, now, now);
-    return {
-      ok: true,
-      videoId: currentVideo.id,
-      comment: publicLocalComment({ id: commentId, body, created_at: now, updated_at: now }),
-      ...localComments(currentVideo.id)
-    };
-  }
-
-  function deleteLocalComment(id, commentId) {
-    const database = databaseOrOpen();
-    const currentVideo = videoCatalogRowByAnyId(database, id, "id");
-    if (!currentVideo?.id) {
-      const error = new Error("短视频不存在");
-      error.statusCode = 404;
-      throw error;
-    }
-    const normalizedCommentId = String(commentId || "").trim();
-    const result = database.prepare(`
-      DELETE FROM short_video_local_comments
-      WHERE id = ? AND local_user_id = ? AND video_id = ?
-    `).run(normalizedCommentId, LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id);
-    if (!Number(result.changes || 0)) {
-      const error = new Error("本地评论不存在");
-      error.statusCode = 404;
-      throw error;
-    }
-    return {
-      ok: true,
-      deletedId: normalizedCommentId,
-      ...localComments(currentVideo.id)
     };
   }
 
@@ -1155,6 +2235,7 @@ function summary() {
       "short_video_collection_items",
       "short_video_watch_history",
       "short_video_local_comments",
+      "short_video_remote_comments",
       "short_video_import_items"
     ]) {
       database.prepare(`DELETE FROM ${table} WHERE video_id IN (${placeholders})`).run(...ids);
@@ -1275,19 +2356,73 @@ function summary() {
   }
 
   function videoFile(id, options = {}) {
-    const row = videoCatalogRowByAnyId(databaseOrOpen(), id, "id, source_path, mtime_ms");
+    const row = videoCatalogRowByAnyId(
+      databaseOrOpen(),
+      id,
+      "id, source_path, size_bytes, mtime_ms, actual_width, actual_height, actual_bit_rate, actual_codec, actual_frame_rate"
+    );
     if (options.allowMissing && row?.source_path) {
       return {
         id: row.id || id,
         path: path.resolve(row.source_path),
         type: "video",
         ext: path.extname(row.source_path).toLowerCase(),
-        cacheVersion: shortVideoMediaVersion(row.mtime_ms)
+        size: Math.max(0, Number(row.size_bytes || 0)),
+        cacheVersion: shortVideoMediaVersion(row.mtime_ms),
+        actualWidth: Math.max(0, Number(row.actual_width || 0)),
+        actualHeight: Math.max(0, Number(row.actual_height || 0)),
+        actualBitRate: Math.max(0, Number(row.actual_bit_rate || 0)),
+        actualCodec: String(row.actual_codec || "").trim().toLowerCase(),
+        actualFrameRate: Math.max(0, Number(row.actual_frame_rate || 0))
       };
     }
     const file = fileFromRow(row, "video");
-    if (file) file.cacheVersion = shortVideoMediaVersion(row?.mtime_ms);
+    if (file) {
+      file.cacheVersion = shortVideoMediaVersion(row?.mtime_ms);
+      file.actualWidth = Math.max(0, Number(row?.actual_width || 0));
+      file.actualHeight = Math.max(0, Number(row?.actual_height || 0));
+      file.actualBitRate = Math.max(0, Number(row?.actual_bit_rate || 0));
+      file.actualCodec = String(row?.actual_codec || "").trim().toLowerCase();
+      file.actualFrameRate = Math.max(0, Number(row?.actual_frame_rate || 0));
+    }
     return file;
+  }
+
+  function updateActualVideoPlaybackMetadata(id, metadata = {}) {
+    const database = databaseOrOpen();
+    const row = videoCatalogRowByAnyId(database, id, "id");
+    if (!row?.id) return null;
+    const width = Math.max(0, Math.round(Number(metadata.width || 0)));
+    const height = Math.max(0, Math.round(Number(metadata.height || 0)));
+    const bitRate = Math.max(0, Math.round(Number(metadata.bitRate || 0)));
+    const codec = String(metadata.codec || "").trim().toLowerCase().slice(0, 32);
+    const frameRate = Math.max(0, Number(metadata.frameRate || 0));
+    if (!width && !height && !bitRate && !codec && !frameRate) return null;
+    const probedAt = String(metadata.probedAt || new Date().toISOString());
+    database.prepare(`
+      UPDATE short_videos SET
+        actual_width=CASE WHEN ?>0 THEN ? ELSE actual_width END,
+        actual_height=CASE WHEN ?>0 THEN ? ELSE actual_height END,
+        actual_bit_rate=CASE WHEN ?>0 THEN ? ELSE actual_bit_rate END,
+        actual_codec=CASE WHEN ?<>'' THEN ? ELSE actual_codec END,
+        actual_frame_rate=CASE WHEN ?>0 THEN ? ELSE actual_frame_rate END,
+        actual_pixels=CASE WHEN ?>0 AND ?>0 THEN ? * ? ELSE actual_pixels END,
+        actual_long_edge=CASE WHEN ?>0 OR ?>0 THEN MAX(?, ?) ELSE actual_long_edge END,
+        actual_probed_at=?,
+        actual_probe_error=''
+      WHERE id=?
+    `).run(
+      width, width,
+      height, height,
+      bitRate, bitRate,
+      codec, codec,
+      frameRate, frameRate,
+      width, height, width, height,
+      width, height, width, height,
+      probedAt,
+      row.id
+    );
+    return { id: row.id, width, height, bitRate, codec, frameRate, probedAt };
   }
 
   function musicFile(id) {
@@ -1320,7 +2455,7 @@ function summary() {
 
   function coverFile(id) {
     const database = databaseOrOpen();
-    const row = videoCatalogRowByAnyId(database, id);
+    const row = videoCatalogRowByAnyId(database, id, "id, cover_path");
     if (!row?.cover_path) return null;
     return safeStoredFile(row.cover_path, "image");
   }
@@ -1632,6 +2767,7 @@ function summary() {
     }
     if (batch.length) writeBatch(batch.splice(0));
     deleteMissingImportedVideos(database, foundIds);
+    refreshShortVideoRelationshipFlags(database);
     return { ok: true, root, scannedFiles, imported, scannedAt: now, summary: summary() };
   }
 
@@ -1652,6 +2788,14 @@ function summary() {
     const now = new Date().toISOString();
     const targetDb = databaseOrOpen();
     const sourceDb = new DatabaseSync(sourceDbPath, { readOnly: true });
+    try {
+      return importDownloadManagerSource({ sourceDb, sourceDbPath, targetDb, now, options });
+    } finally {
+      sourceDb.close();
+    }
+  }
+
+  function importDownloadManagerSource({ sourceDb, sourceDbPath, targetDb, now, options }) {
     const upsert = shortVideoUpsertStatement(targetDb);
     const normalized = normalizedUpsertStatements(targetDb, coverCacheDir);
     const batchId = `download-manager:${hashText(`${sourceDbPath}:${now}`).slice(0, 24)}`;
@@ -1814,42 +2958,38 @@ function summary() {
     const importedIds = new Set();
 
     if (!sourceRows.length && !galleryBackfillIds.length) {
-      try {
-        if (sourceMaxDownloadedAt && sourceMaxDownloadedAt !== previousWatermark) {
-          targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(watermarkKey, sourceMaxDownloadedAt);
-        }
-        if (shouldBackfillStats && sourceMaxDownloadedAt) {
-          targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(statsBackfillWatermarkKey, sourceMaxDownloadedAt);
-        }
-        targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(
-          galleryImportVersionKey,
-          DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION
-        );
-        return {
-          ok: true,
-          sourceDbPath,
-          batchId: "",
-          incremental,
-          sourceWatermark: sourceMaxDownloadedAt,
-          scanned: 0,
-          incrementalRows,
-          backfillAttempted: shouldBackfillStats,
-          backfillCandidates,
-          backfillRows,
-          galleryBackfill: needsGalleryBackfill,
-          imported: 0,
-          updated: 0,
-          skipped: 0,
-          skippedNotDownloaded: 0,
-          skippedNoPlayableVideo: 0,
-          skippedDuplicate: 0,
-          totalImportedThisBatch: 0,
-          importedAt: now,
-          summary: includeSummary ? cachedSummary() : null
-        };
-      } finally {
-        sourceDb.close();
+      if (sourceMaxDownloadedAt && sourceMaxDownloadedAt !== previousWatermark) {
+        targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(watermarkKey, sourceMaxDownloadedAt);
       }
+      if (shouldBackfillStats && sourceMaxDownloadedAt) {
+        targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(statsBackfillWatermarkKey, sourceMaxDownloadedAt);
+      }
+      targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(
+        galleryImportVersionKey,
+        DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION
+      );
+      return {
+        ok: true,
+        sourceDbPath,
+        batchId: "",
+        incremental,
+        sourceWatermark: sourceMaxDownloadedAt,
+        scanned: 0,
+        incrementalRows,
+        backfillAttempted: shouldBackfillStats,
+        backfillCandidates,
+        backfillRows,
+        galleryBackfill: needsGalleryBackfill,
+        imported: 0,
+        updated: 0,
+        skipped: 0,
+        skippedNotDownloaded: 0,
+        skippedNoPlayableVideo: 0,
+        skippedDuplicate: 0,
+        totalImportedThisBatch: 0,
+        importedAt: now,
+        summary: includeSummary ? cachedSummary() : null
+      };
     }
 
     const importSourceRow = (row) => {
@@ -1921,14 +3061,13 @@ function summary() {
         galleryImportVersionKey,
         DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION
       );
+      refreshShortVideoRelationshipFlags(targetDb);
       targetDb.exec("COMMIT");
     } catch (error) {
       try {
         targetDb.exec("ROLLBACK");
       } catch {}
       throw error;
-    } finally {
-      sourceDb.close();
     }
 
     return {
@@ -1960,6 +3099,17 @@ function summary() {
     return database();
   }
 
+  function downloadManagerSourceStateKey(value) {
+    const database = databaseOrOpen();
+    if (value === undefined) return metaValue(database, "download_manager_source_state_key");
+    const normalized = String(value || "");
+    database.prepare(`
+      INSERT OR REPLACE INTO short_video_meta (key, value)
+      VALUES ('download_manager_source_state_key', ?)
+    `).run(normalized);
+    return normalized;
+  }
+
   return {
     adjacentVideo,
     backfillMissingCovers,
@@ -1971,26 +3121,35 @@ function summary() {
     deleteVideo,
     deleteVideoGroup,
     deleteVideos,
+    downloadManagerSourceStateKey,
     facets,
     galleryFile,
     importDownloadManagerDb,
+    importRemoteComments,
     listAuthors,
+    likeDistribution,
     listVideos,
     localComments,
     createLocalComment,
     deleteLocalComment,
     musicFile,
+    queueQualityUpgrades,
     relatedVideos,
     recordWatch,
+    resolveAuthorMention,
     roots,
     scan,
     searchSuggestions,
     setAuthorFollow,
+    setAuthorFollowByUser,
     setUserAction,
+    smoothPlaybackCandidateCount,
+    smoothPlaybackCandidates,
     summary: cachedSummary,
     warm,
     videoDetail,
-    videoFile
+    videoFile,
+    updateActualVideoPlaybackMetadata
   };
 }
 
@@ -2001,19 +3160,6 @@ function isCurrentShortVideoSchema(db) {
   } catch {
     return false;
   }
-}
-
-function publicLocalComment(row = {}) {
-  return {
-    id: String(row.id || ""),
-    body: String(row.body || ""),
-    createdAt: String(row.created_at || ""),
-    updatedAt: String(row.updated_at || row.created_at || "")
-  };
-}
-
-function normalizeLocalCommentBody(value) {
-  return Array.from(String(value || "").trim()).slice(0, 500).join("");
 }
 
 function ensureSchema(db, coverCacheDir = "") {
@@ -2030,6 +3176,11 @@ function ensureSchema(db, coverCacheDir = "") {
       origin TEXT NOT NULL DEFAULT 'douyin_like_import',
       status TEXT NOT NULL DEFAULT 'normal',
       visibility TEXT NOT NULL DEFAULT 'local_only',
+      media_type TEXT NOT NULL DEFAULT 'video',
+      is_liked INTEGER NOT NULL DEFAULT 0,
+      author_following INTEGER NOT NULL DEFAULT 0,
+      liked_sort_at TEXT NOT NULL DEFAULT '',
+      liked_sort_time REAL,
       author_sec_uid TEXT NOT NULL DEFAULT '',
       author_uid TEXT NOT NULL DEFAULT '',
       author_name TEXT NOT NULL DEFAULT '',
@@ -2044,6 +3195,15 @@ function ensureSchema(db, coverCacheDir = "") {
       duration_ms INTEGER,
       width INTEGER,
       height INTEGER,
+      actual_width INTEGER NOT NULL DEFAULT 0,
+      actual_height INTEGER NOT NULL DEFAULT 0,
+      actual_bit_rate INTEGER NOT NULL DEFAULT 0,
+      actual_codec TEXT NOT NULL DEFAULT '',
+      actual_frame_rate REAL NOT NULL DEFAULT 0,
+      actual_pixels INTEGER NOT NULL DEFAULT 0,
+      actual_long_edge INTEGER NOT NULL DEFAULT 0,
+      actual_probed_at TEXT NOT NULL DEFAULT '',
+      actual_probe_error TEXT NOT NULL DEFAULT '',
       digg_count INTEGER,
       comment_count INTEGER,
       collect_count INTEGER,
@@ -2197,6 +3357,23 @@ function ensureSchema(db, coverCacheDir = "") {
     );
     CREATE INDEX IF NOT EXISTS idx_short_video_local_comments_video
       ON short_video_local_comments(local_user_id, video_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS short_video_remote_comments (
+      id TEXT PRIMARY KEY,
+      video_id TEXT NOT NULL,
+      parent_id TEXT NOT NULL DEFAULT '',
+      user_id TEXT NOT NULL DEFAULT '',
+      user_name TEXT NOT NULL DEFAULT '',
+      user_avatar_url TEXT NOT NULL DEFAULT '',
+      body TEXT NOT NULL,
+      digg_count INTEGER NOT NULL DEFAULT 0,
+      reply_count INTEGER NOT NULL DEFAULT 0,
+      ip_label TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT '',
+      raw_json TEXT NOT NULL DEFAULT '{}',
+      synced_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_short_video_remote_comments_video
+      ON short_video_remote_comments(video_id, digg_count DESC, created_at DESC);
     CREATE TABLE IF NOT EXISTS short_video_import_batches (
       id TEXT PRIMARY KEY,
       source_root TEXT NOT NULL DEFAULT '',
@@ -2215,422 +3392,9 @@ function ensureSchema(db, coverCacheDir = "") {
     );
   `);
   ensureShortVideoColumns(db);
+  ensureShortVideoSearchIndex(db);
   recreateShortVideoCatalogView(db);
   migrateNormalizedShortVideoData(db, coverCacheDir);
-}
-
-function ensureShortVideoColumns(db) {
-  addColumnIfMissing(db, "short_videos", "owner_user_id", "TEXT NOT NULL DEFAULT ''");
-  addColumnIfMissing(db, "short_videos", "origin", "TEXT NOT NULL DEFAULT 'douyin_like_import'");
-  addColumnIfMissing(db, "short_videos", "status", "TEXT NOT NULL DEFAULT 'normal'");
-  addColumnIfMissing(db, "short_videos", "visibility", "TEXT NOT NULL DEFAULT 'local_only'");
-  addColumnIfMissing(db, "short_videos", "metadata_json", "TEXT NOT NULL DEFAULT '{}'");
-  addColumnIfMissing(db, "short_videos", "cover_source", "TEXT NOT NULL DEFAULT ''");
-  addColumnIfMissing(db, "short_video_users", "profile_url", "TEXT NOT NULL DEFAULT ''");
-  addColumnIfMissing(db, "short_video_users", "unique_id", "TEXT NOT NULL DEFAULT ''");
-  addColumnIfMissing(db, "short_video_users", "short_id", "TEXT NOT NULL DEFAULT ''");
-  addColumnIfMissing(db, "short_video_users", "ip_location", "TEXT NOT NULL DEFAULT ''");
-  addColumnIfMissing(db, "short_video_users", "total_favorited", "INTEGER");
-  addColumnIfMissing(db, "short_video_users", "aweme_count", "INTEGER");
-  addColumnIfMissing(db, "short_video_users", "favoriting_count", "INTEGER");
-  addColumnIfMissing(db, "short_video_users", "gender", "INTEGER");
-  addColumnIfMissing(db, "short_video_users", "age", "INTEGER");
-  addColumnIfMissing(db, "short_video_users", "verification", "TEXT NOT NULL DEFAULT ''");
-  addColumnIfMissing(db, "short_video_users", "profile_collected_at", "TEXT NOT NULL DEFAULT ''");
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_short_videos_owner ON short_videos(owner_user_id);
-    CREATE INDEX IF NOT EXISTS idx_short_videos_origin ON short_videos(origin);
-    CREATE INDEX IF NOT EXISTS idx_short_video_users_unique_id ON short_video_users(unique_id);
-  `);
-  backfillShortVideoShareUrls(db);
-  migrateShortVideoCoverSources(db);
-  ensureShortVideoTopics(db);
-  ensureShortVideoSounds(db);
-}
-
-function ensureShortVideoTopics(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS short_video_topics (
-      video_id TEXT NOT NULL,
-      topic TEXT NOT NULL,
-      topic_key TEXT NOT NULL,
-      PRIMARY KEY (video_id, topic_key)
-    );
-    CREATE INDEX IF NOT EXISTS idx_short_video_topics_key ON short_video_topics(topic_key, video_id);
-    CREATE INDEX IF NOT EXISTS idx_short_video_topics_video ON short_video_topics(video_id);
-
-    DROP TRIGGER IF EXISTS trg_short_video_topics_insert;
-    DROP TRIGGER IF EXISTS trg_short_video_topics_update;
-    DROP TRIGGER IF EXISTS trg_short_video_topics_delete;
-
-    CREATE TRIGGER trg_short_video_topics_insert
-    AFTER INSERT ON short_videos
-    BEGIN
-      INSERT OR REPLACE INTO short_video_topics (video_id, topic, topic_key)
-      SELECT
-        NEW.id,
-        TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')),
-        LOWER(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')))
-      FROM json_each(CASE WHEN json_valid(NEW.tags_json) THEN NEW.tags_json ELSE '[]' END) AS topic_tag
-      WHERE LENGTH(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#'))) BETWEEN 1 AND 48
-      GROUP BY LOWER(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')));
-    END;
-
-    CREATE TRIGGER trg_short_video_topics_update
-    AFTER UPDATE OF tags_json ON short_videos
-    BEGIN
-      DELETE FROM short_video_topics WHERE video_id = NEW.id;
-      INSERT OR REPLACE INTO short_video_topics (video_id, topic, topic_key)
-      SELECT
-        NEW.id,
-        TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')),
-        LOWER(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')))
-      FROM json_each(CASE WHEN json_valid(NEW.tags_json) THEN NEW.tags_json ELSE '[]' END) AS topic_tag
-      WHERE LENGTH(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#'))) BETWEEN 1 AND 48
-      GROUP BY LOWER(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')));
-    END;
-
-    CREATE TRIGGER trg_short_video_topics_delete
-    AFTER DELETE ON short_videos
-    BEGIN
-      DELETE FROM short_video_topics WHERE video_id = OLD.id;
-    END;
-  `);
-  if (metaValue(db, "short_video_topic_index_version") === SHORT_VIDEO_TOPIC_INDEX_VERSION) return;
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    db.exec(`
-      DELETE FROM short_video_topics;
-      INSERT OR REPLACE INTO short_video_topics (video_id, topic, topic_key)
-      SELECT
-        v.id,
-        TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')),
-        LOWER(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')))
-      FROM short_videos v
-      JOIN json_each(CASE WHEN json_valid(v.tags_json) THEN v.tags_json ELSE '[]' END) AS topic_tag
-      WHERE LENGTH(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#'))) BETWEEN 1 AND 48
-      GROUP BY v.id, LOWER(TRIM(LTRIM(CAST(topic_tag.value AS TEXT), '#')));
-      INSERT OR REPLACE INTO short_video_meta (key, value)
-      VALUES ('short_video_topic_index_version', '${SHORT_VIDEO_TOPIC_INDEX_VERSION}');
-    `);
-    db.exec("COMMIT");
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
-    throw error;
-  }
-}
-
-function ensureShortVideoSounds(db) {
-  const insertNew = shortVideoSoundIndexSelect("NEW");
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS short_video_sounds (
-      video_id TEXT PRIMARY KEY,
-      sound_key TEXT NOT NULL,
-      sound_id TEXT NOT NULL DEFAULT '',
-      title TEXT NOT NULL DEFAULT '',
-      author TEXT NOT NULL DEFAULT '',
-      cover_url TEXT NOT NULL DEFAULT '',
-      preview_url TEXT NOT NULL DEFAULT '',
-      local_available INTEGER NOT NULL DEFAULT 0
-    );
-    CREATE INDEX IF NOT EXISTS idx_short_video_sounds_key ON short_video_sounds(sound_key, video_id);
-
-    CREATE TRIGGER IF NOT EXISTS trg_short_video_sounds_insert
-    AFTER INSERT ON short_videos
-    BEGIN
-      INSERT OR REPLACE INTO short_video_sounds (
-        video_id, sound_key, sound_id, title, author, cover_url, preview_url, local_available
-      )
-      ${insertNew};
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS trg_short_video_sounds_update
-    AFTER UPDATE OF metadata_json, music_path, author_name ON short_videos
-    BEGIN
-      DELETE FROM short_video_sounds WHERE video_id = NEW.id;
-      INSERT OR REPLACE INTO short_video_sounds (
-        video_id, sound_key, sound_id, title, author, cover_url, preview_url, local_available
-      )
-      ${insertNew};
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS trg_short_video_sounds_delete
-    AFTER DELETE ON short_videos
-    BEGIN
-      DELETE FROM short_video_sounds WHERE video_id = OLD.id;
-    END;
-  `);
-  if (metaValue(db, "short_video_sound_index_version") === SHORT_VIDEO_SOUND_INDEX_VERSION) return;
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    db.exec(`
-      DELETE FROM short_video_sounds;
-      INSERT OR REPLACE INTO short_video_sounds (
-        video_id, sound_key, sound_id, title, author, cover_url, preview_url, local_available
-      )
-      ${shortVideoSoundIndexSelect("v", "FROM short_videos v")};
-      INSERT OR REPLACE INTO short_video_meta (key, value)
-      VALUES ('short_video_sound_index_version', '${SHORT_VIDEO_SOUND_INDEX_VERSION}');
-    `);
-    db.exec("COMMIT");
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
-    throw error;
-  }
-}
-
-function shortVideoSoundIndexSelect(rowReference, fromClause = "") {
-  const row = String(rowReference || "v");
-  return `
-    SELECT
-      indexed.video_id,
-      indexed.sound_key,
-      indexed.sound_id,
-      indexed.title,
-      indexed.author,
-      indexed.cover_url,
-      indexed.preview_url,
-      indexed.local_available
-    FROM (
-      SELECT
-        source.*,
-        CASE
-          WHEN source.title <> ''
-            AND source.author <> ''
-            AND source.is_original_sound = 0
-            AND source.title NOT LIKE '%创作的原声%'
-            AND LOWER(source.title) <> '模板音乐'
-            THEN 'track:' || LOWER(source.title) || CHAR(31) || LOWER(source.author)
-          WHEN source.sound_id <> '' THEN 'id:' || source.sound_id
-          WHEN source.local_available = 1 THEN 'local:' || source.video_id
-          ELSE ''
-        END AS sound_key
-      FROM (
-        SELECT
-          ${row}.id AS video_id,
-          TRIM(COALESCE(
-            CAST(json_extract(${row}.metadata_json, '$.music.id_str') AS TEXT),
-            CAST(json_extract(${row}.metadata_json, '$.music.mid') AS TEXT),
-            ''
-          )) AS sound_id,
-          TRIM(COALESCE(CAST(json_extract(${row}.metadata_json, '$.music.title') AS TEXT), '')) AS title,
-          TRIM(COALESCE(CAST(json_extract(${row}.metadata_json, '$.music.author') AS TEXT), '')) AS author,
-          TRIM(COALESCE(
-            CAST(json_extract(${row}.metadata_json, '$.music.cover_medium.url_list[0]') AS TEXT),
-            CAST(json_extract(${row}.metadata_json, '$.music.cover_thumb.url_list[0]') AS TEXT),
-            ''
-          )) AS cover_url,
-          TRIM(COALESCE(
-            CAST(json_extract(${row}.metadata_json, '$.music.play_url.url_list[0]') AS TEXT),
-            CAST(json_extract(${row}.metadata_json, '$.music.play_url.uri') AS TEXT),
-            ''
-          )) AS preview_url,
-          CASE WHEN COALESCE(TRIM(${row}.music_path), '') <> '' THEN 1 ELSE 0 END AS local_available,
-          CASE WHEN COALESCE(CAST(json_extract(${row}.metadata_json, '$.music.is_original_sound') AS INTEGER), 0) = 1 THEN 1 ELSE 0 END AS is_original_sound
-        ${fromClause}
-      ) AS source
-    ) AS indexed
-    WHERE indexed.sound_key <> ''
-  `;
-}
-
-function addColumnIfMissing(db, table, column, definition) {
-  const columns = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
-  if (columns.has(column)) return;
-  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-}
-
-function backfillShortVideoShareUrls(db) {
-  db.prepare(`
-    UPDATE short_videos
-    SET share_url = 'https://www.douyin.com/video/' || TRIM(aweme_id),
-        updated_at = ?
-    WHERE COALESCE(TRIM(share_url), '') = ''
-      AND COALESCE(TRIM(aweme_id), '') <> ''
-      AND TRIM(aweme_id) NOT GLOB '*[^0-9]*'
-      AND LENGTH(TRIM(aweme_id)) >= 8
-  `).run(new Date().toISOString());
-}
-
-function migrateShortVideoCoverSources(db) {
-  const now = new Date().toISOString();
-  db.prepare(`
-    UPDATE short_videos
-    SET cover_source = CASE
-          WHEN cover_path LIKE '%short-video-covers%' THEN 'ffmpeg'
-          WHEN COALESCE(TRIM(cover_path), '') <> '' THEN 'native'
-          ELSE ''
-        END,
-        updated_at = CASE WHEN COALESCE(updated_at, '') = '' THEN ? ELSE updated_at END
-    WHERE COALESCE(TRIM(cover_source), '') = ''
-  `).run(now);
-
-  db.prepare(`
-    UPDATE short_video_assets
-    SET asset_type = CASE
-          WHEN local_path LIKE '%short-video-covers%' THEN 'ffmpeg_cover'
-          ELSE 'native_cover'
-        END,
-        id = video_id || ':' || CASE
-          WHEN local_path LIKE '%short-video-covers%' THEN 'ffmpeg_cover'
-          ELSE 'native_cover'
-        END,
-        updated_at = CASE WHEN COALESCE(updated_at, '') = '' THEN ? ELSE updated_at END
-    WHERE asset_type = 'cover'
-  `).run(now);
-}
-
-function recreateShortVideoCatalogView(db) {
-  const recommendationScoreSql = SHORT_VIDEO_RECOMMENDATION_SCORE_SQL;
-  db.exec(`
-    DROP VIEW IF EXISTS short_video_catalog;
-    DROP VIEW IF EXISTS short_video_catalog_base;
-    CREATE VIEW short_video_catalog_base AS
-    SELECT
-      v.id,
-      v.aweme_id,
-      v.owner_user_id,
-      v.origin,
-      v.status,
-      v.visibility,
-      ${SHORT_VIDEO_MEDIA_TYPE_SQL} AS media_type,
-      COALESCE(NULLIF(u.sec_uid, ''), v.author_sec_uid) AS author_sec_uid,
-      COALESCE(NULLIF(u.uid, ''), v.author_uid) AS author_uid,
-      COALESCE(NULLIF(u.nickname, ''), v.author_name, '未知作者') AS author_name,
-      COALESCE(NULLIF(u.avatar_url, ''), v.author_avatar_url) AS author_avatar_url,
-      COALESCE(NULLIF(u.profile_url, ''), CASE WHEN COALESCE(NULLIF(u.sec_uid, ''), v.author_sec_uid) <> '' THEN 'https://www.douyin.com/user/' || COALESCE(NULLIF(u.sec_uid, ''), v.author_sec_uid) ELSE '' END) AS author_profile_url,
-      COALESCE(NULLIF(u.unique_id, ''), '') AS author_unique_id,
-      COALESCE(NULLIF(u.short_id, ''), '') AS author_short_id,
-      COALESCE(NULLIF(u.signature, ''), '') AS author_signature,
-      COALESCE(NULLIF(u.ip_location, ''), '') AS author_ip_location,
-      u.follower_count AS author_follower_count,
-      u.following_count AS author_following_count,
-      u.total_favorited AS author_total_favorited,
-      u.aweme_count AS author_aweme_count,
-      u.favoriting_count AS author_favoriting_count,
-      u.gender AS author_gender,
-      u.age AS author_age,
-      COALESCE(NULLIF(u.verification, ''), '') AS author_verification,
-      COALESCE(NULLIF(u.profile_collected_at, ''), '') AS author_profile_collected_at,
-      COALESCE(user_follow.active, 0) AS author_following,
-      v.title,
-      v.description,
-      v.tags_json,
-      v.tags_text,
-      v.create_time,
-      v.published_at,
-      v.liked_at,
-      COALESCE(
-        NULLIF(liked_membership.first_seen_at, ''),
-        NULLIF(v.imported_at, ''),
-        NULLIF(v.published_at, ''),
-        ''
-      ) AS liked_sort_at,
-      julianday(COALESCE(
-        NULLIF(liked_membership.first_seen_at, ''),
-        NULLIF(v.imported_at, ''),
-        NULLIF(v.published_at, '')
-      )) AS liked_sort_time,
-      v.duration_ms,
-      v.width,
-      v.height,
-      COALESCE(s.digg_count, v.digg_count, 0) AS digg_count,
-      COALESCE(s.comment_count, v.comment_count, 0) AS comment_count,
-      COALESCE(s.collect_count, v.collect_count, 0) AS collect_count,
-      COALESCE(s.share_count, v.share_count, 0) AS share_count,
-      COALESCE(s.play_count, v.play_count, 0) AS play_count,
-      COALESCE(user_like.active, 0) AS user_like_active,
-      COALESCE(user_like.source, '') AS user_like_source,
-      COALESCE(user_collect.active, 0) AS user_collect_active,
-      COALESCE(user_collect.source, '') AS user_collect_source,
-      COALESCE(user_dislike.active, 0) AS user_dislike_active,
-      COALESCE(user_dislike.source, '') AS user_dislike_source,
-      ${recommendationScoreSql} AS recommendation_score,
-      COALESCE(watch_history.progress_ms, 0) AS watch_progress_ms,
-      COALESCE(watch_history.completed_count, 0) AS watch_completed_count,
-      COALESCE(watch_history.last_watched_at, '') AS last_watched_at,
-      v.share_url,
-      v.metadata_json,
-      COALESCE(sound_index.sound_key, '') AS sound_key,
-      COALESCE(sound_index.sound_id, '') AS sound_id,
-      COALESCE(sound_index.title, '') AS sound_title,
-      COALESCE(sound_index.author, '') AS sound_author,
-      COALESCE(sound_index.cover_url, '') AS sound_cover_url,
-      COALESCE(sound_index.preview_url, '') AS sound_preview_url,
-      COALESCE(sound_index.local_available, 0) AS sound_local_available,
-      COALESCE(NULLIF(video_asset.local_path, ''), v.source_path) AS source_path,
-      COALESCE(
-        NULLIF(native_cover_asset.local_path, ''),
-        CASE WHEN v.cover_source = 'native' THEN NULLIF(v.cover_path, '') ELSE NULL END,
-        NULLIF(ffmpeg_cover_asset.local_path, ''),
-        CASE WHEN v.cover_source = 'ffmpeg' THEN NULLIF(v.cover_path, '') ELSE NULL END,
-        NULLIF(legacy_cover_asset.local_path, ''),
-        NULLIF(v.cover_path, '')
-      ) AS cover_path,
-      CASE
-        WHEN NULLIF(native_cover_asset.local_path, '') IS NOT NULL
-          OR (v.cover_source = 'native' AND NULLIF(v.cover_path, '') IS NOT NULL)
-          THEN 'native'
-        WHEN NULLIF(ffmpeg_cover_asset.local_path, '') IS NOT NULL
-          OR (v.cover_source = 'ffmpeg' AND NULLIF(v.cover_path, '') IS NOT NULL)
-          THEN 'ffmpeg'
-        WHEN NULLIF(legacy_cover_asset.local_path, '') IS NOT NULL
-          THEN CASE WHEN legacy_cover_asset.local_path LIKE '%short-video-covers%' THEN 'ffmpeg' ELSE 'native' END
-        ELSE COALESCE(NULLIF(v.cover_source, ''), '')
-      END AS cover_source,
-      COALESCE(NULLIF(music_asset.local_path, ''), v.music_path) AS music_path,
-      v.data_path,
-      v.relative_path,
-      COALESCE(NULLIF(video_asset.file_name, ''), v.file_name) AS file_name,
-      COALESCE(NULLIF(video_asset.size_bytes, 0), v.size_bytes, 0) AS size_bytes,
-      COALESCE(NULLIF(video_asset.mtime_ms, 0), v.mtime_ms, 0) AS mtime_ms,
-      v.imported_at,
-      v.updated_at
-    FROM short_videos v
-    LEFT JOIN short_video_users u ON u.id = v.owner_user_id
-    LEFT JOIN short_video_stats s ON s.video_id = v.id
-    LEFT JOIN short_video_user_actions user_like
-      ON user_like.video_id = v.id
-     AND user_like.local_user_id = 'local:self'
-     AND user_like.action_type = 'like'
-    LEFT JOIN short_video_user_actions user_collect
-      ON user_collect.video_id = v.id
-     AND user_collect.local_user_id = 'local:self'
-     AND user_collect.action_type = 'collect'
-    LEFT JOIN short_video_user_actions user_dislike
-      ON user_dislike.video_id = v.id
-     AND user_dislike.local_user_id = 'local:self'
-     AND user_dislike.action_type = 'dislike'
-    LEFT JOIN short_video_follows user_follow
-      ON user_follow.target_user_id = v.owner_user_id
-     AND user_follow.local_user_id = 'local:self'
-    LEFT JOIN short_video_watch_history watch_history
-      ON watch_history.video_id = v.id
-     AND watch_history.local_user_id = 'local:self'
-    LEFT JOIN (
-      SELECT aweme_id, MIN(NULLIF(first_seen_at, '')) AS first_seen_at
-      FROM short_video_source_memberships
-      WHERE source_type = 'like'
-      GROUP BY aweme_id
-    ) liked_membership ON liked_membership.aweme_id = v.aweme_id
-    LEFT JOIN short_video_assets video_asset ON video_asset.video_id = v.id AND video_asset.asset_type = 'video'
-    LEFT JOIN short_video_assets native_cover_asset ON native_cover_asset.video_id = v.id AND native_cover_asset.asset_type = 'native_cover'
-    LEFT JOIN short_video_assets ffmpeg_cover_asset ON ffmpeg_cover_asset.video_id = v.id AND ffmpeg_cover_asset.asset_type = 'ffmpeg_cover'
-    LEFT JOIN short_video_assets legacy_cover_asset ON legacy_cover_asset.video_id = v.id AND legacy_cover_asset.asset_type = 'cover'
-    LEFT JOIN short_video_assets music_asset ON music_asset.video_id = v.id AND music_asset.asset_type = 'music'
-    LEFT JOIN short_video_sounds sound_index ON sound_index.video_id = v.id;
-
-    CREATE VIEW short_video_catalog AS
-    SELECT
-      short_video_catalog_base.*,
-      1 AS recommendation_author_rank,
-      recommendation_score AS recommendation_order_score
-    FROM short_video_catalog_base;
-  `);
 }
 
 function migrateNormalizedShortVideoData(db, coverCacheDir = "") {
@@ -2962,6 +3726,17 @@ function downloadManagerRowToItem(row) {
     durationMs,
     width: Number(video.width || video.play_addr?.width || 0) || null,
     height: Number(video.height || video.play_addr?.height || 0) || null,
+    actualVideo: mediaType === "video" ? {
+      width: Math.max(0, Number(row.actual_width || 0)),
+      height: Math.max(0, Number(row.actual_height || 0)),
+      bitRate: Math.max(0, Number(row.actual_bit_rate || 0)),
+      codec: String(row.actual_codec || "").trim().toLowerCase(),
+      frameRate: Math.max(0, Number(row.actual_frame_rate || 0)),
+      pixels: Math.max(0, Number(row.actual_pixels || 0)),
+      longEdge: Math.max(0, Number(row.actual_long_edge || 0)),
+      probedAt: String(row.actual_probed_at || "").trim(),
+      probeError: String(row.actual_probe_error || "").trim()
+    } : null,
     diggCount: Math.max(0, Number(row.digg_count || 0), Number(statistics.digg_count || 0)),
     commentCount: Math.max(0, Number(row.comment_count || 0), Number(statistics.comment_count || 0)),
     collectCount: Math.max(0, Number(row.collect_count || 0), Number(statistics.collect_count || 0)),
@@ -2986,12 +3761,14 @@ function shortVideoUpsertStatement(db) {
   return db.prepare(`
     INSERT INTO short_videos (
       id, aweme_id, author_sec_uid, author_uid, author_name, author_avatar_url,
-      title, description, tags_json, tags_text, create_time, published_at, liked_at,
-      duration_ms, width, height, digg_count, comment_count, collect_count,
+      title, description, tags_json, tags_text, create_time, published_at, liked_at, media_type,
+      duration_ms, width, height, actual_width, actual_height, actual_bit_rate,
+      actual_codec, actual_frame_rate, actual_pixels, actual_long_edge, actual_probed_at,
+      actual_probe_error, digg_count, comment_count, collect_count,
       share_count, play_count, share_url, metadata_json, source_path, cover_path, cover_source, music_path,
       data_path, relative_path, file_name, size_bytes, mtime_ms, imported_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       aweme_id = excluded.aweme_id,
       author_sec_uid = excluded.author_sec_uid,
@@ -3005,9 +3782,22 @@ function shortVideoUpsertStatement(db) {
       create_time = excluded.create_time,
       published_at = excluded.published_at,
       liked_at = excluded.liked_at,
+      media_type = excluded.media_type,
       duration_ms = excluded.duration_ms,
       width = excluded.width,
       height = excluded.height,
+      actual_width = CASE WHEN excluded.actual_width > 0 THEN excluded.actual_width ELSE short_videos.actual_width END,
+      actual_height = CASE WHEN excluded.actual_height > 0 THEN excluded.actual_height ELSE short_videos.actual_height END,
+      actual_bit_rate = CASE WHEN excluded.actual_bit_rate > 0 THEN excluded.actual_bit_rate ELSE short_videos.actual_bit_rate END,
+      actual_codec = COALESCE(NULLIF(excluded.actual_codec, ''), short_videos.actual_codec),
+      actual_frame_rate = CASE WHEN excluded.actual_frame_rate > 0 THEN excluded.actual_frame_rate ELSE short_videos.actual_frame_rate END,
+      actual_pixels = CASE WHEN excluded.actual_pixels > 0 THEN excluded.actual_pixels ELSE short_videos.actual_pixels END,
+      actual_long_edge = CASE WHEN excluded.actual_long_edge > 0 THEN excluded.actual_long_edge ELSE short_videos.actual_long_edge END,
+      actual_probed_at = COALESCE(NULLIF(excluded.actual_probed_at, ''), short_videos.actual_probed_at),
+      actual_probe_error = CASE
+        WHEN NULLIF(excluded.actual_probed_at, '') IS NOT NULL THEN excluded.actual_probe_error
+        ELSE short_videos.actual_probe_error
+      END,
       digg_count = MAX(COALESCE(short_videos.digg_count, 0), COALESCE(excluded.digg_count, 0)),
       comment_count = MAX(COALESCE(short_videos.comment_count, 0), COALESCE(excluded.comment_count, 0)),
       collect_count = MAX(COALESCE(short_videos.collect_count, 0), COALESCE(excluded.collect_count, 0)),
@@ -3219,6 +4009,7 @@ function mergeDuplicateShortVideoRow(db, duplicateId, keepId) {
   mergeDuplicateShortVideoActions(db, duplicateId, keepId, now);
   mergeDuplicateShortVideoCollectionItems(db, duplicateId, keepId);
   mergeDuplicateShortVideoLocalComments(db, duplicateId, keepId, now);
+  mergeDuplicateShortVideoRemoteComments(db, duplicateId, keepId, now);
   mergeDuplicateShortVideoWatchHistory(db, duplicateId, keepId);
   mergeDuplicateShortVideoImportItems(db, duplicateId, keepId);
   db.prepare("DELETE FROM short_videos WHERE id = ?").run(duplicateId);
@@ -3351,6 +4142,14 @@ function mergeDuplicateShortVideoLocalComments(db, duplicateId, keepId, now) {
   `).run(keepId, now, duplicateId);
 }
 
+function mergeDuplicateShortVideoRemoteComments(db, duplicateId, keepId, now) {
+  db.prepare(`
+    UPDATE short_video_remote_comments
+    SET video_id = ?, synced_at = COALESCE(NULLIF(synced_at, ''), ?)
+    WHERE video_id = ?
+  `).run(keepId, now, duplicateId);
+}
+
 function mergeDuplicateShortVideoWatchHistory(db, duplicateId, keepId) {
   const rows = db.prepare("SELECT * FROM short_video_watch_history WHERE video_id = ?").all(duplicateId);
   const keepStatement = db.prepare("SELECT * FROM short_video_watch_history WHERE local_user_id = ? AND video_id = ?");
@@ -3396,6 +4195,7 @@ function mergeShortVideoOrigin(keepOrigin = "", duplicateOrigin = "") {
 }
 
 function videoRowValues(item, now) {
+  const actualVideo = item.actualVideo || {};
   return [
     item.id,
     item.awemeId,
@@ -3410,9 +4210,19 @@ function videoRowValues(item, now) {
     item.createTime,
     item.publishedAt,
     item.likedAt,
+    item.mediaType === "gallery" ? "gallery" : "video",
     item.durationMs,
     item.width,
     item.height,
+    Math.max(0, Number(actualVideo.width || 0)),
+    Math.max(0, Number(actualVideo.height || 0)),
+    Math.max(0, Number(actualVideo.bitRate || 0)),
+    String(actualVideo.codec || "").trim().toLowerCase(),
+    Math.max(0, Number(actualVideo.frameRate || 0)),
+    Math.max(0, Number(actualVideo.pixels || 0)),
+    Math.max(0, Number(actualVideo.longEdge || 0)),
+    String(actualVideo.probedAt || "").trim(),
+    String(actualVideo.probeError || "").trim(),
     item.diggCount,
     item.commentCount,
     item.collectCount,
@@ -3495,6 +4305,20 @@ function normalizedUpsertStatements(db, coverCacheDir = "") {
           status = ?,
           visibility = ?,
           updated_at = ?
+      WHERE id = ?
+    `),
+    videoFollowing: db.prepare(`
+      UPDATE short_videos
+      SET author_following = CASE
+        WHEN EXISTS (
+          SELECT 1
+          FROM short_video_follows user_follow
+          WHERE user_follow.local_user_id = '${LOCAL_SHORT_VIDEO_USER_ID}'
+            AND user_follow.target_user_id = ?
+            AND user_follow.active = 1
+        ) THEN 1
+        ELSE 0
+      END
       WHERE id = ?
     `),
     stats: db.prepare(`
@@ -3595,6 +4419,7 @@ function upsertNormalizedItem(statements, item, now, options = {}) {
   );
   const origin = shortVideoOrigin(item);
   statements.videoCore.run(authorId, origin, origin, origin, origin, "normal", "local_only", now, item.id);
+  statements.videoFollowing.run(authorId, item.id);
   statements.stats.run(
     item.id,
     Number(item.diggCount || 0),
@@ -3857,6 +4682,7 @@ function syncDownloadManagerSourceMemberships(targetDb, sourceDb, now = new Date
            WHERE membership.aweme_id = short_videos.aweme_id
          )
     `).run(now);
+    refreshShortVideoRelationshipFlags(targetDb);
     targetDb.exec("COMMIT");
   } catch (error) {
     try {
@@ -3917,6 +4743,7 @@ function deleteNormalizedVideoRows(db, videoIds) {
     ["short_video_collection_items", "video_id"],
     ["short_video_watch_history", "video_id"],
     ["short_video_local_comments", "video_id"],
+    ["short_video_remote_comments", "video_id"],
     ["short_video_import_items", "video_id"]
   ]) {
     db.prepare(`DELETE FROM ${table} WHERE ${column} IN (${placeholders})`).run(...videoIds);
@@ -4045,6 +4872,17 @@ function publicVideo(row, options = {}) {
     durationMs: Number(row.duration_ms || 0) || null,
     width: Number(row.width || 0) || null,
     height: Number(row.height || 0) || null,
+    actualVideo: {
+      width: Number(row.actual_width || 0) || null,
+      height: Number(row.actual_height || 0) || null,
+      bitRate: Number(row.actual_bit_rate || 0) || null,
+      codec: row.actual_codec || "",
+      frameRate: Number(row.actual_frame_rate || 0) || null,
+      pixels: Number(row.actual_pixels || 0),
+      longEdge: Number(row.actual_long_edge || 0),
+      probedAt: row.actual_probed_at || "",
+      probeError: row.actual_probe_error || ""
+    },
     stats: {
       known: statisticsKnown,
       likes: Math.max(0, Number(row.digg_count || 0) + likeDelta),
@@ -4132,13 +4970,18 @@ function publicVideoMedia(row, metadata = {}) {
     ? metadata.fanhaoMedia
     : {};
   const declaredType = String(fanhaoMedia.type || "").trim().toLowerCase();
+  const storedType = String(row.media_type || "").trim().toLowerCase();
   const galleryCount = clampInt(fanhaoMedia.galleryCount, 0, 0, 1000);
   const declaredGalleryItems = Array.isArray(fanhaoMedia.galleryItems)
     ? fanhaoMedia.galleryItems.slice(0, galleryCount).map((item) => item === "video" ? "video" : "image")
     : [];
   const sourceExt = path.extname(String(row.source_path || "")).toLowerCase();
   const inferredGallery = IMAGE_EXTS.has(sourceExt) && galleryCount > 0;
-  const type = declaredType === "gallery" || inferredGallery ? "gallery" : "video";
+  const type = storedType === "gallery"
+    ? "gallery"
+    : storedType === "video"
+      ? "video"
+      : declaredType === "gallery" || inferredGallery ? "gallery" : "video";
   return {
     type,
     galleryCount: type === "gallery" ? galleryCount : 0,
@@ -4148,37 +4991,133 @@ function publicVideoMedia(row, metadata = {}) {
   };
 }
 
+function normalizeAuthorSort(value) {
+  const sort = String(value || "followed").trim().toLowerCase();
+  return ["followed", "count", "liked"].includes(sort) ? sort : "followed";
+}
+
+function normalizeAuthorFilter(value) {
+  return String(value || "all").trim().toLowerCase() === "unliked" ? "unliked" : "all";
+}
+
+function authorComparator(sort) {
+  const byName = (a, b) => String(a.name || "").localeCompare(String(b.name || ""), "zh-CN");
+  if (sort === "liked") {
+    return (a, b) => Number(b.likedCount || 0) - Number(a.likedCount || 0)
+      || Number(b.count || 0) - Number(a.count || 0)
+      || Number(b.followedTime || 0) - Number(a.followedTime || 0)
+      || byName(a, b);
+  }
+  if (sort === "count") {
+    return (a, b) => Number(b.count || 0) - Number(a.count || 0)
+      || Number(b.likedCount || 0) - Number(a.likedCount || 0)
+      || Number(b.followedTime || 0) - Number(a.followedTime || 0)
+      || byName(a, b);
+  }
+  return (a, b) => Number(b.followedTime || 0) - Number(a.followedTime || 0)
+    || Number(b.count || 0) - Number(a.count || 0)
+    || byName(a, b);
+}
+
+function followingAuthorFacet(db) {
+  return db.prepare(`
+    WITH followed AS (
+      SELECT
+        users.id AS targetUserId,
+        users.sec_uid AS secUid,
+        users.nickname AS name,
+        users.avatar_url AS avatarUrl,
+        users.profile_url AS profileUrl,
+        users.unique_id AS uniqueId,
+        follows.followed_at AS followedAt,
+        COALESCE((julianday(NULLIF(follows.followed_at, '')) - 2440587.5) * 86400000, 0) AS followedTime
+      FROM short_video_follows follows
+      JOIN short_video_users users ON users.id = follows.target_user_id
+      WHERE follows.local_user_id = '${LOCAL_SHORT_VIDEO_USER_ID}'
+        AND follows.active = 1
+    ),
+    local_video_stats AS (
+      SELECT
+        videos.owner_user_id AS targetUserId,
+        COUNT(*) AS count,
+        COUNT(DISTINCT CASE
+          WHEN videos.is_liked = 1 THEN COALESCE(NULLIF(videos.aweme_id, ''), videos.id)
+          ELSE NULL
+        END) AS likedCount
+      FROM short_videos videos INDEXED BY idx_short_videos_following_stats
+      JOIN followed ON followed.targetUserId = videos.owner_user_id
+      WHERE videos.visibility = 'local_only'
+      GROUP BY videos.owner_user_id
+    )
+    SELECT
+      followed.secUid,
+      followed.name,
+      followed.avatarUrl,
+      followed.profileUrl,
+      followed.uniqueId,
+      followed.targetUserId,
+      followed.followedAt,
+      followed.followedTime,
+      COALESCE(local_video_stats.count, 0) AS count,
+      COALESCE(local_video_stats.likedCount, 0) AS likedCount,
+      '' AS coverId,
+      0 AS coverMtimeMs
+    FROM followed
+    LEFT JOIN local_video_stats ON local_video_stats.targetUserId = followed.targetUserId
+  `).all().map((row) => ({
+    secUid: row.secUid || "",
+    name: row.name || "未知作者",
+    avatarUrl: row.avatarUrl || "",
+    profileUrl: row.profileUrl || "",
+    uniqueId: row.uniqueId || "",
+    id: row.targetUserId || "",
+    following: true,
+    followedAt: row.followedAt || "",
+    followedTime: Number(row.followedTime || 0),
+    likedCount: Number(row.likedCount || 0),
+    fallbackCoverUrl: row.coverId ? `/media/short-video-cover/${encodeURIComponent(row.coverId)}?v=${encodeURIComponent(String(row.coverMtimeMs || ""))}` : "",
+    count: Number(row.count || 0)
+  }));
+}
+
 function authorFacet(db) {
   return db.prepare(`
-    SELECT
-      MAX(secUid) AS secUid,
-      COALESCE(MAX(name), '未知作者') AS name,
-      MAX(NULLIF(author_avatar_url, '')) AS avatarUrl,
-      MAX(NULLIF(targetUserId, '')) AS targetUserId,
-      MAX(following) AS following,
-      MAX(coverId) AS coverId,
-      MAX(coverMtimeMs) AS coverMtimeMs,
-      COUNT(*) AS count
-    FROM (
+    WITH grouped AS (
       SELECT
-        COALESCE(NULLIF(author_sec_uid, ''), NULLIF(author_name, ''), 'unknown') AS authorKey,
-        NULLIF(author_sec_uid, '') AS secUid,
-        NULLIF(author_name, '') AS name,
-        author_avatar_url,
-        owner_user_id AS targetUserId,
-        COALESCE(author_following, 0) AS following,
-        CASE WHEN COALESCE(NULLIF(cover_path, ''), '') <> '' THEN id ELSE '' END AS coverId,
-        CASE WHEN COALESCE(NULLIF(cover_path, ''), '') <> '' THEN mtime_ms ELSE 0 END AS coverMtimeMs
-      FROM short_video_catalog
-      WHERE visibility = 'local_only'
-        AND (NULLIF(author_sec_uid, '') IS NOT NULL OR NULLIF(author_name, '') IS NOT NULL)
+        COALESCE(NULLIF(v.author_sec_uid, ''), NULLIF(v.author_name, ''), 'unknown') AS authorKey,
+        MAX(NULLIF(v.author_sec_uid, '')) AS secUid,
+        COALESCE(MAX(NULLIF(v.author_name, '')), '未知作者') AS name,
+        MAX(NULLIF(v.author_avatar_url, '')) AS avatarUrl,
+        MAX(NULLIF(v.owner_user_id, '')) AS targetUserId,
+        MAX(COALESCE(v.author_following, 0)) AS following,
+        MAX(CASE WHEN COALESCE(NULLIF(v.cover_path, ''), '') <> '' THEN v.id ELSE '' END) AS coverId,
+        MAX(CASE WHEN COALESCE(NULLIF(v.cover_path, ''), '') <> '' THEN v.mtime_ms ELSE 0 END) AS coverMtimeMs,
+        COUNT(*) AS count
+      FROM short_videos v INDEXED BY idx_short_videos_author_facet
+      WHERE v.visibility = 'local_only'
+        AND (NULLIF(v.author_sec_uid, '') IS NOT NULL OR NULLIF(v.author_name, '') IS NOT NULL)
+      GROUP BY authorKey
     )
-    GROUP BY authorKey
+    SELECT
+      COALESCE(NULLIF(author_user.sec_uid, ''), grouped.secUid) AS secUid,
+      COALESCE(NULLIF(author_user.nickname, ''), grouped.name, '未知作者') AS name,
+      COALESCE(NULLIF(author_user.avatar_url, ''), grouped.avatarUrl) AS avatarUrl,
+      NULLIF(author_user.profile_url, '') AS profileUrl,
+      NULLIF(author_user.unique_id, '') AS uniqueId,
+      grouped.targetUserId,
+      grouped.following,
+      grouped.coverId,
+      grouped.coverMtimeMs,
+      grouped.count
+    FROM grouped
+    LEFT JOIN short_video_users author_user ON author_user.id = grouped.targetUserId
     ORDER BY count DESC, name COLLATE NOCASE
   `).all().map((row) => ({
     secUid: row.secUid || "",
     name: row.name || "未知作者",
     avatarUrl: row.avatarUrl || "",
+    profileUrl: row.profileUrl || "",
+    uniqueId: row.uniqueId || "",
     id: row.targetUserId || "",
     following: Boolean(row.following),
     fallbackCoverUrl: row.coverId ? `/media/short-video-cover/${encodeURIComponent(row.coverId)}?v=${encodeURIComponent(String(row.coverMtimeMs || ""))}` : "",
@@ -4591,6 +5530,58 @@ function normalizeSort(value) {
   return ["recommended", "liked", "likedAsc", "watched", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
 }
 
+function fastHistoryVideoPage(database, filter, sort, limit, offset) {
+  const eligible = filter.source === "history"
+    && sort === "watched"
+    && !filter.q
+    && !filter.topic
+    && !filter.soundKey
+    && !filter.author;
+  if (!eligible) return null;
+
+  const whereParts = [
+    "w.local_user_id = 'local:self'",
+    "w.last_watched_at <> ''"
+  ];
+  const args = [];
+  if (!filter.includePending) whereParts.push("v.visibility = 'local_only'");
+  const qualityWhere = actualVideoQualityWhere(filter.quality, "v.");
+  if (qualityWhere) {
+    if (filter.quality === "unknown") whereParts.push(shortVideoMediaWhere("video", "v."));
+    whereParts.push(qualityWhere);
+  } else if (filter.media !== "all") {
+    whereParts.push(shortVideoMediaWhere(filter.media, "v."));
+  }
+  const where = whereParts.join(" AND ");
+  const total = Number(database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM short_video_watch_history w INDEXED BY idx_short_video_watch_history_recent_video
+    JOIN short_videos v ON v.id = w.video_id
+    WHERE ${where}
+  `).get(...args)?.count || 0);
+  const ids = database.prepare(`
+    SELECT v.id
+    FROM short_video_watch_history w INDEXED BY idx_short_video_watch_history_recent_video
+    JOIN short_videos v ON v.id = w.video_id
+    WHERE ${where}
+    ORDER BY w.last_watched_at DESC, v.published_at DESC, v.id DESC
+    LIMIT ? OFFSET ?
+  `).all(...args, limit, offset).map((row) => String(row.id || "")).filter(Boolean);
+  if (!ids.length) return { total, rows: [] };
+
+  const placeholders = ids.map(() => "?").join(", ");
+  const fetched = database.prepare(`
+    SELECT ${LIST_VIDEO_COLUMNS}
+    FROM short_video_catalog
+    WHERE id IN (${placeholders})
+  `).all(...ids);
+  const byId = new Map(fetched.map((row) => [String(row.id || ""), row]));
+  return {
+    total,
+    rows: ids.map((id) => byId.get(id)).filter(Boolean)
+  };
+}
+
 function shortVideoMediaVersion(value) {
   const version = Math.max(0, Math.floor(Number(value || 0)));
   return version ? String(version) : "";
@@ -4602,9 +5593,174 @@ function shortVideoMediaUrl(id, mtimeMs) {
   return version ? `${base}?v=${encodeURIComponent(version)}` : base;
 }
 
-function fastPublishedVideoPage(database, filter, sort, limit, offset) {
+function encodeShortVideoListCursor(sort, row = {}, total = 0, seen = 0) {
+  if (sort !== "likes" || !row?.id) return "";
+  return Buffer.from(JSON.stringify({
+    v: 1,
+    s: "likes",
+    l: Math.max(0, Number(row.digg_count || 0)),
+    a: String(row.liked_at || ""),
+    i: String(row.id || ""),
+    t: Math.max(0, Math.floor(Number(total || 0))),
+    n: Math.max(0, Math.floor(Number(seen || 0)))
+  })).toString("base64url");
+}
+
+function decodeShortVideoListCursor(value, sort) {
+  const token = String(value || "").trim();
+  if (sort !== "likes" || !token || token.length > 512) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(token, "base64url").toString("utf8"));
+    const id = String(parsed?.i || "").trim();
+    const likes = Number(parsed?.l);
+    const total = Math.max(0, Math.floor(Number(parsed?.t || 0)));
+    const seen = Math.max(0, Math.floor(Number(parsed?.n || 0)));
+    if (parsed?.v !== 1 || parsed?.s !== "likes" || !id || !Number.isFinite(likes) || seen > total) return null;
+    return {
+      likes: Math.max(0, likes),
+      likedAt: String(parsed?.a || "").slice(0, 80),
+      id,
+      total,
+      seen
+    };
+  } catch {
+    return null;
+  }
+}
+
+function fastFilteredVideoPage(database, filter, sort, limit, offset, totalOverride, listCursor = null) {
+  if (!["all", "liked", "following", "posts", "local"].includes(filter.source)
+    || filter.q || filter.topic || filter.soundKey || filter.author) return null;
+  if (["liked", "likedAsc"].includes(sort) && filter.source !== "liked") return null;
+  const likedSortAt = "v.liked_sort_at";
+  const orderBy = {
+    liked: `v.liked_sort_time DESC, ${likedSortAt} DESC, v.published_at DESC, v.id DESC`,
+    likedAsc: `COALESCE(v.liked_sort_time, 1000000000000) ASC, ${likedSortAt} ASC, v.published_at ASC, v.id DESC`,
+    published: "v.published_at DESC, v.liked_at DESC, v.id DESC",
+    publishedAsc: "COALESCE(NULLIF(v.published_at, ''), '9999-12-31T23:59:59.999Z') ASC, v.liked_at ASC, v.id DESC",
+    likes: "v.digg_count DESC, v.liked_at DESC, v.id DESC",
+    likesAsc: `
+      CASE
+        WHEN COALESCE(v.digg_count, 0) > 0
+          OR COALESCE(v.comment_count, 0) > 0
+          OR COALESCE(v.collect_count, 0) > 0
+          OR COALESCE(v.share_count, 0) > 0
+        THEN COALESCE(v.digg_count, 0)
+        ELSE 1000000000000
+      END ASC,
+      v.liked_at ASC,
+      v.id DESC
+    `,
+    comments: "COALESCE(v.comment_count, 0) DESC, v.liked_at DESC, v.id DESC",
+    duration: "COALESCE(v.duration_ms, 0) DESC, v.liked_at DESC, v.id DESC"
+  }[sort];
+  if (!orderBy) return null;
+
+  const whereParts = [];
+  const args = [];
+  if (!filter.includePending) whereParts.push("v.visibility = 'local_only'");
+  const qualityWhere = actualVideoQualityWhere(filter.quality, "v.");
+  if (qualityWhere) {
+    if (filter.quality === "unknown") whereParts.push(shortVideoMediaWhere("video", "v."));
+    whereParts.push(qualityWhere);
+  } else if (filter.media !== "all") {
+    whereParts.push(shortVideoMediaWhere(filter.media, "v."));
+  }
+  if (filter.source === "liked") {
+    whereParts.push("v.is_liked = 1");
+  } else if (filter.source === "following") {
+    whereParts.push("v.author_following = 1");
+  } else if (filter.source === "posts") {
+    whereParts.push(`EXISTS (
+      SELECT 1 FROM short_video_source_memberships membership
+      WHERE membership.aweme_id = v.aweme_id AND membership.source_type = 'post'
+    )`);
+  } else if (filter.source === "local") {
+    whereParts.push(`NOT EXISTS (
+      SELECT 1 FROM short_video_source_memberships membership
+      WHERE membership.aweme_id = v.aweme_id
+    )`);
+  }
+  if (sort === "likes" && listCursor) {
+    whereParts.push(`(
+      v.digg_count < ?
+      OR (v.digg_count = ? AND v.liked_at < ?)
+      OR (v.digg_count = ? AND v.liked_at = ? AND v.id < ?)
+    )`);
+    args.push(
+      listCursor.likes,
+      listCursor.likes, listCursor.likedAt,
+      listCursor.likes, listCursor.likedAt, listCursor.id
+    );
+  }
+  const where = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+  const indexHint = qualityWhere
+    ? "INDEXED BY idx_short_videos_actual_pixels"
+    : filter.source === "following" && sort === "likes" && filter.media === "video"
+      ? "INDEXED BY idx_short_videos_following_media_digg"
+      : filter.source === "following" && ["published", "publishedAsc"].includes(sort) && filter.media === "video"
+        ? "INDEXED BY idx_short_videos_following_media_published"
+        : sort === "likes" && filter.media === "video"
+          ? "INDEXED BY idx_short_videos_media_digg"
+          : ["published", "publishedAsc"].includes(sort) && filter.media === "video"
+            ? "INDEXED BY idx_short_videos_media_published"
+            : sort === "liked" && filter.source === "liked"
+              ? filter.media === "all"
+                ? "INDEXED BY idx_short_videos_liked_sort_all"
+                : "INDEXED BY idx_short_videos_liked_sort"
+              : "";
+  const total = listCursor
+    ? listCursor.total
+    : Number.isFinite(totalOverride)
+    ? Number(totalOverride)
+    : Number(database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM short_videos v ${indexHint}
+      ${where}
+    `).get(...args)?.count || 0);
+  const remaining = listCursor ? Math.max(0, listCursor.total - listCursor.seen) : limit;
+  if (listCursor && remaining <= 0) {
+    return { total, rows: [], hasMore: false, nextCursor: "" };
+  }
+  const requestedRows = listCursor ? Math.min(limit, remaining) : limit;
+  const queryLimit = listCursor ? requestedRows + 1 : requestedRows;
+  const effectiveOffset = listCursor ? 0 : offset;
+  const ids = database.prepare(`
+    SELECT v.id
+    FROM short_videos v ${indexHint}
+    ${where}
+    ORDER BY ${orderBy}
+    LIMIT ? OFFSET ?
+  `).all(...args, queryLimit, effectiveOffset).map((row) => String(row.id || "")).filter(Boolean);
+  const hasExtraRow = listCursor && ids.length > requestedRows;
+  const pageIds = ids.slice(0, requestedRows);
+  if (!pageIds.length) return { total, rows: [], hasMore: false, nextCursor: "" };
+
+  const placeholders = pageIds.map(() => "?").join(", ");
+  const fetched = database.prepare(`
+    SELECT ${LIST_VIDEO_COLUMNS}
+    FROM short_video_catalog
+    WHERE id IN (${placeholders})
+  `).all(...pageIds);
+  const byId = new Map(fetched.map((row) => [String(row.id || ""), row]));
+  const rows = pageIds.map((id) => byId.get(id)).filter(Boolean);
+  const seen = listCursor ? listCursor.seen + rows.length : effectiveOffset + rows.length;
+  const hasMore = listCursor
+    ? Boolean(hasExtraRow && seen < total)
+    : seen < total;
+  return {
+    total,
+    rows,
+    hasMore,
+    nextCursor: sort === "likes" && rows.length
+      ? encodeShortVideoListCursor(sort, rows[rows.length - 1], total, seen)
+      : ""
+  };
+}
+
+function fastPublishedVideoPage(database, filter, sort, limit, offset, totalOverride) {
   if (!["published", "publishedAsc"].includes(sort)) return null;
-  if (filter.q || filter.topic || filter.soundKey || filter.media !== "all") return null;
+  if (filter.q || filter.topic || filter.soundKey || filter.media !== "all" || filter.quality !== "all") return null;
   if (!["liked", "all", "posts", "local"].includes(filter.source)) return null;
   if (filter.author?.startsWith("name:")) return null;
 
@@ -4621,19 +5777,7 @@ function fastPublishedVideoPage(database, filter, sort, limit, offset) {
     args.push(filter.author, filter.author);
   }
   if (filter.source === "liked") {
-    whereParts.push(`(
-      EXISTS (
-        SELECT 1 FROM short_video_source_memberships membership
-        WHERE membership.aweme_id = v.aweme_id AND membership.source_type = 'like'
-      )
-      OR EXISTS (
-        SELECT 1 FROM short_video_user_actions manual_like
-        WHERE manual_like.video_id = v.id
-          AND manual_like.local_user_id = 'local:self'
-          AND manual_like.action_type = 'like'
-          AND manual_like.active = 1
-      )
-    )`);
+    whereParts.push("v.is_liked = 1");
   } else if (filter.source === "posts") {
     whereParts.push(`EXISTS (
       SELECT 1 FROM short_video_source_memberships membership
@@ -4650,11 +5794,13 @@ function fastPublishedVideoPage(database, filter, sort, limit, offset) {
   const orderBy = sort === "publishedAsc"
     ? "v.published_at ASC, v.liked_at ASC, v.id DESC"
     : "v.published_at DESC, v.liked_at DESC, v.id DESC";
-  const total = Number(database.prepare(`
-    SELECT COUNT(*) AS count
-    FROM short_videos v
-    ${where}
-  `).get(...args)?.count || 0);
+  const total = Number.isFinite(totalOverride)
+    ? Number(totalOverride)
+    : Number(database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM short_videos v
+      ${where}
+    `).get(...args)?.count || 0);
   const ids = database.prepare(`
     SELECT v.id
     FROM short_videos v
@@ -4677,102 +5823,19 @@ function fastPublishedVideoPage(database, filter, sort, limit, offset) {
   };
 }
 
-function videoFilter(params = new URLSearchParams()) {
-  const q = String(params.get("q") || params.get("search") || "").trim();
-  const topic = normalizeTopicFilter(params.get("topic") || params.get("tag"));
-  const sound = normalizeSoundFilter(params.get("sound") || params.get("music"));
-  const soundKey = decodeShortVideoSoundKey(sound);
-  const author = String(params.get("author") || "").trim();
-  const source = normalizeSourceFilter(params.get("source") || params.get("origin"));
-  const media = normalizeMediaFilter(params.get("media") || params.get("type"));
-  const whereParts = [];
-  const args = [];
-  const includePending = includePendingShortVideos(params);
-  if (!includePending) {
-    whereParts.push("visibility = 'local_only'");
-  }
-  if (q) {
-    const like = `%${escapeLike(q)}%`;
-    whereParts.push(`(
-      title LIKE ? ESCAPE '\\' OR
-      description LIKE ? ESCAPE '\\' OR
-      author_name LIKE ? ESCAPE '\\' OR
-      aweme_id LIKE ? ESCAPE '\\' OR
-      tags_text LIKE ? ESCAPE '\\'
-    )`);
-    args.push(like, like, like, like, like);
-  }
-  if (topic) {
-    whereParts.push("id IN (SELECT video_id FROM short_video_topics WHERE topic_key = LOWER(?))");
-    args.push(topic);
-  }
-  if (soundKey) {
-    whereParts.push("id IN (SELECT video_id FROM short_video_sounds WHERE sound_key = ?)");
-    args.push(soundKey);
-  }
-  if (author && author !== "all") {
-    if (author.startsWith("name:")) {
-      whereParts.push("author_name = ?");
-      args.push(author.slice(5));
-    } else {
-      whereParts.push("author_sec_uid = ?");
-      args.push(author);
-    }
-  }
-  if (media !== "all") {
-    whereParts.push("media_type = ?");
-    args.push(media);
-  }
-  if (source === "recommended") {
-    whereParts.push("user_dislike_active = 0");
-  } else if (source === "liked") {
-    whereParts.push(`(
-      id IN (
-        SELECT v2.id
-        FROM short_videos v2
-        JOIN short_video_source_memberships membership ON membership.aweme_id = v2.aweme_id
-        WHERE membership.source_type = 'like'
-      )
-      OR user_like_active = 1
-    )`);
-  } else if (source === "following") {
-    whereParts.push("author_following = 1");
-  } else if (source === "history") {
-    whereParts.push("last_watched_at <> ''");
-  } else if (source === "posts") {
-    whereParts.push(`id IN (
-      SELECT v2.id
-      FROM short_videos v2
-      JOIN short_video_source_memberships membership ON membership.aweme_id = v2.aweme_id
-      WHERE membership.source_type = 'post'
-    )`);
-  } else if (source === "local") {
-    whereParts.push(`id NOT IN (
-      SELECT v2.id
-      FROM short_videos v2
-      JOIN short_video_source_memberships membership ON membership.aweme_id = v2.aweme_id
-    )`);
-  }
-  return { q, topic, sound, soundKey, author, media, source, includePending, where: whereParts.join(" AND "), args };
+function fastSourceTotalCacheKey(filter = {}) {
+  if (!["posts", "local"].includes(filter.source)
+    || filter.includePending
+    || filter.q
+    || filter.topic
+    || filter.soundKey
+    || filter.author) return "";
+  return `${filter.source}:${filter.media || "all"}:${filter.quality || "all"}`;
 }
 
 function shortVideoRelationshipTotal(database, source) {
   if (source === "liked") {
-    return Number(database.prepare(`
-      SELECT COUNT(*) AS count
-      FROM (
-        SELECT aweme_id
-        FROM short_video_source_memberships
-        WHERE source_type = 'like'
-        UNION
-        SELECT v.aweme_id
-        FROM short_video_user_actions action
-        JOIN short_videos v ON v.id = action.video_id
-        WHERE action.local_user_id = 'local:self'
-          AND action.action_type = 'like'
-          AND action.active = 1
-      )
-    `).get()?.count || 0);
+    return Number(database.prepare("SELECT COUNT(*) AS count FROM short_videos WHERE is_liked = 1").get()?.count || 0);
   }
   if (source === "posts") {
     return Number(database.prepare(`
@@ -4782,48 +5845,6 @@ function shortVideoRelationshipTotal(database, source) {
     `).get()?.count || 0);
   }
   return null;
-}
-
-function normalizeTopicFilter(value) {
-  return String(value || "").trim().replace(/^#+/, "").slice(0, 48);
-}
-
-function normalizeSoundFilter(value) {
-  const token = String(value || "").trim();
-  return /^[A-Za-z0-9_-]{1,1000}$/.test(token) ? token : "";
-}
-
-function encodeShortVideoSoundKey(value) {
-  const key = String(value || "");
-  return key ? Buffer.from(key, "utf8").toString("base64url") : "";
-}
-
-function decodeShortVideoSoundKey(value) {
-  try {
-    const decoded = Buffer.from(normalizeSoundFilter(value), "base64url").toString("utf8");
-    return decoded.length <= 600 ? decoded : "";
-  } catch {
-    return "";
-  }
-}
-
-function normalizeMediaFilter(value) {
-  const media = String(value || "all").trim().toLowerCase();
-  return ["video", "gallery"].includes(media) ? media : "all";
-}
-
-function formatSuggestionCount(value) {
-  return new Intl.NumberFormat("zh-CN").format(Math.max(0, Number(value || 0)));
-}
-
-function includePendingShortVideos(params = new URLSearchParams()) {
-  const value = String(params.get("includePending") || params.get("pending") || "").trim().toLowerCase();
-  return ["1", "true", "yes", "on"].includes(value);
-}
-
-function normalizeSourceFilter(value) {
-  const source = String(value || "liked").trim().toLowerCase();
-  return ["recommended", "liked", "following", "history", "posts", "all", "local"].includes(source) ? source : "liked";
 }
 
 function adjacentOrder(urlOrOptions = {}) {
@@ -4891,8 +5912,149 @@ function adjacentOrder(urlOrOptions = {}) {
   }[sort] || { column: "published_at", fallback: "liked_at", numeric: false };
 }
 
+function fastHistoryAdjacentRows(database, row, direction, filter, order, limit) {
+  const eligible = filter.source === "history"
+    && !filter.q
+    && !filter.topic
+    && !filter.soundKey
+    && !filter.author
+    && order?.column === "last_watched_at";
+  if (!eligible) return null;
+
+  const movingNext = direction > 0;
+  const operator = movingNext ? "<" : ">";
+  const sortDirection = movingNext ? "DESC" : "ASC";
+  const lastWatchedAt = String(row.last_watched_at || "");
+  const publishedAt = String(row.published_at || "");
+  const currentId = String(row.id || "");
+  const whereParts = [
+    `w.local_user_id = '${LOCAL_SHORT_VIDEO_USER_ID}'`,
+    "w.last_watched_at <> ''"
+  ];
+  if (!filter.includePending) whereParts.push("v.visibility = 'local_only'");
+  const qualityWhere = actualVideoQualityWhere(filter.quality, "v.");
+  if (qualityWhere) {
+    if (filter.quality === "unknown") whereParts.push(shortVideoMediaWhere("video", "v."));
+    whereParts.push(qualityWhere);
+  } else if (filter.media !== "all") {
+    whereParts.push(shortVideoMediaWhere(filter.media, "v."));
+  }
+  const ids = database.prepare(`
+    SELECT v.id
+    FROM short_video_watch_history w INDEXED BY idx_short_video_watch_history_recent_video
+    JOIN short_videos v ON v.id = w.video_id
+    WHERE ${whereParts.join(" AND ")} AND (
+      w.last_watched_at ${operator} ?
+      OR (w.last_watched_at = ? AND v.published_at ${operator} ?)
+      OR (w.last_watched_at = ? AND v.published_at = ? AND v.id ${operator} ?)
+    )
+    ORDER BY
+      w.last_watched_at ${sortDirection},
+      v.published_at ${sortDirection},
+      v.id ${sortDirection}
+    LIMIT ?
+  `).all(
+    lastWatchedAt,
+    lastWatchedAt,
+    publishedAt,
+    lastWatchedAt,
+    publishedAt,
+    currentId,
+    Math.max(1, Number(limit || 1))
+  ).map((item) => String(item.id || "")).filter(Boolean);
+  if (!ids.length) return [];
+
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = database.prepare(`
+    SELECT ${LIST_VIDEO_COLUMNS}
+    FROM short_video_catalog
+    WHERE id IN (${placeholders})
+  `).all(...ids);
+  const byId = new Map(rows.map((item) => [String(item.id || ""), item]));
+  return ids.map((id) => byId.get(id)).filter(Boolean);
+}
+
 function adjacentRow(database, row, direction, order, includeAllColumns = false, filter = null) {
   return adjacentRows(database, row, direction, order, includeAllColumns, filter, 1)[0] || null;
+}
+
+function fastLikedAdjacentRows(database, row, direction, filter, order, limit) {
+  const eligible = filter.source === "liked"
+    && !filter.q
+    && !filter.topic
+    && !filter.soundKey
+    && !filter.author
+    && order?.column === "liked_sort_time";
+  if (!eligible) return null;
+
+  const likedSortAt = "v.liked_sort_at";
+  const ascending = String(order.direction || "DESC").toUpperCase() === "ASC";
+  const likedSortTime = `COALESCE(v.liked_sort_time, ${ascending ? "1000000000000" : "-1"})`;
+  const currentTime = Number(order.value ? order.value(row) : row.liked_sort_time);
+  const normalizedCurrentTime = Number.isFinite(currentTime)
+    ? currentTime
+    : (ascending ? 1000000000000 : -1);
+  const currentSortAt = String(row.liked_sort_at || "");
+  const currentPublishedAt = String(row.published_at || "");
+  const currentId = String(row.id || "");
+  const movingNext = direction > 0;
+  const primaryOperator = movingNext === ascending ? ">" : "<";
+  const idOperator = movingNext ? "<" : ">";
+  const primarySortDirection = movingNext
+    ? (ascending ? "ASC" : "DESC")
+    : (ascending ? "DESC" : "ASC");
+  const idSortDirection = movingNext ? "DESC" : "ASC";
+  const whereParts = [];
+  const args = [];
+  if (!filter.includePending) whereParts.push("v.visibility = 'local_only'");
+  const qualityWhere = actualVideoQualityWhere(filter.quality, "v.");
+  if (qualityWhere) {
+    if (filter.quality === "unknown") whereParts.push(shortVideoMediaWhere("video", "v."));
+    whereParts.push(qualityWhere);
+  } else if (filter.media !== "all") {
+    whereParts.push(shortVideoMediaWhere(filter.media, "v."));
+  }
+  whereParts.push("v.is_liked = 1");
+  const indexHint = qualityWhere ? "INDEXED BY idx_short_videos_actual_pixels" : "";
+  const ids = database.prepare(`
+    SELECT v.id
+    FROM short_videos v ${indexHint}
+    WHERE ${whereParts.join(" AND ")} AND (
+      ${likedSortTime} ${primaryOperator} ?
+      OR (${likedSortTime} = ? AND ${likedSortAt} ${primaryOperator} ?)
+      OR (${likedSortTime} = ? AND ${likedSortAt} = ? AND v.published_at ${primaryOperator} ?)
+      OR (${likedSortTime} = ? AND ${likedSortAt} = ? AND v.published_at = ? AND v.id ${idOperator} ?)
+    )
+    ORDER BY
+      ${likedSortTime} ${primarySortDirection},
+      ${likedSortAt} ${primarySortDirection},
+      v.published_at ${primarySortDirection},
+      v.id ${idSortDirection}
+    LIMIT ?
+  `).all(
+    ...args,
+    normalizedCurrentTime,
+    normalizedCurrentTime,
+    currentSortAt,
+    normalizedCurrentTime,
+    currentSortAt,
+    currentPublishedAt,
+    normalizedCurrentTime,
+    currentSortAt,
+    currentPublishedAt,
+    currentId,
+    Math.max(1, Number(limit || 1))
+  ).map((item) => String(item.id || "")).filter(Boolean);
+  if (!ids.length) return [];
+
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = database.prepare(`
+    SELECT ${LIST_VIDEO_COLUMNS}
+    FROM short_video_catalog
+    WHERE id IN (${placeholders})
+  `).all(...ids);
+  const byId = new Map(rows.map((item) => [String(item.id || ""), item]));
+  return ids.map((id) => byId.get(id)).filter(Boolean);
 }
 
 function fastPublishedAdjacentRows(database, row, direction, filter, order, limit) {
@@ -4901,13 +6063,10 @@ function fastPublishedAdjacentRows(database, row, direction, filter, order, limi
     && !filter.topic
     && !filter.soundKey
     && ["liked", "posts", "all", "local"].includes(filter.source)
-    && order?.column === "published_at"
-    && !order?.expression;
+    && order?.column === "published_at";
   if (!eligible) return null;
 
   const movingNext = direction > 0;
-  const operator = movingNext ? "<" : ">";
-  const sortDirection = movingNext ? "DESC" : "ASC";
   const whereParts = [];
   const args = [];
   if (!filter.includePending) whereParts.push("v.visibility = 'local_only'");
@@ -4920,24 +6079,15 @@ function fastPublishedAdjacentRows(database, row, direction, filter, order, limi
       args.push(author);
     }
   }
-  if (filter.media !== "all") {
-    whereParts.push(`${SHORT_VIDEO_MEDIA_TYPE_SQL} = ?`);
-    args.push(filter.media);
+  const qualityWhere = actualVideoQualityWhere(filter.quality, "v.");
+  if (qualityWhere) {
+    if (filter.quality === "unknown") whereParts.push(shortVideoMediaWhere("video", "v."));
+    whereParts.push(qualityWhere);
+  } else if (filter.media !== "all") {
+    whereParts.push(shortVideoMediaWhere(filter.media, "v."));
   }
   if (filter.source === "liked") {
-    whereParts.push(`(
-      EXISTS (
-        SELECT 1 FROM short_video_source_memberships membership
-        WHERE membership.aweme_id = v.aweme_id AND membership.source_type = 'like'
-      )
-      OR EXISTS (
-        SELECT 1 FROM short_video_user_actions manual_like
-        WHERE manual_like.video_id = v.id
-          AND manual_like.local_user_id = '${LOCAL_SHORT_VIDEO_USER_ID}'
-          AND manual_like.action_type = 'like'
-          AND manual_like.active = 1
-      )
-    )`);
+    whereParts.push("v.is_liked = 1");
   } else if (filter.source === "posts") {
     whereParts.push(`EXISTS (
       SELECT 1 FROM short_video_source_memberships membership
@@ -4949,21 +6099,132 @@ function fastPublishedAdjacentRows(database, row, direction, filter, order, limi
       WHERE membership.aweme_id = v.aweme_id
     )`);
   }
-  const publishedAt = row.published_at || "";
+  const publishedExpression = order.expression
+    ? "COALESCE(NULLIF(v.published_at, ''), '9999-12-31T23:59:59.999Z')"
+    : "v.published_at";
+  const publishedAt = order.value ? order.value(row) : row.published_at || "";
   const likedAt = row.liked_at || "";
-  const indexHint = author && author !== "all" && !author.startsWith("name:")
-    ? "INDEXED BY idx_short_videos_author_published"
-    : "INDEXED BY idx_short_videos_published";
+  const ascending = String(order.direction || "DESC").toUpperCase() === "ASC";
+  const operator = movingNext === ascending ? ">" : "<";
+  const sortDirection = movingNext
+    ? (ascending ? "ASC" : "DESC")
+    : (ascending ? "DESC" : "ASC");
+  const indexHint = qualityWhere
+    ? "INDEXED BY idx_short_videos_actual_pixels"
+    : author && author !== "all" && !author.startsWith("name:")
+      ? "INDEXED BY idx_short_videos_author_published"
+      : "INDEXED BY idx_short_videos_published";
   const ids = database.prepare(`
     SELECT v.id
     FROM short_videos v ${indexHint}
     WHERE ${whereParts.length ? `${whereParts.join(" AND ")} AND ` : ""}
-      (v.published_at, v.liked_at, v.id) ${operator} (?, ?, ?)
-    ORDER BY v.published_at ${sortDirection}, v.liked_at ${sortDirection}, v.id ${sortDirection}
+      (${publishedExpression}, v.liked_at, v.id) ${operator} (?, ?, ?)
+    ORDER BY ${publishedExpression} ${sortDirection}, v.liked_at ${sortDirection}, v.id ${sortDirection}
     LIMIT ?
   `).all(
     ...args,
     publishedAt,
+    likedAt,
+    row.id || "",
+    Math.max(1, Number(limit || 1))
+  ).map((item) => String(item.id || "")).filter(Boolean);
+  if (!ids.length) return [];
+
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = database.prepare(`
+    SELECT ${LIST_VIDEO_COLUMNS}
+    FROM short_video_catalog
+    WHERE id IN (${placeholders})
+  `).all(...ids);
+  const byId = new Map(rows.map((item) => [String(item.id || ""), item]));
+  return ids.map((id) => byId.get(id)).filter(Boolean);
+}
+
+function fastMetricAdjacentRows(database, row, direction, filter, order, limit) {
+  const eligibleColumns = new Set(["digg_count", "comment_count", "collect_count", "share_count", "duration_ms"]);
+  const likesAscending = order.column === "digg_count"
+    && String(order.direction || "").toUpperCase() === "ASC"
+    && Boolean(order.expression);
+  const eligible = !filter.q
+    && !filter.topic
+    && !filter.soundKey
+    && !filter.author
+    && ["all", "liked", "following", "posts", "local"].includes(filter.source)
+    && (!order.expression || likesAscending)
+    && eligibleColumns.has(order.column)
+    && order.fallback === "liked_at";
+  if (!eligible) return null;
+
+  const metricExpression = likesAscending
+    ? `CASE
+        WHEN COALESCE(v.digg_count, 0) > 0
+          OR COALESCE(v.comment_count, 0) > 0
+          OR COALESCE(v.collect_count, 0) > 0
+          OR COALESCE(v.share_count, 0) > 0
+        THEN COALESCE(v.digg_count, 0)
+        ELSE 1000000000000
+      END`
+    : order.column === "duration_ms"
+      ? "COALESCE(v.duration_ms, 0)"
+      : order.column === "digg_count"
+        ? "v.digg_count"
+        : `COALESCE(v.${order.column}, 0)`;
+  const metricValue = Math.max(0, Number(order.value ? order.value(row) : row[order.column] || 0));
+  const likedAt = String(row.liked_at || "");
+  const ascending = String(order.direction || "DESC").toUpperCase() === "ASC";
+  const movingNext = direction > 0;
+  const operator = movingNext === ascending ? ">" : "<";
+  const sortDirection = movingNext
+    ? (ascending ? "ASC" : "DESC")
+    : (ascending ? "DESC" : "ASC");
+  const whereParts = [];
+  const args = [];
+  if (!filter.includePending) whereParts.push("v.visibility = 'local_only'");
+  const qualityWhere = actualVideoQualityWhere(filter.quality, "v.");
+  if (qualityWhere) {
+    if (filter.quality === "unknown") whereParts.push(shortVideoMediaWhere("video", "v."));
+    whereParts.push(qualityWhere);
+  } else if (filter.media !== "all") {
+    whereParts.push(shortVideoMediaWhere(filter.media, "v."));
+  }
+  if (filter.source === "liked") {
+    whereParts.push("v.is_liked = 1");
+  } else if (filter.source === "following") {
+    whereParts.push("v.author_following = 1");
+  } else if (filter.source === "posts") {
+    whereParts.push(`EXISTS (
+      SELECT 1 FROM short_video_source_memberships membership
+      WHERE membership.aweme_id = v.aweme_id AND membership.source_type = 'post'
+    )`);
+  } else if (filter.source === "local") {
+    whereParts.push(`NOT EXISTS (
+      SELECT 1 FROM short_video_source_memberships membership
+      WHERE membership.aweme_id = v.aweme_id
+    )`);
+  }
+  const indexHint = qualityWhere
+    ? "INDEXED BY idx_short_videos_actual_pixels"
+    : filter.source === "following" && order.column === "digg_count" && filter.media === "video"
+      ? "INDEXED BY idx_short_videos_following_media_digg"
+      : order.column === "digg_count" && filter.media === "video"
+        ? "INDEXED BY idx_short_videos_media_digg"
+        : "";
+  const ids = database.prepare(`
+    SELECT v.id
+    FROM short_videos v ${indexHint}
+    WHERE ${whereParts.length ? `${whereParts.join(" AND ")} AND ` : ""}(
+      ${metricExpression} ${operator} ?
+      OR (${metricExpression} = ? AND v.liked_at ${operator} ?)
+      OR (${metricExpression} = ? AND v.liked_at = ? AND v.id ${operator} ?)
+    )
+    ORDER BY ${metricExpression} ${sortDirection}, v.liked_at ${sortDirection}, v.id ${sortDirection}
+    LIMIT ?
+  `).all(
+    ...args,
+    metricValue,
+    metricValue,
+    likedAt,
+    metricValue,
     likedAt,
     row.id || "",
     Math.max(1, Number(limit || 1))
@@ -5079,10 +6340,6 @@ function optionalInteger(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? Math.floor(number) : null;
-}
-
-function escapeLike(value) {
-  return String(value || "").replace(/[\\%_]/g, (match) => `\\${match}`);
 }
 
 function uniqueTextArray(values, options = {}) {

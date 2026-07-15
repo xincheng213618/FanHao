@@ -232,7 +232,7 @@ export function createMangaService({
     return null;
   }
 
-  function serveImage(res, mangaId, chapterNumber, imageIndex) {
+  async function serveImage(res, mangaId, chapterNumber, imageIndex) {
     const cacheDir = cacheById(decodeURIComponent(mangaId));
     if (!cacheDir) {
       notFound(res);
@@ -252,7 +252,7 @@ export function createMangaService({
     }
     const memberPath = path.relative(chapterDir, sourceImagePath).replace(/\\/g, "/");
     const archivePath = `${chapterDir}.zip`;
-    serveArchiveMemberImage(res, {
+    await serveArchiveMemberImage(res, {
       sourceType: "manga",
       archivePath,
       memberPath,

@@ -52,7 +52,6 @@ for (const relativePath of [
   "android-client/www/modules/fanhao/features/works/actions.js",
   "android-client/www/modules/fanhao/features/works/preview-media.js",
   "android-client/www/modules/fanhao/features/rankings/ranking-views.js",
-  "android-client/www/platform/search/global-search.js",
   "src/modules/fanhao/server/composition.js"
 ]) {
   assert(fs.statSync(path.join(root, relativePath), { throwIfNoEntry: false })?.isFile(), `missing FanHao refactor part: ${relativePath}`);
@@ -61,11 +60,12 @@ for (const relativePath of [
 const androidWorkViews = read("android-client/www/modules/fanhao/work-views.js");
 assert(!androidWorkViews.includes("SEARCH_CHANNELS"), "FanHao Android must not own cross-module search channels");
 assert(!/function createWorkCard\s*\(/.test(androidWorkViews), "FanHao Android work cards must stay in their feature module");
-assert(androidWorkViews.includes("createGlobalSearch"), "FanHao Android must use the platform search aggregator");
+assert(!androidWorkViews.includes("createGlobalSearch"), "FanHao Android search must not use a cross-module aggregator");
+assert(androidWorkViews.includes("/api/fanhao/search"), "FanHao Android search must use the module-scoped endpoint");
+assert(!androidWorkViews.includes("data.channels"), "FanHao Android search must not render results from other modules");
 assert(androidWorkViews.includes("createRankingViews"), "FanHao Android rankings must stay in their feature module");
 assert(lines("android-client/www/modules/fanhao/work-views.js") <= 750, "FanHao Android work views must stay below 750 lines");
 assert(lines("android-client/www/modules/fanhao/features/works/cards.js") <= 320, "FanHao Android work cards must stay focused");
-assert(lines("android-client/www/platform/search/global-search.js") <= 240, "Android global search aggregator must stay focused");
 const androidDetailViews = read("android-client/www/modules/fanhao/detail-views.js");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
   assert(!androidDetailViews.includes(`function ${functionName}(`), `Android detail must delegate ${functionName}`);

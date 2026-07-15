@@ -12,6 +12,7 @@ $ErrorActionPreference = "Stop"
 
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ServerFile = Join-Path $ProjectDir "server.js"
+$ShortVideoBuildScript = Join-Path $ProjectDir "tools\build_short_video_web.mjs"
 $DownloadManagerScript = Join-Path $ProjectDir "src\modules\short-videos\download-manager\run.ps1"
 $LogDir = Join-Path $ProjectDir "logs"
 $OutLog = Join-Path $LogDir "fanhao.out.log"
@@ -23,6 +24,20 @@ if (-not (Test-Path -LiteralPath $ServerFile)) {
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
   throw "Node.js was not found in PATH. Install Node.js 20+ or add node.exe to PATH."
+}
+
+if (-not (Test-Path -LiteralPath $ShortVideoBuildScript)) {
+  throw "Short-video web build script not found: $ShortVideoBuildScript"
+}
+
+Push-Location $ProjectDir
+try {
+  & node $ShortVideoBuildScript
+  if ($LASTEXITCODE -ne 0) {
+    throw "Short-video web build failed. Exit code: $LASTEXITCODE"
+  }
+} finally {
+  Pop-Location
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null

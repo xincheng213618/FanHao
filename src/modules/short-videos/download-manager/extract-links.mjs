@@ -661,7 +661,8 @@ async function extractWorks(opts) {
   const pending = [];
   const writer = createJsonlWriter(opts.streamOut);
   const profile = {};
-  const targetSecUid = profileSecUidFromUrl(opts.url);
+  const rawTargetSecUid = profileSecUidFromUrl(opts.url);
+  const targetSecUid = rawTargetSecUid.toLowerCase() === "self" ? "" : rawTargetSecUid;
   const filterToTargetAuthor = Boolean(targetSecUid && !isLikeProfileUrl(opts.url));
   if (targetSecUid) profile.sec_uid = targetSecUid;
   const emitProfile = async (reason, incoming) => {

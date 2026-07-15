@@ -1,6 +1,7 @@
 import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=20260706-mobile-web-sync-01";
 import { formatCompact } from "../../../js/format.js";
-import { DEFAULT_SORT, initials } from "../shared.js";
+import { DEFAULT_SORT, initials } from "../shared.js?v=20260713-follow-toggle-08";
+import { renderFollowingAuthorTools } from "./following-view.js?v=20260713-follow-toggle-08";
 export function createShortVideoListView(context = {}) {
   const { els, getActiveUrl, goBack, listState, openSettings, showView } = context;
   const appendVisibleAuthors = (...args) => context.appendVisibleAuthors(...args);
@@ -41,6 +42,9 @@ export function createShortVideoListView(context = {}) {
     const toolbar = listState.searchPage ? null : renderListToolbar();
     if (toolbar) shell.append(toolbar);
     if (isAuthorIndexView()) {
+      if (listState.source === "following") {
+        shell.append(renderFollowingAuthorTools({ listState, onChange: updateListParams }));
+      }
       shell.append(renderAuthorIndex());
       els.viewContent.append(shell);
       return;
@@ -65,14 +69,39 @@ export function createShortVideoListView(context = {}) {
       grid.append(empty);
     }
     shell.append(grid);
-    if (listState.data?.hasMore) {
-      const sentinel = document.createElement("div");
-      sentinel.className = "short-video-mobile-load-more";
-      sentinel.setAttribute("aria-hidden", "true");
-      shell.append(sentinel);
-      observeListLoadMore(sentinel);
-    }
+    syncListLoadMoreSentinel(shell);
     els.viewContent.append(shell);
+  }
+
+  function appendListVideos(videos = []) {
+    const shell = els.viewContent.querySelector(".short-video-mobile-list");
+    const grid = shell?.querySelector(".short-video-mobile-grid");
+    if (!shell || !grid || isAuthorIndexView()) return renderListShell();
+    grid.querySelector(".short-video-mobile-empty")?.remove();
+    for (const video of videos) grid.append(renderCard(video));
+    syncListLoadMoreSentinel(shell);
+  }
+
+  function setListLoadingMore(loading, message = "") {
+    const shell = els.viewContent.querySelector(".short-video-mobile-list");
+    const sentinel = shell?.querySelector(".short-video-mobile-load-more");
+    if (!sentinel) return;
+    resetListLoadMoreObserver();
+    sentinel.classList.toggle("is-loading", Boolean(loading));
+    sentinel.textContent = loading ? "正在加载" : String(message || "");
+    sentinel.toggleAttribute("aria-hidden", !sentinel.textContent);
+    if (!loading && listState.data?.hasMore) observeListLoadMore(sentinel);
+  }
+
+  function syncListLoadMoreSentinel(shell) {
+    resetListLoadMoreObserver();
+    shell?.querySelector(".short-video-mobile-load-more")?.remove();
+    if (!shell || !listState.data?.hasMore) return;
+    const sentinel = document.createElement("div");
+    sentinel.className = "short-video-mobile-load-more";
+    sentinel.setAttribute("aria-hidden", "true");
+    shell.append(sentinel);
+    observeListLoadMore(sentinel);
   }
 
   function renderDedicatedSearchHeader() {
@@ -402,7 +431,13 @@ export function createShortVideoListView(context = {}) {
     if (!authors.length) {
       const status = document.createElement("div");
       status.className = "short-video-mobile-author-index-status";
-      status.textContent = listState.query ? `没有匹配“${listState.query}”的作者` : "还没有作者数据";
+      status.textContent = listState.query
+        ? `没有匹配“${listState.query}”的作者`
+        : listState.source === "following" && listState.authorFilter === "unliked"
+          ? "没有未点赞的关注账号"
+          : listState.source === "following"
+            ? "还没有关注账号"
+            : "还没有作者数据";
       wrap.append(status);
       return wrap;
     }
@@ -420,9 +455,11 @@ export function createShortVideoListView(context = {}) {
   }
 
   function renderAuthorIndexCard(author = {}) {
+    const card = document.createElement("article");
+    card.className = "short-video-mobile-author-card";
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "short-video-mobile-author-card";
+    button.className = "short-video-mobile-author-card-main";
     button.setAttribute("aria-label", `查看 ${author.name || "未知作者"} 的作品`);
     const avatar = document.createElement("span");
     avatar.className = "short-video-mobile-author-card-avatar";
@@ -444,8 +481,15 @@ export function createShortVideoListView(context = {}) {
     const name = document.createElement("strong");
     name.textContent = author.name || "未知作者";
     button.append(avatar, name);
+    if (listState.source === "following") {
+      const meta = document.createElement("small");
+      meta.className = "short-video-mobile-author-card-meta";
+      meta.textContent = `视频 ${formatCompact(author.count || 0)} · 喜欢 ${formatCompact(author.likedCount || 0)}`;
+      button.append(meta);
+    }
     bindReliableTap(button, () => openShortVideoAuthor(author));
-    return button;
+    card.append(button);
+    return card;
   }
 
   function renderCard(video) {
@@ -529,9 +573,7 @@ export function createShortVideoListView(context = {}) {
       event.preventDefault();
       open();
     }, { passive: false });
-    element.addEventListener("touchcancel", () => {
-      touchStart = null;
-    }, { passive: true });
+    element.addEventListener("touchcancel", () => { touchStart = null; }, { passive: true });
   }
 
   function shortVideoToast(message) {
@@ -545,6 +587,8 @@ export function createShortVideoListView(context = {}) {
 
   return {
     renderListShell,
+    appendListVideos,
+    setListLoadingMore,
     renderListToolbar,
     renderAuthorIndex,
     renderAuthorIndexCard,

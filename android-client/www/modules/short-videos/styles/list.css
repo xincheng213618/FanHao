@@ -681,6 +681,59 @@ body.short-video-search-page-view .bottom-nav {
   white-space: nowrap;
 }
 
+.short-video-mobile-following-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 118px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 10px;
+}
+
+.short-video-mobile-following-summary {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.short-video-mobile-following-summary strong {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.short-video-mobile-following-summary small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.short-video-mobile-following-sort,
+.short-video-mobile-following-filter {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.short-video-mobile-following-sort {
+  min-width: 0;
+  padding: 0 8px;
+}
+
+.short-video-mobile-following-filter {
+  grid-column: 1 / -1;
+}
+
+.short-video-mobile-following-filter.active {
+  border-color: rgba(254, 44, 85, .48);
+  background: rgba(254, 44, 85, .1);
+  color: #d71948;
+}
+
 .short-video-mobile-author-index {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -692,13 +745,22 @@ body.short-video-search-page-view .bottom-nav {
 .short-video-mobile-author-card {
   display: grid;
   justify-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
   min-height: 102px;
+  padding: 4px 2px;
+}
+
+.short-video-mobile-author-card-main {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
   border: 0;
   background: transparent;
   color: var(--ink);
-  padding: 4px 2px;
+  padding: 0;
   font: inherit;
   text-align: center;
   touch-action: manipulation;
@@ -736,6 +798,17 @@ body.short-video-search-page-view .bottom-nav {
 .short-video-mobile-author-card strong {
   font-size: 13px;
   line-height: 1.2;
+}
+
+.short-video-mobile-author-card-meta {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .short-video-mobile-author-card.is-loading {

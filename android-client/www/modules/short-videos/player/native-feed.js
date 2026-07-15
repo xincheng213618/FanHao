@@ -1,4 +1,5 @@
 import { DEFAULT_SORT } from "../shared.js";
+import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js";
 
 export function createShortVideoNativeFeed(context = {}) {
   const { getActiveUrl, listState } = context;
@@ -21,74 +22,7 @@ export function createShortVideoNativeFeed(context = {}) {
     const end = Math.min(playableEntries.length, index + 31);
     const feedEntries = playableEntries.slice(start, end);
     const feedUrl = nativeShortVideoFeedUrl(options);
-    const payload = feedEntries.map(({ item }) => ({
-      id: item.id,
-      awemeId: item.awemeId || "",
-      title: item.title || "",
-      mediaType: item.mediaType || "video",
-      streamUrl: item.streamUrl || "",
-      coverUrl: item.coverUrl || "",
-      galleryCount: Number(item.galleryCount || item.galleryImages?.length || 0),
-      galleryItems: Array.isArray(item.galleryItems)
-        ? item.galleryItems.map((entry, galleryIndex) => ({
-            index: Number(entry?.index ?? galleryIndex),
-            type: entry?.type === "video" ? "video" : "image",
-            url: entry?.url || ""
-          })).filter((entry) => entry.url)
-        : [],
-      galleryImages: Array.isArray(item.galleryImages)
-        ? item.galleryImages.map((entry, galleryIndex) => ({
-            index: Number(entry?.index ?? galleryIndex),
-            url: entry?.url || ""
-          })).filter((entry) => entry.url)
-        : [],
-      sound: item.sound ? {
-        key: item.sound.key || "",
-        id: item.sound.id || "",
-        title: item.sound.title || "",
-        author: item.sound.author || "",
-        coverUrl: item.sound.coverUrl || "",
-        previewUrl: item.sound.previewUrl || "",
-        previewSource: item.sound.previewSource || "",
-        localAvailable: Boolean(item.sound.localAvailable),
-        original: Boolean(item.sound.original)
-      } : null,
-      shareUrl: item.shareUrl || "",
-      originalUrl: item.originalUrl || "",
-      author: {
-        name: item.author?.name || "",
-        secUid: item.author?.secUid || "",
-        uid: item.author?.uid || "",
-        avatarUrl: item.author?.avatarUrl || "",
-        profileUrl: item.author?.profileUrl || "",
-        uniqueId: item.author?.uniqueId || "",
-        shortId: item.author?.shortId || "",
-        signature: item.author?.signature || "",
-        ipLocation: item.author?.ipLocation || "",
-        followerCount: Number(item.author?.followerCount || 0),
-        followingCount: Number(item.author?.followingCount || 0),
-        totalFavorited: Number(item.author?.totalFavorited || 0),
-        awemeCount: Number(item.author?.awemeCount || 0),
-        favoritingCount: Number(item.author?.favoritingCount || 0),
-        gender: Number(item.author?.gender || 0),
-        age: Number(item.author?.age || 0),
-        verification: item.author?.verification || "",
-        profileCollectedAt: item.author?.profileCollectedAt || ""
-      },
-      publishedAt: item.publishedAt || "",
-      durationMs: Number(item.durationMs || 0),
-      size: Number(item.size || 0),
-      stats: {
-        likes: Number(item.stats?.likes || 0),
-        comments: Number(item.stats?.comments || 0),
-        collects: Number(item.stats?.collects || 0),
-        shares: Number(item.stats?.shares || 0),
-        plays: Number(item.stats?.plays || 0)
-      },
-      actions: {
-        liked: Boolean(item.actions?.liked)
-      }
-    }));
+    const payload = stringifyNativeShortVideoFeed(feedEntries.map(({ item }) => item));
     try {
       await plugin.playShortFeed({
         baseUrl: getActiveUrl(),
@@ -98,7 +32,7 @@ export function createShortVideoNativeFeed(context = {}) {
         startIndex: index - start,
         startId: video.id,
         openAuthorPanel: Boolean(options.openAuthorPanel),
-        videos: JSON.stringify(payload)
+        videos: payload
       });
       return true;
     } catch {
@@ -113,6 +47,10 @@ export function createShortVideoNativeFeed(context = {}) {
       ? item.galleryItems
       : item.galleryImages;
     return Array.isArray(entries) && entries.some((entry) => String(entry?.url || "").trim());
+  }
+
+  function nativeShortVideoStreamUrl(item = {}) {
+    return String(item.mobileStreamUrl || item.streamUrl || "").trim();
   }
 
   function nativeShortVideoFeedUrl(options = {}) {
@@ -136,6 +74,7 @@ export function createShortVideoNativeFeed(context = {}) {
 
   return {
     openNativeShortVideoFeed,
-    nativeShortVideoFeedUrl
+    nativeShortVideoFeedUrl,
+    nativeShortVideoStreamUrl
   };
 }

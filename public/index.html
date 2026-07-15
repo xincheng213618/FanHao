@@ -10,7 +10,60 @@
     <link rel="manifest" href="/manifest.webmanifest?v=20260701-gallery-merge-01" />
     <link rel="icon" href="/app-icon.svg?v=20260701-gallery-merge-01" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/app-icon.svg?v=20260701-gallery-merge-01" />
-    <link rel="stylesheet" href="/styles.css?v=20260712-video-contain-blur-114" />
+    <style>html.app-styles-loading body { visibility: hidden; }</style>
+    <script>
+      (() => {
+        document.documentElement.classList.add("app-styles-loading");
+        const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
+        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-c16c469a4009";
+        if (shortVideoEntry) {
+          const modulePreload = document.createElement("link");
+          modulePreload.rel = "modulepreload";
+          modulePreload.href = shortVideoModuleUrl;
+          modulePreload.fetchPriority = "high";
+          document.head.append(modulePreload);
+          window.__fanhaoShortVideoModuleUrl = shortVideoModuleUrl;
+        }
+        const shortVideoStyleUrls = [
+          "/css/foundation.css?v=20260710-web-css-modules-01",
+          "/css/shell.css?v=20260713-search-index-02",
+          "/modules/short-videos/styles/list.css?v=20260715-aggregate-search-01",
+          "/modules/short-videos/styles/viewer.css?v=20260715-first-frame-13",
+          "/modules/short-videos/styles/gallery-navigation.css?v=20260711-player-modal-focus-75",
+          "/modules/short-videos/styles/panels.css?v=20260712-player-search-overlay-86",
+          "/modules/short-videos/styles/responsive.css?v=20260715-aggregate-search-01"
+        ];
+        const shortVideoViewerStyleUrls = [
+          "/modules/short-videos/styles/viewer.css?v=20260715-first-frame-13",
+          "/modules/short-videos/styles/gallery-navigation.css?v=20260711-player-modal-focus-75"
+        ];
+        const shortVideoDetailEntry = /^\/(?:short-videos|short-video|douyin)\/(?!(?:stats|authors)(?:\/|$))[^/]+\/?$/.test(window.location.pathname);
+        const styleUrls = shortVideoEntry
+          ? (shortVideoDetailEntry
+            ? shortVideoStyleUrls
+            : shortVideoStyleUrls.filter((href) => !shortVideoViewerStyleUrls.includes(href)))
+          : ["/styles.css?v=20260715-aggregate-search-01"];
+        const stylePromises = new Map();
+        const loadStyle = (href) => {
+          if (stylePromises.has(href)) return stylePromises.get(href);
+          const promise = new Promise((resolve) => {
+            const link = document.createElement("link");
+            link.rel = "stylesheet";
+            link.href = href;
+            link.fetchPriority = "high";
+            link.addEventListener("load", resolve, { once: true });
+            link.addEventListener("error", resolve, { once: true });
+            document.head.append(link);
+          });
+          stylePromises.set(href, promise);
+          return promise;
+        };
+        const loadStyleUrls = (urls) => Promise.all(urls.map(loadStyle));
+        window.__fanhaoEnsureShortVideoViewerStyles = () => loadStyleUrls(shortVideoViewerStyleUrls);
+        window.__fanhaoStylesReady = loadStyleUrls(styleUrls)
+          .finally(() => document.documentElement.classList.remove("app-styles-loading"));
+      })();
+    </script>
   </head>
   <body>
     <script>
@@ -226,11 +279,15 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        await import("/short-video-app.js?v=20260712-video-contain-blur-114");
+        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-c16c469a4009");
+        await window.__fanhaoStylesReady;
+        await shortVideoModulePromise;
       } else if (standaloneEntry) {
+        await window.__fanhaoStylesReady;
         await import("/standalone-app.js?v=20260712-module-settings-02");
       } else {
-        await import("/fanhao-app.js?v=20260712-module-settings-02");
+        await window.__fanhaoStylesReady;
+        await import("/fanhao-app.js?v=20260713-search-index-01");
       }
     </script>
   </body>

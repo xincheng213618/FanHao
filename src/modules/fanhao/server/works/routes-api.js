@@ -16,7 +16,7 @@ export async function routeWorksApi(req, res, url, deps) {
     return true;
   }
 
-  if (url.pathname === "/api/search" && req.method === "GET") {
+  if (["/api/fanhao/search", "/api/search"].includes(url.pathname) && req.method === "GET") {
     sendJson(res, 200, workQueryService.searchPayload(url));
     return true;
   }

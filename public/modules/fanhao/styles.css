@@ -783,6 +783,19 @@
   font-size: 12px;
 }
 
+.search-view .stats-row {
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  padding: 12px 0;
+}
+
+.search-view .main {
+  padding-top: 0;
+}
+
+.search-view .toolbar {
+  margin-top: 0;
+}
+
 .person-detail-view .stats-row {
   display: flex;
   flex-wrap: wrap;

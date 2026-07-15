@@ -1,9 +1,9 @@
-import { createShortVideoApi } from "./api.js?v=20260711-short-video-cache-09";
-import { createShortVideoListController } from "./list/controller.js?v=20260712-douyin-search-05";
-import { createShortVideoListView } from "./list/view.js?v=20260712-douyin-search-05";
+import { createShortVideoApi } from "./api.js?v=20260713-follow-toggle-08";
+import { createShortVideoListController } from "./list/controller.js?v=20260713-follow-toggle-08";
+import { createShortVideoListView } from "./list/view.js?v=20260713-follow-toggle-08";
 import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260712-native-short-video-only-02";
 import { createShortVideoSearch } from "./search.js?v=20260712-douyin-search-05";
-import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=20260712-douyin-search-05";
+import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=20260713-follow-toggle-08";
 import { createShortVideoIcons } from "./ui/icons.js?v=20260712-douyin-search-05";
 
 export function createShortVideoViews(deps) {
@@ -14,6 +14,8 @@ export function createShortVideoViews(deps) {
     author: "all",
     source: DEFAULT_SOURCE,
     sort: DEFAULT_SORT,
+    authorSort: "followed",
+    authorFilter: "all",
     loading: false,
     loadingMore: false,
     status: "",

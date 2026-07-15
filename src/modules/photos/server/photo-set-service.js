@@ -107,18 +107,18 @@ export function createPhotoSetService({
     return { image: candidates[0], isExplicitCover: false };
   }
 
-  function coverBlobFromFile(filePath, image, isExplicitCover) {
+  async function coverBlobFromFile(filePath, image, isExplicitCover) {
     const sourceBytes = safeStat(filePath)?.size || Number(image?.bytes || 0);
     const mime = archiveImageMime(image?.path || image?.name || "");
     if (isExplicitCover && sourceBytes > 0 && sourceBytes <= coverMaxBytes) {
       return {
-        blob: fs.readFileSync(filePath),
+        blob: await fs.promises.readFile(filePath),
         mime,
         sourceBytes
       };
     }
 
-    const blob = compressImageFileToJpeg(filePath);
+    const blob = await compressImageFileToJpeg(filePath);
     return {
       blob,
       mime: "image/jpeg",
@@ -229,7 +229,7 @@ export function createPhotoSetService({
     return coverRow(album);
   }
 
-  function generateCover(album) {
+  async function generateCover(album) {
     const targetArchivePath = archivePath(album);
     const signature = archiveSignature(targetArchivePath);
     if (!signature) {
@@ -246,7 +246,7 @@ export function createPhotoSetService({
       throw error;
     }
 
-    const images = listArchiveImages(targetArchivePath);
+    const images = await listArchiveImages(targetArchivePath);
     const selected = selectCoverImage(images);
     if (!selected?.image?.path) {
       const error = new Error("图包里没有可用图片");
@@ -259,8 +259,8 @@ export function createPhotoSetService({
     const tempExt = archiveImageExts.has(normalizeExt(selected.image.path)) ? normalizeExt(selected.image.path) : ".img";
     const tempPath = path.join(tempDir, `source${tempExt}`);
     try {
-      extractArchiveMemberToCache(targetArchivePath, selected.image.path, tempPath);
-      const cover = coverBlobFromFile(tempPath, selected.image, selected.isExplicitCover);
+      await extractArchiveMemberToCache(targetArchivePath, selected.image.path, tempPath);
+      const cover = await coverBlobFromFile(tempPath, selected.image, selected.isExplicitCover);
       return upsertCover(album, signature, selected.image, cover);
     } catch (error) {
       upsertCoverError(album, signature, error);
@@ -273,14 +273,14 @@ export function createPhotoSetService({
     }
   }
 
-  function publicDetail(album, options = {}) {
+  async function publicDetail(album, options = {}) {
     const targetArchivePath = archivePath(album);
     const imageOffset = Math.max(0, Math.floor(Number(options.imageOffset || 0)) || 0);
     const rawImageLimit = options.imageLimit;
     const imageLimit = Number.isFinite(Number(rawImageLimit)) && Number(rawImageLimit) > 0
       ? Math.floor(Number(rawImageLimit))
       : 0;
-    const payload = archiveImagesPayload(targetArchivePath, {
+    const payload = await archiveImagesPayload(targetArchivePath, {
       limit: imageLimit > 0 ? imageOffset + imageLimit : 0
     });
     const images = Array.isArray(payload.images) ? payload.images : [];
@@ -304,20 +304,20 @@ export function createPhotoSetService({
     };
   }
 
-  function serveImage(res, albumId, imageIndex) {
+  async function serveImage(res, albumId, imageIndex) {
     const album = byId(decodeURIComponent(albumId));
     if (!album) {
       notFound(res);
       return;
     }
     const targetArchivePath = archivePath(album);
-    const images = listArchiveImages(targetArchivePath);
+    const images = await listArchiveImages(targetArchivePath);
     const image = images[Number(decodeURIComponent(imageIndex)) - 1];
     if (!image?.path) {
       notFound(res);
       return;
     }
-    serveArchiveMemberImage(res, {
+    await serveArchiveMemberImage(res, {
       sourceType: "photo-set",
       archivePath: targetArchivePath,
       memberPath: image.path,
@@ -325,7 +325,7 @@ export function createPhotoSetService({
     });
   }
 
-  function serveCover(res, albumId) {
+  async function serveCover(res, albumId) {
     const album = byId(albumId);
     if (!album) {
       notFound(res);
@@ -336,7 +336,7 @@ export function createPhotoSetService({
     const signature = archiveSignature(archivePath(album));
     if (!coverMatches(row, signature) || !row?.cover_blob) {
       try {
-        row = generateCover(album);
+        row = await generateCover(album);
       } catch (error) {
         console.warn("[image-gallery-cover]", album.relativePath || album.id, error.message || error);
         notFound(res);

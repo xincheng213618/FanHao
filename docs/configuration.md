@@ -37,6 +37,7 @@ FanHao 服务端通过**环境变量**控制资料库根目录、端口、外部
 | `FANHAO_SHORT_VIDEO_STORAGE_ROOT` | `D:\Media` | 本机短视频下载存储根目录；默认媒体库为其下的 `ShortVideos`。 |
 | `FANHAO_SHORT_VIDEO_ROOTS` / `FANHAO_DOUYIN_LIKES_ROOT` | `D:\Media\ShortVideos` | 短视频扫描根目录。 |
 | `FANHAO_DOUYIN_DOWNLOAD_MANAGER_DB` | `src/modules/short-videos/download-manager/data/douyin_downloads.sqlite` | 内置抖音下载管理器数据库路径；仅在需要改用外部库时覆盖。 |
+| `FANHAO_DOUYIN_DOWNLOAD_MANAGER_URL` | `http://127.0.0.1:8765` | 作者主页快速刷新、全部扫描和评论同步使用的下载管理器地址。 |
 | `FANHAO_DOUYIN_SYNC_MS` | `60000`（1 分钟） | 短视频从下载管理器同步的轮询间隔。 |
 | `FANHAO_MUSIC_ROOTS` / `FANHAO_MUSIC_ROOT` | `D:\Media\Music` | 音乐模块扫描根目录，多个根用分号或逗号分隔。 |
 
@@ -84,3 +85,7 @@ npm start
 或在 `start-fanhao.ps1 -Port 29998` 之外，直接用 `node server.js` 并在环境变量中覆盖上述任意项。
 
 `start-fanhao.ps1` 默认也会启动内置抖音下载管理器（8765 端口）。可用 `-DownloadManagerPort` 改端口，`-RestartDownloadManager` 显式重启它，或用 `-SkipDownloadManager` 只启动 FanHao 主服务。
+
+内置下载管理器只写自己的数据库；`data/short-videos.sqlite` 由 FanHao 主服务的
+Node 同步 Worker 独占写入。不要在下载管理器进程中恢复主库直写逻辑，否则会绕过
+主服务的身份合并、缓存失效和数据库生命周期管理。

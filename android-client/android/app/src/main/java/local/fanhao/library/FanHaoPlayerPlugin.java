@@ -47,6 +47,16 @@ public class FanHaoPlayerPlugin extends Plugin {
       call.reject("缺少短视频列表");
       return;
     }
+    try {
+      if (ShortVideoFeedContract.decode(videosJson, call.getString("baseUrl")).isEmpty()) {
+        call.reject("短视频列表中没有可播放内容");
+        return;
+      }
+    } catch (Exception error) {
+      Log.w(TAG, "Rejected invalid native short-video feed", error);
+      call.reject("短视频列表格式不受支持");
+      return;
+    }
 
     Intent intent = new Intent(getActivity(), NativeShortVideoActivity.class);
     intent.putExtra(NativeShortVideoActivity.EXTRA_VIDEOS_JSON, videosJson);

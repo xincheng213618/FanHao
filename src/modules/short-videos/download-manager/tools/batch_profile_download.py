@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sqlite3
 import time
 import urllib.error
 import urllib.request
@@ -12,15 +11,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-MODULE_DIR = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = Path(os.environ.get("FANHAO_PROJECT_ROOT", str(MODULE_DIR.parents[3]))).resolve()
 BASE = os.environ.get("DOUYIN_MANAGER_URL", "http://localhost:8765").rstrip("/")
-DOWNLOAD_DB = Path(
-    os.environ.get("DOUYIN_MANAGER_DB", str(MODULE_DIR / "data" / "douyin_downloads.sqlite"))
-).resolve()
-FANHAO_DB = Path(
-    os.environ.get("FANHAO_SHORT_VIDEO_DB", str(PROJECT_ROOT / "data" / "short-videos.sqlite"))
-).resolve()
 EXTRACT_SCROLLS = 30000
 EXTRACT_IDLE_ROUNDS = 220
 DOWNLOAD_WATCHDOG_SECONDS = 600
@@ -44,7 +35,6 @@ class BatchRunner:
     def __init__(self, urls: list[str], log_path: Path) -> None:
         self.urls = urls
         self.log_path = log_path
-        self.backed_up = False
         self.skip_extract = False
 
     def log(self, message: str) -> None:
@@ -195,86 +185,6 @@ class BatchRunner:
             return current
         return candidates[0]
 
-    def backup_fanhao_once(self) -> None:
-        if self.backed_up:
-            return
-        backup = FANHAO_DB.with_name(
-            FANHAO_DB.name + ".bak-target-merge-" + datetime.now().strftime("%Y%m%d-%H%M%S")
-        )
-        source = sqlite3.connect(FANHAO_DB)
-        dest = sqlite3.connect(backup)
-        source.backup(dest)
-        dest.close()
-        source.close()
-        self.backed_up = True
-        self.log(f"FanHao 合并前备份: {backup}")
-
-    def merge_fanhao_target(self, sec_uid: str) -> None:
-        con = sqlite3.connect(FANHAO_DB)
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA busy_timeout=10000")
-        rows = con.execute(
-            """
-            SELECT u.sec_uid, u.uid, u.nickname, COUNT(v.id) videos
-            FROM short_video_users u
-            LEFT JOIN short_videos v ON v.author_sec_uid=u.sec_uid
-            WHERE u.sec_uid LIKE 'MS4w%'
-              AND (? LIKE u.sec_uid || '%' OR u.sec_uid LIKE ? || '%')
-            GROUP BY u.sec_uid, u.uid, u.nickname
-            """,
-            (sec_uid, sec_uid),
-        ).fetchall()
-        target = next((row for row in rows if row["sec_uid"] == sec_uid), None)
-        if not target:
-            con.close()
-            return
-        target_uid = (target["uid"] or "").strip()
-        target_name = (target["nickname"] or "").strip()
-        candidates: list[sqlite3.Row] = []
-        for row in rows:
-            short_sec = (row["sec_uid"] or "").strip()
-            if short_sec == sec_uid or not sec_uid.startswith(short_sec):
-                continue
-            uid = (row["uid"] or "").strip()
-            name = (row["nickname"] or "").strip()
-            if len(short_sec) < 24:
-                continue
-            same_uid = bool(target_uid and uid == target_uid)
-            same_name_missing_uid = bool(target_name and name == target_name and not uid)
-            if same_uid or same_name_missing_uid:
-                candidates.append(row)
-        if not candidates:
-            con.close()
-            return
-
-        self.backup_fanhao_once()
-        timestamp = now()
-        con.execute("BEGIN IMMEDIATE")
-        updated = 0
-        deleted = 0
-        for row in candidates:
-            short_sec = row["sec_uid"]
-            cur = con.execute(
-                """
-                UPDATE short_videos
-                SET author_sec_uid=?, owner_user_id=?, updated_at=?
-                WHERE author_sec_uid=? OR owner_user_id=?
-                """,
-                (sec_uid, f"douyin:{sec_uid}", timestamp, short_sec, f"douyin:{short_sec}"),
-            )
-            updated += max(cur.rowcount or 0, 0)
-            cur = con.execute(
-                "DELETE FROM short_video_users WHERE sec_uid=? AND id<>?",
-                (short_sec, f"douyin:{sec_uid}"),
-            )
-            deleted += max(cur.rowcount or 0, 0)
-        con.commit()
-        con.close()
-        self.log(
-            f"FanHao 归并 {target_name or sec_uid}: {len(candidates)} 个旧 sec_uid, "
-            f"更新视频 {updated}, 删除作者 {deleted}"
-        )
-
     def wait_download_inactive(self) -> None:
         while (self.api("/api/state").get("download") or {}).get("active"):
             time.sleep(2)
@@ -384,7 +294,6 @@ class BatchRunner:
             for url, sec_uid in targets:
                 try:
                     self.start_extract(url)
-                    self.merge_fanhao_target(sec_uid)
                 except Exception as exc:
                     self.log(f"采集失败 {sec_uid}: {exc}")
         else:
@@ -392,7 +301,6 @@ class BatchRunner:
         for url, sec_uid in targets:
             try:
                 self.start_download(url, sec_uid)
-                self.merge_fanhao_target(sec_uid)
             except Exception as exc:
                 self.log(f"下载流程失败 {sec_uid}: {exc}")
         self.log("批量作者采集下载结束")
@@ -411,7 +319,6 @@ class BatchRunner:
         for url, sec_uid in targets:
             try:
                 self.start_extract(url)
-                self.merge_fanhao_target(sec_uid)
             except Exception as exc:
                 self.log(f"采集失败 {sec_uid}: {exc}")
         self.log("批量作者只采集结束")
@@ -437,7 +344,6 @@ class BatchRunner:
                     f"downloaded={profile.get('downloaded')} failed={profile.get('failed')}"
                 )
                 self.start_download(url, sec_uid)
-                self.merge_fanhao_target(sec_uid)
             except KeyboardInterrupt:
                 self.log("自动未完成主页下载守护停止")
                 raise

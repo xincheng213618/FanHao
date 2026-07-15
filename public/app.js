@@ -12,7 +12,7 @@ import {
   selectVisibleWorks
 } from "./modules/fanhao/index.js?v=20260712-fanhao-home-01";
 import { createAdminModal } from "./modules/system/admin-modal.js?v=20260712-module-settings-02";
-import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260712-project-refactor-03";
+import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
 
 prepareAppShell();
 prepareClientShell();
@@ -567,7 +567,7 @@ async function loadLibrary(options = {}) {
 let libraryLoadPromise = null;
 
 function routeNeedsLibrary(route) {
-  return Boolean(route?.view);
+  return Boolean(route?.view && route.view !== "search");
 }
 
 async function ensureLibraryLoaded(options = {}) {
@@ -810,6 +810,7 @@ function setMainHeader(title, pathText) {
 
 function updateBackToPeopleIndexButton() {
   syncProductShell();
+  document.body.classList.toggle("search-view", state.activeView === "search");
   document.body.classList.toggle("people-index-view", state.activeView === "people" && !state.selectedPersonId);
   document.body.classList.toggle("person-detail-view", state.activeView === "people" && Boolean(state.selectedPersonId));
   document.body.classList.toggle("ranking-view", state.activeView === "rankings");
@@ -2464,9 +2465,13 @@ installAndroidClientReturn({ isAndroidClient, initialParams });
 async function bootApp() {
   await initializeModuleNavigation();
   const initialRoute = routeFromUrl();
-  await ensureLibraryLoaded({ deferMainRender: true });
   await applyRoute(initialRoute);
   initializeRouteHistory();
+  if (!state.library) {
+    ensureLibraryLoaded({ deferMainRender: true }).catch((error) => {
+      console.error("[library]", error);
+    });
+  }
 }
 
 bootApp().catch((error) => {

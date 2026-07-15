@@ -9,7 +9,7 @@ export function createWorkCodeIndexService({
   let localWorkByCodeKeyCache = null;
 
   function workCodeKeys(work) {
-    const info = workInfoRow(work.id);
+    const info = work.infoSummary?.code ? null : workInfoRow(work.id);
     const values = [
       info?.code,
       work.infoSummary?.code,
@@ -47,9 +47,8 @@ export function createWorkCodeIndexService({
 
     const keys = new Set();
     for (const work of library.worksById.values()) {
-      const info = workInfoRow(work.id);
       const values = [
-        info?.code,
+        work.infoSummary?.code,
         work.title,
         work.directoryName,
         work.relativePath,
@@ -74,9 +73,8 @@ export function createWorkCodeIndexService({
 
     const rows = new Map();
     for (const work of library.worksById.values()) {
-      const info = workInfoRow(work.id);
       const values = [
-        info?.code,
+        work.infoSummary?.code,
         work.title,
         work.directoryName,
         work.relativePath,

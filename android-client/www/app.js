@@ -190,6 +190,8 @@ function sanitizeViewParams(view, params = {}) {
     const author = String(params.author || "all").trim() || "all";
     const source = normalizeShortVideoSource(params.source || params.origin);
     const sort = normalizeShortVideoSort(params.sort);
+    const authorSort = normalizeFollowingAuthorSort(params.authorSort);
+    const authorFilter = normalizeFollowingAuthorFilter(params.authorFilter);
     const searchTab = ["all", "videos", "authors"].includes(String(params.searchTab || params.tab || "").trim())
       ? String(params.searchTab || params.tab).trim()
       : "all";
@@ -198,6 +200,8 @@ function sanitizeViewParams(view, params = {}) {
       ...(author !== "all" ? { author } : {}),
       ...(source !== "liked" ? { source } : {}),
       ...(sort !== "published" ? { sort } : {}),
+      ...(source === "following" && authorSort !== "followed" ? { authorSort } : {}),
+      ...(source === "following" && authorFilter !== "all" ? { authorFilter } : {}),
       ...(view === "shortVideoSearch" && searchTab !== "all" ? { tab: searchTab } : {})
     };
   }
@@ -257,7 +261,16 @@ function normalizeShortVideoSort(value) {
 
 function normalizeShortVideoSource(value) {
   const source = String(value || "liked").trim().toLowerCase();
-  return ["liked", "authors", "posts", "all", "local"].includes(source) ? source : "liked";
+  return ["liked", "following", "authors", "posts", "all", "local"].includes(source) ? source : "liked";
+}
+
+function normalizeFollowingAuthorSort(value) {
+  const sort = String(value || "followed").trim().toLowerCase();
+  return ["followed", "count", "liked"].includes(sort) ? sort : "followed";
+}
+
+function normalizeFollowingAuthorFilter(value) {
+  return String(value || "all").trim().toLowerCase() === "unliked" ? "unliked" : "all";
 }
 
 function normalizeMusicSort(value) {

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverFanHaoModuleDefinitions } from "../src/fanhao/module-registry.js";
+import { staticCacheControl } from "../src/platform/server/static-files.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bootstrapDir = path.join(root, "src", "bootstrap");
@@ -62,6 +63,17 @@ assert(!/from\s+["'][^"']*root-config\.js["']/.test(serverSource), "server.js mu
 assert(!/\bcreateServer\s*\(/.test(serverSource), "server.js must delegate HTTP server construction to createServerHost()");
 assert(!/process\.(?:once|on)\(\s*["']SIG(?:INT|TERM)["']/.test(serverSource), "server.js must delegate signal handling to createServerHost()");
 assert(serverSource.includes("createServerHost({"), "server.js must use the shared server host");
+assert(serverSource.includes("createArchiveImageService({"), "server.js must delegate archive image subprocesses to the platform service");
+assert(!serverSource.includes("spawnSync") && !serverSource.includes("execFileSync"), "server.js must not block the request loop with synchronous subprocesses");
+assert(serverSource.split(/\r?\n/).length <= 2400, "server.js composition root must stay below 2400 lines");
+const archiveImageServiceSource = fs.readFileSync(path.join(platformDir, "server", "archive-image-service.js"), "utf8");
+assert(archiveImageServiceSource.includes('import { execFile } from "node:child_process"') && archiveImageServiceSource.includes("listInflight") && archiveImageServiceSource.includes("extractInflight"), "archive image work must use asynchronous deduplicated subprocesses");
+assert(!archiveImageServiceSource.includes("spawnSync") && !archiveImageServiceSource.includes("execFileSync"), "archive image service must not restore synchronous subprocesses");
+const photoSetServiceSource = fs.readFileSync(path.join(modulesDir, "photos", "server", "photo-set-service.js"), "utf8");
+assert(photoSetServiceSource.includes("async function publicDetail") && photoSetServiceSource.includes("await archiveImagesPayload") && photoSetServiceSource.includes("async function serveCover"), "photo-set routes must await asynchronous archive and cover work");
+assert.equal(staticCacheControl("/short-video-app.min.js?v=bundle-c16c469a4009", ".js"), "public, max-age=31536000, immutable", "content-hashed assets must be immutable");
+assert.equal(staticCacheControl("/app.js?v=20260715-manual-label", ".js"), "no-store", "human-managed cache labels must not make changed bytes immutable forever");
+assert.equal(staticCacheControl("/index.html?v=bundle-c16c469a4009", ".html"), "no-store", "HTML route shells must never be immutable");
 
 for (const filePath of sourceFiles(bootstrapDir)) {
   for (const target of relativeImportTargets(filePath)) {
@@ -101,6 +113,7 @@ assert(!androidIndexSource.includes('id="topSearchButton"'), "Android shell must
 assert(!androidIndexSource.includes('id="topModuleActions"'), "Android shell must not own a shared module action layout");
 assert(!androidIndexSource.includes('id="fanhaoSectionNav"'), "Android shell must not own business secondary navigation");
 assert(/<header id="moduleChrome"[^>]*><\/header>/.test(androidIndexSource), "Android shell must expose only an empty module chrome mount");
+assert(!fs.existsSync(path.join(root, "android-client", "www", "platform", "search", "global-search.js")), "Android must not keep the retired cross-module search aggregator");
 for (const text of ["搜番号、作品或人物", "搜套图、人物或分类", "搜电影或电视剧", "搜短视频标题、作者或标签"]) {
   assert(!androidAppSource.includes(text), `Android shell must not own module search copy: ${text}`);
 }
@@ -110,6 +123,9 @@ for (const id of ["fanhao", "photos", "media"]) {
   assert(entrySource.includes("renderChrome"), `Android module must own its chrome rendering: ${id}`);
   assert(entrySource.includes("host.ui.openSearch"), `Android module must wire its own search entry: ${id}`);
 }
+const androidFanhaoViews = fs.readFileSync(path.join(androidModulesDir, "fanhao", "work-views.js"), "utf8");
+assert(androidFanhaoViews.includes("/api/fanhao/search"), "FanHao mobile search must call only its module-scoped API");
+assert(!androidFanhaoViews.includes("createGlobalSearch"), "FanHao mobile search must not aggregate gallery or media results");
 const androidShortVideoEntry = fs.readFileSync(path.join(androidModulesDir, "short-videos", "android-module.js"), "utf8");
 assert(androidShortVideoEntry.includes('view: "shortVideoSearch"'), "short videos must own a dedicated Android search route");
 assert(androidShortVideoEntry.includes("short-video-chrome-row"), "short videos must own its compact one-row chrome");

@@ -13,6 +13,9 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $ModuleDir = Join-Path $ProjectRoot "src\modules\short-videos\download-manager"
 $PackagingDir = Join-Path $ModuleDir "packaging"
+$ManagerCoreDir = Join-Path $ModuleDir "manager_core"
+$CommentHelper = Join-Path $ModuleDir "fetch-comments.py"
+$PrimerMedia = Join-Path $ProjectRoot "public\assets\short-video-h264-2k-primer.mp4"
 $DownloaderEntry = Join-Path $PackagingDir "downloader_entry.py"
 $InstallerScript = Join-Path $PackagingDir "DouyinDownloadManager.iss"
 $BuildRequirements = Join-Path $PackagingDir "requirements-build.txt"
@@ -70,6 +73,8 @@ $DownloaderSitePackages = Join-Path $DownloaderRoot ".venv\Lib\site-packages"
 foreach ($required in @(
   (Join-Path $ModuleDir "app.py"),
   (Join-Path $ModuleDir "static"),
+  $CommentHelper,
+  $PrimerMedia,
   (Join-Path $ModuleDir "node_modules\playwright-core"),
   (Join-Path $ProjectRoot "public\short-video-app.js"),
   (Join-Path $ProjectRoot "public\modules\short-videos\short-video-page.js"),
@@ -99,19 +104,24 @@ try {
     "--distpath", $ManagerDist,
     "--workpath", $ManagerWork,
     "--specpath", $SpecDir,
+    "--paths", $ModuleDir,
     "--add-data", "$(Join-Path $ModuleDir 'static');static",
     "--add-data", "$(Join-Path $ProjectRoot 'public');fanhao-public",
     "--add-data", "$(Join-Path $ModuleDir 'extract-links.mjs');.",
     "--add-data", "$(Join-Path $ModuleDir 'extract-following.mjs');.",
     "--add-data", "$(Join-Path $ModuleDir 'cookie-login.mjs');.",
+    "--add-data", "$CommentHelper;.",
     "--add-data", "$(Join-Path $ModuleDir 'node_modules');node_modules",
     "--exclude-module", "PyQt5",
     "--exclude-module", "PyQt6",
     "--exclude-module", "PySide2",
     "--exclude-module", "PySide6",
-    "--exclude-module", "cefpython3",
-    (Join-Path $ModuleDir "app.py")
+    "--exclude-module", "cefpython3"
   )
+  if (Test-Path -LiteralPath $ManagerCoreDir) {
+    $managerArgs += @("--collect-submodules", "manager_core")
+  }
+  $managerArgs += (Join-Path $ModuleDir "app.py")
   Invoke-Checked -FilePath $PyInstaller -ArgumentList $managerArgs -Label "manager"
 
   $downloaderArgs = @(
@@ -140,8 +150,27 @@ try {
   Copy-Item (Join-Path $downloaderPackage "*") (Join-Path $PackageDir "downloader") -Recurse -Force
   Copy-Item $Node (Join-Path $PackageDir "runtime\node.exe") -Force
 
+  $PackagedCommentHelper = Join-Path $PackageDir "_internal\fetch-comments.py"
+  if (-not (Test-Path -LiteralPath $PackagedCommentHelper)) {
+    throw "Packaged comment helper is missing: $PackagedCommentHelper"
+  }
+
+  $PackagedPrimerMedia = [System.IO.Path]::GetFullPath(
+    (Join-Path $PackageDir "_internal\fanhao-public\assets\short-video-h264-2k-primer.mp4")
+  )
+  if (-not (Test-Path -LiteralPath $PackagedPrimerMedia)) {
+    throw "Packaged H.264 primer media is missing: $PackagedPrimerMedia"
+  }
+
   $sensitiveFiles = Get-ChildItem $PackageDir -Recurse -File | Where-Object {
-    $_.Name -match '(?i)\.sqlite$|\.mp4$|custom-batch-douyin-cookies|^\.cookies\.json$'
+    $fullPath = [System.IO.Path]::GetFullPath($_.FullName)
+    $isAllowedPrimer = [string]::Equals(
+      $fullPath,
+      $PackagedPrimerMedia,
+      [System.StringComparison]::OrdinalIgnoreCase
+    )
+    $isSensitive = $_.Name -match '(?i)\.sqlite$|\.mp4$|custom-batch-douyin-cookies|^\.cookies\.json$'
+    $isSensitive -and -not $isAllowedPrimer
   }
   if ($sensitiveFiles) {
     throw "Sensitive runtime files entered the package: $($sensitiveFiles.FullName -join ', ')"
@@ -163,12 +192,18 @@ try {
     DOUYIN_MANAGER_LOG_DIR = $env:DOUYIN_MANAGER_LOG_DIR
     DOUYIN_MANAGER_OPEN = $env:DOUYIN_MANAGER_OPEN
     DOUYIN_MANAGER_SINGLE_INSTANCE = $env:DOUYIN_MANAGER_SINGLE_INSTANCE
+    FANHAO_SHORT_VIDEO_STORAGE_ROOT = $env:FANHAO_SHORT_VIDEO_STORAGE_ROOT
+    LOCALAPPDATA = $env:LOCALAPPDATA
+    APPDATA = $env:APPDATA
   }
   $env:DOUYIN_MANAGER_PORT = [string]$smokePort
   $env:DOUYIN_MANAGER_DATA_DIR = Join-Path $SmokeDir "data"
   $env:DOUYIN_MANAGER_LOG_DIR = Join-Path $SmokeDir "logs"
   $env:DOUYIN_MANAGER_OPEN = "0"
   $env:DOUYIN_MANAGER_SINGLE_INSTANCE = "0"
+  $env:FANHAO_SHORT_VIDEO_STORAGE_ROOT = Join-Path $SmokeDir "media"
+  $env:LOCALAPPDATA = Join-Path $SmokeDir "local-app-data"
+  $env:APPDATA = Join-Path $SmokeDir "roaming-app-data"
   $managerProcess = Start-Process -FilePath (Join-Path $PackageDir "DouyinDownloadManager.exe") -WorkingDirectory $PackageDir -WindowStyle Hidden -PassThru
   try {
     $state = $null
@@ -181,6 +216,11 @@ try {
       } catch {}
     }
     if (-not $state) { throw "Packaged manager did not become ready on port $smokePort" }
+    $expectedSmokeDb = [System.IO.Path]::GetFullPath((Join-Path $SmokeDir "data\douyin_downloads.sqlite"))
+    $actualSmokeDb = [System.IO.Path]::GetFullPath([string]$state.paths.database)
+    if (-not $actualSmokeDb.Equals($expectedSmokeDb, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "Packaged manager escaped the isolated data directory: $actualSmokeDb"
+    }
     $html = (Invoke-WebRequest -Uri "http://127.0.0.1:$smokePort/#settings" -TimeoutSec 5).Content
     if ($html -notmatch "打开 Edge 登录") { throw "Packaged settings page is missing the auth controls." }
     if ($html -notmatch "已下载作品") { throw "Packaged page is missing the local library." }

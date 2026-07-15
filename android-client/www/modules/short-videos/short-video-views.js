@@ -1,1 +1,1 @@
-export { createShortVideoViews } from "./index.js?v=20260711-short-video-home-01";
+export { createShortVideoViews } from "./index.js?v=20260713-follow-toggle-08";

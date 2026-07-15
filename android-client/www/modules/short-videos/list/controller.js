@@ -1,10 +1,12 @@
-import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeSearchTab, normalizeSort, normalizeSource } from "../shared.js";
+import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSort, normalizeSource } from "../shared.js?v=20260713-follow-toggle-08";
 export function createShortVideoListController(context = {}) {
   const { api, getActiveUrl, listState, showView } = context;
   let listLoadMoreObserver = null;
   let listEventsInstalled = false;
   const openNativeShortVideoFeed = (...args) => context.openNativeShortVideoFeed(...args);
   const renderListShell = (...args) => context.renderListShell(...args);
+  const appendListVideos = (...args) => context.appendListVideos?.(...args);
+  const setListLoadingMore = (...args) => context.setListLoadingMore?.(...args);
   const shortVideoToast = (...args) => context.shortVideoToast(...args);
 
   function shortVideoApiSource() {
@@ -16,18 +18,24 @@ export function createShortVideoListController(context = {}) {
     let nextAuthor = String(params.author || "all").trim() || "all";
     let nextSource = normalizeSource(params.source || params.origin);
     const nextSort = normalizeSort(params.sort);
+    const nextAuthorSort = normalizeFollowingAuthorSort(params.authorSort || listState.authorSort);
+    const nextAuthorFilter = normalizeFollowingAuthorFilter(params.authorFilter || listState.authorFilter);
     const nextSearchTab = normalizeSearchTab(params.searchTab || params.tab || (nextSource === "authors" ? "authors" : listState.searchTab));
-    if (nextSource === "authors") nextAuthor = "all";
-    if (nextAuthor === "all" && !["all", "liked", "authors"].includes(nextSource)) nextSource = DEFAULT_SOURCE;
+    if (["authors", "following"].includes(nextSource)) nextAuthor = "all";
+    if (nextAuthor === "all" && !["all", "liked", "following", "authors"].includes(nextSource)) nextSource = DEFAULT_SOURCE;
     const scopeChanged = nextQuery !== listState.query
       || nextAuthor !== listState.author
       || nextSource !== listState.source
       || nextSort !== listState.sort
+      || nextAuthorSort !== listState.authorSort
+      || nextAuthorFilter !== listState.authorFilter
       || nextSearchTab !== listState.searchTab;
     listState.query = nextQuery;
     listState.author = nextAuthor;
     listState.source = nextSource;
     listState.sort = nextSort;
+    listState.authorSort = nextAuthorSort;
+    listState.authorFilter = nextAuthorFilter;
     listState.searchTab = nextSearchTab;
     if (scopeChanged) {
       listState.data = null;
@@ -43,10 +51,16 @@ export function createShortVideoListController(context = {}) {
     const requestUrl = getActiveUrl();
     const params = new URLSearchParams();
     const authorIndex = isAuthorIndexView();
+    const appendedVideos = [];
     if (listState.query) params.set("q", listState.query);
     if (authorIndex) {
       params.set("limit", String(append ? AUTHOR_APPEND_COUNT : AUTHOR_INITIAL_COUNT));
       params.set("offset", String(append ? listState.data?.authors?.length || 0 : 0));
+      if (listState.source === "following") {
+        params.set("scope", "following");
+        params.set("sort", listState.authorSort);
+        params.set("filter", listState.authorFilter);
+      }
     } else {
       if (listState.author && listState.author !== "all") params.set("author", listState.author);
       params.set("source", shortVideoApiSource());
@@ -58,12 +72,13 @@ export function createShortVideoListController(context = {}) {
     }
     if (append) {
       listState.loadingMore = true;
+      if (!authorIndex) setListLoadingMore(true);
     } else {
       listState.allowLoadMore = false;
       listState.loading = true;
       listState.status = listState.data ? "" : "正在读取短视频";
+      renderListShell();
     }
-    renderListShell();
     try {
       const endpoint = authorIndex ? "/api/short-videos/authors" : "/api/short-videos";
       const relatedAuthorsRequest = listState.searchPage
@@ -98,6 +113,7 @@ export function createShortVideoListController(context = {}) {
           if (seen.has(video.id)) continue;
           seen.add(video.id);
           merged.push(video);
+          appendedVideos.push(video);
         }
         listState.data = { ...data, videos: merged, offset: 0, limit: merged.length };
       } else {
@@ -109,23 +125,34 @@ export function createShortVideoListController(context = {}) {
       if (!isAuthorIndexView()) listState.source = normalizeSource(data.source || listState.source);
       listState.loading = false;
       listState.loadingMore = false;
-      listState.status = data.total ? "" : (authorIndex ? "还没有作者数据。" : "还没有短视频。");
-      renderListShell();
+      listState.status = data.total
+        ? ""
+        : authorIndex
+          ? listState.source === "following" && listState.authorFilter === "unliked"
+            ? "没有未点赞的关注账号。"
+            : listState.source === "following"
+              ? "还没有关注账号。"
+              : "还没有作者数据。"
+          : "还没有短视频。";
+      if (append && !authorIndex) appendListVideos(appendedVideos);
+      else renderListShell();
     } catch (error) {
       if (renderGuard && !renderGuard()) return;
       listState.loading = false;
       listState.loadingMore = false;
       listState.status = shortVideoErrorMessage(error, "短视频读取失败，请检查服务连接");
-      renderListShell();
+      if (append && !authorIndex) setListLoadingMore(false, listState.status);
+      else renderListShell();
     }
   }
 
   function sortedAuthorFacets(options = {}) {
     const query = options.ignoreQuery ? "" : listState.query.toLocaleLowerCase("zh-CN");
-    return [...(listState.data?.authors || [])]
+    const authors = [...(listState.data?.authors || [])]
       .filter((author) => author && shortVideoAuthorFilterValue(author))
-      .filter((author) => !query || `${author.name || ""} ${author.secUid || ""}`.toLocaleLowerCase("zh-CN").includes(query))
-      .sort((a, b) => Number(b.count || 0) - Number(a.count || 0) || String(a.name || "").localeCompare(String(b.name || ""), "zh-CN"));
+      .filter((author) => !query || `${author.name || ""} ${author.secUid || ""}`.toLocaleLowerCase("zh-CN").includes(query));
+    if (listState.source === "following") return authors;
+    return authors.sort((a, b) => Number(b.count || 0) - Number(a.count || 0) || String(a.name || "").localeCompare(String(b.name || ""), "zh-CN"));
   }
 
   function appendVisibleAuthors(force = false) {
@@ -158,7 +185,7 @@ export function createShortVideoListController(context = {}) {
   }
 
   function isAuthorIndexView() {
-    return listState.source === "authors" && listState.author === "all";
+    return ["authors", "following"].includes(listState.source) && listState.author === "all";
   }
 
   function isAuthorFeedView() {
@@ -171,6 +198,8 @@ export function createShortVideoListController(context = {}) {
       author: listState.author,
       source: listState.source,
       sort: listState.sort,
+      authorSort: listState.authorSort,
+      authorFilter: listState.authorFilter,
       searchTab: listState.searchTab,
       ...patch
     };
@@ -187,6 +216,8 @@ export function createShortVideoListController(context = {}) {
       author: listState.author || "all",
       source: listState.source || DEFAULT_SOURCE,
       sort: listState.sort || DEFAULT_SORT,
+      authorSort: listState.authorSort || "followed",
+      authorFilter: listState.authorFilter || "all",
       searchTab: listState.searchTab || "all",
       authors: listState.data?.authors || []
     };
@@ -259,8 +290,14 @@ export function createShortVideoListController(context = {}) {
       });
       const first = data.videos?.[0];
       if (!first) {
-        shortVideoToast("该作者还没有本地作品");
-        return false;
+        const profileUrl = authorOriginalUrl(author);
+        if (!profileUrl) {
+          shortVideoToast("该作者还没有本地作品或可打开的主页");
+          return false;
+        }
+        shortVideoToast("该作者还没有本地作品，正在打开抖音主页");
+        window.open(profileUrl, "_blank", "noreferrer");
+        return true;
       }
       const opened = await openNativeShortVideoFeed(first, {
         videos: data.videos || [],
@@ -277,6 +314,13 @@ export function createShortVideoListController(context = {}) {
       shortVideoToast(shortVideoErrorMessage(error, "作者主页打开失败，请稍后重试"));
       return false;
     }
+  }
+
+  function authorOriginalUrl(author = {}) {
+    const profileUrl = String(author.profileUrl || "").trim();
+    if (/^https?:\/\//i.test(profileUrl)) return profileUrl;
+    const secUid = String(author.secUid || "").trim();
+    return secUid ? `https://www.douyin.com/user/${encodeURIComponent(secUid)}` : "";
   }
 
   function shortVideoErrorMessage(error, fallback) {

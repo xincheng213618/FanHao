@@ -1,7 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { ADMIN_SCRIPT_DEFINITIONS } from "./lib/admin-script-registry.js";
 import { normalizeWorkCode as parseNormalizedWorkCode, workCodeKey } from "./lib/code-parser.js";
 import { decodeInfoBuffer, isSubtitleLikeInfoText, parseInfoMetadata, renderInfoMetadataText } from "./lib/info-metadata.js";
@@ -51,6 +49,7 @@ import { createAdminTaskService } from "./src/modules/system/server/admin-task-s
 import { createAppConfigService } from "./src/modules/system/server/app-config-service.js";
 import { createDoubanCookieService } from "./src/modules/system/server/douban-cookie-service.js";
 import { createAccessLogger } from "./src/platform/server/access-log.js";
+import { createArchiveImageService } from "./src/platform/server/archive-image-service.js";
 import { createAuthServices } from "./src/platform/server/auth.js";
 import { createFileServer } from "./src/platform/server/file-server.js";
 import { createRequestHandler } from "./src/platform/server/http-app.js";
@@ -132,6 +131,7 @@ const {
   REMOTE_WEB_PASSWORD,
   SHORT_VIDEO_DB_PATH,
   SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH,
+  SHORT_VIDEO_DOWNLOAD_MANAGER_URL,
   SHORT_VIDEO_DOWNLOAD_MANAGER_SYNC_MS,
   SHORT_VIDEO_ROOTS,
   TOOL_DOWNLOAD_DIR,
@@ -231,6 +231,7 @@ let library = emptyLibrary();
 let lastScanError = null;
 let localLibraryIndexService = null;
 let libraryPeopleCacheVersion = 0;
+let archiveImageService = null;
 const userState = userStateService.state;
 const favoriteStateService = createFavoriteStateService({
   createId,
@@ -255,6 +256,25 @@ const imageReaderCacheService = createImageReaderCacheService({
   rootDir: IMAGE_READER_CACHE_DIR,
   safeStat,
   touchThrottleMs: IMAGE_READER_CACHE_TOUCH_THROTTLE_MS
+});
+archiveImageService = createArchiveImageService({
+  archiveImageExts: ARCHIVE_IMAGE_EXTS,
+  coverBoxSize: IMAGE_GALLERY_COVER_BOX_SIZE,
+  coverMaxBytes: IMAGE_GALLERY_COVER_MAX_BYTES,
+  ffmpegPath: FFMPEG_PATH,
+  getImageGalleryDb,
+  helperPath: ARCHIVE_READER_HELPER_PATH,
+  imageReaderCacheService,
+  listCacheTtlMs: IMAGE_READER_LIST_CACHE_TTL_MS,
+  mimeTypes: MIME_TYPES,
+  normalizeExt,
+  notFound,
+  projectRoot: PROJECT_ROOT,
+  pythonPath: PYTHON_PATH,
+  safeStat,
+  sendText,
+  serveInlineFile,
+  warn: console.warn
 });
 const imageLibraryService = createImageLibraryService({
   clampInteger,
@@ -351,7 +371,7 @@ const workInfoService = createWorkInfoService({
 });
 const workCodeIndexService = createWorkCodeIndexService({
   getLibrary: () => library,
-  getStamp: () => `${library.scannedAt || ""}:${workInfoStamp()}`,
+  getStamp: () => library.scannedAt || "",
   looseWorkCodeKey,
   storedWorkCodeKey,
   workInfoRow
@@ -682,7 +702,7 @@ const adminActorAvatarService = createAdminActorAvatarService({
 });
 let coreMapCache = null;
 let workSearchTextCache = null;
-const archiveImageListCache = new Map();
+let workSearchInfoCache = null;
 const {
   libraryOpenRoots,
   pathWithinRoot,
@@ -807,13 +827,14 @@ const moduleRegistry = await discoverFanHaoModules({
         dedupeWorksForDisplay,
         enrichLocalWorksWithActorMovieIndex,
         enrichLocalWorksWithActorMovieInfo,
+        fastMissingCodeSearch,
         favoriteStateService,
         galleryMediaService,
         generateWorkCover: workCoverMutationService.generateWorkCover,
         getLastScanError: () => lastScanError,
         getLibrary: () => library,
         isVrWork,
-        matchesWorkSearch,
+        createWorkSearchMatcher,
         maxActorAvatarBytes: MAX_ACTOR_AVATAR_BYTES,
         maxWorkLimit: MAX_WORK_LIMIT,
         manualCoverStateService,
@@ -894,8 +915,11 @@ const moduleRegistry = await discoverFanHaoModules({
       shortVideos: {
         dbPath: SHORT_VIDEO_DB_PATH,
         downloadManagerDbPath: SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH,
+        downloadManagerUrl: SHORT_VIDEO_DOWNLOAD_MANAGER_URL,
         downloadManagerSyncMs: SHORT_VIDEO_DOWNLOAD_MANAGER_SYNC_MS,
         ffmpegPath: FFMPEG_PATH,
+        ffprobePath: FFPROBE_PATH,
+        hasNvenc: HAS_NVENC,
         mediaResponseService,
         mediaStreamService,
         notFound,
@@ -1220,7 +1244,7 @@ function searchPeople(rawQuery) {
 
 function buildWorkSearchText(work) {
   const person = library.peopleById.get(work.personId);
-  const info = workInfoRow(work.id);
+  const info = searchWorkInfoRow(work.id);
   const infoFields = parseJsonArray(info?.fields_json).flatMap((field) => [field?.label, field?.value]);
   return [
     work.title,
@@ -1228,7 +1252,6 @@ function buildWorkSearchText(work) {
     work.relativePath,
     work.personName,
     person?.name,
-    ...actorProfileSearchNames(person),
     info?.code,
     info?.title,
     info?.person_name,
@@ -1236,7 +1259,7 @@ function buildWorkSearchText(work) {
     info?.maker,
     info?.label,
     info?.series,
-    ...parseJsonTextArray(info?.actors_json),
+    ...(info?.actors || []),
     ...parseJsonTextArray(info?.tags_json),
     ...infoFields,
     info?.raw_text,
@@ -1249,8 +1272,63 @@ function buildWorkSearchText(work) {
     .toLowerCase();
 }
 
-function workSearchTextEntry(work) {
-  const stamp = searchSourceStamp();
+function searchWorkInfoRows() {
+  const stamp = `${library.scannedAt || ""}:${workInfoStamp()}`;
+  if (workSearchInfoCache?.stamp === stamp) return workSearchInfoCache.rows;
+
+  const rows = new Map();
+  try {
+    const db = getCoreDb();
+    for (const row of db.prepare(`
+      SELECT CAST(id AS TEXT) AS work_id, code, title, director,
+             fields_json, raw_text, javdb_tags_json AS tags_json
+      FROM works
+      WHERE status = 'ok'
+    `).all()) {
+      rows.set(row.work_id, { ...row, actors: [] });
+    }
+
+    for (const row of db.prepare(`
+      SELECT CAST(wp.work_id AS TEXT) AS work_id, p.name
+      FROM work_people wp
+      JOIN people p ON p.id = wp.person_id
+      WHERE wp.role = 'actor'
+    `).all()) {
+      const info = rows.get(row.work_id);
+      if (info && row.name) info.actors.push(row.name);
+    }
+
+    for (const row of db.prepare(`
+      SELECT CAST(wm.work_id AS TEXT) AS work_id, wm.role, m.name
+      FROM work_makers wm
+      JOIN makers m ON m.id = wm.maker_id
+      WHERE wm.role IN ('maker', 'label')
+    `).all()) {
+      const info = rows.get(row.work_id);
+      if (info && row.name && !info[row.role]) info[row.role] = row.name;
+    }
+
+    for (const row of db.prepare(`
+      SELECT CAST(ws.work_id AS TEXT) AS work_id, s.name
+      FROM work_series ws
+      JOIN series s ON s.id = ws.series_id
+    `).all()) {
+      const info = rows.get(row.work_id);
+      if (info && row.name && !info.series) info.series = row.name;
+    }
+  } catch (error) {
+    console.warn("[work-search-index]", error.message || error);
+  }
+
+  workSearchInfoCache = { stamp, rows };
+  return rows;
+}
+
+function searchWorkInfoRow(workId) {
+  return searchWorkInfoRows().get(String(workId || "")) || null;
+}
+
+function workSearchTextEntry(work, stamp = searchSourceStamp()) {
   if (workSearchTextCache?.stamp !== stamp) {
     workSearchTextCache = { stamp, rows: new Map() };
   }
@@ -1268,11 +1346,19 @@ function workSearchTextEntry(work) {
   return entry;
 }
 
-function matchesWorkSearch(work, query) {
-  if (!query) return true;
-  const { text, normalized } = workSearchTextEntry(work);
+function createWorkSearchMatcher(query) {
   const normalizedQuery = normalizeSearchValue(query);
-  return text.includes(query) || (normalizedQuery.length >= 2 && normalized.includes(normalizedQuery));
+  const loweredQuery = String(query || "").toLowerCase();
+  const stamp = searchSourceStamp();
+  if (workSearchTextCache?.stamp !== stamp) {
+    workSearchTextCache = { stamp, rows: new Map() };
+  }
+
+  return (work) => {
+    if (!loweredQuery) return true;
+    const { text, normalized } = workSearchTextEntry(work, stamp);
+    return text.includes(loweredQuery) || (normalizedQuery.length >= 2 && normalized.includes(normalizedQuery));
+  };
 }
 
 function ensureDataDir() {
@@ -1422,6 +1508,7 @@ function clearSearchSourceCaches() {
   rankingService.invalidateSearch();
   actorMovieService.invalidateSearch();
   workSearchTextCache = null;
+  workSearchInfoCache = null;
 }
 
 function workInfoRow(workId) {
@@ -1488,6 +1575,109 @@ function localWorkByCodeKey() {
 
 function rankingMissingSearchWorks() {
   return rankingService.missingSearchWorks();
+}
+
+function fastMissingCodeSearch(rawQuery) {
+  const prefix = storedWorkCodeKey(rawQuery);
+  if (!prefix) return [];
+
+  try {
+    return getCoreDb().prepare(`
+      SELECT
+        CAST(w.id AS TEXT) AS work_id,
+        w.code,
+        w.title,
+        w.release_date,
+        w.duration_minutes,
+        w.rating,
+        w.rating_count,
+        w.has_magnet,
+        w.is_streamable,
+        w.has_subtitles,
+        w.javdb_tags_json,
+        w.updated_at,
+        CAST((
+          SELECT wp.person_id
+          FROM work_people wp
+          WHERE wp.work_id = w.id AND wp.role = 'actor'
+          ORDER BY wp.sort_order, wp.person_id
+          LIMIT 1
+        ) AS TEXT) AS person_id,
+        (
+          SELECT p.name
+          FROM work_people wp
+          JOIN people p ON p.id = wp.person_id
+          WHERE wp.work_id = w.id AND wp.role = 'actor'
+          ORDER BY wp.sort_order, wp.person_id
+          LIMIT 1
+        ) AS person_name,
+        (
+          SELECT ref.url
+          FROM work_external_refs ref
+          WHERE ref.work_id = w.id AND ref.provider = 'javdb-video'
+          LIMIT 1
+        ) AS detail_url,
+        (
+          SELECT image.remote_url
+          FROM images image
+          WHERE image.owner_type = 'work'
+            AND image.owner_id = w.id
+            AND image.kind = 'cover'
+          ORDER BY image.id
+          LIMIT 1
+        ) AS image_url
+      FROM works w
+      WHERE w.status = 'ok'
+        AND w.code_search LIKE ?
+        AND NOT EXISTS (
+          SELECT 1
+          FROM works local_code
+          JOIN local_works lw ON lw.work_id = local_code.id
+          WHERE local_code.code_search = w.code_search
+        )
+      ORDER BY w.code_search, w.id
+      LIMIT 5000
+    `).all(`${prefix}%`).map((row) => {
+      const code = normalizeWorkCode(row.code) || row.code || "";
+      return {
+        id: row.work_id,
+        personId: row.person_id || "",
+        personName: row.person_name || "",
+        title: row.title && row.title !== row.code ? row.title : code || row.title || "未下载作品",
+        directoryName: code,
+        relativePath: "",
+        coverId: null,
+        remoteCoverUrl: proxiedRemoteImageUrl(row.image_url),
+        videoCount: 0,
+        playableCount: 0,
+        imageCount: 0,
+        infoCount: 0,
+        videos: [],
+        images: [],
+        infos: [],
+        modifiedAt: row.updated_at || "",
+        missingLocal: true,
+        javdbUrl: publicRemoteUrl(row.detail_url),
+        actorUrl: "",
+        infoSummary: {
+          code,
+          title: row.title || "",
+          javdbUrl: publicRemoteUrl(row.detail_url),
+          releaseDate: row.release_date || "",
+          durationMinutes: row.duration_minutes ?? null,
+          rating: row.rating ?? null,
+          ratingCount: row.rating_count ?? null,
+          hasMagnet: dbBoolOrNull(row.has_magnet),
+          isStreamable: dbBoolOrNull(row.is_streamable),
+          hasSubtitles: dbBoolOrNull(row.has_subtitles),
+          javdbTags: parseJsonTextArray(row.javdb_tags_json)
+        }
+      };
+    });
+  } catch (error) {
+    console.warn("[fast-code-search]", error.message || error);
+    return [];
+  }
 }
 
 function workCodeKeys(work) {
@@ -1861,7 +2051,7 @@ function applyAdminTaskInvalidations(task) {
   if (invalidates.has("remoteImages")) invalidateTableStamp("remote_image_cache");
   if (invalidates.has("imageLibrary")) {
     imageLibraryIndexService.invalidate();
-    archiveImageListCache.clear();
+    archiveImageService?.clearListCache();
   }
   if (invalidates.has("tvMetadata") || invalidates.has("movieMetadata") || invalidates.has("galleryMediaCovers")) {
     imageLibraryIndexService.invalidate();
@@ -1878,237 +2068,25 @@ function applyAdminTaskInvalidations(task) {
   if (invalidates.has("userState")) userStateService.load();
 }
 
-function runArchiveImageHelper(args, options = {}) {
-  const result = spawnSync(PYTHON_PATH, [ARCHIVE_READER_HELPER_PATH, ...args], {
-    cwd: PROJECT_ROOT,
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: options.timeout || 120000
-  });
-
-  let payload = null;
-  try {
-    payload = JSON.parse(result.stdout || "{}");
-  } catch {}
-  if (result.status !== 0 || !payload?.ok) {
-    const message = payload?.error || `${result.stderr || result.stdout || "archive helper failed"}`.trim();
-    throw new Error(message || `archive helper failed: ${result.status}`);
-  }
-  return payload;
+async function archiveImagesPayload(archivePath, options = {}) {
+  return archiveImageService.archiveImagesPayload(archivePath, options);
 }
 
-function archiveImageListSignature(archivePath) {
-  const stat = safeStat(archivePath);
-  if (!stat?.isFile()) return null;
-  return {
-    archivePath: path.resolve(archivePath),
-    archiveSize: stat.size || 0,
-    archiveMtimeMs: Math.floor(stat.mtimeMs || 0)
-  };
+async function listArchiveImages(archivePath, options = {}) {
+  return archiveImageService.listArchiveImages(archivePath, options);
 }
 
-function archiveListCacheKeyFromSignature(signature) {
-  if (!signature) return "";
-  return `${signature.archivePath}|${signature.archiveSize}|${signature.archiveMtimeMs}`;
+async function extractArchiveMemberToCache(archivePath, memberPath, cachePath) {
+  return archiveImageService.extractArchiveMemberToCache(archivePath, memberPath, cachePath);
 }
 
-function sliceArchiveImagePayload(payload, limit = 0) {
-  const images = Array.isArray(payload?.images) ? payload.images : [];
-  const safeLimit = Math.max(0, Math.floor(Number(limit || 0)) || 0);
-  return {
-    imageCount: Number(payload?.imageCount || images.length || 0),
-    images: safeLimit > 0 ? images.slice(0, safeLimit) : images
-  };
+async function compressImageFileToJpeg(filePath) {
+  return archiveImageService.compressImageFileToJpeg(filePath);
 }
 
-function archiveImageIndexRow(signature) {
-  if (!signature) return null;
-  try {
-    return getImageGalleryDb()
-      .prepare("SELECT * FROM photo_set_image_indexes WHERE archive_path = ?")
-      .get(signature.archivePath) || null;
-  } catch {
-    return null;
-  }
+async function serveArchiveMemberImage(res, options) {
+  return archiveImageService.serveArchiveMemberImage(res, options);
 }
-
-function archiveImageIndexMatches(row, signature) {
-  return Boolean(
-    row &&
-    signature &&
-    path.resolve(row.archive_path || "") === signature.archivePath &&
-    Number(row.archive_size || 0) === signature.archiveSize &&
-    Number(row.archive_mtime_ms || 0) === signature.archiveMtimeMs
-  );
-}
-
-function cachedArchiveImagesPayload(signature) {
-  const row = archiveImageIndexRow(signature);
-  if (!archiveImageIndexMatches(row, signature)) return null;
-  try {
-    const images = JSON.parse(row.images_json || "[]");
-    if (!Array.isArray(images)) return null;
-    return {
-      imageCount: Number(row.image_count || images.length || 0),
-      images
-    };
-  } catch {
-    return null;
-  }
-}
-
-function rememberArchiveImagesPayload(key, signature, payload) {
-  const images = Array.isArray(payload?.images) ? payload.images : [];
-  const imageCount = Number(payload?.imageCount || images.length || 0);
-  archiveImageListCache.set(key, { createdAt: Date.now(), images, imageCount });
-  if (archiveImageListCache.size > 300) {
-    const firstKey = archiveImageListCache.keys().next().value;
-    if (firstKey) archiveImageListCache.delete(firstKey);
-  }
-  if (!signature || !images.length) return;
-  try {
-    const now = new Date().toISOString();
-    getImageGalleryDb()
-      .prepare(`
-        INSERT INTO photo_set_image_indexes (
-          archive_path, archive_size, archive_mtime_ms, image_count,
-          images_json, indexed_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(archive_path) DO UPDATE SET
-          archive_size = excluded.archive_size,
-          archive_mtime_ms = excluded.archive_mtime_ms,
-          image_count = excluded.image_count,
-          images_json = excluded.images_json,
-          indexed_at = excluded.indexed_at,
-          updated_at = excluded.updated_at
-      `)
-      .run(
-        signature.archivePath,
-        signature.archiveSize,
-        signature.archiveMtimeMs,
-        imageCount,
-        JSON.stringify(images),
-        now,
-        now
-      );
-  } catch (error) {
-    console.warn("[archive-image-index-cache]", error.message || error);
-  }
-}
-
-function archiveImagesPayload(archivePath, options = {}) {
-  const signature = archiveImageListSignature(archivePath);
-  const key = archiveListCacheKeyFromSignature(signature);
-  if (!key) return { imageCount: 0, images: [] };
-  const now = Date.now();
-  const limit = Number(options.limit || 0) || 0;
-  const cached = archiveImageListCache.get(key);
-  if (cached && now - cached.createdAt < IMAGE_READER_LIST_CACHE_TTL_MS) {
-    return sliceArchiveImagePayload(cached, limit);
-  }
-
-  const persisted = cachedArchiveImagesPayload(signature);
-  if (persisted) {
-    rememberArchiveImagesPayload(key, signature, persisted);
-    return sliceArchiveImagePayload(persisted, limit);
-  }
-
-  const payload = runArchiveImageHelper(["list", archivePath], { timeout: options.timeout || 120000 });
-  const images = Array.isArray(payload.images) ? payload.images : [];
-  const fullPayload = { images, imageCount: Number(payload.imageCount || images.length) };
-  rememberArchiveImagesPayload(key, signature, fullPayload);
-  return sliceArchiveImagePayload(fullPayload, limit);
-}
-
-function listArchiveImages(archivePath, options = {}) {
-  return archiveImagesPayload(archivePath, options).images;
-}
-
-function archiveImageCacheFile(sourceType, archivePath, memberPath) {
-  const stat = safeStat(archivePath);
-  const archiveKey = `${path.resolve(archivePath)}|${stat?.size || 0}|${Math.floor(stat?.mtimeMs || 0)}`;
-  const archiveHash = crypto.createHash("sha1").update(archiveKey).digest("hex").slice(0, 24);
-  const memberHash = crypto.createHash("sha1").update(String(memberPath || "")).digest("hex").slice(0, 24);
-  const ext = ARCHIVE_IMAGE_EXTS.has(normalizeExt(memberPath)) ? normalizeExt(memberPath) : ".img";
-  return path.join(imageReaderCacheService.rootDir, sourceType, archiveHash, `${memberHash}${ext}`);
-}
-
-function extractArchiveMemberToCache(archivePath, memberPath, cachePath) {
-  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-  runArchiveImageHelper(["extract", archivePath, memberPath, cachePath], { timeout: 120000 });
-}
-
-function compressImageFileToJpeg(filePath) {
-  const result = spawnSync(
-    FFMPEG_PATH,
-    [
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-i",
-      filePath,
-      "-frames:v",
-      "1",
-      "-vf",
-      `scale=${IMAGE_GALLERY_COVER_BOX_SIZE}:${IMAGE_GALLERY_COVER_BOX_SIZE}:force_original_aspect_ratio=decrease`,
-      "-q:v",
-      "5",
-      "-f",
-      "image2pipe",
-      "-vcodec",
-      "mjpeg",
-      "pipe:1"
-    ],
-    {
-      windowsHide: true,
-      maxBuffer: IMAGE_GALLERY_COVER_MAX_BYTES,
-      timeout: 30000
-    }
-  );
-
-  if (result.error) {
-    throw new Error(result.error.code === "ENOBUFS" ? "压缩后的封面超过大小限制" : `FFmpeg 启动失败：${result.error.message}`);
-  }
-  if (result.status !== 0 || !result.stdout?.length) {
-    const detail = String(result.stderr || "").trim();
-    throw new Error(detail ? `封面压缩失败：${detail}` : "封面压缩失败");
-  }
-  if (result.stdout.length > IMAGE_GALLERY_COVER_MAX_BYTES) {
-    throw new Error("压缩后的封面超过大小限制");
-  }
-  if (result.stdout[0] !== 0xff || result.stdout[1] !== 0xd8) {
-    throw new Error("FFmpeg 没有生成有效的 JPEG 封面");
-  }
-  return result.stdout;
-}
-
-function serveArchiveMemberImage(res, options) {
-  const archivePath = options.archivePath;
-  const memberPath = String(options.memberPath || "").replace(/[\\/]+/g, "/");
-  const stat = safeStat(archivePath);
-  if (!stat?.isFile() || !memberPath || !ARCHIVE_IMAGE_EXTS.has(normalizeExt(memberPath))) {
-    if (options.fallbackPath && serveInlineFile(res, options.fallbackPath, options.contentType)) return;
-    notFound(res);
-    return;
-  }
-
-  const cachePath = archiveImageCacheFile(options.sourceType || "common", archivePath, memberPath);
-  if (!safeStat(cachePath)?.isFile()) {
-    try {
-      extractArchiveMemberToCache(archivePath, memberPath, cachePath);
-    } catch (error) {
-      console.warn("[image-reader-extract]", error.message || error);
-      sendText(res, 500, error.message || "图片缓存抽取失败");
-      return;
-    }
-  }
-
-  imageReaderCacheService.touch(cachePath);
-  imageReaderCacheService.scheduleCleanup();
-  serveInlineFile(res, cachePath, options.contentType || MIME_TYPES[normalizeExt(memberPath)] || "");
-}
-
 function photoSetCoverUrl(albumId, updatedAt = "") {
   if (!albumId) return "";
   const suffix = updatedAt ? `?v=${encodeURIComponent(updatedAt)}` : "";
@@ -2149,8 +2127,8 @@ function publicWorkAvailability(work, infoSummary = null) {
   return workPresenterService.publicWorkAvailability(work, infoSummary);
 }
 
-function publicWork(work, includeFiles = false) {
-  return workPresenterService.publicWork(work, includeFiles);
+function publicWork(work, includeFiles = false, options = {}) {
+  return workPresenterService.publicWork(work, includeFiles, options);
 }
 
 function publicMediaFile(file, work = null) {

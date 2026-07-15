@@ -1,4 +1,38 @@
 import { createShortVideoSearchModule } from "./search/index.js?v=20260710-short-video-search-01";
+import {
+  applyShortVideoLikeBadgeState,
+  clampNumber,
+  ensureShortVideoState,
+  formatCompact,
+  formatDate,
+  formatDuration,
+  formatLocalCommentDate,
+  formatPlaybackRate,
+  formatSeconds,
+  formatShortVideoMetric,
+  initials,
+  normalizePlaybackRate,
+  normalizeShortVideoAuthorFilter,
+  normalizeShortVideoAuthorSort,
+  normalizeShortVideoMedia,
+  normalizeShortVideoQuality,
+  normalizeShortVideoSortValue,
+  normalizeShortVideoSound,
+  normalizeShortVideoSource,
+  normalizeShortVideoTopic,
+  normalizeShortVideoVolume,
+  readAutoNextPreference,
+  readMutedPreference,
+  readPlaybackRatePreference,
+  readSmartFillPreference,
+  readVolumePreference,
+  shortVideoQualityLabel,
+  writeAutoNextPreference,
+  writeMutedPreference,
+  writePlaybackRatePreference,
+  writeSmartFillPreference,
+  writeVolumePreference
+} from "./state.js?v=20260716-short-video-state-01";
 
 export function createShortVideoPage(deps) {
   const {
@@ -6,6 +40,7 @@ export function createShortVideoPage(deps) {
     cancelScheduledWorkRendering,
     disconnectPeopleIndexAutoload,
     els,
+    ensureShortVideoViewerStyles,
     formatBytes,
     formatNumber,
     hidePersonProfile,
@@ -14,8 +49,20 @@ export function createShortVideoPage(deps) {
     resetProgressiveCoverLoading,
     setMainHeader,
     state,
-    syncRouteAfterNavigation
+    syncRouteAfterNavigation,
+    takeDirectShortVideoPlaybackPrewarm
   } = deps;
+
+  let likeDistributionViewPromise = null;
+  let likeDistributionRenderToken = 0;
+  let shortVideoCommentsViewPromise = null;
+  let shortVideoSharePanelPromise = null;
+  let shortVideoPlaybackSettingsPromise = null;
+  let shortVideoPlaybackSettingsWarmupScheduled = false;
+  let shortVideoAuthorPanelPromise = null;
+  let shortVideoGalleryPlayerPromise = null;
+  let shortVideoListCardsPromise = null;
+  let shortVideoListCards = null;
 
   let wheelLocked = false;
   let touchStartX = 0;
@@ -65,13 +112,18 @@ export function createShortVideoPage(deps) {
   const initialVideoLimit = 48;
   const appendVideoLimit = 72;
   const coverEagerCount = 18;
-  const coverLoadBatchSize = 10;
-  const coverLoadBatchDelay = 70;
+  const coverLoadBatchSize = 2;
+  const coverLoadBatchDelay = 24;
   const SV_FEED_MIN_COL = 320;
   const SV_AUTHOR_MIN_COL = 176;
   const SV_COL_GAP = 10;
   const SV_ROW_GAP = 14;
-  const SV_BUFFER_ROWS = 12;
+  // Keep enough off-screen rows for a fast wheel/touch fling without retaining
+  // dozens of fully interactive cards. Each card owns several listeners and
+  // overlay nodes, so a 12-row buffer made every row boundary rebuild 75-84
+  // cards on a three-column desktop grid.
+  const SV_BUFFER_ROWS = 5;
+  const SV_INITIAL_BUFFER_ROWS = 2;
   const SV_APPEND_LOOKAHEAD_ROWS = 18;
   const AUTHOR_PAGE_SIZE = 96;
   const AUTHOR_APPEND_LOOKAHEAD = 900;
@@ -83,13 +135,17 @@ export function createShortVideoPage(deps) {
   let svReady = false;
   let svStart = 0;
   let svEnd = 0;
+  let svTotal = 0;
   let svGridEl = null;
   let svInnerEl = null;
   let svScrollRaf = 0;
+  let svAppendContinuationRaf = 0;
+  let svExpandIdle = 0;
   let authorPanelReturnFeed = null;
   let authorPanelVideoRequestId = 0;
   let authorPanelVideoCache = null;
   let authorPanelTileMap = null;
+  let authorMentionReturn = null;
   let shortVideoAdjacentRequestId = 0;
   let shortVideoListRequestId = 0;
   let shortVideoOpenRequestId = 0;
@@ -97,14 +153,22 @@ export function createShortVideoPage(deps) {
   let shortVideoOpenError = "";
   let shortVideoNavigationPrefetchTimer = 0;
   let shortVideoVisibilitySnapshot = null;
+  let shortVideoPrewarmShelf = null;
+  let shortVideoAdjacentWarmDirection = 1;
+  let shortVideoAdjacentWarmScheduleId = 0;
+  let shortVideoLastNavigationAt = 0;
+  let shortVideoIconMarkupTable = null;
+  let shortVideoCacheSampleCounter = 0;
   const loadedCoverIds = new Set();
   const shortVideoWatchWrites = new Map();
   const shortVideoDetailCache = new Map();
   const shortVideoResolvedDetailCache = new Map();
   const shortVideoNavigationCache = new Map();
   const shortVideoVideoCache = new Map();
+  const shortVideoAuthorMentionCache = new Map();
   const shortVideoVideoPrefetches = new Map();
   const shortVideoMediaPrefetches = new Map();
+  const shortVideoPlaybackPreloads = new Map();
   const SHORT_VIDEO_WATCH_SAVE_INTERVAL = 4000;
   const SHORT_VIDEO_GALLERY_ADVANCE_MS = 3000;
   const SHORT_VIDEO_GALLERY_GESTURE_HINT_MS = 3200;
@@ -112,13 +176,40 @@ export function createShortVideoPage(deps) {
   const SHORT_VIDEO_SMART_FILL_KEY = "fanhao.shortVideo.smartFill";
   const SHORT_VIDEO_NAV_CACHE_LIMIT = 32;
   const SHORT_VIDEO_NEIGHBOR_CACHE_LIMIT = 96;
-  const SHORT_VIDEO_DETAIL_NEIGHBOR_LIMIT = 2;
+  const SHORT_VIDEO_LOADED_COVER_CACHE_LIMIT = 512;
+  const SHORT_VIDEO_WATCH_WRITE_CACHE_LIMIT = 128;
+  const SHORT_VIDEO_AUTHOR_MENTION_CACHE_LIMIT = 256;
+  // The reel only keeps one previous and one next panel alive. Fetching a
+  // second ring here inflated every detail payload by roughly 40%; the next
+  // ring is already filled by the deferred adjacent-detail prefetch.
+  const SHORT_VIDEO_DETAIL_NEIGHBOR_LIMIT = 1;
   const SHORT_VIDEO_SWIPE_DISTANCE = 44;
   const SHORT_VIDEO_WHEEL_DISTANCE = 82;
   const SHORT_VIDEO_SWITCH_ANIMATION_MS = 220;
+  const SHORT_VIDEO_PREWARMED_SWITCH_ANIMATION_MS = 72;
   const SHORT_VIDEO_SWITCH_MIN_ANIMATION_MS = 112;
   const SHORT_VIDEO_SWITCH_MAX_ANIMATION_MS = 232;
-  const SHORT_VIDEO_SWITCH_PRIME_TIMEOUT_MS = 200;
+  // A cold decoder can legitimately need longer than the reel animation,
+  // especially after several rapid 2K/4K switches. Never promote an adjacent
+  // player until it has painted a frame; the timeout is only the maximum time
+  // we keep the switch pending before rebounding to the current reel.
+  const SHORT_VIDEO_SWITCH_PRIME_TIMEOUT_MS = 1200;
+  // Let the visible stream settle before asking the browser to decode a second
+  // 2K frame. Starting the adjacent decoder immediately after first paint
+  // caused a noticeable opening hitch on machines with one hardware decoder.
+  const SHORT_VIDEO_ADJACENT_WARM_STABLE_MS = 650;
+  const SHORT_VIDEO_ADJACENT_WARM_RAPID_MS = 80;
+  const SHORT_VIDEO_RAPID_NAV_WARM_WINDOW_MS = 1200;
+  // The current detail response already carries the immediately visible
+  // neighbors. Fetching the next navigation ring before the current player has
+  // painted can contend with a cold media pipeline, so only fill that second
+  // ring after the visible frame has had a short stable window.
+  const SHORT_VIDEO_NAV_PREFETCH_AFTER_FRAME_MS = 320;
+  const SHORT_VIDEO_NAV_PREFETCH_MAX_WAIT_MS = 3600;
+  const SHORT_VIDEO_PLAYBACK_PRELOAD_LIMIT = 1;
+  const SHORT_VIDEO_PLAYBACK_PRELOAD_TIMEOUT_MS = 2800;
+  const SHORT_VIDEO_FIRST_FRAME_TIMEOUT_MS = 1600;
+  const SHORT_VIDEO_FIRST_FRAME_RETRY_LIMIT = 4;
   const SHORT_VIDEO_BOUNDARY_RESISTANCE = 0.3;
   const SHORT_VIDEO_BOUNDARY_RANGE = 180;
   const SHORT_VIDEO_HOLD_ARM_MOVE_TOLERANCE = 12;
@@ -133,62 +224,102 @@ export function createShortVideoPage(deps) {
     onSearch: commitShortVideoSearch
   });
 
-  function ensureState() {
-    if (!state.shortVideo) state.shortVideo = {};
-    state.shortVideo.query = state.shortVideo.query || "";
-    state.shortVideo.topic = normalizeShortVideoTopic(state.shortVideo.topic);
-    state.shortVideo.sound = normalizeShortVideoSound(state.shortVideo.sound);
-    state.shortVideo.soundInfo = state.shortVideo.soundInfo && typeof state.shortVideo.soundInfo === "object" ? state.shortVideo.soundInfo : null;
-    state.shortVideo.author = state.shortVideo.author || "all";
-    state.shortVideo.authorPage = state.shortVideo.authorPage || "";
-    state.shortVideo.media = normalizeShortVideoMedia(state.shortVideo.media);
-    state.shortVideo.source = normalizeShortVideoSource(state.shortVideo.source);
-    state.shortVideo.sort = normalizeShortVideoSortValue(state.shortVideo.sort);
-    state.shortVideo.data = state.shortVideo.data || null;
-    state.shortVideo.summary = state.shortVideo.summary || null;
-    state.shortVideo.authors = Array.isArray(state.shortVideo.authors) ? state.shortVideo.authors : [];
-    state.shortVideo.authorTotal = Math.max(0, Number(state.shortVideo.authorTotal || 0));
-    state.shortVideo.authorHasMore = Boolean(state.shortVideo.authorHasMore);
-    state.shortVideo.authorLoadingMore = Boolean(state.shortVideo.authorLoadingMore);
-    state.shortVideo.authorDetail = state.shortVideo.authorDetail && typeof state.shortVideo.authorDetail === "object"
-      ? state.shortVideo.authorDetail
-      : null;
-    state.shortVideo.authorVideo = state.shortVideo.authorVideo && typeof state.shortVideo.authorVideo === "object"
-      ? state.shortVideo.authorVideo
-      : null;
-    state.shortVideo.summaryLoading = Boolean(state.shortVideo.summaryLoading);
-    state.shortVideo.current = state.shortVideo.current || null;
-    state.shortVideo.prevVideo = state.shortVideo.prevVideo || null;
-    state.shortVideo.nextVideo = state.shortVideo.nextVideo || null;
-    state.shortVideo.dragging = Boolean(state.shortVideo.dragging);
-    if (typeof state.shortVideo.muted !== "boolean") {
-      state.shortVideo.muted = readMutedPreference();
+  function markShortVideoPerformance(name, details = {}) {
+    const now = Date.now();
+    const trace = window.__fanhaoShortVideoPerf && typeof window.__fanhaoShortVideoPerf === "object"
+      ? window.__fanhaoShortVideoPerf
+      : {
+          version: 1,
+          startedAt: Math.floor(Number(globalThis.performance?.timeOrigin || now)),
+          events: []
+        };
+    const event = {
+      name: String(name || "event"),
+      at: now,
+      elapsedMs: Math.max(0, now - Number(trace.startedAt || now)),
+      ...details
+    };
+    trace.events = Array.isArray(trace.events) ? trace.events : [];
+    trace.events.push(event);
+    if (trace.events.length > 240) trace.events.splice(0, trace.events.length - 240);
+    trace.latest = event;
+    window.__fanhaoShortVideoPerf = trace;
+    if (document.documentElement.dataset.shortVideoPerfCapture === "1") {
+      document.documentElement.dataset.shortVideoPerfTrace = JSON.stringify({
+        version: trace.version,
+        startedAt: trace.startedAt,
+        latest: trace.latest,
+        events: trace.events.slice(-120)
+      });
     }
-    state.shortVideo.volume = normalizeShortVideoVolume(
-      state.shortVideo.volume ?? readVolumePreference()
-    );
-    if (typeof state.shortVideo.autoNext !== "boolean") {
-      state.shortVideo.autoNext = readAutoNextPreference();
-    }
-    if (typeof state.shortVideo.smartFill !== "boolean") {
-      state.shortVideo.smartFill = readSmartFillPreference(SHORT_VIDEO_SMART_FILL_KEY);
-    }
-    state.shortVideo.playbackRate = normalizePlaybackRate(
-      state.shortVideo.playbackRate ?? readPlaybackRatePreference()
-    );
-    state.shortVideo.prevId = state.shortVideo.prevId || "";
-    state.shortVideo.nextId = state.shortVideo.nextId || "";
-    state.shortVideo.slideDirection = Number(state.shortVideo.slideDirection || 0);
-    state.shortVideo.loading = Boolean(state.shortVideo.loading);
-    state.shortVideo.loadingMore = Boolean(state.shortVideo.loadingMore);
-    state.shortVideo.status = state.shortVideo.status || "";
-    state.shortVideo.deleteMode = Boolean(state.shortVideo.deleteMode);
-    if (!(state.shortVideo.deleteSelection instanceof Set)) {
-      state.shortVideo.deleteSelection = new Set(Array.isArray(state.shortVideo.deleteSelection) ? state.shortVideo.deleteSelection : []);
-    }
-    installBrowseEvents();
+    return event;
   }
 
+  function rememberLoadedCoverId(videoId) {
+    const id = String(videoId || "").trim();
+    if (!id) return;
+    loadedCoverIds.delete(id);
+    loadedCoverIds.add(id);
+    while (loadedCoverIds.size > SHORT_VIDEO_LOADED_COVER_CACHE_LIMIT) {
+      loadedCoverIds.delete(loadedCoverIds.values().next().value);
+    }
+  }
+
+  function cacheShortVideoAuthorMention(key, author) {
+    const normalizedKey = String(key || "").trim();
+    if (!normalizedKey || !author) return;
+    shortVideoAuthorMentionCache.delete(normalizedKey);
+    shortVideoAuthorMentionCache.set(normalizedKey, author);
+    while (shortVideoAuthorMentionCache.size > SHORT_VIDEO_AUTHOR_MENTION_CACHE_LIMIT) {
+      shortVideoAuthorMentionCache.delete(shortVideoAuthorMentionCache.keys().next().value);
+    }
+  }
+
+  function trimShortVideoWatchWrites(protectedVideoId = "") {
+    while (shortVideoWatchWrites.size > SHORT_VIDEO_WATCH_WRITE_CACHE_LIMIT) {
+      const removable = [...shortVideoWatchWrites.entries()]
+        .find(([videoId, write]) => videoId !== protectedVideoId && !write?.inFlight && !write?.pending);
+      if (!removable) return;
+      shortVideoWatchWrites.delete(removable[0]);
+    }
+  }
+
+  function markShortVideoCacheState() {
+    if (document.documentElement.dataset.shortVideoPerfCapture !== "1") return;
+    shortVideoCacheSampleCounter += 1;
+    if (shortVideoCacheSampleCounter % 16 !== 0) return;
+    markShortVideoPerformance("short-video-cache-state", {
+      loadedCovers: loadedCoverIds.size,
+      watchWrites: shortVideoWatchWrites.size,
+      videos: shortVideoVideoCache.size,
+      navigation: shortVideoNavigationCache.size,
+      detailRequests: shortVideoDetailCache.size,
+      resolvedDetails: shortVideoResolvedDetailCache.size,
+      authorMentions: shortVideoAuthorMentionCache.size,
+      mediaPrefetches: shortVideoMediaPrefetches.size,
+      playbackPreloads: shortVideoPlaybackPreloads.size
+    });
+  }
+
+  function shortVideoPlaybackUrl(video = {}) {
+    const source = String(video?.streamUrl || "").trim();
+    if (!source) return "";
+    const longEdge = Math.max(
+      Number(video?.actualVideo?.longEdge || 0),
+      Number(video?.actualVideo?.width || video?.width || 0),
+      Number(video?.actualVideo?.height || video?.height || 0)
+    );
+    if (longEdge < 2160 || !source.includes("/media/short-video/")) return source;
+    const smoothSource = source.replace("/media/short-video/", "/media/short-video-smooth/");
+    return `${smoothSource}${smoothSource.includes("?") ? "&" : "?"}rendition=2k30-v2-range2`;
+  }
+
+  function ensureState() {
+    return ensureShortVideoState(state, {
+      installBrowseEvents,
+      smartFillKey: SHORT_VIDEO_SMART_FILL_KEY
+    });
+  }
   function enter(options = {}) {
     ensureState();
     state.selectedPersonId = null;
@@ -218,6 +349,7 @@ export function createShortVideoPage(deps) {
 
   function applyRouteState(route = {}) {
     ensureState();
+    state.shortVideo.mode = route.shortVideoMode === "likes" ? "likes" : "feed";
     const nextAuthorPage = route.shortVideoAuthorPage || "";
     if (state.shortVideo.authorPage && state.shortVideo.authorPage !== nextAuthorPage) {
       state.shortVideo.authorDetail = null;
@@ -230,7 +362,12 @@ export function createShortVideoPage(deps) {
     state.shortVideo.authorPage = nextAuthorPage;
     state.shortVideo.author = state.shortVideo.authorPage || route.shortVideoAuthor || "all";
     state.shortVideo.media = normalizeShortVideoMedia(route.shortVideoMedia);
+    state.shortVideo.quality = normalizeShortVideoQuality(route.shortVideoQuality);
+    if (state.shortVideo.quality !== "all") state.shortVideo.media = "video";
     state.shortVideo.source = normalizeShortVideoSource(route.shortVideoSource);
+    if (!state.shortVideo.authorPage && ["authors", "following"].includes(state.shortVideo.source)) {
+      state.shortVideo.authorIndexSource = state.shortVideo.source;
+    }
     state.shortVideo.sort = normalizeShortVideoSortValue(route.shortVideoSort);
     if (state.shortVideo.source === "recommended" && state.shortVideo.sort === "published") {
       state.shortVideo.sort = "recommended";
@@ -241,6 +378,17 @@ export function createShortVideoPage(deps) {
 
   async function openRouteTarget(route = {}) {
     ensureState();
+    if (route.shortVideoMode === "likes") {
+      state.shortVideo.current = null;
+      state.shortVideo.prevVideo = null;
+      state.shortVideo.nextVideo = null;
+      state.shortVideo.prevId = "";
+      state.shortVideo.nextId = "";
+      setMainHeader("内容洞察", "短视频 / 数据统计");
+      renderView();
+      if (!state.shortVideo.likeDistribution) await loadLikeDistribution();
+      return;
+    }
     if (route.shortVideoId) {
       await openVideo(route.shortVideoId, { skipRoute: true });
       return;
@@ -263,6 +411,9 @@ export function createShortVideoPage(deps) {
   async function loadVideos(options = {}) {
     ensureState();
     const append = Boolean(options.append);
+    if (!append && !shortVideoListCards) {
+      ensureShortVideoListCards().catch((error) => console.warn(error));
+    }
     if (isShortVideoAuthorIndexPage()) {
       if (append && (state.shortVideo.loading || state.shortVideo.authorLoadingMore || !state.shortVideo.authorHasMore)) return;
       const requestId = ++shortVideoListRequestId;
@@ -279,6 +430,8 @@ export function createShortVideoPage(deps) {
         state.shortVideo.authorLoadingMore = false;
         state.shortVideo.authors = [];
         state.shortVideo.authorTotal = 0;
+        state.shortVideo.authorScopeTotal = 0;
+        state.shortVideo.authorUnlikedTotal = 0;
         state.shortVideo.authorHasMore = false;
       }
       state.shortVideo.status = append ? "" : "正在读取作者";
@@ -287,6 +440,11 @@ export function createShortVideoPage(deps) {
         limit: String(AUTHOR_PAGE_SIZE),
         offset: String(append ? state.shortVideo.authors.length : 0)
       });
+      if (state.shortVideo.source === "following") {
+        params.set("scope", "following");
+        params.set("sort", state.shortVideo.authorSort);
+        params.set("filter", state.shortVideo.authorFilter);
+      }
       if (state.shortVideo.query) params.set("q", state.shortVideo.query);
       const data = await api(`/api/short-videos/authors?${params}`);
       if (requestId !== shortVideoListRequestId) return;
@@ -305,6 +463,8 @@ export function createShortVideoPage(deps) {
         state.shortVideo.authors = nextAuthors;
       }
       state.shortVideo.authorTotal = Math.max(0, Number(data.total || 0));
+      state.shortVideo.authorScopeTotal = Math.max(0, Number(data.scopeTotal || data.total || 0));
+      state.shortVideo.authorUnlikedTotal = Math.max(0, Number(data.unlikedTotal || 0));
       state.shortVideo.authorHasMore = Boolean(data.hasMore);
       state.shortVideo.loading = false;
       state.shortVideo.authorLoadingMore = false;
@@ -320,6 +480,15 @@ export function createShortVideoPage(deps) {
     }
     if (append && (state.shortVideo.loading || state.shortVideo.loadingMore || !state.shortVideo.data?.hasMore)) return;
     const requestId = ++shortVideoListRequestId;
+    const captureListPerformance = document.documentElement.dataset.shortVideoPerfCapture === "1";
+    const listRequestStartedAt = Date.now();
+    if (captureListPerformance) {
+      markShortVideoPerformance("short-video-list-request-start", {
+        append,
+        requestId,
+        offset: append ? Number(state.shortVideo.data?.videos?.length || 0) : 0
+      });
+    }
     if (append) {
       state.shortVideo.loadingMore = true;
     } else {
@@ -340,15 +509,60 @@ export function createShortVideoPage(deps) {
     if (state.shortVideo.sound) params.set("sound", state.shortVideo.sound);
     if (state.shortVideo.author && state.shortVideo.author !== "all") params.set("author", state.shortVideo.author);
     if (state.shortVideo.media && state.shortVideo.media !== "all") params.set("media", state.shortVideo.media);
+    if (state.shortVideo.quality && state.shortVideo.quality !== "all") params.set("quality", state.shortVideo.quality);
     params.set("source", shortVideoApiSource());
     params.set("sort", state.shortVideo.sort || "published");
     params.set("limit", String(append ? appendVideoLimit : initialVideoLimit));
     params.set("facets", "0");
     params.set("stats", "0");
-    if (append) params.set("offset", String(state.shortVideo.data?.videos?.length || 0));
+    // Actual-resolution probes can move videos into a quality bucket while the
+    // user is scrolling. Likes-ordered feeds therefore continue from the last
+    // stable sort key instead of an OFFSET whose membership may have shifted.
+    const appendCursor = append && state.shortVideo.sort === "likes"
+      ? String(state.shortVideo.data?.nextCursor || "")
+      : "";
+    if (appendCursor) params.set("cursor", appendCursor);
+    else if (append) params.set("offset", String(state.shortVideo.data?.videos?.length || 0));
+    if (append) params.set("users", "0");
+    // Quality-filtered pages are cheap indexed reads and must not mix a cached
+    // pre-probe page with newly measured append pages.
+    if (state.shortVideo.quality !== "all") params.set("refresh", "1");
+    const requestedAuthorPage = String(state.shortVideo.authorPage || "").trim();
+    if (!append && requestedAuthorPage) {
+      resolveShortVideoAuthor(requestedAuthorPage).then((author) => {
+        if (requestId !== shortVideoListRequestId || state.shortVideo.authorPage !== requestedAuthorPage || !author) return;
+        state.shortVideo.authorDetail = { ...(state.shortVideo.authorDetail || {}), ...author };
+        renderView();
+      }).catch(() => {});
+    }
     const data = await api(`/api/short-videos?${params}`);
-    if (requestId !== shortVideoListRequestId) return;
+    if (captureListPerformance) {
+      markShortVideoPerformance("short-video-list-request-finish", {
+        append,
+        requestId,
+        currentRequestId: shortVideoListRequestId,
+        durationMs: Date.now() - listRequestStartedAt,
+        received: Array.isArray(data?.videos) ? data.videos.length : 0,
+        hasMore: Boolean(data?.hasMore)
+      });
+    }
+    if (requestId !== shortVideoListRequestId) {
+      if (captureListPerformance) {
+        markShortVideoPerformance("short-video-list-request-stale", {
+          append,
+          requestId,
+          currentRequestId: shortVideoListRequestId
+        });
+      }
+      return;
+    }
     if (append && state.shortVideo.data) {
+      const previousUsers = Array.isArray(state.shortVideo.data.users) ? state.shortVideo.data.users : [];
+      const previousUsersTotal = Math.max(0, Number(state.shortVideo.data.usersTotal || 0));
+      const previousUsersHasMore = Boolean(state.shortVideo.data.usersHasMore);
+      const stableTotal = appendCursor
+        ? Math.max(0, Number(state.shortVideo.data.total || 0))
+        : Math.max(0, Number(data.total || 0));
       const seen = new Set((state.shortVideo.data.videos || []).map((video) => video.id));
       const merged = [...(state.shortVideo.data.videos || [])];
       for (const video of data.videos || []) {
@@ -356,7 +570,16 @@ export function createShortVideoPage(deps) {
         seen.add(video.id);
         merged.push(video);
       }
-      state.shortVideo.data = { ...data, videos: merged, offset: 0, limit: merged.length };
+      state.shortVideo.data = {
+        ...data,
+        total: stableTotal,
+        users: previousUsers,
+        usersTotal: previousUsersTotal,
+        usersHasMore: previousUsersHasMore,
+        videos: merged,
+        offset: 0,
+        limit: merged.length
+      };
     } else {
       state.shortVideo.data = data;
     }
@@ -369,6 +592,8 @@ export function createShortVideoPage(deps) {
       state.shortVideo.soundInfo = (data.videos || []).find((video) => video?.sound?.key === state.shortVideo.sound)?.sound || state.shortVideo.soundInfo;
     }
     state.shortVideo.media = normalizeShortVideoMedia(data.media || state.shortVideo.media);
+    state.shortVideo.quality = normalizeShortVideoQuality(data.quality || state.shortVideo.quality);
+    if (state.shortVideo.quality !== "all") state.shortVideo.media = "video";
     if (Array.isArray(data.authors) && data.authors.length) state.shortVideo.authors = data.authors;
     state.shortVideo.summary = data.summary || state.shortVideo.summary;
     state.shortVideo.loading = false;
@@ -386,8 +611,19 @@ export function createShortVideoPage(deps) {
     if (append) {
       renderShortVideoWindow(false);
       scheduleShortVideoWindowUpdate();
+      scheduleShortVideoAppendContinuation();
     } else {
       renderView();
+    }
+    if (captureListPerformance) {
+      markShortVideoPerformance("short-video-list-applied", {
+        append,
+        requestId,
+        videos: Array.isArray(state.shortVideo.data?.videos) ? state.shortVideo.data.videos.length : 0,
+        visibleVideos: shortVideosWithCovers(state.shortVideo.data?.videos || []).length,
+        hasMore: Boolean(state.shortVideo.data?.hasMore),
+        durationMs: Date.now() - listRequestStartedAt
+      });
     }
     if (!options.skipRoute) {
       const writer = options.replaceRoute ? replaceRoute : pushRoute;
@@ -416,14 +652,86 @@ export function createShortVideoPage(deps) {
     ensureState();
     if (!videoId) return;
     const requestId = ++shortVideoOpenRequestId;
+    const openStartedAt = Date.now();
+    const viewerStylesReady = Promise.resolve(ensureShortVideoViewerStyles?.()).catch(() => false);
+    if (document.documentElement.dataset.shortVideoPerfCapture === "1") {
+      viewerStylesReady.then(() => markShortVideoPerformance("video-viewer-styles-ready", {
+        videoId: String(videoId),
+        requestId,
+        durationMs: Date.now() - openStartedAt
+      }));
+    }
+    markShortVideoPerformance("video-open-start", {
+      videoId: String(videoId),
+      requestId
+    });
     shortVideoOpeningId = String(videoId);
     shortVideoOpenError = "";
+    const feedVideos = Array.isArray(state.shortVideo.data?.videos) ? state.shortVideo.data.videos : [];
+    const feedIndex = feedVideos.findIndex((video) => String(video?.id || "") === String(videoId));
+    const openingVideo = options.video
+      || cachedShortVideo(videoId)
+      || (feedIndex >= 0 ? feedVideos[feedIndex] : null);
+    if (openingVideo?.id) {
+      markShortVideoPerformance("video-open-fast-path", {
+        videoId: String(openingVideo.id),
+        requestId,
+        feedIndex
+      });
+      rememberShortVideo(openingVideo);
+      prewarmShortVideoPlayback(openingVideo).catch(() => {});
+      await viewerStylesReady;
+      if (requestId !== shortVideoOpenRequestId) return false;
+      const navigation = cachedShortVideoNavigation(openingVideo.id);
+      const feedPrevious = feedIndex > 0 ? feedVideos[feedIndex - 1] : null;
+      const feedNext = feedIndex >= 0 && feedIndex < feedVideos.length - 1 ? feedVideos[feedIndex + 1] : null;
+      const previousId = navigation?.prevId || String(feedPrevious?.id || "");
+      const nextId = navigation?.nextId || String(feedNext?.id || "");
+      state.shortVideo.current = openingVideo;
+      state.shortVideo.prevId = previousId;
+      state.shortVideo.nextId = nextId;
+      state.shortVideo.prevVideo = cachedShortVideo(previousId) || feedPrevious || null;
+      state.shortVideo.nextVideo = cachedShortVideo(nextId) || feedNext || null;
+      rememberShortVideo(state.shortVideo.prevVideo);
+      rememberShortVideo(state.shortVideo.nextVideo);
+      state.shortVideo.slideDirection = Number(options.slideDirection || 0);
+      state.shortVideo.loading = false;
+      state.shortVideo.status = "";
+      shortVideoOpeningId = "";
+      renderStats();
+      renderView();
+      markShortVideoPerformance("video-rendered", {
+        videoId: String(openingVideo.id),
+        requestId,
+        source: "cached-feed",
+        durationMs: Date.now() - openStartedAt
+      });
+      resumeActiveSound();
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      if (!options.skipRoute) pushRoute({ view: "shortVideos", shortVideoId: openingVideo.id });
+      loadShortVideoSummary().catch(handleSummaryLoadError);
+      hydratePromotedShortVideo(openingVideo).catch((error) => console.warn(error));
+      return true;
+    }
     state.shortVideo.loading = true;
     state.shortVideo.status = "正在打开视频";
-    if (options.renderLoading !== false) renderView();
+    const detailPromise = fetchShortVideoDetail(videoId);
     try {
-      const data = await fetchShortVideoDetail(videoId);
+      if (options.renderLoading !== false) {
+        await viewerStylesReady;
+        if (requestId !== shortVideoOpenRequestId) {
+          detailPromise.catch(() => {});
+          return false;
+        }
+        renderView();
+      }
+      const [data] = await Promise.all([detailPromise, viewerStylesReady]);
       if (requestId !== shortVideoOpenRequestId) return false;
+      markShortVideoPerformance("video-detail-ready", {
+        videoId: String(data?.video?.id || videoId),
+        requestId,
+        durationMs: Date.now() - openStartedAt
+      });
       state.shortVideo.current = data.video;
       if (state.shortVideo.sound && data.video?.sound?.key === state.shortVideo.sound) state.shortVideo.soundInfo = data.video.sound;
       state.shortVideo.prevId = data.prevId || "";
@@ -437,18 +745,29 @@ export function createShortVideoPage(deps) {
       shortVideoOpenError = "";
       renderStats();
       renderView();
+      markShortVideoPerformance("video-rendered", {
+        videoId: String(data.video.id),
+        requestId,
+        source: "detail",
+        durationMs: Date.now() - openStartedAt
+      });
       resumeActiveSound();
       window.scrollTo({ top: 0, left: 0, behavior: "auto" });
       if (!options.skipRoute) pushRoute({ view: "shortVideos", shortVideoId: data.video.id });
       loadShortVideoSummary().catch(handleSummaryLoadError);
       loadAdjacentVideos(data.video.id).then((loaded) => {
         if (!loaded) return;
-        refreshAdjacentPanelsDom();
-        syncCurrentNavigationDom();
+        scheduleInitialAdjacentPanelsRefresh(data.video.id);
       }).catch((error) => console.warn(error));
       return true;
     } catch (error) {
       if (requestId !== shortVideoOpenRequestId) return false;
+      markShortVideoPerformance("video-open-error", {
+        videoId: String(videoId),
+        requestId,
+        durationMs: Date.now() - openStartedAt,
+        message: String(error?.message || error || "")
+      });
       state.shortVideo.loading = false;
       state.shortVideo.status = "";
       if (state.shortVideo.current) {
@@ -513,6 +832,10 @@ export function createShortVideoPage(deps) {
     disposeShortVideoMedia(els.workGrid);
     els.workGrid.innerHTML = "";
     setBodyClass();
+    if (state.shortVideo.mode === "likes") {
+      renderLikeDistributionPage();
+      return;
+    }
     if (state.shortVideo.current) {
       renderBrowser();
       return;
@@ -524,8 +847,74 @@ export function createShortVideoPage(deps) {
     renderHome();
   }
 
+  function ensureShortVideoListCards() {
+    if (shortVideoListCards) return Promise.resolve(shortVideoListCards);
+    if (shortVideoListCardsPromise) return shortVideoListCardsPromise;
+    markShortVideoPerformance("list-cards-module-start");
+    const moduleUrl = "/modules/short-videos/list-cards.js?v=20260715-aggregate-search-01";
+    shortVideoListCardsPromise = import(moduleUrl).then((module) => {
+      if (typeof module.createShortVideoListCards !== "function") {
+        throw new Error("短视频列表模块加载失败");
+      }
+      shortVideoListCards = module.createShortVideoListCards({
+        applyShortVideoLikeBadgeState,
+        authorScopeId,
+        cardTitle,
+        coverEagerCount,
+        createIcon,
+        ensureShortVideoViewerStyles,
+        formatDate,
+        formatDuration,
+        formatNumber,
+        formatSeconds,
+        formatShortVideoMetric,
+        galleryBadge,
+        galleryLabel,
+        initials,
+        isGalleryPost,
+        isShortVideoAuthorDetailPage,
+        openShortVideoAuthorPage,
+        openVideo,
+        prewarmShortVideoPlayback,
+        rememberShortVideo,
+        shortVideoAuthorHandle,
+        shortVideoCardCoverUrl,
+        shortVideoDeleteSelection,
+        showError,
+        state,
+        toggleShortVideoSelected
+      });
+      markShortVideoPerformance("list-cards-module-ready");
+      return shortVideoListCards;
+    }).catch((error) => {
+      shortVideoListCardsPromise = null;
+      markShortVideoPerformance("list-cards-module-error", {
+        message: String(error?.message || error || "unknown")
+      });
+      throw error;
+    });
+    return shortVideoListCardsPromise;
+  }
+
   function renderHome() {
     const data = state.shortVideo.data || {};
+    const needsListCards = isShortVideoAuthorIndexPage()
+      ? Boolean(state.shortVideo.authors?.length)
+      : shortVideosWithCovers(data.videos || []).length > 0 || Boolean(data.users?.length);
+    if (needsListCards && !shortVideoListCards) {
+      const loading = document.createElement("section");
+      loading.className = "short-video-home";
+      const status = document.createElement("div");
+      status.className = "short-video-status";
+      status.setAttribute("role", "status");
+      status.textContent = "正在准备短视频列表…";
+      loading.append(status);
+      els.workGrid.append(loading);
+      ensureShortVideoListCards().then(() => {
+        if (state.activeView === "shortVideos" && !state.shortVideo?.current && !shortVideoOpeningId) renderView();
+      }).catch(showError);
+      return;
+    }
     const shell = document.createElement("section");
     shell.className = "short-video-home";
     shell.classList.toggle("is-author-page", isShortVideoAuthorDetailPage());
@@ -540,6 +929,9 @@ export function createShortVideoPage(deps) {
     }
     if (isShortVideoAuthorDetailPage()) {
       shell.append(renderAuthorDetailHome(data), renderAuthorWorkspaceToolbar(data));
+    }
+    if (state.shortVideo.query && !isShortVideoAuthorDetailPage()) {
+      shell.append(renderAggregateSearchResults(data));
     }
     if (state.shortVideo.status && !(data.videos || []).length) {
       const status = document.createElement("div");
@@ -587,7 +979,37 @@ export function createShortVideoPage(deps) {
       button.addEventListener("click", () => commitShortVideoMedia(value));
       media.append(button);
     }
-    section.append(form, media);
+    const quality = document.createElement("label");
+    quality.className = "short-video-quality-filter";
+    const qualityLabel = document.createElement("span");
+    qualityLabel.textContent = "清晰度";
+    const qualitySelect = document.createElement("select");
+    qualitySelect.setAttribute("aria-label", "按实际视频清晰度筛选");
+    for (const [value, label] of [
+      ["all", "全部"],
+      ["4k", "4K"],
+      ["1440p", "2K / 1440P"],
+      ["1080p", "1080P"],
+      ["720p", "720P"],
+      ["below720p", "低于 720P"],
+      ["unknown", "未检测"]
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      option.selected = normalizeShortVideoQuality(state.shortVideo.quality) === value;
+      qualitySelect.append(option);
+    }
+    qualitySelect.addEventListener("change", () => commitShortVideoQuality(qualitySelect.value));
+    quality.append(qualityLabel, qualitySelect);
+
+    const distribution = document.createElement("button");
+    distribution.type = "button";
+    distribution.className = "short-video-distribution-toggle";
+    distribution.append(createIcon("chart"), document.createTextNode("数据统计"));
+    distribution.addEventListener("click", openLikeDistributionPage);
+
+    section.append(form, media, quality, distribution);
     if (state.shortVideo.topic) {
       const topic = document.createElement("div");
       topic.className = "short-video-active-topic";
@@ -618,6 +1040,172 @@ export function createShortVideoPage(deps) {
     return section;
   }
 
+  function renderAggregateSearchResults(data = {}) {
+    const section = document.createElement("section");
+    section.className = "short-video-aggregate-results";
+    section.setAttribute("aria-label", "综合搜索结果");
+
+    const userHeader = document.createElement("div");
+    userHeader.className = "short-video-search-section-head";
+    const userTitle = document.createElement("h2");
+    userTitle.textContent = "用户";
+    const userCount = document.createElement("span");
+    const usersTotal = Math.max(0, Number(data.usersTotal || 0));
+    userCount.textContent = usersTotal
+      ? `${formatNumber(usersTotal)} 位匹配用户${data.usersHasMore ? "，展示前 6 位" : ""}`
+      : "没有匹配用户";
+    userHeader.append(userTitle, userCount);
+
+    const users = document.createElement("div");
+    users.className = "short-video-search-users";
+    for (const author of Array.isArray(data.users) ? data.users : []) {
+      const card = renderSearchUserCard(author);
+      if (card) users.append(card);
+    }
+    if (!users.childElementCount) {
+      const empty = document.createElement("p");
+      empty.className = "short-video-search-users-empty";
+      empty.textContent = "本地用户库里暂时没有匹配项。";
+      users.append(empty);
+    }
+
+    const workHeader = document.createElement("div");
+    workHeader.className = "short-video-search-section-head is-works";
+    const workTitle = document.createElement("h2");
+    workTitle.textContent = "作品";
+    const workCount = document.createElement("span");
+    workCount.textContent = `${formatNumber(data.total || 0)} 条匹配作品`;
+    workHeader.append(workTitle, workCount);
+    section.append(userHeader, users, workHeader);
+    return section;
+  }
+
+  function openLikeDistributionPage() {
+    state.shortVideo.mode = "likes";
+    state.shortVideo.current = null;
+    state.shortVideo.prevVideo = null;
+    state.shortVideo.nextVideo = null;
+    state.shortVideo.prevId = "";
+    state.shortVideo.nextId = "";
+    pushRoute({
+      shortVideoId: "",
+      shortVideoAuthorPage: "",
+      shortVideoMode: "likes"
+    });
+    setMainHeader("内容洞察", "短视频 / 数据统计");
+    renderView();
+    if (!state.shortVideo.likeDistribution) {
+      loadLikeDistribution().catch((error) => {
+        state.shortVideo.likeDistributionError = error?.message || "点赞分布读取失败";
+        renderView();
+      });
+    }
+  }
+
+  function leaveLikeDistributionPage() {
+    state.shortVideo.mode = "feed";
+    replaceRoute({
+      shortVideoId: "",
+      shortVideoAuthorPage: "",
+      shortVideoMode: "feed"
+    });
+    setMainHeader("短视频", "抖音点赞本地库");
+    renderView();
+    if (!state.shortVideo.data) loadVideos({ skipRoute: true }).catch(showError);
+  }
+
+  async function loadLikeDistribution(options = {}) {
+    if (state.shortVideo.likeDistributionLoading) return;
+    state.shortVideo.likeDistributionLoading = true;
+    state.shortVideo.likeDistributionError = "";
+    if (state.shortVideo.mode === "likes") renderView();
+    try {
+      state.shortVideo.likeDistribution = await api("/api/short-videos/like-distribution");
+    } catch (error) {
+      state.shortVideo.likeDistributionError = error?.message || "点赞分布读取失败";
+      return null;
+    } finally {
+      state.shortVideo.likeDistributionLoading = false;
+      if (state.shortVideo.mode === "likes" && options.render !== false) renderView();
+    }
+  }
+
+  function openLikeDistributionAuthor(item = {}) {
+    const secUid = String(item.authorSecUid || item.secUid || "").trim();
+    if (!secUid) return;
+    openShortVideoAuthorPage({
+      secUid,
+      name: item.authorName || item.name || "未知作者"
+    }, item.id ? {
+      id: item.id,
+      author: { secUid, name: item.authorName || item.name || "未知作者" }
+    } : {});
+  }
+
+  function openLikeDistributionTopic(item = {}) {
+    state.shortVideo.mode = "feed";
+    setMainHeader("短视频", "抖音点赞本地库");
+    commitShortVideoTopic(item.label || item.key || "");
+  }
+
+  function ensureLikeDistributionView() {
+    if (likeDistributionViewPromise) return likeDistributionViewPromise;
+    // Keep the research/statistics renderer out of the video-detail startup bundle.
+    // A variable URL intentionally leaves this import for the browser at route time.
+    const moduleUrl = "/modules/short-videos/like-distribution-view.js?v=20260716-quality-audit-20w-01";
+    likeDistributionViewPromise = import(moduleUrl).then((module) => {
+      if (typeof module.createLikeDistributionView !== "function") {
+        throw new Error("内容洞察模块加载失败");
+      }
+      return module.createLikeDistributionView({
+        formatNumber,
+        loadLikeDistribution,
+        openInsightAuthor: openLikeDistributionAuthor,
+        openInsightTopic: openLikeDistributionTopic,
+        showError,
+        state
+      });
+    }).catch((error) => {
+      likeDistributionViewPromise = null;
+      throw error;
+    });
+    return likeDistributionViewPromise;
+  }
+
+  function renderLikeDistributionPage() {
+    const shell = document.createElement("section");
+    shell.className = "short-video-home short-video-distribution-page";
+    const navigation = document.createElement("div");
+    navigation.className = "short-video-distribution-page-nav";
+    const back = document.createElement("button");
+    back.type = "button";
+    back.append(createIcon("chevronLeft"), document.createTextNode("返回短视频"));
+    back.addEventListener("click", leaveLikeDistributionPage);
+    const context = document.createElement("div");
+    const eyebrow = document.createElement("span");
+    eyebrow.textContent = "短视频数据统计";
+    const title = document.createElement("h1");
+    title.textContent = "内容洞察";
+    context.append(eyebrow, title);
+    navigation.append(back, context);
+    const placeholder = document.createElement("section");
+    placeholder.className = "short-video-distribution-panel";
+    placeholder.setAttribute("aria-busy", "true");
+    placeholder.textContent = "正在载入内容洞察…";
+    shell.append(navigation, placeholder);
+    els.workGrid.append(shell);
+
+    const renderToken = ++likeDistributionRenderToken;
+    ensureLikeDistributionView().then((view) => {
+      if (renderToken !== likeDistributionRenderToken || state.shortVideo.mode !== "likes" || !placeholder.isConnected) return;
+      placeholder.replaceWith(view.renderLikeDistributionPanel());
+    }).catch((error) => {
+      if (renderToken !== likeDistributionRenderToken || !placeholder.isConnected) return;
+      placeholder.removeAttribute("aria-busy");
+      placeholder.classList.add("is-error");
+      placeholder.textContent = error?.message || "内容洞察模块加载失败";
+    });
+  }
   function commitShortVideoSearch(value, options = {}) {
     const query = String(value || "").trim().slice(0, 120);
     shortVideoSearch.remember(query);
@@ -626,12 +1214,14 @@ export function createShortVideoPage(deps) {
       || state.shortVideo.authorPage
       || state.shortVideo.source !== "all"
       || state.shortVideo.media !== "all"
+      || state.shortVideo.quality !== "all"
     ));
     if (options.global) {
       state.shortVideo.author = "all";
       state.shortVideo.authorPage = "";
       state.shortVideo.source = "all";
       state.shortVideo.media = "all";
+      state.shortVideo.quality = "all";
     }
     if (!globalScopeChanged && query === (state.shortVideo.query || "") && !state.shortVideo.topic && !state.shortVideo.sound && state.shortVideo.data) return;
     state.shortVideo.query = query;
@@ -682,8 +1272,22 @@ export function createShortVideoPage(deps) {
 
   function commitShortVideoMedia(value) {
     const media = normalizeShortVideoMedia(value);
-    if (media === normalizeShortVideoMedia(state.shortVideo.media)) return;
+    const nextQuality = media === "video" ? state.shortVideo.quality : "all";
+    if (media === normalizeShortVideoMedia(state.shortVideo.media)
+      && nextQuality === normalizeShortVideoQuality(state.shortVideo.quality)) return;
     state.shortVideo.media = media;
+    state.shortVideo.quality = nextQuality;
+    state.shortVideo.current = null;
+    state.shortVideo.data = null;
+    clearShortVideoDeleteSelection();
+    loadVideos({ replaceRoute: true }).catch(showError);
+  }
+
+  function commitShortVideoQuality(value) {
+    const quality = normalizeShortVideoQuality(value);
+    if (quality === normalizeShortVideoQuality(state.shortVideo.quality)) return;
+    state.shortVideo.quality = quality;
+    if (quality !== "all") state.shortVideo.media = "video";
     state.shortVideo.current = null;
     state.shortVideo.data = null;
     clearShortVideoDeleteSelection();
@@ -706,6 +1310,7 @@ export function createShortVideoPage(deps) {
     const topic = normalizeShortVideoTopic(state.shortVideo.topic);
     const sound = normalizeShortVideoSound(state.shortVideo.sound);
     const media = normalizeShortVideoMedia(state.shortVideo.media);
+    const quality = normalizeShortVideoQuality(state.shortVideo.quality);
     const title = document.createElement("h2");
     title.textContent = query
       ? `没有找到“${query}”`
@@ -713,6 +1318,8 @@ export function createShortVideoPage(deps) {
         ? `没有找到 #${topic} 的本地作品`
       : sound
         ? `没有找到“${state.shortVideo.soundInfo?.title || "当前原声"}”的本地作品`
+      : quality !== "all"
+        ? `没有找到${shortVideoQualityLabel(quality)}视频`
       : media === "gallery"
         ? "没有找到图文作品"
         : media === "video"
@@ -763,11 +1370,13 @@ export function createShortVideoPage(deps) {
     const tabs = document.createElement("div");
     tabs.className = "short-video-source-tabs";
     tabs.setAttribute("role", "tablist");
-    const activeSource = isShortVideoAuthorDetailPage() ? "authors" : (state.shortVideo.source || "liked");
+    const activeSource = isShortVideoAuthorDetailPage()
+      ? state.shortVideo.authorIndexSource
+      : (state.shortVideo.source || "liked");
     for (const item of [
       ["recommended", "推荐"],
       ["liked", "我的喜欢"],
-      ["following", "关注"],
+      ["following", "我的关注"],
       ["history", "历史"],
       ["authors", "作者"],
       ["all", "全部"]
@@ -793,12 +1402,16 @@ export function createShortVideoPage(deps) {
         } else if (["recommended", "watched"].includes(state.shortVideo.sort)) {
           state.shortVideo.sort = "published";
         }
-        if (item[0] === "authors") {
+        if (["authors", "following"].includes(item[0])) {
+          state.shortVideo.authorIndexSource = item[0];
           state.shortVideo.author = "all";
           state.shortVideo.query = "";
           state.shortVideo.media = "all";
+          state.shortVideo.quality = "all";
           state.shortVideo.authors = [];
           state.shortVideo.authorTotal = 0;
+          state.shortVideo.authorScopeTotal = 0;
+          state.shortVideo.authorUnlikedTotal = 0;
           state.shortVideo.authorHasMore = false;
         } else {
           state.shortVideo.author = "all";
@@ -818,17 +1431,29 @@ export function createShortVideoPage(deps) {
       });
       tabs.append(button);
     }
-    const actions = isShortVideoAuthorDetailPage() ? document.createElement("div") : renderDeleteSelectionActions(data);
+    const actions = isShortVideoAuthorDetailPage()
+      ? document.createElement("div")
+      : state.shortVideo.source === "following" && isShortVideoAuthorIndexPage()
+        ? renderFollowingAuthorControls()
+        : renderDeleteSelectionActions(data);
     const total = document.createElement("div");
     total.className = "short-video-home-total";
     if (isShortVideoAuthorIndexPage()) {
       const loadedCount = state.shortVideo.authors.length;
       const authorTotal = state.shortVideo.authorTotal;
-      total.textContent = state.shortVideo.loading
-        ? "正在读取作者"
-        : state.shortVideo.authorHasMore
-          ? `已显示 ${formatNumber(loadedCount)} / ${formatNumber(authorTotal)} 位作者`
-          : `${formatNumber(authorTotal || loadedCount)} 位作者`;
+      if (state.shortVideo.source === "following") {
+        const scopeTotal = state.shortVideo.authorScopeTotal || authorTotal;
+        const unlikedTotal = state.shortVideo.authorUnlikedTotal;
+        total.textContent = state.shortVideo.loading
+          ? "正在读取关注账号"
+          : `关注 ${formatNumber(scopeTotal)} · 未点赞 ${formatNumber(unlikedTotal)}${state.shortVideo.authorHasMore ? ` · 已显示 ${formatNumber(loadedCount)}` : ""}`;
+      } else {
+        total.textContent = state.shortVideo.loading
+          ? "正在读取作者"
+          : state.shortVideo.authorHasMore
+            ? `已显示 ${formatNumber(loadedCount)} / ${formatNumber(authorTotal)} 位作者`
+            : `${formatNumber(authorTotal || loadedCount)} 位作者`;
+      }
     } else if (isShortVideoAuthorDetailPage()) {
       total.textContent = `${formatNumber(data.total || 0)} 条作品`;
     } else if (
@@ -933,6 +1558,58 @@ export function createShortVideoPage(deps) {
     return label;
   }
 
+  function renderFollowingAuthorControls() {
+    const wrap = document.createElement("div");
+    wrap.className = "short-video-delete-actions short-video-following-controls";
+    const label = document.createElement("label");
+    label.className = "short-video-sort-control";
+    const text = document.createElement("span");
+    text.textContent = "排序";
+    const select = document.createElement("select");
+    select.className = "short-video-sort-select";
+    select.setAttribute("aria-label", "我的关注排序");
+    for (const item of [
+      ["followed", "最近关注"],
+      ["count", "视频数量"],
+      ["liked", "喜欢视频数"]
+    ]) {
+      const option = document.createElement("option");
+      option.value = item[0];
+      option.textContent = item[1];
+      select.append(option);
+    }
+    select.value = normalizeShortVideoAuthorSort(state.shortVideo.authorSort);
+    select.addEventListener("change", () => {
+      const nextSort = normalizeShortVideoAuthorSort(select.value);
+      if (nextSort === state.shortVideo.authorSort) return;
+      state.shortVideo.authorSort = nextSort;
+      reloadFollowingAuthors();
+    });
+    label.append(text, select);
+
+    const unlikedOnly = state.shortVideo.authorFilter === "unliked";
+    const filter = document.createElement("button");
+    filter.type = "button";
+    filter.className = "short-video-delete-tool short-video-following-unliked";
+    filter.classList.toggle("is-active", unlikedOnly);
+    filter.setAttribute("aria-pressed", String(unlikedOnly));
+    filter.textContent = `只看未点赞 ${formatNumber(state.shortVideo.authorUnlikedTotal || 0)}`;
+    filter.addEventListener("click", () => {
+      state.shortVideo.authorFilter = unlikedOnly ? "all" : "unliked";
+      reloadFollowingAuthors();
+    });
+    wrap.append(label, filter);
+    return wrap;
+  }
+
+  function reloadFollowingAuthors() {
+    state.shortVideo.authors = [];
+    state.shortVideo.authorTotal = 0;
+    state.shortVideo.authorHasMore = false;
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    loadVideos({ skipRoute: true }).catch(showError);
+  }
+
   function shortVideoDeleteSelection() {
     ensureState();
     return state.shortVideo.deleteSelection;
@@ -1013,7 +1690,7 @@ export function createShortVideoPage(deps) {
     identity.textContent = identityText || "本地作者资料";
     const signature = document.createElement("p");
     signature.className = "short-video-author-page-signature";
-    signature.textContent = String(author.signature || "暂无作者简介").trim();
+    renderAuthorSignature(signature, author.signature, "暂无作者简介");
     const stats = document.createElement("div");
     stats.className = "short-video-author-page-stats";
     for (const [label, value] of [
@@ -1058,9 +1735,68 @@ export function createShortVideoPage(deps) {
     douyin.className = "short-video-author-page-secondary";
     douyin.textContent = "抖音主页";
     douyin.addEventListener("click", () => openAuthorDouyinLink(author));
-    actions.append(follow, douyin);
+    const quickRefresh = document.createElement("button");
+    quickRefresh.type = "button";
+    quickRefresh.className = "short-video-author-page-secondary short-video-author-collector-action";
+    quickRefresh.textContent = "快速刷新";
+    quickRefresh.title = "通过 8765 增量采集最新作品，连续遇到旧作品后快速停止";
+    quickRefresh.addEventListener("click", () => runAuthorCollector(author, "quick", quickRefresh).catch(showError));
+    const fullRefresh = document.createElement("button");
+    fullRefresh.type = "button";
+    fullRefresh.className = "short-video-author-page-secondary short-video-author-collector-action";
+    fullRefresh.textContent = "全部扫描";
+    fullRefresh.title = "完整扫描作者全部作品并更新点赞、评论等统计";
+    fullRefresh.addEventListener("click", () => runAuthorCollector(author, "full", fullRefresh).catch(showError));
+    actions.append(follow, douyin, quickRefresh, fullRefresh);
     head.append(back, avatar, copy, actions);
     return head;
+  }
+
+  async function runAuthorCollector(author = {}, mode = "quick", button) {
+    const secUid = String(author?.secUid || state.shortVideo.author || "").trim();
+    if (!secUid || secUid.startsWith("name:")) {
+      showBrowserToast("当前作者没有可关联的抖音 sec_uid");
+      return;
+    }
+    const actions = button?.closest(".short-video-author-page-actions");
+    const buttons = [...(actions?.querySelectorAll(".short-video-author-collector-action") || [])];
+    const originalText = button?.textContent || (mode === "full" ? "全部扫描" : "快速刷新");
+    buttons.forEach((item) => { item.disabled = true; });
+    button?.setAttribute("aria-busy", "true");
+    if (button) button.textContent = mode === "full" ? "启动扫描" : "启动刷新";
+    try {
+      const result = await api(`/api/short-videos/authors/${encodeURIComponent(secUid)}/collector`, {
+        method: "POST",
+        body: { mode }
+      });
+      const jobId = Number(result?.jobId || 0);
+      if (!jobId) throw new Error("8765 没有返回采集任务编号");
+      showBrowserToast(mode === "full" ? `全部扫描已启动 #${jobId}` : `快速刷新已启动 #${jobId}`);
+      const finalState = await waitForAuthorCollector(secUid, jobId, button);
+      if (finalState?.job?.status === "failed") throw new Error(finalState.job.message || "作者主页采集失败");
+      if (finalState?.job?.status === "stopped") throw new Error(finalState.job.message || "作者主页采集已停止");
+      showBrowserToast(finalState?.job?.message || (mode === "full" ? "全部扫描完成" : "快速刷新完成"));
+      await loadVideos({ skipRoute: true });
+    } finally {
+      buttons.forEach((item) => { item.disabled = false; });
+      button?.removeAttribute("aria-busy");
+      if (button?.isConnected) button.textContent = originalText;
+    }
+  }
+
+  async function waitForAuthorCollector(secUid, jobId, button) {
+    for (let attempt = 0; attempt < 900; attempt += 1) {
+      const data = await api(`/api/short-videos/authors/${encodeURIComponent(secUid)}/collector?jobId=${encodeURIComponent(jobId)}`);
+      const job = data?.job;
+      if (job) {
+        const processed = Math.max(0, Number(job.processed || 0));
+        const total = Math.max(0, Number(job.total || 0));
+        if (button?.isConnected) button.textContent = total ? `${processed}/${total}` : "采集中";
+        if (["complete", "failed", "stopped"].includes(job.status)) return data;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+    }
+    throw new Error("8765 采集任务等待超时，请到采集管理查看");
   }
 
   function renderAuthorWorkspaceToolbar(data = {}) {
@@ -1119,16 +1855,27 @@ export function createShortVideoPage(deps) {
   }
 
   function returnToShortVideoAuthorIndex() {
+    if (authorMentionReturn?.targetSecUid === state.shortVideo.authorPage) {
+      const previous = authorMentionReturn;
+      authorMentionReturn = null;
+      openShortVideoAuthorPage(previous.author, previous.video, { replaceHistory: true });
+      return;
+    }
+    authorMentionReturn = null;
+    const authorIndexSource = ["authors", "following"].includes(state.shortVideo.authorIndexSource)
+      ? state.shortVideo.authorIndexSource
+      : "authors";
     state.shortVideo.authorPage = "";
     state.shortVideo.authorDetail = null;
     state.shortVideo.authorVideo = null;
-    state.shortVideo.source = "authors";
+    state.shortVideo.source = authorIndexSource;
     state.shortVideo.author = "all";
     state.shortVideo.query = "";
     state.shortVideo.topic = "";
     state.shortVideo.sound = "";
     state.shortVideo.soundInfo = null;
     state.shortVideo.media = "all";
+    state.shortVideo.quality = "all";
     state.shortVideo.current = null;
     state.shortVideo.data = null;
     clearShortVideoDeleteSelection();
@@ -1138,18 +1885,21 @@ export function createShortVideoPage(deps) {
       shortVideoAuthorPage: "",
       shortVideoAuthor: "all",
       shortVideoQuery: "",
-      shortVideoSource: "authors"
+      shortVideoSource: authorIndexSource
     });
     loadVideos({ skipRoute: true }).catch(showError);
   }
 
-  function openShortVideoAuthorPage(author = {}, video = {}) {
+  function openShortVideoAuthorPage(author = {}, video = {}, options = {}) {
     const authorId = authorScopeId(video, author);
     if (!authorId) {
       showBrowserToast("没有作者资料");
       return;
     }
     authorPanelReturnFeed = null;
+    if (isShortVideoAuthorIndexPage()) {
+      state.shortVideo.authorIndexSource = state.shortVideo.source;
+    }
     state.shortVideo.authorPage = authorId;
     state.shortVideo.author = authorId;
     state.shortVideo.authorDetail = { ...(video?.author || {}), ...author, secUid: authorId };
@@ -1160,6 +1910,7 @@ export function createShortVideoPage(deps) {
     state.shortVideo.sound = "";
     state.shortVideo.soundInfo = null;
     state.shortVideo.media = "all";
+    state.shortVideo.quality = "all";
     state.shortVideo.current = null;
     state.shortVideo.prevVideo = null;
     state.shortVideo.nextVideo = null;
@@ -1167,7 +1918,8 @@ export function createShortVideoPage(deps) {
     state.shortVideo.nextId = "";
     state.shortVideo.data = null;
     clearShortVideoDeleteSelection();
-    pushRoute({
+    const updateRoute = options.replaceHistory ? replaceRoute : pushRoute;
+    updateRoute({
       view: "shortVideos",
       shortVideoId: "",
       shortVideoAuthorPage: authorId,
@@ -1176,6 +1928,72 @@ export function createShortVideoPage(deps) {
       shortVideoSource: "all"
     });
     loadVideos({ skipRoute: true }).catch(showError);
+  }
+
+  function renderAuthorSignature(target, value, fallback = "") {
+    const text = String(value || fallback || "").trim();
+    target.textContent = "";
+    if (!text) return;
+    const mentionPattern = /@([^\s@，。！？、；：,.!?;:()\[\]{}<>《》【】"'“”‘’]+)/gu;
+    let cursor = 0;
+    let match = mentionPattern.exec(text);
+    while (match) {
+      if (match.index > cursor) target.append(document.createTextNode(text.slice(cursor, match.index)));
+      const mention = match[1];
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "short-video-author-mention";
+      button.textContent = `@${mention}`;
+      button.title = `打开 ${mention} 的作者主页`;
+      button.addEventListener("click", () => openMentionedAuthor(mention, button));
+      target.append(button);
+      cursor = match.index + match[0].length;
+      match = mentionPattern.exec(text);
+    }
+    if (cursor < text.length) target.append(document.createTextNode(text.slice(cursor)));
+  }
+
+  async function openMentionedAuthor(mention, button) {
+    if (button?.getAttribute("aria-busy") === "true") return;
+    button?.setAttribute("aria-busy", "true");
+    try {
+      const author = await resolveShortVideoAuthor(mention);
+      if (!author?.secUid) {
+        showBrowserToast(`本地没有找到 @${mention}`);
+        return;
+      }
+      if (isShortVideoAuthorDetailPage()) {
+        authorMentionReturn = {
+          targetSecUid: author.secUid,
+          author: currentShortVideoAuthorDetail(state.shortVideo.data || {}),
+          video: state.shortVideo.authorVideo || null
+        };
+      }
+      openShortVideoAuthorPage(author);
+    } catch (error) {
+      showBrowserToast(error?.message || `无法打开 @${mention}`);
+    } finally {
+      button?.removeAttribute("aria-busy");
+    }
+  }
+
+  async function resolveShortVideoAuthor(value) {
+    const cacheKey = String(value || "").trim().replace(/^@+\s*/u, "").toLocaleLowerCase("zh-CN");
+    if (!cacheKey) return null;
+    const cached = shortVideoAuthorMentionCache.get(cacheKey);
+    if (cached) {
+      cacheShortVideoAuthorMention(cacheKey, cached);
+      return cached;
+    }
+    const data = await api(`/api/short-videos/authors/resolve?mention=${encodeURIComponent(value)}`);
+    const author = data?.author || null;
+    if (!author) return null;
+    for (const key of [author.name, author.secUid, author.uniqueId, author.shortId]) {
+      const normalizedKey = String(key || "").trim().toLocaleLowerCase("zh-CN");
+      if (normalizedKey) cacheShortVideoAuthorMention(normalizedKey, author);
+    }
+    cacheShortVideoAuthorMention(cacheKey, author);
+    return author;
   }
 
   function renderAuthorIndex() {
@@ -1192,7 +2010,11 @@ export function createShortVideoPage(deps) {
     if (!authors.length) {
       const status = document.createElement("div");
       status.className = "short-video-author-index-status";
-      status.textContent = "还没有作者数据";
+      status.textContent = state.shortVideo.source === "following"
+        ? state.shortVideo.authorFilter === "unliked"
+          ? "没有未点赞的关注账号"
+          : "还没有已关注的作者"
+        : "还没有作者数据";
       wrap.append(status);
       return wrap;
     }
@@ -1209,9 +2031,10 @@ export function createShortVideoPage(deps) {
   }
 
   function sortedShortVideoAuthors() {
-    return [...(state.shortVideo.authors || [])]
-      .filter((author) => author && (author.secUid || author.name))
-      .sort((a, b) => Number(b.count || 0) - Number(a.count || 0) || String(a.name || "").localeCompare(String(b.name || ""), "zh-CN"));
+    const authors = [...(state.shortVideo.authors || [])]
+      .filter((author) => author && (author.secUid || author.name));
+    if (state.shortVideo.source === "following") return authors;
+    return authors.sort((a, b) => Number(b.count || 0) - Number(a.count || 0) || String(a.name || "").localeCompare(String(b.name || ""), "zh-CN"));
   }
 
   function appendVisibleAuthorsIfNeeded(force = false) {
@@ -1226,7 +2049,7 @@ export function createShortVideoPage(deps) {
   }
 
   function isShortVideoAuthorIndexPage() {
-    return !state.shortVideo?.authorPage && state.shortVideo?.source === "authors";
+    return !state.shortVideo?.authorPage && ["authors", "following"].includes(state.shortVideo?.source);
   }
 
   function isShortVideoAuthorDetailPage() {
@@ -1285,51 +2108,26 @@ export function createShortVideoPage(deps) {
   }
 
   function renderAuthorIndexCard(author = {}) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "short-video-author-index-card";
-    button.setAttribute("aria-label", `查看 ${author.name || "未知作者"} 的短视频`);
-    const media = document.createElement("span");
-    media.className = "short-video-author-index-media";
-    const imageUrl = author.avatarUrl || author.fallbackCoverUrl || "";
-    if (imageUrl) {
-      const img = document.createElement("img");
-      img.src = imageUrl;
-      img.alt = author.name || "作者头像";
-      img.loading = "lazy";
-      img.decoding = "async";
-      media.append(img);
-    } else {
-      media.classList.add("is-fallback");
-      media.textContent = initials(author.name || "?");
-    }
-    const name = document.createElement("strong");
-    name.textContent = author.name || "未知作者";
-    const meta = document.createElement("span");
-    meta.className = "short-video-author-index-meta";
-    meta.textContent = `${formatNumber(author.count || 0)} 条视频`;
-    button.append(media, name, meta);
-    if (author.following) {
-      const following = document.createElement("span");
-      following.className = "short-video-author-index-following";
-      following.textContent = "已关注";
-      button.append(following);
-    }
-    button.addEventListener("click", () => {
-      openShortVideoAuthorPage(author);
-    });
-    return button;
+    return shortVideoListCards?.renderAuthorIndexCard(author) || null;
+  }
+
+  function renderSearchUserCard(author = {}) {
+    return shortVideoListCards?.renderSearchUserCard(author) || null;
   }
 
   function resetShortVideoWindow() {
     svStart = 0;
     svEnd = 0;
+    svTotal = 0;
     svGridEl = null;
     svInnerEl = null;
     svReady = false;
     svCardH = 0;
     if (svScrollRaf) window.cancelAnimationFrame(svScrollRaf);
     svScrollRaf = 0;
+    if (svAppendContinuationRaf) window.cancelAnimationFrame(svAppendContinuationRaf);
+    svAppendContinuationRaf = 0;
+    cancelShortVideoWindowExpansion();
     coverLoadObserver?.disconnect?.();
     coverLoadObserver = null;
     if (coverLoadTimer) window.clearTimeout(coverLoadTimer);
@@ -1347,7 +2145,7 @@ export function createShortVideoPage(deps) {
     svRowH = svCardH + SV_ROW_GAP;
   }
 
-  function computeShortVideoWindow(grid, total) {
+  function computeShortVideoWindow(grid, total, bufferRows = SV_BUFFER_ROWS) {
     if (!svCols || !svRowH) measureShortVideoGrid(grid);
     const gridTop = grid.getBoundingClientRect().top + window.scrollY;
     const viewportTop = window.scrollY;
@@ -1355,8 +2153,8 @@ export function createShortVideoPage(deps) {
     const totalRows = Math.ceil(total / svCols) || 1;
     const rawStartRow = Math.max(0, Math.floor((viewportTop - gridTop) / svRowH));
     const rawEndRow = Math.min(totalRows, Math.ceil((viewportBottom - gridTop) / svRowH));
-    const startRow = Math.max(0, rawStartRow - SV_BUFFER_ROWS);
-    const endRow = Math.min(totalRows, rawEndRow + SV_BUFFER_ROWS);
+    const startRow = Math.max(0, rawStartRow - bufferRows);
+    const endRow = Math.min(totalRows, rawEndRow + bufferRows);
     return {
       start: startRow * svCols,
       end: Math.min(total, endRow * svCols),
@@ -1366,35 +2164,72 @@ export function createShortVideoPage(deps) {
   }
 
   function renderShortVideoWindow(force) {
+    const renderStartedAt = Date.now();
     const grid = svGridEl;
     const inner = svInnerEl;
     const videos = shortVideosWithCovers(state.shortVideo?.data?.videos || []);
     const total = videos.length;
     if (!grid || !total) {
       if (grid) grid.style.height = "";
+      svTotal = 0;
       return;
     }
-    if (!svReady) measureShortVideoGrid(grid);
-    const { start, end, startRow, totalRows } = computeShortVideoWindow(grid, total);
-    grid.style.height = `${Math.max(0, totalRows * svRowH - SV_ROW_GAP)}px`;
+    const previousTotal = svTotal;
+    const totalChanged = total !== previousTotal;
+    svTotal = total;
+    const initialWindow = !svReady;
+    if (initialWindow) measureShortVideoGrid(grid);
+    const bufferRows = initialWindow ? SV_INITIAL_BUFFER_ROWS : SV_BUFFER_ROWS;
+    const { start, end, startRow, totalRows } = computeShortVideoWindow(grid, total, bufferRows);
+    const virtualHeight = Math.max(0, totalRows * svRowH - SV_ROW_GAP);
+    grid.style.height = `${virtualHeight}px`;
     if (!inner) return;
-    if (!force && start === svStart && end === svEnd && svReady) return;
+    if (document.documentElement.dataset.shortVideoPerfCapture === "1" && totalChanged) {
+      markShortVideoPerformance("short-video-window-total-changed", {
+        previousTotal,
+        total,
+        totalRows,
+        columns: svCols,
+        rowHeight: svRowH,
+        virtualHeight,
+        start,
+        end
+      });
+    }
+    if (!force && !totalChanged && start === svStart && end === svEnd && svReady) return;
     svStart = start;
     svEnd = end;
     inner.style.transform = `translate3d(0, ${startRow * svRowH}px, 0)`;
     inner.style.gridTemplateColumns = `repeat(${svCols}, minmax(0, 1fr))`;
-    inner.innerHTML = "";
-    coverLoadObserver?.disconnect?.();
-    coverLoadObserver = null;
-    coverLoadQueue.length = 0;
+    const existingCards = new Map(
+      [...inner.children]
+        .filter((card) => card?.dataset?.videoId)
+        .map((card) => [String(card.dataset.videoId), card])
+    );
     const cards = [];
+    let createdCount = 0;
+    let reusedCount = 0;
+    const capturePerformance = document.documentElement.dataset.shortVideoPerfCapture === "1";
+    let cardCreateDurationMs = 0;
     for (let i = start; i < end; i++) {
       const video = videos[i];
       if (!video) continue;
-      const card = renderVideoCard(video, i);
+      const videoId = String(video.id || "");
+      let card = existingCards.get(videoId) || null;
+      if (card?.shortVideoCardRecord !== video) card = null;
+      if (card) {
+        existingCards.delete(videoId);
+        reusedCount += 1;
+      } else {
+        const cardCreateStartedAt = capturePerformance ? globalThis.performance?.now?.() || Date.now() : 0;
+        card = renderVideoCard(video, i);
+        if (capturePerformance) cardCreateDurationMs += (globalThis.performance?.now?.() || Date.now()) - cardCreateStartedAt;
+        createdCount += card ? 1 : 0;
+      }
       if (!card) continue;
       const coverUrl = shortVideoCardCoverUrl(video);
       if (coverUrl && loadedCoverIds.has(video.id)) {
+        rememberLoadedCoverId(video.id);
         const img = card.querySelector("img.short-video-cover-image");
         if (img) {
           img.src = coverUrl;
@@ -1403,25 +2238,55 @@ export function createShortVideoPage(deps) {
           delete img.dataset.src;
         }
       }
-      inner.append(card);
       cards.push(card);
     }
+    const desiredCards = new Set(cards);
+    const domPatchStartedAt = capturePerformance ? globalThis.performance?.now?.() || Date.now() : 0;
+    let removedCount = 0;
+    for (const card of [...inner.children]) {
+      if (desiredCards.has(card)) continue;
+      card.querySelectorAll?.("img.short-video-cover-image")?.forEach?.((img) => coverLoadObserver?.unobserve?.(img));
+      card.remove();
+      removedCount += 1;
+    }
+    cards.forEach((card, index) => {
+      const current = inner.children[index] || null;
+      if (current !== card) inner.insertBefore(card, current);
+    });
+    for (let index = coverLoadQueue.length - 1; index >= 0; index -= 1) {
+      if (!coverLoadQueue[index]?.isConnected) coverLoadQueue.splice(index, 1);
+    }
+    const domPatchDurationMs = capturePerformance
+      ? (globalThis.performance?.now?.() || Date.now()) - domPatchStartedAt
+      : 0;
+    const coverActivationStartedAt = capturePerformance ? globalThis.performance?.now?.() || Date.now() : 0;
     activateShortVideoCoversForNodes(cards);
-    if (!svReady) {
-      const first = cards[0];
-      if (first) {
-        const h = first.getBoundingClientRect().height;
-        const w = first.getBoundingClientRect().width;
-        if (h > 0) {
-          svCardH = h;
-          svRowH = h + SV_ROW_GAP;
-          if (w) svCardW = w;
-          svReady = true;
-          renderShortVideoWindow(true);
-          return;
-        }
-      }
+    const coverActivationDurationMs = capturePerformance
+      ? (globalThis.performance?.now?.() || Date.now()) - coverActivationStartedAt
+      : 0;
+    if (capturePerformance) {
+      markShortVideoPerformance("short-video-window-render", {
+        start,
+        end,
+        created: createdCount,
+        reused: reusedCount,
+        removed: removedCount,
+        initial: initialWindow,
+        bufferRows,
+        cardCreateDurationMs: Math.round(cardCreateDurationMs * 10) / 10,
+        domPatchDurationMs: Math.round(domPatchDurationMs * 10) / 10,
+        coverActivationDurationMs: Math.round(coverActivationDurationMs * 10) / 10,
+        durationMs: Date.now() - renderStartedAt
+      });
+      markShortVideoCacheState();
+    }
+    if (initialWindow) {
+      // Card aspect ratio and metadata height are deterministic CSS values and
+      // are already represented by measureShortVideoGrid(). Reading the first
+      // card here forced layout of the whole freshly inserted window; the live
+      // measurement differed from the estimate by less than half a pixel.
       svReady = true;
+      scheduleShortVideoWindowExpansion();
     }
   }
 
@@ -1436,7 +2301,50 @@ export function createShortVideoPage(deps) {
     }
   }
 
+  function cancelShortVideoWindowExpansion() {
+    if (!svExpandIdle) return;
+    if (typeof window.cancelIdleCallback === "function") window.cancelIdleCallback(svExpandIdle);
+    else window.clearTimeout(svExpandIdle);
+    svExpandIdle = 0;
+  }
+
+  function scheduleShortVideoWindowExpansion() {
+    cancelShortVideoWindowExpansion();
+    const expand = () => {
+      svExpandIdle = 0;
+      if (state.activeView !== "shortVideos" || state.shortVideo?.current || !svGridEl?.isConnected) return;
+      renderShortVideoWindow(true);
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      svExpandIdle = window.requestIdleCallback(expand, { timeout: 180 });
+    } else {
+      svExpandIdle = window.setTimeout(expand, 60);
+    }
+  }
+
+  function isShortVideoViewportOutsideWindow() {
+    if (!svGridEl || !svCols || !svRowH || svEnd <= svStart) return false;
+    const gridTop = svGridEl.getBoundingClientRect().top + window.scrollY;
+    const viewportTop = Math.max(0, window.scrollY - gridTop);
+    const viewportBottom = viewportTop + (window.innerHeight || document.documentElement.clientHeight || 800);
+    const firstVisibleRow = Math.max(0, Math.floor(viewportTop / svRowH));
+    const lastVisibleRow = Math.max(firstVisibleRow, Math.ceil(viewportBottom / svRowH));
+    const renderedStartRow = Math.floor(svStart / svCols);
+    const renderedEndRow = Math.ceil(svEnd / svCols);
+    return firstVisibleRow < renderedStartRow || lastVisibleRow > renderedEndRow;
+  }
+
   function scheduleShortVideoWindowUpdate() {
+    // A scrollbar drag or PageDown can jump beyond the buffered window in one
+    // event. Rebuild before the browser's next paint so the viewport never
+    // exposes the empty virtual-grid spacer. Normal wheel/touch scrolling stays
+    // coalesced to one update per animation frame.
+    if (isShortVideoViewportOutsideWindow()) {
+      if (svScrollRaf) window.cancelAnimationFrame(svScrollRaf);
+      svScrollRaf = 0;
+      updateShortVideoWindowAndLoadMore();
+      return;
+    }
     if (svScrollRaf) return;
     svScrollRaf = window.requestAnimationFrame(() => {
       svScrollRaf = 0;
@@ -1444,132 +2352,19 @@ export function createShortVideoPage(deps) {
     });
   }
 
-  function renderVideoCard(video, index = 0) {
-    const card = document.createElement("article");
-    card.className = "short-video-card";
-    const authorWork = isShortVideoAuthorDetailPage();
-    card.classList.toggle("is-author-work", authorWork);
-    const selection = shortVideoDeleteSelection();
-    const selected = selection.has(String(video.id || ""));
-    const selecting = Boolean(state.shortVideo.deleteMode);
-    card.classList.toggle("is-selecting", selecting);
-    card.classList.toggle("is-selected", selected);
-    const thumb = document.createElement("div");
-    thumb.className = "short-video-thumb";
-    const coverUrl = shortVideoCardCoverUrl(video);
-    if (!coverUrl) return null;
-    const open = document.createElement("button");
-    open.type = "button";
-    open.className = "short-video-thumb-open";
-    open.setAttribute("aria-label", selecting ? `选择 ${video.title || "短视频"}` : video.title || "打开短视频");
-    if (selecting) open.setAttribute("aria-pressed", String(selected));
-    const img = document.createElement("img");
-    img.className = "short-video-cover-image";
-    img.dataset.src = coverUrl;
-    img.dataset.videoId = video.id;
-    img.alt = video.title || "短视频封面";
-    img.loading = index < coverEagerCount ? "eager" : "lazy";
-    img.decoding = "async";
-    img.fetchPriority = index < 8 ? "high" : "low";
-    open.append(img);
-    const like = document.createElement("span");
-    like.className = "short-video-like-badge";
-    like.append(createIcon("heart"), document.createTextNode(formatShortVideoMetric(video, "likes")));
-    applyShortVideoStatsBadgeState(like, video);
-    open.append(like);
-    if (isGalleryPost(video)) {
-      open.append(galleryBadge(video));
-    } else if (!authorWork) {
-      const durationText = formatDuration(video.durationMs);
-      if (durationText) {
-        const duration = document.createElement("span");
-        duration.className = "short-video-duration-badge";
-        duration.textContent = durationText;
-        open.append(duration);
-      }
-    }
-    appendShortVideoWatchBadge(open, video);
-    const selectionBadge = document.createElement("span");
-    selectionBadge.className = "short-video-selection-badge";
-    selectionBadge.append(createIcon("check"));
-    open.append(selectionBadge);
-    open.addEventListener("click", () => {
-      if (state.shortVideo.deleteMode) {
-        toggleShortVideoSelected(video.id);
-        return;
-      }
-      openVideo(video.id).catch(showError);
+  function scheduleShortVideoAppendContinuation() {
+    if (svAppendContinuationRaf) window.cancelAnimationFrame(svAppendContinuationRaf);
+    svAppendContinuationRaf = window.requestAnimationFrame(() => {
+      svAppendContinuationRaf = window.requestAnimationFrame(() => {
+        svAppendContinuationRaf = 0;
+        if (state.activeView !== "shortVideos" || state.shortVideo?.current || !svGridEl?.isConnected) return;
+        updateShortVideoWindowAndLoadMore();
+      });
     });
-    thumb.append(open);
-    const title = document.createElement("div");
-    title.className = "short-video-card-title";
-    title.textContent = cardTitle(video);
-    card.append(thumb, title);
-    if (authorWork) {
-      const meta = document.createElement("div");
-      meta.className = "short-video-card-meta";
-      const date = document.createElement("span");
-      date.textContent = formatDate(video.publishedAt) || "日期未知";
-      const duration = document.createElement("span");
-      duration.textContent = isGalleryPost(video) ? galleryLabel(video) : (formatDuration(video.durationMs) || "-");
-      const comments = document.createElement("span");
-      comments.append(createIcon("comment"), document.createTextNode(formatShortVideoMetric(video, "comments")));
-      meta.append(date, duration, comments);
-      card.append(meta);
-    } else {
-      const subline = document.createElement("div");
-      subline.className = "short-video-card-subline";
-      const authorName = String(video.author?.name || "未知作者").trim() || "未知作者";
-      if (authorScopeId(video, video.author)) {
-        const author = document.createElement("button");
-        author.type = "button";
-        author.className = "short-video-card-author";
-        author.textContent = shortVideoAuthorHandle(authorName);
-        author.title = `查看 ${authorName}`;
-        author.disabled = selecting;
-        author.addEventListener("click", () => openShortVideoAuthorPage(video.author, video));
-        subline.append(author);
-      } else {
-        const author = document.createElement("span");
-        author.className = "short-video-card-author is-static";
-        author.textContent = shortVideoAuthorHandle(authorName);
-        subline.append(author);
-      }
-      if (state.shortVideo.source === "recommended" && video.recommendation?.reason) {
-        const reason = document.createElement("span");
-        reason.className = "short-video-recommend-reason";
-        reason.textContent = video.recommendation.reason;
-        subline.append(reason);
-      }
-      const date = document.createElement("span");
-      date.className = "short-video-card-date";
-      date.textContent = formatDate(video.publishedAt) || "日期未知";
-      subline.append(date);
-      card.append(subline);
-    }
-    return card;
   }
 
-  function appendShortVideoWatchBadge(target, video = {}) {
-    const watchedAt = String(video?.watch?.lastWatchedAt || "").trim();
-    if (!watchedAt) return;
-    const completed = Boolean(video?.watch?.completed);
-    const progressMs = Math.max(0, Number(video?.watch?.progressMs || 0));
-    const durationMs = Math.max(0, Number(video?.durationMs || 0));
-    const ratio = completed
-      ? 1
-      : (durationMs > 0 ? Math.max(0, Math.min(1, progressMs / durationMs)) : 0);
-    const badge = document.createElement("span");
-    badge.className = "short-video-watch-badge";
-    badge.textContent = completed
-      ? "已看完"
-      : (progressMs >= 1000 ? `续播 ${formatSeconds(progressMs / 1000)}` : "看过");
-    const track = document.createElement("span");
-    track.className = "short-video-watch-progress";
-    const fill = document.createElement("span");
-    fill.style.width = `${Math.max(3, Math.round(ratio * 100))}%`;
-    track.append(fill);
-    target.append(badge, track);
+  function renderVideoCard(video, index = 0) {
+    return shortVideoListCards?.renderVideoCard(video, index) || null;
   }
 
   function shortVideoCardCoverUrl(video = {}) {
@@ -1639,21 +2434,13 @@ export function createShortVideoPage(deps) {
 
   function activateShortVideoCoversForNodes(nodes) {
     const observer = ensureShortVideoCoverObserver();
-    const viewportCenter = (window.innerHeight || document.documentElement.clientHeight || 800) / 2;
-    const images = [];
     for (const node of nodes || []) {
       for (const img of node?.querySelectorAll?.("img.short-video-cover-image[data-src]") || []) {
-        const rect = img.getBoundingClientRect();
-        images.push({ img, distance: Math.abs((rect.top + rect.bottom) / 2 - viewportCenter) });
-      }
-    }
-    images.sort((a, b) => a.distance - b.distance);
-    for (const { img, distance } of images) {
-      if (!observer || distance < viewportCenter * 1.35) {
-        img.fetchPriority = "high";
-        queueShortVideoCover(img);
-      } else {
-        observer.observe(img);
+        // Reading every image rect here forced a full style/layout pass before
+        // the first list paint. Eager cards are already known from their
+        // creation index; lazy cards can be classified asynchronously by IO.
+        if (img.loading === "eager" || !observer) queueShortVideoCover(img);
+        else observer.observe(img);
       }
     }
   }
@@ -1663,7 +2450,10 @@ export function createShortVideoPage(deps) {
     if (!coverLoadObserver) {
       coverLoadObserver = new IntersectionObserver((entries) => {
         for (const entry of entries) {
-          if (entry.isIntersecting) queueShortVideoCover(entry.target);
+          if (entry.isIntersecting) {
+            entry.target.fetchPriority = "high";
+            queueShortVideoCover(entry.target);
+          }
         }
       }, { rootMargin: "720px 0px", threshold: 0.01 });
     }
@@ -1702,7 +2492,7 @@ export function createShortVideoPage(deps) {
     img.addEventListener("load", () => {
       img.classList.add("is-loaded");
       const vid = img.dataset.videoId;
-      if (vid) loadedCoverIds.add(vid);
+      if (vid) rememberLoadedCoverId(vid);
     }, { once: true });
     img.addEventListener("error", () => {
       img.classList.add("is-cover-error");
@@ -1853,22 +2643,19 @@ export function createShortVideoPage(deps) {
     const staticBackdropUrl = video.coverUrl || (gallery
       ? galleryImageEntries(video).find((item) => item.type !== "video")?.url || ""
       : "");
-    const useStaticBackdrop = gallery || Boolean(staticBackdropUrl);
-    const backdrop = document.createElement(useStaticBackdrop ? "img" : "video");
+    const backdrop = document.createElement(staticBackdropUrl ? "img" : "div");
     backdrop.className = "short-video-backdrop-video";
-    if (useStaticBackdrop) {
+    if (staticBackdropUrl) {
       backdrop.classList.add("short-video-backdrop-image");
+      backdrop.decoding = "async";
+      backdrop.loading = ghost ? "lazy" : "eager";
+      backdrop.fetchPriority = ghost ? "low" : "high";
       backdrop.src = staticBackdropUrl;
       backdrop.alt = "";
       backdrop.setAttribute("aria-hidden", "true");
     } else {
-      backdrop.src = video.streamUrl;
-      backdrop.muted = true;
-      backdrop.playsInline = true;
-      backdrop.loop = true;
-      backdrop.preload = ghost ? "metadata" : "auto";
-      if (video.coverUrl) backdrop.poster = video.coverUrl;
-      if (!ghost) window.requestAnimationFrame(() => backdrop.play().catch(() => {}));
+      backdrop.classList.add("is-empty");
+      backdrop.setAttribute("aria-hidden", "true");
     }
 
     const stage = document.createElement("div");
@@ -1883,16 +2670,45 @@ export function createShortVideoPage(deps) {
     if (video.coverUrl) {
       stage.style.setProperty("--short-video-cover", `url(${JSON.stringify(video.coverUrl)})`);
     }
+    let firstFramePoster = null;
+    if (!gallery && video.coverUrl) {
+      firstFramePoster = document.createElement("img");
+      firstFramePoster.className = "short-video-first-frame-poster";
+      firstFramePoster.src = video.coverUrl;
+      firstFramePoster.alt = "";
+      firstFramePoster.decoding = "async";
+      firstFramePoster.loading = ghost ? "lazy" : "eager";
+      firstFramePoster.setAttribute("aria-hidden", "true");
+      stage.append(firstFramePoster);
+    }
     let player = null;
     let syncPlayToggle = () => {};
     if (gallery) {
       stage.append(renderGalleryPlayer(video, { ghost, stage, railGetter: () => rail }));
     } else {
-      player = document.createElement("video");
+      player = ghost ? null : takePrewarmedShortVideoPlayer(video);
+      const reusedPrewarmedPlayer = Boolean(player);
+      if (!player) player = document.createElement("video");
       player.className = "short-video-player";
       if (ghost) player.classList.add("is-ghost");
-      player.src = video.streamUrl;
-      player.dataset.streamUrl = video.streamUrl;
+      player.removeAttribute("aria-hidden");
+      player.removeAttribute("tabindex");
+      // Loading policy must be applied before src. Setting src first lets the
+      // browser start both off-screen reels with its default `auto` preload,
+      // which can compete with the current video's first range request.
+      player.preload = ghost ? "none" : "auto";
+      player.fetchPriority = ghost ? "low" : "high";
+      player.setAttribute("fetchpriority", ghost ? "low" : "high");
+      const playbackUrl = shortVideoPlaybackUrl(video);
+      if (player.dataset.streamUrl !== playbackUrl) {
+        delete player.dataset.shortVideoFrameReady;
+        delete player.dataset.shortVideoFrameReadyAt;
+        player.src = playbackUrl;
+      }
+      player.dataset.streamUrl = playbackUrl;
+      player.dataset.videoId = String(video?.id || "");
+      player.dataset.shortVideoSlot = slot;
+      player.dataset.shortVideoAttachedAt = String(Date.now());
       if (video.coverUrl) player.poster = video.coverUrl;
       player.controls = false;
       player.autoplay = !ghost;
@@ -1901,30 +2717,86 @@ export function createShortVideoPage(deps) {
       player.playbackRate = normalizePlaybackRate(state.shortVideo.playbackRate);
       player.playsInline = true;
       player.loop = true;
-      player.preload = ghost ? "none" : "auto";
       let firstFramePromise = null;
+      let firstFrameAttempts = 0;
+      let firstFrameRetryTimer = 0;
+      const mediaEvents = new Set();
+      const markMediaEvent = (eventName) => {
+        if (mediaEvents.has(eventName)) return;
+        mediaEvents.add(eventName);
+        markShortVideoPerformance(`video-${eventName}`, {
+          videoId: String(video?.id || ""),
+          slot: String(player.dataset.shortVideoSlot || slot),
+          ghost: player.classList.contains("is-ghost"),
+          readyState: Number(player.readyState || 0),
+          networkState: Number(player.networkState || 0),
+          currentTime: Number(player.currentTime || 0),
+          prewarmed: reusedPrewarmedPlayer
+        });
+      };
+      markShortVideoPerformance("video-player-attached", {
+        videoId: String(video?.id || ""),
+        slot,
+        ghost,
+        prewarmed: reusedPrewarmedPlayer,
+        readyState: Number(player.readyState || 0)
+      });
       const revealVideoFrame = () => {
         stage.classList.remove("is-video-loading", "is-video-buffering", "is-video-error");
         stage.classList.add("is-video-ready");
         stage.setAttribute("aria-busy", "false");
         if (!player.dataset.shortVideoMediaReadyAt) player.dataset.shortVideoMediaReadyAt = String(Date.now());
+        markShortVideoPerformance("video-first-frame-revealed", {
+          videoId: String(video?.id || ""),
+          slot: String(player.dataset.shortVideoSlot || slot),
+          ghost: player.classList.contains("is-ghost"),
+          readyState: Number(player.readyState || 0),
+          currentTime: Number(player.currentTime || 0),
+          prewarmed: reusedPrewarmedPlayer,
+          attempts: firstFrameAttempts,
+          attachedDurationMs: Date.now() - Number(player.dataset.shortVideoAttachedAt || Date.now())
+        });
+        if (!player.classList.contains("is-ghost") && isCurrentShortVideo(video)) {
+          scheduleShortVideoPlaybackSettingsWarmup();
+        }
         applyVideoOrientation(panel, stage, player.videoWidth, player.videoHeight);
       };
       const markVideoReady = () => {
         if (stage.classList.contains("is-video-ready") || firstFramePromise) return;
-        firstFramePromise = waitForVideoFirstFrame(player, 420).then((ready) => {
+        firstFrameAttempts += 1;
+        firstFramePromise = waitForVideoFirstFrame(player, ghost ? 1200 : SHORT_VIDEO_FIRST_FRAME_TIMEOUT_MS).then((ready) => {
           firstFramePromise = null;
           if (!player.isConnected || stage.classList.contains("is-video-ready")) return;
-          if (!ready && player.readyState < 2) return;
+          if (!ready) {
+            if (!player.requestVideoFrameCallback && player.readyState >= 2) {
+              revealVideoFrame();
+              return;
+            }
+            if (!player.error && firstFrameAttempts < SHORT_VIDEO_FIRST_FRAME_RETRY_LIMIT) {
+              window.clearTimeout(firstFrameRetryTimer);
+              firstFrameRetryTimer = window.setTimeout(markVideoReady, 120);
+            }
+            return;
+          }
           revealVideoFrame();
         });
       };
       player.addEventListener("loadedmetadata", () => {
+        markMediaEvent("loadedmetadata");
         applyVideoOrientation(panel, stage, player.videoWidth, player.videoHeight);
       });
-      player.addEventListener("loadeddata", markVideoReady);
-      player.addEventListener("canplay", markVideoReady);
-      player.addEventListener("playing", markVideoReady);
+      player.addEventListener("loadeddata", () => {
+        markMediaEvent("loadeddata");
+        markVideoReady();
+      });
+      player.addEventListener("canplay", () => {
+        markMediaEvent("canplay");
+        markVideoReady();
+      });
+      player.addEventListener("playing", () => {
+        markMediaEvent("playing");
+        markVideoReady();
+      });
       window.requestAnimationFrame(() => {
         if (player.readyState >= 2) markVideoReady();
       });
@@ -2108,922 +2980,97 @@ export function createShortVideoPage(deps) {
     else panel.setAttribute("aria-hidden", "true");
   }
 
+  function ensureShortVideoGalleryPlayer() {
+    if (shortVideoGalleryPlayerPromise) return shortVideoGalleryPlayerPromise;
+    markShortVideoPerformance("gallery-player-module-start");
+    const moduleUrl = "/modules/short-videos/gallery-player.js?v=20260715-gallery-lazy-04";
+    shortVideoGalleryPlayerPromise = import(moduleUrl).then((module) => {
+      if (typeof module.createShortVideoGalleryPlayer !== "function") {
+        throw new Error("图文播放器模块加载失败");
+      }
+      const render = module.createShortVideoGalleryPlayer({
+        api,
+        applyVideoOrientation,
+        clearPlayerSoundBlocked,
+        createIcon,
+        currentShortVideoVolume,
+        els,
+        formatBytes,
+        galleryImageEntries,
+        isShortVideoGestureClickBlocked,
+        isShortVideoKeyboardControl,
+        markPlayerSoundBlocked,
+        persistShortVideoWatch,
+        revealShortVideoClearScreen,
+        setIconButton,
+        SHORT_VIDEO_DOUBLE_TAP_WINDOW_MS,
+        SHORT_VIDEO_GALLERY_ADVANCE_MS,
+        SHORT_VIDEO_GALLERY_GESTURE_HINT_KEY,
+        SHORT_VIDEO_GALLERY_GESTURE_HINT_MS,
+        showBrowserToast,
+        showHeartBurst,
+        state,
+        toggleShortVideoAction,
+        wasClearScreenJustRevealed,
+        writeMutedPreference
+      });
+      markShortVideoPerformance("gallery-player-module-ready");
+      return render;
+    }).catch((error) => {
+      shortVideoGalleryPlayerPromise = null;
+      markShortVideoPerformance("gallery-player-module-error", {
+        message: String(error?.message || error || "unknown")
+      });
+      throw error;
+    });
+    return shortVideoGalleryPlayerPromise;
+  }
+
   function renderGalleryPlayer(video, options = {}) {
-    const images = galleryImageEntries(video);
     const ghost = Boolean(options.ghost);
     const stage = options.stage;
-    const wrap = document.createElement("div");
-    wrap.className = `short-video-gallery-player${ghost ? " is-ghost" : ""}`;
-    wrap.setAttribute("role", "group");
-    wrap.setAttribute("aria-label", "图文播放器");
-    if (images.length > 1) wrap.setAttribute("aria-description", "左右滑动翻图，上下滑动切换作品");
-    wrap.dataset.galleryIndex = "0";
-    wrap.dataset.galleryRequestedIndex = "0";
-    wrap.dataset.galleryCount = String(images.length);
-    wrap.style.setProperty("--short-video-gallery-advance-duration", `${SHORT_VIDEO_GALLERY_ADVANCE_MS}ms`);
+    const placeholder = document.createElement("div");
+    placeholder.className = `short-video-gallery-player is-loading${ghost ? " is-ghost" : ""}`;
+    placeholder.setAttribute("role", "group");
+    placeholder.setAttribute("aria-label", ghost ? "图文播放器预览" : "正在加载图文播放器");
+    placeholder.setAttribute("aria-busy", String(!ghost));
+    placeholder.dataset.galleryIndex = "0";
+    placeholder.dataset.galleryRequestedIndex = "0";
+    placeholder.dataset.galleryCount = "0";
 
-    const track = document.createElement("div");
-    track.className = "short-video-gallery-track";
+    if (ghost) return placeholder;
 
-    const counter = document.createElement("span");
-    counter.className = "short-video-gallery-counter";
-    counter.setAttribute("role", "status");
-    counter.setAttribute("aria-live", "polite");
-    counter.setAttribute("aria-atomic", "true");
+    const status = document.createElement("div");
+    status.className = "short-video-gallery-load-status is-visible";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    status.textContent = "正在载入图文播放器…";
+    placeholder.append(status);
+    stage?.setAttribute("aria-busy", "true");
+    const startedAt = Date.now();
 
-    const pager = document.createElement("div");
-    pager.className = "short-video-gallery-pager";
-    pager.setAttribute("role", "group");
-    pager.setAttribute("aria-label", "图集翻页");
-
-    const loadStatus = document.createElement("div");
-    loadStatus.className = "short-video-gallery-load-status";
-    loadStatus.setAttribute("aria-hidden", "true");
-    const loadStatusCopy = document.createElement("span");
-    loadStatusCopy.className = "short-video-gallery-load-copy";
-    loadStatusCopy.setAttribute("role", "status");
-    loadStatusCopy.setAttribute("aria-live", "polite");
-    loadStatusCopy.setAttribute("aria-atomic", "true");
-    const loadRetry = document.createElement("button");
-    loadRetry.type = "button";
-    loadRetry.className = "short-video-gallery-load-retry";
-    loadRetry.textContent = "重试";
-    loadRetry.hidden = true;
-    loadStatus.append(loadStatusCopy, loadRetry);
-
-    const gestureHint = document.createElement("div");
-    gestureHint.className = "short-video-gallery-gesture-hint";
-    gestureHint.setAttribute("aria-hidden", "true");
-    gestureHint.textContent = "左右滑动翻图 · 上下滑动切作品";
-
-    const progress = document.createElement("div");
-    progress.className = "short-video-gallery-progress";
-    progress.setAttribute("role", "tablist");
-    progress.setAttribute("aria-label", "图集内容进度");
-    const progressButtons = images.map((item, index) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.dataset.galleryMediaType = item?.type === "video" ? "video" : "image";
-      button.setAttribute("role", "tab");
-      const mediaLabel = item?.type === "video" ? "视频" : "图片";
-      button.setAttribute("aria-label", `查看第 ${index + 1} 项，共 ${images.length} 项，${mediaLabel}`);
-      progress.append(button);
-      return button;
+    ensureShortVideoGalleryPlayer().then((render) => {
+      if (!placeholder.isConnected) return;
+      const player = render(video, options);
+      placeholder.replaceWith(player);
+      stage?.setAttribute("aria-busy", "false");
+      markShortVideoPerformance("gallery-player-mounted", {
+        videoId: String(video?.id || ""),
+        durationMs: Date.now() - startedAt
+      });
+      if (isCurrentShortVideo(video)) syncActiveControlBar();
+    }).catch((error) => {
+      if (!placeholder.isConnected) return;
+      placeholder.classList.remove("is-loading");
+      placeholder.classList.add("is-error");
+      placeholder.setAttribute("aria-busy", "false");
+      stage?.setAttribute("aria-busy", "false");
+      status.classList.add("is-error");
+      status.textContent = error?.message || "图文播放器加载失败";
+      showBrowserToast(status.textContent);
     });
 
-    const centerPlay = document.createElement("button");
-    centerPlay.type = "button";
-    centerPlay.className = "short-video-center-play is-gallery-center-play";
-    centerPlay.tabIndex = -1;
-    centerPlay.setAttribute("aria-hidden", "true");
-    setIconButton(centerPlay, "play", "继续播放图集");
-
-    const previous = document.createElement("button");
-    previous.type = "button";
-    previous.className = "short-video-gallery-nav is-previous";
-    previous.append(createIcon("chevronLeft"));
-    previous.setAttribute("aria-label", "上一项内容");
-
-    const next = document.createElement("button");
-    next.type = "button";
-    next.className = "short-video-gallery-nav is-next";
-    next.append(createIcon("chevronLeft"));
-    next.setAttribute("aria-label", "下一项内容");
-
-    const edgePrevious = document.createElement("button");
-    edgePrevious.type = "button";
-    edgePrevious.className = "short-video-gallery-edge-nav is-previous";
-    edgePrevious.append(createIcon("chevronLeft"));
-    edgePrevious.setAttribute("aria-label", "上一项图集内容");
-    edgePrevious.title = "上一张（←）";
-
-    const edgeNext = document.createElement("button");
-    edgeNext.type = "button";
-    edgeNext.className = "short-video-gallery-edge-nav is-next";
-    edgeNext.append(createIcon("chevronLeft"));
-    edgeNext.setAttribute("aria-label", "下一项图集内容");
-    edgeNext.title = "下一张（→）";
-
-    let currentIndex = 0;
-    let requestedIndex = 0;
-    let currentReady = false;
-    let image = null;
-    let requestToken = 0;
-    let cacheClock = 0;
-    let animationTimer = 0;
-    let boundaryTimer = 0;
-    let loadStatusTimer = 0;
-    let loadStatusHideTimer = 0;
-    let failedLoadIndex = -1;
-    let failedLoadDirection = 0;
-    let dragActive = false;
-    let dragDirection = 0;
-    let dragVisualX = 0;
-    let dragPreviewEntry = null;
-    let dragPreviewToken = 0;
-    let dragSettleTimer = 0;
-    let advanceTimer = 0;
-    let advanceStartedAt = 0;
-    let advanceRemainingMs = SHORT_VIDEO_GALLERY_ADVANCE_MS;
-    let advanceEntry = null;
-    let videoProgressRaf = 0;
-    let galleryVisibilityPaused = false;
-    let galleryUserPaused = false;
-    let backgroundAudio = null;
-    let syncGallerySoundState = () => {};
-    let galleryClickTimer = 0;
-    let captionMetaTimer = 0;
-    let counterMotionTimer = 0;
-    let localSoundPollTimer = 0;
-    let localSoundPollAttempts = 0;
-    let gestureHintTimer = 0;
-    let gestureHintShown = false;
-    const imageCache = new Map();
-
-    const dismissGalleryGestureHint = () => {
-      window.clearTimeout(gestureHintTimer);
-      gestureHintTimer = 0;
-      gestureHint.classList.remove("is-visible");
-    };
-    const maybeShowGalleryGestureHint = () => {
-      if (ghost || gestureHintShown || images.length <= 1 || !window.matchMedia?.("(max-width: 680px)")?.matches) return;
-      let alreadySeen = false;
-      try {
-        alreadySeen = window.sessionStorage?.getItem(SHORT_VIDEO_GALLERY_GESTURE_HINT_KEY) === "1";
-      } catch {}
-      if (alreadySeen) return;
-      gestureHintShown = true;
-      try {
-        window.sessionStorage?.setItem(SHORT_VIDEO_GALLERY_GESTURE_HINT_KEY, "1");
-      } catch {}
-      window.requestAnimationFrame(() => gestureHint.classList.add("is-visible"));
-      gestureHintTimer = window.setTimeout(dismissGalleryGestureHint, SHORT_VIDEO_GALLERY_GESTURE_HINT_MS);
-    };
-
-    const createGalleryImage = (index) => {
-      const mediaType = images[index]?.type === "video" ? "video" : "image";
-      const element = document.createElement(mediaType === "video" ? "video" : "img");
-      element.className = "short-video-gallery-image";
-      if (mediaType === "video") {
-        element.muted = true;
-        element.playsInline = true;
-        element.preload = ghost ? "metadata" : "auto";
-        element.setAttribute("aria-label", `${video.title || "图文作品"}，第 ${index + 1} 项视频，共 ${images.length} 项`);
-      } else {
-        element.alt = `${video.title || "图文作品"}，第 ${index + 1} 张，共 ${images.length} 张`;
-        element.decoding = "async";
-      }
-      element.draggable = false;
-      element.dataset.galleryImageIndex = String(index);
-      element.dataset.galleryMediaType = mediaType;
-      return element;
-    };
-    const loadImage = (index) => {
-      const cached = imageCache.get(index);
-      if (cached) {
-        cached.lastUsed = ++cacheClock;
-        return cached;
-      }
-      const element = createGalleryImage(index);
-      const entry = {
-        index,
-        mediaType: images[index]?.type === "video" ? "video" : "image",
-        image: element,
-        status: "loading",
-        cancelled: false,
-        lastUsed: ++cacheClock,
-        promise: null,
-        cancel: () => {}
-      };
-      entry.promise = new Promise((resolve) => {
-        let settled = false;
-        const finish = async (ready) => {
-          if (settled) return;
-          settled = true;
-          element.removeEventListener(entry.mediaType === "video" ? "canplay" : "load", handleLoad);
-          element.removeEventListener("error", handleError);
-          if (ready && entry.mediaType === "image" && !entry.cancelled && typeof element.decode === "function") {
-            try {
-              await element.decode();
-            } catch {
-              // The load event still proves the image can be displayed.
-            }
-          }
-          if (entry.cancelled) {
-            resolve(null);
-            return;
-          }
-          entry.status = ready ? "ready" : "error";
-          if (!ready && imageCache.get(index) === entry) imageCache.delete(index);
-          resolve(ready ? entry : null);
-        };
-        const handleLoad = () => finish(true);
-        const handleError = () => finish(false);
-        entry.cancel = () => {
-          if (settled) return;
-          entry.cancelled = true;
-          element.removeEventListener(entry.mediaType === "video" ? "canplay" : "load", handleLoad);
-          element.removeEventListener("error", handleError);
-          element.pause?.();
-          element.removeAttribute("src");
-          settled = true;
-          resolve(null);
-        };
-        element.addEventListener(entry.mediaType === "video" ? "canplay" : "load", handleLoad, { once: true });
-        element.addEventListener("error", handleError, { once: true });
-        element.src = images[index].url;
-        if (entry.mediaType === "video") {
-          element.load?.();
-          if (element.readyState >= 3) Promise.resolve().then(handleLoad);
-        } else if (element.complete && element.naturalWidth) {
-          Promise.resolve().then(handleLoad);
-        }
-      });
-      imageCache.set(index, entry);
-      return entry;
-    };
-    const releaseEntry = (entry) => {
-      if (!entry || entry.image === image) return false;
-      entry.cancelled = true;
-      entry.cancel?.();
-      entry.image.pause?.();
-      entry.image.removeAttribute("src");
-      if (imageCache.get(entry.index) === entry) imageCache.delete(entry.index);
-      return true;
-    };
-    const trimImageCache = (keepIndexes = new Set()) => {
-      const protectedIndexes = new Set([currentIndex, requestedIndex, ...keepIndexes]);
-      const candidates = [...imageCache.values()]
-        .filter((entry) => !protectedIndexes.has(entry.index) && entry.image !== image)
-        .sort((a, b) => a.lastUsed - b.lastUsed);
-      while (imageCache.size > 7 && candidates.length) releaseEntry(candidates.shift());
-    };
-    const resolveGalleryIndex = (index) => {
-      if (!images.length) return 0;
-      return ((Number(index) % images.length) + images.length) % images.length;
-    };
-    const preloadAround = (index, direction = 0) => {
-      const offsets = direction > 0 ? [1, 2, -1] : (direction < 0 ? [-1, -2, 1] : [-1, 1, -2, 2]);
-      const preloadIndexes = [...new Set(offsets
-        .map((offset) => resolveGalleryIndex(index + offset))
-        .filter((item) => item !== index))];
-      preloadIndexes.forEach((item) => loadImage(item));
-      trimImageCache(new Set([index, ...preloadIndexes]));
-    };
-    const hideLoadStatus = () => {
-      window.clearTimeout(loadStatusTimer);
-      window.clearTimeout(loadStatusHideTimer);
-      wrap.classList.remove("is-image-loading");
-      wrap.setAttribute("aria-busy", "false");
-      loadStatus.classList.remove("is-visible", "is-error");
-      loadStatus.setAttribute("aria-hidden", "true");
-      loadStatusCopy.textContent = "";
-      loadRetry.hidden = true;
-      failedLoadIndex = -1;
-      failedLoadDirection = 0;
-    };
-    const showLoadStatus = (index) => {
-      window.clearTimeout(loadStatusTimer);
-      window.clearTimeout(loadStatusHideTimer);
-      wrap.classList.add("is-image-loading");
-      wrap.setAttribute("aria-busy", "true");
-      loadStatus.classList.remove("is-visible", "is-error");
-      loadStatus.setAttribute("aria-hidden", "true");
-      loadRetry.hidden = true;
-      loadStatusCopy.textContent = currentReady && currentIndex !== index
-        ? `正在载入 ${index + 1}/${images.length}，当前仍显示 ${currentIndex + 1}/${images.length}`
-        : `正在载入 ${index + 1}/${images.length}`;
-      loadStatusTimer = window.setTimeout(() => {
-        if (requestedIndex === index && (!currentReady || currentIndex !== index)) {
-          loadStatus.setAttribute("aria-hidden", "false");
-          loadStatus.classList.add("is-visible");
-        }
-      }, 120);
-    };
-    const showLoadError = (index, direction = 0) => {
-      window.clearTimeout(loadStatusTimer);
-      window.clearTimeout(loadStatusHideTimer);
-      wrap.classList.remove("is-image-loading");
-      wrap.setAttribute("aria-busy", "false");
-      failedLoadIndex = index;
-      failedLoadDirection = direction || Math.sign(index - currentIndex);
-      requestedIndex = currentIndex;
-      syncRequestedUi();
-      loadStatusCopy.textContent = currentReady
-        ? `第 ${index + 1} 项暂时无法载入，仍显示 ${currentIndex + 1}/${images.length}`
-        : `第 ${index + 1} 项暂时无法载入`;
-      loadRetry.hidden = false;
-      loadRetry.setAttribute("aria-label", `重试载入第 ${index + 1} 项`);
-      loadStatus.setAttribute("aria-hidden", "false");
-      loadStatus.classList.add("is-visible", "is-error");
-    };
-    const animateImage = (direction) => {
-      window.clearTimeout(animationTimer);
-      if (!image) return;
-      image.classList.remove("is-entering-next", "is-entering-previous");
-      if (!direction || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return;
-      image.getBoundingClientRect();
-      image.classList.add(direction > 0 ? "is-entering-next" : "is-entering-previous");
-      animationTimer = window.setTimeout(() => {
-        image.classList.remove("is-entering-next", "is-entering-previous");
-      }, 260);
-    };
-    const showBoundary = (direction) => {
-      window.clearTimeout(boundaryTimer);
-      wrap.classList.remove("is-boundary-start", "is-boundary-end");
-      wrap.classList.add(direction < 0 ? "is-boundary-start" : "is-boundary-end");
-      boundaryTimer = window.setTimeout(() => {
-        wrap.classList.remove("is-boundary-start", "is-boundary-end");
-      }, 280);
-    };
-    const syncGalleryCaptionState = (direction = 0) => {
-      const caption = stage?.closest?.(".short-video-reel-panel")?.querySelector?.(".short-video-caption");
-      const captionMeta = caption?.querySelector?.(".short-video-caption-meta");
-      if (!caption || !captionMeta) return;
-      caption.dataset.galleryIndex = String(currentIndex);
-      captionMeta.textContent = [
-        `图集 · ${currentIndex + 1}/${images.length}`,
-        formatBytes(video.size || 0)
-      ].filter(Boolean).join(" · ");
-      captionMeta.classList.remove("is-page-next", "is-page-previous");
-      window.clearTimeout(captionMetaTimer);
-      if (!direction || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return;
-      captionMeta.getBoundingClientRect();
-      captionMeta.classList.add(direction > 0 ? "is-page-next" : "is-page-previous");
-      captionMetaTimer = window.setTimeout(() => {
-        captionMeta.classList.remove("is-page-next", "is-page-previous");
-      }, 220);
-    };
-    const syncCommittedUi = (direction = 0) => {
-      const current = images[currentIndex];
-      counter.textContent = `${currentIndex + 1}/${images.length}`;
-      counter.setAttribute("aria-label", `第 ${currentIndex + 1} 项，共 ${images.length} 项`);
-      counter.classList.remove("is-page-next", "is-page-previous");
-      window.clearTimeout(counterMotionTimer);
-      if (direction && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
-        counter.getBoundingClientRect();
-        counter.classList.add(direction > 0 ? "is-page-next" : "is-page-previous");
-        counterMotionTimer = window.setTimeout(() => {
-          counter.classList.remove("is-page-next", "is-page-previous");
-        }, 220);
-      }
-      wrap.dataset.galleryIndex = String(currentIndex);
-      wrap.classList.toggle("is-gallery-video-item", current?.type === "video");
-      progressButtons.forEach((button, itemIndex) => {
-        const active = itemIndex === currentIndex;
-        button.classList.toggle("active", active);
-        button.classList.toggle("is-past", itemIndex < currentIndex);
-        button.setAttribute("aria-selected", String(active));
-        if (active) button.setAttribute("aria-current", "true");
-        else button.removeAttribute("aria-current");
-      });
-      if (current) stage?.style.setProperty("--short-video-cover", `url(${JSON.stringify(current.url)})`);
-      syncGalleryCaptionState(direction);
-    };
-    const restartProgressTiming = () => {
-      const activeButton = progressButtons[currentIndex];
-      if (!activeButton) return;
-      activeButton.style.setProperty("--short-video-gallery-media-progress", "0");
-      activeButton.classList.remove("active");
-      activeButton.getBoundingClientRect();
-      activeButton.classList.add("active");
-    };
-    const syncRequestedUi = () => {
-      wrap.dataset.galleryRequestedIndex = String(requestedIndex);
-      previous.disabled = images.length <= 1;
-      next.disabled = images.length <= 1;
-      edgePrevious.disabled = images.length <= 1;
-      edgeNext.disabled = images.length <= 1;
-    };
-    const stopVideoProgress = () => {
-      if (videoProgressRaf) window.cancelAnimationFrame(videoProgressRaf);
-      videoProgressRaf = 0;
-    };
-    const updateVideoProgress = (entry) => {
-      if (!entry || entry.mediaType !== "video") return 0;
-      const clip = entry.image;
-      const duration = Math.max(0, Number(clip.duration || 0));
-      const currentTime = Math.max(0, Number(clip.currentTime || 0));
-      const ratio = duration > 0 ? Math.max(0, Math.min(1, currentTime / duration)) : 0;
-      progressButtons[entry.index]?.style.setProperty("--short-video-gallery-media-progress", String(ratio));
-      wrap.dataset.galleryVideoProgress = ratio.toFixed(4);
-      return ratio;
-    };
-    const startVideoProgress = (entry) => {
-      stopVideoProgress();
-      if (!entry || entry.mediaType !== "video") {
-        delete wrap.dataset.galleryVideoProgress;
-        return;
-      }
-      const tick = () => {
-        videoProgressRaf = 0;
-        updateVideoProgress(entry);
-        if (!wrap.isConnected
-          || currentIndex !== entry.index
-          || entry.image.paused
-          || entry.image.ended
-          || galleryTimingPaused()) return;
-        videoProgressRaf = window.requestAnimationFrame(tick);
-      };
-      tick();
-    };
-    const clearAdvance = (options = {}) => {
-      window.clearTimeout(advanceTimer);
-      advanceTimer = 0;
-      advanceStartedAt = 0;
-      stopVideoProgress();
-      if (options.detachVideo !== false && image?.tagName === "VIDEO") {
-        image.onended = null;
-        delete wrap.dataset.galleryVideoProgress;
-      }
-      if (options.reset !== false) {
-        advanceRemainingMs = SHORT_VIDEO_GALLERY_ADVANCE_MS;
-        advanceEntry = null;
-      }
-    };
-    const galleryTimingPaused = () => galleryVisibilityPaused || galleryUserPaused;
-    const syncGalleryPlaybackState = () => {
-      const paused = galleryTimingPaused();
-      wrap.classList.toggle("is-gallery-timing-paused", paused);
-      wrap.dataset.galleryPlaybackPaused = galleryUserPaused ? "1" : "0";
-      stage?.classList.toggle("is-paused", galleryUserPaused);
-      const centerVisible = Boolean(galleryUserPaused && currentReady && !ghost);
-      centerPlay.classList.toggle("is-visible", centerVisible);
-      centerPlay.tabIndex = centerVisible ? 0 : -1;
-      centerPlay.setAttribute("aria-hidden", String(!centerVisible));
-      els.workGrid?.querySelector?.(".short-video-control-bar.is-gallery")?.shortVideoSync?.();
-    };
-    const startAdvance = (entry, options = {}) => {
-      if (!entry || ghost || !wrap.isConnected || galleryTimingPaused() || document.hidden) return;
-      if (entry.mediaType === "video") {
-        const clip = entry.image;
-        if (options.restartVideo !== false) clip.currentTime = 0;
-        clip.muted = true;
-        clip.onended = () => {
-          updateVideoProgress(entry);
-          if (images.length > 1 && wrap.isConnected && currentIndex === entry.index) move(1);
-        };
-        clip.play?.().catch(() => {}).finally(() => startVideoProgress(entry));
-        return;
-      }
-      advanceStartedAt = Date.now();
-      advanceTimer = window.setTimeout(() => {
-        advanceTimer = 0;
-        advanceStartedAt = 0;
-        if (wrap.isConnected && currentIndex === entry.index) move(1);
-      }, Math.max(0, advanceRemainingMs));
-    };
-    const scheduleAdvance = (entry) => {
-      clearAdvance();
-      if (!entry) return;
-      advanceEntry = entry;
-      galleryVisibilityPaused = document.hidden;
-      syncGalleryPlaybackState();
-      restartProgressTiming();
-      startAdvance(entry);
-    };
-    const pauseAutoAdvance = (reason = "visibility") => {
-      const wasPaused = galleryTimingPaused();
-      if (reason === "user") galleryUserPaused = true;
-      else galleryVisibilityPaused = true;
-      if (!wasPaused && advanceTimer && advanceStartedAt) {
-        advanceRemainingMs = Math.max(0, advanceRemainingMs - (Date.now() - advanceStartedAt));
-      }
-      if (!wasPaused) {
-        clearAdvance({ reset: false, detachVideo: false });
-        if (advanceEntry?.mediaType === "video") advanceEntry.image.pause?.();
-      }
-      if (reason === "user") backgroundAudio?.pause?.();
-      syncGalleryPlaybackState();
-      if (reason === "user") stage?.closest?.(".short-video-browser")?.shortVideoRevealControls?.(1900);
-    };
-    const resumeAutoAdvance = (reason = "visibility") => {
-      if (reason === "user") galleryUserPaused = false;
-      else galleryVisibilityPaused = false;
-      syncGalleryPlaybackState();
-      if (galleryTimingPaused()) return;
-      const entry = advanceEntry;
-      if (!entry || entry.index !== currentIndex || !currentReady) return;
-      startAdvance(entry, { restartVideo: false });
-      if (reason === "user" && backgroundAudio) playGallerySound();
-      if (reason === "user") stage?.closest?.(".short-video-browser")?.shortVideoRevealControls?.(1900);
-    };
-    const playGallerySound = async () => {
-      if (!backgroundAudio || galleryTimingPaused()) return false;
-      try {
-        await backgroundAudio.play?.();
-        syncGallerySoundState();
-        return !backgroundAudio.paused;
-      } catch {
-        if (!state.shortVideo.muted) markPlayerSoundBlocked(stage);
-        backgroundAudio.muted = true;
-        syncGallerySoundState();
-        try {
-          await backgroundAudio.play?.();
-        } catch {
-          // The environment may block audio playback entirely; keep the blocked state visible.
-        }
-        syncGallerySoundState();
-        return false;
-      }
-    };
-    const restoreGallerySound = async () => {
-      if (!backgroundAudio) return "missing";
-      state.shortVideo.muted = false;
-      writeMutedPreference(false);
-      backgroundAudio.muted = false;
-      backgroundAudio.volume = currentShortVideoVolume();
-      clearPlayerSoundBlocked(stage);
-      syncGallerySoundState();
-      if (galleryTimingPaused()) return "paused";
-      return await playGallerySound() ? "playing" : "blocked";
-    };
-    const toggleGalleryPlayback = () => {
-      if (galleryUserPaused) resumeAutoAdvance("user");
-      else pauseAutoAdvance("user");
-      return galleryUserPaused;
-    };
-    centerPlay.addEventListener("pointerdown", (event) => event.stopPropagation());
-    centerPlay.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (!galleryUserPaused) return;
-      resumeAutoAdvance("user");
-      stage?.focus?.({ preventScroll: true });
-    });
-    centerPlay.addEventListener("dblclick", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-    });
-    const commitImage = (entry, direction = 0, commitOptions = {}) => {
-      const nextImage = entry.image;
-      clearAdvance();
-      if (image && image !== nextImage) {
-        image.onended = null;
-        image.pause?.();
-      }
-      nextImage.className = "short-video-gallery-image";
-      if (entry.mediaType === "image") {
-        nextImage.alt = `${video.title || "图文作品"}，第 ${entry.index + 1} 张，共 ${images.length} 张`;
-      }
-      track.replaceChildren(nextImage);
-      image = nextImage;
-      dragActive = false;
-      dragDirection = 0;
-      dragVisualX = 0;
-      dragPreviewEntry = null;
-      dragPreviewToken += 1;
-      wrap.classList.remove("is-gallery-dragging", "is-gallery-settling");
-      track.style.setProperty("--short-video-gallery-drag-x", "0px");
-      wrap.dataset.galleryDragX = "0";
-      delete wrap.dataset.galleryDragTarget;
-      currentIndex = entry.index;
-      requestedIndex = entry.index;
-      currentReady = true;
-      syncCommittedUi(direction);
-      syncRequestedUi();
-      hideLoadStatus();
-      if (commitOptions.animate !== false) animateImage(direction);
-      applyVideoOrientation(
-        stage?.closest?.(".short-video-reel-panel"),
-        stage,
-        image.videoWidth || image.naturalWidth,
-        image.videoHeight || image.naturalHeight
-      );
-      if (ghost) trimImageCache(new Set([currentIndex]));
-      else preloadAround(currentIndex, direction);
-      scheduleAdvance(entry);
-      if (!direction) maybeShowGalleryGestureHint();
-    };
-    const show = (index, direction = 0) => {
-      if (!images.length) return;
-      if (dragActive || wrap.classList.contains("is-gallery-settling")) return false;
-      const nextIndex = Math.max(0, Math.min(images.length - 1, Number(index) || 0));
-      const resolvedDirection = direction || Math.sign(nextIndex - requestedIndex) || Math.sign(nextIndex - currentIndex);
-      requestedIndex = nextIndex;
-      syncRequestedUi();
-      const token = ++requestToken;
-      if (nextIndex === currentIndex && currentReady) {
-        hideLoadStatus();
-        preloadAround(currentIndex, resolvedDirection);
-        return true;
-      }
-      showLoadStatus(nextIndex);
-      const entry = loadImage(nextIndex);
-      if (ghost) trimImageCache(new Set([nextIndex]));
-      else preloadAround(nextIndex, resolvedDirection);
-      entry.promise.then((readyEntry) => {
-        if (token !== requestToken || requestedIndex !== nextIndex || !wrap.isConnected) return;
-        if (!readyEntry) {
-          showLoadError(nextIndex, resolvedDirection);
-          return;
-        }
-        commitImage(readyEntry, resolvedDirection);
-      });
-      return true;
-    };
-    loadRetry.addEventListener("pointerdown", (event) => event.stopPropagation());
-    loadRetry.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (failedLoadIndex < 0) return;
-      show(failedLoadIndex, failedLoadDirection);
-    });
-    loadRetry.addEventListener("dblclick", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-    });
-    const clearDragPreview = () => {
-      const previewImage = dragPreviewEntry?.image;
-      if (previewImage && previewImage !== image) {
-        previewImage.classList.remove("is-drag-preview", "is-next", "is-previous");
-        previewImage.remove();
-      }
-      dragPreviewEntry = null;
-    };
-    const prepareDragPreview = (direction) => {
-      const token = ++dragPreviewToken;
-      clearDragPreview();
-      dragDirection = direction;
-      const targetIndex = resolveGalleryIndex(currentIndex + direction);
-      wrap.dataset.galleryDragTarget = String(targetIndex);
-      const entry = loadImage(targetIndex);
-      trimImageCache(new Set([currentIndex, targetIndex]));
-      const attach = (readyEntry) => {
-        if (!readyEntry || !dragActive || token !== dragPreviewToken || dragDirection !== direction) return;
-        if (readyEntry.index !== resolveGalleryIndex(currentIndex + direction)) return;
-        const previewImage = readyEntry.image;
-        previewImage.className = `short-video-gallery-image is-drag-preview ${direction > 0 ? "is-next" : "is-previous"}`;
-        dragPreviewEntry = readyEntry;
-        track.append(previewImage);
-      };
-      if (entry.status === "ready") attach(entry);
-      else entry.promise.then(attach);
-    };
-    const startDrag = () => {
-      if (ghost || images.length <= 1 || !currentReady || dragActive || wrap.classList.contains("is-gallery-settling")) return false;
-      window.clearTimeout(dragSettleTimer);
-      clearAdvance();
-      wrap.classList.add("is-gallery-timing-paused");
-      requestToken += 1;
-      requestedIndex = currentIndex;
-      syncRequestedUi();
-      hideLoadStatus();
-      clearDragPreview();
-      dragActive = true;
-      dragDirection = 0;
-      dragVisualX = 0;
-      image?.classList.remove("is-entering-next", "is-entering-previous");
-      wrap.classList.add("is-gallery-dragging");
-      wrap.dataset.galleryDragX = "0";
-      track.style.setProperty("--short-video-gallery-drag-x", "0px");
-      return true;
-    };
-    const updateDrag = (deltaX) => {
-      if (!dragActive) return false;
-      const rawDelta = Number(deltaX || 0);
-      const direction = rawDelta < 0 ? 1 : (rawDelta > 0 ? -1 : 0);
-      if (direction && direction !== dragDirection) prepareDragPreview(direction);
-      const targetIndex = resolveGalleryIndex(currentIndex + direction);
-      const canMove = Boolean(direction && images.length > 1);
-      const width = Math.max(1, wrap.clientWidth || stage?.clientWidth || 1);
-      const bounded = Math.sign(rawDelta) * Math.min(Math.abs(rawDelta), width * 1.06);
-      dragVisualX = canMove ? bounded : rawDelta * .22;
-      track.style.setProperty("--short-video-gallery-drag-x", `${dragVisualX}px`);
-      wrap.dataset.galleryDragX = String(Math.round(dragVisualX));
-      return true;
-    };
-    const settleDrag = (targetX, callback, durationMs = 230) => {
-      dragActive = false;
-      wrap.classList.remove("is-gallery-dragging");
-      wrap.classList.add("is-gallery-settling");
-      const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-      const settleDuration = reducedMotion ? 20 : Math.max(120, Math.min(280, Math.round(Number(durationMs) || 230)));
-      wrap.style.setProperty("--short-video-gallery-settle-duration", `${settleDuration}ms`);
-      wrap.dataset.gallerySettleDuration = String(settleDuration);
-      dragVisualX = Number(targetX || 0);
-      track.style.setProperty("--short-video-gallery-drag-x", `${dragVisualX}px`);
-      wrap.dataset.galleryDragX = String(Math.round(dragVisualX));
-      window.clearTimeout(dragSettleTimer);
-      dragSettleTimer = window.setTimeout(() => {
-        wrap.classList.remove("is-gallery-settling");
-        callback?.();
-        dragVisualX = 0;
-        track.style.setProperty("--short-video-gallery-drag-x", "0px");
-        wrap.dataset.galleryDragX = "0";
-        delete wrap.dataset.galleryDragTarget;
-      }, settleDuration + 10);
-    };
-    const endDrag = (deltaX, velocityX = 0) => {
-      if (!dragActive) return false;
-      const rawDelta = Number(deltaX || dragVisualX || 0);
-      const velocity = Math.max(-2.4, Math.min(2.4, Number(velocityX || 0)));
-      const projectedDelta = rawDelta + velocity * 180;
-      const direction = rawDelta < 0 ? 1 : (rawDelta > 0 ? -1 : (velocity < 0 ? 1 : (velocity > 0 ? -1 : dragDirection)));
-      const targetIndex = resolveGalleryIndex(currentIndex + direction);
-      const canMove = Boolean(direction && images.length > 1);
-      const width = Math.max(1, wrap.clientWidth || stage?.clientWidth || 1);
-      const distanceReady = Math.abs(rawDelta) >= Math.min(120, width * .22);
-      const projectedReady = Math.abs(projectedDelta) >= Math.min(96, width * .18)
-        && Math.sign(projectedDelta) === Math.sign(rawDelta || projectedDelta);
-      const velocityReady = Math.abs(velocity) >= .45
-        && Math.sign(velocity) === Math.sign(rawDelta)
-        && Math.abs(rawDelta) >= 18;
-      const shouldCommit = Boolean(canMove && (distanceReady || projectedReady || velocityReady));
-      const readyEntry = dragPreviewEntry?.index === targetIndex && dragPreviewEntry.status === "ready"
-        ? dragPreviewEntry
-        : null;
-      if (shouldCommit && readyEntry) {
-        const settleX = direction > 0 ? -width : width;
-        const remainingRatio = Math.min(1, Math.abs(settleX - rawDelta) / width);
-        const settleDuration = 220 + remainingRatio * 42 - Math.min(92, Math.abs(velocity) * 58);
-        settleDrag(settleX, () => commitImage(readyEntry, direction, { animate: false }), settleDuration);
-        return true;
-      }
-      const reboundDuration = 148 + Math.min(72, Math.abs(rawDelta) / width * 90) - Math.min(28, Math.abs(velocity) * 18);
-      settleDrag(0, () => {
-        clearDragPreview();
-        dragDirection = 0;
-        if (shouldCommit) show(targetIndex, direction);
-        else scheduleAdvance(imageCache.get(currentIndex));
-      }, reboundDuration);
-      return true;
-    };
-    const cancelDrag = () => {
-      if (!dragActive) return false;
-      settleDrag(0, () => {
-        clearDragPreview();
-        dragDirection = 0;
-        scheduleAdvance(imageCache.get(currentIndex));
-      });
-      return true;
-    };
-    const move = (delta) => {
-      const direction = Math.sign(Number(delta) || 0);
-      if (!direction) return false;
-      const nextIndex = resolveGalleryIndex(requestedIndex + direction);
-      return Boolean(show(nextIndex, direction));
-    };
-    wrap.shortVideoGalleryMove = move;
-    wrap.shortVideoGalleryDragStart = startDrag;
-    wrap.shortVideoGalleryDragMove = updateDrag;
-    wrap.shortVideoGalleryDragEnd = endDrag;
-    wrap.shortVideoGalleryDragCancel = cancelDrag;
-    wrap.shortVideoGalleryPause = pauseAutoAdvance;
-    wrap.shortVideoGalleryResume = resumeAutoAdvance;
-    wrap.shortVideoGalleryTogglePlayback = toggleGalleryPlayback;
-    wrap.shortVideoGalleryIsPaused = () => galleryUserPaused;
-    wrap.shortVideoGalleryPlaySound = playGallerySound;
-    progressButtons.forEach((button, index) => {
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        show(index, Math.sign(index - requestedIndex));
-      });
-      button.addEventListener("pointerdown", (event) => event.stopPropagation());
-    });
-    const stopAndMove = (delta) => (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      move(delta);
-    };
-    previous.addEventListener("click", stopAndMove(-1));
-    next.addEventListener("click", stopAndMove(1));
-    edgePrevious.addEventListener("click", stopAndMove(-1));
-    edgeNext.addEventListener("click", stopAndMove(1));
-    previous.addEventListener("pointerdown", (event) => event.stopPropagation());
-    next.addEventListener("pointerdown", (event) => event.stopPropagation());
-    edgePrevious.addEventListener("pointerdown", (event) => event.stopPropagation());
-    edgeNext.addEventListener("pointerdown", (event) => event.stopPropagation());
-    if (!ghost) {
-      wrap.addEventListener("pointerdown", dismissGalleryGestureHint, { passive: true });
-      window.requestAnimationFrame(() => {
-        persistShortVideoWatch(video, null, { force: true, completed: true });
-      });
-      stage?.addEventListener("dblclick", (event) => {
-        window.clearTimeout(galleryClickTimer);
-        galleryClickTimer = 0;
-        if (wasClearScreenJustRevealed(stage) || isShortVideoGestureClickBlocked(stage)) {
-          event.preventDefault();
-          event.stopPropagation();
-          return;
-        }
-        toggleShortVideoAction(state.shortVideo?.current, "like", options.railGetter?.(), { forceActive: true, silent: true });
-        showHeartBurst(stage, event);
-      });
-      wrap.addEventListener("click", (event) => {
-        if (isShortVideoKeyboardControl(event.target)) return;
-        if (revealShortVideoClearScreen(wrap) || wasClearScreenJustRevealed(wrap)) return;
-        if (isShortVideoGestureClickBlocked(wrap)) return;
-        if (stage?.classList.contains("is-sound-blocked") && backgroundAudio) {
-          window.clearTimeout(galleryClickTimer);
-          galleryClickTimer = 0;
-          restoreGallerySound().then((result) => {
-            if (result === "playing") showBrowserToast("图集音乐已开启");
-            else if (result === "paused") showBrowserToast("图集音乐已开启，继续播放图集后生效");
-            else showBrowserToast("浏览器仍在阻止音乐播放，请再次点击声音按钮");
-          });
-          return;
-        }
-        const browser = wrap.closest(".short-video-browser");
-        if (browser?.dataset?.shortVideoTapReveal === "1") {
-          delete browser.dataset.shortVideoTapReveal;
-          return;
-        }
-        window.clearTimeout(galleryClickTimer);
-        galleryClickTimer = window.setTimeout(() => {
-          galleryClickTimer = 0;
-          toggleGalleryPlayback();
-        }, SHORT_VIDEO_DOUBLE_TAP_WINDOW_MS);
-      });
-    }
-    const initialEntry = loadImage(0);
-    image = initialEntry.image;
-    track.append(image);
-    if (images.length > 1) pager.append(previous, counter, next);
-    else pager.append(counter);
-    wrap.append(track, progress, pager);
-    if (images.length > 1) wrap.append(edgePrevious, edgeNext);
-    wrap.append(centerPlay, loadStatus, gestureHint);
-    const attachLocalBackgroundSound = (sound = video.sound) => {
-      const localSoundUrl = !ghost && sound?.localAvailable ? String(sound.previewUrl || "").trim() : "";
-      if (!localSoundUrl || backgroundAudio) return false;
-      const audio = document.createElement("audio");
-      audio.className = "short-video-player short-video-gallery-audio";
-      audio.src = localSoundUrl;
-      audio.dataset.streamUrl = localSoundUrl;
-      audio.loop = true;
-      audio.autoplay = true;
-      audio.preload = "auto";
-      audio.muted = Boolean(state.shortVideo.muted);
-      audio.volume = currentShortVideoVolume();
-      backgroundAudio = audio;
-      video.sound = sound;
-      if (state.shortVideo?.current?.id === video.id) state.shortVideo.current.sound = sound;
-      wrap.append(audio);
-      syncGallerySoundState = () => {
-        const playing = !audio.paused && !audio.ended;
-        const muted = Boolean(audio.muted || audio.volume <= 0);
-        const blocked = Boolean(stage?.classList.contains("is-sound-blocked"));
-        const soundState = blocked ? "blocked" : (playing ? "playing" : "paused");
-        const audible = Boolean(playing && !muted && !blocked);
-        wrap.dataset.gallerySoundState = soundState;
-        wrap.dataset.gallerySoundMuted = muted ? "1" : "0";
-        const railSound = options.railGetter?.()?.querySelector?.(".short-video-rail-button.is-listen");
-        railSound?.classList.toggle("is-playing", audible);
-        railSound?.classList.toggle("is-muted", muted);
-        railSound?.classList.toggle("is-blocked", blocked);
-        const captionSound = stage?.closest?.(".short-video-reel-panel")?.querySelector?.(".short-video-caption-sound-cover");
-        captionSound?.classList.toggle("is-playing", audible);
-        captionSound?.classList.toggle("is-muted", muted);
-        captionSound?.classList.toggle("is-blocked", blocked);
-        els.workGrid?.querySelector?.(".short-video-control-bar.is-gallery")?.shortVideoSync?.();
-      };
-      audio.addEventListener("play", syncGallerySoundState);
-      audio.addEventListener("pause", syncGallerySoundState);
-      audio.addEventListener("ended", syncGallerySoundState);
-      audio.addEventListener("volumechange", syncGallerySoundState);
-      audio.addEventListener("error", syncGallerySoundState);
-      els.workGrid?.querySelector?.(".short-video-control-bar.is-gallery")?.shortVideoEnableGallerySound?.(sound);
-      window.requestAnimationFrame(() => {
-        if (galleryUserPaused) {
-          syncGallerySoundState();
-          return;
-        }
-        playGallerySound();
-        syncGallerySoundState();
-      });
-      return true;
-    };
-    const scheduleLocalSoundPoll = () => {
-      window.clearTimeout(localSoundPollTimer);
-      if (ghost || backgroundAudio || !video.sound?.previewUrl || localSoundPollAttempts >= 48) return;
-      localSoundPollTimer = window.setTimeout(async () => {
-        localSoundPollTimer = 0;
-        if (!wrap.isConnected || backgroundAudio) return;
-        localSoundPollAttempts += 1;
-        try {
-          const params = new URLSearchParams({
-            source: "all",
-            neighbors: "1",
-            metadata: "0",
-            refresh: String(Date.now())
-          });
-          const data = await api(`/api/short-videos/${encodeURIComponent(video.id)}?${params}`);
-          const sound = data?.video?.sound;
-          if (sound?.localAvailable && sound.previewUrl && attachLocalBackgroundSound(sound)) return;
-        } catch {
-          // The downloader or local sync may still be replacing its database row.
-        }
-        scheduleLocalSoundPoll();
-      }, 15000);
-    };
-    if (!attachLocalBackgroundSound(video.sound)) scheduleLocalSoundPoll();
-    syncCommittedUi();
-    syncRequestedUi();
-    show(0);
-    window.requestAnimationFrame(() => syncGalleryCaptionState(0));
-    return wrap;
+    return placeholder;
   }
 
   function applyVideoOrientation(panel, stage, width, height) {
@@ -3470,7 +3517,11 @@ export function createShortVideoPage(deps) {
     if (!write) {
       write = { inFlight: false, lastSavedAt: 0, lastPayload: null, pending: null };
       shortVideoWatchWrites.set(videoId, write);
+    } else {
+      shortVideoWatchWrites.delete(videoId);
+      shortVideoWatchWrites.set(videoId, write);
     }
+    trimShortVideoWatchWrites(videoId);
     if (!options.force && now - write.lastSavedAt < SHORT_VIDEO_WATCH_SAVE_INTERVAL) return;
     const progressMs = Math.max(0, Math.round(Number(player?.currentTime || 0) * 1000));
     const payload = { progressMs, completed: Boolean(options.completed) };
@@ -3511,6 +3562,7 @@ export function createShortVideoPage(deps) {
       const pending = write.pending;
       write.pending = null;
       if (pending) dispatchShortVideoWatchWrite(video, write, pending);
+      else trimShortVideoWatchWrites();
     });
   }
 
@@ -3843,11 +3895,40 @@ export function createShortVideoPage(deps) {
   function syncShortVideoDisplayModeControl(control) {
     if (!control) return;
     const smartFill = Boolean(state.shortVideo?.smartFill);
-    control.textContent = "智能";
+    const label = smartFill ? "关闭智能适配" : "开启智能适配";
+    if (control.dataset.shortVideoCompact === "true") {
+      setIconButton(control, "clearScreen", label);
+    } else {
+      control.textContent = "智能";
+    }
     control.classList.toggle("active", smartFill);
     control.setAttribute("aria-pressed", String(smartFill));
-    control.setAttribute("aria-label", smartFill ? "关闭智能适配" : "开启智能适配");
+    control.setAttribute("aria-label", label);
     control.title = smartFill ? "关闭屏幕方向智能扩展" : "根据当前屏幕方向扩大展示区域";
+  }
+
+  function shortVideoPlaybackQualityLabel(video) {
+    const actual = video?.actualVideo || {};
+    const width = Math.max(0, Number(actual.width || video?.width || 0));
+    const height = Math.max(0, Number(actual.height || video?.height || 0));
+    const pixels = Math.max(0, Number(actual.pixels || (width * height)));
+    if (pixels >= 8_000_000 || width >= 3840 || height >= 2160) return "超清 4K";
+    if (pixels >= 3_500_000 || width >= 2560 || height >= 1440) return "超清 2K";
+    if (pixels >= 2_000_000 || width >= 1920 || height >= 1080) return "高清 1080P";
+    if (pixels >= 900_000 || width >= 1280 || height >= 720) return "高清 720P";
+    if (pixels > 0) return "标清";
+    return "清晰度";
+  }
+
+  function shortVideoPlaybackQualityDescription(video) {
+    const actual = video?.actualVideo || {};
+    const width = Math.max(0, Number(actual.width || video?.width || 0));
+    const height = Math.max(0, Number(actual.height || video?.height || 0));
+    const bitRate = Math.max(0, Number(actual.bitRate || 0));
+    const parts = [shortVideoPlaybackQualityLabel(video)];
+    if (width && height) parts.push(`${width} × ${height}`);
+    if (bitRate) parts.push(`${(bitRate / 1_000_000).toFixed(1)} Mbps`);
+    return parts.join(" · ");
   }
 
   function toggleShortVideoSmartFill() {
@@ -3927,9 +4008,11 @@ export function createShortVideoPage(deps) {
       const paused = Boolean(gallery?.shortVideoGalleryIsPaused?.());
       setIconButton(play, paused ? "play" : "pause", paused ? "继续播放图集" : "暂停图集");
       const localReady = Boolean(video.sound?.localAvailable && video.sound?.previewUrl);
-      mute.disabled = !localReady;
+      mute.disabled = false;
+      mute.classList.toggle("is-pending", !localReady);
       if (!localReady) {
-        setIconButton(mute, "volumeX", "背景音乐下载中");
+        mute.removeAttribute("aria-pressed");
+        setIconButton(mute, "volumeX", "背景音乐准备中，点击刷新");
         return;
       }
       const player = activePlayer();
@@ -3946,15 +4029,55 @@ export function createShortVideoPage(deps) {
       mute.setAttribute("aria-pressed", String(muted));
       setIconButton(mute, muted ? "volumeX" : "volume2", soundLabel);
     };
-    mute.addEventListener("click", () => {
+    mute.addEventListener("pointerdown", () => {
       const gallery = activeGalleryPlayer();
       const player = activePlayer();
+      const blocked = Boolean(gallery?.closest?.(".short-video-stage")?.classList.contains("is-sound-blocked"));
+      if (!player || (!player.muted && !blocked)) return;
+      mute.dataset.shortVideoSoundRestoredOnPointerDown = "1";
+      gallery?.shortVideoGalleryRestoreSound?.().then((result) => {
+        if (result === "blocked") showBrowserToast("浏览器仍在阻止音乐播放，请再点一次声音按钮");
+        syncSound();
+      });
+    });
+    mute.addEventListener("click", async () => {
+      if (mute.dataset.shortVideoSoundRestoredOnPointerDown === "1") {
+        delete mute.dataset.shortVideoSoundRestoredOnPointerDown;
+        return;
+      }
+      let gallery = activeGalleryPlayer();
+      let player = activePlayer();
+      if (!player) {
+        if (mute.getAttribute("aria-busy") === "true") return;
+        mute.setAttribute("aria-busy", "true");
+        setIconButton(mute, "volumeX", "正在检查背景音乐");
+        const ready = await gallery?.shortVideoGalleryRefreshSound?.();
+        mute.removeAttribute("aria-busy");
+        syncSound();
+        if (!ready) {
+          showBrowserToast("背景音乐还在下载，稍后再试");
+          return;
+        }
+        gallery = activeGalleryPlayer();
+        player = activePlayer();
+        const result = await gallery?.shortVideoGalleryRestoreSound?.();
+        if (result === "blocked") showBrowserToast("浏览器仍在阻止音乐播放，请再点一次声音按钮");
+        syncSound();
+        return;
+      }
+      const blocked = Boolean(gallery?.closest?.(".short-video-stage")?.classList.contains("is-sound-blocked"));
+      if (player.muted || blocked) {
+        const result = await gallery?.shortVideoGalleryRestoreSound?.();
+        if (result === "blocked") showBrowserToast("浏览器仍在阻止音乐播放，请再点一次声音按钮");
+        syncSound();
+        return;
+      }
       if (player && player.paused && !player.muted && !gallery?.shortVideoGalleryIsPaused?.()) {
         gallery?.shortVideoGalleryPlaySound?.();
         syncSound();
         return;
       }
-      toggleActiveMute();
+      await toggleActiveMute();
       const nextPlayer = activePlayer();
       if (nextPlayer && !nextPlayer.muted && !gallery?.shortVideoGalleryIsPaused?.()) {
         gallery?.shortVideoGalleryPlaySound?.();
@@ -4016,23 +4139,49 @@ export function createShortVideoPage(deps) {
     progressWrap.append(progress, seekPreview);
     const autoNext = document.createElement("button");
     autoNext.type = "button";
-    autoNext.className = "short-video-control-auto";
-    autoNext.textContent = "连播";
+    autoNext.className = "short-video-control-toggle short-video-control-auto";
+    autoNext.setAttribute("role", "switch");
+    const autoNextTrack = document.createElement("span");
+    autoNextTrack.className = "short-video-control-switch-track";
+    autoNextTrack.setAttribute("aria-hidden", "true");
+    const autoNextLabel = document.createElement("span");
+    autoNextLabel.textContent = "连播";
+    autoNext.append(autoNextTrack, autoNextLabel);
     autoNext.title = "自动播放下一条";
+    const clearScreen = document.createElement("button");
+    clearScreen.type = "button";
+    clearScreen.className = "short-video-control-toggle short-video-control-clear";
+    clearScreen.setAttribute("role", "switch");
+    const clearScreenTrack = document.createElement("span");
+    clearScreenTrack.className = "short-video-control-switch-track";
+    clearScreenTrack.setAttribute("aria-hidden", "true");
+    const clearScreenLabel = document.createElement("span");
+    clearScreenLabel.textContent = "清屏";
+    clearScreen.append(clearScreenTrack, clearScreenLabel);
+    clearScreen.title = "隐藏播放器界面（J）";
+    const quality = document.createElement("button");
+    quality.type = "button";
+    quality.className = "short-video-control-quality";
+    quality.textContent = shortVideoPlaybackQualityLabel(state.shortVideo?.current);
+    quality.title = "当前本地视频清晰度";
     const rate = document.createElement("button");
     rate.type = "button";
     rate.className = "short-video-control-rate";
-    rate.textContent = formatPlaybackRate(state.shortVideo.playbackRate);
+    rate.textContent = "倍速";
     rate.title = "播放速度";
+    const settings = document.createElement("button");
+    settings.type = "button";
+    settings.className = "short-video-control-icon short-video-control-settings";
+    setIconButton(settings, "more", "更多播放设置");
+    const pip = document.createElement("button");
+    pip.type = "button";
+    pip.className = "short-video-control-icon short-video-control-pip";
+    setIconButton(pip, "pictureInPicture", "画中画");
     const smartFill = document.createElement("button");
     smartFill.type = "button";
-    smartFill.className = "short-video-control-smart-fill";
+    smartFill.className = "short-video-control-icon short-video-control-smart-fill";
+    smartFill.dataset.shortVideoCompact = "true";
     syncShortVideoDisplayModeControl(smartFill);
-    const original = document.createElement("button");
-    original.type = "button";
-    original.className = "short-video-control-original";
-    original.textContent = "原视频";
-    original.title = "打开抖音原视频";
     const mute = document.createElement("button");
     mute.type = "button";
     mute.className = "short-video-control-icon";
@@ -4193,14 +4342,24 @@ export function createShortVideoPage(deps) {
       volumeReadout.textContent = `${volumePercent}%`;
       autoNext.classList.toggle("active", Boolean(state.shortVideo?.autoNext));
       autoNext.setAttribute("aria-pressed", String(Boolean(state.shortVideo?.autoNext)));
+      autoNext.setAttribute("aria-checked", String(Boolean(state.shortVideo?.autoNext)));
       autoNext.setAttribute("aria-label", state.shortVideo?.autoNext ? "关闭连播" : "开启连播");
-      rate.textContent = formatPlaybackRate(state.shortVideo?.playbackRate);
+      const clearScreenActive = Boolean(bar.closest(".short-video-browser")?.classList.contains("is-clear-screen"));
+      clearScreen.classList.toggle("active", clearScreenActive);
+      clearScreen.setAttribute("aria-pressed", String(clearScreenActive));
+      clearScreen.setAttribute("aria-checked", String(clearScreenActive));
+      clearScreen.setAttribute("aria-label", clearScreenActive ? "退出清屏" : "开启清屏");
+      rate.textContent = "倍速";
       rate.setAttribute("aria-label", `播放速度 ${formatPlaybackRate(state.shortVideo?.playbackRate)}`);
+      rate.title = `播放速度：${formatPlaybackRate(state.shortVideo?.playbackRate)}`;
+      quality.textContent = shortVideoPlaybackQualityLabel(state.shortVideo?.current);
+      quality.setAttribute("aria-label", shortVideoPlaybackQualityDescription(state.shortVideo?.current));
       syncShortVideoDisplayModeControl(smartFill);
-      const originalUrl = originalDouyinUrl(state.shortVideo?.current);
-      original.disabled = !originalUrl;
-      original.classList.toggle("is-unavailable", !originalUrl);
-      original.setAttribute("aria-label", originalUrl ? "打开抖音原视频" : "当前视频没有原始链接");
+      const pictureInPictureAvailable = Boolean(player?.requestPictureInPicture && document.pictureInPictureEnabled);
+      const pictureInPictureActive = Boolean(player && document.pictureInPictureElement === player);
+      pip.disabled = !pictureInPictureAvailable;
+      pip.classList.toggle("active", pictureInPictureActive);
+      setIconButton(pip, "pictureInPicture", pictureInPictureActive ? "退出画中画" : "画中画");
       syncProgress(player);
       player.closest(".short-video-stage")?.classList.toggle("is-paused", player.paused);
       syncActivePlaybackMode(player);
@@ -4351,11 +4510,31 @@ export function createShortVideoPage(deps) {
       showBrowserToast(state.shortVideo.autoNext ? "已开启连播" : "已关闭连播");
       sync(true);
     });
+    clearScreen.addEventListener("click", () => {
+      toggleClearScreen();
+      sync(true);
+    });
+    quality.addEventListener("click", () => {
+      showBrowserToast(shortVideoPlaybackQualityDescription(state.shortVideo?.current));
+    });
     rate.addEventListener("click", (event) => {
       showPlaybackSettings(state.shortVideo?.current, { trigger: event.currentTarget, focusSpeed: true });
     });
+    settings.addEventListener("click", (event) => {
+      showPlaybackSettings(state.shortVideo?.current, { trigger: event.currentTarget });
+    });
+    pip.addEventListener("click", async () => {
+      const player = activePlayer();
+      if (!player?.requestPictureInPicture || !document.pictureInPictureEnabled) return;
+      try {
+        if (document.pictureInPictureElement === player) await document.exitPictureInPicture();
+        else await player.requestPictureInPicture();
+      } catch {
+        showBrowserToast("画中画启动失败");
+      }
+      sync(true);
+    });
     smartFill.addEventListener("click", toggleShortVideoSmartFill);
-    original.addEventListener("click", () => openDouyinLink(state.shortVideo?.current));
     full.addEventListener("click", () => toggleShortVideoFullscreen());
     progress.addEventListener("pointerenter", (event) => {
       progressWrap.classList.add("is-hovering");
@@ -4401,7 +4580,10 @@ export function createShortVideoPage(deps) {
         sync(true);
       }
     });
-    bar.append(play, time, progressWrap, controlSpacer, autoNext, rate, smartFill, original, volumeControl, full);
+    const tools = document.createElement("div");
+    tools.className = "short-video-control-tools";
+    tools.append(autoNext, clearScreen, quality, rate, settings, pip, volumeControl, smartFill, full);
+    bar.append(play, time, progressWrap, controlSpacer, tools);
     bar.shortVideoSync = () => {
       sync();
       scheduleProgressLoop();
@@ -4425,12 +4607,22 @@ export function createShortVideoPage(deps) {
       pulseBoundaryStack(direction);
       return;
     }
+    shortVideoAdjacentWarmDirection = direction < 0 ? -1 : 1;
+    const navigationStartedAt = Date.now();
+    const incomingPlayer = adjacentPlayer(direction);
+    markShortVideoPerformance("adjacent-switch-start", {
+      videoId: String(id),
+      direction: Number(direction || 0),
+      frameReady: incomingPlayer?.dataset.shortVideoFrameReady === "1",
+      readyState: Number(incomingPlayer?.readyState || 0)
+    });
     clearPendingPlayerClick();
     closeTransientPlayerControls();
     if (wheelLocked) {
       queuedAdjacentDirection = direction;
       return;
     }
+    shortVideoLastNavigationAt = Date.now();
     const cachedVideo = (direction < 0 ? state.shortVideo.prevVideo : state.shortVideo.nextVideo)
       || cachedShortVideo(id);
     const hasCachedAdjacent = cachedVideo?.id === id;
@@ -4444,12 +4636,29 @@ export function createShortVideoPage(deps) {
     wheelIgnoreUntil = Date.now() + 180;
     window.clearTimeout(wheelResetTimer);
     try {
-      const animationPromise = animateActiveStack(direction, options.motion);
+      const animationPromise = animateActiveStack(direction, {
+        ...(options.motion || {}),
+        prewarmed: incomingPlayer?.dataset.shortVideoFrameReady === "1" && incomingPlayer.readyState >= 2
+      });
       const primePromise = primeAdjacentSound(direction, cachedVideo).catch(() => false);
-      await Promise.all([
+      const [, incomingReady] = await Promise.all([
         animationPromise,
         primePromise
       ]);
+      if (canPromoteVideoPanel && incomingPlayer && !incomingReady) {
+        if (queuedAdjacentDirection === direction) queuedAdjacentDirection = 0;
+        incomingPlayer.pause?.();
+        incomingPlayer.muted = true;
+        releaseOffscreenVideoDecoder(incomingPlayer, "adjacent-switch-timeout");
+        snapStackBack();
+        markShortVideoPerformance("adjacent-switch-rebounded", {
+          videoId: String(id),
+          direction: Number(direction || 0),
+          durationMs: Date.now() - navigationStartedAt,
+          readyState: Number(incomingPlayer.readyState || 0)
+        });
+        return;
+      }
       if (canPromoteVideoPanel) {
         promoteAdjacentPanelDom(direction, cachedVideo);
         await promoteAdjacentMedia(cachedVideo, direction);
@@ -4458,6 +4667,14 @@ export function createShortVideoPage(deps) {
       } else {
         await openVideo(id, { renderLoading: false });
       }
+      markShortVideoPerformance("adjacent-switch-ready", {
+        videoId: String(state.shortVideo.current?.id || id),
+        direction: Number(direction || 0),
+        durationMs: Date.now() - navigationStartedAt,
+        promoted: canPromoteVideoPanel,
+        cached: hasCachedAdjacent
+      });
+      markShortVideoCacheState();
     } finally {
       wheelIgnoreUntil = Date.now();
       wheelLocked = false;
@@ -4506,7 +4723,13 @@ export function createShortVideoPage(deps) {
 
   async function warmAdjacentVideoPlayer(player, video, options = {}) {
     if (!player) return false;
-    const source = String(video?.streamUrl || player.dataset.streamUrl || player.currentSrc || player.src || "").trim();
+    const source = String(
+      player.dataset.streamUrl
+      || shortVideoPlaybackUrl(video)
+      || player.currentSrc
+      || player.getAttribute("src")
+      || ""
+    ).trim();
     if (!source) return false;
     const pauseAfter = options.pauseAfter !== false;
     const settleGhost = () => {
@@ -4515,10 +4738,16 @@ export function createShortVideoPage(deps) {
       player.muted = true;
       player.preload = "metadata";
     };
-    const shouldReload = Boolean(options.forceReload || player.error || !player.currentSrc);
+    const shouldReload = Boolean(
+      options.forceReload
+      || player.error
+      || !player.currentSrc
+      || player.dataset.shortVideoDecoderReleased === "1"
+    );
     if (shouldReload) {
       delete player.dataset.shortVideoFrameReady;
       delete player.dataset.shortVideoFrameReadyAt;
+      delete player.dataset.shortVideoDecoderReleased;
       player.src = source;
       player.dataset.streamUrl = source;
       player.load?.();
@@ -4540,47 +4769,108 @@ export function createShortVideoPage(deps) {
   }
 
   function scheduleAdjacentVideoWarmup(player, video, slot = "next") {
+    if (!player) return;
+    const scheduleToken = String(++shortVideoAdjacentWarmScheduleId);
+    player.dataset.shortVideoWarmScheduleToken = scheduleToken;
+    const preferredSlot = shortVideoAdjacentWarmDirection < 0 ? "prev" : "next";
+    if (slot !== preferredSlot) {
+      window.setTimeout(() => {
+        if (player.dataset.shortVideoWarmScheduleToken !== scheduleToken) return;
+        releaseOffscreenVideoDecoder(player, `adjacent-${slot}`);
+      }, 80);
+      return;
+    }
     const startedAt = Date.now();
+    const rapidNavigation = shortVideoLastNavigationAt > 0
+      && startedAt - shortVideoLastNavigationAt <= SHORT_VIDEO_RAPID_NAV_WARM_WINDOW_MS;
+    const stableDelayMs = rapidNavigation
+      ? SHORT_VIDEO_ADJACENT_WARM_RAPID_MS
+      : SHORT_VIDEO_ADJACENT_WARM_STABLE_MS;
+    let warmStarted = false;
     const warm = () => {
-      if (!player?.isConnected || !player.classList.contains("is-ghost")) return;
-      const current = activePlayer();
-      if (current && current !== player && current.readyState < 2 && Date.now() - startedAt < 2600) {
-        window.setTimeout(warm, 180);
+      if (
+        !player.isConnected
+        || !player.classList.contains("is-ghost")
+        || player.dataset.shortVideoWarmScheduleToken !== scheduleToken
+      ) return;
+      const currentPreferredSlot = shortVideoAdjacentWarmDirection < 0 ? "prev" : "next";
+      if (slot !== currentPreferredSlot) {
+        releaseOffscreenVideoDecoder(player, `adjacent-${slot}`);
         return;
       }
-      if (slot === "prev" && Date.now() - startedAt < 2600) {
-        const nextPlayer = player.closest(".short-video-reel-stack")?.querySelector(".short-video-reel-panel.is-next .short-video-player");
-        if (nextPlayer && nextPlayer !== player && !nextPlayer.error && nextPlayer.dataset.shortVideoFrameReady !== "1") {
-          window.setTimeout(warm, 160);
+      const current = activePlayer();
+      if (current && current !== player) {
+        const elapsed = Date.now() - startedAt;
+        if (current.dataset.shortVideoFrameReady !== "1" && elapsed < 5200) {
+          window.setTimeout(warm, 120);
           return;
         }
-        const nextReadyAt = Number(nextPlayer?.dataset?.shortVideoFrameReadyAt || 0);
-        const nextCooldown = 600 - (Date.now() - nextReadyAt);
-        if (nextReadyAt && nextCooldown > 0) {
-          window.setTimeout(warm, nextCooldown);
+        const currentFrameReadyAt = Number(current.dataset.shortVideoFrameReadyAt || 0);
+        const currentCooldown = stableDelayMs - (Date.now() - currentFrameReadyAt);
+        if (currentFrameReadyAt && currentCooldown > 0) {
+          window.setTimeout(warm, currentCooldown);
           return;
         }
       }
-      warmAdjacentVideoPlayer(player, video, { pauseAfter: true, timeout: 1200 }).catch(() => {});
+      if (warmStarted) return;
+      warmStarted = true;
+      const warmStartedAt = Date.now();
+      markShortVideoPerformance("adjacent-warm-start", {
+        videoId: String(video?.id || player.dataset.videoId || ""),
+        slot,
+        deferredMs: warmStartedAt - startedAt,
+        mode: rapidNavigation ? "rapid-navigation" : "steady-playback",
+        stableDelayMs
+      });
+      warmAdjacentVideoPlayer(player, video, { pauseAfter: true, timeout: 1200 }).then((ready) => {
+        markShortVideoPerformance("adjacent-warm-finish", {
+          videoId: String(video?.id || player.dataset.videoId || ""),
+          slot,
+          ready: Boolean(ready),
+          durationMs: Date.now() - warmStartedAt,
+          readyState: Number(player.readyState || 0)
+        });
+      }).catch(() => {});
     };
-    window.setTimeout(warm, slot === "next" ? 40 : 220);
+    window.setTimeout(warm, rapidNavigation ? 0 : (slot === "next" ? 40 : 220));
   }
 
   function warmVisibleAdjacentVideoPlayers() {
     const stack = activeReelStack();
-    const players = [
-      stack?.querySelector?.(".short-video-reel-panel.is-next .short-video-player"),
-      stack?.querySelector?.(".short-video-reel-panel.is-prev .short-video-player")
-    ].filter(Boolean);
-    players.forEach((player, index) => {
-      window.setTimeout(() => {
-        warmAdjacentVideoPlayer(player, null, {
-          forceReload: Boolean(player.error),
-          pauseAfter: true,
-          timeout: 1200
-        }).catch(() => {});
-      }, index * 360);
-    });
+    const preferredSlot = shortVideoAdjacentWarmDirection < 0 ? "prev" : "next";
+    const preferred = stack?.querySelector?.(`.short-video-reel-panel.is-${preferredSlot} .short-video-player`);
+    const oppositeSlot = preferredSlot === "next" ? "prev" : "next";
+    const opposite = stack?.querySelector?.(`.short-video-reel-panel.is-${oppositeSlot} .short-video-player`);
+    releaseOffscreenVideoDecoder(opposite, `adjacent-${oppositeSlot}`);
+    if (!preferred) return;
+    warmAdjacentVideoPlayer(preferred, null, {
+      forceReload: Boolean(preferred.error),
+      pauseAfter: true,
+      timeout: 1200
+    }).catch(() => {});
+  }
+
+  function releaseOffscreenVideoDecoder(player, reason = "offscreen") {
+    if (!player || player.dataset.shortVideoSlot === "current") return false;
+    const source = String(player.dataset.streamUrl || player.currentSrc || player.getAttribute("src") || "").trim();
+    const hadMedia = Boolean(player.currentSrc || player.getAttribute("src") || player.readyState > 0);
+    if (source) player.dataset.streamUrl = source;
+    player.muted = true;
+    player.pause?.();
+    player.preload = "none";
+    delete player.dataset.shortVideoFrameReady;
+    delete player.dataset.shortVideoFrameReadyAt;
+    player.dataset.shortVideoDecoderReleased = "1";
+    player.removeAttribute("src");
+    player.load?.();
+    if (hadMedia) {
+      markShortVideoPerformance("video-decoder-released", {
+        videoId: String(player.dataset.videoId || ""),
+        slot: String(player.dataset.shortVideoSlot || ""),
+        reason
+      });
+    }
+    return hadMedia;
   }
 
   function promoteAdjacentPanelDom(direction, video) {
@@ -4617,6 +4907,7 @@ export function createShortVideoPage(deps) {
     const previousPlayer = outgoing.querySelector(".short-video-player");
     if (previousPlayer) {
       previousPlayer.classList.add("is-ghost");
+      previousPlayer.dataset.shortVideoSlot = direction > 0 ? "prev" : "next";
       previousPlayer.muted = true;
       previousPlayer.pause?.();
       delete previousPlayer.dataset.shortVideoFrameReady;
@@ -4625,19 +4916,12 @@ export function createShortVideoPage(deps) {
         previousPlayer.currentTime = 0;
       } catch {}
     }
-    const previousBackdrop = outgoing.querySelector("video.short-video-backdrop-video");
-    if (previousBackdrop) {
-      previousBackdrop.muted = true;
-      previousBackdrop.pause?.();
-      try {
-        previousBackdrop.currentTime = 0;
-      } catch {}
-    }
-
     const player = incoming.querySelector(".short-video-player");
     const stage = incoming.querySelector(".short-video-stage");
     if (player && stage) {
       player.classList.remove("is-ghost");
+      player.dataset.shortVideoSlot = "current";
+      player.dataset.shortVideoPromotedAt = String(Date.now());
       player.muted = Boolean(state.shortVideo.muted);
       player.volume = currentShortVideoVolume();
       if (player.dataset.primaryControlsBound !== "1") {
@@ -4658,13 +4942,13 @@ export function createShortVideoPage(deps) {
           player.play?.().catch(() => {});
         }
       });
-    }
-
-    const incomingBackdrop = incoming.querySelector("video.short-video-backdrop-video");
-    if (incomingBackdrop) {
-      incomingBackdrop.preload = "auto";
-      incomingBackdrop.muted = true;
-      incomingBackdrop.play?.().catch(() => {});
+      markShortVideoPerformance("video-player-promoted", {
+        videoId: String(video?.id || player.dataset.videoId || ""),
+        direction: Number(direction || 0),
+        slot: "current",
+        prewarmed: player.dataset.shortVideoFrameReady === "1",
+        readyState: Number(player.readyState || 0)
+      });
     }
 
   }
@@ -4723,6 +5007,39 @@ export function createShortVideoPage(deps) {
     }
   }
 
+  function scheduleInitialAdjacentPanelsRefresh(videoId) {
+    const expectedVideoId = String(videoId || "");
+    const player = activePlayer();
+    const scheduledAt = Date.now();
+    const refresh = () => {
+      if (String(state.shortVideo?.current?.id || "") !== expectedVideoId) return;
+      const startedAt = Date.now();
+      markShortVideoPerformance("adjacent-panels-refresh-start", {
+        videoId: expectedVideoId,
+        deferredMs: startedAt - scheduledAt,
+        currentFrameReady: player?.dataset?.shortVideoFrameReady === "1"
+      });
+      refreshAdjacentPanelsDom();
+      syncCurrentNavigationDom();
+      markShortVideoPerformance("adjacent-panels-refresh-finish", {
+        videoId: expectedVideoId,
+        durationMs: Date.now() - startedAt
+      });
+    };
+    if (!player || isGalleryPost(state.shortVideo?.current)) {
+      refresh();
+      return;
+    }
+    waitForVideoFirstFrame(player, SHORT_VIDEO_FIRST_FRAME_TIMEOUT_MS).finally(() => {
+      if (String(state.shortVideo?.current?.id || "") !== expectedVideoId) return;
+      if (typeof window.requestIdleCallback === "function") {
+        window.requestIdleCallback(refresh, { timeout: 96 });
+      } else {
+        window.requestAnimationFrame(refresh);
+      }
+    });
+  }
+
   function refreshAdjacentPanelsDom() {
     const stack = activeReelStack();
     if (!stack || !state.shortVideo?.current) {
@@ -4748,8 +5065,10 @@ export function createShortVideoPage(deps) {
         const player = panel.querySelector(".short-video-player");
         if (player) {
           player.classList.add("is-ghost");
+          player.dataset.shortVideoSlot = slot;
           player.muted = true;
           player.pause?.();
+          scheduleAdjacentVideoWarmup(player, video, slot);
         }
       } else {
         panel = renderReelPanel(video, { ghost: true, slot }).panel;
@@ -4770,6 +5089,8 @@ export function createShortVideoPage(deps) {
     panel.querySelectorAll?.("video")?.forEach?.((player) => {
       player.muted = true;
       player.pause?.();
+      player.removeAttribute("src");
+      player.load?.();
     });
     panel.remove();
   }
@@ -4794,6 +5115,7 @@ export function createShortVideoPage(deps) {
       sound: state.shortVideo?.sound || "",
       soundInfo: state.shortVideo?.soundInfo || null,
       media: state.shortVideo?.media || "all",
+      quality: state.shortVideo?.quality || "all",
       sort: state.shortVideo?.sort || "published"
     };
   }
@@ -4806,6 +5128,7 @@ export function createShortVideoPage(deps) {
     state.shortVideo.sound = normalizeShortVideoSound(feed.sound);
     state.shortVideo.soundInfo = feed.soundInfo || null;
     state.shortVideo.media = normalizeShortVideoMedia(feed.media);
+    state.shortVideo.quality = normalizeShortVideoQuality(feed.quality);
     state.shortVideo.sort = feed.sort || "published";
     state.shortVideo.data = null;
   }
@@ -5135,38 +5458,72 @@ export function createShortVideoPage(deps) {
   function waitForVideoFirstFrame(player, timeout = 260) {
     if (!player) return Promise.resolve(false);
     if (player.readyState >= 2 && player.dataset.shortVideoFrameReady === "1") return Promise.resolve(true);
-    if (player.readyState >= 2 && !player.requestVideoFrameCallback) return Promise.resolve(true);
+    const supportsPaintedFrame = typeof player.requestVideoFrameCallback === "function";
+    if (player.readyState >= 2 && !supportsPaintedFrame) {
+      player.dataset.shortVideoFrameReady = "1";
+      player.dataset.shortVideoFrameReadyAt = String(Date.now());
+      return Promise.resolve(true);
+    }
     return new Promise((resolve) => {
       let finished = false;
       let frameHandle = null;
+      let timeoutHandle = 0;
       const done = (ready) => {
         if (finished) return;
         finished = true;
         player.removeEventListener("loadeddata", onReady);
         player.removeEventListener("canplay", onReady);
         player.removeEventListener("playing", onReady);
-        if (frameHandle && player.cancelVideoFrameCallback) {
+        player.removeEventListener("error", onUnavailable);
+        player.removeEventListener("emptied", onUnavailable);
+        if (timeoutHandle) {
+          window.clearTimeout(timeoutHandle);
+          timeoutHandle = 0;
+        }
+        if (frameHandle != null && player.cancelVideoFrameCallback) {
           player.cancelVideoFrameCallback(frameHandle);
+          frameHandle = null;
         }
         if (ready) {
+          const firstPaintForPlayer = player.dataset.shortVideoFrameReady !== "1";
           player.dataset.shortVideoFrameReady = "1";
           player.dataset.shortVideoFrameReadyAt = String(Date.now());
+          if (firstPaintForPlayer) {
+            markShortVideoPerformance("video-frame-painted", {
+              videoId: String(player.dataset.videoId || ""),
+              slot: String(player.dataset.shortVideoSlot || "prewarm"),
+              readyState: Number(player.readyState || 0),
+              currentTime: Number(player.currentTime || 0),
+              prewarmed: player.dataset.shortVideoPrewarmed === "1"
+            });
+          }
         }
         resolve(ready);
       };
       const requestPaintedFrame = () => {
-        if (finished || frameHandle || player.readyState < 2 || !player.requestVideoFrameCallback) return false;
+        if (finished || player.readyState < 2 || !supportsPaintedFrame) return false;
+        if (frameHandle != null) return true;
         frameHandle = player.requestVideoFrameCallback(() => done(true));
         return true;
       };
       const onReady = () => {
-        if (!requestPaintedFrame()) done(true);
+        if (supportsPaintedFrame) {
+          requestPaintedFrame();
+          return;
+        }
+        done(true);
       };
+      const onUnavailable = () => done(false);
       player.addEventListener("loadeddata", onReady, { once: true });
       player.addEventListener("canplay", onReady, { once: true });
       player.addEventListener("playing", onReady, { once: true });
+      player.addEventListener("error", onUnavailable, { once: true });
+      player.addEventListener("emptied", onUnavailable, { once: true });
       requestPaintedFrame();
-      window.setTimeout(() => done(player.readyState >= 2), timeout);
+      timeoutHandle = window.setTimeout(() => {
+        const readyWithoutFrameCallback = !supportsPaintedFrame && player.readyState >= 2;
+        done(readyWithoutFrameCallback);
+      }, timeout);
     });
   }
 
@@ -5291,7 +5648,7 @@ export function createShortVideoPage(deps) {
     }, { passive: false });
     window.addEventListener("scroll", () => {
       if (state.activeView !== "shortVideos" || state.shortVideo?.current) return;
-      if (state.shortVideo?.source === "authors") {
+      if (isShortVideoAuthorIndexPage()) {
         appendVisibleAuthorsIfNeeded();
         return;
       }
@@ -5612,6 +5969,9 @@ export function createShortVideoPage(deps) {
         player.muted = true;
         player.pause?.();
       });
+      els.workGrid?.querySelectorAll?.(".short-video-player.is-ghost")?.forEach?.((player) => {
+        releaseOffscreenVideoDecoder(player, "document-hidden");
+      });
       return;
     }
     gallery?.shortVideoGalleryResume?.();
@@ -5624,14 +5984,17 @@ export function createShortVideoPage(deps) {
       current.muted = Boolean(state.shortVideo.muted);
       current.volume = currentShortVideoVolume();
       syncActiveControlBar();
+      warmVisibleAdjacentVideoPlayers();
       return;
     }
     if (state.shortVideo.muted) {
       current.muted = true;
       current.play?.().catch(() => {});
+      warmVisibleAdjacentVideoPlayers();
       return;
     }
     resumeActiveSound();
+    warmVisibleAdjacentVideoPlayers();
   }
 
   function activePlayer() {
@@ -5827,6 +6190,7 @@ export function createShortVideoPage(deps) {
     closeTransientPlayerControls();
     const cleared = browser.classList.toggle("is-clear-screen");
     delete browser.dataset.shortVideoClearScreenRevealAt;
+    syncActiveControlBar();
     if (cleared) {
       const touchPrimary = window.matchMedia?.("(pointer: coarse)")?.matches
         || window.matchMedia?.("(max-width: 680px)")?.matches;
@@ -5843,6 +6207,7 @@ export function createShortVideoPage(deps) {
     browser.classList.remove("is-clear-screen");
     browser.dataset.shortVideoClearScreenRevealAt = String(Date.now());
     browser.shortVideoRevealControls?.(1900);
+    syncActiveControlBar();
     showBrowserToast("已恢复操作界面");
     return true;
   }
@@ -5953,11 +6318,22 @@ export function createShortVideoPage(deps) {
     if (!id) return Promise.resolve(null);
     const cacheKey = `${params}::${id}`;
     const cached = shortVideoDetailCache.get(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      markShortVideoPerformance("video-detail-cache-hit", { videoId: id });
+      return cached;
+    }
     const detailParams = new URLSearchParams(params);
     detailParams.set("neighbors", String(SHORT_VIDEO_DETAIL_NEIGHBOR_LIMIT));
     detailParams.set("metadata", "0");
+    const requestStartedAt = Date.now();
+    markShortVideoPerformance("video-detail-request-start", { videoId: id });
     const request = api(`/api/short-videos/${encodeURIComponent(id)}?${detailParams}`).then((data) => {
+      markShortVideoPerformance("video-detail-request-finish", {
+        videoId: id,
+        durationMs: Date.now() - requestStartedAt,
+        previousId: String(data?.prevId || ""),
+        nextId: String(data?.nextId || "")
+      });
       rememberShortVideoNavigation(data, params);
       shortVideoResolvedDetailCache.delete(cacheKey);
       shortVideoResolvedDetailCache.set(cacheKey, data);
@@ -5966,6 +6342,11 @@ export function createShortVideoPage(deps) {
       }
       return data;
     }).catch((error) => {
+      markShortVideoPerformance("video-detail-request-error", {
+        videoId: id,
+        durationMs: Date.now() - requestStartedAt,
+        message: String(error?.message || error || "")
+      });
       shortVideoDetailCache.delete(cacheKey);
       shortVideoResolvedDetailCache.delete(cacheKey);
       throw error;
@@ -5983,25 +6364,168 @@ export function createShortVideoPage(deps) {
     return shortVideoResolvedDetailCache.get(`${params}::${id}`) || null;
   }
 
+  function ensureShortVideoPrewarmShelf() {
+    if (shortVideoPrewarmShelf?.isConnected) return shortVideoPrewarmShelf;
+    shortVideoPrewarmShelf = document.createElement("div");
+    shortVideoPrewarmShelf.className = "short-video-prewarm-shelf";
+    shortVideoPrewarmShelf.setAttribute("aria-hidden", "true");
+    Object.assign(shortVideoPrewarmShelf.style, {
+      position: "fixed",
+      left: "-10000px",
+      top: "0",
+      width: "2px",
+      height: "2px",
+      overflow: "hidden",
+      opacity: "0.001",
+      pointerEvents: "none"
+    });
+    document.body.append(shortVideoPrewarmShelf);
+    return shortVideoPrewarmShelf;
+  }
+
+  function disposeShortVideoPlaybackPreload(entry) {
+    const player = entry?.player;
+    if (!player || entry.taken) return;
+    player.muted = true;
+    player.pause?.();
+    player.removeAttribute("src");
+    player.load?.();
+    player.remove();
+  }
+
+  function trimShortVideoPlaybackPreloads() {
+    while (shortVideoPlaybackPreloads.size > SHORT_VIDEO_PLAYBACK_PRELOAD_LIMIT) {
+      const [source, entry] = shortVideoPlaybackPreloads.entries().next().value || [];
+      if (!source) break;
+      shortVideoPlaybackPreloads.delete(source);
+      disposeShortVideoPlaybackPreload(entry);
+    }
+  }
+
+  function prewarmShortVideoPlayback(video = {}, options = {}) {
+    if (!video?.id || isGalleryPost(video)) return Promise.resolve(false);
+    const source = shortVideoPlaybackUrl(video);
+    if (!source) return Promise.resolve(false);
+    const cached = shortVideoPlaybackPreloads.get(source);
+    if (cached) {
+      shortVideoPlaybackPreloads.delete(source);
+      shortVideoPlaybackPreloads.set(source, cached);
+      markShortVideoPerformance("video-prewarm-cache-hit", {
+        videoId: String(video.id),
+        readyState: Number(cached.player?.readyState || 0)
+      });
+      return cached.promise;
+    }
+
+    const player = document.createElement("video");
+    player.className = "short-video-prewarm-player";
+    player.dataset.streamUrl = source;
+    player.dataset.videoId = String(video.id);
+    player.dataset.shortVideoSlot = "prewarm";
+    player.src = source;
+    player.preload = "auto";
+    player.controls = false;
+    player.autoplay = false;
+    player.loop = false;
+    player.muted = true;
+    player.volume = 0;
+    player.playsInline = true;
+    player.tabIndex = -1;
+    player.setAttribute("aria-hidden", "true");
+    ensureShortVideoPrewarmShelf().append(player);
+    const prewarmStartedAt = Date.now();
+    markShortVideoPerformance("video-prewarm-start", {
+      videoId: String(video.id)
+    });
+
+    const entry = { player, promise: null, taken: false };
+    entry.promise = (async () => {
+      const timeout = Math.max(800, Number(options.timeout || SHORT_VIDEO_PLAYBACK_PRELOAD_TIMEOUT_MS));
+      const readyPromise = waitForVideoFirstFrame(player, timeout);
+      player.load?.();
+      player.play?.().catch(() => {});
+      const ready = await readyPromise;
+      if (!entry.taken) {
+        player.pause?.();
+        player.muted = true;
+      }
+      markShortVideoPerformance("video-prewarm-finish", {
+        videoId: String(video.id),
+        ready: Boolean(ready || player.readyState >= 2),
+        readyState: Number(player.readyState || 0),
+        durationMs: Date.now() - prewarmStartedAt,
+        taken: entry.taken
+      });
+      return ready || player.readyState >= 2;
+    })().catch(() => {
+      if (!entry.taken && shortVideoPlaybackPreloads.get(source) === entry) {
+        shortVideoPlaybackPreloads.delete(source);
+        disposeShortVideoPlaybackPreload(entry);
+      }
+      return false;
+    });
+    shortVideoPlaybackPreloads.set(source, entry);
+    trimShortVideoPlaybackPreloads();
+    return entry.promise;
+  }
+
+  function takePrewarmedShortVideoPlayer(video = {}) {
+    const source = shortVideoPlaybackUrl(video);
+    const directPlayer = takeDirectShortVideoPlaybackPrewarm?.(video, source) || null;
+    if (directPlayer) {
+      markShortVideoPerformance("video-prewarm-taken", {
+        videoId: String(video.id || directPlayer.dataset.videoId || ""),
+        readyState: Number(directPlayer.readyState || 0),
+        frameReady: directPlayer.dataset.shortVideoFrameReady === "1",
+        direct: true
+      });
+      return directPlayer;
+    }
+    const entry = source ? shortVideoPlaybackPreloads.get(source) : null;
+    if (!entry?.player) return null;
+    shortVideoPlaybackPreloads.delete(source);
+    entry.taken = true;
+    const player = entry.player;
+    player.dataset.shortVideoPrewarmed = "1";
+    player.removeAttribute("aria-hidden");
+    player.removeAttribute("tabindex");
+    markShortVideoPerformance("video-prewarm-taken", {
+      videoId: String(video.id || player.dataset.videoId || ""),
+      readyState: Number(player.readyState || 0),
+      frameReady: player.dataset.shortVideoFrameReady === "1"
+    });
+    return player;
+  }
+
   function prefetchShortVideoFirstMedia(video = {}) {
     const galleryEntry = isGalleryPost(video) ? galleryImageEntries(video)[0] : null;
     const url = String(galleryEntry?.url || shortVideoCardCoverUrl(video) || "").trim();
-    if (!url || shortVideoMediaPrefetches.has(url)) return shortVideoMediaPrefetches.get(url)?.promise || Promise.resolve(false);
-    const image = new Image();
-    image.decoding = "async";
-    image.fetchPriority = "low";
-    const promise = new Promise((resolve) => {
-      const finish = (ready) => resolve(Boolean(ready));
-      image.addEventListener("load", () => finish(true), { once: true });
-      image.addEventListener("error", () => finish(false), { once: true });
-      image.src = url;
-      if (image.complete && image.naturalWidth) Promise.resolve().then(() => finish(true));
-    });
-    shortVideoMediaPrefetches.set(url, { image, promise });
-    while (shortVideoMediaPrefetches.size > 18) {
-      shortVideoMediaPrefetches.delete(shortVideoMediaPrefetches.keys().next().value);
+    const playbackPromise = isGalleryPost(video)
+      ? Promise.resolve(false)
+      : prewarmShortVideoPlayback(video);
+    let imagePromise = Promise.resolve(false);
+    if (url) {
+      const cached = shortVideoMediaPrefetches.get(url);
+      if (cached) {
+        imagePromise = cached.promise;
+      } else {
+        const image = new Image();
+        image.decoding = "async";
+        image.fetchPriority = "low";
+        imagePromise = new Promise((resolve) => {
+          const finish = (ready) => resolve(Boolean(ready));
+          image.addEventListener("load", () => finish(true), { once: true });
+          image.addEventListener("error", () => finish(false), { once: true });
+          image.src = url;
+          if (image.complete && image.naturalWidth) Promise.resolve().then(() => finish(true));
+        });
+        shortVideoMediaPrefetches.set(url, { image, promise: imagePromise });
+        while (shortVideoMediaPrefetches.size > 18) {
+          shortVideoMediaPrefetches.delete(shortVideoMediaPrefetches.keys().next().value);
+        }
+      }
     }
-    return promise;
+    return Promise.all([imagePromise, playbackPromise]).then((results) => results.some(Boolean));
   }
 
   async function prefetchRelatedVideo(video = {}) {
@@ -6024,18 +6548,44 @@ export function createShortVideoPage(deps) {
   function scheduleAdjacentNavigationPrefetch() {
     window.clearTimeout(shortVideoNavigationPrefetchTimer);
     const params = shortVideoFeedParams();
-    const candidates = [
-      { direction: 1, video: state.shortVideo?.nextVideo },
-      { direction: -1, video: state.shortVideo?.prevVideo }
-    ].filter((item) => item.video?.id);
-    if (!candidates.length) return;
-    shortVideoNavigationPrefetchTimer = window.setTimeout(() => {
-      candidates.forEach((item, index) => {
-        window.setTimeout(() => {
-          prefetchAdjacentNavigation(item.video, item.direction, params).catch(() => {});
-        }, index * 120);
+    const forward = { direction: 1, video: state.shortVideo?.nextVideo };
+    const backward = { direction: -1, video: state.shortVideo?.prevVideo };
+    // Match navigation look-ahead to the one media decoder we keep warm. The
+    // opposite visible neighbor can already be promoted immediately; fetching
+    // its second ring on every page doubles detail parsing during fast swipes.
+    const preferred = shortVideoAdjacentWarmDirection < 0 ? backward : forward;
+    const fallback = shortVideoAdjacentWarmDirection < 0 ? forward : backward;
+    const candidate = preferred.video?.id ? preferred : (fallback.video?.id ? fallback : null);
+    if (!candidate) return;
+    const currentVideoId = String(state.shortVideo?.current?.id || "");
+    const scheduledAt = Date.now();
+    const run = () => {
+      shortVideoNavigationPrefetchTimer = 0;
+      if (!currentVideoId || String(state.shortVideo?.current?.id || "") !== currentVideoId) return;
+      const current = activePlayer();
+      const elapsed = Date.now() - scheduledAt;
+      if (current && current.dataset.shortVideoFrameReady !== "1" && elapsed < SHORT_VIDEO_NAV_PREFETCH_MAX_WAIT_MS) {
+        shortVideoNavigationPrefetchTimer = window.setTimeout(run, 120);
+        return;
+      }
+      const frameReadyAt = Number(current?.dataset?.shortVideoFrameReadyAt || 0);
+      const cooldown = frameReadyAt
+        ? SHORT_VIDEO_NAV_PREFETCH_AFTER_FRAME_MS - (Date.now() - frameReadyAt)
+        : 0;
+      if (cooldown > 0) {
+        shortVideoNavigationPrefetchTimer = window.setTimeout(run, cooldown);
+        return;
+      }
+      markShortVideoPerformance("adjacent-navigation-prefetch-start", {
+        videoId: String(candidate.video?.id || ""),
+        currentVideoId,
+        direction: candidate.direction,
+        deferredMs: Date.now() - scheduledAt,
+        currentFrameReady: current?.dataset?.shortVideoFrameReady === "1"
       });
-    }, 60);
+      prefetchAdjacentNavigation(candidate.video, candidate.direction, params).catch(() => {});
+    };
+    shortVideoNavigationPrefetchTimer = window.setTimeout(run, 60);
   }
 
   async function prefetchAdjacentNavigation(video, direction, params) {
@@ -6096,6 +6646,7 @@ export function createShortVideoPage(deps) {
     if (state.shortVideo.sound) params.set("sound", state.shortVideo.sound);
     if (state.shortVideo.author && state.shortVideo.author !== "all") params.set("author", state.shortVideo.author);
     if (state.shortVideo.media && state.shortVideo.media !== "all") params.set("media", state.shortVideo.media);
+    if (state.shortVideo.quality && state.shortVideo.quality !== "all") params.set("quality", state.shortVideo.quality);
     params.set("source", shortVideoApiSource());
     params.set("sort", state.shortVideo.sort || "published");
     return params.toString();
@@ -6313,7 +6864,9 @@ export function createShortVideoPage(deps) {
   function resolveSwitchAnimationDuration(motion = {}) {
     const dragDistance = Math.max(0, Number(motion?.dragDistance || 0));
     const velocity = Math.max(0, Number(motion?.velocity || 0));
-    if (!dragDistance && !velocity) return SHORT_VIDEO_SWITCH_ANIMATION_MS;
+    if (!dragDistance && !velocity) {
+      return motion?.prewarmed ? SHORT_VIDEO_PREWARMED_SWITCH_ANIMATION_MS : SHORT_VIDEO_SWITCH_ANIMATION_MS;
+    }
     const viewportHeight = Math.max(1, Number(window.innerHeight || 720));
     const remainingRatio = 1 - Math.min(1, dragDistance / viewportHeight);
     const velocityRatio = Math.min(1, velocity / 1.4);
@@ -6532,7 +7085,7 @@ export function createShortVideoPage(deps) {
     button.dataset.authorFollowVariant = variant;
     button.dataset.authorFollowKey = authorFollowKey(video, author);
     applyAuthorFollowButtonState(button, Boolean(author?.following), author?.name || "作者");
-    if (!video?.id || !authorFollowTargetId(video, author)) {
+    if (!authorFollowKey(video, author)) {
       button.disabled = true;
       button.setAttribute("aria-label", "当前作者无法关注");
       return button;
@@ -6557,25 +7110,34 @@ export function createShortVideoPage(deps) {
       button.replaceChildren(createIcon(active ? "check" : "plusBadge"));
       return;
     }
-    button.textContent = active ? "已关注" : "+ 关注";
+    button.textContent = active ? "已关注" : variant === "page" ? "已取关" : "+ 关注";
   }
 
   async function toggleAuthorFollow(video, author = video?.author || {}, button) {
-    const videoId = String(video?.id || "").trim();
-    if (!videoId || !button || button.getAttribute("aria-busy") === "true") return;
+    const authorId = authorFollowKey(video, author);
+    if (!authorId || !button || button.getAttribute("aria-busy") === "true") return;
     const wasFollowing = button.classList.contains("is-following");
     const nextFollowing = !wasFollowing;
     applyAuthorFollowButtonState(button, nextFollowing, author?.name || "作者");
     button.setAttribute("aria-busy", "true");
     try {
-      const data = await api(`/api/short-videos/${encodeURIComponent(videoId)}/author-follow`, {
+      const data = await api(`/api/short-videos/authors/${encodeURIComponent(authorId)}/follow`, {
         method: "PUT",
         body: { active: nextFollowing }
       });
-      const updated = data.video || null;
-      const following = updated ? Boolean(updated.author?.following) : Boolean(data.active);
-      syncShortVideoAuthorFollow(updated || video, following);
-      showBrowserToast(following ? `已关注 ${author?.name || "作者"}` : "已取消关注");
+      const following = Boolean(data.active);
+      const updated = {
+        ...(video || {}),
+        ownerUserId: data.targetUserId || author?.id || video?.ownerUserId || "",
+        author: {
+          ...(author || {}),
+          id: data.targetUserId || author?.id || "",
+          secUid: data.secUid || author?.secUid || "",
+          following
+        }
+      };
+      syncShortVideoAuthorFollow(updated, following);
+      showBrowserToast(following ? `已关注 ${author?.name || "作者"}` : `已取关 ${author?.name || "作者"}`);
     } catch (error) {
       console.warn(error);
       applyAuthorFollowButtonState(button, wasFollowing, author?.name || "作者");
@@ -6635,8 +7197,44 @@ export function createShortVideoPage(deps) {
     showBrowserToast("当前是本地视频");
   }
 
+  function ensureShortVideoSharePanel() {
+    if (shortVideoSharePanelPromise) return shortVideoSharePanelPromise;
+    const moduleUrl = "/modules/short-videos/share-panel.js?v=20260715-share-lazy-01";
+    shortVideoSharePanelPromise = import(moduleUrl).then((module) => {
+      if (typeof module.createShortVideoSharePanel !== "function") {
+        throw new Error("分享模块加载失败");
+      }
+      return module.createShortVideoSharePanel({
+        bindShortVideoModalFocusLoop,
+        cardTitle,
+        closePlaybackSettings,
+        copyShortVideoValue,
+        createIcon,
+        focusShortVideoTransientModal,
+        formatDuration,
+        formatShortVideoMetric,
+        galleryLabel,
+        getBrowser: () => els.workGrid?.querySelector?.(".short-video-browser"),
+        isGalleryPost,
+        isolateShortVideoTransientModal,
+        localShortVideoUrl,
+        originalDouyinUrl,
+        shortVideoAuthorHandle,
+        shortVideoShareText,
+        showBrowserToast,
+        state
+      });
+    }).catch((error) => {
+      shortVideoSharePanelPromise = null;
+      throw error;
+    });
+    return shortVideoSharePanelPromise;
+  }
+
   function shareShortVideo(video, options = {}) {
-    showSharePanel(video, options);
+    return ensureShortVideoSharePanel()
+      .then((showSharePanel) => showSharePanel(video, options))
+      .catch((error) => showBrowserToast(error?.message || "分享模块加载失败"));
   }
 
   async function copyShortVideoValue(value, message = "已复制链接") {
@@ -6753,237 +7351,82 @@ export function createShortVideoPage(deps) {
     window.requestAnimationFrame(() => window.requestAnimationFrame(focusTarget));
   }
 
-  function showPlaybackSettings(video = state.shortVideo?.current, options = {}) {
-    const browser = els.workGrid?.querySelector?.(".short-video-browser");
-    if (!browser) return;
-    const galleryMode = isGalleryPost(video);
-    const existingOverlay = browser.querySelector(".short-video-more-overlay");
-    if (existingOverlay) closePlaybackSettings(existingOverlay, { restoreFocus: false });
-
-    const overlay = document.createElement("div");
-    overlay.className = "short-video-more-overlay";
-    overlay._shortVideoReturnFocus = options.trigger || null;
-    overlay.addEventListener("click", (event) => {
-      if (event.target === overlay) closePlaybackSettings(overlay);
-    });
-
-    const sheet = document.createElement("section");
-    sheet.className = "short-video-more-sheet";
-    sheet.setAttribute("role", "dialog");
-    sheet.setAttribute("aria-modal", "true");
-    sheet.setAttribute("aria-labelledby", "short-video-playback-settings-title");
-    sheet.tabIndex = -1;
-
-    const header = document.createElement("header");
-    header.className = "short-video-more-head";
-    const headingWrap = document.createElement("div");
-    const eyebrow = document.createElement("span");
-    eyebrow.textContent = "本地播放器";
-    const heading = document.createElement("h2");
-    heading.id = "short-video-playback-settings-title";
-    heading.textContent = "更多功能";
-    headingWrap.append(eyebrow, heading);
-    const close = document.createElement("button");
-    close.type = "button";
-    close.className = "short-video-more-close";
-    close.append(createIcon("close"));
-    close.setAttribute("aria-label", "关闭更多功能");
-    close.addEventListener("click", () => closePlaybackSettings(overlay));
-    header.append(headingWrap, close);
-
-    const speedSection = document.createElement("section");
-    speedSection.className = "short-video-speed-section";
-    const speedHead = document.createElement("div");
-    const speedTitle = document.createElement("strong");
-    speedTitle.textContent = "播放速度";
-    const speedCurrent = document.createElement("span");
-    speedHead.append(speedTitle, speedCurrent);
-    const speedGrid = document.createElement("div");
-    speedGrid.className = "short-video-speed-grid";
-    const speedButtons = new Map();
-    const syncSpeedButtons = () => {
-      const currentRate = normalizePlaybackRate(state.shortVideo?.playbackRate);
-      speedCurrent.textContent = `当前 ${formatPlaybackRate(currentRate)}`;
-      for (const [value, button] of speedButtons) {
-        const active = value === currentRate;
-        button.classList.toggle("active", active);
-        button.setAttribute("aria-pressed", String(active));
+  function ensureShortVideoPlaybackSettings() {
+    if (shortVideoPlaybackSettingsPromise) return shortVideoPlaybackSettingsPromise;
+    const moduleUrl = "/modules/short-videos/playback-settings.js?v=20260715-settings-lazy-02";
+    shortVideoPlaybackSettingsPromise = import(moduleUrl).then((module) => {
+      if (typeof module.createShortVideoPlaybackSettings !== "function") {
+        throw new Error("播放设置模块加载失败");
       }
-    };
-    for (const value of PLAYBACK_RATES) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = formatPlaybackRate(value);
-      button.addEventListener("click", () => {
-        setPlaybackRate(value);
-        syncSpeedButtons();
+      return module.createShortVideoPlaybackSettings({
+        activePlayer,
+        bindShortVideoModalFocusLoop,
+        closePlaybackSettings,
+        createIcon,
+        deleteShortVideo,
+        focusShortVideoTransientModal,
+        formatPlaybackRate,
+        getBrowser: () => els.workGrid?.querySelector?.(".short-video-browser"),
+        getWorkGrid: () => els.workGrid,
+        isCurrentShortVideo,
+        isGalleryPost,
+        isolateShortVideoTransientModal,
+        loadVideos,
+        normalizePlaybackRate,
+        openAdjacent,
+        openDouyinLink,
+        originalDouyinUrl,
+        playbackRates: PLAYBACK_RATES,
+        setPlaybackRate,
+        shareShortVideo,
+        showBrowserToast,
+        showError,
+        state,
+        syncActivePlaybackMode,
+        syncShortVideoFullscreenControl,
+        toggleClearScreen,
+        toggleShortVideoDislike,
+        toggleShortVideoFullscreen,
+        writeAutoNextPreference
       });
-      speedButtons.set(value, button);
-      speedGrid.append(button);
-    }
-    speedSection.append(speedHead, speedGrid);
-
-    const actions = document.createElement("div");
-    actions.className = "short-video-more-actions is-primary-actions";
-    const player = activePlayer();
-    const pictureInPictureAvailable = Boolean(player?.requestPictureInPicture && document.pictureInPictureEnabled);
-    const pictureInPictureActive = Boolean(player && document.pictureInPictureElement === player);
-    const pip = playbackSettingsAction(
-      pictureInPictureActive ? "退出画中画" : "画中画",
-      pictureInPictureAvailable ? "悬浮在其他窗口上方" : "当前作品不支持",
-      "pictureInPicture",
-      async () => {
-        if (!pictureInPictureAvailable) return;
-        closePlaybackSettings(overlay, { restoreFocus: false });
-        try {
-          if (pictureInPictureActive) await document.exitPictureInPicture();
-          else await player.requestPictureInPicture();
-        } catch {
-          showBrowserToast("画中画启动失败");
-        }
-      }
-    );
-    pip.disabled = !pictureInPictureAvailable;
-
-    const fullscreen = playbackSettingsAction("全屏播放", "沉浸观看当前作品", "fullscreen", () => {
-      closePlaybackSettings(overlay, { restoreFocus: false });
-      toggleShortVideoFullscreen();
+    }).catch((error) => {
+      shortVideoPlaybackSettingsPromise = null;
+      throw error;
     });
-    fullscreen.dataset.shortVideoFullscreenControl = "settings";
-    syncShortVideoFullscreenControl(fullscreen);
-
-    const autoNext = playbackSettingsAction("连播", "播完自动切换下一条", "repeat", () => {
-      state.shortVideo.autoNext = !state.shortVideo.autoNext;
-      writeAutoNextPreference(state.shortVideo.autoNext);
-      syncActivePlaybackMode();
-      autoNext.classList.toggle("active", state.shortVideo.autoNext);
-      autoNext.setAttribute("aria-pressed", String(state.shortVideo.autoNext));
-      autoNext.querySelector("small").textContent = state.shortVideo.autoNext ? "已开启，播完切换下一条" : "播完自动切换下一条";
-      els.workGrid?.querySelector?.(".short-video-control-auto")?.classList.toggle("active", state.shortVideo.autoNext);
-    });
-    autoNext.classList.toggle("active", Boolean(state.shortVideo.autoNext));
-    autoNext.setAttribute("aria-pressed", String(Boolean(state.shortVideo.autoNext)));
-    if (state.shortVideo.autoNext) autoNext.querySelector("small").textContent = "已开启，播完切换下一条";
-
-    const clearScreenHint = window.matchMedia?.("(max-width: 680px)")?.matches
-      ? "进入后轻触画面恢复"
-      : "快捷键 J，再按恢复";
-    const clearScreen = playbackSettingsAction("清屏播放", clearScreenHint, "clearScreen", () => {
-      closePlaybackSettings(overlay, { restoreFocus: false });
-      toggleClearScreen();
-    });
-    const copyLink = playbackSettingsAction("分享作品", "复制链接或打开系统分享", "link", () => {
-      const returnFocus = overlay._shortVideoReturnFocus;
-      closePlaybackSettings(overlay, { restoreFocus: false });
-      shareShortVideo(video, { trigger: returnFocus });
-    });
-    const originalUrl = originalDouyinUrl(video);
-    const original = playbackSettingsAction("抖音原视频", originalUrl ? "在新窗口打开" : "当前作品没有原始链接", "external", () => {
-      closePlaybackSettings(overlay, { restoreFocus: false });
-      openDouyinLink(video);
-    });
-    original.disabled = !originalUrl;
-    const dislike = playbackSettingsAction(
-      video?.actions?.disliked ? "撤销不感兴趣" : "不感兴趣",
-      video?.actions?.disliked ? "重新允许出现在推荐中" : "减少此类内容推荐",
-      "eyeOff",
-      async () => {
-        closePlaybackSettings(overlay, { restoreFocus: false });
-        const disliked = await toggleShortVideoDislike(video);
-        if (!disliked || state.shortVideo?.source !== "recommended" || !isCurrentShortVideo(video)) return;
-        if (state.shortVideo.nextId) {
-          openAdjacent(1).catch(showError);
-          return;
-        }
-        state.shortVideo.current = null;
-        state.shortVideo.data = null;
-        loadVideos({ replaceRoute: true }).catch(showError);
-      }
-    );
-    const deleteCurrent = playbackSettingsAction("删除作品", "删除本地记录与文件", "trash", () => {
-      closePlaybackSettings(overlay, { restoreFocus: false });
-      deleteShortVideo(video, { fromBrowser: true }).catch(showError);
-    });
-    deleteCurrent.classList.add("is-danger");
-    const deleteGroup = playbackSettingsAction("删除同组", "清理同一文件夹作品", "folderTrash", () => {
-      closePlaybackSettings(overlay, { restoreFocus: false });
-      deleteShortVideo(video, { fromBrowser: true, scope: "group" }).catch(showError);
-    });
-    deleteGroup.classList.add("is-danger");
-    const primarySection = document.createElement("section");
-    primarySection.className = "short-video-more-section";
-    const primaryTitle = document.createElement("strong");
-    primaryTitle.textContent = "播放与分享";
-    actions.append(pip, fullscreen, autoNext, clearScreen, copyLink, original);
-    primarySection.append(primaryTitle, actions);
-
-    const manageSection = document.createElement("section");
-    manageSection.className = "short-video-more-section";
-    const manageTitle = document.createElement("strong");
-    manageTitle.textContent = "内容管理";
-    const manageActions = document.createElement("div");
-    manageActions.className = "short-video-more-actions is-manage-actions";
-    manageActions.append(dislike, deleteCurrent, deleteGroup);
-    manageSection.append(manageTitle, manageActions);
-
-    const shortcuts = document.createElement("details");
-    shortcuts.className = "short-video-shortcuts";
-    const shortcutsSummary = document.createElement("summary");
-    const shortcutsTitle = document.createElement("strong");
-    shortcutsTitle.textContent = "快捷操作";
-    const shortcutsHint = document.createElement("span");
-    shortcutsHint.textContent = "键盘与手势";
-    shortcutsSummary.append(shortcutsTitle, shortcutsHint);
-    const shortcutGrid = document.createElement("div");
-    const shortcutItems = [
-      ["Space", galleryMode ? "播放 / 暂停图集" : "播放 / 暂停视频"],
-      ["M", galleryMode ? "开启 / 关闭图集音乐" : "静音"],
-      ["F", "进入 / 退出全屏"],
-      ["J", "清屏"],
-      ...(!galleryMode ? [["按住画面", "临时 2×，松开恢复"]] : []),
-      ["双击画面", "点赞当前作品"],
-      ["←  →", galleryMode ? "切换图集内容" : "视频快退 / 快进 5 秒"],
-      ["↑  ↓", "切换作品"],
-      ["Esc", "关闭 / 返回"]
-    ];
-    for (const [key, label] of shortcutItems) {
-      const item = document.createElement("span");
-      const keyboard = document.createElement("kbd");
-      keyboard.textContent = key;
-      item.append(keyboard, document.createTextNode(label));
-      shortcutGrid.append(item);
-    }
-    shortcuts.append(shortcutsSummary, shortcutGrid);
-
-    sheet.append(header);
-    if (!galleryMode) sheet.append(speedSection);
-    sheet.append(primarySection, manageSection, shortcuts);
-    overlay.append(sheet);
-    browser.append(overlay);
-    isolateShortVideoTransientModal(overlay);
-    bindShortVideoModalFocusLoop(overlay, sheet, () => closePlaybackSettings(overlay));
-    if (!galleryMode) syncSpeedButtons();
-    const initialFocus = options.focusSpeed && !galleryMode
-      ? speedButtons.get(normalizePlaybackRate(state.shortVideo?.playbackRate))
-      : close;
-    focusShortVideoTransientModal(sheet, initialFocus);
+    return shortVideoPlaybackSettingsPromise;
   }
 
-  function playbackSettingsAction(label, description, icon, action) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "short-video-more-action";
-    const visual = document.createElement("span");
-    visual.append(createIcon(icon));
-    const copy = document.createElement("span");
-    const title = document.createElement("b");
-    title.textContent = label;
-    const detail = document.createElement("small");
-    detail.textContent = description;
-    copy.append(title, detail);
-    button.append(visual, copy);
-    button.addEventListener("click", action);
-    return button;
+  function scheduleShortVideoPlaybackSettingsWarmup() {
+    if (shortVideoPlaybackSettingsPromise || shortVideoPlaybackSettingsWarmupScheduled) return;
+    shortVideoPlaybackSettingsWarmupScheduled = true;
+    const warm = () => {
+      if (shortVideoPlaybackSettingsPromise) return;
+      markShortVideoPerformance("playback-settings-warm-start");
+      ensureShortVideoPlaybackSettings()
+        .then(() => markShortVideoPerformance("playback-settings-warm-ready"))
+        .catch((error) => {
+          shortVideoPlaybackSettingsWarmupScheduled = false;
+          markShortVideoPerformance("playback-settings-warm-error", {
+            message: String(error?.message || error || "unknown")
+          });
+        });
+    };
+    window.setTimeout(() => {
+      if (typeof window.requestIdleCallback === "function") {
+        window.requestIdleCallback(warm, { timeout: 700 });
+      } else {
+        warm();
+      }
+    }, 180);
+  }
+
+  function showPlaybackSettings(video = state.shortVideo?.current, options = {}) {
+    const trigger = options.trigger;
+    trigger?.setAttribute?.("aria-busy", "true");
+    return ensureShortVideoPlaybackSettings()
+      .then((showSettings) => showSettings(video, options))
+      .catch((error) => showBrowserToast(error?.message || "播放设置模块加载失败"))
+      .finally(() => trigger?.removeAttribute?.("aria-busy"));
   }
 
   function closePlaybackSettings(overlay, options = {}) {
@@ -7113,200 +7556,6 @@ export function createShortVideoPage(deps) {
     window.setTimeout(() => toast.remove(), 1500);
   }
 
-  function showSharePanel(video = state.shortVideo?.current, options = {}) {
-    const browser = els.workGrid?.querySelector?.(".short-video-browser");
-    if (!browser || !video?.id) return;
-    const existingOverlay = browser.querySelector(".short-video-more-overlay");
-    if (existingOverlay) closePlaybackSettings(existingOverlay, { restoreFocus: false });
-    browser.querySelector(".short-video-share-panel")?.remove();
-
-    const localUrl = localShortVideoUrl(video);
-    const originalUrl = originalDouyinUrl(video);
-    const title = cardTitle(video) || "本地短视频";
-    const authorName = String(video?.author?.name || "").trim();
-    const shareText = shortVideoShareText(video, localUrl);
-
-    const overlay = document.createElement("div");
-    overlay.className = "short-video-more-overlay short-video-share-overlay";
-    overlay._shortVideoReturnFocus = options.trigger || null;
-    overlay.addEventListener("click", (event) => {
-      if (event.target === overlay) closePlaybackSettings(overlay);
-    });
-
-    const sheet = document.createElement("section");
-    sheet.className = "short-video-more-sheet short-video-share-sheet";
-    sheet.setAttribute("role", "dialog");
-    sheet.setAttribute("aria-modal", "true");
-    sheet.setAttribute("aria-labelledby", "short-video-share-title");
-    sheet.tabIndex = -1;
-
-    const header = document.createElement("header");
-    header.className = "short-video-more-head";
-    const headingWrap = document.createElement("div");
-    const eyebrow = document.createElement("span");
-    eyebrow.textContent = "分享作品";
-    const heading = document.createElement("h2");
-    heading.id = "short-video-share-title";
-    heading.textContent = "发送给朋友";
-    headingWrap.append(eyebrow, heading);
-    const input = document.createElement("input");
-    input.value = localUrl;
-    input.readOnly = true;
-    input.setAttribute("aria-label", "本地作品链接");
-    input.addEventListener("focus", () => input.select());
-    input.addEventListener("click", () => input.select());
-    const close = document.createElement("button");
-    close.type = "button";
-    close.className = "short-video-more-close";
-    close.append(createIcon("close"));
-    close.setAttribute("aria-label", "关闭分享面板");
-    close.addEventListener("click", () => closePlaybackSettings(overlay));
-    header.append(headingWrap, close);
-
-    const preview = document.createElement("section");
-    preview.className = "short-video-share-preview";
-    const media = document.createElement("span");
-    media.className = "short-video-share-preview-media";
-    if (video.coverUrl) {
-      const image = document.createElement("img");
-      image.src = video.coverUrl;
-      image.alt = title;
-      image.decoding = "async";
-      media.append(image);
-    } else {
-      media.append(createIcon(isGalleryPost(video) ? "images" : "play"));
-    }
-    const mediaType = document.createElement("small");
-    mediaType.textContent = isGalleryPost(video) ? `图集 · ${galleryLabel(video)}` : (formatDuration(video.durationMs) || "视频");
-    media.append(mediaType);
-    const previewCopy = document.createElement("div");
-    const previewTitle = document.createElement("strong");
-    previewTitle.textContent = title;
-    const previewAuthor = document.createElement("span");
-    previewAuthor.textContent = authorName ? shortVideoAuthorHandle(authorName) : "本地作品";
-    const previewMeta = document.createElement("small");
-    previewMeta.textContent = `${formatShortVideoMetric(video, "likes", "待补")} 赞 · ${formatShortVideoMetric(video, "comments", "待补")} 评论`;
-    previewCopy.append(previewTitle, previewAuthor, previewMeta);
-    preview.append(media, previewCopy);
-
-    const actionSection = document.createElement("section");
-    actionSection.className = "short-video-share-section";
-    const actionTitle = document.createElement("strong");
-    actionTitle.textContent = "分享方式";
-    const actions = document.createElement("div");
-    actions.className = "short-video-share-actions";
-
-    const copyLocal = sharePanelAction("复制本地链接", "在这台设备或局域网打开", "link", async (button) => {
-      await copyShortVideoValue(localUrl, "已复制本地链接");
-      syncShareActionDone(button, "已复制");
-    });
-    copyLocal.classList.add("is-primary");
-    const copyOriginal = sharePanelAction("复制抖音链接", originalUrl ? "打开原作品" : "当前作品没有原链接", "external", async (button) => {
-      await copyShortVideoValue(originalUrl, "已复制抖音原链接");
-      syncShareActionDone(button, "已复制");
-    });
-    copyOriginal.disabled = !originalUrl;
-    const copyText = sharePanelAction("复制分享文案", "标题、作者和观看地址", "comment", async (button) => {
-      await copyShortVideoValue(shareText, "已复制分享文案");
-      syncShareActionDone(button, "已复制文案");
-    });
-    const systemShareAvailable = typeof navigator.share === "function";
-    const systemShare = sharePanelAction("系统分享", systemShareAvailable ? "发送到其他应用" : "当前浏览器不支持", "share", async (button) => {
-      if (!systemShareAvailable) return;
-      try {
-        await navigator.share({
-          title,
-          text: [title, authorName ? shortVideoAuthorHandle(authorName) : ""].filter(Boolean).join("\n"),
-          url: localUrl
-        });
-        syncShareActionDone(button, "已打开分享");
-      } catch (error) {
-        if (error?.name !== "AbortError") showBrowserToast("系统分享启动失败");
-      }
-    });
-    systemShare.disabled = !systemShareAvailable;
-    actions.append(copyLocal, copyOriginal, copyText, systemShare);
-    actionSection.append(actionTitle, actions);
-
-    const linkSection = document.createElement("details");
-    linkSection.className = "short-video-share-link";
-    const linkSummary = document.createElement("summary");
-    const linkLabel = document.createElement("strong");
-    linkLabel.textContent = "查看本地地址";
-    const linkHint = document.createElement("span");
-    const localOnly = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
-    linkHint.textContent = localOnly ? "仅这台设备可用" : "同一局域网可打开";
-    linkSummary.append(linkLabel, linkHint);
-    const linkField = document.createElement("div");
-    const linkButton = document.createElement("button");
-    linkButton.type = "button";
-    linkButton.textContent = "复制";
-    linkButton.addEventListener("click", () => {
-      copyShortVideoValue(localUrl, "已复制本地链接").then(() => {
-        linkButton.textContent = "已复制";
-        window.setTimeout(() => {
-          if (linkButton.isConnected) linkButton.textContent = "复制";
-        }, 1800);
-      }).catch(() => {
-        input.focus({ preventScroll: true });
-        input.select();
-      });
-    });
-    linkField.append(input, linkButton);
-    linkSection.append(linkSummary, linkField);
-
-    const note = document.createElement("p");
-    note.className = "short-video-share-note";
-    note.append(createIcon("check"), document.createTextNode("分享只复制地址或调用系统面板，不会自动发布内容"));
-
-    sheet.append(header, preview, actionSection, linkSection, note);
-    overlay.append(sheet);
-    browser.append(overlay);
-    isolateShortVideoTransientModal(overlay);
-    bindShortVideoModalFocusLoop(overlay, sheet, () => closePlaybackSettings(overlay));
-    focusShortVideoTransientModal(sheet, copyLocal);
-  }
-
-  function sharePanelAction(label, description, icon, action) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "short-video-share-action";
-    const visual = document.createElement("span");
-    visual.append(createIcon(icon));
-    const copy = document.createElement("span");
-    const title = document.createElement("b");
-    title.textContent = label;
-    const detail = document.createElement("small");
-    detail.textContent = description;
-    copy.append(title, detail);
-    button.append(visual, copy);
-    button.addEventListener("click", async () => {
-      if (button.disabled || button.getAttribute("aria-busy") === "true") return;
-      button.setAttribute("aria-busy", "true");
-      try {
-        await action?.(button);
-      } catch (error) {
-        console.warn(error);
-      } finally {
-        button.removeAttribute("aria-busy");
-      }
-    });
-    return button;
-  }
-
-  function syncShareActionDone(button, detail) {
-    if (!button) return;
-    button.classList.add("is-done");
-    const description = button.querySelector("small");
-    const previous = description?.textContent || "";
-    if (description) description.textContent = detail;
-    window.setTimeout(() => {
-      if (!button.isConnected) return;
-      button.classList.remove("is-done");
-      if (description) description.textContent = previous;
-    }, 1800);
-  }
-
   function railNav(icon, action, disabled) {
     const button = railButton("", createIcon(icon === "↑" ? "chevronUp" : "chevronDown"), "nav", icon === "↑" ? "上一个" : "下一个");
     button.title = icon === "↑" ? "上一个（↑）" : "下一个（↓）";
@@ -7353,433 +7602,159 @@ export function createShortVideoPage(deps) {
     return avatar;
   }
 
-  async function showAuthorPanel(video, options = {}) {
-    const browser = els.workGrid?.querySelector?.(".short-video-browser");
-    if (!browser) return;
-    const existingPanel = browser.querySelector(".short-video-author-panel");
-    if (existingPanel) closeAuthorPanel(existingPanel, { restoreFeed: false, restoreFocus: false, animate: false });
-    closeTransientPlayerControls();
-    authorPanelReturnFeed = shortVideoFeedSnapshot();
-    const author = video.author || {};
-    const selectedTopic = normalizeShortVideoTopic(options.topic || video.tags?.[0]);
-    const selectedSound = options.sound || video.sound || null;
-    const panel = document.createElement("section");
-    panel.className = "short-video-author-panel is-douyin-style";
-    panel.setAttribute("role", "dialog");
-    panel.setAttribute("aria-modal", "false");
-    panel._shortVideoReturnFocus = document.activeElement;
-    panel.dataset.returnFocusTab = String(options.initialTab || "works");
-    panel.dataset.returnFocusTopic = selectedTopic;
-    panel.setAttribute("aria-label", options.initialTab === "sound" && selectedSound
-      ? `原声 ${selectedSound.title || "作品原声"}`
-      : options.initialTab === "topic" && selectedTopic
-      ? `话题 ${selectedTopic}`
-      : options.initialTab === "comments"
-      ? "评论与视频详情"
-      : options.initialTab === "ai"
-      ? "本地内容识别"
-      : (options.initialTab === "related" ? "相关推荐" : "作者作品"));
-    panel.addEventListener("click", (event) => {
-      if (event.target === panel) closeAuthorPanel(panel);
+  function ensureShortVideoCommentsView() {
+    if (shortVideoCommentsViewPromise) return shortVideoCommentsViewPromise;
+    const moduleUrl = "/modules/short-videos/comments-view.js?v=20260715-comments-lazy-01";
+    shortVideoCommentsViewPromise = import(moduleUrl).then((module) => {
+      if (typeof module.createShortVideoCommentsView !== "function") {
+        throw new Error("评论模块加载失败");
+      }
+      return module.createShortVideoCommentsView({
+        api,
+        copyShortVideoValue,
+        createIcon,
+        formatCompact,
+        formatLocalCommentDate,
+        formatNumber,
+        localShortVideoUrl,
+        openDouyinLink,
+        originalDouyinUrl,
+        showBrowserToast
+      });
+    }).catch((error) => {
+      shortVideoCommentsViewPromise = null;
+      throw error;
     });
-
-    const sheet = document.createElement("div");
-    sheet.className = "short-video-author-sheet";
-    const dragHandle = document.createElement("button");
-    dragHandle.type = "button";
-    dragHandle.className = "short-video-author-drag-handle";
-    dragHandle.setAttribute("aria-label", "向下拖动关闭面板");
-    dragHandle.title = "下滑关闭";
-
-    const top = document.createElement("div");
-    top.className = "short-video-author-top";
-    const tabNav = document.createElement("div");
-    tabNav.className = "short-video-author-tab-nav";
-    const tabs = document.createElement("div");
-    tabs.className = "short-video-author-tabs";
-    tabs.setAttribute("role", "tablist");
-    tabs.setAttribute("aria-label", "视频信息视图");
-    const contextTabs = document.createElement("div");
-    contextTabs.className = "short-video-author-context-tabs";
-    contextTabs.setAttribute("role", "toolbar");
-    contextTabs.setAttribute("aria-label", "扩展信息");
-    const tabButtons = new Map();
-    const primaryTabItems = [
-      ["related", "相关推荐"],
-      ["comments", `评论 ${formatShortVideoMetric(video, "comments")}`]
-    ];
-    const contextTabItems = [
-      ["works", "作品"],
-      ["detail", "详情"],
-      ["ai", "识别"]
-    ];
-    if (selectedTopic) contextTabItems.push(["topic", `#${selectedTopic}`]);
-    if (selectedSound) contextTabItems.push(["sound", "原声"]);
-    const appendTabButton = (item, container, role = "tab") => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = item[1];
-      button.dataset.tab = item[0];
-      button.setAttribute("role", role);
-      button.addEventListener("click", () => renderAuthorTab(item[0], { userInitiated: true }));
-      tabButtons.set(item[0], button);
-      container.append(button);
-    };
-    primaryTabItems.forEach((item) => appendTabButton(item, tabs));
-    contextTabItems.forEach((item) => appendTabButton(item, contextTabs, "button"));
-    tabNav.append(tabs, contextTabs);
-    const syncContextTabOverflow = () => {
-      if (!contextTabs.isConnected) return;
-      const overflow = contextTabs.scrollWidth > contextTabs.clientWidth + 2;
-      const atStart = contextTabs.scrollLeft <= 2;
-      const atEnd = contextTabs.scrollLeft + contextTabs.clientWidth >= contextTabs.scrollWidth - 2;
-      contextTabs.classList.toggle("has-overflow", overflow);
-      contextTabs.classList.toggle("is-scroll-start", !overflow || atStart);
-      contextTabs.classList.toggle("is-scroll-end", !overflow || atEnd);
-      contextTabs.setAttribute("aria-label", overflow ? "扩展信息，可横向滚动" : "扩展信息");
-    };
-    contextTabs.addEventListener("scroll", syncContextTabOverflow, { passive: true });
-    if (typeof ResizeObserver === "function") {
-      panel._shortVideoContextTabsObserver = new ResizeObserver(syncContextTabOverflow);
-      panel._shortVideoContextTabsObserver.observe(contextTabs);
-    }
-    window.requestAnimationFrame(syncContextTabOverflow);
-    const close = document.createElement("button");
-    close.type = "button";
-    close.className = "short-video-author-close";
-    close.append(createIcon("close"));
-    close.setAttribute("aria-label", "关闭");
-    close.addEventListener("click", () => closeAuthorPanel(panel));
-    top.append(tabNav, close);
-
-    const head = document.createElement("header");
-    head.className = "short-video-author-head";
-    head.append(authorAvatar(author, "short-video-author-head-avatar"));
-    const title = document.createElement("div");
-    title.className = "short-video-author-title";
-    const name = document.createElement("strong");
-    name.textContent = author.name || "未知作者";
-    const profileLine = document.createElement("div");
-    profileLine.className = "short-video-author-profile-line";
-    const signature = document.createElement("div");
-    signature.className = "short-video-author-profile-signature";
-    const profileStats = document.createElement("div");
-    profileStats.className = "short-video-author-profile-stats";
-    const sub = document.createElement("span");
-    sub.textContent = "读取中";
-    title.append(name, profileLine, signature, profileStats, sub);
-    const refreshAuthorHeader = () => {
-      const lineText = authorProfileLineText(author);
-      profileLine.textContent = lineText;
-      profileLine.hidden = !lineText;
-      const signatureText = String(author.signature || "").trim();
-      signature.textContent = signatureText;
-      signature.hidden = !signatureText;
-      renderAuthorProfileStats(profileStats, author);
-    };
-    refreshAuthorHeader();
-
-    const actions = document.createElement("div");
-    actions.className = "short-video-author-actions";
-    const follow = createAuthorFollowButton(video, author, "panel");
-    const douyin = document.createElement("button");
-    douyin.type = "button";
-    douyin.textContent = "抖音主页";
-    douyin.addEventListener("click", () => openAuthorDouyinLink(author));
-    const authorPage = document.createElement("button");
-    authorPage.type = "button";
-    authorPage.textContent = "作者主页";
-    authorPage.addEventListener("click", () => {
-      closeAuthorPanel(panel, { restoreFeed: false });
-      openShortVideoAuthorPage(author, video);
-    });
-    actions.append(follow, douyin, authorPage);
-    head.append(title, actions);
-
-    const content = document.createElement("div");
-    content.className = "short-video-author-content";
-    const status = document.createElement("div");
-    status.className = "short-video-author-status";
-    status.textContent = "正在读取";
-    content.append(status);
-    sheet.append(dragHandle, head, top, content);
-    panel.append(sheet);
-    browser.append(panel);
-    bindAuthorPanelDragToClose(panel, sheet, dragHandle);
-    isolateAuthorPanelAsMobileModal(panel, sheet, browser, close);
-
-    let authorVideos = [];
-    let authorTotal = 0;
-    let authorVideosLoaded = false;
-    let authorWorksLoading = false;
-    let authorWorksError = "";
-    let authorWorksRequestId = 0;
-    let authorWorksSort = normalizeShortVideoSortValue(state.shortVideo.sort || "published");
-    let authorFeedSwitchRequested = false;
-    let activeTab = ["detail", "works", "comments", "ai", "sound", "topic", "related"].includes(options.initialTab)
-      && (options.initialTab !== "topic" || selectedTopic)
-      && (options.initialTab !== "sound" || selectedSound)
-      ? options.initialTab
-      : "works";
-    const autoSwitchAuthorFeed = options.switchAuthorFeed !== false;
-    let authorFeedSwitchStarted = false;
-    let relatedItems = [];
-    let relatedBasis = null;
-    let relatedLoading = false;
-    let relatedLoaded = false;
-    let relatedError = "";
-    let topicItems = [];
-    let topicTotal = 0;
-    let topicLoading = false;
-    let topicLoaded = false;
-    let topicError = "";
-    let soundItems = [];
-    let soundTotal = 0;
-    let soundLoading = false;
-    let soundLoaded = false;
-    let soundError = "";
-    const startAuthorFeedSwitch = () => {
-      if (!panel.isConnected || authorFeedSwitchStarted || !authorScopeId(video, author)) return;
-      if (!authorVideosLoaded) {
-        authorFeedSwitchRequested = true;
-        return;
-      }
-      authorFeedSwitchStarted = true;
-      authorFeedSwitchRequested = false;
-      switchToAuthorWorksFeed(video, author, panel, authorWorksSort).catch(showError);
-    };
-    const loadRelatedRecommendations = async (force = false) => {
-      if (relatedLoading || (relatedLoaded && !force)) return;
-      relatedLoading = true;
-      relatedError = "";
-      try {
-        const data = await api(`/api/short-videos/${encodeURIComponent(video.id)}/related?limit=36`);
-        if (!panel.isConnected) return;
-        relatedItems = Array.isArray(data.videos) ? data.videos : [];
-        for (const item of relatedItems) cacheAuthorPanelVideo(item);
-        relatedBasis = data.basis || null;
-        relatedLoaded = true;
-      } catch (error) {
-        if (!panel.isConnected) return;
-        relatedError = shortVideoFriendlyError(error, "相关推荐读取失败");
-      } finally {
-        relatedLoading = false;
-        if (panel.isConnected && ["related", "ai"].includes(activeTab)) renderAuthorTab(activeTab);
-      }
-    };
-    const loadTopicWorks = async (force = false) => {
-      if (!selectedTopic || topicLoading || (topicLoaded && !force)) return;
-      topicLoading = true;
-      topicError = "";
-      try {
-        const params = new URLSearchParams({
-          topic: selectedTopic,
-          source: "all",
-          sort: "likes",
-          limit: "36",
-          facets: "0"
-        });
-        const data = await api(`/api/short-videos?${params}`);
-        if (!panel.isConnected) return;
-        topicItems = Array.isArray(data.videos) ? data.videos : [];
-        topicTotal = Number(data.total || topicItems.length || 0);
-        topicLoaded = true;
-      } catch (error) {
-        if (!panel.isConnected) return;
-        topicError = shortVideoFriendlyError(error, "话题作品读取失败");
-      } finally {
-        topicLoading = false;
-        if (panel.isConnected && activeTab === "topic") renderAuthorTab("topic");
-      }
-    };
-    const loadSoundWorks = async (force = false) => {
-      if (!selectedSound?.key || soundLoading || (soundLoaded && !force)) return;
-      soundLoading = true;
-      soundError = "";
-      try {
-        const params = new URLSearchParams({
-          sound: selectedSound.key,
-          source: "all",
-          sort: "likes",
-          limit: "36",
-          facets: "0"
-        });
-        const data = await api(`/api/short-videos?${params}`);
-        if (!panel.isConnected) return;
-        soundItems = Array.isArray(data.videos) ? data.videos : [];
-        soundTotal = Number(data.total || soundItems.length || 0);
-        soundLoaded = true;
-      } catch (error) {
-        if (!panel.isConnected) return;
-        soundError = shortVideoFriendlyError(error, "原声作品读取失败");
-      } finally {
-        soundLoading = false;
-        if (panel.isConnected && activeTab === "sound") renderAuthorTab("sound");
-      }
-    };
-    const loadAuthorWorks = async (requestedSort = authorWorksSort) => {
-      const nextSort = normalizeShortVideoSortValue(requestedSort);
-      const requestId = ++authorWorksRequestId;
-      authorWorksSort = nextSort;
-      state.shortVideo.sort = nextSort;
-      authorWorksLoading = true;
-      authorWorksError = "";
-      if (panel.isConnected && activeTab === "works") renderAuthorTab("works");
-      try {
-        const params = new URLSearchParams();
-        if (author.secUid) params.set("author", author.secUid);
-        params.set("source", "all");
-        params.set("sort", nextSort);
-        params.set("limit", "36");
-        params.set("facets", "0");
-        const data = author.secUid ? await api(`/api/short-videos?${params}`) : { videos: [video], total: 1 };
-        if (!panel.isConnected || requestId !== authorWorksRequestId) return;
-        authorVideos = data.videos || [];
-        authorTotal = Number(data.total || authorVideos.length || 0);
-        authorVideosLoaded = true;
-        cacheAuthorPanelVideos([video, ...authorVideos]);
-        const richerAuthor = authorVideos.find((item) => authorHasProfileMeta(item.author))?.author || authorVideos[0]?.author;
-        if (richerAuthor) Object.assign(author, richerAuthor);
-        refreshAuthorHeader();
-        const homeCount = profileNumber(author.awemeCount);
-        sub.textContent = homeCount !== null
-          ? `${formatNumber(authorTotal)} 个本地作品 / 主页 ${formatNumber(homeCount)}`
-          : `${formatNumber(authorTotal)} 个本地作品`;
-      } catch (error) {
-        if (!panel.isConnected || requestId !== authorWorksRequestId) return;
-        authorVideosLoaded = true;
-        authorWorksError = shortVideoFriendlyError(error, "作者作品读取失败");
-        if (authorFeedSwitchRequested && activeTab === "works") startAuthorFeedSwitch();
-      } finally {
-        if (!panel.isConnected || requestId !== authorWorksRequestId) return;
-        authorWorksLoading = false;
-        if (activeTab === "works" || activeTab === "detail") renderAuthorTab(activeTab);
-      }
-    };
-    const renderAuthorTab = (tab, renderOptions = {}) => {
-      activeTab = tab;
-      panel.dataset.activeTab = tab;
-      for (const [key, button] of tabButtons) {
-        const selected = key === tab;
-        button.classList.toggle("active", selected);
-        if (button.getAttribute("role") === "tab") button.setAttribute("aria-selected", String(selected));
-        else button.setAttribute("aria-pressed", String(selected));
-      }
-      authorPanelTileMap = null;
-      content.replaceChildren();
-      if (tab === "works") {
-        if (autoSwitchAuthorFeed || renderOptions.userInitiated) startAuthorFeedSwitch();
-        content.append(authorWorksView(authorVideos, authorTotal, panel, state.shortVideo?.current || video, {
-          sort: authorWorksSort,
-          loading: authorWorksLoading || !authorVideosLoaded,
-          error: authorWorksError,
-          onSortChange: (nextSort) => loadAuthorWorks(nextSort)
-        }));
-        return;
-      }
-      if (tab === "detail") {
-        content.append(authorDetailView(video, author));
-        return;
-      }
-      if (tab === "comments") {
-        content.append(shortVideoCommentsView(video));
-        return;
-      }
-      if (tab === "ai") {
-        content.append(shortVideoInsightView({
-          videos: relatedItems,
-          basis: relatedBasis,
-          loading: relatedLoading,
-          loaded: relatedLoaded,
-          error: relatedError,
-          onRetry: () => loadRelatedRecommendations(true),
-          onShowRelated: () => renderAuthorTab("related", { userInitiated: true })
-        }, panel, state.shortVideo?.current || video));
-        if (!relatedLoaded && !relatedLoading) loadRelatedRecommendations().catch(() => {});
-        return;
-      }
-      if (tab === "related") {
-        content.append(shortVideoRelatedView({
-          videos: relatedItems,
-          basis: relatedBasis,
-          loading: relatedLoading,
-          loaded: relatedLoaded,
-          error: relatedError,
-          onRetry: () => loadRelatedRecommendations(true)
-        }, panel, state.shortVideo?.current || video));
-        if (!relatedLoaded && !relatedLoading) loadRelatedRecommendations().catch(() => {});
-        return;
-      }
-      if (tab === "topic") {
-        content.append(shortVideoTopicView({
-          topic: selectedTopic,
-          videos: topicItems,
-          total: topicTotal,
-          loading: topicLoading,
-          loaded: topicLoaded,
-          error: topicError,
-          onRetry: () => loadTopicWorks(true)
-        }, panel, state.shortVideo?.current || video));
-        if (!topicLoaded && !topicLoading) loadTopicWorks().catch(() => {});
-        return;
-      }
-      if (tab === "sound") {
-        content.append(shortVideoSoundView({
-          sound: selectedSound,
-          videos: soundItems,
-          total: soundTotal,
-          loading: soundLoading,
-          loaded: soundLoaded,
-          error: soundError,
-          onRetry: () => loadSoundWorks(true)
-        }, panel, state.shortVideo?.current || video));
-        if (!soundLoaded && !soundLoading) loadSoundWorks().catch(() => {});
-        return;
-      }
-      content.append(authorComingSoonView("内容待接入"));
-    };
-    renderAuthorTab(activeTab);
-    const commitPanelOpen = () => {
-      if (!panel.isConnected || panel.dataset.openCommitted === "1") return;
-      panel.dataset.openCommitted = "1";
-      browser.classList.add("is-author-panel-open");
-      panel.classList.add("is-open");
-      const focusActiveTab = () => {
-        if (!panel.isConnected) return;
-        tabButtons.get(activeTab)?.focus?.({ preventScroll: true });
-      };
-      window.requestAnimationFrame(focusActiveTab);
-      window.setTimeout(focusActiveTab, 100);
-    };
-    window.requestAnimationFrame(commitPanelOpen);
-    window.setTimeout(commitPanelOpen, 80);
-
-    loadAuthorWorks().catch(showError);
+    return shortVideoCommentsViewPromise;
   }
 
-  async function switchToAuthorWorksFeed(video, author = {}, panel = null, sort = state.shortVideo?.sort) {
-    const authorId = authorScopeId(video, author);
-    if (!authorId || !panel?.isConnected || !isCurrentShortVideo(video)) return;
-    state.shortVideo.author = authorId;
-    if (!isShortVideoAuthorDetailPage()) state.shortVideo.source = "all";
-    state.shortVideo.query = "";
-    state.shortVideo.topic = "";
-    state.shortVideo.sound = "";
-    state.shortVideo.soundInfo = null;
-    if (!isShortVideoAuthorDetailPage()) state.shortVideo.sort = normalizeShortVideoSortValue(sort || "published");
-    state.shortVideo.data = null;
-    const data = await fetchShortVideoDetail(video.id);
-    if (!panel.isConnected || !isCurrentShortVideo(video)) return;
-    state.shortVideo.current = data.video || state.shortVideo.current;
-    cacheAuthorPanelVideo(state.shortVideo.current);
-    state.shortVideo.prevId = data.prevId || "";
-    state.shortVideo.nextId = data.nextId || "";
-    await loadAdjacentVideos(state.shortVideo.current.id);
-    if (!panel.isConnected || !isCurrentShortVideo(video)) return;
-    refreshAdjacentPanelsDom();
-    syncShortVideoBrowserSearchDom();
-    syncAuthorPanelCurrentTile();
-    replaceRoute({ view: "shortVideos", shortVideoId: state.shortVideo.current.id });
+  function lazyShortVideoCommentsView(video, panel) {
+    const placeholder = document.createElement("div");
+    placeholder.className = "short-video-comments short-video-related-status is-loading";
+    placeholder.setAttribute("aria-busy", "true");
+    placeholder.textContent = "正在载入评论…";
+    const load = () => {
+      placeholder.classList.add("is-loading");
+      placeholder.setAttribute("aria-busy", "true");
+      placeholder.textContent = "正在载入评论…";
+      ensureShortVideoCommentsView().then((renderComments) => {
+        if (!placeholder.isConnected || panel.dataset.activeTab !== "comments") return;
+        placeholder.replaceWith(renderComments(video));
+      }).catch((error) => {
+        if (!placeholder.isConnected || panel.dataset.activeTab !== "comments") return;
+        placeholder.classList.remove("is-loading");
+        placeholder.removeAttribute("aria-busy");
+        const message = document.createElement("span");
+        message.textContent = error?.message || "评论模块加载失败";
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.textContent = "重试";
+        retry.addEventListener("click", load);
+        placeholder.replaceChildren(message, retry);
+      });
+    };
+    load();
+    return placeholder;
+  }
+
+  function ensureShortVideoAuthorPanel() {
+    if (shortVideoAuthorPanelPromise) return shortVideoAuthorPanelPromise;
+    markShortVideoPerformance("author-panel-module-start");
+    const moduleUrl = "/modules/short-videos/author-panel.js?v=20260715-author-panel-lazy-04";
+    shortVideoAuthorPanelPromise = import(moduleUrl).then((module) => {
+      if (typeof module.createShortVideoAuthorPanel !== "function") {
+        throw new Error("作者信息模块加载失败");
+      }
+      const showPanel = module.createShortVideoAuthorPanel({
+        activateShortVideoCovers,
+        activePlayer,
+        activeReelStack,
+        api,
+        appendCaptionText,
+        applyShortVideoLikeBadgeState,
+        authorAvatar,
+        bindAuthorPanelDragToClose,
+        cacheAuthorPanelVideo,
+        cacheAuthorPanelVideos,
+        captionTitleWithTags,
+        cardTitle,
+        clearShortVideoDeleteSelection,
+        closeAuthorPanel,
+        closeTransientPlayerControls,
+        commitShortVideoSearch,
+        coverEagerCount,
+        createAuthorFollowButton,
+        createIcon,
+        currentAuthorPanelVideoRequestId: () => authorPanelVideoRequestId,
+        disposeShortVideoMedia,
+        els,
+        fetchShortVideoDetail,
+        formatBytes,
+        formatCompact,
+        formatDate,
+        formatDuration,
+        formatNumber,
+        formatShortVideoMetric,
+        galleryBadge,
+        galleryLabel,
+        isGalleryPost,
+        isolateAuthorPanelAsMobileModal,
+        isShortVideoAuthorDetailPage,
+        lazyShortVideoCommentsView,
+        loadAdjacentVideos,
+        nextAuthorPanelVideoRequestId: () => ++authorPanelVideoRequestId,
+        normalizeShortVideoSortValue,
+        normalizeShortVideoSound,
+        normalizeShortVideoTopic,
+        openAuthorDouyinLink,
+        openDouyinLink,
+        openShortVideoAuthorPage,
+        prefetchRelatedVideo,
+        refreshAdjacentPanelsDom,
+        renderAuthorSignature,
+        renderReelPanel,
+        renderStats,
+        replaceRoute,
+        resolvedShortVideoDetail,
+        resumeActiveSound,
+        setAuthorPanelReturnFeed: (value) => {
+          authorPanelReturnFeed = value;
+        },
+        setAuthorPanelTileMap: (value) => {
+          authorPanelTileMap = value;
+        },
+        setReelPanelInteractionState,
+        shortVideoAuthorHandle,
+        shortVideoCardCoverUrl,
+        shortVideoFeedSnapshot,
+        shortVideoFriendlyError,
+        shortVideosWithCovers,
+        showBrowserToast,
+        showError,
+        state,
+        syncAuthorPanelCurrentTile,
+        syncCurrentNavigationDom,
+        syncRelatedPanelCurrentItem,
+        syncShortVideoBrowserSearchDom
+      });
+      markShortVideoPerformance("author-panel-module-ready");
+      return showPanel;
+    }).catch((error) => {
+      shortVideoAuthorPanelPromise = null;
+      markShortVideoPerformance("author-panel-module-error", {
+        message: String(error?.message || error || "unknown")
+      });
+      throw error;
+    });
+    return shortVideoAuthorPanelPromise;
+  }
+
+  function showAuthorPanel(video, options = {}) {
+    return ensureShortVideoAuthorPanel()
+      .then((showPanel) => showPanel(video, options))
+      .catch((error) => {
+        showBrowserToast(error?.message || "作者信息模块加载失败");
+      });
   }
 
   function authorScopeId(video = {}, author = {}) {
@@ -7793,121 +7768,6 @@ export function createShortVideoPage(deps) {
     const awemeId = String(video?.awemeId || "").trim();
     const currentAwemeId = String(currentVideo?.awemeId || "").trim();
     return Boolean(awemeId && currentAwemeId && awemeId === currentAwemeId);
-  }
-
-  function authorWorksView(videos, total, panel, currentVideo = null, options = {}) {
-    const wrap = document.createElement("div");
-    wrap.className = "short-video-author-works";
-    const heading = document.createElement("div");
-    heading.className = "short-video-author-section-head";
-    const label = document.createElement("div");
-    label.className = "short-video-author-section-title";
-    label.textContent = `${formatNumber(total || videos.length || 0)} 个作品`;
-    const sort = document.createElement("select");
-    sort.className = "short-video-author-sort-select";
-    sort.setAttribute("aria-label", "作者作品排序");
-    for (const item of [
-      ["published", "时间倒序"],
-      ["publishedAsc", "时间正序"],
-      ["likes", "点赞最多"],
-      ["likesAsc", "点赞最少"],
-      ["comments", "评论最多"],
-      ["duration", "时长最长"]
-    ]) {
-      const option = document.createElement("option");
-      option.value = item[0];
-      option.textContent = item[1];
-      sort.append(option);
-    }
-    sort.value = normalizeShortVideoSortValue(options.sort || "published");
-    sort.disabled = Boolean(options.loading);
-    sort.addEventListener("change", () => options.onSortChange?.(sort.value));
-    heading.append(label, sort);
-    const grid = document.createElement("div");
-    grid.className = "short-video-author-grid";
-    const tileMap = new Map();
-    const displayVideos = shortVideosWithCovers(videos);
-    if (options.error) {
-      const error = document.createElement("div");
-      error.className = "short-video-author-status is-error";
-      error.textContent = options.error;
-      grid.append(error);
-    } else if (options.loading && !displayVideos.length) {
-      const loading = document.createElement("div");
-      loading.className = "short-video-author-status is-loading";
-      loading.textContent = "正在按所选顺序读取作品";
-      grid.append(loading);
-    } else if (!displayVideos.length) {
-      const empty = document.createElement("div");
-      empty.className = "short-video-author-status";
-      empty.textContent = videos.length ? "封面补齐前暂不显示这些短视频。" : "没有视频";
-      grid.append(empty);
-    } else {
-      for (const [index, item] of displayVideos.entries()) {
-        const tile = authorVideoTile(item, panel, index, {
-          current: isCurrentShortVideo(item, currentVideo),
-          previous: displayVideos[index - 1] || null,
-          next: displayVideos[index + 1] || null
-        });
-        if (tile) {
-          const id = String(item.id || "").trim();
-          const awemeId = String(item.awemeId || "").trim();
-          if (id) tileMap.set(`id:${id}`, tile);
-          if (awemeId) tileMap.set(`aweme:${awemeId}`, tile);
-          grid.append(tile);
-        }
-      }
-    }
-    authorPanelTileMap = tileMap;
-    activateShortVideoCovers(grid);
-    wrap.append(heading, grid);
-    return wrap;
-  }
-
-  function authorDetailView(video, author) {
-    const detail = document.createElement("div");
-    detail.className = "short-video-author-detail";
-    const authorLine = document.createElement("button");
-    authorLine.type = "button";
-    authorLine.className = "short-video-author-detail-owner";
-    authorLine.textContent = `${shortVideoAuthorHandle(author.name)} ›`;
-    authorLine.addEventListener("click", () => openAuthorDouyinLink(author));
-    const profile = authorProfileBlock(author);
-    const title = document.createElement("p");
-    appendCaptionText(title, captionTitleWithTags(video), video);
-    const stats = document.createElement("div");
-    stats.className = "short-video-author-detail-stats";
-    for (const item of [
-      ["点赞", formatShortVideoMetric(video, "likes", "待补")],
-      ["评论", formatShortVideoMetric(video, "comments", "待补")],
-      ["收藏", formatShortVideoMetric(video, "collects", "待补")],
-      ["分享", formatShortVideoMetric(video, "shares", "待补")],
-      [isGalleryPost(video) ? "图片" : "时长", isGalleryPost(video) ? galleryLabel(video) : (formatDuration(video.durationMs) || "-")],
-      ["大小", formatBytes(video.size || 0) || "-"]
-    ]) {
-      const cell = document.createElement("span");
-      const value = document.createElement("b");
-      value.textContent = item[1];
-      const label = document.createElement("small");
-      label.textContent = item[0];
-      cell.append(value, label);
-      stats.append(cell);
-    }
-    const actions = document.createElement("div");
-    actions.className = "short-video-author-detail-actions";
-    const original = document.createElement("button");
-    original.type = "button";
-    original.textContent = "打开原视频";
-    original.addEventListener("click", () => openDouyinLink(video));
-    const home = document.createElement("button");
-    home.type = "button";
-    home.textContent = "打开抖音主页";
-    home.addEventListener("click", () => openAuthorDouyinLink(author));
-    actions.append(original, home);
-    detail.append(authorLine);
-    if (profile) detail.append(profile);
-    detail.append(title, stats, actions);
-    return detail;
   }
 
   function authorProfileLineText(author) {
@@ -7941,1118 +7801,6 @@ export function createShortVideoPage(deps) {
       ["作品", profileNumber(author?.awemeCount)]
     ].filter((item) => item[1] !== null);
   }
-
-  function renderAuthorProfileStats(target, author) {
-    target.textContent = "";
-    const items = profileStatItems(author);
-    target.hidden = !items.length;
-    for (const [label, value] of items) {
-      const cell = document.createElement("span");
-      cell.dataset.profileStat = label;
-      const strong = document.createElement("b");
-      strong.textContent = formatCompact(value);
-      const small = document.createElement("small");
-      small.textContent = label;
-      cell.append(strong, small);
-      target.append(cell);
-    }
-  }
-
-  function authorProfileBlock(author) {
-    if (!authorHasProfileMeta(author)) return null;
-    const block = document.createElement("div");
-    block.className = "short-video-author-profile-block";
-    const lineText = authorProfileLineText(author);
-    if (lineText) {
-      const line = document.createElement("div");
-      line.className = "short-video-author-profile-line";
-      line.textContent = lineText;
-      block.append(line);
-    }
-    const signature = String(author?.signature || "").trim();
-    if (signature) {
-      const bio = document.createElement("div");
-      bio.className = "short-video-author-profile-signature";
-      bio.textContent = signature;
-      block.append(bio);
-    }
-    const stats = document.createElement("div");
-    stats.className = "short-video-author-profile-stats";
-    renderAuthorProfileStats(stats, author);
-    if (!stats.hidden) block.append(stats);
-    return block;
-  }
-
-  function shortVideoCommentsView(video) {
-    const commentCount = Math.max(0, Number(video?.stats?.comments || 0));
-    const originalUrl = originalDouyinUrl(video);
-    const videoId = String(video?.id || "").trim();
-    const commentsEndpoint = `/api/short-videos/${encodeURIComponent(videoId)}/comments`;
-    const wrap = document.createElement("div");
-    wrap.className = "short-video-comments";
-
-    const heading = document.createElement("div");
-    heading.className = "short-video-comments-heading";
-    const title = document.createElement("strong");
-    title.textContent = `${formatCompact(commentCount)} 条评论`;
-    const source = document.createElement("span");
-    source.textContent = "原视频统计";
-    heading.append(title, source);
-
-    const scroll = document.createElement("div");
-    scroll.className = "short-video-comments-scroll";
-
-    const localSection = document.createElement("section");
-    localSection.className = "short-video-local-comments";
-    const localHeading = document.createElement("div");
-    localHeading.className = "short-video-local-comments-heading";
-    const localTitle = document.createElement("strong");
-    localTitle.textContent = "我的本地评论";
-    const localCount = document.createElement("span");
-    localCount.textContent = "读取中";
-    localHeading.append(localTitle, localCount);
-    const localList = document.createElement("div");
-    localList.className = "short-video-local-comment-list";
-    localSection.append(localHeading, localList);
-
-    const remote = document.createElement("section");
-    remote.className = "short-video-comments-remote";
-    const remoteIcon = document.createElement("span");
-    remoteIcon.className = "short-video-comments-remote-icon";
-    remoteIcon.append(createIcon("comment"));
-    const remoteCopy = document.createElement("div");
-    const remoteTitle = document.createElement("strong");
-    remoteTitle.textContent = commentCount
-      ? `${formatCompact(commentCount)} 条抖音评论未同步`
-      : "原视频暂无评论正文";
-    const remoteMessage = document.createElement("p");
-    remoteMessage.textContent = commentCount
-      ? "这里只显示保存在本机的评论；原评论请前往抖音查看。"
-      : "当前资料库没有保存原视频评论正文。";
-    remoteCopy.append(remoteTitle, remoteMessage);
-
-    const actions = document.createElement("div");
-    actions.className = "short-video-comments-remote-actions";
-    const open = document.createElement("button");
-    open.type = "button";
-    open.className = "is-primary";
-    open.textContent = "查看原评论";
-    open.disabled = !originalUrl;
-    open.title = originalUrl ? "打开抖音原视频" : "当前作品没有原始链接";
-    open.addEventListener("click", () => openDouyinLink(video));
-    const copy = document.createElement("button");
-    copy.type = "button";
-    copy.textContent = "复制链接";
-    copy.addEventListener("click", () => {
-      const value = originalUrl || localShortVideoUrl(video);
-      copyShortVideoValue(value, originalUrl ? "已复制抖音原链接" : "已复制本地链接").catch(() => {});
-    });
-    actions.append(open, copy);
-    remote.append(remoteIcon, remoteCopy, actions);
-
-    const note = document.createElement("div");
-    note.className = "short-video-comments-note";
-    note.append(createIcon("check"), document.createTextNode("“我的本地评论”只保存在这台设备，不会发布到抖音"));
-
-    scroll.append(remote, localSection, note);
-
-    const composer = document.createElement("form");
-    composer.className = "short-video-comment-composer";
-    const composerAvatar = document.createElement("span");
-    composerAvatar.className = "short-video-comment-composer-avatar";
-    composerAvatar.textContent = "我";
-    const composerField = document.createElement("div");
-    composerField.className = "short-video-comment-composer-field";
-    const textarea = document.createElement("textarea");
-    textarea.rows = 1;
-    textarea.maxLength = 500;
-    textarea.placeholder = "说点什么，只保存在本机…";
-    textarea.setAttribute("aria-label", "输入本地评论");
-    const composerFooter = document.createElement("div");
-    composerFooter.className = "short-video-comment-composer-footer";
-    const composerHint = document.createElement("span");
-    composerHint.textContent = "Enter 发送 · Shift+Enter 换行";
-    const composerActions = document.createElement("span");
-    const characterCount = document.createElement("small");
-    characterCount.textContent = "0/500";
-    const submit = document.createElement("button");
-    submit.type = "submit";
-    submit.textContent = "发送";
-    submit.disabled = true;
-    composerActions.append(characterCount, submit);
-    composerFooter.append(composerHint, composerActions);
-    composerField.append(textarea, composerFooter);
-    composer.append(composerAvatar, composerField);
-
-    let comments = [];
-    let loading = true;
-    let loadError = "";
-
-    const renderLocalComments = () => {
-      localList.innerHTML = "";
-      localCount.textContent = loading ? "读取中" : `${comments.length} 条`;
-      if (loading) {
-        const status = document.createElement("div");
-        status.className = "short-video-local-comments-status is-loading";
-        status.textContent = "正在读取本地评论";
-        localList.append(status);
-        return;
-      }
-      if (loadError) {
-        const status = document.createElement("div");
-        status.className = "short-video-local-comments-status is-error";
-        const message = document.createElement("span");
-        message.textContent = loadError;
-        const retry = document.createElement("button");
-        retry.type = "button";
-        retry.textContent = "重试";
-        retry.addEventListener("click", () => loadLocalComments());
-        status.append(message, retry);
-        localList.append(status);
-        return;
-      }
-      if (!comments.length) {
-        const empty = document.createElement("div");
-        empty.className = "short-video-local-comments-status";
-        empty.textContent = "还没有本地评论，写下第一条只给自己看的评论。";
-        localList.append(empty);
-        return;
-      }
-      for (const comment of comments) localList.append(renderLocalComment(comment));
-    };
-
-    const renderLocalComment = (comment = {}) => {
-      const item = document.createElement("article");
-      item.className = "short-video-local-comment";
-      item.dataset.commentId = comment.id || "";
-      const avatar = document.createElement("span");
-      avatar.className = "short-video-local-comment-avatar";
-      avatar.textContent = "我";
-      const body = document.createElement("div");
-      body.className = "short-video-local-comment-body";
-      const meta = document.createElement("div");
-      meta.className = "short-video-local-comment-meta";
-      const name = document.createElement("strong");
-      name.textContent = "我";
-      const badge = document.createElement("span");
-      badge.textContent = "本地";
-      const time = document.createElement("time");
-      time.dateTime = comment.createdAt || "";
-      time.textContent = formatLocalCommentDate(comment.createdAt);
-      meta.append(name, badge, time);
-      const content = document.createElement("p");
-      content.textContent = comment.body || "";
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "short-video-local-comment-delete";
-      remove.textContent = "删除";
-      remove.setAttribute("aria-label", "删除本地评论");
-      let confirmTimer = 0;
-      remove.addEventListener("click", async () => {
-        if (remove.dataset.confirm !== "1") {
-          remove.dataset.confirm = "1";
-          remove.textContent = "确认删除";
-          window.clearTimeout(confirmTimer);
-          confirmTimer = window.setTimeout(() => {
-            remove.dataset.confirm = "0";
-            remove.textContent = "删除";
-          }, 10000);
-          return;
-        }
-        window.clearTimeout(confirmTimer);
-        remove.disabled = true;
-        remove.setAttribute("aria-busy", "true");
-        try {
-          const data = await api(`${commentsEndpoint}/${encodeURIComponent(comment.id || "")}`, { method: "DELETE" });
-          comments = Array.isArray(data.comments) ? data.comments : comments.filter((itemComment) => itemComment.id !== comment.id);
-          renderLocalComments();
-          showBrowserToast("已删除本地评论");
-        } catch (error) {
-          remove.disabled = false;
-          remove.removeAttribute("aria-busy");
-          remove.dataset.confirm = "0";
-          remove.textContent = "删除";
-          showBrowserToast(error.message || "本地评论删除失败");
-        }
-      });
-      body.append(meta, content, remove);
-      item.append(avatar, body);
-      return item;
-    };
-
-    const loadLocalComments = async () => {
-      loading = true;
-      loadError = "";
-      renderLocalComments();
-      try {
-        const data = await api(commentsEndpoint);
-        comments = Array.isArray(data.comments) ? data.comments : [];
-      } catch (error) {
-        loadError = error.message || "本地评论读取失败";
-      } finally {
-        loading = false;
-        renderLocalComments();
-      }
-    };
-
-    const syncComposer = () => {
-      const value = textarea.value || "";
-      const length = Array.from(value).length;
-      characterCount.textContent = `${length}/500`;
-      submit.disabled = !value.trim() || submit.getAttribute("aria-busy") === "true";
-      composerField.classList.toggle("is-dirty", Boolean(value));
-      textarea.style.height = "auto";
-      textarea.style.height = `${Math.min(104, Math.max(28, textarea.scrollHeight || 28))}px`;
-    };
-    textarea.addEventListener("input", syncComposer);
-    textarea.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
-      event.preventDefault();
-      if (!submit.disabled) composer.requestSubmit();
-    });
-    composer.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const body = textarea.value.trim();
-      if (!body || submit.getAttribute("aria-busy") === "true") return;
-      submit.setAttribute("aria-busy", "true");
-      submit.disabled = true;
-      submit.textContent = "发送中";
-      try {
-        const data = await api(commentsEndpoint, { method: "POST", body: { body } });
-        comments = Array.isArray(data.comments) ? data.comments : [data.comment, ...comments].filter(Boolean);
-        textarea.value = "";
-        renderLocalComments();
-        scroll.scrollTop = 0;
-        showBrowserToast("本地评论已保存");
-      } catch (error) {
-        showBrowserToast(error.message || "本地评论保存失败");
-      } finally {
-        submit.removeAttribute("aria-busy");
-        submit.textContent = "发送";
-        syncComposer();
-        textarea.focus();
-      }
-    });
-
-    wrap.append(heading, scroll, composer);
-    renderLocalComments();
-    loadLocalComments();
-    return wrap;
-  }
-
-  function shortVideoSoundView(data = {}, panel, currentVideo) {
-    const sound = data.sound || currentVideo?.sound || {};
-    const wrap = document.createElement("div");
-    wrap.className = "short-video-sound";
-    const heading = document.createElement("div");
-    heading.className = "short-video-sound-heading";
-    const cover = document.createElement("span");
-    cover.className = "short-video-sound-cover";
-    if (sound.coverUrl) {
-      const image = document.createElement("img");
-      image.src = sound.coverUrl;
-      image.alt = `${sound.title || "原声"}封面`;
-      image.decoding = "async";
-      cover.append(image);
-    } else {
-      cover.append(createIcon("headphones"));
-    }
-    const copy = document.createElement("div");
-    const eyebrow = document.createElement("span");
-    eyebrow.textContent = sound.localAvailable ? "本地原声" : "作品原声";
-    const title = document.createElement("strong");
-    title.textContent = sound.title || "作品原声";
-    const author = document.createElement("small");
-    author.textContent = [sound.author ? `音乐人 ${sound.author}` : "", data.loaded ? `${formatNumber(data.total || 0)} 个作品` : "正在统计"].filter(Boolean).join(" · ");
-    copy.append(eyebrow, title, author);
-    const actions = document.createElement("div");
-    actions.className = "short-video-sound-actions";
-    let audio = null;
-    let preview = null;
-    if (sound.previewUrl) {
-      audio = document.createElement("audio");
-      audio.className = "short-video-sound-audio";
-      audio.src = sound.previewUrl;
-      audio.preload = "metadata";
-      preview = document.createElement("button");
-      preview.type = "button";
-      preview.textContent = sound.localAvailable ? "播放本地原声" : "试听原声";
-      const syncPreview = () => {
-        const playing = !audio.paused && !audio.ended;
-        preview.textContent = playing ? "暂停原声" : (sound.localAvailable ? "播放本地原声" : "试听原声");
-        cover.classList.toggle("is-playing", playing);
-      };
-      audio.addEventListener("play", syncPreview);
-      audio.addEventListener("pause", syncPreview);
-      audio.addEventListener("ended", syncPreview);
-      audio.addEventListener("error", () => {
-        preview.disabled = true;
-        preview.textContent = "原声暂不可播放";
-        cover.classList.remove("is-playing");
-      });
-      preview.addEventListener("click", async () => {
-        if (audio.paused) {
-          activePlayer()?.pause?.();
-          try {
-            await audio.play();
-          } catch (error) {
-            showBrowserToast(error?.name === "NotAllowedError"
-              ? "浏览器拦截了播放，请再次点击试听"
-              : "原声暂时无法播放");
-          }
-        } else {
-          audio.pause();
-        }
-        syncPreview();
-      });
-      actions.append(preview, audio);
-    }
-    const enter = document.createElement("button");
-    enter.type = "button";
-    enter.className = "is-primary";
-    enter.textContent = "进入原声流";
-    enter.disabled = !sound.key || data.loading;
-    enter.addEventListener("click", () => enterShortVideoSoundFeed(sound, currentVideo, panel).catch(showError));
-    actions.append(enter);
-    heading.append(cover, copy, actions);
-    wrap.append(heading);
-
-    if (data.error) {
-      const error = document.createElement("div");
-      error.className = "short-video-related-status is-error";
-      const message = document.createElement("span");
-      message.textContent = data.error;
-      const retry = document.createElement("button");
-      retry.type = "button";
-      retry.textContent = "重新加载";
-      retry.addEventListener("click", () => data.onRetry?.());
-      error.append(message, retry);
-      wrap.append(error);
-      return wrap;
-    }
-    if (data.loading || !data.loaded) {
-      const loading = document.createElement("div");
-      loading.className = "short-video-related-status is-loading";
-      loading.append(createIcon("repeat"), document.createTextNode("正在读取同原声作品"));
-      wrap.append(loading);
-      return wrap;
-    }
-    const videos = shortVideosWithCovers(Array.isArray(data.videos) ? data.videos : []);
-    if (!videos.length) {
-      const empty = document.createElement("div");
-      empty.className = "short-video-related-status";
-      empty.textContent = "本地库暂时没有同原声作品";
-      wrap.append(empty);
-      return wrap;
-    }
-    const grid = document.createElement("div");
-    grid.className = "short-video-author-grid short-video-sound-grid";
-    for (const [index, video] of videos.entries()) {
-      const tile = authorVideoTile(video, panel, index, {
-        current: isCurrentShortVideo(video, currentVideo),
-        previous: videos[index - 1] || null,
-        next: videos[index + 1] || null,
-        onOpen: (item, sourcePanel) => enterShortVideoSoundFeed(sound, item, sourcePanel)
-      });
-      if (tile) grid.append(tile);
-    }
-    activateShortVideoCovers(grid);
-    wrap.append(grid);
-    return wrap;
-  }
-
-  async function enterShortVideoSoundFeed(sound, targetVideo, panel) {
-    const key = normalizeShortVideoSound(sound?.key);
-    const video = targetVideo || state.shortVideo?.current;
-    if (!key || !video?.id) return;
-    authorPanelReturnFeed = null;
-    state.shortVideo.authorPage = "";
-    state.shortVideo.author = "all";
-    state.shortVideo.source = "all";
-    state.shortVideo.sort = "likes";
-    state.shortVideo.query = "";
-    state.shortVideo.topic = "";
-    state.shortVideo.sound = key;
-    state.shortVideo.soundInfo = sound;
-    state.shortVideo.media = "all";
-    state.shortVideo.data = null;
-    clearShortVideoDeleteSelection();
-
-    if (isCurrentShortVideo(video)) {
-      const data = await fetchShortVideoDetail(video.id);
-      if (!isCurrentShortVideo(video)) return;
-      state.shortVideo.current = data.video || video;
-      state.shortVideo.prevId = data.prevId || "";
-      state.shortVideo.nextId = data.nextId || "";
-      await loadAdjacentVideos(video.id);
-      if (!isCurrentShortVideo(video)) return;
-      renderStats();
-      refreshAdjacentPanelsDom();
-      syncCurrentNavigationDom();
-    } else {
-      await replaceVideoFromAuthorPanel(video, panel);
-    }
-    syncShortVideoBrowserSearchDom();
-    if (panel?.isConnected) closeAuthorPanel(panel, { restoreFeed: false });
-    replaceRoute({ view: "shortVideos", shortVideoId: state.shortVideo.current?.id || video.id });
-    showBrowserToast(`已进入原声：${sound.title || "作品原声"}`);
-  }
-
-  function shortVideoTopicView(data = {}, panel, currentVideo) {
-    const topic = normalizeShortVideoTopic(data.topic);
-    const wrap = document.createElement("div");
-    wrap.className = "short-video-topic";
-    const heading = document.createElement("div");
-    heading.className = "short-video-topic-heading";
-    const copy = document.createElement("div");
-    const eyebrow = document.createElement("span");
-    eyebrow.textContent = "本地话题";
-    const title = document.createElement("strong");
-    title.textContent = `#${topic}`;
-    const count = document.createElement("small");
-    count.textContent = data.loaded ? `${formatNumber(data.total || 0)} 个作品` : "正在统计";
-    copy.append(eyebrow, title, count);
-    const enter = document.createElement("button");
-    enter.type = "button";
-    enter.textContent = "进入话题流";
-    enter.disabled = !topic || data.loading;
-    enter.addEventListener("click", () => enterShortVideoTopicFeed(topic, currentVideo, panel).catch(showError));
-    heading.append(copy, enter);
-    wrap.append(heading);
-
-    if (data.error) {
-      const error = document.createElement("div");
-      error.className = "short-video-related-status is-error";
-      const message = document.createElement("span");
-      message.textContent = data.error;
-      const retry = document.createElement("button");
-      retry.type = "button";
-      retry.textContent = "重新加载";
-      retry.addEventListener("click", () => data.onRetry?.());
-      error.append(message, retry);
-      wrap.append(error);
-      return wrap;
-    }
-    if (data.loading || !data.loaded) {
-      const loading = document.createElement("div");
-      loading.className = "short-video-related-status is-loading";
-      loading.append(createIcon("repeat"), document.createTextNode("正在读取同话题作品"));
-      wrap.append(loading);
-      return wrap;
-    }
-    const videos = shortVideosWithCovers(Array.isArray(data.videos) ? data.videos : []);
-    if (!videos.length) {
-      const empty = document.createElement("div");
-      empty.className = "short-video-related-status";
-      empty.textContent = "本地库暂时没有同话题作品";
-      wrap.append(empty);
-      return wrap;
-    }
-    const grid = document.createElement("div");
-    grid.className = "short-video-author-grid short-video-topic-grid";
-    for (const [index, video] of videos.entries()) {
-      const tile = authorVideoTile(video, panel, index, {
-        current: isCurrentShortVideo(video, currentVideo),
-        previous: videos[index - 1] || null,
-        next: videos[index + 1] || null,
-        onOpen: (item, sourcePanel) => enterShortVideoTopicFeed(topic, item, sourcePanel)
-      });
-      if (tile) grid.append(tile);
-    }
-    activateShortVideoCovers(grid);
-    wrap.append(grid);
-    return wrap;
-  }
-
-  async function enterShortVideoTopicFeed(value, targetVideo, panel) {
-    const topic = normalizeShortVideoTopic(value);
-    const video = targetVideo || state.shortVideo?.current;
-    if (!topic || !video?.id) return;
-    authorPanelReturnFeed = null;
-    state.shortVideo.authorPage = "";
-    state.shortVideo.author = "all";
-    state.shortVideo.source = "all";
-    state.shortVideo.sort = "likes";
-    state.shortVideo.query = "";
-    state.shortVideo.topic = topic;
-    state.shortVideo.sound = "";
-    state.shortVideo.soundInfo = null;
-    state.shortVideo.media = "all";
-    state.shortVideo.data = null;
-    clearShortVideoDeleteSelection();
-
-    if (isCurrentShortVideo(video)) {
-      const data = await fetchShortVideoDetail(video.id);
-      if (!isCurrentShortVideo(video)) return;
-      state.shortVideo.current = data.video || video;
-      state.shortVideo.prevId = data.prevId || "";
-      state.shortVideo.nextId = data.nextId || "";
-      await loadAdjacentVideos(video.id);
-      if (!isCurrentShortVideo(video)) return;
-      renderStats();
-      refreshAdjacentPanelsDom();
-      syncCurrentNavigationDom();
-    } else {
-      await replaceVideoFromAuthorPanel(video, panel);
-    }
-    syncShortVideoBrowserSearchDom();
-    if (panel?.isConnected) closeAuthorPanel(panel, { restoreFeed: false });
-    replaceRoute({ view: "shortVideos", shortVideoId: state.shortVideo.current?.id || video.id });
-    showBrowserToast(`已进入 #${topic}`);
-  }
-
-  function shortVideoInsightQuery(video = {}) {
-    const cleanTitle = String(video.title || video.description || "")
-      .replace(/#[^\s#@]+/gu, " ")
-      .replace(/@[^\s#@]+/gu, " ")
-      .replace(/[|｜]+/gu, " ")
-      .replace(/\s+/gu, " ")
-      .trim();
-    if (cleanTitle) return cleanTitle.slice(0, 32);
-    const firstTag = normalizeShortVideoTopic(video.tags?.[0]);
-    return firstTag || String(video.author?.name || "").trim().slice(0, 32);
-  }
-
-  function shortVideoFrameLabel(video = {}) {
-    const width = Math.max(0, Number(video.width || 0));
-    const height = Math.max(0, Number(video.height || 0));
-    if (!width || !height) return "规格未知";
-    const orientation = Math.abs(width - height) < Math.max(width, height) * 0.04
-      ? "方形"
-      : (width > height ? "横屏" : "竖屏");
-    return `${orientation} · ${width}×${height}`;
-  }
-
-  function shortVideoInsightView(data = {}, panel, currentVideo = {}) {
-    const video = currentVideo || {};
-    const gallery = isGalleryPost(video);
-    const query = shortVideoInsightQuery(video);
-    const tags = [...new Set((Array.isArray(video.tags) ? video.tags : [])
-      .map(normalizeShortVideoTopic)
-      .filter(Boolean))].slice(0, 8);
-    const wrap = document.createElement("div");
-    wrap.className = "short-video-insight";
-
-    const hero = document.createElement("section");
-    hero.className = "short-video-insight-hero";
-    const media = document.createElement("div");
-    media.className = "short-video-insight-media";
-    const coverUrl = shortVideoCardCoverUrl(video);
-    if (coverUrl) {
-      const cover = document.createElement("img");
-      cover.className = "short-video-cover-image";
-      cover.dataset.src = coverUrl;
-      cover.dataset.videoId = String(video.id || "");
-      cover.alt = gallery ? "当前图文封面" : "当前视频封面";
-      cover.loading = "eager";
-      cover.decoding = "async";
-      media.append(cover);
-    }
-    const mediaBadge = document.createElement("span");
-    mediaBadge.textContent = gallery ? `图集 · ${galleryLabel(video)}` : "短视频";
-    media.append(mediaBadge);
-
-    const heroCopy = document.createElement("div");
-    heroCopy.className = "short-video-insight-hero-copy";
-    const eyebrow = document.createElement("span");
-    eyebrow.className = "short-video-insight-eyebrow";
-    eyebrow.append(createIcon("ai"), document.createTextNode("本地内容识别"));
-    const privacy = document.createElement("em");
-    privacy.textContent = "未上传云端";
-    eyebrow.append(privacy);
-    const title = document.createElement("strong");
-    title.textContent = cardTitle(video);
-    const note = document.createElement("p");
-    note.textContent = "根据本地标题、标签、作者与媒体信息整理，不虚构画面结论。";
-    heroCopy.append(eyebrow, title, note);
-    hero.append(media, heroCopy);
-
-    const facts = document.createElement("div");
-    facts.className = "short-video-insight-facts";
-    const factItems = [
-      ["内容类型", gallery ? "图文作品" : "视频作品"],
-      ["画面规格", shortVideoFrameLabel(video)],
-      [gallery ? "图片数量" : "视频时长", gallery ? galleryLabel(video) : (formatDuration(video.durationMs) || "未知")],
-      ["发布时间", formatDate(video.publishedAt) || "日期未知"]
-    ];
-    for (const [labelText, valueText] of factItems) {
-      const fact = document.createElement("span");
-      const value = document.createElement("b");
-      value.textContent = valueText;
-      const label = document.createElement("small");
-      label.textContent = labelText;
-      fact.append(value, label);
-      facts.append(fact);
-    }
-
-    const clues = document.createElement("section");
-    clues.className = "short-video-insight-section";
-    const cluesHeading = document.createElement("div");
-    cluesHeading.className = "short-video-insight-section-heading";
-    const cluesTitle = document.createElement("strong");
-    cluesTitle.textContent = "内容线索";
-    const cluesHint = document.createElement("span");
-    cluesHint.textContent = "点击线索继续探索";
-    cluesHeading.append(cluesTitle, cluesHint);
-    const chips = document.createElement("div");
-    chips.className = "short-video-insight-chips";
-    for (const topic of tags) {
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.textContent = `#${topic}`;
-      chip.addEventListener("click", () => showAuthorPanel(video, {
-        initialTab: "topic",
-        topic,
-        switchAuthorFeed: false
-      }).catch(showError));
-      chips.append(chip);
-    }
-    if (video.author?.name) {
-      const author = document.createElement("button");
-      author.type = "button";
-      author.textContent = shortVideoAuthorHandle(video.author.name);
-      author.addEventListener("click", () => {
-        closeAuthorPanel(panel, { restoreFeed: false });
-        openShortVideoAuthorPage(video.author, video);
-      });
-      chips.append(author);
-    }
-    if (!chips.childElementCount) {
-      const empty = document.createElement("span");
-      empty.className = "short-video-insight-empty-clue";
-      empty.textContent = "这条作品没有记录可用的话题或作者线索。";
-      chips.append(empty);
-    }
-    clues.append(cluesHeading, chips);
-
-    const actions = document.createElement("div");
-    actions.className = "short-video-insight-actions";
-    const search = document.createElement("button");
-    search.type = "button";
-    search.className = "is-primary";
-    search.textContent = query ? `搜索“${query}”` : "搜索相关内容";
-    search.disabled = !query;
-    search.addEventListener("click", () => {
-      closeAuthorPanel(panel, { restoreFeed: false });
-      commitShortVideoSearch(query);
-    });
-    const related = document.createElement("button");
-    related.type = "button";
-    related.textContent = data.loading ? "正在匹配相似作品" : "查看全部相关推荐";
-    related.addEventListener("click", () => data.onShowRelated?.());
-    actions.append(search, related);
-
-    const recommendation = document.createElement("section");
-    recommendation.className = "short-video-insight-section short-video-insight-recommendations";
-    const recommendationHeading = document.createElement("div");
-    recommendationHeading.className = "short-video-insight-section-heading";
-    const recommendationTitle = document.createElement("strong");
-    recommendationTitle.textContent = "相似作品";
-    const recommendationBasis = document.createElement("span");
-    const basisTags = Array.isArray(data.basis?.tags) ? data.basis.tags.filter(Boolean).slice(0, 2) : [];
-    recommendationBasis.textContent = basisTags.length
-      ? `基于 ${basisTags.map((tag) => `#${tag}`).join(" · ")}`
-      : `基于 ${data.basis?.author || video.author?.name || "当前作品"}`;
-    recommendationHeading.append(recommendationTitle, recommendationBasis);
-    recommendation.append(recommendationHeading);
-
-    if (data.error) {
-      const error = document.createElement("div");
-      error.className = "short-video-insight-recommendation-status";
-      const message = document.createElement("span");
-      message.textContent = data.error;
-      const retry = document.createElement("button");
-      retry.type = "button";
-      retry.textContent = "重新匹配";
-      retry.addEventListener("click", () => data.onRetry?.());
-      error.append(message, retry);
-      recommendation.append(error);
-    } else if (data.loading || !data.loaded) {
-      const loading = document.createElement("div");
-      loading.className = "short-video-insight-recommendation-status is-loading";
-      loading.append(createIcon("repeat"), document.createTextNode("正在匹配本地作品"));
-      recommendation.append(loading);
-    } else {
-      const videos = shortVideosWithCovers(Array.isArray(data.videos) ? data.videos : []).slice(0, 3);
-      if (!videos.length) {
-        const empty = document.createElement("div");
-        empty.className = "short-video-insight-recommendation-status";
-        empty.textContent = "本地库暂时没有相似作品";
-        recommendation.append(empty);
-      } else {
-        const list = document.createElement("div");
-        list.className = "short-video-insight-recommendation-list";
-        for (const [index, item] of videos.entries()) {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.setAttribute("aria-label", `播放相似作品：${cardTitle(item)}`);
-          const itemMedia = document.createElement("span");
-          const image = document.createElement("img");
-          image.className = "short-video-cover-image";
-          image.dataset.src = shortVideoCardCoverUrl(item);
-          image.dataset.videoId = String(item.id || "");
-          image.alt = item.title || "相似作品封面";
-          image.loading = index === 0 ? "eager" : "lazy";
-          image.decoding = "async";
-          itemMedia.append(image);
-          const copy = document.createElement("span");
-          const itemTitle = document.createElement("strong");
-          itemTitle.textContent = cardTitle(item);
-          const reason = document.createElement("small");
-          reason.textContent = item.recommendation?.reason || shortVideoAuthorHandle(item.author?.name);
-          copy.append(itemTitle, reason);
-          button.append(itemMedia, copy);
-          button.addEventListener("click", () => openRelatedVideo(item, panel));
-          list.append(button);
-        }
-        recommendation.append(list);
-      }
-    }
-
-    wrap.append(hero, facts, clues, actions, recommendation);
-    activateShortVideoCovers(wrap);
-    return wrap;
-  }
-
-  function shortVideoRelatedView(data = {}, panel, currentVideo) {
-    const wrap = document.createElement("div");
-    wrap.className = "short-video-related";
-    const summary = document.createElement("div");
-    summary.className = "short-video-related-summary";
-    const basis = document.createElement("span");
-    const basisTags = Array.isArray(data.basis?.tags) ? data.basis.tags.filter(Boolean).slice(0, 2) : [];
-    basis.textContent = basisTags.length
-      ? `基于 ${basisTags.map((tag) => `#${tag}`).join(" · ")}`
-      : `基于 ${data.basis?.author || currentVideo?.author?.name || "当前作品"}`;
-    summary.append(basis);
-    wrap.append(summary);
-
-    if (data.error) {
-      const error = document.createElement("div");
-      error.className = "short-video-related-status is-error";
-      const message = document.createElement("span");
-      message.textContent = data.error;
-      const retry = document.createElement("button");
-      retry.type = "button";
-      retry.textContent = "重新加载";
-      retry.addEventListener("click", () => data.onRetry?.());
-      error.append(message, retry);
-      wrap.append(error);
-      return wrap;
-    }
-    if (data.loading || !data.loaded) {
-      const loading = document.createElement("div");
-      loading.className = "short-video-related-status is-loading";
-      loading.append(createIcon("repeat"), document.createTextNode("正在匹配本地作品"));
-      wrap.append(loading);
-      return wrap;
-    }
-
-    const candidates = shortVideosWithCovers([
-      currentVideo,
-      ...(Array.isArray(data.videos) ? data.videos : [])
-    ].filter(Boolean));
-    const seen = new Set();
-    const videos = candidates.filter((item) => {
-      const key = String(item?.id || item?.awemeId || "").trim();
-      if (!key || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    const recommendations = videos.filter((item) => !isCurrentShortVideo(item, currentVideo));
-    if (!recommendations.length) {
-      const empty = document.createElement("div");
-      empty.className = "short-video-related-status";
-      empty.textContent = "暂时没有可展示的本地相关推荐";
-      wrap.append(empty);
-      return wrap;
-    }
-
-    const count = document.createElement("strong");
-    count.textContent = `${formatNumber(recommendations.length)} 条本地推荐`;
-    summary.append(count);
-    const list = document.createElement("div");
-    list.className = "short-video-related-list";
-    for (const [index, video] of videos.entries()) {
-      const isCurrent = isCurrentShortVideo(video, currentVideo);
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "short-video-related-item";
-      button.classList.toggle("is-current", isCurrent);
-      button.dataset.videoId = String(video.id || "");
-      button.dataset.awemeId = String(video.awemeId || "");
-      if (isCurrent) button.setAttribute("aria-current", "true");
-      button.setAttribute("aria-label", `播放推荐：${cardTitle(video)}`);
-      const media = document.createElement("span");
-      media.className = "short-video-related-media";
-      const img = document.createElement("img");
-      img.className = "short-video-cover-image";
-      img.dataset.src = shortVideoCardCoverUrl(video);
-      img.dataset.videoId = video.id;
-      img.alt = video.title || "推荐作品封面";
-      img.loading = index < 5 ? "eager" : "lazy";
-      img.decoding = "async";
-      img.fetchPriority = index < 3 ? "high" : "low";
-      const type = document.createElement("em");
-      type.textContent = isGalleryPost(video) ? galleryLabel(video) : (formatDuration(video.durationMs) || "视频");
-      media.append(img, type);
-      if (isCurrent) {
-        const current = document.createElement("span");
-        current.className = "short-video-related-current";
-        current.textContent = "播放中";
-        media.append(current);
-      }
-
-      const copy = document.createElement("span");
-      copy.className = "short-video-related-copy";
-      const itemTitle = document.createElement("strong");
-      itemTitle.textContent = cardTitle(video);
-      const metrics = document.createElement("small");
-      metrics.className = "short-video-related-meta";
-      const likes = document.createElement("span");
-      likes.append(createIcon("heart"), document.createTextNode(formatShortVideoMetric(video, "likes")));
-      applyShortVideoStatsBadgeState(likes, video);
-      const author = document.createElement("span");
-      author.className = "short-video-related-author";
-      author.textContent = video.author?.name || "未知作者";
-      metrics.append(likes, author);
-      copy.append(itemTitle, metrics);
-      button.append(media, copy);
-      const warmRelatedItem = () => {
-        if (isCurrent || button.dataset.prefetchStarted === "1" || !button.isConnected) return;
-        button.dataset.prefetchStarted = "1";
-        button.classList.add("is-prefetching");
-        prefetchRelatedVideo(video).then((detail) => {
-          if (!button.isConnected || !detail?.video) return;
-          button.dataset.detailReady = "1";
-          button.classList.add("is-prefetched");
-        }).catch(() => {}).finally(() => {
-          button.classList.remove("is-prefetching");
-        });
-      };
-      button.addEventListener("pointerenter", warmRelatedItem, { once: true });
-      button.addEventListener("focus", warmRelatedItem, { once: true });
-      if (!isCurrent && index <= 4) {
-        if (typeof window.requestIdleCallback === "function") {
-          window.requestIdleCallback(warmRelatedItem, { timeout: 900 });
-        } else {
-          window.setTimeout(warmRelatedItem, 80 + index * 55);
-        }
-      }
-      button.addEventListener("click", async () => {
-        button.classList.add("is-opening");
-        panel?.classList.add("is-switching-video");
-        try {
-          await openRelatedVideo(video, panel, {
-            previous: videos[index - 1] || null,
-            next: videos[index + 1] || null
-          });
-        } finally {
-          button.classList.remove("is-opening");
-          panel?.classList.remove("is-switching-video");
-        }
-      });
-      list.append(button);
-    }
-    activateShortVideoCovers(list);
-    wrap.append(list);
-    return wrap;
-  }
-
-  async function openRelatedVideo(video, panel, neighbors = {}) {
-    if (!video?.id) return;
-    if (isCurrentShortVideo(video)) {
-      showBrowserToast("正在观看这条");
-      return;
-    }
-    const resolved = resolvedShortVideoDetail(video.id);
-    await replaceVideoFromAuthorPanel(resolved?.video || video, panel, neighbors);
-  }
-
-  function authorComingSoonView(text) {
-    const box = document.createElement("div");
-    box.className = "short-video-author-status";
-    box.textContent = text;
-    return box;
-  }
-
-  function authorVideoTile(video, panel, index = 0, options = {}) {
-    const isCurrent = Boolean(options.current);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "short-video-author-tile";
-    button.classList.toggle("is-current", isCurrent);
-    button.dataset.videoId = String(video.id || "");
-    button.dataset.awemeId = String(video.awemeId || "");
-    button.setAttribute("aria-label", video.title || "打开短视频");
-    if (isCurrent) button.setAttribute("aria-current", "true");
-    const media = document.createElement("span");
-    media.className = "short-video-author-tile-media";
-    const coverUrl = shortVideoCardCoverUrl(video);
-    if (!coverUrl) return null;
-    const img = document.createElement("img");
-    img.className = "short-video-cover-image";
-    img.dataset.src = coverUrl;
-    img.dataset.videoId = video.id;
-    img.alt = video.title || "短视频封面";
-    img.loading = index < coverEagerCount ? "eager" : "lazy";
-    img.decoding = "async";
-    img.fetchPriority = index < 8 ? "high" : "low";
-    media.append(img);
-    const meta = document.createElement("span");
-    meta.className = "short-video-author-tile-meta";
-    const like = document.createElement("span");
-    like.className = "short-video-like-badge";
-    like.append(createIcon("heart"), document.createTextNode(formatShortVideoMetric(video, "likes")));
-    applyShortVideoStatsBadgeState(like, video);
-    if (isCurrent) {
-      const currentBadge = document.createElement("span");
-      currentBadge.className = "short-video-author-current-badge";
-      currentBadge.textContent = "当前观看";
-      media.append(currentBadge);
-    }
-    media.append(like);
-    if (isGalleryPost(video)) media.append(galleryBadge(video));
-    meta.textContent = cardTitle(video);
-    button.append(media, meta);
-    button.addEventListener("click", () => {
-      if (isCurrentShortVideo(video)) {
-        showBrowserToast("正在观看这条");
-        return;
-      }
-      if (typeof options.onOpen === "function") {
-        Promise.resolve(options.onOpen(video, panel, {
-          previous: options.previous || null,
-          next: options.next || null
-        })).catch(showError);
-        return;
-      }
-      replaceVideoFromAuthorPanel(video, panel, {
-        previous: options.previous || null,
-        next: options.next || null
-      }).catch(showError);
-    });
-    return button;
-  }
-
-  async function replaceVideoFromAuthorPanel(video, panel, neighbors = {}) {
-    const videoId = String(video?.id || "").trim();
-    if (!videoId || !panel?.isConnected) return;
-
-    const requestId = ++authorPanelVideoRequestId;
-    panel.setAttribute("aria-busy", "true");
-    state.shortVideo.current = video;
-    state.shortVideo.loading = false;
-    state.shortVideo.status = "";
-    state.shortVideo.slideDirection = 0;
-    state.shortVideo.prevVideo = neighbors.previous || null;
-    state.shortVideo.nextVideo = neighbors.next || null;
-    state.shortVideo.prevId = neighbors.previous?.id || "";
-    state.shortVideo.nextId = neighbors.next?.id || "";
-
-    replaceCurrentReelDom(video, { transition: true });
-    syncAuthorPanelCurrentTile();
-    syncRelatedPanelCurrentItem(panel);
-    syncCurrentNavigationDom();
-    replaceRoute({ view: "shortVideos", shortVideoId: videoId });
-    resumeActiveSound();
-
-    try {
-      const data = await fetchShortVideoDetail(videoId);
-      if (requestId !== authorPanelVideoRequestId || state.shortVideo.current?.id !== videoId || !panel.isConnected) return;
-      state.shortVideo.current = data.video || video;
-      cacheAuthorPanelVideo(state.shortVideo.current);
-      const currentPanel = els.workGrid?.querySelector?.(".short-video-reel-panel.is-current");
-      const needsGallerySoundRefresh = isGalleryPost(state.shortVideo.current)
-        && state.shortVideo.current?.sound?.localAvailable
-        && state.shortVideo.current?.sound?.previewUrl
-        && !currentPanel?.querySelector?.(".short-video-gallery-audio");
-      if (needsGallerySoundRefresh) replaceCurrentReelDom(state.shortVideo.current);
-      state.shortVideo.prevId = data.prevId || "";
-      state.shortVideo.nextId = data.nextId || "";
-      await loadAdjacentVideos(videoId);
-      if (requestId !== authorPanelVideoRequestId || state.shortVideo.current?.id !== videoId || !panel.isConnected) return;
-      refreshAdjacentPanelsDom();
-      syncAuthorPanelCurrentTile();
-      syncRelatedPanelCurrentItem(panel);
-      syncCurrentNavigationDom();
-      resumeActiveSound();
-    } catch (error) {
-      console.warn(error);
-      if (requestId === authorPanelVideoRequestId && panel.isConnected) {
-        showBrowserToast("已切换视频，详情仍在后台读取");
-      }
-    } finally {
-      if (requestId === authorPanelVideoRequestId && panel.isConnected) {
-        panel.removeAttribute("aria-busy");
-      }
-    }
-  }
-
-  function replaceCurrentReelDom(video, options = {}) {
-    const stack = activeReelStack();
-    if (!stack) return;
-    const oldCurrent = stack.querySelector(".short-video-reel-panel.is-current");
-    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-    const animateTransition = Boolean(options.transition && oldCurrent && !reducedMotion);
-    let outgoing = null;
-    if (animateTransition && oldCurrent.classList.contains("is-gallery-post")) {
-      outgoing = oldCurrent.cloneNode(true);
-      outgoing.classList.remove("is-current", "is-prev", "is-next", "is-ghost-panel");
-      outgoing.classList.add("is-transition-outgoing");
-      setReelPanelInteractionState(outgoing, false);
-      outgoing.querySelectorAll("[id]").forEach((element) => element.removeAttribute("id"));
-      outgoing.querySelectorAll("audio, video").forEach((element) => element.remove());
-      outgoing.querySelectorAll("button, input, a").forEach((element) => {
-        element.setAttribute("tabindex", "-1");
-        element.setAttribute("aria-hidden", "true");
-      });
-    }
-    disposeShortVideoMedia(stack);
-    stack.querySelectorAll(".short-video-reel-panel.is-transition-outgoing").forEach((panel) => panel.remove());
-    if (stack._shortVideoDirectTransitionTimer) window.clearTimeout(stack._shortVideoDirectTransitionTimer);
-    stack.classList.remove("is-dragging", "is-snap-next", "is-snap-prev", "is-rebasing");
-    stack.style.setProperty("--short-video-drag-y", "0px");
-
-    const panels = [];
-    if (state.shortVideo.prevVideo) {
-      panels.push(renderReelPanel(state.shortVideo.prevVideo, { ghost: true, slot: "prev" }).panel);
-    }
-    const current = renderReelPanel(video, { slot: "current" });
-    if (animateTransition) current.panel.classList.add("is-transition-incoming");
-    panels.push(current.panel);
-    if (state.shortVideo.nextVideo) {
-      panels.push(renderReelPanel(state.shortVideo.nextVideo, { ghost: true, slot: "next" }).panel);
-    }
-    stack.replaceChildren(...panels);
-    if (outgoing) stack.append(outgoing);
-    if (animateTransition) {
-      let transitionFinished = false;
-      const finishTransition = () => {
-        if (transitionFinished) return;
-        transitionFinished = true;
-        window.clearTimeout(stack._shortVideoDirectTransitionTimer);
-        stack._shortVideoDirectTransitionTimer = 0;
-        current.panel.removeEventListener("animationend", handleTransitionEnd);
-        current.panel.classList.remove("is-transition-incoming");
-        outgoing?.remove();
-        stack.classList.remove("is-direct-switching");
-      };
-      const handleTransitionEnd = (event) => {
-        if (event.target === current.panel) finishTransition();
-      };
-      stack.classList.add("is-direct-switching");
-      current.panel.addEventListener("animationend", handleTransitionEnd);
-      stack._shortVideoDirectTransitionTimer = window.setTimeout(finishTransition, 420);
-    }
-    current.syncPlayToggle();
-    if (current.player) {
-      window.requestAnimationFrame(() => {
-        current.player?.play?.().then(current.syncPlayToggle).catch(current.syncPlayToggle);
-      });
-    }
-  }
-
   function authorDouyinUrl(author) {
     const url = String(author?.profileUrl || "").trim();
     if (url) return url;
@@ -9125,9 +7873,13 @@ export function createShortVideoPage(deps) {
 
   function iconMarkup(name) {
     const line = "fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"";
-    const icons = {
+    // This table contains several large SVG paths. Rebuilding the complete
+    // object for every card icon dominated cold list rendering, even when the
+    // requested icon was only a heart or check mark.
+    const icons = shortVideoIconMarkupTable || (shortVideoIconMarkupTable = {
       ai: `<svg viewBox="0 0 34 34" aria-hidden="true"><path d="M22.94 21.309l.58 1.364a45.819 45.819 0 0 0 2.125 4.34l.528.947-.108.056-1.077.543-.102.052-.054-.102-.576-1.087a44.077 44.077 0 0 1-.22-.423 7.704 7.704 0 0 0-3.902.001c-.087.169-.154.3-.219.422l-.576 1.087-.054.102-.102-.052-1.077-.543-.108-.056.059-.106.468-.841a45.902 45.902 0 0 0 2.125-4.34l.58-1.364.038-.086.091.017c.482.086.97.086 1.451 0l.093-.017.037.086zm6.011-.019a3.731 3.731 0 0 0-.173.9c-.022.342-.034.69-.034 1.035v3.067c0 .345.012.694.034 1.035l.022.227c.029.226.08.452.151.673l.05.153h-1.92l.049-.153c.095-.295.153-.597.173-.9.022-.345.033-.694.033-1.035v-3.067c0-.34-.01-.689-.033-1.034a3.753 3.753 0 0 0-.173-.9l-.05-.154h1.921l-.05.153zM17.161 5.395l.123.008a4.527 4.527 0 0 1 3.14 1.602 4.367 4.367 0 0 1 1.033 2.978l-.005.109c-.015.284-.063.56-.13.828l-.117.447 1.964-.504.113-.027c2.38-.549 4.824.818 5.465 3.136l.05.184a4.368 4.368 0 0 1-.534 3.265l-.06.097a4.495 4.495 0 0 1-1.965 1.674c-3.71 1.444-5.893-1.51-6.663-3.187l.134-.034 2.236-.575c.033.329.136.661.333.984a2.5 2.5 0 0 0 2.51 1.157l.113-.021a2.456 2.456 0 0 0 1.384-.825l.297-.448a2.37 2.37 0 0 0 .209-1.637l-.018-.075c-.334-1.268-1.63-2.035-2.914-1.753h-.01l-7.51 1.916h-.022a.056.056 0 0 1-.02-.01.048.048 0 0 1-.017-.037l.014-.205.136-2.238c.327.071.682.079 1.054-.008.973-.227 1.74-1.006 1.894-1.992a2.371 2.371 0 0 0-.303-1.578l-.055-.09a2.46 2.46 0 0 0-1.855-1.118l-.076-.006c-1.323-.076-2.469.897-2.596 2.188v.009l-.47 7.62a.047.047 0 0 1-.053.04l-.013-.002-.166-.065-2.15-.83c.169-.284.285-.612.316-.987l.007-.092a2.443 2.443 0 0 0-1.263-2.256l-.084-.043-.105-.048a2.482 2.482 0 0 0-1.508-.155l-.104.024a2.443 2.443 0 0 0-1.683 1.46c-.487 1.219.104 2.59 1.31 3.109l.008.003 7.22 2.797c.03.012.036.048.02.068l-.114.136-1.467 1.759a2.335 2.335 0 0 0-.79-.573l-.068-.03-.086-.034c-.873-.321-1.878-.147-2.566.484l-.069.065a2.407 2.407 0 0 0 .188 3.584 2.49 2.49 0 0 0 3.404-.268l.006-.006 3.485-4.165v3.166l-.5.607v-.004l-1.29 1.543c-1.559 1.868-4.346 2.229-6.28.782l-.092-.07a4.41 4.41 0 0 1-1.668-3.076l-.009-.113a4.384 4.384 0 0 1 1.619-3.688l.357-.297-1.892-.729c-2.323-.895-3.535-3.457-2.656-5.739a4.475 4.475 0 0 1 2.565-2.555 4.577 4.577 0 0 1 4.068.373l.393.244.12-1.995h-.001c.146-2.447 2.248-4.375 4.728-4.258zm4.679 17.909a45.987 45.987 0 0 1-.964 2.191 9.16 9.16 0 0 1 2.417 0 45.878 45.878 0 0 1-.963-2.191l-.245-.6-.245.6z" fill="#fff"/></svg>`,
       check: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M20 6 9 17l-5-5"/></svg>`,
+      chart: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M4 20V10M10 20V4M16 20v-7M22 20V7"/></svg>`,
       chevronLeft: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M15 18l-6-6 6-6"/></svg>`,
       chevronDown: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M7 10l5 5 5-5"/></svg>`,
       chevronUp: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M7 14l5-5 5 5"/></svg>`,
@@ -9154,7 +7906,7 @@ export function createShortVideoPage(deps) {
       trash: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M3 6h18M8 6V4h8v2M7 6l1 15h8l1-15M10 10v7M14 10v7"/></svg>`,
       volume2: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M4 9v6h4l5 4V5L8 9H4z"/><path ${line} d="M16 8.5a5 5 0 0 1 0 7M19 6a9 9 0 0 1 0 12"/></svg>`,
       volumeX: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M4 9v6h4l5 4V5L8 9H4z"/><path ${line} d="m18 9 4 4M22 9l-4 4"/></svg>`
-    };
+    });
     return icons[name] || icons.more;
   }
 
@@ -9242,179 +7994,4 @@ export function createShortVideoPage(deps) {
     renderStats,
     renderView
   };
-}
-
-function formatShortVideoMetric(video, key, unknownLabel = "—") {
-  if (video?.stats?.known === false) return unknownLabel;
-  return formatCompact(video?.stats?.[key] || 0);
-}
-
-function applyShortVideoStatsBadgeState(element, video) {
-  const unknown = video?.stats?.known === false;
-  element?.classList?.toggle("is-unknown", unknown);
-  if (unknown) {
-    element.setAttribute("aria-label", "点赞统计待补");
-    element.title = "统计待补";
-  }
-}
-
-function formatCompact(value) {
-  const number = Number(value || 0);
-  if (!Number.isFinite(number) || number <= 0) return "0";
-  if (number >= 10000) return `${(number / 10000).toFixed(number >= 100000 ? 0 : 1)}万`;
-  return String(Math.round(number));
-}
-
-function clampNumber(value, fallback, min, max) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(number)));
-}
-
-function readMutedPreference() {
-  try {
-    return window.localStorage.getItem("fanhao.shortVideo.muted") === "1";
-  } catch {
-    return false;
-  }
-}
-
-function writeMutedPreference(muted) {
-  try {
-    window.localStorage.setItem("fanhao.shortVideo.muted", muted ? "1" : "0");
-  } catch {}
-}
-
-function readVolumePreference() {
-  try {
-    return normalizeShortVideoVolume(window.localStorage.getItem("fanhao.shortVideo.volume"));
-  } catch {
-    return 1;
-  }
-}
-
-function writeVolumePreference(value) {
-  try {
-    window.localStorage.setItem("fanhao.shortVideo.volume", String(normalizeShortVideoVolume(value)));
-  } catch {}
-}
-
-function normalizeShortVideoVolume(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number) || number <= 0) return 1;
-  return Math.max(.01, Math.min(1, Math.round(number * 100) / 100));
-}
-
-function readAutoNextPreference() {
-  try {
-    return window.localStorage.getItem("fanhao.shortVideo.autoNext") === "1";
-  } catch {
-    return false;
-  }
-}
-
-function writeAutoNextPreference(enabled) {
-  try {
-    window.localStorage.setItem("fanhao.shortVideo.autoNext", enabled ? "1" : "0");
-  } catch {}
-}
-
-function readPlaybackRatePreference() {
-  try {
-    return normalizePlaybackRate(window.localStorage.getItem("fanhao.shortVideo.playbackRate"));
-  } catch {
-    return 1;
-  }
-}
-
-function writePlaybackRatePreference(value) {
-  try {
-    window.localStorage.setItem("fanhao.shortVideo.playbackRate", String(normalizePlaybackRate(value)));
-  } catch {}
-}
-
-function readSmartFillPreference(key) {
-  try {
-    return window.localStorage.getItem(key) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function writeSmartFillPreference(key, enabled) {
-  try {
-    window.localStorage.setItem(key, enabled ? "1" : "0");
-  } catch {}
-}
-
-function normalizePlaybackRate(value) {
-  const number = Number(value);
-  const allowed = [0.5, 0.75, 1, 1.25, 1.5, 2];
-  return allowed.includes(number) ? number : 1;
-}
-
-function formatPlaybackRate(value) {
-  const rate = normalizePlaybackRate(value);
-  return `${Number.isInteger(rate) ? rate : String(rate).replace(/0+$/, "")}x`;
-}
-
-function normalizeShortVideoSource(value) {
-  const source = String(value || "liked").trim().toLowerCase();
-  return ["recommended", "liked", "following", "history", "posts", "authors", "all", "local"].includes(source) ? source : "liked";
-}
-
-function normalizeShortVideoSortValue(value) {
-  const sort = String(value || "published").trim();
-  return ["recommended", "watched", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
-}
-
-function normalizeShortVideoMedia(value) {
-  const media = String(value || "all").trim().toLowerCase();
-  return ["video", "gallery"].includes(media) ? media : "all";
-}
-
-function normalizeShortVideoTopic(value) {
-  return String(value || "").trim().replace(/^#+/, "").slice(0, 48);
-}
-
-function normalizeShortVideoSound(value) {
-  const sound = String(value || "").trim();
-  return /^[A-Za-z0-9_-]{1,1000}$/.test(sound) ? sound : "";
-}
-
-function formatDuration(ms) {
-  const seconds = Math.round(Number(ms || 0) / 1000);
-  if (!seconds) return "";
-  const minutes = Math.floor(seconds / 60);
-  const remain = seconds % 60;
-  return minutes ? `${minutes}:${String(remain).padStart(2, "0")}` : `0:${String(remain).padStart(2, "0")}`;
-}
-
-function formatDate(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function formatLocalCommentDate(value) {
-  if (!value) return "刚刚";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "刚刚";
-  const now = new Date();
-  const time = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-  if (date.toDateString() === now.toDateString()) return `今天 ${time}`;
-  const day = `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-  return date.getFullYear() === now.getFullYear() ? `${day} ${time}` : `${date.getFullYear()}-${day} ${time}`;
-}
-
-function formatSeconds(value) {
-  const total = Math.max(0, Math.floor(Number(value || 0)));
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
-
-function initials(value) {
-  return String(value || "?").trim().slice(0, 2).toUpperCase();
 }

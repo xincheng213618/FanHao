@@ -24,16 +24,30 @@ assertPlaybackMode({ ext: ".wmv", videoCodec: "vc1", audioCodec: "wmapro", expec
 const serverConfigSource = fs.readFileSync(path.join(root, "src", "bootstrap", "server-config.js"), "utf8");
 const routeSource = fs.readFileSync(path.join(root, "src", "modules", "fanhao", "server", "works", "routes-media.js"), "utf8");
 const streamSource = fs.readFileSync(path.join(root, "src", "platform", "server", "media-stream-service.js"), "utf8");
+const fileServerSource = fs.readFileSync(path.join(root, "src", "platform", "server", "file-server.js"), "utf8");
 const playerSource = fs.readFileSync(path.join(root, "public", "js", "player-page.js"), "utf8");
+const nativePlayerSource = fs.readFileSync(
+  path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativePlayerActivity.java"),
+  "utf8"
+);
+const shortVideoRuntimeSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "runtime.js"), "utf8");
 
 assert(serverConfigSource.includes("DEFAULT_VIDEO_CHUNK_BYTES: 4 * 1024 * 1024"), "video initial ranges should avoid 1 MB request churn");
 assert(routeSource.includes('cacheControl: "private, max-age=0, must-revalidate"'), "native video ranges should be reusable with validators");
+assert(fileServerSource.includes("const entitySize = Math.max(stat.size") && fileServerSource.includes('"Content-Range": `bytes ${responseRange.start}-${responseRange.end}/${entitySize}`'), "partial startup files must preserve the original media entity size in HTTP ranges");
+assert(fileServerSource.includes("...responseHeaders"), "media range responses must expose module diagnostics without changing the shared file server contract");
+assert(shortVideoRuntimeSource.includes("short-video-smooth") && shortVideoRuntimeSource.includes('"no-store"'), "uncached adaptive short-video responses must not pin the original stream under the rendition URL");
+assert(shortVideoRuntimeSource.includes('url.searchParams.get("wait")') && shortVideoRuntimeSource.includes('playbackPrepare = "source-no-wait"'), "mobile smooth playback must reuse a ready rendition without blocking first play on a background transcode");
+assert(shortVideoRuntimeSource.includes("applyMobilePlaybackHints") && shortVideoRuntimeSource.includes('req.headers?.["x-fanhao-client"]'), "native playback must receive a stable rendition URL and an untruncated Media3 byte stream");
 assert(playerSource.includes('els.video.preload = mode === "direct" ? "auto" : "none";'), "native MP4 should preload while generated streams start on demand");
 assert(playerSource.includes("if (customControls && autoPlay)"), "generated stream seeks should restart playback without waiting for metadata preload");
 assert(playerSource.includes("const deferGeneratedStream = customControls && !autoPlay;"), "generated streams should not start FFmpeg during page load");
 assert(!playerSource.includes('addEventListener("click", activateGeneratedStreamFromInteraction'), "the first generated-stream play gesture must remain native");
 assert(playerSource.includes("function requestVideoPlayback()"), "play promise failures should stay retryable and visible");
 assert(playerSource.includes('els.streamStart?.addEventListener("click", startDeferredStream);'), "generated streams need a dedicated trusted start control");
+assert(nativePlayerSource.includes("removeControllerScrims();"), "native FanHao playback must remove Media3 controller scrims");
+assert(nativePlayerSource.includes("R.id.exo_controls_background"), "native FanHao playback must clear the full-screen controller dim layer");
+assert(nativePlayerSource.includes("R.id.exo_bottom_bar"), "native FanHao playback must clear the progress bar shadow background");
 for (const option of ['"-fflags", "+genpts"', '"-avoid_negative_ts", "make_zero"', '"-pix_fmt", "yuv420p"']) {
   assert(streamSource.includes(option), `missing compatibility option: ${option}`);
 }

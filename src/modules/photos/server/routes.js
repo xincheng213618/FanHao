@@ -83,7 +83,7 @@ export async function routePhotosApi(req, res, url, deps) {
       const imageLimit = rawLimit && rawLimit !== "all" ? Number(rawLimit) : 0;
       const imageOffset = Number(url.searchParams.get("imageOffset") || url.searchParams.get("imagesOffset") || 0);
       sendJson(res, 200, {
-        album: photoSetService.publicDetail(album, { imageLimit, imageOffset }),
+        album: await photoSetService.publicDetail(album, { imageLimit, imageOffset }),
         cache: imageReaderCacheStatus()
       });
     } catch (error) {

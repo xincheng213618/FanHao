@@ -101,7 +101,14 @@ export function createFileServer({ defaultChunkBytes, mimeTypes, normalizeExt, n
       return;
     }
 
-    const requestedRange = parseRange(req.headers.range, stat.size);
+    // A short-video startup cache may contain only the first chunk while still
+    // representing the original media entity. Keep the HTTP range total and
+    // validators tied to that original entity, but never read past the cached
+    // physical prefix.
+    const entitySize = Math.max(stat.size, Math.floor(Number(file.totalSize || 0)) || 0);
+    const entityMtimeMs = Math.max(0, Number(file.entityMtimeMs || stat.mtimeMs || 0));
+    const entityMtime = new Date(entityMtimeMs || stat.mtimeMs || Date.now());
+    const requestedRange = parseRange(req.headers.range, entitySize);
     const maxRangeBytes = Math.max(0, Math.floor(Number(file.maxRangeBytes || 0)));
     const range = requestedRange && maxRangeBytes
       ? {
@@ -111,37 +118,46 @@ export function createFileServer({ defaultChunkBytes, mimeTypes, normalizeExt, n
       : requestedRange;
     const contentType = mimeTypes[file.ext] || "application/octet-stream";
     const cacheControl = String(file.cacheControl || "").trim() || "no-store";
+    const responseHeaders = file.responseHeaders && typeof file.responseHeaders === "object"
+      ? file.responseHeaders
+      : {};
     const validators = {
-      ETag: `"${stat.size.toString(16)}-${Math.max(0, Math.floor(Number(stat.mtimeMs || 0))).toString(16)}"`,
-      "Last-Modified": stat.mtime.toUTCString()
+      ETag: `"${entitySize.toString(16)}-${Math.floor(entityMtimeMs).toString(16)}"`,
+      "Last-Modified": entityMtime.toUTCString()
     };
 
     if (req.method === "HEAD" && !range) {
       res.writeHead(200, {
         "Content-Type": contentType,
         "Accept-Ranges": "bytes",
-        "Content-Length": stat.size,
+        "Content-Length": entitySize,
         "Cache-Control": cacheControl,
         "Content-Disposition": "inline",
-        ...validators
+        ...validators,
+        ...responseHeaders
       });
       res.end();
       return;
     }
 
-    const responseRange = range || {
+    const requestedResponseRange = range || {
       start: 0,
-      end: file.fullResponse ? stat.size - 1 : Math.min(stat.size - 1, defaultChunkBytes - 1)
+      end: file.fullResponse ? entitySize - 1 : Math.min(entitySize - 1, defaultChunkBytes - 1)
+    };
+    const responseRange = {
+      start: requestedResponseRange.start,
+      end: Math.min(requestedResponseRange.end, stat.size - 1)
     };
 
     res.writeHead(206, {
       "Content-Type": contentType,
       "Accept-Ranges": "bytes",
-      "Content-Range": `bytes ${responseRange.start}-${responseRange.end}/${stat.size}`,
+      "Content-Range": `bytes ${responseRange.start}-${responseRange.end}/${entitySize}`,
       "Content-Length": responseRange.end - responseRange.start + 1,
       "Cache-Control": cacheControl,
       "Content-Disposition": "inline",
-      ...validators
+      ...validators,
+      ...responseHeaders
     });
     if (req.method === "HEAD") {
       res.end();

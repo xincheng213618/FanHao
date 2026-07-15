@@ -3,7 +3,6 @@ import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260702-novel-loca
 import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260702-novel-local-manage-74";
 import { formatNumber } from "../../js/format.js";
 import { createWorkListState } from "../../js/work-filtering.js?v=20260710-western-merge-01";
-import { createGlobalSearch } from "../../platform/search/global-search.js?v=20260712-fanhao-refactor-01";
 import { createWorkCards } from "./features/works/cards.js?v=20260712-fanhao-refactor-01";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260712-fanhao-refactor-01";
 
@@ -41,7 +40,6 @@ export function createWorkViews(context) {
     getWorksLimit,
     increaseWorksLimit,
     showView,
-    openInLibrary,
     setActiveBottom,
     renderCurrentView,
     renderCurrentViewPreservingScroll = renderCurrentView,
@@ -50,7 +48,6 @@ export function createWorkViews(context) {
   const renderFavoriteExtras = context.renderFavoriteExtras || (() => {});
   const workListState = createWorkListState({ renderCurrentView });
   let selectedFavoriteFolderId = "all";
-  const globalSearch = createGlobalSearch({ els, getActiveUrl, showView, openInLibrary });
   const workCards = createWorkCards({ getActiveUrl, showView });
   const rankingViews = createRankingViews({
     els,
@@ -534,12 +531,12 @@ export function createWorkViews(context) {
     els.searchInput.value = text;
     setActiveBottom("search");
     els.viewKicker.textContent = "搜索";
-    els.viewTitle.textContent = text ? `搜索：${text}` : "搜索资料库";
-    els.viewMeta.textContent = text ? "正在全库搜索" : "输入番号、标题、人物或频道内容后搜索";
+    els.viewTitle.textContent = text ? `搜索：${text}` : "搜索番号库";
+    els.viewMeta.textContent = text ? "正在搜索番号与人物" : "输入番号、作品标题或人物后搜索";
     els.contentPanel.hidden = false;
 
     if (!text) {
-      renderMessage("可以搜索番号、标题、文件名、人物、套图、漫画或媒体。", "quiet");
+      renderMessage("可以搜索番号、作品标题、文件名或人物。", "quiet");
       return;
     }
 
@@ -547,30 +544,25 @@ export function createWorkViews(context) {
     const limit = getWorksLimit();
     const serverFilter = workListState.getFilterMode();
     const serverSort = workListState.getServerSortMode();
-    const path = `/api/search?q=${encodeURIComponent(text)}&limit=${limit}&offset=0&sort=${encodeURIComponent(serverSort)}&filter=${encodeURIComponent(serverFilter)}`;
+    const path = `/api/fanhao/search?q=${encodeURIComponent(text)}&limit=${limit}&offset=0&sort=${encodeURIComponent(serverSort)}&filter=${encodeURIComponent(serverFilter)}`;
     const activeUrl = getActiveUrl();
     let renderedCache = false;
 
     const renderSearchData = (data, cacheEntry = null) => {
       const people = data.people || [];
       const works = data.works || [];
-      const channels = data.channels || [];
-      const channelTotal = channels.reduce((sum, item) => sum + Number(item.total || 0), 0);
       const total = Number(data.total || works.length);
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-      els.viewMeta.textContent = `${formatNumber(total)} 个作品 · ${formatNumber(people.length)} 个人物 · ${formatNumber(channelTotal)} 个频道内容${suffix}`;
+      els.viewMeta.textContent = `${formatNumber(total)} 个作品 · ${formatNumber(people.length)} 个人物${suffix}`;
       els.viewContent.innerHTML = "";
       renderSearchPeople(people);
-      globalSearch.renderChannels(channels, text);
-      const hasChannelResults = channels.some((channel) => (channel.items || []).length);
-      const hasSideResults = people.length || hasChannelResults;
-      if (works.length || total || !hasSideResults) {
+      if (works.length || total || !people.length) {
         renderWorks(works, `没有搜到「${text}」。`, {
           facets: data.facets,
           total
         });
       } else {
-        renderMessage("作品库没有匹配，已显示频道内容。", "quiet", false);
+        renderMessage("没有匹配的番号作品，已显示人物结果。", "quiet", false);
       }
       if (works.length < total) {
         els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(works.length)} / ${formatNumber(total)}`, () => {
@@ -588,7 +580,7 @@ export function createWorkViews(context) {
     }
 
     try {
-      const data = await globalSearch.fetchBundle(path, text, isActive.signal);
+      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
       writeCachedJson(activeUrl, path, data).catch(() => {});
       if (!isActive()) return;
       renderSearchData(data);

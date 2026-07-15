@@ -4,7 +4,6 @@ import android.app.Activity;
 import android.content.pm.ActivityInfo;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -187,6 +186,7 @@ public class NativePlayerActivity extends Activity {
     playerView.setControllerShowTimeoutMs(CHROME_HIDE_TIMEOUT_MS);
     playerView.setControllerAnimationEnabled(false);
     playerView.setKeepContentOnPlayerReset(true);
+    removeControllerScrims();
     playerView.setControllerVisibilityListener((PlayerView.ControllerVisibilityListener) visibility ->
       syncPlayerChrome(visibility == View.VISIBLE)
     );
@@ -241,17 +241,15 @@ public class NativePlayerActivity extends Activity {
     LinearLayout bar = new LinearLayout(this);
     bar.setOrientation(LinearLayout.HORIZONTAL);
     bar.setGravity(Gravity.CENTER_VERTICAL);
-    bar.setPadding(dp(14), dp(10), dp(18), dp(30));
-    bar.setBackground(new GradientDrawable(
-      GradientDrawable.Orientation.TOP_BOTTOM,
-      new int[] { 0xCC000000, 0x00000000 }
-    ));
+    bar.setPadding(dp(14), dp(10), dp(18), dp(10));
+    bar.setBackgroundColor(Color.TRANSPARENT);
 
     TextView back = new TextView(this);
     back.setText("‹");
     back.setTextColor(Color.WHITE);
     back.setTextSize(38);
     back.setTypeface(Typeface.DEFAULT_BOLD);
+    back.setShadowLayer(dp(2), 0, dp(1), 0xCC000000);
     back.setGravity(Gravity.CENTER);
     back.setBackgroundColor(Color.TRANSPARENT);
     back.setContentDescription("返回");
@@ -268,6 +266,7 @@ public class NativePlayerActivity extends Activity {
     titleView.setTextColor(Color.WHITE);
     titleView.setTextSize(18);
     titleView.setTypeface(Typeface.DEFAULT_BOLD);
+    titleView.setShadowLayer(dp(2), 0, dp(1), 0xCC000000);
     titleView.setSingleLine(true);
     titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
 
@@ -275,6 +274,7 @@ public class NativePlayerActivity extends Activity {
     subtitleView.setText(subtitle);
     subtitleView.setTextColor(0xCCFFFFFF);
     subtitleView.setTextSize(12);
+    subtitleView.setShadowLayer(dp(2), 0, dp(1), 0xCC000000);
     subtitleView.setSingleLine(true);
     subtitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
     subtitleView.setVisibility(hasText(subtitle) ? View.VISIBLE : View.GONE);
@@ -289,6 +289,14 @@ public class NativePlayerActivity extends Activity {
     ));
     bar.addView(textColumn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
     return bar;
+  }
+
+  private void removeControllerScrims() {
+    if (playerView == null) return;
+    View controlsBackground = playerView.findViewById(androidx.media3.ui.R.id.exo_controls_background);
+    if (controlsBackground != null) controlsBackground.setBackgroundColor(Color.TRANSPARENT);
+    View bottomBar = playerView.findViewById(androidx.media3.ui.R.id.exo_bottom_bar);
+    if (bottomBar != null) bottomBar.setBackgroundColor(Color.TRANSPARENT);
   }
 
   private void syncPlayerChrome(boolean visible) {

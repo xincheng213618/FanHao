@@ -1,6 +1,6 @@
 import { createApiClient } from "./api.js?v=20260701-gallery-merge-01";
 import { installAndroidClientReturn, isLocalHostName, prepareClientShell } from "./client-shell.js?v=20260712-project-refactor-03";
-import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20260712-project-refactor-03";
+import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20260715-actual-video-quality-09";
 
 const MODULE_VIEWS = new Set(["gallery", "novels", "music", "tools"]);
 const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;

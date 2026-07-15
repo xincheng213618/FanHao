@@ -76,8 +76,11 @@ export function routeFromUrl(url = window.location.href) {
       novelSort: "updated",
       shortVideoId: "",
       shortVideoAuthorPage: "",
+      shortVideoMode: "feed",
       shortVideoQuery: "",
       shortVideoAuthor: "all",
+      shortVideoMedia: "all",
+      shortVideoQuality: "all",
       shortVideoSource: "liked",
       shortVideoSort: "published",
       musicTrackId: "",
@@ -141,11 +144,13 @@ export function normalizeRoute(route = {}) {
     novelPage: view === "novels" ? normalizeNovelPage(route.novelPage) : 0,
     shortVideoId: view === "shortVideos" ? String(route.shortVideoId || "").trim() : "",
     shortVideoAuthorPage: view === "shortVideos" ? String(route.shortVideoAuthorPage || "").trim() : "",
+    shortVideoMode: view === "shortVideos" && route.shortVideoMode === "likes" ? "likes" : "feed",
     shortVideoQuery: view === "shortVideos" ? String(route.shortVideoQuery || route.q || "").trim() : "",
     shortVideoTopic: view === "shortVideos" ? normalizeShortVideoTopic(route.shortVideoTopic || route.topic || route.tag) : "",
     shortVideoSound: view === "shortVideos" ? normalizeShortVideoSound(route.shortVideoSound || route.sound || route.music) : "",
     shortVideoAuthor: view === "shortVideos" ? String(route.shortVideoAuthor || "all").trim() || "all" : "all",
     shortVideoMedia: view === "shortVideos" ? normalizeShortVideoMedia(route.shortVideoMedia || route.media) : "all",
+    shortVideoQuality: view === "shortVideos" ? normalizeShortVideoQuality(route.shortVideoQuality || route.quality || route.resolution) : "all",
     shortVideoSource: view === "shortVideos" ? normalizeShortVideoSource(route.shortVideoSource || route.source) : "liked",
     shortVideoSort: view === "shortVideos" ? normalizeShortVideoSort(route.shortVideoSort) : "published",
     musicTrackId: view === "music" ? String(route.musicTrackId || "").trim() : "",
@@ -196,18 +201,21 @@ export function routeUrl(route, options = {}) {
     if (next.novelSort && next.novelSort !== defaultNovelSort) params.set("sort", next.novelSort);
     if (next.novelAuthor && next.novelMode !== "author") params.set("author", next.novelAuthor);
   } else if (next.view === "shortVideos") {
-    if (next.shortVideoQuery) params.set("q", next.shortVideoQuery);
-    if (next.shortVideoTopic) params.set("topic", next.shortVideoTopic);
-    if (next.shortVideoSound) params.set("sound", next.shortVideoSound);
-    if (next.shortVideoId && next.shortVideoAuthor && next.shortVideoAuthor !== "all") {
-      params.set("author", next.shortVideoAuthor);
-    } else if (!next.shortVideoAuthorPage && next.shortVideoAuthor && next.shortVideoAuthor !== "all") {
-      params.set("author", next.shortVideoAuthor);
+    if (next.shortVideoMode !== "likes") {
+      if (next.shortVideoQuery) params.set("q", next.shortVideoQuery);
+      if (next.shortVideoTopic) params.set("topic", next.shortVideoTopic);
+      if (next.shortVideoSound) params.set("sound", next.shortVideoSound);
+      if (next.shortVideoId && next.shortVideoAuthor && next.shortVideoAuthor !== "all") {
+        params.set("author", next.shortVideoAuthor);
+      } else if (!next.shortVideoAuthorPage && next.shortVideoAuthor && next.shortVideoAuthor !== "all") {
+        params.set("author", next.shortVideoAuthor);
+      }
+      if (next.shortVideoMedia && next.shortVideoMedia !== "all") params.set("media", next.shortVideoMedia);
+      if (next.shortVideoQuality && next.shortVideoQuality !== "all") params.set("quality", next.shortVideoQuality);
+      const defaultSource = next.shortVideoAuthorPage && !next.shortVideoId ? "all" : "liked";
+      if (next.shortVideoSource && next.shortVideoSource !== defaultSource) params.set("source", next.shortVideoSource);
+      if (next.shortVideoSort && next.shortVideoSort !== "published") params.set("sort", next.shortVideoSort);
     }
-    if (next.shortVideoMedia && next.shortVideoMedia !== "all") params.set("media", next.shortVideoMedia);
-    const defaultSource = next.shortVideoAuthorPage && !next.shortVideoId ? "all" : "liked";
-    if (next.shortVideoSource && next.shortVideoSource !== defaultSource) params.set("source", next.shortVideoSource);
-    if (next.shortVideoSort && next.shortVideoSort !== "published") params.set("sort", next.shortVideoSort);
   } else if (next.view === "music") {
     if (next.musicMode === "artists") {
       if (next.musicQuery) params.set("q", next.musicQuery);
@@ -315,6 +323,11 @@ function normalizeShortVideoSort(value) {
 function normalizeShortVideoMedia(value) {
   const media = String(value || "all").trim().toLowerCase();
   return ["video", "gallery"].includes(media) ? media : "all";
+}
+
+function normalizeShortVideoQuality(value) {
+  const quality = String(value || "all").trim().toLowerCase();
+  return ["4k", "1440p", "1080p", "720p", "below720p", "unknown"].includes(quality) ? quality : "all";
 }
 
 function normalizeShortVideoTopic(value) {
@@ -461,6 +474,7 @@ function novelRouteFromPath(routePath, params = new URLSearchParams()) {
 function shortVideoRouteFromPath(routePath, params = new URLSearchParams()) {
   const segments = normalizeRoutePath(routePath).split("/").filter(Boolean);
   if (!segments.length || !["short-videos", "short-video", "douyin"].includes(segments[0])) return null;
+  const likesStatsPage = segments[1] === "stats" && segments[2] === "likes";
   const pathAuthorPage = segments[1] === "authors" ? decodeRouteSegment(segments[2] || "") : "";
   const requestedAuthor = params.get("author") || "all";
   const requestedSource = params.get("source") || params.get("origin") || "";
@@ -485,13 +499,15 @@ function shortVideoRouteFromPath(routePath, params = new URLSearchParams()) {
     novelQuery: "",
     novelCategory: "all",
     novelSort: "updated",
-    shortVideoId: pathAuthorPage ? "" : decodeRouteSegment(segments[1] || ""),
+    shortVideoId: pathAuthorPage || likesStatsPage ? "" : decodeRouteSegment(segments[1] || ""),
     shortVideoAuthorPage: authorPage,
+    shortVideoMode: likesStatsPage ? "likes" : "feed",
     shortVideoQuery: params.get("q") || params.get("search") || "",
     shortVideoTopic: normalizeShortVideoTopic(params.get("topic") || params.get("tag")),
     shortVideoSound: normalizeShortVideoSound(params.get("sound") || params.get("music")),
     shortVideoAuthor: authorPage || requestedAuthor,
     shortVideoMedia: normalizeShortVideoMedia(params.get("media") || params.get("type")),
+    shortVideoQuality: normalizeShortVideoQuality(params.get("quality") || params.get("resolution")),
     shortVideoSource: authorPage
       ? normalizeShortVideoSource(requestedSource === "authors" ? "all" : requestedSource || "all")
       : normalizeShortVideoSource(requestedSource),
@@ -528,6 +544,7 @@ function musicRouteFromPath(routePath, params = new URLSearchParams()) {
     novelSort: "updated",
     shortVideoId: "",
     shortVideoAuthorPage: "",
+    shortVideoMode: "feed",
     shortVideoQuery: "",
     shortVideoAuthor: "all",
     shortVideoSource: "liked",
@@ -586,6 +603,7 @@ function routePath(route) {
     return "/novels";
   }
   if (route.view === "shortVideos") {
+    if (route.shortVideoMode === "likes") return "/short-videos/stats/likes";
     if (route.shortVideoId) return `/short-videos/${encodeRouteSegment(route.shortVideoId)}`;
     if (route.shortVideoAuthorPage) return `/short-videos/authors/${encodeRouteSegment(route.shortVideoAuthorPage)}`;
     return "/short-videos";

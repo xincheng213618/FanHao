@@ -1,5 +1,5 @@
 export async function routeShortVideoApi(req, res, url, deps) {
-  const { notFound, onMutation, readJsonBody, requireLocalAdmin, sendJson, shortVideoStore } = deps;
+  const { notFound, onMutation, onWatch, onWatchMutation, readJsonBody, requireLocalAdmin, sendJson, shortVideoStore } = deps;
 
   if (url.pathname === "/api/short-videos/summary" && req.method === "GET") {
     try {
@@ -19,11 +19,48 @@ export async function routeShortVideoApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/short-videos/like-distribution" && req.method === "GET") {
+    try {
+      sendJson(res, 200, shortVideoStore.likeDistribution());
+    } catch (error) {
+      sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频点赞分布读取失败") });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/short-videos/quality-upgrades" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req).catch(() => ({}));
+      const result = shortVideoStore.queueQualityUpgrades(Array.isArray(body?.ids) ? body.ids : []);
+      onMutation?.();
+      sendJson(res, 200, result);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "高清重下排队失败" });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/short-videos/authors" && req.method === "GET") {
     try {
       sendJson(res, 200, shortVideoStore.listAuthors(url));
     } catch (error) {
       sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频作者读取失败") });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/short-videos/authors/resolve" && req.method === "GET") {
+    try {
+      const mention = String(url.searchParams.get("mention") || "").trim();
+      const author = shortVideoStore.resolveAuthorMention(mention);
+      if (!author) {
+        sendJson(res, 404, { error: mention ? `本地没有找到 @${mention.replace(/^@+\s*/u, "")}` : "缺少作者名称" });
+        return true;
+      }
+      sendJson(res, 200, { author });
+    } catch (error) {
+      sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "作者提及解析失败") });
     }
     return true;
   }
@@ -69,7 +106,9 @@ export async function routeShortVideoApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req);
-      sendJson(res, 200, shortVideoStore.scan(body?.root || ""));
+      const data = shortVideoStore.scan(body?.root || "");
+      onMutation?.();
+      sendJson(res, 200, data);
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "短视频点赞目录扫描失败" });
     }
@@ -85,6 +124,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
         actionMatch[2],
         body || {}
       );
+      onMutation?.();
       sendJson(res, 200, data);
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "短视频互动状态保存失败" });
@@ -97,6 +137,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
     try {
       const body = await readJsonBody(req).catch(() => ({}));
       const data = shortVideoStore.setAuthorFollow(decodeURIComponent(followMatch[1]), body || {});
+      onMutation?.();
       sendJson(res, 200, data);
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "作者关注状态保存失败" });
@@ -104,11 +145,27 @@ export async function routeShortVideoApi(req, res, url, deps) {
     return true;
   }
 
+  const authorFollowMatch = /^\/api\/short-videos\/authors\/([^/]+)\/follow$/.exec(url.pathname);
+  if (authorFollowMatch && (req.method === "PUT" || req.method === "POST")) {
+    try {
+      const body = await readJsonBody(req).catch(() => ({}));
+      const data = shortVideoStore.setAuthorFollowByUser(decodeURIComponent(authorFollowMatch[1]), body || {});
+      onMutation?.();
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "关注账号移除失败" });
+    }
+    return true;
+  }
+
   const watchMatch = /^\/api\/short-videos\/([^/]+)\/watch$/.exec(url.pathname);
   if (watchMatch && (req.method === "PUT" || req.method === "POST")) {
     try {
+      const videoId = decodeURIComponent(watchMatch[1]);
       const body = await readJsonBody(req).catch(() => ({}));
-      const data = shortVideoStore.recordWatch(decodeURIComponent(watchMatch[1]), body || {});
+      const data = shortVideoStore.recordWatch(videoId, body || {});
+      onWatchMutation?.(videoId, body || {}, data);
+      onWatch?.(videoId, body || {}, data);
       sendJson(res, 200, data);
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "观看进度保存失败" });

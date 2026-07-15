@@ -1,0 +1,277 @@
+import { api, post } from "../core/api.js";
+import { $, escapeHtml, safeUrl, toast } from "../core/dom.js";
+import { dateInputDaysAgo, displayDouyinId, formatCompact, formatDateTime, profileWorkDate } from "../core/format.js";
+
+export function createProfilesFeature(options) {
+  const settings = options.settings;
+  const refreshState = options.refreshState;
+  const refreshLinks = options.refreshLinks;
+  let searchTimer = null;
+  let rows = [];
+  let total = 0;
+  let eligibleCount = 0;
+  let loading = false;
+  let wasExtractActive = false;
+  let extractActive = false;
+
+  function renderProfileSelect(profiles, currentProfile) {
+    const select = $("profileSelect");
+    if (!select || document.activeElement === select) return;
+    const profileRows = profiles || [];
+    select.innerHTML =
+      profileRows
+        .map((profile) => {
+          const tabLabel = profile.tab === "like" ? "喜欢" : "作品";
+          const name = String(profile.nickname || profile.title || "").trim();
+          const douyinId = displayDouyinId(profile);
+          const stats = [
+            profile.aweme_count ? `主页 ${formatCompact(profile.aweme_count)} 作品` : "",
+            profile.follower_count ? `粉丝 ${formatCompact(profile.follower_count)}` : "",
+            profile.total_favorited ? `获赞 ${formatCompact(profile.total_favorited)}` : "",
+            profile.ip_location ? `IP ${profile.ip_location}` : "",
+            douyinId ? `抖音号 ${douyinId}` : "",
+          ].filter(Boolean).join(" / ");
+          const title = name ? `${name} · ` : "";
+          const extra = stats ? ` · ${stats}` : "";
+          const label = `${title}${tabLabel} · ${profile.total || 0} 条 / 完成 ${profile.downloaded || 0} / 待 ${profile.pending || 0}${extra}`;
+          const selected = currentProfile && profile.id === currentProfile.id ? "selected" : "";
+          return `<option value="${escapeHtml(profile.url || "")}" data-tab="${escapeHtml(profile.tab || "post")}" ${selected}>#${escapeHtml(profile.id || "")} ${escapeHtml(label)} · ${escapeHtml(profile.url || "")}</option>`;
+        })
+        .join("") || '<option value="">还没有入库主页</option>';
+  }
+
+  function renderManager(profiles, isExtractActive = false) {
+    const node = $("profileManagerList");
+    if (!node) return;
+    const query = String($("profileManagerSearch")?.value || "").trim().toLowerCase();
+    const sortMode = $("profileManagerSort")?.value || "latest_desc";
+    const scope = $("profileManagerScope")?.value || "collected";
+    const allRows = Array.isArray(profiles) ? profiles : [];
+    const filteredRows = allRows.filter((profile) => {
+      const inScope = scope === "all"
+        || (scope === "following" && (Number(profile.is_following || 0) === 1 || Number(profile.is_self || 0) === 1))
+        || (scope === "collected" && (Number(profile.total || 0) > 0 || Number(profile.is_self || 0) === 1));
+      if (!inScope) return false;
+      if (!query) return true;
+      return [profile.nickname, profile.title, profile.unique_id, profile.short_id, profile.sec_uid]
+        .some((value) => String(value || "").toLowerCase().includes(query));
+    });
+    const numericSort = {
+      latest_desc: (profile) => Number(profile.latest_work_create_time || 0),
+      works_desc: (profile) => Number(profile.aweme_count || profile.total || 0),
+      likes_desc: (profile) => Number(profile.total_favorited || 0),
+      followers_desc: (profile) => Number(profile.follower_count || 0),
+    };
+    if (sortMode === "last_refresh_asc") {
+      filteredRows.sort((a, b) => Number(b.is_self || 0) - Number(a.is_self || 0) || String(a.last_extracted_at || "").localeCompare(String(b.last_extracted_at || "")) || Number(a.id) - Number(b.id));
+    } else {
+      const valueOf = numericSort[sortMode] || numericSort.latest_desc;
+      filteredRows.sort((a, b) => Number(b.is_self || 0) - Number(a.is_self || 0) || valueOf(b) - valueOf(a) || Number(b.id) - Number(a.id));
+    }
+
+    const since = $("profileRefreshSince")?.value || "";
+    const sinceTimestamp = since ? new Date(`${since}T00:00:00`).getTime() / 1000 : 0;
+    const localEligibleCount = allRows.filter((profile) => {
+      if (!(Number(profile.total || 0) > 0 || Number(profile.is_self || 0) === 1)) return false;
+      const latest = Number(profile.latest_work_create_time || 0);
+      return !sinceTimestamp || profile.tab === "like" || latest <= 0 || latest >= sinceTimestamp;
+    }).length;
+    const currentEligibleCount = eligibleCount || localEligibleCount;
+    const visibleRows = filteredRows;
+    const totalRows = Math.max(total, filteredRows.length);
+    $("profileManagerSummary").textContent = `${totalRows} 个主页 · 已加载 ${visibleRows.length} 个 · 一键采集 ${currentEligibleCount} 个${since ? `（作品不早于 ${since}）` : ""}`;
+    node.innerHTML = visibleRows.map((profile) => {
+      const name = String(profile.nickname || profile.title || `主页 #${profile.id}`).trim();
+      const douyinId = displayDouyinId(profile) || "-";
+      const latestWork = profileWorkDate(profile);
+      const lastExtracted = formatDateTime(profile.last_extracted_at);
+      const tabLabel = profile.tab === "like" ? "我的喜欢" : "作者作品";
+      const sourceLabel = Number(profile.is_self || 0) === 1 ? "本人" : Number(profile.is_following || 0) === 1 ? "已关注" : "";
+      const avatar = profile.avatar_url
+        ? `<img class="profile-manager-avatar" src="${safeUrl(profile.avatar_url)}" alt="" loading="lazy" />`
+        : '<div class="profile-manager-avatar placeholder"></div>';
+      return `
+        <div class="profile-manager-row">
+          <div class="profile-manager-identity">
+            ${avatar}
+            <div>
+              <div class="profile-manager-name">${escapeHtml(name)}${sourceLabel ? ` <span class="profile-manager-badge">${escapeHtml(sourceLabel)}</span>` : ""}</div>
+              <div class="muted">${escapeHtml(tabLabel)} · 抖音号 ${escapeHtml(douyinId)}</div>
+            </div>
+          </div>
+          <div class="profile-manager-metric"><span>作品</span><strong>${formatCompact(profile.aweme_count || profile.total || 0)}</strong><small>入库 ${formatCompact(profile.total || 0)}</small></div>
+          <div class="profile-manager-metric"><span>粉丝</span><strong>${formatCompact(profile.follower_count || 0)}</strong></div>
+          <div class="profile-manager-metric"><span>获赞</span><strong>${formatCompact(profile.total_favorited || 0)}</strong></div>
+          <div class="profile-manager-date"><span>最新作品</span><strong>${escapeHtml(latestWork ? latestWork.slice(0, 10) : "暂无日期")}</strong></div>
+          <div class="profile-manager-date"><span>上次采集</span><strong>${escapeHtml(lastExtracted || "尚未采集")}</strong></div>
+          <div class="profile-manager-row-actions">
+            <a class="queue-link" href="${safeUrl(profile.url)}" target="_blank" rel="noreferrer">主页</a>
+            <button data-profile-refresh="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>${Number(profile.is_self || 0) === 1 ? "采集喜欢" : "采集作品"}</button>
+          </div>
+        </div>
+      `;
+    }).join("") + (totalRows > visibleRows.length
+      ? `<div class="profile-manager-load-more"><button data-profile-load-more ${loading ? "disabled" : ""}>${loading ? "加载中" : `显示更多（剩余 ${totalRows - visibleRows.length}）`}</button></div>`
+      : "") || '<div class="muted profile-manager-empty">没有符合条件的主页</div>';
+  }
+
+  async function load(options = {}) {
+    if (loading) return;
+    const reset = options.reset !== false;
+    loading = true;
+    try {
+      const since = $("profileRefreshSince")?.value || "";
+      const sinceTimestamp = since ? Math.floor(new Date(`${since}T00:00:00`).getTime() / 1000) : 0;
+      const params = new URLSearchParams({
+        scope: $("profileManagerScope")?.value || "collected",
+        q: String($("profileManagerSearch")?.value || "").trim(),
+        sort: $("profileManagerSort")?.value || "latest_desc",
+        since: String(sinceTimestamp || 0),
+        limit: "200",
+        offset: String(reset ? 0 : rows.length),
+      });
+      const data = await api(`/api/profiles?${params.toString()}`);
+      const incoming = Array.isArray(data.profiles) ? data.profiles : [];
+      if (reset) {
+        rows = incoming;
+      } else {
+        const known = new Set(rows.map((profile) => Number(profile.id)));
+        rows.push(...incoming.filter((profile) => !known.has(Number(profile.id))));
+      }
+      total = Number(data.total || 0);
+      eligibleCount = Number(data.eligible_count || 0);
+    } finally {
+      loading = false;
+      renderManager(rows, extractActive);
+    }
+  }
+
+  async function startExtract() {
+    const payload = settings.snapshot();
+    await settings.persist(payload);
+    settings.markClean("profileUrl");
+    const result = await post("/api/extract/start", {
+      url: payload.profile_url,
+      profile_tab: "auto",
+      max: $("maxItems").value || 0,
+      scrolls: payload.scrolls,
+      idle_rounds: payload.idle_rounds,
+      incremental_stop_existing: payload.incremental_stop_existing || 12,
+    });
+    $("extractStart").hidden = true;
+    $("extractStop").hidden = false;
+    toast(`采集任务已启动 #${result.job_id}`);
+  }
+
+  async function refreshProfiles(profileIds = []) {
+    const payload = settings.snapshot();
+    await settings.persist(payload);
+    const result = await post("/api/profiles/refresh", {
+      max_profiles: 0,
+      profile_ids: profileIds,
+      since_date: profileIds.length ? "" : $("profileRefreshSince").value,
+      max: $("maxItems").value || 0,
+      scrolls: payload.scrolls,
+      idle_rounds: payload.idle_rounds,
+      incremental_stop_existing: payload.incremental_stop_existing || 12,
+    });
+    $("extractStart").hidden = true;
+    $("refreshProfiles").hidden = true;
+    $("extractStop").hidden = false;
+    $("profileRefreshStop").hidden = false;
+    toast(profileIds.length ? `主页采集已启动 #${result.job_id}` : `一键采集已启动 #${result.job_id}`);
+  }
+
+  async function importFollowing() {
+    const result = await post("/api/profiles/following/import", {
+      max: 0,
+      scrolls: 1200,
+      idle_rounds: 16,
+    });
+    $("importFollowing").hidden = true;
+    $("refreshProfiles").hidden = true;
+    $("profileRefreshStop").hidden = false;
+    toast(`我的关注提取已启动 #${result.job_id}`);
+  }
+
+  async function stopExtractJob() {
+    await post("/api/extract/stop");
+    $("extractStart").hidden = false;
+    $("refreshProfiles").hidden = false;
+    $("extractStop").hidden = true;
+    $("profileRefreshStop").hidden = true;
+    toast("正在停止采集");
+  }
+
+  function bind() {
+    $("profileSelect").addEventListener("change", () => {
+      const value = $("profileSelect").value;
+      if (!value) return;
+      settings.setProfileUrl(value);
+      settings.save()
+        .then(() => {
+          refreshState();
+          refreshLinks();
+        })
+        .catch((err) => toast(err.message));
+    });
+    $("extractStart").addEventListener("click", () => startExtract().catch((err) => toast(err.message)));
+    $("extractStop").addEventListener("click", () => stopExtractJob().catch((err) => toast(err.message)));
+    $("profileRefreshStop").addEventListener("click", () => stopExtractJob().catch((err) => toast(err.message)));
+    $("refreshProfiles").addEventListener("click", () => refreshProfiles([]).catch((err) => toast(err.message)));
+    $("importFollowing").addEventListener("click", () => importFollowing().catch((err) => toast(err.message)));
+    $("profileRefreshRecentDays").addEventListener("input", () => {
+      $("profileRefreshSince").value = dateInputDaysAgo($("profileRefreshRecentDays").value);
+      settings.markDirty("profileRefreshSince");
+      load({ reset: true }).catch((err) => toast(err.message));
+    });
+    $("profileRefreshSince").addEventListener("input", () => {
+      load({ reset: true }).catch((err) => toast(err.message));
+    });
+    $("profileManagerSearch").addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => load({ reset: true }).catch((err) => toast(err.message)), 250);
+    });
+    $("profileManagerSort").addEventListener("change", () => {
+      load({ reset: true }).catch((err) => toast(err.message));
+    });
+    $("profileManagerScope").addEventListener("change", () => {
+      load({ reset: true }).catch((err) => toast(err.message));
+    });
+    $("profileManagerList").addEventListener("click", (event) => {
+      const loadMore = event.target.closest("button[data-profile-load-more]");
+      if (loadMore) {
+        load({ reset: false }).catch((err) => toast(err.message));
+        return;
+      }
+      const button = event.target.closest("button[data-profile-refresh]");
+      if (!button) return;
+      const profileId = Number(button.dataset.profileRefresh || 0);
+      if (!profileId) return;
+      refreshProfiles([profileId]).catch((err) => toast(err.message));
+    });
+  }
+
+  function render(state) {
+    const profiles = state.profiles || [];
+    extractActive = Boolean(state.extract?.active);
+    renderProfileSelect(profiles, state.current_profile || null);
+    if (!rows.length) {
+      rows = profiles;
+      total = profiles.length;
+    }
+    renderManager(rows, extractActive);
+    if (wasExtractActive && !extractActive && location.hash === "#profiles") {
+      load({ reset: true }).catch((err) => toast(err.message));
+    }
+    wasExtractActive = extractActive;
+    $("extractState").textContent = extractActive ? "采集中" : "采集空闲";
+    $("extractStart").hidden = extractActive;
+    $("refreshProfiles").hidden = extractActive;
+    $("importFollowing").hidden = extractActive;
+    $("extractStop").hidden = !extractActive;
+    $("profileRefreshStop").hidden = !extractActive;
+  }
+
+  return { bind, render, activate: () => load({ reset: true }) };
+}
