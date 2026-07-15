@@ -8,6 +8,36 @@ import { createShortVideoStore } from "../src/modules/short-videos/server/store.
 import { createDownloadManagerSyncService } from "../src/modules/short-videos/server/download-manager-sync-service.js";
 
 const shortVideoStoreSource = fs.readFileSync(new URL("../src/modules/short-videos/server/store.js", import.meta.url), "utf8");
+const shortVideoListPageQueriesSource = fs.readFileSync(
+  new URL("../src/modules/short-videos/server/list-page-queries.js", import.meta.url),
+  "utf8"
+);
+const shortVideoNavigationQueriesSource = fs.readFileSync(
+  new URL("../src/modules/short-videos/server/navigation-queries.js", import.meta.url),
+  "utf8"
+);
+assert.match(shortVideoStoreSource, /createShortVideoListPageQueries/, "store should delegate list-page query planning to the query component");
+assert.doesNotMatch(
+  shortVideoStoreSource,
+  /^function (?:fastHistoryVideoPage|fastFilteredVideoPage|fastPublishedVideoPage|shortVideoRelationshipTotal)\b/m,
+  "store should not reintroduce list-page SQL strategies"
+);
+assert.match(
+  shortVideoListPageQueriesSource,
+  /function orderedCatalogRows\(/,
+  "list-page query component should centralize ordered catalog hydration"
+);
+assert.match(shortVideoStoreSource, /createShortVideoNavigationQueries/, "store should delegate adjacent-video navigation to the query component");
+assert.doesNotMatch(
+  shortVideoStoreSource,
+  /^function (?:adjacentOrder|adjacentRows|fastHistoryAdjacentRows|fastLikedAdjacentRows|fastPublishedAdjacentRows|fastMetricAdjacentRows)\b/m,
+  "store should not reintroduce adjacent-video SQL strategies"
+);
+assert.match(
+  shortVideoNavigationQueriesSource,
+  /function multiColumnAdjacentRows\(/,
+  "navigation query component should own multi-column cursor traversal"
+);
 const contentStructureStart = shortVideoStoreSource.indexOf("  function contentStructureInsights(database) {");
 const contentStructureEnd = shortVideoStoreSource.indexOf("\n  function ", contentStructureStart + 12);
 const contentStructureSource = shortVideoStoreSource.slice(contentStructureStart, contentStructureEnd);
