@@ -151,11 +151,14 @@ assert(
 );
 const androidMusicEntry = fs.readFileSync(path.join(androidModulesDir, "music", "android-module.js"), "utf8");
 const androidMusicViews = fs.readFileSync(path.join(androidModulesDir, "music", "music-views.js"), "utf8");
+const androidMusicSearchController = fs.readFileSync(path.join(androidModulesDir, "music", "music-search-controller.js"), "utf8");
 const androidMusicSheets = fs.readFileSync(path.join(androidModulesDir, "music", "music-sheets.js"), "utf8");
 assert(androidMusicEntry.includes("deactivate: () => musicViews.deactivate()"), "music must deactivate before another module renders");
 assert(androidMusicViews.includes("if (!moduleActive || !els.viewContent) return;"), "inactive music work must not repaint another module");
 assert(androidMusicViews.includes("createMusicSheets") && androidMusicViews.includes("music-sheets.js?v="), "music must delegate settings and action sheets to a dedicated controller");
-assert(androidMusicViews.split(/\r?\n/).length <= 5500, "Android music composition root must stay below 5500 lines");
+assert(androidMusicViews.includes("createMusicSearchController") && androidMusicViews.includes("music-search-controller.js?v="), "music must delegate search requests and suggestion lifecycle to a dedicated controller");
+assert(androidMusicViews.split(/\r?\n/).length <= 5200, "Android music composition root must stay below 5200 lines");
+assert(androidMusicSearchController.split(/\r?\n/).length <= 400, "Android music search controller must stay below 400 lines");
 assert(androidMusicSheets.split(/\r?\n/).length <= 700, "Android music sheet controller must stay below 700 lines");
 assert(
   fs.readFileSync(path.join(androidModulesDir, "novels", "novel-views.js"), "utf8").includes("novel-mobile-search-pill"),

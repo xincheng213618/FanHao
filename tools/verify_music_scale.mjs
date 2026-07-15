@@ -371,9 +371,10 @@ try {
   const standaloneHost = fs.readFileSync(path.join(root, "public", "js", "standalone-host.js"), "utf8");
   const androidApp = fs.readFileSync(path.join(root, "android-client", "www", "app.js"), "utf8");
   const androidMusicViewSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-views.js"), "utf8");
+  const androidMusicSearchControllerSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-search-controller.js"), "utf8");
   const androidMusicSheetsSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-sheets.js"), "utf8");
   const androidMusicStateSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-state.js"), "utf8");
-  const androidClient = [androidMusicStateSource, androidMusicSheetsSource, androidMusicViewSource].join("\n");
+  const androidClient = [androidMusicStateSource, androidMusicSearchControllerSource, androidMusicSheetsSource, androidMusicViewSource].join("\n");
   const androidMusicStyles = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "styles.css"), "utf8");
   const musicRuntime = fs.readFileSync(path.join(root, "src", "modules", "music", "server", "runtime.js"), "utf8");
   const musicServerFiles = fs.readdirSync(path.join(root, "src", "modules", "music", "server"))
@@ -435,7 +436,9 @@ try {
   assert.match(standaloneHost, /page\.enter\(\{ skipRoute: true, deferInitialLoad: true \}\);\s*await page\.openRouteTarget\(next\);/, "music route restoration should let openRouteTarget own the single initial data load");
   assert.match(androidClient, /DEFAULT_LIMIT = 80/);
   assert.match(androidMusicViewSource, /from "\.\/music-state\.js\?v=/, "Android music must compose reusable state, formatting, and persistence helpers");
+  assert.match(androidMusicViewSource, /createMusicSearchController/, "Android music must delegate search debounce, suggestions, and history coordination");
   assert.ok(androidMusicViewSource.split(/\r?\n/).length <= 6000, "Android music view/controller must stay below 6000 lines");
+  assert.ok(androidMusicSearchControllerSource.split(/\r?\n/).length <= 400, "Android music search controller must stay below 400 lines");
   assert.ok(androidMusicStateSource.split(/\r?\n/).length <= 600, "Android music state helpers must stay below 600 lines");
   assert.match(androidClient, /music-mobile-load-more/);
   assert.match(androidClient, /music-mobile-artist-browser/);
