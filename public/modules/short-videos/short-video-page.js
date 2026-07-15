@@ -1,4 +1,6 @@
 import { createShortVideoSearchModule } from "./search/index.js?v=20260710-short-video-search-01";
+import { createShortVideoAuthorPages } from "./author-pages.js?v=20260716-short-video-author-pages-01";
+import { createIcon, railButton, setIconButton } from "./icons.js?v=20260716-short-video-icons-01";
 import {
   applyShortVideoLikeBadgeState,
   clampNumber,
@@ -145,7 +147,6 @@ export function createShortVideoPage(deps) {
   let authorPanelVideoRequestId = 0;
   let authorPanelVideoCache = null;
   let authorPanelTileMap = null;
-  let authorMentionReturn = null;
   let shortVideoAdjacentRequestId = 0;
   let shortVideoListRequestId = 0;
   let shortVideoOpenRequestId = 0;
@@ -157,7 +158,6 @@ export function createShortVideoPage(deps) {
   let shortVideoAdjacentWarmDirection = 1;
   let shortVideoAdjacentWarmScheduleId = 0;
   let shortVideoLastNavigationAt = 0;
-  let shortVideoIconMarkupTable = null;
   let shortVideoCacheSampleCounter = 0;
   const loadedCoverIds = new Set();
   const shortVideoWatchWrites = new Map();
@@ -222,6 +222,53 @@ export function createShortVideoPage(deps) {
     createIcon,
     getState: () => state.shortVideo,
     onSearch: commitShortVideoSearch
+  });
+  const {
+    appendVisibleAuthorsIfNeeded,
+    authorNameFromFilter,
+    currentShortVideoAuthorDetail,
+    isShortVideoAuthorDetailPage,
+    isShortVideoAuthorIndexPage,
+    openShortVideoAuthorPage,
+    renderAuthorDetailHome,
+    renderAuthorIndex,
+    renderAuthorIndexCard,
+    renderAuthorSignature,
+    renderAuthorWorkspaceToolbar,
+    renderSearchUserCard,
+    resolveShortVideoAuthor,
+    shortVideoApiSource,
+    shortVideoAuthorFilterValue,
+    shortVideoAuthorHandle
+  } = createShortVideoAuthorPages({
+    AUTHOR_APPEND_LOOKAHEAD,
+    api,
+    authorAvatar,
+    authorProfileLineText,
+    authorScopeId,
+    cacheShortVideoAuthorMention,
+    clearShortVideoDeleteSelection,
+    createAuthorFollowButton,
+    createIcon,
+    formatCompact,
+    formatDate,
+    formatNumber,
+    getShortVideoListCards: () => shortVideoListCards,
+    loadVideos,
+    openAuthorDouyinLink,
+    profileNumber,
+    pushRoute,
+    renderDeleteSelectionActions,
+    replaceRoute,
+    setAuthorPanelReturnFeed: (value) => {
+      authorPanelReturnFeed = value;
+    },
+    shortVideoAuthorMentionCache,
+    shortVideoCardCoverUrl,
+    shortVideoSearch,
+    showBrowserToast,
+    showError,
+    state
   });
 
   function markShortVideoPerformance(name, details = {}) {
@@ -1639,480 +1686,6 @@ export function createShortVideoPage(deps) {
       else selection.add(videoId);
     }
     renderView();
-  }
-
-  function renderAuthorDetailHome(data = {}) {
-    const author = currentShortVideoAuthorDetail(data);
-    const visibleAuthorVideo = (data.videos || []).find((video) => video?.ownerUserId || video?.author?.id) || null;
-    if (visibleAuthorVideo) state.shortVideo.authorVideo = visibleAuthorVideo;
-    const authorVideo = visibleAuthorVideo || state.shortVideo.authorVideo || null;
-    const head = document.createElement("section");
-    head.className = "short-video-author-page-head";
-    const heroCoverUrl = shortVideoCardCoverUrl(authorVideo || {});
-    if (heroCoverUrl) {
-      const hero = document.createElement("div");
-      hero.className = "short-video-author-page-hero";
-      hero.setAttribute("aria-hidden", "true");
-      const heroImage = document.createElement("img");
-      heroImage.src = heroCoverUrl;
-      heroImage.alt = "";
-      heroImage.loading = "eager";
-      heroImage.decoding = "async";
-      hero.append(heroImage);
-      head.append(hero);
-    }
-    const back = document.createElement("button");
-    back.type = "button";
-    back.className = "short-video-author-page-back";
-    back.append(createIcon("chevronLeft"), document.createTextNode("返回"));
-    back.addEventListener("click", () => returnToShortVideoAuthorIndex());
-    const avatar = authorAvatar(author, "short-video-author-page-avatar");
-    const copy = document.createElement("div");
-    copy.className = "short-video-author-page-copy";
-    const eyebrow = document.createElement("span");
-    eyebrow.className = "short-video-author-page-eyebrow";
-    eyebrow.textContent = "抖音作者";
-    const nameRow = document.createElement("div");
-    nameRow.className = "short-video-author-page-name-row";
-    const name = document.createElement("strong");
-    name.textContent = author.name || authorNameFromFilter(state.shortVideo.author) || "未知作者";
-    nameRow.append(name);
-    const verification = String(author.verification || "").trim();
-    if (verification) {
-      const badge = document.createElement("span");
-      badge.className = "short-video-author-page-verified";
-      badge.textContent = verification;
-      nameRow.append(badge);
-    }
-    const identity = document.createElement("div");
-    identity.className = "short-video-author-page-identity";
-    const identityText = authorProfileLineText({ ...author, verification: "" });
-    identity.textContent = identityText || "本地作者资料";
-    const signature = document.createElement("p");
-    signature.className = "short-video-author-page-signature";
-    renderAuthorSignature(signature, author.signature, "暂无作者简介");
-    const stats = document.createElement("div");
-    stats.className = "short-video-author-page-stats";
-    for (const [label, value] of [
-      ["关注", profileNumber(author.followingCount)],
-      ["粉丝", profileNumber(author.followerCount)],
-      ["获赞", profileNumber(author.totalFavorited)],
-      ["作品", profileNumber(author.awemeCount)],
-      ["喜欢", profileNumber(author.favoritingCount)]
-    ]) {
-      if (value === null) continue;
-      const cell = document.createElement("span");
-      const strong = document.createElement("b");
-      strong.textContent = formatCompact(value);
-      const small = document.createElement("small");
-      small.textContent = label;
-      cell.append(strong, small);
-      stats.append(cell);
-    }
-    const libraryMeta = document.createElement("div");
-    libraryMeta.className = "short-video-author-page-library-meta";
-    const localCount = document.createElement("b");
-    localCount.textContent = `${formatNumber(author.count || data.total || 0)} 个本地作品`;
-    libraryMeta.append(localCount);
-    const homeCount = profileNumber(author.awemeCount);
-    if (homeCount !== null) {
-      const comparison = document.createElement("span");
-      comparison.textContent = `主页 ${formatNumber(homeCount)}`;
-      libraryMeta.append(comparison);
-    }
-    const collectedAt = formatDate(author.profileCollectedAt);
-    if (collectedAt) {
-      const collected = document.createElement("span");
-      collected.textContent = `资料更新 ${collectedAt}`;
-      libraryMeta.append(collected);
-    }
-    copy.append(eyebrow, nameRow, stats, identity, signature, libraryMeta);
-    const actions = document.createElement("div");
-    actions.className = "short-video-author-page-actions";
-    const follow = createAuthorFollowButton(authorVideo, author, "page");
-    const douyin = document.createElement("button");
-    douyin.type = "button";
-    douyin.className = "short-video-author-page-secondary";
-    douyin.textContent = "抖音主页";
-    douyin.addEventListener("click", () => openAuthorDouyinLink(author));
-    const quickRefresh = document.createElement("button");
-    quickRefresh.type = "button";
-    quickRefresh.className = "short-video-author-page-secondary short-video-author-collector-action";
-    quickRefresh.textContent = "快速刷新";
-    quickRefresh.title = "通过 8765 增量采集最新作品，连续遇到旧作品后快速停止";
-    quickRefresh.addEventListener("click", () => runAuthorCollector(author, "quick", quickRefresh).catch(showError));
-    const fullRefresh = document.createElement("button");
-    fullRefresh.type = "button";
-    fullRefresh.className = "short-video-author-page-secondary short-video-author-collector-action";
-    fullRefresh.textContent = "全部扫描";
-    fullRefresh.title = "完整扫描作者全部作品并更新点赞、评论等统计";
-    fullRefresh.addEventListener("click", () => runAuthorCollector(author, "full", fullRefresh).catch(showError));
-    actions.append(follow, douyin, quickRefresh, fullRefresh);
-    head.append(back, avatar, copy, actions);
-    return head;
-  }
-
-  async function runAuthorCollector(author = {}, mode = "quick", button) {
-    const secUid = String(author?.secUid || state.shortVideo.author || "").trim();
-    if (!secUid || secUid.startsWith("name:")) {
-      showBrowserToast("当前作者没有可关联的抖音 sec_uid");
-      return;
-    }
-    const actions = button?.closest(".short-video-author-page-actions");
-    const buttons = [...(actions?.querySelectorAll(".short-video-author-collector-action") || [])];
-    const originalText = button?.textContent || (mode === "full" ? "全部扫描" : "快速刷新");
-    buttons.forEach((item) => { item.disabled = true; });
-    button?.setAttribute("aria-busy", "true");
-    if (button) button.textContent = mode === "full" ? "启动扫描" : "启动刷新";
-    try {
-      const result = await api(`/api/short-videos/authors/${encodeURIComponent(secUid)}/collector`, {
-        method: "POST",
-        body: { mode }
-      });
-      const jobId = Number(result?.jobId || 0);
-      if (!jobId) throw new Error("8765 没有返回采集任务编号");
-      showBrowserToast(mode === "full" ? `全部扫描已启动 #${jobId}` : `快速刷新已启动 #${jobId}`);
-      const finalState = await waitForAuthorCollector(secUid, jobId, button);
-      if (finalState?.job?.status === "failed") throw new Error(finalState.job.message || "作者主页采集失败");
-      if (finalState?.job?.status === "stopped") throw new Error(finalState.job.message || "作者主页采集已停止");
-      showBrowserToast(finalState?.job?.message || (mode === "full" ? "全部扫描完成" : "快速刷新完成"));
-      await loadVideos({ skipRoute: true });
-    } finally {
-      buttons.forEach((item) => { item.disabled = false; });
-      button?.removeAttribute("aria-busy");
-      if (button?.isConnected) button.textContent = originalText;
-    }
-  }
-
-  async function waitForAuthorCollector(secUid, jobId, button) {
-    for (let attempt = 0; attempt < 900; attempt += 1) {
-      const data = await api(`/api/short-videos/authors/${encodeURIComponent(secUid)}/collector?jobId=${encodeURIComponent(jobId)}`);
-      const job = data?.job;
-      if (job) {
-        const processed = Math.max(0, Number(job.processed || 0));
-        const total = Math.max(0, Number(job.total || 0));
-        if (button?.isConnected) button.textContent = total ? `${processed}/${total}` : "采集中";
-        if (["complete", "failed", "stopped"].includes(job.status)) return data;
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 1500));
-    }
-    throw new Error("8765 采集任务等待超时，请到采集管理查看");
-  }
-
-  function renderAuthorWorkspaceToolbar(data = {}) {
-    const section = document.createElement("section");
-    section.className = "short-video-author-workspace";
-    const heading = document.createElement("div");
-    heading.className = "short-video-author-workspace-heading";
-    heading.setAttribute("role", "tablist");
-    heading.setAttribute("aria-label", "作者作品来源");
-    const author = currentShortVideoAuthorDetail(data);
-    const authorTotal = author.count || data.total || 0;
-    const activeSource = ["all", "posts", "liked", "local"].includes(state.shortVideo.source)
-      ? state.shortVideo.source
-      : "all";
-    for (const [value, label] of [
-      ["all", "作品"],
-      ["posts", "发布"],
-      ["liked", "喜欢"],
-      ["local", "本地"]
-    ]) {
-      const tab = document.createElement("button");
-      tab.type = "button";
-      tab.className = "short-video-author-workspace-tab";
-      tab.classList.toggle("active", activeSource === value);
-      tab.setAttribute("role", "tab");
-      tab.setAttribute("aria-selected", String(activeSource === value));
-      tab.append(document.createTextNode(label));
-      if (value === "all") {
-        const count = document.createElement("small");
-        count.textContent = state.shortVideo.loading ? "…" : formatNumber(authorTotal);
-        tab.append(count);
-      } else if (value === "liked") {
-        tab.append(createIcon("eyeOff"));
-      }
-      tab.addEventListener("click", () => {
-        if (value === state.shortVideo.source) return;
-        state.shortVideo.source = value;
-        state.shortVideo.data = null;
-        clearShortVideoDeleteSelection();
-        loadVideos({ replaceRoute: true }).catch(showError);
-      });
-      heading.append(tab);
-    }
-
-    const filters = document.createElement("div");
-    filters.className = "short-video-author-filters";
-    const search = shortVideoSearch.renderForm({
-      compact: true,
-      placeholder: "搜索 TA 的作品",
-      ariaLabel: "搜索作者作品",
-      params: () => ({ author: state.shortVideo.authorPage || state.shortVideo.author })
-    });
-    filters.append(search, renderDeleteSelectionActions(data));
-    section.append(heading, filters);
-    return section;
-  }
-
-  function returnToShortVideoAuthorIndex() {
-    if (authorMentionReturn?.targetSecUid === state.shortVideo.authorPage) {
-      const previous = authorMentionReturn;
-      authorMentionReturn = null;
-      openShortVideoAuthorPage(previous.author, previous.video, { replaceHistory: true });
-      return;
-    }
-    authorMentionReturn = null;
-    const authorIndexSource = ["authors", "following"].includes(state.shortVideo.authorIndexSource)
-      ? state.shortVideo.authorIndexSource
-      : "authors";
-    state.shortVideo.authorPage = "";
-    state.shortVideo.authorDetail = null;
-    state.shortVideo.authorVideo = null;
-    state.shortVideo.source = authorIndexSource;
-    state.shortVideo.author = "all";
-    state.shortVideo.query = "";
-    state.shortVideo.topic = "";
-    state.shortVideo.sound = "";
-    state.shortVideo.soundInfo = null;
-    state.shortVideo.media = "all";
-    state.shortVideo.quality = "all";
-    state.shortVideo.current = null;
-    state.shortVideo.data = null;
-    clearShortVideoDeleteSelection();
-    replaceRoute({
-      view: "shortVideos",
-      shortVideoId: "",
-      shortVideoAuthorPage: "",
-      shortVideoAuthor: "all",
-      shortVideoQuery: "",
-      shortVideoSource: authorIndexSource
-    });
-    loadVideos({ skipRoute: true }).catch(showError);
-  }
-
-  function openShortVideoAuthorPage(author = {}, video = {}, options = {}) {
-    const authorId = authorScopeId(video, author);
-    if (!authorId) {
-      showBrowserToast("没有作者资料");
-      return;
-    }
-    authorPanelReturnFeed = null;
-    if (isShortVideoAuthorIndexPage()) {
-      state.shortVideo.authorIndexSource = state.shortVideo.source;
-    }
-    state.shortVideo.authorPage = authorId;
-    state.shortVideo.author = authorId;
-    state.shortVideo.authorDetail = { ...(video?.author || {}), ...author, secUid: authorId };
-    state.shortVideo.authorVideo = video?.id ? video : null;
-    state.shortVideo.source = "all";
-    state.shortVideo.query = "";
-    state.shortVideo.topic = "";
-    state.shortVideo.sound = "";
-    state.shortVideo.soundInfo = null;
-    state.shortVideo.media = "all";
-    state.shortVideo.quality = "all";
-    state.shortVideo.current = null;
-    state.shortVideo.prevVideo = null;
-    state.shortVideo.nextVideo = null;
-    state.shortVideo.prevId = "";
-    state.shortVideo.nextId = "";
-    state.shortVideo.data = null;
-    clearShortVideoDeleteSelection();
-    const updateRoute = options.replaceHistory ? replaceRoute : pushRoute;
-    updateRoute({
-      view: "shortVideos",
-      shortVideoId: "",
-      shortVideoAuthorPage: authorId,
-      shortVideoAuthor: authorId,
-      shortVideoQuery: "",
-      shortVideoSource: "all"
-    });
-    loadVideos({ skipRoute: true }).catch(showError);
-  }
-
-  function renderAuthorSignature(target, value, fallback = "") {
-    const text = String(value || fallback || "").trim();
-    target.textContent = "";
-    if (!text) return;
-    const mentionPattern = /@([^\s@，。！？、；：,.!?;:()\[\]{}<>《》【】"'“”‘’]+)/gu;
-    let cursor = 0;
-    let match = mentionPattern.exec(text);
-    while (match) {
-      if (match.index > cursor) target.append(document.createTextNode(text.slice(cursor, match.index)));
-      const mention = match[1];
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "short-video-author-mention";
-      button.textContent = `@${mention}`;
-      button.title = `打开 ${mention} 的作者主页`;
-      button.addEventListener("click", () => openMentionedAuthor(mention, button));
-      target.append(button);
-      cursor = match.index + match[0].length;
-      match = mentionPattern.exec(text);
-    }
-    if (cursor < text.length) target.append(document.createTextNode(text.slice(cursor)));
-  }
-
-  async function openMentionedAuthor(mention, button) {
-    if (button?.getAttribute("aria-busy") === "true") return;
-    button?.setAttribute("aria-busy", "true");
-    try {
-      const author = await resolveShortVideoAuthor(mention);
-      if (!author?.secUid) {
-        showBrowserToast(`本地没有找到 @${mention}`);
-        return;
-      }
-      if (isShortVideoAuthorDetailPage()) {
-        authorMentionReturn = {
-          targetSecUid: author.secUid,
-          author: currentShortVideoAuthorDetail(state.shortVideo.data || {}),
-          video: state.shortVideo.authorVideo || null
-        };
-      }
-      openShortVideoAuthorPage(author);
-    } catch (error) {
-      showBrowserToast(error?.message || `无法打开 @${mention}`);
-    } finally {
-      button?.removeAttribute("aria-busy");
-    }
-  }
-
-  async function resolveShortVideoAuthor(value) {
-    const cacheKey = String(value || "").trim().replace(/^@+\s*/u, "").toLocaleLowerCase("zh-CN");
-    if (!cacheKey) return null;
-    const cached = shortVideoAuthorMentionCache.get(cacheKey);
-    if (cached) {
-      cacheShortVideoAuthorMention(cacheKey, cached);
-      return cached;
-    }
-    const data = await api(`/api/short-videos/authors/resolve?mention=${encodeURIComponent(value)}`);
-    const author = data?.author || null;
-    if (!author) return null;
-    for (const key of [author.name, author.secUid, author.uniqueId, author.shortId]) {
-      const normalizedKey = String(key || "").trim().toLocaleLowerCase("zh-CN");
-      if (normalizedKey) cacheShortVideoAuthorMention(normalizedKey, author);
-    }
-    cacheShortVideoAuthorMention(cacheKey, author);
-    return author;
-  }
-
-  function renderAuthorIndex() {
-    const authors = sortedShortVideoAuthors();
-    const wrap = document.createElement("div");
-    wrap.className = "short-video-author-index";
-    if (state.shortVideo.loading && !authors.length) {
-      const status = document.createElement("div");
-      status.className = "short-video-author-index-status";
-      status.textContent = "正在读取作者";
-      wrap.append(status);
-      return wrap;
-    }
-    if (!authors.length) {
-      const status = document.createElement("div");
-      status.className = "short-video-author-index-status";
-      status.textContent = state.shortVideo.source === "following"
-        ? state.shortVideo.authorFilter === "unliked"
-          ? "没有未点赞的关注账号"
-          : "还没有已关注的作者"
-        : "还没有作者数据";
-      wrap.append(status);
-      return wrap;
-    }
-    for (const author of authors) {
-      wrap.append(renderAuthorIndexCard(author));
-    }
-    if (state.shortVideo.authorHasMore || state.shortVideo.authorLoadingMore) {
-      const status = document.createElement("div");
-      status.className = "short-video-author-index-status short-video-author-index-more";
-      status.textContent = state.shortVideo.authorLoadingMore ? "正在加载更多作者" : "继续下滑加载更多作者";
-      wrap.append(status);
-    }
-    return wrap;
-  }
-
-  function sortedShortVideoAuthors() {
-    const authors = [...(state.shortVideo.authors || [])]
-      .filter((author) => author && (author.secUid || author.name));
-    if (state.shortVideo.source === "following") return authors;
-    return authors.sort((a, b) => Number(b.count || 0) - Number(a.count || 0) || String(a.name || "").localeCompare(String(b.name || ""), "zh-CN"));
-  }
-
-  function appendVisibleAuthorsIfNeeded(force = false) {
-    if (state.activeView !== "shortVideos" || state.shortVideo?.current || !isShortVideoAuthorIndexPage()) return;
-    if (!state.shortVideo.authorHasMore || state.shortVideo.loading || state.shortVideo.authorLoadingMore) return;
-    if (!force) {
-      const doc = document.documentElement;
-      const bottomDistance = Math.max(0, (doc.scrollHeight || 0) - ((window.scrollY || 0) + (window.innerHeight || 0)));
-      if (bottomDistance > AUTHOR_APPEND_LOOKAHEAD) return;
-    }
-    loadVideos({ append: true, skipRoute: true }).catch(showError);
-  }
-
-  function isShortVideoAuthorIndexPage() {
-    return !state.shortVideo?.authorPage && ["authors", "following"].includes(state.shortVideo?.source);
-  }
-
-  function isShortVideoAuthorDetailPage() {
-    return Boolean(state.shortVideo?.authorPage);
-  }
-
-  function shortVideoApiSource() {
-    if (isShortVideoAuthorDetailPage()) {
-      return ["liked", "posts", "all", "local"].includes(state.shortVideo.source) ? state.shortVideo.source : "all";
-    }
-    return state.shortVideo.source || "liked";
-  }
-
-  function currentShortVideoAuthorDetail(data = {}) {
-    const filter = String(state.shortVideo.author || "").trim();
-    const fromVideo = (data.videos || []).find((video) => video?.author)?.author || {};
-    const fromFacet = (state.shortVideo.authors || []).find((author) => shortVideoAuthorFilterValue(author) === filter) || {};
-    const cached = state.shortVideo.authorDetail || {};
-    const fromCache = shortVideoAuthorFilterValue(cached) === filter ? cached : {};
-    const fresh = { ...fromVideo, ...fromFacet };
-    const preserveCachedProfile = Boolean(fromCache.secUid || fromCache.name) && state.shortVideo.source !== "all";
-    const detail = preserveCachedProfile
-      ? { ...fresh, ...fromCache }
-      : { ...fromCache, ...fresh };
-    detail.name = preserveCachedProfile
-      ? (fromCache.name || fromFacet.name || fromVideo.name || authorNameFromFilter(filter))
-      : (fromFacet.name || fromVideo.name || fromCache.name || authorNameFromFilter(filter));
-    if (state.shortVideo.source === "all" && Number.isFinite(Number(data.total))) {
-      detail.count = Math.max(0, Number(data.total));
-    }
-    if (detail.secUid || detail.name) {
-      state.shortVideo.authorDetail = { ...detail };
-    }
-    return detail;
-  }
-
-  function shortVideoAuthorFilterValue(author = {}) {
-    const secUid = String(author.secUid || "").trim();
-    if (secUid) return secUid;
-    const name = String(author.name || "").trim();
-    return name ? `name:${name}` : "all";
-  }
-
-  function authorNameFromFilter(value) {
-    const text = String(value || "").trim();
-    return text.startsWith("name:") ? text.slice(5) : "";
-  }
-
-  function shortVideoAuthorDisplayName(value, fallback = "未知作者") {
-    const name = String(value || "").trim().replace(/^(?:@\s*)+/u, "").trim();
-    return name || fallback;
-  }
-
-  function shortVideoAuthorHandle(value, fallback = "未知作者") {
-    return `@${shortVideoAuthorDisplayName(value, fallback)}`;
-  }
-
-  function renderAuthorIndexCard(author = {}) {
-    return shortVideoListCards?.renderAuthorIndexCard(author) || null;
-  }
-
-  function renderSearchUserCard(author = {}) {
-    return shortVideoListCards?.renderSearchUserCard(author) || null;
   }
 
   function resetShortVideoWindow() {
@@ -7825,89 +7398,6 @@ export function createShortVideoPage(deps) {
     const follow = createAuthorFollowButton(video, video.author, "rail");
     wrap.append(profile, follow);
     return wrap;
-  }
-
-  function railButton(label, icon, kind = "", ariaLabel = "", action = null) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `short-video-rail-button${kind ? ` is-${kind}` : ""}`;
-    if (!label) button.classList.add("is-icon-only");
-    button.setAttribute("aria-label", ariaLabel || label || kind || "操作");
-    if (ariaLabel) button.title = ariaLabel;
-    const strong = document.createElement("strong");
-    if (icon instanceof Node) strong.append(icon);
-    else strong.textContent = icon;
-    button.append(strong);
-    if (label) {
-      const span = document.createElement("span");
-      span.textContent = label;
-      button.append(span);
-    }
-    if (action) button.addEventListener("click", action);
-    return button;
-  }
-
-  function setIconButton(button, iconName, label) {
-    if (!button || button.dataset.iconName === iconName) {
-      if (button && label) {
-        button.setAttribute("aria-label", label);
-        button.title = label;
-      }
-      return;
-    }
-    button.dataset.iconName = iconName;
-    button.textContent = "";
-    button.append(createIcon(iconName));
-    if (label) {
-      button.setAttribute("aria-label", label);
-      button.title = label;
-    }
-  }
-
-  function createIcon(name) {
-    const wrap = document.createElement("span");
-    wrap.className = `short-video-icon short-video-icon-${name}`;
-    wrap.innerHTML = iconMarkup(name);
-    return wrap;
-  }
-
-  function iconMarkup(name) {
-    const line = "fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"";
-    // This table contains several large SVG paths. Rebuilding the complete
-    // object for every card icon dominated cold list rendering, even when the
-    // requested icon was only a heart or check mark.
-    const icons = shortVideoIconMarkupTable || (shortVideoIconMarkupTable = {
-      ai: `<svg viewBox="0 0 34 34" aria-hidden="true"><path d="M22.94 21.309l.58 1.364a45.819 45.819 0 0 0 2.125 4.34l.528.947-.108.056-1.077.543-.102.052-.054-.102-.576-1.087a44.077 44.077 0 0 1-.22-.423 7.704 7.704 0 0 0-3.902.001c-.087.169-.154.3-.219.422l-.576 1.087-.054.102-.102-.052-1.077-.543-.108-.056.059-.106.468-.841a45.902 45.902 0 0 0 2.125-4.34l.58-1.364.038-.086.091.017c.482.086.97.086 1.451 0l.093-.017.037.086zm6.011-.019a3.731 3.731 0 0 0-.173.9c-.022.342-.034.69-.034 1.035v3.067c0 .345.012.694.034 1.035l.022.227c.029.226.08.452.151.673l.05.153h-1.92l.049-.153c.095-.295.153-.597.173-.9.022-.345.033-.694.033-1.035v-3.067c0-.34-.01-.689-.033-1.034a3.753 3.753 0 0 0-.173-.9l-.05-.154h1.921l-.05.153zM17.161 5.395l.123.008a4.527 4.527 0 0 1 3.14 1.602 4.367 4.367 0 0 1 1.033 2.978l-.005.109c-.015.284-.063.56-.13.828l-.117.447 1.964-.504.113-.027c2.38-.549 4.824.818 5.465 3.136l.05.184a4.368 4.368 0 0 1-.534 3.265l-.06.097a4.495 4.495 0 0 1-1.965 1.674c-3.71 1.444-5.893-1.51-6.663-3.187l.134-.034 2.236-.575c.033.329.136.661.333.984a2.5 2.5 0 0 0 2.51 1.157l.113-.021a2.456 2.456 0 0 0 1.384-.825l.297-.448a2.37 2.37 0 0 0 .209-1.637l-.018-.075c-.334-1.268-1.63-2.035-2.914-1.753h-.01l-7.51 1.916h-.022a.056.056 0 0 1-.02-.01.048.048 0 0 1-.017-.037l.014-.205.136-2.238c.327.071.682.079 1.054-.008.973-.227 1.74-1.006 1.894-1.992a2.371 2.371 0 0 0-.303-1.578l-.055-.09a2.46 2.46 0 0 0-1.855-1.118l-.076-.006c-1.323-.076-2.469.897-2.596 2.188v.009l-.47 7.62a.047.047 0 0 1-.053.04l-.013-.002-.166-.065-2.15-.83c.169-.284.285-.612.316-.987l.007-.092a2.443 2.443 0 0 0-1.263-2.256l-.084-.043-.105-.048a2.482 2.482 0 0 0-1.508-.155l-.104.024a2.443 2.443 0 0 0-1.683 1.46c-.487 1.219.104 2.59 1.31 3.109l.008.003 7.22 2.797c.03.012.036.048.02.068l-.114.136-1.467 1.759a2.335 2.335 0 0 0-.79-.573l-.068-.03-.086-.034c-.873-.321-1.878-.147-2.566.484l-.069.065a2.407 2.407 0 0 0 .188 3.584 2.49 2.49 0 0 0 3.404-.268l.006-.006 3.485-4.165v3.166l-.5.607v-.004l-1.29 1.543c-1.559 1.868-4.346 2.229-6.28.782l-.092-.07a4.41 4.41 0 0 1-1.668-3.076l-.009-.113a4.384 4.384 0 0 1 1.619-3.688l.357-.297-1.892-.729c-2.323-.895-3.535-3.457-2.656-5.739a4.475 4.475 0 0 1 2.565-2.555 4.577 4.577 0 0 1 4.068.373l.393.244.12-1.995h-.001c.146-2.447 2.248-4.375 4.728-4.258zm4.679 17.909a45.987 45.987 0 0 1-.964 2.191 9.16 9.16 0 0 1 2.417 0 45.878 45.878 0 0 1-.963-2.191l-.245-.6-.245.6z" fill="#fff"/></svg>`,
-      check: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M20 6 9 17l-5-5"/></svg>`,
-      chart: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M4 20V10M10 20V4M16 20v-7M22 20V7"/></svg>`,
-      chevronLeft: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M15 18l-6-6 6-6"/></svg>`,
-      chevronDown: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M7 10l5 5 5-5"/></svg>`,
-      chevronUp: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M7 14l5-5 5 5"/></svg>`,
-      clearScreen: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M8 4H4v4M16 4h4v4M8 20H4v-4M20 16v4h-4"/><path ${line} d="M9 9h6v6H9z"/></svg>`,
-      close: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M6 6l12 12M18 6 6 18"/></svg>`,
-      comment: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.8571 17.3202C20.8406 15.3333 22 13.2638 22 10.8541C22 5.96406 17.5232 2 12 2C6.47686 2 2 5.96406 2 10.8542C2 16.8002 8 19.2002 11.429 19.2002V20.7211C11.429 22.3041 12.3493 22.1732 13.1196 21.7347C14.586 20.9 17.4106 18.7693 18.8571 17.3202ZM8.57142 11.0778C8.57142 11.8619 7.93154 12.4971 7.1422 12.4971C6.35418 12.4971 5.71427 11.8619 5.71427 11.0778C5.71427 10.2953 6.35418 9.66007 7.1422 9.66007C7.93154 9.66007 8.57142 10.2953 8.57142 11.0778ZM12 12.4971C11.2112 12.4971 10.5715 11.8619 10.5715 11.0778C10.5715 10.2953 11.2111 9.66007 12 9.66007C12.789 9.66007 13.4286 10.2953 13.4286 11.0778C13.4286 11.8619 12.789 12.4971 12 12.4971ZM18.2857 11.0778C18.2857 11.8619 17.6467 12.4971 16.8575 12.4971C16.0683 12.4971 15.4284 11.8619 15.4285 11.0778C15.4285 10.2953 16.0683 9.66007 16.8575 9.66007C17.6467 9.66007 18.2857 10.2953 18.2857 11.0778Z"/></svg>`,
-      folderTrash: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M3 7.5V6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2.5M4 10h16M9 13h8M10 13l.6 7h2.8l.6-7M11 13v-2h2v2"/></svg>`,
-      fullscreen: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M8 3H3v5M16 3h5v5M8 21H3v-5M21 16v5h-5"/></svg>`,
-      headphones: `<svg viewBox="0 0 36 36" aria-hidden="true"><path fill="currentColor" fill-opacity=".9" d="M9.68718 12.4801C8.612 14.3927 8.1197 16.7374 8.05821 19.0767C8.23942 18.9661 8.4351 18.8725 8.64383 18.7988L9.16952 18.6132C10.7699 18.0482 12.5315 18.8701 13.1042 20.4491L15.3865 26.7417C15.9591 28.3206 15.126 30.0586 13.5257 30.6236L13 30.8092C11.4155 31.3686 9.85676 30.6485 8.86663 29.2939C8.83318 29.2583 8.80192 29.22 8.7732 29.1788C7.33136 27.1149 6.42117 24.618 6.13186 21.9841C5.75876 18.5873 6.12658 14.6403 7.8929 11.4983C9.70099 8.28189 12.9317 6 17.9885 6C23.0436 6 26.2778 8.27305 28.092 11.4819C29.8643 14.6168 30.2393 18.557 29.8725 21.9536C29.5881 24.5883 28.6825 27.0875 27.2445 29.155C27.2194 29.1911 27.1924 29.2251 27.1636 29.2569C26.1749 30.6354 24.6023 31.3737 23.0035 30.8092L22.4778 30.6236C20.8774 30.0586 20.0443 28.3206 20.617 26.7417L22.8993 20.4491C23.472 18.8701 25.2335 18.0482 26.8339 18.6132L27.3596 18.7988C27.5669 18.8719 27.7613 18.9648 27.9415 19.0744C27.8783 16.7301 27.382 14.3817 26.3001 12.468C24.846 9.89593 22.2949 8.02429 17.9885 8.02428C13.684 8.02428 11.1369 9.90129 9.68718 12.4801Z"/></svg>`,
-      images: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect ${line} x="5" y="5" width="15" height="15" rx="2"/><path ${line} d="M5 16l4-4 3 3 2-2 6 6M8.5 9h.01"/><path ${line} d="M3 17V5a2 2 0 0 1 2-2h12"/></svg>`,
-      external: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M14 4h6v6M20 4l-9 9"/><path ${line} d="M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6"/></svg>`,
-      eyeOff: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M3 3l18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.9 4.2A10.7 10.7 0 0 1 12 4c5.5 0 9 6 9 6a15.7 15.7 0 0 1-2.1 2.9M6.6 6.6C4.2 8.2 3 10 3 10s3.5 6 9 6c1 0 1.9-.2 2.7-.5"/></svg>`,
-      heart: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M2.00534 9C2.00179 8.91711 2 8.83376 2 8.75C2 5.57436 4.57436 3 7.75 3C9.43372 3 10.9484 3.72368 12 4.87696C13.0516 3.72368 14.5663 3 16.25 3C19.4256 3 22 5.57436 22 8.75C22 8.83376 21.9982 8.91711 21.9947 9H22C22 13.5738 14.6263 19.141 12.5425 20.6229C12.2133 20.8571 11.7867 20.8571 11.4575 20.6229C9.37369 19.141 2 13.5738 2 9H2.00534Z" fill="currentColor"/></svg>`,
-      link: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></svg>`,
-      more: `<svg viewBox="0 0 36 36" aria-hidden="true"><path d="M13.556 17.778a1.778 1.778 0 1 1-3.556 0 1.778 1.778 0 0 1 3.556 0zM19.778 17.778a1.778 1.778 0 1 1-3.556 0 1.778 1.778 0 0 1 3.556 0zM24.222 19.556a1.778 1.778 0 1 0 0-3.556 1.778 1.778 0 0 0 0 3.556z" fill="currentColor"/></svg>`,
-      pause: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="5" width="3.8" height="14" rx="1.3" fill="currentColor"/><rect x="13.2" y="5" width="3.8" height="14" rx="1.3" fill="currentColor"/></svg>`,
-      play: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5.7v12.6c0 .9 1 1.4 1.8.9l9.2-6.3c.7-.5.7-1.5 0-2L9.8 4.8C9 4.3 8 4.8 8 5.7z"/></svg>`,
-      pictureInPicture: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect ${line} x="3" y="5" width="18" height="14" rx="2"/><rect x="12" y="11" width="7" height="5" rx="1" fill="currentColor"/></svg>`,
-      plusBadge: `<svg viewBox="0 0 32 33" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M16 26.7319C22.6274 26.7319 28 21.3594 28 14.7319C28 8.10452 22.6274 2.73193 16 2.73193C9.37258 2.73193 4 8.10452 4 14.7319C4 21.3594 9.37258 26.7319 16 26.7319Z" fill="#FE2C55"/><path d="M12 15.7319C11.4477 15.7319 11 15.2842 11 14.7319C11 14.1796 11.4477 13.7319 12 13.7319H20C20.5523 13.7319 21 14.1796 21 14.7319C21 15.2842 20.5523 15.7319 20 15.7319H12Z" fill="white"/><path d="M15 10.7319C15 10.1796 15.4477 9.73193 16 9.73193C16.5523 9.73193 17 10.1796 17 10.7319V18.7319C17 19.2842 16.5523 19.7319 16 19.7319C15.4477 19.7319 15 19.2842 15 18.7319V10.7319Z" fill="white"/></svg>`,
-      repeat: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M17 2l4 4-4 4"/><path ${line} d="M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4"/><path ${line} d="M21 13v2a3 3 0 0 1-3 3H3"/></svg>`,
-      search: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M10.8 18a7.2 7.2 0 1 1 0-14.4 7.2 7.2 0 0 1 0 14.4zM16.1 16.1L21 21"/></svg>`,
-      share: `<svg viewBox="0 0 36 36" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M21.8839 9.41656C20.675 8.26037 18.67 9.11717 18.67 10.7899V13.186C18.5357 13.186 18.4029 13.1872 18.2714 13.1895C16.8626 13.1517 12.0185 13.3097 8.61024 16.9648C6.24883 19.4974 5.18753 23.5267 5.25283 25.606C5.19102 27.6796 6.15808 27.4932 6.41822 27.0157C9.39378 21.554 18.67 23.2251 18.67 23.2251V25.4897C18.67 27.1268 20.6019 27.9978 21.8286 26.9138L29.8176 19.855C30.6512 19.1185 30.6767 17.8265 29.8728 17.0576L21.8839 9.41656Z" fill="currentColor"/></svg>`,
-      star: `<svg viewBox="0 0 36 36" aria-hidden="true"><path d="M16.5101 7.2579C17.0254 5.84046 18.9746 5.84047 19.4899 7.2579L21.8225 13.6744L28.4762 13.9734C29.946 14.0395 30.5484 15.9463 29.397 16.8884L24.1849 21.153L25.9645 27.7544C26.3577 29.2126 24.7807 30.3911 23.5538 29.5559L18 25.7751L12.4462 29.5559C11.2193 30.3911 9.64234 29.2126 10.0355 27.7544L11.8151 21.153L6.60299 16.8884C5.45162 15.9463 6.05397 14.0395 7.5238 13.9734L14.1775 13.6744L16.5101 7.2579Z" fill="currentColor"/></svg>`,
-      trash: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M3 6h18M8 6V4h8v2M7 6l1 15h8l1-15M10 10v7M14 10v7"/></svg>`,
-      volume2: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M4 9v6h4l5 4V5L8 9H4z"/><path ${line} d="M16 8.5a5 5 0 0 1 0 7M19 6a9 9 0 0 1 0 12"/></svg>`,
-      volumeX: `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${line} d="M4 9v6h4l5 4V5L8 9H4z"/><path ${line} d="m18 9 4 4M22 9l-4 4"/></svg>`
-    });
-    return icons[name] || icons.more;
   }
 
   function appendCaptionText(target, text, video = null) {

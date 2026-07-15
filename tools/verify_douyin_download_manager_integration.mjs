@@ -346,12 +346,13 @@ assert.match(sharedPlayerHtml, /\/fanhao\/short-video-app\.js/);
 assert.match(sharedPlayerHtml, /返回下载管理/);
 
 const sharedWebPlayer = fs.readFileSync(path.join(projectRoot, "public", "modules", "short-videos", "short-video-page.js"), "utf8");
+const sharedAuthorPages = fs.readFileSync(path.join(projectRoot, "public", "modules", "short-videos", "author-pages.js"), "utf8");
 const sharedCommentsView = fs.readFileSync(path.join(projectRoot, "public", "modules", "short-videos", "comments-view.js"), "utf8");
 assert.match(sharedWebPlayer, /export function createShortVideoPage/);
 assert.match(sharedWebPlayer, /点赞分布/);
 assert.match(sharedWebPlayer, /\/api\/short-videos\/like-distribution/);
-assert.match(sharedWebPlayer, /快速刷新/);
-assert.match(sharedWebPlayer, /全部扫描/);
+assert.match(sharedAuthorPages, /快速刷新/);
+assert.match(sharedAuthorPages, /全部扫描/);
 assert.match(sharedWebPlayer, /comments-view\.js\?v=/);
 assert.match(sharedCommentsView, /commentsEndpoint}\/sync/);
 
