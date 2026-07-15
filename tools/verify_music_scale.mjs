@@ -371,8 +371,9 @@ try {
   const standaloneHost = fs.readFileSync(path.join(root, "public", "js", "standalone-host.js"), "utf8");
   const androidApp = fs.readFileSync(path.join(root, "android-client", "www", "app.js"), "utf8");
   const androidMusicViewSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-views.js"), "utf8");
+  const androidMusicSheetsSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-sheets.js"), "utf8");
   const androidMusicStateSource = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "music-state.js"), "utf8");
-  const androidClient = [androidMusicStateSource, androidMusicViewSource].join("\n");
+  const androidClient = [androidMusicStateSource, androidMusicSheetsSource, androidMusicViewSource].join("\n");
   const androidMusicStyles = fs.readFileSync(path.join(root, "android-client", "www", "modules", "music", "styles.css"), "utf8");
   const musicRuntime = fs.readFileSync(path.join(root, "src", "modules", "music", "server", "runtime.js"), "utf8");
   const musicServerFiles = fs.readdirSync(path.join(root, "src", "modules", "music", "server"))
