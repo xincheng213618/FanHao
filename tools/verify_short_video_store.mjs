@@ -8,6 +8,10 @@ import { createShortVideoStore } from "../src/modules/short-videos/server/store.
 import { createDownloadManagerSyncService } from "../src/modules/short-videos/server/download-manager-sync-service.js";
 
 const shortVideoStoreSource = fs.readFileSync(new URL("../src/modules/short-videos/server/store.js", import.meta.url), "utf8");
+const shortVideoImportItemMapperSource = fs.readFileSync(
+  new URL("../src/modules/short-videos/server/import-item-mapper.js", import.meta.url),
+  "utf8"
+);
 const shortVideoListPageQueriesSource = fs.readFileSync(
   new URL("../src/modules/short-videos/server/list-page-queries.js", import.meta.url),
   "utf8"
@@ -17,6 +21,19 @@ const shortVideoNavigationQueriesSource = fs.readFileSync(
   "utf8"
 );
 assert.match(shortVideoStoreSource, /createShortVideoListPageQueries/, "store should delegate list-page query planning to the query component");
+assert.match(shortVideoStoreSource, /createShortVideoImportItemMapper/, "store should delegate filesystem and download-manager item mapping");
+assert.doesNotMatch(
+  shortVideoStoreSource,
+  /^function (?:parseVideoFile|parseGalleryDirectory|downloadManagerRowToItem)\b/m,
+  "store should not reintroduce import item parsing"
+);
+assert.match(
+  shortVideoImportItemMapperSource,
+  /return Object\.freeze\(\{\s*downloadManagerRowToItem,\s*parseGalleryDirectory,\s*parseVideoFile\s*\}\)/,
+  "import item mapper should expose the three canonical import entry points"
+);
+assert.ok(shortVideoStoreSource.split(/\r?\n/).length <= 5200, "short-video store exceeded its refactored 5200-line budget");
+assert.ok(shortVideoImportItemMapperSource.split(/\r?\n/).length <= 650, "short-video import item mapper exceeded its 650-line budget");
 assert.doesNotMatch(
   shortVideoStoreSource,
   /^function (?:fastHistoryVideoPage|fastFilteredVideoPage|fastPublishedVideoPage|shortVideoRelationshipTotal)\b/m,
