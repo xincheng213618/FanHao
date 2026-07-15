@@ -5,7 +5,6 @@ import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.app.Dialog;
 import android.content.res.ColorStateList;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -40,13 +39,10 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.animation.PathInterpolator;
-import android.view.inputmethod.EditorInfo;
-import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -180,8 +176,7 @@ public class NativeShortVideoActivity extends Activity {
   private TextView topInfoView;
   private ImageView topSearchButton;
   private ImageView topBackButton;
-  private View feedSearchOverlay;
-  private Dialog feedSearchDialog;
+  private NativeShortVideoFeedSearchController feedSearchController;
   private FrameLayout rootView;
   private View authorOverlay;
   private View playbackToolbarOverlay;
@@ -314,6 +309,7 @@ public class NativeShortVideoActivity extends Activity {
   protected void onDestroy() {
     Log.i(TAG, "destroy");
     destroying = true;
+    if (feedSearchController != null) feedSearchController.dismiss(false);
     stopSystemInfoUpdates();
     stopProgressUpdates();
     releaseAllPlayers();
@@ -337,10 +333,7 @@ public class NativeShortVideoActivity extends Activity {
   @Override
   public void onBackPressed() {
     if (commentsController != null && commentsController.dismiss(true)) return;
-    if (feedSearchOverlay != null) {
-      dismissFeedSearchOverlay(true);
-      return;
-    }
+    if (feedSearchController != null && feedSearchController.dismiss(true)) return;
     if (playbackToolbarOverlay != null) {
       dismissPlaybackToolbar();
       return;
@@ -352,6 +345,7 @@ public class NativeShortVideoActivity extends Activity {
     FrameLayout root = new FrameLayout(this);
     rootView = root;
     root.setBackgroundColor(Color.BLACK);
+    feedSearchController = createFeedSearchController();
 
     pager = new ViewPager2(this);
     galleryScaleDetector = new ScaleGestureDetector(this, new GalleryScaleListener());
@@ -430,7 +424,7 @@ public class NativeShortVideoActivity extends Activity {
     topSearchButton.setPadding(dp(10), dp(10), dp(10), dp(10));
     topSearchButton.setBackgroundColor(Color.TRANSPARENT);
     topSearchButton.setContentDescription("搜索短视频");
-    topSearchButton.setOnClickListener(view -> showFeedSearchDialog());
+    topSearchButton.setOnClickListener(view -> feedSearchController.show());
     FrameLayout.LayoutParams searchParams = new FrameLayout.LayoutParams(
       dp(44),
       dp(44),
@@ -496,6 +490,57 @@ public class NativeShortVideoActivity extends Activity {
         NativeShortVideoActivity.this.openOriginalVideo(item);
       }
     });
+  }
+
+  private NativeShortVideoFeedSearchController createFeedSearchController() {
+    return new NativeShortVideoFeedSearchController(this, new NativeShortVideoFeedSearchController.Host() {
+      @Override public boolean isFeedLoading() {
+        return loadingMoreVideos;
+      }
+
+      @Override public String currentQuery() {
+        return currentFeedQuery();
+      }
+
+      @Override public Runnable pausePlayback() {
+        return pausePlaybackForFeedSearch();
+      }
+
+      @Override public void applySearch(String query) {
+        applyFeedSearch(query);
+      }
+
+      @Override public void showTransientStatus(String message) {
+        NativeShortVideoActivity.this.showTransientStatus(message);
+      }
+
+      @Override public void hideSystemBars() {
+        NativeShortVideoActivity.this.hideSystemBars();
+      }
+    });
+  }
+
+  private Runnable pausePlaybackForFeedSearch() {
+    ExoPlayer dialogPlayer = activePlayer;
+    ExoPlayer dialogGallerySegment = gallerySegmentPlayer;
+    ExoPlayer dialogGallerySound = gallerySoundPlayer;
+    boolean resumeVideo = dialogPlayer != null && dialogPlayer.isPlaying();
+    boolean resumeSegment = dialogGallerySegment != null && dialogGallerySegment.isPlaying();
+    boolean resumeSound = dialogGallerySound != null && dialogGallerySound.isPlaying();
+    Log.i(TAG, "search overlay open video=" + resumeVideo
+      + " segment=" + resumeSegment + " sound=" + resumeSound);
+    if (dialogPlayer != null) dialogPlayer.pause();
+    if (dialogGallerySegment != null) dialogGallerySegment.pause();
+    if (dialogGallerySound != null) dialogGallerySound.pause();
+    return () -> {
+      if (!activityResumed || authorOverlay != null) return;
+      if (resumeVideo && activePlayer == dialogPlayer && dialogPlayer.getPlaybackState() != Player.STATE_ENDED) {
+        dialogPlayer.play();
+        startProgressUpdates();
+      }
+      if (resumeSegment && gallerySegmentPlayer == dialogGallerySegment) dialogGallerySegment.play();
+      if (resumeSound && gallerySoundPlayer == dialogGallerySound) dialogGallerySound.play();
+    };
   }
 
   private boolean commentsOpen() {
@@ -5018,169 +5063,6 @@ public class NativeShortVideoActivity extends Activity {
     } catch (Exception ignored) {
       return "";
     }
-  }
-
-  private void showFeedSearchDialog() {
-    if (loadingMoreVideos) {
-      showTransientStatus("作品流正在加载");
-      return;
-    }
-    if (rootView == null || feedSearchOverlay != null) return;
-    String currentQuery = currentFeedQuery();
-    ExoPlayer dialogPlayer = activePlayer;
-    ExoPlayer dialogGallerySegment = gallerySegmentPlayer;
-    ExoPlayer dialogGallerySound = gallerySoundPlayer;
-    boolean resumeVideoAfterDialog = dialogPlayer != null && dialogPlayer.isPlaying();
-    boolean resumeSegmentAfterDialog = dialogGallerySegment != null && dialogGallerySegment.isPlaying();
-    boolean resumeSoundAfterDialog = dialogGallerySound != null && dialogGallerySound.isPlaying();
-    Log.i(TAG, "search overlay open video=" + resumeVideoAfterDialog
-      + " segment=" + resumeSegmentAfterDialog + " sound=" + resumeSoundAfterDialog);
-    if (dialogPlayer != null) dialogPlayer.pause();
-    if (dialogGallerySegment != null) dialogGallerySegment.pause();
-    if (dialogGallerySound != null) dialogGallerySound.pause();
-
-    EditText input = new EditText(this);
-    input.setSingleLine(true);
-    input.setHint("标题、文案或作者");
-    input.setHintTextColor(0x99FFFFFF);
-    input.setTextColor(Color.WHITE);
-    input.setTextSize(15);
-    input.setPadding(dp(14), 0, dp(12), 0);
-    input.setBackground(roundedDrawable(0xFF2A2D37, dp(20)));
-    input.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
-    input.setText(currentQuery);
-    input.setSelection(input.getText().length());
-
-    FrameLayout overlay = new FrameLayout(this);
-    overlay.setClickable(true);
-    overlay.setFocusable(true);
-    overlay.setBackgroundColor(0x99000000);
-    overlay.setContentDescription("短视频搜索");
-
-    LinearLayout panel = new LinearLayout(this);
-    panel.setOrientation(LinearLayout.VERTICAL);
-    panel.setPadding(dp(10), dp(10), dp(10), dp(12));
-    panel.setBackground(roundedDrawable(0xF21B1D25, dp(20)));
-    panel.setClickable(true);
-    panel.setOnClickListener(view -> {});
-
-    LinearLayout row = new LinearLayout(this);
-    row.setOrientation(LinearLayout.HORIZONTAL);
-    row.setGravity(Gravity.CENTER_VERTICAL);
-
-    TextView cancel = searchOverlayAction("取消", "关闭搜索");
-    row.addView(cancel, new LinearLayout.LayoutParams(dp(54), dp(44)));
-
-    LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(0, dp(44), 1f);
-    inputParams.leftMargin = dp(4);
-    inputParams.rightMargin = dp(8);
-    row.addView(input, inputParams);
-
-    TextView submit = searchOverlayAction("搜索", "提交搜索");
-    row.addView(submit, new LinearLayout.LayoutParams(dp(54), dp(44)));
-    panel.addView(row, new LinearLayout.LayoutParams(
-      ViewGroup.LayoutParams.MATCH_PARENT,
-      dp(44)
-    ));
-
-    TextView helper = new TextView(this);
-    helper.setText("输入标题、文案或作者；清空后搜索可恢复全部作品");
-    helper.setTextColor(0xA6FFFFFF);
-    helper.setTextSize(11);
-    helper.setPadding(dp(68), dp(8), dp(58), 0);
-    panel.addView(helper, new LinearLayout.LayoutParams(
-      ViewGroup.LayoutParams.MATCH_PARENT,
-      ViewGroup.LayoutParams.WRAP_CONTENT
-    ));
-
-    FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(
-      ViewGroup.LayoutParams.MATCH_PARENT,
-      ViewGroup.LayoutParams.WRAP_CONTENT,
-      Gravity.TOP
-    );
-    // Dialog content already begins below the real status bar; align the active search row over the passive top bar.
-    panelParams.topMargin = dp(10);
-    panelParams.leftMargin = dp(8);
-    panelParams.rightMargin = dp(8);
-    overlay.addView(panel, panelParams);
-
-    Runnable restorePlayback = () -> {
-      if (!activityResumed || authorOverlay != null) return;
-      if (resumeVideoAfterDialog && activePlayer == dialogPlayer && dialogPlayer.getPlaybackState() != Player.STATE_ENDED) {
-        dialogPlayer.play();
-        startProgressUpdates();
-      }
-      if (resumeSegmentAfterDialog && gallerySegmentPlayer == dialogGallerySegment) dialogGallerySegment.play();
-      if (resumeSoundAfterDialog && gallerySoundPlayer == dialogGallerySound) dialogGallerySound.play();
-    };
-    overlay.setTag(restorePlayback);
-    cancel.setOnClickListener(view -> dismissFeedSearchOverlay(true));
-    overlay.setOnClickListener(view -> dismissFeedSearchOverlay(true));
-    Runnable submitSearch = () -> {
-      String query = input.getText().toString();
-      dismissFeedSearchOverlay(true);
-      applyFeedSearch(query);
-    };
-    submit.setOnClickListener(view -> submitSearch.run());
-    input.setOnEditorActionListener((view, actionId, event) -> {
-      if (actionId != EditorInfo.IME_ACTION_SEARCH) return false;
-      submitSearch.run();
-      return true;
-    });
-
-    Dialog dialog = new Dialog(this);
-    dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-    dialog.setContentView(overlay);
-    dialog.setCancelable(true);
-    dialog.setOnCancelListener(ignored -> dismissFeedSearchOverlay(true));
-    feedSearchOverlay = overlay;
-    feedSearchDialog = dialog;
-    dialog.show();
-    Window searchWindow = dialog.getWindow();
-    if (searchWindow != null) {
-      searchWindow.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
-      searchWindow.setBackgroundDrawableResource(android.R.color.transparent);
-      searchWindow.setDimAmount(0f);
-      searchWindow.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-      searchWindow.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
-        | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
-    }
-    input.requestFocus();
-    input.postDelayed(() -> {
-      InputMethodManager keyboard = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-      if (keyboard != null && feedSearchOverlay == overlay) keyboard.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
-    }, 120);
-  }
-
-  private TextView searchOverlayAction(String text, String description) {
-    TextView view = new TextView(this);
-    view.setText(text);
-    view.setTextColor(Color.WHITE);
-    view.setTextSize(13);
-    view.setTypeface(Typeface.DEFAULT_BOLD);
-    view.setGravity(Gravity.CENTER);
-    view.setMinWidth(dp(48));
-    view.setMinHeight(dp(44));
-    view.setClickable(true);
-    view.setFocusable(true);
-    view.setContentDescription(description);
-    view.setBackground(roundedDrawable(0x332A2D37, dp(16)));
-    return view;
-  }
-
-  private void dismissFeedSearchOverlay(boolean restorePlayback) {
-    if (feedSearchOverlay == null) return;
-    View overlay = feedSearchOverlay;
-    Dialog dialog = feedSearchDialog;
-    feedSearchOverlay = null;
-    feedSearchDialog = null;
-    InputMethodManager keyboard = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-    View focused = overlay.findFocus();
-    if (keyboard != null && focused != null) keyboard.hideSoftInputFromWindow(focused.getWindowToken(), 0);
-    if (dialog != null && dialog.isShowing()) dialog.dismiss();
-    if (restorePlayback && overlay.getTag() instanceof Runnable) ((Runnable) overlay.getTag()).run();
-    Log.i(TAG, "search overlay close restore=" + restorePlayback);
-    hideSystemBars();
   }
 
   private void applyFeedSearch(String query) {
