@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
 import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
+import { sendJson } from "../src/platform/server/responses.js";
 import { createVideoProbeService } from "../src/platform/server/video-probe-service.js";
 import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
 import { fetchPreparedImage } from "../android-client/www/js/image.js";
@@ -14,6 +16,25 @@ import { fetchPreparedImage } from "../android-client/www/js/image.js";
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
 const lines = (relativePath) => read(relativePath).split(/\r?\n/).length;
+
+function captureJsonResponse(payload, acceptEncoding = "") {
+  return new Promise((resolve) => {
+    const response = {
+      req: { headers: { "accept-encoding": acceptEncoding } },
+      destroyed: false,
+      writableEnded: false,
+      writeHead(status, headers) {
+        this.status = status;
+        this.headers = headers;
+      },
+      end(body) {
+        this.writableEnded = true;
+        resolve({ status: this.status, headers: this.headers, body: Buffer.from(body) });
+      }
+    };
+    sendJson(response, 200, payload);
+  });
+}
 
 const indexHtml = read("public/index.html");
 const fanhaoEntry = read("public/fanhao-app.js");
@@ -44,6 +65,16 @@ const staticFiles = read("src/platform/server/static-files.js");
 for (const alias of ["/novel", "/novel/", "/musics", "/musics/", "/songs", "/songs/"]) {
   assert(staticFiles.includes(`"${alias}"`), `static app fallback must preserve ${alias}`);
 }
+const responses = read("src/platform/server/responses.js");
+assert(responses.includes("const JSON_COMPRESSION_MIN_BYTES = 4 * 1024"), "large API payloads must use negotiated compression");
+assert(responses.includes('Vary: "Accept-Encoding"'), "compressed API responses must remain safe for intermediaries");
+const responseFixture = { works: Array.from({ length: 256 }, (_, index) => ({ id: index, title: `work-${index}`, path: `person/work-${index}/video.mp4` })) };
+const brotliResponse = await captureJsonResponse(responseFixture, "br, gzip");
+assert.equal(brotliResponse.headers["Content-Encoding"], "br", "API responses must prefer Brotli when supported");
+assert.deepEqual(JSON.parse(brotliDecompressSync(brotliResponse.body)), responseFixture, "Brotli API responses must preserve JSON payloads");
+const gzipResponse = await captureJsonResponse(responseFixture, "br;q=0, gzip;q=1");
+assert.equal(gzipResponse.headers["Content-Encoding"], "gzip", "API response negotiation must honor disabled encodings");
+assert.deepEqual(JSON.parse(gunzipSync(gzipResponse.body)), responseFixture, "Gzip API responses must preserve JSON payloads");
 const webRouter = read("public/js/router.js");
 assert(webRouter.includes('if (routePath !== "/western") return null'), "exact /western must remain a FanHao people route");
 assert(webRouter.includes('return "/gallery/western"'), "western gallery index must keep a refresh-safe standalone URL");
