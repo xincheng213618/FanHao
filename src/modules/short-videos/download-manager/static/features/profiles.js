@@ -107,6 +107,7 @@ export function createProfilesFeature(options) {
           <div class="profile-manager-row-actions">
             <a class="queue-link" href="${safeUrl(profile.url)}" target="_blank" rel="noreferrer">主页</a>
             <button data-profile-refresh="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>${Number(profile.is_self || 0) === 1 ? "采集喜欢" : "采集作品"}</button>
+            <button class="danger" data-profile-delete="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>删除</button>
           </div>
         </div>
       `;
@@ -194,6 +195,28 @@ export function createProfilesFeature(options) {
     toast(`我的关注提取已启动 #${result.job_id}`);
   }
 
+  async function deleteProfile(profileId, button) {
+    const profile = rows.find((item) => Number(item.id) === Number(profileId));
+    if (!profile) return;
+    const name = String(profile.nickname || profile.title || `主页 #${profileId}`).trim();
+    const linkCount = Number(profile.total || 0);
+    const confirmed = window.confirm(
+      `确定删除“${name}”的这条主页记录吗？\n\n将从 8765 数据库删除 ${linkCount} 条关联链接和队列记录；不会删除磁盘上的媒体文件。`
+    );
+    if (!confirmed) return;
+    button.disabled = true;
+    try {
+      const result = await post("/api/profiles/delete", { profile_id: profileId });
+      rows = rows.filter((item) => Number(item.id) !== Number(profileId));
+      total = Math.max(0, total - 1);
+      renderManager(rows, extractActive);
+      await Promise.all([load({ reset: true }), refreshState(), refreshLinks()]);
+      toast(`已删除“${name}”：${Number(result.links_deleted || 0)} 条数据库链接`);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   async function stopExtractJob() {
     await post("/api/extract/stop");
     $("extractStart").hidden = false;
@@ -242,6 +265,13 @@ export function createProfilesFeature(options) {
       const loadMore = event.target.closest("button[data-profile-load-more]");
       if (loadMore) {
         load({ reset: false }).catch((err) => toast(err.message));
+        return;
+      }
+      const deleteButton = event.target.closest("button[data-profile-delete]");
+      if (deleteButton) {
+        const profileId = Number(deleteButton.dataset.profileDelete || 0);
+        if (!profileId) return;
+        deleteProfile(profileId, deleteButton).catch((err) => toast(err.message));
         return;
       }
       const button = event.target.closest("button[data-profile-refresh]");

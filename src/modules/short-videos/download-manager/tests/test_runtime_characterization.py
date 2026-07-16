@@ -290,6 +290,159 @@ class RuntimeCharacterizationTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_profile_delete_removes_database_records_and_preserves_sibling_profile(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="fanhao-download-manager-profile-delete-") as temp:
+            runtime = IsolatedManager(Path(temp))
+            try:
+                runtime.start()
+                sec_uid = "test-profile-sec-uid"
+                post_url = f"https://www.douyin.com/user/{sec_uid}"
+                like_url = f"{post_url}?showTab=like"
+                now = "2026-07-16T20:00:00+08:00"
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    connection.execute("PRAGMA foreign_keys=ON")
+                    post_profile_id = int(
+                        connection.execute(
+                            """
+                            INSERT INTO profiles(url, sec_uid, tab, title, nickname, created_at, updated_at)
+                            VALUES(?, ?, 'post', '测试主页', '测试主页', ?, ?)
+                            """,
+                            (post_url, sec_uid, now, now),
+                        ).lastrowid
+                    )
+                    like_profile_id = int(
+                        connection.execute(
+                            """
+                            INSERT INTO profiles(url, sec_uid, tab, title, nickname, created_at, updated_at)
+                            VALUES(?, ?, 'like', '测试主页', '测试主页', ?, ?)
+                            """,
+                            (like_url, sec_uid, now, now),
+                        ).lastrowid
+                    )
+                    owner_like_profile_id = int(
+                        connection.execute(
+                            """
+                            INSERT INTO profiles(url, sec_uid, tab, title, nickname, created_at, updated_at)
+                            VALUES(?, 'owner-self-sec-uid', 'like', '我的喜欢', '我的喜欢', ?, ?)
+                            """,
+                            ("https://www.douyin.com/user/owner-self-sec-uid?showTab=like", now, now),
+                        ).lastrowid
+                    )
+                    link_id = int(
+                        connection.execute(
+                            """
+                            INSERT INTO links(profile_id, aweme_id, kind, url, status, discovered_at, last_seen_at)
+                            VALUES(?, '7657753714518250752', 'video', ?, 'pending', ?, ?)
+                            """,
+                            (like_profile_id, "https://www.douyin.com/video/7657753714518250752", now, now),
+                        ).lastrowid
+                    )
+                    owner_link_id = int(
+                        connection.execute(
+                            """
+                            INSERT INTO links(profile_id, aweme_id, kind, url, status, discovered_at, last_seen_at)
+                            VALUES(?, '7657753714518250752', 'video', ?, 'downloaded', ?, ?)
+                            """,
+                            (owner_like_profile_id, "https://www.douyin.com/video/7657753714518250752", now, now),
+                        ).lastrowid
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO link_files(
+                          link_id, profile_id, aweme_id, role, kind, file_name, file_path,
+                          absolute_path, size_bytes, exists_on_disk, recorded_at
+                        )
+                        VALUES(?, ?, '7657753714518250752', 'primary', 'video', 'test.mp4',
+                               'test/test.mp4', 'D:/Media/test.mp4', 123, 1, ?)
+                        """,
+                        (link_id, like_profile_id, now),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO link_files(
+                          link_id, profile_id, aweme_id, role, kind, file_name, file_path,
+                          absolute_path, size_bytes, exists_on_disk, recorded_at
+                        )
+                        VALUES(?, ?, '7657753714518250752', 'primary', 'video', 'shared.mp4',
+                               'owner/shared.mp4', 'D:/Media/shared.mp4', 456, 1, ?)
+                        """,
+                        (owner_link_id, owner_like_profile_id, now),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO profile_download_queue(profile_id, sort_order, enabled, created_at, updated_at)
+                        VALUES(?, 1, 1, ?, ?)
+                        """,
+                        (like_profile_id, now, now),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO jobs(type, status, profile_id, total, processed, success, failed, message, started_at, finished_at)
+                        VALUES('extract', 'complete', ?, 1, 1, 1, 0, 'done', ?, ?)
+                        """,
+                        (like_profile_id, now, now),
+                    )
+                    connection.execute(
+                        "UPDATE settings SET value=? WHERE key='profile_url'",
+                        (like_url,),
+                    )
+                    connection.commit()
+
+                result = runtime.json_request(
+                    "/api/profiles/delete",
+                    method="POST",
+                    payload={"profile_id": like_profile_id},
+                )
+                self.assertTrue(result.get("ok"), result)
+                self.assertEqual(result.get("links_deleted"), 1)
+                self.assertEqual(result.get("file_records_deleted"), 1)
+                self.assertFalse(result.get("disk_files_deleted"))
+
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    self.assertIsNone(
+                        connection.execute("SELECT id FROM profiles WHERE id=?", (like_profile_id,)).fetchone()
+                    )
+                    self.assertIsNotNone(
+                        connection.execute("SELECT id FROM profiles WHERE id=?", (post_profile_id,)).fetchone()
+                    )
+                    self.assertEqual(
+                        connection.execute("SELECT COUNT(*) FROM links WHERE profile_id=?", (like_profile_id,)).fetchone()[0],
+                        0,
+                    )
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM links WHERE profile_id=? AND aweme_id='7657753714518250752'",
+                            (owner_like_profile_id,),
+                        ).fetchone()[0],
+                        1,
+                    )
+                    self.assertEqual(
+                        connection.execute("SELECT COUNT(*) FROM link_files WHERE profile_id=?", (like_profile_id,)).fetchone()[0],
+                        0,
+                    )
+                    self.assertEqual(
+                        connection.execute("SELECT COUNT(*) FROM link_files WHERE profile_id=?", (owner_like_profile_id,)).fetchone()[0],
+                        1,
+                    )
+                    self.assertEqual(
+                        connection.execute("SELECT COUNT(*) FROM profile_download_queue WHERE profile_id=?", (like_profile_id,)).fetchone()[0],
+                        0,
+                    )
+                    self.assertIsNone(
+                        connection.execute("SELECT profile_id FROM jobs WHERE message='done'").fetchone()[0]
+                    )
+                    self.assertEqual(
+                        connection.execute("SELECT value FROM settings WHERE key='profile_url'").fetchone()[0],
+                        post_url,
+                    )
+
+                state = runtime.json_request("/api/state")
+                self.assertEqual(state.get("current_profile", {}).get("id"), post_profile_id)
+                profiles_js = runtime.request("/features/profiles.js")[2].decode("utf-8")
+                self.assertIn("data-profile-delete", profiles_js)
+            finally:
+                runtime.close()
+
     def test_database_initialization_is_idempotent_and_healthy(self) -> None:
         with tempfile.TemporaryDirectory(prefix="fanhao-download-manager-db-") as temp:
             root = Path(temp)

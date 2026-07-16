@@ -20,7 +20,7 @@ from .download_supervisor import download_manager
 from .downloader_client import fetch_aweme_comments
 from .extraction import start_extract, start_following_import, start_refresh_profiles, stop_extract
 from .library import list_library, open_library_folder, resolve_library_media, shared_player_detail, shared_player_list, shared_player_neighbor, shared_player_row, shared_player_summary, shared_player_video_from_row
-from .maintenance import delete_empty_failed_links, delete_failed_links, delete_link, queue_gallery_music_backfill, reset_failed_links
+from .maintenance import delete_empty_failed_links, delete_failed_links, delete_link, delete_profile, queue_gallery_music_backfill, reset_failed_links
 from .profiles_links import current_profile_id, import_manifest_to_db, upsert_links, upsert_profile
 from .queue import ensure_profile_in_download_queue, move_download_queue_item, sort_download_queue_by_pending
 from .read_models import get_state, list_links, list_profiles
@@ -133,6 +133,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(start_extract(payload))
             if parsed.path == "/api/profiles/refresh":
                 return self.send_json(start_refresh_profiles(payload))
+            if parsed.path == "/api/profiles/delete":
+                return self.send_json(delete_profile(payload))
             if parsed.path == "/api/comments/fetch":
                 return self.send_json(fetch_aweme_comments(payload))
             if parsed.path == "/api/profiles/following/import":

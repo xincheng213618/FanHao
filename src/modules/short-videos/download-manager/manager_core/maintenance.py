@@ -199,3 +199,111 @@ def delete_link(payload: dict[str, Any]) -> dict[str, Any]:
         "aweme_id": aweme_id,
         "state": get_state(),
     }
+
+
+def delete_profile(payload: dict[str, Any]) -> dict[str, Any]:
+    profile_id = normalize_int(payload.get("profile_id", 0), 0, 0, 1000000)
+    if profile_id <= 0:
+        return {"ok": False, "message": "缺少有效的主页记录 ID"}
+
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        profile = conn.execute(
+            "SELECT id, url, sec_uid, tab, nickname, title FROM profiles WHERE id=?",
+            (profile_id,),
+        ).fetchone()
+        if profile is None:
+            return {"ok": False, "message": "这个主页记录已经不存在"}
+
+        running_job = conn.execute(
+            "SELECT id FROM jobs WHERE profile_id=? AND status='running' LIMIT 1",
+            (profile_id,),
+        ).fetchone()
+        if running_job is not None:
+            return {
+                "ok": False,
+                "message": f"主页正在执行任务 #{running_job['id']}，请先停止任务再删除",
+            }
+
+        downloading = int(
+            conn.execute(
+                "SELECT COUNT(*) c FROM links WHERE profile_id=? AND status='downloading'",
+                (profile_id,),
+            ).fetchone()["c"]
+        )
+        if downloading > 0:
+            return {
+                "ok": False,
+                "message": f"主页还有 {downloading} 条正在下载，请停止下载后再删除",
+            }
+
+        link_count = int(
+            conn.execute("SELECT COUNT(*) c FROM links WHERE profile_id=?", (profile_id,)).fetchone()["c"]
+        )
+        file_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) c
+                FROM link_files
+                WHERE profile_id=?
+                   OR link_id IN (SELECT id FROM links WHERE profile_id=?)
+                """,
+                (profile_id, profile_id),
+            ).fetchone()["c"]
+        )
+        audit_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) c
+                FROM video_quality_audit_items
+                WHERE profile_id=?
+                   OR link_id IN (SELECT id FROM links WHERE profile_id=?)
+                """,
+                (profile_id, profile_id),
+            ).fetchone()["c"]
+        )
+
+        conn.execute(
+            """
+            DELETE FROM video_quality_audit_items
+            WHERE profile_id=?
+               OR link_id IN (SELECT id FROM links WHERE profile_id=?)
+            """,
+            (profile_id, profile_id),
+        )
+        conn.execute("DELETE FROM links WHERE profile_id=?", (profile_id,))
+        conn.execute("UPDATE jobs SET profile_id=NULL WHERE profile_id=?", (profile_id,))
+
+        current_url_row = conn.execute("SELECT value FROM settings WHERE key='profile_url'").fetchone()
+        current_url = str(current_url_row["value"] or "") if current_url_row else ""
+        if current_url == str(profile["url"] or ""):
+            fallback = conn.execute(
+                """
+                SELECT url
+                FROM profiles
+                WHERE sec_uid=? AND id<>?
+                ORDER BY CASE WHEN tab='post' THEN 0 ELSE 1 END, id
+                LIMIT 1
+                """,
+                (str(profile["sec_uid"] or ""), profile_id),
+            ).fetchone()
+            conn.execute(
+                "UPDATE settings SET value=? WHERE key='profile_url'",
+                (str(fallback["url"] or "") if fallback else "",),
+            )
+
+        conn.execute("DELETE FROM profiles WHERE id=?", (profile_id,))
+        sync_download_queue(conn)
+
+    name = str(profile["nickname"] or profile["title"] or f"主页 #{profile_id}")
+    add_event("warn", f"主页记录已删除：{name}（#{profile_id}），数据库链接 {link_count} 条")
+    return {
+        "ok": True,
+        "profile_id": profile_id,
+        "name": name,
+        "links_deleted": link_count,
+        "file_records_deleted": file_count,
+        "audit_records_deleted": audit_count,
+        "disk_files_deleted": False,
+        "state": get_state(),
+    }
