@@ -457,7 +457,7 @@ const rankingService = createRankingService({
   createId,
   dbBoolOrNull,
   getCoreDb,
-  getSearchStamp: searchSourceStamp,
+  getSearchStamp: workQueryStamp,
   localWorkByCodeKey,
   localWorkCodeKeys,
   looseWorkCodeKey,

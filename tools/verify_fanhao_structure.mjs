@@ -6,6 +6,7 @@ import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
 import { createPlaybackProgressService } from "../src/modules/fanhao/server/playback/playback-progress-service.js";
+import { createRankingService } from "../src/modules/fanhao/server/catalog/ranking-service.js";
 import { prepareCollectionWorkPage } from "../src/modules/fanhao/server/user-state/routes.js";
 import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkImageService } from "../src/modules/fanhao/server/works/image-service.js";
@@ -209,6 +210,9 @@ assert(studioService.includes("sortedByMode: new Map()"), "studio detail paging 
 assert(studioService.includes("ensureDetailCaches(stamp)"), "studio detail caches must follow the catalog version stamp");
 assert(!studioService.includes("enrichLocalWorksWithActorMovieIndex(linkRows"), "studio details must not rerun actor-movie code matching for core library works");
 assert(rankingServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "ranking pages must batch-hydrate visible local work metadata");
+assert(rankingServiceSource.includes("hydrateRankingCoverUrls(rankingRows)"), "ranking pages must batch-hydrate cover URLs after the fast list query");
+assert(!rankingServiceSource.includes("LEFT JOIN images cover"), "ranking list queries must not run one correlated image lookup per row");
+assert(rankingServiceSource.includes("rankingSummariesCache?.stamp === stamp"), "ranking summaries must reuse versioned results");
 const workInfoServiceSource = read("src/modules/fanhao/server/works/work-info-service.js");
 const workQueryServiceSource = read("src/modules/fanhao/server/works/work-query-service.js");
 const workCodeIndexServiceSource = read("src/modules/fanhao/server/works/work-code-index-service.js");
@@ -358,6 +362,79 @@ assert.deepEqual(
   "collection pages must batch-prepare details before presentation and warm visible media afterward"
 );
 assert.deepEqual(preparedCollectionWorks.map((work) => work.id), ["history-1", "history-2"], "collection page preparation must preserve order");
+
+let rankingDataStamp = "ranking-v1";
+let rankingListReadCount = 0;
+let rankingCoverReadCount = 0;
+let rankingSummaryReadCount = 0;
+let rankingSummaryCodesReadCount = 0;
+const cachedRankingService = createRankingService({
+  clampInteger: (value, fallback, min, max) => Math.max(min, Math.min(max, Number(value ?? fallback))),
+  createId: (prefix, value) => `${prefix}:${value}`,
+  dbBoolOrNull: (value) => value === null || value === undefined ? null : Boolean(value),
+  getCoreDb: () => ({
+    prepare(sql) {
+      return {
+        all(...args) {
+          if (sql.includes("COUNT(ci.work_id)")) {
+            rankingSummaryReadCount += 1;
+            return [{ collection_id: 1, list_label: "TOP250 2025", source_key: "top:y2025", total: 2, updated_at: "v1", page_url: "https://example.com/ranking" }];
+          }
+          if (sql.includes("SELECT w.code_search AS code_key")) {
+            rankingSummaryCodesReadCount += 1;
+            return [{ code_key: "abc001" }, { code_key: "def002" }];
+          }
+          if (sql.includes("FROM images")) {
+            rankingCoverReadCount += 1;
+            assert.deepEqual(args, [101, 102], "ranking cover batches must bind only listed core work IDs");
+            return [
+              { work_id: "101", remote_url: "https://example.com/ranking-101.jpg" },
+              { work_id: "101", remote_url: "https://example.com/fallback-101.jpg" },
+              { work_id: "102", remote_url: "https://example.com/ranking-102.jpg" }
+            ];
+          }
+          if (sql.includes("AND c.source_key = ?")) {
+            rankingListReadCount += 1;
+            return [
+              { list_type: args[0], list_key: args[1], list_label: "TOP250 2025", rank_no: 1, core_work_id: 101, code: "ABC-001", code_key: "abc001", title: "ABC-001", detail_url: "", release_date: "2025-01-01", rating: 4.5, rating_count: 10, page_url: "", fetched_at: "", updated_at: "v1" },
+              { list_type: args[0], list_key: args[1], list_label: "TOP250 2025", rank_no: 2, core_work_id: 102, code: "DEF-002", code_key: "def002", title: "DEF-002", detail_url: "", release_date: "2025-01-02", rating: 4.4, rating_count: 9, page_url: "", fetched_at: "", updated_at: "v1" }
+            ];
+          }
+          throw new Error(`unexpected ranking query: ${sql.slice(0, 80)}`);
+        }
+      };
+    }
+  }),
+  getSearchStamp: () => rankingDataStamp,
+  localWorkByCodeKey: () => new Map(),
+  localWorkCodeKeys: () => new Set(),
+  looseWorkCodeKey: (value) => String(value || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase(),
+  maxWorkLimit: 1000,
+  normalizeWorkCode: (value) => String(value || ""),
+  parseJsonTextArray: () => [],
+  prewarmCoreWorkCovers() {},
+  prewarmRemoteImagesForWorks() {},
+  prewarmWorkInfoDetails() {},
+  proxiedRemoteImageUrl: (value) => value ? `/proxy?url=${encodeURIComponent(value)}` : "",
+  publicWork: (work) => ({ ...work }),
+  storedWorkCodeKey: (value) => String(value || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase()
+});
+cachedRankingService.rows("top", "y2025");
+cachedRankingService.rows("top", "y2025");
+assert.equal(rankingListReadCount, 1, "repeated ranking pages must reuse cached list rows");
+assert.equal(rankingCoverReadCount, 1, "repeated ranking pages must reuse batch-hydrated cover URLs");
+const cachedRankingPayload = cachedRankingService.worksPayload(new URL("http://127.0.0.1/api/rankings/top?key=y2025&limit=48"));
+assert.equal(cachedRankingPayload.works[0]?.remoteCoverUrl, "/proxy?url=https%3A%2F%2Fexample.com%2Franking-101.jpg", "ranking cover batches must preserve the preferred cover URL");
+cachedRankingService.summaries();
+cachedRankingService.summaries();
+assert.equal(rankingSummaryReadCount, 1, "repeated ranking navigation must reuse summary rows");
+assert.equal(rankingSummaryCodesReadCount, 1, "repeated ranking navigation must reuse summary membership counts");
+rankingDataStamp = "ranking-v2";
+cachedRankingService.rows("top", "y2025");
+assert.equal(rankingListReadCount, 2, "ranking updates must invalidate cached list rows");
+cachedRankingService.invalidateSearch();
+cachedRankingService.rows("top", "y2025");
+assert.equal(rankingListReadCount, 3, "explicit ranking invalidation must clear cached list rows");
 
 let historyWorkLookupCount = 0;
 class CountingWorkMap extends Map {

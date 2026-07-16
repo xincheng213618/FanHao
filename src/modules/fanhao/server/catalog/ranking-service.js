@@ -1,3 +1,5 @@
+const RANKING_COVER_BATCH_SIZE = 200;
+
 export function createRankingService({
   clampInteger,
   createId,
@@ -18,6 +20,8 @@ export function createRankingService({
   storedWorkCodeKey
 }) {
   let rankingMissingSearchCache = null;
+  let rankingRowsCache = new Map();
+  let rankingSummariesCache = null;
 
   function listLabel(listType, listKey, fallback = "") {
     const key = String(listKey || "");
@@ -40,8 +44,11 @@ export function createRankingService({
   }
 
   function summaries() {
+    const stamp = getSearchStamp();
+    if (rankingSummariesCache?.stamp === stamp) return rankingSummariesCache.items;
     const localKeys = localWorkCodeKeys();
     const result = [];
+    let succeeded = true;
     try {
       const rows = getCoreDb()
         .prepare(
@@ -89,14 +96,22 @@ export function createRankingService({
         });
       }
     } catch (error) {
+      succeeded = false;
       console.warn("[rankings]", error.message);
     }
+    if (succeeded) rankingSummariesCache = { stamp, items: result };
     return result;
   }
 
   function rows(listType = "top", listKey = "") {
+    const normalizedListKey = listKey || "";
+    const stamp = getSearchStamp();
+    const cacheKey = `${listType}:${normalizedListKey}`;
+    const cached = rankingRowsCache.get(cacheKey);
+    if (cached?.stamp === stamp) return cached.rows;
+
     try {
-      return getCoreDb()
+      const rankingRows = getCoreDb()
         .prepare(
           `
           SELECT
@@ -104,11 +119,11 @@ export function createRankingService({
             ? AS list_key,
             c.name AS list_label,
             ci.rank_no,
+            w.id AS core_work_id,
             w.code,
             w.code_search AS code_key,
             COALESCE(ci.title_snapshot, w.title) AS title,
             wref.url AS detail_url,
-            cover.remote_url AS image_url,
             w.release_date,
             COALESCE(ci.rating_snapshot, w.rating) AS rating,
             COALESCE(ci.rating_count_snapshot, w.rating_count) AS rating_count,
@@ -119,26 +134,59 @@ export function createRankingService({
           JOIN collection_items ci ON ci.collection_id = c.id
           JOIN works w ON w.id = ci.work_id
           LEFT JOIN work_external_refs wref ON wref.work_id = w.id AND wref.provider = 'javdb-video'
-          LEFT JOIN images cover
-            ON cover.id = (
-              SELECT i.id
-              FROM images i
-              WHERE i.owner_type = 'work'
-                AND i.owner_id = w.id
-                AND i.kind = 'cover'
-              ORDER BY CASE WHEN i.source = 'javdb_rankings' THEN 0 ELSE 1 END, i.id ASC
-              LIMIT 1
-            )
           WHERE c.type = 'ranking'
             AND c.source_key = ?
           ORDER BY ci.rank_no ASC, w.code ASC
           `
         )
-        .all(listType, listKey || "", `${listType}:${listKey || ""}`);
+        .all(listType, normalizedListKey, `${listType}:${normalizedListKey}`);
+      hydrateRankingCoverUrls(rankingRows);
+      rankingRowsCache.delete(cacheKey);
+      rankingRowsCache.set(cacheKey, { stamp, rows: rankingRows });
+      while (rankingRowsCache.size > 32) rankingRowsCache.delete(rankingRowsCache.keys().next().value);
+      return rankingRows;
     } catch (error) {
       console.warn("[rankings]", error.message);
       return [];
     }
+  }
+
+  function hydrateRankingCoverUrls(rankingRows = []) {
+    const workIds = [...new Set((rankingRows || [])
+      .map((row) => Number(row?.core_work_id))
+      .filter((workId) => Number.isSafeInteger(workId) && workId > 0))];
+    const coverUrlByWorkId = new Map();
+
+    for (let offset = 0; offset < workIds.length; offset += RANKING_COVER_BATCH_SIZE) {
+      const batch = workIds.slice(offset, offset + RANKING_COVER_BATCH_SIZE);
+      const placeholders = batch.map(() => "?").join(", ");
+      try {
+        const coverRows = getCoreDb()
+          .prepare(
+            `
+            SELECT CAST(owner_id AS TEXT) AS work_id, remote_url
+            FROM images
+            WHERE owner_type = 'work'
+              AND owner_id IN (${placeholders})
+              AND kind = 'cover'
+            ORDER BY owner_id ASC, CASE WHEN source = 'javdb_rankings' THEN 0 ELSE 1 END, id ASC
+            `
+          )
+          .all(...batch);
+        for (const coverRow of coverRows) {
+          if (!coverUrlByWorkId.has(coverRow.work_id)) {
+            coverUrlByWorkId.set(coverRow.work_id, coverRow.remote_url || "");
+          }
+        }
+      } catch (error) {
+        console.warn("[rankings-cover]", error.message);
+      }
+    }
+
+    for (const row of rankingRows || []) {
+      row.image_url = coverUrlByWorkId.get(String(row.core_work_id || "")) || "";
+    }
+    return rankingRows;
   }
 
   function workFromRow(row, localByCode = localWorkByCodeKey()) {
@@ -240,6 +288,7 @@ export function createRankingService({
     const localByCode = localWorkByCodeKey();
     const seen = new Set();
     const works = [];
+    const missingRows = [];
 
     try {
       const rankingRows = getCoreDb()
@@ -250,11 +299,11 @@ export function createRankingService({
             substr(c.source_key, instr(c.source_key || ':', ':') + 1) AS list_key,
             c.name AS list_label,
             ci.rank_no,
+            w.id AS core_work_id,
             w.code,
             w.code_search AS code_key,
             COALESCE(ci.title_snapshot, w.title) AS title,
             wref.url AS detail_url,
-            cover.remote_url AS image_url,
             w.release_date,
             COALESCE(ci.rating_snapshot, w.rating) AS rating,
             COALESCE(ci.rating_count_snapshot, w.rating_count) AS rating_count,
@@ -265,16 +314,6 @@ export function createRankingService({
           JOIN collection_items ci ON ci.collection_id = c.id
           JOIN works w ON w.id = ci.work_id
           LEFT JOIN work_external_refs wref ON wref.work_id = w.id AND wref.provider = 'javdb-video'
-          LEFT JOIN images cover
-            ON cover.id = (
-              SELECT i.id
-              FROM images i
-              WHERE i.owner_type = 'work'
-                AND i.owner_id = w.id
-                AND i.kind = 'cover'
-              ORDER BY CASE WHEN i.source = 'javdb_rankings' THEN 0 ELSE 1 END, i.id ASC
-              LIMIT 1
-            )
           WHERE c.type = 'ranking'
           ORDER BY ci.rank_no ASC, ci.updated_at DESC, c.source_key DESC, w.code ASC
           `
@@ -285,8 +324,10 @@ export function createRankingService({
         const codeKey = storedWorkCodeKey(row.code_key) || looseWorkCodeKey(row.code);
         if (!codeKey || seen.has(codeKey) || localByCode.has(codeKey)) continue;
         seen.add(codeKey);
-        works.push(workFromRow(row, localByCode));
+        missingRows.push(row);
       }
+      hydrateRankingCoverUrls(missingRows);
+      for (const row of missingRows) works.push(workFromRow(row, localByCode));
     } catch (error) {
       console.warn("[rankings-search]", error.message);
     }
@@ -297,6 +338,8 @@ export function createRankingService({
 
   function invalidateSearch() {
     rankingMissingSearchCache = null;
+    rankingRowsCache = new Map();
+    rankingSummariesCache = null;
   }
 
   return {
