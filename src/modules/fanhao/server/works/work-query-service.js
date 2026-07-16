@@ -14,6 +14,7 @@ export function createWorkQueryService({
   peopleScopeService,
   playbackProgressService,
   prewarmLocalWorkCodeKeys,
+  prewarmWorkSearch = () => {},
   prewarmWorkInfoDetails = () => {},
   prewarmRemoteImagesForWorks,
   publicPerson,
@@ -346,6 +347,12 @@ export function createWorkQueryService({
   function prewarm() {
     enrichedWorks();
     prewarmLocalWorkCodeKeys();
+    prewarmWorkSearch();
+    const rankingMissingWorks = rankingMissingSearchWorks();
+    const rankingMissingKeys = new Set(rankingMissingWorks
+      .map((work) => storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title))
+      .filter(Boolean));
+    actorMissingSearchWorks(rankingMissingKeys);
     const scope = peopleScopeService.normalize("main");
     const stamp = currentStamp();
     const works = enrichedWorks().filter((work) => peopleScopeService.workMatches(work, scope));
@@ -367,24 +374,31 @@ export function createWorkQueryService({
       ? { exact: [], matchedPersonIds: [], people: [] }
       : searchPeople(rawQuery);
     const exactPersonIds = new Set(peopleSearch.matchedPersonIds || peopleSearch.exact.map((person) => person.id));
-    const matchesQuery = exactCodeKey || codePrefixQuery ? null : createWorkSearchMatcher(query);
+    const exactPersonSearch = !exactCodeKey && !codePrefixQuery && peopleSearch.exact.length > 0;
+    const matchesQuery = exactCodeKey || codePrefixQuery || exactPersonSearch ? null : createWorkSearchMatcher(query);
     const exactLocalWork = exactCodeKey ? findExactLocalWork(exactCodeKey) : null;
     const localMatches = exactCodeKey
       ? (exactLocalWork ? [exactLocalWork] : [])
       : codePrefixQuery
         ? findLocalWorksByCodePrefix(storedWorkCodeKey(rawQuery))
-        : allWorks().filter((work) => exactPersonIds.has(work.personId) || matchesQuery(work));
+        : exactPersonSearch
+          ? allWorks().filter((work) => exactPersonIds.has(work.personId))
+          : allWorks().filter((work) => exactPersonIds.has(work.personId) || matchesQuery(work));
     const fastMissingMatches = codePrefixQuery && !exactLocalWork ? fastMissingCodeSearch(rawQuery) : null;
     const rankingMissingWorks = exactLocalWork || codePrefixQuery ? [] : rankingMissingSearchWorks();
     const rankingMissingKeys = new Set(rankingMissingWorks
       .map((work) => storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title))
       .filter(Boolean));
-    const rankingMissingMatches = rankingMissingWorks.filter((work) => exactCodeKey
+    const rankingMissingMatches = exactPersonSearch ? [] : rankingMissingWorks.filter((work) => exactCodeKey
       ? storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title) === exactCodeKey
       : matchesQuery(work));
-    const actorMissingMatches = exactLocalWork || codePrefixQuery ? [] : actorMissingSearchWorks(rankingMissingKeys).filter((work) => exactCodeKey
-      ? storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title) === exactCodeKey
-      : matchesQuery(work));
+    const actorMissingMatches = exactLocalWork || codePrefixQuery
+      ? []
+      : actorMissingSearchWorks(rankingMissingKeys).filter((work) => exactPersonSearch
+        ? exactPersonIds.has(work.personId)
+        : exactCodeKey
+          ? storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title) === exactCodeKey
+          : matchesQuery(work));
     const matchedWorks = dedupeWorksForDisplay([
       ...localMatches,
       ...(fastMissingMatches || []),

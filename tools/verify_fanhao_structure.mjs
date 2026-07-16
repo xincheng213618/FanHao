@@ -144,6 +144,8 @@ assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info d
 assert(workQueryServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "work lists must batch-hydrate detail rows before presentation");
 assert(workInfoServiceSource.includes("function facetRowsById()"), "work-list facets must use a compact metadata index");
 assert(workQueryServiceSource.includes("staticWorkFacets(works);"), "compact work facets must be ready before the first list request");
+assert(workQueryServiceSource.includes("prewarmWorkSearch();"), "local and missing-work search indexes must be ready before the first query");
+assert(workQueryServiceSource.includes("const exactPersonSearch ="), "exact person searches must bypass the full local text scan");
 assert(workCodeIndexServiceSource.includes("localWorkCodeIndexCache = { stamp, keys, rows }"), "local code membership and work lookup must share one catalog pass");
 const workImageServiceSource = read("src/modules/fanhao/server/works/image-service.js");
 assert(workImageServiceSource.includes("FROM local_works lw"), "work-cover facets must index only local catalog entries");
@@ -158,6 +160,8 @@ assert(server.includes("createFanhaoDependencies({"), "server composition must d
 assert(!/fanhao:\s*\{\s*catalog:/s.test(server), "server.js must not own FanHao runtime buckets");
 assert(server.includes("if (!missingLocal && !work.coverId && !workHasCoreCover(work.id))"), "catalog facets must use the compact core-cover index");
 assert(!server.includes("return !work.coverId && !workCoverRow(work.id);"), "catalog facets must not read cover blobs while counting missing covers");
+assert(server.includes("normalized: normalizeSearchValue(normalizedValues.join"), "deep raw metadata must stay out of the pinyin-normalization hot path");
+assert(server.includes("function prewarmWorkSearch()"), "local work search text must be prepared before the first query");
 const worksRuntime = read("src/modules/fanhao/server/works/runtime.js");
 assert(worksRuntime.includes("activeRequestDeps"), "work services must be reused for the active library snapshot");
 assert(worksRuntime.includes("workQueryService.prewarm()"), "FanHao work queries must prewarm their full-library enrichment cache before serving requests");

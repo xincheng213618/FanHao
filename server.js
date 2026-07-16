@@ -853,6 +853,7 @@ const moduleRegistry = await discoverFanHaoModules({
         personListService,
         playbackProgressService,
         prewarmLocalWorkCodeKeys: workCodeIndexService.localCodeKeys,
+        prewarmWorkSearch,
         prewarmWorkInfoDetails,
         prewarmRemoteImagesForWorks,
         publicActorProfile,
@@ -1247,14 +1248,13 @@ function searchPeople(rawQuery) {
   };
 }
 
-function buildWorkSearchText(work) {
+function buildWorkSearchEntry(work) {
   const person = library.peopleById.get(work.personId);
   const info = searchWorkInfoRow(work.id);
   const infoFields = parseJsonArray(info?.fields_json).flatMap((field) => [field?.label, field?.value]);
-  return [
+  const normalizedValues = [
     work.title,
     work.directoryName,
-    work.relativePath,
     work.personName,
     person?.name,
     info?.code,
@@ -1265,7 +1265,11 @@ function buildWorkSearchText(work) {
     info?.label,
     info?.series,
     ...(info?.actors || []),
-    ...parseJsonTextArray(info?.tags_json),
+    ...parseJsonTextArray(info?.tags_json)
+  ].filter(Boolean);
+  const text = [
+    ...normalizedValues,
+    work.relativePath,
     ...infoFields,
     info?.raw_text,
     ...(work.videos || []).flatMap((video) => [video.name, video.title, video.relativePath]),
@@ -1275,6 +1279,10 @@ function buildWorkSearchText(work) {
     .filter(Boolean)
     .join("\n")
     .toLowerCase();
+  return {
+    text,
+    normalized: normalizeSearchValue(normalizedValues.join("\n"))
+  };
 }
 
 function searchWorkInfoRows() {
@@ -1289,6 +1297,11 @@ function searchWorkInfoRows() {
              fields_json, raw_text, javdb_tags_json AS tags_json
       FROM works
       WHERE status = 'ok'
+        AND EXISTS (
+          SELECT 1
+          FROM local_works lw
+          WHERE lw.work_id = works.id
+        )
     `).all()) {
       rows.set(row.work_id, { ...row, actors: [] });
     }
@@ -1298,6 +1311,11 @@ function searchWorkInfoRows() {
       FROM work_people wp
       JOIN people p ON p.id = wp.person_id
       WHERE wp.role = 'actor'
+        AND EXISTS (
+          SELECT 1
+          FROM local_works lw
+          WHERE lw.work_id = wp.work_id
+        )
     `).all()) {
       const info = rows.get(row.work_id);
       if (info && row.name) info.actors.push(row.name);
@@ -1308,6 +1326,11 @@ function searchWorkInfoRows() {
       FROM work_makers wm
       JOIN makers m ON m.id = wm.maker_id
       WHERE wm.role IN ('maker', 'label')
+        AND EXISTS (
+          SELECT 1
+          FROM local_works lw
+          WHERE lw.work_id = wm.work_id
+        )
     `).all()) {
       const info = rows.get(row.work_id);
       if (info && row.name && !info[row.role]) info[row.role] = row.name;
@@ -1317,6 +1340,11 @@ function searchWorkInfoRows() {
       SELECT CAST(ws.work_id AS TEXT) AS work_id, s.name
       FROM work_series ws
       JOIN series s ON s.id = ws.series_id
+      WHERE EXISTS (
+        SELECT 1
+        FROM local_works lw
+        WHERE lw.work_id = ws.work_id
+      )
     `).all()) {
       const info = rows.get(row.work_id);
       if (info && row.name && !info.series) info.series = row.name;
@@ -1342,13 +1370,16 @@ function workSearchTextEntry(work, stamp = searchSourceStamp()) {
   const cached = workSearchTextCache.rows.get(key);
   if (cached) return cached;
 
-  const text = buildWorkSearchText(work);
-  const entry = {
-    text,
-    normalized: normalizeSearchValue(text)
-  };
+  const entry = buildWorkSearchEntry(work);
   workSearchTextCache.rows.set(key, entry);
   return entry;
+}
+
+function prewarmWorkSearch() {
+  const stamp = searchSourceStamp();
+  for (const work of library.worksById.values()) {
+    workSearchTextEntry(work, stamp);
+  }
 }
 
 function createWorkSearchMatcher(query) {
