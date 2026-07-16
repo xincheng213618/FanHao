@@ -153,6 +153,12 @@ assert(!/fanhao:\s*\{\s*catalog:/s.test(server), "server.js must not own FanHao 
 const worksRuntime = read("src/modules/fanhao/server/works/runtime.js");
 assert(worksRuntime.includes("activeRequestDeps"), "work services must be reused for the active library snapshot");
 assert(worksRuntime.includes("workQueryService.prewarm()"), "FanHao work queries must prewarm their full-library enrichment cache before serving requests");
+const libraryRuntime = read("src/modules/fanhao/server/library/runtime.js");
+const personListServiceSource = read("src/modules/fanhao/server/people/person-list-service.js");
+const fanhaoRuntime = read("src/modules/fanhao/server/runtime.js");
+assert(libraryRuntime.includes("prewarmLibraryPeoplePayloads(requestDeps())"), "FanHao must prepare people payloads before the first library request");
+assert(personListServiceSource.includes("const mainPeopleCache = new Map()"), "main and western people scopes must remain cached independently");
+assert(fanhaoRuntime.includes("library.start();"), "FanHao startup must prewarm the library response path");
 const workInfoService = read("src/modules/fanhao/server/works/work-info-service.js");
 const workPresenterService = read("src/modules/fanhao/server/works/presenter-service.js");
 const workMediaRoutes = read("src/modules/fanhao/server/works/routes-media.js");

@@ -20,6 +20,7 @@ export function createFanhaoRuntime(deps) {
   }
 
   function start() {
+    library.start();
     works.start();
   }
 

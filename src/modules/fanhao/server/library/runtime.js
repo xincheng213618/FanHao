@@ -1,4 +1,9 @@
-import { routeLibraryApi, routeLibraryMutationApi, routeLibraryReadApi } from "./routes.js";
+import {
+  prewarmLibraryPeoplePayloads,
+  routeLibraryApi,
+  routeLibraryMutationApi,
+  routeLibraryReadApi
+} from "./routes.js";
 
 export function createLibraryRuntime(deps) {
   function requestDeps() {
@@ -20,9 +25,14 @@ export function createLibraryRuntime(deps) {
     return routeLibraryMutationApi(req, res, url, requestDeps());
   }
 
+  function start() {
+    prewarmLibraryPeoplePayloads(requestDeps());
+  }
+
   return {
     routeApi,
     routeMutationApi,
-    routeReadApi
+    routeReadApi,
+    start
   };
 }

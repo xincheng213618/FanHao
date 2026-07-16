@@ -6,7 +6,7 @@ export function createPersonListService({
   peopleScopeService,
   personMergeService
 }) {
-  const mainPeopleCache = { key: "", people: null };
+  const mainPeopleCache = new Map();
 
   function shouldShowPersonInMainList(person) {
     if (!person) return false;
@@ -19,9 +19,8 @@ export function createPersonListService({
     const library = getLibrary();
     const normalizedScope = peopleScopeService.normalize(scope);
     const cacheKey = `${normalizedScope}:${getStamp()}:${library.people?.length || 0}`;
-    if (mainPeopleCache.key === cacheKey && mainPeopleCache.people) {
-      return mainPeopleCache.people;
-    }
+    const cached = mainPeopleCache.get(cacheKey);
+    if (cached) return cached;
     const people = [];
     const seen = new Set();
     for (const person of library.people) {
@@ -31,8 +30,10 @@ export function createPersonListService({
       if (!peopleScopeService.personMatches(merged, normalizedScope)) continue;
       if (shouldShowPersonInMainList(merged)) people.push(merged);
     }
-    mainPeopleCache.key = cacheKey;
-    mainPeopleCache.people = people;
+    mainPeopleCache.set(cacheKey, people);
+    while (mainPeopleCache.size > 6) {
+      mainPeopleCache.delete(mainPeopleCache.keys().next().value);
+    }
     return people;
   }
 

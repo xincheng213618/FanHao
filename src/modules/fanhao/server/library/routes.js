@@ -72,6 +72,29 @@ function cachedPublicPeople({ people, publicPerson, scope, stamp }) {
   return payload;
 }
 
+export function prewarmLibraryPeoplePayloads(deps, scopes = ["main", "western"]) {
+  const {
+    library,
+    peopleScopeService,
+    personListService,
+    peoplePayloadStamp,
+    publicPerson
+  } = deps;
+  const warmed = [];
+  for (const requestedScope of scopes) {
+    const scope = peopleScopeService.normalize(requestedScope);
+    const people = personListService.mainLibraryPeople(scope);
+    cachedPublicPeople({
+      people,
+      publicPerson,
+      scope,
+      stamp: typeof peoplePayloadStamp === "function" ? peoplePayloadStamp(scope) : `${library.scannedAt || ""}:${scope}:${people.length}`
+    });
+    warmed.push({ scope, count: people.length });
+  }
+  return warmed;
+}
+
 export async function routeLibraryMutationApi(req, res, url, deps) {
   const {
     getLastScanError,
