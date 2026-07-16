@@ -25,6 +25,7 @@ const serverConfigSource = fs.readFileSync(path.join(root, "src", "bootstrap", "
 const routeSource = fs.readFileSync(path.join(root, "src", "modules", "fanhao", "server", "works", "routes-media.js"), "utf8");
 const streamSource = fs.readFileSync(path.join(root, "src", "platform", "server", "media-stream-service.js"), "utf8");
 const fileServerSource = fs.readFileSync(path.join(root, "src", "platform", "server", "file-server.js"), "utf8");
+const playerHtmlSource = fs.readFileSync(path.join(root, "public", "player.html"), "utf8");
 const playerSource = fs.readFileSync(path.join(root, "public", "js", "player-page.js"), "utf8");
 const nativePlayerSource = fs.readFileSync(
   path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativePlayerActivity.java"),
@@ -39,6 +40,9 @@ assert(fileServerSource.includes("...responseHeaders"), "media range responses m
 assert(shortVideoRuntimeSource.includes("short-video-smooth") && shortVideoRuntimeSource.includes('"no-store"'), "uncached adaptive short-video responses must not pin the original stream under the rendition URL");
 assert(shortVideoRuntimeSource.includes('url.searchParams.get("wait")') && shortVideoRuntimeSource.includes('playbackPrepare = "source-no-wait"'), "mobile smooth playback must reuse a ready rendition without blocking first play on a background transcode");
 assert(shortVideoRuntimeSource.includes("applyMobilePlaybackHints") && shortVideoRuntimeSource.includes('req.headers?.["x-fanhao-client"]'), "native playback must receive a stable rendition URL and an untruncated Media3 byte stream");
+assert(playerHtmlSource.includes('href="/css/foundation.css?'), "standalone player should load only the shared foundation styles");
+assert(!playerHtmlSource.includes('href="/styles.css?'), "standalone player must not parse every application module stylesheet");
+assert(playerHtmlSource.includes("*::before") && playerHtmlSource.includes("box-sizing: border-box;"), "standalone player should own the box model reset it needs");
 assert(playerSource.includes('els.video.preload = mode === "direct" ? "auto" : "none";'), "native MP4 should preload while generated streams start on demand");
 assert(playerSource.includes("if (customControls && autoPlay)"), "generated stream seeks should restart playback without waiting for metadata preload");
 assert(playerSource.includes("const deferGeneratedStream = customControls && !autoPlay;"), "generated streams should not start FFmpeg during page load");
