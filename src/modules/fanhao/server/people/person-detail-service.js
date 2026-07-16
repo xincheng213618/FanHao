@@ -1,3 +1,5 @@
+const PERSON_DETAIL_SOURCE_CACHE_LIMIT = 128;
+
 export function createPersonDetailService({
   actorProfileMergeCandidates,
   actorProfileRow,
@@ -12,6 +14,7 @@ export function createPersonDetailService({
   mergedActorMovieRows,
   mergedPersonRecord,
   missingActorWorksForPerson,
+  peoplePayloadStamp,
   peopleScopeService,
   publicActorProfile,
   publicPerson,
@@ -20,8 +23,11 @@ export function createPersonDetailService({
   workLocalMutationService,
   workCodeKeySetForWorks,
   workQueryService,
+  workQueryStamp,
 }) {
   const coverBodyLimit = Math.ceil(maxActorAvatarBytes * 1.4) + 128 * 1024;
+  const detailSourceCache = new Map();
+  let detailSourceCacheStamp = "";
 
   function actorProfilePayload(personId) {
     const person = resolveLibraryPersonByPublicId(personId);
@@ -60,12 +66,48 @@ export function createPersonDetailService({
       timings[name] = Math.round(performance.now() - startedAt);
     };
     const scope = peopleScopeService.normalize(url.searchParams.get("scope"));
-    const rawPerson = resolveLibraryPersonByPublicId(personId) || corePersonFallbackRecord(personId);
-    const person = mergedPersonRecord(rawPerson);
-    if (!person || !peopleScopeService.personMatches(person, scope)) return null;
-    mark("person");
+    const source = cachedDetailSource(personId, scope, timings, mark);
+    if (!source) return null;
+    mark("source");
 
     const filter = url.searchParams.get("filter") || "all";
+    const facets = workQueryService.facets(source.works);
+    mark("facets");
+    const worksPayload = workQueryService.listFromWorksPayload(source.works, url, {
+      filter,
+      facets
+    });
+    mark("payload");
+    if (timings.payload >= 500) {
+      console.warn("[fanhao-person-detail-slow]", JSON.stringify({ personId: source.personId, count: source.works.length, ...timings }));
+    }
+    return { person: source.person, ...worksPayload };
+  }
+
+  function cachedDetailSource(personId, scope, timings, mark) {
+    const stamp = `${library.scannedAt || ""}:${peoplePayloadStamp(scope)}:${workQueryStamp()}`;
+    if (detailSourceCacheStamp !== stamp) {
+      detailSourceCacheStamp = stamp;
+      detailSourceCache.clear();
+    }
+
+    const cacheKey = `${scope}:${String(personId || "")}`;
+    if (detailSourceCache.has(cacheKey)) {
+      const cached = detailSourceCache.get(cacheKey);
+      detailSourceCache.delete(cacheKey);
+      detailSourceCache.set(cacheKey, cached);
+      timings.sourceCacheHit = true;
+      return cached;
+    }
+
+    const rawPerson = resolveLibraryPersonByPublicId(personId) || corePersonFallbackRecord(personId);
+    const person = mergedPersonRecord(rawPerson);
+    if (!person || !peopleScopeService.personMatches(person, scope)) {
+      cacheDetailSource(cacheKey, null);
+      return null;
+    }
+    mark("person");
+
     const actorRows = mergedActorMovieRows(person.id);
     mark("actorRows");
     const rawLocalWorks = person.works
@@ -87,22 +129,21 @@ export function createPersonDetailService({
     const allPersonWorks = dedupeWorksForDisplay([...localWorks, ...missingWorks]);
     mark("dedupe");
     const personPayload = publicPerson(person, {
-        actorMovieCount: actorRows.length,
-        missingLocalWorkCount: missingWorks.length,
-        skipFallbackAvatar: scope === "western"
-      });
+      actorMovieCount: actorRows.length,
+      missingLocalWorkCount: missingWorks.length,
+      skipFallbackAvatar: scope === "western"
+    });
     mark("publicPerson");
-    const facets = workQueryService.facets(allPersonWorks);
-    mark("facets");
-    const worksPayload = workQueryService.listFromWorksPayload(allPersonWorks, url, {
-        filter,
-        facets
-      });
-    mark("payload");
-    if (timings.payload >= 500) {
-      console.warn("[fanhao-person-detail-slow]", JSON.stringify({ personId: person.id, count: allPersonWorks.length, ...timings }));
+    const source = { person: personPayload, personId: person.id, works: allPersonWorks };
+    cacheDetailSource(cacheKey, source);
+    return source;
+  }
+
+  function cacheDetailSource(cacheKey, source) {
+    detailSourceCache.set(cacheKey, source);
+    while (detailSourceCache.size > PERSON_DETAIL_SOURCE_CACHE_LIMIT) {
+      detailSourceCache.delete(detailSourceCache.keys().next().value);
     }
-    return { person: personPayload, ...worksPayload };
   }
 
   function deleteLocalFiles(personId) {

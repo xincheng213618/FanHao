@@ -64,6 +64,7 @@ export function createFanhaoDependencies(deps) {
       "mergedPersonRecord",
       "missingActorWorksForPerson",
       "notFound",
+      "peoplePayloadStamp",
       "peopleScopeService",
       "playbackProgressService",
       "prewarmCoreWorkCovers",

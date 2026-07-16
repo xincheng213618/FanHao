@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
+import { createPersonDetailService } from "../src/modules/fanhao/server/people/person-detail-service.js";
 import { createPlaybackProgressService } from "../src/modules/fanhao/server/playback/playback-progress-service.js";
 import { createRankingService } from "../src/modules/fanhao/server/catalog/ranking-service.js";
 import { prepareCollectionWorkPage } from "../src/modules/fanhao/server/user-state/routes.js";
@@ -203,6 +204,7 @@ assert(!webStudioPage.includes('limit: "2000"'), "Web studio details must not fe
 assert(webApp.includes("hasStudioServerMore"), "Web work rendering must expose studio continuation");
 const studioService = read("src/modules/fanhao/server/catalog/studio-service.js");
 const rankingServiceSource = read("src/modules/fanhao/server/catalog/ranking-service.js");
+const personDetailServiceSource = read("src/modules/fanhao/server/people/person-detail-service.js");
 assert(studioService.includes("const makers = rows.map(publicMakerSummary)"), "studio index responses must use lightweight maker summaries");
 assert(!studioService.includes("rows.map((row) => publicMaker(row, seriesRowsForMaker"), "studio indexes must not run one series query per maker");
 assert(studioService.includes("const studioWorksCache = new Map()"), "studio detail paging must reuse versioned work sets");
@@ -213,6 +215,9 @@ assert(rankingServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "ran
 assert(rankingServiceSource.includes("hydrateRankingCoverUrls(rankingRows)"), "ranking pages must batch-hydrate cover URLs after the fast list query");
 assert(!rankingServiceSource.includes("LEFT JOIN images cover"), "ranking list queries must not run one correlated image lookup per row");
 assert(rankingServiceSource.includes("rankingSummariesCache?.stamp === stamp"), "ranking summaries must reuse versioned results");
+assert(personDetailServiceSource.includes("const detailSourceCache = new Map()"), "person navigation must reuse prepared detail sources");
+assert(personDetailServiceSource.includes("peoplePayloadStamp(scope)}:${workQueryStamp()"), "person detail sources must follow people and work data versions");
+assert(personDetailServiceSource.includes("workQueryService.facets(source.works)"), "person facets must remain live outside the prepared source cache");
 const workInfoServiceSource = read("src/modules/fanhao/server/works/work-info-service.js");
 const workQueryServiceSource = read("src/modules/fanhao/server/works/work-query-service.js");
 const workCodeIndexServiceSource = read("src/modules/fanhao/server/works/work-code-index-service.js");
@@ -362,6 +367,68 @@ assert.deepEqual(
   "collection pages must batch-prepare details before presentation and warm visible media afterward"
 );
 assert.deepEqual(preparedCollectionWorks.map((work) => work.id), ["history-1", "history-2"], "collection page preparation must preserve order");
+
+let personDetailDataStamp = "person-v1";
+let personDetailSourceBuildCount = 0;
+let personDetailFacetReadCount = 0;
+let personDetailPayloadReadCount = 0;
+const personDetailFixture = { id: "person-1", name: "Person One", works: ["work-1"] };
+const personDetailLibrary = {
+  scannedAt: "scan-v1",
+  worksById: new Map([["work-1", { id: "work-1", personId: "person-1", title: "Work One" }]])
+};
+const cachedPersonDetailService = createPersonDetailService({
+  actorProfileMergeCandidates: () => [],
+  actorProfileRow: () => null,
+  adminCoreMutationService: {},
+  coreMissingWorksForPerson() {
+    personDetailSourceBuildCount += 1;
+    return [];
+  },
+  corePersonFallbackRecord: () => null,
+  dedupeWorksForDisplay: (works) => works,
+  enrichLocalWorksWithActorMovieInfo: (works) => works,
+  library: personDetailLibrary,
+  manualCoverStateService: {},
+  maxActorAvatarBytes: 1024,
+  mergedActorMovieRows: () => [],
+  mergedPersonRecord: (person) => person,
+  missingActorWorksForPerson: () => [],
+  peoplePayloadStamp: () => personDetailDataStamp,
+  peopleScopeService: {
+    normalize: () => "main",
+    personMatches: () => true,
+    workMatches: () => true
+  },
+  publicActorProfile: () => null,
+  publicPerson: (person) => ({ id: person.id, name: person.name }),
+  resolveLibraryPersonByPublicId: (personId) => personId === personDetailFixture.id ? personDetailFixture : null,
+  storedWorkCodeKey: (value) => String(value || "").toLowerCase(),
+  workLocalMutationService: {},
+  workCodeKeySetForWorks: () => new Set(["work1"]),
+  workQueryService: {
+    facets(works) {
+      personDetailFacetReadCount += 1;
+      return { all: works.length, favorite: personDetailFacetReadCount };
+    },
+    listFromWorksPayload(works, url, extra) {
+      personDetailPayloadReadCount += 1;
+      return { ...extra, count: works.length, total: works.length, filter: extra.filter, works };
+    }
+  },
+  workQueryStamp: () => "works-v1"
+});
+const personDetailUrl = new URL("http://127.0.0.1/api/people/person-1?filter=all&limit=48&offset=0");
+const firstPersonDetail = cachedPersonDetailService.detailPayload("person-1", personDetailUrl);
+const repeatedPersonDetail = cachedPersonDetailService.detailPayload("person-1", new URL("http://127.0.0.1/api/people/person-1?filter=rated&limit=48&offset=48"));
+assert.equal(personDetailSourceBuildCount, 1, "repeated person paging and filters must reuse the prepared work source");
+assert.equal(personDetailFacetReadCount, 2, "person detail facets must still read live favorite and progress state");
+assert.equal(personDetailPayloadReadCount, 2, "person detail paging must still build each requested response");
+assert.equal(firstPersonDetail.person.id, "person-1", "prepared person details must preserve the person payload");
+assert.equal(repeatedPersonDetail.filter, "rated", "prepared person details must preserve per-request filters");
+personDetailDataStamp = "person-v2";
+cachedPersonDetailService.detailPayload("person-1", personDetailUrl);
+assert.equal(personDetailSourceBuildCount, 2, "person data changes must invalidate prepared detail sources");
 
 let rankingDataStamp = "ranking-v1";
 let rankingListReadCount = 0;
