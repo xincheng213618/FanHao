@@ -8,7 +8,7 @@ export function createVideoProbeService({
   hasNvenc,
   safeStat,
   execFileFn = execFile,
-  probeWaitMs = 800,
+  probeWaitMs = 300,
   statFile = (filePath) => fs.promises.stat(filePath),
   spawnSyncFn = spawnSync
 }) {
