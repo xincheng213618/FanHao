@@ -126,6 +126,9 @@ assert(webApp.includes("hasStudioServerMore"), "Web work rendering must expose s
 const studioService = read("src/modules/fanhao/server/catalog/studio-service.js");
 assert(studioService.includes("const makers = rows.map(publicMakerSummary)"), "studio index responses must use lightweight maker summaries");
 assert(!studioService.includes("rows.map((row) => publicMaker(row, seriesRowsForMaker"), "studio indexes must not run one series query per maker");
+assert(studioService.includes("const studioWorksCache = new Map()"), "studio detail paging must reuse versioned work sets");
+assert(studioService.includes("sortedByMode: new Map()"), "studio detail paging must reuse sorted work lists");
+assert(studioService.includes("ensureDetailCaches(stamp)"), "studio detail caches must follow the catalog version stamp");
 
 const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");

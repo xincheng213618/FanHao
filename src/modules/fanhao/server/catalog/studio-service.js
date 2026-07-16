@@ -10,9 +10,20 @@ export function createStudioService({
   workFacets
 }) {
   let studioHierarchyCache = null;
+  let studioDetailCacheStamp = null;
+  const studioMakerCache = new Map();
+  const studioWorksCache = new Map();
+
+  function ensureDetailCaches(stamp) {
+    if (studioDetailCacheStamp === stamp) return;
+    studioDetailCacheStamp = stamp;
+    studioMakerCache.clear();
+    studioWorksCache.clear();
+  }
 
   function ensureCatalog({ force = false } = {}) {
     const stamp = getStamp();
+    ensureDetailCaches(stamp);
     if (!force && studioHierarchyCache?.stamp === stamp) return studioHierarchyCache;
     const db = getCoreDb();
     const counts = db
@@ -168,6 +179,28 @@ export function createStudioService({
   function detailPayload(makerId, url) {
     const sync = ensureCatalog();
     const db = getCoreDb();
+    const requestedSeriesId = String(url.searchParams.get("seriesId") || "all").trim() || "all";
+    const selectedSeriesId = requestedSeriesId === "all" || /^\d+$/.test(requestedSeriesId) ? requestedSeriesId : "all";
+    const maker = cachedMakerDetail(makerId, db);
+    if (!maker) return null;
+    const workSet = cachedStudioWorks(makerId, selectedSeriesId, db);
+    const sort = url.searchParams.get("sort") || "releaseDesc";
+    let sorted = workSet.sortedByMode.get(sort);
+    if (!sorted) {
+      sorted = sortWorkList(workSet.works, sort);
+      workSet.sortedByMode.set(sort, sorted);
+    }
+    return {
+      sync,
+      studio: maker.studio,
+      selectedSeriesId,
+      ...pagedWorksPayload(sorted, url, { facets: workSet.facets })
+    };
+  }
+
+  function cachedMakerDetail(makerId, db) {
+    const cacheKey = String(makerId);
+    if (studioMakerCache.has(cacheKey)) return studioMakerCache.get(cacheKey);
     const row = db
       .prepare(
         `
@@ -191,27 +224,37 @@ export function createStudioService({
         `
       )
       .get(Number(makerId));
-    if (!row) return null;
-    const library = getLibrary();
+    if (!row) {
+      studioMakerCache.set(cacheKey, null);
+      return null;
+    }
     const seriesRows = seriesRowsForMaker(makerId);
     const prefixRows = prefixRowsForMaker(makerId);
-    const selectedSeriesId = String(url.searchParams.get("seriesId") || "all").trim() || "all";
+    const detail = { studio: publicMaker(row, seriesRows, prefixRows) };
+    studioMakerCache.set(cacheKey, detail);
+    return detail;
+  }
+
+  function cachedStudioWorks(makerId, selectedSeriesId, db) {
+    const cacheKey = `${makerId}:${selectedSeriesId}`;
+    const cached = studioWorksCache.get(cacheKey);
+    if (cached) return cached;
     const filterBySeries = selectedSeriesId !== "all";
     const linkRows = filterBySeries
       ? db.prepare("SELECT DISTINCT CAST(wm.work_id AS TEXT) AS work_id FROM work_makers wm JOIN work_series ws ON ws.work_id = wm.work_id JOIN local_works lw ON lw.work_id = wm.work_id WHERE wm.maker_id = ? AND ws.series_id = ?").all(Number(makerId), Number(selectedSeriesId))
       : db.prepare("SELECT DISTINCT CAST(wm.work_id AS TEXT) AS work_id FROM work_makers wm JOIN local_works lw ON lw.work_id = wm.work_id WHERE wm.maker_id = ?").all(Number(makerId));
+    const library = getLibrary();
     const works = enrichLocalWorksWithActorMovieIndex(linkRows.map((item) => library.worksById.get(item.work_id)).filter(Boolean));
-    const sorted = sortWorkList(works, url.searchParams.get("sort") || "releaseDesc");
-    return {
-      sync,
-      studio: publicMaker(row, seriesRows, prefixRows),
-      selectedSeriesId,
-      ...pagedWorksPayload(sorted, url, { facets: workFacets(works) })
-    };
+    const detail = { works, facets: workFacets(works), sortedByMode: new Map() };
+    studioWorksCache.set(cacheKey, detail);
+    return detail;
   }
 
   function invalidate() {
     studioHierarchyCache = null;
+    studioDetailCacheStamp = null;
+    studioMakerCache.clear();
+    studioWorksCache.clear();
   }
 
   return {
