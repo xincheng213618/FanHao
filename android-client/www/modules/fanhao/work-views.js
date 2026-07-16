@@ -118,28 +118,39 @@ export function createWorkViews(context) {
     els.viewTitle.textContent = isFavorites ? "已收藏作品" : "观看进度";
     els.viewMeta.textContent = "正在读取";
     els.viewContent.innerHTML = `<div class="loading-row">正在加载列表</div>`;
-    const path = isFavorites ? favoriteCollectionPath() : "/api/history";
+    const limit = getWorksLimit();
+    const path = isFavorites ? favoriteCollectionPath(limit) : `/api/history?limit=${limit}&offset=0`;
     const activeUrl = getActiveUrl();
     let renderedCache = false;
     let renderedCacheSignature = "";
 
     const applyCollectionHeader = (data, cacheEntry = null) => {
       const works = data.works || [];
+      const total = Number(data.total || data.count || works.length);
       if (isFavorites && data.selectedFolderId) selectedFavoriteFolderId = data.selectedFolderId;
       const folder = isFavorites ? favoriteFolderById(data.folders || [], selectedFavoriteFolderId) : null;
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
       els.viewTitle.textContent = isFavorites && folder ? folder.name : isFavorites ? "已收藏作品" : "观看进度";
       els.viewMeta.textContent = isFavorites && folder
         ? `${formatNumber(works.length)} / ${formatNumber(folder.count || works.length)} 个作品${suffix}`
-        : `${formatNumber(works.length)} 个作品${suffix}`;
+        : `${formatNumber(works.length)} / ${formatNumber(total)} 个作品${suffix}`;
     };
 
     const renderCollectionData = (data, cacheEntry = null) => {
+      const works = data.works || [];
+      const total = Number(data.total || data.count || works.length);
       applyCollectionHeader(data, cacheEntry);
       els.viewContent.innerHTML = "";
       if (isFavorites) renderFavoriteFolderStrip(data.folders || []);
       if (isFavorites) renderFavoriteExtras();
-      renderWorks(works, isFavorites ? "还没有收藏作品。" : "暂无继续观看记录。");
+      renderWorks(works, isFavorites ? "还没有收藏作品。" : "暂无继续观看记录。", {
+        total,
+        hasServerMore: works.length < total,
+        onLoadMore: () => {
+          increaseWorksLimit(80);
+          return renderCurrentViewPreservingScroll();
+        }
+      });
     };
 
     const cached = await readCachedJson(activeUrl, path).catch(() => null);
@@ -169,9 +180,10 @@ export function createWorkViews(context) {
     }
   }
 
-  function favoriteCollectionPath() {
-    if (!selectedFavoriteFolderId || selectedFavoriteFolderId === "all") return "/api/favorites";
-    return `/api/favorites?folder=${encodeURIComponent(selectedFavoriteFolderId)}`;
+  function favoriteCollectionPath(limit = getWorksLimit()) {
+    const params = new URLSearchParams({ limit: String(limit), offset: "0" });
+    if (selectedFavoriteFolderId && selectedFavoriteFolderId !== "all") params.set("folder", selectedFavoriteFolderId);
+    return `/api/favorites?${params}`;
   }
 
   function favoriteFolderById(folders, folderId) {

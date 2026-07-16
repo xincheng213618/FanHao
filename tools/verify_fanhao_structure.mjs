@@ -82,6 +82,8 @@ assert(!androidApp.includes("return fast ? 480"), "Android FanHao detail and col
 assert(androidRankingViews.includes("const PAGE_SIZE = 80"), "Android rankings must request a bounded first page");
 assert(androidRankingViews.includes("hasServerMore:"), "Android rankings must preserve server-side continuation");
 assert(androidWorkViews.includes("options.hasServerMore"), "Android work rendering must expose server-side continuation");
+assert(androidWorkViews.includes("/api/history?limit=${limit}&offset=0"), "Android history must request a bounded first page");
+assert(androidWorkViews.includes("const works = data.works || []"), "Android collections must define their rendered work list locally");
 const androidDetailViews = read("android-client/www/modules/fanhao/detail-views.js");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
   assert(!androidDetailViews.includes(`function ${functionName}(`), `Android detail must delegate ${functionName}`);
@@ -106,6 +108,10 @@ assert(webRankingPage.includes("limit: String(rankingPageSize())"), "Web ranking
 assert(webRankingPage.includes("loadMoreRankingWorks"), "Web rankings must keep server-side continuation available");
 assert(!webRankingPage.includes('limit: "1000"'), "Web rankings must not fetch the entire list before first render");
 assert(webApp.includes("hasRankingServerMore"), "Web work rendering must expose ranking continuation");
+const webCollectionPage = read("public/modules/fanhao/features/collections/collection-page.js");
+assert(webCollectionPage.includes('params.set("limit", String(collectionPageSize()))'), "Web collections must request a bounded first page");
+assert(webCollectionPage.includes("loadMoreCollectionWorks"), "Web collections must preserve server-side continuation");
+assert(webApp.includes("hasCollectionServerMore"), "Web work rendering must expose collection continuation");
 
 const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");
@@ -117,6 +123,7 @@ const workInfoService = read("src/modules/fanhao/server/works/work-info-service.
 const workPresenterService = read("src/modules/fanhao/server/works/presenter-service.js");
 const workMediaRoutes = read("src/modules/fanhao/server/works/routes-media.js");
 const coreDbService = read("src/modules/fanhao/server/library/core-db-service.js");
+const userStateRoutes = read("src/modules/fanhao/server/user-state/routes.js");
 assert(workInfoService.includes("function detailRow(workId)"), "work metadata must load full details per work instead of hydrating the entire catalog");
 assert(workInfoService.includes("SELECT 1\n              FROM local_works"), "work-list metadata must use a lightweight local-work index query");
 assert(workPresenterService.includes("workInfoDetailRow(work.id)"), "work cards and details must hydrate full metadata only for the visible page");
@@ -124,6 +131,8 @@ assert(workMediaRoutes.includes("/media\\/person\\/([^/]+)\\/cover"), "person-li
 assert(coreDbService.includes("const DEFAULT_TABLE_STAMP_CACHE_MS = 5000"), "FanHao table stamps must not rescan the core database between nearby interactions");
 assert(coreDbService.includes("idx_works_updated_at ON works(updated_at)"), "work-info stamps must use a lightweight updated-at index");
 assert(coreDbService.includes("idx_work_people_updated_at ON work_people(updated_at)"), "actor-movie stamps must use a lightweight updated-at index");
+assert(userStateRoutes.includes("allWorks.slice(offset, offset + limit)"), "favorites must paginate before presenting work details");
+assert(userStateRoutes.includes("entries.slice(offset, offset + limit)"), "history must paginate before presenting work details");
 const serviceLauncher = read("start-fanhao.ps1");
 assert(
   /if \(-not \$ready\)[\s\S]*Stop-Process -Id \$process\.Id -Force/.test(serviceLauncher),

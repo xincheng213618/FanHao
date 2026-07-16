@@ -10,7 +10,7 @@ import {
   createStudioPage,
   createWorkDetailPage,
   selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260717-fanhao-perf-03";
+} from "./modules/fanhao/index.js?v=20260717-fanhao-perf-04";
 import { createAdminModal } from "./modules/system/admin-modal.js?v=20260712-module-settings-02";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
 
@@ -1578,7 +1578,8 @@ function renderWorks(emptyMessage = "没有匹配的作品。") {
   const hasSearchServerMore = state.activeView === "search" && state.works.length < state.searchTotal;
   const hasPersonServerMore = state.activeView === "people" && state.selectedPersonId && state.works.length < state.personWorksTotal;
   const hasRankingServerMore = state.activeView === "rankings" && state.works.length < state.rankingTotal;
-  const hasServerMore = hasSearchServerMore || hasPersonServerMore || hasRankingServerMore;
+  const hasCollectionServerMore = ["favorites", "history"].includes(state.activeView) && state.works.length < state.collectionTotal;
+  const hasServerMore = hasSearchServerMore || hasPersonServerMore || hasRankingServerMore || hasCollectionServerMore;
   if (!works.length && !hasServerMore) {
     appendEmpty(emptyMessage);
     return;
@@ -1589,14 +1590,14 @@ function renderWorks(emptyMessage = "没有匹配的作品。") {
   if (nextIndex < visible.length) {
     scheduleRemainingWorkCards(visible, nextIndex, renderSeq, () => {
       if (visible.length < works.length || hasServerMore) {
-        appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore, hasRankingServerMore });
+        appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore, hasRankingServerMore, hasCollectionServerMore });
       }
     });
     return;
   }
 
   if (visible.length < works.length || hasServerMore) {
-    appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore, hasRankingServerMore });
+    appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore, hasRankingServerMore, hasCollectionServerMore });
   }
 }
 
@@ -1635,6 +1636,7 @@ function appendLoadMore(visibleCount, totalCount, options = {}) {
   const hasSearchServerMore = Boolean(options.hasSearchServerMore);
   const hasPersonServerMore = Boolean(options.hasPersonServerMore);
   const hasRankingServerMore = Boolean(options.hasRankingServerMore);
+  const hasCollectionServerMore = Boolean(options.hasCollectionServerMore);
   const wrap = document.createElement("div");
   wrap.className = "load-more-row";
 
@@ -1648,6 +1650,8 @@ function appendLoadMore(visibleCount, totalCount, options = {}) {
         ? Math.max(state.works.length, visibleCount)
         : hasRankingServerMore
           ? Math.max(state.works.length, visibleCount)
+          : hasCollectionServerMore
+            ? Math.max(state.works.length, visibleCount)
         : visibleCount;
   const targetCount =
     state.activeView === "search"
@@ -1656,6 +1660,8 @@ function appendLoadMore(visibleCount, totalCount, options = {}) {
         ? Math.max(state.personWorksTotal, totalCount)
         : hasRankingServerMore
           ? Math.max(state.rankingTotal, totalCount)
+          : hasCollectionServerMore
+            ? Math.max(state.collectionTotal, totalCount)
         : totalCount;
   if (visibleCount < totalCount) {
     button.textContent =
@@ -1677,6 +1683,8 @@ function appendLoadMore(visibleCount, totalCount, options = {}) {
       return loadMorePersonWorks(button);
     } else if (hasRankingServerMore) {
       return rankingPage.loadMoreRankingWorks(button);
+    } else if (hasCollectionServerMore) {
+      return collectionPage.loadMoreCollectionWorks(button);
     }
   };
   button.addEventListener("click", loadNext);

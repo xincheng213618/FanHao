@@ -7,17 +7,24 @@ const HISTORY_RANGES = [
 export function createCollectionPage(deps) {
   const { api, els, formatNumber, hidePersonProfile, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
 
-  async function loadFavorites() {
-    els.workGrid.innerHTML = `<div class="empty-state">正在加载收藏</div>`;
+  function collectionPageSize() {
+    return Math.max(40, Math.min(96, Number(state.workPageSize) || 48));
+  }
+
+  async function loadFavorites(options = {}) {
+    const append = Boolean(options.append);
+    if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载收藏</div>`;
     const params = new URLSearchParams();
     if (state.selectedFavoriteFolderId && state.selectedFavoriteFolderId !== "all") params.set("folder", state.selectedFavoriteFolderId);
-    const query = params.toString();
-    const data = await api(`/api/favorites${query ? `?${query}` : ""}`);
+    params.set("limit", String(collectionPageSize()));
+    params.set("offset", String(append ? state.works.length : 0));
+    const data = await api(`/api/favorites?${params}`);
     resetSelection();
-    state.works = data.works || [];
+    applyCollectionWorks(data.works || [], append);
+    state.collectionTotal = data.total ?? data.count ?? state.works.length;
     state.favoriteFolders = data.folders || [];
     state.selectedFavoriteFolderId = data.selectedFolderId || state.selectedFavoriteFolderId || "all";
-    resetWorkPaging();
+    if (!append) resetWorkPaging();
     const folder = folderById(state.selectedFavoriteFolderId);
     setMainHeader("收藏", folder ? `${folder.name} · ${formatNumber(folder.count || 0)} 部` : "已收藏的作品");
     renderStatsForWorks(state.works);
@@ -45,18 +52,53 @@ export function createCollectionPage(deps) {
     els.statsRow.append(wrap);
   }
 
-  async function loadHistory() {
-    els.workGrid.innerHTML = `<div class="empty-state">正在加载观看记录</div>`;
-    const data = await api(historyPath());
+  async function loadHistory(options = {}) {
+    const append = Boolean(options.append);
+    if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载观看记录</div>`;
+    const data = await api(historyPath(append ? state.works.length : 0));
     resetSelection();
-    state.works = data.works || [];
-    resetWorkPaging();
+    applyCollectionWorks(data.works || [], append);
+    state.collectionTotal = data.total ?? data.count ?? state.works.length;
+    if (!append) resetWorkPaging();
     const rangeLabel = historyLabel(state.selectedHistoryRange);
     const total = data.total ?? data.count ?? state.works.length;
     setMainHeader("继续观看", state.selectedHistoryRange === "all" ? "全部有播放进度的作品" : `${rangeLabel}有播放进度的作品 · ${formatNumber(total)} 部`);
     renderStatsForWorks(state.works);
     renderHistoryControls(data);
     renderWorks("暂无观看记录。");
+  }
+
+  function applyCollectionWorks(nextWorks, append) {
+    if (!append) {
+      state.works = nextWorks;
+      return;
+    }
+    const seen = new Set(state.works.map((work) => work.id));
+    state.works.push(...nextWorks.filter((work) => !seen.has(work.id)));
+    state.workVisibleLimit += collectionPageSize();
+  }
+
+  async function loadMoreCollectionWorks(button) {
+    if (state.collectionLoadingMore || state.works.length >= state.collectionTotal) return;
+    const loader = state.activeView === "favorites" ? loadFavorites : state.activeView === "history" ? loadHistory : null;
+    if (!loader) return;
+    state.collectionLoadingMore = true;
+    const originalText = button?.textContent || "";
+    if (button) {
+      button.disabled = true;
+      button.textContent = "正在加载";
+    }
+    try {
+      await loader({ append: true });
+    } catch (error) {
+      if (button?.isConnected) button.textContent = error.message || "加载失败";
+    } finally {
+      state.collectionLoadingMore = false;
+      if (button?.isConnected) {
+        button.disabled = false;
+        if (button.textContent === "正在加载") button.textContent = originalText;
+      }
+    }
   }
 
   async function loadVrWorks() {
@@ -79,6 +121,7 @@ export function createCollectionPage(deps) {
     state.searchPeople = [];
     state.personWorksTotal = 0;
     state.personWorksFacets = null;
+    state.collectionTotal = 0;
     hidePersonProfile();
   }
 
@@ -115,11 +158,12 @@ export function createCollectionPage(deps) {
     }
   }
 
-  function historyPath() {
+  function historyPath(offset = 0) {
     const params = new URLSearchParams();
     if (state.selectedHistoryRange && state.selectedHistoryRange !== "all") params.set("days", state.selectedHistoryRange);
-    const query = params.toString();
-    return `/api/history${query ? `?${query}` : ""}`;
+    params.set("limit", String(collectionPageSize()));
+    params.set("offset", String(offset || 0));
+    return `/api/history?${params}`;
   }
 
   function historyLabel(value) {
@@ -152,5 +196,5 @@ export function createCollectionPage(deps) {
     els.statsRow.append(wrap);
   }
 
-  return { loadFavorites, loadHistory, loadVrWorks, renderFavoriteFolderControls };
+  return { loadFavorites, loadHistory, loadMoreCollectionWorks, loadVrWorks, renderFavoriteFolderControls };
 }

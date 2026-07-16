@@ -34,6 +34,8 @@ export function createFanhaoState({ readStoredFlag }) {
     workVisibleLimit: 96,
     searchTotal: 0,
     searchLoadingMore: false,
+    collectionTotal: 0,
+    collectionLoadingMore: false,
     rankingLists: [],
     selectedRankingKey: "y2025",
     rankingTotal: 0,
