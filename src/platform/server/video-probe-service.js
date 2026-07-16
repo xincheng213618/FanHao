@@ -13,7 +13,17 @@ export function createVideoProbeService({
   spawnSyncFn = spawnSync
 }) {
   const cache = new Map();
+  const resolvedProbeByFile = new Map();
   const asyncInflight = new Map();
+  const prewarmQueue = [];
+  const prewarmQueuedKeys = new Set();
+  let prewarmActive = 0;
+  let prewarmConcurrency = 2;
+  let cacheGeneration = 0;
+
+  function inflightKey(file) {
+    return `${file.id}:${file.path}`;
+  }
 
   function parseProbeOutput(stdout) {
     const data = JSON.parse(stdout);
@@ -86,20 +96,22 @@ export function createVideoProbeService({
   }
 
   function probeCachedAsync(file) {
-    const inflightKey = `${file.id}:${file.path}`;
-    const active = asyncInflight.get(inflightKey);
+    const key = inflightKey(file);
+    if (resolvedProbeByFile.has(key)) return Promise.resolve(resolvedProbeByFile.get(key));
+    const active = asyncInflight.get(key);
     if (active) return active;
 
-    const task = loadProbeAsync(file);
-    asyncInflight.set(inflightKey, task);
+    const task = loadProbeAsync(file, key);
+    asyncInflight.set(key, task);
     task.then(
-      () => asyncInflight.delete(inflightKey),
-      () => asyncInflight.delete(inflightKey)
+      () => asyncInflight.delete(key),
+      () => asyncInflight.delete(key)
     );
     return task;
   }
 
-  async function loadProbeAsync(file) {
+  async function loadProbeAsync(file, fileKey) {
+    const generation = cacheGeneration;
     let stat = null;
     try {
       stat = await statFile(file.path);
@@ -111,13 +123,57 @@ export function createVideoProbeService({
       const cached = cache.get(cacheKey);
       cache.delete(cacheKey);
       cache.set(cacheKey, cached);
+      if (generation === cacheGeneration) resolvedProbeByFile.set(fileKey, cached);
       return cached;
     }
 
     const result = stat ? await probeAsync(file) : null;
-    cache.set(cacheKey, result);
-    if (cache.size > cacheLimit) cache.delete(cache.keys().next().value);
+    if (generation === cacheGeneration) {
+      cache.set(cacheKey, result);
+      resolvedProbeByFile.set(fileKey, result);
+      if (cache.size > cacheLimit) cache.delete(cache.keys().next().value);
+    }
     return result;
+  }
+
+  function prewarm(files = [], options = {}) {
+    const limit = Math.max(0, Math.min(48, Number(options.limit) || 12));
+    const queueLimit = Math.max(limit, Math.min(96, Number(options.queueLimit) || 48));
+    prewarmConcurrency = Math.max(1, Math.min(4, Number(options.concurrency) || 2));
+    let queued = 0;
+    for (const file of files || []) {
+      if (queued >= limit || prewarmQueue.length + prewarmActive >= queueLimit) break;
+      if (!file?.id || !file?.path) continue;
+      const key = inflightKey(file);
+      if (resolvedProbeByFile.has(key) || prewarmQueuedKeys.has(key) || asyncInflight.has(key)) continue;
+      prewarmQueuedKeys.add(key);
+      prewarmQueue.push({ file, key });
+      queued += 1;
+    }
+    drainPrewarmQueue();
+    return { queued, active: prewarmActive, pending: prewarmQueue.length };
+  }
+
+  function drainPrewarmQueue() {
+    while (prewarmActive < prewarmConcurrency && prewarmQueue.length) {
+      const { file, key } = prewarmQueue.shift();
+      prewarmQueuedKeys.delete(key);
+      prewarmActive += 1;
+      probeCachedAsync(file)
+        .catch(() => null)
+        .finally(() => {
+          prewarmActive -= 1;
+          drainPrewarmQueue();
+        });
+    }
+  }
+
+  function clearCache() {
+    cacheGeneration += 1;
+    cache.clear();
+    resolvedProbeByFile.clear();
+    prewarmQueue.length = 0;
+    prewarmQueuedKeys.clear();
   }
 
   async function boundedProbe(file) {
@@ -197,12 +253,13 @@ export function createVideoProbeService({
   }
 
   return {
-    clearCache: () => cache.clear(),
+    clearCache,
     playInfoForFile,
     playInfoForFileAsync,
     probe,
     probeAsync,
     probeCachedAsync,
-    probeCached
+    probeCached,
+    prewarm
   };
 }

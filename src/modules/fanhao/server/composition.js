@@ -64,6 +64,7 @@ export function createFanhaoDependencies(deps) {
       "prewarmWorkSearch",
       "prewarmWorkInfoDetails",
       "prewarmRemoteImagesForWorks",
+      "prewarmVideoProbesForWorks",
       "publicActorProfile",
       "publicPerson",
       "publicWork",

@@ -856,6 +856,7 @@ const moduleRegistry = await discoverFanHaoModules({
         prewarmWorkSearch,
         prewarmWorkInfoDetails,
         prewarmRemoteImagesForWorks,
+        prewarmVideoProbesForWorks,
         publicActorProfile,
         publicPerson,
         publicWork,
@@ -1867,6 +1868,16 @@ function remoteImageTargetUrl(value) {
 
 function prewarmRemoteImagesForWorks(works, limit = 1000) {
   return mediaResponseService.prewarmRemoteImagesForWorks(works, limit);
+}
+
+function prewarmVideoProbesForWorks(works, limit = 12) {
+  const files = [];
+  for (const work of works || []) {
+    const video = (work?.videos || []).find((item) => item.playable);
+    if (video) files.push(video);
+    if (files.length >= limit) break;
+  }
+  return videoProbeService.prewarm(files, { limit, concurrency: 2, queueLimit: 48 });
 }
 
 function proxiedRemoteImageUrlArray(values) {

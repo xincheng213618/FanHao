@@ -88,6 +88,9 @@ assert(workDetailPageSource.includes("const workDetailRequests = createLatestReq
 assert(workDetailPageSource.includes("const playInfoRequests = createLatestRequestGate()"), "playback probes must own a cancellable latest request");
 assert(workDetailPageSource.includes("playInfoRequests.cancel();"), "closing or switching work details must cancel playback probes");
 assert(videoProbeSource.includes("probeWaitMs = 300"), "cold playback probes must return a usable fallback within a short interaction budget");
+assert(videoProbeSource.includes("const prewarmQueue = []"), "visible playback probes must use a bounded background queue");
+assert(videoProbeSource.includes("prewarmActive < prewarmConcurrency"), "background playback probes must keep concurrency bounded");
+assert(videoProbeSource.includes("const resolvedProbeByFile = new Map()"), "prepared playback probes must avoid repeated slow file-stat calls");
 for (const factoryName of ["createGalleryPage", "createGalleryRenderer", "createNovelPage", "createMusicPage", "createToolsPage"]) {
   assert(!webApp.includes(factoryName), `FanHao runtime must not compose ${factoryName}`);
 }
@@ -203,6 +206,7 @@ const workQueryServiceSource = read("src/modules/fanhao/server/works/work-query-
 const workCodeIndexServiceSource = read("src/modules/fanhao/server/works/work-code-index-service.js");
 assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info details must support page-level batch hydration");
 assert(workQueryServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "work lists must batch-hydrate detail rows before presentation");
+assert(workQueryServiceSource.includes("prewarmVideoProbesForWorks(pageSource)"), "visible work pages must prepare playback probes before user selection");
 assert(workInfoServiceSource.includes("function facetRowsById()"), "work-list facets must use a compact metadata index");
 assert(workQueryServiceSource.includes("staticWorkFacets(works);"), "compact work facets must be ready before the first list request");
 assert(workQueryServiceSource.includes("prewarmWorkSearch();"), "local and missing-work search indexes must be ready before the first query");

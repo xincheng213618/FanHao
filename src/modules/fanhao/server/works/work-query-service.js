@@ -17,6 +17,7 @@ export function createWorkQueryService({
   prewarmWorkSearch = () => {},
   prewarmWorkInfoDetails = () => {},
   prewarmRemoteImagesForWorks,
+  prewarmVideoProbesForWorks = () => {},
   publicPerson,
   publicWork,
   publicWorkAvailability,
@@ -302,6 +303,7 @@ export function createWorkQueryService({
     const sort = url.searchParams.get("sort") || "releaseDesc";
     const total = works.length;
     const pageSource = works.slice(offset, offset + limit);
+    prewarmVideoProbesForWorks(pageSource);
     if (!options.lightweightInfo) prewarmWorkInfoDetails(pageSource);
     const page = pageSource.map((work) => publicWork(work, false, options));
     prewarmRemoteImagesForWorks(page);
