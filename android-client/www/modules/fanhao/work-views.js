@@ -53,6 +53,7 @@ export function createWorkViews(context) {
     els,
     getActiveUrl,
     renderCurrentView,
+    renderCurrentViewPreservingScroll,
     renderMessage,
     renderWorks,
     setActiveBottom,
@@ -645,6 +646,8 @@ export function createWorkViews(context) {
         increaseWorksLimit(40);
         return renderCurrentViewPreservingScroll();
       }));
+    } else if (options.hasServerMore && typeof options.onLoadMore === "function") {
+      els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(options.total || visible.length)}`, options.onLoadMore));
     }
   }
 

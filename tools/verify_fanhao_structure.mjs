@@ -65,6 +65,7 @@ for (const relativePath of [
 const androidWorkViews = read("android-client/www/modules/fanhao/work-views.js");
 const androidApp = read("android-client/www/app.js");
 const androidPeopleViews = read("android-client/www/modules/fanhao/people-views.js");
+const androidRankingViews = read("android-client/www/modules/fanhao/features/rankings/ranking-views.js");
 assert(!androidWorkViews.includes("SEARCH_CHANNELS"), "FanHao Android must not own cross-module search channels");
 assert(!/function createWorkCard\s*\(/.test(androidWorkViews), "FanHao Android work cards must stay in their feature module");
 assert(!androidWorkViews.includes("createGlobalSearch"), "FanHao Android search must not use a cross-module aggregator");
@@ -78,6 +79,9 @@ assert(androidPeopleViews.includes("const aVisual = imageUrlForPerson(a) ? 1 : 0
 assert(androidApp.includes("const FAST_WORK_LIMIT = 80"), "Android FanHao work views must request a small interactive first page");
 assert(androidApp.includes("const FAST_WORK_STEP = 80"), "Android FanHao work views must grow in bounded pages");
 assert(!androidApp.includes("return fast ? 480"), "Android FanHao detail and collection views must not restore oversized initial requests");
+assert(androidRankingViews.includes("const PAGE_SIZE = 80"), "Android rankings must request a bounded first page");
+assert(androidRankingViews.includes("hasServerMore:"), "Android rankings must preserve server-side continuation");
+assert(androidWorkViews.includes("options.hasServerMore"), "Android work rendering must expose server-side continuation");
 const androidDetailViews = read("android-client/www/modules/fanhao/detail-views.js");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
   assert(!androidDetailViews.includes(`function ${functionName}(`), `Android detail must delegate ${functionName}`);
@@ -91,12 +95,17 @@ assert(lines("public/modules/fanhao/work-detail-page.js") <= 1000, "Web work det
 assert(lines("public/app.js") <= 2500, "FanHao Web composition root must stay below 2500 lines");
 assert(lines("public/js/standalone-host.js") <= 650, "standalone Web host must stay below 650 lines");
 const peoplePage = read("public/modules/fanhao/people-page.js");
+const webRankingPage = read("public/modules/fanhao/ranking-page.js");
 const loadMorePeopleSource = /function loadMorePeopleIndex\(\)\s*\{([\s\S]*?)\n\}/.exec(peoplePage)?.[1] || "";
 assert(loadMorePeopleSource.includes("loadMoreRow.before(fragment)"), "people pagination must append cards without replacing the grid");
 assert(!loadMorePeopleSource.includes("renderPeopleIndex()"), "people pagination must not rerender the full index");
 const fanhaoStyles = read("public/modules/fanhao/styles.css");
 const personCardStyles = /\.person-index-card\s*\{([\s\S]*?)\n\}/.exec(fanhaoStyles)?.[1] || "";
 assert(!personCardStyles.includes("content-visibility"), "people cards must not flash in while scrolling");
+assert(webRankingPage.includes("limit: String(rankingPageSize())"), "Web rankings must request a bounded first page");
+assert(webRankingPage.includes("loadMoreRankingWorks"), "Web rankings must keep server-side continuation available");
+assert(!webRankingPage.includes('limit: "1000"'), "Web rankings must not fetch the entire list before first render");
+assert(webApp.includes("hasRankingServerMore"), "Web work rendering must expose ranking continuation");
 
 const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");

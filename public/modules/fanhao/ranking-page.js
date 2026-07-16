@@ -44,23 +44,62 @@ export function createRankingPage(deps) {
     }
   }
 
-  async function loadRankingWorks() {
-    const key = state.selectedRankingKey || "";
+  function rankingPageSize() {
+    return Math.max(40, Math.min(96, Number(state.workPageSize) || 48));
+  }
+
+  async function fetchRankingPage(key, offset = 0) {
     const params = new URLSearchParams({
       key,
-      limit: "1000"
+      limit: String(rankingPageSize()),
+      offset: String(offset || 0)
     });
-    const data = await api(`/api/rankings/top?${params}`);
-    state.works = data.works || [];
+    return api(`/api/rankings/top?${params}`);
+  }
+
+  async function loadRankingWorks(options = {}) {
+    const key = state.selectedRankingKey || "";
+    const append = Boolean(options.append);
+    if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载榜单作品</div>`;
+    const data = await fetchRankingPage(key, append ? state.works.length : 0);
+    if (key !== (state.selectedRankingKey || "")) return;
+    if (append) {
+      const seen = new Set(state.works.map((work) => work.id));
+      state.works.push(...(data.works || []).filter((work) => !seen.has(work.id)));
+      state.workVisibleLimit += rankingPageSize();
+    } else {
+      state.works = data.works || [];
+      resetWorkPaging();
+    }
     state.rankingTotal = data.rankingTotal || data.total || state.works.length;
     state.rankingMissingTotal = data.missingTotal || 0;
     state.rankingLocalTotal = data.localTotal || 0;
     state.rankingUpdatedAt = data.updatedAt || "";
     state.rankingPageUrl = data.pageUrl || "";
-    resetWorkPaging();
     renderPanel(data);
     renderStats(data);
     renderWorks(state.rankingLists.length ? "这个榜单没有匹配项目。" : "还没有缓存排行榜。");
+  }
+
+  async function loadMoreRankingWorks(button) {
+    if (state.rankingLoadingMore || state.works.length >= state.rankingTotal) return;
+    state.rankingLoadingMore = true;
+    const originalText = button?.textContent || "";
+    if (button) {
+      button.disabled = true;
+      button.textContent = "正在加载";
+    }
+    try {
+      await loadRankingWorks({ append: true });
+    } catch (error) {
+      if (button?.isConnected) button.textContent = error.message || "加载失败";
+    } finally {
+      state.rankingLoadingMore = false;
+      if (button?.isConnected) {
+        button.disabled = false;
+        if (button.textContent === "正在加载") button.textContent = originalText;
+      }
+    }
   }
 
   function renderPanel(data = {}) {
@@ -217,6 +256,7 @@ export function createRankingPage(deps) {
 
   return {
     enter,
+    loadMoreRankingWorks,
     loadRankings,
     loadRankingWorks,
     renderStats

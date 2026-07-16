@@ -41,6 +41,7 @@ export function createFanhaoState({ readStoredFlag }) {
     rankingLocalTotal: 0,
     rankingUpdatedAt: "",
     rankingPageUrl: "",
+    rankingLoadingMore: false,
     favoriteFolders: [],
     selectedFavoriteFolderId: "all",
     selectedHistoryRange: "30",

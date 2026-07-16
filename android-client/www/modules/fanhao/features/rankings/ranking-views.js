@@ -5,11 +5,12 @@ import { absoluteUrl, imageUrlForWork, precacheImage } from "../../../../js/imag
 
 const STORAGE_KEY = "fanhao.android.rankingKey";
 const DEFAULT_KEY = "y2025";
-const LIMIT = 1000;
+const PAGE_SIZE = 80;
 const IMAGE_CACHE_LIMIT = 48;
+let requestedLimit = PAGE_SIZE;
 
 export function createRankingViews(deps) {
-  const { els, getActiveUrl, renderCurrentView, renderMessage, renderWorks, setActiveBottom, workListState } = deps;
+  const { els, getActiveUrl, renderCurrentView, renderCurrentViewPreservingScroll, renderMessage, renderWorks, setActiveBottom, workListState } = deps;
   let lists = [];
   let selectedKey = readStoredKey();
   let filterMode = "all";
@@ -33,6 +34,7 @@ export function createRankingViews(deps) {
         localStorage.setItem(STORAGE_KEY, selectedKey);
       }
       const works = data?.works || [];
+      const resultTotal = Number(data?.total || data?.rankingTotal || works.length);
       const suffix = dataCache ? ` · 缓存 ${cacheAgeText(dataCache.updatedAt)}` : "";
       els.viewTitle.textContent = data?.label || "JavDB TOP250";
       els.viewMeta.textContent = metaText(data, works.length, suffix);
@@ -47,7 +49,12 @@ export function createRankingViews(deps) {
         sortMode,
         onFilterChange: setFilterMode,
         onSortChange: setSortMode,
-        total: data?.rankingTotal || data?.total || works.length
+        total: resultTotal,
+        hasServerMore: works.length < resultTotal,
+        onLoadMore: () => {
+          requestedLimit = Math.min(resultTotal, requestedLimit + PAGE_SIZE);
+          return renderCurrentViewPreservingScroll();
+        }
       });
     };
 
@@ -173,6 +180,7 @@ export function createRankingViews(deps) {
         button.addEventListener("click", () => {
           if (key === selectedKey && key === activeKey) return;
           selectedKey = key;
+          requestedLimit = PAGE_SIZE;
           localStorage.setItem(STORAGE_KEY, selectedKey);
           renderCurrentView();
         });
@@ -196,6 +204,7 @@ export function createRankingViews(deps) {
   }
 
   function leaveRankingSort() {
+    requestedLimit = PAGE_SIZE;
     if (workListState.getSortMode() === "ranking") workListState.setSortMode("updated", { rerender: false });
   }
 
@@ -230,7 +239,7 @@ function itemKey(item = {}) { return normalizeKey(item.key); }
 function rankingDataKey(data, fallback = "") { return data && Object.hasOwn(data, "key") ? normalizeKey(data.key) : normalizeKey(fallback); }
 function normalizeKey(key) { return key === undefined || key === null ? "" : String(key); }
 function readStoredKey() { const stored = localStorage.getItem(STORAGE_KEY); return stored === null ? DEFAULT_KEY : stored; }
-function topPath(key = "") { return `/api/rankings/top?${new URLSearchParams({ key, limit: String(LIMIT), offset: "0" })}`; }
+function topPath(key = "") { return `/api/rankings/top?${new URLSearchParams({ key, limit: String(requestedLimit), offset: "0" })}`; }
 function compactCount(value) { const number = Number(value || 0); return number > 0 ? formatNumber(number) : "TOP"; }
 
 function metaText(data = {}, visibleCount = 0, suffix = "") {
