@@ -147,6 +147,7 @@ assert(workQueryServiceSource.includes("staticWorkFacets(works);"), "compact wor
 assert(workQueryServiceSource.includes("prewarmWorkSearch();"), "local and missing-work search indexes must be ready before the first query");
 assert(workQueryServiceSource.includes("const exactPersonSearch ="), "exact person searches must bypass the full local text scan");
 assert(workCodeIndexServiceSource.includes("localWorkCodeIndexCache = { stamp, keys, rows }"), "local code membership and work lookup must share one catalog pass");
+assert(workCodeIndexServiceSource.includes("let workCodeKeysCache = new WeakMap()"), "repeated person and catalog lookups must reuse parsed work code keys");
 const workImageServiceSource = read("src/modules/fanhao/server/works/image-service.js");
 assert(workImageServiceSource.includes("FROM local_works lw"), "work-cover facets must index only local catalog entries");
 assert(!workImageServiceSource.includes("SELECT DISTINCT CAST(owner_id AS TEXT)"), "work-cover facets must not hydrate every historical image owner");

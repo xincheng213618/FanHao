@@ -6,8 +6,22 @@ export function createWorkCodeIndexService({
   workInfoRow
 }) {
   let localWorkCodeIndexCache = null;
+  let workCodeKeysCache = new WeakMap();
+  let workCodeKeysCacheStamp = null;
+
+  function currentWorkCodeKeysCache() {
+    const stamp = getStamp();
+    if (workCodeKeysCacheStamp !== stamp) {
+      workCodeKeysCache = new WeakMap();
+      workCodeKeysCacheStamp = stamp;
+    }
+    return workCodeKeysCache;
+  }
 
   function workCodeKeys(work) {
+    const cache = currentWorkCodeKeysCache();
+    const cached = cache.get(work);
+    if (cached) return cached;
     const info = work.infoSummary?.code ? null : workInfoRow(work.id);
     const values = [
       info?.code,
@@ -28,6 +42,7 @@ export function createWorkCodeIndexService({
       seen.add(key);
       keys.push(key);
     }
+    cache.set(work, keys);
     return keys;
   }
 
@@ -47,19 +62,7 @@ export function createWorkCodeIndexService({
     const keys = new Set();
     const rows = new Map();
     for (const work of library.worksById.values()) {
-      const values = [
-        work.infoSummary?.code,
-        work.title,
-        work.directoryName,
-        work.relativePath,
-        ...(work.videos || []).flatMap((video) => [video.name, video.title, video.relativePath]),
-        ...(work.images || []).flatMap((image) => [image.name, image.title]),
-        ...(work.infos || []).flatMap((infoFile) => [infoFile.name, infoFile.title])
-      ];
-
-      for (const value of values) {
-        const key = looseWorkCodeKey(value);
-        if (!key) continue;
+      for (const key of workCodeKeys(work)) {
         keys.add(key);
         if (!rows.has(key)) rows.set(key, work);
       }
@@ -87,6 +90,8 @@ export function createWorkCodeIndexService({
 
   function invalidate() {
     localWorkCodeIndexCache = null;
+    workCodeKeysCache = new WeakMap();
+    workCodeKeysCacheStamp = null;
   }
 
   return {
