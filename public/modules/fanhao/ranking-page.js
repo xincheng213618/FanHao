@@ -1,3 +1,5 @@
+import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
+
 export function createRankingPage(deps) {
   const {
     adminRefreshRankings,
@@ -16,6 +18,11 @@ export function createRankingPage(deps) {
     syncRouteAfterNavigation,
     visibleWorks
   } = deps;
+  const rankingRequests = createLatestRequestGate();
+
+  function cancelPendingRequests() {
+    rankingRequests.cancel();
+  }
 
   function enter(options = {}) {
     clearWorkFilter();
@@ -26,59 +33,75 @@ export function createRankingPage(deps) {
   }
 
   async function loadRankings() {
+    const request = rankingRequests.begin();
+    let loadSelectedRanking = false;
     els.workGrid.innerHTML = `<div class="empty-state">正在加载排行榜</div>`;
     clearPersonSelection();
     state.searchPeople = [];
     setMainHeader("排行榜", "JavDB TOP250 缓存");
 
     try {
-      const summary = await api("/api/rankings");
+      const summary = await api("/api/rankings", { signal: request.signal });
+      if (!request.isCurrent() || state.activeView !== "rankings") return;
       state.rankingLists = summary.lists || [];
       if (state.rankingLists.length && !state.rankingLists.some((item) => item.key === state.selectedRankingKey)) {
         state.selectedRankingKey = state.rankingLists.find((item) => item.key === "y2025")?.key || state.rankingLists[0].key || "";
       }
-      await loadRankingWorks();
+      loadSelectedRanking = true;
     } catch (error) {
+      if (!request.isCurrent() || state.activeView !== "rankings") return;
       hidePersonProfile();
       renderEmpty(error.message || "排行榜读取失败");
+    } finally {
+      request.finish();
     }
+    if (loadSelectedRanking) await loadRankingWorks();
   }
 
   function rankingPageSize() {
     return Math.max(40, Math.min(96, Number(state.workPageSize) || 48));
   }
 
-  async function fetchRankingPage(key, offset = 0) {
+  async function fetchRankingPage(key, offset = 0, options = {}) {
     const params = new URLSearchParams({
       key,
       limit: String(rankingPageSize()),
       offset: String(offset || 0)
     });
-    return api(`/api/rankings/top?${params}`);
+    return api(`/api/rankings/top?${params}`, options.signal ? { signal: options.signal } : {});
   }
 
   async function loadRankingWorks(options = {}) {
     const key = state.selectedRankingKey || "";
     const append = Boolean(options.append);
+    const request = rankingRequests.begin();
     if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载榜单作品</div>`;
-    const data = await fetchRankingPage(key, append ? state.works.length : 0);
-    if (key !== (state.selectedRankingKey || "")) return;
-    if (append) {
-      const seen = new Set(state.works.map((work) => work.id));
-      state.works.push(...(data.works || []).filter((work) => !seen.has(work.id)));
-      state.workVisibleLimit += rankingPageSize();
-    } else {
-      state.works = data.works || [];
-      resetWorkPaging();
+    try {
+      const data = await fetchRankingPage(key, append ? state.works.length : 0, { signal: request.signal });
+      if (!request.isCurrent() || state.activeView !== "rankings" || key !== (state.selectedRankingKey || "")) return;
+      if (append) {
+        const seen = new Set(state.works.map((work) => work.id));
+        state.works.push(...(data.works || []).filter((work) => !seen.has(work.id)));
+        state.workVisibleLimit += rankingPageSize();
+      } else {
+        state.works = data.works || [];
+        resetWorkPaging();
+      }
+      state.rankingTotal = data.rankingTotal || data.total || state.works.length;
+      state.rankingMissingTotal = data.missingTotal || 0;
+      state.rankingLocalTotal = data.localTotal || 0;
+      state.rankingUpdatedAt = data.updatedAt || "";
+      state.rankingPageUrl = data.pageUrl || "";
+      renderPanel(data);
+      renderStats(data);
+      renderWorks(state.rankingLists.length ? "这个榜单没有匹配项目。" : "还没有缓存排行榜。");
+    } catch (error) {
+      if (!request.isCurrent() || state.activeView !== "rankings") return;
+      if (append) throw error;
+      renderEmpty(error.message || "排行榜读取失败");
+    } finally {
+      request.finish();
     }
-    state.rankingTotal = data.rankingTotal || data.total || state.works.length;
-    state.rankingMissingTotal = data.missingTotal || 0;
-    state.rankingLocalTotal = data.localTotal || 0;
-    state.rankingUpdatedAt = data.updatedAt || "";
-    state.rankingPageUrl = data.pageUrl || "";
-    renderPanel(data);
-    renderStats(data);
-    renderWorks(state.rankingLists.length ? "这个榜单没有匹配项目。" : "还没有缓存排行榜。");
   }
 
   async function loadMoreRankingWorks(button) {
@@ -255,6 +278,7 @@ export function createRankingPage(deps) {
   }
 
   return {
+    cancelPendingRequests,
     enter,
     loadMoreRankingWorks,
     loadRankings,

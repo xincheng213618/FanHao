@@ -465,7 +465,6 @@ async function applyRoute(route) {
   }
 }
 
-
 function formatNumber(value) {
   return formatter.format(value || 0);
 }
@@ -696,6 +695,7 @@ function setActiveView(view, options = {}) {
   }
   if (view !== "people") peoplePage.cancelPendingSelection();
   if (view !== "search") searchRequests.cancel();
+  if (view !== "rankings") rankingPage.cancelPendingRequests();
   const previousView = state.activeView;
   state.activeView = view;
   if (view !== "rankings" && state.sortMode === "ranking") {
@@ -775,7 +775,6 @@ async function fetchPersonWorksPage(personId, offset = 0) {
 async function goToPerson(personId) {
   await peoplePage.goToPerson(personId);
 }
-
 
 async function loadFavorites() {
   await collectionPage.loadFavorites();
@@ -1428,6 +1427,7 @@ async function loadSearchResults(query, options = {}) {
 
   const enteringSearch = state.activeView !== "search";
   peoplePage.cancelPendingSelection();
+  rankingPage.cancelPendingRequests();
   if (state.activeView !== "search") {
     state.searchReturnView = state.activeView || "people";
     if (selectedWorkFilters().length) {
