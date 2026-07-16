@@ -853,6 +853,7 @@ const moduleRegistry = await discoverFanHaoModules({
         personListService,
         playbackProgressService,
         prewarmLocalWorkCodeKeys: workCodeIndexService.localCodeKeys,
+        prewarmWorkInfoDetails,
         prewarmRemoteImagesForWorks,
         publicActorProfile,
         publicPerson,
@@ -1535,6 +1536,10 @@ function workInfoRow(workId) {
 
 function workInfoDetailRow(workId) {
   return workInfoService.detailRow(workId);
+}
+
+function prewarmWorkInfoDetails(works) {
+  return workInfoService.prewarmDetailRows((Array.isArray(works) ? works : []).map((work) => work?.id));
 }
 
 function studioCatalogStamp() {
@@ -2292,7 +2297,9 @@ function pagedWorksPayload(works, url, extra = {}) {
   const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
   const sort = url.searchParams.get("sort") || "releaseDesc";
   const total = works.length;
-  const page = works.slice(offset, offset + limit).map((work) => publicWork(work));
+  const pageSource = works.slice(offset, offset + limit);
+  prewarmWorkInfoDetails(pageSource);
+  const page = pageSource.map((work) => publicWork(work));
   prewarmRemoteImagesForWorks(page);
   return { ...extra, count: page.length, total, limit, offset, sort, works: page };
 }

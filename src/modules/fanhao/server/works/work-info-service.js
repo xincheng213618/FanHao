@@ -1,3 +1,7 @@
+import { workInfoDetailQuery } from "./work-info-detail-query.js";
+
+const DETAIL_BATCH_SIZE = 200;
+
 export function createWorkInfoService({
   displayWorkTitle,
   getCoreDb,
@@ -39,117 +43,48 @@ export function createWorkInfoService({
     return Boolean(Number(value));
   }
 
-  function detailRow(workId) {
+  function ensureWorkInfoDetailCache() {
     const stamp = getStamp();
     if (workInfoDetailCache?.stamp !== stamp) {
       workInfoDetailCache = { stamp, rows: new Map() };
     }
-    if (workInfoDetailCache.rows.has(workId)) return workInfoDetailCache.rows.get(workId);
+    return workInfoDetailCache;
+  }
 
-    try {
-      const db = getCoreDb();
-      for (const row of db
-        .prepare(
-          `
-          SELECT
-            CAST(w.id AS TEXT) AS work_id,
-            CAST(p.id AS TEXT) AS person_id,
-            COALESCE(p.name, '') AS person_name,
-            lw.source_info_id,
-            lw.source_name,
-            lw.source_info_path AS source_path,
-            lw.source_size,
-            lw.source_mtime,
-            w.code,
-            w.title,
-            w.release_date,
-            w.duration_minutes,
-            w.rating,
-            w.rating_count,
-            w.director,
-            maker.name AS maker,
-            label.name AS label,
-            series.name AS series,
-            vref.url AS javdb_url,
-            cover.remote_url AS image_url,
-            (
-              SELECT json_group_array(i.remote_url)
-              FROM images i
-              WHERE i.owner_type = 'work'
-                AND i.owner_id = w.id
-                AND i.kind = 'preview'
-                AND i.remote_url IS NOT NULL
-                AND i.remote_url <> ''
-            ) AS preview_images_json,
-            NULL AS preview_video_url,
-            (
-              SELECT json_group_array(pp.name)
-              FROM work_people wpa
-              JOIN people pp ON pp.id = wpa.person_id
-              WHERE wpa.work_id = w.id
-                AND wpa.role = 'actor'
-            ) AS actors_json,
-            (
-              SELECT json_group_array(json_object('name', pp.name, 'url', COALESCE(pref.url, '')))
-              FROM work_people wpa
-              JOIN people pp ON pp.id = wpa.person_id
-              LEFT JOIN person_external_refs pref
-                ON pref.person_id = pp.id
-               AND pref.provider = 'javdb-actor'
-              WHERE wpa.work_id = w.id
-                AND wpa.role = 'actor'
-            ) AS actor_links_json,
-            '[]' AS tags_json,
-            '[]' AS tag_links_json,
-            maker_ref.url AS maker_url,
-            label_ref.url AS label_url,
-            series_ref.url AS series_url,
-            w.fields_json,
-            w.raw_text,
-            0 AS raw_truncated,
-            w.status,
-            w.error,
-            w.updated_at
-          FROM works w
-          LEFT JOIN local_works lw ON lw.work_id = w.id
-          LEFT JOIN work_people wp ON wp.work_id = w.id AND wp.role = 'actor'
-          LEFT JOIN people p ON p.id = wp.person_id
-          LEFT JOIN work_external_refs vref ON vref.work_id = w.id AND vref.provider = 'javdb-video'
-          LEFT JOIN images cover
-            ON cover.id = (
-              SELECT i.id
-              FROM images i
-              WHERE i.owner_type = 'work'
-                AND i.owner_id = w.id
-                AND i.kind = 'cover'
-              ORDER BY CASE WHEN i.image_blob IS NOT NULL THEN 0 ELSE 1 END, i.id ASC
-              LIMIT 1
-            )
-          LEFT JOIN work_makers maker_link ON maker_link.work_id = w.id AND maker_link.role = 'maker'
-          LEFT JOIN makers maker ON maker.id = maker_link.maker_id
-          LEFT JOIN maker_external_refs maker_ref ON maker_ref.maker_id = maker.id AND maker_ref.provider = 'javdb-maker'
-          LEFT JOIN work_makers label_link ON label_link.work_id = w.id AND label_link.role = 'label'
-          LEFT JOIN makers label ON label.id = label_link.maker_id
-          LEFT JOIN maker_external_refs label_ref ON label_ref.maker_id = label.id AND label_ref.provider = 'javdb-maker'
-          LEFT JOIN work_series ws ON ws.work_id = w.id
-          LEFT JOIN series ON series.id = ws.series_id
-          LEFT JOIN series_external_refs series_ref ON series_ref.series_id = series.id AND series_ref.provider = 'javdb-series'
-          WHERE w.status = 'ok'
-            AND lw.id IS NOT NULL
-            AND w.id = ?
-          GROUP BY w.id
-          `
-        )
-        .all(Number(workId))) {
-        workInfoDetailCache.rows.set(row.work_id, row);
+  function normalizeDetailWorkId(value) {
+    const number = Number(value);
+    return Number.isSafeInteger(number) && number > 0 ? String(number) : "";
+  }
+
+  function prewarmDetailRows(workIds = []) {
+    const cache = ensureWorkInfoDetailCache();
+    const pending = [...new Set((Array.isArray(workIds) ? workIds : [])
+      .map(normalizeDetailWorkId)
+      .filter((workId) => workId && !cache.rows.has(workId)))];
+    if (!pending.length) return cache.rows;
+
+    for (let offset = 0; offset < pending.length; offset += DETAIL_BATCH_SIZE) {
+      const batch = pending.slice(offset, offset + DETAIL_BATCH_SIZE);
+      try {
+        const rows = getCoreDb()
+          .prepare(workInfoDetailQuery(batch.length))
+          .all(...batch.map(Number));
+        for (const row of rows) cache.rows.set(row.work_id, row);
+      } catch (error) {
+        console.warn("[core-work-info-detail]", error.message);
       }
-    } catch (error) {
-      console.warn("[core-work-info-detail]", error.message);
+      for (const workId of batch) {
+        if (!cache.rows.has(workId)) cache.rows.set(workId, null);
+      }
     }
 
-    const row = workInfoDetailCache.rows.get(workId) || null;
-    workInfoDetailCache.rows.set(workId, row);
-    return row;
+    return cache.rows;
+  }
+
+  function detailRow(workId) {
+    const normalizedId = normalizeDetailWorkId(workId);
+    if (!normalizedId) return null;
+    return prewarmDetailRows([normalizedId]).get(normalizedId) || null;
   }
 
   function rowsById() {
@@ -303,6 +238,7 @@ export function createWorkInfoService({
     detailRow,
     publicMetadata,
     publicSummary,
+    prewarmDetailRows,
     row,
     rowsById,
     setRowsCache,

@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
+import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -129,6 +130,10 @@ assert(!studioService.includes("rows.map((row) => publicMaker(row, seriesRowsFor
 assert(studioService.includes("const studioWorksCache = new Map()"), "studio detail paging must reuse versioned work sets");
 assert(studioService.includes("sortedByMode: new Map()"), "studio detail paging must reuse sorted work lists");
 assert(studioService.includes("ensureDetailCaches(stamp)"), "studio detail caches must follow the catalog version stamp");
+const workInfoServiceSource = read("src/modules/fanhao/server/works/work-info-service.js");
+const workQueryServiceSource = read("src/modules/fanhao/server/works/work-query-service.js");
+assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info details must support page-level batch hydration");
+assert(workQueryServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "work lists must batch-hydrate detail rows before presentation");
 
 const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");
@@ -208,6 +213,30 @@ assert.equal(personListItem.actorProfile.displayName, "Display Person", "person-
 assert(!("sourcePaths" in personListItem), "person-list summaries must defer source paths until person detail is opened");
 assert(!("avatarImage" in personListItem), "person-list summaries must defer avatar metadata until person detail is opened");
 assert(!("javdbRefs" in personListItem.actorProfile), "person-list summaries must defer full actor metadata until person detail is opened");
+
+let workInfoDetailStamp = "detail-v1";
+let workInfoDetailPrepareCount = 0;
+let workInfoDetailArgs = [];
+const batchedWorkInfoService = createWorkInfoService({
+  getStamp: () => workInfoDetailStamp,
+  getCoreDb: () => ({
+    prepare(sql) {
+      workInfoDetailPrepareCount += 1;
+      assert(sql.includes("w.id IN (?, ?)"), "work-info batch queries must bind one placeholder per work");
+      return {
+        all(...ids) {
+          workInfoDetailArgs = ids;
+          return ids.map((id) => ({ work_id: String(id), title: `Work ${id}` }));
+        }
+      };
+    }
+  })
+});
+batchedWorkInfoService.prewarmDetailRows(["1", "2"]);
+batchedWorkInfoService.prewarmDetailRows(["1", "2"]);
+assert.equal(workInfoDetailPrepareCount, 1, "repeated work pages must reuse batch-hydrated detail rows");
+assert.deepEqual(workInfoDetailArgs, [1, 2], "work-info batches must pass normalized numeric identifiers");
+assert.equal(batchedWorkInfoService.detailRow("1")?.title, "Work 1", "single-work reads must reuse the batch detail cache");
 
 let actorMovieDataStamp = "actor-v1";
 let enrichmentCount = 0;

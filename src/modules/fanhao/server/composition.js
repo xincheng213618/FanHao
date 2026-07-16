@@ -61,6 +61,7 @@ export function createFanhaoDependencies(deps) {
       "peopleScopeService",
       "playbackProgressService",
       "prewarmLocalWorkCodeKeys",
+      "prewarmWorkInfoDetails",
       "prewarmRemoteImagesForWorks",
       "publicActorProfile",
       "publicPerson",

@@ -14,6 +14,7 @@ export function createWorkQueryService({
   peopleScopeService,
   playbackProgressService,
   prewarmLocalWorkCodeKeys,
+  prewarmWorkInfoDetails = () => {},
   prewarmRemoteImagesForWorks,
   publicPerson,
   publicWork,
@@ -265,7 +266,9 @@ export function createWorkQueryService({
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const sort = url.searchParams.get("sort") || "releaseDesc";
     const total = works.length;
-    const page = works.slice(offset, offset + limit).map((work) => publicWork(work, false, options));
+    const pageSource = works.slice(offset, offset + limit);
+    if (!options.lightweightInfo) prewarmWorkInfoDetails(pageSource);
+    const page = pageSource.map((work) => publicWork(work, false, options));
     prewarmRemoteImagesForWorks(page);
     return { ...extra, count: page.length, total, limit, offset, sort, works: page };
   }
