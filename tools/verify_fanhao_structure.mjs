@@ -8,6 +8,7 @@ import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-i
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
 import { createVideoProbeService } from "../src/platform/server/video-probe-service.js";
+import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
 import { fetchPreparedImage } from "../android-client/www/js/image.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -492,5 +493,71 @@ const cachedPlayInfo = await videoProbeService.playInfoForFileAsync(slowVideoFil
 assert.equal(cachedPlayInfo.probePending, false, "completed video probes must serve from cache");
 assert.equal(cachedPlayInfo.duration, 123.5, "completed video probes must preserve duration metadata");
 assert.equal(cachedPlayInfo.videoCodec, "h264", "completed video probes must preserve codec metadata");
+
+let stampNow = 1000;
+let synchronousStampReads = 0;
+let backgroundStampReads = 0;
+let fakeDataVersion = 1;
+let resolveBackgroundStamp;
+const backgroundStamp = new Promise((resolve) => {
+  resolveBackgroundStamp = resolve;
+});
+const fakeCoreDb = {
+  exec() {},
+  prepare(sql) {
+    if (sql.startsWith("PRAGMA table_info")) {
+      return {
+        all: () => [
+          { name: "gender" },
+          { name: "has_magnet" },
+          { name: "is_streamable" },
+          { name: "has_subtitles" },
+          { name: "javdb_tags_json" },
+          { name: "image_blob" }
+        ]
+      };
+    }
+    if (sql === "PRAGMA data_version") {
+      return { get: () => ({ data_version: fakeDataVersion }) };
+    }
+    return {
+      get() {
+        synchronousStampReads += 1;
+        return { max_rowid: 1 };
+      }
+    };
+  }
+};
+const backgroundStampCoreDb = createCoreDbService({
+  createDatabase: () => fakeCoreDb,
+  dbPath: "fake.sqlite",
+  ensureDataDir() {},
+  now: () => stampNow,
+  refreshTableStampRow: async () => {
+    backgroundStampReads += 1;
+    return backgroundStamp;
+  },
+  tableStampCacheMs: 5,
+  warn() {}
+});
+const initialWorkInfoStamp = backgroundStampCoreDb.tableDataStamp("work_info");
+assert.equal(synchronousStampReads, 1, "the first table stamp must establish a synchronous startup baseline");
+stampNow += 10;
+assert.equal(backgroundStampCoreDb.tableDataStamp("work_info"), initialWorkInfoStamp, "stale table stamps must return their cached value immediately");
+assert.equal(backgroundStampCoreDb.tableDataStamp("work_info"), initialWorkInfoStamp, "nearby stale reads must share one background refresh");
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(synchronousStampReads, 1, "stale table stamps must not query SQLite on the request thread");
+assert.equal(backgroundStampReads, 1, "stale table stamps must deduplicate background refreshes");
+fakeDataVersion = 2;
+resolveBackgroundStamp({ data_version: fakeDataVersion, max_rowid: 2 });
+for (let attempt = 0; attempt < 10 && backgroundStampCoreDb.tableDataStamp("work_info") === initialWorkInfoStamp; attempt += 1) {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+const refreshedWorkInfoStamp = backgroundStampCoreDb.tableDataStamp("work_info");
+assert.notEqual(refreshedWorkInfoStamp, initialWorkInfoStamp, "background stamp refreshes must publish external database changes");
+backgroundStampCoreDb.invalidateTableStamp("work_info");
+const invalidatedWorkInfoStamp = backgroundStampCoreDb.tableDataStamp("work_info");
+assert.notEqual(invalidatedWorkInfoStamp, refreshedWorkInfoStamp, "explicit mutations must invalidate dependent caches immediately");
+assert.equal(synchronousStampReads, 1, "explicit stamp invalidation must not fall back to a synchronous SQLite query");
 
 console.log("fanhao-structure: ok");

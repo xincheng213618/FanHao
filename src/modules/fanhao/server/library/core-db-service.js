@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { readTableStampRow, tableStampValue } from "./table-stamp-query.js";
+import { createTableStampWorkerClient } from "./table-stamp-worker-client.js";
 
 const DEFAULT_TABLE_STAMP_CACHE_MS = 5000;
 
@@ -68,20 +70,26 @@ function ensureCoreCacheTables(db) {
 }
 
 export function createCoreDbService({
+  createDatabase = (filePath) => new DatabaseSync(filePath),
   dbPath,
   ensureDataDir,
+  now = Date.now,
+  refreshTableStampRow = null,
   tableStampCacheMs = DEFAULT_TABLE_STAMP_CACHE_MS,
   warn = console.warn
 }) {
   let db = null;
   let tableStampCache = new Map();
   let globalStampVersion = 0;
+  const stampRefreshes = new Map();
   const tableStampVersions = new Map();
+  const tableStampWorker = refreshTableStampRow ? null : createTableStampWorkerClient({ dbPath });
+  const refreshStampRow = refreshTableStampRow || tableStampWorker.refresh;
 
   function getDb() {
     if (!db) {
       ensureDataDir();
-      db = new DatabaseSync(dbPath);
+      db = createDatabase(dbPath);
       db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
       try {
         ensureColumn(db, "people", "gender", "TEXT NOT NULL DEFAULT 'unknown'");
@@ -104,61 +112,83 @@ export function createCoreDbService({
 
   function invalidateTableStamp(...tables) {
     if (!tables.length) {
-      tableStampCache = new Map();
       globalStampVersion += 1;
+      for (const [table, cached] of tableStampCache) {
+        const version = stampVersion(table);
+        tableStampCache.set(table, {
+          ...cached,
+          checkedAt: now(),
+          stamp: tableStampValue(table, version, cached.row)
+        });
+        scheduleTableStampRefresh(table, version);
+      }
       return;
     }
     for (const table of tables) {
-      tableStampCache.delete(table);
       tableStampVersions.set(table, Number(tableStampVersions.get(table) || 0) + 1);
+      const cached = tableStampCache.get(table);
+      if (!cached) continue;
+      const version = stampVersion(table);
+      tableStampCache.set(table, {
+        ...cached,
+        checkedAt: now(),
+        stamp: tableStampValue(table, version, cached.row)
+      });
+      scheduleTableStampRefresh(table, version);
     }
   }
 
   function tableDataStamp(table) {
-    const now = Date.now();
+    const checkedAt = now();
     const cached = tableStampCache.get(table);
-    if (cached && now - cached.checkedAt < tableStampCacheMs) return cached.stamp;
+    if (cached) {
+      if (checkedAt - cached.checkedAt >= tableStampCacheMs) {
+        scheduleTableStampRefresh(table, stampVersion(table));
+      }
+      return cached.stamp;
+    }
 
     try {
-      const tableMap = {
-        actor_profiles: "people",
-        actor_movies: "work_people",
-        work_info: "works",
-        work_covers: "images",
-        javdb_rankings: "collection_items",
-        local_image_cache: "local_image_cache",
-        remote_image_cache: "remote_image_cache"
-      };
-      const safeTable = tableMap[table] || table;
-      if (!/^[A-Za-z0-9_]+$/.test(safeTable)) throw new Error(`Invalid table: ${table}`);
-      const version = `${globalStampVersion}:${Number(tableStampVersions.get(table) || 0)}`;
-      const row = table === "work_covers"
-        ? getDb()
-          .prepare(
-            `
-            SELECT COUNT(*) AS count, COALESCE(MAX(owner_id), 0) AS max_owner_id
-            FROM images INDEXED BY idx_images_unique_asset
-            WHERE owner_type = 'work'
-              AND kind = 'cover'
-            `
-          )
-          .get()
-        : getDb().prepare(`SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS updated_at FROM ${safeTable}`).get();
-      const stamp = table === "work_covers"
-        ? `${version}:${Number(row?.count || 0)}:${Number(row?.max_owner_id || 0)}`
-        : `${version}:${Number(row?.count || 0)}:${row?.updated_at || ""}`;
-      tableStampCache.set(table, { checkedAt: now, stamp });
+      const version = stampVersion(table);
+      const row = readTableStampRow(getDb(), table);
+      const stamp = tableStampValue(table, version, row);
+      tableStampCache.set(table, { checkedAt, row, stamp });
       return stamp;
     } catch (error) {
       warn("[core-db-stamp]", table, error.message);
-      if (cached?.stamp) {
-        tableStampCache.set(table, { checkedAt: now, stamp: cached.stamp });
-        return cached.stamp;
-      }
-      const fallback = `${table}:unavailable`;
-      tableStampCache.set(table, { checkedAt: now, stamp: fallback });
+      const fallback = tableStampValue(table, stampVersion(table), null);
+      tableStampCache.set(table, { checkedAt, row: null, stamp: fallback });
       return fallback;
     }
+  }
+
+  function stampVersion(table) {
+    return `${globalStampVersion}:${Number(tableStampVersions.get(table) || 0)}`;
+  }
+
+  function scheduleTableStampRefresh(table, version) {
+    if (stampRefreshes.has(table)) return;
+    const refresh = Promise.resolve()
+      .then(() => refreshStampRow(table))
+      .then((row) => {
+        if (stampVersion(table) !== version) return;
+        tableStampCache.set(table, {
+          checkedAt: now(),
+          row,
+          stamp: tableStampValue(table, version, row)
+        });
+      })
+      .catch((error) => {
+        warn("[core-db-stamp-refresh]", table, error?.message || error);
+        const cached = tableStampCache.get(table);
+        if (cached && stampVersion(table) === version) {
+          tableStampCache.set(table, { ...cached, checkedAt: now() });
+        }
+      })
+      .finally(() => {
+        if (stampRefreshes.get(table) === refresh) stampRefreshes.delete(table);
+      });
+    stampRefreshes.set(table, refresh);
   }
 
   return {
