@@ -374,7 +374,12 @@ assert.equal(personListItem.avatarUrl, "/media/person/27/cover", "person-list fa
 assert.equal(personListItem.actorProfile.displayName, "Display Person", "person-list summaries must preserve display names");
 assert(!("sourcePaths" in personListItem), "person-list summaries must defer source paths until person detail is opened");
 assert(!("avatarImage" in personListItem), "person-list summaries must defer avatar metadata until person detail is opened");
-assert(!("javdbRefs" in personListItem.actorProfile), "person-list summaries must defer full actor metadata until person detail is opened");
+for (const detailCount of ["videoCount", "playableCount", "imageCount", "infoCount", "isGSource"]) {
+  assert(!(detailCount in personListItem), `person-list summaries must defer detail field: ${detailCount}`);
+}
+for (const actorDetail of ["movieCount", "javdbUrl", "javdbRefs"]) {
+  assert(!(actorDetail in personListItem.actorProfile), `person-list summaries must defer actor detail: ${actorDetail}`);
+}
 
 const collectionPrepareEvents = [];
 const collectionSourceWorks = [{ id: "history-1" }, { id: "history-2" }];
