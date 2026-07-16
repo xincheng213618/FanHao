@@ -1,5 +1,7 @@
 import { readCachedImage, writeCachedImage } from "./cache.js?v=20260702-novel-local-manage-74";
 
+const IMAGE_PREPARE_RETRY_DELAYS_MS = Object.freeze([700, 900, 1200, 1600, 2200, 3000]);
+
 export function absoluteUrl(baseUrl, path) {
   if (!path) return "";
   return /^https?:\/\//i.test(path) ? path : `${baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
@@ -85,7 +87,7 @@ export async function loadPreviewImage(target, imageUrl, options = {}) {
       if (options.refresh !== true) return;
     }
 
-    const response = await fetch(imageUrl, { mode: "cors" });
+    const response = await fetchPreparedImage(imageUrl, { mode: "cors" });
     if (!response.ok) throw new Error(String(response.status));
     const blob = await response.blob();
     writeCachedImage(imageUrl, blob, { baseUrl: options.cacheBaseUrl }).catch(() => {});
@@ -103,6 +105,58 @@ function delay(ms, value = null) {
   });
 }
 
+export async function fetchPreparedImage(imageUrl, fetchOptions = {}, options = {}) {
+  const retryDelaysMs = Array.isArray(options.retryDelaysMs)
+    ? options.retryDelaysMs
+    : IMAGE_PREPARE_RETRY_DELAYS_MS;
+
+  for (let attempt = 0; ; attempt += 1) {
+    const response = await fetch(imageUrl, fetchOptions);
+    if (!isPendingPreparedImage(response) || attempt >= retryDelaysMs.length) return response;
+
+    await response.body?.cancel().catch(() => {});
+    const retryAfterMs = preparedImageRetryAfterMs(response);
+    const delayMs = Math.max(retryAfterMs, Math.max(0, Number(retryDelaysMs[attempt]) || 0));
+    await waitForPreparedImage(delayMs, fetchOptions.signal);
+  }
+}
+
+function isPendingPreparedImage(response) {
+  return response?.status === 503
+    && String(response.headers?.get("X-FanHao-Image-Prepare") || "").toLowerCase() === "pending";
+}
+
+function preparedImageRetryAfterMs(response) {
+  const seconds = Number(response.headers?.get("Retry-After") || 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) return 0;
+  return Math.min(5000, Math.max(100, Math.round(seconds * 1000)));
+}
+
+function waitForPreparedImage(ms, signal) {
+  if (signal?.aborted) return Promise.reject(abortError());
+
+  return new Promise((resolve, reject) => {
+    const timer = globalThis.setTimeout(done, ms);
+    signal?.addEventListener("abort", aborted, { once: true });
+
+    function done() {
+      signal?.removeEventListener("abort", aborted);
+      resolve();
+    }
+
+    function aborted() {
+      globalThis.clearTimeout(timer);
+      reject(abortError());
+    }
+  });
+}
+
+function abortError() {
+  const error = new Error("Image preparation aborted");
+  error.name = "AbortError";
+  return error;
+}
+
 export async function precacheImage(imageUrl, options = {}) {
   if (!imageUrl) return null;
 
@@ -116,7 +170,7 @@ export async function precacheImage(imageUrl, options = {}) {
   options.signal?.addEventListener("abort", abort, { once: true });
 
   try {
-    const response = await fetch(imageUrl, { mode: "cors", signal: controller.signal });
+    const response = await fetchPreparedImage(imageUrl, { mode: "cors", signal: controller.signal });
     if (!response.ok) throw new Error(String(response.status));
     const blob = await response.blob();
     return await writeCachedImage(imageUrl, blob, { baseUrl: options.cacheBaseUrl });

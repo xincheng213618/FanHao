@@ -1,7 +1,7 @@
 import { fetchJson } from "../../../../js/api.js?v=20260702-novel-local-manage-74";
 import { cacheAgeText, readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=20260702-novel-local-manage-74";
 import { formatDate, formatNumber } from "../../../../js/format.js";
-import { absoluteUrl, imageUrlForWork, precacheImage } from "../../../../js/image.js";
+import { absoluteUrl, imageUrlForWork, precacheImage } from "../../../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 
 const STORAGE_KEY = "fanhao.android.rankingKey";
 const DEFAULT_KEY = "y2025";

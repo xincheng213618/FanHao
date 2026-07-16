@@ -1,5 +1,5 @@
 import { formatNumber } from "../../js/format.js";
-import { absoluteUrl, createFallbackCover, imageUrlForPerson, loadPreviewImage } from "../../js/image.js";
+import { absoluteUrl, createFallbackCover, imageUrlForPerson, loadPreviewImage } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 
 const PEOPLE_SORT_STORAGE_KEY = "fanhao.android.peopleSort";
 const PEOPLE_SORTS = [

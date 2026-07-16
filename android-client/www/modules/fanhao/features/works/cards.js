@@ -1,5 +1,5 @@
 import { formatDate, formatNumber } from "../../../../js/format.js";
-import { absoluteUrl, imageUrlForWork, loadPreviewImage } from "../../../../js/image.js";
+import { absoluteUrl, imageUrlForWork, loadPreviewImage } from "../../../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 
 export function createWorkCards({ getActiveUrl, showView }) {
   function createWorkCard(work, options = {}) {

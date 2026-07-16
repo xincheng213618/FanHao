@@ -7,6 +7,7 @@ import { publicPersonListItem } from "../src/modules/fanhao/server/people/person
 import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
+import { fetchPreparedImage } from "../android-client/www/js/image.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -413,5 +414,33 @@ const cachedImageResponse = testImageResponse();
 await mediaResponseService.servePreparedImage(cachedImageResponse, testLocalImage);
 assert.equal(cachedImageResponse.statusCode, 200, "prepared FanHao covers must serve from cache on retry");
 assert.deepEqual(cachedImageResponse.body, Buffer.from([1, 2, 3]), "prepared FanHao covers must preserve image bytes");
+
+const originalFetch = globalThis.fetch;
+let preparedImageFetchCount = 0;
+globalThis.fetch = async () => {
+  preparedImageFetchCount += 1;
+  if (preparedImageFetchCount < 3) {
+    return new Response(null, {
+      status: 503,
+      headers: { "X-FanHao-Image-Prepare": "pending" }
+    });
+  }
+  return new Response(Buffer.from([4, 5, 6]), { status: 200 });
+};
+try {
+  const preparedImageResponse = await fetchPreparedImage("http://127.0.0.1/media/image/slow-cover", {}, { retryDelaysMs: [0, 0] });
+  assert.equal(preparedImageResponse.status, 200, "Android must retry a FanHao cover while the server prepares it");
+  assert.equal(preparedImageFetchCount, 3, "Android prepared-cover retries must remain bounded and stop after success");
+  preparedImageFetchCount = 0;
+  globalThis.fetch = async () => {
+    preparedImageFetchCount += 1;
+    return new Response(null, { status: 503 });
+  };
+  const ordinaryFailureResponse = await fetchPreparedImage("http://127.0.0.1/media/image/unavailable-cover", {}, { retryDelaysMs: [0, 0] });
+  assert.equal(ordinaryFailureResponse.status, 503, "Android must preserve ordinary image failures");
+  assert.equal(preparedImageFetchCount, 1, "Android must only retry explicitly prepared FanHao covers");
+} finally {
+  globalThis.fetch = originalFetch;
+}
 
 console.log("fanhao-structure: ok");

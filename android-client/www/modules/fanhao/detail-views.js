@@ -4,7 +4,7 @@ import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js
 import { createDetailSectionTitle } from "../../js/detail-ui.js";
 import { extractWorkCode, formatDate, formatNumber } from "../../js/format.js";
 import { createInfoPreviewSection } from "../../js/info-preview.js";
-import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "../../js/image.js";
+import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-01";
 import { createWorkActions } from "./features/works/actions.js?v=20260712-fanhao-refactor-01";
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
