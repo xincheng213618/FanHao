@@ -1868,8 +1868,8 @@ function remoteImageTargetUrl(value) {
   return mediaResponseService.remoteImageTargetUrl(value);
 }
 
-function prewarmRemoteImagesForWorks(works, limit = 1000) {
-  return mediaResponseService.prewarmRemoteImagesForWorks(works, limit);
+function prewarmRemoteImagesForWorks(works, limit = 96) {
+  return mediaResponseService.prewarmRemoteImagesForWorks(works, limit, { queueLimit: 96, replaceQueued: true });
 }
 
 function prewarmVideoProbesForWorks(works, limit = 12) {
@@ -1879,7 +1879,7 @@ function prewarmVideoProbesForWorks(works, limit = 12) {
     if (video) files.push(video);
     if (files.length >= limit) break;
   }
-  return videoProbeService.prewarm(files, { limit, concurrency: 2, queueLimit: 48 });
+  return videoProbeService.prewarm(files, { limit, concurrency: 2, queueLimit: 48, replaceQueued: true });
 }
 
 function proxiedRemoteImageUrlArray(values) {

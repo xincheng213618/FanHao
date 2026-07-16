@@ -140,6 +140,10 @@ export function createVideoProbeService({
     const limit = Math.max(0, Math.min(48, Number(options.limit) || 12));
     const queueLimit = Math.max(limit, Math.min(96, Number(options.queueLimit) || 48));
     prewarmConcurrency = Math.max(1, Math.min(4, Number(options.concurrency) || 2));
+    if (options.replaceQueued) {
+      prewarmQueue.length = 0;
+      prewarmQueuedKeys.clear();
+    }
     let queued = 0;
     for (const file of files || []) {
       if (queued >= limit || prewarmQueue.length + prewarmActive >= queueLimit) break;

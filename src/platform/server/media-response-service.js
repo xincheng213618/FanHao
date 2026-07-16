@@ -345,7 +345,12 @@ export function createMediaResponseService({
     }
   }
 
-  function prewarmRemoteImagesForWorks(works, limit = 1000) {
+  function prewarmRemoteImagesForWorks(works, limit = 1000, options = {}) {
+    const queueLimit = Math.max(1, Math.min(512, Number(options.queueLimit) || limit));
+    if (options.replaceQueued) {
+      for (const remoteUrl of remoteImageWarmQueue) remoteImageWarmQueued.delete(remoteUrl);
+      remoteImageWarmQueue.length = 0;
+    }
     const seen = new Set();
     const remoteUrls = [];
     outer:
@@ -369,6 +374,7 @@ export function createMediaResponseService({
 
     const cachedUrls = cachedRemoteImageUrls(remoteUrls);
     for (const remoteUrl of remoteUrls) {
+      if (remoteImageWarmQueue.length + remoteImageWarmActive >= queueLimit) break;
       if (!cachedUrls.has(remoteUrl)) enqueueRemoteImageWarm(remoteUrl, { skipCacheCheck: true });
     }
     return remoteUrls.length;
@@ -489,10 +495,11 @@ export function createMediaResponseService({
   }
 
   function enqueueRemoteImageWarm(remoteUrl, options = {}) {
-    if ((!options.skipCacheCheck && remoteImageCacheHasEntry(remoteUrl)) || remoteImageWarmQueued.has(remoteUrl)) return;
+    if ((!options.skipCacheCheck && remoteImageCacheHasEntry(remoteUrl)) || remoteImageWarmQueued.has(remoteUrl)) return false;
     remoteImageWarmQueued.add(remoteUrl);
     remoteImageWarmQueue.push(remoteUrl);
     drainRemoteImageWarmQueue();
+    return true;
   }
 
   function drainRemoteImageWarmQueue() {
