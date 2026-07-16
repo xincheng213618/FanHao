@@ -37,12 +37,24 @@
           "/modules/short-videos/styles/viewer.css?v=20260715-first-frame-13",
           "/modules/short-videos/styles/gallery-navigation.css?v=20260711-player-modal-focus-75"
         ];
+        const fanhaoStyleUrls = [
+          "/css/foundation.css?v=20260710-web-css-modules-01",
+          "/css/shell.css?v=20260713-search-index-02",
+          "/modules/fanhao/styles.css?v=20260717-studio-detail-01",
+          "/modules/fanhao/work-cards.css?v=20260710-web-css-modules-01",
+          "/modules/system/admin.css?v=20260712-module-settings-02",
+          "/css/player.css?v=20260710-web-css-modules-01",
+          "/css/responsive.css?v=20260712-module-settings-02"
+        ];
         const shortVideoDetailEntry = /^\/(?:short-videos|short-video|douyin)\/(?!(?:stats|authors)(?:\/|$))[^/]+\/?$/.test(window.location.pathname);
+        const standaloneStyleEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(window.location.pathname) || /^\/western\/.+/.test(window.location.pathname);
         const styleUrls = shortVideoEntry
           ? (shortVideoDetailEntry
             ? shortVideoStyleUrls
             : shortVideoStyleUrls.filter((href) => !shortVideoViewerStyleUrls.includes(href)))
-          : ["/styles.css?v=20260715-aggregate-search-01"];
+          : standaloneStyleEntry
+            ? ["/styles.css?v=20260715-aggregate-search-01"]
+            : fanhaoStyleUrls;
         const stylePromises = new Map();
         const loadStyle = (href) => {
           if (stylePromises.has(href)) return stylePromises.get(href);

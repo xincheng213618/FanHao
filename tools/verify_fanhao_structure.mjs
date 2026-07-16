@@ -61,6 +61,13 @@ const videoProbeSource = read("src/platform/server/video-probe-service.js");
 assert(indexHtml.includes('import("/fanhao-app.js'), "FanHao must have a dedicated Web entry");
 assert(indexHtml.includes('import("/standalone-app.js'), "standalone modules must have a dedicated Web entry");
 assert(indexHtml.includes('/^\\/western\\/.+/'), "western detail routes must use the standalone gallery host");
+const fanhaoStyleList = indexHtml.match(/const fanhaoStyleUrls = \[([\s\S]*?)\n\s*\];/)?.[1] || "";
+assert(fanhaoStyleList.includes("/modules/fanhao/styles.css") && fanhaoStyleList.includes("/modules/fanhao/work-cards.css"), "FanHao routes must load their module styles directly");
+assert(fanhaoStyleList.includes("/modules/system/admin.css") && fanhaoStyleList.includes("/css/responsive.css"), "FanHao routes must retain shared admin and responsive styles");
+for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/modules/tools/", "/modules/short-videos/", "/modules/music/"]) {
+  assert(!fanhaoStyleList.includes(unrelatedStyle), `FanHao startup must not load unrelated styles: ${unrelatedStyle}`);
+}
+assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
