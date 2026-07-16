@@ -15,9 +15,17 @@ export function createMediaResponseService({
   safeStat,
   sendText,
   workCoverRow,
+  localImageReadConcurrency = 4,
+  localImageWaitMs = 800,
+  readFile = (filePath) => fs.promises.readFile(filePath),
+  statFile = (filePath) => fs.promises.stat(filePath),
   remoteImageWarmConcurrency = 6,
   warn = console.warn
 }) {
+  const localImageInflight = new Map();
+  const localImageReadQueue = [];
+  const maxLocalImageReads = Math.max(1, Number(localImageReadConcurrency) || 1);
+  let localImageReadActive = 0;
   const remoteImageWarmQueue = [];
   const remoteImageWarmQueued = new Set();
   let remoteImageWarmActive = 0;
@@ -208,6 +216,113 @@ export function createMediaResponseService({
       "Content-Disposition": "inline"
     });
     res.end(buffer);
+  }
+
+  async function servePreparedImage(res, file) {
+    if (serveLocalImageCacheRow(res, localImageCacheRow(file))) {
+      return;
+    }
+
+    const result = await waitForLocalImage(localImageLoad(file));
+    if (result.pending) {
+      res.writeHead(503, {
+        "Content-Length": "0",
+        "Cache-Control": "no-store",
+        "Retry-After": "1",
+        "X-FanHao-Image-Prepare": "pending"
+      });
+      res.end();
+      return;
+    }
+    if (result.error) {
+      if (result.error.code === "ENOENT" || result.error.statusCode === 404) notFound(res);
+      else sendText(res, 500, "Local image read failed");
+      return;
+    }
+    if (!serveLocalImageCacheRow(res, result.row)) {
+      sendText(res, 500, "Local image read failed");
+    }
+  }
+
+  function localImageLoad(file) {
+    const key = `${file.id || file.path}:${Number(file.size || 0)}:${file.modifiedAt || ""}`;
+    const active = localImageInflight.get(key);
+    if (active) return active;
+
+    const task = enqueueLocalImageRead(file);
+    localImageInflight.set(key, task);
+    task.then(
+      () => localImageInflight.delete(key),
+      () => localImageInflight.delete(key)
+    );
+    return task;
+  }
+
+  function enqueueLocalImageRead(file) {
+    return new Promise((resolve, reject) => {
+      localImageReadQueue.push({ file, reject, resolve });
+      drainLocalImageReadQueue();
+    });
+  }
+
+  function drainLocalImageReadQueue() {
+    while (localImageReadActive < maxLocalImageReads && localImageReadQueue.length) {
+      const job = localImageReadQueue.shift();
+      localImageReadActive += 1;
+      readAndCacheLocalImage(job.file)
+        .then(job.resolve, job.reject)
+        .finally(() => {
+          localImageReadActive -= 1;
+          drainLocalImageReadQueue();
+        });
+    }
+  }
+
+  async function readAndCacheLocalImage(file) {
+    try {
+      const stat = await statFile(file.path);
+      if (!stat?.isFile?.() || stat.size <= 0) {
+        const error = new Error("empty or missing local image");
+        error.statusCode = 404;
+        throw error;
+      }
+      const buffer = await readFile(file.path);
+      if (!buffer?.length) {
+        const error = new Error("empty local image");
+        error.statusCode = 404;
+        throw error;
+      }
+      try {
+        return upsertLocalImageCache(file, stat, buffer);
+      } catch (error) {
+        warn("[local-image-cache]", error.message || error);
+        return {
+          content_type: localImageMime(file),
+          image_blob: buffer,
+          byte_length: buffer.length
+        };
+      }
+    } catch (error) {
+      upsertLocalImageCacheError(file, error);
+      warn("[local-image-cache]", error.message || error);
+      throw error;
+    }
+  }
+
+  async function waitForLocalImage(task) {
+    let timer = null;
+    const settled = task.then(
+      (row) => ({ row }),
+      (error) => ({ error })
+    );
+    const waitMs = Math.max(0, Number(localImageWaitMs) || 0);
+    if (!waitMs) return settled;
+    const pending = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ pending: true }), waitMs);
+    });
+    const result = await Promise.race([settled, pending]);
+    if (timer) clearTimeout(timer);
+    return result;
   }
 
   function remoteImageTargetUrl(value) {
@@ -420,6 +535,7 @@ export function createMediaResponseService({
     serveCachedRemoteImage,
     serveCoreImage,
     serveImage,
+    servePreparedImage,
     serveLocalImageCacheRow,
     serveWorkCover
   };

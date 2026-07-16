@@ -17,7 +17,7 @@ export async function routeWorksMedia(req, res, url, deps) {
       return true;
     }
 
-    mediaResponseService.serveImage(res, file);
+    await mediaResponseService.servePreparedImage(res, file);
     return true;
   }
 
@@ -47,7 +47,7 @@ export async function routeWorksMedia(req, res, url, deps) {
       return true;
     }
 
-    mediaResponseService.serveImage(res, file);
+    await mediaResponseService.servePreparedImage(res, file);
     return true;
   }
 

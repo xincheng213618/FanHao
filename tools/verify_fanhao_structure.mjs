@@ -6,6 +6,7 @@ import { selectVisibleWorks } from "../public/modules/fanhao/features/works/quer
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
 import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
+import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -300,5 +301,117 @@ assert.equal(enrichmentCount, 1, "repeated FanHao work-list requests must reuse 
 actorMovieDataStamp = "actor-v2";
 workQueryService.listPayload(workListUrl);
 assert.equal(enrichmentCount, 2, "actor-movie updates must invalidate the FanHao work-list enrichment cache");
+
+let cachedLocalImageRow = null;
+let localImageStatCount = 0;
+let localImageReadCount = 0;
+let resolveLocalImageRead;
+const pendingLocalImageRead = new Promise((resolve) => {
+  resolveLocalImageRead = resolve;
+});
+const testLocalImage = {
+  id: "slow-cover",
+  path: "G:/slow/cover.jpg",
+  relativePath: "slow/cover.jpg",
+  ext: ".jpg",
+  size: 3,
+  modifiedAt: "2026-07-17T00:00:00.000Z"
+};
+const mediaResponseService = createMediaResponseService({
+  coreImageRow: () => null,
+  corePersonAvatarRow: () => null,
+  getCoreDb: () => ({
+    prepare(sql) {
+      return {
+        get: () => cachedLocalImageRow,
+        run(...args) {
+          if (sql.includes("image_blob") && Buffer.isBuffer(args[4])) {
+            cachedLocalImageRow = {
+              content_type: args[3],
+              image_blob: args[4],
+              byte_length: args[5]
+            };
+          }
+        }
+      };
+    }
+  }),
+  isAllowedRemoteImageUrl: () => true,
+  localImageReadConcurrency: 1,
+  localImageWaitMs: 1,
+  maxRemoteImageBytes: 1024,
+  mimeTypes: { ".jpg": "image/jpeg" },
+  normalizeExt: (value) => path.extname(value),
+  notFound: (res) => {
+    res.writeHead(404);
+    res.end();
+  },
+  proxiedRemoteImageUrl: (value) => value,
+  publicRemoteUrl: (value) => value,
+  readFile: async () => {
+    localImageReadCount += 1;
+    return pendingLocalImageRead;
+  },
+  safeStat: () => null,
+  sendText: (res, statusCode, body) => {
+    res.writeHead(statusCode);
+    res.end(body);
+  },
+  statFile: async () => {
+    localImageStatCount += 1;
+    return {
+      isFile: () => true,
+      mtime: new Date(testLocalImage.modifiedAt),
+      size: testLocalImage.size
+    };
+  },
+  warn: () => {},
+  workCoverRow: () => null
+});
+function testImageResponse() {
+  return {
+    body: null,
+    headers: null,
+    statusCode: null,
+    writeHead(statusCode, headers = {}) {
+      this.statusCode = statusCode;
+      this.headers = headers;
+    },
+    end(body = null) {
+      this.body = body;
+    }
+  };
+}
+const firstSlowImageResponse = testImageResponse();
+await Promise.race([
+  mediaResponseService.servePreparedImage(firstSlowImageResponse, testLocalImage),
+  new Promise((_, reject) => setTimeout(() => reject(new Error("slow local image blocked the request loop")), 100))
+]);
+assert.equal(firstSlowImageResponse.statusCode, 503, "slow FanHao covers must return a bounded preparation response");
+assert.equal(firstSlowImageResponse.headers["X-FanHao-Image-Prepare"], "pending", "slow FanHao covers must expose a retryable preparation state");
+
+const duplicateSlowImageResponse = testImageResponse();
+await mediaResponseService.servePreparedImage(duplicateSlowImageResponse, testLocalImage);
+assert.equal(duplicateSlowImageResponse.statusCode, 503, "duplicate slow-cover requests must remain bounded");
+assert.equal(localImageStatCount, 1, "duplicate slow-cover requests must share one stat operation");
+assert.equal(localImageReadCount, 1, "duplicate slow-cover requests must share one file read");
+
+const queuedSlowImageResponse = testImageResponse();
+await mediaResponseService.servePreparedImage(queuedSlowImageResponse, { ...testLocalImage, id: "queued-cover" });
+assert.equal(queuedSlowImageResponse.statusCode, 503, "queued slow-cover requests must remain bounded");
+assert.equal(localImageStatCount, 1, "cold-cover reads beyond the concurrency limit must remain queued");
+assert.equal(localImageReadCount, 1, "cold-cover reads beyond the concurrency limit must not hit disk early");
+
+resolveLocalImageRead(Buffer.from([1, 2, 3]));
+for (let attempt = 0; attempt < 10 && localImageReadCount < 2; attempt += 1) {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+assert(cachedLocalImageRow, "completed slow-cover reads must populate the local image cache");
+assert.equal(localImageStatCount, 2, "the local-cover queue must continue after an active read completes");
+assert.equal(localImageReadCount, 2, "the local-cover queue must eventually read queued covers");
+const cachedImageResponse = testImageResponse();
+await mediaResponseService.servePreparedImage(cachedImageResponse, testLocalImage);
+assert.equal(cachedImageResponse.statusCode, 200, "prepared FanHao covers must serve from cache on retry");
+assert.deepEqual(cachedImageResponse.body, Buffer.from([1, 2, 3]), "prepared FanHao covers must preserve image bytes");
 
 console.log("fanhao-structure: ok");
