@@ -47,6 +47,7 @@ const searchRequestSource = read("public/modules/fanhao/search-request-service.j
 const rankingPageSource = read("public/modules/fanhao/ranking-page.js");
 const studioPageSource = read("public/modules/fanhao/features/studios/studio-page.js");
 const collectionPageSource = read("public/modules/fanhao/features/collections/collection-page.js");
+const workDetailPageSource = read("public/modules/fanhao/work-detail-page.js");
 assert(indexHtml.includes('import("/fanhao-app.js'), "FanHao must have a dedicated Web entry");
 assert(indexHtml.includes('import("/standalone-app.js'), "standalone modules must have a dedicated Web entry");
 assert(indexHtml.includes('/^\\/western\\/.+/'), "western detail routes must use the standalone gallery host");
@@ -82,6 +83,9 @@ assert(collectionPageSource.includes("const collectionRequests = createLatestReq
 for (const view of ["favorites", "history", "vr"]) {
   assert(collectionPageSource.includes(`state.activeView !== "${view}"`), `stale ${view} responses must not overwrite newer navigation`);
 }
+assert(workDetailPageSource.includes("const workDetailRequests = createLatestRequestGate()"), "work details must own a cancellable latest request");
+assert(workDetailPageSource.includes("const playInfoRequests = createLatestRequestGate()"), "playback probes must own a cancellable latest request");
+assert(workDetailPageSource.includes("playInfoRequests.cancel();"), "closing or switching work details must cancel playback probes");
 for (const factoryName of ["createGalleryPage", "createGalleryRenderer", "createNovelPage", "createMusicPage", "createToolsPage"]) {
   assert(!webApp.includes(factoryName), `FanHao runtime must not compose ${factoryName}`);
 }

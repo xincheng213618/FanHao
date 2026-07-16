@@ -1,4 +1,5 @@
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
+import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
 
 export function createWorkDetailPage(deps) {
   const {
@@ -21,6 +22,8 @@ export function createWorkDetailPage(deps) {
     workCoverUrl,
     workPersonDisplayName
   } = deps;
+  const workDetailRequests = createLatestRequestGate();
+  const playInfoRequests = createLatestRequestGate();
   const previewMedia = createWorkPreviewMedia({
     api,
     coverRetryDelays,
@@ -36,13 +39,15 @@ export function createWorkDetailPage(deps) {
   });
 
   async function openWork(workId, videoId = null, options = {}) {
+    workDetailRequests.cancel();
+    playInfoRequests.cancel();
     const cachedWork = state.works.find((work) => work.id === workId);
     if (cachedWork?.missingLocal) {
       openWorkCard(cachedWork);
       return;
     }
 
-    const seq = ++state.openWorkSeq;
+    const request = workDetailRequests.begin();
     reportCurrentProgress();
     stopProgressReporting();
     stopTimelineSync();
@@ -59,8 +64,8 @@ export function createWorkDetailPage(deps) {
     els.infoArea.innerHTML = "";
 
     try {
-      const data = await api(`/api/works/${encodeURIComponent(workId)}`);
-      if (seq !== state.openWorkSeq || !els.detailDrawer.classList.contains("open")) return;
+      const data = await api(`/api/works/${encodeURIComponent(workId)}`, { signal: request.signal });
+      if (!request.isCurrent() || !els.detailDrawer.classList.contains("open")) return;
 
       const work = data.work;
       state.currentWork = work;
@@ -75,7 +80,7 @@ export function createWorkDetailPage(deps) {
         routeOverrides: { workId: work.id, videoId: videoId || state.currentVideo?.id || "" }
       });
     } catch (error) {
-      if (seq !== state.openWorkSeq) return;
+      if (!request.isCurrent()) return;
       els.drawerTitle.textContent = "打开失败";
       els.drawerPath.textContent = "";
       els.playerArea.innerHTML = "";
@@ -83,6 +88,8 @@ export function createWorkDetailPage(deps) {
       notice.className = "unsupported";
       notice.textContent = error.message;
       els.playerArea.append(notice);
+    } finally {
+      request.finish();
     }
   }
 
@@ -133,7 +140,8 @@ export function createWorkDetailPage(deps) {
   }
 
   function closeDrawer(options = {}) {
-    state.openWorkSeq += 1;
+    workDetailRequests.cancel();
+    playInfoRequests.cancel();
     reportCurrentProgress();
     stopProgressReporting();
     stopTimelineSync();
@@ -216,6 +224,7 @@ export function createWorkDetailPage(deps) {
   }
 
   async function renderPlayer(work, requestedVideoId = null, startAt = null, autoplay = false) {
+    playInfoRequests.cancel();
     stopProgressReporting();
     stopTimelineSync();
     els.playerArea.innerHTML = "";
@@ -244,12 +253,17 @@ export function createWorkDetailPage(deps) {
     loading.textContent = "正在探测播放方式";
     els.playerArea.append(loading);
 
+    const request = playInfoRequests.begin();
     let playInfo;
     try {
-      playInfo = await api(`/api/playinfo/${encodeURIComponent(selected.id)}`);
+      playInfo = await api(`/api/playinfo/${encodeURIComponent(selected.id)}`, { signal: request.signal });
+      if (!request.isCurrent()) return;
     } catch (error) {
+      if (!request.isCurrent()) return;
       loading.textContent = error.message;
       return;
+    } finally {
+      request.finish();
     }
 
     if (state.currentVideo?.id !== selected.id || state.currentWork?.id !== work.id) return;

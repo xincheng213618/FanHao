@@ -60,7 +60,6 @@ export function createFanhaoState({ readStoredFlag }) {
     personBulkDeleteSelectedIds: new Set(),
     personPageSize: 120,
     personVisibleLimit: 120,
-    openWorkSeq: 0,
     infoRenderTimer: null,
     lastFocusedElement: null
   };
