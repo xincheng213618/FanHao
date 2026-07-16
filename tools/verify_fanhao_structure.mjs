@@ -112,6 +112,9 @@ const webCollectionPage = read("public/modules/fanhao/features/collections/colle
 assert(webCollectionPage.includes('params.set("limit", String(collectionPageSize()))'), "Web collections must request a bounded first page");
 assert(webCollectionPage.includes("loadMoreCollectionWorks"), "Web collections must preserve server-side continuation");
 assert(webApp.includes("hasCollectionServerMore"), "Web work rendering must expose collection continuation");
+const studioService = read("src/modules/fanhao/server/catalog/studio-service.js");
+assert(studioService.includes("const makers = rows.map(publicMakerSummary)"), "studio index responses must use lightweight maker summaries");
+assert(!studioService.includes("rows.map((row) => publicMaker(row, seriesRowsForMaker"), "studio indexes must not run one series query per maker");
 
 const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");

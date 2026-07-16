@@ -119,6 +119,19 @@ export function createStudioService({
     };
   }
 
+  function publicMakerSummary(row) {
+    return {
+      id: row.maker_id,
+      name: row.name || "",
+      url: publicRemoteUrl(row.javdb_url),
+      source: row.source || "",
+      workCount: row.work_count || 0,
+      localWorkCount: row.local_work_count || 0,
+      firstReleaseDate: row.first_release_date || "",
+      latestReleaseDate: row.latest_release_date || ""
+    };
+  }
+
   function summaries(url) {
     const sync = ensureCatalog();
     const limit = clampInteger(url.searchParams.get("limit"), 120, 1, 1000);
@@ -148,7 +161,7 @@ export function createStudioService({
         `
       )
       .all(q, `%${q}%`, `%${q}%`, limit);
-    const makers = rows.map((row) => publicMaker(row, seriesRowsForMaker(row.maker_id), prefixRowsForMaker(row.maker_id)));
+    const makers = rows.map(publicMakerSummary);
     return { sync, count: makers.length, makers };
   }
 
@@ -207,6 +220,7 @@ export function createStudioService({
     invalidate,
     prefixRowsForMaker,
     publicMaker,
+    publicMakerSummary,
     publicSeries,
     seriesRowsForMaker,
     summaries
