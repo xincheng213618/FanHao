@@ -73,6 +73,8 @@ export function createCoreDbService({
 }) {
   let db = null;
   let tableStampCache = new Map();
+  let globalStampVersion = 0;
+  const tableStampVersions = new Map();
 
   function getDb() {
     if (!db) {
@@ -101,9 +103,13 @@ export function createCoreDbService({
   function invalidateTableStamp(...tables) {
     if (!tables.length) {
       tableStampCache = new Map();
+      globalStampVersion += 1;
       return;
     }
-    for (const table of tables) tableStampCache.delete(table);
+    for (const table of tables) {
+      tableStampCache.delete(table);
+      tableStampVersions.set(table, Number(tableStampVersions.get(table) || 0) + 1);
+    }
   }
 
   function tableDataStamp(table) {
@@ -123,8 +129,22 @@ export function createCoreDbService({
       };
       const safeTable = tableMap[table] || table;
       if (!/^[A-Za-z0-9_]+$/.test(safeTable)) throw new Error(`Invalid table: ${table}`);
-      const row = getDb().prepare(`SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS updated_at FROM ${safeTable}`).get();
-      const stamp = `${Number(row?.count || 0)}:${row?.updated_at || ""}`;
+      const version = `${globalStampVersion}:${Number(tableStampVersions.get(table) || 0)}`;
+      const row = table === "work_covers"
+        ? getDb()
+          .prepare(
+            `
+            SELECT COUNT(*) AS count, COALESCE(MAX(owner_id), 0) AS max_owner_id
+            FROM images INDEXED BY idx_images_unique_asset
+            WHERE owner_type = 'work'
+              AND kind = 'cover'
+            `
+          )
+          .get()
+        : getDb().prepare(`SELECT COUNT(*) AS count, COALESCE(MAX(updated_at), '') AS updated_at FROM ${safeTable}`).get();
+      const stamp = table === "work_covers"
+        ? `${version}:${Number(row?.count || 0)}:${Number(row?.max_owner_id || 0)}`
+        : `${version}:${Number(row?.count || 0)}:${row?.updated_at || ""}`;
       tableStampCache.set(table, { checkedAt: now, stamp });
       return stamp;
     } catch (error) {

@@ -20,6 +20,7 @@ export function createWorkPresenterService({
   publicWorkInfoSummary,
   uniqueTextArray,
   workCoverRow,
+  workInfoDetailRow,
   workInfoRow
 }) {
   function publicPersonFallbackAvatar(person) {
@@ -155,6 +156,7 @@ export function createWorkPresenterService({
   function publicWork(work, includeFiles = false, options = {}) {
     const markers = localWorkMarkers(work);
     if (work.missingLocal) {
+      const coreCover = options.lightweightInfo ? null : publicCoreWorkCover(work.id);
       const person = options.lightweightInfo
         ? getLibrary().peopleById.get(String(work.personId || "")) || null
         : displayPersonForWork(work.personId);
@@ -173,8 +175,8 @@ export function createWorkPresenterService({
         coverId: null,
         manualCoverId: "",
         autoCoverId: "",
-        cachedCover: null,
-        remoteCoverUrl: proxiedRemoteImageUrl(work.remoteCoverUrl) || work.remoteCoverUrl || "",
+        cachedCover: coreCover,
+        remoteCoverUrl: coreCover?.coverUrl || proxiedRemoteImageUrl(work.remoteCoverUrl) || work.remoteCoverUrl || "",
         videoCount: 0,
         playableCount: 0,
         imageCount: 0,
@@ -209,7 +211,7 @@ export function createWorkPresenterService({
     const coreCover = options.lightweightInfo ? null : publicCoreWorkCover(work.id);
     const manualCover = manualCoverStateService.manualCoverForWork(work);
     const cachedCover = manualCover ? null : coreCover || (work.coverId ? null : publicWorkCover(workCoverRow(work.id)));
-    const infoRow = options.lightweightInfo ? null : workInfoRow(work.id);
+    const infoRow = options.lightweightInfo ? null : workInfoDetailRow(work.id);
     const infoSummary = publicWorkInfoSummary(infoRow, work.infoSummary);
     const videos = work.videos || [];
     const favorite = favoriteStateService.publicFavoriteForWork(work.id);

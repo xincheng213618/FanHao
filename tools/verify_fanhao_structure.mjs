@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
+import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -27,6 +28,9 @@ for (const modulePath of ["content-index/gallery-page", "content-index/gallery-r
 }
 assert(!webApp.includes("loadStandaloneFactories"), "FanHao runtime must not own standalone factory loading");
 assert(!webApp.includes("standaloneFactories"), "FanHao runtime must not retain standalone factories");
+assert(webApp.includes("const WORK_RENDER_INITIAL_COUNT = 24"), "FanHao work lists must render a small first batch for responsive interaction");
+assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 96, lan: 64, remote: 48 })"), "FanHao work APIs must keep page payloads bounded for each access mode");
+assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 for (const factoryName of ["createGalleryPage", "createGalleryRenderer", "createNovelPage", "createMusicPage", "createToolsPage"]) {
   assert(!webApp.includes(factoryName), `FanHao runtime must not compose ${factoryName}`);
 }
@@ -91,6 +95,17 @@ assert(server.includes("createFanhaoDependencies({"), "server composition must d
 assert(!/fanhao:\s*\{\s*catalog:/s.test(server), "server.js must not own FanHao runtime buckets");
 const worksRuntime = read("src/modules/fanhao/server/works/runtime.js");
 assert(worksRuntime.includes("activeRequestDeps"), "work services must be reused for the active library snapshot");
+assert(worksRuntime.includes("workQueryService.prewarm()"), "FanHao work queries must prewarm their full-library enrichment cache before serving requests");
+const workInfoService = read("src/modules/fanhao/server/works/work-info-service.js");
+const workPresenterService = read("src/modules/fanhao/server/works/presenter-service.js");
+assert(workInfoService.includes("function detailRow(workId)"), "work metadata must load full details per work instead of hydrating the entire catalog");
+assert(workInfoService.includes("SELECT 1\n              FROM local_works"), "work-list metadata must use a lightweight local-work index query");
+assert(workPresenterService.includes("workInfoDetailRow(work.id)"), "work cards and details must hydrate full metadata only for the visible page");
+const serviceLauncher = read("start-fanhao.ps1");
+assert(
+  /if \(-not \$ready\)[\s\S]*Stop-Process -Id \$process\.Id -Force/.test(serviceLauncher),
+  "FanHao launcher must stop a startup process that never opens its port"
+);
 const serverRootFiles = fs.readdirSync(path.join(root, "src/modules/fanhao/server"), { withFileTypes: true })
   .filter((entry) => entry.isFile() && entry.name.endsWith(".js"))
   .map((entry) => entry.name)
@@ -114,5 +129,68 @@ assert.deepEqual(
   ["older"],
   "FanHao work query must preserve missing-local filtering"
 );
+
+let actorMovieDataStamp = "actor-v1";
+let enrichmentCount = 0;
+let workInfoReadCount = 0;
+const queryWork = {
+  id: "work-1",
+  personId: "person-1",
+  title: "ABC-001",
+  directoryName: "ABC-001",
+  modifiedAt: "2026-07-16T00:00:00.000Z",
+  videos: [],
+  images: [],
+  infos: [],
+  missingLocal: false,
+  playableCount: 0,
+  infoCount: 0
+};
+const workQueryService = createWorkQueryService({
+  actorMovieStamp: () => actorMovieDataStamp,
+  actorMissingSearchWorks: () => [],
+  clampInteger: (value, fallback, min, max) => Math.max(min, Math.min(max, Number(value ?? fallback))),
+  createWorkSearchMatcher: () => () => false,
+  dedupeWorksForDisplay: (items) => items,
+  defaultWorkLimit: 24,
+  enrichLocalWorksWithActorMovieIndex(items) {
+    enrichmentCount += 1;
+    return items;
+  },
+  fastMissingCodeSearch: () => [],
+  favoriteStateService: { isFavoriteWork: () => false },
+  isVrWork: () => false,
+  library: { scannedAt: "library-v1", worksById: new Map([[queryWork.id, queryWork]]) },
+  maxWorkLimit: 1000,
+  peopleScopeService: { normalize: () => "main", workMatches: () => true },
+  playbackProgressService: { getWorkProgress: () => null },
+  prewarmLocalWorkCodeKeys() {},
+  prewarmRemoteImagesForWorks() {},
+  publicPerson: (person) => person,
+  publicWork: (work) => ({ id: work.id }),
+  publicWorkAvailability: () => ({ hasMagnet: false }),
+  rankingMissingSearchWorks: () => [],
+  searchPeople: () => ({ exact: [], matchedPersonIds: [], people: [] }),
+  storedWorkCodeKey: (value) => String(value || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase(),
+  workHasCoreCover: () => false,
+  workHasLocalMarker: () => false,
+  workInfoRow: () => {
+    workInfoReadCount += 1;
+    return null;
+  },
+  workQueryStamp: () => actorMovieDataStamp,
+  workRating: () => null,
+  workRatingCount: () => 0,
+  workReleaseDate: () => ""
+});
+const workListUrl = new URL("http://127.0.0.1/api/works?limit=24&sort=updated");
+workQueryService.prewarm();
+assert.equal(workInfoReadCount, 0, "FanHao startup prewarm must not hydrate full work-info facets before the server listens");
+workQueryService.listPayload(workListUrl);
+workQueryService.listPayload(workListUrl);
+assert.equal(enrichmentCount, 1, "repeated FanHao work-list requests must reuse the prewarmed full-library enrichment");
+actorMovieDataStamp = "actor-v2";
+workQueryService.listPayload(workListUrl);
+assert.equal(enrichmentCount, 2, "actor-movie updates must invalidate the FanHao work-list enrichment cache");
 
 console.log("fanhao-structure: ok");

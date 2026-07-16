@@ -236,7 +236,7 @@ export function createAuthServices({
       clientIsLocal,
       clientIsLan,
       hints: {
-        workPageSize: mode === "local" ? 1000 : mode === "lan" ? 720 : 80,
+        workPageSize: mode === "local" ? 96 : mode === "lan" ? 64 : 48,
         videoPreload: mode === "local" ? "metadata" : "none",
         transcode: mode === "local" ? "manual" : "prefer"
       }

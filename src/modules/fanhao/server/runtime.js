@@ -19,9 +19,14 @@ export function createFanhaoRuntime(deps) {
     return works.routeApi(req, res, url);
   }
 
+  function start() {
+    works.start();
+  }
+
   return {
     routeApi,
     routeMedia: works.routeMedia,
+    start,
     settings
   };
 }

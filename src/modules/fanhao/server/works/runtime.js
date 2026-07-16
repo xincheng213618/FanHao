@@ -33,8 +33,13 @@ export function createWorksRuntime(deps) {
     return routeWorksMedia(req, res, url, requestDeps());
   }
 
+  function start() {
+    requestDeps().workQueryService.prewarm();
+  }
+
   return {
     routeApi,
-    routeMedia
+    routeMedia,
+    start
   };
 }

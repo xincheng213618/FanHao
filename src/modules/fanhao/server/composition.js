@@ -31,6 +31,7 @@ export function createFanhaoDependencies(deps) {
     ]),
     works: pick(deps, [
       "adminCoreMutationService",
+      "actorMovieStamp",
       "actorProfileMergeCandidates",
       "actorProfileRow",
       "actorMissingSearchWorks",
@@ -59,6 +60,7 @@ export function createFanhaoDependencies(deps) {
       "notFound",
       "peopleScopeService",
       "playbackProgressService",
+      "prewarmLocalWorkCodeKeys",
       "prewarmRemoteImagesForWorks",
       "publicActorProfile",
       "publicPerson",
@@ -76,10 +78,11 @@ export function createFanhaoDependencies(deps) {
       "storedWorkCodeKey",
       "videoProbeService",
       "workCodeKeySetForWorks",
-      "workCoverRow",
+      "workHasCoreCover",
       "workHasLocalMarker",
       "workInfoRow",
       "workLocalMutationService",
+      "workQueryStamp",
       "workRating",
       "workRatingCount",
       "workReleaseDate"

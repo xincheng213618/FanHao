@@ -54,19 +54,28 @@ export function createPersonDetailService({
   }
 
   function detailPayload(personId, url) {
+    const startedAt = performance.now();
+    const timings = {};
+    const mark = (name) => {
+      timings[name] = Math.round(performance.now() - startedAt);
+    };
     const scope = peopleScopeService.normalize(url.searchParams.get("scope"));
     const rawPerson = resolveLibraryPersonByPublicId(personId) || corePersonFallbackRecord(personId);
     const person = mergedPersonRecord(rawPerson);
     if (!person || !peopleScopeService.personMatches(person, scope)) return null;
+    mark("person");
 
     const filter = url.searchParams.get("filter") || "all";
     const actorRows = mergedActorMovieRows(person.id);
+    mark("actorRows");
     const rawLocalWorks = person.works
       .map((workId) => library.worksById.get(workId))
       .filter((work) => work && peopleScopeService.workMatches(work, scope));
     const localWorks = enrichLocalWorksWithActorMovieInfo(rawLocalWorks, actorRows);
     const personLocalCodeKeys = workCodeKeySetForWorks(rawLocalWorks);
+    mark("localWorks");
     const coreMissingWorks = scope === "western" ? [] : coreMissingWorksForPerson(person, personLocalCodeKeys);
+    mark("coreMissing");
     const coreMissingKeys = new Set(coreMissingWorks.map((work) => storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title)).filter(Boolean));
     const missingWorks = [
       ...coreMissingWorks,
@@ -76,17 +85,24 @@ export function createPersonDetailService({
       })
     ];
     const allPersonWorks = dedupeWorksForDisplay([...localWorks, ...missingWorks]);
-    return {
-      person: publicPerson(person, {
+    mark("dedupe");
+    const personPayload = publicPerson(person, {
         actorMovieCount: actorRows.length,
         missingLocalWorkCount: missingWorks.length,
         skipFallbackAvatar: scope === "western"
-      }),
-      ...workQueryService.listFromWorksPayload(allPersonWorks, url, {
+      });
+    mark("publicPerson");
+    const facets = workQueryService.facets(allPersonWorks);
+    mark("facets");
+    const worksPayload = workQueryService.listFromWorksPayload(allPersonWorks, url, {
         filter,
-        facets: workQueryService.facets(allPersonWorks)
-      })
-    };
+        facets
+      });
+    mark("payload");
+    if (timings.payload >= 500) {
+      console.warn("[fanhao-person-detail-slow]", JSON.stringify({ personId: person.id, count: allPersonWorks.length, ...timings }));
+    }
+    return { person: personPayload, ...worksPayload };
   }
 
   function deleteLocalFiles(personId) {

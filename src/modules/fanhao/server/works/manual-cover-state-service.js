@@ -19,6 +19,7 @@ export function createManualCoverStateService({
   userStateService,
   userStateSummary,
   workCoverRow,
+  workInfoDetailRow,
   workInfoRow
 }) {
   function manualCoverRecord(workId) {
@@ -152,7 +153,7 @@ export function createManualCoverStateService({
       };
     }
 
-    const infoSummary = publicWorkInfoSummary(workInfoRow(work.id), work.infoSummary);
+    const infoSummary = publicWorkInfoSummary(workInfoDetailRow(work.id), work.infoSummary);
     const remoteUrl = work.remoteCoverUrl || infoSummary?.imageUrl || "";
     if (!remoteUrl) return null;
     return {

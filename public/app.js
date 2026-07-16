@@ -103,9 +103,10 @@ let workLoadMoreScrollCleanup = null;
 let coverLoadQueue = [];
 let coverLoadTimer = null;
 let coverLoadObserver = null;
-const WORK_RENDER_INITIAL_COUNT = 96;
-const WORK_RENDER_BATCH_SIZE = 96;
+const WORK_RENDER_INITIAL_COUNT = 24;
+const WORK_RENDER_BATCH_SIZE = 24;
 const WORK_RENDER_BATCH_DELAY = 16;
+const WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 96, lan: 64, remote: 48 });
 const WORK_AUTO_LOAD_ROOT_MARGIN = "0px 0px 1400px 0px";
 const WORK_AUTO_LOAD_DISTANCE = 1400;
 const WORK_AUTO_LOAD_RECHECK_DELAYS = [120, 480, 900];
@@ -549,7 +550,8 @@ async function loadLibrary(options = {}) {
   if (els.topRescanButton) els.topRescanButton.hidden = state.accessMode !== "local";
   if (els.missingLocalToggle) els.missingLocalToggle.checked = state.showMissingLocalWorks;
   if (els.collectionToggle) els.collectionToggle.checked = state.showCompilationWorks;
-  state.workPageSize = Number(state.accessHints.workPageSize) || (state.accessMode === "remote" ? 80 : 1000);
+  const defaultWorkPageSize = WORK_PAGE_SIZE_BY_ACCESS[state.accessMode] || WORK_PAGE_SIZE_BY_ACCESS.remote;
+  state.workPageSize = Math.max(40, Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize) || defaultWorkPageSize));
   state.personPageSize = state.accessMode === "lan" ? 80 : 96;
   resetWorkPaging();
   state.people = sortPeopleForList(data.people || []);
@@ -1466,7 +1468,7 @@ async function loadSearchResults(query, options = {}) {
 }
 
 function searchPageSize() {
-  return Math.max(40, Math.min(1000, Number(state.workPageSize) || 80));
+  return Math.max(40, Math.min(WORK_PAGE_SIZE_BY_ACCESS.local, Number(state.workPageSize) || WORK_PAGE_SIZE_BY_ACCESS.remote));
 }
 
 async function fetchSearchPage(query, offset) {

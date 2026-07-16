@@ -241,7 +241,7 @@ async function selectPerson(personId, options = {}) {
 }
 
 function personWorkPageSize() {
-  return Math.max(80, Number(state.workPageSize || 160));
+  return Math.max(40, Math.min(96, Number(state.workPageSize) || 48));
 }
 
 async function fetchPersonWorksPage(personId, offset = 0) {

@@ -1,16 +1,51 @@
 export function createWorkImageService({
   getCoreDb,
   getPersonById,
+  getStamp,
   getWorkById,
   hasCoreDb,
   proxiedRemoteImageUrl
 }) {
+  let workIdsWithCoreCoverCache = null;
+
   function coreImageUrl(row) {
     if (!row) return "";
-    if (row.image_blob) return `/media/core-image/${encodeURIComponent(String(row.id))}?v=${encodeURIComponent(row.updated_at || "")}`;
+    if (row.image_blob || row.has_image_blob) return `/media/core-image/${encodeURIComponent(String(row.id))}?v=${encodeURIComponent(row.updated_at || "")}`;
     if (row.remote_url) return proxiedRemoteImageUrl(row.remote_url) || row.remote_url || "";
     if (row.local_path) return row.local_path;
     return "";
+  }
+
+  function corePersonAvatarMetadataRow(personId) {
+    const coreId = Number(personId);
+    if (!Number.isFinite(coreId) || !hasCoreDb()) return null;
+    try {
+      return getCoreDb()
+        .prepare(
+          `
+          SELECT id, owner_id, remote_url, local_path, source, updated_at, legacy_key,
+                 image_blob IS NOT NULL AS has_image_blob
+          FROM images
+          WHERE owner_type = 'person'
+            AND owner_id = ?
+            AND kind = 'avatar'
+          ORDER BY
+            CASE
+              WHEN source IN ('manual_upload', 'manual_person_cover', 'manual') THEN 0
+              WHEN source = 'actor_profiles' THEN 1
+              ELSE 2
+            END,
+            CASE WHEN image_blob IS NOT NULL THEN 0 ELSE 1 END,
+            updated_at DESC,
+            id ASC
+          LIMIT 1
+          `
+        )
+        .get(coreId) || null;
+    } catch (error) {
+      console.warn("[core-image]", error.message);
+      return null;
+    }
   }
 
   function corePersonAvatarRow(personId, options = {}) {
@@ -49,7 +84,7 @@ export function createWorkImageService({
   }
 
   function publicPersonAvatar(personId) {
-    const row = corePersonAvatarRow(personId);
+    const row = corePersonAvatarMetadataRow(personId);
     const avatarUrl = coreImageUrl(row);
     if (!row || !avatarUrl) return null;
     return {
@@ -60,6 +95,30 @@ export function createWorkImageService({
       updatedAt: row.updated_at || "",
       coverWorkId: row.source === "manual_person_cover" ? String(row.legacy_key || "") : ""
     };
+  }
+
+  function coreWorkCoverMetadataRow(workId) {
+    const coreId = Number(workId);
+    if (!Number.isFinite(coreId) || !hasCoreDb()) return null;
+    try {
+      return getCoreDb()
+        .prepare(
+          `
+          SELECT id, owner_id, remote_url, local_path, source, updated_at,
+                 image_blob IS NOT NULL AS has_image_blob
+          FROM images
+          WHERE owner_type = 'work'
+            AND owner_id = ?
+            AND kind = 'cover'
+          ORDER BY CASE WHEN image_blob IS NOT NULL THEN 0 ELSE 1 END, sort_order ASC, id ASC
+          LIMIT 1
+          `
+        )
+        .get(coreId) || null;
+    } catch (error) {
+      console.warn("[core-image]", error.message);
+      return null;
+    }
   }
 
   function coreWorkCoverRow(workId) {
@@ -86,7 +145,7 @@ export function createWorkImageService({
   }
 
   function publicCoreWorkCover(workId) {
-    const row = coreWorkCoverRow(workId);
+    const row = coreWorkCoverMetadataRow(workId);
     const coverUrl = coreImageUrl(row);
     if (!row || !coverUrl) return null;
     return {
@@ -96,6 +155,36 @@ export function createWorkImageService({
       source: row.source || "",
       updatedAt: row.updated_at || ""
     };
+  }
+
+  function workIdsWithCoreCover(expectedStamp = "") {
+    const stamp = expectedStamp || getStamp();
+    if (workIdsWithCoreCoverCache?.stamp === stamp) return workIdsWithCoreCoverCache.ids;
+    const ids = new Set();
+    if (hasCoreDb()) {
+      try {
+        for (const row of getCoreDb()
+          .prepare(
+            `
+            SELECT DISTINCT CAST(owner_id AS TEXT) AS work_id
+            FROM images
+            WHERE owner_type = 'work'
+              AND kind = 'cover'
+            `
+          )
+          .all()) {
+          ids.add(row.work_id);
+        }
+      } catch (error) {
+        console.warn("[core-image]", error.message);
+      }
+    }
+    workIdsWithCoreCoverCache = { stamp, ids };
+    return ids;
+  }
+
+  function workHasCoreCover(workId, expectedStamp = "") {
+    return workIdsWithCoreCover(expectedStamp).has(String(workId || ""));
   }
 
   function coreImageRow(imageId) {
@@ -150,10 +239,13 @@ export function createWorkImageService({
     coreImageRow,
     coreImageUrl,
     corePersonAvatarRow,
+    corePersonAvatarMetadataRow,
     coreWorkCoverRow,
+    coreWorkCoverMetadataRow,
     publicCoreWorkCover,
     publicPersonAvatar,
     publicWorkCover,
-    workCoverRow
+    workCoverRow,
+    workHasCoreCover
   };
 }

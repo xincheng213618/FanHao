@@ -1,4 +1,5 @@
 export function createWorkQueryService({
+  actorMovieStamp,
   actorMissingSearchWorks,
   clampInteger,
   createWorkSearchMatcher,
@@ -12,6 +13,7 @@ export function createWorkQueryService({
   maxWorkLimit,
   peopleScopeService,
   playbackProgressService,
+  prewarmLocalWorkCodeKeys,
   prewarmRemoteImagesForWorks,
   publicPerson,
   publicWork,
@@ -19,18 +21,48 @@ export function createWorkQueryService({
   rankingMissingSearchWorks,
   searchPeople,
   storedWorkCodeKey,
-  workCoverRow,
+  workHasCoreCover,
   workHasLocalMarker,
   workInfoRow,
+  workQueryStamp,
   workRating,
   workRatingCount,
   workReleaseDate,
 }) {
+  let enrichedWorksCache = null;
+  const listSourceCache = new Map();
+  const cacheableFilters = new Set([
+    "all",
+    "hasMagnet",
+    "highRating",
+    "info",
+    "localOnly",
+    "missingCover",
+    "missingLocal",
+    "playable",
+    "rated",
+    "vr"
+  ]);
+  let staticFacetCache = new WeakMap();
+  let sortedWorksCache = new WeakMap();
+
+  function currentStamp() {
+    return `${library.scannedAt || ""}:${library.worksById.size}:${workQueryStamp()}`;
+  }
+
   function allWorks() {
     return [...library.worksById.values()];
   }
 
-  function workMatchesFilter(work, filter) {
+  function enrichedWorks() {
+    const stamp = `${library.scannedAt || ""}:${library.worksById.size}:${actorMovieStamp()}`;
+    if (enrichedWorksCache?.stamp === stamp) return enrichedWorksCache.works;
+    const works = enrichLocalWorksWithActorMovieIndex(allWorks());
+    enrichedWorksCache = { stamp, works };
+    return works;
+  }
+
+  function workMatchesFilter(work, filter, stamp = "") {
     switch (filter) {
       case "localOnly":
         return !work.missingLocal;
@@ -58,7 +90,7 @@ export function createWorkQueryService({
         return Boolean(work.missingLocal && publicWorkAvailability(work).hasMagnet);
       case "missingCover":
         if (work.missingLocal) return false;
-        return !work.coverId && !workCoverRow(work.id);
+        return !work.coverId && !workHasCoreCover(work.id, stamp);
       case "all":
       default:
         return true;
@@ -66,6 +98,12 @@ export function createWorkQueryService({
   }
 
   function sortWorkList(works, sort, options = {}) {
+    const stamp = currentStamp();
+    const cacheKey = `${sort}:${options.lightweightInfo ? "light" : "full"}`;
+    const cachedBySort = sortedWorksCache.get(works);
+    const cached = cachedBySort?.get(cacheKey);
+    if (cached?.stamp === stamp) return cached.works;
+
     const list = [...works];
     list.sort((a, b) => {
       if (sort === "releaseDesc" || sort === "releaseAsc") {
@@ -111,6 +149,9 @@ export function createWorkQueryService({
 
       return String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || ""));
     });
+    const nextCachedBySort = cachedBySort || new Map();
+    nextCachedBySort.set(cacheKey, { stamp, works: list });
+    if (!cachedBySort) sortedWorksCache.set(works, nextCachedBySort);
     return list;
   }
 
@@ -138,45 +179,85 @@ export function createWorkQueryService({
     }
   }
 
-  function workFacets(works = allWorks()) {
-    return {
+  function staticWorkFacets(works) {
+    const stamp = currentStamp();
+    const cached = staticFacetCache.get(works);
+    if (cached?.stamp === stamp) return cached.facets;
+
+    const facets = {
       all: works.length,
-      playable: works.filter((work) => workMatchesFilter(work, "playable")).length,
-      favorite: works.filter((work) => workMatchesFilter(work, "favorite")).length,
-      progress: works.filter((work) => workMatchesFilter(work, "progress")).length,
-      info: works.filter((work) => workMatchesFilter(work, "info")).length,
-      localOnly: works.filter((work) => workMatchesFilter(work, "localOnly")).length,
-      missingLocal: works.filter((work) => workMatchesFilter(work, "missingLocal")).length,
-      rated: works.filter((work) => workRating(work) !== null).length,
-      highRating: works.filter((work) => {
-        const rating = workRating(work);
-        return rating !== null && rating >= 4;
-      }).length,
-      vr: works.filter((work) => workMatchesFilter(work, "vr")).length,
-      hasMagnet: works.filter((work) => workMatchesFilter(work, "hasMagnet")).length,
-      missingCover: works.filter((work) => workMatchesFilter(work, "missingCover")).length
+      playable: 0,
+      info: 0,
+      localOnly: 0,
+      missingLocal: 0,
+      rated: 0,
+      highRating: 0,
+      vr: 0,
+      hasMagnet: 0,
+      missingCover: 0
     };
+
+    for (const work of works) {
+      const missingLocal = Boolean(work.missingLocal);
+      const rating = workRating(work);
+      if (Number(work.playableCount || 0) > 0) facets.playable += 1;
+      if (workInfoRow(work.id) || Number(work.infoCount || 0) > 0) facets.info += 1;
+      if (missingLocal) facets.missingLocal += 1;
+      else facets.localOnly += 1;
+      if (rating !== null) facets.rated += 1;
+      if (rating !== null && rating >= 4) facets.highRating += 1;
+      if (isVrWork(work)) facets.vr += 1;
+      if (missingLocal && publicWorkAvailability(work).hasMagnet) facets.hasMagnet += 1;
+      if (!missingLocal && !work.coverId && !workHasCoreCover(work.id, stamp)) facets.missingCover += 1;
+    }
+
+    staticFacetCache.set(works, { stamp, facets });
+    return facets;
+  }
+
+  function workFacets(works = allWorks()) {
+    const facets = { ...staticWorkFacets(works), favorite: 0, progress: 0 };
+    for (const work of works) {
+      if (favoriteStateService.isFavoriteWork(work.id)) facets.favorite += 1;
+      if (playbackProgressService.getWorkProgress(work)) facets.progress += 1;
+    }
+    return facets;
   }
 
   function lightweightWorkFacets(works = []) {
-    const rating = (work) => {
-      const value = Number(work.infoSummary?.rating);
-      return Number.isFinite(value) ? value : null;
-    };
-    return {
+    const facets = {
       all: works.length,
-      playable: works.filter((work) => Number(work.playableCount || 0) > 0).length,
-      favorite: works.filter((work) => favoriteStateService.isFavoriteWork(work.id)).length,
-      progress: works.filter((work) => Boolean(playbackProgressService.getWorkProgress(work))).length,
-      info: works.filter((work) => Boolean(work.infoSummary) || Number(work.infoCount || 0) > 0).length,
-      localOnly: works.filter((work) => !work.missingLocal).length,
-      missingLocal: works.filter((work) => Boolean(work.missingLocal)).length,
-      rated: works.filter((work) => rating(work) !== null).length,
-      highRating: works.filter((work) => (rating(work) ?? -Infinity) >= 4).length,
-      vr: works.filter((work) => isVrWork(work)).length,
-      hasMagnet: works.filter((work) => Boolean(work.missingLocal && work.infoSummary?.hasMagnet)).length,
-      missingCover: works.filter((work) => !work.coverId && !work.remoteCoverUrl && !work.infoSummary?.imageUrl).length
+      playable: 0,
+      favorite: 0,
+      progress: 0,
+      info: 0,
+      localOnly: 0,
+      missingLocal: 0,
+      rated: 0,
+      highRating: 0,
+      vr: 0,
+      hasMagnet: 0,
+      missingCover: 0
     };
+
+    for (const work of works) {
+      const missingLocal = Boolean(work.missingLocal);
+      const ratingValue = Number(work.infoSummary?.rating);
+      const rating = Number.isFinite(ratingValue) ? ratingValue : null;
+      if (Number(work.playableCount || 0) > 0) facets.playable += 1;
+      if (favoriteStateService.isFavoriteWork(work.id)) facets.favorite += 1;
+      if (playbackProgressService.getWorkProgress(work)) facets.progress += 1;
+      if (work.infoSummary || Number(work.infoCount || 0) > 0) facets.info += 1;
+      if (missingLocal) facets.missingLocal += 1;
+      else facets.localOnly += 1;
+      if (rating !== null) facets.rated += 1;
+      if (rating !== null && rating >= 4) facets.highRating += 1;
+      if (isVrWork(work)) facets.vr += 1;
+      if (missingLocal && work.infoSummary?.hasMagnet) facets.hasMagnet += 1;
+      if (!work.coverId && !work.remoteCoverUrl && !work.infoSummary?.imageUrl) facets.missingCover += 1;
+    }
+
+    return facets;
   }
 
   function pagedWorksPayload(works, url, extra = {}, options = {}) {
@@ -192,7 +273,9 @@ export function createWorkQueryService({
   function listFromWorksPayload(sourceWorks, url, extra = {}) {
     const filter = extra.filter || url.searchParams.get("filter") || "all";
     const sort = url.searchParams.get("sort") || "releaseDesc";
-    const works = sortWorkList(sourceWorks.filter((work) => workMatchesFilter(work, filter)), sort);
+    const stamp = currentStamp();
+    const matchedWorks = filter === "all" ? sourceWorks : sourceWorks.filter((work) => workMatchesFilter(work, filter, stamp));
+    const works = sortWorkList(matchedWorks, sort);
     return pagedWorksPayload(works, url, {
       ...extra,
       filter,
@@ -203,10 +286,37 @@ export function createWorkQueryService({
   function listPayload(url) {
     const scope = peopleScopeService.normalize(url.searchParams.get("scope"));
     const filter = url.searchParams.get("filter") || "all";
-    const filtered = enrichLocalWorksWithActorMovieIndex(allWorks()
-      .filter((work) => peopleScopeService.workMatches(work, scope)))
-      .filter((work) => workMatchesFilter(work, filter));
-    return listFromWorksPayload(filtered, url, { filter, facets: workFacets(filtered) });
+    const stamp = currentStamp();
+    const cacheKey = `${scope}:${filter}`;
+    const cached = listSourceCache.get(cacheKey);
+    let filtered = cached?.stamp === stamp ? cached.works : null;
+
+    if (!filtered) {
+      const scopedCacheKey = `${scope}:all`;
+      const scopedCached = listSourceCache.get(scopedCacheKey);
+      const scopedWorks = scopedCached?.stamp === stamp
+        ? scopedCached.works
+        : enrichedWorks().filter((work) => peopleScopeService.workMatches(work, scope));
+      listSourceCache.set(scopedCacheKey, { stamp, works: scopedWorks });
+      filtered = filter === "all" ? scopedWorks : scopedWorks.filter((work) => workMatchesFilter(work, filter, stamp));
+      if (cacheableFilters.has(filter)) listSourceCache.set(cacheKey, { stamp, works: filtered });
+    }
+
+    const sort = url.searchParams.get("sort") || "releaseDesc";
+    const works = sortWorkList(filtered, sort);
+    return pagedWorksPayload(works, url, { filter, facets: workFacets(filtered) });
+  }
+
+  function prewarm() {
+    enrichedWorks();
+    prewarmLocalWorkCodeKeys();
+    const scope = peopleScopeService.normalize("main");
+    const stamp = currentStamp();
+    const works = enrichedWorks().filter((work) => peopleScopeService.workMatches(work, scope));
+    listSourceCache.set(`${scope}:all`, { stamp, works });
+    // Static facets hydrate the full core work-info projection. Keep that
+    // demand-driven so an expensive metadata refresh cannot block server.listen().
+    sortWorkList(works, "updated");
   }
 
   function searchPayload(url) {
@@ -277,6 +387,7 @@ export function createWorkQueryService({
     facets: workFacets,
     listPayload,
     listFromWorksPayload,
+    prewarm,
     searchPayload
   };
 }

@@ -11,6 +11,7 @@ export function createWorkInfoService({
   uniqueTextArray
 }) {
   let workInfoCache = null;
+  let workInfoDetailCache = null;
 
   function firstPresentValue(...values) {
     for (const value of values) {
@@ -38,11 +39,13 @@ export function createWorkInfoService({
     return Boolean(Number(value));
   }
 
-  function rowsById() {
+  function detailRow(workId) {
     const stamp = getStamp();
-    if (workInfoCache?.stamp === stamp) return workInfoCache.rows;
+    if (workInfoDetailCache?.stamp !== stamp) {
+      workInfoDetailCache = { stamp, rows: new Map() };
+    }
+    if (workInfoDetailCache.rows.has(workId)) return workInfoDetailCache.rows.get(workId);
 
-    const rows = new Map();
     try {
       const db = getCoreDb();
       for (const row of db
@@ -133,14 +136,61 @@ export function createWorkInfoService({
           LEFT JOIN series_external_refs series_ref ON series_ref.series_id = series.id AND series_ref.provider = 'javdb-series'
           WHERE w.status = 'ok'
             AND lw.id IS NOT NULL
+            AND w.id = ?
           GROUP BY w.id
+          `
+        )
+        .all(Number(workId))) {
+        workInfoDetailCache.rows.set(row.work_id, row);
+      }
+    } catch (error) {
+      console.warn("[core-work-info-detail]", error.message);
+    }
+
+    const row = workInfoDetailCache.rows.get(workId) || null;
+    workInfoDetailCache.rows.set(workId, row);
+    return row;
+  }
+
+  function rowsById() {
+    const stamp = getStamp();
+    if (workInfoCache?.stamp === stamp) return workInfoCache.rows;
+
+    const rows = new Map();
+    try {
+      for (const row of getCoreDb()
+        .prepare(
+          `
+          SELECT
+            CAST(w.id AS TEXT) AS work_id,
+            w.code,
+            w.title,
+            w.release_date,
+            w.duration_minutes,
+            w.rating,
+            w.rating_count,
+            w.director,
+            w.has_magnet,
+            w.is_streamable,
+            w.has_subtitles,
+            w.javdb_tags_json,
+            w.status,
+            w.error,
+            w.updated_at
+          FROM works w
+          WHERE w.status = 'ok'
+            AND EXISTS (
+              SELECT 1
+              FROM local_works lw
+              WHERE lw.work_id = w.id
+            )
           `
         )
         .all()) {
         rows.set(row.work_id, row);
       }
     } catch (error) {
-      console.warn("[core-work-info]", error.message);
+      console.warn("[core-work-info-index]", error.message);
       if (workInfoCache?.rows) return workInfoCache.rows;
     }
 
@@ -237,10 +287,12 @@ export function createWorkInfoService({
 
   function invalidate() {
     workInfoCache = null;
+    workInfoDetailCache = null;
   }
 
   function setRowsCache(value) {
     workInfoCache = value;
+    workInfoDetailCache = null;
   }
 
   return {
@@ -248,6 +300,7 @@ export function createWorkInfoService({
     firstPresentNumber,
     firstPresentText,
     firstPresentValue,
+    detailRow,
     publicMetadata,
     publicSummary,
     row,

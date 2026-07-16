@@ -419,8 +419,7 @@ export function createCoreLibraryService({
             w.javdb_tags_json,
             w.updated_at,
             wref.url AS detail_url,
-            pref.url AS actor_url,
-            cover.remote_url AS image_url
+            pref.url AS actor_url
           FROM work_people wp
           JOIN works w ON w.id = wp.work_id
           LEFT JOIN work_external_refs wref
@@ -433,16 +432,6 @@ export function createCoreLibraryService({
               WHERE pref2.person_id = wp.person_id
                 AND pref2.provider = 'javdb-actor'
               ORDER BY pref2.id ASC
-              LIMIT 1
-            )
-          LEFT JOIN images cover
-            ON cover.id = (
-              SELECT i.id
-              FROM images i
-              WHERE i.owner_type = 'work'
-                AND i.owner_id = w.id
-                AND i.kind = 'cover'
-              ORDER BY CASE WHEN i.image_blob IS NOT NULL THEN 0 ELSE 1 END, i.id ASC
               LIMIT 1
             )
           WHERE wp.person_id = ?

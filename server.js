@@ -298,6 +298,7 @@ const videoProbeService = createVideoProbeService({
 const workImageService = createWorkImageService({
   getCoreDb,
   getPersonById: (personId) => library.peopleById.get(String(personId || "")) || null,
+  getStamp: workCoverStamp,
   getWorkById: (workId) => library.worksById.get(String(workId || "")) || null,
   hasCoreDb,
   proxiedRemoteImageUrl
@@ -444,6 +445,7 @@ const manualCoverStateService = createManualCoverStateService({
   userStateService,
   userStateSummary: () => playbackProgressService.userStateSummary(),
   workCoverRow,
+  workInfoDetailRow,
   workInfoRow
 });
 const rankingService = createRankingService({
@@ -624,6 +626,7 @@ const workPresenterService = createWorkPresenterService({
   publicWorkInfoSummary,
   uniqueTextArray,
   workCoverRow,
+  workInfoDetailRow,
   workInfoRow
 });
 const adminScriptService = createAdminScriptService({
@@ -816,6 +819,7 @@ const moduleRegistry = await discoverFanHaoModules({
       },
       fanhao: createFanhaoDependencies({
         adminCoreMutationService,
+        actorMovieStamp,
         actorProfileMergeCandidates,
         actorProfileRow,
         actorMissingSearchWorks,
@@ -848,6 +852,7 @@ const moduleRegistry = await discoverFanHaoModules({
         peopleScopeService,
         personListService,
         playbackProgressService,
+        prewarmLocalWorkCodeKeys: workCodeIndexService.localCodeKeys,
         prewarmRemoteImagesForWorks,
         publicActorProfile,
         publicPerson,
@@ -872,10 +877,11 @@ const moduleRegistry = await discoverFanHaoModules({
         userStateSummary: () => playbackProgressService.userStateSummary(),
         videoProbeService,
         workCodeKeySetForWorks,
-        workCoverRow,
+        workHasCoreCover,
         workHasLocalMarker,
         workInfoRow,
         workLocalMutationService,
+        workQueryStamp,
         workRating,
         workRatingCount,
         workReleaseDate
@@ -1456,6 +1462,10 @@ function workCoverRow(workId) {
   return workImageService.workCoverRow(workId);
 }
 
+function workHasCoreCover(workId) {
+  return workImageService.workHasCoreCover(workId);
+}
+
 function publicWorkCover(row) {
   return workImageService.publicWorkCover(row);
 }
@@ -1477,6 +1487,10 @@ function actorProfileStamp() {
 
 function workInfoStamp() {
   return tableDataStamp("work_info");
+}
+
+function workCoverStamp() {
+  return tableDataStamp("work_covers");
 }
 
 function actorMovieStamp() {
@@ -1504,6 +1518,10 @@ function searchSourceStamp() {
   return `${library.scannedAt || ""}:${workInfoStamp()}:${actorMovieStamp()}:${rankingStamp()}`;
 }
 
+function workQueryStamp() {
+  return `${searchSourceStamp()}:${workCoverStamp()}`;
+}
+
 function clearSearchSourceCaches() {
   rankingService.invalidateSearch();
   actorMovieService.invalidateSearch();
@@ -1513,6 +1531,10 @@ function clearSearchSourceCaches() {
 
 function workInfoRow(workId) {
   return workInfoService.row(workId);
+}
+
+function workInfoDetailRow(workId) {
+  return workInfoService.detailRow(workId);
 }
 
 function studioCatalogStamp() {
