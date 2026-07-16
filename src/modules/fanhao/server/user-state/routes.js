@@ -6,6 +6,7 @@ export async function routeUserStateApi(req, res, url, deps) {
     maxWorkLimit,
     notFound,
     playbackProgressService,
+    prewarmCoreWorkCovers,
     prewarmRemoteImagesForWorks,
     prewarmVideoProbesForWorks,
     prewarmWorkInfoDetails,
@@ -24,6 +25,7 @@ export async function routeUserStateApi(req, res, url, deps) {
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const page = limit ? allWorks.slice(offset, offset + limit) : allWorks.slice(offset);
     const works = prepareCollectionWorkPage(page, {
+      prewarmCoreWorkCovers,
       prewarmRemoteImagesForWorks,
       prewarmVideoProbesForWorks,
       prewarmWorkInfoDetails,
@@ -70,6 +72,7 @@ export async function routeUserStateApi(req, res, url, deps) {
     const entries = playbackProgressService.historyEntries({ days });
     const page = limit ? entries.slice(offset, offset + limit) : entries.slice(offset);
     const works = prepareCollectionWorkPage(page.map((entry) => entry.work), {
+      prewarmCoreWorkCovers,
       prewarmRemoteImagesForWorks,
       prewarmVideoProbesForWorks,
       prewarmWorkInfoDetails,
@@ -146,12 +149,14 @@ export async function routeUserStateApi(req, res, url, deps) {
 }
 
 export function prepareCollectionWorkPage(sourceWorks, {
+  prewarmCoreWorkCovers = () => {},
   prewarmRemoteImagesForWorks = () => {},
   prewarmVideoProbesForWorks = () => {},
   prewarmWorkInfoDetails = () => {},
   publicWork
 }) {
   const page = Array.isArray(sourceWorks) ? sourceWorks : [];
+  prewarmCoreWorkCovers(page);
   prewarmVideoProbesForWorks(page);
   prewarmWorkInfoDetails(page);
   const works = page.map((work) => publicWork(work));

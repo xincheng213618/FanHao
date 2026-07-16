@@ -2,6 +2,7 @@ export function createWorkDetailService({
   galleryMediaService,
   library,
   mediaStreamService,
+  prewarmCoreWorkCovers,
   prewarmRemoteImagesForWorks,
   publicPerson,
   publicWork,
@@ -13,6 +14,7 @@ export function createWorkDetailService({
     if (!work) return null;
 
     const person = library.peopleById.get(work.personId);
+    prewarmCoreWorkCovers([work]);
     const publicItem = publicWork(work, true);
     prewarmRemoteImagesForWorks([publicItem], 100);
     return { work: publicItem, person: person ? publicPerson(person) : null };

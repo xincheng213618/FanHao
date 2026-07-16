@@ -15,6 +15,7 @@ export function createWorkQueryService({
   maxWorkLimit,
   peopleScopeService,
   playbackProgressService,
+  prewarmCoreWorkCovers = () => {},
   prewarmLocalWorkCodeKeys,
   prewarmWorkSearch = () => {},
   prewarmWorkInfoDetails = () => {},
@@ -305,6 +306,7 @@ export function createWorkQueryService({
     const sort = url.searchParams.get("sort") || "releaseDesc";
     const total = works.length;
     const pageSource = works.slice(offset, offset + limit);
+    if (!options.lightweightInfo) prewarmCoreWorkCovers(pageSource);
     prewarmVideoProbesForWorks(pageSource);
     if (!options.lightweightInfo) prewarmWorkInfoDetails(pageSource);
     const page = pageSource.map((work) => publicWork(work, false, options));

@@ -1,3 +1,5 @@
+const WORK_COVER_METADATA_BATCH_SIZE = 200;
+
 export function createWorkImageService({
   getCoreDb,
   getPersonById,
@@ -7,6 +9,7 @@ export function createWorkImageService({
   proxiedRemoteImageUrl
 }) {
   let localWorkCoreCoverCache = null;
+  let workCoverMetadataCache = null;
 
   function coreImageUrl(row) {
     if (!row) return "";
@@ -98,27 +101,66 @@ export function createWorkImageService({
   }
 
   function coreWorkCoverMetadataRow(workId) {
-    const coreId = Number(workId);
-    if (!Number.isFinite(coreId) || !hasCoreDb()) return null;
-    try {
-      return getCoreDb()
-        .prepare(
-          `
-          SELECT id, owner_id, remote_url, local_path, source, updated_at,
-                 image_blob IS NOT NULL AS has_image_blob
-          FROM images
-          WHERE owner_type = 'work'
-            AND owner_id = ?
-            AND kind = 'cover'
-          ORDER BY CASE WHEN image_blob IS NOT NULL THEN 0 ELSE 1 END, sort_order ASC, id ASC
-          LIMIT 1
-          `
-        )
-        .get(coreId) || null;
-    } catch (error) {
-      console.warn("[core-image]", error.message);
-      return null;
+    const normalizedId = normalizeWorkId(workId);
+    if (!normalizedId) return null;
+    return prewarmCoreWorkCoverMetadata([normalizedId]).get(normalizedId) || null;
+  }
+
+  function ensureWorkCoverMetadataCache() {
+    const stamp = getStamp();
+    if (workCoverMetadataCache?.stamp !== stamp) {
+      workCoverMetadataCache = { stamp, rows: new Map() };
     }
+    return workCoverMetadataCache;
+  }
+
+  function normalizeWorkId(value) {
+    const number = Number(value);
+    return Number.isSafeInteger(number) && number > 0 ? String(number) : "";
+  }
+
+  function prewarmCoreWorkCoverMetadata(workIds = []) {
+    const cache = ensureWorkCoverMetadataCache();
+    const pending = [...new Set((Array.isArray(workIds) ? workIds : [])
+      .map(normalizeWorkId)
+      .filter((workId) => workId && !cache.rows.has(workId)))];
+    if (!pending.length) return cache.rows;
+
+    for (let offset = 0; offset < pending.length; offset += WORK_COVER_METADATA_BATCH_SIZE) {
+      const batch = pending.slice(offset, offset + WORK_COVER_METADATA_BATCH_SIZE);
+      if (hasCoreDb()) {
+        try {
+          const placeholders = batch.map(() => "?").join(", ");
+          const rows = getCoreDb()
+            .prepare(
+              `
+              SELECT id, CAST(owner_id AS TEXT) AS work_id, owner_id, remote_url, local_path, source, updated_at,
+                     image_blob IS NOT NULL AS has_image_blob
+              FROM images
+              WHERE owner_type = 'work'
+                AND owner_id IN (${placeholders})
+                AND kind = 'cover'
+              ORDER BY owner_id ASC, CASE WHEN image_blob IS NOT NULL THEN 0 ELSE 1 END, sort_order ASC, id ASC
+              `
+            )
+            .all(...batch.map(Number));
+          for (const row of rows) {
+            if (!cache.rows.has(row.work_id)) cache.rows.set(row.work_id, row);
+          }
+        } catch (error) {
+          console.warn("[core-image]", error.message);
+        }
+      }
+      for (const workId of batch) {
+        if (!cache.rows.has(workId)) cache.rows.set(workId, null);
+      }
+    }
+
+    return cache.rows;
+  }
+
+  function prewarmCoreWorkCovers(works = []) {
+    return prewarmCoreWorkCoverMetadata((Array.isArray(works) ? works : []).map((work) => work?.id));
   }
 
   function coreWorkCoverRow(workId) {
@@ -194,6 +236,11 @@ export function createWorkImageService({
     return localWorkCoreCoverStates().get(String(workId || "")) === true;
   }
 
+  function invalidate() {
+    localWorkCoreCoverCache = null;
+    workCoverMetadataCache = null;
+  }
+
   function coreImageRow(imageId) {
     if (!hasCoreDb()) return null;
     try {
@@ -249,6 +296,9 @@ export function createWorkImageService({
     corePersonAvatarMetadataRow,
     coreWorkCoverRow,
     coreWorkCoverMetadataRow,
+    invalidate,
+    prewarmCoreWorkCoverMetadata,
+    prewarmCoreWorkCovers,
     publicCoreWorkCover,
     publicPersonAvatar,
     publicWorkCover,

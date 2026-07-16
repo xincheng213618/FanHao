@@ -5,6 +5,7 @@ export function createWorkCoverMutationService({
   ffprobePath,
   getCoreDb,
   getWorks,
+  invalidateWorkImageCache = () => {},
   maxCoverBytes = DEFAULT_MAX_COVER_BYTES,
   publicCoreWorkCover,
   publicWorkCover,
@@ -136,6 +137,7 @@ export function createWorkCoverMutationService({
         now
       );
 
+    invalidateWorkImageCache();
     workInfoService.invalidate();
     resetWorkSearch();
     return publicCoreWorkCover(work.id) || publicWorkCover(workCoverRow(work.id));

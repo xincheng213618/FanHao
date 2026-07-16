@@ -8,6 +8,7 @@ import { publicPersonListItem } from "../src/modules/fanhao/server/people/person
 import { createPlaybackProgressService } from "../src/modules/fanhao/server/playback/playback-progress-service.js";
 import { prepareCollectionWorkPage } from "../src/modules/fanhao/server/user-state/routes.js";
 import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-info-service.js";
+import { createWorkImageService } from "../src/modules/fanhao/server/works/image-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
 import { sendJson } from "../src/platform/server/responses.js";
@@ -226,6 +227,8 @@ assert(workCodeIndexServiceSource.includes("let workCodeKeysCache = new WeakMap(
 const workImageServiceSource = read("src/modules/fanhao/server/works/image-service.js");
 assert(workImageServiceSource.includes("FROM local_works lw"), "work-cover facets must index only local catalog entries");
 assert(!workImageServiceSource.includes("SELECT DISTINCT CAST(owner_id AS TEXT)"), "work-cover facets must not hydrate every historical image owner");
+assert(workImageServiceSource.includes("owner_id IN (${placeholders})"), "visible work covers must load metadata in bounded batches");
+assert(workImageServiceSource.includes("workCoverMetadataCache = { stamp, rows: new Map() }"), "work-cover metadata batches must be reused until the image table changes");
 const mediaResponseServiceSource = read("src/platform/server/media-response-service.js");
 const mediaBlobWorkerClientSource = read("src/platform/server/media-blob-worker-client.js");
 const mediaBlobWorkerSource = read("src/platform/server/media-blob-worker.js");
@@ -332,6 +335,9 @@ assert(!("javdbRefs" in personListItem.actorProfile), "person-list summaries mus
 const collectionPrepareEvents = [];
 const collectionSourceWorks = [{ id: "history-1" }, { id: "history-2" }];
 const preparedCollectionWorks = prepareCollectionWorkPage(collectionSourceWorks, {
+  prewarmCoreWorkCovers(works) {
+    collectionPrepareEvents.push(`cover:${works.length}`);
+  },
   prewarmVideoProbesForWorks(works) {
     collectionPrepareEvents.push(`video:${works.length}`);
   },
@@ -348,7 +354,7 @@ const preparedCollectionWorks = prepareCollectionWorkPage(collectionSourceWorks,
 });
 assert.deepEqual(
   collectionPrepareEvents,
-  ["video:2", "info:2", "public:history-1", "public:history-2", "image:2"],
+  ["cover:2", "video:2", "info:2", "public:history-1", "public:history-2", "image:2"],
   "collection pages must batch-prepare details before presentation and warm visible media afterward"
 );
 assert.deepEqual(preparedCollectionWorks.map((work) => work.id), ["history-1", "history-2"], "collection page preparation must preserve order");
@@ -389,6 +395,42 @@ assert.equal(playbackProgressService.getWorkProgress(historyWorkOne)?.videoId, "
 playbackProgressService.saveVideoProgress("video-1", { workId: "work-1", position: 30, duration: 100 });
 assert.equal(historySaveCount, 1, "progress updates must still persist user state");
 assert.equal(playbackProgressService.historyEntries()[0]?.work.id, "work-1", "progress updates must invalidate the cached history order");
+
+let workCoverMetadataStamp = "cover-v1";
+let workCoverMetadataPrepareCount = 0;
+let workCoverMetadataArgs = [];
+const batchedWorkImageService = createWorkImageService({
+  getCoreDb: () => ({
+    prepare(sql) {
+      workCoverMetadataPrepareCount += 1;
+      assert(sql.includes("owner_id IN (?, ?)"), "cover metadata must bind one placeholder per visible work");
+      return {
+        all(...ids) {
+          workCoverMetadataArgs = ids;
+          return [
+            { id: 11, work_id: "1", owner_id: 1, has_image_blob: 1, source: "generated", updated_at: "v1" },
+            { id: 12, work_id: "1", owner_id: 1, has_image_blob: 0, remote_url: "https://example.com/older.jpg", source: "remote", updated_at: "v0" },
+            { id: 21, work_id: "2", owner_id: 2, has_image_blob: 0, remote_url: "https://example.com/cover.jpg", source: "remote", updated_at: "v1" }
+          ];
+        }
+      };
+    }
+  }),
+  getPersonById: () => null,
+  getStamp: () => workCoverMetadataStamp,
+  getWorkById: () => null,
+  hasCoreDb: () => true,
+  proxiedRemoteImageUrl: (value) => `/proxy?url=${encodeURIComponent(value)}`
+});
+batchedWorkImageService.prewarmCoreWorkCoverMetadata(["1", "2"]);
+batchedWorkImageService.prewarmCoreWorkCoverMetadata(["1", "2"]);
+assert.equal(workCoverMetadataPrepareCount, 1, "repeated visible pages must reuse batch-hydrated cover metadata");
+assert.deepEqual(workCoverMetadataArgs, [1, 2], "cover metadata batches must pass normalized numeric identifiers");
+assert.equal(batchedWorkImageService.coreWorkCoverMetadataRow("1")?.id, 11, "cover metadata batches must preserve preferred cover order");
+assert.equal(batchedWorkImageService.publicCoreWorkCover("2")?.coverUrl, "/proxy?url=https%3A%2F%2Fexample.com%2Fcover.jpg", "cached remote cover metadata must preserve proxied URLs");
+workCoverMetadataStamp = "cover-v2";
+batchedWorkImageService.prewarmCoreWorkCoverMetadata(["1", "2"]);
+assert.equal(workCoverMetadataPrepareCount, 2, "image table changes must invalidate cached cover metadata");
 
 let workInfoDetailStamp = "detail-v1";
 let workInfoDetailPrepareCount = 0;

@@ -304,6 +304,7 @@ const workImageService = createWorkImageService({
   hasCoreDb,
   proxiedRemoteImageUrl
 });
+const prewarmCoreWorkCovers = workImageService.prewarmCoreWorkCovers;
 const mediaBlobStore = createMediaBlobWorkerClient({ dbPath: CORE_DB_PATH });
 const mediaResponseService = createMediaResponseService({
   coreImageRow,
@@ -463,6 +464,7 @@ const rankingService = createRankingService({
   maxWorkLimit: MAX_WORK_LIMIT,
   normalizeWorkCode,
   parseJsonTextArray,
+  prewarmCoreWorkCovers,
   prewarmWorkInfoDetails,
   prewarmRemoteImagesForWorks,
   proxiedRemoteImageUrl,
@@ -597,6 +599,7 @@ const workCoverMutationService = createWorkCoverMutationService({
   ffprobePath: FFPROBE_PATH,
   getCoreDb,
   getWorks: () => [...library.worksById.values()],
+  invalidateWorkImageCache: workImageService.invalidate,
   publicCoreWorkCover,
   publicWorkCover,
   resetWorkSearch: () => {
@@ -857,6 +860,7 @@ const moduleRegistry = await discoverFanHaoModules({
         peopleScopeService,
         personListService,
         playbackProgressService,
+        prewarmCoreWorkCovers,
         prewarmLocalWorkCodeKeys: workCodeIndexService.localCodeKeys,
         prewarmWorkSearch,
         prewarmWorkInfoDetails,
@@ -2327,6 +2331,7 @@ function pagedWorksPayload(works, url, extra = {}) {
   const sort = url.searchParams.get("sort") || "releaseDesc";
   const total = works.length;
   const pageSource = works.slice(offset, offset + limit);
+  prewarmCoreWorkCovers(pageSource);
   prewarmWorkInfoDetails(pageSource);
   const page = pageSource.map((work) => publicWork(work));
   prewarmRemoteImagesForWorks(page);
