@@ -485,7 +485,6 @@ const actorMovieService = createActorMovieService({
 });
 const studioService = createStudioService({
   clampInteger,
-  enrichLocalWorksWithActorMovieIndex,
   getCoreDb,
   getLibrary: () => library,
   getStamp: studioCatalogStamp,
@@ -884,10 +883,7 @@ const moduleRegistry = await discoverFanHaoModules({
         workInfoFacetRow,
         workInfoRow,
         workLocalMutationService,
-        workQueryStamp,
-        workRating,
-        workRatingCount,
-        workReleaseDate
+        workQueryStamp
       }),
       contentIndex: {
         imageLibraryService,
@@ -2179,64 +2175,32 @@ function allWorks() {
   return [...library.worksById.values()];
 }
 
-function workRating(work) {
-  return firstPresentNumber(workInfoRow(work.id)?.rating, work.infoSummary?.rating);
-}
-
-function workRatingCount(work) {
-  return firstPresentNumber(workInfoRow(work.id)?.rating_count, work.infoSummary?.ratingCount) || 0;
-}
-
-function workReleaseDate(work) {
-  return firstPresentText(workInfoRow(work.id)?.release_date, work.infoSummary?.releaseDate);
-}
-
 function isVrWork(work) {
   const text = `${work.relativePath || ""}\n${work.title || ""}\n${work.directoryName || ""}`.toLowerCase();
   return text.includes("v:/") || text.includes("[vr]") || /\bvr\b/i.test(text);
 }
 
-function workMatchesFilter(work, filter) {
-  switch (filter) {
-    case "localOnly":
-      return !work.missingLocal;
-    case "missingLocal":
-      return Boolean(work.missingLocal);
-    case "playable":
-      return Number(work.playableCount || 0) > 0;
-    case "favorite":
-      return favoriteStateService.isFavoriteWork(work.id);
-    case "progress":
-      return Boolean(playbackProgressService.getWorkProgress(work));
-    case "info":
-      return Boolean(workInfoRow(work.id)) || Number(work.infoCount || 0) > 0;
-    case "rated":
-      return workRating(work) !== null;
-    case "highRating": {
-      const rating = workRating(work);
-      return rating !== null && rating >= 4;
-    }
-    case "vr":
-      return isVrWork(work);
-    case "localMarkedA":
-      return workHasLocalMarker(work, "A");
-    case "hasMagnet":
-      return Boolean(work.missingLocal && publicWorkAvailability(work).hasMagnet);
-    case "missingCover":
-      if (work.missingLocal) return false;
-      return !work.coverId && !workCoverRow(work.id);
-    case "all":
-    default:
-      return true;
-  }
-}
-
 function sortWorkList(works, sort) {
   const list = [...works];
+  const usesMetadata = ["releaseDesc", "releaseAsc", "ratingAsc", "ratingDesc", "duration", "durationDesc", "durationAsc", "codeAsc", "codeDesc"].includes(sort);
+  const metadataByWork = usesMetadata
+    ? new Map(list.map((work) => {
+      const infoRow = workInfoFacetRow(work.id);
+      return [work, {
+        releaseDate: firstPresentText(infoRow?.release_date, work.infoSummary?.releaseDate),
+        rating: firstPresentNumber(infoRow?.rating, work.infoSummary?.rating),
+        ratingCount: firstPresentNumber(infoRow?.rating_count, work.infoSummary?.ratingCount) || 0,
+        duration: firstPresentNumber(infoRow?.duration_minutes, work.infoSummary?.durationMinutes) || 0,
+        code: infoRow?.code || work.infoSummary?.code || work.title || work.directoryName || ""
+      }];
+    }))
+    : null;
   list.sort((a, b) => {
+    const aMetadata = metadataByWork?.get(a);
+    const bMetadata = metadataByWork?.get(b);
     if (sort === "releaseDesc" || sort === "releaseAsc") {
-      const aDate = workReleaseDate(a);
-      const bDate = workReleaseDate(b);
+      const aDate = aMetadata.releaseDate;
+      const bDate = bMetadata.releaseDate;
       const aHas = Boolean(aDate);
       const bHas = Boolean(bDate);
       if (aHas !== bHas) return aHas ? -1 : 1;
@@ -2244,13 +2208,13 @@ function sortWorkList(works, sort) {
     }
 
     if (sort === "ratingAsc" || sort === "ratingDesc") {
-      const aRating = workRating(a);
-      const bRating = workRating(b);
+      const aRating = aMetadata.rating;
+      const bRating = bMetadata.rating;
       const aHas = aRating !== null;
       const bHas = bRating !== null;
       if (aHas !== bHas) return aHas ? -1 : 1;
       if (aHas && aRating !== bRating) return sort === "ratingAsc" ? aRating - bRating : bRating - aRating;
-      const countDiff = workRatingCount(b) - workRatingCount(a);
+      const countDiff = bMetadata.ratingCount - aMetadata.ratingCount;
       if (countDiff) return countDiff;
     }
 
@@ -2261,15 +2225,13 @@ function sortWorkList(works, sort) {
     }
 
     if (sort === "duration" || sort === "durationDesc" || sort === "durationAsc") {
-      const aDuration = Number(a.infoSummary?.durationMinutes ?? workInfoRow(a.id)?.duration_minutes ?? 0);
-      const bDuration = Number(b.infoSummary?.durationMinutes ?? workInfoRow(b.id)?.duration_minutes ?? 0);
+      const aDuration = aMetadata.duration;
+      const bDuration = bMetadata.duration;
       if (aDuration !== bDuration) return sort === "durationAsc" ? aDuration - bDuration : bDuration - aDuration;
     }
 
     if (sort === "codeAsc" || sort === "codeDesc") {
-      const aCode = a.infoSummary?.code || workInfoRow(a.id)?.code || a.title || a.directoryName || "";
-      const bCode = b.infoSummary?.code || workInfoRow(b.id)?.code || b.title || b.directoryName || "";
-      const result = aCode.localeCompare(bCode, undefined, { numeric: true, sensitivity: "base" });
+      const result = aMetadata.code.localeCompare(bMetadata.code, undefined, { numeric: true, sensitivity: "base" });
       if (result) return sort === "codeDesc" ? -result : result;
     }
 
@@ -2279,23 +2241,37 @@ function sortWorkList(works, sort) {
 }
 
 function workFacets(works = allWorks()) {
-  return {
+  const facets = {
     all: works.length,
-    playable: works.filter((work) => workMatchesFilter(work, "playable")).length,
-    favorite: works.filter((work) => workMatchesFilter(work, "favorite")).length,
-    progress: works.filter((work) => workMatchesFilter(work, "progress")).length,
-    info: works.filter((work) => workMatchesFilter(work, "info")).length,
-    localOnly: works.filter((work) => workMatchesFilter(work, "localOnly")).length,
-    missingLocal: works.filter((work) => workMatchesFilter(work, "missingLocal")).length,
-    rated: works.filter((work) => workRating(work) !== null).length,
-    highRating: works.filter((work) => {
-      const rating = workRating(work);
-      return rating !== null && rating >= 4;
-    }).length,
-    vr: works.filter((work) => workMatchesFilter(work, "vr")).length,
-    hasMagnet: works.filter((work) => workMatchesFilter(work, "hasMagnet")).length,
-    missingCover: works.filter((work) => workMatchesFilter(work, "missingCover")).length
+    playable: 0,
+    favorite: 0,
+    progress: 0,
+    info: 0,
+    localOnly: 0,
+    missingLocal: 0,
+    rated: 0,
+    highRating: 0,
+    vr: 0,
+    hasMagnet: 0,
+    missingCover: 0
   };
+  for (const work of works) {
+    const infoRow = workInfoFacetRow(work.id);
+    const rating = firstPresentNumber(infoRow?.rating, work.infoSummary?.rating);
+    const missingLocal = Boolean(work.missingLocal);
+    if (Number(work.playableCount || 0) > 0) facets.playable += 1;
+    if (favoriteStateService.isFavoriteWork(work.id)) facets.favorite += 1;
+    if (playbackProgressService.getWorkProgress(work)) facets.progress += 1;
+    if (infoRow || Number(work.infoCount || 0) > 0) facets.info += 1;
+    if (missingLocal) facets.missingLocal += 1;
+    else facets.localOnly += 1;
+    if (rating !== null) facets.rated += 1;
+    if (rating !== null && rating >= 4) facets.highRating += 1;
+    if (isVrWork(work)) facets.vr += 1;
+    if (missingLocal && publicWorkAvailability(work).hasMagnet) facets.hasMagnet += 1;
+    if (!missingLocal && !work.coverId && !workHasCoreCover(work.id)) facets.missingCover += 1;
+  }
+  return facets;
 }
 
 function pagedWorksPayload(works, url, extra = {}) {

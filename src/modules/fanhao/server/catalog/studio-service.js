@@ -1,6 +1,5 @@
 export function createStudioService({
   clampInteger,
-  enrichLocalWorksWithActorMovieIndex,
   getCoreDb,
   getLibrary,
   getStamp,
@@ -244,7 +243,7 @@ export function createStudioService({
       ? db.prepare("SELECT DISTINCT CAST(wm.work_id AS TEXT) AS work_id FROM work_makers wm JOIN work_series ws ON ws.work_id = wm.work_id JOIN local_works lw ON lw.work_id = wm.work_id WHERE wm.maker_id = ? AND ws.series_id = ?").all(Number(makerId), Number(selectedSeriesId))
       : db.prepare("SELECT DISTINCT CAST(wm.work_id AS TEXT) AS work_id FROM work_makers wm JOIN local_works lw ON lw.work_id = wm.work_id WHERE wm.maker_id = ?").all(Number(makerId));
     const library = getLibrary();
-    const works = enrichLocalWorksWithActorMovieIndex(linkRows.map((item) => library.worksById.get(item.work_id)).filter(Boolean));
+    const works = linkRows.map((item) => library.worksById.get(item.work_id)).filter(Boolean);
     const detail = { works, facets: workFacets(works), sortedByMode: new Map() };
     studioWorksCache.set(cacheKey, detail);
     return detail;

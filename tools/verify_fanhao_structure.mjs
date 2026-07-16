@@ -135,6 +135,7 @@ assert(!studioService.includes("rows.map((row) => publicMaker(row, seriesRowsFor
 assert(studioService.includes("const studioWorksCache = new Map()"), "studio detail paging must reuse versioned work sets");
 assert(studioService.includes("sortedByMode: new Map()"), "studio detail paging must reuse sorted work lists");
 assert(studioService.includes("ensureDetailCaches(stamp)"), "studio detail caches must follow the catalog version stamp");
+assert(!studioService.includes("enrichLocalWorksWithActorMovieIndex(linkRows"), "studio details must not rerun actor-movie code matching for core library works");
 assert(rankingServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "ranking pages must batch-hydrate visible local work metadata");
 const workInfoServiceSource = read("src/modules/fanhao/server/works/work-info-service.js");
 const workQueryServiceSource = read("src/modules/fanhao/server/works/work-query-service.js");
@@ -155,6 +156,8 @@ assert(!mediaResponseServiceSource.includes("WHERE image_blob IS NOT NULL AND ur
 const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");
 assert(!/fanhao:\s*\{\s*catalog:/s.test(server), "server.js must not own FanHao runtime buckets");
+assert(server.includes("if (!missingLocal && !work.coverId && !workHasCoreCover(work.id))"), "catalog facets must use the compact core-cover index");
+assert(!server.includes("return !work.coverId && !workCoverRow(work.id);"), "catalog facets must not read cover blobs while counting missing covers");
 const worksRuntime = read("src/modules/fanhao/server/works/runtime.js");
 assert(worksRuntime.includes("activeRequestDeps"), "work services must be reused for the active library snapshot");
 assert(worksRuntime.includes("workQueryService.prewarm()"), "FanHao work queries must prewarm their full-library enrichment cache before serving requests");

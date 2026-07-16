@@ -84,10 +84,7 @@ export function createFanhaoDependencies(deps) {
       "workInfoFacetRow",
       "workInfoRow",
       "workLocalMutationService",
-      "workQueryStamp",
-      "workRating",
-      "workRatingCount",
-      "workReleaseDate"
+      "workQueryStamp"
     ])
   };
 }
