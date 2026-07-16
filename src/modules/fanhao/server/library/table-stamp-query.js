@@ -11,12 +11,20 @@ const TABLE_MAP = Object.freeze({
 export function readTableStampRow(db, table) {
   const safeTable = TABLE_MAP[table] || table;
   if (!/^[A-Za-z0-9_]+$/.test(safeTable)) throw new Error(`Invalid table: ${table}`);
-  const dataVersion = Number(db.prepare("PRAGMA data_version").get()?.data_version || 0);
-  const row = db.prepare(`SELECT COALESCE(MAX(rowid), 0) AS max_rowid FROM ${safeTable}`).get();
-  return { data_version: dataVersion, max_rowid: Number(row?.max_rowid || 0) };
+  const row = db.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM ${safeTable}) AS row_count,
+      (SELECT COALESCE(MAX(rowid), 0) FROM ${safeTable}) AS max_rowid,
+      (SELECT COALESCE(MAX(updated_at), '') FROM ${safeTable}) AS max_updated_at
+  `).get();
+  return {
+    row_count: Number(row?.row_count || 0),
+    max_rowid: Number(row?.max_rowid || 0),
+    max_updated_at: String(row?.max_updated_at || "")
+  };
 }
 
 export function tableStampValue(table, version, row) {
   if (!row) return `${version}:${table}:unavailable`;
-  return `${version}:${Number(row.data_version || 0)}:${Number(row.max_rowid || 0)}`;
+  return `${version}:${Number(row.row_count || 0)}:${Number(row.max_rowid || 0)}:${String(row.max_updated_at || "")}`;
 }

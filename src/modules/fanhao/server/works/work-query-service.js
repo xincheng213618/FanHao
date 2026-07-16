@@ -13,10 +13,12 @@ export function createWorkQueryService({
   localSearchWorkByCodeKey,
   localWorksByCodePrefix,
   maxWorkLimit,
+  peoplePayloadStamp = () => "",
   peopleScopeService,
   playbackProgressService,
   prewarmCoreWorkCovers = () => {},
   prewarmLocalWorkCodeKeys,
+  prewarmPersonMerge = () => {},
   prewarmWorkSearch = () => {},
   prewarmWorkInfoDetails = () => {},
   prewarmRemoteImagesForWorks,
@@ -27,6 +29,7 @@ export function createWorkQueryService({
   rankingMissingSearchWorks,
   searchPeople,
   storedWorkCodeKey,
+  userStateStamp = () => "",
   workHasCoreCover,
   workHasLocalMarker,
   workInfoFacetRow,
@@ -34,6 +37,8 @@ export function createWorkQueryService({
 }) {
   let enrichedWorksCache = null;
   const listSourceCache = new Map();
+  const searchSourceCache = new Map();
+  let searchSourceCacheStamp = "";
   const cacheableFilters = new Set([
     "all",
     "hasMagnet",
@@ -357,6 +362,7 @@ export function createWorkQueryService({
   function prewarm() {
     enrichedWorks();
     prewarmLocalWorkCodeKeys();
+    prewarmPersonMerge();
     prewarmWorkSearch();
     const rankingMissingWorks = rankingMissingSearchWorks();
     const rankingMissingKeys = new Set(rankingMissingWorks
@@ -380,9 +386,36 @@ export function createWorkQueryService({
 
   function searchPayload(url) {
     const rawQuery = (url.searchParams.get("q") || "").trim();
-    const query = rawQuery.toLowerCase();
     const filter = url.searchParams.get("filter") || "all";
     const sort = url.searchParams.get("sort") || "releaseDesc";
+    const source = cachedSearchSource(rawQuery);
+    const facets = cachedSearchFacets(source);
+    const filteredWorks = cachedSearchFilter(source, filter);
+    const works = sortWorkList(filteredWorks, sort, { lightweightInfo: true });
+    return pagedWorksPayload(works, url, {
+      filter,
+      q: rawQuery,
+      facets,
+      people: source.people
+    }, { lightweightInfo: true });
+  }
+
+  function cachedSearchSource(rawQuery) {
+    const stamp = `${currentStamp()}:${peoplePayloadStamp()}`;
+    if (searchSourceCacheStamp !== stamp) {
+      searchSourceCacheStamp = stamp;
+      searchSourceCache.clear();
+    }
+
+    const cacheKey = String(rawQuery || "").toLowerCase();
+    if (searchSourceCache.has(cacheKey)) {
+      const cached = searchSourceCache.get(cacheKey);
+      searchSourceCache.delete(cacheKey);
+      searchSourceCache.set(cacheKey, cached);
+      return cached;
+    }
+
+    const query = rawQuery.toLowerCase();
     const exactCodeKey = /^[a-z]{2,12}[-_\s]?\d{2,}$/i.test(rawQuery) ? storedWorkCodeKey(rawQuery) : "";
     const codePrefixQuery = storedWorkCodeKey(rawQuery).length >= 2 && /^[a-z][a-z0-9_-]*$/i.test(rawQuery);
     const peopleSearch = exactCodeKey || codePrefixQuery
@@ -420,18 +453,32 @@ export function createWorkQueryService({
       ...rankingMissingMatches,
       ...actorMissingMatches
     ]);
-    const facets = lightweightWorkFacets(matchedWorks);
-    const works = sortWorkList(
-      matchedWorks.filter((work) => lightweightWorkMatchesFilter(work, filter)),
-      sort,
-      { lightweightInfo: true }
-    );
-    return pagedWorksPayload(works, url, {
-      filter,
-      q: rawQuery,
-      facets,
-      people: peopleSearch.people.map(publicPerson)
-    }, { lightweightInfo: true });
+    const source = {
+      facetsCache: null,
+      filteredByMode: new Map(),
+      people: peopleSearch.people.map(publicPerson),
+      works: matchedWorks
+    };
+    searchSourceCache.set(cacheKey, source);
+    while (searchSourceCache.size > 48) searchSourceCache.delete(searchSourceCache.keys().next().value);
+    return source;
+  }
+
+  function cachedSearchFacets(source) {
+    const stamp = userStateStamp();
+    if (source.facetsCache?.stamp === stamp) return source.facetsCache.facets;
+    const facets = lightweightWorkFacets(source.works);
+    source.facetsCache = { stamp, facets };
+    return facets;
+  }
+
+  function cachedSearchFilter(source, filter) {
+    if (filter === "all") return source.works;
+    if (!cacheableFilters.has(filter)) return source.works.filter((work) => lightweightWorkMatchesFilter(work, filter));
+    if (!source.filteredByMode.has(filter)) {
+      source.filteredByMode.set(filter, source.works.filter((work) => lightweightWorkMatchesFilter(work, filter)));
+    }
+    return source.filteredByMode.get(filter);
   }
 
   function findExactLocalWork(codeKey) {

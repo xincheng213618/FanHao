@@ -16,6 +16,7 @@ import { createMediaResponseService } from "../src/platform/server/media-respons
 import { sendJson } from "../src/platform/server/responses.js";
 import { createVideoProbeService } from "../src/platform/server/video-probe-service.js";
 import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
+import { tableStampValue } from "../src/modules/fanhao/server/library/table-stamp-query.js";
 import { fetchPreparedImage } from "../android-client/www/js/image.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -229,6 +230,10 @@ assert(workQueryServiceSource.includes("staticWorkFacets(works);"), "compact wor
 assert(workQueryServiceSource.includes("sortWorkList(works, \"releaseDesc\")"), "the default work-list order must be ready before the first request");
 assert(workQueryServiceSource.includes("[\"playable\", \"info\", \"rated\", \"highRating\", \"vr\"]"), "common work filters must be ready before first navigation");
 assert(workQueryServiceSource.includes("prewarmWorkSearch();"), "local and missing-work search indexes must be ready before the first query");
+assert(workQueryServiceSource.includes("prewarmPersonMerge();"), "person merge maps must be ready before the first search request");
+assert(workQueryServiceSource.includes("const searchSourceCache = new Map()"), "search paging and return navigation must reuse matched work sources");
+assert(workQueryServiceSource.includes("const source = cachedSearchSource(rawQuery)"), "search responses must use the versioned matched-work cache");
+assert(workQueryServiceSource.includes("source.facetsCache?.stamp === stamp"), "search facets must only refresh after user state changes");
 assert(workQueryServiceSource.includes("const exactPersonSearch ="), "exact person searches must bypass the full local text scan");
 assert(workCodeIndexServiceSource.includes("localWorkCodeIndexCache = { stamp, keys, rows, searchRows, prefixRows }"), "local code membership and work lookup must share one catalog pass");
 assert(workCodeIndexServiceSource.includes("while (low < high)"), "local code-prefix search must use the sorted code index");
@@ -272,16 +277,23 @@ const workInfoService = read("src/modules/fanhao/server/works/work-info-service.
 const workPresenterService = read("src/modules/fanhao/server/works/presenter-service.js");
 const workMediaRoutes = read("src/modules/fanhao/server/works/routes-media.js");
 const coreDbService = read("src/modules/fanhao/server/library/core-db-service.js");
+const tableStampQuerySource = read("src/modules/fanhao/server/library/table-stamp-query.js");
 const userStateRoutes = read("src/modules/fanhao/server/user-state/routes.js");
+const userStateServiceSource = read("src/modules/fanhao/server/collections/user-state-service.js");
 assert(workInfoService.includes("function detailRow(workId)"), "work metadata must load full details per work instead of hydrating the entire catalog");
 assert(workInfoService.includes("SELECT 1\n              FROM local_works"), "work-list metadata must use a lightweight local-work index query");
 assert(workPresenterService.includes("workInfoDetailRow(work.id)"), "work cards and details must hydrate full metadata only for the visible page");
 assert(workMediaRoutes.includes("/media\\/person\\/([^/]+)\\/cover"), "person-list avatars must use a stable compact media URL");
 assert(coreDbService.includes("const DEFAULT_TABLE_STAMP_CACHE_MS = 5000"), "FanHao table stamps must not rescan the core database between nearby interactions");
 assert(coreDbService.includes("idx_works_updated_at ON works(updated_at)"), "work-info stamps must use a lightweight updated-at index");
+assert(coreDbService.includes("idx_works_status_code_search ON works(status, code_search, id)"), "code-prefix searches must use a status-aware covering index");
 assert(coreDbService.includes("idx_work_people_updated_at ON work_people(updated_at)"), "actor-movie stamps must use a lightweight updated-at index");
+assert(coreDbService.includes("idx_images_updated_at ON images(updated_at)"), "cover stamps must use a lightweight table-specific update index");
+assert(tableStampQuerySource.includes("MAX(updated_at)"), "table stamps must track changes in their own target table");
+assert(!tableStampQuerySource.includes("PRAGMA data_version"), "unrelated SQLite writes must not invalidate every FanHao cache");
 assert(userStateRoutes.includes("allWorks.slice(offset, offset + limit)"), "favorites must paginate before presenting work details");
 assert(userStateRoutes.includes("entries.slice(offset, offset + limit)"), "history must paginate before presenting work details");
+assert(userStateServiceSource.includes("stateRevision += 1"), "favorite and progress mutations must version cached search facets");
 const serviceLauncher = read("start-fanhao.ps1");
 assert(
   /if \(-not \$ready\)[\s\S]*Stop-Process -Id \$process\.Id -Force/.test(serviceLauncher),
@@ -602,6 +614,10 @@ assert.equal(batchedWorkInfoService.detailRow("1")?.title, "Work 1", "single-wor
 
 let actorMovieDataStamp = "actor-v1";
 let enrichmentCount = 0;
+let localPrefixReadCount = 0;
+let personMergePrewarmCount = 0;
+let searchFavoriteFacetReadCount = 0;
+let searchUserStateRevision = 1;
 let workInfoReadCount = 0;
 let workInfoFacetReadCount = 0;
 const queryWork = {
@@ -629,15 +645,27 @@ const workQueryService = createWorkQueryService({
     return items;
   },
   fastMissingCodeSearch: () => [],
-  favoriteStateService: { isFavoriteWork: () => false },
+  favoriteStateService: {
+    isFavoriteWork() {
+      searchFavoriteFacetReadCount += 1;
+      return false;
+    }
+  },
   isVrWork: () => false,
   library: { scannedAt: "library-v1", worksById: new Map([[queryWork.id, queryWork]]) },
   localSearchWorkByCodeKey: () => new Map([["abc001", queryWork]]),
-  localWorksByCodePrefix: () => [queryWork],
+  localWorksByCodePrefix: () => {
+    localPrefixReadCount += 1;
+    return [queryWork];
+  },
   maxWorkLimit: 1000,
+  peoplePayloadStamp: () => actorMovieDataStamp,
   peopleScopeService: { normalize: () => "main", workMatches: () => true },
   playbackProgressService: { getWorkProgress: () => null },
   prewarmLocalWorkCodeKeys() {},
+  prewarmPersonMerge() {
+    personMergePrewarmCount += 1;
+  },
   prewarmRemoteImagesForWorks() {},
   publicPerson: (person) => person,
   publicWork: (work) => ({ id: work.id }),
@@ -645,6 +673,7 @@ const workQueryService = createWorkQueryService({
   rankingMissingSearchWorks: () => [],
   searchPeople: () => ({ exact: [], matchedPersonIds: [], people: [] }),
   storedWorkCodeKey: (value) => String(value || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase(),
+  userStateStamp: () => searchUserStateRevision,
   workHasCoreCover: () => false,
   workHasLocalMarker: () => false,
   workInfoFacetRow: () => {
@@ -662,14 +691,26 @@ const workQueryService = createWorkQueryService({
 });
 const workListUrl = new URL("http://127.0.0.1/api/works?limit=24&sort=updated");
 workQueryService.prewarm();
+assert.equal(personMergePrewarmCount, 1, "FanHao startup must prepare person merge maps before search traffic");
 assert.equal(workInfoReadCount, 0, "FanHao startup prewarm must not hydrate full work-info facets before the server listens");
 assert(workInfoFacetReadCount > 0 && workInfoFacetReadCount <= 8, "FanHao startup prewarm must use only bounded compact work-info lookups");
 workQueryService.listPayload(workListUrl);
 workQueryService.listPayload(workListUrl);
 assert.equal(enrichmentCount, 1, "repeated FanHao work-list requests must reuse the prewarmed full-library enrichment");
+const workSearchUrl = new URL("http://127.0.0.1/api/search?q=AB&limit=24&sort=releaseDesc");
+workQueryService.searchPayload(workSearchUrl);
+const favoriteFacetReadsAfterSearch = searchFavoriteFacetReadCount;
+workQueryService.searchPayload(workSearchUrl);
+assert.equal(localPrefixReadCount, 1, "repeated search paging must reuse the matched work source");
+assert.equal(searchFavoriteFacetReadCount, favoriteFacetReadsAfterSearch, "repeated search paging must reuse unchanged user facets");
+searchUserStateRevision += 1;
+workQueryService.searchPayload(workSearchUrl);
+assert(searchFavoriteFacetReadCount > favoriteFacetReadsAfterSearch, "favorite and progress changes must refresh search facets");
 actorMovieDataStamp = "actor-v2";
 workQueryService.listPayload(workListUrl);
 assert.equal(enrichmentCount, 2, "actor-movie updates must invalidate the FanHao work-list enrichment cache");
+workQueryService.searchPayload(workSearchUrl);
+assert.equal(localPrefixReadCount, 2, "search data changes must invalidate matched work sources");
 
 let cachedLocalImageRow = null;
 let localImageStatCount = 0;
@@ -905,7 +946,6 @@ assert.equal(cachedPlayInfo.videoCodec, "h264", "completed video probes must pre
 let stampNow = 1000;
 let synchronousStampReads = 0;
 let backgroundStampReads = 0;
-let fakeDataVersion = 1;
 let resolveBackgroundStamp;
 const backgroundStamp = new Promise((resolve) => {
   resolveBackgroundStamp = resolve;
@@ -925,13 +965,10 @@ const fakeCoreDb = {
         ]
       };
     }
-    if (sql === "PRAGMA data_version") {
-      return { get: () => ({ data_version: fakeDataVersion }) };
-    }
     return {
       get() {
         synchronousStampReads += 1;
-        return { max_rowid: 1 };
+        return { row_count: 1, max_rowid: 1, max_updated_at: "v1" };
       }
     };
   }
@@ -956,8 +993,12 @@ assert.equal(backgroundStampCoreDb.tableDataStamp("work_info"), initialWorkInfoS
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(synchronousStampReads, 1, "stale table stamps must not query SQLite on the request thread");
 assert.equal(backgroundStampReads, 1, "stale table stamps must deduplicate background refreshes");
-fakeDataVersion = 2;
-resolveBackgroundStamp({ data_version: fakeDataVersion, max_rowid: 2 });
+assert.equal(
+  tableStampValue("work_info", "0:0", { data_version: 1, row_count: 1, max_rowid: 1, max_updated_at: "v1" }),
+  tableStampValue("work_info", "0:0", { data_version: 2, row_count: 1, max_rowid: 1, max_updated_at: "v1" }),
+  "unrelated SQLite writes must not invalidate a table-specific cache"
+);
+resolveBackgroundStamp({ row_count: 2, max_rowid: 2, max_updated_at: "v2" });
 for (let attempt = 0; attempt < 10 && backgroundStampCoreDb.tableDataStamp("work_info") === initialWorkInfoStamp; attempt += 1) {
   await new Promise((resolve) => setImmediate(resolve));
 }

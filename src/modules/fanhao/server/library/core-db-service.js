@@ -15,7 +15,11 @@ function ensureColumn(db, table, column, definition) {
 function ensureCoreCacheTables(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_works_updated_at ON works(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_works_status_code_search ON works(status, code_search, id);
     CREATE INDEX IF NOT EXISTS idx_work_people_updated_at ON work_people(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_people_updated_at ON people(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_images_updated_at ON images(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_collection_items_updated_at ON collection_items(updated_at);
     CREATE TABLE IF NOT EXISTS remote_image_cache (
       url TEXT PRIMARY KEY,
       url_hash TEXT NOT NULL,

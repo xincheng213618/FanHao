@@ -7,6 +7,7 @@ export function createUserStateService({
   statePath,
   warn = console.warn
 }) {
+  let stateRevision = 0;
   const state = emptyState();
 
   function emptyState() {
@@ -27,6 +28,7 @@ export function createUserStateService({
   function replaceState(nextState) {
     for (const key of Object.keys(state)) delete state[key];
     Object.assign(state, nextState);
+    stateRevision += 1;
     return state;
   }
 
@@ -135,6 +137,7 @@ export function createUserStateService({
   }
 
   function save() {
+    stateRevision += 1;
     try {
       ensureDataDir();
       fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
@@ -142,6 +145,10 @@ export function createUserStateService({
       warn("[state]", error.message);
     }
     return state;
+  }
+
+  function revision() {
+    return stateRevision;
   }
 
   return {
@@ -157,6 +164,7 @@ export function createUserStateService({
     normalizeFavorites,
     normalizeManualCoverRecord,
     normalizeManualCovers,
+    revision,
     save,
     state
   };

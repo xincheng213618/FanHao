@@ -860,6 +860,7 @@ const moduleRegistry = await discoverFanHaoModules({
         peopleScopeService,
         personListService,
         playbackProgressService,
+        prewarmPersonMerge: () => personMergeService.maps(),
         prewarmCoreWorkCovers,
         prewarmLocalWorkCodeKeys: workCodeIndexService.localCodeKeys,
         prewarmWorkSearch,
@@ -887,6 +888,7 @@ const moduleRegistry = await discoverFanHaoModules({
         storedWorkCodeKey,
         studioService,
         userStateSummary: () => playbackProgressService.userStateSummary(),
+        userStateStamp: () => userStateService.revision(),
         videoProbeService,
         workCodeKeySetForWorks,
         workHasCoreCover,
@@ -1561,7 +1563,6 @@ function searchSourceStamp() {
 function workQueryStamp() {
   return `${searchSourceStamp()}:${workCoverStamp()}`;
 }
-
 function clearSearchSourceCaches() {
   rankingService.invalidateSearch();
   actorMovieService.invalidateSearch();
