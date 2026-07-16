@@ -6,6 +6,9 @@ export async function routeUserStateApi(req, res, url, deps) {
     maxWorkLimit,
     notFound,
     playbackProgressService,
+    prewarmRemoteImagesForWorks,
+    prewarmVideoProbesForWorks,
+    prewarmWorkInfoDetails,
     publicWork,
     readJsonBody,
     recentWatchedDays,
@@ -20,7 +23,12 @@ export async function routeUserStateApi(req, res, url, deps) {
     const limit = clampInteger(url.searchParams.get("limit"), 0, 0, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const page = limit ? allWorks.slice(offset, offset + limit) : allWorks.slice(offset);
-    const works = page.map((work) => publicWork(work));
+    const works = prepareCollectionWorkPage(page, {
+      prewarmRemoteImagesForWorks,
+      prewarmVideoProbesForWorks,
+      prewarmWorkInfoDetails,
+      publicWork
+    });
     sendJson(res, 200, {
       count: works.length,
       total: allWorks.length,
@@ -61,7 +69,12 @@ export async function routeUserStateApi(req, res, url, deps) {
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const entries = playbackProgressService.historyEntries({ days });
     const page = limit ? entries.slice(offset, offset + limit) : entries.slice(offset);
-    const works = page.map((entry) => publicWork(entry.work));
+    const works = prepareCollectionWorkPage(page.map((entry) => entry.work), {
+      prewarmRemoteImagesForWorks,
+      prewarmVideoProbesForWorks,
+      prewarmWorkInfoDetails,
+      publicWork
+    });
     sendJson(res, 200, {
       count: works.length,
       total: entries.length,
@@ -130,4 +143,18 @@ export async function routeUserStateApi(req, res, url, deps) {
   }
 
   return false;
+}
+
+export function prepareCollectionWorkPage(sourceWorks, {
+  prewarmRemoteImagesForWorks = () => {},
+  prewarmVideoProbesForWorks = () => {},
+  prewarmWorkInfoDetails = () => {},
+  publicWork
+}) {
+  const page = Array.isArray(sourceWorks) ? sourceWorks : [];
+  prewarmVideoProbesForWorks(page);
+  prewarmWorkInfoDetails(page);
+  const works = page.map((work) => publicWork(work));
+  prewarmRemoteImagesForWorks(works);
+  return works;
 }

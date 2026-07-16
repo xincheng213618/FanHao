@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
+import { createPlaybackProgressService } from "../src/modules/fanhao/server/playback/playback-progress-service.js";
+import { prepareCollectionWorkPage } from "../src/modules/fanhao/server/user-state/routes.js";
 import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
@@ -42,11 +44,13 @@ const standaloneEntry = read("public/standalone-app.js");
 const standaloneHost = read("public/js/standalone-host.js");
 const webApp = read("public/app.js");
 const peoplePageSource = read("public/modules/fanhao/people-page.js");
+const fanhaoModuleIndexSource = read("public/modules/fanhao/index.js");
 const latestRequestSource = read("public/modules/fanhao/latest-request.js");
 const searchRequestSource = read("public/modules/fanhao/search-request-service.js");
 const rankingPageSource = read("public/modules/fanhao/ranking-page.js");
 const studioPageSource = read("public/modules/fanhao/features/studios/studio-page.js");
 const collectionPageSource = read("public/modules/fanhao/features/collections/collection-page.js");
+const playbackProgressServiceSource = read("src/modules/fanhao/server/playback/playback-progress-service.js");
 const workDetailPageSource = read("public/modules/fanhao/work-detail-page.js");
 const videoProbeSource = read("src/platform/server/video-probe-service.js");
 assert(indexHtml.includes('import("/fanhao-app.js'), "FanHao must have a dedicated Web entry");
@@ -67,6 +71,7 @@ assert(webApp.includes("const WORK_RENDER_INITIAL_COUNT = 24"), "FanHao work lis
 assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 96, lan: 64, remote: 48 })"), "FanHao work APIs must keep page payloads bounded for each access mode");
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
+assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-latest-request-02'), "person navigation changes must use a fresh browser module URL");
 assert(latestRequestSource.includes("sequence === requestSequence"), "latest-request gates must reject stale completions");
 assert(peoplePageSource.includes("const personDetailRequests = createLatestRequestGate()"), "person navigation must own a cancellable latest request");
 assert(peoplePageSource.includes("if (!request.isCurrent() || state.activeView !== \"people\""), "stale person responses must not overwrite newer navigation");
@@ -81,6 +86,7 @@ assert(studioPageSource.includes("const studioRequests = createLatestRequestGate
 assert(studioPageSource.includes('state.activeView !== "studios"'), "stale studio responses must not overwrite newer navigation");
 assert(webApp.includes('if (view !== "studios") studioPage.cancelPendingRequests()'), "leaving studios must cancel pending requests");
 assert(collectionPageSource.includes("const collectionRequests = createLatestRequestGate()"), "collection navigation must own a cancellable latest request");
+assert(!playbackProgressServiceSource.includes(".map((video) => getVideoProgress"), "work progress must avoid allocating and sorting every video on list rendering");
 for (const view of ["favorites", "history", "vr"]) {
   assert(collectionPageSource.includes(`state.activeView !== "${view}"`), `stale ${view} responses must not overwrite newer navigation`);
 }
@@ -322,6 +328,67 @@ assert.equal(personListItem.actorProfile.displayName, "Display Person", "person-
 assert(!("sourcePaths" in personListItem), "person-list summaries must defer source paths until person detail is opened");
 assert(!("avatarImage" in personListItem), "person-list summaries must defer avatar metadata until person detail is opened");
 assert(!("javdbRefs" in personListItem.actorProfile), "person-list summaries must defer full actor metadata until person detail is opened");
+
+const collectionPrepareEvents = [];
+const collectionSourceWorks = [{ id: "history-1" }, { id: "history-2" }];
+const preparedCollectionWorks = prepareCollectionWorkPage(collectionSourceWorks, {
+  prewarmVideoProbesForWorks(works) {
+    collectionPrepareEvents.push(`video:${works.length}`);
+  },
+  prewarmWorkInfoDetails(works) {
+    collectionPrepareEvents.push(`info:${works.length}`);
+  },
+  publicWork(work) {
+    collectionPrepareEvents.push(`public:${work.id}`);
+    return { id: work.id, prepared: true };
+  },
+  prewarmRemoteImagesForWorks(works) {
+    collectionPrepareEvents.push(`image:${works.length}`);
+  }
+});
+assert.deepEqual(
+  collectionPrepareEvents,
+  ["video:2", "info:2", "public:history-1", "public:history-2", "image:2"],
+  "collection pages must batch-prepare details before presentation and warm visible media afterward"
+);
+assert.deepEqual(preparedCollectionWorks.map((work) => work.id), ["history-1", "history-2"], "collection page preparation must preserve order");
+
+let historyWorkLookupCount = 0;
+class CountingWorkMap extends Map {
+  get(key) {
+    historyWorkLookupCount += 1;
+    return super.get(key);
+  }
+}
+const historyWorkOne = { id: "work-1", videos: [{ id: "video-1" }] };
+const historyWorkTwo = { id: "work-2", videos: [{ id: "video-2" }] };
+const historyLibrary = {
+  filesById: new Map(),
+  worksById: new CountingWorkMap([[historyWorkOne.id, historyWorkOne], [historyWorkTwo.id, historyWorkTwo]])
+};
+const historyUserState = {
+  favorites: {},
+  progress: {
+    "video-1": { workId: "work-1", position: 10, duration: 100, updatedAt: new Date(Date.now() - 10 * 86400000).toISOString() },
+    "video-2": { workId: "work-2", position: 20, duration: 100, updatedAt: new Date(Date.now() - 86400000).toISOString() }
+  }
+};
+let historySaveCount = 0;
+const playbackProgressService = createPlaybackProgressService({
+  getLibrary: () => historyLibrary,
+  publicFavoriteFolders: () => [],
+  recentWatchedDays: 7,
+  userState: historyUserState,
+  userStateService: { save: () => { historySaveCount += 1; } }
+});
+assert.deepEqual(playbackProgressService.historyEntries().map((entry) => entry.work.id), ["work-2", "work-1"], "history must remain ordered by latest progress");
+const initialHistoryLookupCount = historyWorkLookupCount;
+assert.deepEqual(playbackProgressService.historyEntries({ days: 7 }).map((entry) => entry.work.id), ["work-2"], "history day filters must use the cached ordered index");
+assert.equal(historyWorkLookupCount, initialHistoryLookupCount, "repeated history summaries must reuse resolved work entries");
+assert.equal(playbackProgressService.getWorkProgress(historyWorkOne)?.videoId, "video-1", "work progress must preserve the latest playable entry");
+playbackProgressService.saveVideoProgress("video-1", { workId: "work-1", position: 30, duration: 100 });
+assert.equal(historySaveCount, 1, "progress updates must still persist user state");
+assert.equal(playbackProgressService.historyEntries()[0]?.work.id, "work-1", "progress updates must invalidate the cached history order");
 
 let workInfoDetailStamp = "detail-v1";
 let workInfoDetailPrepareCount = 0;

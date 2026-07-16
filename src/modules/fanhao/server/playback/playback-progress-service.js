@@ -5,6 +5,12 @@ export function createPlaybackProgressService({
   userState,
   userStateService
 }) {
+  let historyCache = null;
+  let progressRevision = 0;
+  let workProgressCache = new WeakMap();
+  let workProgressCacheProgress = null;
+  let workProgressCacheRevision = -1;
+
   function getVideoProgress(videoId, work = null) {
     const progress = userState.progress[videoId];
     if (!progress || !Number.isFinite(progress.position) || !Number.isFinite(progress.duration) || progress.duration <= 0) {
@@ -23,11 +29,29 @@ export function createPlaybackProgressService({
   }
 
   function getWorkProgress(work) {
-    const candidates = (work.videos || [])
-      .map((video) => getVideoProgress(video.id, work))
-      .filter(Boolean)
-      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
-    return candidates[0] || null;
+    ensureWorkProgressCache();
+    if (workProgressCache.has(work)) return workProgressCache.get(work);
+
+    let latest = null;
+    let latestUpdatedAt = "";
+    for (const video of work.videos || []) {
+      const progress = getVideoProgress(video.id, work);
+      if (!progress) continue;
+      const updatedAt = String(progress.updatedAt || "");
+      if (!latest || updatedAt.localeCompare(latestUpdatedAt) > 0) {
+        latest = progress;
+        latestUpdatedAt = updatedAt;
+      }
+    }
+    workProgressCache.set(work, latest);
+    return latest;
+  }
+
+  function ensureWorkProgressCache() {
+    if (workProgressCacheProgress === userState.progress && workProgressCacheRevision === progressRevision) return;
+    workProgressCache = new WeakMap();
+    workProgressCacheProgress = userState.progress;
+    workProgressCacheRevision = progressRevision;
   }
 
   function progressUpdatedTime(progress) {
@@ -52,27 +76,43 @@ export function createPlaybackProgressService({
   function historyEntries(options = {}) {
     const days = Number(options.days || 0);
     const cutoff = days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : 0;
+    const entries = cachedHistoryEntries();
+    const matched = cutoff ? entries.filter((entry) => entry.updatedTime >= cutoff) : entries;
+    const limit = Number(options.limit || 0);
+    return limit > 0 ? matched.slice(0, limit) : matched.slice();
+  }
+
+  function cachedHistoryEntries() {
+    const library = getLibrary();
+    const progress = userState.progress || {};
+    if (
+      historyCache?.library === library
+      && historyCache.progress === progress
+      && historyCache.revision === progressRevision
+    ) {
+      return historyCache.entries;
+    }
+
     const byWorkId = new Map();
 
-    for (const [videoId, progress] of Object.entries(userState.progress)) {
-      const updatedTime = progressUpdatedTime(progress);
-      if (cutoff && (!updatedTime || updatedTime < cutoff)) continue;
-      const work = progressWork(videoId, progress);
+    for (const [videoId, progressRow] of Object.entries(progress)) {
+      const updatedTime = progressUpdatedTime(progressRow);
+      const work = progressWork(videoId, progressRow);
       if (!work) continue;
 
       const existing = byWorkId.get(work.id);
       if (!existing || updatedTime > existing.updatedTime) {
         byWorkId.set(work.id, {
           work,
-          updatedAt: progress?.updatedAt || "",
+          updatedAt: progressRow?.updatedAt || "",
           updatedTime
         });
       }
     }
 
     const entries = [...byWorkId.values()].sort((a, b) => b.updatedTime - a.updatedTime || String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
-    const limit = Number(options.limit || 0);
-    return limit > 0 ? entries.slice(0, limit) : entries;
+    historyCache = { entries, library, progress, revision: progressRevision };
+    return entries;
   }
 
   function historyWorks(options = {}) {
@@ -98,6 +138,7 @@ export function createPlaybackProgressService({
       duration,
       updatedAt: new Date().toISOString()
     };
+    progressRevision += 1;
     userStateService.save();
     return getVideoProgress(videoId, library.worksById.get(workId));
   }
