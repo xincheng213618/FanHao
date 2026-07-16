@@ -59,6 +59,11 @@ export function createShortVideoMediaCache(dependencies) {
     return videoId ? `${params}::${videoId}` : "";
   }
 
+  function cachedNavigation(id, params = getFeedParams()) {
+    const key = navigationKey(id, params);
+    return key ? navigation.get(key) || null : null;
+  }
+
   function rememberNavigation(data, params = getFeedParams()) {
     const current = data?.video;
     const currentId = String(current?.id || "").trim();
@@ -313,6 +318,7 @@ export function createShortVideoMediaCache(dependencies) {
   }
 
   return Object.freeze({
+    cachedNavigation,
     cachedVideo,
     fetchDetail,
     prefetchFirstMedia,

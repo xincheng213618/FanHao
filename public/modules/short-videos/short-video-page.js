@@ -111,6 +111,7 @@ export function createShortVideoPage(deps) {
   let pendingPlayerTap = null;
   const initialVideoLimit = 48;
   const appendVideoLimit = 72;
+  const coverEagerCount = 18;
   const AUTHOR_PAGE_SIZE = 96;
   const AUTHOR_APPEND_LOOKAHEAD = 900;
   const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -151,9 +152,9 @@ export function createShortVideoPage(deps) {
   const SHORT_VIDEO_SWITCH_MIN_ANIMATION_MS = 112;
   const SHORT_VIDEO_SWITCH_MAX_ANIMATION_MS = 232;
   // A cold decoder can legitimately need longer than the reel animation,
-  // especially after several rapid 2K/4K switches. Never promote an adjacent
-  // player until it has painted a frame; the timeout is only the maximum time
-  // we keep the switch pending before rebounding to the current reel.
+  // especially after several rapid 2K/4K switches. Wait briefly for a painted
+  // frame, but still advance after the timeout so one broken media item cannot
+  // permanently block navigation to every later reel.
   const SHORT_VIDEO_SWITCH_PRIME_TIMEOUT_MS = 1200;
   // Let the visible stream settle before asking the browser to decode a second
   // 2K frame. Starting the adjacent decoder immediately after first paint
@@ -279,6 +280,7 @@ export function createShortVideoPage(deps) {
     wasCoverLoaded: (videoId) => loadedCoverIds.has(videoId)
   });
   const {
+    cachedNavigation: cachedShortVideoNavigation,
     cachedVideo: cachedShortVideo,
     fetchDetail: fetchShortVideoDetail,
     prefetchFirstMedia: prefetchShortVideoFirstMedia,
@@ -3883,18 +3885,12 @@ export function createShortVideoPage(deps) {
         primePromise
       ]);
       if (canPromoteVideoPanel && incomingPlayer && !incomingReady) {
-        if (queuedAdjacentDirection === direction) queuedAdjacentDirection = 0;
-        incomingPlayer.pause?.();
-        incomingPlayer.muted = true;
-        releaseOffscreenVideoDecoder(incomingPlayer, "adjacent-switch-timeout");
-        snapStackBack();
-        markShortVideoPerformance("adjacent-switch-rebounded", {
+        markShortVideoPerformance("adjacent-switch-promoting-unready", {
           videoId: String(id),
           direction: Number(direction || 0),
           durationMs: Date.now() - navigationStartedAt,
           readyState: Number(incomingPlayer.readyState || 0)
         });
-        return;
       }
       if (canPromoteVideoPanel) {
         promoteAdjacentPanelDom(direction, cachedVideo);
@@ -4091,10 +4087,34 @@ export function createShortVideoPage(deps) {
     if (!player || player.dataset.shortVideoSlot === "current") return false;
     const source = String(player.dataset.streamUrl || player.currentSrc || player.getAttribute("src") || "").trim();
     const hadMedia = Boolean(player.currentSrc || player.getAttribute("src") || player.readyState > 0);
+    const retainPlayedAdjacent = reason.startsWith("adjacent-")
+      && player.dataset.shortVideoPlayed === "1"
+      && !player.error
+      && player.readyState >= 2
+      && hadMedia;
+    if (retainPlayedAdjacent) {
+      player.muted = true;
+      player.pause?.();
+      player.preload = "auto";
+      delete player.dataset.shortVideoDecoderReleased;
+      const retentionKey = `${player.dataset.shortVideoSlot || ""}:${reason}`;
+      if (player.dataset.shortVideoDecoderRetentionKey !== retentionKey) {
+        player.dataset.shortVideoDecoderRetentionKey = retentionKey;
+        markShortVideoPerformance("video-decoder-retained", {
+          videoId: String(player.dataset.videoId || ""),
+          slot: String(player.dataset.shortVideoSlot || ""),
+          reason,
+          readyState: Number(player.readyState || 0)
+        });
+      }
+      return false;
+    }
     if (source) player.dataset.streamUrl = source;
     player.muted = true;
     player.pause?.();
     player.preload = "none";
+    delete player.dataset.shortVideoPlayed;
+    delete player.dataset.shortVideoDecoderRetentionKey;
     delete player.dataset.shortVideoFrameReady;
     delete player.dataset.shortVideoFrameReadyAt;
     player.dataset.shortVideoDecoderReleased = "1";
@@ -4145,10 +4165,9 @@ export function createShortVideoPage(deps) {
     if (previousPlayer) {
       previousPlayer.classList.add("is-ghost");
       previousPlayer.dataset.shortVideoSlot = direction > 0 ? "prev" : "next";
+      previousPlayer.dataset.shortVideoPlayed = "1";
       previousPlayer.muted = true;
       previousPlayer.pause?.();
-      delete previousPlayer.dataset.shortVideoFrameReady;
-      delete previousPlayer.dataset.shortVideoFrameReadyAt;
       try {
         previousPlayer.currentTime = 0;
       } catch {}
@@ -4158,7 +4177,9 @@ export function createShortVideoPage(deps) {
     if (player && stage) {
       player.classList.remove("is-ghost");
       player.dataset.shortVideoSlot = "current";
+      player.dataset.shortVideoPlayed = "1";
       player.dataset.shortVideoPromotedAt = String(Date.now());
+      delete player.dataset.shortVideoDecoderRetentionKey;
       player.muted = Boolean(state.shortVideo.muted);
       player.volume = currentShortVideoVolume();
       if (player.dataset.primaryControlsBound !== "1") {
