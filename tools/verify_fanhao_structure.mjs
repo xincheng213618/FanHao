@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
+import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -62,6 +63,8 @@ for (const relativePath of [
 }
 
 const androidWorkViews = read("android-client/www/modules/fanhao/work-views.js");
+const androidApp = read("android-client/www/app.js");
+const androidPeopleViews = read("android-client/www/modules/fanhao/people-views.js");
 assert(!androidWorkViews.includes("SEARCH_CHANNELS"), "FanHao Android must not own cross-module search channels");
 assert(!/function createWorkCard\s*\(/.test(androidWorkViews), "FanHao Android work cards must stay in their feature module");
 assert(!androidWorkViews.includes("createGlobalSearch"), "FanHao Android search must not use a cross-module aggregator");
@@ -70,6 +73,8 @@ assert(!androidWorkViews.includes("data.channels"), "FanHao Android search must 
 assert(androidWorkViews.includes("createRankingViews"), "FanHao Android rankings must stay in their feature module");
 assert(lines("android-client/www/modules/fanhao/work-views.js") <= 750, "FanHao Android work views must stay below 750 lines");
 assert(lines("android-client/www/modules/fanhao/features/works/cards.js") <= 320, "FanHao Android work cards must stay focused");
+assert(androidApp.includes("const aVisual = imageUrlForPerson(a) ? 1 : 0"), "Android home must recognize compact person-list avatar URLs");
+assert(androidPeopleViews.includes("const aVisual = imageUrlForPerson(a) ? 1 : 0"), "Android people sorting must recognize compact person-list avatar URLs");
 const androidDetailViews = read("android-client/www/modules/fanhao/detail-views.js");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
   assert(!androidDetailViews.includes(`function ${functionName}(`), `Android detail must delegate ${functionName}`);
@@ -98,9 +103,11 @@ assert(worksRuntime.includes("activeRequestDeps"), "work services must be reused
 assert(worksRuntime.includes("workQueryService.prewarm()"), "FanHao work queries must prewarm their full-library enrichment cache before serving requests");
 const workInfoService = read("src/modules/fanhao/server/works/work-info-service.js");
 const workPresenterService = read("src/modules/fanhao/server/works/presenter-service.js");
+const workMediaRoutes = read("src/modules/fanhao/server/works/routes-media.js");
 assert(workInfoService.includes("function detailRow(workId)"), "work metadata must load full details per work instead of hydrating the entire catalog");
 assert(workInfoService.includes("SELECT 1\n              FROM local_works"), "work-list metadata must use a lightweight local-work index query");
 assert(workPresenterService.includes("workInfoDetailRow(work.id)"), "work cards and details must hydrate full metadata only for the visible page");
+assert(workMediaRoutes.includes("/media\\/person\\/([^/]+)\\/cover"), "person-list avatars must use a stable compact media URL");
 const serviceLauncher = read("start-fanhao.ps1");
 assert(
   /if \(-not \$ready\)[\s\S]*Stop-Process -Id \$process\.Id -Force/.test(serviceLauncher),
@@ -129,6 +136,36 @@ assert.deepEqual(
   ["older"],
   "FanHao work query must preserve missing-local filtering"
 );
+
+const personListItem = publicPersonListItem({
+  id: "27",
+  name: "Person",
+  relativePath: "G:/Person",
+  sourcePaths: ["G:/Person", "O:/Person"],
+  sourceCount: 2,
+  workCount: 9,
+  videoCount: 10,
+  playableCount: 8,
+  imageCount: 3,
+  infoCount: 4,
+  coverId: "long-local-image-id",
+  avatarImage: { sourceAvatarUrl: "G:/Person/cover.jpg" },
+  actorProfile: {
+    personName: "Person",
+    displayName: "Display Person",
+    aliases: ["Alias"],
+    gender: "female",
+    movieCount: 12,
+    javdbUrl: "https://example.invalid/person",
+    javdbRefs: [{ id: "large-detail" }],
+    updatedAt: "2026-07-17"
+  }
+});
+assert.equal(personListItem.avatarUrl, "/media/person/27/cover", "person-list fallback covers must not expose long file identifiers");
+assert.equal(personListItem.actorProfile.displayName, "Display Person", "person-list summaries must preserve display names");
+assert(!("sourcePaths" in personListItem), "person-list summaries must defer source paths until person detail is opened");
+assert(!("avatarImage" in personListItem), "person-list summaries must defer avatar metadata until person detail is opened");
+assert(!("javdbRefs" in personListItem.actorProfile), "person-list summaries must defer full actor metadata until person detail is opened");
 
 let actorMovieDataStamp = "actor-v1";
 let enrichmentCount = 0;

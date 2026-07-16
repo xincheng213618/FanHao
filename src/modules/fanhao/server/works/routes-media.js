@@ -4,8 +4,22 @@ export async function routeWorksMedia(req, res, url, deps) {
     mediaResponseService,
     mediaStreamService,
     notFound,
+    resolveLibraryPersonByPublicId,
     resolveVideoFileByPublicId
   } = deps;
+
+  const personCoverMatch = /^\/media\/person\/([^/]+)\/cover$/.exec(url.pathname);
+  if (personCoverMatch && req.method === "GET") {
+    const person = resolveLibraryPersonByPublicId(decodeURIComponent(personCoverMatch[1]));
+    const file = person?.coverId ? library.filesById.get(person.coverId) : null;
+    if (!file || file.type !== "image") {
+      notFound(res);
+      return true;
+    }
+
+    mediaResponseService.serveImage(res, file);
+    return true;
+  }
 
   const actorAvatarMatch = /^\/media\/actor\/([^/]+)\/avatar$/.exec(url.pathname);
   if (actorAvatarMatch && req.method === "GET") {

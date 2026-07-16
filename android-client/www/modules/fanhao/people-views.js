@@ -98,8 +98,8 @@ export function createPeopleViews(context) {
   }
 
   function comparePeople(a, b, mode) {
-    const aVisual = a.actorProfile?.avatarUrl ? 2 : a.coverId ? 1 : 0;
-    const bVisual = b.actorProfile?.avatarUrl ? 2 : b.coverId ? 1 : 0;
+    const aVisual = imageUrlForPerson(a) ? 1 : 0;
+    const bVisual = imageUrlForPerson(b) ? 1 : 0;
     const byName = () => displayPersonName(a).localeCompare(displayPersonName(b), "zh-Hans-CN");
     if (mode === "works") {
       return (b.workCount || 0) - (a.workCount || 0)

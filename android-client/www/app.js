@@ -5,7 +5,7 @@ import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } fr
 import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260712-module-chrome-03";
 import { getElements } from "./js/dom.js?v=20260712-module-chrome-03";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
-import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260706-mobile-web-sync-01";
+import { absoluteUrl, imageUrlForPerson, loadPreviewImage } from "./js/image.js?v=20260706-mobile-web-sync-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
 import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=20260712-module-chrome-03";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
@@ -1161,8 +1161,8 @@ function renderDashboard(data) {
   const previewPeople = people
     .filter((person) => person?.actorProfile?.gender !== "male")
     .sort((a, b) => {
-      const aVisual = a.actorProfile?.avatarUrl ? 2 : a.coverId ? 1 : 0;
-      const bVisual = b.actorProfile?.avatarUrl ? 2 : b.coverId ? 1 : 0;
+      const aVisual = imageUrlForPerson(a) ? 1 : 0;
+      const bVisual = imageUrlForPerson(b) ? 1 : 0;
       return bVisual - aVisual || (b.videoCount || 0) - (a.videoCount || 0);
     })
     .slice(0, 10);

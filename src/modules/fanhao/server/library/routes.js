@@ -1,3 +1,5 @@
+import { publicPersonListItem } from "../people/person-list-presenter.js";
+
 const libraryPeoplePayloadCache = new Map();
 
 export async function routeLibraryReadApi(req, res, url, deps) {
@@ -61,7 +63,7 @@ function cachedPublicPeople({ people, publicPerson, scope, stamp }) {
   const cacheKey = `${scope}:${stamp}:${people.length}`;
   const cached = libraryPeoplePayloadCache.get(cacheKey);
   if (cached) return cached;
-  const payload = people.map((person) => publicPerson(person, { skipFallbackAvatar: true }));
+  const payload = people.map((person) => publicPersonListItem(publicPerson(person, { skipFallbackAvatar: true })));
   libraryPeoplePayloadCache.set(cacheKey, payload);
   while (libraryPeoplePayloadCache.size > 6) {
     const oldest = libraryPeoplePayloadCache.keys().next().value;
