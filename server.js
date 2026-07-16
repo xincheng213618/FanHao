@@ -54,6 +54,7 @@ import { createAuthServices } from "./src/platform/server/auth.js";
 import { createFileServer } from "./src/platform/server/file-server.js";
 import { createRequestHandler } from "./src/platform/server/http-app.js";
 import { createImageReaderCacheService } from "./src/platform/server/image-reader-cache-service.js";
+import { createMediaBlobWorkerClient } from "./src/platform/server/media-blob-worker-client.js";
 import { createMediaResponseService } from "./src/platform/server/media-response-service.js";
 import { createMediaStreamService } from "./src/platform/server/media-stream-service.js";
 import { readBodyText, readJsonBody, readJsonFile, safeChildPath } from "./src/platform/server/request-io.js";
@@ -303,11 +304,13 @@ const workImageService = createWorkImageService({
   hasCoreDb,
   proxiedRemoteImageUrl
 });
+const mediaBlobStore = createMediaBlobWorkerClient({ dbPath: CORE_DB_PATH });
 const mediaResponseService = createMediaResponseService({
   coreImageRow,
   corePersonAvatarRow,
   getCoreDb,
   isAllowedRemoteImageUrl,
+  mediaBlobStore,
   maxRemoteImageBytes: MAX_REMOTE_IMAGE_BYTES,
   mimeTypes: MIME_TYPES,
   normalizeExt,
@@ -2381,7 +2384,10 @@ const serverHost = createServerHost({
   port: PORT,
   host: HOST,
   getLibraryState: () => library,
-  stop: () => moduleRegistry.stop()
+  stop: async () => {
+    await moduleRegistry.stop();
+    await mediaBlobStore.close();
+  }
 });
 
 serverHost.listen();

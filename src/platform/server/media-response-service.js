@@ -7,6 +7,7 @@ export function createMediaResponseService({
   coreImageRow,
   corePersonAvatarRow,
   getCoreDb,
+  mediaBlobStore,
   isAllowedRemoteImageUrl,
   maxRemoteImageBytes,
   mimeTypes,
@@ -22,8 +23,12 @@ export function createMediaResponseService({
   readFile = (filePath) => fs.promises.readFile(filePath),
   statFile = (filePath) => fs.promises.stat(filePath),
   remoteImageWarmConcurrency = 6,
+  mediaBlobCacheMaxBytes = 512 * 1024 * 1024,
   warn = console.warn
 }) {
+  const blobStore = mediaBlobStore || createInlineMediaBlobStore({ coreImageRow, corePersonAvatarRow, getCoreDb, workCoverRow });
+  const mediaBlobCache = new Map();
+  let mediaBlobCacheBytes = 0;
   const localImageInflight = new Map();
   const localImageReadQueue = [];
   const maxLocalImageReads = Math.max(1, Number(localImageReadConcurrency) || 1);
@@ -31,11 +36,12 @@ export function createMediaResponseService({
   const remoteImageWarmQueue = [];
   const remoteImageWarmQueued = new Set();
   let remoteImageWarmActive = 0;
+  let remoteImageWarmGeneration = 0;
 
   function serveBlobRow(res, row, options = {}) {
     const blob = row?.[options.blobField || "image_blob"];
     if (!blob) return false;
-    const buffer = Buffer.from(blob);
+    const buffer = mediaBlobBuffer(blob);
     if (!buffer.length) return false;
     res.writeHead(200, {
       "Content-Type": row?.[options.mimeField || "mime"] || options.defaultMime || "image/jpeg",
@@ -47,22 +53,65 @@ export function createMediaResponseService({
     return true;
   }
 
-  function serveCoreImage(res, imageId) {
-    if (!serveBlobRow(res, coreImageRow(imageId), { defaultMime: "image/jpeg" })) {
+  function mediaBlobBuffer(blob) {
+    if (Buffer.isBuffer(blob)) return blob;
+    if (ArrayBuffer.isView(blob)) return Buffer.from(blob.buffer, blob.byteOffset, blob.byteLength);
+    if (blob instanceof ArrayBuffer) return Buffer.from(blob);
+    return Buffer.from(blob);
+  }
+
+  async function serveCoreImage(res, imageId, options = {}) {
+    const row = await cachedMediaBlobRow(`core:${imageId}:${options.version || ""}`, () => blobStore.coreImage(imageId));
+    if (!serveBlobRow(res, row, { defaultMime: "image/jpeg" })) {
       notFound(res);
     }
   }
 
-  function serveActorAvatar(res, personId) {
-    if (!serveBlobRow(res, corePersonAvatarRow(personId), { defaultMime: "image/jpeg" })) {
+  async function serveActorAvatar(res, personId, options = {}) {
+    const row = await cachedMediaBlobRow(`actor:${personId}:${options.version || ""}`, () => blobStore.actorAvatar(personId));
+    if (!serveBlobRow(res, row, { defaultMime: "image/jpeg" })) {
       notFound(res);
     }
   }
 
-  function serveWorkCover(res, workId) {
-    if (!serveBlobRow(res, workCoverRow(workId), { blobField: "cover_blob", mimeField: "cover_mime", defaultMime: "image/jpeg" })) {
+  async function serveWorkCover(res, workId, options = {}) {
+    const row = await cachedMediaBlobRow(`work:${workId}:${options.version || ""}`, () => blobStore.workCover(workId));
+    if (!serveBlobRow(res, row, { blobField: "cover_blob", mimeField: "cover_mime", defaultMime: "image/jpeg" })) {
       notFound(res);
     }
+  }
+
+  async function cachedMediaBlobRow(key, loader) {
+    if (mediaBlobCache.has(key)) {
+      const cached = mediaBlobCache.get(key);
+      mediaBlobCache.delete(key);
+      mediaBlobCache.set(key, cached);
+      return cached.row;
+    }
+    const row = await loader();
+    rememberMediaBlobRow(key, row);
+    return row;
+  }
+
+  function rememberMediaBlobRow(key, row) {
+    const bytes = mediaBlobRowBytes(row);
+    if (!bytes || bytes > mediaBlobCacheMaxBytes) return;
+    const previous = mediaBlobCache.get(key);
+    if (previous) mediaBlobCacheBytes -= previous.bytes;
+    mediaBlobCache.delete(key);
+    mediaBlobCache.set(key, { bytes, row });
+    mediaBlobCacheBytes += bytes;
+    while (mediaBlobCacheBytes > mediaBlobCacheMaxBytes && mediaBlobCache.size > 1) {
+      const oldestKey = mediaBlobCache.keys().next().value;
+      const oldest = mediaBlobCache.get(oldestKey);
+      mediaBlobCache.delete(oldestKey);
+      mediaBlobCacheBytes -= oldest?.bytes || 0;
+    }
+  }
+
+  function mediaBlobRowBytes(row) {
+    const blob = row?.image_blob || row?.cover_blob;
+    return Number(blob?.byteLength || blob?.length || 0);
   }
 
   function localImageMime(file) {
@@ -348,6 +397,7 @@ export function createMediaResponseService({
   function prewarmRemoteImagesForWorks(works, limit = 1000, options = {}) {
     const queueLimit = Math.max(1, Math.min(512, Number(options.queueLimit) || limit));
     if (options.replaceQueued) {
+      remoteImageWarmGeneration += 1;
       for (const remoteUrl of remoteImageWarmQueue) remoteImageWarmQueued.delete(remoteUrl);
       remoteImageWarmQueue.length = 0;
     }
@@ -372,12 +422,17 @@ export function createMediaResponseService({
       }
     }
 
-    const cachedUrls = cachedRemoteImageUrls(remoteUrls);
+    queueUncachedRemoteImages(remoteUrls, queueLimit, remoteImageWarmGeneration);
+    return remoteUrls.length;
+  }
+
+  async function queueUncachedRemoteImages(remoteUrls, queueLimit, generation) {
+    const cachedUrls = await cachedRemoteImageUrls(remoteUrls);
+    if (generation !== remoteImageWarmGeneration) return;
     for (const remoteUrl of remoteUrls) {
       if (remoteImageWarmQueue.length + remoteImageWarmActive >= queueLimit) break;
-      if (!cachedUrls.has(remoteUrl)) enqueueRemoteImageWarm(remoteUrl, { skipCacheCheck: true });
+      if (!cachedUrls.has(remoteUrl)) enqueueRemoteImageWarm(remoteUrl);
     }
-    return remoteUrls.length;
   }
 
   function proxiedRemoteImageUrlArray(values) {
@@ -397,40 +452,18 @@ export function createMediaResponseService({
     return crypto.createHash("sha256").update(remoteUrl).digest("hex");
   }
 
-  function remoteImageCacheRow(remoteUrl) {
-    try {
-      return getCoreDb().prepare("SELECT * FROM remote_image_cache WHERE url = ?").get(remoteUrl) || null;
-    } catch (error) {
-      warn("[remote-image-cache]", error.message || error);
-      return null;
-    }
-  }
-
-  function remoteImageCacheHasEntry(remoteUrl) {
-    try {
-      return Boolean(getCoreDb()
-        .prepare("SELECT 1 FROM remote_image_cache WHERE url = ? LIMIT 1")
-        .get(remoteUrl));
-    } catch (error) {
-      warn("[remote-image-cache]", error.message || error);
-      return false;
-    }
-  }
-
-  function cachedRemoteImageUrls(remoteUrls) {
+  async function cachedRemoteImageUrls(remoteUrls) {
     const cached = new Set();
-    for (let offset = 0; offset < remoteUrls.length; offset += REMOTE_IMAGE_LOOKUP_BATCH_SIZE) {
-      const batch = remoteUrls.slice(offset, offset + REMOTE_IMAGE_LOOKUP_BATCH_SIZE);
-      if (!batch.length) continue;
-      try {
-        const placeholders = batch.map(() => "?").join(", ");
-        const rows = getCoreDb()
-          .prepare(`SELECT url FROM remote_image_cache WHERE url IN (${placeholders})`)
-          .all(...batch);
-        for (const row of rows) cached.add(row.url);
-      } catch (error) {
-        warn("[remote-image-cache]", error.message || error);
-      }
+    const pending = [];
+    for (const remoteUrl of remoteUrls) {
+      if (mediaBlobCache.has(`remote:${remoteUrl}`)) cached.add(remoteUrl);
+      else pending.push(remoteUrl);
+    }
+    if (!pending.length) return cached;
+    try {
+      for (const remoteUrl of await blobStore.cachedRemoteUrls(pending)) cached.add(remoteUrl);
+    } catch (error) {
+      warn("[remote-image-cache]", error.message || error);
     }
     return cached;
   }
@@ -494,8 +527,8 @@ export function createMediaResponseService({
     };
   }
 
-  function enqueueRemoteImageWarm(remoteUrl, options = {}) {
-    if ((!options.skipCacheCheck && remoteImageCacheHasEntry(remoteUrl)) || remoteImageWarmQueued.has(remoteUrl)) return false;
+  function enqueueRemoteImageWarm(remoteUrl) {
+    if (remoteImageWarmQueued.has(remoteUrl)) return false;
     remoteImageWarmQueued.add(remoteUrl);
     remoteImageWarmQueue.push(remoteUrl);
     drainRemoteImageWarmQueue();
@@ -519,28 +552,23 @@ export function createMediaResponseService({
   }
 
   async function warmRemoteImage(remoteUrl) {
-    if (remoteImageCacheHasEntry(remoteUrl)) return;
     const downloaded = await downloadRemoteImage(remoteUrl);
     const now = new Date().toISOString();
-    getCoreDb()
-      .prepare(
-        `
-        INSERT INTO remote_image_cache (
-          url, url_hash, content_type, image_blob, byte_length, status, error, fetched_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, 'ok', '', ?, ?)
-        ON CONFLICT(url) DO UPDATE SET
-          url_hash = excluded.url_hash,
-          content_type = excluded.content_type,
-          image_blob = excluded.image_blob,
-          byte_length = excluded.byte_length,
-          status = 'ok',
-          error = '',
-          fetched_at = excluded.fetched_at,
-          updated_at = excluded.updated_at
-        `
-      )
-      .run(remoteUrl, remoteImageCacheKey(remoteUrl), downloaded.contentType, downloaded.buffer, downloaded.buffer.length, now, now);
+    const row = {
+      content_type: downloaded.contentType,
+      image_blob: downloaded.buffer,
+      byte_length: downloaded.buffer.length,
+      updated_at: now
+    };
+    rememberMediaBlobRow(`remote:${remoteUrl}`, row);
+    await blobStore.upsertRemote({
+      url: remoteUrl,
+      urlHash: remoteImageCacheKey(remoteUrl),
+      contentType: downloaded.contentType,
+      buffer: downloaded.buffer,
+      byteLength: downloaded.buffer.length,
+      updatedAt: now
+    });
   }
 
   async function serveCachedRemoteImage(req, res, url) {
@@ -556,7 +584,8 @@ export function createMediaResponseService({
       return;
     }
 
-    if (serveRemoteImageRow(res, remoteImageCacheRow(remoteUrl))) {
+    const cachedRow = await cachedMediaBlobRow(`remote:${remoteUrl}`, () => blobStore.remoteImage(remoteUrl));
+    if (serveRemoteImageRow(res, cachedRow)) {
       return;
     }
 
@@ -581,5 +610,63 @@ export function createMediaResponseService({
     servePreparedImage,
     serveLocalImageCacheRow,
     serveWorkCover
+  };
+}
+
+function createInlineMediaBlobStore({ coreImageRow, corePersonAvatarRow, getCoreDb, workCoverRow }) {
+  return {
+    async actorAvatar(personId) {
+      return corePersonAvatarRow(personId);
+    },
+    async cachedRemoteUrls(remoteUrls) {
+      const cached = [];
+      for (let offset = 0; offset < remoteUrls.length; offset += REMOTE_IMAGE_LOOKUP_BATCH_SIZE) {
+        const batch = remoteUrls.slice(offset, offset + REMOTE_IMAGE_LOOKUP_BATCH_SIZE);
+        if (!batch.length) continue;
+        const placeholders = batch.map(() => "?").join(", ");
+        const rows = getCoreDb()
+          .prepare(`SELECT url FROM remote_image_cache WHERE url IN (${placeholders})`)
+          .all(...batch);
+        for (const row of rows) cached.push(row.url);
+      }
+      return cached;
+    },
+    async coreImage(imageId) {
+      return coreImageRow(imageId);
+    },
+    async remoteImage(remoteUrl) {
+      return getCoreDb().prepare("SELECT content_type, image_blob, byte_length, updated_at FROM remote_image_cache WHERE url = ?").get(remoteUrl) || null;
+    },
+    async upsertRemote(record) {
+      getCoreDb()
+        .prepare(`
+          INSERT INTO remote_image_cache (
+            url, url_hash, content_type, image_blob, byte_length, status, error, fetched_at, updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, 'ok', '', ?, ?)
+          ON CONFLICT(url) DO UPDATE SET
+            url_hash = excluded.url_hash,
+            content_type = excluded.content_type,
+            image_blob = excluded.image_blob,
+            byte_length = excluded.byte_length,
+            status = 'ok',
+            error = '',
+            fetched_at = excluded.fetched_at,
+            updated_at = excluded.updated_at
+        `)
+        .run(
+          record.url,
+          record.urlHash,
+          record.contentType,
+          record.buffer,
+          record.byteLength,
+          record.updatedAt,
+          record.updatedAt
+        );
+      return true;
+    },
+    async workCover(workId) {
+      return workCoverRow(workId);
+    }
   };
 }

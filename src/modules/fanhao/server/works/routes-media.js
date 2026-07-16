@@ -23,19 +23,19 @@ export async function routeWorksMedia(req, res, url, deps) {
 
   const actorAvatarMatch = /^\/media\/actor\/([^/]+)\/avatar$/.exec(url.pathname);
   if (actorAvatarMatch && req.method === "GET") {
-    mediaResponseService.serveActorAvatar(res, decodeURIComponent(actorAvatarMatch[1]));
+    await mediaResponseService.serveActorAvatar(res, decodeURIComponent(actorAvatarMatch[1]), { version: url.searchParams.get("v") || "" });
     return true;
   }
 
   const workCoverMatch = /^\/media\/work\/([^/]+)\/cover$/.exec(url.pathname);
   if (workCoverMatch && req.method === "GET") {
-    mediaResponseService.serveWorkCover(res, decodeURIComponent(workCoverMatch[1]));
+    await mediaResponseService.serveWorkCover(res, decodeURIComponent(workCoverMatch[1]), { version: url.searchParams.get("v") || "" });
     return true;
   }
 
   const coreImageMatch = /^\/media\/core-image\/([^/]+)$/.exec(url.pathname);
   if (coreImageMatch && req.method === "GET") {
-    mediaResponseService.serveCoreImage(res, decodeURIComponent(coreImageMatch[1]));
+    await mediaResponseService.serveCoreImage(res, decodeURIComponent(coreImageMatch[1]), { version: url.searchParams.get("v") || "" });
     return true;
   }
 

@@ -221,11 +221,18 @@ const workImageServiceSource = read("src/modules/fanhao/server/works/image-servi
 assert(workImageServiceSource.includes("FROM local_works lw"), "work-cover facets must index only local catalog entries");
 assert(!workImageServiceSource.includes("SELECT DISTINCT CAST(owner_id AS TEXT)"), "work-cover facets must not hydrate every historical image owner");
 const mediaResponseServiceSource = read("src/platform/server/media-response-service.js");
+const mediaBlobWorkerClientSource = read("src/platform/server/media-blob-worker-client.js");
+const mediaBlobWorkerSource = read("src/platform/server/media-blob-worker.js");
 assert(mediaResponseServiceSource.includes("cachedRemoteImageUrls(remoteUrls)"), "visible work pages must batch-check warmed remote images");
+assert(mediaResponseServiceSource.includes("await cachedMediaBlobRow"), "database-backed images must leave synchronous request handling");
+assert(mediaResponseServiceSource.includes("mediaBlobCacheMaxBytes = 512 * 1024 * 1024"), "database-backed images must reuse a bounded memory hot cache");
 assert(mediaResponseServiceSource.includes("remoteImageWarmQueue.length + remoteImageWarmActive >= queueLimit"), "remote-image prewarming must keep its backlog bounded");
 assert(mediaResponseServiceSource.includes("for (const remoteUrl of remoteImageWarmQueue) remoteImageWarmQueued.delete(remoteUrl)"), "newly visible remote images must discard stale queued downloads");
 assert(!mediaResponseServiceSource.includes("remoteImageCacheRow(remoteUrl)?.image_blob || remoteImageWarmQueued"), "remote-image warming must not read cached blobs on the response path");
 assert(!mediaResponseServiceSource.includes("WHERE image_blob IS NOT NULL AND url IN"), "remote-image warming must use the URL covering index instead of opening cached blobs");
+assert(mediaBlobWorkerClientSource.includes("new WorkerCtor"), "database-backed image reads must run outside the server main thread");
+assert(mediaBlobWorkerSource.includes("SELECT image_blob, mime FROM images WHERE id = ?"), "the media worker must own core-image blob reads");
+assert(mediaBlobWorkerSource.includes("INSERT INTO remote_image_cache"), "the media worker must own remote-image blob writes");
 
 const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");
@@ -522,6 +529,48 @@ const cachedImageResponse = testImageResponse();
 await mediaResponseService.servePreparedImage(cachedImageResponse, testLocalImage);
 assert.equal(cachedImageResponse.statusCode, 200, "prepared FanHao covers must serve from cache on retry");
 assert.deepEqual(cachedImageResponse.body, Buffer.from([1, 2, 3]), "prepared FanHao covers must preserve image bytes");
+
+let coreBlobLoadCount = 0;
+const workerBackedMediaResponseService = createMediaResponseService({
+  coreImageRow: () => null,
+  corePersonAvatarRow: () => null,
+  getCoreDb: () => null,
+  isAllowedRemoteImageUrl: () => true,
+  maxRemoteImageBytes: 1024,
+  mediaBlobStore: {
+    actorAvatar: async () => null,
+    cachedRemoteUrls: async () => [],
+    coreImage: async () => {
+      coreBlobLoadCount += 1;
+      await new Promise((resolve) => setImmediate(resolve));
+      return { image_blob: new Uint8Array([9, 8, 7]), mime: "image/jpeg" };
+    },
+    remoteImage: async () => null,
+    upsertRemote: async () => true,
+    workCover: async () => null
+  },
+  mimeTypes: { ".jpg": "image/jpeg" },
+  normalizeExt: (value) => path.extname(value),
+  notFound: (res) => {
+    res.writeHead(404);
+    res.end();
+  },
+  proxiedRemoteImageUrl: (value) => value,
+  publicRemoteUrl: (value) => value,
+  safeStat: () => null,
+  sendText: (res, statusCode, body) => {
+    res.writeHead(statusCode);
+    res.end(body);
+  },
+  workCoverRow: () => null
+});
+const firstCoreBlobResponse = testImageResponse();
+await workerBackedMediaResponseService.serveCoreImage(firstCoreBlobResponse, "1", { version: "v1" });
+const repeatedCoreBlobResponse = testImageResponse();
+await workerBackedMediaResponseService.serveCoreImage(repeatedCoreBlobResponse, "1", { version: "v1" });
+assert.equal(coreBlobLoadCount, 1, "repeated core-image requests must reuse the in-memory blob cache");
+assert.deepEqual(firstCoreBlobResponse.body, Buffer.from([9, 8, 7]), "worker-backed core images must preserve bytes");
+assert.deepEqual(repeatedCoreBlobResponse.body, Buffer.from([9, 8, 7]), "in-memory core images must preserve bytes");
 
 const originalFetch = globalThis.fetch;
 let preparedImageFetchCount = 0;
