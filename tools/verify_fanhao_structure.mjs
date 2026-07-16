@@ -211,7 +211,8 @@ assert(workInfoServiceSource.includes("function facetRowsById()"), "work-list fa
 assert(workQueryServiceSource.includes("staticWorkFacets(works);"), "compact work facets must be ready before the first list request");
 assert(workQueryServiceSource.includes("prewarmWorkSearch();"), "local and missing-work search indexes must be ready before the first query");
 assert(workQueryServiceSource.includes("const exactPersonSearch ="), "exact person searches must bypass the full local text scan");
-assert(workCodeIndexServiceSource.includes("localWorkCodeIndexCache = { stamp, keys, rows }"), "local code membership and work lookup must share one catalog pass");
+assert(workCodeIndexServiceSource.includes("localWorkCodeIndexCache = { stamp, keys, rows, searchRows, prefixRows }"), "local code membership and work lookup must share one catalog pass");
+assert(workCodeIndexServiceSource.includes("while (low < high)"), "local code-prefix search must use the sorted code index");
 assert(workCodeIndexServiceSource.includes("let workCodeKeysCache = new WeakMap()"), "repeated person and catalog lookups must reuse parsed work code keys");
 const workImageServiceSource = read("src/modules/fanhao/server/works/image-service.js");
 assert(workImageServiceSource.includes("FROM local_works lw"), "work-cover facets must index only local catalog entries");
@@ -366,6 +367,8 @@ const workQueryService = createWorkQueryService({
   favoriteStateService: { isFavoriteWork: () => false },
   isVrWork: () => false,
   library: { scannedAt: "library-v1", worksById: new Map([[queryWork.id, queryWork]]) },
+  localSearchWorkByCodeKey: () => new Map([["abc001", queryWork]]),
+  localWorksByCodePrefix: () => [queryWork],
   maxWorkLimit: 1000,
   peopleScopeService: { normalize: () => "main", workMatches: () => true },
   playbackProgressService: { getWorkProgress: () => null },

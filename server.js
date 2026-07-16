@@ -839,6 +839,8 @@ const moduleRegistry = await discoverFanHaoModules({
         getLibrary: () => library,
         isVrWork,
         createWorkSearchMatcher,
+        localSearchWorkByCodeKey: workCodeIndexService.localSearchWorkByCodeKey,
+        localWorksByCodePrefix: workCodeIndexService.localWorksByCodePrefix,
         maxActorAvatarBytes: MAX_ACTOR_AVATAR_BYTES,
         maxWorkLimit: MAX_WORK_LIMIT,
         manualCoverStateService,

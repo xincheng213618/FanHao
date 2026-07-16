@@ -49,6 +49,8 @@ export function createFanhaoDependencies(deps) {
       "getLibrary",
       "isVrWork",
       "createWorkSearchMatcher",
+      "localSearchWorkByCodeKey",
+      "localWorksByCodePrefix",
       "maxActorAvatarBytes",
       "maxWorkLimit",
       "manualCoverStateService",

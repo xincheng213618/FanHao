@@ -10,6 +10,8 @@ export function createWorkQueryService({
   favoriteStateService,
   isVrWork,
   library,
+  localSearchWorkByCodeKey,
+  localWorksByCodePrefix,
   maxWorkLimit,
   peopleScopeService,
   playbackProgressService,
@@ -422,18 +424,11 @@ export function createWorkQueryService({
   }
 
   function findExactLocalWork(codeKey) {
-    for (const work of library.worksById.values()) {
-      const values = [work.infoSummary?.code, work.directoryName, work.title];
-      if (values.some((value) => storedWorkCodeKey(value) === codeKey)) return work;
-    }
-    return null;
+    return localSearchWorkByCodeKey().get(codeKey) || null;
   }
 
   function findLocalWorksByCodePrefix(codePrefix) {
-    return allWorks().filter((work) => {
-      const values = [work.infoSummary?.code, work.directoryName, work.title];
-      return values.some((value) => storedWorkCodeKey(value).startsWith(codePrefix));
-    });
+    return localWorksByCodePrefix(codePrefix);
   }
 
   return {
