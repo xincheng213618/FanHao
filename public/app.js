@@ -12,7 +12,7 @@ import {
   createWorkDetailPage,
   selectVisibleWorks
 } from "./modules/fanhao/index.js?v=20260717-fanhao-perf-05";
-import { createAdminModal } from "./modules/system/admin-modal.js?v=20260712-module-settings-02";
+import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
 
 prepareAppShell();
@@ -178,31 +178,34 @@ const personProfilePage = createPersonProfile({
   togglePersonBulkDeleteMode,
   workCoverUrl
 });
-const adminModal = createAdminModal({
-  api,
-  displayPersonName,
-  els,
-  formatBytes,
-  formatDateTime,
-  formatNumber,
-  loadFavorites,
-  loadHistory,
-  loadImageLibrary: async () => {},
-  loadLibrary,
-  loadMusic: async () => {},
-  loadNovels: async () => {},
-  loadRankings,
-  normalizeUiConfig,
-  personWorkPageSize,
-  renderMeta,
-  renderPeopleIndex,
-  renderPeopleIndexStats,
-  renderPlayer,
-  renderWorks,
-  resetWorkPaging,
-  selectPerson,
-  state,
-  updateWorkSnapshot
+const adminModal = createLazyAdminModal(async () => {
+  const { createAdminModal } = await import("./modules/system/admin-modal.js?v=20260717-fanhao-lazy-admin-01");
+  return createAdminModal({
+    api,
+    displayPersonName,
+    els,
+    formatBytes,
+    formatDateTime,
+    formatNumber,
+    loadFavorites,
+    loadHistory,
+    loadImageLibrary: async () => {},
+    loadLibrary,
+    loadMusic: async () => {},
+    loadNovels: async () => {},
+    loadRankings,
+    normalizeUiConfig,
+    personWorkPageSize,
+    renderMeta,
+    renderPeopleIndex,
+    renderPeopleIndexStats,
+    renderPlayer,
+    renderWorks,
+    resetWorkPaging,
+    selectPerson,
+    state,
+    updateWorkSnapshot
+  });
 });
 const collectionPage = createCollectionPage({
   api,
@@ -2427,27 +2430,7 @@ for (const button of els.viewTabs) {
   });
 }
 
-async function rescanFullLibrary(button) {
-  openAdminScript("");
-}
-
-els.topRescanButton?.addEventListener("click", () => rescanFullLibrary(els.topRescanButton));
-
-els.closeAdmin?.addEventListener("click", adminModal.closeModal);
-els.adminBackdrop?.addEventListener("click", adminModal.closeModal);
-els.adminRescanPerson?.addEventListener("click", adminModal.rescanSelectedPerson);
-els.adminRefreshActor?.addEventListener("click", adminModal.refreshActorMovies);
-els.adminRefreshRankings?.addEventListener("click", adminModal.refreshRankings);
-els.adminPreviewActorAvatars?.addEventListener("click", adminModal.previewActorAvatarCandidates);
-els.adminImportActorAvatars?.addEventListener("click", adminModal.importActorAvatars);
-els.adminGenerateCovers?.addEventListener("click", adminModal.generateMissingCovers);
-els.adminScriptForm?.addEventListener("submit", adminModal.runSelectedScript);
-els.adminRefreshScripts?.addEventListener("click", adminModal.loadScripts);
-els.adminScriptCategory?.addEventListener("change", () => {
-  state.adminScriptCategory = els.adminScriptCategory.value || "all";
-  adminModal.renderScripts();
-});
-els.compilationConfigButton?.addEventListener("click", adminModal.openCompilationConfig);
+bindLazyAdminModal({ adminModal, els, openAdminScript, state });
 
 els.closeDrawer.addEventListener("click", closeDrawer);
 els.drawerBackdrop.addEventListener("click", closeDrawer);

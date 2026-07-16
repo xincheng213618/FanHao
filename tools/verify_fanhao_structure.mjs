@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
+import { createLazyAdminModal } from "../public/modules/system/lazy-admin-modal.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
 import { createPersonDetailService } from "../src/modules/fanhao/server/people/person-detail-service.js";
 import { createPlaybackProgressService } from "../src/modules/fanhao/server/playback/playback-progress-service.js";
@@ -47,6 +48,7 @@ const indexHtml = read("public/index.html");
 const fanhaoEntry = read("public/fanhao-app.js");
 const standaloneEntry = read("public/standalone-app.js");
 const standaloneHost = read("public/js/standalone-host.js");
+const lazyAdminModalSource = read("public/modules/system/lazy-admin-modal.js");
 const webApp = read("public/app.js");
 const peoplePageSource = read("public/modules/fanhao/people-page.js");
 const fanhaoModuleIndexSource = read("public/modules/fanhao/index.js");
@@ -79,6 +81,10 @@ for (const modulePath of ["content-index/gallery-page", "content-index/gallery-r
 }
 assert(!webApp.includes("loadStandaloneFactories"), "FanHao runtime must not own standalone factory loading");
 assert(!webApp.includes("standaloneFactories"), "FanHao runtime must not retain standalone factories");
+assert(webApp.includes("createLazyAdminModal") && webApp.includes('await import("./modules/system/admin-modal.js?v='), "FanHao startup must defer the admin console module until the first admin action");
+assert(!webApp.includes('import { createAdminModal }'), "FanHao startup must not statically import the admin console");
+assert(lazyAdminModalSource.includes("let instancePromise = null") && lazyAdminModalSource.includes("instancePromise = null") && lazyAdminModalSource.includes("const lazyModal = { load }"), "lazy admin loading must deduplicate concurrent opens and remain retryable after an import failure");
+assert(webApp.includes("bindLazyAdminModal({ adminModal, els, openAdminScript, state })") && lazyAdminModalSource.includes("export function bindLazyAdminModal"), "admin event wiring must stay with the lazy admin boundary instead of growing the composition root");
 assert(webApp.includes("const WORK_RENDER_INITIAL_COUNT = 24"), "FanHao work lists must render a small first batch for responsive interaction");
 assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 96, lan: 64, remote: 48 })"), "FanHao work APIs must keep page payloads bounded for each access mode");
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
@@ -345,6 +351,26 @@ assert.deepEqual(
   ["older"],
   "FanHao work query must preserve missing-local filtering"
 );
+
+let lazyAdminLoadCount = 0;
+const lazyAdminCalls = [];
+const lazyAdmin = createLazyAdminModal(async () => {
+  lazyAdminLoadCount += 1;
+  return { openModal: (options) => lazyAdminCalls.push(options.scriptId) };
+});
+assert.equal(lazyAdminLoadCount, 0, "the admin console must stay unloaded during FanHao startup");
+await Promise.all([lazyAdmin.openModal({ scriptId: "first" }), lazyAdmin.openModal({ scriptId: "second" })]);
+assert.equal(lazyAdminLoadCount, 1, "concurrent admin actions must share one module load");
+assert.deepEqual(lazyAdminCalls, ["first", "second"], "queued admin actions must run after the module is ready");
+
+let lazyAdminRetryCount = 0;
+const retryableLazyAdmin = createLazyAdminModal(async () => {
+  lazyAdminRetryCount += 1;
+  if (lazyAdminRetryCount === 1) throw new Error("temporary import failure");
+  return { openModal: () => "ready" };
+});
+await assert.rejects(retryableLazyAdmin.openModal({}), /temporary import failure/);
+assert.equal(await retryableLazyAdmin.openModal({}), "ready", "a failed lazy import must be retryable");
 
 const personListItem = publicPersonListItem({
   id: "27",
