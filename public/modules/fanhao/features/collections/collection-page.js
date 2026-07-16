@@ -1,3 +1,5 @@
+import { createLatestRequestGate } from "../../latest-request.js?v=20260717-fanhao-latest-request-01";
+
 const HISTORY_RANGES = [
   { value: "30", label: "30 天" },
   { value: "7", label: "7 天" },
@@ -5,31 +7,47 @@ const HISTORY_RANGES = [
 ];
 
 export function createCollectionPage(deps) {
-  const { api, els, formatNumber, hidePersonProfile, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
+  const { api, els, formatNumber, hidePersonProfile, renderEmpty, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
+  const collectionRequests = createLatestRequestGate();
+
+  function cancelPendingRequests() {
+    collectionRequests.cancel();
+  }
 
   function collectionPageSize() {
     return Math.max(40, Math.min(96, Number(state.workPageSize) || 48));
   }
 
   async function loadFavorites(options = {}) {
+    if (state.activeView !== "favorites") return;
     const append = Boolean(options.append);
+    const request = collectionRequests.begin();
     if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载收藏</div>`;
     const params = new URLSearchParams();
     if (state.selectedFavoriteFolderId && state.selectedFavoriteFolderId !== "all") params.set("folder", state.selectedFavoriteFolderId);
     params.set("limit", String(collectionPageSize()));
     params.set("offset", String(append ? state.works.length : 0));
-    const data = await api(`/api/favorites?${params}`);
-    resetSelection();
-    applyCollectionWorks(data.works || [], append);
-    state.collectionTotal = data.total ?? data.count ?? state.works.length;
-    state.favoriteFolders = data.folders || [];
-    state.selectedFavoriteFolderId = data.selectedFolderId || state.selectedFavoriteFolderId || "all";
-    if (!append) resetWorkPaging();
-    const folder = folderById(state.selectedFavoriteFolderId);
-    setMainHeader("收藏", folder ? `${folder.name} · ${formatNumber(folder.count || 0)} 部` : "已收藏的作品");
-    renderStatsForWorks(state.works);
-    renderFavoriteFolderControls();
-    renderWorks("还没有收藏。");
+    try {
+      const data = await api(`/api/favorites?${params}`, { signal: request.signal });
+      if (!request.isCurrent() || state.activeView !== "favorites") return;
+      resetSelection();
+      applyCollectionWorks(data.works || [], append);
+      state.collectionTotal = data.total ?? data.count ?? state.works.length;
+      state.favoriteFolders = data.folders || [];
+      state.selectedFavoriteFolderId = data.selectedFolderId || state.selectedFavoriteFolderId || "all";
+      if (!append) resetWorkPaging();
+      const folder = folderById(state.selectedFavoriteFolderId);
+      setMainHeader("收藏", folder ? `${folder.name} · ${formatNumber(folder.count || 0)} 部` : "已收藏的作品");
+      renderStatsForWorks(state.works);
+      renderFavoriteFolderControls();
+      renderWorks("还没有收藏。");
+    } catch (error) {
+      if (!request.isCurrent() || state.activeView !== "favorites") return;
+      if (append) throw error;
+      renderEmpty(error.message || "收藏读取失败");
+    } finally {
+      request.finish();
+    }
   }
 
   function renderFavoriteFolderControls() {
@@ -53,19 +71,30 @@ export function createCollectionPage(deps) {
   }
 
   async function loadHistory(options = {}) {
+    if (state.activeView !== "history") return;
     const append = Boolean(options.append);
+    const request = collectionRequests.begin();
     if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载观看记录</div>`;
-    const data = await api(historyPath(append ? state.works.length : 0));
-    resetSelection();
-    applyCollectionWorks(data.works || [], append);
-    state.collectionTotal = data.total ?? data.count ?? state.works.length;
-    if (!append) resetWorkPaging();
-    const rangeLabel = historyLabel(state.selectedHistoryRange);
-    const total = data.total ?? data.count ?? state.works.length;
-    setMainHeader("继续观看", state.selectedHistoryRange === "all" ? "全部有播放进度的作品" : `${rangeLabel}有播放进度的作品 · ${formatNumber(total)} 部`);
-    renderStatsForWorks(state.works);
-    renderHistoryControls(data);
-    renderWorks("暂无观看记录。");
+    try {
+      const data = await api(historyPath(append ? state.works.length : 0), { signal: request.signal });
+      if (!request.isCurrent() || state.activeView !== "history") return;
+      resetSelection();
+      applyCollectionWorks(data.works || [], append);
+      state.collectionTotal = data.total ?? data.count ?? state.works.length;
+      if (!append) resetWorkPaging();
+      const rangeLabel = historyLabel(state.selectedHistoryRange);
+      const total = data.total ?? data.count ?? state.works.length;
+      setMainHeader("继续观看", state.selectedHistoryRange === "all" ? "全部有播放进度的作品" : `${rangeLabel}有播放进度的作品 · ${formatNumber(total)} 部`);
+      renderStatsForWorks(state.works);
+      renderHistoryControls(data);
+      renderWorks("暂无观看记录。");
+    } catch (error) {
+      if (!request.isCurrent() || state.activeView !== "history") return;
+      if (append) throw error;
+      renderEmpty(error.message || "观看记录读取失败");
+    } finally {
+      request.finish();
+    }
   }
 
   function applyCollectionWorks(nextWorks, append) {
@@ -102,7 +131,9 @@ export function createCollectionPage(deps) {
   }
 
   async function loadVrWorks(options = {}) {
+    if (state.activeView !== "vr") return;
     const append = Boolean(options.append);
+    const request = collectionRequests.begin();
     if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载 VR 作品</div>`;
     const params = new URLSearchParams({
       filter: "vr",
@@ -110,17 +141,26 @@ export function createCollectionPage(deps) {
       limit: String(collectionPageSize()),
       offset: String(append ? state.works.length : 0)
     });
-    const data = await api(`/api/works?${params}`);
-    resetSelection();
-    state.selectedPersonId = null;
-    state.selectedStudio = null;
-    state.selectedStudioSeriesId = "all";
-    applyCollectionWorks(data.works || [], append);
-    state.vrTotal = data.total ?? data.count ?? state.works.length;
-    if (!append) resetWorkPaging();
-    setMainHeader("VR", `全库 VR 作品 · ${formatNumber(state.vrTotal)} 部`);
-    renderStatsForWorks(state.works);
-    renderWorks("没有 VR 作品。");
+    try {
+      const data = await api(`/api/works?${params}`, { signal: request.signal });
+      if (!request.isCurrent() || state.activeView !== "vr") return;
+      resetSelection();
+      state.selectedPersonId = null;
+      state.selectedStudio = null;
+      state.selectedStudioSeriesId = "all";
+      applyCollectionWorks(data.works || [], append);
+      state.vrTotal = data.total ?? data.count ?? state.works.length;
+      if (!append) resetWorkPaging();
+      setMainHeader("VR", `全库 VR 作品 · ${formatNumber(state.vrTotal)} 部`);
+      renderStatsForWorks(state.works);
+      renderWorks("没有 VR 作品。");
+    } catch (error) {
+      if (!request.isCurrent() || state.activeView !== "vr") return;
+      if (append) throw error;
+      renderEmpty(error.message || "VR 作品读取失败");
+    } finally {
+      request.finish();
+    }
   }
 
   async function loadMoreVrWorks(button) {
@@ -225,5 +265,5 @@ export function createCollectionPage(deps) {
     els.statsRow.append(wrap);
   }
 
-  return { loadFavorites, loadHistory, loadMoreCollectionWorks, loadMoreVrWorks, loadVrWorks, renderFavoriteFolderControls };
+  return { cancelPendingRequests, loadFavorites, loadHistory, loadMoreCollectionWorks, loadMoreVrWorks, loadVrWorks, renderFavoriteFolderControls };
 }

@@ -209,6 +209,7 @@ const collectionPage = createCollectionPage({
   els,
   formatNumber,
   hidePersonProfile,
+  renderEmpty,
   renderStatsForWorks,
   renderWorks,
   resetWorkPaging,
@@ -697,6 +698,7 @@ function setActiveView(view, options = {}) {
   if (view !== "search") searchRequests.cancel();
   if (view !== "rankings") rankingPage.cancelPendingRequests();
   if (view !== "studios") studioPage.cancelPendingRequests();
+  if (!["favorites", "history", "vr"].includes(view)) collectionPage.cancelPendingRequests();
   const previousView = state.activeView;
   state.activeView = view;
   if (view !== "rankings" && state.sortMode === "ranking") {
@@ -791,10 +793,6 @@ async function loadHistory() {
 
 async function loadRankings() {
   await rankingPage.loadRankings();
-}
-
-async function loadRankingWorks() {
-  await rankingPage.loadRankingWorks();
 }
 
 function renderRankingStats(data = {}) {
@@ -1430,6 +1428,7 @@ async function loadSearchResults(query, options = {}) {
   peoplePage.cancelPendingSelection();
   rankingPage.cancelPendingRequests();
   studioPage.cancelPendingRequests();
+  collectionPage.cancelPendingRequests();
   if (state.activeView !== "search") {
     state.searchReturnView = state.activeView || "people";
     if (selectedWorkFilters().length) {
