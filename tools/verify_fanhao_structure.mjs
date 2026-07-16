@@ -107,10 +107,14 @@ assert(worksRuntime.includes("workQueryService.prewarm()"), "FanHao work queries
 const workInfoService = read("src/modules/fanhao/server/works/work-info-service.js");
 const workPresenterService = read("src/modules/fanhao/server/works/presenter-service.js");
 const workMediaRoutes = read("src/modules/fanhao/server/works/routes-media.js");
+const coreDbService = read("src/modules/fanhao/server/library/core-db-service.js");
 assert(workInfoService.includes("function detailRow(workId)"), "work metadata must load full details per work instead of hydrating the entire catalog");
 assert(workInfoService.includes("SELECT 1\n              FROM local_works"), "work-list metadata must use a lightweight local-work index query");
 assert(workPresenterService.includes("workInfoDetailRow(work.id)"), "work cards and details must hydrate full metadata only for the visible page");
 assert(workMediaRoutes.includes("/media\\/person\\/([^/]+)\\/cover"), "person-list avatars must use a stable compact media URL");
+assert(coreDbService.includes("const DEFAULT_TABLE_STAMP_CACHE_MS = 5000"), "FanHao table stamps must not rescan the core database between nearby interactions");
+assert(coreDbService.includes("idx_works_updated_at ON works(updated_at)"), "work-info stamps must use a lightweight updated-at index");
+assert(coreDbService.includes("idx_work_people_updated_at ON work_people(updated_at)"), "actor-movie stamps must use a lightweight updated-at index");
 const serviceLauncher = read("start-fanhao.ps1");
 assert(
   /if \(-not \$ready\)[\s\S]*Stop-Process -Id \$process\.Id -Force/.test(serviceLauncher),

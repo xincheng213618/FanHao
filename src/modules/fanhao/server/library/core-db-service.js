@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
-const DEFAULT_TABLE_STAMP_CACHE_MS = 1000;
+const DEFAULT_TABLE_STAMP_CACHE_MS = 5000;
 
 function ensureColumn(db, table, column, definition) {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all();
@@ -12,6 +12,8 @@ function ensureColumn(db, table, column, definition) {
 
 function ensureCoreCacheTables(db) {
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_works_updated_at ON works(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_work_people_updated_at ON work_people(updated_at);
     CREATE TABLE IF NOT EXISTS remote_image_cache (
       url TEXT PRIMARY KEY,
       url_hash TEXT NOT NULL,
