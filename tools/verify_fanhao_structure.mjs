@@ -85,6 +85,9 @@ assert(androidWorkViews.includes("options.hasServerMore"), "Android work renderi
 assert(androidWorkViews.includes("/api/history?limit=${limit}&offset=0"), "Android history must request a bounded first page");
 assert(androidWorkViews.includes("const works = data.works || []"), "Android collections must define their rendered work list locally");
 const androidDetailViews = read("android-client/www/modules/fanhao/detail-views.js");
+assert(androidDetailViews.includes("getWorksLimit()"), "Android person details must use the bounded shared work limit");
+assert(androidDetailViews.includes("hasServerMore:"), "Android person details must preserve server-side continuation");
+assert(!androidDetailViews.includes("limit=2000"), "Android person details must not fetch every work before first render");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
   assert(!androidDetailViews.includes(`function ${functionName}(`), `Android detail must delegate ${functionName}`);
 }

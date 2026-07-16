@@ -22,6 +22,9 @@ export function createDetailViews(context) {
     renderWorks,
     renderMessage,
     createChip,
+    getWorksLimit = () => 80,
+    increaseWorksLimit = () => {},
+    renderCurrentViewPreservingScroll = () => {},
     mediaViewer,
     goBack = () => window.history.back(),
     onUserStateChange
@@ -52,7 +55,7 @@ export function createDetailViews(context) {
     els.viewTitle.textContent = "正在加载";
     els.viewMeta.textContent = "";
     els.viewContent.innerHTML = `<div class="loading-row">正在加载人物资料</div>`;
-    const path = `/api/people/${encodeURIComponent(personId)}?limit=2000&offset=0`;
+    const path = `/api/people/${encodeURIComponent(personId)}?limit=${encodeURIComponent(getWorksLimit())}&offset=0`;
     let renderedCache = false;
 
     const renderPersonData = (data, cacheEntry = null) => {
@@ -67,7 +70,12 @@ export function createDetailViews(context) {
       els.viewContent.append(createDetailSectionTitle("作品", `${formatNumber(works.length)} / ${formatNumber(data.total || works.length)}`));
       renderWorks(works, "这个人物下面还没有作品。", {
         facets: data.facets,
-        total: data.total || works.length
+        total: data.total || works.length,
+        hasServerMore: works.length < Number(data.total || works.length),
+        onLoadMore: () => {
+          increaseWorksLimit(80);
+          return renderCurrentViewPreservingScroll();
+        }
       });
     };
 
