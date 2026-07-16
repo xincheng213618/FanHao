@@ -1,24 +1,40 @@
+import { createLatestRequestGate } from "../../latest-request.js?v=20260717-fanhao-latest-request-01";
+
 export function createStudioPage(deps) {
   const { api, appendEmpty, els, formatNumber, hidePersonProfile, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
-  let studioDetailRequestSeq = 0;
+  const studioRequests = createLatestRequestGate();
+
+  function cancelPendingRequests() {
+    studioRequests.cancel();
+  }
 
   function studioPageSize() {
     return Math.max(40, Math.min(96, Number(state.workPageSize) || 48));
   }
 
   async function loadStudios() {
-    studioDetailRequestSeq += 1;
+    const request = studioRequests.begin();
     els.workGrid.innerHTML = `<div class="empty-state">正在加载片商</div>`;
-    const data = await api("/api/studios?limit=500");
-    resetSelection();
-    state.studios = data.makers || [];
-    setMainHeader("片商", "按片商浏览本地作品");
-    renderIndex();
+    try {
+      const data = await api("/api/studios?limit=500", { signal: request.signal });
+      if (!request.isCurrent() || state.activeView !== "studios") return;
+      resetSelection();
+      state.studios = data.makers || [];
+      setMainHeader("片商", "按片商浏览本地作品");
+      renderIndex();
+    } catch (error) {
+      if (!request.isCurrent() || state.activeView !== "studios") return;
+      setMainHeader("片商", "读取失败");
+      els.workGrid.innerHTML = "";
+      appendEmpty(error.message || "片商读取失败");
+    } finally {
+      request.finish();
+    }
   }
 
   async function loadStudioDetail(studioId, seriesId = "all", options = {}) {
     const append = Boolean(options.append);
-    const requestSeq = ++studioDetailRequestSeq;
+    const request = studioRequests.begin();
     if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载片商作品</div>`;
     const params = new URLSearchParams({
       seriesId,
@@ -26,20 +42,30 @@ export function createStudioPage(deps) {
       limit: String(studioPageSize()),
       offset: String(append ? state.works.length : 0)
     });
-    const data = await api(`/api/studios/${encodeURIComponent(studioId)}?${params}`);
-    if (requestSeq !== studioDetailRequestSeq) return;
-    if (!append) resetSelection();
-    state.selectedStudio = data.studio || state.selectedStudio || null;
-    state.selectedStudioSeriesId = data.selectedSeriesId || seriesId || "all";
-    applyStudioWorks(data.works || [], append);
-    state.studioWorksTotal = data.total ?? data.count ?? state.works.length;
-    if (!append) resetWorkPaging();
-    const studio = state.selectedStudio;
-    const selectedSeries = (studio?.series || []).find((item) => item.id === state.selectedStudioSeriesId);
-    setMainHeader(studio?.name || "片商", selectedSeries ? `${selectedSeries.name} · ${formatNumber(state.studioWorksTotal)} 部` : `${formatNumber(state.studioWorksTotal)} 部本地作品`);
-    renderStatsForWorks(state.works);
-    renderSeriesControls(studio);
-    renderWorks("这个片商暂无本地作品。");
+    try {
+      const data = await api(`/api/studios/${encodeURIComponent(studioId)}?${params}`, { signal: request.signal });
+      if (!request.isCurrent() || state.activeView !== "studios") return;
+      if (!append) resetSelection();
+      state.selectedStudio = data.studio || state.selectedStudio || null;
+      state.selectedStudioSeriesId = data.selectedSeriesId || seriesId || "all";
+      applyStudioWorks(data.works || [], append);
+      state.studioWorksTotal = data.total ?? data.count ?? state.works.length;
+      if (!append) resetWorkPaging();
+      const studio = state.selectedStudio;
+      const selectedSeries = (studio?.series || []).find((item) => item.id === state.selectedStudioSeriesId);
+      setMainHeader(studio?.name || "片商", selectedSeries ? `${selectedSeries.name} · ${formatNumber(state.studioWorksTotal)} 部` : `${formatNumber(state.studioWorksTotal)} 部本地作品`);
+      renderStatsForWorks(state.works);
+      renderSeriesControls(studio);
+      renderWorks("这个片商暂无本地作品。");
+    } catch (error) {
+      if (!request.isCurrent() || state.activeView !== "studios") return;
+      if (append) throw error;
+      setMainHeader("片商", "读取失败");
+      els.workGrid.innerHTML = "";
+      appendEmpty(error.message || "片商作品读取失败");
+    } finally {
+      request.finish();
+    }
   }
 
   function applyStudioWorks(nextWorks, append) {
@@ -136,5 +162,5 @@ export function createStudioPage(deps) {
     return button;
   }
 
-  return { loadStudios, loadMoreStudioWorks, loadStudioDetail };
+  return { cancelPendingRequests, loadStudios, loadMoreStudioWorks, loadStudioDetail };
 }

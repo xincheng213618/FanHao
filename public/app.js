@@ -123,7 +123,7 @@ const api = createApiClient({ isAndroidClient });
 const searchRequests = createSearchRequestService({
   api,
   filter: serializedWorkFilterMode,
-  pageSize: searchPageSize,
+  pageSize: () => Math.max(40, Math.min(WORK_PAGE_SIZE_BY_ACCESS.local, Number(state.workPageSize) || WORK_PAGE_SIZE_BY_ACCESS.remote)),
   sort: () => state.sortMode || "releaseDesc"
 });
 
@@ -696,6 +696,7 @@ function setActiveView(view, options = {}) {
   if (view !== "people") peoplePage.cancelPendingSelection();
   if (view !== "search") searchRequests.cancel();
   if (view !== "rankings") rankingPage.cancelPendingRequests();
+  if (view !== "studios") studioPage.cancelPendingRequests();
   const previousView = state.activeView;
   state.activeView = view;
   if (view !== "rankings" && state.sortMode === "ranking") {
@@ -1428,6 +1429,7 @@ async function loadSearchResults(query, options = {}) {
   const enteringSearch = state.activeView !== "search";
   peoplePage.cancelPendingSelection();
   rankingPage.cancelPendingRequests();
+  studioPage.cancelPendingRequests();
   if (state.activeView !== "search") {
     state.searchReturnView = state.activeView || "people";
     if (selectedWorkFilters().length) {
@@ -1471,10 +1473,6 @@ async function loadSearchResults(query, options = {}) {
   } catch (error) {
     renderEmpty(error.message);
   }
-}
-
-function searchPageSize() {
-  return Math.max(40, Math.min(WORK_PAGE_SIZE_BY_ACCESS.local, Number(state.workPageSize) || WORK_PAGE_SIZE_BY_ACCESS.remote));
 }
 
 async function loadMoreSearchResults(button) {
