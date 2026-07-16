@@ -6,7 +6,7 @@ export function createWorkImageService({
   hasCoreDb,
   proxiedRemoteImageUrl
 }) {
-  let workIdsWithCoreCoverCache = null;
+  let localWorkCoreCoverCache = null;
 
   function coreImageUrl(row) {
     if (!row) return "";
@@ -157,34 +157,41 @@ export function createWorkImageService({
     };
   }
 
-  function workIdsWithCoreCover(expectedStamp = "") {
-    const stamp = expectedStamp || getStamp();
-    if (workIdsWithCoreCoverCache?.stamp === stamp) return workIdsWithCoreCoverCache.ids;
-    const ids = new Set();
+  function localWorkCoreCoverStates() {
+    const stamp = getStamp();
+    if (localWorkCoreCoverCache?.stamp === stamp) return localWorkCoreCoverCache.states;
+    const states = new Map();
     if (hasCoreDb()) {
       try {
         for (const row of getCoreDb()
           .prepare(
             `
-            SELECT DISTINCT CAST(owner_id AS TEXT) AS work_id
-            FROM images
-            WHERE owner_type = 'work'
-              AND kind = 'cover'
+            SELECT
+              CAST(lw.work_id AS TEXT) AS work_id,
+              EXISTS (
+                SELECT 1
+                FROM images i
+                WHERE i.owner_type = 'work'
+                  AND i.owner_id = lw.work_id
+                  AND i.kind = 'cover'
+              ) AS has_cover
+            FROM local_works lw
             `
           )
           .all()) {
-          ids.add(row.work_id);
+          states.set(row.work_id, Boolean(row.has_cover));
         }
       } catch (error) {
         console.warn("[core-image]", error.message);
+        if (localWorkCoreCoverCache?.states) return localWorkCoreCoverCache.states;
       }
     }
-    workIdsWithCoreCoverCache = { stamp, ids };
-    return ids;
+    localWorkCoreCoverCache = { stamp, states };
+    return states;
   }
 
-  function workHasCoreCover(workId, expectedStamp = "") {
-    return workIdsWithCoreCover(expectedStamp).has(String(workId || ""));
+  function workHasCoreCover(workId) {
+    return localWorkCoreCoverStates().get(String(workId || "")) === true;
   }
 
   function coreImageRow(imageId) {

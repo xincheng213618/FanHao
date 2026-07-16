@@ -16,6 +16,7 @@ export function createWorkInfoService({
 }) {
   let workInfoCache = null;
   let workInfoDetailCache = null;
+  let workInfoFacetCache = null;
 
   function firstPresentValue(...values) {
     for (const value of values) {
@@ -133,6 +134,47 @@ export function createWorkInfoService({
     return rows;
   }
 
+  function facetRowsById() {
+    const stamp = getStamp();
+    if (workInfoFacetCache?.stamp === stamp) return workInfoFacetCache.rows;
+
+    const rows = new Map();
+    try {
+      for (const row of getCoreDb()
+        .prepare(
+          `
+          SELECT
+            CAST(w.id AS TEXT) AS work_id,
+            w.code,
+            w.release_date,
+            w.duration_minutes,
+            w.rating,
+            w.rating_count
+          FROM works w
+          WHERE w.status = 'ok'
+            AND EXISTS (
+              SELECT 1
+              FROM local_works lw
+              WHERE lw.work_id = w.id
+            )
+          `
+        )
+        .all()) {
+        rows.set(row.work_id, row);
+      }
+    } catch (error) {
+      console.warn("[core-work-info-facets]", error.message);
+      if (workInfoFacetCache?.rows) return workInfoFacetCache.rows;
+    }
+
+    workInfoFacetCache = { stamp, rows };
+    return rows;
+  }
+
+  function facetRow(workId) {
+    return facetRowsById().get(String(workId || "")) || null;
+  }
+
   function row(workId) {
     return rowsById().get(workId) || null;
   }
@@ -223,11 +265,13 @@ export function createWorkInfoService({
   function invalidate() {
     workInfoCache = null;
     workInfoDetailCache = null;
+    workInfoFacetCache = null;
   }
 
   function setRowsCache(value) {
     workInfoCache = value;
     workInfoDetailCache = null;
+    workInfoFacetCache = null;
   }
 
   return {
@@ -236,6 +280,8 @@ export function createWorkInfoService({
     firstPresentText,
     firstPresentValue,
     detailRow,
+    facetRow,
+    facetRowsById,
     publicMetadata,
     publicSummary,
     prewarmDetailRows,

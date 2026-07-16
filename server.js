@@ -880,6 +880,7 @@ const moduleRegistry = await discoverFanHaoModules({
         workCodeKeySetForWorks,
         workHasCoreCover,
         workHasLocalMarker,
+        workInfoFacetRow,
         workInfoRow,
         workLocalMutationService,
         workQueryStamp,
@@ -1532,6 +1533,10 @@ function clearSearchSourceCaches() {
 
 function workInfoRow(workId) {
   return workInfoService.row(workId);
+}
+
+function workInfoFacetRow(workId) {
+  return workInfoService.facetRow(workId);
 }
 
 function workInfoDetailRow(workId) {

@@ -24,11 +24,8 @@ export function createWorkQueryService({
   storedWorkCodeKey,
   workHasCoreCover,
   workHasLocalMarker,
-  workInfoRow,
+  workInfoFacetRow,
   workQueryStamp,
-  workRating,
-  workRatingCount,
-  workReleaseDate,
 }) {
   let enrichedWorksCache = null;
   const listSourceCache = new Map();
@@ -46,6 +43,7 @@ export function createWorkQueryService({
   ]);
   let staticFacetCache = new WeakMap();
   let sortedWorksCache = new WeakMap();
+  const workCodeCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
   function currentStamp() {
     return `${library.scannedAt || ""}:${library.worksById.size}:${workQueryStamp()}`;
@@ -63,7 +61,7 @@ export function createWorkQueryService({
     return works;
   }
 
-  function workMatchesFilter(work, filter, stamp = "") {
+  function workMatchesFilter(work, filter) {
     switch (filter) {
       case "localOnly":
         return !work.missingLocal;
@@ -76,11 +74,11 @@ export function createWorkQueryService({
       case "progress":
         return Boolean(playbackProgressService.getWorkProgress(work));
       case "info":
-        return Boolean(workInfoRow(work.id)) || Number(work.infoCount || 0) > 0;
+        return Boolean(workInfoFacetRow(work.id)) || Number(work.infoCount || 0) > 0;
       case "rated":
-        return workRating(work) !== null;
+        return workListRating(work) !== null;
       case "highRating": {
-        const rating = workRating(work);
+        const rating = workListRating(work);
         return rating !== null && rating >= 4;
       }
       case "vr":
@@ -91,7 +89,7 @@ export function createWorkQueryService({
         return Boolean(work.missingLocal && publicWorkAvailability(work).hasMagnet);
       case "missingCover":
         if (work.missingLocal) return false;
-        return !work.coverId && !workHasCoreCover(work.id, stamp);
+        return !work.coverId && !workHasCoreCover(work.id);
       case "all":
       default:
         return true;
@@ -106,10 +104,26 @@ export function createWorkQueryService({
     if (cached?.stamp === stamp) return cached.works;
 
     const list = [...works];
+    const usesMetadata = [
+      "releaseDesc",
+      "releaseAsc",
+      "ratingAsc",
+      "ratingDesc",
+      "duration",
+      "durationDesc",
+      "durationAsc",
+      "codeAsc",
+      "codeDesc"
+    ].includes(sort);
+    const metadataByWork = usesMetadata
+      ? new Map(list.map((work) => [work, workSortMetadata(work, options)]))
+      : null;
     list.sort((a, b) => {
+      const aMetadata = metadataByWork?.get(a);
+      const bMetadata = metadataByWork?.get(b);
       if (sort === "releaseDesc" || sort === "releaseAsc") {
-        const aDate = options.lightweightInfo ? String(a.infoSummary?.releaseDate || "") : workReleaseDate(a);
-        const bDate = options.lightweightInfo ? String(b.infoSummary?.releaseDate || "") : workReleaseDate(b);
+        const aDate = aMetadata.releaseDate;
+        const bDate = bMetadata.releaseDate;
         const aHas = Boolean(aDate);
         const bHas = Boolean(bDate);
         if (aHas !== bHas) return aHas ? -1 : 1;
@@ -117,15 +131,13 @@ export function createWorkQueryService({
       }
 
       if (sort === "ratingAsc" || sort === "ratingDesc") {
-        const aRating = options.lightweightInfo ? numericSummaryRating(a) : workRating(a);
-        const bRating = options.lightweightInfo ? numericSummaryRating(b) : workRating(b);
+        const aRating = aMetadata.rating;
+        const bRating = bMetadata.rating;
         const aHas = aRating !== null;
         const bHas = bRating !== null;
         if (aHas !== bHas) return aHas ? -1 : 1;
         if (aHas && aRating !== bRating) return sort === "ratingAsc" ? aRating - bRating : bRating - aRating;
-        const countDiff = options.lightweightInfo
-          ? Number(b.infoSummary?.ratingCount || 0) - Number(a.infoSummary?.ratingCount || 0)
-          : workRatingCount(b) - workRatingCount(a);
+        const countDiff = bMetadata.ratingCount - aMetadata.ratingCount;
         if (countDiff) return countDiff;
       }
 
@@ -136,15 +148,13 @@ export function createWorkQueryService({
       }
 
       if (sort === "duration" || sort === "durationDesc" || sort === "durationAsc") {
-        const aDuration = Number(a.infoSummary?.durationMinutes ?? workInfoRow(a.id)?.duration_minutes ?? 0);
-        const bDuration = Number(b.infoSummary?.durationMinutes ?? workInfoRow(b.id)?.duration_minutes ?? 0);
+        const aDuration = aMetadata.duration;
+        const bDuration = bMetadata.duration;
         if (aDuration !== bDuration) return sort === "durationAsc" ? aDuration - bDuration : bDuration - aDuration;
       }
 
       if (sort === "codeAsc" || sort === "codeDesc") {
-        const aCode = a.infoSummary?.code || workInfoRow(a.id)?.code || a.title || a.directoryName || "";
-        const bCode = b.infoSummary?.code || workInfoRow(b.id)?.code || b.title || b.directoryName || "";
-        const result = aCode.localeCompare(bCode, undefined, { numeric: true, sensitivity: "base" });
+        const result = workCodeCollator.compare(aMetadata.code, bMetadata.code);
         if (result) return sort === "codeDesc" ? -result : result;
       }
 
@@ -157,8 +167,31 @@ export function createWorkQueryService({
   }
 
   function numericSummaryRating(work) {
-    const value = Number(work.infoSummary?.rating);
-    return Number.isFinite(value) ? value : null;
+    return optionalNumber(work.infoSummary?.rating);
+  }
+
+  function optionalNumber(...values) {
+    for (const value of values) {
+      if (value === null || value === undefined || value === "") continue;
+      const number = Number(value);
+      if (Number.isFinite(number)) return number;
+    }
+    return null;
+  }
+
+  function workListRating(work) {
+    return optionalNumber(workInfoFacetRow(work.id)?.rating, work.infoSummary?.rating);
+  }
+
+  function workSortMetadata(work, options = {}) {
+    const infoRow = options.lightweightInfo ? null : workInfoFacetRow(work.id);
+    return {
+      releaseDate: String(infoRow?.release_date || work.infoSummary?.releaseDate || ""),
+      rating: optionalNumber(infoRow?.rating, work.infoSummary?.rating),
+      ratingCount: optionalNumber(infoRow?.rating_count, work.infoSummary?.ratingCount) || 0,
+      duration: optionalNumber(infoRow?.duration_minutes, work.infoSummary?.durationMinutes) || 0,
+      code: infoRow?.code || work.infoSummary?.code || work.title || work.directoryName || ""
+    };
   }
 
   function lightweightWorkMatchesFilter(work, filter) {
@@ -200,16 +233,17 @@ export function createWorkQueryService({
 
     for (const work of works) {
       const missingLocal = Boolean(work.missingLocal);
-      const rating = workRating(work);
+      const infoRow = workInfoFacetRow(work.id);
+      const rating = optionalNumber(infoRow?.rating, work.infoSummary?.rating);
       if (Number(work.playableCount || 0) > 0) facets.playable += 1;
-      if (workInfoRow(work.id) || Number(work.infoCount || 0) > 0) facets.info += 1;
+      if (infoRow || Number(work.infoCount || 0) > 0) facets.info += 1;
       if (missingLocal) facets.missingLocal += 1;
       else facets.localOnly += 1;
       if (rating !== null) facets.rated += 1;
       if (rating !== null && rating >= 4) facets.highRating += 1;
       if (isVrWork(work)) facets.vr += 1;
       if (missingLocal && publicWorkAvailability(work).hasMagnet) facets.hasMagnet += 1;
-      if (!missingLocal && !work.coverId && !workHasCoreCover(work.id, stamp)) facets.missingCover += 1;
+      if (!missingLocal && !work.coverId && !workHasCoreCover(work.id)) facets.missingCover += 1;
     }
 
     staticFacetCache.set(works, { stamp, facets });
@@ -276,8 +310,7 @@ export function createWorkQueryService({
   function listFromWorksPayload(sourceWorks, url, extra = {}) {
     const filter = extra.filter || url.searchParams.get("filter") || "all";
     const sort = url.searchParams.get("sort") || "releaseDesc";
-    const stamp = currentStamp();
-    const matchedWorks = filter === "all" ? sourceWorks : sourceWorks.filter((work) => workMatchesFilter(work, filter, stamp));
+    const matchedWorks = filter === "all" ? sourceWorks : sourceWorks.filter((work) => workMatchesFilter(work, filter));
     const works = sortWorkList(matchedWorks, sort);
     return pagedWorksPayload(works, url, {
       ...extra,
@@ -301,7 +334,7 @@ export function createWorkQueryService({
         ? scopedCached.works
         : enrichedWorks().filter((work) => peopleScopeService.workMatches(work, scope));
       listSourceCache.set(scopedCacheKey, { stamp, works: scopedWorks });
-      filtered = filter === "all" ? scopedWorks : scopedWorks.filter((work) => workMatchesFilter(work, filter, stamp));
+      filtered = filter === "all" ? scopedWorks : scopedWorks.filter((work) => workMatchesFilter(work, filter));
       if (cacheableFilters.has(filter)) listSourceCache.set(cacheKey, { stamp, works: filtered });
     }
 
@@ -317,8 +350,9 @@ export function createWorkQueryService({
     const stamp = currentStamp();
     const works = enrichedWorks().filter((work) => peopleScopeService.workMatches(work, scope));
     listSourceCache.set(`${scope}:all`, { stamp, works });
-    // Static facets hydrate the full core work-info projection. Keep that
-    // demand-driven so an expensive metadata refresh cannot block server.listen().
+    // Compact facet indexes are cheap to hydrate and keep the first list
+    // request from paying synchronous catalog-query costs.
+    staticWorkFacets(works);
     sortWorkList(works, "updated");
   }
 

@@ -81,6 +81,7 @@ export function createFanhaoDependencies(deps) {
       "workCodeKeySetForWorks",
       "workHasCoreCover",
       "workHasLocalMarker",
+      "workInfoFacetRow",
       "workInfoRow",
       "workLocalMutationService",
       "workQueryStamp",

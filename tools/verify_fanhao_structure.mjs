@@ -138,6 +138,14 @@ const workInfoServiceSource = read("src/modules/fanhao/server/works/work-info-se
 const workQueryServiceSource = read("src/modules/fanhao/server/works/work-query-service.js");
 assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info details must support page-level batch hydration");
 assert(workQueryServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "work lists must batch-hydrate detail rows before presentation");
+assert(workInfoServiceSource.includes("function facetRowsById()"), "work-list facets must use a compact metadata index");
+assert(workQueryServiceSource.includes("staticWorkFacets(works);"), "compact work facets must be ready before the first list request");
+const workImageServiceSource = read("src/modules/fanhao/server/works/image-service.js");
+assert(workImageServiceSource.includes("FROM local_works lw"), "work-cover facets must index only local catalog entries");
+assert(!workImageServiceSource.includes("SELECT DISTINCT CAST(owner_id AS TEXT)"), "work-cover facets must not hydrate every historical image owner");
+const mediaResponseServiceSource = read("src/platform/server/media-response-service.js");
+assert(mediaResponseServiceSource.includes("cachedRemoteImageUrls(remoteUrls)"), "visible work pages must batch-check warmed remote images");
+assert(!mediaResponseServiceSource.includes("remoteImageCacheRow(remoteUrl)?.image_blob || remoteImageWarmQueued"), "remote-image warming must not read cached blobs on the response path");
 
 const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");
@@ -245,6 +253,7 @@ assert.equal(batchedWorkInfoService.detailRow("1")?.title, "Work 1", "single-wor
 let actorMovieDataStamp = "actor-v1";
 let enrichmentCount = 0;
 let workInfoReadCount = 0;
+let workInfoFacetReadCount = 0;
 const queryWork = {
   id: "work-1",
   personId: "person-1",
@@ -286,6 +295,10 @@ const workQueryService = createWorkQueryService({
   storedWorkCodeKey: (value) => String(value || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase(),
   workHasCoreCover: () => false,
   workHasLocalMarker: () => false,
+  workInfoFacetRow: () => {
+    workInfoFacetReadCount += 1;
+    return null;
+  },
   workInfoRow: () => {
     workInfoReadCount += 1;
     return null;
@@ -298,6 +311,7 @@ const workQueryService = createWorkQueryService({
 const workListUrl = new URL("http://127.0.0.1/api/works?limit=24&sort=updated");
 workQueryService.prewarm();
 assert.equal(workInfoReadCount, 0, "FanHao startup prewarm must not hydrate full work-info facets before the server listens");
+assert.equal(workInfoFacetReadCount, 1, "FanHao startup prewarm must hydrate only the compact work-info facet index");
 workQueryService.listPayload(workListUrl);
 workQueryService.listPayload(workListUrl);
 assert.equal(enrichmentCount, 1, "repeated FanHao work-list requests must reuse the prewarmed full-library enrichment");

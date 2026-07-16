@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 
+const REMOTE_IMAGE_LOOKUP_BATCH_SIZE = 200;
+
 export function createMediaResponseService({
   coreImageRow,
   corePersonAvatarRow,
@@ -345,7 +347,8 @@ export function createMediaResponseService({
 
   function prewarmRemoteImagesForWorks(works, limit = 1000) {
     const seen = new Set();
-    let count = 0;
+    const remoteUrls = [];
+    outer:
     for (const work of works || []) {
       const previewImages = [
         ...(Array.isArray(work.infoSummary?.previewImages) ? work.infoSummary.previewImages : []),
@@ -359,12 +362,16 @@ export function createMediaResponseService({
         const remoteUrl = remoteImageTargetUrl(candidate);
         if (!remoteUrl || seen.has(remoteUrl)) continue;
         seen.add(remoteUrl);
-        enqueueRemoteImageWarm(remoteUrl);
-        count += 1;
-        if (count >= limit) return count;
+        remoteUrls.push(remoteUrl);
+        if (remoteUrls.length >= limit) break outer;
       }
     }
-    return count;
+
+    const cachedUrls = cachedRemoteImageUrls(remoteUrls);
+    for (const remoteUrl of remoteUrls) {
+      if (!cachedUrls.has(remoteUrl)) enqueueRemoteImageWarm(remoteUrl, { skipCacheCheck: true });
+    }
+    return remoteUrls.length;
   }
 
   function proxiedRemoteImageUrlArray(values) {
@@ -391,6 +398,35 @@ export function createMediaResponseService({
       warn("[remote-image-cache]", error.message || error);
       return null;
     }
+  }
+
+  function remoteImageCacheHasBlob(remoteUrl) {
+    try {
+      return Boolean(getCoreDb()
+        .prepare("SELECT 1 FROM remote_image_cache WHERE url = ? AND image_blob IS NOT NULL LIMIT 1")
+        .get(remoteUrl));
+    } catch (error) {
+      warn("[remote-image-cache]", error.message || error);
+      return false;
+    }
+  }
+
+  function cachedRemoteImageUrls(remoteUrls) {
+    const cached = new Set();
+    for (let offset = 0; offset < remoteUrls.length; offset += REMOTE_IMAGE_LOOKUP_BATCH_SIZE) {
+      const batch = remoteUrls.slice(offset, offset + REMOTE_IMAGE_LOOKUP_BATCH_SIZE);
+      if (!batch.length) continue;
+      try {
+        const placeholders = batch.map(() => "?").join(", ");
+        const rows = getCoreDb()
+          .prepare(`SELECT url FROM remote_image_cache WHERE image_blob IS NOT NULL AND url IN (${placeholders})`)
+          .all(...batch);
+        for (const row of rows) cached.add(row.url);
+      } catch (error) {
+        warn("[remote-image-cache]", error.message || error);
+      }
+    }
+    return cached;
   }
 
   function remoteImageMimeFromUrl(remoteUrl) {
@@ -452,8 +488,8 @@ export function createMediaResponseService({
     };
   }
 
-  function enqueueRemoteImageWarm(remoteUrl) {
-    if (remoteImageCacheRow(remoteUrl)?.image_blob || remoteImageWarmQueued.has(remoteUrl)) return;
+  function enqueueRemoteImageWarm(remoteUrl, options = {}) {
+    if ((!options.skipCacheCheck && remoteImageCacheHasBlob(remoteUrl)) || remoteImageWarmQueued.has(remoteUrl)) return;
     remoteImageWarmQueued.add(remoteUrl);
     remoteImageWarmQueue.push(remoteUrl);
     drainRemoteImageWarmQueue();
@@ -476,7 +512,7 @@ export function createMediaResponseService({
   }
 
   async function warmRemoteImage(remoteUrl) {
-    if (remoteImageCacheRow(remoteUrl)?.image_blob) return;
+    if (remoteImageCacheHasBlob(remoteUrl)) return;
     const downloaded = await downloadRemoteImage(remoteUrl);
     const now = new Date().toISOString();
     getCoreDb()
