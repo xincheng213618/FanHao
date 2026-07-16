@@ -10,6 +10,7 @@ export function createStudioService({
 }) {
   let studioHierarchyCache = null;
   let studioDetailCacheStamp = null;
+  let studioSummaryRowsCache = null;
   const studioMakerCache = new Map();
   const studioWorksCache = new Map();
 
@@ -146,7 +147,20 @@ export function createStudioService({
     const sync = ensureCatalog();
     const limit = clampInteger(url.searchParams.get("limit"), 120, 1, 1000);
     const q = String(url.searchParams.get("q") || "").trim().toLowerCase();
-    const rows = getCoreDb()
+    const rows = q ? querySummaryRows(q, limit) : cachedSummaryRows(sync.stamp).slice(0, limit);
+    const makers = rows.map(publicMakerSummary);
+    return { sync, count: makers.length, makers };
+  }
+
+  function cachedSummaryRows(stamp) {
+    if (studioSummaryRowsCache?.stamp === stamp) return studioSummaryRowsCache.rows;
+    const rows = querySummaryRows("", 1000);
+    studioSummaryRowsCache = { stamp, rows };
+    return rows;
+  }
+
+  function querySummaryRows(q, limit) {
+    return getCoreDb()
       .prepare(
         `
         SELECT
@@ -171,8 +185,11 @@ export function createStudioService({
         `
       )
       .all(q, `%${q}%`, `%${q}%`, limit);
-    const makers = rows.map(publicMakerSummary);
-    return { sync, count: makers.length, makers };
+  }
+
+  function prewarm() {
+    const sync = ensureCatalog();
+    cachedSummaryRows(sync.stamp);
   }
 
   function detailPayload(makerId, url) {
@@ -252,6 +269,7 @@ export function createStudioService({
   function invalidate() {
     studioHierarchyCache = null;
     studioDetailCacheStamp = null;
+    studioSummaryRowsCache = null;
     studioMakerCache.clear();
     studioWorksCache.clear();
   }
@@ -260,6 +278,7 @@ export function createStudioService({
     detailPayload,
     ensureCatalog,
     invalidate,
+    prewarm,
     prefixRowsForMaker,
     publicMaker,
     publicMakerSummary,

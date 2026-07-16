@@ -8,6 +8,7 @@ import { publicPersonListItem } from "../src/modules/fanhao/server/people/person
 import { createPersonDetailService } from "../src/modules/fanhao/server/people/person-detail-service.js";
 import { createPlaybackProgressService } from "../src/modules/fanhao/server/playback/playback-progress-service.js";
 import { createRankingService } from "../src/modules/fanhao/server/catalog/ranking-service.js";
+import { createStudioService } from "../src/modules/fanhao/server/catalog/studio-service.js";
 import { prepareCollectionWorkPage } from "../src/modules/fanhao/server/user-state/routes.js";
 import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkImageService } from "../src/modules/fanhao/server/works/image-service.js";
@@ -204,6 +205,7 @@ assert(webStudioPage.includes("loadMoreStudioWorks"), "Web studio details must p
 assert(!webStudioPage.includes('limit: "2000"'), "Web studio details must not fetch every work before first render");
 assert(webApp.includes("hasStudioServerMore"), "Web work rendering must expose studio continuation");
 const studioService = read("src/modules/fanhao/server/catalog/studio-service.js");
+const catalogRuntimeSource = read("src/modules/fanhao/server/catalog/runtime.js");
 const rankingServiceSource = read("src/modules/fanhao/server/catalog/ranking-service.js");
 const personDetailServiceSource = read("src/modules/fanhao/server/people/person-detail-service.js");
 assert(studioService.includes("const makers = rows.map(publicMakerSummary)"), "studio index responses must use lightweight maker summaries");
@@ -211,6 +213,8 @@ assert(!studioService.includes("rows.map((row) => publicMaker(row, seriesRowsFor
 assert(studioService.includes("const studioWorksCache = new Map()"), "studio detail paging must reuse versioned work sets");
 assert(studioService.includes("sortedByMode: new Map()"), "studio detail paging must reuse sorted work lists");
 assert(studioService.includes("ensureDetailCaches(stamp)"), "studio detail caches must follow the catalog version stamp");
+assert(studioService.includes("studioSummaryRowsCache?.stamp === stamp"), "studio indexes must reuse versioned aggregate rows");
+assert(catalogRuntimeSource.includes("deps.studioService.prewarm()"), "studio aggregate rows must be ready before the first navigation");
 assert(!studioService.includes("enrichLocalWorksWithActorMovieIndex(linkRows"), "studio details must not rerun actor-movie code matching for core library works");
 assert(rankingServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "ranking pages must batch-hydrate visible local work metadata");
 assert(rankingServiceSource.includes("hydrateRankingCoverUrls(rankingRows)"), "ranking pages must batch-hydrate cover URLs after the fast list query");
@@ -273,6 +277,7 @@ const fanhaoRuntime = read("src/modules/fanhao/server/runtime.js");
 assert(libraryRuntime.includes("prewarmLibraryPeoplePayloads(requestDeps())"), "FanHao must prepare people payloads before the first library request");
 assert(personListServiceSource.includes("const mainPeopleCache = new Map()"), "main and western people scopes must remain cached independently");
 assert(fanhaoRuntime.includes("library.start();"), "FanHao startup must prewarm the library response path");
+assert(fanhaoRuntime.includes("catalog.start();"), "FanHao startup must prewarm the catalog response path");
 const workInfoService = read("src/modules/fanhao/server/works/work-info-service.js");
 const workPresenterService = read("src/modules/fanhao/server/works/presenter-service.js");
 const workMediaRoutes = read("src/modules/fanhao/server/works/routes-media.js");
@@ -441,6 +446,54 @@ assert.equal(repeatedPersonDetail.filter, "rated", "prepared person details must
 personDetailDataStamp = "person-v2";
 cachedPersonDetailService.detailPayload("person-1", personDetailUrl);
 assert.equal(personDetailSourceBuildCount, 2, "person data changes must invalidate prepared detail sources");
+
+let studioDataStamp = "studio-v1";
+let studioCatalogReadCount = 0;
+let studioSummaryReadCount = 0;
+const cachedStudioService = createStudioService({
+  clampInteger: (value, fallback, min, max) => Math.max(min, Math.min(max, Number(value ?? fallback))),
+  getCoreDb: () => ({
+    prepare(sql) {
+      if (sql.includes("SELECT COUNT(*) FROM makers")) {
+        return {
+          get() {
+            studioCatalogReadCount += 1;
+            return { maker_count: 2, series_count: 0, link_count: 12 };
+          }
+        };
+      }
+      if (sql.includes("FROM makers m")) {
+        return {
+          all() {
+            studioSummaryReadCount += 1;
+            return [
+              { maker_id: "1", name: "Studio One", normalized_name: "studio one", javdb_url: "", source: "test", work_count: 10, local_work_count: 8, first_release_date: "2024-01-01", latest_release_date: "2026-01-01" },
+              { maker_id: "2", name: "Studio Two", normalized_name: "studio two", javdb_url: "", source: "test", work_count: 2, local_work_count: 1, first_release_date: "2025-01-01", latest_release_date: "2026-01-02" }
+            ];
+          }
+        };
+      }
+      throw new Error(`unexpected studio query: ${sql.slice(0, 80)}`);
+    }
+  }),
+  getLibrary: () => ({ worksById: new Map() }),
+  getStamp: () => studioDataStamp,
+  pagedWorksPayload: () => ({}),
+  publicRemoteUrl: (value) => value,
+  sortWorkList: (works) => works,
+  workFacets: () => ({})
+});
+cachedStudioService.prewarm();
+const studioSummaryUrl = new URL("http://127.0.0.1/api/studios?limit=500");
+assert.equal(cachedStudioService.summaries(studioSummaryUrl).count, 2, "prewarmed studio indexes must preserve maker counts");
+cachedStudioService.summaries(studioSummaryUrl);
+assert.equal(studioSummaryReadCount, 1, "repeated studio indexes must reuse prewarmed aggregate rows");
+cachedStudioService.summaries(new URL("http://127.0.0.1/api/studios?limit=500&q=studio"));
+assert.equal(studioSummaryReadCount, 2, "studio keyword searches must preserve their direct SQL semantics");
+studioDataStamp = "studio-v2";
+cachedStudioService.summaries(studioSummaryUrl);
+assert.equal(studioCatalogReadCount, 2, "studio data changes must refresh catalog metadata");
+assert.equal(studioSummaryReadCount, 3, "studio data changes must invalidate aggregate rows");
 
 let rankingDataStamp = "ranking-v1";
 let rankingListReadCount = 0;

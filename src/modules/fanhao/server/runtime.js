@@ -21,6 +21,7 @@ export function createFanhaoRuntime(deps) {
 
   function start() {
     library.start();
+    catalog.start();
     works.start();
   }
 

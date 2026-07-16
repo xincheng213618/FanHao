@@ -5,7 +5,12 @@ export function createCatalogRuntime(deps) {
     return routeCatalogApi(req, res, url, deps);
   }
 
+  function start() {
+    deps.studioService.prewarm();
+  }
+
   return {
-    routeApi
+    routeApi,
+    start
   };
 }
