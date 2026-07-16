@@ -7,6 +7,7 @@ import { publicPersonListItem } from "../src/modules/fanhao/server/people/person
 import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
+import { createVideoProbeService } from "../src/platform/server/video-probe-service.js";
 import { fetchPreparedImage } from "../android-client/www/js/image.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -442,5 +443,54 @@ try {
 } finally {
   globalThis.fetch = originalFetch;
 }
+
+let videoProbeStatCount = 0;
+let videoProbeExecCount = 0;
+let resolveVideoProbeStat;
+const pendingVideoProbeStat = new Promise((resolve) => {
+  resolveVideoProbeStat = resolve;
+});
+const videoProbeService = createVideoProbeService({
+  directVideoExts: new Set([".mp4", ".m4v", ".webm"]),
+  execFileFn: (_command, _args, _options, callback) => {
+    videoProbeExecCount += 1;
+    callback(null, JSON.stringify({
+      format: { duration: "123.5" },
+      streams: [
+        { codec_type: "video", codec_name: "h264", width: 1920, height: 1080 },
+        { codec_type: "audio", codec_name: "aac" }
+      ]
+    }));
+  },
+  ffprobePath: "ffprobe",
+  hasNvenc: false,
+  probeWaitMs: 1,
+  safeStat: () => null,
+  statFile: async () => {
+    videoProbeStatCount += 1;
+    return pendingVideoProbeStat;
+  }
+});
+const slowVideoFile = { id: "slow-video", path: "G:/slow/video.mp4", ext: ".mp4", type: "video" };
+const firstPlayInfo = await Promise.race([
+  videoProbeService.playInfoForFileAsync(slowVideoFile),
+  new Promise((_, reject) => setTimeout(() => reject(new Error("slow video probe blocked the request loop")), 100))
+]);
+assert.equal(firstPlayInfo.mode, "direct", "slow direct-video probes must return a usable fallback");
+assert.equal(firstPlayInfo.probePending, true, "slow video probes must expose their background preparation state");
+const duplicatePlayInfo = await videoProbeService.playInfoForFileAsync(slowVideoFile);
+assert.equal(duplicatePlayInfo.probePending, true, "duplicate slow video probes must remain bounded");
+assert.equal(videoProbeStatCount, 1, "duplicate video-probe requests must share one file stat");
+assert.equal(videoProbeExecCount, 0, "ffprobe must wait for the asynchronous file stat");
+
+resolveVideoProbeStat({ size: 1024, mtimeMs: 12345 });
+for (let attempt = 0; attempt < 10 && videoProbeExecCount < 1; attempt += 1) {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+assert.equal(videoProbeExecCount, 1, "the background video probe must continue after the API fallback returns");
+const cachedPlayInfo = await videoProbeService.playInfoForFileAsync(slowVideoFile);
+assert.equal(cachedPlayInfo.probePending, false, "completed video probes must serve from cache");
+assert.equal(cachedPlayInfo.duration, 123.5, "completed video probes must preserve duration metadata");
+assert.equal(cachedPlayInfo.videoCodec, "h264", "completed video probes must preserve codec metadata");
 
 console.log("fanhao-structure: ok");

@@ -18,12 +18,12 @@ export function createWorkDetailService({
     return { work: publicItem, person: person ? publicPerson(person) : null };
   }
 
-  function playInfoPayload(videoId) {
+  async function playInfoPayload(videoId) {
     const galleryItem = galleryMediaService.byId(videoId);
     const file = galleryItem ? galleryMediaService.videoFile(galleryItem) : library.filesById.get(videoId);
     if (!file || file.type !== "video") return null;
 
-    return videoProbeService.playInfoForFile(file, videoId, galleryItem ? { streamBase: "/media/gallery-video" } : {});
+    return videoProbeService.playInfoForFileAsync(file, videoId, galleryItem ? { streamBase: "/media/gallery-video" } : {});
   }
 
   function serveInfoFile(res, fileId) {
