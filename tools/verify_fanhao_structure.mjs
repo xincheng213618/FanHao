@@ -129,23 +129,28 @@ assert(webStudioPage.includes("loadMoreStudioWorks"), "Web studio details must p
 assert(!webStudioPage.includes('limit: "2000"'), "Web studio details must not fetch every work before first render");
 assert(webApp.includes("hasStudioServerMore"), "Web work rendering must expose studio continuation");
 const studioService = read("src/modules/fanhao/server/catalog/studio-service.js");
+const rankingServiceSource = read("src/modules/fanhao/server/catalog/ranking-service.js");
 assert(studioService.includes("const makers = rows.map(publicMakerSummary)"), "studio index responses must use lightweight maker summaries");
 assert(!studioService.includes("rows.map((row) => publicMaker(row, seriesRowsForMaker"), "studio indexes must not run one series query per maker");
 assert(studioService.includes("const studioWorksCache = new Map()"), "studio detail paging must reuse versioned work sets");
 assert(studioService.includes("sortedByMode: new Map()"), "studio detail paging must reuse sorted work lists");
 assert(studioService.includes("ensureDetailCaches(stamp)"), "studio detail caches must follow the catalog version stamp");
+assert(rankingServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "ranking pages must batch-hydrate visible local work metadata");
 const workInfoServiceSource = read("src/modules/fanhao/server/works/work-info-service.js");
 const workQueryServiceSource = read("src/modules/fanhao/server/works/work-query-service.js");
+const workCodeIndexServiceSource = read("src/modules/fanhao/server/works/work-code-index-service.js");
 assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info details must support page-level batch hydration");
 assert(workQueryServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "work lists must batch-hydrate detail rows before presentation");
 assert(workInfoServiceSource.includes("function facetRowsById()"), "work-list facets must use a compact metadata index");
 assert(workQueryServiceSource.includes("staticWorkFacets(works);"), "compact work facets must be ready before the first list request");
+assert(workCodeIndexServiceSource.includes("localWorkCodeIndexCache = { stamp, keys, rows }"), "local code membership and work lookup must share one catalog pass");
 const workImageServiceSource = read("src/modules/fanhao/server/works/image-service.js");
 assert(workImageServiceSource.includes("FROM local_works lw"), "work-cover facets must index only local catalog entries");
 assert(!workImageServiceSource.includes("SELECT DISTINCT CAST(owner_id AS TEXT)"), "work-cover facets must not hydrate every historical image owner");
 const mediaResponseServiceSource = read("src/platform/server/media-response-service.js");
 assert(mediaResponseServiceSource.includes("cachedRemoteImageUrls(remoteUrls)"), "visible work pages must batch-check warmed remote images");
 assert(!mediaResponseServiceSource.includes("remoteImageCacheRow(remoteUrl)?.image_blob || remoteImageWarmQueued"), "remote-image warming must not read cached blobs on the response path");
+assert(!mediaResponseServiceSource.includes("WHERE image_blob IS NOT NULL AND url IN"), "remote-image warming must use the URL covering index instead of opening cached blobs");
 
 const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");

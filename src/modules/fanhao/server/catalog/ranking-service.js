@@ -10,6 +10,7 @@ export function createRankingService({
   maxWorkLimit,
   normalizeWorkCode,
   parseJsonTextArray,
+  prewarmWorkInfoDetails,
   prewarmRemoteImagesForWorks,
   proxiedRemoteImageUrl,
   publicWork,
@@ -204,10 +205,13 @@ export function createRankingService({
     const sourceWorks = onlyMissing ? allWorks.filter((work) => work.missingLocal) : allWorks;
     const limit = clampInteger(url.searchParams.get("limit"), maxWorkLimit, 1, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-    const page = sourceWorks.slice(offset, offset + limit).map((work) => publicWork(work));
+    const pageSource = sourceWorks.slice(offset, offset + limit);
+    prewarmWorkInfoDetails(pageSource);
+    const sourceById = new Map(pageSource.map((work) => [work.id, work]));
+    const page = pageSource.map((work) => publicWork(work));
     prewarmRemoteImagesForWorks(page);
     for (const work of page) {
-      const source = sourceWorks.find((item) => item.id === work.id);
+      const source = sourceById.get(work.id);
       if (source?.ranking) work.ranking = source.ranking;
     }
     return {

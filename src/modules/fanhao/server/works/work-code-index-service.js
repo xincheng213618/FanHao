@@ -5,8 +5,7 @@ export function createWorkCodeIndexService({
   storedWorkCodeKey,
   workInfoRow
 }) {
-  let localWorkCodeKeyCache = null;
-  let localWorkByCodeKeyCache = null;
+  let localWorkCodeIndexCache = null;
 
   function workCodeKeys(work) {
     const info = work.infoSummary?.code ? null : workInfoRow(work.id);
@@ -40,37 +39,12 @@ export function createWorkCodeIndexService({
     return keys;
   }
 
-  function localCodeKeys() {
+  function localWorkCodeIndex() {
     const library = getLibrary();
     const stamp = getStamp();
-    if (localWorkCodeKeyCache?.stamp === stamp) return localWorkCodeKeyCache.keys;
+    if (localWorkCodeIndexCache?.stamp === stamp) return localWorkCodeIndexCache;
 
     const keys = new Set();
-    for (const work of library.worksById.values()) {
-      const values = [
-        work.infoSummary?.code,
-        work.title,
-        work.directoryName,
-        work.relativePath,
-        ...(work.videos || []).flatMap((video) => [video.name, video.title, video.relativePath]),
-        ...(work.images || []).flatMap((image) => [image.name, image.title]),
-        ...(work.infos || []).flatMap((infoFile) => [infoFile.name, infoFile.title])
-      ];
-
-      for (const value of values) {
-        const key = looseWorkCodeKey(value);
-        if (key) keys.add(key);
-      }
-    }
-    localWorkCodeKeyCache = { stamp, keys };
-    return keys;
-  }
-
-  function localWorkByCodeKey() {
-    const library = getLibrary();
-    const stamp = getStamp();
-    if (localWorkByCodeKeyCache?.stamp === stamp) return localWorkByCodeKeyCache.rows;
-
     const rows = new Map();
     for (const work of library.worksById.values()) {
       const values = [
@@ -85,12 +59,21 @@ export function createWorkCodeIndexService({
 
       for (const value of values) {
         const key = looseWorkCodeKey(value);
-        if (key && !rows.has(key)) rows.set(key, work);
+        if (!key) continue;
+        keys.add(key);
+        if (!rows.has(key)) rows.set(key, work);
       }
     }
+    localWorkCodeIndexCache = { stamp, keys, rows };
+    return localWorkCodeIndexCache;
+  }
 
-    localWorkByCodeKeyCache = { stamp, rows };
-    return rows;
+  function localCodeKeys() {
+    return localWorkCodeIndex().keys;
+  }
+
+  function localWorkByCodeKey() {
+    return localWorkCodeIndex().rows;
   }
 
   function combinedLocalCodeKeys(extraKeys = new Set()) {
@@ -103,8 +86,7 @@ export function createWorkCodeIndexService({
   }
 
   function invalidate() {
-    localWorkCodeKeyCache = null;
-    localWorkByCodeKeyCache = null;
+    localWorkCodeIndexCache = null;
   }
 
   return {

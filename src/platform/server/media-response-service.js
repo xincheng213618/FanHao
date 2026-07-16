@@ -400,10 +400,10 @@ export function createMediaResponseService({
     }
   }
 
-  function remoteImageCacheHasBlob(remoteUrl) {
+  function remoteImageCacheHasEntry(remoteUrl) {
     try {
       return Boolean(getCoreDb()
-        .prepare("SELECT 1 FROM remote_image_cache WHERE url = ? AND image_blob IS NOT NULL LIMIT 1")
+        .prepare("SELECT 1 FROM remote_image_cache WHERE url = ? LIMIT 1")
         .get(remoteUrl));
     } catch (error) {
       warn("[remote-image-cache]", error.message || error);
@@ -419,7 +419,7 @@ export function createMediaResponseService({
       try {
         const placeholders = batch.map(() => "?").join(", ");
         const rows = getCoreDb()
-          .prepare(`SELECT url FROM remote_image_cache WHERE image_blob IS NOT NULL AND url IN (${placeholders})`)
+          .prepare(`SELECT url FROM remote_image_cache WHERE url IN (${placeholders})`)
           .all(...batch);
         for (const row of rows) cached.add(row.url);
       } catch (error) {
@@ -489,7 +489,7 @@ export function createMediaResponseService({
   }
 
   function enqueueRemoteImageWarm(remoteUrl, options = {}) {
-    if ((!options.skipCacheCheck && remoteImageCacheHasBlob(remoteUrl)) || remoteImageWarmQueued.has(remoteUrl)) return;
+    if ((!options.skipCacheCheck && remoteImageCacheHasEntry(remoteUrl)) || remoteImageWarmQueued.has(remoteUrl)) return;
     remoteImageWarmQueued.add(remoteUrl);
     remoteImageWarmQueue.push(remoteUrl);
     drainRemoteImageWarmQueue();
@@ -512,7 +512,7 @@ export function createMediaResponseService({
   }
 
   async function warmRemoteImage(remoteUrl) {
-    if (remoteImageCacheHasBlob(remoteUrl)) return;
+    if (remoteImageCacheHasEntry(remoteUrl)) return;
     const downloaded = await downloadRemoteImage(remoteUrl);
     const now = new Date().toISOString();
     getCoreDb()

@@ -460,6 +460,7 @@ const rankingService = createRankingService({
   maxWorkLimit: MAX_WORK_LIMIT,
   normalizeWorkCode,
   parseJsonTextArray,
+  prewarmWorkInfoDetails,
   prewarmRemoteImagesForWorks,
   proxiedRemoteImageUrl,
   publicWork,
