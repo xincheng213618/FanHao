@@ -29,8 +29,8 @@ const PRIMARY_LABELS = {
   shortVideos: "短视频",
   tools: "我的"
 };
-const FAST_WORK_LIMIT = 720;
-const FAST_WORK_STEP = 720;
+const FAST_WORK_LIMIT = 80;
+const FAST_WORK_STEP = 80;
 const FAST_CHANNEL_LIMIT = 720;
 const FAST_CHANNEL_STEP = 720;
 const PHOTO_CHANNEL_LIMIT = 24;
@@ -1400,9 +1400,9 @@ function defaultWorksLimitForView(view) {
   const fast = isFastServerUrl();
   if (view === "rankings") return 120;
   if (view === "works" || view === "vr" || view === "studioDetail") return fast ? FAST_WORK_LIMIT : 60;
-  if (view === "search" || view === "personDetail") return fast ? 480 : 48;
-  if (view === "favorites" || view === "history") return fast ? 480 : 48;
-  return fast ? 160 : 40;
+  if (view === "search" || view === "personDetail") return fast ? FAST_WORK_LIMIT : 48;
+  if (view === "favorites" || view === "history") return fast ? FAST_WORK_LIMIT : 48;
+  return fast ? FAST_WORK_LIMIT : 40;
 }
 
 function defaultChannelLimitForView(view, params = currentViewParams) {
