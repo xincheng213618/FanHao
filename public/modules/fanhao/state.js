@@ -24,7 +24,6 @@ export function createFanhaoState({ readStoredFlag }) {
     lastProgressReport: 0,
     searchReturnView: "people",
     searchTimer: null,
-    searchSeq: 0,
     searchPeople: [],
     searchQuery: "",
     searchFacets: null,

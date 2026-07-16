@@ -7,6 +7,7 @@ import {
   createPeoplePage,
   createPersonProfile,
   createRankingPage,
+  createSearchRequestService,
   createStudioPage,
   createWorkDetailPage,
   selectVisibleWorks
@@ -119,6 +120,12 @@ const COVER_RETRY_DELAYS = [700, 1400, 2400, 4000, 6500, 9000];
 const initialParams = new URLSearchParams(window.location.search);
 const isAndroidClient = initialParams.get("client") === "android";
 const api = createApiClient({ isAndroidClient });
+const searchRequests = createSearchRequestService({
+  api,
+  filter: serializedWorkFilterMode,
+  pageSize: searchPageSize,
+  sort: () => state.sortMode || "releaseDesc"
+});
 
 async function initializeModuleNavigation() {
   try {
@@ -688,6 +695,7 @@ function setActiveView(view, options = {}) {
     return;
   }
   if (view !== "people") peoplePage.cancelPendingSelection();
+  if (view !== "search") searchRequests.cancel();
   const previousView = state.activeView;
   state.activeView = view;
   if (view !== "rankings" && state.sortMode === "ranking") {
@@ -1355,6 +1363,7 @@ function resetPersonPaging() {
 
 function clearWorkSearch() {
   window.clearTimeout(state.searchTimer);
+  searchRequests.cancel();
   state.workQuery = "";
   els.workSearch.value = "";
 }
@@ -1401,6 +1410,7 @@ async function loadSearchResults(query, options = {}) {
     els.workSearch.value = normalizedQuery;
   }
   if (!normalizedQuery) {
+    searchRequests.cancel();
     state.searchPeople = [];
     state.searchQuery = "";
     state.searchFacets = null;
@@ -1440,10 +1450,9 @@ async function loadSearchResults(query, options = {}) {
   state.searchFacets = null;
   state.searchLoadingMore = false;
 
-  const seq = ++state.searchSeq;
   try {
-    const data = await fetchSearchPage(normalizedQuery, 0);
-    if (seq !== state.searchSeq) return;
+    const data = await searchRequests.fetchPage(normalizedQuery, 0);
+    if (!data) return;
     state.selectedPerson = null;
     state.personWorksTotal = 0;
     state.personWorksFacets = null;
@@ -1460,24 +1469,12 @@ async function loadSearchResults(query, options = {}) {
       routeOverrides: { view: "search", personId: "", q: normalizedQuery, workId: "", videoId: "" }
     });
   } catch (error) {
-    if (seq !== state.searchSeq) return;
     renderEmpty(error.message);
   }
 }
 
 function searchPageSize() {
   return Math.max(40, Math.min(WORK_PAGE_SIZE_BY_ACCESS.local, Number(state.workPageSize) || WORK_PAGE_SIZE_BY_ACCESS.remote));
-}
-
-async function fetchSearchPage(query, offset) {
-  const params = new URLSearchParams({
-    q: query,
-    limit: String(searchPageSize()),
-    offset: String(offset || 0),
-    sort: state.sortMode || "releaseDesc",
-    filter: serializedWorkFilterMode()
-  });
-  return api(`/api/search?${params}`);
 }
 
 async function loadMoreSearchResults(button) {
@@ -1490,8 +1487,11 @@ async function loadMoreSearchResults(button) {
     button.textContent = "正在加载";
   }
 
+  const query = state.searchQuery;
+  const offset = state.works.length;
   try {
-    const data = await fetchSearchPage(state.searchQuery, state.works.length);
+    const data = await searchRequests.fetchPage(query, offset);
+    if (!data || state.activeView !== "search" || state.searchQuery !== query) return;
     const seen = new Set(state.works.map((work) => work.id));
     const nextWorks = (data.works || []).filter((work) => !seen.has(work.id));
     state.works.push(...nextWorks);

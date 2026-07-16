@@ -1,3 +1,5 @@
+import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
+
 export function createPeoplePage(deps) {
   const {
     api,
@@ -28,28 +30,8 @@ export function createPeoplePage(deps) {
 
   let peopleIndexLoadObserver = null;
   let peopleIndexLoadPending = false;
-  let personDetailAbortController = null;
-  let personDetailRequestSeq = 0;
-
-function beginPersonDetailRequest() {
-  personDetailAbortController?.abort();
-  const controller = new AbortController();
-  const requestSeq = ++personDetailRequestSeq;
-  personDetailAbortController = controller;
-  return {
-    signal: controller.signal,
-    isCurrent: () => personDetailAbortController === controller && personDetailRequestSeq === requestSeq,
-    finish: () => {
-      if (personDetailAbortController === controller) personDetailAbortController = null;
-    }
-  };
-}
-
-function cancelPendingSelection() {
-  personDetailRequestSeq += 1;
-  personDetailAbortController?.abort();
-  personDetailAbortController = null;
-}
+  const personDetailRequests = createLatestRequestGate();
+  const cancelPendingSelection = personDetailRequests.cancel;
 
 function filteredPeople() {
   return state.people.filter((person) => person?.actorProfile?.gender !== "male");
@@ -232,7 +214,7 @@ function createPersonIndexCard(person) {
 }
 
 async function selectPerson(personId, options = {}) {
-  const request = beginPersonDetailRequest();
+  const request = personDetailRequests.begin();
   disconnectPeopleIndexAutoload();
   if (state.activeView === "people" && !state.selectedPersonId && options.captureIndexScroll !== false) {
     state.peopleIndexScrollTop = currentPageScrollTop();
