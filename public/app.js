@@ -10,7 +10,7 @@ import {
   createStudioPage,
   createWorkDetailPage,
   selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260717-fanhao-perf-04";
+} from "./modules/fanhao/index.js?v=20260717-fanhao-perf-05";
 import { createAdminModal } from "./modules/system/admin-modal.js?v=20260712-module-settings-02";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
 
@@ -719,14 +719,14 @@ function setActiveView(view, options = {}) {
   }
 
   if (view === "studios") {
-    loadStudios();
+    studioPage.loadStudios();
     syncRouteAfterNavigation(options);
     return;
   }
 
   if (view === "vr") {
     if (previousView !== "vr" && !options.keepFilter) state.filterMode = "all";
-    loadVrWorks();
+    collectionPage.loadVrWorks();
     syncRouteAfterNavigation(options);
     return;
   }
@@ -778,18 +778,6 @@ function renderFavoriteFolderControls() {
 
 async function loadHistory() {
   await collectionPage.loadHistory();
-}
-
-async function loadVrWorks() {
-  await collectionPage.loadVrWorks();
-}
-
-async function loadStudios() {
-  await studioPage.loadStudios();
-}
-
-async function loadStudioDetail(studioId, seriesId = "all") {
-  await studioPage.loadStudioDetail(studioId, seriesId);
 }
 
 async function loadRankings() {
@@ -940,6 +928,14 @@ function handleSortModeChange(event) {
   }
   if (state.activeView === "rankings") {
     renderRankingStats();
+  }
+  if (state.activeView === "vr") {
+    collectionPage.loadVrWorks();
+    return;
+  }
+  if (state.activeView === "studios" && state.selectedStudio) {
+    studioPage.loadStudioDetail(state.selectedStudio.id, state.selectedStudioSeriesId);
+    return;
   }
   renderWorks();
 }
@@ -1579,7 +1575,9 @@ function renderWorks(emptyMessage = "没有匹配的作品。") {
   const hasPersonServerMore = state.activeView === "people" && state.selectedPersonId && state.works.length < state.personWorksTotal;
   const hasRankingServerMore = state.activeView === "rankings" && state.works.length < state.rankingTotal;
   const hasCollectionServerMore = ["favorites", "history"].includes(state.activeView) && state.works.length < state.collectionTotal;
-  const hasServerMore = hasSearchServerMore || hasPersonServerMore || hasRankingServerMore || hasCollectionServerMore;
+  const hasVrServerMore = state.activeView === "vr" && state.works.length < state.vrTotal;
+  const hasStudioServerMore = state.activeView === "studios" && state.selectedStudio && state.works.length < state.studioWorksTotal;
+  const hasServerMore = hasSearchServerMore || hasPersonServerMore || hasRankingServerMore || hasCollectionServerMore || hasVrServerMore || hasStudioServerMore;
   if (!works.length && !hasServerMore) {
     appendEmpty(emptyMessage);
     return;
@@ -1590,14 +1588,14 @@ function renderWorks(emptyMessage = "没有匹配的作品。") {
   if (nextIndex < visible.length) {
     scheduleRemainingWorkCards(visible, nextIndex, renderSeq, () => {
       if (visible.length < works.length || hasServerMore) {
-        appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore, hasRankingServerMore, hasCollectionServerMore });
+        appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore, hasRankingServerMore, hasCollectionServerMore, hasVrServerMore, hasStudioServerMore });
       }
     });
     return;
   }
 
   if (visible.length < works.length || hasServerMore) {
-    appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore, hasRankingServerMore, hasCollectionServerMore });
+    appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore, hasRankingServerMore, hasCollectionServerMore, hasVrServerMore, hasStudioServerMore });
   }
 }
 
@@ -1637,32 +1635,29 @@ function appendLoadMore(visibleCount, totalCount, options = {}) {
   const hasPersonServerMore = Boolean(options.hasPersonServerMore);
   const hasRankingServerMore = Boolean(options.hasRankingServerMore);
   const hasCollectionServerMore = Boolean(options.hasCollectionServerMore);
+  const hasVrServerMore = Boolean(options.hasVrServerMore);
+  const hasStudioServerMore = Boolean(options.hasStudioServerMore);
   const wrap = document.createElement("div");
   wrap.className = "load-more-row";
 
   const button = document.createElement("button");
   button.type = "button";
   button.className = "text-button";
-  const loadedCount =
-    state.activeView === "search"
-      ? Math.max(state.works.length, visibleCount)
-      : hasPersonServerMore
-        ? Math.max(state.works.length, visibleCount)
-        : hasRankingServerMore
-          ? Math.max(state.works.length, visibleCount)
-          : hasCollectionServerMore
-            ? Math.max(state.works.length, visibleCount)
-        : visibleCount;
-  const targetCount =
-    state.activeView === "search"
-      ? Math.max(state.searchTotal, totalCount)
-      : hasPersonServerMore
-        ? Math.max(state.personWorksTotal, totalCount)
-        : hasRankingServerMore
-          ? Math.max(state.rankingTotal, totalCount)
-          : hasCollectionServerMore
-            ? Math.max(state.collectionTotal, totalCount)
-        : totalCount;
+  const serverTotal = state.activeView === "search"
+    ? state.searchTotal
+    : hasPersonServerMore
+      ? state.personWorksTotal
+      : hasRankingServerMore
+        ? state.rankingTotal
+        : hasCollectionServerMore
+          ? state.collectionTotal
+          : hasVrServerMore
+            ? state.vrTotal
+            : hasStudioServerMore
+              ? state.studioWorksTotal
+              : null;
+  const loadedCount = serverTotal === null ? visibleCount : Math.max(state.works.length, visibleCount);
+  const targetCount = serverTotal === null ? totalCount : Math.max(serverTotal, totalCount);
   if (visibleCount < totalCount) {
     button.textContent =
       state.activeView === "search"
@@ -1685,6 +1680,10 @@ function appendLoadMore(visibleCount, totalCount, options = {}) {
       return rankingPage.loadMoreRankingWorks(button);
     } else if (hasCollectionServerMore) {
       return collectionPage.loadMoreCollectionWorks(button);
+    } else if (hasVrServerMore) {
+      return collectionPage.loadMoreVrWorks(button);
+    } else if (hasStudioServerMore) {
+      return studioPage.loadMoreStudioWorks(button);
     }
   };
   button.addEventListener("click", loadNext);

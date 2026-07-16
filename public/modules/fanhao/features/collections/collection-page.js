@@ -101,19 +101,47 @@ export function createCollectionPage(deps) {
     }
   }
 
-  async function loadVrWorks() {
-    els.workGrid.innerHTML = `<div class="empty-state">正在加载 VR 作品</div>`;
-    const params = new URLSearchParams({ filter: "vr", sort: state.sortMode || "releaseDesc", limit: "2000" });
+  async function loadVrWorks(options = {}) {
+    const append = Boolean(options.append);
+    if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载 VR 作品</div>`;
+    const params = new URLSearchParams({
+      filter: "vr",
+      sort: state.sortMode || "releaseDesc",
+      limit: String(collectionPageSize()),
+      offset: String(append ? state.works.length : 0)
+    });
     const data = await api(`/api/works?${params}`);
     resetSelection();
     state.selectedPersonId = null;
     state.selectedStudio = null;
     state.selectedStudioSeriesId = "all";
-    state.works = data.works || [];
-    resetWorkPaging();
-    setMainHeader("VR", `全库 VR 作品 · ${formatNumber(data.total ?? state.works.length)} 部`);
+    applyCollectionWorks(data.works || [], append);
+    state.vrTotal = data.total ?? data.count ?? state.works.length;
+    if (!append) resetWorkPaging();
+    setMainHeader("VR", `全库 VR 作品 · ${formatNumber(state.vrTotal)} 部`);
     renderStatsForWorks(state.works);
     renderWorks("没有 VR 作品。");
+  }
+
+  async function loadMoreVrWorks(button) {
+    if (state.vrLoadingMore || state.works.length >= state.vrTotal) return;
+    state.vrLoadingMore = true;
+    const originalText = button?.textContent || "";
+    if (button) {
+      button.disabled = true;
+      button.textContent = "正在加载";
+    }
+    try {
+      await loadVrWorks({ append: true });
+    } catch (error) {
+      if (button?.isConnected) button.textContent = error.message || "加载失败";
+    } finally {
+      state.vrLoadingMore = false;
+      if (button?.isConnected) {
+        button.disabled = false;
+        if (button.textContent === "正在加载") button.textContent = originalText;
+      }
+    }
   }
 
   function resetSelection() {
@@ -122,6 +150,7 @@ export function createCollectionPage(deps) {
     state.personWorksTotal = 0;
     state.personWorksFacets = null;
     state.collectionTotal = 0;
+    state.vrTotal = 0;
     hidePersonProfile();
   }
 
@@ -196,5 +225,5 @@ export function createCollectionPage(deps) {
     els.statsRow.append(wrap);
   }
 
-  return { loadFavorites, loadHistory, loadMoreCollectionWorks, loadVrWorks, renderFavoriteFolderControls };
+  return { loadFavorites, loadHistory, loadMoreCollectionWorks, loadMoreVrWorks, loadVrWorks, renderFavoriteFolderControls };
 }

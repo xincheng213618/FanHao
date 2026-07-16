@@ -112,6 +112,14 @@ const webCollectionPage = read("public/modules/fanhao/features/collections/colle
 assert(webCollectionPage.includes('params.set("limit", String(collectionPageSize()))'), "Web collections must request a bounded first page");
 assert(webCollectionPage.includes("loadMoreCollectionWorks"), "Web collections must preserve server-side continuation");
 assert(webApp.includes("hasCollectionServerMore"), "Web work rendering must expose collection continuation");
+assert(webCollectionPage.includes("loadMoreVrWorks"), "Web VR lists must preserve server-side continuation");
+assert(!webCollectionPage.includes('limit: "2000"'), "Web VR lists must not fetch thousands of works before first render");
+assert(webApp.includes("hasVrServerMore"), "Web work rendering must expose VR continuation");
+const webStudioPage = read("public/modules/fanhao/features/studios/studio-page.js");
+assert(webStudioPage.includes("limit: String(studioPageSize())"), "Web studio details must request a bounded first page");
+assert(webStudioPage.includes("loadMoreStudioWorks"), "Web studio details must preserve server-side continuation");
+assert(!webStudioPage.includes('limit: "2000"'), "Web studio details must not fetch every work before first render");
+assert(webApp.includes("hasStudioServerMore"), "Web work rendering must expose studio continuation");
 const studioService = read("src/modules/fanhao/server/catalog/studio-service.js");
 assert(studioService.includes("const makers = rows.map(publicMakerSummary)"), "studio index responses must use lightweight maker summaries");
 assert(!studioService.includes("rows.map((row) => publicMaker(row, seriesRowsForMaker"), "studio indexes must not run one series query per maker");

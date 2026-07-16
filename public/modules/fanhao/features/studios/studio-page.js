@@ -1,7 +1,13 @@
 export function createStudioPage(deps) {
   const { api, appendEmpty, els, formatNumber, hidePersonProfile, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
+  let studioDetailRequestSeq = 0;
+
+  function studioPageSize() {
+    return Math.max(40, Math.min(96, Number(state.workPageSize) || 48));
+  }
 
   async function loadStudios() {
+    studioDetailRequestSeq += 1;
     els.workGrid.innerHTML = `<div class="empty-state">正在加载片商</div>`;
     const data = await api("/api/studios?limit=500");
     resetSelection();
@@ -10,19 +16,61 @@ export function createStudioPage(deps) {
     renderIndex();
   }
 
-  async function loadStudioDetail(studioId, seriesId = "all") {
-    const params = new URLSearchParams({ seriesId, sort: state.sortMode || "releaseDesc", limit: "2000" });
+  async function loadStudioDetail(studioId, seriesId = "all", options = {}) {
+    const append = Boolean(options.append);
+    const requestSeq = ++studioDetailRequestSeq;
+    if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载片商作品</div>`;
+    const params = new URLSearchParams({
+      seriesId,
+      sort: state.sortMode || "releaseDesc",
+      limit: String(studioPageSize()),
+      offset: String(append ? state.works.length : 0)
+    });
     const data = await api(`/api/studios/${encodeURIComponent(studioId)}?${params}`);
-    state.selectedStudio = data.studio || null;
+    if (requestSeq !== studioDetailRequestSeq) return;
+    if (!append) resetSelection();
+    state.selectedStudio = data.studio || state.selectedStudio || null;
     state.selectedStudioSeriesId = data.selectedSeriesId || seriesId || "all";
-    state.works = data.works || [];
-    resetWorkPaging();
+    applyStudioWorks(data.works || [], append);
+    state.studioWorksTotal = data.total ?? data.count ?? state.works.length;
+    if (!append) resetWorkPaging();
     const studio = state.selectedStudio;
     const selectedSeries = (studio?.series || []).find((item) => item.id === state.selectedStudioSeriesId);
-    setMainHeader(studio?.name || "片商", selectedSeries ? `${selectedSeries.name} · ${formatNumber(data.total || 0)} 部` : `${formatNumber(data.total || 0)} 部本地作品`);
+    setMainHeader(studio?.name || "片商", selectedSeries ? `${selectedSeries.name} · ${formatNumber(state.studioWorksTotal)} 部` : `${formatNumber(state.studioWorksTotal)} 部本地作品`);
     renderStatsForWorks(state.works);
     renderSeriesControls(studio);
     renderWorks("这个片商暂无本地作品。");
+  }
+
+  function applyStudioWorks(nextWorks, append) {
+    if (!append) {
+      state.works = nextWorks;
+      return;
+    }
+    const seen = new Set(state.works.map((work) => work.id));
+    state.works.push(...nextWorks.filter((work) => !seen.has(work.id)));
+    state.workVisibleLimit += studioPageSize();
+  }
+
+  async function loadMoreStudioWorks(button) {
+    if (state.studioWorksLoadingMore || state.works.length >= state.studioWorksTotal || !state.selectedStudio) return;
+    state.studioWorksLoadingMore = true;
+    const originalText = button?.textContent || "";
+    if (button) {
+      button.disabled = true;
+      button.textContent = "正在加载";
+    }
+    try {
+      await loadStudioDetail(state.selectedStudio.id, state.selectedStudioSeriesId, { append: true });
+    } catch (error) {
+      if (button?.isConnected) button.textContent = error.message || "加载失败";
+    } finally {
+      state.studioWorksLoadingMore = false;
+      if (button?.isConnected) {
+        button.disabled = false;
+        if (button.textContent === "正在加载") button.textContent = originalText;
+      }
+    }
   }
 
   function resetSelection() {
@@ -30,6 +78,7 @@ export function createStudioPage(deps) {
     state.selectedPerson = null;
     state.selectedStudio = null;
     state.selectedStudioSeriesId = "all";
+    state.studioWorksTotal = 0;
     state.works = [];
     state.searchPeople = [];
     state.personWorksTotal = 0;
@@ -87,5 +136,5 @@ export function createStudioPage(deps) {
     return button;
   }
 
-  return { loadStudios, loadStudioDetail };
+  return { loadStudios, loadMoreStudioWorks, loadStudioDetail };
 }
