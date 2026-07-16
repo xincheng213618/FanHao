@@ -493,7 +493,7 @@ const studioService = createStudioService({
   getCoreDb,
   getLibrary: () => library,
   getStamp: studioCatalogStamp,
-  pagedWorksPayload,
+  pagedWorksPayload, prewarmCoreWorkCovers, prewarmWorkInfoDetails,
   publicRemoteUrl,
   sortWorkList,
   workFacets

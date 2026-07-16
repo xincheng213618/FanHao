@@ -186,8 +186,10 @@ const loadMorePeopleSource = /function loadMorePeopleIndex\(\)\s*\{([\s\S]*?)\n\
 assert(loadMorePeopleSource.includes("loadMoreRow.before(fragment)"), "people pagination must append cards without replacing the grid");
 assert(!loadMorePeopleSource.includes("renderPeopleIndex()"), "people pagination must not rerender the full index");
 const fanhaoStyles = read("public/modules/fanhao/styles.css");
+const rootStyles = read("public/styles.css");
 const personCardStyles = /\.person-index-card\s*\{([\s\S]*?)\n\}/.exec(fanhaoStyles)?.[1] || "";
 assert(!personCardStyles.includes("content-visibility"), "people cards must not flash in while scrolling");
+assert(rootStyles.includes('modules/fanhao/styles.css?v=20260717-studio-detail-01'), "FanHao style changes must use a fresh browser cache key");
 assert(webRankingPage.includes("limit: String(rankingPageSize())"), "Web rankings must request a bounded first page");
 assert(webRankingPage.includes("loadMoreRankingWorks"), "Web rankings must keep server-side continuation available");
 assert(!webRankingPage.includes('limit: "1000"'), "Web rankings must not fetch the entire list before first render");
@@ -200,9 +202,15 @@ assert(webCollectionPage.includes("loadMoreVrWorks"), "Web VR lists must preserv
 assert(!webCollectionPage.includes('limit: "2000"'), "Web VR lists must not fetch thousands of works before first render");
 assert(webApp.includes("hasVrServerMore"), "Web work rendering must expose VR continuation");
 const webStudioPage = read("public/modules/fanhao/features/studios/studio-page.js");
+const studioSeriesControlStyles = /\.studio-series-controls \.stat-filter-group\s*\{([\s\S]*?)\n\}/.exec(fanhaoStyles)?.[1] || "";
 assert(webStudioPage.includes("limit: String(studioPageSize())"), "Web studio details must request a bounded first page");
+assert(webStudioPage.includes("const STUDIO_DESKTOP_PAGE_SIZE = 48"), "Web studio details must keep desktop first payloads compact");
+assert(webStudioPage.includes("const STUDIO_MOBILE_PAGE_SIZE = 32"), "Web studio details must keep mobile first payloads compact");
+assert(webStudioPage.includes('globalThis.matchMedia?.("(max-width: 720px)")'), "Web studio details must use the smaller mobile first page");
 assert(webStudioPage.includes("loadMoreStudioWorks"), "Web studio details must preserve server-side continuation");
 assert(!webStudioPage.includes('limit: "2000"'), "Web studio details must not fetch every work before first render");
+assert(studioSeriesControlStyles.includes("flex-wrap: nowrap"), "studio series filters must stay on one compact row");
+assert(studioSeriesControlStyles.includes("overflow-x: auto"), "studio series filters must remain reachable by horizontal scrolling");
 assert(webApp.includes("hasStudioServerMore"), "Web work rendering must expose studio continuation");
 const studioService = read("src/modules/fanhao/server/catalog/studio-service.js");
 const catalogRuntimeSource = read("src/modules/fanhao/server/catalog/runtime.js");
@@ -214,6 +222,9 @@ assert(studioService.includes("const studioWorksCache = new Map()"), "studio det
 assert(studioService.includes("sortedByMode: new Map()"), "studio detail paging must reuse sorted work lists");
 assert(studioService.includes("ensureDetailCaches(stamp)"), "studio detail caches must follow the catalog version stamp");
 assert(studioService.includes("studioSummaryRowsCache?.stamp === stamp"), "studio indexes must reuse versioned aggregate rows");
+assert(studioService.includes("prewarmDetails(cachedSummaryRows(sync.stamp))"), "studio startup must prepare detail sources before the first selection");
+assert(studioService.includes("prewarmCoreWorkCovers(pageWorks)"), "studio startup must batch-hydrate first-page covers");
+assert(studioService.includes("prewarmWorkInfoDetails(pageWorks)"), "studio startup must batch-hydrate first-page metadata");
 assert(catalogRuntimeSource.includes("deps.studioService.prewarm()"), "studio aggregate rows must be ready before the first navigation");
 assert(!studioService.includes("enrichLocalWorksWithActorMovieIndex(linkRows"), "studio details must not rerun actor-movie code matching for core library works");
 assert(rankingServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "ranking pages must batch-hydrate visible local work metadata");
@@ -450,6 +461,16 @@ assert.equal(personDetailSourceBuildCount, 2, "person data changes must invalida
 let studioDataStamp = "studio-v1";
 let studioCatalogReadCount = 0;
 let studioSummaryReadCount = 0;
+let studioMakerDetailReadCount = 0;
+let studioSeriesReadCount = 0;
+let studioWorksReadCount = 0;
+let studioSortCount = 0;
+let studioCoverPrewarmCount = 0;
+let studioInfoPrewarmCount = 0;
+const studioRows = [
+  { maker_id: "1", name: "Studio One", normalized_name: "studio one", javdb_url: "", source: "test", work_count: 10, local_work_count: 8, first_release_date: "2024-01-01", latest_release_date: "2026-01-01" },
+  { maker_id: "2", name: "Studio Two", normalized_name: "studio two", javdb_url: "", source: "test", work_count: 2, local_work_count: 1, first_release_date: "2025-01-01", latest_release_date: "2026-01-02" }
+];
 const cachedStudioService = createStudioService({
   clampInteger: (value, fallback, min, max) => Math.max(min, Math.min(max, Number(value ?? fallback))),
   getCoreDb: () => ({
@@ -466,10 +487,27 @@ const cachedStudioService = createStudioService({
         return {
           all() {
             studioSummaryReadCount += 1;
-            return [
-              { maker_id: "1", name: "Studio One", normalized_name: "studio one", javdb_url: "", source: "test", work_count: 10, local_work_count: 8, first_release_date: "2024-01-01", latest_release_date: "2026-01-01" },
-              { maker_id: "2", name: "Studio Two", normalized_name: "studio two", javdb_url: "", source: "test", work_count: 2, local_work_count: 1, first_release_date: "2025-01-01", latest_release_date: "2026-01-02" }
-            ];
+            return studioRows;
+          },
+          get(makerId) {
+            studioMakerDetailReadCount += 1;
+            return studioRows.find((row) => Number(row.maker_id) === Number(makerId)) || null;
+          }
+        };
+      }
+      if (sql.includes("FROM series s")) {
+        return {
+          all() {
+            studioSeriesReadCount += 1;
+            return [];
+          }
+        };
+      }
+      if (sql.includes("FROM work_makers wm")) {
+        return {
+          all() {
+            studioWorksReadCount += 1;
+            return [];
           }
         };
       }
@@ -479,15 +517,34 @@ const cachedStudioService = createStudioService({
   getLibrary: () => ({ worksById: new Map() }),
   getStamp: () => studioDataStamp,
   pagedWorksPayload: () => ({}),
+  prewarmCoreWorkCovers: () => {
+    studioCoverPrewarmCount += 1;
+  },
+  prewarmWorkInfoDetails: () => {
+    studioInfoPrewarmCount += 1;
+  },
   publicRemoteUrl: (value) => value,
-  sortWorkList: (works) => works,
+  sortWorkList: (works) => {
+    studioSortCount += 1;
+    return works;
+  },
   workFacets: () => ({})
 });
 cachedStudioService.prewarm();
+assert.equal(studioMakerDetailReadCount, 2, "studio startup must prepare every visible maker detail");
+assert.equal(studioSeriesReadCount, 2, "studio startup must prepare every visible maker series list");
+assert.equal(studioWorksReadCount, 2, "studio startup must prepare every visible maker work set");
+assert.equal(studioSortCount, 2, "studio startup must prepare the default order for every visible maker");
+assert.equal(studioCoverPrewarmCount, 1, "studio startup must batch first-page cover preparation");
+assert.equal(studioInfoPrewarmCount, 1, "studio startup must batch first-page metadata preparation");
 const studioSummaryUrl = new URL("http://127.0.0.1/api/studios?limit=500");
 assert.equal(cachedStudioService.summaries(studioSummaryUrl).count, 2, "prewarmed studio indexes must preserve maker counts");
 cachedStudioService.summaries(studioSummaryUrl);
 assert.equal(studioSummaryReadCount, 1, "repeated studio indexes must reuse prewarmed aggregate rows");
+cachedStudioService.detailPayload("1", new URL("http://127.0.0.1/api/studios/1?seriesId=all&sort=releaseDesc&limit=48"));
+assert.equal(studioMakerDetailReadCount, 2, "first studio selection must reuse its prepared maker detail");
+assert.equal(studioWorksReadCount, 2, "first studio selection must reuse its prepared work set");
+assert.equal(studioSortCount, 2, "first studio selection must reuse its prepared default order");
 cachedStudioService.summaries(new URL("http://127.0.0.1/api/studios?limit=500&q=studio"));
 assert.equal(studioSummaryReadCount, 2, "studio keyword searches must preserve their direct SQL semantics");
 studioDataStamp = "studio-v2";

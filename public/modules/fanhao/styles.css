@@ -860,6 +860,21 @@
   align-items: center;
 }
 
+.studio-series-controls .stat-filter-group {
+  width: 100%;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
+}
+
+.studio-series-controls .stat-filter-label,
+.studio-series-controls .stat-filter-chip {
+  flex: 0 0 auto;
+}
+
 .stat-sort-group {
   flex-wrap: nowrap;
 }

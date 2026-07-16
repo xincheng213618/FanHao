@@ -1,9 +1,14 @@
+const DEFAULT_STUDIO_SORT = "releaseDesc";
+const STUDIO_DETAIL_PREWARM_PAGE_SIZE = 48;
+
 export function createStudioService({
   clampInteger,
   getCoreDb,
   getLibrary,
   getStamp,
   pagedWorksPayload,
+  prewarmCoreWorkCovers = () => {},
+  prewarmWorkInfoDetails = () => {},
   publicRemoteUrl,
   sortWorkList,
   workFacets
@@ -189,7 +194,29 @@ export function createStudioService({
 
   function prewarm() {
     const sync = ensureCatalog();
-    cachedSummaryRows(sync.stamp);
+    prewarmDetails(cachedSummaryRows(sync.stamp));
+  }
+
+  function prewarmDetails(rows) {
+    const db = getCoreDb();
+    const pageWorks = [];
+    const pageWorkIds = new Set();
+    for (const row of rows) {
+      const makerId = String(row.maker_id || "");
+      if (!makerId) continue;
+      cachedMakerDetail(makerId, db);
+      const workSet = cachedStudioWorks(makerId, "all", db);
+      if (!workSet.sortedByMode.has(DEFAULT_STUDIO_SORT)) {
+        workSet.sortedByMode.set(DEFAULT_STUDIO_SORT, sortWorkList(workSet.works, DEFAULT_STUDIO_SORT));
+      }
+      for (const work of workSet.sortedByMode.get(DEFAULT_STUDIO_SORT).slice(0, STUDIO_DETAIL_PREWARM_PAGE_SIZE)) {
+        if (!work?.id || pageWorkIds.has(work.id)) continue;
+        pageWorkIds.add(work.id);
+        pageWorks.push(work);
+      }
+    }
+    prewarmCoreWorkCovers(pageWorks);
+    prewarmWorkInfoDetails(pageWorks);
   }
 
   function detailPayload(makerId, url) {
@@ -200,7 +227,7 @@ export function createStudioService({
     const maker = cachedMakerDetail(makerId, db);
     if (!maker) return null;
     const workSet = cachedStudioWorks(makerId, selectedSeriesId, db);
-    const sort = url.searchParams.get("sort") || "releaseDesc";
+    const sort = url.searchParams.get("sort") || DEFAULT_STUDIO_SORT;
     let sorted = workSet.sortedByMode.get(sort);
     if (!sorted) {
       sorted = sortWorkList(workSet.works, sort);

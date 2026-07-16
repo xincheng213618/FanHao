@@ -1,5 +1,8 @@
 import { createLatestRequestGate } from "../../latest-request.js?v=20260717-fanhao-latest-request-01";
 
+const STUDIO_DESKTOP_PAGE_SIZE = 48;
+const STUDIO_MOBILE_PAGE_SIZE = 32;
+
 export function createStudioPage(deps) {
   const { api, appendEmpty, els, formatNumber, hidePersonProfile, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
   const studioRequests = createLatestRequestGate();
@@ -9,7 +12,10 @@ export function createStudioPage(deps) {
   }
 
   function studioPageSize() {
-    return Math.max(40, Math.min(96, Number(state.workPageSize) || 48));
+    const viewportLimit = globalThis.matchMedia?.("(max-width: 720px)")?.matches
+      ? STUDIO_MOBILE_PAGE_SIZE
+      : STUDIO_DESKTOP_PAGE_SIZE;
+    return Math.max(24, Math.min(viewportLimit, Number(state.workPageSize) || viewportLimit));
   }
 
   async function loadStudios() {
