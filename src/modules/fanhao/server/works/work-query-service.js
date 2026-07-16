@@ -328,6 +328,13 @@ export function createWorkQueryService({
     const scope = peopleScopeService.normalize(url.searchParams.get("scope"));
     const filter = url.searchParams.get("filter") || "all";
     const stamp = currentStamp();
+    const filtered = cachedListSource(scope, filter, stamp);
+    const sort = url.searchParams.get("sort") || "releaseDesc";
+    const works = sortWorkList(filtered, sort);
+    return pagedWorksPayload(works, url, { filter, facets: workFacets(filtered) });
+  }
+
+  function cachedListSource(scope, filter, stamp = currentStamp()) {
     const cacheKey = `${scope}:${filter}`;
     const cached = listSourceCache.get(cacheKey);
     let filtered = cached?.stamp === stamp ? cached.works : null;
@@ -342,10 +349,7 @@ export function createWorkQueryService({
       filtered = filter === "all" ? scopedWorks : scopedWorks.filter((work) => workMatchesFilter(work, filter));
       if (cacheableFilters.has(filter)) listSourceCache.set(cacheKey, { stamp, works: filtered });
     }
-
-    const sort = url.searchParams.get("sort") || "releaseDesc";
-    const works = sortWorkList(filtered, sort);
-    return pagedWorksPayload(works, url, { filter, facets: workFacets(filtered) });
+    return filtered;
   }
 
   function prewarm() {
@@ -359,12 +363,17 @@ export function createWorkQueryService({
     actorMissingSearchWorks(rankingMissingKeys);
     const scope = peopleScopeService.normalize("main");
     const stamp = currentStamp();
-    const works = enrichedWorks().filter((work) => peopleScopeService.workMatches(work, scope));
-    listSourceCache.set(`${scope}:all`, { stamp, works });
+    const works = cachedListSource(scope, "all", stamp);
     // Compact facet indexes are cheap to hydrate and keep the first list
     // request from paying synchronous catalog-query costs.
     staticWorkFacets(works);
     sortWorkList(works, "updated");
+    sortWorkList(works, "releaseDesc");
+    for (const filter of ["playable", "info", "rated", "highRating", "vr"]) {
+      const filtered = cachedListSource(scope, filter, stamp);
+      sortWorkList(filtered, "releaseDesc");
+      if (filter === "rated" || filter === "highRating") sortWorkList(filtered, "ratingDesc");
+    }
   }
 
   function searchPayload(url) {
