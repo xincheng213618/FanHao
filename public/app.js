@@ -687,6 +687,7 @@ function setActiveView(view, options = {}) {
     window.location.assign(routeUrl({ view }, { initialParams }));
     return;
   }
+  if (view !== "people") peoplePage.cancelPendingSelection();
   const previousView = state.activeView;
   state.activeView = view;
   if (view !== "rankings" && state.sortMode === "ranking") {
@@ -1416,6 +1417,7 @@ async function loadSearchResults(query, options = {}) {
   }
 
   const enteringSearch = state.activeView !== "search";
+  peoplePage.cancelPendingSelection();
   if (state.activeView !== "search") {
     state.searchReturnView = state.activeView || "people";
     if (selectedWorkFilters().length) {

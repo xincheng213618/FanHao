@@ -28,12 +28,35 @@ export function createPeoplePage(deps) {
 
   let peopleIndexLoadObserver = null;
   let peopleIndexLoadPending = false;
+  let personDetailAbortController = null;
+  let personDetailRequestSeq = 0;
+
+function beginPersonDetailRequest() {
+  personDetailAbortController?.abort();
+  const controller = new AbortController();
+  const requestSeq = ++personDetailRequestSeq;
+  personDetailAbortController = controller;
+  return {
+    signal: controller.signal,
+    isCurrent: () => personDetailAbortController === controller && personDetailRequestSeq === requestSeq,
+    finish: () => {
+      if (personDetailAbortController === controller) personDetailAbortController = null;
+    }
+  };
+}
+
+function cancelPendingSelection() {
+  personDetailRequestSeq += 1;
+  personDetailAbortController?.abort();
+  personDetailAbortController = null;
+}
 
 function filteredPeople() {
   return state.people.filter((person) => person?.actorProfile?.gender !== "male");
 }
 
 function showPeopleIndex(options = {}) {
+  cancelPendingSelection();
   state.activeView = "people";
   state.selectedPersonId = null;
   state.selectedPerson = null;
@@ -209,6 +232,7 @@ function createPersonIndexCard(person) {
 }
 
 async function selectPerson(personId, options = {}) {
+  const request = beginPersonDetailRequest();
   disconnectPeopleIndexAutoload();
   if (state.activeView === "people" && !state.selectedPersonId && options.captureIndexScroll !== false) {
     state.peopleIndexScrollTop = currentPageScrollTop();
@@ -222,29 +246,36 @@ async function selectPerson(personId, options = {}) {
   syncNavigationState("people");
   els.workGrid.innerHTML = `<div class="empty-state">正在加载作品</div>`;
 
-  const data = await fetchPersonWorksPage(personId, 0);
-  state.selectedPerson = data.person;
-  const resolvedPersonId = state.selectedPerson?.id || personId;
-  state.selectedPersonId = resolvedPersonId;
-  state.works = data.works || [];
-  state.personWorksTotal = data.total || state.works.length;
-  state.personWorksFacets = data.facets || null;
-  resetWorkPaging();
-  setMainHeader(state.selectedPerson.name, formatLibraryPaths(state.selectedPerson.sourcePaths || [state.selectedPerson.relativePath]));
-  renderPersonProfile(state.selectedPerson);
-  renderPersonWorkStats();
-  renderWorks();
-  syncRouteAfterNavigation({
-    ...options,
-    routeOverrides: { view: "people", peopleScope: state.peopleScope || "main", personId: resolvedPersonId, q: "", workId: "", videoId: "" }
-  });
+  try {
+    const data = await fetchPersonWorksPage(personId, 0, { signal: request.signal });
+    if (!request.isCurrent() || state.activeView !== "people" || state.selectedPersonId !== personId) return;
+    state.selectedPerson = data.person;
+    const resolvedPersonId = state.selectedPerson?.id || personId;
+    state.selectedPersonId = resolvedPersonId;
+    state.works = data.works || [];
+    state.personWorksTotal = data.total || state.works.length;
+    state.personWorksFacets = data.facets || null;
+    resetWorkPaging();
+    setMainHeader(state.selectedPerson.name, formatLibraryPaths(state.selectedPerson.sourcePaths || [state.selectedPerson.relativePath]));
+    renderPersonProfile(state.selectedPerson);
+    renderPersonWorkStats();
+    renderWorks();
+    syncRouteAfterNavigation({
+      ...options,
+      routeOverrides: { view: "people", peopleScope: state.peopleScope || "main", personId: resolvedPersonId, q: "", workId: "", videoId: "" }
+    });
+  } catch (error) {
+    if (!request.signal.aborted) throw error;
+  } finally {
+    request.finish();
+  }
 }
 
 function personWorkPageSize() {
   return Math.max(40, Math.min(96, Number(state.workPageSize) || 48));
 }
 
-async function fetchPersonWorksPage(personId, offset = 0) {
+async function fetchPersonWorksPage(personId, offset = 0, options = {}) {
   const params = new URLSearchParams({
     limit: String(personWorkPageSize()),
     offset: String(offset || 0),
@@ -252,7 +283,7 @@ async function fetchPersonWorksPage(personId, offset = 0) {
     filter: typeof getWorkFilterMode === "function" ? getWorkFilterMode() : state.filterMode || "all"
   });
   if (state.peopleScope && state.peopleScope !== "main") params.set("scope", state.peopleScope);
-  return api(`/api/people/${encodeURIComponent(personId)}?${params}`);
+  return api(`/api/people/${encodeURIComponent(personId)}?${params}`, options.signal ? { signal: options.signal } : {});
 }
 
 async function goToPerson(personId) {
@@ -269,6 +300,7 @@ function resetPersonPaging() {
 }
 
   return {
+    cancelPendingSelection,
     disconnectIndexAutoload: disconnectPeopleIndexAutoload,
     fetchPersonWorksPage,
     goToPerson,

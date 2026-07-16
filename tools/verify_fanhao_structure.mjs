@@ -41,6 +41,7 @@ const fanhaoEntry = read("public/fanhao-app.js");
 const standaloneEntry = read("public/standalone-app.js");
 const standaloneHost = read("public/js/standalone-host.js");
 const webApp = read("public/app.js");
+const peoplePageSource = read("public/modules/fanhao/people-page.js");
 assert(indexHtml.includes('import("/fanhao-app.js'), "FanHao must have a dedicated Web entry");
 assert(indexHtml.includes('import("/standalone-app.js'), "standalone modules must have a dedicated Web entry");
 assert(indexHtml.includes('/^\\/western\\/.+/'), "western detail routes must use the standalone gallery host");
@@ -58,6 +59,9 @@ assert(!webApp.includes("standaloneFactories"), "FanHao runtime must not retain 
 assert(webApp.includes("const WORK_RENDER_INITIAL_COUNT = 24"), "FanHao work lists must render a small first batch for responsive interaction");
 assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 96, lan: 64, remote: 48 })"), "FanHao work APIs must keep page payloads bounded for each access mode");
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
+assert(peoplePageSource.includes("let personDetailAbortController = null"), "person navigation must own a cancellable latest request");
+assert(peoplePageSource.includes("if (!request.isCurrent() || state.activeView !== \"people\""), "stale person responses must not overwrite newer navigation");
+assert(webApp.includes("if (view !== \"people\") peoplePage.cancelPendingSelection()"), "leaving the people view must cancel pending person work");
 for (const factoryName of ["createGalleryPage", "createGalleryRenderer", "createNovelPage", "createMusicPage", "createToolsPage"]) {
   assert(!webApp.includes(factoryName), `FanHao runtime must not compose ${factoryName}`);
 }
