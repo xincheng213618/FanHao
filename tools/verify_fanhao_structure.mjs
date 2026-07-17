@@ -98,9 +98,9 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-work-card-lifecycle-01'), "work-card lifecycle changes must refresh the FanHao browser entry");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-work-card-lifecycle-01'), "work-card lifecycle changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260717-fanhao-work-card-lifecycle-01'), "work-card lifecycle changes must refresh the FanHao module barrel");
+assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-people-card-lifecycle-01'), "people-card lifecycle changes must refresh the FanHao browser entry");
+assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-people-card-lifecycle-01'), "people-card lifecycle changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260717-fanhao-people-card-lifecycle-01'), "people-card lifecycle changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -138,7 +138,10 @@ assert(workRoutesApiSource.includes('source: url.searchParams.get("source") || "
 assert(playerPageSource.includes('mediaId ? "?source=gallery" : ""'), "the standalone gallery player must explicitly select gallery play-info lookup");
 assert(playerHtmlSource.includes("player-page.js?v=20260717-fanhao-playinfo-01"), "play-info lookup changes must refresh the standalone player module");
 assert(workActionsSource.includes("captureFavoriteSnapshot") && workActionsSource.includes("restoreFavoriteSnapshot"), "optimistic favorite feedback must roll back cleanly after API failures");
-assert(peoplePageSource.includes('["pointerenter", "focus", "pointerdown"]') && peoplePageSource.includes("preparePersonProfile?.()"), "person cards must prefetch profile code before or alongside the detail API request");
+assert(peoplePageSource.includes("const personIndexRecords = new WeakMap()") && peoplePageSource.includes("bindPeopleIndexInteractions();"), "person cards must keep navigation records behind one persistent interaction surface");
+assert(peoplePageSource.includes('root.addEventListener("pointerover"') && peoplePageSource.includes('root.addEventListener("focusin"') && peoplePageSource.includes('root.addEventListener("pointerdown"'), "person cards must delegate mouse, keyboard, and touch preparation");
+assert(!peoplePageSource.includes('card.addEventListener("click"') && !peoplePageSource.includes('card.addEventListener("pointerenter"') && !peoplePageSource.includes('card.addEventListener("pointerdown"'), "person cards must not allocate navigation and preparation listeners per item");
+assert(peoplePageSource.includes("preparePersonProfile?.()") && peoplePageSource.includes("prefetchPersonDetails(person.id)"), "delegated person intent must prepare profile code and the exact detail request");
 assert(lazyPersonProfileSource.includes("renderVersion") && lazyPersonProfileSource.includes("version !== renderVersion"), "late profile modules must not render after navigation invalidates them");
 assert(webApp.includes("const WORK_RENDER_INITIAL_COUNT = 24"), "FanHao work lists must render a small first batch for responsive interaction");
 assert(webApp.includes("const movedDown = nextScrollY > lastScrollY + 1"), "work continuation must require a real downward scroll before automatic loading");
@@ -157,7 +160,7 @@ assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 64, la
 assert(webApp.includes('globalThis.matchMedia?.("(max-width: 720px)")') && webApp.includes("pageSize: preferredWorkPageSize"), "search requests must follow the active desktop or mobile viewport");
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
-assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-person-detail-01'), "person navigation changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-people-card-lifecycle-01'), "people-card lifecycle changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260717-fanhao-ranking-response-01'), "ranking navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('collection-page.js?v=20260717-fanhao-collection-response-01'), "collection navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('studio-page.js?v=20260717-fanhao-studio-first-paint-01'), "studio first-paint changes must use a fresh browser module URL");
@@ -165,7 +168,7 @@ assert(collectionPageSource.includes("const collectionPrefetches = new Map()") &
 assert(collectionPageSource.includes("const COLLECTION_PREFETCH_TTL_MS = 5 * 60 * 1000") && collectionPageSource.includes("invalidatePrefetches"), "Web collection prefetches must survive normal reading time and expose explicit invalidation");
 assert(peoplePageSource.includes("const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64") && peoplePageSource.includes("const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48"), "person details must keep desktop and mobile first payloads bounded");
 assert(peoplePageSource.includes("const personDetailPrefetches = new Map()") && peoplePageSource.includes("reusePrefetch: true"), "person interactions must reuse prepared detail requests instead of issuing a duplicate click request");
-assert(peoplePageSource.includes('card.addEventListener("pointerenter", () => schedulePersonDetailPrefetch(person.id))') && peoplePageSource.includes('card.addEventListener("pointerdown", () => prefetchPersonDetails(person.id))'), "person cards must prepare details before desktop and touch clicks");
+assert(peoplePageSource.includes("schedulePersonDetailPrefetch(person.id)") && peoplePageSource.includes("preparePersonDetailFromIntent(root, event.target)"), "delegated person cards must prepare details before desktop and touch clicks");
 assert(peoplePageSource.includes("detailPending: true") && personProfileSource.includes("正在加载详情"), "Web person navigation must paint the indexed profile before the detail API returns");
 assert(peoplePageSource.includes("works.map((work) => workCoverUrl(work)).find(Boolean)"), "Web person details must reuse the prepared work page for fallback artwork");
 assert(latestRequestSource.includes("sequence === requestSequence"), "latest-request gates must reject stale completions");

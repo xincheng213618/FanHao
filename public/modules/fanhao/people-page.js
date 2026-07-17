@@ -41,9 +41,11 @@ export function createPeoplePage(deps) {
   let peopleIndexLoadPending = false;
   let personDetailHoverTimer = null;
   let personDetailHoverTarget = "";
+  const personIndexRecords = new WeakMap();
   const personDetailPrefetches = new Map();
   const personDetailRequests = createLatestRequestGate();
   const cancelPendingSelection = personDetailRequests.cancel;
+  bindPeopleIndexInteractions();
 
 function filteredPeople() {
   return state.people.filter((person) => person?.actorProfile?.gender !== "male");
@@ -188,10 +190,7 @@ function createPersonIndexCard(person) {
   const card = document.createElement("button");
   card.type = "button";
   card.className = "person-index-card";
-  card.addEventListener("click", () => {
-    clearWorkSearch();
-    selectPerson(person.id);
-  });
+  personIndexRecords.set(card, person);
 
   const avatar = document.createElement("div");
   avatar.className = "person-index-avatar";
@@ -222,14 +221,49 @@ function createPersonIndexCard(person) {
 
   body.append(name);
   card.append(avatar, body);
-  for (const eventName of ["pointerenter", "focus", "pointerdown"]) {
-    card.addEventListener(eventName, () => preparePersonProfile?.(), { once: true });
-  }
-  card.addEventListener("pointerenter", () => schedulePersonDetailPrefetch(person.id));
-  card.addEventListener("pointerleave", () => cancelPersonDetailPrefetch(person.id));
-  card.addEventListener("focus", () => prefetchPersonDetails(person.id));
-  card.addEventListener("pointerdown", () => prefetchPersonDetails(person.id));
   return card;
+}
+
+function bindPeopleIndexInteractions() {
+  const root = els.workGrid;
+  root.addEventListener("click", (event) => {
+    const person = personIndexRecord(root, event.target);
+    if (!person) return;
+    clearWorkSearch();
+    selectPerson(person.id);
+  });
+  root.addEventListener("pointerover", (event) => {
+    const card = personIndexCard(root, event.target);
+    if (!card || card.contains(event.relatedTarget)) return;
+    const person = personIndexRecords.get(card);
+    if (!person) return;
+    preparePersonProfile?.();
+    schedulePersonDetailPrefetch(person.id);
+  }, { passive: true });
+  root.addEventListener("pointerout", (event) => {
+    const card = personIndexCard(root, event.target);
+    if (!card || card.contains(event.relatedTarget)) return;
+    cancelPersonDetailPrefetch(personIndexRecords.get(card)?.id);
+  }, { passive: true });
+  root.addEventListener("focusin", (event) => preparePersonDetailFromIntent(root, event.target));
+  root.addEventListener("pointerdown", (event) => preparePersonDetailFromIntent(root, event.target), { passive: true });
+}
+
+function preparePersonDetailFromIntent(root, target) {
+  const person = personIndexRecord(root, target);
+  if (!person) return;
+  preparePersonProfile?.();
+  prefetchPersonDetails(person.id);
+}
+
+function personIndexRecord(root, target) {
+  const card = personIndexCard(root, target);
+  return card ? personIndexRecords.get(card) : null;
+}
+
+function personIndexCard(root, target) {
+  const card = target?.closest?.(".person-index-card");
+  return card && root.contains(card) ? card : null;
 }
 
 async function selectPerson(personId, options = {}) {
