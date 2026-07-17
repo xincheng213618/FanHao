@@ -5,17 +5,111 @@ const HISTORY_RANGES = [
   { value: "7", label: "7 天" },
   { value: "all", label: "全部" }
 ];
+const COLLECTION_DESKTOP_PAGE_SIZE = 64;
+const COLLECTION_MOBILE_PAGE_SIZE = 48;
+const COLLECTION_PREFETCH_TTL_MS = 5000;
 
 export function createCollectionPage(deps) {
   const { api, els, formatNumber, hidePersonProfile, renderEmpty, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
   const collectionRequests = createLatestRequestGate();
+  let collectionPrefetch = null;
 
   function cancelPendingRequests() {
     collectionRequests.cancel();
+    collectionPrefetch = null;
   }
 
   function collectionPageSize() {
-    return Math.max(40, Math.min(96, Number(state.workPageSize) || 48));
+    const viewportLimit = globalThis.matchMedia?.("(max-width: 720px)")?.matches
+      ? COLLECTION_MOBILE_PAGE_SIZE
+      : COLLECTION_DESKTOP_PAGE_SIZE;
+    return Math.max(40, Math.min(viewportLimit, Number(state.workPageSize) || viewportLimit));
+  }
+
+  function collectionPath(view, offset = 0) {
+    if (view === "favorites") return favoritesPath(offset);
+    if (view === "history") return historyPath(offset);
+    if (view === "vr") return vrPath(offset);
+    return "";
+  }
+
+  function favoritesPath(offset = 0) {
+    const params = new URLSearchParams();
+    if (state.selectedFavoriteFolderId && state.selectedFavoriteFolderId !== "all") params.set("folder", state.selectedFavoriteFolderId);
+    params.set("limit", String(collectionPageSize()));
+    params.set("offset", String(offset || 0));
+    return `/api/favorites?${params}`;
+  }
+
+  function historyPath(offset = 0) {
+    const params = new URLSearchParams();
+    if (state.selectedHistoryRange && state.selectedHistoryRange !== "all") params.set("days", state.selectedHistoryRange);
+    params.set("limit", String(collectionPageSize()));
+    params.set("offset", String(offset || 0));
+    return `/api/history?${params}`;
+  }
+
+  function vrPath(offset = 0) {
+    const params = new URLSearchParams({
+      filter: "vr",
+      sort: state.sortMode || "releaseDesc",
+      limit: String(collectionPageSize()),
+      offset: String(offset || 0)
+    });
+    return `/api/works?${params}`;
+  }
+
+  function requestShape(path) {
+    const url = new URL(path, "http://fanhao.local");
+    url.searchParams.delete("limit");
+    url.searchParams.delete("offset");
+    return `${url.pathname}?${url.searchParams}`;
+  }
+
+  function prefetch(view) {
+    const path = collectionPath(view, 0);
+    if (!path) return null;
+    const now = Date.now();
+    const shape = requestShape(path);
+    if (collectionPrefetch?.view === view && collectionPrefetch.shape === shape && collectionPrefetch.expiresAt > now) {
+      return collectionPrefetch.promise;
+    }
+
+    const promise = api(path).then(
+      (data) => ({ data, error: null }),
+      (error) => ({ data: null, error })
+    );
+    collectionPrefetch = {
+      view,
+      shape,
+      expiresAt: now + COLLECTION_PREFETCH_TTL_MS,
+      promise
+    };
+    return promise;
+  }
+
+  async function fetchCollectionPage(view, path, request) {
+    const prefetched = collectionPrefetch;
+    if (
+      prefetched?.view === view
+      && prefetched.shape === requestShape(path)
+      && prefetched.expiresAt > Date.now()
+      && new URL(path, "http://fanhao.local").searchParams.get("offset") === "0"
+    ) {
+      collectionPrefetch = null;
+      const result = await prefetched.promise;
+      if (result.error) throw result.error;
+      return trimPrefetchedPage(result.data, path);
+    }
+    return api(path, { signal: request.signal });
+  }
+
+  function trimPrefetchedPage(data, path) {
+    const limit = Number(new URL(path, "http://fanhao.local").searchParams.get("limit") || 0);
+    const sourceWorks = Array.isArray(data?.works) ? data.works : [];
+    if (!limit || sourceWorks.length <= limit) return data;
+    const works = sourceWorks.slice(0, limit);
+    return { ...data, count: works.length, limit, works };
   }
 
   async function loadFavorites(options = {}) {
@@ -23,12 +117,9 @@ export function createCollectionPage(deps) {
     const append = Boolean(options.append);
     const request = collectionRequests.begin();
     if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载收藏</div>`;
-    const params = new URLSearchParams();
-    if (state.selectedFavoriteFolderId && state.selectedFavoriteFolderId !== "all") params.set("folder", state.selectedFavoriteFolderId);
-    params.set("limit", String(collectionPageSize()));
-    params.set("offset", String(append ? state.works.length : 0));
+    const path = favoritesPath(append ? state.works.length : 0);
     try {
-      const data = await api(`/api/favorites?${params}`, { signal: request.signal });
+      const data = await fetchCollectionPage("favorites", path, request);
       if (!request.isCurrent() || state.activeView !== "favorites") return;
       resetSelection();
       applyCollectionWorks(data.works || [], append);
@@ -75,8 +166,9 @@ export function createCollectionPage(deps) {
     const append = Boolean(options.append);
     const request = collectionRequests.begin();
     if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载观看记录</div>`;
+    const path = historyPath(append ? state.works.length : 0);
     try {
-      const data = await api(historyPath(append ? state.works.length : 0), { signal: request.signal });
+      const data = await fetchCollectionPage("history", path, request);
       if (!request.isCurrent() || state.activeView !== "history") return;
       resetSelection();
       applyCollectionWorks(data.works || [], append);
@@ -135,14 +227,9 @@ export function createCollectionPage(deps) {
     const append = Boolean(options.append);
     const request = collectionRequests.begin();
     if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载 VR 作品</div>`;
-    const params = new URLSearchParams({
-      filter: "vr",
-      sort: state.sortMode || "releaseDesc",
-      limit: String(collectionPageSize()),
-      offset: String(append ? state.works.length : 0)
-    });
+    const path = vrPath(append ? state.works.length : 0);
     try {
-      const data = await api(`/api/works?${params}`, { signal: request.signal });
+      const data = await fetchCollectionPage("vr", path, request);
       if (!request.isCurrent() || state.activeView !== "vr") return;
       resetSelection();
       state.selectedPersonId = null;
@@ -227,14 +314,6 @@ export function createCollectionPage(deps) {
     }
   }
 
-  function historyPath(offset = 0) {
-    const params = new URLSearchParams();
-    if (state.selectedHistoryRange && state.selectedHistoryRange !== "all") params.set("days", state.selectedHistoryRange);
-    params.set("limit", String(collectionPageSize()));
-    params.set("offset", String(offset || 0));
-    return `/api/history?${params}`;
-  }
-
   function historyLabel(value) {
     return HISTORY_RANGES.find((item) => item.value === value)?.label || "30 天";
   }
@@ -265,5 +344,5 @@ export function createCollectionPage(deps) {
     els.statsRow.append(wrap);
   }
 
-  return { cancelPendingRequests, loadFavorites, loadHistory, loadMoreCollectionWorks, loadMoreVrWorks, loadVrWorks, renderFavoriteFolderControls };
+  return { cancelPendingRequests, loadFavorites, loadHistory, loadMoreCollectionWorks, loadMoreVrWorks, loadVrWorks, prefetch, renderFavoriteFolderControls };
 }

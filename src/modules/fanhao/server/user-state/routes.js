@@ -155,11 +155,24 @@ export function prepareCollectionWorkPage(sourceWorks, {
   prewarmWorkInfoDetails = () => {},
   publicWork
 }) {
+  const page = prewarmCollectionWorkPage(sourceWorks, {
+    prewarmCoreWorkCovers,
+    prewarmVideoProbesForWorks,
+    prewarmWorkInfoDetails
+  });
+  const works = page.map((work) => publicWork(work));
+  prewarmRemoteImagesForWorks(works);
+  return works;
+}
+
+export function prewarmCollectionWorkPage(sourceWorks, {
+  prewarmCoreWorkCovers = () => {},
+  prewarmVideoProbesForWorks = () => {},
+  prewarmWorkInfoDetails = () => {}
+}) {
   const page = Array.isArray(sourceWorks) ? sourceWorks : [];
   prewarmCoreWorkCovers(page);
   prewarmVideoProbesForWorks(page);
   prewarmWorkInfoDetails(page);
-  const works = page.map((work) => publicWork(work));
-  prewarmRemoteImagesForWorks(works);
-  return works;
+  return page;
 }

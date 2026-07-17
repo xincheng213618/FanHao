@@ -35,6 +35,7 @@ export function createWorkQueryService({
   workInfoFacetRow,
   workQueryStamp,
 }) {
+  const firstPagePrewarmLimit = 64;
   let enrichedWorksCache = null;
   const listSourceCache = new Map();
   const searchSourceCache = new Map();
@@ -379,9 +380,17 @@ export function createWorkQueryService({
     sortWorkList(works, "releaseDesc");
     for (const filter of ["playable", "info", "rated", "highRating", "vr"]) {
       const filtered = cachedListSource(scope, filter, stamp);
-      sortWorkList(filtered, "releaseDesc");
+      const releaseSorted = sortWorkList(filtered, "releaseDesc");
+      if (filter === "vr") prewarmPreparedPage(releaseSorted);
       if (filter === "rated" || filter === "highRating") sortWorkList(filtered, "ratingDesc");
     }
+  }
+
+  function prewarmPreparedPage(works) {
+    const page = works.slice(0, firstPagePrewarmLimit);
+    prewarmCoreWorkCovers(page);
+    prewarmVideoProbesForWorks(page);
+    prewarmWorkInfoDetails(page);
   }
 
   function searchPayload(url) {

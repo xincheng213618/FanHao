@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
 import { createWorkActions } from "../public/modules/fanhao/features/works/work-actions.js";
+import { createCollectionPage } from "../public/modules/fanhao/features/collections/collection-page.js";
 import { createLazyPersonProfile } from "../public/modules/fanhao/lazy-person-profile.js";
 import { createLazyAdminModal } from "../public/modules/system/lazy-admin-modal.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
@@ -76,9 +77,9 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-ranking-first-page-01'), "ranking startup changes must refresh the FanHao browser entry");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-ranking-first-page-01'), "ranking startup changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260717-fanhao-ranking-first-page-01'), "ranking startup changes must refresh the FanHao module barrel");
+assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-collection-first-page-03'), "collection startup changes must refresh the FanHao browser entry");
+assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-collection-first-page-03'), "collection startup changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260717-fanhao-collection-first-page-03'), "collection startup changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -103,7 +104,14 @@ assert(workActionsSource.includes("captureFavoriteSnapshot") && workActionsSourc
 assert(peoplePageSource.includes('["pointerenter", "focus", "pointerdown"]') && peoplePageSource.includes("preparePersonProfile?.()"), "person cards must prefetch profile code before or alongside the detail API request");
 assert(lazyPersonProfileSource.includes("renderVersion") && lazyPersonProfileSource.includes("version !== renderVersion"), "late profile modules must not render after navigation invalidates them");
 assert(webApp.includes("const WORK_RENDER_INITIAL_COUNT = 24"), "FanHao work lists must render a small first batch for responsive interaction");
+assert(webApp.includes("const movedDown = nextScrollY > lastScrollY + 1"), "work continuation must require a real downward scroll before automatic loading");
+assert(webApp.includes("userScrollIntentUntil = Date.now() + 1200"), "automatic work continuation must be armed by recent wheel, touch, keyboard, or scrollbar input");
+assert(webApp.includes("userScrollIntentUntil = 0;\n    scheduleCheck();"), "one user scroll gesture must consume at most one automatic page");
+assert(!webApp.includes("WORK_AUTO_LOAD_RECHECK_DELAYS"), "work rendering must not schedule autonomous load-more cascades");
+assert(!webApp.includes("workLoadMoreObserver"), "newly rendered load-more rows must not immediately retrigger through intersection observation");
 assert(webApp.includes("const moduleNavigationPromise = initializeModuleNavigation();"), "FanHao startup must begin module navigation without blocking the first route");
+assert(webApp.includes("collectionPage.prefetch(initialRoute.view);"), "direct collection routes must start their data request before library hydration");
+assert(webApp.indexOf("collectionPage.prefetch(initialRoute.view);") < webApp.indexOf("await applyRoute(initialRoute);"), "collection and library startup requests must overlap");
 assert(!webApp.includes("await initializeModuleNavigation();"), "FanHao startup must not serialize module discovery ahead of the first library request");
 assert(webApp.indexOf("const moduleNavigationPromise = initializeModuleNavigation();") < webApp.indexOf("await applyRoute(initialRoute);"), "module discovery and route data must start concurrently");
 assert(webApp.includes("await moduleNavigationPromise;"), "FanHao startup must still observe module-navigation completion");
@@ -112,6 +120,7 @@ assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.w
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
 assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-person-prefetch-01'), "person navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260717-fanhao-ranking-first-page-01'), "ranking navigation changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('collection-page.js?v=20260717-fanhao-collection-first-page-03'), "collection navigation changes must use a fresh browser module URL");
 assert(peoplePageSource.includes("const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64") && peoplePageSource.includes("const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48"), "person details must keep desktop and mobile first payloads bounded");
 assert(peoplePageSource.includes("const personDetailPrefetches = new Map()") && peoplePageSource.includes("reusePrefetch: true"), "person interactions must reuse prepared detail requests instead of issuing a duplicate click request");
 assert(peoplePageSource.includes('card.addEventListener("pointerenter", () => schedulePersonDetailPrefetch(person.id))') && peoplePageSource.includes('card.addEventListener("pointerdown", () => prefetchPersonDetails(person.id))'), "person cards must prepare details before desktop and touch clicks");
@@ -129,6 +138,13 @@ assert(studioPageSource.includes("const studioRequests = createLatestRequestGate
 assert(studioPageSource.includes('state.activeView !== "studios"'), "stale studio responses must not overwrite newer navigation");
 assert(webApp.includes('if (view !== "studios") studioPage.cancelPendingRequests()'), "leaving studios must cancel pending requests");
 assert(collectionPageSource.includes("const collectionRequests = createLatestRequestGate()"), "collection navigation must own a cancellable latest request");
+assert(collectionPageSource.includes("const COLLECTION_DESKTOP_PAGE_SIZE = 64"), "desktop collections must keep the first payload compact");
+assert(collectionPageSource.includes("const COLLECTION_MOBILE_PAGE_SIZE = 48"), "mobile collections must use a smaller first payload");
+assert(collectionPageSource.includes('globalThis.matchMedia?.("(max-width: 720px)")'), "collection page size must follow the active viewport");
+assert(collectionPageSource.includes("const promise = api(path).then("), "collection navigation must prepare one reusable request before activation");
+assert(collectionPageSource.includes("return trimPrefetchedPage(result.data, path);"), "collection activation must consume prefetched results instead of issuing a duplicate request");
+assert(webApp.includes('button.addEventListener("pointerenter", prefetchCollection'), "desktop collection tabs must prefetch before click");
+assert(webApp.includes('button.addEventListener("focus", prefetchCollection)'), "keyboard and touch collection navigation must share the prepared request path");
 assert(!playbackProgressServiceSource.includes(".map((video) => getVideoProgress"), "work progress must avoid allocating and sorting every video on list rendering");
 for (const view of ["favorites", "history", "vr"]) {
   assert(collectionPageSource.includes(`state.activeView !== "${view}"`), `stale ${view} responses must not overwrite newer navigation`);
@@ -303,6 +319,49 @@ assert(webApp.includes("hasCollectionServerMore"), "Web work rendering must expo
 assert(webCollectionPage.includes("loadMoreVrWorks"), "Web VR lists must preserve server-side continuation");
 assert(!webCollectionPage.includes('limit: "2000"'), "Web VR lists must not fetch thousands of works before first render");
 assert(webApp.includes("hasVrServerMore"), "Web work rendering must expose VR continuation");
+const prefetchedCollectionCalls = [];
+const prefetchedCollectionState = {
+  activeView: "vr",
+  collectionTotal: 0,
+  personWorksFacets: null,
+  personWorksTotal: 0,
+  searchPeople: [],
+  selectedPerson: null,
+  selectedPersonId: null,
+  selectedStudio: null,
+  selectedStudioSeriesId: "all",
+  sortMode: "releaseDesc",
+  vrTotal: 0,
+  workPageSize: 96,
+  workVisibleLimit: 96,
+  works: []
+};
+const prefetchedCollectionPage = createCollectionPage({
+  api: async (requestPath) => {
+    prefetchedCollectionCalls.push(requestPath);
+    return {
+      count: 64,
+      total: 120,
+      works: Array.from({ length: 64 }, (_, index) => ({ id: `vr-${index + 1}` }))
+    };
+  },
+  els: { workGrid: { innerHTML: "" } },
+  formatNumber: String,
+  hidePersonProfile() {},
+  renderEmpty() {},
+  renderStatsForWorks() {},
+  renderWorks() {},
+  resetWorkPaging() {
+    prefetchedCollectionState.workVisibleLimit = prefetchedCollectionState.workPageSize;
+  },
+  setMainHeader() {},
+  state: prefetchedCollectionState
+});
+prefetchedCollectionPage.prefetch("vr");
+await prefetchedCollectionPage.loadVrWorks();
+assert.equal(prefetchedCollectionCalls.length, 1, "prefetched VR activation must not issue a duplicate first-page request");
+assert(prefetchedCollectionCalls[0].includes("limit=64"), "desktop VR prefetch must request only one compact first page");
+assert.equal(prefetchedCollectionState.works.length, 64, "prefetched VR data must render as the active collection page");
 const webStudioPage = read("public/modules/fanhao/features/studios/studio-page.js");
 const studioSeriesControlStyles = /\.studio-series-controls \.stat-filter-group\s*\{([\s\S]*?)\n\}/.exec(fanhaoStyles)?.[1] || "";
 assert(webStudioPage.includes("limit: String(studioPageSize())"), "Web studio details must request a bounded first page");
@@ -349,6 +408,9 @@ const workSearchIndexServiceSource = read("src/modules/fanhao/server/works/work-
 assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info details must support page-level batch hydration");
 assert(workQueryServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "work lists must batch-hydrate detail rows before presentation");
 assert(workQueryServiceSource.includes("prewarmVideoProbesForWorks(pageSource)"), "visible work pages must prepare playback probes before user selection");
+assert(workQueryServiceSource.includes('if (filter === "vr") prewarmPreparedPage(releaseSorted);'), "VR startup must prepare the same release-ordered source used by its first page");
+assert(workQueryServiceSource.includes("const firstPagePrewarmLimit = 64"), "VR metadata prewarm must stay bounded to one desktop page");
+assert(workQueryServiceSource.includes("prewarmCoreWorkCovers(page)") && workQueryServiceSource.includes("prewarmWorkInfoDetails(page)"), "VR startup must batch-hydrate first-page cover and detail metadata");
 assert(workInfoServiceSource.includes("function facetRowsById()"), "work-list facets must use a compact metadata index");
 assert(workQueryServiceSource.includes("staticWorkFacets(works);"), "compact work facets must be ready before the first list request");
 assert(workQueryServiceSource.includes("sortWorkList(works, \"releaseDesc\")"), "the default work-list order must be ready before the first request");
@@ -459,10 +521,15 @@ assert(worksRuntime.includes("workQueryService.prewarm()"), "FanHao work queries
 const libraryRuntime = read("src/modules/fanhao/server/library/runtime.js");
 const personListServiceSource = read("src/modules/fanhao/server/people/person-list-service.js");
 const fanhaoRuntime = read("src/modules/fanhao/server/runtime.js");
+const userStateRuntime = read("src/modules/fanhao/server/user-state/runtime.js");
 assert(libraryRuntime.includes("prewarmLibraryPeoplePayloads(requestDeps())"), "FanHao must prepare people payloads before the first library request");
 assert(personListServiceSource.includes("const mainPeopleCache = new Map()"), "main and western people scopes must remain cached independently");
 assert(fanhaoRuntime.includes("library.start();"), "FanHao startup must prewarm the library response path");
 assert(fanhaoRuntime.includes("catalog.start();"), "FanHao startup must prewarm the catalog response path");
+assert(fanhaoRuntime.includes("userState.start();"), "FanHao startup must prewarm user collection response paths");
+assert(userStateRuntime.includes("const COLLECTION_PREWARM_PAGE_SIZE = 64"), "collection metadata prewarm must stay bounded to one desktop page");
+assert(userStateRuntime.includes("favoriteStateService.favoriteWorks().slice") && userStateRuntime.includes("historyEntries({ days: active.recentWatchedDays"), "collection startup must prepare favorites and the default history range");
+assert(userStateRuntime.includes("const seen = new Set()") && userStateRuntime.includes("prewarmCollectionWorkPage(firstPageWorks, active)"), "collection startup must deduplicate metadata preparation across favorites and history");
 const workInfoService = read("src/modules/fanhao/server/works/work-info-service.js");
 const workPresenterService = read("src/modules/fanhao/server/works/presenter-service.js");
 const workMediaRoutes = read("src/modules/fanhao/server/works/routes-media.js");
@@ -473,6 +540,7 @@ const userStateServiceSource = read("src/modules/fanhao/server/collections/user-
 assert(workInfoService.includes("function detailRow(workId)"), "work metadata must load full details per work instead of hydrating the entire catalog");
 assert(workInfoService.includes("SELECT 1\n              FROM local_works"), "work-list metadata must use a lightweight local-work index query");
 assert(workPresenterService.includes("workInfoDetailRow(work.id)"), "work cards and details must hydrate full metadata only for the visible page");
+assert(userStateRoutes.includes("const page = prewarmCollectionWorkPage(sourceWorks"), "collection routes and startup must share one metadata preparation seam");
 assert(workMediaRoutes.includes("/media\\/person\\/([^/]+)\\/cover"), "person-list avatars must use a stable compact media URL");
 assert(coreDbService.includes("const DEFAULT_TABLE_STAMP_CACHE_MS = 5000"), "FanHao table stamps must not rescan the core database between nearby interactions");
 assert(coreDbService.includes("idx_works_updated_at ON works(updated_at)"), "work-info stamps must use a lightweight updated-at index");
@@ -983,6 +1051,9 @@ let searchFavoriteFacetReadCount = 0;
 let searchUserStateRevision = 1;
 let workInfoReadCount = 0;
 let workInfoFacetReadCount = 0;
+let preparedWorkCoverIds = [];
+let preparedWorkInfoIds = [];
+let preparedWorkVideoIds = [];
 const queryWork = {
   id: "work-1",
   personId: "person-1",
@@ -1014,7 +1085,7 @@ const workQueryService = createWorkQueryService({
       return false;
     }
   },
-  isVrWork: () => false,
+  isVrWork: (work) => work.id === queryWork.id,
   library: { scannedAt: "library-v1", worksById: new Map([[queryWork.id, queryWork]]) },
   localSearchWorkByCodeKey: () => new Map([["abc001", queryWork]]),
   localWorksByCodePrefix: () => {
@@ -1025,11 +1096,20 @@ const workQueryService = createWorkQueryService({
   peoplePayloadStamp: () => actorMovieDataStamp,
   peopleScopeService: { normalize: () => "main", workMatches: () => true },
   playbackProgressService: { getWorkProgress: () => null },
+  prewarmCoreWorkCovers(works) {
+    preparedWorkCoverIds.push(...works.map((work) => work.id));
+  },
   prewarmLocalWorkCodeKeys() {},
   prewarmPersonMerge() {
     personMergePrewarmCount += 1;
   },
   prewarmRemoteImagesForWorks() {},
+  prewarmVideoProbesForWorks(works) {
+    preparedWorkVideoIds.push(...works.map((work) => work.id));
+  },
+  prewarmWorkInfoDetails(works) {
+    preparedWorkInfoIds.push(...works.map((work) => work.id));
+  },
   publicPerson: (person) => person,
   publicWork: (work) => ({ id: work.id }),
   publicWorkAvailability: () => ({ hasMagnet: false }),
@@ -1055,6 +1135,9 @@ const workQueryService = createWorkQueryService({
 const workListUrl = new URL("http://127.0.0.1/api/works?limit=24&sort=updated");
 workQueryService.prewarm();
 assert.equal(personMergePrewarmCount, 1, "FanHao startup must prepare person merge maps before search traffic");
+assert.deepEqual(preparedWorkCoverIds, [queryWork.id], "FanHao startup must prepare first-page VR cover metadata");
+assert.deepEqual(preparedWorkInfoIds, [queryWork.id], "FanHao startup must prepare first-page VR detail metadata");
+assert.deepEqual(preparedWorkVideoIds, [queryWork.id], "FanHao startup must queue first-page VR playback probes");
 assert.equal(workInfoReadCount, 0, "FanHao startup prewarm must not hydrate full work-info facets before the server listens");
 assert(workInfoFacetReadCount > 0 && workInfoFacetReadCount <= 8, "FanHao startup prewarm must use only bounded compact work-info lookups");
 workQueryService.listPayload(workListUrl);

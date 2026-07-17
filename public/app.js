@@ -10,7 +10,7 @@ import {
   createStudioPage,
   createWorkActions,
   selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260717-fanhao-ranking-first-page-01";
+} from "./modules/fanhao/index.js?v=20260717-fanhao-collection-first-page-03";
 import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
@@ -90,7 +90,6 @@ const els = {
 const formatter = new Intl.NumberFormat("zh-CN");
 let workRenderTimer = null;
 let workRenderSeq = 0;
-let workLoadMoreObserver = null;
 let workLoadMoreScrollCleanup = null;
 let coverLoadQueue = [];
 let coverLoadTimer = null;
@@ -99,9 +98,7 @@ const WORK_RENDER_INITIAL_COUNT = 24;
 const WORK_RENDER_BATCH_SIZE = 24;
 const WORK_RENDER_BATCH_DELAY = 16;
 const WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 96, lan: 64, remote: 48 });
-const WORK_AUTO_LOAD_ROOT_MARGIN = "0px 0px 1400px 0px";
 const WORK_AUTO_LOAD_DISTANCE = 1400;
-const WORK_AUTO_LOAD_RECHECK_DELAYS = [120, 480, 900];
 const COVER_LOAD_BATCH_SIZE = 16;
 const COVER_LOAD_BATCH_DELAY = 45;
 const COVER_EAGER_COUNT = 48;
@@ -1663,10 +1660,6 @@ function appendLoadMore(visibleCount, totalCount, options = {}) {
 }
 
 function disconnectWorkLoadMoreAutoload() {
-  if (workLoadMoreObserver) {
-    workLoadMoreObserver.disconnect();
-    workLoadMoreObserver = null;
-  }
   if (workLoadMoreScrollCleanup) {
     workLoadMoreScrollCleanup();
     workLoadMoreScrollCleanup = null;
@@ -1710,25 +1703,35 @@ function setupWorkLoadMoreAutoload(trigger, button, loadNext) {
     scheduled = true;
     window.requestAnimationFrame(check);
   };
-
-  window.addEventListener("scroll", scheduleCheck, { passive: true });
-  window.addEventListener("resize", scheduleCheck, { passive: true });
-  workLoadMoreScrollCleanup = () => {
-    window.removeEventListener("scroll", scheduleCheck);
-    window.removeEventListener("resize", scheduleCheck);
+  let userScrollIntentUntil = 0;
+  const markUserScrollIntent = (event) => {
+    if (event.type === "wheel" && Number(event.deltaY || 0) <= 0) return;
+    if (event.type === "keydown" && !["ArrowDown", "End", "PageDown", " "].includes(event.key)) return;
+    if (event.type === "pointerdown" && Number(event.clientX || 0) < document.documentElement.clientWidth - 20) return;
+    userScrollIntentUntil = Date.now() + 1200;
+  };
+  let lastScrollY = window.scrollY;
+  const handleScroll = () => {
+    const nextScrollY = window.scrollY;
+    const movedDown = nextScrollY > lastScrollY + 1;
+    lastScrollY = nextScrollY;
+    if (!movedDown || Date.now() > userScrollIntentUntil) return;
+    userScrollIntentUntil = 0;
+    scheduleCheck();
   };
 
-  if ("IntersectionObserver" in window) {
-    workLoadMoreObserver = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) run();
-      },
-      { root: null, rootMargin: WORK_AUTO_LOAD_ROOT_MARGIN, threshold: 0 }
-    );
-    workLoadMoreObserver.observe(trigger);
-  }
-
-  for (const delay of WORK_AUTO_LOAD_RECHECK_DELAYS) window.setTimeout(scheduleCheck, delay);
+  window.addEventListener("wheel", markUserScrollIntent, { passive: true });
+  window.addEventListener("touchmove", markUserScrollIntent, { passive: true });
+  window.addEventListener("pointerdown", markUserScrollIntent, { passive: true });
+  window.addEventListener("keydown", markUserScrollIntent);
+  window.addEventListener("scroll", handleScroll, { passive: true });
+  workLoadMoreScrollCleanup = () => {
+    window.removeEventListener("wheel", markUserScrollIntent);
+    window.removeEventListener("touchmove", markUserScrollIntent);
+    window.removeEventListener("pointerdown", markUserScrollIntent);
+    window.removeEventListener("keydown", markUserScrollIntent);
+    window.removeEventListener("scroll", handleScroll);
+  };
 }
 
 function renderEmpty(message) {
@@ -2355,6 +2358,9 @@ els.collectionToggle?.addEventListener("change", (event) => {
 els.backToPeopleIndex?.addEventListener("click", returnToPeopleIndex);
 
 for (const button of els.viewTabs) {
+  const prefetchCollection = () => collectionPage.prefetch(button.dataset.view);
+  button.addEventListener("pointerenter", prefetchCollection, { passive: true });
+  button.addEventListener("focus", prefetchCollection);
   button.addEventListener("click", () => {
     clearWorkSearch();
     setActiveView(button.dataset.view);
@@ -2380,6 +2386,7 @@ installAndroidClientReturn({ isAndroidClient, initialParams });
 
 async function bootApp() {
   const initialRoute = routeFromUrl();
+  collectionPage.prefetch(initialRoute.view);
   const moduleNavigationPromise = initializeModuleNavigation();
   await applyRoute(initialRoute);
   initializeRouteHistory();

@@ -23,6 +23,7 @@ export function createFanhaoRuntime(deps) {
     library.start();
     catalog.start();
     works.start();
+    userState.start();
   }
 
   return {
