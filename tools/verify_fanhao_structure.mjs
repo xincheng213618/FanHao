@@ -16,6 +16,7 @@ import { prepareCollectionWorkPage } from "../src/modules/fanhao/server/user-sta
 import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkImageService } from "../src/modules/fanhao/server/works/image-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
+import { createWorkSearchIndexService } from "../src/modules/fanhao/server/works/work-search-index-service.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
 import { sendJson } from "../src/platform/server/responses.js";
 import { createVideoProbeService } from "../src/platform/server/video-probe-service.js";
@@ -331,6 +332,7 @@ assert(personDetailServiceSource.includes("workQueryService.facets(source.works)
 const workInfoServiceSource = read("src/modules/fanhao/server/works/work-info-service.js");
 const workQueryServiceSource = read("src/modules/fanhao/server/works/work-query-service.js");
 const workCodeIndexServiceSource = read("src/modules/fanhao/server/works/work-code-index-service.js");
+const workSearchIndexServiceSource = read("src/modules/fanhao/server/works/work-search-index-service.js");
 assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info details must support page-level batch hydration");
 assert(workQueryServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "work lists must batch-hydrate detail rows before presentation");
 assert(workQueryServiceSource.includes("prewarmVideoProbesForWorks(pageSource)"), "visible work pages must prepare playback probes before user selection");
@@ -338,7 +340,8 @@ assert(workInfoServiceSource.includes("function facetRowsById()"), "work-list fa
 assert(workQueryServiceSource.includes("staticWorkFacets(works);"), "compact work facets must be ready before the first list request");
 assert(workQueryServiceSource.includes("sortWorkList(works, \"releaseDesc\")"), "the default work-list order must be ready before the first request");
 assert(workQueryServiceSource.includes("[\"playable\", \"info\", \"rated\", \"highRating\", \"vr\"]"), "common work filters must be ready before first navigation");
-assert(workQueryServiceSource.includes("prewarmWorkSearch();"), "local and missing-work search indexes must be ready before the first query");
+assert(workQueryServiceSource.includes("prewarmWorkSearch([...rankingMissingWorks, ...actorMissingWorks]);"), "local and missing-work search indexes must be ready before the first query");
+assert(workQueryServiceSource.indexOf("if (usesTextMatcher) prewarmWorkSearch") < workQueryServiceSource.indexOf("const matchesQuery = usesTextMatcher"), "cache invalidation must reindex missing-work candidates before matching a new text query");
 assert(workQueryServiceSource.includes("prewarmPersonMerge();"), "person merge maps must be ready before the first search request");
 assert(workQueryServiceSource.includes("const searchSourceCache = new Map()"), "search paging and return navigation must reuse matched work sources");
 assert(workQueryServiceSource.includes("const source = cachedSearchSource(rawQuery)"), "search responses must use the versioned matched-work cache");
@@ -347,6 +350,70 @@ assert(workQueryServiceSource.includes("const exactPersonSearch ="), "exact pers
 assert(workCodeIndexServiceSource.includes("localWorkCodeIndexCache = { stamp, keys, rows, searchRows, prefixRows }"), "local code membership and work lookup must share one catalog pass");
 assert(workCodeIndexServiceSource.includes("while (low < high)"), "local code-prefix search must use the sorted code index");
 assert(workCodeIndexServiceSource.includes("let workCodeKeysCache = new WeakMap()"), "repeated person and catalog lookups must reuse parsed work code keys");
+assert(workSearchIndexServiceSource.includes("const postings = new Map()"), "full-text search must build an in-memory candidate index during prewarm");
+assert(workSearchIndexServiceSource.includes("function rarestPosting"), "search candidate selection must start from the rarest query gram");
+assert(workSearchIndexServiceSource.includes("candidateIds && isIndexedWork && !candidateIds.has(work.id)"), "new search terms must skip exact checks for unrelated indexed works");
+assert(lines("src/modules/fanhao/server/works/work-search-index-service.js") <= 240, "the work-search index service must stay focused");
+const searchIndexWorks = [
+  {
+    id: "work-1",
+    personId: "person-1",
+    personName: "甲",
+    title: "人妻精选",
+    directoryName: "ABC-123",
+    relativePath: "甲/ABC-123",
+    videos: [{ name: "rare-file-token.mp4", title: "", relativePath: "甲/ABC-123/rare-file-token.mp4" }],
+    images: [],
+    infos: []
+  },
+  {
+    id: "work-2",
+    personId: "person-2",
+    personName: "乙",
+    title: "普通作品",
+    directoryName: "DEF-456",
+    relativePath: "乙/DEF-456",
+    videos: [],
+    images: [],
+    infos: []
+  }
+];
+const searchIndexLibrary = {
+  scannedAt: "fixture-v1",
+  peopleById: new Map([
+    ["person-1", { id: "person-1", name: "甲" }],
+    ["person-2", { id: "person-2", name: "乙" }]
+  ]),
+  worksById: new Map(searchIndexWorks.map((work) => [work.id, work]))
+};
+const searchIndex = createWorkSearchIndexService({
+  getCoreDb: () => ({ prepare: () => ({ all: () => [] }) }),
+  getLibrary: () => searchIndexLibrary,
+  getSourceStamp: () => "fixture-v1",
+  getWorkInfoStamp: () => "fixture-info-v1",
+  normalizeSearchValue: (value) => String(value || "").toLowerCase().replace(/[\s._\-()[\]【】（）]+/g, ""),
+  parseJsonArray: () => [],
+  parseJsonTextArray: () => []
+});
+searchIndex.prewarm();
+assert.deepEqual(searchIndexWorks.filter(searchIndex.createMatcher("人妻")).map((work) => work.id), ["work-1"], "indexed search must preserve title matches");
+assert.deepEqual(searchIndexWorks.filter(searchIndex.createMatcher("abc123")).map((work) => work.id), ["work-1"], "indexed search must preserve normalized code matches");
+assert.deepEqual(searchIndexWorks.filter(searchIndex.createMatcher("rare-file-token")).map((work) => work.id), ["work-1"], "indexed search must preserve raw file-name matches");
+assert.deepEqual(searchIndexWorks.filter(searchIndex.createMatcher("桥本")).map((work) => work.id), [], "indexed search must reject absent terms without changing results");
+const externalSearchWork = {
+  id: "external-work",
+  personId: "",
+  personName: "",
+  title: "人妻外部榜单作品",
+  directoryName: "EXT-001",
+  relativePath: "",
+  videos: [],
+  images: [],
+  infos: []
+};
+assert.equal(searchIndex.createMatcher("人妻")(externalSearchWork), true, "candidate pruning must preserve non-local ranking and actor matches");
+searchIndex.prewarm([externalSearchWork]);
+assert.equal(searchIndex.createMatcher("人妻")(externalSearchWork), true, "candidate pruning must preserve prewarmed external matches");
 const workImageServiceSource = read("src/modules/fanhao/server/works/image-service.js");
 assert(workImageServiceSource.includes("FROM local_works lw"), "work-cover facets must index only local catalog entries");
 assert(!workImageServiceSource.includes("SELECT DISTINCT CAST(owner_id AS TEXT)"), "work-cover facets must not hydrate every historical image owner");
@@ -371,8 +438,8 @@ assert(server.includes("createFanhaoDependencies({"), "server composition must d
 assert(!/fanhao:\s*\{\s*catalog:/s.test(server), "server.js must not own FanHao runtime buckets");
 assert(server.includes("if (!missingLocal && !work.coverId && !workHasCoreCover(work.id))"), "catalog facets must use the compact core-cover index");
 assert(!server.includes("return !work.coverId && !workCoverRow(work.id);"), "catalog facets must not read cover blobs while counting missing covers");
-assert(server.includes("normalized: normalizeSearchValue(normalizedValues.join"), "deep raw metadata must stay out of the pinyin-normalization hot path");
-assert(server.includes("function prewarmWorkSearch()"), "local work search text must be prepared before the first query");
+assert(workSearchIndexServiceSource.includes("normalized: normalizeSearchValue(normalizedValues.join"), "deep raw metadata must stay out of the normalization hot path");
+assert(server.includes("function prewarmWorkSearch(works = [])"), "local and missing-work search text must be prepared before the first query");
 const worksRuntime = read("src/modules/fanhao/server/works/runtime.js");
 assert(worksRuntime.includes("activeRequestDeps"), "work services must be reused for the active library snapshot");
 assert(worksRuntime.includes("workQueryService.prewarm()"), "FanHao work queries must prewarm their full-library enrichment cache before serving requests");

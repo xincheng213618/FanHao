@@ -38,6 +38,7 @@ import { createWorkCodeIndexService } from "./src/modules/fanhao/server/works/wo
 import { createWorkCoverMutationService } from "./src/modules/fanhao/server/works/work-cover-mutation-service.js";
 import { createWorkInfoService } from "./src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkLocalMutationService } from "./src/modules/fanhao/server/works/work-local-mutation-service.js";
+import { createWorkSearchIndexService } from "./src/modules/fanhao/server/works/work-search-index-service.js";
 import { createGalleryMediaService } from "./src/modules/media/server/gallery-media-service.js";
 import { createGalleryMetadataService } from "./src/modules/media/server/gallery-metadata-service.js";
 import { createMangaService } from "./src/modules/photos/server/manga-service.js";
@@ -525,6 +526,15 @@ const personListService = createPersonListService({
   peopleScopeService,
   personMergeService
 });
+const workSearchIndexService = createWorkSearchIndexService({
+  getCoreDb,
+  getLibrary: () => library,
+  getSourceStamp: searchSourceStamp,
+  getWorkInfoStamp: workInfoStamp,
+  normalizeSearchValue,
+  parseJsonArray,
+  parseJsonTextArray
+});
 const adminCoreMutationService = createAdminCoreMutationService({
   actorIdFromJavdbUrl,
   actorProfileRow,
@@ -559,9 +569,7 @@ const adminCoreMutationService = createAdminCoreMutationService({
   resolveLibraryWorkByPublicId,
   safeStat,
   sourcePathToAbsolute: (...args) => sourcePathToAbsolute(...args),
-  resetWorkSearch: () => {
-    workSearchTextCache = null;
-  },
+  resetWorkSearch: workSearchIndexService.invalidate,
   uniqueTextArray,
   uniquePersonNames
 });
@@ -588,9 +596,7 @@ const workLocalMutationService = createWorkLocalMutationService({
   safeStat,
   sourcePathToAbsolute: (...args) => sourcePathToAbsolute(...args),
   refreshLibrary,
-  resetWorkSearch: () => {
-    workSearchTextCache = null;
-  },
+  resetWorkSearch: workSearchIndexService.invalidate,
   uniqueTextArray,
   workHasLocalMarker
 });
@@ -602,9 +608,7 @@ const workCoverMutationService = createWorkCoverMutationService({
   invalidateWorkImageCache: workImageService.invalidate,
   publicCoreWorkCover,
   publicWorkCover,
-  resetWorkSearch: () => {
-    workSearchTextCache = null;
-  },
+  resetWorkSearch: workSearchIndexService.invalidate,
   safeStat,
   videoProbeService,
   workCoverRow,
@@ -710,8 +714,6 @@ const adminActorAvatarService = createAdminActorAvatarService({
   resolveLibraryPersonByPublicId
 });
 let coreMapCache = null;
-let workSearchTextCache = null;
-let workSearchInfoCache = null;
 const {
   libraryOpenRoots,
   pathWithinRoot,
@@ -1260,153 +1262,12 @@ function searchPeople(rawQuery) {
   };
 }
 
-function buildWorkSearchEntry(work) {
-  const person = library.peopleById.get(work.personId);
-  const info = searchWorkInfoRow(work.id);
-  const infoFields = parseJsonArray(info?.fields_json).flatMap((field) => [field?.label, field?.value]);
-  const normalizedValues = [
-    work.title,
-    work.directoryName,
-    work.personName,
-    person?.name,
-    info?.code,
-    info?.title,
-    info?.person_name,
-    info?.director,
-    info?.maker,
-    info?.label,
-    info?.series,
-    ...(info?.actors || []),
-    ...parseJsonTextArray(info?.tags_json)
-  ].filter(Boolean);
-  const text = [
-    ...normalizedValues,
-    work.relativePath,
-    ...infoFields,
-    info?.raw_text,
-    ...(work.videos || []).flatMap((video) => [video.name, video.title, video.relativePath]),
-    ...(work.images || []).flatMap((image) => [image.name, image.title]),
-    ...(work.infos || []).flatMap((info) => [info.name, info.title])
-  ]
-    .filter(Boolean)
-    .join("\n")
-    .toLowerCase();
-  return {
-    text,
-    normalized: normalizeSearchValue(normalizedValues.join("\n"))
-  };
-}
-
-function searchWorkInfoRows() {
-  const stamp = `${library.scannedAt || ""}:${workInfoStamp()}`;
-  if (workSearchInfoCache?.stamp === stamp) return workSearchInfoCache.rows;
-
-  const rows = new Map();
-  try {
-    const db = getCoreDb();
-    for (const row of db.prepare(`
-      SELECT CAST(id AS TEXT) AS work_id, code, title, director,
-             fields_json, raw_text, javdb_tags_json AS tags_json
-      FROM works
-      WHERE status = 'ok'
-        AND EXISTS (
-          SELECT 1
-          FROM local_works lw
-          WHERE lw.work_id = works.id
-        )
-    `).all()) {
-      rows.set(row.work_id, { ...row, actors: [] });
-    }
-
-    for (const row of db.prepare(`
-      SELECT CAST(wp.work_id AS TEXT) AS work_id, p.name
-      FROM work_people wp
-      JOIN people p ON p.id = wp.person_id
-      WHERE wp.role = 'actor'
-        AND EXISTS (
-          SELECT 1
-          FROM local_works lw
-          WHERE lw.work_id = wp.work_id
-        )
-    `).all()) {
-      const info = rows.get(row.work_id);
-      if (info && row.name) info.actors.push(row.name);
-    }
-
-    for (const row of db.prepare(`
-      SELECT CAST(wm.work_id AS TEXT) AS work_id, wm.role, m.name
-      FROM work_makers wm
-      JOIN makers m ON m.id = wm.maker_id
-      WHERE wm.role IN ('maker', 'label')
-        AND EXISTS (
-          SELECT 1
-          FROM local_works lw
-          WHERE lw.work_id = wm.work_id
-        )
-    `).all()) {
-      const info = rows.get(row.work_id);
-      if (info && row.name && !info[row.role]) info[row.role] = row.name;
-    }
-
-    for (const row of db.prepare(`
-      SELECT CAST(ws.work_id AS TEXT) AS work_id, s.name
-      FROM work_series ws
-      JOIN series s ON s.id = ws.series_id
-      WHERE EXISTS (
-        SELECT 1
-        FROM local_works lw
-        WHERE lw.work_id = ws.work_id
-      )
-    `).all()) {
-      const info = rows.get(row.work_id);
-      if (info && row.name && !info.series) info.series = row.name;
-    }
-  } catch (error) {
-    console.warn("[work-search-index]", error.message || error);
-  }
-
-  workSearchInfoCache = { stamp, rows };
-  return rows;
-}
-
-function searchWorkInfoRow(workId) {
-  return searchWorkInfoRows().get(String(workId || "")) || null;
-}
-
-function workSearchTextEntry(work, stamp = searchSourceStamp()) {
-  if (workSearchTextCache?.stamp !== stamp) {
-    workSearchTextCache = { stamp, rows: new Map() };
-  }
-
-  const key = work?.id || `${work?.personId || ""}:${work?.directoryName || ""}:${work?.title || ""}`;
-  const cached = workSearchTextCache.rows.get(key);
-  if (cached) return cached;
-
-  const entry = buildWorkSearchEntry(work);
-  workSearchTextCache.rows.set(key, entry);
-  return entry;
-}
-
-function prewarmWorkSearch() {
-  const stamp = searchSourceStamp();
-  for (const work of library.worksById.values()) {
-    workSearchTextEntry(work, stamp);
-  }
+function prewarmWorkSearch(works = []) {
+  workSearchIndexService.prewarm(works);
 }
 
 function createWorkSearchMatcher(query) {
-  const normalizedQuery = normalizeSearchValue(query);
-  const loweredQuery = String(query || "").toLowerCase();
-  const stamp = searchSourceStamp();
-  if (workSearchTextCache?.stamp !== stamp) {
-    workSearchTextCache = { stamp, rows: new Map() };
-  }
-
-  return (work) => {
-    if (!loweredQuery) return true;
-    const { text, normalized } = workSearchTextEntry(work, stamp);
-    return text.includes(loweredQuery) || (normalizedQuery.length >= 2 && normalized.includes(normalizedQuery));
-  };
+  return workSearchIndexService.createMatcher(query);
 }
 
 function ensureDataDir() {
@@ -1566,8 +1427,7 @@ function workQueryStamp() {
 function clearSearchSourceCaches() {
   rankingService.invalidateSearch();
   actorMovieService.invalidateSearch();
-  workSearchTextCache = null;
-  workSearchInfoCache = null;
+  workSearchIndexService.invalidate();
 }
 
 function workInfoRow(workId) {
