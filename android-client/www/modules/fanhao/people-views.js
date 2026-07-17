@@ -1,7 +1,10 @@
 import { formatNumber } from "../../js/format.js";
-import { absoluteUrl, createFallbackCover, imageUrlForPerson, loadPreviewImage } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
+import { createFallbackCover, imageUrlForPerson } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
+import { createViewportImageLoader } from "./features/shared/viewport-image-loader.js?v=20260717-fanhao-people-first-paint-01";
 
 const PEOPLE_SORT_STORAGE_KEY = "fanhao.android.peopleSort";
+const PEOPLE_PAGE_SIZE = 64;
+const PERSON_AVATAR_ROOT_MARGIN = "560px 320px";
 const PEOPLE_SORTS = [
   { value: "smart", label: "默认", description: "头像优先" },
   { value: "works", label: "作品", description: "作品最多" },
@@ -18,9 +21,16 @@ export function createPeopleViews(context) {
     increasePeopleLimit,
     showView,
     setActiveBottom,
-    createLoadMoreButton,
-    renderCurrentViewPreservingScroll
+    createLoadMoreButton
   } = context;
+  const previewAvatarLoader = createViewportImageLoader({
+    getActiveUrl,
+    rootMargin: PERSON_AVATAR_ROOT_MARGIN
+  });
+  const indexAvatarLoader = createViewportImageLoader({
+    getActiveUrl,
+    rootMargin: PERSON_AVATAR_ROOT_MARGIN
+  });
 
   function visiblePeople(people) {
     return (people || []).filter((person) => person?.actorProfile?.gender !== "male");
@@ -28,6 +38,7 @@ export function createPeopleViews(context) {
 
   function renderPreviewPeople(people) {
     const list = visiblePeople(people);
+    previewAvatarLoader.reset();
     els.personPreview.innerHTML = "";
     if (!list.length) {
       els.personPreview.innerHTML = `<div class="loading-row">暂无人物数据</div>`;
@@ -35,7 +46,7 @@ export function createPeopleViews(context) {
     }
 
     for (const person of list) {
-      els.personPreview.append(createPersonCard(person, "preview"));
+      els.personPreview.append(createPersonCard(person, "preview", previewAvatarLoader));
     }
   }
 
@@ -44,6 +55,7 @@ export function createPeopleViews(context) {
     const sortMode = getPeopleSortMode();
     const people = visiblePeople(getLibrary()?.people).sort((a, b) => comparePeople(a, b, sortMode));
     const visible = people.slice(0, getPeopleLimit());
+    indexAvatarLoader.reset();
 
     els.viewKicker.textContent = "人物索引";
     els.viewTitle.textContent = "全部人物";
@@ -53,16 +65,31 @@ export function createPeopleViews(context) {
 
     const grid = document.createElement("div");
     grid.className = "people-grid";
-    for (const person of visible) grid.append(createPersonCard(person, "index"));
+    appendPeopleCards(grid, visible, indexAvatarLoader);
     els.viewContent.append(grid);
 
-    if (visible.length < people.length) {
-      els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(people.length)}`, () => {
-        increasePeopleLimit(80);
-        if (renderCurrentViewPreservingScroll) return renderCurrentViewPreservingScroll();
-        renderPeopleIndex();
-      }));
-    }
+    appendPeopleIndexLoadMore(grid, people);
+  }
+
+  function appendPeopleCards(grid, people, avatarLoader) {
+    const fragment = document.createDocumentFragment();
+    for (const person of people) fragment.append(createPersonCard(person, "index", avatarLoader));
+    grid.append(fragment);
+  }
+
+  function appendPeopleIndexLoadMore(grid, people) {
+    const visibleCount = grid.children.length;
+    if (visibleCount >= people.length) return;
+
+    const loadMore = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visibleCount)} / ${formatNumber(people.length)}`, () => {
+      const start = grid.children.length;
+      increasePeopleLimit(PEOPLE_PAGE_SIZE);
+      const nextLimit = Math.min(people.length, getPeopleLimit());
+      appendPeopleCards(grid, people.slice(start, nextLimit), indexAvatarLoader);
+      loadMore.remove();
+      appendPeopleIndexLoadMore(grid, people);
+    });
+    els.viewContent.append(loadMore);
   }
 
   function sortPeople(a, b) {
@@ -128,7 +155,7 @@ export function createPeopleViews(context) {
     return String(person.actorProfile?.displayName || person.name || "");
   }
 
-  function createPersonCard(person, mode) {
+  function createPersonCard(person, mode, avatarLoader = mode === "preview" ? previewAvatarLoader : indexAvatarLoader) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = mode === "preview" ? "person-card" : "index-person-card";
@@ -138,8 +165,7 @@ export function createPeopleViews(context) {
     button.append(visual);
     const imagePath = imageUrlForPerson(person);
     if (imagePath) {
-      const activeUrl = getActiveUrl();
-      loadPreviewImage(visual, absoluteUrl(activeUrl, imagePath), { cacheBaseUrl: activeUrl });
+      avatarLoader.schedule(visual, imagePath);
     }
 
     const name = document.createElement("strong");

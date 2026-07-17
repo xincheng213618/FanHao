@@ -2,6 +2,8 @@ import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-l
 
 const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64;
 const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48;
+const PERSON_INDEX_DESKTOP_PAGE_SIZE = 64;
+const PERSON_INDEX_MOBILE_PAGE_SIZE = 48;
 const PERSON_DETAIL_PREFETCH_LIMIT = 8;
 const PERSON_DETAIL_PREFETCH_TTL_MS = 15_000;
 const PERSON_DETAIL_HOVER_DELAY_MS = 80;
@@ -359,11 +361,18 @@ function resetPersonPaging() {
   state.personVisibleLimit = state.personPageSize;
 }
 
+function personIndexPageSize() {
+  return globalThis.matchMedia?.("(max-width: 720px)")?.matches
+    ? PERSON_INDEX_MOBILE_PAGE_SIZE
+    : PERSON_INDEX_DESKTOP_PAGE_SIZE;
+}
+
   return {
     cancelPendingSelection,
     disconnectIndexAutoload: disconnectPeopleIndexAutoload,
     fetchPersonWorksPage,
     goToPerson,
+    personIndexPageSize,
     personWorkPageSize,
     renderIndex: renderPeopleIndex,
     renderIndexStats: renderPeopleIndexStats,

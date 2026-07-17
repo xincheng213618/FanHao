@@ -11,7 +11,7 @@ import {
   createStudioPage,
   createWorkActions,
   selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260717-fanhao-player-prefetch-01";
+} from "./modules/fanhao/index.js?v=20260717-fanhao-people-first-paint-01";
 import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
@@ -538,7 +538,7 @@ async function loadLibrary(options = {}) {
   if (els.collectionToggle) els.collectionToggle.checked = state.showCompilationWorks;
   const defaultWorkPageSize = WORK_PAGE_SIZE_BY_ACCESS[state.accessMode] || WORK_PAGE_SIZE_BY_ACCESS.remote;
   state.workPageSize = preferredWorkPageSize(Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize) || defaultWorkPageSize));
-  state.personPageSize = state.accessMode === "lan" ? 80 : 96;
+  state.personPageSize = peoplePage.personIndexPageSize();
   resetWorkPaging();
   state.people = sortPeopleForList(data.people || []);
   resetPersonPaging();

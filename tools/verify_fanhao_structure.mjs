@@ -94,9 +94,9 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-player-prefetch-01'), "player prefetch changes must refresh the FanHao browser entry");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-work-page-01'), "adaptive work paging changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260717-fanhao-player-prefetch-01'), "player prefetch changes must refresh the FanHao module barrel");
+assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-people-first-paint-01'), "people first-paint changes must refresh the FanHao browser entry");
+assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-people-first-paint-01'), "people first-paint changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260717-fanhao-people-first-paint-01'), "people first-paint changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -148,7 +148,7 @@ assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 64, la
 assert(webApp.includes('globalThis.matchMedia?.("(max-width: 720px)")') && webApp.includes("pageSize: preferredWorkPageSize"), "search requests must follow the active desktop or mobile viewport");
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
-assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-person-prefetch-01'), "person navigation changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-people-first-paint-01'), "person navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260717-fanhao-ranking-first-page-01'), "ranking navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('collection-page.js?v=20260717-fanhao-collection-prefetch-04'), "collection navigation changes must use a fresh browser module URL");
 assert(peoplePageSource.includes("const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64") && peoplePageSource.includes("const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48"), "person details must keep desktop and mobile first payloads bounded");
@@ -233,6 +233,7 @@ for (const relativePath of [
   "android-client/www/modules/fanhao/features/works/cards.js",
   "android-client/www/modules/fanhao/features/works/actions.js",
   "android-client/www/modules/fanhao/features/works/preview-media.js",
+  "android-client/www/modules/fanhao/features/shared/viewport-image-loader.js",
   "android-client/www/modules/fanhao/features/rankings/ranking-views.js",
   "src/modules/fanhao/server/composition.js"
 ]) {
@@ -245,6 +246,7 @@ const androidPeopleViews = read("android-client/www/modules/fanhao/people-views.
 const androidRankingViews = read("android-client/www/modules/fanhao/features/rankings/ranking-views.js");
 const androidWorkCards = read("android-client/www/modules/fanhao/features/works/cards.js");
 const androidWorkCoverLoader = read("android-client/www/modules/fanhao/features/works/cover-loader.js");
+const androidViewportImageLoader = read("android-client/www/modules/fanhao/features/shared/viewport-image-loader.js");
 const androidListStyles = read("android-client/www/css/lists.css");
 assert(!androidWorkViews.includes("SEARCH_CHANNELS"), "FanHao Android must not own cross-module search channels");
 assert(!/function createWorkCard\s*\(/.test(androidWorkViews), "FanHao Android work cards must stay in their feature module");
@@ -258,10 +260,16 @@ assert(androidApp.includes("const aVisual = imageUrlForPerson(a) ? 1 : 0"), "And
 assert(androidPeopleViews.includes("const aVisual = imageUrlForPerson(a) ? 1 : 0"), "Android people sorting must recognize compact person-list avatar URLs");
 assert(androidApp.includes("const FAST_WORK_LIMIT = 48"), "Android FanHao work views must request a phone-sized interactive first page");
 assert(androidApp.includes("const FAST_WORK_STEP = 48"), "Android FanHao work views must grow in phone-sized pages");
+assert(androidApp.includes("const FAST_PEOPLE_LIMIT = 64"), "Android people index must keep its first page compact");
+assert(androidApp.includes("const FAST_PEOPLE_STEP = 64"), "Android people index must grow in bounded pages");
 assert(!androidApp.includes("return fast ? 480"), "Android FanHao detail and collection views must not restore oversized initial requests");
+assert(androidPeopleViews.includes("avatarLoader.schedule(visual, imagePath)"), "Android people avatars must wait until their cards approach the viewport");
+assert(androidPeopleViews.includes("appendPeopleCards(grid, people.slice(start, nextLimit)"), "Android people continuation must append only the next page");
+assert(!androidPeopleViews.includes("renderCurrentViewPreservingScroll"), "Android people continuation must not rebuild the existing index");
 assert(androidWorkCards.includes("coverLoader.schedule(thumb, imagePath)"), "Android work cards must defer cover reads until they approach the viewport");
 assert(androidWorkViews.includes("workCards.resetCoverLoading();"), "Android work navigation must cancel stale offscreen cover work");
 assert(androidWorkCoverLoader.includes('const WORK_COVER_ROOT_MARGIN = "720px 0px"'), "Android work covers must start shortly before they enter the viewport");
+assert(androidViewportImageLoader.includes("const pending = new Map()"), "Android viewport image loading must share one focused queue implementation");
 assert(androidListStyles.includes("content-visibility: auto") && androidListStyles.includes("contain-intrinsic-size: auto 128px"), "Android work cards must skip offscreen layout and painting");
 assert(androidRankingViews.includes("const PAGE_SIZE = 80"), "Android rankings must request a bounded first page");
 assert(androidRankingViews.includes("hasServerMore:"), "Android rankings must preserve server-side continuation");
@@ -389,6 +397,9 @@ const webRankingPage = read("public/modules/fanhao/ranking-page.js");
 const loadMorePeopleSource = /function loadMorePeopleIndex\(\)\s*\{([\s\S]*?)\n\}/.exec(peoplePage)?.[1] || "";
 assert(loadMorePeopleSource.includes("loadMoreRow.before(fragment)"), "people pagination must append cards without replacing the grid");
 assert(!loadMorePeopleSource.includes("renderPeopleIndex()"), "people pagination must not rerender the full index");
+assert(peoplePage.includes("const PERSON_INDEX_DESKTOP_PAGE_SIZE = 64"), "Web people index must keep the desktop first page compact");
+assert(peoplePage.includes("const PERSON_INDEX_MOBILE_PAGE_SIZE = 48"), "Web people index must keep the mobile first page compact");
+assert(webApp.includes("state.personPageSize = peoplePage.personIndexPageSize()"), "Web people paging must adapt to the viewport instead of network location");
 const fanhaoStyles = read("public/modules/fanhao/styles.css");
 const rootStyles = read("public/styles.css");
 const personCardStyles = /\.person-index-card\s*\{([\s\S]*?)\n\}/.exec(fanhaoStyles)?.[1] || "";

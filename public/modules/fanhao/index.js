@@ -1,7 +1,7 @@
-export { createPeoplePage } from "./people-page.js?v=20260717-fanhao-person-prefetch-01";
+export { createPeoplePage } from "./people-page.js?v=20260717-fanhao-people-first-paint-01";
 export { createPlaybackPrefetch } from "./playback-prefetch.js?v=20260717-fanhao-player-prefetch-01";
 export { createRankingPage } from "./ranking-page.js?v=20260717-fanhao-ranking-first-page-01";
-export { createFanhaoState } from "./state.js?v=20260717-fanhao-perf-05";
+export { createFanhaoState } from "./state.js?v=20260717-fanhao-people-first-paint-01";
 export { createSearchRequestService } from "./search-request-service.js?v=20260717-fanhao-search-request-01";
 export { selectVisibleWorks } from "./features/works/query.js";
 export { createWorkActions } from "./features/works/work-actions.js?v=20260717-fanhao-work-actions-01";

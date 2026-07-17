@@ -31,6 +31,8 @@ const PRIMARY_LABELS = {
 };
 const FAST_WORK_LIMIT = 48;
 const FAST_WORK_STEP = 48;
+const FAST_PEOPLE_LIMIT = 64;
+const FAST_PEOPLE_STEP = 64;
 const FAST_CHANNEL_LIMIT = 720;
 const FAST_CHANNEL_STEP = 720;
 const PHOTO_CHANNEL_LIMIT = 24;
@@ -368,7 +370,7 @@ function resetViewLimitsForView(view = currentView) {
 }
 
 function defaultPeopleLimit() {
-  return isFastServerUrl() ? 160 : 48;
+  return isFastServerUrl() ? FAST_PEOPLE_LIMIT : 48;
 }
 
 function worksLimitStepForView(view, fallback = 80) {
@@ -388,8 +390,10 @@ function channelLimitStepForView(view, fallback = 48, params = currentViewParams
   return Math.min(Number(fallback) || 24, 24);
 }
 
-function peopleLimitStep() {
-  return isFastServerUrl() ? 160 : 48;
+function peopleLimitStep(fallback = 48) {
+  return isFastServerUrl()
+    ? Math.max(Number(fallback) || 0, FAST_PEOPLE_STEP)
+    : Math.min(Number(fallback) || 48, 48);
 }
 
 function photoImageLimitStep(fallback = 24) {
