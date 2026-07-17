@@ -3,7 +3,6 @@ const HOVER_DELAY_MS = 90;
 export function createWorkDetailDataService({
   getActiveUrl,
   pageDataService,
-  readCachedJson,
   clearTimer = globalThis.clearTimeout,
   setTimer = globalThis.setTimeout
 }) {
@@ -21,26 +20,8 @@ export function createWorkDetailDataService({
     });
   }
 
-  async function load(workId, options = {}) {
-    const activeUrl = getActiveUrl();
-    const requestPath = path(workId);
-    const isActive = options.isActive || (() => true);
-    const freshRequest = fetch(workId, options).then((data) => ({ source: "fresh", data }), (error) => ({ source: "fresh", error }));
-    const cacheRequest = readCachedJson(activeUrl, requestPath)
-      .then((cache) => ({ source: "cache", cache }), () => ({ source: "cache", cache: null }));
-    const first = await Promise.race([freshRequest, cacheRequest]);
-    if (!isActive()) return null;
-    if (first.source === "fresh" && !first.error) return { data: first.data, unchanged: false };
-
-    const cached = first.source === "cache" ? first.cache : (await cacheRequest).cache;
-    const cachedSignature = cached?.payload?.work ? JSON.stringify(cached.payload) : "";
-    if (cachedSignature) options.onCached?.(cached.payload, cached);
-    const fresh = first.source === "fresh" ? first : await freshRequest;
-    if (fresh.error) throw fresh.error;
-    return {
-      data: fresh.data,
-      unchanged: Boolean(cachedSignature && JSON.stringify(fresh.data) === cachedSignature)
-    };
+  function load(workId, options = {}) {
+    return pageDataService.load(getActiveUrl(), path(workId), options);
   }
 
   function warm(workId) {

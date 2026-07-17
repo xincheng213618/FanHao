@@ -5,9 +5,9 @@ import { formatNumber } from "../../js/format.js";
 import { createWorkListState } from "../../js/work-filtering.js?v=20260710-western-merge-01";
 import { createWorkCards } from "./features/works/cards.js?v=20260717-fanhao-work-detail-response-01";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260717-fanhao-ranking-response-01";
-import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-work-response-01";
+import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-page-race-01";
 import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260717-fanhao-search-response-01";
-import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-work-detail-response-01";
+import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-page-race-01";
 
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
@@ -51,8 +51,8 @@ export function createWorkViews(context) {
   const renderFavoriteExtras = context.renderFavoriteExtras || (() => {});
   const workListState = createWorkListState({ renderCurrentView });
   let selectedFavoriteFolderId = "all";
-  const pageDataService = createWorkPageDataService({ fetchJson, writeCachedJson });
-  const workDetailDataService = createWorkDetailDataService({ getActiveUrl, pageDataService, readCachedJson });
+  const pageDataService = createWorkPageDataService({ fetchJson, readCachedJson, writeCachedJson });
+  const workDetailDataService = createWorkDetailDataService({ getActiveUrl, pageDataService });
   const workCards = createWorkCards({ getActiveUrl, showView, workDetailDataService });
   const searchDataService = createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageDataService, workListState });
   const rankingViews = createRankingViews({
@@ -75,27 +75,34 @@ export function createWorkViews(context) {
     const path = `/api/history?days=${CONTINUE_PREVIEW_DAYS}&limit=${CONTINUE_PREVIEW_LIMIT}`;
     const activeUrl = getActiveUrl();
 
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    if (cached?.payload) {
-      renderContinueData(cached.payload);
-      warmPrimaryCollections(activeUrl);
-      if (options.preferCache) return;
+    if (options.preferCache) {
+      const cached = await readCachedJson(activeUrl, path).catch(() => null);
+      if (cached?.payload) {
+        renderContinueData(cached.payload);
+        warmPrimaryCollections(activeUrl);
+        return;
+      }
     }
 
+    let renderedCache = false;
     try {
-      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000 });
-      writeCachedJson(activeUrl, path, data).catch(() => {});
-      renderContinueData(data);
+      const result = await pageDataService.load(activeUrl, path, {
+        onCached(data) {
+          renderedCache = true;
+          renderContinueData(data);
+          warmPrimaryCollections(activeUrl);
+        }
+      });
+      if (!result.unchanged) renderContinueData(result.data);
       warmPrimaryCollections(activeUrl);
     } catch {
-      if (!cached?.payload) {
+      if (!renderedCache) {
         els.continuePreview.dataset.hasItems = "0";
         els.continuePreview.innerHTML = "";
         els.continueSection.hidden = true;
       }
     }
   }
-
   function renderContinueData(data) {
     const works = (data.works || []).filter((work) => workCards.progressPercent(work) > 0).slice(0, CONTINUE_PREVIEW_LIMIT);
     els.continuePreview.innerHTML = "";
@@ -130,7 +137,6 @@ export function createWorkViews(context) {
     const path = isFavorites ? favoriteCollectionPath(limit) : `/api/history?limit=${limit}&offset=0`;
     const activeUrl = getActiveUrl();
     let renderedCache = false;
-    let renderedCacheSignature = "";
 
     const applyCollectionHeader = (data, cacheEntry = null) => {
       const works = data.works || [];
@@ -161,22 +167,22 @@ export function createWorkViews(context) {
       });
     };
 
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    if (!isActive()) return;
-    if (cached?.payload) {
-      renderedCache = true;
-      renderedCacheSignature = workDataSignature(cached.payload);
-      renderCollectionData(cached.payload, cached);
-    }
-
     try {
-      const data = await pageDataService.fetch(activeUrl, path, { signal: isActive.signal });
-      if (!isActive()) return;
-      if (renderedCache && workDataSignature(data) === renderedCacheSignature) {
-        applyCollectionHeader(data);
+      const result = await pageDataService.load(activeUrl, path, {
+        signal: isActive.signal,
+        isActive,
+        signature: workDataSignature,
+        onCached(data, cacheEntry) {
+          renderedCache = true;
+          renderCollectionData(data, cacheEntry);
+        }
+      });
+      if (!result || !isActive()) return;
+      if (result.unchanged) {
+        applyCollectionHeader(result.data);
         return;
       }
-      renderCollectionData(data);
+      renderCollectionData(result.data);
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
@@ -186,7 +192,6 @@ export function createWorkViews(context) {
       }
     }
   }
-
   function favoriteCollectionPath(limit = getWorksLimit()) {
     const params = new URLSearchParams({ limit: String(limit), offset: "0" });
     if (selectedFavoriteFolderId && selectedFavoriteFolderId !== "all") params.set("folder", selectedFavoriteFolderId);
@@ -244,7 +249,6 @@ export function createWorkViews(context) {
     const path = `/api/works?limit=${limit}&offset=0&sort=${encodeURIComponent(serverSort)}&filter=${encodeURIComponent(serverFilter)}`;
     const activeUrl = getActiveUrl();
     let renderedCache = false;
-    let renderedCacheSignature = "";
 
     const applyWorksHeader = (data, cacheEntry = null) => {
       const works = data.works || [];
@@ -267,24 +271,24 @@ export function createWorkViews(context) {
       }
     };
 
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    if (!isActive()) return;
-    if (cached?.payload) {
-      renderedCache = true;
-      renderedCacheSignature = workDataSignature(cached.payload);
-      renderWorksData(cached.payload, cached);
-      warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
-    }
-
     try {
-      const data = await pageDataService.fetch(activeUrl, path, { signal: isActive.signal });
-      if (!isActive()) return;
+      const result = await pageDataService.load(activeUrl, path, {
+        signal: isActive.signal,
+        isActive,
+        signature: workDataSignature,
+        onCached(data, cacheEntry) {
+          renderedCache = true;
+          renderWorksData(data, cacheEntry);
+          warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
+        }
+      });
+      if (!result || !isActive()) return;
       warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
-      if (renderedCache && workDataSignature(data) === renderedCacheSignature) {
-        applyWorksHeader(data);
+      if (result.unchanged) {
+        applyWorksHeader(result.data);
         return;
       }
-      renderWorksData(data);
+      renderWorksData(result.data);
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
@@ -309,7 +313,6 @@ export function createWorkViews(context) {
     const path = `/api/works?limit=${limit}&offset=0&sort=${encodeURIComponent(serverSort)}&filter=${encodeURIComponent(serverFilter)}`;
     const activeUrl = getActiveUrl();
     let renderedCache = false;
-    let renderedCacheSignature = "";
 
     const applyHeader = (data, cacheEntry = null) => {
       const works = data.works || [];
@@ -332,24 +335,24 @@ export function createWorkViews(context) {
       }
     };
 
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    if (!isActive()) return;
-    if (cached?.payload) {
-      renderedCache = true;
-      renderedCacheSignature = workDataSignature(cached.payload);
-      renderData(cached.payload, cached);
-      warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
-    }
-
     try {
-      const data = await pageDataService.fetch(activeUrl, path, { signal: isActive.signal });
-      if (!isActive()) return;
+      const result = await pageDataService.load(activeUrl, path, {
+        signal: isActive.signal,
+        isActive,
+        signature: workDataSignature,
+        onCached(data, cacheEntry) {
+          renderedCache = true;
+          renderData(data, cacheEntry);
+          warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
+        }
+      });
+      if (!result || !isActive()) return;
       warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
-      if (renderedCache && workDataSignature(data) === renderedCacheSignature) {
-        applyHeader(data);
+      if (result.unchanged) {
+        applyHeader(result.data);
         return;
       }
-      renderData(data);
+      renderData(result.data);
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
@@ -372,11 +375,12 @@ export function createWorkViews(context) {
     const activeUrl = getActiveUrl();
     let renderedCache = false;
 
-    const renderData = (data, cacheEntry = null) => {
+    const renderData = (data, cacheEntry = null, headerOnly = false) => {
       const studios = data.makers || [];
       const total = Number(data.total || studios.length);
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
       els.viewMeta.textContent = `${formatNumber(studios.length)} / ${formatNumber(total)} 个片商${suffix}`;
+      if (headerOnly) return;
       els.viewContent.innerHTML = "";
       if (!studios.length) {
         renderMessage("还没有片商数据。", "quiet", false);
@@ -388,17 +392,17 @@ export function createWorkViews(context) {
       els.viewContent.append(grid);
     };
 
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    if (!isActive()) return;
-    if (cached?.payload) {
-      renderedCache = true;
-      renderData(cached.payload, cached);
-    }
-
     try {
-      const data = await pageDataService.fetch(activeUrl, path, { signal: isActive.signal });
-      if (!isActive()) return;
-      renderData(data);
+      const result = await pageDataService.load(activeUrl, path, {
+        signal: isActive.signal,
+        isActive,
+        onCached(data, cacheEntry) {
+          renderedCache = true;
+          renderData(data, cacheEntry);
+        }
+      });
+      if (!result || !isActive()) return;
+      renderData(result.data, null, result.unchanged);
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
@@ -423,7 +427,6 @@ export function createWorkViews(context) {
     const path = studioDetailPath(studioId, seriesId, limit);
     const activeUrl = getActiveUrl();
     let renderedCache = false;
-    let renderedCacheSignature = "";
 
     const applyHeader = (data, cacheEntry = null) => {
       const studio = data.studio || {};
@@ -453,22 +456,23 @@ export function createWorkViews(context) {
       }
     };
 
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    if (!isActive()) return;
-    if (cached?.payload) {
-      renderedCache = true;
-      renderedCacheSignature = workDataSignature(cached.payload);
-      renderData(cached.payload, cached);
-    }
-
     try {
-      const data = await pageDataService.fetch(activeUrl, path, { signal: isActive.signal, reuseWarmed: true });
-      if (!isActive()) return;
-      if (renderedCache && workDataSignature(data) === renderedCacheSignature) {
-        applyHeader(data);
+      const result = await pageDataService.load(activeUrl, path, {
+        signal: isActive.signal,
+        isActive,
+        reuseWarmed: true,
+        signature: workDataSignature,
+        onCached(data, cacheEntry) {
+          renderedCache = true;
+          renderData(data, cacheEntry);
+        }
+      });
+      if (!result || !isActive()) return;
+      if (result.unchanged) {
+        applyHeader(result.data);
         return;
       }
-      renderData(data);
+      renderData(result.data);
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
@@ -583,12 +587,13 @@ export function createWorkViews(context) {
     const activeUrl = getActiveUrl();
     let renderedCache = false;
 
-    const renderSearchData = (data, cacheEntry = null) => {
+    const renderSearchData = (data, cacheEntry = null, headerOnly = false) => {
       const people = data.people || [];
       const works = data.works || [];
       const total = Number(data.total || works.length);
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
       els.viewMeta.textContent = `${formatNumber(total)} 个作品 · ${formatNumber(people.length)} 个人物${suffix}`;
+      if (headerOnly) return;
       els.viewContent.innerHTML = "";
       renderSearchPeople(people);
       if (works.length || total || !people.length) {
@@ -607,17 +612,18 @@ export function createWorkViews(context) {
       }
     };
 
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    if (!isActive()) return;
-    if (cached?.payload) {
-      renderedCache = true;
-      renderSearchData(cached.payload, cached);
-    }
-
     try {
-      const data = await pageDataService.fetch(activeUrl, path, { signal: isActive.signal, reuseWarmed: true });
-      if (!isActive()) return;
-      renderSearchData(data);
+      const result = await pageDataService.load(activeUrl, path, {
+        signal: isActive.signal,
+        isActive,
+        reuseWarmed: true,
+        onCached(data, cacheEntry) {
+          renderedCache = true;
+          renderSearchData(data, cacheEntry);
+        }
+      });
+      if (!result || !isActive()) return;
+      renderSearchData(result.data, null, result.unchanged);
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
@@ -722,7 +728,6 @@ export function createWorkViews(context) {
     box.textContent = message;
     els.viewContent.append(box);
   }
-
   return {
     renderAllWorks,
     renderVrWorks,
@@ -741,5 +746,4 @@ export function createWorkViews(context) {
     renderMessage
   };
 }
-
 

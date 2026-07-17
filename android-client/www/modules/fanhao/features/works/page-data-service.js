@@ -1,7 +1,7 @@
 const WARMED_RESULT_TTL_MS = 60 * 1000;
 const WARMED_RESULT_LIMIT = 32;
 
-export function createWorkPageDataService({ fetchJson, writeCachedJson }) {
+export function createWorkPageDataService({ fetchJson, readCachedJson = async () => null, writeCachedJson }) {
   const inflight = new Map();
   const warmed = new Set();
   const warmedResults = new Map();
@@ -51,9 +51,36 @@ export function createWorkPageDataService({ fetchJson, writeCachedJson }) {
     return Promise.all(requests);
   }
 
+  async function load(activeUrl, path, options = {}) {
+    const isActive = options.isActive || (() => true);
+    const signature = options.signature || JSON.stringify;
+    const freshRequest = fetch(activeUrl, path, options).then(
+      (data) => ({ source: "fresh", data }),
+      (error) => ({ source: "fresh", error })
+    );
+    const cacheRequest = readCachedJson(activeUrl, path).then(
+      (cache) => ({ source: "cache", cache }),
+      () => ({ source: "cache", cache: null })
+    );
+    const first = await Promise.race([freshRequest, cacheRequest]);
+    if (!isActive()) return null;
+    if (first.source === "fresh" && !first.error) return { data: first.data, unchanged: false };
+
+    const cached = first.source === "cache" ? first.cache : (await cacheRequest).cache;
+    const cachedPayload = cached?.payload || null;
+    const cachedSignature = cachedPayload ? signature(cachedPayload) : "";
+    if (cachedPayload) options.onCached?.(cachedPayload, cached);
+    const fresh = first.source === "fresh" ? first : await freshRequest;
+    if (fresh.error) throw fresh.error;
+    return {
+      data: fresh.data,
+      unchanged: Boolean(cachedSignature && signature(fresh.data) === cachedSignature)
+    };
+  }
+
   function requestKey(activeUrl, path) {
     return `${activeUrl}:${path}`;
   }
 
-  return { fetch, warm };
+  return { fetch, load, warm };
 }
