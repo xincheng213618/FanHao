@@ -1,5 +1,11 @@
 import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
 
+const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64;
+const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48;
+const PERSON_DETAIL_PREFETCH_LIMIT = 8;
+const PERSON_DETAIL_PREFETCH_TTL_MS = 15_000;
+const PERSON_DETAIL_HOVER_DELAY_MS = 80;
+
 export function createPeoplePage(deps) {
   const {
     api,
@@ -30,6 +36,9 @@ export function createPeoplePage(deps) {
 
   let peopleIndexLoadObserver = null;
   let peopleIndexLoadPending = false;
+  let personDetailHoverTimer = null;
+  let personDetailHoverTarget = "";
+  const personDetailPrefetches = new Map();
   const personDetailRequests = createLatestRequestGate();
   const cancelPendingSelection = personDetailRequests.cancel;
 
@@ -213,6 +222,10 @@ function createPersonIndexCard(person) {
   for (const eventName of ["pointerenter", "focus", "pointerdown"]) {
     card.addEventListener(eventName, () => preparePersonProfile?.(), { once: true });
   }
+  card.addEventListener("pointerenter", () => schedulePersonDetailPrefetch(person.id));
+  card.addEventListener("pointerleave", () => cancelPersonDetailPrefetch(person.id));
+  card.addEventListener("focus", () => prefetchPersonDetails(person.id));
+  card.addEventListener("pointerdown", () => prefetchPersonDetails(person.id));
   return card;
 }
 
@@ -233,7 +246,7 @@ async function selectPerson(personId, options = {}) {
   els.workGrid.innerHTML = `<div class="empty-state">正在加载作品</div>`;
 
   try {
-    const data = await fetchPersonWorksPage(personId, 0, { signal: request.signal });
+    const data = await fetchPersonWorksPage(personId, 0, { reusePrefetch: true, signal: request.signal });
     if (!request.isCurrent() || state.activeView !== "people" || state.selectedPersonId !== personId) return;
     state.selectedPerson = data.person;
     const resolvedPersonId = state.selectedPerson?.id || personId;
@@ -258,10 +271,25 @@ async function selectPerson(personId, options = {}) {
 }
 
 function personWorkPageSize() {
-  return Math.max(40, Math.min(96, Number(state.workPageSize) || 48));
+  const viewportLimit = globalThis.matchMedia?.("(max-width: 720px)")?.matches
+    ? PERSON_DETAIL_MOBILE_PAGE_SIZE
+    : PERSON_DETAIL_DESKTOP_PAGE_SIZE;
+  return Math.max(40, Math.min(viewportLimit, Number(state.workPageSize) || PERSON_DETAIL_MOBILE_PAGE_SIZE));
 }
 
 async function fetchPersonWorksPage(personId, offset = 0, options = {}) {
+  const requestUrl = personDetailRequestUrl(personId, offset);
+  if (options.reusePrefetch && offset === 0) {
+    const cached = reusablePersonDetailPrefetch(requestUrl);
+    if (cached) {
+      personDetailPrefetches.delete(requestUrl);
+      return cached.promise;
+    }
+  }
+  return api(requestUrl, options.signal ? { signal: options.signal } : {});
+}
+
+function personDetailRequestUrl(personId, offset = 0) {
   const params = new URLSearchParams({
     limit: String(personWorkPageSize()),
     offset: String(offset || 0),
@@ -269,7 +297,56 @@ async function fetchPersonWorksPage(personId, offset = 0, options = {}) {
     filter: typeof getWorkFilterMode === "function" ? getWorkFilterMode() : state.filterMode || "all"
   });
   if (state.peopleScope && state.peopleScope !== "main") params.set("scope", state.peopleScope);
-  return api(`/api/people/${encodeURIComponent(personId)}?${params}`, options.signal ? { signal: options.signal } : {});
+  return `/api/people/${encodeURIComponent(personId)}?${params}`;
+}
+
+function schedulePersonDetailPrefetch(personId) {
+  cancelPersonDetailPrefetch();
+  personDetailHoverTarget = String(personId || "");
+  personDetailHoverTimer = window.setTimeout(() => {
+    personDetailHoverTimer = null;
+    personDetailHoverTarget = "";
+    prefetchPersonDetails(personId);
+  }, PERSON_DETAIL_HOVER_DELAY_MS);
+}
+
+function cancelPersonDetailPrefetch(personId = "") {
+  if (personId && personDetailHoverTarget !== String(personId)) return;
+  if (personDetailHoverTimer) window.clearTimeout(personDetailHoverTimer);
+  personDetailHoverTimer = null;
+  personDetailHoverTarget = "";
+}
+
+function prefetchPersonDetails(personId) {
+  cancelPersonDetailPrefetch();
+  const requestUrl = personDetailRequestUrl(personId, 0);
+  const cached = reusablePersonDetailPrefetch(requestUrl);
+  if (cached) return cached.promise;
+
+  const entry = {
+    createdAt: Date.now(),
+    promise: api(requestUrl)
+  };
+  entry.promise.catch(() => {
+    if (personDetailPrefetches.get(requestUrl) === entry) personDetailPrefetches.delete(requestUrl);
+  });
+  personDetailPrefetches.set(requestUrl, entry);
+  while (personDetailPrefetches.size > PERSON_DETAIL_PREFETCH_LIMIT) {
+    personDetailPrefetches.delete(personDetailPrefetches.keys().next().value);
+  }
+  return entry.promise;
+}
+
+function reusablePersonDetailPrefetch(requestUrl) {
+  const entry = personDetailPrefetches.get(requestUrl);
+  if (!entry) return null;
+  if (Date.now() - entry.createdAt > PERSON_DETAIL_PREFETCH_TTL_MS) {
+    personDetailPrefetches.delete(requestUrl);
+    return null;
+  }
+  personDetailPrefetches.delete(requestUrl);
+  personDetailPrefetches.set(requestUrl, entry);
+  return entry;
 }
 
 async function goToPerson(personId) {

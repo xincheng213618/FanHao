@@ -106,7 +106,10 @@ assert(webApp.includes("await moduleNavigationPromise;"), "FanHao startup must s
 assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 96, lan: 64, remote: 48 })"), "FanHao work APIs must keep page payloads bounded for each access mode");
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
-assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-work-actions-01'), "person navigation changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-person-prefetch-01'), "person navigation changes must use a fresh browser module URL");
+assert(peoplePageSource.includes("const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64") && peoplePageSource.includes("const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48"), "person details must keep desktop and mobile first payloads bounded");
+assert(peoplePageSource.includes("const personDetailPrefetches = new Map()") && peoplePageSource.includes("reusePrefetch: true"), "person interactions must reuse prepared detail requests instead of issuing a duplicate click request");
+assert(peoplePageSource.includes('card.addEventListener("pointerenter", () => schedulePersonDetailPrefetch(person.id))') && peoplePageSource.includes('card.addEventListener("pointerdown", () => prefetchPersonDetails(person.id))'), "person cards must prepare details before desktop and touch clicks");
 assert(latestRequestSource.includes("sequence === requestSequence"), "latest-request gates must reject stale completions");
 assert(peoplePageSource.includes("const personDetailRequests = createLatestRequestGate()"), "person navigation must own a cancellable latest request");
 assert(peoplePageSource.includes("if (!request.isCurrent() || state.activeView !== \"people\""), "stale person responses must not overwrite newer navigation");
