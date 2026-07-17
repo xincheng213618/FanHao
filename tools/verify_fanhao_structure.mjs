@@ -675,6 +675,10 @@ assert(workQueryServiceSource.includes("prewarmWorkInfoDetails(missing)"), "work
 assert(workQueryServiceSource.includes("prewarmVideoProbesForWorks(missing)"), "visible work pages must prepare playback probes only for unprepared works");
 assert(workQueryServiceSource.includes("const LIST_PAGE_CACHE_LIMIT = 96") && workQueryServiceSource.includes("const WORK_PAYLOAD_CACHE_LIMIT = 4096"), "work lists must retain complete pages and prepared work payloads in bounded caches");
 assert(workQueryServiceSource.includes("const PREWARM_PAGE_SIZES = [48, 64]"), "work-list startup must prepare phone and desktop response sizes");
+assert(workQueryServiceSource.includes("const LEGACY_MOBILE_PROGRESS_LIMIT = 720") && workQueryServiceSource.includes("scheduleLegacyMobileProgressPrewarm()"), "old Android progress feeds must be prepared after startup");
+assert(workQueryServiceSource.includes("const LEGACY_MOBILE_PREWARM_BATCH_SIZE = 48") && workQueryServiceSource.includes("scheduleBackground(prepareNextBatch"), "legacy Android progress preparation must yield between phone-sized batches");
+assert(workQueryServiceSource.includes("function ensureWorkPayloadCache()") && !workQueryServiceSource.includes("listPageCache = new Map();\n    workPayloadCache = new Map();"), "favorite and progress changes must preserve prepared static work payloads");
+assert(workQueryServiceSource.includes("publicWorkUserState(work)") && workQueryServiceSource.includes("favoriteStateService.publicFavoriteForWork?.(work.id)"), "reused work payloads must refresh their live favorite and progress fields");
 assert(workQueryServiceSource.includes('["vr", "updated"]') && workQueryServiceSource.includes('["vr", "releaseDesc"]'), "VR startup must prepare Android and Web default ordering");
 assert(workQueryServiceSource.includes("dynamicFacetCache.get(works)") && workQueryServiceSource.includes("userStateStamp()"), "work-list dynamic facets must remain cached until user state changes");
 assert(workInfoServiceSource.includes("function facetRowsById()"), "work-list facets must use a compact metadata index");
@@ -1539,6 +1543,9 @@ let localPrefixReadCount = 0;
 let personMergePrewarmCount = 0;
 let searchFavoriteFacetReadCount = 0;
 let searchUserStateRevision = 1;
+let searchFavoriteState = false;
+let searchProgressState = null;
+let searchProgressReadCount = 0;
 let workListPublicCount = 0;
 let workInfoReadCount = 0;
 let workInfoFacetReadCount = 0;
@@ -1573,8 +1580,9 @@ const workQueryService = createWorkQueryService({
   favoriteStateService: {
     isFavoriteWork() {
       searchFavoriteFacetReadCount += 1;
-      return false;
-    }
+      return searchFavoriteState;
+    },
+    publicFavoriteForWork: () => searchFavoriteState ? { folderId: "folder-1", folderName: "测试收藏" } : null
   },
   isVrWork: (work) => work.id === queryWork.id,
   library: { scannedAt: "library-v1", worksById: new Map([[queryWork.id, queryWork]]) },
@@ -1586,7 +1594,12 @@ const workQueryService = createWorkQueryService({
   maxWorkLimit: 1000,
   peoplePayloadStamp: () => actorMovieDataStamp,
   peopleScopeService: { normalize: () => "main", workMatches: () => true },
-  playbackProgressService: { getWorkProgress: () => null },
+  playbackProgressService: {
+    getWorkProgress() {
+      searchProgressReadCount += 1;
+      return searchProgressState;
+    }
+  },
   prewarmCoreWorkCovers(works) {
     preparedWorkCoverIds.push(...works.map((work) => work.id));
   },
@@ -1608,6 +1621,7 @@ const workQueryService = createWorkQueryService({
   },
   publicWorkAvailability: () => ({ hasMagnet: false }),
   rankingMissingSearchWorks: () => [],
+  scheduleBackground: () => {},
   searchPeople: () => ({ exact: [], matchedPersonIds: [], people: [] }),
   storedWorkCodeKey: (value) => String(value || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase(),
   userStateStamp: () => searchUserStateRevision,
@@ -1655,16 +1669,29 @@ const singleLetterCodeSearch = workQueryService.searchPayload(singleLetterCodeSe
 assert.equal(localPrefixReadCount, prefixReadsBeforeSingleLetterSearch + 1, "single-letter Latin searches must use the indexed code-prefix path");
 assert.equal(singleLetterCodeSearch.total, 1, "single-letter code-prefix searches must preserve matching local works");
 searchUserStateRevision += 1;
+searchFavoriteState = true;
+searchProgressState = { percent: 42 };
 const workListPublicCountBeforeStateChange = workListPublicCount;
 const refreshedWorkList = workQueryService.listPayload(workListUrl);
 assert.notEqual(refreshedWorkList, cachedWorkListFirst, "favorite and progress changes must invalidate complete work-list responses");
-assert.equal(workListPublicCount, workListPublicCountBeforeStateChange + 1, "user-state changes must refresh prepared work payloads");
+assert.equal(workListPublicCount, workListPublicCountBeforeStateChange, "user-state changes must reuse prepared static work payloads");
+assert.equal(refreshedWorkList.works[0].favorite, true, "reused work payloads must refresh favorite state");
+assert.equal(refreshedWorkList.works[0].favoriteFolderId, "folder-1", "reused work payloads must refresh favorite folders");
+assert.equal(refreshedWorkList.works[0].progress?.percent, 42, "reused work payloads must refresh playback progress");
 const refreshedSearch = workQueryService.searchPayload(workSearchUrl);
 assert.notEqual(refreshedSearch, cachedSearchFirst, "favorite and progress changes must invalidate complete search responses");
 assert(searchFavoriteFacetReadCount > favoriteFacetReadsAfterSearch, "favorite and progress changes must refresh search facets");
+const progressPageFirst = workQueryService.listPayload(new URL("http://127.0.0.1/api/works?filter=progress&limit=24&sort=updated"));
+const progressReadsAfterFirstPage = searchProgressReadCount;
+const progressPageSecond = workQueryService.listPayload(new URL("http://127.0.0.1/api/works?filter=progress&limit=48&sort=updated"));
+assert.equal(progressPageFirst.total, 1, "progress filters must reflect the current playback state");
+assert.equal(progressPageSecond.works[0].progress?.percent, 42, "different progress page sizes must retain current playback state");
+assert.equal(searchProgressReadCount, progressReadsAfterFirstPage, "different progress page sizes must reuse the current user-state source and facets");
+const workListPublicCountBeforeStaticChange = workListPublicCount;
 actorMovieDataStamp = "actor-v2";
 workQueryService.listPayload(workListUrl);
 assert.equal(enrichmentCount, 2, "actor-movie updates must invalidate the FanHao work-list enrichment cache");
+assert.equal(workListPublicCount, workListPublicCountBeforeStaticChange + 1, "static work changes must still rebuild prepared work payloads");
 const prefixReadsBeforeInvalidatedSearch = localPrefixReadCount;
 workQueryService.searchPayload(workSearchUrl);
 assert.equal(localPrefixReadCount, prefixReadsBeforeInvalidatedSearch + 1, "search data changes must invalidate matched work sources");

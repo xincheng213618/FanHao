@@ -2,6 +2,9 @@ const LIST_PAGE_CACHE_LIMIT = 96;
 const SEARCH_PAGE_CACHE_LIMIT = 192;
 const WORK_PAYLOAD_CACHE_LIMIT = 4096;
 const PREWARM_PAGE_SIZES = [48, 64];
+const LEGACY_MOBILE_PROGRESS_LIMIT = 720;
+const LEGACY_MOBILE_PREWARM_BATCH_SIZE = 48;
+const LEGACY_MOBILE_PREWARM_DELAY_MS = 500;
 
 export function createWorkQueryService({
   actorMovieStamp,
@@ -33,6 +36,7 @@ export function createWorkQueryService({
   publicWork,
   publicWorkAvailability,
   rankingMissingSearchWorks,
+  scheduleBackground = (callback, delay = 0) => setTimeout(callback, delay),
   searchPeople,
   storedWorkCodeKey,
   userStateStamp = () => "",
@@ -46,22 +50,27 @@ export function createWorkQueryService({
   let listPageCache = new Map();
   let listPageCacheStamp = "";
   let workPayloadCache = new Map();
+  let workPayloadCacheStamp = "";
   const searchSourceCache = new Map();
   let searchSourceCacheStamp = "";
   let searchPageCache = new Map();
   let searchPageCacheStamp = "";
   const cacheableFilters = new Set([
     "all",
+    "favorite",
     "hasMagnet",
     "highRating",
     "info",
+    "localMarkedA",
     "localOnly",
     "missingCover",
     "missingLocal",
     "playable",
+    "progress",
     "rated",
     "vr"
   ]);
+  const userStateFilters = new Set(["favorite", "progress"]);
   let staticFacetCache = new WeakMap();
   let dynamicFacetCache = new WeakMap();
   let sortedWorksCache = new WeakMap();
@@ -333,7 +342,7 @@ export function createWorkQueryService({
     const total = works.length;
     const pageSource = works.slice(offset, offset + limit);
     if (options.hydrateMissingSearchResults) hydrateMissingSearchWorks(pageSource);
-    const missing = pageSource.filter((work) => !readPreparedWork(work, options));
+    const missing = pageSource.filter((work) => !preparedWorkEntry(work, options));
     if (missing.length) {
       if (!options.lightweightInfo) prewarmCoreWorkCovers(missing);
       prewarmVideoProbesForWorks(missing);
@@ -345,13 +354,34 @@ export function createWorkQueryService({
   }
 
   function readPreparedWork(work, options = {}) {
+    const cached = preparedWorkEntry(work, options);
+    if (!cached) return null;
+    const stateStamp = userStateStamp();
+    if (cached.userStateStamp !== stateStamp) {
+      cached.payload = { ...cached.payload, ...publicWorkUserState(work) };
+      cached.userStateStamp = stateStamp;
+    }
     const cacheKey = preparedWorkCacheKey(work, options);
-    if (!cacheKey || !workPayloadCache.has(cacheKey)) return null;
-    const cached = workPayloadCache.get(cacheKey);
-    if (cached.work !== work) return null;
     workPayloadCache.delete(cacheKey);
     workPayloadCache.set(cacheKey, cached);
     return cached.payload;
+  }
+
+  function preparedWorkEntry(work, options = {}) {
+    const cacheKey = preparedWorkCacheKey(work, options);
+    if (!cacheKey || !workPayloadCache.has(cacheKey)) return null;
+    const cached = workPayloadCache.get(cacheKey);
+    return cached.work === work ? cached : null;
+  }
+
+  function publicWorkUserState(work) {
+    const favorite = favoriteStateService.publicFavoriteForWork?.(work.id) || null;
+    return {
+      favorite: Boolean(favorite),
+      favoriteFolderId: favorite?.folderId || "",
+      favoriteFolderName: favorite?.folderName || "",
+      progress: playbackProgressService.getWorkProgress(work)
+    };
   }
 
   function preparedPublicWork(work, options = {}) {
@@ -360,7 +390,7 @@ export function createWorkQueryService({
     const payload = publicWork(work, false, options);
     const cacheKey = preparedWorkCacheKey(work, options);
     if (!cacheKey) return payload;
-    workPayloadCache.set(cacheKey, { work, payload });
+    workPayloadCache.set(cacheKey, { work, payload, userStateStamp: userStateStamp() });
     while (workPayloadCache.size > WORK_PAYLOAD_CACHE_LIMIT) {
       workPayloadCache.delete(workPayloadCache.keys().next().value);
     }
@@ -420,18 +450,26 @@ export function createWorkQueryService({
   }
 
   function ensureListResponseCache() {
+    ensureWorkPayloadCache();
     const stamp = listResponseStamp();
     if (listPageCacheStamp === stamp) return;
     listPageCacheStamp = stamp;
     listPageCache = new Map();
-    workPayloadCache = new Map();
     dynamicFacetCache = new WeakMap();
+  }
+
+  function ensureWorkPayloadCache() {
+    const stamp = `${currentStamp()}:${actorMovieStamp()}:${peoplePayloadStamp()}`;
+    if (workPayloadCacheStamp === stamp) return;
+    workPayloadCacheStamp = stamp;
+    workPayloadCache = new Map();
   }
 
   function cachedListSource(scope, filter, stamp = currentStamp()) {
     const cacheKey = `${scope}:${filter}`;
     const cached = listSourceCache.get(cacheKey);
-    let filtered = cached?.stamp === stamp ? cached.works : null;
+    const filterStamp = userStateFilters.has(filter) ? `${stamp}:${userStateStamp()}` : stamp;
+    let filtered = cached?.stamp === filterStamp ? cached.works : null;
 
     if (!filtered) {
       const scopedCacheKey = `${scope}:all`;
@@ -441,7 +479,7 @@ export function createWorkQueryService({
         : enrichedWorks().filter((work) => peopleScopeService.workMatches(work, scope));
       listSourceCache.set(scopedCacheKey, { stamp, works: scopedWorks });
       filtered = filter === "all" ? scopedWorks : scopedWorks.filter((work) => workMatchesFilter(work, filter));
-      if (cacheableFilters.has(filter)) listSourceCache.set(cacheKey, { stamp, works: filtered });
+      if (cacheableFilters.has(filter)) listSourceCache.set(cacheKey, { stamp: filterStamp, works: filtered });
     }
     return filtered;
   }
@@ -481,6 +519,26 @@ export function createWorkQueryService({
         listPayload(new URL(`http://fanhao.local/api/works?limit=${limit}&offset=0&sort=${sort}&filter=${filter}`));
       }
     }
+    scheduleLegacyMobileProgressPrewarm();
+  }
+
+  function scheduleLegacyMobileProgressPrewarm() {
+    const targetLimit = Math.min(LEGACY_MOBILE_PROGRESS_LIMIT, maxWorkLimit);
+    let offset = 0;
+    const prepareNextBatch = () => {
+      try {
+        const page = listPayload(new URL(`http://fanhao.local/api/works?limit=${LEGACY_MOBILE_PREWARM_BATCH_SIZE}&offset=${offset}&sort=updated&filter=progress`));
+        offset += page.count;
+        if (page.count > 0 && offset < Math.min(page.total, targetLimit)) {
+          scheduleBackground(prepareNextBatch, 0);
+          return;
+        }
+        listPayload(new URL(`http://fanhao.local/api/works?limit=${targetLimit}&offset=0&sort=updated&filter=progress`));
+      } catch (error) {
+        console.warn("[fanhao] legacy mobile progress prewarm failed:", error.message);
+      }
+    };
+    scheduleBackground(prepareNextBatch, LEGACY_MOBILE_PREWARM_DELAY_MS);
   }
 
   function searchPayload(url) {
