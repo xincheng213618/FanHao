@@ -650,7 +650,10 @@ export function createWorkQueryService({
       facetsCache: null,
       filteredByMode: new Map(),
       filteredByModeStamp: userStateStamp(),
-      people: peopleSearch.people.map(publicPerson),
+      // Search renders compact person chips (name + work count) and opens the
+      // full person endpoint on selection. Do not synchronously scan every
+      // matched person's works just to synthesize an unused fallback avatar.
+      people: peopleSearch.people.map((person) => publicPerson(person, { skipFallbackAvatar: true })),
       works: matchedWorks
     };
     searchSourceCache.set(cacheKey, source);

@@ -1596,9 +1596,15 @@ let searchProgressReadCount = 0;
 let workListPublicCount = 0;
 let workInfoReadCount = 0;
 let workInfoFacetReadCount = 0;
+let searchPersonOptions = null;
 let preparedWorkCoverIds = [];
 let preparedWorkInfoIds = [];
 let preparedWorkVideoIds = [];
+const searchPerson = {
+  id: "person-1",
+  name: "Exact Person",
+  workCount: 1
+};
 const queryWork = {
   id: "work-1",
   personId: "person-1",
@@ -1661,7 +1667,10 @@ const workQueryService = createWorkQueryService({
   prewarmWorkInfoDetails(works) {
     preparedWorkInfoIds.push(...works.map((work) => work.id));
   },
-  publicPerson: (person) => person,
+  publicPerson: (person, options = {}) => {
+    searchPersonOptions = options;
+    return person;
+  },
   publicWork: (work) => {
     workListPublicCount += 1;
     return { id: work.id, revision: searchUserStateRevision };
@@ -1669,7 +1678,9 @@ const workQueryService = createWorkQueryService({
   publicWorkAvailability: () => ({ hasMagnet: false }),
   rankingMissingSearchWorks: () => [],
   scheduleBackground: () => {},
-  searchPeople: () => ({ exact: [], matchedPersonIds: [], people: [] }),
+  searchPeople: (query) => query === searchPerson.name
+    ? { exact: [searchPerson], matchedPersonIds: [searchPerson.id], people: [searchPerson] }
+    : { exact: [], matchedPersonIds: [], people: [] },
   storedWorkCodeKey: (value) => String(value || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase(),
   userStateStamp: () => searchUserStateRevision,
   workHasCoreCover: () => false,
@@ -1727,6 +1738,9 @@ const cachedSearchSecond = workQueryService.searchPayload(workSearchUrl);
 assert.equal(cachedSearchSecond, cachedSearchFirst, "identical search requests must reuse the complete response object");
 assert.equal(localPrefixReadCount, 1, "repeated search paging must reuse the matched work source");
 assert.equal(searchFavoriteFacetReadCount, favoriteFacetReadsAfterSearch, "repeated search paging must reuse unchanged user facets");
+const exactPersonSearch = workQueryService.searchPayload(new URL("http://127.0.0.1/api/search?q=Exact%20Person&limit=24&sort=releaseDesc"));
+assert.equal(exactPersonSearch.people[0]?.id, searchPerson.id, "exact person searches must retain compact person results");
+assert.deepEqual(searchPersonOptions, { skipFallbackAvatar: true }, "search person chips must not scan works for unused fallback avatars");
 const singleLetterCodeSearchUrl = new URL("http://127.0.0.1/api/search?q=A&limit=24&sort=releaseDesc");
 const prefixReadsBeforeSingleLetterSearch = localPrefixReadCount;
 const singleLetterCodeSearch = workQueryService.searchPayload(singleLetterCodeSearchUrl);
