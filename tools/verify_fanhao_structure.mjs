@@ -102,9 +102,9 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-viewport-render-01'), "viewport rendering changes must refresh the FanHao browser entry");
+assert(indexHtml.includes('/fanhao-app.js?v=20260717-photo-library-workspace-01'), "workspace changes must refresh the FanHao browser entry");
 assert(indexHtml.includes('/modules/fanhao/work-cards.css?v=20260717-fanhao-viewport-render-01'), "viewport rendering styles must use a fresh browser URL");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-viewport-render-01'), "viewport rendering changes must refresh the FanHao app module");
+assert(fanhaoEntry.includes('app.js?v=20260717-photo-library-workspace-01'), "workspace changes must refresh the FanHao app module");
 assert(webApp.includes('index.js?v=20260717-fanhao-viewport-render-01'), "viewport rendering changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
@@ -678,7 +678,7 @@ assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-ra
 assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-touch-intent-01'), "Android touch-intent changes must use a fresh work-view URL");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must use a fresh people-view URL");
 assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-touch-intent-01'), "Android touch-intent changes must refresh the FanHao module entry chain");
-assert(androidIndexHtml.includes('app.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must retain its current app entry URL");
+assert(androidIndexHtml.includes('app.js?v=20260717-photo-first-image-06'), "Android app entry must retain its current cache-busting URL");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
@@ -884,7 +884,7 @@ assert(workClassificationServiceSource.includes("function isCompilation(work)") 
 assert(personDetailServiceSource.includes('url.searchParams.get("includeMissingLocal")') && personDetailServiceSource.includes('url.searchParams.get("includeCompilation")'), "person page caches must distinguish server visibility options");
 assert(webApp.includes('if (state.activeView === "people" && state.selectedPersonId) return state.works;'), "person cards must render the server page without client-side visibility filtering or sorting");
 assert(webApp.includes("state.workVisibleLimit = Math.max(state.workVisibleLimit, state.works.length);"), "person continuation must expose each server page immediately instead of adding a second client paging layer");
-const workAutoloadSource = /function setupWorkLoadMoreAutoload\([\s\S]*?\n}\n\nfunction renderEmpty/.exec(webApp)?.[0] || "";
+const workAutoloadSource = /function setupWorkLoadMoreAutoload\([\s\S]*?\r?\n}\r?\n\r?\nfunction renderEmpty/.exec(webApp)?.[0] || "";
 assert(workAutoloadSource.includes("new IntersectionObserver"), "work continuation must use viewport observation for automatic loading");
 assert(!workAutoloadSource.includes('window.addEventListener("wheel"') && !workAutoloadSource.includes("userScrollIntentUntil"), "work continuation must not depend on short-lived wheel intent timing");
 assert(workQueryServiceSource.includes("missing.filter((work) => work.missingLocal)"), "lightweight person pages must batch-hydrate SQL covers for missing-local works");
@@ -1313,6 +1313,7 @@ const cachedPersonDetailService = createPersonDetailService({
   workLocalMutationService: {},
   workCodeKeySetForWorks: () => new Set(["work1"]),
   workQueryService: {
+    visibilityStamp: () => "visibility-v1",
     lightweightFacets(works) {
       personDetailFacetReadCount += 1;
       return { all: works.length, favorite: personDetailFacetReadCount };
