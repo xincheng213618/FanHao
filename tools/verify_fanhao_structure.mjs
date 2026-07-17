@@ -6,6 +6,7 @@ import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
 import { createWorkActions } from "../public/modules/fanhao/features/works/work-actions.js";
 import { createCollectionPage } from "../public/modules/fanhao/features/collections/collection-page.js";
+import { createPlaybackPrefetch } from "../public/modules/fanhao/playback-prefetch.js";
 import { createLazyPersonProfile } from "../public/modules/fanhao/lazy-person-profile.js";
 import { createLazyAdminModal } from "../public/modules/system/lazy-admin-modal.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
@@ -16,6 +17,7 @@ import { createStudioService } from "../src/modules/fanhao/server/catalog/studio
 import { prepareCollectionWorkPage } from "../src/modules/fanhao/server/user-state/routes.js";
 import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkImageService } from "../src/modules/fanhao/server/works/image-service.js";
+import { createWorkDetailService } from "../src/modules/fanhao/server/works/work-detail-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createWorkSearchIndexService } from "../src/modules/fanhao/server/works/work-search-index-service.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
@@ -62,7 +64,10 @@ const searchRequestSource = read("public/modules/fanhao/search-request-service.j
 const rankingPageSource = read("public/modules/fanhao/ranking-page.js");
 const studioPageSource = read("public/modules/fanhao/features/studios/studio-page.js");
 const collectionPageSource = read("public/modules/fanhao/features/collections/collection-page.js");
+const playbackPrefetchSource = read("public/modules/fanhao/playback-prefetch.js");
 const workActionsSource = read("public/modules/fanhao/features/works/work-actions.js");
+const workDetailServiceSource = read("src/modules/fanhao/server/works/work-detail-service.js");
+const workRoutesApiSource = read("src/modules/fanhao/server/works/routes-api.js");
 const playbackProgressServiceSource = read("src/modules/fanhao/server/playback/playback-progress-service.js");
 const workDetailPageSource = read("public/modules/fanhao/work-detail-page.js");
 const videoProbeSource = read("src/platform/server/video-probe-service.js");
@@ -77,9 +82,9 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-collection-first-page-03'), "collection startup changes must refresh the FanHao browser entry");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-collection-first-page-03'), "collection startup changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260717-fanhao-collection-first-page-03'), "collection startup changes must refresh the FanHao module barrel");
+assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-player-prefetch-01'), "player prefetch changes must refresh the FanHao browser entry");
+assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-player-prefetch-01'), "player prefetch changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260717-fanhao-player-prefetch-01'), "player prefetch changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -100,6 +105,11 @@ assert(!fanhaoModuleIndexSource.includes("createWorkDetailPage"), "the FanHao ba
 assert(!webApp.includes("createWorkDetailPage") && webApp.includes("createWorkActions"), "the FanHao composition root must use focused work actions without composing the retired drawer");
 assert(webApp.includes("toggleFavorite(work.id, favorite)"), "work cards must expose immediate favorite-control feedback while the API is pending");
 assert(webApp.includes('window.open(playerPageUrl(work.id), "_blank", "noopener")'), "work cards must keep opening the standalone player");
+assert(webApp.includes("playbackPrefetch.bind(cover, work.id)") && webApp.includes("playbackPrefetch.bind(body, work.id)"), "work-card primary targets must prepare playback before selection");
+assert(webApp.includes("void playbackPrefetch.prepare(work.id)") && playbackPrefetchSource.includes("playback-prewarm"), "work-card activation must overlap player navigation with probe preparation");
+assert(playbackPrefetchSource.includes('target.addEventListener("pointerenter"') && playbackPrefetchSource.includes('target.addEventListener("pointerdown"'), "desktop hover and touch press must share playback preparation");
+assert(workRoutesApiSource.includes("playbackPrewarmPayload") && workRoutesApiSource.includes("/playback-prewarm$"), "FanHao must expose a focused playback-prewarm route");
+assert(workDetailServiceSource.includes("replaceQueued: true") && workDetailServiceSource.includes("concurrency: 3"), "playback intent must take priority over speculative list probes without awaiting them");
 assert(workActionsSource.includes("captureFavoriteSnapshot") && workActionsSource.includes("restoreFavoriteSnapshot"), "optimistic favorite feedback must roll back cleanly after API failures");
 assert(peoplePageSource.includes('["pointerenter", "focus", "pointerdown"]') && peoplePageSource.includes("preparePersonProfile?.()"), "person cards must prefetch profile code before or alongside the detail API request");
 assert(lazyPersonProfileSource.includes("renderVersion") && lazyPersonProfileSource.includes("version !== renderVersion"), "late profile modules must not render after navigation invalidates them");
@@ -979,6 +989,15 @@ const initialHistoryLookupCount = historyWorkLookupCount;
 assert.deepEqual(playbackProgressService.historyEntries({ days: 7 }).map((entry) => entry.work.id), ["work-2"], "history day filters must use the cached ordered index");
 assert.equal(historyWorkLookupCount, initialHistoryLookupCount, "repeated history summaries must reuse resolved work entries");
 assert.equal(playbackProgressService.getWorkProgress(historyWorkOne)?.videoId, "video-1", "work progress must preserve the latest playable entry");
+assert.equal(playbackProgressService.saveVideoProgress("video-3", { workId: "work-1", position: 0, duration: 100 }), null, "opening a player at zero seconds must not create watch history");
+assert.equal(historySaveCount, 0, "zero-second player startup must avoid a user-state write");
+assert.equal(playbackProgressService.saveVideoProgress("video-1", { workId: "work-1", position: 0, duration: 100 })?.position, 10, "zero-second startup must not overwrite existing progress");
+assert.equal(historySaveCount, 0, "preserving existing progress at zero seconds must avoid a user-state write");
+historyUserState.progress["video-zero"] = { workId: "work-1", position: 0, duration: 100, updatedAt: new Date().toISOString() };
+assert.equal(playbackProgressService.saveVideoProgress("video-zero", { workId: "work-1", position: 0, duration: 100 }), null, "stale zero-second progress must be removed instead of entering history");
+assert.equal(historyUserState.progress["video-zero"], undefined, "zero-second cleanup must remove the stale progress row");
+assert.equal(historySaveCount, 1, "zero-second cleanup must persist the removal once");
+historySaveCount = 0;
 playbackProgressService.saveVideoProgress("video-1", { workId: "work-1", position: 30, duration: 100 });
 assert.equal(historySaveCount, 1, "progress updates must still persist user state");
 assert.equal(playbackProgressService.historyEntries()[0]?.work.id, "work-1", "progress updates must invalidate the cached history order");
@@ -1388,6 +1407,56 @@ const cachedPlayInfo = await videoProbeService.playInfoForFileAsync(slowVideoFil
 assert.equal(cachedPlayInfo.probePending, false, "completed video probes must serve from cache");
 assert.equal(cachedPlayInfo.duration, 123.5, "completed video probes must preserve duration metadata");
 assert.equal(cachedPlayInfo.videoCodec, "h264", "completed video probes must preserve codec metadata");
+
+let playbackPrefetchApiCalls = 0;
+let scheduledPlaybackPrefetch = null;
+const playbackPrefetch = createPlaybackPrefetch({
+  api: async (requestPath) => {
+    playbackPrefetchApiCalls += 1;
+    return { requestPath };
+  },
+  clearTimer: () => {
+    scheduledPlaybackPrefetch = null;
+  },
+  setTimer: (callback) => {
+    scheduledPlaybackPrefetch = callback;
+    return 1;
+  }
+});
+playbackPrefetch.schedule("work one");
+assert.equal(playbackPrefetchApiCalls, 0, "pointer hover must avoid probing transient card flyovers");
+scheduledPlaybackPrefetch();
+await playbackPrefetch.prepare("work one");
+assert.equal(playbackPrefetchApiCalls, 1, "hover and activation must reuse one playback-prewarm request");
+playbackPrefetch.schedule("work two");
+playbackPrefetch.cancel("work two");
+assert.equal(scheduledPlaybackPrefetch, null, "leaving a work card must cancel its delayed playback preparation");
+
+const preferredPlaybackVideo = { id: "video-b", path: "G:/work/video-b.mp4", playable: true };
+let preparedPlayback = null;
+const workDetailService = createWorkDetailService({
+  playbackProgressService: { getWorkProgress: () => ({ videoId: "video-b" }) },
+  resolveLibraryWorkByPublicId: (workId) => workId === "work-1"
+    ? {
+        id: workId,
+        videos: [
+          { id: "video-a", path: "G:/work/video-a.mp4", playable: true },
+          preferredPlaybackVideo
+        ]
+      }
+    : null,
+  videoProbeService: {
+    prewarm(files, options) {
+      preparedPlayback = { files, options };
+      return { queued: 1, active: 1, pending: 0 };
+    }
+  }
+});
+const playbackPrewarmPayload = workDetailService.playbackPrewarmPayload("work-1");
+assert.equal(playbackPrewarmPayload.videoId, "video-b", "playback preparation must prefer the user's latest video progress");
+assert.deepEqual(preparedPlayback.files, [preferredPlaybackVideo], "playback preparation must enqueue only the selected video");
+assert.equal(preparedPlayback.options.replaceQueued, true, "explicit playback intent must replace lower-priority queued probes");
+assert.equal(workDetailService.playbackPrewarmPayload("missing-work"), null, "playback preparation must preserve missing-work semantics");
 
 let stampNow = 1000;
 let synchronousStampReads = 0;

@@ -5,12 +5,13 @@ import {
   createFanhaoState,
   createCollectionPage,
   createPeoplePage,
+  createPlaybackPrefetch,
   createRankingPage,
   createSearchRequestService,
   createStudioPage,
   createWorkActions,
   selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260717-fanhao-collection-first-page-03";
+} from "./modules/fanhao/index.js?v=20260717-fanhao-player-prefetch-01";
 import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
@@ -108,6 +109,7 @@ const COVER_RETRY_DELAYS = [700, 1400, 2400, 4000, 6500, 9000];
 const initialParams = new URLSearchParams(window.location.search);
 const isAndroidClient = initialParams.get("client") === "android";
 const api = createApiClient({ isAndroidClient });
+const playbackPrefetch = createPlaybackPrefetch({ api });
 const searchRequests = createSearchRequestService({
   api,
   filter: serializedWorkFilterMode,
@@ -2078,6 +2080,8 @@ function createWorkCard(work, index = 0) {
   if (work.missingLocal) {
     card.append(cover, body);
   } else {
+    playbackPrefetch.bind(cover, work.id);
+    playbackPrefetch.bind(body, work.id);
     card.append(cover, favorite, createLocalMarkerButton(work, "A"));
     if (isPersonBulkDeleteActive()) card.append(createBulkDeleteSelectButton(work));
     card.append(body);
@@ -2181,6 +2185,7 @@ function openWorkCard(work) {
     }
     return;
   }
+  void playbackPrefetch.prepare(work.id);
   window.open(playerPageUrl(work.id), "_blank", "noopener");
 }
 

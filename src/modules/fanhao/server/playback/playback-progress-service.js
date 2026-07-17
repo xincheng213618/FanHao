@@ -132,9 +132,23 @@ export function createPlaybackProgressService({
       throw error;
     }
 
+    const normalizedPosition = Math.max(0, position);
+    if (normalizedPosition === 0) {
+      const existing = userState.progress[videoId];
+      if (Number(existing?.position || 0) > 0) {
+        return getVideoProgress(videoId, library.worksById.get(existing.workId || workId));
+      }
+      if (existing) {
+        delete userState.progress[videoId];
+        progressRevision += 1;
+        userStateService.save();
+      }
+      return null;
+    }
+
     userState.progress[videoId] = {
       workId,
-      position: Math.max(0, position),
+      position: normalizedPosition,
       duration,
       updatedAt: new Date().toISOString()
     };

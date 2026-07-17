@@ -169,6 +169,18 @@ export async function routeWorksApi(req, res, url, deps) {
     return true;
   }
 
+  const playbackPrewarmMatch = /^\/api\/works\/([^/]+)\/playback-prewarm$/.exec(url.pathname);
+  if (playbackPrewarmMatch && req.method === "GET") {
+    const payload = workDetailService.playbackPrewarmPayload(decodeURIComponent(playbackPrewarmMatch[1]));
+    if (!payload) {
+      notFound(res);
+      return true;
+    }
+
+    sendJson(res, 200, payload);
+    return true;
+  }
+
   const workMatch = /^\/api\/works\/([^/]+)$/.exec(url.pathname);
   if (workMatch && req.method === "GET") {
     const payload = workDetailService.detailPayload(decodeURIComponent(workMatch[1]));

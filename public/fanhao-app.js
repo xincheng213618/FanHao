@@ -1,2 +1,2 @@
 document.documentElement.dataset.appModule = "fanhao";
-await import("./app.js?v=20260717-fanhao-collection-first-page-03");
+await import("./app.js?v=20260717-fanhao-player-prefetch-01");
