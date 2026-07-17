@@ -65,13 +65,44 @@ export function createPlaybackPrefetch({
     hoverTarget = "";
   }
 
-  function bind(target, workId) {
-    if (!target) return;
-    target.addEventListener("pointerenter", () => schedule(workId), { passive: true });
-    target.addEventListener("pointerleave", () => cancel(workId), { passive: true });
-    target.addEventListener("focus", () => void prepare(workId));
-    target.addEventListener("pointerdown", () => void prepare(workId), { passive: true });
+  function bindContainer(container) {
+    if (!container) return () => {};
+
+    const findIntentTarget = (target) => {
+      const intentTarget = target?.closest?.("[data-playback-work-id]");
+      return intentTarget && container.contains(intentTarget) ? intentTarget : null;
+    };
+    const workIdFor = (target) => target?.dataset?.playbackWorkId || "";
+    const handlePointerOver = (event) => {
+      const intentTarget = findIntentTarget(event.target);
+      if (!intentTarget || findIntentTarget(event.relatedTarget) === intentTarget) return;
+      schedule(workIdFor(intentTarget));
+    };
+    const handlePointerOut = (event) => {
+      const intentTarget = findIntentTarget(event.target);
+      if (!intentTarget || findIntentTarget(event.relatedTarget) === intentTarget) return;
+      cancel(workIdFor(intentTarget));
+    };
+    const handleFocusIn = (event) => {
+      const intentTarget = findIntentTarget(event.target);
+      if (intentTarget) void prepare(workIdFor(intentTarget));
+    };
+    const handlePointerDown = (event) => {
+      const intentTarget = findIntentTarget(event.target);
+      if (intentTarget) void prepare(workIdFor(intentTarget));
+    };
+
+    container.addEventListener("pointerover", handlePointerOver, { passive: true });
+    container.addEventListener("pointerout", handlePointerOut, { passive: true });
+    container.addEventListener("focusin", handleFocusIn);
+    container.addEventListener("pointerdown", handlePointerDown, { passive: true });
+    return () => {
+      container.removeEventListener("pointerover", handlePointerOver);
+      container.removeEventListener("pointerout", handlePointerOut);
+      container.removeEventListener("focusin", handleFocusIn);
+      container.removeEventListener("pointerdown", handlePointerDown);
+    };
   }
 
-  return { bind, cancel, prepare, schedule };
+  return { bindContainer, cancel, prepare, schedule };
 }

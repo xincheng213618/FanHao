@@ -98,9 +98,9 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-studio-first-paint-01'), "studio first-paint changes must refresh the FanHao browser entry");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-studio-first-paint-01'), "studio first-paint changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260717-fanhao-studio-first-paint-01'), "studio first-paint changes must refresh the FanHao module barrel");
+assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-work-card-lifecycle-01'), "work-card lifecycle changes must refresh the FanHao browser entry");
+assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-work-card-lifecycle-01'), "work-card lifecycle changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260717-fanhao-work-card-lifecycle-01'), "work-card lifecycle changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -122,9 +122,13 @@ assert(!webApp.includes("createWorkDetailPage") && webApp.includes("createWorkAc
 assert(webApp.includes("toggleFavorite(work.id, favorite)"), "work cards must expose immediate favorite-control feedback while the API is pending");
 assert(webApp.includes("onCollectionStateChanged: () => collectionPage.invalidatePrefetches()") && workActionsSource.includes("onCollectionStateChanged();"), "favorite changes must invalidate prefetched collection pages");
 assert(webApp.includes('window.open(playerPageUrl(work.id), "_blank", "noopener")'), "work cards must keep opening the standalone player");
-assert(webApp.includes("playbackPrefetch.bind(cover, work.id)") && webApp.includes("playbackPrefetch.bind(body, work.id)"), "work-card primary targets must prepare playback before selection");
+assert(webApp.includes("playbackPrefetch.bindContainer(els.workGrid)") && webApp.includes("cover.dataset.playbackWorkId") && webApp.includes("body.dataset.playbackWorkId"), "work-card primary targets must delegate playback preparation through the persistent grid");
+assert(!webApp.includes("playbackPrefetch.bind(cover") && !webApp.includes("playbackPrefetch.bind(body"), "work cards must not attach playback listeners per rendered card");
 assert(webApp.includes("void playbackPrefetch.prepare(work.id)") && playbackPrefetchSource.includes("playback-prewarm"), "work-card activation must overlap player navigation with probe preparation");
-assert(playbackPrefetchSource.includes('target.addEventListener("pointerenter"') && playbackPrefetchSource.includes('target.addEventListener("pointerdown"'), "desktop hover and touch press must share playback preparation");
+assert(playbackPrefetchSource.includes('container.addEventListener("pointerover"') && playbackPrefetchSource.includes('container.addEventListener("focusin"') && playbackPrefetchSource.includes('container.addEventListener("pointerdown"'), "desktop hover, keyboard focus, and touch press must share delegated playback preparation");
+assert(webApp.includes("const activeCoverImages = new Set()") && webApp.includes("bindProgressiveCoverLifecycle(els.workGrid)") && webApp.includes("if (!root.contains(img)) cancelActiveCoverImage(img)"), "detaching a work card must immediately retire its active cover request");
+assert(webApp.includes('img.dataset.coverCancelled = "1"') && webApp.includes('img.removeAttribute("src")'), "leaving a work view must cancel cover requests that belong to the retired DOM");
+assert(webApp.includes('img.dataset.coverCancelled === "1"') && webApp.includes("activeCoverImages.delete(img)"), "cancelled cover requests must not retry or retain active lifecycle entries");
 assert(workRoutesApiSource.includes("playbackPrewarmPayload") && workRoutesApiSource.includes("/playback-prewarm$"), "FanHao must expose a focused playback-prewarm route");
 assert(workDetailServiceSource.includes("replaceQueued: true") && workDetailServiceSource.includes("concurrency: 3"), "playback intent must take priority over speculative list probes without awaiting them");
 assert(workDetailServiceSource.includes("const detailCache = new Map()") && workDetailServiceSource.includes("detailCacheStamp"), "work details must stay reusable across card intent and player startup");
@@ -1967,6 +1971,28 @@ const playbackPrefetch = createPlaybackPrefetch({
     return 1;
   }
 });
+const delegatedPlaybackHandlers = new Map();
+const delegatedPlaybackIntent = {
+  dataset: { playbackWorkId: "delegated work" },
+  closest: (selector) => (selector === "[data-playback-work-id]" ? delegatedPlaybackIntent : null)
+};
+const delegatedPlaybackGrid = {
+  addEventListener: (name, handler) => delegatedPlaybackHandlers.set(name, handler),
+  contains: (target) => target === delegatedPlaybackIntent,
+  removeEventListener: (name, handler) => {
+    if (delegatedPlaybackHandlers.get(name) === handler) delegatedPlaybackHandlers.delete(name);
+  }
+};
+const unbindPlaybackPrefetch = playbackPrefetch.bindContainer(delegatedPlaybackGrid);
+delegatedPlaybackHandlers.get("pointerover")({ target: delegatedPlaybackIntent, relatedTarget: null });
+assert.equal(typeof scheduledPlaybackPrefetch, "function", "delegated card hover must schedule playback preparation");
+delegatedPlaybackHandlers.get("pointerout")({ target: delegatedPlaybackIntent, relatedTarget: null });
+assert.equal(scheduledPlaybackPrefetch, null, "delegated card exit must cancel delayed playback preparation");
+delegatedPlaybackHandlers.get("focusin")({ target: delegatedPlaybackIntent });
+assert.equal(playbackPrefetchApiCalls, 1, "delegated keyboard focus must prepare playback immediately");
+unbindPlaybackPrefetch();
+assert.equal(delegatedPlaybackHandlers.size, 0, "delegated playback listeners must expose lifecycle cleanup");
+playbackPrefetchApiCalls = 0;
 playbackPrefetch.schedule("work one");
 assert.equal(playbackPrefetchApiCalls, 0, "pointer hover must avoid probing transient card flyovers");
 scheduledPlaybackPrefetch();

@@ -11,7 +11,7 @@ import {
   createStudioPage,
   createWorkActions,
   selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260717-fanhao-studio-first-paint-01";
+} from "./modules/fanhao/index.js?v=20260717-fanhao-work-card-lifecycle-01";
 import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
@@ -95,6 +95,7 @@ let workLoadMoreScrollCleanup = null;
 let coverLoadQueue = [];
 let coverLoadTimer = null;
 let coverLoadObserver = null;
+const activeCoverImages = new Set();
 const WORK_RENDER_INITIAL_COUNT = 24;
 const WORK_RENDER_BATCH_SIZE = 24;
 const WORK_RENDER_BATCH_DELAY = 16;
@@ -112,6 +113,8 @@ const initialParams = new URLSearchParams(window.location.search);
 const isAndroidClient = initialParams.get("client") === "android";
 const api = createApiClient({ isAndroidClient });
 const playbackPrefetch = createPlaybackPrefetch({ api });
+playbackPrefetch.bindContainer(els.workGrid);
+bindProgressiveCoverLifecycle(els.workGrid);
 const searchRequests = createSearchRequestService({
   api,
   filter: serializedWorkFilterMode,
@@ -1895,7 +1898,26 @@ function resetProgressiveCoverLoading() {
     coverLoadObserver.disconnect();
     coverLoadObserver = null;
   }
+  for (const img of activeCoverImages) {
+    cancelActiveCoverImage(img);
+  }
   coverLoadQueue = [];
+}
+
+function bindProgressiveCoverLifecycle(root) {
+  if (!root || !("MutationObserver" in globalThis)) return;
+  const observer = new MutationObserver(() => {
+    for (const img of activeCoverImages) {
+      if (!root.contains(img)) cancelActiveCoverImage(img);
+    }
+  });
+  observer.observe(root, { childList: true, subtree: true });
+}
+
+function cancelActiveCoverImage(img) {
+  activeCoverImages.delete(img);
+  img.dataset.coverCancelled = "1";
+  img.removeAttribute("src");
 }
 
 function appendProgressiveCoverImage(cover, src, index = 0) {
@@ -1957,7 +1979,8 @@ function retryCoverImage(img, src) {
   img.dataset.retryCount = String(retryCount + 1);
   img.classList.remove("loaded");
   window.setTimeout(() => {
-    if (!img.isConnected || img.classList.contains("loaded")) return;
+    if (!img.isConnected || img.dataset.coverCancelled === "1" || img.classList.contains("loaded")) return;
+    activeCoverImages.add(img);
     img.src = retryCoverUrl(src, retryCount + 1);
   }, delay);
 }
@@ -1990,11 +2013,15 @@ function loadQueuedCoverImage(img) {
   const cover = img.closest(".cover-wrap");
   coverLoadObserver?.unobserve(img);
   img.dataset.loaded = "1";
+  delete img.dataset.coverCancelled;
   delete img.dataset.src;
+  activeCoverImages.add(img);
 
   img.addEventListener(
     "load",
     () => {
+      activeCoverImages.delete(img);
+      if (img.dataset.coverCancelled === "1") return;
       cover?.querySelector(".placeholder-cover")?.remove();
       img.classList.add("loaded");
     },
@@ -2003,6 +2030,8 @@ function loadQueuedCoverImage(img) {
   img.addEventListener(
     "error",
     () => {
+      activeCoverImages.delete(img);
+      if (img.dataset.coverCancelled === "1") return;
       retryCoverImage(img, src);
     }
   );
@@ -2091,8 +2120,8 @@ function createWorkCard(work, index = 0) {
   if (work.missingLocal) {
     card.append(cover, body);
   } else {
-    playbackPrefetch.bind(cover, work.id);
-    playbackPrefetch.bind(body, work.id);
+    cover.dataset.playbackWorkId = String(work.id);
+    body.dataset.playbackWorkId = String(work.id);
     card.append(cover, favorite, createLocalMarkerButton(work, "A"));
     if (isPersonBulkDeleteActive()) card.append(createBulkDeleteSelectButton(work));
     card.append(body);
