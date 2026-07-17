@@ -1,6 +1,7 @@
 const AUTO_LOAD_ROOT_MARGIN = "0px 0px 1600px 0px";
 const FALLBACK_AUTO_LOAD_DISTANCE = 1600;
 const AUTO_LOAD_RECHECK_DELAYS = [120, 420, 900];
+const AUTO_LOAD_SCROLL_INTENT_MS = 1200;
 
 export function enhanceAutoLoadMore(node, handler, options = {}) {
   const button = node instanceof HTMLButtonElement ? node : node.querySelector("button");
@@ -70,14 +71,23 @@ export function enhanceAutoLoadMore(node, handler, options = {}) {
 
   let scheduled = false;
   let observer = null;
+  const requireScrollIntent = options.requireScrollIntent === true;
+  let userScrollIntentUntil = 0;
+  let lastScrollY = window.scrollY;
+  let touchScrolling = false;
 
   const check = () => {
     if (!node.isConnected) {
       cleanup();
       return;
     }
+    if (requireScrollIntent && Date.now() > userScrollIntentUntil) return;
+    if (requireScrollIntent && touchScrolling) return;
     const rect = node.getBoundingClientRect();
-    if (rect.top <= window.innerHeight + FALLBACK_AUTO_LOAD_DISTANCE && rect.bottom >= -FALLBACK_AUTO_LOAD_DISTANCE) run();
+    if (rect.top <= window.innerHeight + FALLBACK_AUTO_LOAD_DISTANCE && rect.bottom >= -FALLBACK_AUTO_LOAD_DISTANCE) {
+      if (requireScrollIntent) userScrollIntentUntil = 0;
+      run();
+    }
   };
 
   scheduleCheck = () => {
@@ -89,16 +99,62 @@ export function enhanceAutoLoadMore(node, handler, options = {}) {
     });
   };
 
+  const markUserScrollIntent = (event) => {
+    if (event.type === "wheel" && Number(event.deltaY || 0) <= 0) return;
+    if (event.type === "keydown" && !["ArrowDown", "End", "PageDown", " "].includes(event.key)) return;
+    if (event.type === "pointerdown" && Number(event.clientX || 0) < document.documentElement.clientWidth - 20) return;
+    userScrollIntentUntil = Date.now() + AUTO_LOAD_SCROLL_INTENT_MS;
+  };
+
+  const handleTouchStart = () => {
+    touchScrolling = true;
+  };
+
+  const handleTouchEnd = () => {
+    touchScrolling = false;
+    if (requireScrollIntent && Date.now() <= userScrollIntentUntil) window.setTimeout(scheduleCheck, 80);
+  };
+
+  const handleScroll = () => {
+    const nextScrollY = window.scrollY;
+    const movedDown = nextScrollY > lastScrollY + 1;
+    lastScrollY = nextScrollY;
+    if (requireScrollIntent && (!movedDown || Date.now() > userScrollIntentUntil)) return;
+    scheduleCheck();
+  };
+
   const bindScrollCheck = () => {
-    window.addEventListener("scroll", scheduleCheck, { passive: true });
+    window.addEventListener("scroll", handleScroll, { passive: true });
     window.addEventListener("resize", scheduleCheck, { passive: true });
-    window.setTimeout(check, 120);
-    window.setTimeout(check, 700);
+    if (requireScrollIntent) {
+      window.addEventListener("wheel", markUserScrollIntent, { passive: true });
+      window.addEventListener("touchstart", handleTouchStart, { passive: true });
+      window.addEventListener("touchmove", markUserScrollIntent, { passive: true });
+      window.addEventListener("touchend", handleTouchEnd, { passive: true });
+      window.addEventListener("touchcancel", handleTouchEnd, { passive: true });
+      window.addEventListener("pointerdown", markUserScrollIntent, { passive: true });
+      window.addEventListener("keydown", markUserScrollIntent);
+    } else {
+      window.setTimeout(check, 120);
+      window.setTimeout(check, 700);
+    }
+  };
+
+  const unbindScrollCheck = () => {
+    window.removeEventListener("scroll", handleScroll);
+    window.removeEventListener("resize", scheduleCheck);
+    window.removeEventListener("wheel", markUserScrollIntent);
+    window.removeEventListener("touchstart", handleTouchStart);
+    window.removeEventListener("touchmove", markUserScrollIntent);
+    window.removeEventListener("touchend", handleTouchEnd);
+    window.removeEventListener("touchcancel", handleTouchEnd);
+    window.removeEventListener("pointerdown", markUserScrollIntent);
+    window.removeEventListener("keydown", markUserScrollIntent);
   };
 
   if ("IntersectionObserver" in window) {
     observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) run();
+      if (entries.some((entry) => entry.isIntersecting)) scheduleCheck();
     }, {
       root: null,
       rootMargin: options.rootMargin || AUTO_LOAD_ROOT_MARGIN,
@@ -108,16 +164,12 @@ export function enhanceAutoLoadMore(node, handler, options = {}) {
     bindScrollCheck();
     cleanup = () => {
       observer?.disconnect();
-      window.removeEventListener("scroll", scheduleCheck);
-      window.removeEventListener("resize", scheduleCheck);
+      unbindScrollCheck();
     };
     return node;
   }
 
   bindScrollCheck();
-  cleanup = () => {
-    window.removeEventListener("scroll", scheduleCheck);
-    window.removeEventListener("resize", scheduleCheck);
-  };
+  cleanup = unbindScrollCheck;
   return node;
 }

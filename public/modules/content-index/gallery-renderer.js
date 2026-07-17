@@ -31,6 +31,8 @@ const GALLERY_READER_IMAGE_CONCURRENCY = 4;
 const GALLERY_READER_PRELOAD_ABOVE = 900;
 const GALLERY_READER_PRELOAD_BELOW = 1400;
 const GALLERY_READER_ROOT_MARGIN = "900px 0px 1400px 0px";
+const GALLERY_MORE_AUTO_LOAD_DISTANCE = 1200;
+const GALLERY_MORE_SCROLL_INTENT_MS = 1200;
 
 export function createGalleryRenderer(deps) {
   const {
@@ -55,7 +57,7 @@ export function createGalleryRenderer(deps) {
   let galleryReaderImageQueue = [];
   let activeGalleryReaderImageLoads = 0;
   let galleryReaderImageGeneration = 0;
-  let galleryMoreObserver = null;
+  let galleryMoreScrollCleanup = null;
   let galleryPagerCleanup = null;
 
 function setGalleryStatus(message) {
@@ -532,9 +534,9 @@ function resetGalleryRenderedState() {
     galleryReaderScrollCleanup();
     galleryReaderScrollCleanup = null;
   }
-  if (galleryMoreObserver) {
-    galleryMoreObserver.disconnect();
-    galleryMoreObserver = null;
+  if (galleryMoreScrollCleanup) {
+    galleryMoreScrollCleanup();
+    galleryMoreScrollCleanup = null;
   }
   if (galleryPagerCleanup) {
     galleryPagerCleanup();
@@ -1287,23 +1289,81 @@ function activateGalleryLazyImages(root) {
 }
 
 function setupGalleryMoreAutoload(button) {
-  if (!button || !("IntersectionObserver" in window)) return;
-  if (!galleryMoreObserver) {
-    galleryMoreObserver = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (!entry.isIntersecting) continue;
-          const target = entry.target;
-          if (!(target instanceof HTMLButtonElement) || target.disabled || target.dataset.autoloading === "1") continue;
-          target.dataset.autoloading = "1";
-          galleryMoreObserver.unobserve(target);
-          window.setTimeout(() => target.click(), 80);
-        }
-      },
-      { rootMargin: "900px 0px 900px 0px" }
-    );
+  if (!button) return;
+  if (galleryMoreScrollCleanup) {
+    galleryMoreScrollCleanup();
+    galleryMoreScrollCleanup = null;
   }
-  galleryMoreObserver.observe(button);
+
+  let scheduled = false;
+  let userScrollIntentUntil = 0;
+  let lastScrollY = window.scrollY;
+  let touchScrolling = false;
+
+  const run = () => {
+    if (!button.isConnected || button.disabled || button.dataset.autoloading === "1") return;
+    button.dataset.autoloading = "1";
+    button.click();
+  };
+  const check = () => {
+    scheduled = false;
+    if (!button.isConnected) {
+      cleanup();
+      if (galleryMoreScrollCleanup === cleanup) galleryMoreScrollCleanup = null;
+      return;
+    }
+    if (Date.now() > userScrollIntentUntil) return;
+    if (touchScrolling) return;
+    const rect = button.getBoundingClientRect();
+    if (rect.top > window.innerHeight + GALLERY_MORE_AUTO_LOAD_DISTANCE || rect.bottom < -GALLERY_MORE_AUTO_LOAD_DISTANCE) return;
+    userScrollIntentUntil = 0;
+    run();
+  };
+  const scheduleCheck = () => {
+    if (scheduled) return;
+    scheduled = true;
+    window.requestAnimationFrame(check);
+  };
+  const markUserScrollIntent = (event) => {
+    if (event.type === "wheel" && Number(event.deltaY || 0) <= 0) return;
+    if (event.type === "keydown" && !["ArrowDown", "End", "PageDown", " "].includes(event.key)) return;
+    if (event.type === "pointerdown" && Number(event.clientX || 0) < document.documentElement.clientWidth - 20) return;
+    userScrollIntentUntil = Date.now() + GALLERY_MORE_SCROLL_INTENT_MS;
+  };
+  const handleTouchStart = () => {
+    touchScrolling = true;
+  };
+  const handleTouchEnd = () => {
+    touchScrolling = false;
+    if (Date.now() <= userScrollIntentUntil) window.setTimeout(scheduleCheck, 80);
+  };
+  const handleScroll = () => {
+    const nextScrollY = window.scrollY;
+    const movedDown = nextScrollY > lastScrollY + 1;
+    lastScrollY = nextScrollY;
+    if (!movedDown || Date.now() > userScrollIntentUntil) return;
+    scheduleCheck();
+  };
+
+  window.addEventListener("wheel", markUserScrollIntent, { passive: true });
+  window.addEventListener("touchstart", handleTouchStart, { passive: true });
+  window.addEventListener("touchmove", markUserScrollIntent, { passive: true });
+  window.addEventListener("touchend", handleTouchEnd, { passive: true });
+  window.addEventListener("touchcancel", handleTouchEnd, { passive: true });
+  window.addEventListener("pointerdown", markUserScrollIntent, { passive: true });
+  window.addEventListener("keydown", markUserScrollIntent);
+  window.addEventListener("scroll", handleScroll, { passive: true });
+  const cleanup = () => {
+    window.removeEventListener("wheel", markUserScrollIntent);
+    window.removeEventListener("touchstart", handleTouchStart);
+    window.removeEventListener("touchmove", markUserScrollIntent);
+    window.removeEventListener("touchend", handleTouchEnd);
+    window.removeEventListener("touchcancel", handleTouchEnd);
+    window.removeEventListener("pointerdown", markUserScrollIntent);
+    window.removeEventListener("keydown", markUserScrollIntent);
+    window.removeEventListener("scroll", handleScroll);
+  };
+  galleryMoreScrollCleanup = cleanup;
 }
 
 function activateGalleryReaderImages(root) {

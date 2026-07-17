@@ -16,6 +16,7 @@ assert(router.includes("photoSearch ? \"all\""), "A direct Web photo search must
 
 const webRenderer = read("public", "modules", "content-index", "gallery-renderer.js");
 assert(!webRenderer.includes('createGalleryFilterField("文件夹"'), "Web photo controls must not render the folder dropdown");
+assert(!webRenderer.includes("galleryMoreObserver"), "Web photo pagination must not cascade through an intersection observer");
 for (const marker of [
   "renderPagedImageLibrarySearchSummary",
   "gallerySearchMatchText",
@@ -23,7 +24,11 @@ for (const marker of [
   "startingPhotoSearch",
   "search.value = nextQuery",
   "controls.append(searchRow, hierarchy)",
-  "按相关性排序"
+  "按相关性排序",
+  "GALLERY_MORE_SCROLL_INTENT_MS",
+  "galleryMoreScrollCleanup",
+  "userScrollIntentUntil = 0",
+  'addEventListener("touchend", handleTouchEnd'
 ]) {
   assert(webRenderer.includes(marker), `Web photo search is missing: ${marker}`);
 }
@@ -39,6 +44,21 @@ for (const marker of [
 ]) {
   assert(androidViews.includes(marker), `Android photo search is missing: ${marker}`);
 }
+assert(androidViews.includes('{ requireScrollIntent: mode === "photo" }'), "Android photo list pagination must require fresh downward scroll intent");
+assert(androidViews.includes("}, { requireScrollIntent: true });"), "Android photo reader pagination must require fresh downward scroll intent");
+
+const androidAutoLoad = read("android-client", "www", "js", "auto-load.js");
+for (const marker of [
+  "options.requireScrollIntent === true",
+  "AUTO_LOAD_SCROLL_INTENT_MS",
+  "markUserScrollIntent",
+  "movedDown",
+  "userScrollIntentUntil = 0",
+  'addEventListener("touchend", handleTouchEnd'
+]) {
+  assert(androidAutoLoad.includes(marker), `Android photo auto-load intent guard is missing: ${marker}`);
+}
+assert(!androidAutoLoad.includes("entries.some((entry) => entry.isIntersecting)) run()"), "Android photo auto-load must not run directly from intersection alone");
 
 const androidApp = read("android-client", "www", "app.js");
 assert(androidApp.includes("startingPhotoSearch"), "Android must reset implicit photo filters when starting a search");

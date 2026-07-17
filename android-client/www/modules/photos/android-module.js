@@ -1,4 +1,4 @@
-import { createChannelViews } from "../../platform/content-index/channel-views.js?v=20260712-module-chrome-03";
+import { createChannelViews } from "../../platform/content-index/channel-views.js?v=20260717-photo-scroll-intent-02";
 
 const DEFAULT_CATEGORY = "我喜欢的";
 const CATEGORY_PRIORITY = [DEFAULT_CATEGORY, "all", "[XIUREN] 秀人网", "[COS]", "内购私拍", "日本写真集", "韩国写真集", "国模"];

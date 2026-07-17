@@ -1,5 +1,5 @@
 import { fetchJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260702-novel-local-manage-74";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260717-photo-scroll-intent-02";
 import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260702-novel-local-manage-74";
 import { isChannelFavorite, toggleChannelFavorite } from "../../js/channel-favorites.js";
 import { formatBytes, formatDate, formatNumber } from "../../js/format.js";
@@ -291,7 +291,7 @@ export function createChannelViews(context) {
       els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(items.length)} / ${formatNumber(total)}`, () => {
         increaseChannelLimit(48);
         return renderCurrentViewPreservingScroll();
-      }));
+      }, { requireScrollIntent: mode === "photo" }));
     }
   }
 
@@ -866,7 +866,7 @@ export function createChannelViews(context) {
     return button;
   }
 
-  function createLoadMoreButton(text, handler) {
+  function createLoadMoreButton(text, handler, options = {}) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "text-button channel-more";
@@ -874,7 +874,8 @@ export function createChannelViews(context) {
     return enhanceAutoLoadMore(button, handler, {
       idleText: text,
       loadingText: "正在接着加载",
-      retryText: "加载停住了，点一下重试"
+      retryText: "加载停住了，点一下重试",
+      requireScrollIntent: options.requireScrollIntent === true
     });
   }
 
@@ -976,7 +977,7 @@ export function createChannelViews(context) {
       });
       more.remove();
       appendPhotoDetailLoadMore(album, loadedImages, grid, nextTotal, updateTotalImages);
-    });
+    }, { requireScrollIntent: true });
     els.viewContent.append(more);
   }
 
