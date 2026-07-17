@@ -13,6 +13,7 @@ function archiveMemberDepth(memberPath) {
 
 export function createPhotoSetService({
   archiveImageExts,
+  archiveImageSignature,
   archiveImagesPayload,
   compressImageFileToJpeg,
   coverGeneratorVersion,
@@ -57,13 +58,7 @@ export function createPhotoSetService({
   }
 
   function archiveSignature(targetArchivePath) {
-    const stat = safeStat(targetArchivePath);
-    if (!stat?.isFile()) return null;
-    return {
-      archivePath: path.resolve(targetArchivePath),
-      archiveSize: stat.size || 0,
-      archiveMtimeMs: Math.floor(stat.mtimeMs || 0)
-    };
+    return archiveImageSignature(targetArchivePath);
   }
 
   function coverRow(album) {

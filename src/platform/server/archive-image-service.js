@@ -7,6 +7,8 @@ export function createArchiveImageService(options) {
   const listCache = new Map();
   const listInflight = new Map();
   const extractInflight = new Map();
+  const signatureCache = new Map();
+  const signatureCacheTtlMs = Math.max(0, Number(options.signatureCacheTtlMs ?? 30_000) || 0);
 
   async function runArchiveImageHelper(args, runOptions = {}) {
     const { stdout, stderr, error } = await execute(options.pythonPath, [options.helperPath, ...args], {
@@ -26,13 +28,26 @@ export function createArchiveImageService(options) {
   }
 
   function archiveImageListSignature(archivePath) {
-    const stat = options.safeStat(archivePath);
-    if (!stat?.isFile()) return null;
-    return {
-      archivePath: path.resolve(archivePath),
+    const resolvedPath = path.resolve(archivePath);
+    const cached = signatureCache.get(resolvedPath);
+    if (cached && Date.now() - cached.createdAt < signatureCacheTtlMs) return cached.signature;
+
+    const stat = options.safeStat(resolvedPath);
+    if (!stat?.isFile()) {
+      signatureCache.delete(resolvedPath);
+      return null;
+    }
+    const signature = {
+      archivePath: resolvedPath,
       archiveSize: stat.size || 0,
       archiveMtimeMs: Math.floor(stat.mtimeMs || 0)
     };
+    signatureCache.set(resolvedPath, { createdAt: Date.now(), signature });
+    if (signatureCache.size > 300) {
+      const firstKey = signatureCache.keys().next().value;
+      if (firstKey) signatureCache.delete(firstKey);
+    }
+    return signature;
   }
 
   function archiveListCacheKeyFromSignature(signature) {
@@ -146,9 +161,8 @@ export function createArchiveImageService(options) {
     return (await archiveImagesPayload(archivePath, payloadOptions)).images;
   }
 
-  function archiveImageCacheFile(sourceType, archivePath, memberPath) {
-    const stat = options.safeStat(archivePath);
-    const archiveKey = `${path.resolve(archivePath)}|${stat?.size || 0}|${Math.floor(stat?.mtimeMs || 0)}`;
+  function archiveImageCacheFile(sourceType, signature, memberPath) {
+    const archiveKey = `${signature.archivePath}|${signature.archiveSize}|${signature.archiveMtimeMs}`;
     const archiveHash = crypto.createHash("sha1").update(archiveKey).digest("hex").slice(0, 24);
     const memberHash = crypto.createHash("sha1").update(String(memberPath || "")).digest("hex").slice(0, 24);
     const ext = options.archiveImageExts.has(options.normalizeExt(memberPath)) ? options.normalizeExt(memberPath) : ".img";
@@ -184,13 +198,13 @@ export function createArchiveImageService(options) {
   async function serveArchiveMemberImage(res, serveOptions) {
     const archivePath = serveOptions.archivePath;
     const memberPath = String(serveOptions.memberPath || "").replace(/[\\/]+/g, "/");
-    const stat = options.safeStat(archivePath);
-    if (!stat?.isFile() || !memberPath || !options.archiveImageExts.has(options.normalizeExt(memberPath))) {
+    const signature = archiveImageListSignature(archivePath);
+    if (!signature || !memberPath || !options.archiveImageExts.has(options.normalizeExt(memberPath))) {
       if (serveOptions.fallbackPath && options.serveInlineFile(res, serveOptions.fallbackPath, serveOptions.contentType)) return;
       options.notFound(res);
       return;
     }
-    const cachePath = archiveImageCacheFile(serveOptions.sourceType || "common", archivePath, memberPath);
+    const cachePath = archiveImageCacheFile(serveOptions.sourceType || "common", signature, memberPath);
     if (!options.safeStat(cachePath)?.isFile()) {
       try {
         await extractArchiveMemberToCache(archivePath, memberPath, cachePath);
@@ -206,8 +220,12 @@ export function createArchiveImageService(options) {
   }
 
   return {
+    archiveSignature: archiveImageListSignature,
     archiveImagesPayload,
-    clearListCache: () => listCache.clear(),
+    clearListCache: () => {
+      listCache.clear();
+      signatureCache.clear();
+    },
     compressImageFileToJpeg,
     extractArchiveMemberToCache,
     listArchiveImages,

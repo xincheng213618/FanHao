@@ -18,6 +18,7 @@ try {
     scheduleCleanup() {},
     touch() {}
   };
+  let archiveStatCount = 0;
   const service = createArchiveImageService({
     archiveImageExts: new Set([".jpg"]),
     coverBoxSize: 480,
@@ -29,6 +30,7 @@ try {
     helperPath: fixture,
     imageReaderCacheService,
     listCacheTtlMs: 60_000,
+    signatureCacheTtlMs: 60_000,
     mimeTypes: { ".jpg": "image/jpeg" },
     normalizeExt: (value) => path.extname(String(value || "")).toLowerCase(),
     notFound() {},
@@ -36,6 +38,7 @@ try {
     pythonPath: process.execPath,
     safeStat: (value) => {
       try {
+        if (path.resolve(value) === path.resolve(archivePath)) archiveStatCount += 1;
         return fs.statSync(value);
       } catch {
         return null;
@@ -63,6 +66,7 @@ try {
 
   await service.archiveImagesPayload(archivePath);
   assert.equal(countInvocations(`${archivePath}.list.count`), 1, "fresh archive lists must reuse the memory cache");
+  assert.equal(archiveStatCount, 1, "one reading burst must reuse the archive signature instead of blocking on repeated stats");
 
   await Promise.all([
     service.extractArchiveMemberToCache(archivePath, "cover.jpg", cachePath),
@@ -70,6 +74,14 @@ try {
   ]);
   assert.equal(countInvocations(`${archivePath}.extract.count`), 1, "concurrent member extractions must share one subprocess");
   assert.equal(fs.readFileSync(cachePath, "utf8"), "cover.jpg:sample.zip");
+
+  await service.serveArchiveMemberImage({}, {
+    sourceType: "photo-set",
+    archivePath,
+    memberPath: "cover.jpg",
+    contentType: "image/jpeg"
+  });
+  assert.equal(archiveStatCount, 1, "serving a member must reuse the signature already resolved for its image list");
 
   console.log("archive-image-service: ok");
 } finally {

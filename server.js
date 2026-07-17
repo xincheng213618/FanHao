@@ -192,6 +192,7 @@ const imageGalleryDbService = createImageGalleryDbService({
 const getImageGalleryDb = imageGalleryDbService.getDb;
 const photoSetService = createPhotoSetService({
   archiveImageExts: ARCHIVE_IMAGE_EXTS,
+  archiveImageSignature,
   archiveImagesPayload,
   compressImageFileToJpeg,
   coverGeneratorVersion: PHOTO_SET_COVER_GENERATOR_VERSION,
@@ -1933,6 +1934,10 @@ function applyAdminTaskInvalidations(task) {
 
 async function archiveImagesPayload(archivePath, options = {}) {
   return archiveImageService.archiveImagesPayload(archivePath, options);
+}
+
+function archiveImageSignature(archivePath) {
+  return archiveImageService.archiveSignature(archivePath);
 }
 
 async function listArchiveImages(archivePath, options = {}) {
