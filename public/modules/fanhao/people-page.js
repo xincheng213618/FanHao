@@ -16,6 +16,7 @@ export function createPeoplePage(deps) {
     formatNumber,
     getWorkFilterMode,
     hidePersonProfile,
+    preparePersonProfile,
     renderPersonProfile,
     renderPersonWorkStats,
     renderWorks,
@@ -210,11 +211,15 @@ function createPersonIndexCard(person) {
 
   body.append(name);
   card.append(avatar, body);
+  for (const eventName of ["pointerenter", "focus", "pointerdown"]) {
+    card.addEventListener(eventName, () => preparePersonProfile?.(), { once: true });
+  }
   return card;
 }
 
 async function selectPerson(personId, options = {}) {
   const request = personDetailRequests.begin();
+  preparePersonProfile?.();
   disconnectPeopleIndexAutoload();
   if (state.activeView === "people" && !state.selectedPersonId && options.captureIndexScroll !== false) {
     state.peopleIndexScrollTop = currentPageScrollTop();

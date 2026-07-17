@@ -5,14 +5,14 @@ import {
   createFanhaoState,
   createCollectionPage,
   createPeoplePage,
-  createPersonProfile,
   createRankingPage,
   createSearchRequestService,
   createStudioPage,
   createWorkDetailPage,
   selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260717-fanhao-perf-05";
+} from "./modules/fanhao/index.js?v=20260717-fanhao-lazy-person-01";
 import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
+import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
 
 prepareAppShell();
@@ -150,6 +150,7 @@ const peoplePage = createPeoplePage({
   formatNumber,
   getWorkFilterMode: serializedWorkFilterMode,
   hidePersonProfile,
+  preparePersonProfile: () => personProfilePage.load().catch(() => {}),
   renderPersonProfile,
   renderPersonWorkStats,
   renderWorks,
@@ -161,22 +162,29 @@ const peoplePage = createPeoplePage({
   syncNavigationState,
   syncRouteAfterNavigation
 });
-const personProfilePage = createPersonProfile({
-  api,
-  coverUrl,
+const personProfilePage = createLazyPersonProfile({
   els,
-  formatLibraryPath,
-  formatNumber,
-  isPersonBulkDeleteActive,
-  isTrustedNetworkFeatureAvailable,
-  linesFromTextarea,
-  normalizeSourcePath,
-  renderPeople: renderPeopleIndex,
-  selectPerson,
-  sourcePriority,
-  state,
-  togglePersonBulkDeleteMode,
-  workCoverUrl
+  loadPersonProfile: async () => {
+    const { createPersonProfile } = await import("./modules/fanhao/person-profile.js?v=20260717-fanhao-lazy-person-01");
+    return createPersonProfile({
+      api,
+      coverUrl,
+      els,
+      formatLibraryPath,
+      formatNumber,
+      isPersonBulkDeleteActive,
+      isTrustedNetworkFeatureAvailable,
+      linesFromTextarea,
+      normalizeSourcePath,
+      renderPeople: renderPeopleIndex,
+      selectPerson,
+      sourcePriority,
+      state,
+      togglePersonBulkDeleteMode,
+      workCoverUrl
+    });
+  },
+  onLoadError: (error) => console.warn("[person-profile]", error?.message || error)
 });
 const adminModal = createLazyAdminModal(async () => {
   const { createAdminModal } = await import("./modules/system/admin-modal.js?v=20260717-fanhao-lazy-admin-01");

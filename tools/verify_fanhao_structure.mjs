@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
+import { createLazyPersonProfile } from "../public/modules/fanhao/lazy-person-profile.js";
 import { createLazyAdminModal } from "../public/modules/system/lazy-admin-modal.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
 import { createPersonDetailService } from "../src/modules/fanhao/server/people/person-detail-service.js";
@@ -53,6 +54,7 @@ const webApp = read("public/app.js");
 const peoplePageSource = read("public/modules/fanhao/people-page.js");
 const fanhaoModuleIndexSource = read("public/modules/fanhao/index.js");
 const latestRequestSource = read("public/modules/fanhao/latest-request.js");
+const lazyPersonProfileSource = read("public/modules/fanhao/lazy-person-profile.js");
 const searchRequestSource = read("public/modules/fanhao/search-request-service.js");
 const rankingPageSource = read("public/modules/fanhao/ranking-page.js");
 const studioPageSource = read("public/modules/fanhao/features/studios/studio-page.js");
@@ -85,11 +87,15 @@ assert(webApp.includes("createLazyAdminModal") && webApp.includes('await import(
 assert(!webApp.includes('import { createAdminModal }'), "FanHao startup must not statically import the admin console");
 assert(lazyAdminModalSource.includes("let instancePromise = null") && lazyAdminModalSource.includes("instancePromise = null") && lazyAdminModalSource.includes("const lazyModal = { load }"), "lazy admin loading must deduplicate concurrent opens and remain retryable after an import failure");
 assert(webApp.includes("bindLazyAdminModal({ adminModal, els, openAdminScript, state })") && lazyAdminModalSource.includes("export function bindLazyAdminModal"), "admin event wiring must stay with the lazy admin boundary instead of growing the composition root");
+assert(webApp.includes("createLazyPersonProfile") && webApp.includes('await import("./modules/fanhao/person-profile.js?v='), "FanHao startup must defer person-profile code until person interaction");
+assert(!fanhaoModuleIndexSource.includes("createPersonProfile"), "the FanHao barrel must not pull person-profile code into the people index startup graph");
+assert(peoplePageSource.includes('["pointerenter", "focus", "pointerdown"]') && peoplePageSource.includes("preparePersonProfile?.()"), "person cards must prefetch profile code before or alongside the detail API request");
+assert(lazyPersonProfileSource.includes("renderVersion") && lazyPersonProfileSource.includes("version !== renderVersion"), "late profile modules must not render after navigation invalidates them");
 assert(webApp.includes("const WORK_RENDER_INITIAL_COUNT = 24"), "FanHao work lists must render a small first batch for responsive interaction");
 assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 96, lan: 64, remote: 48 })"), "FanHao work APIs must keep page payloads bounded for each access mode");
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
-assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-latest-request-02'), "person navigation changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-lazy-person-01'), "person navigation changes must use a fresh browser module URL");
 assert(latestRequestSource.includes("sequence === requestSequence"), "latest-request gates must reject stale completions");
 assert(peoplePageSource.includes("const personDetailRequests = createLatestRequestGate()"), "person navigation must own a cancellable latest request");
 assert(peoplePageSource.includes("if (!request.isCurrent() || state.activeView !== \"people\""), "stale person responses must not overwrite newer navigation");
@@ -371,6 +377,41 @@ const retryableLazyAdmin = createLazyAdminModal(async () => {
 });
 await assert.rejects(retryableLazyAdmin.openModal({}), /temporary import failure/);
 assert.equal(await retryableLazyAdmin.openModal({}), "ready", "a failed lazy import must be retryable");
+
+const profileElement = {
+  classList: { remove() {} },
+  hidden: false,
+  innerHTML: "existing"
+};
+let lazyProfileLoadCount = 0;
+const lazyProfileRenders = [];
+const lazyProfile = createLazyPersonProfile({
+  els: { personProfile: profileElement },
+  loadPersonProfile: async () => {
+    lazyProfileLoadCount += 1;
+    return { render: (person) => lazyProfileRenders.push(person.id) };
+  }
+});
+lazyProfile.hide();
+assert.equal(lazyProfileLoadCount, 0, "hiding the empty profile shell must not load person-profile code");
+assert.equal(profileElement.hidden, true);
+assert.equal(profileElement.innerHTML, "");
+await Promise.all([lazyProfile.render({ id: "first" }), lazyProfile.load()]);
+assert.equal(lazyProfileLoadCount, 1, "profile prefetch and render must share one module load");
+assert.deepEqual(lazyProfileRenders, ["first"]);
+
+let resolveStaleProfile;
+const staleProfileRenders = [];
+const staleLazyProfile = createLazyPersonProfile({
+  els: { personProfile: profileElement },
+  loadPersonProfile: () => new Promise((resolve) => { resolveStaleProfile = resolve; })
+});
+const staleRender = staleLazyProfile.render({ id: "stale" });
+await Promise.resolve();
+staleLazyProfile.hide();
+resolveStaleProfile({ render: (person) => staleProfileRenders.push(person.id) });
+await staleRender;
+assert.deepEqual(staleProfileRenders, [], "a profile module resolving after navigation must not render stale person data");
 
 const personListItem = publicPersonListItem({
   id: "27",

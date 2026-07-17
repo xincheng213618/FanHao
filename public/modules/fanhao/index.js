@@ -1,5 +1,4 @@
-export { createPeoplePage } from "./people-page.js?v=20260717-fanhao-latest-request-02";
-export { createPersonProfile } from "./person-profile.js";
+export { createPeoplePage } from "./people-page.js?v=20260717-fanhao-lazy-person-01";
 export { createRankingPage } from "./ranking-page.js?v=20260717-fanhao-latest-request-01";
 export { createWorkDetailPage } from "./work-detail-page.js?v=20260717-fanhao-latest-request-01";
 export { createFanhaoState } from "./state.js?v=20260717-fanhao-perf-05";

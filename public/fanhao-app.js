@@ -1,2 +1,2 @@
 document.documentElement.dataset.appModule = "fanhao";
-await import("./app.js?v=20260717-fanhao-lazy-admin-01");
+await import("./app.js?v=20260717-fanhao-lazy-person-01");
