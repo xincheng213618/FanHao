@@ -559,6 +559,12 @@
   padding: 8px 0 18px;
 }
 
+.work-render-sentinel {
+  grid-column: 1 / -1;
+  block-size: 1px;
+  pointer-events: none;
+}
+
 .drawer-backdrop {
   position: fixed;
   inset: 0;

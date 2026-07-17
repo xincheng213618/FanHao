@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
 import { createWorkActions } from "../public/modules/fanhao/features/works/work-actions.js";
+import { createViewportBatchRenderer } from "../public/modules/fanhao/features/works/viewport-batch-renderer.js";
 import { createCollectionPage } from "../public/modules/fanhao/features/collections/collection-page.js";
 import { createPlaybackPrefetch } from "../public/modules/fanhao/playback-prefetch.js";
 import { createSearchRequestService } from "../public/modules/fanhao/search-request-service.js";
@@ -78,6 +79,7 @@ const playbackPrefetchSource = read("public/modules/fanhao/playback-prefetch.js"
 const playerPageSource = read("public/js/player-page.js");
 const playerHtmlSource = read("public/player.html");
 const workActionsSource = read("public/modules/fanhao/features/works/work-actions.js");
+const viewportBatchRendererSource = read("public/modules/fanhao/features/works/viewport-batch-renderer.js");
 const workDetailServiceSource = read("src/modules/fanhao/server/works/work-detail-service.js");
 const missingCodeSearchServiceSource = read("src/modules/fanhao/server/works/missing-code-search-service.js");
 const workRoutesApiSource = read("src/modules/fanhao/server/works/routes-api.js");
@@ -99,9 +101,10 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-people-card-lifecycle-01'), "people-card lifecycle changes must refresh the FanHao browser entry");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-people-card-lifecycle-01'), "people-card lifecycle changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260717-fanhao-people-card-lifecycle-01'), "people-card lifecycle changes must refresh the FanHao module barrel");
+assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-viewport-render-01'), "viewport rendering changes must refresh the FanHao browser entry");
+assert(indexHtml.includes('/modules/fanhao/work-cards.css?v=20260717-fanhao-viewport-render-01'), "viewport rendering styles must use a fresh browser URL");
+assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-viewport-render-01'), "viewport rendering changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260717-fanhao-viewport-render-01'), "viewport rendering changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -144,8 +147,11 @@ assert(peoplePageSource.includes('root.addEventListener("pointerover"') && peopl
 assert(!peoplePageSource.includes('card.addEventListener("click"') && !peoplePageSource.includes('card.addEventListener("pointerenter"') && !peoplePageSource.includes('card.addEventListener("pointerdown"'), "person cards must not allocate navigation and preparation listeners per item");
 assert(peoplePageSource.includes("preparePersonProfile?.()") && peoplePageSource.includes("prefetchPersonDetails(person.id)"), "delegated person intent must prepare profile code and the exact detail request");
 assert(lazyPersonProfileSource.includes("renderVersion") && lazyPersonProfileSource.includes("version !== renderVersion"), "late profile modules must not render after navigation invalidates them");
-assert(webApp.includes("const WORK_RENDER_INITIAL_COUNT = 12"), "FanHao work lists must render only the above-fold cards before yielding");
-assert(webApp.includes("const WORK_RENDER_BATCH_SIZE = 12"), "FanHao work lists must keep follow-up DOM tasks bounded");
+assert(viewportBatchRendererSource.includes("const DEFAULT_INITIAL_COUNT = 12"), "FanHao work lists must render only the above-fold cards before yielding");
+assert(viewportBatchRendererSource.includes("const DEFAULT_BATCH_SIZE = 12"), "FanHao work lists must keep follow-up DOM tasks bounded");
+assert(viewportBatchRendererSource.includes("const DEFAULT_LOOKAHEAD_DISTANCE = 720"), "FanHao work lists must limit client-side DOM expansion to the viewport lookahead");
+assert(viewportBatchRendererSource.includes("observer.observe(sentinel)"), "FanHao work lists must append offscreen card batches only when their sentinel approaches the viewport");
+assert(webApp.includes("els.workGrid.insertBefore(fragment, beforeNode)"), "FanHao work batches must stay ahead of the viewport sentinel");
 assert(webApp.includes("const COVER_LOAD_BATCH_SIZE = 8"), "FanHao work covers must keep decode and request bursts bounded");
 assert(webApp.includes("const COVER_EAGER_COUNT = 12"), "FanHao work lists must eagerly load only the above-fold covers");
 assert(webApp.includes('const COVER_OBSERVER_ROOT_MARGIN = "420px 0px"'), "FanHao work covers must preload only a nearby row beyond the viewport");
@@ -287,6 +293,7 @@ for (const relativePath of [
   "public/modules/fanhao/state.js",
   "public/modules/fanhao/features/works/query.js",
   "public/modules/fanhao/features/works/work-actions.js",
+  "public/modules/fanhao/features/works/viewport-batch-renderer.js",
   "public/modules/fanhao/features/works/preview-media.js",
   "android-client/www/modules/fanhao/features/works/cards.js",
   "android-client/www/modules/fanhao/features/works/actions.js",
@@ -368,6 +375,84 @@ assert((androidDetailViews.match(/pageDataService\.load\(activeUrl, path/g) || [
 assert(!androidDetailViews.includes("await readCachedJson(activeUrl, path)") && !androidDetailViews.includes("fetchJson(activeUrl, path"), "Android detail views must not wait for IndexedDB before starting their live request");
 assert(androidWorkViews.includes('cards.js?v=20260717-fanhao-mobile-card-lifecycle-01'), "Android card-lifecycle changes must refresh the card module URL");
 assert((androidWorkViews.match(/pageDataService\.load\(activeUrl, path/g) || []).length >= 7 && androidWorkPageDataService.includes("Promise.race([freshRequest, cacheRequest])"), "Android FanHao pages must race IndexedDB with the live response");
+const scheduledViewportBatches = new Map();
+let nextViewportBatchId = 1;
+let viewportObserverCallback = null;
+let viewportObserverOptions = null;
+let viewportObservedTarget = null;
+const viewportContainer = {
+  children: [],
+  ownerDocument: {
+    createElement() {
+      return {
+        isConnected: true,
+        setAttribute() {},
+        remove() {
+          this.isConnected = false;
+          const index = viewportContainer.children.indexOf(this);
+          if (index >= 0) viewportContainer.children.splice(index, 1);
+        }
+      };
+    }
+  },
+  append(child) {
+    this.children.push(child);
+  }
+};
+class ViewportObserver {
+  constructor(callback, options) {
+    viewportObserverCallback = callback;
+    viewportObserverOptions = options;
+  }
+  observe(target) {
+    viewportObservedTarget = target;
+  }
+  disconnect() {}
+}
+const viewportBatchRenderer = createViewportBatchRenderer({
+  container: viewportContainer,
+  initialCount: 2,
+  batchSize: 2,
+  lookaheadDistance: 720,
+  IntersectionObserver: ViewportObserver,
+  appendBatch(items, start, end, beforeNode) {
+    const values = items.slice(start, end);
+    const beforeIndex = beforeNode ? viewportContainer.children.indexOf(beforeNode) : -1;
+    if (beforeIndex >= 0) viewportContainer.children.splice(beforeIndex, 0, ...values);
+    else viewportContainer.children.push(...values);
+    return end;
+  },
+  setTimer(callback) {
+    const id = nextViewportBatchId++;
+    scheduledViewportBatches.set(id, callback);
+    return id;
+  },
+  clearTimer(id) {
+    scheduledViewportBatches.delete(id);
+  }
+});
+let viewportBatchComplete = false;
+viewportBatchRenderer.render([1, 2, 3, 4, 5], () => {
+  viewportBatchComplete = true;
+});
+assert.deepEqual(viewportContainer.children.slice(0, 2), [1, 2], "Web work lists must expose the first card batch synchronously");
+assert.equal(viewportContainer.children.length, 3, "Web work lists must retain only one viewport sentinel beyond the first batch");
+assert.equal(viewportObserverOptions.rootMargin, "720px 0px", "Web work batches must observe only the configured viewport lookahead");
+assert.equal(scheduledViewportBatches.size, 0, "far-offscreen Web work batches must not schedule autonomous DOM work");
+viewportObserverCallback([{ target: viewportObservedTarget, isIntersecting: true }]);
+const runNextViewportBatch = () => {
+  const entry = scheduledViewportBatches.entries().next().value;
+  assert(entry, "an intersecting Web work sentinel must schedule one bounded batch");
+  scheduledViewportBatches.delete(entry[0]);
+  entry[1]();
+};
+runNextViewportBatch();
+assert.deepEqual(viewportContainer.children.slice(0, 4), [1, 2, 3, 4], "Web work continuation must append one bounded batch ahead of its sentinel");
+assert.equal(viewportBatchComplete, false, "Web load-more must stay hidden before the loaded page reaches its real end");
+viewportObserverCallback([{ target: viewportObservedTarget, isIntersecting: true }]);
+runNextViewportBatch();
+assert.deepEqual(viewportContainer.children, [1, 2, 3, 4, 5], "Web viewport rendering must eventually append the complete loaded page");
+assert.equal(viewportBatchComplete, true, "Web load-more must activate only after the loaded page reaches its real end");
 const scheduledWorkBatches = new Map();
 let nextWorkBatchId = 1;
 const progressiveWorkListRenderer = createProgressiveWorkListRenderer({

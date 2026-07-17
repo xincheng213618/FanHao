@@ -9,9 +9,10 @@ import {
   createRankingPage,
   createSearchRequestService,
   createStudioPage,
+  createViewportBatchRenderer,
   createWorkActions,
   selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260717-fanhao-people-card-lifecycle-01";
+} from "./modules/fanhao/index.js?v=20260717-fanhao-viewport-render-01";
 import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
@@ -89,16 +90,11 @@ const els = {
 };
 
 const formatter = new Intl.NumberFormat("zh-CN");
-let workRenderTimer = null;
-let workRenderSeq = 0;
 let workLoadMoreScrollCleanup = null;
 let coverLoadQueue = [];
 let coverLoadTimer = null;
 let coverLoadObserver = null;
 const activeCoverImages = new Set();
-const WORK_RENDER_INITIAL_COUNT = 12;
-const WORK_RENDER_BATCH_SIZE = 12;
-const WORK_RENDER_BATCH_DELAY = 16;
 const WORK_DESKTOP_PAGE_SIZE = 64;
 const WORK_MOBILE_PAGE_SIZE = 48;
 const WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 64, lan: 64, remote: 48 });
@@ -115,6 +111,10 @@ const api = createApiClient({ isAndroidClient });
 const playbackPrefetch = createPlaybackPrefetch({ api });
 playbackPrefetch.bindContainer(els.workGrid);
 bindProgressiveCoverLifecycle(els.workGrid);
+const workListRenderer = createViewportBatchRenderer({
+  container: els.workGrid,
+  appendBatch: appendWorkCardBatch
+});
 const searchRequests = createSearchRequestService({
   api,
   filter: serializedWorkFilterMode,
@@ -1548,7 +1548,6 @@ function renderWorks(emptyMessage = "没有匹配的作品。") {
   disconnectWorkLoadMoreAutoload();
   cancelScheduledWorkRendering();
   resetProgressiveCoverLoading();
-  const renderSeq = ++workRenderSeq;
   const works = visibleWorks();
   els.workGrid.innerHTML = "";
   renderSearchPeoplePanel();
@@ -1566,29 +1565,18 @@ function renderWorks(emptyMessage = "没有匹配的作品。") {
   }
 
   const visible = works.slice(0, state.workVisibleLimit);
-  const nextIndex = appendWorkCardBatch(visible, 0, Math.min(visible.length, WORK_RENDER_INITIAL_COUNT));
-  if (nextIndex < visible.length) {
-    scheduleRemainingWorkCards(visible, nextIndex, renderSeq, () => {
-      if (visible.length < works.length || hasServerMore) {
-        appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore, hasRankingServerMore, hasCollectionServerMore, hasVrServerMore, hasStudioServerMore });
-      }
-    });
-    return;
-  }
-
-  if (visible.length < works.length || hasServerMore) {
-    appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore, hasRankingServerMore, hasCollectionServerMore, hasVrServerMore, hasStudioServerMore });
-  }
+  workListRenderer.render(visible, () => {
+    if (visible.length < works.length || hasServerMore) {
+      appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore, hasRankingServerMore, hasCollectionServerMore, hasVrServerMore, hasStudioServerMore });
+    }
+  });
 }
 
 function cancelScheduledWorkRendering() {
-  if (workRenderTimer) {
-    window.clearTimeout(workRenderTimer);
-    workRenderTimer = null;
-  }
+  workListRenderer.cancel();
 }
 
-function appendWorkCardBatch(visible, start, end) {
+function appendWorkCardBatch(visible, start, end, beforeNode = null) {
   const fragment = document.createDocumentFragment();
   const images = [];
   for (let index = start; index < end; index += 1) {
@@ -1597,23 +1585,10 @@ function appendWorkCardBatch(visible, start, end) {
     if (image) images.push(image);
     fragment.append(card);
   }
-  els.workGrid.append(fragment);
+  if (beforeNode?.isConnected) els.workGrid.insertBefore(fragment, beforeNode);
+  else els.workGrid.append(fragment);
   activateProgressiveCoverImages(images);
   return end;
-}
-
-function scheduleRemainingWorkCards(visible, nextIndex, renderSeq, onComplete) {
-  workRenderTimer = window.setTimeout(() => {
-    workRenderTimer = null;
-    if (renderSeq !== workRenderSeq) return;
-    const end = Math.min(visible.length, nextIndex + WORK_RENDER_BATCH_SIZE);
-    const afterIndex = appendWorkCardBatch(visible, nextIndex, end);
-    if (afterIndex < visible.length) {
-      scheduleRemainingWorkCards(visible, afterIndex, renderSeq, onComplete);
-    } else {
-      onComplete?.();
-    }
-  }, WORK_RENDER_BATCH_DELAY);
 }
 
 function appendLoadMore(visibleCount, totalCount, options = {}) {
