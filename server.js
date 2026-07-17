@@ -24,6 +24,7 @@ import { createLibraryPathServices } from "./src/modules/fanhao/server/library/l
 import { createLocalLibraryIndexService } from "./src/modules/fanhao/server/library/local-library-index-service.js";
 import { createLocalLibraryScanService } from "./src/modules/fanhao/server/library/local-library-scan-service.js";
 import { createManualCoverStateService } from "./src/modules/fanhao/server/works/manual-cover-state-service.js";
+import { createMissingCodeSearchService } from "./src/modules/fanhao/server/works/missing-code-search-service.js";
 import { createPeopleScopeService } from "./src/modules/fanhao/server/people/people-scope-service.js";
 import { createPersonLibraryService } from "./src/modules/fanhao/server/people/person-library-service.js";
 import { createPersonListService } from "./src/modules/fanhao/server/people/person-list-service.js";
@@ -539,6 +540,17 @@ const workSearchIndexService = createWorkSearchIndexService({
   parseJsonArray,
   parseJsonTextArray
 });
+const missingCodeSearchService = createMissingCodeSearchService({
+  dbBoolOrNull,
+  getCoverStamp: () => tableDataStamp("images"),
+  getCoreDb,
+  normalizeWorkCode,
+  parseJsonTextArray,
+  proxiedRemoteImageUrl,
+  publicRemoteUrl,
+  storedWorkCodeKey
+});
+missingCodeSearchService.prewarm();
 const adminCoreMutationService = createAdminCoreMutationService({
   actorIdFromJavdbUrl,
   actorProfileRow,
@@ -843,12 +855,13 @@ const moduleRegistry = await discoverFanHaoModules({
         dedupeWorksForDisplay,
         enrichLocalWorksWithActorMovieIndex,
         enrichLocalWorksWithActorMovieInfo,
-        fastMissingCodeSearch,
+        fastMissingCodeSearch: missingCodeSearchService.search,
         favoriteStateService,
         galleryMediaService,
         generateWorkCover: workCoverMutationService.generateWorkCover,
         getLastScanError: () => lastScanError,
         getLibrary: () => library,
+        hydrateMissingSearchWorks: missingCodeSearchService.hydrate,
         isVrWork,
         createWorkSearchMatcher,
         localSearchWorkByCodeKey: workCodeIndexService.localSearchWorkByCodeKey,
@@ -1516,109 +1529,6 @@ function rankingMissingSearchWorks() {
   return rankingService.missingSearchWorks();
 }
 
-function fastMissingCodeSearch(rawQuery) {
-  const prefix = storedWorkCodeKey(rawQuery);
-  if (!prefix) return [];
-
-  try {
-    return getCoreDb().prepare(`
-      SELECT
-        CAST(w.id AS TEXT) AS work_id,
-        w.code,
-        w.title,
-        w.release_date,
-        w.duration_minutes,
-        w.rating,
-        w.rating_count,
-        w.has_magnet,
-        w.is_streamable,
-        w.has_subtitles,
-        w.javdb_tags_json,
-        w.updated_at,
-        CAST((
-          SELECT wp.person_id
-          FROM work_people wp
-          WHERE wp.work_id = w.id AND wp.role = 'actor'
-          ORDER BY wp.sort_order, wp.person_id
-          LIMIT 1
-        ) AS TEXT) AS person_id,
-        (
-          SELECT p.name
-          FROM work_people wp
-          JOIN people p ON p.id = wp.person_id
-          WHERE wp.work_id = w.id AND wp.role = 'actor'
-          ORDER BY wp.sort_order, wp.person_id
-          LIMIT 1
-        ) AS person_name,
-        (
-          SELECT ref.url
-          FROM work_external_refs ref
-          WHERE ref.work_id = w.id AND ref.provider = 'javdb-video'
-          LIMIT 1
-        ) AS detail_url,
-        (
-          SELECT image.remote_url
-          FROM images image
-          WHERE image.owner_type = 'work'
-            AND image.owner_id = w.id
-            AND image.kind = 'cover'
-          ORDER BY image.id
-          LIMIT 1
-        ) AS image_url
-      FROM works w
-      WHERE w.status = 'ok'
-        AND w.code_search LIKE ?
-        AND NOT EXISTS (
-          SELECT 1
-          FROM works local_code
-          JOIN local_works lw ON lw.work_id = local_code.id
-          WHERE local_code.code_search = w.code_search
-        )
-      ORDER BY w.code_search, w.id
-      LIMIT 5000
-    `).all(`${prefix}%`).map((row) => {
-      const code = normalizeWorkCode(row.code) || row.code || "";
-      return {
-        id: row.work_id,
-        personId: row.person_id || "",
-        personName: row.person_name || "",
-        title: row.title && row.title !== row.code ? row.title : code || row.title || "未下载作品",
-        directoryName: code,
-        relativePath: "",
-        coverId: null,
-        remoteCoverUrl: proxiedRemoteImageUrl(row.image_url),
-        videoCount: 0,
-        playableCount: 0,
-        imageCount: 0,
-        infoCount: 0,
-        videos: [],
-        images: [],
-        infos: [],
-        modifiedAt: row.updated_at || "",
-        missingLocal: true,
-        javdbUrl: publicRemoteUrl(row.detail_url),
-        actorUrl: "",
-        infoSummary: {
-          code,
-          title: row.title || "",
-          javdbUrl: publicRemoteUrl(row.detail_url),
-          releaseDate: row.release_date || "",
-          durationMinutes: row.duration_minutes ?? null,
-          rating: row.rating ?? null,
-          ratingCount: row.rating_count ?? null,
-          hasMagnet: dbBoolOrNull(row.has_magnet),
-          isStreamable: dbBoolOrNull(row.is_streamable),
-          hasSubtitles: dbBoolOrNull(row.has_subtitles),
-          javdbTags: parseJsonTextArray(row.javdb_tags_json)
-        }
-      };
-    });
-  } catch (error) {
-    console.warn("[fast-code-search]", error.message || error);
-    return [];
-  }
-}
-
 function workCodeKeys(work) {
   return workCodeIndexService.workCodeKeys(work);
 }
@@ -1634,7 +1544,7 @@ function displayWorkDedupeKey(work) {
 }
 
 function workHasDisplayCover(work) {
-  return Boolean(work?.coverId || work?.remoteCoverUrl || work?.infoSummary?.imageUrl);
+  return Boolean(work?.coverId || work?.remoteCoverUrl || work?.searchHasCover || work?.infoSummary?.imageUrl);
 }
 
 function preferredDisplayWork(existing, next) {

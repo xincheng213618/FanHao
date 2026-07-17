@@ -51,6 +51,7 @@ export function createFanhaoDependencies(deps) {
       "galleryMediaService",
       "generateWorkCover",
       "getLibrary",
+      "hydrateMissingSearchWorks",
       "isVrWork",
       "createWorkSearchMatcher",
       "localSearchWorkByCodeKey",

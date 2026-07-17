@@ -8,6 +8,7 @@ export function createWorkQueryService({
   enrichLocalWorksWithActorMovieIndex,
   fastMissingCodeSearch,
   favoriteStateService,
+  hydrateMissingSearchWorks = () => {},
   isVrWork,
   library,
   localSearchWorkByCodeKey,
@@ -218,7 +219,7 @@ export function createWorkQueryService({
       case "vr": return isVrWork(work);
       case "localMarkedA": return workHasLocalMarker(work, "A");
       case "hasMagnet": return Boolean(work.missingLocal && work.infoSummary?.hasMagnet);
-      case "missingCover": return !work.coverId && !work.remoteCoverUrl && !work.infoSummary?.imageUrl;
+      case "missingCover": return !work.coverId && !work.remoteCoverUrl && !work.searchHasCover && !work.infoSummary?.imageUrl;
       case "all":
       default: return true;
     }
@@ -300,7 +301,7 @@ export function createWorkQueryService({
       if (rating !== null && rating >= 4) facets.highRating += 1;
       if (isVrWork(work)) facets.vr += 1;
       if (missingLocal && work.infoSummary?.hasMagnet) facets.hasMagnet += 1;
-      if (!work.coverId && !work.remoteCoverUrl && !work.infoSummary?.imageUrl) facets.missingCover += 1;
+      if (!work.coverId && !work.remoteCoverUrl && !work.searchHasCover && !work.infoSummary?.imageUrl) facets.missingCover += 1;
     }
 
     return facets;
@@ -312,6 +313,7 @@ export function createWorkQueryService({
     const sort = url.searchParams.get("sort") || "releaseDesc";
     const total = works.length;
     const pageSource = works.slice(offset, offset + limit);
+    if (options.hydrateMissingSearchResults) hydrateMissingSearchWorks(pageSource);
     if (!options.lightweightInfo) prewarmCoreWorkCovers(pageSource);
     prewarmVideoProbesForWorks(pageSource);
     if (!options.lightweightInfo) prewarmWorkInfoDetails(pageSource);
@@ -406,7 +408,7 @@ export function createWorkQueryService({
       q: rawQuery,
       facets,
       people: source.people
-    }, { lightweightInfo: true });
+    }, { hydrateMissingSearchResults: true, lightweightInfo: true });
   }
 
   function cachedSearchSource(rawQuery) {
@@ -426,7 +428,8 @@ export function createWorkQueryService({
 
     const query = rawQuery.toLowerCase();
     const exactCodeKey = /^[a-z]{2,12}[-_\s]?\d{2,}$/i.test(rawQuery) ? storedWorkCodeKey(rawQuery) : "";
-    const codePrefixQuery = storedWorkCodeKey(rawQuery).length >= 2 && /^[a-z][a-z0-9_-]*$/i.test(rawQuery);
+    const codePrefix = storedWorkCodeKey(rawQuery);
+    const codePrefixQuery = codePrefix.length >= 1 && /^[a-z][a-z0-9_-]*$/i.test(rawQuery);
     const peopleSearch = exactCodeKey || codePrefixQuery
       ? { exact: [], matchedPersonIds: [], people: [] }
       : searchPeople(rawQuery);
@@ -444,7 +447,7 @@ export function createWorkQueryService({
     const localMatches = exactCodeKey
       ? (exactLocalWork ? [exactLocalWork] : [])
       : codePrefixQuery
-        ? findLocalWorksByCodePrefix(storedWorkCodeKey(rawQuery))
+        ? findLocalWorksByCodePrefix(codePrefix)
         : exactPersonSearch
           ? allWorks().filter((work) => exactPersonIds.has(work.personId))
           : allWorks().filter((work) => exactPersonIds.has(work.personId) || matchesQuery(work));

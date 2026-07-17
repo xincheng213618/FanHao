@@ -20,6 +20,7 @@ import { prepareCollectionWorkPage } from "../src/modules/fanhao/server/user-sta
 import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkImageService } from "../src/modules/fanhao/server/works/image-service.js";
 import { createWorkDetailService } from "../src/modules/fanhao/server/works/work-detail-service.js";
+import { createMissingCodeSearchService } from "../src/modules/fanhao/server/works/missing-code-search-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createWorkSearchIndexService } from "../src/modules/fanhao/server/works/work-search-index-service.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
@@ -72,6 +73,7 @@ const playerPageSource = read("public/js/player-page.js");
 const playerHtmlSource = read("public/player.html");
 const workActionsSource = read("public/modules/fanhao/features/works/work-actions.js");
 const workDetailServiceSource = read("src/modules/fanhao/server/works/work-detail-service.js");
+const missingCodeSearchServiceSource = read("src/modules/fanhao/server/works/missing-code-search-service.js");
 const workRoutesApiSource = read("src/modules/fanhao/server/works/routes-api.js");
 const workPresenterServiceSource = read("src/modules/fanhao/server/works/presenter-service.js");
 const playbackProgressServiceSource = read("src/modules/fanhao/server/playback/playback-progress-service.js");
@@ -456,7 +458,7 @@ assert(workQueryServiceSource.includes("prewarmWorkSearch([...rankingMissingWork
 assert(workQueryServiceSource.indexOf("if (usesTextMatcher) prewarmWorkSearch") < workQueryServiceSource.indexOf("const matchesQuery = usesTextMatcher"), "cache invalidation must reindex missing-work candidates before matching a new text query");
 assert(workQueryServiceSource.includes("prewarmPersonMerge();"), "person merge maps must be ready before the first search request");
 assert(workQueryServiceSource.includes("const searchSourceCache = new Map()"), "search paging and return navigation must reuse matched work sources");
-assert(workQueryServiceSource.includes("const source = cachedSearchSource(rawQuery)"), "search responses must use the versioned matched-work cache");
+assert(workQueryServiceSource.includes("const source = cachedSearchSource(rawQuery"), "search responses must use the versioned matched-work cache");
 assert(workQueryServiceSource.includes("source.facetsCache?.stamp === stamp"), "search facets must only refresh after user state changes");
 assert(workQueryServiceSource.includes("const exactPersonSearch ="), "exact person searches must bypass the full local text scan");
 assert(workCodeIndexServiceSource.includes("localWorkCodeIndexCache = { stamp, keys, rows, searchRows, prefixRows }"), "local code membership and work lookup must share one catalog pass");
@@ -466,6 +468,13 @@ assert(workSearchIndexServiceSource.includes("const postings = new Map()"), "ful
 assert(workSearchIndexServiceSource.includes("function rarestPosting"), "search candidate selection must start from the rarest query gram");
 assert(workSearchIndexServiceSource.includes("candidateIds && isIndexedWork && !candidateIds.has(work.id)"), "new search terms must skip exact checks for unrelated indexed works");
 assert(lines("src/modules/fanhao/server/works/work-search-index-service.js") <= 240, "the work-search index service must stay focused");
+assert(missingCodeSearchServiceSource.includes("missingCodeSearchPending: true"), "broad code-prefix searches must defer non-page detail hydration");
+assert(missingCodeSearchServiceSource.includes("WHERE w.id IN (${placeholders})"), "visible missing-code results must batch-hydrate one page of details");
+assert(missingCodeSearchServiceSource.includes("coverWorkIdsCache?.stamp === stamp"), "broad code-prefix searches must reuse the in-memory cover membership index");
+assert(!missingCodeSearchServiceSource.includes("EXISTS (\n            SELECT 1\n            FROM images image"), "broad code-prefix result scans must not probe the cover index once per candidate");
+assert(!missingCodeSearchServiceSource.includes("LIMIT 5000"), "code-prefix search must not truncate broad missing-work results");
+assert(read("server.js").includes("missingCodeSearchService.prewarm();"), "FanHao startup must prepare broad-search cover membership before the first request");
+assert(read("server.js").includes("hydrateMissingSearchWorks: missingCodeSearchService.hydrate"), "FanHao search composition must use page-level missing-result hydration");
 const searchIndexWorks = [
   {
     id: "work-1",
@@ -1129,6 +1138,72 @@ assert.equal(workInfoDetailPrepareCount, 1, "repeated work pages must reuse batc
 assert.deepEqual(workInfoDetailArgs, [1, 2], "work-info batches must pass normalized numeric identifiers");
 assert.equal(batchedWorkInfoService.detailRow("1")?.title, "Work 1", "single-work reads must reuse the batch detail cache");
 
+const missingCodeSearchDb = new DatabaseSync(":memory:");
+missingCodeSearchDb.exec(`
+  CREATE TABLE works (
+    id INTEGER PRIMARY KEY,
+    code TEXT,
+    code_search TEXT,
+    title TEXT,
+    release_date TEXT,
+    duration_minutes INTEGER,
+    rating REAL,
+    rating_count INTEGER,
+    has_magnet INTEGER,
+    is_streamable INTEGER,
+    has_subtitles INTEGER,
+    javdb_tags_json TEXT,
+    updated_at TEXT,
+    status TEXT
+  );
+  CREATE TABLE local_works (work_id INTEGER);
+  CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);
+  CREATE TABLE work_people (work_id INTEGER, person_id INTEGER, role TEXT, sort_order INTEGER);
+  CREATE TABLE work_external_refs (work_id INTEGER, provider TEXT, url TEXT);
+  CREATE TABLE images (id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, kind TEXT, remote_url TEXT);
+  INSERT INTO works VALUES
+    (1, 'M-001', 'm001', 'Local M', '2026-01-01', 60, 4.0, 10, 0, 0, 0, '[]', '2026-01-01', 'ok'),
+    (2, 'M-002', 'm002', 'Missing M', '2026-01-02', 90, 4.5, 20, 1, 1, 1, '["tag"]', '2026-01-02', 'ok'),
+    (3, 'N-001', 'n001', 'Missing N', '2026-01-03', 70, 3.5, 5, 0, 0, 0, '[]', '2026-01-03', 'ok');
+  INSERT INTO local_works VALUES (1);
+  INSERT INTO people VALUES (9, 'Actor M');
+  INSERT INTO work_people VALUES (2, 9, 'actor', 0);
+  INSERT INTO work_external_refs VALUES (2, 'javdb-video', 'https://example.com/m002');
+  INSERT INTO images VALUES (20, 'work', 2, 'cover', 'https://example.com/m002.jpg');
+`);
+let missingCodeCoverStamp = "cover-v1";
+let missingCodeCoverIndexReads = 0;
+const missingCodeSearchService = createMissingCodeSearchService({
+  dbBoolOrNull: (value) => value === null || value === undefined ? null : Boolean(value),
+  getCoverStamp: () => missingCodeCoverStamp,
+  getCoreDb: () => ({
+    prepare(sql) {
+      if (sql.includes("SELECT image.owner_id")) missingCodeCoverIndexReads += 1;
+      return missingCodeSearchDb.prepare(sql);
+    }
+  }),
+  normalizeWorkCode: (value) => String(value || ""),
+  parseJsonTextArray: (value) => JSON.parse(value || "[]"),
+  proxiedRemoteImageUrl: (value) => value ? `/proxy?url=${encodeURIComponent(value)}` : "",
+  publicRemoteUrl: (value) => String(value || ""),
+  storedWorkCodeKey: (value) => String(value || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase()
+});
+const lightweightMissingCodeWorks = missingCodeSearchService.search("M");
+assert.deepEqual(lightweightMissingCodeWorks.map((work) => work.id), ["2"], "missing-code search must exclude matching local works without truncating the prefix source");
+assert.equal(lightweightMissingCodeWorks[0].missingCodeSearchPending, true, "missing-code search must leave non-page details deferred");
+assert.equal(lightweightMissingCodeWorks[0].searchHasCover, true, "deferred missing-code rows must retain lightweight cover presence for facets and dedupe");
+missingCodeSearchService.search("M");
+assert.equal(missingCodeCoverIndexReads, 1, "repeated broad-code searches must reuse cover membership from memory");
+missingCodeCoverStamp = "cover-v2";
+missingCodeSearchService.search("M");
+assert.equal(missingCodeCoverIndexReads, 2, "cover-table changes must invalidate broad-search cover membership");
+missingCodeSearchService.hydrate(lightweightMissingCodeWorks);
+assert.equal(lightweightMissingCodeWorks[0].personName, "Actor M", "visible missing-code results must hydrate actor details in one page batch");
+assert.equal(lightweightMissingCodeWorks[0].infoSummary.javdbTags[0], "tag", "visible missing-code results must retain deferred metadata");
+assert(lightweightMissingCodeWorks[0].remoteCoverUrl.includes("m002.jpg"), "visible missing-code results must retain deferred cover URLs");
+assert.equal(lightweightMissingCodeWorks[0].missingCodeSearchPending, undefined, "hydrated missing-code results must not stay pending");
+missingCodeSearchDb.close();
+
 let actorMovieDataStamp = "actor-v1";
 let enrichmentCount = 0;
 let localPrefixReadCount = 0;
@@ -1235,14 +1310,20 @@ const favoriteFacetReadsAfterSearch = searchFavoriteFacetReadCount;
 workQueryService.searchPayload(workSearchUrl);
 assert.equal(localPrefixReadCount, 1, "repeated search paging must reuse the matched work source");
 assert.equal(searchFavoriteFacetReadCount, favoriteFacetReadsAfterSearch, "repeated search paging must reuse unchanged user facets");
+const singleLetterCodeSearchUrl = new URL("http://127.0.0.1/api/search?q=A&limit=24&sort=releaseDesc");
+const prefixReadsBeforeSingleLetterSearch = localPrefixReadCount;
+const singleLetterCodeSearch = workQueryService.searchPayload(singleLetterCodeSearchUrl);
+assert.equal(localPrefixReadCount, prefixReadsBeforeSingleLetterSearch + 1, "single-letter Latin searches must use the indexed code-prefix path");
+assert.equal(singleLetterCodeSearch.total, 1, "single-letter code-prefix searches must preserve matching local works");
 searchUserStateRevision += 1;
 workQueryService.searchPayload(workSearchUrl);
 assert(searchFavoriteFacetReadCount > favoriteFacetReadsAfterSearch, "favorite and progress changes must refresh search facets");
 actorMovieDataStamp = "actor-v2";
 workQueryService.listPayload(workListUrl);
 assert.equal(enrichmentCount, 2, "actor-movie updates must invalidate the FanHao work-list enrichment cache");
+const prefixReadsBeforeInvalidatedSearch = localPrefixReadCount;
 workQueryService.searchPayload(workSearchUrl);
-assert.equal(localPrefixReadCount, 2, "search data changes must invalidate matched work sources");
+assert.equal(localPrefixReadCount, prefixReadsBeforeInvalidatedSearch + 1, "search data changes must invalidate matched work sources");
 
 let cachedLocalImageRow = null;
 let localImageStatCount = 0;
