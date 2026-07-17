@@ -8,10 +8,10 @@ import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260
 import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-page-race-01";
 import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260717-fanhao-search-response-01";
 import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-mobile-card-lifecycle-01";
+import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=20260717-fanhao-work-first-paint-01";
 
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
-
 function workDataSignature(data = {}) {
   const works = Array.isArray(data.works) ? data.works : [];
   const folders = Array.isArray(data.folders) ? data.folders : [];
@@ -54,6 +54,7 @@ export function createWorkViews(context) {
   const pageDataService = createWorkPageDataService({ fetchJson, readCachedJson, writeCachedJson });
   const workDetailDataService = createWorkDetailDataService({ getActiveUrl, pageDataService });
   const workCards = createWorkCards({ getActiveUrl, roots: [els.viewContent, els.continuePreview], showView, workDetailDataService });
+  const progressiveWorkListRenderer = createProgressiveWorkListRenderer();
   const searchDataService = createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageDataService, workListState });
   const rankingViews = createRankingViews({
     els,
@@ -65,10 +66,8 @@ export function createWorkViews(context) {
     setActiveBottom,
     workListState
   });
-
   async function renderContinuePreview(options = {}) {
     if (!els.continuePreview || !els.continueSection) return;
-
     els.continuePreview.dataset.hasItems = "0";
     els.continuePreview.innerHTML = `<div class="loading-row">正在读取最近进度</div>`;
     els.continueSection.hidden = !isHomeView();
@@ -158,12 +157,7 @@ export function createWorkViews(context) {
       if (isFavorites) renderFavoriteFolderStrip(data.folders || []);
       if (isFavorites) renderFavoriteExtras();
       renderWorks(works, isFavorites ? "还没有收藏作品。" : "暂无继续观看记录。", {
-        total,
-        hasServerMore: works.length < total,
-        onLoadMore: () => {
-          increaseWorksLimit(48);
-          return renderCurrentViewPreservingScroll();
-        }
+        ...serverContinuationOptions(works, total)
       });
     };
 
@@ -262,13 +256,11 @@ export function createWorkViews(context) {
       const total = Number(data.total || works.length);
       applyWorksHeader(data, cacheEntry);
       els.viewContent.innerHTML = "";
-      renderWorks(works, "资料库里还没有作品。", { compactMeta: true, facets: data.facets, total });
-      if (works.length < total) {
-        els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(works.length)} / ${formatNumber(total)}`, () => {
-          increaseWorksLimit(48);
-          return renderCurrentViewPreservingScroll();
-        }));
-      }
+      renderWorks(works, "资料库里还没有作品。", {
+        compactMeta: true,
+        facets: data.facets,
+        ...serverContinuationOptions(works, total)
+      });
     };
 
     try {
@@ -326,13 +318,11 @@ export function createWorkViews(context) {
       const total = Number(data.total || works.length);
       applyHeader(data, cacheEntry);
       els.viewContent.innerHTML = "";
-      renderWorks(works, "没有 VR 作品。", { compactMeta: true, facets: data.facets, total });
-      if (works.length < total) {
-        els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(works.length)} / ${formatNumber(total)}`, () => {
-          increaseWorksLimit(48);
-          return renderCurrentViewPreservingScroll();
-        }));
-      }
+      renderWorks(works, "没有 VR 作品。", {
+        compactMeta: true,
+        facets: data.facets,
+        ...serverContinuationOptions(works, total)
+      });
     };
 
     try {
@@ -447,13 +437,10 @@ export function createWorkViews(context) {
       applyHeader(data, cacheEntry);
       els.viewContent.innerHTML = "";
       renderStudioSeriesStrip(studio, data.selectedSeriesId || seriesId || "all");
-      renderWorks(works, "这个片商暂无本地作品。", { compactMeta: true, total });
-      if (works.length < total) {
-        els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(works.length)} / ${formatNumber(total)}`, () => {
-          increaseWorksLimit(48);
-          return renderCurrentViewPreservingScroll();
-        }));
-      }
+      renderWorks(works, "这个片商暂无本地作品。", {
+        compactMeta: true,
+        ...serverContinuationOptions(works, total)
+      });
     };
 
     try {
@@ -599,16 +586,10 @@ export function createWorkViews(context) {
       if (works.length || total || !people.length) {
         renderWorks(works, `没有搜到「${text}」。`, {
           facets: data.facets,
-          total
+          ...serverContinuationOptions(works, total)
         });
       } else {
         renderMessage("没有匹配的番号作品，已显示人物结果。", "quiet", false);
-      }
-      if (works.length < total) {
-        els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(works.length)} / ${formatNumber(total)}`, () => {
-          increaseWorksLimit(48);
-          return renderCurrentViewPreservingScroll();
-        }));
       }
     };
 
@@ -662,6 +643,17 @@ export function createWorkViews(context) {
     rankingViews.leaveRankingSort();
   }
 
+  function serverContinuationOptions(works, total) {
+    return {
+      total,
+      hasServerMore: works.length < total,
+      onLoadMore() {
+        increaseWorksLimit(48);
+        return renderCurrentViewPreservingScroll();
+      }
+    };
+  }
+
   function renderSearchPeople(people) {
     if (!people.length) return;
 
@@ -680,6 +672,7 @@ export function createWorkViews(context) {
 
   function renderWorks(works, emptyMessage, options = {}) {
     if (!options.allowRankingSort) leaveRankingSort();
+    progressiveWorkListRenderer.cancel();
     workCards.resetCoverLoading();
     const source = works || [];
     const list = workListState.visibleWorks(source, options);
@@ -694,17 +687,17 @@ export function createWorkViews(context) {
 
     const grid = document.createElement("div");
     grid.className = "work-list";
-    for (const work of visible) grid.append(workCards.createWorkCard(work, options));
     els.viewContent.append(grid);
-
+    let loadMore = null;
     if (visible.length < list.length) {
-      els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(list.length)}`, () => {
+      loadMore = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(list.length)}`, () => {
         increaseWorksLimit(40);
         return renderCurrentViewPreservingScroll();
-      }));
+      });
     } else if (options.hasServerMore && typeof options.onLoadMore === "function") {
-      els.viewContent.append(createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(options.total || visible.length)}`, options.onLoadMore));
+      loadMore = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(options.total || visible.length)}`, options.onLoadMore);
     }
+    progressiveWorkListRenderer.render(grid, visible, (work) => workCards.createWorkCard(work, options), () => loadMore && els.viewContent.append(loadMore));
   }
 
   function createLoadMoreButton(text, handler) {

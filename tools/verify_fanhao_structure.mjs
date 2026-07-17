@@ -34,6 +34,7 @@ import { fetchPreparedImage } from "../android-client/www/js/image.js";
 import { createWorkCoverLoader } from "../android-client/www/modules/fanhao/features/works/cover-loader.js";
 import { createWorkPageDataService } from "../android-client/www/modules/fanhao/features/works/page-data-service.js";
 import { createWorkDetailDataService } from "../android-client/www/modules/fanhao/features/works/detail-data-service.js";
+import { createProgressiveWorkListRenderer } from "../android-client/www/modules/fanhao/features/works/progressive-list-renderer.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -291,6 +292,7 @@ for (const relativePath of [
   "android-client/www/modules/fanhao/features/works/actions.js",
   "android-client/www/modules/fanhao/features/works/preview-media.js",
   "android-client/www/modules/fanhao/features/works/page-data-service.js",
+  "android-client/www/modules/fanhao/features/works/progressive-list-renderer.js",
   "android-client/www/modules/fanhao/features/shared/viewport-image-loader.js",
   "android-client/www/modules/fanhao/features/rankings/ranking-views.js",
   "src/modules/fanhao/server/composition.js",
@@ -311,6 +313,7 @@ const androidPeopleViews = read("android-client/www/modules/fanhao/people-views.
 const androidRankingViews = read("android-client/www/modules/fanhao/features/rankings/ranking-views.js");
 const androidWorkCards = read("android-client/www/modules/fanhao/features/works/cards.js");
 const androidWorkCoverLoader = read("android-client/www/modules/fanhao/features/works/cover-loader.js");
+const androidProgressiveWorkListRenderer = read("android-client/www/modules/fanhao/features/works/progressive-list-renderer.js");
 const androidViewportImageLoader = read("android-client/www/modules/fanhao/features/shared/viewport-image-loader.js");
 const androidListStyles = read("android-client/www/css/lists.css");
 assert(!androidWorkViews.includes("SEARCH_CHANNELS"), "FanHao Android must not own cross-module search channels");
@@ -335,6 +338,11 @@ assert(androidPeopleViews.includes("els.viewContent.replaceChildren(...nodes)") 
 assert(!androidPeopleViews.includes("renderCurrentViewPreservingScroll"), "Android people continuation must not rebuild the existing index");
 assert(androidWorkCards.includes("coverLoader.schedule(thumb, imagePath)"), "Android work cards must defer cover reads until they approach the viewport");
 assert(androidWorkViews.includes("workCards.resetCoverLoading();"), "Android work navigation must cancel stale offscreen cover work");
+assert(androidWorkViews.includes("progressiveWorkListRenderer.render(grid, visible"), "Android work lists must expose the first card batch before building the remaining page");
+assert(!androidWorkViews.includes("for (const work of visible) grid.append"), "Android work lists must not synchronously build the full first page");
+assert(androidWorkViews.includes("() => loadMore && els.viewContent.append(loadMore)"), "Android auto-load must wait until progressive work rendering reaches the real list end");
+assert(!androidWorkViews.includes("els.viewContent.append(createLoadMoreButton"), "Android callers must not attach auto-load before progressive work rendering completes");
+assert(androidProgressiveWorkListRenderer.includes("container.isConnected === false"), "Android progressive work rendering must stop after navigation detaches its list");
 assert(androidWorkCoverLoader.includes('const WORK_COVER_ROOT_MARGIN = "720px 0px"'), "Android work covers must start shortly before they enter the viewport");
 assert(androidViewportImageLoader.includes("const pending = new Map()"), "Android viewport image loading must share one focused queue implementation");
 assert(androidListStyles.includes("content-visibility: auto") && androidListStyles.includes("contain-intrinsic-size: auto 128px"), "Android work cards must skip offscreen layout and painting");
@@ -359,6 +367,56 @@ assert((androidDetailViews.match(/pageDataService\.load\(activeUrl, path/g) || [
 assert(!androidDetailViews.includes("await readCachedJson(activeUrl, path)") && !androidDetailViews.includes("fetchJson(activeUrl, path"), "Android detail views must not wait for IndexedDB before starting their live request");
 assert(androidWorkViews.includes('cards.js?v=20260717-fanhao-mobile-card-lifecycle-01'), "Android card-lifecycle changes must refresh the card module URL");
 assert((androidWorkViews.match(/pageDataService\.load\(activeUrl, path/g) || []).length >= 7 && androidWorkPageDataService.includes("Promise.race([freshRequest, cacheRequest])"), "Android FanHao pages must race IndexedDB with the live response");
+const scheduledWorkBatches = new Map();
+let nextWorkBatchId = 1;
+const progressiveWorkListRenderer = createProgressiveWorkListRenderer({
+  initialCount: 2,
+  batchSize: 2,
+  batchDelayMs: 16,
+  setTimer(callback) {
+    const id = nextWorkBatchId;
+    nextWorkBatchId += 1;
+    scheduledWorkBatches.set(id, callback);
+    return id;
+  },
+  clearTimer(id) {
+    scheduledWorkBatches.delete(id);
+  }
+});
+const createListContainer = () => ({
+  children: [],
+  isConnected: true,
+  append(child) {
+    this.children.push(child);
+  }
+});
+const runNextWorkBatch = () => {
+  const entry = scheduledWorkBatches.entries().next().value;
+  assert(entry, "Android progressive work rendering must schedule its next batch");
+  const [id, callback] = entry;
+  scheduledWorkBatches.delete(id);
+  callback();
+};
+const progressiveWorkList = createListContainer();
+let progressiveWorkListComplete = false;
+progressiveWorkListRenderer.render(progressiveWorkList, [1, 2, 3, 4, 5], (value) => value, () => {
+  progressiveWorkListComplete = true;
+});
+assert.deepEqual(progressiveWorkList.children, [1, 2], "Android work lists must render the first batch synchronously");
+assert.equal(progressiveWorkListComplete, false, "Android work continuation must stay hidden while card batches are still rendering");
+runNextWorkBatch();
+assert.deepEqual(progressiveWorkList.children, [1, 2, 3, 4], "Android work lists must append one bounded continuation batch");
+runNextWorkBatch();
+assert.deepEqual(progressiveWorkList.children, [1, 2, 3, 4, 5], "Android work lists must eventually append the complete page");
+assert.equal(progressiveWorkListComplete, true, "Android work continuation must activate after the complete page is rendered");
+const staleWorkList = createListContainer();
+progressiveWorkListRenderer.render(staleWorkList, ["old-1", "old-2", "old-3"], (value) => value);
+const staleWorkBatch = scheduledWorkBatches.values().next().value;
+const replacementWorkList = createListContainer();
+progressiveWorkListRenderer.render(replacementWorkList, ["new-1"], (value) => value);
+staleWorkBatch();
+assert.deepEqual(staleWorkList.children, ["old-1", "old-2"], "Android navigation must cancel stale work-card batches");
+assert.deepEqual(replacementWorkList.children, ["new-1"], "Android navigation must render the replacement list immediately");
 let resolveWarmedWorkPage;
 let workPageFetchCount = 0;
 const writtenWorkPages = [];
