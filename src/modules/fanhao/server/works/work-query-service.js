@@ -402,16 +402,17 @@ export function createWorkQueryService({
     return workId ? `${options.lightweightInfo ? "light" : "full"}:${workId}` : "";
   }
 
-  function listFromWorksPayload(sourceWorks, url, extra = {}) {
+  function listFromWorksPayload(sourceWorks, url, extra = {}, options = {}) {
     const filter = extra.filter || url.searchParams.get("filter") || "all";
     const sort = url.searchParams.get("sort") || "releaseDesc";
-    const matchedWorks = filter === "all" ? sourceWorks : sourceWorks.filter((work) => workMatchesFilter(work, filter));
-    const works = sortWorkList(matchedWorks, sort);
+    const matchesFilter = options.lightweightInfo ? lightweightWorkMatchesFilter : workMatchesFilter;
+    const matchedWorks = filter === "all" ? sourceWorks : sourceWorks.filter((work) => matchesFilter(work, filter));
+    const works = sortWorkList(matchedWorks, sort, options);
     return pagedWorksPayload(works, url, {
       ...extra,
       filter,
       facets: extra.facets || workFacets(sourceWorks)
-    });
+    }, options);
   }
 
   function listPayload(url) {
@@ -689,6 +690,7 @@ export function createWorkQueryService({
 
   return {
     facets: workFacets,
+    lightweightFacets: lightweightWorkFacets,
     listPayload,
     listFromWorksPayload,
     prewarm,

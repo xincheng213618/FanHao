@@ -700,12 +700,13 @@ assert(rankingServiceSource.includes("prewarmCoreWorkCovers(pageWorks)") && rank
 assert(catalogRuntimeSource.includes("deps.rankingService.prewarm();"), "ranking summaries and selectable list sources must be ready before first navigation");
 assert(personDetailServiceSource.includes("const detailSourceCache = new Map()"), "person navigation must reuse prepared detail sources");
 assert(personDetailServiceSource.includes("peoplePayloadStamp(scope)}:${workQueryStamp()"), "person detail sources must follow people and work data versions");
-assert(personDetailServiceSource.includes("workQueryService.facets(source.works)"), "person facets must remain live outside the prepared source cache");
+assert(personDetailServiceSource.includes("workQueryService.lightweightFacets(source.works)"), "person facets must remain live without hydrating detail-only metadata");
 const workInfoServiceSource = read("src/modules/fanhao/server/works/work-info-service.js");
 const workQueryServiceSource = read("src/modules/fanhao/server/works/work-query-service.js");
 const workCodeIndexServiceSource = read("src/modules/fanhao/server/works/work-code-index-service.js");
 const workSearchIndexServiceSource = read("src/modules/fanhao/server/works/work-search-index-service.js");
 assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info details must support page-level batch hydration");
+assert(personDetailServiceSource.includes("{ lightweightInfo: true }") && workQueryServiceSource.includes("lightweightFacets: lightweightWorkFacets"), "person first pages must reuse the lightweight work-list path");
 assert(workQueryServiceSource.includes("prewarmWorkInfoDetails(missing)"), "work lists must batch-hydrate only unprepared detail rows before presentation");
 assert(workQueryServiceSource.includes("prewarmVideoProbesForWorks(missing)"), "visible work pages must prepare playback probes only for unprepared works");
 assert(workQueryServiceSource.includes("const LIST_PAGE_CACHE_LIMIT = 96") && workQueryServiceSource.includes("const WORK_PAYLOAD_CACHE_LIMIT = 4096"), "work lists must retain complete pages and prepared work payloads in bounded caches");
@@ -1069,6 +1070,7 @@ let personDetailUserStateStamp = "user-v1";
 let personDetailSourceBuildCount = 0;
 let personDetailFacetReadCount = 0;
 let personDetailPayloadReadCount = 0;
+let personDetailPayloadOptions = null;
 const personDetailFixture = { id: "person-1", name: "Person One", works: ["work-1"] };
 const personDetailLibrary = {
   scannedAt: "scan-v1",
@@ -1104,12 +1106,13 @@ const cachedPersonDetailService = createPersonDetailService({
   workLocalMutationService: {},
   workCodeKeySetForWorks: () => new Set(["work1"]),
   workQueryService: {
-    facets(works) {
+    lightweightFacets(works) {
       personDetailFacetReadCount += 1;
       return { all: works.length, favorite: personDetailFacetReadCount };
     },
-    listFromWorksPayload(works, url, extra) {
+    listFromWorksPayload(works, url, extra, options) {
       personDetailPayloadReadCount += 1;
+      personDetailPayloadOptions = options;
       return { ...extra, count: works.length, total: works.length, filter: extra.filter, works };
     }
   },
@@ -1119,6 +1122,7 @@ const cachedPersonDetailService = createPersonDetailService({
 const personDetailUrl = new URL("http://127.0.0.1/api/people/person-1?filter=all&limit=48&offset=0");
 const firstPersonDetail = cachedPersonDetailService.detailPayload("person-1", personDetailUrl);
 assert.equal(personDetailServiceSource.includes("skipFallbackAvatar: true"), true, "person detail APIs must not rescan works for fallback avatars");
+assert.deepEqual(personDetailPayloadOptions, { lightweightInfo: true }, "person detail first pages must not synchronously hydrate work-detail-only metadata");
 const cachedFirstPersonDetail = cachedPersonDetailService.detailPayload("person-1", new URL(personDetailUrl));
 assert.equal(personDetailFacetReadCount, 1, "identical person pages must reuse prepared facets while user state is unchanged");
 assert.equal(personDetailPayloadReadCount, 1, "identical person pages must reuse their complete prepared response");
@@ -1684,11 +1688,28 @@ assert.deepEqual(preparedWorkVideoIds, [queryWork.id], "FanHao startup must queu
 assert.equal(workInfoReadCount, 0, "FanHao startup prewarm must not hydrate full work-info facets before the server listens");
 assert(workInfoFacetReadCount > 0 && workInfoFacetReadCount <= 8, "FanHao startup prewarm must use only bounded compact work-info lookups");
 assert.equal(workListPublicCount, 1, "FanHao startup must prepare each visible work payload once across common list variants");
+preparedWorkCoverIds = [];
+preparedWorkInfoIds = [];
+preparedWorkVideoIds = [];
+const lightweightFacetReadsBeforePersonPage = workInfoFacetReadCount;
+const lightweightPersonFacets = workQueryService.lightweightFacets([queryWork]);
+const lightweightPersonPage = workQueryService.listFromWorksPayload(
+  [queryWork],
+  new URL("http://127.0.0.1/api/people/person-1?limit=24&sort=releaseDesc"),
+  { filter: "all", facets: lightweightPersonFacets },
+  { lightweightInfo: true }
+);
+assert.equal(lightweightPersonPage.works[0].id, queryWork.id, "lightweight person pages must preserve visible work payloads");
+assert.equal(workInfoFacetReadCount, lightweightFacetReadsBeforePersonPage, "lightweight person facets must not read detail-only work metadata");
+assert.deepEqual(preparedWorkCoverIds, [], "lightweight person pages must not hydrate detail-only cover metadata");
+assert.deepEqual(preparedWorkInfoIds, [], "lightweight person pages must not hydrate detail-only info rows");
+assert.deepEqual(preparedWorkVideoIds, [queryWork.id], "lightweight person pages must still prepare playback probes for visible works");
+const workListPublicCountAfterLightweightPage = workListPublicCount;
 const cachedWorkListFirst = workQueryService.listPayload(workListUrl);
 const listFavoriteReadsAfterFirstPage = searchFavoriteFacetReadCount;
 const cachedWorkListSecond = workQueryService.listPayload(workListUrl);
 assert.equal(cachedWorkListSecond, cachedWorkListFirst, "identical work-list requests must reuse the complete response object");
-assert.equal(workListPublicCount, 1, "new page sizes must reuse already prepared work payloads");
+assert.equal(workListPublicCount, workListPublicCountAfterLightweightPage, "new page sizes must reuse already prepared full and lightweight work payloads");
 assert.equal(searchFavoriteFacetReadCount, listFavoriteReadsAfterFirstPage, "repeated work lists must reuse unchanged dynamic facets");
 assert.equal(enrichmentCount, 1, "repeated FanHao work-list requests must reuse the prewarmed full-library enrichment");
 const workSearchUrl = new URL("http://127.0.0.1/api/search?q=AB&limit=24&sort=releaseDesc");

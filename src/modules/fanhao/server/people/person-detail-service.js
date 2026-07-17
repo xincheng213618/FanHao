@@ -80,12 +80,12 @@ export function createPersonDetailService({
       mark("payload");
     } else {
       const filter = url.searchParams.get("filter") || "all";
-      const facets = workQueryService.facets(source.works);
+      const facets = workQueryService.lightweightFacets(source.works);
       mark("facets");
       worksPayload = workQueryService.listFromWorksPayload(source.works, url, {
         filter,
         facets
-      });
+      }, { lightweightInfo: true });
       cachePage(source, pageCacheKey, worksPayload);
       mark("payload");
     }
