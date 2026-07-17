@@ -124,7 +124,8 @@ for (const id of ["fanhao", "photos", "media"]) {
   assert(entrySource.includes("host.ui.openSearch"), `Android module must wire its own search entry: ${id}`);
 }
 const androidFanhaoViews = fs.readFileSync(path.join(androidModulesDir, "fanhao", "work-views.js"), "utf8");
-assert(androidFanhaoViews.includes("/api/fanhao/search"), "FanHao mobile search must call only its module-scoped API");
+const androidFanhaoSearchData = fs.readFileSync(path.join(androidModulesDir, "fanhao", "features", "works", "search-data-service.js"), "utf8");
+assert(androidFanhaoSearchData.includes("/api/fanhao/search"), "FanHao mobile search must call only its module-scoped API");
 assert(!androidFanhaoViews.includes("createGlobalSearch"), "FanHao mobile search must not aggregate gallery or media results");
 const androidShortVideoEntry = fs.readFileSync(path.join(androidModulesDir, "short-videos", "android-module.js"), "utf8");
 assert(androidShortVideoEntry.includes('view: "shortVideoSearch"'), "short videos must own a dedicated Android search route");

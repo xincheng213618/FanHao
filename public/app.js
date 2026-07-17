@@ -11,7 +11,7 @@ import {
   createStudioPage,
   createWorkActions,
   selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260717-fanhao-studio-response-01";
+} from "./modules/fanhao/index.js?v=20260717-fanhao-search-response-01";
 import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
@@ -2337,6 +2337,9 @@ function createAvailabilityChips(work) {
 
 els.workSearch.addEventListener("input", () => {
   window.clearTimeout(state.searchTimer);
+  const query = els.workSearch.value.trim();
+  if (!query || globalThis.navigator?.connection?.saveData) return;
+  state.searchTimer = window.setTimeout(() => searchRequests.prefetch(query), 160);
 });
 
 els.workSearch.addEventListener("keydown", (event) => {

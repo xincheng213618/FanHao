@@ -2,6 +2,7 @@ export function createMissingCodeSearchService({
   dbBoolOrNull,
   getCoverStamp = () => "",
   getCoreDb,
+  getSourceStamp = () => "",
   normalizeWorkCode,
   parseJsonTextArray,
   proxiedRemoteImageUrl,
@@ -10,6 +11,7 @@ export function createMissingCodeSearchService({
   warn = console.warn
 }) {
   let coverWorkIdsCache = null;
+  let missingWorkIndexCache = { stamp: "", prefixes: new Map() };
 
   function coverWorkIds() {
     const stamp = String(getCoverStamp() || "");
@@ -37,10 +39,34 @@ export function createMissingCodeSearchService({
     if (!prefix) return [];
 
     try {
-      const coverIds = coverWorkIds();
-      return getCoreDb().prepare(`
+      const entries = missingWorkPrefix(prefix);
+      const start = lowerBound(entries, prefix);
+      const works = [];
+      for (let index = start; index < entries.length && entries[index].key.startsWith(prefix); index += 1) {
+        works.push(entries[index].work);
+      }
+      return works;
+    } catch (error) {
+      warn("[fast-code-search]", error?.message || error);
+      return [];
+    }
+  }
+
+  function missingWorkPrefix(prefix) {
+    const stamp = `${getSourceStamp()}:${getCoverStamp()}`;
+    if (missingWorkIndexCache.stamp !== stamp) {
+      missingWorkIndexCache = { stamp, prefixes: new Map() };
+    }
+    for (let length = prefix.length; length > 0; length -= 1) {
+      const cached = missingWorkIndexCache.prefixes.get(prefix.slice(0, length));
+      if (cached) return cached;
+    }
+
+    const coverIds = coverWorkIds();
+    const rows = getCoreDb().prepare(`
         SELECT
           CAST(w.id AS TEXT) AS work_id,
+          w.code_search AS code_key,
           w.code,
           w.title,
           w.release_date,
@@ -61,11 +87,24 @@ export function createMissingCodeSearchService({
             WHERE local_code.code_search = w.code_search
         )
         ORDER BY w.code_search, w.id
-      `).all(`${prefix}%`).map((row) => lightweightMissingWork(row, coverIds.has(String(row.work_id))));
-    } catch (error) {
-      warn("[fast-code-search]", error?.message || error);
-      return [];
+      `).all(`${prefix}%`);
+    const entries = rows.map((row) => ({
+      key: String(row.code_key || ""),
+      work: lightweightMissingWork(row, coverIds.has(String(row.work_id)))
+    }));
+    missingWorkIndexCache.prefixes.set(prefix, entries);
+    return entries;
+  }
+
+  function lowerBound(entries, prefix) {
+    let low = 0;
+    let high = entries.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (entries[middle].key < prefix) low = middle + 1;
+      else high = middle;
     }
+    return low;
   }
 
   function hydrate(works = []) {
@@ -171,5 +210,9 @@ export function createMissingCodeSearchService({
     work.infoSummary.javdbTags = parseJsonTextArray(row.javdb_tags_json);
   }
 
-  return { hydrate, prewarm: coverWorkIds, search };
+  function prewarm() {
+    coverWorkIds();
+  }
+
+  return { hydrate, prewarm, search };
 }

@@ -6,6 +6,7 @@ import { createWorkListState } from "../../js/work-filtering.js?v=20260710-weste
 import { createWorkCards } from "./features/works/cards.js?v=20260717-fanhao-work-covers-01";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260717-fanhao-ranking-response-01";
 import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-work-response-01";
+import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260717-fanhao-search-response-01";
 
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
@@ -51,6 +52,7 @@ export function createWorkViews(context) {
   let selectedFavoriteFolderId = "all";
   const workCards = createWorkCards({ getActiveUrl, showView });
   const pageDataService = createWorkPageDataService({ fetchJson, writeCachedJson });
+  const searchDataService = createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageDataService, workListState });
   const rankingViews = createRankingViews({
     els,
     getActiveUrl,
@@ -575,7 +577,7 @@ export function createWorkViews(context) {
     const limit = getWorksLimit();
     const serverFilter = workListState.getFilterMode();
     const serverSort = workListState.getServerSortMode();
-    const path = `/api/fanhao/search?q=${encodeURIComponent(text)}&limit=${limit}&offset=0&sort=${encodeURIComponent(serverSort)}&filter=${encodeURIComponent(serverFilter)}`;
+    const path = searchDataService.path(text, limit, serverFilter, serverSort);
     const activeUrl = getActiveUrl();
     let renderedCache = false;
 
@@ -611,8 +613,7 @@ export function createWorkViews(context) {
     }
 
     try {
-      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
-      writeCachedJson(activeUrl, path, data).catch(() => {});
+      const data = await pageDataService.fetch(activeUrl, path, { signal: isActive.signal, reuseWarmed: true });
       if (!isActive()) return;
       renderSearchData(data);
     } catch (error) {
@@ -729,6 +730,7 @@ export function createWorkViews(context) {
     renderRankings,
     renderWorkCollection,
     renderSearchResults,
+    warmSearch: searchDataService.warm,
     refreshRankingCache,
     renderWorks,
     createChip: workCards.createChip,

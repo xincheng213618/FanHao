@@ -8,6 +8,7 @@ import { selectVisibleWorks } from "../public/modules/fanhao/features/works/quer
 import { createWorkActions } from "../public/modules/fanhao/features/works/work-actions.js";
 import { createCollectionPage } from "../public/modules/fanhao/features/collections/collection-page.js";
 import { createPlaybackPrefetch } from "../public/modules/fanhao/playback-prefetch.js";
+import { createSearchRequestService } from "../public/modules/fanhao/search-request-service.js";
 import { createLazyPersonProfile } from "../public/modules/fanhao/lazy-person-profile.js";
 import { createLazyAdminModal } from "../public/modules/system/lazy-admin-modal.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
@@ -96,9 +97,9 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-studio-response-01'), "studio-response changes must refresh the FanHao browser entry");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-studio-response-01'), "studio-response changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260717-fanhao-studio-response-01'), "studio-response changes must refresh the FanHao module barrel");
+assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-search-response-01'), "search-response changes must refresh the FanHao browser entry");
+assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-search-response-01'), "search-response changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260717-fanhao-search-response-01'), "search-response changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -169,6 +170,31 @@ assert(webApp.includes("if (view !== \"people\") peoplePage.cancelPendingSelecti
 assert(webApp.includes("const searchRequests = createSearchRequestService({"), "FanHao search must retain a cancellable active request");
 assert(searchRequestSource.includes("const request = requests.begin()"), "search and load-more requests must replace stale work");
 assert(searchRequestSource.includes("return request.isCurrent() ? data : null"), "stale search responses must not overwrite current navigation");
+assert(searchRequestSource.includes("const prefetched = new Map()") && searchRequestSource.includes("consumePrefetch(target.key)"), "Web search submit must consume input-time request warmups");
+assert(webApp.includes("searchRequests.prefetch(query)"), "Web search input must prepare the likely first page before Enter");
+let resolveSearchPrefetch;
+const searchRequestPaths = [];
+const pendingSearchPrefetch = new Promise((resolve) => {
+  resolveSearchPrefetch = resolve;
+});
+const searchRequestService = createSearchRequestService({
+  api: async (requestPath) => {
+    searchRequestPaths.push(requestPath);
+    if (searchRequestPaths.length === 1) return pendingSearchPrefetch;
+    return { q: "SSIS", works: [{ id: "ssis-1" }] };
+  },
+  filter: () => "all",
+  pageSize: () => 48,
+  sort: () => "releaseDesc"
+});
+searchRequestService.prefetch("J");
+const sharedSearchSubmit = searchRequestService.fetchPage("J");
+assert.equal(searchRequestPaths.length, 1, "submitting while input prefetch is pending must not duplicate the search request");
+resolveSearchPrefetch({ q: "J", works: [{ id: "j-1" }] });
+assert.deepEqual(await sharedSearchSubmit, { q: "J", works: [{ id: "j-1" }] }, "search submit must receive the pending prefetched response");
+await searchRequestService.prefetch("SSIS");
+assert.deepEqual(await searchRequestService.fetchPage("SSIS"), { q: "SSIS", works: [{ id: "ssis-1" }] }, "search submit must consume a completed input prefetch");
+assert.equal(searchRequestPaths.length, 2, "completed search prefetches must also be reused once");
 assert(rankingPageSource.includes("const rankingRequests = createLatestRequestGate()"), "ranking navigation must own a cancellable latest request");
 assert(rankingPageSource.includes('state.activeView !== "rankings"'), "stale ranking responses must not overwrite newer navigation");
 assert(rankingPageSource.includes("const [summary, anticipatedData] = await Promise.all(["), "Web ranking activation must overlap summary and first-page requests");
@@ -257,6 +283,7 @@ for (const relativePath of [
 
 const androidWorkViews = read("android-client/www/modules/fanhao/work-views.js");
 const androidWorkPageDataService = read("android-client/www/modules/fanhao/features/works/page-data-service.js");
+const androidWorkSearchDataService = read("android-client/www/modules/fanhao/features/works/search-data-service.js");
 const androidApp = read("android-client/www/app.js");
 const androidIndexHtml = read("android-client/www/index.html");
 const androidFanhaoModule = read("android-client/www/modules/fanhao/android-module.js");
@@ -269,7 +296,7 @@ const androidListStyles = read("android-client/www/css/lists.css");
 assert(!androidWorkViews.includes("SEARCH_CHANNELS"), "FanHao Android must not own cross-module search channels");
 assert(!/function createWorkCard\s*\(/.test(androidWorkViews), "FanHao Android work cards must stay in their feature module");
 assert(!androidWorkViews.includes("createGlobalSearch"), "FanHao Android search must not use a cross-module aggregator");
-assert(androidWorkViews.includes("/api/fanhao/search"), "FanHao Android search must use the module-scoped endpoint");
+assert(androidWorkSearchDataService.includes("/api/fanhao/search"), "FanHao Android search must use the module-scoped endpoint");
 assert(!androidWorkViews.includes("data.channels"), "FanHao Android search must not render results from other modules");
 assert(androidWorkViews.includes("createRankingViews"), "FanHao Android rankings must stay in their feature module");
 assert(lines("android-client/www/modules/fanhao/work-views.js") <= 750, "FanHao Android work views must stay below 750 lines");
@@ -298,6 +325,8 @@ assert(androidWorkViews.includes("createWorkPageDataService") && androidWorkView
 assert(androidWorkViews.includes("warmCatalogSibling(activeUrl") && androidWorkPageDataService.includes("const inflight = new Map()"), "Android work and VR views must warm sibling pages and share requests");
 assert(androidWorkViews.includes("pageDataService.fetch(activeUrl, path") && androidWorkViews.includes("warmStudioDetail(studio.id)"), "Android studio navigation must share touch warmups with its live detail request");
 assert(androidWorkViews.includes('button.addEventListener("pointerdown", warmDetail'), "Android studio cards and series chips must begin loading on touch press");
+assert(androidFanhaoModule.includes("prepare(query)") && androidWorkViews.includes("warmSearch: searchDataService.warm"), "Android search input must warm the exact page consumed by navigation");
+assert(androidApp.includes("activeSearchController()?.prepare?.(query, searchContext())"), "Android shared search shell must debounce module-owned preparation");
 let resolveWarmedWorkPage;
 let workPageFetchCount = 0;
 const writtenWorkPages = [];
@@ -382,8 +411,8 @@ assert(!androidDetailViews.includes("limit=2000"), "Android person details must 
 assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && androidDetailViews.includes("正在加载作品"), "Android person navigation must paint the local index before the network request completes");
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-person-detail-01'), "Android person-detail changes must use a fresh module URL");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-studio-response-01'), "Android studio-response changes must use a fresh work-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-studio-response-01') && androidIndexHtml.includes('app.js?v=20260717-fanhao-studio-response-01'), "Android studio-response changes must refresh the module and app entry chain");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-search-response-01'), "Android search-response changes must use a fresh work-view URL");
+assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-search-response-01') && androidIndexHtml.includes('app.js?v=20260717-fanhao-search-response-01'), "Android search-response changes must refresh the module and app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
@@ -1399,12 +1428,16 @@ missingCodeSearchDb.exec(`
 `);
 let missingCodeCoverStamp = "cover-v1";
 let missingCodeCoverIndexReads = 0;
+let missingCodeSourceStamp = "source-v1";
+let missingCodeRowIndexReads = 0;
 const missingCodeSearchService = createMissingCodeSearchService({
   dbBoolOrNull: (value) => value === null || value === undefined ? null : Boolean(value),
   getCoverStamp: () => missingCodeCoverStamp,
+  getSourceStamp: () => missingCodeSourceStamp,
   getCoreDb: () => ({
     prepare(sql) {
       if (sql.includes("SELECT image.owner_id")) missingCodeCoverIndexReads += 1;
+      if (sql.includes("w.code_search AS code_key")) missingCodeRowIndexReads += 1;
       return missingCodeSearchDb.prepare(sql);
     }
   }),
@@ -1420,9 +1453,15 @@ assert.equal(lightweightMissingCodeWorks[0].missingCodeSearchPending, true, "mis
 assert.equal(lightweightMissingCodeWorks[0].searchHasCover, true, "deferred missing-code rows must retain lightweight cover presence for facets and dedupe");
 missingCodeSearchService.search("M");
 assert.equal(missingCodeCoverIndexReads, 1, "repeated broad-code searches must reuse cover membership from memory");
+missingCodeSearchService.search("M0");
+assert.equal(missingCodeRowIndexReads, 1, "related code prefixes must share one sorted missing-work memory bucket");
 missingCodeCoverStamp = "cover-v2";
 missingCodeSearchService.search("M");
 assert.equal(missingCodeCoverIndexReads, 2, "cover-table changes must invalidate broad-search cover membership");
+assert.equal(missingCodeRowIndexReads, 2, "cover-table changes must refresh lightweight cover flags in the missing-work index");
+missingCodeSourceStamp = "source-v2";
+missingCodeSearchService.search("M");
+assert.equal(missingCodeRowIndexReads, 3, "core search-data changes must invalidate the missing-work index");
 missingCodeSearchService.hydrate(lightweightMissingCodeWorks);
 assert.equal(lightweightMissingCodeWorks[0].personName, "Actor M", "visible missing-code results must hydrate actor details in one page batch");
 assert.equal(lightweightMissingCodeWorks[0].infoSummary.javdbTags[0], "tag", "visible missing-code results must retain deferred metadata");
@@ -1540,9 +1579,10 @@ assert.equal(workListPublicCount, 1, "new page sizes must reuse already prepared
 assert.equal(searchFavoriteFacetReadCount, listFavoriteReadsAfterFirstPage, "repeated work lists must reuse unchanged dynamic facets");
 assert.equal(enrichmentCount, 1, "repeated FanHao work-list requests must reuse the prewarmed full-library enrichment");
 const workSearchUrl = new URL("http://127.0.0.1/api/search?q=AB&limit=24&sort=releaseDesc");
-workQueryService.searchPayload(workSearchUrl);
+const cachedSearchFirst = workQueryService.searchPayload(workSearchUrl);
 const favoriteFacetReadsAfterSearch = searchFavoriteFacetReadCount;
-workQueryService.searchPayload(workSearchUrl);
+const cachedSearchSecond = workQueryService.searchPayload(workSearchUrl);
+assert.equal(cachedSearchSecond, cachedSearchFirst, "identical search requests must reuse the complete response object");
 assert.equal(localPrefixReadCount, 1, "repeated search paging must reuse the matched work source");
 assert.equal(searchFavoriteFacetReadCount, favoriteFacetReadsAfterSearch, "repeated search paging must reuse unchanged user facets");
 const singleLetterCodeSearchUrl = new URL("http://127.0.0.1/api/search?q=A&limit=24&sort=releaseDesc");
@@ -1555,7 +1595,8 @@ const workListPublicCountBeforeStateChange = workListPublicCount;
 const refreshedWorkList = workQueryService.listPayload(workListUrl);
 assert.notEqual(refreshedWorkList, cachedWorkListFirst, "favorite and progress changes must invalidate complete work-list responses");
 assert.equal(workListPublicCount, workListPublicCountBeforeStateChange + 1, "user-state changes must refresh prepared work payloads");
-workQueryService.searchPayload(workSearchUrl);
+const refreshedSearch = workQueryService.searchPayload(workSearchUrl);
+assert.notEqual(refreshedSearch, cachedSearchFirst, "favorite and progress changes must invalidate complete search responses");
 assert(searchFavoriteFacetReadCount > favoriteFacetReadsAfterSearch, "favorite and progress changes must refresh search facets");
 actorMovieDataStamp = "actor-v2";
 workQueryService.listPayload(workListUrl);

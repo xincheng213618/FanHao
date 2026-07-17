@@ -70,6 +70,7 @@ let viewRenderToken = 0;
 let activeViewController = null;
 let pendingScrollRestore = null;
 let searchSurfaceExpanded = initialViewState.view === "search" || (initialViewState.view === "channel" && Boolean(initialViewState.params.query));
+let searchPrepareTimer = 0;
 const HISTORY_MARKER = "fanhao-android";
 const LIBRARY_CACHE_PATH = "/api/library";
 const IMAGE_LIBRARY_SUMMARY_CACHE_PATH = "/api/image-library/summary";
@@ -1837,6 +1838,7 @@ function updateModuleChannelSearch(params, query, options = {}) {
 }
 
 function runSearch(query) {
+  window.clearTimeout(searchPrepareTimer);
   const controller = activeSearchController();
   if (!controller?.submit) return;
   controller.submit(String(query || "").trim(), searchContext());
@@ -1861,6 +1863,7 @@ function openSearchSurface() {
 }
 
 function closeSearchSurface() {
+  window.clearTimeout(searchPrepareTimer);
   const controller = activeSearchController();
   searchSurfaceExpanded = false;
   if (controller?.close?.(searchContext())) return;
@@ -1924,6 +1927,12 @@ els.searchForm.addEventListener("submit", (event) => {
 els.searchInput.addEventListener("focus", () => {
   searchSurfaceExpanded = true;
   syncSearchSurface();
+});
+els.searchInput.addEventListener("input", () => {
+  window.clearTimeout(searchPrepareTimer);
+  const query = els.searchInput.value.trim();
+  if (!query || globalThis.navigator?.connection?.saveData) return;
+  searchPrepareTimer = window.setTimeout(() => activeSearchController()?.prepare?.(query, searchContext()), 160);
 });
 
 els.connectForm.addEventListener("submit", async (event) => {

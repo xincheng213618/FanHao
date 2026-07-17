@@ -1,4 +1,4 @@
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260717-fanhao-studio-response-01";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260717-fanhao-search-response-01";
 
 const ROOT_VIEWS = ["works", "rankings", "studios", "vr", "people", "favorites"];
 const CHROME_TABS = [
@@ -11,7 +11,6 @@ const CHROME_TABS = [
 ];
 
 export function createAndroidModule({ host }) {
-  const search = createSearchController(host);
   const workViews = createWorkViews({
     els: host.els,
     getActiveUrl: host.getActiveUrl,
@@ -25,6 +24,7 @@ export function createAndroidModule({ host }) {
     isHomeView: () => host.navigation.currentView() === "home",
     renderFavoriteExtras: host.favorites.renderPanel
   });
+  const search = createSearchController(host, workViews);
   const peopleViews = createPeopleViews({
     els: host.els,
     getActiveUrl: host.getActiveUrl,
@@ -117,7 +117,7 @@ function createSearchButton(host, label) {
   return button;
 }
 
-function createSearchController(host) {
+function createSearchController(host, workViews) {
   return {
     mode: "route",
     useHistory: true,
@@ -126,6 +126,9 @@ function createSearchController(host) {
     isExpanded: (view, _params, expanded) => view === "search" || expanded,
     placeholder: () => "搜番号、作品或人物",
     value: (view, params) => view === "search" ? String(params.query || "") : "",
+    prepare(query) {
+      return workViews.warmSearch(query);
+    },
     submit(query, context) {
       const navigation = context.view === "search" ? { skipHistory: true } : { resetStack: true };
       host.navigation.showView("search", { query }, navigation);

@@ -547,6 +547,7 @@ const missingCodeSearchService = createMissingCodeSearchService({
   dbBoolOrNull,
   getCoverStamp: () => tableDataStamp("images"),
   getCoreDb,
+  getSourceStamp: searchSourceStamp,
   normalizeWorkCode,
   parseJsonTextArray,
   proxiedRemoteImageUrl,

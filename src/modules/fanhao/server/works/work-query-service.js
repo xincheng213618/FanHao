@@ -1,4 +1,5 @@
 const LIST_PAGE_CACHE_LIMIT = 96;
+const SEARCH_PAGE_CACHE_LIMIT = 192;
 const WORK_PAYLOAD_CACHE_LIMIT = 4096;
 const PREWARM_PAGE_SIZES = [48, 64];
 
@@ -47,6 +48,8 @@ export function createWorkQueryService({
   let workPayloadCache = new Map();
   const searchSourceCache = new Map();
   let searchSourceCacheStamp = "";
+  let searchPageCache = new Map();
+  let searchPageCacheStamp = "";
   const cacheableFilters = new Set([
     "all",
     "hasMagnet",
@@ -484,16 +487,47 @@ export function createWorkQueryService({
     const rawQuery = (url.searchParams.get("q") || "").trim();
     const filter = url.searchParams.get("filter") || "all";
     const sort = url.searchParams.get("sort") || "releaseDesc";
+    const limit = clampInteger(url.searchParams.get("limit"), defaultWorkLimit, 1, maxWorkLimit);
+    const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+    const pageCacheKey = JSON.stringify([rawQuery, filter, sort, limit, offset]);
+    const cachedPage = readSearchPage(pageCacheKey);
+    if (cachedPage) return cachedPage;
     const source = cachedSearchSource(rawQuery);
     const facets = cachedSearchFacets(source);
     const filteredWorks = cachedSearchFilter(source, filter);
     const works = sortWorkList(filteredWorks, sort, { lightweightInfo: true });
-    return pagedWorksPayload(works, url, {
+    const payload = pagedWorksPayload(works, url, {
       filter,
       q: rawQuery,
       facets,
       people: source.people
     }, { hydrateMissingSearchResults: true, lightweightInfo: true });
+    return cacheSearchPage(pageCacheKey, payload);
+  }
+
+  function readSearchPage(cacheKey) {
+    ensureSearchResponseCache();
+    if (!searchPageCache.has(cacheKey)) return null;
+    const cached = searchPageCache.get(cacheKey);
+    searchPageCache.delete(cacheKey);
+    searchPageCache.set(cacheKey, cached);
+    return cached;
+  }
+
+  function cacheSearchPage(cacheKey, payload) {
+    ensureSearchResponseCache();
+    searchPageCache.set(cacheKey, payload);
+    while (searchPageCache.size > SEARCH_PAGE_CACHE_LIMIT) {
+      searchPageCache.delete(searchPageCache.keys().next().value);
+    }
+    return payload;
+  }
+
+  function ensureSearchResponseCache() {
+    const stamp = listResponseStamp();
+    if (searchPageCacheStamp === stamp) return;
+    searchPageCacheStamp = stamp;
+    searchPageCache = new Map();
   }
 
   function cachedSearchSource(rawQuery) {
@@ -556,6 +590,7 @@ export function createWorkQueryService({
     const source = {
       facetsCache: null,
       filteredByMode: new Map(),
+      filteredByModeStamp: userStateStamp(),
       people: peopleSearch.people.map(publicPerson),
       works: matchedWorks
     };
@@ -575,6 +610,11 @@ export function createWorkQueryService({
   function cachedSearchFilter(source, filter) {
     if (filter === "all") return source.works;
     if (!cacheableFilters.has(filter)) return source.works.filter((work) => lightweightWorkMatchesFilter(work, filter));
+    const stamp = userStateStamp();
+    if (source.filteredByModeStamp !== stamp) {
+      source.filteredByModeStamp = stamp;
+      source.filteredByMode.clear();
+    }
     if (!source.filteredByMode.has(filter)) {
       source.filteredByMode.set(filter, source.works.filter((work) => lightweightWorkMatchesFilter(work, filter)));
     }
