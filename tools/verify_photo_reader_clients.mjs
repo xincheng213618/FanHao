@@ -9,6 +9,10 @@ const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
 const webReader = read("public", "modules", "content-index", "gallery-renderer.js");
 for (const marker of [
   "GALLERY_READER_IMAGE_CONCURRENCY = 4",
+  "galleryReaderStartupFigure",
+  "const concurrency = galleryReaderStartupFigure ? 1 : GALLERY_READER_IMAGE_CONCURRENCY",
+  "figure.dataset.galleryPreview",
+  "previewUrl: album.coverUrl",
   "new IntersectionObserver",
   "imageOffset: currentImages.length",
   "mergePhotoReaderImages",
@@ -44,6 +48,13 @@ assert.match(shellStyles, /body\.gallery-view \.main\s*\{\s*overflow: visible;/,
 const androidReader = read("android-client", "www", "platform", "content-index", "channel-views.js");
 for (const marker of [
   "PHOTO_DETAIL_IMAGE_CONCURRENCY = 4",
+  "photoDetailStartupImage",
+  "const concurrency = photoDetailStartupImage ? 1 : PHOTO_DETAIL_IMAGE_CONCURRENCY",
+  "requestAnimationFrame(() => loadPendingPhotoDetailImage(img))",
+  "delete image.dataset.photoQueued",
+  "tile.dataset.photoPreview",
+  "photoAlbumDataSignature",
+  "applyPhotoAlbumHeader(data.album)",
   "retryPhotoDetailImage",
   "photoRetrySrc",
   "const imageOffset = loadedImages.length",
@@ -53,11 +64,19 @@ for (const marker of [
 ]) {
   assert(androidReader.includes(marker), `Android photo reader is missing: ${marker}`);
 }
+assert.match(
+  androidReader,
+  /function loadPendingPhotoDetailImage\(image\)[\s\S]*?if \(!imageUrl \|\| !image\?\.isConnected\) return;\s*delete image\.dataset\.photoSrc;/,
+  "Android photo reader must preserve the pending URL until the image is mounted"
+);
 
 const androidStyles = read("android-client", "www", "css", "lists.css");
 assert(androidStyles.includes(".photo-preview-tile.load-failed"), "Android photo reader needs a visible retry state");
 
 const photoRoutes = read("src", "modules", "photos", "server", "routes.js");
 assert(photoRoutes.includes("imageOffset"), "photo detail API must support incremental image offsets");
+
+const photoService = read("src", "modules", "photos", "server", "photo-set-service.js");
+assert(photoService.includes("coverUrl: album.coverUrl || coverUrl"), "photo detail API must keep the list cover available as a first-paint preview");
 
 console.log("photo-reader-clients: ok");

@@ -55,6 +55,19 @@ function channelDataSignature(data = {}) {
   });
 }
 
+function photoAlbumDataSignature(album = {}) {
+  const images = Array.isArray(album.images) ? album.images : [];
+  return JSON.stringify({
+    id: album.id || "",
+    updatedAt: album.updatedAt || "",
+    imageCount: Number(album.imageCount || images.length || 0),
+    imageOffset: Number(album.imageOffset || 0),
+    imageLimit: Number(album.imageLimit || images.length || 0),
+    coverUrl: album.coverUrl || "",
+    images: images.map((image) => [image.index || 0, image.url || "", image.name || "", Number(image.bytes || 0)])
+  });
+}
+
 export function normalizeChannelMode(value) {
   const mode = String(value || "").trim();
   if (mode === "movies") return "movie";
@@ -97,6 +110,7 @@ export function createChannelViews(context) {
   let photoDetailImageQueue = [];
   let activePhotoDetailImageLoads = 0;
   let photoDetailImageGeneration = 0;
+  let photoDetailStartupImage = null;
   let channelPageState = null;
 
   async function renderChannel(params = {}, isActive = () => true) {
@@ -443,6 +457,7 @@ export function createChannelViews(context) {
     }
     photoDetailImageQueue = [];
     activePhotoDetailImageLoads = 0;
+    photoDetailStartupImage = null;
     photoDetailImageGeneration += 1;
   }
 
@@ -892,6 +907,7 @@ export function createChannelViews(context) {
     const path = photoDetailPath(albumId, { imageLimit: getPhotoImageLimit() });
     const activeUrl = getActiveUrl();
     let renderedCache = false;
+    let renderedCacheSignature = "";
 
     setActiveBottom("photo");
     els.viewKicker.textContent = "套图";
@@ -908,6 +924,7 @@ export function createChannelViews(context) {
     if (!isActive()) return;
     if (cached?.payload?.album) {
       renderedCache = true;
+      renderedCacheSignature = photoAlbumDataSignature(cached.payload.album);
       renderPhotoAlbum(cached.payload.album, cached);
     }
 
@@ -915,6 +932,10 @@ export function createChannelViews(context) {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 20000, signal: isActive.signal });
       writeCachedJson(activeUrl, path, data).catch(() => {});
       if (!isActive()) return;
+      if (renderedCache && photoAlbumDataSignature(data.album) === renderedCacheSignature) {
+        applyPhotoAlbumHeader(data.album);
+        return;
+      }
       renderPhotoAlbum(data.album);
     } catch (error) {
       if (!isActive()) return;
@@ -929,11 +950,7 @@ export function createChannelViews(context) {
   function renderPhotoAlbum(album = {}, cacheEntry = null) {
     const loadedImages = Array.isArray(album.images) ? album.images.slice() : [];
     let totalImages = Number(album.imageCount || loadedImages.length || 0);
-    const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-
-    els.viewKicker.textContent = [album.category, album.personName].filter(Boolean).join(" · ") || "套图";
-    els.viewTitle.textContent = album.title || "套图详情";
-    els.viewMeta.textContent = `${formatNumber(totalImages)} 张 · ${formatBytes(album.size)}${suffix}`;
+    applyPhotoAlbumHeader(album, cacheEntry);
     resetPreviewImageObserver();
     els.viewContent.innerHTML = "";
     recordPhotoRecent(album);
@@ -952,6 +969,15 @@ export function createChannelViews(context) {
     appendPhotoDetailLoadMore(album, loadedImages, grid, totalImages, (nextTotal) => {
       totalImages = nextTotal;
     });
+  }
+
+  function applyPhotoAlbumHeader(album = {}, cacheEntry = null) {
+    const images = Array.isArray(album.images) ? album.images : [];
+    const totalImages = Number(album.imageCount || images.length || 0);
+    const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
+    els.viewKicker.textContent = [album.category, album.personName].filter(Boolean).join(" · ") || "套图";
+    els.viewTitle.textContent = album.title || "套图详情";
+    els.viewMeta.textContent = `${formatNumber(totalImages)} 张 · ${formatBytes(album.size)}${suffix}`;
   }
 
   function appendPhotoDetailLoadMore(album, loadedImages, grid, totalImages, updateTotalImages) {
@@ -1041,6 +1067,14 @@ export function createChannelViews(context) {
     const tile = document.createElement("button");
     tile.type = "button";
     tile.className = "photo-preview-tile";
+    const previewUrl = Number(options.index || 0) === 0 ? absoluteUrl(getActiveUrl(), album.coverUrl) : "";
+    if (previewUrl) {
+      tile.dataset.photoPreview = "1";
+      tile.style.backgroundImage = `url(${JSON.stringify(previewUrl)})`;
+      tile.style.backgroundPosition = "center";
+      tile.style.backgroundRepeat = "no-repeat";
+      tile.style.backgroundSize = "cover";
+    }
 
     const fallback = document.createElement("span");
     fallback.textContent = formatNumber(image.index || 0);
@@ -1054,6 +1088,13 @@ export function createChannelViews(context) {
       img.referrerPolicy = "no-referrer";
       if ("fetchPriority" in img) img.fetchPriority = Number(options.index || 0) < EAGER_PHOTO_DETAIL_IMAGE_COUNT ? "high" : "low";
       img.addEventListener("load", () => {
+        if (tile.dataset.photoPreview === "1") {
+          delete tile.dataset.photoPreview;
+          tile.style.removeProperty("background-image");
+          tile.style.removeProperty("background-position");
+          tile.style.removeProperty("background-repeat");
+          tile.style.removeProperty("background-size");
+        }
         delete img.dataset.photoReleased;
         delete img.dataset.photoFailed;
         tile.classList.remove("load-failed");
@@ -1136,14 +1177,14 @@ export function createChannelViews(context) {
   function loadPhotoDetailImage(img, imageUrl, index = 0) {
     if (!img || !imageUrl) return;
     img.dataset.photoRetrySrc = imageUrl;
-    const safeIndex = Math.max(0, Number(index) || 0);
-    if ("IntersectionObserver" in window) getPhotoDetailImageObserver().observe(img);
-    if (safeIndex < EAGER_PHOTO_DETAIL_IMAGE_COUNT || !("IntersectionObserver" in window)) {
-      img.src = imageUrl;
-      return;
-    }
     img.dataset.photoSrc = imageUrl;
-    getPhotoDetailImageObserver().observe(img);
+    const safeIndex = Math.max(0, Number(index) || 0);
+    if (safeIndex === 0 && !photoDetailStartupImage) photoDetailStartupImage = img;
+    const hasObserver = "IntersectionObserver" in window;
+    if (hasObserver) getPhotoDetailImageObserver().observe(img);
+    if (safeIndex < EAGER_PHOTO_DETAIL_IMAGE_COUNT || !hasObserver) {
+      window.requestAnimationFrame(() => loadPendingPhotoDetailImage(img));
+    }
   }
 
   function getPhotoDetailImageObserver() {
@@ -1164,8 +1205,8 @@ export function createChannelViews(context) {
 
   function loadPendingPhotoDetailImage(image) {
     const imageUrl = image?.dataset?.photoSrc || image?.dataset?.photoRetrySrc || "";
-    if (image?.dataset) delete image.dataset.photoSrc;
     if (!imageUrl || !image?.isConnected) return;
+    delete image.dataset.photoSrc;
     enqueuePhotoDetailImage(image, imageUrl);
   }
 
@@ -1190,10 +1231,14 @@ export function createChannelViews(context) {
   }
 
   function drainPhotoDetailImageQueue() {
-    while (activePhotoDetailImageLoads < PHOTO_DETAIL_IMAGE_CONCURRENCY && photoDetailImageQueue.length) {
+    const concurrency = photoDetailStartupImage ? 1 : PHOTO_DETAIL_IMAGE_CONCURRENCY;
+    while (activePhotoDetailImageLoads < concurrency && photoDetailImageQueue.length) {
       const item = photoDetailImageQueue.shift();
       const { image, imageUrl, generation } = item;
-      if (generation !== photoDetailImageGeneration || !image?.isConnected || image.getAttribute("src")) continue;
+      if (generation !== photoDetailImageGeneration || !image?.isConnected || image.getAttribute("src")) {
+        if (image?.dataset) delete image.dataset.photoQueued;
+        continue;
+      }
 
       activePhotoDetailImageLoads += 1;
       delete image.dataset.photoQueued;
@@ -1205,6 +1250,7 @@ export function createChannelViews(context) {
         image.removeEventListener("error", onError);
         if (generation !== photoDetailImageGeneration) return;
         activePhotoDetailImageLoads = Math.max(0, activePhotoDetailImageLoads - 1);
+        if (photoDetailStartupImage === image) photoDetailStartupImage = null;
         if (loaded && !photoDetailImageNearViewport(image)) releasePhotoDetailImage(image);
         drainPhotoDetailImageQueue();
       };

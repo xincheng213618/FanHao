@@ -48,7 +48,12 @@ export function createPhotoSetService({
     const target = String(id || "");
     if (!target) return null;
     const index = getImageLibraryIndex();
-    return (index.photoSets || []).find((item) => item.id === target) || null;
+    const album = (index.photoSets || []).find((item) => item.id === target) || null;
+    if (!album) return null;
+    return {
+      ...album,
+      coverUrl: album.coverUrl || coverUrl(album.id, album.updatedAt || "")
+    };
   }
 
   function archiveSignature(targetArchivePath) {

@@ -57,6 +57,7 @@ export function createGalleryRenderer(deps) {
   let galleryReaderImageQueue = [];
   let activeGalleryReaderImageLoads = 0;
   let galleryReaderImageGeneration = 0;
+  let galleryReaderStartupFigure = null;
   let galleryMoreScrollCleanup = null;
   let galleryPagerCleanup = null;
 
@@ -522,6 +523,7 @@ function resetGalleryRenderedState() {
   galleryReaderImageGeneration += 1;
   galleryReaderImageQueue = [];
   activeGalleryReaderImageLoads = 0;
+  galleryReaderStartupFigure = null;
   if (galleryCoverObserver) {
     galleryCoverObserver.disconnect();
     galleryCoverObserver = null;
@@ -1377,6 +1379,7 @@ function activateGalleryReaderImages(root) {
   }
   const figures = [...root.querySelectorAll(".gallery-reader-figure[data-gallery-src]")];
   if (!figures.length) return;
+  galleryReaderStartupFigure = figures[0];
 
   let progressTicking = false;
   const reportProgress = () => {
@@ -1457,7 +1460,8 @@ function enqueueGalleryReaderFigure(figure) {
 }
 
 function drainGalleryReaderImageQueue() {
-  while (activeGalleryReaderImageLoads < GALLERY_READER_IMAGE_CONCURRENCY && galleryReaderImageQueue.length) {
+  const concurrency = galleryReaderStartupFigure ? 1 : GALLERY_READER_IMAGE_CONCURRENCY;
+  while (activeGalleryReaderImageLoads < concurrency && galleryReaderImageQueue.length) {
     const item = galleryReaderImageQueue.shift();
     const { figure, generation } = item;
     if (generation !== galleryReaderImageGeneration || !figure?.isConnected || !figure.dataset.gallerySrc) continue;
@@ -1480,10 +1484,18 @@ function drainGalleryReaderImageQueue() {
       img.removeEventListener("error", onError);
       if (generation !== galleryReaderImageGeneration) return;
       activeGalleryReaderImageLoads = Math.max(0, activeGalleryReaderImageLoads - 1);
+      if (galleryReaderStartupFigure === figure) galleryReaderStartupFigure = null;
       delete figure.dataset.galleryLoading;
       if (loaded) {
         figure.classList.add("loaded");
         figure.classList.remove("failed");
+        if (figure.dataset.galleryPreview === "1") {
+          delete figure.dataset.galleryPreview;
+          figure.style.removeProperty("background-image");
+          figure.style.removeProperty("background-position");
+          figure.style.removeProperty("background-repeat");
+          figure.style.removeProperty("background-size");
+        }
         if (figure.dataset.galleryAriaLabel) figure.setAttribute("aria-label", figure.dataset.galleryAriaLabel);
         if (!galleryReaderFigureNearViewport(figure)) releaseGalleryReaderFigure(figure);
       } else {
@@ -2673,6 +2685,14 @@ function renderReaderImages(container, images, options = {}) {
     figure.className = "gallery-reader-figure";
     figure.dataset.gallerySrc = image.url;
     figure.dataset.imageIndex = String(image.index || index + 1);
+    const previewUrl = index === 0 ? String(options.previewUrl || "").trim() : "";
+    if (previewUrl) {
+      figure.dataset.galleryPreview = "1";
+      figure.style.backgroundImage = `url(${JSON.stringify(previewUrl)})`;
+      figure.style.backgroundPosition = "center";
+      figure.style.backgroundRepeat = "no-repeat";
+      figure.style.backgroundSize = "contain";
+    }
     figure.tabIndex = 0;
     figure.setAttribute("role", "button");
     const figureLabel = `打开第 ${formatNumber(image.index || index + 1)} 张`;
@@ -2758,6 +2778,7 @@ function renderPhotoReader(container) {
     meta,
     totalCount,
     sourceKey,
+    previewUrl: album.coverUrl,
     fullImages: () => fullPhotoReaderImages(album)
   });
   if (visibleCount < totalCount) {
