@@ -98,9 +98,9 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-search-response-01'), "search-response changes must refresh the FanHao browser entry");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-search-response-01'), "search-response changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260717-fanhao-search-response-01'), "search-response changes must refresh the FanHao module barrel");
+assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-studio-first-paint-01'), "studio first-paint changes must refresh the FanHao browser entry");
+assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-studio-first-paint-01'), "studio first-paint changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260717-fanhao-studio-first-paint-01'), "studio first-paint changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -156,7 +156,7 @@ assert(latestRequestSource.includes("controller?.abort()"), "latest-request gate
 assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-person-detail-01'), "person navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260717-fanhao-ranking-response-01'), "ranking navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('collection-page.js?v=20260717-fanhao-collection-response-01'), "collection navigation changes must use a fresh browser module URL");
-assert(fanhaoModuleIndexSource.includes('studio-page.js?v=20260717-fanhao-studio-response-01'), "studio navigation changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('studio-page.js?v=20260717-fanhao-studio-first-paint-01'), "studio first-paint changes must use a fresh browser module URL");
 assert(collectionPageSource.includes("const collectionPrefetches = new Map()") && collectionPageSource.includes("warmHistoryRanges()"), "Web history ranges must reuse prefetched pages while the collection view remains active");
 assert(collectionPageSource.includes("const COLLECTION_PREFETCH_TTL_MS = 5 * 60 * 1000") && collectionPageSource.includes("invalidatePrefetches"), "Web collection prefetches must survive normal reading time and expose explicit invalidation");
 assert(peoplePageSource.includes("const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64") && peoplePageSource.includes("const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48"), "person details must keep desktop and mobile first payloads bounded");
@@ -204,7 +204,10 @@ assert(studioPageSource.includes("const studioRequests = createLatestRequestGate
 assert(studioPageSource.includes('state.activeView !== "studios"'), "stale studio responses must not overwrite newer navigation");
 assert(webApp.includes('if (view !== "studios") studioPage.cancelPendingRequests()'), "leaving studios must cancel pending requests");
 assert(studioPageSource.includes("const studioPrefetches = new Map()") && studioPageSource.includes("return result.data;"), "studio activation must reuse its prepared detail request");
-assert(studioPageSource.includes('button.addEventListener("pointerenter", prefetch') && studioPageSource.includes('button.addEventListener("pointerdown", prefetch'), "desktop and touch studio cards must prepare detail data before click");
+assert(studioPageSource.includes('bindStudioIntentSurface(els.workGrid, ".studio-card"') && studioPageSource.includes('root.addEventListener("pointerover", prefetch'), "studio cards must delegate desktop and touch detail preparation");
+assert(!studioPageSource.includes('button.addEventListener("pointerenter", prefetch'), "studio cards must not allocate intent listeners per index item");
+assert(studioPageSource.includes("const STUDIO_INDEX_INITIAL_COUNT = 64") && studioPageSource.includes("appendIndexBatch(state.studios, 0, studioIndexRenderSeq)"), "studio indexes must paint a bounded first batch");
+assert(studioPageSource.includes("cancelIndexRendering()") && studioPageSource.includes("studioIndexRenderSeq += 1"), "leaving the studio index must cancel stale render batches");
 assert(studioPageSource.includes('globalThis.scrollTo?.({ top: 0, left: 0, behavior: "auto" })'), "studio card activation must start the detail at the top instead of inheriting index scroll");
 assert(collectionPageSource.includes("const collectionRequests = createLatestRequestGate()"), "collection navigation must own a cancellable latest request");
 assert(collectionPageSource.includes("const COLLECTION_DESKTOP_PAGE_SIZE = 64"), "desktop collections must keep the first payload compact");

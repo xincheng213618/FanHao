@@ -4,15 +4,28 @@ const STUDIO_DESKTOP_PAGE_SIZE = 48;
 const STUDIO_MOBILE_PAGE_SIZE = 32;
 const STUDIO_PREFETCH_TTL_MS = 60 * 1000;
 const STUDIO_PREFETCH_LIMIT = 16;
+const STUDIO_INDEX_INITIAL_COUNT = 64;
+const STUDIO_INDEX_BATCH_SIZE = 64;
+const STUDIO_INDEX_BATCH_DELAY_MS = 16;
 
 export function createStudioPage(deps) {
   const { api, appendEmpty, els, formatNumber, hidePersonProfile, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
   const studioRequests = createLatestRequestGate();
   const studioPrefetches = new Map();
+  let studioIndexRenderTimer = null;
+  let studioIndexRenderSeq = 0;
+  bindStudioIntentSurface(els.workGrid, ".studio-card", (studioId) => {
+    globalThis.scrollTo?.({ top: 0, left: 0, behavior: "auto" });
+    loadStudioDetail(studioId);
+  });
+  bindStudioIntentSurface(els.statsRow, ".studio-series-chip", (studioId, seriesId) => {
+    loadStudioDetail(studioId, seriesId);
+  });
 
   function cancelPendingRequests() {
     studioRequests.cancel();
     studioPrefetches.clear();
+    cancelIndexRendering();
   }
 
   function studioPageSize() {
@@ -23,6 +36,7 @@ export function createStudioPage(deps) {
   }
 
   async function loadStudios() {
+    cancelIndexRendering();
     const request = studioRequests.begin();
     els.workGrid.innerHTML = `<div class="empty-state">正在加载片商</div>`;
     try {
@@ -43,6 +57,7 @@ export function createStudioPage(deps) {
   }
 
   async function loadStudioDetail(studioId, seriesId = "all", options = {}) {
+    cancelIndexRendering();
     const append = Boolean(options.append);
     const request = studioRequests.begin();
     if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载片商作品</div>`;
@@ -161,29 +176,41 @@ export function createStudioPage(deps) {
   }
 
   function renderIndex() {
+    cancelIndexRendering();
     els.statsRow.innerHTML = "";
     els.workGrid.innerHTML = "";
     if (!state.studios.length) {
       appendEmpty("还没有片商数据。");
       return;
     }
+    appendIndexBatch(state.studios, 0, studioIndexRenderSeq);
+  }
+
+  function appendIndexBatch(studios, start, renderSeq) {
+    if (renderSeq !== studioIndexRenderSeq || state.activeView !== "studios" || state.selectedStudio) return;
+    const size = start ? STUDIO_INDEX_BATCH_SIZE : STUDIO_INDEX_INITIAL_COUNT;
+    const end = Math.min(studios.length, start + size);
     const fragment = document.createDocumentFragment();
-    for (const studio of state.studios) fragment.append(createCard(studio));
+    for (const studio of studios.slice(start, end)) fragment.append(createCard(studio));
     els.workGrid.append(fragment);
+    if (end >= studios.length) return;
+    studioIndexRenderTimer = globalThis.setTimeout(() => {
+      studioIndexRenderTimer = null;
+      appendIndexBatch(studios, end, renderSeq);
+    }, STUDIO_INDEX_BATCH_DELAY_MS);
+  }
+
+  function cancelIndexRendering() {
+    studioIndexRenderSeq += 1;
+    if (studioIndexRenderTimer) globalThis.clearTimeout(studioIndexRenderTimer);
+    studioIndexRenderTimer = null;
   }
 
   function createCard(studio) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "studio-card";
-    const prefetch = () => prefetchStudioDetail(studio.id);
-    button.addEventListener("pointerenter", prefetch, { passive: true });
-    button.addEventListener("pointerdown", prefetch, { passive: true });
-    button.addEventListener("focus", prefetch);
-    button.addEventListener("click", () => {
-      globalThis.scrollTo?.({ top: 0, left: 0, behavior: "auto" });
-      loadStudioDetail(studio.id);
-    });
+    button.dataset.studioId = studio.id;
     const name = document.createElement("strong");
     name.textContent = studio.name || "未命名片商";
     const count = document.createElement("span");
@@ -211,14 +238,31 @@ export function createStudioPage(deps) {
   function createSeriesButton(studio, seriesId, name, count) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `stat-filter-chip${state.selectedStudioSeriesId === seriesId ? " active" : ""}`;
+    button.className = `stat-filter-chip studio-series-chip${state.selectedStudioSeriesId === seriesId ? " active" : ""}`;
     button.textContent = `${name} ${formatNumber(count)}`;
-    const prefetch = () => prefetchStudioDetail(studio.id, seriesId);
-    button.addEventListener("pointerenter", prefetch, { passive: true });
-    button.addEventListener("pointerdown", prefetch, { passive: true });
-    button.addEventListener("focus", prefetch);
-    button.addEventListener("click", () => loadStudioDetail(studio.id, seriesId));
+    button.dataset.studioId = studio.id;
+    button.dataset.seriesId = seriesId;
     return button;
+  }
+
+  function bindStudioIntentSurface(root, selector, activate) {
+    if (!root) return;
+    const targetButton = (target) => {
+      const button = target instanceof Element ? target.closest(selector) : null;
+      return button && root.contains(button) ? button : null;
+    };
+    const prefetch = (event) => {
+      const button = targetButton(event.target);
+      if (!button || (event.type === "pointerover" && button.contains(event.relatedTarget))) return;
+      void prefetchStudioDetail(button.dataset.studioId, button.dataset.seriesId || "all");
+    };
+    root.addEventListener("pointerover", prefetch, { passive: true });
+    root.addEventListener("pointerdown", prefetch, { passive: true });
+    root.addEventListener("focusin", prefetch);
+    root.addEventListener("click", (event) => {
+      const button = targetButton(event.target);
+      if (button) activate(button.dataset.studioId, button.dataset.seriesId || "all");
+    });
   }
 
   return { cancelPendingRequests, loadStudios, loadMoreStudioWorks, loadStudioDetail };

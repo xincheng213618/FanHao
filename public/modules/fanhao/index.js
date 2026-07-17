@@ -6,4 +6,4 @@ export { createSearchRequestService } from "./search-request-service.js?v=202607
 export { selectVisibleWorks } from "./features/works/query.js";
 export { createWorkActions } from "./features/works/work-actions.js?v=20260717-fanhao-work-actions-01";
 export { createCollectionPage } from "./features/collections/collection-page.js?v=20260717-fanhao-collection-response-01";
-export { createStudioPage } from "./features/studios/studio-page.js?v=20260717-fanhao-studio-response-01";
+export { createStudioPage } from "./features/studios/studio-page.js?v=20260717-fanhao-studio-first-paint-01";
