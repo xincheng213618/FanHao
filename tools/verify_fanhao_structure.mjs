@@ -62,6 +62,7 @@ const standaloneHost = read("public/js/standalone-host.js");
 const lazyAdminModalSource = read("public/modules/system/lazy-admin-modal.js");
 const webApp = read("public/app.js");
 const peoplePageSource = read("public/modules/fanhao/people-page.js");
+const personProfileSource = read("public/modules/fanhao/person-profile.js");
 const fanhaoModuleIndexSource = read("public/modules/fanhao/index.js");
 const latestRequestSource = read("public/modules/fanhao/latest-request.js");
 const lazyPersonProfileSource = read("public/modules/fanhao/lazy-person-profile.js");
@@ -94,9 +95,9 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-people-first-paint-01'), "people first-paint changes must refresh the FanHao browser entry");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-people-first-paint-01'), "people first-paint changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260717-fanhao-people-first-paint-01'), "people first-paint changes must refresh the FanHao module barrel");
+assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-person-detail-01'), "person-detail changes must refresh the FanHao browser entry");
+assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-person-detail-01'), "person-detail changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260717-fanhao-person-detail-01'), "person-detail changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -148,12 +149,14 @@ assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 64, la
 assert(webApp.includes('globalThis.matchMedia?.("(max-width: 720px)")') && webApp.includes("pageSize: preferredWorkPageSize"), "search requests must follow the active desktop or mobile viewport");
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
-assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-people-first-paint-01'), "person navigation changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-person-detail-01'), "person navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260717-fanhao-ranking-first-page-01'), "ranking navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('collection-page.js?v=20260717-fanhao-collection-prefetch-04'), "collection navigation changes must use a fresh browser module URL");
 assert(peoplePageSource.includes("const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64") && peoplePageSource.includes("const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48"), "person details must keep desktop and mobile first payloads bounded");
 assert(peoplePageSource.includes("const personDetailPrefetches = new Map()") && peoplePageSource.includes("reusePrefetch: true"), "person interactions must reuse prepared detail requests instead of issuing a duplicate click request");
 assert(peoplePageSource.includes('card.addEventListener("pointerenter", () => schedulePersonDetailPrefetch(person.id))') && peoplePageSource.includes('card.addEventListener("pointerdown", () => prefetchPersonDetails(person.id))'), "person cards must prepare details before desktop and touch clicks");
+assert(peoplePageSource.includes("detailPending: true") && personProfileSource.includes("正在加载详情"), "Web person navigation must paint the indexed profile before the detail API returns");
+assert(peoplePageSource.includes("works.map((work) => workCoverUrl(work)).find(Boolean)"), "Web person details must reuse the prepared work page for fallback artwork");
 assert(latestRequestSource.includes("sequence === requestSequence"), "latest-request gates must reject stale completions");
 assert(peoplePageSource.includes("const personDetailRequests = createLatestRequestGate()"), "person navigation must own a cancellable latest request");
 assert(peoplePageSource.includes("if (!request.isCurrent() || state.activeView !== \"people\""), "stale person responses must not overwrite newer navigation");
@@ -318,9 +321,13 @@ deferredWorkCoverLoader.reset();
 assert.equal(deferredWorkCoverLoader.pendingCount(), 0, "navigation must drop stale offscreen cover work");
 assert.equal(coverObserverDisconnected, 1, "navigation must disconnect the previous cover observer");
 const androidDetailViews = read("android-client/www/modules/fanhao/detail-views.js");
+const androidFanhaoIndex = read("android-client/www/modules/fanhao/index.js");
 assert(androidDetailViews.includes("getWorksLimit()"), "Android person details must use the bounded shared work limit");
 assert(androidDetailViews.includes("hasServerMore:"), "Android person details must preserve server-side continuation");
 assert(!androidDetailViews.includes("limit=2000"), "Android person details must not fetch every work before first render");
+assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && androidDetailViews.includes("正在加载作品"), "Android person navigation must paint the local index before the network request completes");
+assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
+assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-person-detail-01'), "Android person-detail changes must use a fresh module URL");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
   assert(!androidDetailViews.includes(`function ${functionName}(`), `Android detail must delegate ${functionName}`);
 }
@@ -807,6 +814,7 @@ assert.deepEqual(
 assert.deepEqual(preparedCollectionWorks.map((work) => work.id), ["history-1", "history-2"], "collection page preparation must preserve order");
 
 let personDetailDataStamp = "person-v1";
+let personDetailUserStateStamp = "user-v1";
 let personDetailSourceBuildCount = 0;
 let personDetailFacetReadCount = 0;
 let personDetailPayloadReadCount = 0;
@@ -854,16 +862,26 @@ const cachedPersonDetailService = createPersonDetailService({
       return { ...extra, count: works.length, total: works.length, filter: extra.filter, works };
     }
   },
+  userStateStamp: () => personDetailUserStateStamp,
   workQueryStamp: () => "works-v1"
 });
 const personDetailUrl = new URL("http://127.0.0.1/api/people/person-1?filter=all&limit=48&offset=0");
 const firstPersonDetail = cachedPersonDetailService.detailPayload("person-1", personDetailUrl);
+assert.equal(personDetailServiceSource.includes("skipFallbackAvatar: true"), true, "person detail APIs must not rescan works for fallback avatars");
+const cachedFirstPersonDetail = cachedPersonDetailService.detailPayload("person-1", new URL(personDetailUrl));
+assert.equal(personDetailFacetReadCount, 1, "identical person pages must reuse prepared facets while user state is unchanged");
+assert.equal(personDetailPayloadReadCount, 1, "identical person pages must reuse their complete prepared response");
+assert.equal(cachedFirstPersonDetail.works, firstPersonDetail.works, "cached person pages must preserve the prepared work list");
 const repeatedPersonDetail = cachedPersonDetailService.detailPayload("person-1", new URL("http://127.0.0.1/api/people/person-1?filter=rated&limit=48&offset=48"));
 assert.equal(personDetailSourceBuildCount, 1, "repeated person paging and filters must reuse the prepared work source");
 assert.equal(personDetailFacetReadCount, 2, "person detail facets must still read live favorite and progress state");
 assert.equal(personDetailPayloadReadCount, 2, "person detail paging must still build each requested response");
 assert.equal(firstPersonDetail.person.id, "person-1", "prepared person details must preserve the person payload");
 assert.equal(repeatedPersonDetail.filter, "rated", "prepared person details must preserve per-request filters");
+personDetailUserStateStamp = "user-v2";
+cachedPersonDetailService.detailPayload("person-1", personDetailUrl);
+assert.equal(personDetailFacetReadCount, 3, "favorite and progress changes must invalidate prepared person facets");
+assert.equal(personDetailPayloadReadCount, 3, "favorite and progress changes must invalidate prepared person pages");
 personDetailDataStamp = "person-v2";
 cachedPersonDetailService.detailPayload("person-1", personDetailUrl);
 assert.equal(personDetailSourceBuildCount, 2, "person data changes must invalidate prepared detail sources");

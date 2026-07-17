@@ -1,4 +1,5 @@
 const PERSON_DETAIL_SOURCE_CACHE_LIMIT = 128;
+const PERSON_DETAIL_PAGE_CACHE_LIMIT = 12;
 
 export function createPersonDetailService({
   actorProfileMergeCandidates,
@@ -24,6 +25,7 @@ export function createPersonDetailService({
   workCodeKeySetForWorks,
   workQueryService,
   workQueryStamp,
+  userStateStamp = () => "",
 }) {
   const coverBodyLimit = Math.ceil(maxActorAvatarBytes * 1.4) + 128 * 1024;
   const detailSourceCache = new Map();
@@ -70,14 +72,25 @@ export function createPersonDetailService({
     if (!source) return null;
     mark("source");
 
-    const filter = url.searchParams.get("filter") || "all";
-    const facets = workQueryService.facets(source.works);
-    mark("facets");
-    const worksPayload = workQueryService.listFromWorksPayload(source.works, url, {
-      filter,
-      facets
-    });
-    mark("payload");
+    const pageCacheKey = detailPageCacheKey(url);
+    let worksPayload = readCachedPage(source, pageCacheKey);
+    if (worksPayload) {
+      timings.pageCacheHit = true;
+      mark("facets");
+      mark("payload");
+    } else {
+      const filter = url.searchParams.get("filter") || "all";
+      const facets = workQueryService.facets(source.works);
+      mark("facets");
+      worksPayload = workQueryService.listFromWorksPayload(source.works, url, {
+        filter,
+        facets
+      });
+      cachePage(source, pageCacheKey, worksPayload);
+      mark("payload");
+    }
+    if (!source.person) source.person = publicPerson(source.personSource, source.personOptions);
+    mark("publicPerson");
     if (timings.payload >= 500) {
       console.warn("[fanhao-person-detail-slow]", JSON.stringify({ personId: source.personId, count: source.works.length, ...timings }));
     }
@@ -130,15 +143,48 @@ export function createPersonDetailService({
     ];
     const allPersonWorks = dedupeWorksForDisplay([...localWorks, ...missingWorks]);
     mark("dedupe");
-    const personPayload = publicPerson(person, {
+    const personOptions = {
       actorMovieCount: actorRows.length,
       missingLocalWorkCount: missingWorks.length,
-      skipFallbackAvatar: scope === "western"
-    });
-    mark("publicPerson");
-    const source = { person: personPayload, personId: person.id, works: allPersonWorks };
+      // Clients already have the indexed person and the prepared work page. Avoid
+      // synchronously scanning the person's library a second time for a fallback.
+      skipFallbackAvatar: true
+    };
+    const source = {
+      pageCache: new Map(),
+      person: null,
+      personId: person.id,
+      personOptions,
+      personSource: person,
+      works: allPersonWorks
+    };
     cacheDetailSource(cacheKey, source);
     return source;
+  }
+
+  function detailPageCacheKey(url) {
+    return [
+      userStateStamp(),
+      url.searchParams.get("filter") || "all",
+      url.searchParams.get("sort") || "releaseDesc",
+      url.searchParams.get("limit") || "",
+      url.searchParams.get("offset") || "0"
+    ].join(":");
+  }
+
+  function readCachedPage(source, cacheKey) {
+    if (!source.pageCache.has(cacheKey)) return null;
+    const cached = source.pageCache.get(cacheKey);
+    source.pageCache.delete(cacheKey);
+    source.pageCache.set(cacheKey, cached);
+    return cached;
+  }
+
+  function cachePage(source, cacheKey, payload) {
+    source.pageCache.set(cacheKey, payload);
+    while (source.pageCache.size > PERSON_DETAIL_PAGE_CACHE_LIMIT) {
+      source.pageCache.delete(source.pageCache.keys().next().value);
+    }
   }
 
   function cacheDetailSource(cacheKey, source) {

@@ -57,9 +57,11 @@ export function createDetailViews(context) {
     els.viewContent.innerHTML = `<div class="loading-row">正在加载人物资料</div>`;
     const path = `/api/people/${encodeURIComponent(personId)}?limit=${encodeURIComponent(getWorksLimit())}&offset=0`;
     let renderedCache = false;
+    const indexedPerson = findPersonInLibrary(personId);
+    if (indexedPerson) renderPersonPreview(indexedPerson);
 
     const renderPersonData = (data, cacheEntry = null) => {
-      const person = data.person;
+      const person = mergeIndexedPerson(indexedPerson, data.person, data.works);
       const works = data.works || [];
       const displayName = person.actorProfile?.displayName || person.name;
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
@@ -102,6 +104,33 @@ export function createDetailViews(context) {
         renderMessage(detailErrorMessage(error, "人物资料读取失败，请检查服务连接"), "error");
       }
     }
+  }
+
+  function renderPersonPreview(person) {
+    const displayName = person.actorProfile?.displayName || person.name || "人物";
+    els.viewTitle.textContent = displayName;
+    els.viewMeta.textContent = `${formatNumber(person.workCount)} 部作品 · 正在加载详情`;
+    els.viewContent.innerHTML = "";
+    els.viewContent.append(createPersonDetailHero(person));
+    els.viewContent.append(createDetailSectionTitle("作品", "正在加载"));
+    const loading = document.createElement("div");
+    loading.className = "loading-row";
+    loading.textContent = "正在加载作品";
+    els.viewContent.append(loading);
+  }
+
+  function mergeIndexedPerson(indexedPerson, detailPerson, works = []) {
+    const fallbackAvatarUrl = detailPerson?.avatarUrl
+      || indexedPerson?.avatarUrl
+      || works.map((work) => imageUrlForWork(work)).find(Boolean)
+      || "";
+    if (!indexedPerson) return { ...detailPerson, avatarUrl: fallbackAvatarUrl };
+    return {
+      ...indexedPerson,
+      ...detailPerson,
+      actorProfile: detailPerson?.actorProfile || indexedPerson.actorProfile || null,
+      avatarUrl: fallbackAvatarUrl
+    };
   }
 
   function renderPersonFallback(personId, error) {
@@ -863,10 +892,3 @@ export function createDetailViews(context) {
     renderWorkDetail
   };
 }
-
-
-
-
-
-
-

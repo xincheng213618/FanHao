@@ -33,7 +33,8 @@ export function createPeoplePage(deps) {
     setMainHeader,
     state,
     syncNavigationState,
-    syncRouteAfterNavigation
+    syncRouteAfterNavigation,
+    workCoverUrl
   } = deps;
 
   let peopleIndexLoadObserver = null;
@@ -245,12 +246,22 @@ async function selectPerson(personId, options = {}) {
     clearWorkFilter();
   }
   syncNavigationState("people");
+  const indexedPerson = state.people.find((person) => String(person.id) === String(personId)) || null;
+  state.works = [];
   els.workGrid.innerHTML = `<div class="empty-state">正在加载作品</div>`;
+  if (indexedPerson) {
+    state.selectedPerson = { ...indexedPerson, detailPending: true };
+    setMainHeader(
+      indexedPerson.actorProfile?.displayName || indexedPerson.name,
+      formatLibraryPaths(indexedPerson.sourcePaths || [indexedPerson.relativePath])
+    );
+    renderPersonProfile(state.selectedPerson);
+  }
 
   try {
     const data = await fetchPersonWorksPage(personId, 0, { reusePrefetch: true, signal: request.signal });
     if (!request.isCurrent() || state.activeView !== "people" || state.selectedPersonId !== personId) return;
-    state.selectedPerson = data.person;
+    state.selectedPerson = mergeIndexedPerson(indexedPerson, data.person, data.works);
     const resolvedPersonId = state.selectedPerson?.id || personId;
     state.selectedPersonId = resolvedPersonId;
     state.works = data.works || [];
@@ -270,6 +281,21 @@ async function selectPerson(personId, options = {}) {
   } finally {
     request.finish();
   }
+}
+
+function mergeIndexedPerson(indexedPerson, detailPerson, works = []) {
+  const fallbackAvatarUrl = detailPerson?.avatarUrl
+    || indexedPerson?.avatarUrl
+    || works.map((work) => workCoverUrl(work)).find(Boolean)
+    || "";
+  if (!indexedPerson) return { ...detailPerson, avatarUrl: fallbackAvatarUrl, detailPending: false };
+  return {
+    ...indexedPerson,
+    ...detailPerson,
+    actorProfile: detailPerson?.actorProfile || indexedPerson.actorProfile || null,
+    avatarUrl: fallbackAvatarUrl,
+    detailPending: false
+  };
 }
 
 function personWorkPageSize() {

@@ -1,4 +1,4 @@
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260717-fanhao-person-page-01";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260717-fanhao-person-detail-01";
 
 const ROOT_VIEWS = ["works", "rankings", "studios", "vr", "people", "favorites"];
 const CHROME_TABS = [

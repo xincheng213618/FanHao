@@ -822,6 +822,10 @@ async function openLocalFolder(sourcePath, button) {
 function createProfileSummary(person, profile) {
   const item = document.createElement("div");
   item.className = "person-profile-summary";
+  if (person.detailPending) {
+    item.textContent = `本地 ${formatNumber(person.workCount)} 部 · 正在加载详情`;
+    return item;
+  }
   const parts = [`本地 ${formatNumber(person.workCount)} 部 / ${formatNumber(person.videoCount)} 视频`];
   const actorCount = person.actorMovieCount ?? profile?.movieCount ?? 0;
   if (actorCount > 0 || profile?.javdbUrl) {
