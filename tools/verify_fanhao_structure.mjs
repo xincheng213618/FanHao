@@ -27,7 +27,7 @@ import { createWorkSearchIndexService } from "../src/modules/fanhao/server/works
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
 import { sendJson } from "../src/platform/server/responses.js";
 import { createVideoProbeCacheService } from "../src/platform/server/video-probe-cache-service.js";
-import { createVideoProbeService } from "../src/platform/server/video-probe-service.js";
+import { createVideoProbeService, DEFAULT_VIDEO_PROBE_WAIT_MS } from "../src/platform/server/video-probe-service.js";
 import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
 import { tableStampValue } from "../src/modules/fanhao/server/library/table-stamp-query.js";
 import { fetchPreparedImage } from "../android-client/www/js/image.js";
@@ -238,7 +238,7 @@ for (const view of ["favorites", "history", "vr"]) {
 assert(workDetailPageSource.includes("const workDetailRequests = createLatestRequestGate()"), "work details must own a cancellable latest request");
 assert(workDetailPageSource.includes("const playInfoRequests = createLatestRequestGate()"), "playback probes must own a cancellable latest request");
 assert(workDetailPageSource.includes("playInfoRequests.cancel();"), "closing or switching work details must cancel playback probes");
-assert(videoProbeSource.includes("probeWaitMs = 300"), "cold playback probes must return a usable fallback within a short interaction budget");
+assert(videoProbeSource.includes("probeWaitMs = DEFAULT_VIDEO_PROBE_WAIT_MS") && DEFAULT_VIDEO_PROBE_WAIT_MS === 80, "cold playback probes must return a usable fallback within the interactive response budget");
 assert(videoProbeSource.includes("persistentCache.get(file, stat)") && videoProbeSource.includes("persistentCache.set(file, stat, value)"), "completed playback probes must survive server restarts");
 assert(videoProbeCacheSource.includes("source_size") && videoProbeCacheSource.includes("source_mtime"), "persistent playback probes must invalidate when their source file changes");
 assert(videoProbeCacheSource.includes("const rowsByFile = new Map()") && videoProbeCacheSource.includes("rowsByFile.get(cacheKey(file.id, file.path))"), "playback requests must read persisted probes from a startup-hydrated memory index");

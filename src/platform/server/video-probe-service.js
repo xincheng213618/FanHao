@@ -1,6 +1,8 @@
 import { execFile, spawnSync } from "node:child_process";
 import fs from "node:fs";
 
+export const DEFAULT_VIDEO_PROBE_WAIT_MS = 80;
+
 export function createVideoProbeService({
   cacheLimit = 512,
   directVideoExts,
@@ -9,7 +11,7 @@ export function createVideoProbeService({
   safeStat,
   execFileFn = execFile,
   persistentCache = null,
-  probeWaitMs = 300,
+  probeWaitMs = DEFAULT_VIDEO_PROBE_WAIT_MS,
   statFile = (filePath) => fs.promises.stat(filePath),
   spawnSyncFn = spawnSync
 }) {
