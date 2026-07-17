@@ -1,3 +1,7 @@
+const LIST_PAGE_CACHE_LIMIT = 96;
+const WORK_PAYLOAD_CACHE_LIMIT = 4096;
+const PREWARM_PAGE_SIZES = [48, 64];
+
 export function createWorkQueryService({
   actorMovieStamp,
   actorMissingSearchWorks,
@@ -36,9 +40,11 @@ export function createWorkQueryService({
   workInfoFacetRow,
   workQueryStamp,
 }) {
-  const firstPagePrewarmLimit = 64;
   let enrichedWorksCache = null;
   const listSourceCache = new Map();
+  let listPageCache = new Map();
+  let listPageCacheStamp = "";
+  let workPayloadCache = new Map();
   const searchSourceCache = new Map();
   let searchSourceCacheStamp = "";
   const cacheableFilters = new Set([
@@ -54,11 +60,16 @@ export function createWorkQueryService({
     "vr"
   ]);
   let staticFacetCache = new WeakMap();
+  let dynamicFacetCache = new WeakMap();
   let sortedWorksCache = new WeakMap();
   const workCodeCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
   function currentStamp() {
     return `${library.scannedAt || ""}:${library.worksById.size}:${workQueryStamp()}`;
+  }
+
+  function listResponseStamp() {
+    return `${currentStamp()}:${actorMovieStamp()}:${peoplePayloadStamp()}:${userStateStamp()}`;
   }
 
   function allWorks() {
@@ -263,11 +274,15 @@ export function createWorkQueryService({
   }
 
   function workFacets(works = allWorks()) {
+    const stamp = `${currentStamp()}:${userStateStamp()}`;
+    const cached = dynamicFacetCache.get(works);
+    if (cached?.stamp === stamp) return cached.facets;
     const facets = { ...staticWorkFacets(works), favorite: 0, progress: 0 };
     for (const work of works) {
       if (favoriteStateService.isFavoriteWork(work.id)) facets.favorite += 1;
       if (playbackProgressService.getWorkProgress(work)) facets.progress += 1;
     }
+    dynamicFacetCache.set(works, { stamp, facets });
     return facets;
   }
 
@@ -308,18 +323,50 @@ export function createWorkQueryService({
   }
 
   function pagedWorksPayload(works, url, extra = {}, options = {}) {
+    ensureListResponseCache();
     const limit = clampInteger(url.searchParams.get("limit"), defaultWorkLimit, 1, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const sort = url.searchParams.get("sort") || "releaseDesc";
     const total = works.length;
     const pageSource = works.slice(offset, offset + limit);
     if (options.hydrateMissingSearchResults) hydrateMissingSearchWorks(pageSource);
-    if (!options.lightweightInfo) prewarmCoreWorkCovers(pageSource);
-    prewarmVideoProbesForWorks(pageSource);
-    if (!options.lightweightInfo) prewarmWorkInfoDetails(pageSource);
-    const page = pageSource.map((work) => publicWork(work, false, options));
+    const missing = pageSource.filter((work) => !readPreparedWork(work, options));
+    if (missing.length) {
+      if (!options.lightweightInfo) prewarmCoreWorkCovers(missing);
+      prewarmVideoProbesForWorks(missing);
+      if (!options.lightweightInfo) prewarmWorkInfoDetails(missing);
+    }
+    const page = pageSource.map((work) => preparedPublicWork(work, options));
     prewarmRemoteImagesForWorks(page);
     return { ...extra, count: page.length, total, limit, offset, sort, works: page };
+  }
+
+  function readPreparedWork(work, options = {}) {
+    const cacheKey = preparedWorkCacheKey(work, options);
+    if (!cacheKey || !workPayloadCache.has(cacheKey)) return null;
+    const cached = workPayloadCache.get(cacheKey);
+    if (cached.work !== work) return null;
+    workPayloadCache.delete(cacheKey);
+    workPayloadCache.set(cacheKey, cached);
+    return cached.payload;
+  }
+
+  function preparedPublicWork(work, options = {}) {
+    const cached = readPreparedWork(work, options);
+    if (cached) return cached;
+    const payload = publicWork(work, false, options);
+    const cacheKey = preparedWorkCacheKey(work, options);
+    if (!cacheKey) return payload;
+    workPayloadCache.set(cacheKey, { work, payload });
+    while (workPayloadCache.size > WORK_PAYLOAD_CACHE_LIMIT) {
+      workPayloadCache.delete(workPayloadCache.keys().next().value);
+    }
+    return payload;
+  }
+
+  function preparedWorkCacheKey(work, options = {}) {
+    const workId = String(work?.id || "");
+    return workId ? `${options.lightweightInfo ? "light" : "full"}:${workId}` : "";
   }
 
   function listFromWorksPayload(sourceWorks, url, extra = {}) {
@@ -337,11 +384,45 @@ export function createWorkQueryService({
   function listPayload(url) {
     const scope = peopleScopeService.normalize(url.searchParams.get("scope"));
     const filter = url.searchParams.get("filter") || "all";
+    const sort = url.searchParams.get("sort") || "releaseDesc";
+    const limit = clampInteger(url.searchParams.get("limit"), defaultWorkLimit, 1, maxWorkLimit);
+    const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+    const pageCacheKey = `${scope}:${filter}:${sort}:${limit}:${offset}`;
+    const cachedPage = readListPage(pageCacheKey);
+    if (cachedPage) return cachedPage;
+
     const stamp = currentStamp();
     const filtered = cachedListSource(scope, filter, stamp);
-    const sort = url.searchParams.get("sort") || "releaseDesc";
     const works = sortWorkList(filtered, sort);
-    return pagedWorksPayload(works, url, { filter, facets: workFacets(filtered) });
+    const payload = pagedWorksPayload(works, url, { filter, facets: workFacets(filtered) });
+    return cacheListPage(pageCacheKey, payload);
+  }
+
+  function readListPage(cacheKey) {
+    ensureListResponseCache();
+    if (!listPageCache.has(cacheKey)) return null;
+    const cached = listPageCache.get(cacheKey);
+    listPageCache.delete(cacheKey);
+    listPageCache.set(cacheKey, cached);
+    return cached;
+  }
+
+  function cacheListPage(cacheKey, payload) {
+    ensureListResponseCache();
+    listPageCache.set(cacheKey, payload);
+    while (listPageCache.size > LIST_PAGE_CACHE_LIMIT) {
+      listPageCache.delete(listPageCache.keys().next().value);
+    }
+    return payload;
+  }
+
+  function ensureListResponseCache() {
+    const stamp = listResponseStamp();
+    if (listPageCacheStamp === stamp) return;
+    listPageCacheStamp = stamp;
+    listPageCache = new Map();
+    workPayloadCache = new Map();
+    dynamicFacetCache = new WeakMap();
   }
 
   function cachedListSource(scope, filter, stamp = currentStamp()) {
@@ -383,16 +464,20 @@ export function createWorkQueryService({
     for (const filter of ["playable", "info", "rated", "highRating", "vr"]) {
       const filtered = cachedListSource(scope, filter, stamp);
       const releaseSorted = sortWorkList(filtered, "releaseDesc");
-      if (filter === "vr") prewarmPreparedPage(releaseSorted);
       if (filter === "rated" || filter === "highRating") sortWorkList(filtered, "ratingDesc");
     }
-  }
-
-  function prewarmPreparedPage(works) {
-    const page = works.slice(0, firstPagePrewarmLimit);
-    prewarmCoreWorkCovers(page);
-    prewarmVideoProbesForWorks(page);
-    prewarmWorkInfoDetails(page);
+    const variants = [
+      ["all", "updated"],
+      ["all", "releaseDesc"],
+      ["vr", "updated"],
+      ["vr", "releaseDesc"],
+      ["rated", "ratingDesc"]
+    ];
+    for (const limit of PREWARM_PAGE_SIZES) {
+      for (const [filter, sort] of variants) {
+        listPayload(new URL(`http://fanhao.local/api/works?limit=${limit}&offset=0&sort=${sort}&filter=${filter}`));
+      }
+    }
   }
 
   function searchPayload(url) {

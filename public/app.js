@@ -11,7 +11,7 @@ import {
   createStudioPage,
   createWorkActions,
   selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260717-fanhao-collection-response-01";
+} from "./modules/fanhao/index.js?v=20260717-fanhao-work-response-01";
 import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
@@ -2376,6 +2376,7 @@ els.backToPeopleIndex?.addEventListener("click", returnToPeopleIndex);
 for (const button of els.viewTabs) {
   const prefetchCollection = () => collectionPage.prefetch(button.dataset.view);
   button.addEventListener("pointerenter", prefetchCollection, { passive: true });
+  button.addEventListener("pointerdown", prefetchCollection, { passive: true });
   button.addEventListener("focus", prefetchCollection);
   button.addEventListener("click", () => {
     clearWorkSearch();

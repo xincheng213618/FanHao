@@ -5,11 +5,10 @@ import { formatNumber } from "../../js/format.js";
 import { createWorkListState } from "../../js/work-filtering.js?v=20260710-western-merge-01";
 import { createWorkCards } from "./features/works/cards.js?v=20260717-fanhao-work-covers-01";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260717-fanhao-ranking-response-01";
+import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-work-response-01";
 
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
-const collectionFetches = new Map();
-const warmedCollectionKeys = new Set();
 
 function workDataSignature(data = {}) {
   const works = Array.isArray(data.works) ? data.works : [];
@@ -51,6 +50,7 @@ export function createWorkViews(context) {
   const workListState = createWorkListState({ renderCurrentView });
   let selectedFavoriteFolderId = "all";
   const workCards = createWorkCards({ getActiveUrl, showView });
+  const pageDataService = createWorkPageDataService({ fetchJson, writeCachedJson });
   const rankingViews = createRankingViews({
     els,
     getActiveUrl,
@@ -166,7 +166,7 @@ export function createWorkViews(context) {
     }
 
     try {
-      const data = await fetchCollectionData(activeUrl, path, { signal: isActive.signal });
+      const data = await pageDataService.fetch(activeUrl, path, { signal: isActive.signal });
       if (!isActive()) return;
       if (renderedCache && workDataSignature(data) === renderedCacheSignature) {
         applyCollectionHeader(data);
@@ -269,12 +269,13 @@ export function createWorkViews(context) {
       renderedCache = true;
       renderedCacheSignature = workDataSignature(cached.payload);
       renderWorksData(cached.payload, cached);
+      warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
     }
 
     try {
-      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
-      writeCachedJson(activeUrl, path, data).catch(() => {});
+      const data = await pageDataService.fetch(activeUrl, path, { signal: isActive.signal });
       if (!isActive()) return;
+      warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
       if (renderedCache && workDataSignature(data) === renderedCacheSignature) {
         applyWorksHeader(data);
         return;
@@ -333,12 +334,13 @@ export function createWorkViews(context) {
       renderedCache = true;
       renderedCacheSignature = workDataSignature(cached.payload);
       renderData(cached.payload, cached);
+      warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
     }
 
     try {
-      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
-      writeCachedJson(activeUrl, path, data).catch(() => {});
+      const data = await pageDataService.fetch(activeUrl, path, { signal: isActive.signal });
       if (!isActive()) return;
+      warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
       if (renderedCache && workDataSignature(data) === renderedCacheSignature) {
         applyHeader(data);
         return;
@@ -614,31 +616,20 @@ export function createWorkViews(context) {
     return rankingViews.renderRankings(isActive);
   }
 
-  function fetchCollectionData(activeUrl, path, options = {}) {
-    const key = `${activeUrl}:${path}`;
-    if (collectionFetches.has(key)) return collectionFetches.get(key);
-    const promise = fetchJson(activeUrl, path, { timeoutMs: 12000, signal: options.signal })
-      .then((data) => {
-        writeCachedJson(activeUrl, path, data).catch(() => {});
-        return data;
-      })
-      .finally(() => collectionFetches.delete(key));
-    collectionFetches.set(key, promise);
-    return promise;
-  }
-
   function warmPrimaryCollections(activeUrl) {
     const limit = getWorksLimit();
-    const paths = [
+    pageDataService.warm(activeUrl, [
       `/api/history?limit=${limit}&offset=0`,
       favoriteCollectionPath(limit)
-    ];
-    for (const path of paths) {
-      const key = `${activeUrl}:${path}`;
-      if (warmedCollectionKeys.has(key)) continue;
-      warmedCollectionKeys.add(key);
-      fetchCollectionData(activeUrl, path).catch(() => warmedCollectionKeys.delete(key));
-    }
+    ]);
+  }
+
+  function warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort }) {
+    if (!["all", "vr"].includes(serverFilter)) return;
+    const siblingFilter = serverFilter === "vr" ? "all" : "vr";
+    pageDataService.warm(activeUrl, [
+      `/api/works?limit=${limit}&offset=0&sort=${encodeURIComponent(serverSort)}&filter=${siblingFilter}`
+    ]);
   }
 
   async function refreshRankingCache() {

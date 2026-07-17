@@ -31,6 +31,7 @@ import { createCoreDbService } from "../src/modules/fanhao/server/library/core-d
 import { tableStampValue } from "../src/modules/fanhao/server/library/table-stamp-query.js";
 import { fetchPreparedImage } from "../android-client/www/js/image.js";
 import { createWorkCoverLoader } from "../android-client/www/modules/fanhao/features/works/cover-loader.js";
+import { createWorkPageDataService } from "../android-client/www/modules/fanhao/features/works/page-data-service.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -95,9 +96,9 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-collection-response-01'), "collection-response changes must refresh the FanHao browser entry");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-collection-response-01'), "collection-response changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260717-fanhao-collection-response-01'), "collection-response changes must refresh the FanHao module barrel");
+assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-work-response-01'), "work-response changes must refresh the FanHao browser entry");
+assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-work-response-01'), "work-response changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260717-fanhao-work-response-01'), "work-response changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -181,6 +182,7 @@ assert(collectionPageSource.includes('globalThis.matchMedia?.("(max-width: 720px
 assert(collectionPageSource.includes("const promise = api(path).then("), "collection navigation must prepare one reusable request before activation");
 assert(collectionPageSource.includes("return trimPrefetchedPage(result.data, path);"), "collection activation must consume prefetched results instead of issuing a duplicate request");
 assert(webApp.includes('button.addEventListener("pointerenter", prefetchCollection'), "desktop collection tabs must prefetch before click");
+assert(webApp.includes('button.addEventListener("pointerdown", prefetchCollection'), "touch collection tabs must start prefetching before click");
 assert(webApp.includes('button.addEventListener("focus", prefetchCollection)'), "keyboard and touch collection navigation must share the prepared request path");
 assert(!playbackProgressServiceSource.includes(".map((video) => getVideoProgress"), "work progress must avoid allocating and sorting every video on list rendering");
 assert(personMergeServiceSource.includes("personRecordCache") && personMergeServiceSource.includes("personRecordCacheStamp"), "repeated work cards for one person must reuse the merged person record");
@@ -240,6 +242,7 @@ for (const relativePath of [
   "android-client/www/modules/fanhao/features/works/cards.js",
   "android-client/www/modules/fanhao/features/works/actions.js",
   "android-client/www/modules/fanhao/features/works/preview-media.js",
+  "android-client/www/modules/fanhao/features/works/page-data-service.js",
   "android-client/www/modules/fanhao/features/shared/viewport-image-loader.js",
   "android-client/www/modules/fanhao/features/rankings/ranking-views.js",
   "src/modules/fanhao/server/composition.js",
@@ -249,6 +252,7 @@ for (const relativePath of [
 }
 
 const androidWorkViews = read("android-client/www/modules/fanhao/work-views.js");
+const androidWorkPageDataService = read("android-client/www/modules/fanhao/features/works/page-data-service.js");
 const androidApp = read("android-client/www/app.js");
 const androidIndexHtml = read("android-client/www/index.html");
 const androidFanhaoModule = read("android-client/www/modules/fanhao/android-module.js");
@@ -286,7 +290,36 @@ assert(androidRankingViews.includes("hasServerMore:"), "Android rankings must pr
 assert(androidWorkViews.includes("options.hasServerMore"), "Android work rendering must expose server-side continuation");
 assert(androidWorkViews.includes("/api/history?limit=${limit}&offset=0"), "Android history must request a bounded first page");
 assert(androidWorkViews.includes("const works = data.works || []"), "Android collections must define their rendered work list locally");
-assert(androidWorkViews.includes("const collectionFetches = new Map()") && androidWorkViews.includes("warmPrimaryCollections(activeUrl)"), "Android home must warm and share collection requests before navigation");
+assert(androidWorkViews.includes("createWorkPageDataService") && androidWorkViews.includes("warmPrimaryCollections(activeUrl)"), "Android home must warm and share collection requests before navigation");
+assert(androidWorkViews.includes("warmCatalogSibling(activeUrl") && androidWorkPageDataService.includes("const inflight = new Map()"), "Android work and VR views must warm sibling pages and share requests");
+let resolveWarmedWorkPage;
+let workPageFetchCount = 0;
+const writtenWorkPages = [];
+const warmedWorkPageRequest = new Promise((resolve) => {
+  resolveWarmedWorkPage = resolve;
+});
+const workPageDataService = createWorkPageDataService({
+  fetchJson: async () => {
+    workPageFetchCount += 1;
+    if (workPageFetchCount === 1) return warmedWorkPageRequest;
+    return { works: [{ id: `work-${workPageFetchCount}` }] };
+  },
+  writeCachedJson: async (activeUrl, path, data) => {
+    writtenWorkPages.push({ activeUrl, path, data });
+  }
+});
+const warmedWorkPath = "/api/works?limit=48&offset=0&sort=updated&filter=vr";
+workPageDataService.warm("http://fanhao.local", [warmedWorkPath]);
+const sharedWarmedWorkPage = workPageDataService.fetch("http://fanhao.local", warmedWorkPath);
+assert.equal(workPageFetchCount, 1, "Android work-page navigation must reuse a sibling prefetch still in flight");
+resolveWarmedWorkPage({ works: [{ id: "work-vr" }] });
+assert.deepEqual(await sharedWarmedWorkPage, { works: [{ id: "work-vr" }] }, "Android work-page prefetch must preserve the server payload");
+assert.equal(writtenWorkPages.length, 1, "Android work-page prefetch must populate IndexedDB once");
+workPageDataService.warm("http://fanhao.local", [warmedWorkPath]);
+await Promise.resolve();
+assert.equal(workPageFetchCount, 1, "completed Android sibling warmups must not repeat during the same app session");
+await workPageDataService.fetch("http://fanhao.local", warmedWorkPath);
+assert.equal(workPageFetchCount, 2, "explicit Android navigation must still revalidate a completed cached page");
 let coverObserverCallback = null;
 let coverObserverOptions = null;
 let coverObserverDisconnected = 0;
@@ -336,8 +369,8 @@ assert(!androidDetailViews.includes("limit=2000"), "Android person details must 
 assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && androidDetailViews.includes("正在加载作品"), "Android person navigation must paint the local index before the network request completes");
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-person-detail-01'), "Android person-detail changes must use a fresh module URL");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-collection-response-01'), "Android collection-response changes must use a fresh work-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-collection-response-01') && androidIndexHtml.includes('app.js?v=20260717-fanhao-collection-response-01'), "Android collection-response changes must refresh the module and app entry chain");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-work-response-01'), "Android work-response changes must use a fresh work-view URL");
+assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-work-response-01') && androidIndexHtml.includes('app.js?v=20260717-fanhao-work-response-01'), "Android work-response changes must refresh the module and app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
@@ -531,11 +564,12 @@ const workQueryServiceSource = read("src/modules/fanhao/server/works/work-query-
 const workCodeIndexServiceSource = read("src/modules/fanhao/server/works/work-code-index-service.js");
 const workSearchIndexServiceSource = read("src/modules/fanhao/server/works/work-search-index-service.js");
 assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info details must support page-level batch hydration");
-assert(workQueryServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "work lists must batch-hydrate detail rows before presentation");
-assert(workQueryServiceSource.includes("prewarmVideoProbesForWorks(pageSource)"), "visible work pages must prepare playback probes before user selection");
-assert(workQueryServiceSource.includes('if (filter === "vr") prewarmPreparedPage(releaseSorted);'), "VR startup must prepare the same release-ordered source used by its first page");
-assert(workQueryServiceSource.includes("const firstPagePrewarmLimit = 64"), "VR metadata prewarm must stay bounded to one desktop page");
-assert(workQueryServiceSource.includes("prewarmCoreWorkCovers(page)") && workQueryServiceSource.includes("prewarmWorkInfoDetails(page)"), "VR startup must batch-hydrate first-page cover and detail metadata");
+assert(workQueryServiceSource.includes("prewarmWorkInfoDetails(missing)"), "work lists must batch-hydrate only unprepared detail rows before presentation");
+assert(workQueryServiceSource.includes("prewarmVideoProbesForWorks(missing)"), "visible work pages must prepare playback probes only for unprepared works");
+assert(workQueryServiceSource.includes("const LIST_PAGE_CACHE_LIMIT = 96") && workQueryServiceSource.includes("const WORK_PAYLOAD_CACHE_LIMIT = 4096"), "work lists must retain complete pages and prepared work payloads in bounded caches");
+assert(workQueryServiceSource.includes("const PREWARM_PAGE_SIZES = [48, 64]"), "work-list startup must prepare phone and desktop response sizes");
+assert(workQueryServiceSource.includes('["vr", "updated"]') && workQueryServiceSource.includes('["vr", "releaseDesc"]'), "VR startup must prepare Android and Web default ordering");
+assert(workQueryServiceSource.includes("dynamicFacetCache.get(works)") && workQueryServiceSource.includes("userStateStamp()"), "work-list dynamic facets must remain cached until user state changes");
 assert(workInfoServiceSource.includes("function facetRowsById()"), "work-list facets must use a compact metadata index");
 assert(workQueryServiceSource.includes("staticWorkFacets(works);"), "compact work facets must be ready before the first list request");
 assert(workQueryServiceSource.includes("sortWorkList(works, \"releaseDesc\")"), "the default work-list order must be ready before the first request");
@@ -1373,6 +1407,7 @@ let localPrefixReadCount = 0;
 let personMergePrewarmCount = 0;
 let searchFavoriteFacetReadCount = 0;
 let searchUserStateRevision = 1;
+let workListPublicCount = 0;
 let workInfoReadCount = 0;
 let workInfoFacetReadCount = 0;
 let preparedWorkCoverIds = [];
@@ -1435,7 +1470,10 @@ const workQueryService = createWorkQueryService({
     preparedWorkInfoIds.push(...works.map((work) => work.id));
   },
   publicPerson: (person) => person,
-  publicWork: (work) => ({ id: work.id }),
+  publicWork: (work) => {
+    workListPublicCount += 1;
+    return { id: work.id, revision: searchUserStateRevision };
+  },
   publicWorkAvailability: () => ({ hasMagnet: false }),
   rankingMissingSearchWorks: () => [],
   searchPeople: () => ({ exact: [], matchedPersonIds: [], people: [] }),
@@ -1464,8 +1502,13 @@ assert.deepEqual(preparedWorkInfoIds, [queryWork.id], "FanHao startup must prepa
 assert.deepEqual(preparedWorkVideoIds, [queryWork.id], "FanHao startup must queue first-page VR playback probes");
 assert.equal(workInfoReadCount, 0, "FanHao startup prewarm must not hydrate full work-info facets before the server listens");
 assert(workInfoFacetReadCount > 0 && workInfoFacetReadCount <= 8, "FanHao startup prewarm must use only bounded compact work-info lookups");
-workQueryService.listPayload(workListUrl);
-workQueryService.listPayload(workListUrl);
+assert.equal(workListPublicCount, 1, "FanHao startup must prepare each visible work payload once across common list variants");
+const cachedWorkListFirst = workQueryService.listPayload(workListUrl);
+const listFavoriteReadsAfterFirstPage = searchFavoriteFacetReadCount;
+const cachedWorkListSecond = workQueryService.listPayload(workListUrl);
+assert.equal(cachedWorkListSecond, cachedWorkListFirst, "identical work-list requests must reuse the complete response object");
+assert.equal(workListPublicCount, 1, "new page sizes must reuse already prepared work payloads");
+assert.equal(searchFavoriteFacetReadCount, listFavoriteReadsAfterFirstPage, "repeated work lists must reuse unchanged dynamic facets");
 assert.equal(enrichmentCount, 1, "repeated FanHao work-list requests must reuse the prewarmed full-library enrichment");
 const workSearchUrl = new URL("http://127.0.0.1/api/search?q=AB&limit=24&sort=releaseDesc");
 workQueryService.searchPayload(workSearchUrl);
@@ -1479,6 +1522,10 @@ const singleLetterCodeSearch = workQueryService.searchPayload(singleLetterCodeSe
 assert.equal(localPrefixReadCount, prefixReadsBeforeSingleLetterSearch + 1, "single-letter Latin searches must use the indexed code-prefix path");
 assert.equal(singleLetterCodeSearch.total, 1, "single-letter code-prefix searches must preserve matching local works");
 searchUserStateRevision += 1;
+const workListPublicCountBeforeStateChange = workListPublicCount;
+const refreshedWorkList = workQueryService.listPayload(workListUrl);
+assert.notEqual(refreshedWorkList, cachedWorkListFirst, "favorite and progress changes must invalidate complete work-list responses");
+assert.equal(workListPublicCount, workListPublicCountBeforeStateChange + 1, "user-state changes must refresh prepared work payloads");
 workQueryService.searchPayload(workSearchUrl);
 assert(searchFavoriteFacetReadCount > favoriteFacetReadsAfterSearch, "favorite and progress changes must refresh search facets");
 actorMovieDataStamp = "actor-v2";
