@@ -2379,8 +2379,8 @@ window.addEventListener("popstate", () => {
 installAndroidClientReturn({ isAndroidClient, initialParams });
 
 async function bootApp() {
-  await initializeModuleNavigation();
   const initialRoute = routeFromUrl();
+  const moduleNavigationPromise = initializeModuleNavigation();
   await applyRoute(initialRoute);
   initializeRouteHistory();
   if (!state.library) {
@@ -2388,6 +2388,7 @@ async function bootApp() {
       console.error("[library]", error);
     });
   }
+  await moduleNavigationPromise;
 }
 
 bootApp().catch((error) => {
