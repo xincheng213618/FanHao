@@ -8,6 +8,7 @@ export function createWorkDetailDataService({
 }) {
   let hoverTimer = 0;
   let hoverWorkId = "";
+  const boundContainers = new WeakSet();
 
   function path(workId) {
     return `/api/works/${encodeURIComponent(String(workId || ""))}`;
@@ -57,5 +58,35 @@ export function createWorkDetailDataService({
     target.addEventListener("focus", () => void warm(workId));
   }
 
-  return { bind, cancelHover, fetch, load, path, warm };
+  function bindContainer(container) {
+    if (!container || boundContainers.has(container)) return;
+    boundContainers.add(container);
+
+    container.addEventListener("pointerover", (event) => {
+      const card = intentCard(container, event.target);
+      if (!card || card.contains(event.relatedTarget)) return;
+      schedule(card.dataset.workDetailId);
+    }, { passive: true });
+    container.addEventListener("pointerout", (event) => {
+      const card = intentCard(container, event.target);
+      if (!card || card.contains(event.relatedTarget)) return;
+      cancelHover(card.dataset.workDetailId);
+    }, { passive: true });
+    container.addEventListener("pointerdown", (event) => {
+      const card = intentCard(container, event.target);
+      if (card) void warm(card.dataset.workDetailId);
+    }, { passive: true });
+    container.addEventListener("focusin", (event) => {
+      const card = intentCard(container, event.target);
+      if (card) void warm(card.dataset.workDetailId);
+    });
+  }
+
+  function intentCard(container, target) {
+    if (!target?.closest || target.closest("[data-work-intent-ignore]")) return null;
+    const card = target.closest("[data-work-detail-id]");
+    return card && container.contains(card) ? card : null;
+  }
+
+  return { bind, bindContainer, cancelHover, fetch, load, path, warm };
 }

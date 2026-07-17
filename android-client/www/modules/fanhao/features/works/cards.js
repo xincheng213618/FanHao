@@ -2,8 +2,14 @@ import { formatDate, formatNumber } from "../../../../js/format.js";
 import { imageUrlForWork } from "../../../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { createWorkCoverLoader } from "./cover-loader.js?v=20260717-fanhao-work-covers-01";
 
-export function createWorkCards({ getActiveUrl, showView, workDetailDataService = null }) {
+export function createWorkCards({ getActiveUrl, roots = [], showView, workDetailDataService = null }) {
   const coverLoader = createWorkCoverLoader({ getActiveUrl });
+  const cardWorks = new WeakMap();
+
+  for (const root of roots.filter(Boolean)) {
+    bindCardSurface(root);
+    workDetailDataService?.bindContainer(root);
+  }
 
   function createWorkCard(work, options = {}) {
     const compactMeta = Boolean(options.compactMeta);
@@ -12,13 +18,8 @@ export function createWorkCards({ getActiveUrl, showView, workDetailDataService 
     card.className = `work-card${work.missingLocal ? " missing-local" : ""}`;
     card.role = "button";
     card.tabIndex = 0;
-    card.addEventListener("click", () => openWorkCard(work));
-    card.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      openWorkCard(work);
-    });
-    if (!work.missingLocal) workDetailDataService?.bind(card, work.id);
+    cardWorks.set(card, work);
+    if (!work.missingLocal) card.dataset.workDetailId = String(work.id);
 
     const thumb = document.createElement("div");
     thumb.className = "work-thumb";
@@ -37,10 +38,8 @@ export function createWorkCards({ getActiveUrl, showView, workDetailDataService 
     person.textContent = workPersonName(work) || "未知人物";
     if (work.personId) {
       person.type = "button";
-      person.addEventListener("click", (event) => {
-        event.stopPropagation();
-        showView("personDetail", { personId: work.personId }, { push: true });
-      });
+      person.dataset.personId = String(work.personId);
+      person.dataset.workIntentIgnore = "1";
     }
 
     const percent = progressPercent(work);
@@ -63,6 +62,30 @@ export function createWorkCards({ getActiveUrl, showView, workDetailDataService 
     if (chips?.children.length) body.append(chips);
     card.append(thumb, body);
     return card;
+  }
+
+  function bindCardSurface(root) {
+    root.addEventListener("click", (event) => {
+      const card = event.target?.closest?.(".work-card");
+      if (!card || !root.contains(card)) return;
+      const person = event.target?.closest?.(".work-person[data-person-id]");
+      if (person && card.contains(person)) {
+        showView("personDetail", { personId: person.dataset.personId }, { push: true });
+        return;
+      }
+      const work = cardWorks.get(card);
+      if (work) openWorkCard(work);
+    });
+
+    root.addEventListener("keydown", (event) => {
+      const card = event.target?.closest?.(".work-card");
+      if (!card || event.target !== card || !root.contains(card)) return;
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const work = cardWorks.get(card);
+      if (!work) return;
+      event.preventDefault();
+      openWorkCard(work);
+    });
   }
 
   function openWorkCard(work) {
