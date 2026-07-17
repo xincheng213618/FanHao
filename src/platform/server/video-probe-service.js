@@ -8,6 +8,7 @@ export function createVideoProbeService({
   hasNvenc,
   safeStat,
   execFileFn = execFile,
+  persistentCache = null,
   probeWaitMs = 300,
   statFile = (filePath) => fs.promises.stat(filePath),
   spawnSyncFn = spawnSync
@@ -53,17 +54,25 @@ export function createVideoProbeService({
   }
 
   function probeCached(file) {
-    const stat = safeStat(file.path);
-    const cacheKey = stat ? `${file.id}:${file.path}:${stat.size}:${stat.mtimeMs}` : `${file.id}:${file.path}:missing`;
-    if (cache.has(cacheKey)) {
-      const cached = cache.get(cacheKey);
-      cache.delete(cacheKey);
-      cache.set(cacheKey, cached);
-      return cached;
+    const fileSignature = libraryFileSignature(file);
+    const fileCacheKey = fileSignature ? cacheKeyForSignature(file, fileSignature) : "";
+    if (fileCacheKey && cache.has(fileCacheKey)) return touchCached(fileCacheKey);
+    const persistedFromLibrary = fileSignature ? readPersistentProbe(file, fileSignature) : { hit: false, value: null };
+    if (persistedFromLibrary.hit) {
+      cache.set(fileCacheKey, persistedFromLibrary.value);
+      resolvedProbeByFile.set(inflightKey(file), persistedFromLibrary.value);
+      return persistedFromLibrary.value;
     }
 
-    const result = stat ? probe(file) : null;
-    cache.set(cacheKey, result);
+    const stat = safeStat(file.path);
+    const cacheKey = stat ? `${file.id}:${file.path}:${stat.size}:${stat.mtimeMs}` : `${file.id}:${file.path}:missing`;
+    if (cache.has(cacheKey)) return touchCached(cacheKey);
+
+    const persisted = stat ? readPersistentProbe(file, stat) : { hit: false, value: null };
+    const result = persisted.hit ? persisted.value : stat ? probe(file) : null;
+    if (stat && (!persisted.hit || fileSignature)) writePersistentProbe(file, fileSignature || stat, result);
+    cache.set(fileCacheKey || cacheKey, result);
+    resolvedProbeByFile.set(inflightKey(file), result);
     if (cache.size > cacheLimit) {
       cache.delete(cache.keys().next().value);
     }
@@ -112,6 +121,22 @@ export function createVideoProbeService({
 
   async function loadProbeAsync(file, fileKey) {
     const generation = cacheGeneration;
+    const fileSignature = libraryFileSignature(file);
+    const fileCacheKey = fileSignature ? cacheKeyForSignature(file, fileSignature) : "";
+    if (fileCacheKey && cache.has(fileCacheKey)) {
+      const cached = touchCached(fileCacheKey);
+      if (generation === cacheGeneration) resolvedProbeByFile.set(fileKey, cached);
+      return cached;
+    }
+    const persistedFromLibrary = fileSignature ? readPersistentProbe(file, fileSignature) : { hit: false, value: null };
+    if (persistedFromLibrary.hit) {
+      if (generation === cacheGeneration) {
+        cache.set(fileCacheKey, persistedFromLibrary.value);
+        resolvedProbeByFile.set(fileKey, persistedFromLibrary.value);
+      }
+      return persistedFromLibrary.value;
+    }
+
     let stat = null;
     try {
       stat = await statFile(file.path);
@@ -120,20 +145,57 @@ export function createVideoProbeService({
     }
     const cacheKey = stat ? `${file.id}:${file.path}:${stat.size}:${stat.mtimeMs}` : `${file.id}:${file.path}:missing`;
     if (cache.has(cacheKey)) {
-      const cached = cache.get(cacheKey);
-      cache.delete(cacheKey);
-      cache.set(cacheKey, cached);
+      const cached = touchCached(cacheKey);
       if (generation === cacheGeneration) resolvedProbeByFile.set(fileKey, cached);
       return cached;
     }
 
-    const result = stat ? await probeAsync(file) : null;
+    const persisted = stat ? readPersistentProbe(file, stat) : { hit: false, value: null };
+    const result = persisted.hit ? persisted.value : stat ? await probeAsync(file) : null;
+    if (stat && (!persisted.hit || fileSignature)) writePersistentProbe(file, fileSignature || stat, result);
     if (generation === cacheGeneration) {
-      cache.set(cacheKey, result);
+      cache.set(fileCacheKey || cacheKey, result);
       resolvedProbeByFile.set(fileKey, result);
       if (cache.size > cacheLimit) cache.delete(cache.keys().next().value);
     }
     return result;
+  }
+
+  function libraryFileSignature(file) {
+    const size = Number(file?.size);
+    const modifiedAt = String(file?.modifiedAt || "").trim();
+    if (!Number.isFinite(size) || size < 0 || !modifiedAt) return null;
+    return { size, cacheMtime: `library:${modifiedAt}` };
+  }
+
+  function cacheKeyForSignature(file, signature) {
+    return `${file.id}:${file.path}:${signature.size}:${signature.cacheMtime}`;
+  }
+
+  function touchCached(cacheKey) {
+    const cached = cache.get(cacheKey);
+    cache.delete(cacheKey);
+    cache.set(cacheKey, cached);
+    return cached;
+  }
+
+  function readPersistentProbe(file, stat) {
+    if (!persistentCache?.get) return { hit: false, value: null };
+    try {
+      const cached = persistentCache.get(file, stat);
+      return cached?.hit ? cached : { hit: false, value: null };
+    } catch {
+      return { hit: false, value: null };
+    }
+  }
+
+  function writePersistentProbe(file, stat, value) {
+    if (!persistentCache?.set) return;
+    try {
+      persistentCache.set(file, stat, value);
+    } catch {
+      // Playback must continue even when the optional persistent cache is unavailable.
+    }
   }
 
   function prewarm(files = [], options = {}) {

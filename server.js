@@ -62,6 +62,7 @@ import { readBodyText, readJsonBody, readJsonFile, safeChildPath } from "./src/p
 import { sendJson, sendText, sendHtml, redirect, notFound } from "./src/platform/server/responses.js";
 import { createServerHost } from "./src/platform/server/server-host.js";
 import { createStaticFileServer } from "./src/platform/server/static-files.js";
+import { createVideoProbeCacheService } from "./src/platform/server/video-probe-cache-service.js";
 import { createVideoProbeService } from "./src/platform/server/video-probe-service.js";
 
 const {
@@ -290,11 +291,14 @@ const imageLibraryService = createImageLibraryService({
   photoSetRootStatuses: imageLibraryIndexService.photoSetRootStatuses,
   photoSetService
 });
+const videoProbeCacheService = createVideoProbeCacheService({ getDb: getCoreDb });
+videoProbeCacheService.start();
 const videoProbeService = createVideoProbeService({
   cacheLimit: VIDEO_PROBE_CACHE_LIMIT,
   directVideoExts: DIRECT_VIDEO_EXTS,
   ffprobePath: FFPROBE_PATH,
   hasNvenc: HAS_NVENC,
+  persistentCache: videoProbeCacheService,
   safeStat
 });
 const workImageService = createWorkImageService({

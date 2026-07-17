@@ -195,7 +195,9 @@ export async function routeWorksApi(req, res, url, deps) {
 
   const playInfoMatch = /^\/api\/playinfo\/([^/]+)$/.exec(url.pathname);
   if (playInfoMatch && req.method === "GET") {
-    const payload = await workDetailService.playInfoPayload(decodeURIComponent(playInfoMatch[1]));
+    const payload = await workDetailService.playInfoPayload(decodeURIComponent(playInfoMatch[1]), {
+      source: url.searchParams.get("source") || "fanhao"
+    });
     if (!payload) {
       notFound(res);
       return true;

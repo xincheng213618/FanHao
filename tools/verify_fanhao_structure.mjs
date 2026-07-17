@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
@@ -23,6 +24,7 @@ import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-
 import { createWorkSearchIndexService } from "../src/modules/fanhao/server/works/work-search-index-service.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
 import { sendJson } from "../src/platform/server/responses.js";
+import { createVideoProbeCacheService } from "../src/platform/server/video-probe-cache-service.js";
 import { createVideoProbeService } from "../src/platform/server/video-probe-service.js";
 import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
 import { tableStampValue } from "../src/modules/fanhao/server/library/table-stamp-query.js";
@@ -66,6 +68,8 @@ const rankingPageSource = read("public/modules/fanhao/ranking-page.js");
 const studioPageSource = read("public/modules/fanhao/features/studios/studio-page.js");
 const collectionPageSource = read("public/modules/fanhao/features/collections/collection-page.js");
 const playbackPrefetchSource = read("public/modules/fanhao/playback-prefetch.js");
+const playerPageSource = read("public/js/player-page.js");
+const playerHtmlSource = read("public/player.html");
 const workActionsSource = read("public/modules/fanhao/features/works/work-actions.js");
 const workDetailServiceSource = read("src/modules/fanhao/server/works/work-detail-service.js");
 const workRoutesApiSource = read("src/modules/fanhao/server/works/routes-api.js");
@@ -74,6 +78,7 @@ const playbackProgressServiceSource = read("src/modules/fanhao/server/playback/p
 const personDetailServiceSource = read("src/modules/fanhao/server/people/person-detail-service.js");
 const personMergeServiceSource = read("src/modules/fanhao/server/people/person-merge-service.js");
 const workDetailPageSource = read("public/modules/fanhao/work-detail-page.js");
+const videoProbeCacheSource = read("src/platform/server/video-probe-cache-service.js");
 const videoProbeSource = read("src/platform/server/video-probe-service.js");
 assert(indexHtml.includes('import("/fanhao-app.js'), "FanHao must have a dedicated Web entry");
 assert(indexHtml.includes('import("/standalone-app.js'), "standalone modules must have a dedicated Web entry");
@@ -116,6 +121,10 @@ assert(workRoutesApiSource.includes("playbackPrewarmPayload") && workRoutesApiSo
 assert(workDetailServiceSource.includes("replaceQueued: true") && workDetailServiceSource.includes("concurrency: 3"), "playback intent must take priority over speculative list probes without awaiting them");
 assert(workDetailServiceSource.includes("const detailCache = new Map()") && workDetailServiceSource.includes("detailCacheStamp"), "work details must stay reusable across card intent and player startup");
 assert(workDetailServiceSource.includes("const detail = detailPayload(workId)") && workDetailServiceSource.includes("detailReady: true"), "playback preparation must hydrate the complete work detail before player navigation");
+assert(workDetailServiceSource.includes("const libraryFile = preferGallery ? null : library.filesById.get(videoId)"), "FanHao play-info must use the O(1) library file index before touching the gallery catalog");
+assert(workRoutesApiSource.includes('source: url.searchParams.get("source") || "fanhao"'), "play-info routing must carry an explicit media source boundary");
+assert(playerPageSource.includes('mediaId ? "?source=gallery" : ""'), "the standalone gallery player must explicitly select gallery play-info lookup");
+assert(playerHtmlSource.includes("player-page.js?v=20260717-fanhao-playinfo-01"), "play-info lookup changes must refresh the standalone player module");
 assert(workActionsSource.includes("captureFavoriteSnapshot") && workActionsSource.includes("restoreFavoriteSnapshot"), "optimistic favorite feedback must roll back cleanly after API failures");
 assert(peoplePageSource.includes('["pointerenter", "focus", "pointerdown"]') && peoplePageSource.includes("preparePersonProfile?.()"), "person cards must prefetch profile code before or alongside the detail API request");
 assert(lazyPersonProfileSource.includes("renderVersion") && lazyPersonProfileSource.includes("version !== renderVersion"), "late profile modules must not render after navigation invalidates them");
@@ -175,6 +184,11 @@ assert(workDetailPageSource.includes("const workDetailRequests = createLatestReq
 assert(workDetailPageSource.includes("const playInfoRequests = createLatestRequestGate()"), "playback probes must own a cancellable latest request");
 assert(workDetailPageSource.includes("playInfoRequests.cancel();"), "closing or switching work details must cancel playback probes");
 assert(videoProbeSource.includes("probeWaitMs = 300"), "cold playback probes must return a usable fallback within a short interaction budget");
+assert(videoProbeSource.includes("persistentCache.get(file, stat)") && videoProbeSource.includes("persistentCache.set(file, stat, value)"), "completed playback probes must survive server restarts");
+assert(videoProbeCacheSource.includes("source_size") && videoProbeCacheSource.includes("source_mtime"), "persistent playback probes must invalidate when their source file changes");
+assert(videoProbeCacheSource.includes("const rowsByFile = new Map()") && videoProbeCacheSource.includes("rowsByFile.get(cacheKey(file.id, file.path))"), "playback requests must read persisted probes from a startup-hydrated memory index");
+assert(read("server.js").includes("persistentCache: videoProbeCacheService"), "FanHao playback must compose the persistent probe cache into the runtime");
+assert(read("server.js").includes("videoProbeCacheService.start();"), "persistent probe statements must initialize before the first playback request");
 assert(videoProbeSource.includes("const prewarmQueue = []"), "visible playback probes must use a bounded background queue");
 assert(videoProbeSource.includes("prewarmActive < prewarmConcurrency"), "background playback probes must keep concurrency bounded");
 assert(videoProbeSource.includes("const resolvedProbeByFile = new Map()"), "prepared playback probes must avoid repeated slow file-stat calls");
@@ -1410,6 +1424,62 @@ try {
   globalThis.fetch = originalFetch;
 }
 
+const persistentProbeDb = new DatabaseSync(":memory:");
+let persistentProbeCache = createVideoProbeCacheService({
+  getDb: () => persistentProbeDb,
+  now: () => "2026-07-17T00:00:00.000Z"
+});
+const restartVideoFile = {
+  id: "restart-video",
+  path: "G:/restart/video.mp4",
+  ext: ".mp4",
+  type: "video",
+  size: 4096,
+  modifiedAt: "2026-07-17T00:00:00.000Z"
+};
+const restartVideoStat = { size: 4096, mtimeMs: 12345 };
+let persistentProbeExecCount = 0;
+let persistentProbeStatCount = 0;
+const persistentProbeOutput = JSON.stringify({
+  format: { duration: "88.5" },
+  streams: [
+    { codec_type: "video", codec_name: "h264", width: 1280, height: 720 },
+    { codec_type: "audio", codec_name: "aac" }
+  ]
+});
+function persistentVideoProbeRuntime(stat = restartVideoStat) {
+  return createVideoProbeService({
+    directVideoExts: new Set([".mp4", ".m4v", ".webm"]),
+    ffprobePath: "ffprobe",
+    hasNvenc: false,
+    persistentCache: persistentProbeCache,
+    safeStat: () => {
+      persistentProbeStatCount += 1;
+      return stat;
+    },
+    spawnSyncFn: () => {
+      persistentProbeExecCount += 1;
+      return { status: 0, stdout: persistentProbeOutput };
+    }
+  });
+}
+const firstPersistentPlayInfo = persistentVideoProbeRuntime().playInfoForFile(restartVideoFile);
+assert.equal(firstPersistentPlayInfo.duration, 88.5, "the first playback probe must retain accurate media metadata");
+assert.equal(persistentProbeExecCount, 1, "the first unseen video must run ffprobe once");
+assert.equal(persistentProbeStatCount, 1, "the first unseen video must validate its source file once");
+persistentProbeCache = createVideoProbeCacheService({
+  getDb: () => persistentProbeDb,
+  now: () => "2026-07-17T00:00:01.000Z"
+});
+const restartedPersistentPlayInfo = persistentVideoProbeRuntime().playInfoForFile(restartVideoFile);
+assert.equal(restartedPersistentPlayInfo.videoCodec, "h264", "a restarted runtime must restore persisted codec metadata");
+assert.equal(persistentProbeExecCount, 1, "a restarted runtime must not probe an unchanged video again");
+assert.equal(persistentProbeStatCount, 1, "a restarted runtime must validate the library signature without touching the network file");
+const changedRestartVideoFile = { ...restartVideoFile, modifiedAt: "2026-07-17T00:00:01.000Z" };
+persistentVideoProbeRuntime({ ...restartVideoStat, mtimeMs: restartVideoStat.mtimeMs + 1 }).playInfoForFile(changedRestartVideoFile);
+assert.equal(persistentProbeExecCount, 2, "changing the source file signature must invalidate its persisted probe");
+persistentProbeDb.close();
+
 let videoProbeStatCount = 0;
 let videoProbeExecCount = 0;
 let resolveVideoProbeStat;
@@ -1484,11 +1554,25 @@ playbackPrefetch.cancel("work two");
 assert.equal(scheduledPlaybackPrefetch, null, "leaving a work card must cancel its delayed playback preparation");
 
 const preferredPlaybackVideo = { id: "video-b", path: "G:/work/video-b.mp4", playable: true };
+const indexedLibraryVideo = { id: "library-video", path: "G:/work/library-video.mp4", type: "video" };
+const indexedGalleryVideo = { id: "gallery-video", path: "V:/gallery/gallery-video.mp4", type: "video" };
 let preparedPlayback = null;
 let detailMaterializations = 0;
+let galleryPlayInfoLookups = 0;
 let workDetailStamp = "detail-1";
 const workDetailService = createWorkDetailService({
-  library: { scannedAt: "scan-1", peopleById: new Map() },
+  galleryMediaService: {
+    byId: (videoId) => {
+      galleryPlayInfoLookups += 1;
+      return videoId === "gallery-video" ? { id: videoId } : null;
+    },
+    videoFile: () => indexedGalleryVideo
+  },
+  library: {
+    filesById: new Map([[indexedLibraryVideo.id, indexedLibraryVideo]]),
+    scannedAt: "scan-1",
+    peopleById: new Map()
+  },
   peoplePayloadStamp: () => "people-1",
   playbackProgressService: { getWorkProgress: () => ({ videoId: "video-b" }) },
   prewarmCoreWorkCovers: () => {},
@@ -1508,6 +1592,9 @@ const workDetailService = createWorkDetailService({
     : null,
   userStateStamp: () => "user-1",
   videoProbeService: {
+    async playInfoForFileAsync(file, videoId, options) {
+      return { file, streamBase: options.streamBase || "/media/video", videoId };
+    },
     prewarm(files, options) {
       preparedPlayback = { files, options };
       return { queued: 1, active: 1, pending: 0 };
@@ -1527,6 +1614,13 @@ workDetailStamp = "detail-2";
 workDetailService.detailPayload("work-1");
 assert.equal(detailMaterializations, 2, "work detail cache entries must invalidate when their source stamp changes");
 assert.equal(workDetailService.playbackPrewarmPayload("missing-work"), null, "playback preparation must preserve missing-work semantics");
+const indexedLibraryPlayInfo = await workDetailService.playInfoPayload("library-video");
+assert.equal(indexedLibraryPlayInfo.file, indexedLibraryVideo, "FanHao play-info must resolve directly from the library file index");
+assert.equal(galleryPlayInfoLookups, 0, "FanHao play-info must not hydrate the unrelated gallery catalog");
+const indexedGalleryPlayInfo = await workDetailService.playInfoPayload("gallery-video", { source: "gallery" });
+assert.equal(indexedGalleryPlayInfo.file, indexedGalleryVideo, "explicit gallery play-info must preserve gallery media resolution");
+assert.equal(indexedGalleryPlayInfo.streamBase, "/media/gallery-video", "gallery play-info must retain its media stream boundary");
+assert.equal(galleryPlayInfoLookups, 1, "explicit gallery play-info must perform one gallery lookup");
 
 let stampNow = 1000;
 let synchronousStampReads = 0;

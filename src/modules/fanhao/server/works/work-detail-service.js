@@ -45,9 +45,11 @@ export function createWorkDetailService({
     return payload;
   }
 
-  async function playInfoPayload(videoId) {
-    const galleryItem = galleryMediaService.byId(videoId);
-    const file = galleryItem ? galleryMediaService.videoFile(galleryItem) : library.filesById.get(videoId);
+  async function playInfoPayload(videoId, options = {}) {
+    const preferGallery = options.source === "gallery";
+    const libraryFile = preferGallery ? null : library.filesById.get(videoId);
+    const galleryItem = libraryFile ? null : galleryMediaService.byId(videoId);
+    const file = libraryFile || (galleryItem ? galleryMediaService.videoFile(galleryItem) : null);
     if (!file || file.type !== "video") return null;
 
     return videoProbeService.playInfoForFileAsync(file, videoId, galleryItem ? { streamBase: "/media/gallery-video" } : {});

@@ -431,7 +431,8 @@ async function playVideo(video) {
   hidePlaybackControls();
 
   try {
-    const playInfo = await api(`/api/playinfo/${encodeURIComponent(video.id)}`);
+    const sourceQuery = mediaId ? "?source=gallery" : "";
+    const playInfo = await api(`/api/playinfo/${encodeURIComponent(video.id)}${sourceQuery}`);
     currentPlayInfo = playInfo;
     const savedProgress = video.progress || (currentWork.progress?.videoId === video.id ? currentWork.progress : null);
     const resumePosition = savedProgress?.position > 5 ? Number(savedProgress.position) : 0;
