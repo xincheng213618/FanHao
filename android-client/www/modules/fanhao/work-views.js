@@ -7,7 +7,7 @@ import { createWorkCards } from "./features/works/cards.js?v=20260717-fanhao-mob
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260717-fanhao-ranking-response-01";
 import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-page-race-01";
 import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260717-fanhao-search-response-01";
-import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-mobile-card-lifecycle-01";
+import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-touch-intent-01";
 import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=20260717-fanhao-work-first-paint-01";
 
 const CONTINUE_PREVIEW_DAYS = 30;

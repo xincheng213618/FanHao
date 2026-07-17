@@ -360,7 +360,8 @@ assert(androidApp.includes("activeSearchController()?.prepare?.(query, searchCon
 assert(androidWorkCards.includes("const cardWorks = new WeakMap()") && androidWorkCards.includes("cardWorks.set(card, work)"), "Android work cards must retain navigation records without attaching them to global state");
 assert(androidWorkViews.includes("roots: [els.viewContent, els.continuePreview]") && androidWorkDetailDataService.includes("function bindContainer(container)"), "Android work-card surfaces must share delegated interaction listeners");
 assert(!androidWorkCards.includes('card.addEventListener("click"') && !androidWorkCards.includes('card.addEventListener("keydown"') && !androidWorkCards.includes('person.addEventListener("click"'), "Android work cards must not allocate navigation listeners per item");
-assert(androidWorkDetailDataService.includes('container.addEventListener("pointerover"') && androidWorkDetailDataService.includes('container.addEventListener("focusin"') && androidWorkDetailDataService.includes('container.addEventListener("pointerdown"'), "Android pointer, keyboard, and touch work intent must use delegated preparation");
+assert(androidWorkDetailDataService.includes('container.addEventListener("pointerover"') && androidWorkDetailDataService.includes('container.addEventListener("focusin"') && androidWorkDetailDataService.includes("bindActivationIntent(container") && androidWorkDetailDataService.includes('target.addEventListener("pointerup"'), "Android mouse, keyboard, and confirmed touch intent must use delegated preparation");
+assert(androidWorkDetailDataService.includes("TOUCH_TAP_SLOP_PX") && androidWorkDetailDataService.includes('event.pointerType === "touch"'), "Android work intent must distinguish taps from touch scrolling");
 assert(androidWorkCards.includes('person.dataset.workIntentIgnore = "1"') && androidWorkDetailDataService.includes('target.closest("[data-work-intent-ignore]")'), "Android person navigation must not prefetch the surrounding work detail");
 assert(read("android-client/www/modules/fanhao/detail-views.js").includes("workDetailDataService.load(workId") && androidWorkDetailDataService.includes("pageDataService.load(getActiveUrl(), path(workId)"), "Android work detail navigation must reuse the shared page race");
 assert((androidDetailViews.match(/pageDataService\.load\(activeUrl, path/g) || []).length >= 2 && androidFanhaoModule.includes("pageDataService: workViews.pageDataService"), "Android person and related-work navigation must share the cache/network race");
@@ -517,11 +518,17 @@ const delegatedPersonButton = {
 };
 workDetailDataService.bindContainer(delegatedWorkIntentRoot);
 workDetailDataService.bindContainer(delegatedWorkIntentRoot);
-assert.equal(delegatedWorkIntentListenerCount, 4, "Android work intent must allocate four listeners per persistent surface only once");
+assert.equal(delegatedWorkIntentListenerCount, 6, "Android work intent must allocate one gesture-aware listener set per persistent surface only once");
 delegatedWorkIntentHandlers.get("pointerdown")({ target: delegatedPersonButton });
 assert.equal(warmedWorkDetailPaths.length, 1, "touching a person button must not warm its surrounding work detail");
-delegatedWorkIntentHandlers.get("pointerdown")({ target: delegatedWorkBody });
-assert.deepEqual(warmedWorkDetailPaths[1], ["http://fanhao.local", "/api/works/delegated-work"], "touching a work card must still warm the exact detail request");
+delegatedWorkIntentHandlers.get("pointerdown")({ target: delegatedWorkBody, pointerType: "mouse" });
+assert.deepEqual(warmedWorkDetailPaths[1], ["http://fanhao.local", "/api/works/delegated-work"], "mouse activation must still warm the exact detail request");
+delegatedWorkIntentHandlers.get("pointerdown")({ target: delegatedWorkBody, pointerType: "touch", pointerId: 7, clientX: 20, clientY: 20 });
+delegatedWorkIntentHandlers.get("pointerup")({ target: delegatedWorkBody, pointerType: "touch", pointerId: 7, clientX: 20, clientY: 80 });
+assert.equal(warmedWorkDetailPaths.length, 2, "touch scrolling must not warm an incidental work detail");
+delegatedWorkIntentHandlers.get("pointerdown")({ target: delegatedWorkBody, pointerType: "touch", pointerId: 8, clientX: 20, clientY: 20 });
+delegatedWorkIntentHandlers.get("pointerup")({ target: delegatedWorkBody, pointerType: "touch", pointerId: 8, clientX: 24, clientY: 25 });
+assert.deepEqual(warmedWorkDetailPaths[2], ["http://fanhao.local", "/api/works/delegated-work"], "a confirmed touch tap must still warm the exact detail request");
 const fastWorkPageDataService = createWorkPageDataService({
   fetchJson: async () => ({ work: { id: "fast-work" } }),
   readCachedJson: () => new Promise(() => {}),
@@ -581,10 +588,11 @@ assert(!androidDetailViews.includes("limit=2000"), "Android person details must 
 assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && androidDetailViews.includes("正在加载作品"), "Android person navigation must paint the local index before the network request completes");
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-person-page-race-01'), "Android person-page race changes must use a fresh detail-view URL");
-assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-mobile-card-lifecycle-01'), "Android page-race service and delegated intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-person-page-race-01'), "Android person-page race changes must use a fresh work-view URL");
+assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-touch-intent-01'), "Android touch-intent changes must use a fresh work-view URL");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must use a fresh people-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-people-return-cache-01') && androidIndexHtml.includes('app.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must refresh the module and app entry chain");
+assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-touch-intent-01'), "Android touch-intent changes must refresh the FanHao module entry chain");
+assert(androidIndexHtml.includes('app.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must retain its current app entry URL");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
