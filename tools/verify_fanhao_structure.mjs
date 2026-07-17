@@ -114,6 +114,8 @@ assert(webApp.includes("void playbackPrefetch.prepare(work.id)") && playbackPref
 assert(playbackPrefetchSource.includes('target.addEventListener("pointerenter"') && playbackPrefetchSource.includes('target.addEventListener("pointerdown"'), "desktop hover and touch press must share playback preparation");
 assert(workRoutesApiSource.includes("playbackPrewarmPayload") && workRoutesApiSource.includes("/playback-prewarm$"), "FanHao must expose a focused playback-prewarm route");
 assert(workDetailServiceSource.includes("replaceQueued: true") && workDetailServiceSource.includes("concurrency: 3"), "playback intent must take priority over speculative list probes without awaiting them");
+assert(workDetailServiceSource.includes("const detailCache = new Map()") && workDetailServiceSource.includes("detailCacheStamp"), "work details must stay reusable across card intent and player startup");
+assert(workDetailServiceSource.includes("const detail = detailPayload(workId)") && workDetailServiceSource.includes("detailReady: true"), "playback preparation must hydrate the complete work detail before player navigation");
 assert(workActionsSource.includes("captureFavoriteSnapshot") && workActionsSource.includes("restoreFavoriteSnapshot"), "optimistic favorite feedback must roll back cleanly after API failures");
 assert(peoplePageSource.includes('["pointerenter", "focus", "pointerdown"]') && peoplePageSource.includes("preparePersonProfile?.()"), "person cards must prefetch profile code before or alongside the detail API request");
 assert(lazyPersonProfileSource.includes("renderVersion") && lazyPersonProfileSource.includes("version !== renderVersion"), "late profile modules must not render after navigation invalidates them");
@@ -1483,8 +1485,18 @@ assert.equal(scheduledPlaybackPrefetch, null, "leaving a work card must cancel i
 
 const preferredPlaybackVideo = { id: "video-b", path: "G:/work/video-b.mp4", playable: true };
 let preparedPlayback = null;
+let detailMaterializations = 0;
+let workDetailStamp = "detail-1";
 const workDetailService = createWorkDetailService({
+  library: { scannedAt: "scan-1", peopleById: new Map() },
+  peoplePayloadStamp: () => "people-1",
   playbackProgressService: { getWorkProgress: () => ({ videoId: "video-b" }) },
+  prewarmCoreWorkCovers: () => {},
+  prewarmRemoteImagesForWorks: () => {},
+  publicWork: (work) => {
+    detailMaterializations += 1;
+    return { id: work.id, videos: work.videos };
+  },
   resolveLibraryWorkByPublicId: (workId) => workId === "work-1"
     ? {
         id: workId,
@@ -1494,17 +1506,26 @@ const workDetailService = createWorkDetailService({
         ]
       }
     : null,
+  userStateStamp: () => "user-1",
   videoProbeService: {
     prewarm(files, options) {
       preparedPlayback = { files, options };
       return { queued: 1, active: 1, pending: 0 };
     }
-  }
+  },
+  workQueryStamp: () => workDetailStamp
 });
 const playbackPrewarmPayload = workDetailService.playbackPrewarmPayload("work-1");
 assert.equal(playbackPrewarmPayload.videoId, "video-b", "playback preparation must prefer the user's latest video progress");
+assert.equal(playbackPrewarmPayload.detailReady, true, "playback preparation must report complete detail hydration");
 assert.deepEqual(preparedPlayback.files, [preferredPlaybackVideo], "playback preparation must enqueue only the selected video");
 assert.equal(preparedPlayback.options.replaceQueued, true, "explicit playback intent must replace lower-priority queued probes");
+const prefetchedWorkDetail = workDetailService.detailPayload("work-1");
+assert.equal(prefetchedWorkDetail.work.id, "work-1", "the player detail request must reuse the prefetched work");
+assert.equal(detailMaterializations, 1, "playback intent and the following player request must share one detail materialization");
+workDetailStamp = "detail-2";
+workDetailService.detailPayload("work-1");
+assert.equal(detailMaterializations, 2, "work detail cache entries must invalidate when their source stamp changes");
 assert.equal(workDetailService.playbackPrewarmPayload("missing-work"), null, "playback preparation must preserve missing-work semantics");
 
 let stampNow = 1000;
