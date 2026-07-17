@@ -31,6 +31,7 @@ export function createPeopleViews(context) {
     getActiveUrl,
     rootMargin: PERSON_AVATAR_ROOT_MARGIN
   });
+  let peopleIndexCache = null;
 
   function visiblePeople(people) {
     return (people || []).filter((person) => person?.actorProfile?.gender !== "male");
@@ -53,22 +54,35 @@ export function createPeopleViews(context) {
   function renderPeopleIndex() {
     setActiveBottom("people");
     const sortMode = getPeopleSortMode();
-    const people = visiblePeople(getLibrary()?.people).sort((a, b) => comparePeople(a, b, sortMode));
+    const sourcePeople = getLibrary()?.people || [];
+    if (restorePeopleIndex(sourcePeople, sortMode)) return;
+
+    const people = visiblePeople(sourcePeople).sort((a, b) => comparePeople(a, b, sortMode));
     const visible = people.slice(0, getPeopleLimit());
     indexAvatarLoader.reset();
 
     els.viewKicker.textContent = "人物索引";
     els.viewTitle.textContent = "全部人物";
     els.viewMeta.textContent = `${formatNumber(people.length)} 人 · ${sortDescription(sortMode)}`;
-    els.viewContent.innerHTML = "";
-    els.viewContent.append(createPeopleSortControls(sortMode));
-
+    const controls = createPeopleSortControls(sortMode);
     const grid = document.createElement("div");
     grid.className = "people-grid";
     appendPeopleCards(grid, visible, indexAvatarLoader);
-    els.viewContent.append(grid);
+    peopleIndexCache = { controls, grid, loadMore: null, people, sortMode, sourcePeople };
+    els.viewContent.replaceChildren(controls, grid);
+    appendPeopleIndexLoadMore(peopleIndexCache);
+  }
 
-    appendPeopleIndexLoadMore(grid, people);
+  function restorePeopleIndex(sourcePeople, sortMode) {
+    const cache = peopleIndexCache;
+    if (!cache || cache.sourcePeople !== sourcePeople || cache.sortMode !== sortMode) return false;
+    syncPeopleLimit(cache.grid.children.length);
+    els.viewKicker.textContent = "人物索引";
+    els.viewTitle.textContent = "全部人物";
+    els.viewMeta.textContent = `${formatNumber(cache.people.length)} 人 · ${sortDescription(sortMode)}`;
+    const nodes = cache.loadMore ? [cache.controls, cache.grid, cache.loadMore] : [cache.controls, cache.grid];
+    els.viewContent.replaceChildren(...nodes);
+    return true;
   }
 
   function appendPeopleCards(grid, people, avatarLoader) {
@@ -77,19 +91,34 @@ export function createPeopleViews(context) {
     grid.append(fragment);
   }
 
-  function appendPeopleIndexLoadMore(grid, people) {
+  function appendPeopleIndexLoadMore(cache) {
+    const { grid, people } = cache;
     const visibleCount = grid.children.length;
-    if (visibleCount >= people.length) return;
+    if (visibleCount >= people.length) {
+      cache.loadMore = null;
+      return;
+    }
 
     const loadMore = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visibleCount)} / ${formatNumber(people.length)}`, () => {
       const start = grid.children.length;
+      syncPeopleLimit(start);
       increasePeopleLimit(PEOPLE_PAGE_SIZE);
       const nextLimit = Math.min(people.length, getPeopleLimit());
       appendPeopleCards(grid, people.slice(start, nextLimit), indexAvatarLoader);
       loadMore.remove();
-      appendPeopleIndexLoadMore(grid, people);
+      cache.loadMore = null;
+      appendPeopleIndexLoadMore(cache);
     });
+    cache.loadMore = loadMore;
     els.viewContent.append(loadMore);
+  }
+
+  function syncPeopleLimit(renderedCount) {
+    while (getPeopleLimit() < renderedCount) {
+      const before = getPeopleLimit();
+      increasePeopleLimit(Math.min(PEOPLE_PAGE_SIZE, renderedCount - before));
+      if (getPeopleLimit() <= before) break;
+    }
   }
 
   function sortPeople(a, b) {

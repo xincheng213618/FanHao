@@ -323,6 +323,8 @@ assert(androidApp.includes("const FAST_PEOPLE_STEP = 64"), "Android people index
 assert(!androidApp.includes("return fast ? 480"), "Android FanHao detail and collection views must not restore oversized initial requests");
 assert(androidPeopleViews.includes("avatarLoader.schedule(visual, imagePath)"), "Android people avatars must wait until their cards approach the viewport");
 assert(androidPeopleViews.includes("appendPeopleCards(grid, people.slice(start, nextLimit)"), "Android people continuation must append only the next page");
+assert(androidPeopleViews.includes("restorePeopleIndex(sourcePeople, sortMode)") && androidPeopleViews.includes("cache.sourcePeople !== sourcePeople"), "Android people navigation must restore the current library index without rebuilding it");
+assert(androidPeopleViews.includes("els.viewContent.replaceChildren(...nodes)") && androidPeopleViews.includes("syncPeopleLimit(cache.grid.children.length)"), "Android people restoration must retain loaded cards and synchronize continuation with the rendered count");
 assert(!androidPeopleViews.includes("renderCurrentViewPreservingScroll"), "Android people continuation must not rebuild the existing index");
 assert(androidWorkCards.includes("coverLoader.schedule(thumb, imagePath)"), "Android work cards must defer cover reads until they approach the viewport");
 assert(androidWorkViews.includes("workCards.resetCoverLoading();"), "Android work navigation must cancel stale offscreen cover work");
@@ -516,7 +518,8 @@ assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).f
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-person-page-race-01'), "Android person-page race changes must use a fresh detail-view URL");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-mobile-card-lifecycle-01'), "Android page-race service and delegated intent changes must retain fresh module URLs");
 assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-person-page-race-01'), "Android person-page race changes must use a fresh work-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-person-page-race-01') && androidIndexHtml.includes('app.js?v=20260717-fanhao-person-page-race-01'), "Android person-page race changes must refresh the module and app entry chain");
+assert(androidFanhaoIndex.includes('people-views.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must use a fresh people-view URL");
+assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-people-return-cache-01') && androidIndexHtml.includes('app.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must refresh the module and app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
