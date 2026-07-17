@@ -3,10 +3,11 @@ import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260702-novel-loca
 import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260702-novel-local-manage-74";
 import { formatNumber } from "../../js/format.js";
 import { createWorkListState } from "../../js/work-filtering.js?v=20260710-western-merge-01";
-import { createWorkCards } from "./features/works/cards.js?v=20260717-fanhao-work-covers-01";
+import { createWorkCards } from "./features/works/cards.js?v=20260717-fanhao-work-detail-response-01";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260717-fanhao-ranking-response-01";
 import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-work-response-01";
 import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260717-fanhao-search-response-01";
+import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-work-detail-response-01";
 
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
@@ -50,8 +51,9 @@ export function createWorkViews(context) {
   const renderFavoriteExtras = context.renderFavoriteExtras || (() => {});
   const workListState = createWorkListState({ renderCurrentView });
   let selectedFavoriteFolderId = "all";
-  const workCards = createWorkCards({ getActiveUrl, showView });
   const pageDataService = createWorkPageDataService({ fetchJson, writeCachedJson });
+  const workDetailDataService = createWorkDetailDataService({ getActiveUrl, pageDataService, readCachedJson });
+  const workCards = createWorkCards({ getActiveUrl, showView, workDetailDataService });
   const searchDataService = createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageDataService, workListState });
   const rankingViews = createRankingViews({
     els,
@@ -731,6 +733,7 @@ export function createWorkViews(context) {
     renderWorkCollection,
     renderSearchResults,
     warmSearch: searchDataService.warm,
+    workDetailDataService,
     refreshRankingCache,
     renderWorks,
     createChip: workCards.createChip,
@@ -738,10 +741,5 @@ export function createWorkViews(context) {
     renderMessage
   };
 }
-
-
-
-
-
 
 

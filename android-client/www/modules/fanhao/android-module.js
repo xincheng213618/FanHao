@@ -1,4 +1,4 @@
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260717-fanhao-search-response-01";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260717-fanhao-work-detail-response-01";
 
 const ROOT_VIEWS = ["works", "rankings", "studios", "vr", "people", "favorites"];
 const CHROME_TABS = [
@@ -52,7 +52,8 @@ export function createAndroidModule({ host }) {
     renderCurrentViewPreservingScroll: host.ui.renderCurrentViewPreservingScroll,
     mediaViewer: host.mediaViewer,
     goBack: host.navigation.goBack,
-    onUserStateChange: host.favorites.onUserStateChange
+    onUserStateChange: host.favorites.onUserStateChange,
+    workDetailDataService: workViews.workDetailDataService
   });
 
   return {

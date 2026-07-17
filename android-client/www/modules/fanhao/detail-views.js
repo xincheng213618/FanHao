@@ -27,7 +27,8 @@ export function createDetailViews(context) {
     renderCurrentViewPreservingScroll = () => {},
     mediaViewer,
     goBack = () => window.history.back(),
-    onUserStateChange
+    onUserStateChange,
+    workDetailDataService
   } = context;
   const videoSection = createAndroidVideoSection({ getActiveUrl, openInLibrary });
   const infoSection = createInfoPreviewSection({ getActiveUrl });
@@ -235,25 +236,25 @@ export function createDetailViews(context) {
     if (value.startsWith("r:/")) return "欧美";
     return "";
   }
-
   async function renderWorkDetail(workId, isActive = () => true) {
-    const activeUrl = getActiveUrl();
     setActiveBottom("works");
     els.viewKicker.textContent = "作品详情";
     els.viewTitle.textContent = "正在加载";
     els.viewMeta.textContent = "";
     els.viewContent.innerHTML = `<div class="loading-row">正在加载作品详情</div>`;
-    const path = `/api/works/${encodeURIComponent(workId)}`;
     let renderedCache = false;
-
-    const renderWorkData = (data, cacheEntry = null) => {
+    const applyWorkHeader = (data, cacheEntry = null) => {
       const work = data.work;
-      const person = data.person || null;
       const code = extractWorkCode(work);
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
       els.viewTitle.textContent = code || work.title || work.directoryName || "作品";
       const personName = workPersonName(work);
       els.viewMeta.textContent = personName ? `${personName}${suffix}` : suffix.trim();
+    };
+    const renderWorkData = (data, cacheEntry = null) => {
+      const work = data.work;
+      const person = data.person || null;
+      applyWorkHeader(data, cacheEntry);
       els.viewContent.innerHTML = "";
       const playbackSection = videoSection.createVideoList(work, { showFiles: false, showTitle: false });
       els.viewContent.append(createWorkDetailHero(work, () => videoSection.playDefaultVideo(playbackSection, work)));
@@ -271,19 +272,21 @@ export function createDetailViews(context) {
       const relatedPanel = createRelatedWorksPanel(work, person, isActive);
       if (relatedPanel) els.viewContent.append(relatedPanel);
     };
-
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    if (!isActive()) return;
-    if (cached?.payload?.work) {
-      renderedCache = true;
-      renderWorkData(cached.payload, cached);
-    }
-
     try {
-      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
-      writeCachedJson(activeUrl, path, data).catch(() => {});
-      if (!isActive()) return;
-      renderWorkData(data);
+      const result = await workDetailDataService.load(workId, {
+        signal: isActive.signal,
+        isActive,
+        onCached(data, cacheEntry) {
+          renderedCache = true;
+          renderWorkData(data, cacheEntry);
+        }
+      });
+      if (!result || !isActive()) return;
+      if (result.unchanged) {
+        applyWorkHeader(result.data);
+        return;
+      }
+      renderWorkData(result.data);
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
@@ -294,12 +297,10 @@ export function createDetailViews(context) {
       }
     }
   }
-
   function createWorkDetailHero(work, onDirectPlay) {
     const activeUrl = getActiveUrl();
     const hero = document.createElement("div");
     hero.className = "detail-hero work-detail-hero";
-
     const cover = document.createElement("button");
     cover.type = "button";
     cover.className = "work-detail-cover work-detail-play-cover";
@@ -835,7 +836,11 @@ export function createDetailViews(context) {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "related-work-card";
-    card.addEventListener("click", () => showView("workDetail", { workId: work.id }, { push: true }));
+    workDetailDataService.bind(card, work.id);
+    card.addEventListener("click", () => {
+      void workDetailDataService.warm(work.id);
+      showView("workDetail", { workId: work.id }, { push: true });
+    });
 
     const thumb = document.createElement("div");
     thumb.className = "related-work-thumb";

@@ -2,7 +2,7 @@ import { formatDate, formatNumber } from "../../../../js/format.js";
 import { imageUrlForWork } from "../../../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { createWorkCoverLoader } from "./cover-loader.js?v=20260717-fanhao-work-covers-01";
 
-export function createWorkCards({ getActiveUrl, showView }) {
+export function createWorkCards({ getActiveUrl, showView, workDetailDataService = null }) {
   const coverLoader = createWorkCoverLoader({ getActiveUrl });
 
   function createWorkCard(work, options = {}) {
@@ -18,6 +18,7 @@ export function createWorkCards({ getActiveUrl, showView }) {
       event.preventDefault();
       openWorkCard(work);
     });
+    if (!work.missingLocal) workDetailDataService?.bind(card, work.id);
 
     const thumb = document.createElement("div");
     thumb.className = "work-thumb";
@@ -69,6 +70,7 @@ export function createWorkCards({ getActiveUrl, showView }) {
       if (work.javdbUrl) window.open(work.javdbUrl, "_blank", "noreferrer");
       return;
     }
+    void workDetailDataService?.warm(work.id);
     showView("workDetail", { workId: work.id }, { push: true });
   }
 

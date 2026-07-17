@@ -33,6 +33,7 @@ import { tableStampValue } from "../src/modules/fanhao/server/library/table-stam
 import { fetchPreparedImage } from "../android-client/www/js/image.js";
 import { createWorkCoverLoader } from "../android-client/www/modules/fanhao/features/works/cover-loader.js";
 import { createWorkPageDataService } from "../android-client/www/modules/fanhao/features/works/page-data-service.js";
+import { createWorkDetailDataService } from "../android-client/www/modules/fanhao/features/works/detail-data-service.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -284,6 +285,7 @@ for (const relativePath of [
 const androidWorkViews = read("android-client/www/modules/fanhao/work-views.js");
 const androidWorkPageDataService = read("android-client/www/modules/fanhao/features/works/page-data-service.js");
 const androidWorkSearchDataService = read("android-client/www/modules/fanhao/features/works/search-data-service.js");
+const androidWorkDetailDataService = read("android-client/www/modules/fanhao/features/works/detail-data-service.js");
 const androidApp = read("android-client/www/app.js");
 const androidIndexHtml = read("android-client/www/index.html");
 const androidFanhaoModule = read("android-client/www/modules/fanhao/android-module.js");
@@ -327,6 +329,9 @@ assert(androidWorkViews.includes("pageDataService.fetch(activeUrl, path") && and
 assert(androidWorkViews.includes('button.addEventListener("pointerdown", warmDetail'), "Android studio cards and series chips must begin loading on touch press");
 assert(androidFanhaoModule.includes("prepare(query)") && androidWorkViews.includes("warmSearch: searchDataService.warm"), "Android search input must warm the exact page consumed by navigation");
 assert(androidApp.includes("activeSearchController()?.prepare?.(query, searchContext())"), "Android shared search shell must debounce module-owned preparation");
+assert(androidWorkCards.includes("workDetailDataService?.bind(card, work.id)") && androidWorkDetailDataService.includes('target.addEventListener("pointerdown"'), "Android work cards must prepare details from touch intent");
+assert(read("android-client/www/modules/fanhao/detail-views.js").includes("workDetailDataService.load(workId") && androidWorkDetailDataService.includes("const freshRequest = fetch(workId, options)"), "Android work detail navigation must overlap cache reads with the live request");
+assert(androidWorkViews.includes('cards.js?v=20260717-fanhao-work-detail-response-01'), "Android work-detail changes must refresh the card module URL");
 let resolveWarmedWorkPage;
 let workPageFetchCount = 0;
 const writtenWorkPages = [];
@@ -362,6 +367,51 @@ await workPageDataService.fetch("http://fanhao.local", completedWarmPath, { reus
 assert.equal(workPageFetchCount, 3, "Android touch navigation must consume a just-completed warmup without a second request");
 await workPageDataService.fetch("http://fanhao.local", completedWarmPath);
 assert.equal(workPageFetchCount, 4, "ordinary Android navigation must still revalidate a completed cached page");
+let resolveWorkDetailFetch;
+let resolveWorkDetailCache;
+const workDetailLoadOrder = [];
+const warmedWorkDetailPaths = [];
+const pendingWorkDetailFetch = new Promise((resolve) => { resolveWorkDetailFetch = resolve; });
+const pendingWorkDetailCache = new Promise((resolve) => { resolveWorkDetailCache = resolve; });
+const workDetailDataService = createWorkDetailDataService({
+  getActiveUrl: () => "http://fanhao.local",
+  pageDataService: {
+    fetch(activeUrl, requestPath, options) {
+      workDetailLoadOrder.push(["fetch", activeUrl, requestPath, options.reuseWarmed]);
+      return pendingWorkDetailFetch;
+    },
+    warm(activeUrl, paths) {
+      warmedWorkDetailPaths.push([activeUrl, ...paths]);
+      return Promise.resolve([]);
+    }
+  },
+  readCachedJson(activeUrl, requestPath) {
+    workDetailLoadOrder.push(["cache", activeUrl, requestPath]);
+    return pendingWorkDetailCache;
+  }
+});
+let cachedWorkDetailRendered = false;
+const workDetailLoad = workDetailDataService.load("work / 1", {
+  onCached() { cachedWorkDetailRendered = true; }
+});
+assert.deepEqual(workDetailLoadOrder.map((item) => item[0]), ["fetch", "cache"], "Android work detail must start the live request before awaiting IndexedDB");
+resolveWorkDetailCache({ payload: { work: { id: "work / 1" } }, updatedAt: Date.now() });
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(cachedWorkDetailRendered, true, "Android work detail must still paint an available cached response immediately");
+resolveWorkDetailFetch({ work: { id: "work / 1" } });
+assert.equal((await workDetailLoad).unchanged, true, "identical fresh work details must avoid rebuilding the cached detail DOM");
+workDetailDataService.warm("work / 1");
+assert.deepEqual(warmedWorkDetailPaths[0], ["http://fanhao.local", "/api/works/work%20%2F%201"], "Android work intent must warm the exact encoded detail path");
+const fastWorkDetailDataService = createWorkDetailDataService({
+  getActiveUrl: () => "http://fanhao.local",
+  pageDataService: {
+    fetch: async () => ({ work: { id: "fast-work" } }),
+    warm: async () => []
+  },
+  readCachedJson: () => new Promise(() => {})
+});
+const fastWorkDetail = await fastWorkDetailDataService.load("fast-work");
+assert.equal(fastWorkDetail.data.work.id, "fast-work", "a fast Android detail response must not wait for a stalled IndexedDB read");
 let coverObserverCallback = null;
 let coverObserverOptions = null;
 let coverObserverDisconnected = 0;
@@ -410,9 +460,9 @@ assert(androidDetailViews.includes("hasServerMore:"), "Android person details mu
 assert(!androidDetailViews.includes("limit=2000"), "Android person details must not fetch every work before first render");
 assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && androidDetailViews.includes("正在加载作品"), "Android person navigation must paint the local index before the network request completes");
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
-assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-person-detail-01'), "Android person-detail changes must use a fresh module URL");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-search-response-01'), "Android search-response changes must use a fresh work-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-search-response-01') && androidIndexHtml.includes('app.js?v=20260717-fanhao-search-response-01'), "Android search-response changes must refresh the module and app entry chain");
+assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-work-detail-response-01'), "Android work-detail changes must use a fresh detail-view URL");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-work-detail-response-01'), "Android work-detail changes must use a fresh work-view URL");
+assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-work-detail-response-01') && androidIndexHtml.includes('app.js?v=20260717-fanhao-work-detail-response-01'), "Android work-detail changes must refresh the module and app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
