@@ -475,7 +475,8 @@ const rankingService = createRankingService({
   prewarmRemoteImagesForWorks,
   proxiedRemoteImageUrl,
   publicWork,
-  storedWorkCodeKey
+  storedWorkCodeKey,
+  userStateStamp: () => userStateService.revision()
 });
 const actorMovieService = createActorMovieService({
   createId,

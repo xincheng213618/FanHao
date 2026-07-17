@@ -95,9 +95,9 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-person-detail-01'), "person-detail changes must refresh the FanHao browser entry");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-person-detail-01'), "person-detail changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260717-fanhao-person-detail-01'), "person-detail changes must refresh the FanHao module barrel");
+assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-ranking-response-01'), "ranking-response changes must refresh the FanHao browser entry");
+assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-ranking-response-01'), "ranking-response changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260717-fanhao-ranking-response-01'), "ranking-response changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -150,7 +150,7 @@ assert(webApp.includes('globalThis.matchMedia?.("(max-width: 720px)")') && webAp
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
 assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-person-detail-01'), "person navigation changes must use a fresh browser module URL");
-assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260717-fanhao-ranking-first-page-01'), "ranking navigation changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260717-fanhao-ranking-response-01'), "ranking navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('collection-page.js?v=20260717-fanhao-collection-prefetch-04'), "collection navigation changes must use a fresh browser module URL");
 assert(peoplePageSource.includes("const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64") && peoplePageSource.includes("const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48"), "person details must keep desktop and mobile first payloads bounded");
 assert(peoplePageSource.includes("const personDetailPrefetches = new Map()") && peoplePageSource.includes("reusePrefetch: true"), "person interactions must reuse prepared detail requests instead of issuing a duplicate click request");
@@ -166,6 +166,7 @@ assert(searchRequestSource.includes("const request = requests.begin()"), "search
 assert(searchRequestSource.includes("return request.isCurrent() ? data : null"), "stale search responses must not overwrite current navigation");
 assert(rankingPageSource.includes("const rankingRequests = createLatestRequestGate()"), "ranking navigation must own a cancellable latest request");
 assert(rankingPageSource.includes('state.activeView !== "rankings"'), "stale ranking responses must not overwrite newer navigation");
+assert(rankingPageSource.includes("const [summary, anticipatedData] = await Promise.all(["), "Web ranking activation must overlap summary and first-page requests");
 assert(webApp.includes('if (view !== "rankings") rankingPage.cancelPendingRequests()'), "leaving rankings must cancel pending requests");
 assert(studioPageSource.includes("const studioRequests = createLatestRequestGate()"), "studio navigation must own a cancellable latest request");
 assert(studioPageSource.includes('state.activeView !== "studios"'), "stale studio responses must not overwrite newer navigation");
@@ -274,7 +275,7 @@ assert(androidWorkViews.includes("workCards.resetCoverLoading();"), "Android wor
 assert(androidWorkCoverLoader.includes('const WORK_COVER_ROOT_MARGIN = "720px 0px"'), "Android work covers must start shortly before they enter the viewport");
 assert(androidViewportImageLoader.includes("const pending = new Map()"), "Android viewport image loading must share one focused queue implementation");
 assert(androidListStyles.includes("content-visibility: auto") && androidListStyles.includes("contain-intrinsic-size: auto 128px"), "Android work cards must skip offscreen layout and painting");
-assert(androidRankingViews.includes("const PAGE_SIZE = 80"), "Android rankings must request a bounded first page");
+assert(androidRankingViews.includes("const PAGE_SIZE = 48"), "Android rankings must request a phone-sized first page");
 assert(androidRankingViews.includes("hasServerMore:"), "Android rankings must preserve server-side continuation");
 assert(androidWorkViews.includes("options.hasServerMore"), "Android work rendering must expose server-side continuation");
 assert(androidWorkViews.includes("/api/history?limit=${limit}&offset=0"), "Android history must request a bounded first page");
@@ -328,6 +329,8 @@ assert(!androidDetailViews.includes("limit=2000"), "Android person details must 
 assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && androidDetailViews.includes("正在加载作品"), "Android person navigation must paint the local index before the network request completes");
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-person-detail-01'), "Android person-detail changes must use a fresh module URL");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-ranking-response-01') && androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking-response changes must use fresh module URLs");
+assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
   assert(!androidDetailViews.includes(`function ${functionName}(`), `Android detail must delegate ${functionName}`);
 }
@@ -502,6 +505,7 @@ assert(!rankingServiceSource.includes("LEFT JOIN images cover"), "ranking list q
 assert(rankingServiceSource.includes("rankingSummariesCache?.stamp === stamp"), "ranking summaries must reuse versioned results");
 assert(rankingServiceSource.includes("const RANKING_PREWARM_PAGE_SIZE = 64"), "ranking startup must prepare the desktop first page");
 assert(rankingServiceSource.includes("rankingWorkSourcesCache.get(cacheKey)"), "ranking pages must reuse prepared local and missing work sources");
+assert(rankingServiceSource.includes("const RANKING_PAGE_CACHE_LIMIT = 64") && rankingServiceSource.includes("userStateStamp()"), "ranking pages must cache complete responses until ranking or user state changes");
 assert(rankingServiceSource.includes("const orderedLists = [preferred, ...topLists.filter"), "ranking startup must prepare the default list first");
 assert(rankingServiceSource.includes("const source = preparedWorkSource(list.type, list.key)"), "ranking startup must prepare every selectable list source");
 assert(rankingServiceSource.includes("prewarmCoreWorkCovers(pageWorks)") && rankingServiceSource.includes("prewarmWorkInfoDetails(pageWorks)"), "ranking startup must batch visible metadata across selectable lists");
@@ -1021,6 +1025,7 @@ assert.equal(studioCatalogReadCount, 2, "studio data changes must refresh catalo
 assert.equal(studioSummaryReadCount, 3, "studio data changes must invalidate aggregate rows");
 
 let rankingDataStamp = "ranking-v1";
+let rankingUserStateStamp = "ranking-user-v1";
 let rankingListReadCount = 0;
 let rankingCoverReadCount = 0;
 let rankingSummaryReadCount = 0;
@@ -1028,6 +1033,7 @@ let rankingSummaryCodesReadCount = 0;
 let rankingLocalMapReadCount = 0;
 let rankingCoverPrewarmCount = 0;
 let rankingInfoPrewarmCount = 0;
+let rankingPublicWorkCount = 0;
 const cachedRankingService = createRankingService({
   clampInteger: (value, fallback, min, max) => Math.max(min, Math.min(max, Number(value ?? fallback))),
   createId: (prefix, value) => `${prefix}:${value}`,
@@ -1083,8 +1089,12 @@ const cachedRankingService = createRankingService({
     rankingInfoPrewarmCount += 1;
   },
   proxiedRemoteImageUrl: (value) => value ? `/proxy?url=${encodeURIComponent(value)}` : "",
-  publicWork: (work) => ({ ...work }),
-  storedWorkCodeKey: (value) => String(value || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase()
+  publicWork: (work) => {
+    rankingPublicWorkCount += 1;
+    return { ...work };
+  },
+  storedWorkCodeKey: (value) => String(value || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase(),
+  userStateStamp: () => rankingUserStateStamp
 });
 cachedRankingService.prewarm();
 assert.equal(rankingSummaryReadCount, 1, "ranking startup must prepare summary rows");
@@ -1101,6 +1111,10 @@ const cachedRankingPayload = cachedRankingService.worksPayload(new URL("http://1
 assert.equal(cachedRankingPayload.works[0]?.remoteCoverUrl, "/proxy?url=https%3A%2F%2Fexample.com%2Franking-101.jpg", "ranking cover batches must preserve the preferred cover URL");
 cachedRankingService.worksPayload(new URL("http://127.0.0.1/api/rankings/top?key=y2025&limit=48"));
 assert.equal(rankingLocalMapReadCount, 1, "repeated ranking pages must reuse the prepared work source");
+assert.equal(rankingPublicWorkCount, 2, "identical ranking pages must reuse the complete prepared response");
+rankingUserStateStamp = "ranking-user-v2";
+cachedRankingService.worksPayload(new URL("http://127.0.0.1/api/rankings/top?key=y2025&limit=48"));
+assert.equal(rankingPublicWorkCount, 4, "favorite and progress changes must invalidate prepared ranking pages");
 cachedRankingService.summaries();
 cachedRankingService.summaries();
 assert.equal(rankingSummaryReadCount, 1, "repeated ranking navigation must reuse summary rows");
@@ -1108,6 +1122,8 @@ assert.equal(rankingSummaryCodesReadCount, 1, "repeated ranking navigation must 
 rankingDataStamp = "ranking-v2";
 cachedRankingService.rows("top", "y2025");
 assert.equal(rankingListReadCount, 2, "ranking updates must invalidate cached list rows");
+cachedRankingService.worksPayload(new URL("http://127.0.0.1/api/rankings/top?key=y2025&limit=48"));
+assert.equal(rankingPublicWorkCount, 6, "ranking updates must invalidate complete prepared pages");
 cachedRankingService.invalidateSearch();
 cachedRankingService.rows("top", "y2025");
 assert.equal(rankingListReadCount, 3, "explicit ranking invalidation must clear cached list rows");

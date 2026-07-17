@@ -4,7 +4,7 @@ import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js
 import { formatNumber } from "../../js/format.js";
 import { createWorkListState } from "../../js/work-filtering.js?v=20260710-western-merge-01";
 import { createWorkCards } from "./features/works/cards.js?v=20260717-fanhao-work-covers-01";
-import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260712-fanhao-refactor-01";
+import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260717-fanhao-ranking-response-01";
 
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;

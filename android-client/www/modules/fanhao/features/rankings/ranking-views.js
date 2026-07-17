@@ -5,7 +5,7 @@ import { absoluteUrl, imageUrlForWork, precacheImage } from "../../../../js/imag
 
 const STORAGE_KEY = "fanhao.android.rankingKey";
 const DEFAULT_KEY = "y2025";
-const PAGE_SIZE = 80;
+const PAGE_SIZE = 48;
 const IMAGE_CACHE_LIMIT = 48;
 let requestedLimit = PAGE_SIZE;
 
@@ -58,9 +58,15 @@ export function createRankingViews(deps) {
       });
     };
 
-    const cachedSummary = await readCachedJson(activeUrl, "/api/rankings").catch(() => null);
+    const anticipatedKey = normalizeKey(selectedKey || DEFAULT_KEY);
+    const [cachedSummary, anticipatedCache] = await Promise.all([
+      readCachedJson(activeUrl, "/api/rankings").catch(() => null),
+      readCachedJson(activeUrl, topPath(anticipatedKey)).catch(() => null)
+    ]);
     const requestedKey = chooseKey(cachedSummary?.payload?.lists || [], selectedKey);
-    const cachedData = await readCachedJson(activeUrl, topPath(requestedKey)).catch(() => null);
+    const cachedData = requestedKey === anticipatedKey
+      ? anticipatedCache
+      : await readCachedJson(activeUrl, topPath(requestedKey)).catch(() => null);
     if (!isActive()) return;
     if (cachedData?.payload) {
       renderedCache = true;
@@ -104,10 +110,18 @@ export function createRankingViews(deps) {
   }
 
   async function fetchBundle(activeUrl, preferredKey = selectedKey, signal = undefined) {
-    const summary = await fetchJson(activeUrl, "/api/rankings", { timeoutMs: 12000, signal });
-    await writeCachedJson(activeUrl, "/api/rankings", summary).catch(() => {});
+    const anticipatedKey = normalizeKey(preferredKey || DEFAULT_KEY);
+    const summaryRequest = fetchJson(activeUrl, "/api/rankings", { timeoutMs: 12000, signal })
+      .then((summary) => {
+        writeCachedJson(activeUrl, "/api/rankings", summary).catch(() => {});
+        return summary;
+      });
+    const [summary, anticipatedData] = await Promise.all([
+      summaryRequest,
+      fetchTop(activeUrl, anticipatedKey, signal)
+    ]);
     const key = chooseKey(summary.lists || [], preferredKey);
-    const data = await fetchTop(activeUrl, key, signal);
+    const data = key === anticipatedKey ? anticipatedData : await fetchTop(activeUrl, key, signal);
     return { summary, data };
   }
 

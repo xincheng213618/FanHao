@@ -37,20 +37,27 @@ export function createRankingPage(deps) {
 
   async function loadRankings() {
     const request = rankingRequests.begin();
-    let loadSelectedRanking = false;
     els.workGrid.innerHTML = `<div class="empty-state">正在加载排行榜</div>`;
     clearPersonSelection();
     state.searchPeople = [];
     setMainHeader("排行榜", "JavDB TOP250 缓存");
 
     try {
-      const summary = await api("/api/rankings", { signal: request.signal });
+      const anticipatedKey = state.selectedRankingKey || "y2025";
+      const [summary, anticipatedData] = await Promise.all([
+        api("/api/rankings", { signal: request.signal }),
+        fetchRankingPage(anticipatedKey, 0, { signal: request.signal })
+      ]);
       if (!request.isCurrent() || state.activeView !== "rankings") return;
       state.rankingLists = summary.lists || [];
       if (state.rankingLists.length && !state.rankingLists.some((item) => item.key === state.selectedRankingKey)) {
         state.selectedRankingKey = state.rankingLists.find((item) => item.key === "y2025")?.key || state.rankingLists[0].key || "";
       }
-      loadSelectedRanking = true;
+      const data = state.selectedRankingKey === anticipatedKey
+        ? anticipatedData
+        : await fetchRankingPage(state.selectedRankingKey || "", 0, { signal: request.signal });
+      if (!request.isCurrent() || state.activeView !== "rankings") return;
+      applyRankingPage(data);
     } catch (error) {
       if (!request.isCurrent() || state.activeView !== "rankings") return;
       hidePersonProfile();
@@ -58,7 +65,6 @@ export function createRankingPage(deps) {
     } finally {
       request.finish();
     }
-    if (loadSelectedRanking) await loadRankingWorks();
   }
 
   function rankingPageSize() {
@@ -85,22 +91,7 @@ export function createRankingPage(deps) {
     try {
       const data = await fetchRankingPage(key, append ? state.works.length : 0, { signal: request.signal });
       if (!request.isCurrent() || state.activeView !== "rankings" || key !== (state.selectedRankingKey || "")) return;
-      if (append) {
-        const seen = new Set(state.works.map((work) => work.id));
-        state.works.push(...(data.works || []).filter((work) => !seen.has(work.id)));
-        state.workVisibleLimit += rankingPageSize();
-      } else {
-        state.works = data.works || [];
-        resetWorkPaging();
-      }
-      state.rankingTotal = data.rankingTotal || data.total || state.works.length;
-      state.rankingMissingTotal = data.missingTotal || 0;
-      state.rankingLocalTotal = data.localTotal || 0;
-      state.rankingUpdatedAt = data.updatedAt || "";
-      state.rankingPageUrl = data.pageUrl || "";
-      renderPanel(data);
-      renderStats(data);
-      renderWorks(state.rankingLists.length ? "这个榜单没有匹配项目。" : "还没有缓存排行榜。");
+      applyRankingPage(data, { append });
     } catch (error) {
       if (!request.isCurrent() || state.activeView !== "rankings") return;
       if (append) throw error;
@@ -108,6 +99,25 @@ export function createRankingPage(deps) {
     } finally {
       request.finish();
     }
+  }
+
+  function applyRankingPage(data, options = {}) {
+    if (options.append) {
+      const seen = new Set(state.works.map((work) => work.id));
+      state.works.push(...(data.works || []).filter((work) => !seen.has(work.id)));
+      state.workVisibleLimit += rankingPageSize();
+    } else {
+      state.works = data.works || [];
+      resetWorkPaging();
+    }
+    state.rankingTotal = data.rankingTotal || data.total || state.works.length;
+    state.rankingMissingTotal = data.missingTotal || 0;
+    state.rankingLocalTotal = data.localTotal || 0;
+    state.rankingUpdatedAt = data.updatedAt || "";
+    state.rankingPageUrl = data.pageUrl || "";
+    renderPanel(data);
+    renderStats(data);
+    renderWorks(state.rankingLists.length ? "这个榜单没有匹配项目。" : "还没有缓存排行榜。");
   }
 
   async function loadMoreRankingWorks(button) {

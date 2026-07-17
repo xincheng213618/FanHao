@@ -1,6 +1,7 @@
 const RANKING_COVER_BATCH_SIZE = 200;
 const DEFAULT_RANKING_KEY = "y2025";
 const RANKING_PREWARM_PAGE_SIZE = 64;
+const RANKING_PAGE_CACHE_LIMIT = 64;
 
 export function createRankingService({
   clampInteger,
@@ -19,12 +20,15 @@ export function createRankingService({
   prewarmRemoteImagesForWorks,
   proxiedRemoteImageUrl,
   publicWork,
-  storedWorkCodeKey
+  storedWorkCodeKey,
+  userStateStamp = () => ""
 }) {
   let rankingMissingSearchCache = null;
   let rankingRowsCache = new Map();
   let rankingSummariesCache = null;
   let rankingWorkSourcesCache = new Map();
+  let rankingPageCache = new Map();
+  let rankingPageCacheStamp = "";
 
   function listLabel(listType, listKey, fallback = "") {
     const key = String(listKey || "");
@@ -273,12 +277,16 @@ export function createRankingService({
 
   function worksPayload(url, listType = "top") {
     const listKey = url.searchParams.get("key") || "";
-    const source = preparedWorkSource(listType, listKey);
-    const { allWorks, localTotal, missingTotal, rankingRows } = source;
     const onlyMissing = ["1", "true", "yes"].includes(String(url.searchParams.get("missing") || "").toLowerCase());
-    const sourceWorks = onlyMissing ? source.missingWorks : allWorks;
     const limit = clampInteger(url.searchParams.get("limit"), maxWorkLimit, 1, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+    const pageCacheKey = `${listType}:${listKey}:${onlyMissing ? "missing" : "all"}:${limit}:${offset}`;
+    const cachedPage = readCachedPage(pageCacheKey);
+    if (cachedPage) return cachedPage;
+
+    const source = preparedWorkSource(listType, listKey);
+    const { allWorks, localTotal, missingTotal, rankingRows } = source;
+    const sourceWorks = onlyMissing ? source.missingWorks : allWorks;
     const pageSource = sourceWorks.slice(offset, offset + limit);
     prewarmCoreWorkCovers(pageSource);
     prewarmWorkInfoDetails(pageSource);
@@ -289,7 +297,7 @@ export function createRankingService({
       const source = sourceById.get(work.id);
       if (source?.ranking) work.ranking = source.ranking;
     }
-    return {
+    const payload = {
       type: listType,
       key: listKey,
       label: listLabel(listType, listKey, rankingRows[0]?.list_label || ""),
@@ -304,6 +312,32 @@ export function createRankingService({
       pageUrl: rankingRows[0]?.page_url || "",
       works: page
     };
+    cachePage(pageCacheKey, payload);
+    return payload;
+  }
+
+  function readCachedPage(cacheKey) {
+    ensurePageCache();
+    if (!rankingPageCache.has(cacheKey)) return null;
+    const cached = rankingPageCache.get(cacheKey);
+    rankingPageCache.delete(cacheKey);
+    rankingPageCache.set(cacheKey, cached);
+    return cached;
+  }
+
+  function cachePage(cacheKey, payload) {
+    ensurePageCache();
+    rankingPageCache.set(cacheKey, payload);
+    while (rankingPageCache.size > RANKING_PAGE_CACHE_LIMIT) {
+      rankingPageCache.delete(rankingPageCache.keys().next().value);
+    }
+  }
+
+  function ensurePageCache() {
+    const stamp = `${getSearchStamp()}:${userStateStamp()}`;
+    if (rankingPageCacheStamp === stamp) return;
+    rankingPageCacheStamp = stamp;
+    rankingPageCache.clear();
   }
 
   function prewarm() {
@@ -386,6 +420,8 @@ export function createRankingService({
     rankingRowsCache = new Map();
     rankingSummariesCache = null;
     rankingWorkSourcesCache = new Map();
+    rankingPageCache = new Map();
+    rankingPageCacheStamp = "";
   }
 
   return {
