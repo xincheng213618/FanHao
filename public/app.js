@@ -96,18 +96,18 @@ let coverLoadQueue = [];
 let coverLoadTimer = null;
 let coverLoadObserver = null;
 const activeCoverImages = new Set();
-const WORK_RENDER_INITIAL_COUNT = 24;
-const WORK_RENDER_BATCH_SIZE = 24;
+const WORK_RENDER_INITIAL_COUNT = 12;
+const WORK_RENDER_BATCH_SIZE = 12;
 const WORK_RENDER_BATCH_DELAY = 16;
 const WORK_DESKTOP_PAGE_SIZE = 64;
 const WORK_MOBILE_PAGE_SIZE = 48;
 const WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 64, lan: 64, remote: 48 });
 const WORK_AUTO_LOAD_DISTANCE = 1400;
-const COVER_LOAD_BATCH_SIZE = 16;
+const COVER_LOAD_BATCH_SIZE = 8;
 const COVER_LOAD_BATCH_DELAY = 45;
-const COVER_EAGER_COUNT = 48;
-const COVER_HIGH_PRIORITY_COUNT = 24;
-const COVER_OBSERVER_ROOT_MARGIN = "900px 0px";
+const COVER_EAGER_COUNT = 12;
+const COVER_HIGH_PRIORITY_COUNT = 8;
+const COVER_OBSERVER_ROOT_MARGIN = "420px 0px";
 const COVER_RETRY_DELAYS = [700, 1400, 2400, 4000, 6500, 9000];
 const initialParams = new URLSearchParams(window.location.search);
 const isAndroidClient = initialParams.get("client") === "android";
@@ -1590,11 +1590,15 @@ function cancelScheduledWorkRendering() {
 
 function appendWorkCardBatch(visible, start, end) {
   const fragment = document.createDocumentFragment();
+  const images = [];
   for (let index = start; index < end; index += 1) {
-    fragment.append(createWorkCard(visible[index], index));
+    const card = createWorkCard(visible[index], index);
+    const image = card.querySelector("img.progressive-cover-image[data-src]");
+    if (image) images.push(image);
+    fragment.append(card);
   }
   els.workGrid.append(fragment);
-  activateProgressiveCoverImages(els.workGrid);
+  activateProgressiveCoverImages(images);
   return end;
 }
 
@@ -1934,6 +1938,7 @@ function appendProgressiveCoverImage(cover, src, index = 0) {
   img.fetchPriority = index < COVER_HIGH_PRIORITY_COUNT ? "high" : index < COVER_EAGER_COUNT ? "auto" : "low";
   img.referrerPolicy = "no-referrer";
   img.alt = "";
+  img.dataset.coverIndex = String(index);
   img.dataset.src = src;
   cover.append(img);
 }
@@ -1946,10 +1951,10 @@ function queueCoverImage(img) {
   scheduleCoverLoadDrain();
 }
 
-function activateProgressiveCoverImages(root) {
-  const images = [...root.querySelectorAll('img.progressive-cover-image[data-src]')];
+function activateProgressiveCoverImages(images = []) {
   const observer = ensureCoverLoadObserver();
-  images.forEach((img, index) => {
+  images.forEach((img) => {
+    const index = Math.max(0, Number(img.dataset.coverIndex) || 0);
     if (index < COVER_EAGER_COUNT || !observer) {
       queueCoverImage(img);
     } else {

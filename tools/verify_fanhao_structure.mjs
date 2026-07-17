@@ -143,7 +143,14 @@ assert(peoplePageSource.includes('root.addEventListener("pointerover"') && peopl
 assert(!peoplePageSource.includes('card.addEventListener("click"') && !peoplePageSource.includes('card.addEventListener("pointerenter"') && !peoplePageSource.includes('card.addEventListener("pointerdown"'), "person cards must not allocate navigation and preparation listeners per item");
 assert(peoplePageSource.includes("preparePersonProfile?.()") && peoplePageSource.includes("prefetchPersonDetails(person.id)"), "delegated person intent must prepare profile code and the exact detail request");
 assert(lazyPersonProfileSource.includes("renderVersion") && lazyPersonProfileSource.includes("version !== renderVersion"), "late profile modules must not render after navigation invalidates them");
-assert(webApp.includes("const WORK_RENDER_INITIAL_COUNT = 24"), "FanHao work lists must render a small first batch for responsive interaction");
+assert(webApp.includes("const WORK_RENDER_INITIAL_COUNT = 12"), "FanHao work lists must render only the above-fold cards before yielding");
+assert(webApp.includes("const WORK_RENDER_BATCH_SIZE = 12"), "FanHao work lists must keep follow-up DOM tasks bounded");
+assert(webApp.includes("const COVER_LOAD_BATCH_SIZE = 8"), "FanHao work covers must keep decode and request bursts bounded");
+assert(webApp.includes("const COVER_EAGER_COUNT = 12"), "FanHao work lists must eagerly load only the above-fold covers");
+assert(webApp.includes('const COVER_OBSERVER_ROOT_MARGIN = "420px 0px"'), "FanHao work covers must preload only a nearby row beyond the viewport");
+assert(webApp.includes("img.dataset.coverIndex = String(index)"), "FanHao work covers must retain their absolute card priority across render batches");
+assert(webApp.includes("activateProgressiveCoverImages(images)"), "FanHao work batches must schedule only newly attached covers");
+assert(!webApp.includes("activateProgressiveCoverImages(els.workGrid)"), "FanHao work batches must not rescan every previously rendered cover");
 assert(webApp.includes("const movedDown = nextScrollY > lastScrollY + 1"), "work continuation must require a real downward scroll before automatic loading");
 assert(webApp.includes("userScrollIntentUntil = Date.now() + 1200"), "automatic work continuation must be armed by recent wheel, touch, keyboard, or scrollbar input");
 assert(webApp.includes("userScrollIntentUntil = 0;\n    scheduleCheck();"), "one user scroll gesture must consume at most one automatic page");
