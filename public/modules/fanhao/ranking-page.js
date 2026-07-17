@@ -1,5 +1,8 @@
 import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
 
+const RANKING_DESKTOP_PAGE_SIZE = 64;
+const RANKING_MOBILE_PAGE_SIZE = 48;
+
 export function createRankingPage(deps) {
   const {
     adminRefreshRankings,
@@ -59,7 +62,10 @@ export function createRankingPage(deps) {
   }
 
   function rankingPageSize() {
-    return Math.max(40, Math.min(96, Number(state.workPageSize) || 48));
+    const viewportPageSize = globalThis.matchMedia?.("(max-width: 720px)")?.matches
+      ? RANKING_MOBILE_PAGE_SIZE
+      : RANKING_DESKTOP_PAGE_SIZE;
+    return Math.max(40, Math.min(viewportPageSize, Number(state.workPageSize) || viewportPageSize));
   }
 
   async function fetchRankingPage(key, offset = 0, options = {}) {

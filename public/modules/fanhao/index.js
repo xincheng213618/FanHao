@@ -1,5 +1,5 @@
 export { createPeoplePage } from "./people-page.js?v=20260717-fanhao-person-prefetch-01";
-export { createRankingPage } from "./ranking-page.js?v=20260717-fanhao-latest-request-01";
+export { createRankingPage } from "./ranking-page.js?v=20260717-fanhao-ranking-first-page-01";
 export { createFanhaoState } from "./state.js?v=20260717-fanhao-perf-05";
 export { createSearchRequestService } from "./search-request-service.js?v=20260717-fanhao-search-request-01";
 export { selectVisibleWorks } from "./features/works/query.js";

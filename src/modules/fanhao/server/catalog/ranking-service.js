@@ -1,4 +1,6 @@
 const RANKING_COVER_BATCH_SIZE = 200;
+const DEFAULT_RANKING_KEY = "y2025";
+const RANKING_PREWARM_PAGE_SIZE = 64;
 
 export function createRankingService({
   clampInteger,
@@ -22,6 +24,7 @@ export function createRankingService({
   let rankingMissingSearchCache = null;
   let rankingRowsCache = new Map();
   let rankingSummariesCache = null;
+  let rankingWorkSourcesCache = new Map();
 
   function listLabel(listType, listKey, fallback = "") {
     const key = String(listKey || "");
@@ -243,15 +246,37 @@ export function createRankingService({
     };
   }
 
-  function worksPayload(url, listType = "top") {
-    const listKey = url.searchParams.get("key") || "";
-    const rankingRows = rows(listType, listKey);
+  function preparedWorkSource(listType = "top", listKey = "") {
+    const normalizedListKey = listKey || "";
+    const stamp = getSearchStamp();
+    const cacheKey = `${listType}:${normalizedListKey}`;
+    const cached = rankingWorkSourcesCache.get(cacheKey);
+    if (cached?.stamp === stamp) return cached.source;
+
+    const rankingRows = rows(listType, normalizedListKey);
     const localByCode = localWorkByCodeKey();
     const allWorks = rankingRows.map((row) => workFromRow(row, localByCode));
-    const localTotal = allWorks.filter((work) => !work.missingLocal).length;
-    const missingTotal = allWorks.length - localTotal;
+    const localWorks = allWorks.filter((work) => !work.missingLocal);
+    const missingWorks = allWorks.filter((work) => work.missingLocal);
+    const source = {
+      allWorks,
+      localTotal: localWorks.length,
+      missingTotal: missingWorks.length,
+      missingWorks,
+      rankingRows
+    };
+    rankingWorkSourcesCache.delete(cacheKey);
+    rankingWorkSourcesCache.set(cacheKey, { stamp, source });
+    while (rankingWorkSourcesCache.size > 32) rankingWorkSourcesCache.delete(rankingWorkSourcesCache.keys().next().value);
+    return source;
+  }
+
+  function worksPayload(url, listType = "top") {
+    const listKey = url.searchParams.get("key") || "";
+    const source = preparedWorkSource(listType, listKey);
+    const { allWorks, localTotal, missingTotal, rankingRows } = source;
     const onlyMissing = ["1", "true", "yes"].includes(String(url.searchParams.get("missing") || "").toLowerCase());
-    const sourceWorks = onlyMissing ? allWorks.filter((work) => work.missingLocal) : allWorks;
+    const sourceWorks = onlyMissing ? source.missingWorks : allWorks;
     const limit = clampInteger(url.searchParams.get("limit"), maxWorkLimit, 1, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const pageSource = sourceWorks.slice(offset, offset + limit);
@@ -279,6 +304,26 @@ export function createRankingService({
       pageUrl: rankingRows[0]?.page_url || "",
       works: page
     };
+  }
+
+  function prewarm() {
+    const lists = summaries();
+    const topLists = lists.filter((item) => item.type === "top");
+    const preferred = topLists.find((item) => item.key === DEFAULT_RANKING_KEY) || topLists[0];
+    if (!preferred) return;
+    const orderedLists = [preferred, ...topLists.filter((item) => item !== preferred)];
+    const pageWorks = [];
+    const seenWorkIds = new Set();
+    for (const list of orderedLists) {
+      const source = preparedWorkSource(list.type, list.key);
+      for (const work of source.allWorks.slice(0, RANKING_PREWARM_PAGE_SIZE)) {
+        if (!work?.id || seenWorkIds.has(work.id)) continue;
+        seenWorkIds.add(work.id);
+        pageWorks.push(work);
+      }
+    }
+    prewarmCoreWorkCovers(pageWorks);
+    prewarmWorkInfoDetails(pageWorks);
   }
 
   function missingSearchWorks() {
@@ -340,12 +385,14 @@ export function createRankingService({
     rankingMissingSearchCache = null;
     rankingRowsCache = new Map();
     rankingSummariesCache = null;
+    rankingWorkSourcesCache = new Map();
   }
 
   return {
     invalidateSearch,
     listLabel,
     missingSearchWorks,
+    prewarm,
     rows,
     sourceParts,
     summaries,
