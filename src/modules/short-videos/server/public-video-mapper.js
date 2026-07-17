@@ -123,7 +123,7 @@ export function createShortVideoPublicVideoMapper(dependencies = {}) {
       shareUrl,
       originalUrl,
       streamUrl: media.type === "video" ? shortVideoMediaUrl(id, row.mtime_ms) : "",
-      coverUrl: row.cover_path ? `/media/short-video-cover/${encodeURIComponent(id)}?v=${encodeURIComponent(String(row.mtime_ms || ""))}` : remoteCoverUrl,
+      coverUrl: shortVideoCoverUrl(row, id) || remoteCoverUrl,
       coverSource: row.cover_source || "",
       fileName: row.file_name || "",
       relativePath: row.relative_path || "",
@@ -176,7 +176,7 @@ export function createShortVideoPublicVideoMapper(dependencies = {}) {
       id: String(row.sound_id || ""),
       title,
       author,
-      coverUrl: remoteCover || row.author_avatar_url || (row.cover_path ? `/media/short-video-cover/${encodeURIComponent(id)}?v=${encodeURIComponent(String(row.mtime_ms || ""))}` : ""),
+      coverUrl: remoteCover || row.author_avatar_url || shortVideoCoverUrl(row, id),
       previewUrl: localAvailable ? `/media/short-video-music/${encodeURIComponent(id)}` : remotePreview,
       previewSource: localAvailable ? "local" : (remotePreview ? "remote" : ""),
       localAvailable,
@@ -206,6 +206,13 @@ export function shortVideoMediaUrl(id, mtimeMs) {
 function shortVideoActionMetricDelta(active, source) {
   const baselineActive = IMPORTED_SHORT_VIDEO_ACTION_SOURCES.has(String(source || "").trim());
   return Number(Boolean(active)) - Number(baselineActive);
+}
+
+function shortVideoCoverUrl(row = {}, id = "") {
+  const source = String(row.cover_source || "").trim();
+  if (!row.cover_path && source !== "ffmpeg_sqlite") return "";
+  const version = `${row.mtime_ms || ""}-${source || "file"}`;
+  return `/media/short-video-cover/${encodeURIComponent(id)}?v=${encodeURIComponent(version)}`;
 }
 
 function publicShortVideoRecommendation(row = {}) {

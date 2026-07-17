@@ -140,7 +140,11 @@ for ($i = 0; $i -lt 60; $i++) {
 }
 
 if (-not $ready) {
+  if (-not $process.HasExited) {
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+  }
   Write-Host "FanHao process started (PID $($process.Id)), but port $Port is not listening yet."
+  Write-Host "The stalled startup process has been stopped."
   Write-Host "Logs:"
   Write-Host "  $OutLog"
   Write-Host "  $ErrLog"

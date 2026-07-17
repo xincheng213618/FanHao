@@ -475,6 +475,7 @@ body.short-video-view .work-grid {
 .short-video-distribution-head > .short-video-distribution-head-actions {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 8px;
 }
 
@@ -487,6 +488,7 @@ body.short-video-view .work-grid {
   color: var(--text);
   cursor: pointer;
   font: inherit;
+  white-space: nowrap;
   transition: border-color .16s ease, background-color .16s ease, color .16s ease;
 }
 
@@ -525,6 +527,285 @@ body.short-video-view .work-grid {
   color: var(--muted);
   font-size: 11px;
   line-height: 1.35;
+}
+
+.short-video-personal-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.short-video-personal-summary.is-four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.short-video-personal-summary > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid rgba(22, 119, 91, .14);
+  border-radius: 11px;
+  background: rgba(22, 119, 91, .04);
+}
+
+.short-video-personal-summary span,
+.short-video-personal-summary small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+}
+
+.short-video-personal-summary strong {
+  overflow: hidden;
+  font-size: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.short-video-personal-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.short-video-personal-columns > div {
+  display: grid;
+  align-content: start;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.short-video-personal-columns h4 {
+  margin: 0;
+  padding: 11px 12px 8px;
+  font-size: 13px;
+}
+
+.short-video-personal-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.short-video-personal-list-row:hover,
+.short-video-personal-list-row:focus-visible {
+  outline: none;
+  background: rgba(22, 119, 91, .055);
+}
+
+.short-video-personal-list-row.is-static {
+  cursor: default;
+}
+
+.short-video-personal-list-row.is-static:hover {
+  background: transparent;
+}
+
+.short-video-personal-list-row > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.short-video-personal-list-row strong,
+.short-video-personal-list-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.short-video-personal-list-row strong {
+  font-size: 12px;
+}
+
+.short-video-personal-list-row small,
+.short-video-personal-list-empty {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.short-video-personal-list-row em {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 850;
+}
+
+.short-video-personal-list-empty {
+  margin: 0;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.short-video-personal-comparison-table {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.short-video-personal-comparison-table > div {
+  display: grid;
+  grid-template-columns: minmax(120px, .8fr) repeat(2, minmax(140px, 1fr));
+  border-top: 1px solid var(--line);
+}
+
+.short-video-personal-comparison-table > div:first-child {
+  border-top: 0;
+  background: rgba(100, 116, 139, .065);
+}
+
+.short-video-personal-comparison-table strong,
+.short-video-personal-comparison-table span {
+  padding: 9px 12px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.short-video-personal-comparison-table span:last-child {
+  color: var(--muted);
+}
+
+.short-video-watch-duration {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.short-video-watch-duration > div {
+  display: grid;
+  grid-template-columns: 90px minmax(120px, 1fr) 130px;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.short-video-watch-duration i,
+.short-video-health-grid i {
+  display: block;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, .08);
+}
+
+.short-video-watch-duration b,
+.short-video-health-grid i b {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2d6fce, #57a3ff);
+}
+
+.short-video-watch-duration strong {
+  text-align: right;
+  font-size: 11px;
+}
+
+.short-video-health-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.short-video-health-grid > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+
+.short-video-health-grid span,
+.short-video-health-grid small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+}
+
+.short-video-health-grid strong {
+  font-size: 18px;
+}
+
+.short-video-health-grid i b {
+  background: linear-gradient(90deg, var(--accent), #36b69a);
+}
+
+.short-video-quality-audit-health {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid rgba(22, 119, 91, .18);
+  border-radius: 12px;
+  background: rgba(22, 119, 91, .04);
+}
+
+.short-video-quality-audit-health > strong {
+  font-size: 13px;
+}
+
+.short-video-quality-audit-health > span,
+.short-video-quality-audit-health > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.short-video-quality-audit-health > div {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.short-video-quality-audit-health > div > span {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .72);
+}
+
+.short-video-quality-audit-health small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.2;
+}
+
+.short-video-quality-audit-health b {
+  font-size: 14px;
+}
+
+.short-video-quality-audit-health .is-good b {
+  color: var(--accent);
+}
+
+.short-video-quality-audit-health .is-warning b {
+  color: #a35d00;
+}
+
+.short-video-quality-audit-health .is-danger b {
+  color: #b42318;
 }
 
 .short-video-insight-section {
@@ -999,7 +1280,7 @@ body.short-video-view .work-grid {
 
 .short-video-distribution-table {
   width: 100%;
-  min-width: 820px;
+  min-width: 680px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -1039,23 +1320,8 @@ body.short-video-view .work-grid {
   border-top: 2px solid rgba(22, 119, 91, .2);
 }
 
-.short-video-distribution-table tr.is-current-audit td {
-  background: rgba(22, 119, 91, .06);
-}
-
 .short-video-distribution-table tbody tr:hover td {
   background: rgba(22, 119, 91, .045);
-}
-
-.short-video-distribution-tag {
-  display: inline-flex;
-  margin-left: 7px;
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: rgba(22, 119, 91, .14);
-  color: var(--accent);
-  font-size: 10px;
-  font-weight: 800;
 }
 
 .short-video-distribution-bar {
@@ -1114,8 +1380,7 @@ body.short-video-view .work-grid {
 }
 
 .short-video-distribution-log-tick,
-.short-video-distribution-log-axis-title,
-.short-video-distribution-log-band-label {
+.short-video-distribution-log-axis-title {
   fill: var(--muted);
   font-family: inherit;
   font-size: 11px;
@@ -1125,16 +1390,6 @@ body.short-video-view .work-grid {
   fill: var(--text);
   font-size: 12px;
   font-weight: 700;
-}
-
-.short-video-distribution-log-audit-band {
-  fill: rgba(22, 119, 91, .08);
-}
-
-.short-video-distribution-log-band-label {
-  fill: var(--accent);
-  font-size: 10px;
-  font-weight: 800;
 }
 
 .short-video-distribution-log-line {
@@ -1177,11 +1432,6 @@ body.short-video-view .work-grid {
   background: #2d6fce;
 }
 
-.short-video-distribution-log-legend i.is-band {
-  border: 1px solid rgba(22, 119, 91, .2);
-  background: rgba(22, 119, 91, .08);
-}
-
 .short-video-distribution-bar > span {
   display: block;
   height: 100%;
@@ -1212,9 +1462,25 @@ body.short-video-view .work-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .short-video-personal-summary,
+  .short-video-personal-summary.is-four,
+  .short-video-health-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .short-video-personal-columns,
   .short-video-insight-quadrant-cards,
   .short-video-insight-ranking-columns {
     grid-template-columns: 1fr;
+  }
+
+  .short-video-quality-audit-health > div {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .short-video-watch-duration > div {
+    grid-template-columns: 76px minmax(80px, 1fr) 112px;
+    gap: 7px;
   }
 
   .short-video-high-res-row {

@@ -15,7 +15,7 @@ import {
 } from "./modules/fanhao/index.js?v=20260717-fanhao-viewport-render-01";
 import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
-import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
+import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260717-photo-library-workspace-01";
 
 prepareAppShell();
 prepareClientShell();
@@ -347,10 +347,6 @@ function linesFromTextarea(value) {
     .split(/\r?\n|[,，、;]/)
     .map((line) => line.trim())
     .filter(Boolean);
-}
-
-function escapeRegExp(value) {
-  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function currentPageScrollTop() {
@@ -1272,6 +1268,7 @@ function topInfoValues(works, selectValues, limit) {
 }
 
 function visibleWorks() {
+  if (state.activeView === "people" && state.selectedPersonId) return state.works;
   return selectVisibleWorks(state.works, {
     query: state.activeView === "search" ? "" : state.workQuery,
     filters: selectedWorkFilters(),
@@ -1306,19 +1303,7 @@ function clientWorkMatchesFilter(work, filter) {
 }
 
 function isCompilationWork(work) {
-  if (!work?.missingLocal) return false;
-
-  const config = normalizeUiConfig(state.uiConfig);
-  const code = String(work.infoSummary?.code || extractWorkCode(work) || "").trim();
-  const codePrefix = code.match(/^([A-Z0-9]+)[-_\s]?\d+/i)?.[1]?.toUpperCase() || "";
-  if (codePrefix && config.compilationPrefixes.includes(codePrefix)) return true;
-
-  const text = `${work.title || ""} ${work.directoryName || ""} ${work.infoSummary?.title || ""}`;
-  const upperText = text.toUpperCase();
-  if (config.compilationPrefixes.some((prefix) => new RegExp(`(^|[^A-Z0-9])${escapeRegExp(prefix)}[-_\\s]?\\d+`, "i").test(text))) {
-    return true;
-  }
-  return config.compilationKeywords.some((keyword) => upperText.includes(String(keyword).toUpperCase()));
+  return Boolean(work?.compilation);
 }
 
 function numericRating(value) {
@@ -1513,12 +1498,13 @@ async function loadMorePersonWorks(button) {
     const seen = new Set(state.works.map((work) => work.id));
     const nextWorks = (data.works || []).filter((work) => !seen.has(work.id));
     state.works.push(...nextWorks);
+    state.workVisibleLimit = Math.max(state.workVisibleLimit, state.works.length);
     state.selectedPerson = data.person || state.selectedPerson;
     state.personWorksTotal = data.total || state.personWorksTotal || state.works.length;
     state.personWorksFacets = data.facets || state.personWorksFacets || null;
     renderPersonProfile(state.selectedPerson);
     renderPersonWorkStats();
-    renderWorks();
+    appendLoadedPersonWorks();
   } catch (error) {
     toastInline(button, error.message || "加载失败", originalText);
     restoreInFinally = false;
@@ -1570,6 +1556,31 @@ function renderWorks(emptyMessage = "没有匹配的作品。") {
       appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore, hasRankingServerMore, hasCollectionServerMore, hasVrServerMore, hasStudioServerMore });
     }
   });
+}
+
+function appendLoadedPersonWorks() {
+  const works = visibleWorks();
+  const visible = works.slice(0, state.workVisibleLimit);
+  const renderedCards = [...els.workGrid.querySelectorAll(".work-card")];
+  const renderedIds = renderedCards.map((card) => String(card.dataset.workId || ""));
+  const prefixMatches = renderedIds.every((id, index) => id === String(visible[index]?.id || ""));
+
+  // Server pages use the same ordering as the current client view, so the normal
+  // path only appends the newly arrived cards. Fall back to a full render if a
+  // concurrent filter or sort change invalidated that prefix while loading.
+  if (!prefixMatches || renderedIds.length > visible.length) {
+    renderWorks();
+    return;
+  }
+
+  disconnectWorkLoadMoreAutoload();
+  els.workGrid.querySelector(".load-more-row")?.remove();
+  appendWorkCardBatch(visible, renderedIds.length, visible.length);
+
+  const hasPersonServerMore = state.works.length < state.personWorksTotal;
+  if (visible.length < works.length || hasPersonServerMore) {
+    appendLoadMore(visible.length, works.length, { hasPersonServerMore });
+  }
 }
 
 function cancelScheduledWorkRendering() {
@@ -1668,6 +1679,7 @@ function setupWorkLoadMoreAutoload(trigger, button, loadNext) {
   const run = () => {
     if (!trigger.isConnected || !button.isConnected || button.disabled || trigger.dataset.autoConsumed === "1") return;
     trigger.dataset.autoConsumed = "1";
+    observer?.disconnect();
     button.dataset.autoloading = "1";
     button.textContent = button.textContent.replace(/^向下滑动继续加载/u, "正在接着加载");
     try {
@@ -1681,51 +1693,16 @@ function setupWorkLoadMoreAutoload(trigger, button, loadNext) {
     }
   };
 
-  let scheduled = false;
-  const check = () => {
-    scheduled = false;
-    if (!trigger.isConnected) {
-      disconnectWorkLoadMoreAutoload();
-      return;
-    }
-    const rect = trigger.getBoundingClientRect();
-    if (rect.top <= window.innerHeight + WORK_AUTO_LOAD_DISTANCE && rect.bottom >= -WORK_AUTO_LOAD_DISTANCE) {
-      run();
-    }
-  };
-  const scheduleCheck = () => {
-    if (scheduled) return;
-    scheduled = true;
-    window.requestAnimationFrame(check);
-  };
-  let userScrollIntentUntil = 0;
-  const markUserScrollIntent = (event) => {
-    if (event.type === "wheel" && Number(event.deltaY || 0) <= 0) return;
-    if (event.type === "keydown" && !["ArrowDown", "End", "PageDown", " "].includes(event.key)) return;
-    if (event.type === "pointerdown" && Number(event.clientX || 0) < document.documentElement.clientWidth - 20) return;
-    userScrollIntentUntil = Date.now() + 1200;
-  };
-  let lastScrollY = window.scrollY;
-  const handleScroll = () => {
-    const nextScrollY = window.scrollY;
-    const movedDown = nextScrollY > lastScrollY + 1;
-    lastScrollY = nextScrollY;
-    if (!movedDown || Date.now() > userScrollIntentUntil) return;
-    userScrollIntentUntil = 0;
-    scheduleCheck();
-  };
-
-  window.addEventListener("wheel", markUserScrollIntent, { passive: true });
-  window.addEventListener("touchmove", markUserScrollIntent, { passive: true });
-  window.addEventListener("pointerdown", markUserScrollIntent, { passive: true });
-  window.addEventListener("keydown", markUserScrollIntent);
-  window.addEventListener("scroll", handleScroll, { passive: true });
+  if (!("IntersectionObserver" in window)) return;
+  const observer = new IntersectionObserver(
+    (entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) run();
+    },
+    { root: null, rootMargin: `${WORK_AUTO_LOAD_DISTANCE}px 0px`, threshold: 0 }
+  );
+  observer.observe(trigger);
   workLoadMoreScrollCleanup = () => {
-    window.removeEventListener("wheel", markUserScrollIntent);
-    window.removeEventListener("touchmove", markUserScrollIntent);
-    window.removeEventListener("pointerdown", markUserScrollIntent);
-    window.removeEventListener("keydown", markUserScrollIntent);
-    window.removeEventListener("scroll", handleScroll);
+    observer.disconnect();
   };
 }
 
@@ -1828,6 +1805,10 @@ function showMissingLocalFromEmptyState() {
   writeStoredFlag("fanhao.showMissingLocalWorks", true);
   if (els.missingLocalToggle) els.missingLocalToggle.checked = true;
   resetWorkPaging();
+  if (state.activeView === "people" && state.selectedPersonId) {
+    selectPerson(state.selectedPersonId, { resetFilter: false });
+    return;
+  }
   renderWorks();
 }
 
@@ -2368,6 +2349,10 @@ els.missingLocalToggle?.addEventListener("change", (event) => {
   state.showMissingLocalWorks = Boolean(event.target.checked);
   writeStoredFlag("fanhao.showMissingLocalWorks", state.showMissingLocalWorks);
   resetWorkPaging();
+  if (state.activeView === "people" && state.selectedPersonId) {
+    selectPerson(state.selectedPersonId, { resetFilter: false });
+    return;
+  }
   renderWorks();
 });
 
@@ -2375,6 +2360,10 @@ els.collectionToggle?.addEventListener("change", (event) => {
   state.showCompilationWorks = Boolean(event.target.checked);
   writeStoredFlag("fanhao.showCompilationWorks", state.showCompilationWorks);
   resetWorkPaging();
+  if (state.activeView === "people" && state.selectedPersonId) {
+    selectPerson(state.selectedPersonId, { resetFilter: false });
+    return;
+  }
   if (state.activeView === "people" && !state.selectedPersonId) {
     renderPeopleIndexStats();
     renderPeopleIndex();

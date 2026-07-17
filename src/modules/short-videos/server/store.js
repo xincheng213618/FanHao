@@ -1,10 +1,13 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame, extractCoverFrameAsync } from "../../../../lib/cover-frame.js";
 import { LOCAL_SHORT_VIDEO_USER_ID, SHORT_VIDEO_RECOMMENDATION_SCORE_SQL } from "./constants.js";
 import { createShortVideoCommentsRepository } from "./comments-repository.js";
+import { createShortVideoCoverDatabase, defaultShortVideoCoverDbPath, SHORT_VIDEO_COVER_GENERATION_VERSION, SQLITE_SHORT_VIDEO_COVER_SOURCE } from "./cover-database.js";
+import { createShortVideoCoverStorageService } from "./cover-storage-service.js";
 import {
   createShortVideoImportItemMapper,
   douyinUserUrl,
@@ -12,6 +15,7 @@ import {
   normalizedDouyinUserUrl
 } from "./import-item-mapper.js";
 import { createShortVideoListPageQueries } from "./list-page-queries.js";
+import { shortVideoLibraryInsights } from "./library-insights.js";
 import { createShortVideoNavigationQueries } from "./navigation-queries.js";
 import {
   createShortVideoPublicVideoMapper,
@@ -45,7 +49,7 @@ const DEFAULT_COVER_GENERATE_LIMIT = 0;
 const DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT = 50000;
 const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
 const DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION = "4";
-const SHORT_VIDEO_SCHEMA_VERSION = "20260715-following-flag-7";
+const SHORT_VIDEO_SCHEMA_VERSION = "20260717-cover-sqlite-8";
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LIST_VIDEO_COLUMNS = [
   "id",
@@ -172,6 +176,15 @@ export function createShortVideoStore(options = {}) {
   const roots = normalizeRoots(options.roots || []);
   const ffmpegPath = options.ffmpegPath || "ffmpeg";
   const coverCacheDir = options.coverCacheDir || path.join(path.dirname(dbPath || "."), "short-video-covers");
+  const coverTempDir = options.coverTempDir || path.join(os.tmpdir(), "fanhao-short-video-cover-inputs");
+  const coverDbPath = options.coverDbPath || defaultShortVideoCoverDbPath(dbPath);
+  const coverBlobDatabase = createShortVideoCoverDatabase({ dbPath: coverDbPath });
+  const coverStorage = createShortVideoCoverStorageService({
+    coverDatabase: coverBlobDatabase,
+    coverDbPath,
+    legacyCoverDir: coverCacheDir,
+    onCatalogChanged: recreateShortVideoCatalogView
+  });
   const coverMaxBytes = clampInt(options.coverMaxBytes, DEFAULT_MAX_COVER_BYTES, 64 * 1024, 16 * 1024 * 1024);
   const coverGenerateLimit = clampInt(options.coverGenerateLimit, DEFAULT_COVER_GENERATE_LIMIT, 0, MAX_LIMIT);
   if (!dbPath) throw new Error("short video dbPath is required");
@@ -247,6 +260,7 @@ export function createShortVideoStore(options = {}) {
         `);
         if (!skipStartupMaintenance) cleanupSupersededFfmpegCovers(opened, coverCacheDir);
         db = opened;
+        if (!skipStartupMaintenance) coverStorage.reconcile(opened);
       } catch (error) {
         try {
           opened.close();
@@ -294,7 +308,6 @@ export function createShortVideoStore(options = {}) {
       })
     });
     cachedSummary();
-    likeDistribution();
     cachedAuthorFacet(database);
     cachedFollowingAuthorFacet(database);
     if (options.recommendations) {
@@ -312,11 +325,13 @@ export function createShortVideoStore(options = {}) {
   }
 
   function close() {
-    if (!db) return;
-    try {
-      db.close();
-    } catch {}
+    if (db) {
+      try {
+        db.close();
+      } catch {}
+    }
     db = null;
+    coverBlobDatabase.close();
     catalogCache.key = null;
     catalogCache.summary = null;
     catalogCache.likeDistribution = null;
@@ -331,7 +346,7 @@ export function createShortVideoStore(options = {}) {
   // 但二者只在入库（scan / importDownloadManagerDb）改变行集合时才会变化。
   // 用 scanned_at + download_manager_imported_at 两个 meta 戳做缓存键：
   // scan 写入 scanned_at、import 写入 download_manager_imported_at，自动失效，零额外查询。
-  const catalogCache = { key: null, summary: null, likeDistribution: null, authors: null, followingAuthors: null, sourceTotals: new Map() };
+  const catalogCache = { key: null, summary: null, likeDistribution: null, likeDistributionKey: "", authors: null, followingAuthors: null, sourceTotals: new Map() };
   let recommendationRevision = 0;
   let recommendationCache = { key: "", ids: [] };
   let explicitCatalogStamp = "";
@@ -340,6 +355,7 @@ export function createShortVideoStore(options = {}) {
     catalogCache.key = key;
     catalogCache.summary = null;
     catalogCache.likeDistribution = null;
+    catalogCache.likeDistributionKey = "";
     catalogCache.authors = null;
     catalogCache.followingAuthors = null;
     catalogCache.sourceTotals.clear();
@@ -350,6 +366,26 @@ export function createShortVideoStore(options = {}) {
     if (!trustExplicitInvalidation) return liveStamp;
     if (!explicitCatalogStamp) explicitCatalogStamp = liveStamp;
     return explicitCatalogStamp;
+  }
+  function likeDistributionStamp(database) {
+    const latestAction = database.prepare(`
+      SELECT MAX(updated_at) AS value
+      FROM short_video_user_actions
+      WHERE local_user_id = ?
+    `).get(LOCAL_SHORT_VIDEO_USER_ID)?.value || "";
+    const latestWatch = database.prepare(`
+      SELECT last_watched_at AS value
+      FROM short_video_watch_history
+      WHERE local_user_id = ?
+      ORDER BY last_watched_at DESC
+      LIMIT 1
+    `).get(LOCAL_SHORT_VIDEO_USER_ID)?.value || "";
+    let managerStamp = "";
+    try {
+      const stat = downloadManagerDbPath ? fs.statSync(downloadManagerDbPath) : null;
+      managerStamp = stat ? `${stat.size}:${stat.mtimeMs}` : "";
+    } catch {}
+    return `${catalogStamp()}::${latestAction}::${latestWatch}::${managerStamp}`;
   }
   function cachedSummary() {
     const key = catalogStamp();
@@ -1102,15 +1138,14 @@ function summary() {
   }
 
   function likeDistribution() {
-    const key = catalogStamp();
-    ensureCatalogCacheKey(key);
-    if (catalogCache.key === key && catalogCache.likeDistribution) return catalogCache.likeDistribution;
     const database = databaseOrOpen();
+    ensureCatalogCacheKey(catalogStamp());
+    const key = likeDistributionStamp(database);
+    if (catalogCache.likeDistributionKey === key && catalogCache.likeDistribution) return catalogCache.likeDistribution;
     const rows = database.prepare(`
       WITH distribution AS (
         SELECT
-          COALESCE(s.digg_count, v.digg_count, 0) AS likes,
-          COALESCE(v.actual_pixels, 0) AS actual_pixels
+          COALESCE(s.digg_count, v.digg_count, 0) AS likes
         FROM short_videos v INDEXED BY idx_short_videos_distribution
         LEFT JOIN short_video_stats s ON s.video_id = v.id
         WHERE v.visibility = 'local_only'
@@ -1125,8 +1160,7 @@ function summary() {
           WHEN likes < 5000000 THEN 28 + CAST((likes - 1000000) / 1000000 AS INTEGER)
           ELSE 32
         END AS bin_index,
-        COUNT(*) AS video_count,
-        SUM(CASE WHEN actual_pixels >= 8294400 THEN 1 ELSE 0 END) AS four_k_count
+        COUNT(*) AS video_count
       FROM distribution
       GROUP BY bin_index
     `).all();
@@ -1134,61 +1168,55 @@ function summary() {
       minLikes: index * 1000,
       maxLikes: (index + 1) * 1000,
       label: index === 9 ? "9千-1万" : `${index}-${index + 1}千`,
-      videoCount: 0,
-      fourKCount: 0
+      videoCount: 0
     }));
     const lowBins = Array.from({ length: 9 }, (_, index) => ({
       minLikes: 10000 + index * 10000,
       maxLikes: 20000 + index * 10000,
       label: `${index + 1}-${index + 2}万`,
-      videoCount: 0,
-      fourKCount: 0
+      videoCount: 0
     }));
     const denseBins = Array.from({ length: 9 }, (_, index) => ({
       minLikes: 100000 + index * 100000,
       maxLikes: 200000 + index * 100000,
       label: `${10 + index * 10}-${20 + index * 10}万`,
-      videoCount: 0,
-      fourKCount: 0
+      videoCount: 0
     }));
     const tailBins = Array.from({ length: 4 }, (_, index) => ({
       minLikes: 1000000 + index * 1000000,
       maxLikes: 2000000 + index * 1000000,
       label: `${100 + index * 100}-${200 + index * 100}万`,
-      videoCount: 0,
-      fourKCount: 0
+      videoCount: 0
     }));
     const bins = [
       ...microBins,
       ...lowBins,
       ...denseBins,
       ...tailBins,
-      { minLikes: 5000000, maxLikes: null, label: "500万+", videoCount: 0, fourKCount: 0 }
+      { minLikes: 5000000, maxLikes: null, label: "500万+", videoCount: 0 }
     ];
     let total = 0;
     let knownLikesTotal = 0;
     let unknownLikesTotal = 0;
-    let fourKTotal = 0;
     for (const row of rows) {
       const count = Math.max(0, Number(row.video_count || 0));
-      const fourKCount = Math.max(0, Number(row.four_k_count || 0));
       const binIndex = Number(row.bin_index);
       total += count;
-      fourKTotal += fourKCount;
       if (binIndex < 0) {
         unknownLikesTotal += count;
       } else {
         knownLikesTotal += count;
         bins[Math.min(32, binIndex)].videoCount += count;
-        bins[Math.min(32, binIndex)].fourKCount += fourKCount;
       }
     }
-    const insights = contentStructureInsights(database);
+    const insights = {
+      ...contentStructureInsights(database),
+      ...shortVideoLibraryInsights(database, { downloadManagerDbPath })
+    };
     const result = {
       total,
       knownLikesTotal,
       unknownLikesTotal,
-      fourKTotal,
       shape: "right_skewed_long_tail",
       binning: {
         strategy: "multiscale_fixed_width",
@@ -1207,6 +1235,7 @@ function summary() {
       insights
     };
     catalogCache.likeDistribution = result;
+    catalogCache.likeDistributionKey = key;
     return result;
   }
 
@@ -2253,6 +2282,14 @@ function summary() {
       } catch {}
       throw error;
     }
+    let deletedStoredCovers = 0;
+    let coverCleanupError = "";
+    try {
+      deletedStoredCovers = coverBlobDatabase.removeMany(videoIds);
+    } catch (error) {
+      coverCleanupError = String(error?.message || error);
+      console.warn("[short-video-cover-delete]", coverCleanupError);
+    }
     catalogCache.key = null;
     catalogCache.summary = null;
     catalogCache.authors = null;
@@ -2265,6 +2302,8 @@ function summary() {
       groupDir: options.groupDir ? shortVideoRelativePath(options.groupDir) : "",
       title: firstRow.title || firstRow.description || firstRow.file_name || "",
       deletedFiles,
+      deletedStoredCovers,
+      coverCleanupError,
       missingFiles,
       skippedFiles,
       emptyRemovedPaths
@@ -2502,8 +2541,23 @@ function summary() {
 
   function coverFile(id) {
     const database = databaseOrOpen();
-    const row = videoCatalogRowByAnyId(database, id, "id, cover_path");
-    if (!row?.cover_path) return null;
+    const row = videoCatalogRowByAnyId(database, id, "id, cover_path, cover_source, mtime_ms");
+    if (!row) return null;
+    if (row.cover_source === SQLITE_SHORT_VIDEO_COVER_SOURCE) {
+      const stored = coverBlobDatabase.get(row.id);
+      if (!stored) return null;
+      return {
+        id: row.id,
+        type: "image",
+        ext: ".jpg",
+        mimeType: stored.mimeType,
+        buffer: stored.imageBuffer,
+        size: stored.byteLength,
+        modifiedAt: stored.updatedAt,
+        cacheVersion: `${stored.sourceFingerprint || row.mtime_ms || ""}-${stored.generationVersion}`
+      };
+    }
+    if (!row.cover_path) return null;
     return safeStoredFile(row.cover_path, "image");
   }
 
@@ -2522,6 +2576,16 @@ function summary() {
       missing,
       sample
     };
+  }
+
+  function migrateLegacyCoverFiles(options = {}) {
+    const result = coverStorage.migrateLegacyCoverFiles(databaseOrOpen(), options);
+    catalogCache.key = null;
+    return result;
+  }
+
+  function coverStorageStatus(options = {}) {
+    return coverStorage.status(databaseOrOpen(), options);
   }
 
   function backfillMissingCovers(options = {}) {
@@ -2586,73 +2650,26 @@ function summary() {
   }
 
   function missingCoverCount(database) {
-    return Number(database.prepare(`
-      SELECT COUNT(*) AS count
-      FROM short_video_catalog
-      WHERE COALESCE(TRIM(cover_path), '') = ''
-        AND COALESCE(TRIM(source_path), '') <> ''
-    `).get()?.count || 0);
+    return coverStorage.missingCount(database);
   }
 
   function missingCoverRows(database, limit) {
-    const safeLimit = clampInt(limit, 50, 0, 50000);
-    if (safeLimit <= 0) return [];
-    return database.prepare(`
-      SELECT *
-      FROM short_video_catalog
-      WHERE COALESCE(TRIM(cover_path), '') = ''
-        AND COALESCE(TRIM(source_path), '') <> ''
-      ORDER BY liked_at DESC, published_at DESC, id DESC
-      LIMIT ?
-    `).all(safeLimit);
+    return coverStorage.missingRows(database, limit);
   }
 
-  function generatedCoverStatements(database) {
-    return {
-      video: database.prepare(`
-        UPDATE short_videos
-        SET cover_path = ?,
-            cover_source = 'ffmpeg',
-            updated_at = ?
-        WHERE id = ?
-          AND COALESCE(cover_source, '') <> 'native'
-      `),
-      asset: normalizedUpsertStatements(database).asset
-    };
-  }
-
-  function recordGeneratedCover(row, coverPath, statements) {
-    if (!row?.id || !coverPath) return false;
-    const now = new Date().toISOString();
-    const result = runSqliteBusyRetry(() => statements.video.run(coverPath, now, row.id));
-    if (Number(result?.changes || 0) <= 0) {
-      removeGeneratedCoverFile(coverPath, coverCacheDir);
-      return false;
-    }
-    row.cover_path = coverPath;
-    row.cover_source = "ffmpeg";
-    const stat = safeStat(coverPath);
-    runAssetUpsert(statements.asset, {
-      videoId: row.id,
-      assetType: "ffmpeg_cover",
-      localPath: coverPath,
-      fileName: path.basename(coverPath),
-      sizeBytes: stat?.size || 0,
-      mtimeMs: Math.floor(stat?.mtimeMs || Date.now())
-    }, now);
-    return true;
+  function rowHasUsableCover(row) {
+    return coverStorage.hasUsableCover(row);
   }
 
   function ensureGeneratedCovers(database, rows, maxCount) {
     if (!maxCount || maxCount <= 0) return 0;
     let generated = 0;
-    const statements = generatedCoverStatements(database);
     for (const row of rows) {
       if (generated >= maxCount) return generated;
-      if (!row || (row.cover_path && fs.existsSync(row.cover_path))) continue;
-      const coverPath = generateCoverForRow(row);
-      if (!coverPath) continue;
-      if (recordGeneratedCover(row, coverPath, statements)) generated += 1;
+      if (!row || rowHasUsableCover(row)) continue;
+      const storedCover = generateCoverForRow(row);
+      if (!storedCover) continue;
+      if (coverStorage.linkGeneratedCover(database, row, storedCover)) generated += 1;
     }
     return generated;
   }
@@ -2663,7 +2680,6 @@ function summary() {
     if (!selectedRows.length) return 0;
     const concurrency = clampInt(options.concurrency, 2, 1, 16);
     const workerCount = Math.min(concurrency, selectedRows.length);
-    const statements = generatedCoverStatements(database);
     let nextIndex = 0;
     let processed = 0;
     let generated = 0;
@@ -2675,9 +2691,9 @@ function summary() {
         if (index >= selectedRows.length) return;
         const row = selectedRows[index];
         let didGenerate = false;
-        if (row && !(row.cover_path && fs.existsSync(row.cover_path))) {
-          const coverPath = await generateCoverForRowAsync(row);
-          if (coverPath) didGenerate = recordGeneratedCover(row, coverPath, statements);
+        if (row && !rowHasUsableCover(row)) {
+          const storedCover = await generateCoverForRowAsync(row);
+          if (storedCover) didGenerate = coverStorage.linkGeneratedCover(database, row, storedCover);
         }
         processed += 1;
         if (didGenerate) generated += 1;
@@ -2699,18 +2715,20 @@ function summary() {
     if (!row?.source_path || !fs.existsSync(row.source_path)) return "";
     let tempInput = null;
     try {
-      fs.mkdirSync(coverCacheDir, { recursive: true });
-      const coverPath = path.join(coverCacheDir, coverFileName(row));
-      if (fs.existsSync(coverPath) && safeStat(coverPath)?.size > 0) return coverPath;
-      tempInput = asciiInputPath(row.source_path, coverCacheDir, row.id || row.aweme_id || "");
+      const fingerprint = coverStorage.sourceFingerprint(row);
+      if (coverBlobDatabase.has(row.id, fingerprint)) return coverBlobDatabase.get(row.id);
+      tempInput = asciiInputPath(row.source_path, coverTempDir, row.id || row.aweme_id || "");
       const buffer = extractCoverFrame(tempInput.path, {
         duration: Number(row.duration_ms || 0) > 0 ? Number(row.duration_ms) / 1000 : undefined,
         ffmpegPath,
         maxBytes: coverMaxBytes,
         timeoutMs: 15000
       });
-      fs.writeFileSync(coverPath, buffer);
-      return coverPath;
+      return coverBlobDatabase.put(row.id, buffer, {
+        sourceFingerprint: fingerprint,
+        sourceMtimeMs: row.mtime_ms,
+        generationVersion: SHORT_VIDEO_COVER_GENERATION_VERSION
+      });
     } catch (error) {
       console.warn("[short-video-cover]", row.id || row.source_path, error.message || error);
       return "";
@@ -2723,18 +2741,20 @@ function summary() {
     if (!row?.source_path || !fs.existsSync(row.source_path)) return "";
     let tempInput = null;
     try {
-      fs.mkdirSync(coverCacheDir, { recursive: true });
-      const coverPath = path.join(coverCacheDir, coverFileName(row));
-      if (fs.existsSync(coverPath) && safeStat(coverPath)?.size > 0) return coverPath;
-      tempInput = asciiInputPath(row.source_path, coverCacheDir, row.id || row.aweme_id || "");
+      const fingerprint = coverStorage.sourceFingerprint(row);
+      if (coverBlobDatabase.has(row.id, fingerprint)) return coverBlobDatabase.get(row.id);
+      tempInput = asciiInputPath(row.source_path, coverTempDir, row.id || row.aweme_id || "");
       const buffer = await extractCoverFrameAsync(tempInput.path, {
         duration: Number(row.duration_ms || 0) > 0 ? Number(row.duration_ms) / 1000 : undefined,
         ffmpegPath,
         maxBytes: coverMaxBytes,
         timeoutMs: 15000
       });
-      fs.writeFileSync(coverPath, buffer);
-      return coverPath;
+      return coverBlobDatabase.put(row.id, buffer, {
+        sourceFingerprint: fingerprint,
+        sourceMtimeMs: row.mtime_ms,
+        generationVersion: SHORT_VIDEO_COVER_GENERATION_VERSION
+      });
     } catch (error) {
       console.warn("[short-video-cover]", row.id || row.source_path, error.message || error);
       return "";
@@ -2815,6 +2835,7 @@ function summary() {
     if (batch.length) writeBatch(batch.splice(0));
     deleteMissingImportedVideos(database, foundIds);
     refreshShortVideoRelationshipFlags(database);
+    coverStorage.reconcile(database);
     return { ok: true, root, scannedFiles, imported, scannedAt: now, summary: summary() };
   }
 
@@ -3116,6 +3137,7 @@ function summary() {
       } catch {}
       throw error;
     }
+    coverStorage.reconcile(targetDb);
 
     return {
       ok: true,
@@ -3163,7 +3185,9 @@ function summary() {
     backfillMissingCoversAsync,
     close,
     coverBackfillStatus,
+    coverDbPath,
     coverFile,
+    coverStorageStatus,
     dbPath,
     deleteVideo,
     deleteVideoGroup,
@@ -3177,6 +3201,7 @@ function summary() {
     likeDistribution,
     listVideos,
     localComments,
+    migrateLegacyCoverFiles,
     createLocalComment,
     deleteLocalComment,
     musicFile,
@@ -4654,8 +4679,8 @@ function authorFacet(db) {
         MAX(NULLIF(v.author_avatar_url, '')) AS avatarUrl,
         MAX(NULLIF(v.owner_user_id, '')) AS targetUserId,
         MAX(COALESCE(v.author_following, 0)) AS following,
-        MAX(CASE WHEN COALESCE(NULLIF(v.cover_path, ''), '') <> '' THEN v.id ELSE '' END) AS coverId,
-        MAX(CASE WHEN COALESCE(NULLIF(v.cover_path, ''), '') <> '' THEN v.mtime_ms ELSE 0 END) AS coverMtimeMs,
+        MAX(CASE WHEN v.cover_source = '${SQLITE_SHORT_VIDEO_COVER_SOURCE}' OR COALESCE(NULLIF(v.cover_path, ''), '') <> '' THEN v.id ELSE '' END) AS coverId,
+        MAX(CASE WHEN v.cover_source = '${SQLITE_SHORT_VIDEO_COVER_SOURCE}' OR COALESCE(NULLIF(v.cover_path, ''), '') <> '' THEN v.mtime_ms ELSE 0 END) AS coverMtimeMs,
         COUNT(*) AS count
       FROM short_videos v INDEXED BY idx_short_videos_author_facet
       WHERE v.visibility = 'local_only'
@@ -4788,15 +4813,9 @@ function safeStoredFile(filePath, type, id = "") {
   return { id: id || hashText(normalized).slice(0, 16), path: normalized, type, ext: path.extname(normalized).toLowerCase() };
 }
 
-function coverFileName(row) {
-  const id = String(row?.id || row?.aweme_id || "short-video").replace(/[^a-z0-9_-]+/gi, "-").slice(0, 80) || "short-video";
-  const stamp = String(row?.mtime_ms || "");
-  const hash = hashText(`${row?.source_path || ""}:${stamp}`).slice(0, 16);
-  return `${id}-${hash}.jpg`;
-}
-
 function asciiInputPath(sourcePath, tempDir, token = "") {
   if (/^[\x00-\x7F]+$/.test(sourcePath) && sourcePath.length < 240) return { path: sourcePath, cleanup: null };
+  fs.mkdirSync(tempDir, { recursive: true });
   const ext = path.extname(sourcePath) || ".mp4";
   const tempPath = path.join(tempDir, `_short-video-source-${hashText(`${sourcePath}:${token}`).slice(0, 16)}${ext}`);
   try {

@@ -165,7 +165,10 @@ export function createPersonDetailService({
   function detailPageCacheKey(url) {
     return [
       userStateStamp(),
+      workQueryService.visibilityStamp(),
       url.searchParams.get("filter") || "all",
+      url.searchParams.get("includeMissingLocal") || "",
+      url.searchParams.get("includeCompilation") || "",
       url.searchParams.get("sort") || "releaseDesc",
       url.searchParams.get("limit") || "",
       url.searchParams.get("offset") || "0"

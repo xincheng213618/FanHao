@@ -133,6 +133,7 @@ export function normalizeRoute(route = {}) {
     galleryCategory: view === "gallery" ? normalizeGalleryCategory(route) : "all",
     gallerySubCategory: view === "gallery" ? String(route.gallerySubCategory || "all").trim() || "all" : "all",
     galleryPerson: view === "gallery" ? String(route.galleryPerson || "all").trim() || "all" : "all",
+    galleryPhotoDate: view === "gallery" ? String(route.galleryPhotoDate || "all").trim() || "all" : "all",
     gallerySort: view === "gallery" ? normalizeGallerySort(route.gallerySort) : "updated",
     novelBookId: view === "novels" ? String(route.novelBookId || "").trim() : "",
     novelChapterIndex: view === "novels" ? String(route.novelChapterIndex || "").trim() : "",
@@ -193,6 +194,7 @@ export function routeUrl(route, options = {}) {
     if (next.galleryPerson && next.galleryPerson !== "all") {
       params.set(["tv", "media"].includes(next.galleryMode) ? "series" : "person", next.galleryPerson);
     }
+    if (next.galleryMode === "photo" && next.galleryPhotoDate && next.galleryPhotoDate !== "all") params.set("date", next.galleryPhotoDate);
     if (next.gallerySort && next.gallerySort !== "updated") params.set("sort", next.gallerySort);
   } else if (next.view === "novels") {
     if (next.novelQuery) params.set("q", next.novelQuery);
@@ -397,6 +399,7 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     galleryCategory: params.has("category") ? params.get("category") || "all" : photoSearch ? "all" : galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all",
     gallerySubCategory: params.get("subCategory") || params.get("folder") || "all",
     galleryPerson: ["tv", "media"].includes(galleryMode) ? params.get("series") || params.get("person") || "all" : params.get("person") || "all",
+    galleryPhotoDate: galleryMode === "photo" ? params.get("date") || "all" : "all",
     gallerySort: normalizeGallerySort(params.get("sort")),
     personId: "",
     q: "",

@@ -1,5 +1,5 @@
 export async function routeShortVideoApi(req, res, url, deps) {
-  const { notFound, onMutation, onWatch, onWatchMutation, readJsonBody, requireLocalAdmin, sendJson, shortVideoStore } = deps;
+  const { notFound, onMutation, onWatch, onWatchMutation, readJsonBody, recordWatch, requireLocalAdmin, sendJson, shortVideoStore } = deps;
 
   if (url.pathname === "/api/short-videos/summary" && req.method === "GET") {
     try {
@@ -163,7 +163,9 @@ export async function routeShortVideoApi(req, res, url, deps) {
     try {
       const videoId = decodeURIComponent(watchMatch[1]);
       const body = await readJsonBody(req).catch(() => ({}));
-      const data = shortVideoStore.recordWatch(videoId, body || {});
+      const data = recordWatch
+        ? await recordWatch(videoId, body || {})
+        : shortVideoStore.recordWatch(videoId, body || {});
       onWatchMutation?.(videoId, body || {}, data);
       onWatch?.(videoId, body || {}, data);
       sendJson(res, 200, data);

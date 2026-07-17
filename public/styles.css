@@ -5,7 +5,7 @@
 
 /* Main library modules. */
 @import "./modules/fanhao/styles.css?v=20260717-studio-detail-01";
-@import "./modules/content-index/styles.css?v=20260711-photo-reader-sticky-15";
+@import "./modules/content-index/styles.css?v=20260717-photo-album-parser-02";
 @import "./modules/tools/styles.css?v=20260710-web-css-modules-01";
 @import "./modules/fanhao/work-cards.css?v=20260710-web-css-modules-01";
 @import "./modules/system/admin.css?v=20260712-module-settings-02";
@@ -13,7 +13,7 @@
 @import "./css/responsive.css?v=20260712-module-settings-02";
 
 /* Standalone feature modules. */
-@import "./modules/short-videos/styles/list.css?v=20260715-aggregate-search-01";
+@import "./modules/short-videos/styles/list.css?v=20260716-personal-value-health-01";
 @import "./modules/short-videos/styles/viewer.css?v=20260715-first-frame-13";
 @import "./modules/short-videos/styles/gallery-navigation.css?v=20260711-player-modal-focus-75";
 @import "./modules/short-videos/styles/panels.css?v=20260712-player-search-overlay-86";

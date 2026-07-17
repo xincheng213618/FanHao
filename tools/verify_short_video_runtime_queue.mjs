@@ -26,7 +26,7 @@ try {
     mediaResponseService: { serveImage() {} },
     mediaStreamService: { serveVideo() {} },
     notFound() {},
-    readJsonBody: async () => ({}),
+    readJsonBody: async (req) => req?.body || {},
     requireLocalAdmin: () => true,
     sendJson(res, status, data) {
       res.status = status;
@@ -65,7 +65,7 @@ try {
   db.exec("COMMIT");
   db.close();
 
-  runtime.start();
+  await runtime.start();
   await new Promise((resolve) => setTimeout(resolve, 1900));
   const response = {};
   await runtime.routeApi(
@@ -99,7 +99,42 @@ try {
   );
   assert.equal(facetsResponse.status, 200, "facet reads must share the prewarmed catalog worker");
   assert.equal(facetsResponse.data?.summary?.totals?.videos, 530);
-  console.log("short-video-runtime-queue: ok (530 candidates paged through a 512-row backlog)");
+
+  const lockDb = new DatabaseSync(dbPath);
+  lockDb.exec("BEGIN IMMEDIATE");
+  const watchResponse = {};
+  const watchRequest = runtime.routeApi(
+    { method: "PUT", body: { progressMs: 1250 } },
+    watchResponse,
+    new URL("http://127.0.0.1/api/short-videos/runtime-page-0000/watch")
+  );
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const healthResponse = {};
+  const healthStartedAt = performance.now();
+  await runtime.routeApi(
+    { method: "GET" },
+    healthResponse,
+    new URL("http://127.0.0.1/api/short-videos/playback-cache-status")
+  );
+  const healthDurationMs = performance.now() - healthStartedAt;
+  assert.equal(healthResponse.status, 200, "media-adjacent status requests must keep running while a watch write is locked");
+  assert.ok(healthDurationMs < 100, `watch SQLite lock must not block the HTTP event loop, got ${healthDurationMs.toFixed(1)}ms`);
+  assert.equal(watchResponse.status, undefined, "the locked watch write must still be pending in its worker");
+  lockDb.exec("ROLLBACK");
+  lockDb.close();
+  await watchRequest;
+  assert.equal(watchResponse.status, 200, "watch write must complete after the SQLite lock is released");
+  assert.equal(watchResponse.data?.watch?.progressMs, 1250);
+
+  const verifyDb = new DatabaseSync(dbPath, { readOnly: true });
+  const savedWatch = verifyDb.prepare(`
+    SELECT progress_ms
+    FROM short_video_watch_history
+    WHERE local_user_id = 'local:self' AND video_id = 'runtime-page-0000'
+  `).get();
+  verifyDb.close();
+  assert.equal(savedWatch?.progress_ms, 1250, "worker writes must remain linked to the existing short-video database");
+  console.log(`short-video-runtime-queue: ok (530 candidates; locked watch write kept HTTP responsive at ${healthDurationMs.toFixed(1)}ms)`);
 } finally {
   runtime?.stop();
   runtime?.store?.close();

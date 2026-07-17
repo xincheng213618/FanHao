@@ -104,7 +104,7 @@ export function createImageLibraryService({
       facets: {
         categories: facetCounts(photoSets, "category"),
         subCategories: facetCounts(photoSets, "subCategory"),
-        people: facetCounts(photoSets, "personName"),
+        people: photoPersonFacets(photoSets),
         roots: facetCounts(photoSets, "rootLabel"),
         western: mediaFacets(westernItems),
         movie: mediaFacets(movieItems),
@@ -154,7 +154,7 @@ export function createImageLibraryService({
       },
       facets: {
         categories: facetCounts(photoSets, "category").slice(0, 12),
-        people: facetCounts(photoSets, "personName").slice(0, 12),
+        people: photoPersonFacets(photoSets, 12),
         western: mediaFacets(westernItems),
         movie: mediaFacets(movieItems),
         tv: mediaFacets(tvItems),
@@ -175,6 +175,7 @@ export function createImageLibraryService({
     const category = String(url.searchParams.get("category") || "all").trim() || "all";
     const subCategory = String(url.searchParams.get("subCategory") || "all").trim() || "all";
     const person = String(url.searchParams.get("person") || "all").trim() || "all";
+    const date = String(url.searchParams.get("date") || "all").trim() || "all";
     const collection = String(url.searchParams.get("collection") || "").trim();
     const seriesKey = String(url.searchParams.get("seriesKey") || "").trim();
     const index = getImageLibraryIndex(options);
@@ -193,16 +194,17 @@ export function createImageLibraryService({
     let seriesSummary = null;
     if (mode === "photo") {
       const catalog = preparedPhotoCatalog(index);
-      const filteredPhotoSets = filterPhotoSetsForList(catalog.items, { category, subCategory, person, collection });
+      const filteredPhotoSets = filterPhotoSetsForList(catalog.items, { category, subCategory, person, date, collection });
       photoFacets = preparedPhotoFacets(catalog, category);
       if (collection) {
-        const collectionItems = filterPhotoSetsForList(catalog.items, { collection, category: "all", subCategory: "all", person: "all" });
+        const collectionItems = filterPhotoSetsForList(catalog.items, { collection, category: "all", subCategory: "all", person: "all", date: "all" });
         collectionSummary = photoCollectionSummary(collectionItems, collection);
+        photoFacets = photoLibraryFacets(collectionItems, collectionItems, { peopleLimit: 500, includeDates: true });
       }
       source = photoView === "collections" && !collection
-        ? photoFiltersAreDefault({ category, subCategory, person })
-          ? catalog.collections
-          : photoCollectionGroups(filteredPhotoSets).map(publicPhotoCollectionListItem)
+        ? photoFiltersAreDefault({ category, subCategory, person, date })
+          ? catalog.collectionCategories
+          : photoCollectionCategoryGroups(filteredPhotoSets).map(publicPhotoCollectionCategoryListItem)
         : filteredPhotoSets;
     } else if (mode === "manga") {
       source = mangaService.cacheDirs().map((cacheDir) => publicImageLibraryListItem(mangaService.publicSummary(cacheDir), "manga"));
@@ -260,6 +262,7 @@ export function createImageLibraryService({
       category: ["photo", "western", "movie", "tv", "media"].includes(mode) ? category : "",
       subCategory: mode === "photo" ? subCategory : "",
       person: mode === "photo" ? person : "",
+      date: mode === "photo" ? date : "",
       collection: mode === "photo" ? collection : "",
       collectionSummary,
       searchTerms: searchSpec?.terms || [],
@@ -319,14 +322,113 @@ export function createImageLibraryService({
     return movieChineseTitle(title);
   }
 
+  function photoArchiveDate(value) {
+    const match = String(value || "").match(/(?:^|[^\d])(20\d{2})[.\-/年](\d{1,2})[.\-/月](\d{1,2})(?:日|[^\d]|$)/u);
+    if (!match) return "";
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (month < 1 || month > 12 || day < 1 || day > new Date(year, month, 0).getDate()) return "";
+    return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+
+  function photoArchiveMonth(value) {
+    return photoArchiveDate(value).slice(0, 7);
+  }
+
+  function photoAlbumNumber(value) {
+    const match = String(value || "").match(/\b(VOL|N[O0])\.?\s*(\d+)\b/i);
+    if (!match) return "";
+    const prefix = /^VOL$/i.test(match[1]) ? "VOL." : "NO.";
+    return `${prefix}${match[2]}`;
+  }
+
+  function escapePhotoAlbumPattern(value) {
+    return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function stripPhotoAlbumStats(value) {
+    return String(value || "")
+      .replace(/\s*\[[^\]]*(?:\d+\s*[PV]|(?:MB|GB)\b|\d+(?:\.\d+)?\s*M\b)[^\]]*\]\s*$/iu, "")
+      .trim();
+  }
+
+  function photoAlbumSubject(value, item = {}) {
+    const text = stripPhotoAlbumStats(value);
+    const match = text.match(/\b(?:VOL|N[O0])\.?\s*\d+\b/i);
+    const structuralLabels = [
+      item?.collectionTitle,
+      item?.subCategory,
+      photoCollectionDisplayName(photoCollectionDir(item))
+    ]
+      .map((label) => String(label || "").replace(/^\[|\]$/g, "").trim())
+      .filter(Boolean);
+    const clean = (candidate) => {
+      let result = stripPhotoAlbumStats(candidate);
+      for (const label of structuralLabels) {
+        result = result.replace(new RegExp(`^\\[?${escapePhotoAlbumPattern(label)}\\]?\\s*(?:[-–—:]\\s*)?`, "iu"), "");
+      }
+      return result
+        .replace(/(?:^|\s)20\d{2}[.\-/年]\d{1,2}[.\-/月]\d{1,2}(?:日)?(?:\s|$)/u, " ")
+        .replace(/\s*[-–—:]\s*Collection\s*$/iu, "")
+        .replace(/\s+Collection\s*$/iu, "")
+        .replace(/^\s*[-–—:]\s*/u, "")
+        .trim();
+    };
+    if (!match) return clean(text);
+    const after = clean(text.slice(Number(match.index || 0) + match[0].length));
+    return after || clean(text.slice(0, Number(match.index || 0)));
+  }
+
+  function normalizedPhotoPersonValue(value) {
+    return String(value || "").normalize("NFKC").replace(/\s+/g, "").toLowerCase();
+  }
+
+  function photoPersonFacetValue(item = {}) {
+    const person = String(item?.personName || "").trim();
+    if (!person) return "";
+    const normalized = normalizedPhotoPersonValue(person);
+    const structuralValues = [item?.subCategory, item?.collectionTitle]
+      .map(normalizedPhotoPersonValue)
+      .filter(Boolean);
+    return structuralValues.includes(normalized) ? "" : person;
+  }
+
+  function photoPersonFacets(items = [], limit = Number.MAX_SAFE_INTEGER) {
+    const counts = new Map();
+    for (const item of items) {
+      const value = photoPersonFacetValue(item);
+      if (!value) continue;
+      counts.set(value, (counts.get(value) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([value, count]) => ({ value, count }))
+      .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value, undefined, { numeric: true, sensitivity: "base" }))
+      .slice(0, limit);
+  }
+
+  function photoDateFacets(items = []) {
+    const counts = new Map();
+    for (const item of items) {
+      const value = String(item?.archiveMonth || "").trim();
+      if (!value) continue;
+      counts.set(value, (counts.get(value) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([value, count]) => ({ value, count, label: `${value.slice(0, 4)} 年 ${Number(value.slice(5, 7))} 月` }))
+      .sort((a, b) => b.value.localeCompare(a.value));
+  }
+
   function publicImageLibraryListItem(item, mode) {
     const normalizedMode = normalizeImageLibraryMode(mode || item?.mediaKind || item?.type);
     const movieMetadata = item?.movieMetadata || null;
     const movieTitle = normalizedMode === "movie" ? moviePrimaryDisplayTitle(item, movieMetadata) : "";
+    const photoTitle = String(item?.title || item?.dirName || "").trim();
+    const collectionTitle = normalizedMode === "photo" ? photoCollectionDisplayName(photoCollectionDir(item)) : "";
     const displayTitle =
       normalizedMode === "movie" && movieTitle
         ? [movieTitle, movieMetadata?.year ? `(${movieMetadata.year})` : ""].filter(Boolean).join(" ")
-        : String(item?.title || item?.dirName || "").trim();
+        : photoTitle;
     return {
       id: String(item?.id || ""),
       type: normalizedMode,
@@ -342,6 +444,10 @@ export function createImageLibraryService({
       ext: String(item?.archiveExt || item?.ext || "").trim(),
       size: Number(item?.size || 0),
       updatedAt: String(item?.updatedAt || "").trim(),
+      archiveDate: normalizedMode === "photo" ? photoArchiveDate(photoTitle) : "",
+      archiveMonth: normalizedMode === "photo" ? photoArchiveMonth(photoTitle) : "",
+      albumNumber: normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : "",
+      albumSubject: normalizedMode === "photo" ? photoAlbumSubject(photoTitle, { ...item, collectionTitle }) : "",
       imageCount: item?.imageCount === null || item?.imageCount === undefined ? null : Number(item.imageCount || 0),
       chapterCount: item?.chapterCount === undefined ? null : Number(item.chapterCount || 0),
       doneChapterCount: item?.doneChapterCount === undefined ? null : Number(item.doneChapterCount || 0),
@@ -349,7 +455,7 @@ export function createImageLibraryService({
       failedCount: item?.failedCount === undefined ? null : Number(item.failedCount || 0),
       albumCount: item?.albumCount === undefined ? null : Number(item.albumCount || 0),
       collectionId: normalizedMode === "photo" ? photoCollectionValue(item) : "",
-      collectionTitle: normalizedMode === "photo" ? photoCollectionDisplayName(photoCollectionDir(item)) : "",
+      collectionTitle,
       playable: Boolean(item?.playable),
       coverUrl: String(item?.coverUrl || (normalizedMode === "photo" ? photoSetService.coverUrl(item?.id, item?.updatedAt || "") : "")).trim(),
       rating: item?.movieMetadata?.rating === null || item?.movieMetadata?.rating === undefined ? item?.rating ?? null : Number(item.movieMetadata.rating || 0),
@@ -380,6 +486,30 @@ export function createImageLibraryService({
       playable: false,
       coverUrl: group.coverUrl,
       routePath: `/photo/collection/${encodeURIComponent(group.value)}`
+    };
+  }
+
+  function publicPhotoCollectionCategoryListItem(group) {
+    const collections = group.collections.map(publicPhotoCollectionListItem);
+    return {
+      id: group.value,
+      type: "photoCollectionCategory",
+      title: group.title,
+      category: group.category,
+      subCategory: collections.map((item) => item.title).join(" · "),
+      personName: "",
+      seriesName: "",
+      rootLabel: group.rootLabel,
+      ext: "",
+      size: group.size,
+      updatedAt: group.updatedAt,
+      imageCount: group.imageCount,
+      albumCount: group.albumCount,
+      collectionCount: collections.length,
+      playable: false,
+      coverUrl: group.coverUrl,
+      collections,
+      routePath: ""
     };
   }
 
@@ -474,8 +604,9 @@ export function createImageLibraryService({
       index,
       items,
       collections: photoCollectionGroups(items).map(publicPhotoCollectionListItem),
+      collectionCategories: photoCollectionCategoryGroups(items).map(publicPhotoCollectionCategoryListItem),
       categories: facetCounts(items, "category"),
-      people: facetCounts(items, "personName").slice(0, 20),
+      people: photoPersonFacets(items, 20),
       subCategories: new Map()
     };
     return cachedPhotoCatalog;
@@ -499,7 +630,8 @@ export function createImageLibraryService({
   function photoFiltersAreDefault(filters = {}) {
     return (!filters.category || filters.category === "all")
       && (!filters.subCategory || filters.subCategory === "all")
-      && (!filters.person || filters.person === "all");
+      && (!filters.person || filters.person === "all")
+      && (!filters.date || filters.date === "all");
   }
 
   function normalizeImageSearchValue(value) {
@@ -611,17 +743,20 @@ export function createImageLibraryService({
       if (filters.category && filters.category !== "all" && item.category !== filters.category) return false;
       if (filters.subCategory && filters.subCategory !== "all" && item.subCategory !== filters.subCategory) return false;
       if (filters.person && filters.person !== "all" && item.personName !== filters.person) return false;
+      if (filters.date && filters.date !== "all" && item.archiveMonth !== filters.date && item.archiveDate !== filters.date) return false;
       if (filters.collection && photoCollectionValue(item) !== filters.collection) return false;
       return true;
     });
   }
 
-  function photoLibraryFacets(items = [], subCategoryItems = items) {
-    return {
+  function photoLibraryFacets(items = [], subCategoryItems = items, options = {}) {
+    const facets = {
       categories: facetCounts(items, "category"),
       subCategories: facetCounts(subCategoryItems, "subCategory").slice(0, 500),
-      people: facetCounts(items, "personName").slice(0, 20)
+      people: photoPersonFacets(items, Number(options.peopleLimit || 20))
     };
+    if (options.includeDates) facets.dates = photoDateFacets(items);
+    return facets;
   }
 
   function mediaLibraryFacets(items = []) {
@@ -703,6 +838,44 @@ export function createImageLibraryService({
       .sort((a, b) => b.count - a.count || new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime() || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
   }
 
+  function photoCollectionCategoryGroups(items = []) {
+    const groups = new Map();
+    for (const item of items) {
+      const source = String(photoCollectionValue(item)).split("|")[0] || item.rootLabel || "图库";
+      const category = String(item.category || "未分类").trim() || "未分类";
+      const value = `${source}|${category}`;
+      let group = groups.get(value);
+      if (!group) {
+        group = {
+          value,
+          title: [item.rootLabel, category].filter(Boolean).join(" / ") || category,
+          category,
+          rootLabel: item.rootLabel || "",
+          items: [],
+          size: 0,
+          imageCount: 0,
+          albumCount: 0,
+          updatedAt: "",
+          coverUrl: item.coverUrl || photoSetService.coverUrl(item.id, item.updatedAt || "")
+        };
+        groups.set(value, group);
+      }
+      group.items.push(item);
+      group.size += Number(item.size || 0);
+      group.imageCount += Number(item.imageCount || 0);
+      group.albumCount += 1;
+      const itemTime = new Date(item.updatedAt || 0).getTime();
+      const groupTime = new Date(group.updatedAt || 0).getTime();
+      if (itemTime > groupTime) group.updatedAt = item.updatedAt || group.updatedAt;
+    }
+    return [...groups.values()]
+      .map((group) => ({
+        ...group,
+        collections: photoCollectionGroups(group.items)
+      }))
+      .sort((a, b) => b.albumCount - a.albumCount || Number(b.size || 0) - Number(a.size || 0) || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
+  }
+
   function photoCollectionSummary(items = [], collectionValue = "") {
     if (!collectionValue) return null;
     const first = items[0] || {};
@@ -710,6 +883,9 @@ export function createImageLibraryService({
       id: collectionValue,
       title: first.collectionTitle || photoCollectionDisplayName(photoCollectionDir(first)),
       rootLabel: first.rootLabel || "",
+      category: first.category || "",
+      subCategory: first.subCategory || first.collectionTitle || "",
+      largeCategoryTitle: [first.rootLabel, first.category].filter(Boolean).join(" / "),
       count: items.length,
       size: items.reduce((sum, item) => sum + Number(item.size || 0), 0),
       imageCount: items.reduce((sum, item) => sum + Number(item.imageCount || 0), 0),

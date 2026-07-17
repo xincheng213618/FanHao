@@ -5,9 +5,12 @@ const photoSets = [
   photo("a1", "分类 A", "文件夹一", "人物甲", "合集一/001.zip", 100, "2026-07-01T00:00:00.000Z"),
   photo("a2", "分类 A", "文件夹一", "人物甲", "合集一/002.zip", 200, "2026-07-02T00:00:00.000Z"),
   photo("b1", "分类 B", "文件夹二", "人物乙", "合集一/003.zip", 300, "2026-07-03T00:00:00.000Z"),
-  photo("a3", "分类 A", "文件夹二", "人物丙", "合集二/001.zip", 400, "2026-07-04T00:00:00.000Z")
+  photo("a3", "分类 A", "文件夹二", "文件夹二", "合集二/001.zip", 400, "2026-07-04T00:00:00.000Z")
 ];
-photoSets[1].title = "就是阿朱啊 – NO.108 阳台";
+photoSets[0].title = "[分类 A]2026.07.01 VOL.100 人物甲";
+photoSets[1].title = "[分类 A]2026.06.02 就是阿朱啊 – NO.108 阳台";
+photoSets[2].title = "[分类 B]2026.05.03 N0.102 童颜少女";
+photoSets[3].title = "文件夹二 Sira (시라) - Collection VOL.12 [95P+5V／437MB]";
 let coverUrlCalls = 0;
 const imageIndex = { scannedAt: "2026-07-11T00:00:00.000Z", roots: [], mediaRoots: [], photoSets, mediaItems: [] };
 
@@ -50,8 +53,10 @@ assert.equal("photoSets" in summary, false, "summary payload must not include th
 
 const collectionList = service.itemsPayload(url({ mode: "photo", photoView: "collections", sort: "count", limit: "20" }));
 assert.equal(collectionList.total, 2);
-assert.equal(collectionList.items[0].title, "合集一");
+assert.equal(collectionList.items[0].title, "[套图1] / 分类 A");
 assert.equal(collectionList.items[0].albumCount, 3);
+assert.equal(collectionList.items[0].collectionCount, 2);
+assert.deepEqual(collectionList.items[0].collections.map((item) => item.title), ["合集一", "合集二"]);
 
 const filtered = service.itemsPayload(url({
   mode: "photo",
@@ -70,12 +75,44 @@ assert.deepEqual(filtered.facets.subCategories, [
 const collection = service.itemsPayload(url({
   mode: "photo",
   photoView: "albums",
-  collection: "T:\\|合集一",
+  collection: "T:\\[套图1]|合集一",
   category: "分类 A",
   limit: "20"
 }));
 assert.equal(collection.total, 2, "list filters should still apply inside a collection");
 assert.equal(collection.collectionSummary.count, 3, "collection summary should describe the full collection");
+assert.equal(collection.collectionSummary.largeCategoryTitle, "[套图1] / 分类 A");
+assert.deepEqual(collection.facets.people, [
+  { value: "人物甲", count: 2 },
+  { value: "人物乙", count: 1 }
+]);
+assert.deepEqual(collection.facets.dates.map((item) => item.value), ["2026-07", "2026-06", "2026-05"]);
+
+const datedCollection = service.itemsPayload(url({
+  mode: "photo",
+  photoView: "albums",
+  collection: "T:\\[套图1]|合集一",
+  date: "2026-06",
+  limit: "20"
+}));
+assert.deepEqual(datedCollection.items.map((item) => item.id), ["a2"]);
+assert.equal(datedCollection.items[0].archiveDate, "2026-06-02");
+assert.equal(datedCollection.items[0].albumNumber, "NO.108");
+assert.equal(datedCollection.items[0].albumSubject, "阳台");
+
+const typoNumberItem = service.itemsPayload(url({ mode: "photo", photoView: "albums", q: "童颜少女", limit: "20" })).items[0];
+assert.equal(typoNumberItem.albumNumber, "NO.102", "N0 should normalize to the NO. display prefix");
+assert.equal(typoNumberItem.albumSubject, "童颜少女");
+
+const structuralPersonCollection = service.itemsPayload(url({
+  mode: "photo",
+  photoView: "albums",
+  collection: "T:\\[套图1]|合集二",
+  limit: "20"
+}));
+assert.deepEqual(structuralPersonCollection.facets.people, [], "a folder label repeated as personName should not become a person facet");
+assert.equal(structuralPersonCollection.items[0].albumNumber, "VOL.12");
+assert.equal(structuralPersonCollection.items[0].albumSubject, "Sira (시라)", "a subject before VOL should be preserved without its collection label");
 
 const multiTermSearch = service.itemsPayload(url({
   mode: "photo",
@@ -111,8 +148,8 @@ function photo(id, category, subCategory, personName, relativePath, size, update
     subCategory,
     personName,
     relativePath,
-    sourceRoot: "T:\\",
-    rootLabel: "T:\\",
+    sourceRoot: "T:\\[套图1]",
+    rootLabel: "[套图1]",
     size,
     updatedAt,
     coverUrl: ""

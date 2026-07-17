@@ -410,7 +410,9 @@ export function createMediaResponseService({
         ...(Array.isArray(work.infoMetadata?.previewImages) ? work.infoMetadata.previewImages : [])
       ].slice(0, 12);
       const candidates = [
-        ...(!work.coverId && !work.cachedCover?.coverUrl ? [work.remoteCoverUrl, work.infoSummary?.imageUrl, work.infoMetadata?.imageUrl] : []),
+        ...(!work.coverId
+          ? [work.cachedCover?.coverUrl, work.remoteCoverUrl, work.infoSummary?.imageUrl, work.infoMetadata?.imageUrl]
+          : []),
         ...previewImages
       ];
       for (const candidate of candidates) {

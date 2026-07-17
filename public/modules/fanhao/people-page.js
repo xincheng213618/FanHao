@@ -356,7 +356,9 @@ function personDetailRequestUrl(personId, offset = 0) {
     limit: String(personWorkPageSize()),
     offset: String(offset || 0),
     sort: state.sortMode || "releaseDesc",
-    filter: typeof getWorkFilterMode === "function" ? getWorkFilterMode() : state.filterMode || "all"
+    filter: typeof getWorkFilterMode === "function" ? getWorkFilterMode() : state.filterMode || "all",
+    includeMissingLocal: state.showMissingLocalWorks ? "1" : "0",
+    includeCompilation: state.showCompilationWorks ? "1" : "0"
   });
   if (state.peopleScope && state.peopleScope !== "main") params.set("scope", state.peopleScope);
   return `/api/people/${encodeURIComponent(personId)}?${params}`;

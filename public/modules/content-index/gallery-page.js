@@ -46,6 +46,7 @@ export function createGalleryPage(deps) {
     state.gallery.category = route.galleryCategory || (state.gallery.mode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all");
     state.gallery.subCategory = route.gallerySubCategory || "all";
     state.gallery.person = route.galleryPerson || "all";
+    state.gallery.photoDate = route.galleryPhotoDate || "all";
     state.gallery.sort = route.gallerySort || "updated";
     state.gallery.visibleLimit = 80;
     resetReader();
@@ -132,6 +133,7 @@ export function createGalleryPage(deps) {
       category: state.gallery.mode === "photo" ? state.gallery.category || "all" : "",
       subCategory: state.gallery.mode === "photo" ? state.gallery.subCategory || "all" : "",
       person: state.gallery.mode === "photo" ? state.gallery.person || "all" : "",
+      date: state.gallery.mode === "photo" ? state.gallery.photoDate || "all" : "",
       query: state.gallery.query || ""
     });
   }
@@ -151,6 +153,7 @@ export function createGalleryPage(deps) {
       if (state.gallery.category && state.gallery.category !== "all") params.set("category", state.gallery.category);
       if (state.gallery.subCategory && state.gallery.subCategory !== "all") params.set("subCategory", state.gallery.subCategory);
       if (state.gallery.person && state.gallery.person !== "all") params.set("person", state.gallery.person);
+      if (state.gallery.photoDate && state.gallery.photoDate !== "all") params.set("date", state.gallery.photoDate);
       if (state.gallery.photoCollection) params.set("collection", state.gallery.photoCollection);
     }
     return `/api/image-library/items?${params.toString()}`;

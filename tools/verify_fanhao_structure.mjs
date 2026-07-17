@@ -24,6 +24,7 @@ import { createWorkImageService } from "../src/modules/fanhao/server/works/image
 import { createWorkDetailService } from "../src/modules/fanhao/server/works/work-detail-service.js";
 import { createMissingCodeSearchService } from "../src/modules/fanhao/server/works/missing-code-search-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
+import { createWorkClassificationService } from "../src/modules/fanhao/server/works/work-classification-service.js";
 import { createWorkSearchIndexService } from "../src/modules/fanhao/server/works/work-search-index-service.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
 import { sendJson } from "../src/platform/server/responses.js";
@@ -158,11 +159,11 @@ assert(webApp.includes('const COVER_OBSERVER_ROOT_MARGIN = "420px 0px"'), "FanHa
 assert(webApp.includes("img.dataset.coverIndex = String(index)"), "FanHao work covers must retain their absolute card priority across render batches");
 assert(webApp.includes("activateProgressiveCoverImages(images)"), "FanHao work batches must schedule only newly attached covers");
 assert(!webApp.includes("activateProgressiveCoverImages(els.workGrid)"), "FanHao work batches must not rescan every previously rendered cover");
-assert(webApp.includes("const movedDown = nextScrollY > lastScrollY + 1"), "work continuation must require a real downward scroll before automatic loading");
-assert(webApp.includes("userScrollIntentUntil = Date.now() + 1200"), "automatic work continuation must be armed by recent wheel, touch, keyboard, or scrollbar input");
-assert(webApp.includes("userScrollIntentUntil = 0;\n    scheduleCheck();"), "one user scroll gesture must consume at most one automatic page");
+assert(webApp.includes("const observer = new IntersectionObserver") && webApp.includes('rootMargin: `${WORK_AUTO_LOAD_DISTANCE}px 0px`'), "work continuation must load when its sentinel approaches the viewport");
+assert(!webApp.includes("userScrollIntentUntil") && !webApp.includes("const movedDown = nextScrollY > lastScrollY + 1"), "work continuation must not depend on a short-lived input-intent window");
+assert(webApp.includes('trigger.dataset.autoConsumed = "1"') && webApp.includes("observer?.disconnect();"), "one continuation sentinel must trigger at most one server page");
 assert(!webApp.includes("WORK_AUTO_LOAD_RECHECK_DELAYS"), "work rendering must not schedule autonomous load-more cascades");
-assert(!webApp.includes("workLoadMoreObserver"), "newly rendered load-more rows must not immediately retrigger through intersection observation");
+assert(!webApp.includes("workLoadMoreObserver"), "work continuation observers must stay scoped to their rendered sentinel");
 assert(webApp.includes("const moduleNavigationPromise = initializeModuleNavigation();"), "FanHao startup must begin module navigation without blocking the first route");
 assert(webApp.includes("collectionPage.prefetch(initialRoute.view);"), "direct collection routes must start their data request before library hydration");
 assert(webApp.indexOf("collectionPage.prefetch(initialRoute.view);") < webApp.indexOf("await applyRoute(initialRoute);"), "collection and library startup requests must overlap");
@@ -760,6 +761,8 @@ const webRankingPage = read("public/modules/fanhao/ranking-page.js");
 const loadMorePeopleSource = /function loadMorePeopleIndex\(\)\s*\{([\s\S]*?)\n\}/.exec(peoplePage)?.[1] || "";
 assert(loadMorePeopleSource.includes("loadMoreRow.before(fragment)"), "people pagination must append cards without replacing the grid");
 assert(!loadMorePeopleSource.includes("renderPeopleIndex()"), "people pagination must not rerender the full index");
+assert(webApp.includes("appendLoadedPersonWorks();"), "person work pagination must append the next server page without resetting scroll position");
+assert(webApp.includes("const prefixMatches = renderedIds.every"), "person work pagination must fall back safely when filters or sorting change during loading");
 assert(peoplePage.includes("const PERSON_INDEX_DESKTOP_PAGE_SIZE = 64"), "Web people index must keep the desktop first page compact");
 assert(peoplePage.includes("const PERSON_INDEX_MOBILE_PAGE_SIZE = 48"), "Web people index must keep the mobile first page compact");
 assert(webApp.includes("state.personPageSize = peoplePage.personIndexPageSize()"), "Web people paging must adapt to the viewport instead of network location");
@@ -869,10 +872,23 @@ assert(personDetailServiceSource.includes("peoplePayloadStamp(scope)}:${workQuer
 assert(personDetailServiceSource.includes("workQueryService.lightweightFacets(source.works)"), "person facets must remain live without hydrating detail-only metadata");
 const workInfoServiceSource = read("src/modules/fanhao/server/works/work-info-service.js");
 const workQueryServiceSource = read("src/modules/fanhao/server/works/work-query-service.js");
+const workClassificationServiceSource = read("src/modules/fanhao/server/works/work-classification-service.js");
 const workCodeIndexServiceSource = read("src/modules/fanhao/server/works/work-code-index-service.js");
 const workSearchIndexServiceSource = read("src/modules/fanhao/server/works/work-search-index-service.js");
 assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info details must support page-level batch hydration");
 assert(personDetailServiceSource.includes("{ lightweightInfo: true }") && workQueryServiceSource.includes("lightweightFacets: lightweightWorkFacets"), "person first pages must reuse the lightweight work-list path");
+assert(peoplePageSource.includes('includeMissingLocal: state.showMissingLocalWorks ? "1" : "0"') && peoplePageSource.includes('includeCompilation: state.showCompilationWorks ? "1" : "0"'), "person requests must send server-side missing-local and compilation visibility");
+assert(workQueryServiceSource.includes("workClassificationService.filterForRequest(sourceWorks, url, filter)") && workQueryServiceSource.indexOf("filterForRequest(sourceWorks, url, filter)") < workQueryServiceSource.indexOf("sortWorkList(matchedWorks"), "person visibility must be filtered on the server before sorting and pagination");
+assert(workQueryServiceSource.includes("filters.every((item) => matchesFilter(work, item))"), "server work queries must apply combined filter chips before pagination");
+assert(workClassificationServiceSource.includes("function isCompilation(work)") && workClassificationServiceSource.includes("function filterForRequest(works, url, filter"), "compilation classification and visibility must live on the server");
+assert(personDetailServiceSource.includes('url.searchParams.get("includeMissingLocal")') && personDetailServiceSource.includes('url.searchParams.get("includeCompilation")'), "person page caches must distinguish server visibility options");
+assert(webApp.includes('if (state.activeView === "people" && state.selectedPersonId) return state.works;'), "person cards must render the server page without client-side visibility filtering or sorting");
+assert(webApp.includes("state.workVisibleLimit = Math.max(state.workVisibleLimit, state.works.length);"), "person continuation must expose each server page immediately instead of adding a second client paging layer");
+const workAutoloadSource = /function setupWorkLoadMoreAutoload\([\s\S]*?\n}\n\nfunction renderEmpty/.exec(webApp)?.[0] || "";
+assert(workAutoloadSource.includes("new IntersectionObserver"), "work continuation must use viewport observation for automatic loading");
+assert(!workAutoloadSource.includes('window.addEventListener("wheel"') && !workAutoloadSource.includes("userScrollIntentUntil"), "work continuation must not depend on short-lived wheel intent timing");
+assert(workQueryServiceSource.includes("missing.filter((work) => work.missingLocal)"), "lightweight person pages must batch-hydrate SQL covers for missing-local works");
+assert(workPresenterServiceSource.includes("if (work.missingLocal) {\n      // Missing-local works") && workPresenterServiceSource.includes("const coreCover = publicCoreWorkCover(work.id);"), "missing-local work cards must expose their cached SQL cover in lightweight pages");
 assert(workQueryServiceSource.includes("prewarmWorkInfoDetails(missing)"), "work lists must batch-hydrate only unprepared detail rows before presentation");
 assert(workQueryServiceSource.includes("prewarmVideoProbesForWorks(missing)"), "visible work pages must prepare playback probes only for unprepared works");
 assert(workQueryServiceSource.includes("const LIST_PAGE_CACHE_LIMIT = 96") && workQueryServiceSource.includes("const WORK_PAYLOAD_CACHE_LIMIT = 4096"), "work lists must retain complete pages and prepared work payloads in bounded caches");
@@ -977,6 +993,7 @@ const mediaResponseServiceSource = read("src/platform/server/media-response-serv
 const mediaBlobWorkerClientSource = read("src/platform/server/media-blob-worker-client.js");
 const mediaBlobWorkerSource = read("src/platform/server/media-blob-worker.js");
 assert(mediaResponseServiceSource.includes("cachedRemoteImageUrls(remoteUrls)"), "visible work pages must batch-check warmed remote images");
+assert(mediaResponseServiceSource.includes("work.cachedCover?.coverUrl, work.remoteCoverUrl"), "SQL cover metadata must still prewarm remote image blobs that are not cached yet");
 assert(mediaResponseServiceSource.includes("await cachedMediaBlobRow"), "database-backed images must leave synchronous request handling");
 assert(mediaResponseServiceSource.includes("mediaBlobCacheMaxBytes = 512 * 1024 * 1024"), "database-backed images must reuse a bounded memory hot cache");
 assert(mediaResponseServiceSource.includes("remoteImageWarmQueue.length + remoteImageWarmActive >= queueLimit"), "remote-image prewarming must keep its backlog bounded");
@@ -1051,6 +1068,30 @@ const works = [
   { id: "older", title: "BBB", missingLocal: false, infoSummary: { releaseDate: "2024-01-01" } },
   { id: "newer", title: "AAA", missingLocal: true, infoSummary: { releaseDate: "2025-01-01" } }
 ];
+const workClassificationService = createWorkClassificationService({
+  appConfigService: {
+    current: () => ({ compilationPrefixes: ["KWBD"], compilationKeywords: ["総集編"] })
+  }
+});
+const classifiedWorks = [
+  { id: "local", title: "LOCAL-001", missingLocal: false },
+  { id: "missing", title: "NORMAL-001", missingLocal: true },
+  { id: "prefix", title: "KWBD-001", missingLocal: true, infoSummary: { code: "KWBD-001" } },
+  { id: "keyword", title: "SPECIAL 総集編", missingLocal: true }
+];
+assert.equal(workClassificationService.isCompilation(classifiedWorks[0]), false, "local works must not be classified as compilation placeholders");
+assert.equal(workClassificationService.isCompilation(classifiedWorks[2]), true, "server compilation classification must honor configured prefixes");
+assert.equal(workClassificationService.isCompilation(classifiedWorks[3]), true, "server compilation classification must honor configured keywords");
+assert.deepEqual(
+  workClassificationService.filterForRequest(classifiedWorks, new URL("http://fanhao.local/api/people/1?includeMissingLocal=0&includeCompilation=0")),
+  [classifiedWorks[0]],
+  "server visibility must remove missing-local and compilation works before pagination"
+);
+assert.deepEqual(
+  workClassificationService.filterForRequest(classifiedWorks, new URL("http://fanhao.local/api/people/1?includeMissingLocal=1&includeCompilation=0")),
+  [classifiedWorks[0], classifiedWorks[1]],
+  "server visibility must allow ordinary missing-local works without leaking compilations"
+);
 assert.deepEqual(
   selectVisibleWorks(works, { showCompilationWorks: true, showMissingLocalWorks: true, sortMode: "releaseDesc" }).map((work) => work.id),
   ["newer", "older"],
@@ -1878,9 +1919,20 @@ const lightweightPersonPage = workQueryService.listFromWorksPayload(
 );
 assert.equal(lightweightPersonPage.works[0].id, queryWork.id, "lightweight person pages must preserve visible work payloads");
 assert.equal(workInfoFacetReadCount, lightweightFacetReadsBeforePersonPage, "lightweight person facets must not read detail-only work metadata");
-assert.deepEqual(preparedWorkCoverIds, [], "lightweight person pages must not hydrate detail-only cover metadata");
+assert.deepEqual(preparedWorkCoverIds, [], "lightweight person pages must not hydrate redundant SQL covers for local works");
 assert.deepEqual(preparedWorkInfoIds, [], "lightweight person pages must not hydrate detail-only info rows");
 assert.deepEqual(preparedWorkVideoIds, [], "lightweight person pages must leave playback probes to explicit hover, focus, or pointer intent");
+const lightweightMissingWork = { ...queryWork, id: "missing-work-1", missingLocal: true };
+const lightweightMissingPage = workQueryService.listFromWorksPayload(
+  [lightweightMissingWork],
+  new URL("http://127.0.0.1/api/people/person-1?limit=24&sort=releaseDesc"),
+  { filter: "all" },
+  { lightweightInfo: true }
+);
+assert.equal(lightweightMissingPage.works[0].id, lightweightMissingWork.id, "lightweight person pages must preserve missing-local works");
+assert.deepEqual(preparedWorkCoverIds, [lightweightMissingWork.id], "lightweight person pages must batch-hydrate cached SQL covers for missing-local works");
+assert.deepEqual(preparedWorkInfoIds, [], "missing-local cover hydration must not pull detail-only info rows");
+assert.deepEqual(preparedWorkVideoIds, [], "missing-local cover hydration must not start playback probes");
 const workListPublicCountAfterLightweightPage = workListPublicCount;
 const cachedWorkListFirst = workQueryService.listPayload(workListUrl);
 const listFavoriteReadsAfterFirstPage = searchFavoriteFacetReadCount;

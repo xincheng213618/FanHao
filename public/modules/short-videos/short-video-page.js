@@ -4,6 +4,7 @@ import { createShortVideoAuthorPages } from "./author-pages.js?v=20260716-short-
 import { createIcon, railButton, setIconButton } from "./icons.js?v=20260716-short-video-icons-01";
 import { createShortVideoListWindow } from "./list-window.js?v=20260716-short-video-list-window-01";
 import { createShortVideoMediaCache } from "./media-cache.js?v=20260716-short-video-media-cache-01";
+import { createShortVideoPlayerSourceLifecycle } from "./player-source-lifecycle.js?v=20260717-short-video-source-lifecycle-01";
 import {
   applyShortVideoLikeBadgeState,
   clampNumber,
@@ -67,6 +68,14 @@ export function createShortVideoPage(deps) {
   let shortVideoGalleryPlayerPromise = null;
   let shortVideoListCardsPromise = null;
   let shortVideoListCards = null;
+  const {
+    ensureShortVideoPlayerSource,
+    warmAdjacentVideoPlayer
+  } = createShortVideoPlayerSourceLifecycle({
+    markPerformance: markShortVideoPerformance,
+    playbackUrl: shortVideoPlaybackUrl,
+    waitForFirstFrame: waitForVideoFirstFrame
+  });
 
   let wheelLocked = false;
   let touchStartX = 0;
@@ -1223,7 +1232,7 @@ export function createShortVideoPage(deps) {
     if (likeDistributionViewPromise) return likeDistributionViewPromise;
     // Keep the research/statistics renderer out of the video-detail startup bundle.
     // A variable URL intentionally leaves this import for the browser at route time.
-    const moduleUrl = "/modules/short-videos/like-distribution-view.js?v=20260716-quality-audit-20w-01";
+    const moduleUrl = "/modules/short-videos/like-distribution-view.js?v=20260716-personal-value-health-01";
     likeDistributionViewPromise = import(moduleUrl).then((module) => {
       if (typeof module.createLikeDistributionView !== "function") {
         throw new Error("内容洞察模块加载失败");
@@ -1939,12 +1948,11 @@ export function createShortVideoPage(deps) {
       player.fetchPriority = ghost ? "low" : "high";
       player.setAttribute("fetchpriority", ghost ? "low" : "high");
       const playbackUrl = shortVideoPlaybackUrl(video);
-      if (player.dataset.streamUrl !== playbackUrl) {
-        delete player.dataset.shortVideoFrameReady;
-        delete player.dataset.shortVideoFrameReadyAt;
-        player.src = playbackUrl;
-      }
-      player.dataset.streamUrl = playbackUrl;
+      ensureShortVideoPlayerSource(player, video, {
+        source: playbackUrl,
+        forceReload: player.dataset.streamUrl !== playbackUrl,
+        reason: ghost ? "render-adjacent" : "render-current"
+      });
       player.dataset.videoId = String(video?.id || "");
       player.dataset.shortVideoSlot = slot;
       player.dataset.shortVideoAttachedAt = String(Date.now());
@@ -2358,6 +2366,7 @@ export function createShortVideoPage(deps) {
     let feedbackTimer = 0;
     let stuckTimer = 0;
     let retrying = false;
+    let automaticSourceRecoveryAttempted = false;
     let wantsToPlay = Boolean(player.autoplay);
     let lastGoodTime = Math.max(0, Number(player.currentTime || 0));
 
@@ -2386,6 +2395,23 @@ export function createShortVideoPage(deps) {
       if (kind === "loading" || kind === "buffering" || kind === "retrying") {
         stuckTimer = window.setTimeout(() => {
           if (player.readyState >= 2 && !stage.classList.contains("is-video-buffering")) return;
+          const boundSource = String(player.currentSrc || player.getAttribute("src") || "").trim();
+          if (
+            !automaticSourceRecoveryAttempted
+            && (player.dataset.shortVideoDecoderReleased === "1" || !boundSource)
+          ) {
+            automaticSourceRecoveryAttempted = true;
+            const sourceRestored = ensureShortVideoPlayerSource(player, video, {
+              forceReload: true,
+              reason: "stuck-timeout"
+            });
+            if (sourceRestored) {
+              retrying = true;
+              showStatus("retrying", "正在重新加载", "已自动恢复视频地址");
+              if (wantsToPlay) player.play?.().catch(() => {});
+              return;
+            }
+          }
           retrying = false;
           showStatus("error", "视频加载失败", "保留当前进度后重试");
         }, 8000);
@@ -2426,6 +2452,7 @@ export function createShortVideoPage(deps) {
     };
     const handleReady = () => {
       if (player.readyState < 2) return;
+      automaticSourceRecoveryAttempted = false;
       const recoveredFromRetry = retrying;
       hideStatus();
       if (recoveredFromRetry) warmVisibleAdjacentVideoPlayers();
@@ -2475,7 +2502,7 @@ export function createShortVideoPage(deps) {
     retry.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      const source = String(video?.streamUrl || player.currentSrc || player.src || "").trim();
+      const source = String(player.dataset.streamUrl || shortVideoPlaybackUrl(video) || player.currentSrc || player.src || "").trim();
       if (!source) {
         showStatus("error", "视频加载失败", "暂时找不到可播放的视频地址");
         return;
@@ -2512,10 +2539,11 @@ export function createShortVideoPage(deps) {
         else player.addEventListener("canplay", resume, { once: true });
       };
       player.addEventListener("loadedmetadata", restorePlaybackState, { once: true });
-      delete player.dataset.shortVideoFrameReady;
-      delete player.dataset.shortVideoFrameReadyAt;
-      player.src = source;
-      player.load();
+      ensureShortVideoPlayerSource(player, video, {
+        source,
+        forceReload: true,
+        reason: "manual-retry"
+      });
     });
 
     if (player.error) handleError();
@@ -3928,8 +3956,15 @@ export function createShortVideoPage(deps) {
   async function primeAdjacentSound(direction, video) {
     const player = adjacentPlayer(direction);
     if (!player) return false;
+    // A delayed warm/release callback created while this player was an
+    // off-screen ghost must not be allowed to clear its src mid-transition.
+    player.dataset.shortVideoWarmScheduleToken = String(++shortVideoAdjacentWarmScheduleId);
     const ready = await warmAdjacentVideoPlayer(player, video, {
-      forceReload: Boolean(player.error),
+      forceReload: Boolean(
+        player.error
+        || player.dataset.shortVideoDecoderReleased === "1"
+        || !(player.currentSrc || player.getAttribute("src"))
+      ),
       pauseAfter: false,
       timeout: SHORT_VIDEO_SWITCH_PRIME_TIMEOUT_MS
     });
@@ -3952,53 +3987,6 @@ export function createShortVideoPage(deps) {
       ? ".short-video-reel-panel.is-next .short-video-player"
       : ".short-video-reel-panel.is-prev .short-video-player";
     return els.workGrid?.querySelector?.(selector) || null;
-  }
-
-  async function warmAdjacentVideoPlayer(player, video, options = {}) {
-    if (!player) return false;
-    const source = String(
-      player.dataset.streamUrl
-      || shortVideoPlaybackUrl(video)
-      || player.currentSrc
-      || player.getAttribute("src")
-      || ""
-    ).trim();
-    if (!source) return false;
-    const pauseAfter = options.pauseAfter !== false;
-    const settleGhost = () => {
-      if (!pauseAfter || !player.classList.contains("is-ghost")) return;
-      player.pause?.();
-      player.muted = true;
-      player.preload = "metadata";
-    };
-    const shouldReload = Boolean(
-      options.forceReload
-      || player.error
-      || !player.currentSrc
-      || player.dataset.shortVideoDecoderReleased === "1"
-    );
-    if (shouldReload) {
-      delete player.dataset.shortVideoFrameReady;
-      delete player.dataset.shortVideoFrameReadyAt;
-      delete player.dataset.shortVideoDecoderReleased;
-      player.src = source;
-      player.dataset.streamUrl = source;
-      player.load?.();
-    }
-    player.preload = "auto";
-    player.muted = true;
-    if (player.readyState >= 1 && player.currentTime > 0.12) {
-      delete player.dataset.shortVideoFrameReady;
-      delete player.dataset.shortVideoFrameReadyAt;
-      try {
-        player.currentTime = 0;
-      } catch {}
-    }
-    const readyPromise = waitForVideoFirstFrame(player, Math.max(200, Number(options.timeout || 1000)));
-    player.play?.().catch(() => {});
-    const ready = await readyPromise;
-    settleGhost();
-    return ready || player.readyState >= 2;
   }
 
   function scheduleAdjacentVideoWarmup(player, video, slot = "next") {
@@ -4175,11 +4163,26 @@ export function createShortVideoPage(deps) {
     const player = incoming.querySelector(".short-video-player");
     const stage = incoming.querySelector(".short-video-stage");
     if (player && stage) {
+      // Promotion invalidates every timer scheduled for the old ghost role.
+      // Restore the source before changing slot/play state in case a timer
+      // already released the decoder during the navigation animation.
+      player.dataset.shortVideoWarmScheduleToken = String(++shortVideoAdjacentWarmScheduleId);
       player.classList.remove("is-ghost");
       player.dataset.shortVideoSlot = "current";
       player.dataset.shortVideoPlayed = "1";
       player.dataset.shortVideoPromotedAt = String(Date.now());
       delete player.dataset.shortVideoDecoderRetentionKey;
+      player.preload = "auto";
+      player.fetchPriority = "high";
+      player.setAttribute("fetchpriority", "high");
+      ensureShortVideoPlayerSource(player, video, {
+        forceReload: Boolean(
+          player.error
+          || player.dataset.shortVideoDecoderReleased === "1"
+          || !(player.currentSrc || player.getAttribute("src"))
+        ),
+        reason: "adjacent-promotion"
+      });
       player.muted = Boolean(state.shortVideo.muted);
       player.volume = currentShortVideoVolume();
       if (player.dataset.primaryControlsBound !== "1") {

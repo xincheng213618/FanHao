@@ -10,6 +10,7 @@ export function createWorkPresenterService({
   getLibrary,
   getPersonFallbackAvatarStamp = () => "",
   isGPerson,
+  isCompilationWork = () => false,
   localWorkMarkers,
   manualCoverStateService,
   playbackProgressService,
@@ -166,7 +167,9 @@ export function createWorkPresenterService({
   function publicWork(work, includeFiles = false, options = {}) {
     const markers = localWorkMarkers(work);
     if (work.missingLocal) {
-      const coreCover = options.lightweightInfo ? null : publicCoreWorkCover(work.id);
+      // Missing-local works have no filesystem fallback. Their cached SQL cover is
+      // list-critical data, even when the rest of the person page stays lightweight.
+      const coreCover = publicCoreWorkCover(work.id);
       const person = options.lightweightInfo
         ? getLibrary().peopleById.get(String(work.personId || "")) || null
         : displayPersonForWork(work.personId);
@@ -182,6 +185,7 @@ export function createWorkPresenterService({
         directoryName: displayWorkTitle(work.directoryName || ""),
         relativePath: work.relativePath || "",
         localMarkers: markers,
+        compilation: isCompilationWork(work),
         coverId: null,
         manualCoverId: "",
         autoCoverId: "",
@@ -235,6 +239,7 @@ export function createWorkPresenterService({
       directoryName: displayWorkTitle(work.directoryName),
       relativePath: work.relativePath,
       localMarkers: markers,
+      compilation: isCompilationWork(work),
       coverId: manualCover?.image.id || (coreCover ? null : work.coverId),
       manualCoverId: manualCover?.image.id || "",
       autoCoverId: work.coverId || "",

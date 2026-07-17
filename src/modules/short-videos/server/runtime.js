@@ -1,6 +1,7 @@
 import { createShortVideoStore } from "./store.js";
 import { routeShortVideoApi } from "./routes.js";
 import { createShortVideoCatalogWorkerClient } from "./catalog-worker-client.js";
+import { createShortVideoWatchWriteService } from "./watch-write-service.js";
 import { createDownloadManagerSyncService } from "./download-manager-sync-service.js";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
@@ -56,6 +57,12 @@ export function createShortVideosRuntime({
 }) {
   const store = createShortVideoStore({ dbPath, downloadManagerDbPath, ffmpegPath, roots });
   const catalogWorker = createShortVideoCatalogWorkerClient({
+    dbPath,
+    downloadManagerDbPath,
+    ffmpegPath,
+    roots
+  });
+  const watchWriter = createShortVideoWatchWriteService({
     dbPath,
     downloadManagerDbPath,
     ffmpegPath,
@@ -284,6 +291,7 @@ export function createShortVideosRuntime({
       requireLocalAdmin,
       sendJson,
       shortVideoStore: store,
+      recordWatch: (videoId, options) => watchWriter.record(videoId, options),
       onMutation: clearShortVideoListCache,
       onWatch: queueWatchedVideoCache,
       onWatchMutation: recordShortVideoWatchCacheMutation
@@ -421,7 +429,8 @@ export function createShortVideosRuntime({
         notFound(res);
         return true;
       }
-      mediaResponseService.serveImage(res, file);
+      if (file.buffer) serveShortVideoCoverBlob(res, file);
+      else mediaResponseService.serveImage(res, file);
       return true;
     }
 
@@ -749,6 +758,7 @@ export function createShortVideosRuntime({
 
   function stopListServices() {
     catalogWorker.stop();
+    watchWriter.stop();
     for (const timer of listCacheRefreshJobs.values()) clearTimeout(timer);
     listCacheRefreshJobs.clear();
     if (shortVideoWatchCachePersistTimer) {
@@ -760,6 +770,7 @@ export function createShortVideosRuntime({
 
   function startDownloadManagerSync() {
     const catalogReady = catalogWorker.start();
+    watchWriter.start();
     schedule4kSmoothVideoWarmup();
     downloadManagerSync.start();
     return catalogReady;
@@ -1677,4 +1688,17 @@ export function createShortVideosRuntime({
     stop: stopDownloadManagerSync,
     store
   };
+}
+
+function serveShortVideoCoverBlob(res, file) {
+  const buffer = Buffer.from(file.buffer || []);
+  const version = String(file.cacheVersion || "").replace(/[^a-z0-9._-]+/gi, "-");
+  res.writeHead(200, {
+    "Content-Type": file.mimeType || "image/jpeg",
+    "Content-Length": buffer.length,
+    "Cache-Control": "private, max-age=31536000, immutable",
+    "Content-Disposition": "inline",
+    ...(version ? { ETag: `\"${version}\"` } : {})
+  });
+  res.end(buffer);
 }

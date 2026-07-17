@@ -49,6 +49,7 @@ import { createAdminSettingsService } from "./src/modules/system/server/admin-se
 import { createAdminTaskOrchestrationService } from "./src/modules/system/server/admin-task-orchestration-service.js";
 import { createAdminTaskService } from "./src/modules/system/server/admin-task-service.js";
 import { createAppConfigService } from "./src/modules/system/server/app-config-service.js";
+import { createWorkClassificationService } from "./src/modules/fanhao/server/works/work-classification-service.js";
 import { createDoubanCookieService } from "./src/modules/system/server/douban-cookie-service.js";
 import { createAccessLogger } from "./src/platform/server/access-log.js";
 import { createArchiveImageService } from "./src/platform/server/archive-image-service.js";
@@ -222,6 +223,7 @@ const appConfigService = createAppConfigService({
   maxImageReaderCacheMaxBytes: MAX_IMAGE_READER_CACHE_MAX_BYTES,
   minImageReaderCacheMaxBytes: MIN_IMAGE_READER_CACHE_MAX_BYTES
 });
+const workClassificationService = createWorkClassificationService({ appConfigService });
 const userStateService = createUserStateService({
   defaultFavoriteFolderId: DEFAULT_FAVORITE_FOLDER_ID,
   defaultFavoriteFolderName: DEFAULT_FAVORITE_FOLDER_NAME,
@@ -645,6 +647,7 @@ const workPresenterService = createWorkPresenterService({
   getLibrary: () => library,
   getPersonFallbackAvatarStamp: personFallbackAvatarStamp,
   isGPerson,
+  isCompilationWork: workClassificationService.isCompilation,
   localWorkMarkers,
   manualCoverStateService,
   playbackProgressService,
@@ -919,6 +922,7 @@ const moduleRegistry = await discoverFanHaoModules({
         workHasLocalMarker,
         workInfoFacetRow,
         workInfoRow,
+        workClassificationService,
         workLocalMutationService,
         workQueryStamp
       }),

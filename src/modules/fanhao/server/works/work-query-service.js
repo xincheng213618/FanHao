@@ -44,6 +44,10 @@ export function createWorkQueryService({
   workHasLocalMarker,
   workInfoFacetRow,
   workQueryStamp,
+  workClassificationService = {
+    filterForRequest: (works) => works,
+    visibilityStamp: () => ""
+  },
 }) {
   let enrichedWorksCache = null;
   const listSourceCache = new Map();
@@ -77,7 +81,7 @@ export function createWorkQueryService({
   const workCodeCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
   function currentStamp() {
-    return `${library.scannedAt || ""}:${library.worksById.size}:${workQueryStamp()}`;
+    return `${library.scannedAt || ""}:${library.worksById.size}:${workQueryStamp()}:${workClassificationService.visibilityStamp()}`;
   }
 
   function listResponseStamp() {
@@ -344,8 +348,11 @@ export function createWorkQueryService({
     if (options.hydrateMissingSearchResults) hydrateMissingSearchWorks(pageSource);
     const missing = pageSource.filter((work) => !preparedWorkEntry(work, options));
     if (missing.length) {
+      const coverBatch = options.lightweightInfo
+        ? missing.filter((work) => work.missingLocal)
+        : missing;
+      if (coverBatch.length) prewarmCoreWorkCovers(coverBatch);
       if (!options.lightweightInfo) {
-        prewarmCoreWorkCovers(missing);
         prewarmVideoProbesForWorks(missing);
         prewarmWorkInfoDetails(missing);
       }
@@ -408,7 +415,11 @@ export function createWorkQueryService({
     const filter = extra.filter || url.searchParams.get("filter") || "all";
     const sort = url.searchParams.get("sort") || "releaseDesc";
     const matchesFilter = options.lightweightInfo ? lightweightWorkMatchesFilter : workMatchesFilter;
-    const matchedWorks = filter === "all" ? sourceWorks : sourceWorks.filter((work) => matchesFilter(work, filter));
+    const visibleWorks = workClassificationService.filterForRequest(sourceWorks, url, filter);
+    const filters = requestedFilters(filter);
+    const matchedWorks = filters.length
+      ? visibleWorks.filter((work) => filters.every((item) => matchesFilter(work, item)))
+      : visibleWorks;
     const works = sortWorkList(matchedWorks, sort, options);
     return pagedWorksPayload(works, url, {
       ...extra,
@@ -699,6 +710,14 @@ export function createWorkQueryService({
     listPayload,
     listFromWorksPayload,
     prewarm,
-    searchPayload
+    searchPayload,
+    visibilityStamp: workClassificationService.visibilityStamp
   };
+}
+
+function requestedFilters(value) {
+  return String(value || "all")
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item && item !== "all");
 }

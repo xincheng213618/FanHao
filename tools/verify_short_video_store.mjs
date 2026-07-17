@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import { SQLITE_SHORT_VIDEO_COVER_SOURCE } from "../src/modules/short-videos/server/cover-database.js";
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
 import { createDownloadManagerSyncService } from "../src/modules/short-videos/server/download-manager-sync-service.js";
 
@@ -18,6 +19,10 @@ const shortVideoListPageQueriesSource = fs.readFileSync(
 );
 const shortVideoNavigationQueriesSource = fs.readFileSync(
   new URL("../src/modules/short-videos/server/navigation-queries.js", import.meta.url),
+  "utf8"
+);
+const shortVideoLibraryInsightsSource = fs.readFileSync(
+  new URL("../src/modules/short-videos/server/library-insights.js", import.meta.url),
   "utf8"
 );
 const shortVideoPublicVideoMapperSource = fs.readFileSync(
@@ -61,6 +66,9 @@ assert.match(
   "list-page query component should centralize ordered catalog hydration"
 );
 assert.match(shortVideoStoreSource, /createShortVideoNavigationQueries/, "store should delegate adjacent-video navigation to the query component");
+assert.match(shortVideoStoreSource, /shortVideoLibraryInsights/, "store should delegate personal-value and data-health analytics to a dedicated component");
+assert.match(shortVideoLibraryInsightsSource, /function authorEfficiency\(/, "library insights should quantify author input against explicit-like hits");
+assert.match(shortVideoLibraryInsightsSource, /function managerQualityAudit\(/, "library insights should read the real quality-audit state instead of hard-coding a likes band");
 assert.doesNotMatch(
   shortVideoStoreSource,
   /^function (?:adjacentOrder|adjacentRows|fastHistoryAdjacentRows|fastLikedAdjacentRows|fastPublishedAdjacentRows|fastMetricAdjacentRows)\b/m,
@@ -132,6 +140,26 @@ try {
       following_discovered_at TEXT,
       updated_at TEXT
     );
+    CREATE TABLE links (
+      id INTEGER PRIMARY KEY,
+      aweme_id TEXT,
+      kind TEXT,
+      status TEXT,
+      download_intent TEXT
+    );
+    CREATE TABLE video_quality_audit_runs (
+      id INTEGER PRIMARY KEY,
+      generated_at TEXT,
+      downloaded_count INTEGER,
+      probe_error_count INTEGER
+    );
+    CREATE TABLE video_quality_audit_items (
+      id INTEGER PRIMARY KEY,
+      run_id INTEGER,
+      audit_status TEXT,
+      redownload_status TEXT,
+      verification_status TEXT
+    );
   `);
   followingManagerDb.prepare(`
     INSERT INTO profiles (id, sec_uid, tab, is_following, following_discovered_at, updated_at)
@@ -141,6 +169,10 @@ try {
     INSERT INTO profiles (id, sec_uid, tab, is_following, following_discovered_at, updated_at)
     VALUES (2, 'MS4wNoLikedVideos', 'post', 1, '2026-07-12T00:00:00.000Z', '2026-07-12T00:00:00.000Z')
   `).run();
+  followingManagerDb.prepare("INSERT INTO links VALUES (1, 'distribution-video', 'video', 'downloaded', '')").run();
+  followingManagerDb.prepare("INSERT INTO video_quality_audit_runs VALUES (7, '2026-07-15T12:00:00.000Z', 1, 0)").run();
+  followingManagerDb.prepare("INSERT INTO video_quality_audit_items VALUES (1, 7, 'skipped_threshold', 'not_needed', 'not_checked')").run();
+  followingManagerDb.prepare("INSERT INTO video_quality_audit_items VALUES (2, 7, 'upgrade_available', 'completed', 'passed')").run();
   followingManagerDb.close();
 
   store = createShortVideoStore({
@@ -150,6 +182,45 @@ try {
   });
   const scan = store.scan(root);
   assert.equal(scan.imported, 1, "pure image gallery should be imported by the filesystem scanner");
+  const legacyGeneratedId = "legacy-generated-cover";
+  const legacyGeneratedVideo = path.join(root, `${legacyGeneratedId}.mp4`);
+  const legacyCoverDir = path.join(tempDir, "short-video-covers");
+  const legacyGeneratedCover = path.join(legacyCoverDir, `${legacyGeneratedId}-legacy.jpg`);
+  const jpegBuffer = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0xff, 0xd9]);
+  fs.mkdirSync(legacyCoverDir, { recursive: true });
+  fs.writeFileSync(legacyGeneratedVideo, Buffer.from("legacy-video"));
+  fs.writeFileSync(legacyGeneratedCover, jpegBuffer);
+  const legacyCoverDb = new DatabaseSync(targetDbPath);
+  legacyCoverDb.prepare(`
+    INSERT INTO short_videos (
+      id, aweme_id, visibility, media_type, title, source_path, cover_path, cover_source,
+      metadata_json, size_bytes, mtime_ms
+    ) VALUES (?, ?, 'local_only', 'video', '旧封面迁移测试', ?, ?, 'ffmpeg', '{}', ?, ?)
+  `).run(legacyGeneratedId, legacyGeneratedId, legacyGeneratedVideo, legacyGeneratedCover, 12, 1234);
+  legacyCoverDb.prepare(`
+    INSERT INTO short_video_assets (id, video_id, asset_type, local_path, size_bytes, mime_type)
+    VALUES (?, ?, 'ffmpeg_cover', ?, ?, 'image/jpeg')
+  `).run(`${legacyGeneratedId}:ffmpeg_cover`, legacyGeneratedId, legacyGeneratedCover, jpegBuffer.length);
+  legacyCoverDb.close();
+  const legacyMigration = store.migrateLegacyCoverFiles();
+  assert.equal(legacyMigration.migrated, 1, "legacy generated covers should migrate into the dedicated cover database");
+  assert.equal(fs.existsSync(legacyGeneratedCover), true, "migration must retain legacy files until the caller completes verification");
+  const migratedCover = store.coverFile(legacyGeneratedId);
+  assert.equal(migratedCover?.buffer?.equals(jpegBuffer), true, "migrated covers should be read directly from SQLite BLOB storage");
+  const migratedCoverDb = new DatabaseSync(targetDbPath, { readOnly: true });
+  const migratedCoverRow = migratedCoverDb.prepare("SELECT cover_path, cover_source FROM short_videos WHERE id = ?").get(legacyGeneratedId);
+  migratedCoverDb.close();
+  assert.equal(migratedCoverRow?.cover_path, "");
+  assert.equal(migratedCoverRow?.cover_source, SQLITE_SHORT_VIDEO_COVER_SOURCE);
+  assert.match(
+    store.videoDetail(legacyGeneratedId)?.video?.coverUrl || "",
+    /^\/media\/short-video-cover\/legacy-generated-cover\?v=/,
+    "SQLite-backed generated covers must keep the public media contract"
+  );
+  const storedCoverDelete = store.deleteVideos([legacyGeneratedId], { deleteFiles: false });
+  assert.equal(storedCoverDelete.deletedStoredCovers, 1, "deleting a short video should delete its linked SQLite cover");
+  assert.equal(store.coverStorageStatus().count, 0, "cover storage should not retain deleted-video orphans");
+  fs.rmSync(legacyGeneratedVideo, { force: true });
   const gallery = store.videoDetail(galleryId)?.video;
   assert.equal(gallery?.mediaType, "gallery");
   assert.equal(gallery?.galleryCount, 3);
@@ -545,9 +616,12 @@ try {
   distributionDb.prepare(`
     INSERT INTO short_videos (
       id, aweme_id, visibility, title, source_path, metadata_json,
+      author_sec_uid, author_name, is_liked, size_bytes, duration_ms,
       digg_count, actual_width, actual_height, actual_codec, actual_frame_rate,
       actual_pixels, actual_long_edge
-    ) VALUES (?, ?, 'local_only', '点赞分布测试视频', ?, '{}', 750000, 2160, 3840, 'hevc', 60, 8294400, 3840)
+    ) VALUES (?, ?, 'local_only', '点赞分布测试视频', ?, '{}',
+      'MS4wDistributionAuthor', '分布测试作者', 1, 4096, 12000,
+      750000, 2160, 3840, 'hevc', 60, 8294400, 3840)
   `).run("distribution-video", "distribution-video", path.join(root, "distribution-video.mp4"));
   distributionDb.prepare(`
     INSERT INTO short_video_assets (id, video_id, asset_type, local_path)
@@ -591,9 +665,26 @@ try {
     searchParams: new URLSearchParams("source=all&quality=unknown&sort=published&limit=10&stats=0&facets=0")
   });
   assert.equal(unknownQualityVideos.total, 0, "unknown video quality must not accidentally include galleries");
+  const comparisonDb = new DatabaseSync(targetDbPath);
+  comparisonDb.prepare(`
+    INSERT INTO short_videos (
+      id, aweme_id, visibility, media_type, title, source_path, metadata_json,
+      author_sec_uid, author_name, is_liked, size_bytes, duration_ms,
+      digg_count, comment_count, collect_count, share_count,
+      actual_width, actual_height, actual_pixels, actual_long_edge
+    ) VALUES (
+      'distribution-other', 'distribution-other', 'local_only', 'video', '同作者其他作品', ?, '{}',
+      'MS4wDistributionAuthor', '分布测试作者', 0, 2048, 20000,
+      30000, 300, 3000, 1500, 1080, 1920, 2073600, 1920
+    )
+  `).run(path.join(root, "distribution-other.mp4"));
+  comparisonDb.close();
+  store.setUserAction("distribution-video", "like", { active: true });
+  store.recordWatch("distribution-video", { progressMs: 12000, completed: true });
   const distribution = store.likeDistribution();
-  assert.equal(distribution.total, 1, "like distribution must count videos but exclude galleries");
-  assert.equal(distribution.fourKTotal, 1);
+  assert.equal(distribution.total, 2, "like distribution must count videos but exclude galleries");
+  assert.equal(Object.prototype.hasOwnProperty.call(distribution, "fourKTotal"), false, "likes density should no longer carry a redundant 4K total");
+  assert.equal(distribution.bins.some((item) => Object.prototype.hasOwnProperty.call(item, "fourKCount")), false, "likes-density bins should not mix in file-quality counts");
   assert.equal(distribution.bins.length, 33, "multiscale like distribution should keep low-like detail without flooding the tail");
   assert.deepEqual(distribution.bins.slice(0, 10).map((item) => item.label), ["0-1千", "1-2千", "2-3千", "3-4千", "4-5千", "5-6千", "6-7千", "7-8千", "8-9千", "9千-1万"]);
   assert.deepEqual(distribution.bins.slice(10, 19).map((item) => item.label), ["1-2万", "2-3万", "3-4万", "4-5万", "5-6万", "6-7万", "7-8万", "8-9万", "9-10万"]);
@@ -604,15 +695,25 @@ try {
   assert.equal(distribution.binning?.lowBinWidth, 10000);
   assert.equal(distribution.binning?.denseBinWidth, 100000);
   assert.equal(distribution.binning?.tailBinWidth, 1000000);
-  assert.equal(distribution.insights?.valueMap?.eligibleTotal, 1, "content insights must include every video with known interaction data");
-  assert.equal(distribution.insights?.valueMap?.ratioComparableTotal, 1, "videos with likes must contribute to the interaction-structure comparison");
+  assert.equal(distribution.insights?.valueMap?.eligibleTotal, 2, "content insights must include every video with known interaction data");
+  assert.equal(distribution.insights?.valueMap?.ratioComparableTotal, 2, "videos with likes must contribute to the interaction-structure comparison");
   assert.equal(
     distribution.insights?.valueMap?.cells?.reduce((total, item) => total + Number(item.count || 0), 0),
-    1,
+    2,
     "the structure-map cells must preserve the complete ratio-comparable sample"
   );
-  assert.equal(distribution.insights?.valueMap?.types?.reduce((total, item) => total + Number(item.count || 0), 0), 1, "interaction-type totals must preserve the comparable sample");
+  assert.equal(distribution.insights?.valueMap?.types?.reduce((total, item) => total + Number(item.count || 0), 0), 2, "interaction-type totals must preserve the comparable sample");
   assert.equal(Object.prototype.hasOwnProperty.call(distribution.insights || {}, "highRes"), false, "content analytics must not infer quality-upgrade work from local pixel dimensions");
+  assert.equal(distribution.insights?.personal?.authorEfficiency?.likedVideos, 1, "personal author efficiency must use explicit likes as hits");
+  assert.equal(distribution.insights?.personal?.preferenceComparison?.comparableAuthorTotal, 1, "personal comparisons must stay within authors that have liked and other works");
+  assert.equal(distribution.insights?.personal?.watch?.watchedTotal, 1);
+  assert.equal(distribution.insights?.personal?.watch?.completedTotal, 1, "watch completion must mean at least one completed play");
+  assert.equal(distribution.insights?.health?.likesCoverageRate, 1);
+  assert.equal(distribution.insights?.health?.qualityCoverageRate, 1);
+  assert.equal(distribution.insights?.health?.playCoverageRate, 0);
+  assert.equal(distribution.insights?.health?.qualityAudit?.available, true);
+  assert.equal(distribution.insights?.health?.qualityAudit?.alreadyHighest, 1);
+  assert.equal(distribution.insights?.health?.qualityAudit?.upgradePassed, 1);
   assert.equal(distribution.insights?.method?.limitation, "当前没有播放量，不能计算官方口径的互动率、完播率或流量转化");
   const cursorDb = new DatabaseSync(targetDbPath);
   const insertCursorVideoSql = `

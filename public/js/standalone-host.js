@@ -1,6 +1,6 @@
 import { createApiClient } from "./api.js?v=20260701-gallery-merge-01";
 import { installAndroidClientReturn, isLocalHostName, prepareClientShell } from "./client-shell.js?v=20260712-project-refactor-03";
-import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20260715-actual-video-quality-09";
+import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20260717-photo-library-workspace-01";
 
 const MODULE_VIEWS = new Set(["gallery", "novels", "music", "tools"]);
 const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
@@ -34,8 +34,8 @@ export async function bootStandaloneApp() {
 async function loadCurrentModule(view) {
   if (view === "gallery") {
     const [pageModule, rendererModule] = await Promise.all([
-      import("../modules/content-index/gallery-page.js?v=20260712-project-refactor-03"),
-      import("../modules/content-index/gallery-renderer.js?v=20260712-project-refactor-03")
+      import("../modules/content-index/gallery-page.js?v=20260717-photo-library-workspace-01"),
+      import("../modules/content-index/gallery-renderer.js?v=20260717-photo-album-parser-02")
     ]);
     return {
       createPage: pageModule.createGalleryPage,
@@ -125,6 +125,7 @@ function createHost({ api, els, initialParams, pages, state }) {
         galleryCategory: state.gallery.category || "all",
         gallerySubCategory: state.gallery.subCategory || "all",
         galleryPerson: state.gallery.person || "all",
+        galleryPhotoDate: state.gallery.photoDate || "all",
         gallerySort: state.gallery.sort || "updated"
       });
     } else if (state.activeView === "novels") {
@@ -354,6 +355,7 @@ function createStandaloneState(view) {
       category: "all",
       subCategory: "all",
       person: "all",
+      photoDate: "all",
       sort: "updated",
       visibleLimit: 80,
       loading: false,

@@ -92,16 +92,6 @@ export function createLikeDistributionView(deps) {
       "aria-label": "点赞数与每千赞视频密度的双对数折线图"
     });
 
-    const auditStart = mapX(Math.log10(200000));
-    const auditEnd = mapX(Math.log10(1000000));
-    svg.append(shortVideoDistributionSvgElement("rect", {
-      class: "short-video-distribution-log-audit-band",
-      x: auditStart,
-      y: padding.top,
-      width: Math.max(0, auditEnd - auditStart),
-      height: plotHeight
-    }));
-
     for (let tick = yMin; tick <= yMax; tick += 1) {
       const y = mapY(tick);
       svg.append(
@@ -140,13 +130,12 @@ export function createLikeDistributionView(deps) {
     }
     svg.append(
       shortVideoDistributionSvgElement("text", { class: "short-video-distribution-log-axis-title", x: padding.left + plotWidth / 2, y: height - 10, "text-anchor": "middle", text: "点赞数（log10）" }),
-      shortVideoDistributionSvgElement("text", { class: "short-video-distribution-log-axis-title", x: 18, y: padding.top + plotHeight / 2, transform: `rotate(-90 18 ${padding.top + plotHeight / 2})`, "text-anchor": "middle", text: "每千赞视频密度（log10）" }),
-      shortVideoDistributionSvgElement("text", { class: "short-video-distribution-log-band-label", x: (auditStart + auditEnd) / 2, y: padding.top + 16, "text-anchor": "middle", text: "20-100万已回测" })
+      shortVideoDistributionSvgElement("text", { class: "short-video-distribution-log-axis-title", x: 18, y: padding.top + plotHeight / 2, transform: `rotate(-90 18 ${padding.top + plotHeight / 2})`, "text-anchor": "middle", text: "每千赞视频密度（log10）" })
     );
     chart.append(svg);
     const legend = document.createElement("div");
     legend.className = "short-video-distribution-log-legend";
-    legend.innerHTML = '<span><i class="is-line"></i>本地兴趣样本密度</span><span><i class="is-band"></i>50-100万关注区间</span>';
+    legend.innerHTML = '<span><i class="is-line"></i>本地兴趣样本密度</span>';
     section.append(chart, legend);
     return section;
   }
@@ -355,6 +344,271 @@ export function createLikeDistributionView(deps) {
     return section;
   }
 
+  function formatInsightBytes(value) {
+    const bytes = Math.max(0, Number(value || 0));
+    if (!bytes) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+    const scaled = bytes / (1024 ** index);
+    return `${scaled.toFixed(scaled >= 100 || index === 0 ? 0 : scaled >= 10 ? 1 : 2)} ${units[index]}`;
+  }
+
+  function formatInsightDate(value) {
+    const date = new Date(value || "");
+    if (!Number.isFinite(date.getTime())) return "暂无";
+    return new Intl.DateTimeFormat("zh-CN", {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    }).format(date);
+  }
+
+  function renderPersonalAuthorList(titleText, items, kind) {
+    const column = document.createElement("div");
+    const title = document.createElement("h4");
+    title.textContent = titleText;
+    column.append(title);
+    if (!items.length) {
+      const empty = document.createElement("p");
+      empty.className = "short-video-personal-list-empty";
+      empty.textContent = "暂时没有达到样本门槛的作者。";
+      column.append(empty);
+      return column;
+    }
+    for (const item of items) {
+      const button = document.createElement(kind === "topic" ? "button" : "div");
+      if (kind === "topic") button.type = "button";
+      button.className = "short-video-personal-list-row";
+      button.classList.toggle("is-static", kind !== "topic");
+      const copy = document.createElement("span");
+      const name = document.createElement("strong");
+      name.textContent = item.name || "未知作者";
+      const meta = document.createElement("small");
+      meta.textContent = `${formatNumber(item.likedCount || 0)} 条点赞 / ${formatNumber(item.videoCount || 0)} 条入库 · ${formatInsightBytes(item.sizeBytes)}`;
+      copy.append(name, meta);
+      const score = document.createElement("em");
+      score.textContent = insightPercent(item.hitRate, 1);
+      score.title = kind === "high" ? "明确点赞作品占该作者本地作品的比例" : "低命中作者的本地存储占用";
+      button.append(copy, score);
+      button.addEventListener("click", () => openInsightAuthor(item));
+      column.append(button);
+    }
+    return column;
+  }
+
+  function renderAuthorEfficiency(personal = {}) {
+    const efficiency = personal.authorEfficiency || {};
+    const section = document.createElement("section");
+    section.className = "short-video-insight-section short-video-personal-authors";
+    section.append(renderLikeDistributionSectionHeading(
+      "作者投入—命中率",
+      `明确点赞作品 / 同作者本地作品，至少 ${formatNumber(efficiency.minSamples || 20)} 条且同时有点赞与其他作品才参与排名；同时看文件占用，便于决定继续采集谁、减少采集谁。`
+    ));
+    const summary = document.createElement("div");
+    summary.className = "short-video-personal-summary";
+    for (const [label, value, note] of [
+      ["全库明确点赞", formatNumber(efficiency.likedVideos || 0), `命中率 ${insightPercent(efficiency.baselineHitRate, 1)}`],
+      ["可比较作者", formatNumber(efficiency.eligibleAuthorTotal || 0), "同时有点赞与其他作品"],
+      ["视频存储占用", formatInsightBytes(efficiency.sizeBytes), `${formatNumber(efficiency.totalVideos || 0)} 条本地视频`]
+    ]) {
+      const card = document.createElement("div");
+      card.innerHTML = `<span>${label}</span><strong>${value}</strong><small>${note}</small>`;
+      summary.append(card);
+    }
+    const columns = document.createElement("div");
+    columns.className = "short-video-personal-columns";
+    columns.append(
+      renderPersonalAuthorList("更值得继续采集", Array.isArray(efficiency.highHit) ? efficiency.highHit : [], "high"),
+      renderPersonalAuthorList("低命中且占用较大", Array.isArray(efficiency.lowYield) ? efficiency.lowYield : [], "low")
+    );
+    section.append(summary, columns);
+    return section;
+  }
+
+  function renderPreferenceComparison(comparison = {}) {
+    const section = document.createElement("section");
+    section.className = "short-video-insight-section short-video-personal-comparison";
+    section.append(renderLikeDistributionSectionHeading(
+      "你的点赞作品有什么不同",
+      `只在同时拥有“点赞作品”和“其他作品”的 ${formatNumber(comparison.comparableAuthorTotal || 0)} 位作者内部比较，减少作者差异；这是观察到的关联，不是因果结论。`
+    ));
+    const table = document.createElement("div");
+    table.className = "short-video-personal-comparison-table";
+    const liked = comparison.liked || {};
+    const other = comparison.other || {};
+    const rows = [
+      ["样本", formatNumber(liked.sampleCount || 0), formatNumber(other.sampleCount || 0)],
+      ["中位点赞", formatNumber(Math.round(liked.medianLikes || 0)), formatNumber(Math.round(other.medianLikes || 0))],
+      ["中位藏 / 赞", insightRatio(liked.medianCollectRate), insightRatio(other.medianCollectRate)],
+      ["中位转 / 赞", insightRatio(liked.medianShareRate), insightRatio(other.medianShareRate)],
+      ["中位评 / 赞", insightRatio(liked.medianCommentRate), insightRatio(other.medianCommentRate)]
+    ];
+    for (const [metric, likedValue, otherValue] of [["指标", "你的点赞作品", "同作者其他作品"], ...rows]) {
+      const row = document.createElement("div");
+      row.append(...[metric, likedValue, otherValue].map((value, index) => {
+        const cell = document.createElement(index === 0 ? "strong" : "span");
+        cell.textContent = value;
+        return cell;
+      }));
+      table.append(row);
+    }
+    section.append(table);
+    return section;
+  }
+
+  function renderPreferenceSignalColumn(titleText, items, kind) {
+    const column = document.createElement("div");
+    const title = document.createElement("h4");
+    title.textContent = titleText;
+    column.append(title);
+    if (!items.length) {
+      const empty = document.createElement("p");
+      empty.className = "short-video-personal-list-empty";
+      empty.textContent = "还没有超过全库基线且样本足够的信号。";
+      column.append(empty);
+      return column;
+    }
+    for (const item of items) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "short-video-personal-list-row";
+      const copy = document.createElement("span");
+      const name = document.createElement("strong");
+      name.textContent = kind === "topic" ? `#${item.label || item.key || "未命名题材"}` : item.label || "未命名原声";
+      const meta = document.createElement("small");
+      meta.textContent = `${formatNumber(item.likedCount || 0)} / ${formatNumber(item.sampleCount || 0)} 条明确点赞 · 命中 ${insightPercent(item.hitRate, 1)}`;
+      copy.append(name, meta);
+      const score = document.createElement("em");
+      score.textContent = `${Number(item.lift || 0).toFixed(1)}×`;
+      score.title = "相对全库明确点赞命中率";
+      button.append(copy, score);
+      if (kind === "topic") button.addEventListener("click", () => openInsightTopic(item));
+      column.append(button);
+    }
+    return column;
+  }
+
+  function renderPreferenceSignals(signals = {}) {
+    const section = document.createElement("section");
+    section.className = "short-video-insight-section short-video-personal-signals";
+    section.append(renderLikeDistributionSectionHeading(
+      "可复用的个人偏好信号",
+      `这里的倍数是题材或原声命中率相对全库 ${insightPercent(signals.baselineHitRate, 1)} 基线的提升，已设置最小样本门槛；仅代表当前入库样本并受采集范围影响，题材可点击回到对应内容。`
+    ));
+    const columns = document.createElement("div");
+    columns.className = "short-video-personal-columns";
+    columns.append(
+      renderPreferenceSignalColumn("题材偏好", Array.isArray(signals.topics) ? signals.topics : [], "topic"),
+      renderPreferenceSignalColumn("原声偏好", Array.isArray(signals.sounds) ? signals.sounds : [], "sound")
+    );
+    section.append(columns);
+    return section;
+  }
+
+  function renderWatchInsights(watch = {}) {
+    const section = document.createElement("section");
+    section.className = "short-video-insight-section short-video-watch-insights";
+    section.append(renderLikeDistributionSectionHeading(
+      "实际观看行为",
+      `观看记录从 ${formatInsightDate(watch.firstWatchedAt)} 开始积累；“看完”表示至少完成过一次，不是重复播放次数。`
+    ));
+    const cards = document.createElement("div");
+    cards.className = "short-video-personal-summary is-four";
+    for (const [label, value, note] of [
+      ["看过", formatNumber(watch.watchedTotal || 0), `覆盖本地库 ${insightPercent(watch.coverageRate, 1)}`],
+      ["至少看完一次", formatNumber(watch.completedTotal || 0), `看过样本中 ${insightPercent(watch.completionRate, 1)}`],
+      ["平均最后进度", insightPercent(watch.averageProgressRate, 1), "按视频时长归一化"],
+      ["最近观看", formatInsightDate(watch.lastWatchedAt), "数据仍在持续积累"]
+    ]) {
+      const card = document.createElement("div");
+      card.innerHTML = `<span>${label}</span><strong>${value}</strong><small>${note}</small>`;
+      cards.append(card);
+    }
+    const duration = document.createElement("div");
+    duration.className = "short-video-watch-duration";
+    for (const band of Array.isArray(watch.durationBands) ? watch.durationBands : []) {
+      const row = document.createElement("div");
+      const label = document.createElement("span");
+      label.textContent = band.label || "未知时长";
+      const track = document.createElement("i");
+      const fill = document.createElement("b");
+      fill.style.width = `${Math.max(0, Math.min(100, Number(band.completionRate || 0) * 100)).toFixed(1)}%`;
+      track.append(fill);
+      const value = document.createElement("strong");
+      value.textContent = `${insightPercent(band.completionRate, 1)} · ${formatNumber(band.watched || 0)} 条`;
+      row.append(label, track, value);
+      duration.append(row);
+    }
+    section.append(cards, duration);
+    return section;
+  }
+
+  function renderDataHealth(health = {}) {
+    const section = document.createElement("section");
+    section.className = "short-video-insight-section short-video-data-health";
+    section.append(renderLikeDistributionSectionHeading(
+      "数据健康与高清审计",
+      "质量字段仍用于播放、筛选、转码和审计，但不再混入点赞密度表；这里集中显示真实覆盖率和需要处理的缺口。"
+    ));
+    const grid = document.createElement("div");
+    grid.className = "short-video-health-grid";
+    for (const [label, known, total, coverage, note] of [
+      ["点赞数据", health.likesKnown, health.total, health.likesCoverageRate, `${formatNumber(health.likesUnknown || 0)} 条未知`],
+      ["播放量", health.playKnown, health.total, health.playCoverageRate, Number(health.playKnown || 0) ? "可逐步做曝光转化" : "当前无法计算官方互动率"],
+      ["实际画质", health.qualityKnown, health.total, health.qualityCoverageRate, `${formatNumber(health.probeErrors || 0)} 条探测错误`],
+      ["题材标签", health.topicKnown, health.total, health.topicCoverageRate, "用于偏好与检索"],
+      ["原声信息", health.soundKnown, health.total, health.soundCoverageRate, "用于原声偏好"],
+      ["观看记录", health.watchKnown, health.total, health.watchCoverageRate, "本地行为数据仍在积累"]
+    ]) {
+      const card = document.createElement("div");
+      const head = document.createElement("span");
+      head.textContent = label;
+      const value = document.createElement("strong");
+      value.textContent = insightPercent(coverage, 1);
+      const detail = document.createElement("small");
+      detail.textContent = `${formatNumber(known || 0)} / ${formatNumber(total || 0)} · ${note}`;
+      const track = document.createElement("i");
+      const fill = document.createElement("b");
+      fill.style.width = `${Math.max(0, Math.min(100, Number(coverage || 0) * 100)).toFixed(1)}%`;
+      track.append(fill);
+      card.append(head, value, detail, track);
+      grid.append(card);
+    }
+    section.append(grid);
+    const audit = health.qualityAudit || {};
+    const auditPanel = document.createElement("div");
+    auditPanel.className = "short-video-quality-audit-health";
+    if (!audit.available) {
+      auditPanel.innerHTML = "<strong>高清审计记录暂不可用</strong><span>下载管理器尚无可读审计表；实际画质覆盖仍以上方文件探测结果为准。</span>";
+    } else {
+      const failures = Number(audit.verificationFailed || 0) + Number(audit.probeFailed || 0) + Number(audit.failedQueue || 0);
+      const title = document.createElement("strong");
+      title.textContent = `最近高清审计 · ${formatInsightDate(audit.generatedAt)}`;
+      const stats = document.createElement("div");
+      for (const [label, value, tone] of [
+        ["审计样本", audit.auditedTotal, ""],
+        ["已达最高 / 无需更新", Number(audit.alreadyHighest || 0) + Number(audit.upToDate || 0), "is-good"],
+        ["高清重下校验通过", audit.upgradePassed, "is-good"],
+        ["源不可用", audit.sourceUnavailable, "is-warning"],
+        ["失败或探测异常", failures, failures ? "is-danger" : "is-good"],
+        ["当前库较审计多", audit.catalogDeltaFromAudit, Number(audit.catalogDeltaFromAudit || 0) ? "is-warning" : ""]
+      ]) {
+        const item = document.createElement("span");
+        if (tone) item.className = tone;
+        item.innerHTML = `<small>${label}</small><b>${formatNumber(value || 0)}</b>`;
+        stats.append(item);
+      }
+      const note = document.createElement("p");
+      note.textContent = Number(audit.catalogDeltaFromAudit || 0) > 0
+        ? `当前库比最近审计样本多 ${formatNumber(audit.catalogDeltaFromAudit)} 条，可能来自审计后入库或审计范围差异；需要时应按当前文件重跑审计。`
+        : "审计结果已覆盖当前下载样本，不需要再按点赞区间重复标注审计状态。";
+      auditPanel.append(title, stats, note);
+    }
+    section.append(auditPanel);
+    return section;
+  }
+
   function renderLikeDistributionDetailTable(bins, densities, maxLogDensity, knownTotal) {
     const detailSection = document.createElement("section");
     detailSection.className = "short-video-distribution-section is-detail";
@@ -366,7 +620,7 @@ export function createLikeDistributionView(deps) {
     tableWrap.className = "short-video-distribution-table-wrap";
     const table = document.createElement("table");
     table.className = "short-video-distribution-table";
-    table.innerHTML = "<thead><tr><th>点赞区间</th><th>视频数量</th><th>占已知点赞</th><th>当前 4K</th><th>单位密度<span>每千赞 · 对数柱</span></th></tr></thead>";
+    table.innerHTML = "<thead><tr><th>点赞区间</th><th>视频数量</th><th>占已知样本</th><th>单位密度<span>每千赞 · 对数柱</span></th></tr></thead>";
     const body = document.createElement("tbody");
     const rows = document.createDocumentFragment();
     for (const [index, item] of bins.entries()) {
@@ -374,23 +628,13 @@ export function createLikeDistributionView(deps) {
       const density = densities[index];
       const row = document.createElement("tr");
       const minLikes = Number(item.minLikes || 0);
-      const maxLikes = Number(item.maxLikes || 0);
       if ([10000, 100000, 1000000].includes(minLikes)) row.classList.add("is-scale-start");
-      if (item.maxLikes != null && minLikes >= 200000 && maxLikes <= 1000000) row.classList.add("is-current-audit");
       const label = document.createElement("td");
       label.textContent = item.label || "";
-      if (row.classList.contains("is-current-audit")) {
-        const tag = document.createElement("span");
-        tag.className = "short-video-distribution-tag";
-        tag.textContent = "已回测";
-        label.append(tag);
-      }
       const amount = document.createElement("td");
       amount.textContent = formatNumber(count);
       const share = document.createElement("td");
       share.textContent = knownTotal > 0 ? `${(count / knownTotal * 100).toFixed(2)}%` : "0.00%";
-      const fourK = document.createElement("td");
-      fourK.textContent = formatNumber(item.fourKCount || 0);
       const relation = document.createElement("td");
       const densityLayout = document.createElement("div");
       densityLayout.className = "short-video-distribution-density";
@@ -415,7 +659,7 @@ export function createLikeDistributionView(deps) {
       track.append(fill);
       densityLayout.append(densityValue, track);
       relation.append(densityLayout);
-      row.append(label, amount, share, fourK, relation);
+      row.append(label, amount, share, relation);
       rows.append(row);
     }
     body.append(rows);
@@ -434,9 +678,9 @@ export function createLikeDistributionView(deps) {
     const heading = document.createElement("div");
     const title = document.createElement("h2");
     title.id = "short-video-like-distribution-title";
-    title.textContent = "看清内容为什么被收藏、传播或讨论";
+    title.textContent = "从下载库看清个人偏好与数据质量";
     const description = document.createElement("span");
-    description.textContent = "只统计本地已下载视频，并把下载库当作抖音大空间中的兴趣样本；不再用已下载、已点赞反推偏好命中，先看互动结构，再决定补高清、回看作者或打开题材。";
+    description.textContent = "只统计本地已下载视频：明确点赞用于衡量个人命中，观看记录用于衡量实际使用，公开互动用于理解内容结构；三种口径分开呈现。";
     heading.append(title, description);
     const actions = document.createElement("div");
     actions.className = "short-video-distribution-head-actions";
@@ -466,6 +710,7 @@ export function createLikeDistributionView(deps) {
     }
 
     const insights = data.insights || {};
+    const personal = insights.personal || {};
     const valueMap = insights.valueMap || {};
     const eligibleTotal = Math.max(0, Number(valueMap.eligibleTotal || 0));
     const comparableTotal = Math.max(0, Number(valueMap.ratioComparableTotal || 0));
@@ -490,9 +735,22 @@ export function createLikeDistributionView(deps) {
       card.append(name, count, hint);
       cards.append(card);
     }
-    panel.append(cards);
-
     panel.append(
+      renderAuthorEfficiency(personal),
+      renderPreferenceComparison(personal.preferenceComparison),
+      renderPreferenceSignals(personal.preferenceSignals),
+      renderWatchInsights(personal.watch),
+      renderDataHealth(insights.health)
+    );
+
+    const platformOverview = document.createElement("section");
+    platformOverview.className = "short-video-insight-section short-video-platform-overview";
+    platformOverview.append(renderLikeDistributionSectionHeading(
+      "平台公开互动结构",
+      "下面只解释已下载样本在抖音公开累计赞、评、藏、转上的结构，不把它误当作你的观看偏好或平台总体分布。"
+    ), cards);
+    panel.append(
+      platformOverview,
       renderContentValueMap(valueMap),
       renderInsightRankings(insights)
     );
