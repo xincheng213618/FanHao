@@ -7,7 +7,6 @@ export function createPeoplePage(deps) {
     cancelScheduledWorkRendering,
     clearWorkFilter,
     clearWorkSearch,
-    closeDrawer,
     coverUrl,
     currentPageScrollTop,
     displayPersonName,
@@ -275,9 +274,6 @@ async function fetchPersonWorksPage(personId, offset = 0, options = {}) {
 
 async function goToPerson(personId) {
   if (!personId) return;
-  if (els.detailDrawer.classList.contains("open")) {
-    closeDrawer();
-  }
   clearWorkSearch();
   await selectPerson(personId);
 }

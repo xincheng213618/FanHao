@@ -15,15 +15,12 @@ export function createAdminModal(deps) {
     loadRankings,
     normalizeUiConfig,
     personWorkPageSize,
-    renderMeta,
     renderPeopleIndex,
     renderPeopleIndexStats,
-    renderPlayer,
     renderWorks,
     resetWorkPaging,
     selectPerson,
-    state,
-    updateWorkSnapshot
+    state
   } = deps;
 
 let pendingAdminScriptDefaults = {};
@@ -723,15 +720,6 @@ async function applyAdminTaskRefreshHints(task) {
 }
 
 async function refreshCurrentWorkViewAfterAdminTask() {
-  if (state.currentWork?.id) {
-    try {
-      const data = await api(`/api/works/${encodeURIComponent(state.currentWork.id)}`);
-      state.currentWork = data.work || state.currentWork;
-      updateWorkSnapshot(state.currentWork);
-      renderPlayer(state.currentWork, state.currentVideo?.id);
-      renderMeta(state.currentWork);
-    } catch {}
-  }
   if (state.selectedPersonId && state.activeView === "people") {
     await selectPerson(state.selectedPersonId, { resetFilter: false });
     return;

@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { selectVisibleWorks } from "../public/modules/fanhao/features/works/query.js";
+import { createWorkActions } from "../public/modules/fanhao/features/works/work-actions.js";
 import { createLazyPersonProfile } from "../public/modules/fanhao/lazy-person-profile.js";
 import { createLazyAdminModal } from "../public/modules/system/lazy-admin-modal.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
@@ -59,6 +60,7 @@ const searchRequestSource = read("public/modules/fanhao/search-request-service.j
 const rankingPageSource = read("public/modules/fanhao/ranking-page.js");
 const studioPageSource = read("public/modules/fanhao/features/studios/studio-page.js");
 const collectionPageSource = read("public/modules/fanhao/features/collections/collection-page.js");
+const workActionsSource = read("public/modules/fanhao/features/works/work-actions.js");
 const playbackProgressServiceSource = read("src/modules/fanhao/server/playback/playback-progress-service.js");
 const workDetailPageSource = read("public/modules/fanhao/work-detail-page.js");
 const videoProbeSource = read("src/platform/server/video-probe-service.js");
@@ -89,13 +91,18 @@ assert(lazyAdminModalSource.includes("let instancePromise = null") && lazyAdminM
 assert(webApp.includes("bindLazyAdminModal({ adminModal, els, openAdminScript, state })") && lazyAdminModalSource.includes("export function bindLazyAdminModal"), "admin event wiring must stay with the lazy admin boundary instead of growing the composition root");
 assert(webApp.includes("createLazyPersonProfile") && webApp.includes('await import("./modules/fanhao/person-profile.js?v='), "FanHao startup must defer person-profile code until person interaction");
 assert(!fanhaoModuleIndexSource.includes("createPersonProfile"), "the FanHao barrel must not pull person-profile code into the people index startup graph");
+assert(!fanhaoModuleIndexSource.includes("createWorkDetailPage"), "the FanHao barrel must not pull the retired work drawer into the startup graph");
+assert(!webApp.includes("createWorkDetailPage") && webApp.includes("createWorkActions"), "the FanHao composition root must use focused work actions without composing the retired drawer");
+assert(webApp.includes("toggleFavorite(work.id, favorite)"), "work cards must expose immediate favorite-control feedback while the API is pending");
+assert(webApp.includes('window.open(playerPageUrl(work.id), "_blank", "noopener")'), "work cards must keep opening the standalone player");
+assert(workActionsSource.includes("captureFavoriteSnapshot") && workActionsSource.includes("restoreFavoriteSnapshot"), "optimistic favorite feedback must roll back cleanly after API failures");
 assert(peoplePageSource.includes('["pointerenter", "focus", "pointerdown"]') && peoplePageSource.includes("preparePersonProfile?.()"), "person cards must prefetch profile code before or alongside the detail API request");
 assert(lazyPersonProfileSource.includes("renderVersion") && lazyPersonProfileSource.includes("version !== renderVersion"), "late profile modules must not render after navigation invalidates them");
 assert(webApp.includes("const WORK_RENDER_INITIAL_COUNT = 24"), "FanHao work lists must render a small first batch for responsive interaction");
 assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 96, lan: 64, remote: 48 })"), "FanHao work APIs must keep page payloads bounded for each access mode");
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
-assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-lazy-person-01'), "person navigation changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-work-actions-01'), "person navigation changes must use a fresh browser module URL");
 assert(latestRequestSource.includes("sequence === requestSequence"), "latest-request gates must reject stale completions");
 assert(peoplePageSource.includes("const personDetailRequests = createLatestRequestGate()"), "person navigation must own a cancellable latest request");
 assert(peoplePageSource.includes("if (!request.isCurrent() || state.activeView !== \"people\""), "stale person responses must not overwrite newer navigation");
@@ -152,6 +159,7 @@ for (const relativePath of [
   "public/modules/fanhao/index.js",
   "public/modules/fanhao/state.js",
   "public/modules/fanhao/features/works/query.js",
+  "public/modules/fanhao/features/works/work-actions.js",
   "public/modules/fanhao/features/works/preview-media.js",
   "android-client/www/modules/fanhao/features/works/cards.js",
   "android-client/www/modules/fanhao/features/works/actions.js",
@@ -198,6 +206,66 @@ assert(!/function createPreviewMediaSection\s*\(/.test(workDetail), "Web preview
 assert(workDetail.includes("createWorkPreviewMedia"), "Web work detail must compose the preview feature");
 assert(lines("public/modules/fanhao/work-detail-page.js") <= 1000, "Web work detail must stay below 1000 lines");
 assert(lines("public/app.js") <= 2500, "FanHao Web composition root must stay below 2500 lines");
+
+const favoriteState = {
+  activeView: "people",
+  currentWork: null,
+  favoriteFolders: [],
+  library: { user: null },
+  works: [{ id: "work-1", favorite: false, favoriteFolderId: "", favoriteFolderName: "" }]
+};
+let resolveFavoriteRequest;
+const favoriteRequest = new Promise((resolve) => {
+  resolveFavoriteRequest = resolve;
+});
+const controlClasses = new Set();
+const favoriteControl = {
+  attributes: new Map(),
+  classList: {
+    remove(name) { controlClasses.delete(name); },
+    toggle(name, enabled) { enabled ? controlClasses.add(name) : controlClasses.delete(name); }
+  },
+  disabled: false,
+  setAttribute(name, value) { this.attributes.set(name, value); },
+  title: ""
+};
+let workActionRenderCount = 0;
+const workActions = createWorkActions({
+  api: () => favoriteRequest,
+  renderFavoriteFolderControls: () => {},
+  renderStatsForWorks: () => {},
+  renderWorks: () => { workActionRenderCount += 1; },
+  showError: (message) => assert.fail(message),
+  state: favoriteState
+});
+const favoritePending = workActions.toggleFavorite("work-1", favoriteControl);
+assert.equal(favoriteState.works[0].favorite, true, "favorite controls must update before the API completes");
+assert.equal(favoriteControl.disabled, true, "favorite controls must block duplicate requests while pending");
+assert(controlClasses.has("pending") && controlClasses.has("active"), "favorite controls must expose optimistic pending state");
+resolveFavoriteRequest({
+  favorite: true,
+  favoriteFolder: { folderId: "default", folderName: "默认" },
+  folders: [{ id: "default", name: "默认" }],
+  user: { favorites: ["work-1"] }
+});
+await favoritePending;
+assert.equal(favoriteControl.disabled, false, "favorite controls must become interactive after the API completes");
+assert(!controlClasses.has("pending"), "favorite controls must clear pending state after the API completes");
+assert.equal(favoriteState.works[0].favoriteFolderId, "default", "favorite responses must reconcile server folder state");
+assert.equal(workActionRenderCount, 1, "favorite responses must refresh work cards once");
+let favoriteRollbackMessage = "";
+const rollbackWorkActions = createWorkActions({
+  api: async () => { throw new Error("favorite unavailable"); },
+  renderFavoriteFolderControls: () => {},
+  renderStatsForWorks: () => {},
+  renderWorks: () => {},
+  showError: (message) => { favoriteRollbackMessage = message; },
+  state: favoriteState
+});
+await rollbackWorkActions.toggleFavorite("work-1", favoriteControl);
+assert.equal(favoriteState.works[0].favorite, true, "failed favorite requests must restore optimistic work state");
+assert.equal(favoriteControl.getAttribute?.("aria-label") || favoriteControl.attributes.get("aria-label"), "取消收藏", "failed favorite requests must restore control state");
+assert.equal(favoriteRollbackMessage, "favorite unavailable", "failed favorite requests must report a useful error");
 assert(lines("public/js/standalone-host.js") <= 650, "standalone Web host must stay below 650 lines");
 const peoplePage = read("public/modules/fanhao/people-page.js");
 const webRankingPage = read("public/modules/fanhao/ranking-page.js");

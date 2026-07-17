@@ -1,4 +1,5 @@
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
+import { createWorkActions } from "./features/works/work-actions.js?v=20260717-fanhao-work-actions-01";
 import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
 
 export function createWorkDetailPage(deps) {
@@ -24,6 +25,20 @@ export function createWorkDetailPage(deps) {
   } = deps;
   const workDetailRequests = createLatestRequestGate();
   const playInfoRequests = createLatestRequestGate();
+  const {
+    moveFavoriteToFolder,
+    toggleFavorite,
+    updateWorkSnapshot
+  } = createWorkActions({
+    api,
+    onCurrentWorkFavoriteChanged: (work) => {
+      if (work) renderPlayer(work, state.currentVideo?.id);
+    },
+    renderFavoriteFolderControls,
+    renderStatsForWorks,
+    renderWorks,
+    state
+  });
   const previewMedia = createWorkPreviewMedia({
     api,
     coverRetryDelays,
@@ -830,91 +845,6 @@ export function createWorkDetailPage(deps) {
       button.disabled = false;
       button.textContent = originalText;
     }
-  }
-
-  async function toggleFavorite(workId) {
-    const data = await api(`/api/favorites/${encodeURIComponent(workId)}`, { method: "POST" });
-    state.favoriteFolders = data.folders || state.favoriteFolders;
-    updateWorkFavorite(workId, data.favorite, data.favoriteFolder);
-    state.library.user = data.user;
-
-    if (state.currentWork?.id === workId) {
-      state.currentWork.favorite = data.favorite;
-      if (data.favoriteFolder) {
-        state.currentWork.favoriteFolderId = data.favoriteFolder.folderId;
-        state.currentWork.favoriteFolderName = data.favoriteFolder.folderName;
-      } else {
-        state.currentWork.favoriteFolderId = "";
-        state.currentWork.favoriteFolderName = "";
-      }
-      renderPlayer(state.currentWork, state.currentVideo?.id);
-    }
-
-    if (state.activeView === "favorites" && !data.favorite) {
-      state.works = state.works.filter((work) => work.id !== workId);
-    }
-
-    if (state.activeView === "favorites") {
-      renderStatsForWorks(state.works);
-      renderFavoriteFolderControls();
-    }
-    renderWorks(state.activeView === "favorites" ? "还没有收藏。" : "没有匹配的作品。");
-  }
-
-  async function moveFavoriteToFolder(work, folderId, control) {
-    const previous = work.favoriteFolderId || "default";
-    control.disabled = true;
-    try {
-      const data = await api(`/api/favorites/${encodeURIComponent(work.id)}/folder`, { method: "PUT", body: { folderId } });
-      state.favoriteFolders = data.folders || state.favoriteFolders;
-      updateWorkFavoriteFolder(work.id, data.favorite);
-      state.library.user = data.user;
-
-      if (state.currentWork?.id === work.id) {
-        state.currentWork.favoriteFolderId = data.favorite.folderId;
-        state.currentWork.favoriteFolderName = data.favorite.folderName;
-      }
-
-      if (state.activeView === "favorites" && state.selectedFavoriteFolderId !== "all" && data.favorite.folderId !== state.selectedFavoriteFolderId) {
-        state.works = state.works.filter((item) => item.id !== work.id);
-      }
-      renderStatsForWorks(state.works);
-      renderFavoriteFolderControls();
-      renderWorks("还没有收藏。");
-    } catch (error) {
-      control.value = previous;
-      alert(error.message);
-    } finally {
-      control.disabled = false;
-    }
-  }
-
-  function updateWorkFavorite(workId, favorite, favoriteFolder = null) {
-    for (const work of state.works) {
-      if (work.id !== workId) continue;
-      work.favorite = favorite;
-      if (favorite && favoriteFolder) {
-        work.favoriteFolderId = favoriteFolder.folderId;
-        work.favoriteFolderName = favoriteFolder.folderName;
-      }
-      if (!favorite) {
-        work.favoriteFolderId = "";
-        work.favoriteFolderName = "";
-      }
-    }
-  }
-
-  function updateWorkFavoriteFolder(workId, favoriteFolder) {
-    for (const work of state.works) {
-      if (work.id !== workId) continue;
-      work.favoriteFolderId = favoriteFolder.folderId;
-      work.favoriteFolderName = favoriteFolder.folderName;
-    }
-  }
-
-  function updateWorkSnapshot(nextWork) {
-    const index = state.works.findIndex((work) => work.id === nextWork.id);
-    if (index >= 0) state.works[index] = { ...state.works[index], ...nextWork };
   }
 
   function startProgressReporting() {

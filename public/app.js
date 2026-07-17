@@ -1,4 +1,4 @@
-import { createApiClient, addQueryParam } from "./js/api.js?v=20260701-gallery-merge-01";
+import { createApiClient } from "./js/api.js?v=20260701-gallery-merge-01";
 import { installAndroidClientReturn, isTrustedNetworkFeatureAvailable, prepareClientShell } from "./js/client-shell.js?v=20260712-project-refactor-03";
 import { loadModuleCatalog, renderWebModuleNavigation } from "./js/module-navigation.js?v=20260710-module-windows-01";
 import {
@@ -8,9 +8,9 @@ import {
   createRankingPage,
   createSearchRequestService,
   createStudioPage,
-  createWorkDetailPage,
+  createWorkActions,
   selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260717-fanhao-lazy-person-01";
+} from "./modules/fanhao/index.js?v=20260717-fanhao-work-actions-01";
 import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260715-actual-video-quality-09";
@@ -54,15 +54,6 @@ const els = {
   backToPeopleIndex: document.querySelector("#backToPeopleIndex"),
   statsRow: document.querySelector("#statsRow"),
   workGrid: document.querySelector("#workGrid"),
-  drawerBackdrop: document.querySelector("#drawerBackdrop"),
-  detailDrawer: document.querySelector("#detailDrawer"),
-  closeDrawer: document.querySelector("#closeDrawer"),
-  drawerPath: document.querySelector("#drawerPath"),
-  drawerTitle: document.querySelector("#drawerTitle"),
-  playerArea: document.querySelector("#playerArea"),
-  drawerSide: document.querySelector(".drawer-side"),
-  metaArea: document.querySelector("#metaArea"),
-  infoArea: document.querySelector("#infoArea"),
   placeholderTemplate: document.querySelector("#placeholderTemplate"),
   adminBackdrop: document.querySelector("#adminBackdrop"),
   adminModal: document.querySelector("#adminModal"),
@@ -141,7 +132,6 @@ const peoplePage = createPeoplePage({
   cancelScheduledWorkRendering,
   clearWorkFilter,
   clearWorkSearch,
-  closeDrawer,
   coverUrl,
   currentPageScrollTop,
   displayPersonName,
@@ -186,6 +176,17 @@ const personProfilePage = createLazyPersonProfile({
   },
   onLoadError: (error) => console.warn("[person-profile]", error?.message || error)
 });
+const {
+  moveFavoriteToFolder,
+  toggleFavorite,
+  updateWorkSnapshot
+} = createWorkActions({
+  api,
+  renderFavoriteFolderControls,
+  renderStatsForWorks,
+  renderWorks,
+  state
+});
 const adminModal = createLazyAdminModal(async () => {
   const { createAdminModal } = await import("./modules/system/admin-modal.js?v=20260717-fanhao-lazy-admin-01");
   return createAdminModal({
@@ -204,15 +205,12 @@ const adminModal = createLazyAdminModal(async () => {
     loadRankings,
     normalizeUiConfig,
     personWorkPageSize,
-    renderMeta,
     renderPeopleIndex,
     renderPeopleIndexStats,
-    renderPlayer,
     renderWorks,
     resetWorkPaging,
     selectPerson,
-    state,
-    updateWorkSnapshot
+    state
   });
 });
 const collectionPage = createCollectionPage({
@@ -260,26 +258,6 @@ const rankingPage = createRankingPage({
   state,
   syncRouteAfterNavigation,
   visibleWorks
-});
-const workDetailPage = createWorkDetailPage({
-  addQueryParam,
-  api,
-  coverRetryDelays: COVER_RETRY_DELAYS,
-  els,
-  formatBytes,
-  formatLibraryPath,
-  formatTime,
-  goToPerson,
-  searchWorksByText,
-  openWorkCard,
-  renderFavoriteFolderControls,
-  renderStatsForWorks,
-  renderWorks,
-  retryCoverUrl,
-  state,
-  syncRouteAfterNavigation,
-  workCoverUrl,
-  workPersonDisplayName
 });
 document.documentElement.classList.toggle("android-client", isAndroidClient);
 
@@ -373,14 +351,13 @@ function restorePageScrollTop(top) {
 }
 
 function currentRouteSnapshot(overrides = {}) {
-  const drawerOpen = els.detailDrawer?.classList.contains("open");
   const route = {
     view: state.activeView || "people",
     peopleScope: state.activeView === "people" ? state.peopleScope || "main" : "main",
     personId: state.activeView === "people" ? state.selectedPersonId || "" : "",
     q: state.activeView === "search" ? state.searchQuery || state.workQuery || "" : "",
-    workId: drawerOpen ? state.currentWork?.id || "" : "",
-    videoId: drawerOpen ? state.currentVideo?.id || "" : ""
+    workId: "",
+    videoId: ""
   };
   return normalizeRoute({ ...route, ...overrides });
 }
@@ -434,10 +411,6 @@ async function applyRoute(route) {
   }
   state.restoringRoute = true;
   try {
-    if (!next.workId && els.detailDrawer.classList.contains("open")) {
-      closeDrawer({ skipRoute: true });
-    }
-
     if (next.view === "search") {
       state.workQuery = next.q;
       els.workSearch.value = next.q;
@@ -493,25 +466,12 @@ function formatBytes(bytes) {
   return `${value >= 10 ? value.toFixed(1) : value.toFixed(2)} ${units[unitIndex]}`;
 }
 
-function formatTime(seconds) {
-  const total = Math.max(0, Math.floor(seconds || 0));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const secs = total % 60;
-  if (hours) return `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-  return `${minutes}:${String(secs).padStart(2, "0")}`;
-}
-
 function includesText(value, query) {
   return String(value || "").toLowerCase().includes(query.trim().toLowerCase());
 }
 
 function displayPersonName(person) {
   return person?.actorProfile?.displayName || person?.name || "";
-}
-
-function workPersonDisplayName(work) {
-  return work?.personDisplayName || work?.personName || "";
 }
 
 function workPersonSearchText(work) {
@@ -669,7 +629,6 @@ function searchWorksByText(value) {
   const query = String(value || "").trim();
   if (!query) return;
   if (els.workSearch) els.workSearch.value = query;
-  closeDrawer({ replaceRoute: false });
   loadSearchResults(query);
 }
 
@@ -2063,7 +2022,7 @@ function createWorkCard(work, index = 0) {
   favorite.textContent = "★";
   favorite.addEventListener("click", (event) => {
     event.stopPropagation();
-    toggleFavorite(work.id);
+    toggleFavorite(work.id, favorite);
   });
 
   if (work.progress?.percent) {
@@ -2357,42 +2316,6 @@ function createAvailabilityChips(work) {
   return [];
 }
 
-async function openWork(workId, videoId = null, options = {}) {
-  await workDetailPage.openWork(workId, videoId, options);
-}
-
-function closeDrawer(options = {}) {
-  workDetailPage.closeDrawer(options);
-}
-
-function trapDrawerFocus(event) {
-  workDetailPage.trapDrawerFocus(event);
-}
-
-async function renderPlayer(work, requestedVideoId = null, startAt = null, autoplay = false) {
-  await workDetailPage.renderPlayer(work, requestedVideoId, startAt, autoplay);
-}
-
-function renderMeta(work) {
-  workDetailPage.renderMeta(work);
-}
-
-async function toggleFavorite(workId) {
-  await workDetailPage.toggleFavorite(workId);
-}
-
-async function moveFavoriteToFolder(work, folderId, control) {
-  await workDetailPage.moveFavoriteToFolder(work, folderId, control);
-}
-
-function updateWorkSnapshot(nextWork) {
-  workDetailPage.updateWorkSnapshot(nextWork);
-}
-
-function reportCurrentProgress(options = {}) {
-  workDetailPage.reportCurrentProgress(options);
-}
-
 els.workSearch.addEventListener("input", () => {
   window.clearTimeout(state.searchTimer);
 });
@@ -2440,23 +2363,10 @@ for (const button of els.viewTabs) {
 
 bindLazyAdminModal({ adminModal, els, openAdminScript, state });
 
-els.closeDrawer.addEventListener("click", closeDrawer);
-els.drawerBackdrop.addEventListener("click", closeDrawer);
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && els.adminModal?.classList.contains("open")) {
     adminModal.closeModal();
-    return;
   }
-
-  const drawerOpen = els.detailDrawer.classList.contains("open");
-  if (event.key === "Escape" && drawerOpen) {
-    closeDrawer();
-    return;
-  }
-  if (event.key === "Tab" && drawerOpen) {
-    trapDrawerFocus(event);
-  }
-
 });
 
 window.addEventListener("popstate", () => {
@@ -2466,7 +2376,6 @@ window.addEventListener("popstate", () => {
   });
 });
 
-window.addEventListener("beforeunload", reportCurrentProgress);
 installAndroidClientReturn({ isAndroidClient, initialParams });
 
 async function bootApp() {
