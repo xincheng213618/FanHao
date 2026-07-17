@@ -344,9 +344,11 @@ export function createWorkQueryService({
     if (options.hydrateMissingSearchResults) hydrateMissingSearchWorks(pageSource);
     const missing = pageSource.filter((work) => !preparedWorkEntry(work, options));
     if (missing.length) {
-      if (!options.lightweightInfo) prewarmCoreWorkCovers(missing);
-      prewarmVideoProbesForWorks(missing);
-      if (!options.lightweightInfo) prewarmWorkInfoDetails(missing);
+      if (!options.lightweightInfo) {
+        prewarmCoreWorkCovers(missing);
+        prewarmVideoProbesForWorks(missing);
+        prewarmWorkInfoDetails(missing);
+      }
     }
     const page = pageSource.map((work) => preparedPublicWork(work, options));
     prewarmRemoteImagesForWorks(page);

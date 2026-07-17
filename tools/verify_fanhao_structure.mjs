@@ -1729,7 +1729,7 @@ assert.equal(lightweightPersonPage.works[0].id, queryWork.id, "lightweight perso
 assert.equal(workInfoFacetReadCount, lightweightFacetReadsBeforePersonPage, "lightweight person facets must not read detail-only work metadata");
 assert.deepEqual(preparedWorkCoverIds, [], "lightweight person pages must not hydrate detail-only cover metadata");
 assert.deepEqual(preparedWorkInfoIds, [], "lightweight person pages must not hydrate detail-only info rows");
-assert.deepEqual(preparedWorkVideoIds, [queryWork.id], "lightweight person pages must still prepare playback probes for visible works");
+assert.deepEqual(preparedWorkVideoIds, [], "lightweight person pages must leave playback probes to explicit hover, focus, or pointer intent");
 const workListPublicCountAfterLightweightPage = workListPublicCount;
 const cachedWorkListFirst = workQueryService.listPayload(workListUrl);
 const listFavoriteReadsAfterFirstPage = searchFavoriteFacetReadCount;
