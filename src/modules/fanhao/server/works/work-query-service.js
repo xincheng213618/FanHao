@@ -618,35 +618,38 @@ export function createWorkQueryService({
     }
 
     const query = rawQuery.toLowerCase();
+    const localMarkerQuery = localMarkerFromSearchQuery(rawQuery);
     const exactCodeKey = /^[a-z]{2,12}[-_\s]?\d{2,}$/i.test(rawQuery) ? storedWorkCodeKey(rawQuery) : "";
     const codePrefix = storedWorkCodeKey(rawQuery);
     const codePrefixQuery = codePrefix.length >= 1 && /^[a-z][a-z0-9_-]*$/i.test(rawQuery);
-    const peopleSearch = exactCodeKey || codePrefixQuery
+    const peopleSearch = localMarkerQuery || exactCodeKey || codePrefixQuery
       ? { exact: [], matchedPersonIds: [], people: [] }
       : searchPeople(rawQuery);
     const exactPersonIds = new Set(peopleSearch.matchedPersonIds || peopleSearch.exact.map((person) => person.id));
     const exactPersonSearch = !exactCodeKey && !codePrefixQuery && peopleSearch.exact.length > 0;
     const exactLocalWork = exactCodeKey ? findExactLocalWork(exactCodeKey) : null;
-    const rankingMissingWorks = exactLocalWork || codePrefixQuery ? [] : rankingMissingSearchWorks();
+    const rankingMissingWorks = localMarkerQuery || exactLocalWork || codePrefixQuery ? [] : rankingMissingSearchWorks();
     const rankingMissingKeys = new Set(rankingMissingWorks
       .map((work) => storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title))
       .filter(Boolean));
-    const actorMissingWorks = exactLocalWork || codePrefixQuery ? [] : actorMissingSearchWorks(rankingMissingKeys);
-    const usesTextMatcher = !exactCodeKey && !codePrefixQuery && !exactPersonSearch;
+    const actorMissingWorks = localMarkerQuery || exactLocalWork || codePrefixQuery ? [] : actorMissingSearchWorks(rankingMissingKeys);
+    const usesTextMatcher = !localMarkerQuery && !exactCodeKey && !codePrefixQuery && !exactPersonSearch;
     if (usesTextMatcher) prewarmWorkSearch([...rankingMissingWorks, ...actorMissingWorks]);
     const matchesQuery = usesTextMatcher ? createWorkSearchMatcher(query) : null;
-    const localMatches = exactCodeKey
-      ? (exactLocalWork ? [exactLocalWork] : [])
-      : codePrefixQuery
-        ? findLocalWorksByCodePrefix(codePrefix)
-        : exactPersonSearch
-          ? allWorks().filter((work) => exactPersonIds.has(work.personId))
-          : allWorks().filter((work) => exactPersonIds.has(work.personId) || matchesQuery(work));
+    const localMatches = localMarkerQuery
+      ? allWorks().filter((work) => workHasLocalMarker(work, localMarkerQuery))
+      : exactCodeKey
+        ? (exactLocalWork ? [exactLocalWork] : [])
+        : codePrefixQuery
+          ? findLocalWorksByCodePrefix(codePrefix)
+          : exactPersonSearch
+            ? allWorks().filter((work) => exactPersonIds.has(work.personId))
+            : allWorks().filter((work) => exactPersonIds.has(work.personId) || matchesQuery(work));
     const fastMissingMatches = codePrefixQuery && !exactLocalWork ? fastMissingCodeSearch(rawQuery) : null;
     const rankingMissingMatches = exactPersonSearch ? [] : rankingMissingWorks.filter((work) => exactCodeKey
       ? storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title) === exactCodeKey
       : matchesQuery(work));
-    const actorMissingMatches = exactLocalWork || codePrefixQuery
+    const actorMissingMatches = localMarkerQuery || exactLocalWork || codePrefixQuery
       ? []
       : actorMissingWorks.filter((work) => exactPersonSearch
         ? exactPersonIds.has(work.personId)
@@ -713,6 +716,12 @@ export function createWorkQueryService({
     searchPayload,
     visibilityStamp: workClassificationService.visibilityStamp
   };
+}
+
+function localMarkerFromSearchQuery(value) {
+  const match = String(value || "").trim().match(/^\[\s*([a-z0-9]+)\s*\]$/i);
+  const marker = String(match?.[1] || "").toUpperCase();
+  return marker === "A" ? marker : "";
 }
 
 function requestedFilters(value) {

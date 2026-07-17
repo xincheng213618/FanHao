@@ -1884,7 +1884,7 @@ const workQueryService = createWorkQueryService({
   storedWorkCodeKey: (value) => String(value || "").replace(/[^A-Za-z0-9]/g, "").toLowerCase(),
   userStateStamp: () => searchUserStateRevision,
   workHasCoreCover: () => false,
-  workHasLocalMarker: () => false,
+  workHasLocalMarker: (_work, marker) => marker === "A",
   workInfoFacetRow: () => {
     workInfoFacetReadCount += 1;
     return null;
@@ -1952,6 +1952,8 @@ assert.equal(searchFavoriteFacetReadCount, favoriteFacetReadsAfterSearch, "repea
 const exactPersonSearch = workQueryService.searchPayload(new URL("http://127.0.0.1/api/search?q=Exact%20Person&limit=24&sort=releaseDesc"));
 assert.equal(exactPersonSearch.people[0]?.id, searchPerson.id, "exact person searches must retain compact person results");
 assert.deepEqual(searchPersonOptions, { skipFallbackAvatar: true }, "search person chips must not scan works for unused fallback avatars");
+const localMarkerSearch = workQueryService.searchPayload(new URL("http://127.0.0.1/api/search?q=%5BA%5D&limit=24&sort=releaseDesc"));
+assert.equal(localMarkerSearch.total, 1, "exact [A] searches must use the local marker category instead of text or person matching");
 const singleLetterCodeSearchUrl = new URL("http://127.0.0.1/api/search?q=A&limit=24&sort=releaseDesc");
 const prefixReadsBeforeSingleLetterSearch = localPrefixReadCount;
 const singleLetterCodeSearch = workQueryService.searchPayload(singleLetterCodeSearchUrl);
