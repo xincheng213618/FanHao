@@ -1180,6 +1180,8 @@
   padding: 9px;
   color: var(--ink);
   text-align: left;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 128px;
 }
 
 .content-panel[data-view="works"] .work-list,

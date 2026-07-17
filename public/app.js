@@ -98,7 +98,9 @@ let coverLoadObserver = null;
 const WORK_RENDER_INITIAL_COUNT = 24;
 const WORK_RENDER_BATCH_SIZE = 24;
 const WORK_RENDER_BATCH_DELAY = 16;
-const WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 96, lan: 64, remote: 48 });
+const WORK_DESKTOP_PAGE_SIZE = 64;
+const WORK_MOBILE_PAGE_SIZE = 48;
+const WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 64, lan: 64, remote: 48 });
 const WORK_AUTO_LOAD_DISTANCE = 1400;
 const COVER_LOAD_BATCH_SIZE = 16;
 const COVER_LOAD_BATCH_DELAY = 45;
@@ -113,9 +115,16 @@ const playbackPrefetch = createPlaybackPrefetch({ api });
 const searchRequests = createSearchRequestService({
   api,
   filter: serializedWorkFilterMode,
-  pageSize: () => Math.max(40, Math.min(WORK_PAGE_SIZE_BY_ACCESS.local, Number(state.workPageSize) || WORK_PAGE_SIZE_BY_ACCESS.remote)),
+  pageSize: preferredWorkPageSize,
   sort: () => state.sortMode || "releaseDesc"
 });
+
+function preferredWorkPageSize(configuredLimit = state.workPageSize) {
+  const viewportLimit = globalThis.matchMedia?.("(max-width: 720px)")?.matches
+    ? WORK_MOBILE_PAGE_SIZE
+    : WORK_DESKTOP_PAGE_SIZE;
+  return Math.max(40, Math.min(viewportLimit, Number(configuredLimit) || viewportLimit));
+}
 
 async function initializeModuleNavigation() {
   try {
@@ -528,7 +537,7 @@ async function loadLibrary(options = {}) {
   if (els.missingLocalToggle) els.missingLocalToggle.checked = state.showMissingLocalWorks;
   if (els.collectionToggle) els.collectionToggle.checked = state.showCompilationWorks;
   const defaultWorkPageSize = WORK_PAGE_SIZE_BY_ACCESS[state.accessMode] || WORK_PAGE_SIZE_BY_ACCESS.remote;
-  state.workPageSize = Math.max(40, Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize) || defaultWorkPageSize));
+  state.workPageSize = preferredWorkPageSize(Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize) || defaultWorkPageSize));
   state.personPageSize = state.accessMode === "lan" ? 80 : 96;
   resetWorkPaging();
   state.people = sortPeopleForList(data.people || []);

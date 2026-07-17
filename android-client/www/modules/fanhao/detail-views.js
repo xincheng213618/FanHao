@@ -73,7 +73,7 @@ export function createDetailViews(context) {
         total: data.total || works.length,
         hasServerMore: works.length < Number(data.total || works.length),
         onLoadMore: () => {
-          increaseWorksLimit(80);
+          increaseWorksLimit(48);
           return renderCurrentViewPreservingScroll();
         }
       });

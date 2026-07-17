@@ -29,8 +29,8 @@ const PRIMARY_LABELS = {
   shortVideos: "短视频",
   tools: "我的"
 };
-const FAST_WORK_LIMIT = 80;
-const FAST_WORK_STEP = 80;
+const FAST_WORK_LIMIT = 48;
+const FAST_WORK_STEP = 48;
 const FAST_CHANNEL_LIMIT = 720;
 const FAST_CHANNEL_STEP = 720;
 const PHOTO_CHANNEL_LIMIT = 24;

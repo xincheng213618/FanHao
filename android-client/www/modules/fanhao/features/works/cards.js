@@ -1,7 +1,10 @@
 import { formatDate, formatNumber } from "../../../../js/format.js";
-import { absoluteUrl, imageUrlForWork, loadPreviewImage } from "../../../../js/image.js?v=20260717-fanhao-cover-prepare-01";
+import { imageUrlForWork } from "../../../../js/image.js?v=20260717-fanhao-cover-prepare-01";
+import { createWorkCoverLoader } from "./cover-loader.js?v=20260717-fanhao-work-covers-01";
 
 export function createWorkCards({ getActiveUrl, showView }) {
+  const coverLoader = createWorkCoverLoader({ getActiveUrl });
+
   function createWorkCard(work, options = {}) {
     const compactMeta = Boolean(options.compactMeta);
     const showRatingMeta = Boolean(options.showRatingMeta);
@@ -20,10 +23,7 @@ export function createWorkCards({ getActiveUrl, showView }) {
     thumb.className = "work-thumb";
     decorateFallbackThumb(thumb, work);
     const imagePath = imageUrlForWork(work);
-    if (imagePath) {
-      const activeUrl = getActiveUrl();
-      loadPreviewImage(thumb, absoluteUrl(activeUrl, imagePath), { cacheBaseUrl: activeUrl });
-    }
+    if (imagePath) coverLoader.schedule(thumb, imagePath);
 
     const body = document.createElement("div");
     body.className = "work-summary";
@@ -72,7 +72,13 @@ export function createWorkCards({ getActiveUrl, showView }) {
     showView("workDetail", { workId: work.id }, { push: true });
   }
 
-  return { createWorkCard, createChip, progressPercent, displayPersonName };
+  return {
+    createWorkCard,
+    createChip,
+    displayPersonName,
+    progressPercent,
+    resetCoverLoading: coverLoader.reset
+  };
 }
 
 export function createChip(text, variant = "") {

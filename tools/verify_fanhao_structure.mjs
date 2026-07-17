@@ -30,6 +30,7 @@ import { createVideoProbeService } from "../src/platform/server/video-probe-serv
 import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
 import { tableStampValue } from "../src/modules/fanhao/server/library/table-stamp-query.js";
 import { fetchPreparedImage } from "../android-client/www/js/image.js";
+import { createWorkCoverLoader } from "../android-client/www/modules/fanhao/features/works/cover-loader.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -94,7 +95,7 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
 assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-player-prefetch-01'), "player prefetch changes must refresh the FanHao browser entry");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-player-prefetch-01'), "player prefetch changes must refresh the FanHao app module");
+assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-work-page-01'), "adaptive work paging changes must refresh the FanHao app module");
 assert(webApp.includes('index.js?v=20260717-fanhao-player-prefetch-01'), "player prefetch changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
@@ -142,7 +143,9 @@ assert(webApp.indexOf("collectionPage.prefetch(initialRoute.view);") < webApp.in
 assert(!webApp.includes("await initializeModuleNavigation();"), "FanHao startup must not serialize module discovery ahead of the first library request");
 assert(webApp.indexOf("const moduleNavigationPromise = initializeModuleNavigation();") < webApp.indexOf("await applyRoute(initialRoute);"), "module discovery and route data must start concurrently");
 assert(webApp.includes("await moduleNavigationPromise;"), "FanHao startup must still observe module-navigation completion");
-assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 96, lan: 64, remote: 48 })"), "FanHao work APIs must keep page payloads bounded for each access mode");
+assert(webApp.includes("const WORK_DESKTOP_PAGE_SIZE = 64") && webApp.includes("const WORK_MOBILE_PAGE_SIZE = 48"), "FanHao work APIs must use viewport-sized desktop and mobile first pages");
+assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 64, lan: 64, remote: 48 })"), "FanHao work APIs must keep page payloads bounded for each access mode");
+assert(webApp.includes('globalThis.matchMedia?.("(max-width: 720px)")') && webApp.includes("pageSize: preferredWorkPageSize"), "search requests must follow the active desktop or mobile viewport");
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
 assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-person-prefetch-01'), "person navigation changes must use a fresh browser module URL");
@@ -240,6 +243,9 @@ const androidWorkViews = read("android-client/www/modules/fanhao/work-views.js")
 const androidApp = read("android-client/www/app.js");
 const androidPeopleViews = read("android-client/www/modules/fanhao/people-views.js");
 const androidRankingViews = read("android-client/www/modules/fanhao/features/rankings/ranking-views.js");
+const androidWorkCards = read("android-client/www/modules/fanhao/features/works/cards.js");
+const androidWorkCoverLoader = read("android-client/www/modules/fanhao/features/works/cover-loader.js");
+const androidListStyles = read("android-client/www/css/lists.css");
 assert(!androidWorkViews.includes("SEARCH_CHANNELS"), "FanHao Android must not own cross-module search channels");
 assert(!/function createWorkCard\s*\(/.test(androidWorkViews), "FanHao Android work cards must stay in their feature module");
 assert(!androidWorkViews.includes("createGlobalSearch"), "FanHao Android search must not use a cross-module aggregator");
@@ -250,14 +256,59 @@ assert(lines("android-client/www/modules/fanhao/work-views.js") <= 750, "FanHao 
 assert(lines("android-client/www/modules/fanhao/features/works/cards.js") <= 320, "FanHao Android work cards must stay focused");
 assert(androidApp.includes("const aVisual = imageUrlForPerson(a) ? 1 : 0"), "Android home must recognize compact person-list avatar URLs");
 assert(androidPeopleViews.includes("const aVisual = imageUrlForPerson(a) ? 1 : 0"), "Android people sorting must recognize compact person-list avatar URLs");
-assert(androidApp.includes("const FAST_WORK_LIMIT = 80"), "Android FanHao work views must request a small interactive first page");
-assert(androidApp.includes("const FAST_WORK_STEP = 80"), "Android FanHao work views must grow in bounded pages");
+assert(androidApp.includes("const FAST_WORK_LIMIT = 48"), "Android FanHao work views must request a phone-sized interactive first page");
+assert(androidApp.includes("const FAST_WORK_STEP = 48"), "Android FanHao work views must grow in phone-sized pages");
 assert(!androidApp.includes("return fast ? 480"), "Android FanHao detail and collection views must not restore oversized initial requests");
+assert(androidWorkCards.includes("coverLoader.schedule(thumb, imagePath)"), "Android work cards must defer cover reads until they approach the viewport");
+assert(androidWorkViews.includes("workCards.resetCoverLoading();"), "Android work navigation must cancel stale offscreen cover work");
+assert(androidWorkCoverLoader.includes('const WORK_COVER_ROOT_MARGIN = "720px 0px"'), "Android work covers must start shortly before they enter the viewport");
+assert(androidListStyles.includes("content-visibility: auto") && androidListStyles.includes("contain-intrinsic-size: auto 128px"), "Android work cards must skip offscreen layout and painting");
 assert(androidRankingViews.includes("const PAGE_SIZE = 80"), "Android rankings must request a bounded first page");
 assert(androidRankingViews.includes("hasServerMore:"), "Android rankings must preserve server-side continuation");
 assert(androidWorkViews.includes("options.hasServerMore"), "Android work rendering must expose server-side continuation");
 assert(androidWorkViews.includes("/api/history?limit=${limit}&offset=0"), "Android history must request a bounded first page");
 assert(androidWorkViews.includes("const works = data.works || []"), "Android collections must define their rendered work list locally");
+let coverObserverCallback = null;
+let coverObserverOptions = null;
+let coverObserverDisconnected = 0;
+const observedCoverTargets = [];
+const unobservedCoverTargets = [];
+const loadedWorkCovers = [];
+const deferredWorkCoverLoader = createWorkCoverLoader({
+  createObserver(callback, options) {
+    coverObserverCallback = callback;
+    coverObserverOptions = options;
+    return {
+      disconnect() {
+        coverObserverDisconnected += 1;
+      },
+      observe(target) {
+        observedCoverTargets.push(target);
+      },
+      unobserve(target) {
+        unobservedCoverTargets.push(target);
+      }
+    };
+  },
+  getActiveUrl: () => "http://127.0.0.1:29998",
+  loadImage: (target, url, options) => loadedWorkCovers.push({ target, url, options })
+});
+const deferredCoverTarget = {};
+deferredWorkCoverLoader.schedule(deferredCoverTarget, "/media/image/cover-1");
+assert.equal(deferredWorkCoverLoader.pendingCount(), 1, "offscreen Android covers must remain queued without starting cache or network work");
+assert.deepEqual(observedCoverTargets, [deferredCoverTarget], "queued Android covers must be observed once");
+assert.equal(coverObserverOptions.rootMargin, "720px 0px", "cover observation must begin before the card reaches the viewport");
+coverObserverCallback([{ target: deferredCoverTarget, isIntersecting: false, intersectionRatio: 0 }]);
+assert.equal(loadedWorkCovers.length, 0, "far-offscreen Android covers must not read IndexedDB or network data");
+coverObserverCallback([{ target: deferredCoverTarget, isIntersecting: true, intersectionRatio: 0.1 }]);
+assert.equal(deferredWorkCoverLoader.pendingCount(), 0, "visible Android covers must leave the pending queue");
+assert.deepEqual(unobservedCoverTargets, [deferredCoverTarget], "visible Android covers must stop observing after their first load");
+assert.equal(loadedWorkCovers[0]?.url, "http://127.0.0.1:29998/media/image/cover-1", "deferred Android covers must retain the active server URL");
+const cancelledCoverTarget = {};
+deferredWorkCoverLoader.schedule(cancelledCoverTarget, "/media/image/cover-2");
+deferredWorkCoverLoader.reset();
+assert.equal(deferredWorkCoverLoader.pendingCount(), 0, "navigation must drop stale offscreen cover work");
+assert.equal(coverObserverDisconnected, 1, "navigation must disconnect the previous cover observer");
 const androidDetailViews = read("android-client/www/modules/fanhao/detail-views.js");
 assert(androidDetailViews.includes("getWorksLimit()"), "Android person details must use the bounded shared work limit");
 assert(androidDetailViews.includes("hasServerMore:"), "Android person details must preserve server-side continuation");
