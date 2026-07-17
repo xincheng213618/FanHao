@@ -1,5 +1,6 @@
 export function createWorkActions({
   api,
+  onCollectionStateChanged = () => {},
   onCurrentWorkFavoriteChanged = () => {},
   renderFavoriteFolderControls,
   renderStatsForWorks,
@@ -33,6 +34,7 @@ export function createWorkActions({
         renderFavoriteFolderControls();
       }
       renderWorks(state.activeView === "favorites" ? "还没有收藏。" : "没有匹配的作品。");
+      onCollectionStateChanged();
       onCurrentWorkFavoriteChanged(state.currentWork);
       return data;
     } catch (error) {
@@ -68,6 +70,7 @@ export function createWorkActions({
       renderStatsForWorks(state.works);
       renderFavoriteFolderControls();
       renderWorks("还没有收藏。");
+      onCollectionStateChanged();
       return data;
     } catch (error) {
       control.value = previous;

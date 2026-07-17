@@ -8,6 +8,8 @@ import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260
 
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
+const collectionFetches = new Map();
+const warmedCollectionKeys = new Set();
 
 function workDataSignature(data = {}) {
   const works = Array.isArray(data.works) ? data.works : [];
@@ -72,6 +74,7 @@ export function createWorkViews(context) {
     const cached = await readCachedJson(activeUrl, path).catch(() => null);
     if (cached?.payload) {
       renderContinueData(cached.payload);
+      warmPrimaryCollections(activeUrl);
       if (options.preferCache) return;
     }
 
@@ -79,6 +82,7 @@ export function createWorkViews(context) {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 12000 });
       writeCachedJson(activeUrl, path, data).catch(() => {});
       renderContinueData(data);
+      warmPrimaryCollections(activeUrl);
     } catch {
       if (!cached?.payload) {
         els.continuePreview.dataset.hasItems = "0";
@@ -162,8 +166,7 @@ export function createWorkViews(context) {
     }
 
     try {
-      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
-      writeCachedJson(activeUrl, path, data).catch(() => {});
+      const data = await fetchCollectionData(activeUrl, path, { signal: isActive.signal });
       if (!isActive()) return;
       if (renderedCache && workDataSignature(data) === renderedCacheSignature) {
         applyCollectionHeader(data);
@@ -609,6 +612,33 @@ export function createWorkViews(context) {
 
   async function renderRankings(isActive = () => true) {
     return rankingViews.renderRankings(isActive);
+  }
+
+  function fetchCollectionData(activeUrl, path, options = {}) {
+    const key = `${activeUrl}:${path}`;
+    if (collectionFetches.has(key)) return collectionFetches.get(key);
+    const promise = fetchJson(activeUrl, path, { timeoutMs: 12000, signal: options.signal })
+      .then((data) => {
+        writeCachedJson(activeUrl, path, data).catch(() => {});
+        return data;
+      })
+      .finally(() => collectionFetches.delete(key));
+    collectionFetches.set(key, promise);
+    return promise;
+  }
+
+  function warmPrimaryCollections(activeUrl) {
+    const limit = getWorksLimit();
+    const paths = [
+      `/api/history?limit=${limit}&offset=0`,
+      favoriteCollectionPath(limit)
+    ];
+    for (const path of paths) {
+      const key = `${activeUrl}:${path}`;
+      if (warmedCollectionKeys.has(key)) continue;
+      warmedCollectionKeys.add(key);
+      fetchCollectionData(activeUrl, path).catch(() => warmedCollectionKeys.delete(key));
+    }
   }
 
   async function refreshRankingCache() {

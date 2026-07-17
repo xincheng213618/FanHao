@@ -1,45 +1,17 @@
 export async function routeUserStateApi(req, res, url, deps) {
   const {
-    clampInteger,
+    collectionQueryService,
     favoriteStateService,
     library,
-    maxWorkLimit,
     notFound,
     playbackProgressService,
-    prewarmCoreWorkCovers,
-    prewarmRemoteImagesForWorks,
-    prewarmVideoProbesForWorks,
-    prewarmWorkInfoDetails,
-    publicWork,
     readJsonBody,
-    recentWatchedDays,
     resolvePlayableVideoFile,
     sendJson
   } = deps;
 
   if (url.pathname === "/api/favorites" && req.method === "GET") {
-    const rawFolderId = url.searchParams.get("folder") || "";
-    const selectedFolderId = rawFolderId ? favoriteStateService.normalizeFavoriteFolderId(rawFolderId) : "";
-    const allWorks = favoriteStateService.favoriteWorks(selectedFolderId);
-    const limit = clampInteger(url.searchParams.get("limit"), 0, 0, maxWorkLimit);
-    const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-    const page = limit ? allWorks.slice(offset, offset + limit) : allWorks.slice(offset);
-    const works = prepareCollectionWorkPage(page, {
-      prewarmCoreWorkCovers,
-      prewarmRemoteImagesForWorks,
-      prewarmVideoProbesForWorks,
-      prewarmWorkInfoDetails,
-      publicWork
-    });
-    sendJson(res, 200, {
-      count: works.length,
-      total: allWorks.length,
-      limit,
-      offset,
-      works,
-      folders: favoriteStateService.publicFavoriteFolders(),
-      selectedFolderId: selectedFolderId || "all"
-    });
+    sendJson(res, 200, collectionQueryService.favoritesPayload(url));
     return true;
   }
 
@@ -65,28 +37,7 @@ export async function routeUserStateApi(req, res, url, deps) {
   }
 
   if (url.pathname === "/api/history" && req.method === "GET") {
-    const rawDays = String(url.searchParams.get("days") || "").trim().toLowerCase();
-    const days = rawDays && rawDays !== "all" ? clampInteger(rawDays, 0, 1, 3650) : 0;
-    const limit = clampInteger(url.searchParams.get("limit"), 0, 0, maxWorkLimit);
-    const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-    const entries = playbackProgressService.historyEntries({ days });
-    const page = limit ? entries.slice(offset, offset + limit) : entries.slice(offset);
-    const works = prepareCollectionWorkPage(page.map((entry) => entry.work), {
-      prewarmCoreWorkCovers,
-      prewarmRemoteImagesForWorks,
-      prewarmVideoProbesForWorks,
-      prewarmWorkInfoDetails,
-      publicWork
-    });
-    sendJson(res, 200, {
-      count: works.length,
-      total: entries.length,
-      days,
-      limit,
-      offset,
-      recentWatchedDays,
-      works
-    });
+    sendJson(res, 200, collectionQueryService.historyPayload(url));
     return true;
   }
 
@@ -146,33 +97,4 @@ export async function routeUserStateApi(req, res, url, deps) {
   }
 
   return false;
-}
-
-export function prepareCollectionWorkPage(sourceWorks, {
-  prewarmCoreWorkCovers = () => {},
-  prewarmRemoteImagesForWorks = () => {},
-  prewarmVideoProbesForWorks = () => {},
-  prewarmWorkInfoDetails = () => {},
-  publicWork
-}) {
-  const page = prewarmCollectionWorkPage(sourceWorks, {
-    prewarmCoreWorkCovers,
-    prewarmVideoProbesForWorks,
-    prewarmWorkInfoDetails
-  });
-  const works = page.map((work) => publicWork(work));
-  prewarmRemoteImagesForWorks(works);
-  return works;
-}
-
-export function prewarmCollectionWorkPage(sourceWorks, {
-  prewarmCoreWorkCovers = () => {},
-  prewarmVideoProbesForWorks = () => {},
-  prewarmWorkInfoDetails = () => {}
-}) {
-  const page = Array.isArray(sourceWorks) ? sourceWorks : [];
-  prewarmCoreWorkCovers(page);
-  prewarmVideoProbesForWorks(page);
-  prewarmWorkInfoDetails(page);
-  return page;
 }

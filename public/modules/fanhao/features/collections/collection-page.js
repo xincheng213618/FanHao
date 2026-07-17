@@ -7,16 +7,21 @@ const HISTORY_RANGES = [
 ];
 const COLLECTION_DESKTOP_PAGE_SIZE = 64;
 const COLLECTION_MOBILE_PAGE_SIZE = 48;
-const COLLECTION_PREFETCH_TTL_MS = 5000;
+const COLLECTION_PREFETCH_TTL_MS = 5 * 60 * 1000;
+const COLLECTION_PREFETCH_LIMIT = 8;
 
 export function createCollectionPage(deps) {
   const { api, els, formatNumber, hidePersonProfile, renderEmpty, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
   const collectionRequests = createLatestRequestGate();
-  let collectionPrefetch = null;
+  const collectionPrefetches = new Map();
 
   function cancelPendingRequests() {
     collectionRequests.cancel();
-    collectionPrefetch = null;
+    invalidatePrefetches();
+  }
+
+  function invalidatePrefetches() {
+    collectionPrefetches.clear();
   }
 
   function collectionPageSize() {
@@ -41,9 +46,9 @@ export function createCollectionPage(deps) {
     return `/api/favorites?${params}`;
   }
 
-  function historyPath(offset = 0) {
+  function historyPath(offset = 0, range = state.selectedHistoryRange) {
     const params = new URLSearchParams();
-    if (state.selectedHistoryRange && state.selectedHistoryRange !== "all") params.set("days", state.selectedHistoryRange);
+    if (range && range !== "all") params.set("days", range);
     params.set("limit", String(collectionPageSize()));
     params.set("offset", String(offset || 0));
     return `/api/history?${params}`;
@@ -74,34 +79,47 @@ export function createCollectionPage(deps) {
   function prefetch(view) {
     const path = collectionPath(view, 0);
     if (!path) return null;
+    return prefetchPath(view, path);
+  }
+
+  function prefetchPath(view, path) {
     const now = Date.now();
     const shape = requestShape(path);
-    if (collectionPrefetch?.view === view && collectionPrefetch.shape === shape && collectionPrefetch.expiresAt > now) {
-      return collectionPrefetch.promise;
+    const cacheKey = `${view}:${shape}`;
+    const cached = collectionPrefetches.get(cacheKey);
+    if (cached?.expiresAt > now) {
+      collectionPrefetches.delete(cacheKey);
+      collectionPrefetches.set(cacheKey, cached);
+      return cached.promise;
     }
+    if (cached) collectionPrefetches.delete(cacheKey);
 
     const promise = api(path).then(
       (data) => ({ data, error: null }),
       (error) => ({ data: null, error })
-    );
-    collectionPrefetch = {
+    ).then((result) => {
+      if (result.error) collectionPrefetches.delete(cacheKey);
+      return result;
+    });
+    collectionPrefetches.set(cacheKey, {
       view,
       shape,
       expiresAt: now + COLLECTION_PREFETCH_TTL_MS,
       promise
-    };
+    });
+    while (collectionPrefetches.size > COLLECTION_PREFETCH_LIMIT) {
+      collectionPrefetches.delete(collectionPrefetches.keys().next().value);
+    }
     return promise;
   }
 
   async function fetchCollectionPage(view, path, request) {
-    const prefetched = collectionPrefetch;
+    const shape = requestShape(path);
+    const prefetched = collectionPrefetches.get(`${view}:${shape}`);
     if (
-      prefetched?.view === view
-      && prefetched.shape === requestShape(path)
-      && prefetched.expiresAt > Date.now()
+      prefetched?.expiresAt > Date.now()
       && new URL(path, "http://fanhao.local").searchParams.get("offset") === "0"
     ) {
-      collectionPrefetch = null;
       const result = await prefetched.promise;
       if (result.error) throw result.error;
       return trimPrefetchedPage(result.data, path);
@@ -185,12 +203,21 @@ export function createCollectionPage(deps) {
       renderStatsForWorks(state.works);
       renderHistoryControls(data);
       renderWorks("暂无观看记录。");
+      if (!append) warmHistoryRanges();
     } catch (error) {
       if (!request.isCurrent() || state.activeView !== "history") return;
       if (append) throw error;
       renderEmpty(error.message || "观看记录读取失败");
     } finally {
       request.finish();
+    }
+  }
+
+  function warmHistoryRanges() {
+    if (globalThis.navigator?.connection?.saveData) return;
+    for (const option of HISTORY_RANGES) {
+      if (option.value === state.selectedHistoryRange) continue;
+      prefetchPath("history", historyPath(0, option.value));
     }
   }
 
@@ -349,5 +376,5 @@ export function createCollectionPage(deps) {
     els.statsRow.append(wrap);
   }
 
-  return { cancelPendingRequests, loadFavorites, loadHistory, loadMoreCollectionWorks, loadMoreVrWorks, loadVrWorks, prefetch, renderFavoriteFolderControls };
+  return { cancelPendingRequests, invalidatePrefetches, loadFavorites, loadHistory, loadMoreCollectionWorks, loadMoreVrWorks, loadVrWorks, prefetch, renderFavoriteFolderControls };
 }

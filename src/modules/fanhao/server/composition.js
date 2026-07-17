@@ -31,7 +31,9 @@ export function createFanhaoDependencies(deps) {
       "readJsonBody",
       "recentWatchedDays",
       "resolvePlayableVideoFile",
-      "sendJson"
+      "sendJson",
+      "userStateStamp",
+      "workQueryStamp"
     ]),
     works: pick(deps, [
       "adminCoreMutationService",

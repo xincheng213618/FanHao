@@ -1,11 +1,13 @@
-import { prewarmCollectionWorkPage, routeUserStateApi } from "./routes.js";
-
-const COLLECTION_PREWARM_PAGE_SIZE = 64;
+import { createCollectionQueryService } from "./collection-query-service.js";
+import { routeUserStateApi } from "./routes.js";
 
 export function createUserStateRuntime(deps) {
+  const collectionQueryService = createCollectionQueryService(deps);
+
   function requestDeps() {
     return {
       ...deps,
+      collectionQueryService,
       library: deps.getLibrary()
     };
   }
@@ -15,18 +17,7 @@ export function createUserStateRuntime(deps) {
   }
 
   function start() {
-    const active = requestDeps();
-    const favoriteWorks = active.favoriteStateService.favoriteWorks().slice(0, COLLECTION_PREWARM_PAGE_SIZE);
-    const historyWorks = active.playbackProgressService
-      .historyEntries({ days: active.recentWatchedDays, limit: COLLECTION_PREWARM_PAGE_SIZE })
-      .map((entry) => entry.work);
-    const seen = new Set();
-    const firstPageWorks = [...favoriteWorks, ...historyWorks].filter((work) => {
-      if (!work?.id || seen.has(work.id)) return false;
-      seen.add(work.id);
-      return true;
-    });
-    prewarmCollectionWorkPage(firstPageWorks, active);
+    collectionQueryService.prewarm();
   }
 
   return {
