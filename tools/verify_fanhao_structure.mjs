@@ -145,7 +145,7 @@ assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.w
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
 assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-person-prefetch-01'), "person navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260717-fanhao-ranking-first-page-01'), "ranking navigation changes must use a fresh browser module URL");
-assert(fanhaoModuleIndexSource.includes('collection-page.js?v=20260717-fanhao-collection-first-page-03'), "collection navigation changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('collection-page.js?v=20260717-fanhao-collection-prefetch-04'), "collection navigation changes must use a fresh browser module URL");
 assert(peoplePageSource.includes("const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64") && peoplePageSource.includes("const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48"), "person details must keep desktop and mobile first payloads bounded");
 assert(peoplePageSource.includes("const personDetailPrefetches = new Map()") && peoplePageSource.includes("reusePrefetch: true"), "person interactions must reuse prepared detail requests instead of issuing a duplicate click request");
 assert(peoplePageSource.includes('card.addEventListener("pointerenter", () => schedulePersonDetailPrefetch(person.id))') && peoplePageSource.includes('card.addEventListener("pointerdown", () => prefetchPersonDetails(person.id))'), "person cards must prepare details before desktop and touch clicks");
@@ -366,7 +366,7 @@ const prefetchedCollectionState = {
   selectedPersonId: null,
   selectedStudio: null,
   selectedStudioSeriesId: "all",
-  sortMode: "releaseDesc",
+  sortMode: "ranking",
   vrTotal: 0,
   workPageSize: 96,
   workVisibleLimit: 96,
@@ -394,9 +394,11 @@ const prefetchedCollectionPage = createCollectionPage({
   state: prefetchedCollectionState
 });
 prefetchedCollectionPage.prefetch("vr");
+prefetchedCollectionState.sortMode = "releaseDesc";
 await prefetchedCollectionPage.loadVrWorks();
 assert.equal(prefetchedCollectionCalls.length, 1, "prefetched VR activation must not issue a duplicate first-page request");
 assert(prefetchedCollectionCalls[0].includes("limit=64"), "desktop VR prefetch must request only one compact first page");
+assert(prefetchedCollectionCalls[0].includes("sort=releaseDesc"), "VR prefetch must normalize ranking state to the sort used after navigation");
 assert.equal(prefetchedCollectionState.works.length, 64, "prefetched VR data must render as the active collection page");
 const webStudioPage = read("public/modules/fanhao/features/studios/studio-page.js");
 const studioSeriesControlStyles = /\.studio-series-controls \.stat-filter-group\s*\{([\s\S]*?)\n\}/.exec(fanhaoStyles)?.[1] || "";

@@ -52,11 +52,16 @@ export function createCollectionPage(deps) {
   function vrPath(offset = 0) {
     const params = new URLSearchParams({
       filter: "vr",
-      sort: state.sortMode || "releaseDesc",
+      sort: vrSortMode(),
       limit: String(collectionPageSize()),
       offset: String(offset || 0)
     });
     return `/api/works?${params}`;
+  }
+
+  function vrSortMode() {
+    const sort = state.sortMode || "releaseDesc";
+    return sort === "ranking" ? "releaseDesc" : sort;
   }
 
   function requestShape(path) {
