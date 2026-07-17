@@ -96,9 +96,9 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-work-response-01'), "work-response changes must refresh the FanHao browser entry");
-assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-work-response-01'), "work-response changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260717-fanhao-work-response-01'), "work-response changes must refresh the FanHao module barrel");
+assert(indexHtml.includes('/fanhao-app.js?v=20260717-fanhao-studio-response-01'), "studio-response changes must refresh the FanHao browser entry");
+assert(fanhaoEntry.includes('app.js?v=20260717-fanhao-studio-response-01'), "studio-response changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260717-fanhao-studio-response-01'), "studio-response changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -154,6 +154,7 @@ assert(latestRequestSource.includes("controller?.abort()"), "latest-request gate
 assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-person-detail-01'), "person navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260717-fanhao-ranking-response-01'), "ranking navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('collection-page.js?v=20260717-fanhao-collection-response-01'), "collection navigation changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('studio-page.js?v=20260717-fanhao-studio-response-01'), "studio navigation changes must use a fresh browser module URL");
 assert(collectionPageSource.includes("const collectionPrefetches = new Map()") && collectionPageSource.includes("warmHistoryRanges()"), "Web history ranges must reuse prefetched pages while the collection view remains active");
 assert(collectionPageSource.includes("const COLLECTION_PREFETCH_TTL_MS = 5 * 60 * 1000") && collectionPageSource.includes("invalidatePrefetches"), "Web collection prefetches must survive normal reading time and expose explicit invalidation");
 assert(peoplePageSource.includes("const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64") && peoplePageSource.includes("const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48"), "person details must keep desktop and mobile first payloads bounded");
@@ -175,6 +176,9 @@ assert(webApp.includes('if (view !== "rankings") rankingPage.cancelPendingReques
 assert(studioPageSource.includes("const studioRequests = createLatestRequestGate()"), "studio navigation must own a cancellable latest request");
 assert(studioPageSource.includes('state.activeView !== "studios"'), "stale studio responses must not overwrite newer navigation");
 assert(webApp.includes('if (view !== "studios") studioPage.cancelPendingRequests()'), "leaving studios must cancel pending requests");
+assert(studioPageSource.includes("const studioPrefetches = new Map()") && studioPageSource.includes("return result.data;"), "studio activation must reuse its prepared detail request");
+assert(studioPageSource.includes('button.addEventListener("pointerenter", prefetch') && studioPageSource.includes('button.addEventListener("pointerdown", prefetch'), "desktop and touch studio cards must prepare detail data before click");
+assert(studioPageSource.includes('globalThis.scrollTo?.({ top: 0, left: 0, behavior: "auto" })'), "studio card activation must start the detail at the top instead of inheriting index scroll");
 assert(collectionPageSource.includes("const collectionRequests = createLatestRequestGate()"), "collection navigation must own a cancellable latest request");
 assert(collectionPageSource.includes("const COLLECTION_DESKTOP_PAGE_SIZE = 64"), "desktop collections must keep the first payload compact");
 assert(collectionPageSource.includes("const COLLECTION_MOBILE_PAGE_SIZE = 48"), "mobile collections must use a smaller first payload");
@@ -292,6 +296,8 @@ assert(androidWorkViews.includes("/api/history?limit=${limit}&offset=0"), "Andro
 assert(androidWorkViews.includes("const works = data.works || []"), "Android collections must define their rendered work list locally");
 assert(androidWorkViews.includes("createWorkPageDataService") && androidWorkViews.includes("warmPrimaryCollections(activeUrl)"), "Android home must warm and share collection requests before navigation");
 assert(androidWorkViews.includes("warmCatalogSibling(activeUrl") && androidWorkPageDataService.includes("const inflight = new Map()"), "Android work and VR views must warm sibling pages and share requests");
+assert(androidWorkViews.includes("pageDataService.fetch(activeUrl, path") && androidWorkViews.includes("warmStudioDetail(studio.id)"), "Android studio navigation must share touch warmups with its live detail request");
+assert(androidWorkViews.includes('button.addEventListener("pointerdown", warmDetail'), "Android studio cards and series chips must begin loading on touch press");
 let resolveWarmedWorkPage;
 let workPageFetchCount = 0;
 const writtenWorkPages = [];
@@ -310,7 +316,7 @@ const workPageDataService = createWorkPageDataService({
 });
 const warmedWorkPath = "/api/works?limit=48&offset=0&sort=updated&filter=vr";
 workPageDataService.warm("http://fanhao.local", [warmedWorkPath]);
-const sharedWarmedWorkPage = workPageDataService.fetch("http://fanhao.local", warmedWorkPath);
+const sharedWarmedWorkPage = workPageDataService.fetch("http://fanhao.local", warmedWorkPath, { reuseWarmed: true });
 assert.equal(workPageFetchCount, 1, "Android work-page navigation must reuse a sibling prefetch still in flight");
 resolveWarmedWorkPage({ works: [{ id: "work-vr" }] });
 assert.deepEqual(await sharedWarmedWorkPage, { works: [{ id: "work-vr" }] }, "Android work-page prefetch must preserve the server payload");
@@ -318,8 +324,15 @@ assert.equal(writtenWorkPages.length, 1, "Android work-page prefetch must popula
 workPageDataService.warm("http://fanhao.local", [warmedWorkPath]);
 await Promise.resolve();
 assert.equal(workPageFetchCount, 1, "completed Android sibling warmups must not repeat during the same app session");
-await workPageDataService.fetch("http://fanhao.local", warmedWorkPath);
-assert.equal(workPageFetchCount, 2, "explicit Android navigation must still revalidate a completed cached page");
+await workPageDataService.fetch("http://fanhao.local", warmedWorkPath, { reuseWarmed: true });
+assert.equal(workPageFetchCount, 2, "an in-flight Android warmup must be consumed once instead of leaking into a later navigation");
+const completedWarmPath = "/api/studios/1?seriesId=all&limit=48&offset=0";
+await workPageDataService.warm("http://fanhao.local", [completedWarmPath]);
+assert.equal(workPageFetchCount, 3, "Android studio warmups must complete one background request");
+await workPageDataService.fetch("http://fanhao.local", completedWarmPath, { reuseWarmed: true });
+assert.equal(workPageFetchCount, 3, "Android touch navigation must consume a just-completed warmup without a second request");
+await workPageDataService.fetch("http://fanhao.local", completedWarmPath);
+assert.equal(workPageFetchCount, 4, "ordinary Android navigation must still revalidate a completed cached page");
 let coverObserverCallback = null;
 let coverObserverOptions = null;
 let coverObserverDisconnected = 0;
@@ -369,8 +382,8 @@ assert(!androidDetailViews.includes("limit=2000"), "Android person details must 
 assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && androidDetailViews.includes("正在加载作品"), "Android person navigation must paint the local index before the network request completes");
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-person-detail-01'), "Android person-detail changes must use a fresh module URL");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-work-response-01'), "Android work-response changes must use a fresh work-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-work-response-01') && androidIndexHtml.includes('app.js?v=20260717-fanhao-work-response-01'), "Android work-response changes must refresh the module and app entry chain");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-studio-response-01'), "Android studio-response changes must use a fresh work-view URL");
+assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-studio-response-01') && androidIndexHtml.includes('app.js?v=20260717-fanhao-studio-response-01'), "Android studio-response changes must refresh the module and app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
@@ -540,7 +553,8 @@ assert(studioService.includes("const studioWorksCache = new Map()"), "studio det
 assert(studioService.includes("sortedByMode: new Map()"), "studio detail paging must reuse sorted work lists");
 assert(studioService.includes("ensureDetailCaches(stamp)"), "studio detail caches must follow the catalog version stamp");
 assert(studioService.includes("studioSummaryRowsCache?.stamp === stamp"), "studio indexes must reuse versioned aggregate rows");
-assert(studioService.includes("prewarmDetails(cachedSummaryRows(sync.stamp))"), "studio startup must prepare detail sources before the first selection");
+assert(studioService.includes('summaries(new URL("http://fanhao.local/api/studios?limit=500"))'), "studio startup must prepare the complete index response before first navigation");
+assert(studioService.includes("prewarmDetails(rows)"), "studio startup must prepare detail sources before the first selection");
 assert(studioService.includes("prewarmCoreWorkCovers(pageWorks)"), "studio startup must batch-hydrate first-page covers");
 assert(studioService.includes("prewarmWorkInfoDetails(pageWorks)"), "studio startup must batch-hydrate first-page metadata");
 assert(catalogRuntimeSource.includes("deps.studioService.prewarm()"), "studio aggregate rows must be ready before the first navigation");
@@ -1040,6 +1054,8 @@ let studioWorksReadCount = 0;
 let studioSortCount = 0;
 let studioCoverPrewarmCount = 0;
 let studioInfoPrewarmCount = 0;
+let studioPagePayloadCount = 0;
+let studioUserStateStamp = "studio-user-v1";
 const studioRows = [
   { maker_id: "1", name: "Studio One", normalized_name: "studio one", javdb_url: "", source: "test", work_count: 10, local_work_count: 8, first_release_date: "2024-01-01", latest_release_date: "2026-01-01" },
   { maker_id: "2", name: "Studio Two", normalized_name: "studio two", javdb_url: "", source: "test", work_count: 2, local_work_count: 1, first_release_date: "2025-01-01", latest_release_date: "2026-01-02" }
@@ -1089,7 +1105,10 @@ const cachedStudioService = createStudioService({
   }),
   getLibrary: () => ({ worksById: new Map() }),
   getStamp: () => studioDataStamp,
-  pagedWorksPayload: () => ({}),
+  pagedWorksPayload: () => {
+    studioPagePayloadCount += 1;
+    return {};
+  },
   prewarmCoreWorkCovers: () => {
     studioCoverPrewarmCount += 1;
   },
@@ -1101,6 +1120,7 @@ const cachedStudioService = createStudioService({
     studioSortCount += 1;
     return works;
   },
+  userStateStamp: () => studioUserStateStamp,
   workFacets: () => ({})
 });
 cachedStudioService.prewarm();
@@ -1110,6 +1130,7 @@ assert.equal(studioWorksReadCount, 2, "studio startup must prepare every visible
 assert.equal(studioSortCount, 2, "studio startup must prepare the default order for every visible maker");
 assert.equal(studioCoverPrewarmCount, 1, "studio startup must batch first-page cover preparation");
 assert.equal(studioInfoPrewarmCount, 1, "studio startup must batch first-page metadata preparation");
+assert.equal(studioPagePayloadCount, 4, "studio startup must prepare phone and desktop detail pages for visible makers");
 const studioSummaryUrl = new URL("http://127.0.0.1/api/studios?limit=500");
 assert.equal(cachedStudioService.summaries(studioSummaryUrl).count, 2, "prewarmed studio indexes must preserve maker counts");
 cachedStudioService.summaries(studioSummaryUrl);
@@ -1118,6 +1139,14 @@ cachedStudioService.detailPayload("1", new URL("http://127.0.0.1/api/studios/1?s
 assert.equal(studioMakerDetailReadCount, 2, "first studio selection must reuse its prepared maker detail");
 assert.equal(studioWorksReadCount, 2, "first studio selection must reuse its prepared work set");
 assert.equal(studioSortCount, 2, "first studio selection must reuse its prepared default order");
+assert.equal(studioPagePayloadCount, 4, "first studio selection must reuse its complete prepared page");
+const uncachedStudioPageUrl = new URL("http://127.0.0.1/api/studios/1?seriesId=all&sort=releaseDesc&limit=24");
+cachedStudioService.detailPayload("1", uncachedStudioPageUrl);
+cachedStudioService.detailPayload("1", uncachedStudioPageUrl);
+assert.equal(studioPagePayloadCount, 5, "repeated studio detail pages must reuse one complete response payload");
+studioUserStateStamp = "studio-user-v2";
+cachedStudioService.detailPayload("1", uncachedStudioPageUrl);
+assert.equal(studioPagePayloadCount, 6, "studio detail pages must refresh after favorite or progress state changes");
 cachedStudioService.summaries(new URL("http://127.0.0.1/api/studios?limit=500&q=studio"));
 assert.equal(studioSummaryReadCount, 2, "studio keyword searches must preserve their direct SQL semantics");
 studioDataStamp = "studio-v2";

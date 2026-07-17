@@ -2,13 +2,17 @@ import { createLatestRequestGate } from "../../latest-request.js?v=20260717-fanh
 
 const STUDIO_DESKTOP_PAGE_SIZE = 48;
 const STUDIO_MOBILE_PAGE_SIZE = 32;
+const STUDIO_PREFETCH_TTL_MS = 60 * 1000;
+const STUDIO_PREFETCH_LIMIT = 16;
 
 export function createStudioPage(deps) {
   const { api, appendEmpty, els, formatNumber, hidePersonProfile, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
   const studioRequests = createLatestRequestGate();
+  const studioPrefetches = new Map();
 
   function cancelPendingRequests() {
     studioRequests.cancel();
+    studioPrefetches.clear();
   }
 
   function studioPageSize() {
@@ -42,14 +46,9 @@ export function createStudioPage(deps) {
     const append = Boolean(options.append);
     const request = studioRequests.begin();
     if (!append) els.workGrid.innerHTML = `<div class="empty-state">正在加载片商作品</div>`;
-    const params = new URLSearchParams({
-      seriesId,
-      sort: state.sortMode || "releaseDesc",
-      limit: String(studioPageSize()),
-      offset: String(append ? state.works.length : 0)
-    });
+    const path = studioDetailPath(studioId, seriesId, append ? state.works.length : 0);
     try {
-      const data = await api(`/api/studios/${encodeURIComponent(studioId)}?${params}`, { signal: request.signal });
+      const data = await fetchStudioDetail(path, request, !append);
       if (!request.isCurrent() || state.activeView !== "studios") return;
       if (!append) resetSelection();
       state.selectedStudio = data.studio || state.selectedStudio || null;
@@ -72,6 +71,49 @@ export function createStudioPage(deps) {
     } finally {
       request.finish();
     }
+  }
+
+  function studioDetailPath(studioId, seriesId = "all", offset = 0) {
+    const params = new URLSearchParams({
+      seriesId,
+      sort: state.sortMode || "releaseDesc",
+      limit: String(studioPageSize()),
+      offset: String(offset || 0)
+    });
+    return `/api/studios/${encodeURIComponent(studioId)}?${params}`;
+  }
+
+  function prefetchStudioDetail(studioId, seriesId = "all") {
+    if (globalThis.navigator?.connection?.saveData) return null;
+    const path = studioDetailPath(studioId, seriesId, 0);
+    const now = Date.now();
+    const cached = studioPrefetches.get(path);
+    if (cached?.expiresAt > now) return cached.promise;
+    if (cached) studioPrefetches.delete(path);
+    const promise = api(path).then(
+      (data) => ({ data, error: null }),
+      (error) => ({ data: null, error })
+    ).then((result) => {
+      if (result.error) studioPrefetches.delete(path);
+      return result;
+    });
+    studioPrefetches.set(path, { expiresAt: now + STUDIO_PREFETCH_TTL_MS, promise });
+    while (studioPrefetches.size > STUDIO_PREFETCH_LIMIT) {
+      studioPrefetches.delete(studioPrefetches.keys().next().value);
+    }
+    return promise;
+  }
+
+  async function fetchStudioDetail(path, request, allowPrefetch) {
+    const prefetched = allowPrefetch ? studioPrefetches.get(path) : null;
+    if (prefetched?.expiresAt > Date.now()) {
+      studioPrefetches.delete(path);
+      const result = await prefetched.promise;
+      if (result.error) throw result.error;
+      return result.data;
+    }
+    if (prefetched) studioPrefetches.delete(path);
+    return api(path, { signal: request.signal });
   }
 
   function applyStudioWorks(nextWorks, append) {
@@ -134,7 +176,14 @@ export function createStudioPage(deps) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "studio-card";
-    button.addEventListener("click", () => loadStudioDetail(studio.id));
+    const prefetch = () => prefetchStudioDetail(studio.id);
+    button.addEventListener("pointerenter", prefetch, { passive: true });
+    button.addEventListener("pointerdown", prefetch, { passive: true });
+    button.addEventListener("focus", prefetch);
+    button.addEventListener("click", () => {
+      globalThis.scrollTo?.({ top: 0, left: 0, behavior: "auto" });
+      loadStudioDetail(studio.id);
+    });
     const name = document.createElement("strong");
     name.textContent = studio.name || "未命名片商";
     const count = document.createElement("span");
@@ -164,6 +213,10 @@ export function createStudioPage(deps) {
     button.type = "button";
     button.className = `stat-filter-chip${state.selectedStudioSeriesId === seriesId ? " active" : ""}`;
     button.textContent = `${name} ${formatNumber(count)}`;
+    const prefetch = () => prefetchStudioDetail(studio.id, seriesId);
+    button.addEventListener("pointerenter", prefetch, { passive: true });
+    button.addEventListener("pointerdown", prefetch, { passive: true });
+    button.addEventListener("focus", prefetch);
     button.addEventListener("click", () => loadStudioDetail(studio.id, seriesId));
     return button;
   }

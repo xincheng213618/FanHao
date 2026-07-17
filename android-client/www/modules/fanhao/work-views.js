@@ -392,8 +392,7 @@ export function createWorkViews(context) {
     }
 
     try {
-      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
-      writeCachedJson(activeUrl, path, data).catch(() => {});
+      const data = await pageDataService.fetch(activeUrl, path, { signal: isActive.signal });
       if (!isActive()) return;
       renderData(data);
     } catch (error) {
@@ -417,13 +416,7 @@ export function createWorkViews(context) {
     els.viewContent.innerHTML = `<div class="loading-row">正在加载片商作品</div>`;
 
     const limit = getWorksLimit();
-    const params = new URLSearchParams({
-      seriesId: seriesId || "all",
-      sort: workListState.getServerSortMode(),
-      limit: String(limit),
-      offset: "0"
-    });
-    const path = `/api/studios/${encodeURIComponent(studioId)}?${params}`;
+    const path = studioDetailPath(studioId, seriesId, limit);
     const activeUrl = getActiveUrl();
     let renderedCache = false;
     let renderedCacheSignature = "";
@@ -465,8 +458,7 @@ export function createWorkViews(context) {
     }
 
     try {
-      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
-      writeCachedJson(activeUrl, path, data).catch(() => {});
+      const data = await pageDataService.fetch(activeUrl, path, { signal: isActive.signal, reuseWarmed: true });
       if (!isActive()) return;
       if (renderedCache && workDataSignature(data) === renderedCacheSignature) {
         applyHeader(data);
@@ -484,6 +476,21 @@ export function createWorkViews(context) {
     }
   }
 
+  function studioDetailPath(studioId, seriesId = "all", limit = getWorksLimit()) {
+    const params = new URLSearchParams({
+      seriesId: seriesId || "all",
+      sort: workListState.getServerSortMode(),
+      limit: String(limit),
+      offset: "0"
+    });
+    return `/api/studios/${encodeURIComponent(studioId)}?${params}`;
+  }
+
+  function warmStudioDetail(studioId, seriesId = "all") {
+    if (globalThis.navigator?.connection?.saveData) return;
+    pageDataService.warm(getActiveUrl(), [studioDetailPath(studioId, seriesId)]);
+  }
+
   function mergeServerFilters(...values) {
     const filters = [];
     for (const value of values) {
@@ -499,6 +506,9 @@ export function createWorkViews(context) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "studio-card";
+    const warmDetail = () => warmStudioDetail(studio.id);
+    button.addEventListener("pointerdown", warmDetail, { passive: true });
+    button.addEventListener("focus", warmDetail);
     button.addEventListener("click", () => showView("studioDetail", { studioId: studio.id, seriesId: "all" }, { push: true }));
 
     const name = document.createElement("strong");
@@ -531,6 +541,9 @@ export function createWorkViews(context) {
     button.type = "button";
     button.className = String(activeSeriesId || "all") === String(seriesId || "all") ? "active" : "";
     button.textContent = `${name} ${formatNumber(count || 0)}`;
+    const warmDetail = () => warmStudioDetail(studioId, seriesId);
+    button.addEventListener("pointerdown", warmDetail, { passive: true });
+    button.addEventListener("focus", warmDetail);
     button.addEventListener("click", () => {
       showView("studioDetail", { studioId, seriesId: seriesId || "all" }, { skipHistory: true, replaceHistory: true });
     });

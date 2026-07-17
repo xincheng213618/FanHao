@@ -1,5 +1,8 @@
 const DEFAULT_STUDIO_SORT = "releaseDesc";
 const STUDIO_DETAIL_PREWARM_PAGE_SIZE = 48;
+const STUDIO_DETAIL_PREWARM_LIMIT = 12;
+const STUDIO_PAGE_CACHE_LIMIT = 256;
+const STUDIO_SUMMARY_CACHE_LIMIT = 32;
 
 export function createStudioService({
   clampInteger,
@@ -11,12 +14,18 @@ export function createStudioService({
   prewarmWorkInfoDetails = () => {},
   publicRemoteUrl,
   sortWorkList,
-  workFacets
+  userStateStamp = () => "",
+  workFacets,
+  workQueryStamp = () => ""
 }) {
   let studioHierarchyCache = null;
   let studioDetailCacheStamp = null;
+  let studioPageCacheStamp = null;
+  let studioSummaryPayloadCacheStamp = null;
   let studioSummaryRowsCache = null;
   const studioMakerCache = new Map();
+  const studioPageCache = new Map();
+  const studioSummaryPayloadCache = new Map();
   const studioWorksCache = new Map();
 
   function ensureDetailCaches(stamp) {
@@ -152,9 +161,21 @@ export function createStudioService({
     const sync = ensureCatalog();
     const limit = clampInteger(url.searchParams.get("limit"), 120, 1, 1000);
     const q = String(url.searchParams.get("q") || "").trim().toLowerCase();
+    ensureSummaryPayloadCache(sync.stamp);
+    const cacheKey = `${q}:${limit}`;
+    const cached = readLru(studioSummaryPayloadCache, cacheKey);
+    if (cached) return cached;
     const rows = q ? querySummaryRows(q, limit) : cachedSummaryRows(sync.stamp).slice(0, limit);
     const makers = rows.map(publicMakerSummary);
-    return { sync, count: makers.length, makers };
+    const payload = { sync, count: makers.length, makers };
+    writeLru(studioSummaryPayloadCache, cacheKey, payload, STUDIO_SUMMARY_CACHE_LIMIT);
+    return payload;
+  }
+
+  function ensureSummaryPayloadCache(stamp) {
+    if (studioSummaryPayloadCacheStamp === stamp) return;
+    studioSummaryPayloadCacheStamp = stamp;
+    studioSummaryPayloadCache.clear();
   }
 
   function cachedSummaryRows(stamp) {
@@ -194,7 +215,9 @@ export function createStudioService({
 
   function prewarm() {
     const sync = ensureCatalog();
-    prewarmDetails(cachedSummaryRows(sync.stamp));
+    const rows = cachedSummaryRows(sync.stamp);
+    summaries(new URL("http://fanhao.local/api/studios?limit=500"));
+    prewarmDetails(rows);
   }
 
   function prewarmDetails(rows) {
@@ -217,10 +240,18 @@ export function createStudioService({
     }
     prewarmCoreWorkCovers(pageWorks);
     prewarmWorkInfoDetails(pageWorks);
+    for (const row of rows.slice(0, STUDIO_DETAIL_PREWARM_LIMIT)) {
+      const makerId = String(row.maker_id || "");
+      if (!makerId) continue;
+      for (const limit of [32, STUDIO_DETAIL_PREWARM_PAGE_SIZE]) {
+        detailPayload(makerId, new URL(`http://fanhao.local/api/studios/${makerId}?seriesId=all&sort=${DEFAULT_STUDIO_SORT}&limit=${limit}&offset=0`));
+      }
+    }
   }
 
   function detailPayload(makerId, url) {
     const sync = ensureCatalog();
+    ensurePageCache(sync.stamp);
     const db = getCoreDb();
     const requestedSeriesId = String(url.searchParams.get("seriesId") || "all").trim() || "all";
     const selectedSeriesId = requestedSeriesId === "all" || /^\d+$/.test(requestedSeriesId) ? requestedSeriesId : "all";
@@ -228,17 +259,47 @@ export function createStudioService({
     if (!maker) return null;
     const workSet = cachedStudioWorks(makerId, selectedSeriesId, db);
     const sort = url.searchParams.get("sort") || DEFAULT_STUDIO_SORT;
+    const pageCacheKey = detailPageCacheKey(makerId, selectedSeriesId, sort, url);
+    const cachedPage = readLru(studioPageCache, pageCacheKey);
+    if (cachedPage) return cachedPage;
     let sorted = workSet.sortedByMode.get(sort);
     if (!sorted) {
       sorted = sortWorkList(workSet.works, sort);
       workSet.sortedByMode.set(sort, sorted);
     }
-    return {
+    const payload = {
       sync,
       studio: maker.studio,
       selectedSeriesId,
-      ...pagedWorksPayload(sorted, url, { facets: workSet.facets })
+      ...pagedWorksPayload(sorted, url, { facets: cachedStudioFacets(workSet) })
     };
+    writeLru(studioPageCache, pageCacheKey, payload, STUDIO_PAGE_CACHE_LIMIT);
+    return payload;
+  }
+
+  function ensurePageCache(stamp) {
+    const nextStamp = `${stamp}:${workQueryStamp()}:${userStateStamp()}`;
+    if (studioPageCacheStamp === nextStamp) return;
+    studioPageCacheStamp = nextStamp;
+    studioPageCache.clear();
+  }
+
+  function detailPageCacheKey(makerId, selectedSeriesId, sort, url) {
+    return [
+      String(makerId || ""),
+      selectedSeriesId,
+      sort,
+      url.searchParams.get("limit") || "",
+      url.searchParams.get("offset") || "0"
+    ].join(":");
+  }
+
+  function cachedStudioFacets(workSet) {
+    const stamp = userStateStamp();
+    if (workSet.facetsCache?.stamp === stamp) return workSet.facetsCache.facets;
+    const facets = workFacets(workSet.works);
+    workSet.facetsCache = { stamp, facets };
+    return facets;
   }
 
   function cachedMakerDetail(makerId, db) {
@@ -288,16 +349,33 @@ export function createStudioService({
       : db.prepare("SELECT DISTINCT CAST(wm.work_id AS TEXT) AS work_id FROM work_makers wm JOIN local_works lw ON lw.work_id = wm.work_id WHERE wm.maker_id = ?").all(Number(makerId));
     const library = getLibrary();
     const works = linkRows.map((item) => library.worksById.get(item.work_id)).filter(Boolean);
-    const detail = { works, facets: workFacets(works), sortedByMode: new Map() };
+    const detail = { works, facetsCache: null, sortedByMode: new Map() };
     studioWorksCache.set(cacheKey, detail);
     return detail;
+  }
+
+  function readLru(cache, key) {
+    if (!cache.has(key)) return null;
+    const value = cache.get(key);
+    cache.delete(key);
+    cache.set(key, value);
+    return value;
+  }
+
+  function writeLru(cache, key, value, limit) {
+    cache.set(key, value);
+    while (cache.size > limit) cache.delete(cache.keys().next().value);
   }
 
   function invalidate() {
     studioHierarchyCache = null;
     studioDetailCacheStamp = null;
+    studioPageCacheStamp = null;
+    studioSummaryPayloadCacheStamp = null;
     studioSummaryRowsCache = null;
     studioMakerCache.clear();
+    studioPageCache.clear();
+    studioSummaryPayloadCache.clear();
     studioWorksCache.clear();
   }
 

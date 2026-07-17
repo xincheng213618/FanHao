@@ -503,7 +503,9 @@ const studioService = createStudioService({
   pagedWorksPayload, prewarmCoreWorkCovers, prewarmWorkInfoDetails,
   publicRemoteUrl,
   sortWorkList,
-  workFacets
+  userStateStamp: () => userStateService.revision(),
+  workFacets,
+  workQueryStamp
 });
 const personMergeService = createPersonMergeService({
   actorMovieRows,
