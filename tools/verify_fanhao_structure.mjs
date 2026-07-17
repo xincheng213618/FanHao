@@ -11,6 +11,7 @@ import { createLazyPersonProfile } from "../public/modules/fanhao/lazy-person-pr
 import { createLazyAdminModal } from "../public/modules/system/lazy-admin-modal.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
 import { createPersonDetailService } from "../src/modules/fanhao/server/people/person-detail-service.js";
+import { createPersonMergeService } from "../src/modules/fanhao/server/people/person-merge-service.js";
 import { createPlaybackProgressService } from "../src/modules/fanhao/server/playback/playback-progress-service.js";
 import { createRankingService } from "../src/modules/fanhao/server/catalog/ranking-service.js";
 import { createStudioService } from "../src/modules/fanhao/server/catalog/studio-service.js";
@@ -68,7 +69,10 @@ const playbackPrefetchSource = read("public/modules/fanhao/playback-prefetch.js"
 const workActionsSource = read("public/modules/fanhao/features/works/work-actions.js");
 const workDetailServiceSource = read("src/modules/fanhao/server/works/work-detail-service.js");
 const workRoutesApiSource = read("src/modules/fanhao/server/works/routes-api.js");
+const workPresenterServiceSource = read("src/modules/fanhao/server/works/presenter-service.js");
 const playbackProgressServiceSource = read("src/modules/fanhao/server/playback/playback-progress-service.js");
+const personDetailServiceSource = read("src/modules/fanhao/server/people/person-detail-service.js");
+const personMergeServiceSource = read("src/modules/fanhao/server/people/person-merge-service.js");
 const workDetailPageSource = read("public/modules/fanhao/work-detail-page.js");
 const videoProbeSource = read("src/platform/server/video-probe-service.js");
 assert(indexHtml.includes('import("/fanhao-app.js'), "FanHao must have a dedicated Web entry");
@@ -156,6 +160,12 @@ assert(collectionPageSource.includes("return trimPrefetchedPage(result.data, pat
 assert(webApp.includes('button.addEventListener("pointerenter", prefetchCollection'), "desktop collection tabs must prefetch before click");
 assert(webApp.includes('button.addEventListener("focus", prefetchCollection)'), "keyboard and touch collection navigation must share the prepared request path");
 assert(!playbackProgressServiceSource.includes(".map((video) => getVideoProgress"), "work progress must avoid allocating and sorting every video on list rendering");
+assert(personMergeServiceSource.includes("personRecordCache") && personMergeServiceSource.includes("personRecordCacheStamp"), "repeated work cards for one person must reuse the merged person record");
+assert(workPresenterServiceSource.includes("PERSON_FALLBACK_AVATAR_BATCH_SIZE = 48"), "person avatar fallback scans must prepare bounded work batches");
+assert(workPresenterServiceSource.includes("prewarmCoreWorkCovers(batch)") && workPresenterServiceSource.includes("prewarmWorkInfoDetails(batch)"), "person avatar fallbacks must batch metadata before scanning works");
+assert(workPresenterServiceSource.includes("personFallbackAvatarCache") && workPresenterServiceSource.includes("getPersonFallbackAvatarStamp"), "repeated person presentation must reuse versioned fallback avatars");
+assert(!workPresenterServiceSource.includes("workCoverRow(work.id)"), "person and work cards must not repeat the retired per-work cover query after metadata prewarm");
+assert(workPresenterServiceSource.includes("publicWorkInfoSummary(workInfoDetailRow(work.id), work.infoSummary)"), "person avatar fallbacks must reuse batch-prepared detail rows");
 for (const view of ["favorites", "history", "vr"]) {
   assert(collectionPageSource.includes(`state.activeView !== "${view}"`), `stale ${view} responses must not overwrite newer navigation`);
 }
@@ -386,7 +396,6 @@ assert(webApp.includes("hasStudioServerMore"), "Web work rendering must expose s
 const studioService = read("src/modules/fanhao/server/catalog/studio-service.js");
 const catalogRuntimeSource = read("src/modules/fanhao/server/catalog/runtime.js");
 const rankingServiceSource = read("src/modules/fanhao/server/catalog/ranking-service.js");
-const personDetailServiceSource = read("src/modules/fanhao/server/people/person-detail-service.js");
 assert(studioService.includes("const makers = rows.map(publicMakerSummary)"), "studio index responses must use lightweight maker summaries");
 assert(!studioService.includes("rows.map((row) => publicMaker(row, seriesRowsForMaker"), "studio indexes must not run one series query per maker");
 assert(studioService.includes("const studioWorksCache = new Map()"), "studio detail paging must reuse versioned work sets");
@@ -769,6 +778,46 @@ assert.equal(repeatedPersonDetail.filter, "rated", "prepared person details must
 personDetailDataStamp = "person-v2";
 cachedPersonDetailService.detailPayload("person-1", personDetailUrl);
 assert.equal(personDetailSourceBuildCount, 2, "person data changes must invalidate prepared detail sources");
+
+let personMergeStamp = "merge-v1";
+let mergedPersonWorkLookupCount = 0;
+class CountingMergedWorkMap extends Map {
+  get(key) {
+    mergedPersonWorkLookupCount += 1;
+    return super.get(key);
+  }
+}
+const mergedPersonA = { id: "merge-a", name: "Merge A", relativePath: "F:/Merge A", sourcePaths: ["F:/Merge A"], sourceCount: 1, workCount: 2, works: ["merge-work-a1", "merge-work-a2"] };
+const mergedPersonB = { id: "merge-b", name: "Merge B", relativePath: "G:/Merge B", sourcePaths: ["G:/Merge B"], sourceCount: 1, workCount: 1, works: ["merge-work-b1"] };
+const personMergeLibrary = {
+  people: [mergedPersonA, mergedPersonB],
+  peopleById: new Map([[mergedPersonA.id, mergedPersonA], [mergedPersonB.id, mergedPersonB]]),
+  worksById: new CountingMergedWorkMap([
+    ["merge-work-a1", { id: "merge-work-a1", videoCount: 1, playableCount: 1, imageCount: 0, infoCount: 1 }],
+    ["merge-work-a2", { id: "merge-work-a2", videoCount: 1, playableCount: 1, imageCount: 1, infoCount: 0 }],
+    ["merge-work-b1", { id: "merge-work-b1", videoCount: 1, playableCount: 0, imageCount: 0, infoCount: 1 }]
+  ])
+};
+const cachedPersonMergeService = createPersonMergeService({
+  actorMovieRows: () => [],
+  actorProfileAliases: () => [],
+  actorProfileRow: (personId) => ({ javdb_actor_id: personId ? "actor-one" : "" }),
+  getLibrary: () => personMergeLibrary,
+  getStamp: () => personMergeStamp,
+  normalizePersonSearchValue: (value) => String(value || "").trim().toLowerCase(),
+  normalizeSourcePath: (value) => String(value || "").replaceAll("\\", "/").toLowerCase(),
+  personHasVrMergeContent: () => false,
+  preferredPersonDisplayName: (_row, fallback) => fallback,
+  uniquePersonNames: (values) => [...new Set((values || []).filter(Boolean))]
+});
+const firstMergedPersonRecord = cachedPersonMergeService.record(mergedPersonA);
+const firstMergedPersonLookupCount = mergedPersonWorkLookupCount;
+assert.equal(firstMergedPersonRecord.works.length, 3, "merged person records must still combine every member work");
+assert.equal(cachedPersonMergeService.record(mergedPersonB), firstMergedPersonRecord, "aliases must reuse the canonical merged person record");
+assert.equal(mergedPersonWorkLookupCount, firstMergedPersonLookupCount, "repeated merged person presentation must avoid rescanning every member work");
+personMergeStamp = "merge-v2";
+cachedPersonMergeService.record(mergedPersonA);
+assert(mergedPersonWorkLookupCount > firstMergedPersonLookupCount, "person merge data changes must rebuild cached records");
 
 let studioDataStamp = "studio-v1";
 let studioCatalogReadCount = 0;

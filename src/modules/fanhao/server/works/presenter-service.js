@@ -1,3 +1,5 @@
+const PERSON_FALLBACK_AVATAR_BATCH_SIZE = 48;
+
 export function createWorkPresenterService({
   actorProfileRow,
   dbBoolOrNull,
@@ -6,32 +8,52 @@ export function createWorkPresenterService({
   favoriteStateService,
   firstPresentValue,
   getLibrary,
+  getPersonFallbackAvatarStamp = () => "",
   isGPerson,
   localWorkMarkers,
   manualCoverStateService,
   playbackProgressService,
+  prewarmCoreWorkCovers = () => {},
+  prewarmWorkInfoDetails = () => {},
   preferredPersonDisplayName,
   proxiedRemoteImageUrl,
   publicActorProfile,
   publicCoreWorkCover,
   publicPersonAvatar,
-  publicWorkCover,
   publicWorkInfoMetadata,
   publicWorkInfoSummary,
   uniqueTextArray,
-  workCoverRow,
-  workInfoDetailRow,
-  workInfoRow
+  workInfoDetailRow
 }) {
+  const personFallbackAvatarCache = new Map();
+  let personFallbackAvatarCacheStamp = "";
+
   function publicPersonFallbackAvatar(person) {
     const library = getLibrary();
-    for (const workId of person?.works || []) {
-      const work = library.worksById.get(workId);
-      if (!work || work.missingLocal) continue;
-
-      const cover = publicWorkCoverAvatar(work, person.id);
-      if (cover) return { ...cover, fallbackWorkId: String(work.id || "") };
+    const stamp = getPersonFallbackAvatarStamp();
+    if (personFallbackAvatarCacheStamp !== stamp) {
+      personFallbackAvatarCacheStamp = stamp;
+      personFallbackAvatarCache.clear();
     }
+    const cacheKey = String(person?.id || "");
+    if (cacheKey && personFallbackAvatarCache.has(cacheKey)) return personFallbackAvatarCache.get(cacheKey);
+
+    const works = (person?.works || [])
+      .map((workId) => library.worksById.get(workId))
+      .filter((work) => work && !work.missingLocal);
+    for (let offset = 0; offset < works.length; offset += PERSON_FALLBACK_AVATAR_BATCH_SIZE) {
+      const batch = works.slice(offset, offset + PERSON_FALLBACK_AVATAR_BATCH_SIZE);
+      prewarmCoreWorkCovers(batch);
+      prewarmWorkInfoDetails(batch);
+      for (const work of batch) {
+        const cover = publicWorkCoverAvatar(work, person.id);
+        if (!cover) continue;
+        const fallback = { ...cover, fallbackWorkId: String(work.id || "") };
+        if (cacheKey) personFallbackAvatarCache.set(cacheKey, fallback);
+        return fallback;
+      }
+    }
+    if (cacheKey) personFallbackAvatarCache.set(cacheKey, null);
     return null;
   }
 
@@ -73,19 +95,7 @@ export function createWorkPresenterService({
       };
     }
 
-    const cachedCover = publicWorkCover(workCoverRow(work.id));
-    if (cachedCover?.coverUrl) {
-      return {
-        personId: String(personId || ""),
-        avatarUrl: cachedCover.coverUrl,
-        sourceAvatarUrl: cachedCover.sourceCoverUrl || "",
-        source: cachedCover.source || source,
-        updatedAt: cachedCover.updatedAt || "",
-        coverWorkId: String(work.id || "")
-      };
-    }
-
-    const infoSummary = publicWorkInfoSummary(workInfoRow(work.id), work.infoSummary);
+    const infoSummary = publicWorkInfoSummary(workInfoDetailRow(work.id), work.infoSummary);
     const remoteUrl = proxiedRemoteImageUrl(work.remoteCoverUrl) || work.remoteCoverUrl || infoSummary?.imageUrl || "";
     if (!remoteUrl) return null;
     return {
@@ -210,7 +220,7 @@ export function createWorkPresenterService({
     const profileRow = person && !options.lightweightInfo ? actorProfileRow(person.id) : null;
     const coreCover = options.lightweightInfo ? null : publicCoreWorkCover(work.id);
     const manualCover = manualCoverStateService.manualCoverForWork(work);
-    const cachedCover = manualCover ? null : coreCover || (work.coverId ? null : publicWorkCover(workCoverRow(work.id)));
+    const cachedCover = manualCover ? null : coreCover;
     const infoRow = options.lightweightInfo ? null : workInfoDetailRow(work.id);
     const infoSummary = publicWorkInfoSummary(infoRow, work.infoSummary);
     const videos = work.videos || [];

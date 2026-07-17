@@ -622,22 +622,22 @@ const workPresenterService = createWorkPresenterService({
   favoriteStateService,
   firstPresentValue,
   getLibrary: () => library,
+  getPersonFallbackAvatarStamp: personFallbackAvatarStamp,
   isGPerson,
   localWorkMarkers,
   manualCoverStateService,
   playbackProgressService,
+  prewarmCoreWorkCovers,
+  prewarmWorkInfoDetails,
   preferredPersonDisplayName,
   proxiedRemoteImageUrl,
   publicActorProfile,
   publicCoreWorkCover,
   publicPersonAvatar,
-  publicWorkCover,
   publicWorkInfoMetadata,
   publicWorkInfoSummary,
   uniqueTextArray,
-  workCoverRow,
-  workInfoDetailRow,
-  workInfoRow
+  workInfoDetailRow
 });
 const adminScriptService = createAdminScriptService({
   definitions: ADMIN_SCRIPT_DEFINITIONS,
@@ -1415,6 +1415,10 @@ function manualCoversStamp() {
 
 function libraryPeopleStamp() {
   return `${library.scannedAt || ""}:${libraryPeopleCacheVersion}:${manualCoversStamp()}`;
+}
+
+function personFallbackAvatarStamp() {
+  return `${library.scannedAt || ""}:${workCoverStamp()}:${workInfoStamp()}:${manualCoversStamp()}`;
 }
 
 function searchSourceStamp() {

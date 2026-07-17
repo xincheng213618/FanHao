@@ -81,7 +81,9 @@ export function createPersonDetailService({
     if (timings.payload >= 500) {
       console.warn("[fanhao-person-detail-slow]", JSON.stringify({ personId: source.personId, count: source.works.length, ...timings }));
     }
-    return { person: source.person, ...worksPayload };
+    const payload = { person: source.person, ...worksPayload };
+    if (url.searchParams.get("timing") === "1") payload.timings = timings;
+    return payload;
   }
 
   function cachedDetailSource(personId, scope, timings, mark) {

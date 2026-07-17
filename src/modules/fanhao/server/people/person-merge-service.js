@@ -11,6 +11,8 @@ export function createPersonMergeService({
   uniquePersonNames
 }) {
   let personMergeCache = null;
+  const personRecordCache = new Map();
+  let personRecordCacheStamp = "";
 
   function preferCanonicalPerson(a, b) {
     const aF = (a.sourcePaths || []).some((item) => /^f:\//i.test(String(item || "").replaceAll("\\", "/")));
@@ -143,11 +145,20 @@ export function createPersonMergeService({
 
   function record(person) {
     if (!person) return null;
+    const stamp = getStamp();
+    if (personRecordCacheStamp !== stamp) {
+      personRecordCacheStamp = stamp;
+      personRecordCache.clear();
+    }
     const library = getLibrary();
     const canonicalPersonId = canonicalId(person.id);
+    if (personRecordCache.has(canonicalPersonId)) return personRecordCache.get(canonicalPersonId);
     const canonical = library.peopleById.get(canonicalPersonId) || person;
     const mergedMembers = members(canonicalPersonId);
-    if (mergedMembers.length <= 1) return canonical;
+    if (mergedMembers.length <= 1) {
+      personRecordCache.set(canonicalPersonId, canonical);
+      return canonical;
+    }
 
     const sourcePaths = [];
     const sourceSeen = new Set();
@@ -179,7 +190,7 @@ export function createPersonMergeService({
       .sort()
       .at(-1) || canonical.modifiedAt;
 
-    return {
+    const mergedRecord = {
       ...canonical,
       relativePath: sourcePaths[0] || canonical.relativePath,
       sourcePaths,
@@ -192,6 +203,8 @@ export function createPersonMergeService({
       infoCount: workRows.reduce((sum, work) => sum + Number(work.infoCount || 0), 0),
       modifiedAt
     };
+    personRecordCache.set(canonicalPersonId, mergedRecord);
+    return mergedRecord;
   }
 
   function displayName(person) {
@@ -218,6 +231,8 @@ export function createPersonMergeService({
 
   function invalidate() {
     personMergeCache = null;
+    personRecordCacheStamp = "";
+    personRecordCache.clear();
   }
 
   return {
