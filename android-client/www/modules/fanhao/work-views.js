@@ -720,7 +720,6 @@ export function createWorkViews(context) {
       retryText: "加载停住了，点一下重试"
     });
   }
-
   function renderMessage(message, tone = "quiet", replace = true) {
     if (replace) els.viewContent.innerHTML = "";
     const box = document.createElement("div");
@@ -738,6 +737,7 @@ export function createWorkViews(context) {
     renderWorkCollection,
     renderSearchResults,
     warmSearch: searchDataService.warm,
+    pageDataService,
     workDetailDataService,
     refreshRankingCache,
     renderWorks,

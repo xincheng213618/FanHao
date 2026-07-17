@@ -1,4 +1,4 @@
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260717-fanhao-mobile-card-lifecycle-01";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260717-fanhao-person-page-race-01";
 
 const ROOT_VIEWS = ["works", "rankings", "studios", "vr", "people", "favorites"];
 const CHROME_TABS = [
@@ -53,6 +53,7 @@ export function createAndroidModule({ host }) {
     mediaViewer: host.mediaViewer,
     goBack: host.navigation.goBack,
     onUserStateChange: host.favorites.onUserStateChange,
+    pageDataService: workViews.pageDataService,
     workDetailDataService: workViews.workDetailDataService
   });
 

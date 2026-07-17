@@ -1,6 +1,5 @@
-import { fetchJson } from "../../js/api.js?v=20260706-mobile-web-sync-01";
 import { createAndroidVideoSection } from "../../js/android-player.js";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260705-mobile-actions-01";
+import { cacheAgeText } from "../../js/cache.js?v=20260705-mobile-actions-01";
 import { createDetailSectionTitle } from "../../js/detail-ui.js";
 import { extractWorkCode, formatDate, formatNumber } from "../../js/format.js";
 import { createInfoPreviewSection } from "../../js/info-preview.js";
@@ -28,6 +27,7 @@ export function createDetailViews(context) {
     mediaViewer,
     goBack = () => window.history.back(),
     onUserStateChange,
+    pageDataService,
     workDetailDataService
   } = context;
   const videoSection = createAndroidVideoSection({ getActiveUrl, openInLibrary });
@@ -60,7 +60,6 @@ export function createDetailViews(context) {
     let renderedCache = false;
     const indexedPerson = findPersonInLibrary(personId);
     if (indexedPerson) renderPersonPreview(indexedPerson);
-
     const renderPersonData = (data, cacheEntry = null) => {
       const person = mergeIndexedPerson(indexedPerson, data.person, data.works);
       const works = data.works || [];
@@ -81,19 +80,18 @@ export function createDetailViews(context) {
         }
       });
     };
-
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    if (!isActive()) return;
-    if (cached?.payload?.person) {
-      renderedCache = true;
-      renderPersonData(cached.payload, cached);
-    }
-
     try {
-      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
-      writeCachedJson(activeUrl, path, data).catch(() => {});
-      if (!isActive()) return;
-      renderPersonData(data);
+      const result = await pageDataService.load(activeUrl, path, {
+        signal: isActive.signal,
+        isActive,
+        onCached(data, cacheEntry) {
+          if (!data?.person) return;
+          renderedCache = true;
+          renderPersonData(data, cacheEntry);
+        }
+      });
+      if (!result || !isActive()) return;
+      if (!result.unchanged) renderPersonData(result.data);
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
@@ -780,24 +778,26 @@ export function createDetailViews(context) {
         mount.append(empty);
         return;
       }
-
       for (const item of works.slice(0, 12)) {
         mount.append(createRelatedWorkCard(item));
       }
     };
-
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    if (!isActive()) return;
-    if (cached?.payload?.works) render(cached.payload, cached);
-
+    let renderedCache = false;
     try {
-      const data = await fetchJson(activeUrl, path, { timeoutMs: 12000, signal: isActive.signal });
-      writeCachedJson(activeUrl, path, data).catch(() => {});
-      if (!isActive()) return;
-      render(data);
+      const result = await pageDataService.load(activeUrl, path, {
+        signal: isActive.signal,
+        isActive,
+        onCached(data, cacheEntry) {
+          if (!data?.works) return;
+          renderedCache = true;
+          render(data, cacheEntry);
+        }
+      });
+      if (!result || !isActive()) return;
+      if (!result.unchanged) render(result.data);
     } catch (error) {
       if (!isActive()) return;
-      if (cached?.payload?.works) return;
+      if (renderedCache) return;
       mount.innerHTML = "";
       const box = document.createElement("div");
       box.className = "message-box error";

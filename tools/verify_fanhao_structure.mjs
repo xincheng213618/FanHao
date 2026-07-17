@@ -293,6 +293,7 @@ const androidWorkViews = read("android-client/www/modules/fanhao/work-views.js")
 const androidWorkPageDataService = read("android-client/www/modules/fanhao/features/works/page-data-service.js");
 const androidWorkSearchDataService = read("android-client/www/modules/fanhao/features/works/search-data-service.js");
 const androidWorkDetailDataService = read("android-client/www/modules/fanhao/features/works/detail-data-service.js");
+const androidDetailViews = read("android-client/www/modules/fanhao/detail-views.js");
 const androidApp = read("android-client/www/app.js");
 const androidIndexHtml = read("android-client/www/index.html");
 const androidFanhaoModule = read("android-client/www/modules/fanhao/android-module.js");
@@ -342,6 +343,8 @@ assert(!androidWorkCards.includes('card.addEventListener("click"') && !androidWo
 assert(androidWorkDetailDataService.includes('container.addEventListener("pointerover"') && androidWorkDetailDataService.includes('container.addEventListener("focusin"') && androidWorkDetailDataService.includes('container.addEventListener("pointerdown"'), "Android pointer, keyboard, and touch work intent must use delegated preparation");
 assert(androidWorkCards.includes('person.dataset.workIntentIgnore = "1"') && androidWorkDetailDataService.includes('target.closest("[data-work-intent-ignore]")'), "Android person navigation must not prefetch the surrounding work detail");
 assert(read("android-client/www/modules/fanhao/detail-views.js").includes("workDetailDataService.load(workId") && androidWorkDetailDataService.includes("pageDataService.load(getActiveUrl(), path(workId)"), "Android work detail navigation must reuse the shared page race");
+assert((androidDetailViews.match(/pageDataService\.load\(activeUrl, path/g) || []).length >= 2 && androidFanhaoModule.includes("pageDataService: workViews.pageDataService"), "Android person and related-work navigation must share the cache/network race");
+assert(!androidDetailViews.includes("await readCachedJson(activeUrl, path)") && !androidDetailViews.includes("fetchJson(activeUrl, path"), "Android detail views must not wait for IndexedDB before starting their live request");
 assert(androidWorkViews.includes('cards.js?v=20260717-fanhao-mobile-card-lifecycle-01'), "Android card-lifecycle changes must refresh the card module URL");
 assert((androidWorkViews.match(/pageDataService\.load\(activeUrl, path/g) || []).length >= 7 && androidWorkPageDataService.includes("Promise.race([freshRequest, cacheRequest])"), "Android FanHao pages must race IndexedDB with the live response");
 let resolveWarmedWorkPage;
@@ -501,17 +504,16 @@ deferredWorkCoverLoader.schedule(cancelledCoverTarget, "/media/image/cover-2");
 deferredWorkCoverLoader.reset();
 assert.equal(deferredWorkCoverLoader.pendingCount(), 0, "navigation must drop stale offscreen cover work");
 assert.equal(coverObserverDisconnected, 1, "navigation must disconnect the previous cover observer");
-const androidDetailViews = read("android-client/www/modules/fanhao/detail-views.js");
 const androidFanhaoIndex = read("android-client/www/modules/fanhao/index.js");
 assert(androidDetailViews.includes("getWorksLimit()"), "Android person details must use the bounded shared work limit");
 assert(androidDetailViews.includes("hasServerMore:"), "Android person details must preserve server-side continuation");
 assert(!androidDetailViews.includes("limit=2000"), "Android person details must not fetch every work before first render");
 assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && androidDetailViews.includes("正在加载作品"), "Android person navigation must paint the local index before the network request completes");
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
-assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-work-detail-response-01'), "Android work-detail changes must use a fresh detail-view URL");
+assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-person-page-race-01'), "Android person-page race changes must use a fresh detail-view URL");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-mobile-card-lifecycle-01'), "Android page-race service and delegated intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-mobile-card-lifecycle-01'), "Android card-lifecycle changes must use a fresh work-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-mobile-card-lifecycle-01') && androidIndexHtml.includes('app.js?v=20260717-fanhao-mobile-card-lifecycle-01'), "Android card-lifecycle changes must refresh the module and app entry chain");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-person-page-race-01'), "Android person-page race changes must use a fresh work-view URL");
+assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-person-page-race-01') && androidIndexHtml.includes('app.js?v=20260717-fanhao-person-page-race-01'), "Android person-page race changes must refresh the module and app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
