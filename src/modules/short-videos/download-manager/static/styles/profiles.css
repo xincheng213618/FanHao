@@ -17,7 +17,7 @@
 
 .profile-manager-controls {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 150px 120px 170px 190px;
+  grid-template-columns: minmax(220px, 1fr) 140px 150px 120px 170px 190px;
   gap: 12px;
   align-items: end;
 }
@@ -82,6 +82,12 @@
   line-height: 1;
   padding: 3px 6px;
   vertical-align: 1px;
+}
+
+.profile-manager-badge.is-deleted-works {
+  border-color: #d97706;
+  background: #fff7ed;
+  color: #9a3412;
 }
 
 .profile-manager-metric,

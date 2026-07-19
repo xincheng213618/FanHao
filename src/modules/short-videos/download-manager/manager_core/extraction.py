@@ -14,7 +14,13 @@ from typing import Any
 from .common import clean_profile_nickname, first_text, int_or_none, normalize_int, normalize_profile_tab, now_iso, parse_profile_url, tail_text
 from .config import BASE_DIR, DATA_DIR, DEFAULT_COOKIE_FILE, LIBRARY_SEC_UID, LOG_DIR, NODE_EXECUTABLE, TEST_PROFILE_URL
 from .database import add_event, create_job, db, set_setting, setting, update_job
-from .profiles_links import upsert_following_profiles, upsert_links, upsert_profile, upsert_profile_metadata
+from .profiles_links import (
+    update_profile_deleted_works_flag,
+    upsert_following_profiles,
+    upsert_links,
+    upsert_profile,
+    upsert_profile_metadata,
+)
 
 
 extract_lock = threading.Lock()
@@ -41,6 +47,7 @@ def run_extract_job(
     headed: bool,
     incremental_stop_existing: int,
     clear_global: bool = True,
+    full_scan: bool = False,
 ) -> None:
     global extract_thread, extract_job_id, extract_process
     profile_id = upsert_profile(url)
@@ -87,6 +94,7 @@ def run_extract_job(
     recent_existing_flags: list[bool] = []
     incremental_stop_reason = ""
     existing_aweme_ids: set[str] = set()
+    full_scan_seen_aweme_ids: set[str] = set()
     if incremental_stop_existing > 0:
         try:
             with db() as conn:
@@ -101,6 +109,20 @@ def run_extract_job(
             existing_aweme_ids = set()
     if not existing_aweme_ids:
         incremental_stop_existing = 0
+
+    def finish_full_scan_flag() -> str:
+        if not full_scan or profile_tab_for_job != "post":
+            return ""
+        result = update_profile_deleted_works_flag(profile_id, full_scan_seen_aweme_ids)
+        if not result or result.get("skipped") or not result["has_deleted_works"]:
+            return ""
+        difference = int(result["marked"] or 0)
+        add_event(
+            "warn",
+            f"全部扫描发现：本次去重后 {len(full_scan_seen_aweme_ids)} 条，数据库保留 {result['link_total']} 条，"
+            f"主页不可见 {difference} 条作品（主页计数 {result['aweme_count']}）",
+        )
+        return f"；主页不可见 {difference} 条作品，已标记"
 
     def consume_stream() -> None:
         nonlocal offset, partial, total_seen, inserted_total, updated_total, consecutive_existing, incremental_stop_triggered, incremental_stop_reason, profile_aweme_count, target_count_stop_triggered, like_sequence
@@ -141,6 +163,8 @@ def run_extract_job(
                     aweme_id = str((work or {}).get("aweme_id") or "").strip()
                     if not aweme_id:
                         continue
+                    if full_scan:
+                        full_scan_seen_aweme_ids.add(aweme_id)
                     was_existing = aweme_id in existing_aweme_ids
                     if incremental_stop_existing > 0 and was_existing:
                         consecutive_existing += 1
@@ -206,7 +230,13 @@ def run_extract_job(
             elif row_type == "profile":
                 profile_payload = row.get("profile") or {}
                 upsert_profile_metadata(profile_id, profile_payload)
-                profile_aweme_count = int_or_none(profile_payload.get("aweme_count") or profile_payload.get("awemeCount")) or profile_aweme_count
+                fresh_aweme_count = int_or_none(
+                    profile_payload.get("aweme_count")
+                    if profile_payload.get("aweme_count") is not None
+                    else profile_payload.get("awemeCount")
+                )
+                if fresh_aweme_count is not None:
+                    profile_aweme_count = fresh_aweme_count
             elif row_type == "progress":
                 total_seen = max(total_seen, int(row.get("count") or 0))
                 update_job(
@@ -259,6 +289,7 @@ def run_extract_job(
             consume_stream()
         if extract_stop_event.is_set():
             if target_count_stop_triggered:
+                deletion_suffix = finish_full_scan_flag()
                 update_job(
                     job_id,
                     status="complete",
@@ -269,7 +300,7 @@ def run_extract_job(
                     finished_at=now_iso(),
                     message=(
                         f"采集完成：已达到主页作品数 {profile_aweme_count}，"
-                        f"已入库 {total_seen} 条，新 {inserted_total}，已存在 {updated_total}"
+                        f"已入库 {total_seen} 条，新 {inserted_total}，已存在 {updated_total}{deletion_suffix}"
                     ),
                 )
                 add_event(
@@ -317,10 +348,17 @@ def run_extract_job(
             payload = json.loads(out_path.read_text(encoding="utf-8"))
             upsert_profile_metadata(profile_id, payload.get("profile") or {})
             works = payload.get("works") or []
+            if full_scan:
+                full_scan_seen_aweme_ids.update(
+                    str((work or {}).get("aweme_id") or "").strip()
+                    for work in works
+                    if str((work or {}).get("aweme_id") or "").strip()
+                )
             inserted, updated = upsert_links(profile_id, works)
             inserted_total += inserted
             updated_total += updated
             total_seen = len(works)
+        deletion_suffix = finish_full_scan_flag()
         update_job(
             job_id,
             status="complete",
@@ -329,7 +367,7 @@ def run_extract_job(
             success=inserted_total,
             failed=0,
             finished_at=now_iso(),
-            message=f"采集完成：{total_seen} 条，新 {inserted_total}，已存在 {updated_total}",
+            message=f"采集完成：{total_seen} 条，新 {inserted_total}，已存在 {updated_total}{deletion_suffix}",
         )
         add_event("info", f"采集完成：{total_seen} 条，新 {inserted_total}，已存在 {updated_total}")
     except Exception as exc:
@@ -362,6 +400,10 @@ def start_extract(payload: dict[str, Any]) -> dict[str, Any]:
         0,
         1000,
     )
+    full_scan = payload.get("full_scan") is True
+    if full_scan:
+        max_items = 0
+        incremental_stop_existing = 0
     headed = bool(payload.get("headed", False))
 
     with extract_lock:
@@ -373,6 +415,7 @@ def start_extract(payload: dict[str, Any]) -> dict[str, Any]:
         extract_thread = threading.Thread(
             target=run_extract_job,
             args=(job_id, url, max_items, scrolls, idle_rounds, headed, incremental_stop_existing),
+            kwargs={"full_scan": full_scan},
             daemon=True,
         )
         extract_thread.start()
@@ -389,6 +432,7 @@ def run_refresh_profiles_job(
     idle_rounds: int,
     headed: bool,
     incremental_stop_existing: int,
+    full_scan: bool,
 ) -> None:
     global extract_thread, extract_job_id, extract_process
     success_profiles = 0
@@ -479,6 +523,7 @@ def run_refresh_profiles_job(
                 headed,
                 incremental_stop_existing,
                 clear_global=False,
+                full_scan=full_scan,
             )
             with db() as conn:
                 sub = conn.execute("SELECT status FROM jobs WHERE id=?", (sub_job_id,)).fetchone()
@@ -551,6 +596,10 @@ def start_refresh_profiles(payload: dict[str, Any]) -> dict[str, Any]:
         0,
         1000,
     )
+    full_scan = payload.get("full_scan") is True
+    if full_scan:
+        max_items = 0
+        incremental_stop_existing = 0
     headed = bool(payload.get("headed", False))
     with extract_lock:
         if extract_thread is not None and extract_thread.is_alive():
@@ -570,6 +619,7 @@ def start_refresh_profiles(payload: dict[str, Any]) -> dict[str, Any]:
                 idle_rounds,
                 headed,
                 incremental_stop_existing,
+                full_scan,
             ),
             daemon=True,
         )

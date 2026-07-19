@@ -108,6 +108,13 @@ export function createShortVideoAuthorPages(deps) {
       comparison.textContent = `主页 ${formatNumber(homeCount)}`;
       libraryMeta.append(comparison);
     }
+    const deletedTotal = Math.max(0, Number(data.deletedTotal || 0));
+    if (deletedTotal) {
+      const deleted = document.createElement("span");
+      deleted.className = "short-video-author-page-deleted";
+      deleted.textContent = `主页已删除 ${formatNumber(deletedTotal)}`;
+      libraryMeta.append(deleted);
+    }
     const collectedAt = formatDate(author.profileCollectedAt);
     if (collectedAt) {
       const collected = document.createElement("span");
@@ -177,9 +184,10 @@ export function createShortVideoAuthorPages(deps) {
       const data = await api(`/api/short-videos/authors/${encodeURIComponent(secUid)}/collector?jobId=${encodeURIComponent(jobId)}`);
       const job = data?.job;
       if (job) {
-        const processed = Math.max(0, Number(job.processed || 0));
-        const total = Math.max(0, Number(job.total || 0));
-        if (button?.isConnected) button.textContent = total ? `${processed}/${total}` : "采集中";
+        const progress = data?.progress?.status === "running" ? data.progress : job;
+        const processed = Math.max(0, Number(progress.processed || 0));
+        const total = Math.max(0, Number(progress.total || 0));
+        if (button?.isConnected) button.textContent = total ? `采集中 ${processed}/${total}` : "采集中";
         if (["complete", "failed", "stopped"].includes(job.status)) return data;
       }
       await new Promise((resolve) => window.setTimeout(resolve, 1500));
@@ -264,6 +272,7 @@ export function createShortVideoAuthorPages(deps) {
     state.shortVideo.soundInfo = null;
     state.shortVideo.media = "all";
     state.shortVideo.quality = "all";
+    state.shortVideo.deleted = "all";
     state.shortVideo.current = null;
     state.shortVideo.data = null;
     clearShortVideoDeleteSelection();
@@ -299,6 +308,7 @@ export function createShortVideoAuthorPages(deps) {
     state.shortVideo.soundInfo = null;
     state.shortVideo.media = "all";
     state.shortVideo.quality = "all";
+    state.shortVideo.deleted = "all";
     state.shortVideo.current = null;
     state.shortVideo.prevVideo = null;
     state.shortVideo.nextVideo = null;

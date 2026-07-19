@@ -291,6 +291,108 @@ def upsert_profile_metadata(profile_id: int, profile: dict[str, Any] | None) -> 
         )
 
 
+def update_profile_deleted_works_flag(
+    profile_id: int,
+    seen_aweme_ids: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Reconcile per-work profile presence after a completed full post scan."""
+    if not profile_id:
+        return None
+    with db() as conn:
+        profile = conn.execute(
+            """
+            SELECT
+              profiles.tab,
+              profiles.aweme_count,
+              profiles.has_deleted_works
+            FROM profiles
+            WHERE profiles.id=?
+            """,
+            (profile_id,),
+        ).fetchone()
+        if profile is None or str(profile["tab"] or "post") != "post" or profile["aweme_count"] is None:
+            return None
+        links = conn.execute(
+            """
+            SELECT id, aweme_id, is_missing_from_profile, last_seen_at, create_time
+            FROM links
+            WHERE profile_id=?
+            ORDER BY id
+            """,
+            (profile_id,),
+        ).fetchall()
+        aweme_count = max(0, int(profile["aweme_count"] or 0))
+        link_total = len(links)
+        previous = int(profile["has_deleted_works"] or 0)
+        difference = max(0, link_total - aweme_count)
+        seen = {
+            str(aweme_id or "").strip()
+            for aweme_id in (seen_aweme_ids or set())
+            if str(aweme_id or "").strip()
+        }
+        if seen_aweme_ids is not None and not seen and aweme_count > 0:
+            marked = sum(int(link["is_missing_from_profile"] or 0) for link in links)
+            return {
+                "has_deleted_works": int(marked > 0),
+                "previous": previous,
+                "changed": False,
+                "aweme_count": aweme_count,
+                "link_total": link_total,
+                "difference": difference,
+                "marked": marked,
+                "unseen": 0,
+                "skipped": True,
+            }
+        candidates = [
+            link for link in links
+            if str(link["aweme_id"] or "").strip() not in seen
+        ] if seen_aweme_ids is not None else []
+        candidates.sort(
+            key=lambda link: (
+                0 if int(link["is_missing_from_profile"] or 0) else 1,
+                str(link["last_seen_at"] or ""),
+                int(link["create_time"] or 0),
+                int(link["id"]),
+            )
+        )
+        marked_ids = {int(link["id"]) for link in candidates}
+        marked = len(marked_ids)
+        if seen_aweme_ids is not None:
+            ts = now_iso()
+            for link in links:
+                link_id = int(link["id"])
+                should_mark = link_id in marked_ids
+                conn.execute(
+                    """
+                    UPDATE links
+                    SET is_missing_from_profile=?,
+                        missing_from_profile_at=CASE
+                          WHEN ?=1 THEN COALESCE(missing_from_profile_at, ?)
+                          ELSE NULL
+                        END
+                    WHERE id=?
+                    """,
+                    (int(should_mark), int(should_mark), ts, link_id),
+                )
+        else:
+            marked = difference
+        flagged = int(marked > 0)
+        conn.execute(
+            "UPDATE profiles SET has_deleted_works=? WHERE id=?",
+            (flagged, profile_id),
+        )
+    return {
+        "has_deleted_works": flagged,
+        "previous": previous,
+        "changed": flagged != previous,
+        "aweme_count": aweme_count,
+        "link_total": link_total,
+        "difference": difference,
+        "marked": marked,
+        "unseen": len(candidates),
+    }
+
+
 def upsert_following_profiles(users: list[dict[str, Any]]) -> tuple[int, int]:
     inserted = 0
     updated = 0
@@ -450,7 +552,9 @@ def upsert_links(profile_id: int, works: list[dict[str, Any]]) -> tuple[int, int
                   local_file_paths=COALESCE(NULLIF(excluded.local_file_paths, ''), links.local_file_paths),
                   preview_path=COALESCE(NULLIF(excluded.preview_path, ''), links.preview_path),
                   metadata_json=COALESCE(NULLIF(excluded.metadata_json, ''), links.metadata_json),
-                  last_seen_at=excluded.last_seen_at
+                  last_seen_at=excluded.last_seen_at,
+                  is_missing_from_profile=0,
+                  missing_from_profile_at=NULL
                 """,
                 (
                     profile_id,

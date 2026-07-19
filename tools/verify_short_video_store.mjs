@@ -399,7 +399,19 @@ try {
 
   const sourceDb = new DatabaseSync(sourceDbPath);
   sourceDb.exec(`
-    CREATE TABLE profiles (id INTEGER PRIMARY KEY, tab TEXT, sec_uid TEXT, url TEXT);
+    CREATE TABLE profiles (
+      id INTEGER PRIMARY KEY,
+      tab TEXT,
+      sec_uid TEXT,
+      url TEXT,
+      nickname TEXT,
+      following_count INTEGER,
+      follower_count INTEGER,
+      total_favorited INTEGER,
+      aweme_count INTEGER,
+      profile_collected_at TEXT,
+      updated_at TEXT
+    );
     CREATE TABLE links (
       id INTEGER PRIMARY KEY,
       profile_id INTEGER,
@@ -415,11 +427,25 @@ try {
       digg_count INTEGER,
       comment_count INTEGER,
       collect_count INTEGER,
-      share_count INTEGER
+      share_count INTEGER,
+      is_missing_from_profile INTEGER NOT NULL DEFAULT 0,
+      missing_from_profile_at TEXT
     );
   `);
-  sourceDb.prepare("INSERT INTO profiles (id, tab, sec_uid, url) VALUES (1, 'like', 'MS4wTestAuthor', '')").run();
-  sourceDb.prepare("INSERT INTO profiles (id, tab, sec_uid, url) VALUES (2, 'post', 'MS4wTestAuthor', '')").run();
+  sourceDb.prepare(`
+    INSERT INTO profiles (
+      id, tab, sec_uid, url, nickname, following_count, follower_count,
+      total_favorited, aweme_count, profile_collected_at, updated_at
+    ) VALUES (1, 'like', 'MS4wTestAuthor', '', '测试作者', 10, 20, 30, 1,
+      '2026-07-10T00:00:00+08:00', '2026-07-10T00:00:00+08:00')
+  `).run();
+  sourceDb.prepare(`
+    INSERT INTO profiles (
+      id, tab, sec_uid, url, nickname, following_count, follower_count,
+      total_favorited, aweme_count, profile_collected_at, updated_at
+    ) VALUES (2, 'post', 'MS4wTestAuthor', '', '测试作者', 11, 21, 31, 2,
+      '2026-07-11T00:00:00+08:00', '2026-07-11T00:00:00+08:00')
+  `).run();
   sourceDb.prepare(`
     INSERT INTO links (
       id, profile_id, aweme_id, status, kind, media_type, output_dir,
@@ -462,6 +488,40 @@ try {
   assert.equal(importedLikes.total, 1, "only the downloader like profile should populate My Likes");
   assert.equal(importedLikes.relationshipTotal, 1);
   assert.equal(importedLikes.videos[0]?.id, liveId);
+  const refreshedSourceDb = new DatabaseSync(sourceDbPath);
+  refreshedSourceDb.prepare(`
+    UPDATE profiles
+    SET following_count = 295,
+        follower_count = 892000,
+        total_favorited = 8439000,
+        aweme_count = 509,
+        profile_collected_at = '2026-07-20T04:32:03+08:00',
+        updated_at = '2026-07-20T04:32:03+08:00'
+    WHERE id = 2
+  `).run();
+  refreshedSourceDb.prepare(`
+    UPDATE links
+    SET is_missing_from_profile = 1,
+        missing_from_profile_at = '2026-07-20T04:32:03+08:00'
+    WHERE id = 2
+  `).run();
+  refreshedSourceDb.close();
+  const zeroRowProfileSync = store.importDownloadManagerDb(sourceDbPath, { incremental: true, includePosts: true });
+  assert.equal(zeroRowProfileSync.incrementalRows, 0, "full scans without new downloads should still synchronize profiles");
+  assert.equal(zeroRowProfileSync.profilesSynced, 1);
+  const refreshedAuthor = store.resolveAuthorMention("MS4wTestAuthor");
+  assert.equal(refreshedAuthor?.awemeCount, 509, "official profile work totals must refresh without a new download");
+  assert.equal(refreshedAuthor?.followingCount, 295);
+  assert.equal(refreshedAuthor?.profileCollectedAt, "2026-07-20T04:32:03+08:00");
+  const authorAllWorks = store.listVideos({
+    searchParams: new URLSearchParams("source=all&author=MS4wTestAuthor&limit=10&stats=0&facets=0")
+  });
+  assert.equal(authorAllWorks.deletedTotal, 1);
+  const authorDeletedWorks = store.listVideos({
+    searchParams: new URLSearchParams("source=all&author=MS4wTestAuthor&deleted=1&limit=10&stats=0&facets=0")
+  });
+  assert.equal(authorDeletedWorks.total, 1, "history minus the latest deduplicated full scan should be filterable");
+  assert.equal(authorDeletedWorks.videos[0]?.deletedFromAuthor, true);
   store.recordWatch(galleryId, { progressMs: 600, completed: false });
   store.recordWatch(liveId, { progressMs: 1200, completed: false });
   const historyDb = new DatabaseSync(targetDbPath);

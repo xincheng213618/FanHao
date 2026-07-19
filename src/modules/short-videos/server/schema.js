@@ -35,6 +35,8 @@ export function ensureShortVideoColumns(db) {
   addColumnIfMissing(db, "short_video_users", "age", "INTEGER");
   addColumnIfMissing(db, "short_video_users", "verification", "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing(db, "short_video_users", "profile_collected_at", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, "short_video_source_memberships", "is_missing_from_profile", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "short_video_source_memberships", "missing_from_profile_at", "TEXT NOT NULL DEFAULT ''");
   db.exec(`
     UPDATE short_videos
     SET media_type = CASE
@@ -407,6 +409,13 @@ export function recreateShortVideoCatalogView(db) {
       COALESCE(NULLIF(u.verification, ''), '') AS author_verification,
       COALESCE(NULLIF(u.profile_collected_at, ''), '') AS author_profile_collected_at,
       COALESCE(v.author_following, 0) AS author_following,
+      CASE WHEN EXISTS (
+        SELECT 1
+        FROM short_video_source_memberships missing_membership
+        WHERE missing_membership.aweme_id = v.aweme_id
+          AND missing_membership.source_type = 'post'
+          AND missing_membership.is_missing_from_profile = 1
+      ) THEN 1 ELSE 0 END AS author_deleted,
       v.title,
       v.description,
       v.tags_json,

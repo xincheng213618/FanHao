@@ -2833,6 +2833,32 @@ body.short-video-author-page-active .main {
   pointer-events: none;
 }
 
+.short-video-deleted-badge {
+  position: absolute;
+  z-index: 4;
+  top: 0.72rem;
+  left: 0.72rem;
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.75rem;
+  padding: 0.24rem 0.58rem;
+  border: 1px solid rgba(255, 111, 145, 0.52);
+  border-radius: 999px;
+  color: #ffd8e2;
+  background: rgba(145, 25, 58, 0.84);
+  box-shadow: 0 0.3rem 1rem rgba(16, 6, 12, 0.36);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.short-video-author-page-deleted {
+  color: #ff8fac;
+  border-color: rgba(255, 91, 132, 0.3);
+  background: rgba(255, 74, 120, 0.1);
+}
+
 .short-video-like-badge.is-unknown {
   color: rgba(255, 255, 255, .72);
   font-weight: 700;

@@ -9,6 +9,10 @@ import { createShortVideoCommentsRepository } from "./comments-repository.js";
 import { createShortVideoCoverDatabase, defaultShortVideoCoverDbPath, SHORT_VIDEO_COVER_GENERATION_VERSION, SQLITE_SHORT_VIDEO_COVER_SOURCE } from "./cover-database.js";
 import { createShortVideoCoverStorageService } from "./cover-storage-service.js";
 import {
+  syncDownloadManagerProfiles,
+  syncDownloadManagerSourceMemberships
+} from "./download-manager-metadata-sync.js";
+import {
   createShortVideoImportItemMapper,
   douyinUserUrl,
   normalizedDouyinShareUrl,
@@ -49,7 +53,7 @@ const DEFAULT_COVER_GENERATE_LIMIT = 0;
 const DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT = 50000;
 const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
 const DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION = "4";
-const SHORT_VIDEO_SCHEMA_VERSION = "20260717-cover-sqlite-8";
+const SHORT_VIDEO_SCHEMA_VERSION = "20260720-author-deleted-9";
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LIST_VIDEO_COLUMNS = [
   "id",
@@ -81,6 +85,7 @@ const LIST_VIDEO_COLUMNS = [
   "author_verification",
   "author_profile_collected_at",
   "author_following",
+  "author_deleted",
   "published_at",
   "liked_at",
   "duration_ms",
@@ -932,6 +937,7 @@ function summary() {
       duration: "duration_ms DESC, liked_at DESC"
     }[sort] || "published_at DESC, liked_at DESC";
     const database = databaseOrOpen();
+    const deletedTotal = authorDeletedVideoTotal(database, filter);
     const recommendationIds = filter.source === "recommended" ? recommendedVideoIds(database, filter) : null;
     const sourceTotalKey = fastSourceTotalCacheKey(filter);
     let sourceTotalOverride;
@@ -1011,6 +1017,7 @@ function summary() {
       author: filter.author,
       media: filter.media,
       quality: filter.quality,
+      deleted: filter.deleted,
       source: filter.source,
       sort,
       stats,
@@ -1020,8 +1027,30 @@ function summary() {
       users: userPage?.authors || [],
       usersTotal: Number(userPage?.total || 0),
       usersHasMore: Boolean(userPage?.hasMore),
+      deletedTotal,
       videos: rows.map(publicVideo)
     };
+  }
+
+  function authorDeletedVideoTotal(database, filter = {}) {
+    const author = String(filter.author || "").trim();
+    if (!author || author === "all") return 0;
+    if (author.startsWith("name:")) {
+      return Number(database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM short_video_catalog
+        WHERE visibility = 'local_only'
+          AND author_deleted = 1
+          AND author_name = ?
+      `).get(author.slice(5))?.count || 0);
+    }
+    return Number(database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM short_video_catalog
+      WHERE visibility = 'local_only'
+        AND author_deleted = 1
+        AND author_sec_uid = ?
+    `).get(author)?.count || 0);
   }
 
   function videoDetail(id, urlOrOptions = {}) {
@@ -2875,6 +2904,7 @@ function summary() {
     const includeSummary = !options.skipSummary;
     const profileWhere = includePosts ? "p.tab IN ('like', 'post')" : "p.tab = 'like'";
     syncDownloadManagerSourceMemberships(targetDb, sourceDb, now);
+    let profilesSynced = 0;
     const incremental = Boolean(options.incremental);
     const backfillStatsLimit = incremental
       ? clampInt(options.backfillStatsLimit, DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT, 0, 100000)
@@ -3026,6 +3056,7 @@ function summary() {
     const importedIds = new Set();
 
     if (!sourceRows.length && !galleryBackfillIds.length) {
+      profilesSynced = syncDownloadManagerProfiles(targetDb, sourceDb, normalized.user, now);
       if (sourceMaxDownloadedAt && sourceMaxDownloadedAt !== previousWatermark) {
         targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(watermarkKey, sourceMaxDownloadedAt);
       }
@@ -3047,6 +3078,7 @@ function summary() {
         backfillAttempted: shouldBackfillStats,
         backfillCandidates,
         backfillRows,
+        profilesSynced,
         galleryBackfill: needsGalleryBackfill,
         imported: 0,
         updated: 0,
@@ -3138,6 +3170,7 @@ function summary() {
       throw error;
     }
     coverStorage.reconcile(targetDb);
+    profilesSynced = syncDownloadManagerProfiles(targetDb, sourceDb, normalized.user, now);
 
     return {
       ok: true,
@@ -3150,6 +3183,7 @@ function summary() {
       backfillAttempted: shouldBackfillStats,
       backfillCandidates,
       backfillRows,
+      profilesSynced,
       galleryBackfill: needsGalleryBackfill,
       galleryBackfillRows,
       imported,
@@ -3382,6 +3416,8 @@ function ensureSchema(db, coverCacheDir = "") {
       source_profile_id TEXT NOT NULL DEFAULT '',
       first_seen_at TEXT NOT NULL DEFAULT '',
       last_seen_at TEXT NOT NULL DEFAULT '',
+      is_missing_from_profile INTEGER NOT NULL DEFAULT 0,
+      missing_from_profile_at TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT '',
       PRIMARY KEY(aweme_id, source_type, source_profile_id)
     );
@@ -4076,7 +4112,11 @@ function normalizedUpsertStatements(db, coverCacheDir = "") {
         gender = COALESCE(excluded.gender, short_video_users.gender),
         age = COALESCE(excluded.age, short_video_users.age),
         verification = COALESCE(NULLIF(excluded.verification, ''), short_video_users.verification),
-        profile_collected_at = COALESCE(NULLIF(excluded.profile_collected_at, ''), short_video_users.profile_collected_at),
+        profile_collected_at = CASE
+          WHEN COALESCE(excluded.profile_collected_at, '') >= COALESCE(short_video_users.profile_collected_at, '')
+            THEN COALESCE(NULLIF(excluded.profile_collected_at, ''), short_video_users.profile_collected_at)
+          ELSE short_video_users.profile_collected_at
+        END,
         updated_at = excluded.updated_at
     `),
     videoCore: db.prepare(`
@@ -4358,126 +4398,6 @@ function shortVideoUserId(author = {}) {
   if (author.secUid) return `douyin:${author.secUid}`;
   if (author.uid) return `douyin-uid:${author.uid}`;
   return `author:${hashText(author.name || "unknown").slice(0, 18)}`;
-}
-
-function syncDownloadManagerSourceMemberships(targetDb, sourceDb, now = new Date().toISOString()) {
-  const sourceRows = sourceDb.prepare(`
-    SELECT DISTINCT
-      TRIM(COALESCE(l.aweme_id, '')) AS aweme_id,
-      LOWER(TRIM(COALESCE(p.tab, ''))) AS source_type,
-      CAST(p.id AS TEXT) AS source_profile_id,
-      ? AS first_seen_at,
-      ? AS last_seen_at
-    FROM links l
-    JOIN profiles p ON p.id = l.profile_id
-    WHERE p.tab IN ('like', 'post')
-      AND TRIM(COALESCE(l.aweme_id, '')) <> ''
-    GROUP BY l.aweme_id, p.tab, p.id
-  `).all(now, now);
-  const desiredKeys = new Set(sourceRows.map((row) => (
-    `${row.aweme_id}\u0000${row.source_type}\u0000${row.source_profile_id}`
-  )));
-  const existingRows = targetDb.prepare(`
-    SELECT aweme_id, source_type, source_profile_id
-    FROM short_video_source_memberships
-    WHERE source_type IN ('like', 'post')
-  `).all();
-  const upsert = targetDb.prepare(`
-    INSERT INTO short_video_source_memberships (
-      aweme_id, source_type, source_profile_id, first_seen_at, last_seen_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(aweme_id, source_type, source_profile_id) DO UPDATE SET
-      first_seen_at = COALESCE(NULLIF(short_video_source_memberships.first_seen_at, ''), excluded.first_seen_at),
-      last_seen_at = excluded.last_seen_at,
-      updated_at = excluded.updated_at
-  `);
-  const remove = targetDb.prepare(`
-    DELETE FROM short_video_source_memberships
-    WHERE aweme_id = ? AND source_type = ? AND source_profile_id = ?
-  `);
-  targetDb.exec("BEGIN");
-  try {
-    for (const row of sourceRows) {
-      upsert.run(
-        row.aweme_id,
-        row.source_type,
-        row.source_profile_id,
-        row.first_seen_at || now,
-        row.last_seen_at || now,
-        now
-      );
-    }
-    for (const row of existingRows) {
-      const key = `${row.aweme_id}\u0000${row.source_type}\u0000${row.source_profile_id}`;
-      if (!desiredKeys.has(key)) remove.run(row.aweme_id, row.source_type, row.source_profile_id);
-    }
-
-    // 下载器 profile 是来源关系的权威数据。清除旧文件扫描误建的动作，
-    // 再为真实 like profile 中、且已经进入内容库的视频建立喜欢动作。
-    targetDb.prepare(`
-      DELETE FROM short_video_user_actions
-      WHERE local_user_id = ?
-        AND action_type = 'like'
-        AND source IN ('imported', 'download_manager')
-        AND video_id NOT IN (
-          SELECT v.id
-          FROM short_videos v
-          JOIN short_video_source_memberships membership
-            ON membership.aweme_id = v.aweme_id
-           AND membership.source_type = 'like'
-        )
-    `).run(LOCAL_SHORT_VIDEO_USER_ID);
-    targetDb.prepare(`
-      INSERT INTO short_video_user_actions (
-        local_user_id, video_id, action_type, active, source, acted_at, updated_at
-      )
-      SELECT ?, v.id, 'like', 1, 'download_manager',
-             COALESCE(NULLIF(v.liked_at, ''), ?), ?
-      FROM short_videos v
-      WHERE EXISTS (
-        SELECT 1
-        FROM short_video_source_memberships membership
-        WHERE membership.aweme_id = v.aweme_id
-          AND membership.source_type = 'like'
-      )
-      ON CONFLICT(local_user_id, video_id, action_type) DO UPDATE SET
-        active = 1,
-        source = CASE
-          WHEN short_video_user_actions.source = 'local_web' THEN short_video_user_actions.source
-          ELSE 'download_manager'
-        END,
-        updated_at = excluded.updated_at
-    `).run(LOCAL_SHORT_VIDEO_USER_ID, now, now);
-
-    targetDb.prepare(`
-      UPDATE short_videos
-      SET origin = CASE
-        WHEN EXISTS (
-          SELECT 1 FROM short_video_source_memberships membership
-          WHERE membership.aweme_id = short_videos.aweme_id AND membership.source_type = 'like'
-        ) THEN 'douyin_download_manager_like'
-        WHEN EXISTS (
-          SELECT 1 FROM short_video_source_memberships membership
-          WHERE membership.aweme_id = short_videos.aweme_id AND membership.source_type = 'post'
-        ) THEN 'douyin_download_manager_post'
-        WHEN origin = 'douyin_like_import' THEN 'local_import'
-        ELSE origin
-      END,
-      updated_at = ?
-      WHERE origin IN ('douyin_like_import', 'douyin_download_manager_like', 'douyin_download_manager_post')
-         OR EXISTS (
-           SELECT 1 FROM short_video_source_memberships membership
-           WHERE membership.aweme_id = short_videos.aweme_id
-         )
-    `).run(now);
-    refreshShortVideoRelationshipFlags(targetDb);
-    targetDb.exec("COMMIT");
-  } catch (error) {
-    try {
-      targetDb.exec("ROLLBACK");
-    } catch {}
-    throw error;
-  }
 }
 
 function shortVideoOrigin(item = {}) {

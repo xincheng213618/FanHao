@@ -15,7 +15,7 @@
       (() => {
         document.documentElement.classList.add("app-styles-loading");
         const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
-        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-90b956291aea";
+        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-9ca1bdf34fa9";
         if (shortVideoEntry) {
           const modulePreload = document.createElement("link");
           modulePreload.rel = "modulepreload";
@@ -292,7 +292,7 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-90b956291aea");
+        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-9ca1bdf34fa9");
         await window.__fanhaoStylesReady;
         await shortVideoModulePromise;
       } else if (standaloneEntry) {

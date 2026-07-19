@@ -46,12 +46,14 @@ export function createProfilesFeature(options) {
     const query = String($("profileManagerSearch")?.value || "").trim().toLowerCase();
     const sortMode = $("profileManagerSort")?.value || "latest_desc";
     const scope = $("profileManagerScope")?.value || "collected";
+    const deletedWorks = $("profileManagerDeletedWorks")?.value || "all";
     const allRows = Array.isArray(profiles) ? profiles : [];
     const filteredRows = allRows.filter((profile) => {
       const inScope = scope === "all"
         || (scope === "following" && (Number(profile.is_following || 0) === 1 || Number(profile.is_self || 0) === 1))
         || (scope === "collected" && (Number(profile.total || 0) > 0 || Number(profile.is_self || 0) === 1));
       if (!inScope) return false;
+      if (deletedWorks === "flagged" && Number(profile.has_deleted_works || 0) !== 1) return false;
       if (!query) return true;
       return [profile.nickname, profile.title, profile.unique_id, profile.short_id, profile.sec_uid]
         .some((value) => String(value || "").toLowerCase().includes(query));
@@ -87,6 +89,9 @@ export function createProfilesFeature(options) {
       const lastExtracted = formatDateTime(profile.last_extracted_at);
       const tabLabel = profile.tab === "like" ? "我的喜欢" : "作者作品";
       const sourceLabel = Number(profile.is_self || 0) === 1 ? "本人" : Number(profile.is_following || 0) === 1 ? "已关注" : "";
+      const deletedWorksBadge = Number(profile.has_deleted_works || 0) === 1
+        ? ' <span class="profile-manager-badge is-deleted-works" title="仅在全部扫描完成后确认">疑似删过作品</span>'
+        : "";
       const avatar = profile.avatar_url
         ? `<img class="profile-manager-avatar" src="${safeUrl(profile.avatar_url)}" alt="" loading="lazy" />`
         : '<div class="profile-manager-avatar placeholder"></div>';
@@ -95,7 +100,7 @@ export function createProfilesFeature(options) {
           <div class="profile-manager-identity">
             ${avatar}
             <div>
-              <div class="profile-manager-name">${escapeHtml(name)}${sourceLabel ? ` <span class="profile-manager-badge">${escapeHtml(sourceLabel)}</span>` : ""}</div>
+              <div class="profile-manager-name">${escapeHtml(name)}${sourceLabel ? ` <span class="profile-manager-badge">${escapeHtml(sourceLabel)}</span>` : ""}${deletedWorksBadge}</div>
               <div class="muted">${escapeHtml(tabLabel)} · 抖音号 ${escapeHtml(douyinId)}</div>
             </div>
           </div>
@@ -127,6 +132,7 @@ export function createProfilesFeature(options) {
         scope: $("profileManagerScope")?.value || "collected",
         q: String($("profileManagerSearch")?.value || "").trim(),
         sort: $("profileManagerSort")?.value || "latest_desc",
+        deleted_works: $("profileManagerDeletedWorks")?.value || "all",
         since: String(sinceTimestamp || 0),
         limit: "200",
         offset: String(reset ? 0 : rows.length),
@@ -259,6 +265,9 @@ export function createProfilesFeature(options) {
       load({ reset: true }).catch((err) => toast(err.message));
     });
     $("profileManagerScope").addEventListener("change", () => {
+      load({ reset: true }).catch((err) => toast(err.message));
+    });
+    $("profileManagerDeletedWorks").addEventListener("change", () => {
       load({ reset: true }).catch((err) => toast(err.message));
     });
     $("profileManagerList").addEventListener("click", (event) => {

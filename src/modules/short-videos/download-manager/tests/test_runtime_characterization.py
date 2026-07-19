@@ -82,6 +82,7 @@ class IsolatedManager:
         self.port = reserve_loopback_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.process: subprocess.Popen[str] | None = None
+        self.environment: dict[str, str] = {}
         self.stdout = ""
         self.stderr = ""
 
@@ -108,6 +109,7 @@ class IsolatedManager:
                 "APPDATA": str(self.root / "roaming-app-data"),
             }
         )
+        self.environment = environment
         creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         self.process = subprocess.Popen(
             [sys.executable, "-u", str(APP_ENTRY)],
@@ -440,6 +442,100 @@ class RuntimeCharacterizationTests(unittest.TestCase):
                 self.assertEqual(state.get("current_profile", {}).get("id"), post_profile_id)
                 profiles_js = runtime.request("/features/profiles.js")[2].decode("utf-8")
                 self.assertIn("data-profile-delete", profiles_js)
+            finally:
+                runtime.close()
+
+    def test_deleted_works_flag_can_filter_profiles(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="fanhao-download-manager-deleted-works-") as temp:
+            runtime = IsolatedManager(Path(temp))
+            try:
+                runtime.start()
+                now = "2026-07-20T12:00:00+08:00"
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    link_columns = {
+                        row[1] for row in connection.execute("PRAGMA table_info(links)").fetchall()
+                    }
+                    self.assertIn("is_missing_from_profile", link_columns)
+                    self.assertIn("missing_from_profile_at", link_columns)
+                    connection.execute(
+                        """
+                        INSERT INTO profiles(
+                          url, sec_uid, tab, title, nickname, aweme_count,
+                          has_deleted_works, created_at, updated_at
+                        )
+                        VALUES(?, 'flagged-author', 'post', '疑似删除作者', '疑似删除作者', 3, 1, ?, ?)
+                        """,
+                        ("https://www.douyin.com/user/flagged-author", now, now),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO profiles(
+                          url, sec_uid, tab, title, nickname, aweme_count,
+                          has_deleted_works, created_at, updated_at
+                        )
+                        VALUES(?, 'clean-author', 'post', '普通作者', '普通作者', 2, 0, ?, ?)
+                        """,
+                        ("https://www.douyin.com/user/clean-author", now, now),
+                    )
+                    flagged_profile_id = connection.execute(
+                        "SELECT id FROM profiles WHERE sec_uid='flagged-author'"
+                    ).fetchone()[0]
+                    for aweme_id in ["seen-a", "seen-b", "seen-c", "missing-d", "missing-e"]:
+                        connection.execute(
+                            """
+                            INSERT INTO links(
+                              profile_id, aweme_id, kind, url, status, discovered_at, last_seen_at
+                            ) VALUES(?, ?, 'video', ?, 'downloaded', ?, ?)
+                            """,
+                            (flagged_profile_id, aweme_id, f"https://www.douyin.com/video/{aweme_id}", now, now),
+                        )
+                    connection.commit()
+
+                reconcile = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "import json; "
+                            "from manager_core.profiles_links import update_profile_deleted_works_flag; "
+                            f"print(json.dumps(update_profile_deleted_works_flag({flagged_profile_id}, "
+                            "{'seen-a', 'seen-b', 'seen-c'}), ensure_ascii=False))"
+                        ),
+                    ],
+                    cwd=MODULE_DIR,
+                    env=runtime.environment,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=True,
+                )
+                reconcile_result = json.loads(reconcile.stdout.strip())
+                self.assertEqual(reconcile_result["marked"], 2)
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    missing_ids = {
+                        row[0]
+                        for row in connection.execute(
+                            """
+                            SELECT aweme_id FROM links
+                            WHERE profile_id=? AND is_missing_from_profile=1
+                            """,
+                            (flagged_profile_id,),
+                        ).fetchall()
+                    }
+                self.assertEqual(missing_ids, {"missing-d", "missing-e"})
+
+                result = runtime.json_request("/api/profiles?scope=all&deleted_works=flagged")
+                self.assertEqual(result.get("total"), 1)
+                self.assertEqual([row.get("sec_uid") for row in result.get("profiles", [])], ["flagged-author"])
+                self.assertEqual(result["profiles"][0].get("has_deleted_works"), 1)
+
+                manager_html = runtime.request("/")[2].decode("utf-8")
+                profiles_js = runtime.request("/features/profiles.js")[2].decode("utf-8")
+                self.assertIn('id="profileManagerDeletedWorks"', manager_html)
+                self.assertIn("疑似删过作品", manager_html)
+                self.assertIn("deleted_works", profiles_js)
+                self.assertIn("has_deleted_works", profiles_js)
             finally:
                 runtime.close()
 

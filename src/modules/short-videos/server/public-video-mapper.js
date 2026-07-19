@@ -48,6 +48,7 @@ export function createShortVideoPublicVideoMapper(dependencies = {}) {
       origin: row.origin || "",
       status: row.status || "normal",
       visibility: row.visibility || "local_only",
+      deletedFromAuthor: Boolean(row.author_deleted),
       mediaType: media.type,
       galleryCount: media.galleryCount,
       galleryItems: media.galleryItems.map((type, index) => ({

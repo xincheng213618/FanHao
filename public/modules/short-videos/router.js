@@ -49,6 +49,7 @@ export function routeFromUrl(url = browserHref()) {
     shortVideoAuthor: authorPage || requestedAuthor,
     shortVideoMedia: params.get("media") || params.get("type") || "all",
     shortVideoQuality: params.get("quality") || params.get("resolution") || "all",
+    shortVideoDeleted: params.get("deleted") || "all",
     shortVideoSource: authorPage
       ? (requestedSource === "authors" ? "all" : requestedSource || "all")
       : requestedSource,
@@ -70,6 +71,7 @@ export function normalizeRoute(route = {}) {
     shortVideoAuthor: String(route.shortVideoAuthor || authorPage || "all").trim() || "all",
     shortVideoMedia: normalizeMedia(route.shortVideoMedia || route.media),
     shortVideoQuality: normalizeQuality(route.shortVideoQuality || route.quality || route.resolution),
+    shortVideoDeleted: normalizeDeleted(route.shortVideoDeleted || route.deleted),
     shortVideoSource: normalizeSource(route.shortVideoSource || route.source),
     shortVideoSort: normalizeSort(route.shortVideoSort || route.sort)
   };
@@ -96,6 +98,7 @@ export function routeUrl(route, options = {}) {
     }
     if (next.shortVideoMedia !== "all") params.set("media", next.shortVideoMedia);
     if (next.shortVideoQuality !== "all") params.set("quality", next.shortVideoQuality);
+    if (next.shortVideoDeleted === "deleted") params.set("deleted", "1");
     const defaultSource = next.shortVideoAuthorPage && !next.shortVideoId ? "all" : "liked";
     if (next.shortVideoSource !== defaultSource) params.set("source", next.shortVideoSource);
     if (next.shortVideoSort !== "published") params.set("sort", next.shortVideoSort);
@@ -120,6 +123,11 @@ function normalizeSort(value) {
 function normalizeSource(value) {
   const normalized = String(value || "liked").trim().toLowerCase();
   return SHORT_VIDEO_SOURCE_NAMES.has(normalized) ? normalized : "liked";
+}
+
+function normalizeDeleted(value) {
+  const normalized = String(value || "all").trim().toLowerCase();
+  return ["1", "true", "yes", "deleted"].includes(normalized) ? "deleted" : "all";
 }
 
 function normalizeMedia(value) {

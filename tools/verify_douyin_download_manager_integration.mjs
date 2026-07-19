@@ -209,6 +209,9 @@ assert.doesNotMatch(
   "batch download automation must use manager APIs instead of writing the FanHao catalog"
 );
 assert.match(appSource, /following_discovered_at/);
+assert.match(appSource, /has_deleted_works/);
+assert.match(appSource, /def update_profile_deleted_works_flag\(/);
+assert.match(appSource, /full_scan/);
 assert.match(appSource, /\/api\/links\/delete/);
 assert.match(appSource, /def delete_link\(/);
 assert.match(appSource, /\/api\/comments\/fetch/);
@@ -330,12 +333,14 @@ assert.match(managerHtml, /导入 Cookie/);
 assert.match(managerClient, /export function createAuthFeature/);
 assert.match(managerClient, /\/api\/auth\/status/);
 assert.match(managerHtml, /提取我的关注/);
+assert.match(managerHtml, /疑似删过作品/);
 assert.match(managerHtml, /已下载作品/);
 assert.match(managerHtml, /id="quitApp"/);
 assert.match(managerClient, /export function createLibraryFeature/);
 assert.match(managerClient, /\/api\/library\?/);
 assert.match(managerClient, /export function createDownloadsFeature/);
 assert.match(managerClient, /\/api\/app\/quit/);
+assert.match(managerClient, /deleted_works/);
 assert.match(managerClient, /下载管理器已退出/);
 assert.match(managerHtml, /id="linksBody"/);
 assert.match(managerClient, /data-link-delete/);

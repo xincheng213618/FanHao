@@ -11,7 +11,8 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
       && !filter.q
       && !filter.topic
       && !filter.soundKey
-      && !filter.author;
+      && !filter.author
+      && filter.deleted === "all";
     if (!eligible) return null;
 
     const whereParts = [
@@ -87,7 +88,7 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
 
   function fastFilteredVideoPage(database, filter, sort, limit, offset, totalOverride, listCursor = null) {
     if (!["all", "liked", "following", "posts", "local"].includes(filter.source)
-      || filter.q || filter.topic || filter.soundKey || filter.author) return null;
+      || filter.q || filter.topic || filter.soundKey || filter.author || filter.deleted !== "all") return null;
     if (["liked", "likedAsc"].includes(sort) && filter.source !== "liked") return null;
     const likedSortAt = "v.liked_sort_at";
     const orderBy = {
@@ -210,7 +211,7 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
 
   function fastPublishedVideoPage(database, filter, sort, limit, offset, totalOverride) {
     if (!["published", "publishedAsc"].includes(sort)) return null;
-    if (filter.q || filter.topic || filter.soundKey || filter.media !== "all" || filter.quality !== "all") return null;
+    if (filter.q || filter.topic || filter.soundKey || filter.media !== "all" || filter.quality !== "all" || filter.deleted !== "all") return null;
     if (!["liked", "all", "posts", "local"].includes(filter.source)) return null;
     if (filter.author?.startsWith("name:")) return null;
 
@@ -272,7 +273,8 @@ export function createShortVideoListPageQueries({ listVideoColumns }) {
       || filter.q
       || filter.topic
       || filter.soundKey
-      || filter.author) return "";
+      || filter.author
+      || filter.deleted !== "all") return "";
     return `${filter.source}:${filter.media || "all"}:${filter.quality || "all"}`;
   }
 

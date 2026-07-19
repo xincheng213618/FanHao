@@ -44,6 +44,7 @@ def get_state() -> dict[str, Any]:
                   profiles.follower_count,
                   profiles.total_favorited,
                   profiles.aweme_count,
+                  profiles.has_deleted_works,
                   profiles.favoriting_count,
                   profiles.gender,
                   profiles.age,
@@ -128,6 +129,7 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
     limit = normalize_int((query.get("limit") or ["200"])[0], 200, 1, 500)
     offset = normalize_int((query.get("offset") or ["0"])[0], 0, 0, 1000000)
     since_timestamp = normalize_int((query.get("since") or ["0"])[0], 0, 0, 9999999999)
+    deleted_works = (query.get("deleted_works") or ["all"])[0].strip().lower()
     where: list[str] = []
     params: list[Any] = []
     if scope == "following":
@@ -138,6 +140,10 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
         params.append(LIBRARY_SEC_UID)
     elif scope != "all":
         raise ValueError("主页范围只能是 collected/following/all")
+    if deleted_works == "flagged":
+        where.append("profiles.has_deleted_works=1")
+    elif deleted_works != "all":
+        raise ValueError("作品差异只能是 all/flagged")
     if search:
         where.append(
             "(profiles.nickname LIKE ? OR profiles.title LIKE ? OR profiles.unique_id LIKE ? "

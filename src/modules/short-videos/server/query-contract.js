@@ -7,6 +7,7 @@ export function videoFilter(params = new URLSearchParams()) {
   const source = normalizeSourceFilter(params.get("source") || params.get("origin"));
   const media = normalizeMediaFilter(params.get("media") || params.get("type"));
   const quality = normalizeVideoQualityFilter(params.get("quality") || params.get("resolution"));
+  const deleted = normalizeDeletedFromAuthorFilter(params.get("deleted") || params.get("authorDeleted"));
   const whereParts = [];
   const args = [];
   const includePending = includePendingShortVideos(params);
@@ -57,6 +58,9 @@ export function videoFilter(params = new URLSearchParams()) {
     if (quality === "unknown") whereParts.push(shortVideoMediaWhere("video"));
     whereParts.push(qualityWhere);
   }
+  if (deleted === "deleted") {
+    whereParts.push("author_deleted = 1");
+  }
   if (source === "recommended") {
     whereParts.push("user_dislike_active = 0");
   } else if (source === "liked") {
@@ -79,7 +83,12 @@ export function videoFilter(params = new URLSearchParams()) {
       JOIN short_video_source_memberships membership ON membership.aweme_id = v2.aweme_id
     )`);
   }
-  return { q, topic, sound, soundKey, author, media, quality, source, includePending, where: whereParts.join(" AND "), args };
+  return { q, topic, sound, soundKey, author, media, quality, deleted, source, includePending, where: whereParts.join(" AND "), args };
+}
+
+export function normalizeDeletedFromAuthorFilter(value) {
+  const normalized = String(value || "all").trim().toLowerCase();
+  return ["1", "true", "yes", "deleted"].includes(normalized) ? "deleted" : "all";
 }
 export function normalizeTopicFilter(value) {
   return String(value || "").trim().replace(/^#+/, "").slice(0, 48);

@@ -751,7 +751,8 @@ async function extractWorks(opts) {
       stable = count === lastCount ? stable + 1 : 0;
       lastCount = count;
       const expectedWorks = filterToTargetAuthor ? Number(profile.aweme_count || 0) : 0;
-      const nearExpectedWorks = expectedWorks > 0 && count >= Math.max(1, expectedWorks - 1);
+      const expectedGapTolerance = Math.max(2, Math.ceil(expectedWorks * 0.005));
+      const nearExpectedWorks = expectedWorks > 0 && count >= Math.max(1, expectedWorks - expectedGapTolerance);
       const nearExpectedIdleRounds = Math.min(opts.idleRounds, 20);
       if (nearExpectedWorks && stable >= nearExpectedIdleRounds) {
         console.error(

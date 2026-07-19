@@ -11,6 +11,7 @@ export function ensureShortVideoState(state, options = {}) {
     : "authors";
   state.shortVideo.media = normalizeShortVideoMedia(state.shortVideo.media);
   state.shortVideo.quality = normalizeShortVideoQuality(state.shortVideo.quality);
+  state.shortVideo.deleted = normalizeShortVideoDeleted(state.shortVideo.deleted);
   if (state.shortVideo.quality !== "all") state.shortVideo.media = "video";
   state.shortVideo.source = normalizeShortVideoSource(state.shortVideo.source);
   state.shortVideo.sort = normalizeShortVideoSortValue(state.shortVideo.sort);
@@ -180,6 +181,11 @@ export function formatPlaybackRate(value) {
 export function normalizeShortVideoSource(value) {
   const source = String(value || "liked").trim().toLowerCase();
   return ["recommended", "liked", "following", "history", "posts", "authors", "all", "local"].includes(source) ? source : "liked";
+}
+
+export function normalizeShortVideoDeleted(value) {
+  const normalized = String(value || "all").trim().toLowerCase();
+  return ["1", "true", "yes", "deleted"].includes(normalized) ? "deleted" : "all";
 }
 
 export function normalizeShortVideoSortValue(value) {

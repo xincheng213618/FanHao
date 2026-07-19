@@ -33,7 +33,7 @@ const SHORT_VIDEO_SMOOTH_MAX_EDGE = 2560;
 const SHORT_VIDEO_SMOOTH_RENDITION_VERSION = 2;
 const SHORT_VIDEO_SMOOTH_MIN_LONG_EDGE = 2160;
 const SHORT_VIDEO_LIST_CACHE_FRESH_MS = 2 * 60 * 1000;
-const SHORT_VIDEO_LIST_CACHE_SCHEMA = "aggregate-search-v1";
+const SHORT_VIDEO_LIST_CACHE_SCHEMA = "aggregate-search-v2-author-deleted";
 const SHORT_VIDEO_CACHE_WATCH_DELAY_MS = 4000;
 const SHORT_VIDEO_CACHE_COMPLETED_DELAY_MS = 750;
 const SHORT_VIDEO_CACHE_MIN_PROGRESS_MS = 500;
@@ -182,7 +182,8 @@ export function createShortVideosRuntime({
             max: 0,
             scrolls: mode === "full" ? Number(settings.scrolls || 12000) : 120,
             idle_rounds: mode === "full" ? Number(settings.idle_rounds || 160) : 16,
-            incremental_stop_existing: mode === "full" ? 0 : 6
+            incremental_stop_existing: mode === "full" ? 0 : 6,
+            full_scan: mode === "full"
           }
         });
         if (result?.ok === false) {
@@ -821,23 +822,29 @@ export function createShortVideosRuntime({
     const profile = collectorProfile(state, secUid);
     const jobs = Array.isArray(state?.jobs) ? state.jobs : [];
     const job = jobId ? jobs.find((item) => Number(item?.id || 0) === Number(jobId)) || null : null;
+    const progressJobId = Number(state?.extract?.job_id || 0);
+    const progressJob = progressJobId
+      ? jobs.find((item) => Number(item?.id || 0) === progressJobId) || null
+      : null;
+    const publicJob = (item) => item ? {
+      id: Number(item.id || 0),
+      type: String(item.type || ""),
+      status: String(item.status || ""),
+      message: String(item.message || ""),
+      total: Number(item.total || 0),
+      processed: Number(item.processed || 0),
+      success: Number(item.success || 0),
+      failed: Number(item.failed || 0)
+    } : null;
     return {
       ok: true,
       available: true,
       linked: Boolean(profile),
       profile: profile ? publicCollectorProfile(profile) : null,
       active: Boolean(state?.extract?.active),
-      activeJobId: Number(state?.extract?.job_id || 0),
-      job: job ? {
-        id: Number(job.id || 0),
-        type: String(job.type || ""),
-        status: String(job.status || ""),
-        message: String(job.message || ""),
-        total: Number(job.total || 0),
-        processed: Number(job.processed || 0),
-        success: Number(job.success || 0),
-        failed: Number(job.failed || 0)
-      } : null
+      activeJobId: progressJobId,
+      progress: publicJob(progressJob),
+      job: publicJob(job)
     };
   }
 

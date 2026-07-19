@@ -4,14 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Douyin Download Manager</title>
-    <link rel="stylesheet" href="/styles/shell.css?v=20260716-static-modules-01" />
-    <link rel="stylesheet" href="/styles/auth.css?v=20260716-static-modules-01" />
-    <link rel="stylesheet" href="/styles/controls.css?v=20260716-static-modules-01" />
-    <link rel="stylesheet" href="/styles/profiles.css?v=20260716-static-modules-01" />
-    <link rel="stylesheet" href="/styles/home.css?v=20260716-static-modules-01" />
-    <link rel="stylesheet" href="/styles/links.css?v=20260716-static-modules-01" />
-    <link rel="stylesheet" href="/styles/library.css?v=20260716-static-modules-01" />
-    <link rel="stylesheet" href="/styles/responsive.css?v=20260716-static-modules-01" />
+    <link rel="stylesheet" href="/styles/shell.css?v=20260720-deleted-works-01" />
+    <link rel="stylesheet" href="/styles/auth.css?v=20260720-deleted-works-01" />
+    <link rel="stylesheet" href="/styles/controls.css?v=20260720-deleted-works-01" />
+    <link rel="stylesheet" href="/styles/profiles.css?v=20260720-deleted-works-01" />
+    <link rel="stylesheet" href="/styles/home.css?v=20260720-deleted-works-01" />
+    <link rel="stylesheet" href="/styles/links.css?v=20260720-deleted-works-01" />
+    <link rel="stylesheet" href="/styles/library.css?v=20260720-deleted-works-01" />
+    <link rel="stylesheet" href="/styles/responsive.css?v=20260720-deleted-works-01" />
   </head>
   <body>
     <main class="shell">
@@ -200,6 +200,13 @@
               </select>
             </label>
             <label class="field">
+              <span>作品差异</span>
+              <select id="profileManagerDeletedWorks">
+                <option value="all">全部</option>
+                <option value="flagged">疑似删过作品</option>
+              </select>
+            </label>
+            <label class="field">
               <span>最近天数</span>
               <input id="profileRefreshRecentDays" type="number" min="0" max="3650" value="30" />
             </label>
@@ -337,6 +344,6 @@
     </main>
 
     <div id="toast" class="toast"></div>
-    <script type="module" src="/app.js?v=20260716-static-modules-01"></script>
+    <script type="module" src="/app.js?v=20260720-deleted-works-01"></script>
   </body>
 </html>

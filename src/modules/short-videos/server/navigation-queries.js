@@ -84,6 +84,7 @@ export function createShortVideoNavigationQueries({
 
   function fastHistoryAdjacentRows(database, row, direction, filter, order, limit) {
     const eligible = filter.source === "history"
+      && filter.deleted === "all"
       && !filter.q
       && !filter.topic
       && !filter.soundKey
@@ -150,6 +151,7 @@ export function createShortVideoNavigationQueries({
 
   function fastLikedAdjacentRows(database, row, direction, filter, order, limit) {
     const eligible = filter.source === "liked"
+      && filter.deleted === "all"
       && !filter.q
       && !filter.topic
       && !filter.soundKey
@@ -230,6 +232,7 @@ export function createShortVideoNavigationQueries({
   function fastPublishedAdjacentRows(database, row, direction, filter, order, limit) {
     const author = String(filter?.author || "").trim();
     const eligible = !filter.q
+      && filter.deleted === "all"
       && !filter.topic
       && !filter.soundKey
       && ["liked", "posts", "all", "local"].includes(filter.source)
@@ -316,6 +319,7 @@ export function createShortVideoNavigationQueries({
       && String(order.direction || "").toUpperCase() === "ASC"
       && Boolean(order.expression);
     const eligible = !filter.q
+      && filter.deleted === "all"
       && !filter.topic
       && !filter.soundKey
       && !filter.author

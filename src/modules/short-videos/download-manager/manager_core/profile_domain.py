@@ -25,6 +25,11 @@ def normalize_profile_metadata(profile: dict[str, Any] | None, fallback_sec_uid:
         short_id = douyin_id
     profile_url = first_text(profile.get("profile_url"), profile.get("profileUrl"), douyin_user_url(sec_uid))
     raw_json = raw if isinstance(raw, str) else json_text(raw)
+    aweme_count_value = (
+        profile.get("aweme_count")
+        if profile.get("aweme_count") is not None
+        else profile.get("awemeCount")
+    )
     return {
         "uid": uid,
         "sec_uid": sec_uid,
@@ -37,7 +42,7 @@ def normalize_profile_metadata(profile: dict[str, Any] | None, fallback_sec_uid:
         "following_count": int_or_none(profile.get("following_count") or profile.get("followingCount")),
         "follower_count": int_or_none(profile.get("follower_count") or profile.get("followerCount")),
         "total_favorited": int_or_none(profile.get("total_favorited") or profile.get("totalFavorited")),
-        "aweme_count": int_or_none(profile.get("aweme_count") or profile.get("awemeCount")),
+        "aweme_count": int_or_none(aweme_count_value),
         "favoriting_count": int_or_none(profile.get("favoriting_count") or profile.get("favoritingCount")),
         "gender": int_or_none(profile.get("gender")),
         "age": int_or_none(profile.get("age")),

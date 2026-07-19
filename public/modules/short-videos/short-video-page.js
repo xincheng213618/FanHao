@@ -1,6 +1,7 @@
 import { createShortVideoSearchModule } from "./search/index.js?v=20260710-short-video-search-01";
 import { createShortVideoActionsController } from "./actions-controller.js?v=20260716-short-video-actions-01";
 import { createShortVideoAuthorPages } from "./author-pages.js?v=20260716-short-video-author-pages-01";
+import { createShortVideoFilterControls } from "./filter-controls.js?v=20260720-short-video-filter-controls-01";
 import { createIcon, railButton, setIconButton } from "./icons.js?v=20260716-short-video-icons-01";
 import { createShortVideoListWindow } from "./list-window.js?v=20260716-short-video-list-window-01";
 import { createShortVideoMediaCache } from "./media-cache.js?v=20260716-short-video-media-cache-01";
@@ -20,6 +21,7 @@ import {
   normalizePlaybackRate,
   normalizeShortVideoAuthorFilter,
   normalizeShortVideoAuthorSort,
+  normalizeShortVideoDeleted,
   normalizeShortVideoMedia,
   normalizeShortVideoQuality,
   normalizeShortVideoSortValue,
@@ -268,6 +270,19 @@ export function createShortVideoPage(deps) {
     state
   });
   const {
+    renderDeletedControl: renderShortVideoDeletedControl,
+    renderSortControl: renderShortVideoSortControl
+  } = createShortVideoFilterControls({
+    clearSelection: clearShortVideoDeleteSelection,
+    formatNumber,
+    isAuthorDetailPage: isShortVideoAuthorDetailPage,
+    loadVideos,
+    normalizeDeleted: normalizeShortVideoDeleted,
+    normalizeSort: normalizeShortVideoSortValue,
+    showError,
+    state
+  });
+  const {
     activateCovers: activateShortVideoCovers,
     attach: attachShortVideoWindow,
     render: renderShortVideoWindow,
@@ -447,6 +462,7 @@ export function createShortVideoPage(deps) {
     state.shortVideo.author = state.shortVideo.authorPage || route.shortVideoAuthor || "all";
     state.shortVideo.media = normalizeShortVideoMedia(route.shortVideoMedia);
     state.shortVideo.quality = normalizeShortVideoQuality(route.shortVideoQuality);
+    state.shortVideo.deleted = normalizeShortVideoDeleted(route.shortVideoDeleted);
     if (state.shortVideo.quality !== "all") state.shortVideo.media = "video";
     state.shortVideo.source = normalizeShortVideoSource(route.shortVideoSource);
     if (!state.shortVideo.authorPage && ["authors", "following"].includes(state.shortVideo.source)) {
@@ -594,6 +610,7 @@ export function createShortVideoPage(deps) {
     if (state.shortVideo.author && state.shortVideo.author !== "all") params.set("author", state.shortVideo.author);
     if (state.shortVideo.media && state.shortVideo.media !== "all") params.set("media", state.shortVideo.media);
     if (state.shortVideo.quality && state.shortVideo.quality !== "all") params.set("quality", state.shortVideo.quality);
+    if (state.shortVideo.deleted === "deleted") params.set("deleted", "1");
     params.set("source", shortVideoApiSource());
     params.set("sort", state.shortVideo.sort || "published");
     params.set("limit", String(append ? appendVideoLimit : initialVideoLimit));
@@ -677,6 +694,7 @@ export function createShortVideoPage(deps) {
     }
     state.shortVideo.media = normalizeShortVideoMedia(data.media || state.shortVideo.media);
     state.shortVideo.quality = normalizeShortVideoQuality(data.quality || state.shortVideo.quality);
+    state.shortVideo.deleted = normalizeShortVideoDeleted(data.deleted || state.shortVideo.deleted);
     if (state.shortVideo.quality !== "all") state.shortVideo.media = "video";
     if (Array.isArray(data.authors) && data.authors.length) state.shortVideo.authors = data.authors;
     state.shortVideo.summary = data.summary || state.shortVideo.summary;
@@ -711,7 +729,21 @@ export function createShortVideoPage(deps) {
     }
     if (!options.skipRoute) {
       const writer = options.replaceRoute ? replaceRoute : pushRoute;
-      writer({ view: "shortVideos", shortVideoId: "" });
+      writer({
+        view: "shortVideos",
+        shortVideoId: "",
+        shortVideoAuthorPage: state.shortVideo.authorPage || "",
+        shortVideoMode: state.shortVideo.mode || "feed",
+        shortVideoQuery: state.shortVideo.query || "",
+        shortVideoTopic: state.shortVideo.topic || "",
+        shortVideoSound: state.shortVideo.sound || "",
+        shortVideoAuthor: state.shortVideo.author || "all",
+        shortVideoMedia: state.shortVideo.media || "all",
+        shortVideoQuality: state.shortVideo.quality || "all",
+        shortVideoDeleted: state.shortVideo.deleted || "all",
+        shortVideoSource: state.shortVideo.source || "liked",
+        shortVideoSort: state.shortVideo.sort || "published"
+      });
     }
     if (!append) loadShortVideoSummary().catch(handleSummaryLoadError);
   }
@@ -1391,6 +1423,7 @@ export function createShortVideoPage(deps) {
     const sound = normalizeShortVideoSound(state.shortVideo.sound);
     const media = normalizeShortVideoMedia(state.shortVideo.media);
     const quality = normalizeShortVideoQuality(state.shortVideo.quality);
+    const deleted = normalizeShortVideoDeleted(state.shortVideo.deleted);
     const title = document.createElement("h2");
     title.textContent = query
       ? `没有找到“${query}”`
@@ -1400,13 +1433,15 @@ export function createShortVideoPage(deps) {
         ? `没有找到“${state.shortVideo.soundInfo?.title || "当前原声"}”的本地作品`
       : quality !== "all"
         ? `没有找到${shortVideoQualityLabel(quality)}视频`
+      : deleted === "deleted"
+        ? "没有找到已从作者主页删除的本地作品"
       : media === "gallery"
         ? "没有找到图文作品"
         : media === "video"
           ? "没有找到视频作品"
           : state.shortVideo.status || "没有匹配的短视频";
     const hint = document.createElement("p");
-    hint.textContent = query || topic || sound || media !== "all"
+    hint.textContent = query || topic || sound || media !== "all" || deleted !== "all"
       ? "试试更短的关键词，或者调整作品类型。"
       : "本地库暂时没有可展示的内容。";
     const actions = document.createElement("div");
@@ -1552,6 +1587,7 @@ export function createShortVideoPage(deps) {
     const wrap = document.createElement("div");
     wrap.className = "short-video-delete-actions";
     if (isShortVideoAuthorIndexPage()) return wrap;
+    if (isShortVideoAuthorDetailPage()) wrap.append(renderShortVideoDeletedControl(data));
     wrap.append(renderShortVideoSortControl());
     const selection = shortVideoDeleteSelection();
     if (!state.shortVideo.deleteMode) {
@@ -1599,43 +1635,6 @@ export function createShortVideoPage(deps) {
     });
     wrap.append(selectLoaded, commit, cancel);
     return wrap;
-  }
-
-  function renderShortVideoSortControl() {
-    const label = document.createElement("label");
-    label.className = "short-video-sort-control";
-    const text = document.createElement("span");
-    text.textContent = isShortVideoAuthorDetailPage() ? "日期" : "排序";
-    const select = document.createElement("select");
-    select.className = "short-video-sort-select";
-    const timeLabel = state.shortVideo.source === "liked" ? "入库时间" : "发布时间";
-    for (const item of [
-      ["recommended", "推荐排序"],
-      ["watched", "最近观看"],
-      ["published", `${timeLabel}倒序`],
-      ["publishedAsc", `${timeLabel}正序`],
-      ["likes", "点赞最多"],
-      ["likesAsc", "点赞最少"],
-      ["comments", "评论最多"],
-      ["duration", "时长最长"]
-    ]) {
-      const option = document.createElement("option");
-      option.value = item[0];
-      option.textContent = item[1];
-      select.append(option);
-    }
-    select.value = normalizeShortVideoSortValue(state.shortVideo.sort);
-    select.addEventListener("change", () => {
-      const nextSort = normalizeShortVideoSortValue(select.value);
-      if ((state.shortVideo.sort || "published") === nextSort) return;
-      state.shortVideo.sort = nextSort;
-      state.shortVideo.current = null;
-      state.shortVideo.data = null;
-      clearShortVideoDeleteSelection();
-      loadVideos({ replaceRoute: true }).catch(showError);
-    });
-    label.append(text, select);
-    return label;
   }
 
   function renderFollowingAuthorControls() {

@@ -81,6 +81,7 @@ export function routeFromUrl(url = window.location.href) {
       shortVideoAuthor: "all",
       shortVideoMedia: "all",
       shortVideoQuality: "all",
+      shortVideoDeleted: "all",
       shortVideoSource: "liked",
       shortVideoSort: "published",
       musicTrackId: "",
@@ -153,6 +154,7 @@ export function normalizeRoute(route = {}) {
     shortVideoAuthor: view === "shortVideos" ? String(route.shortVideoAuthor || "all").trim() || "all" : "all",
     shortVideoMedia: view === "shortVideos" ? normalizeShortVideoMedia(route.shortVideoMedia || route.media) : "all",
     shortVideoQuality: view === "shortVideos" ? normalizeShortVideoQuality(route.shortVideoQuality || route.quality || route.resolution) : "all",
+    shortVideoDeleted: view === "shortVideos" ? normalizeShortVideoDeleted(route.shortVideoDeleted || route.deleted) : "all",
     shortVideoSource: view === "shortVideos" ? normalizeShortVideoSource(route.shortVideoSource || route.source) : "liked",
     shortVideoSort: view === "shortVideos" ? normalizeShortVideoSort(route.shortVideoSort) : "published",
     musicTrackId: view === "music" ? String(route.musicTrackId || "").trim() : "",
@@ -216,6 +218,7 @@ export function routeUrl(route, options = {}) {
       }
       if (next.shortVideoMedia && next.shortVideoMedia !== "all") params.set("media", next.shortVideoMedia);
       if (next.shortVideoQuality && next.shortVideoQuality !== "all") params.set("quality", next.shortVideoQuality);
+      if (next.shortVideoDeleted === "deleted") params.set("deleted", "1");
       const defaultSource = next.shortVideoAuthorPage && !next.shortVideoId ? "all" : "liked";
       if (next.shortVideoSource && next.shortVideoSource !== defaultSource) params.set("source", next.shortVideoSource);
       if (next.shortVideoSort && next.shortVideoSort !== "published") params.set("sort", next.shortVideoSort);
@@ -339,6 +342,11 @@ function normalizeShortVideoMedia(value) {
 function normalizeShortVideoQuality(value) {
   const quality = String(value || "all").trim().toLowerCase();
   return ["4k", "1440p", "1080p", "720p", "below720p", "unknown"].includes(quality) ? quality : "all";
+}
+
+function normalizeShortVideoDeleted(value) {
+  const normalized = String(value || "all").trim().toLowerCase();
+  return ["1", "true", "yes", "deleted"].includes(normalized) ? "deleted" : "all";
 }
 
 function normalizeShortVideoTopic(value) {
@@ -521,6 +529,7 @@ function shortVideoRouteFromPath(routePath, params = new URLSearchParams()) {
     shortVideoAuthor: authorPage || requestedAuthor,
     shortVideoMedia: normalizeShortVideoMedia(params.get("media") || params.get("type")),
     shortVideoQuality: normalizeShortVideoQuality(params.get("quality") || params.get("resolution")),
+    shortVideoDeleted: normalizeShortVideoDeleted(params.get("deleted")),
     shortVideoSource: authorPage
       ? normalizeShortVideoSource(requestedSource === "authors" ? "all" : requestedSource || "all")
       : normalizeShortVideoSource(requestedSource),
@@ -562,6 +571,7 @@ function musicRouteFromPath(routePath, params = new URLSearchParams()) {
     shortVideoAuthor: "all",
     shortVideoSource: "liked",
     shortVideoSort: "published",
+    shortVideoDeleted: "all",
     musicTrackId: section === "track" ? decodeRouteSegment(segments[2] || "") : "",
     musicArtistId: section === "artist" ? decodeRouteSegment(segments[2] || "") : "",
     musicAlbumId: section === "album" ? decodeRouteSegment(segments[2] || "") : "",

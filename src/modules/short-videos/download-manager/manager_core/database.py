@@ -46,6 +46,7 @@ def init_db() -> None:
               follower_count INTEGER,
               total_favorited INTEGER,
               aweme_count INTEGER,
+              has_deleted_works INTEGER NOT NULL DEFAULT 0,
               favoriting_count INTEGER,
               gender INTEGER,
               age INTEGER,
@@ -102,6 +103,8 @@ def init_db() -> None:
               music_play_url TEXT,
               local_music_path TEXT,
               status TEXT NOT NULL DEFAULT 'pending',
+              is_missing_from_profile INTEGER NOT NULL DEFAULT 0,
+              missing_from_profile_at TEXT,
               attempts INTEGER NOT NULL DEFAULT 0,
               discovered_at TEXT NOT NULL,
               last_seen_at TEXT NOT NULL,
@@ -150,6 +153,7 @@ def init_db() -> None:
         migrate_profile_metadata_columns(conn)
         migrate_link_author_columns(conn)
         migrate_link_preview_columns(conn)
+        migrate_link_profile_presence_columns(conn)
         migrate_link_files(conn)
         migrate_video_quality_audits(conn)
         migrate_self_profile_aliases(conn)
@@ -221,6 +225,7 @@ def migrate_profile_metadata_columns(conn: sqlite3.Connection) -> None:
         "follower_count": "INTEGER",
         "total_favorited": "INTEGER",
         "aweme_count": "INTEGER",
+        "has_deleted_works": "INTEGER NOT NULL DEFAULT 0",
         "favoriting_count": "INTEGER",
         "gender": "INTEGER",
         "age": "INTEGER",
@@ -287,6 +292,21 @@ def migrate_link_preview_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE links ADD COLUMN {name} {column_type}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_links_create_time ON links(create_time)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_links_media_type ON links(media_type)")
+
+
+def migrate_link_profile_presence_columns(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(links)").fetchall()}
+    specs = {
+        "is_missing_from_profile": "INTEGER NOT NULL DEFAULT 0",
+        "missing_from_profile_at": "TEXT",
+    }
+    for name, definition in specs.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE links ADD COLUMN {name} {definition}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_links_profile_missing "
+        "ON links(profile_id, is_missing_from_profile, id)"
+    )
 
 
 def migrate_link_files(conn: sqlite3.Connection) -> None:
@@ -420,6 +440,7 @@ def merge_profile_alias(conn: sqlite3.Connection, target_id: int, source_id: int
           follower_count=COALESCE(follower_count, ?),
           total_favorited=COALESCE(total_favorited, ?),
           aweme_count=COALESCE(aweme_count, ?),
+          has_deleted_works=MAX(COALESCE(has_deleted_works, 0), ?),
           favoriting_count=COALESCE(favoriting_count, ?),
           gender=COALESCE(gender, ?),
           age=COALESCE(age, ?),
@@ -453,6 +474,7 @@ def merge_profile_alias(conn: sqlite3.Connection, target_id: int, source_id: int
             source["follower_count"],
             source["total_favorited"],
             source["aweme_count"],
+            int(source["has_deleted_works"] or 0),
             source["favoriting_count"],
             source["gender"],
             source["age"],

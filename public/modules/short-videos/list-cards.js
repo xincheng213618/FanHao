@@ -158,6 +158,12 @@ export function createShortVideoListCards(dependencies) {
     img.decoding = "async";
     img.fetchPriority = index < 8 ? "high" : "low";
     open.append(img);
+    if (video.deletedFromAuthor) {
+      const deleted = document.createElement("span");
+      deleted.className = "short-video-deleted-badge";
+      deleted.textContent = "主页已删除";
+      open.append(deleted);
+    }
     const like = document.createElement("span");
     like.className = "short-video-like-badge";
     like.append(createIcon("heart"), document.createTextNode(formatShortVideoMetric(video, "likes")));
