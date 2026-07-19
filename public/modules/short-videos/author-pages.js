@@ -135,13 +135,15 @@ export function createShortVideoAuthorPages(deps) {
     quickRefresh.className = "short-video-author-page-secondary short-video-author-collector-action";
     quickRefresh.textContent = "快速刷新";
     quickRefresh.title = "通过 8765 增量采集最新作品，连续遇到旧作品后快速停止";
-    quickRefresh.addEventListener("click", () => runAuthorCollector(author, "quick", quickRefresh).catch(showError));
+    quickRefresh.addEventListener("click", () => runAuthorCollector(author, "quick", quickRefresh)
+      .catch((error) => showBrowserToast(error?.message || "快速刷新启动失败")));
     const fullRefresh = document.createElement("button");
     fullRefresh.type = "button";
     fullRefresh.className = "short-video-author-page-secondary short-video-author-collector-action";
     fullRefresh.textContent = "全部扫描";
     fullRefresh.title = "完整扫描作者全部作品并更新点赞、评论等统计";
-    fullRefresh.addEventListener("click", () => runAuthorCollector(author, "full", fullRefresh).catch(showError));
+    fullRefresh.addEventListener("click", () => runAuthorCollector(author, "full", fullRefresh)
+      .catch((error) => showBrowserToast(error?.message || "全部扫描启动失败")));
     actions.append(follow, douyin, quickRefresh, fullRefresh);
     head.append(back, avatar, copy, actions);
     return head;

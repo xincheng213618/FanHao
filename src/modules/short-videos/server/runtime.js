@@ -167,24 +167,23 @@ export function createShortVideosRuntime({
         const mode = String(body?.mode || "quick").trim().toLowerCase() === "full" ? "full" : "quick";
         const state = await downloadManagerRequest("/api/state");
         const profile = collectorProfile(state, secUid);
-        if (!profile) {
-          const error = new Error("8765 里还没有这个作者主页");
-          error.statusCode = 404;
-          throw error;
-        }
         const settings = state?.settings || {};
-        const result = await downloadManagerRequest("/api/profiles/refresh", {
+        const collectorOptions = {
+          max: 0,
+          scrolls: mode === "full" ? Number(settings.scrolls || 12000) : 120,
+          idle_rounds: mode === "full" ? Number(settings.idle_rounds || 160) : 16,
+          incremental_stop_existing: mode === "full" ? 0 : 6,
+          full_scan: mode === "full"
+        };
+        const result = await downloadManagerRequest(profile ? "/api/profiles/refresh" : "/api/extract/start", {
           method: "POST",
-          body: {
-            max_profiles: 0,
-            profile_ids: [Number(profile.id)],
-            since_date: "",
-            max: 0,
-            scrolls: mode === "full" ? Number(settings.scrolls || 12000) : 120,
-            idle_rounds: mode === "full" ? Number(settings.idle_rounds || 160) : 16,
-            incremental_stop_existing: mode === "full" ? 0 : 6,
-            full_scan: mode === "full"
-          }
+          body: profile
+            ? { max_profiles: 0, profile_ids: [Number(profile.id)], since_date: "", ...collectorOptions }
+            : {
+                url: `https://www.douyin.com/user/${encodeURIComponent(secUid)}`,
+                profile_tab: "post",
+                ...collectorOptions
+              }
         });
         if (result?.ok === false) {
           const error = new Error(result.message || "8765 采集任务启动失败");
@@ -195,7 +194,7 @@ export function createShortVideosRuntime({
           ok: true,
           mode,
           jobId: Number(result?.job_id || 0),
-          profile: publicCollectorProfile(profile)
+          profile: publicCollectorProfile(profile || { sec_uid: secUid, tab: "post" })
         });
       } catch (error) {
         sendJson(res, downloadManagerErrorStatus(error), { error: error.message || "作者主页采集启动失败" });
