@@ -81,7 +81,7 @@ export function createProfilesFeature(options) {
     const currentEligibleCount = eligibleCount || localEligibleCount;
     const visibleRows = filteredRows;
     const totalRows = Math.max(total, filteredRows.length);
-    $("profileManagerSummary").textContent = `${totalRows} 个主页 · 已加载 ${visibleRows.length} 个 · 一键采集 ${currentEligibleCount} 个${since ? `（作品不早于 ${since}）` : ""}`;
+    $("profileManagerSummary").textContent = `${totalRows} 个主页 · 已加载 ${visibleRows.length} 个 · 一键快速采集 ${currentEligibleCount} 个${since ? `（作品不早于 ${since}）` : ""}`;
     node.innerHTML = visibleRows.map((profile) => {
       const name = String(profile.nickname || profile.title || `主页 #${profile.id}`).trim();
       const douyinId = displayDouyinId(profile) || "-";
@@ -111,7 +111,8 @@ export function createProfilesFeature(options) {
           <div class="profile-manager-date"><span>上次采集</span><strong>${escapeHtml(lastExtracted || "尚未采集")}</strong></div>
           <div class="profile-manager-row-actions">
             <a class="queue-link" href="${safeUrl(profile.url)}" target="_blank" rel="noreferrer">主页</a>
-            <button data-profile-refresh="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>${Number(profile.is_self || 0) === 1 ? "采集喜欢" : "采集作品"}</button>
+            <button data-profile-refresh="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>${Number(profile.is_self || 0) === 1 ? "采集喜欢" : "快速采集"}</button>
+            ${profile.tab === "post" ? `<button data-profile-full-refresh="${escapeHtml(profile.id || "")}" title="遍历该作者当前全部主页作品，并标记主页已删除作品" ${isExtractActive ? "disabled" : ""}>全量采集</button>` : ""}
             <button class="danger" data-profile-delete="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>删除</button>
           </div>
         </div>
@@ -170,7 +171,8 @@ export function createProfilesFeature(options) {
     toast(`采集任务已启动 #${result.job_id}`);
   }
 
-  async function refreshProfiles(profileIds = []) {
+  async function refreshProfiles(profileIds = [], options = {}) {
+    const fullScan = options.fullScan === true;
     const payload = settings.snapshot();
     await settings.persist(payload);
     const result = await post("/api/profiles/refresh", {
@@ -181,12 +183,15 @@ export function createProfilesFeature(options) {
       scrolls: payload.scrolls,
       idle_rounds: payload.idle_rounds,
       incremental_stop_existing: payload.incremental_stop_existing || 12,
+      full_scan: fullScan,
     });
     $("extractStart").hidden = true;
     $("refreshProfiles").hidden = true;
     $("extractStop").hidden = false;
     $("profileRefreshStop").hidden = false;
-    toast(profileIds.length ? `主页采集已启动 #${result.job_id}` : `一键采集已启动 #${result.job_id}`);
+    toast(profileIds.length
+      ? `${fullScan ? "主页全量采集" : "主页快速采集"}已启动 #${result.job_id}`
+      : `一键快速采集已启动 #${result.job_id}`);
   }
 
   async function importFollowing() {
@@ -281,6 +286,13 @@ export function createProfilesFeature(options) {
         const profileId = Number(deleteButton.dataset.profileDelete || 0);
         if (!profileId) return;
         deleteProfile(profileId, deleteButton).catch((err) => toast(err.message));
+        return;
+      }
+      const fullRefreshButton = event.target.closest("button[data-profile-full-refresh]");
+      if (fullRefreshButton) {
+        const profileId = Number(fullRefreshButton.dataset.profileFullRefresh || 0);
+        if (!profileId) return;
+        refreshProfiles([profileId], { fullScan: true }).catch((err) => toast(err.message));
         return;
       }
       const button = event.target.closest("button[data-profile-refresh]");

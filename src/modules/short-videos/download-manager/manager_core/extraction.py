@@ -38,6 +38,9 @@ extract_process: subprocess.Popen[Any] | None = None
 extract_stop_event = threading.Event()
 
 
+extract_cancel_event = threading.Event()
+
+
 def run_extract_job(
     job_id: int,
     url: str,
@@ -379,6 +382,8 @@ def run_extract_job(
             if clear_global:
                 extract_thread = None
                 extract_job_id = None
+                extract_stop_event.clear()
+                extract_cancel_event.clear()
 
 
 def start_extract(payload: dict[str, Any]) -> dict[str, Any]:
@@ -410,6 +415,7 @@ def start_extract(payload: dict[str, Any]) -> dict[str, Any]:
         if extract_thread is not None and extract_thread.is_alive():
             return {"ok": False, "message": "采集任务已经在运行"}
         extract_stop_event.clear()
+        extract_cancel_event.clear()
         job_id = create_job("extract", "准备采集")
         extract_job_id = job_id
         extract_thread = threading.Thread(
@@ -501,7 +507,7 @@ def run_refresh_profiles_job(
             return
         add_event("info", f"开始批量刷新现有主页：{total_profiles} 个")
         for index, profile in enumerate(rows, start=1):
-            if extract_stop_event.is_set():
+            if extract_cancel_event.is_set():
                 stopped = True
                 break
             extract_stop_event.clear()
@@ -567,6 +573,7 @@ def run_refresh_profiles_job(
             extract_thread = None
             extract_job_id = None
         extract_stop_event.clear()
+        extract_cancel_event.clear()
 
 
 def start_refresh_profiles(payload: dict[str, Any]) -> dict[str, Any]:
@@ -605,6 +612,7 @@ def start_refresh_profiles(payload: dict[str, Any]) -> dict[str, Any]:
         if extract_thread is not None and extract_thread.is_alive():
             return {"ok": False, "message": "采集任务已经在运行"}
         extract_stop_event.clear()
+        extract_cancel_event.clear()
         job_id = create_job("refresh", "准备批量刷新现有主页")
         extract_job_id = job_id
         extract_thread = threading.Thread(
@@ -749,6 +757,7 @@ def run_following_import_job(
             extract_thread = None
             extract_job_id = None
         extract_stop_event.clear()
+        extract_cancel_event.clear()
 
 
 def start_following_import(payload: dict[str, Any]) -> dict[str, Any]:
@@ -762,6 +771,7 @@ def start_following_import(payload: dict[str, Any]) -> dict[str, Any]:
         if extract_thread is not None and extract_thread.is_alive():
             return {"ok": False, "message": "采集任务已经在运行"}
         extract_stop_event.clear()
+        extract_cancel_event.clear()
         job_id = create_job("following", "准备提取本人关注列表")
         extract_job_id = job_id
         extract_thread = threading.Thread(
@@ -779,6 +789,7 @@ def stop_extract() -> dict[str, Any]:
         proc = extract_process
         if not running:
             return {"ok": False, "message": "当前没有采集任务"}
+        extract_cancel_event.set()
         extract_stop_event.set()
         if proc is not None and proc.poll() is None:
             try:

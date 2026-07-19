@@ -536,6 +536,97 @@ class RuntimeCharacterizationTests(unittest.TestCase):
                 self.assertIn("疑似删过作品", manager_html)
                 self.assertIn("deleted_works", profiles_js)
                 self.assertIn("has_deleted_works", profiles_js)
+                self.assertIn("一键快速采集", manager_html)
+                self.assertIn("data-profile-full-refresh", profiles_js)
+                self.assertIn("full_scan: fullScan", profiles_js)
+            finally:
+                runtime.close()
+
+    def test_batch_refresh_continues_after_incremental_child_stop_signal(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="fanhao-download-manager-refresh-") as temp:
+            runtime = IsolatedManager(Path(temp))
+            try:
+                runtime.start()
+                now = "2026-07-20T12:00:00+08:00"
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    for sec_uid in ("batch-author-a", "batch-author-b"):
+                        connection.execute(
+                            """
+                            INSERT INTO profiles(url, sec_uid, tab, title, created_at, updated_at)
+                            VALUES(?, ?, 'post', ?, ?, ?)
+                            """,
+                            (f"https://www.douyin.com/user/{sec_uid}", sec_uid, sec_uid, now, now),
+                        )
+                    profile_ids = [
+                        row[0]
+                        for row in connection.execute(
+                            "SELECT id FROM profiles WHERE sec_uid LIKE 'batch-author-%' ORDER BY id"
+                        ).fetchall()
+                    ]
+                    connection.commit()
+
+                probe_script = f"""
+import json
+from manager_core import extraction
+from manager_core.database import create_job, db, update_job
+
+calls = []
+
+def fake(job_id, url, *args, **kwargs):
+    calls.append(url)
+    update_job(
+        job_id,
+        status="complete",
+        total=1,
+        processed=1,
+        success=1,
+        failed=0,
+        message="incremental done",
+    )
+    extraction.extract_stop_event.set()
+
+extraction.run_extract_job = fake
+job_id = create_job("refresh", "test batch")
+extraction.run_refresh_profiles_job(
+    job_id,
+    0,
+    {profile_ids!r},
+    None,
+    0,
+    10,
+    2,
+    False,
+    12,
+    False,
+)
+with db() as connection:
+    row = connection.execute(
+        "SELECT status, processed, success FROM jobs WHERE id=?",
+        (job_id,),
+    ).fetchone()
+print(json.dumps({{
+    "calls": len(calls),
+    "status": row["status"],
+    "processed": row["processed"],
+    "success": row["success"],
+}}))
+"""
+                probe = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        probe_script,
+                    ],
+                    cwd=MODULE_DIR,
+                    env=runtime.environment,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=True,
+                )
+                result = json.loads(probe.stdout.strip())
+                self.assertEqual(result, {"calls": 2, "status": "complete", "processed": 2, "success": 2})
             finally:
                 runtime.close()
 
