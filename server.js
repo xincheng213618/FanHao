@@ -48,9 +48,11 @@ import { createAdminScriptService } from "./src/modules/system/server/admin-scri
 import { createAdminSettingsService } from "./src/modules/system/server/admin-settings-service.js";
 import { createAdminTaskOrchestrationService } from "./src/modules/system/server/admin-task-orchestration-service.js";
 import { createAdminTaskService } from "./src/modules/system/server/admin-task-service.js";
+import { createAccessAnalyticsService } from "./src/modules/system/server/access-analytics-service.js";
 import { createAppConfigService } from "./src/modules/system/server/app-config-service.js";
 import { createWorkClassificationService } from "./src/modules/fanhao/server/works/work-classification-service.js";
 import { createDoubanCookieService } from "./src/modules/system/server/douban-cookie-service.js";
+import { createIpRegionService } from "./src/modules/system/server/ip-region-service.js";
 import { createAccessLogger } from "./src/platform/server/access-log.js";
 import { createArchiveImageService } from "./src/platform/server/archive-image-service.js";
 import { createAuthServices } from "./src/platform/server/auth.js";
@@ -68,6 +70,7 @@ import { createVideoProbeCacheService } from "./src/platform/server/video-probe-
 import { createVideoProbeService } from "./src/platform/server/video-probe-service.js";
 
 const {
+  ACCESS_ANALYTICS_DB_PATH,
   ACCESS_LOG_PATH,
   ACTOR_AVATAR_EXTS,
   ADMIN_TASK_HISTORY_LIMIT,
@@ -79,6 +82,7 @@ const {
   ARCHIVE_READER_HELPER_PATH,
   AUTH_SECRET_PATH,
   CORE_DB_PATH,
+  CORE_IMAGE_DB_PATH,
   COVER_HINTS,
   DATA_DIR,
   DEFAULT_FAVORITE_FOLDER_ID,
@@ -106,6 +110,7 @@ const {
   IMAGE_READER_CACHE_TOUCH_THROTTLE_MS,
   IMAGE_READER_LIST_CACHE_TTL_MS,
   INFO_EXTS,
+  IP2REGION_XDB_PATH,
   JAVDB_115_COOKIE_PROFILE_DIR,
   LIBRARY_ROOTS,
   LOCAL_ACTOR_AVATAR_SOURCE,
@@ -232,7 +237,8 @@ const userStateService = createUserStateService({
 });
 const coreDbService = createCoreDbService({
   dbPath: CORE_DB_PATH,
-  ensureDataDir
+  ensureDataDir,
+  imageDbPath: CORE_IMAGE_DB_PATH
 });
 let library = emptyLibrary();
 let lastScanError = null;
@@ -314,7 +320,7 @@ const workImageService = createWorkImageService({
   proxiedRemoteImageUrl
 });
 const prewarmCoreWorkCovers = workImageService.prewarmCoreWorkCovers;
-const mediaBlobStore = createMediaBlobWorkerClient({ dbPath: CORE_DB_PATH });
+const mediaBlobStore = createMediaBlobWorkerClient({ dbPath: CORE_DB_PATH, imageDbPath: CORE_IMAGE_DB_PATH });
 const mediaResponseService = createMediaResponseService({
   coreImageRow,
   corePersonAvatarRow,
@@ -711,6 +717,19 @@ const adminSettingsService = createAdminSettingsService({
   doubanCookieService,
   getModuleRegistry: () => moduleRegistry
 });
+const ipRegionService = createIpRegionService({ xdbPath: IP2REGION_XDB_PATH });
+const accessAnalyticsService = createAccessAnalyticsService({
+  dbPath: ACCESS_ANALYTICS_DB_PATH,
+  ensureDataDir,
+  ipRegionService
+});
+const accessLogBootstrap = await accessAnalyticsService.bootstrapFromAccessLogs([
+  `${ACCESS_LOG_PATH}.1`,
+  ACCESS_LOG_PATH
+]);
+if (accessLogBootstrap.imported) {
+  console.log(`[access-analytics] imported ${accessLogBootstrap.imported} historical requests`);
+}
 const actorAvatarService = createActorAvatarService({
   avatarExts: ACTOR_AVATAR_EXTS,
   fileBase,
@@ -808,6 +827,7 @@ const moduleRegistry = await discoverFanHaoModules({
     moduleDeps: {
       system: {
         admin: {
+          accessAnalyticsService,
           adminActorAvatarService,
           adminMaintenanceTaskService,
           adminPersonService,
@@ -996,6 +1016,9 @@ const moduleRegistry = await discoverFanHaoModules({
         sendJson,
         toolDownloadDir: TOOL_DOWNLOAD_DIR,
         ttlMs: TOOL_DOWNLOAD_TTL_MS
+      },
+      marketDashboard: {
+        sendJson
       }
     }
   },
@@ -2163,6 +2186,7 @@ await moduleRegistry.start();
 
 const requestHandler = createRequestHandler({
   applyAppCookie,
+  attachAccessAnalytics: accessAnalyticsService.attach,
   attachAccessLogger,
   requestAuthState,
   routeAuth,
@@ -2182,6 +2206,7 @@ const serverHost = createServerHost({
   host: HOST,
   getLibraryState: () => library,
   stop: async () => {
+    await accessAnalyticsService.close();
     await moduleRegistry.stop();
     await mediaBlobStore.close();
   }

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { attachCoreImageStore } from "../../../../platform/server/core-image-store.js";
 import { readTableStampRow, tableStampValue } from "./table-stamp-query.js";
 import { createTableStampWorkerClient } from "./table-stamp-worker-client.js";
 
@@ -12,43 +13,13 @@ function ensureColumn(db, table, column, definition) {
   }
 }
 
-function ensureCoreCacheTables(db) {
+function ensureCoreTables(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_works_updated_at ON works(updated_at);
     CREATE INDEX IF NOT EXISTS idx_works_status_code_search ON works(status, code_search, id);
     CREATE INDEX IF NOT EXISTS idx_work_people_updated_at ON work_people(updated_at);
     CREATE INDEX IF NOT EXISTS idx_people_updated_at ON people(updated_at);
-    CREATE INDEX IF NOT EXISTS idx_images_updated_at ON images(updated_at);
     CREATE INDEX IF NOT EXISTS idx_collection_items_updated_at ON collection_items(updated_at);
-    CREATE TABLE IF NOT EXISTS remote_image_cache (
-      url TEXT PRIMARY KEY,
-      url_hash TEXT NOT NULL,
-      content_type TEXT,
-      image_blob BLOB,
-      byte_length INTEGER,
-      status TEXT NOT NULL DEFAULT 'ok',
-      error TEXT,
-      fetched_at TEXT,
-      updated_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_remote_image_cache_hash ON remote_image_cache(url_hash);
-    CREATE INDEX IF NOT EXISTS idx_remote_image_cache_status ON remote_image_cache(status);
-    CREATE TABLE IF NOT EXISTS local_image_cache (
-      file_id TEXT PRIMARY KEY,
-      file_path TEXT NOT NULL,
-      relative_path TEXT,
-      content_type TEXT,
-      image_blob BLOB,
-      byte_length INTEGER,
-      source_size INTEGER,
-      source_mtime TEXT,
-      status TEXT NOT NULL DEFAULT 'ok',
-      error TEXT,
-      cached_at TEXT,
-      updated_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_local_image_cache_path ON local_image_cache(file_path);
-    CREATE INDEX IF NOT EXISTS idx_local_image_cache_status ON local_image_cache(status);
     CREATE TABLE IF NOT EXISTS local_files (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
@@ -77,6 +48,7 @@ export function createCoreDbService({
   createDatabase = (filePath) => new DatabaseSync(filePath),
   dbPath,
   ensureDataDir,
+  imageDbPath,
   now = Date.now,
   refreshTableStampRow = null,
   tableStampCacheMs = DEFAULT_TABLE_STAMP_CACHE_MS,
@@ -87,7 +59,7 @@ export function createCoreDbService({
   let globalStampVersion = 0;
   const stampRefreshes = new Map();
   const tableStampVersions = new Map();
-  const tableStampWorker = refreshTableStampRow ? null : createTableStampWorkerClient({ dbPath });
+  const tableStampWorker = refreshTableStampRow ? null : createTableStampWorkerClient({ dbPath, imageDbPath });
   const refreshStampRow = refreshTableStampRow || tableStampWorker.refresh;
 
   function getDb() {
@@ -95,14 +67,14 @@ export function createCoreDbService({
       ensureDataDir();
       db = createDatabase(dbPath);
       db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+      attachCoreImageStore(db, { dbPath: imageDbPath });
       try {
         ensureColumn(db, "people", "gender", "TEXT NOT NULL DEFAULT 'unknown'");
         ensureColumn(db, "works", "has_magnet", "INTEGER");
         ensureColumn(db, "works", "is_streamable", "INTEGER");
         ensureColumn(db, "works", "has_subtitles", "INTEGER");
         ensureColumn(db, "works", "javdb_tags_json", "TEXT");
-        ensureColumn(db, "images", "image_blob", "BLOB");
-        ensureCoreCacheTables(db);
+        ensureCoreTables(db);
       } catch (error) {
         warn("[core-db]", error.message);
       }

@@ -1,0 +1,235 @@
+.access-analytics-view {
+  gap: 16px;
+}
+
+.access-analytics-toolbar,
+.access-analytics-status,
+.access-pagination {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.access-filter-panel {
+  display: grid;
+  grid-template-columns: 130px 150px 170px 150px minmax(220px, 1fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.access-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.access-summary-card {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 16px;
+}
+
+.access-summary-card span,
+.access-summary-card small,
+.access-table-panel small,
+.access-breakdown-grid .admin-panel-head small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.access-summary-card strong {
+  font-size: clamp(23px, 3vw, 34px);
+  line-height: 1;
+}
+
+.access-summary-card.accent { box-shadow: inset 0 3px 0 #1f7a62; }
+.access-summary-card.blue { box-shadow: inset 0 3px 0 #2563eb; }
+.access-summary-card.rust { box-shadow: inset 0 3px 0 #c2410c; }
+.access-summary-card.violet { box-shadow: inset 0 3px 0 #7c3aed; }
+.access-summary-card.slate { box-shadow: inset 0 3px 0 #64748b; }
+
+.access-breakdown-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(300px, 1fr) minmax(320px, 1.15fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.access-auth-list,
+.access-ranking-list,
+.access-daily-list {
+  display: grid;
+  gap: 8px;
+}
+
+.access-auth-row,
+.access-ranking-row,
+.access-daily-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(96px, 1fr) auto;
+  gap: 8px 12px;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-soft);
+  padding: 9px 10px;
+}
+
+.access-auth-row button {
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 0;
+  text-align: left;
+  font: inherit;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.access-auth-row strong,
+.access-ranking-row strong,
+.access-daily-row strong {
+  font-size: 13px;
+}
+
+.access-auth-row small,
+.access-ranking-row small,
+.access-daily-row small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.access-ranking-bar,
+.access-daily-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 0;
+  width: var(--bar-width, 0%);
+  background: rgba(31, 122, 98, 0.08);
+  pointer-events: none;
+}
+
+.access-ranking-row > :not(.access-ranking-bar),
+.access-daily-row > :not(.access-daily-bar) {
+  position: relative;
+  z-index: 1;
+}
+
+.access-table-panel {
+  gap: 14px;
+}
+
+.access-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.access-table {
+  width: 100%;
+  min-width: 980px;
+  border-collapse: collapse;
+  background: var(--panel);
+}
+
+.access-table th,
+.access-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.access-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.access-table tbody tr:last-child td { border-bottom: 0; }
+.access-table tbody tr:hover { background: rgba(31, 122, 98, 0.04); }
+
+.access-ip {
+  font: 800 13px/1.35 Consolas, "Cascadia Mono", monospace;
+}
+
+.access-cell-stack {
+  display: grid;
+  gap: 3px;
+}
+
+.access-cell-stack small,
+.access-path {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.access-path {
+  display: block;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: Consolas, "Cascadia Mono", monospace;
+}
+
+.access-auth-badge {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  padding: 3px 7px;
+  font-size: 11px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.access-auth-badge.missing-password { color: #b42318; border-color: rgba(180, 35, 24, 0.3); }
+.access-auth-badge.password { color: #1f7a62; border-color: rgba(31, 122, 98, 0.3); }
+.access-auth-badge.app,
+.access-auth-badge.app-cookie { color: #6d28d9; border-color: rgba(109, 40, 217, 0.3); }
+
+.access-empty {
+  padding: 36px 16px !important;
+  color: var(--muted);
+  text-align: center !important;
+}
+
+@media (max-width: 1180px) {
+  .access-summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .access-breakdown-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .access-daily-panel { grid-column: 1 / -1; }
+}
+
+@media (max-width: 820px) {
+  .access-analytics-toolbar { align-items: flex-start; }
+  .access-filter-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .access-query-field { grid-column: 1 / -1; }
+  .access-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .access-breakdown-grid { grid-template-columns: 1fr; }
+  .access-daily-panel { grid-column: auto; }
+}
+
+@media (max-width: 540px) {
+  .access-analytics-toolbar,
+  .access-analytics-status,
+  .access-table-panel > .admin-panel-head { align-items: stretch; flex-direction: column; }
+  .access-filter-panel,
+  .access-summary-grid { grid-template-columns: 1fr; }
+  .access-query-field { grid-column: auto; }
+  .access-pagination { justify-content: space-between; }
+}

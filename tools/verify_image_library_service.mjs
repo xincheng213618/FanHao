@@ -5,13 +5,18 @@ const photoSets = [
   photo("a1", "分类 A", "文件夹一", "人物甲", "合集一/001.zip", 100, "2026-07-01T00:00:00.000Z"),
   photo("a2", "分类 A", "文件夹一", "人物甲", "合集一/002.zip", 200, "2026-07-02T00:00:00.000Z"),
   photo("b1", "分类 B", "文件夹二", "人物乙", "合集一/003.zip", 300, "2026-07-03T00:00:00.000Z"),
-  photo("a3", "分类 A", "文件夹二", "文件夹二", "合集二/001.zip", 400, "2026-07-04T00:00:00.000Z")
+  photo("a3", "分类 A", "文件夹二", "文件夹二", "合集二/001.zip", 400, "2026-07-04T00:00:00.000Z"),
+  photo("y1", "[YITUYU艺图语]", "", "柳柳杨柳柳", "[YITUYU艺图语]/001.rar", 500, "2023-04-18T00:00:00.000Z"),
+  photo("y2", "[YITUYU艺图语]", "", "只有作品", "[YITUYU艺图语]/002.rar", 600, "2023-04-19T00:00:00.000Z")
 ];
 photoSets[0].title = "[分类 A]2026.07.01 VOL.100 人物甲";
 photoSets[1].title = "[分类 A]2026.06.02 就是阿朱啊 – NO.108 阳台";
 photoSets[2].title = "[分类 B]2026.05.03 N0.102 童颜少女";
 photoSets[3].title = "文件夹二 Sira (시라) - Collection VOL.12 [95P+5V／437MB]";
+photoSets[4].title = "[YITUYU艺图语]2023.04.18 午后玫瑰 柳柳杨柳柳_[22+1P／147MB]";
+photoSets[5].title = "[YITUYU艺图语]2023.04.19 只有作品_[22P／100MB]";
 let coverUrlCalls = 0;
+let cacheStatusCalls = 0;
 const imageIndex = { scannedAt: "2026-07-11T00:00:00.000Z", roots: [], mediaRoots: [], photoSets, mediaItems: [] };
 
 const service = createImageLibraryService({
@@ -21,7 +26,10 @@ const service = createImageLibraryService({
   },
   galleryMediaRootStatuses: () => [],
   getImageLibraryIndex: () => imageIndex,
-  imageReaderCacheStatus: () => ({ root: "", exists: true, maxBytes: 0, currentBytes: 0, overBytes: 0, fileCount: 0, cleanupIntervalMs: 0 }),
+  imageReaderCacheStatus: () => {
+    cacheStatusCalls += 1;
+    return { root: "", exists: true, maxBytes: 0, currentBytes: 0, overBytes: 0, fileCount: 0, cleanupIntervalMs: 0 };
+  },
   mangaService: {
     cacheDirs: () => [],
     publicSummary: (value) => value,
@@ -33,7 +41,7 @@ const service = createImageLibraryService({
     publicMovie: (value) => value,
     publicTvSeries: (value) => value,
     movieRow: () => null,
-    tvSeriesKey: () => "",
+    tvSeriesKey: (category, seriesName) => `${category}|${seriesName}`,
     tvSeriesRow: () => null,
     tvSeriesRowsMap: () => new Map()
   },
@@ -48,11 +56,14 @@ const service = createImageLibraryService({
 });
 
 const summary = service.summaryPayload();
-assert.equal(summary.totals.photoSets, 4);
+assert.equal(summary.totals.photoSets, 6);
 assert.equal("photoSets" in summary, false, "summary payload must not include the full photo index");
+const mediaSummary = service.summaryPayload({ includeCache: false });
+assert.equal(mediaSummary.cache, null, "media summary should skip the image reader cache scan");
+assert.equal(cacheStatusCalls, 1, "cache-free summary should not collect image reader cache entries");
 
 const collectionList = service.itemsPayload(url({ mode: "photo", photoView: "collections", sort: "count", limit: "20" }));
-assert.equal(collectionList.total, 2);
+assert.equal(collectionList.total, 3);
 assert.equal(collectionList.items[0].title, "[套图1] / 分类 A");
 assert.equal(collectionList.items[0].albumCount, 3);
 assert.equal(collectionList.items[0].collectionCount, 2);
@@ -114,6 +125,19 @@ assert.deepEqual(structuralPersonCollection.facets.people, [], "a folder label r
 assert.equal(structuralPersonCollection.items[0].albumNumber, "VOL.12");
 assert.equal(structuralPersonCollection.items[0].albumSubject, "Sira (시라)", "a subject before VOL should be preserved without its collection label");
 
+const namedWorkCollection = service.itemsPayload(url({
+  mode: "photo",
+  photoView: "albums",
+  collection: "T:\\[套图1]|[YITUYU艺图语]",
+  limit: "20"
+}));
+const namedWork = namedWorkCollection.items.find((item) => item.id === "y1");
+assert.equal(namedWork.personName, "柳柳杨柳柳");
+assert.equal(namedWork.albumSubject, "午后玫瑰", "a named YITUYU work must exclude its trailing person from the work title");
+assert.deepEqual(namedWorkCollection.facets.people, [
+  { value: "柳柳杨柳柳", count: 1 }
+], "a middle section that cannot be split from the work title must not become a person facet");
+
 const multiTermSearch = service.itemsPayload(url({
   mode: "photo",
   photoView: "albums",
@@ -138,6 +162,28 @@ assert.deepEqual(punctuationSearch.searchTerms, ["no108"]);
 service.itemsPayload(url({ mode: "photo", photoView: "albums", q: "a1", limit: "20" }));
 assert.equal(coverUrlCalls, photoSets.length, "prepared photo items should be reused across list and search requests");
 
+imageIndex.mediaItems = [
+  media("movie-1", "movie", "电影", "电影一"),
+  media("tv-1", "tv", "华语剧", "剧集一", "第 1 集"),
+  media("tv-2", "tv", "华语剧", "剧集一", "第 2 集"),
+  media("western-1", "western", "欧美", "人物甲", "视频一"),
+  media("western-2", "western", "欧美", "人物甲", "视频二")
+];
+
+const mediaWorks = service.itemsPayload(url({ mode: "media", limit: "20" }));
+assert.equal(mediaWorks.total, 2, "media list should return one movie plus one grouped TV work");
+assert.equal(mediaWorks.items.find((item) => item.mediaKind === "tv")?.type, "tvSeriesWork");
+assert.equal(mediaWorks.items.find((item) => item.mediaKind === "tv")?.episodeCount, 2);
+const movieWorks = service.itemsPayload(url({ mode: "media", kind: "movie", limit: "20" }));
+assert.deepEqual(movieWorks.items.map((item) => item.id), ["movie-1"], "media kind should be independent from the library category filter");
+
+const tvEpisodes = service.itemsPayload(url({ mode: "tv", person: "剧集一", limit: "20" }));
+assert.deepEqual(tvEpisodes.items.map((item) => item.id).sort(), ["tv-1", "tv-2"], "selecting a TV work should page its episodes");
+
+const westernPeople = service.itemsPayload(url({ mode: "western", limit: "20" }));
+assert.equal(westernPeople.total, 1, "western list should page grouped people instead of every video");
+assert.equal(westernPeople.items[0].videoCount, 2);
+
 console.log("image-library-service: ok");
 
 function photo(id, category, subCategory, personName, relativePath, size, updatedAt) {
@@ -153,6 +199,20 @@ function photo(id, category, subCategory, personName, relativePath, size, update
     size,
     updatedAt,
     coverUrl: ""
+  };
+}
+
+function media(id, mediaKind, category, personOrSeries, title = personOrSeries) {
+  return {
+    id,
+    mediaKind,
+    category,
+    title,
+    personName: mediaKind === "tv" ? "" : personOrSeries,
+    seriesName: mediaKind === "tv" ? personOrSeries : "",
+    size: 100,
+    updatedAt: "2026-07-12T00:00:00.000Z",
+    playable: true
   };
 }
 

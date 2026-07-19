@@ -25,6 +25,7 @@ export function createGalleryPage(deps) {
   } = deps;
 
   let imageListRequestVersion = 0;
+  let librarySummaryTimer = 0;
 
   function enter(options = {}) {
     if (state.gallery.mode === "cache") state.gallery.mode = "photo";
@@ -34,7 +35,15 @@ export function createGalleryPage(deps) {
     setMainHeader(imageModule ? "图库" : galleryModeLabel(state.gallery.mode), imageModule ? "套图和韩漫" : "本地媒体");
     renderGalleryStats();
     renderGalleryView();
-    loadImageLibrary();
+    window.clearTimeout(librarySummaryTimer);
+    if (imageModule) {
+      void loadImageLibrary();
+    } else {
+      librarySummaryTimer = window.setTimeout(() => {
+        librarySummaryTimer = 0;
+        void loadImageLibrary();
+      }, 1000);
+    }
     syncRouteAfterNavigation(options);
   }
 
@@ -43,6 +52,7 @@ export function createGalleryPage(deps) {
     state.gallery.photoView = state.gallery.mode === "photo" && route.galleryPhotoView !== "albums" ? "collections" : "albums";
     state.gallery.photoCollection = route.galleryPhotoCollection || null;
     state.gallery.query = route.galleryQuery || "";
+    state.gallery.mediaKind = state.gallery.mode === "media" ? route.galleryMediaKind || "all" : "all";
     state.gallery.category = route.galleryCategory || (state.gallery.mode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all");
     state.gallery.subCategory = route.gallerySubCategory || "all";
     state.gallery.person = route.galleryPerson || "all";
@@ -100,9 +110,8 @@ export function createGalleryPage(deps) {
     state.gallery.loading = true;
     setStatus(options.refresh ? "正在刷新图像资料库索引" : "正在读取图像资料库");
     try {
-      const imageModule = isImageLibraryMode();
-      const endpoint = imageModule ? "/api/image-library/summary" : "/api/image-library";
-      const data = await api(options.refresh ? "/api/image-library/rescan" : endpoint, {
+      const summaryEndpoint = isImageLibraryMode() ? "/api/image-library/summary" : "/api/image-library/summary?cache=0";
+      const data = await api(options.refresh ? "/api/image-library/rescan" : summaryEndpoint, {
         method: options.refresh ? "POST" : "GET"
       });
       state.gallery.data = data;
@@ -125,27 +134,30 @@ export function createGalleryPage(deps) {
   }
 
   function imageLibraryListKey() {
-    if (!isImageLibraryMode()) return "";
+    if (!["photo", "manga", "western", "media", "movie", "tv"].includes(state.gallery.mode)) return "";
     return JSON.stringify({
       mode: state.gallery.mode,
+      mediaKind: state.gallery.mode === "media" ? state.gallery.mediaKind || "all" : "",
       photoView: state.gallery.mode === "photo" ? state.gallery.photoCollection ? "albums" : state.gallery.photoView || "collections" : "",
       collection: state.gallery.mode === "photo" ? state.gallery.photoCollection || "" : "",
-      category: state.gallery.mode === "photo" ? state.gallery.category || "all" : "",
+      category: state.gallery.mode === "manga" ? "" : state.gallery.category || "all",
       subCategory: state.gallery.mode === "photo" ? state.gallery.subCategory || "all" : "",
-      person: state.gallery.mode === "photo" ? state.gallery.person || "all" : "",
+      person: ["photo", "western", "media", "tv"].includes(state.gallery.mode) ? state.gallery.person || "all" : "",
       date: state.gallery.mode === "photo" ? state.gallery.photoDate || "all" : "",
-      query: state.gallery.query || ""
+      query: state.gallery.query || "",
+      sort: ["media", "movie"].includes(state.gallery.mode) ? state.gallery.sort || "updated" : ""
     });
   }
 
   function imageLibraryListPath(options = {}) {
     const collectionIndex = state.gallery.mode === "photo" && !state.gallery.photoCollection && state.gallery.photoView === "collections";
+    const selectedSeries = ["media", "tv"].includes(state.gallery.mode) && state.gallery.person && state.gallery.person !== "all";
     const query = String(state.gallery.query || "").trim();
     const params = new URLSearchParams({
       mode: state.gallery.mode,
       limit: String(Math.max(1, Number(options.limit || state.gallery.visibleLimit || 80))),
       offset: String(Math.max(0, Number(options.offset || 0))),
-      sort: query ? "relevance" : collectionIndex ? "count" : state.gallery.sort || "updated"
+      sort: query ? "relevance" : collectionIndex ? "count" : selectedSeries ? "title" : state.gallery.sort || "updated"
     });
     if (query) params.set("q", query);
     if (state.gallery.mode === "photo") {
@@ -155,6 +167,12 @@ export function createGalleryPage(deps) {
       if (state.gallery.person && state.gallery.person !== "all") params.set("person", state.gallery.person);
       if (state.gallery.photoDate && state.gallery.photoDate !== "all") params.set("date", state.gallery.photoDate);
       if (state.gallery.photoCollection) params.set("collection", state.gallery.photoCollection);
+    } else if (["western", "media", "movie", "tv"].includes(state.gallery.mode)) {
+      if (state.gallery.mode === "media" && state.gallery.mediaKind && state.gallery.mediaKind !== "all") params.set("kind", state.gallery.mediaKind);
+      if (state.gallery.category && state.gallery.category !== "all") params.set("category", state.gallery.category);
+      if (["western", "media", "tv"].includes(state.gallery.mode) && state.gallery.person && state.gallery.person !== "all") {
+        params.set("person", state.gallery.person);
+      }
     }
     return `/api/image-library/items?${params.toString()}`;
   }
@@ -172,7 +190,6 @@ export function createGalleryPage(deps) {
   }
 
   async function loadImageLibraryItems(options = {}) {
-    if (!isImageLibraryMode()) return null;
     const key = imageLibraryListKey();
     if (!key) return null;
     const currentList = state.gallery.list?.key === key ? state.gallery.list : null;

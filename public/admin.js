@@ -1,4 +1,5 @@
 import { createSettingsController } from "./modules/system/settings-controller.js?v=20260712-module-settings-02";
+import { createAccessAnalyticsController } from "./modules/system/access-analytics-controller.js?v=20260718-access-analytics-01";
 
 const state = {
   library: null,
@@ -100,6 +101,7 @@ const els = {
 const formatter = new Intl.NumberFormat("zh-CN");
 const VIEW_TITLES = {
   overview: ["后台", "系统总览"],
+  visitors: ["安全与流量", "访问统计"],
   scripts: ["运维", "作业中心"],
   tasks: ["监控", "任务队列"],
   maintenance: ["资料库", "数据维护"],
@@ -201,6 +203,10 @@ const settingsController = createSettingsController({
   status: els.settingsStatus,
   onSaved: () => loadImageReaderCache({ quiet: true })
 });
+const accessAnalyticsController = createAccessAnalyticsController({
+  api,
+  root: document.querySelector("#adminViewVisitors")
+});
 
 function setBusy(button, busy, text = "处理中") {
   if (!button) return;
@@ -262,7 +268,15 @@ async function refreshTasks() {
 async function refreshAll() {
   setBusy(els.refreshAll, true, "刷新中");
   try {
-    await Promise.all([loadHealth(), loadLibrary(), loadScripts(), refreshTasks(), loadImageReaderCache({ quiet: true }), settingsController.load({ quiet: true })]);
+    await Promise.all([
+      loadHealth(),
+      loadLibrary(),
+      loadScripts(),
+      refreshTasks(),
+      loadImageReaderCache({ quiet: true }),
+      settingsController.load({ quiet: true }),
+      accessAnalyticsController.load({ quiet: true })
+    ]);
     await refreshCoverCacheStatus({ quiet: true });
     renderLastRefresh();
   } finally {

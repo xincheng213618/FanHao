@@ -1032,6 +1032,7 @@ const workInfoService = read("src/modules/fanhao/server/works/work-info-service.
 const workPresenterService = read("src/modules/fanhao/server/works/presenter-service.js");
 const workMediaRoutes = read("src/modules/fanhao/server/works/routes-media.js");
 const coreDbService = read("src/modules/fanhao/server/library/core-db-service.js");
+const coreImageStoreSource = read("src/platform/server/core-image-store.js");
 const tableStampQuerySource = read("src/modules/fanhao/server/library/table-stamp-query.js");
 const userStateRoutes = read("src/modules/fanhao/server/user-state/routes.js");
 const userStateServiceSource = read("src/modules/fanhao/server/collections/user-state-service.js");
@@ -1044,7 +1045,9 @@ assert(coreDbService.includes("const DEFAULT_TABLE_STAMP_CACHE_MS = 5000"), "Fan
 assert(coreDbService.includes("idx_works_updated_at ON works(updated_at)"), "work-info stamps must use a lightweight updated-at index");
 assert(coreDbService.includes("idx_works_status_code_search ON works(status, code_search, id)"), "code-prefix searches must use a status-aware covering index");
 assert(coreDbService.includes("idx_work_people_updated_at ON work_people(updated_at)"), "actor-movie stamps must use a lightweight updated-at index");
-assert(coreDbService.includes("idx_images_updated_at ON images(updated_at)"), "cover stamps must use a lightweight table-specific update index");
+assert(coreImageStoreSource.includes("idx_images_updated_at") && coreImageStoreSource.includes("ON images(updated_at)"), "cover stamps must use a lightweight table-specific update index");
+assert(coreDbService.includes("attachCoreImageStore(db, { dbPath: imageDbPath })"), "core queries must attach the separated image database");
+assert(mediaBlobWorkerSource.includes("attachCoreImageStore(db, { dbPath: workerData.imageDbPath })"), "media workers must read and write the separated image database");
 assert(tableStampQuerySource.includes("MAX(updated_at)"), "table stamps must track changes in their own target table");
 assert(!tableStampQuerySource.includes("PRAGMA data_version"), "unrelated SQLite writes must not invalidate every FanHao cache");
 assert(collectionQueryServiceSource.includes("allWorks.slice(offset, offset + limit)"), "favorites must paginate before presenting work details");

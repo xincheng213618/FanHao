@@ -7,6 +7,7 @@ const projectDir = path.resolve(scriptDir, "..");
 const sourceDir = path.resolve(projectDir, "..", "public", "games");
 const targetDir = path.resolve(projectDir, "www", "games");
 const expectedTarget = path.join(projectDir, "www", "games");
+const webOnlyGames = new Set(["gomoku", "jump"]);
 
 if (targetDir !== expectedTarget) throw new Error(`Unexpected shared asset target: ${targetDir}`);
 if (!fs.statSync(sourceDir, { throwIfNoEntry: false })?.isDirectory()) {
@@ -14,7 +15,14 @@ if (!fs.statSync(sourceDir, { throwIfNoEntry: false })?.isDirectory()) {
 }
 
 fs.rmSync(targetDir, { recursive: true, force: true });
-fs.cpSync(sourceDir, targetDir, { recursive: true });
+fs.cpSync(sourceDir, targetDir, {
+  recursive: true,
+  filter(sourcePath) {
+    const relativePath = path.relative(sourceDir, sourcePath);
+    const topLevelDir = relativePath.split(path.sep)[0];
+    return !webOnlyGames.has(topLevelDir);
+  }
+});
 
 let fileCount = 0;
 let totalBytes = 0;
@@ -25,4 +33,4 @@ for (const entry of fs.readdirSync(targetDir, { recursive: true, withFileTypes: 
   totalBytes += fs.statSync(filePath).size;
 }
 
-console.log(`shared-assets: ${fileCount} files, ${totalBytes} bytes`);
+console.log(`shared-assets: ${fileCount} files, ${totalBytes} bytes (excluded web-only: ${[...webOnlyGames].join(", ")})`);

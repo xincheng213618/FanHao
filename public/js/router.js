@@ -130,6 +130,7 @@ export function normalizeRoute(route = {}) {
     galleryChapterIndex: view === "gallery" ? String(route.galleryChapterIndex || "").trim() : "",
     galleryMediaId: view === "gallery" ? String(route.galleryMediaId || "").trim() : "",
     galleryQuery: view === "gallery" ? String(route.galleryQuery || "").trim() : "",
+    galleryMediaKind: view === "gallery" && galleryMode === "media" ? normalizeGalleryMediaKind(route.galleryMediaKind) : "all",
     galleryCategory: view === "gallery" ? normalizeGalleryCategory(route) : "all",
     gallerySubCategory: view === "gallery" ? String(route.gallerySubCategory || "all").trim() || "all" : "all",
     galleryPerson: view === "gallery" ? String(route.galleryPerson || "all").trim() || "all" : "all",
@@ -189,6 +190,7 @@ export function routeUrl(route, options = {}) {
   if (next.personId) params.set("personId", next.personId);
   if (next.view === "gallery") {
     if (next.galleryQuery) params.set("q", next.galleryQuery);
+    if (next.galleryMode === "media" && next.galleryMediaKind !== "all") params.set("kind", next.galleryMediaKind);
     if (next.galleryCategory && shouldWriteGalleryCategory(next)) params.set("category", next.galleryCategory);
     if (next.gallerySubCategory && next.gallerySubCategory !== "all") params.set("subCategory", next.gallerySubCategory);
     if (next.galleryPerson && next.galleryPerson !== "all") {
@@ -265,6 +267,13 @@ function normalizeGalleryCategory(route = {}) {
   if (category) return category;
   if (route.galleryMode === "photo" && String(route.galleryQuery || "").trim()) return "all";
   return route.galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all";
+}
+
+function normalizeGalleryMediaKind(value) {
+  const kind = String(value || "").trim().toLowerCase();
+  if (["movie", "__fanhao_media_kind_movie__"].includes(kind)) return "movie";
+  if (["tv", "__fanhao_media_kind_tv__"].includes(kind)) return "tv";
+  return "all";
 }
 
 function peopleRouteFromPath(routePath, params = new URLSearchParams()) {
@@ -396,7 +405,8 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     galleryChapterIndex: "",
     galleryMediaId: "",
     galleryQuery,
-    galleryCategory: params.has("category") ? params.get("category") || "all" : photoSearch ? "all" : galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all",
+    galleryMediaKind: galleryMode === "media" ? normalizeGalleryMediaKind(params.get("kind") || params.get("mediaKind") || params.get("category")) : "all",
+    galleryCategory: params.has("category") && !["__fanhao_media_kind_movie__", "__fanhao_media_kind_tv__"].includes(params.get("category")) ? params.get("category") || "all" : photoSearch ? "all" : galleryMode === "photo" ? DEFAULT_GALLERY_PHOTO_CATEGORY : "all",
     gallerySubCategory: params.get("subCategory") || params.get("folder") || "all",
     galleryPerson: ["tv", "media"].includes(galleryMode) ? params.get("series") || params.get("person") || "all" : params.get("person") || "all",
     galleryPhotoDate: galleryMode === "photo" ? params.get("date") || "all" : "all",

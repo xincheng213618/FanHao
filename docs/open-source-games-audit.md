@@ -7,7 +7,7 @@
 - 优先选择有明确开源许可证的项目；如用户确认仅本地自用，可集成无许可证但来源清楚的 source-available 项目。
 - 优先选择成熟、维护历史清楚、移动端交互简单的项目。
 - 审计不充分的项目不进 `public/games`。
-- `public/games` 是唯一受版本控制的游戏资产源；Android 构建通过 `npm run sync:assets` 生成 `android-client/www/games`，避免两份副本漂移。
+- `public/games` 是唯一受版本控制的游戏资产源；Android 构建通过 `npm run sync:assets` 生成 `android-client/www/games`，其中明确标记为 web-only 的游戏不进入 APK，避免两份副本漂移和无意义的包体增长。
 
 ## 已集成
 
@@ -26,6 +26,25 @@
 - 状态：已集成
 - 证据：使用仓库 `app/` 下的 AngularJS 静态版本，补齐本地前端依赖，`README.md`、`SOURCE.txt` 已随包保留；本地浏览器验证关卡列表、第一关棋盘、点按移动和 AI worker 自动解。
 - 改动：移除 Google Analytics 和未使用的 Bootstrap JS 引用；添加 `返回资料库` 链接；修复 AngularJS hash 前缀、`$http.then()` 兼容和手机宽度溢出。
+
+### 五子棋 AI（仅网页）
+
+- 来源：https://github.com/dhbloo/rapfi 与官方 Web 前端 https://github.com/dhbloo/gomoku-calculator
+- 许可证：Rapfi 引擎 GPL-3.0；NNUE/传统评估权重 CC0-1.0。
+- 状态：已集成，仅网页端，不进入 Android APK。
+- 选型：Rapfi 官方定位为强力五子棋/连珠引擎，使用 Alpha-Beta 搜索和 NNUE 评估，并正式支持 WebAssembly；比普通 JavaScript 极小极大示例更适合作为高强度人机对战内核。
+- 证据：使用 Gomoku Calculator 官方发布的单线程 WebAssembly + 完整 NNUE 数据包；随包保留引擎与权重许可证、来源 URL、文件哈希。自有页面提供 15×15 无禁手规则、执黑/执白、三档难度、悔棋、胜负判定和搜索信息。
+- Android 隔离：`android-client/scripts/sync-shared-assets.mjs` 明确排除 `gomoku`，Android 入口仍只展示原有 2 个小游戏。
+
+### 蓄力跳台（仅网页）
+
+- 来源：https://github.com/shenmaxg/web-jump
+- 固定版本：`3fdcb17436f77ddb6664b9aad8f9c5fffdf0fe58`
+- 许可证：MIT。
+- 状态：已集成，仅网页端，不进入 Android APK。
+- 选型：Three.js 蓄力跳跃玩法，运行时为纯静态资源；上游源码使用 `touchstart` / `touchend`，本地适配为统一的 Pointer Events。
+- 证据：在 Node.js 25.8.2 + webpack 5.108.4 下完成生产构建；保留固定提交信息、许可证、上游 README、修改后完整源码和运行时 SHA-256。自有页面增加计分、浏览器本地最佳成绩、失败提示、重新开始及返回资料库入口，并将设备像素倍率限制为 2。
+- Android 隔离：`android-client/scripts/sync-shared-assets.mjs` 明确排除 `jump`，Android 入口继续只展示原有 2 个小游戏。
 
 ## 下一批只做候选，不集成
 

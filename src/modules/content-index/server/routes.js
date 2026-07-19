@@ -12,7 +12,7 @@ export async function routeContentIndexApi(req, res, url, deps) {
 
   if (url.pathname === "/api/image-library/summary" && req.method === "GET") {
     try {
-      sendJson(res, 200, imageLibraryService.summaryPayload());
+      sendJson(res, 200, imageLibraryService.summaryPayload({ includeCache: url.searchParams.get("cache") !== "0" }));
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "图像资料库概览读取失败" });
     }

@@ -1,6 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import crypto from "node:crypto";
+import path from "node:path";
+import { attachCoreImageStore } from "../src/platform/server/core-image-store.js";
 
 const MAX_REMOTE_IMAGE_BYTES = 8 * 1024 * 1024;
 const ALLOWED_REMOTE_IMAGE_HOSTS = ["jdbstatic.com", "javdb.com"];
@@ -13,7 +15,13 @@ if (!args.db || !args.urlsFile) {
 
 const urls = uniqueRemoteImageUrls(JSON.parse(fs.readFileSync(args.urlsFile, "utf8")));
 const db = new DatabaseSync(args.db);
-ensureSchema(db);
+const usesCoreImageStore = path.basename(path.resolve(args.db)).toLowerCase() === "fanhao-core-v2.sqlite";
+if (usesCoreImageStore) {
+  attachCoreImageStore(db, {
+    dbPath: path.resolve(args.imageDb || process.env.FANHAO_CORE_IMAGE_DB || path.join(path.dirname(path.resolve(args.db)), "fanhao-core-images.sqlite"))
+  });
+}
+ensureSchema(db, usesCoreImageStore ? "fanhao_images" : "main");
 
 const stats = { checked: 0, cached: 0, skipped: 0, failed: 0 };
 let nextIndex = 0;
@@ -57,6 +65,7 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--db") result.db = argv[++index];
+    else if (arg === "--image-db") result.imageDb = argv[++index];
     else if (arg === "--urls-file") result.urlsFile = argv[++index];
     else if (arg === "--referer") result.referer = argv[++index] || "";
     else if (arg === "--timeout") result.timeout = Math.max(1000, Number(argv[++index] || 30) * 1000);
@@ -66,9 +75,9 @@ function parseArgs(argv) {
   return result;
 }
 
-function ensureSchema(db) {
+function ensureSchema(db, schema) {
   db.exec(`
-    CREATE TABLE IF NOT EXISTS remote_image_cache (
+    CREATE TABLE IF NOT EXISTS ${schema}.remote_image_cache (
       url TEXT PRIMARY KEY,
       url_hash TEXT NOT NULL,
       content_type TEXT,
@@ -79,8 +88,8 @@ function ensureSchema(db) {
       fetched_at TEXT,
       updated_at TEXT NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS idx_remote_image_cache_hash ON remote_image_cache(url_hash);
-    CREATE INDEX IF NOT EXISTS idx_remote_image_cache_status ON remote_image_cache(status);
+    CREATE INDEX IF NOT EXISTS ${schema}.idx_remote_image_cache_hash ON remote_image_cache(url_hash);
+    CREATE INDEX IF NOT EXISTS ${schema}.idx_remote_image_cache_status ON remote_image_cache(status);
   `);
 }
 

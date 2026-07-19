@@ -4,7 +4,6 @@ const PHOTO_CATEGORY_LABELS = new Map([
   ["[XIUREN] 秀人网", "秀人网"],
   ["[COS]", "COS"]
 ]);
-const MOVIE_QUICK_CATEGORY_LIMIT = 14;
 const MEDIA_KIND_CATEGORY_VALUES = {
   movie: "__fanhao_media_kind_movie__",
   tv: "__fanhao_media_kind_tv__"
@@ -33,6 +32,7 @@ const GALLERY_READER_PRELOAD_BELOW = 1400;
 const GALLERY_READER_ROOT_MARGIN = "900px 0px 1400px 0px";
 const GALLERY_MORE_AUTO_LOAD_DISTANCE = 1200;
 const GALLERY_MORE_SCROLL_INTENT_MS = 1200;
+const GALLERY_MORE_GESTURE_IDLE_MS = 320;
 
 export function createGalleryRenderer(deps) {
   const {
@@ -59,6 +59,8 @@ export function createGalleryRenderer(deps) {
   let galleryReaderImageGeneration = 0;
   let galleryReaderStartupFigure = null;
   let galleryMoreScrollCleanup = null;
+  let galleryMoreGestureConsumed = false;
+  let galleryMoreGestureReleaseTimer = 0;
   let galleryPagerCleanup = null;
   const expandedPhotoCategoryIds = new Set();
   let photoCategoryExpansionInitialized = false;
@@ -220,8 +222,12 @@ function appendFacetOption(select, label, value, count) {
 
 function mediaItemsForMode(mode = state.gallery.mode) {
   const kind = galleryMediaKindForMode(mode);
-  if (kind === "media") return (state.gallery.data?.mediaItems || []).filter((item) => item.mediaKind === "movie" || item.mediaKind === "tv");
-  return kind ? (state.gallery.data?.mediaItems || []).filter((item) => item.mediaKind === kind) : [];
+  const list = currentImageLibraryList();
+  const source = list && ["western", "media", "movie", "tv"].includes(state.gallery.mode)
+    ? list.items || []
+    : state.gallery.data?.mediaItems || [];
+  if (kind === "media") return source.filter((item) => item.mediaKind === "movie" || item.mediaKind === "tv");
+  return kind ? source.filter((item) => item.mediaKind === kind) : [];
 }
 
 function galleryMediaPlayerUrl(item) {
@@ -262,21 +268,23 @@ function galleryCategoryMatchesItem(item, category = state.gallery.category) {
   return item?.category === category;
 }
 
-function createTvRegionStrip() {
-  const regions = localGalleryFacets(mediaItemsForMode("tv"), "category");
-  const total = mediaItemsForMode("tv").length;
+function createMovieCategoryStrip() {
+  const list = currentImageLibraryList();
+  const kindCounts = new Map((list?.facets?.mediaKinds || []).map((item) => [item.value, Number(item.count || 0)]));
+  const total = [...kindCounts.values()].reduce((sum, count) => sum + count, 0) || Number(list?.total || 0);
   const strip = document.createElement("div");
-  strip.className = "gallery-category-strip gallery-tv-region-strip";
+  strip.className = "gallery-media-kind-switch";
 
   const addChip = (value, label, count) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `gallery-category-chip${state.gallery.category === value ? " active" : ""}`;
+    button.className = `gallery-media-kind-button${(state.gallery.mediaKind || "all") === value ? " active" : ""}`;
     button.textContent = label;
     button.title = `${label} · ${formatNumber(count)}`;
     button.setAttribute("aria-label", `${label}，${formatNumber(count)} 项`);
+    button.setAttribute("aria-pressed", String((state.gallery.mediaKind || "all") === value));
     button.addEventListener("click", () => {
-      state.gallery.category = value;
+      state.gallery.mediaKind = value;
       state.gallery.person = "all";
       state.gallery.visibleLimit = 80;
       resetGalleryReader();
@@ -287,48 +295,8 @@ function createTvRegionStrip() {
   };
 
   addChip("all", "全部", total);
-  for (const item of regions) addChip(item.value, item.value, item.count);
-  if (state.gallery.category !== "all" && !regions.some((item) => item.value === state.gallery.category)) {
-    const count = mediaItemsForMode("tv").filter((item) => item.category === state.gallery.category).length;
-    addChip(state.gallery.category, state.gallery.category, count);
-  }
-
-  return strip;
-}
-
-function createMovieCategoryStrip() {
-  const source = state.gallery.mode === "media" ? mediaItemsForMode("media") : mediaItemsForMode("movie");
-  const categories = (state.gallery.mode === "media" ? currentGalleryCategoryFacets() : localGalleryFacets(source, "category")).slice(0, MOVIE_QUICK_CATEGORY_LIMIT);
-  const total = state.gallery.mode === "media"
-    ? mediaItemsForMode("movie").length + tvSeriesGroupCountForItems(mediaItemsForMode("tv"))
-    : source.length;
-  const strip = document.createElement("div");
-  strip.className = "gallery-category-strip gallery-movie-category-strip";
-
-  const addChip = (value, label, count) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `gallery-category-chip${state.gallery.category === value ? " active" : ""}`;
-    button.textContent = label;
-    button.title = `${label} · ${formatNumber(count)}`;
-    button.setAttribute("aria-label", `${label}，${formatNumber(count)} 项`);
-    button.addEventListener("click", () => {
-      state.gallery.category = value;
-      state.gallery.person = "all";
-      state.gallery.visibleLimit = 80;
-      resetGalleryReader();
-      renderGalleryView();
-      syncGalleryRoute();
-    });
-    strip.append(button);
-  };
-
-  addChip("all", "全部分类", total);
-  for (const item of categories) addChip(item.value, galleryCategoryDisplayName(item.value), item.count);
-  if (state.gallery.category !== "all" && !categories.some((item) => item.value === state.gallery.category)) {
-    const count = source.filter((item) => galleryCategoryMatchesItem(item)).length;
-    addChip(state.gallery.category, galleryCategoryDisplayName(state.gallery.category), count);
-  }
+  addChip("movie", "电影", kindCounts.get("movie") || 0);
+  addChip("tv", "电视剧", kindCounts.get("tv") || 0);
 
   return strip;
 }
@@ -355,8 +323,13 @@ function renderGalleryControls(options = {}) {
   const search = document.createElement("input");
   search.type = "search";
   search.className = "gallery-search";
-  search.placeholder = state.gallery.mode === "manga" ? "搜索韩漫标题、分类或站点" : "搜索标题、人物、合集；多个词可同时匹配";
-  search.setAttribute("aria-label", state.gallery.mode === "manga" ? "搜索韩漫" : "搜索套图");
+  const mediaModule = ["western", "media", "movie", "tv"].includes(state.gallery.mode);
+  search.placeholder = state.gallery.mode === "manga"
+    ? "搜索韩漫标题、分类或站点"
+    : mediaModule
+      ? "搜索片名、演员、导演或类型"
+      : "搜索标题、人物、合集；多个词可同时匹配";
+  search.setAttribute("aria-label", state.gallery.mode === "manga" ? "搜索韩漫" : mediaModule ? "搜索影视资料库" : "搜索套图");
   search.value = options.searchValue ?? state.gallery.query;
   search.addEventListener("search", () => {
     if (!search.value && state.gallery.query) submitGallerySearch("");
@@ -377,8 +350,8 @@ function renderGalleryControls(options = {}) {
   const category = document.createElement("select");
   category.className = "gallery-select";
   category.setAttribute("aria-label", state.gallery.mode === "photo" ? "套图分类" : "分类");
-  category.append(new Option(state.gallery.mode === "photo" ? "全部大类" : state.gallery.mode === "tv" ? "全部" : "全部分类", "all"));
-  const categoryFacets = currentGalleryCategoryFacets();
+  category.append(new Option(state.gallery.mode === "photo" ? "全部大类" : state.gallery.mode === "tv" ? "全部地区" : "全部片库分区", "all"));
+  const categoryFacets = currentGalleryCategoryFacets().filter((item) => !Object.values(MEDIA_KIND_CATEGORY_VALUES).includes(item.value));
   for (const item of categoryFacets) {
     const label = state.gallery.mode === "photo" ? photoCategoryDisplayName(item.value) : galleryCategoryDisplayName(item.value);
     appendFacetOption(category, label, item.value, item.count);
@@ -443,7 +416,8 @@ function renderGalleryControls(options = {}) {
   refresh.type = "button";
   refresh.className = "text-button";
   const rescanScope = galleryRescanScopeForMode();
-  refresh.textContent = imageModule ? "图库维护" : rescanScope === "all" ? "后台刷新" : `后台刷新${galleryModeLabel(state.gallery.mode)}`;
+  refresh.textContent = imageModule ? "图库维护" : "维护";
+  if (!imageModule) refresh.title = `后台刷新${galleryModeLabel(state.gallery.mode)}索引`;
   if (imageModule) refresh.title = "打开图库索引与刷新工具";
   refresh.disabled = state.gallery.loading;
   refresh.addEventListener("click", () => openAdminScript?.("image-library-rescan", { defaults: { scope: rescanScope } }));
@@ -469,13 +443,49 @@ function renderGalleryControls(options = {}) {
     return controls;
   }
 
-  if (["movie", "media"].includes(state.gallery.mode)) controls.append(createMovieCategoryStrip());
-  if (state.gallery.mode === "tv") controls.append(createTvRegionStrip());
-  controls.append(search);
-  if (["photo", "western", "media", "movie", "tv"].includes(state.gallery.mode)) controls.append(category);
-  if (["western", "tv"].includes(state.gallery.mode)) controls.append(people);
-  if (["movie", "media"].includes(state.gallery.mode)) controls.append(sort);
-  controls.append(refresh, status);
+  controls.classList.add("gallery-media-controls");
+  const searchRow = document.createElement("div");
+  searchRow.className = "gallery-media-search-row";
+  const searchBox = document.createElement("div");
+  searchBox.className = "gallery-media-search-box";
+  const searchSubmit = document.createElement("button");
+  searchSubmit.type = "button";
+  searchSubmit.className = "gallery-media-search-submit";
+  searchSubmit.textContent = "搜索";
+  searchSubmit.addEventListener("click", () => submitGallerySearch(search.value, { restoreFocus: true }));
+  searchBox.append(search, searchSubmit);
+  searchRow.append(createGalleryFilterField("搜索影视", searchBox, "gallery-media-search-field"));
+  if (state.gallery.mode === "media") searchRow.append(createGalleryControlGroup("内容类型", createMovieCategoryStrip()));
+
+  const filterRow = document.createElement("div");
+  filterRow.className = "gallery-media-filter-row";
+  if (["western", "media", "movie", "tv"].includes(state.gallery.mode)) {
+    filterRow.append(createGalleryControlGroup(state.gallery.mode === "tv" ? "地区" : "片库分区", category));
+  }
+  if (["western", "tv"].includes(state.gallery.mode)) filterRow.append(createGalleryControlGroup(state.gallery.mode === "tv" ? "剧集" : "人物", people));
+  if (["movie", "media"].includes(state.gallery.mode)) filterRow.append(createGalleryControlGroup("排序", sort));
+
+  if (state.gallery.query || state.gallery.category !== "all" || (state.gallery.mode === "media" && state.gallery.mediaKind !== "all")) {
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "text-button gallery-filter-clear";
+    clear.textContent = "清除筛选";
+    clear.addEventListener("click", () => {
+      state.gallery.query = "";
+      state.gallery.category = "all";
+      state.gallery.mediaKind = "all";
+      state.gallery.person = "all";
+      state.gallery.visibleLimit = 80;
+      renderGalleryView();
+      syncGalleryRoute("replace");
+    });
+    filterRow.append(clear);
+  }
+  const maintenance = document.createElement("div");
+  maintenance.className = "gallery-maintenance gallery-media-maintenance";
+  maintenance.append(refresh, status);
+  filterRow.append(maintenance);
+  controls.append(searchRow, filterRow);
   return controls;
 }
 
@@ -587,22 +597,19 @@ function renderGalleryResults() {
 function currentGalleryCategoryFacets() {
   const facets = state.gallery.data?.facets || {};
   if (state.gallery.mode === "photo") return currentImageLibraryList()?.facets?.categories || facets.categories || [];
+  const listFacets = currentImageLibraryList()?.facets || {};
   const kind = galleryMediaKindForMode(state.gallery.mode);
   if (kind === "media") {
-    const typeFacets = [
-      { value: MEDIA_KIND_CATEGORY_VALUES.movie, count: mediaItemsForMode("movie").length },
-      { value: MEDIA_KIND_CATEGORY_VALUES.tv, count: tvSeriesGroupCountForItems(mediaItemsForMode("tv")) }
-    ].filter((item) => item.count > 0);
-    const typeLabels = new Set(Object.values(MEDIA_KIND_CATEGORY_LABELS));
-    const categoryFacets = (facets.media?.categories || []).filter((item) => !typeLabels.has(String(item.value || "").trim()));
-    return [...typeFacets, ...categoryFacets];
+    return listFacets.categories || facets.media?.categories || [];
   }
-  return kind ? facets[kind]?.categories || [] : [];
+  return kind ? listFacets.categories || facets[kind]?.categories || [] : [];
 }
 
 function currentGalleryPeopleFacets() {
   const facets = state.gallery.data?.facets || {};
   if (state.gallery.mode === "photo") return currentImageLibraryList()?.facets?.people || facets.people || [];
+  const listPeople = currentImageLibraryList()?.facets?.people;
+  if (listPeople?.length) return listPeople;
   const kind = galleryMediaKindForMode(state.gallery.mode);
   if (kind === "tv") return currentTvSeriesFacets();
   if (kind === "western") return localGalleryFacets(filteredWesternItemsForGroups(), "personName");
@@ -669,6 +676,8 @@ function localGalleryFacets(items, fieldName) {
 }
 
 function filteredMediaItems() {
+  const list = currentImageLibraryList();
+  if (list && ["western", "media", "movie", "tv"].includes(state.gallery.mode)) return list.items || [];
   const kind = galleryMediaKindForMode(state.gallery.mode);
   if (kind === "media") {
     if (state.gallery.person !== "all") {
@@ -797,6 +806,19 @@ function filteredWesternItemsForGroups() {
 }
 
 function westernPersonGroups() {
+  const list = currentImageLibraryList();
+  if (list && state.gallery.mode === "western" && state.gallery.person === "all") {
+    return (list.items || []).map((item) => ({
+      personName: item.personName || item.title || "未归类",
+      count: Number(item.videoCount || 0),
+      playableCount: Number(item.playableCount || 0),
+      size: Number(item.size || 0),
+      updatedAt: item.updatedAt || "",
+      coverUrl: item.coverUrl || "",
+      categories: new Map((item.categories || []).map((entry) => [entry.value, entry.count])),
+      samples: item.samples || []
+    }));
+  }
   const groups = new Map();
   for (const item of filteredWesternItemsForGroups()) {
     const personName = String(item.personName || item.subCategory || item.category || "未归类").trim();
@@ -846,6 +868,20 @@ function filteredTvItemsForGroups() {
 }
 
 function tvSeriesGroups() {
+  const list = currentImageLibraryList();
+  if (list && state.gallery.mode === "tv" && state.gallery.person === "all") {
+    return (list.items || []).map((item) => ({
+      value: item.seriesKey || item.id,
+      title: item.seriesName || item.title,
+      category: item.category || "",
+      count: Number(item.episodeCount || item.chapterCount || 0),
+      size: Number(item.size || 0),
+      updatedAt: item.updatedAt || "",
+      samples: [],
+      coverUrl: item.coverUrl || "",
+      tvSeries: item.tvSeries || null
+    }));
+  }
   const groups = new Map();
   for (const item of filteredTvItemsForGroups()) {
     const seriesName = String(item.seriesName || item.subCategory || item.category || "未归类").trim();
@@ -1058,47 +1094,85 @@ function renderTvSeriesBar(container, total) {
   if (!["tv", "media"].includes(state.gallery.mode) || state.gallery.person === "all") return;
   const metadata = selectedTvSeriesMetadata();
   const bar = document.createElement("div");
-  bar.className = "gallery-person-bar";
+  bar.className = "gallery-person-bar gallery-series-hero";
+
+  if (metadata?.coverUrl) {
+    const poster = document.createElement("div");
+    poster.className = "gallery-series-poster";
+    const image = document.createElement("img");
+    image.src = metadata.coverUrl;
+    image.alt = `${tvSeriesDisplayTitle(state.gallery.person, metadata)} 海报`;
+    poster.append(image);
+    bar.append(poster);
+  }
 
   const text = document.createElement("div");
-  text.className = "gallery-person-bar-text";
-  const title = document.createElement("strong");
+  text.className = "gallery-person-bar-text gallery-series-copy";
+  const eyebrow = document.createElement("span");
+  eyebrow.className = "gallery-series-eyebrow";
+  eyebrow.textContent = ["电视剧", state.gallery.category !== "all" ? galleryCategoryDisplayName(state.gallery.category) : ""].filter(Boolean).join(" · ");
+  const title = document.createElement("h1");
   title.textContent = tvSeriesDisplayTitle(state.gallery.person, metadata);
-  const meta = document.createElement("span");
-  meta.textContent = [
-    state.gallery.category !== "all" ? galleryCategoryDisplayName(state.gallery.category) : "",
-    tvSeriesRatingText(metadata),
-    metadata?.pubdate ? `首播 ${metadata.pubdate}` : "",
-    metadata?.episodeCount ? `${formatNumber(metadata.episodeCount)} 集` : `${formatNumber(total)} 集`,
-    metadata?.episodeDuration || "",
-    metadata?.imdbId ? `IMDb ${metadata.imdbId}` : ""
+  const stats = document.createElement("div");
+  stats.className = "gallery-series-stats";
+  const statItems = [
+    metadata?.rating ? [Number(metadata.rating).toFixed(1), metadata?.ratingCount ? `${formatNumber(metadata.ratingCount)} 人评分` : "豆瓣评分"] : null,
+    [formatNumber(metadata?.episodeCount || total), "集"],
+    metadata?.episodeDuration ? [metadata.episodeDuration, "单集"] : null,
+    metadata?.pubdate ? [String(metadata.pubdate).slice(0, 10), "首播"] : null
+  ].filter(Boolean);
+  for (const [value, label] of statItems) {
+    const stat = document.createElement("span");
+    const strong = document.createElement("strong");
+    const small = document.createElement("small");
+    strong.textContent = value;
+    small.textContent = label;
+    stat.append(strong, small);
+    stats.append(stat);
+  }
+  const directors = metadata?.directors?.slice(0, 2) || [];
+  const actors = metadata?.actors?.slice(0, 5) || [];
+  const credits = document.createElement("p");
+  credits.className = "gallery-series-credits";
+  credits.textContent = [
+    directors.length ? `导演 ${directors.join(" / ")}` : "",
+    actors.length ? `主演 ${actors.join(" / ")}` : ""
   ].filter(Boolean).join(" · ");
-  text.append(title, meta);
-  const betterThan = tvSeriesBetterThanText(metadata);
-  const people = [
+  text.append(eyebrow, title, stats);
+  if (credits.textContent) text.append(credits);
+
+  const fullPeople = [
     metadata?.directors?.length ? `导演：${metadata.directors.join(" / ")}` : "",
     metadata?.writers?.length ? `编剧：${metadata.writers.join(" / ")}` : "",
-    metadata?.actors?.length ? `主演：${metadata.actors.slice(0, 8).join(" / ")}` : ""
+    metadata?.actors?.length ? `主演：${metadata.actors.join(" / ")}` : "",
+    metadata?.imdbId ? `IMDb：${metadata.imdbId}` : ""
   ].filter(Boolean).join(" · ");
-  if (betterThan || people) {
-    const detail = document.createElement("small");
-    detail.className = "gallery-tv-summary";
-    detail.textContent = [betterThan, people].filter(Boolean).join(" · ");
-    text.append(detail);
-  }
-  if (metadata?.summary) {
-    const summary = document.createElement("small");
-    summary.className = "gallery-tv-summary";
-    summary.textContent = metadata.summary;
-    text.append(summary);
+  if (metadata?.summary || fullPeople) {
+    const details = document.createElement("details");
+    details.className = "gallery-series-more";
+    const summaryToggle = document.createElement("summary");
+    summaryToggle.textContent = "剧情与演职员";
+    if (metadata?.summary) {
+      const synopsis = document.createElement("p");
+      synopsis.textContent = metadata.summary;
+      details.append(summaryToggle, synopsis);
+    } else {
+      details.append(summaryToggle);
+    }
+    if (fullPeople) {
+      const fullCredits = document.createElement("p");
+      fullCredits.textContent = fullPeople;
+      details.append(fullCredits);
+    }
+    text.append(details);
   }
 
   const actions = document.createElement("div");
-  actions.className = "gallery-person-bar-actions";
+  actions.className = "gallery-person-bar-actions gallery-series-actions";
   const allButton = document.createElement("button");
   allButton.type = "button";
   allButton.className = "text-button";
-  allButton.textContent = state.gallery.mode === "media" ? "全部影视" : "全部作品";
+  allButton.textContent = state.gallery.mode === "media" ? "返回影视库" : "返回电视剧";
   allButton.addEventListener("click", () => {
     state.gallery.person = "all";
     state.gallery.visibleLimit = 80;
@@ -1113,6 +1187,7 @@ function renderTvSeriesBar(container, total) {
 function renderTvSeriesShelf(container) {
   const groups = tvSeriesGroups();
   const visible = groups.slice(0, state.gallery.visibleLimit);
+  const total = Number(currentImageLibraryList()?.total ?? groups.length);
   const grid = document.createElement("div");
   grid.className = "gallery-grid media-grid gallery-tv-series-grid";
   for (const group of visible) {
@@ -1152,14 +1227,17 @@ function renderTvSeriesShelf(container) {
     empty.className = "empty-state";
     empty.textContent = state.gallery.data ? "没有匹配的电视剧作品" : "正在等待图像资料库索引";
     container.append(empty);
-  } else if (visible.length < groups.length) {
+  } else if (visible.length < total) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "text-button gallery-more";
-    more.textContent = `显示更多作品 ${formatNumber(visible.length)} / ${formatNumber(groups.length)}`;
+    more.textContent = `显示更多作品 ${formatNumber(visible.length)} / ${formatNumber(total)}`;
     more.addEventListener("click", () => {
       state.gallery.visibleLimit += 80;
       renderGalleryView();
+      if (getGalleryPage().imageLibraryListNeedsLoad?.() && !getGalleryPage().isImageLibraryListLoading?.()) {
+        void getGalleryPage().loadImageLibraryItems?.({ renderStart: false });
+      }
     });
     setupGalleryMoreAutoload(more);
     container.append(more);
@@ -1218,6 +1296,7 @@ function renderWesternPersonBar(container, total) {
 function renderWesternPersonShelf(container) {
   const groups = westernPersonGroups();
   const visible = groups.slice(0, state.gallery.visibleLimit);
+  const total = Number(currentImageLibraryList()?.total ?? groups.length);
   const grid = document.createElement("div");
   grid.className = "gallery-grid media-grid gallery-western-person-grid";
   for (const group of visible) {
@@ -1253,14 +1332,17 @@ function renderWesternPersonShelf(container) {
     empty.className = "empty-state";
     empty.textContent = state.gallery.data ? "没有匹配的欧美人物" : "正在等待图像资料库索引";
     container.append(empty);
-  } else if (visible.length < groups.length) {
+  } else if (visible.length < total) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "text-button gallery-more";
-    more.textContent = `显示更多人物 ${formatNumber(visible.length)} / ${formatNumber(groups.length)}`;
+    more.textContent = `显示更多人物 ${formatNumber(visible.length)} / ${formatNumber(total)}`;
     more.addEventListener("click", () => {
       state.gallery.visibleLimit += 80;
       renderGalleryView();
+      if (getGalleryPage().imageLibraryListNeedsLoad?.() && !getGalleryPage().isImageLibraryListLoading?.()) {
+        void getGalleryPage().loadImageLibraryItems?.({ renderStart: false });
+      }
     });
     setupGalleryMoreAutoload(more);
     container.append(more);
@@ -1308,8 +1390,18 @@ function setupGalleryMoreAutoload(button) {
   let lastScrollY = window.scrollY;
   let touchScrolling = false;
 
+  const scheduleGestureRelease = () => {
+    window.clearTimeout(galleryMoreGestureReleaseTimer);
+    galleryMoreGestureReleaseTimer = window.setTimeout(() => {
+      galleryMoreGestureConsumed = false;
+      galleryMoreGestureReleaseTimer = 0;
+    }, GALLERY_MORE_GESTURE_IDLE_MS);
+  };
+
   const run = () => {
     if (!button.isConnected || button.disabled || button.dataset.autoloading === "1") return;
+    galleryMoreGestureConsumed = true;
+    scheduleGestureRelease();
     button.dataset.autoloading = "1";
     button.click();
   };
@@ -1336,6 +1428,10 @@ function setupGalleryMoreAutoload(button) {
     if (event.type === "wheel" && Number(event.deltaY || 0) <= 0) return;
     if (event.type === "keydown" && !["ArrowDown", "End", "PageDown", " "].includes(event.key)) return;
     if (event.type === "pointerdown" && Number(event.clientX || 0) < document.documentElement.clientWidth - 20) return;
+    if (galleryMoreGestureConsumed) {
+      scheduleGestureRelease();
+      return;
+    }
     userScrollIntentUntil = Date.now() + GALLERY_MORE_SCROLL_INTENT_MS;
   };
   const handleTouchStart = () => {
@@ -1914,18 +2010,22 @@ function createPhotoCollectionFilter(label, emptyLabel, values = [], currentValu
   return wrapper;
 }
 
+function photoAlbumPersonName(item = {}) {
+  const normalize = (value) => String(value || "").normalize("NFKC").replace(/\s+/g, "").toLowerCase();
+  const person = String(item.personName || "").trim();
+  const structuralPeople = [item.subCategory, item.collectionTitle, item.albumNumber ? "" : item.albumSubject].map(normalize).filter(Boolean);
+  return person && !structuralPeople.includes(normalize(person)) ? person : "";
+}
+
 function photoAlbumDisplayTitle(item = {}) {
   const title = String(item.title || "").trim();
   const sequence = title.match(/\b(VOL|N[O0])\.?\s*(\d+)\b/i);
   const albumNumber = String(item.albumNumber || (sequence ? `${/^VOL$/i.test(sequence[1]) ? "VOL." : "NO."}${sequence[2]}` : "")).trim();
-  const normalize = (value) => String(value || "").normalize("NFKC").replace(/\s+/g, "").toLowerCase();
-  const person = String(item.personName || "").trim();
-  const structuralPeople = [item.subCategory, item.collectionTitle].map(normalize).filter(Boolean);
-  const meaningfulPerson = person && !structuralPeople.includes(normalize(person)) ? person : "";
+  const meaningfulPerson = photoAlbumPersonName(item);
   const fallbackSubject = sequence
     ? title.slice(Number(sequence.index || 0) + sequence[0].length).replace(/\s*\[[^\]]*(?:P|MB|GB)[^\]]*\]\s*$/iu, "").trim()
     : "";
-  const subject = meaningfulPerson || String(item.albumSubject || fallbackSubject).trim();
+  const subject = String(item.albumSubject || fallbackSubject || meaningfulPerson).trim();
   if (albumNumber) return [albumNumber, subject].filter(Boolean).join(" · ");
   if (subject) return subject;
   return title
@@ -1939,8 +2039,9 @@ function renderPagedPhotoCards(items, options = {}) {
   grid.className = "gallery-grid";
   for (const [index, item] of items.entries()) {
     const collectionView = Boolean(options.collection);
+    const collectionPerson = collectionView ? photoAlbumPersonName(item) : "";
     const card = createGalleryCard(collectionView ? { ...item, title: photoAlbumDisplayTitle(item) } : item, {
-      meta: collectionView ? "" : [item.category, item.subCategory, item.personName].filter(Boolean).join(" · "),
+      meta: collectionView ? collectionPerson : [item.category, item.subCategory, item.personName].filter(Boolean).join(" · "),
       extra: [gallerySearchMatchText(item), collectionView ? item.archiveDate : "", formatBytes(item.size), collectionView ? "" : formatDateTime(item.updatedAt)].filter(Boolean).join(" · "),
       placeholder: "套图",
       onOpen: () => openPhotoSet(item.id)
@@ -2129,9 +2230,13 @@ function createMovieExploreItem(item, index) {
 }
 
 function renderMovieExploreSidebar(aside, items) {
-  const allItems = state.gallery.mode === "media" ? filteredMediaItemsForSidebar() : mediaItemsForMode("movie");
-  const ratedCount = allItems.filter((item) => Number(screenMetadata(item)?.rating || 0) > 0).length;
-  const totalSize = allItems.reduce((sum, item) => sum + Number(item.size || 0), 0);
+  const listState = currentImageLibraryList();
+  const allTotal = state.gallery.mode === "media"
+    ? (listState?.facets?.mediaKinds || []).reduce((sum, item) => sum + Number(item.count || 0), 0) || listState?.total || items.length
+    : Number(state.gallery.data?.totals?.movies ?? listState?.total ?? items.length);
+  const filteredTotal = Number(listState?.total ?? items.length);
+  const ratedCount = Number(listState?.stats?.ratedCount ?? items.filter((item) => Number(screenMetadata(item)?.rating || 0) > 0).length);
+  const totalSize = Number(listState?.stats?.totalBytes ?? items.reduce((sum, item) => sum + Number(item.size || 0), 0));
   const mediaLabel = state.gallery.mode === "media" ? "影视" : "电影";
 
   const summary = document.createElement("section");
@@ -2140,12 +2245,14 @@ function renderMovieExploreSidebar(aside, items) {
   summaryTitle.textContent = state.gallery.mode === "media" ? "本地影视" : "本地片库";
   const summaryList = document.createElement("div");
   summaryList.className = "gallery-movie-sidebar-stats";
-  for (const [statLabel, value] of [
-    ["当前筛选", `${formatNumber(items.length)} 部`],
-    [`全部${mediaLabel}`, `${formatNumber(allItems.length)} 部`],
+  const hasActiveFilter = Boolean(state.gallery.query || state.gallery.category !== "all" || (state.gallery.mode === "media" && state.gallery.mediaKind !== "all"));
+  const rows = [
+    ...(hasActiveFilter ? [["当前筛选", `${formatNumber(filteredTotal)} 部`]] : []),
+    [`全部${mediaLabel}`, `${formatNumber(allTotal)} 部`],
     ["豆瓣资料", `${formatNumber(ratedCount)} 部`],
     ["总大小", formatBytes(totalSize)]
-  ]) {
+  ];
+  for (const [statLabel, value] of rows) {
     const row = document.createElement("span");
     row.innerHTML = "<strong></strong><small></small>";
     row.querySelector("strong").textContent = value;
@@ -2153,46 +2260,13 @@ function renderMovieExploreSidebar(aside, items) {
     summaryList.append(row);
   }
   summary.append(summaryTitle, summaryList);
-
-  const categories = document.createElement("section");
-  categories.className = "gallery-movie-sidebar-section";
-  const categoriesTitle = document.createElement("h3");
-  categoriesTitle.textContent = "热门分类";
-  const list = document.createElement("div");
-  list.className = "gallery-movie-sidebar-links";
-  for (const item of currentGalleryCategoryFacets().slice(0, 8)) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = state.gallery.category === item.value ? "active" : "";
-    button.innerHTML = "<span></span><small></small>";
-    button.querySelector("span").textContent = galleryCategoryDisplayName(item.value);
-    button.querySelector("small").textContent = `${formatNumber(item.count)} 部`;
-    button.addEventListener("click", () => {
-      state.gallery.category = item.value;
-      state.gallery.visibleLimit = 80;
-      resetGalleryReader();
-      renderGalleryView();
-      syncGalleryRoute();
-    });
-    list.append(button);
-  }
-  categories.append(categoriesTitle, list);
-  aside.append(summary, categories);
-}
-
-function filteredMediaItemsForSidebar() {
-  const previousPerson = state.gallery.person;
-  state.gallery.person = "all";
-  try {
-    return filteredMediaItems();
-  } finally {
-    state.gallery.person = previousPerson;
-  }
+  aside.append(summary);
 }
 
 function renderMovieShelf(container) {
   const items = filteredMediaItems();
   const visible = items.slice(0, state.gallery.visibleLimit);
+  const total = Number(currentImageLibraryList()?.total ?? items.length);
 
   const shell = document.createElement("section");
   shell.className = "gallery-movie-explore";
@@ -2207,7 +2281,7 @@ function renderMovieShelf(container) {
   meta.textContent = [
     state.gallery.category !== "all" ? galleryCategoryDisplayName(state.gallery.category) : "全部",
     state.gallery.sort === "rating" ? "豆瓣高分" : "",
-    `${formatNumber(items.length)} 部`
+    `${formatNumber(total)} 部`
   ].filter(Boolean).join(" / ");
   header.append(title, meta);
 
@@ -2223,14 +2297,17 @@ function renderMovieShelf(container) {
     empty.className = "empty-state";
     empty.textContent = state.gallery.data ? `没有匹配的${state.gallery.mode === "media" ? "影视作品" : "电影"}` : "正在等待图像资料库索引";
     main.append(empty);
-  } else if (visible.length < items.length) {
+  } else if (visible.length < total) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "text-button gallery-more";
-    more.textContent = `显示更多 ${formatNumber(visible.length)} / ${formatNumber(items.length)}`;
+    more.textContent = `显示更多 ${formatNumber(visible.length)} / ${formatNumber(total)}`;
     more.addEventListener("click", () => {
       state.gallery.visibleLimit += 80;
       renderGalleryView();
+      if (getGalleryPage().imageLibraryListNeedsLoad?.() && !getGalleryPage().isImageLibraryListLoading?.()) {
+        void getGalleryPage().loadImageLibraryItems?.({ renderStart: false });
+      }
     });
     setupGalleryMoreAutoload(more);
     main.append(more);
@@ -2244,7 +2321,63 @@ function renderMovieShelf(container) {
   activateGalleryLazyImages(list);
 }
 
+function tvEpisodeNumber(item = {}) {
+  const title = String(item.title || "").trim();
+  const patterns = [
+    /(?:^|\b)S\d{1,2}E(?:P)?\s*(\d{1,3})(?:\b|$)/i,
+    /第\s*(\d{1,3})\s*集/,
+    /^\s*0*(\d{1,3})(?:\s|[._-]|$)/
+  ];
+  for (const pattern of patterns) {
+    const match = title.match(pattern);
+    if (match) return Number.parseInt(match[1], 10);
+  }
+  return 0;
+}
+
+function tvEpisodeQuality(item = {}) {
+  const text = [item.title, item.relativePath, item.ext].filter(Boolean).join(" ");
+  return text.match(/\b(?:4K|2160P|1080P|720P|HDR10\+?|HDR|DV)\b/i)?.[0]?.toUpperCase() || "";
+}
+
+function createTvEpisodeCard(item) {
+  const episodeNumber = tvEpisodeNumber(item);
+  const quality = tvEpisodeQuality(item);
+  const title = episodeNumber ? `第 ${String(episodeNumber).padStart(2, "0")} 集` : item.title || "未命名单集";
+  const card = createGalleryCard(
+    { ...item, title },
+    {
+      meta: formatBytes(item.size),
+      extra: item.updatedAt ? `更新于 ${formatDateTime(item.updatedAt)}` : "",
+      badges: quality ? [quality] : [],
+      placeholder: episodeNumber ? `第 ${episodeNumber} 集` : "单集",
+      onOpen: () => openScreenMediaPlayer(item)
+    }
+  );
+  card.classList.add("gallery-episode-card");
+  card.setAttribute("aria-label", ["播放", title, quality, formatBytes(item.size)].filter(Boolean).join("，"));
+  const play = document.createElement("span");
+  play.className = "gallery-episode-play";
+  play.textContent = "播放";
+  card.querySelector(".gallery-card-body")?.append(play);
+  return card;
+}
+
 function renderMediaShelf(container) {
+  const page = getGalleryPage();
+  const list = currentImageLibraryList();
+  if (!list) {
+    const key = page.imageLibraryListKey?.() || "";
+    const currentError = state.gallery.listErrorKey === key ? state.gallery.listError : "";
+    renderPagedImageLibraryMessage(container, currentError || `正在读取${galleryModeLabel(state.gallery.mode)}`, currentError ? {
+      action: "重试",
+      onAction: () => page.loadImageLibraryItems?.({ force: true })
+    } : {});
+    if (!currentError && page.imageLibraryListNeedsLoad?.() && !page.isImageLibraryListLoading?.()) {
+      void page.loadImageLibraryItems?.({ renderStart: false });
+    }
+    return;
+  }
   if (state.gallery.mode === "movie" || (state.gallery.mode === "media" && state.gallery.person === "all")) {
     renderMovieShelf(container);
     return;
@@ -2259,11 +2392,27 @@ function renderMediaShelf(container) {
   }
   const items = filteredMediaItems();
   const visible = items.slice(0, state.gallery.visibleLimit);
+  const total = Number(list.total ?? items.length);
+  const selectedSeries = ["media", "tv"].includes(state.gallery.mode) && state.gallery.person !== "all";
   renderWesternPersonBar(container, items.length);
   renderTvSeriesBar(container, items.length);
+  if (selectedSeries) {
+    const heading = document.createElement("div");
+    heading.className = "gallery-episode-section-head";
+    const title = document.createElement("h2");
+    title.textContent = "选集播放";
+    const meta = document.createElement("span");
+    meta.textContent = `${formatNumber(total)} 集 · 点击卡片直接播放`;
+    heading.append(title, meta);
+    container.append(heading);
+  }
   const grid = document.createElement("div");
-  grid.className = "gallery-grid media-grid";
+  grid.className = `gallery-grid media-grid${selectedSeries ? " gallery-episode-grid" : ""}`;
   for (const item of visible) {
+    if (selectedSeries) {
+      grid.append(createTvEpisodeCard(item));
+      continue;
+    }
     const doubanMetadata = item.mediaKind === "movie" ? item.movieMetadata : item.tvSeries;
     const cardItem = item.mediaKind === "movie"
       ? { ...item, title: movieDisplayTitle(item), coverUrl: item.movieMetadata?.coverUrl || item.coverUrl }
@@ -2294,14 +2443,17 @@ function renderMediaShelf(container) {
     empty.className = "empty-state";
     empty.textContent = state.gallery.data ? `没有匹配的${galleryModeLabel(state.gallery.mode)}` : "正在等待图像资料库索引";
     container.append(empty);
-  } else if (visible.length < items.length) {
+  } else if (visible.length < total) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "text-button gallery-more";
-    more.textContent = `显示更多 ${formatNumber(visible.length)} / ${formatNumber(items.length)}`;
+    more.textContent = `显示更多 ${formatNumber(visible.length)} / ${formatNumber(total)}`;
     more.addEventListener("click", () => {
       state.gallery.visibleLimit += 80;
       renderGalleryView();
+      if (page.imageLibraryListNeedsLoad?.() && !page.isImageLibraryListLoading?.()) {
+        void page.loadImageLibraryItems?.({ renderStart: false });
+      }
     });
     setupGalleryMoreAutoload(more);
     container.append(more);
@@ -3475,7 +3627,9 @@ function renderGalleryView() {
   const shell = document.createElement("section");
   shell.className = "gallery-shell";
   const imageReaderOpen = Boolean(state.gallery.album || state.gallery.comic);
+  const seriesPageOpen = ["media", "tv"].includes(state.gallery.mode) && state.gallery.person !== "all" && !state.gallery.media;
   if (imageReaderOpen) shell.classList.add("gallery-reader-shell");
+  else if (seriesPageOpen) shell.classList.add("gallery-series-shell");
   else shell.append(renderGalleryControls({ searchValue: searchValueToRestore }));
 
   const content = document.createElement("div");

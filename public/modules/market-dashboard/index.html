@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5f6f8">
+    <title>市场聚合看板 · FanHao</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar__main">
+        <div>
+          <a class="back-link" href="/fanhao">FanHao 资料库</a>
+          <p class="eyebrow">Market Dashboard</p>
+          <h1>市场聚合看板</h1>
+        </div>
+        <div class="toolbar" aria-label="行情工具栏">
+          <button class="icon-button" id="refreshButton" type="button" title="立即刷新" aria-label="立即刷新">
+            <span aria-hidden="true">↻</span>
+          </button>
+          <button class="icon-button" id="pauseButton" type="button" title="暂停自动刷新" aria-label="暂停自动刷新">
+            <span aria-hidden="true">Ⅱ</span>
+          </button>
+        </div>
+      </div>
+      <div class="status-row">
+        <span class="status-chip" id="connectionStatus">连接中</span>
+        <span id="lastUpdated">等待行情</span>
+        <span id="sourceLabel">数据源准备中</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="summary-strip" aria-label="行情摘要">
+        <div>
+          <span class="summary-label">总监控</span>
+          <strong id="totalCount">--</strong>
+        </div>
+        <div>
+          <span class="summary-label">USD/CNY</span>
+          <strong id="usdCnyValue">--</strong>
+        </div>
+        <div>
+          <span class="summary-label">自动刷新</span>
+          <strong id="refreshState">30s</strong>
+        </div>
+      </section>
+
+      <div id="errorPanel" class="error-panel" hidden></div>
+
+      <div class="context-grid">
+        <section class="context-panel" aria-labelledby="marketLinksTitle">
+          <div class="context-heading">
+            <div>
+              <p class="section-kicker">MARKET LINKS</p>
+              <h2 id="marketLinksTitle">行情与官方入口</h2>
+            </div>
+            <span>新窗口打开</span>
+          </div>
+          <div class="site-links">
+            <a href="https://finance.sina.com.cn/" target="_blank" rel="noopener noreferrer">
+              <strong>新浪财经</strong><span>综合行情</span>
+            </a>
+            <a href="https://stock.10jqka.com.cn/" target="_blank" rel="noopener noreferrer">
+              <strong>同花顺</strong><span>市场摘要</span>
+            </a>
+            <a href="https://www.sge.com.cn/" target="_blank" rel="noopener noreferrer">
+              <strong>上海黄金交易所</strong><span>贵金属官方</span>
+            </a>
+            <a href="https://www.sse.com.cn/" target="_blank" rel="noopener noreferrer">
+              <strong>上海证券交易所</strong><span>上交所官方</span>
+            </a>
+            <a href="https://www.szse.cn/" target="_blank" rel="noopener noreferrer">
+              <strong>深圳证券交易所</strong><span>深交所官方</span>
+            </a>
+            <a href="https://www.pbc.gov.cn/" target="_blank" rel="noopener noreferrer">
+              <strong>中国人民银行</strong><span>汇率与政策</span>
+            </a>
+          </div>
+        </section>
+
+        <section class="context-panel" aria-labelledby="sourceStatusTitle">
+          <div class="context-heading">
+            <div>
+              <p class="section-kicker">DATA SOURCES</p>
+              <h2 id="sourceStatusTitle">数据来源</h2>
+            </div>
+            <span id="sourceStatusSummary">等待数据</span>
+          </div>
+          <div class="source-cards" id="sourceCards" aria-live="polite">
+            <p class="source-loading">正在读取来源状态…</p>
+          </div>
+        </section>
+      </div>
+
+      <details class="methodology-panel">
+        <summary>数据口径与刷新说明</summary>
+        <div class="methodology-grid">
+          <div><strong>刷新</strong><span>服务端缓存约 12 秒，页面默认每 30 秒刷新一次。</span></div>
+          <div><strong>时区</strong><span>页面以北京时间展示；休市期间保留数据源最近一次行情。</span></div>
+          <div><strong>换算</strong><span>人民币/克 = 美元/盎司 × USD/CNY ÷ 31.1034768。</span></div>
+          <div><strong>用途</strong><span>聚合结果用于快速查看，交易前请前往官方或专业行情页面核对。</span></div>
+        </div>
+      </details>
+
+      <div id="groups" class="groups" aria-live="polite"></div>
+    </main>
+
+    <template id="groupTemplate">
+      <section class="market-section">
+        <div class="section-heading">
+          <div>
+            <h2></h2>
+            <p></p>
+          </div>
+        </div>
+        <div class="card-grid"></div>
+      </section>
+    </template>
+
+    <template id="cardTemplate">
+      <article class="quote-card">
+        <div class="quote-card__head">
+          <div>
+            <span class="quote-symbol"></span>
+            <h3></h3>
+          </div>
+          <span class="move-badge"></span>
+        </div>
+        <p class="quote-subtitle"></p>
+        <div class="quote-value-row">
+          <strong class="quote-value"></strong>
+          <span class="quote-unit"></span>
+        </div>
+        <div class="secondary-line"></div>
+        <div class="range">
+          <div class="range__bar"><span></span></div>
+          <div class="range__labels">
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+        <dl class="meta-grid">
+          <div>
+            <dt>开盘</dt>
+            <dd data-field="open"></dd>
+          </div>
+          <div>
+            <dt>昨收</dt>
+            <dd data-field="previousClose"></dd>
+          </div>
+          <div>
+            <dt>时间</dt>
+            <dd data-field="marketTime"></dd>
+          </div>
+          <div>
+            <dt>来源</dt>
+            <dd data-field="source"></dd>
+          </div>
+        </dl>
+      </article>
+    </template>
+
+    <footer class="page-footer">行情数据仅供查看，不构成投资建议。</footer>
+    <script src="./app.js" defer></script>
+  </body>
+</html>

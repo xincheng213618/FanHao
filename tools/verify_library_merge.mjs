@@ -83,5 +83,14 @@ const legacyDetailRoute = routeFromUrl("http://localhost/western/gw_legacy");
 assert.equal(legacyDetailRoute.view, "gallery");
 assert.equal(legacyDetailRoute.galleryMode, "western");
 assert.equal(legacyDetailRoute.galleryMediaId, "gw_legacy");
+const filteredMediaRoute = routeFromUrl("http://localhost/media?kind=movie&category=%E4%B8%AD%E5%9B%BD");
+assert.equal(filteredMediaRoute.view, "gallery");
+assert.equal(filteredMediaRoute.galleryMode, "media");
+assert.equal(filteredMediaRoute.galleryMediaKind, "movie");
+assert.equal(filteredMediaRoute.galleryCategory, "中国");
+assert.equal(
+  routeUrl(filteredMediaRoute, { initialParams: new URLSearchParams(), hash: "" }),
+  "/media?kind=movie&category=%E4%B8%AD%E5%9B%BD"
+);
 
 console.log("library merge verification passed");

@@ -26,9 +26,14 @@ for (const marker of [
   "controls.append(searchRow, hierarchy)",
   "按相关性排序",
   "GALLERY_MORE_SCROLL_INTENT_MS",
+  "GALLERY_MORE_GESTURE_IDLE_MS",
   "galleryMoreScrollCleanup",
+  "galleryMoreGestureConsumed = true",
+  "scheduleGestureRelease",
   "userScrollIntentUntil = 0",
-  'addEventListener("touchend", handleTouchEnd'
+  'addEventListener("touchend", handleTouchEnd',
+  "item.albumSubject || fallbackSubject || meaningfulPerson",
+  "collectionView ? collectionPerson"
 ]) {
   assert(webRenderer.includes(marker), `Web photo search is missing: ${marker}`);
 }
@@ -51,7 +56,10 @@ const androidAutoLoad = read("android-client", "www", "js", "auto-load.js");
 for (const marker of [
   "options.requireScrollIntent === true",
   "AUTO_LOAD_SCROLL_INTENT_MS",
+  "AUTO_LOAD_GESTURE_IDLE_MS",
   "markUserScrollIntent",
+  "scrollGestureConsumed = true",
+  "scheduleScrollGestureRelease",
   "movedDown",
   "userScrollIntentUntil = 0",
   'addEventListener("touchend", handleTouchEnd'

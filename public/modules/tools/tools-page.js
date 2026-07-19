@@ -23,7 +23,7 @@ export function createToolsPage(deps) {
     const bytes = inputBytes();
     const result = state.txtTool.result;
     const stats = [
-      ["小游戏", 2],
+      ["小游戏", 4],
       ["输入", bytes ? formatBytes(bytes) : "待上传"],
       ["输出", result?.size ? formatBytes(result.size) : "-"],
       ["保留", "10 分钟"]
@@ -111,7 +111,7 @@ export function createToolsPage(deps) {
     const title = document.createElement("h3");
     title.textContent = "离线小游戏";
     const subtitle = document.createElement("p");
-    subtitle.textContent = "不需要电脑端服务，网页端和安卓端都可直接打开。";
+    subtitle.textContent = "游戏均在浏览器本地运行；标有“仅网页”的项目不会进入安卓包。";
     copy.append(eyebrow, title, subtitle);
     const badge = document.createElement("span");
     badge.className = "txt-tool-badge";
@@ -122,7 +122,9 @@ export function createToolsPage(deps) {
     grid.className = "game-launch-grid";
     grid.append(
       createGameCard("2048 AI Engine", "game-difficulty/2048EndgameTablebase · GPL-3.0", "带 WASM AI 的 2048 静态版，可手玩、一步建议或自动运行。", "/games/2048/index.html"),
-      createGameCard("华容道", "jeantimex/hua-rong-dao-html", "经典滑块关卡，内置多关卡和 AI 自动解，可离线点按游玩。", "/games/huarongdao/index.html#/game")
+      createGameCard("华容道", "jeantimex/hua-rong-dao-html", "经典滑块关卡，内置多关卡和 AI 自动解，可离线点按游玩。", "/games/huarongdao/index.html#/game"),
+      createGameCard("五子棋 AI", "dhbloo/rapfi · GPL-3.0 · 仅网页", "开源强棋力 Rapfi NNUE 引擎，支持执黑或执白、三档难度和悔棋。", "/games/gomoku/index.html"),
+      createGameCard("蓄力跳台", "shenmaxg/web-jump · MIT · 仅网页", "按住蓄力、松开起跳，支持手机触控、计分和本地最佳成绩。", "/games/jump/index.html")
     );
 
     panel.append(head, grid);

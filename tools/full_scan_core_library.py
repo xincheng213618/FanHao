@@ -11,6 +11,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from code_parser import code_key, normalize_code
+from core_image_store import attach_core_image_store
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -832,6 +833,7 @@ def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8")
     conn = sqlite3.connect(args.db, timeout=30)
     conn.row_factory = sqlite3.Row
+    attach_core_image_store(conn, args.db)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
     modified_since = parse_local_date(args.modified_since)

@@ -2,6 +2,17 @@ const AUTO_LOAD_ROOT_MARGIN = "0px 0px 1600px 0px";
 const FALLBACK_AUTO_LOAD_DISTANCE = 1600;
 const AUTO_LOAD_RECHECK_DELAYS = [120, 420, 900];
 const AUTO_LOAD_SCROLL_INTENT_MS = 1200;
+const AUTO_LOAD_GESTURE_IDLE_MS = 320;
+let scrollGestureConsumed = false;
+let scrollGestureReleaseTimer = 0;
+
+function scheduleScrollGestureRelease() {
+  window.clearTimeout(scrollGestureReleaseTimer);
+  scrollGestureReleaseTimer = window.setTimeout(() => {
+    scrollGestureConsumed = false;
+    scrollGestureReleaseTimer = 0;
+  }, AUTO_LOAD_GESTURE_IDLE_MS);
+}
 
 export function enhanceAutoLoadMore(node, handler, options = {}) {
   const button = node instanceof HTMLButtonElement ? node : node.querySelector("button");
@@ -42,6 +53,10 @@ export function enhanceAutoLoadMore(node, handler, options = {}) {
   const run = async (event = null) => {
     event?.preventDefault();
     if (loading || !node.isConnected) return;
+    if (options.requireScrollIntent === true) {
+      scrollGestureConsumed = true;
+      scheduleScrollGestureRelease();
+    }
     loading = true;
     node.classList.add("auto-loading");
     node.dataset.autoLoad = "loading";
@@ -103,6 +118,10 @@ export function enhanceAutoLoadMore(node, handler, options = {}) {
     if (event.type === "wheel" && Number(event.deltaY || 0) <= 0) return;
     if (event.type === "keydown" && !["ArrowDown", "End", "PageDown", " "].includes(event.key)) return;
     if (event.type === "pointerdown" && Number(event.clientX || 0) < document.documentElement.clientWidth - 20) return;
+    if (scrollGestureConsumed) {
+      scheduleScrollGestureRelease();
+      return;
+    }
     userScrollIntentUntil = Date.now() + AUTO_LOAD_SCROLL_INTENT_MS;
   };
 

@@ -125,15 +125,15 @@ export function createImageLibraryService({
     const movieItems = mediaItemsByKind(mediaItems, "movie");
     const tvItems = mediaItemsByKind(mediaItems, "tv");
     const screenItems = mediaItemsByKinds(mediaItems, ["movie", "tv"]);
-    const manga = mangaService.cacheDirs().map(mangaService.publicSummary);
-    const cache = imageReaderCacheStatus();
+    const mangaCount = mangaService.cacheDirs().length;
+    const cache = options.includeCache === false ? null : imageReaderCacheStatus();
     return {
       schemaVersion: 1,
       scannedAt: index.scannedAt || "",
       mangaRoot: mangaService.rootStatus(),
       photoRoots: index.roots || photoSetRootStatuses(),
       mediaRoots: index.mediaRoots || galleryMediaRootStatuses(),
-      cache: {
+      cache: cache ? {
         root: cache.root,
         exists: cache.exists,
         maxBytes: cache.maxBytes,
@@ -141,9 +141,9 @@ export function createImageLibraryService({
         overBytes: cache.overBytes,
         fileCount: cache.fileCount,
         cleanupIntervalMs: cache.cleanupIntervalMs
-      },
+      } : null,
       totals: {
-        manga: manga.length,
+        manga: mangaCount,
         photoSets: photoSets.length,
         western: westernItems.length,
         movies: movieItems.length,
@@ -173,6 +173,7 @@ export function createImageLibraryService({
     const photoView = normalizePhotoLibraryView(url.searchParams.get("photoView") || url.searchParams.get("view"));
     const tvView = normalizeTvLibraryView(url.searchParams.get("tvView") || url.searchParams.get("view"));
     const category = String(url.searchParams.get("category") || "all").trim() || "all";
+    const mediaKind = normalizeMediaKindFilter(url.searchParams.get("kind") || url.searchParams.get("mediaKind"));
     const subCategory = String(url.searchParams.get("subCategory") || "all").trim() || "all";
     const person = String(url.searchParams.get("person") || "all").trim() || "all";
     const date = String(url.searchParams.get("date") || "all").trim() || "all";
@@ -215,26 +216,35 @@ export function createImageLibraryService({
       const screenWorksSource = [...movieSource, ...tvSeriesSource];
       facetsSource = screenWorksSource;
       if (seriesKey) {
-        const categorySource = filterMediaItemsForList(tvSource, { category });
+        const categorySource = filterMediaItemsForList(tvSource, { category, person, mediaKind: "tv" });
         source = categorySource.filter((item) => item.seriesKey === seriesKey);
         seriesSummary = publicTvSeriesListItem(tvSeriesGroups(tvSource).find((group) => group.seriesKey === seriesKey) || null);
+      } else if (person !== "all") {
+        source = filterMediaItemsForList(tvSource, { category, person, mediaKind: "tv" });
+        seriesSummary = publicTvSeriesListItem(tvSeriesGroups(tvSource).find((group) => group.seriesName === person) || null);
       } else {
-        source = filterMediaItemsForList(screenWorksSource, { category });
+        source = filterMediaItemsForList(screenWorksSource, { category, person, mediaKind });
       }
     } else if (["western", "movie", "tv"].includes(mode)) {
       const mediaSource = mediaItemsByKind(mediaItems, mode).map((item) => publicImageLibraryListItem(item, mode));
-      const categorySource = filterMediaItemsForList(mediaSource, { category });
+      const categorySource = filterMediaItemsForList(mediaSource, { category, person });
       if (mode === "tv") {
         const tvSeriesSource = tvSeriesGroups(mediaSource).map(publicTvSeriesListItem);
         facetsSource = tvSeriesSource;
         if (seriesKey) {
           source = categorySource.filter((item) => item.seriesKey === seriesKey);
           seriesSummary = publicTvSeriesListItem(tvSeriesGroups(mediaSource).find((group) => group.seriesKey === seriesKey) || null);
+        } else if (person !== "all") {
+          source = categorySource;
+          seriesSummary = publicTvSeriesListItem(tvSeriesGroups(mediaSource).find((group) => group.seriesName === person) || null);
         } else if (tvView === "episodes") {
           source = categorySource;
         } else {
           source = tvSeriesGroups(categorySource).map(publicTvSeriesListItem);
         }
+      } else if (mode === "western") {
+        facetsSource = mediaSource;
+        source = person === "all" ? westernPersonGroups(categorySource).map(publicWesternPersonListItem) : categorySource;
       } else {
         facetsSource = mediaSource;
         source = categorySource;
@@ -255,13 +265,14 @@ export function createImageLibraryService({
     return {
       schemaVersion: 1,
       mode,
+      mediaKind: mode === "media" ? mediaKind : "all",
       query,
       sort,
       photoView: mode === "photo" ? (collection ? "albums" : photoView) : "",
       tvView: mode === "tv" ? (seriesKey || tvView === "episodes" ? "episodes" : "series") : mode === "media" && seriesKey ? "episodes" : "",
       category: ["photo", "western", "movie", "tv", "media"].includes(mode) ? category : "",
       subCategory: mode === "photo" ? subCategory : "",
-      person: mode === "photo" ? person : "",
+      person: ["photo", "western", "media", "tv"].includes(mode) ? person : "",
       date: mode === "photo" ? date : "",
       collection: mode === "photo" ? collection : "",
       collectionSummary,
@@ -269,6 +280,10 @@ export function createImageLibraryService({
       seriesKey: ["tv", "media"].includes(mode) ? seriesKey : "",
       seriesSummary,
       facets: mode === "photo" ? photoFacets || photoLibraryFacets(facetsSource, photoSubCategoryFacetsSource) : mediaLibraryFacets(facetsSource),
+      stats: {
+        ratedCount: sorted.filter((item) => Number(item?.rating || item?.movieMetadata?.rating || item?.tvSeries?.rating || 0) > 0).length,
+        totalBytes: sorted.reduce((sum, item) => sum + Number(item?.size || 0), 0)
+      },
       count: items.length,
       total: sorted.length,
       limit,
@@ -295,6 +310,11 @@ export function createImageLibraryService({
     if (["media", "video", "screen", "film", "films"].includes(mode)) return "media";
     if (["photo", "manga", "western", "movie", "tv"].includes(mode)) return mode;
     return "photo";
+  }
+
+  function normalizeMediaKindFilter(value) {
+    const kind = String(value || "").trim().toLowerCase();
+    return ["movie", "tv"].includes(kind) ? kind : "all";
   }
 
   function hasCjkText(value) {
@@ -356,6 +376,7 @@ export function createImageLibraryService({
   function photoAlbumSubject(value, item = {}) {
     const text = stripPhotoAlbumStats(value);
     const match = text.match(/\b(?:VOL|N[O0])\.?\s*\d+\b/i);
+    const personName = String(item?.personName || "").trim();
     const structuralLabels = [
       item?.collectionTitle,
       item?.subCategory,
@@ -368,12 +389,20 @@ export function createImageLibraryService({
       for (const label of structuralLabels) {
         result = result.replace(new RegExp(`^\\[?${escapePhotoAlbumPattern(label)}\\]?\\s*(?:[-–—:]\\s*)?`, "iu"), "");
       }
-      return result
+      result = result
         .replace(/(?:^|\s)20\d{2}[.\-/年]\d{1,2}[.\-/月]\d{1,2}(?:日)?(?:\s|$)/u, " ")
         .replace(/\s*[-–—:]\s*Collection\s*$/iu, "")
         .replace(/\s+Collection\s*$/iu, "")
         .replace(/^\s*[-–—:]\s*/u, "")
+        .replace(/[\s._-]+$/u, "")
         .trim();
+      if (personName) {
+        const withoutPerson = result
+          .replace(new RegExp(`[\\s._-]+${escapePhotoAlbumPattern(personName)}[\\s._-]*$`, "iu"), "")
+          .trim();
+        if (withoutPerson) result = withoutPerson;
+      }
+      return result;
     };
     if (!match) return clean(text);
     const after = clean(text.slice(Number(match.index || 0) + match[0].length));
@@ -388,7 +417,7 @@ export function createImageLibraryService({
     const person = String(item?.personName || "").trim();
     if (!person) return "";
     const normalized = normalizedPhotoPersonValue(person);
-    const structuralValues = [item?.subCategory, item?.collectionTitle]
+    const structuralValues = [item?.subCategory, item?.collectionTitle, item?.albumNumber ? "" : item?.albumSubject]
       .map(normalizedPhotoPersonValue)
       .filter(Boolean);
     return structuralValues.includes(normalized) ? "" : person;
@@ -432,6 +461,7 @@ export function createImageLibraryService({
     return {
       id: String(item?.id || ""),
       type: normalizedMode,
+      mediaKind: String(item?.mediaKind || (["western", "movie", "tv"].includes(normalizedMode) ? normalizedMode : "")).trim(),
       title: displayTitle,
       category: String(item?.category || item?.site || item?.kindLabel || "").trim(),
       subCategory: String(item?.subCategory || "").trim(),
@@ -553,7 +583,8 @@ export function createImageLibraryService({
     const meta = group.tvSeries || {};
     return {
       id: group.seriesKey,
-      type: "tvSeries",
+      type: "tvSeriesWork",
+      mediaKind: "tv",
       title: String(meta.title || group.title || group.seriesName || "电视剧").trim(),
       category: String(group.category || meta.category || "").trim(),
       subCategory: String(group.seriesName || "").trim(),
@@ -564,6 +595,7 @@ export function createImageLibraryService({
       rootLabel: String(group.rootLabel || "").trim(),
       ext: "",
       size: Number(group.size || 0),
+      episodeCount: Number(group.episodeCount || 0),
       updatedAt: String(group.updatedAt || meta.updatedAt || "").trim(),
       imageCount: null,
       chapterCount: Number(group.episodeCount || 0),
@@ -581,6 +613,62 @@ export function createImageLibraryService({
       year: String(meta.year || "").trim(),
       genres: Array.isArray(meta.genres) ? meta.genres : [],
       routePath: `/tv?seriesKey=${encodeURIComponent(String(group.seriesKey || ""))}`
+    };
+  }
+
+  function westernPersonGroups(items = []) {
+    const groups = new Map();
+    for (const item of items) {
+      const personName = String(item?.personName || item?.subCategory || item?.category || "未归类").trim() || "未归类";
+      let group = groups.get(personName);
+      if (!group) {
+        group = {
+          personName,
+          count: 0,
+          playableCount: 0,
+          size: 0,
+          updatedAt: "",
+          coverUrl: "",
+          categories: new Map(),
+          samples: []
+        };
+        groups.set(personName, group);
+      }
+      group.count += 1;
+      if (item?.playable) group.playableCount += 1;
+      group.size += Number(item?.size || 0);
+      if (item?.category) group.categories.set(item.category, (group.categories.get(item.category) || 0) + 1);
+      if (group.samples.length < 3 && item?.title) group.samples.push(item.title);
+      if (String(item?.updatedAt || "") > group.updatedAt) {
+        group.updatedAt = String(item.updatedAt || "");
+        group.coverUrl = String(item?.coverUrl || group.coverUrl || "");
+      } else if (!group.coverUrl && item?.coverUrl) {
+        group.coverUrl = String(item.coverUrl);
+      }
+    }
+    return [...groups.values()];
+  }
+
+  function publicWesternPersonListItem(group) {
+    const categories = [...(group?.categories || new Map()).entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: "base" }))
+      .map(([value, count]) => ({ value, count }));
+    return {
+      id: String(group?.personName || ""),
+      type: "westernPerson",
+      mediaKind: "western",
+      title: String(group?.personName || "未归类"),
+      category: "",
+      subCategory: "",
+      personName: String(group?.personName || "未归类"),
+      size: Number(group?.size || 0),
+      updatedAt: String(group?.updatedAt || ""),
+      playable: Boolean(group?.playableCount),
+      playableCount: Number(group?.playableCount || 0),
+      videoCount: Number(group?.count || 0),
+      coverUrl: String(group?.coverUrl || ""),
+      categories,
+      samples: Array.isArray(group?.samples) ? group.samples : []
     };
   }
 
@@ -762,6 +850,7 @@ export function createImageLibraryService({
   function mediaLibraryFacets(items = []) {
     return {
       categories: facetCounts(items, "category").slice(0, 24),
+      mediaKinds: facetCounts(items, "mediaKind"),
       people: facetCounts(items, "personName").slice(0, 20),
       roots: facetCounts(items, "rootLabel").slice(0, 12)
     };
@@ -769,7 +858,16 @@ export function createImageLibraryService({
 
   function filterMediaItemsForList(items, filters = {}) {
     return (items || []).filter((item) => {
-      if (filters.category && filters.category !== "all" && item.category !== filters.category) return false;
+      const categoryKind = {
+        __fanhao_media_kind_movie__: "movie",
+        __fanhao_media_kind_tv__: "tv"
+      }[filters.category];
+      if (categoryKind ? item.mediaKind !== categoryKind : filters.category && filters.category !== "all" && item.category !== filters.category) return false;
+      if (filters.mediaKind && filters.mediaKind !== "all" && item.mediaKind !== filters.mediaKind) return false;
+      if (filters.person && filters.person !== "all") {
+        const itemPerson = String(item?.personName || item?.seriesName || "").trim();
+        if (itemPerson !== filters.person) return false;
+      }
       return true;
     });
   }
@@ -917,6 +1015,13 @@ export function createImageLibraryService({
         if (aHasRating !== bHasRating) return aHasRating ? -1 : 1;
         if (aRating !== bRating) return bRating - aRating;
         return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+      });
+    }
+    if (sort === "year") {
+      return list.sort((a, b) => {
+        const aYear = Number.parseInt(String(a?.year || a?.movieMetadata?.year || a?.tvSeries?.year || "").match(/\d{4}/)?.[0] || "", 10) || 0;
+        const bYear = Number.parseInt(String(b?.year || b?.movieMetadata?.year || b?.tvSeries?.year || "").match(/\d{4}/)?.[0] || "", 10) || 0;
+        return bYear - aYear || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
       });
     }
     return list.sort((a, b) => {

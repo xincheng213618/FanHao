@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { attachCoreImageStore } from "../src/platform/server/core-image-store.js";
 import { fileURLToPath } from "node:url";
 
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
@@ -11,9 +12,11 @@ const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const DATA_DIR = path.join(PROJECT_ROOT, "data");
 const DEFAULT_DB_PATH = path.join(DATA_DIR, "short-videos.sqlite");
 const DEFAULT_CORE_DB_PATH = path.join(DATA_DIR, "fanhao-core-v2.sqlite");
+const DEFAULT_CORE_IMAGE_DB_PATH = path.join(DATA_DIR, "fanhao-core-images.sqlite");
 const args = parseArgs(process.argv.slice(2));
 const dbPath = path.resolve(args.db || DEFAULT_DB_PATH);
 const coreDbPath = path.resolve(args["core-db"] || DEFAULT_CORE_DB_PATH);
+const coreImageDbPath = path.resolve(args["core-image-db"] || DEFAULT_CORE_IMAGE_DB_PATH);
 const write = Boolean(args.write);
 const deleteFiles = Boolean(args["delete-files"]);
 const cleanupCoreCache = Boolean(args["cleanup-core-cache"]);
@@ -113,6 +116,7 @@ function cleanupCoreLocalImageCache(coreDbPath, legacyCoverDir) {
   const database = new DatabaseSync(coreDbPath);
   try {
     database.exec("PRAGMA busy_timeout = 10000;");
+    attachCoreImageStore(database, { dbPath: coreImageDbPath });
     const resolvedRoot = path.resolve(legacyCoverDir);
     const rows = database.prepare(`
       SELECT file_id, file_path, byte_length

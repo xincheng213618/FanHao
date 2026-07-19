@@ -1,6 +1,6 @@
 import { Worker } from "node:worker_threads";
 
-export function createMediaBlobWorkerClient({ dbPath, WorkerCtor = Worker } = {}) {
+export function createMediaBlobWorkerClient({ dbPath, imageDbPath, WorkerCtor = Worker } = {}) {
   const requests = new Map();
   let requestId = 0;
   let worker = null;
@@ -27,7 +27,7 @@ export function createMediaBlobWorkerClient({ dbPath, WorkerCtor = Worker } = {}
 
     const nextWorker = new WorkerCtor(new URL("./media-blob-worker.js", import.meta.url), {
       execArgv: process.execArgv.filter((value) => !String(value).startsWith("--input-type")),
-      workerData: { dbPath }
+      workerData: { dbPath, imageDbPath }
     });
     worker = nextWorker;
     nextWorker.on("message", (message) => {

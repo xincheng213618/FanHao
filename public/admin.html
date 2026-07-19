@@ -6,7 +6,8 @@
     <meta name="theme-color" content="#1f2937" />
     <title>资料库设置与运维</title>
     <link rel="icon" href="/app-icon.svg?v=20260629-douban-cookie-01" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=20260712-module-settings-02" />
+    <link rel="stylesheet" href="/styles.css?v=20260718-access-analytics-01" />
+    <link rel="stylesheet" href="/modules/system/access-analytics.css?v=20260718-access-analytics-01" />
   </head>
   <body class="admin-page">
     <div class="admin-shell">
@@ -24,20 +25,24 @@
             <span class="admin-nav-index">01</span>
             <span><strong>系统总览</strong><small>健康、指标、快捷作业</small></span>
           </button>
-          <button type="button" data-admin-nav="scripts">
+          <button type="button" data-admin-nav="visitors">
             <span class="admin-nav-index">02</span>
+            <span><strong>访问统计</strong><small>IP、省份、鉴权方式</small></span>
+          </button>
+          <button type="button" data-admin-nav="scripts">
+            <span class="admin-nav-index">03</span>
             <span><strong>作业中心</strong><small><b id="adminNavScriptCount">-</b> 个脚本</small></span>
           </button>
           <button type="button" data-admin-nav="tasks">
-            <span class="admin-nav-index">03</span>
+            <span class="admin-nav-index">04</span>
             <span><strong>任务队列</strong><small><b id="adminNavTaskCount">-</b> 条历史</small></span>
           </button>
           <button type="button" data-admin-nav="maintenance">
-            <span class="admin-nav-index">04</span>
+            <span class="admin-nav-index">05</span>
             <span><strong>数据维护</strong><small>演员、封面、缓存</small></span>
           </button>
           <button type="button" data-admin-nav="settings">
-            <span class="admin-nav-index">05</span>
+            <span class="admin-nav-index">06</span>
             <span><strong>资料库设置</strong><small>按模块自动汇总</small></span>
           </button>
         </nav>
@@ -148,6 +153,116 @@
               <div class="admin-task-list compact" id="adminFailureRail"></div>
             </section>
           </div>
+        </section>
+
+        <section class="admin-view access-analytics-view" id="adminViewVisitors" data-admin-view="visitors">
+          <div class="admin-view-toolbar access-analytics-toolbar">
+            <div>
+              <h2>访问者与地区</h2>
+              <p>按 IP 汇总页面、接口和媒体请求；省份由本机 ip2region 离线库解析。</p>
+            </div>
+            <div class="access-analytics-status">
+              <span id="accessGeoStatus" class="admin-badge">检查离线库</span>
+              <button class="folder-button compact" id="accessRefresh" type="button">刷新统计</button>
+            </div>
+          </div>
+
+          <section class="admin-panel access-filter-panel" aria-label="访问统计筛选">
+            <label class="admin-field">
+              <span>时间范围</span>
+              <select id="accessDays">
+                <option value="1">今天</option>
+                <option value="7">最近 7 天</option>
+                <option value="30" selected>最近 30 天</option>
+                <option value="90">最近 90 天</option>
+                <option value="365">最近一年</option>
+              </select>
+            </label>
+            <label class="admin-field">
+              <span>网络范围</span>
+              <select id="accessNetwork">
+                <option value="remote" selected>远程访问</option>
+                <option value="all">全部网络</option>
+                <option value="lan">局域网</option>
+                <option value="local">本机</option>
+              </select>
+            </label>
+            <label class="admin-field">
+              <span>访问方式</span>
+              <select id="accessAuth">
+                <option value="">全部方式</option>
+                <option value="missing-password">未输入密码</option>
+                <option value="password">已输入密码</option>
+                <option value="trusted-network">局域网免密</option>
+                <option value="app">Android 注入</option>
+                <option value="app-cookie">App Cookie</option>
+              </select>
+            </label>
+            <label class="admin-field">
+              <span>省份</span>
+              <select id="accessProvince"><option value="">全部省份</option></select>
+            </label>
+            <label class="admin-field access-query-field">
+              <span>搜索 IP / 省市 / 运营商</span>
+              <input id="accessQuery" type="search" placeholder="例如 1.2.3.4 或 广东" autocomplete="off" />
+            </label>
+          </section>
+
+          <div class="access-summary-grid" id="accessSummary" aria-live="polite"></div>
+
+          <div class="access-breakdown-grid">
+            <section class="admin-panel">
+              <div class="admin-panel-head">
+                <h2>访问方式</h2>
+                <small>同一 IP 可出现在多个方式中</small>
+              </div>
+              <div class="access-auth-list" id="accessAuthBreakdown"></div>
+            </section>
+            <section class="admin-panel">
+              <div class="admin-panel-head">
+                <h2>省份排行</h2>
+                <small>ip2region 结果仅代表网络出口归属</small>
+              </div>
+              <div class="access-ranking-list" id="accessProvinceBreakdown"></div>
+            </section>
+            <section class="admin-panel access-daily-panel">
+              <div class="admin-panel-head">
+                <h2>每日趋势</h2>
+                <small>请求数 / 独立 IP</small>
+              </div>
+              <div class="access-daily-list" id="accessDaily"></div>
+            </section>
+          </div>
+
+          <section class="admin-panel access-table-panel">
+            <div class="admin-panel-head">
+              <div>
+                <h2>IP 明细</h2>
+                <small id="accessTableSummary">正在读取</small>
+              </div>
+              <div class="access-pagination">
+                <button class="folder-button compact subtle" id="accessPrev" type="button">上一页</button>
+                <span id="accessPageLabel">-</span>
+                <button class="folder-button compact subtle" id="accessNext" type="button">下一页</button>
+              </div>
+            </div>
+            <div class="access-table-wrap">
+              <table class="access-table">
+                <thead>
+                  <tr>
+                    <th>IP</th>
+                    <th>省市 / 运营商</th>
+                    <th>访问方式</th>
+                    <th>请求 / 页面</th>
+                    <th>首次 / 最近</th>
+                    <th>最近路径</th>
+                  </tr>
+                </thead>
+                <tbody id="accessVisitorRows"></tbody>
+              </table>
+            </div>
+            <p class="admin-status" id="accessStatus"></p>
+          </section>
         </section>
 
         <section class="admin-view" id="adminViewScripts" data-admin-view="scripts">
@@ -343,6 +458,6 @@
       </main>
     </div>
 
-    <script src="/admin.js?v=20260712-module-settings-02" type="module"></script>
+    <script src="/admin.js?v=20260718-access-analytics-01" type="module"></script>
   </body>
 </html>

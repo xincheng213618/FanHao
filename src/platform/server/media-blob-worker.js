@@ -1,8 +1,10 @@
 import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
+import { attachCoreImageStore } from "./core-image-store.js";
 
 const db = new DatabaseSync(workerData.dbPath);
 db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+attachCoreImageStore(db, { dbPath: workerData.imageDbPath });
 
 const coreImageQuery = db.prepare("SELECT image_blob, mime FROM images WHERE id = ?");
 const actorAvatarQuery = db.prepare(`

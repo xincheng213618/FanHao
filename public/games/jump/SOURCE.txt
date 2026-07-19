@@ -1,0 +1,20 @@
+Upstream: https://github.com/shenmaxg/web-jump
+Commit: 3fdcb17436f77ddb6664b9aad8f9c5fffdf0fe58
+Commit date: 2021-07-04T12:18:37+08:00
+License: MIT (see LICENSE.txt)
+
+Built locally on 2026-07-18 with Node.js 25.8.2 and webpack 5.108.4.
+The upstream prebuild command uses Windows-incompatible `mkdir ./build`, so the
+production bundle was generated with webpack directly. Runtime dependencies were
+pinned by the upstream package manifest: three 0.124.0 and @tweenjs/tween.js 18.6.4.
+
+Local integration changes:
+- rebranded the page as 蓄力跳台;
+- added Pointer Events input, score/game-over events and context-menu suppression;
+- added local score UI, persistent best score, restart and return navigation;
+- capped devicePixelRatio at 2 for mobile GPU stability;
+- removed disabled debug, FPS and post-processing imports from the production bundle;
+- kept the locally modified upstream source under source/.
+
+Runtime bundle: game.a87e6d4f5755295c82b3.js
+Runtime bundle SHA-256: 82014F2E5DD5313AD34AE488D2153AD88A22C12C8F5AF859A9D35C9578A264A0

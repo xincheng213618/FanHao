@@ -1,6 +1,7 @@
 export async function routeAdminApi(req, res, url, deps) {
   const {
     adminActorAvatarService,
+    accessAnalyticsService,
     adminMaintenanceTaskService,
     adminPersonService,
     adminSettingsService,
@@ -11,6 +12,16 @@ export async function routeAdminApi(req, res, url, deps) {
   } = deps;
 
   if (!url.pathname.startsWith("/api/admin/")) return false;
+
+  if (url.pathname === "/api/admin/access-stats" && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, await accessAnalyticsService.statsPayload(url));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "读取访问统计失败" });
+    }
+    return true;
+  }
 
   if (url.pathname === "/api/admin/tasks" && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;

@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#173f35">
+    <meta name="description" content="由开源 Rapfi NNUE 引擎驱动的离线网页五子棋 AI 对战。">
+    <title>五子棋 AI · Rapfi</title>
+    <link rel="stylesheet" href="./styles.css?v=20260718-rapfi-01">
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <a class="back-link" href="../../index.html#tools" aria-label="返回资料库小工具">
+          <span aria-hidden="true">←</span>
+          返回资料库
+        </a>
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
+          <span>
+            <strong>五子棋 AI</strong>
+            <small>Rapfi · Alpha-Beta + NNUE</small>
+          </span>
+        </div>
+        <span id="engineBadge" class="engine-badge loading">引擎加载中</span>
+      </header>
+
+      <main class="game-layout">
+        <section class="board-panel" aria-labelledby="gameTitle">
+          <div class="board-heading">
+            <div>
+              <span class="eyebrow">GOMOKU · 15 × 15</span>
+              <h1 id="gameTitle">和 Rapfi 下一盘</h1>
+            </div>
+            <div class="turn-pill" id="turnPill">
+              <span class="mini-stone black" aria-hidden="true"></span>
+              <span id="turnText">黑方行棋</span>
+            </div>
+          </div>
+
+          <div class="board-wrap" id="boardWrap">
+            <canvas
+              id="board"
+              width="720"
+              height="720"
+              tabindex="0"
+              role="application"
+              aria-label="十五乘十五五子棋棋盘，点击交叉点落子"
+            ></canvas>
+            <div id="loadingPanel" class="loading-panel">
+              <span class="loader" aria-hidden="true"></span>
+              <strong id="loadingTitle">正在加载 Rapfi 引擎</strong>
+              <span id="loadingDetail">首次载入约 40 MB NNUE 模型，之后由浏览器缓存</span>
+              <div class="progress-track" aria-hidden="true"><i id="loadingProgress"></i></div>
+            </div>
+          </div>
+
+          <div class="game-status" aria-live="polite">
+            <span id="statusStone" class="status-stone black" aria-hidden="true"></span>
+            <div>
+              <strong id="statusTitle">棋盘已就绪</strong>
+              <span id="statusDetail">你执黑先行，点击棋盘交叉点落子。</span>
+            </div>
+          </div>
+
+          <div class="primary-actions">
+            <button id="undoButton" class="button secondary" type="button" disabled>悔棋</button>
+            <button id="newGameButton" class="button primary" type="button">重新开始</button>
+          </div>
+        </section>
+
+        <aside class="control-panel" aria-label="对局设置和 AI 分析">
+          <section class="control-card">
+            <div class="section-heading">
+              <span class="eyebrow">MATCH</span>
+              <h2>对局设置</h2>
+            </div>
+
+            <fieldset class="setting-group">
+              <legend>选择执子</legend>
+              <div class="segmented" id="sideSelector">
+                <label>
+                  <input type="radio" name="humanSide" value="1" checked>
+                  <span><i class="mini-stone black" aria-hidden="true"></i>我执黑</span>
+                </label>
+                <label>
+                  <input type="radio" name="humanSide" value="2">
+                  <span><i class="mini-stone white" aria-hidden="true"></i>我执白</span>
+                </label>
+              </div>
+            </fieldset>
+
+            <label class="setting-group" for="difficulty">
+              <span>AI 难度</span>
+              <select id="difficulty">
+                <option value="casual">休闲 · 约 0.5 秒</option>
+                <option value="strong" selected>进阶 · 约 1.5 秒</option>
+                <option value="master">挑战 · 约 4 秒</option>
+              </select>
+            </label>
+
+            <div class="rule-note">
+              <strong>无禁手五子棋</strong>
+              <span>黑白双方均可长连，任一方向率先连成五子或更多即获胜。</span>
+            </div>
+          </section>
+
+          <section class="control-card analysis-card">
+            <div class="section-heading row">
+              <div>
+                <span class="eyebrow">ENGINE</span>
+                <h2>Rapfi 分析</h2>
+              </div>
+              <span id="thinkingIndicator" class="thinking-indicator">等待对局</span>
+            </div>
+            <dl class="analysis-grid">
+              <div><dt>深度</dt><dd id="depthValue">-</dd></div>
+              <div><dt>估值</dt><dd id="evalValue">-</dd></div>
+              <div><dt>节点</dt><dd id="nodesValue">-</dd></div>
+              <div><dt>速度</dt><dd id="speedValue">-</dd></div>
+            </dl>
+            <div class="bestline">
+              <span>推荐变化</span>
+              <strong id="bestlineValue">等待 AI 思考</strong>
+            </div>
+          </section>
+
+          <section class="source-card">
+            <span class="source-icon" aria-hidden="true">R</span>
+            <div>
+              <strong>开源强棋力引擎</strong>
+              <span>Rapfi 通过 WebAssembly 在浏览器本地计算；棋局不会上传。</span>
+              <a href="https://github.com/dhbloo/rapfi" target="_blank" rel="noreferrer">查看 Rapfi 源码与 GPL-3.0 许可</a>
+            </div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script src="./gomoku.js?v=20260718-rapfi-01" defer></script>
+  </body>
+</html>

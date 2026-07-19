@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from core_image_store import image_store_schema
+
 
 MAX_REMOTE_IMAGE_BYTES = 8 * 1024 * 1024
 DEFAULT_USER_AGENT = (
@@ -20,9 +22,10 @@ ALLOWED_REMOTE_IMAGE_HOSTS = ("jdbstatic.com", "javdb.com")
 
 
 def ensure_remote_image_schema(conn: sqlite3.Connection) -> None:
+    schema = image_store_schema(conn)
     conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS remote_image_cache (
+        f"""
+        CREATE TABLE IF NOT EXISTS {schema}.remote_image_cache (
           url TEXT PRIMARY KEY,
           url_hash TEXT NOT NULL,
           content_type TEXT,
@@ -33,24 +36,24 @@ def ensure_remote_image_schema(conn: sqlite3.Connection) -> None:
           fetched_at TEXT,
           updated_at TEXT NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_remote_image_cache_hash ON remote_image_cache(url_hash);
-        CREATE INDEX IF NOT EXISTS idx_remote_image_cache_status ON remote_image_cache(status);
+        CREATE INDEX IF NOT EXISTS {schema}.idx_remote_image_cache_hash ON remote_image_cache(url_hash);
+        CREATE INDEX IF NOT EXISTS {schema}.idx_remote_image_cache_status ON remote_image_cache(status);
         """
     )
-    ensure_column(conn, "remote_image_cache", "url_hash", "TEXT")
-    ensure_column(conn, "remote_image_cache", "content_type", "TEXT")
-    ensure_column(conn, "remote_image_cache", "image_blob", "BLOB")
-    ensure_column(conn, "remote_image_cache", "byte_length", "INTEGER")
-    ensure_column(conn, "remote_image_cache", "status", "TEXT NOT NULL DEFAULT 'ok'")
-    ensure_column(conn, "remote_image_cache", "error", "TEXT")
-    ensure_column(conn, "remote_image_cache", "fetched_at", "TEXT")
-    ensure_column(conn, "remote_image_cache", "updated_at", "TEXT")
+    ensure_column(conn, schema, "remote_image_cache", "url_hash", "TEXT")
+    ensure_column(conn, schema, "remote_image_cache", "content_type", "TEXT")
+    ensure_column(conn, schema, "remote_image_cache", "image_blob", "BLOB")
+    ensure_column(conn, schema, "remote_image_cache", "byte_length", "INTEGER")
+    ensure_column(conn, schema, "remote_image_cache", "status", "TEXT NOT NULL DEFAULT 'ok'")
+    ensure_column(conn, schema, "remote_image_cache", "error", "TEXT")
+    ensure_column(conn, schema, "remote_image_cache", "fetched_at", "TEXT")
+    ensure_column(conn, schema, "remote_image_cache", "updated_at", "TEXT")
 
 
-def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+def ensure_column(conn: sqlite3.Connection, schema: str, table: str, column: str, definition: str) -> None:
+    rows = conn.execute(f"PRAGMA {schema}.table_info({table})").fetchall()
     if not any(row[1] == column for row in rows):
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        conn.execute(f"ALTER TABLE {schema}.{table} ADD COLUMN {column} {definition}")
 
 
 def is_allowed_remote_image_url(url: str) -> bool:

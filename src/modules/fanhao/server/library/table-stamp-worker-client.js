@@ -1,6 +1,6 @@
 import { Worker } from "node:worker_threads";
 
-export function createTableStampWorkerClient({ dbPath }) {
+export function createTableStampWorkerClient({ dbPath, imageDbPath }) {
   const requests = new Map();
   let requestId = 0;
   let worker = null;
@@ -25,7 +25,7 @@ export function createTableStampWorkerClient({ dbPath }) {
     if (worker) return worker;
 
     const nextWorker = new Worker(new URL("./table-stamp-worker.js", import.meta.url), {
-      workerData: { dbPath }
+      workerData: { dbPath, imageDbPath }
     });
     worker = nextWorker;
     nextWorker.on("message", (message) => {

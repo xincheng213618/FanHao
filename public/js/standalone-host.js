@@ -35,7 +35,7 @@ async function loadCurrentModule(view) {
   if (view === "gallery") {
     const [pageModule, rendererModule] = await Promise.all([
       import("../modules/content-index/gallery-page.js?v=20260717-photo-library-workspace-01"),
-      import("../modules/content-index/gallery-renderer.js?v=20260717-photo-album-parser-02")
+      import("../modules/content-index/gallery-renderer.js?v=20260718-photo-gesture-parser-03")
     ]);
     return {
       createPage: pageModule.createGalleryPage,
@@ -122,6 +122,7 @@ function createHost({ api, els, initialParams, pages, state }) {
         galleryChapterIndex: String(state.gallery.chapter?.index || ""),
         galleryMediaId: state.gallery.media?.id || "",
         galleryQuery: state.gallery.query || "",
+        galleryMediaKind: state.gallery.mediaKind || "all",
         galleryCategory: state.gallery.category || "all",
         gallerySubCategory: state.gallery.subCategory || "all",
         galleryPerson: state.gallery.person || "all",
@@ -352,6 +353,7 @@ function createStandaloneState(view) {
       photoView: "collections",
       photoCollection: null,
       query: "",
+      mediaKind: "all",
       category: "all",
       subCategory: "all",
       person: "all",

@@ -1,5 +1,5 @@
 import { fetchJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260717-photo-scroll-intent-02";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260718-photo-gesture-03";
 import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260702-novel-local-manage-74";
 import { isChannelFavorite, toggleChannelFavorite } from "../../js/channel-favorites.js";
 import { formatBytes, formatDate, formatNumber } from "../../js/format.js";

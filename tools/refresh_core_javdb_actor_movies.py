@@ -32,6 +32,7 @@ from backfill_javdb_metadata import (  # noqa: E402
     load_scraper_config,
 )
 from code_parser import loose_code_key, normalize_code  # noqa: E402
+from core_image_store import attach_core_image_store  # noqa: E402
 from import_javdb_actor import actor_id_from_url, download_avatar, parse_actor_page, profile_looks_ready  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +60,7 @@ def main() -> None:
     try:
         with sqlite3.connect(args.db, timeout=30) as conn:
             conn.row_factory = sqlite3.Row
+            attach_core_image_store(conn, args.db)
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("PRAGMA busy_timeout = 5000")
             for index, job in enumerate(jobs, 1):

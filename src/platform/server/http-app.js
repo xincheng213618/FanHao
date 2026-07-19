@@ -1,5 +1,6 @@
 export function createRequestHandler({
   applyAppCookie,
+  attachAccessAnalytics,
   attachAccessLogger,
   requestAuthState,
   routeAuth,
@@ -28,6 +29,7 @@ export function createRequestHandler({
 
     const authState = requestAuthState(req, url);
     applyAppCookie(res, authState);
+    attachAccessAnalytics(req, res, url, authState, startedAt);
     attachAccessLogger(req, res, url, authState, startedAt);
 
     try {
