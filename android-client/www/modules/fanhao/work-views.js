@@ -2,7 +2,7 @@ import { fetchJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
 import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260720-fanhao-scroll-intent-01";
 import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260702-novel-local-manage-74";
 import { formatNumber } from "../../js/format.js";
-import { createWorkListState } from "../../js/work-filtering.js?v=20260720-fanhao-combined-filter-01";
+import { createWorkListState } from "../../js/work-filtering.js?v=20260720-fanhao-search-state-01";
 import { createWorkCards } from "./features/works/cards.js?v=20260720-fanhao-card-code-01";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260717-fanhao-ranking-response-01";
 import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-page-race-01";
@@ -50,12 +50,13 @@ export function createWorkViews(context) {
   } = context;
   const renderFavoriteExtras = context.renderFavoriteExtras || (() => {});
   const workListState = createWorkListState({ renderCurrentView });
+  const searchListState = createWorkListState({ renderCurrentView, persist: false, initialFilterMode: "all", initialSortMode: "updated" });
   let selectedFavoriteFolderId = "all";
   const pageDataService = createWorkPageDataService({ fetchJson, readCachedJson, writeCachedJson });
   const workDetailDataService = createWorkDetailDataService({ getActiveUrl, pageDataService });
   const workCards = createWorkCards({ getActiveUrl, roots: [els.viewContent, els.continuePreview], showView, workDetailDataService });
   const progressiveWorkListRenderer = createProgressiveWorkListRenderer();
-  const searchDataService = createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageDataService, workListState });
+  const searchDataService = createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageDataService, workListState: searchListState });
   const rankingViews = createRankingViews({
     els,
     getActiveUrl,
@@ -552,7 +553,6 @@ export function createWorkViews(context) {
   }
 
   async function renderSearchResults(query, isActive = () => true) {
-    leaveRankingSort();
     const text = query.trim();
     els.searchInput.value = text;
     setActiveBottom("search");
@@ -562,14 +562,16 @@ export function createWorkViews(context) {
     els.contentPanel.hidden = false;
 
     if (!text) {
+      searchListState.setFilterMode("all", { replace: true, rerender: false });
+      searchListState.setSortMode("updated", { rerender: false });
       renderMessage("可以搜索番号、作品标题、文件名或人物。", "quiet");
       return;
     }
 
     els.viewContent.innerHTML = `<div class="loading-row">正在搜索</div>`;
     const limit = getWorksLimit();
-    const serverFilter = workListState.getFilterMode();
-    const serverSort = workListState.getServerSortMode();
+    const serverFilter = searchListState.getServerFilterMode();
+    const serverSort = searchListState.getServerSortMode();
     const path = searchDataService.path(text, limit, serverFilter, serverSort);
     const activeUrl = getActiveUrl();
     let renderedCache = false;
@@ -585,6 +587,7 @@ export function createWorkViews(context) {
       renderSearchPeople(people);
       if (works.length || total || !people.length) {
         renderWorks(works, `没有搜到「${text}」。`, {
+          listState: searchListState,
           facets: data.facets,
           ...serverContinuationOptions(works, total, { activeFilterTotal: true })
         });
@@ -672,14 +675,15 @@ export function createWorkViews(context) {
   }
 
   function renderWorks(works, emptyMessage, options = {}) {
-    if (!options.allowRankingSort) leaveRankingSort();
+    const { listState = workListState, ...renderOptions } = options;
+    if (!renderOptions.allowRankingSort && listState === workListState) leaveRankingSort();
     progressiveWorkListRenderer.cancel();
     workCards.resetCoverLoading();
     const source = works || [];
-    const list = workListState.visibleWorks(source, options);
+    const list = listState.visibleWorks(source, renderOptions);
     const visible = list.slice(0, getWorksLimit());
     els.viewContent.querySelector(".loading-row")?.remove();
-    els.viewContent.append(workListState.createWorkControls(source, list, { ...options, displayedCount: visible.length }));
+    els.viewContent.append(listState.createWorkControls(source, list, { ...renderOptions, displayedCount: visible.length }));
 
     if (!list.length) {
       renderMessage(source.length ? "没有符合当前筛选的作品。" : emptyMessage, "quiet", false);
@@ -695,10 +699,10 @@ export function createWorkViews(context) {
         increaseWorksLimit(40);
         return renderCurrentViewPreservingScroll();
       });
-    } else if (options.hasServerMore && typeof options.onLoadMore === "function") {
-      loadMore = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(options.total || visible.length)}`, options.onLoadMore);
+    } else if (renderOptions.hasServerMore && typeof renderOptions.onLoadMore === "function") {
+      loadMore = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(renderOptions.total || visible.length)}`, renderOptions.onLoadMore);
     }
-    progressiveWorkListRenderer.render(grid, visible, (work) => workCards.createWorkCard(work, options), () => loadMore && els.viewContent.append(loadMore));
+    progressiveWorkListRenderer.render(grid, visible, (work) => workCards.createWorkCard(work, renderOptions), () => loadMore && els.viewContent.append(loadMore));
   }
 
   function createLoadMoreButton(text, handler) {

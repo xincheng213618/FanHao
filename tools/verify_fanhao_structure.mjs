@@ -33,6 +33,7 @@ import { createVideoProbeService, DEFAULT_VIDEO_PROBE_WAIT_MS } from "../src/pla
 import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
 import { tableStampValue } from "../src/modules/fanhao/server/library/table-stamp-query.js";
 import { fetchPreparedImage } from "../android-client/www/js/image.js";
+import { createWorkListState } from "../android-client/www/js/work-filtering.js";
 import { createWorkCoverLoader } from "../android-client/www/modules/fanhao/features/works/cover-loader.js";
 import { createWorkPageDataService } from "../android-client/www/modules/fanhao/features/works/page-data-service.js";
 import { createWorkDetailDataService } from "../android-client/www/modules/fanhao/features/works/detail-data-service.js";
@@ -336,6 +337,50 @@ assert(!/function createWorkCard\s*\(/.test(androidWorkViews), "FanHao Android w
 assert(!androidWorkViews.includes("createGlobalSearch"), "FanHao Android search must not use a cross-module aggregator");
 assert(androidWorkSearchDataService.includes("/api/fanhao/search"), "FanHao Android search must use the module-scoped endpoint");
 assert(!androidWorkViews.includes("data.channels"), "FanHao Android search must not render results from other modules");
+assert(androidWorkViews.includes("const searchListState = createWorkListState({") && androidWorkViews.includes("persist: false") && androidWorkViews.includes('initialFilterMode: "all"'), "FanHao Android search must start from an isolated unfiltered list state");
+assert(androidWorkViews.includes("workListState: searchListState") && androidWorkViews.includes("listState: searchListState"), "FanHao Android search requests and controls must share their isolated list state");
+assert(androidWorkViews.includes('searchListState.setFilterMode("all", { replace: true, rerender: false })') && androidWorkViews.includes('searchListState.setSortMode("updated", { rerender: false })'), "opening a fresh FanHao Android search must reset route-local filters");
+assert(androidWorkViews.includes("const { listState = workListState, ...renderOptions } = options"), "Android work rendering must allow a route-owned list state");
+assert(androidWorkFiltering.includes("const persist = context.persist !== false") && androidWorkFiltering.includes("if (persist && options.persist !== false)"), "Android list state must support non-persistent route-local filters");
+const originalLocalStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+const listStateStorageReads = [];
+const listStateStorageWrites = [];
+Object.defineProperty(globalThis, "localStorage", {
+  configurable: true,
+  value: {
+    getItem(key) {
+      listStateStorageReads.push(key);
+      if (key.endsWith("workFilter")) return "highRating";
+      if (key.endsWith("workSort")) return "ratingDesc";
+      return null;
+    },
+    setItem(key, value) {
+      listStateStorageWrites.push([key, value]);
+    }
+  }
+});
+try {
+  const catalogListState = createWorkListState({ renderCurrentView() {} });
+  const searchListState = createWorkListState({
+    renderCurrentView() {},
+    persist: false,
+    initialFilterMode: "all",
+    initialSortMode: "updated"
+  });
+  assert.equal(catalogListState.getFilterMode(), "highRating", "catalog list state must still restore its saved filter");
+  assert.equal(catalogListState.getSortMode(), "ratingDesc", "catalog list state must still restore its saved sort");
+  assert.equal(searchListState.getFilterMode(), "all", "search list state must ignore the catalog's saved filter");
+  assert.equal(searchListState.getSortMode(), "updated", "search list state must ignore the catalog's saved sort");
+  searchListState.setFilterMode("progress", { rerender: false });
+  searchListState.setSortMode("title", { rerender: false });
+  assert.equal(searchListState.getFilterMode(), "progress", "search filters must remain usable within the current search session");
+  assert.equal(catalogListState.getFilterMode(), "highRating", "search filters must not mutate the catalog state");
+  assert.equal(listStateStorageReads.length, 2, "only the persistent catalog state may read saved list preferences");
+  assert.deepEqual(listStateStorageWrites, [], "route-local search state must not overwrite saved catalog preferences");
+} finally {
+  if (originalLocalStorageDescriptor) Object.defineProperty(globalThis, "localStorage", originalLocalStorageDescriptor);
+  else delete globalThis.localStorage;
+}
 assert(androidWorkViews.includes("createRankingViews"), "FanHao Android rankings must stay in their feature module");
 assert(lines("android-client/www/modules/fanhao/work-views.js") <= 750, "FanHao Android work views must stay below 750 lines");
 assert(lines("android-client/www/modules/fanhao/features/works/cards.js") <= 320, "FanHao Android work cards must stay focused");
@@ -370,10 +415,11 @@ assert(workDetailTitleStyles.includes("-webkit-line-clamp: 3"), "Android work de
 assert(androidSectionStyles.includes('@media (max-width: 360px)') && androidSectionStyles.includes("-webkit-line-clamp: 4"), "narrow Android work details must retain a fourth title line");
 assert(workDetailActionStyles.includes("flex-wrap: nowrap") && workDetailActionStyles.includes("width: 100%"), "Android work-detail actions must stay in one dedicated full-width row");
 assert(workDetailActionButtonStyles.includes("flex: 1 1 0") && workDetailActionButtonStyles.includes("min-width: 0"), "Android work-detail actions must share the available phone width evenly");
-assert(androidIndexHtml.includes("styles.css?v=20260720-fanhao-detail-layout-01") && androidIndexHtml.includes("app.js?v=20260720-fanhao-detail-layout-01") && androidApp.includes("config.js?v=20260720-fanhao-detail-layout-01") && androidConfig.includes('CLIENT_VERSION = "20260720-fanhao-detail-layout-01"'), "Android work-detail layout changes must refresh the WebView cache chain");
+assert(androidIndexHtml.includes("styles.css?v=20260720-fanhao-detail-layout-01"), "Android work-detail layout styles must retain their fresh WebView URL");
+assert(androidIndexHtml.includes("app.js?v=20260720-fanhao-search-state-01") && androidApp.includes("config.js?v=20260720-fanhao-search-state-01") && androidConfig.includes('CLIENT_VERSION = "20260720-fanhao-search-state-01"'), "Android search-state changes must refresh the WebView cache chain");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48"), "Android rankings must request a phone-sized first page");
 assert(androidRankingViews.includes("hasServerMore:"), "Android rankings must preserve server-side continuation");
-assert(androidWorkViews.includes("options.hasServerMore"), "Android work rendering must expose server-side continuation");
+assert(androidWorkViews.includes("renderOptions.hasServerMore"), "Android work rendering must expose server-side continuation");
 assert(androidWorkViews.includes("/api/history?limit=${limit}&offset=0"), "Android history must request a bounded first page");
 assert(androidWorkViews.includes("const works = data.works || []"), "Android collections must define their rendered work list locally");
 assert(androidWorkViews.includes("createWorkPageDataService") && androidWorkViews.includes("warmPrimaryCollections(activeUrl)"), "Android home must warm and share collection requests before navigation");
@@ -692,10 +738,10 @@ assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && andr
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-person-page-race-01'), "Android person-page race changes must use a fresh detail-view URL");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-card-code-01'), "Android work-card code changes must use a fresh work-view URL");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-search-state-01'), "Android search-state changes must use a fresh work-view URL");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must use a fresh people-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-card-code-01'), "Android work-card code changes must refresh the FanHao module entry chain");
-assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-detail-layout-01'), "Android work-detail layout changes must refresh the app entry chain");
+assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-search-state-01'), "Android search-state changes must refresh the FanHao module entry chain");
+assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-search-state-01'), "Android search-state changes must refresh the app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {

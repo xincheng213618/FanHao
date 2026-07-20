@@ -35,8 +35,13 @@ const WORK_SORTS = [
 
 export function createWorkListState(context) {
   const { renderCurrentView } = context;
-  let filterMode = normalizeFilterMode(localStorage.getItem(FILTER_STORAGE_KEY));
-  let sortMode = validValue(localStorage.getItem(SORT_STORAGE_KEY), WORK_SORTS, "updated");
+  const persist = context.persist !== false;
+  const filterStorageKey = context.filterStorageKey || FILTER_STORAGE_KEY;
+  const sortStorageKey = context.sortStorageKey || SORT_STORAGE_KEY;
+  const storedFilterMode = persist ? localStorage.getItem(filterStorageKey) : null;
+  const storedSortMode = persist ? localStorage.getItem(sortStorageKey) : null;
+  let filterMode = normalizeFilterMode(storedFilterMode ?? context.initialFilterMode ?? "all");
+  let sortMode = validValue(storedSortMode ?? context.initialSortMode, WORK_SORTS, "updated");
 
   function visibleWorks(works, options = {}) {
     const activeFilter = normalizeFilterMode(options.filterMode ?? filterMode);
@@ -59,7 +64,7 @@ export function createWorkListState(context) {
     const next = options.replace ? normalizeFilterMode(value) : nextFilterMode(filterMode, value);
     if (filterMode === next) return false;
     filterMode = next;
-    if (options.persist !== false) localStorage.setItem(FILTER_STORAGE_KEY, filterMode);
+    if (persist && options.persist !== false) localStorage.setItem(filterStorageKey, filterMode);
     if (options.rerender !== false) renderCurrentView();
     return true;
   }
@@ -68,7 +73,7 @@ export function createWorkListState(context) {
     if (!validValue(value, WORK_SORTS, "")) return false;
     if (sortMode === value) return false;
     sortMode = value;
-    if (options.persist !== false) localStorage.setItem(SORT_STORAGE_KEY, sortMode);
+    if (persist && options.persist !== false) localStorage.setItem(sortStorageKey, sortMode);
     if (options.rerender !== false) renderCurrentView();
     return true;
   }
