@@ -1,4 +1,4 @@
-import { createAndroidVideoSection } from "../../js/android-player.js";
+import { createAndroidVideoSection } from "../../js/android-player.js?v=20260721-fanhao-media-relocate-16";
 import { cacheAgeText } from "../../js/cache.js?v=20260705-mobile-actions-01";
 import { createDetailSectionTitle } from "../../js/detail-ui.js";
 import { extractWorkCode, formatDate, formatNumber } from "../../js/format.js";

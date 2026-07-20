@@ -204,7 +204,7 @@ export async function routeWorksApi(req, res, url, deps) {
       source: url.searchParams.get("source") || "fanhao"
     });
     if (!payload) {
-      notFound(res);
+      sendJson(res, 404, { error: "视频文件不存在或已移动，请刷新作品资料" });
       return true;
     }
 

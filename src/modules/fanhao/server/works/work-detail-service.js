@@ -11,6 +11,7 @@ export function createWorkDetailService({
   publicPerson,
   publicWork,
   resolveLibraryWorkByPublicId,
+  resolveVideoFileByPublicId,
   userStateStamp = () => "",
   videoProbeService,
   workQueryStamp = () => ""
@@ -47,7 +48,9 @@ export function createWorkDetailService({
 
   async function playInfoPayload(videoId, options = {}) {
     const preferGallery = options.source === "gallery";
-    const libraryFile = preferGallery ? null : library.filesById.get(videoId);
+    const libraryFile = preferGallery
+      ? null
+      : (resolveVideoFileByPublicId ? resolveVideoFileByPublicId(videoId) : library.filesById.get(videoId));
     const galleryItem = libraryFile ? null : galleryMediaService.byId(videoId);
     const file = libraryFile || (galleryItem ? galleryMediaService.videoFile(galleryItem) : null);
     if (!file || file.type !== "video") return null;

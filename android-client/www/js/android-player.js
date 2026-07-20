@@ -75,8 +75,13 @@ export function createAndroidVideoSection(context) {
     let playInfo = null;
     try {
       playInfo = await fetchJson(activeUrl, `/api/playinfo/${encodeURIComponent(videoFile.id)}`);
-    } catch {
-      playInfo = null;
+    } catch (error) {
+      mount.innerHTML = "";
+      mount.append(createPlayerErrorBox(error.message || "播放地址准备失败，请重试", {
+        retry: () => playVideo(mount, work, videoFile, options)
+      }));
+      revealDetailBlock(mount);
+      return;
     }
 
     const opened = await openNativePlayer(activeUrl, work, videoFile, playInfo, resume);
@@ -85,10 +90,7 @@ export function createAndroidVideoSection(context) {
       return;
     }
 
-    if (playInfo) {
-      return renderAndroidPlayer(mount, work, videoFile, { ...options, playInfo, startAt: resume });
-    }
-    return renderAndroidPlayer(mount, work, videoFile, options);
+    return renderAndroidPlayer(mount, work, videoFile, { ...options, playInfo, startAt: resume });
   }
 
   async function openNativePlayer(activeUrl, work, videoFile, playInfo, resume) {

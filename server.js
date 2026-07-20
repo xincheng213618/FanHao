@@ -24,6 +24,7 @@ import { createLibraryPathServices } from "./src/modules/fanhao/server/library/l
 import { createLocalLibraryIndexService } from "./src/modules/fanhao/server/library/local-library-index-service.js";
 import { createLocalLibraryScanService } from "./src/modules/fanhao/server/library/local-library-scan-service.js";
 import { createManualCoverStateService } from "./src/modules/fanhao/server/works/manual-cover-state-service.js";
+import { createMediaFileRelocationService } from "./src/modules/fanhao/server/works/media-file-relocation-service.js";
 import { createMissingCodeSearchService } from "./src/modules/fanhao/server/works/missing-code-search-service.js";
 import { createPeopleScopeService } from "./src/modules/fanhao/server/people/people-scope-service.js";
 import { createPersonLibraryService } from "./src/modules/fanhao/server/people/person-library-service.js";
@@ -350,6 +351,7 @@ const mediaStreamService = createMediaStreamService({
   sendJson,
   serveRangedFile
 });
+const mediaFileRelocationService = createMediaFileRelocationService({ safeStat });
 const galleryMediaService = createGalleryMediaService({
   coverBoxSize: IMAGE_GALLERY_COVER_BOX_SIZE,
   coverGeneratorVersion: GALLERY_MEDIA_COVER_GENERATOR_VERSION,
@@ -1358,8 +1360,7 @@ function resolveLibraryWorkByPublicId(workId) {
 function resolveVideoFileByPublicId(videoId) {
   const value = decodeURIComponent(String(videoId || ""));
   const direct = library.filesById.get(value);
-  if (direct?.type === "video") return direct;
-  return null;
+  return direct?.type === "video" ? mediaFileRelocationService.resolve(direct) : null;
 }
 
 function coreImageUrl(row) {

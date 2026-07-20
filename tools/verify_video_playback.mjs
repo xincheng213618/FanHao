@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseRange } from "../src/platform/server/file-server.js";
+import { createMediaFileRelocationService } from "../src/modules/fanhao/server/works/media-file-relocation-service.js";
 import { createVideoProbeService } from "../src/platform/server/video-probe-service.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -13,6 +14,27 @@ assert.deepEqual(parseRange("bytes=-100", 1000), { start: 900, end: 999 });
 assert.deepEqual(parseRange("bytes=900-2000", 1000), { start: 900, end: 999 });
 assert.equal(parseRange("bytes=1000-", 1000), null);
 assert.equal(parseRange("bytes=-0", 1000), null);
+
+const staleVideoPath = "R:\\Polly Yangs MegaPack\\nested\\movie.mp4";
+const relocatedVideoPath = "R:\\Polly Yangs\\nested\\movie.mp4";
+let relocationDirectoryReads = 0;
+const relocationWarnings = [];
+const relocatedFileStat = { size: 2048, isFile: () => true };
+const relocationService = createMediaFileRelocationService({
+  safeStat: (filePath) => filePath === relocatedVideoPath ? relocatedFileStat : null,
+  readRootDirectoryNames(rootPath) {
+    relocationDirectoryReads += 1;
+    assert.equal(rootPath, "R:\\");
+    return ["Other", "Polly Yangs"];
+  },
+  warn: (message) => relocationWarnings.push(message)
+});
+const relocatedFile = relocationService.resolve({ id: "stale-video", path: staleVideoPath, size: 2048 });
+assert.equal(relocatedFile.path, relocatedVideoPath, "renamed person folders must recover the same relative media path");
+assert.equal(relocationWarnings.length, 1, "successful media relocation must leave one diagnostic trail");
+assert.equal(relocationService.resolve({ id: "stale-video", path: staleVideoPath, size: 2048 }).path, relocatedVideoPath, "relocated media paths must be cached while they exist");
+assert.equal(relocationDirectoryReads, 1, "cached media relocation must avoid rescanning the drive root");
+assert.equal(relocationService.resolve({ id: "wrong-size", path: staleVideoPath, size: 4096 }), null, "media relocation must not guess when file size differs");
 
 assertPlaybackMode({ ext: ".mp4", videoCodec: "h264", audioCodec: "aac", expected: "direct" });
 assertPlaybackMode({ ext: ".mp4", videoCodec: "hevc", audioCodec: "aac", expected: "transcode" });
@@ -52,6 +74,8 @@ assert(playerSource.includes('els.streamStart?.addEventListener("click", startDe
 assert(nativePlayerSource.includes("removeControllerScrims();"), "native FanHao playback must remove Media3 controller scrims");
 assert(nativePlayerSource.includes("R.id.exo_controls_background"), "native FanHao playback must clear the full-screen controller dim layer");
 assert(nativePlayerSource.includes("R.id.exo_bottom_bar"), "native FanHao playback must clear the progress bar shadow background");
+assert(nativePlayerSource.includes("HttpDataSource.InvalidResponseCodeException") && nativePlayerSource.includes("视频文件已移动或离线"), "native FanHao playback must translate missing media responses into an actionable message");
+assert(nativePlayerSource.includes('Log.e(TAG, "Playback failed:'), "native FanHao playback must retain the complete Media3 failure in ADB logs");
 for (const option of ['"-fflags", "+genpts"', '"-avoid_negative_ts", "make_zero"', '"-pix_fmt", "yuv420p"']) {
   assert(streamSource.includes(option), `missing compatibility option: ${option}`);
 }

@@ -25,6 +25,7 @@ import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
+import androidx.media3.datasource.HttpDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.ui.PlayerView;
 
@@ -128,13 +129,14 @@ public class NativePlayerActivity extends Activity {
 
       @Override
       public void onPlayerError(PlaybackException error) {
+        Log.e(TAG, "Playback failed: " + error.getErrorCodeName(), error);
         if (!fallbackTried && hasText(fallbackUrl) && !sameUrl(url, fallbackUrl)) {
           fallbackTried = true;
           showStatus("直连失败，切换智能播放", true);
           playUrl(withFallbackSeek(fallbackUrl), Math.max(0, player.getCurrentPosition()));
           return;
         }
-        showStatus("播放失败：" + error.getErrorCodeName(), true);
+        showStatus(playbackErrorMessage(error), true);
       }
     });
 
@@ -348,6 +350,19 @@ public class NativePlayerActivity extends Activity {
     statusView.setText(message);
     statusView.setVisibility(View.VISIBLE);
     if (!persistent) handler.postDelayed(statusHideRunnable, 900);
+  }
+
+  private String playbackErrorMessage(PlaybackException error) {
+    Throwable cause = error;
+    while (cause != null) {
+      if (cause instanceof HttpDataSource.InvalidResponseCodeException) {
+        int statusCode = ((HttpDataSource.InvalidResponseCodeException) cause).responseCode;
+        if (statusCode == 404) return "视频文件已移动或离线，请刷新后重试";
+        return "播放地址请求失败（HTTP " + statusCode + "）";
+      }
+      cause = cause.getCause();
+    }
+    return "播放失败：" + error.getErrorCodeName();
   }
 
   private void reportProgress(boolean force) {

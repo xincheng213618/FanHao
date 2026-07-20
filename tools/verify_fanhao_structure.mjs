@@ -149,8 +149,8 @@ assert(workRoutesApiSource.includes("playbackPrewarmPayload") && workRoutesApiSo
 assert(workDetailServiceSource.includes("replaceQueued: true") && workDetailServiceSource.includes("concurrency: 3"), "playback intent must take priority over speculative list probes without awaiting them");
 assert(workDetailServiceSource.includes("const detailCache = new Map()") && workDetailServiceSource.includes("detailCacheStamp"), "work details must stay reusable across card intent and player startup");
 assert(workDetailServiceSource.includes("const detail = detailPayload(workId)") && workDetailServiceSource.includes("detailReady: true"), "playback preparation must hydrate the complete work detail before player navigation");
-assert(workDetailServiceSource.includes("const libraryFile = preferGallery ? null : library.filesById.get(videoId)"), "FanHao play-info must use the O(1) library file index before touching the gallery catalog");
-assert(workRoutesApiSource.includes('source: url.searchParams.get("source") || "fanhao"'), "play-info routing must carry an explicit media source boundary");
+assert(workDetailServiceSource.includes("resolveVideoFileByPublicId ? resolveVideoFileByPublicId(videoId) : library.filesById.get(videoId)"), "FanHao play-info must validate or relocate indexed media before touching the gallery catalog");
+assert(workRoutesApiSource.includes('source: url.searchParams.get("source") || "fanhao"') && workRoutesApiSource.includes("视频文件不存在或已移动"), "play-info routing must retain its media boundary and explain missing local files");
 assert(playerPageSource.includes('mediaId ? "?source=gallery" : ""'), "the standalone gallery player must explicitly select gallery play-info lookup");
 assert(playerHtmlSource.includes("player-page.js?v=20260717-fanhao-playinfo-01"), "play-info lookup changes must refresh the standalone player module");
 assert(workActionsSource.includes("captureFavoriteSnapshot") && workActionsSource.includes("restoreFavoriteSnapshot"), "optimistic favorite feedback must roll back cleanly after API failures");
@@ -340,7 +340,9 @@ const androidWorkDetailDataService = read("android-client/www/modules/fanhao/fea
 const androidPersonDetailRequest = read("android-client/www/modules/fanhao/features/people/detail-request.js");
 const androidPersonDetailWorkToolbar = read("android-client/www/modules/fanhao/features/people/detail-work-toolbar.js");
 const androidDetailViews = read("android-client/www/modules/fanhao/detail-views.js");
+const androidPlayerSource = read("android-client/www/js/android-player.js");
 const androidApp = read("android-client/www/app.js");
+const androidCacheSource = read("android-client/www/js/cache.js");
 const androidIndexHtml = read("android-client/www/index.html");
 const androidFanhaoModule = read("android-client/www/modules/fanhao/android-module.js");
 const androidFanhaoChrome = read("android-client/www/modules/fanhao/chrome.js");
@@ -609,7 +611,7 @@ assert(androidWorkActions.includes('variant: "danger wide"') && androidFanhaoSty
 assert(!androidWorkActions.includes("createBackButton") && androidSectionStyles.includes(".work-detail-meta-body"), "Android work details must delegate return navigation to the shared sticky detail header");
 assert(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions must stay focused");
 assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-person-year-15") && androidStyles.includes("css/sections.css?v=20260721-fanhao-ranking-density-11") && androidStyles.includes("css/lists.css?v=20260721-fanhao-actor-discovery-14") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-person-year-15"), "Android actor year filtering must refresh its styles while retaining compact rankings and actor discovery");
-assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-person-year-15") && androidApp.includes("config.js?v=20260721-fanhao-person-year-15") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-person-year-15"'), "Android actor year filtering must refresh the WebView cache chain");
+assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-media-relocate-16") && androidApp.includes("config.js?v=20260721-fanhao-media-relocate-16") && androidApp.includes("cache.js?v=20260721-fanhao-media-relocate-16") && androidCacheSource.includes("config.js?v=20260721-fanhao-media-relocate-16") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-media-relocate-16"'), "Android media relocation must invalidate stale work responses through the complete cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -966,12 +968,13 @@ assert(androidDetailViews.includes("setDetailChromeTitle") && androidDetailViews
 assert(androidSectionStyles.includes("grid-template-columns: clamp(104px, 32%, 128px)") && androidSectionStyles.includes(".person-detail-hero .detail-hero-body"), "Android author identity must leave first-screen space for the work grid");
 assert(lines("android-client/www/modules/fanhao/features/people/detail-hero.js") <= 150, "Android author identity component must stay focused");
 assert(lines("android-client/www/modules/fanhao/features/people/detail-work-toolbar.js") <= 110, "Android author work toolbar must stay focused");
-assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-person-year-15') && androidDetailViews.includes('detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09'), "Android actor year filtering and work-detail flow must retain fresh component URLs");
+assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-media-relocate-16') && androidDetailViews.includes('android-player.js?v=20260721-fanhao-media-relocate-16') && androidDetailViews.includes('detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09'), "Android media recovery and work-detail flow must retain fresh component URLs");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-category-browser-13') && androidWorkViews.includes('work-filtering.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-discovery-03'), "Android category browsing must use a fresh work-view URL while retaining dense browsing and search discovery");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-media-relocate-16') && androidWorkViews.includes('cache.js?v=20260721-fanhao-media-relocate-16') && androidWorkViews.includes('work-filtering.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-discovery-03'), "Android media recovery must invalidate stale work detail caches while retaining dense browsing and search discovery");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-actor-discovery-14'), "Android actor discovery must use the current FanHao module cache chain");
-assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-person-year-15'), "Android actor year filtering must refresh the FanHao entry chain without dropping category browsing");
-assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-person-year-15'), "Android actor year filtering must refresh the app entry chain");
+assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-media-relocate-16'), "Android media recovery must refresh the FanHao entry chain without dropping category browsing");
+assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-media-relocate-16'), "Android media recovery must refresh the app entry chain");
+assert(androidPlayerSource.includes("mount.append(createPlayerErrorBox(error.message") && androidPlayerSource.includes("retry: () => playVideo"), "Android playback preparation failures must stay on the detail page with a retry action instead of opening a broken native player");
 assert(androidWorkViews.includes('ranking-views.js?v=20260721-fanhao-ranking-density-11'), "Android compact ranking changes must use a fresh module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
@@ -2701,10 +2704,12 @@ assert.equal(scheduledPlaybackPrefetch, null, "leaving a work card must cancel i
 
 const preferredPlaybackVideo = { id: "video-b", path: "G:/work/video-b.mp4", playable: true };
 const indexedLibraryVideo = { id: "library-video", path: "G:/work/library-video.mp4", type: "video" };
+const relocatedIndexedLibraryVideo = { ...indexedLibraryVideo, path: "G:/renamed/library-video.mp4" };
 const indexedGalleryVideo = { id: "gallery-video", path: "V:/gallery/gallery-video.mp4", type: "video" };
 let preparedPlayback = null;
 let detailMaterializations = 0;
 let galleryPlayInfoLookups = 0;
+let libraryPlayInfoLookups = 0;
 let workDetailStamp = "detail-1";
 const workDetailService = createWorkDetailService({
   galleryMediaService: {
@@ -2736,6 +2741,10 @@ const workDetailService = createWorkDetailService({
         ]
       }
     : null,
+  resolveVideoFileByPublicId: (videoId) => {
+    libraryPlayInfoLookups += 1;
+    return videoId === indexedLibraryVideo.id ? relocatedIndexedLibraryVideo : null;
+  },
   userStateStamp: () => "user-1",
   videoProbeService: {
     async playInfoForFileAsync(file, videoId, options) {
@@ -2761,7 +2770,8 @@ workDetailService.detailPayload("work-1");
 assert.equal(detailMaterializations, 2, "work detail cache entries must invalidate when their source stamp changes");
 assert.equal(workDetailService.playbackPrewarmPayload("missing-work"), null, "playback preparation must preserve missing-work semantics");
 const indexedLibraryPlayInfo = await workDetailService.playInfoPayload("library-video");
-assert.equal(indexedLibraryPlayInfo.file, indexedLibraryVideo, "FanHao play-info must resolve directly from the library file index");
+assert.equal(indexedLibraryPlayInfo.file, relocatedIndexedLibraryVideo, "FanHao play-info must use the validated or relocated library file path");
+assert.equal(libraryPlayInfoLookups, 1, "FanHao play-info must validate the indexed media path exactly once");
 assert.equal(galleryPlayInfoLookups, 0, "FanHao play-info must not hydrate the unrelated gallery catalog");
 const indexedGalleryPlayInfo = await workDetailService.playInfoPayload("gallery-video", { source: "gallery" });
 assert.equal(indexedGalleryPlayInfo.file, indexedGalleryVideo, "explicit gallery play-info must preserve gallery media resolution");
