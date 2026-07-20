@@ -738,6 +738,7 @@ export function createWorkViews(context) {
     warmSearch: searchDataService.warm,
     pageDataService,
     workDetailDataService,
+    getWorkListRequestState: () => ({ filter: workListState.getServerFilterMode(), sort: workListState.getServerSortMode() }),
     refreshRankingCache,
     renderWorks,
     createChip: workCards.createChip,

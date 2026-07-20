@@ -5,11 +5,11 @@ import { extractWorkCode, formatDate, formatNumber } from "../../js/format.js";
 import { createInfoPreviewSection } from "../../js/info-preview.js";
 import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-01";
+import { personDetailPath } from "./features/people/detail-request.js?v=20260720-fanhao-person-query-01";
 import { createWorkActions } from "./features/works/actions.js?v=20260712-fanhao-refactor-01";
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
 
 const PLAY_OPEN_COOLDOWN_MS = 1400;
-
 export function createDetailViews(context) {
   const {
     els,
@@ -22,6 +22,7 @@ export function createDetailViews(context) {
     renderMessage,
     createChip,
     getWorksLimit = () => 80,
+    getWorkListRequestState = () => ({ filter: "all", sort: "updated" }),
     increaseWorksLimit = () => {},
     renderCurrentViewPreservingScroll = () => {},
     mediaViewer,
@@ -48,7 +49,6 @@ export function createDetailViews(context) {
     renderMessage,
     renderWorkDetail
   });
-
   async function renderPersonDetail(personId, isActive = () => true) {
     const activeUrl = getActiveUrl();
     setActiveBottom("people");
@@ -56,7 +56,7 @@ export function createDetailViews(context) {
     els.viewTitle.textContent = "正在加载";
     els.viewMeta.textContent = "";
     els.viewContent.innerHTML = `<div class="loading-row">正在加载人物资料</div>`;
-    const path = `/api/people/${encodeURIComponent(personId)}?limit=${encodeURIComponent(getWorksLimit())}&offset=0`;
+    const path = personDetailPath(personId, { ...getWorkListRequestState(), limit: getWorksLimit() });
     let renderedCache = false;
     const indexedPerson = findPersonInLibrary(personId);
     if (indexedPerson) renderPersonPreview(indexedPerson);
