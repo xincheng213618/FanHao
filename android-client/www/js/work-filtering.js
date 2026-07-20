@@ -84,16 +84,20 @@ export function createWorkListState(context) {
     const activeFilter = normalizeFilterMode(options.filterMode ?? filterMode);
     const activeFilters = new Set(normalizeFilterList(activeFilter));
     const activeSort = validValue(options.sortMode, WORK_SORTS, sortMode);
+    const filterToReveal = activeFilters.size ? [...activeFilters].at(-1) : "all";
 
     const filterStrip = document.createElement("div");
     filterStrip.className = "work-filter-strip";
+    filterStrip.setAttribute("aria-label", "作品筛选");
     const counts = { ...filterCounts(sourceWorks), ...(options.facets || {}) };
+    let filterButtonToReveal = null;
     for (const option of WORK_FILTERS) {
       const count = counts[option.value] || 0;
       const button = document.createElement("button");
       button.type = "button";
       const active = option.value === "all" ? activeFilters.size === 0 : activeFilters.has(option.value);
       button.className = active ? "active" : "";
+      button.setAttribute("aria-pressed", active ? "true" : "false");
       button.textContent = option.label;
       button.title = `${option.label} · ${formatNumber(count)}`;
       button.setAttribute("aria-label", `${option.label}，${formatNumber(count)} 个作品`);
@@ -104,8 +108,10 @@ export function createWorkListState(context) {
         }
         setFilterMode(option.value);
       });
+      if (option.value === filterToReveal) filterButtonToReveal = button;
       filterStrip.append(button);
     }
+    revealActiveFilter(filterStrip, filterButtonToReveal);
 
     const sortRow = document.createElement("div");
     sortRow.className = "work-sort-row";
@@ -265,6 +271,17 @@ export function createWorkListState(context) {
     setSortMode,
     visibleWorks
   };
+}
+
+function revealActiveFilter(filterStrip, button) {
+  if (!button || typeof globalThis.requestAnimationFrame !== "function") return;
+  globalThis.requestAnimationFrame(() => {
+    if (!filterStrip.isConnected || !button.isConnected) return;
+    const stripRect = filterStrip.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    const centerOffset = (stripRect.width - buttonRect.width) / 2;
+    filterStrip.scrollLeft = Math.max(0, filterStrip.scrollLeft + buttonRect.left - stripRect.left - centerOffset);
+  });
 }
 
 function validValue(value, options, fallback) {

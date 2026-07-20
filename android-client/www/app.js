@@ -1,4 +1,4 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260720-fanhao-search-state-01";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260720-fanhao-filter-back-01";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260714-music-sleep-current-28";
 import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
@@ -1435,6 +1435,7 @@ function defaultMangaImageLimitForView(view) {
 function goBack() {
   if (mediaViewer?.close()) return;
   if (androidModuleRegistry?.handleBack(currentView, currentViewParams)) return;
+  if (returnToStackView()) return;
   if (!isRootNavigationView() && currentView !== "home" && window.history.state?.marker === HISTORY_MARKER && window.history.length > 1) {
     window.history.back();
     return;
@@ -1442,13 +1443,20 @@ function goBack() {
   applyBackState();
 }
 
-function applyBackState() {
+function returnToStackView() {
   const previous = viewStack.pop();
-  if (!previous || previous.view === "home") {
-    showView(DEFAULT_VIEW, {}, { skipHistory: true, replaceHistory: true, restoreScrollY: previous?.scrollY ?? 0 });
-    return;
+  if (!previous) return false;
+  if (previous.view === "home") {
+    showView(DEFAULT_VIEW, {}, { skipHistory: true, replaceHistory: true, restoreScrollY: previous.scrollY ?? 0 });
+    return true;
   }
   showView(previous.view, previous.params, { skipHistory: true, replaceHistory: true, restoreScrollY: previous.scrollY ?? 0 });
+  return true;
+}
+
+function applyBackState() {
+  if (returnToStackView()) return;
+  showView(DEFAULT_VIEW, {}, { skipHistory: true, replaceHistory: true, restoreScrollY: 0 });
 }
 
 function routeHistoryState(view, params = {}, scrollY = currentScrollY()) {
@@ -1892,6 +1900,7 @@ window.fanhaoHandleNativeBack = () => {
     return true;
   }
   if (currentView === "home" || isRootNavigationView()) return false;
+  if (returnToStackView()) return true;
   if (window.history.state?.marker === HISTORY_MARKER && window.history.length > 1) {
     window.history.back();
     return true;
