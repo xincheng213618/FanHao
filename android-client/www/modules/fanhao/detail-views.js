@@ -68,10 +68,10 @@ export function createDetailViews(context) {
   async function renderPersonDetail(personId, isActive = () => true) {
     const activeUrl = getActiveUrl();
     setActiveBottom("people");
-    els.viewKicker.textContent = "作者";
+    els.viewKicker.textContent = "演员";
     els.viewTitle.textContent = "正在加载";
     els.viewMeta.textContent = "";
-    els.viewContent.innerHTML = `<div class="loading-row">正在加载作者资料</div>`;
+    els.viewContent.innerHTML = `<div class="loading-row">正在加载演员资料</div>`;
     const path = personDetailPath(personId, { ...getWorkListRequestState(), limit: getWorksLimit() });
     let renderedCache = false;
     const indexedPerson = findPersonInLibrary(personId);
@@ -79,13 +79,13 @@ export function createDetailViews(context) {
     const renderPersonData = (data) => {
       const person = mergeIndexedPerson(indexedPerson, data.person, data.works);
       const works = data.works || [];
-      setDetailChromeTitle(person.actorProfile?.displayName || person.name || "作者详情");
-      els.viewTitle.textContent = "作者详情";
+      setDetailChromeTitle(person.actorProfile?.displayName || person.name || "演员详情");
+      els.viewTitle.textContent = "演员详情";
       els.viewMeta.textContent = "";
       els.viewContent.innerHTML = "";
       els.viewContent.append(renderPersonHero(person));
       els.viewContent.append(createDetailSectionTitle("作品", ""));
-      renderWorks(works, "这个作者下面还没有作品。", {
+      renderWorks(works, "这个演员下面还没有作品。", {
         facets: data.facets,
         total: data.total || works.length,
         activeFilterTotal: data.total || works.length,
@@ -126,14 +126,14 @@ export function createDetailViews(context) {
       } else if (renderPersonFallback(personId, error)) {
         return;
       } else {
-        els.viewTitle.textContent = "作者";
-        renderMessage(detailErrorMessage(error, "作者资料读取失败，请检查服务连接"), "error");
+        els.viewTitle.textContent = "演员";
+        renderMessage(detailErrorMessage(error, "演员资料读取失败，请检查服务连接"), "error");
       }
     }
   }
   function renderPersonPreview(person) {
-    setDetailChromeTitle(person.actorProfile?.displayName || person.name || "作者详情");
-    els.viewTitle.textContent = "作者详情";
+    setDetailChromeTitle(person.actorProfile?.displayName || person.name || "演员详情");
+    els.viewTitle.textContent = "演员详情";
     els.viewMeta.textContent = "";
     els.viewContent.innerHTML = "";
     els.viewContent.append(renderPersonHero(person));
@@ -162,8 +162,8 @@ export function createDetailViews(context) {
     const person = findPersonInLibrary(personId);
     if (!person) return false;
 
-    setDetailChromeTitle(person.actorProfile?.displayName || person.name || "作者详情");
-    els.viewTitle.textContent = "作者详情";
+    setDetailChromeTitle(person.actorProfile?.displayName || person.name || "演员详情");
+    els.viewTitle.textContent = "演员详情";
     els.viewMeta.textContent = "";
     els.viewContent.innerHTML = "";
     els.viewContent.append(renderPersonHero(person));
@@ -297,7 +297,7 @@ export function createDetailViews(context) {
 
     const author = document.createElement(work.personId ? "button" : "span");
     author.className = "work-detail-author";
-    author.textContent = workPersonName(work) ? `作者：${workPersonName(work)}` : "作者：未知";
+    author.textContent = workPersonName(work) ? `演员：${workPersonName(work)}` : "演员：未知";
     if (work.personId) {
       author.type = "button";
       author.addEventListener("click", () => showView("personDetail", { personId: work.personId }, { push: true }));
@@ -454,7 +454,7 @@ export function createDetailViews(context) {
         if (canNavigate) {
           chip.type = "button";
           chip.classList.toggle("linked", Boolean(person));
-          chip.setAttribute("aria-label", person ? `打开作者 ${displayPersonName(person)}` : `搜索 ${item}`);
+          chip.setAttribute("aria-label", person ? `打开演员 ${displayPersonName(person)}` : `搜索 ${item}`);
           chip.addEventListener("click", () => {
             if (person) {
               showView("personDetail", { personId: person.id }, { push: true });
@@ -563,7 +563,7 @@ export function createDetailViews(context) {
 
     const section = document.createElement("div");
     section.className = "detail-block work-people-block";
-    section.append(createDetailSectionTitle(actors.length > 1 ? "演员" : "作者", actors.length > 1 ? `${formatNumber(actors.length)} 人` : ""));
+    section.append(createDetailSectionTitle("演员", actors.length > 1 ? `${formatNumber(actors.length)} 人` : ""));
 
     const list = document.createElement("div");
     list.className = actors.length > 1 ? "work-actor-strip" : "work-actor-list";
@@ -688,7 +688,7 @@ export function createDetailViews(context) {
   }
 
   function displayPersonName(person) {
-    return person?.actorProfile?.displayName || person?.name || "未知作者";
+    return person?.actorProfile?.displayName || person?.name || "未知演员";
   }
 
   function workPersonName(work) {
@@ -708,7 +708,7 @@ export function createDetailViews(context) {
 
     const section = document.createElement("div");
     section.className = "detail-block related-works-block";
-    const heading = createDetailSectionTitle("同作者作品", "正在加载");
+    const heading = createDetailSectionTitle("同演员作品", "正在加载");
     const meta = heading.querySelector("span");
     const strip = document.createElement("div");
     strip.className = "related-work-strip";

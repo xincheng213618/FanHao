@@ -30,7 +30,7 @@ export function createFanhaoSearchPage({ els, goBack, showView, warmSearch, getL
     input.type = "search";
     input.autocomplete = "off";
     input.enterKeyHint = "search";
-    input.placeholder = "搜番号、作品、作者";
+    input.placeholder = "搜番号、作品、演员";
     input.value = text;
     const clear = document.createElement("button");
     clear.type = "button";
@@ -102,7 +102,7 @@ export function createFanhaoSearchPage({ els, goBack, showView, warmSearch, getL
     })), { note: "直接筛选" }));
     const authors = localAuthorSearchSuggestions(getLibrary()?.people);
     if (authors.length) {
-      landing.append(createSearchGroup("作者推荐", authors.map((author) => ({
+      landing.append(createSearchGroup("演员推荐", authors.map((author) => ({
         query: author.name,
         label: author.name,
         meta: `${author.workCount.toLocaleString("zh-CN")} 部`,
@@ -111,7 +111,7 @@ export function createFanhaoSearchPage({ els, goBack, showView, warmSearch, getL
     }
     const prompt = document.createElement("div");
     prompt.className = "fanhao-search-prompt";
-    prompt.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><strong>继续输入也可以搜索</strong><span>支持番号、作品标题、文件名和作者</span>';
+    prompt.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><strong>继续输入也可以搜索</strong><span>支持番号、作品标题、文件名和演员</span>';
     landing.append(prompt);
     container.append(landing);
 

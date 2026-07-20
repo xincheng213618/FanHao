@@ -8,7 +8,7 @@ export function createPersonDetailWorkToolbar(options = {}) {
   const sortMode = String(options.sortMode || "updated");
   const toolbar = document.createElement("nav");
   toolbar.className = "person-detail-work-toolbar";
-  toolbar.setAttribute("aria-label", "作者作品筛选和排序");
+  toolbar.setAttribute("aria-label", "演员作品筛选和排序");
 
   toolbar.append(
     createToolbarButton("筛选", activeFilterLabel(filterMode, filterOptions), () => {

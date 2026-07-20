@@ -11,6 +11,11 @@ export async function routeWorksApi(req, res, url, deps) {
     workQueryService
   } = deps;
 
+  if (url.pathname === "/api/fanhao/categories" && req.method === "GET") {
+    sendJson(res, 200, workQueryService.categorySummaryPayload());
+    return true;
+  }
+
   if (url.pathname === "/api/works" && req.method === "GET") {
     sendJson(res, 200, workQueryService.listPayload(url));
     return true;

@@ -1,4 +1,4 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260721-fanhao-ranking-density-11";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260721-fanhao-category-browser-13";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260714-music-sleep-current-28";
 import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260712-module-chrome-03";
@@ -12,7 +12,7 @@ import { createSearchHistory } from "./js/search-history.js";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
-const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "studios", "studioDetail", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "tools"]);
+const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "categories", "studios", "studioDetail", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "tools"]);
 const DEFAULT_VIEW = "works";
 const DEFAULT_PHOTO_CATEGORY = "我喜欢的";
 const PRIMARY_LABELS = {
@@ -84,7 +84,7 @@ let musicSummary = null;
 let shortVideoSummary = null;
 let androidVersionInfo = null;
 let androidUpdateInfo = null;
-const FEED_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "people", "personDetail", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail", "music", "shortVideos"]);
+const FEED_VIEWS = new Set(["works", "rankings", "categories", "studios", "studioDetail", "people", "personDetail", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail", "music", "shortVideos"]);
 
 function readInitialViewState() {
   const state = readViewStateFromHash() || readLastViewState();
@@ -140,6 +140,10 @@ function sanitizeViewParams(view, params = {}) {
   if (view === "personDetail") return { personId: String(params.personId || "") };
   if (view === "workDetail") return { workId: String(params.workId || "") };
   if (view === "studioDetail") return { studioId: String(params.studioId || ""), seriesId: String(params.seriesId || "all") || "all" };
+  if (view === "categories") {
+    const category = String(params.category || "censored").trim().toLowerCase();
+    return { category: ["censored", "western", "fc2", "anime"].includes(category) ? category : "censored" };
+  }
   if (view === "photoDetail") return { id: String(params.id || "") };
   if (view === "mangaDetail") return { id: String(params.id || "") };
   if (view === "mangaChapter") return { id: String(params.id || ""), chapterIndex: String(params.chapterIndex || params.chapter || "") };
@@ -993,6 +997,10 @@ function openNativeLibraryRoute(options = {}) {
     showView("people", {}, navigation);
     return true;
   }
+  if (first === "categories" || first === "category") {
+    showView("categories", { category: query.get("category") || segments[1] || "censored" }, navigation);
+    return true;
+  }
   if (first === "music") {
     showView("music", {
       mode: query.get("mode") || "library",
@@ -1336,7 +1344,7 @@ function canRenderWithoutLibrary(view = "") {
 function defaultWorksLimitForView(view) {
   const fast = isFastServerUrl();
   if (view === "rankings") return 120;
-  if (view === "works" || view === "studioDetail") return fast ? FAST_WORK_LIMIT : 60;
+  if (view === "works" || view === "categories" || view === "studioDetail") return fast ? FAST_WORK_LIMIT : 60;
   if (view === "search" || view === "personDetail") return fast ? FAST_WORK_LIMIT : 48;
   if (view === "history") return fast ? FAST_WORK_LIMIT : 48;
   return fast ? FAST_WORK_LIMIT : 40;
@@ -1525,18 +1533,19 @@ function routeLoadingCopy(view = currentView, params = currentViewParams) {
   if (view === "photoDetail") return { kicker: "套图", title: "套图详情", meta: "正在读取", message: "正在读取套图" };
   if (view === "mangaDetail") return { kicker: "韩漫", title: "漫画详情", meta: "正在读取", message: "正在读取漫画" };
   if (view === "mangaChapter") return { kicker: "韩漫阅读", title: "章节", meta: "正在读取", message: "正在读取章节" };
-  if (view === "personDetail") return { kicker: "作者", title: "作者详情", meta: "正在读取", message: "正在加载作者资料" };
+  if (view === "personDetail") return { kicker: "演员", title: "演员详情", meta: "正在读取", message: "正在加载演员资料" };
   if (view === "workDetail") return { kicker: "作品详情", title: "作品详情", meta: "正在读取", message: "正在加载作品详情" };
   if (view === "novelDetail") return { kicker: "小说", title: "书籍详情", meta: "正在读取", message: "正在读取书籍详情" };
   if (view === "novelReader") return { kicker: "小说阅读", title: "章节", meta: "正在读取", message: "正在翻开章节" };
   if (view === "music") return { kicker: "本地音乐", title: "音乐", meta: "正在读取", message: "正在读取音乐库" };
   if (view === "shortVideoSearch") return { kicker: "短视频", title: "搜索", meta: "", message: "正在打开搜索" };
   if (view === "rankings") return { kicker: "榜单", title: "排行榜", meta: "正在加载", message: "正在加载排行榜" };
+  if (view === "categories") return { kicker: "分类", title: "番号分类", meta: "正在加载", message: "正在加载分类作品" };
   if (view === "studios") return { kicker: "片商", title: "片商索引", meta: "正在加载", message: "正在加载片商" };
   if (view === "studioDetail") return { kicker: "片商", title: "片商作品", meta: "正在加载", message: "正在加载片商作品" };
   if (view === "history") return { kicker: "继续观看", title: "观看进度", meta: "正在读取", message: "正在加载观看进度" };
   if (view === "search") return { kicker: "搜索", title: params.query ? `搜索：${params.query}` : "全库搜索", meta: "正在搜索", message: "正在搜索" };
-  if (view === "people") return { kicker: "作者索引", title: "全部作者", meta: "正在整理", message: "正在整理作者索引" };
+  if (view === "people") return { kicker: "演员索引", title: "全部演员", meta: "正在整理", message: "正在整理演员索引" };
   if (view === "novels") return { kicker: "小说", title: "书库", meta: "正在读取", message: "正在读取书库" };
   if (view === "shortVideos") return { kicker: "短视频", title: "短视频", meta: "正在读取", message: "正在读取短视频" };
   if (view === "tools") return { kicker: "个人中心", title: "我的", meta: "正在准备", message: "正在准备我的页面" };

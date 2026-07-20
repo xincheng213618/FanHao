@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#f6f7f9" />
     <title>资料库</title>
-    <link rel="stylesheet" href="./styles.css?v=20260721-fanhao-ranking-density-11" />
+    <link rel="stylesheet" href="./styles.css?v=20260721-fanhao-category-browser-13" />
   </head>
   <body>
     <main class="app-shell">
@@ -14,7 +14,7 @@
       <form id="searchForm" class="search-bar" autocomplete="off" hidden>
         <button id="searchCloseButton" class="search-close-button" type="button" aria-label="关闭搜索">‹</button>
         <span aria-hidden="true">⌕</span>
-        <input id="searchInput" type="search" placeholder="搜全库：作品/作者/频道" />
+        <input id="searchInput" type="search" placeholder="搜全库：作品/演员/频道" />
         <button class="search-submit-button" type="submit">搜索</button>
       </form>
       <div id="searchHistory" class="search-history" aria-label="搜索记录" hidden></div>
@@ -61,7 +61,7 @@
 
       <nav class="quick-strip" aria-label="快捷入口">
         <button type="button" data-open-view="people">
-          <strong>作者</strong>
+          <strong>演员</strong>
           <span id="peopleCount">0</span>
         </button>
         <button type="button" data-open-view="works">
@@ -71,6 +71,10 @@
         <button type="button" data-open-view="rankings">
           <strong>排行榜</strong>
           <span id="rankingsCount">TOP</span>
+        </button>
+        <button type="button" data-open-view="categories">
+          <strong>分类</strong>
+          <span>有码 / 欧美</span>
         </button>
         <button type="button" data-open-view="studios">
           <strong>片商</strong>
@@ -132,7 +136,7 @@
           </div>
           <div>
             <strong id="statPeople">-</strong>
-            <span>作者</span>
+            <span>演员</span>
           </div>
           <div>
             <strong id="statVideos">-</strong>
@@ -144,13 +148,13 @@
           </div>
         </div>
 
-        <button id="openLibraryButton" class="primary-action" type="button">浏览作者</button>
+        <button id="openLibraryButton" class="primary-action" type="button">浏览演员</button>
       </section>
 
       <section class="preview-section" aria-labelledby="previewTitle">
         <div class="section-head">
           <div>
-            <p class="section-label">作者索引</p>
+            <p class="section-label">演员索引</p>
             <h2 id="previewTitle">常用入口</h2>
           </div>
           <button class="text-button" type="button" data-open-view="people">全部</button>
@@ -258,7 +262,7 @@
       </nav>
     </main>
 
-    <script src="./app.js?v=20260721-fanhao-ranking-density-11" type="module"></script>
+    <script src="./app.js?v=20260721-fanhao-category-browser-13" type="module"></script>
   </body>
 </html>
 

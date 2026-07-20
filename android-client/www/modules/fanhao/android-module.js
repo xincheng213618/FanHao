@@ -1,5 +1,5 @@
-import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260721-fanhao-author-sort-density-08";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260721-fanhao-ranking-density-11";
+import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260721-fanhao-category-browser-13";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260721-fanhao-category-browser-13";
 
 export function createAndroidModule({ host }) {
   const workViews = createWorkViews({
@@ -62,6 +62,7 @@ export function createAndroidModule({ host }) {
       route("people", (_params, guard) => peopleViews.renderPeopleIndex(guard)),
       route("works", (_params, guard) => workViews.renderAllWorks(guard)),
       route("rankings", (_params, guard) => workViews.renderRankings(guard)),
+      route("categories", (params, guard) => workViews.renderCategories(params.category, guard)),
       route("studios", (_params, guard) => workViews.renderStudios(guard)),
       route("studioDetail", (params, guard) => workViews.renderStudioDetail(params.studioId, params.seriesId, guard)),
       route("history", (_params, guard) => workViews.renderHistory(guard)),
@@ -82,7 +83,7 @@ function createSearchController(host, workViews) {
     showHistory: () => false,
     hideBottom: () => false,
     isExpanded: () => false,
-    placeholder: () => "搜番号、作品或作者",
+    placeholder: () => "搜番号、作品或演员",
     value: (view, params) => view === "search" ? String(params.query || "") : "",
     prepare(query) {
       return workViews.warmSearch(query);

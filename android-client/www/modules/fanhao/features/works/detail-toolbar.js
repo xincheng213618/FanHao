@@ -16,7 +16,7 @@ export function createWorkDetailToolbar(options = {}) {
     createToolbarButton("资料", targetStatus(options.factsTarget, ".work-fact-row"), () => revealTarget(options.factsTarget), {
       disabled: !options.factsTarget
     }),
-    createToolbarButton("相关", options.relatedTarget ? "同作者作品" : "暂无", () => revealTarget(options.relatedTarget), {
+    createToolbarButton("相关", options.relatedTarget ? "同演员作品" : "暂无", () => revealTarget(options.relatedTarget), {
       disabled: !options.relatedTarget
     })
   );

@@ -25,6 +25,7 @@ import { createWorkDetailService } from "../src/modules/fanhao/server/works/work
 import { createMissingCodeSearchService } from "../src/modules/fanhao/server/works/missing-code-search-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createWorkClassificationService } from "../src/modules/fanhao/server/works/work-classification-service.js";
+import { classifyWorkCategory, isAnimeWork, isFc2Work, normalizeWorkCategory, WORK_CATEGORY_OPTIONS } from "../src/modules/fanhao/server/works/work-category.js";
 import { createWorkFilterService } from "../src/modules/fanhao/server/works/work-filter-service.js";
 import { createWorkSearchIndexService } from "../src/modules/fanhao/server/works/work-search-index-service.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
@@ -44,6 +45,8 @@ import { createWorkDetailDataService } from "../android-client/www/modules/fanha
 import { workCollectionPath } from "../android-client/www/modules/fanhao/features/works/collection-request.js";
 import { personDetailPath } from "../android-client/www/modules/fanhao/features/people/detail-request.js";
 import { createProgressiveWorkListRenderer } from "../android-client/www/modules/fanhao/features/works/progressive-list-renderer.js";
+import { selectStudios, STUDIO_SORT_OPTIONS } from "../android-client/www/modules/fanhao/features/studios/index-model.js";
+import { categoryWorksPath, normalizeCategory } from "../android-client/www/modules/fanhao/features/categories/category-views.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -313,6 +316,8 @@ for (const relativePath of [
   "android-client/www/modules/fanhao/features/works/progressive-list-renderer.js",
   "android-client/www/modules/fanhao/features/shared/viewport-image-loader.js",
   "android-client/www/modules/fanhao/features/rankings/ranking-views.js",
+  "android-client/www/modules/fanhao/features/categories/category-views.js",
+  "android-client/www/modules/fanhao/features/studios/index-model.js",
   "android-client/www/modules/fanhao/features/people/detail-work-toolbar.js",
   "android-client/www/modules/fanhao/chrome.js",
   "android-client/www/modules/fanhao/sheet.js",
@@ -320,7 +325,8 @@ for (const relativePath of [
   "android-client/www/modules/fanhao/styles.css",
   "src/modules/fanhao/server/composition.js",
   "src/modules/fanhao/server/user-state/collection-query-service.js",
-  "src/modules/fanhao/server/works/work-filter-service.js"
+  "src/modules/fanhao/server/works/work-filter-service.js",
+  "src/modules/fanhao/server/works/work-category.js"
 ]) {
   assert(fs.statSync(path.join(root, relativePath), { throwIfNoEntry: false })?.isFile(), `missing FanHao refactor part: ${relativePath}`);
 }
@@ -343,6 +349,7 @@ const androidFanhaoStyles = read("android-client/www/modules/fanhao/styles.css")
 const androidStyles = read("android-client/www/styles.css");
 const androidPeopleViews = read("android-client/www/modules/fanhao/people-views.js");
 const androidRankingViews = read("android-client/www/modules/fanhao/features/rankings/ranking-views.js");
+const androidCategoryViews = read("android-client/www/modules/fanhao/features/categories/category-views.js");
 const androidWorkCards = read("android-client/www/modules/fanhao/features/works/cards.js");
 const androidWorkActions = read("android-client/www/modules/fanhao/features/works/actions.js");
 const androidWorkDetailToolbar = read("android-client/www/modules/fanhao/features/works/detail-toolbar.js");
@@ -363,11 +370,38 @@ assert(!androidWorkViews.includes("createGlobalSearch"), "FanHao Android search 
 assert(androidWorkSearchDataService.includes("/api/fanhao/search"), "FanHao Android search must use the module-scoped endpoint");
 assert(!androidWorkViews.includes("data.channels"), "FanHao Android search must not render results from other modules");
 assert(!androidFanhaoModule.includes('route("favorites"') && !androidFanhaoModule.includes('route("vr"') && !androidApp.includes("renderChannelFavoritesPanel"), "Android favorites and VR must remain work filters instead of independent pages or panels");
-assert(androidFanhaoChrome.indexOf('{ label: "作者", view: "people" }') < androidFanhaoChrome.indexOf('{ label: "作品", view: "works" }'), "Android FanHao chrome must put authors first");
+assert(androidFanhaoChrome.indexOf('{ label: "演员", view: "people" }') < androidFanhaoChrome.indexOf('{ label: "作品", view: "works" }'), "Android FanHao chrome must put actors first");
 assert(androidFanhaoChrome.includes("if (view === tab.view)") && androidFanhaoChrome.includes("openSortDialog(host, activeSort)"), "tapping the active FanHao chrome tag must open its sort sheet");
 assert(androidFanhaoChrome.includes('button.classList.toggle("has-menu", opensSort)') && androidFanhaoChrome.includes("点按选择排序") && androidFanhaoStyles.includes(".fanhao-chrome-tag.has-menu"), "active author and work tabs must visibly announce their sort menu");
 assert(androidFanhaoStyles.includes(".fanhao-sort-sheet") && androidFanhaoStyles.includes("grid-template-columns: repeat(2"), "FanHao sorting must use the compact two-column bottom sheet");
 assert(androidFanhaoChrome.includes("sheet.js?v=20260721-fanhao-person-detail-02") && androidFanhaoChrome.includes("openFanhaoSheet({"), "FanHao sorting must reuse the shared bottom sheet");
+assert(androidFanhaoChrome.includes('if (view === "studios")') && androidFanhaoChrome.includes('title: "片商排序"') && androidWorkViews.includes("getStudioSortOptions"), "the active studio tab must open the shared studio sort sheet");
+assert.deepEqual(STUDIO_SORT_OPTIONS.map((option) => option.value), ["count", "recent", "name"], "studio browsing must offer count, recency, and name ordering");
+const studioIndexFixture = [
+  { id: "beta", name: "Beta", localWorkCount: 3, latestReleaseDate: "2026-01-01" },
+  { id: "alpha", name: "Alpha", localWorkCount: 8, latestReleaseDate: "2025-01-01" },
+  { id: "gamma", name: "Gamma", localWorkCount: 8, latestReleaseDate: "2026-06-01" }
+];
+assert.deepEqual(selectStudios(studioIndexFixture, { sort: "count" }).map((studio) => studio.id), ["gamma", "alpha", "beta"], "studio count ordering must use recency as a stable tie breaker");
+assert.deepEqual(selectStudios(studioIndexFixture, { sort: "recent" }).map((studio) => studio.id), ["gamma", "beta", "alpha"], "studio recency ordering must expose recently active makers first");
+assert.deepEqual(selectStudios(studioIndexFixture, { sort: "name", query: "ALP" }).map((studio) => studio.id), ["alpha"], "studio name filtering must be case insensitive and retain active ordering");
+assert(androidWorkViews.includes('input.placeholder = "筛选片商名称"') && androidWorkViews.includes("selectStudios(studios") && androidWorkViews.includes("studioActiveYears(studio)"), "Android studio browsing must combine direct filtering with useful activity metadata");
+assert(androidListStyles.includes('.content-panel[data-view="studios"] > .view-meta') && androidListStyles.includes(".studio-index-tools") && /\.studio-list\s*\{[\s\S]*?grid-template-columns: repeat\(2/.test(androidListStyles), "Android studio browsing must merge its count into a compact toolbar and use a dense two-column index");
+assert(androidFanhaoChrome.includes('{ label: "分类", view: "categories" }') && androidFanhaoModule.includes('route("categories"') && androidFanhaoChrome.includes('"rankings", "categories", "studios"'), "Android FanHao navigation must expose categories as a first-class root beside studios");
+assert.deepEqual(WORK_CATEGORY_OPTIONS.map((option) => option.value), ["censored", "western", "fc2", "anime"], "FanHao categories must expose censored, western, FC2, and anime in the requested order");
+assert.equal(normalizeWorkCategory("FC2"), "fc2", "server category parsing must be case insensitive");
+assert.equal(normalizeWorkCategory("unknown"), "all", "unknown server categories must fall back to the complete library");
+assert.equal(isFc2Work({ infoSummary: { code: "FC2-PPV-4923651" } }), true, "FC2 classification must recognize authoritative metadata codes");
+assert.equal(isAnimeWork({ personName: "[动漫]" }), true, "anime classification must recognize the library actor marker");
+assert.equal(classifyWorkCategory({ title: "FC2-123456" }, { isWestern: true }), "western", "western roots must remain authoritative when category signals overlap");
+assert.equal(normalizeCategory("anime"), "anime", "Android category routes must preserve supported category ids");
+const westernCategoryUrl = new URL(categoryWorksPath("western", { filter: "playable", sort: "releaseDesc", limit: 64 }), "http://127.0.0.1");
+assert.equal(westernCategoryUrl.searchParams.get("category"), "western", "Android category requests must send the selected server category");
+assert.equal(westernCategoryUrl.searchParams.get("filter"), "playable", "Android category requests must preserve work filters");
+assert.equal(westernCategoryUrl.searchParams.get("sort"), "releaseDesc", "Android category requests must preserve work sorting");
+assert(androidCategoryViews.includes('strip.className = "fanhao-category-strip"') && androidCategoryViews.includes("data.categories") && androidCategoryViews.includes("compactSummary: true"), "Android categories must combine a four-way selector with the dense work browser");
+assert(androidListStyles.includes(".fanhao-category-strip") && /\.fanhao-category-strip\s*\{[\s\S]*?grid-template-columns: repeat\(4/.test(androidListStyles), "Android category choices must fit in one compact four-column row");
+assert(workRoutesApiSource.includes('url.pathname === "/api/fanhao/categories"') && workRoutesApiSource.includes("categorySummaryPayload()"), "FanHao must expose category counts from the module-scoped works API");
 assert(androidFanhaoChrome.includes('view === "personDetail"') && androidFanhaoChrome.includes('view === "workDetail"') && androidFanhaoChrome.includes("renderDetailChrome(container, view, host)"), "Android FanHao detail routes must replace the catalog tabs with one compact detail header");
 assert(androidFanhaoChrome.includes("host.navigation.goBack()") && androidFanhaoChrome.includes("title.dataset.fanhaoDetailTitle") && androidFanhaoStyles.includes(".fanhao-detail-chrome-row"), "Android FanHao detail headers must keep a sticky shared return action and updateable title");
 assert(androidFanhaoChrome.includes("container.dataset.detailView = view") && androidFanhaoStyles.includes('.module-chrome[data-module="fanhao"][data-detail-view]') && androidFanhaoStyles.includes("position: fixed"), "Android FanHao detail return controls must retain stable hit testing after the page scrolls");
@@ -375,7 +409,7 @@ assert(androidFanhaoStyles.includes("min-height: 44px") && androidFanhaoStyles.i
 assert(androidFanhaoSheet.includes('backdrop.addEventListener("click", close)') && androidFanhaoSheet.includes('event.key === "Escape"') && androidFanhaoSheet.includes("config.options || []"), "the shared FanHao sheet must support backdrop, keyboard, and configurable actions");
 assert(lines("android-client/www/modules/fanhao/sheet.js") <= 60, "the shared FanHao bottom sheet must stay focused");
 assert(androidFanhaoSearchPage.includes("fanhao-search-page-form") && androidFanhaoSearchPage.includes("搜索历史") && androidFanhaoSearchPage.includes("input.focus({ preventScroll: true })"), "FanHao search must use a focused dedicated page with history");
-assert(androidFanhaoSearchPage.includes('createSearchGroup("快捷搜索"') && androidFanhaoSearchPage.includes('createSearchGroup("作者推荐"') && androidFanhaoSearchPage.includes("getLibrary()?.people"), "FanHao search discovery must fill the landing page with local dynamic shortcuts");
+assert(androidFanhaoSearchPage.includes('createSearchGroup("快捷搜索"') && androidFanhaoSearchPage.includes('createSearchGroup("演员推荐"') && androidFanhaoSearchPage.includes("getLibrary()?.people"), "FanHao search discovery must fill the landing page with local dynamic shortcuts");
 assert(androidFanhaoSearchPage.includes('meta: "本地标记"') && androidFanhaoSearchPage.includes("remember: false"), "the local marker shortcut must remain distinct from actual search history");
 assert(androidFanhaoSearchPage.includes('showView("personDetail", { personId: author.id }, { push: true })') && androidFanhaoSearchPage.includes('note: "点选直达"'), "recommended authors must open their detail directly without an intermediate search-result touch target");
 assert(androidFanhaoStyles.includes(".fanhao-search-discovery-group") && androidFanhaoStyles.includes("min-height: 150px"), "FanHao search discovery must stay compact above the phone keyboard");
@@ -544,8 +578,8 @@ assert(androidWorkActions.includes('title: "更多操作"') && androidWorkAction
 assert(androidWorkActions.includes('variant: "danger wide"') && androidFanhaoStyles.includes(".fanhao-sort-option.danger") && androidFanhaoStyles.includes(".fanhao-sort-option.wide"), "Android destructive work actions must remain visually isolated in the sheet");
 assert(!androidWorkActions.includes("createBackButton") && androidSectionStyles.includes(".work-detail-meta-body"), "Android work details must delegate return navigation to the shared sticky detail header");
 assert(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions must stay focused");
-assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-ranking-density-11") && androidStyles.includes("css/sections.css?v=20260721-fanhao-ranking-density-11") && androidStyles.includes("css/lists.css?v=20260721-fanhao-work-browse-density-10") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-work-detail-flow-09"), "Android FanHao compact rankings must use a fresh WebView URL while retaining dense work browsing and immersive details");
-assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-ranking-density-11") && androidApp.includes("config.js?v=20260721-fanhao-ranking-density-11") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-ranking-density-11"'), "Android FanHao compact rankings must refresh the WebView cache chain");
+assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-category-browser-13") && androidStyles.includes("css/sections.css?v=20260721-fanhao-ranking-density-11") && androidStyles.includes("css/lists.css?v=20260721-fanhao-category-browser-13") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-work-detail-flow-09"), "Android FanHao category browsing must use a fresh WebView URL while retaining compact rankings and immersive details");
+assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-category-browser-13") && androidApp.includes("config.js?v=20260721-fanhao-category-browser-13") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-category-browser-13"'), "Android FanHao category browsing must refresh the WebView cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -903,10 +937,10 @@ assert(lines("android-client/www/modules/fanhao/features/people/detail-hero.js")
 assert(lines("android-client/www/modules/fanhao/features/people/detail-work-toolbar.js") <= 110, "Android author work toolbar must stay focused");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-work-detail-flow-09') && androidDetailViews.includes('detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09'), "Android work-detail flow changes must use fresh component URLs");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-ranking-density-11') && androidWorkViews.includes('work-filtering.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-discovery-03'), "Android compact rankings must use a fresh work-view URL while retaining dense browsing and search discovery");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-category-browser-13') && androidWorkViews.includes('work-filtering.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-discovery-03'), "Android category browsing must use a fresh work-view URL while retaining dense browsing and search discovery");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-author-portraits-06'), "Android author browsing must use the current FanHao module cache chain");
-assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-author-sort-density-08') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-ranking-density-11'), "Android compact rankings must refresh the FanHao entry chain without dropping author sorting");
-assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-ranking-density-11'), "Android compact rankings must refresh the app entry chain");
+assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-category-browser-13'), "Android category browsing must refresh the FanHao entry chain without dropping actor sorting");
+assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-category-browser-13'), "Android category browsing must refresh the app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260721-fanhao-ranking-density-11'), "Android compact ranking changes must use a fresh module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
@@ -1106,6 +1140,9 @@ const workFilterServiceSource = read("src/modules/fanhao/server/works/work-filte
 const workCodeIndexServiceSource = read("src/modules/fanhao/server/works/work-code-index-service.js");
 const workSearchIndexServiceSource = read("src/modules/fanhao/server/works/work-search-index-service.js");
 assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info details must support page-level batch hydration");
+assert(workQueryServiceSource.includes('normalizeWorkCategory(url.searchParams.get("category"))') && workQueryServiceSource.includes("categorySummaryItems(stamp)"), "work list responses must carry the selected category and all four category counts");
+assert(workQueryServiceSource.includes('const pageCacheKey = `${scope}:${category}:${filter}:${sort}:${limit}:${offset}`') && workQueryServiceSource.includes("categorySourcesCache?.stamp === stamp"), "category work pages and source partitions must use versioned bounded caches");
+assert(workQueryServiceSource.includes("classifyWorkCategory(work, { isWestern: peopleScopeService.workMatches(work, \"western\") })"), "western-root membership must feed the shared work category classifier");
 assert(personDetailServiceSource.includes("{ lightweightInfo: true }") && workQueryServiceSource.includes("lightweightFacets: lightweightWorkFacets"), "person first pages must reuse the lightweight work-list path");
 assert(peoplePageSource.includes('includeMissingLocal: state.showMissingLocalWorks ? "1" : "0"') && peoplePageSource.includes('includeCompilation: state.showCompilationWorks ? "1" : "0"'), "person requests must send server-side missing-local and compilation visibility");
 assert(workQueryServiceSource.includes("workClassificationService.filterForRequest(sourceWorks, url, filter)") && workQueryServiceSource.indexOf("filterForRequest(sourceWorks, url, filter)") < workQueryServiceSource.indexOf("sortWorkList(matchedWorks"), "person visibility must be filtered on the server before sorting and pagination");
@@ -2132,7 +2169,7 @@ const workQueryService = createWorkQueryService({
   },
   maxWorkLimit: 1000,
   peoplePayloadStamp: () => actorMovieDataStamp,
-  peopleScopeService: { normalize: () => "main", workMatches: () => true },
+  peopleScopeService: { normalize: () => "main", workMatches: (_work, scope) => scope === "main" },
   playbackProgressService: {
     getWorkProgress() {
       searchProgressReadCount += 1;
@@ -2187,12 +2224,18 @@ const workQueryService = createWorkQueryService({
 const workListUrl = new URL("http://127.0.0.1/api/works?limit=24&sort=updated");
 workQueryService.prewarm();
 assert.equal(personMergePrewarmCount, 1, "FanHao startup must prepare person merge maps before search traffic");
+const workCategorySummary = workQueryService.categorySummaryPayload();
+assert.deepEqual(workCategorySummary.categories.map(({ value, count }) => [value, count]), [["censored", 1], ["western", 0], ["fc2", 0], ["anime", 0]], "category summaries must partition every local work into exactly one requested category");
 assert.deepEqual(preparedWorkCoverIds, [queryWork.id], "FanHao startup must prepare first-page VR cover metadata");
 assert.deepEqual(preparedWorkInfoIds, [queryWork.id], "FanHao startup must prepare first-page VR detail metadata");
 assert.deepEqual(preparedWorkVideoIds, [queryWork.id], "FanHao startup must queue first-page VR playback probes");
 assert.equal(workInfoReadCount, 0, "FanHao startup prewarm must not hydrate full work-info facets before the server listens");
 assert(workInfoFacetReadCount > 0 && workInfoFacetReadCount <= 8, "FanHao startup prewarm must use only bounded compact work-info lookups");
 assert.equal(workListPublicCount, 1, "FanHao startup must prepare each visible work payload once across common list variants");
+const censoredWorkPage = workQueryService.listPayload(new URL("http://127.0.0.1/api/works?category=censored&limit=24&sort=releaseDesc"));
+assert.equal(censoredWorkPage.category, "censored", "category work pages must echo the active category");
+assert.equal(censoredWorkPage.total, 1, "category work pages must filter before pagination");
+assert.equal(censoredWorkPage.categories.length, 4, "category work pages must carry all category counts for the mobile selector");
 preparedWorkCoverIds = [];
 preparedWorkInfoIds = [];
 preparedWorkVideoIds = [];

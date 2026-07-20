@@ -84,7 +84,7 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
     if (!hidePerson) {
       person = document.createElement(work.personId ? "button" : "span");
       person.className = "work-person";
-      person.textContent = workPersonName(work) || "未知作者";
+      person.textContent = workPersonName(work) || "未知演员";
       if (work.personId) {
         person.type = "button";
         person.dataset.personId = String(work.personId);

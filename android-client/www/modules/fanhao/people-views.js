@@ -57,7 +57,7 @@ export function createPeopleViews(context) {
     previewAvatarLoader.reset();
     els.personPreview.innerHTML = "";
     if (!list.length) {
-      els.personPreview.innerHTML = `<div class="loading-row">暂无作者数据</div>`;
+      els.personPreview.innerHTML = `<div class="loading-row">暂无演员数据</div>`;
       return;
     }
 
@@ -76,9 +76,9 @@ export function createPeopleViews(context) {
     const visible = people.slice(0, getPeopleLimit());
     indexAvatarLoader.reset();
 
-    els.viewKicker.textContent = "作者索引";
-    els.viewTitle.textContent = "全部作者";
-    els.viewMeta.textContent = `${formatNumber(people.length)} 位作者 · ${sortDescription(sortMode)}`;
+    els.viewKicker.textContent = "演员索引";
+    els.viewTitle.textContent = "全部演员";
+    els.viewMeta.textContent = `${formatNumber(people.length)} 位演员 · ${sortDescription(sortMode)}`;
     const grid = document.createElement("div");
     grid.className = "people-grid";
     appendPeopleCards(grid, visible, indexAvatarLoader);
@@ -91,9 +91,9 @@ export function createPeopleViews(context) {
     const cache = peopleIndexCache;
     if (!cache || cache.sourcePeople !== sourcePeople || cache.sortMode !== sortMode) return false;
     syncPeopleLimit(cache.grid.children.length);
-    els.viewKicker.textContent = "作者索引";
-    els.viewTitle.textContent = "全部作者";
-    els.viewMeta.textContent = `${formatNumber(cache.people.length)} 位作者 · ${sortDescription(sortMode)}`;
+    els.viewKicker.textContent = "演员索引";
+    els.viewTitle.textContent = "全部演员";
+    els.viewMeta.textContent = `${formatNumber(cache.people.length)} 位演员 · ${sortDescription(sortMode)}`;
     const nodes = cache.loadMore ? [cache.grid, cache.loadMore] : [cache.grid];
     els.viewContent.replaceChildren(...nodes);
     return true;

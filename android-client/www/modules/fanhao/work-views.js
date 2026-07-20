@@ -11,9 +11,12 @@ import { createWorkSearchDataService } from "./features/works/search-data-servic
 import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-touch-intent-01";
 import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=20260717-fanhao-work-first-paint-01";
 import { createFanhaoSearchPage } from "./search-page.js?v=20260721-fanhao-search-discovery-03";
+import { normalizeStudioSort, selectStudios, STUDIO_SORT_OPTIONS } from "./features/studios/index-model.js?v=20260721-fanhao-studio-density-12";
+import { createCategoryViews } from "./features/categories/category-views.js?v=20260721-fanhao-category-browser-13";
 
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
+const STUDIO_SORT_STORAGE_KEY = "fanhao.android.studioSort";
 function workDataSignature(data = {}) {
   const works = Array.isArray(data.works) ? data.works : [];
   return JSON.stringify({
@@ -67,6 +70,12 @@ export function createWorkViews(context) {
     setActiveBottom,
     workListState
   });
+  const categoryViews = createCategoryViews({
+    els, getActiveUrl, getWorksLimit, increaseWorksLimit, pageDataService,
+    renderCurrentViewPreservingScroll, renderMessage, renderWorks, setActiveBottom,
+    showView, workListState
+  });
+  let studioQuery = "";
   async function renderContinuePreview(options = {}) {
     if (!els.continuePreview || !els.continueSection) return;
     els.continuePreview.dataset.hasItems = "0";
@@ -263,17 +272,14 @@ export function createWorkViews(context) {
       const studios = data.makers || [];
       const total = Number(data.total || studios.length);
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-      els.viewMeta.textContent = `${formatNumber(studios.length)} / ${formatNumber(total)} 个片商${suffix}`;
       if (headerOnly) return;
-      els.viewContent.innerHTML = "";
       if (!studios.length) {
+        els.viewMeta.textContent = `0 个片商${suffix}`;
+        els.viewContent.innerHTML = "";
         renderMessage("还没有片商数据。", "quiet", false);
         return;
       }
-      const grid = document.createElement("div");
-      grid.className = "studio-list";
-      for (const studio of studios) grid.append(createStudioCard(studio));
-      els.viewContent.append(grid);
+      renderStudioIndex(studios, total, suffix);
     };
 
     try {
@@ -365,6 +371,11 @@ export function createWorkViews(context) {
     }
   }
 
+  function renderCategories(category, isActive = () => true) {
+    leaveRankingSort();
+    return categoryViews.renderCategories(category, isActive);
+  }
+
   function studioDetailPath(studioId, seriesId = "all", limit = getWorksLimit()) {
     const params = new URLSearchParams({
       seriesId: seriesId || "all",
@@ -392,14 +403,108 @@ export function createWorkViews(context) {
 
     const name = document.createElement("strong");
     name.textContent = studio.name || "未命名片商";
+    name.title = name.textContent;
 
     const meta = document.createElement("span");
     const localCount = Number(studio.localWorkCount || studio.workCount || 0);
-    const seriesCount = Array.isArray(studio.series) ? studio.series.length : Number(studio.seriesCount || 0);
-    meta.textContent = `${formatNumber(localCount)} 部${seriesCount ? ` · ${formatNumber(seriesCount)} 系列` : ""}`;
+    const activeYears = studioActiveYears(studio);
+    meta.textContent = `${formatNumber(localCount)} 部${activeYears ? ` · ${activeYears}` : ""}`;
+    button.setAttribute("aria-label", `${name.textContent}，${formatNumber(localCount)} 部作品${activeYears ? `，${activeYears}` : ""}`);
 
     button.append(name, meta);
     return button;
+  }
+
+  function renderStudioIndex(studios, total, suffix = "") {
+    const toolbar = document.createElement("div");
+    toolbar.className = "studio-index-tools";
+    const search = document.createElement("div");
+    search.className = "studio-index-search";
+    search.setAttribute("role", "search");
+    search.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="5.75" fill="none" stroke="currentColor" stroke-width="2"/><path d="m15 15 4.5 4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+    const input = document.createElement("input");
+    input.type = "search";
+    input.autocomplete = "off";
+    input.placeholder = "筛选片商名称";
+    input.setAttribute("aria-label", "筛选片商名称");
+    input.value = studioQuery;
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "studio-index-clear";
+    clear.setAttribute("aria-label", "清除片商筛选");
+    clear.textContent = "×";
+    search.append(input, clear);
+
+    const summary = document.createElement("output");
+    summary.className = "studio-index-summary";
+    summary.setAttribute("aria-live", "polite");
+    const count = document.createElement("strong");
+    const order = document.createElement("span");
+    summary.append(count, order);
+    toolbar.append(search, summary);
+    const results = document.createElement("div");
+    results.className = "studio-index-results";
+    els.viewContent.replaceChildren(toolbar, results);
+
+    const paint = () => {
+      const sortMode = getStudioSortMode();
+      const visible = selectStudios(studios, { query: studioQuery, sort: sortMode });
+      const sortLabel = studioSortDescription(sortMode);
+      const countLabel = studioQuery
+        ? `${formatNumber(visible.length)} / ${formatNumber(total)}`
+        : studios.length === total
+          ? formatNumber(total)
+          : `${formatNumber(studios.length)} / ${formatNumber(total)}`;
+      count.textContent = `${countLabel} 个`;
+      order.textContent = sortLabel;
+      clear.hidden = !studioQuery;
+      els.viewMeta.textContent = `${countLabel} 个片商 · ${sortLabel}${suffix}`;
+      results.replaceChildren();
+      if (!visible.length) {
+        renderMessageInto(results, `没有匹配「${studioQuery}」的片商。`, "quiet", false);
+        return;
+      }
+      const grid = document.createElement("div");
+      grid.className = "studio-list";
+      const fragment = document.createDocumentFragment();
+      for (const studio of visible) fragment.append(createStudioCard(studio));
+      grid.append(fragment);
+      results.append(grid);
+    };
+
+    input.addEventListener("input", () => {
+      studioQuery = input.value.trim();
+      paint();
+    });
+    clear.addEventListener("click", () => {
+      studioQuery = "";
+      input.value = "";
+      paint();
+      input.focus({ preventScroll: true });
+    });
+    paint();
+  }
+
+  function getStudioSortMode() {
+    return normalizeStudioSort(localStorage.getItem(STUDIO_SORT_STORAGE_KEY));
+  }
+
+  function setStudioSortMode(value) {
+    if (!STUDIO_SORT_OPTIONS.some((option) => option.value === value) || value === getStudioSortMode()) return false;
+    localStorage.setItem(STUDIO_SORT_STORAGE_KEY, value);
+    renderCurrentView();
+    return true;
+  }
+
+  function studioSortDescription(mode) {
+    return STUDIO_SORT_OPTIONS.find((option) => option.value === mode)?.description || STUDIO_SORT_OPTIONS[0].description;
+  }
+
+  function studioActiveYears(studio) {
+    const first = String(studio.firstReleaseDate || "").slice(0, 4);
+    const latest = String(studio.latestReleaseDate || "").slice(0, 4);
+    if (first && latest && first !== latest) return `${first}–${latest}`;
+    return latest || first;
   }
 
   function renderStudioSeriesStrip(studio, activeSeriesId = "all") {
@@ -440,7 +545,7 @@ export function createWorkViews(context) {
     setActiveBottom("search");
     els.viewKicker.textContent = "搜索";
     els.viewTitle.textContent = text ? `搜索：${text}` : "搜索番号库";
-    els.viewMeta.textContent = text ? "正在搜索番号与作者" : "输入番号、作品标题或作者后搜索";
+    els.viewMeta.textContent = text ? "正在搜索番号与演员" : "输入番号、作品标题或演员后搜索";
     els.contentPanel.hidden = false;
     const { results } = searchPage.render(text);
 
@@ -463,7 +568,7 @@ export function createWorkViews(context) {
       const works = data.works || [];
       const total = Number(data.total || works.length);
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-      els.viewMeta.textContent = `${formatNumber(total)} 个作品 · ${formatNumber(people.length)} 位作者${suffix}`;
+      els.viewMeta.textContent = `${formatNumber(total)} 个作品 · ${formatNumber(people.length)} 位演员${suffix}`;
       if (headerOnly) return;
       results.innerHTML = "";
       renderSearchPeople(people, results);
@@ -476,7 +581,7 @@ export function createWorkViews(context) {
           ...serverContinuationOptions(works, total)
         });
       } else {
-        renderMessageInto(results, "没有匹配的番号作品，已显示作者结果。", "quiet", false);
+        renderMessageInto(results, "没有匹配的番号作品，已显示演员结果。", "quiet", false);
       }
     };
 
@@ -604,6 +709,7 @@ export function createWorkViews(context) {
   }
   return {
     renderAllWorks,
+    renderCategories,
     renderStudios,
     renderStudioDetail,
     renderContinuePreview,
@@ -616,6 +722,9 @@ export function createWorkViews(context) {
     getSortMode: (view) => view === "rankings" ? rankingViews.getSortMode() : workListState.getSortMode(),
     getSortOptions: (view) => workListState.getSortOptions({ allowRankingSort: view === "rankings" }),
     setSortMode: (view, value) => view === "rankings" ? rankingViews.setSortMode(value) : workListState.setSortMode(value),
+    getStudioSortMode,
+    getStudioSortOptions: () => STUDIO_SORT_OPTIONS,
+    setStudioSortMode,
     getWorkFilterMode: () => workListState.getFilterMode(),
     getWorkFilterOptions: (works, facets) => workListState.getFilterOptions(works, facets),
     setWorkFilterMode: (value, options = {}) => workListState.setFilterMode(value, options),

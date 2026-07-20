@@ -1,3 +1,5 @@
+import { classifyWorkCategory, normalizeWorkCategory, WORK_CATEGORY_OPTIONS } from "./work-category.js";
+
 const LIST_PAGE_CACHE_LIMIT = 96;
 const SEARCH_PAGE_CACHE_LIMIT = 192;
 const WORK_PAYLOAD_CACHE_LIMIT = 4096;
@@ -51,6 +53,7 @@ export function createWorkQueryService({
   },
 }) {
   let enrichedWorksCache = null;
+  let categorySourcesCache = null;
   const listSourceCache = new Map();
   let listPageCache = new Map();
   let listPageCacheStamp = "";
@@ -443,19 +446,30 @@ export function createWorkQueryService({
 
   function listPayload(url) {
     const scope = peopleScopeService.normalize(url.searchParams.get("scope"));
+    const category = normalizeWorkCategory(url.searchParams.get("category"));
     const filter = url.searchParams.get("filter") || "all";
     const sort = url.searchParams.get("sort") || "releaseDesc";
     const limit = clampInteger(url.searchParams.get("limit"), defaultWorkLimit, 1, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-    const pageCacheKey = `${scope}:${filter}:${sort}:${limit}:${offset}`;
+    const pageCacheKey = `${scope}:${category}:${filter}:${sort}:${limit}:${offset}`;
     const cachedPage = readListPage(pageCacheKey);
     if (cachedPage) return cachedPage;
 
     const stamp = currentStamp();
-    const filtered = cachedListSource(scope, filter, stamp);
+    const filtered = cachedListSource(scope, filter, stamp, category);
     const works = sortWorkList(filtered, sort);
-    const payload = pagedWorksPayload(works, url, { filter, facets: workFacets(filtered) });
+    const payload = pagedWorksPayload(works, url, {
+      category,
+      categories: category === "all" ? undefined : categorySummaryItems(stamp),
+      filter,
+      facets: workFacets(filtered)
+    });
     return cacheListPage(pageCacheKey, payload);
+  }
+
+  function categorySummaryPayload() {
+    const stamp = currentStamp();
+    return { count: WORK_CATEGORY_OPTIONS.length, categories: categorySummaryItems(stamp) };
   }
 
   function readListPage(cacheKey) {
@@ -492,20 +506,21 @@ export function createWorkQueryService({
     workPayloadCache = new Map();
   }
 
-  function cachedListSource(scope, filter, stamp = currentStamp()) {
+  function cachedListSource(scope, filter, stamp = currentStamp(), requestedCategory = "all") {
+    const category = normalizeWorkCategory(requestedCategory);
     const filters = requestedFilters(filter);
     const filterKey = filters.length ? filters.join(",") : "all";
-    const cacheKey = `${scope}:${filterKey}`;
+    const cacheKey = `${scope}:${category}:${filterKey}`;
     const cached = listSourceCache.get(cacheKey);
     const filterStamp = filters.some((item) => userStateFilters.has(item)) ? `${stamp}:${userStateStamp()}` : stamp;
     let filtered = cached?.stamp === filterStamp ? cached.works : null;
 
     if (!filtered) {
-      const scopedCacheKey = `${scope}:all`;
+      const scopedCacheKey = `${scope}:${category}:all`;
       const scopedCached = listSourceCache.get(scopedCacheKey);
       const scopedWorks = scopedCached?.stamp === stamp
         ? scopedCached.works
-        : enrichedWorks().filter((work) => peopleScopeService.workMatches(work, scope));
+        : worksForScopeAndCategory(scope, category, stamp);
       listSourceCache.set(scopedCacheKey, { stamp, works: scopedWorks });
       filtered = filters.length
         ? scopedWorks.filter((work) => filters.every((item) => workMatchesFilter(work, item)))
@@ -515,6 +530,39 @@ export function createWorkQueryService({
       }
     }
     return filtered;
+  }
+
+  function worksForScopeAndCategory(scope, category, stamp) {
+    if (scope === "main" && category !== "all") return categorySources(stamp).get(category) || [];
+    if (scope === "western" && (category === "all" || category === "western")) {
+      return categorySources(stamp).get("western") || [];
+    }
+    return enrichedWorks().filter((work) =>
+      peopleScopeService.workMatches(work, scope)
+      && (category === "all" || workCategory(work) === category));
+  }
+
+  function categorySources(stamp = currentStamp()) {
+    if (categorySourcesCache?.stamp === stamp) return categorySourcesCache.sources;
+    const sources = new Map(WORK_CATEGORY_OPTIONS.map((option) => [option.value, []]));
+    for (const work of enrichedWorks()) {
+      const category = workCategory(work);
+      sources.get(category)?.push(work);
+    }
+    categorySourcesCache = { stamp, sources };
+    return sources;
+  }
+
+  function workCategory(work) {
+    return classifyWorkCategory(work, { isWestern: peopleScopeService.workMatches(work, "western") });
+  }
+
+  function categorySummaryItems(stamp = currentStamp()) {
+    const sources = categorySources(stamp);
+    return WORK_CATEGORY_OPTIONS.map((option) => ({
+      ...option,
+      count: sources.get(option.value)?.length || 0
+    }));
   }
 
   function prewarm() {
@@ -530,6 +578,7 @@ export function createWorkQueryService({
     const scope = peopleScopeService.normalize("main");
     const stamp = currentStamp();
     const works = cachedListSource(scope, "all", stamp);
+    categorySummaryPayload();
     // Compact facet indexes are cheap to hydrate and keep the first list
     // request from paying synchronous catalog-query costs.
     staticWorkFacets(works);
@@ -730,6 +779,7 @@ export function createWorkQueryService({
   }
 
   return {
+    categorySummaryPayload,
     facets: workFacets,
     lightweightFacets: lightweightWorkFacets,
     listPayload,

@@ -1,11 +1,12 @@
 import { openFanhaoSheet } from "./sheet.js?v=20260721-fanhao-person-detail-02";
 
-export const FANHAO_ROOT_VIEWS = Object.freeze(["people", "works", "rankings", "studios"]);
+export const FANHAO_ROOT_VIEWS = Object.freeze(["people", "works", "rankings", "categories", "studios"]);
 
 const CHROME_TABS = Object.freeze([
-  { label: "作者", view: "people" },
+  { label: "演员", view: "people" },
   { label: "作品", view: "works" },
   { label: "榜单", view: "rankings" },
+  { label: "分类", view: "categories" },
   { label: "片商", view: "studios" }
 ]);
 
@@ -55,7 +56,7 @@ export function renderFanhaoChrome({ container, view }, host, views) {
   const search = document.createElement("button");
   search.type = "button";
   search.className = "fanhao-chrome-icon";
-  search.setAttribute("aria-label", "搜索番号、作品或作者");
+  search.setAttribute("aria-label", "搜索番号、作品或演员");
   search.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
   search.addEventListener("click", () => {
     host.navigation.showView("search", { query: "" }, { push: true });
@@ -69,7 +70,7 @@ export function renderFanhaoChrome({ container, view }, host, views) {
 function renderDetailChrome(container, view, host) {
   const row = document.createElement("nav");
   row.className = "fanhao-detail-chrome-row";
-  row.setAttribute("aria-label", view === "personDetail" ? "作者详情导航" : "作品详情导航");
+  row.setAttribute("aria-label", view === "personDetail" ? "演员详情导航" : "作品详情导航");
   const back = document.createElement("button");
   back.type = "button";
   back.className = "fanhao-detail-chrome-back";
@@ -79,7 +80,7 @@ function renderDetailChrome(container, view, host) {
   const title = document.createElement("strong");
   title.className = "fanhao-detail-chrome-title";
   title.dataset.fanhaoDetailTitle = "";
-  title.textContent = view === "personDetail" ? "作者详情" : "作品详情";
+  title.textContent = view === "personDetail" ? "演员详情" : "作品详情";
   row.append(back, title);
   container.append(row);
 }
@@ -87,6 +88,7 @@ function renderDetailChrome(container, view, host) {
 function fanhaoTabForView(view) {
   if (view === "people" || view === "personDetail") return "people";
   if (view === "rankings") return "rankings";
+  if (view === "categories") return "categories";
   if (view === "studios" || view === "studioDetail") return "studios";
   return "works";
 }
@@ -94,18 +96,26 @@ function fanhaoTabForView(view) {
 function sortConfigForView(view, views) {
   if (view === "people") {
     return {
-      title: "作者排序",
+      title: "演员排序",
       options: views.peopleViews.getSortOptions(),
       value: views.peopleViews.getSortMode(),
       select: (value) => views.peopleViews.setSortMode(value)
     };
   }
-  if (view === "works" || view === "rankings") {
+  if (view === "works" || view === "rankings" || view === "categories") {
     return {
-      title: view === "rankings" ? "榜单排序" : "作品排序",
+      title: view === "rankings" ? "榜单排序" : view === "categories" ? "分类作品排序" : "作品排序",
       options: views.workViews.getSortOptions(view),
       value: views.workViews.getSortMode(view),
       select: (value) => views.workViews.setSortMode(view, value)
+    };
+  }
+  if (view === "studios") {
+    return {
+      title: "片商排序",
+      options: views.workViews.getStudioSortOptions(),
+      value: views.workViews.getStudioSortMode(),
+      select: (value) => views.workViews.setStudioSortMode(value)
     };
   }
   return null;
