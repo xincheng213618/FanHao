@@ -1,5 +1,5 @@
 import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260721-fanhao-person-detail-02";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260721-fanhao-author-portraits-06";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260721-fanhao-person-browser-07";
 
 export function createAndroidModule({ host }) {
   const workViews = createWorkViews({
@@ -40,6 +40,12 @@ export function createAndroidModule({ host }) {
     createChip: workViews.createChip,
     getWorksLimit: host.limits.getWorks,
     getWorkListRequestState: workViews.getWorkListRequestState,
+    getWorkFilterMode: workViews.getWorkFilterMode,
+    getWorkFilterOptions: workViews.getWorkFilterOptions,
+    setWorkFilterMode: workViews.setWorkFilterMode,
+    getWorkSortMode: () => workViews.getSortMode("works"),
+    getWorkSortOptions: () => workViews.getSortOptions("works"),
+    setWorkSortMode: (value) => workViews.setSortMode("works", value),
     increaseWorksLimit: host.limits.increaseWorks,
     renderCurrentViewPreservingScroll: host.ui.renderCurrentViewPreservingScroll,
     mediaViewer: host.mediaViewer,

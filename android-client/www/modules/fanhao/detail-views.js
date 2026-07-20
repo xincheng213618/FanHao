@@ -7,6 +7,7 @@ import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, l
 import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-01";
 import { personDetailPath } from "./features/people/detail-request.js?v=20260720-fanhao-person-query-01";
 import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260721-fanhao-author-portraits-06";
+import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=20260721-fanhao-person-browser-07";
 import { createWorkActions } from "./features/works/actions.js?v=20260721-fanhao-person-detail-02";
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
 
@@ -23,6 +24,12 @@ export function createDetailViews(context) {
     renderMessage,
     getWorksLimit = () => 80,
     getWorkListRequestState = () => ({ filter: "all", sort: "updated" }),
+    getWorkFilterMode = () => "all",
+    getWorkFilterOptions = () => [],
+    setWorkFilterMode = () => false,
+    getWorkSortMode = () => "updated",
+    getWorkSortOptions = () => [],
+    setWorkSortMode = () => false,
     increaseWorksLimit = () => {},
     renderCurrentViewPreservingScroll = () => {},
     mediaViewer,
@@ -83,12 +90,21 @@ export function createDetailViews(context) {
         activeFilterTotal: data.total || works.length,
         coverGrid: true,
         hidePerson: true,
+        hideControls: true,
         hasServerMore: works.length < Number(data.total || works.length),
         onLoadMore: () => {
           increaseWorksLimit(48);
           return renderCurrentViewPreservingScroll();
         }
       });
+      els.viewContent.append(createPersonDetailWorkToolbar({
+        filterMode: getWorkFilterMode(),
+        filterOptions: getWorkFilterOptions(works, data.facets),
+        sortMode: getWorkSortMode(),
+        sortOptions: getWorkSortOptions(),
+        onFilterChange: (value) => setWorkFilterMode(value, { replace: true }),
+        onSortChange: setWorkSortMode
+      }));
     };
     try {
       const result = await pageDataService.load(activeUrl, path, {

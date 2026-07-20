@@ -1489,6 +1489,28 @@ button.work-person {
   -webkit-line-clamp: 2;
 }
 
+.content-panel[data-view="personDetail"] .work-list.cover-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 10px;
+}
+
+.content-panel[data-view="personDetail"] .work-list.cover-grid .work-card {
+  contain-intrinsic-size: auto 330px;
+}
+
+.content-panel[data-view="personDetail"] .work-list.cover-grid .work-summary strong {
+  min-height: 38px;
+  font-size: 13.5px;
+}
+
+.content-panel[data-view="personDetail"] .work-list.cover-grid .work-card-code {
+  font-size: 12px;
+}
+
+.content-panel[data-view="personDetail"] .work-list.cover-grid .work-card-grid-meta {
+  font-size: 11px;
+}
+
 .work-card-code,
 .work-card-grid-meta {
   min-width: 0;

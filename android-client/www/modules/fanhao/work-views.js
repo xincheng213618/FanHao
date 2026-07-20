@@ -2,7 +2,7 @@ import { fetchJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
 import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260720-fanhao-scroll-intent-01";
 import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260702-novel-local-manage-74";
 import { formatNumber } from "../../js/format.js";
-import { createWorkListState } from "../../js/work-filtering.js?v=20260721-fanhao-person-detail-02";
+import { createWorkListState } from "../../js/work-filtering.js?v=20260721-fanhao-person-browser-07";
 import { createWorkCards } from "./features/works/cards.js?v=20260721-fanhao-person-detail-02";
 import { workCollectionPath } from "./features/works/collection-request.js?v=20260720-fanhao-collection-filter-01";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260721-fanhao-person-detail-02";
@@ -553,7 +553,9 @@ export function createWorkViews(context) {
     const list = listState.visibleWorks(source, renderOptions);
     const visible = list.slice(0, getWorksLimit());
     container.querySelector(".loading-row")?.remove();
-    container.append(listState.createWorkControls(source, list, renderOptions));
+    if (renderOptions.hideControls !== true) {
+      container.append(listState.createWorkControls(source, list, renderOptions));
+    }
 
     if (!list.length) {
       renderMessageInto(container, source.length ? "没有符合当前筛选的作品。" : emptyMessage, "quiet", false);
@@ -613,6 +615,8 @@ export function createWorkViews(context) {
     getSortMode: (view) => view === "rankings" ? rankingViews.getSortMode() : workListState.getSortMode(),
     getSortOptions: (view) => workListState.getSortOptions({ allowRankingSort: view === "rankings" }),
     setSortMode: (view, value) => view === "rankings" ? rankingViews.setSortMode(value) : workListState.setSortMode(value),
+    getWorkFilterMode: () => workListState.getFilterMode(),
+    getWorkFilterOptions: (works, facets) => workListState.getFilterOptions(works, facets),
     setWorkFilterMode: (value, options = {}) => workListState.setFilterMode(value, options),
     getWorkListRequestState: () => ({ filter: workListState.getServerFilterMode(), sort: workListState.getServerSortMode() }),
     refreshRankingCache,

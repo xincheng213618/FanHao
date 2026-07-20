@@ -88,10 +88,9 @@ export function createWorkListState(context) {
     const filterStrip = document.createElement("div");
     filterStrip.className = "work-filter-strip";
     filterStrip.setAttribute("aria-label", "作品筛选");
-    const counts = { ...filterCounts(sourceWorks), ...(options.facets || {}) };
     let filterButtonToReveal = null;
-    for (const option of WORK_FILTERS) {
-      const count = counts[option.value] || 0;
+    for (const option of getFilterOptions(sourceWorks, options.facets)) {
+      const count = option.count;
       const button = document.createElement("button");
       button.type = "button";
       const active = option.value === "all" ? activeFilters.size === 0 : activeFilters.has(option.value);
@@ -120,6 +119,14 @@ export function createWorkListState(context) {
       ? WORK_SORTS
       : WORK_SORTS.filter((option) => option.value !== "ranking");
     return values.map((option) => ({ ...option }));
+  }
+
+  function getFilterOptions(works = [], facets = {}) {
+    const counts = { ...filterCounts(works), ...(facets || {}) };
+    return WORK_FILTERS.map((option) => ({
+      ...option,
+      count: Math.max(0, Number(counts[option.value] || 0))
+    }));
   }
 
   function filterCounts(works) {
@@ -229,6 +236,7 @@ export function createWorkListState(context) {
 
   return {
     createWorkControls,
+    getFilterOptions,
     getFilterMode: () => filterMode,
     getServerFilterMode,
     getServerSortMode,
