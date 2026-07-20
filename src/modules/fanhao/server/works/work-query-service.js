@@ -480,9 +480,11 @@ export function createWorkQueryService({
   }
 
   function cachedListSource(scope, filter, stamp = currentStamp()) {
-    const cacheKey = `${scope}:${filter}`;
+    const filters = requestedFilters(filter);
+    const filterKey = filters.length ? filters.join(",") : "all";
+    const cacheKey = `${scope}:${filterKey}`;
     const cached = listSourceCache.get(cacheKey);
-    const filterStamp = userStateFilters.has(filter) ? `${stamp}:${userStateStamp()}` : stamp;
+    const filterStamp = filters.some((item) => userStateFilters.has(item)) ? `${stamp}:${userStateStamp()}` : stamp;
     let filtered = cached?.stamp === filterStamp ? cached.works : null;
 
     if (!filtered) {
@@ -492,8 +494,12 @@ export function createWorkQueryService({
         ? scopedCached.works
         : enrichedWorks().filter((work) => peopleScopeService.workMatches(work, scope));
       listSourceCache.set(scopedCacheKey, { stamp, works: scopedWorks });
-      filtered = filter === "all" ? scopedWorks : scopedWorks.filter((work) => workMatchesFilter(work, filter));
-      if (cacheableFilters.has(filter)) listSourceCache.set(cacheKey, { stamp: filterStamp, works: filtered });
+      filtered = filters.length
+        ? scopedWorks.filter((work) => filters.every((item) => workMatchesFilter(work, item)))
+        : scopedWorks;
+      if (filters.every((item) => cacheableFilters.has(item))) {
+        listSourceCache.set(cacheKey, { stamp: filterStamp, works: filtered });
+      }
     }
     return filtered;
   }
@@ -686,17 +692,20 @@ export function createWorkQueryService({
   }
 
   function cachedSearchFilter(source, filter) {
-    if (filter === "all") return source.works;
-    if (!cacheableFilters.has(filter)) return source.works.filter((work) => lightweightWorkMatchesFilter(work, filter));
+    const filters = requestedFilters(filter);
+    if (!filters.length) return source.works;
+    const filterKey = filters.join(",");
+    const matchesFilters = (work) => filters.every((item) => lightweightWorkMatchesFilter(work, item));
+    if (!filters.every((item) => cacheableFilters.has(item))) return source.works.filter(matchesFilters);
     const stamp = userStateStamp();
     if (source.filteredByModeStamp !== stamp) {
       source.filteredByModeStamp = stamp;
       source.filteredByMode.clear();
     }
-    if (!source.filteredByMode.has(filter)) {
-      source.filteredByMode.set(filter, source.works.filter((work) => lightweightWorkMatchesFilter(work, filter)));
+    if (!source.filteredByMode.has(filterKey)) {
+      source.filteredByMode.set(filterKey, source.works.filter(matchesFilters));
     }
-    return source.filteredByMode.get(filter);
+    return source.filteredByMode.get(filterKey);
   }
 
   function findExactLocalWork(codeKey) {
@@ -725,8 +734,8 @@ function localMarkerFromSearchQuery(value) {
 }
 
 function requestedFilters(value) {
-  return String(value || "all")
+  return [...new Set(String(value || "all")
     .split(",")
     .map((item) => item.trim())
-    .filter((item) => item && item !== "all");
+    .filter((item) => item && item !== "all"))];
 }

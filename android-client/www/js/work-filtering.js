@@ -109,8 +109,13 @@ export function createWorkListState(context) {
       ? Number(options.displayedCount)
       : visibleList.length;
     const allTotal = Number.isFinite(Number(options.total)) ? Number(options.total) : sourceWorks.length;
+    const activeFilterTotal = Number.isFinite(Number(options.activeFilterTotal))
+      ? Number(options.activeFilterTotal)
+      : null;
     const singleActiveFilter = activeFilters.size === 1 ? [...activeFilters][0] : "";
-    const activeTotalValue = activeFilters.size === 0
+    const activeTotalValue = activeFilterTotal !== null
+      ? activeFilterTotal
+      : activeFilters.size === 0
       ? allTotal
       : singleActiveFilter
         ? counts[singleActiveFilter]

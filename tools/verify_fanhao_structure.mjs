@@ -310,6 +310,7 @@ for (const relativePath of [
 }
 
 const androidWorkViews = read("android-client/www/modules/fanhao/work-views.js");
+const androidWorkFiltering = read("android-client/www/js/work-filtering.js");
 const androidWorkPageDataService = read("android-client/www/modules/fanhao/features/works/page-data-service.js");
 const androidWorkSearchDataService = read("android-client/www/modules/fanhao/features/works/search-data-service.js");
 const androidWorkDetailDataService = read("android-client/www/modules/fanhao/features/works/detail-data-service.js");
@@ -351,6 +352,7 @@ assert(!androidWorkViews.includes("for (const work of visible) grid.append"), "A
 assert(androidWorkViews.includes("() => loadMore && els.viewContent.append(loadMore)"), "Android auto-load must wait until progressive work rendering reaches the real list end");
 assert(!androidWorkViews.includes("els.viewContent.append(createLoadMoreButton"), "Android callers must not attach auto-load before progressive work rendering completes");
 assert(androidWorkViews.includes("requireScrollIntent: true"), "Android FanHao pagination must require fresh downward scroll intent");
+assert(androidWorkViews.includes("activeFilterTotal: options.activeFilterTotal ? total : undefined") && androidWorkFiltering.includes("options.activeFilterTotal"), "Android combined filters must display the server-filtered total");
 assert(androidProgressiveWorkListRenderer.includes("container.isConnected === false"), "Android progressive work rendering must stop after navigation detaches its list");
 assert(androidWorkCoverLoader.includes('const WORK_COVER_ROOT_MARGIN = "720px 0px"'), "Android work covers must start shortly before they enter the viewport");
 assert(androidViewportImageLoader.includes("const pending = new Map()"), "Android viewport image loading must share one focused queue implementation");
@@ -676,10 +678,10 @@ assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && andr
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-person-page-race-01'), "Android person-page race changes must use a fresh detail-view URL");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-scroll-intent-01'), "Android pagination intent changes must use a fresh work-view URL");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-combined-filter-01'), "Android combined-filter changes must use a fresh work-view URL");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must use a fresh people-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-scroll-intent-01'), "Android pagination intent changes must refresh the FanHao module entry chain");
-assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-scroll-intent-01'), "Android pagination intent changes must refresh the app entry chain");
+assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-combined-filter-01'), "Android combined-filter changes must refresh the FanHao module entry chain");
+assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-combined-filter-01'), "Android combined-filter changes must refresh the app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
@@ -1820,7 +1822,7 @@ const queryWork = {
   infos: [],
   missingLocal: false,
   playableCount: 0,
-  infoCount: 0
+  infoCount: 1
 };
 const workQueryService = createWorkQueryService({
   actorMovieStamp: () => actorMovieDataStamp,
@@ -1946,8 +1948,14 @@ assert.equal(cachedWorkListSecond, cachedWorkListFirst, "identical work-list req
 assert.equal(workListPublicCount, workListPublicCountAfterLightweightPage, "new page sizes must reuse already prepared full and lightweight work payloads");
 assert.equal(searchFavoriteFacetReadCount, listFavoriteReadsAfterFirstPage, "repeated work lists must reuse unchanged dynamic facets");
 assert.equal(enrichmentCount, 1, "repeated FanHao work-list requests must reuse the prewarmed full-library enrichment");
+const combinedWorkListUrl = new URL("http://127.0.0.1/api/works?filter=progress%2Cinfo&limit=24&sort=updated");
+const combinedWorkListBeforeProgress = workQueryService.listPayload(combinedWorkListUrl);
+assert.equal(combinedWorkListBeforeProgress.total, 0, "combined work-list filters must apply every chip before pagination");
 const workSearchUrl = new URL("http://127.0.0.1/api/search?q=AB&limit=24&sort=releaseDesc");
 const cachedSearchFirst = workQueryService.searchPayload(workSearchUrl);
+const combinedWorkSearchUrl = new URL("http://127.0.0.1/api/search?q=AB&filter=progress%2Cinfo&limit=24&sort=releaseDesc");
+const combinedWorkSearchBeforeProgress = workQueryService.searchPayload(combinedWorkSearchUrl);
+assert.equal(combinedWorkSearchBeforeProgress.total, 0, "combined work-search filters must apply every chip before pagination");
 const favoriteFacetReadsAfterSearch = searchFavoriteFacetReadCount;
 const cachedSearchSecond = workQueryService.searchPayload(workSearchUrl);
 assert.equal(cachedSearchSecond, cachedSearchFirst, "identical search requests must reuse the complete response object");
@@ -1982,6 +1990,11 @@ const progressPageSecond = workQueryService.listPayload(new URL("http://127.0.0.
 assert.equal(progressPageFirst.total, 1, "progress filters must reflect the current playback state");
 assert.equal(progressPageSecond.works[0].progress?.percent, 42, "different progress page sizes must retain current playback state");
 assert.equal(searchProgressReadCount, progressReadsAfterFirstPage, "different progress page sizes must reuse the current user-state source and facets");
+const combinedWorkListAfterProgress = workQueryService.listPayload(combinedWorkListUrl);
+assert.equal(combinedWorkListAfterProgress.total, 1, "combined work-list caches must refresh when playback state changes");
+assert.equal(combinedWorkListAfterProgress.facets.all, 1, "combined work-list facets must describe the filtered intersection");
+const combinedWorkSearchAfterProgress = workQueryService.searchPayload(combinedWorkSearchUrl);
+assert.equal(combinedWorkSearchAfterProgress.total, 1, "combined work-search caches must refresh when playback state changes");
 const workListPublicCountBeforeStaticChange = workListPublicCount;
 actorMovieDataStamp = "actor-v2";
 workQueryService.listPayload(workListUrl);

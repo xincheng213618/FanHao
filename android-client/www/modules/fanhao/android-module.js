@@ -1,4 +1,4 @@
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260720-fanhao-scroll-intent-01";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260720-fanhao-combined-filter-01";
 
 const ROOT_VIEWS = ["works", "rankings", "studios", "vr", "people", "favorites"];
 const CHROME_TABS = [
