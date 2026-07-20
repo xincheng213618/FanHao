@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from code_parser import loose_code_key, normalize_code
+from javdb_card_facts import parse_javdb_rating_facts
 from remote_image_cache import cache_remote_images, ensure_remote_image_schema, upsert_remote_image
 
 
@@ -1135,12 +1136,7 @@ def parse_duration(value: str) -> int | None:
 
 
 def parse_rating(value: str) -> tuple[float | None, int | None]:
-    rating_match = re.search(r"(\d+(?:\.\d+)?)", value or "")
-    count_match = re.search(r"(\d{1,8})\s*(?:人|users?|ratings?|评价|評價)", value or "", re.I)
-    rating = float(rating_match.group(1)) if rating_match else None
-    if rating is not None and not (0 <= rating <= 10):
-        rating = None
-    return rating, int(count_match.group(1)) if count_match else None
+    return parse_javdb_rating_facts(value)
 
 
 def upsert_work_info(conn: sqlite3.Connection, target: WorkTarget, meta: JavDbMeta) -> None:

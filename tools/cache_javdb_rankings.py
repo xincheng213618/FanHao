@@ -16,6 +16,7 @@ from bs4 import BeautifulSoup
 from selenium.common.exceptions import TimeoutException
 
 from code_parser import loose_code_key, normalize_code
+from javdb_card_facts import parse_javdb_rating_facts
 from backfill_javdb_metadata import (  # noqa: E402
     AccessBlockedError,
     DEFAULT_CHROME_BINARY,
@@ -608,21 +609,7 @@ def parse_card_facts(item) -> dict:
         parts = re.split(r"[-/.]", date_match.group(1))
         release_date = f"{parts[0]}-{parts[1].zfill(2)}-{parts[2].zfill(2)}"
 
-    rating = None
-    rating_count = None
-    rating_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*分", text)
-    if rating_match:
-        try:
-            rating = float(rating_match.group(1))
-        except ValueError:
-            rating = None
-
-    count_match = re.search(r"由\s*([\d,]+)\s*人", text)
-    if count_match:
-        try:
-            rating_count = int(count_match.group(1).replace(",", ""))
-        except ValueError:
-            rating_count = None
+    rating, rating_count = parse_javdb_rating_facts(text, require_paired_count=True)
 
     return {"release_date": release_date, "rating": rating, "rating_count": rating_count}
 

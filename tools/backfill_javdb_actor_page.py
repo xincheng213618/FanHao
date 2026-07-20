@@ -19,6 +19,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from code_parser import loose_code_key, normalize_code  # noqa: E402
+from javdb_card_facts import parse_javdb_rating_facts  # noqa: E402
 from backfill_javdb_metadata import (  # noqa: E402
     DEFAULT_CHROME_BINARY,
     DEFAULT_DB,
@@ -717,21 +718,7 @@ def parse_actor_movie_facts(item) -> dict:
         parts = re.split(r"[-/.]", date_match.group(1))
         release_date = f"{parts[0]}-{parts[1].zfill(2)}-{parts[2].zfill(2)}"
 
-    rating = None
-    rating_count = None
-    rating_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*分", text)
-    if rating_match:
-        try:
-            rating = float(rating_match.group(1))
-        except ValueError:
-            rating = None
-
-    count_match = re.search(r"由\s*([\d,]+)\s*人", text)
-    if count_match:
-        try:
-            rating_count = int(count_match.group(1).replace(",", ""))
-        except ValueError:
-            rating_count = None
+    rating, rating_count = parse_javdb_rating_facts(text, require_paired_count=True)
 
     tags = parse_actor_movie_tags(item, text)
     combined = " ".join(tags)
