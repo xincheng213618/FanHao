@@ -350,6 +350,7 @@ assert(androidWorkViews.includes("progressiveWorkListRenderer.render(grid, visib
 assert(!androidWorkViews.includes("for (const work of visible) grid.append"), "Android work lists must not synchronously build the full first page");
 assert(androidWorkViews.includes("() => loadMore && els.viewContent.append(loadMore)"), "Android auto-load must wait until progressive work rendering reaches the real list end");
 assert(!androidWorkViews.includes("els.viewContent.append(createLoadMoreButton"), "Android callers must not attach auto-load before progressive work rendering completes");
+assert(androidWorkViews.includes("requireScrollIntent: true"), "Android FanHao pagination must require fresh downward scroll intent");
 assert(androidProgressiveWorkListRenderer.includes("container.isConnected === false"), "Android progressive work rendering must stop after navigation detaches its list");
 assert(androidWorkCoverLoader.includes('const WORK_COVER_ROOT_MARGIN = "720px 0px"'), "Android work covers must start shortly before they enter the viewport");
 assert(androidViewportImageLoader.includes("const pending = new Map()"), "Android viewport image loading must share one focused queue implementation");
@@ -675,10 +676,10 @@ assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && andr
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-person-page-race-01'), "Android person-page race changes must use a fresh detail-view URL");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260717-fanhao-touch-intent-01'), "Android touch-intent changes must use a fresh work-view URL");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-scroll-intent-01'), "Android pagination intent changes must use a fresh work-view URL");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must use a fresh people-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260717-fanhao-touch-intent-01'), "Android touch-intent changes must refresh the FanHao module entry chain");
-assert(androidIndexHtml.includes('app.js?v=20260717-photo-first-image-06'), "Android app entry must retain its current cache-busting URL");
+assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-scroll-intent-01'), "Android pagination intent changes must refresh the FanHao module entry chain");
+assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-scroll-intent-01'), "Android pagination intent changes must refresh the app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {

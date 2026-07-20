@@ -1,5 +1,5 @@
 import { fetchJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260702-novel-local-manage-74";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260720-fanhao-scroll-intent-01";
 import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260702-novel-local-manage-74";
 import { formatNumber } from "../../js/format.js";
 import { createWorkListState } from "../../js/work-filtering.js?v=20260710-western-merge-01";
@@ -710,7 +710,8 @@ export function createWorkViews(context) {
     return enhanceAutoLoadMore(wrap, handler, {
       idleText: text,
       loadingText: "正在接着加载",
-      retryText: "加载停住了，点一下重试"
+      retryText: "加载停住了，点一下重试",
+      requireScrollIntent: true
     });
   }
   function renderMessage(message, tone = "quiet", replace = true) {
