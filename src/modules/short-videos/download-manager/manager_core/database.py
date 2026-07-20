@@ -3,10 +3,29 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 from .common import normalize_int, now_iso, parse_profile_url
-from .config import CONFIG_DIR, DATA_DIR, DB_PATH, DEFAULT_COOKIE_FILE, DEFAULT_FAILURE_GUARD_THRESHOLD, DEFAULT_LIBRARY_OUTPUT_DIR, DEFAULT_OUTPUT_DIR, DOWNLOADER_PYTHON, DOWNLOADER_ROOT, DOWNLOADER_RUN, LIBRARY_SEC_UID, LOG_DIR, TEST_PROFILE_URL
+from .config import (
+    CONFIG_DIR,
+    DATA_DIR,
+    DB_PATH,
+    DEFAULT_COOKIE_FILE,
+    DEFAULT_FAILURE_GUARD_THRESHOLD,
+    DEFAULT_LIBRARY_OUTPUT_DIR,
+    DEFAULT_OUTPUT_DIR,
+    DOWNLOADER_PYTHON,
+    DOWNLOADER_ROOT,
+    DOWNLOADER_RUN,
+    LEGACY_DOWNLOADER_PYTHON,
+    LEGACY_DOWNLOADER_ROOT,
+    LEGACY_DOWNLOADER_RUN,
+    LIBRARY_SEC_UID,
+    LOG_DIR,
+    TEST_PROFILE_URL,
+    downloader_root_env_value,
+)
 
 
 def db() -> sqlite3.Connection:
@@ -181,6 +200,7 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
                 (key, value),
             )
+        migrate_downloader_settings(conn)
         conn.execute(
             "UPDATE links SET status='pending', last_error='上次程序退出时仍在下载，已重置为待下载' "
             "WHERE status='downloading'"
@@ -193,6 +213,80 @@ def init_db() -> None:
         from .queue import seed_download_queue
 
         seed_download_queue(conn)
+
+
+def _same_path(left: str, right: str) -> bool:
+    if not str(left).strip() or not str(right).strip():
+        return False
+    try:
+        return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _downloader_setting_path_is_valid(key: str, value: str) -> bool:
+    if not str(value).strip():
+        return False
+    try:
+        path = Path(value).expanduser()
+        return path.is_dir() if key == "downloader_root" else path.is_file()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def migrate_downloader_settings(
+    conn: sqlite3.Connection,
+    *,
+    environment_override: bool | None = None,
+    path_is_valid: Callable[[str, str], bool] | None = None,
+) -> tuple[str, ...]:
+    """Move stale legacy downloader paths to the colocated runtime.
+
+    Existing custom paths remain authoritative while they still point to the
+    expected file or directory. An explicit environment override is also
+    authoritative and deliberately leaves the persisted settings untouched.
+    """
+
+    if environment_override is None:
+        environment_override = bool(downloader_root_env_value())
+    if environment_override:
+        return ()
+
+    validator = path_is_valid or _downloader_setting_path_is_valid
+    targets = {
+        "downloader_root": str(DOWNLOADER_ROOT),
+        "downloader_python": str(DOWNLOADER_PYTHON),
+        "downloader_run": str(DOWNLOADER_RUN),
+    }
+    legacy = {
+        "downloader_root": str(LEGACY_DOWNLOADER_ROOT),
+        "downloader_python": str(LEGACY_DOWNLOADER_PYTHON),
+        "downloader_run": str(LEGACY_DOWNLOADER_RUN),
+    }
+    rows = conn.execute(
+        "SELECT key, value FROM settings WHERE key IN (?, ?, ?)",
+        tuple(targets),
+    ).fetchall()
+    current = {str(row["key"]): str(row["value"]) for row in rows}
+    if all(_same_path(current.get(key, ""), target) for key, target in targets.items()):
+        return ()
+
+    contains_legacy_path = any(
+        _same_path(current.get(key, ""), legacy[key]) for key in targets
+    )
+    valid_custom_triplet = not contains_legacy_path and all(
+        validator(key, current.get(key, "")) for key in targets
+    )
+    if valid_custom_triplet:
+        return ()
+
+    for key, target in targets.items():
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, target),
+        )
+    return tuple(targets)
 
 
 def migrate_profiles_tabs(conn: sqlite3.Connection) -> None:

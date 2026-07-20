@@ -16,16 +16,45 @@ from urllib.request import Request, urlopen
 
 from .auth import parse_netscape_cookie_dict
 from .common import normalize_int, normalize_proxy
-from .config import BASE_DIR, CONFIG_DIR, DEFAULT_COOKIE_FILE, DOWNLOADER_EXE, DOWNLOADER_PYTHON, DOWNLOADER_ROOT, DOWNLOADER_RUN
+from .config import (
+    BASE_DIR,
+    CONFIG_DIR,
+    DEFAULT_COOKIE_FILE,
+    DOWNLOADER_PYTHON,
+    DOWNLOADER_ROOT,
+    DOWNLOADER_RUN,
+    downloader_root_env_value,
+)
 from .database import setting
 
 
+def configured_downloader_paths() -> tuple[Path, Path, Path]:
+    """Resolve the effective root, interpreter, and entrypoint.
+
+    ``DOUYIN_DOWNLOADER_ROOT`` is an explicit runtime override. When it is
+    present, derived paths from that root take precedence over SQLite values.
+    """
+
+    environment_root = downloader_root_env_value()
+    if environment_root:
+        repo_root = Path(environment_root).expanduser().resolve()
+        return (
+            repo_root,
+            repo_root / ".venv" / "Scripts" / "python.exe",
+            repo_root / "run.py",
+        )
+    return (
+        Path(setting("downloader_root", str(DOWNLOADER_ROOT))).expanduser().resolve(),
+        Path(setting("downloader_python", str(DOWNLOADER_PYTHON))).expanduser().resolve(),
+        Path(setting("downloader_run", str(DOWNLOADER_RUN))).expanduser().resolve(),
+    )
+
+
 def downloader_command(args: list[str]) -> tuple[list[str], Path]:
-    if DOWNLOADER_EXE.exists():
-        return [str(DOWNLOADER_EXE), *args], DOWNLOADER_ROOT
-    python_exe = Path(setting("downloader_python", str(DOWNLOADER_PYTHON)))
-    run_py = Path(setting("downloader_run", str(DOWNLOADER_RUN)))
-    repo_root = Path(setting("downloader_root", str(DOWNLOADER_ROOT)))
+    repo_root, python_exe, run_py = configured_downloader_paths()
+    downloader_exe = repo_root / "douyin-downloader.exe"
+    if downloader_exe.is_file():
+        return [str(downloader_exe), *args], repo_root
     if not python_exe.exists() or not run_py.exists():
         raise RuntimeError("下载器路径不存在，请检查设置")
     return [str(python_exe), str(run_py), *args], repo_root
@@ -109,8 +138,7 @@ def fetch_aweme_comments(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "message": "需要有效的抖音作品 ID"}
     max_comments = normalize_int(payload.get("max_comments", 100), 100, 1, 500)
     include_replies = bool(payload.get("include_replies", False))
-    downloader_root = Path(setting("downloader_root", str(DOWNLOADER_ROOT))).expanduser().resolve()
-    downloader_python = Path(setting("downloader_python", str(DOWNLOADER_PYTHON))).expanduser().resolve()
+    downloader_root, downloader_python, _ = configured_downloader_paths()
     helper = BASE_DIR / "fetch-comments.py"
     if not downloader_python.is_file() or not downloader_root.is_dir() or not helper.is_file():
         return {"ok": False, "message": "评论采集依赖不完整"}

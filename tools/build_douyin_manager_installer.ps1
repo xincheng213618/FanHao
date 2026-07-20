@@ -15,6 +15,7 @@ $ModuleDir = Join-Path $ProjectRoot "src\modules\short-videos\download-manager"
 $PackagingDir = Join-Path $ModuleDir "packaging"
 $ManagerCoreDir = Join-Path $ModuleDir "manager_core"
 $CommentHelper = Join-Path $ModuleDir "fetch-comments.py"
+$SetupDownloader = Join-Path $ModuleDir "setup-downloader.ps1"
 $PrimerMedia = Join-Path $ProjectRoot "public\assets\short-video-h264-2k-primer.mp4"
 $DownloaderEntry = Join-Path $PackagingDir "downloader_entry.py"
 $InstallerScript = Join-Path $PackagingDir "DouyinDownloadManager.iss"
@@ -22,7 +23,7 @@ $BuildRequirements = Join-Path $PackagingDir "requirements-build.txt"
 $AutoWorkDirectory = [string]::IsNullOrWhiteSpace($WorkDirectory)
 
 if ([string]::IsNullOrWhiteSpace($DownloaderRoot)) {
-  $DownloaderRoot = Join-Path (Split-Path $ProjectRoot -Parent) "Tool\douyin-downloader"
+  $DownloaderRoot = Join-Path $ModuleDir "downloader"
 }
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
   $OutputDirectory = Join-Path $ProjectRoot "dist\douyin-download-manager"
@@ -61,6 +62,7 @@ function Invoke-Checked {
 }
 
 $PyInstaller = Get-RequiredCommand "pyinstaller"
+$Python = Get-RequiredCommand "python"
 $Node = Get-RequiredCommand "node"
 $InnoCompiler = @(
   (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
@@ -69,7 +71,16 @@ $InnoCompiler = @(
 ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
 if (-not $InnoCompiler) { throw "Inno Setup 6 compiler (ISCC.exe) was not found." }
 
+if (-not (Test-Path -LiteralPath $SetupDownloader -PathType Leaf)) {
+  throw "Downloader setup script was not found: $SetupDownloader"
+}
+& $SetupDownloader -DownloaderRoot $DownloaderRoot -PythonExecutable $Python
+
 $DownloaderSitePackages = Join-Path $DownloaderRoot ".venv\Lib\site-packages"
+$DownloaderPyproject = Join-Path $DownloaderRoot "pyproject.toml"
+$DownloaderLicense = Join-Path $DownloaderRoot "LICENSE"
+$DownloaderNotices = Join-Path $DownloaderRoot "THIRD_PARTY_NOTICES.md"
+$DownloaderApacheLicense = Join-Path $DownloaderRoot "LICENSES\Apache-2.0.txt"
 foreach ($required in @(
   (Join-Path $ModuleDir "app.py"),
   (Join-Path $ModuleDir "static"),
@@ -78,7 +89,19 @@ foreach ($required in @(
   (Join-Path $ModuleDir "node_modules\playwright-core"),
   (Join-Path $ProjectRoot "public\short-video-app.js"),
   (Join-Path $ProjectRoot "public\modules\short-videos\short-video-page.js"),
+  (Join-Path $DownloaderRoot "auth"),
   (Join-Path $DownloaderRoot "cli"),
+  (Join-Path $DownloaderRoot "config"),
+  (Join-Path $DownloaderRoot "control"),
+  (Join-Path $DownloaderRoot "core"),
+  (Join-Path $DownloaderRoot "server"),
+  (Join-Path $DownloaderRoot "storage"),
+  (Join-Path $DownloaderRoot "utils"),
+  (Join-Path $DownloaderRoot "run.py"),
+  $DownloaderPyproject,
+  $DownloaderLicense,
+  $DownloaderNotices,
+  $DownloaderApacheLicense,
   $DownloaderSitePackages,
   $DownloaderEntry,
   $InstallerScript,
@@ -144,11 +167,14 @@ try {
 
   $managerPackage = Join-Path $ManagerDist "DouyinDownloadManager"
   $downloaderPackage = Join-Path $DownloaderDist "douyin-downloader"
-  New-Item -ItemType Directory -Force -Path $PackageDir, (Join-Path $PackageDir "downloader"), (Join-Path $PackageDir "runtime") | Out-Null
+  New-Item -ItemType Directory -Force -Path $PackageDir, (Join-Path $PackageDir "downloader"), (Join-Path $PackageDir "runtime"), (Join-Path $PackageDir "licenses") | Out-Null
   Copy-Item (Join-Path $managerPackage "DouyinDownloadManager.exe") $PackageDir -Force
   Copy-Item (Join-Path $managerPackage "_internal") $PackageDir -Recurse -Force
   Copy-Item (Join-Path $downloaderPackage "*") (Join-Path $PackageDir "downloader") -Recurse -Force
   Copy-Item $Node (Join-Path $PackageDir "runtime\node.exe") -Force
+  Copy-Item $DownloaderLicense (Join-Path $PackageDir "licenses\douyin-downloader-LICENSE.txt") -Force
+  Copy-Item $DownloaderNotices (Join-Path $PackageDir "licenses\douyin-downloader-THIRD_PARTY_NOTICES.md") -Force
+  Copy-Item $DownloaderApacheLicense (Join-Path $PackageDir "licenses\Apache-2.0.txt") -Force
 
   $PackagedCommentHelper = Join-Path $PackageDir "_internal\fetch-comments.py"
   if (-not (Test-Path -LiteralPath $PackagedCommentHelper)) {
@@ -169,7 +195,7 @@ try {
       $PackagedPrimerMedia,
       [System.StringComparison]::OrdinalIgnoreCase
     )
-    $isSensitive = $_.Name -match '(?i)\.sqlite$|\.mp4$|custom-batch-douyin-cookies|^\.cookies\.json$'
+    $isSensitive = $_.Name -match '(?i)\.sqlite.*$|\.db(?:\..*)?$|\.log$|\.mp4$|custom-batch-douyin-cookies|^\.cookies\.json$|^\.comment-cookies\.json$|^cookies\.json$|^config\.ya?ml$|^\.env(?:\..*)?$'
     $isSensitive -and -not $isAllowedPrimer
   }
   if ($sensitiveFiles) {

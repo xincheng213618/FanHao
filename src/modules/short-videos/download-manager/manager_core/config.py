@@ -65,11 +65,23 @@ TEST_PROFILE_URL = (
 )
 
 
+DOUYIN_DOWNLOADER_ROOT_ENV = "DOUYIN_DOWNLOADER_ROOT"
+
+
+def downloader_root_env_value() -> str:
+    """Return the explicit downloader-root override, if one is configured."""
+
+    return str(os.environ.get(DOUYIN_DOWNLOADER_ROOT_ENV, "")).strip()
+
+
+DEFAULT_DOWNLOADER_ROOT = (INSTALL_DIR / "downloader").resolve()
+
+
+LEGACY_DOWNLOADER_ROOT = (PROJECT_ROOT.parent / "Tool" / "douyin-downloader").resolve()
+
+
 DOWNLOADER_ROOT = Path(
-    os.environ.get(
-        "DOUYIN_DOWNLOADER_ROOT",
-        str(INSTALL_DIR / "downloader" if FROZEN_BUILD else PROJECT_ROOT.parent / "Tool" / "douyin-downloader"),
-    )
+    downloader_root_env_value() or str(DEFAULT_DOWNLOADER_ROOT)
 ).resolve()
 
 
@@ -80,6 +92,12 @@ DOWNLOADER_PYTHON = DOWNLOADER_ROOT / ".venv" / "Scripts" / "python.exe"
 
 
 DOWNLOADER_RUN = DOWNLOADER_ROOT / "run.py"
+
+
+LEGACY_DOWNLOADER_PYTHON = LEGACY_DOWNLOADER_ROOT / ".venv" / "Scripts" / "python.exe"
+
+
+LEGACY_DOWNLOADER_RUN = LEGACY_DOWNLOADER_ROOT / "run.py"
 
 
 DEFAULT_COOKIE_FILE = (

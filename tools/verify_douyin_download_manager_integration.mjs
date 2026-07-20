@@ -9,6 +9,7 @@ import { createServerConfig } from "../src/bootstrap/server-config.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const moduleDir = path.join(projectRoot, "src", "modules", "short-videos", "download-manager");
+const downloaderDir = path.join(moduleDir, "downloader");
 const expectedDbPath = path.join(moduleDir, "data", "douyin_downloads.sqlite");
 
 function listFilesRecursive(root, predicate) {
@@ -128,6 +129,26 @@ for (const relativePath of [
   "extract-following.mjs",
   "cookie-login.mjs",
   "fetch-comments.py",
+  "downloader/__init__.py",
+  "downloader/pyproject.toml",
+  "downloader/requirements.txt",
+  "downloader/LICENSE",
+  "downloader/LICENSES/Apache-2.0.txt",
+  "downloader/THIRD_PARTY_NOTICES.md",
+  "downloader/run.py",
+  "downloader/auth/cookie_manager.py",
+  "downloader/cli/main.py",
+  "downloader/config/config_loader.py",
+  "downloader/control/queue_manager.py",
+  "downloader/core/api_client.py",
+  "downloader/core/downloader_factory.py",
+  "downloader/core/user_downloader.py",
+  "downloader/core/video_downloader.py",
+  "downloader/server/app.py",
+  "downloader/storage/database.py",
+  "downloader/storage/file_manager.py",
+  "downloader/tools/cookie_fetcher.py",
+  "downloader/utils/logger.py",
   "packaging/downloader_entry.py",
   "packaging/DouyinDownloadManager.iss",
   "packaging/README.md",
@@ -136,6 +157,7 @@ for (const relativePath of [
   "package-lock.json",
   "run.cmd",
   "run.ps1",
+  "setup-downloader.ps1",
   "tests/test_runtime_characterization.py",
   "static/index.html",
   "static/app.js",
@@ -148,6 +170,26 @@ for (const relativePath of [
 ]) {
   assert.equal(fs.existsSync(path.join(moduleDir, relativePath)), true, `missing download-manager file: ${relativePath}`);
 }
+
+const downloaderPackageRoots = ["auth", "cli", "config", "control", "core", "server", "storage", "tools", "utils"];
+const downloaderPythonFiles = downloaderPackageRoots.flatMap((packageName) =>
+  listFilesRecursive(path.join(downloaderDir, packageName), (filePath) => filePath.endsWith(".py"))
+);
+assert.ok(
+  downloaderPythonFiles.length >= 50,
+  `embedded downloader source is incomplete: found only ${downloaderPythonFiles.length} package files`
+);
+const downloaderPyproject = fs.readFileSync(path.join(downloaderDir, "pyproject.toml"), "utf8");
+assert.match(downloaderPyproject, /name\s*=\s*["']douyin-downloader["']/);
+assert.match(downloaderPyproject, /include\s*=\s*\[[^\]]*cli\*/s);
+assert.match(downloaderPyproject, /imageio-ffmpeg/);
+const downloaderLicense = fs.readFileSync(path.join(downloaderDir, "LICENSE"), "utf8");
+assert.match(downloaderLicense, /MIT License/i);
+const downloaderApacheLicense = fs.readFileSync(
+  path.join(downloaderDir, "LICENSES", "Apache-2.0.txt"),
+  "utf8"
+);
+assert.match(downloaderApacheLicense, /Apache License\s+Version 2\.0, January 2004/i);
 
 const config = createServerConfig({ projectRoot });
 assert.equal(config.SHORT_VIDEO_DOWNLOAD_MANAGER_DB_PATH, expectedDbPath);
@@ -172,6 +214,18 @@ const managerPythonFiles = [
   ...listFilesRecursive(managerCoreDir, (filePath) => filePath.endsWith(".py"))
 ];
 const appSource = combinedSource(managerPythonFiles);
+const managerConfigSource = fs.readFileSync(path.join(managerCoreDir, "config.py"), "utf8");
+assert.match(
+  managerConfigSource,
+  /DEFAULT_DOWNLOADER_ROOT\s*=\s*\(INSTALL_DIR\s*\/\s*["']downloader["']\)\.resolve\(\)/,
+  "source-mode downloader root must resolve inside the download-manager module"
+);
+assert.match(
+  managerConfigSource,
+  /DOWNLOADER_ROOT\s*=\s*Path\([\s\S]{0,200}downloader_root_env_value\(\)\s+or\s+str\(DEFAULT_DOWNLOADER_ROOT\)/,
+  "the optional environment override must fall back to the embedded downloader"
+);
+assert.doesNotMatch(managerConfigSource, /Desktop[\\/]+Tool/i);
 assert.match(appSource, /FANHAO_PROJECT_ROOT/);
 assert.match(appSource, /DOUYIN_MANAGER_PORT/);
 assert.match(appSource, /\/api\/auth\/cookie\/import/);
@@ -366,7 +420,92 @@ assert.match(installerBuilder, /public'\);fanhao-public/);
 assert.match(installerBuilder, /shared short-video player assets are missing/);
 assert.match(installerBuilder, /fetch-comments\.py/);
 assert.match(installerBuilder, /PackagedCommentHelper/);
+assert.match(installerBuilder, /\[string\]\$DownloaderRoot\s*=\s*["']["']/);
+assert.match(installerBuilder, /\$DownloaderRoot\s*=\s*Join-Path\s+\$ModuleDir\s+["']downloader["']/);
+assert.match(installerBuilder, /setup-downloader\.ps1/);
+assert.match(installerBuilder, /-DownloaderRoot\s+\$DownloaderRoot\s+-PythonExecutable\s+\$Python/);
+assert.match(installerBuilder, /douyin-downloader-LICENSE\.txt/);
+assert.match(installerBuilder, /douyin-downloader-THIRD_PARTY_NOTICES\.md/);
+assert.match(installerBuilder, /licenses\\Apache-2\.0\.txt/);
+assert.doesNotMatch(installerBuilder, /Desktop[\\/]+Tool|Tool\\douyin-downloader/i);
 assert.doesNotMatch(installerBuilder, /FANHAO_DIRECT_IMPORT|FANHAO_SHORT_VIDEO_DB/);
+
+const moduleReadme = fs.readFileSync(path.join(moduleDir, "README.md"), "utf8");
+const packagingReadme = fs.readFileSync(path.join(moduleDir, "packaging", "README.md"), "utf8");
+assert.match(moduleReadme, /downloader\//);
+assert.match(packagingReadme, /-DownloaderRoot/);
+assert.doesNotMatch(`${moduleReadme}\n${packagingReadme}`, /Desktop[\\/]+Tool/i);
+
+const downloaderPathspec = path.relative(projectRoot, downloaderDir).split(path.sep).join("/");
+const trackedDownloaderResult = spawnSync("git", ["ls-files", "-z", "--", downloaderPathspec], {
+  cwd: projectRoot,
+  encoding: "utf8"
+});
+assert.equal(
+  trackedDownloaderResult.status,
+  0,
+  `could not inspect tracked downloader files\n${trackedDownloaderResult.stderr || trackedDownloaderResult.stdout}`
+);
+const forbiddenRuntimeSegments = new Set([
+  ".git",
+  ".hypothesis",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".venv",
+  "__pycache__",
+  "build",
+  "data",
+  "dist",
+  "downloaded",
+  "htmlcov",
+  "logs",
+  "transcripts",
+  "venv"
+]);
+const trackedSensitiveFiles = trackedDownloaderResult.stdout
+  .split("\0")
+  .filter(Boolean)
+  .filter((repoPath) => {
+    const relativePath = repoPath.replaceAll("\\", "/").slice(downloaderPathspec.length + 1);
+    const lowerPath = relativePath.toLowerCase();
+    const segments = lowerPath.split("/");
+    const fileName = segments.at(-1) || "";
+    if (segments.some((segment) => forbiddenRuntimeSegments.has(segment) || segment.endsWith(".egg-info"))) return true;
+    if ([".cookies.json", ".env", "config.yml", "cookies.json", "dy_downloader.db"].includes(fileName)) return true;
+    if (/^config(?:\..+)?\.ya?ml$/.test(fileName) && fileName !== "config.example.yml") return true;
+    return /\.(?:db(?:\..*)?|log|m4a|mkv|mov|mp3|mp4|pid|sqlite(?:3|.*)?|wav|webm)$/.test(fileName);
+  });
+assert.deepEqual(trackedSensitiveFiles, [], `sensitive/runtime downloader files are tracked: ${trackedSensitiveFiles.join(", ")}`);
+
+const rootGitignore = fs.readFileSync(path.join(projectRoot, ".gitignore"), "utf8");
+for (const ignoredPath of [
+  `${downloaderPathspec}/.venv/`,
+  `${downloaderPathspec}/Downloaded/`,
+  `${downloaderPathspec}/Transcripts/`,
+  `${downloaderPathspec}/config*.yml`,
+  `${downloaderPathspec}/config*.yaml`,
+  `${downloaderPathspec}/.cookies.json`,
+  `${downloaderPathspec}/config/cookies.json`,
+  `${downloaderPathspec}/*.db`,
+  `${downloaderPathspec}/*.sqlite*`
+]) {
+  assert.ok(rootGitignore.split(/\r?\n/).includes(ignoredPath), `root .gitignore is missing: ${ignoredPath}`);
+}
+for (const runtimeSample of [
+  `${downloaderPathspec}/.venv/Scripts/python.exe`,
+  `${downloaderPathspec}/.cookies.json`,
+  `${downloaderPathspec}/config.yml`,
+  `${downloaderPathspec}/config.codex-test.yml`,
+  `${downloaderPathspec}/Downloaded/clip.mp4`,
+  `${downloaderPathspec}/logs/downloader.log`,
+  `${downloaderPathspec}/dy_downloader.db`
+]) {
+  const ignored = spawnSync("git", ["check-ignore", "-q", "--no-index", "--", runtimeSample], {
+    cwd: projectRoot,
+    encoding: "utf8"
+  });
+  assert.equal(ignored.status, 0, `runtime path is not ignored: ${runtimeSample}`);
+}
 
 const launcherSource = fs.readFileSync(path.join(projectRoot, "start-fanhao.ps1"), "utf8");
 assert.match(launcherSource, /short-videos\\download-manager\\run\.ps1/);
@@ -374,6 +513,20 @@ assert.equal(fs.existsSync(path.join(projectRoot, "tools", "build_douyin_manager
 
 const runtimeVerifier = path.join(projectRoot, "tools", "verify_douyin_download_manager_runtime.ps1");
 assert.equal(fs.existsSync(runtimeVerifier), true, "missing isolated download-manager runtime verifier");
+const runtimeVerifierSource = fs.readFileSync(runtimeVerifier, "utf8");
+assert.match(runtimeVerifierSource, /Import-Module\s+Microsoft\.PowerShell\.Utility/);
+assert.match(runtimeVerifierSource, /setup-downloader\.ps1/);
+assert.match(runtimeVerifierSource, /-DownloaderRoot\s+\$DownloaderDir\s+-PythonExecutable\s+\$Python/);
+assert.match(runtimeVerifierSource, /DownloaderPython\s*=\s*Join-Path\s+\$DownloaderDir\s+["']\.venv\\Scripts\\python\.exe["']/);
+assert.match(runtimeVerifierSource, /DownloaderRun\s*=\s*Join-Path\s+\$DownloaderDir\s+["']run\.py["']/);
+assert.match(runtimeVerifierSource, /\/api\/v1\/health/);
+assert.match(runtimeVerifierSource, /\/api\/v1\/jobs/);
+assert.match(runtimeVerifierSource, /PYTHONUTF8/);
+assert.match(runtimeVerifierSource, /PYTHONIOENCODING/);
+assert.match(runtimeVerifierSource, /PYTHONLEGACYWINDOWSSTDIO/);
+assert.match(runtimeVerifierSource, /Stop-Process\s+-Id\s+\$sidecarProcess\.Id/);
+assert.match(runtimeVerifierSource, /Remove-Item\s+-LiteralPath\s+\$tempRoot\s+-Recurse\s+-Force/);
+assert.doesNotMatch(runtimeVerifierSource, /Desktop[\\/]+Tool|Tool\\douyin-downloader/i);
 const runtimeResult = spawnSync(
   process.platform === "win32" ? "powershell.exe" : "pwsh",
   ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", runtimeVerifier],

@@ -24,7 +24,10 @@ FanHao 的 `data/short-videos.sqlite`。FanHao 主服务通过 Node `sync-worker
 .\run.ps1 -Open
 ```
 
-首次启动会在当前目录安装 `playwright-core`。下载器继续复用同级工具目录 `Desktop\Tool\douyin-downloader`，数据库中已有的自定义路径设置优先。
+首次启动会在当前目录安装 `playwright-core`。下载器源码已经内嵌在当前模块的
+`downloader/`，首次运行会在该目录创建独立且不纳入 Git 的 `.venv` 并安装依赖。
+数据库中已有的自定义路径设置仍然优先；迁移完成后，日常运行不再依赖任何模块外的
+下载器仓库。
 
 ## 抖音登录
 
@@ -39,9 +42,9 @@ FanHao 的 `data/short-videos.sqlite`。FanHao 主服务通过 Node `sync-worker
 ## 数据流
 
 1. 管理页面采集抖音主页链接并写入本模块 SQLite。
-2. 下载任务复用 `douyin-downloader`，文件仍写到数据库配置的输出目录。
+2. 下载任务调用当前模块内嵌的 `downloader/`，文件仍写到数据库配置的输出目录。
 3. 下载完成或采集更新时，本模块直接补充 FanHao 短视频库；FanHao 服务也会定时做增量同步。
 
 媒体文件与程序数据分开保存：视频、图集、封面和下载清单统一放在 `ShortVideos`；SQLite、日志和有容量上限的播放缓存继续留在 FanHao 工作区。可通过 `FANHAO_SHORT_VIDEO_STORAGE_ROOT` 整体覆盖存储根目录，通过 `FANHAO_SHORT_VIDEO_ROOTS` 只覆盖 FanHao 的扫描目录。
 
-数据库和 cookie 配置从旧的 `Desktop\Tool\douyin-download-manager` 迁移后，旧目录不再作为运行依赖。
+数据库和 Cookie 配置从旧版外置管理器迁移后，旧目录不再作为运行依赖。

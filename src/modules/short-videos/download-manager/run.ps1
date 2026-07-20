@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 $ModuleDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $ModuleDir "..\..\..\.."))
 $AppFile = Join-Path $ModuleDir "app.py"
+$SetupDownloader = Join-Path $ModuleDir "setup-downloader.ps1"
 $LogDir = Join-Path $ModuleDir "logs"
 $OutLog = Join-Path $LogDir "manager.out.log"
 $ErrLog = Join-Path $LogDir "manager.err.log"
@@ -18,7 +19,8 @@ $StateUrl = "http://127.0.0.1:$Port/api/state"
 if (-not (Test-Path -LiteralPath $AppFile)) {
   throw "app.py not found in $ModuleDir"
 }
-if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+$PythonCommand = Get-Command python -ErrorAction SilentlyContinue
+if (-not $PythonCommand) {
   throw "Python was not found in PATH."
 }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
@@ -44,6 +46,20 @@ function Get-ManagerState {
   }
 }
 
+function Test-LoopbackPortOpen {
+  param([Parameter(Mandatory = $true)][int]$LocalPort)
+
+  $client = [System.Net.Sockets.TcpClient]::new()
+  try {
+    $connection = $client.ConnectAsync("127.0.0.1", $LocalPort)
+    return $connection.Wait(300) -and $client.Connected
+  } catch {
+    return $false
+  } finally {
+    $client.Dispose()
+  }
+}
+
 $existingState = Get-ManagerState
 if ($existingState -and -not $Restart) {
   $runningBase = [System.IO.Path]::GetFullPath([string]$existingState.paths.base)
@@ -55,7 +71,13 @@ if ($existingState -and -not $Restart) {
   exit 0
 }
 
-$listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+$listener = $null
+if (Test-LoopbackPortOpen -LocalPort $Port) {
+  $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $listener) {
+    throw "Port $Port is in use, but its owning process could not be identified."
+  }
+}
 if ($listener) {
   if (-not $Restart) {
     throw "Port $Port is already in use by PID $($listener.OwningProcess), but /api/state is not healthy."
@@ -71,6 +93,11 @@ if ($listener) {
   }
 }
 
+if (-not (Test-Path -LiteralPath $SetupDownloader -PathType Leaf)) {
+  throw "Downloader setup script was not found: $SetupDownloader"
+}
+& $SetupDownloader -PythonExecutable $PythonCommand.Source
+
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $env:FANHAO_PROJECT_ROOT = $ProjectRoot
 $env:DOUYIN_MANAGER_PORT = [string]$Port
@@ -78,14 +105,14 @@ $env:DOUYIN_MANAGER_PORT = [string]$Port
 if ($Foreground) {
   Push-Location $ModuleDir
   try {
-    python -u $AppFile
+    & $PythonCommand.Source -u $AppFile
   } finally {
     Pop-Location
   }
   exit $LASTEXITCODE
 }
 
-$process = Start-Process -FilePath "python" `
+$process = Start-Process -FilePath $PythonCommand.Source `
   -ArgumentList @("-u", $AppFile) `
   -WorkingDirectory $ModuleDir `
   -RedirectStandardOutput $OutLog `
