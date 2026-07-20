@@ -1,10 +1,11 @@
 import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260721-fanhao-person-detail-02";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260721-fanhao-person-detail-02";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260721-fanhao-search-discovery-03";
 
 export function createAndroidModule({ host }) {
   const workViews = createWorkViews({
     els: host.els,
     getActiveUrl: host.getActiveUrl,
+    getLibrary: host.getLibrary,
     getWorksLimit: host.limits.getWorks,
     increaseWorksLimit: host.limits.increaseWorks,
     showView: host.navigation.showView,

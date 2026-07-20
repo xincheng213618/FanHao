@@ -10,7 +10,7 @@ import { createWorkPageDataService } from "./features/works/page-data-service.js
 import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260717-fanhao-search-response-01";
 import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-touch-intent-01";
 import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=20260717-fanhao-work-first-paint-01";
-import { createFanhaoSearchPage } from "./search-page.js?v=20260721-fanhao-person-detail-02";
+import { createFanhaoSearchPage } from "./search-page.js?v=20260721-fanhao-search-discovery-03";
 
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
@@ -39,6 +39,7 @@ export function createWorkViews(context) {
   const {
     els,
     getActiveUrl,
+    getLibrary = () => null,
     getWorksLimit,
     increaseWorksLimit,
     showView,
@@ -55,7 +56,7 @@ export function createWorkViews(context) {
   const workCards = createWorkCards({ getActiveUrl, roots: [els.viewContent, els.continuePreview], showView, workDetailDataService });
   const progressiveWorkListRenderer = createProgressiveWorkListRenderer();
   const searchDataService = createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageDataService, workListState: searchListState });
-  const searchPage = createFanhaoSearchPage({ els, goBack, showView, warmSearch: searchDataService.warm });
+  const searchPage = createFanhaoSearchPage({ els, goBack, showView, warmSearch: searchDataService.warm, getLibrary });
   const rankingViews = createRankingViews({
     els,
     getActiveUrl,

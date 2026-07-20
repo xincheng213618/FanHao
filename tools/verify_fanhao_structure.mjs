@@ -36,6 +36,7 @@ import { tableStampValue } from "../src/modules/fanhao/server/library/table-stam
 import { fetchPreparedImage } from "../android-client/www/js/image.js";
 import { createWorkListState } from "../android-client/www/js/work-filtering.js";
 import { isBrowsableAuthor } from "../android-client/www/modules/fanhao/people-views.js";
+import { localAuthorSearchSuggestions } from "../android-client/www/modules/fanhao/search-page.js";
 import { createWorkCoverLoader } from "../android-client/www/modules/fanhao/features/works/cover-loader.js";
 import { compactWorkCode, displayWorkTitle, workGridBadge, workGridMeta, workGridRankBadge } from "../android-client/www/modules/fanhao/features/works/card-presentation.js";
 import { createWorkPageDataService } from "../android-client/www/modules/fanhao/features/works/page-data-service.js";
@@ -336,6 +337,7 @@ const androidFanhaoChrome = read("android-client/www/modules/fanhao/chrome.js");
 const androidFanhaoSheet = read("android-client/www/modules/fanhao/sheet.js");
 const androidFanhaoSearchPage = read("android-client/www/modules/fanhao/search-page.js");
 const androidFanhaoStyles = read("android-client/www/modules/fanhao/styles.css");
+const androidStyles = read("android-client/www/styles.css");
 const androidPeopleViews = read("android-client/www/modules/fanhao/people-views.js");
 const androidRankingViews = read("android-client/www/modules/fanhao/features/rankings/ranking-views.js");
 const androidWorkCards = read("android-client/www/modules/fanhao/features/works/cards.js");
@@ -368,6 +370,19 @@ assert(androidFanhaoStyles.includes("min-height: 44px") && androidFanhaoStyles.i
 assert(androidFanhaoSheet.includes('backdrop.addEventListener("click", close)') && androidFanhaoSheet.includes('event.key === "Escape"') && androidFanhaoSheet.includes("config.options || []"), "the shared FanHao sheet must support backdrop, keyboard, and configurable actions");
 assert(lines("android-client/www/modules/fanhao/sheet.js") <= 60, "the shared FanHao bottom sheet must stay focused");
 assert(androidFanhaoSearchPage.includes("fanhao-search-page-form") && androidFanhaoSearchPage.includes("搜索历史") && androidFanhaoSearchPage.includes("input.focus({ preventScroll: true })"), "FanHao search must use a focused dedicated page with history");
+assert(androidFanhaoSearchPage.includes('createSearchGroup("快捷搜索"') && androidFanhaoSearchPage.includes('createSearchGroup("作者推荐"') && androidFanhaoSearchPage.includes("getLibrary()?.people"), "FanHao search discovery must fill the landing page with local dynamic shortcuts");
+assert(androidFanhaoSearchPage.includes('meta: "本地标记"') && androidFanhaoSearchPage.includes("remember: false"), "the local marker shortcut must remain distinct from actual search history");
+assert(androidFanhaoSearchPage.includes('showView("personDetail", { personId: author.id }, { push: true })') && androidFanhaoSearchPage.includes('note: "点选直达"'), "recommended authors must open their detail directly without an intermediate search-result touch target");
+assert(androidFanhaoStyles.includes(".fanhao-search-discovery-group") && androidFanhaoStyles.includes("min-height: 150px"), "FanHao search discovery must stay compact above the phone keyboard");
+const authorSuggestions = localAuthorSearchSuggestions([
+  { name: "collection", workCount: 900, sourceCount: 20 },
+  { id: "male", actorProfile: { displayName: "男作者", gender: "male" }, workCount: 100, sourceCount: 12 },
+  { id: "a-old", actorProfile: { displayName: "作者甲", gender: "female" }, workCount: 18, sourceCount: 3 },
+  { id: "b", actorProfile: { displayName: "作者乙", gender: "female" }, workCount: 42, sourceCount: 2 },
+  { id: "a-best", actorProfile: { displayName: "作者甲", gender: "female" }, workCount: 28, sourceCount: 5 },
+  { id: "c", actorProfile: { displayName: "作者丙", gender: "female" }, workCount: 0, sourceCount: 9 }
+], 2);
+assert.deepEqual(authorSuggestions.map(({ id, name, workCount }) => [id, name, workCount]), [["a-best", "作者甲", 28], ["b", "作者乙", 42]], "local author search suggestions must deduplicate, rank by source coverage, and retain the direct-navigation id");
 assert(androidFanhaoModule.includes('mode: "dedicated"') && androidFanhaoChrome.includes('showView("search", { query: "" }, { push: true })'), "FanHao chrome search must navigate to the dedicated search route");
 const filteredPersonDetailUrl = new URL(personDetailPath("person/13", {
   limit: 96,
@@ -507,8 +522,8 @@ assert(androidWorkActions.includes('title: "更多操作"') && androidWorkAction
 assert(androidWorkActions.includes('variant: "danger wide"') && androidFanhaoStyles.includes(".fanhao-sort-option.danger") && androidFanhaoStyles.includes(".fanhao-sort-option.wide"), "Android destructive work actions must remain visually isolated in the sheet");
 assert(!androidWorkActions.includes("createBackButton") && androidSectionStyles.includes(".work-detail-meta-body"), "Android work details must delegate return navigation to the shared sticky detail header");
 assert(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions must stay focused");
-assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-person-detail-02"), "Android FanHao chrome styles must use a fresh WebView URL");
-assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-person-detail-02") && androidApp.includes("config.js?v=20260721-fanhao-person-detail-02") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-person-detail-02"'), "Android FanHao navigation changes must refresh the WebView cache chain");
+assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-search-discovery-03") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-search-discovery-03"), "Android FanHao search discovery styles must use a fresh WebView URL");
+assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-search-discovery-03") && androidApp.includes("config.js?v=20260721-fanhao-search-discovery-03") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-search-discovery-03"'), "Android FanHao search discovery must refresh the WebView cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -851,10 +866,10 @@ assert(androidSectionStyles.includes("grid-template-columns: clamp(104px, 32%, 1
 assert(lines("android-client/www/modules/fanhao/features/people/detail-hero.js") <= 150, "Android author identity component must stay focused");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-person-detail-02'), "Android person-detail changes must use a fresh detail-view URL");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-person-detail-02'), "Android person-detail changes must use a fresh work-view URL");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-search-discovery-03') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-discovery-03'), "Android search discovery changes must use a fresh module URL");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-person-detail-02'), "Android author browsing must use the current FanHao module cache chain");
-assert(androidFanhaoModule.includes('index.js?v=20260721-fanhao-person-detail-02'), "Android navigation changes must refresh the FanHao module entry chain");
-assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-person-detail-02'), "Android navigation changes must refresh the app entry chain");
+assert(androidFanhaoModule.includes('index.js?v=20260721-fanhao-search-discovery-03'), "Android search navigation changes must refresh the FanHao module entry chain");
+assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-search-discovery-03'), "Android search navigation changes must refresh the app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260721-fanhao-person-detail-02'), "Android ranking grid changes must use a fresh module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
