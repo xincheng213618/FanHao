@@ -110,7 +110,13 @@ export function createWorkListState(context) {
       filterStrip.append(button);
     }
     revealActiveFilter(filterStrip, filterButtonToReveal);
-    controls.append(filterStrip);
+    const compactSummary = createCompactSummary(options, sourceWorks.length);
+    if (compactSummary) {
+      controls.classList.add("has-compact-summary");
+      controls.append(compactSummary, filterStrip);
+    } else {
+      controls.append(filterStrip);
+    }
     return controls;
   }
 
@@ -246,6 +252,23 @@ export function createWorkListState(context) {
     setSortMode,
     visibleWorks
   };
+}
+
+function createCompactSummary(options, loadedCount) {
+  if (!options.compactSummary) return null;
+  const loaded = Math.max(0, Number(loadedCount || 0));
+  const total = Math.max(loaded, Number(options.total || loaded));
+  const summary = document.createElement("span");
+  summary.className = "work-control-summary";
+  summary.setAttribute("aria-label", `已载入 ${formatNumber(loaded)} 个，共 ${formatNumber(total)} 个作品`);
+  summary.title = `${formatNumber(loaded)} / ${formatNumber(total)} 个作品`;
+
+  const current = document.createElement("strong");
+  current.textContent = formatNumber(loaded);
+  const overall = document.createElement("small");
+  overall.textContent = `/ ${formatNumber(total)}`;
+  summary.append(current, overall);
+  return summary;
 }
 
 function revealActiveFilter(filterStrip, button) {

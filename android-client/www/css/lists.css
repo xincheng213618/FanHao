@@ -89,6 +89,40 @@
   color: var(--blue);
 }
 
+.content-panel[data-view="works"] > .view-meta {
+  display: none;
+}
+
+.content-panel[data-view="works"] .work-controls.has-compact-summary {
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px;
+}
+
+.work-control-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+  min-height: 40px;
+  border-right: 1px solid var(--line);
+  color: var(--muted);
+  padding: 0 8px 0 2px;
+  font-size: 10.5px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.work-control-summary strong {
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.content-panel[data-view="works"] .work-controls.has-compact-summary .work-filter-strip button {
+  min-height: 40px;
+  padding: 0 10px;
+  font-size: 11.5px;
+}
+
 .studio-list {
   display: grid;
   gap: 8px;

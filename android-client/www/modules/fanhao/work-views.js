@@ -2,7 +2,7 @@ import { fetchJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
 import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260720-fanhao-scroll-intent-01";
 import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260702-novel-local-manage-74";
 import { formatNumber } from "../../js/format.js";
-import { createWorkListState } from "../../js/work-filtering.js?v=20260721-fanhao-person-browser-07";
+import { createWorkListState } from "../../js/work-filtering.js?v=20260721-fanhao-work-browse-density-10";
 import { createWorkCards } from "./features/works/cards.js?v=20260721-fanhao-author-sort-density-08";
 import { workCollectionPath } from "./features/works/collection-request.js?v=20260720-fanhao-collection-filter-01";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260721-fanhao-person-detail-02";
@@ -214,6 +214,7 @@ export function createWorkViews(context) {
       els.viewContent.innerHTML = "";
       renderWorks(works, "资料库里还没有作品。", {
         compactMeta: true,
+        compactSummary: true,
         coverGrid: true,
         facets: data.facets,
         ...serverContinuationOptions(works, total)
