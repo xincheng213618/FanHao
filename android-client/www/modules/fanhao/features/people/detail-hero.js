@@ -1,5 +1,5 @@
 import { formatNumber } from "../../../../js/format.js";
-import { absoluteUrl, createFallbackCover, imageUrlForPerson, loadPreviewImage } from "../../../../js/image.js?v=20260717-fanhao-cover-prepare-01";
+import { absoluteUrl, createFallbackCover, loadPreviewImage, portraitUrlForPerson } from "../../../../js/image.js?v=20260721-fanhao-author-portraits-06";
 
 export function createPersonDetailHero(person, options = {}) {
   const activeUrl = options.activeUrl || "";
@@ -11,7 +11,7 @@ export function createPersonDetailHero(person, options = {}) {
   const visual = createFallbackCover(person.name);
   visualFrame.append(visual);
   hero.append(visualFrame);
-  const imagePath = imageUrlForPerson(person);
+  const imagePath = portraitUrlForPerson(person);
   const imageUrl = absoluteUrl(activeUrl, imagePath);
   if (imagePath) {
     loadPreviewImage(visual, imageUrl, {

@@ -11,6 +11,14 @@ export function imageUrlForPerson(person) {
   return person?.avatarUrl || person?.actorProfile?.avatarUrl || (person?.coverId ? `/media/image/${encodeURIComponent(person.coverId)}` : "");
 }
 
+export function portraitUrlForPerson(person) {
+  const source = String(person?.avatarImage?.source || "").trim().toLowerCase();
+  if (source === "work_cover" || source === "manual_work_cover") return "";
+  const imageUrl = imageUrlForPerson(person);
+  if (/^\/media\/person\/[^/]+\/cover(?:[?#]|$)/i.test(imageUrl)) return "";
+  return imageUrl;
+}
+
 export function imageUrlForWork(work) {
   return work?.coverId ? `/media/image/${encodeURIComponent(work.coverId)}` : work?.cachedCover?.coverUrl || work?.remoteCoverUrl || "";
 }

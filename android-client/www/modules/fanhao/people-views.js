@@ -1,5 +1,5 @@
 import { formatNumber } from "../../js/format.js";
-import { createFallbackCover, imageUrlForPerson } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
+import { createFallbackCover, portraitUrlForPerson } from "../../js/image.js?v=20260721-fanhao-author-portraits-06";
 import { createViewportImageLoader } from "./features/shared/viewport-image-loader.js?v=20260717-fanhao-people-first-paint-01";
 
 const PEOPLE_SORT_STORAGE_KEY = "fanhao.android.peopleSort";
@@ -156,8 +156,8 @@ export function createPeopleViews(context) {
   }
 
   function comparePeople(a, b, mode) {
-    const aVisual = imageUrlForPerson(a) ? 1 : 0;
-    const bVisual = imageUrlForPerson(b) ? 1 : 0;
+    const aVisual = portraitUrlForPerson(a) ? 1 : 0;
+    const bVisual = portraitUrlForPerson(b) ? 1 : 0;
     const byName = () => displayPersonName(a).localeCompare(displayPersonName(b), "zh-Hans-CN");
     if (mode === "works") {
       return authorPriority(b) - authorPriority(a)
@@ -197,7 +197,7 @@ export function createPeopleViews(context) {
 
     const visual = createFallbackCover(person.name);
     button.append(visual);
-    const imagePath = imageUrlForPerson(person);
+    const imagePath = portraitUrlForPerson(person);
     if (imagePath) {
       avatarLoader.schedule(visual, imagePath);
     }
