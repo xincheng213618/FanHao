@@ -346,6 +346,8 @@ assert(androidPeopleViews.includes("restorePeopleIndex(sourcePeople, sortMode)")
 assert(androidPeopleViews.includes("els.viewContent.replaceChildren(...nodes)") && androidPeopleViews.includes("syncPeopleLimit(cache.grid.children.length)"), "Android people restoration must retain loaded cards and synchronize continuation with the rendered count");
 assert(!androidPeopleViews.includes("renderCurrentViewPreservingScroll"), "Android people continuation must not rebuild the existing index");
 assert(androidWorkCards.includes("coverLoader.schedule(thumb, imagePath)"), "Android work cards must defer cover reads until they approach the viewport");
+assert(androidWorkCards.includes("compactMeta ? compactWorkCardTitle(work)") && androidWorkCards.includes("function compactWorkCode(work)"), "Android compact work cards must keep the work code visible beside the cleaned title");
+assert(androidWorkCards.includes("function extractLeadingWorkCode(value)") && androidWorkCards.includes("work?.infoSummary?.code"), "Android compact work-code labels must prefer authoritative metadata and only infer codes from title prefixes");
 assert(androidWorkViews.includes("workCards.resetCoverLoading();"), "Android work navigation must cancel stale offscreen cover work");
 assert(androidWorkViews.includes("progressiveWorkListRenderer.render(grid, visible"), "Android work lists must expose the first card batch before building the remaining page");
 assert(!androidWorkViews.includes("for (const work of visible) grid.append"), "Android work lists must not synchronously build the full first page");
@@ -377,7 +379,7 @@ assert(androidWorkCards.includes('person.dataset.workIntentIgnore = "1"') && and
 assert(read("android-client/www/modules/fanhao/detail-views.js").includes("workDetailDataService.load(workId") && androidWorkDetailDataService.includes("pageDataService.load(getActiveUrl(), path(workId)"), "Android work detail navigation must reuse the shared page race");
 assert((androidDetailViews.match(/pageDataService\.load\(activeUrl, path/g) || []).length >= 2 && androidFanhaoModule.includes("pageDataService: workViews.pageDataService"), "Android person and related-work navigation must share the cache/network race");
 assert(!androidDetailViews.includes("await readCachedJson(activeUrl, path)") && !androidDetailViews.includes("fetchJson(activeUrl, path"), "Android detail views must not wait for IndexedDB before starting their live request");
-assert(androidWorkViews.includes('cards.js?v=20260717-fanhao-mobile-card-lifecycle-01'), "Android card-lifecycle changes must refresh the card module URL");
+assert(androidWorkViews.includes('cards.js?v=20260720-fanhao-card-code-01'), "Android work-card code changes must refresh the card module URL");
 assert((androidWorkViews.match(/pageDataService\.load\(activeUrl, path/g) || []).length >= 7 && androidWorkPageDataService.includes("Promise.race([freshRequest, cacheRequest])"), "Android FanHao pages must race IndexedDB with the live response");
 const scheduledViewportBatches = new Map();
 let nextViewportBatchId = 1;
@@ -678,10 +680,10 @@ assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && andr
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260717-fanhao-person-page-race-01'), "Android person-page race changes must use a fresh detail-view URL");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-combined-filter-01'), "Android combined-filter changes must use a fresh work-view URL");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-card-code-01'), "Android work-card code changes must use a fresh work-view URL");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must use a fresh people-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-combined-filter-01'), "Android combined-filter changes must refresh the FanHao module entry chain");
-assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-combined-filter-01'), "Android combined-filter changes must refresh the app entry chain");
+assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-card-code-01'), "Android work-card code changes must refresh the FanHao module entry chain");
+assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-card-code-01'), "Android work-card code changes must refresh the app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {

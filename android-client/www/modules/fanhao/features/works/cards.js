@@ -31,7 +31,7 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
     body.className = "work-summary";
     const title = document.createElement("strong");
     title.className = "work-card-title";
-    title.textContent = displayWorkTitle(work, compactMeta);
+    title.textContent = compactMeta ? compactWorkCardTitle(work) : displayWorkTitle(work, false);
     const primaryFacts = createPrimaryFacts(work);
     const person = document.createElement(work.personId ? "button" : "span");
     person.className = "work-person";
@@ -229,6 +229,26 @@ function displayWorkTitle(work, compactMeta) {
   }
   cleaned = cleaned.replace(/\s*生写真\d+枚セット\s*$/u, "").trim();
   return cleaned || rawTitle;
+}
+
+function compactWorkCardTitle(work) {
+  const title = displayWorkTitle(work, true);
+  const code = compactWorkCode(work);
+  if (!code || title.toUpperCase().startsWith(code.toUpperCase())) return title;
+  return `${code} · ${title}`;
+}
+
+function compactWorkCode(work) {
+  const explicit = [work?.infoSummary?.code, work?.code].map((value) => String(value || "").trim()).find(Boolean);
+  if (explicit) return explicit.toUpperCase();
+  const source = [work?.directoryName, work?.title].map((value) => String(value || "").trim()).find(Boolean) || "";
+  const withoutTags = source.replace(/^(?:(?:\[[^\]]+\]|【[^】]+】)[\s._-]*)*/u, "");
+  return extractLeadingWorkCode(withoutTags);
+}
+
+function extractLeadingWorkCode(value) {
+  const match = /^([A-Z]{2,10})[\s._-]*(\d{2,6}[A-Z]?)(?=$|[^A-Z0-9])/iu.exec(String(value || "").trim());
+  return match ? `${match[1].toUpperCase()}-${match[2].toUpperCase()}` : "";
 }
 
 function workCode(work) {
