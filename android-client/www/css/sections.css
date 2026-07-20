@@ -478,8 +478,11 @@ body.search-view.search-expanded .content-panel {
 .content-panel[data-view="workDetail"] .work-detail-hero {
   grid-template-columns: 1fr;
   align-items: stretch;
-  gap: 9px;
-  padding: 8px;
+  gap: 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
 }
 
 .work-detail-cover,
@@ -606,6 +609,7 @@ body.search-view.search-expanded .content-panel {
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
   gap: 0;
+  padding: 0 8px;
 }
 
 .work-detail-title-block {
@@ -618,6 +622,14 @@ body.search-view.search-expanded .content-panel {
   display: grid;
   min-width: 0;
   gap: 7px;
+}
+
+.content-panel[data-view="workDetail"] .work-detail-meta-body {
+  margin: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  padding: 9px;
 }
 
 .detail-hero-body > strong {
@@ -911,6 +923,11 @@ button.work-detail-author {
   border-radius: 8px;
   background: var(--surface-raised);
   overflow: hidden;
+}
+
+.content-panel[data-view="workDetail"] .work-facts-block,
+.content-panel[data-view="workDetail"] .related-works-block {
+  scroll-margin-top: calc(76px + env(safe-area-inset-top));
 }
 
 .work-fact-row {

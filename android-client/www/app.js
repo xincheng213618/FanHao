@@ -1,4 +1,4 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260721-fanhao-author-sort-density-08";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260721-fanhao-work-detail-flow-09";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260714-music-sleep-current-28";
 import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260712-module-chrome-03";
@@ -1555,6 +1555,7 @@ function syncContentPanelMode() {
   document.body.classList.toggle("short-video-search-page-view", currentView === "shortVideoSearch");
   document.body.classList.toggle("fanhao-search-page-view", currentView === "search");
   document.body.classList.toggle("fanhao-person-detail-view", currentView === "personDetail");
+  document.body.classList.toggle("fanhao-work-detail-view", currentView === "workDetail");
   dispatchAppViewChanged();
 }
 

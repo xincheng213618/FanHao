@@ -3,7 +3,7 @@ export const STORAGE_KEY = "fanhao.serverUrl";
 export const THEME_STORAGE_KEY = "fanhao.theme";
 export const SEARCH_HISTORY_STORAGE_KEY = "fanhao.android.searchHistory";
 export const LAST_VIEW_STORAGE_KEY = "fanhao.android.lastView";
-export const CLIENT_VERSION = "20260721-fanhao-author-sort-density-08";
+export const CLIENT_VERSION = "20260721-fanhao-work-detail-flow-09";
 
 
 

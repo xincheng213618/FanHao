@@ -305,6 +305,7 @@ for (const relativePath of [
   "public/modules/fanhao/features/works/preview-media.js",
   "android-client/www/modules/fanhao/features/works/cards.js",
   "android-client/www/modules/fanhao/features/works/actions.js",
+  "android-client/www/modules/fanhao/features/works/detail-toolbar.js",
   "android-client/www/modules/fanhao/features/works/preview-media.js",
   "android-client/www/modules/fanhao/features/people/detail-request.js",
   "android-client/www/modules/fanhao/features/works/collection-request.js",
@@ -344,6 +345,7 @@ const androidPeopleViews = read("android-client/www/modules/fanhao/people-views.
 const androidRankingViews = read("android-client/www/modules/fanhao/features/rankings/ranking-views.js");
 const androidWorkCards = read("android-client/www/modules/fanhao/features/works/cards.js");
 const androidWorkActions = read("android-client/www/modules/fanhao/features/works/actions.js");
+const androidWorkDetailToolbar = read("android-client/www/modules/fanhao/features/works/detail-toolbar.js");
 const androidWorkCardPresentation = read("android-client/www/modules/fanhao/features/works/card-presentation.js");
 const androidWorkCoverLoader = read("android-client/www/modules/fanhao/features/works/cover-loader.js");
 const androidProgressiveWorkListRenderer = read("android-client/www/modules/fanhao/features/works/progressive-list-renderer.js");
@@ -531,13 +533,17 @@ assert(androidSectionStyles.includes('@media (max-width: 360px)') && androidSect
 assert(workDetailActionStyles.includes("flex-wrap: nowrap") && workDetailActionStyles.includes("width: 100%"), "Android work-detail actions must stay in one dedicated full-width row");
 assert(workDetailActionButtonStyles.includes("flex: 1 1 0") && workDetailActionButtonStyles.includes("min-width: 0"), "Android work-detail actions must share the available phone width evenly");
 assert(androidDetailViews.includes("titleBlock.append(title, author)") && androidDetailViews.includes("hero.append(body, cover, metaBody)"), "Android work details must give the title full width and place playback before metadata");
+assert(androidDetailViews.includes("createWorkDetailToolbar({") && androidDetailViews.includes("factsTarget: factPanel || fallbackInfoPanel") && androidDetailViews.includes("relatedTarget: relatedPanel"), "Android work details must compose contextual playback and section navigation from the rendered targets");
+assert(androidWorkDetailToolbar.includes('createToolbarButton("播放"') && androidWorkDetailToolbar.includes('createToolbarButton("资料"') && androidWorkDetailToolbar.includes('createToolbarButton("相关"'), "Android work details must replace global navigation with three explicit contextual actions");
+assert(androidWorkDetailToolbar.includes('behavior: "smooth"') && androidWorkDetailToolbar.includes("playStatus(videos.length, progress)"), "Android work detail actions must reveal their target sections and expose playback state");
+assert(lines("android-client/www/modules/fanhao/features/works/detail-toolbar.js") <= 90, "Android work-detail toolbar must stay focused");
 assert(androidWorkActions.includes("actions.append(markerButton, favoriteButton, moreButton)") && !androidWorkActions.includes("actions.append(backButton") && !androidWorkActions.includes("actions.append(markerButton, favoriteButton, deleteButton"), "Android work details must reserve the main action row for common non-destructive actions");
 assert(androidWorkActions.includes('title: "更多操作"') && androidWorkActions.includes('label: "复制番号"') && androidWorkActions.includes('label: "打开资料来源"') && androidWorkActions.includes('label: "删除本地文件"'), "Android work details must move utility and destructive actions into the shared more sheet");
 assert(androidWorkActions.includes('variant: "danger wide"') && androidFanhaoStyles.includes(".fanhao-sort-option.danger") && androidFanhaoStyles.includes(".fanhao-sort-option.wide"), "Android destructive work actions must remain visually isolated in the sheet");
 assert(!androidWorkActions.includes("createBackButton") && androidSectionStyles.includes(".work-detail-meta-body"), "Android work details must delegate return navigation to the shared sticky detail header");
 assert(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions must stay focused");
-assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-author-sort-density-08") && androidStyles.includes("css/lists.css?v=20260721-fanhao-author-sort-density-08") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-author-sort-density-08"), "Android FanHao author sorting and dense work-card styles must use a fresh WebView URL");
-assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-author-sort-density-08") && androidApp.includes("config.js?v=20260721-fanhao-author-sort-density-08") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-author-sort-density-08"'), "Android FanHao author sorting and work density must refresh the WebView cache chain");
+assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-work-detail-flow-09") && androidStyles.includes("css/sections.css?v=20260721-fanhao-work-detail-flow-09") && androidStyles.includes("css/lists.css?v=20260721-fanhao-author-sort-density-08") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-work-detail-flow-09"), "Android FanHao immersive work-detail styles must use a fresh WebView URL while retaining dense work cards");
+assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-work-detail-flow-09") && androidApp.includes("config.js?v=20260721-fanhao-work-detail-flow-09") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-work-detail-flow-09"'), "Android FanHao work-detail flow must refresh the WebView cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -881,6 +887,8 @@ assert(androidSectionStyles.includes(".person-detail-avatar-frame > img") && and
 assert(androidSectionStyles.includes("aspect-ratio: 4 / 5 !important") && androidSectionStyles.includes(".index-person-card .person-cover"), "Android author index portraits must keep a uniform complete-image frame");
 assert(androidApp.includes('classList.toggle("fanhao-person-detail-view", currentView === "personDetail")') && androidFanhaoStyles.includes("body.fanhao-person-detail-view .bottom-nav"), "Android author details must hide the unrelated global bottom navigation");
 assert(androidFanhaoStyles.includes(".person-detail-work-toolbar") && androidFanhaoStyles.includes("grid-template-columns: repeat(2") && androidListStyles.includes('.content-panel[data-view="personDetail"] .work-list.cover-grid') && androidListStyles.includes("grid-template-columns: repeat(2"), "Android author details must use a fixed two-action toolbar and readable two-column work grid");
+assert(androidApp.includes('classList.toggle("fanhao-work-detail-view", currentView === "workDetail")') && androidFanhaoStyles.includes("body.fanhao-work-detail-view .bottom-nav") && androidFanhaoStyles.includes(".work-detail-toolbar"), "Android work details must hide the unrelated global navigation and provide a contextual fixed toolbar");
+assert(androidSectionStyles.includes('.content-panel[data-view="workDetail"] .work-detail-hero') && androidSectionStyles.includes("background: transparent") && androidSectionStyles.includes("scroll-margin-top"), "Android work details must use an immersive borderless hero and unobscured section jumps");
 assert(androidApp.includes('"people", "personDetail", "history"') && androidSectionStyles.includes('.content-panel[data-feed-view="true"] .section-head'), "Android author details must use the immersive feed surface without a duplicate page heading");
 assert(androidPersonDetailHero.includes("body.append(name, alias, workCount)") && !androidPersonDetailHero.includes("person-detail-eyebrow") && !androidPersonDetailHero.includes("person-detail-back"), "Android author identity must keep one compact summary without repeated labels or return controls");
 assert(!androidPersonDetailHero.includes("cacheNote") && !androidPersonDetailHero.includes("正在同步详情") && !androidPersonDetailHero.includes("本地索引"), "Android author identity must not expose cache implementation status as profile information");
@@ -888,12 +896,12 @@ assert(androidDetailViews.includes("setDetailChromeTitle") && androidDetailViews
 assert(androidSectionStyles.includes("grid-template-columns: clamp(104px, 32%, 128px)") && androidSectionStyles.includes(".person-detail-hero .detail-hero-body"), "Android author identity must leave first-screen space for the work grid");
 assert(lines("android-client/www/modules/fanhao/features/people/detail-hero.js") <= 150, "Android author identity component must stay focused");
 assert(lines("android-client/www/modules/fanhao/features/people/detail-work-toolbar.js") <= 110, "Android author work toolbar must stay focused");
-assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-person-browser-07'), "Android person-detail changes must use a fresh detail-view URL");
+assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-work-detail-flow-09') && androidDetailViews.includes('detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09'), "Android work-detail flow changes must use fresh component URLs");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
 assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-author-sort-density-08') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-discovery-03'), "Android dense work-browser changes must use a fresh module URL while retaining search discovery");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-author-portraits-06'), "Android author browsing must use the current FanHao module cache chain");
-assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-author-sort-density-08') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-author-sort-density-08'), "Android author sorting and dense work browsing must refresh the FanHao entry chain");
-assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-author-sort-density-08'), "Android author sorting and dense work browsing must refresh the app entry chain");
+assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-author-sort-density-08') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-work-detail-flow-09'), "Android immersive work details must refresh the FanHao entry chain without dropping author sorting");
+assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-work-detail-flow-09'), "Android immersive work details must refresh the app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260721-fanhao-person-detail-02'), "Android ranking grid changes must use a fresh module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {

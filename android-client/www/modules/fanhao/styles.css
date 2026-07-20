@@ -167,17 +167,18 @@
   grid-column: 1 / -1;
 }
 
-body.fanhao-person-detail-view .bottom-nav {
+body.fanhao-person-detail-view .bottom-nav,
+body.fanhao-work-detail-view .bottom-nav {
   display: none;
 }
 
-.person-detail-work-toolbar {
+.person-detail-work-toolbar,
+.work-detail-toolbar {
   position: fixed;
   left: 50%;
   bottom: 0;
   z-index: 32;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
   width: min(100%, 560px);
   border-top: 1px solid var(--line);
@@ -188,7 +189,16 @@ body.fanhao-person-detail-view .bottom-nav {
   backdrop-filter: blur(14px);
 }
 
-.person-detail-work-toolbar > button {
+.person-detail-work-toolbar {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.work-detail-toolbar {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.person-detail-work-toolbar > button,
+.work-detail-toolbar > button {
   display: grid;
   min-width: 0;
   min-height: 48px;
@@ -202,28 +212,43 @@ body.fanhao-person-detail-view .bottom-nav {
   text-align: left;
 }
 
-.person-detail-work-toolbar > button:active {
+.work-detail-toolbar > button {
+  padding-right: 6px;
+  padding-left: 6px;
+  text-align: center;
+}
+
+.person-detail-work-toolbar > button:active,
+.work-detail-toolbar > button:active {
   background: var(--surface-soft);
 }
 
 .person-detail-work-toolbar span,
-.person-detail-work-toolbar strong {
+.person-detail-work-toolbar strong,
+.work-detail-toolbar span,
+.work-detail-toolbar strong {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.person-detail-work-toolbar span {
+.person-detail-work-toolbar span,
+.work-detail-toolbar span {
   color: var(--muted);
   font-size: 10.5px;
   font-weight: 850;
 }
 
-.person-detail-work-toolbar strong {
+.person-detail-work-toolbar strong,
+.work-detail-toolbar strong {
   color: var(--blue);
   font-size: 13px;
   font-weight: 950;
+}
+
+.work-detail-toolbar > button:disabled {
+  opacity: 0.5;
 }
 
 body.fanhao-search-page-view #contentPanel {

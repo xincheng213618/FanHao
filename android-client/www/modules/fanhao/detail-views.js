@@ -9,6 +9,7 @@ import { personDetailPath } from "./features/people/detail-request.js?v=20260720
 import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260721-fanhao-author-portraits-06";
 import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=20260721-fanhao-person-browser-07";
 import { createWorkActions } from "./features/works/actions.js?v=20260721-fanhao-person-detail-02";
+import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09";
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
 
 const PLAY_OPEN_COOLDOWN_MS = 1400;
@@ -199,20 +200,29 @@ export function createDetailViews(context) {
       applyWorkHeader(data, cacheEntry);
       els.viewContent.innerHTML = "";
       const playbackSection = videoSection.createVideoList(work, { showFiles: false, showTitle: false });
-      els.viewContent.append(createWorkDetailHero(work, () => videoSection.playDefaultVideo(playbackSection, work)));
+      const playDefaultVideo = () => videoSection.playDefaultVideo(playbackSection, work);
+      const hero = createWorkDetailHero(work, playDefaultVideo);
       const factPanel = createWorkFactPanel(work);
-      if (factPanel) els.viewContent.append(factPanel);
       const previewPanel = previewMedia.render(work);
+      const fallbackInfoPanel = !factPanel ? infoSection.createInlineInfoPanel(work) : null;
+      const personPanel = createWorkPeoplePanel(person, work);
+      const relatedPanel = createRelatedWorksPanel(work, person, isActive);
+
+      els.viewContent.append(hero);
+      if (factPanel) els.viewContent.append(factPanel);
       if (previewPanel) els.viewContent.append(previewPanel);
       els.viewContent.append(playbackSection);
       if (!factPanel) {
-        const infoPanel = infoSection.createInlineInfoPanel(work);
-        if (infoPanel) els.viewContent.append(infoPanel);
+        if (fallbackInfoPanel) els.viewContent.append(fallbackInfoPanel);
       }
-      const personPanel = createWorkPeoplePanel(person, work);
       if (personPanel) els.viewContent.append(personPanel);
-      const relatedPanel = createRelatedWorksPanel(work, person, isActive);
       if (relatedPanel) els.viewContent.append(relatedPanel);
+      els.viewContent.append(createWorkDetailToolbar({
+        work,
+        onPlay: playDefaultVideo,
+        factsTarget: factPanel || fallbackInfoPanel,
+        relatedTarget: relatedPanel
+      }));
     };
     try {
       const result = await workDetailDataService.load(workId, {
