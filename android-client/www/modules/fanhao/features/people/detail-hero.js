@@ -22,9 +22,6 @@ export function createPersonDetailHero(person, options = {}) {
 
   const body = document.createElement("div");
   body.className = "detail-hero-body";
-  const eyebrow = document.createElement("span");
-  eyebrow.className = "person-detail-eyebrow";
-  eyebrow.textContent = "作者";
   const name = document.createElement("strong");
   name.className = "person-detail-name";
   name.textContent = person.actorProfile?.displayName || person.name;
@@ -40,9 +37,9 @@ export function createPersonDetailHero(person, options = {}) {
   const workCountUnit = document.createElement("span");
   workCountUnit.textContent = "部作品";
   workCount.append(workCountValue, workCountUnit);
-  const facts = createPersonFacts(person, options.cacheNote);
+  const facts = createPersonFacts(person);
   const sources = createPersonSourceStrip(person);
-  body.append(eyebrow, name, alias, workCount);
+  body.append(name, alias, workCount);
   if (facts) body.append(facts);
   if (sources) body.append(sources);
   hero.append(body);
@@ -65,12 +62,11 @@ function personAliasText(person) {
   return aliases.join(" · ");
 }
 
-function createPersonFacts(person, cacheNote = "") {
+function createPersonFacts(person) {
   const labels = [];
   if (Number(person.videoCount || 0) > 0) labels.push(`${formatNumber(person.videoCount)} 个视频`);
   if (Number(person.infoCount || 0) > 0) labels.push(`${formatNumber(person.infoCount)} 份资料`);
   if (Number(person.sourceCount || 0) > 1) labels.push(`${formatNumber(person.sourceCount)} 个来源`);
-  if (cacheNote) labels.push(cacheNote);
   if (!labels.length) return null;
   const facts = document.createElement("div");
   facts.className = "person-detail-facts";

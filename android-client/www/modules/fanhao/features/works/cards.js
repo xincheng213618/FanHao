@@ -12,7 +12,7 @@ import {
   workGridBadge,
   workGridMeta,
   workGridRankBadge
-} from "./card-presentation.js?v=20260721-fanhao-work-detail-01";
+} from "./card-presentation.js?v=20260721-fanhao-person-detail-02";
 import { createWorkCoverLoader } from "./cover-loader.js?v=20260717-fanhao-work-covers-01";
 
 export function createWorkCards({ getActiveUrl, roots = [], showView, workDetailDataService = null }) {

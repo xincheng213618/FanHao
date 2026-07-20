@@ -1,4 +1,4 @@
-import { openFanhaoSheet } from "./sheet.js?v=20260721-fanhao-work-detail-01";
+import { openFanhaoSheet } from "./sheet.js?v=20260721-fanhao-person-detail-02";
 
 export const FANHAO_ROOT_VIEWS = Object.freeze(["people", "works", "rankings", "studios"]);
 
@@ -12,6 +12,12 @@ const CHROME_TABS = Object.freeze([
 export function renderFanhaoChrome({ container, view }, host, views) {
   if (view === "search") return false;
   container.dataset.module = "fanhao";
+  delete container.dataset.detailView;
+  if (view === "personDetail" || view === "workDetail") {
+    container.dataset.detailView = view;
+    renderDetailChrome(container, view, host);
+    return true;
+  }
   const row = document.createElement("nav");
   row.className = "fanhao-chrome-row";
   row.setAttribute("aria-label", "番号导航和排序");
@@ -48,6 +54,24 @@ export function renderFanhaoChrome({ container, view }, host, views) {
   row.append(search);
   container.append(row);
   return true;
+}
+
+function renderDetailChrome(container, view, host) {
+  const row = document.createElement("nav");
+  row.className = "fanhao-detail-chrome-row";
+  row.setAttribute("aria-label", view === "personDetail" ? "作者详情导航" : "作品详情导航");
+  const back = document.createElement("button");
+  back.type = "button";
+  back.className = "fanhao-detail-chrome-back";
+  back.setAttribute("aria-label", "返回上一页");
+  back.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14.5 5-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  back.addEventListener("click", () => host.navigation.goBack());
+  const title = document.createElement("strong");
+  title.className = "fanhao-detail-chrome-title";
+  title.dataset.fanhaoDetailTitle = "";
+  title.textContent = view === "personDetail" ? "作者详情" : "作品详情";
+  row.append(back, title);
+  container.append(row);
 }
 
 function fanhaoTabForView(view) {

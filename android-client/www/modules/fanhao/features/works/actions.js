@@ -1,6 +1,6 @@
 import { postJson } from "../../../../js/api.js?v=20260706-mobile-web-sync-01";
 import { readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=20260705-mobile-actions-01";
-import { openFanhaoSheet } from "../../sheet.js?v=20260721-fanhao-work-detail-01";
+import { openFanhaoSheet } from "../../sheet.js?v=20260721-fanhao-person-detail-02";
 
 export function createWorkActions(deps) {
   const {
@@ -23,12 +23,6 @@ export function createWorkActions(deps) {
     const moreButton = actionButton("work-more-action", "更多", () => openMoreActions(work));
     actions.append(markerButton, favoriteButton, moreButton);
     return actions;
-  }
-
-  function createBackButton(goBack) {
-    const button = actionButton("work-detail-header-back", "返回", goBack);
-    button.setAttribute("aria-label", "返回上一页");
-    return button;
   }
 
   function openMoreActions(work) {
@@ -172,5 +166,5 @@ export function createWorkActions(deps) {
     return writeCachedJson(activeUrl, path, { ...(cached?.payload || {}), work });
   }
 
-  return { createActionRow, createBackButton };
+  return { createActionRow };
 }

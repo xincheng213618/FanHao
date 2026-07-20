@@ -419,11 +419,15 @@ body.search-view.search-expanded .content-panel {
 }
 
 .person-detail-hero {
-  grid-template-columns: clamp(112px, 36%, 136px) minmax(0, 1fr);
+  grid-template-columns: clamp(104px, 32%, 128px) minmax(0, 1fr);
   align-items: start;
-  gap: 16px;
+  gap: 12px;
   border-radius: 14px;
-  padding: 14px;
+  padding: 10px;
+}
+
+.person-detail-hero .detail-hero-body {
+  gap: 6px;
 }
 
 .person-detail-avatar-frame {
@@ -603,29 +607,6 @@ body.search-view.search-expanded .content-panel {
   gap: 3px;
 }
 
-.content-panel[data-view="workDetail"] .work-detail-title-block {
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  column-gap: 8px;
-}
-
-.content-panel[data-view="workDetail"] .work-detail-title-block .work-detail-author {
-  grid-column: 1 / -1;
-}
-
-.work-detail-header-back {
-  min-width: 56px;
-  min-height: 36px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-soft);
-  color: var(--muted);
-  padding: 0 10px;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 900;
-}
-
 .work-detail-meta-body {
   display: grid;
   min-width: 0;
@@ -785,16 +766,12 @@ button.work-detail-author {
   }
 }
 
-.person-detail-eyebrow {
-  color: var(--blue) !important;
-  font-size: 11px !important;
-  font-weight: 950 !important;
-  letter-spacing: .08em;
-}
-
 .detail-hero-body > strong.person-detail-name {
-  font-size: 22px;
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 20px;
   line-height: 1.22;
+  -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
 
@@ -813,7 +790,7 @@ button.work-detail-author {
 
 .person-detail-work-count > strong {
   color: var(--ink);
-  font-size: 30px;
+  font-size: 26px;
   font-weight: 950;
   line-height: 1;
 }
@@ -828,7 +805,7 @@ button.work-detail-author {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
-  gap: 6px 12px;
+  gap: 4px 10px;
 }
 
 .person-detail-facts > span {
@@ -843,19 +820,19 @@ button.work-detail-author {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
-  gap: 7px;
+  gap: 5px;
 }
 
 .person-source-chip {
   display: inline-flex;
-  min-height: 32px;
+  min-height: 28px;
   align-items: center;
   border: 1px solid rgba(31, 122, 98, 0.2);
   border-radius: 999px;
   background: var(--green-soft);
   color: var(--green);
-  padding: 0 10px;
-  font-size: 12px;
+  padding: 0 8px;
+  font-size: 11px;
   font-weight: 900;
   line-height: 1.15;
 }

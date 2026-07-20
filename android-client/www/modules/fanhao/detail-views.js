@@ -6,8 +6,8 @@ import { createInfoPreviewSection } from "../../js/info-preview.js";
 import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-01";
 import { personDetailPath } from "./features/people/detail-request.js?v=20260720-fanhao-person-query-01";
-import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260721-fanhao-work-detail-01";
-import { createWorkActions } from "./features/works/actions.js?v=20260721-fanhao-work-detail-01";
+import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260721-fanhao-person-detail-02";
+import { createWorkActions } from "./features/works/actions.js?v=20260721-fanhao-person-detail-02";
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
 
 const PLAY_OPEN_COOLDOWN_MS = 1400;
@@ -26,7 +26,6 @@ export function createDetailViews(context) {
     increaseWorksLimit = () => {},
     renderCurrentViewPreservingScroll = () => {},
     mediaViewer,
-    goBack = () => window.history.back(),
     onUserStateChange,
     pageDataService,
     workDetailDataService
@@ -54,6 +53,10 @@ export function createDetailViews(context) {
     activeUrl: getActiveUrl(),
     mediaViewer
   });
+  const setDetailChromeTitle = (value) => {
+    const title = els.moduleChrome?.querySelector("[data-fanhao-detail-title]");
+    if (title) title.textContent = String(value || "").trim() || "详情";
+  };
   async function renderPersonDetail(personId, isActive = () => true) {
     const activeUrl = getActiveUrl();
     setActiveBottom("people");
@@ -65,14 +68,14 @@ export function createDetailViews(context) {
     let renderedCache = false;
     const indexedPerson = findPersonInLibrary(personId);
     if (indexedPerson) renderPersonPreview(indexedPerson);
-    const renderPersonData = (data, cacheEntry = null) => {
+    const renderPersonData = (data) => {
       const person = mergeIndexedPerson(indexedPerson, data.person, data.works);
       const works = data.works || [];
-      const cacheNote = cacheEntry ? `缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
+      setDetailChromeTitle(person.actorProfile?.displayName || person.name || "作者详情");
       els.viewTitle.textContent = "作者详情";
       els.viewMeta.textContent = "";
       els.viewContent.innerHTML = "";
-      els.viewContent.append(renderPersonHero(person, { cacheNote }));
+      els.viewContent.append(renderPersonHero(person));
       els.viewContent.append(createDetailSectionTitle("作品", ""));
       renderWorks(works, "这个作者下面还没有作品。", {
         facets: data.facets,
@@ -91,10 +94,10 @@ export function createDetailViews(context) {
       const result = await pageDataService.load(activeUrl, path, {
         signal: isActive.signal,
         isActive,
-        onCached(data, cacheEntry) {
+        onCached(data) {
           if (!data?.person) return;
           renderedCache = true;
-          renderPersonData(data, cacheEntry);
+          renderPersonData(data);
         }
       });
       if (!result || !isActive()) return;
@@ -112,10 +115,11 @@ export function createDetailViews(context) {
     }
   }
   function renderPersonPreview(person) {
+    setDetailChromeTitle(person.actorProfile?.displayName || person.name || "作者详情");
     els.viewTitle.textContent = "作者详情";
     els.viewMeta.textContent = "";
     els.viewContent.innerHTML = "";
-    els.viewContent.append(renderPersonHero(person, { cacheNote: "正在同步详情" }));
+    els.viewContent.append(renderPersonHero(person));
     els.viewContent.append(createDetailSectionTitle("作品", ""));
     const loading = document.createElement("div");
     loading.className = "loading-row";
@@ -141,10 +145,11 @@ export function createDetailViews(context) {
     const person = findPersonInLibrary(personId);
     if (!person) return false;
 
+    setDetailChromeTitle(person.actorProfile?.displayName || person.name || "作者详情");
     els.viewTitle.textContent = "作者详情";
     els.viewMeta.textContent = "";
     els.viewContent.innerHTML = "";
-    els.viewContent.append(renderPersonHero(person, { cacheNote: "本地索引" }));
+    els.viewContent.append(renderPersonHero(person));
     els.viewContent.append(createDetailSectionTitle("作品", ""));
     renderMessage(`作品列表暂时无法加载：${detailErrorMessage(error, "请检查服务连接")}`, "quiet", false);
     return true;
@@ -166,7 +171,9 @@ export function createDetailViews(context) {
       const work = data.work;
       const code = extractWorkCode(work);
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-      els.viewTitle.textContent = code || work.title || work.directoryName || "作品";
+      const heading = code || work.title || work.directoryName || "作品";
+      setDetailChromeTitle(heading);
+      els.viewTitle.textContent = heading;
       const personName = workPersonName(work);
       els.viewMeta.textContent = personName ? `${personName}${suffix}` : suffix.trim();
     };
@@ -272,8 +279,7 @@ export function createDetailViews(context) {
 
     const titleBlock = document.createElement("div");
     titleBlock.className = "work-detail-title-block";
-    const backButton = workActions.createBackButton(goBack);
-    titleBlock.append(title, backButton, author);
+    titleBlock.append(title, author);
 
     const actions = workActions.createActionRow(work);
 

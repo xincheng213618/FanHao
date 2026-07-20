@@ -42,6 +42,57 @@
   height: 21px;
 }
 
+.fanhao-detail-chrome-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.fanhao-detail-chrome-back {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 44px;
+  min-height: 44px;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  padding: 0;
+  touch-action: manipulation;
+}
+
+.fanhao-detail-chrome-back > svg {
+  width: 25px;
+  height: 25px;
+}
+
+.fanhao-detail-chrome-title {
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 950;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.module-chrome[data-module="fanhao"][data-detail-view] {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  width: min(100%, 560px);
+  margin: 0;
+  transform: translateX(-50%);
+}
+
+.content-panel[data-view="personDetail"],
+.content-panel[data-view="workDetail"] {
+  margin-top: calc(64px + env(safe-area-inset-top));
+}
+
 .fanhao-sort-overlay {
   position: fixed;
   inset: 0;
