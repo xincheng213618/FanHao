@@ -1,7 +1,7 @@
 import { createAndroidVideoSection } from "../../js/android-player.js?v=20260721-fanhao-media-relocate-16";
 import { cacheAgeText } from "../../js/cache.js?v=20260705-mobile-actions-01";
 import { createDetailSectionTitle } from "../../js/detail-ui.js";
-import { extractWorkCode, formatDate, formatNumber } from "../../js/format.js";
+import { extractWorkCode, formatBytes, formatDate, formatNumber } from "../../js/format.js";
 import { createInfoPreviewSection } from "../../js/info-preview.js";
 import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-01";
@@ -331,18 +331,10 @@ export function createDetailViews(context) {
 
     const actions = workActions.createActionRow(work);
 
-    const highlights = createWorkDetailHighlights(work);
     const metaBody = document.createElement("div");
     metaBody.className = "work-detail-meta-body";
     body.append(titleBlock);
-    if (highlights) metaBody.append(highlights);
     metaBody.append(actions);
-    if (work.modifiedAt) {
-      const updated = document.createElement("span");
-      updated.className = "work-detail-updated";
-      updated.textContent = `更新：${formatDate(work.modifiedAt)}`;
-      metaBody.append(updated);
-    }
     hero.append(body, cover, metaBody);
     return hero;
   }
@@ -362,15 +354,18 @@ export function createDetailViews(context) {
     const fields = fieldMap(info?.fields || []);
     const rating = ratingFact(info || summary);
     const releaseDate = cleanFactValue(info?.releaseDate || summary?.releaseDate || fields.get("日期"));
-    const duration = durationText(info?.durationMinutes ?? summary?.durationMinutes ?? fields.get("时长"));
+    const duration = durationText(info?.durationMinutes ?? summary?.durationMinutes ?? fields.get("时长")) || playbackDurationText(work);
+    const videoSize = formatBytes((work.videos || []).reduce((total, video) => total + Math.max(0, Number(video?.size || 0)), 0));
     const items = [];
-    if (rating.text) items.push({ label: "评分", value: compactRatingText(rating.text), accent: true });
     if (releaseDate) items.push({ label: "日期", value: releaseDate });
     if (duration) items.push({ label: "时长", value: duration });
+    if (rating.text) items.push({ label: "评分", value: compactRatingText(rating.text), accent: true });
+    if (videoSize) items.push({ label: "大小", value: videoSize });
     if (!items.length) return null;
 
     const strip = document.createElement("div");
     strip.className = "work-detail-highlights";
+    strip.dataset.count = String(items.length);
     for (const item of items) {
       const chip = document.createElement("div");
       chip.className = `work-detail-highlight${item.accent ? " rating" : ""}`;
@@ -382,6 +377,11 @@ export function createDetailViews(context) {
       strip.append(chip);
     }
     return strip;
+  }
+
+  function playbackDurationText(work) {
+    const seconds = Math.max(0, ...(work.videos || []).map((video) => Number(video?.progress?.duration || 0)).filter(Number.isFinite));
+    return seconds > 0 ? `${Math.max(1, Math.round(seconds / 60))} 分钟` : "";
   }
 
   function compactRatingText(value) {
@@ -399,18 +399,16 @@ export function createDetailViews(context) {
 
     const fields = fieldMap(info?.fields || []);
     const code = cleanFactValue(info?.code || summary?.code || extractWorkCode(work));
-    const releaseDate = cleanFactValue(info?.releaseDate || summary?.releaseDate || fields.get("日期"));
-    const duration = durationText(info?.durationMinutes ?? summary?.durationMinutes ?? fields.get("时长"));
     const maker = cleanFactValue(info?.maker || fields.get("片商"));
     const label = cleanFactValue(info?.label || fields.get("发行商"));
     const series = cleanFactValue(info?.series || fields.get("系列"));
     const director = cleanFactValue(info?.director || fields.get("导演"));
-    const rating = ratingFact(info || summary);
     const workType = workTypeFact(work);
     const tags = arrayFact(info?.tags).length ? arrayFact(info.tags) : splitFactList(fields.get("类别"));
     const actors = arrayFact(info?.actors).length ? arrayFact(info.actors) : splitFactList(fields.get("演员"));
 
-    const hasContent = [code, workType, releaseDate, duration, maker, label, series, director, rating.text, tags.length, actors.length].some(Boolean);
+    const highlights = createWorkDetailHighlights(work);
+    const hasContent = [code, workType, maker, label, series, director, tags.length, actors.length, highlights].some(Boolean);
     if (!hasContent) return null;
 
     const section = document.createElement("div");
@@ -419,14 +417,15 @@ export function createDetailViews(context) {
 
     const panel = document.createElement("div");
     panel.className = "work-facts-panel";
+    if (highlights) {
+      highlights.classList.add("work-facts-highlights");
+      panel.append(highlights);
+    }
     appendFactRow(panel, "番号", code, { copyable: true });
     appendFactRow(panel, "类型", singleFactList(workType), { chips: true });
-    appendFactRow(panel, "日期", releaseDate);
-    appendFactRow(panel, "时长", duration);
     appendFactRow(panel, "导演", singleFactList(director), { chips: true, searchable: true });
     appendFactRow(panel, "片商", singleFactList(maker), { chips: true, searchable: true });
     appendFactRow(panel, "系列", singleFactList(series), { chips: true, searchable: true });
-    appendFactRow(panel, "评分", rating.text, { rating: rating.value });
     appendFactRow(panel, "类别", tags, { chips: true, searchable: true });
     appendFactRow(panel, "演员", actors, { chips: true, actorLinks: true });
     appendFactRow(panel, "发行商", singleFactList(label), { chips: true, searchable: true });
