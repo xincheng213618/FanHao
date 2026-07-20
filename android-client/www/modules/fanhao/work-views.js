@@ -1,6 +1,6 @@
 import { fetchJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
 import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260720-fanhao-scroll-intent-01";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260721-fanhao-media-relocate-16";
+import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260721-fanhao-actor-counts-17";
 import { formatNumber } from "../../js/format.js";
 import { createWorkListState } from "../../js/work-filtering.js?v=20260721-fanhao-work-browse-density-10";
 import { createWorkCards } from "./features/works/cards.js?v=20260721-fanhao-author-sort-density-08";

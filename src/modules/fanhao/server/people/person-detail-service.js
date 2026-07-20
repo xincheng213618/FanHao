@@ -100,6 +100,7 @@ export function createPersonDetailService({
     }
     const payload = {
       person: source.person,
+      filmographyCount: source.works.length,
       year: normalizePersonWorkYear(url.searchParams.get("year")),
       years: source.years,
       ...worksPayload

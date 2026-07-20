@@ -32,18 +32,24 @@ export function createPersonDetailHero(person, options = {}) {
   alias.hidden = !aliases;
   const workCount = document.createElement("div");
   workCount.className = "person-detail-work-count";
+  const filmographyCount = finiteCount(options.filmographyCount);
+  const workCountPrefix = document.createElement("span");
+  workCountPrefix.textContent = filmographyCount === null ? "本地收录" : "出演过";
   const workCountValue = document.createElement("strong");
-  workCountValue.textContent = formatNumber(person.workCount);
+  workCountValue.textContent = formatNumber(filmographyCount ?? person.workCount);
   const workCountUnit = document.createElement("span");
-  workCountUnit.textContent = "部作品";
-  workCount.append(workCountValue, workCountUnit);
-  const facts = createPersonFacts(person);
+  workCountUnit.textContent = filmographyCount === null ? "部作品" : "部影片";
+  workCount.append(workCountPrefix, workCountValue, workCountUnit);
   const sources = createPersonSourceStrip(person);
   body.append(name, alias, workCount);
-  if (facts) body.append(facts);
   if (sources) body.append(sources);
   hero.append(body);
   return hero;
+}
+
+function finiteCount(value) {
+  const count = Number(value);
+  return Number.isFinite(count) && count >= 0 ? count : null;
 }
 
 function personAliasText(person) {
@@ -60,22 +66,6 @@ function personAliasText(person) {
     if (aliases.length >= 3) break;
   }
   return aliases.join(" · ");
-}
-
-function createPersonFacts(person) {
-  const labels = [];
-  if (Number(person.videoCount || 0) > 0) labels.push(`${formatNumber(person.videoCount)} 个视频`);
-  if (Number(person.infoCount || 0) > 0) labels.push(`${formatNumber(person.infoCount)} 份资料`);
-  if (Number(person.sourceCount || 0) > 1) labels.push(`${formatNumber(person.sourceCount)} 个来源`);
-  if (!labels.length) return null;
-  const facts = document.createElement("div");
-  facts.className = "person-detail-facts";
-  for (const label of labels) {
-    const fact = document.createElement("span");
-    fact.textContent = label;
-    facts.append(fact);
-  }
-  return facts;
 }
 
 function createPersonSourceStrip(person) {

@@ -6,7 +6,7 @@ import { createInfoPreviewSection } from "../../js/info-preview.js";
 import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-01";
 import { personDetailPath } from "./features/people/detail-request.js?v=20260721-fanhao-person-year-15";
-import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260721-fanhao-author-portraits-06";
+import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260721-fanhao-actor-counts-17";
 import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=20260721-fanhao-person-year-15";
 import { createWorkActions } from "./features/works/actions.js?v=20260721-fanhao-person-detail-02";
 import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09";
@@ -86,7 +86,7 @@ export function createDetailViews(context) {
       els.viewTitle.textContent = "演员详情";
       els.viewMeta.textContent = "";
       els.viewContent.innerHTML = "";
-      els.viewContent.append(renderPersonHero(person));
+      els.viewContent.append(renderPersonHero(person, { filmographyCount: data.filmographyCount }));
       els.viewContent.append(createDetailSectionTitle("作品", ""));
       renderWorks(works, "这个演员下面还没有作品。", {
         facets: data.facets,

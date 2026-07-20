@@ -8,7 +8,7 @@ const PEOPLE_PAGE_SIZE = 64;
 const PERSON_AVATAR_ROOT_MARGIN = "560px 320px";
 const PEOPLE_SORTS = [
   { value: "smart", label: "推荐排序", description: "推荐排序" },
-  { value: "works", label: "作品最多", description: "作品最多" },
+  { value: "works", label: "本地作品", description: "本地作品数量排序" },
   { value: "sources", label: "多来源", description: "多来源优先" },
   { value: "name", label: "名称排序", description: "按名称" }
 ];
@@ -269,7 +269,7 @@ export function createPeopleViews(context) {
     if (mode === "preview") {
       const meta = document.createElement("span");
       const sources = person.sourceCount > 1 ? ` · ${formatNumber(person.sourceCount)} 处` : "";
-      meta.textContent = `${formatNumber(person.workCount)} 部${sources}`;
+      meta.textContent = `本地 ${formatNumber(person.workCount)} 部${sources}`;
       button.append(name, meta);
       return button;
     }
@@ -290,7 +290,7 @@ export function createPeopleViews(context) {
     const meta = document.createElement("span");
     meta.className = "index-person-meta";
     const sources = person.sourceCount > 1 ? ` · ${formatNumber(person.sourceCount)} 来源` : "";
-    meta.textContent = `${formatNumber(person.workCount)} 部${sources}`;
+    meta.textContent = `本地 ${formatNumber(person.workCount)} 部${sources}`;
     body.append(meta);
 
     button.append(body);

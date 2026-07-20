@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=20260721-fanhao-media-relocate-16";
+import { CLIENT_VERSION } from "./config.js?v=20260721-fanhao-actor-counts-17";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;
