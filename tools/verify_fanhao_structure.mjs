@@ -325,6 +325,12 @@ const androidWorkCoverLoader = read("android-client/www/modules/fanhao/features/
 const androidProgressiveWorkListRenderer = read("android-client/www/modules/fanhao/features/works/progressive-list-renderer.js");
 const androidViewportImageLoader = read("android-client/www/modules/fanhao/features/shared/viewport-image-loader.js");
 const androidListStyles = read("android-client/www/css/lists.css");
+const androidSectionStyles = read("android-client/www/css/sections.css");
+const androidConfig = read("android-client/www/js/config.js");
+const workDetailHeroBodyStyles = /\.content-panel\[data-view="workDetail"\] \.detail-hero-body \{([\s\S]*?)\}/.exec(androidSectionStyles)?.[1] || "";
+const workDetailTitleStyles = /\.content-panel\[data-view="workDetail"\] \.work-detail-title-block > strong \{([\s\S]*?)\}/.exec(androidSectionStyles)?.[1] || "";
+const workDetailActionStyles = /\.content-panel\[data-view="workDetail"\] \.detail-action-row \{([\s\S]*?)\}/.exec(androidSectionStyles)?.[1] || "";
+const workDetailActionButtonStyles = /\.content-panel\[data-view="workDetail"\] \.detail-action-row button \{([\s\S]*?)\}/.exec(androidSectionStyles)?.[1] || "";
 assert(!androidWorkViews.includes("SEARCH_CHANNELS"), "FanHao Android must not own cross-module search channels");
 assert(!/function createWorkCard\s*\(/.test(androidWorkViews), "FanHao Android work cards must stay in their feature module");
 assert(!androidWorkViews.includes("createGlobalSearch"), "FanHao Android search must not use a cross-module aggregator");
@@ -359,6 +365,12 @@ assert(androidProgressiveWorkListRenderer.includes("container.isConnected === fa
 assert(androidWorkCoverLoader.includes('const WORK_COVER_ROOT_MARGIN = "720px 0px"'), "Android work covers must start shortly before they enter the viewport");
 assert(androidViewportImageLoader.includes("const pending = new Map()"), "Android viewport image loading must share one focused queue implementation");
 assert(androidListStyles.includes("content-visibility: auto") && androidListStyles.includes("contain-intrinsic-size: auto 128px"), "Android work cards must skip offscreen layout and painting");
+assert(workDetailHeroBodyStyles.includes("grid-template-columns: minmax(0, 1fr);") && !workDetailHeroBodyStyles.includes(" auto"), "Android work details must give the title and actions a full-width single-column header");
+assert(workDetailTitleStyles.includes("-webkit-line-clamp: 3"), "Android work details must expose three full-width title lines");
+assert(androidSectionStyles.includes('@media (max-width: 360px)') && androidSectionStyles.includes("-webkit-line-clamp: 4"), "narrow Android work details must retain a fourth title line");
+assert(workDetailActionStyles.includes("flex-wrap: nowrap") && workDetailActionStyles.includes("width: 100%"), "Android work-detail actions must stay in one dedicated full-width row");
+assert(workDetailActionButtonStyles.includes("flex: 1 1 0") && workDetailActionButtonStyles.includes("min-width: 0"), "Android work-detail actions must share the available phone width evenly");
+assert(androidIndexHtml.includes("styles.css?v=20260720-fanhao-detail-layout-01") && androidIndexHtml.includes("app.js?v=20260720-fanhao-detail-layout-01") && androidApp.includes("config.js?v=20260720-fanhao-detail-layout-01") && androidConfig.includes('CLIENT_VERSION = "20260720-fanhao-detail-layout-01"'), "Android work-detail layout changes must refresh the WebView cache chain");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48"), "Android rankings must request a phone-sized first page");
 assert(androidRankingViews.includes("hasServerMore:"), "Android rankings must preserve server-side continuation");
 assert(androidWorkViews.includes("options.hasServerMore"), "Android work rendering must expose server-side continuation");
@@ -683,7 +695,7 @@ assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-ra
 assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-card-code-01'), "Android work-card code changes must use a fresh work-view URL");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must use a fresh people-view URL");
 assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-card-code-01'), "Android work-card code changes must refresh the FanHao module entry chain");
-assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-card-code-01'), "Android work-card code changes must refresh the app entry chain");
+assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-detail-layout-01'), "Android work-detail layout changes must refresh the app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
