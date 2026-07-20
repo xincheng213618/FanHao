@@ -1,4 +1,4 @@
-export function publicPersonListItem(person) {
+export function publicPersonListItem(person, options = {}) {
   if (!person) return null;
   const profile = person.actorProfile || null;
   return {
@@ -7,6 +7,7 @@ export function publicPersonListItem(person) {
     relativePath: person.relativePath || "",
     sourceCount: Number(person.sourceCount || 0),
     workCount: Number(person.workCount || 0),
+    isWestern: Boolean(options.isWestern),
     avatarUrl: person.avatarUrl || (person.coverId ? `/media/person/${encodeURIComponent(String(person.id || ""))}/cover` : ""),
     actorProfile: profile
       ? {

@@ -23,9 +23,11 @@ export async function routeLibraryReadApi(req, res, url, deps) {
     const lastScanError = getLastScanError();
     const publicPeople = cachedPublicPeople({
       people,
+      peopleScopeService,
       publicPerson,
       scope,
-      stamp: typeof peoplePayloadStamp === "function" ? peoplePayloadStamp(scope) : `${library.scannedAt || ""}:${scope}:${people.length}`
+      stamp: typeof peoplePayloadStamp === "function" ? peoplePayloadStamp(scope) : `${library.scannedAt || ""}:${scope}:${people.length}`,
+      westernStamp: peopleScopeService.cacheKey()
     });
     sendJson(res, 200, {
       root: library.root,
@@ -59,11 +61,14 @@ export async function routeLibraryReadApi(req, res, url, deps) {
   return false;
 }
 
-function cachedPublicPeople({ people, publicPerson, scope, stamp }) {
-  const cacheKey = `${scope}:${stamp}:${people.length}`;
+function cachedPublicPeople({ people, peopleScopeService, publicPerson, scope, stamp, westernStamp = "" }) {
+  const cacheKey = `${scope}:${stamp}:${westernStamp}:${people.length}`;
   const cached = libraryPeoplePayloadCache.get(cacheKey);
   if (cached) return cached;
-  const payload = people.map((person) => publicPersonListItem(publicPerson(person, { skipFallbackAvatar: true })));
+  const payload = people.map((person) => publicPersonListItem(
+    publicPerson(person, { skipFallbackAvatar: true }),
+    { isWestern: peopleScopeService.personMatches(person, "western") }
+  ));
   libraryPeoplePayloadCache.set(cacheKey, payload);
   while (libraryPeoplePayloadCache.size > 6) {
     const oldest = libraryPeoplePayloadCache.keys().next().value;
@@ -86,9 +91,11 @@ export function prewarmLibraryPeoplePayloads(deps, scopes = ["main", "western"])
     const people = personListService.mainLibraryPeople(scope);
     cachedPublicPeople({
       people,
+      peopleScopeService,
       publicPerson,
       scope,
-      stamp: typeof peoplePayloadStamp === "function" ? peoplePayloadStamp(scope) : `${library.scannedAt || ""}:${scope}:${people.length}`
+      stamp: typeof peoplePayloadStamp === "function" ? peoplePayloadStamp(scope) : `${library.scannedAt || ""}:${scope}:${people.length}`,
+      westernStamp: peopleScopeService.cacheKey()
     });
     warmed.push({ scope, count: people.length });
   }

@@ -3,13 +3,21 @@ import { createFallbackCover, portraitUrlForPerson } from "../../js/image.js?v=2
 import { createViewportImageLoader } from "./features/shared/viewport-image-loader.js?v=20260717-fanhao-people-first-paint-01";
 
 const PEOPLE_SORT_STORAGE_KEY = "fanhao.android.peopleSort";
+const PEOPLE_FILTER_STORAGE_KEY = "fanhao.android.peopleFilter";
 const PEOPLE_PAGE_SIZE = 64;
 const PERSON_AVATAR_ROOT_MARGIN = "560px 320px";
 const PEOPLE_SORTS = [
-  { value: "smart", label: "常用优先", description: "常用优先" },
+  { value: "smart", label: "推荐排序", description: "推荐排序" },
   { value: "works", label: "作品最多", description: "作品最多" },
   { value: "sources", label: "多来源", description: "多来源优先" },
   { value: "name", label: "名称排序", description: "按名称" }
+];
+const PEOPLE_FILTERS = [
+  { value: "recommended", label: "推荐", title: "推荐演员" },
+  { value: "female", label: "女演员", title: "女演员" },
+  { value: "male", label: "男演员", title: "男演员" },
+  { value: "western", label: "欧美", title: "欧美演员" },
+  { value: "all", label: "全部", title: "全部演员" }
 ];
 
 function displayPersonName(person) {
@@ -25,6 +33,25 @@ export function isBrowsableAuthor(person) {
   if (/[（(]\d{4}\s*[-–—]\s*\d{4}[）)]/u.test(name)) return false;
   if (/(?:mega\s*pack|actress\s*pack|collection\s*videos?)/iu.test(name)) return false;
   return true;
+}
+
+export function normalizePeopleFilter(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return PEOPLE_FILTERS.some((item) => item.value === normalized) ? normalized : "recommended";
+}
+
+export function filterPeopleForIndex(people, requestedFilter = "recommended") {
+  const filter = normalizePeopleFilter(requestedFilter);
+  const candidates = (people || []).filter(isBrowsableAuthor);
+  if (filter === "female") return candidates.filter((person) => person?.actorProfile?.gender === "female");
+  if (filter === "male") return candidates.filter((person) => person?.actorProfile?.gender === "male");
+  if (filter === "western") return candidates.filter((person) => person?.isWestern);
+  if (filter === "all") return candidates;
+  return candidates.filter((person) => (
+    person?.actorProfile?.gender !== "male"
+    && !person?.isWestern
+    && Boolean(portraitUrlForPerson(person))
+  ));
 }
 
 export function createPeopleViews(context) {
@@ -48,12 +75,8 @@ export function createPeopleViews(context) {
   });
   let peopleIndexCache = null;
 
-  function visiblePeople(people) {
-    return (people || []).filter((person) => person?.actorProfile?.gender !== "male" && isBrowsableAuthor(person));
-  }
-
   function renderPreviewPeople(people) {
-    const list = visiblePeople(people);
+    const list = filterPeopleForIndex(people, "recommended").sort((a, b) => comparePeople(a, b, "smart")).slice(0, 12);
     previewAvatarLoader.reset();
     els.personPreview.innerHTML = "";
     if (!list.length) {
@@ -69,34 +92,57 @@ export function createPeopleViews(context) {
   function renderPeopleIndex() {
     setActiveBottom("people");
     const sortMode = getPeopleSortMode();
+    const filterMode = getPeopleFilterMode();
     const sourcePeople = getLibrary()?.people || [];
-    if (restorePeopleIndex(sourcePeople, sortMode)) return;
+    if (restorePeopleIndex(sourcePeople, sortMode, filterMode)) return;
 
-    const people = visiblePeople(sourcePeople).sort((a, b) => comparePeople(a, b, sortMode));
+    const people = filterPeopleForIndex(sourcePeople, filterMode).sort((a, b) => comparePeople(a, b, sortMode));
     const visible = people.slice(0, getPeopleLimit());
     indexAvatarLoader.reset();
 
-    els.viewKicker.textContent = "演员索引";
-    els.viewTitle.textContent = "全部演员";
+    els.viewKicker.textContent = "演员";
+    els.viewTitle.textContent = peopleFilterTitle(filterMode);
     els.viewMeta.textContent = `${formatNumber(people.length)} 位演员 · ${sortDescription(sortMode)}`;
+    const filterStrip = createPeopleFilterStrip(sourcePeople, filterMode);
     const grid = document.createElement("div");
     grid.className = "people-grid";
     appendPeopleCards(grid, visible, indexAvatarLoader);
-    peopleIndexCache = { grid, loadMore: null, people, sortMode, sourcePeople };
-    els.viewContent.replaceChildren(grid);
+    peopleIndexCache = { filterMode, filterStrip, grid, loadMore: null, people, sortMode, sourcePeople };
+    els.viewContent.replaceChildren(filterStrip, grid);
     appendPeopleIndexLoadMore(peopleIndexCache);
   }
 
-  function restorePeopleIndex(sourcePeople, sortMode) {
+  function restorePeopleIndex(sourcePeople, sortMode, filterMode) {
     const cache = peopleIndexCache;
-    if (!cache || cache.sourcePeople !== sourcePeople || cache.sortMode !== sortMode) return false;
+    if (!cache || cache.sourcePeople !== sourcePeople || cache.sortMode !== sortMode || cache.filterMode !== filterMode) return false;
     syncPeopleLimit(cache.grid.children.length);
-    els.viewKicker.textContent = "演员索引";
-    els.viewTitle.textContent = "全部演员";
+    els.viewKicker.textContent = "演员";
+    els.viewTitle.textContent = peopleFilterTitle(filterMode);
     els.viewMeta.textContent = `${formatNumber(cache.people.length)} 位演员 · ${sortDescription(sortMode)}`;
-    const nodes = cache.loadMore ? [cache.grid, cache.loadMore] : [cache.grid];
+    const nodes = cache.loadMore ? [cache.filterStrip, cache.grid, cache.loadMore] : [cache.filterStrip, cache.grid];
     els.viewContent.replaceChildren(...nodes);
     return true;
+  }
+
+  function createPeopleFilterStrip(sourcePeople, activeFilter) {
+    const strip = document.createElement("nav");
+    strip.className = "people-category-strip";
+    strip.setAttribute("aria-label", "演员分类");
+    for (const option of PEOPLE_FILTERS) {
+      const button = document.createElement("button");
+      button.type = "button";
+      const active = option.value === activeFilter;
+      button.className = active ? "active" : "";
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      const label = document.createElement("strong");
+      label.textContent = option.label;
+      const count = document.createElement("span");
+      count.textContent = formatNumber(filterPeopleForIndex(sourcePeople, option.value).length);
+      button.append(label, count);
+      button.addEventListener("click", () => setPeopleFilterMode(option.value));
+      strip.append(button);
+    }
+    return strip;
   }
 
   function appendPeopleCards(grid, people, avatarLoader) {
@@ -144,6 +190,22 @@ export function createPeopleViews(context) {
     return PEOPLE_SORTS.some((item) => item.value === value) ? value : "smart";
   }
 
+  function getPeopleFilterMode() {
+    return normalizePeopleFilter(localStorage.getItem(PEOPLE_FILTER_STORAGE_KEY));
+  }
+
+  function peopleFilterTitle(mode) {
+    return PEOPLE_FILTERS.find((item) => item.value === mode)?.title || PEOPLE_FILTERS[0].title;
+  }
+
+  function setPeopleFilterMode(value) {
+    const normalized = normalizePeopleFilter(value);
+    if (normalized === getPeopleFilterMode()) return false;
+    localStorage.setItem(PEOPLE_FILTER_STORAGE_KEY, normalized);
+    renderPeopleIndex();
+    return true;
+  }
+
   function sortDescription(mode) {
     return PEOPLE_SORTS.find((item) => item.value === mode)?.description || PEOPLE_SORTS[0].description;
   }
@@ -178,10 +240,9 @@ export function createPeopleViews(context) {
         || (b.workCount || 0) - (a.workCount || 0)
         || bVisual - aVisual;
     }
-    return authorPriority(b) - authorPriority(a)
-      || (b.sourceCount || 0) - (a.sourceCount || 0)
-      || bVisual - aVisual
+    return bVisual - aVisual
       || (b.workCount || 0) - (a.workCount || 0)
+      || (b.sourceCount || 0) - (a.sourceCount || 0)
       || byName();
   }
 

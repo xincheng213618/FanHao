@@ -126,6 +126,52 @@
   font-size: 11.5px;
 }
 
+.people-category-strip {
+  display: flex;
+  gap: 5px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.people-category-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.people-category-strip button {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--muted);
+  padding: 0 11px;
+}
+
+.people-category-strip button.active {
+  border-color: rgba(47, 128, 237, 0.42);
+  background: var(--button-soft);
+  color: var(--blue);
+}
+
+.people-category-strip strong {
+  color: var(--ink);
+  font-size: 11.5px;
+  font-weight: 900;
+}
+
+.people-category-strip button.active strong {
+  color: currentColor;
+}
+
+.people-category-strip span {
+  font-size: 9.5px;
+  font-weight: 850;
+}
+
 .fanhao-category-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

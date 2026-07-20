@@ -36,7 +36,7 @@ import { createCoreDbService } from "../src/modules/fanhao/server/library/core-d
 import { tableStampValue } from "../src/modules/fanhao/server/library/table-stamp-query.js";
 import { fetchPreparedImage, portraitUrlForPerson } from "../android-client/www/js/image.js";
 import { createWorkListState } from "../android-client/www/js/work-filtering.js";
-import { isBrowsableAuthor } from "../android-client/www/modules/fanhao/people-views.js";
+import { filterPeopleForIndex, isBrowsableAuthor, normalizePeopleFilter } from "../android-client/www/modules/fanhao/people-views.js";
 import { localAuthorSearchSuggestions } from "../android-client/www/modules/fanhao/search-page.js";
 import { createWorkCoverLoader } from "../android-client/www/modules/fanhao/features/works/cover-loader.js";
 import { compactWorkCode, displayWorkTitle, workGridBadge, workGridMeta, workGridPerson, workGridRankBadge } from "../android-client/www/modules/fanhao/features/works/card-presentation.js";
@@ -520,7 +520,7 @@ assert(androidApp.includes("const FAST_PEOPLE_STEP = 64"), "Android people index
 assert(!androidApp.includes("return fast ? 480"), "Android FanHao detail and collection views must not restore oversized initial requests");
 assert(androidPeopleViews.includes("avatarLoader.schedule(visual, imagePath)"), "Android people avatars must wait until their cards approach the viewport");
 assert(androidPeopleViews.includes("appendPeopleCards(grid, people.slice(start, nextLimit)"), "Android people continuation must append only the next page");
-assert(androidPeopleViews.includes("restorePeopleIndex(sourcePeople, sortMode)") && androidPeopleViews.includes("cache.sourcePeople !== sourcePeople"), "Android people navigation must restore the current library index without rebuilding it");
+assert(androidPeopleViews.includes("restorePeopleIndex(sourcePeople, sortMode, filterMode)") && androidPeopleViews.includes("cache.sourcePeople !== sourcePeople") && androidPeopleViews.includes("cache.filterMode !== filterMode"), "Android people navigation must restore only the matching actor category and sort without rebuilding it");
 assert(androidPeopleViews.includes("els.viewContent.replaceChildren(...nodes)") && androidPeopleViews.includes("syncPeopleLimit(cache.grid.children.length)"), "Android people restoration must retain loaded cards and synchronize continuation with the rendered count");
 assert(androidPeopleViews.includes("getSortOptions:") && androidPeopleViews.includes("setSortMode: setPeopleSortMode") && !androidPeopleViews.includes("createPeopleSortControls"), "Android author sorting must be owned by the active chrome tag instead of a permanent row");
 assert(androidPeopleViews.includes('{ value: "sources", label: "多来源"') && !androidPeopleViews.includes('{ value: "videos"'), "Android author sorting must only offer fields present in the lightweight person payload");
@@ -530,6 +530,18 @@ assert.equal(isBrowsableAuthor({ name: "Melody Marks" }), true, "real Western au
 for (const placeholderName of ["noactor", "[动漫]", "[]", "精神文明建设之“绅士”养成（1995-2000）", "Elena Koshka actress pack 1", "Alexa Grace MegaPack 配图精装", "Mila Azul Collection Videos"]) {
   assert.equal(isBrowsableAuthor({ name: placeholderName }), false, `placeholder author record must stay out of the mobile index: ${placeholderName}`);
 }
+const actorFilterFixtures = [
+  { id: "female", name: "明里つむぎ", avatarUrl: "/media/core-image/female", actorProfile: { gender: "female" }, isWestern: false },
+  { id: "male", name: "黒田悠斗", avatarUrl: "/media/core-image/male", actorProfile: { gender: "male" }, isWestern: false },
+  { id: "western", name: "Melody Marks", avatarUrl: "/media/core-image/western", actorProfile: { gender: "female" }, isWestern: true },
+  { id: "fallback", name: "愛花未満", avatarUrl: "/media/person/fallback/cover", actorProfile: { gender: "female" }, isWestern: false }
+];
+assert.equal(normalizePeopleFilter("unknown"), "recommended", "unknown actor categories must fall back to recommendations");
+assert.deepEqual(filterPeopleForIndex(actorFilterFixtures, "recommended").map((person) => person.id), ["female"], "actor recommendations must prioritize real portraits while excluding male and Western categories");
+assert.deepEqual(filterPeopleForIndex(actorFilterFixtures, "male").map((person) => person.id), ["male"], "male actors must remain discoverable instead of being silently hidden");
+assert.deepEqual(filterPeopleForIndex(actorFilterFixtures, "western").map((person) => person.id), ["western"], "Western actors must have a dedicated discovery category");
+assert.equal(filterPeopleForIndex(actorFilterFixtures, "all").length, 4, "the all-actor category must retain every browseable actor");
+assert(androidPeopleViews.includes('strip.className = "people-category-strip"') && androidPeopleViews.includes('strip.setAttribute("aria-label", "演员分类")'), "Android actor browsing must expose the compact JavDB-style category rail");
 assert(androidPeopleViews.includes('meta.className = "index-person-meta"'), "Android author tiles must retain a compact work-count cue");
 assert(androidSectionStyles.includes("grid-template-columns: repeat(3, minmax(0, 1fr))") && androidSectionStyles.includes("contain-intrinsic-size: auto 176px"), "Android author browsing must use a dense three-column tile grid");
 assert(!androidPeopleViews.includes("renderCurrentViewPreservingScroll"), "Android people continuation must not rebuild the existing index");
@@ -578,8 +590,8 @@ assert(androidWorkActions.includes('title: "更多操作"') && androidWorkAction
 assert(androidWorkActions.includes('variant: "danger wide"') && androidFanhaoStyles.includes(".fanhao-sort-option.danger") && androidFanhaoStyles.includes(".fanhao-sort-option.wide"), "Android destructive work actions must remain visually isolated in the sheet");
 assert(!androidWorkActions.includes("createBackButton") && androidSectionStyles.includes(".work-detail-meta-body"), "Android work details must delegate return navigation to the shared sticky detail header");
 assert(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions must stay focused");
-assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-category-browser-13") && androidStyles.includes("css/sections.css?v=20260721-fanhao-ranking-density-11") && androidStyles.includes("css/lists.css?v=20260721-fanhao-category-browser-13") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-work-detail-flow-09"), "Android FanHao category browsing must use a fresh WebView URL while retaining compact rankings and immersive details");
-assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-category-browser-13") && androidApp.includes("config.js?v=20260721-fanhao-category-browser-13") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-category-browser-13"'), "Android FanHao category browsing must refresh the WebView cache chain");
+assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-actor-discovery-14") && androidStyles.includes("css/sections.css?v=20260721-fanhao-ranking-density-11") && androidStyles.includes("css/lists.css?v=20260721-fanhao-actor-discovery-14") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-work-detail-flow-09"), "Android actor discovery must use a fresh WebView URL while retaining compact rankings and immersive details");
+assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-actor-discovery-14") && androidApp.includes("config.js?v=20260721-fanhao-actor-discovery-14") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-actor-discovery-14"'), "Android actor discovery must refresh the WebView cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -938,9 +950,9 @@ assert(lines("android-client/www/modules/fanhao/features/people/detail-work-tool
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-work-detail-flow-09') && androidDetailViews.includes('detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09'), "Android work-detail flow changes must use fresh component URLs");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
 assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-category-browser-13') && androidWorkViews.includes('work-filtering.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-discovery-03'), "Android category browsing must use a fresh work-view URL while retaining dense browsing and search discovery");
-assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-author-portraits-06'), "Android author browsing must use the current FanHao module cache chain");
-assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-category-browser-13'), "Android category browsing must refresh the FanHao entry chain without dropping actor sorting");
-assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-category-browser-13'), "Android category browsing must refresh the app entry chain");
+assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-actor-discovery-14'), "Android actor discovery must use the current FanHao module cache chain");
+assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-actor-discovery-14'), "Android actor discovery must refresh the FanHao entry chain without dropping category browsing");
+assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-actor-discovery-14'), "Android actor discovery must refresh the app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260721-fanhao-ranking-density-11'), "Android compact ranking changes must use a fresh module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
@@ -1459,9 +1471,10 @@ const personListItem = publicPersonListItem({
     javdbRefs: [{ id: "large-detail" }],
     updatedAt: "2026-07-17"
   }
-});
+}, { isWestern: true });
 assert.equal(personListItem.avatarUrl, "/media/person/27/cover", "person-list fallback covers must not expose long file identifiers");
 assert.equal(personListItem.actorProfile.displayName, "Display Person", "person-list summaries must preserve display names");
+assert.equal(personListItem.isWestern, true, "person-list summaries must expose Western membership for Android actor discovery");
 assert(!("sourcePaths" in personListItem), "person-list summaries must defer source paths until person detail is opened");
 assert(!("avatarImage" in personListItem), "person-list summaries must defer avatar metadata until person detail is opened");
 for (const detailCount of ["videoCount", "playableCount", "imageCount", "infoCount", "isGSource"]) {
