@@ -413,7 +413,6 @@ export function createWorkViews(context) {
     els.viewTitle.textContent = "正在加载";
     els.viewMeta.textContent = "";
     els.viewContent.innerHTML = `<div class="loading-row">正在加载片商作品</div>`;
-
     const limit = getWorksLimit();
     const path = studioDetailPath(studioId, seriesId, limit);
     const activeUrl = getActiveUrl();
@@ -440,7 +439,7 @@ export function createWorkViews(context) {
       renderStudioSeriesStrip(studio, data.selectedSeriesId || seriesId || "all");
       renderWorks(works, "这个片商暂无本地作品。", {
         compactMeta: true,
-        ...serverContinuationOptions(works, total)
+        ...serverContinuationOptions(works, total, { activeFilterTotal: true })
       });
     };
 
@@ -475,6 +474,7 @@ export function createWorkViews(context) {
   function studioDetailPath(studioId, seriesId = "all", limit = getWorksLimit()) {
     const params = new URLSearchParams({
       seriesId: seriesId || "all",
+      filter: workListState.getServerFilterMode(),
       sort: workListState.getServerSortMode(),
       limit: String(limit),
       offset: "0"

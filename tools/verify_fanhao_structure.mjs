@@ -25,6 +25,7 @@ import { createWorkDetailService } from "../src/modules/fanhao/server/works/work
 import { createMissingCodeSearchService } from "../src/modules/fanhao/server/works/missing-code-search-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createWorkClassificationService } from "../src/modules/fanhao/server/works/work-classification-service.js";
+import { createWorkFilterService } from "../src/modules/fanhao/server/works/work-filter-service.js";
 import { createWorkSearchIndexService } from "../src/modules/fanhao/server/works/work-search-index-service.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
 import { sendJson } from "../src/platform/server/responses.js";
@@ -307,7 +308,8 @@ for (const relativePath of [
   "android-client/www/modules/fanhao/features/shared/viewport-image-loader.js",
   "android-client/www/modules/fanhao/features/rankings/ranking-views.js",
   "src/modules/fanhao/server/composition.js",
-  "src/modules/fanhao/server/user-state/collection-query-service.js"
+  "src/modules/fanhao/server/user-state/collection-query-service.js",
+  "src/modules/fanhao/server/works/work-filter-service.js"
 ]) {
   assert(fs.statSync(path.join(root, relativePath), { throwIfNoEntry: false })?.isFile(), `missing FanHao refactor part: ${relativePath}`);
 }
@@ -355,6 +357,8 @@ assert.equal(filteredPersonDetailUrl.searchParams.get("includeMissingLocal"), "1
 assert.equal(filteredPersonDetailUrl.searchParams.get("includeCompilation"), "1", "Android person requests must explicitly retain compilation works");
 assert(androidDetailViews.includes("personDetailPath(personId, { ...getWorkListRequestState(), limit: getWorksLimit() })") && androidFanhaoModule.includes("getWorkListRequestState: workViews.getWorkListRequestState"), "Android person pages must derive their server query from the rendered work-list state");
 assert(androidWorkViews.includes("getWorkListRequestState: () => ({ filter: workListState.getServerFilterMode(), sort: workListState.getServerSortMode() })"), "Android work views must expose one authoritative server filter and sort snapshot");
+assert(/function studioDetailPath[\s\S]*?filter: workListState\.getServerFilterMode\(\)[\s\S]*?return `\/api\/studios\//.test(androidWorkViews), "Android studio requests must send the authoritative server filter");
+assert(androidWorkViews.includes("serverContinuationOptions(works, total, { activeFilterTotal: true })") && androidDetailViews.includes("activeFilterTotal: data.total || works.length"), "Android server-filtered detail pages must display the full filtered total for combined chips");
 assert(lines("android-client/www/modules/fanhao/features/people/detail-request.js") <= 24 && androidPersonDetailRequest.includes("URLSearchParams"), "Android person request construction must stay focused and encoded");
 assert(androidWorkViews.includes("const searchListState = createWorkListState({") && androidWorkViews.includes("persist: false") && androidWorkViews.includes('initialFilterMode: "all"'), "FanHao Android search must start from an isolated unfiltered list state");
 assert(androidWorkViews.includes("workListState: searchListState") && androidWorkViews.includes("listState: searchListState"), "FanHao Android search requests and controls must share their isolated list state");
@@ -438,7 +442,7 @@ assert(androidSectionStyles.includes('@media (max-width: 360px)') && androidSect
 assert(workDetailActionStyles.includes("flex-wrap: nowrap") && workDetailActionStyles.includes("width: 100%"), "Android work-detail actions must stay in one dedicated full-width row");
 assert(workDetailActionButtonStyles.includes("flex: 1 1 0") && workDetailActionButtonStyles.includes("min-width: 0"), "Android work-detail actions must share the available phone width evenly");
 assert(androidIndexHtml.includes("styles.css?v=20260720-fanhao-detail-layout-01"), "Android work-detail layout styles must retain their fresh WebView URL");
-assert(androidIndexHtml.includes("app.js?v=20260720-fanhao-person-query-01") && androidApp.includes("config.js?v=20260720-fanhao-person-query-01") && androidConfig.includes('CLIENT_VERSION = "20260720-fanhao-person-query-01"'), "Android person-query changes must refresh the WebView cache chain");
+assert(androidIndexHtml.includes("app.js?v=20260720-fanhao-studio-filter-01") && androidApp.includes("config.js?v=20260720-fanhao-studio-filter-01") && androidConfig.includes('CLIENT_VERSION = "20260720-fanhao-studio-filter-01"'), "Android studio-filter changes must refresh the WebView cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -767,12 +771,12 @@ assert(androidDetailViews.includes("hasServerMore:"), "Android person details mu
 assert(!androidDetailViews.includes("limit=2000"), "Android person details must not fetch every work before first render");
 assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && androidDetailViews.includes("正在加载作品"), "Android person navigation must paint the local index before the network request completes");
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
-assert(androidFanhaoIndex.includes('detail-views.js?v=20260720-fanhao-person-query-01'), "Android person-query changes must use a fresh detail-view URL");
+assert(androidFanhaoIndex.includes('detail-views.js?v=20260720-fanhao-studio-filter-01'), "Android filtered-total changes must use a fresh detail-view URL");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-person-query-01'), "Android person-query changes must use a fresh work-view URL");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-studio-filter-01'), "Android studio-filter changes must use a fresh work-view URL");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must use a fresh people-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-person-query-01'), "Android person-query changes must refresh the FanHao module entry chain");
-assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-person-query-01'), "Android person-query changes must refresh the app entry chain");
+assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-studio-filter-01'), "Android studio-filter changes must refresh the FanHao module entry chain");
+assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-studio-filter-01'), "Android studio-filter changes must refresh the app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
@@ -967,6 +971,7 @@ assert(personDetailServiceSource.includes("workQueryService.lightweightFacets(so
 const workInfoServiceSource = read("src/modules/fanhao/server/works/work-info-service.js");
 const workQueryServiceSource = read("src/modules/fanhao/server/works/work-query-service.js");
 const workClassificationServiceSource = read("src/modules/fanhao/server/works/work-classification-service.js");
+const workFilterServiceSource = read("src/modules/fanhao/server/works/work-filter-service.js");
 const workCodeIndexServiceSource = read("src/modules/fanhao/server/works/work-code-index-service.js");
 const workSearchIndexServiceSource = read("src/modules/fanhao/server/works/work-search-index-service.js");
 assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info details must support page-level batch hydration");
@@ -974,6 +979,9 @@ assert(personDetailServiceSource.includes("{ lightweightInfo: true }") && workQu
 assert(peoplePageSource.includes('includeMissingLocal: state.showMissingLocalWorks ? "1" : "0"') && peoplePageSource.includes('includeCompilation: state.showCompilationWorks ? "1" : "0"'), "person requests must send server-side missing-local and compilation visibility");
 assert(workQueryServiceSource.includes("workClassificationService.filterForRequest(sourceWorks, url, filter)") && workQueryServiceSource.indexOf("filterForRequest(sourceWorks, url, filter)") < workQueryServiceSource.indexOf("sortWorkList(matchedWorks"), "person visibility must be filtered on the server before sorting and pagination");
 assert(workQueryServiceSource.includes("filters.every((item) => matchesFilter(work, item))"), "server work queries must apply combined filter chips before pagination");
+assert(studioService.indexOf("cachedFilteredStudioWorks(workSet, filter)") < studioService.indexOf("sortWorkList(filteredWorkSet.works, sort)"), "studio filters must run before sorting and pagination");
+assert(studioService.includes("detailPageCacheKey(makerId, selectedSeriesId, filter, sort, url)"), "studio page caches must distinguish active server filters");
+assert(workFilterServiceSource.includes("requested.every((item) => matches(work, item))") && lines("src/modules/fanhao/server/works/work-filter-service.js") <= 100, "shared server work filtering must support compact combined-filter semantics");
 assert(workClassificationServiceSource.includes("function isCompilation(work)") && workClassificationServiceSource.includes("function filterForRequest(works, url, filter"), "compilation classification and visibility must live on the server");
 assert(personDetailServiceSource.includes('url.searchParams.get("includeMissingLocal")') && personDetailServiceSource.includes('url.searchParams.get("includeCompilation")'), "person page caches must distinguish server visibility options");
 assert(webApp.includes('if (state.activeView === "people" && state.selectedPersonId) return state.works;'), "person cards must render the server page without client-side visibility filtering or sorting");
@@ -1101,7 +1109,7 @@ assert(mediaBlobWorkerSource.includes("INSERT INTO remote_image_cache"), "the me
 const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");
 assert(!/fanhao:\s*\{\s*catalog:/s.test(server), "server.js must not own FanHao runtime buckets");
-assert(server.includes("if (!missingLocal && !work.coverId && !workHasCoreCover(work.id))"), "catalog facets must use the compact core-cover index");
+assert(workFilterServiceSource.includes("if (!missingLocal && !work.coverId && !workHasCoreCover(work.id))"), "catalog facets must use the compact core-cover index");
 assert(!server.includes("return !work.coverId && !workCoverRow(work.id);"), "catalog facets must not read cover blobs while counting missing covers");
 assert(workSearchIndexServiceSource.includes("normalized: normalizeSearchValue(normalizedValues.join"), "deep raw metadata must stay out of the normalization hot path");
 assert(server.includes("function prewarmWorkSearch(works = [])"), "local and missing-work search text must be prepared before the first query");
@@ -1497,6 +1505,18 @@ let studioCoverPrewarmCount = 0;
 let studioInfoPrewarmCount = 0;
 let studioPagePayloadCount = 0;
 let studioUserStateStamp = "studio-user-v1";
+const studioWorks = [
+  { id: "studio-high-vr", coverId: "cover-1", infoCount: 1, infoSummary: { rating: 4.5 }, playableCount: 1, vr: true },
+  { id: "studio-high", coverId: "cover-2", infoCount: 1, infoSummary: { rating: 4.2 }, playableCount: 1, vr: false },
+  { id: "studio-low", coverId: "cover-3", infoCount: 1, infoSummary: { rating: 3.8 }, playableCount: 1, vr: true }
+];
+const studioWorksById = new Map(studioWorks.map((work) => [work.id, work]));
+const studioWorkFilterService = createWorkFilterService({
+  isVrWork: (work) => work.vr,
+  workInfoFacetRow: () => null
+});
+assert.deepEqual(studioWorkFilterService.filter(studioWorks, "highRating,vr").map((work) => work.id), ["studio-high-vr"], "shared studio filtering must apply every active chip before paging");
+assert.equal(studioWorkFilterService.facets(studioWorks).highRating, 2, "shared studio facets must retain the full maker filter counts");
 const studioRows = [
   { maker_id: "1", name: "Studio One", normalized_name: "studio one", javdb_url: "", source: "test", work_count: 10, local_work_count: 8, first_release_date: "2024-01-01", latest_release_date: "2026-01-01" },
   { maker_id: "2", name: "Studio Two", normalized_name: "studio two", javdb_url: "", source: "test", work_count: 2, local_work_count: 1, first_release_date: "2025-01-01", latest_release_date: "2026-01-02" }
@@ -1535,20 +1555,22 @@ const cachedStudioService = createStudioService({
       }
       if (sql.includes("FROM work_makers wm")) {
         return {
-          all() {
+          all(makerId) {
             studioWorksReadCount += 1;
-            return [];
+            const ids = Number(makerId) === 1 ? studioWorks.map((work) => work.id) : [studioWorks[2].id];
+            return ids.map((workId) => ({ work_id: workId }));
           }
         };
       }
       throw new Error(`unexpected studio query: ${sql.slice(0, 80)}`);
     }
   }),
-  getLibrary: () => ({ worksById: new Map() }),
+  filterWorkList: studioWorkFilterService.filter,
+  getLibrary: () => ({ worksById: studioWorksById }),
   getStamp: () => studioDataStamp,
-  pagedWorksPayload: () => {
+  pagedWorksPayload: (works, _url, extra) => {
     studioPagePayloadCount += 1;
-    return {};
+    return { ...extra, count: works.length, total: works.length, works };
   },
   prewarmCoreWorkCovers: () => {
     studioCoverPrewarmCount += 1;
@@ -1562,7 +1584,7 @@ const cachedStudioService = createStudioService({
     return works;
   },
   userStateStamp: () => studioUserStateStamp,
-  workFacets: () => ({})
+  workFacets: studioWorkFilterService.facets
 });
 cachedStudioService.prewarm();
 assert.equal(studioMakerDetailReadCount, 2, "studio startup must prepare every visible maker detail");
@@ -1588,6 +1610,10 @@ assert.equal(studioPagePayloadCount, 5, "repeated studio detail pages must reuse
 studioUserStateStamp = "studio-user-v2";
 cachedStudioService.detailPayload("1", uncachedStudioPageUrl);
 assert.equal(studioPagePayloadCount, 6, "studio detail pages must refresh after favorite or progress state changes");
+const filteredStudioPage = cachedStudioService.detailPayload("1", new URL("http://127.0.0.1/api/studios/1?seriesId=all&filter=highRating%2Cvr&sort=releaseDesc&limit=24"));
+assert.equal(filteredStudioPage.total, 1, "studio details must filter the complete maker work set before pagination");
+assert.equal(filteredStudioPage.filter, "highRating,vr", "studio detail payloads must expose the applied combined filter");
+assert.equal(filteredStudioPage.facets.highRating, 2, "studio detail facets must continue describing the complete maker work set");
 cachedStudioService.summaries(new URL("http://127.0.0.1/api/studios?limit=500&q=studio"));
 assert.equal(studioSummaryReadCount, 2, "studio keyword searches must preserve their direct SQL semantics");
 studioDataStamp = "studio-v2";

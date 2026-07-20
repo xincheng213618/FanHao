@@ -37,6 +37,7 @@ import { createWorkImageService } from "./src/modules/fanhao/server/works/image-
 import { createWorkPresenterService } from "./src/modules/fanhao/server/works/presenter-service.js";
 import { createWorkCodeIndexService } from "./src/modules/fanhao/server/works/work-code-index-service.js";
 import { createWorkCoverMutationService } from "./src/modules/fanhao/server/works/work-cover-mutation-service.js";
+import { createWorkFilterService } from "./src/modules/fanhao/server/works/work-filter-service.js";
 import { createWorkInfoService } from "./src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkLocalMutationService } from "./src/modules/fanhao/server/works/work-local-mutation-service.js";
 import { createWorkSearchIndexService } from "./src/modules/fanhao/server/works/work-search-index-service.js";
@@ -504,8 +505,18 @@ const actorMovieService = createActorMovieService({
   storedWorkCodeKey,
   workCodeKeys
 });
+const workFilterService = createWorkFilterService({
+  favoriteStateService,
+  isVrWork,
+  playbackProgressService,
+  publicWorkAvailability,
+  workHasCoreCover,
+  workHasLocalMarker,
+  workInfoFacetRow
+});
 const studioService = createStudioService({
   clampInteger,
+  filterWorkList: workFilterService.filter,
   getCoreDb,
   getLibrary: () => library,
   getStamp: studioCatalogStamp,
@@ -2107,37 +2118,7 @@ function sortWorkList(works, sort) {
 }
 
 function workFacets(works = allWorks()) {
-  const facets = {
-    all: works.length,
-    playable: 0,
-    favorite: 0,
-    progress: 0,
-    info: 0,
-    localOnly: 0,
-    missingLocal: 0,
-    rated: 0,
-    highRating: 0,
-    vr: 0,
-    hasMagnet: 0,
-    missingCover: 0
-  };
-  for (const work of works) {
-    const infoRow = workInfoFacetRow(work.id);
-    const rating = firstPresentNumber(infoRow?.rating, work.infoSummary?.rating);
-    const missingLocal = Boolean(work.missingLocal);
-    if (Number(work.playableCount || 0) > 0) facets.playable += 1;
-    if (favoriteStateService.isFavoriteWork(work.id)) facets.favorite += 1;
-    if (playbackProgressService.getWorkProgress(work)) facets.progress += 1;
-    if (infoRow || Number(work.infoCount || 0) > 0) facets.info += 1;
-    if (missingLocal) facets.missingLocal += 1;
-    else facets.localOnly += 1;
-    if (rating !== null) facets.rated += 1;
-    if (rating !== null && rating >= 4) facets.highRating += 1;
-    if (isVrWork(work)) facets.vr += 1;
-    if (missingLocal && publicWorkAvailability(work).hasMagnet) facets.hasMagnet += 1;
-    if (!missingLocal && !work.coverId && !workHasCoreCover(work.id)) facets.missingCover += 1;
-  }
-  return facets;
+  return workFilterService.facets(works);
 }
 
 function pagedWorksPayload(works, url, extra = {}) {

@@ -6,6 +6,7 @@ const STUDIO_SUMMARY_CACHE_LIMIT = 32;
 
 export function createStudioService({
   clampInteger,
+  filterWorkList = (works) => works,
   getCoreDb,
   getLibrary,
   getStamp,
@@ -258,20 +259,22 @@ export function createStudioService({
     const maker = cachedMakerDetail(makerId, db);
     if (!maker) return null;
     const workSet = cachedStudioWorks(makerId, selectedSeriesId, db);
+    const filter = String(url.searchParams.get("filter") || "all").trim() || "all";
     const sort = url.searchParams.get("sort") || DEFAULT_STUDIO_SORT;
-    const pageCacheKey = detailPageCacheKey(makerId, selectedSeriesId, sort, url);
+    const pageCacheKey = detailPageCacheKey(makerId, selectedSeriesId, filter, sort, url);
     const cachedPage = readLru(studioPageCache, pageCacheKey);
     if (cachedPage) return cachedPage;
-    let sorted = workSet.sortedByMode.get(sort);
+    const filteredWorkSet = cachedFilteredStudioWorks(workSet, filter);
+    let sorted = filteredWorkSet.sortedByMode.get(sort);
     if (!sorted) {
-      sorted = sortWorkList(workSet.works, sort);
-      workSet.sortedByMode.set(sort, sorted);
+      sorted = sortWorkList(filteredWorkSet.works, sort);
+      filteredWorkSet.sortedByMode.set(sort, sorted);
     }
     const payload = {
       sync,
       studio: maker.studio,
       selectedSeriesId,
-      ...pagedWorksPayload(sorted, url, { facets: cachedStudioFacets(workSet) })
+      ...pagedWorksPayload(sorted, url, { filter, facets: cachedStudioFacets(workSet) })
     };
     writeLru(studioPageCache, pageCacheKey, payload, STUDIO_PAGE_CACHE_LIMIT);
     return payload;
@@ -284,10 +287,11 @@ export function createStudioService({
     studioPageCache.clear();
   }
 
-  function detailPageCacheKey(makerId, selectedSeriesId, sort, url) {
+  function detailPageCacheKey(makerId, selectedSeriesId, filter, sort, url) {
     return [
       String(makerId || ""),
       selectedSeriesId,
+      filter,
       sort,
       url.searchParams.get("limit") || "",
       url.searchParams.get("offset") || "0"
@@ -295,11 +299,28 @@ export function createStudioService({
   }
 
   function cachedStudioFacets(workSet) {
-    const stamp = userStateStamp();
+    const stamp = `${workQueryStamp()}:${userStateStamp()}`;
     if (workSet.facetsCache?.stamp === stamp) return workSet.facetsCache.facets;
     const facets = workFacets(workSet.works);
     workSet.facetsCache = { stamp, facets };
     return facets;
+  }
+
+  function cachedFilteredStudioWorks(workSet, filter) {
+    const stamp = `${workQueryStamp()}:${userStateStamp()}`;
+    if (workSet.queryCacheStamp !== stamp) {
+      workSet.queryCacheStamp = stamp;
+      workSet.filteredByMode.clear();
+      workSet.sortedByMode.clear();
+    }
+    if (filter === "all") return workSet;
+    if (!workSet.filteredByMode.has(filter)) {
+      workSet.filteredByMode.set(filter, {
+        works: filterWorkList(workSet.works, filter),
+        sortedByMode: new Map()
+      });
+    }
+    return workSet.filteredByMode.get(filter);
   }
 
   function cachedMakerDetail(makerId, db) {
@@ -349,7 +370,13 @@ export function createStudioService({
       : db.prepare("SELECT DISTINCT CAST(wm.work_id AS TEXT) AS work_id FROM work_makers wm JOIN local_works lw ON lw.work_id = wm.work_id WHERE wm.maker_id = ?").all(Number(makerId));
     const library = getLibrary();
     const works = linkRows.map((item) => library.worksById.get(item.work_id)).filter(Boolean);
-    const detail = { works, facetsCache: null, sortedByMode: new Map() };
+    const detail = {
+      works,
+      facetsCache: null,
+      queryCacheStamp: `${workQueryStamp()}:${userStateStamp()}`,
+      filteredByMode: new Map(),
+      sortedByMode: new Map()
+    };
     studioWorksCache.set(cacheKey, detail);
     return detail;
   }

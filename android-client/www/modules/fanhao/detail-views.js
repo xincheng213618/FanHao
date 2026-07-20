@@ -73,6 +73,7 @@ export function createDetailViews(context) {
       renderWorks(works, "这个人物下面还没有作品。", {
         facets: data.facets,
         total: data.total || works.length,
+        activeFilterTotal: data.total || works.length,
         hasServerMore: works.length < Number(data.total || works.length),
         onLoadMore: () => {
           increaseWorksLimit(48);
@@ -104,7 +105,6 @@ export function createDetailViews(context) {
       }
     }
   }
-
   function renderPersonPreview(person) {
     const displayName = person.actorProfile?.displayName || person.name || "人物";
     els.viewTitle.textContent = displayName;
