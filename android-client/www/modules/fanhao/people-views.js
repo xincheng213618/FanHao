@@ -6,10 +6,10 @@ const PEOPLE_SORT_STORAGE_KEY = "fanhao.android.peopleSort";
 const PEOPLE_PAGE_SIZE = 64;
 const PERSON_AVATAR_ROOT_MARGIN = "560px 320px";
 const PEOPLE_SORTS = [
-  { value: "smart", label: "默认", description: "头像优先" },
-  { value: "works", label: "作品", description: "作品最多" },
-  { value: "videos", label: "视频", description: "视频最多" },
-  { value: "name", label: "名称", description: "按名称" }
+  { value: "smart", label: "头像优先", description: "头像优先" },
+  { value: "works", label: "作品最多", description: "作品最多" },
+  { value: "videos", label: "视频最多", description: "视频最多" },
+  { value: "name", label: "名称排序", description: "按名称" }
 ];
 
 export function createPeopleViews(context) {
@@ -42,7 +42,7 @@ export function createPeopleViews(context) {
     previewAvatarLoader.reset();
     els.personPreview.innerHTML = "";
     if (!list.length) {
-      els.personPreview.innerHTML = `<div class="loading-row">暂无人物数据</div>`;
+      els.personPreview.innerHTML = `<div class="loading-row">暂无作者数据</div>`;
       return;
     }
 
@@ -61,15 +61,14 @@ export function createPeopleViews(context) {
     const visible = people.slice(0, getPeopleLimit());
     indexAvatarLoader.reset();
 
-    els.viewKicker.textContent = "人物索引";
-    els.viewTitle.textContent = "全部人物";
-    els.viewMeta.textContent = `${formatNumber(people.length)} 人 · ${sortDescription(sortMode)}`;
-    const controls = createPeopleSortControls(sortMode);
+    els.viewKicker.textContent = "作者索引";
+    els.viewTitle.textContent = "全部作者";
+    els.viewMeta.textContent = `${formatNumber(people.length)} 位作者 · ${sortDescription(sortMode)}`;
     const grid = document.createElement("div");
     grid.className = "people-grid";
     appendPeopleCards(grid, visible, indexAvatarLoader);
-    peopleIndexCache = { controls, grid, loadMore: null, people, sortMode, sourcePeople };
-    els.viewContent.replaceChildren(controls, grid);
+    peopleIndexCache = { grid, loadMore: null, people, sortMode, sourcePeople };
+    els.viewContent.replaceChildren(grid);
     appendPeopleIndexLoadMore(peopleIndexCache);
   }
 
@@ -77,10 +76,10 @@ export function createPeopleViews(context) {
     const cache = peopleIndexCache;
     if (!cache || cache.sourcePeople !== sourcePeople || cache.sortMode !== sortMode) return false;
     syncPeopleLimit(cache.grid.children.length);
-    els.viewKicker.textContent = "人物索引";
-    els.viewTitle.textContent = "全部人物";
-    els.viewMeta.textContent = `${formatNumber(cache.people.length)} 人 · ${sortDescription(sortMode)}`;
-    const nodes = cache.loadMore ? [cache.controls, cache.grid, cache.loadMore] : [cache.controls, cache.grid];
+    els.viewKicker.textContent = "作者索引";
+    els.viewTitle.textContent = "全部作者";
+    els.viewMeta.textContent = `${formatNumber(cache.people.length)} 位作者 · ${sortDescription(sortMode)}`;
+    const nodes = cache.loadMore ? [cache.grid, cache.loadMore] : [cache.grid];
     els.viewContent.replaceChildren(...nodes);
     return true;
   }
@@ -134,23 +133,11 @@ export function createPeopleViews(context) {
     return PEOPLE_SORTS.find((item) => item.value === mode)?.description || PEOPLE_SORTS[0].description;
   }
 
-  function createPeopleSortControls(activeMode) {
-    const row = document.createElement("div");
-    row.className = "people-sort-row";
-    for (const option of PEOPLE_SORTS) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = option.label;
-      button.classList.toggle("active", option.value === activeMode);
-      button.setAttribute("aria-pressed", option.value === activeMode ? "true" : "false");
-      button.addEventListener("click", () => {
-        if (option.value === getPeopleSortMode()) return;
-        localStorage.setItem(PEOPLE_SORT_STORAGE_KEY, option.value);
-        renderPeopleIndex();
-      });
-      row.append(button);
-    }
-    return row;
+  function setPeopleSortMode(value) {
+    if (!PEOPLE_SORTS.some((item) => item.value === value) || value === getPeopleSortMode()) return false;
+    localStorage.setItem(PEOPLE_SORT_STORAGE_KEY, value);
+    renderPeopleIndex();
+    return true;
   }
 
   function comparePeople(a, b, mode) {
@@ -229,6 +216,9 @@ export function createPeopleViews(context) {
     renderPreviewPeople,
     renderPeopleIndex,
     createPersonCard,
+    getSortMode: getPeopleSortMode,
+    getSortOptions: () => PEOPLE_SORTS.map(({ value, label }) => ({ value, label })),
+    setSortMode: setPeopleSortMode,
     sortPeople
   };
 }

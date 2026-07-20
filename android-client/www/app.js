@@ -1,7 +1,6 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260720-fanhao-collection-filter-01";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260720-fanhao-author-detail-02";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260714-music-sleep-current-28";
-import { countChannelFavorites, readChannelFavorites, removeChannelFavorite } from "./js/channel-favorites.js?v=20260702-novel-local-manage-74";
 import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260712-module-chrome-03";
 import { getElements } from "./js/dom.js?v=20260712-module-chrome-03";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
@@ -13,7 +12,7 @@ import { createSearchHistory } from "./js/search-history.js";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
-const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "studios", "studioDetail", "vr", "favorites", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "tools"]);
+const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "studios", "studioDetail", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "tools"]);
 const DEFAULT_VIEW = "works";
 const DEFAULT_PHOTO_CATEGORY = "我喜欢的";
 const PRIMARY_LABELS = {
@@ -85,7 +84,7 @@ let musicSummary = null;
 let shortVideoSummary = null;
 let androidVersionInfo = null;
 let androidUpdateInfo = null;
-const FEED_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "vr", "people", "favorites", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail", "music", "shortVideos"]);
+const FEED_VIEWS = new Set(["works", "rankings", "studios", "studioDetail", "people", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail", "music", "shortVideos"]);
 
 function readInitialViewState() {
   const state = readViewStateFromHash() || readLastViewState();
@@ -981,7 +980,12 @@ function openNativeLibraryRoute(options = {}) {
     showView(DEFAULT_VIEW, {}, navigation);
     return true;
   }
-  if (first === "favorites" || first === "history" || first === "rankings" || first === "tools") {
+  if (first === "favorites" || first === "vr") {
+    workViews?.setWorkFilterMode(first === "vr" ? "vr" : "favorite", { replace: true, rerender: false });
+    showView("works", {}, navigation);
+    return true;
+  }
+  if (first === "history" || first === "rankings" || first === "tools") {
     showView(first, {}, navigation);
     return true;
   }
@@ -1176,7 +1180,6 @@ function renderDashboard(data) {
 
 function renderUserState(user = {}) {
   els.historyCount.textContent = formatNumber(user.historyCount || user.history || 0);
-  els.favoriteCount.textContent = formatNumber((user.favoriteCount || user.favorites || 0) + countChannelFavorites());
 }
 
 function renderRecentContentPreview() {
@@ -1225,81 +1228,14 @@ function rememberRecentContent(item) {
   if (currentView === "home") renderRecentContentPreview();
 }
 
-function renderChannelFavoritesPanel() {
-  const items = readChannelFavorites();
-  if (!items.length) return;
-
-  const panel = document.createElement("div");
-  panel.className = "channel-favorites-panel";
-  const head = document.createElement("div");
-  head.className = "channel-favorites-head";
-  const title = document.createElement("strong");
-  title.textContent = "频道收藏";
-  const meta = document.createElement("span");
-  meta.textContent = `${formatNumber(items.length)} 个`;
-  head.append(title, meta);
-
-  const grid = document.createElement("div");
-  grid.className = "channel-favorites-grid";
-  for (const item of items) {
-    grid.append(createChannelFavoriteCard(item));
-  }
-
-  panel.append(head, grid);
-  els.viewContent.append(panel);
-}
-
-function createChannelFavoriteCard(item) {
-  const wrap = document.createElement("div");
-  wrap.className = `channel-favorite-card ${item.type || ""}`;
-
-  const open = document.createElement("button");
-  open.type = "button";
-  open.className = "channel-favorite-open";
-  open.addEventListener("click", () => showView(item.view, item.params, { push: true }));
-
-  const thumb = document.createElement("div");
-  thumb.className = "channel-favorite-thumb";
-  thumb.textContent = item.fallback || "?";
-  if (item.coverUrl) {
-    const cover = absoluteUrl(activeUrl, item.coverUrl);
-    if (cover) loadPreviewImage(thumb, cover, { cacheBaseUrl: activeUrl });
-  }
-
-  const body = document.createElement("div");
-  body.className = "channel-favorite-body";
-  const label = document.createElement("span");
-  label.textContent = item.label || "频道";
-  const title = document.createElement("strong");
-  title.textContent = item.title || "未命名内容";
-  const meta = document.createElement("small");
-  meta.textContent = [item.subtitle, item.meta].filter(Boolean).join(" · ");
-  body.append(label, title);
-  if (meta.textContent) body.append(meta);
-  open.append(thumb, body);
-
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "channel-favorite-remove";
-  remove.textContent = "取消收藏";
-  remove.addEventListener("click", () => {
-    removeChannelFavorite(item);
-    renderUserState(library?.user || {});
-    renderCurrentView();
-  });
-
-  wrap.append(open, remove);
-  return wrap;
-}
-
 function handleChannelFavoriteChange() {
   renderUserState(library?.user || {});
-  if (currentView === "favorites") renderCurrentView();
 }
 
 function showHome(options = {}) {
   invalidateViewRender();
   document.body.classList.remove("novel-reader-view");
+  document.body.classList.remove("fanhao-search-page-view");
   currentView = "home";
   currentViewParams = {};
   dispatchAppViewChanged();
@@ -1404,9 +1340,9 @@ function canRenderWithoutLibrary(view = "") {
 function defaultWorksLimitForView(view) {
   const fast = isFastServerUrl();
   if (view === "rankings") return 120;
-  if (view === "works" || view === "vr" || view === "studioDetail") return fast ? FAST_WORK_LIMIT : 60;
+  if (view === "works" || view === "studioDetail") return fast ? FAST_WORK_LIMIT : 60;
   if (view === "search" || view === "personDetail") return fast ? FAST_WORK_LIMIT : 48;
-  if (view === "favorites" || view === "history") return fast ? FAST_WORK_LIMIT : 48;
+  if (view === "history") return fast ? FAST_WORK_LIMIT : 48;
   return fast ? FAST_WORK_LIMIT : 40;
 }
 
@@ -1593,7 +1529,7 @@ function routeLoadingCopy(view = currentView, params = currentViewParams) {
   if (view === "photoDetail") return { kicker: "套图", title: "套图详情", meta: "正在读取", message: "正在读取套图" };
   if (view === "mangaDetail") return { kicker: "韩漫", title: "漫画详情", meta: "正在读取", message: "正在读取漫画" };
   if (view === "mangaChapter") return { kicker: "韩漫阅读", title: "章节", meta: "正在读取", message: "正在读取章节" };
-  if (view === "personDetail") return { kicker: "人物", title: "人物详情", meta: "正在读取", message: "正在加载人物资料" };
+  if (view === "personDetail") return { kicker: "作者", title: "作者详情", meta: "正在读取", message: "正在加载作者资料" };
   if (view === "workDetail") return { kicker: "作品详情", title: "作品详情", meta: "正在读取", message: "正在加载作品详情" };
   if (view === "novelDetail") return { kicker: "小说", title: "书籍详情", meta: "正在读取", message: "正在读取书籍详情" };
   if (view === "novelReader") return { kicker: "小说阅读", title: "章节", meta: "正在读取", message: "正在翻开章节" };
@@ -1602,11 +1538,9 @@ function routeLoadingCopy(view = currentView, params = currentViewParams) {
   if (view === "rankings") return { kicker: "榜单", title: "排行榜", meta: "正在加载", message: "正在加载排行榜" };
   if (view === "studios") return { kicker: "片商", title: "片商索引", meta: "正在加载", message: "正在加载片商" };
   if (view === "studioDetail") return { kicker: "片商", title: "片商作品", meta: "正在加载", message: "正在加载片商作品" };
-  if (view === "vr") return { kicker: "VR", title: "VR 作品", meta: "正在加载", message: "正在加载 VR 作品" };
-  if (view === "favorites") return { kicker: "收藏", title: "已收藏作品", meta: "正在读取", message: "正在加载收藏" };
   if (view === "history") return { kicker: "继续观看", title: "观看进度", meta: "正在读取", message: "正在加载观看进度" };
   if (view === "search") return { kicker: "搜索", title: params.query ? `搜索：${params.query}` : "全库搜索", meta: "正在搜索", message: "正在搜索" };
-  if (view === "people") return { kicker: "人物索引", title: "全部人物", meta: "正在整理", message: "正在整理人物索引" };
+  if (view === "people") return { kicker: "作者索引", title: "全部作者", meta: "正在整理", message: "正在整理作者索引" };
   if (view === "novels") return { kicker: "小说", title: "书库", meta: "正在读取", message: "正在读取书库" };
   if (view === "shortVideos") return { kicker: "短视频", title: "短视频", meta: "正在读取", message: "正在读取短视频" };
   if (view === "tools") return { kicker: "个人中心", title: "我的", meta: "正在准备", message: "正在准备我的页面" };
@@ -1623,6 +1557,7 @@ function syncContentPanelMode() {
   document.body.classList.toggle("music-mobile-view", currentView === "music");
   document.body.classList.toggle("short-video-mobile-view", currentView === "shortVideos");
   document.body.classList.toggle("short-video-search-page-view", currentView === "shortVideoSearch");
+  document.body.classList.toggle("fanhao-search-page-view", currentView === "search");
   dispatchAppViewChanged();
 }
 
@@ -1638,7 +1573,6 @@ function renderOffline() {
   els.statVideos.textContent = "-";
   els.statInfo.textContent = "-";
   els.historyCount.textContent = "0";
-  els.favoriteCount.textContent = "0";
   els.peopleCount.textContent = "0";
   if (els.worksCount) els.worksCount.textContent = "0";
   if (els.rankingsCount) els.rankingsCount.textContent = "TOP";
@@ -1804,7 +1738,6 @@ function createAndroidModuleHost() {
       openSettings: () => toggleSettings(true)
     }),
     favorites: Object.freeze({
-      renderPanel: renderChannelFavoritesPanel,
       onChannelFavoriteChange: handleChannelFavoriteChange,
       onUserStateChange: renderUserState
     }),

@@ -2,25 +2,23 @@ import { fetchJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
 import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260720-fanhao-scroll-intent-01";
 import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260702-novel-local-manage-74";
 import { formatNumber } from "../../js/format.js";
-import { createWorkListState } from "../../js/work-filtering.js?v=20260720-fanhao-filter-back-01";
-import { createWorkCards } from "./features/works/cards.js?v=20260720-fanhao-card-code-01";
+import { createWorkListState } from "../../js/work-filtering.js?v=20260720-fanhao-author-detail-02";
+import { createWorkCards } from "./features/works/cards.js?v=20260720-fanhao-author-detail-02";
 import { workCollectionPath } from "./features/works/collection-request.js?v=20260720-fanhao-collection-filter-01";
-import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260717-fanhao-ranking-response-01";
+import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260720-fanhao-author-detail-02";
 import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-page-race-01";
 import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260717-fanhao-search-response-01";
 import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-touch-intent-01";
 import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=20260717-fanhao-work-first-paint-01";
+import { createFanhaoSearchPage } from "./search-page.js?v=20260720-fanhao-author-detail-02";
 
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
 function workDataSignature(data = {}) {
   const works = Array.isArray(data.works) ? data.works : [];
-  const folders = Array.isArray(data.folders) ? data.folders : [];
   return JSON.stringify({
     total: Number(data.total || works.length),
-    selectedFolderId: data.selectedFolderId || "",
     facets: data.facets || null,
-    folders: folders.map((folder) => [folder.id || "", folder.name || "", folder.count || 0]),
     works: works.map((work) => [
       work.id || "",
       work.title || "",
@@ -44,20 +42,20 @@ export function createWorkViews(context) {
     getWorksLimit,
     increaseWorksLimit,
     showView,
+    goBack,
     setActiveBottom,
     renderCurrentView,
     renderCurrentViewPreservingScroll = renderCurrentView,
     isHomeView = () => false
   } = context;
-  const renderFavoriteExtras = context.renderFavoriteExtras || (() => {});
   const workListState = createWorkListState({ renderCurrentView });
   const searchListState = createWorkListState({ renderCurrentView, persist: false, initialFilterMode: "all", initialSortMode: "updated" });
-  let selectedFavoriteFolderId = "all";
   const pageDataService = createWorkPageDataService({ fetchJson, readCachedJson, writeCachedJson });
   const workDetailDataService = createWorkDetailDataService({ getActiveUrl, pageDataService });
   const workCards = createWorkCards({ getActiveUrl, roots: [els.viewContent, els.continuePreview], showView, workDetailDataService });
   const progressiveWorkListRenderer = createProgressiveWorkListRenderer();
   const searchDataService = createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageDataService, workListState: searchListState });
+  const searchPage = createFanhaoSearchPage({ els, goBack, showView, warmSearch: searchDataService.warm });
   const rankingViews = createRankingViews({
     els,
     getActiveUrl,
@@ -126,39 +124,32 @@ export function createWorkViews(context) {
     els.continueSection.hidden = !isHomeView();
   }
 
-  async function renderWorkCollection(view, isActive = () => true) {
+  async function renderHistory(isActive = () => true) {
     leaveRankingSort();
-    const isFavorites = view === "favorites";
-    setActiveBottom(isFavorites ? "favorites" : "history");
-    els.viewKicker.textContent = isFavorites ? "收藏" : "继续观看";
-    els.viewTitle.textContent = isFavorites ? "已收藏作品" : "观看进度";
+    setActiveBottom("history");
+    els.viewKicker.textContent = "继续观看";
+    els.viewTitle.textContent = "观看进度";
     els.viewMeta.textContent = "正在读取";
-    els.viewContent.innerHTML = `<div class="loading-row">正在加载列表</div>`;
-    const limit = getWorksLimit();
-    const path = collectionPath(isFavorites ? "favorites" : "history", limit);
+    els.viewContent.innerHTML = `<div class="loading-row">正在加载观看进度</div>`;
+    const path = historyPath(getWorksLimit());
     const activeUrl = getActiveUrl();
     let renderedCache = false;
 
-    const applyCollectionHeader = (data, cacheEntry = null) => {
+    const applyHeader = (data, cacheEntry = null) => {
       const works = data.works || [];
       const total = Number(data.total || data.count || works.length);
-      if (isFavorites && data.selectedFolderId) selectedFavoriteFolderId = data.selectedFolderId;
-      const folder = isFavorites ? favoriteFolderById(data.folders || [], selectedFavoriteFolderId) : null;
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-      els.viewTitle.textContent = isFavorites && folder ? folder.name : isFavorites ? "已收藏作品" : "观看进度";
       els.viewMeta.textContent = `${formatNumber(works.length)} / ${formatNumber(total)} 个作品${suffix}`;
     };
 
-    const renderCollectionData = (data, cacheEntry = null) => {
+    const renderData = (data, cacheEntry = null) => {
       const works = data.works || [];
       const total = Number(data.total || data.count || works.length);
-      applyCollectionHeader(data, cacheEntry);
+      applyHeader(data, cacheEntry);
       els.viewContent.innerHTML = "";
-      if (isFavorites) renderFavoriteFolderStrip(data.folders || []);
-      if (isFavorites) renderFavoriteExtras();
-      renderWorks(works, isFavorites ? "还没有收藏作品。" : "暂无继续观看记录。", {
+      renderWorks(works, "暂无继续观看记录。", {
         facets: data.facets,
-        ...serverContinuationOptions(works, total, { activeFilterTotal: true })
+        ...serverContinuationOptions(works, total)
       });
     };
 
@@ -169,61 +160,28 @@ export function createWorkViews(context) {
         signature: workDataSignature,
         onCached(data, cacheEntry) {
           renderedCache = true;
-          renderCollectionData(data, cacheEntry);
+          renderData(data, cacheEntry);
         }
       });
       if (!result || !isActive()) return;
       if (result.unchanged) {
-        applyCollectionHeader(result.data);
+        applyHeader(result.data);
         return;
       }
-      renderCollectionData(result.data);
+      renderData(result.data);
     } catch (error) {
       if (!isActive()) return;
-      if (renderedCache) {
-        renderMessage("电脑端暂时连不上，当前显示的是本地缓存。", "quiet", false);
-      } else {
-        renderMessage(error.message, "error");
-      }
+      if (renderedCache) renderMessage("电脑端暂时连不上，当前显示的是本地缓存。", "quiet", false);
+      else renderMessage(error.message, "error");
     }
   }
-  function collectionPath(view, limit = getWorksLimit()) { return workCollectionPath(view, { limit, filter: workListState.getServerFilterMode(), sort: workListState.getServerSortMode(), folderId: selectedFavoriteFolderId }); }
 
-  function favoriteFolderById(folders, folderId) {
-    return (folders || []).find((folder) => folder.id === folderId) || null;
-  }
-
-  function favoriteFolderTotal(folders) {
-    return (folders || []).reduce((sum, folder) => sum + Number(folder.count || 0), 0);
-  }
-
-  function renderFavoriteFolderStrip(folders) {
-    if (!folders.length) return;
-
-    const strip = document.createElement("div");
-    strip.className = "favorite-folder-strip";
-    strip.append(createFavoriteFolderChip("all", "全部", favoriteFolderTotal(folders)));
-
-    for (const folder of folders) {
-      strip.append(createFavoriteFolderChip(folder.id, folder.name, folder.count || 0));
-    }
-
-    els.viewContent.append(strip);
-  }
-
-  function createFavoriteFolderChip(folderId, name, count) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = selectedFavoriteFolderId === folderId ? "active" : "";
-    button.textContent = name;
-    button.title = `${name} · ${formatNumber(count || 0)}`;
-    button.setAttribute("aria-label", `${name}，${formatNumber(count || 0)} 个作品`);
-    button.addEventListener("click", () => {
-      if (selectedFavoriteFolderId === folderId) return;
-      selectedFavoriteFolderId = folderId;
-      renderCurrentView();
+  function historyPath(limit = getWorksLimit()) {
+    return workCollectionPath("history", {
+      limit,
+      filter: workListState.getServerFilterMode(),
+      sort: workListState.getServerSortMode()
     });
-    return button;
   }
 
   async function renderAllWorks(isActive = () => true) {
@@ -256,7 +214,7 @@ export function createWorkViews(context) {
       renderWorks(works, "资料库里还没有作品。", {
         compactMeta: true,
         facets: data.facets,
-        ...serverContinuationOptions(works, total, { activeFilterTotal: true })
+        ...serverContinuationOptions(works, total)
       });
     };
 
@@ -268,11 +226,9 @@ export function createWorkViews(context) {
         onCached(data, cacheEntry) {
           renderedCache = true;
           renderWorksData(data, cacheEntry);
-          warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
         }
       });
       if (!result || !isActive()) return;
-      warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
       if (result.unchanged) {
         applyWorksHeader(result.data);
         return;
@@ -282,68 +238,6 @@ export function createWorkViews(context) {
       if (!isActive()) return;
       if (renderedCache) {
         renderMessage("电脑端暂时连不上，当前显示的是本地缓存作品。", "quiet", false);
-      } else {
-        renderMessage(error.message, "error");
-      }
-    }
-  }
-
-  async function renderVrWorks(isActive = () => true) {
-    leaveRankingSort();
-    setActiveBottom("works");
-    els.viewKicker.textContent = "VR";
-    els.viewTitle.textContent = "VR 作品";
-    els.viewMeta.textContent = "正在加载";
-    els.viewContent.innerHTML = `<div class="loading-row">正在加载 VR 作品</div>`;
-
-    const limit = getWorksLimit();
-    const serverFilter = mergeServerFilters("vr", workListState.getServerFilterMode());
-    const serverSort = workListState.getServerSortMode();
-    const path = `/api/works?limit=${limit}&offset=0&sort=${encodeURIComponent(serverSort)}&filter=${encodeURIComponent(serverFilter)}`;
-    const activeUrl = getActiveUrl();
-    let renderedCache = false;
-
-    const applyHeader = (data, cacheEntry = null) => {
-      const works = data.works || [];
-      const total = Number(data.total || works.length);
-      const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-      els.viewMeta.textContent = `${formatNumber(works.length)} / ${formatNumber(total)} 个 VR 作品${suffix}`;
-    };
-
-    const renderData = (data, cacheEntry = null) => {
-      const works = data.works || [];
-      const total = Number(data.total || works.length);
-      applyHeader(data, cacheEntry);
-      els.viewContent.innerHTML = "";
-      renderWorks(works, "没有 VR 作品。", {
-        compactMeta: true,
-        facets: data.facets,
-        ...serverContinuationOptions(works, total, { activeFilterTotal: true })
-      });
-    };
-
-    try {
-      const result = await pageDataService.load(activeUrl, path, {
-        signal: isActive.signal,
-        isActive,
-        signature: workDataSignature,
-        onCached(data, cacheEntry) {
-          renderedCache = true;
-          renderData(data, cacheEntry);
-          warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
-        }
-      });
-      if (!result || !isActive()) return;
-      warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort });
-      if (result.unchanged) {
-        applyHeader(result.data);
-        return;
-      }
-      renderData(result.data);
-    } catch (error) {
-      if (!isActive()) return;
-      if (renderedCache) {
-        renderMessage("电脑端暂时连不上，当前显示的是本地缓存 VR 作品。", "quiet", false);
       } else {
         renderMessage(error.message, "error");
       }
@@ -435,7 +329,7 @@ export function createWorkViews(context) {
       renderStudioSeriesStrip(studio, data.selectedSeriesId || seriesId || "all");
       renderWorks(works, "这个片商暂无本地作品。", {
         compactMeta: true,
-        ...serverContinuationOptions(works, total, { activeFilterTotal: true })
+        ...serverContinuationOptions(works, total)
       });
     };
 
@@ -481,17 +375,6 @@ export function createWorkViews(context) {
   function warmStudioDetail(studioId, seriesId = "all") {
     if (globalThis.navigator?.connection?.saveData) return;
     pageDataService.warm(getActiveUrl(), [studioDetailPath(studioId, seriesId)]);
-  }
-
-  function mergeServerFilters(...values) {
-    const filters = [];
-    for (const value of values) {
-      for (const item of String(value || "all").split(",")) {
-        const clean = item.trim();
-        if (clean && clean !== "all" && !filters.includes(clean)) filters.push(clean);
-      }
-    }
-    return filters.length ? filters.join(",") : "all";
   }
 
   function createStudioCard(studio) {
@@ -550,21 +433,20 @@ export function createWorkViews(context) {
 
   async function renderSearchResults(query, isActive = () => true) {
     const text = query.trim();
-    els.searchInput.value = text;
     setActiveBottom("search");
     els.viewKicker.textContent = "搜索";
     els.viewTitle.textContent = text ? `搜索：${text}` : "搜索番号库";
-    els.viewMeta.textContent = text ? "正在搜索番号与人物" : "输入番号、作品标题或人物后搜索";
+    els.viewMeta.textContent = text ? "正在搜索番号与作者" : "输入番号、作品标题或作者后搜索";
     els.contentPanel.hidden = false;
+    const { results } = searchPage.render(text);
 
     if (!text) {
       searchListState.setFilterMode("all", { replace: true, rerender: false });
       searchListState.setSortMode("updated", { rerender: false });
-      renderMessage("可以搜索番号、作品标题、文件名或人物。", "quiet");
       return;
     }
 
-    els.viewContent.innerHTML = `<div class="loading-row">正在搜索</div>`;
+    results.innerHTML = `<div class="loading-row">正在搜索</div>`;
     const limit = getWorksLimit();
     const serverFilter = searchListState.getServerFilterMode();
     const serverSort = searchListState.getServerSortMode();
@@ -577,18 +459,19 @@ export function createWorkViews(context) {
       const works = data.works || [];
       const total = Number(data.total || works.length);
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-      els.viewMeta.textContent = `${formatNumber(total)} 个作品 · ${formatNumber(people.length)} 个人物${suffix}`;
+      els.viewMeta.textContent = `${formatNumber(total)} 个作品 · ${formatNumber(people.length)} 位作者${suffix}`;
       if (headerOnly) return;
-      els.viewContent.innerHTML = "";
-      renderSearchPeople(people);
+      results.innerHTML = "";
+      renderSearchPeople(people, results);
       if (works.length || total || !people.length) {
         renderWorks(works, `没有搜到「${text}」。`, {
+          container: results,
           listState: searchListState,
           facets: data.facets,
-          ...serverContinuationOptions(works, total, { activeFilterTotal: true })
+          ...serverContinuationOptions(works, total)
         });
       } else {
-        renderMessage("没有匹配的番号作品，已显示人物结果。", "quiet", false);
+        renderMessageInto(results, "没有匹配的番号作品，已显示作者结果。", "quiet", false);
       }
     };
 
@@ -607,9 +490,9 @@ export function createWorkViews(context) {
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
-        renderMessage("电脑端暂时连不上，当前显示的是本地缓存搜索结果。", "quiet", false);
+        renderMessageInto(results, "电脑端暂时连不上，当前显示的是本地缓存搜索结果。", "quiet", false);
       } else {
-        renderMessage(error.message, "error");
+        renderMessageInto(results, error.message, "error");
       }
     }
   }
@@ -619,19 +502,7 @@ export function createWorkViews(context) {
   }
 
   function warmPrimaryCollections(activeUrl) {
-    const limit = getWorksLimit();
-    pageDataService.warm(activeUrl, [
-      collectionPath("history", limit),
-      collectionPath("favorites", limit)
-    ]);
-  }
-
-  function warmCatalogSibling(activeUrl, { limit, serverFilter, serverSort }) {
-    if (!["all", "vr"].includes(serverFilter)) return;
-    const siblingFilter = serverFilter === "vr" ? "all" : "vr";
-    pageDataService.warm(activeUrl, [
-      `/api/works?limit=${limit}&offset=0&sort=${encodeURIComponent(serverSort)}&filter=${siblingFilter}`
-    ]);
+    pageDataService.warm(activeUrl, [historyPath(getWorksLimit())]);
   }
 
   async function refreshRankingCache() {
@@ -642,10 +513,9 @@ export function createWorkViews(context) {
     rankingViews.leaveRankingSort();
   }
 
-  function serverContinuationOptions(works, total, options = {}) {
+  function serverContinuationOptions(works, total) {
     return {
       total,
-      activeFilterTotal: options.activeFilterTotal ? total : undefined,
       hasServerMore: works.length < total,
       onLoadMore() {
         increaseWorksLimit(48);
@@ -654,7 +524,7 @@ export function createWorkViews(context) {
     };
   }
 
-  function renderSearchPeople(people) {
+  function renderSearchPeople(people, container = els.viewContent) {
     if (!people.length) return;
 
     const panel = document.createElement("div");
@@ -667,28 +537,28 @@ export function createWorkViews(context) {
       chip.addEventListener("click", () => showView("personDetail", { personId: person.id }, { push: true }));
       panel.append(chip);
     }
-    els.viewContent.append(panel);
+    container.append(panel);
   }
 
   function renderWorks(works, emptyMessage, options = {}) {
-    const { listState = workListState, ...renderOptions } = options;
+    const { container = els.viewContent, listState = workListState, ...renderOptions } = options;
     if (!renderOptions.allowRankingSort && listState === workListState) leaveRankingSort();
     progressiveWorkListRenderer.cancel();
     workCards.resetCoverLoading();
     const source = works || [];
     const list = listState.visibleWorks(source, renderOptions);
     const visible = list.slice(0, getWorksLimit());
-    els.viewContent.querySelector(".loading-row")?.remove();
-    els.viewContent.append(listState.createWorkControls(source, list, { ...renderOptions, displayedCount: visible.length }));
+    container.querySelector(".loading-row")?.remove();
+    container.append(listState.createWorkControls(source, list, renderOptions));
 
     if (!list.length) {
-      renderMessage(source.length ? "没有符合当前筛选的作品。" : emptyMessage, "quiet", false);
+      renderMessageInto(container, source.length ? "没有符合当前筛选的作品。" : emptyMessage, "quiet", false);
       return;
     }
 
     const grid = document.createElement("div");
     grid.className = "work-list";
-    els.viewContent.append(grid);
+    container.append(grid);
     let loadMore = null;
     if (visible.length < list.length) {
       loadMore = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(list.length)}`, () => {
@@ -698,7 +568,7 @@ export function createWorkViews(context) {
     } else if (renderOptions.hasServerMore && typeof renderOptions.onLoadMore === "function") {
       loadMore = createLoadMoreButton(`向下滑动继续加载 ${formatNumber(visible.length)} / ${formatNumber(renderOptions.total || visible.length)}`, renderOptions.onLoadMore);
     }
-    progressiveWorkListRenderer.render(grid, visible, (work) => workCards.createWorkCard(work, renderOptions), () => loadMore && els.viewContent.append(loadMore));
+    progressiveWorkListRenderer.render(grid, visible, (work) => workCards.createWorkCard(work, renderOptions), () => loadMore && container.append(loadMore));
   }
 
   function createLoadMoreButton(text, handler) {
@@ -716,24 +586,30 @@ export function createWorkViews(context) {
     });
   }
   function renderMessage(message, tone = "quiet", replace = true) {
-    if (replace) els.viewContent.innerHTML = "";
+    renderMessageInto(els.viewContent, message, tone, replace);
+  }
+  function renderMessageInto(container, message, tone = "quiet", replace = true) {
+    if (replace) container.innerHTML = "";
     const box = document.createElement("div");
     box.className = `message-box ${tone}`;
     box.textContent = message;
-    els.viewContent.append(box);
+    container.append(box);
   }
   return {
     renderAllWorks,
-    renderVrWorks,
     renderStudios,
     renderStudioDetail,
     renderContinuePreview,
     renderRankings,
-    renderWorkCollection,
+    renderHistory,
     renderSearchResults,
     warmSearch: searchDataService.warm,
     pageDataService,
     workDetailDataService,
+    getSortMode: (view) => view === "rankings" ? rankingViews.getSortMode() : workListState.getSortMode(),
+    getSortOptions: (view) => workListState.getSortOptions({ allowRankingSort: view === "rankings" }),
+    setSortMode: (view, value) => view === "rankings" ? rankingViews.setSortMode(value) : workListState.setSortMode(value),
+    setWorkFilterMode: (value, options = {}) => workListState.setFilterMode(value, options),
     getWorkListRequestState: () => ({ filter: workListState.getServerFilterMode(), sort: workListState.getServerSortMode() }),
     refreshRankingCache,
     renderWorks,

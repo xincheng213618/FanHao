@@ -31,7 +31,7 @@
 
 .work-controls {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   gap: 4px;
   padding-bottom: 0;
@@ -1130,43 +1130,6 @@
   color: var(--blue);
 }
 
-.work-sort-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 4px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 900;
-}
-
-.work-sort-row span {
-  display: none;
-}
-
-.work-sort-row select {
-  min-height: 44px;
-  width: 100px;
-  max-width: 100px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  background: var(--surface-soft);
-  color: var(--ink);
-  padding: 0 22px 0 11px;
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.content-panel[data-feed-view="true"] .work-sort-row {
-  gap: 8px;
-  font-size: 11.5px;
-}
-
-.content-panel[data-feed-view="true"] .work-sort-row select {
-  min-height: 44px;
-  max-width: 100px;
-}
-
 .work-card {
   display: grid;
   grid-template-columns: minmax(126px, 38%) minmax(0, 1fr);
@@ -1185,19 +1148,17 @@
 }
 
 .content-panel[data-view="works"] .work-list,
-.content-panel[data-view="vr"] .work-list,
+.content-panel[data-view="personDetail"] .work-list,
 .content-panel[data-view="studioDetail"] .work-list,
 .content-panel[data-view="rankings"] .work-list,
-.content-panel[data-view="favorites"] .work-list,
 .content-panel[data-view="history"] .work-list {
   gap: 8px;
 }
 
 .content-panel[data-view="works"] .work-card,
-.content-panel[data-view="vr"] .work-card,
+.content-panel[data-view="personDetail"] .work-card,
 .content-panel[data-view="studioDetail"] .work-card,
 .content-panel[data-view="rankings"] .work-card,
-.content-panel[data-view="favorites"] .work-card,
 .content-panel[data-view="history"] .work-card {
   grid-template-columns: minmax(116px, 36%) minmax(0, 1fr);
   gap: 10px;
@@ -1315,8 +1276,8 @@
 }
 
 .content-panel[data-view="works"] .work-summary,
+.content-panel[data-view="personDetail"] .work-summary,
 .content-panel[data-view="rankings"] .work-summary,
-.content-panel[data-view="favorites"] .work-summary,
 .content-panel[data-view="history"] .work-summary {
   gap: 5px;
 }
@@ -1331,8 +1292,8 @@
 }
 
 .content-panel[data-view="works"] .work-summary strong,
+.content-panel[data-view="personDetail"] .work-summary strong,
 .content-panel[data-view="rankings"] .work-summary strong,
-.content-panel[data-view="favorites"] .work-summary strong,
 .content-panel[data-view="history"] .work-summary strong {
   font-size: 14.5px;
 }

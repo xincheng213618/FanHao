@@ -117,12 +117,15 @@ assert(!fs.existsSync(path.join(root, "android-client", "www", "platform", "sear
 for (const text of ["搜番号、作品或人物", "搜套图、人物或分类", "搜电影或电视剧", "搜短视频标题、作者或标签"]) {
   assert(!androidAppSource.includes(text), `Android shell must not own module search copy: ${text}`);
 }
-for (const id of ["fanhao", "photos", "media"]) {
+for (const id of ["photos", "media"]) {
   const entrySource = fs.readFileSync(path.join(androidModulesDir, id, "android-module.js"), "utf8");
   assert(entrySource.includes("createSearchController(host"), `Android module must own its search controller: ${id}`);
   assert(entrySource.includes("renderChrome"), `Android module must own its chrome rendering: ${id}`);
   assert(entrySource.includes("host.ui.openSearch"), `Android module must wire its own search entry: ${id}`);
 }
+const androidFanhaoEntry = fs.readFileSync(path.join(androidModulesDir, "fanhao", "android-module.js"), "utf8");
+assert(androidFanhaoEntry.includes("createSearchController(host") && androidFanhaoEntry.includes("renderChrome"), "FanHao Android must own its search controller and chrome");
+assert(androidFanhaoEntry.includes('mode: "dedicated"') && !androidFanhaoEntry.includes("host.ui.openSearch"), "FanHao Android search must use its dedicated route instead of the shared shell surface");
 const androidFanhaoViews = fs.readFileSync(path.join(androidModulesDir, "fanhao", "work-views.js"), "utf8");
 const androidFanhaoSearchData = fs.readFileSync(path.join(androidModulesDir, "fanhao", "features", "works", "search-data-service.js"), "utf8");
 assert(androidFanhaoSearchData.includes("/api/fanhao/search"), "FanHao mobile search must call only its module-scoped API");

@@ -64,7 +64,6 @@ export function getElements() {
     bottomNavBar: document.querySelector(".bottom-nav"),
     bottomNav: [...document.querySelectorAll(".bottom-nav button")],
     historyCount: document.querySelector("#historyCount"),
-    favoriteCount: document.querySelector("#favoriteCount"),
     peopleCount: document.querySelector("#peopleCount"),
     worksCount: document.querySelector("#worksCount"),
     rankingsCount: document.querySelector("#rankingsCount"),

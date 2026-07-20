@@ -83,7 +83,6 @@ export function createWorkListState(context) {
     controls.className = "work-controls";
     const activeFilter = normalizeFilterMode(options.filterMode ?? filterMode);
     const activeFilters = new Set(normalizeFilterList(activeFilter));
-    const activeSort = validValue(options.sortMode, WORK_SORTS, sortMode);
     const filterToReveal = activeFilters.size ? [...activeFilters].at(-1) : "all";
 
     const filterStrip = document.createElement("div");
@@ -112,48 +111,15 @@ export function createWorkListState(context) {
       filterStrip.append(button);
     }
     revealActiveFilter(filterStrip, filterButtonToReveal);
-
-    const sortRow = document.createElement("div");
-    sortRow.className = "work-sort-row";
-    const summary = document.createElement("span");
-    const displayedCount = Number.isFinite(Number(options.displayedCount))
-      ? Number(options.displayedCount)
-      : visibleList.length;
-    const allTotal = Number.isFinite(Number(options.total)) ? Number(options.total) : sourceWorks.length;
-    const activeFilterTotal = Number.isFinite(Number(options.activeFilterTotal))
-      ? Number(options.activeFilterTotal)
-      : null;
-    const singleActiveFilter = activeFilters.size === 1 ? [...activeFilters][0] : "";
-    const activeTotalValue = activeFilterTotal !== null
-      ? activeFilterTotal
-      : activeFilters.size === 0
-      ? allTotal
-      : singleActiveFilter
-        ? counts[singleActiveFilter]
-        : visibleList.length;
-    const activeTotal = Number.isFinite(Number(activeTotalValue)) ? Number(activeTotalValue) : allTotal;
-    summary.textContent = `显示 ${formatNumber(displayedCount)} / ${formatNumber(activeTotal)}`;
-    const select = document.createElement("select");
-    select.setAttribute("aria-label", "作品排序");
-    const sortOptions = options.allowRankingSort ? WORK_SORTS : WORK_SORTS.filter((option) => option.value !== "ranking");
-    for (const option of sortOptions) {
-      const item = document.createElement("option");
-      item.value = option.value;
-      item.textContent = option.label;
-      item.selected = activeSort === option.value;
-      select.append(item);
-    }
-    select.addEventListener("change", () => {
-      if (typeof options.onSortChange === "function") {
-        options.onSortChange(select.value);
-        return;
-      }
-      setSortMode(select.value);
-    });
-    sortRow.append(summary, select);
-
-    controls.append(filterStrip, sortRow);
+    controls.append(filterStrip);
     return controls;
+  }
+
+  function getSortOptions(options = {}) {
+    const values = options.allowRankingSort
+      ? WORK_SORTS
+      : WORK_SORTS.filter((option) => option.value !== "ranking");
+    return values.map((option) => ({ ...option }));
   }
 
   function filterCounts(works) {
@@ -266,6 +232,7 @@ export function createWorkListState(context) {
     getFilterMode: () => filterMode,
     getServerFilterMode,
     getServerSortMode,
+    getSortOptions,
     getSortMode: () => sortMode,
     setFilterMode,
     setSortMode,

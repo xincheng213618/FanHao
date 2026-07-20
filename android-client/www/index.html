@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#f6f7f9" />
     <title>资料库</title>
-    <link rel="stylesheet" href="./styles.css?v=20260720-fanhao-detail-layout-01" />
+    <link rel="stylesheet" href="./styles.css?v=20260720-fanhao-author-detail-02" />
   </head>
   <body>
     <main class="app-shell">
@@ -14,7 +14,7 @@
       <form id="searchForm" class="search-bar" autocomplete="off" hidden>
         <button id="searchCloseButton" class="search-close-button" type="button" aria-label="关闭搜索">‹</button>
         <span aria-hidden="true">⌕</span>
-        <input id="searchInput" type="search" placeholder="搜全库：作品/人物/频道" />
+        <input id="searchInput" type="search" placeholder="搜全库：作品/作者/频道" />
         <button class="search-submit-button" type="submit">搜索</button>
       </form>
       <div id="searchHistory" class="search-history" aria-label="搜索记录" hidden></div>
@@ -60,16 +60,8 @@
       </section>
 
       <nav class="quick-strip" aria-label="快捷入口">
-        <button type="button" data-open-view="history">
-          <strong>继续观看</strong>
-          <span id="historyCount">0</span>
-        </button>
-        <button type="button" data-open-view="favorites">
-          <strong>收藏</strong>
-          <span id="favoriteCount">0</span>
-        </button>
         <button type="button" data-open-view="people">
-          <strong>人物</strong>
+          <strong>作者</strong>
           <span id="peopleCount">0</span>
         </button>
         <button type="button" data-open-view="works">
@@ -84,9 +76,9 @@
           <strong>片商</strong>
           <span>系列浏览</span>
         </button>
-        <button type="button" data-open-view="vr">
-          <strong>VR</strong>
-          <span>沉浸作品</span>
+        <button type="button" data-open-view="history">
+          <strong>继续观看</strong>
+          <span id="historyCount">0</span>
         </button>
         <button type="button" data-open-view="music">
           <strong>音乐</strong>
@@ -140,7 +132,7 @@
           </div>
           <div>
             <strong id="statPeople">-</strong>
-            <span>人物</span>
+            <span>作者</span>
           </div>
           <div>
             <strong id="statVideos">-</strong>
@@ -152,13 +144,13 @@
           </div>
         </div>
 
-        <button id="openLibraryButton" class="primary-action" type="button">浏览人物</button>
+        <button id="openLibraryButton" class="primary-action" type="button">浏览作者</button>
       </section>
 
       <section class="preview-section" aria-labelledby="previewTitle">
         <div class="section-head">
           <div>
-            <p class="section-label">人物索引</p>
+            <p class="section-label">作者索引</p>
             <h2 id="previewTitle">常用入口</h2>
           </div>
           <button class="text-button" type="button" data-open-view="people">全部</button>
@@ -266,7 +258,7 @@
       </nav>
     </main>
 
-    <script src="./app.js?v=20260720-fanhao-collection-filter-01" type="module"></script>
+    <script src="./app.js?v=20260720-fanhao-author-detail-02" type="module"></script>
   </body>
 </html>
 

@@ -14,6 +14,7 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
   function createWorkCard(work, options = {}) {
     const compactMeta = Boolean(options.compactMeta);
     const showRatingMeta = Boolean(options.showRatingMeta);
+    const hidePerson = Boolean(options.hidePerson);
     const card = document.createElement("article");
     card.className = `work-card${work.missingLocal ? " missing-local" : ""}`;
     card.role = "button";
@@ -33,13 +34,16 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
     title.className = "work-card-title";
     title.textContent = compactMeta ? compactWorkCardTitle(work) : displayWorkTitle(work, false);
     const primaryFacts = createPrimaryFacts(work);
-    const person = document.createElement(work.personId ? "button" : "span");
-    person.className = "work-person";
-    person.textContent = workPersonName(work) || "未知人物";
-    if (work.personId) {
-      person.type = "button";
-      person.dataset.personId = String(work.personId);
-      person.dataset.workIntentIgnore = "1";
+    let person = null;
+    if (!hidePerson) {
+      person = document.createElement(work.personId ? "button" : "span");
+      person.className = "work-person";
+      person.textContent = workPersonName(work) || "未知作者";
+      if (work.personId) {
+        person.type = "button";
+        person.dataset.personId = String(work.personId);
+        person.dataset.workIntentIgnore = "1";
+      }
     }
 
     const percent = progressPercent(work);
@@ -56,7 +60,8 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
       }
     }
 
-    body.append(title, person);
+    body.append(title);
+    if (person) body.append(person);
     if (primaryFacts) body.append(primaryFacts);
     if (!compactMeta && percent) body.append(createProgressMeter(work.progress, percent));
     if (chips?.children.length) body.append(chips);

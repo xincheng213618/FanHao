@@ -212,9 +212,10 @@ export function createRankingViews(deps) {
   }
 
   function setSortMode(value) {
-    if (sortMode === value) return;
+    if (!workListState.getSortOptions({ allowRankingSort: true }).some((option) => option.value === value) || sortMode === value) return false;
     sortMode = value;
     renderCurrentView();
+    return true;
   }
 
   function leaveRankingSort() {
@@ -222,7 +223,13 @@ export function createRankingViews(deps) {
     if (workListState.getSortMode() === "ranking") workListState.setSortMode("updated", { rerender: false });
   }
 
-  return { leaveRankingSort, refreshRankingCache, renderRankings };
+  return {
+    getSortMode: () => sortMode,
+    leaveRankingSort,
+    refreshRankingCache,
+    renderRankings,
+    setSortMode
+  };
 }
 
 function chooseKey(lists = [], preferredKey = "") {
