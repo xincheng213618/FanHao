@@ -14,6 +14,7 @@ import { createLazyPersonProfile } from "../public/modules/fanhao/lazy-person-pr
 import { createLazyAdminModal } from "../public/modules/system/lazy-admin-modal.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
 import { createPersonDetailService } from "../src/modules/fanhao/server/people/person-detail-service.js";
+import { normalizePersonWorkYear, personWorkYearOptions, worksForPersonYear } from "../src/modules/fanhao/server/people/person-work-year.js";
 import { createPersonMergeService } from "../src/modules/fanhao/server/people/person-merge-service.js";
 import { createPlaybackProgressService } from "../src/modules/fanhao/server/playback/playback-progress-service.js";
 import { createRankingService } from "../src/modules/fanhao/server/catalog/ranking-service.js";
@@ -427,16 +428,33 @@ const filteredPersonDetailUrl = new URL(personDetailPath("person/13", {
   limit: 96,
   offset: 48,
   filter: "highRating,vr",
+  year: "2024",
   sort: "ratingDesc"
 }), "http://127.0.0.1");
 assert.equal(filteredPersonDetailUrl.pathname, "/api/people/person%2F13", "Android person requests must encode public person ids");
 assert.equal(filteredPersonDetailUrl.searchParams.get("limit"), "96", "Android person requests must preserve the active page size");
 assert.equal(filteredPersonDetailUrl.searchParams.get("offset"), "48", "Android person requests must support server continuation offsets");
 assert.equal(filteredPersonDetailUrl.searchParams.get("filter"), "highRating,vr", "Android person requests must send combined work filters to the server");
+assert.equal(filteredPersonDetailUrl.searchParams.get("year"), "2024", "Android person requests must send the selected release year to the server");
 assert.equal(filteredPersonDetailUrl.searchParams.get("sort"), "ratingDesc", "Android person requests must send the active work sort to the server");
 assert.equal(filteredPersonDetailUrl.searchParams.get("includeMissingLocal"), "1", "Android person requests must explicitly retain missing catalog works");
 assert.equal(filteredPersonDetailUrl.searchParams.get("includeCompilation"), "1", "Android person requests must explicitly retain compilation works");
-assert(androidDetailViews.includes("personDetailPath(personId, { ...getWorkListRequestState(), limit: getWorksLimit() })") && androidFanhaoModule.includes("getWorkListRequestState: workViews.getWorkListRequestState"), "Android person pages must derive their server query from the rendered work-list state");
+const personYearWorks = [
+  { id: "work-2024-a", infoSummary: { releaseDate: "2024-01-02" } },
+  { id: "work-unknown", infoSummary: { releaseDate: "" } },
+  { id: "work-2025", infoSummary: { releaseDate: "2025-06-03" } },
+  { id: "work-2024-b", releaseDate: "2024-11-12" }
+];
+assert.equal(normalizePersonWorkYear("2024"), "2024", "actor year filtering must retain valid release years");
+assert.equal(normalizePersonWorkYear("future"), "all", "actor year filtering must reject unsupported values");
+assert.deepEqual(worksForPersonYear(personYearWorks, "2024").map((work) => work.id), ["work-2024-a", "work-2024-b"], "actor year filtering must select only matching releases");
+assert.deepEqual(personWorkYearOptions(personYearWorks), [
+  { value: "all", label: "全部年份", count: 4 },
+  { value: "2025", label: "2025 年", count: 1 },
+  { value: "2024", label: "2024 年", count: 2 },
+  { value: "unknown", label: "日期未知", count: 1 }
+], "actor year choices must be newest-first and retain undated works");
+assert(androidDetailViews.includes("personDetailPath(personId, { ...getWorkListRequestState(), year: selectedYear, limit: getWorksLimit() })") && androidFanhaoModule.includes("getWorkListRequestState: workViews.getWorkListRequestState"), "Android person pages must combine the rendered work-list state with their selected year");
 assert(androidWorkViews.includes("getWorkListRequestState: () => ({ filter: workListState.getServerFilterMode(), sort: workListState.getServerSortMode() })"), "Android work views must expose one authoritative server filter and sort snapshot");
 assert(/function studioDetailPath[\s\S]*?filter: workListState\.getServerFilterMode\(\)[\s\S]*?return `\/api\/studios\//.test(androidWorkViews), "Android studio requests must send the authoritative server filter");
 const filteredFavoriteCollectionUrl = new URL(workCollectionPath("favorites", { limit: 96, offset: 48, filter: "highRating,vr", sort: "ratingDesc", folderId: "folder/1" }), "http://127.0.0.1");
@@ -590,8 +608,8 @@ assert(androidWorkActions.includes('title: "更多操作"') && androidWorkAction
 assert(androidWorkActions.includes('variant: "danger wide"') && androidFanhaoStyles.includes(".fanhao-sort-option.danger") && androidFanhaoStyles.includes(".fanhao-sort-option.wide"), "Android destructive work actions must remain visually isolated in the sheet");
 assert(!androidWorkActions.includes("createBackButton") && androidSectionStyles.includes(".work-detail-meta-body"), "Android work details must delegate return navigation to the shared sticky detail header");
 assert(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions must stay focused");
-assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-actor-discovery-14") && androidStyles.includes("css/sections.css?v=20260721-fanhao-ranking-density-11") && androidStyles.includes("css/lists.css?v=20260721-fanhao-actor-discovery-14") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-work-detail-flow-09"), "Android actor discovery must use a fresh WebView URL while retaining compact rankings and immersive details");
-assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-actor-discovery-14") && androidApp.includes("config.js?v=20260721-fanhao-actor-discovery-14") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-actor-discovery-14"'), "Android actor discovery must refresh the WebView cache chain");
+assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-person-year-15") && androidStyles.includes("css/sections.css?v=20260721-fanhao-ranking-density-11") && androidStyles.includes("css/lists.css?v=20260721-fanhao-actor-discovery-14") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-person-year-15"), "Android actor year filtering must refresh its styles while retaining compact rankings and actor discovery");
+assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-person-year-15") && androidApp.includes("config.js?v=20260721-fanhao-person-year-15") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-person-year-15"'), "Android actor year filtering must refresh the WebView cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -927,8 +945,9 @@ assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).f
 assert(androidDetailViews.includes('detail-hero.js?v=20260721-fanhao-author-portraits-06'), "Android author portrait changes must use a fresh component URL");
 assert(androidDetailViews.includes("hidePerson: true") && androidDetailViews.includes('createDetailSectionTitle("作品", "")'), "Android author pages must show works without repeating the author or a second work count");
 assert(androidDetailViews.includes("hideControls: true") && androidDetailViews.includes("createPersonDetailWorkToolbar({"), "Android author pages must replace the wide chip strip with compact detail controls");
-assert(androidPersonDetailWorkToolbar.includes('title: "作品筛选"') && androidPersonDetailWorkToolbar.includes('title: "作品排序"') && androidPersonDetailWorkToolbar.includes("openFanhaoSheet({"), "Android author work controls must open shared bottom sheets for filtering and sorting");
+assert(androidPersonDetailWorkToolbar.includes('title: "作品筛选"') && androidPersonDetailWorkToolbar.includes('title: "发行年份"') && androidPersonDetailWorkToolbar.includes('title: "作品排序"') && androidPersonDetailWorkToolbar.includes("openFanhaoSheet({"), "Android actor work controls must open shared bottom sheets for filtering, year, and sorting");
 assert(androidPersonDetailWorkToolbar.includes("activeFilterLabel") && androidPersonDetailWorkToolbar.includes("formatNumber(option.count || 0)"), "Android author filter controls must expose the active state and available counts");
+assert(androidPersonDetailWorkToolbar.includes('createToolbarButton("年份"') && androidDetailViews.includes("onYearChange: (value) => setPersonWorkYear(personId, value)"), "Android actor details must expose and apply the release-year selection");
 assert(androidFanhaoModule.includes("getWorkFilterOptions: workViews.getWorkFilterOptions") && androidFanhaoModule.includes('setWorkSortMode: (value) => workViews.setSortMode("works", value)'), "Android author detail controls must reuse the authoritative work-list state");
 assert(androidWorkViews.includes("if (renderOptions.hideControls !== true)") && androidWorkViews.includes("getWorkFilterOptions: (works, facets)"), "Android work rendering must allow details to replace catalog controls without duplicating filter logic");
 assert(androidPersonDetailHero.includes('workCountUnit.textContent = "部作品"') && !androidDetailViews.includes("function personSummaryText(person)"), "Android author pages must present the work count once as the primary identity metric");
@@ -937,7 +956,7 @@ assert(androidPeopleViews.includes("portraitUrlForPerson(person)") && androidPer
 assert(androidSectionStyles.includes(".person-detail-avatar-frame > img") && androidSectionStyles.includes("aspect-ratio: 4 / 3 !important") && androidSectionStyles.includes("object-fit: contain"), "Android author avatars must match the detail frame instead of overflowing at their intrinsic ratio");
 assert(androidSectionStyles.includes("aspect-ratio: 4 / 5 !important") && androidSectionStyles.includes(".index-person-card .person-cover"), "Android author index portraits must keep a uniform complete-image frame");
 assert(androidApp.includes('classList.toggle("fanhao-person-detail-view", currentView === "personDetail")') && androidFanhaoStyles.includes("body.fanhao-person-detail-view .bottom-nav"), "Android author details must hide the unrelated global bottom navigation");
-assert(androidFanhaoStyles.includes(".person-detail-work-toolbar") && androidFanhaoStyles.includes("grid-template-columns: repeat(2") && androidListStyles.includes('.content-panel[data-view="personDetail"] .work-list.cover-grid') && androidListStyles.includes("grid-template-columns: repeat(2"), "Android author details must use a fixed two-action toolbar and readable two-column work grid");
+assert(androidFanhaoStyles.includes(".person-detail-work-toolbar") && androidFanhaoStyles.includes("grid-template-columns: repeat(3") && androidListStyles.includes('.content-panel[data-view="personDetail"] .work-list.cover-grid') && androidListStyles.includes("grid-template-columns: repeat(2"), "Android actor details must use a fixed filter-year-sort toolbar and readable two-column work grid");
 assert(androidApp.includes('classList.toggle("fanhao-work-detail-view", currentView === "workDetail")') && androidFanhaoStyles.includes("body.fanhao-work-detail-view .bottom-nav") && androidFanhaoStyles.includes(".work-detail-toolbar"), "Android work details must hide the unrelated global navigation and provide a contextual fixed toolbar");
 assert(androidSectionStyles.includes('.content-panel[data-view="workDetail"] .work-detail-hero') && androidSectionStyles.includes("background: transparent") && androidSectionStyles.includes("scroll-margin-top"), "Android work details must use an immersive borderless hero and unobscured section jumps");
 assert(androidApp.includes('"people", "personDetail", "history"') && androidSectionStyles.includes('.content-panel[data-feed-view="true"] .section-head'), "Android author details must use the immersive feed surface without a duplicate page heading");
@@ -947,12 +966,12 @@ assert(androidDetailViews.includes("setDetailChromeTitle") && androidDetailViews
 assert(androidSectionStyles.includes("grid-template-columns: clamp(104px, 32%, 128px)") && androidSectionStyles.includes(".person-detail-hero .detail-hero-body"), "Android author identity must leave first-screen space for the work grid");
 assert(lines("android-client/www/modules/fanhao/features/people/detail-hero.js") <= 150, "Android author identity component must stay focused");
 assert(lines("android-client/www/modules/fanhao/features/people/detail-work-toolbar.js") <= 110, "Android author work toolbar must stay focused");
-assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-work-detail-flow-09') && androidDetailViews.includes('detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09'), "Android work-detail flow changes must use fresh component URLs");
+assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-person-year-15') && androidDetailViews.includes('detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09'), "Android actor year filtering and work-detail flow must retain fresh component URLs");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
 assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-category-browser-13') && androidWorkViews.includes('work-filtering.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-discovery-03'), "Android category browsing must use a fresh work-view URL while retaining dense browsing and search discovery");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-actor-discovery-14'), "Android actor discovery must use the current FanHao module cache chain");
-assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-actor-discovery-14'), "Android actor discovery must refresh the FanHao entry chain without dropping category browsing");
-assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-actor-discovery-14'), "Android actor discovery must refresh the app entry chain");
+assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-person-year-15'), "Android actor year filtering must refresh the FanHao entry chain without dropping category browsing");
+assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-person-year-15'), "Android actor year filtering must refresh the app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260721-fanhao-ranking-density-11'), "Android compact ranking changes must use a fresh module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
@@ -1144,7 +1163,7 @@ assert(rankingServiceSource.includes("prewarmCoreWorkCovers(pageWorks)") && rank
 assert(catalogRuntimeSource.includes("deps.rankingService.prewarm();"), "ranking summaries and selectable list sources must be ready before first navigation");
 assert(personDetailServiceSource.includes("const detailSourceCache = new Map()"), "person navigation must reuse prepared detail sources");
 assert(personDetailServiceSource.includes("peoplePayloadStamp(scope)}:${workQueryStamp()"), "person detail sources must follow people and work data versions");
-assert(personDetailServiceSource.includes("workQueryService.lightweightFacets(source.works)"), "person facets must remain live without hydrating detail-only metadata");
+assert(personDetailServiceSource.includes("workQueryService.lightweightFacets(yearWorks)"), "person facets must remain live inside the selected year without hydrating detail-only metadata");
 const workInfoServiceSource = read("src/modules/fanhao/server/works/work-info-service.js");
 const workQueryServiceSource = read("src/modules/fanhao/server/works/work-query-service.js");
 const workClassificationServiceSource = read("src/modules/fanhao/server/works/work-classification-service.js");
@@ -1591,7 +1610,7 @@ let personDetailPayloadOptions = null;
 const personDetailFixture = { id: "person-1", name: "Person One", works: ["work-1"] };
 const personDetailLibrary = {
   scannedAt: "scan-v1",
-  worksById: new Map([["work-1", { id: "work-1", personId: "person-1", title: "Work One" }]])
+  worksById: new Map([["work-1", { id: "work-1", personId: "person-1", title: "Work One", infoSummary: { releaseDate: "2024-01-01" } }]])
 };
 const cachedPersonDetailService = createPersonDetailService({
   actorProfileMergeCandidates: () => [],
@@ -1651,10 +1670,17 @@ assert.equal(personDetailFacetReadCount, 2, "person detail facets must still rea
 assert.equal(personDetailPayloadReadCount, 2, "person detail paging must still build each requested response");
 assert.equal(firstPersonDetail.person.id, "person-1", "prepared person details must preserve the person payload");
 assert.equal(repeatedPersonDetail.filter, "rated", "prepared person details must preserve per-request filters");
+const yearFilteredPersonDetail = cachedPersonDetailService.detailPayload("person-1", new URL("http://127.0.0.1/api/people/person-1?filter=all&year=2025&limit=48&offset=0"));
+assert.equal(yearFilteredPersonDetail.year, "2025", "person detail responses must echo the normalized selected year");
+assert.equal(yearFilteredPersonDetail.total, 0, "person detail responses must filter works before facets and pagination");
+assert.deepEqual(yearFilteredPersonDetail.years, [
+  { value: "all", label: "全部年份", count: 1 },
+  { value: "2024", label: "2024 年", count: 1 }
+], "person detail responses must retain year choices from the complete filmography");
 personDetailUserStateStamp = "user-v2";
 cachedPersonDetailService.detailPayload("person-1", personDetailUrl);
-assert.equal(personDetailFacetReadCount, 3, "favorite and progress changes must invalidate prepared person facets");
-assert.equal(personDetailPayloadReadCount, 3, "favorite and progress changes must invalidate prepared person pages");
+assert.equal(personDetailFacetReadCount, 4, "favorite and progress changes must invalidate prepared person facets");
+assert.equal(personDetailPayloadReadCount, 4, "favorite and progress changes must invalidate prepared person pages");
 personDetailDataStamp = "person-v2";
 cachedPersonDetailService.detailPayload("person-1", personDetailUrl);
 assert.equal(personDetailSourceBuildCount, 2, "person data changes must invalidate prepared detail sources");

@@ -5,9 +5,9 @@ import { extractWorkCode, formatDate, formatNumber } from "../../js/format.js";
 import { createInfoPreviewSection } from "../../js/info-preview.js";
 import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-01";
-import { personDetailPath } from "./features/people/detail-request.js?v=20260720-fanhao-person-query-01";
+import { personDetailPath } from "./features/people/detail-request.js?v=20260721-fanhao-person-year-15";
 import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260721-fanhao-author-portraits-06";
-import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=20260721-fanhao-person-browser-07";
+import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=20260721-fanhao-person-year-15";
 import { createWorkActions } from "./features/works/actions.js?v=20260721-fanhao-person-detail-02";
 import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09";
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
@@ -32,6 +32,7 @@ export function createDetailViews(context) {
     getWorkSortOptions = () => [],
     setWorkSortMode = () => false,
     increaseWorksLimit = () => {},
+    renderCurrentView = () => {},
     renderCurrentViewPreservingScroll = () => {},
     mediaViewer,
     onUserStateChange,
@@ -56,6 +57,7 @@ export function createDetailViews(context) {
     renderMessage,
     renderWorkDetail
   });
+  let personYearSelection = { personId: "", value: "all" };
   const renderPersonHero = (person, options = {}) => createPersonDetailHero(person, {
     ...options,
     activeUrl: getActiveUrl(),
@@ -72,7 +74,8 @@ export function createDetailViews(context) {
     els.viewTitle.textContent = "正在加载";
     els.viewMeta.textContent = "";
     els.viewContent.innerHTML = `<div class="loading-row">正在加载演员资料</div>`;
-    const path = personDetailPath(personId, { ...getWorkListRequestState(), limit: getWorksLimit() });
+    const selectedYear = getPersonWorkYear(personId);
+    const path = personDetailPath(personId, { ...getWorkListRequestState(), year: selectedYear, limit: getWorksLimit() });
     let renderedCache = false;
     const indexedPerson = findPersonInLibrary(personId);
     if (indexedPerson) renderPersonPreview(indexedPerson);
@@ -101,9 +104,12 @@ export function createDetailViews(context) {
       els.viewContent.append(createPersonDetailWorkToolbar({
         filterMode: getWorkFilterMode(),
         filterOptions: getWorkFilterOptions(works, data.facets),
+        yearMode: data.year || selectedYear,
+        yearOptions: data.years,
         sortMode: getWorkSortMode(),
         sortOptions: getWorkSortOptions(),
         onFilterChange: (value) => setWorkFilterMode(value, { replace: true }),
+        onYearChange: (value) => setPersonWorkYear(personId, value),
         onSortChange: setWorkSortMode
       }));
     };
@@ -130,6 +136,22 @@ export function createDetailViews(context) {
         renderMessage(detailErrorMessage(error, "演员资料读取失败，请检查服务连接"), "error");
       }
     }
+  }
+
+  function getPersonWorkYear(personId) {
+    const normalizedId = String(personId || "");
+    if (personYearSelection.personId !== normalizedId) personYearSelection = { personId: normalizedId, value: "all" };
+    return personYearSelection.value;
+  }
+
+  function setPersonWorkYear(personId, value) {
+    const normalizedId = String(personId || "");
+    const requested = String(value || "").trim().toLowerCase();
+    const next = requested === "unknown" || /^(?:19|20)\d{2}$/.test(requested) ? requested : "all";
+    if (getPersonWorkYear(normalizedId) === next) return false;
+    personYearSelection = { personId: normalizedId, value: next };
+    renderCurrentView();
+    return true;
   }
   function renderPersonPreview(person) {
     setDetailChromeTitle(person.actorProfile?.displayName || person.name || "演员详情");

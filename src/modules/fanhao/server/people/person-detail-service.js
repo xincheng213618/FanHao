@@ -1,3 +1,5 @@
+import { normalizePersonWorkYear, personWorkYearOptions, worksForPersonYear } from "./person-work-year.js";
+
 const PERSON_DETAIL_SOURCE_CACHE_LIMIT = 128;
 const PERSON_DETAIL_PAGE_CACHE_LIMIT = 12;
 
@@ -80,9 +82,11 @@ export function createPersonDetailService({
       mark("payload");
     } else {
       const filter = url.searchParams.get("filter") || "all";
-      const facets = workQueryService.lightweightFacets(source.works);
+      const year = normalizePersonWorkYear(url.searchParams.get("year"));
+      const yearWorks = worksForPersonYear(source.works, year);
+      const facets = workQueryService.lightweightFacets(yearWorks);
       mark("facets");
-      worksPayload = workQueryService.listFromWorksPayload(source.works, url, {
+      worksPayload = workQueryService.listFromWorksPayload(yearWorks, url, {
         filter,
         facets
       }, { lightweightInfo: true });
@@ -94,7 +98,12 @@ export function createPersonDetailService({
     if (timings.payload >= 500) {
       console.warn("[fanhao-person-detail-slow]", JSON.stringify({ personId: source.personId, count: source.works.length, ...timings }));
     }
-    const payload = { person: source.person, ...worksPayload };
+    const payload = {
+      person: source.person,
+      year: normalizePersonWorkYear(url.searchParams.get("year")),
+      years: source.years,
+      ...worksPayload
+    };
     if (url.searchParams.get("timing") === "1") payload.timings = timings;
     return payload;
   }
@@ -156,6 +165,7 @@ export function createPersonDetailService({
       personId: person.id,
       personOptions,
       personSource: person,
+      years: personWorkYearOptions(allPersonWorks),
       works: allPersonWorks
     };
     cacheDetailSource(cacheKey, source);
@@ -167,6 +177,7 @@ export function createPersonDetailService({
       userStateStamp(),
       workQueryService.visibilityStamp(),
       url.searchParams.get("filter") || "all",
+      normalizePersonWorkYear(url.searchParams.get("year")),
       url.searchParams.get("includeMissingLocal") || "",
       url.searchParams.get("includeCompilation") || "",
       url.searchParams.get("sort") || "releaseDesc",

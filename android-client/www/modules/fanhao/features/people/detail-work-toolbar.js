@@ -3,12 +3,14 @@ import { openFanhaoSheet } from "../../sheet.js?v=20260721-fanhao-person-browser
 
 export function createPersonDetailWorkToolbar(options = {}) {
   const filterOptions = normalizeOptions(options.filterOptions);
+  const yearOptions = normalizeOptions(options.yearOptions);
   const sortOptions = normalizeOptions(options.sortOptions);
   const filterMode = String(options.filterMode || "all");
+  const yearMode = String(options.yearMode || "all");
   const sortMode = String(options.sortMode || "updated");
   const toolbar = document.createElement("nav");
   toolbar.className = "person-detail-work-toolbar";
-  toolbar.setAttribute("aria-label", "演员作品筛选和排序");
+  toolbar.setAttribute("aria-label", "演员作品筛选、年份和排序");
 
   toolbar.append(
     createToolbarButton("筛选", activeFilterLabel(filterMode, filterOptions), () => {
@@ -19,6 +21,17 @@ export function createPersonDetailWorkToolbar(options = {}) {
           value: option.value,
           label: `${option.label} · ${formatNumber(option.count || 0)}`,
           select: () => options.onFilterChange?.(option.value)
+        }))
+      });
+    }),
+    createToolbarButton("年份", activeOptionLabel(yearMode, yearOptions, "全部年份"), () => {
+      openFanhaoSheet({
+        title: "发行年份",
+        value: yearMode,
+        options: yearOptions.map((option) => ({
+          value: option.value,
+          label: `${option.label} · ${formatNumber(option.count || 0)}`,
+          select: () => options.onYearChange?.(option.value)
         }))
       });
     }),
