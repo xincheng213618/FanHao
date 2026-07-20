@@ -43,6 +43,7 @@ export function createRankingViews(deps) {
       els.viewContent.append(createPanel(data, summaryCache, activeKey));
       renderWorks(works, lists.length ? "这个榜单没有匹配项目。" : "还没有缓存排行榜。", {
         compactMeta: true,
+        coverGrid: true,
         showRatingMeta: true,
         allowRankingSort: true,
         filterMode,

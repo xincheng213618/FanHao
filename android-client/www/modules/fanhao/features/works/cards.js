@@ -1,5 +1,18 @@
-import { formatDate, formatNumber } from "../../../../js/format.js";
+import { formatNumber } from "../../../../js/format.js";
 import { imageUrlForWork } from "../../../../js/image.js?v=20260717-fanhao-cover-prepare-01";
+import {
+  compactWorkCardTitle,
+  compactWorkCode,
+  displayCardDate,
+  displayPercent,
+  displayWorkTitle,
+  formatCompactRating,
+  numericRating,
+  progressPercent,
+  workGridBadge,
+  workGridMeta,
+  workGridRankBadge
+} from "./card-presentation.js?v=20260720-fanhao-work-grid-03";
 import { createWorkCoverLoader } from "./cover-loader.js?v=20260717-fanhao-work-covers-01";
 
 export function createWorkCards({ getActiveUrl, roots = [], showView, workDetailDataService = null }) {
@@ -15,8 +28,9 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
     const compactMeta = Boolean(options.compactMeta);
     const showRatingMeta = Boolean(options.showRatingMeta);
     const hidePerson = Boolean(options.hidePerson);
+    const coverGrid = Boolean(options.coverGrid);
     const card = document.createElement("article");
-    card.className = `work-card${work.missingLocal ? " missing-local" : ""}`;
+    card.className = `work-card${coverGrid ? " cover-grid-card" : ""}${work.missingLocal ? " missing-local" : ""}`;
     card.role = "button";
     card.tabIndex = 0;
     cardWorks.set(card, work);
@@ -32,7 +46,28 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
     body.className = "work-summary";
     const title = document.createElement("strong");
     title.className = "work-card-title";
-    title.textContent = compactMeta ? compactWorkCardTitle(work) : displayWorkTitle(work, false);
+    title.textContent = coverGrid ? displayWorkTitle(work, true) : (compactMeta ? compactWorkCardTitle(work) : displayWorkTitle(work, false));
+
+    if (coverGrid) {
+      body.append(title);
+      const code = compactWorkCode(work);
+      if (code) {
+        const codeLine = document.createElement("span");
+        codeLine.className = "work-card-code";
+        codeLine.textContent = code;
+        body.append(codeLine);
+      }
+      const gridMeta = workGridMeta(work);
+      if (gridMeta) {
+        const meta = document.createElement("span");
+        meta.className = "work-card-grid-meta";
+        meta.textContent = gridMeta;
+        body.append(meta);
+      }
+      card.append(createWorkCoverFrame(thumb, work), body);
+      return card;
+    }
+
     const primaryFacts = createPrimaryFacts(work);
     let person = null;
     if (!hidePerson) {
@@ -118,20 +153,22 @@ export function createChip(text, variant = "") {
   return chip;
 }
 
-export function progressPercent(work) {
-  const percent = Number(work?.progress?.percent || 0);
-  if (!Number.isFinite(percent) || percent <= 0) return 0;
-  return Math.max(0, Math.min(100, percent));
-}
-
 export function displayPersonName(person) {
   return person?.actorProfile?.displayName || person?.name || "";
 }
 
-function numericRating(value) {
-  if (value === null || value === undefined || value === "") return null;
-  const rating = Number(value);
-  return Number.isFinite(rating) ? rating : null;
+function createWorkCoverFrame(thumb, work) {
+  const frame = document.createElement("div");
+  frame.className = "work-cover-frame";
+  frame.append(thumb);
+  for (const badgeData of [workGridRankBadge(work), workGridBadge(work)]) {
+    if (!badgeData.text) continue;
+    const badge = document.createElement("span");
+    badge.className = `work-cover-badge ${badgeData.variant}`;
+    badge.textContent = badgeData.text;
+    frame.append(badge);
+  }
+  return frame;
 }
 
 function decorateFallbackThumb(thumb, work) {
@@ -163,12 +200,6 @@ function thumbMeta(work) {
   if (rating === null && percent) parts.push(`已看 ${displayPercent(percent)}%`);
   if (work.missingLocal) parts.push("未下载");
   return parts.slice(0, 2).join(" · ");
-}
-
-function formatCompactRating(value) {
-  const rating = Number(value);
-  if (!Number.isFinite(rating)) return "";
-  return Number.isInteger(rating) ? rating.toFixed(1) : rating.toFixed(2).replace(/0$/u, "");
 }
 
 function workPersonName(work) {
@@ -211,51 +242,6 @@ function ratingStars(value) {
   return `${"★".repeat(full)}${"☆".repeat(5 - full)}`;
 }
 
-function displayCardDate(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
-  return match ? `${match[1]}-${match[2]}-${match[3]}` : formatDate(raw);
-}
-
-function displayWorkTitle(work, compactMeta) {
-  const rawTitle = work.title || work.directoryName || "未命名作品";
-  if (!compactMeta) return rawTitle;
-  let cleaned = String(rawTitle).trim();
-  for (let index = 0; index < 4; index += 1) {
-    const previous = cleaned;
-    cleaned = cleaned
-      .replace(/^\[[^\]]+\][\s._-]*/u, "")
-      .replace(/^【[^】]+】[\s._-]*/u, "")
-      .replace(/^[A-Z]{2,10}[\s._-]*\d{2,6}[A-Z]?[\s._-]*/iu, "")
-      .replace(/^[\s._\-:：・]+/u, "")
-      .trim();
-    if (cleaned === previous) break;
-  }
-  cleaned = cleaned.replace(/\s*生写真\d+枚セット\s*$/u, "").trim();
-  return cleaned || rawTitle;
-}
-
-function compactWorkCardTitle(work) {
-  const title = displayWorkTitle(work, true);
-  const code = compactWorkCode(work);
-  if (!code || title.toUpperCase().startsWith(code.toUpperCase())) return title;
-  return `${code} · ${title}`;
-}
-
-function compactWorkCode(work) {
-  const explicit = [work?.infoSummary?.code, work?.code].map((value) => String(value || "").trim()).find(Boolean);
-  if (explicit) return explicit.toUpperCase();
-  const source = [work?.directoryName, work?.title].map((value) => String(value || "").trim()).find(Boolean) || "";
-  const withoutTags = source.replace(/^(?:(?:\[[^\]]+\]|【[^】]+】)[\s._-]*)*/u, "");
-  return extractLeadingWorkCode(withoutTags);
-}
-
-function extractLeadingWorkCode(value) {
-  const match = /^([A-Z]{2,10})[\s._-]*(\d{2,6}[A-Z]?)(?=$|[^A-Z0-9])/iu.exec(String(value || "").trim());
-  return match ? `${match[1].toUpperCase()}-${match[2].toUpperCase()}` : "";
-}
-
 function workCode(work) {
   for (const candidate of [work?.infoSummary?.code, work?.code, work?.directoryName, work?.title, work?.relativePath]) {
     const code = extractWorkCode(candidate);
@@ -266,7 +252,7 @@ function workCode(work) {
 
 function extractWorkCode(value) {
   const text = String(value || "").trim();
-  const match = text && /(?:^|[^A-Z0-9])([A-Z]{2,10})[\s._-]*(\d{2,6}[A-Z]?)(?=$|[^A-Z0-9])/iu.exec(text);
+  const match = text && /(?:^|[^A-Z0-9])([A-Z]{1,10})[\s._-]*(\d{2,6}[A-Z]?)(?=$|[^A-Z0-9])/iu.exec(text);
   return match ? `${match[1].toUpperCase()}-${match[2].toUpperCase()}` : "";
 }
 
@@ -287,11 +273,6 @@ function createProgressMeter(progress, percent) {
   track.append(bar);
   meter.append(meta, track);
   return meter;
-}
-
-function displayPercent(percent) {
-  if (percent <= 0) return 0;
-  return Math.max(1, Math.min(100, Math.floor(percent)));
 }
 
 function formatProgressTime(value) {

@@ -6,7 +6,7 @@ import { createInfoPreviewSection } from "../../js/info-preview.js";
 import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-01";
 import { personDetailPath } from "./features/people/detail-request.js?v=20260720-fanhao-person-query-01";
-import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260720-fanhao-author-grid-02";
+import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260720-fanhao-work-grid-03";
 import { createWorkActions } from "./features/works/actions.js?v=20260712-fanhao-refactor-01";
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
 
@@ -78,6 +78,7 @@ export function createDetailViews(context) {
         facets: data.facets,
         total: data.total || works.length,
         activeFilterTotal: data.total || works.length,
+        coverGrid: true,
         hidePerson: true,
         hasServerMore: works.length < Number(data.total || works.length),
         onLoadMore: () => {
