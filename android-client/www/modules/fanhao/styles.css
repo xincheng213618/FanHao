@@ -93,6 +93,16 @@
   color: var(--blue);
 }
 
+.fanhao-sort-option.danger {
+  border-color: rgba(204, 72, 72, .24);
+  background: rgba(204, 72, 72, .08);
+  color: var(--danger);
+}
+
+.fanhao-sort-option.wide {
+  grid-column: 1 / -1;
+}
+
 body.fanhao-search-page-view #contentPanel {
   gap: 0;
   margin-top: 0;

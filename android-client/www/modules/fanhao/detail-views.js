@@ -6,8 +6,8 @@ import { createInfoPreviewSection } from "../../js/info-preview.js";
 import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-01";
 import { personDetailPath } from "./features/people/detail-request.js?v=20260720-fanhao-person-query-01";
-import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260720-fanhao-work-grid-03";
-import { createWorkActions } from "./features/works/actions.js?v=20260712-fanhao-refactor-01";
+import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260721-fanhao-work-detail-01";
+import { createWorkActions } from "./features/works/actions.js?v=20260721-fanhao-work-detail-01";
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
 
 const PLAY_OPEN_COOLDOWN_MS = 1400;
@@ -272,20 +272,24 @@ export function createDetailViews(context) {
 
     const titleBlock = document.createElement("div");
     titleBlock.className = "work-detail-title-block";
-    titleBlock.append(title, author);
+    const backButton = workActions.createBackButton(goBack);
+    titleBlock.append(title, backButton, author);
 
-    const actions = workActions.createActionRow(work, goBack);
+    const actions = workActions.createActionRow(work);
 
     const highlights = createWorkDetailHighlights(work);
-    body.append(titleBlock, actions);
-    if (highlights) body.append(highlights);
+    const metaBody = document.createElement("div");
+    metaBody.className = "work-detail-meta-body";
+    body.append(titleBlock);
+    if (highlights) metaBody.append(highlights);
+    metaBody.append(actions);
     if (work.modifiedAt) {
       const updated = document.createElement("span");
       updated.className = "work-detail-updated";
       updated.textContent = `更新：${formatDate(work.modifiedAt)}`;
-      body.append(updated);
+      metaBody.append(updated);
     }
-    hero.append(body, cover);
+    hero.append(body, cover, metaBody);
     return hero;
   }
 
@@ -475,7 +479,8 @@ export function createDetailViews(context) {
   async function copyFactValue(value, button) {
     const previous = button.textContent;
     try {
-      await navigator.clipboard?.writeText(value);
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(value);
       button.textContent = "已复制";
     } catch {
       button.textContent = "复制失败";

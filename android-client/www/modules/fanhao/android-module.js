@@ -1,5 +1,5 @@
-import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260720-fanhao-work-grid-03";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260720-fanhao-work-grid-03";
+import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260721-fanhao-work-detail-01";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260721-fanhao-work-detail-01";
 
 export function createAndroidModule({ host }) {
   const workViews = createWorkViews({

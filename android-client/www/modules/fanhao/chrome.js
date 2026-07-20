@@ -1,3 +1,5 @@
+import { openFanhaoSheet } from "./sheet.js?v=20260721-fanhao-work-detail-01";
+
 export const FANHAO_ROOT_VIEWS = Object.freeze(["people", "works", "rankings", "studios"]);
 
 const CHROME_TABS = Object.freeze([
@@ -76,41 +78,14 @@ function sortConfigForView(view, views) {
 }
 
 function openSortDialog(host, config) {
-  document.querySelector(".fanhao-sort-overlay")?.remove();
-  const overlay = document.createElement("div");
-  overlay.className = "fanhao-sort-overlay";
-  const backdrop = document.createElement("button");
-  backdrop.type = "button";
-  backdrop.className = "fanhao-sort-backdrop";
-  backdrop.setAttribute("aria-label", "关闭排序");
-  const panel = document.createElement("section");
-  panel.className = "fanhao-sort-sheet";
-  panel.setAttribute("role", "dialog");
-  panel.setAttribute("aria-modal", "true");
-  panel.setAttribute("aria-label", config.title);
-  const title = document.createElement("strong");
-  title.textContent = config.title;
-  panel.append(title);
-
-  for (const option of config.options) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "fanhao-sort-option";
-    button.classList.toggle("active", option.value === config.value);
-    button.textContent = option.label;
-    button.addEventListener("click", () => {
-      overlay.remove();
-      if (config.select(option.value) !== false) host.ui.scrollToTop();
-    });
-    panel.append(button);
-  }
-
-  const close = () => overlay.remove();
-  backdrop.addEventListener("click", close);
-  overlay.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") close();
+  openFanhaoSheet({
+    title: config.title,
+    value: config.value,
+    options: config.options.map((option) => ({
+      ...option,
+      select: () => {
+        if (config.select(option.value) !== false) host.ui.scrollToTop();
+      }
+    }))
   });
-  overlay.append(backdrop, panel);
-  document.body.append(overlay);
-  panel.querySelector(".active")?.focus();
 }

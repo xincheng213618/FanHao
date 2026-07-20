@@ -1,5 +1,6 @@
 import { postJson } from "../../../../js/api.js?v=20260706-mobile-web-sync-01";
 import { readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=20260705-mobile-actions-01";
+import { openFanhaoSheet } from "../../sheet.js?v=20260721-fanhao-work-detail-01";
 
 export function createWorkActions(deps) {
   const {
@@ -12,18 +13,57 @@ export function createWorkActions(deps) {
     renderWorkDetail
   } = deps;
 
-  function createActionRow(work, goBack) {
+  function createActionRow(work) {
     const actions = document.createElement("div");
     actions.className = "detail-action-row";
-    const backButton = actionButton("detail-back-action", "返回", goBack);
     const markerButton = actionButton("local-marker-action", "", () => toggleLocalMarker(work, "A", markerButton));
     syncMarkerButton(markerButton, work, "A");
     const favoriteButton = actionButton("favorite-action", "", () => toggleFavorite(work, favoriteButton));
     syncFavoriteButton(favoriteButton, work.favorite);
-    const deleteButton = actionButton("delete-local-action danger", "", () => deleteLocalFiles(work, deleteButton));
-    syncDeleteButton(deleteButton, work);
-    actions.append(backButton, markerButton, favoriteButton, deleteButton);
+    const moreButton = actionButton("work-more-action", "更多", () => openMoreActions(work));
+    actions.append(markerButton, favoriteButton, moreButton);
     return actions;
+  }
+
+  function createBackButton(goBack) {
+    const button = actionButton("work-detail-header-back", "返回", goBack);
+    button.setAttribute("aria-label", "返回上一页");
+    return button;
+  }
+
+  function openMoreActions(work) {
+    const code = extractWorkCode(work);
+    openFanhaoSheet({
+      title: "更多操作",
+      options: [
+        {
+          label: "复制番号",
+          hidden: !code,
+          select: () => copyWorkCode(code)
+        },
+        {
+          label: "打开资料来源",
+          hidden: !work.javdbUrl,
+          select: () => window.open(work.javdbUrl, "_blank", "noreferrer")
+        },
+        {
+          label: "删除本地文件",
+          variant: "danger wide",
+          hidden: !work?.id || work.missingLocal,
+          select: (_value, button) => deleteLocalFiles(work, button)
+        }
+      ]
+    });
+  }
+
+  async function copyWorkCode(code) {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(code);
+      renderMessage(`番号 ${code} 已复制。`, "quiet", false);
+    } catch {
+      renderMessage("复制番号失败，请长按番号手动复制。", "error", false);
+    }
   }
 
   function actionButton(className, text, onClick) {
@@ -132,5 +172,5 @@ export function createWorkActions(deps) {
     return writeCachedJson(activeUrl, path, { ...(cached?.payload || {}), work });
   }
 
-  return { createActionRow };
+  return { createActionRow, createBackButton };
 }
