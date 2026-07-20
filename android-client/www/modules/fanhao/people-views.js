@@ -6,11 +6,26 @@ const PEOPLE_SORT_STORAGE_KEY = "fanhao.android.peopleSort";
 const PEOPLE_PAGE_SIZE = 64;
 const PERSON_AVATAR_ROOT_MARGIN = "560px 320px";
 const PEOPLE_SORTS = [
-  { value: "smart", label: "头像优先", description: "头像优先" },
+  { value: "smart", label: "常用优先", description: "常用优先" },
   { value: "works", label: "作品最多", description: "作品最多" },
-  { value: "videos", label: "视频最多", description: "视频最多" },
+  { value: "sources", label: "多来源", description: "多来源优先" },
   { value: "name", label: "名称排序", description: "按名称" }
 ];
+
+function displayPersonName(person) {
+  return String(person?.actorProfile?.displayName || person?.name || "");
+}
+
+export function isBrowsableAuthor(person) {
+  const name = displayPersonName(person).trim();
+  const compact = name.toLocaleLowerCase().replace(/\s+/gu, "");
+  if (!name || /^(?:noactor|unknownactor|unknown|未知|未知作者|无名|無名|なし)$/iu.test(compact)) return false;
+  if (/^[\[【][^\]】]*[\]】]$/u.test(name)) return false;
+  if (Array.from(name).length > 28) return false;
+  if (/[（(]\d{4}\s*[-–—]\s*\d{4}[）)]/u.test(name)) return false;
+  if (/(?:mega\s*pack|actress\s*pack|collection\s*videos?)/iu.test(name)) return false;
+  return true;
+}
 
 export function createPeopleViews(context) {
   const {
@@ -34,7 +49,7 @@ export function createPeopleViews(context) {
   let peopleIndexCache = null;
 
   function visiblePeople(people) {
-    return (people || []).filter((person) => person?.actorProfile?.gender !== "male");
+    return (people || []).filter((person) => person?.actorProfile?.gender !== "male" && isBrowsableAuthor(person));
   }
 
   function renderPreviewPeople(people) {
@@ -145,30 +160,33 @@ export function createPeopleViews(context) {
     const bVisual = imageUrlForPerson(b) ? 1 : 0;
     const byName = () => displayPersonName(a).localeCompare(displayPersonName(b), "zh-Hans-CN");
     if (mode === "works") {
-      return (b.workCount || 0) - (a.workCount || 0)
-        || (b.videoCount || 0) - (a.videoCount || 0)
+      return authorPriority(b) - authorPriority(a)
+        || (b.workCount || 0) - (a.workCount || 0)
         || bVisual - aVisual
         || byName();
     }
-    if (mode === "videos") {
-      return (b.videoCount || 0) - (a.videoCount || 0)
-        || (b.workCount || 0) - (a.workCount || 0)
+    if (mode === "sources") {
+      return authorPriority(b) - authorPriority(a)
+        || (b.sourceCount || 0) - (a.sourceCount || 0)
         || bVisual - aVisual
+        || (b.workCount || 0) - (a.workCount || 0)
         || byName();
     }
     if (mode === "name") {
-      return byName()
+      return authorPriority(b) - authorPriority(a)
+        || byName()
         || (b.workCount || 0) - (a.workCount || 0)
-        || (b.videoCount || 0) - (a.videoCount || 0);
+        || bVisual - aVisual;
     }
-    return bVisual - aVisual
+    return authorPriority(b) - authorPriority(a)
+      || (b.sourceCount || 0) - (a.sourceCount || 0)
+      || bVisual - aVisual
       || (b.workCount || 0) - (a.workCount || 0)
-      || (b.videoCount || 0) - (a.videoCount || 0)
       || byName();
   }
 
-  function displayPersonName(person) {
-    return String(person.actorProfile?.displayName || person.name || "");
+  function authorPriority(person) {
+    return isBrowsableAuthor(person) ? 1 : 0;
   }
 
   function createPersonCard(person, mode, avatarLoader = mode === "preview" ? previewAvatarLoader : indexAvatarLoader) {
@@ -190,7 +208,7 @@ export function createPeopleViews(context) {
     if (mode === "preview") {
       const meta = document.createElement("span");
       const sources = person.sourceCount > 1 ? ` · ${formatNumber(person.sourceCount)} 处` : "";
-      meta.textContent = `${formatNumber(person.workCount)} 部 · ${formatNumber(person.videoCount)} 视频${sources}`;
+      meta.textContent = `${formatNumber(person.workCount)} 部${sources}`;
       button.append(name, meta);
       return button;
     }
@@ -207,6 +225,12 @@ export function createPeopleViews(context) {
     } else {
       body.append(name);
     }
+
+    const meta = document.createElement("span");
+    meta.className = "index-person-meta";
+    const sources = person.sourceCount > 1 ? ` · ${formatNumber(person.sourceCount)} 来源` : "";
+    meta.textContent = `${formatNumber(person.workCount)} 部${sources}`;
+    body.append(meta);
 
     button.append(body);
     return button;

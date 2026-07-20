@@ -1,7 +1,7 @@
 @import "./css/base.css?v=20260712-module-chrome-03";
-@import "./css/sections.css?v=20260720-fanhao-author-detail-02";
-@import "./css/lists.css?v=20260720-fanhao-author-detail-02";
-@import "./modules/fanhao/styles.css?v=20260720-fanhao-author-detail-02";
+@import "./css/sections.css?v=20260720-fanhao-author-grid-02";
+@import "./css/lists.css?v=20260720-fanhao-author-grid-02";
+@import "./modules/fanhao/styles.css?v=20260720-fanhao-author-grid-02";
 @import "./modules/novels/styles.css?v=20260712-module-chrome-03";
 @import "./modules/music/styles.css?v=20260714-music-search-queue-27";
 @import "./modules/short-videos/styles.css?v=20260713-module-isolation-10";

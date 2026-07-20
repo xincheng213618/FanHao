@@ -35,6 +35,7 @@ import { createCoreDbService } from "../src/modules/fanhao/server/library/core-d
 import { tableStampValue } from "../src/modules/fanhao/server/library/table-stamp-query.js";
 import { fetchPreparedImage } from "../android-client/www/js/image.js";
 import { createWorkListState } from "../android-client/www/js/work-filtering.js";
+import { isBrowsableAuthor } from "../android-client/www/modules/fanhao/people-views.js";
 import { createWorkCoverLoader } from "../android-client/www/modules/fanhao/features/works/cover-loader.js";
 import { createWorkPageDataService } from "../android-client/www/modules/fanhao/features/works/page-data-service.js";
 import { createWorkDetailDataService } from "../android-client/www/modules/fanhao/features/works/detail-data-service.js";
@@ -433,7 +434,7 @@ try {
 assert(androidWorkViews.includes("createRankingViews"), "FanHao Android rankings must stay in their feature module");
 assert(lines("android-client/www/modules/fanhao/work-views.js") <= 750, "FanHao Android work views must stay below 750 lines");
 assert(lines("android-client/www/modules/fanhao/features/works/cards.js") <= 320, "FanHao Android work cards must stay focused");
-assert(androidApp.includes("const aVisual = imageUrlForPerson(a) ? 1 : 0"), "Android home must recognize compact person-list avatar URLs");
+assert(androidApp.includes(".sort(peopleViews.sortPeople)") && !androidApp.includes("const aVisual = imageUrlForPerson(a) ? 1 : 0"), "Android home must reuse the author index ordering supported by compact person-list fields");
 assert(androidPeopleViews.includes("const aVisual = imageUrlForPerson(a) ? 1 : 0"), "Android people sorting must recognize compact person-list avatar URLs");
 assert(androidApp.includes("const FAST_WORK_LIMIT = 48"), "Android FanHao work views must request a phone-sized interactive first page");
 assert(androidApp.includes("const FAST_WORK_STEP = 48"), "Android FanHao work views must grow in phone-sized pages");
@@ -445,6 +446,15 @@ assert(androidPeopleViews.includes("appendPeopleCards(grid, people.slice(start, 
 assert(androidPeopleViews.includes("restorePeopleIndex(sourcePeople, sortMode)") && androidPeopleViews.includes("cache.sourcePeople !== sourcePeople"), "Android people navigation must restore the current library index without rebuilding it");
 assert(androidPeopleViews.includes("els.viewContent.replaceChildren(...nodes)") && androidPeopleViews.includes("syncPeopleLimit(cache.grid.children.length)"), "Android people restoration must retain loaded cards and synchronize continuation with the rendered count");
 assert(androidPeopleViews.includes("getSortOptions:") && androidPeopleViews.includes("setSortMode: setPeopleSortMode") && !androidPeopleViews.includes("createPeopleSortControls"), "Android author sorting must be owned by the active chrome tag instead of a permanent row");
+assert(androidPeopleViews.includes('{ value: "sources", label: "多来源"') && !androidPeopleViews.includes('{ value: "videos"'), "Android author sorting must only offer fields present in the lightweight person payload");
+assert(androidPeopleViews.includes("isBrowsableAuthor(person)") && androidPeopleViews.includes("noactor|unknownactor"), "Android author browsing must hide obvious placeholder and collection records without deleting library data");
+assert.equal(isBrowsableAuthor({ name: "明里つむぎ" }), true, "real Japanese author names must remain browseable");
+assert.equal(isBrowsableAuthor({ name: "Melody Marks" }), true, "real Western author names must remain browseable");
+for (const placeholderName of ["noactor", "[动漫]", "[]", "精神文明建设之“绅士”养成（1995-2000）", "Elena Koshka actress pack 1", "Alexa Grace MegaPack 配图精装", "Mila Azul Collection Videos"]) {
+  assert.equal(isBrowsableAuthor({ name: placeholderName }), false, `placeholder author record must stay out of the mobile index: ${placeholderName}`);
+}
+assert(androidPeopleViews.includes('meta.className = "index-person-meta"'), "Android author tiles must retain a compact work-count cue");
+assert(androidSectionStyles.includes("grid-template-columns: repeat(3, minmax(0, 1fr))") && androidSectionStyles.includes("contain-intrinsic-size: auto 176px"), "Android author browsing must use a dense three-column tile grid");
 assert(!androidPeopleViews.includes("renderCurrentViewPreservingScroll"), "Android people continuation must not rebuild the existing index");
 assert(androidWorkCards.includes("coverLoader.schedule(thumb, imagePath)"), "Android work cards must defer cover reads until they approach the viewport");
 assert(androidWorkCards.includes("compactMeta ? compactWorkCardTitle(work)") && androidWorkCards.includes("function compactWorkCode(work)"), "Android compact work cards must keep the work code visible beside the cleaned title");
@@ -466,8 +476,8 @@ assert(workDetailTitleStyles.includes("-webkit-line-clamp: 3"), "Android work de
 assert(androidSectionStyles.includes('@media (max-width: 360px)') && androidSectionStyles.includes("-webkit-line-clamp: 4"), "narrow Android work details must retain a fourth title line");
 assert(workDetailActionStyles.includes("flex-wrap: nowrap") && workDetailActionStyles.includes("width: 100%"), "Android work-detail actions must stay in one dedicated full-width row");
 assert(workDetailActionButtonStyles.includes("flex: 1 1 0") && workDetailActionButtonStyles.includes("min-width: 0"), "Android work-detail actions must share the available phone width evenly");
-assert(androidIndexHtml.includes("styles.css?v=20260720-fanhao-author-detail-02"), "Android FanHao chrome styles must use a fresh WebView URL");
-assert(androidIndexHtml.includes("app.js?v=20260720-fanhao-author-detail-02") && androidApp.includes("config.js?v=20260720-fanhao-author-detail-02") && androidConfig.includes('CLIENT_VERSION = "20260720-fanhao-author-detail-02"'), "Android FanHao navigation changes must refresh the WebView cache chain");
+assert(androidIndexHtml.includes("styles.css?v=20260720-fanhao-author-grid-02"), "Android FanHao chrome styles must use a fresh WebView URL");
+assert(androidIndexHtml.includes("app.js?v=20260720-fanhao-author-grid-02") && androidApp.includes("config.js?v=20260720-fanhao-author-grid-02") && androidConfig.includes('CLIENT_VERSION = "20260720-fanhao-author-grid-02"'), "Android FanHao navigation changes must refresh the WebView cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -497,7 +507,7 @@ assert(androidWorkCards.includes('person.dataset.workIntentIgnore = "1"') && and
 assert(read("android-client/www/modules/fanhao/detail-views.js").includes("workDetailDataService.load(workId") && androidWorkDetailDataService.includes("pageDataService.load(getActiveUrl(), path(workId)"), "Android work detail navigation must reuse the shared page race");
 assert((androidDetailViews.match(/pageDataService\.load\(activeUrl, path/g) || []).length >= 2 && androidFanhaoModule.includes("pageDataService: workViews.pageDataService"), "Android person and related-work navigation must share the cache/network race");
 assert(!androidDetailViews.includes("await readCachedJson(activeUrl, path)") && !androidDetailViews.includes("fetchJson(activeUrl, path"), "Android detail views must not wait for IndexedDB before starting their live request");
-assert(androidWorkViews.includes('cards.js?v=20260720-fanhao-author-detail-02'), "Android author-copy changes must refresh the card module URL");
+assert(androidWorkViews.includes('cards.js?v=20260720-fanhao-author-grid-02'), "Android author-copy changes must refresh the card module URL");
 assert((androidWorkViews.match(/pageDataService\.load\(activeUrl, path/g) || []).length >= 5 && androidWorkPageDataService.includes("Promise.race([freshRequest, cacheRequest])"), "remaining Android FanHao pages must race IndexedDB with the live response");
 const scheduledViewportBatches = new Map();
 let nextViewportBatchId = 1;
@@ -797,19 +807,19 @@ assert(androidDetailViews.includes("hasServerMore:"), "Android person details mu
 assert(!androidDetailViews.includes("limit=2000"), "Android person details must not fetch every work before first render");
 assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && androidDetailViews.includes("正在加载作品"), "Android person navigation must paint the local index before the network request completes");
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
-assert(androidDetailViews.includes('detail-hero.js?v=20260720-fanhao-author-detail-02'), "Android author identity changes must use a fresh component URL");
+assert(androidDetailViews.includes('detail-hero.js?v=20260720-fanhao-author-grid-02'), "Android author identity changes must use a fresh component URL");
 assert(androidDetailViews.includes("hidePerson: true") && androidDetailViews.includes('createDetailSectionTitle("作品", "")'), "Android author pages must show works without repeating the author or a second work count");
 assert(androidPersonDetailHero.includes('workCountUnit.textContent = "部作品"') && !androidDetailViews.includes("function personSummaryText(person)"), "Android author pages must present the work count once as the primary identity metric");
 assert(androidPersonDetailHero.includes("codex(?:smoke)?alias"), "Android author identity must hide stale smoke-test aliases");
 assert(androidSectionStyles.includes(".person-detail-avatar-frame > img") && androidSectionStyles.includes("object-fit: contain"), "Android author avatars must remain fully visible inside their detail frame");
 assert(lines("android-client/www/modules/fanhao/features/people/detail-hero.js") <= 150, "Android author identity component must stay focused");
-assert(androidFanhaoIndex.includes('detail-views.js?v=20260720-fanhao-author-detail-02'), "Android author-copy changes must use a fresh detail-view URL");
+assert(androidFanhaoIndex.includes('detail-views.js?v=20260720-fanhao-author-grid-02'), "Android author-copy changes must use a fresh detail-view URL");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-author-detail-02'), "Android chrome sorting changes must use a fresh work-view URL");
-assert(androidFanhaoIndex.includes('people-views.js?v=20260720-fanhao-author-detail-02'), "Android author sorting must use a fresh people-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-author-detail-02'), "Android navigation changes must refresh the FanHao module entry chain");
-assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-author-detail-02'), "Android navigation changes must refresh the app entry chain");
-assert(androidWorkViews.includes('ranking-views.js?v=20260720-fanhao-author-detail-02'), "Android ranking sheet changes must use a fresh module URL");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-author-grid-02'), "Android chrome sorting changes must use a fresh work-view URL");
+assert(androidFanhaoIndex.includes('people-views.js?v=20260720-fanhao-author-grid-02'), "Android author sorting must use a fresh people-view URL");
+assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-author-grid-02'), "Android navigation changes must refresh the FanHao module entry chain");
+assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-author-grid-02'), "Android navigation changes must refresh the app entry chain");
+assert(androidWorkViews.includes('ranking-views.js?v=20260720-fanhao-author-grid-02'), "Android ranking sheet changes must use a fresh module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
   assert(!androidDetailViews.includes(`function ${functionName}(`), `Android detail must delegate ${functionName}`);

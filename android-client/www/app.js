@@ -1,10 +1,10 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260720-fanhao-author-detail-02";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260720-fanhao-author-grid-02";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
 import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260714-music-sleep-current-28";
 import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260712-module-chrome-03";
 import { getElements } from "./js/dom.js?v=20260712-module-chrome-03";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
-import { absoluteUrl, imageUrlForPerson, loadPreviewImage } from "./js/image.js?v=20260717-fanhao-cover-prepare-01";
+import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
 import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=20260712-module-chrome-03";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
@@ -1169,11 +1169,7 @@ function renderDashboard(data) {
 
   const previewPeople = people
     .filter((person) => person?.actorProfile?.gender !== "male")
-    .sort((a, b) => {
-      const aVisual = imageUrlForPerson(a) ? 1 : 0;
-      const bVisual = imageUrlForPerson(b) ? 1 : 0;
-      return bVisual - aVisual || (b.videoCount || 0) - (a.videoCount || 0);
-    })
+    .sort(peopleViews.sortPeople)
     .slice(0, 10);
   peopleViews.renderPreviewPeople(previewPeople);
 }
