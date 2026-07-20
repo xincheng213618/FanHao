@@ -38,7 +38,7 @@ import { createWorkListState } from "../android-client/www/js/work-filtering.js"
 import { isBrowsableAuthor } from "../android-client/www/modules/fanhao/people-views.js";
 import { localAuthorSearchSuggestions } from "../android-client/www/modules/fanhao/search-page.js";
 import { createWorkCoverLoader } from "../android-client/www/modules/fanhao/features/works/cover-loader.js";
-import { compactWorkCode, displayWorkTitle, workGridBadge, workGridMeta, workGridRankBadge } from "../android-client/www/modules/fanhao/features/works/card-presentation.js";
+import { compactWorkCode, displayWorkTitle, workGridBadge, workGridMeta, workGridPerson, workGridRankBadge } from "../android-client/www/modules/fanhao/features/works/card-presentation.js";
 import { createWorkPageDataService } from "../android-client/www/modules/fanhao/features/works/page-data-service.js";
 import { createWorkDetailDataService } from "../android-client/www/modules/fanhao/features/works/detail-data-service.js";
 import { workCollectionPath } from "../android-client/www/modules/fanhao/features/works/collection-request.js";
@@ -362,7 +362,8 @@ assert(androidWorkSearchDataService.includes("/api/fanhao/search"), "FanHao Andr
 assert(!androidWorkViews.includes("data.channels"), "FanHao Android search must not render results from other modules");
 assert(!androidFanhaoModule.includes('route("favorites"') && !androidFanhaoModule.includes('route("vr"') && !androidApp.includes("renderChannelFavoritesPanel"), "Android favorites and VR must remain work filters instead of independent pages or panels");
 assert(androidFanhaoChrome.indexOf('{ label: "作者", view: "people" }') < androidFanhaoChrome.indexOf('{ label: "作品", view: "works" }'), "Android FanHao chrome must put authors first");
-assert(androidFanhaoChrome.includes("if (view === tab.view)") && androidFanhaoChrome.includes("openSortDialog(host, sort)"), "tapping the active FanHao chrome tag must open its sort sheet");
+assert(androidFanhaoChrome.includes("if (view === tab.view)") && androidFanhaoChrome.includes("openSortDialog(host, activeSort)"), "tapping the active FanHao chrome tag must open its sort sheet");
+assert(androidFanhaoChrome.includes('button.classList.toggle("has-menu", opensSort)') && androidFanhaoChrome.includes("点按选择排序") && androidFanhaoStyles.includes(".fanhao-chrome-tag.has-menu"), "active author and work tabs must visibly announce their sort menu");
 assert(androidFanhaoStyles.includes(".fanhao-sort-sheet") && androidFanhaoStyles.includes("grid-template-columns: repeat(2"), "FanHao sorting must use the compact two-column bottom sheet");
 assert(androidFanhaoChrome.includes("sheet.js?v=20260721-fanhao-person-detail-02") && androidFanhaoChrome.includes("openFanhaoSheet({"), "FanHao sorting must reuse the shared bottom sheet");
 assert(androidFanhaoChrome.includes('view === "personDetail"') && androidFanhaoChrome.includes('view === "workDetail"') && androidFanhaoChrome.includes("renderDetailChrome(container, view, host)"), "Android FanHao detail routes must replace the catalog tabs with one compact detail header");
@@ -498,10 +499,13 @@ assert(androidWorkCards.includes("coverLoader.schedule(thumb, imagePath)"), "And
 assert(androidWorkCards.includes("compactMeta ? compactWorkCardTitle(work)") && androidWorkCardPresentation.includes("export function compactWorkCode(work)"), "Android compact work cards must keep the work code visible beside the cleaned title");
 assert(androidWorkViews.includes('coverGrid: true') && androidWorkViews.includes('grid.className = `work-list${renderOptions.coverGrid ? " cover-grid" : ""}`'), "Android work, studio, and search collections must share the dense cover-grid renderer");
 assert(androidDetailViews.includes("coverGrid: true") && androidRankingViews.includes("coverGrid: true"), "Android author works and rankings must reuse the dense cover-grid renderer");
-assert(androidWorkCards.includes("createWorkCoverFrame(thumb, work)") && androidWorkCards.includes('codeLine.className = "work-card-code"'), "Android cover-grid cards must reuse the existing card navigation while separating title, code, and cover status");
-assert(androidListStyles.includes(".work-list.cover-grid") && androidListStyles.includes("grid-template-columns: repeat(3, minmax(0, 1fr))") && androidListStyles.includes(".work-cover-badge"), "Android work browsing must use a dense three-column cover grid with glanceable status");
-assert.equal(workGridMeta({ infoSummary: { releaseDate: "2026-07-20", rating: 4.41 } }), "2026-07-20 · ★ 4.41", "Android work-grid metadata must keep release date and compact rating together");
+assert(androidWorkCards.includes("createWorkCoverFrame(thumb, work)") && androidWorkCards.includes('identity.className = "work-card-grid-identity"') && androidWorkCards.includes('personLine.className = "work-card-grid-person"'), "Android cover-grid cards must reuse existing navigation while combining code and author into one dense identity row");
+assert(androidListStyles.includes(".work-list.cover-grid") && androidListStyles.includes("grid-template-columns: repeat(3, minmax(0, 1fr))") && androidListStyles.includes("gap: 11px 7px") && androidListStyles.includes(".work-card-grid-identity"), "Android work browsing must use a compact three-column grid with a dense identity row");
+assert.equal(workGridMeta({ infoSummary: { releaseDate: "2026-07-20", rating: 4.41 } }), "2026-07-20 · ★4.41", "Android work-grid metadata must keep release date and compact rating together");
+assert.equal(workGridMeta({ infoSummary: { releaseDate: "2026-07-20", rating: 0, ratingCount: 0, durationMinutes: 110 } }), "2026-07-20 · 110分", "unrated work cards must prefer useful duration over a meaningless zero rating");
 assert.equal(workGridMeta({ modifiedAt: "2025-01-02T12:00:00Z", videoCount: 2 }), "2025-01-02 · 2 个视频", "Android work-grid metadata must retain a useful fallback when rating data is absent");
+assert.equal(workGridPerson({ personDisplayName: "noactor", infoSummary: { actors: ["明里つむぎ"] } }), "明里つむぎ", "Android dense work cards must recover a real author from metadata when the library group is a placeholder");
+assert.equal(workGridPerson({ personName: "unknown actor" }), "", "Android dense work cards must omit placeholder author noise");
 assert.equal(compactWorkCode({ infoSummary: { code: "B-008 人妻売春 08" } }), "B-008", "single-letter work codes must not leak title text into the grid code line");
 assert.equal(displayWorkTitle({ title: "B-008 人妻売春 08" }, true), "人妻売春 08", "single-letter work codes must be removed from the compact grid title");
 assert.deepEqual(workGridBadge({ missingLocal: true, playableCount: 1 }), { text: "未下载", variant: "missing" }, "missing-local state must outrank other work-grid badges");
@@ -532,8 +536,8 @@ assert(androidWorkActions.includes('title: "更多操作"') && androidWorkAction
 assert(androidWorkActions.includes('variant: "danger wide"') && androidFanhaoStyles.includes(".fanhao-sort-option.danger") && androidFanhaoStyles.includes(".fanhao-sort-option.wide"), "Android destructive work actions must remain visually isolated in the sheet");
 assert(!androidWorkActions.includes("createBackButton") && androidSectionStyles.includes(".work-detail-meta-body"), "Android work details must delegate return navigation to the shared sticky detail header");
 assert(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions must stay focused");
-assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-person-browser-07") && androidStyles.includes("css/lists.css?v=20260721-fanhao-person-browser-07") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-person-browser-07"), "Android FanHao author browsing styles must use a fresh WebView URL");
-assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-person-browser-07") && androidApp.includes("config.js?v=20260721-fanhao-person-browser-07") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-person-browser-07"'), "Android FanHao author browsing must refresh the WebView cache chain");
+assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-author-sort-density-08") && androidStyles.includes("css/lists.css?v=20260721-fanhao-author-sort-density-08") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-author-sort-density-08"), "Android FanHao author sorting and dense work-card styles must use a fresh WebView URL");
+assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-author-sort-density-08") && androidApp.includes("config.js?v=20260721-fanhao-author-sort-density-08") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-author-sort-density-08"'), "Android FanHao author sorting and work density must refresh the WebView cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -563,7 +567,7 @@ assert(androidWorkCards.includes('person.dataset.workIntentIgnore = "1"') && and
 assert(read("android-client/www/modules/fanhao/detail-views.js").includes("workDetailDataService.load(workId") && androidWorkDetailDataService.includes("pageDataService.load(getActiveUrl(), path(workId)"), "Android work detail navigation must reuse the shared page race");
 assert((androidDetailViews.match(/pageDataService\.load\(activeUrl, path/g) || []).length >= 2 && androidFanhaoModule.includes("pageDataService: workViews.pageDataService"), "Android person and related-work navigation must share the cache/network race");
 assert(!androidDetailViews.includes("await readCachedJson(activeUrl, path)") && !androidDetailViews.includes("fetchJson(activeUrl, path"), "Android detail views must not wait for IndexedDB before starting their live request");
-assert(androidWorkViews.includes('cards.js?v=20260721-fanhao-person-detail-02') && androidWorkCards.includes('card-presentation.js?v=20260721-fanhao-person-detail-02'), "Android work-grid changes must refresh the card presentation chain");
+assert(androidWorkViews.includes('cards.js?v=20260721-fanhao-author-sort-density-08') && androidWorkCards.includes('card-presentation.js?v=20260721-fanhao-author-sort-density-08'), "Android dense work-grid changes must refresh the card presentation chain");
 assert((androidWorkViews.match(/pageDataService\.load\(activeUrl, path/g) || []).length >= 5 && androidWorkPageDataService.includes("Promise.race([freshRequest, cacheRequest])"), "remaining Android FanHao pages must race IndexedDB with the live response");
 const scheduledViewportBatches = new Map();
 let nextViewportBatchId = 1;
@@ -886,10 +890,10 @@ assert(lines("android-client/www/modules/fanhao/features/people/detail-hero.js")
 assert(lines("android-client/www/modules/fanhao/features/people/detail-work-toolbar.js") <= 110, "Android author work toolbar must stay focused");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-person-browser-07'), "Android person-detail changes must use a fresh detail-view URL");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-person-browser-07') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-discovery-03'), "Android author work-browser changes must use a fresh module URL while retaining search discovery");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-author-sort-density-08') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-discovery-03'), "Android dense work-browser changes must use a fresh module URL while retaining search discovery");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-author-portraits-06'), "Android author browsing must use the current FanHao module cache chain");
-assert(androidFanhaoModule.includes('index.js?v=20260721-fanhao-person-browser-07'), "Android author work-browser changes must refresh the FanHao module entry chain");
-assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-person-browser-07'), "Android author work-browser changes must refresh the app entry chain");
+assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-author-sort-density-08') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-author-sort-density-08'), "Android author sorting and dense work browsing must refresh the FanHao entry chain");
+assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-author-sort-density-08'), "Android author sorting and dense work browsing must refresh the app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260721-fanhao-person-detail-02'), "Android ranking grid changes must use a fresh module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {

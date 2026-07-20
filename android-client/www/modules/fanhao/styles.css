@@ -29,6 +29,19 @@
   color: var(--blue);
 }
 
+.fanhao-chrome-tag.has-menu {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding-right: 8px;
+}
+
+.fanhao-chrome-tag.has-menu > svg {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+}
+
 .fanhao-chrome-icon {
   display: grid;
   width: 40px;

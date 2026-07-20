@@ -22,17 +22,27 @@ export function renderFanhaoChrome({ container, view }, host, views) {
   row.className = "fanhao-chrome-row";
   row.setAttribute("aria-label", "番号导航和排序");
   const activeView = fanhaoTabForView(view);
+  const activeSort = sortConfigForView(view, views);
 
   for (const tab of CHROME_TABS) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "fanhao-chrome-tag";
-    button.classList.toggle("active", tab.view === activeView);
-    button.textContent = tab.label;
+    const active = tab.view === activeView;
+    const opensSort = tab.view === view && Boolean(activeSort?.options.length);
+    button.classList.toggle("active", active);
+    button.classList.toggle("has-menu", opensSort);
+    if (opensSort) {
+      const sortLabel = activeSort.options.find((option) => option.value === activeSort.value)?.label || "默认排序";
+      button.setAttribute("aria-label", `${tab.label}，当前${sortLabel}，点按选择排序`);
+      button.title = `${tab.label}排序 · ${sortLabel}`;
+      button.innerHTML = `<span>${tab.label}</span><svg aria-hidden="true" viewBox="0 0 12 12"><path d="m2.5 4.25 3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    } else {
+      button.textContent = tab.label;
+    }
     button.addEventListener("click", () => {
       if (view === tab.view) {
-        const sort = sortConfigForView(view, views);
-        if (sort?.options.length) openSortDialog(host, sort);
+        if (activeSort?.options.length) openSortDialog(host, activeSort);
         else host.ui.scrollToTop();
         return;
       }

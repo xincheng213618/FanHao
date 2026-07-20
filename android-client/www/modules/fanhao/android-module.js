@@ -1,5 +1,5 @@
-import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260721-fanhao-person-detail-02";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260721-fanhao-person-browser-07";
+import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260721-fanhao-author-sort-density-08";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260721-fanhao-author-sort-density-08";
 
 export function createAndroidModule({ host }) {
   const workViews = createWorkViews({

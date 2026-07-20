@@ -1379,13 +1379,13 @@ button.work-person {
 .content-panel .work-list.cover-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: start;
-  gap: 14px 9px;
+  gap: 11px 7px;
 }
 
 .content-panel .work-list.cover-grid .work-card {
   grid-template-columns: minmax(0, 1fr);
   align-content: start;
-  gap: 7px;
+  gap: 5px;
   min-width: 0;
   min-height: 0;
   border: 0;
@@ -1478,14 +1478,14 @@ button.work-person {
 }
 
 .content-panel .work-list.cover-grid .work-summary {
-  gap: 3px;
-  padding: 0 2px 3px;
+  gap: 2px;
+  padding: 0 1px 2px;
 }
 
 .content-panel .work-list.cover-grid .work-summary strong {
-  min-height: 34px;
-  font-size: 12.5px;
-  line-height: 1.35;
+  min-height: 32px;
+  font-size: 12px;
+  line-height: 1.32;
   -webkit-line-clamp: 2;
 }
 
@@ -1512,6 +1512,7 @@ button.work-person {
 }
 
 .work-card-code,
+.work-card-grid-person,
 .work-card-grid-meta {
   min-width: 0;
   overflow: hidden;
@@ -1521,6 +1522,30 @@ button.work-person {
   white-space: nowrap;
 }
 
+.work-card-grid-identity {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.work-card-grid-identity .work-card-code {
+  flex: 0 0 auto;
+  max-width: 78%;
+}
+
+.work-card-grid-person {
+  flex: 1 1 auto;
+  color: var(--green);
+  font-size: 9.5px;
+  font-weight: 850;
+  text-align: right;
+}
+
+.work-card-grid-person:first-child {
+  text-align: left;
+}
+
 .work-card-code {
   color: var(--blue);
   font-size: 11.5px;
@@ -1528,7 +1553,8 @@ button.work-person {
 
 .work-card-grid-meta {
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: 9.5px;
+  font-weight: 850;
 }
 
 .work-progress {

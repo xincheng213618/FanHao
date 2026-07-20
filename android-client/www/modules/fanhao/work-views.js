@@ -3,7 +3,7 @@ import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=20260720-fanhao-scr
 import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260702-novel-local-manage-74";
 import { formatNumber } from "../../js/format.js";
 import { createWorkListState } from "../../js/work-filtering.js?v=20260721-fanhao-person-browser-07";
-import { createWorkCards } from "./features/works/cards.js?v=20260721-fanhao-person-detail-02";
+import { createWorkCards } from "./features/works/cards.js?v=20260721-fanhao-author-sort-density-08";
 import { workCollectionPath } from "./features/works/collection-request.js?v=20260720-fanhao-collection-filter-01";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260721-fanhao-person-detail-02";
 import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-page-race-01";

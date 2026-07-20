@@ -36,11 +36,25 @@ export function compactWorkCode(work) {
 export function workGridMeta(work) {
   const date = displayCardDate(work?.infoSummary?.releaseDate) || displayCardDate(work?.modifiedAt);
   const rating = numericRating(work?.infoSummary?.rating);
+  const ratingCount = Number(work?.infoSummary?.ratingCount || 0);
+  const duration = Number(work?.infoSummary?.durationMinutes || 0);
   const parts = [];
   if (date) parts.push(date);
-  if (rating !== null) parts.push(`★ ${formatCompactRating(rating)}`);
+  if (rating !== null && (rating > 0 || ratingCount > 0)) parts.push(`★${formatCompactRating(rating)}`);
+  else if (Number.isFinite(duration) && duration > 0) parts.push(`${formatNumber(Math.round(duration))}分`);
   else if (Number(work?.videoCount || 0) > 0) parts.push(`${formatNumber(work.videoCount)} 个视频`);
   return parts.join(" · ");
+}
+
+export function workGridPerson(work) {
+  const candidates = [work?.personDisplayName, work?.personName, ...(work?.infoSummary?.actors || [])];
+  for (const candidate of candidates) {
+    const name = String(candidate || "").trim();
+    const compact = name.toLocaleLowerCase().replace(/\s+/gu, "");
+    if (!name || /^(?:noactor|unknownactor|unknown|未知|未知作者|无名|無名|なし)$/iu.test(compact)) continue;
+    return name;
+  }
+  return "";
 }
 
 export function workGridBadge(work) {

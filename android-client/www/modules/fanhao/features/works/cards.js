@@ -11,8 +11,9 @@ import {
   progressPercent,
   workGridBadge,
   workGridMeta,
+  workGridPerson,
   workGridRankBadge
-} from "./card-presentation.js?v=20260721-fanhao-person-detail-02";
+} from "./card-presentation.js?v=20260721-fanhao-author-sort-density-08";
 import { createWorkCoverLoader } from "./cover-loader.js?v=20260717-fanhao-work-covers-01";
 
 export function createWorkCards({ getActiveUrl, roots = [], showView, workDetailDataService = null }) {
@@ -50,13 +51,23 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
 
     if (coverGrid) {
       body.append(title);
+      const identity = document.createElement("div");
+      identity.className = "work-card-grid-identity";
       const code = compactWorkCode(work);
       if (code) {
         const codeLine = document.createElement("span");
         codeLine.className = "work-card-code";
         codeLine.textContent = code;
-        body.append(codeLine);
+        identity.append(codeLine);
       }
+      const personName = workGridPerson(work);
+      if (personName) {
+        const personLine = document.createElement("span");
+        personLine.className = "work-card-grid-person";
+        personLine.textContent = personName;
+        identity.append(personLine);
+      }
+      if (identity.children.length) body.append(identity);
       const gridMeta = workGridMeta(work);
       if (gridMeta) {
         const meta = document.createElement("span");
