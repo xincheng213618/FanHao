@@ -544,8 +544,8 @@ assert(androidWorkActions.includes('title: "更多操作"') && androidWorkAction
 assert(androidWorkActions.includes('variant: "danger wide"') && androidFanhaoStyles.includes(".fanhao-sort-option.danger") && androidFanhaoStyles.includes(".fanhao-sort-option.wide"), "Android destructive work actions must remain visually isolated in the sheet");
 assert(!androidWorkActions.includes("createBackButton") && androidSectionStyles.includes(".work-detail-meta-body"), "Android work details must delegate return navigation to the shared sticky detail header");
 assert(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions must stay focused");
-assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-work-browse-density-10") && androidStyles.includes("css/sections.css?v=20260721-fanhao-work-detail-flow-09") && androidStyles.includes("css/lists.css?v=20260721-fanhao-work-browse-density-10") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-work-detail-flow-09"), "Android FanHao compact work browsing must use a fresh WebView URL while retaining immersive details");
-assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-work-browse-density-10") && androidApp.includes("config.js?v=20260721-fanhao-work-browse-density-10") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-work-browse-density-10"'), "Android FanHao compact work browsing must refresh the WebView cache chain");
+assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-ranking-density-11") && androidStyles.includes("css/sections.css?v=20260721-fanhao-ranking-density-11") && androidStyles.includes("css/lists.css?v=20260721-fanhao-work-browse-density-10") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-work-detail-flow-09"), "Android FanHao compact rankings must use a fresh WebView URL while retaining dense work browsing and immersive details");
+assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-ranking-density-11") && androidApp.includes("config.js?v=20260721-fanhao-ranking-density-11") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-ranking-density-11"'), "Android FanHao compact rankings must refresh the WebView cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -557,6 +557,9 @@ assert(androidNativeBackStart >= 0 && androidNativeBackStackPriority > androidNa
 assert(androidApp.includes("function returnToStackView()") && androidApp.includes("replaceHistory: true") && androidFanhaoModule.includes("host.navigation.goBack()"), "FanHao search close must replace its route with the originating in-app view");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48"), "Android rankings must request a phone-sized first page");
 assert(androidRankingViews.includes("hasServerMore:"), "Android rankings must preserve server-side continuation");
+assert(!androidRankingViews.includes('stats.className = "ranking-stats"') && androidRankingViews.includes("compactRankingLabel(item)") && androidRankingViews.includes('button.setAttribute("aria-pressed"'), "Android rankings must replace repeated metric cards with compact accessible coverage labels");
+assert(androidRankingViews.includes("function revealRankingChip(strip, button)") && androidRankingViews.includes("strip.scrollLeft = Math.max"), "Android rankings must keep the selected list visible without moving the page vertically");
+assert(androidSectionStyles.includes('.content-panel[data-view="rankings"] > .view-meta') && !androidSectionStyles.includes(".ranking-stats div") && androidSectionStyles.includes(".ranking-chip-strip button"), "Android rankings must remove the duplicated summary row and large statistic cards");
 assert(androidWorkViews.includes("renderOptions.hasServerMore"), "Android work rendering must expose server-side continuation");
 assert.equal(new URL(workCollectionPath("history", { limit: 48 }), "http://127.0.0.1").searchParams.get("limit"), "48", "Android history must request a bounded first page");
 assert(androidWorkViews.includes("const works = data.works || []"), "Android collections must define their rendered work list locally");
@@ -900,11 +903,11 @@ assert(lines("android-client/www/modules/fanhao/features/people/detail-hero.js")
 assert(lines("android-client/www/modules/fanhao/features/people/detail-work-toolbar.js") <= 110, "Android author work toolbar must stay focused");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-work-detail-flow-09') && androidDetailViews.includes('detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09'), "Android work-detail flow changes must use fresh component URLs");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('work-filtering.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-discovery-03'), "Android compact work browsing must use fresh module URLs while retaining search discovery");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-ranking-density-11') && androidWorkViews.includes('work-filtering.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-discovery-03'), "Android compact rankings must use a fresh work-view URL while retaining dense browsing and search discovery");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-author-portraits-06'), "Android author browsing must use the current FanHao module cache chain");
-assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-author-sort-density-08') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-work-browse-density-10'), "Android compact work browsing must refresh the FanHao entry chain without dropping author sorting");
-assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-work-browse-density-10'), "Android compact work browsing must refresh the app entry chain");
-assert(androidWorkViews.includes('ranking-views.js?v=20260721-fanhao-person-detail-02'), "Android ranking grid changes must use a fresh module URL");
+assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-author-sort-density-08') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-ranking-density-11'), "Android compact rankings must refresh the FanHao entry chain without dropping author sorting");
+assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-ranking-density-11'), "Android compact rankings must refresh the app entry chain");
+assert(androidWorkViews.includes('ranking-views.js?v=20260721-fanhao-ranking-density-11'), "Android compact ranking changes must use a fresh module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
   assert(!androidDetailViews.includes(`function ${functionName}(`), `Android detail must delegate ${functionName}`);
@@ -1085,6 +1088,7 @@ assert(rankingServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "ran
 assert(rankingServiceSource.includes("hydrateRankingCoverUrls(rankingRows)"), "ranking pages must batch-hydrate cover URLs after the fast list query");
 assert(!rankingServiceSource.includes("LEFT JOIN images cover"), "ranking list queries must not run one correlated image lookup per row");
 assert(rankingServiceSource.includes("rankingSummariesCache?.stamp === stamp"), "ranking summaries must reuse versioned results");
+assert(rankingServiceSource.includes("function uniqueRankingRows(items = [])") && rankingServiceSource.includes("const rankingRows = uniqueRankingRows(getCoreDb()") && rankingServiceSource.includes("COUNT(DISTINCT ci.work_id)"), "ranking summaries and pages must ignore duplicate collection memberships");
 assert(rankingServiceSource.includes("const RANKING_PREWARM_PAGE_SIZE = 64"), "ranking startup must prepare the desktop first page");
 assert(rankingServiceSource.includes("rankingWorkSourcesCache.get(cacheKey)"), "ranking pages must reuse prepared local and missing work sources");
 assert(rankingServiceSource.includes("const RANKING_PAGE_CACHE_LIMIT = 64") && rankingServiceSource.includes("userStateStamp()"), "ranking pages must cache complete responses until ranking or user state changes");
@@ -1790,13 +1794,17 @@ const cachedRankingService = createRankingService({
     prepare(sql) {
       return {
         all(...args) {
-          if (sql.includes("COUNT(ci.work_id)")) {
+          if (sql.includes("COUNT(DISTINCT ci.work_id)")) {
             rankingSummaryReadCount += 1;
             return [{ collection_id: 1, list_label: "TOP250 2025", source_key: "top:y2025", total: 2, updated_at: "v1", page_url: "https://example.com/ranking" }];
           }
           if (sql.includes("SELECT w.code_search AS code_key")) {
             rankingSummaryCodesReadCount += 1;
-            return [{ code_key: "abc001" }, { code_key: "def002" }];
+            return [
+              { work_id: 101, code: "ABC-001", code_key: "abc001" },
+              { work_id: 101, code: "ABC-001", code_key: "abc001" },
+              { work_id: 102, code: "DEF-002", code_key: "def002" }
+            ];
           }
           if (sql.includes("FROM images")) {
             rankingCoverReadCount += 1;
@@ -1810,6 +1818,7 @@ const cachedRankingService = createRankingService({
           if (sql.includes("AND c.source_key = ?")) {
             rankingListReadCount += 1;
             return [
+              { list_type: args[0], list_key: args[1], list_label: "TOP250 2025", rank_no: 1, core_work_id: 101, code: "ABC-001", code_key: "abc001", title: "ABC-001", detail_url: "", release_date: "2025-01-01", rating: 4.5, rating_count: 10, page_url: "", fetched_at: "", updated_at: "v1" },
               { list_type: args[0], list_key: args[1], list_label: "TOP250 2025", rank_no: 1, core_work_id: 101, code: "ABC-001", code_key: "abc001", title: "ABC-001", detail_url: "", release_date: "2025-01-01", rating: 4.5, rating_count: 10, page_url: "", fetched_at: "", updated_at: "v1" },
               { list_type: args[0], list_key: args[1], list_label: "TOP250 2025", rank_no: 2, core_work_id: 102, code: "DEF-002", code_key: "def002", title: "DEF-002", detail_url: "", release_date: "2025-01-02", rating: 4.4, rating_count: 9, page_url: "", fetched_at: "", updated_at: "v1" }
             ];
@@ -1845,6 +1854,7 @@ const cachedRankingService = createRankingService({
   userStateStamp: () => rankingUserStateStamp
 });
 cachedRankingService.prewarm();
+assert.equal(cachedRankingService.summaries()[0]?.total, 2, "ranking summaries must count unique works instead of duplicate collection rows");
 assert.equal(rankingSummaryReadCount, 1, "ranking startup must prepare summary rows");
 assert.equal(rankingSummaryCodesReadCount, 1, "ranking startup must prepare summary membership counts");
 assert.equal(rankingListReadCount, 1, "ranking startup must prepare the default list rows");
@@ -1856,6 +1866,8 @@ cachedRankingService.rows("top", "y2025");
 assert.equal(rankingListReadCount, 1, "repeated ranking pages must reuse cached list rows");
 assert.equal(rankingCoverReadCount, 1, "repeated ranking pages must reuse batch-hydrated cover URLs");
 const cachedRankingPayload = cachedRankingService.worksPayload(new URL("http://127.0.0.1/api/rankings/top?key=y2025&limit=48"));
+assert.equal(cachedRankingPayload.rankingTotal, 2, "ranking payloads must remove duplicate works before pagination");
+assert.deepEqual(cachedRankingPayload.works.map((work) => work.ranking.rankNo), [1, 2], "ranking deduplication must preserve the first authoritative rank");
 assert.equal(cachedRankingPayload.works[0]?.remoteCoverUrl, "/proxy?url=https%3A%2F%2Fexample.com%2Franking-101.jpg", "ranking cover batches must preserve the preferred cover URL");
 cachedRankingService.worksPayload(new URL("http://127.0.0.1/api/rankings/top?key=y2025&limit=48"));
 assert.equal(rankingLocalMapReadCount, 1, "repeated ranking pages must reuse the prepared work source");

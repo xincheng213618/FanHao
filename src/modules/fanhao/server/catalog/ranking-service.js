@@ -50,6 +50,20 @@ export function createRankingService({
     return { listType: listType || "top", listKey: rest.join(":") || "" };
   }
 
+  function uniqueRankingRows(items = []) {
+    const seen = new Set();
+    const unique = [];
+    for (const item of items || []) {
+      const codeKey = storedWorkCodeKey(item.code_key) || looseWorkCodeKey(item.code);
+      const workId = item.core_work_id ?? item.work_id ?? "";
+      const identity = codeKey ? `code:${codeKey}` : `work:${workId}`;
+      if ((!workId && !codeKey) || seen.has(identity)) continue;
+      seen.add(identity);
+      unique.push(item);
+    }
+    return unique;
+  }
+
   function summaries() {
     const stamp = getSearchStamp();
     if (rankingSummariesCache?.stamp === stamp) return rankingSummariesCache.items;
@@ -64,7 +78,7 @@ export function createRankingService({
             c.id AS collection_id,
             c.name AS list_label,
             c.source_key,
-            COUNT(ci.work_id) AS total,
+            COUNT(DISTINCT ci.work_id) AS total,
             MAX(ci.updated_at) AS updated_at,
             MAX(c.source_url) AS page_url
           FROM collections c
@@ -83,21 +97,23 @@ export function createRankingService({
         const listRows = getCoreDb()
           .prepare(
             `
-            SELECT w.code_search AS code_key
+            SELECT w.code_search AS code_key, w.id AS work_id, w.code
             FROM collection_items ci
             JOIN works w ON w.id = ci.work_id
             WHERE ci.collection_id = ?
             `
           )
           .all(row.collection_id);
-        const localTotal = listRows.filter((item) => localKeys.has(storedWorkCodeKey(item.code_key))).length;
+        const uniqueRows = uniqueRankingRows(listRows);
+        const total = uniqueRows.length;
+        const localTotal = uniqueRows.filter((item) => localKeys.has(storedWorkCodeKey(item.code_key))).length;
         result.push({
           type: listType,
           key: listKey,
           label: listLabel(listType, listKey, row.list_label),
-          total: Number(row.total || 0),
+          total,
           localTotal,
-          missingTotal: Math.max(0, Number(row.total || 0) - localTotal),
+          missingTotal: Math.max(0, total - localTotal),
           updatedAt: row.updated_at || "",
           pageUrl: row.page_url || ""
         });
@@ -118,7 +134,7 @@ export function createRankingService({
     if (cached?.stamp === stamp) return cached.rows;
 
     try {
-      const rankingRows = getCoreDb()
+      const rankingRows = uniqueRankingRows(getCoreDb()
         .prepare(
           `
           SELECT
@@ -146,7 +162,7 @@ export function createRankingService({
           ORDER BY ci.rank_no ASC, w.code ASC
           `
         )
-        .all(listType, normalizedListKey, `${listType}:${normalizedListKey}`);
+        .all(listType, normalizedListKey, `${listType}:${normalizedListKey}`));
       hydrateRankingCoverUrls(rankingRows);
       rankingRowsCache.delete(cacheKey);
       rankingRowsCache.set(cacheKey, { stamp, rows: rankingRows });

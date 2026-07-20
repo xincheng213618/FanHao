@@ -167,19 +167,11 @@ export function createRankingViews(deps) {
   function createPanel(data = {}, summaryCache = null, activeKey = selectedKey) {
     const panel = document.createElement("div");
     panel.className = "ranking-panel";
-    const stats = document.createElement("div");
-    stats.className = "ranking-stats";
-    for (const [label, value] of [["榜单", data.rankingTotal || data.total || 0], ["本地已有", data.localTotal || 0], ["未下载", data.missingTotal || 0]]) {
-      const item = document.createElement("div");
-      const strong = document.createElement("strong");
-      strong.textContent = formatNumber(value);
-      const span = document.createElement("span");
-      span.textContent = label;
-      item.append(strong, span);
-      stats.append(item);
-    }
+    panel.setAttribute("aria-label", metaText(data));
     const chips = document.createElement("div");
     chips.className = "ranking-chip-strip";
+    chips.setAttribute("aria-label", "选择榜单");
+    let activeButton = null;
     if (!lists.length) {
       const empty = document.createElement("span");
       empty.className = "ranking-empty-note";
@@ -191,7 +183,11 @@ export function createRankingViews(deps) {
         button.type = "button";
         const key = itemKey(item);
         button.className = key === activeKey ? "active" : "";
-        button.textContent = `${item.label || item.key || "榜单"} · 缺 ${formatNumber(item.missingTotal || 0)}`;
+        const total = Number(item.total || 0);
+        const local = Number(item.localTotal || 0);
+        button.textContent = `${compactRankingLabel(item)} · ${formatNumber(local)}/${formatNumber(total)}`;
+        button.setAttribute("aria-label", `${item.label || item.key || "榜单"}，本地已有 ${formatNumber(local)} / ${formatNumber(total)}`);
+        button.setAttribute("aria-pressed", key === activeKey ? "true" : "false");
         button.addEventListener("click", () => {
           if (key === selectedKey && key === activeKey) return;
           selectedKey = key;
@@ -199,10 +195,12 @@ export function createRankingViews(deps) {
           localStorage.setItem(STORAGE_KEY, selectedKey);
           renderCurrentView();
         });
+        if (key === activeKey) activeButton = button;
         chips.append(button);
       }
     }
-    panel.append(stats, chips);
+    revealRankingChip(chips, activeButton);
+    panel.append(chips);
     return panel;
   }
 
@@ -263,6 +261,21 @@ function normalizeKey(key) { return key === undefined || key === null ? "" : Str
 function readStoredKey() { const stored = localStorage.getItem(STORAGE_KEY); return stored === null ? DEFAULT_KEY : stored; }
 function topPath(key = "") { return `/api/rankings/top?${new URLSearchParams({ key, limit: String(requestedLimit), offset: "0" })}`; }
 function compactCount(value) { const number = Number(value || 0); return number > 0 ? formatNumber(number) : "TOP"; }
+
+function compactRankingLabel(item = {}) {
+  return String(item.label || item.key || "榜单").replace(/^TOP250\s*/i, "") || "全部";
+}
+
+function revealRankingChip(strip, button) {
+  if (!button || typeof globalThis.requestAnimationFrame !== "function") return;
+  globalThis.requestAnimationFrame(() => {
+    if (!strip.isConnected || !button.isConnected) return;
+    const stripRect = strip.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    const centerOffset = (stripRect.width - buttonRect.width) / 2;
+    strip.scrollLeft = Math.max(0, strip.scrollLeft + buttonRect.left - stripRect.left - centerOffset);
+  });
+}
 
 function metaText(data = {}, visibleCount = 0, suffix = "") {
   const total = data.rankingTotal || data.total || visibleCount;
