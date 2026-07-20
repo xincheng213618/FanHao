@@ -19,6 +19,7 @@ export function createFanhaoDependencies(deps) {
     userState: pick(deps, [
       "clampInteger",
       "favoriteStateService",
+      "filterWorkList",
       "getLibrary",
       "maxWorkLimit",
       "notFound",
@@ -32,7 +33,9 @@ export function createFanhaoDependencies(deps) {
       "recentWatchedDays",
       "resolvePlayableVideoFile",
       "sendJson",
+      "sortWorkList",
       "userStateStamp",
+      "workFacets",
       "workQueryStamp"
     ]),
     works: pick(deps, [
@@ -46,6 +49,7 @@ export function createFanhaoDependencies(deps) {
       "corePersonFallbackRecord",
       "defaultWorkLimit",
       "dedupeWorksForDisplay",
+      "displayWorkTitle",
       "enrichLocalWorksWithActorMovieIndex",
       "enrichLocalWorksWithActorMovieInfo",
       "fastMissingCodeSearch",

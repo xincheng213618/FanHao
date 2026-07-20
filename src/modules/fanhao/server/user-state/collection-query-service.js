@@ -5,6 +5,7 @@ const COLLECTION_PREWARM_PAGE_SIZES = [8, 48, 64];
 export function createCollectionQueryService({
   clampInteger,
   favoriteStateService,
+  filterWorkList = (works) => works,
   getLibrary,
   maxWorkLimit,
   playbackProgressService,
@@ -14,7 +15,9 @@ export function createCollectionQueryService({
   prewarmWorkInfoDetails,
   publicWork,
   recentWatchedDays,
+  sortWorkList = (works) => works,
   userStateStamp = () => "",
+  workFacets = (works) => ({ all: works.length }),
   workQueryStamp = () => ""
 }) {
   let cacheStamp = "";
@@ -26,19 +29,25 @@ export function createCollectionQueryService({
     const selectedFolderId = rawFolderId ? favoriteStateService.normalizeFavoriteFolderId(rawFolderId) : "";
     const limit = clampInteger(url.searchParams.get("limit"), 0, 0, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-    const cacheKey = `favorites:${selectedFolderId || "all"}:${limit}:${offset}`;
+    const filter = requestFilter(url);
+    const sort = requestSort(url);
+    const cacheKey = `favorites:${selectedFolderId || "all"}:${filter}:${sort}:${limit}:${offset}`;
     const cached = readPage(cacheKey);
     if (cached) return cached;
 
     const allWorks = favoriteStateService.favoriteWorks(selectedFolderId);
-    const page = limit ? allWorks.slice(offset, offset + limit) : allWorks.slice(offset);
+    const queried = queryWorks(allWorks, { filter, sort });
+    const page = limit ? queried.works.slice(offset, offset + limit) : queried.works.slice(offset);
     const works = preparePage(page);
     return cachePage(cacheKey, {
       count: works.length,
-      total: allWorks.length,
+      total: queried.works.length,
       limit,
       offset,
+      filter,
+      sort,
       works,
+      facets: queried.facets,
       folders: favoriteStateService.publicFavoriteFolders(),
       selectedFolderId: selectedFolderId || "all"
     });
@@ -49,22 +58,45 @@ export function createCollectionQueryService({
     const days = rawDays && rawDays !== "all" ? clampInteger(rawDays, 0, 1, 3650) : 0;
     const limit = clampInteger(url.searchParams.get("limit"), 0, 0, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-    const cacheKey = `history:${days}:${limit}:${offset}`;
+    const filter = requestFilter(url);
+    const sort = requestSort(url);
+    const cacheKey = `history:${days}:${filter}:${sort}:${limit}:${offset}`;
     const cached = readPage(cacheKey);
     if (cached) return cached;
 
     const entries = playbackProgressService.historyEntries({ days });
-    const page = limit ? entries.slice(offset, offset + limit) : entries.slice(offset);
-    const works = preparePage(page.map((entry) => entry.work));
+    const queried = queryWorks(entries.map((entry) => entry.work), { filter, sort });
+    const page = limit ? queried.works.slice(offset, offset + limit) : queried.works.slice(offset);
+    const works = preparePage(page);
     return cachePage(cacheKey, {
       count: works.length,
-      total: entries.length,
+      total: queried.works.length,
       days,
       limit,
       offset,
+      filter,
+      sort,
       recentWatchedDays,
-      works
+      works,
+      facets: queried.facets
     });
+  }
+
+  function queryWorks(sourceWorks, { filter, sort }) {
+    const source = Array.isArray(sourceWorks) ? sourceWorks : [];
+    const filtered = filterWorkList(source, filter);
+    return {
+      works: sort ? sortWorkList(filtered, sort) : filtered,
+      facets: workFacets(source)
+    };
+  }
+
+  function requestFilter(url) {
+    return String(url.searchParams.get("filter") || "all").trim() || "all";
+  }
+
+  function requestSort(url) {
+    return String(url.searchParams.get("sort") || "").trim();
   }
 
   function preparePage(sourceWorks) {

@@ -38,6 +38,7 @@ import { createWorkListState } from "../android-client/www/js/work-filtering.js"
 import { createWorkCoverLoader } from "../android-client/www/modules/fanhao/features/works/cover-loader.js";
 import { createWorkPageDataService } from "../android-client/www/modules/fanhao/features/works/page-data-service.js";
 import { createWorkDetailDataService } from "../android-client/www/modules/fanhao/features/works/detail-data-service.js";
+import { workCollectionPath } from "../android-client/www/modules/fanhao/features/works/collection-request.js";
 import { personDetailPath } from "../android-client/www/modules/fanhao/features/people/detail-request.js";
 import { createProgressiveWorkListRenderer } from "../android-client/www/modules/fanhao/features/works/progressive-list-renderer.js";
 
@@ -303,6 +304,7 @@ for (const relativePath of [
   "android-client/www/modules/fanhao/features/works/actions.js",
   "android-client/www/modules/fanhao/features/works/preview-media.js",
   "android-client/www/modules/fanhao/features/people/detail-request.js",
+  "android-client/www/modules/fanhao/features/works/collection-request.js",
   "android-client/www/modules/fanhao/features/works/page-data-service.js",
   "android-client/www/modules/fanhao/features/works/progressive-list-renderer.js",
   "android-client/www/modules/fanhao/features/shared/viewport-image-loader.js",
@@ -358,6 +360,14 @@ assert.equal(filteredPersonDetailUrl.searchParams.get("includeCompilation"), "1"
 assert(androidDetailViews.includes("personDetailPath(personId, { ...getWorkListRequestState(), limit: getWorksLimit() })") && androidFanhaoModule.includes("getWorkListRequestState: workViews.getWorkListRequestState"), "Android person pages must derive their server query from the rendered work-list state");
 assert(androidWorkViews.includes("getWorkListRequestState: () => ({ filter: workListState.getServerFilterMode(), sort: workListState.getServerSortMode() })"), "Android work views must expose one authoritative server filter and sort snapshot");
 assert(/function studioDetailPath[\s\S]*?filter: workListState\.getServerFilterMode\(\)[\s\S]*?return `\/api\/studios\//.test(androidWorkViews), "Android studio requests must send the authoritative server filter");
+const filteredFavoriteCollectionUrl = new URL(workCollectionPath("favorites", { limit: 96, offset: 48, filter: "highRating,vr", sort: "ratingDesc", folderId: "folder/1" }), "http://127.0.0.1");
+assert.equal(filteredFavoriteCollectionUrl.pathname, "/api/favorites", "Android favorite requests must use the collection endpoint");
+assert.equal(filteredFavoriteCollectionUrl.searchParams.get("limit"), "96", "Android collection requests must preserve the active page size");
+assert.equal(filteredFavoriteCollectionUrl.searchParams.get("offset"), "48", "Android collection requests must support server continuation offsets");
+assert.equal(filteredFavoriteCollectionUrl.searchParams.get("filter"), "highRating,vr", "Android collection requests must send combined work filters to the server");
+assert.equal(filteredFavoriteCollectionUrl.searchParams.get("sort"), "ratingDesc", "Android collection requests must send the active work sort to the server");
+assert.equal(filteredFavoriteCollectionUrl.searchParams.get("folder"), "folder/1", "Android favorite requests must preserve encoded folder ids");
+assert(androidWorkViews.includes("workCollectionPath(view, { limit, filter: workListState.getServerFilterMode(), sort: workListState.getServerSortMode()") && androidWorkViews.includes('collectionPath("history", limit)') && androidWorkViews.includes('collectionPath("favorites", limit)'), "Android collection pages and warmups must share their authoritative filtered request builder");
 assert(androidWorkViews.includes("serverContinuationOptions(works, total, { activeFilterTotal: true })") && androidDetailViews.includes("activeFilterTotal: data.total || works.length"), "Android server-filtered detail pages must display the full filtered total for combined chips");
 assert(lines("android-client/www/modules/fanhao/features/people/detail-request.js") <= 24 && androidPersonDetailRequest.includes("URLSearchParams"), "Android person request construction must stay focused and encoded");
 assert(androidWorkViews.includes("const searchListState = createWorkListState({") && androidWorkViews.includes("persist: false") && androidWorkViews.includes('initialFilterMode: "all"'), "FanHao Android search must start from an isolated unfiltered list state");
@@ -442,7 +452,7 @@ assert(androidSectionStyles.includes('@media (max-width: 360px)') && androidSect
 assert(workDetailActionStyles.includes("flex-wrap: nowrap") && workDetailActionStyles.includes("width: 100%"), "Android work-detail actions must stay in one dedicated full-width row");
 assert(workDetailActionButtonStyles.includes("flex: 1 1 0") && workDetailActionButtonStyles.includes("min-width: 0"), "Android work-detail actions must share the available phone width evenly");
 assert(androidIndexHtml.includes("styles.css?v=20260720-fanhao-detail-layout-01"), "Android work-detail layout styles must retain their fresh WebView URL");
-assert(androidIndexHtml.includes("app.js?v=20260720-fanhao-studio-filter-01") && androidApp.includes("config.js?v=20260720-fanhao-studio-filter-01") && androidConfig.includes('CLIENT_VERSION = "20260720-fanhao-studio-filter-01"'), "Android studio-filter changes must refresh the WebView cache chain");
+assert(androidIndexHtml.includes("app.js?v=20260720-fanhao-collection-filter-01") && androidApp.includes("config.js?v=20260720-fanhao-collection-filter-01") && androidConfig.includes('CLIENT_VERSION = "20260720-fanhao-collection-filter-01"'), "Android collection-filter changes must refresh the WebView cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -455,7 +465,7 @@ assert(androidApp.includes("function returnToStackView()") && androidApp.include
 assert(androidRankingViews.includes("const PAGE_SIZE = 48"), "Android rankings must request a phone-sized first page");
 assert(androidRankingViews.includes("hasServerMore:"), "Android rankings must preserve server-side continuation");
 assert(androidWorkViews.includes("renderOptions.hasServerMore"), "Android work rendering must expose server-side continuation");
-assert(androidWorkViews.includes("/api/history?limit=${limit}&offset=0"), "Android history must request a bounded first page");
+assert.equal(new URL(workCollectionPath("history", { limit: 48 }), "http://127.0.0.1").searchParams.get("limit"), "48", "Android history must request a bounded first page");
 assert(androidWorkViews.includes("const works = data.works || []"), "Android collections must define their rendered work list locally");
 assert(androidWorkViews.includes("createWorkPageDataService") && androidWorkViews.includes("warmPrimaryCollections(activeUrl)"), "Android home must warm and share collection requests before navigation");
 assert(androidWorkViews.includes("warmCatalogSibling(activeUrl") && androidWorkPageDataService.includes("const inflight = new Map()"), "Android work and VR views must warm sibling pages and share requests");
@@ -771,12 +781,12 @@ assert(androidDetailViews.includes("hasServerMore:"), "Android person details mu
 assert(!androidDetailViews.includes("limit=2000"), "Android person details must not fetch every work before first render");
 assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && androidDetailViews.includes("正在加载作品"), "Android person navigation must paint the local index before the network request completes");
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
-assert(androidFanhaoIndex.includes('detail-views.js?v=20260720-fanhao-studio-filter-01'), "Android filtered-total changes must use a fresh detail-view URL");
+assert(androidFanhaoIndex.includes('detail-views.js?v=20260720-fanhao-collection-filter-01'), "Android filtered-total changes must use a fresh detail-view URL");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-studio-filter-01'), "Android studio-filter changes must use a fresh work-view URL");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260720-fanhao-collection-filter-01'), "Android collection-filter changes must use a fresh work-view URL");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260717-fanhao-people-return-cache-01'), "Android people restoration must use a fresh people-view URL");
-assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-studio-filter-01'), "Android studio-filter changes must refresh the FanHao module entry chain");
-assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-studio-filter-01'), "Android studio-filter changes must refresh the app entry chain");
+assert(androidFanhaoModule.includes('index.js?v=20260720-fanhao-collection-filter-01'), "Android collection-filter changes must refresh the FanHao module entry chain");
+assert(androidIndexHtml.includes('app.js?v=20260720-fanhao-collection-filter-01'), "Android collection-filter changes must refresh the app entry chain");
 assert(androidWorkViews.includes('ranking-views.js?v=20260717-fanhao-ranking-response-01'), "Android ranking views must retain their current module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
 for (const functionName of ["toggleLocalMarker", "deleteLocalFiles", "toggleFavorite", "createPreviewMediaPanel"]) {
@@ -1109,6 +1119,10 @@ assert(mediaBlobWorkerSource.includes("INSERT INTO remote_image_cache"), "the me
 const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");
 assert(!/fanhao:\s*\{\s*catalog:/s.test(server), "server.js must not own FanHao runtime buckets");
+for (const source of [server, workQueryServiceSource]) {
+  assert(source.includes("displayWorkTitle(a.title || a.directoryName)") && source.includes('if (sort === "title") return titleResult;') && source.includes('if (sort === "progress")') && source.includes('if (sort === "videos")'), "server work sorting must cover every Android collection sort mode using displayed titles");
+}
+assert(workQueryServiceSource.includes('sort === "progress" ? `${currentStamp()}:${userStateStamp()}`'), "progress-sorted work caches must follow playback state changes");
 assert(workFilterServiceSource.includes("if (!missingLocal && !work.coverId && !workHasCoreCover(work.id))"), "catalog facets must use the compact core-cover index");
 assert(!server.includes("return !work.coverId && !workCoverRow(work.id);"), "catalog facets must not read cover blobs while counting missing covers");
 assert(workSearchIndexServiceSource.includes("normalized: normalizeSearchValue(normalizedValues.join"), "deep raw metadata must stay out of the normalization hot path");
@@ -1130,6 +1144,8 @@ assert(userStateRuntime.includes("createCollectionQueryService(deps)") && userSt
 assert(collectionQueryServiceSource.includes("const COLLECTION_PREWARM_PAGE_SIZES = [8, 48, 64]"), "collection startup must prepare preview, phone, and desktop response sizes");
 assert(collectionQueryServiceSource.includes("[0, 7, Number(recentWatchedDays || 0)]"), "collection startup must prepare all-time, seven-day, and default history ranges");
 assert(collectionQueryServiceSource.includes("const COLLECTION_PAGE_CACHE_LIMIT = 64") && collectionQueryServiceSource.includes("userStateStamp()") && collectionQueryServiceSource.includes("workQueryStamp()"), "collection responses must stay cached until catalog or user state changes");
+assert(collectionQueryServiceSource.indexOf("filterWorkList(source, filter)") < collectionQueryServiceSource.indexOf("sortWorkList(filtered, sort)"), "collection filters must run before sorting and pagination");
+assert(collectionQueryServiceSource.includes('favorites:${selectedFolderId || "all"}:${filter}:${sort}:${limit}:${offset}') && collectionQueryServiceSource.includes("history:${days}:${filter}:${sort}:${limit}:${offset}"), "collection page caches must distinguish active filters and sorts");
 const workInfoService = read("src/modules/fanhao/server/works/work-info-service.js");
 const workPresenterService = read("src/modules/fanhao/server/works/presenter-service.js");
 const workMediaRoutes = read("src/modules/fanhao/server/works/routes-media.js");
@@ -1152,8 +1168,7 @@ assert(coreDbService.includes("attachCoreImageStore(db, { dbPath: imageDbPath })
 assert(mediaBlobWorkerSource.includes("attachCoreImageStore(db, { dbPath: workerData.imageDbPath })"), "media workers must read and write the separated image database");
 assert(tableStampQuerySource.includes("MAX(updated_at)"), "table stamps must track changes in their own target table");
 assert(!tableStampQuerySource.includes("PRAGMA data_version"), "unrelated SQLite writes must not invalidate every FanHao cache");
-assert(collectionQueryServiceSource.includes("allWorks.slice(offset, offset + limit)"), "favorites must paginate before presenting work details");
-assert(collectionQueryServiceSource.includes("entries.slice(offset, offset + limit)"), "history must paginate before presenting work details");
+assert.equal((collectionQueryServiceSource.match(/queried\.works\.slice\(offset, offset \+ limit\)/g) || []).length, 2, "favorites and history must paginate their fully queried collections before presenting work details");
 assert(userStateServiceSource.includes("stateRevision += 1"), "favorite and progress mutations must version cached search facets");
 const serviceLauncher = read("start-fanhao.ps1");
 assert(
@@ -1328,7 +1343,11 @@ assert.deepEqual(preparedCollectionWorks.map((work) => work.id), ["history-1", "
 let collectionQueryStateStamp = "state-v1";
 let collectionQueryWorkStamp = "works-v1";
 let collectionQueryPublicWorkCount = 0;
-const collectionQueryWorks = [{ id: "collection-1" }, { id: "collection-2" }];
+const collectionQueryWorks = [
+  { id: "collection-low", rating: 3.5 },
+  { id: "collection-high-a", rating: 4.2 },
+  { id: "collection-high-b", rating: 4.8 }
+];
 const collectionQueryLibrary = {
   scannedAt: "scan-v1",
   worksById: new Map(collectionQueryWorks.map((work) => [work.id, work]))
@@ -1342,6 +1361,9 @@ const cachedCollectionQueryService = createCollectionQueryService({
     favoriteWorks: () => collectionQueryWorks,
     normalizeFavoriteFolderId: () => "default",
     publicFavoriteFolders: () => [{ id: "default", name: "默认收藏", count: collectionQueryWorks.length }]
+  },
+  filterWorkList(works, filter) {
+    return filter === "highRating" ? works.filter((work) => work.rating >= 4) : works;
   },
   getLibrary: () => collectionQueryLibrary,
   maxWorkLimit: 2000,
@@ -1357,7 +1379,11 @@ const cachedCollectionQueryService = createCollectionQueryService({
     return { id: work.id, state: collectionQueryStateStamp, workStamp: collectionQueryWorkStamp };
   },
   recentWatchedDays: 30,
+  sortWorkList(works, sort) {
+    return sort === "ratingDesc" ? [...works].sort((a, b) => b.rating - a.rating) : works;
+  },
   userStateStamp: () => collectionQueryStateStamp,
+  workFacets: (works) => ({ all: works.length, highRating: works.filter((work) => work.rating >= 4).length }),
   workQueryStamp: () => collectionQueryWorkStamp
 });
 const collectionHistoryUrl = new URL("http://127.0.0.1/api/history?days=30&limit=2&offset=0");
@@ -1376,6 +1402,14 @@ cachedCollectionQueryService.historyPayload(collectionHistoryUrl);
 assert.equal(collectionQueryPublicWorkCount, 6, "catalog metadata changes must refresh presented collection works");
 cachedCollectionQueryService.favoritesPayload(new URL("http://127.0.0.1/api/favorites?limit=2&offset=0"));
 assert.equal(collectionQueryPublicWorkCount, 6, "favorites and history must share prepared work payloads within one version");
+const filteredCollectionPage = cachedCollectionQueryService.historyPayload(new URL("http://127.0.0.1/api/history?filter=highRating&sort=ratingDesc&limit=1&offset=0"));
+assert.equal(filteredCollectionPage.total, 2, "collection totals must describe the complete server-filtered result");
+assert.equal(filteredCollectionPage.works[0].id, "collection-high-b", "collection filters and sorts must run before page slicing");
+assert.deepEqual(filteredCollectionPage.facets, { all: 3, highRating: 2 }, "collection filter chips must describe the complete source collection");
+assert.equal(filteredCollectionPage.filter, "highRating", "collection responses must echo the active filter");
+assert.equal(filteredCollectionPage.sort, "ratingDesc", "collection responses must echo the active sort");
+assert.equal(collectionQueryPublicWorkCount, 7, "filtered collection pages must reuse prepared works and present only newly visible entries");
+assert.equal(cachedCollectionQueryService.historyPayload(new URL("http://127.0.0.1/api/history?filter=highRating&sort=ratingDesc&limit=1&offset=0")), filteredCollectionPage, "identical filtered collection requests must reuse their complete response");
 
 let personDetailDataStamp = "person-v1";
 let personDetailUserStateStamp = "user-v1";

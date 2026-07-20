@@ -892,10 +892,12 @@ const moduleRegistry = await discoverFanHaoModules({
         corePersonFallbackRecord: coreLibraryService.personFallbackRecord,
         defaultWorkLimit: DEFAULT_WORK_LIMIT,
         dedupeWorksForDisplay,
+        displayWorkTitle,
         enrichLocalWorksWithActorMovieIndex,
         enrichLocalWorksWithActorMovieInfo,
         fastMissingCodeSearch: missingCodeSearchService.search,
         favoriteStateService,
+        filterWorkList: workFilterService.filter,
         galleryMediaService,
         generateWorkCover: workCoverMutationService.generateWorkCover,
         getLastScanError: () => lastScanError,
@@ -943,6 +945,7 @@ const moduleRegistry = await discoverFanHaoModules({
         resolveVideoFileByPublicId,
         searchPeople,
         sendJson,
+        sortWorkList,
         storedWorkCodeKey,
         studioService,
         userStateSummary: () => playbackProgressService.userStateSummary(),
@@ -954,6 +957,7 @@ const moduleRegistry = await discoverFanHaoModules({
         workInfoFacetRow,
         workInfoRow,
         workClassificationService,
+        workFacets,
         workLocalMutationService,
         workQueryStamp
       }),
@@ -2072,9 +2076,21 @@ function sortWorkList(works, sort) {
       }];
     }))
     : null;
+  const progressByWork = sort === "progress"
+    ? new Map(list.map((work) => [work, String(playbackProgressService.getWorkProgress(work)?.updatedAt || "")]))
+    : null;
   list.sort((a, b) => {
     const aMetadata = metadataByWork?.get(a);
     const bMetadata = metadataByWork?.get(b);
+    const titleResult = displayWorkTitle(a.title || a.directoryName).localeCompare(displayWorkTitle(b.title || b.directoryName), undefined, { numeric: true, sensitivity: "base" });
+    if (sort === "title") return titleResult;
+    if (sort === "progress") {
+      const progressResult = progressByWork.get(b).localeCompare(progressByWork.get(a));
+      return progressResult || titleResult;
+    }
+    if (sort === "videos") {
+      return Number(b.videoCount || 0) - Number(a.videoCount || 0) || titleResult;
+    }
     if (sort === "releaseDesc" || sort === "releaseAsc") {
       const aDate = aMetadata.releaseDate;
       const bDate = bMetadata.releaseDate;
@@ -2112,7 +2128,7 @@ function sortWorkList(works, sort) {
       if (result) return sort === "codeDesc" ? -result : result;
     }
 
-    return String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || ""));
+    return String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || "")) || titleResult;
   });
   return list;
 }

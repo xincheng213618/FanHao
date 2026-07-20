@@ -4,6 +4,7 @@ import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js
 import { formatNumber } from "../../js/format.js";
 import { createWorkListState } from "../../js/work-filtering.js?v=20260720-fanhao-filter-back-01";
 import { createWorkCards } from "./features/works/cards.js?v=20260720-fanhao-card-code-01";
+import { workCollectionPath } from "./features/works/collection-request.js?v=20260720-fanhao-collection-filter-01";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260717-fanhao-ranking-response-01";
 import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-page-race-01";
 import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260717-fanhao-search-response-01";
@@ -134,7 +135,7 @@ export function createWorkViews(context) {
     els.viewMeta.textContent = "正在读取";
     els.viewContent.innerHTML = `<div class="loading-row">正在加载列表</div>`;
     const limit = getWorksLimit();
-    const path = isFavorites ? favoriteCollectionPath(limit) : `/api/history?limit=${limit}&offset=0`;
+    const path = collectionPath(isFavorites ? "favorites" : "history", limit);
     const activeUrl = getActiveUrl();
     let renderedCache = false;
 
@@ -145,9 +146,7 @@ export function createWorkViews(context) {
       const folder = isFavorites ? favoriteFolderById(data.folders || [], selectedFavoriteFolderId) : null;
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
       els.viewTitle.textContent = isFavorites && folder ? folder.name : isFavorites ? "已收藏作品" : "观看进度";
-      els.viewMeta.textContent = isFavorites && folder
-        ? `${formatNumber(works.length)} / ${formatNumber(folder.count || works.length)} 个作品${suffix}`
-        : `${formatNumber(works.length)} / ${formatNumber(total)} 个作品${suffix}`;
+      els.viewMeta.textContent = `${formatNumber(works.length)} / ${formatNumber(total)} 个作品${suffix}`;
     };
 
     const renderCollectionData = (data, cacheEntry = null) => {
@@ -158,7 +157,8 @@ export function createWorkViews(context) {
       if (isFavorites) renderFavoriteFolderStrip(data.folders || []);
       if (isFavorites) renderFavoriteExtras();
       renderWorks(works, isFavorites ? "还没有收藏作品。" : "暂无继续观看记录。", {
-        ...serverContinuationOptions(works, total)
+        facets: data.facets,
+        ...serverContinuationOptions(works, total, { activeFilterTotal: true })
       });
     };
 
@@ -187,11 +187,7 @@ export function createWorkViews(context) {
       }
     }
   }
-  function favoriteCollectionPath(limit = getWorksLimit()) {
-    const params = new URLSearchParams({ limit: String(limit), offset: "0" });
-    if (selectedFavoriteFolderId && selectedFavoriteFolderId !== "all") params.set("folder", selectedFavoriteFolderId);
-    return `/api/favorites?${params}`;
-  }
+  function collectionPath(view, limit = getWorksLimit()) { return workCollectionPath(view, { limit, filter: workListState.getServerFilterMode(), sort: workListState.getServerSortMode(), folderId: selectedFavoriteFolderId }); }
 
   function favoriteFolderById(folders, folderId) {
     return (folders || []).find((folder) => folder.id === folderId) || null;
@@ -625,8 +621,8 @@ export function createWorkViews(context) {
   function warmPrimaryCollections(activeUrl) {
     const limit = getWorksLimit();
     pageDataService.warm(activeUrl, [
-      `/api/history?limit=${limit}&offset=0`,
-      favoriteCollectionPath(limit)
+      collectionPath("history", limit),
+      collectionPath("favorites", limit)
     ]);
   }
 

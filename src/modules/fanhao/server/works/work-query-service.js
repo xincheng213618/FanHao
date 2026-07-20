@@ -13,6 +13,7 @@ export function createWorkQueryService({
   createWorkSearchMatcher,
   dedupeWorksForDisplay,
   defaultWorkLimit,
+  displayWorkTitle = (value) => String(value || ""),
   enrichLocalWorksWithActorMovieIndex,
   fastMissingCodeSearch,
   favoriteStateService,
@@ -136,7 +137,7 @@ export function createWorkQueryService({
   }
 
   function sortWorkList(works, sort, options = {}) {
-    const stamp = currentStamp();
+    const stamp = sort === "progress" ? `${currentStamp()}:${userStateStamp()}` : currentStamp();
     const cacheKey = `${sort}:${options.lightweightInfo ? "light" : "full"}`;
     const cachedBySort = sortedWorksCache.get(works);
     const cached = cachedBySort?.get(cacheKey);
@@ -157,9 +158,21 @@ export function createWorkQueryService({
     const metadataByWork = usesMetadata
       ? new Map(list.map((work) => [work, workSortMetadata(work, options)]))
       : null;
+    const progressByWork = sort === "progress"
+      ? new Map(list.map((work) => [work, String(playbackProgressService.getWorkProgress(work)?.updatedAt || "")]))
+      : null;
     list.sort((a, b) => {
       const aMetadata = metadataByWork?.get(a);
       const bMetadata = metadataByWork?.get(b);
+      const titleResult = workCodeCollator.compare(displayWorkTitle(a.title || a.directoryName), displayWorkTitle(b.title || b.directoryName));
+      if (sort === "title") return titleResult;
+      if (sort === "progress") {
+        const progressResult = progressByWork.get(b).localeCompare(progressByWork.get(a));
+        return progressResult || titleResult;
+      }
+      if (sort === "videos") {
+        return Number(b.videoCount || 0) - Number(a.videoCount || 0) || titleResult;
+      }
       if (sort === "releaseDesc" || sort === "releaseAsc") {
         const aDate = aMetadata.releaseDate;
         const bDate = bMetadata.releaseDate;
@@ -197,7 +210,7 @@ export function createWorkQueryService({
         if (result) return sort === "codeDesc" ? -result : result;
       }
 
-      return String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || ""));
+      return String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || "")) || titleResult;
     });
     const nextCachedBySort = cachedBySort || new Map();
     nextCachedBySort.set(cacheKey, { stamp, works: list });
