@@ -996,12 +996,6 @@ button.work-fact-chip {
   cursor: pointer;
 }
 
-.work-fact-chip.linked {
-  border-color: rgba(31, 122, 98, 0.22);
-  background: var(--green-soft);
-  color: var(--green);
-}
-
 button.work-fact-chip {
   text-align: left;
 }

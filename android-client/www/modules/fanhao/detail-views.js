@@ -235,12 +235,12 @@ export function createDetailViews(context) {
 
       els.viewContent.append(hero);
       if (factPanel) els.viewContent.append(factPanel);
+      if (personPanel) els.viewContent.append(personPanel);
       if (previewPanel) els.viewContent.append(previewPanel);
       els.viewContent.append(playbackSection);
       if (!factPanel) {
         if (fallbackInfoPanel) els.viewContent.append(fallbackInfoPanel);
       }
-      if (personPanel) els.viewContent.append(personPanel);
       if (relatedPanel) els.viewContent.append(relatedPanel);
       els.viewContent.append(createWorkDetailToolbar({
         work,
@@ -408,10 +408,9 @@ export function createDetailViews(context) {
     const director = cleanFactValue(info?.director || fields.get("导演"));
     const workType = workTypeFact(work);
     const tags = arrayFact(info?.tags).length ? arrayFact(info.tags) : splitFactList(fields.get("类别"));
-    const actors = arrayFact(info?.actors).length ? arrayFact(info.actors) : splitFactList(fields.get("演员"));
 
     const highlights = createWorkDetailHighlights(work);
-    const hasContent = [code, workType, maker, label, series, director, tags.length, actors.length, highlights].some(Boolean);
+    const hasContent = [code, workType, maker, label, series, director, tags.length, highlights].some(Boolean);
     if (!hasContent) return null;
 
     const section = document.createElement("div");
@@ -430,7 +429,6 @@ export function createDetailViews(context) {
     appendFactRow(panel, "片商", singleFactList(maker), { chips: true, searchable: true });
     appendFactRow(panel, "系列", singleFactList(series), { chips: true, searchable: true });
     appendFactRow(panel, "类别", tags, { chips: true, searchable: true });
-    appendFactRow(panel, "演员", actors, { chips: true, actorLinks: true });
     appendFactRow(panel, "发行商", singleFactList(label), { chips: true, searchable: true });
 
     section.append(panel);
@@ -470,22 +468,14 @@ export function createDetailViews(context) {
       const chips = document.createElement("div");
       chips.className = "work-fact-chip-row";
       for (const item of listValue.slice(0, 18)) {
-        const person = options.actorLinks ? findPersonByActorName(item, getLibrary?.()?.people || []) : null;
-        const canNavigate = Boolean(person || options.searchable || options.actorLinks);
+        const canNavigate = Boolean(options.searchable);
         const chip = document.createElement(canNavigate ? "button" : "span");
         chip.className = "work-fact-chip";
         chip.textContent = item;
         if (canNavigate) {
           chip.type = "button";
-          chip.classList.toggle("linked", Boolean(person));
-          chip.setAttribute("aria-label", person ? `打开演员 ${displayPersonName(person)}` : `搜索 ${item}`);
-          chip.addEventListener("click", () => {
-            if (person) {
-              showView("personDetail", { personId: person.id }, { push: true });
-            } else {
-              showView("search", { query: item }, { push: true });
-            }
-          });
+          chip.setAttribute("aria-label", `搜索 ${item}`);
+          chip.addEventListener("click", () => showView("search", { query: item }, { push: true }));
         }
         chips.append(chip);
       }
