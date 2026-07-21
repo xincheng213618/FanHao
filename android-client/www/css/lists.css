@@ -1718,25 +1718,63 @@ button.work-person {
 }
 
 .content-panel[data-view="personDetail"] .work-list.cover-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px 7px;
 }
 
 .content-panel[data-view="personDetail"] .work-list.cover-grid .work-card {
-  contain-intrinsic-size: auto 330px;
+  contain-intrinsic-size: auto 158px;
+}
+
+.content-panel[data-view="personDetail"] .work-cover-frame {
+  aspect-ratio: 16 / 10;
+}
+
+.content-panel[data-view="personDetail"] .work-cover-frame > img {
+  object-fit: contain;
+  object-position: center;
 }
 
 .content-panel[data-view="personDetail"] .work-list.cover-grid .work-summary strong {
-  min-height: 38px;
-  font-size: 13.5px;
+  min-height: 30px;
+  font-size: 12px;
+  line-height: 1.28;
 }
 
 .content-panel[data-view="personDetail"] .work-list.cover-grid .work-card-code {
-  font-size: 12px;
+  font-size: 11px;
+}
+
+.content-panel[data-view="personDetail"] .work-list.cover-grid .work-card-grid-person {
+  display: none;
 }
 
 .content-panel[data-view="personDetail"] .work-list.cover-grid .work-card-grid-meta {
-  font-size: 11px;
+  font-size: 10px;
+}
+
+.content-panel[data-view="personDetail"] .work-cover-badge {
+  min-height: 18px;
+  max-width: calc(100% - 8px);
+  padding: 0 5px;
+  font-size: 8.5px;
+}
+
+.content-panel[data-view="personDetail"] .work-cover-badge:not(.rank) {
+  right: 4px;
+  bottom: 4px;
+}
+
+.content-panel[data-view="personDetail"] .work-cover-badge.rank {
+  top: 4px;
+  right: auto;
+  bottom: auto;
+  left: 4px;
+}
+
+.content-panel[data-view="personDetail"] .work-cover-badge.playable,
+.content-panel[data-view="personDetail"] .work-cover-badge.info {
+  display: none;
 }
 
 .work-card-code,

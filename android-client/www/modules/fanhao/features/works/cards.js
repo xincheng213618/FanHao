@@ -60,7 +60,7 @@ export function createWorkCards({ getActiveUrl, roots = [], showView, workDetail
         codeLine.textContent = code;
         identity.append(codeLine);
       }
-      const personName = workGridPerson(work);
+      const personName = hidePerson ? "" : workGridPerson(work);
       if (personName) {
         const personLine = document.createElement("span");
         personLine.className = "work-card-grid-person";
