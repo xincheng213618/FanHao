@@ -14,7 +14,8 @@ export function imageUrlForPerson(person) {
 export function portraitUrlForPerson(person) {
   const source = String(person?.avatarImage?.source || "").trim().toLowerCase();
   if (source === "work_cover" || source === "manual_work_cover") return "";
-  const imageUrl = imageUrlForPerson(person);
+  const imageUrl = person?.avatarUrl || person?.actorProfile?.avatarUrl || "";
+  if (!imageUrl) return "";
   if (/^\/media\/person\/[^/]+\/cover(?:[?#]|$)/i.test(imageUrl)) return "";
   return imageUrl;
 }

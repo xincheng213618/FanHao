@@ -275,6 +275,8 @@ body.fanhao-search-page-view .bottom-nav {
   position: sticky;
   top: 0;
   z-index: 18;
+  display: grid;
+  gap: 0;
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--bg) 94%, transparent);
   padding: 8px 10px 6px;
@@ -387,10 +389,209 @@ body.fanhao-search-page-view .bottom-nav {
   background: var(--button-soft);
 }
 
+.fanhao-search-suggestions {
+  display: grid;
+  max-height: min(48vh, 390px);
+  margin: 6px 0 0 50px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow);
+  overscroll-behavior: contain;
+}
+
+.fanhao-search-suggestions[hidden] {
+  display: none;
+}
+
+.fanhao-search-suggestion {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 20px;
+  min-height: 60px;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  padding: 6px 11px;
+  text-align: left;
+}
+
+.fanhao-search-suggestion:last-child {
+  border-bottom: 0;
+}
+
+.fanhao-search-suggestion:active {
+  background: var(--surface-soft);
+}
+
+.fanhao-search-suggestion-visual,
+.fanhao-search-person-avatar {
+  position: relative;
+  display: grid;
+  overflow: hidden;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 950;
+}
+
+.fanhao-search-suggestion-visual {
+  width: 42px;
+  height: 48px;
+}
+
+.fanhao-search-suggestion-visual > img,
+.fanhao-search-person-avatar > img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--surface-soft);
+  object-fit: cover;
+}
+
+.fanhao-search-suggestion-visual > img.person,
+.fanhao-search-person-avatar > img.person {
+  object-fit: contain;
+  object-position: center top;
+}
+
+.fanhao-search-suggestion-copy,
+.fanhao-search-person-card > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.fanhao-search-suggestion-copy > strong,
+.fanhao-search-suggestion-copy > small,
+.fanhao-search-person-card > span:nth-child(2) > strong,
+.fanhao-search-person-card > span:nth-child(2) > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fanhao-search-suggestion-copy > strong {
+  font-size: 13px;
+  font-weight: 920;
+}
+
+.fanhao-search-suggestion-copy > small,
+.fanhao-search-person-card small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.fanhao-search-suggestion > svg,
+.fanhao-search-person-card > svg {
+  width: 18px;
+  height: 18px;
+  color: var(--quiet);
+}
+
 .fanhao-search-results {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   padding: 12px 12px 0;
+}
+
+.fanhao-search-result-summary {
+  display: flex;
+  min-height: 32px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+}
+
+.fanhao-search-result-summary > strong {
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.fanhao-search-result-summary > span {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.fanhao-search-people-section {
+  display: grid;
+  gap: 7px;
+}
+
+.fanhao-search-people-head {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+}
+
+.fanhao-search-people-head > strong {
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.fanhao-search-people-head > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.fanhao-search-people-list {
+  display: grid;
+  grid-auto-columns: minmax(238px, 82%);
+  grid-auto-flow: column;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+  scroll-snap-type: x proximity;
+}
+
+.fanhao-search-people-list::-webkit-scrollbar {
+  display: none;
+}
+
+.fanhao-search-person-card {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 20px;
+  min-height: 64px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  padding: 6px 10px 6px 7px;
+  scroll-snap-align: start;
+  text-align: left;
+}
+
+.fanhao-search-person-card:active {
+  background: var(--surface-soft);
+}
+
+.fanhao-search-person-avatar {
+  width: 48px;
+  height: 52px;
+}
+
+.fanhao-search-person-card > span:nth-child(2) > strong {
+  font-size: 13px;
+  font-weight: 950;
 }
 
 .fanhao-search-landing {

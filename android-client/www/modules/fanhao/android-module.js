@@ -1,5 +1,5 @@
 import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260721-fanhao-category-browser-13";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260721-fanhao-work-facts-18";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260721-fanhao-search-suggestions-19";
 
 export function createAndroidModule({ host }) {
   const workViews = createWorkViews({
@@ -9,6 +9,7 @@ export function createAndroidModule({ host }) {
     getWorksLimit: host.limits.getWorks,
     increaseWorksLimit: host.limits.increaseWorks,
     showView: host.navigation.showView,
+    replaceViewParams: host.navigation.replaceViewParams,
     goBack: host.navigation.goBack,
     openInLibrary: host.navigation.openInLibrary,
     setActiveBottom: host.ui.setActiveBottom,

@@ -7,10 +7,10 @@ import { createWorkCards } from "./features/works/cards.js?v=20260721-fanhao-aut
 import { workCollectionPath } from "./features/works/collection-request.js?v=20260720-fanhao-collection-filter-01";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260721-fanhao-ranking-density-11";
 import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-page-race-01";
-import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260717-fanhao-search-response-01";
+import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260721-fanhao-search-suggestions-19";
 import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-touch-intent-01";
 import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=20260717-fanhao-work-first-paint-01";
-import { createFanhaoSearchPage } from "./search-page.js?v=20260721-fanhao-search-discovery-03";
+import { createFanhaoSearchPage } from "./search-page.js?v=20260721-fanhao-search-suggestions-19";
 import { normalizeStudioSort, selectStudios, STUDIO_SORT_OPTIONS } from "./features/studios/index-model.js?v=20260721-fanhao-studio-density-12";
 import { createCategoryViews } from "./features/categories/category-views.js?v=20260721-fanhao-category-browser-13";
 
@@ -46,6 +46,7 @@ export function createWorkViews(context) {
     getWorksLimit,
     increaseWorksLimit,
     showView,
+    replaceViewParams = () => false,
     goBack,
     setActiveBottom,
     renderCurrentView,
@@ -59,7 +60,16 @@ export function createWorkViews(context) {
   const workCards = createWorkCards({ getActiveUrl, roots: [els.viewContent, els.continuePreview], showView, workDetailDataService });
   const progressiveWorkListRenderer = createProgressiveWorkListRenderer();
   const searchDataService = createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageDataService, workListState: searchListState });
-  const searchPage = createFanhaoSearchPage({ els, goBack, showView, warmSearch: searchDataService.warm, getLibrary });
+  const searchPage = createFanhaoSearchPage({
+    els,
+    goBack,
+    showView,
+    preserveQuery: (query) => replaceViewParams("search", { query }),
+    warmSearch: searchDataService.warm,
+    fetchSuggestions: searchDataService.suggestions,
+    getActiveUrl,
+    getLibrary
+  });
   const rankingViews = createRankingViews({
     els,
     getActiveUrl,
@@ -571,7 +581,7 @@ export function createWorkViews(context) {
       els.viewMeta.textContent = `${formatNumber(total)} 个作品 · ${formatNumber(people.length)} 位演员${suffix}`;
       if (headerOnly) return;
       results.innerHTML = "";
-      renderSearchPeople(people, results);
+      searchPage.renderResultOverview(results, { query: text, total, people });
       if (works.length || total || !people.length) {
         renderWorks(works, `没有搜到「${text}」。`, {
           container: results,
@@ -632,22 +642,6 @@ export function createWorkViews(context) {
         return renderCurrentViewPreservingScroll();
       }
     };
-  }
-
-  function renderSearchPeople(people, container = els.viewContent) {
-    if (!people.length) return;
-
-    const panel = document.createElement("div");
-    panel.className = "chip-panel";
-    for (const person of people.slice(0, 12)) {
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.className = "person-chip";
-      chip.textContent = `${workCards.displayPersonName(person)} · ${formatNumber(person.workCount)} 部`;
-      chip.addEventListener("click", () => showView("personDetail", { personId: person.id }, { push: true }));
-      panel.append(chip);
-    }
-    container.append(panel);
   }
 
   function renderWorks(works, emptyMessage, options = {}) {

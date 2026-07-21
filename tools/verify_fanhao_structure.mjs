@@ -38,7 +38,7 @@ import { tableStampValue } from "../src/modules/fanhao/server/library/table-stam
 import { fetchPreparedImage, portraitUrlForPerson } from "../android-client/www/js/image.js";
 import { createWorkListState } from "../android-client/www/js/work-filtering.js";
 import { filterPeopleForIndex, isBrowsableAuthor, normalizePeopleFilter } from "../android-client/www/modules/fanhao/people-views.js";
-import { localAuthorSearchSuggestions } from "../android-client/www/modules/fanhao/search-page.js";
+import { buildFanhaoSearchSuggestions, localAuthorSearchSuggestions } from "../android-client/www/modules/fanhao/search-page.js";
 import { createWorkCoverLoader } from "../android-client/www/modules/fanhao/features/works/cover-loader.js";
 import { compactWorkCode, displayWorkTitle, workGridBadge, workGridMeta, workGridPerson, workGridRankBadge } from "../android-client/www/modules/fanhao/features/works/card-presentation.js";
 import { createWorkPageDataService } from "../android-client/www/modules/fanhao/features/works/page-data-service.js";
@@ -416,6 +416,10 @@ assert(androidFanhaoSearchPage.includes('createSearchGroup("快捷搜索"') && a
 assert(androidFanhaoSearchPage.includes('meta: "本地标记"') && androidFanhaoSearchPage.includes("remember: false"), "the local marker shortcut must remain distinct from actual search history");
 assert(androidFanhaoSearchPage.includes('showView("personDetail", { personId: author.id }, { push: true })') && androidFanhaoSearchPage.includes('note: "点选直达"'), "recommended authors must open their detail directly without an intermediate search-result touch target");
 assert(androidFanhaoStyles.includes(".fanhao-search-discovery-group") && androidFanhaoStyles.includes("min-height: 150px"), "FanHao search discovery must stay compact above the phone keyboard");
+assert(androidWorkSearchDataService.includes("function suggestions") && androidWorkSearchDataService.includes('path(text, 6, "all", "updated")') && androidFanhaoSearchPage.includes("fanhao-search-suggestions"), "FanHao search must expose bounded live suggestions through the module-scoped endpoint");
+assert(androidFanhaoSearchPage.includes("renderResultOverview") && androidFanhaoSearchPage.includes("fanhao-search-result-summary") && androidFanhaoSearchPage.includes("fanhao-search-person-card"), "FanHao search results must expose visible counts and portrait-backed actor matches");
+assert(androidFanhaoModule.includes("replaceViewParams: host.navigation.replaceViewParams") && androidWorkViews.includes('preserveQuery: (query) => replaceViewParams("search", { query })') && androidFanhaoSearchPage.includes("preserveQuery(query)"), "direct live-suggestion navigation must preserve the typed query for the Android back path");
+assert(androidFanhaoStyles.includes(".fanhao-search-suggestion") && androidFanhaoStyles.includes(".fanhao-search-result-summary") && androidFanhaoStyles.includes("object-fit: contain"), "FanHao search suggestions and complete actor portraits must have dedicated phone styling");
 const authorSuggestions = localAuthorSearchSuggestions([
   { name: "collection", workCount: 900, sourceCount: 20 },
   { id: "male", actorProfile: { displayName: "男作者", gender: "male" }, workCount: 100, sourceCount: 12 },
@@ -425,6 +429,21 @@ const authorSuggestions = localAuthorSearchSuggestions([
   { id: "c", actorProfile: { displayName: "作者丙", gender: "female" }, workCount: 0, sourceCount: 9 }
 ], 2);
 assert.deepEqual(authorSuggestions.map(({ id, name, workCount }) => [id, name, workCount]), [["a-best", "作者甲", 28], ["b", "作者乙", 42]], "local author search suggestions must deduplicate, rank by source coverage, and retain the direct-navigation id");
+const liveSearchSuggestions = buildFanhaoSearchSuggestions({
+  people: [
+    { id: "person-1", actorProfile: { displayName: "演员甲" }, workCount: 21, avatarUrl: "/media/core-image/avatar-1" },
+    { id: "person-2", name: "演员乙", workCount: 9 },
+    { id: "person-3", name: "演员丙", workCount: 4 }
+  ],
+  works: [
+    { id: "work-1", title: "FNS-220 测试作品", personName: "演员甲", videoCount: 1, coverId: "cover-1", infoSummary: { code: "FNS-220", releaseDate: "2026-07-23" } },
+    { id: "work-2", title: "ABF-363 第二作品", personName: "演员乙", videoCount: 1, infoSummary: { code: "ABF-363" } },
+    { id: "work-2", title: "重复作品" }
+  ]
+}, 4);
+assert.deepEqual(liveSearchSuggestions.map(({ kind, id }) => [kind, id]), [["person", "person-1"], ["person", "person-2"], ["work", "work-1"], ["work", "work-2"]], "live FanHao suggestions must reserve room for both actor and work matches while deduplicating ids");
+assert.equal(liveSearchSuggestions[0].detail, "21 部本地作品", "actor suggestions must explain their local work count");
+assert.equal(liveSearchSuggestions[2].label, "FNS-220 · 测试作品", "work suggestions must retain both code and compact title");
 assert(androidFanhaoModule.includes('mode: "dedicated"') && androidFanhaoChrome.includes('showView("search", { query: "" }, { push: true })'), "FanHao chrome search must navigate to the dedicated search route");
 const filteredPersonDetailUrl = new URL(personDetailPath("person/13", {
   limit: 96,
@@ -531,6 +550,7 @@ assert(androidApp.includes(".sort(peopleViews.sortPeople)") && !androidApp.inclu
 assert(androidPeopleViews.includes("const aVisual = portraitUrlForPerson(a) ? 1 : 0"), "Android people sorting must recognize portrait-only person-list avatar URLs");
 assert.equal(portraitUrlForPerson({ avatarUrl: "/media/person/48/cover" }), "", "Android author cards must not present a work-cover fallback as a portrait");
 assert.equal(portraitUrlForPerson({ avatarUrl: "/media/image/fallback", avatarImage: { source: "work_cover" } }), "", "Android author cards must reject explicitly sourced work-cover fallbacks");
+assert.equal(portraitUrlForPerson({ coverId: "work-cover-without-avatar" }), "", "Android author cards must not infer a portrait from a generic work cover id");
 assert.equal(portraitUrlForPerson({ avatarUrl: "/media/image/manual", avatarImage: { source: "manual_person_cover" } }), "/media/image/manual", "Android author cards must keep an intentional person portrait");
 assert.equal(portraitUrlForPerson({ actorProfile: { avatarUrl: "https://example/avatar.jpg" } }), "https://example/avatar.jpg", "Android author cards must keep a profile portrait");
 assert(androidApp.includes("const FAST_WORK_LIMIT = 48"), "Android FanHao work views must request a phone-sized interactive first page");
@@ -615,8 +635,8 @@ assert(androidWorkActions.includes('title: "更多操作"') && androidWorkAction
 assert(androidWorkActions.includes('variant: "danger wide"') && androidFanhaoStyles.includes(".fanhao-sort-option.danger") && androidFanhaoStyles.includes(".fanhao-sort-option.wide"), "Android destructive work actions must remain visually isolated in the sheet");
 assert(!androidWorkActions.includes("createBackButton") && androidSectionStyles.includes(".work-detail-meta-body"), "Android work details must delegate return navigation to the shared sticky detail header");
 assert(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions must stay focused");
-assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-work-facts-18") && androidStyles.includes("css/sections.css?v=20260721-fanhao-work-facts-18") && androidStyles.includes("css/lists.css?v=20260721-fanhao-actor-discovery-14") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-person-year-15"), "Android compact work facts must refresh section styles while retaining actor discovery and year filtering");
-assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-work-facts-18") && androidApp.includes("config.js?v=20260721-fanhao-work-facts-18") && androidApp.includes("cache.js?v=20260721-fanhao-work-facts-18") && androidCacheSource.includes("config.js?v=20260721-fanhao-work-facts-18") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-work-facts-18"'), "Android compact work facts must refresh the complete application cache chain");
+assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-search-suggestions-19") && androidStyles.includes("css/sections.css?v=20260721-fanhao-work-facts-18") && androidStyles.includes("css/lists.css?v=20260721-fanhao-actor-discovery-14") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-search-suggestions-19"), "Android search suggestions must refresh FanHao styles while retaining compact work facts and actor discovery");
+assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-search-suggestions-19") && androidApp.includes("config.js?v=20260721-fanhao-search-suggestions-19") && androidApp.includes("cache.js?v=20260721-fanhao-search-suggestions-19") && androidCacheSource.includes("config.js?v=20260721-fanhao-search-suggestions-19") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-search-suggestions-19"'), "Android search suggestions must refresh the complete application cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -949,7 +969,7 @@ assert(androidDetailViews.includes("hasServerMore:"), "Android person details mu
 assert(!androidDetailViews.includes("limit=2000"), "Android person details must not fetch every work before first render");
 assert(androidDetailViews.includes("renderPersonPreview(indexedPerson)") && androidDetailViews.includes("正在加载作品"), "Android person navigation must paint the local index before the network request completes");
 assert(androidDetailViews.includes("works.map((work) => imageUrlForWork(work)).find(Boolean)"), "Android person details must reuse the prepared work page for fallback artwork");
-assert(androidDetailViews.includes('detail-hero.js?v=20260721-fanhao-actor-counts-17'), "Android actor count changes must use a fresh detail-hero URL");
+assert(androidDetailViews.includes('detail-hero.js?v=20260721-fanhao-search-suggestions-19'), "Android portrait-only search changes must use a fresh detail-hero URL");
 assert(androidDetailViews.includes("hidePerson: true") && androidDetailViews.includes('createDetailSectionTitle("作品", "")'), "Android author pages must show works without repeating the author or a second work count");
 assert(androidDetailViews.includes("hideControls: true") && androidDetailViews.includes("createPersonDetailWorkToolbar({"), "Android author pages must replace the wide chip strip with compact detail controls");
 assert(androidPersonDetailWorkToolbar.includes('title: "作品筛选"') && androidPersonDetailWorkToolbar.includes('title: "发行年份"') && androidPersonDetailWorkToolbar.includes('title: "作品排序"') && androidPersonDetailWorkToolbar.includes("openFanhaoSheet({"), "Android actor work controls must open shared bottom sheets for filtering, year, and sorting");
@@ -975,12 +995,12 @@ assert(androidDetailViews.includes("setDetailChromeTitle") && androidDetailViews
 assert(androidSectionStyles.includes("grid-template-columns: clamp(104px, 32%, 128px)") && androidSectionStyles.includes(".person-detail-hero .detail-hero-body"), "Android author identity must leave first-screen space for the work grid");
 assert(lines("android-client/www/modules/fanhao/features/people/detail-hero.js") <= 150, "Android author identity component must stay focused");
 assert(lines("android-client/www/modules/fanhao/features/people/detail-work-toolbar.js") <= 110, "Android author work toolbar must stay focused");
-assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-work-facts-18') && androidDetailViews.includes('android-player.js?v=20260721-fanhao-media-relocate-16') && androidDetailViews.includes('detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09'), "Android compact work facts must refresh without dropping media recovery or the work-detail flow");
+assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-search-suggestions-19') && androidDetailViews.includes('android-player.js?v=20260721-fanhao-media-relocate-16') && androidDetailViews.includes('detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09'), "Android portrait-only search changes must refresh without dropping media recovery or the work-detail flow");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-actor-counts-17') && androidWorkViews.includes('cache.js?v=20260721-fanhao-actor-counts-17') && androidWorkViews.includes('work-filtering.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-discovery-03'), "Android actor count cache refresh must retain dense browsing and search discovery");
-assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-actor-counts-17'), "Android actor count semantics must use the current people module URL");
-assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-work-facts-18'), "Android compact work facts must refresh the FanHao entry chain without dropping category browsing");
-assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-work-facts-18'), "Android compact work facts must refresh the app entry chain");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-search-suggestions-19') && androidWorkViews.includes('cache.js?v=20260721-fanhao-actor-counts-17') && androidWorkViews.includes('work-filtering.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-suggestions-19'), "Android search suggestions must retain actor-count caching and dense browsing");
+assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-search-suggestions-19'), "Android portrait-only search changes must use the current people module URL");
+assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-search-suggestions-19'), "Android search suggestions must refresh the FanHao entry chain without dropping category browsing");
+assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-search-suggestions-19'), "Android search suggestions must refresh the app entry chain");
 assert(androidPlayerSource.includes("mount.append(createPlayerErrorBox(error.message") && androidPlayerSource.includes("retry: () => playVideo"), "Android playback preparation failures must stay on the detail page with a retry action instead of opening a broken native player");
 assert(androidWorkViews.includes('ranking-views.js?v=20260721-fanhao-ranking-density-11'), "Android compact ranking changes must use a fresh module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");

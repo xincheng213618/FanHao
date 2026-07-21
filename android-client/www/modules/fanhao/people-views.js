@@ -1,5 +1,5 @@
 import { formatNumber } from "../../js/format.js";
-import { createFallbackCover, portraitUrlForPerson } from "../../js/image.js?v=20260721-fanhao-author-portraits-06";
+import { createFallbackCover, portraitUrlForPerson } from "../../js/image.js?v=20260721-fanhao-search-suggestions-19";
 import { createViewportImageLoader } from "./features/shared/viewport-image-loader.js?v=20260717-fanhao-people-first-paint-01";
 
 const PEOPLE_SORT_STORAGE_KEY = "fanhao.android.peopleSort";

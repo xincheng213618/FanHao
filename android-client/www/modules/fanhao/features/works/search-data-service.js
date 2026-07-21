@@ -16,5 +16,13 @@ export function createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageD
     return pageDataService.warm(getActiveUrl(), [path(text)]);
   }
 
-  return { path, warm };
+  function suggestions(query, options = {}) {
+    const text = String(query || "").trim();
+    if (!text) return Promise.resolve({ people: [], works: [] });
+    return pageDataService.fetch(getActiveUrl(), path(text, 6, "all", "updated"), {
+      signal: options.signal
+    });
+  }
+
+  return { path, suggestions, warm };
 }

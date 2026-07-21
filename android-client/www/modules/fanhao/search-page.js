@@ -1,14 +1,33 @@
+import { formatNumber } from "../../js/format.js";
+import { absoluteUrl, imageUrlForWork, portraitUrlForPerson } from "../../js/image.js?v=20260721-fanhao-search-suggestions-19";
+import { compactWorkCardTitle, workGridMeta, workGridPerson } from "./features/works/card-presentation.js?v=20260721-fanhao-author-sort-density-08";
+
 const SEARCH_HISTORY_STORAGE_KEY = "fanhao.android.searchHistory";
 const DEFAULT_SEARCH_TERMS = Object.freeze(["[A]"]);
 const MAX_SEARCH_HISTORY = 8;
 const MAX_AUTHOR_SUGGESTIONS = 12;
+const MAX_LIVE_SUGGESTIONS = 6;
 
-export function createFanhaoSearchPage({ els, goBack, showView, warmSearch, getLibrary = () => null }) {
+export function createFanhaoSearchPage({
+  els,
+  goBack,
+  showView,
+  preserveQuery = () => false,
+  warmSearch,
+  fetchSuggestions = async () => ({ people: [], works: [] }),
+  getActiveUrl = () => "",
+  getLibrary = () => null
+}) {
   let prepareTimer = 0;
+  let suggestionTimer = 0;
+  let suggestionController = null;
 
   function render(query = "") {
     const text = cleanQuery(query);
     window.clearTimeout(prepareTimer);
+    window.clearTimeout(suggestionTimer);
+    suggestionController?.abort();
+    suggestionController = null;
     els.viewContent.className = "content-list fanhao-search-page-content";
     const head = document.createElement("header");
     head.className = "fanhao-search-page-head";
@@ -50,6 +69,10 @@ export function createFanhaoSearchPage({ els, goBack, showView, warmSearch, getL
 
     const results = document.createElement("div");
     results.className = "fanhao-search-results";
+    const suggestions = document.createElement("div");
+    suggestions.className = "fanhao-search-suggestions";
+    suggestions.hidden = true;
+    head.append(suggestions);
     els.viewContent.replaceChildren(head, results);
 
     form.addEventListener("submit", (event) => {
@@ -60,12 +83,23 @@ export function createFanhaoSearchPage({ els, goBack, showView, warmSearch, getL
       syncClear();
       window.clearTimeout(prepareTimer);
       const next = cleanQuery(input.value);
-      if (!next || globalThis.navigator?.connection?.saveData) return;
-      prepareTimer = window.setTimeout(() => Promise.resolve(warmSearch(next)).catch(() => {}), 180);
+      if (!next) {
+        hideSuggestions();
+        return;
+      }
+      if (!globalThis.navigator?.connection?.saveData) {
+        prepareTimer = window.setTimeout(() => Promise.resolve(warmSearch(next)).catch(() => {}), 180);
+      }
+      requestSuggestions(next);
     });
+    input.addEventListener("focus", () => requestSuggestions(input.value));
+    input.addEventListener("blur", () => window.setTimeout(() => {
+      if (!head.contains(document.activeElement)) hideSuggestions();
+    }, 80));
     clear.addEventListener("click", () => {
       input.value = "";
       syncClear();
+      hideSuggestions();
       input.focus({ preventScroll: true });
       if (text) submitQuery("", { remember: false });
     });
@@ -78,6 +112,154 @@ export function createFanhaoSearchPage({ els, goBack, showView, warmSearch, getL
       });
     }
     return { input, results };
+
+    function requestSuggestions(value) {
+      const next = cleanQuery(value);
+      window.clearTimeout(suggestionTimer);
+      suggestionController?.abort();
+      suggestionController = null;
+      if (!next) {
+        hideSuggestions();
+        return;
+      }
+      suggestionTimer = window.setTimeout(async () => {
+        const controller = new AbortController();
+        suggestionController = controller;
+        try {
+          const data = await fetchSuggestions(next, { signal: controller.signal });
+          if (controller.signal.aborted || !input.isConnected || cleanQuery(input.value) !== next) return;
+          renderSuggestions(buildFanhaoSearchSuggestions(data, MAX_LIVE_SUGGESTIONS));
+        } catch (error) {
+          if (error?.name !== "AbortError") hideSuggestions();
+        } finally {
+          if (suggestionController === controller) suggestionController = null;
+        }
+      }, 220);
+    }
+
+    function renderSuggestions(items) {
+      suggestions.replaceChildren();
+      if (!items.length) {
+        suggestions.hidden = true;
+        return;
+      }
+      for (const item of items) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `fanhao-search-suggestion ${item.kind}`;
+        const visual = createSuggestionVisual(item);
+        const copy = document.createElement("span");
+        copy.className = "fanhao-search-suggestion-copy";
+        const label = document.createElement("strong");
+        label.textContent = item.label;
+        const detail = document.createElement("small");
+        detail.textContent = item.detail;
+        copy.append(label, detail);
+        button.append(visual, copy, createChevron());
+        button.addEventListener("pointerdown", (event) => event.preventDefault());
+        button.addEventListener("click", () => {
+          const query = cleanQuery(input.value);
+          rememberSearch(query);
+          preserveQuery(query);
+          hideSuggestions();
+          input.blur();
+          if (item.kind === "person") {
+            showView("personDetail", { personId: item.id }, { push: true });
+          } else if (item.missingLocal && item.javdbUrl) {
+            window.open(item.javdbUrl, "_blank", "noreferrer");
+          } else {
+            showView("workDetail", { workId: item.id }, { push: true });
+          }
+        });
+        suggestions.append(button);
+      }
+      suggestions.hidden = false;
+    }
+
+    function hideSuggestions() {
+      window.clearTimeout(suggestionTimer);
+      suggestionController?.abort();
+      suggestionController = null;
+      suggestions.hidden = true;
+    }
+  }
+
+  function renderResultOverview(container, { query = "", total = 0, people = [] } = {}) {
+    const summary = document.createElement("div");
+    summary.className = "fanhao-search-result-summary";
+    summary.setAttribute("role", "status");
+    summary.setAttribute("aria-live", "polite");
+    const count = document.createElement("strong");
+    count.textContent = `${formatNumber(total)} 个作品`;
+    const detail = document.createElement("span");
+    detail.textContent = people.length
+      ? `${formatNumber(people.length)} 位演员匹配`
+      : `“${cleanQuery(query)}”的搜索结果`;
+    summary.append(count, detail);
+    container.append(summary);
+
+    if (!people.length) return;
+    const section = document.createElement("section");
+    section.className = "fanhao-search-people-section";
+    const head = document.createElement("div");
+    head.className = "fanhao-search-people-head";
+    const title = document.createElement("strong");
+    title.textContent = "相关演员";
+    const note = document.createElement("span");
+    note.textContent = "点选直达";
+    head.append(title, note);
+    const list = document.createElement("div");
+    list.className = "fanhao-search-people-list";
+    for (const person of people.slice(0, 12)) list.append(createPersonMatch(person));
+    section.append(head, list);
+    container.append(section);
+  }
+
+  function createPersonMatch(person) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "fanhao-search-person-card";
+    const name = displayPersonName(person);
+    const visual = createVisual({
+      className: "fanhao-search-person-avatar",
+      fallback: initials(name),
+      imageUrl: portraitUrlForPerson(person),
+      person: true
+    });
+    const copy = document.createElement("span");
+    const title = document.createElement("strong");
+    title.textContent = name;
+    const count = document.createElement("small");
+    count.textContent = `${formatNumber(person.workCount || 0)} 部本地作品`;
+    copy.append(title, count);
+    button.append(visual, copy, createChevron());
+    button.addEventListener("click", () => showView("personDetail", { personId: person.id }, { push: true }));
+    return button;
+  }
+
+  function createSuggestionVisual(item) {
+    return createVisual({
+      className: `fanhao-search-suggestion-visual ${item.kind}`,
+      fallback: item.kind === "person" ? initials(item.label) : "作品",
+      imageUrl: item.imageUrl,
+      person: item.kind === "person"
+    });
+  }
+
+  function createVisual({ className, fallback, imageUrl, person = false }) {
+    const visual = document.createElement("span");
+    visual.className = className;
+    visual.textContent = fallback;
+    if (!imageUrl) return visual;
+    const image = document.createElement("img");
+    image.alt = "";
+    image.decoding = "async";
+    image.loading = "lazy";
+    image.src = absoluteUrl(getActiveUrl(), imageUrl);
+    image.classList.toggle("person", person);
+    image.addEventListener("error", () => image.remove(), { once: true });
+    visual.append(image);
+    return visual;
   }
 
   function renderLanding(container) {
@@ -171,7 +353,46 @@ export function createFanhaoSearchPage({ els, goBack, showView, warmSearch, getL
     showView("search", { query }, { skipHistory: true, replaceHistory: true });
   }
 
-  return { render, submitQuery };
+  return { render, renderResultOverview, submitQuery };
+}
+
+export function buildFanhaoSearchSuggestions(data = {}, limit = MAX_LIVE_SUGGESTIONS) {
+  const max = Math.max(0, Number(limit) || 0);
+  if (!max) return [];
+  const items = [];
+  const seenPeople = new Set();
+  for (const person of Array.isArray(data.people) ? data.people : []) {
+    const id = cleanQuery(person?.id);
+    const label = displayPersonName(person);
+    if (!id || !label || seenPeople.has(id)) continue;
+    seenPeople.add(id);
+    items.push({
+      kind: "person",
+      id,
+      label,
+      detail: `${formatNumber(person.workCount || 0)} 部本地作品`,
+      imageUrl: portraitUrlForPerson(person)
+    });
+    if (items.length >= Math.min(2, max)) break;
+  }
+  const seenWorks = new Set();
+  for (const work of Array.isArray(data.works) ? data.works : []) {
+    const id = cleanQuery(work?.id);
+    if (!id || seenWorks.has(id)) continue;
+    seenWorks.add(id);
+    const detail = [workGridPerson(work), workGridMeta(work)].filter(Boolean).join(" · ") || "作品";
+    items.push({
+      kind: "work",
+      id,
+      label: compactWorkCardTitle(work),
+      detail,
+      imageUrl: imageUrlForWork(work),
+      missingLocal: Boolean(work.missingLocal),
+      javdbUrl: cleanQuery(work.javdbUrl || work.infoSummary?.javdbUrl)
+    });
+    if (items.length >= max) break;
+  }
+  return items.slice(0, max);
 }
 
 function readSearchHistory() {
@@ -233,4 +454,20 @@ function uniqueQueries(values) {
 
 function cleanQuery(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function displayPersonName(person) {
+  return cleanQuery(person?.actorProfile?.displayName || person?.name);
+}
+
+function initials(value) {
+  return cleanQuery(value).slice(0, 2) || "?";
+}
+
+function createChevron() {
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.setAttribute("aria-hidden", "true");
+  icon.setAttribute("viewBox", "0 0 24 24");
+  icon.innerHTML = '<path d="m9 5 7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>';
+  return icon;
 }
