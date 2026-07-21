@@ -1,9 +1,16 @@
 export function createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageDataService, workListState }) {
-  function path(query, limit = getWorksLimit(), filter = workListState.getFilterMode(), sort = workListState.getServerSortMode()) {
+  function path(
+    query,
+    limit = getWorksLimit(),
+    filter = workListState.getFilterMode(),
+    sort = workListState.getServerSortMode(),
+    category = "all"
+  ) {
     const params = new URLSearchParams({
       q: String(query || "").trim(),
       limit: String(limit),
       offset: "0",
+      category: String(category || "all"),
       sort,
       filter
     });

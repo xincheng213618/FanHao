@@ -336,6 +336,7 @@ const androidWorkViews = read("android-client/www/modules/fanhao/work-views.js")
 const androidWorkFiltering = read("android-client/www/js/work-filtering.js");
 const androidWorkPageDataService = read("android-client/www/modules/fanhao/features/works/page-data-service.js");
 const androidWorkSearchDataService = read("android-client/www/modules/fanhao/features/works/search-data-service.js");
+const androidSearchResultToolbar = read("android-client/www/modules/fanhao/features/works/search-result-toolbar.js");
 const androidWorkDetailDataService = read("android-client/www/modules/fanhao/features/works/detail-data-service.js");
 const androidPersonDetailRequest = read("android-client/www/modules/fanhao/features/people/detail-request.js");
 const androidPersonDetailWorkToolbar = read("android-client/www/modules/fanhao/features/people/detail-work-toolbar.js");
@@ -424,6 +425,11 @@ assert(androidFanhaoSearchPage.includes('showView("personDetail", { personId: au
 assert(androidFanhaoStyles.includes(".fanhao-search-discovery-group") && androidFanhaoStyles.includes("min-height: 150px"), "FanHao search discovery must stay compact above the phone keyboard");
 assert(androidWorkSearchDataService.includes("function suggestions") && androidWorkSearchDataService.includes('path(text, 6, "all", "updated")') && androidFanhaoSearchPage.includes("fanhao-search-suggestions"), "FanHao search must expose bounded live suggestions through the module-scoped endpoint");
 assert(androidFanhaoSearchPage.includes("renderResultOverview") && androidFanhaoSearchPage.includes("fanhao-search-result-summary") && androidFanhaoSearchPage.includes("fanhao-search-person-card"), "FanHao search results must expose visible counts and portrait-backed actor matches");
+assert(androidWorkSearchDataService.includes('category: String(category || "all")') && androidWorkViews.includes("serverSort, searchCategory") && androidWorkViews.includes("onCategoryChange: setSearchCategory"), "FanHao search must send and retain its route-local work category");
+assert(androidWorkViews.includes("mountSearchResultToolbar({") && androidWorkViews.includes("hideControls: true") && androidSearchResultToolbar.includes('options.container.classList.add("has-result-toolbar")'), "FanHao search results must replace the clipped chip strip with a compact toolbar");
+assert(androidSearchResultToolbar.includes('createToolbarButton("类型"') && androidSearchResultToolbar.includes('createToolbarButton("筛选"') && androidSearchResultToolbar.includes('createToolbarButton("排序"') && androidSearchResultToolbar.includes("openFanhaoSheet({"), "FanHao search controls must expose type, filter, and sort through the shared bottom sheet");
+assert(androidFanhaoStyles.includes(".fanhao-search-result-toolbar") && androidFanhaoStyles.includes(".fanhao-search-results.has-result-toolbar") && androidFanhaoStyles.includes("position: fixed"), "FanHao search toolbar must stay reachable without covering the result grid");
+assert(lines("android-client/www/modules/fanhao/features/works/search-result-toolbar.js") <= 140, "Android search result toolbar must stay focused");
 assert(androidFanhaoModule.includes("replaceViewParams: host.navigation.replaceViewParams") && androidWorkViews.includes('preserveQuery: (query) => replaceViewParams("search", { query })') && androidFanhaoSearchPage.includes("preserveQuery(query)"), "direct live-suggestion navigation must preserve the typed query for the Android back path");
 assert(androidFanhaoStyles.includes(".fanhao-search-suggestion") && androidFanhaoStyles.includes(".fanhao-search-result-summary") && androidFanhaoStyles.includes("object-fit: contain"), "FanHao search suggestions and complete actor portraits must have dedicated phone styling");
 const authorSuggestions = localAuthorSearchSuggestions([
@@ -645,8 +651,8 @@ assert(androidWorkActions.includes('title: "更多操作"') && androidWorkAction
 assert(androidWorkActions.includes('variant: "danger wide"') && androidFanhaoStyles.includes(".fanhao-sort-option.danger") && androidFanhaoStyles.includes(".fanhao-sort-option.wide"), "Android destructive work actions must remain visually isolated in the sheet");
 assert(!androidWorkActions.includes("createBackButton") && androidSectionStyles.includes(".work-detail-meta-body"), "Android work details must delegate return navigation to the shared sticky detail header");
 assert(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions must stay focused");
-assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-work-actor-flow-22") && androidStyles.includes("css/sections.css?v=20260721-fanhao-work-actor-flow-22") && androidStyles.includes("css/lists.css?v=20260721-fanhao-person-work-grid-20") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-search-suggestions-19"), "Android work actor flow must refresh section styles while retaining compact work grids and search styling");
-assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-work-actor-flow-22") && androidApp.includes("config.js?v=20260721-fanhao-work-actor-flow-22") && androidApp.includes("cache.js?v=20260721-fanhao-work-actor-flow-22") && androidCacheSource.includes("config.js?v=20260721-fanhao-work-actor-flow-22") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-work-actor-flow-22"'), "Android work actor flow must refresh the complete application cache chain");
+assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-search-toolbar-23") && androidStyles.includes("css/sections.css?v=20260721-fanhao-work-actor-flow-22") && androidStyles.includes("css/lists.css?v=20260721-fanhao-person-work-grid-20") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-search-toolbar-23"), "Android search toolbar must refresh module styling while retaining actor and work-grid styles");
+assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-search-toolbar-23") && androidApp.includes("config.js?v=20260721-fanhao-search-toolbar-23") && androidApp.includes("cache.js?v=20260721-fanhao-search-toolbar-23") && androidCacheSource.includes("config.js?v=20260721-fanhao-search-toolbar-23") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-search-toolbar-23"'), "Android search toolbar must refresh the complete application cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -1009,10 +1015,10 @@ assert(lines("android-client/www/modules/fanhao/features/people/detail-hero.js")
 assert(lines("android-client/www/modules/fanhao/features/people/detail-work-toolbar.js") <= 110, "Android author work toolbar must stay focused");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-work-actor-flow-22') && androidDetailViews.includes('android-player.js?v=20260721-fanhao-media-relocate-16') && androidDetailViews.includes('detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09'), "Android work actor flow must refresh without dropping media recovery or the work-detail toolbar");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-person-work-grid-20') && androidWorkViews.includes('cache.js?v=20260721-fanhao-actor-counts-17') && androidWorkViews.includes('work-filtering.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-suggestions-19'), "Android actor work grids must retain search suggestions, actor-count caching, and dense browsing");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-search-toolbar-23') && androidWorkViews.includes('cache.js?v=20260721-fanhao-actor-counts-17') && androidWorkViews.includes('work-filtering.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-suggestions-19'), "Android search toolbar must retain search suggestions, actor-count caching, and dense browsing");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-search-suggestions-19'), "Android portrait-only search changes must use the current people module URL");
-assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-work-actor-flow-22'), "Android work actor flow must refresh the FanHao entry chain without dropping category browsing");
-assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-work-actor-flow-22'), "Android work actor flow must refresh the app entry chain");
+assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-search-toolbar-23'), "Android search toolbar must refresh the FanHao entry chain without dropping category browsing");
+assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-search-toolbar-23'), "Android search toolbar must refresh the app entry chain");
 assert(androidPlayerSource.includes("mount.append(createPlayerErrorBox(error.message") && androidPlayerSource.includes("retry: () => playVideo"), "Android playback preparation failures must stay on the detail page with a retry action instead of opening a broken native player");
 assert(androidWorkViews.includes('ranking-views.js?v=20260721-fanhao-ranking-density-11'), "Android compact ranking changes must use a fresh module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
@@ -1254,7 +1260,8 @@ assert(workQueryServiceSource.indexOf("if (usesTextMatcher) prewarmWorkSearch") 
 assert(workQueryServiceSource.includes("prewarmPersonMerge();"), "person merge maps must be ready before the first search request");
 assert(workQueryServiceSource.includes("const searchSourceCache = new Map()"), "search paging and return navigation must reuse matched work sources");
 assert(workQueryServiceSource.includes("const source = cachedSearchSource(rawQuery"), "search responses must use the versioned matched-work cache");
-assert(workQueryServiceSource.includes("source.facetsCache?.stamp === stamp"), "search facets must only refresh after user state changes");
+assert(workQueryServiceSource.includes("source.facetsStamp !== stamp") && workQueryServiceSource.includes("source.facetsByCategory.clear()"), "search category facets must only refresh after user state changes");
+assert(workQueryServiceSource.includes("cachedSearchCategory(source, category)") && workQueryServiceSource.includes("categories: categorySummaryForWorks(source.works)") && workQueryServiceSource.includes("[rawQuery, category, filter, sort, limit, offset]"), "search responses must filter and cache by the selected work category while retaining all category counts");
 assert(workQueryServiceSource.includes("const exactPersonSearch ="), "exact person searches must bypass the full local text scan");
 assert(workCodeIndexServiceSource.includes("localWorkCodeIndexCache = { stamp, keys, rows, searchRows, prefixRows }"), "local code membership and work lookup must share one catalog pass");
 assert(workCodeIndexServiceSource.includes("while (low < high)"), "local code-prefix search must use the sorted code index");
@@ -2377,6 +2384,10 @@ const combinedWorkListBeforeProgress = workQueryService.listPayload(combinedWork
 assert.equal(combinedWorkListBeforeProgress.total, 0, "combined work-list filters must apply every chip before pagination");
 const workSearchUrl = new URL("http://127.0.0.1/api/search?q=AB&limit=24&sort=releaseDesc");
 const cachedSearchFirst = workQueryService.searchPayload(workSearchUrl);
+const westernWorkSearch = workQueryService.searchPayload(new URL("http://127.0.0.1/api/search?q=AB&category=western&limit=24&sort=releaseDesc"));
+assert.equal(westernWorkSearch.category, "western", "search responses must echo the active category for the mobile toolbar");
+assert.equal(westernWorkSearch.total, 0, "search category filtering must happen before pagination");
+assert.deepEqual(westernWorkSearch.categories.map(({ value, count }) => [value, count]), [["censored", 1], ["western", 0], ["fc2", 0], ["anime", 0]], "search responses must retain complete query-scoped category counts after filtering");
 const combinedWorkSearchUrl = new URL("http://127.0.0.1/api/search?q=AB&filter=progress%2Cinfo&limit=24&sort=releaseDesc");
 const combinedWorkSearchBeforeProgress = workQueryService.searchPayload(combinedWorkSearchUrl);
 assert.equal(combinedWorkSearchBeforeProgress.total, 0, "combined work-search filters must apply every chip before pagination");

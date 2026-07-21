@@ -173,7 +173,8 @@ body.fanhao-work-detail-view .bottom-nav {
 }
 
 .person-detail-work-toolbar,
-.work-detail-toolbar {
+.work-detail-toolbar,
+.fanhao-search-result-toolbar {
   position: fixed;
   left: 50%;
   bottom: 0;
@@ -193,12 +194,14 @@ body.fanhao-work-detail-view .bottom-nav {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.work-detail-toolbar {
+.work-detail-toolbar,
+.fanhao-search-result-toolbar {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .person-detail-work-toolbar > button,
-.work-detail-toolbar > button {
+.work-detail-toolbar > button,
+.fanhao-search-result-toolbar > button {
   display: grid;
   min-width: 0;
   min-height: 48px;
@@ -219,14 +222,17 @@ body.fanhao-work-detail-view .bottom-nav {
 }
 
 .person-detail-work-toolbar > button:active,
-.work-detail-toolbar > button:active {
+.work-detail-toolbar > button:active,
+.fanhao-search-result-toolbar > button:active {
   background: var(--surface-soft);
 }
 
 .person-detail-work-toolbar span,
 .person-detail-work-toolbar strong,
 .work-detail-toolbar span,
-.work-detail-toolbar strong {
+.work-detail-toolbar strong,
+.fanhao-search-result-toolbar span,
+.fanhao-search-result-toolbar strong {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -234,14 +240,16 @@ body.fanhao-work-detail-view .bottom-nav {
 }
 
 .person-detail-work-toolbar span,
-.work-detail-toolbar span {
+.work-detail-toolbar span,
+.fanhao-search-result-toolbar span {
   color: var(--muted);
   font-size: 10.5px;
   font-weight: 850;
 }
 
 .person-detail-work-toolbar strong,
-.work-detail-toolbar strong {
+.work-detail-toolbar strong,
+.fanhao-search-result-toolbar strong {
   color: var(--blue);
   font-size: 13px;
   font-weight: 950;
@@ -500,6 +508,10 @@ body.fanhao-search-page-view .bottom-nav {
   display: grid;
   gap: 10px;
   padding: 12px 12px 0;
+}
+
+.fanhao-search-results.has-result-toolbar {
+  padding-bottom: calc(82px + env(safe-area-inset-bottom));
 }
 
 .fanhao-search-result-summary {

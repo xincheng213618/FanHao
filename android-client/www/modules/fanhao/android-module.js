@@ -1,5 +1,5 @@
 import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260721-fanhao-category-browser-13";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260721-fanhao-work-actor-flow-22";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260721-fanhao-search-toolbar-23";
 
 export function createAndroidModule({ host }) {
   const workViews = createWorkViews({

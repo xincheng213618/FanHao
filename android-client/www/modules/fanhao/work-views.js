@@ -7,13 +7,13 @@ import { createWorkCards } from "./features/works/cards.js?v=20260721-fanhao-per
 import { workCollectionPath } from "./features/works/collection-request.js?v=20260720-fanhao-collection-filter-01";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260721-fanhao-ranking-density-11";
 import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-page-race-01";
-import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260721-fanhao-search-suggestions-19";
+import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260721-fanhao-search-toolbar-23";
 import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-touch-intent-01";
 import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=20260717-fanhao-work-first-paint-01";
+import { mountSearchResultToolbar } from "./features/works/search-result-toolbar.js?v=20260721-fanhao-search-toolbar-23";
 import { createFanhaoSearchPage } from "./search-page.js?v=20260721-fanhao-search-suggestions-19";
 import { normalizeStudioSort, selectStudios, STUDIO_SORT_OPTIONS } from "./features/studios/index-model.js?v=20260721-fanhao-studio-density-12";
-import { createCategoryViews } from "./features/categories/category-views.js?v=20260721-fanhao-category-browser-13";
-
+import { CATEGORY_OPTIONS, createCategoryViews } from "./features/categories/category-views.js?v=20260721-fanhao-category-browser-13";
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
 const STUDIO_SORT_STORAGE_KEY = "fanhao.android.studioSort";
@@ -86,6 +86,7 @@ export function createWorkViews(context) {
     showView, workListState
   });
   let studioQuery = "";
+  let searchCategory = "all";
   async function renderContinuePreview(options = {}) {
     if (!els.continuePreview || !els.continueSection) return;
     els.continuePreview.dataset.hasItems = "0";
@@ -560,6 +561,7 @@ export function createWorkViews(context) {
     const { results } = searchPage.render(text);
 
     if (!text) {
+      searchCategory = "all";
       searchListState.setFilterMode("all", { replace: true, rerender: false });
       searchListState.setSortMode("updated", { rerender: false });
       return;
@@ -569,7 +571,7 @@ export function createWorkViews(context) {
     const limit = getWorksLimit();
     const serverFilter = searchListState.getServerFilterMode();
     const serverSort = searchListState.getServerSortMode();
-    const path = searchDataService.path(text, limit, serverFilter, serverSort);
+    const path = searchDataService.path(text, limit, serverFilter, serverSort, searchCategory);
     const activeUrl = getActiveUrl();
     let renderedCache = false;
 
@@ -588,11 +590,16 @@ export function createWorkViews(context) {
           listState: searchListState,
           coverGrid: true,
           facets: data.facets,
+          hideControls: true,
           ...serverContinuationOptions(works, total)
         });
       } else {
         renderMessageInto(results, "没有匹配的番号作品，已显示演员结果。", "quiet", false);
       }
+      mountSearchResultToolbar({
+        container: results, data, works, total, listState: searchListState,
+        category: searchCategory, onCategoryChange: setSearchCategory
+      });
     };
 
     try {
@@ -615,6 +622,15 @@ export function createWorkViews(context) {
         renderMessageInto(results, error.message, "error");
       }
     }
+  }
+
+  function setSearchCategory(value) {
+    const requested = String(value || "");
+    const category = requested === "all" || CATEGORY_OPTIONS.some((option) => option.value === requested) ? requested : "all";
+    if (category === searchCategory) return false;
+    searchCategory = category;
+    renderCurrentView();
+    return true;
   }
 
   async function renderRankings(isActive = () => true) {

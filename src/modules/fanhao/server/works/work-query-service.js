@@ -631,18 +631,22 @@ export function createWorkQueryService({
 
   function searchPayload(url) {
     const rawQuery = (url.searchParams.get("q") || "").trim();
+    const category = normalizeWorkCategory(url.searchParams.get("category"));
     const filter = url.searchParams.get("filter") || "all";
     const sort = url.searchParams.get("sort") || "releaseDesc";
     const limit = clampInteger(url.searchParams.get("limit"), defaultWorkLimit, 1, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-    const pageCacheKey = JSON.stringify([rawQuery, filter, sort, limit, offset]);
+    const pageCacheKey = JSON.stringify([rawQuery, category, filter, sort, limit, offset]);
     const cachedPage = readSearchPage(pageCacheKey);
     if (cachedPage) return cachedPage;
     const source = cachedSearchSource(rawQuery);
-    const facets = cachedSearchFacets(source);
-    const filteredWorks = cachedSearchFilter(source, filter);
+    const categoryWorks = cachedSearchCategory(source, category);
+    const facets = cachedSearchFacets(source, category, categoryWorks);
+    const filteredWorks = cachedSearchFilter(source, category, categoryWorks, filter);
     const works = sortWorkList(filteredWorks, sort, { lightweightInfo: true });
     const payload = pagedWorksPayload(works, url, {
+      category,
+      categories: categorySummaryForWorks(source.works),
       filter,
       q: rawQuery,
       facets,
@@ -737,7 +741,9 @@ export function createWorkQueryService({
       ...actorMissingMatches
     ]);
     const source = {
-      facetsCache: null,
+      categoryWorks: new Map(),
+      facetsByCategory: new Map(),
+      facetsStamp: userStateStamp(),
       filteredByMode: new Map(),
       filteredByModeStamp: userStateStamp(),
       // Search renders compact person chips (name + work count) and opens the
@@ -751,27 +757,39 @@ export function createWorkQueryService({
     return source;
   }
 
-  function cachedSearchFacets(source) {
+  function cachedSearchCategory(source, category) {
+    if (category === "all") return source.works;
+    if (!source.categoryWorks.has(category)) {
+      source.categoryWorks.set(category, source.works.filter((work) => workCategory(work) === category));
+    }
+    return source.categoryWorks.get(category);
+  }
+
+  function cachedSearchFacets(source, category, categoryWorks) {
     const stamp = userStateStamp();
-    if (source.facetsCache?.stamp === stamp) return source.facetsCache.facets;
-    const facets = lightweightWorkFacets(source.works);
-    source.facetsCache = { stamp, facets };
+    if (source.facetsStamp !== stamp) {
+      source.facetsStamp = stamp;
+      source.facetsByCategory.clear();
+    }
+    if (source.facetsByCategory.has(category)) return source.facetsByCategory.get(category);
+    const facets = lightweightWorkFacets(categoryWorks);
+    source.facetsByCategory.set(category, facets);
     return facets;
   }
 
-  function cachedSearchFilter(source, filter) {
+  function cachedSearchFilter(source, category, categoryWorks, filter) {
     const filters = requestedFilters(filter);
-    if (!filters.length) return source.works;
-    const filterKey = filters.join(",");
+    if (!filters.length) return categoryWorks;
+    const filterKey = `${category}:${filters.join(",")}`;
     const matchesFilters = (work) => filters.every((item) => lightweightWorkMatchesFilter(work, item));
-    if (!filters.every((item) => cacheableFilters.has(item))) return source.works.filter(matchesFilters);
+    if (!filters.every((item) => cacheableFilters.has(item))) return categoryWorks.filter(matchesFilters);
     const stamp = userStateStamp();
     if (source.filteredByModeStamp !== stamp) {
       source.filteredByModeStamp = stamp;
       source.filteredByMode.clear();
     }
     if (!source.filteredByMode.has(filterKey)) {
-      source.filteredByMode.set(filterKey, source.works.filter(matchesFilters));
+      source.filteredByMode.set(filterKey, categoryWorks.filter(matchesFilters));
     }
     return source.filteredByMode.get(filterKey);
   }
