@@ -812,14 +812,14 @@ button.work-detail-author {
   white-space: nowrap;
 }
 
-.person-source-strip {
+.person-category-strip {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
   gap: 5px;
 }
 
-.person-source-chip {
+.person-category-chip {
   display: inline-flex;
   min-height: 28px;
   align-items: center;

@@ -99,6 +99,7 @@ export function createPersonDetailService({
       console.warn("[fanhao-person-detail-slow]", JSON.stringify({ personId: source.personId, count: source.works.length, ...timings }));
     }
     const payload = {
+      categories: source.categories,
       person: source.person,
       filmographyCount: source.works.length,
       year: normalizePersonWorkYear(url.searchParams.get("year")),
@@ -161,6 +162,7 @@ export function createPersonDetailService({
       skipFallbackAvatar: true
     };
     const source = {
+      categories: workQueryService.categorySummaryForWorks(allPersonWorks),
       pageCache: new Map(),
       person: null,
       personId: person.id,

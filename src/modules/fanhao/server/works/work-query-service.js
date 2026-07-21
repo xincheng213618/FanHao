@@ -1,4 +1,4 @@
-import { classifyWorkCategory, normalizeWorkCategory, WORK_CATEGORY_OPTIONS } from "./work-category.js";
+import { classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS } from "./work-category.js";
 
 const LIST_PAGE_CACHE_LIMIT = 96;
 const SEARCH_PAGE_CACHE_LIMIT = 192;
@@ -472,6 +472,12 @@ export function createWorkQueryService({
     return { count: WORK_CATEGORY_OPTIONS.length, categories: categorySummaryItems(stamp) };
   }
 
+  function categorySummaryForWorks(works = []) {
+    return summarizeWorkCategories(works, {
+      isWestern: (work) => peopleScopeService.workMatches(work, "western")
+    });
+  }
+
   function readListPage(cacheKey) {
     ensureListResponseCache();
     if (!listPageCache.has(cacheKey)) return null;
@@ -779,6 +785,7 @@ export function createWorkQueryService({
   }
 
   return {
+    categorySummaryForWorks,
     categorySummaryPayload,
     facets: workFacets,
     lightweightFacets: lightweightWorkFacets,

@@ -17,6 +17,19 @@ export function classifyWorkCategory(work, options = {}) {
   return "censored";
 }
 
+export function summarizeWorkCategories(works = [], options = {}) {
+  const isWestern = typeof options.isWestern === "function" ? options.isWestern : () => false;
+  const counts = new Map(WORK_CATEGORY_OPTIONS.map((option) => [option.value, 0]));
+  for (const work of works) {
+    const category = classifyWorkCategory(work, { isWestern: Boolean(isWestern(work)) });
+    counts.set(category, (counts.get(category) || 0) + 1);
+  }
+  return WORK_CATEGORY_OPTIONS.map((option) => ({
+    ...option,
+    count: counts.get(option.value) || 0
+  }));
+}
+
 export function isAnimeWork(work) {
   const person = String(work?.personName || "").trim().toLocaleLowerCase();
   if (/^\[?(?:动漫|動畫|anime)\]?$/iu.test(person)) return true;

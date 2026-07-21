@@ -40,9 +40,9 @@ export function createPersonDetailHero(person, options = {}) {
   const workCountUnit = document.createElement("span");
   workCountUnit.textContent = filmographyCount === null ? "部作品" : "部影片";
   workCount.append(workCountPrefix, workCountValue, workCountUnit);
-  const sources = createPersonSourceStrip(person);
+  const categories = createPersonCategoryStrip(options.categories);
   body.append(name, alias, workCount);
-  if (sources) body.append(sources);
+  if (categories) body.append(categories);
   hero.append(body);
   return hero;
 }
@@ -68,37 +68,24 @@ function personAliasText(person) {
   return aliases.join(" · ");
 }
 
-function createPersonSourceStrip(person) {
-  const labels = personSourceLabels(person);
-  if (!labels.length) return null;
+function createPersonCategoryStrip(categories = []) {
+  const items = (Array.isArray(categories) ? categories : [])
+    .map((category) => ({
+      count: finiteCount(category?.count),
+      label: String(category?.label || "").trim(),
+      value: String(category?.value || "").trim()
+    }))
+    .filter((category) => category.label && category.count > 0);
+  if (!items.length) return null;
   const strip = document.createElement("div");
-  strip.className = "person-source-strip";
-  for (const label of labels) {
+  strip.className = "person-category-strip";
+  strip.setAttribute("aria-label", "作品分类");
+  for (const category of items) {
     const chip = document.createElement("span");
-    chip.className = "person-source-chip";
-    chip.textContent = label;
+    chip.className = "person-category-chip";
+    if (category.value) chip.dataset.category = category.value;
+    chip.textContent = `${category.label} ${formatNumber(category.count)}`;
     strip.append(chip);
   }
   return strip;
-}
-
-function personSourceLabels(person) {
-  const paths = [...(person.sourcePaths || []), person.relativePath].filter(Boolean);
-  const labels = new Set();
-  for (const sourcePath of paths) {
-    const source = normalizePersonSource(sourcePath);
-    if (source) labels.add(source);
-  }
-  return [...labels];
-}
-
-function normalizePersonSource(sourcePath) {
-  const value = String(sourcePath || "").replace(/\\/g, "/").toLowerCase();
-  if (!value) return "";
-  if (value.startsWith("v:/")) return "VR";
-  if (value.startsWith("o:/[珍藏1]")) return "珍藏1";
-  if (value.startsWith("o:/[珍藏]")) return "珍藏";
-  if (value.startsWith("g:/") || value.startsWith("f:/") || value.startsWith("o:/")) return "普通";
-  if (value.startsWith("r:/")) return "欧美";
-  return "";
 }
