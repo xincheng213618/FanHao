@@ -21,7 +21,8 @@ try {
     compilationPrefixes: ["ABC"],
     compilationKeywords: ["合集"],
     actorAvatarDataPath: "D:\\avatars",
-    imageReaderCacheMaxBytes: 4 * 1024 ** 3
+    imageReaderCacheMaxBytes: 4 * 1024 ** 3,
+    shortVideoTranscodeConcurrency: 2
   });
 
   const fanhaoSettings = createFanhaoSettingsProvider({ appConfigService });
@@ -30,13 +31,16 @@ try {
     compilationPrefixes: ["NEW"],
     compilationKeywords: ["合集"],
     actorAvatarDataPath: "D:\\avatars",
-    imageReaderCacheMaxBytes: 4 * 1024 ** 3
+    imageReaderCacheMaxBytes: 4 * 1024 ** 3,
+    shortVideoTranscodeConcurrency: 2
   }, "FanHao settings updates must preserve settings owned by other modules");
 
   const photosSettings = createPhotosSettingsProvider({ appConfigService });
   photosSettings.update({ imageReaderCacheMaxBytes: 8 * 1024 ** 3 });
   assert.deepEqual(appConfigService.publicConfig().compilationPrefixes, ["NEW"], "photo settings must patch app config");
   assert.equal(appConfigService.publicConfig().imageReaderCacheMaxBytes, 8 * 1024 ** 3);
+  appConfigService.patch({ shortVideoTranscodeConcurrency: 8 });
+  assert.equal(appConfigService.shortVideoTranscodeConcurrency(), 4, "short-video transcode concurrency must be persisted and clamped to the supported range");
 
   let savedCookie = "";
   const doubanCookieService = {

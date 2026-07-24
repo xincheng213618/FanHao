@@ -23,9 +23,10 @@ export function createAdminPersonService({
     const person = resolveLibraryPersonByPublicId(body.personId);
     if (!person) return null;
 
-    const nextPerson = personLibraryService.refreshPerson(person.id, {
+    const refreshResult = personLibraryService.refreshPerson(person.id, {
       sourcePaths: Array.isArray(body.sourcePaths) ? body.sourcePaths : []
     });
+    const nextPerson = refreshResult.person;
     const library = getLibrary();
     const actorRows = actorMovieService.rows(nextPerson.id);
     const rawWorks = nextPerson.works
@@ -37,6 +38,9 @@ export function createAdminPersonService({
     );
     return {
       ok: true,
+      removedLocalWorkCount: refreshResult.removedLocalWorkCount,
+      removedWorkCount: refreshResult.removedWorkCount,
+      removedWorkIds: refreshResult.removedWorkIds,
       person: publicPerson(nextPerson),
       ...pagedWorksPayload(works, url, {})
     };

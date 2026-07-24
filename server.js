@@ -1010,7 +1010,11 @@ const moduleRegistry = await discoverFanHaoModules({
         requireLocalAdmin,
         roots: SHORT_VIDEO_ROOTS,
         sendJson,
-        sharedCache: imageReaderCacheService
+        sharedCache: imageReaderCacheService,
+        getTranscodeConcurrency: () => appConfigService.shortVideoTranscodeConcurrency(),
+        setTranscodeConcurrency: (value) => appConfigService.patch({
+          shortVideoTranscodeConcurrency: value
+        }).shortVideoTranscodeConcurrency
       },
       music: {
         dbPath: MUSIC_DB_PATH,

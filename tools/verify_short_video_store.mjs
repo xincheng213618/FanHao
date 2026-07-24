@@ -708,12 +708,15 @@ try {
     ) VALUES (?, ?, 'local_only', 'video', '长边平滑播放测试', ?, '{}', 800000, 1234, 4096, 1080, 2160, 'hevc', 60, 2332800, 2160)
   `).run("smooth-long-edge-video", "smooth-long-edge-video", path.join(root, "smooth-long-edge-video.mp4"));
   smoothCandidateDb.close();
+  assert.equal(store.smoothPlaybackCandidateCount(), 0, "resolution and codec alone must not create transcode candidates");
+  assert.equal(store.smoothPlaybackCandidates(10).length, 0, "unobserved videos must stay out of the transcode queue");
+  assert.equal(store.reportSmoothPlaybackIssue("smooth-long-edge-video", "first-frame-timeout"), true);
   const smoothCandidates = store.smoothPlaybackCandidates(10);
-  assert.deepEqual(smoothCandidates.slice(0, 2).map((item) => item.id), ["smooth-long-edge-video", "distribution-video"], "smooth playback candidates must include non-4K pixel bands using the same long-edge threshold and preserve like order");
+  assert.deepEqual(smoothCandidates.map((item) => item.id), ["smooth-long-edge-video"], "only videos with an observed playback issue may enter the transcode queue");
   assert.equal(smoothCandidates[0]?.actualVideo?.longEdge, 2160);
   assert.match(smoothCandidates[0]?.streamUrl || "", /v=1234$/);
-  assert.equal(store.smoothPlaybackCandidateCount(), 2);
-  assert.equal(store.smoothPlaybackCandidates(1, 1)[0]?.id, "distribution-video", "smooth playback candidate pagination must continue past the bounded runtime backlog");
+  assert.equal(store.smoothPlaybackCandidateCount(), 1);
+  assert.equal(store.smoothPlaybackCandidates(1, 1).length, 0, "observed playback issue pages must remain bounded");
   const smoothCandidateCleanupDb = new DatabaseSync(targetDbPath);
   smoothCandidateCleanupDb.prepare("DELETE FROM short_videos WHERE id = ?").run("smooth-long-edge-video");
   smoothCandidateCleanupDb.close();

@@ -58,6 +58,7 @@ const PLYR_STREAM_CONTROLS = ["play-large", "play", "mute", "volume", "fullscree
 const mobileStreamControlsQuery = window.matchMedia("(max-width: 640px)");
 const mobileSidebarQuery = window.matchMedia("(max-width: 900px)");
 const PLAYER_SIDEBAR_STORAGE_KEY = "fanhao.player.sidebar-collapsed";
+const LOCAL_MARKER_RELEASE_DELAY_MS = 900;
 
 initializePlayerExperience();
 
@@ -139,7 +140,7 @@ els.video?.addEventListener("waiting", () => {
 
 els.video?.addEventListener("playing", () => {
   streamNeedsActivation = false;
-  setPlaybackStatus("");
+  setPlaybackStatus(els.video.dataset.autoplayMuted === "1" ? "已静音自动播放，点击页面恢复声音" : "");
   hideFrameHold();
   scheduleUiIdle();
 });
@@ -161,6 +162,8 @@ mobileStreamControlsQuery.addEventListener?.("change", () => {
 
 window.addEventListener("resize", updateVideoAspect);
 document.addEventListener("keydown", handlePlayerKeyboard);
+document.addEventListener("keydown", restoreAutoplayAudioFromInteraction, { capture: true });
+document.addEventListener("click", restoreAutoplayAudioFromInteraction, { capture: true });
 document.addEventListener("pointerdown", revealPlayerUi, { passive: true });
 document.addEventListener("pointermove", handlePlayerPointerMove, { passive: true });
 
@@ -412,7 +415,7 @@ function renderFiles(work) {
   }
 }
 
-async function playVideo(video) {
+async function playVideo(video, options = {}) {
   reportProgress();
   stopProgressTimer();
   currentVideo = video;
@@ -435,9 +438,12 @@ async function playVideo(video) {
     const playInfo = await api(`/api/playinfo/${encodeURIComponent(video.id)}${sourceQuery}`);
     currentPlayInfo = playInfo;
     const savedProgress = video.progress || (currentWork.progress?.videoId === video.id ? currentWork.progress : null);
-    const resumePosition = savedProgress?.position > 5 ? Number(savedProgress.position) : 0;
+    const requestedResumePosition = Number(options.resumePosition);
+    const resumePosition = Number.isFinite(requestedResumePosition)
+      ? Math.max(0, requestedResumePosition)
+      : (savedProgress?.position > 5 ? Number(savedProgress.position) : 0);
     setPlaybackStatus("准备中");
-    setVideoSourceAt(resumePosition);
+    setVideoSourceAt(resumePosition, { autoPlay: options.autoPlay !== false });
     startProgressTimer();
   } catch (error) {
     showNotice(error.message || "播放失败");
@@ -489,7 +495,7 @@ function setVideoSourceAt(position, options = {}) {
       }
       updateSeekControl(target);
       if (autoPlay) {
-        requestVideoPlayback();
+        requestVideoPlayback({ allowMutedFallback: true });
       }
     },
     { once: true }
@@ -501,7 +507,7 @@ function setVideoSourceAt(position, options = {}) {
       () => {
         setPlaybackStatus("");
         if (autoPlay) {
-          requestVideoPlayback();
+          requestVideoPlayback({ allowMutedFallback: true });
         }
         endStreamSwitchSoon();
       },
@@ -511,12 +517,12 @@ function setVideoSourceAt(position, options = {}) {
 
   els.video.load();
   if (customControls && autoPlay) {
-    requestVideoPlayback();
+    requestVideoPlayback({ allowMutedFallback: true });
   }
   updateSeekControl(target);
 }
 
-function requestVideoPlayback() {
+function requestVideoPlayback(options = {}) {
   const attempt = els.video?.play?.();
   if (!attempt?.then) return;
   attempt.then(() => {
@@ -526,6 +532,13 @@ function requestVideoPlayback() {
   }).catch((error) => {
     const name = String(error?.name || "PlaybackError");
     const message = String(error?.message || "播放启动失败").trim();
+    if (name === "NotAllowedError" && options.allowMutedFallback && els.video && !els.video.muted) {
+      els.video.muted = true;
+      els.video.dataset.autoplayMuted = "1";
+      setPlaybackStatus("已静音自动播放，点击页面恢复声音");
+      requestVideoPlayback();
+      return;
+    }
     if (els.video) els.video.dataset.playbackError = `${name}: ${message}`;
     if (usesCustomControls()) {
       streamNeedsActivation = true;
@@ -534,6 +547,14 @@ function requestVideoPlayback() {
     }
     console.warn("[player-play]", name, message);
   });
+}
+
+function restoreAutoplayAudioFromInteraction() {
+  if (!els.video || els.video.dataset.autoplayMuted !== "1") return;
+  delete els.video.dataset.autoplayMuted;
+  els.video.muted = false;
+  requestVideoPlayback();
+  setPlaybackStatus("");
 }
 
 function usesCustomControls() {
@@ -1046,11 +1067,19 @@ async function toggleLocalMarker(marker) {
   if (!els.markerA || !currentWork?.id) return;
   const key = String(marker || "").toUpperCase();
   const nextEnabled = !(currentWork.localMarkers || []).includes(key);
+  const workBeforeMutation = currentWork;
+  const playbackSnapshot = capturePlaybackSnapshot();
   const originalText = els.markerA.textContent;
   els.markerA.disabled = true;
-  els.markerA.textContent = nextEnabled ? "标记中" : "移除中";
+  els.markerA.textContent = playbackSnapshot?.videoId ? "释放播放" : (nextEnabled ? "标记中" : "移除中");
   try {
-    const data = await api(`/api/works/${encodeURIComponent(currentWork.id)}/local-marker`, {
+    if (playbackSnapshot?.videoId) {
+      reportProgress(playbackSnapshot.position, { force: true });
+      stopCurrentPlayback();
+      await delay(LOCAL_MARKER_RELEASE_DELAY_MS);
+      els.markerA.textContent = nextEnabled ? "标记中" : "移除中";
+    }
+    const data = await api(`/api/works/${encodeURIComponent(workBeforeMutation.id)}/local-marker`, {
       method: "POST",
       body: { marker: key, enabled: nextEnabled }
     });
@@ -1058,14 +1087,16 @@ async function toggleLocalMarker(marker) {
       currentWork = data.work;
       document.title = `${currentWork.title} - FanHao`;
       els.title.textContent = currentWork.title;
-      currentVideo = (currentWork.videos || []).find((video) => video.id === currentVideo?.id) || currentVideo;
       renderFiles(currentWork);
       renderMeta(currentWork);
     }
     updateMarkerButton();
     updateDeleteLocalButton();
     updateCorrectActorButton();
+    await restorePlaybackSnapshot(playbackSnapshot);
   } catch (error) {
+    currentWork = workBeforeMutation;
+    await restorePlaybackSnapshot(playbackSnapshot);
     els.markerA.textContent = "标记失败";
     els.markerA.title = error.message || "标记失败";
     window.setTimeout(updateMarkerButton, 2000);
@@ -1073,6 +1104,30 @@ async function toggleLocalMarker(marker) {
     els.markerA.disabled = false;
     if (els.markerA.textContent === originalText) updateMarkerButton();
   }
+}
+
+function capturePlaybackSnapshot() {
+  if (!currentVideo?.id) return null;
+  const hasPreparedPlayback = Boolean(currentPlayInfo);
+  return {
+    videoId: currentVideo.id,
+    position: hasPreparedPlayback ? mediaPosition() : Number(currentVideo.progress?.position || 0),
+    autoPlay: hasPreparedPlayback ? (!els.video.paused && !els.video.ended) : true,
+    muted: Boolean(els.video.muted),
+    volume: Number(els.video.volume)
+  };
+}
+
+async function restorePlaybackSnapshot(snapshot) {
+  if (!snapshot?.videoId || !currentWork) return;
+  const video = (currentWork.videos || []).find((item) => item.id === snapshot.videoId) || selectInitialVideo(currentWork);
+  if (!video) return;
+  if (Number.isFinite(snapshot.volume)) els.video.volume = snapshot.volume;
+  els.video.muted = snapshot.muted;
+  await playVideo(video, {
+    resumePosition: snapshot.position,
+    autoPlay: snapshot.autoPlay
+  });
 }
 
 function updateMarkerButton() {
@@ -1156,6 +1211,53 @@ function parsePersonIdInput(value) {
   return match ? match[1] : "";
 }
 
+function normalizePersonSearchText(value) {
+  return String(value || "").normalize("NFKC").trim().toLocaleLowerCase();
+}
+
+function movePersonSearchValues(person) {
+  const profile = person?.actorProfile || {};
+  return [
+    person?.id,
+    person?.name,
+    profile.personName,
+    profile.displayName,
+    ...(Array.isArray(profile.aliases) ? profile.aliases : [])
+  ].map(normalizePersonSearchText).filter(Boolean);
+}
+
+function movePersonMatchScore(person, query) {
+  const normalizedQuery = normalizePersonSearchText(query);
+  if (!normalizedQuery) return Number.POSITIVE_INFINITY;
+  const values = movePersonSearchValues(person);
+  const id = normalizePersonSearchText(person?.id);
+  if (id === normalizedQuery) return 0;
+  const exactIndex = values.findIndex((value) => value === normalizedQuery);
+  if (exactIndex >= 0) return exactIndex <= 2 ? 1 : 2;
+  if (values.some((value) => value.startsWith(normalizedQuery))) return 3;
+  if (values.some((value) => value.includes(normalizedQuery))) return 4;
+  return Number.POSITIVE_INFINITY;
+}
+
+function searchMovePeople(people, query, limit = 10) {
+  return (Array.isArray(people) ? people : [])
+    .map((person) => ({ person, score: movePersonMatchScore(person, query) }))
+    .filter((item) => Number.isFinite(item.score))
+    .sort((left, right) => {
+      if (left.score !== right.score) return left.score - right.score;
+      const workDifference = Number(right.person.workCount || 0) - Number(left.person.workCount || 0);
+      if (workDifference) return workDifference;
+      return String(left.person.name || "").localeCompare(String(right.person.name || ""), "ja");
+    })
+    .slice(0, limit)
+    .map((item) => item.person);
+}
+
+async function movePeopleForSearch() {
+  const data = await api("/api/library");
+  return Array.isArray(data.people) ? data.people : [];
+}
+
 function safeFolderName(value) {
   return String(value || "")
     .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "")
@@ -1179,7 +1281,10 @@ function closeMoveDialog(overlay, result, resolve) {
 }
 
 async function openMovePersonDialog() {
-  const { roots, defaultRoot } = await libraryRootsForMove();
+  const [{ roots, defaultRoot }, movePeople] = await Promise.all([
+    libraryRootsForMove(),
+    movePeopleForSearch()
+  ]);
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.className = "player-move-backdrop";
@@ -1217,8 +1322,18 @@ async function openMovePersonDialog() {
     existingPane.className = "player-move-pane";
     const existingInput = document.createElement("input");
     existingInput.type = "text";
-    existingInput.placeholder = "1199 或 http://127.0.0.1:29998/?personId=1199";
-    existingPane.append(createMoveField("人物 ID / 链接", existingInput));
+    existingInput.placeholder = "输入人物姓名，例如：皆瀬あかり";
+    existingInput.autocomplete = "off";
+    existingInput.setAttribute("role", "combobox");
+    existingInput.setAttribute("aria-autocomplete", "list");
+    existingInput.setAttribute("aria-controls", "playerMovePersonResults");
+    const existingResults = document.createElement("div");
+    existingResults.id = "playerMovePersonResults";
+    existingResults.className = "player-move-results";
+    existingResults.setAttribute("role", "listbox");
+    const existingHint = document.createElement("div");
+    existingHint.className = "player-move-empty";
+    existingPane.append(createMoveField("搜索人物", existingInput), existingResults, existingHint);
 
     const createPane = document.createElement("div");
     createPane.className = "player-move-pane";
@@ -1268,14 +1383,68 @@ async function openMovePersonDialog() {
     foot.append(status, cancel, submit);
 
     let mode = "existing";
+    let selectedExistingPerson = null;
+    let visibleExistingPeople = [];
+    const exactExistingMatches = () => {
+      const query = normalizePersonSearchText(existingInput.value);
+      if (!query) return [];
+      return movePeople.filter((person) => movePersonSearchValues(person).includes(query));
+    };
+    const selectExistingPerson = (person) => {
+      selectedExistingPerson = person || null;
+      if (selectedExistingPerson) existingInput.value = selectedExistingPerson.name || selectedExistingPerson.actorProfile?.displayName || selectedExistingPerson.id;
+      renderExistingPeople();
+    };
+    const renderExistingPeople = () => {
+      const query = existingInput.value.trim();
+      visibleExistingPeople = searchMovePeople(movePeople, query);
+      const exactMatches = exactExistingMatches();
+      if (exactMatches.length === 1) selectedExistingPerson = exactMatches[0];
+      else if (selectedExistingPerson && !visibleExistingPeople.some((person) => person.id === selectedExistingPerson.id)) selectedExistingPerson = null;
+
+      existingResults.innerHTML = "";
+      for (const person of visibleExistingPeople) {
+        const option = document.createElement("button");
+        option.type = "button";
+        option.className = "player-move-person-option";
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-selected", person.id === selectedExistingPerson?.id ? "true" : "false");
+        option.classList.toggle("selected", person.id === selectedExistingPerson?.id);
+        const name = document.createElement("strong");
+        name.textContent = person.actorProfile?.displayName || person.name || `人物 ${person.id}`;
+        const meta = document.createElement("span");
+        const workCount = Number(person.workCount || 0);
+        meta.textContent = [formatLibraryPath(person.relativePath || ""), `${workCount} 部作品`].filter(Boolean).join(" · ");
+        option.append(name, meta);
+        option.addEventListener("click", () => selectExistingPerson(person));
+        existingResults.append(option);
+      }
+
+      existingResults.hidden = visibleExistingPeople.length === 0;
+      existingHint.hidden = visibleExistingPeople.length > 0;
+      existingHint.textContent = query ? "没有找到匹配人物，可切换到“新建人物”" : "输入姓名后，从候选人物中选择";
+      existingInput.setAttribute("aria-expanded", visibleExistingPeople.length > 0 ? "true" : "false");
+      if (mode === "existing") {
+        submit.disabled = !selectedExistingPerson;
+        status.textContent = selectedExistingPerson
+          ? `已选择：${selectedExistingPerson.actorProfile?.displayName || selectedExistingPerson.name}`
+          : "";
+      }
+    };
     const renderMode = () => {
       existingTab.classList.toggle("active", mode === "existing");
       createTab.classList.toggle("active", mode === "create");
       existingPane.hidden = mode !== "existing";
       createPane.hidden = mode !== "create";
       status.textContent = "";
+      submit.disabled = false;
+      if (mode === "existing") renderExistingPeople();
       window.setTimeout(() => (mode === "existing" ? existingInput : nameInput).focus(), 0);
     };
+    existingInput.addEventListener("input", () => {
+      selectedExistingPerson = null;
+      renderExistingPeople();
+    });
     existingTab.addEventListener("click", () => {
       mode = "existing";
       renderMode();
@@ -1301,15 +1470,22 @@ async function openMovePersonDialog() {
     submit.addEventListener("click", async () => {
       status.textContent = "";
       if (mode === "existing") {
-        const personId = parsePersonIdInput(existingInput.value);
+        let targetPerson = selectedExistingPerson;
+        const personId = targetPerson?.id || parsePersonIdInput(existingInput.value);
         if (!personId) {
-          status.textContent = "人物 ID 无效";
+          status.textContent = existingInput.value.trim() ? "请从候选人物中选择" : "请输入人物姓名";
           return;
         }
         submit.disabled = true;
         try {
-          const data = await api(`/api/people/${encodeURIComponent(personId)}?limit=1`);
-          closeMoveDialog(overlay, { mode, personId, person: data.person || null }, resolve);
+          if (!targetPerson) {
+            targetPerson = movePeople.find((person) => String(person.id) === String(personId)) || null;
+          }
+          if (!targetPerson) {
+            const data = await api(`/api/people/${encodeURIComponent(personId)}?limit=1`);
+            targetPerson = data.person || null;
+          }
+          closeMoveDialog(overlay, { mode, personId, person: targetPerson }, resolve);
         } catch (error) {
           status.textContent = error.message || "读取目标人物失败";
           submit.disabled = false;

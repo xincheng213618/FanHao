@@ -15,7 +15,7 @@
       (() => {
         document.documentElement.classList.add("app-styles-loading");
         const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
-        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-8dcc296ae387";
+        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-801eafd2ce68";
         if (shortVideoEntry) {
           const modulePreload = document.createElement("link");
           modulePreload.rel = "modulepreload";
@@ -30,7 +30,7 @@
           "/modules/short-videos/styles/list.css?v=20260716-personal-value-health-01",
           "/modules/short-videos/styles/viewer.css?v=20260715-first-frame-13",
           "/modules/short-videos/styles/gallery-navigation.css?v=20260711-player-modal-focus-75",
-          "/modules/short-videos/styles/panels.css?v=20260712-player-search-overlay-86",
+          "/modules/short-videos/styles/panels.css?v=20260720-transcode-page-concurrency-05",
           "/modules/short-videos/styles/responsive.css?v=20260715-aggregate-search-01"
         ];
         const shortVideoViewerStyleUrls = [
@@ -46,14 +46,14 @@
           "/css/player.css?v=20260710-web-css-modules-01",
           "/css/responsive.css?v=20260712-module-settings-02"
         ];
-        const shortVideoDetailEntry = /^\/(?:short-videos|short-video|douyin)\/(?!(?:stats|authors)(?:\/|$))[^/]+\/?$/.test(window.location.pathname);
+        const shortVideoDetailEntry = /^\/(?:short-videos|short-video|douyin)\/(?!(?:stats|authors|transcoding)(?:\/|$))[^/]+\/?$/.test(window.location.pathname);
         const standaloneStyleEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(window.location.pathname) || /^\/western\/.+/.test(window.location.pathname);
         const styleUrls = shortVideoEntry
           ? (shortVideoDetailEntry
             ? shortVideoStyleUrls
             : shortVideoStyleUrls.filter((href) => !shortVideoViewerStyleUrls.includes(href)))
           : standaloneStyleEntry
-            ? ["/styles.css?v=20260717-photo-library-workspace-01"]
+            ? ["/styles.css?v=20260720-transcode-page-concurrency-05"]
             : fanhaoStyleUrls;
         const stylePromises = new Map();
         const loadStyle = (href) => {
@@ -292,7 +292,7 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-8dcc296ae387");
+        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-801eafd2ce68");
         await window.__fanhaoStylesReady;
         await shortVideoModulePromise;
       } else if (standaloneEntry) {
@@ -300,7 +300,7 @@
         await import("/standalone-app.js?v=20260717-photo-library-workspace-01");
       } else {
         await window.__fanhaoStylesReady;
-        await import("/fanhao-app.js?v=20260717-photo-library-workspace-01");
+        await import("/fanhao-app.js?v=20260724-person-local-refresh-01");
       }
     </script>
   </body>

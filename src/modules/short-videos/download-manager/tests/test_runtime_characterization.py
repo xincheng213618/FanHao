@@ -250,6 +250,9 @@ class RuntimeCharacterizationTests(unittest.TestCase):
             runtime = IsolatedManager(Path(temp))
             try:
                 runtime.start()
+                health = runtime.json_request("/api/health")
+                self.assertTrue(health.get("ok"))
+                self.assertEqual(Path(health["paths"]["base"]).resolve(), MODULE_DIR.resolve())
                 state = runtime.json_request("/api/state")
                 self.assertTrue(REQUIRED_STATE_KEYS.issubset(state), state.keys())
                 self.assertTrue(REQUIRED_SETTINGS.issubset(state["settings"]), state["settings"].keys())

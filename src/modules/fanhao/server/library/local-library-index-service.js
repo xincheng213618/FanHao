@@ -71,6 +71,10 @@ export function createLocalLibraryIndexService({
     return coreLibrarySyncService.replaceLocalFilesForWork(work);
   }
 
+  function reconcilePersonLocalWorks(previousWorks, nextWorks) {
+    return coreLibrarySyncService.reconcilePersonLocalWorks(previousWorks, nextWorks);
+  }
+
   function loadFromCoreDb() {
     return coreLibraryService.loadLibrary();
   }
@@ -134,6 +138,7 @@ export function createLocalLibraryIndexService({
     loadCache,
     loadFreshLibrary,
     loadFromCoreDb,
+    reconcilePersonLocalWorks,
     refreshLibrary,
     registerWorkFiles,
     replaceLocalFilesForWork,

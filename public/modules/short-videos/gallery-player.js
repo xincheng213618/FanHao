@@ -6,7 +6,6 @@ export function createShortVideoGalleryPlayer(dependencies) {
     createIcon,
     currentShortVideoVolume,
     els,
-    formatBytes,
     galleryImageEntries,
     isShortVideoGestureClickBlocked,
     isShortVideoKeyboardControl,
@@ -150,7 +149,6 @@ export function createShortVideoGalleryPlayer(dependencies) {
     let backgroundAudio = null;
     let syncGallerySoundState = () => {};
     let galleryClickTimer = 0;
-    let captionMetaTimer = 0;
     let counterMotionTimer = 0;
     let localSoundPollTimer = 0;
     let localSoundPollAttempts = 0;
@@ -354,24 +352,6 @@ export function createShortVideoGalleryPlayer(dependencies) {
         wrap.classList.remove("is-boundary-start", "is-boundary-end");
       }, 280);
     };
-    const syncGalleryCaptionState = (direction = 0) => {
-      const caption = stage?.closest?.(".short-video-reel-panel")?.querySelector?.(".short-video-caption");
-      const captionMeta = caption?.querySelector?.(".short-video-caption-meta");
-      if (!caption || !captionMeta) return;
-      caption.dataset.galleryIndex = String(currentIndex);
-      captionMeta.textContent = [
-        `图集 · ${currentIndex + 1}/${images.length}`,
-        formatBytes(video.size || 0)
-      ].filter(Boolean).join(" · ");
-      captionMeta.classList.remove("is-page-next", "is-page-previous");
-      window.clearTimeout(captionMetaTimer);
-      if (!direction || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return;
-      captionMeta.getBoundingClientRect();
-      captionMeta.classList.add(direction > 0 ? "is-page-next" : "is-page-previous");
-      captionMetaTimer = window.setTimeout(() => {
-        captionMeta.classList.remove("is-page-next", "is-page-previous");
-      }, 220);
-    };
     const syncCommittedUi = (direction = 0) => {
       const current = images[currentIndex];
       counter.textContent = `${currentIndex + 1}/${images.length}`;
@@ -396,7 +376,6 @@ export function createShortVideoGalleryPlayer(dependencies) {
         else button.removeAttribute("aria-current");
       });
       if (current) stage?.style.setProperty("--short-video-cover", `url(${JSON.stringify(current.url)})`);
-      syncGalleryCaptionState(direction);
     };
     const restartProgressTiming = () => {
       const activeButton = progressButtons[currentIndex];
@@ -895,10 +874,6 @@ export function createShortVideoGalleryPlayer(dependencies) {
         railSound?.classList.toggle("is-playing", audible);
         railSound?.classList.toggle("is-muted", muted);
         railSound?.classList.toggle("is-blocked", blocked);
-        const captionSound = stage?.closest?.(".short-video-reel-panel")?.querySelector?.(".short-video-caption-sound-cover");
-        captionSound?.classList.toggle("is-playing", audible);
-        captionSound?.classList.toggle("is-muted", muted);
-        captionSound?.classList.toggle("is-blocked", blocked);
         els.workGrid?.querySelector?.(".short-video-control-bar.is-gallery")?.shortVideoSync?.();
       };
       audio.addEventListener("play", syncGallerySoundState);
@@ -960,7 +935,6 @@ export function createShortVideoGalleryPlayer(dependencies) {
     syncCommittedUi();
     syncRequestedUi();
     show(0);
-    window.requestAnimationFrame(() => syncGalleryCaptionState(0));
     return wrap;
   }
 

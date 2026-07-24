@@ -12,7 +12,7 @@ import {
   createViewportBatchRenderer,
   createWorkActions,
   selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260717-fanhao-viewport-render-01";
+} from "./modules/fanhao/index.js?v=20260724-person-local-refresh-01";
 import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260717-photo-library-workspace-01";
@@ -167,7 +167,7 @@ const peoplePage = createPeoplePage({
 const personProfilePage = createLazyPersonProfile({
   els,
   loadPersonProfile: async () => {
-    const { createPersonProfile } = await import("./modules/fanhao/person-profile.js?v=20260717-fanhao-person-detail-01");
+    const { createPersonProfile } = await import("./modules/fanhao/person-profile.js?v=20260724-person-local-refresh-01");
     return createPersonProfile({
       api,
       coverUrl,
@@ -1111,16 +1111,21 @@ async function deleteSelectedPersonLocalWorks(button) {
   const originalText = button?.textContent || "";
   if (button) {
     button.disabled = true;
-    button.textContent = "删除中";
+    button.textContent = `删除中 0/${selectedIds.length}`;
   }
 
   const failed = [];
-  for (const workId of selectedIds) {
-    try {
-      await api(`/api/works/${encodeURIComponent(workId)}/local-files/delete`, { method: "POST" });
-    } catch (error) {
-      failed.push(error.message || String(workId));
+  try {
+    const result = await api(`/api/people/${encodeURIComponent(state.selectedPersonId)}/local-files/delete`, {
+      method: "POST",
+      body: { workIds: selectedIds }
+    });
+    for (const item of result.failed || []) {
+      failed.push(`${item.title || item.workId || "作品"}：${item.error || "删除失败"}`);
     }
+    if (button?.isConnected) button.textContent = `删除中 ${Math.max(0, Number(result.deletedCount || 0))}/${selectedIds.length}`;
+  } catch (error) {
+    failed.push(error.message || "批量删除失败");
   }
 
   clearPersonBulkDeleteSelection();

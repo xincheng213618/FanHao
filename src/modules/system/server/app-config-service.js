@@ -4,7 +4,8 @@ const DEFAULT_CONFIG = {
   compilationPrefixes: ["OFJE", "THN", "THU"],
   compilationKeywords: ["合集", "総集編", "総集", "コンプリート", "全タイトル", "ベスト盤"],
   actorAvatarDataPath: "",
-  imageReaderCacheMaxBytes: 0
+  imageReaderCacheMaxBytes: 0,
+  shortVideoTranscodeConcurrency: 2
 };
 
 function uniqueTrimmedStrings(values, options = {}) {
@@ -48,7 +49,8 @@ export function createAppConfigService({
       compilationPrefixes: [...defaults.compilationPrefixes],
       compilationKeywords: [...defaults.compilationKeywords],
       actorAvatarDataPath: defaults.actorAvatarDataPath,
-      imageReaderCacheMaxBytes: defaults.imageReaderCacheMaxBytes
+      imageReaderCacheMaxBytes: defaults.imageReaderCacheMaxBytes,
+      shortVideoTranscodeConcurrency: defaults.shortVideoTranscodeConcurrency
     };
   }
 
@@ -57,6 +59,12 @@ export function createAppConfigService({
     if (!Number.isFinite(parsed)) return fallback;
     if (parsed <= 0) return 0;
     return Math.min(maxImageReaderCacheMaxBytes, Math.max(minImageReaderCacheMaxBytes, Math.floor(parsed)));
+  }
+
+  function normalizeShortVideoTranscodeConcurrency(value, fallback = defaults.shortVideoTranscodeConcurrency) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(4, Math.max(1, Math.floor(parsed)));
   }
 
   function normalize(value = {}) {
@@ -79,6 +87,10 @@ export function createAppConfigService({
       imageReaderCacheMaxBytes: normalizeImageReaderCacheLimit(
         input.imageReaderCacheMaxBytes ?? input.mangaImageCacheMaxBytes,
         fallback.imageReaderCacheMaxBytes
+      ),
+      shortVideoTranscodeConcurrency: normalizeShortVideoTranscodeConcurrency(
+        input.shortVideoTranscodeConcurrency,
+        fallback.shortVideoTranscodeConcurrency
       )
     };
   }
@@ -126,12 +138,17 @@ export function createAppConfigService({
       compilationPrefixes: [...config.compilationPrefixes],
       compilationKeywords: [...config.compilationKeywords],
       actorAvatarDataPath: config.actorAvatarDataPath || "",
-      imageReaderCacheMaxBytes: normalizeImageReaderCacheLimit(config.imageReaderCacheMaxBytes)
+      imageReaderCacheMaxBytes: normalizeImageReaderCacheLimit(config.imageReaderCacheMaxBytes),
+      shortVideoTranscodeConcurrency: normalizeShortVideoTranscodeConcurrency(config.shortVideoTranscodeConcurrency)
     };
   }
 
   function imageReaderCacheMaxBytes() {
     return normalizeImageReaderCacheLimit(config.imageReaderCacheMaxBytes);
+  }
+
+  function shortVideoTranscodeConcurrency() {
+    return normalizeShortVideoTranscodeConcurrency(config.shortVideoTranscodeConcurrency);
   }
 
   return {
@@ -143,6 +160,7 @@ export function createAppConfigService({
     patch,
     publicConfig,
     save,
+    shortVideoTranscodeConcurrency,
     set
   };
 }

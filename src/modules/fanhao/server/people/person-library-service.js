@@ -160,8 +160,14 @@ export function createPersonLibraryService({
       throw error;
     }
 
+    const previousWorks = (person.works || [])
+      .map((workId) => library.worksById.get(workId))
+      .filter(Boolean);
+    const previousWorksById = new Map(previousWorks.map((work) => [String(work.id), work]));
+    const hasExplicitSourcePaths = Array.isArray(options.sourcePaths) && options.sourcePaths.length > 0;
     const selectedSourcePaths = sourcePathCandidates(person, options);
-    if (!selectedSourcePaths.length) {
+    const knownSourcePaths = [...(person.sourcePaths || []), person.relativePath].filter(Boolean);
+    if (!selectedSourcePaths.length && (hasExplicitSourcePaths || !knownSourcePaths.length)) {
       const error = new Error("这个人物没有本地来源路径");
       error.statusCode = 400;
       throw error;
@@ -177,22 +183,18 @@ export function createPersonLibraryService({
       works.push(...scanPersonDirectory(person.id, absolutePath));
     }
 
-    if (!existingSourcePaths.length) {
-      const error = new Error("本地人物文件夹不存在");
-      error.statusCode = 404;
-      throw error;
-    }
-
-    for (const workId of person.works || []) {
-      const oldWork = library.worksById.get(workId);
-      if (!oldWork) continue;
+    for (const oldWork of previousWorks) {
       for (const file of [...(oldWork.videos || []), ...(oldWork.images || []), ...(oldWork.infos || [])]) {
         library.filesById.delete(file.id);
       }
-      library.worksById.delete(workId);
+      library.worksById.delete(oldWork.id);
     }
 
     for (const work of works) {
+      const previousWork = previousWorksById.get(String(work.id));
+      if (previousWork?.infoSummary) {
+        work.infoSummary = { ...previousWork.infoSummary };
+      }
       libraryIndexService.registerWorkFiles(library, work);
       library.worksById.set(work.id, work);
       try {
@@ -201,6 +203,7 @@ export function createPersonLibraryService({
         warn("[core-local-files]", error.message);
       }
     }
+    const reconciliation = libraryIndexService.reconcilePersonLocalWorks(previousWorks, works);
 
     const nextPerson = personRecordFromWorks(person, existingSourcePaths, works, compareNaturalTitle);
     const personIndex = library.people.findIndex((item) => item.id === person.id);
@@ -209,7 +212,12 @@ export function createPersonLibraryService({
     recalculateLibraryTotals(library);
     libraryIndexService.saveCache(library);
     libraryIndexService.invalidateDerivedCaches?.();
-    return nextPerson;
+    return {
+      person: nextPerson,
+      removedLocalWorkCount: reconciliation.deletedLocalWorkIds.length,
+      removedWorkCount: reconciliation.deletedWorkIds.length,
+      removedWorkIds: reconciliation.deletedWorkIds
+    };
   }
 
   return {

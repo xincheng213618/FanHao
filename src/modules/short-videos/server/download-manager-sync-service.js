@@ -22,7 +22,8 @@ export function createDownloadManagerSyncService({
   let activeWorker = null;
   let activeSyncPromise = null;
   let pendingForcedSync = null;
-  let lastSourceStateKey = String(initialStateKey || "");
+  const initialStateKeyProvider = typeof initialStateKey === "function" ? initialStateKey : null;
+  let lastSourceStateKey = initialStateKeyProvider ? null : String(initialStateKey || "");
 
   function start() {
     stopped = false;
@@ -46,7 +47,7 @@ export function createDownloadManagerSyncService({
     timer = null;
     const worker = activeWorker;
     activeWorker = null;
-    if (worker) worker.terminate().catch(() => {});
+    return worker ? worker.terminate().catch(() => undefined) : Promise.resolve();
   }
 
   function sync(options = {}) {
@@ -71,6 +72,14 @@ export function createDownloadManagerSyncService({
     if (running || stopped) return null;
     const sourceStateKey = sourceDbStateKey(resolvedSourceDbPath);
     if (!sourceStateKey) return null;
+    if (lastSourceStateKey === null) {
+      try {
+        lastSourceStateKey = String(await initialStateKeyProvider() || "");
+      } catch (error) {
+        lastSourceStateKey = "";
+        console.warn("[short-video-sync-state]", error?.message || error);
+      }
+    }
     if (!options.force && sourceStateKey === lastSourceStateKey) return null;
     running = true;
     const operation = performSync(options, sourceStateKey);

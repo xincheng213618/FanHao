@@ -262,6 +262,16 @@ export function createShortVideoStore(options = {}) {
             ON short_video_follows(local_user_id, active, followed_at DESC, target_user_id);
           CREATE INDEX IF NOT EXISTS idx_short_video_watch_history_recent_video
             ON short_video_watch_history(local_user_id, last_watched_at DESC, video_id);
+          CREATE TABLE IF NOT EXISTS short_video_playback_issues (
+            video_id TEXT PRIMARY KEY,
+            reason TEXT NOT NULL DEFAULT '',
+            occurrences INTEGER NOT NULL DEFAULT 1,
+            first_reported_at TEXT NOT NULL DEFAULT '',
+            last_reported_at TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1
+          );
+          CREATE INDEX IF NOT EXISTS idx_short_video_playback_issues_active_recent
+            ON short_video_playback_issues(active, last_reported_at DESC, video_id);
         `);
         if (!skipStartupMaintenance) cleanupSupersededFfmpegCovers(opened, coverCacheDir);
         db = opened;
@@ -1104,11 +1114,12 @@ function summary() {
     const database = databaseOrOpen();
     return Number(database.prepare(`
       SELECT COUNT(*) AS count
-      FROM short_videos INDEXED BY idx_short_videos_smooth_digg
-      WHERE visibility = 'local_only'
-        AND media_type = 'video'
-        AND actual_long_edge >= 2160
-        AND source_path <> ''
+      FROM short_video_playback_issues issue
+      JOIN short_videos video ON video.id = issue.video_id
+      WHERE issue.active = 1
+        AND video.visibility = 'local_only'
+        AND video.media_type = 'video'
+        AND video.source_path <> ''
     `).get()?.count || 0);
   }
 
@@ -1134,15 +1145,17 @@ function summary() {
         actual_probed_at,
         actual_probe_error,
         digg_count
-      FROM short_videos INDEXED BY idx_short_videos_smooth_digg
-      WHERE visibility = 'local_only'
-        AND media_type = 'video'
-        AND actual_long_edge >= 2160
-        AND source_path <> ''
-      ORDER BY digg_count DESC, liked_at DESC, id DESC
+      FROM short_video_playback_issues issue
+      JOIN short_videos video ON video.id = issue.video_id
+      WHERE issue.active = 1
+        AND video.visibility = 'local_only'
+        AND video.media_type = 'video'
+        AND video.source_path <> ''
+      ORDER BY issue.last_reported_at DESC, video.digg_count DESC, video.id DESC
       LIMIT ? OFFSET ?
     `).all(limit, offset).map((row) => ({
       id: String(row.id || ""),
+      observedPlaybackIssue: true,
       sourcePath: String(row.source_path || ""),
       mediaType: "video",
       size: Math.max(0, Number(row.size_bytes || 0)),
@@ -1164,6 +1177,33 @@ function summary() {
         likes: Math.max(0, Number(row.digg_count || 0))
       }
     }));
+  }
+
+  function reportSmoothPlaybackIssue(id, reason = "playback-stalled") {
+    const videoId = String(id || "").trim();
+    if (!videoId) return false;
+    const database = databaseOrOpen();
+    const exists = database.prepare(`
+      SELECT 1
+      FROM short_videos
+      WHERE id = ?
+        AND visibility = 'local_only'
+        AND media_type = 'video'
+        AND source_path <> ''
+    `).get(videoId);
+    if (!exists) return false;
+    const now = new Date().toISOString();
+    database.prepare(`
+      INSERT INTO short_video_playback_issues (
+        video_id, reason, occurrences, first_reported_at, last_reported_at, active
+      ) VALUES (?, ?, 1, ?, ?, 1)
+      ON CONFLICT(video_id) DO UPDATE SET
+        reason = excluded.reason,
+        occurrences = short_video_playback_issues.occurrences + 1,
+        last_reported_at = excluded.last_reported_at,
+        active = 1
+    `).run(videoId, String(reason || "playback-stalled").trim().slice(0, 80), now, now);
+    return true;
   }
 
   function likeDistribution() {
@@ -2474,12 +2514,16 @@ function summary() {
     const row = videoCatalogRowByAnyId(
       databaseOrOpen(),
       id,
-      "id, source_path, size_bytes, mtime_ms, actual_width, actual_height, actual_bit_rate, actual_codec, actual_frame_rate"
+      "id, source_path, file_name, title, author_name, duration_ms, size_bytes, mtime_ms, actual_width, actual_height, actual_bit_rate, actual_codec, actual_frame_rate"
     );
     if (options.allowMissing && row?.source_path) {
       return {
         id: row.id || id,
         path: path.resolve(row.source_path),
+        fileName: row.file_name || path.basename(row.source_path),
+        title: row.title || row.file_name || path.basename(row.source_path),
+        authorName: row.author_name || "未知作者",
+        durationMs: Math.max(0, Number(row.duration_ms || 0)),
         type: "video",
         ext: path.extname(row.source_path).toLowerCase(),
         size: Math.max(0, Number(row.size_bytes || 0)),
@@ -2493,6 +2537,10 @@ function summary() {
     }
     const file = fileFromRow(row, "video");
     if (file) {
+      file.fileName = row?.file_name || path.basename(row?.source_path || file.path);
+      file.title = row?.title || file.fileName;
+      file.authorName = row?.author_name || "未知作者";
+      file.durationMs = Math.max(0, Number(row?.duration_ms || 0));
       file.cacheVersion = shortVideoMediaVersion(row?.mtime_ms);
       file.actualWidth = Math.max(0, Number(row?.actual_width || 0));
       file.actualHeight = Math.max(0, Number(row?.actual_height || 0));
@@ -3249,6 +3297,7 @@ function summary() {
     setAuthorFollow,
     setAuthorFollowByUser,
     setUserAction,
+    reportSmoothPlaybackIssue,
     smoothPlaybackCandidateCount,
     smoothPlaybackCandidates,
     summary: cachedSummary,

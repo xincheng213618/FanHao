@@ -20,6 +20,9 @@ export function createFanhaoRuntime(deps) {
   }
 
   function start() {
+    // These are optional response-cache warmups, not service dependencies.
+    // Large libraries can spend many seconds here, so keep normal startup lazy.
+    if (process.env.FANHAO_EAGER_PREWARM !== "1") return;
     library.start();
     catalog.start();
     works.start();

@@ -760,14 +760,76 @@ function updatePersonActorProfile(personId, profile) {
   renderPeople();
 }
 
+function updateIndexedPersonSnapshot(person) {
+  if (!person?.id) return;
+  state.people = state.people.map((item) => (
+    String(item.id) === String(person.id) ? { ...item, ...person } : item
+  ));
+  if (state.selectedPerson && String(state.selectedPerson.id) === String(person.id)) {
+    state.selectedPerson = { ...state.selectedPerson, ...person };
+  }
+}
+
+async function refreshPersonLocal(person, button) {
+  setButtonBusy(button, true, "刷新中");
+  try {
+    const data = await api("/api/admin/rescan-person?limit=1&sort=releaseDesc", {
+      method: "POST",
+      body: { personId: person.id }
+    });
+    updateIndexedPersonSnapshot(data.person);
+    await selectPerson(person.id, {
+      resetFilter: false,
+      replaceRoute: true,
+      reusePrefetch: false
+    });
+
+    const removedCount = Math.max(0, Number(data.removedWorkCount ?? data.removedLocalWorkCount ?? 0));
+    const nextButton = els.personProfile?.querySelector("[data-person-local-refresh]");
+    if (!nextButton) return;
+    nextButton.textContent = removedCount
+      ? `已转未下载 ${formatNumber(removedCount)}`
+      : "已刷新";
+    nextButton.title = removedCount
+      ? `已发现 ${formatNumber(removedCount)} 条本地记录失效，并标记为未下载`
+      : "本地文件与人物记录一致";
+    window.setTimeout(() => {
+      if (!nextButton.isConnected) return;
+      nextButton.textContent = "刷新本地";
+      nextButton.title = "重新扫描这个人物的本地文件，并把已经删除的作品标记为未下载";
+    }, 1800);
+  } catch (error) {
+    setButtonBusy(button, false);
+    button.textContent = "刷新失败";
+    button.title = error.message || "刷新本地文件失败";
+    window.setTimeout(() => {
+      if (!button.isConnected) return;
+      button.textContent = "刷新本地";
+      button.title = "重新扫描这个人物的本地文件，并把已经删除的作品标记为未下载";
+    }, 2200);
+  }
+}
+
 function createPersonProfileActions(person) {
   const canOpenLocalFolders = state.accessMode === "local";
+  const canRefreshLocal = canOpenLocalFolders && Boolean(person?.id);
   const canBulkDelete = typeof isTrustedNetworkFeatureAvailable === "function" && isTrustedNetworkFeatureAvailable();
   const paths = uniqueSourcePaths(person);
-  if (!paths.length && !canBulkDelete) return null;
+  if (!paths.length && !canBulkDelete && !canRefreshLocal) return null;
 
   const actions = document.createElement("div");
   actions.className = "person-profile-actions";
+
+  if (canRefreshLocal) {
+    const refreshButton = document.createElement("button");
+    refreshButton.type = "button";
+    refreshButton.className = "folder-button";
+    refreshButton.dataset.personLocalRefresh = "";
+    refreshButton.textContent = "刷新本地";
+    refreshButton.title = "重新扫描这个人物的本地文件，并把已经删除的作品标记为未下载";
+    refreshButton.addEventListener("click", () => refreshPersonLocal(person, refreshButton));
+    actions.append(refreshButton);
+  }
 
   if (canOpenLocalFolders) {
     for (const sourcePath of paths) {

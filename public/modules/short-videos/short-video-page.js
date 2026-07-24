@@ -5,7 +5,10 @@ import { createShortVideoFilterControls } from "./filter-controls.js?v=20260720-
 import { createIcon, railButton, setIconButton } from "./icons.js?v=20260716-short-video-icons-01";
 import { createShortVideoListWindow } from "./list-window.js?v=20260716-short-video-list-window-01";
 import { createShortVideoMediaCache } from "./media-cache.js?v=20260716-short-video-media-cache-01";
+import { createShortVideoPlaybackRenditionPolicy } from "./playback-rendition-policy.js?v=20260720-observed-playback-issues-01";
 import { createShortVideoPlayerSourceLifecycle } from "./player-source-lifecycle.js?v=20260717-short-video-source-lifecycle-01";
+import { createShortVideoTranscodeManagementPage } from "./transcode-management-page.js?v=20260720-transcode-continuous-08";
+import { createShortVideoTranscodeStatusButton } from "./transcode-status-button.js?v=20260720-transcode-popup-09";
 import {
   applyShortVideoLikeBadgeState,
   clampNumber,
@@ -70,6 +73,8 @@ export function createShortVideoPage(deps) {
   let shortVideoGalleryPlayerPromise = null;
   let shortVideoListCardsPromise = null;
   let shortVideoListCards = null;
+  const playbackRenditionPolicy = createShortVideoPlaybackRenditionPolicy({ api });
+  const transcodeManagementPage = createShortVideoTranscodeManagementPage({ api, els, formatBytes, setMainHeader, state });
   const {
     ensureShortVideoPlayerSource,
     warmAdjacentVideoPlayer
@@ -400,18 +405,7 @@ export function createShortVideoPage(deps) {
     });
   }
 
-  function shortVideoPlaybackUrl(video = {}) {
-    const source = String(video?.streamUrl || "").trim();
-    if (!source) return "";
-    const longEdge = Math.max(
-      Number(video?.actualVideo?.longEdge || 0),
-      Number(video?.actualVideo?.width || video?.width || 0),
-      Number(video?.actualVideo?.height || video?.height || 0)
-    );
-    if (longEdge < 2160 || !source.includes("/media/short-video/")) return source;
-    const smoothSource = source.replace("/media/short-video/", "/media/short-video-smooth/");
-    return `${smoothSource}${smoothSource.includes("?") ? "&" : "?"}rendition=2k30-v2-range2`;
-  }
+  function shortVideoPlaybackUrl(video = {}) { return playbackRenditionPolicy.playbackUrl(video); }
 
   function ensureState() {
     return ensureShortVideoState(state, {
@@ -448,7 +442,7 @@ export function createShortVideoPage(deps) {
 
   function applyRouteState(route = {}) {
     ensureState();
-    state.shortVideo.mode = route.shortVideoMode === "likes" ? "likes" : "feed";
+    state.shortVideo.mode = ["likes", "transcoding"].includes(route.shortVideoMode) ? route.shortVideoMode : "feed";
     const nextAuthorPage = route.shortVideoAuthorPage || "";
     if (state.shortVideo.authorPage && state.shortVideo.authorPage !== nextAuthorPage) {
       state.shortVideo.authorDetail = null;
@@ -478,6 +472,11 @@ export function createShortVideoPage(deps) {
 
   async function openRouteTarget(route = {}) {
     ensureState();
+    if (route.shortVideoMode === "transcoding") {
+      transcodeManagementPage.activate();
+      renderView();
+      return;
+    }
     if (route.shortVideoMode === "likes") {
       state.shortVideo.current = null;
       state.shortVideo.prevVideo = null;
@@ -903,6 +902,8 @@ export function createShortVideoPage(deps) {
     ensureState();
     if (!els.statsRow) return;
     els.statsRow.innerHTML = "";
+    els.statsRow.hidden = state.shortVideo.mode === "transcoding";
+    if (els.statsRow.hidden) return;
     const totals = state.shortVideo.summary?.totals || state.shortVideo.data?.summary?.totals || {};
     for (const [label, value] of [
       ["视频", formatNumber(totals.videos || 0)],
@@ -945,7 +946,12 @@ export function createShortVideoPage(deps) {
     els.workGrid.querySelector?.(".short-video-control-bar")?.shortVideoDispose?.();
     disposeShortVideoMedia(els.workGrid);
     els.workGrid.innerHTML = "";
+    if (state.shortVideo.mode !== "transcoding") transcodeManagementPage.stop();
     setBodyClass();
+    if (state.shortVideo.mode === "transcoding") {
+      transcodeManagementPage.render();
+      return;
+    }
     if (state.shortVideo.mode === "likes") {
       renderLikeDistributionPage();
       return;
@@ -1120,8 +1126,9 @@ export function createShortVideoPage(deps) {
     distribution.className = "short-video-distribution-toggle";
     distribution.append(createIcon("chart"), document.createTextNode("数据统计"));
     distribution.addEventListener("click", openLikeDistributionPage);
+    const transcodeStatus = createShortVideoTranscodeStatusButton({ api, createIcon, formatBytes });
 
-    section.append(form, media, quality, distribution);
+    section.append(form, media, quality, distribution, transcodeStatus);
     if (state.shortVideo.topic) {
       const topic = document.createElement("div");
       topic.className = "short-video-active-topic";
@@ -1213,6 +1220,7 @@ export function createShortVideoPage(deps) {
       });
     }
   }
+
 
   function leaveLikeDistributionPage() {
     state.shortVideo.mode = "feed";
@@ -1946,6 +1954,7 @@ export function createShortVideoPage(deps) {
       player.preload = ghost ? "none" : "auto";
       player.fetchPriority = ghost ? "low" : "high";
       player.setAttribute("fetchpriority", ghost ? "low" : "high");
+      playbackRenditionPolicy.preparePlayer(player, video);
       const playbackUrl = shortVideoPlaybackUrl(video);
       ensureShortVideoPlayerSource(player, video, {
         source: playbackUrl,
@@ -2056,110 +2065,14 @@ export function createShortVideoPage(deps) {
 
     const info = document.createElement("div");
     info.className = "short-video-caption";
-    const tools = document.createElement("div");
-    tools.className = "short-video-caption-context";
-    const recommend = document.createElement("button");
-    recommend.type = "button";
-    recommend.className = "short-video-caption-context-button";
-    recommend.append(createIcon("repeat"), document.createTextNode("相关推荐"));
-    recommend.addEventListener("click", () => showAuthorPanel(video, {
-      initialTab: "related",
-      switchAuthorFeed: false
-    }));
-    const identify = document.createElement("button");
-    identify.type = "button";
-    identify.className = "short-video-caption-context-button short-video-identify-button";
-    identify.append(createIcon("ai"), document.createTextNode("识别内容"));
-    identify.addEventListener("click", () => showAuthorPanel(video, {
-      initialTab: "ai",
-      switchAuthorFeed: false
-    }).catch(showError));
-    tools.append(recommend, identify);
     const author = authorCaptionButton(video);
     const captionCopy = document.createElement("div");
     captionCopy.className = "short-video-caption-copy";
     const title = document.createElement("p");
-    title.id = `short-video-caption-${String(video.id || "current").replace(/[^a-zA-Z0-9_-]/g, "-")}`;
     appendCaptionText(title, captionTitleWithTags(video), video);
-    const captionToggle = document.createElement("button");
-    captionToggle.type = "button";
-    captionToggle.className = "short-video-caption-expand";
-    captionToggle.textContent = "… 展开";
-    captionToggle.hidden = true;
-    captionToggle.setAttribute("aria-expanded", "false");
-    captionToggle.setAttribute("aria-label", "展开完整标题");
-    captionToggle.setAttribute("aria-controls", title.id);
-    const setCaptionExpanded = (expanded) => {
-      captionCopy.classList.toggle("is-expanded", expanded);
-      captionToggle.textContent = expanded ? "收起" : "… 展开";
-      captionToggle.setAttribute("aria-expanded", String(expanded));
-      captionToggle.setAttribute("aria-label", expanded ? "收起完整标题" : "展开完整标题");
-      if (!expanded) title.scrollTop = 0;
-    };
-    title.addEventListener("click", (event) => {
-      if (!captionCopy.classList.contains("can-expand") || event.target.closest?.("button")) return;
-      setCaptionExpanded(!captionCopy.classList.contains("is-expanded"));
-    });
-    captionToggle.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      setCaptionExpanded(!captionCopy.classList.contains("is-expanded"));
-    });
-    captionCopy.append(title, captionToggle);
-    let soundButton = null;
-    if (video.sound) {
-      soundButton = document.createElement("button");
-      soundButton.type = "button";
-      soundButton.className = "short-video-caption-sound";
-      soundButton.setAttribute("aria-label", `查看原声：${video.sound.title || "作品原声"}`);
-      const soundCover = document.createElement("span");
-      soundCover.className = "short-video-caption-sound-cover";
-      if (video.sound.coverUrl) {
-        const soundImage = document.createElement("img");
-        soundImage.src = video.sound.coverUrl;
-        soundImage.alt = "";
-        soundImage.decoding = "async";
-        soundCover.append(soundImage);
-      } else {
-        soundCover.append(createIcon("headphones"));
-      }
-      const soundCopy = document.createElement("span");
-      const soundTitle = document.createElement("strong");
-      soundTitle.textContent = video.sound.title || "作品原声";
-      const soundAuthor = document.createElement("small");
-      soundAuthor.textContent = [video.sound.author || video.author?.name || "", video.sound.localAvailable ? "本地原声" : "原声"].filter(Boolean).join(" · ");
-      soundCopy.append(soundTitle, soundAuthor);
-      soundButton.append(soundCover, soundCopy);
-      soundButton.addEventListener("click", () => showAuthorPanel(video, {
-        initialTab: "sound",
-        switchAuthorFeed: false
-      }).catch(showError));
-    }
-    const meta = document.createElement("span");
-    meta.className = "short-video-caption-meta";
-    meta.textContent = [gallery ? `图集 · ${galleryLabel(video)}` : formatDuration(video.durationMs), formatBytes(video.size || 0)].filter(Boolean).join(" · ");
+    captionCopy.append(title);
     info.append(author, captionCopy);
-    if (soundButton) info.append(soundButton);
-    info.append(meta, tools);
     panel.append(backdrop, stage, info);
-    const syncCaptionOverflow = () => {
-      if (!title.isConnected) return;
-      const wasExpanded = captionCopy.classList.contains("is-expanded");
-      if (wasExpanded) captionCopy.classList.remove("is-expanded");
-      const canExpand = title.scrollHeight > title.clientHeight + 1;
-      if (wasExpanded && canExpand) captionCopy.classList.add("is-expanded");
-      captionCopy.classList.toggle("can-expand", canExpand);
-      captionToggle.hidden = !canExpand;
-      if (!canExpand) setCaptionExpanded(false);
-    };
-    panel.shortVideoSyncCaptionOverflow = syncCaptionOverflow;
-    if (!ghost) {
-      window.requestAnimationFrame(() => {
-        syncCaptionOverflow();
-        window.requestAnimationFrame(syncCaptionOverflow);
-      });
-      document.fonts?.ready.then(syncCaptionOverflow).catch(() => {});
-    }
 
     const rail = document.createElement("aside");
     rail.className = "short-video-rail";
@@ -2229,7 +2142,7 @@ export function createShortVideoPage(deps) {
   function ensureShortVideoGalleryPlayer() {
     if (shortVideoGalleryPlayerPromise) return shortVideoGalleryPlayerPromise;
     markShortVideoPerformance("gallery-player-module-start");
-    const moduleUrl = "/modules/short-videos/gallery-player.js?v=20260715-gallery-lazy-04";
+    const moduleUrl = "/modules/short-videos/gallery-player.js?v=20260720-compact-caption-10";
     shortVideoGalleryPlayerPromise = import(moduleUrl).then((module) => {
       if (typeof module.createShortVideoGalleryPlayer !== "function") {
         throw new Error("图文播放器模块加载失败");
@@ -2394,6 +2307,8 @@ export function createShortVideoPage(deps) {
       if (kind === "loading" || kind === "buffering" || kind === "retrying") {
         stuckTimer = window.setTimeout(() => {
           if (player.readyState >= 2 && !stage.classList.contains("is-video-buffering")) return;
+          const issueReason = player.currentTime > 0.05 ? "playback-stalled" : "first-frame-timeout";
+          if (switchToSmoothFallback(issueReason)) return;
           const boundSource = String(player.currentSrc || player.getAttribute("src") || "").trim();
           if (
             !automaticSourceRecoveryAttempted
@@ -2415,6 +2330,17 @@ export function createShortVideoPage(deps) {
           showStatus("error", "视频加载失败", "保留当前进度后重试");
         }, 8000);
       }
+    };
+    const switchToSmoothFallback = (reason) => {
+      const switched = playbackRenditionPolicy.switchToSmoothFallback(player, video, reason, {
+        ensureSource: ensureShortVideoPlayerSource,
+        lastGoodTime,
+        wantsToPlay
+      });
+      if (!switched) return false;
+      retrying = true;
+      showStatus("retrying", "正在准备兼容播放", "只为这条实际卡住的视频生成流畅版");
+      return true;
     };
     const hideStatus = () => {
       clearTimers();
@@ -2457,6 +2383,7 @@ export function createShortVideoPage(deps) {
       if (recoveredFromRetry) warmVisibleAdjacentVideoPlayers();
     };
     const handleError = () => {
+      if ([3, 4].includes(Number(player.error?.code || 0)) && switchToSmoothFallback("decode-error")) return;
       retrying = false;
       showStatus("error", "视频加载失败", "保留当前进度后重试");
     };
@@ -4480,7 +4407,7 @@ export function createShortVideoPage(deps) {
     if (visible(returnFocus) && (!returnPanel || returnPanel === current)) return returnFocus;
     const tab = String(panel.dataset.returnFocusTab || "").trim();
     const selector = tab === "related"
-      ? ".short-video-caption-context-button:not(.short-video-identify-button)"
+      ? ".short-video-caption-author, .short-video-rail-button.is-author"
       : tab === "comments"
       ? ".short-video-rail-button.is-comment"
       : tab === "ai"
@@ -6170,12 +6097,11 @@ export function createShortVideoPage(deps) {
     button.type = "button";
     button.className = "short-video-caption-author";
     button.title = video.author?.name ? `查看 ${video.author.name}` : "查看作者";
-    button.append(authorAvatar(video.author, "short-video-caption-author-avatar"));
     const copy = document.createElement("span");
     const name = document.createElement("strong");
     name.textContent = shortVideoAuthorHandle(video.author?.name);
     const meta = document.createElement("em");
-    meta.textContent = [formatDate(video.publishedAt), video.author?.secUid ? "作者主页" : ""].filter(Boolean).join(" · ");
+    meta.textContent = formatDate(video.publishedAt);
     copy.append(name, meta);
     button.append(copy);
     button.addEventListener("click", () => openShortVideoAuthorPage(video.author, video));

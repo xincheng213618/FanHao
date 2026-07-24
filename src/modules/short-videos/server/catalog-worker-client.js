@@ -43,8 +43,8 @@ export function createShortVideoCatalogWorkerClient({
     readyResolve?.(false);
     readyResolve = null;
     readyPromise = null;
-    if (activeWorker) activeWorker.terminate().catch(() => {});
     rejectRequests(new Error("短视频列表后台线程已停止"));
+    return activeWorker ? activeWorker.terminate().catch(() => undefined) : Promise.resolve();
   }
 
   function ensureWorker() {

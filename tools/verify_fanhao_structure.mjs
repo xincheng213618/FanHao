@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
@@ -26,6 +27,7 @@ import { createWorkDetailService } from "../src/modules/fanhao/server/works/work
 import { createMissingCodeSearchService } from "../src/modules/fanhao/server/works/missing-code-search-service.js";
 import { createWorkQueryService } from "../src/modules/fanhao/server/works/work-query-service.js";
 import { createWorkClassificationService } from "../src/modules/fanhao/server/works/work-classification-service.js";
+import { createWorkLocalMutationService } from "../src/modules/fanhao/server/works/work-local-mutation-service.js";
 import { classifyWorkCategory, isAnimeWork, isFc2Work, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS } from "../src/modules/fanhao/server/works/work-category.js";
 import { createWorkFilterService } from "../src/modules/fanhao/server/works/work-filter-service.js";
 import { createWorkSearchIndexService } from "../src/modules/fanhao/server/works/work-search-index-service.js";
@@ -34,6 +36,7 @@ import { sendJson } from "../src/platform/server/responses.js";
 import { createVideoProbeCacheService } from "../src/platform/server/video-probe-cache-service.js";
 import { createVideoProbeService, DEFAULT_VIDEO_PROBE_WAIT_MS } from "../src/platform/server/video-probe-service.js";
 import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
+import { createCoreLibrarySyncService } from "../src/modules/fanhao/server/library/core-library-sync-service.js";
 import { tableStampValue } from "../src/modules/fanhao/server/library/table-stamp-query.js";
 import { fetchPreparedImage, portraitUrlForPerson } from "../android-client/www/js/image.js";
 import { createWorkListState } from "../android-client/www/js/work-filtering.js";
@@ -99,6 +102,7 @@ const workPresenterServiceSource = read("src/modules/fanhao/server/works/present
 const playbackProgressServiceSource = read("src/modules/fanhao/server/playback/playback-progress-service.js");
 const personDetailServiceSource = read("src/modules/fanhao/server/people/person-detail-service.js");
 const personMergeServiceSource = read("src/modules/fanhao/server/people/person-merge-service.js");
+const personLibraryServiceSource = read("src/modules/fanhao/server/people/person-library-service.js");
 const workDetailPageSource = read("public/modules/fanhao/work-detail-page.js");
 const videoProbeCacheSource = read("src/platform/server/video-probe-cache-service.js");
 const videoProbeSource = read("src/platform/server/video-probe-service.js");
@@ -113,10 +117,10 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260717-photo-library-workspace-01'), "workspace changes must refresh the FanHao browser entry");
+assert(indexHtml.includes('/fanhao-app.js?v=20260724-person-local-refresh-01'), "person-local refresh changes must refresh the FanHao browser entry");
 assert(indexHtml.includes('/modules/fanhao/work-cards.css?v=20260717-fanhao-viewport-render-01'), "viewport rendering styles must use a fresh browser URL");
-assert(fanhaoEntry.includes('app.js?v=20260717-photo-library-workspace-01'), "workspace changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260717-fanhao-viewport-render-01'), "viewport rendering changes must refresh the FanHao module barrel");
+assert(fanhaoEntry.includes('app.js?v=20260724-person-local-refresh-01'), "person-local refresh changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260724-person-local-refresh-01'), "person-local refresh changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -152,7 +156,11 @@ assert(workDetailServiceSource.includes("const detail = detailPayload(workId)") 
 assert(workDetailServiceSource.includes("resolveVideoFileByPublicId ? resolveVideoFileByPublicId(videoId) : library.filesById.get(videoId)"), "FanHao play-info must validate or relocate indexed media before touching the gallery catalog");
 assert(workRoutesApiSource.includes('source: url.searchParams.get("source") || "fanhao"') && workRoutesApiSource.includes("视频文件不存在或已移动"), "play-info routing must retain its media boundary and explain missing local files");
 assert(playerPageSource.includes('mediaId ? "?source=gallery" : ""'), "the standalone gallery player must explicitly select gallery play-info lookup");
-assert(playerHtmlSource.includes("player-page.js?v=20260717-fanhao-playinfo-01"), "play-info lookup changes must refresh the standalone player module");
+assert(playerHtmlSource.includes("player-page.js?v=20260724-player-person-search-02"), "player person-search changes must refresh the standalone player module");
+assert(playerPageSource.includes("setVideoSourceAt(resumePosition, { autoPlay: options.autoPlay !== false });"), "standalone player startup must begin playback without a second user action");
+assert(playerPageSource.includes('name === "NotAllowedError" && options.allowMutedFallback'), "standalone player must keep autoplay running when the browser initially blocks sound");
+assert(playerPageSource.includes("capturePlaybackSnapshot()") && playerPageSource.includes("await delay(LOCAL_MARKER_RELEASE_DELAY_MS);") && playerPageSource.includes("await restorePlaybackSnapshot(playbackSnapshot);"), "standalone player marker changes must release the media handle and resume the same playback");
+assert(playerPageSource.includes('createMoveField("搜索人物", existingInput)') && playerPageSource.includes("searchMovePeople(movePeople, query)") && playerPageSource.includes("submit.disabled = !selectedExistingPerson"), "standalone player migration must select existing people by name rather than requiring an id");
 assert(workActionsSource.includes("captureFavoriteSnapshot") && workActionsSource.includes("restoreFavoriteSnapshot"), "optimistic favorite feedback must roll back cleanly after API failures");
 assert(peoplePageSource.includes("const personIndexRecords = new WeakMap()") && peoplePageSource.includes("bindPeopleIndexInteractions();"), "person cards must keep navigation records behind one persistent interaction surface");
 assert(peoplePageSource.includes('root.addEventListener("pointerover"') && peoplePageSource.includes('root.addEventListener("focusin"') && peoplePageSource.includes('root.addEventListener("pointerdown"'), "person cards must delegate mouse, keyboard, and touch preparation");
@@ -186,16 +194,20 @@ assert(webApp.includes("WORK_PAGE_SIZE_BY_ACCESS = Object.freeze({ local: 64, la
 assert(webApp.includes('globalThis.matchMedia?.("(max-width: 720px)")') && webApp.includes("pageSize: preferredWorkPageSize"), "search requests must follow the active desktop or mobile viewport");
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
-assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260717-fanhao-people-card-lifecycle-01'), "people-card lifecycle changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260724-person-local-refresh-01'), "person-local refresh changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260717-fanhao-ranking-response-01'), "ranking navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('collection-page.js?v=20260717-fanhao-collection-response-01'), "collection navigation changes must use a fresh browser module URL");
 assert(fanhaoModuleIndexSource.includes('studio-page.js?v=20260717-fanhao-studio-first-paint-01'), "studio first-paint changes must use a fresh browser module URL");
 assert(collectionPageSource.includes("const collectionPrefetches = new Map()") && collectionPageSource.includes("warmHistoryRanges()"), "Web history ranges must reuse prefetched pages while the collection view remains active");
 assert(collectionPageSource.includes("const COLLECTION_PREFETCH_TTL_MS = 5 * 60 * 1000") && collectionPageSource.includes("invalidatePrefetches"), "Web collection prefetches must survive normal reading time and expose explicit invalidation");
 assert(peoplePageSource.includes("const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64") && peoplePageSource.includes("const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48"), "person details must keep desktop and mobile first payloads bounded");
-assert(peoplePageSource.includes("const personDetailPrefetches = new Map()") && peoplePageSource.includes("reusePrefetch: true"), "person interactions must reuse prepared detail requests instead of issuing a duplicate click request");
+assert(peoplePageSource.includes("const personDetailPrefetches = new Map()") && peoplePageSource.includes("reusePrefetch: options.reusePrefetch !== false"), "person interactions must reuse prepared detail requests unless a local rescan explicitly invalidates them");
 assert(peoplePageSource.includes("schedulePersonDetailPrefetch(person.id)") && peoplePageSource.includes("preparePersonDetailFromIntent(root, event.target)"), "delegated person cards must prepare details before desktop and touch clicks");
 assert(peoplePageSource.includes("detailPending: true") && personProfileSource.includes("正在加载详情"), "Web person navigation must paint the indexed profile before the detail API returns");
+assert(personProfileSource.includes("data-person-local-refresh") && personProfileSource.includes('textContent = "刷新本地"') && personProfileSource.includes("/api/admin/rescan-person"), "person details must expose a direct local refresh action");
+assert(personProfileSource.includes("reusePrefetch: false") && peoplePageSource.includes("invalidatePersonDetailPrefetches(personId)"), "person local refresh must bypass stale prepared detail responses");
+assert(personLibraryServiceSource.includes("reconcilePersonLocalWorks(previousWorks, works)"), "person rescans must reconcile disappeared local works with the core database");
+assert(personLibraryServiceSource.includes("previousWork?.infoSummary") && personLibraryServiceSource.includes("work.infoSummary = { ...previousWork.infoSummary }"), "person rescans must preserve indexed work metadata");
 assert(peoplePageSource.includes("works.map((work) => workCoverUrl(work)).find(Boolean)"), "Web person details must reuse the prepared work page for fallback artwork");
 assert(latestRequestSource.includes("sequence === requestSequence"), "latest-request gates must reject stale completions");
 assert(peoplePageSource.includes("const personDetailRequests = createLatestRequestGate()"), "person navigation must own a cancellable latest request");
@@ -1378,9 +1390,10 @@ const userStateRuntime = read("src/modules/fanhao/server/user-state/runtime.js")
 const collectionQueryServiceSource = read("src/modules/fanhao/server/user-state/collection-query-service.js");
 assert(libraryRuntime.includes("prewarmLibraryPeoplePayloads(requestDeps())"), "FanHao must prepare people payloads before the first library request");
 assert(personListServiceSource.includes("const mainPeopleCache = new Map()"), "main and western people scopes must remain cached independently");
-assert(fanhaoRuntime.includes("library.start();"), "FanHao startup must prewarm the library response path");
-assert(fanhaoRuntime.includes("catalog.start();"), "FanHao startup must prewarm the catalog response path");
-assert(fanhaoRuntime.includes("userState.start();"), "FanHao startup must prewarm user collection response paths");
+assert(fanhaoRuntime.includes('process.env.FANHAO_EAGER_PREWARM !== "1"'), "full-library response prewarming must be opt-in so the HTTP port can open promptly");
+assert(fanhaoRuntime.includes("library.start();"), "opt-in FanHao prewarming must retain the library response path");
+assert(fanhaoRuntime.includes("catalog.start();"), "opt-in FanHao prewarming must retain the catalog response path");
+assert(fanhaoRuntime.includes("userState.start();"), "opt-in FanHao prewarming must retain user collection response paths");
 assert(userStateRuntime.includes("createCollectionQueryService(deps)") && userStateRuntime.includes("collectionQueryService.prewarm()"), "collection startup must delegate complete response preparation to one query service");
 assert(collectionQueryServiceSource.includes("const COLLECTION_PREWARM_PAGE_SIZES = [8, 48, 64]"), "collection startup must prepare preview, phone, and desktop response sizes");
 assert(collectionQueryServiceSource.includes("[0, 7, Number(recentWatchedDays || 0)]"), "collection startup must prepare all-time, seven-day, and default history ranges");
@@ -2913,5 +2926,168 @@ backgroundStampCoreDb.invalidateTableStamp("work_info");
 const invalidatedWorkInfoStamp = backgroundStampCoreDb.tableDataStamp("work_info");
 assert.notEqual(invalidatedWorkInfoStamp, refreshedWorkInfoStamp, "explicit mutations must invalidate dependent caches immediately");
 assert.equal(synchronousStampReads, 1, "explicit stamp invalidation must not fall back to a synchronous SQLite query");
+
+const localReconcileDb = new DatabaseSync(":memory:");
+try {
+  localReconcileDb.exec(`
+    CREATE TABLE local_works (
+      id INTEGER PRIMARY KEY,
+      work_id INTEGER NOT NULL,
+      local_path TEXT
+    );
+    CREATE TABLE local_files (
+      id INTEGER PRIMARY KEY,
+      local_work_id INTEGER,
+      file_path TEXT
+    );
+    INSERT INTO local_works (id, work_id, local_path) VALUES
+      (1, 101, 'O:\\Person\\Gone'),
+      (2, 102, 'O:\\Person'),
+      (3, 103, 'O:\\Person'),
+      (4, 103, 'V:\\Other\\Person');
+    INSERT INTO local_files (id, local_work_id, file_path) VALUES
+      (1, 1, 'O:\\Person\\Gone\\one.mp4'),
+      (2, 2, 'O:\\Person\\two.mp4'),
+      (3, 3, 'O:\\Person\\three.mp4'),
+      (4, 4, 'V:\\Other\\Person\\three.mp4');
+  `);
+  const localReconcileService = createCoreLibrarySyncService({
+    getCoreDb: () => localReconcileDb,
+    hasCoreDb: () => true,
+    sourcePathToAbsolute: (value) => value
+  });
+  const reconciliation = localReconcileService.reconcilePersonLocalWorks(
+    [
+      { id: "101", relativePath: "O:/Person/Gone" },
+      { id: "102", relativePath: "O:/Person" },
+      { id: "103", relativePath: "O:/Person" }
+    ],
+    [{ id: "102", relativePath: "o:/person" }]
+  );
+  assert.deepEqual(reconciliation.deletedWorkIds, ["101"], "person reconciliation must report only works with no remaining local copy");
+  assert.deepEqual(
+    localReconcileDb.prepare("SELECT id FROM local_works ORDER BY id").all().map((row) => Number(row.id)),
+    [2, 4],
+    "person reconciliation must remove only disappeared work/path pairs"
+  );
+  assert.deepEqual(
+    localReconcileDb.prepare("SELECT id FROM local_files ORDER BY id").all().map((row) => Number(row.id)),
+    [2, 4],
+    "person reconciliation must clear file rows for disappeared local works"
+  );
+} finally {
+  localReconcileDb.close();
+}
+
+const localMutationRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-local-delete-"));
+const localMutationDb = new DatabaseSync(":memory:");
+try {
+  const sharedPersonDir = path.join(localMutationRoot, "shared-person");
+  const missingPersonDir = path.join(localMutationRoot, "missing-person");
+  const firstVideoPath = path.join(sharedPersonDir, "one.mp4");
+  const secondVideoPath = path.join(sharedPersonDir, "two.mp4");
+  fs.mkdirSync(sharedPersonDir, { recursive: true });
+  fs.writeFileSync(firstVideoPath, "one");
+  fs.writeFileSync(secondVideoPath, "two");
+  localMutationDb.exec(`
+    CREATE TABLE works (id INTEGER PRIMARY KEY, updated_at TEXT);
+    CREATE TABLE local_works (
+      id INTEGER PRIMARY KEY,
+      work_id INTEGER NOT NULL,
+      local_path TEXT,
+      source_info_path TEXT
+    );
+    CREATE TABLE local_files (
+      id INTEGER PRIMARY KEY,
+      work_id INTEGER NOT NULL,
+      local_work_id INTEGER,
+      file_path TEXT
+    );
+    INSERT INTO works (id, updated_at) VALUES (1, ''), (2, ''), (3, ''), (4, '');
+  `);
+  const insertLocalWork = localMutationDb.prepare("INSERT INTO local_works (id, work_id, local_path) VALUES (?, ?, ?)");
+  const insertLocalFile = localMutationDb.prepare("INSERT INTO local_files (id, work_id, local_work_id, file_path) VALUES (?, ?, ?, ?)");
+  insertLocalWork.run(1, 1, sharedPersonDir);
+  insertLocalWork.run(2, 2, sharedPersonDir);
+  insertLocalWork.run(3, 3, missingPersonDir);
+  insertLocalWork.run(4, 4, missingPersonDir);
+  insertLocalFile.run(1, 1, 1, firstVideoPath);
+  insertLocalFile.run(2, 2, 2, secondVideoPath);
+  insertLocalFile.run(3, 3, 3, path.join(missingPersonDir, "three.mp4"));
+  insertLocalFile.run(4, 4, 4, path.join(missingPersonDir, "four.mp4"));
+
+  const mutationWorks = new Map([1, 2, 3, 4].map((id) => [String(id), {
+    id: String(id),
+    personId: "10",
+    personName: "Shared Person",
+    title: `Work ${id}`,
+    directoryName: "shared-person",
+    missingLocal: false
+  }]));
+  let mutationRefreshCount = 0;
+  const pathWithinMutationRoot = (targetPath, rootPath) => {
+    const relative = path.relative(path.resolve(rootPath), path.resolve(targetPath));
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  };
+  const localMutationService = createWorkLocalMutationService({
+    coreMissingWorksForPerson: () => [],
+    corePersonFallbackRecord: () => ({ id: "10", name: "Shared Person" }),
+    ensureLibraryDirectoryPath(value) {
+      const resolved = path.resolve(value);
+      if (!pathWithinMutationRoot(resolved, localMutationRoot)) throw new Error("test path escaped temp root");
+      return resolved;
+    },
+    getCoreDb: () => localMutationDb,
+    getPersonById: () => ({ id: "10", name: "Shared Person" }),
+    getWorkById: (workId) => mutationWorks.get(String(workId)) || null,
+    hasCoreDb: () => true,
+    invalidateLibraryDerivedCaches() {},
+    invalidateTableStamp() {},
+    invalidateWorkCodeIndex() {},
+    libraryOpenRoots: () => [localMutationRoot],
+    localWorkMarkerKey: () => "",
+    markerDirectoryName: (value) => value,
+    pathWithinRoot: pathWithinMutationRoot,
+    publicWork: (work) => work,
+    refreshLibrary() {
+      mutationRefreshCount += 1;
+    },
+    relativeFromRoot: (value) => path.relative(localMutationRoot, value).replaceAll(path.sep, "/"),
+    replacePathPrefix: (value) => value,
+    resetWorkSearch() {},
+    resolveLibraryPersonByPublicId: (personId) => String(personId) === "10" ? { id: "10", works: ["1", "2", "3", "4"] } : null,
+    resolveLibraryWorkByPublicId: (workId) => mutationWorks.get(String(workId)) || null,
+    safeStat: (value) => fs.statSync(value, { throwIfNoEntry: false }),
+    sourcePathToAbsolute: (value) => path.resolve(value),
+    uniqueTextArray: (values) => [...new Set(values)],
+    workHasLocalMarker: () => false
+  });
+
+  const firstDelete = localMutationService.deleteWorkLocalFiles("1", { refresh: false });
+  assert.equal(fs.existsSync(firstVideoPath), false, "deleting one work in a shared folder must remove only that work's file");
+  assert.equal(fs.existsSync(secondVideoPath), true, "deleting one work must preserve sibling files in the same person folder");
+  assert.equal(fs.existsSync(sharedPersonDir), true, "a shared person folder must remain while another work still uses it");
+  assert.equal(localMutationDb.prepare("SELECT COUNT(*) AS count FROM local_works WHERE id = 1").get().count, 0, "the selected local-work row must be cleared");
+  assert.equal(localMutationDb.prepare("SELECT COUNT(*) AS count FROM local_works WHERE id = 2").get().count, 1, "the sibling local-work row must remain");
+  assert.deepEqual(firstDelete.clearedWorkIds, ["1"], "shared-folder deletion must report only the selected work as cleared");
+
+  const staleDelete = localMutationService.deleteWorkLocalFiles("3", { refresh: false });
+  assert.deepEqual(new Set(staleDelete.clearedWorkIds), new Set(["3", "4"]), "one missing shared path must clear every stale local-work row for that path");
+  assert.equal(localMutationDb.prepare("SELECT COUNT(*) AS count FROM local_works WHERE id IN (3, 4)").get().count, 0, "stale shared-path rows must not survive deletion");
+
+  const personDelete = localMutationService.deletePersonLocalFiles("10", { workIds: ["2"] });
+  assert.equal(personDelete.failedCount, 0, "selected person deletion must complete without per-work failures");
+  assert.equal(mutationRefreshCount, 1, "selected person deletion must refresh the library only once");
+  assert.equal(fs.existsSync(sharedPersonDir), false, "the last work may remove its now-exclusive folder");
+  assert.throws(
+    () => localMutationService.deletePersonLocalFiles("10", { workIds: [] }),
+    /请选择要删除的作品/,
+    "an explicit empty selection must never fall back to deleting every person work"
+  );
+} finally {
+  localMutationDb.close();
+  assert.equal(path.dirname(path.resolve(localMutationRoot)).toLowerCase(), path.resolve(os.tmpdir()).toLowerCase(), "mutation test cleanup must stay in the system temp directory");
+  fs.rmSync(localMutationRoot, { recursive: true, force: true });
+}
 
 console.log("fanhao-structure: ok");

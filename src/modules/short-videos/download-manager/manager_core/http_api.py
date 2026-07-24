@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .auth import clear_cookie_auth, cookie_auth_status, import_cookie_text, open_cookie_folder, start_cookie_login
 from .common import first_text, int_or_none, normalize_int, normalize_profile_tab, normalize_proxy, now_iso, parse_profile_url, work_id_from_url
-from .config import DEFAULT_FAILURE_GUARD_THRESHOLD, DEFAULT_OUTPUT_DIR, FANHAO_PUBLIC_DIR, MAX_CONCURRENCY, STATIC_DIR, TEST_PROFILE_URL
+from .config import BASE_DIR, DEFAULT_FAILURE_GUARD_THRESHOLD, DEFAULT_OUTPUT_DIR, FANHAO_PUBLIC_DIR, MAX_CONCURRENCY, STATIC_DIR, TEST_PROFILE_URL
 from .database import add_event, db, set_setting, setting
 from .domain_manifest import profile_output_dir
 from .download_supervisor import download_manager
@@ -33,6 +33,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/health":
+            return self.send_json({"ok": True, "paths": {"base": str(BASE_DIR)}})
         if parsed.path == "/api/state":
             return self.send_json(get_state())
         if parsed.path == "/api/short-videos/summary":

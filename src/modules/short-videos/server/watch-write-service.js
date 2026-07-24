@@ -47,8 +47,8 @@ export function createShortVideoWatchWriteService({
     readyResolve?.(false);
     readyResolve = null;
     readyPromise = null;
-    if (activeWorker) activeWorker.terminate().catch(() => {});
     rejectRequests(new Error("观看进度后台写入线程已停止"));
+    return activeWorker ? activeWorker.terminate().catch(() => undefined) : Promise.resolve();
   }
 
   function ensureWorker() {

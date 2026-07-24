@@ -41,6 +41,85 @@ export function createCoreLibrarySyncService({
     return coreWorkId ? { ...work, id: coreWorkId } : work;
   }
 
+  function localWorkKey(workId, localPath) {
+    const coreWorkId = Number(workId);
+    const normalizedPath = String(localPath || "")
+      .trim()
+      .replace(/\\/g, "/")
+      .replace(/\/+$/, "")
+      .toLowerCase();
+    return Number.isFinite(coreWorkId) && normalizedPath ? `${coreWorkId}|${normalizedPath}` : "";
+  }
+
+  function scannedWorkKey(work) {
+    const localPath = sourcePathToAbsolute(work?.relativePath) || work?.relativePath || "";
+    return localWorkKey(work?.id, localPath);
+  }
+
+  function reconcilePersonLocalWorks(previousWorks = [], nextWorks = []) {
+    if (!hasCoreDb()) {
+      return { deletedLocalWorkIds: [], deletedWorkIds: [] };
+    }
+
+    const retainedKeys = new Set(nextWorks.map(scannedWorkKey).filter(Boolean));
+    const staleKeys = new Set(
+      previousWorks
+        .map(scannedWorkKey)
+        .filter((key) => key && !retainedKeys.has(key))
+    );
+    if (!staleKeys.size) {
+      return { deletedLocalWorkIds: [], deletedWorkIds: [] };
+    }
+
+    const db = getCoreDb();
+    const selectRows = db.prepare(
+      "SELECT id, work_id, local_path FROM local_works WHERE work_id = ?"
+    );
+    const staleRows = [];
+    const workIds = new Set(
+      previousWorks
+        .map((work) => Number(work?.id))
+        .filter(Number.isFinite)
+    );
+    for (const workId of workIds) {
+      for (const row of selectRows.all(workId)) {
+        if (staleKeys.has(localWorkKey(row.work_id, row.local_path))) staleRows.push(row);
+      }
+    }
+    if (!staleRows.length) {
+      return { deletedLocalWorkIds: [], deletedWorkIds: [] };
+    }
+
+    const deleteFiles = db.prepare("DELETE FROM local_files WHERE local_work_id = ?");
+    const deleteLocalWork = db.prepare("DELETE FROM local_works WHERE id = ?");
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of staleRows) {
+        deleteFiles.run(Number(row.id));
+        deleteLocalWork.run(Number(row.id));
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original reconciliation error.
+      }
+      throw error;
+    }
+
+    const remainingLocalWork = db.prepare(
+      "SELECT 1 FROM local_works WHERE work_id = ? LIMIT 1"
+    );
+    const deletedWorkIds = [...new Set(staleRows.map((row) => Number(row.work_id)))]
+      .filter((workId) => !remainingLocalWork.get(workId))
+      .map(String);
+    return {
+      deletedLocalWorkIds: staleRows.map((row) => Number(row.id)),
+      deletedWorkIds
+    };
+  }
+
   function replaceLocalFilesForWork(work) {
     if (!hasCoreDb() || !work?.id) return;
     const db = getCoreDb();
@@ -184,6 +263,7 @@ export function createCoreLibrarySyncService({
 
   return {
     linkedScannedWork,
+    reconcilePersonLocalWorks,
     replaceLocalFilesForWork,
     workIdForScannedWork
   };

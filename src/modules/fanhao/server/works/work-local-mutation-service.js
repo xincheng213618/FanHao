@@ -185,18 +185,62 @@ export function createWorkLocalMutationService({
     return removed;
   }
 
-  function clearLocalDbRowsForWork(db, coreWorkId, localWorkIds) {
-    if (!localWorkIds.length) return;
+  function normalizedLocalPath(value) {
+    const fullPath = sourcePathToAbsolute(value);
+    return fullPath ? path.resolve(fullPath).toLowerCase() : "";
+  }
+
+  function createLocalWorkPathIndex(db) {
+    const index = new Map();
+    const rows = db
+      .prepare(
+        `
+        SELECT id, work_id, local_path
+        FROM local_works
+        WHERE local_path IS NOT NULL
+          AND local_path <> ''
+        ORDER BY id
+        `
+      )
+      .all();
+    for (const row of rows) {
+      const key = normalizedLocalPath(row.local_path);
+      if (!key) continue;
+      if (!index.has(key)) index.set(key, []);
+      index.get(key).push(row);
+    }
+    return index;
+  }
+
+  function removeLocalWorkRowsFromPathIndex(index, rows) {
+    if (!index) return;
+    const removedIds = new Set(rows.map((row) => Number(row.id)));
+    for (const row of rows) {
+      const key = normalizedLocalPath(row.local_path);
+      const indexedRows = index.get(key);
+      if (!indexedRows) continue;
+      const remaining = indexedRows.filter((item) => !removedIds.has(Number(item.id)));
+      if (remaining.length) index.set(key, remaining);
+      else index.delete(key);
+    }
+  }
+
+  function clearLocalDbRows(db, localWorkRows) {
+    const rows = [...new Map(localWorkRows.map((row) => [Number(row.id), row])).values()].filter((row) => Number.isFinite(Number(row.id)));
+    if (!rows.length) return;
     const deleteFiles = db.prepare("DELETE FROM local_files WHERE local_work_id = ?");
     const deleteLocalWork = db.prepare("DELETE FROM local_works WHERE id = ?");
+    const updateWork = db.prepare("UPDATE works SET updated_at = ? WHERE id = ?");
     const now = new Date().toISOString();
     db.exec("BEGIN IMMEDIATE");
     try {
-      for (const localWorkId of localWorkIds) {
-        deleteFiles.run(localWorkId);
-        deleteLocalWork.run(localWorkId);
+      for (const row of rows) {
+        deleteFiles.run(Number(row.id));
+        deleteLocalWork.run(Number(row.id));
       }
-      db.prepare("UPDATE works SET updated_at = ? WHERE id = ?").run(now, coreWorkId);
+      for (const workId of new Set(rows.map((row) => Number(row.work_id)).filter(Number.isFinite))) {
+        updateWork.run(now, workId);
+      }
       db.exec("COMMIT");
     } catch (error) {
       try {
@@ -204,6 +248,65 @@ export function createWorkLocalMutationService({
       } catch {}
       throw error;
     }
+  }
+
+  function deleteSharedDirectoryWorkFiles(db, coreWorkId, localWorkId, dirPath) {
+    const deletedPaths = [];
+    const missingPaths = [];
+    const emptyRemovedPaths = [];
+    const fileRows = db
+      .prepare(
+        `
+        SELECT id, file_path
+        FROM local_files
+        WHERE local_work_id = ?
+          AND file_path IS NOT NULL
+          AND file_path <> ''
+        ORDER BY id
+        `
+      )
+      .all(Number(localWorkId));
+    const sharedFile = db.prepare(
+      `
+      SELECT 1
+      FROM local_files
+      WHERE work_id <> ?
+        AND lower(replace(file_path, '/', char(92))) = lower(replace(?, '/', char(92)))
+      LIMIT 1
+      `
+    );
+
+    for (const fileRow of fileRows) {
+      const filePath = ensureLibraryDirectoryPath(fileRow.file_path, "作品文件");
+      if (!pathWithinRoot(filePath, dirPath)) {
+        const error = new Error("作品文件不在作品文件夹内");
+        error.statusCode = 400;
+        throw error;
+      }
+      if (sharedFile.get(coreWorkId, fileRow.file_path)) continue;
+
+      const stat = safeStat(filePath);
+      if (!stat) {
+        missingPaths.push(relativeFromRoot(filePath));
+        continue;
+      }
+      if (!stat.isFile()) {
+        const error = new Error("作品文件记录不是普通文件");
+        error.statusCode = 400;
+        throw error;
+      }
+      try {
+        fs.unlinkSync(filePath);
+        deletedPaths.push(relativeFromRoot(filePath));
+        emptyRemovedPaths.push(...removeEmptyLibraryParents(filePath));
+      } catch (error) {
+        const wrapped = new Error(`删除作品文件失败：${error.message}`);
+        wrapped.statusCode = 500;
+        throw wrapped;
+      }
+    }
+
+    return { deletedPaths, missingPaths, emptyRemovedPaths };
   }
 
   function deleteWorkLocalFiles(workId, options = {}) {
@@ -230,7 +333,7 @@ export function createWorkLocalMutationService({
     const rows = db
       .prepare(
         `
-        SELECT id, local_path
+        SELECT id, work_id, local_path
         FROM local_works
         WHERE work_id = ?
           AND local_path IS NOT NULL
@@ -248,6 +351,8 @@ export function createWorkLocalMutationService({
     const deletedPaths = [];
     const missingPaths = [];
     const emptyRemovedPaths = [];
+    const localWorkRowsToClear = [...rows];
+    const localWorkPathIndex = options.localWorkPathIndex || createLocalWorkPathIndex(db);
     for (const row of rows) {
       const dirPath = ensureLibraryDirectoryPath(row.local_path, "作品文件夹");
       const isRoot = libraryOpenRoots().some((rootPath) => path.resolve(dirPath).toLowerCase() === path.resolve(rootPath).toLowerCase());
@@ -258,32 +363,45 @@ export function createWorkLocalMutationService({
       }
 
       const stat = safeStat(dirPath);
+      const pathRows = localWorkPathIndex.get(normalizedLocalPath(row.local_path)) || [row];
+      const sharedByOtherWork = pathRows.some((item) => Number(item.work_id) !== coreWorkId);
       if (stat?.isDirectory()) {
-        try {
-          fs.rmSync(dirPath, { recursive: true, force: false });
-          deletedPaths.push(relativeFromRoot(dirPath));
-          emptyRemovedPaths.push(...removeEmptyLibraryParents(dirPath));
-        } catch (error) {
-          const wrapped = new Error(`删除作品文件夹失败：${error.message}`);
-          wrapped.statusCode = 500;
-          throw wrapped;
+        if (sharedByOtherWork) {
+          const result = deleteSharedDirectoryWorkFiles(db, coreWorkId, row.id, dirPath);
+          deletedPaths.push(...result.deletedPaths);
+          missingPaths.push(...result.missingPaths);
+          emptyRemovedPaths.push(...result.emptyRemovedPaths);
+        } else {
+          try {
+            fs.rmSync(dirPath, { recursive: true, force: false });
+            deletedPaths.push(relativeFromRoot(dirPath));
+            emptyRemovedPaths.push(...removeEmptyLibraryParents(dirPath));
+          } catch (error) {
+            const wrapped = new Error(`删除作品文件夹失败：${error.message}`);
+            wrapped.statusCode = 500;
+            throw wrapped;
+          }
         }
       } else if (stat?.isFile()) {
-        try {
-          fs.unlinkSync(dirPath);
-          deletedPaths.push(relativeFromRoot(dirPath));
-          emptyRemovedPaths.push(...removeEmptyLibraryParents(dirPath));
-        } catch (error) {
-          const wrapped = new Error(`删除作品文件失败：${error.message}`);
-          wrapped.statusCode = 500;
-          throw wrapped;
+        if (!sharedByOtherWork) {
+          try {
+            fs.unlinkSync(dirPath);
+            deletedPaths.push(relativeFromRoot(dirPath));
+            emptyRemovedPaths.push(...removeEmptyLibraryParents(dirPath));
+          } catch (error) {
+            const wrapped = new Error(`删除作品文件失败：${error.message}`);
+            wrapped.statusCode = 500;
+            throw wrapped;
+          }
         }
       } else {
         missingPaths.push(relativeFromRoot(dirPath));
+        localWorkRowsToClear.push(...pathRows);
       }
     }
 
-    clearLocalDbRowsForWork(db, coreWorkId, rows.map((row) => Number(row.id)));
+    clearLocalDbRows(db, localWorkRowsToClear);
+    removeLocalWorkRowsFromPathIndex(localWorkPathIndex, localWorkRowsToClear);
     invalidateWorkCodeIndex();
     resetWorkSearch();
     invalidateTableStamp("local_works", "local_files", "work_info");
@@ -304,23 +422,52 @@ export function createWorkLocalMutationService({
     };
 
     return {
-      deleted: deletedPaths.length > 0 || missingPaths.length > 0,
+      deleted: localWorkRowsToClear.length > 0,
       deletedPaths,
       missingPaths,
       emptyRemovedPaths: uniqueTextArray(emptyRemovedPaths, { maxLength: 260, maxItems: 80 }),
+      clearedWorkIds: [...new Set(localWorkRowsToClear.map((row) => String(row.work_id)))],
       work: publicWork(missingWork, true)
     };
   }
 
-  function deletePersonLocalFiles(personId) {
+  function deletePersonLocalFiles(personId, options = {}) {
     const person = resolveLibraryPersonByPublicId(personId);
     if (!person) {
       const error = new Error("人物不存在或没有本地作品");
       error.statusCode = 404;
       throw error;
     }
+    if (!hasCoreDb()) {
+      const error = new Error("core DB 不可用");
+      error.statusCode = 500;
+      throw error;
+    }
 
-    const workIds = [...(person.works || [])].filter((workId) => {
+    const personWorkIds = [...new Set([...(person.works || [])].map((workId) => String(workId)))];
+    const hasRequestedWorkIds = Object.prototype.hasOwnProperty.call(options, "workIds");
+    if (hasRequestedWorkIds && !Array.isArray(options.workIds)) {
+      const error = new Error("workIds 必须是数组");
+      error.statusCode = 400;
+      throw error;
+    }
+    const requestedWorkIds = Array.isArray(options.workIds)
+      ? [...new Set(options.workIds.map((workId) => String(workId || "").trim()).filter(Boolean))]
+      : [];
+    if (hasRequestedWorkIds && !requestedWorkIds.length) {
+      const error = new Error("请选择要删除的作品");
+      error.statusCode = 400;
+      throw error;
+    }
+    const unknownWorkIds = requestedWorkIds.filter((workId) => !personWorkIds.includes(workId));
+    if (unknownWorkIds.length) {
+      const error = new Error("所选作品不属于当前人物");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const candidateWorkIds = requestedWorkIds.length ? requestedWorkIds : personWorkIds;
+    const workIds = candidateWorkIds.filter((workId) => {
       const work = getWorkById(workId);
       return work && !work.missingLocal;
     });
@@ -333,15 +480,20 @@ export function createWorkLocalMutationService({
     const deleted = [];
     const failed = [];
     const emptyRemovedPaths = [];
+    const localWorkPathIndex = createLocalWorkPathIndex(getCoreDb());
+    const clearedWorkIds = new Set();
     for (const workId of workIds) {
+      if (clearedWorkIds.has(String(workId))) continue;
       const work = getWorkById(workId);
       try {
-        const result = deleteWorkLocalFiles(workId, { refresh: false });
+        const result = deleteWorkLocalFiles(workId, { refresh: false, localWorkPathIndex });
+        for (const clearedWorkId of result.clearedWorkIds || []) clearedWorkIds.add(String(clearedWorkId));
         deleted.push({
           workId: String(workId),
           title: work?.title || work?.directoryName || String(workId),
           deletedPaths: result.deletedPaths || [],
-          missingPaths: result.missingPaths || []
+          missingPaths: result.missingPaths || [],
+          clearedWorkIds: result.clearedWorkIds || [String(workId)]
         });
         emptyRemovedPaths.push(...(result.emptyRemovedPaths || []));
       } catch (error) {
@@ -354,8 +506,10 @@ export function createWorkLocalMutationService({
     }
 
     refreshLibrary();
+    const successfulRequestedCount = workIds.filter((workId) => clearedWorkIds.has(String(workId))).length;
     return {
-      deletedCount: deleted.length,
+      requestedCount: workIds.length,
+      deletedCount: successfulRequestedCount,
       failedCount: failed.length,
       deleted,
       failed,

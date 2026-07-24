@@ -49,7 +49,7 @@
 | GET | `/api/people/:id` | 公开 | 人物详情（作品、缺失作品、合并候选、封面）。 |
 | POST | `/api/people/:id/merge` | 本地管理员 | 将某人物合并到目标人物。 |
 | PUT | `/api/people/:id/cover` | 公开 | 设置人物封面（头像）。 |
-| POST | `/api/people/:id/local-files/delete` | 受信任文件变更 | 批量删除该人物的本地作品文件。 |
+| POST | `/api/people/:id/local-files/delete` | 受信任文件变更 | 批量删除该人物的本地作品文件；可通过 JSON `workIds` 仅删除所选作品。 |
 | POST | `/api/works/:id/cover/generate` | 公开 | 从本地视频抽帧生成缺失封面。 |
 | PUT | `/api/works/:id/cover` | 公开 | 手动设置 / 覆盖作品封面。 |
 | POST | `/api/works/:id/local-marker` | 本地管理员 | 切换作品本地标记（如 `[A]` 特殊分类）。 |

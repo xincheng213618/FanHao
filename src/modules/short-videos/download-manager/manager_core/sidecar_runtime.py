@@ -85,25 +85,29 @@ class SidecarRuntimeMixin:
         with self.lock:
             self.sidecar_proc = proc
             self.sidecar_port = port
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            if proc.poll() is not None:
-                raise RuntimeError(f"sidecar 启动失败，退出码 {proc.returncode}: {tail_text(err_path, 1200)}")
-            try:
-                sidecar_json(port, "GET", "/api/v1/health")
-                proxy_text = f"，代理 {normalize_proxy(setting('download_proxy', ''))}" if normalize_proxy(setting("download_proxy", "")) else ""
-                add_event("info", f"sidecar 已启动：端口 {port}，并发 {concurrency}{proxy_text}")
-                download_timing(
-                    "sidecar_start_ready",
-                    port=port,
-                    concurrency=concurrency,
-                    output_dir=output_dir,
-                    startup_ms=elapsed_ms(started),
-                )
-                return port
-            except Exception:
-                time.sleep(0.5)
-        raise RuntimeError(f"sidecar 启动超时: {tail_text(err_path, 1200)}")
+        try:
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    raise RuntimeError(f"sidecar 启动失败，退出码 {proc.returncode}: {tail_text(err_path, 1200)}")
+                try:
+                    sidecar_json(port, "GET", "/api/v1/health")
+                    proxy_text = f"，代理 {normalize_proxy(setting('download_proxy', ''))}" if normalize_proxy(setting("download_proxy", "")) else ""
+                    add_event("info", f"sidecar 已启动：端口 {port}，并发 {concurrency}{proxy_text}")
+                    download_timing(
+                        "sidecar_start_ready",
+                        port=port,
+                        concurrency=concurrency,
+                        output_dir=output_dir,
+                        startup_ms=elapsed_ms(started),
+                    )
+                    return port
+                except Exception:
+                    time.sleep(0.5)
+            raise RuntimeError(f"sidecar 启动超时: {tail_text(err_path, 1200)}")
+        except Exception:
+            self._stop_sidecar_process()
+            raise
 
     def _submit_links(
         self,

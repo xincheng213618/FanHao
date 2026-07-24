@@ -1700,7 +1700,7 @@
   left: max(24px, env(safe-area-inset-left));
   bottom: max(66px, calc(env(safe-area-inset-bottom) + 56px));
   z-index: 2;
-  width: min(520px, calc(50vw - 40px));
+  width: min(680px, calc(70vw - 40px));
   isolation: isolate;
   text-shadow: 0 1px 2px rgba(0, 0, 0, .96), 0 4px 18px rgba(0, 0, 0, .68);
 }
@@ -1756,12 +1756,10 @@
 }
 
 .short-video-caption-author {
-  display: inline-grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  gap: 9px;
-  align-items: center;
-  max-width: min(420px, 100%);
-  margin: 0 0 9px;
+  display: inline-flex;
+  align-items: baseline;
+  max-width: 100%;
+  margin: 0 0 6px;
   border: 0;
   border-radius: 999px;
   background: transparent;
@@ -1805,16 +1803,17 @@
 }
 
 .short-video-caption-author > span {
-  display: grid;
+  display: flex;
+  align-items: baseline;
   min-width: 0;
-  gap: 2px;
+  gap: 8px;
 }
 
 .short-video-caption-author strong {
   display: block;
   overflow: hidden;
   margin: 0;
-  font-size: 18px;
+  font-size: 17px;
   font-weight: 920;
   line-height: 1.15;
   text-overflow: ellipsis;
@@ -1822,6 +1821,7 @@
 }
 
 .short-video-caption-author em {
+  flex: none;
   overflow: hidden;
   color: rgba(255, 255, 255, .84);
   font-size: 12px;
@@ -1833,11 +1833,11 @@
 }
 
 .short-video-caption p {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 16px;
-  line-height: 1.45;
+  line-height: 1.4;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -1845,7 +1845,7 @@
 .short-video-caption-copy {
   position: relative;
   display: block;
-  margin-bottom: 8px;
+  margin-bottom: 0;
 }
 
 .short-video-caption-copy > p {

@@ -94,7 +94,8 @@ export async function routeWorksApi(req, res, url, deps) {
   if (personLocalDeleteMatch && req.method === "POST") {
     if (!requireTrustedFileMutation(req, res)) return true;
     try {
-      sendJson(res, 200, personDetailService.deleteLocalFiles(decodeURIComponent(personLocalDeleteMatch[1])));
+      const body = await readJsonBody(req);
+      sendJson(res, 200, personDetailService.deleteLocalFiles(decodeURIComponent(personLocalDeleteMatch[1]), body));
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "批量删除本地作品失败" });
     }

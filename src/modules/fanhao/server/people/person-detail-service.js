@@ -211,8 +211,8 @@ export function createPersonDetailService({
     }
   }
 
-  function deleteLocalFiles(personId) {
-    const result = workLocalMutationService.deletePersonLocalFiles(personId);
+  function deleteLocalFiles(personId, options = {}) {
+    const result = workLocalMutationService.deletePersonLocalFiles(personId, options);
     const rawPerson = resolveLibraryPersonByPublicId(personId) || corePersonFallbackRecord(personId);
     const person = mergedPersonRecord(rawPerson) || rawPerson;
     return {

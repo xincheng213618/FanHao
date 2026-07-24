@@ -83,6 +83,14 @@ class EmbeddedDownloaderConfigTests(unittest.TestCase):
         self.assertIn(".fanhao-serve-dependencies.sha256", setup_source)
         self.assertIn("Test-DownloaderDependencyFiles", setup_source)
 
+    def test_entrypoint_disables_windows_wmi_probe_before_importing_aiohttp(self) -> None:
+        entrypoint_source = (config.DEFAULT_DOWNLOADER_ROOT / "run.py").read_text(encoding="utf-8")
+
+        workaround = entrypoint_source.rindex("disable_windows_wmi_platform_probe()")
+        cli_import = entrypoint_source.index("from cli.main import main")
+        self.assertLess(workaround, cli_import)
+        self.assertIn('platform._wmi = None', entrypoint_source)
+
 
 class DownloaderSettingsMigrationTests(unittest.TestCase):
     def target_settings(self) -> dict[str, str]:

@@ -268,6 +268,7 @@ function personIndexCard(root, target) {
 
 async function selectPerson(personId, options = {}) {
   const request = personDetailRequests.begin();
+  if (options.reusePrefetch === false) invalidatePersonDetailPrefetches(personId);
   preparePersonProfile?.();
   disconnectPeopleIndexAutoload();
   if (state.activeView === "people" && !state.selectedPersonId && options.captureIndexScroll !== false) {
@@ -293,7 +294,10 @@ async function selectPerson(personId, options = {}) {
   }
 
   try {
-    const data = await fetchPersonWorksPage(personId, 0, { reusePrefetch: true, signal: request.signal });
+    const data = await fetchPersonWorksPage(personId, 0, {
+      reusePrefetch: options.reusePrefetch !== false,
+      signal: request.signal
+    });
     if (!request.isCurrent() || state.activeView !== "people" || state.selectedPersonId !== personId) return;
     state.selectedPerson = mergeIndexedPerson(indexedPerson, data.person, data.works);
     const resolvedPersonId = state.selectedPerson?.id || personId;
@@ -411,6 +415,13 @@ function reusablePersonDetailPrefetch(requestUrl) {
   personDetailPrefetches.delete(requestUrl);
   personDetailPrefetches.set(requestUrl, entry);
   return entry;
+}
+
+function invalidatePersonDetailPrefetches(personId) {
+  const prefix = `/api/people/${encodeURIComponent(personId)}?`;
+  for (const requestUrl of personDetailPrefetches.keys()) {
+    if (requestUrl.startsWith(prefix)) personDetailPrefetches.delete(requestUrl);
+  }
 }
 
 async function goToPerson(personId) {

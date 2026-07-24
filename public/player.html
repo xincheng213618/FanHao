@@ -551,6 +551,10 @@
         display: grid;
         gap: 6px;
       }
+      .player-move-pane {
+        display: grid;
+        gap: 10px;
+      }
       .player-move-field span {
         color: rgba(238, 247, 242, 0.66);
         font-size: 12px;
@@ -569,6 +573,40 @@
       }
       .player-move-field select option {
         background: #111815;
+      }
+      .player-move-results {
+        display: grid;
+        gap: 6px;
+        max-height: 260px;
+        overflow: auto;
+      }
+      .player-move-person-option {
+        display: grid;
+        gap: 3px;
+        width: 100%;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.035);
+        color: #eef7f2;
+        cursor: pointer;
+        padding: 9px 10px;
+        text-align: left;
+      }
+      .player-move-person-option:hover,
+      .player-move-person-option.selected {
+        border-color: rgba(96, 211, 170, 0.52);
+        background: rgba(96, 211, 170, 0.14);
+      }
+      .player-move-person-option strong {
+        font-size: 14px;
+      }
+      .player-move-person-option span,
+      .player-move-empty {
+        color: rgba(238, 247, 242, 0.62);
+        font-size: 12px;
+      }
+      .player-move-empty {
+        padding: 4px 2px;
       }
       .player-move-status {
         min-height: 18px;
@@ -724,7 +762,7 @@
             </button>
           </header>
           <div class="player-notice" id="playerNotice">正在读取作品</div>
-          <video id="playerVideo" playsinline preload="metadata" hidden></video>
+          <video id="playerVideo" playsinline preload="metadata" autoplay hidden></video>
           <button class="player-stream-start" id="playerStreamStart" type="button" aria-label="开始播放" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z"></path></svg>
           </button>
@@ -772,6 +810,6 @@
       </main>
     </div>
     <script src="/vendor/plyr/plyr.min.js"></script>
-    <script type="module" src="/js/player-page.js?v=20260717-fanhao-playinfo-01"></script>
+    <script type="module" src="/js/player-page.js?v=20260724-player-person-search-02"></script>
   </body>
 </html>

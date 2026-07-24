@@ -14,6 +14,7 @@ $SetupDownloader = Join-Path $ModuleDir "setup-downloader.ps1"
 $LogDir = Join-Path $ModuleDir "logs"
 $OutLog = Join-Path $LogDir "manager.out.log"
 $ErrLog = Join-Path $LogDir "manager.err.log"
+$HealthUrl = "http://127.0.0.1:$Port/api/health"
 $StateUrl = "http://127.0.0.1:$Port/api/state"
 
 if (-not (Test-Path -LiteralPath $AppFile)) {
@@ -46,23 +47,44 @@ function Get-ManagerState {
   }
 }
 
-function Test-LoopbackPortOpen {
-  param([Parameter(Mandatory = $true)][int]$LocalPort)
-
-  $client = [System.Net.Sockets.TcpClient]::new()
+function Get-ManagerHealth {
   try {
-    $connection = $client.ConnectAsync("127.0.0.1", $LocalPort)
-    return $connection.Wait(300) -and $client.Connected
+    return Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2
   } catch {
-    return $false
-  } finally {
-    $client.Dispose()
+    # Compatibility with a manager process started before /api/health existed.
+    $legacyState = Get-ManagerState
+    if (-not $legacyState) { return $null }
+    return [pscustomobject]@{
+      ok = $true
+      paths = $legacyState.paths
+      legacyState = $legacyState
+    }
   }
 }
 
-$existingState = Get-ManagerState
-if ($existingState -and -not $Restart) {
-  $runningBase = [System.IO.Path]::GetFullPath([string]$existingState.paths.base)
+function Get-ListeningProcessId {
+  param([Parameter(Mandatory = $true)][int]$LocalPort)
+
+  $netstatPath = Join-Path $env:SystemRoot "System32\netstat.exe"
+  if (-not (Test-Path -LiteralPath $netstatPath -PathType Leaf)) {
+    $netstatCommand = Get-Command netstat.exe -ErrorAction Stop
+    $netstatPath = $netstatCommand.Source
+  }
+
+  $escapedPort = [regex]::Escape([string]$LocalPort)
+  foreach ($line in (& $netstatPath -ano -p TCP 2>$null)) {
+    if ($line -match "^\s*TCP\s+\S+:$escapedPort\s+\S+\s+LISTENING\s+(\d+)\s*$") {
+      return [int]$Matches[1]
+    }
+  }
+
+  return $null
+}
+
+$existingHealth = Get-ManagerHealth
+$existingState = $existingHealth.legacyState
+if ($existingHealth.ok -and -not $Restart) {
+  $runningBase = [System.IO.Path]::GetFullPath([string]$existingHealth.paths.base)
   if (-not $runningBase.Equals($ModuleDir, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Port $Port is served by another download-manager installation: $runningBase"
   }
@@ -71,25 +93,21 @@ if ($existingState -and -not $Restart) {
   exit 0
 }
 
-$listener = $null
-if (Test-LoopbackPortOpen -LocalPort $Port) {
-  $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-  if (-not $listener) {
-    throw "Port $Port is in use, but its owning process could not be identified."
-  }
-}
-if ($listener) {
+$listenerProcessId = Get-ListeningProcessId -LocalPort $Port
+if ($null -ne $listenerProcessId) {
   if (-not $Restart) {
-    throw "Port $Port is already in use by PID $($listener.OwningProcess), but /api/state is not healthy."
+    throw "Port $Port is already in use by PID $listenerProcessId, but /api/state is not healthy."
   }
+  if (-not $existingState) { $existingState = Get-ManagerState }
   $active = [bool]($existingState.download.active -or $existingState.extract.active)
   if ($active) {
     throw "The download manager is busy. Stop the active task before restarting it."
   }
-  Stop-Process -Id $listener.OwningProcess -Force
+  Stop-Process -Id $listenerProcessId -Force
   for ($i = 0; $i -lt 20; $i++) {
     Start-Sleep -Milliseconds 250
-    if (-not (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) { break }
+    $stillListeningProcessId = Get-ListeningProcessId -LocalPort $Port
+    if ($null -eq $stillListeningProcessId) { break }
   }
 }
 
@@ -123,16 +141,17 @@ $process = Start-Process -FilePath $PythonCommand.Source `
 for ($i = 0; $i -lt 60; $i++) {
   Start-Sleep -Milliseconds 500
   if ($process.HasExited) { break }
-  $state = Get-ManagerState
-  if ($state) { break }
+  $health = Get-ManagerHealth
+  if ($health.ok) { break }
 }
 
-if (-not $state) {
+if (-not $health.ok) {
   Write-Host "Douyin Download Manager failed to become ready."
   if (Test-Path -LiteralPath $ErrLog) { Get-Content -LiteralPath $ErrLog -Tail 40 }
   exit 1
 }
 
+$state = Get-ManagerState
 Write-Host "Douyin Download Manager started: http://127.0.0.1:$Port (PID $($process.Id))"
 Write-Host "Database: $($state.paths.database)"
 if ($Open) { Start-Process "http://localhost:$Port/#home" }
