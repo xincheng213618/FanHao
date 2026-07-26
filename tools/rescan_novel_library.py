@@ -61,8 +61,11 @@ class BookRecord:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Rebuild data/novels.sqlite from local TXT files.")
+    parser = argparse.ArgumentParser(description="Import local TXT novels into data/novels.sqlite.")
     parser.add_argument("--root", action="append", dest="roots", help="TXT novel directory. Can be repeated.")
+    parser.add_argument("--file", help="Reimport one TXT file without rebuilding the whole library.")
+    parser.add_argument("--source-root", help="Source root for --file; defaults to the file's parent directory.")
+    parser.add_argument("--book-id", help="Expected stable book ID for --file.")
     parser.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Target SQLite database path.")
     parser.add_argument("--limit", type=int, default=0, help="Maximum TXT files to scan. 0 means all.")
     parser.add_argument("--dry-run", action="store_true", help="Parse and summarize without writing the database.")
@@ -450,8 +453,166 @@ def write_records(db_path: Path, roots: list[Path], records: Iterable[BookRecord
         conn.close()
 
 
+def write_record(db_path: Path, book: BookRecord) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM novel_chapters WHERE book_id = ?", (book.id,))
+        conn.execute("DELETE FROM novel_book_deletions WHERE book_id = ?", (book.id,))
+        conn.execute(
+            """
+            INSERT INTO novel_books (
+              id, title, author, category, source_root, source_path, relative_path, file_name,
+              size_bytes, mtime_ms, encoding, char_count, chapter_count, first_chapter_id,
+              latest_chapter_id, latest_chapter_title, summary, tags_json, status, error, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              title = excluded.title,
+              author = excluded.author,
+              category = excluded.category,
+              source_root = excluded.source_root,
+              source_path = excluded.source_path,
+              relative_path = excluded.relative_path,
+              file_name = excluded.file_name,
+              size_bytes = excluded.size_bytes,
+              mtime_ms = excluded.mtime_ms,
+              encoding = excluded.encoding,
+              char_count = excluded.char_count,
+              chapter_count = excluded.chapter_count,
+              first_chapter_id = excluded.first_chapter_id,
+              latest_chapter_id = excluded.latest_chapter_id,
+              latest_chapter_title = excluded.latest_chapter_title,
+              summary = excluded.summary,
+              tags_json = excluded.tags_json,
+              status = excluded.status,
+              error = excluded.error,
+              updated_at = excluded.updated_at
+            """,
+            (
+                book.id,
+                book.title,
+                book.author,
+                book.category,
+                book.source_root,
+                book.source_path,
+                book.relative_path,
+                book.file_name,
+                book.size_bytes,
+                book.mtime_ms,
+                book.encoding,
+                book.char_count,
+                book.chapter_count,
+                book.first_chapter_id,
+                book.latest_chapter_id,
+                book.latest_chapter_title,
+                book.summary,
+                book.tags_json,
+                book.status,
+                book.error,
+                book.updated_at,
+            ),
+        )
+        conn.executemany(
+            """
+            INSERT INTO novel_chapters (id, book_id, chapter_index, title, content, char_count, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    f"{book.id}-{chapter.index:05d}",
+                    book.id,
+                    chapter.index,
+                    chapter.title,
+                    chapter.content,
+                    len(chapter.content),
+                    book.updated_at,
+                )
+                for chapter in book.chapters
+            ],
+        )
+        override = conn.execute(
+            "SELECT title, author, category, summary FROM novel_book_overrides WHERE book_id = ?",
+            (book.id,),
+        ).fetchone()
+        if override:
+            conn.execute(
+                "UPDATE novel_books SET title = ?, author = ?, category = ?, summary = ? WHERE id = ?",
+                (override[0] or book.title, override[1] or "", override[2] or book.category, override[3] or "", book.id),
+            )
+        progress = conn.execute(
+            "SELECT chapter_index, scroll_ratio, updated_at FROM novel_reading_state WHERE book_id = ?",
+            (book.id,),
+        ).fetchone()
+        if progress:
+            if book.chapter_count <= 0:
+                conn.execute("DELETE FROM novel_reading_state WHERE book_id = ?", (book.id,))
+            else:
+                previous_index = max(1, int(progress[0] or 1))
+                chapter_index = min(previous_index, book.chapter_count)
+                conn.execute(
+                    """
+                    UPDATE novel_reading_state
+                    SET chapter_id = ?, chapter_index = ?, scroll_ratio = ?, updated_at = ?
+                    WHERE book_id = ?
+                    """,
+                    (
+                        f"{book.id}-{chapter_index:05d}",
+                        chapter_index,
+                        float(progress[1] or 0) if chapter_index == previous_index else 0,
+                        progress[2] or book.updated_at,
+                        book.id,
+                    ),
+                )
+        conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('schema_version', '4')")
+        conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)", (book.updated_at,))
+        conn.execute("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('last_reimported_at', ?)", (book.updated_at,))
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("PRAGMA optimize")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def main() -> int:
     args = parse_args()
+    if args.file:
+        source_path = Path(args.file).resolve()
+        source_root = Path(args.source_root).resolve() if args.source_root else source_path.parent
+        try:
+            source_path.relative_to(source_root)
+        except ValueError as error:
+            raise SystemExit(f"--file must stay inside --source-root: {source_path}") from error
+        record = build_book(source_root, source_path)
+        if record.status != "ok" or not record.chapters:
+            raise SystemExit(record.error or "TXT 解析后没有有效章节")
+        if args.book_id and record.id != str(args.book_id).strip():
+            raise SystemExit(f"stable book ID changed: expected {args.book_id}, got {record.id}")
+        if not args.dry_run:
+            write_record(Path(args.db), record)
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "dryRun": bool(args.dry_run),
+                    "db": str(Path(args.db)),
+                    "bookId": record.id,
+                    "title": record.title,
+                    "chapters": record.chapter_count,
+                    "chars": record.char_count,
+                    "bytes": record.size_bytes,
+                    "encoding": record.encoding,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+
     roots = [Path(item) for item in (args.roots or [str(root) for root in DEFAULT_ROOTS])]
     files = iter_txt_files(roots, args.limit)
     counters = {"books": 0, "parsed": 0, "errors": 0, "chapters": 0, "chars": 0, "bytes": 0}

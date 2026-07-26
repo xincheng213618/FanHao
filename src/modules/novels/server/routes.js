@@ -4,6 +4,7 @@ export async function routeNovelApi(req, res, url, deps) {
     novelStore,
     notFound,
     readJsonBody,
+    reimportService,
     requireLocalAdmin = () => true,
     sendJson,
     novelUploadMaxBodyBytes = 80 * 1024 * 1024
@@ -181,6 +182,23 @@ export async function routeNovelApi(req, res, url, deps) {
       sendJson(res, 201, { ok: true, ...data });
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "小说上传失败" });
+    }
+    return true;
+  }
+
+  const reimportMatch = /^\/api\/novels\/([^/]+)\/reimport$/.exec(url.pathname);
+  if (reimportMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req, novelUploadMaxBodyBytes);
+      const data = await reimportService.reimport(decodeURIComponent(reimportMatch[1]), body || {});
+      if (!data) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, data.kind === "collection" ? 202 : 200, { ok: true, ...data });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "小说重新导入失败" });
     }
     return true;
   }

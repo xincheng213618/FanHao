@@ -1,8 +1,7 @@
-import { createNovelCollectionAdmin } from "./collection-admin.js";
+import { createNovelCollectionAdmin } from "./collection-admin.js?v=20260727-novel-task-log-04";
 
-const NOVEL_CATALOG_PAGE_SIZE = 120;
 const NOVEL_BOOK_PAGE_SIZE = 48;
-const NOVEL_AUTHOR_PAGE_SIZE = 60;
+const NOVEL_RANKING_PAGE_SIZE = 48;
 const NOVEL_CHAPTER_CACHE_LIMIT = 8;
 
 export function createNovelPage(deps) {
@@ -24,8 +23,6 @@ export function createNovelPage(deps) {
     syncRouteAfterNavigation
   } = deps;
 
-  let searchTimer = null;
-  let catalogSearchTimer = null;
   let catalogRequestId = 0;
   let progressTimer = null;
   let progressWrite = Promise.resolve();
@@ -134,7 +131,7 @@ export function createNovelPage(deps) {
     state.novel.category = route.novelCategory || "all";
     state.novel.sort = route.novelSort || "updated";
     state.novel.author = route.novelAuthor || "";
-    state.novel.mode = ["mine", "authors", "author", "search", "rankings", "manage"].includes(route.novelMode) ? route.novelMode : "books";
+    state.novel.mode = ["mine", "author", "rankings", "manage"].includes(route.novelMode) ? route.novelMode : "books";
     state.novel.page = Math.max(0, Number(route.novelPage || 0));
   }
 
@@ -162,8 +159,9 @@ export function createNovelPage(deps) {
   async function loadNovels(options = {}) {
     ensureState();
     if (state.novel.mode === "mine") state.novel.sort = "progress";
-    if (state.novel.mode === "rankings") state.novel.sort = "chars";
-    const append = Boolean(options.append && state.novel.data && !state.novel.loading && !state.novel.loadingMore);
+    if (state.novel.mode === "rankings" && !["chars", "updated"].includes(state.novel.sort)) state.novel.sort = "chars";
+    const paged = state.novel.mode === "rankings";
+    const append = Boolean(!paged && options.append && state.novel.data && !state.novel.loading && !state.novel.loadingMore);
     if (options.append && !append) return;
     if (append) state.novel.loadingMore = true;
     else state.novel.loading = true;
@@ -178,26 +176,31 @@ export function createNovelPage(deps) {
     if (["books", "author"].includes(state.novel.mode) && state.novel.category && state.novel.category !== "all") params.set("category", state.novel.category);
     if (state.novel.mode === "books" && state.novel.author) params.set("author", state.novel.author);
     if (state.novel.sort && state.novel.sort !== "updated") params.set("sort", state.novel.sort);
-    const pageSize = state.novel.mode === "authors" ? NOVEL_AUTHOR_PAGE_SIZE : NOVEL_BOOK_PAGE_SIZE;
+    const pageSize = paged ? NOVEL_RANKING_PAGE_SIZE : NOVEL_BOOK_PAGE_SIZE;
     params.set("limit", String(pageSize));
-    const existingEntries = state.novel.mode === "authors" ? state.novel.data?.authors || [] : state.novel.data?.books || [];
-    params.set("offset", String(append ? existingEntries.length : 0));
-    const endpoint = state.novel.mode === "authors"
-      ? "/api/novels/authors"
-      : state.novel.mode === "author" && state.novel.author
-        ? `/api/novels/authors/${encodeURIComponent(state.novel.author)}`
-        : state.novel.mode === "manage"
-          ? "/api/novels/summary"
-          : "/api/novels";
-    const emptySearch = state.novel.mode === "search" && !state.novel.query;
-    const requestEndpoint = emptySearch ? "/api/novels/summary" : endpoint;
-    const response = await api(`${requestEndpoint}${!emptySearch && state.novel.mode !== "manage" && params.toString() ? `?${params}` : ""}`);
-    const data = state.novel.mode === "manage" || emptySearch
+    const existingEntries = state.novel.data?.books || [];
+    params.set("offset", String(paged ? state.novel.page * pageSize : append ? existingEntries.length : 0));
+    const endpoint = state.novel.mode === "author" && state.novel.author
+      ? `/api/novels/authors/${encodeURIComponent(state.novel.author)}`
+      : state.novel.mode === "manage"
+        ? "/api/novels/summary"
+        : "/api/novels";
+    const response = await api(`${endpoint}${state.novel.mode !== "manage" && params.toString() ? `?${params}` : ""}`);
+    const data = state.novel.mode === "manage"
       ? { summary: response, books: [], total: 0, limit: pageSize, offset: 0 }
       : response;
+    if (paged && Number(data.total || 0) > 0) {
+      const pageCount = Math.max(1, Math.ceil(Number(data.total || 0) / pageSize));
+      const clampedPage = Math.min(pageCount - 1, state.novel.page);
+      if (clampedPage !== state.novel.page && !options.pageClamped) {
+        state.novel.page = clampedPage;
+        state.novel.loading = false;
+        state.novel.loadingMore = false;
+        return loadNovels({ ...options, pageClamped: true });
+      }
+    }
     if (append) {
-      const key = state.novel.mode === "authors" ? "authors" : "books";
-      state.novel.data = { ...data, [key]: [...existingEntries, ...(data[key] || [])] };
+      state.novel.data = { ...data, books: [...existingEntries, ...(data.books || [])] };
     } else {
       state.novel.data = data;
     }
@@ -209,26 +212,22 @@ export function createNovelPage(deps) {
     state.novel.summary = data.summary || state.novel.summary;
     state.novel.loading = false;
     state.novel.loadingMore = false;
-    const loadedEntries = state.novel.mode === "authors" ? state.novel.data?.authors || [] : state.novel.data?.books || [];
-    state.novel.hasMore = !["manage"].includes(state.novel.mode) && !emptySearch && loadedEntries.length < Number(data.total || 0);
-    state.novel.page = 0;
+    const loadedEntries = state.novel.data?.books || [];
+    state.novel.hasMore = !paged && state.novel.mode !== "manage" && loadedEntries.length < Number(data.total || 0);
+    if (!paged) state.novel.page = 0;
     state.novel.status = state.novel.mode === "manage"
       ? ""
-      : emptySearch
-        ? "输入书名、作者、分类或简介关键词开始搜索。"
       : data.total
         ? ""
-        : state.novel.mode === "authors"
-          ? "没有匹配的作者。"
-          : state.novel.mode === "author"
-            ? "这位作者还没有作品。"
-            : state.novel.mode === "mine"
-              ? "还没有阅读记录。"
-            : state.novel.mode === "search"
-              ? "没有找到匹配的小说。"
-              : state.novel.mode === "rankings"
-                ? "排行榜暂时没有小说。"
-            : "这里还没有小说，请到“管理”页面刷新书库。";
+        : state.novel.mode === "author"
+          ? "这位作者还没有作品。"
+          : state.novel.mode === "mine"
+            ? "还没有阅读记录。"
+            : state.novel.mode === "rankings"
+              ? "排行榜暂时没有小说。"
+              : state.novel.query
+                ? "没有找到匹配的小说。"
+                : "这里还没有小说，请到“管理”页面刷新书库。";
     renderStats();
     renderView();
     if (!options.skipRoute) {
@@ -283,10 +282,7 @@ export function createNovelPage(deps) {
     state.novel.catalogFilteredTotal = state.novel.catalogTotal;
     state.novel.catalogOffset = 0;
     resetCatalogState(data.book, state.novel.chapters, data.book?.progress?.chapterIndex || 1);
-    await loadRemoteCatalogPage({
-      anchor: data.book?.progress?.chapterIndex || 1,
-      render: false
-    });
+    await loadRemoteCatalogPage({ render: false });
     if (!isCurrentNavigation(navigation)) return false;
     finishNavigation(navigation);
     state.novel.loading = false;
@@ -357,9 +353,6 @@ export function createNovelPage(deps) {
     const progress = data.book?.progress;
     const restore = options.restoreProgress !== false && Number(progress?.chapterIndex || 0) === Number(data.chapter?.index || 0);
     state.novel.pendingScrollRatio = restore ? Number(progress?.scrollRatio || 0) : 0;
-    if (!state.novel.catalogQuery) {
-      state.novel.catalogPage = catalogPageForChapter(state.novel.chapters, data.chapter?.index, state.novel.catalogDescending);
-    }
     setReaderBodyClass();
     renderStats();
     renderView();
@@ -528,7 +521,7 @@ export function createNovelPage(deps) {
     els.workGrid.innerHTML = "";
     setReaderBodyClass();
     if (state.novel.loading && !state.novel.data && !state.novel.book && !state.novel.chapter) {
-      renderLoading("正在读取小说书库");
+      renderHomeLoading("正在读取小说书库");
       return;
     }
     if (state.novel.chapter) {
@@ -540,6 +533,19 @@ export function createNovelPage(deps) {
       return;
     }
     renderHome();
+  }
+
+  function renderHomeLoading(message) {
+    const shell = document.createElement("section");
+    shell.className = "novel-home";
+    shell.append(renderNovelMenu());
+
+    const loading = document.createElement("div");
+    loading.className = "novel-empty-card novel-home-loading";
+    loading.setAttribute("role", "status");
+    loading.textContent = message;
+    shell.append(loading);
+    els.workGrid.append(shell);
   }
 
   function renderLoading(message) {
@@ -557,17 +563,22 @@ export function createNovelPage(deps) {
     shell.append(renderNovelMenu());
 
     if (state.novel.mode === "manage") {
+      shell.classList.add("novel-home-manage");
       shell.append(renderManagementPage(summary));
+      els.workGrid.append(shell);
+      return;
+    }
+
+    if (state.novel.mode === "rankings") {
+      libraryObserver?.disconnect();
+      libraryObserver = null;
+      shell.append(renderRankingBoard(data));
       els.workGrid.append(shell);
       return;
     }
 
     if (state.novel.mode === "mine") {
       shell.append(renderNovelPageHeading("我的阅读", "阅读记录和继续阅读入口"));
-    } else if (state.novel.mode === "search") {
-      shell.append(renderNovelPageHeading("搜索小说", "集中查找书名、作者、分类和作品简介"));
-    } else if (state.novel.mode === "rankings") {
-      shell.append(renderNovelPageHeading("字数排行榜", "按照正文总字数从高到低排列"));
     }
 
     const head = document.createElement("div");
@@ -585,7 +596,7 @@ export function createNovelPage(deps) {
     eyebrow.className = "eyebrow";
     eyebrow.textContent = authorProfile ? "小说作者" : "本地小说";
     const title = document.createElement("h2");
-    title.textContent = authorProfile?.name || (state.novel.mode === "authors" ? "作者" : "小说书库");
+    title.textContent = authorProfile?.name || "小说书库";
     const meta = document.createElement("p");
     const totals = summary.totals || {};
     meta.textContent = authorProfile
@@ -596,24 +607,9 @@ export function createNovelPage(deps) {
 
     const controls = document.createElement("div");
     controls.className = "novel-controls";
-    const search = document.createElement("label");
-    search.className = "novel-search";
-    const searchInput = document.createElement("input");
-    searchInput.type = "search";
-    searchInput.placeholder = "搜索书名、作者、分类或简介";
-    searchInput.value = state.novel.query || "";
-    searchInput.addEventListener("input", () => {
-      state.novel.query = searchInput.value.trim();
-      state.novel.page = 0;
-      window.clearTimeout(searchTimer);
-      searchTimer = window.setTimeout(() => loadNovels({ replaceRoute: true }).catch(() => {}), 260);
-    });
-    search.append(searchInput);
     const sort = document.createElement("select");
     sort.className = "novel-sort";
-    const sortOptions = state.novel.mode === "authors"
-      ? [["books", "作品最多"], ["name", "作者名"], ["chapters", "章节最多"], ["size", "总量最大"], ["updated", "最近更新"]]
-      : [["updated", "最近更新"], ["chars", "字数最多"], ["progress", "最近阅读"], ["chapters", "章节最多"], ["size", "文件最大"], ["title", "书名"]];
+    const sortOptions = [["updated", "最近更新"], ["chars", "字数最多"], ["progress", "最近阅读"], ["chapters", "章节最多"], ["size", "文件最大"], ["title", "书名"]];
     for (const option of sortOptions) {
       const item = document.createElement("option");
       item.value = option[0];
@@ -626,8 +622,7 @@ export function createNovelPage(deps) {
       state.novel.page = 0;
       loadNovels({ replaceRoute: true }).catch(() => {});
     });
-    if (state.novel.mode === "search") controls.append(search);
-    if (!authorProfile && !["mine", "rankings"].includes(state.novel.mode)) controls.append(sort);
+    if (!authorProfile && state.novel.mode !== "mine") controls.append(sort);
     if (controls.childElementCount === 1) controls.classList.add("single");
 
     const categories = document.createElement("div");
@@ -639,19 +634,19 @@ export function createNovelPage(deps) {
       }
     }
 
-    const entries = state.novel.mode === "authors" ? data.authors || [] : data.books || [];
+    const entries = data.books || [];
     let list = state.novel.mode === "mine" ? renderRecent(entries) : null;
     if (!list) {
       list = document.createElement("div");
-      list.className = state.novel.mode === "authors" ? "novel-author-list" : "novel-book-list";
+      list.className = "novel-book-list";
       for (const [index, entry] of entries.entries()) {
-        list.append(state.novel.mode === "authors" ? renderAuthorRow(entry) : renderBookRow(entry, state.novel.mode === "rankings" ? index + 1 : 0));
+        list.append(renderBookRow(entry));
       }
     }
     if (!entries.length) {
       const empty = document.createElement("div");
       empty.className = "novel-empty-card";
-      empty.textContent = state.novel.status || (state.novel.mode === "authors" ? "没有匹配的作者。" : "没有匹配的小说。");
+      empty.textContent = state.novel.status || (state.novel.query ? "没有找到匹配的小说。" : "没有匹配的小说。");
       list.append(empty);
     }
 
@@ -712,21 +707,39 @@ export function createNovelPage(deps) {
     const nav = document.createElement("nav");
     nav.className = "novel-section-menu";
     nav.setAttribute("aria-label", "小说功能");
-    for (const [mode, label] of [["books", "书库"], ["mine", "我的"], ["authors", "作者"], ["search", "搜索"], ["rankings", "排行"], ["manage", "管理"]]) {
+    for (const [mode, label] of [["books", "书库"], ["mine", "我的"], ["rankings", "排行榜"], ["manage", "管理"]]) {
       const button = document.createElement("button");
       button.type = "button";
-      const active = mode === "authors" ? ["authors", "author"].includes(state.novel.mode) : state.novel.mode === mode;
+      const active = mode === "books" ? ["books", "author"].includes(state.novel.mode) : state.novel.mode === mode;
       button.className = active ? "active" : "";
       button.textContent = label;
       if (active) button.setAttribute("aria-current", "page");
       button.addEventListener("click", () => openNovelSection(mode));
       nav.append(button);
     }
+    const search = document.createElement("form");
+    search.className = "novel-section-search";
+    search.setAttribute("role", "search");
+    const input = document.createElement("input");
+    input.type = "search";
+    input.value = state.novel.query || "";
+    input.placeholder = "搜索书名、作者、分类或简介";
+    input.autocomplete = "off";
+    input.setAttribute("aria-label", "搜索小说");
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.textContent = "搜索";
+    search.append(input, submit);
+    search.addEventListener("submit", (event) => {
+      event.preventDefault();
+      openNovelSearch(input.value);
+    });
+    nav.append(search);
     return nav;
   }
 
   function openNovelSection(mode) {
-    if (!["books", "mine", "authors", "search", "rankings", "manage"].includes(mode)) return;
+    if (!["books", "mine", "rankings", "manage"].includes(mode)) return;
     if (mode !== "manage") collectionAdmin.stopPolling();
     flushProgress();
     invalidateNavigation();
@@ -737,7 +750,7 @@ export function createNovelPage(deps) {
     state.novel.category = "all";
     state.novel.author = "";
     state.novel.page = 0;
-    state.novel.sort = mode === "mine" ? "progress" : mode === "rankings" ? "chars" : mode === "authors" ? "books" : "updated";
+    state.novel.sort = mode === "mine" ? "progress" : mode === "rankings" ? "chars" : "updated";
     state.novel.data = null;
     loadNovels().catch((error) => {
       state.novel.loading = false;
@@ -746,139 +759,400 @@ export function createNovelPage(deps) {
     });
   }
 
+  function openNovelSearch(value) {
+    collectionAdmin.stopPolling();
+    flushProgress();
+    invalidateNavigation();
+    state.novel.book = null;
+    state.novel.chapter = null;
+    state.novel.mode = "books";
+    state.novel.query = String(value || "").trim();
+    state.novel.category = "all";
+    state.novel.author = "";
+    state.novel.page = 0;
+    state.novel.sort = "updated";
+    state.novel.data = null;
+    loadNovels().catch((error) => {
+      state.novel.loading = false;
+      state.novel.status = error.message || "搜索失败";
+      renderView();
+    });
+  }
+
   function renderManagementPage(summary = {}) {
     const panel = document.createElement("section");
     panel.className = "novel-management";
-    const header = document.createElement("div");
-    header.className = "novel-management-head";
-    const titleWrap = document.createElement("div");
-    const eyebrow = document.createElement("div");
-    eyebrow.className = "eyebrow";
-    eyebrow.textContent = "书库维护";
-    const title = document.createElement("h2");
-    title.textContent = "小说管理";
-    const description = document.createElement("p");
-    description.textContent = "上传本地 TXT，或重新扫描已配置的小说目录。阅读功能不受管理操作影响。";
-    titleWrap.append(eyebrow, title, description);
-    header.append(titleWrap);
+    const sections = new Set(["upload", "collect", "config"]);
+    state.novel.manageSection = sections.has(state.novel.manageSection) ? state.novel.manageSection : "collect";
+    const totals = summary.totals || {};
+    const shell = document.createElement("div");
+    shell.className = "novel-management-console";
+    const sidebar = document.createElement("aside");
+    sidebar.className = "novel-management-sidebar";
+    const brand = document.createElement("div");
+    brand.className = "novel-management-brand";
+    const brandMark = document.createElement("span");
+    brandMark.textContent = "TXT";
+    const brandCopy = document.createElement("div");
+    const brandTitle = document.createElement("strong");
+    brandTitle.textContent = "小说管理台";
+    const brandSubtitle = document.createElement("span");
+    brandSubtitle.textContent = "本地书库后台";
+    brandCopy.append(brandTitle, brandSubtitle);
+    brand.append(brandMark, brandCopy);
 
-    const actions = document.createElement("div");
-    actions.className = "novel-management-actions";
-    const uploadCard = document.createElement("article");
-    uploadCard.className = "novel-management-card";
-    const uploadTitle = document.createElement("h3");
-    uploadTitle.textContent = "上传 TXT";
-    const uploadText = document.createElement("p");
-    uploadText.textContent = "支持一次选择多个 TXT 文件，系统会自动识别编码并拆分章节。";
-    const uploadInput = document.createElement("input");
-    uploadInput.type = "file";
-    uploadInput.accept = ".txt,text/plain";
-    uploadInput.multiple = true;
-    uploadInput.className = "novel-upload-input";
-    const uploadButton = document.createElement("button");
-    uploadButton.type = "button";
-    uploadButton.className = "novel-primary-button";
-    uploadButton.textContent = state.novel.uploading ? "正在上传" : "选择 TXT 文件";
-    uploadButton.disabled = state.novel.uploading;
-    uploadButton.addEventListener("click", () => uploadInput.click());
-    uploadInput.addEventListener("change", () => {
-      const files = Array.from(uploadInput.files || []);
-      uploadInput.value = "";
-      uploadNovelFiles(files).catch((error) => {
-        state.novel.uploading = false;
-        state.novel.status = error.message || "上传失败";
+    const nav = document.createElement("nav");
+    nav.className = "novel-management-side-nav";
+    nav.setAttribute("aria-label", "小说管理功能");
+    const sectionItems = [
+      ["upload", "01", "书库上传", "TXT 导入与书库刷新"],
+      ["collect", "02", "采集任务", "队列、进度与运行日志"],
+      ["config", "03", "站点配置", "登录凭据与站点适配器"]
+    ];
+    for (const [value, index, label, description] of sectionItems) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "novel-management-side-item";
+      if (state.novel.manageSection === value) {
+        button.classList.add("active");
+        button.setAttribute("aria-current", "page");
+      }
+      const number = document.createElement("span");
+      number.className = "novel-management-side-index";
+      number.textContent = index;
+      const copy = document.createElement("span");
+      copy.className = "novel-management-side-copy";
+      const strong = document.createElement("strong");
+      strong.textContent = label;
+      const small = document.createElement("small");
+      small.textContent = description;
+      copy.append(strong, small);
+      button.append(number, copy);
+      button.addEventListener("click", () => {
+        if (state.novel.manageSection === value) return;
+        state.novel.manageSection = value;
         renderView();
       });
-    });
-    uploadCard.append(uploadTitle, uploadText, uploadInput, uploadButton);
+      nav.append(button);
+    }
 
-    const refreshCard = document.createElement("article");
-    refreshCard.className = "novel-management-card";
-    const refreshTitle = document.createElement("h3");
-    refreshTitle.textContent = "刷新书库";
-    const refreshText = document.createElement("p");
-    refreshText.textContent = "重新扫描小说目录。手工校正过的书名、作者、分类和简介会继续保留。";
-    const refreshButton = document.createElement("button");
-    refreshButton.type = "button";
-    refreshButton.className = "novel-secondary-button";
-    refreshButton.textContent = "打开刷新任务";
-    refreshButton.disabled = state.novel.uploading;
-    refreshButton.addEventListener("click", () => openAdminScript("novel-library-rescan"));
-    refreshCard.append(refreshTitle, refreshText, refreshButton);
-    actions.append(uploadCard, refreshCard);
+    const sidebarStatus = document.createElement("div");
+    sidebarStatus.className = "novel-management-sidebar-status";
+    const sidebarStatusLabel = document.createElement("span");
+    sidebarStatusLabel.textContent = "书库状态";
+    const sidebarStatusValue = document.createElement("strong");
+    sidebarStatusValue.textContent = `${formatNumber(totals.books || 0)} 本 · ${formatNumber(totals.chapters || 0)} 章`;
+    const sidebarStatusTime = document.createElement("small");
+    sidebarStatusTime.textContent = summary.scannedAt ? `更新 ${formatDateTime(summary.scannedAt)}` : "尚未扫描";
+    sidebarStatus.append(sidebarStatusLabel, sidebarStatusValue, sidebarStatusTime);
+    sidebar.append(brand, nav, sidebarStatus);
 
-    const totals = summary.totals || {};
-    const status = document.createElement("div");
-    status.className = "novel-management-status";
-    status.textContent = state.novel.status || `当前共 ${formatNumber(totals.books || 0)} 本、${formatNumber(totals.chapters || 0)} 章；最近扫描：${summary.scannedAt ? formatDateTime(summary.scannedAt) : "暂无记录"}`;
-    panel.append(header, actions, status, collectionAdmin.render());
+    const main = document.createElement("main");
+    main.className = "novel-management-main";
+    if (state.novel.manageSection === "upload") {
+      const header = document.createElement("header");
+      header.className = "novel-management-page-head";
+      const eyebrow = document.createElement("div");
+      eyebrow.className = "eyebrow";
+      eyebrow.textContent = "书库维护";
+      const title = document.createElement("h2");
+      title.textContent = "书库上传";
+      const description = document.createElement("p");
+      description.textContent = "批量导入 TXT 小说，查看书库规模并执行完整扫描。";
+      header.append(eyebrow, title, description);
+
+      const overview = document.createElement("section");
+      overview.className = "novel-management-overview";
+      const metrics = document.createElement("div");
+      metrics.className = "novel-management-metrics";
+      for (const [label, value] of [
+        ["书籍", formatNumber(totals.books || 0)],
+        ["章节", formatNumber(totals.chapters || 0)],
+        ["正文", formatNumber(totals.chars || 0)],
+        ["最近扫描", summary.scannedAt ? formatDateTime(summary.scannedAt) : "暂无记录"]
+      ]) {
+        const item = document.createElement("div");
+        const span = document.createElement("span");
+        span.textContent = label;
+        const strong = document.createElement("strong");
+        strong.textContent = String(value);
+        item.append(span, strong);
+        metrics.append(item);
+      }
+
+      const uploadCard = document.createElement("section");
+      uploadCard.className = "novel-management-action-card";
+      const uploadCopy = document.createElement("div");
+      const uploadTitle = document.createElement("h3");
+      uploadTitle.textContent = "导入本地小说";
+      const uploadDescription = document.createElement("p");
+      uploadDescription.textContent = "支持一次选择多个 TXT 文件；上传完成后会自动解析书名、作者与章节。";
+      uploadCopy.append(uploadTitle, uploadDescription);
+      const actions = document.createElement("div");
+      actions.className = "novel-management-quick-actions";
+      const uploadInput = document.createElement("input");
+      uploadInput.type = "file";
+      uploadInput.accept = ".txt,text/plain";
+      uploadInput.multiple = true;
+      uploadInput.className = "novel-upload-input";
+      const uploadButton = document.createElement("button");
+      uploadButton.type = "button";
+      uploadButton.className = "novel-primary-button";
+      uploadButton.textContent = state.novel.uploading ? "正在上传" : "选择 TXT 文件";
+      uploadButton.disabled = state.novel.uploading;
+      uploadButton.addEventListener("click", () => uploadInput.click());
+      uploadInput.addEventListener("change", () => {
+        const files = Array.from(uploadInput.files || []);
+        uploadInput.value = "";
+        uploadNovelFiles(files).catch((error) => {
+          state.novel.uploading = false;
+          state.novel.status = error.message || "上传失败";
+          renderView();
+        });
+      });
+      const refreshButton = document.createElement("button");
+      refreshButton.type = "button";
+      refreshButton.className = "novel-secondary-button";
+      refreshButton.textContent = "刷新整本书库";
+      refreshButton.disabled = state.novel.uploading;
+      refreshButton.addEventListener("click", () => openAdminScript("novel-library-rescan"));
+      actions.append(uploadInput, uploadButton, refreshButton);
+      uploadCard.append(uploadCopy, actions);
+      overview.append(metrics);
+      main.append(header, overview, uploadCard);
+    } else {
+      main.append(collectionAdmin.render({ section: state.novel.manageSection }));
+    }
+    if (state.novel.status) {
+      const status = document.createElement("div");
+      status.className = "novel-management-status";
+      status.textContent = state.novel.status;
+      main.prepend(status);
+    }
+    shell.append(sidebar, main);
+    panel.append(shell);
     return panel;
+  }
+
+  function renderRankingBoard(data = {}) {
+    const books = Array.isArray(data.books) ? data.books : [];
+    const panel = document.createElement("section");
+    panel.className = "novel-ranking-board";
+
+    const toolbar = document.createElement("header");
+    toolbar.className = "novel-ranking-toolbar";
+    const heading = document.createElement("div");
+    heading.className = "novel-ranking-heading";
+    const title = document.createElement("h2");
+    title.textContent = "排行榜";
+    const description = document.createElement("p");
+    const total = Math.max(0, Number(data.total || 0));
+    const limit = Math.max(1, Number(data.limit || NOVEL_RANKING_PAGE_SIZE));
+    const pageCount = Math.max(1, Math.ceil(total / limit));
+    description.textContent = `共 ${formatNumber(total)} 本 · 第 ${formatNumber(state.novel.page + 1)} / ${formatNumber(pageCount)} 页`;
+    heading.append(title, description);
+
+    const sorts = document.createElement("div");
+    sorts.className = "novel-ranking-sorts";
+    sorts.setAttribute("role", "group");
+    sorts.setAttribute("aria-label", "排行榜排序");
+    for (const [value, label, titleText] of [
+      ["updated", "按日期", "按照书库更新时间从新到旧排序"],
+      ["chars", "按字数", "按照正文总字数从高到低排序"]
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = state.novel.sort === value ? "active" : "";
+      button.textContent = label;
+      button.title = titleText;
+      button.setAttribute("aria-pressed", state.novel.sort === value ? "true" : "false");
+      button.addEventListener("click", () => {
+        if (state.novel.sort === value) return;
+        state.novel.sort = value;
+        state.novel.page = 0;
+        loadNovels({ replaceRoute: true }).catch(() => {});
+      });
+      sorts.append(button);
+    }
+    toolbar.append(heading, sorts);
+    panel.append(toolbar);
+
+    const tableWrap = document.createElement("div");
+    tableWrap.className = "novel-ranking-table-wrap";
+    const table = document.createElement("table");
+    table.className = "novel-ranking-table";
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    for (const label of ["序号", "小说分类", "书名", "最新章节", "作者", "字数", "更新时间"]) {
+      const cell = document.createElement("th");
+      cell.scope = "col";
+      cell.textContent = label;
+      headRow.append(cell);
+    }
+    head.append(headRow);
+    table.append(head);
+
+    const body = document.createElement("tbody");
+    const rankingOffset = Math.max(0, Number(data.offset || state.novel.page * limit));
+    for (const [index, book] of books.entries()) {
+      body.append(renderRankingRow(book, rankingOffset + index + 1));
+    }
+    if (!books.length) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 7;
+      cell.className = "novel-ranking-empty";
+      cell.textContent = state.novel.status || "排行榜暂时没有小说。";
+      row.append(cell);
+      body.append(row);
+    }
+    table.append(body);
+    tableWrap.append(table);
+    panel.append(tableWrap);
+
+    const pagination = renderLibraryPagination(data);
+    if (pagination) panel.append(pagination);
+    return panel;
+  }
+
+  function renderRankingRow(book, rank) {
+    const row = document.createElement("tr");
+    row.className = "novel-ranking-row";
+    row.tabIndex = 0;
+    row.setAttribute("aria-label", `第 ${rank} 名，《${book.title}》`);
+
+    const rankCell = document.createElement("td");
+    rankCell.className = `novel-ranking-position${rank <= 3 ? " top" : ""}`;
+    rankCell.textContent = formatNumber(rank);
+
+    const category = document.createElement("td");
+    category.textContent = book.category || "未分类";
+
+    const titleCell = document.createElement("td");
+    const title = document.createElement("button");
+    title.type = "button";
+    title.className = "novel-ranking-book";
+    title.textContent = book.title || "未命名小说";
+    title.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openBook(book.id);
+    });
+    titleCell.append(title);
+
+    const latestCell = document.createElement("td");
+    if (book.latestChapterTitle && book.chapterCount) {
+      const latest = document.createElement("button");
+      latest.type = "button";
+      latest.className = "novel-ranking-latest";
+      latest.textContent = book.latestChapterTitle;
+      latest.title = "打开最新章节";
+      latest.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openChapter(book.id, book.chapterCount, { restoreProgress: false });
+      });
+      latestCell.append(latest);
+    } else {
+      latestCell.textContent = "—";
+    }
+
+    const authorCell = document.createElement("td");
+    const authorName = String(book.author || "").trim();
+    if (authorName) {
+      const author = document.createElement("button");
+      author.type = "button";
+      author.className = "novel-ranking-author";
+      author.textContent = authorName;
+      author.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openNovelAuthor(authorName);
+      });
+      authorCell.append(author);
+    } else {
+      authorCell.textContent = "未知作者";
+    }
+
+    const chars = document.createElement("td");
+    chars.className = "novel-ranking-number";
+    chars.textContent = formatNumber(book.charCount || 0);
+
+    const updated = document.createElement("td");
+    updated.className = "novel-ranking-date";
+    updated.textContent = formatNovelDate(book.updatedAt);
+
+    row.append(rankCell, category, titleCell, latestCell, authorCell, chars, updated);
+    row.addEventListener("click", () => openBook(book.id));
+    row.addEventListener("keydown", (event) => {
+      if (event.target !== row || !["Enter", " "].includes(event.key)) return;
+      event.preventDefault();
+      openBook(book.id);
+    });
+    return row;
   }
 
   function renderLibraryPagination(data = {}) {
     const total = Math.max(0, Number(data.total || 0));
-    const limit = Math.max(1, Number(data.limit || (state.novel.mode === "authors" ? NOVEL_AUTHOR_PAGE_SIZE : NOVEL_BOOK_PAGE_SIZE)));
+    const limit = Math.max(1, Number(data.limit || NOVEL_RANKING_PAGE_SIZE));
     const pageCount = Math.max(1, Math.ceil(total / limit));
     if (pageCount <= 1) return null;
     const page = Math.max(0, Math.min(pageCount - 1, Number(state.novel.page || 0)));
-    const start = total ? page * limit + 1 : 0;
-    const end = Math.min(total, start + limit - 1);
     const nav = document.createElement("nav");
     nav.className = "novel-library-pagination";
-    nav.setAttribute("aria-label", state.novel.mode === "authors" ? "作者分页" : "书库分页");
+    nav.setAttribute("aria-label", "排行榜分页");
     const previous = document.createElement("button");
     previous.type = "button";
+    previous.className = "novel-pagination-direction";
     previous.textContent = "上一页";
     previous.disabled = page <= 0;
     previous.addEventListener("click", () => changeLibraryPage(page - 1));
-    const select = document.createElement("select");
-    select.setAttribute("aria-label", "选择页码");
-    for (let index = 0; index < pageCount; index += 1) {
-      const option = document.createElement("option");
-      option.value = String(index);
-      option.textContent = `第 ${formatNumber(index + 1)} 页`;
-      option.selected = index === page;
-      select.append(option);
+
+    const pages = document.createElement("div");
+    pages.className = "novel-pagination-pages";
+    let previousPage = -1;
+    for (const index of rankingPaginationPages(pageCount, page)) {
+      if (previousPage >= 0 && index - previousPage > 1) {
+        const ellipsis = document.createElement("span");
+        ellipsis.className = "novel-pagination-ellipsis";
+        ellipsis.textContent = "…";
+        ellipsis.setAttribute("aria-hidden", "true");
+        pages.append(ellipsis);
+      }
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = index === page ? "active" : "";
+      button.textContent = formatNumber(index + 1);
+      button.setAttribute("aria-label", `第 ${formatNumber(index + 1)} 页`);
+      if (index === page) button.setAttribute("aria-current", "page");
+      button.addEventListener("click", () => changeLibraryPage(index));
+      pages.append(button);
+      previousPage = index;
     }
-    select.addEventListener("change", () => changeLibraryPage(Number(select.value || 0)));
+
     const next = document.createElement("button");
     next.type = "button";
+    next.className = "novel-pagination-direction";
     next.textContent = "下一页";
     next.disabled = page >= pageCount - 1;
     next.addEventListener("click", () => changeLibraryPage(page + 1));
-    const status = document.createElement("span");
-    status.textContent = `${formatNumber(start)}–${formatNumber(end)} / ${formatNumber(total)}`;
-    nav.append(previous, select, next, status);
+    nav.append(previous, pages, next);
     return nav;
   }
 
+  function rankingPaginationPages(pageCount, page) {
+    const pages = new Set([0, 1, pageCount - 2, pageCount - 1]);
+    for (let index = page - 3; index <= page + 3; index += 1) pages.add(index);
+    return [...pages].filter((index) => index >= 0 && index < pageCount).sort((a, b) => a - b);
+  }
+
   function changeLibraryPage(page) {
-    const nextPage = Math.max(0, Number(page || 0));
+    const total = Math.max(0, Number(state.novel.data?.total || 0));
+    const limit = Math.max(1, Number(state.novel.data?.limit || NOVEL_RANKING_PAGE_SIZE));
+    const lastPage = Math.max(0, Math.ceil(total / limit) - 1);
+    const nextPage = Math.max(0, Math.min(lastPage, Number(page || 0)));
     if (nextPage === state.novel.page) return;
     state.novel.page = nextPage;
     loadNovels({ replaceRoute: true }).then(() => {
       document.querySelector(".novel-home")?.scrollIntoView({ block: "start", behavior: "auto" });
     }).catch(() => {});
-  }
-
-  function renderAuthorRow(author) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "novel-author-card";
-    const avatar = document.createElement("span");
-    avatar.className = "novel-author-avatar";
-    avatar.textContent = String(author.name || "作").slice(0, 1).toLocaleUpperCase();
-    const body = document.createElement("span");
-    const name = document.createElement("strong");
-    name.textContent = author.name || "未知作者";
-    const meta = document.createElement("small");
-    meta.textContent = `${formatNumber(author.bookCount || 0)} 本 · ${formatNumber(author.chapterCount || 0)} 章 · ${formatBytes(author.sizeBytes || 0)}`;
-    body.append(name, meta);
-    const open = document.createElement("span");
-    open.textContent = "查看作品 →";
-    button.append(avatar, body, open);
-    button.addEventListener("click", () => openNovelAuthor(author.name));
-    return button;
   }
 
   function openNovelAuthor(authorName) {
@@ -1087,12 +1361,17 @@ export function createNovelPage(deps) {
     download.className = "novel-secondary-button";
     download.textContent = "下载TXT";
     download.addEventListener("click", (event) => downloadBook(book, event));
+    const reimport = document.createElement("button");
+    reimport.type = "button";
+    reimport.className = "novel-secondary-button";
+    reimport.textContent = "重新导入";
+    reimport.addEventListener("click", () => openBookReimportDialog(book));
     const correct = document.createElement("button");
     correct.type = "button";
     correct.className = "novel-secondary-button";
     correct.textContent = "校正信息";
     correct.addEventListener("click", () => openBookCorrectionDialog(book));
-    actions.append(start, catalogButton, download, correct);
+    actions.append(start, catalogButton, download, reimport, correct);
     info.append(title, meta, metrics, actions);
     const side = document.createElement("aside");
     side.className = "novel-detail-reading";
@@ -1157,14 +1436,187 @@ export function createNovelPage(deps) {
     } else {
       grid.append(createCatalogBrowser(chapters, {
         compact: false,
-        meta: catalogMeta,
-        serverPaged: state.novel.catalogRemotePaged
+        meta: catalogMeta
       }));
     }
     catalog.append(catalogHead, grid);
 
     shell.append(hero, intro, catalog);
     els.workGrid.append(shell);
+  }
+
+  function openBookReimportDialog(book) {
+    if (!book?.id) return;
+    const sourcePath = String(book.sourcePath || "");
+    const sourceKind = sourcePath.startsWith("collector://")
+      ? "collector"
+      : sourcePath.startsWith("upload://")
+        ? "upload"
+        : "local";
+    const dialog = document.createElement("dialog");
+    dialog.className = "novel-correction-dialog novel-reimport-dialog";
+    const form = document.createElement("form");
+    form.method = "dialog";
+    form.addEventListener("submit", (event) => event.preventDefault());
+    const header = document.createElement("div");
+    header.className = "novel-correction-head";
+    const heading = document.createElement("h2");
+    heading.textContent = `重新导入《${book.title}》`;
+    const close = document.createElement("button");
+    close.type = "button";
+    close.setAttribute("aria-label", "关闭");
+    close.textContent = "×";
+    close.addEventListener("click", () => dialog.close());
+    header.append(heading, close);
+
+    const copy = document.createElement("div");
+    copy.className = "novel-reimport-copy";
+    const description = document.createElement("p");
+    description.textContent = sourceKind === "collector"
+      ? "选择一个 TXT 覆盖当前章节；也可以按原网址重新创建完整采集任务。"
+      : sourceKind === "upload"
+        ? "选择新的 TXT 覆盖当前章节，并重新识别编码和章节。"
+        : "选择一个 TXT 覆盖当前章节；也可以直接重新读取登记的原始文件。";
+    const preserved = document.createElement("p");
+    preserved.className = "novel-reimport-preserved";
+    preserved.textContent = "阅读进度和手工校正的书名、作者、分类、简介都会保留。";
+    const source = document.createElement("div");
+    source.className = "novel-reimport-source";
+    const sourceLabel = document.createElement("span");
+    sourceLabel.textContent = sourceKind === "collector" ? "原始网址" : sourceKind === "upload" ? "当前文件" : "原始文件";
+    const sourceValue = document.createElement("code");
+    sourceValue.textContent = sourceKind === "collector"
+      ? book.relativePath || "未记录"
+      : sourceKind === "upload"
+        ? book.fileName || "上传 TXT"
+        : sourcePath || "未记录";
+    sourceValue.title = sourceValue.textContent;
+    source.append(sourceLabel, sourceValue);
+    copy.append(description, preserved, source);
+
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".txt,text/plain";
+    input.className = "novel-upload-input";
+    const message = document.createElement("div");
+    message.className = "novel-correction-message";
+    message.setAttribute("role", "status");
+    const footer = document.createElement("div");
+    footer.className = "novel-correction-actions";
+    const sourceAction = sourceKind === "upload" ? null : document.createElement("button");
+    if (sourceAction) {
+      sourceAction.type = "button";
+      sourceAction.className = "novel-secondary-button";
+      sourceAction.textContent = sourceKind === "collector" ? "按原网址重新采集" : "直接读取原文件";
+    } else {
+      footer.classList.add("single");
+    }
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "novel-secondary-button";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", () => dialog.close());
+    const primary = document.createElement("button");
+    primary.type = "button";
+    primary.className = "novel-primary-button";
+    primary.textContent = "选择 TXT 重新导入";
+    let completedKind = "";
+
+    async function execute(body = {}, operation = "source") {
+      close.disabled = true;
+      cancel.disabled = true;
+      primary.disabled = true;
+      if (sourceAction) sourceAction.disabled = true;
+      primary.textContent = operation === "source" && sourceKind === "collector" ? "正在创建任务" : "正在重新导入";
+      message.classList.remove("success");
+      message.textContent = operation === "source" && sourceKind === "collector"
+        ? "正在匹配采集器…"
+        : "正在读取并重新拆分章节…";
+      try {
+        const result = await api(`/api/novels/${encodeURIComponent(book.id)}/reimport`, {
+          method: "POST",
+          body
+        });
+        completedKind = result.kind || "book";
+        if (completedKind === "collection") {
+          message.textContent = result.message || "已创建重新采集任务";
+          state.novel.status = message.textContent;
+          primary.textContent = "查看采集任务";
+        } else {
+          for (const key of chapterCache.keys()) {
+            if (key.startsWith(`${book.id}::`)) chapterCache.delete(key);
+          }
+          await openBook(book.id, { skipRoute: true });
+          message.textContent = result.message || `重新导入完成：${result.book?.chapterCount || 0} 章`;
+          primary.textContent = "完成";
+        }
+        message.classList.add("success");
+        close.disabled = false;
+        cancel.disabled = false;
+        cancel.textContent = "关闭";
+        primary.disabled = false;
+        if (sourceAction) sourceAction.disabled = true;
+      } catch (error) {
+        message.textContent = error.message || "重新导入失败";
+        close.disabled = false;
+        cancel.disabled = false;
+        primary.disabled = false;
+        primary.textContent = "重新选择 TXT";
+        if (sourceAction) sourceAction.disabled = false;
+      }
+    }
+
+    input.addEventListener("change", () => {
+      const file = Array.from(input.files || [])[0];
+      input.value = "";
+      if (!file) return;
+      if (!/\.txt$/i.test(file.name) && !String(file.type || "").startsWith("text/")) {
+        message.textContent = "请选择 TXT 文件";
+        return;
+      }
+      primary.disabled = true;
+      if (sourceAction) sourceAction.disabled = true;
+      message.textContent = `正在读取 ${file.name}…`;
+      readNovelFileText(file)
+        .then((decoded) => execute(
+          {
+            fileName: file.name,
+            sizeBytes: file.size,
+            encoding: decoded.encoding,
+            text: decoded.text
+          },
+          "file"
+        ))
+        .catch((error) => {
+          message.textContent = error.message || "TXT 文件读取失败";
+          primary.disabled = false;
+          if (sourceAction) sourceAction.disabled = false;
+        });
+    });
+    sourceAction?.addEventListener("click", () => execute({}, "source"));
+    primary.addEventListener("click", () => {
+      if (completedKind === "collection") {
+        dialog.close();
+        openNovelSection("manage");
+        return;
+      }
+      if (completedKind === "book") {
+        dialog.close();
+        return;
+      }
+      input.click();
+    });
+    const primaryActions = document.createElement("div");
+    primaryActions.className = "novel-correction-primary-actions";
+    primaryActions.append(cancel, primary);
+    if (sourceAction) footer.append(sourceAction);
+    footer.append(primaryActions);
+    form.append(header, copy, input, message, footer);
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    dialog.append(form);
+    document.body.append(dialog);
+    dialog.showModal();
+    primary.focus();
   }
 
   function openBookCorrectionDialog(book) {
@@ -1403,8 +1855,7 @@ export function createNovelPage(deps) {
       panel.append(error);
     } else {
       panel.append(createCatalogBrowser(state.novel.chapters || [], {
-        compact: true,
-        serverPaged: state.novel.catalogRemotePaged
+        compact: true
       }));
     }
     wrap.append(panel);
@@ -1416,7 +1867,6 @@ export function createNovelPage(deps) {
 
   function createCatalogBrowser(chapters, options = {}) {
     const source = Array.isArray(chapters) ? chapters : [];
-    const serverPaged = Boolean(options.serverPaged);
     const shell = document.createElement("div");
     shell.className = `novel-catalog-browser-inner${options.compact ? " compact" : ""}`;
     const tools = document.createElement("div");
@@ -1429,14 +1879,6 @@ export function createNovelPage(deps) {
     const order = document.createElement("button");
     order.type = "button";
     order.className = "novel-catalog-order";
-    const previous = document.createElement("button");
-    previous.type = "button";
-    previous.textContent = "上一段";
-    const range = document.createElement("select");
-    range.setAttribute("aria-label", "目录分段");
-    const next = document.createElement("button");
-    next.type = "button";
-    next.textContent = "下一段";
     const status = document.createElement("span");
     status.className = "novel-catalog-status";
     const list = document.createElement("div");
@@ -1444,44 +1886,21 @@ export function createNovelPage(deps) {
 
     function refresh() {
       const query = String(state.novel.catalogQuery || "").trim().toLocaleLowerCase("zh-Hans-CN");
-      let filtered = source;
-      let visible = source;
-      let filteredTotal = Number(state.novel.catalogFilteredTotal || source.length);
-      if (!serverPaged) {
-        filtered = query
-          ? source.filter((chapter) => String(chapter.title || "").toLocaleLowerCase("zh-Hans-CN").includes(query) || String(chapter.index || "").includes(query))
-          : [...source];
-        if (state.novel.catalogDescending) filtered.reverse();
-        filteredTotal = filtered.length;
-      }
-      const pageCount = Math.max(1, Math.ceil(filteredTotal / NOVEL_CATALOG_PAGE_SIZE));
-      if (serverPaged) state.novel.catalogPage = Math.floor(Number(state.novel.catalogOffset || 0) / NOVEL_CATALOG_PAGE_SIZE);
-      state.novel.catalogPage = Math.max(0, Math.min(pageCount - 1, Number(state.novel.catalogPage || 0)));
-      const start = state.novel.catalogPage * NOVEL_CATALOG_PAGE_SIZE;
-      if (!serverPaged) visible = filtered.slice(start, start + NOVEL_CATALOG_PAGE_SIZE);
+      const visible = query
+        ? source.filter((chapter) => String(chapter.title || "").toLocaleLowerCase("zh-Hans-CN").includes(query) || String(chapter.index || "").includes(query))
+        : [...source];
+      if (state.novel.catalogDescending) visible.reverse();
+      const filteredTotal = visible.length;
 
       order.textContent = state.novel.catalogDescending ? "倒序" : "正序";
       order.title = state.novel.catalogDescending ? "切换为正序" : "切换为倒序";
-      previous.disabled = state.novel.catalogPage <= 0;
-      next.disabled = state.novel.catalogPage >= pageCount - 1;
-      range.innerHTML = "";
-      for (let page = 0; page < pageCount; page += 1) {
-        const first = page * NOVEL_CATALOG_PAGE_SIZE + 1;
-        const last = Math.min(filteredTotal, first + NOVEL_CATALOG_PAGE_SIZE - 1);
-        const option = document.createElement("option");
-        option.value = String(page);
-        option.textContent = filteredTotal ? `${formatNumber(first)}–${formatNumber(last)}` : "无结果";
-        option.selected = page === state.novel.catalogPage;
-        range.append(option);
-      }
-      range.disabled = pageCount <= 1;
       status.textContent = query
         ? `找到 ${formatNumber(filteredTotal)} 章`
-        : `每段 ${formatNumber(NOVEL_CATALOG_PAGE_SIZE)} 章`;
+        : `全部 ${formatNumber(source.length)} 章`;
       if (options.meta) {
         options.meta.textContent = query
-          ? `找到 ${formatNumber(filteredTotal)} / ${formatNumber(serverPaged ? state.novel.catalogTotal : source.length)} 章`
-          : `共 ${formatNumber(serverPaged ? state.novel.catalogTotal : source.length)} 章`;
+          ? `找到 ${formatNumber(filteredTotal)} / ${formatNumber(source.length)} 章`
+          : `共 ${formatNumber(source.length)} 章`;
       }
 
       list.innerHTML = "";
@@ -1496,54 +1915,14 @@ export function createNovelPage(deps) {
 
     search.addEventListener("input", () => {
       state.novel.catalogQuery = search.value;
-      state.novel.catalogPage = 0;
-      if (!serverPaged) {
-        refresh();
-        return;
-      }
-      window.clearTimeout(catalogSearchTimer);
-      catalogSearchTimer = window.setTimeout(() => {
-        loadRemoteCatalogPage({ page: 0, query: search.value }).catch(() => {});
-      }, 260);
+      refresh();
     });
     order.addEventListener("click", () => {
       state.novel.catalogDescending = !state.novel.catalogDescending;
-      state.novel.catalogPage = 0;
-      if (serverPaged) {
-        loadRemoteCatalogPage({ page: 0, anchor: state.novel.catalogQuery ? 0 : state.novel.chapter?.index }).catch(() => {});
-      } else {
-        refresh();
-      }
-    });
-    previous.addEventListener("click", () => {
-      const page = Math.max(0, state.novel.catalogPage - 1);
-      if (serverPaged) loadRemoteCatalogPage({ page }).catch(() => {});
-      else {
-        state.novel.catalogPage = page;
-        refresh();
-      }
-    });
-    next.addEventListener("click", () => {
-      const page = state.novel.catalogPage + 1;
-      if (serverPaged) loadRemoteCatalogPage({ page }).catch(() => {});
-      else {
-        state.novel.catalogPage = page;
-        refresh();
-      }
-    });
-    range.addEventListener("change", () => {
-      const page = Math.max(0, Number(range.value || 0));
-      if (serverPaged) loadRemoteCatalogPage({ page }).catch(() => {});
-      else {
-        state.novel.catalogPage = page;
-        refresh();
-      }
+      refresh();
     });
 
-    const pagination = document.createElement("div");
-    pagination.className = "novel-catalog-pagination";
-    pagination.append(previous, range, next);
-    tools.append(search, order, pagination, status);
+    tools.append(search, order, status);
     shell.append(tools, list);
     refresh();
     return shell;
@@ -1553,11 +1932,11 @@ export function createNovelPage(deps) {
     state.novel.catalogBookId = book?.id || "";
     state.novel.catalogQuery = "";
     state.novel.catalogDescending = false;
-    state.novel.catalogPage = catalogPageForChapter(chapters, chapterIndex, false);
+    state.novel.catalogPage = 0;
     state.novel.catalogRemotePaged = false;
     state.novel.catalogTotal = Number(chapters.length || book?.chapterCount || 0);
     state.novel.catalogFilteredTotal = state.novel.catalogTotal;
-    state.novel.catalogOffset = state.novel.catalogPage * NOVEL_CATALOG_PAGE_SIZE;
+    state.novel.catalogOffset = 0;
   }
 
   function compactBookProgress(book) {
@@ -1575,7 +1954,7 @@ export function createNovelPage(deps) {
     panel.append(settingRow("字体", fontButtons()));
     panel.append(settingRow("字号", stepper("fontSize", 16, 30, 1, `${state.novel.settings.fontSize}px`)));
     panel.append(settingRow("行距", stepper("lineHeight", 1.5, 2.4, 0.1, state.novel.settings.lineHeight.toFixed(1))));
-    panel.append(settingRow("宽度", stepper("width", 680, 980, 20, `${state.novel.settings.width}px`)));
+    panel.append(settingRow("宽度", stepper("width", 760, 1080, 20, `${state.novel.settings.width}px`)));
     const close = document.createElement("button");
     close.type = "button";
     close.className = "novel-secondary-button";
@@ -1779,9 +2158,6 @@ export function createNovelPage(deps) {
       state.novel.catalogLoading = true;
       state.novel.catalogError = "";
     }
-    if (opening && !state.novel.catalogQuery) {
-      state.novel.catalogPage = catalogPageForChapter(state.novel.chapters, state.novel.chapter?.index, state.novel.catalogDescending);
-    }
     if (state.novel.catalogOpen) {
       state.novel.settingsOpen = false;
     }
@@ -1793,30 +2169,22 @@ export function createNovelPage(deps) {
 
   function hasCatalogForCurrentChapter() {
     const total = Number(state.novel.book?.chapterCount || 0);
-    if (total > 0 && Number(state.novel.chapters?.length || 0) >= total) return true;
-    if (!state.novel.catalogRemotePaged || state.novel.catalogBookId !== state.novel.book?.id) return false;
-    if (state.novel.catalogQuery) return true;
-    const current = Number(state.novel.chapter?.index || 0);
-    return current > 0 && state.novel.chapters.some((chapter) => Number(chapter.index) === current);
+    if (state.novel.catalogBookId !== state.novel.book?.id) return false;
+    return total === 0 || Number(state.novel.chapters?.length || 0) >= total;
   }
 
   async function loadReaderCatalog() {
-    return loadRemoteCatalogPage({ anchor: state.novel.chapter?.index || 1 });
+    return loadRemoteCatalogPage();
   }
 
   async function loadRemoteCatalogPage(options = {}) {
     const bookId = String(state.novel.book?.id || "");
     if (!bookId) return;
     const requestId = ++catalogRequestId;
-    const query = String(options.query ?? state.novel.catalogQuery ?? "").replace(/\s+/g, " ").trim();
-    state.novel.catalogQuery = query;
     const params = new URLSearchParams({
-      limit: String(NOVEL_CATALOG_PAGE_SIZE),
-      order: state.novel.catalogDescending ? "desc" : "asc"
+      all: "1",
+      order: "asc"
     });
-    if (query) params.set("q", query);
-    if (!query && Number(options.anchor || 0) > 0) params.set("anchor", String(options.anchor));
-    else params.set("offset", String(Math.max(0, Number(options.page ?? state.novel.catalogPage ?? 0)) * NOVEL_CATALOG_PAGE_SIZE));
     const ratio = state.novel.chapter ? currentReaderRatio() : 0;
     const detailScrollY = state.novel.chapter ? 0 : window.scrollY;
     const renderDetail = options.render !== false && Boolean(state.novel.book) && !state.novel.chapter;
@@ -1839,12 +2207,12 @@ export function createNovelPage(deps) {
         ? state.novel.chapters.find((chapter) => Number(chapter.index) === progressIndex)
         : null;
       if (progressChapter?.title) state.novel.progressChapterTitle = progressChapter.title;
-      state.novel.catalogRemotePaged = true;
+      state.novel.catalogRemotePaged = false;
       state.novel.catalogBookId = bookId;
       state.novel.catalogTotal = Number(data.total || state.novel.book?.chapterCount || 0);
-      state.novel.catalogFilteredTotal = Number(data.filteredTotal || 0);
-      state.novel.catalogOffset = Number(data.offset || 0);
-      state.novel.catalogPage = Math.floor(state.novel.catalogOffset / NOVEL_CATALOG_PAGE_SIZE);
+      state.novel.catalogFilteredTotal = state.novel.chapters.length;
+      state.novel.catalogOffset = 0;
+      state.novel.catalogPage = 0;
       state.novel.catalogError = "";
     } catch (error) {
       if (requestId !== catalogRequestId || bookId !== String(state.novel.book?.id || "")) return;
@@ -2032,15 +2400,6 @@ export function createNovelPage(deps) {
   };
 }
 
-function catalogPageForChapter(chapters, chapterIndex, descending = false) {
-  const source = Array.isArray(chapters) ? chapters : [];
-  if (!source.length) return 0;
-  const position = source.findIndex((chapter) => Number(chapter.index) === Number(chapterIndex));
-  if (position < 0) return 0;
-  const orderedPosition = descending ? source.length - position - 1 : position;
-  return Math.max(0, Math.floor(orderedPosition / NOVEL_CATALOG_PAGE_SIZE));
-}
-
 function readingProgress(book = {}, chapters = [], chapterIndex, scrollRatio) {
   const source = Array.isArray(chapters) ? chapters : [];
   const chapterCount = Math.max(1, Number(book.chapterCount || source.length || 1));
@@ -2060,6 +2419,17 @@ function clampRatio(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return 0;
   return Math.max(0, Math.min(1, number));
+}
+
+function formatNovelDate(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date).replaceAll("/", "-");
 }
 
 function paragraphsFromContent(content) {
@@ -2109,13 +2479,18 @@ function writeSettings(settings) {
 }
 
 function normalizeSettings(input = {}) {
+  const legacyWidth = clampNumber(input.width, 680, 980, 820);
+  const width = Number(input.widthVersion) >= 2
+    ? clampNumber(input.width, 760, 1080, 960)
+    : clampNumber(legacyWidth + 140, 760, 1080, 960);
   return {
     theme: ["paper", "green", "white"].includes(input.theme) ? input.theme : "paper",
     night: Boolean(input.night),
     font: ["yahei", "simsun", "kaiti"].includes(input.font) ? input.font : "yahei",
     fontSize: clampNumber(input.fontSize, 16, 30, 20),
     lineHeight: clampNumber(input.lineHeight, 1.5, 2.4, 1.9),
-    width: clampNumber(input.width, 680, 980, 820)
+    width,
+    widthVersion: 2
   };
 }
 

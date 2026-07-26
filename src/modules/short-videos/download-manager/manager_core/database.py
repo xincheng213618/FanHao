@@ -386,6 +386,10 @@ def migrate_link_preview_columns(conn: sqlite3.Connection) -> None:
         if name not in columns:
             conn.execute(f"ALTER TABLE links ADD COLUMN {name} {column_type}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_links_create_time ON links(create_time)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_links_profile_create_time "
+        "ON links(profile_id, create_time DESC)"
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_links_media_type ON links(media_type)")
 
 

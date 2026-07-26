@@ -179,6 +179,25 @@ export function createNovelCollectionStore({ dbPath } = {}) {
     return row ? publicTask(row) : null;
   }
 
+  function findReusableTask(input = {}) {
+    const startUrl = normalizeHttpUrl(input.url || input.startUrl);
+    const mode = TASK_MODES.has(String(input.mode || "")) ? String(input.mode) : "collect";
+    const row = getDb()
+      .prepare(
+        `
+        SELECT * FROM novel_collection_tasks
+        WHERE start_url = ? AND mode = ?
+        ORDER BY
+          CASE WHEN status IN ('queued', 'running', 'cancelling') THEN 0 ELSE 1 END,
+          updated_at DESC,
+          created_at DESC
+        LIMIT 1
+      `
+      )
+      .get(startUrl, mode);
+    return row ? publicTask(row) : null;
+  }
+
   function createTask(input = {}) {
     const resolved = resolveAdapter(input.url || input.startUrl, input.adapterId);
     const mode = TASK_MODES.has(String(input.mode || "")) ? String(input.mode) : "collect";
@@ -213,25 +232,69 @@ export function createNovelCollectionStore({ dbPath } = {}) {
     return getTask(id);
   }
 
-  function prepareTaskRun(id) {
+  function updateTaskDefinition(id, input = {}) {
+    const current = requireTask(id);
+    const resolved = resolveAdapter(input.url || input.startUrl || current.startUrl, input.adapterId || current.adapterId);
+    const mode = TASK_MODES.has(String(input.mode || "")) ? String(input.mode) : current.mode;
+    const options = normalizeTaskOptions(input.options || current.options || {}, mode);
+    const name = cleanText(input.name, 120) || current.name || `${mode === "test" ? "测试" : "采集"}：${resolved.adapter.name}`;
+    getDb()
+      .prepare(
+        `
+        UPDATE novel_collection_tasks
+        SET name = ?, adapter_id = ?, adapter_name = ?, adapter_snapshot_json = ?,
+            start_url = ?, mode = ?, options_json = ?, updated_at = ?
+        WHERE id = ?
+      `
+      )
+      .run(
+        name,
+        resolved.adapter.id,
+        resolved.adapter.name,
+        JSON.stringify(resolved.adapter),
+        resolved.url,
+        mode,
+        JSON.stringify(options),
+        new Date().toISOString(),
+        current.id
+      );
+    return getTask(current.id);
+  }
+
+  function prepareTaskRun(id, { preserveCheckpoint = false } = {}) {
     const current = requireTask(id);
     if (["running", "cancelling"].includes(current.status)) throw httpError(409, "任务正在运行");
     const currentAdapter = getAdapter(current.adapterId);
     const adapter = currentAdapter || current.adapterSnapshot;
     if (!adapter) throw httpError(400, "任务缺少可用适配器");
     const now = new Date().toISOString();
+    const checkpointCount = preserveCheckpoint ? current.checkpointCount : 0;
+    const checkpointUpdatedAt = preserveCheckpoint ? current.checkpointUpdatedAt : "";
+    const progressTotal = preserveCheckpoint ? Math.max(current.progressTotal, checkpointCount) : 0;
+    const message = checkpointCount ? `等待从已保存的 ${checkpointCount} 章继续` : "等待执行";
     getDb()
       .prepare(
         `
         UPDATE novel_collection_tasks
         SET adapter_name = ?, adapter_snapshot_json = ?, status = 'queued',
-            progress_current = 0, progress_total = 0, message = ?, book_id = '',
+            progress_current = ?, progress_total = ?, message = ?, book_id = '',
             result_json = '{}', error = '', log_tail = '', started_at = '', finished_at = '',
+            checkpoint_count = ?, checkpoint_updated_at = ?,
             updated_at = ?
         WHERE id = ?
       `
       )
-      .run(adapter.name, JSON.stringify(adapter), "等待执行", now, current.id);
+      .run(
+        adapter.name,
+        JSON.stringify(adapter),
+        checkpointCount,
+        progressTotal,
+        message,
+        checkpointCount,
+        checkpointUpdatedAt,
+        now,
+        current.id
+      );
     return getTask(current.id);
   }
 
@@ -266,6 +329,34 @@ export function createNovelCollectionStore({ dbPath } = {}) {
       `
       )
       .run(progressCurrent, progressTotal, message, logTail, now, current.id);
+    return getTask(current.id);
+  }
+
+  function updateCheckpoint(id, patch = {}) {
+    const current = requireTask(id);
+    const checkpointCount = clampInteger(patch.count, current.checkpointCount, 0, Number.MAX_SAFE_INTEGER);
+    const progressTotal = clampInteger(patch.total, current.progressTotal, 0, Number.MAX_SAFE_INTEGER);
+    const message = cleanText(patch.message, 500) || current.message;
+    const now = new Date().toISOString();
+    getDb()
+      .prepare(
+        `
+        UPDATE novel_collection_tasks
+        SET checkpoint_count = ?, checkpoint_updated_at = ?,
+            progress_current = MAX(progress_current, ?), progress_total = ?,
+            message = ?, updated_at = ?
+        WHERE id = ?
+      `
+      )
+      .run(
+        checkpointCount,
+        now,
+        checkpointCount,
+        progressTotal,
+        message,
+        now,
+        current.id
+      );
     return getTask(current.id);
   }
 
@@ -397,6 +488,7 @@ export function createNovelCollectionStore({ dbPath } = {}) {
     deleteAdapter,
     deleteTask,
     failTask,
+    findReusableTask,
     getAdapter,
     getTask,
     listAdapters,
@@ -409,6 +501,8 @@ export function createNovelCollectionStore({ dbPath } = {}) {
     resolveAdapter,
     summary,
     updateAdapter,
+    updateCheckpoint,
+    updateTaskDefinition,
     updateProgress
   };
 }
@@ -443,6 +537,8 @@ function ensureSchema(db) {
       result_json TEXT NOT NULL DEFAULT '{}',
       error TEXT NOT NULL DEFAULT '',
       log_tail TEXT NOT NULL DEFAULT '',
+      checkpoint_count INTEGER NOT NULL DEFAULT 0,
+      checkpoint_updated_at TEXT NOT NULL DEFAULT '',
       attempt INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       started_at TEXT NOT NULL DEFAULT '',
@@ -453,6 +549,19 @@ function ensureSchema(db) {
       ON novel_collection_tasks(status, created_at);
     CREATE INDEX IF NOT EXISTS idx_novel_collection_tasks_created
       ON novel_collection_tasks(created_at DESC);
+  `);
+  const taskColumns = new Set(
+    db.prepare("PRAGMA table_info(novel_collection_tasks)").all().map((column) => String(column.name || ""))
+  );
+  if (!taskColumns.has("checkpoint_count")) {
+    db.exec("ALTER TABLE novel_collection_tasks ADD COLUMN checkpoint_count INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!taskColumns.has("checkpoint_updated_at")) {
+    db.exec("ALTER TABLE novel_collection_tasks ADD COLUMN checkpoint_updated_at TEXT NOT NULL DEFAULT ''");
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_novel_collection_tasks_source
+      ON novel_collection_tasks(start_url, mode, updated_at DESC);
   `);
 }
 
@@ -550,6 +659,8 @@ function publicTask(row) {
     result: parseJsonObject(row.result_json),
     error: row.error || "",
     logTail: row.log_tail || "",
+    checkpointCount: Number(row.checkpoint_count || 0),
+    checkpointUpdatedAt: row.checkpoint_updated_at || "",
     attempt: Number(row.attempt || 0),
     createdAt: row.created_at || "",
     startedAt: row.started_at || "",

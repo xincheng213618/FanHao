@@ -31,7 +31,6 @@ export function createShortVideoFilterControls(deps) {
       if (normalizeDeleted(state.shortVideo.deleted) === nextDeleted) return;
       state.shortVideo.deleted = nextDeleted;
       state.shortVideo.current = null;
-      state.shortVideo.data = null;
       clearSelection();
       loadVideos({ replaceRoute: true }).catch(showError);
     });
@@ -64,7 +63,6 @@ export function createShortVideoFilterControls(deps) {
       if ((state.shortVideo.sort || "published") === nextSort) return;
       state.shortVideo.sort = nextSort;
       state.shortVideo.current = null;
-      state.shortVideo.data = null;
       clearSelection();
       loadVideos({ replaceRoute: true }).catch(showError);
     });

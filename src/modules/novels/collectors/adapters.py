@@ -43,6 +43,7 @@ COOL18_NOISE = [
 ALICESW_NOISE = [
     r"^(?:首页|文章|爱丽丝书屋|分类|最新章节|书架|排行|登录|注册|返回)",
     r"^(?:推荐|投票|加入书架|直达底部|快速导航)",
+    r"^[\ue000-\uf8ff]+$",
     r"(?:alicesw|爱丽丝书屋)",
     r"(?:验证码|访问验证|安全验证|当前访问行为)",
 ]
@@ -112,6 +113,14 @@ def collect_generic(url: str, config: dict[str, Any], context: CollectorContext)
     page_counts: list[int] = []
     completed: list[Chapter] = []
     for index, chapter in enumerate(chapters, 1):
+        cached = context.restore_chapter(chapter)
+        if cached:
+            cached.order = len(completed) + 1
+            completed.append(cached)
+            metadata = context.checkpoint_metadata(chapter.url)
+            page_counts.append(max(1, clamp_int(metadata.get("pageCount"), 1, 1, 200)))
+            context.progress(index, len(chapters), f"已从断点恢复：{cached.title}")
+            continue
         context.progress(index - 1, len(chapters), f"正在采集：{chapter.title}")
         content, page_count, page_title = collect_generic_chapter(chapter, config, context)
         if page_title:
@@ -123,6 +132,7 @@ def collect_generic(url: str, config: dict[str, Any], context: CollectorContext)
         chapter.order = len(completed) + 1
         completed.append(chapter)
         page_counts.append(page_count)
+        context.save_chapter(chapter, metadata={"pageCount": page_count}, total=len(chapters))
         context.progress(index, len(chapters), f"已完成：{chapter.title}")
         if index < len(chapters):
             context.pause()
@@ -280,6 +290,14 @@ def collect_diyibanzhu(url: str, config: dict[str, Any], context: CollectorConte
     completed: list[Chapter] = []
     total_pages = 0
     for index, chapter in enumerate(chapters, 1):
+        cached = context.restore_chapter(chapter)
+        if cached:
+            cached.order = len(completed) + 1
+            completed.append(cached)
+            metadata = context.checkpoint_metadata(chapter.url)
+            total_pages += max(1, clamp_int(metadata.get("pageCount"), 1, 1, 200))
+            context.progress(index, len(chapters), f"已从断点恢复：{cached.title}")
+            continue
         context.progress(index - 1, len(chapters), f"正在采集：{chapter.title}")
         first_html = context.fetch(chapter.url)
         page_urls = diyibanzhu_page_urls(first_html, chapter.url)
@@ -303,6 +321,7 @@ def collect_diyibanzhu(url: str, config: dict[str, Any], context: CollectorConte
             chapter.content = content
             chapter.order = len(completed) + 1
             completed.append(chapter)
+            context.save_chapter(chapter, metadata={"pageCount": len(page_urls)}, total=len(chapters))
         else:
             context.warning(f"章节正文为空：{chapter.title}")
         total_pages += len(page_urls)
@@ -405,16 +424,42 @@ def collect_alicesw(url: str, config: dict[str, Any], context: CollectorContext)
 
     completed: list[Chapter] = []
     for index, chapter in enumerate(chapters, 1):
+        cached = context.restore_chapter(chapter)
+        if cached:
+            cached.order = len(completed) + 1
+            completed.append(cached)
+            context.progress(index, len(chapters), f"已从断点恢复：{cached.title}")
+            continue
         context.progress(index - 1, len(chapters), f"正在采集：{chapter.title}")
         chapter_html = context.fetch(chapter.url)
         content_selector = first_available_selector(
             chapter_html,
-            ["#j_readMainWrap", "#ajaxchapter", ".text-wrap", ".main-text-wrap", "article", ".webBody", "div[class*='content']"],
+            [
+                ".j_readContent",
+                ".read-content",
+                "#ajaxchapter",
+                "[id^='ajaxchapter-']",
+                ".text-wrap",
+                ".main-text-wrap",
+                "#j_readMainWrap",
+                "article",
+                ".webBody",
+                "div[class*='content']",
+            ],
         )
         content = extract_content(
             chapter_html,
             content_selector,
-            remove_selectors=[".chapter-nav", ".book-info", ".recommend", ".bottom", ".top"],
+            remove_selectors=[
+                ".text-head",
+                ".text-info",
+                ".chapter-control",
+                ".chapter-nav",
+                ".book-info",
+                ".recommend",
+                ".bottom",
+                ".top",
+            ],
             line_patterns=ALICESW_NOISE,
             first_only=True,
         )
@@ -424,6 +469,7 @@ def collect_alicesw(url: str, config: dict[str, Any], context: CollectorContext)
             chapter.content = content
             chapter.order = len(completed) + 1
             completed.append(chapter)
+            context.save_chapter(chapter, total=len(chapters))
         context.progress(index, len(chapters), f"已完成：{chapter.title}")
         if index < len(chapters):
             context.pause()
@@ -460,6 +506,30 @@ def collect_cool18(url: str, config: dict[str, Any], context: CollectorContext) 
         queued.discard(key)
         if key in visited:
             continue
+        cached = context.restore_chapter(
+            Chapter(title=f"帖子 {len(chapters) + 1}", url=current_url)
+        )
+        if cached:
+            metadata = context.checkpoint_metadata(current_url)
+            if not series_title:
+                series_title = str(metadata.get("seriesTitle") or clean_cool18_series_title(cached.title))
+            if not author:
+                author = str(metadata.get("author") or "")
+            for saved_url in metadata.get("nextUrls") or []:
+                try:
+                    candidate = normalize_http_url(saved_url, current_url)
+                except CollectionError:
+                    continue
+                child_key = thread_key(candidate)
+                if same_host(url, candidate) and child_key not in visited and child_key not in queued:
+                    queue.append(candidate)
+                    queued.add(child_key)
+            cached.order = len(chapters) + 1
+            chapters.append(cached)
+            visited.add(key)
+            queue.sort(key=lambda item: cool18_url_sort_key(item))
+            context.progress(len(chapters), max_pages, f"已从断点恢复：{cached.title}")
+            continue
         context.progress(len(chapters), max_pages, f"正在采集帖子 {len(chapters) + 1}")
         html = context.fetch(current_url)
         soup = BeautifulSoup(html, "html.parser")
@@ -472,6 +542,7 @@ def collect_cool18(url: str, config: dict[str, Any], context: CollectorContext) 
         if not author:
             author = clean_author(selected_text(soup, ".sender", "作者"))
         root = soup.select_one("#content-section") or soup.select_one(".post-content") or soup.select_one("article") or soup
+        discovered_urls: list[str] = []
         for anchor in root.select("a[href]"):
             href = anchor.get("href") or ""
             if "threadview" not in href.lower():
@@ -481,6 +552,7 @@ def collect_cool18(url: str, config: dict[str, Any], context: CollectorContext) 
             if same_host(url, candidate) and child_key not in visited and child_key not in queued:
                 queue.append(candidate)
                 queued.add(child_key)
+                discovered_urls.append(candidate)
         content = extract_content(
             html,
             "#content-section, .post-content, article, .main-content",
@@ -498,7 +570,17 @@ def collect_cool18(url: str, config: dict[str, Any], context: CollectorContext) 
             first_only=True,
         )
         if content:
-            chapters.append(Chapter(title=page_title, url=current_url, content=content, order=len(chapters) + 1))
+            chapter = Chapter(title=page_title, url=current_url, content=content, order=len(chapters) + 1)
+            chapters.append(chapter)
+            context.save_chapter(
+                chapter,
+                metadata={
+                    "nextUrls": discovered_urls,
+                    "author": author,
+                    "seriesTitle": series_title,
+                },
+                total=max_pages,
+            )
         visited.add(key)
         queue.sort(key=lambda item: cool18_url_sort_key(item))
         context.progress(len(chapters), max_pages, f"已完成：{page_title}")

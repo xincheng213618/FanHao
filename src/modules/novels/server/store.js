@@ -445,7 +445,8 @@ export function createNovelStore(options = {}) {
       if (!book) return null;
       const query = String(url?.searchParams?.get("q") || "").replace(/\s+/g, " ").trim().slice(0, 80);
       const order = String(url?.searchParams?.get("order") || "asc").toLowerCase() === "desc" ? "desc" : "asc";
-      const limit = clampInteger(url?.searchParams?.get("limit"), 120, 20, 200);
+      const all = ["1", "true", "yes"].includes(String(url?.searchParams?.get("all") || "").toLowerCase());
+      const requestedLimit = clampInteger(url?.searchParams?.get("limit"), 120, 20, 200);
       const requestedOffset = clampInteger(url?.searchParams?.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
       const anchor = clampInteger(url?.searchParams?.get("anchor"), 0, 0, Number.MAX_SAFE_INTEGER);
       const where = ["book_id = ?"];
@@ -458,8 +459,9 @@ export function createNovelStore(options = {}) {
       const filteredTotal = Number(
         database.prepare(`SELECT COUNT(*) AS count FROM novel_chapters WHERE ${where.join(" AND ")}`).get(...params)?.count || 0
       );
-      let offset = requestedOffset;
-      if (!query && anchor > 0 && filteredTotal > 0) {
+      const limit = all ? Math.max(1, filteredTotal) : requestedLimit;
+      let offset = all ? 0 : requestedOffset;
+      if (!all && !query && anchor > 0 && filteredTotal > 0) {
         const clampedAnchor = Math.max(1, Math.min(filteredTotal, anchor));
         const position = order === "desc" ? filteredTotal - clampedAnchor : clampedAnchor - 1;
         offset = Math.floor(position / limit) * limit;
@@ -487,6 +489,7 @@ export function createNovelStore(options = {}) {
         offset,
         query,
         order,
+        all,
         firstIndex: chapters[0]?.index || 0,
         lastIndex: chapters[chapters.length - 1]?.index || 0
       };
@@ -578,6 +581,13 @@ export function createNovelStore(options = {}) {
     });
   }
 
+  function reimportBook(bookId, body = {}) {
+    return withDb((database) => {
+      const importedBookId = reimportBookIntoDb(database, bookId, body);
+      return importedBookId ? bookDetailFromDb(database, importedBookId) : null;
+    });
+  }
+
   function importCollectedBook(body = {}) {
     return withDb((database) => {
       const bookId = importCollectedBookIntoDb(database, body);
@@ -598,6 +608,7 @@ export function createNovelStore(options = {}) {
     invalidate,
     listAuthors,
     listBooks,
+    reimportBook,
     saveProgress,
     summary,
     updateBookMetadata,
@@ -781,6 +792,128 @@ function uploadBookIntoDb(database, body = {}) {
   return bookId;
 }
 
+function reimportBookIntoDb(database, bookId, body = {}) {
+  const current = database.prepare("SELECT * FROM novel_books WHERE id = ? AND status = 'ok'").get(bookId);
+  if (!current) return null;
+
+  const text = normalizeUploadText(body.text ?? body.content ?? decodeBase64Text(body.contentBase64 ?? body.content_base64));
+  if (!text) throw httpError(400, "重新导入内容为空");
+  if (text.length > MAX_UPLOAD_TEXT_CHARS) throw httpError(413, "重新导入文本太大");
+
+  const browserUpload = String(current.source_path || "").startsWith("upload://");
+  const fileName = safeFileName(
+    browserUpload
+      ? body.fileName || body.file_name || body.name || current.file_name
+      : current.file_name
+  );
+  const title = cleanTitle(body.title || (browserUpload ? path.parse(fileName).name : current.title));
+  const author = String(
+    Object.hasOwn(body, "author")
+      ? body.author || ""
+      : detectAuthor(text) || current.author || ""
+  ).trim().slice(0, 80);
+  const category = String(
+    Object.hasOwn(body, "category")
+      ? body.category || ""
+      : current.category || UPLOAD_SOURCE_ROOT
+  ).trim().slice(0, 80) || UPLOAD_SOURCE_ROOT;
+  const chapters = splitUploadedChapters(text);
+  const firstChapter = chapters[0];
+  const latestChapter = chapters[chapters.length - 1];
+  const summary = String(
+    Object.hasOwn(body, "summary")
+      ? body.summary || ""
+      : summarizeNovelText(chapters.slice(0, 2).map((chapter) => chapter.content).join("\n\n") || text)
+  ).replace(/\s+/g, " ").trim().slice(0, 280);
+  const sizeBytes = clampInteger(
+    body.sizeBytes ?? body.size_bytes,
+    Buffer.byteLength(text, "utf8"),
+    0,
+    Number.MAX_SAFE_INTEGER
+  );
+  const tags = [...new Set([...parseJsonArray(current.tags_json), category, current.source_root].filter(Boolean))];
+  const override = database
+    .prepare("SELECT title, author, category, summary FROM novel_book_overrides WHERE book_id = ?")
+    .get(bookId);
+  const now = new Date().toISOString();
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database.prepare("DELETE FROM novel_chapters WHERE book_id = ?").run(bookId);
+    database.prepare("DELETE FROM novel_book_deletions WHERE book_id = ?").run(bookId);
+    database
+      .prepare(
+        `
+        UPDATE novel_books
+        SET title = ?, author = ?, category = ?, relative_path = ?, file_name = ?,
+            size_bytes = ?, mtime_ms = ?, encoding = ?, char_count = ?, chapter_count = ?,
+            first_chapter_id = ?, latest_chapter_id = ?, latest_chapter_title = ?,
+            summary = ?, tags_json = ?, status = 'ok', error = '', updated_at = ?
+        WHERE id = ?
+      `
+      )
+      .run(
+        title,
+        author,
+        category,
+        browserUpload ? fileName : current.relative_path,
+        fileName,
+        sizeBytes,
+        Date.now(),
+        body.encoding || current.encoding || "browser-text",
+        text.length,
+        chapters.length,
+        chapterId(bookId, firstChapter.index),
+        chapterId(bookId, latestChapter.index),
+        latestChapter.title,
+        summary,
+        JSON.stringify(tags),
+        now,
+        bookId
+      );
+
+    const insertChapter = database.prepare(
+      `
+      INSERT INTO novel_chapters (id, book_id, chapter_index, title, content, char_count, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `
+    );
+    for (const chapter of chapters) {
+      insertChapter.run(
+        chapterId(bookId, chapter.index),
+        bookId,
+        chapter.index,
+        chapter.title,
+        chapter.content,
+        chapter.content.length,
+        now
+      );
+    }
+    if (override) {
+      database
+        .prepare("UPDATE novel_books SET title = ?, author = ?, category = ?, summary = ? WHERE id = ?")
+        .run(
+          override.title || title,
+          override.author || "",
+          override.category || category,
+          override.summary || "",
+          bookId
+        );
+    }
+    clampReadingProgress(database, bookId, chapters.length);
+    database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)").run(now);
+    database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('last_reimported_at', ?)").run(now);
+    database.exec("COMMIT");
+  } catch (error) {
+    try {
+      database.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+
+  return bookId;
+}
+
 function importCollectedBookIntoDb(database, body = {}) {
   const sourceUrl = normalizeCollectionUrl(body.sourceUrl || body.source_url || body.url);
   const title = cleanTitle(body.title || "网页小说");
@@ -890,6 +1023,7 @@ function importCollectedBookIntoDb(database, body = {}) {
           bookId
         );
     }
+    clampReadingProgress(database, bookId, chapters.length);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)").run(now);
     database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('last_collected_at', ?)").run(now);
     database.exec("COMMIT");
@@ -901,6 +1035,34 @@ function importCollectedBookIntoDb(database, body = {}) {
   }
 
   return bookId;
+}
+
+function clampReadingProgress(database, bookId, chapterCount) {
+  const progress = database
+    .prepare("SELECT chapter_index, scroll_ratio, updated_at FROM novel_reading_state WHERE book_id = ?")
+    .get(bookId);
+  if (!progress) return;
+  if (chapterCount <= 0) {
+    database.prepare("DELETE FROM novel_reading_state WHERE book_id = ?").run(bookId);
+    return;
+  }
+  const previousIndex = Math.max(1, Number(progress.chapter_index || 1));
+  const chapterIndex = Math.min(previousIndex, chapterCount);
+  database
+    .prepare(
+      `
+      UPDATE novel_reading_state
+      SET chapter_id = ?, chapter_index = ?, scroll_ratio = ?, updated_at = ?
+      WHERE book_id = ?
+    `
+    )
+    .run(
+      chapterId(bookId, chapterIndex),
+      chapterIndex,
+      chapterIndex === previousIndex ? Number(progress.scroll_ratio || 0) : 0,
+      progress.updated_at || new Date().toISOString(),
+      bookId
+    );
 }
 
 function normalizeCollectedChapters(value) {

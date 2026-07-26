@@ -12,7 +12,7 @@ import { createCollectionPage } from "../public/modules/fanhao/features/collecti
 import { createPlaybackPrefetch } from "../public/modules/fanhao/playback-prefetch.js";
 import { createSearchRequestService } from "../public/modules/fanhao/search-request-service.js";
 import { createLazyPersonProfile } from "../public/modules/fanhao/lazy-person-profile.js";
-import { createLazyAdminModal } from "../public/modules/system/lazy-admin-modal.js";
+import { adminUrl } from "../public/js/admin-navigation.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
 import { createPersonDetailService } from "../src/modules/fanhao/server/people/person-detail-service.js";
 import { removeLocalWorksFromLibrary } from "../src/modules/fanhao/server/people/person-library-service.js";
@@ -81,7 +81,9 @@ const indexHtml = read("public/index.html");
 const fanhaoEntry = read("public/fanhao-app.js");
 const standaloneEntry = read("public/standalone-app.js");
 const standaloneHost = read("public/js/standalone-host.js");
-const lazyAdminModalSource = read("public/modules/system/lazy-admin-modal.js");
+const adminStyles = read("public/modules/system/admin.css");
+const adminHtmlSource = read("public/admin.html");
+const adminPageSource = read("public/admin.js");
 const webApp = read("public/app.js");
 const codePrefixPageSource = read("public/modules/fanhao/code-prefix-page.js");
 const peoplePageSource = read("public/modules/fanhao/people-page.js");
@@ -120,14 +122,32 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
   assert(!fanhaoStyleList.includes(unrelatedStyle), `FanHao startup must not load unrelated styles: ${unrelatedStyle}`);
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
+assert(indexHtml.includes('html.app-module-loading body') && indexHtml.includes('classList.add("app-module-loading")'), "standalone routes must stay hidden until their module shell is ready");
+assert(indexHtml.includes('classList.remove("app-module-loading")'), "standalone boot failures must always release the initial visibility guard");
+assert(indexHtml.includes('document.documentElement.classList.add("app-module-loading")') && !indexHtml.includes('if (!shortVideoEntry) document.documentElement.classList.add("app-module-loading")'), "all shared-shell routes must use the initial visibility guard");
+assert(indexHtml.includes('id="currentPath">本地资料库</div>') && indexHtml.includes('id="currentTitle">资料库</h2>'), "the static shell must not expose a stale drive letter before boot");
+assert(adminStyles.includes('.admin-modal[aria-hidden="true"]') && adminStyles.includes('.detail-drawer[aria-hidden="true"]'), "closed overlays must be removed from layout instead of remaining faintly visible");
+assert(indexHtml.includes('id="topAdminLink" href="/admin#overview">设置与运维</a>'), "the library shell must expose one combined settings and operations entry");
+assert(!indexHtml.includes('id="topRescanButton"') && !indexHtml.includes('id="adminModal"') && !indexHtml.includes("脚本与维护后台"), "the retired duplicate admin modal must not remain in the shared shell");
+assert(adminUrl("overview") === "/admin#overview", "admin navigation must support the overview section");
+assert(adminUrl("scripts", { scriptId: "novel-library-rescan" }) === "/admin?script=novel-library-rescan#scripts", "admin navigation must deep-link to a selected script");
+assert(adminPageSource.includes('params.get("script")') && adminPageSource.includes("applyPendingScriptDefaults()"), "the admin page must restore script deep links and their pending defaults");
+assert(adminHtmlSource.includes('class="app-module-loading"') && adminHtmlSource.includes('html.app-module-loading body'), "the admin page must hide its incomplete shell during startup");
+assert(adminHtmlSource.includes('await import("/admin.js?v=20260727-initial-route-reveal-01")') && adminHtmlSource.includes('classList.remove("app-module-loading")'), "the admin page must release its visibility guard after startup");
+assert(adminPageSource.includes("await init().catch"), "the admin page must finish its initial data load before becoming visible");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260726-work-sort-01'), "work sorting changes must refresh the FanHao browser entry");
+assert(indexHtml.includes('/fanhao-app.js?v=20260727-admin-merge-01'), "FanHao shell changes must refresh the browser entry");
 assert(indexHtml.includes('/modules/fanhao/work-cards.css?v=20260717-fanhao-viewport-render-01'), "viewport rendering styles must use a fresh browser URL");
-assert(fanhaoEntry.includes('app.js?v=20260726-work-sort-01'), "work sorting changes must refresh the FanHao app module");
+assert(fanhaoEntry.includes('app.js?v=20260727-admin-merge-01'), "FanHao shell changes must refresh the app module");
+assert(webApp.includes('await bootApp().catch') && webApp.includes('classList.remove("app-module-loading")'), "FanHao must reveal the page only after its initial route is rendered");
 assert(webApp.includes('index.js?v=20260726-work-sort-01'), "work sorting changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
+const standaloneInitialRouteIndex = standaloneHost.indexOf("await host.applyRoute(initialRoute)");
+const standaloneRevealIndex = standaloneHost.indexOf('classList.remove("app-module-loading")');
+assert(standaloneInitialRouteIndex >= 0 && standaloneRevealIndex > standaloneInitialRouteIndex, "standalone routes must remain hidden until their complete initial route is ready");
+assert(!standaloneHost.includes("window.requestAnimationFrame(resolve)"), "standalone startup must not reveal an intermediate loading DOM after one animation frame");
 assert(standaloneHost.includes("routeApplication.catch(() => {}).then(() => applyRouteNow(next))"), "standalone history restores must be serialized");
 for (const modulePath of ["content-index/gallery-page", "content-index/gallery-renderer", "music/music-page", "novels/novel-page", "tools/tools-page"]) {
   assert(standaloneHost.includes(`modules/${modulePath}.js`), `standalone host must route ${modulePath}`);
@@ -135,10 +155,9 @@ for (const modulePath of ["content-index/gallery-page", "content-index/gallery-r
 }
 assert(!webApp.includes("loadStandaloneFactories"), "FanHao runtime must not own standalone factory loading");
 assert(!webApp.includes("standaloneFactories"), "FanHao runtime must not retain standalone factories");
-assert(webApp.includes("createLazyAdminModal") && webApp.includes('await import("./modules/system/admin-modal.js?v='), "FanHao startup must defer the admin console module until the first admin action");
-assert(!webApp.includes('import { createAdminModal }'), "FanHao startup must not statically import the admin console");
-assert(lazyAdminModalSource.includes("let instancePromise = null") && lazyAdminModalSource.includes("instancePromise = null") && lazyAdminModalSource.includes("const lazyModal = { load }"), "lazy admin loading must deduplicate concurrent opens and remain retryable after an import failure");
-assert(webApp.includes("bindLazyAdminModal({ adminModal, els, openAdminScript, state })") && lazyAdminModalSource.includes("export function bindLazyAdminModal"), "admin event wiring must stay with the lazy admin boundary instead of growing the composition root");
+assert(webApp.includes('adminUrl("scripts"') && webApp.includes('adminUrl("settings")'), "FanHao admin actions must route into the combined admin page");
+assert(!webApp.includes("createLazyAdminModal") && !webApp.includes("admin-modal.js"), "FanHao startup must not load the retired duplicate admin modal");
+assert(standaloneHost.includes('adminUrl("scripts"') && !standaloneHost.includes("createStandaloneAdmin") && !standaloneHost.includes("admin-modal.js"), "standalone modules must route admin actions into the combined admin page");
 assert(webApp.includes("createLazyPersonProfile") && webApp.includes('await import("./modules/fanhao/person-profile.js?v='), "FanHao startup must defer person-profile code until person interaction");
 assert(!fanhaoModuleIndexSource.includes("createPersonProfile"), "the FanHao barrel must not pull person-profile code into the people index startup graph");
 assert(!fanhaoModuleIndexSource.includes("createWorkDetailPage"), "the FanHao barrel must not pull the retired work drawer into the startup graph");
@@ -160,7 +179,9 @@ assert(workDetailServiceSource.includes("const detail = detailPayload(workId)") 
 assert(workDetailServiceSource.includes("resolveVideoFileByPublicId ? resolveVideoFileByPublicId(videoId) : library.filesById.get(videoId)"), "FanHao play-info must validate or relocate indexed media before touching the gallery catalog");
 assert(workRoutesApiSource.includes('source: url.searchParams.get("source") || "fanhao"') && workRoutesApiSource.includes("视频文件不存在或已移动"), "play-info routing must retain its media boundary and explain missing local files");
 assert(playerPageSource.includes('mediaId ? "?source=gallery" : ""'), "the standalone gallery player must explicitly select gallery play-info lookup");
-assert(playerHtmlSource.includes("player-page.js?v=20260724-player-person-search-02"), "player person-search changes must refresh the standalone player module");
+assert(playerHtmlSource.includes('class="app-module-loading"') && playerHtmlSource.includes('html.app-module-loading body'), "the standalone player must hide its incomplete shell during startup");
+assert(playerHtmlSource.includes('await import("/js/player-page.js?v=20260727-initial-route-reveal-01")') && playerHtmlSource.includes('classList.remove("app-module-loading")'), "the standalone player must release its visibility guard after startup");
+assert(playerPageSource.lastIndexOf("await load();") > playerPageSource.indexOf("async function load()"), "the standalone player must await its initial payload after all module declarations are initialized");
 assert(playerPageSource.includes("setVideoSourceAt(resumePosition, { autoPlay: options.autoPlay !== false });"), "standalone player startup must begin playback without a second user action");
 assert(playerPageSource.includes('name === "NotAllowedError" && options.allowMutedFallback'), "standalone player must keep autoplay running when the browser initially blocks sound");
 assert(playerPageSource.includes("capturePlaybackSnapshot()") && playerPageSource.includes("await delay(LOCAL_MARKER_RELEASE_DELAY_MS);") && playerPageSource.includes("await restorePlaybackSnapshot(playbackSnapshot);"), "standalone player marker changes must release the media handle and resume the same playback");
@@ -1524,26 +1545,6 @@ assert.deepEqual(
 const sortMetadata = sortWorks.map((work) => ({ id: work.id, ...work.infoSummary }));
 assert.deepEqual([...sortMetadata].sort(compareRatingCountMetadata).map((item) => item.id), ["audience", "popular", "small"], "server rating-count sorting must match the clients");
 assert.deepEqual([...sortMetadata].sort(comparePopularityMetadata).map((item) => item.id), ["popular", "audience", "small"], "server popularity sorting must match the clients");
-
-let lazyAdminLoadCount = 0;
-const lazyAdminCalls = [];
-const lazyAdmin = createLazyAdminModal(async () => {
-  lazyAdminLoadCount += 1;
-  return { openModal: (options) => lazyAdminCalls.push(options.scriptId) };
-});
-assert.equal(lazyAdminLoadCount, 0, "the admin console must stay unloaded during FanHao startup");
-await Promise.all([lazyAdmin.openModal({ scriptId: "first" }), lazyAdmin.openModal({ scriptId: "second" })]);
-assert.equal(lazyAdminLoadCount, 1, "concurrent admin actions must share one module load");
-assert.deepEqual(lazyAdminCalls, ["first", "second"], "queued admin actions must run after the module is ready");
-
-let lazyAdminRetryCount = 0;
-const retryableLazyAdmin = createLazyAdminModal(async () => {
-  lazyAdminRetryCount += 1;
-  if (lazyAdminRetryCount === 1) throw new Error("temporary import failure");
-  return { openModal: () => "ready" };
-});
-await assert.rejects(retryableLazyAdmin.openModal({}), /temporary import failure/);
-assert.equal(await retryableLazyAdmin.openModal({}), "ready", "a failed lazy import must be retryable");
 
 const profileElement = {
   classList: { remove() {} },

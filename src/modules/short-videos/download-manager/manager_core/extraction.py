@@ -21,6 +21,7 @@ from .profiles_links import (
     upsert_profile,
     upsert_profile_metadata,
 )
+from .profile_refresh_policy import PROFILE_LINK_STATS_SQL, profile_refresh_decision
 
 
 extract_lock = threading.Lock()
@@ -432,7 +433,6 @@ def run_refresh_profiles_job(
     job_id: int,
     max_profiles: int,
     profile_ids: list[int],
-    since_timestamp: int | None,
     max_items: int,
     scrolls: int,
     idle_rounds: int,
@@ -449,7 +449,7 @@ def run_refresh_profiles_job(
             rows = [
                 dict(row)
                 for row in conn.execute(
-                    """
+                    f"""
                     SELECT
                       profiles.id,
                       profiles.url,
@@ -462,13 +462,13 @@ def run_refresh_profiles_job(
                       profiles.last_extracted_at,
                       profiles.sec_uid,
                       q.sort_order,
-                      COUNT(links.id) link_total,
-                      MAX(links.create_time) latest_work_create_time
+                      COALESCE(stats.total, 0) link_total,
+                      stats.latest_work_create_time,
+                      stats.previous_work_create_time
                     FROM profiles
                     LEFT JOIN profile_download_queue q ON q.profile_id=profiles.id AND q.enabled=1
-                    LEFT JOIN links ON links.profile_id=profiles.id
+                    LEFT JOIN ({PROFILE_LINK_STATS_SQL}) stats ON stats.profile_id=profiles.id
                     WHERE COALESCE(profiles.url, '') <> ''
-                    GROUP BY profiles.id
                     ORDER BY
                       CASE WHEN q.profile_id IS NULL THEN 1 ELSE 0 END,
                       COALESCE(q.sort_order, 999999999),
@@ -477,6 +477,7 @@ def run_refresh_profiles_job(
                     """
                 ).fetchall()
             ]
+        smart_skipped = 0
         if profile_ids:
             selected_ids = set(profile_ids)
             rows = [row for row in rows if int(row["id"]) in selected_ids]
@@ -490,22 +491,35 @@ def run_refresh_profiles_job(
                     and str(row.get("tab") or "post") == "like"
                 )
             ]
-        if since_timestamp is not None:
-            rows = [
-                row
-                for row in rows
-                if str(row.get("tab") or "post") == "like"
-                or int_or_none(row.get("latest_work_create_time")) is None
-                or int(row["latest_work_create_time"]) >= since_timestamp
-            ]
+            if not full_scan:
+                now_timestamp = int(time.time())
+                due_rows = []
+                for row in rows:
+                    decision = profile_refresh_decision(row, now_timestamp=now_timestamp)
+                    row.update(decision)
+                    if decision["refresh_due"]:
+                        due_rows.append(row)
+                smart_skipped = len(rows) - len(due_rows)
+                rows = due_rows
         if max_profiles > 0:
             rows = rows[:max_profiles]
         total_profiles = len(rows)
-        update_job(job_id, total=total_profiles, processed=0, success=0, failed=0, message=f"准备刷新 {total_profiles} 个主页")
+        prepare_message = f"准备刷新 {total_profiles} 个主页"
+        if smart_skipped:
+            prepare_message += f"，智能跳过 {smart_skipped} 个未到期主页"
+        update_job(job_id, total=total_profiles, processed=0, success=0, failed=0, message=prepare_message)
         if not rows:
-            update_job(job_id, status="complete", finished_at=now_iso(), message="没有可刷新的已入库主页")
+            message = (
+                f"智能判定：暂时没有到期主页，已跳过 {smart_skipped} 个"
+                if smart_skipped
+                else "没有可刷新的已入库主页"
+            )
+            update_job(job_id, status="complete", finished_at=now_iso(), message=message)
             return
-        add_event("info", f"开始批量刷新现有主页：{total_profiles} 个")
+        event_message = f"开始批量刷新现有主页：{total_profiles} 个"
+        if smart_skipped:
+            event_message += f"，智能跳过 {smart_skipped} 个"
+        add_event("info", event_message)
         for index, profile in enumerate(rows, start=1):
             if extract_cancel_event.is_set():
                 stopped = True
@@ -554,6 +568,8 @@ def run_refresh_profiles_job(
             if stopped
             else f"批量刷新完成：成功 {success_profiles}，失败 {failed_profiles}"
         )
+        if smart_skipped:
+            message += f"，智能跳过 {smart_skipped} 个"
         update_job(
             job_id,
             status=status,
@@ -586,14 +602,6 @@ def start_refresh_profiles(payload: dict[str, Any]) -> dict[str, Any]:
             profile_id = normalize_int(value, 0, 0, 1000000)
             if profile_id > 0 and profile_id not in profile_ids:
                 profile_ids.append(profile_id)
-    since_date = str(payload.get("since_date") or "").strip()
-    since_timestamp: int | None = None
-    if since_date:
-        try:
-            local_tz = datetime.now().astimezone().tzinfo
-            since_timestamp = int(datetime.strptime(since_date, "%Y-%m-%d").replace(tzinfo=local_tz).timestamp())
-        except ValueError as exc:
-            raise ValueError("主页刷新起始日期格式应为 YYYY-MM-DD") from exc
     max_items = normalize_int(payload.get("max", 0), 0, 0, 100000)
     scrolls = normalize_int(payload.get("scrolls", setting("scrolls", "12000")), 12000, 1, 30000)
     idle_rounds = normalize_int(payload.get("idle_rounds", setting("idle_rounds", "160")), 160, 1, 1000)
@@ -621,7 +629,6 @@ def start_refresh_profiles(payload: dict[str, Any]) -> dict[str, Any]:
                 job_id,
                 max_profiles,
                 profile_ids,
-                since_timestamp,
                 max_items,
                 scrolls,
                 idle_rounds,

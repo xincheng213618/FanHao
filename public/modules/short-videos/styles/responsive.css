@@ -155,6 +155,10 @@
     scrollbar-width: none;
   }
 
+  .short-video-source-tab-group {
+    flex: 0 0 auto;
+  }
+
   .short-video-source-tabs::-webkit-scrollbar {
     display: none;
   }

@@ -252,4 +252,4 @@ pauseButton.addEventListener("click", () => {
   scheduleNextRefresh();
 });
 
-loadQuotes();
+await loadQuotes();

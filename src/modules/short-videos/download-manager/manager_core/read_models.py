@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,11 @@ from .config import BASE_DIR, DB_PATH, DEFAULT_OUTPUT_DIR, FROZEN_BUILD, LIBRARY
 from .database import db
 from .domain_manifest import profile_output_dir
 from .profiles_links import current_profile_id
+from .profile_refresh_policy import (
+    PROFILE_LINK_STATS_SQL,
+    attach_profile_refresh_decision,
+    profile_refresh_decision,
+)
 from .queue import link_stats, list_download_queue
 
 
@@ -128,7 +134,6 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
     sort_mode = (query.get("sort") or ["latest_desc"])[0].strip().lower()
     limit = normalize_int((query.get("limit") or ["200"])[0], 200, 1, 500)
     offset = normalize_int((query.get("offset") or ["0"])[0], 0, 0, 1000000)
-    since_timestamp = normalize_int((query.get("since") or ["0"])[0], 0, 0, 9999999999)
     deleted_works = (query.get("deleted_works") or ["all"])[0].strip().lower()
     where: list[str] = []
     params: list[Any] = []
@@ -160,19 +165,7 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
         "last_refresh_asc": "COALESCE(profiles.last_extracted_at, '') ASC, profiles.id ASC",
     }
     order_sql = order_map.get(sort_mode, order_map["latest_desc"])
-    stats_sql = """
-      SELECT
-        profile_id,
-        COUNT(*) total,
-        SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending,
-        SUM(CASE WHEN status='downloading' THEN 1 ELSE 0 END) downloading,
-        SUM(CASE WHEN status='downloaded' THEN 1 ELSE 0 END) downloaded,
-        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed,
-        MAX(create_time) latest_work_create_time
-      FROM links
-      WHERE profile_id IS NOT NULL
-      GROUP BY profile_id
-    """
+    stats_sql = PROFILE_LINK_STATS_SQL
     with db() as conn:
         total = int(
             conn.execute(
@@ -184,12 +177,41 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
             dict(row)
             for row in conn.execute(
                 f"""
-                SELECT profiles.*, COALESCE(stats.total, 0) total,
+                SELECT
+                  profiles.id,
+                  profiles.url,
+                  profiles.sec_uid,
+                  profiles.tab,
+                  profiles.title,
+                  profiles.uid,
+                  profiles.nickname,
+                  profiles.avatar_url,
+                  profiles.unique_id,
+                  profiles.short_id,
+                  profiles.signature,
+                  profiles.ip_location,
+                  profiles.following_count,
+                  profiles.follower_count,
+                  profiles.total_favorited,
+                  profiles.aweme_count,
+                  profiles.has_deleted_works,
+                  profiles.favoriting_count,
+                  profiles.gender,
+                  profiles.age,
+                  profiles.verification,
+                  profiles.profile_collected_at,
+                  profiles.is_following,
+                  profiles.following_discovered_at,
+                  profiles.created_at,
+                  profiles.updated_at,
+                  profiles.last_extracted_at,
+                  COALESCE(stats.total, 0) total,
                   COALESCE(stats.pending, 0) pending,
                   COALESCE(stats.downloading, 0) downloading,
                   COALESCE(stats.downloaded, 0) downloaded,
                   COALESCE(stats.failed, 0) failed,
-                  stats.latest_work_create_time
+                  stats.latest_work_create_time,
+                  stats.previous_work_create_time
                 FROM profiles
                 LEFT JOIN ({stats_sql}) stats ON stats.profile_id=profiles.id
                 {where_sql}
@@ -199,23 +221,42 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
                 [*params, LIBRARY_SEC_UID, limit, offset],
             ).fetchall()
         ]
-        eligible_params: list[Any] = [LIBRARY_SEC_UID]
         eligible_where = "(COALESCE(stats.total, 0)>0 OR (profiles.sec_uid=? AND profiles.tab='like'))"
-        if since_timestamp > 0:
-            eligible_where += " AND (profiles.tab='like' OR stats.latest_work_create_time IS NULL OR stats.latest_work_create_time>=?)"
-            eligible_params.append(since_timestamp)
-        eligible_count = int(
-            conn.execute(
-                f"SELECT COUNT(*) c FROM profiles LEFT JOIN ({stats_sql}) stats ON stats.profile_id=profiles.id WHERE {eligible_where}",
-                eligible_params,
-            ).fetchone()["c"]
-        )
+        refresh_candidates = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT
+                  profiles.tab,
+                  profiles.last_extracted_at,
+                  stats.latest_work_create_time,
+                  stats.previous_work_create_time
+                FROM profiles
+                LEFT JOIN ({stats_sql}) stats ON stats.profile_id=profiles.id
+                WHERE {eligible_where}
+                """,
+                [LIBRARY_SEC_UID],
+            ).fetchall()
+        ]
+    now_timestamp = int(time.time())
     for profile in rows:
         profile["is_self"] = int(
             first_text(profile.get("sec_uid")) == LIBRARY_SEC_UID
             and str(profile.get("tab") or "post") == "like"
         )
-    return {"total": total, "eligible_count": eligible_count, "profiles": rows}
+        attach_profile_refresh_decision(profile, now_timestamp=now_timestamp)
+    eligible_count = sum(
+        int(profile_refresh_decision(profile, now_timestamp=now_timestamp)["refresh_due"])
+        for profile in refresh_candidates
+    )
+    deferred_count = len(refresh_candidates) - eligible_count
+    return {
+        "total": total,
+        "eligible_count": eligible_count,
+        "deferred_count": deferred_count,
+        "auto_candidate_count": len(refresh_candidates),
+        "profiles": rows,
+    }
 
 
 def list_links(query: dict[str, list[str]]) -> dict[str, Any]:

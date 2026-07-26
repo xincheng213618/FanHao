@@ -10,12 +10,17 @@
     <link rel="manifest" href="/manifest.webmanifest?v=20260701-gallery-merge-01" />
     <link rel="icon" href="/app-icon.svg?v=20260701-gallery-merge-01" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/app-icon.svg?v=20260701-gallery-merge-01" />
-    <style>html.app-styles-loading body { visibility: hidden; }</style>
+    <style>
+      html.app-styles-loading body,
+      html.app-module-loading body {
+        visibility: hidden;
+      }
+    </style>
     <script>
       (() => {
         document.documentElement.classList.add("app-styles-loading");
         const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
-        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-a891911a8b6b";
+        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-12de4c6739dd";
         if (shortVideoEntry) {
           const modulePreload = document.createElement("link");
           modulePreload.rel = "modulepreload";
@@ -42,18 +47,19 @@
           "/css/shell.css?v=20260713-search-index-02",
           "/modules/fanhao/styles.css?v=20260724-code-prefix-catalog-01",
           "/modules/fanhao/work-cards.css?v=20260717-fanhao-viewport-render-01",
-          "/modules/system/admin.css?v=20260712-module-settings-02",
+          "/modules/system/admin.css?v=20260727-hidden-overlays-01",
           "/css/player.css?v=20260710-web-css-modules-01",
           "/css/responsive.css?v=20260712-module-settings-02"
         ];
         const shortVideoDetailEntry = /^\/(?:short-videos|short-video|douyin)\/(?!(?:stats|authors|transcoding)(?:\/|$))[^/]+\/?$/.test(window.location.pathname);
         const standaloneStyleEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(window.location.pathname) || /^\/western\/.+/.test(window.location.pathname);
+        document.documentElement.classList.add("app-module-loading");
         const styleUrls = shortVideoEntry
           ? (shortVideoDetailEntry
             ? shortVideoStyleUrls
             : shortVideoStyleUrls.filter((href) => !shortVideoViewerStyleUrls.includes(href)))
           : standaloneStyleEntry
-            ? ["/styles.css?v=20260720-transcode-page-concurrency-05"]
+            ? ["/styles.css?v=20260727-hidden-overlays-01"]
             : fanhaoStyleUrls;
         const stylePromises = new Map();
         const loadStyle = (href) => {
@@ -103,9 +109,8 @@
         <a class="product-tab" href="/modules/market-dashboard/index.html" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="marketDashboard">行情</a>
       </nav>
       <div class="product-actions">
-        <button class="product-action" id="topRescanButton" type="button">后台作业</button>
         <a class="product-action" href="/android-update">手机端</a>
-        <a class="product-action" id="topAdminLink" href="/admin">设置</a>
+        <a class="product-action" id="topAdminLink" href="/admin#overview">设置与运维</a>
       </div>
     </header>
     <div class="app-shell">
@@ -130,8 +135,8 @@
         <header class="toolbar">
           <div class="toolbar-title">
             <button class="toolbar-back" id="backToPeopleIndex" type="button" hidden>返回索引</button>
-            <div class="eyebrow" id="currentPath">G:\</div>
-            <h2 id="currentTitle">全部人物</h2>
+            <div class="eyebrow" id="currentPath">本地资料库</div>
+            <h2 id="currentTitle">资料库</h2>
           </div>
           <label class="search-box work-search">
             <span aria-hidden="true">⌕</span>
@@ -157,112 +162,6 @@
     </div>
 
     <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
-    <div class="admin-backdrop" id="adminBackdrop" hidden></div>
-    <section class="admin-modal" id="adminModal" role="dialog" aria-modal="true" aria-labelledby="adminTitle" aria-hidden="true" tabindex="-1">
-      <header class="admin-header">
-        <div>
-          <div class="eyebrow">本机后台控制台</div>
-          <h3 id="adminTitle">脚本与维护后台</h3>
-        </div>
-        <button class="icon-button" id="closeAdmin" type="button" title="关闭" aria-label="关闭">
-          <span aria-hidden="true">×</span>
-        </button>
-      </header>
-      <div class="admin-content">
-        <section class="admin-overview" aria-label="后台概览">
-          <div class="admin-metric">
-            <span>登记脚本</span>
-            <strong id="adminScriptCount">-</strong>
-          </div>
-          <div class="admin-metric">
-            <span>运行中</span>
-            <strong id="adminRunningCount">-</strong>
-          </div>
-          <div class="admin-metric">
-            <span>最近完成</span>
-            <strong id="adminDoneCount">-</strong>
-          </div>
-          <div class="admin-metric">
-            <span>异常</span>
-            <strong id="adminErrorCount">-</strong>
-          </div>
-        </section>
-        <section class="admin-section admin-script-section">
-          <div class="admin-section-head">
-            <div>
-              <div class="admin-section-title">脚本控制</div>
-              <p class="admin-section-subtitle">登记过的工具脚本可以在这里配置参数、启动、停止并查看日志。</p>
-            </div>
-            <div class="admin-script-toolbar">
-              <label class="admin-field compact">
-                <span>分类</span>
-                <select id="adminScriptCategory" aria-label="脚本分类"></select>
-              </label>
-              <button class="folder-button compact" id="adminRefreshScripts" type="button">刷新</button>
-            </div>
-          </div>
-          <div class="admin-script-console">
-            <div class="admin-script-list" id="adminScriptList" aria-label="脚本列表"></div>
-            <form class="admin-script-panel" id="adminScriptForm">
-              <div class="admin-script-panel-head">
-                <div>
-                  <div class="eyebrow" id="adminSelectedScriptCategory">脚本</div>
-                  <h4 id="adminSelectedScriptTitle">选择一个脚本</h4>
-                </div>
-                <span id="adminSelectedScriptRuntime" class="admin-script-runtime">-</span>
-              </div>
-              <p class="admin-script-description" id="adminSelectedScriptDescription">从左侧选择脚本后，可以调整参数并启动任务。</p>
-              <div class="admin-script-fields" id="adminScriptFields"></div>
-              <div class="admin-actions">
-                <button class="folder-button" id="adminRunScript" type="submit">运行脚本</button>
-              </div>
-              <p class="admin-status" id="adminScriptStatus"></p>
-            </form>
-          </div>
-        </section>
-        <section class="admin-section">
-          <label class="admin-field">
-            <span>人物</span>
-            <select id="adminPersonSelect" aria-label="选择人物"></select>
-          </label>
-          <div class="admin-actions">
-            <button class="folder-button" id="adminRescanPerson" type="button">刷新本地检测</button>
-            <button class="folder-button" id="adminRefreshActor" type="button">刷新缺失检测</button>
-            <button class="folder-button" id="adminRefreshRankings" type="button">刷新排行榜</button>
-          </div>
-          <p class="admin-status" id="adminStatus"></p>
-        </section>
-        <section class="admin-section">
-          <div class="admin-section-head">
-            <div>
-              <div class="admin-section-title">演员头像</div>
-              <p class="admin-section-subtitle">头像目录在资料库设置中统一维护，这里只执行扫描和导入。</p>
-            </div>
-            <a class="folder-button compact" href="/admin#settings">配置目录</a>
-          </div>
-          <div class="admin-actions">
-            <button class="folder-button" id="adminPreviewActorAvatars" type="button">预览候选</button>
-            <button class="folder-button" id="adminImportActorAvatars" type="button">扫描本地头像</button>
-          </div>
-          <div class="admin-avatar-candidates" id="adminActorAvatarCandidates"></div>
-        </section>
-        <section class="admin-section">
-          <div class="admin-section-title">封面缓存</div>
-          <label class="admin-field compact">
-            <span>本次生成数量</span>
-            <input id="adminCoverLimit" type="number" min="1" max="200" step="1" value="20" />
-          </label>
-          <div class="admin-actions">
-            <button class="folder-button" id="adminGenerateCovers" type="button">批量补封面</button>
-          </div>
-          <p class="admin-status" id="adminCoverStatus"></p>
-        </section>
-        <section class="admin-section">
-          <div class="admin-section-title">任务日志</div>
-          <div class="admin-task-list" id="adminTaskList"></div>
-        </section>
-      </div>
-    </section>
     <section class="detail-drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" aria-hidden="true" tabindex="-1">
       <header class="drawer-header">
         <div>
@@ -294,15 +193,27 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-a891911a8b6b");
+        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-12de4c6739dd");
         await window.__fanhaoStylesReady;
-        await shortVideoModulePromise;
+        try {
+          await shortVideoModulePromise;
+        } finally {
+          document.documentElement.classList.remove("app-module-loading");
+        }
       } else if (standaloneEntry) {
         await window.__fanhaoStylesReady;
-        await import("/standalone-app.js?v=20260717-photo-library-workspace-01");
+        try {
+          await import("/standalone-app.js?v=20260727-initial-route-reveal-01");
+        } finally {
+          document.documentElement.classList.remove("app-module-loading");
+        }
       } else {
         await window.__fanhaoStylesReady;
-        await import("/fanhao-app.js?v=20260726-work-sort-01");
+        try {
+          await import("/fanhao-app.js?v=20260727-admin-merge-01");
+        } finally {
+          document.documentElement.classList.remove("app-module-loading");
+        }
       }
     </script>
   </body>

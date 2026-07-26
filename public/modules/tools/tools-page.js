@@ -1,45 +1,74 @@
+const GAMES = [
+  {
+    availability: "网页 + 手机端",
+    category: "AI 数字益智",
+    description: "带 WASM AI 的 2048 静态版。可以自己玩，也可以随时查看下一步建议或让 AI 自动运行。",
+    featured: true,
+    href: "/games/2048/index.html",
+    poster: "2048",
+    posterCaption: "THINK AHEAD",
+    slug: "2048",
+    source: "game-difficulty/2048EndgameTablebase · GPL-3.0",
+    subtitle: "把下一步交给算法",
+    tags: ["WASM AI", "一步建议", "自动运行"],
+    title: "2048 AI Engine",
+    tone: "sun"
+  },
+  {
+    availability: "网页 + 手机端",
+    category: "经典滑块",
+    description: "在有限空间里移动棋子，帮助曹操从出口脱身。内置多组关卡，也可以交给 AI 自动求解。",
+    href: "/games/huarongdao/index.html#/game",
+    poster: "华容道",
+    posterCaption: "CLASSIC PUZZLE",
+    slug: "huarongdao",
+    source: "jeantimex/hua-rong-dao-html",
+    subtitle: "一步一步，移出困局",
+    tags: ["多关卡", "AI 解题", "点按操作"],
+    title: "华容道",
+    tone: "rust"
+  },
+  {
+    availability: "仅网页",
+    category: "AI 棋类",
+    description: "对战开源 Rapfi NNUE 引擎。支持执黑或执白、三档难度和悔棋，适合认真下一盘。",
+    href: "/games/gomoku/index.html",
+    poster: "五子棋",
+    posterCaption: "RAPFI NNUE",
+    slug: "gomoku",
+    source: "dhbloo/rapfi · GPL-3.0",
+    subtitle: "和强棋力 AI 对弈",
+    tags: ["三档难度", "黑白方", "支持悔棋"],
+    title: "五子棋 AI",
+    tone: "forest"
+  },
+  {
+    availability: "仅网页",
+    category: "轻量街机",
+    description: "按住蓄力，松开起跳。操作很简单，但落点需要判断，支持触控、计分和本地最佳成绩。",
+    href: "/games/jump/index.html",
+    poster: "JUMP",
+    posterCaption: "PRESS · HOLD · RELEASE",
+    slug: "jump",
+    source: "shenmaxg/web-jump · MIT",
+    subtitle: "蓄好力，跳得更远",
+    tags: ["触控操作", "本地计分", "快速开局"],
+    title: "蓄力跳台",
+    tone: "slate"
+  }
+];
+
 export function createToolsPage(deps) {
   const {
-    api,
     cancelScheduledWorkRendering,
     disconnectPeopleIndexAutoload,
     els,
-    formatBytes,
-    formatDateTime,
-    formatNumber,
-    resetProgressiveCoverLoading,
-    state,
-    toastInline,
-    txtToolMaxFileBytes,
-    writeStoredFlag
+    resetProgressiveCoverLoading
   } = deps;
 
-  function inputBytes() {
-    if (state.txtTool.fileBase64) return state.txtTool.fileSize || 0;
-    return new Blob([state.txtTool.text || ""]).size;
-  }
-
   function renderStats() {
-    const bytes = inputBytes();
-    const result = state.txtTool.result;
-    const stats = [
-      ["小游戏", 4],
-      ["输入", bytes ? formatBytes(bytes) : "待上传"],
-      ["输出", result?.size ? formatBytes(result.size) : "-"],
-      ["保留", "10 分钟"]
-    ];
-
     els.statsRow.innerHTML = "";
-    for (const [label, value] of stats) {
-      const stat = document.createElement("div");
-      stat.className = "stat";
-      const strong = document.createElement("strong");
-      strong.textContent = String(value);
-      const span = document.createElement("span");
-      span.textContent = label;
-      stat.append(strong, span);
-      els.statsRow.append(stat);
-    }
+    els.statsRow.hidden = true;
   }
 
   function renderView() {
@@ -48,401 +77,148 @@ export function createToolsPage(deps) {
     resetProgressiveCoverLoading();
     els.workGrid.innerHTML = "";
 
-    const hub = document.createElement("section");
-    hub.className = "tool-hub";
+    const library = document.createElement("section");
+    library.className = "game-library";
+    library.setAttribute("aria-labelledby", "gameLibraryTitle");
+    library.append(createHero(), createGameCollection());
+    els.workGrid.append(library);
+  }
 
-    const rail = document.createElement("aside");
-    rail.className = "tool-rail";
-    const railTitle = document.createElement("div");
-    railTitle.className = "tool-rail-title";
-    railTitle.textContent = "小工具";
-    rail.append(
-      railTitle,
-      createRailItem("离线小游戏", "开源项目移植", true),
-      createRailItem("TXT 格式化", "小说 / 长文本", false)
-    );
+  function createHero() {
+    const hero = document.createElement("header");
+    hero.className = "game-library-hero";
 
-    const panel = document.createElement("article");
-    panel.className = "txt-tool-panel";
-
-    const head = document.createElement("header");
-    head.className = "txt-tool-head";
     const copy = document.createElement("div");
+    copy.className = "game-library-hero-copy";
+
     const eyebrow = document.createElement("div");
-    eyebrow.className = "eyebrow";
-    eyebrow.textContent = "文本工具";
+    eyebrow.className = "game-library-eyebrow";
+    eyebrow.textContent = "PLAYGROUND · 离线运行";
+
     const title = document.createElement("h3");
-    title.textContent = "TXT 文档格式化";
-    const subtitle = document.createElement("p");
-    subtitle.textContent = "拖拽 TXT 文件或粘贴文本，处理完成后下载 UTF-8 格式化文件。";
-    copy.append(eyebrow, title, subtitle);
-    const badge = document.createElement("span");
-    badge.className = "txt-tool-badge";
-    badge.textContent = state.txtTool.processing ? "处理中" : state.txtTool.result ? "已生成" : "就绪";
-    head.append(copy, badge);
+    title.id = "gameLibraryTitle";
+    title.textContent = "选一个，马上开局";
 
-    const body = document.createElement("div");
-    body.className = "txt-tool-body";
-    body.append(createDropZone(), createEditor(), createOptions(), createActions(), createStatus());
+    const description = document.createElement("p");
+    description.textContent = "不需要安装，也没有账号流程。所有游戏都直接在浏览器本地运行，打开就能玩。";
 
-    panel.append(head, body, renderResult());
-    hub.append(rail, createGamePanel(), panel);
-    els.workGrid.append(hub);
-  }
-
-  function createRailItem(title, meta, active) {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = `tool-rail-item${active ? " active" : ""}`;
-    item.innerHTML = `<strong>${title}</strong><span>${meta}</span>`;
-    return item;
-  }
-
-  function createGamePanel() {
-    const panel = document.createElement("article");
-    panel.className = "game-tool-panel";
-
-    const head = document.createElement("header");
-    head.className = "txt-tool-head";
-    const copy = document.createElement("div");
-    const eyebrow = document.createElement("div");
-    eyebrow.className = "eyebrow";
-    eyebrow.textContent = "Games";
-    const title = document.createElement("h3");
-    title.textContent = "离线小游戏";
-    const subtitle = document.createElement("p");
-    subtitle.textContent = "游戏均在浏览器本地运行；标有“仅网页”的项目不会进入安卓包。";
-    copy.append(eyebrow, title, subtitle);
-    const badge = document.createElement("span");
-    badge.className = "txt-tool-badge";
-    badge.textContent = "离线";
-    head.append(copy, badge);
-
-    const grid = document.createElement("div");
-    grid.className = "game-launch-grid";
-    grid.append(
-      createGameCard("2048 AI Engine", "game-difficulty/2048EndgameTablebase · GPL-3.0", "带 WASM AI 的 2048 静态版，可手玩、一步建议或自动运行。", "/games/2048/index.html"),
-      createGameCard("华容道", "jeantimex/hua-rong-dao-html", "经典滑块关卡，内置多关卡和 AI 自动解，可离线点按游玩。", "/games/huarongdao/index.html#/game"),
-      createGameCard("五子棋 AI", "dhbloo/rapfi · GPL-3.0 · 仅网页", "开源强棋力 Rapfi NNUE 引擎，支持执黑或执白、三档难度和悔棋。", "/games/gomoku/index.html"),
-      createGameCard("蓄力跳台", "shenmaxg/web-jump · MIT · 仅网页", "按住蓄力、松开起跳，支持手机触控、计分和本地最佳成绩。", "/games/jump/index.html")
+    const notes = document.createElement("div");
+    notes.className = "game-library-notes";
+    notes.append(
+      createNote("4 款", "可选游戏"),
+      createNote("2 款", "支持手机端"),
+      createNote("本地", "浏览器运行")
     );
 
-    panel.append(head, grid);
-    return panel;
+    copy.append(eyebrow, title, description);
+    hero.append(copy, notes);
+    return hero;
   }
 
-  function createGameCard(title, meta, detail, href) {
-    const card = document.createElement("a");
-    card.className = "game-launch-card";
-    card.href = href;
-    const body = document.createElement("span");
-    const name = document.createElement("strong");
-    name.textContent = title;
-    const metaNode = document.createElement("span");
-    metaNode.textContent = meta;
-    const detailNode = document.createElement("small");
-    detailNode.textContent = detail;
-    body.append(name, metaNode, detailNode);
-    const action = document.createElement("b");
-    action.textContent = "打开";
-    card.append(body, action);
-    return card;
-  }
+  function createNote(value, label) {
+    const note = document.createElement("div");
+    note.className = "game-library-note";
 
-  function createDropZone() {
-    const dropZone = document.createElement("label");
-    dropZone.className = "txt-drop-zone";
-    dropZone.tabIndex = 0;
-    const fileInput = document.createElement("input");
-    fileInput.type = "file";
-    fileInput.accept = ".txt,text/plain";
-    fileInput.hidden = true;
-
-    const dropTitle = document.createElement("strong");
-    dropTitle.textContent = state.txtTool.fileName || "拖拽 TXT 到这里";
-    const dropMeta = document.createElement("span");
-    dropMeta.textContent = state.txtTool.fileName ? `${formatBytes(state.txtTool.fileSize)} · 原始字节上传` : "也可以点击选择文件";
-    const dropButton = document.createElement("span");
-    dropButton.className = "txt-drop-button";
-    dropButton.textContent = "选择 TXT";
-    dropZone.append(fileInput, dropTitle, dropMeta, dropButton);
-
-    fileInput.addEventListener("change", () => {
-      const file = fileInput.files?.[0];
-      if (file) handleFile(file);
-    });
-    for (const eventName of ["dragenter", "dragover"]) {
-      dropZone.addEventListener(eventName, (event) => {
-        event.preventDefault();
-        dropZone.classList.add("drag-over");
-      });
-    }
-    for (const eventName of ["dragleave", "drop"]) {
-      dropZone.addEventListener(eventName, (event) => {
-        event.preventDefault();
-        dropZone.classList.remove("drag-over");
-      });
-    }
-    dropZone.addEventListener("drop", (event) => {
-      const file = [...(event.dataTransfer?.files || [])].find((item) => item.name.toLowerCase().endsWith(".txt"));
-      if (file) handleFile(file);
-      else setStatus("只支持 .txt 文件");
-    });
-    dropZone.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        fileInput.click();
-      }
-    });
-
-    return dropZone;
-  }
-
-  function createEditor() {
-    const editorWrap = document.createElement("label");
-    editorWrap.className = "txt-tool-editor";
-    const editorLabel = document.createElement("span");
-    editorLabel.textContent = "粘贴文本";
-    const textarea = document.createElement("textarea");
-    textarea.placeholder = "也可以直接粘贴 TXT 内容";
-    textarea.spellcheck = false;
-    textarea.value = state.txtTool.text || "";
-    textarea.addEventListener("input", () => {
-      state.txtTool.text = textarea.value;
-      state.txtTool.result = null;
-      if (state.txtTool.fileBase64 && textarea.value.trim()) {
-        state.txtTool.fileBase64 = "";
-        state.txtTool.fileName = "";
-        state.txtTool.fileSize = 0;
-        renderStats();
-        renderView();
-        return;
-      }
-      renderStats();
-    });
-    editorWrap.append(editorLabel, textarea);
-    return editorWrap;
-  }
-
-  function createOptions() {
-    const options = document.createElement("div");
-    options.className = "txt-tool-options";
-    options.append(
-      createCheckbox("indent", "首行缩进", state.txtTool.indent),
-      createCheckbox("cleanJunk", "清理分页噪声", state.txtTool.cleanJunk)
-    );
-    return options;
-  }
-
-  function createActions() {
-    const actions = document.createElement("div");
-    actions.className = "txt-tool-actions";
-    const runButton = document.createElement("button");
-    runButton.type = "button";
-    runButton.className = "folder-button";
-    runButton.textContent = state.txtTool.processing ? "正在格式化" : "格式化";
-    runButton.disabled = state.txtTool.processing;
-    runButton.addEventListener("click", runFormatter);
-    const clearButton = document.createElement("button");
-    clearButton.type = "button";
-    clearButton.className = "folder-button subtle";
-    clearButton.textContent = "清空";
-    clearButton.addEventListener("click", clear);
-    actions.append(runButton, clearButton);
-    return actions;
-  }
-
-  function createStatus() {
-    const status = document.createElement("p");
-    status.className = "txt-tool-status";
-    status.textContent = state.txtTool.status || "";
-    return status;
-  }
-
-  function createCheckbox(key, text, checked) {
-    const label = document.createElement("label");
-    label.className = "txt-tool-toggle";
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.checked = Boolean(checked);
-    input.addEventListener("change", () => {
-      state.txtTool[key] = input.checked;
-      writeStoredFlag(`fanhao.txtTool.${key}`, input.checked);
-    });
+    const strong = document.createElement("strong");
+    strong.textContent = value;
     const span = document.createElement("span");
-    span.textContent = text;
-    label.append(input, span);
-    return label;
+    span.textContent = label;
+
+    note.append(strong, span);
+    return note;
   }
 
-  function renderResult() {
-    const result = state.txtTool.result;
-    const section = document.createElement("section");
-    section.className = "txt-tool-result";
-    if (!result) {
-      const empty = document.createElement("div");
-      empty.className = "txt-tool-empty";
-      empty.textContent = "结果会显示在这里";
-      section.append(empty);
-      return section;
-    }
+  function createGameCollection() {
+    const collection = document.createElement("section");
+    collection.className = "game-library-collection";
+    collection.setAttribute("aria-labelledby", "allGamesTitle");
 
     const head = document.createElement("div");
-    head.className = "txt-tool-result-head";
-    const info = document.createElement("div");
-    const title = document.createElement("strong");
-    title.textContent = result.fileName || "格式化结果.txt";
+    head.className = "game-library-section-head";
+
+    const copy = document.createElement("div");
+    const eyebrow = document.createElement("span");
+    eyebrow.textContent = "全部游戏";
+    const title = document.createElement("h4");
+    title.id = "allGamesTitle";
+    title.textContent = "今天想玩哪一个？";
+    copy.append(eyebrow, title);
+
+    const hint = document.createElement("p");
+    hint.textContent = "网页专属游戏不会出现在安卓客户端";
+    head.append(copy, hint);
+
+    const grid = document.createElement("div");
+    grid.className = "game-library-grid";
+    for (const game of GAMES) grid.append(createGameCard(game));
+
+    collection.append(head, grid);
+    return collection;
+  }
+
+  function createGameCard(game) {
+    const card = document.createElement("a");
+    card.className = `game-library-card tone-${game.tone}${game.featured ? " featured" : ""}`;
+    card.href = game.href;
+    card.dataset.game = game.slug;
+    card.setAttribute("aria-label", `打开${game.title}`);
+
+    const art = document.createElement("span");
+    art.className = "game-card-art";
+    art.setAttribute("aria-hidden", "true");
+
+    const posterCaption = document.createElement("small");
+    posterCaption.textContent = game.posterCaption;
+    const poster = document.createElement("strong");
+    poster.textContent = game.poster;
+    art.append(posterCaption, poster);
+
+    const body = document.createElement("span");
+    body.className = "game-card-body";
+
     const meta = document.createElement("span");
-    meta.textContent = `${formatBytes(result.size)} · 有效至 ${formatDateTime(result.expiresAt)}`;
-    info.append(title, meta);
+    meta.className = "game-card-meta";
+    const category = document.createElement("span");
+    category.className = "game-card-category";
+    category.textContent = game.category;
+    const availability = document.createElement("span");
+    availability.className = "game-card-availability";
+    availability.textContent = game.availability;
+    meta.append(category, availability);
 
-    const buttons = document.createElement("div");
-    buttons.className = "txt-tool-result-actions";
-    const download = document.createElement("a");
-    download.className = "folder-button";
-    download.href = result.downloadUrl;
-    download.download = result.fileName || "格式化结果.txt";
-    download.textContent = "下载文件";
-    const copy = document.createElement("button");
-    copy.type = "button";
-    copy.className = "folder-button subtle";
-    copy.textContent = "复制文本";
-    copy.addEventListener("click", () => copyResult(copy));
-    buttons.append(download, copy);
-    head.append(info, buttons);
+    const title = document.createElement("strong");
+    title.className = "game-card-title";
+    title.textContent = game.title;
 
-    const stats = document.createElement("div");
-    stats.className = "txt-tool-result-stats";
-    const pairs = [
-      ["章节", result.stats?.chapters],
-      ["段落", result.stats?.paragraphs],
-      ["合并折行", result.stats?.joined_blocks],
-      ["清理噪声", result.stats?.removed_noise_lines]
-    ];
-    for (const [label, value] of pairs) {
+    const subtitle = document.createElement("span");
+    subtitle.className = "game-card-subtitle";
+    subtitle.textContent = game.subtitle;
+
+    const description = document.createElement("span");
+    description.className = "game-card-description";
+    description.textContent = game.description;
+
+    const tags = document.createElement("span");
+    tags.className = "game-card-tags";
+    for (const tag of game.tags) {
       const item = document.createElement("span");
-      item.textContent = `${label} ${formatNumber(value || 0)}`;
-      stats.append(item);
+      item.textContent = tag;
+      tags.append(item);
     }
 
-    const preview = document.createElement("textarea");
-    preview.className = "txt-tool-preview";
-    preview.readOnly = true;
-    preview.spellcheck = false;
-    preview.value = result.previewText || "";
+    const footer = document.createElement("span");
+    footer.className = "game-card-footer";
+    const source = document.createElement("small");
+    source.className = "game-card-source";
+    source.textContent = game.source;
+    const action = document.createElement("b");
+    action.className = "game-card-action";
+    action.textContent = "开始游戏";
+    footer.append(source, action);
 
-    section.append(head, stats, preview);
-    return section;
-  }
-
-  function setStatus(message) {
-    state.txtTool.status = message || "";
-    const status = els.workGrid.querySelector(".txt-tool-status");
-    if (status) status.textContent = state.txtTool.status;
-  }
-
-  function fileToBase64(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const value = String(reader.result || "");
-        resolve(value.includes(",") ? value.slice(value.indexOf(",") + 1) : value);
-      };
-      reader.onerror = () => reject(reader.error || new Error("读取文件失败"));
-      reader.readAsDataURL(file);
-    });
-  }
-
-  async function handleFile(file) {
-    if (!file.name.toLowerCase().endsWith(".txt")) {
-      setStatus("只支持 .txt 文件");
-      return;
-    }
-    if (file.size > txtToolMaxFileBytes) {
-      setStatus(`TXT 文件不能超过 ${Math.round(txtToolMaxFileBytes / 1024 / 1024)} MB`);
-      return;
-    }
-    setStatus("正在读取文件");
-    try {
-      state.txtTool.fileBase64 = await fileToBase64(file);
-      state.txtTool.fileName = file.name;
-      state.txtTool.fileSize = file.size;
-      state.txtTool.text = "";
-      state.txtTool.result = null;
-      state.txtTool.status = "文件已读取";
-    } catch (error) {
-      state.txtTool.status = error.message || "读取文件失败";
-    }
-    renderStats();
-    renderView();
-  }
-
-  async function runFormatter() {
-    if (state.txtTool.processing) return;
-    const pastedText = state.txtTool.text || "";
-    const hasText = Boolean(pastedText.trim());
-    const hasFile = Boolean(state.txtTool.fileBase64);
-    if (!hasText && !hasFile) {
-      setStatus("请先拖拽 TXT 文件或粘贴文本");
-      return;
-    }
-
-    state.txtTool.processing = true;
-    state.txtTool.status = "正在格式化";
-    state.txtTool.result = null;
-    renderStats();
-    renderView();
-    try {
-      const body = {
-        fileName: hasText ? "粘贴文本.txt" : state.txtTool.fileName,
-        options: {
-          indent: state.txtTool.indent,
-          cleanJunk: state.txtTool.cleanJunk
-        }
-      };
-      if (hasText) body.text = pastedText;
-      else body.contentBase64 = state.txtTool.fileBase64;
-
-      const result = await api("/api/tools/txt-format", { method: "POST", body });
-      state.txtTool.result = result;
-      state.txtTool.status = `已生成，${Math.round((result.expiresInSeconds || 600) / 60)} 分钟内可下载`;
-    } catch (error) {
-      state.txtTool.status = error.message || "格式化失败";
-    } finally {
-      state.txtTool.processing = false;
-      renderStats();
-      renderView();
-    }
-  }
-
-  function clear() {
-    state.txtTool.fileName = "";
-    state.txtTool.fileSize = 0;
-    state.txtTool.fileBase64 = "";
-    state.txtTool.text = "";
-    state.txtTool.result = null;
-    state.txtTool.status = "";
-    renderStats();
-    renderView();
-  }
-
-  async function copyResult(button) {
-    const result = state.txtTool.result;
-    if (!result?.downloadUrl) return;
-    const restoreText = button.textContent;
-    button.disabled = true;
-    button.textContent = "正在复制";
-    try {
-      const response = await fetch(result.downloadUrl, { cache: "no-store" });
-      if (!response.ok) throw new Error("下载文件已失效");
-      const text = await response.text();
-      await navigator.clipboard.writeText(text);
-      toastInline(button, "已复制", restoreText);
-    } catch (error) {
-      toastInline(button, error.message || "复制失败", restoreText);
-    } finally {
-      button.disabled = false;
-    }
+    body.append(meta, title, subtitle, description, tags, footer);
+    card.append(art, body);
+    return card;
   }
 
   return {

@@ -48,6 +48,7 @@ data/library-index.json
 data/image-library-index.json
 data/image-reader-cache/
 data/novel-collection/
+data/novel-credentials/
 data/debug-screenshots/
 data/android-update/
 data/user-state.json

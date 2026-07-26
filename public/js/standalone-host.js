@@ -1,6 +1,7 @@
 import { createApiClient } from "./api.js?v=20260701-gallery-merge-01";
+import { adminUrl } from "./admin-navigation.js?v=20260727-admin-merge-01";
 import { installAndroidClientReturn, isLocalHostName, prepareClientShell } from "./client-shell.js?v=20260712-project-refactor-03";
-import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20260717-photo-library-workspace-01";
+import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20260727-novel-nav-search-01";
 
 const MODULE_VIEWS = new Set(["gallery", "novels", "music", "tools"]);
 const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
@@ -29,6 +30,7 @@ export async function bootStandaloneApp() {
   host.installHistory();
   await host.applyRoute(initialRoute);
   host.initializeHistory();
+  document.documentElement.classList.remove("app-module-loading");
 }
 
 async function loadCurrentModule(view) {
@@ -44,21 +46,20 @@ async function loadCurrentModule(view) {
     };
   }
   if (view === "novels") {
-    const module = await import("../modules/novels/novel-page.js?v=20260726-collector-admin-01");
+    const module = await import("../modules/novels/novel-page.js?v=20260727-novel-task-log-04");
     return { createPage: module.createNovelPage, view };
   }
   if (view === "music") {
     const module = await import("../modules/music/music-page.js?v=20260712-project-refactor-03");
     return { createPage: module.createMusicPage, view };
   }
-  const module = await import("../modules/tools/tools-page.js?v=20260712-project-refactor-03");
+  const module = await import("../modules/tools/tools-page.js?v=20260727-game-library-redesign-01");
   return { createPage: module.createToolsPage, view };
 }
 
 function createHost({ api, els, initialParams, pages, state }) {
   let page = null;
   let galleryRenderer = null;
-  let adminModalPromise = null;
   let routeApplication = Promise.resolve();
 
   const shared = {
@@ -221,7 +222,7 @@ function createHost({ api, els, initialParams, pages, state }) {
         await page.openRouteTarget(next);
       } else {
         hidePersonProfile();
-        setMainHeader("小工具", "离线小游戏 / TXT 文档处理");
+        setMainHeader("小游戏", "离线游戏中心");
         page.renderStats();
         page.renderView();
       }
@@ -255,20 +256,10 @@ function createHost({ api, els, initialParams, pages, state }) {
   }
 
   function openAdminScript(scriptId = "", options = {}) {
-    getStandaloneAdmin().then((admin) => {
-      admin.openModal({
-        scriptId,
-        scriptDefaults: options.defaults || options.scriptDefaults || {}
-      });
-    }).catch((error) => {
-      console.error("[standalone-admin]", error);
-      window.location.assign("/admin");
-    });
-  }
-
-  function getStandaloneAdmin() {
-    if (!adminModalPromise) adminModalPromise = createStandaloneAdmin({ api, els, page, state });
-    return adminModalPromise;
+    window.location.assign(adminUrl("scripts", {
+      scriptId,
+      scriptDefaults: options.defaults || options.scriptDefaults || {}
+    }));
   }
 
   return {
@@ -277,55 +268,6 @@ function createHost({ api, els, initialParams, pages, state }) {
     installHistory,
     syncBodyClasses
   };
-}
-
-async function createStandaloneAdmin({ api, els, page, state }) {
-  const { createAdminModal } = await import("../modules/system/admin-modal.js?v=20260712-module-settings-02");
-  const admin = createAdminModal({
-    api,
-    displayPersonName: (person) => person?.actorProfile?.displayName || person?.name || "",
-    els,
-    formatBytes,
-    formatDateTime,
-    formatNumber,
-    loadFavorites: noopAsync,
-    loadHistory: noopAsync,
-    loadImageLibrary: (options) => state.activeView === "gallery" ? page.loadImageLibrary(options) : noopAsync(),
-    loadLibrary: noopAsync,
-    loadMusic: (options) => state.activeView === "music" ? page.loadMusic(options) : noopAsync(),
-    loadNovels: (options) => state.activeView === "novels" ? page.loadNovels(options) : noopAsync(),
-    loadRankings: noopAsync,
-    normalizeUiConfig,
-    personWorkPageSize: () => 0,
-    renderMeta: noop,
-    renderPeopleIndex: noop,
-    renderPeopleIndexStats: noop,
-    renderPlayer: noop,
-    renderWorks: noop,
-    resetWorkPaging: noop,
-    selectPerson: noopAsync,
-    state,
-    updateWorkSnapshot: noop
-  });
-
-  els.closeAdmin?.addEventListener("click", admin.closeModal);
-  els.adminBackdrop?.addEventListener("click", admin.closeModal);
-  els.adminRescanPerson?.addEventListener("click", admin.rescanSelectedPerson);
-  els.adminRefreshActor?.addEventListener("click", admin.refreshActorMovies);
-  els.adminRefreshRankings?.addEventListener("click", admin.refreshRankings);
-  els.adminPreviewActorAvatars?.addEventListener("click", admin.previewActorAvatarCandidates);
-  els.adminImportActorAvatars?.addEventListener("click", admin.importActorAvatars);
-  els.adminGenerateCovers?.addEventListener("click", admin.generateMissingCovers);
-  els.adminScriptForm?.addEventListener("submit", admin.runSelectedScript);
-  els.adminRefreshScripts?.addEventListener("click", admin.loadScripts);
-  els.adminScriptCategory?.addEventListener("change", () => {
-    state.adminScriptCategory = els.adminScriptCategory.value || "all";
-    admin.renderScripts();
-  });
-  window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && els.adminModal?.classList.contains("open")) admin.closeModal();
-  });
-  return admin;
 }
 
 function createStandaloneState(view) {
@@ -341,12 +283,6 @@ function createStandaloneState(view) {
     uiConfig: defaultUiConfig(),
     routeReady: false,
     restoringRoute: false,
-    handledAdminTaskIds: new Set(),
-    adminTasks: [],
-    adminScripts: [],
-    adminScriptCategories: [],
-    selectedAdminScriptId: "",
-    adminScriptCategory: "all",
     rankingLists: [],
     gallery: {
       mode: "photo",
@@ -391,25 +327,13 @@ function createStandaloneState(view) {
 }
 
 function createElementIndex() {
-  const entries = {
+  return {
     currentPath: document.querySelector("#currentPath"),
     currentTitle: document.querySelector("#currentTitle"),
     personProfile: document.querySelector("#personProfile"),
     statsRow: document.querySelector("#statsRow"),
     workGrid: document.querySelector("#workGrid")
   };
-  const adminIds = [
-    "adminBackdrop", "adminModal", "closeAdmin", "adminPersonSelect", "adminRescanPerson",
-    "adminRefreshActor", "adminRefreshRankings", "adminPreviewActorAvatars",
-    "adminImportActorAvatars", "adminActorAvatarCandidates", "adminCoverLimit", "adminGenerateCovers",
-    "adminCoverStatus", "adminStatus", "adminTaskList", "adminScriptCount",
-    "adminRunningCount", "adminDoneCount", "adminErrorCount", "adminScriptCategory", "adminRefreshScripts",
-    "adminScriptList", "adminScriptForm", "adminSelectedScriptCategory", "adminSelectedScriptTitle",
-    "adminSelectedScriptRuntime", "adminSelectedScriptDescription", "adminScriptFields", "adminRunScript",
-    "adminScriptStatus"
-  ];
-  for (const id of adminIds) entries[id] = document.querySelector(`#${id}`);
-  return entries;
 }
 
 function setMainHeader(title, pathText) {
@@ -522,4 +446,3 @@ function renderFatalError(error) {
 }
 
 function noop() {}
-async function noopAsync() {}

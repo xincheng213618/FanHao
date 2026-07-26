@@ -16,7 +16,7 @@ import {
   selectVisibleWorks,
   workServerMoreState
 } from "./modules/fanhao/index.js?v=20260726-work-sort-01";
-import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
+import { adminUrl } from "./js/admin-navigation.js?v=20260727-admin-merge-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260724-code-prefix-catalog-01";
 
@@ -26,13 +26,6 @@ prepareClientShell();
 const state = {
   ...createFanhaoState({ readStoredFlag }),
   uiConfig: defaultUiConfig(),
-  adminPollTimer: null,
-  handledAdminTaskIds: new Set(),
-  adminTasks: [],
-  adminScripts: [],
-  adminScriptCategories: [],
-  selectedAdminScriptId: "",
-  adminScriptCategory: "all",
   routeReady: false,
   restoringRoute: false
 };
@@ -44,7 +37,6 @@ function prepareAppShell() {
 const els = {
   productNav: document.querySelector(".product-nav"),
   productTabs: [...document.querySelectorAll("[data-product-view]")],
-  topRescanButton: document.querySelector("#topRescanButton"),
   topAdminLink: document.querySelector("#topAdminLink"),
   viewTabs: [...document.querySelectorAll(".view-tab")],
   workSearch: document.querySelector("#workSearch"),
@@ -59,37 +51,7 @@ const els = {
   backToPeopleIndex: document.querySelector("#backToPeopleIndex"),
   statsRow: document.querySelector("#statsRow"),
   workGrid: document.querySelector("#workGrid"),
-  placeholderTemplate: document.querySelector("#placeholderTemplate"),
-  adminBackdrop: document.querySelector("#adminBackdrop"),
-  adminModal: document.querySelector("#adminModal"),
-  closeAdmin: document.querySelector("#closeAdmin"),
-  adminPersonSelect: document.querySelector("#adminPersonSelect"),
-  adminRescanPerson: document.querySelector("#adminRescanPerson"),
-  adminRefreshActor: document.querySelector("#adminRefreshActor"),
-  adminRefreshRankings: document.querySelector("#adminRefreshRankings"),
-  adminPreviewActorAvatars: document.querySelector("#adminPreviewActorAvatars"),
-  adminImportActorAvatars: document.querySelector("#adminImportActorAvatars"),
-  adminActorAvatarCandidates: document.querySelector("#adminActorAvatarCandidates"),
-  adminCoverLimit: document.querySelector("#adminCoverLimit"),
-  adminGenerateCovers: document.querySelector("#adminGenerateCovers"),
-  adminCoverStatus: document.querySelector("#adminCoverStatus"),
-  adminStatus: document.querySelector("#adminStatus"),
-  adminTaskList: document.querySelector("#adminTaskList"),
-  adminScriptCount: document.querySelector("#adminScriptCount"),
-  adminRunningCount: document.querySelector("#adminRunningCount"),
-  adminDoneCount: document.querySelector("#adminDoneCount"),
-  adminErrorCount: document.querySelector("#adminErrorCount"),
-  adminScriptCategory: document.querySelector("#adminScriptCategory"),
-  adminRefreshScripts: document.querySelector("#adminRefreshScripts"),
-  adminScriptList: document.querySelector("#adminScriptList"),
-  adminScriptForm: document.querySelector("#adminScriptForm"),
-  adminSelectedScriptCategory: document.querySelector("#adminSelectedScriptCategory"),
-  adminSelectedScriptTitle: document.querySelector("#adminSelectedScriptTitle"),
-  adminSelectedScriptRuntime: document.querySelector("#adminSelectedScriptRuntime"),
-  adminSelectedScriptDescription: document.querySelector("#adminSelectedScriptDescription"),
-  adminScriptFields: document.querySelector("#adminScriptFields"),
-  adminRunScript: document.querySelector("#adminRunScript"),
-  adminScriptStatus: document.querySelector("#adminScriptStatus")
+  placeholderTemplate: document.querySelector("#placeholderTemplate")
 };
 
 const formatter = new Intl.NumberFormat("zh-CN");
@@ -220,32 +182,6 @@ const {
   renderWorks,
   state
 });
-const adminModal = createLazyAdminModal(async () => {
-  const { createAdminModal } = await import("./modules/system/admin-modal.js?v=20260717-fanhao-lazy-admin-01");
-  return createAdminModal({
-    api,
-    displayPersonName,
-    els,
-    formatBytes,
-    formatDateTime,
-    formatNumber,
-    loadFavorites,
-    loadHistory,
-    loadImageLibrary: async () => {},
-    loadLibrary,
-    loadMusic: async () => {},
-    loadNovels: async () => {},
-    loadRankings,
-    normalizeUiConfig,
-    personWorkPageSize,
-    renderPeopleIndex,
-    renderPeopleIndexStats,
-    renderWorks,
-    resetWorkPaging,
-    selectPerson,
-    state
-  });
-});
 const collectionPage = createCollectionPage({
   api,
   appendLoadedWorkPage,
@@ -273,7 +209,7 @@ const studioPage = createStudioPage({
   state
 });
 const rankingPage = createRankingPage({
-  adminRefreshRankings: adminModal.refreshRankings,
+  adminRefreshRankings: refreshRankingsFromLibrary,
   api,
   appendLoadedWorkPage,
   clearPersonSelection: () => {
@@ -561,7 +497,6 @@ async function loadLibrary(options = {}) {
   state.accessHints = data.access?.hints || {};
   state.uiConfig = normalizeUiConfig(data.uiConfig || state.uiConfig);
   if (els.topAdminLink) els.topAdminLink.hidden = state.accessMode !== "local";
-  if (els.topRescanButton) els.topRescanButton.hidden = state.accessMode !== "local";
   if (els.missingLocalToggle) els.missingLocalToggle.checked = state.showMissingLocalWorks;
   if (els.collectionToggle) els.collectionToggle.checked = state.showCompilationWorks;
   const defaultWorkPageSize = WORK_PAGE_SIZE_BY_ACCESS[state.accessMode] || WORK_PAGE_SIZE_BY_ACCESS.remote;
@@ -1872,11 +1807,52 @@ function showMissingLocalFromEmptyState() {
 }
 
 function openAdminScript(scriptId = "", options = {}) {
-  adminModal.openModal({ scriptId, scriptDefaults: options.defaults || options.scriptDefaults || {} });
+  window.location.assign(adminUrl("scripts", {
+    scriptId,
+    scriptDefaults: options.defaults || options.scriptDefaults || {}
+  }));
 }
 
 async function saveCompilationConfig(config) {
-  return adminModal.saveCompilationConfigData(config);
+  const normalized = normalizeUiConfig(config);
+  const data = await api("/api/admin/settings/fanhao", {
+    method: "PATCH",
+    body: {
+      values: {
+        compilationPrefixes: normalized.compilationPrefixes,
+        compilationKeywords: normalized.compilationKeywords
+      }
+    }
+  });
+  state.uiConfig = normalizeUiConfig({ ...state.uiConfig, ...(data.module?.values || {}) });
+  resetWorkPaging();
+  if (state.activeView === "people" && !state.selectedPersonId) {
+    renderPeopleIndexStats();
+    renderPeopleIndex();
+  } else {
+    renderWorks();
+  }
+  return state.uiConfig;
+}
+
+async function refreshRankingsFromLibrary(event) {
+  const button = event?.currentTarget;
+  const originalText = button?.textContent || "刷新缓存";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "启动中";
+  }
+  try {
+    await api("/api/admin/refresh-rankings", {
+      method: "POST",
+      body: { key: state.selectedRankingKey || "y2025", sleep: 2 }
+    });
+    window.location.assign(adminUrl("tasks"));
+  } catch (error) {
+    toastInline(button, error.message || "启动失败", originalText);
+  } finally {
+    if (button?.isConnected) button.disabled = false;
+  }
 }
 
 function renderSearchPeoplePanel() {
@@ -2449,12 +2425,8 @@ for (const button of els.viewTabs) {
   });
 }
 
-bindLazyAdminModal({ adminModal, els, openAdminScript, state });
-
-window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && els.adminModal?.classList.contains("open")) {
-    adminModal.closeModal();
-  }
+els.compilationConfigButton?.addEventListener("click", () => {
+  window.location.assign(adminUrl("settings"));
 });
 
 window.addEventListener("popstate", () => {
@@ -2471,6 +2443,7 @@ async function bootApp() {
   collectionPage.prefetch(initialRoute.view);
   const moduleNavigationPromise = initializeModuleNavigation();
   await applyRoute(initialRoute);
+  document.documentElement.classList.remove("app-module-loading");
   initializeRouteHistory();
   if (!state.library) {
     ensureLibraryLoaded({ deferMainRender: true }).catch((error) => {
@@ -2480,6 +2453,7 @@ async function bootApp() {
   await moduleNavigationPromise;
 }
 
-bootApp().catch((error) => {
+await bootApp().catch((error) => {
   renderEmpty(error.message);
+  document.documentElement.classList.remove("app-module-loading");
 });

@@ -516,7 +516,7 @@ async function bootShortVideoApp() {
   });
 }
 
-bootShortVideoApp().catch((error) => {
+await bootShortVideoApp().catch((error) => {
   console.error(error);
   if (els.workGrid) {
     els.workGrid.textContent = error?.message || "短视频页面加载失败";

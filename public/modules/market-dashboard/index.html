@@ -1,10 +1,11 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="app-module-loading">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#f5f6f8">
     <title>市场聚合看板 · FanHao</title>
+    <style>html.app-module-loading body { visibility: hidden; }</style>
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
@@ -163,6 +164,12 @@
     </template>
 
     <footer class="page-footer">行情数据仅供查看，不构成投资建议。</footer>
-    <script src="./app.js" defer></script>
+    <script type="module">
+      try {
+        await import("./app.js?v=20260727-initial-route-reveal-01");
+      } finally {
+        document.documentElement.classList.remove("app-module-loading");
+      }
+    </script>
   </body>
 </html>

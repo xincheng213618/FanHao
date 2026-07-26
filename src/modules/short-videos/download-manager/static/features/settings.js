@@ -1,6 +1,5 @@
 import { post } from "../core/api.js";
 import { $, toast } from "../core/dom.js";
-import { dateInputDaysAgo } from "../core/format.js";
 
 export function createSettingsFeature(options = {}) {
   const onRefreshLinks = options.onRefreshLinks || (() => Promise.resolve());
@@ -32,7 +31,6 @@ export function createSettingsFeature(options = {}) {
       scrolls: $("scrolls").value,
       idle_rounds: $("idleRounds").value,
       incremental_stop_existing: $("incrementalStopExisting").value,
-      profile_refresh_recent_days: $("profileRefreshRecentDays")?.value || 30,
       download_cycle_limit: $("downloadCycleLimit")?.value || 350,
       download_cycle_cooldown_minutes: $("downloadCycleCooldownMinutes")?.value || 30,
       failure_guard_threshold: $("failureGuardThreshold").value,
@@ -92,8 +90,6 @@ export function createSettingsFeature(options = {}) {
       "scrolls",
       "idleRounds",
       "incrementalStopExisting",
-      "profileRefreshRecentDays",
-      "profileRefreshSince",
       "downloadCycleLimit",
       "downloadCycleCooldownMinutes",
       "failureGuardThreshold",
@@ -123,11 +119,6 @@ export function createSettingsFeature(options = {}) {
     setInputValue("incrementalStopExisting", settings.incremental_stop_existing || 12);
     setInputValue("downloadCycleLimit", settings.download_cycle_limit || state.download?.cycle?.limit || 350);
     setInputValue("downloadCycleCooldownMinutes", settings.download_cycle_cooldown_minutes || state.download?.cycle?.cooldown_minutes || 30);
-    const recentDays = settings.profile_refresh_recent_days || 30;
-    setInputValue("profileRefreshRecentDays", recentDays);
-    if ($("profileRefreshSince") && !dirtyInputs.has("profileRefreshSince") && document.activeElement !== $("profileRefreshSince")) {
-      $("profileRefreshSince").value = dateInputDaysAgo(recentDays);
-    }
     setInputValue("failureGuardThreshold", settings.failure_guard_threshold || state.download?.failure_guard?.threshold || 10);
     setInputValue("concurrency", settings.concurrency || 8);
     setInputValue("concurrencyNumber", settings.concurrency || 8);

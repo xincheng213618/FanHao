@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urljoin, urlparse
 
@@ -82,12 +85,26 @@ class Chapter:
 
 
 class CollectorContext:
-    def __init__(self, config: dict[str, Any], emit):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        emit,
+        *,
+        checkpoint_path: str | Path | None = None,
+        checkpoint_identity: dict[str, Any] | None = None,
+    ):
         self.config = config
         self.emit = emit
         self.timeout = max(3.0, float(config.get("timeoutMs", 30000)) / 1000.0)
         self.delay = max(0.0, float(config.get("delayMs", 800)) / 1000.0)
         self.session = build_session(config)
+        self.checkpoint_path = Path(checkpoint_path).resolve() if checkpoint_path else None
+        self.checkpoint_identity = {
+            str(key): str(value or "")
+            for key, value in (checkpoint_identity or {}).items()
+        }
+        self._checkpoint_chapters: dict[str, dict[str, Any]] = {}
+        self._load_checkpoint()
 
     def fetch(self, url: str) -> str:
         target = normalize_http_url(url)
@@ -97,6 +114,10 @@ class CollectorContext:
             raise CollectionError(f"请求失败：{target}；{exc}") from exc
         if is_cloudflare_challenge(response):
             raise CollectionError("目标站点返回 Cloudflare 交互验证，当前采集器无法继续")
+        if is_access_challenge(response):
+            raise CollectionError(
+                f"目标站点要求访问验证码：{target}；请配置已登录并通过验证的 Cookie 后重试"
+            )
         try:
             response.raise_for_status()
         except requests.RequestException as exc:
@@ -119,6 +140,121 @@ class CollectorContext:
     def warning(self, message: str) -> None:
         self.emit("warning", message=message)
 
+    @property
+    def checkpoint_count(self) -> int:
+        return len(self._checkpoint_chapters)
+
+    def restore_chapter(self, chapter: Chapter) -> Chapter | None:
+        try:
+            key = normalize_http_url(chapter.url)
+        except CollectionError:
+            return None
+        saved = self._checkpoint_chapters.get(key)
+        if not saved:
+            return None
+        content = str(saved.get("content") or "").strip()
+        if not content:
+            return None
+        return Chapter(
+            title=str(saved.get("title") or chapter.title),
+            url=key,
+            content=content,
+            order=int(saved.get("order") or chapter.order or 0),
+        )
+
+    def checkpoint_metadata(self, url: str) -> dict[str, Any]:
+        try:
+            key = normalize_http_url(url)
+        except CollectionError:
+            return {}
+        saved = self._checkpoint_chapters.get(key) or {}
+        metadata = saved.get("metadata")
+        return dict(metadata) if isinstance(metadata, dict) else {}
+
+    def save_chapter(
+        self,
+        chapter: Chapter,
+        *,
+        metadata: dict[str, Any] | None = None,
+        total: int = 0,
+    ) -> None:
+        if self.checkpoint_path is None:
+            return
+        content = str(chapter.content or "").strip()
+        if not content:
+            return
+        key = normalize_http_url(chapter.url)
+        self._checkpoint_chapters[key] = {
+            "title": str(chapter.title or ""),
+            "url": key,
+            "content": content,
+            "order": int(chapter.order or len(self._checkpoint_chapters) + 1),
+            "metadata": dict(metadata) if isinstance(metadata, dict) else {},
+        }
+        self._write_checkpoint()
+        self.emit(
+            "checkpoint",
+            saved=self.checkpoint_count,
+            total=max(0, int(total or 0)),
+            message=f"已保存断点：{self.checkpoint_count} 章",
+        )
+
+    def _load_checkpoint(self) -> None:
+        if self.checkpoint_path is None or not self.checkpoint_path.exists():
+            return
+        try:
+            payload = json.loads(self.checkpoint_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            self.emit("warning", message=f"断点记录无法读取，将从头采集：{exc}")
+            return
+        if not isinstance(payload, dict):
+            return
+        identity = payload.get("identity")
+        normalized_identity = {
+            str(key): str(value or "")
+            for key, value in identity.items()
+        } if isinstance(identity, dict) else {}
+        if normalized_identity != self.checkpoint_identity:
+            self.emit("warning", message="断点记录与当前网址或适配器不一致，将从头采集")
+            return
+        chapters = payload.get("chapters")
+        if not isinstance(chapters, list):
+            return
+        for saved in chapters:
+            if not isinstance(saved, dict):
+                continue
+            try:
+                key = normalize_http_url(saved.get("url"))
+            except CollectionError:
+                continue
+            if not str(saved.get("content") or "").strip():
+                continue
+            self._checkpoint_chapters[key] = {
+                "title": str(saved.get("title") or ""),
+                "url": key,
+                "content": str(saved.get("content") or ""),
+                "order": int(saved.get("order") or len(self._checkpoint_chapters) + 1),
+                "metadata": dict(saved.get("metadata")) if isinstance(saved.get("metadata"), dict) else {},
+            }
+
+    def _write_checkpoint(self) -> None:
+        if self.checkpoint_path is None:
+            return
+        self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "identity": self.checkpoint_identity,
+            "updatedAt": datetime.now(timezone.utc).isoformat(),
+            "chapters": list(self._checkpoint_chapters.values()),
+        }
+        temporary = Path(f"{self.checkpoint_path}.tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+            newline="\n",
+        )
+        os.replace(temporary, self.checkpoint_path)
+
 
 def build_session(config: dict[str, Any]) -> requests.Session:
     session = requests.Session()
@@ -134,6 +270,9 @@ def build_session(config: dict[str, Any]) -> requests.Session:
         for key, value in custom_headers.items():
             if key and value is not None:
                 headers[str(key)] = str(value)
+    cookie = read_cookie_file(config.get("cookieFile"))
+    if cookie:
+        headers["Cookie"] = cookie
     session.headers.update(headers)
     retry = Retry(
         total=3,
@@ -335,3 +474,37 @@ def is_cloudflare_challenge(response: requests.Response) -> bool:
         return True
     text = response.text[:3000].lower()
     return "challenges.cloudflare.com" in text or "<title>just a moment" in text
+
+
+def is_access_challenge(response: requests.Response) -> bool:
+    final_url = str(response.url or "").lower()
+    if "/captcha_page/" in final_url or "/captcha/" in final_url:
+        return True
+    text = response.text[:6000]
+    return (
+        "访问验证" in text
+        and any(marker in text for marker in ("当前访问行为触发", "输入验证码", "安全验证"))
+    )
+
+
+def read_cookie_file(value: Any) -> str:
+    cookie_path = str(value or "").strip()
+    if not cookie_path:
+        return ""
+    path_value = Path(cookie_path)
+    try:
+        if path_value.stat().st_size > 128 * 1024:
+            raise CollectionError("登录 Cookie 文件过大")
+        raw = path_value.read_text(encoding="utf-8")
+    except CollectionError:
+        raise
+    except OSError as exc:
+        raise CollectionError("登录 Cookie 文件不可读") from exc
+    cookie = "; ".join(
+        line.strip()
+        for line in re.sub(r"^\s*Cookie:\s*", "", raw, count=1, flags=re.I).splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ).strip()
+    if cookie and "=" not in cookie:
+        raise CollectionError("登录 Cookie 内容无效")
+    return cookie

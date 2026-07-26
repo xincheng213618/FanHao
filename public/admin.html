@@ -1,10 +1,11 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="app-module-loading">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#1f2937" />
     <title>资料库设置与运维</title>
+    <style>html.app-module-loading body { visibility: hidden; }</style>
     <link rel="icon" href="/app-icon.svg?v=20260629-douban-cookie-01" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css?v=20260718-access-analytics-01" />
     <link rel="stylesheet" href="/modules/system/access-analytics.css?v=20260718-access-analytics-01" />
@@ -458,6 +459,12 @@
       </main>
     </div>
 
-    <script src="/admin.js?v=20260718-access-analytics-01" type="module"></script>
+    <script type="module">
+      try {
+        await import("/admin.js?v=20260727-initial-route-reveal-01");
+      } finally {
+        document.documentElement.classList.remove("app-module-loading");
+      }
+    </script>
   </body>
 </html>

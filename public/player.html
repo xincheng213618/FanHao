@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="app-module-loading">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -7,6 +7,9 @@
     <link rel="stylesheet" href="/css/foundation.css?v=20260717-player-startup-01" />
     <link rel="stylesheet" href="/vendor/plyr/plyr.css" />
     <style>
+      html.app-module-loading body {
+        visibility: hidden;
+      }
       *,
       *::before,
       *::after {
@@ -810,6 +813,12 @@
       </main>
     </div>
     <script src="/vendor/plyr/plyr.min.js"></script>
-    <script type="module" src="/js/player-page.js?v=20260724-player-person-search-02"></script>
+    <script type="module">
+      try {
+        await import("/js/player-page.js?v=20260727-initial-route-reveal-01");
+      } finally {
+        document.documentElement.classList.remove("app-module-loading");
+      }
+    </script>
   </body>
 </html>

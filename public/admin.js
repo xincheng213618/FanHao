@@ -19,6 +19,7 @@ const state = {
   selectedTaskId: "",
   taskFilter: "all",
   activeView: "overview",
+  pendingScriptDefaults: null,
   handledTasks: new Set(),
   pollTimer: null
 };
@@ -1036,6 +1037,39 @@ function viewFromHash() {
   return view === "rules" ? "settings" : view;
 }
 
+function readInitialAdminTarget() {
+  const params = new URLSearchParams(window.location.search);
+  const scriptId = String(params.get("script") || "").trim();
+  if (scriptId) state.selectedScriptId = scriptId;
+  const serializedDefaults = params.get("defaults");
+  if (!serializedDefaults) return;
+  try {
+    const defaults = JSON.parse(serializedDefaults);
+    if (defaults && typeof defaults === "object" && !Array.isArray(defaults)) {
+      state.pendingScriptDefaults = defaults;
+    }
+  } catch {
+    state.pendingScriptDefaults = null;
+  }
+}
+
+function applyPendingScriptDefaults() {
+  const defaults = state.pendingScriptDefaults;
+  if (!defaults || !els.scriptFields) return;
+  for (const [fieldName, value] of Object.entries(defaults)) {
+    const wrapper = els.scriptFields.querySelector(`[data-field-name="${CSS.escape(fieldName)}"]`);
+    const control = wrapper?.querySelector("input, select, textarea");
+    if (!control) continue;
+    if (control.type === "checkbox") {
+      control.checked = Boolean(value);
+    } else {
+      control.value = Array.isArray(value) ? value.join("\n") : String(value ?? "");
+    }
+  }
+  state.pendingScriptDefaults = null;
+  renderCommandPreview();
+}
+
 function bindEvents() {
   els.refreshAll?.addEventListener("click", refreshAll);
   els.refreshScripts?.addEventListener("click", loadScripts);
@@ -1104,13 +1138,16 @@ function selectQuickScript(scriptId) {
 }
 
 async function init() {
+  readInitialAdminTarget();
   bindEvents();
   setView(viewFromHash());
   await refreshAll();
+  applyPendingScriptDefaults();
+  els.scriptList?.querySelector(".admin-script-card.active")?.scrollIntoView({ block: "nearest" });
   state.pollTimer = window.setInterval(refreshTasks, 2500);
 }
 
-init().catch((error) => {
+await init().catch((error) => {
   setText(els.sideHealth, error.message || "后台加载失败");
   setText(els.healthStatus, error.message || "后台加载失败");
 });

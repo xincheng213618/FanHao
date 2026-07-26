@@ -27,6 +27,11 @@
     transform 140ms ease;
 }
 
+.admin-modal[aria-hidden="true"],
+.detail-drawer[aria-hidden="true"] {
+  display: none;
+}
+
 .admin-modal.open {
   transform: translate(-50%, 0);
   opacity: 1;

@@ -1,6 +1,6 @@
 import { api, post } from "../core/api.js";
 import { $, escapeHtml, safeUrl, toast } from "../core/dom.js";
-import { dateInputDaysAgo, displayDouyinId, formatCompact, formatDateTime, profileWorkDate } from "../core/format.js";
+import { displayDouyinId, formatCompact, formatDateTime, profileWorkDate } from "../core/format.js";
 
 export function createProfilesFeature(options) {
   const settings = options.settings;
@@ -9,10 +9,22 @@ export function createProfilesFeature(options) {
   let searchTimer = null;
   let rows = [];
   let total = 0;
-  let eligibleCount = 0;
+  let eligibleCount = null;
+  let deferredCount = null;
   let loading = false;
   let wasExtractActive = false;
   let extractActive = false;
+
+  function formatRefreshInterval(value) {
+    const seconds = Math.max(0, Number(value) || 0);
+    if (!seconds) return "";
+    if (seconds >= 86400) {
+      const days = seconds / 86400;
+      return `${days >= 10 ? Math.round(days) : Number(days.toFixed(1))} 天`;
+    }
+    const hours = seconds / 3600;
+    return `${hours >= 10 ? Math.round(hours) : Number(hours.toFixed(1))} 小时`;
+  }
 
   function renderProfileSelect(profiles, currentProfile) {
     const select = $("profileSelect");
@@ -71,27 +83,45 @@ export function createProfilesFeature(options) {
       filteredRows.sort((a, b) => Number(b.is_self || 0) - Number(a.is_self || 0) || valueOf(b) - valueOf(a) || Number(b.id) - Number(a.id));
     }
 
-    const since = $("profileRefreshSince")?.value || "";
-    const sinceTimestamp = since ? new Date(`${since}T00:00:00`).getTime() / 1000 : 0;
-    const localEligibleCount = allRows.filter((profile) => {
-      if (!(Number(profile.total || 0) > 0 || Number(profile.is_self || 0) === 1)) return false;
-      const latest = Number(profile.latest_work_create_time || 0);
-      return !sinceTimestamp || profile.tab === "like" || latest <= 0 || latest >= sinceTimestamp;
-    }).length;
-    const currentEligibleCount = eligibleCount || localEligibleCount;
+    const localCandidates = allRows.filter(
+      (profile) => Number(profile.total || 0) > 0 || Number(profile.is_self || 0) === 1
+    );
+    const localEligibleCount = localCandidates.filter((profile) => Number(profile.refresh_due || 0) === 1).length;
+    const currentEligibleCount = eligibleCount === null ? localEligibleCount : eligibleCount;
+    const currentDeferredCount = deferredCount === null
+      ? Math.max(0, localCandidates.length - localEligibleCount)
+      : deferredCount;
     const visibleRows = filteredRows;
     const totalRows = Math.max(total, filteredRows.length);
-    $("profileManagerSummary").textContent = `${totalRows} 个主页 · 已加载 ${visibleRows.length} 个 · 一键快速采集 ${currentEligibleCount} 个${since ? `（作品不早于 ${since}）` : ""}`;
+    $("profileManagerSummary").textContent = `${totalRows} 个主页 · 已加载 ${visibleRows.length} 个 · 智能判定本次采集 ${currentEligibleCount} 个，暂缓 ${currentDeferredCount} 个`;
     node.innerHTML = visibleRows.map((profile) => {
       const name = String(profile.nickname || profile.title || `主页 #${profile.id}`).trim();
       const douyinId = displayDouyinId(profile) || "-";
       const latestWork = profileWorkDate(profile);
       const lastExtracted = formatDateTime(profile.last_extracted_at);
+      const refreshDue = Number(profile.refresh_due || 0) === 1;
+      const refreshAt = formatDateTime(profile.refresh_due_at);
+      const refreshInterval = formatRefreshInterval(profile.refresh_interval_seconds);
+      const cadence = formatRefreshInterval(profile.refresh_cadence_seconds);
       const tabLabel = profile.tab === "like" ? "我的喜欢" : "作者作品";
       const sourceLabel = Number(profile.is_self || 0) === 1 ? "本人" : Number(profile.is_following || 0) === 1 ? "已关注" : "";
       const deletedWorksBadge = Number(profile.has_deleted_works || 0) === 1
         ? ' <span class="profile-manager-badge is-deleted-works" title="仅在全部扫描完成后确认">疑似删过作品</span>'
         : "";
+      const refreshBadge = profile.tab === "like"
+        ? ""
+        : ` <span class="profile-manager-badge ${refreshDue ? "is-refresh-due" : "is-refresh-waiting"}">${refreshDue ? "已到期" : "暂缓"}</span>`;
+      const refreshTitle = profile.refresh_basis === "posting_frequency"
+        ? `最近两条作品间隔 ${cadence || "未知"}；智能检查间隔 ${refreshInterval || "未知"}`
+        : profile.refresh_basis === "insufficient_history"
+          ? "作品时间样本不足，按 1 天兜底"
+          : profile.refresh_basis === "never_collected"
+            ? "尚未采集，立即执行"
+            : "喜欢列表在每次批量采集时检查";
+      const refreshMeta = [
+        lastExtracted ? `上次 ${lastExtracted}` : "尚未采集",
+        cadence ? `发作品约 ${cadence}` : "",
+      ].filter(Boolean).join(" · ");
       const avatar = profile.avatar_url
         ? `<img class="profile-manager-avatar" src="${safeUrl(profile.avatar_url)}" alt="" loading="lazy" />`
         : '<div class="profile-manager-avatar placeholder"></div>';
@@ -100,7 +130,7 @@ export function createProfilesFeature(options) {
           <div class="profile-manager-identity">
             ${avatar}
             <div>
-              <div class="profile-manager-name">${escapeHtml(name)}${sourceLabel ? ` <span class="profile-manager-badge">${escapeHtml(sourceLabel)}</span>` : ""}${deletedWorksBadge}</div>
+              <div class="profile-manager-name">${escapeHtml(name)}${sourceLabel ? ` <span class="profile-manager-badge">${escapeHtml(sourceLabel)}</span>` : ""}${deletedWorksBadge}${refreshBadge}</div>
               <div class="muted">${escapeHtml(tabLabel)} · 抖音号 ${escapeHtml(douyinId)}</div>
             </div>
           </div>
@@ -108,7 +138,7 @@ export function createProfilesFeature(options) {
           <div class="profile-manager-metric"><span>粉丝</span><strong>${formatCompact(profile.follower_count || 0)}</strong></div>
           <div class="profile-manager-metric"><span>获赞</span><strong>${formatCompact(profile.total_favorited || 0)}</strong></div>
           <div class="profile-manager-date"><span>最新作品</span><strong>${escapeHtml(latestWork ? latestWork.slice(0, 10) : "暂无日期")}</strong></div>
-          <div class="profile-manager-date"><span>上次采集</span><strong>${escapeHtml(lastExtracted || "尚未采集")}</strong></div>
+          <div class="profile-manager-date" title="${escapeHtml(refreshTitle)}"><span>智能重抓</span><strong>${escapeHtml(refreshDue ? "现在可采集" : refreshAt || "等待判断")}</strong><small>${escapeHtml(refreshMeta)}</small></div>
           <div class="profile-manager-row-actions">
             <a class="queue-link" href="${safeUrl(profile.url)}" target="_blank" rel="noreferrer">主页</a>
             <button data-profile-refresh="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>${Number(profile.is_self || 0) === 1 ? "采集喜欢" : "快速采集"}</button>
@@ -127,14 +157,11 @@ export function createProfilesFeature(options) {
     const reset = options.reset !== false;
     loading = true;
     try {
-      const since = $("profileRefreshSince")?.value || "";
-      const sinceTimestamp = since ? Math.floor(new Date(`${since}T00:00:00`).getTime() / 1000) : 0;
       const params = new URLSearchParams({
         scope: $("profileManagerScope")?.value || "collected",
         q: String($("profileManagerSearch")?.value || "").trim(),
         sort: $("profileManagerSort")?.value || "latest_desc",
         deleted_works: $("profileManagerDeletedWorks")?.value || "all",
-        since: String(sinceTimestamp || 0),
         limit: "200",
         offset: String(reset ? 0 : rows.length),
       });
@@ -148,6 +175,7 @@ export function createProfilesFeature(options) {
       }
       total = Number(data.total || 0);
       eligibleCount = Number(data.eligible_count || 0);
+      deferredCount = Number(data.deferred_count || 0);
     } finally {
       loading = false;
       renderManager(rows, extractActive);
@@ -178,7 +206,6 @@ export function createProfilesFeature(options) {
     const result = await post("/api/profiles/refresh", {
       max_profiles: 0,
       profile_ids: profileIds,
-      since_date: profileIds.length ? "" : $("profileRefreshSince").value,
       max: $("maxItems").value || 0,
       scrolls: payload.scrolls,
       idle_rounds: payload.idle_rounds,
@@ -191,7 +218,7 @@ export function createProfilesFeature(options) {
     $("profileRefreshStop").hidden = false;
     toast(profileIds.length
       ? `${fullScan ? "主页全量采集" : "主页快速采集"}已启动 #${result.job_id}`
-      : `一键快速采集已启动 #${result.job_id}`);
+      : `一键智能采集已启动 #${result.job_id}`);
   }
 
   async function importFollowing() {
@@ -254,14 +281,6 @@ export function createProfilesFeature(options) {
     $("profileRefreshStop").addEventListener("click", () => stopExtractJob().catch((err) => toast(err.message)));
     $("refreshProfiles").addEventListener("click", () => refreshProfiles([]).catch((err) => toast(err.message)));
     $("importFollowing").addEventListener("click", () => importFollowing().catch((err) => toast(err.message)));
-    $("profileRefreshRecentDays").addEventListener("input", () => {
-      $("profileRefreshSince").value = dateInputDaysAgo($("profileRefreshRecentDays").value);
-      settings.markDirty("profileRefreshSince");
-      load({ reset: true }).catch((err) => toast(err.message));
-    });
-    $("profileRefreshSince").addEventListener("input", () => {
-      load({ reset: true }).catch((err) => toast(err.message));
-    });
     $("profileManagerSearch").addEventListener("input", () => {
       clearTimeout(searchTimer);
       searchTimer = setTimeout(() => load({ reset: true }).catch((err) => toast(err.message)), 250);

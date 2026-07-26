@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from adapters import collect
-from core import CollectionError, CollectorContext, json_event, safe_filename
+from core import CollectionError, CollectorContext, json_event, normalize_http_url, safe_filename
 
 
 BUILTIN_DIRECT_ADAPTERS = {
@@ -67,7 +67,31 @@ def main(argv: list[str] | None = None) -> None:
 def execute(payload: dict[str, Any], output_dir: Path, result_path: Path) -> None:
     adapter = payload.get("adapter") or {}
     emit("status", message=f"正在启动适配器：{adapter.get('name') or adapter.get('id') or 'custom'}")
-    context = CollectorContext(dict(adapter.get("config") or {}), emit)
+    mode = str(payload.get("mode") or "collect")
+    task_id = str(payload.get("taskId") or "")
+    source_url = normalize_http_url(str(payload.get("url") or ""))
+    checkpoint_path = output_dir / "checkpoint.json" if task_id and mode == "collect" else None
+    collector_config = dict(adapter.get("config") or {})
+    credential_files = payload.get("credentials") or {}
+    if isinstance(credential_files, dict) and credential_files.get("cookieFile"):
+        collector_config["cookieFile"] = str(credential_files["cookieFile"])
+    context = CollectorContext(
+        collector_config,
+        emit,
+        checkpoint_path=checkpoint_path,
+        checkpoint_identity={
+            "sourceUrl": source_url,
+            "adapterId": str(adapter.get("id") or ""),
+            "mode": mode,
+        },
+    )
+    if context.checkpoint_count:
+        emit(
+            "checkpoint",
+            saved=context.checkpoint_count,
+            total=0,
+            message=f"找到断点记录：已保存 {context.checkpoint_count} 章，正在继续",
+        )
     book = collect(payload, context)
     chapters = list(book.get("chapters") or [])
     if not chapters:
@@ -77,7 +101,7 @@ def execute(payload: dict[str, Any], output_dir: Path, result_path: Path) -> Non
     output_path.write_text(output_text, encoding="utf-8", newline="\n")
     result = {
         "status": "ok",
-        "taskId": str(payload.get("taskId") or ""),
+        "taskId": task_id,
         "adapterId": str(adapter.get("id") or ""),
         "adapterName": str(adapter.get("name") or ""),
         "book": {

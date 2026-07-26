@@ -184,7 +184,7 @@
             </div>
             <div class="profile-manager-actions">
               <button id="importFollowing" title="从当前登录的抖音账号提取关注列表">提取我的关注</button>
-              <button id="refreshProfiles" class="primary" title="逐个增量采集全部符合条件的主页；每个主页遇到连续旧作品后快速进入下一个">一键快速采集</button>
+              <button id="refreshProfiles" class="primary" title="根据上次采集时间和最近两条作品的发布间隔，只增量采集已经到期的主页">一键智能采集</button>
               <button id="profileRefreshStop" class="danger" hidden>停止采集</button>
             </div>
           </div>
@@ -209,14 +209,6 @@
               </select>
             </label>
             <label class="field">
-              <span>最近天数</span>
-              <input id="profileRefreshRecentDays" type="number" min="0" max="3650" value="30" />
-            </label>
-            <label class="field">
-              <span>起始日期</span>
-              <input id="profileRefreshSince" type="date" />
-            </label>
-            <label class="field">
               <span>排序</span>
               <select id="profileManagerSort">
                 <option value="latest_desc">最新作品时间</option>
@@ -226,6 +218,9 @@
                 <option value="last_refresh_asc">最久未采集</option>
               </select>
             </label>
+          </div>
+          <div class="profile-refresh-policy-note muted">
+            智能重抓会比较上次采集时间、最新作品和上一条作品；未到预计发布时间的主页会直接跳过。
           </div>
           <div id="profileManagerList" class="profile-manager-list"></div>
         </section>

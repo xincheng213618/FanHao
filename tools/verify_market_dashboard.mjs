@@ -86,7 +86,9 @@ assert.equal(moduleDefinition.id, "market-dashboard");
 assert.equal(moduleDefinition.client.web.href, "/modules/market-dashboard/index.html");
 const html = fs.readFileSync(path.join(root, "public", "modules", "market-dashboard", "index.html"), "utf8");
 const app = fs.readFileSync(path.join(root, "public", "modules", "market-dashboard", "app.js"), "utf8");
-assert(html.includes('href="./styles.css"') && html.includes('src="./app.js"'));
+assert(html.includes('href="./styles.css"') && html.includes("./app.js?v=20260727-initial-route-reveal-01"));
+assert(html.includes('class="app-module-loading"') && html.includes('classList.remove("app-module-loading")'));
+assert(app.includes("await loadQuotes();"));
 for (const url of [
   "https://finance.sina.com.cn/",
   "https://stock.10jqka.com.cn/",

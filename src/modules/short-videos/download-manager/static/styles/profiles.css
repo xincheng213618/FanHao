@@ -17,9 +17,13 @@
 
 .profile-manager-controls {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 140px 150px 120px 170px 190px;
+  grid-template-columns: minmax(220px, 1fr) 140px 150px 190px;
   gap: 12px;
   align-items: end;
+}
+
+.profile-refresh-policy-note {
+  margin: 10px 0 12px;
 }
 
 .profile-manager-list {
@@ -90,6 +94,18 @@
   color: #9a3412;
 }
 
+.profile-manager-badge.is-refresh-due {
+  border-color: #15803d;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.profile-manager-badge.is-refresh-waiting {
+  border-color: #94a3b8;
+  background: #f8fafc;
+  color: #475569;
+}
+
 .profile-manager-metric,
 .profile-manager-date {
   min-width: 0;
@@ -113,7 +129,8 @@
   white-space: nowrap;
 }
 
-.profile-manager-metric small {
+.profile-manager-metric small,
+.profile-manager-date small {
   display: block;
   margin-top: 2px;
   color: var(--muted);

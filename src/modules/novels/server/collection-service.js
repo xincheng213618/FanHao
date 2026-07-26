@@ -5,9 +5,12 @@ import { spawn, spawnSync } from "node:child_process";
 import { createNovelCollectionStore } from "./collection-store.js";
 
 const MAX_RESULT_BYTES = 96 * 1024 * 1024;
+const MAX_CHECKPOINT_BYTES = 96 * 1024 * 1024;
 const MAX_LOG_LINES = 160;
+const RESUMABLE_TASK_STATUSES = new Set(["failed", "cancelled"]);
 
 export function createNovelCollectionService({
+  credentialService = null,
   dbPath,
   novelStore,
   outputRoot,
@@ -72,6 +75,7 @@ export function createNovelCollectionService({
       summary: store.summary(),
       adapters: store.listAdapters(),
       tasks: store.listTasks(),
+      credentials: credentialService?.statusSummary?.() || {},
       runtime: runtimeStatus()
     };
   }
@@ -113,17 +117,67 @@ export function createNovelCollectionService({
   }
 
   function createTask(body = {}) {
+    const existing = store.findReusableTask(body);
+    if (existing) {
+      if (["queued", "running", "cancelling"].includes(existing.status)) {
+        return { ok: true, task: existing, reused: true, resumed: false, alreadyActive: true };
+      }
+      const updated = store.updateTaskDefinition(existing.id, body);
+      const checkpointCount = RESUMABLE_TASK_STATUSES.has(existing.status)
+        ? readableCheckpointCount(updated)
+        : 0;
+      if (checkpointCount > 0) {
+        store.updateCheckpoint(updated.id, {
+          count: checkpointCount,
+          total: Math.max(updated.progressTotal, checkpointCount),
+          message: `已找到 ${checkpointCount} 章断点记录`
+        });
+      } else {
+        clearCheckpointFiles(updated.id);
+      }
+      const task = store.prepareTaskRun(updated.id, { preserveCheckpoint: checkpointCount > 0 });
+      schedulePump();
+      return {
+        ok: true,
+        task,
+        reused: true,
+        resumed: checkpointCount > 0,
+        alreadyActive: false
+      };
+    }
     const task = store.createTask(body);
     schedulePump();
-    return { ok: true, task };
+    return { ok: true, task, reused: false, resumed: false, alreadyActive: false };
   }
 
   function runTask(id) {
     const current = store.getTask(id);
     if (!current) throw httpError(404, "采集任务不存在");
-    const task = current.status === "queued" ? current : store.prepareTaskRun(id);
+    if (current.status === "queued") {
+      schedulePump();
+      return { ok: true, task: current, reused: true, resumed: false, alreadyActive: true };
+    }
+    const checkpointCount = RESUMABLE_TASK_STATUSES.has(current.status)
+      ? readableCheckpointCount(current)
+      : 0;
+    if (checkpointCount > 0) {
+      store.updateCheckpoint(current.id, {
+        count: checkpointCount,
+        total: Math.max(current.progressTotal, checkpointCount),
+        message: `已找到 ${checkpointCount} 章断点记录`
+      });
+    } else {
+      clearCheckpointFiles(current.id);
+    }
+    const task = store.prepareTaskRun(id, { preserveCheckpoint: checkpointCount > 0 });
     schedulePump();
-    return { ok: true, task };
+    return {
+      ok: true,
+      task,
+      reused: true,
+      resumed: checkpointCount > 0,
+      alreadyActive: false
+    };
   }
 
   function cancelTask(id) {
@@ -182,10 +236,15 @@ export function createNovelCollectionService({
       mode: task.mode,
       adapter: task.adapterSnapshot,
       options: task.options,
+      credentials: credentialService?.runnerCredentials?.(task.adapterId) || {},
       projectRoot: root
     };
     fs.writeFileSync(configPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-    fs.writeFileSync(logPath, "", "utf8");
+    fs.appendFileSync(
+      logPath,
+      `${new Date().toISOString()} attempt ${task.attempt} started\n`,
+      "utf8"
+    );
 
     const logLines = [];
     let lastProgress = {
@@ -263,6 +322,22 @@ export function createNovelCollectionService({
           total: numberOr(event.total, lastProgress.total),
           message: String(event.message || lastProgress.message || "").slice(0, 500)
         };
+        persistProgress();
+      } else if (event.event === "checkpoint") {
+        const checkpointCount = Math.max(0, numberOr(event.saved, 0));
+        const checkpointTotal = Math.max(0, numberOr(event.total, lastProgress.total));
+        lastProgress = {
+          current: Math.max(lastProgress.current, checkpointCount),
+          total: checkpointTotal || lastProgress.total,
+          message: String(event.message || lastProgress.message || "").slice(0, 500)
+        };
+        try {
+          store.updateCheckpoint(task.id, {
+            count: checkpointCount,
+            total: lastProgress.total,
+            message: lastProgress.message
+          });
+        } catch {}
         persistProgress();
       } else if (event.event === "status" || event.event === "warning") {
         lastProgress.message = String(event.message || "").slice(0, 500);
@@ -397,6 +472,43 @@ export function createNovelCollectionService({
       return { ready: true, checkedAt, error: "" };
     } catch (error) {
       return { ready: false, checkedAt, error: normalizeExecutionError(error, pythonPath).message };
+    }
+  }
+
+  function readableCheckpointCount(task) {
+    if (!task || task.mode !== "collect") return 0;
+    const checkpointPath = path.join(taskOutputRoot, task.id, "checkpoint.json");
+    let stat;
+    try {
+      stat = fs.statSync(checkpointPath);
+    } catch {
+      return 0;
+    }
+    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_CHECKPOINT_BYTES) return 0;
+    try {
+      const payload = JSON.parse(fs.readFileSync(checkpointPath, "utf8"));
+      const identity = payload?.identity || {};
+      if (
+        String(identity.sourceUrl || "") !== task.startUrl
+        || String(identity.adapterId || "") !== task.adapterId
+        || String(identity.mode || "") !== task.mode
+      ) {
+        return 0;
+      }
+      return Array.isArray(payload.chapters)
+        ? payload.chapters.filter((chapter) => String(chapter?.url || "").trim() && String(chapter?.content || "").trim()).length
+        : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  function clearCheckpointFiles(taskId) {
+    const taskDir = path.join(taskOutputRoot, String(taskId || ""));
+    for (const filename of ["checkpoint.json", "checkpoint.json.tmp"]) {
+      try {
+        fs.rmSync(path.join(taskDir, filename), { force: true });
+      } catch {}
     }
   }
 

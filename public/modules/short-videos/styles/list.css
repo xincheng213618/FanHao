@@ -1583,11 +1583,23 @@ body.short-video-view .work-grid {
 .short-video-source-tabs {
   display: inline-flex;
   align-items: center;
+  gap: 10px;
+}
+
+.short-video-source-tab-group {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
   gap: 4px;
   padding: 3px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
+}
+
+.short-video-source-tab-group.is-authors {
+  border-color: rgba(71, 92, 122, .22);
+  background: rgba(71, 92, 122, .055);
 }
 
 .short-video-source-tab {

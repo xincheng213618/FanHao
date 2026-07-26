@@ -238,6 +238,8 @@ for (const relativePath of [
   "run.cmd",
   "run.ps1",
   "setup-downloader.ps1",
+  "manager_core/profile_refresh_policy.py",
+  "tests/test_profile_refresh_policy.py",
   "tests/test_runtime_characterization.py",
   "static/index.html",
   "static/app.js",
@@ -344,6 +346,8 @@ assert.doesNotMatch(
 );
 assert.match(appSource, /following_discovered_at/);
 assert.match(appSource, /has_deleted_works/);
+assert.match(appSource, /def profile_refresh_decision\(/);
+assert.match(appSource, /previous_work_create_time/);
 assert.match(appSource, /def update_profile_deleted_works_flag\(/);
 assert.match(appSource, /full_scan/);
 assert.match(appSource, /\/api\/links\/delete/);
@@ -488,6 +492,9 @@ assert.match(managerClient, /export function createAuthFeature/);
 assert.match(managerClient, /\/api\/auth\/status/);
 assert.match(managerHtml, /提取我的关注/);
 assert.match(managerHtml, /疑似删过作品/);
+assert.match(managerHtml, /一键智能采集/);
+assert.match(managerHtml, /智能重抓会比较上次采集时间、最新作品和上一条作品/);
+assert.doesNotMatch(managerHtml, /id="profileRefreshRecentDays"|id="profileRefreshSince"/);
 assert.match(managerHtml, /已下载作品/);
 assert.match(managerHtml, /id="quitApp"/);
 assert.match(managerClient, /export function createLibraryFeature/);

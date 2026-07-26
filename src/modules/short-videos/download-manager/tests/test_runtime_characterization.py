@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -742,7 +743,7 @@ class RuntimeCharacterizationTests(unittest.TestCase):
                 self.assertIn("疑似删过作品", manager_html)
                 self.assertIn("deleted_works", profiles_js)
                 self.assertIn("has_deleted_works", profiles_js)
-                self.assertIn("一键快速采集", manager_html)
+                self.assertIn("一键智能采集", manager_html)
                 self.assertIn("data-profile-full-refresh", profiles_js)
                 self.assertIn("full_scan: fullScan", profiles_js)
             finally:
@@ -797,7 +798,6 @@ extraction.run_refresh_profiles_job(
     job_id,
     0,
     {profile_ids!r},
-    None,
     0,
     10,
     2,
@@ -833,6 +833,138 @@ print(json.dumps({{
                 )
                 result = json.loads(probe.stdout.strip())
                 self.assertEqual(result, {"calls": 2, "status": "complete", "processed": 2, "success": 2})
+            finally:
+                runtime.close()
+
+    def test_batch_refresh_only_runs_profiles_due_by_posting_frequency(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="fanhao-download-manager-smart-refresh-") as temp:
+            runtime = IsolatedManager(Path(temp))
+            try:
+                runtime.start()
+                now_timestamp = int(time.time())
+                now = datetime.fromtimestamp(now_timestamp, timezone.utc).isoformat(timespec="seconds")
+                due_last_extracted = datetime.fromtimestamp(
+                    now_timestamp - 2 * 24 * 60 * 60,
+                    timezone.utc,
+                ).isoformat(timespec="seconds")
+                waiting_last_extracted = datetime.fromtimestamp(
+                    now_timestamp - 60 * 60,
+                    timezone.utc,
+                ).isoformat(timespec="seconds")
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    profile_ids: dict[str, int] = {}
+                    for name, last_extracted_at in (
+                        ("smart-due", due_last_extracted),
+                        ("smart-waiting", waiting_last_extracted),
+                    ):
+                        cursor = connection.execute(
+                            """
+                            INSERT INTO profiles(
+                              url, sec_uid, tab, title, created_at, updated_at, last_extracted_at
+                            )
+                            VALUES(?, ?, 'post', ?, ?, ?, ?)
+                            """,
+                            (
+                                f"https://www.douyin.com/user/{name}",
+                                name,
+                                name,
+                                now,
+                                now,
+                                last_extracted_at,
+                            ),
+                        )
+                        profile_ids[name] = int(cursor.lastrowid)
+                    work_times = {
+                        "smart-due": [now_timestamp - 3 * 24 * 60 * 60, now_timestamp - 4 * 24 * 60 * 60],
+                        "smart-waiting": [now_timestamp - 2 * 60 * 60, now_timestamp - 26 * 60 * 60],
+                    }
+                    for name, timestamps in work_times.items():
+                        for index, create_time in enumerate(timestamps, start=1):
+                            connection.execute(
+                                """
+                                INSERT INTO links(
+                                  profile_id, aweme_id, kind, url, create_time,
+                                  status, discovered_at, last_seen_at
+                                )
+                                VALUES(?, ?, 'video', ?, ?, 'downloaded', ?, ?)
+                                """,
+                                (
+                                    profile_ids[name],
+                                    f"{name}-{index}",
+                                    f"https://www.douyin.com/video/{name}-{index}",
+                                    create_time,
+                                    now,
+                                    now,
+                                ),
+                            )
+                    connection.commit()
+
+                probe_script = """
+import json
+from manager_core import extraction
+from manager_core.database import create_job, db, update_job
+
+calls = []
+
+def fake(job_id, url, *args, **kwargs):
+    calls.append(url)
+    update_job(
+        job_id,
+        status="complete",
+        total=1,
+        processed=1,
+        success=1,
+        failed=0,
+        message="smart refresh done",
+    )
+
+extraction.run_extract_job = fake
+job_id = create_job("refresh", "test smart batch")
+extraction.run_refresh_profiles_job(
+    job_id,
+    0,
+    [],
+    0,
+    10,
+    2,
+    False,
+    12,
+    False,
+)
+with db() as connection:
+    row = connection.execute(
+        "SELECT status, total, processed, success, message FROM jobs WHERE id=?",
+        (job_id,),
+    ).fetchone()
+print(json.dumps({
+    "calls": calls,
+    "status": row["status"],
+    "total": row["total"],
+    "processed": row["processed"],
+    "success": row["success"],
+    "message": row["message"],
+}))
+"""
+                probe = subprocess.run(
+                    [sys.executable, "-c", probe_script],
+                    cwd=MODULE_DIR,
+                    env=runtime.environment,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=True,
+                )
+                result = json.loads(probe.stdout.strip())
+                self.assertEqual(
+                    result["calls"],
+                    ["https://www.douyin.com/user/smart-due"],
+                )
+                self.assertEqual(result["status"], "complete")
+                self.assertEqual(result["total"], 1)
+                self.assertEqual(result["processed"], 1)
+                self.assertEqual(result["success"], 1)
+                self.assertIn("智能跳过 1 个", result["message"])
             finally:
                 runtime.close()
 

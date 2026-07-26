@@ -167,8 +167,6 @@ document.addEventListener("click", restoreAutoplayAudioFromInteraction, { captur
 document.addEventListener("pointerdown", revealPlayerUi, { passive: true });
 document.addEventListener("pointermove", handlePlayerPointerMove, { passive: true });
 
-load();
-
 function initializePlayerExperience() {
   let storedPreference = null;
   try {
@@ -1790,3 +1788,5 @@ function reportProgress(positionOverride = null, options = {}) {
 function formatLibraryPath(value) {
   return String(value || "").replaceAll("\\", "/");
 }
+
+await load();
