@@ -2146,8 +2146,9 @@ public class NativeShortVideoActivity extends Activity {
     holder.playIndicator.setVisibility(View.GONE);
     syncGalleryZoomCounter(holder);
     rebuildGalleryProgress(holder, item.galleryItems.size(), galleryIndex);
-    holder.galleryCounter.setVisibility(controlsHidden ? View.GONE : View.VISIBLE);
-    holder.galleryProgress.setVisibility(!controlsHidden && item.galleryItems.size() > 1 && item.galleryItems.size() <= 12
+    holder.galleryCounter.setVisibility(!controlsHidden && !item.isSingleLivePhoto() ? View.VISIBLE : View.GONE);
+    holder.galleryProgress.setVisibility(!controlsHidden && !item.isSingleLivePhoto()
+      && item.galleryItems.size() > 1 && item.galleryItems.size() <= 12
       ? View.VISIBLE
       : View.GONE);
     holder.progressTouch.setVisibility(View.GONE);
@@ -2311,6 +2312,10 @@ public class NativeShortVideoActivity extends Activity {
 
   private Bitmap loadGalleryMediaFrame(GalleryMedia media) {
     if (media == null || media.url.length() == 0) return null;
+    if (media.posterUrl.length() > 0) {
+      Bitmap poster = loadBitmap(media.posterUrl, PLAYER_COVER_MAX_WIDTH, PLAYER_COVER_MAX_HEIGHT);
+      if (poster != null) return poster;
+    }
     return media.isVideo()
       ? extractFirstFrame(media.url)
       : loadBitmap(media.url, PLAYER_COVER_MAX_WIDTH, PLAYER_COVER_MAX_HEIGHT);
@@ -2614,13 +2619,15 @@ public class NativeShortVideoActivity extends Activity {
 
   private void applyControlsVisibility(ShortVideoHolder holder) {
     int visibility = controlsHidden ? View.GONE : View.VISIBLE;
-    boolean gallery = holder.index >= 0 && holder.index < videos.size() && videos.get(holder.index).isGallery();
-    int galleryCount = gallery ? videos.get(holder.index).galleryItems.size() : 0;
+    ShortVideoItem item = holder.index >= 0 && holder.index < videos.size() ? videos.get(holder.index) : null;
+    boolean gallery = item != null && item.isGallery();
+    boolean singleLivePhoto = gallery && item.isSingleLivePhoto();
+    int galleryCount = gallery ? item.galleryItems.size() : 0;
     holder.caption.setVisibility(visibility);
     holder.rail.setVisibility(visibility);
     holder.progressTouch.setVisibility(gallery ? View.GONE : visibility);
-    holder.galleryCounter.setVisibility(gallery && !controlsHidden ? View.VISIBLE : View.GONE);
-    holder.galleryProgress.setVisibility(gallery && !controlsHidden && galleryCount > 1 && galleryCount <= 12
+    holder.galleryCounter.setVisibility(gallery && !singleLivePhoto && !controlsHidden ? View.VISIBLE : View.GONE);
+    holder.galleryProgress.setVisibility(gallery && !singleLivePhoto && !controlsHidden && galleryCount > 1 && galleryCount <= 12
       ? View.VISIBLE
       : View.GONE);
     ExoPlayer visiblePlayer = gallery && gallerySegmentFeedIndex == holder.index

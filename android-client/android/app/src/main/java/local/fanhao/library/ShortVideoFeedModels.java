@@ -125,6 +125,7 @@ final class ShortVideoItem {
   final String mediaType;
   final String streamUrl;
   final String coverUrl;
+  final String galleryPresentation;
   final List<GalleryMedia> galleryItems;
   final ShortVideoSound sound;
   final String title;
@@ -161,12 +162,13 @@ final class ShortVideoItem {
   final String shareUrl;
   final String originalUrl;
 
-  ShortVideoItem(String id, String awemeId, String mediaType, String streamUrl, String coverUrl, List<GalleryMedia> galleryItems, ShortVideoSound sound, String title, String authorId, String author, String authorSecUid, String authorUid, String authorAvatarUrl, String authorProfileUrl, String authorUniqueId, String authorShortId, String authorSignature, String authorIpLocation, long authorFollowerCount, long authorFollowingCount, long authorTotalFavorited, long authorAwemeCount, long authorFavoritingCount, int authorGender, int authorAge, String authorVerification, String authorProfileCollectedAt, boolean authorFollowing, String publishedAt, long durationMs, int width, int height, long likes, long comments, long collects, long shares, long plays, boolean libraryLiked, String shareUrl, String originalUrl) {
+  ShortVideoItem(String id, String awemeId, String mediaType, String streamUrl, String coverUrl, String galleryPresentation, List<GalleryMedia> galleryItems, ShortVideoSound sound, String title, String authorId, String author, String authorSecUid, String authorUid, String authorAvatarUrl, String authorProfileUrl, String authorUniqueId, String authorShortId, String authorSignature, String authorIpLocation, long authorFollowerCount, long authorFollowingCount, long authorTotalFavorited, long authorAwemeCount, long authorFavoritingCount, int authorGender, int authorAge, String authorVerification, String authorProfileCollectedAt, boolean authorFollowing, String publishedAt, long durationMs, int width, int height, long likes, long comments, long collects, long shares, long plays, boolean libraryLiked, String shareUrl, String originalUrl) {
     this.id = id == null ? "" : id;
     this.awemeId = awemeId == null ? "" : awemeId;
     this.mediaType = mediaType == null ? "video" : mediaType;
     this.streamUrl = streamUrl == null ? "" : streamUrl;
     this.coverUrl = coverUrl == null ? "" : coverUrl;
+    this.galleryPresentation = galleryPresentation == null ? "" : galleryPresentation;
     this.galleryItems = galleryItems == null ? Collections.emptyList() : Collections.unmodifiableList(new ArrayList<>(galleryItems));
     this.sound = sound == null ? ShortVideoSound.EMPTY : sound;
     this.title = title == null ? "" : title;
@@ -207,15 +209,23 @@ final class ShortVideoItem {
   boolean isGallery() {
     return "gallery".equals(mediaType) && !galleryItems.isEmpty();
   }
+
+  boolean isSingleLivePhoto() {
+    return "live-photo".equals(galleryPresentation)
+      && galleryItems.size() == 1
+      && galleryItems.get(0).isVideo();
+  }
 }
 
 final class GalleryMedia {
   final String type;
   final String url;
+  final String posterUrl;
 
-  GalleryMedia(String type, String url) {
+  GalleryMedia(String type, String url, String posterUrl) {
     this.type = "video".equals(type) ? "video" : "image";
     this.url = url == null ? "" : url;
+    this.posterUrl = posterUrl == null ? "" : posterUrl;
   }
 
   boolean isVideo() {

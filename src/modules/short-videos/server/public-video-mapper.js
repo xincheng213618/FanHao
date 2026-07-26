@@ -21,6 +21,16 @@ export function createShortVideoPublicVideoMapper(dependencies = {}) {
     const id = row.id || row.aweme_id || "";
     const metadata = parseJsonObject(row.metadata_json);
     const media = publicVideoMedia(row, metadata);
+    const livePhotoItems = livePhotoGalleryItems(metadata, media);
+    const sourceItems = livePhotoItems || media.galleryItems.map((type, sourceIndex) => ({ sourceIndex, type }));
+    const galleryItems = sourceItems.map((item, index) => ({
+      ...item,
+      index,
+      url: `/media/short-video-gallery/${encodeURIComponent(id)}/${item.sourceIndex}`,
+      ...(Number.isInteger(item.posterIndex)
+        ? { posterUrl: `/media/short-video-gallery/${encodeURIComponent(id)}/${item.posterIndex}` }
+        : {})
+    }));
     const userActions = {
       liked: Boolean(row.user_like_active),
       collected: Boolean(row.user_collect_active),
@@ -50,19 +60,12 @@ export function createShortVideoPublicVideoMapper(dependencies = {}) {
       visibility: row.visibility || "local_only",
       deletedFromAuthor: Boolean(row.author_deleted),
       mediaType: media.type,
-      galleryCount: media.galleryCount,
-      galleryItems: media.galleryItems.map((type, index) => ({
-        index,
-        type,
-        url: `/media/short-video-gallery/${encodeURIComponent(id)}/${index}`
-      })),
-      galleryImages: media.galleryItems
-        .map((type, index) => ({ type, index }))
+      galleryPresentation: livePhotoItems ? "live-photo" : (media.type === "gallery" ? "carousel" : ""),
+      galleryCount: galleryItems.length,
+      galleryItems,
+      galleryImages: galleryItems
         .filter((item) => item.type === "image")
-        .map((item) => ({
-          index: item.index,
-          url: `/media/short-video-gallery/${encodeURIComponent(id)}/${item.index}`
-        })),
+        .map((item) => ({ index: item.index, url: item.url })),
       title: row.title || row.description || row.file_name || "",
       description: row.description || "",
       tags: parseJsonArray(row.tags_json),
@@ -162,6 +165,28 @@ export function createShortVideoPublicVideoMapper(dependencies = {}) {
         ? Array.from({ length: galleryCount }, (_, index) => declaredGalleryItems[index] || "image")
         : []
     };
+  }
+
+  function livePhotoGalleryItems(metadata = {}, media = {}) {
+    const images = Array.isArray(metadata.images) ? metadata.images : [];
+    if (media.type !== "gallery" || !images.length) return null;
+    const items = [];
+    let sourceIndex = 0;
+    let liveCount = 0;
+    for (const image of images) {
+      if (!image || typeof image !== "object" || media.galleryItems[sourceIndex] !== "image") return null;
+      const imageIndex = sourceIndex++;
+      const nestedVideo = image.video && typeof image.video === "object";
+      const livePhoto = Number(image.live_photo_type || 0) > 0 && nestedVideo;
+      if (!livePhoto) {
+        items.push({ sourceIndex: imageIndex, type: "image" });
+        continue;
+      }
+      if (media.galleryItems[sourceIndex] !== "video") return null;
+      items.push({ sourceIndex: sourceIndex++, posterIndex: imageIndex, type: "video" });
+      liveCount += 1;
+    }
+    return liveCount > 0 && sourceIndex === media.galleryItems.length ? items : null;
   }
 
   function publicShortVideoSound(row = {}, id = "") {

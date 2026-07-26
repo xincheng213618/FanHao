@@ -2142,7 +2142,7 @@ export function createShortVideoPage(deps) {
   function ensureShortVideoGalleryPlayer() {
     if (shortVideoGalleryPlayerPromise) return shortVideoGalleryPlayerPromise;
     markShortVideoPerformance("gallery-player-module-start");
-    const moduleUrl = "/modules/short-videos/gallery-player.js?v=20260720-compact-caption-10";
+    const moduleUrl = "/modules/short-videos/gallery-player.js?v=20260727-live-photo-15";
     shortVideoGalleryPlayerPromise = import(moduleUrl).then((module) => {
       if (typeof module.createShortVideoGalleryPlayer !== "function") {
         throw new Error("图文播放器模块加载失败");
@@ -2156,6 +2156,7 @@ export function createShortVideoPage(deps) {
         els,
         formatBytes,
         galleryImageEntries,
+        handleGalleryAutoNext,
         isShortVideoGestureClickBlocked,
         isShortVideoKeyboardControl,
         markPlayerSoundBlocked,
@@ -2926,6 +2927,16 @@ export function createShortVideoPage(deps) {
     openAdjacent(1).catch(showError);
   }
 
+  function handleGalleryAutoNext(video) {
+    if (!state.shortVideo?.autoNext || !isCurrentShortVideo(video)) return false;
+    if (!state.shortVideo.nextId) {
+      showBrowserToast("已经是最后一条");
+      return false;
+    }
+    openAdjacent(1).catch(showError);
+    return true;
+  }
+
   function syncActivePlaybackMode(player = activePlayer()) {
     if (!player || player.classList.contains("is-ghost")) return;
     player.loop = !(state.shortVideo?.autoNext && state.shortVideo?.nextId);
@@ -3175,6 +3186,37 @@ export function createShortVideoPage(deps) {
     }
   }
 
+  function createAutoNextControl() {
+    const autoNext = document.createElement("button");
+    autoNext.type = "button";
+    autoNext.className = "short-video-control-toggle short-video-control-auto";
+    autoNext.setAttribute("role", "switch");
+    const track = document.createElement("span");
+    track.className = "short-video-control-switch-track";
+    track.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = "连播";
+    autoNext.append(track, label);
+    autoNext.title = "自动播放下一条";
+    const sync = () => {
+      const enabled = Boolean(state.shortVideo?.autoNext);
+      autoNext.classList.toggle("active", enabled);
+      autoNext.setAttribute("aria-pressed", String(enabled));
+      autoNext.setAttribute("aria-checked", String(enabled));
+      autoNext.setAttribute("aria-label", enabled ? "关闭连播" : "开启连播");
+    };
+    autoNext.addEventListener("click", () => {
+      state.shortVideo.autoNext = !state.shortVideo.autoNext;
+      writeAutoNextPreference(state.shortVideo.autoNext);
+      syncActivePlaybackMode();
+      showBrowserToast(state.shortVideo.autoNext ? "已开启连播" : "已关闭连播");
+      sync();
+    });
+    autoNext.shortVideoSync = sync;
+    sync();
+    return autoNext;
+  }
+
   function renderGalleryControlBar(video) {
     const bar = document.createElement("div");
     bar.className = "short-video-control-bar is-gallery";
@@ -3185,9 +3227,13 @@ export function createShortVideoPage(deps) {
     play.className = "short-video-control-icon short-video-gallery-play-toggle";
     const label = document.createElement("span");
     label.className = "short-video-gallery-control-label";
-    label.append(createIcon("images"), document.createTextNode(`图集 · ${galleryLabel(video)}`));
+    const livePhoto = video.galleryPresentation === "live-photo";
+    const galleryKind = livePhoto ? "实况" : "图集";
+    const gallerySummary = livePhoto && Number(video.galleryCount || 0) <= 1 ? "视频" : galleryLabel(video);
+    label.append(createIcon("images"), document.createTextNode(`${galleryKind} · ${gallerySummary}`));
     const spacer = document.createElement("span");
     spacer.className = "short-video-gallery-control-spacer";
+    const autoNext = createAutoNextControl();
     const original = document.createElement("button");
     original.type = "button";
     original.className = "short-video-control-original";
@@ -3281,7 +3327,10 @@ export function createShortVideoPage(deps) {
       activeGalleryPlayer()?.shortVideoGalleryTogglePlayback?.();
       syncSound();
     });
-    bar.shortVideoSync = syncSound;
+    bar.shortVideoSync = () => {
+      syncSound();
+      autoNext.shortVideoSync?.();
+    };
     bar.shortVideoEnableGallerySound = (sound) => {
       video.sound = sound;
       mute.hidden = false;
@@ -3297,7 +3346,7 @@ export function createShortVideoPage(deps) {
     full.dataset.shortVideoFullscreenLabel = "全屏查看图文";
     syncShortVideoFullscreenControl(full);
     full.addEventListener("click", () => toggleShortVideoFullscreen());
-    bar.append(play, label, spacer);
+    bar.append(play, label, spacer, autoNext);
     bar.append(mute);
     bar.append(original, full);
     return bar;
@@ -3330,17 +3379,7 @@ export function createShortVideoPage(deps) {
     seekPreview.textContent = "0:00";
     seekPreview.setAttribute("aria-hidden", "true");
     progressWrap.append(progress, seekPreview);
-    const autoNext = document.createElement("button");
-    autoNext.type = "button";
-    autoNext.className = "short-video-control-toggle short-video-control-auto";
-    autoNext.setAttribute("role", "switch");
-    const autoNextTrack = document.createElement("span");
-    autoNextTrack.className = "short-video-control-switch-track";
-    autoNextTrack.setAttribute("aria-hidden", "true");
-    const autoNextLabel = document.createElement("span");
-    autoNextLabel.textContent = "连播";
-    autoNext.append(autoNextTrack, autoNextLabel);
-    autoNext.title = "自动播放下一条";
+    const autoNext = createAutoNextControl();
     const clearScreen = document.createElement("button");
     clearScreen.type = "button";
     clearScreen.className = "short-video-control-toggle short-video-control-clear";
@@ -3533,10 +3572,7 @@ export function createShortVideoPage(deps) {
       volume.style.setProperty("--short-video-volume", `${volumePercent}%`);
       volume.setAttribute("aria-label", `音量 ${volumePercent}%`);
       volumeReadout.textContent = `${volumePercent}%`;
-      autoNext.classList.toggle("active", Boolean(state.shortVideo?.autoNext));
-      autoNext.setAttribute("aria-pressed", String(Boolean(state.shortVideo?.autoNext)));
-      autoNext.setAttribute("aria-checked", String(Boolean(state.shortVideo?.autoNext)));
-      autoNext.setAttribute("aria-label", state.shortVideo?.autoNext ? "关闭连播" : "开启连播");
+      autoNext.shortVideoSync?.();
       const clearScreenActive = Boolean(bar.closest(".short-video-browser")?.classList.contains("is-clear-screen"));
       clearScreen.classList.toggle("active", clearScreenActive);
       clearScreen.setAttribute("aria-pressed", String(clearScreenActive));

@@ -50,7 +50,12 @@ final class ShortVideoFeedContract {
       for (int index = 0; index < galleryMedia.length(); index++) {
         JSONObject entry = galleryMedia.optJSONObject(index);
         String url = absoluteUrl(baseUrl, entry == null ? "" : entry.optString("url", ""));
-        if (url.length() > 0) galleryItems.add(new GalleryMedia(entry == null ? "image" : entry.optString("type", "image"), url));
+        String posterUrl = absoluteUrl(baseUrl, entry == null ? "" : entry.optString("posterUrl", ""));
+        if (url.length() > 0) galleryItems.add(new GalleryMedia(
+          entry == null ? "image" : entry.optString("type", "image"),
+          url,
+          posterUrl
+        ));
       }
     }
     if (streamUrl.length() == 0 && galleryItems.isEmpty()) return null;
@@ -81,6 +86,7 @@ final class ShortVideoFeedContract {
       mediaType,
       streamUrl,
       absoluteUrl(baseUrl, row.optString("coverUrl", "")),
+      row.optString("galleryPresentation", ""),
       galleryItems,
       sound,
       row.optString("title", ""),

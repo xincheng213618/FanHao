@@ -14,6 +14,7 @@ export function serializeShortVideoForNative(item = {}) {
     awemeId: cleanString(item.awemeId),
     title: cleanString(item.title),
     mediaType: cleanString(item.mediaType) || "video",
+    galleryPresentation: cleanString(item.galleryPresentation),
     streamUrl: cleanString(item.mobileStreamUrl || item.streamUrl),
     coverUrl: cleanString(item.coverUrl),
     width: finiteNumber(actualVideo?.width || item.width),
@@ -91,6 +92,7 @@ function serializeGalleryEntries(entries, includeType) {
   return entries.map((entry, index) => ({
     index: finiteNumber(entry?.index ?? index),
     ...(includeType ? { type: entry?.type === "video" ? "video" : "image" } : {}),
+    ...(includeType ? { posterUrl: cleanString(entry?.posterUrl) } : {}),
     url: cleanString(entry?.url)
   })).filter((entry) => entry.url);
 }

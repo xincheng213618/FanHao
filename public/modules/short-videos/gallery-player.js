@@ -7,6 +7,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
     currentShortVideoVolume,
     els,
     galleryImageEntries,
+    handleGalleryAutoNext,
     isShortVideoGestureClickBlocked,
     isShortVideoKeyboardControl,
     markPlayerSoundBlocked,
@@ -27,10 +28,13 @@ export function createShortVideoGalleryPlayer(dependencies) {
 
   function renderGalleryPlayer(video, options = {}) {
     const images = galleryImageEntries(video);
+    const livePhoto = video.galleryPresentation === "live-photo";
+    const singleLivePhoto = livePhoto && images.length === 1;
     const ghost = Boolean(options.ghost);
     const stage = options.stage;
     const wrap = document.createElement("div");
     wrap.className = `short-video-gallery-player${ghost ? " is-ghost" : ""}`;
+    wrap.classList.toggle("is-live-photo", livePhoto);
     wrap.setAttribute("role", "group");
     wrap.setAttribute("aria-label", "图文播放器");
     if (images.length > 1) wrap.setAttribute("aria-description", "左右滑动翻图，上下滑动切换作品");
@@ -184,7 +188,13 @@ export function createShortVideoGalleryPlayer(dependencies) {
         element.muted = true;
         element.playsInline = true;
         element.preload = ghost ? "metadata" : "auto";
-        element.setAttribute("aria-label", `${video.title || "图文作品"}，第 ${index + 1} 项视频，共 ${images.length} 项`);
+        if (images[index]?.posterUrl) {
+          element.poster = images[index].posterUrl;
+          element.dataset.galleryPosterUrl = images[index].posterUrl;
+        }
+        element.setAttribute("aria-label", video.galleryPresentation === "live-photo"
+          ? `${video.title || "图文作品"}，实况视频`
+          : `${video.title || "图文作品"}，第 ${index + 1} 项视频，共 ${images.length} 项`);
       } else {
         element.alt = `${video.title || "图文作品"}，第 ${index + 1} 张，共 ${images.length} 张`;
         element.decoding = "async";
@@ -375,7 +385,10 @@ export function createShortVideoGalleryPlayer(dependencies) {
         if (active) button.setAttribute("aria-current", "true");
         else button.removeAttribute("aria-current");
       });
-      if (current) stage?.style.setProperty("--short-video-cover", `url(${JSON.stringify(current.url)})`);
+      if (current) {
+        const backdropUrl = current.posterUrl || current.url;
+        stage?.style.setProperty("--short-video-cover", `url(${JSON.stringify(backdropUrl)})`);
+      }
     };
     const restartProgressTiming = () => {
       const activeButton = progressButtons[currentIndex];
@@ -439,6 +452,11 @@ export function createShortVideoGalleryPlayer(dependencies) {
       }
     };
     const galleryTimingPaused = () => galleryVisibilityPaused || galleryUserPaused;
+    const advanceFromEntry = (entry) => {
+      if (!entry || !wrap.isConnected || currentIndex !== entry.index) return;
+      if (currentIndex === images.length - 1 && handleGalleryAutoNext?.(video)) return;
+      if (images.length > 1) move(1);
+    };
     const syncGalleryPlaybackState = () => {
       const paused = galleryTimingPaused();
       wrap.classList.toggle("is-gallery-timing-paused", paused);
@@ -458,7 +476,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
         clip.muted = true;
         clip.onended = () => {
           updateVideoProgress(entry);
-          if (images.length > 1 && wrap.isConnected && currentIndex === entry.index) move(1);
+          advanceFromEntry(entry);
         };
         clip.play?.().catch(() => {}).finally(() => startVideoProgress(entry));
         return;
@@ -467,7 +485,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
       advanceTimer = window.setTimeout(() => {
         advanceTimer = 0;
         advanceStartedAt = 0;
-        if (wrap.isConnected && currentIndex === entry.index) move(1);
+        advanceFromEntry(entry);
       }, Math.max(0, advanceRemainingMs));
     };
     const scheduleAdvance = (entry) => {
@@ -841,10 +859,13 @@ export function createShortVideoGalleryPlayer(dependencies) {
     const initialEntry = loadImage(0);
     image = initialEntry.image;
     track.append(image);
-    if (images.length > 1) pager.append(previous, counter, next);
-    else pager.append(counter);
-    wrap.append(track, progress, pager);
-    if (images.length > 1) wrap.append(edgePrevious, edgeNext);
+    wrap.append(track);
+    if (!singleLivePhoto) {
+      if (images.length > 1) pager.append(previous, counter, next);
+      else pager.append(counter);
+      wrap.append(progress, pager);
+    }
+    if (!singleLivePhoto && images.length > 1) wrap.append(edgePrevious, edgeNext);
     wrap.append(centerPlay, loadStatus, gestureHint);
     const attachLocalBackgroundSound = (sound = video.sound) => {
       const localSoundUrl = !ghost && sound?.localAvailable ? String(sound.previewUrl || "").trim() : "";

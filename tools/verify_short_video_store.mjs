@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { SQLITE_SHORT_VIDEO_COVER_SOURCE } from "../src/modules/short-videos/server/cover-database.js";
 import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
 import { createDownloadManagerSyncService } from "../src/modules/short-videos/server/download-manager-sync-service.js";
+import { createShortVideoPublicVideoMapper } from "../src/modules/short-videos/server/public-video-mapper.js";
 
 const shortVideoStoreSource = fs.readFileSync(new URL("../src/modules/short-videos/server/store.js", import.meta.url), "utf8");
 const shortVideoImportItemMapperSource = fs.readFileSync(
@@ -52,6 +53,73 @@ assert.match(
   /return Object\.freeze\(\{ publicVideo, publicVideoMedia \}\)/,
   "public video mapper should expose the canonical row and media mapping entry points"
 );
+const { publicVideo: mapPublicVideoFixture } = createShortVideoPublicVideoMapper({
+  clampInt: (value, fallback, min, max) => Math.max(min, Math.min(max, Math.round(Number(value ?? fallback) || fallback))),
+  optionalInteger: (value) => Number.isFinite(Number(value)) ? Math.round(Number(value)) : null,
+  parseJsonArray: (value) => {
+    try {
+      const parsed = typeof value === "string" ? JSON.parse(value) : value;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  },
+  parseJsonObject: (value) => {
+    try {
+      const parsed = typeof value === "string" ? JSON.parse(value) : value;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+});
+const singleLiveFixtureId = "7666424537071935673";
+const singleLiveFixture = mapPublicVideoFixture({
+  id: singleLiveFixtureId,
+  aweme_id: singleLiveFixtureId,
+  media_type: "gallery",
+  source_path: `C:\\media\\${singleLiveFixtureId}_1.jpg`,
+  metadata_json: JSON.stringify({
+    is_live_photo: 1,
+    images: [{
+      width: 1080,
+      height: 1920,
+      live_photo_type: 1,
+      video: { duration: 4967, play_addr: { url_list: ["https://example.invalid/live.mp4"] } }
+    }],
+    fanhaoMedia: { type: "gallery", galleryCount: 2, galleryItems: ["image", "video"] }
+  })
+});
+assert.equal(singleLiveFixture.galleryPresentation, "live-photo");
+assert.equal(singleLiveFixture.galleryCount, 1, "a single live photo should expose one logical playback item");
+assert.deepEqual(singleLiveFixture.galleryItems.map((item) => item.type), ["video"]);
+assert.equal(singleLiveFixture.galleryItems[0]?.sourceIndex, 1);
+assert.equal(singleLiveFixture.galleryItems[0]?.posterIndex, 0);
+assert.equal(singleLiveFixture.galleryItems[0]?.url, `/media/short-video-gallery/${singleLiveFixtureId}/1`);
+assert.equal(singleLiveFixture.galleryItems[0]?.posterUrl, `/media/short-video-gallery/${singleLiveFixtureId}/0`);
+const multiLiveFixtureId = "7665938053522214858";
+const multiLiveFixture = mapPublicVideoFixture({
+  id: multiLiveFixtureId,
+  aweme_id: multiLiveFixtureId,
+  media_type: "gallery",
+  source_path: `C:\\media\\${multiLiveFixtureId}_1.jpg`,
+  metadata_json: JSON.stringify({
+    images: Array.from({ length: 3 }, () => ({
+      live_photo_type: 1,
+      video: { duration: 3000, play_addr: { url_list: ["https://example.invalid/live.mp4"] } }
+    })),
+    fanhaoMedia: {
+      type: "gallery",
+      galleryCount: 6,
+      galleryItems: ["image", "video", "image", "video", "image", "video"]
+    }
+  })
+});
+assert.equal(multiLiveFixture.galleryPresentation, "live-photo");
+assert.equal(multiLiveFixture.galleryCount, 3, "three live-photo pairs should expose three logical playback items");
+assert.deepEqual(multiLiveFixture.galleryItems.map((item) => item.type), ["video", "video", "video"]);
+assert.deepEqual(multiLiveFixture.galleryItems.map((item) => item.sourceIndex), [1, 3, 5]);
+assert.deepEqual(multiLiveFixture.galleryItems.map((item) => item.posterIndex), [0, 2, 4]);
 assert.ok(shortVideoStoreSource.split(/\r?\n/).length <= 4950, "short-video store exceeded its refactored 4950-line budget");
 assert.ok(shortVideoImportItemMapperSource.split(/\r?\n/).length <= 650, "short-video import item mapper exceeded its 650-line budget");
 assert.ok(shortVideoPublicVideoMapperSource.split(/\r?\n/).length <= 280, "short-video public video mapper exceeded its 280-line budget");
@@ -392,7 +460,12 @@ try {
     aweme_type: 68,
     create_time: Math.floor(Date.parse("2026-07-10T08:00:00.000Z") / 1000),
     desc: "实况视频测试",
-    images: [{ width: 1080, height: 1920, live_photo_type: 1 }, { width: 1080, height: 1440 }],
+    images: [{
+      width: 1080,
+      height: 1920,
+      live_photo_type: 1,
+      video: { duration: 3000, play_addr: { url_list: ["https://example.invalid/live.mp4"] } }
+    }, { width: 1080, height: 1440 }],
     music: { id_str: "music-test", title: "测试背景音乐", author: "测试作者" },
     author: { sec_uid: "MS4wTestAuthor", nickname: "测试作者" }
   }));
@@ -463,8 +536,10 @@ try {
   store.importDownloadManagerDb(sourceDbPath, { incremental: true, includePosts: true });
   const live = store.videoDetail(liveId)?.video;
   assert.equal(live?.mediaType, "gallery", "a note with an image and live MP4 should stay an ordered mixed gallery");
-  assert.equal(live?.galleryCount, 3);
-  assert.deepEqual(live?.galleryItems.map((item) => item.type), ["image", "video", "image"]);
+  assert.equal(live?.galleryPresentation, "live-photo");
+  assert.equal(live?.galleryCount, 2);
+  assert.deepEqual(live?.galleryItems.map((item) => item.type), ["video", "image"]);
+  assert.equal(live?.galleryItems[0]?.posterUrl, `/media/short-video-gallery/${liveId}/0`);
   assert.equal(store.galleryFile(liveId, 0)?.path, liveImage);
   assert.equal(store.galleryFile(liveId, 0)?.type, "image");
   assert.equal(store.galleryFile(liveId, 1)?.path, liveVideo);

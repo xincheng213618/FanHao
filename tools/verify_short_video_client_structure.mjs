@@ -53,6 +53,8 @@ function verifyNativeFeedContract() {
     width: 720,
     height: 1280,
     actualVideo: { width: 2160, height: 3840, longEdge: 3840, codec: "h265" },
+    galleryPresentation: "live-photo",
+    galleryItems: [{ type: "video", url: "/media/live.mp4", posterUrl: "/media/live.jpg" }],
     sound: { id: "sound-1", key: "local:sound-1", localAvailable: true },
     author: { id: "author-1", following: true },
     actions: { liked: true }
@@ -66,6 +68,8 @@ function verifyNativeFeedContract() {
       width: payload.videos[0].width,
       height: payload.videos[0].height,
       codec: payload.videos[0].actualVideo.codec,
+      galleryPresentation: payload.videos[0].galleryPresentation,
+      galleryPosterUrl: payload.videos[0].galleryItems[0].posterUrl,
       soundId: payload.videos[0].sound.id,
       following: payload.videos[0].author.following,
       liked: payload.videos[0].actions.liked
@@ -75,6 +79,8 @@ function verifyNativeFeedContract() {
       width: 2160,
       height: 3840,
       codec: "h265",
+      galleryPresentation: "live-photo",
+      galleryPosterUrl: "/media/live.jpg",
       soundId: "sound-1",
       following: true,
       liked: true
@@ -152,6 +158,8 @@ assert(androidListControllerSource.includes("该作者还没有本地作品，�
 assert(androidNativeFeedSource.includes("openAuthorPanel: Boolean(options.openAuthorPanel)"), "Android native feed bridge must forward the author homepage request");
 assert(androidNativeFeedContractSource.includes("NATIVE_SHORT_VIDEO_FEED_SCHEMA_VERSION = 1") && androidNativeFeedContractSource.includes("schemaVersion: NATIVE_SHORT_VIDEO_FEED_SCHEMA_VERSION"), "Android WebView bridge must emit a versioned native feed envelope");
 assert(androidNativeFeedContractJavaSource.includes("static final int SCHEMA_VERSION = 1") && androidNativeFeedContractJavaSource.includes("unsupported short-video feed schema") && androidNativeFeedContractJavaSource.includes("normalized.charAt(0) == '['"), "Android native decoder must validate the current schema while preserving legacy array compatibility");
+assert(androidNativeFeedContractSource.includes("galleryPresentation: cleanString(item.galleryPresentation)") && androidNativeFeedContractSource.includes("posterUrl: cleanString(entry?.posterUrl)") && androidNativeFeedContractJavaSource.includes('row.optString("galleryPresentation", "")') && androidNativeFeedContractJavaSource.includes('entry.optString("posterUrl", "")'), "Android native feed must preserve the live-photo presentation and JPG poster");
+assert(androidNativeFeedModelsSource.includes("boolean isSingleLivePhoto()") && androidNativePlayerSource.includes("!item.isSingleLivePhoto() ? View.VISIBLE : View.GONE") && androidNativePlayerSource.includes("gallery && !singleLivePhoto && !controlsHidden"), "Android single live photos must hide the redundant 1/1 counter and gallery progress controls");
 assert(androidPlayerPluginSource.includes("ShortVideoFeedContract.decode") && androidPlayerPluginSource.includes("短视频列表格式不受支持"), "Android player plugin must reject malformed native feeds before opening an Activity");
 assert(androidNativePlayerSource.includes("videos.addAll(ShortVideoFeedContract.decode") && androidNativePlayerSource.includes("Unable to decode initial short-video feed") && !androidNativePlayerSource.includes("catch (Exception ignored) {}\n  }\n\n  private ShortVideoItem itemFromJson"), "Android Activity must delegate initial feed decoding and report failures instead of swallowing them");
 assert(androidNativeFeedModelsSource.includes("final class ShortVideoItem") && androidNativeFeedModelsSource.includes("final class FeedPage") && !androidNativePlayerSource.includes("private static final class ShortVideoItem"), "Android feed data models must stay outside the oversized Activity");
@@ -567,7 +575,7 @@ function verifyWebDedicatedEntry() {
   assert(playerSource.includes('window.matchMedia?.("(max-width: 680px)")?.matches') && playerSource.includes("轻触画面恢复操作界面") && playbackSettingsSource.includes('window.matchMedia?.("(max-width: 680px)")?.matches') && playbackSettingsSource.includes("进入后轻触画面恢复"), "mobile clear-screen playback must explain the touch gesture that restores the interface");
   assert(playerSource.includes("setVolumePopoverOpen(!compactVolume)") && playerSource.includes("if (!player.paused) {\n          clearPlayerSoundBlocked(stage);") && playerSource.includes("markPlayerSoundBlocked(stage);"), "mobile volume taps must toggle mute without opening the desktop slider or falsely re-muting a player that kept playing");
   assert(galleryPlayerSource.includes("clip.onended = () =>"), "gallery video items must advance only after playback ends");
-  assert(galleryPlayerSource.includes("if (images.length > 1 && wrap.isConnected"), "single-item gallery videos must finish their progress without trying to navigate away");
+  assert(galleryPlayerSource.includes("if (currentIndex === images.length - 1 && handleGalleryAutoNext?.(video)) return;") && galleryPlayerSource.includes("if (images.length > 1) move(1);"), "single-item gallery videos must navigate away only when continuous play is enabled");
   assert(galleryPlayerSource.includes("currentTime / duration") && galleryPlayerSource.includes("--short-video-gallery-media-progress"), "gallery live-video progress must follow actual media time instead of appearing complete immediately");
   assert(viewerSource.includes("scaleX(var(--short-video-gallery-media-progress, 0))"), "gallery live-video segments must render the synchronized media progress ratio");
   assert(galleryPlayerSource.includes("advanceRemainingMs = Math.max(0, advanceRemainingMs - (Date.now() - advanceStartedAt))"), "gallery image timing must preserve the remaining auto-advance delay while hidden");
