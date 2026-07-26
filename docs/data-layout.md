@@ -10,6 +10,7 @@ FanHao 把本地状态放在项目根下的 `data/` 目录，包含若干 SQLite
 | `fanhao-core-v2.sqlite` | SQLite | **核心库**：人物、作品、厂商、系列、图片、收藏列表、外部引用等规范化模型。详见 [核心数据库](./fanhao-core-database.md)。 |
 | `image-gallery.sqlite` | SQLite | 图库独立库：套图封面、套图图片索引、电视剧 / 电影元数据、图库媒体封面。 |
 | `novels.sqlite` | SQLite | 小说书库：书籍、章节、阅读进度。 |
+| `novel-collection.sqlite` | SQLite | 小说网页采集：自定义站点适配器、任务状态与结果摘要。 |
 | `short-videos.sqlite` | SQLite | 短视频库：点赞短视频索引与元数据。 |
 | `music.sqlite` | SQLite | 音乐独立库：本地音频、歌手、专辑、歌词、收藏与播放进度。 |
 | `user-state.json` | JSON | 用户状态：收藏夹、收藏、播放进度、观看历史、手动封面覆盖。 |
@@ -22,6 +23,7 @@ FanHao 把本地状态放在项目根下的 `data/` 目录，包含若干 SQLite
 | `android-update/` | 目录 | 安卓 APK 更新通道文件（debug / release）。 |
 | `image-reader-cache/` | 目录 | 图片读取器运行时缓存（受 `app-config` 上限约束，可随时清理）。 |
 | `tool-downloads/` | 目录 | 工具临时下载（如 TXT 格式化结果，带 TTL）。 |
+| `novel-collection/` | 目录 | 小说采集任务配置、结构化结果、TXT 输出和逐任务日志。 |
 
 > 日志不在 `data/` 下，而在项目根 `logs/`（`access.log`、`fanhao.out.log`、`fanhao.err.log`）。
 

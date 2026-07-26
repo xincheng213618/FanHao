@@ -1,5 +1,136 @@
 export async function routeNovelApi(req, res, url, deps) {
-  const { novelStore, notFound, readJsonBody, sendJson, novelUploadMaxBodyBytes = 80 * 1024 * 1024 } = deps;
+  const {
+    collectionService,
+    novelStore,
+    notFound,
+    readJsonBody,
+    requireLocalAdmin = () => true,
+    sendJson,
+    novelUploadMaxBodyBytes = 80 * 1024 * 1024
+  } = deps;
+
+  if (url.pathname === "/api/novels/collection" && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, collectionService.snapshot());
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "小说采集后台读取失败" });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/novels/collection/adapters" && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, collectionService.listAdapters());
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "采集适配器读取失败" });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/novels/collection/adapters" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      sendJson(res, 201, collectionService.createAdapter(body || {}));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "采集适配器创建失败" });
+    }
+    return true;
+  }
+
+  const adapterMatch = /^\/api\/novels\/collection\/adapters\/([^/]+)$/.exec(url.pathname);
+  if (adapterMatch && req.method === "PATCH") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      sendJson(res, 200, collectionService.updateAdapter(decodeURIComponent(adapterMatch[1]), body || {}));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "采集适配器保存失败" });
+    }
+    return true;
+  }
+  if (adapterMatch && req.method === "DELETE") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const data = collectionService.deleteAdapter(decodeURIComponent(adapterMatch[1]));
+      if (!data) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "采集适配器删除失败" });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/novels/collection/tasks" && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, collectionService.listTasks());
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "采集任务读取失败" });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/novels/collection/tasks" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const body = await readJsonBody(req);
+      sendJson(res, 201, collectionService.createTask(body || {}));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "采集任务创建失败" });
+    }
+    return true;
+  }
+
+  const taskActionMatch = /^\/api\/novels\/collection\/tasks\/([^/]+)\/(run|cancel)$/.exec(url.pathname);
+  if (taskActionMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const taskId = decodeURIComponent(taskActionMatch[1]);
+      const data = taskActionMatch[2] === "cancel"
+        ? collectionService.cancelTask(taskId)
+        : collectionService.runTask(taskId);
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "采集任务操作失败" });
+    }
+    return true;
+  }
+
+  const taskMatch = /^\/api\/novels\/collection\/tasks\/([^/]+)$/.exec(url.pathname);
+  if (taskMatch && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const task = collectionService.taskDetail(decodeURIComponent(taskMatch[1]));
+      if (!task) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, { task });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "采集任务读取失败" });
+    }
+    return true;
+  }
+  if (taskMatch && req.method === "DELETE") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const data = collectionService.deleteTask(decodeURIComponent(taskMatch[1]));
+      if (!data) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, data);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "采集任务删除失败" });
+    }
+    return true;
+  }
 
   if (url.pathname === "/api/novels/summary" && req.method === "GET") {
     try {

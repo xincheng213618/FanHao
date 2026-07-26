@@ -229,11 +229,12 @@ export function createWorkPresenterService({
     const infoSummary = publicWorkInfoSummary(infoRow, work.infoSummary);
     const videos = work.videos || [];
     const favorite = favoriteStateService.publicFavoriteForWork(work.id);
+    const personName = person?.name || work.personName || "";
     const base = {
       id: work.id,
       personId: person?.id || work.personId,
-      personName: person?.name || "",
-      personDisplayName: profileRow ? preferredPersonDisplayName(profileRow, person?.name || "") : person?.name || "",
+      personName,
+      personDisplayName: profileRow ? preferredPersonDisplayName(profileRow, personName) : personName,
       personAliases: publicActorProfile(profileRow)?.aliases || [],
       title: displayWorkTitle(work.title || work.directoryName || ""),
       directoryName: displayWorkTitle(work.directoryName),

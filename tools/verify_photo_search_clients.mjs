@@ -10,6 +10,8 @@ const webPage = read("public", "modules", "content-index", "gallery-page.js");
 assert(webPage.includes('sort: query ? "relevance"'), "Web photo search must request relevance order");
 assert(webPage.includes("mergeImageLibraryListItems"), "Web photo pagination must merge offset pages");
 assert(webPage.includes("targetCount - offset"), "Web photo pagination must request only the missing range");
+assert(webPage.includes("refreshGalleryAfterLibraryChange({ preserveScroll: true })"), "Async Web gallery refreshes must preserve the current page position");
+assert(webPage.includes("renderGalleryView({ preserveScroll: true })"), "Async Web gallery states must not reset the current page position");
 
 const router = read("public", "js", "router.js");
 assert(router.includes("photoSearch ? \"all\""), "A direct Web photo search must default to the full library");
@@ -32,11 +34,19 @@ for (const marker of [
   "scheduleGestureRelease",
   "userScrollIntentUntil = 0",
   'addEventListener("touchend", handleTouchEnd',
+  "captureGalleryScrollPosition",
+  "restoreGalleryScrollPosition",
+  "renderGalleryResults({ preserveScroll: true })",
+  "renderGalleryView({ preserveScroll: true })",
   "item.albumSubject || fallbackSubject || meaningfulPerson",
   "collectionView ? collectionPerson"
 ]) {
   assert(webRenderer.includes(marker), `Web photo search is missing: ${marker}`);
 }
+
+const webStyles = read("public", "modules", "content-index", "styles.css");
+assert(webStyles.includes("grid-template-columns: repeat(4, minmax(0, 1fr));"), "Desktop media lists must render four items per row");
+assert(webStyles.includes("@media (max-width: 1100px)"), "The four-column media list must retain a responsive tablet fallback");
 
 const androidViews = read("android-client", "www", "platform", "content-index", "channel-views.js");
 for (const marker of [

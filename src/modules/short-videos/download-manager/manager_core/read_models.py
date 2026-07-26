@@ -257,7 +257,12 @@ def list_links(query: dict[str, list[str]]) -> dict[str, Any]:
             )
         rows = conn.execute(
             f"""
-            SELECT links.*, profiles.url profile_url
+            SELECT
+              links.*,
+              profiles.url profile_url,
+              profiles.nickname profile_nickname,
+              profiles.title profile_title,
+              profiles.tab profile_tab
             FROM links
             LEFT JOIN profiles ON profiles.id=links.profile_id
             {where_sql}

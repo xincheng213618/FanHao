@@ -91,6 +91,7 @@ class BaseDownloader(ABC):
         # written onto each aweme row for the History job cross-filter.
         self.job_id = job_id
         self.metadata_handler = MetadataHandler()
+        self.completed_manifest_records: List[Dict[str, Any]] = []
         self.transcript_manager = TranscriptManager(self.config, self.file_manager, self.database)
         self._local_aweme_ids: Optional[set[str]] = None
         self._aweme_id_pattern = re.compile(r"(?<!\d)(\d{15,20})(?!\d)")
@@ -815,9 +816,11 @@ class BaseDownloader(ABC):
         if publish_ts:
             manifest_record["publish_timestamp"] = publish_ts
         manifest_started = time.monotonic()
-        await self.metadata_handler.append_download_manifest(
+        stored_manifest_record = await self.metadata_handler.append_download_manifest(
             self.file_manager.base_path, manifest_record
         )
+        if stored_manifest_record:
+            self.completed_manifest_records.append(stored_manifest_record)
         timing_event(
             "manifest_append_done",
             aweme_id=aweme_id,

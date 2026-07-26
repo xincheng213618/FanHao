@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=20260721-fanhao-search-toolbar-23";
+import { CLIENT_VERSION } from "./config.js?v=20260726-work-sort-01";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;

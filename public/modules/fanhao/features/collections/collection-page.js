@@ -11,7 +11,7 @@ const COLLECTION_PREFETCH_TTL_MS = 5 * 60 * 1000;
 const COLLECTION_PREFETCH_LIMIT = 8;
 
 export function createCollectionPage(deps) {
-  const { api, els, formatNumber, hidePersonProfile, renderEmpty, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
+  const { api, appendLoadedWorkPage, els, formatNumber, hidePersonProfile, renderEmpty, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
   const collectionRequests = createLatestRequestGate();
   const collectionPrefetches = new Map();
 
@@ -154,7 +154,8 @@ export function createCollectionPage(deps) {
       setMainHeader("收藏", folder ? `${folder.name} · ${formatNumber(folder.count || 0)} 部` : "已收藏的作品");
       renderStatsForWorks(state.works);
       renderFavoriteFolderControls();
-      renderWorks("还没有收藏。");
+      if (append) appendLoadedWorkPage();
+      else renderWorks("还没有收藏。");
     } catch (error) {
       if (!request.isCurrent() || state.activeView !== "favorites") return;
       if (append) throw error;
@@ -202,7 +203,8 @@ export function createCollectionPage(deps) {
       setMainHeader("继续观看", state.selectedHistoryRange === "all" ? "全部有播放进度的作品" : `${rangeLabel}有播放进度的作品 · ${formatNumber(total)} 部`);
       renderStatsForWorks(state.works);
       renderHistoryControls(data);
-      renderWorks("暂无观看记录。");
+      if (append) appendLoadedWorkPage();
+      else renderWorks("暂无观看记录。");
       if (!append) warmHistoryRanges();
     } catch (error) {
       if (!request.isCurrent() || state.activeView !== "history") return;
@@ -272,7 +274,8 @@ export function createCollectionPage(deps) {
       if (!append) resetWorkPaging();
       setMainHeader("VR", `全库 VR 作品 · ${formatNumber(state.vrTotal)} 部`);
       renderStatsForWorks(state.works);
-      renderWorks("没有 VR 作品。");
+      if (append) appendLoadedWorkPage();
+      else renderWorks("没有 VR 作品。");
     } catch (error) {
       if (!request.isCurrent() || state.activeView !== "vr") return;
       if (append) throw error;

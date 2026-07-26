@@ -1,5 +1,6 @@
 import { formatNumber } from "./format.js";
 import { imageUrlForWork } from "./image.js";
+import { compareWorkPopularity, compareWorkRatingCount } from "./work-sort.js?v=20260726-work-sort-01";
 import { isVrWork } from "./work-source.js?v=20260710-western-merge-01";
 
 const FILTER_STORAGE_KEY = "fanhao.android.workFilter";
@@ -26,7 +27,8 @@ const WORK_SORTS = [
   { value: "releaseAsc", label: "发行最早" },
   { value: "updated", label: "最近更新" },
   { value: "ratingDesc", label: "评分最高" },
-  { value: "ratingAsc", label: "评分最低" },
+  { value: "ratingCountDesc", label: "评价人数最多" },
+  { value: "popularityDesc", label: "热度最高" },
   { value: "progress", label: "观看进度" },
   { value: "size", label: "大小" },
   { value: "durationDesc", label: "时长" },
@@ -176,7 +178,8 @@ export function createWorkListState(context) {
     if (activeSort === "releaseAsc") return byReleaseDate(a, b, "asc") || byTitle(a, b);
     if (activeSort === "updated") return byTextDesc(a.modifiedAt, b.modifiedAt) || byTitle(a, b);
     if (activeSort === "ratingDesc") return byRating(a, b, "desc") || byTitle(a, b);
-    if (activeSort === "ratingAsc") return byRating(a, b, "asc") || byTitle(a, b);
+    if (activeSort === "ratingCountDesc") return compareWorkRatingCount(a, b) || byTitle(a, b);
+    if (activeSort === "popularityDesc") return compareWorkPopularity(a, b) || byTitle(a, b);
     if (activeSort === "progress") return byTextDesc(a.progress?.updatedAt, b.progress?.updatedAt) || byTitle(a, b);
     if (activeSort === "size") return (b.videoSize || 0) - (a.videoSize || 0) || byTitle(a, b);
     if (activeSort === "durationDesc") return (b.infoSummary?.durationMinutes || 0) - (a.infoSummary?.durationMinutes || 0) || byTitle(a, b);

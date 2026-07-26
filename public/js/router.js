@@ -1,4 +1,4 @@
-export const URL_VIEW_NAMES = new Set(["people", "studios", "vr", "favorites", "history", "rankings", "gallery", "novels", "shortVideos", "music", "tools"]);
+export const URL_VIEW_NAMES = new Set(["people", "codes", "studios", "vr", "favorites", "history", "rankings", "gallery", "novels", "shortVideos", "music", "tools"]);
 export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "media", "movie", "tv"]);
 export const PEOPLE_SCOPE_NAMES = new Set(["main"]);
 export const DEFAULT_GALLERY_PHOTO_CATEGORY = "all";
@@ -28,6 +28,7 @@ const PATH_GALLERY_MODES = new Map([
 ]);
 
 const VIEW_PATHS = {
+  codes: "/fanhao/codes",
   studios: "/fanhao/studios",
   vr: "/fanhao/vr",
   favorites: "/fanhao/favorites",
@@ -41,6 +42,7 @@ const VIEW_PATHS = {
 
 const PATH_VIEWS = new Map(Object.entries(VIEW_PATHS).map(([view, pathname]) => [pathname, view]));
 const LEGACY_PATH_VIEWS = new Map([
+  ["/codes", "codes"],
   ["/studios", "studios"],
   ["/vr", "vr"],
   ["/favorites", "favorites"],
@@ -97,6 +99,8 @@ export function routeFromUrl(url = window.location.href) {
       musicArtistSort: "count",
       musicAlbumSort: "updated",
       musicFavorite: false,
+      codePrefix: pathView === "codes" ? params.get("prefix") || "" : "",
+      codePrefixFamily: pathView === "codes" && params.get("family") === "1",
       personId: "",
       q: "",
       workId: "",
@@ -107,6 +111,8 @@ export function routeFromUrl(url = window.location.href) {
     view: query ? "search" : URL_VIEW_NAMES.has(rawView) ? rawView : "people",
     galleryMode: GALLERY_MODE_NAMES.has(params.get("mode")) ? params.get("mode") : "",
     peopleScope: PEOPLE_SCOPE_NAMES.has(params.get("scope")) ? params.get("scope") : "main",
+    codePrefix: rawView === "codes" ? params.get("prefix") || "" : "",
+    codePrefixFamily: rawView === "codes" && params.get("family") === "1",
     personId: params.get("personId") || params.get("person") || "",
     q: query,
     workId: params.get("workId") || params.get("work") || "",
@@ -120,10 +126,13 @@ export function normalizeRoute(route = {}) {
   const view = explicitView || (searchQuery ? "search" : "people");
   const galleryMode = view === "gallery" && GALLERY_MODE_NAMES.has(route.galleryMode) ? route.galleryMode : "";
   const peopleScope = view === "people" && PEOPLE_SCOPE_NAMES.has(route.peopleScope) ? route.peopleScope : "main";
+  const codePrefix = view === "codes" ? String(route.codePrefix || "").trim().toUpperCase() : "";
   return {
     view,
     galleryMode,
     peopleScope,
+    codePrefix,
+    codePrefixFamily: Boolean(codePrefix && route.codePrefixFamily),
     galleryPhotoView: view === "gallery" && galleryMode === "photo" && route.galleryPhotoView !== "albums" ? "collections" : "albums",
     galleryPhotoCollection: view === "gallery" ? String(route.galleryPhotoCollection || "").trim() : "",
     galleryAlbumId: view === "gallery" ? String(route.galleryAlbumId || "").trim() : "",
@@ -190,6 +199,10 @@ export function routeUrl(route, options = {}) {
     params.set("view", next.view);
   }
   if (next.personId) params.set("personId", next.personId);
+  if (next.codePrefix) {
+    params.set("prefix", next.codePrefix);
+    if (next.codePrefixFamily) params.set("family", "1");
+  }
   if (next.view === "gallery") {
     if (next.galleryQuery) params.set("q", next.galleryQuery);
     if (next.galleryMode === "media" && next.galleryMediaKind !== "all") params.set("kind", next.galleryMediaKind);

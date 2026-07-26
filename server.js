@@ -31,6 +31,7 @@ import { createPersonLibraryService } from "./src/modules/fanhao/server/people/p
 import { createPersonListService } from "./src/modules/fanhao/server/people/person-list-service.js";
 import { createPersonMergeService } from "./src/modules/fanhao/server/people/person-merge-service.js";
 import { createPlaybackProgressService } from "./src/modules/fanhao/server/playback/playback-progress-service.js";
+import { createCodePrefixService } from "./src/modules/fanhao/server/catalog/code-prefix-service.js";
 import { createRankingService } from "./src/modules/fanhao/server/catalog/ranking-service.js";
 import { createStudioService } from "./src/modules/fanhao/server/catalog/studio-service.js";
 import { createUserStateService } from "./src/modules/fanhao/server/collections/user-state-service.js";
@@ -42,6 +43,7 @@ import { createWorkFilterService } from "./src/modules/fanhao/server/works/work-
 import { createWorkInfoService } from "./src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkLocalMutationService } from "./src/modules/fanhao/server/works/work-local-mutation-service.js";
 import { createWorkSearchIndexService } from "./src/modules/fanhao/server/works/work-search-index-service.js";
+import { comparePopularityMetadata, compareRatingCountMetadata } from "./src/modules/fanhao/server/works/work-sort-metadata.js";
 import { createGalleryMediaService } from "./src/modules/media/server/gallery-media-service.js";
 import { createGalleryMetadataService } from "./src/modules/media/server/gallery-metadata-service.js";
 import { createMangaService } from "./src/modules/photos/server/manga-service.js";
@@ -577,6 +579,23 @@ const missingCodeSearchService = createMissingCodeSearchService({
   storedWorkCodeKey
 });
 missingCodeSearchService.prewarm();
+const codePrefixService = createCodePrefixService({
+  clampInteger,
+  dedupeWorksForDisplay,
+  defaultWorkLimit: DEFAULT_WORK_LIMIT,
+  fastMissingCodeSearch: missingCodeSearchService.search,
+  filterWorkList: workFilterService.filter,
+  getCoreDb,
+  getLibrary: () => library,
+  getStamp: studioCatalogStamp,
+  hydrateMissingSearchWorks: missingCodeSearchService.hydrate,
+  maxWorkLimit: MAX_WORK_LIMIT,
+  pagedWorksPayload,
+  sortWorkList,
+  userStateStamp: () => userStateService.revision(),
+  workClassificationService,
+  workFacets
+});
 const adminCoreMutationService = createAdminCoreMutationService({
   actorIdFromJavdbUrl,
   actorProfileRow,
@@ -616,11 +635,8 @@ const adminCoreMutationService = createAdminCoreMutationService({
   uniquePersonNames
 });
 const workLocalMutationService = createWorkLocalMutationService({
-  coreMissingWorksForPerson: coreLibraryService.missingWorksForPerson,
-  corePersonFallbackRecord: coreLibraryService.personFallbackRecord,
   ensureLibraryDirectoryPath: (...args) => ensureLibraryDirectoryPath(...args),
   getCoreDb,
-  getPersonById: (personId) => library.peopleById.get(String(personId || "")) || null,
   getWorkById: (workId) => library.worksById.get(String(workId || "")) || null,
   hasCoreDb,
   invalidateLibraryDerivedCaches,
@@ -631,13 +647,13 @@ const workLocalMutationService = createWorkLocalMutationService({
   markerDirectoryName,
   pathWithinRoot: (...args) => pathWithinRoot(...args),
   publicWork,
+  reconcileDeletedLocalWorks: (...args) => personLibraryService.removeLocalWorks(...args),
   relativeFromRoot: (...args) => relativeFromRoot(...args),
   replacePathPrefix,
   resolveLibraryPersonByPublicId,
   resolveLibraryWorkByPublicId,
   safeStat,
   sourcePathToAbsolute: (...args) => sourcePathToAbsolute(...args),
-  refreshLibrary,
   resetWorkSearch: workSearchIndexService.invalidate,
   uniqueTextArray,
   workHasLocalMarker
@@ -890,6 +906,8 @@ const moduleRegistry = await discoverFanHaoModules({
         actorMissingSearchWorks,
         appConfigService,
         clampInteger,
+        codePrefixService,
+        coreLocalWorkIdsForPeople: coreLibraryService.localWorkIdsForPeople,
         coreMissingWorksForPerson: coreLibraryService.missingWorksForPerson,
         corePersonFallbackRecord: coreLibraryService.personFallbackRecord,
         defaultWorkLimit: DEFAULT_WORK_LIMIT,
@@ -915,6 +933,7 @@ const moduleRegistry = await discoverFanHaoModules({
         mediaResponseService,
         mediaStreamService,
         mergedActorMovieRows,
+        mergedPersonMembers,
         mergedPersonRecord,
         missingActorWorksForPerson,
         notFound,
@@ -992,7 +1011,10 @@ const moduleRegistry = await discoverFanHaoModules({
         dbPath: NOVEL_DB_PATH,
         novelUploadMaxBodyBytes: NOVEL_UPLOAD_MAX_BODY_BYTES,
         notFound,
+        projectRoot: PROJECT_ROOT,
+        pythonPath: PYTHON_PATH,
         readJsonBody,
+        requireLocalAdmin,
         sendJson
       },
       shortVideos: {
@@ -1057,6 +1079,7 @@ function emptyLibrary() {
     peopleById: new Map(),
     worksById: new Map(),
     filesById: new Map(),
+    fileRefCounts: new Map(),
     totals: {
       people: 0,
       works: 0,
@@ -2068,7 +2091,7 @@ function isVrWork(work) {
 
 function sortWorkList(works, sort) {
   const list = [...works];
-  const usesMetadata = ["releaseDesc", "releaseAsc", "ratingAsc", "ratingDesc", "duration", "durationDesc", "durationAsc", "codeAsc", "codeDesc"].includes(sort);
+  const usesMetadata = ["releaseDesc", "releaseAsc", "ratingAsc", "ratingDesc", "ratingCountDesc", "popularityDesc", "duration", "durationDesc", "durationAsc", "codeAsc", "codeDesc"].includes(sort);
   const metadataByWork = usesMetadata
     ? new Map(list.map((work) => {
       const infoRow = workInfoFacetRow(work.id);
@@ -2114,6 +2137,16 @@ function sortWorkList(works, sort) {
       if (aHas && aRating !== bRating) return sort === "ratingAsc" ? aRating - bRating : bRating - aRating;
       const countDiff = bMetadata.ratingCount - aMetadata.ratingCount;
       if (countDiff) return countDiff;
+    }
+
+    if (sort === "ratingCountDesc") {
+      const result = compareRatingCountMetadata(aMetadata, bMetadata);
+      if (result) return result;
+    }
+
+    if (sort === "popularityDesc") {
+      const result = comparePopularityMetadata(aMetadata, bMetadata);
+      if (result) return result;
     }
 
     if (sort === "size" || sort === "sizeDesc" || sort === "sizeAsc") {

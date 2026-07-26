@@ -9,8 +9,13 @@ import webbrowser
 from http.server import ThreadingHTTPServer
 
 from . import auth, runtime
-from .config import DB_PATH, FROZEN_BUILD
-from .database import add_event, init_db
+from .config import DB_PATH, DEFAULT_OUTPUT_DIR, FROZEN_BUILD
+from .database import add_event, init_db, setting
+from .domain_manifest import (
+    backfill_download_records_from_links,
+    profile_output_dir,
+    sync_manifest_to_db,
+)
 from .download_supervisor import download_manager
 from .downloader_client import free_port
 from .extraction import stop_extract
@@ -68,6 +73,16 @@ def main() -> None:
     server: ThreadingHTTPServer | None = None
     try:
         init_db()
+        output_dir = profile_output_dir(setting("output_dir", str(DEFAULT_OUTPUT_DIR)), 0)
+        manifest_sync = sync_manifest_to_db(output_dir)
+        link_backfill = backfill_download_records_from_links()
+        if int(manifest_sync.get("imported") or 0) or int(link_backfill.get("inserted") or 0):
+            add_event(
+                "info",
+                "下载记录同步："
+                f"manifest {int(manifest_sync.get('imported') or 0)}，"
+                f"数据库补全 {int(link_backfill.get('inserted') or 0)}",
+            )
         add_event("info", "服务启动")
         download_manager.restore_failure_guard()
         host = os.environ.get("DOUYIN_MANAGER_HOST", "127.0.0.1")

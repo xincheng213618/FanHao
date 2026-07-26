@@ -24,7 +24,11 @@ class MetadataHandler:
             logger.error("Failed to save metadata: %s, error: %s", save_path, e)
             return False
 
-    async def append_download_manifest(self, base_path: Path, record: Dict[str, Any]) -> bool:
+    async def append_download_manifest(
+        self,
+        base_path: Path,
+        record: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
         manifest_path = base_path / "download_manifest.jsonl"
         normalized_record = {
             "recorded_at": datetime.now().isoformat(timespec="seconds"),
@@ -36,10 +40,10 @@ class MetadataHandler:
                 async with aiofiles.open(manifest_path, "a", encoding="utf-8") as f:
                     await f.write(json.dumps(normalized_record, ensure_ascii=False))
                     await f.write("\n")
-            return True
+            return normalized_record
         except Exception as e:
             logger.error("Failed to append download manifest: %s, error: %s", manifest_path, e)
-            return False
+            return None
 
     async def load_metadata(self, file_path: Path) -> Dict[str, Any]:
         try:

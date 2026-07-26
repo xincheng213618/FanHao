@@ -91,10 +91,10 @@ export function createGalleryPage(deps) {
     return String(active.value || "").trim() !== String(state.gallery.query || "").trim();
   }
 
-  function refreshGalleryAfterLibraryChange() {
+  function refreshGalleryAfterLibraryChange(options = {}) {
     renderGalleryStats();
     if (!hasUnsubmittedGallerySearchDraft()) {
-      renderGalleryView();
+      renderGalleryView(options);
     } else {
       setStatus(state.gallery.status);
     }
@@ -104,7 +104,7 @@ export function createGalleryPage(deps) {
     if (state.gallery.loading) return;
     if (state.gallery.data && !options.refresh && !options.reload) {
       state.gallery.status = state.gallery.data.scannedAt ? `索引 ${formatDateTime(state.gallery.data.scannedAt)}` : state.gallery.status;
-      refreshGalleryAfterLibraryChange();
+      refreshGalleryAfterLibraryChange({ preserveScroll: true });
       return;
     }
     state.gallery.loading = true;
@@ -119,11 +119,11 @@ export function createGalleryPage(deps) {
       state.uiConfig = normalizeUiConfig({ ...state.uiConfig, ...(data.config || {}), ...(data.cache ? { imageReaderCacheMaxBytes: data.cache.maxBytes } : {}) });
       state.gallery.status = data.scannedAt ? `索引 ${formatDateTime(data.scannedAt)}` : "";
       state.gallery.loading = false;
-      refreshGalleryAfterLibraryChange();
+      refreshGalleryAfterLibraryChange({ preserveScroll: true });
     } catch (error) {
       state.gallery.loading = false;
       setStatus(error.message || "图像资料库读取失败");
-      if (!hasUnsubmittedGallerySearchDraft()) renderGalleryView();
+      if (!hasUnsubmittedGallerySearchDraft()) renderGalleryView({ preserveScroll: true });
     } finally {
       state.gallery.loading = false;
     }
@@ -207,7 +207,7 @@ export function createGalleryPage(deps) {
     state.gallery.listLoadingKey = key;
     state.gallery.listError = "";
     state.gallery.listErrorKey = "";
-    if (options.renderStart !== false && !hasUnsubmittedGallerySearchDraft()) renderGalleryView();
+    if (options.renderStart !== false && !hasUnsubmittedGallerySearchDraft()) renderGalleryView({ preserveScroll: true });
 
     try {
       const data = await api(imageLibraryListPath({ limit: requestLimit, offset }));
@@ -226,7 +226,7 @@ export function createGalleryPage(deps) {
       state.gallery.listError = "";
       state.gallery.listErrorKey = "";
       state.gallery.status = data.scannedAt ? `索引 ${formatDateTime(data.scannedAt)}` : state.gallery.status;
-      refreshGalleryAfterLibraryChange();
+      refreshGalleryAfterLibraryChange({ preserveScroll: true });
       return state.gallery.list;
     } catch (error) {
       if (requestVersion !== imageListRequestVersion || key !== imageLibraryListKey()) return null;
@@ -234,7 +234,7 @@ export function createGalleryPage(deps) {
       state.gallery.listError = error.message || "图库列表读取失败";
       state.gallery.listErrorKey = key;
       setStatus(state.gallery.listError);
-      if (!hasUnsubmittedGallerySearchDraft()) renderGalleryView();
+      if (!hasUnsubmittedGallerySearchDraft()) renderGalleryView({ preserveScroll: true });
       return null;
     }
   }

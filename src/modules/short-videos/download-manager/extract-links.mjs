@@ -4,6 +4,11 @@ import path from "node:path";
 import os from "node:os";
 import process from "node:process";
 import { chromium } from "playwright-core";
+import {
+  collectConfirmedLikeItems,
+  hasUsableWorkMetadata,
+} from "./like-extraction.mjs";
+import { profileNicknameFromSnapshot } from "./profile-nickname.mjs";
 
 const defaultCookieFile = path.join(
   process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"),
@@ -360,15 +365,8 @@ function domProfileFromSnapshot(snapshot = {}) {
   const douyinId = (text.match(/抖音号[:：]?\s*([A-Za-z0-9_.-]+)/) || [])[1] || "";
   const ipLocation = ((text.match(/IP属地[:：]?\s*([^\s｜|·]+)/) || [])[1] || "").replace(/^IP属地[:：]?/u, "");
   const age = firstNumber((text.match(/(\d{1,3})\s*岁/) || [])[1]);
-  const cleanNickname = (value) => {
-    const name = String(value || "").trim();
-    if (!name || name.length > 32) return "";
-    if (/captcha|\.zip$|\.rar$|\.7z$|搜索|推荐|关注|粉丝|获赞|作品/i.test(name)) return "";
-    return name;
-  };
-  const profileName = cleanNickname((text.match(/(?:^|\n)\s*([^\n]{1,32})\s*\n\s*关注\s*[0-9.,万亿wk]/i) || [])[1]);
   return {
-    nickname: firstString(profileName, cleanNickname(snapshot.heading), cleanNickname(snapshot.title && snapshot.title.replace(/- 抖音$/, ""))),
+    nickname: profileNicknameFromSnapshot(snapshot),
     avatar_url: firstUrlAny(snapshot.avatar_url),
     unique_id: douyinId,
     short_id: /^\d+$/.test(douyinId) ? douyinId : "",
@@ -595,6 +593,7 @@ async function collectCardLinks(page, works, pending, max) {
       if (row.desc) work.desc = row.desc;
       if (row.cover_url) work.cover_url = row.cover_url;
     }
+    if (!hasUsableWorkMetadata(work)) continue;
     if (addWork(works, pending, work, max)) added += 1;
   }
   return added;
@@ -663,7 +662,8 @@ async function extractWorks(opts) {
   const profile = {};
   const rawTargetSecUid = profileSecUidFromUrl(opts.url);
   const targetSecUid = rawTargetSecUid.toLowerCase() === "self" ? "" : rawTargetSecUid;
-  const filterToTargetAuthor = Boolean(targetSecUid && !isLikeProfileUrl(opts.url));
+  const likeProfile = isLikeProfileUrl(opts.url);
+  const filterToTargetAuthor = Boolean(targetSecUid && !likeProfile);
   if (targetSecUid) profile.sec_uid = targetSecUid;
   const emitProfile = async (reason, incoming) => {
     if (incoming && targetSecUid) incoming.sec_uid = targetSecUid;
@@ -715,7 +715,14 @@ async function extractWorks(opts) {
           return;
         }
         const found = [];
-        collectJsonWorks(data, found);
+        if (likeProfile) {
+          for (const item of collectConfirmedLikeItems(data, targetSecUid)) {
+            const work = workFromObject(item);
+            if (work) found.push(work);
+          }
+        } else {
+          collectJsonWorks(data, found);
+        }
         const profiles = [];
         collectJsonProfiles(data, profiles);
         await emitProfile("network", pickTargetProfile(profiles, targetSecUid));

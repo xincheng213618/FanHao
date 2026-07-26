@@ -1,6 +1,29 @@
 import fs from "node:fs";
 import path from "node:path";
 
+export function linkedLocalWorkIdsForPeople(db, personIds = []) {
+  const ids = [...new Set((personIds || [])
+    .map((personId) => Number(personId))
+    .filter(Number.isFinite))];
+  if (!ids.length) return [];
+
+  const placeholders = ids.map(() => "?").join(", ");
+  return db
+    .prepare(
+      `
+      SELECT DISTINCT CAST(wp.work_id AS TEXT) AS work_id
+      FROM work_people wp
+      JOIN local_works lw ON lw.work_id = wp.work_id
+      WHERE wp.role = 'actor'
+        AND wp.person_id IN (${placeholders})
+      ORDER BY wp.work_id
+      `
+    )
+    .all(...ids)
+    .map((row) => String(row.work_id || ""))
+    .filter(Boolean);
+}
+
 export function createCoreLibraryService({
   chooseCover,
   compareNaturalName,
@@ -233,9 +256,9 @@ export function createCoreLibraryService({
           lw.work_id AS core_work_id,
           lw.local_path,
           lw.source_mtime,
-          owner.id AS core_person_id,
-          owner.name AS core_person_name,
-          owner.display_name AS core_person_display_name,
+          fallback_person.id AS fallback_person_id,
+          fallback_person.name AS fallback_person_name,
+          fallback_person.display_name AS fallback_person_display_name,
           w.code,
           w.title AS work_title,
           w.release_date,
@@ -250,28 +273,13 @@ export function createCoreLibraryService({
           w.updated_at AS work_updated_at
         FROM local_works lw
         JOIN works w ON w.id = lw.work_id
-        LEFT JOIN people owner
-          ON owner.id = (
+        LEFT JOIN people fallback_person
+          ON fallback_person.id = (
             SELECT wp.person_id
             FROM work_people wp
-            JOIN people owner_candidate ON owner_candidate.id = wp.person_id
             WHERE wp.work_id = w.id
               AND wp.role = 'actor'
             ORDER BY
-              CASE WHEN owner_candidate.source IN ('manual', 'manual_move') THEN 0 ELSE 1 END,
-              CASE WHEN EXISTS (
-                SELECT 1
-                FROM person_external_refs pref
-                WHERE pref.person_id = owner_candidate.id
-                  AND pref.provider = 'javdb-actor'
-              ) THEN 0 ELSE 1 END,
-              CASE WHEN EXISTS (
-                SELECT 1
-                FROM images avatar
-                WHERE avatar.owner_type = 'person'
-                  AND avatar.owner_id = owner_candidate.id
-                  AND avatar.kind = 'avatar'
-              ) THEN 0 ELSE 1 END,
               wp.sort_order ASC,
               wp.person_id ASC
             LIMIT 1
@@ -284,10 +292,18 @@ export function createCoreLibraryService({
       .all();
 
     for (const row of localRows) {
-      const fallbackPerson = row.core_person_id ? null : personFromLocalPath(peopleByFolderNameMap, row.local_path);
-      const corePersonId = row.core_person_id ? String(row.core_person_id) : fallbackPerson?.id ? String(fallbackPerson.id) : "";
+      const folderPerson = personFromLocalPath(peopleByFolderNameMap, row.local_path);
+      const fallbackPerson = row.fallback_person_id
+        ? {
+            id: row.fallback_person_id,
+            name: row.fallback_person_name || "",
+            displayName: row.fallback_person_display_name || row.fallback_person_name || ""
+          }
+        : null;
+      const displayPerson = folderPerson || fallbackPerson;
+      const corePersonId = displayPerson?.id ? String(displayPerson.id) : "";
       if (!corePersonId) continue;
-      const personName = row.core_person_display_name || row.core_person_name || fallbackPerson?.displayName || fallbackPerson?.name || "";
+      const personName = displayPerson.displayName || displayPerson.name || "";
       if (!personName) continue;
       const personId = corePersonId;
       const sourcePath = localPersonSourcePath(row.local_path);
@@ -458,9 +474,20 @@ export function createCoreLibraryService({
     }
   }
 
+  function localWorkIdsForPeople(personIds = []) {
+    if (!hasCoreDb()) return [];
+    try {
+      return linkedLocalWorkIdsForPeople(getCoreDb(), personIds);
+    } catch (error) {
+      console.warn("[core-local-work-people]", error.message);
+      return [];
+    }
+  }
+
   return {
     backfillLocalWorkPeopleFromFolders,
     fileToMediaFile,
+    localWorkIdsForPeople,
     loadLibrary,
     localPathPersonName,
     localPersonSourcePath,

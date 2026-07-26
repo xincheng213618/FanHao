@@ -1,3 +1,5 @@
+import { createNovelCollectionAdmin } from "./collection-admin.js";
+
 const NOVEL_CATALOG_PAGE_SIZE = 120;
 const NOVEL_BOOK_PAGE_SIZE = 48;
 const NOVEL_AUTHOR_PAGE_SIZE = 60;
@@ -37,6 +39,26 @@ export function createNovelPage(deps) {
   let libraryObserver = null;
   const chapterCache = new Map();
   const chapterRequests = new Map();
+  const collectionAdmin = createNovelCollectionAdmin({
+    api,
+    state,
+    formatDateTime,
+    formatNumber,
+    openBook,
+    rerender: renderView,
+    onLibraryChanged: async () => {
+      try {
+        const summary = await api("/api/novels/summary");
+        state.novel.summary = summary;
+        state.novel.data = state.novel.mode === "manage"
+          ? { summary, books: [], total: 0, limit: NOVEL_BOOK_PAGE_SIZE, offset: 0 }
+          : null;
+      } catch {
+        state.novel.data = null;
+        state.novel.summary = null;
+      }
+    }
+  });
 
   function ensureState() {
     if (!state.novel) state.novel = {};
@@ -69,6 +91,7 @@ export function createNovelPage(deps) {
     state.novel.catalogPage = Math.max(0, Number(state.novel.catalogPage || 0));
     state.novel.catalogDescending = Boolean(state.novel.catalogDescending);
     state.novel.settings = normalizeSettings(state.novel.settings || readSettings());
+    collectionAdmin.ensureState();
     installScrollProgress();
     installProgressLifecycle();
     installReaderKeyboard();
@@ -177,6 +200,11 @@ export function createNovelPage(deps) {
       state.novel.data = { ...data, [key]: [...existingEntries, ...(data[key] || [])] };
     } else {
       state.novel.data = data;
+    }
+    if (state.novel.mode === "manage") {
+      await collectionAdmin.load({ silent: true });
+    } else {
+      collectionAdmin.stopPolling();
     }
     state.novel.summary = data.summary || state.novel.summary;
     state.novel.loading = false;
@@ -699,6 +727,7 @@ export function createNovelPage(deps) {
 
   function openNovelSection(mode) {
     if (!["books", "mine", "authors", "search", "rankings", "manage"].includes(mode)) return;
+    if (mode !== "manage") collectionAdmin.stopPolling();
     flushProgress();
     invalidateNavigation();
     state.novel.book = null;
@@ -782,7 +811,7 @@ export function createNovelPage(deps) {
     const status = document.createElement("div");
     status.className = "novel-management-status";
     status.textContent = state.novel.status || `当前共 ${formatNumber(totals.books || 0)} 本、${formatNumber(totals.chapters || 0)} 章；最近扫描：${summary.scannedAt ? formatDateTime(summary.scannedAt) : "暂无记录"}`;
-    panel.append(header, actions, status);
+    panel.append(header, actions, status, collectionAdmin.render());
     return panel;
   }
 
@@ -1718,6 +1747,7 @@ export function createNovelPage(deps) {
 
   function showHome() {
     ensureState();
+    collectionAdmin.stopPolling();
     flushProgress();
     invalidateNavigation();
     state.novel.loading = false;

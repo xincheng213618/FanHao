@@ -31,6 +31,8 @@ export function selectVisibleWorks(works, options = {}) {
     if (sortMode === "updated") return String(b?.modifiedAt || "").localeCompare(String(a?.modifiedAt || ""));
     if (sortMode === "ratingDesc") return compareWorkRating(a, b, "desc") || compareTitle(a, b);
     if (sortMode === "ratingAsc") return compareWorkRating(a, b, "asc") || compareTitle(a, b);
+    if (sortMode === "ratingCountDesc") return compareWorkRatingCount(a, b) || compareTitle(a, b);
+    if (sortMode === "popularityDesc") return compareWorkPopularity(a, b) || compareTitle(a, b);
     if (sortMode === "progress") return String(b?.progress?.updatedAt || "").localeCompare(String(a?.progress?.updatedAt || ""));
     if (sortMode === "sizeDesc") return Number(b?.videoSize || 0) - Number(a?.videoSize || 0) || compareTitle(a, b);
     if (sortMode === "durationDesc") {
@@ -66,6 +68,28 @@ export function compareWorkRating(a, b, direction = "desc") {
   const bCount = Number(b?.infoSummary?.ratingCount || 0);
   if (aCount !== bCount) return bCount - aCount;
   return String(b?.modifiedAt || "").localeCompare(String(a?.modifiedAt || ""));
+}
+
+export function compareWorkRatingCount(a, b) {
+  const countResult = workRatingCount(b) - workRatingCount(a);
+  if (countResult) return countResult;
+  return compareWorkRating(a, b, "desc");
+}
+
+export function compareWorkPopularity(a, b) {
+  const popularityResult = workPopularity(b) - workPopularity(a);
+  if (popularityResult) return popularityResult;
+  return compareWorkRatingCount(a, b);
+}
+
+export function workPopularity(work) {
+  const rating = numericRating(work?.infoSummary?.rating);
+  return rating === null ? 0 : rating * workRatingCount(work);
+}
+
+function workRatingCount(work) {
+  const count = Number(work?.infoSummary?.ratingCount);
+  return Number.isFinite(count) && count > 0 ? count : 0;
 }
 
 export function compareWorkReleaseDate(a, b, direction = "desc") {

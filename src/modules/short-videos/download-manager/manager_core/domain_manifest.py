@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
 from .common import first_text, flatten_strings, int_or_none, json_text, now_iso, row_int, row_text, safe_path_segment
 from .config import LIBRARY_SEC_UID
 from .database import db, setting
+
+
+manifest_import_lock = threading.RLock()
 
 
 def profile_output_dir(base_output_dir: str, profile_id: int) -> str:
@@ -40,7 +45,349 @@ def json_value(value: Any, fallback: Any = None) -> Any:
         return fallback
 
 
-def manifest_record(output_dir: str, aweme_id: str) -> dict[str, Any] | None:
+def download_record_from_db(aweme_id: str) -> dict[str, Any] | None:
+    aweme_id = str(aweme_id or "").strip()
+    if not aweme_id:
+        return None
+    try:
+        with db() as conn:
+            row = conn.execute(
+                "SELECT record_json FROM download_records WHERE aweme_id=?",
+                (aweme_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    record = json_value(row["record_json"], {})
+    return record if isinstance(record, dict) else None
+
+
+def download_record_hash(record: dict[str, Any]) -> str:
+    payload = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def sync_download_record_files(
+    conn: sqlite3.Connection,
+    aweme_id: str,
+    output_dir: str | Path,
+    record: dict[str, Any],
+    recorded_at: str,
+) -> int:
+    conn.execute("DELETE FROM download_files WHERE aweme_id=?", (aweme_id,))
+    rows = manifest_file_rows(record, output_dir)
+    for row in rows:
+        conn.execute(
+            """
+            INSERT INTO download_files(
+              aweme_id, role, kind, file_name, file_path, absolute_path,
+              size_bytes, exists_on_disk, recorded_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(aweme_id, file_path) DO UPDATE SET
+              role=excluded.role,
+              kind=excluded.kind,
+              file_name=excluded.file_name,
+              absolute_path=excluded.absolute_path,
+              size_bytes=excluded.size_bytes,
+              exists_on_disk=excluded.exists_on_disk,
+              recorded_at=excluded.recorded_at
+            """,
+            (
+                aweme_id,
+                row["role"],
+                row["kind"],
+                row["file_name"],
+                row["file_path"],
+                row["absolute_path"],
+                row["size_bytes"],
+                row["exists_on_disk"],
+                recorded_at,
+            ),
+        )
+    return len(rows)
+
+
+def persist_download_record(
+    conn: sqlite3.Connection,
+    output_dir: str | Path,
+    record: dict[str, Any],
+    *,
+    source: str,
+    manifest_path: str = "",
+    manifest_offset: int | None = None,
+) -> bool:
+    aweme_id = str(record.get("aweme_id") or "").strip()
+    if not aweme_id:
+        return False
+    recorded_at = first_text(record.get("recorded_at")) or now_iso()
+    record_json = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+    content_hash = download_record_hash(record)
+    ts = now_iso()
+    cursor = conn.execute(
+        """
+        INSERT INTO download_records(
+          aweme_id, output_dir, media_type, record_json, recorded_at,
+          content_hash, source, manifest_path, manifest_offset, created_at, updated_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(aweme_id) DO UPDATE SET
+          output_dir=excluded.output_dir,
+          media_type=excluded.media_type,
+          record_json=excluded.record_json,
+          recorded_at=excluded.recorded_at,
+          content_hash=excluded.content_hash,
+          source=excluded.source,
+          manifest_path=excluded.manifest_path,
+          manifest_offset=excluded.manifest_offset,
+          updated_at=excluded.updated_at
+        WHERE download_records.source='links-backfill'
+           OR COALESCE(excluded.recorded_at, '') >= COALESCE(download_records.recorded_at, '')
+        """,
+        (
+            aweme_id,
+            str(Path(output_dir)),
+            first_text(record.get("media_type")),
+            record_json,
+            recorded_at,
+            content_hash,
+            source,
+            manifest_path or None,
+            manifest_offset,
+            ts,
+            ts,
+        ),
+    )
+    if cursor.rowcount == 0:
+        return False
+    sync_download_record_files(conn, aweme_id, output_dir, record, recorded_at)
+    return True
+
+
+def _write_manifest_import_state(
+    conn: sqlite3.Connection,
+    manifest_path: str,
+    byte_offset: int,
+    file_size: int,
+    file_mtime_ns: int,
+    imported_records: int,
+    bad_lines: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO manifest_import_state(
+          manifest_path, byte_offset, file_size, file_mtime_ns,
+          imported_records, bad_lines, updated_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(manifest_path) DO UPDATE SET
+          byte_offset=excluded.byte_offset,
+          file_size=excluded.file_size,
+          file_mtime_ns=excluded.file_mtime_ns,
+          imported_records=excluded.imported_records,
+          bad_lines=excluded.bad_lines,
+          updated_at=excluded.updated_at
+        """,
+        (
+            manifest_path,
+            byte_offset,
+            file_size,
+            file_mtime_ns,
+            imported_records,
+            bad_lines,
+            now_iso(),
+        ),
+    )
+
+
+def sync_manifest_to_db(output_dir: str | Path) -> dict[str, Any]:
+    resolved_output_dir = Path(output_dir).expanduser().resolve()
+    manifest = resolved_output_dir / "download_manifest.jsonl"
+    result: dict[str, Any] = {
+        "manifest": str(manifest),
+        "database_ready": True,
+        "imported": 0,
+        "bad": 0,
+        "byte_offset": 0,
+        "file_size": 0,
+    }
+    if not manifest.exists():
+        return result
+    try:
+        stat = manifest.stat()
+    except OSError:
+        return result
+
+    manifest_path = str(manifest)
+    with manifest_import_lock:
+        try:
+            with db() as conn:
+                state = conn.execute(
+                    "SELECT * FROM manifest_import_state WHERE manifest_path=?",
+                    (manifest_path,),
+                ).fetchone()
+                byte_offset = int(state["byte_offset"] or 0) if state else 0
+                imported_total = int(state["imported_records"] or 0) if state else 0
+                bad_total = int(state["bad_lines"] or 0) if state else 0
+                if byte_offset > stat.st_size:
+                    byte_offset = imported_total = bad_total = 0
+                if byte_offset == stat.st_size:
+                    if not state or int(state["file_mtime_ns"] or 0) != int(stat.st_mtime_ns):
+                        _write_manifest_import_state(
+                            conn,
+                            manifest_path,
+                            byte_offset,
+                            stat.st_size,
+                            stat.st_mtime_ns,
+                            imported_total,
+                            bad_total,
+                        )
+                    result.update(
+                        {
+                            "byte_offset": byte_offset,
+                            "file_size": stat.st_size,
+                            "imported_total": imported_total,
+                            "bad_total": bad_total,
+                        }
+                    )
+                    return result
+
+                imported = bad = processed = 0
+                committed_offset = byte_offset
+                with manifest.open("rb") as handle:
+                    handle.seek(byte_offset)
+                    while True:
+                        line_start = handle.tell()
+                        raw = handle.readline()
+                        if not raw:
+                            break
+                        line_end = handle.tell()
+                        if not raw.endswith(b"\n"):
+                            # The sidecar writes JSON and the newline separately. Do not
+                            # consume a temporarily incomplete tail.
+                            handle.seek(line_start)
+                            break
+                        committed_offset = line_end
+                        processed += 1
+                        try:
+                            record = json.loads(raw.decode("utf-8", errors="replace"))
+                        except json.JSONDecodeError:
+                            bad += 1
+                        else:
+                            if isinstance(record, dict) and str(record.get("aweme_id") or "").strip():
+                                if persist_download_record(
+                                    conn,
+                                    resolved_output_dir,
+                                    record,
+                                    source="manifest",
+                                    manifest_path=manifest_path,
+                                    manifest_offset=line_end,
+                                ):
+                                    imported += 1
+                            else:
+                                bad += 1
+                        if processed % 500 == 0:
+                            _write_manifest_import_state(
+                                conn,
+                                manifest_path,
+                                committed_offset,
+                                stat.st_size,
+                                stat.st_mtime_ns,
+                                imported_total + imported,
+                                bad_total + bad,
+                            )
+                            conn.commit()
+
+                latest_stat = manifest.stat()
+                _write_manifest_import_state(
+                    conn,
+                    manifest_path,
+                    committed_offset,
+                    latest_stat.st_size,
+                    latest_stat.st_mtime_ns,
+                    imported_total + imported,
+                    bad_total + bad,
+                )
+                result.update(
+                    {
+                        "imported": imported,
+                        "bad": bad,
+                        "byte_offset": committed_offset,
+                        "file_size": latest_stat.st_size,
+                        "imported_total": imported_total + imported,
+                        "bad_total": bad_total + bad,
+                    }
+                )
+                return result
+        except sqlite3.Error as exc:
+            result["database_ready"] = False
+            result["error"] = str(exc)
+            return result
+        except OSError as exc:
+            result["error"] = str(exc)
+            return result
+
+
+def backfill_download_records_from_links() -> dict[str, int]:
+    inserted = files = 0
+    try:
+        with db() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM (
+                  SELECT links.*,
+                    ROW_NUMBER() OVER(
+                      PARTITION BY aweme_id
+                      ORDER BY COALESCE(downloaded_at, last_started_at, last_seen_at) DESC, id DESC
+                    ) row_number
+                  FROM links
+                  WHERE status='downloaded'
+                    AND (COALESCE(metadata_json, '') <> '' OR COALESCE(local_file_paths, '') <> '')
+                ) ranked_links
+                WHERE row_number=1
+                  AND NOT EXISTS(
+                    SELECT 1
+                    FROM download_records
+                    WHERE download_records.aweme_id=ranked_links.aweme_id
+                  )
+                """
+            ).fetchall()
+            for row in rows:
+                record = json_value(row_text(row, "metadata_json"), {})
+                if not isinstance(record, dict):
+                    record = {}
+                record = dict(record)
+                record.setdefault("aweme_id", row_text(row, "aweme_id"))
+                record.setdefault("desc", row_text(row, "desc"))
+                record.setdefault("media_type", row_text(row, "media_type"))
+                create_time = row_int(row, "create_time")
+                if create_time is not None:
+                    record.setdefault("publish_timestamp", create_time)
+                record.setdefault(
+                    "file_names",
+                    flatten_strings(json_value(row_text(row, "local_file_names"), [])),
+                )
+                record.setdefault(
+                    "file_paths",
+                    flatten_strings(json_value(row_text(row, "local_file_paths"), [])),
+                )
+                record.setdefault("recorded_at", row_text(row, "downloaded_at") or now_iso())
+                if persist_download_record(
+                    conn,
+                    row_text(row, "output_dir"),
+                    record,
+                    source="links-backfill",
+                ):
+                    inserted += 1
+                    files += len(record.get("file_paths") or [])
+    except sqlite3.Error:
+        return {"inserted": 0, "files": 0}
+    return {"inserted": inserted, "files": files}
+
+
+def _legacy_manifest_record(output_dir: str, aweme_id: str) -> dict[str, Any] | None:
     manifest = Path(output_dir) / "download_manifest.jsonl"
     if not manifest.exists():
         return None
@@ -62,6 +409,16 @@ def manifest_record(output_dir: str, aweme_id: str) -> dict[str, Any] | None:
     except OSError:
         return None
     return found
+
+
+def manifest_record(output_dir: str, aweme_id: str) -> dict[str, Any] | None:
+    sync = sync_manifest_to_db(output_dir)
+    record = download_record_from_db(aweme_id)
+    if record is not None:
+        return record
+    if not sync.get("database_ready"):
+        return _legacy_manifest_record(output_dir, aweme_id)
+    return None
 
 
 def downloaded_record_from_link(row: sqlite3.Row) -> tuple[str, dict[str, Any]] | None:
@@ -234,6 +591,12 @@ def sync_manifest_files(
     output_dir: str | Path,
     record: dict[str, Any],
 ) -> int:
+    persist_download_record(
+        conn,
+        output_dir,
+        record,
+        source="manager",
+    )
     link = conn.execute(
         "SELECT id FROM links WHERE profile_id=? AND aweme_id=?",
         (profile_id, aweme_id),

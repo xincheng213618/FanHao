@@ -8,15 +8,81 @@ import subprocess
 import time
 from pathlib import Path
 
-from .common import elapsed_ms, normalize_proxy, row_text, tail_text
+from .common import elapsed_ms, normalize_proxy, now_iso, row_text, tail_text
 from .config import GALLERY_MUSIC_INTENT, LOG_DIR, QUALITY_UPGRADE_INTENT
 from .database import add_event, db, failure_guard_threshold, is_antibot_error, setting
-from .domain_manifest import existing_downloaded_work, manifest_has
+from .domain_manifest import download_record_hash, existing_downloaded_work, manifest_has
 from .downloader_client import downloader_command, free_port, sidecar_json, write_sidecar_config
 from .runtime import download_timing
 
 
+def completed_record_from_state(state: dict, aweme_id: str) -> dict | None:
+    records = state.get("records")
+    if not isinstance(records, list):
+        return None
+    target = str(aweme_id or "")
+    for record in reversed(records):
+        if isinstance(record, dict) and str(record.get("aweme_id") or "") == target:
+            return record
+    return None
+
+
 class SidecarRuntimeMixin:
+    def _start_download_attempt(
+        self,
+        job_id: int,
+        sidecar_job_id: str,
+        link: sqlite3.Row,
+    ) -> None:
+        with db() as conn:
+            conn.execute(
+                """
+                INSERT INTO download_attempts(
+                  aweme_id, link_id, profile_id, job_id, sidecar_job_id,
+                  status, started_at
+                )
+                VALUES(?, ?, ?, ?, ?, 'running', ?)
+                """,
+                (
+                    str(link["aweme_id"]),
+                    int(link["id"]),
+                    int(link["profile_id"]) if link["profile_id"] is not None else None,
+                    int(job_id),
+                    sidecar_job_id,
+                    now_iso(),
+                ),
+            )
+
+    def _finish_download_attempt(
+        self,
+        sidecar_job_id: str,
+        status: str,
+        *,
+        error: str = "",
+        record: dict | None = None,
+    ) -> None:
+        record_hash = download_record_hash(record) if record else None
+        with db() as conn:
+            conn.execute(
+                """
+                UPDATE download_attempts SET
+                  status=?, error=?, finished_at=?, record_hash=?
+                WHERE id=(
+                  SELECT id FROM download_attempts
+                  WHERE sidecar_job_id=?
+                  ORDER BY id DESC
+                  LIMIT 1
+                )
+                """,
+                (
+                    status,
+                    error[:2000] or None,
+                    now_iso(),
+                    record_hash,
+                    sidecar_job_id,
+                ),
+            )
+
     def _ensure_sidecar(self, output_dir: str, concurrency: int) -> int:
         proxy = normalize_proxy(setting("download_proxy", ""))
         signature = (str(Path(output_dir).resolve()), concurrency, proxy)
@@ -214,6 +280,7 @@ class SidecarRuntimeMixin:
                 with self.lock:
                     self.active_jobs[sidecar_job_id] = link
                     self.active_job_started[sidecar_job_id] = time.monotonic()
+                self._start_download_attempt(job_id, sidecar_job_id, link)
                 download_timing(
                     "submit_ok",
                     job_id=job_id,
@@ -362,14 +429,24 @@ class SidecarRuntimeMixin:
             status = str(state.get("status") or "")
             if status not in {"success", "failed"}:
                 continue
+            completed_record = completed_record_from_state(state, str(link["aweme_id"]))
             active.pop(sidecar_job_id, None)
             with self.lock:
                 self.active_jobs.pop(sidecar_job_id, None)
                 started = self.active_job_started.pop(sidecar_job_id, None)
             sidecar_elapsed = elapsed_ms(started)
-            if status == "success" and (int(state.get("success") or 0) > 0 or manifest_has(output_dir, link["aweme_id"])):
+            if status == "success" and (
+                int(state.get("success") or 0) > 0
+                or completed_record is not None
+                or manifest_has(output_dir, link["aweme_id"])
+            ):
                 mark_started = time.monotonic()
-                marked_downloaded = self._mark_downloaded(link, output_dir, "")
+                marked_downloaded = self._mark_downloaded(
+                    link,
+                    output_dir,
+                    "",
+                    record=completed_record,
+                )
                 download_timing(
                     "sidecar_job_done",
                     job_id=job_id,
@@ -387,8 +464,20 @@ class SidecarRuntimeMixin:
                     marked_downloaded=marked_downloaded,
                 )
                 if marked_downloaded:
+                    self._finish_download_attempt(
+                        sidecar_job_id,
+                        "downloaded",
+                        record=completed_record,
+                    )
                     success += 1
                     processed += 1
+                else:
+                    self._finish_download_attempt(
+                        sidecar_job_id,
+                        "requeued",
+                        error="下载结果未通过本地质量校验",
+                        record=completed_record,
+                    )
             else:
                 error = state.get("error") or f"sidecar job {status}: {state}"
                 error_text = str(error)
@@ -403,6 +492,12 @@ class SidecarRuntimeMixin:
                     add_event("warn", f"{link['aweme_id']} 详情接口疑似风控，已转回待下载")
                 else:
                     self._mark_failed(link, error_text)
+                self._finish_download_attempt(
+                    sidecar_job_id,
+                    "pending" if anti_bot else "failed",
+                    error=error_text,
+                    record=completed_record,
+                )
                 download_timing(
                     "sidecar_job_done",
                     job_id=job_id,

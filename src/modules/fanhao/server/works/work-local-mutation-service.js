@@ -2,11 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 export function createWorkLocalMutationService({
-  coreMissingWorksForPerson,
-  corePersonFallbackRecord,
   ensureLibraryDirectoryPath,
   getCoreDb,
-  getPersonById,
   getWorkById,
   hasCoreDb,
   invalidateLibraryDerivedCaches,
@@ -17,13 +14,13 @@ export function createWorkLocalMutationService({
   markerDirectoryName,
   pathWithinRoot,
   publicWork,
+  reconcileDeletedLocalWorks,
   relativeFromRoot,
   replacePathPrefix,
   resolveLibraryPersonByPublicId,
   resolveLibraryWorkByPublicId,
   safeStat,
   sourcePathToAbsolute,
-  refreshLibrary,
   resetWorkSearch,
   uniqueTextArray,
   workHasLocalMarker
@@ -225,6 +222,19 @@ export function createWorkLocalMutationService({
     }
   }
 
+  function localWorkRowsForPath(db, localPath) {
+    return db
+      .prepare(
+        `
+        SELECT id, work_id, local_path
+        FROM local_works
+        WHERE lower(replace(local_path, '/', char(92))) = lower(replace(?, '/', char(92)))
+        ORDER BY id
+        `
+      )
+      .all(localPath);
+  }
+
   function clearLocalDbRows(db, localWorkRows) {
     const rows = [...new Map(localWorkRows.map((row) => [Number(row.id), row])).values()].filter((row) => Number.isFinite(Number(row.id)));
     if (!rows.length) return;
@@ -352,7 +362,7 @@ export function createWorkLocalMutationService({
     const missingPaths = [];
     const emptyRemovedPaths = [];
     const localWorkRowsToClear = [...rows];
-    const localWorkPathIndex = options.localWorkPathIndex || createLocalWorkPathIndex(db);
+    const localWorkPathIndex = options.localWorkPathIndex || null;
     for (const row of rows) {
       const dirPath = ensureLibraryDirectoryPath(row.local_path, "作品文件夹");
       const isRoot = libraryOpenRoots().some((rootPath) => path.resolve(dirPath).toLowerCase() === path.resolve(rootPath).toLowerCase());
@@ -363,7 +373,9 @@ export function createWorkLocalMutationService({
       }
 
       const stat = safeStat(dirPath);
-      const pathRows = localWorkPathIndex.get(normalizedLocalPath(row.local_path)) || [row];
+      const pathRows = localWorkPathIndex?.get(normalizedLocalPath(row.local_path))
+        || localWorkRowsForPath(db, row.local_path)
+        || [row];
       const sharedByOtherWork = pathRows.some((item) => Number(item.work_id) !== coreWorkId);
       if (stat?.isDirectory()) {
         if (sharedByOtherWork) {
@@ -373,7 +385,12 @@ export function createWorkLocalMutationService({
           emptyRemovedPaths.push(...result.emptyRemovedPaths);
         } else {
           try {
-            fs.rmSync(dirPath, { recursive: true, force: false });
+            fs.rmSync(dirPath, {
+              recursive: true,
+              force: false,
+              maxRetries: 5,
+              retryDelay: 100
+            });
             deletedPaths.push(relativeFromRoot(dirPath));
             emptyRemovedPaths.push(...removeEmptyLibraryParents(dirPath));
           } catch (error) {
@@ -405,10 +422,10 @@ export function createWorkLocalMutationService({
     invalidateWorkCodeIndex();
     resetWorkSearch();
     invalidateTableStamp("local_works", "local_files", "work_info");
-    if (options.refresh !== false) refreshLibrary();
+    const clearedWorkIds = [...new Set(localWorkRowsToClear.map((row) => String(row.work_id)))];
+    if (options.refresh !== false) reconcileDeletedLocalWorks(clearedWorkIds);
 
-    const person = corePersonFallbackRecord(work.personId) || getPersonById(work.personId) || { id: work.personId || "", name: work.personName || "" };
-    const missingWork = coreMissingWorksForPerson(person).find((item) => item.id === String(coreWorkId)) || {
+    const missingWork = {
       ...work,
       missingLocal: true,
       relativePath: "",
@@ -426,7 +443,7 @@ export function createWorkLocalMutationService({
       deletedPaths,
       missingPaths,
       emptyRemovedPaths: uniqueTextArray(emptyRemovedPaths, { maxLength: 260, maxItems: 80 }),
-      clearedWorkIds: [...new Set(localWorkRowsToClear.map((row) => String(row.work_id)))],
+      clearedWorkIds,
       work: publicWork(missingWork, true)
     };
   }
@@ -505,7 +522,7 @@ export function createWorkLocalMutationService({
       }
     }
 
-    refreshLibrary();
+    reconcileDeletedLocalWorks([...clearedWorkIds]);
     const successfulRequestedCount = workIds.filter((workId) => clearedWorkIds.has(String(workId))).length;
     return {
       requestedCount: workIds.length,

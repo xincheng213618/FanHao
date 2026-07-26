@@ -15,6 +15,7 @@ import { createLazyPersonProfile } from "../public/modules/fanhao/lazy-person-pr
 import { createLazyAdminModal } from "../public/modules/system/lazy-admin-modal.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
 import { createPersonDetailService } from "../src/modules/fanhao/server/people/person-detail-service.js";
+import { removeLocalWorksFromLibrary } from "../src/modules/fanhao/server/people/person-library-service.js";
 import { normalizePersonWorkYear, personWorkYearOptions, worksForPersonYear } from "../src/modules/fanhao/server/people/person-work-year.js";
 import { createPersonMergeService } from "../src/modules/fanhao/server/people/person-merge-service.js";
 import { createPlaybackProgressService } from "../src/modules/fanhao/server/playback/playback-progress-service.js";
@@ -31,6 +32,7 @@ import { createWorkLocalMutationService } from "../src/modules/fanhao/server/wor
 import { classifyWorkCategory, isAnimeWork, isFc2Work, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS } from "../src/modules/fanhao/server/works/work-category.js";
 import { createWorkFilterService } from "../src/modules/fanhao/server/works/work-filter-service.js";
 import { createWorkSearchIndexService } from "../src/modules/fanhao/server/works/work-search-index-service.js";
+import { comparePopularityMetadata, compareRatingCountMetadata } from "../src/modules/fanhao/server/works/work-sort-metadata.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
 import { sendJson } from "../src/platform/server/responses.js";
 import { createVideoProbeCacheService } from "../src/platform/server/video-probe-cache-service.js";
@@ -81,6 +83,7 @@ const standaloneEntry = read("public/standalone-app.js");
 const standaloneHost = read("public/js/standalone-host.js");
 const lazyAdminModalSource = read("public/modules/system/lazy-admin-modal.js");
 const webApp = read("public/app.js");
+const codePrefixPageSource = read("public/modules/fanhao/code-prefix-page.js");
 const peoplePageSource = read("public/modules/fanhao/people-page.js");
 const personProfileSource = read("public/modules/fanhao/person-profile.js");
 const fanhaoModuleIndexSource = read("public/modules/fanhao/index.js");
@@ -95,6 +98,7 @@ const playerPageSource = read("public/js/player-page.js");
 const playerHtmlSource = read("public/player.html");
 const workActionsSource = read("public/modules/fanhao/features/works/work-actions.js");
 const viewportBatchRendererSource = read("public/modules/fanhao/features/works/viewport-batch-renderer.js");
+const workPageAppenderSource = read("public/modules/fanhao/features/works/work-page-appender.js");
 const workDetailServiceSource = read("src/modules/fanhao/server/works/work-detail-service.js");
 const missingCodeSearchServiceSource = read("src/modules/fanhao/server/works/missing-code-search-service.js");
 const workRoutesApiSource = read("src/modules/fanhao/server/works/routes-api.js");
@@ -117,10 +121,10 @@ for (const unrelatedStyle of ["/modules/novels/", "/modules/content-index/", "/m
 }
 assert(indexHtml.includes(": standaloneStyleEntry") && indexHtml.includes(": fanhaoStyleUrls;"), "only standalone modules should fall back to the full style graph");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
-assert(indexHtml.includes('/fanhao-app.js?v=20260724-person-local-refresh-01'), "person-local refresh changes must refresh the FanHao browser entry");
+assert(indexHtml.includes('/fanhao-app.js?v=20260726-work-sort-01'), "work sorting changes must refresh the FanHao browser entry");
 assert(indexHtml.includes('/modules/fanhao/work-cards.css?v=20260717-fanhao-viewport-render-01'), "viewport rendering styles must use a fresh browser URL");
-assert(fanhaoEntry.includes('app.js?v=20260724-person-local-refresh-01'), "person-local refresh changes must refresh the FanHao app module");
-assert(webApp.includes('index.js?v=20260724-person-local-refresh-01'), "person-local refresh changes must refresh the FanHao module barrel");
+assert(fanhaoEntry.includes('app.js?v=20260726-work-sort-01'), "work sorting changes must refresh the FanHao app module");
+assert(webApp.includes('index.js?v=20260726-work-sort-01'), "work sorting changes must refresh the FanHao module barrel");
 assert(!standaloneEntry.includes("app.js"), "standalone entry must not boot the FanHao runtime");
 assert(!standaloneHost.includes("modules/fanhao/"), "standalone host must not load FanHao feature modules");
 assert(standaloneHost.includes("loadCurrentModule(initialRoute.view)"), "standalone host must select one module from the current route");
@@ -195,9 +199,12 @@ assert(webApp.includes('globalThis.matchMedia?.("(max-width: 720px)")') && webAp
 assert(webApp.includes("Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize)"), "FanHao clients must not accept oversized work-page hints");
 assert(latestRequestSource.includes("controller?.abort()"), "latest-request gates must abort superseded work");
 assert(fanhaoModuleIndexSource.includes('people-page.js?v=20260724-person-local-refresh-01'), "person-local refresh changes must use a fresh browser module URL");
-assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260717-fanhao-ranking-response-01'), "ranking navigation changes must use a fresh browser module URL");
-assert(fanhaoModuleIndexSource.includes('collection-page.js?v=20260717-fanhao-collection-response-01'), "collection navigation changes must use a fresh browser module URL");
-assert(fanhaoModuleIndexSource.includes('studio-page.js?v=20260717-fanhao-studio-first-paint-01'), "studio first-paint changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('work-page-appender.js?v=20260724-work-pagination-02'), "in-place work pagination must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('ranking-page.js?v=20260726-work-sort-01') && fanhaoModuleIndexSource.includes('query.js?v=20260726-work-sort-01'), "work sorting changes must refresh ranking and shared query modules");
+assert(webApp.includes('["ratingCountDesc", "评价人数最多"]') && webApp.includes('["popularityDesc", "热度最高"]') && !webApp.includes("评分最低"), "Web work sorting must expose audience and popularity sorts without the lowest-rating option");
+assert(rankingPageSource.includes('["ratingCountDesc", "评价人数最多"]') && rankingPageSource.includes('["popularityDesc", "热度最高"]'), "ranking work sorting must expose audience and popularity sorts");
+assert(fanhaoModuleIndexSource.includes('collection-page.js?v=20260724-work-pagination-01'), "collection pagination changes must use a fresh browser module URL");
+assert(fanhaoModuleIndexSource.includes('studio-page.js?v=20260724-work-pagination-01'), "studio pagination changes must use a fresh browser module URL");
 assert(collectionPageSource.includes("const collectionPrefetches = new Map()") && collectionPageSource.includes("warmHistoryRanges()"), "Web history ranges must reuse prefetched pages while the collection view remains active");
 assert(collectionPageSource.includes("const COLLECTION_PREFETCH_TTL_MS = 5 * 60 * 1000") && collectionPageSource.includes("invalidatePrefetches"), "Web collection prefetches must survive normal reading time and expose explicit invalidation");
 assert(peoplePageSource.includes("const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64") && peoplePageSource.includes("const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48"), "person details must keep desktop and mobile first payloads bounded");
@@ -552,6 +559,17 @@ try {
   assert.equal(catalogListState.getSortMode(), "ratingDesc", "catalog list state must still restore its saved sort");
   assert.equal(searchListState.getFilterMode(), "all", "search list state must ignore the catalog's saved filter");
   assert.equal(searchListState.getSortMode(), "updated", "search list state must ignore the catalog's saved sort");
+  const sortOptions = searchListState.getSortOptions();
+  assert(sortOptions.some((option) => option.value === "ratingCountDesc" && option.label === "评价人数最多"), "Android work sorting must expose the rating-count option");
+  assert(sortOptions.some((option) => option.value === "popularityDesc" && option.label === "热度最高"), "Android work sorting must expose the popularity option");
+  assert(!sortOptions.some((option) => option.value === "ratingAsc") && !androidWorkFiltering.includes("评分最低"), "Android work sorting must remove the lowest-rating option");
+  const sortFixtures = [
+    { id: "audience", infoSummary: { rating: 4, ratingCount: 100 } },
+    { id: "popular", infoSummary: { rating: 4.9, ratingCount: 90 } },
+    { id: "small", infoSummary: { rating: 5, ratingCount: 80 } }
+  ];
+  assert.deepEqual(searchListState.visibleWorks(sortFixtures, { sortMode: "ratingCountDesc" }).map((work) => work.id), ["audience", "popular", "small"], "Android rating-count sorting must order by audience size");
+  assert.deepEqual(searchListState.visibleWorks(sortFixtures, { sortMode: "popularityDesc" }).map((work) => work.id), ["popular", "audience", "small"], "Android popularity sorting must order by rating multiplied by audience size");
   const toolbarFilterOptions = searchListState.getFilterOptions([{ playableCount: 1, favorite: true }], { all: 12, playable: 7 });
   assert.equal(toolbarFilterOptions.find((option) => option.value === "all")?.count, 12, "detail filter menus must use the authoritative server total");
   assert.equal(toolbarFilterOptions.find((option) => option.value === "playable")?.count, 7, "detail filter menus must prefer server facets");
@@ -664,7 +682,7 @@ assert(androidWorkActions.includes('variant: "danger wide"') && androidFanhaoSty
 assert(!androidWorkActions.includes("createBackButton") && androidSectionStyles.includes(".work-detail-meta-body"), "Android work details must delegate return navigation to the shared sticky detail header");
 assert(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions must stay focused");
 assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-search-toolbar-23") && androidStyles.includes("css/sections.css?v=20260721-fanhao-work-actor-flow-22") && androidStyles.includes("css/lists.css?v=20260721-fanhao-person-work-grid-20") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-search-toolbar-23"), "Android search toolbar must refresh module styling while retaining actor and work-grid styles");
-assert(androidIndexHtml.includes("app.js?v=20260721-fanhao-search-toolbar-23") && androidApp.includes("config.js?v=20260721-fanhao-search-toolbar-23") && androidApp.includes("cache.js?v=20260721-fanhao-search-toolbar-23") && androidCacheSource.includes("config.js?v=20260721-fanhao-search-toolbar-23") && androidConfig.includes('CLIENT_VERSION = "20260721-fanhao-search-toolbar-23"'), "Android search toolbar must refresh the complete application cache chain");
+assert(androidIndexHtml.includes("app.js?v=20260726-work-sort-01") && androidApp.includes("config.js?v=20260726-work-sort-01") && androidApp.includes("cache.js?v=20260726-work-sort-01") && androidCacheSource.includes("config.js?v=20260726-work-sort-01") && androidConfig.includes('CLIENT_VERSION = "20260726-work-sort-01"'), "Android work sorting must refresh the complete application cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -1027,10 +1045,10 @@ assert(lines("android-client/www/modules/fanhao/features/people/detail-hero.js")
 assert(lines("android-client/www/modules/fanhao/features/people/detail-work-toolbar.js") <= 110, "Android author work toolbar must stay focused");
 assert(androidFanhaoIndex.includes('detail-views.js?v=20260721-fanhao-work-actor-flow-22') && androidDetailViews.includes('android-player.js?v=20260721-fanhao-media-relocate-16') && androidDetailViews.includes('detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09'), "Android work actor flow must refresh without dropping media recovery or the work-detail toolbar");
 assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-race-01') && androidWorkViews.includes('detail-data-service.js?v=20260717-fanhao-touch-intent-01'), "Android page-race service and gesture-aware intent changes must retain fresh module URLs");
-assert(androidFanhaoIndex.includes('work-views.js?v=20260721-fanhao-search-toolbar-23') && androidWorkViews.includes('cache.js?v=20260721-fanhao-actor-counts-17') && androidWorkViews.includes('work-filtering.js?v=20260721-fanhao-work-browse-density-10') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-suggestions-19'), "Android search toolbar must retain search suggestions, actor-count caching, and dense browsing");
+assert(androidFanhaoIndex.includes('work-views.js?v=20260726-work-sort-01') && androidWorkViews.includes('cache.js?v=20260721-fanhao-actor-counts-17') && androidWorkViews.includes('work-filtering.js?v=20260726-work-sort-01') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-suggestions-19'), "Android work sorting must refresh without dropping search suggestions, actor-count caching, or dense browsing");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-search-suggestions-19'), "Android portrait-only search changes must use the current people module URL");
-assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260721-fanhao-search-toolbar-23'), "Android search toolbar must refresh the FanHao entry chain without dropping category browsing");
-assert(androidIndexHtml.includes('app.js?v=20260721-fanhao-search-toolbar-23'), "Android search toolbar must refresh the app entry chain");
+assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260726-work-sort-01'), "Android work sorting must refresh the FanHao entry chain without dropping category browsing");
+assert(androidIndexHtml.includes('app.js?v=20260726-work-sort-01'), "Android work sorting must refresh the app entry chain");
 assert(androidPlayerSource.includes("mount.append(createPlayerErrorBox(error.message") && androidPlayerSource.includes("retry: () => playVideo"), "Android playback preparation failures must stay on the detail page with a retry action instead of opening a broken native player");
 assert(androidWorkViews.includes('ranking-views.js?v=20260721-fanhao-ranking-density-11'), "Android compact ranking changes must use a fresh module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");
@@ -1114,8 +1132,17 @@ const webRankingPage = read("public/modules/fanhao/ranking-page.js");
 const loadMorePeopleSource = /function loadMorePeopleIndex\(\)\s*\{([\s\S]*?)\n\}/.exec(peoplePage)?.[1] || "";
 assert(loadMorePeopleSource.includes("loadMoreRow.before(fragment)"), "people pagination must append cards without replacing the grid");
 assert(!loadMorePeopleSource.includes("renderPeopleIndex()"), "people pagination must not rerender the full index");
-assert(webApp.includes("appendLoadedPersonWorks();"), "person work pagination must append the next server page without resetting scroll position");
-assert(webApp.includes("const prefixMatches = renderedIds.every"), "person work pagination must fall back safely when filters or sorting change during loading");
+const loadMoreCodePrefixIndexSource = /function loadMoreIndex\(\)\s*\{([\s\S]*?)\n  \}/.exec(codePrefixPageSource)?.[1] || "";
+const loadMoreCodePrefixDetailSource = /async function loadMore\(button\)\s*\{([\s\S]*?)\n  \}/.exec(codePrefixPageSource)?.[1] || "";
+assert(loadMoreCodePrefixIndexSource.includes("body.append(fragment)") && loadMoreCodePrefixIndexSource.includes("appendIndexLoadMore(end, prefixes.length)"), "code-prefix index pagination must append rows without replacing the table");
+assert(!loadMoreCodePrefixIndexSource.includes("els.workGrid.innerHTML"), "code-prefix index pagination must not clear the full grid");
+assert(loadMoreCodePrefixDetailSource.includes("appendLoadedWorkPage();") && !loadMoreCodePrefixDetailSource.includes("renderWorks("), "code-prefix detail pagination must append the next server page without replacing the work grid");
+const appendLoadMoreSource = /function appendLoadMore\([\s\S]*?\n\}/.exec(webApp)?.[0] || "";
+assert(appendLoadMoreSource.includes("state.workVisibleLimit += state.workPageSize;\n      appendLoadedWorkPage();"), "client-side work pagination must append the next visible page without replacing the work grid");
+assert((webApp.match(/appendLoadedWorkPage\(\);/g) || []).length >= 2, "search and person pagination must append the next server page without resetting scroll position");
+assert(webApp.includes("function appendLoadedWorkPage()") && webApp.includes("appendWorkCardsInPlace({"), "shared work pagination must reconcile each next page without clearing the grid");
+assert(workPageAppenderSource.includes("container.insertBefore(card, reference)") && workPageAppenderSource.includes("restoreScrollAnchor(anchor, anchorTop, viewport)"), "reordered work pages must reuse cards and preserve the visible scroll anchor");
+assert(lines("public/modules/fanhao/features/works/work-page-appender.js") <= 120, "in-place work pagination must stay focused");
 assert(peoplePage.includes("const PERSON_INDEX_DESKTOP_PAGE_SIZE = 64"), "Web people index must keep the desktop first page compact");
 assert(peoplePage.includes("const PERSON_INDEX_MOBILE_PAGE_SIZE = 48"), "Web people index must keep the mobile first page compact");
 assert(webApp.includes("state.personPageSize = peoplePage.personIndexPageSize()"), "Web people paging must adapt to the viewport instead of network location");
@@ -1123,7 +1150,7 @@ const fanhaoStyles = read("public/modules/fanhao/styles.css");
 const rootStyles = read("public/styles.css");
 const personCardStyles = /\.person-index-card\s*\{([\s\S]*?)\n\}/.exec(fanhaoStyles)?.[1] || "";
 assert(!personCardStyles.includes("content-visibility"), "people cards must not flash in while scrolling");
-assert(rootStyles.includes('modules/fanhao/styles.css?v=20260717-studio-detail-01'), "FanHao style changes must use a fresh browser cache key");
+assert(rootStyles.includes('modules/fanhao/styles.css?v=20260724-code-prefix-catalog-01'), "FanHao style changes must use a fresh browser cache key");
 assert(webRankingPage.includes("limit: String(rankingPageSize())"), "Web rankings must request a bounded first page");
 assert(webRankingPage.includes("const RANKING_DESKTOP_PAGE_SIZE = 64"), "Web rankings must keep the desktop first page compact");
 assert(webRankingPage.includes("const RANKING_MOBILE_PAGE_SIZE = 48"), "Web rankings must use a smaller mobile first page");
@@ -1134,10 +1161,13 @@ assert(webApp.includes("hasRankingServerMore"), "Web work rendering must expose 
 const webCollectionPage = read("public/modules/fanhao/features/collections/collection-page.js");
 assert(webCollectionPage.includes('params.set("limit", String(collectionPageSize()))'), "Web collections must request a bounded first page");
 assert(webCollectionPage.includes("loadMoreCollectionWorks"), "Web collections must preserve server-side continuation");
+assert((webCollectionPage.match(/if \(append\) appendLoadedWorkPage\(\);/g) || []).length === 3, "favorite, history, and VR pagination must append without replacing the work grid");
 assert(webApp.includes("hasCollectionServerMore"), "Web work rendering must expose collection continuation");
 assert(webCollectionPage.includes("loadMoreVrWorks"), "Web VR lists must preserve server-side continuation");
 assert(!webCollectionPage.includes('limit: "2000"'), "Web VR lists must not fetch thousands of works before first render");
 assert(webApp.includes("hasVrServerMore"), "Web work rendering must expose VR continuation");
+assert(webRankingPage.includes("if (options.append) appendLoadedWorkPage();"), "ranking pagination must append without replacing the work grid");
+assert(studioPageSource.includes("if (append) appendLoadedWorkPage();"), "studio pagination must append without replacing the work grid");
 const prefetchedCollectionCalls = [];
 const prefetchedCollectionState = {
   activeView: "vr",
@@ -1442,6 +1472,11 @@ const works = [
   { id: "older", title: "BBB", missingLocal: false, infoSummary: { releaseDate: "2024-01-01" } },
   { id: "newer", title: "AAA", missingLocal: true, infoSummary: { releaseDate: "2025-01-01" } }
 ];
+const sortWorks = [
+  { id: "audience", title: "Audience", infoSummary: { rating: 4, ratingCount: 100 } },
+  { id: "popular", title: "Popular", infoSummary: { rating: 4.9, ratingCount: 90 } },
+  { id: "small", title: "Small", infoSummary: { rating: 5, ratingCount: 80 } }
+];
 const workClassificationService = createWorkClassificationService({
   appConfigService: {
     current: () => ({ compilationPrefixes: ["KWBD"], compilationKeywords: ["総集編"] })
@@ -1476,6 +1511,19 @@ assert.deepEqual(
   ["older"],
   "FanHao work query must preserve missing-local filtering"
 );
+assert.deepEqual(
+  selectVisibleWorks(sortWorks, { showCompilationWorks: true, showMissingLocalWorks: true, sortMode: "ratingCountDesc" }).map((work) => work.id),
+  ["audience", "popular", "small"],
+  "Web rating-count sorting must order by audience size"
+);
+assert.deepEqual(
+  selectVisibleWorks(sortWorks, { showCompilationWorks: true, showMissingLocalWorks: true, sortMode: "popularityDesc" }).map((work) => work.id),
+  ["popular", "audience", "small"],
+  "Web popularity sorting must order by rating multiplied by audience size"
+);
+const sortMetadata = sortWorks.map((work) => ({ id: work.id, ...work.infoSummary }));
+assert.deepEqual([...sortMetadata].sort(compareRatingCountMetadata).map((item) => item.id), ["audience", "popular", "small"], "server rating-count sorting must match the clients");
+assert.deepEqual([...sortMetadata].sort(comparePopularityMetadata).map((item) => item.id), ["popular", "audience", "small"], "server popularity sorting must match the clients");
 
 let lazyAdminLoadCount = 0;
 const lazyAdminCalls = [];
@@ -2979,6 +3027,90 @@ try {
   localReconcileDb.close();
 }
 
+const sharedIndexedFile = { id: "shared-video", type: "video", playable: true };
+const removedUniqueFile = { id: "removed-video", type: "video", playable: true };
+const keptUniqueFile = { id: "kept-video", type: "video", playable: true };
+const incrementalWorks = [
+  {
+    id: "1",
+    personId: "10",
+    title: "First",
+    coverId: null,
+    videoCount: 2,
+    playableCount: 2,
+    imageCount: 0,
+    infoCount: 0,
+    videos: [{ ...sharedIndexedFile }, removedUniqueFile],
+    images: [],
+    infos: []
+  },
+  {
+    id: "2",
+    personId: "10",
+    title: "Second",
+    coverId: null,
+    videoCount: 2,
+    playableCount: 2,
+    imageCount: 0,
+    infoCount: 0,
+    videos: [sharedIndexedFile, keptUniqueFile],
+    images: [],
+    infos: []
+  }
+];
+const incrementalPerson = {
+  id: "10",
+  name: "Incremental Person",
+  relativePath: "O:/Incremental Person",
+  sourcePaths: ["O:/Incremental Person"],
+  sourceCount: 1,
+  workCount: 2,
+  videoCount: 4,
+  playableCount: 4,
+  imageCount: 0,
+  infoCount: 0,
+  works: ["1", "2"]
+};
+const incrementalLibrary = {
+  scannedAt: null,
+  people: [incrementalPerson],
+  peopleById: new Map([["10", incrementalPerson]]),
+  worksById: new Map(incrementalWorks.map((work) => [work.id, work])),
+  filesById: new Map([
+    [sharedIndexedFile.id, sharedIndexedFile],
+    [removedUniqueFile.id, removedUniqueFile],
+    [keptUniqueFile.id, keptUniqueFile]
+  ]),
+  fileRefCounts: new Map([
+    [sharedIndexedFile.id, 2],
+    [removedUniqueFile.id, 1],
+    [keptUniqueFile.id, 1]
+  ]),
+  totals: {
+    people: 1,
+    works: 2,
+    videos: 3,
+    playableVideos: 3,
+    images: 0,
+    infoFiles: 0
+  }
+};
+const compareIncrementalWorks = (left, right) => left.title.localeCompare(right.title);
+const firstIncrementalRemoval = removeLocalWorksFromLibrary(incrementalLibrary, ["1"], compareIncrementalWorks);
+assert.deepEqual(firstIncrementalRemoval.removedWorkIds, ["1"], "incremental deletion must report only removed local works");
+assert.equal(incrementalLibrary.worksById.has("1"), false, "incremental deletion must remove the selected work index");
+assert.equal(incrementalLibrary.filesById.has(removedUniqueFile.id), false, "incremental deletion must remove unreferenced file indexes");
+assert.equal(incrementalLibrary.filesById.get(sharedIndexedFile.id), sharedIndexedFile, "incremental deletion must retain a shared file index used by a remaining work");
+assert.equal(incrementalLibrary.fileRefCounts.get(sharedIndexedFile.id), 1, "incremental deletion must decrement shared file references without scanning every work");
+assert.deepEqual(incrementalLibrary.peopleById.get("10")?.works, ["2"], "incremental deletion must rebuild only the affected person");
+assert.equal(incrementalLibrary.totals.works, 1, "incremental deletion must decrement the work total");
+assert.equal(incrementalLibrary.totals.videos, 2, "incremental deletion must decrement only unreferenced file totals");
+removeLocalWorksFromLibrary(incrementalLibrary, ["2"], compareIncrementalWorks);
+assert.equal(incrementalLibrary.peopleById.has("10"), false, "incremental deletion must remove a person after their last local work disappears");
+assert.equal(incrementalLibrary.people.length, 0, "incremental deletion must keep people arrays and maps aligned");
+assert.equal(incrementalLibrary.totals.people, 0, "incremental deletion must update the people total");
+assert.equal(incrementalLibrary.totals.videos, 0, "incremental deletion must clear the final file totals");
+
 const localMutationRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-local-delete-"));
 const localMutationDb = new DatabaseSync(":memory:");
 try {
@@ -3024,21 +3156,18 @@ try {
     directoryName: "shared-person",
     missingLocal: false
   }]));
-  let mutationRefreshCount = 0;
+  const mutationReconcileBatches = [];
   const pathWithinMutationRoot = (targetPath, rootPath) => {
     const relative = path.relative(path.resolve(rootPath), path.resolve(targetPath));
     return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
   };
   const localMutationService = createWorkLocalMutationService({
-    coreMissingWorksForPerson: () => [],
-    corePersonFallbackRecord: () => ({ id: "10", name: "Shared Person" }),
     ensureLibraryDirectoryPath(value) {
       const resolved = path.resolve(value);
       if (!pathWithinMutationRoot(resolved, localMutationRoot)) throw new Error("test path escaped temp root");
       return resolved;
     },
     getCoreDb: () => localMutationDb,
-    getPersonById: () => ({ id: "10", name: "Shared Person" }),
     getWorkById: (workId) => mutationWorks.get(String(workId)) || null,
     hasCoreDb: () => true,
     invalidateLibraryDerivedCaches() {},
@@ -3049,8 +3178,8 @@ try {
     markerDirectoryName: (value) => value,
     pathWithinRoot: pathWithinMutationRoot,
     publicWork: (work) => work,
-    refreshLibrary() {
-      mutationRefreshCount += 1;
+    reconcileDeletedLocalWorks(workIds) {
+      mutationReconcileBatches.push([...workIds]);
     },
     relativeFromRoot: (value) => path.relative(localMutationRoot, value).replaceAll(path.sep, "/"),
     replacePathPrefix: (value) => value,
@@ -3071,13 +3200,14 @@ try {
   assert.equal(localMutationDb.prepare("SELECT COUNT(*) AS count FROM local_works WHERE id = 2").get().count, 1, "the sibling local-work row must remain");
   assert.deepEqual(firstDelete.clearedWorkIds, ["1"], "shared-folder deletion must report only the selected work as cleared");
 
-  const staleDelete = localMutationService.deleteWorkLocalFiles("3", { refresh: false });
+  const staleDelete = localMutationService.deleteWorkLocalFiles("3");
   assert.deepEqual(new Set(staleDelete.clearedWorkIds), new Set(["3", "4"]), "one missing shared path must clear every stale local-work row for that path");
   assert.equal(localMutationDb.prepare("SELECT COUNT(*) AS count FROM local_works WHERE id IN (3, 4)").get().count, 0, "stale shared-path rows must not survive deletion");
+  assert.deepEqual(mutationReconcileBatches, [["3", "4"]], "one-work deletion must reconcile only the cleared in-memory work ids");
 
   const personDelete = localMutationService.deletePersonLocalFiles("10", { workIds: ["2"] });
   assert.equal(personDelete.failedCount, 0, "selected person deletion must complete without per-work failures");
-  assert.equal(mutationRefreshCount, 1, "selected person deletion must refresh the library only once");
+  assert.deepEqual(mutationReconcileBatches, [["3", "4"], ["2"]], "selected person deletion must reconcile one cleared-id batch without refreshing the full library");
   assert.equal(fs.existsSync(sharedPersonDir), false, "the last work may remove its now-exclusive folder");
   assert.throws(
     () => localMutationService.deletePersonLocalFiles("10", { workIds: [] }),

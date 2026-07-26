@@ -41,6 +41,8 @@ class DownloadJob:
         self.failed = 0
         self.skipped = 0
         self.error: Optional[str] = None
+        self.records: List[Dict[str, Any]] = []
+        self.records_truncated = 0
         self._task: Optional[asyncio.Task] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -56,6 +58,8 @@ class DownloadJob:
             "failed": self.failed,
             "skipped": self.skipped,
             "error": self.error,
+            "records": self.records,
+            "records_truncated": self.records_truncated,
         }
 
 
@@ -77,7 +81,7 @@ class JobManager:
 
     def __init__(
         self,
-        executor: Callable[[str], Awaitable[Dict[str, int]]],
+        executor: Callable[[str], Awaitable[Dict[str, Any]]],
         *,
         max_concurrency: int = 2,
         max_jobs: int = DEFAULT_MAX_JOBS,
@@ -140,6 +144,11 @@ class JobManager:
                 job.failed = int(counts.get("failed", 0))
                 job.skipped = int(counts.get("skipped", 0))
                 job.error = str(counts.get("error") or "") or None
+                records = counts.get("records")
+                job.records = [
+                    record for record in records if isinstance(record, dict)
+                ] if isinstance(records, list) else []
+                job.records_truncated = int(counts.get("records_truncated", 0) or 0)
                 # 只要跑完就是 success；具体成功/失败个数通过字段区分
                 job.status = JobStatus.SUCCESS if job.failed == 0 else JobStatus.FAILED
                 if job.status == JobStatus.FAILED and not job.error:

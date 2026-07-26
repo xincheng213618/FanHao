@@ -12,6 +12,10 @@
 FanHao 的 `data/short-videos.sqlite`。FanHao 主服务通过 Node `sync-worker` 按分钟
 同步下载结果，数据库迁移、身份合并、缓存失效和目录数据写入因此只有一个所有者。
 
+`douyin_downloads.sqlite` 中的 `download_records` / `download_files` 是下载结果的
+运行时事实来源；`download_manifest.jsonl` 继续由内嵌下载器追加，作为可移动的兼容
+与恢复副本。管理器按字节偏移增量导入 manifest，不再为每个作品从头扫描整份文件。
+
 代码、采集器、管理页面和运行脚本都放在当前目录；运行数据通过仓库根目录的 `.gitignore` 排除。FanHao 会定时从这里的 SQLite 同步已采集、已下载作品到 `data/short-videos.sqlite`。
 
 ## 启动

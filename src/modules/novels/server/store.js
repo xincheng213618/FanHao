@@ -8,6 +8,7 @@ const MAX_LIMIT = 5000;
 const MAX_CHAPTER_CHARS = 12000;
 const MAX_UPLOAD_TEXT_CHARS = 50 * 1024 * 1024;
 const UPLOAD_SOURCE_ROOT = "上传";
+const COLLECTION_SOURCE_ROOT = "网页采集";
 
 export function createNovelStore(options = {}) {
   const dbPath = options.dbPath;
@@ -577,6 +578,13 @@ export function createNovelStore(options = {}) {
     });
   }
 
+  function importCollectedBook(body = {}) {
+    return withDb((database) => {
+      const bookId = importCollectedBookIntoDb(database, body);
+      return bookDetailFromDb(database, bookId);
+    });
+  }
+
   return {
     authorDetail,
     bookDetail,
@@ -585,6 +593,7 @@ export function createNovelStore(options = {}) {
     chapterDetail,
     deleteBook,
     dbPath,
+    importCollectedBook,
     openDownload,
     invalidate,
     listAuthors,
@@ -770,6 +779,168 @@ function uploadBookIntoDb(database, body = {}) {
   }
 
   return bookId;
+}
+
+function importCollectedBookIntoDb(database, body = {}) {
+  const sourceUrl = normalizeCollectionUrl(body.sourceUrl || body.source_url || body.url);
+  const title = cleanTitle(body.title || "网页小说");
+  const author = String(body.author || "").trim().slice(0, 80);
+  const category = String(body.category || COLLECTION_SOURCE_ROOT).trim().slice(0, 80) || COLLECTION_SOURCE_ROOT;
+  const adapterName = String(body.adapterName || body.adapter_name || body.adapterId || "").trim().slice(0, 80);
+  const chapters = normalizeCollectedChapters(body.chapters);
+  const totalChars = chapters.reduce((total, chapter) => total + chapter.content.length, 0);
+  if (totalChars > MAX_UPLOAD_TEXT_CHARS) throw httpError(413, "采集正文超过 50 MiB 上限");
+  const sourcePath = `collector://${crypto.createHash("sha1").update(sourceUrl).digest("hex")}`;
+  const bookId = crypto.createHash("sha1").update(sourcePath).digest("hex").slice(0, 20);
+  const firstChapter = chapters[0];
+  const latestChapter = chapters[chapters.length - 1];
+  const summary = String(body.summary || summarizeNovelText(chapters.slice(0, 2).map((chapter) => chapter.content).join("\n\n")))
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 280);
+  const tags = [...new Set([category, COLLECTION_SOURCE_ROOT, adapterName].filter(Boolean))];
+  const now = validIsoDate(body.collectedAt || body.collected_at) || new Date().toISOString();
+  const fileName = safeFileName(`${title}.txt`);
+  const override = database
+    .prepare("SELECT title, author, category, summary FROM novel_book_overrides WHERE book_id = ?")
+    .get(bookId);
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database.prepare("DELETE FROM novel_chapters WHERE book_id = ?").run(bookId);
+    database.prepare("DELETE FROM novel_book_deletions WHERE book_id = ?").run(bookId);
+    database
+      .prepare(
+        `
+        INSERT INTO novel_books (
+          id, title, author, category, source_root, source_path, relative_path, file_name,
+          size_bytes, mtime_ms, encoding, char_count, chapter_count, first_chapter_id,
+          latest_chapter_id, latest_chapter_title, summary, tags_json, status, error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', '', ?)
+        ON CONFLICT(id) DO UPDATE SET
+          title = excluded.title,
+          author = excluded.author,
+          category = excluded.category,
+          source_root = excluded.source_root,
+          source_path = excluded.source_path,
+          relative_path = excluded.relative_path,
+          file_name = excluded.file_name,
+          size_bytes = excluded.size_bytes,
+          mtime_ms = excluded.mtime_ms,
+          encoding = excluded.encoding,
+          char_count = excluded.char_count,
+          chapter_count = excluded.chapter_count,
+          first_chapter_id = excluded.first_chapter_id,
+          latest_chapter_id = excluded.latest_chapter_id,
+          latest_chapter_title = excluded.latest_chapter_title,
+          summary = excluded.summary,
+          tags_json = excluded.tags_json,
+          status = 'ok',
+          error = '',
+          updated_at = excluded.updated_at
+      `
+      )
+      .run(
+        bookId,
+        title,
+        author,
+        category,
+        COLLECTION_SOURCE_ROOT,
+        sourcePath,
+        sourceUrl,
+        fileName,
+        Buffer.byteLength(chapters.map((chapter) => `${chapter.title}\n\n${chapter.content}`).join("\n\n"), "utf8"),
+        Date.now(),
+        "utf-8",
+        totalChars,
+        chapters.length,
+        chapterId(bookId, firstChapter.index),
+        chapterId(bookId, latestChapter.index),
+        latestChapter.title,
+        summary,
+        JSON.stringify(tags),
+        now
+      );
+
+    const insertChapter = database.prepare(
+      `
+      INSERT INTO novel_chapters (id, book_id, chapter_index, title, content, char_count, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `
+    );
+    for (const chapter of chapters) {
+      insertChapter.run(
+        chapterId(bookId, chapter.index),
+        bookId,
+        chapter.index,
+        chapter.title,
+        chapter.content,
+        chapter.content.length,
+        now
+      );
+    }
+    if (override) {
+      database
+        .prepare("UPDATE novel_books SET title = ?, author = ?, category = ?, summary = ? WHERE id = ?")
+        .run(
+          override.title || title,
+          override.author || "",
+          override.category || category,
+          override.summary || "",
+          bookId
+        );
+    }
+    database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('scanned_at', ?)").run(now);
+    database.prepare("INSERT OR REPLACE INTO novel_meta (key, value) VALUES ('last_collected_at', ?)").run(now);
+    database.exec("COMMIT");
+  } catch (error) {
+    try {
+      database.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+
+  return bookId;
+}
+
+function normalizeCollectedChapters(value) {
+  if (!Array.isArray(value) || !value.length) throw httpError(400, "采集结果没有章节");
+  if (value.length > 20000) throw httpError(413, "采集章节超过 20000 章上限");
+  const chapters = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const title = String(item.title || `第 ${chapters.length + 1} 章`)
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 180) || `第 ${chapters.length + 1} 章`;
+    const content = normalizeUploadText(item.content || item.body || "");
+    if (!content) continue;
+    chapters.push({
+      index: chapters.length + 1,
+      title,
+      content
+    });
+  }
+  if (!chapters.length) throw httpError(400, "采集结果没有有效正文");
+  return chapters;
+}
+
+function normalizeCollectionUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(String(value || "").trim());
+  } catch {
+    throw httpError(400, "采集来源网址无效");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) throw httpError(400, "采集来源只支持 HTTP 或 HTTPS");
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+function validIsoDate(value) {
+  const text = String(value || "").trim();
+  if (!text || !Number.isFinite(Date.parse(text))) return "";
+  return new Date(text).toISOString();
 }
 
 function publicBook(row) {

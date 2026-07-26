@@ -2,6 +2,8 @@ import { createApiClient } from "./js/api.js?v=20260701-gallery-merge-01";
 import { installAndroidClientReturn, isTrustedNetworkFeatureAvailable, prepareClientShell } from "./js/client-shell.js?v=20260712-project-refactor-03";
 import { loadModuleCatalog, renderWebModuleNavigation } from "./js/module-navigation.js?v=20260710-module-windows-01";
 import {
+  appendWorkCardsInPlace,
+  createCodePrefixPage,
   createFanhaoState,
   createCollectionPage,
   createPeoplePage,
@@ -11,11 +13,12 @@ import {
   createStudioPage,
   createViewportBatchRenderer,
   createWorkActions,
-  selectVisibleWorks
-} from "./modules/fanhao/index.js?v=20260724-person-local-refresh-01";
+  selectVisibleWorks,
+  workServerMoreState
+} from "./modules/fanhao/index.js?v=20260726-work-sort-01";
 import { bindLazyAdminModal, createLazyAdminModal } from "./modules/system/lazy-admin-modal.js?v=20260717-fanhao-lazy-admin-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
-import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260717-photo-library-workspace-01";
+import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20260724-code-prefix-catalog-01";
 
 prepareAppShell();
 prepareClientShell();
@@ -164,6 +167,23 @@ const peoplePage = createPeoplePage({
   syncRouteAfterNavigation,
   workCoverUrl
 });
+const codePrefixPage = createCodePrefixPage({
+  api,
+  appendEmpty,
+  appendLoadedWorkPage,
+  appendWorkControls,
+  clearWorkFilter,
+  clearWorkSearch,
+  els,
+  formatNumber,
+  hidePersonProfile,
+  renderWorks,
+  resetWorkPaging,
+  setMainHeader,
+  state,
+  syncNavigationState,
+  syncRouteAfterNavigation
+});
 const personProfilePage = createLazyPersonProfile({
   els,
   loadPersonProfile: async () => {
@@ -228,6 +248,7 @@ const adminModal = createLazyAdminModal(async () => {
 });
 const collectionPage = createCollectionPage({
   api,
+  appendLoadedWorkPage,
   els,
   formatNumber,
   hidePersonProfile,
@@ -240,6 +261,7 @@ const collectionPage = createCollectionPage({
 });
 const studioPage = createStudioPage({
   api,
+  appendLoadedWorkPage,
   appendEmpty,
   els,
   formatNumber,
@@ -253,6 +275,7 @@ const studioPage = createStudioPage({
 const rankingPage = createRankingPage({
   adminRefreshRankings: adminModal.refreshRankings,
   api,
+  appendLoadedWorkPage,
   clearPersonSelection: () => {
     state.selectedPersonId = null;
     state.selectedPerson = null;
@@ -363,6 +386,8 @@ function currentRouteSnapshot(overrides = {}) {
   const route = {
     view: state.activeView || "people",
     peopleScope: state.activeView === "people" ? state.peopleScope || "main" : "main",
+    codePrefix: state.activeView === "codes" ? state.selectedCodePrefix || "" : "",
+    codePrefixFamily: state.activeView === "codes" && Boolean(state.selectedCodePrefixFamily),
     personId: state.activeView === "people" ? state.selectedPersonId || "" : "",
     q: state.activeView === "search" ? state.searchQuery || state.workQuery || "" : "",
     workId: "",
@@ -424,6 +449,8 @@ async function applyRoute(route) {
       state.workQuery = next.q;
       els.workSearch.value = next.q;
       await loadSearchResults(next.q, { skipRoute: true });
+    } else if (next.view === "codes") {
+      await codePrefixPage.applyRoute(next);
     } else if (next.view === "people") {
       await setPeopleScope(next.peopleScope || "main");
       clearWorkSearch();
@@ -542,6 +569,7 @@ async function loadLibrary(options = {}) {
   state.personPageSize = peoplePage.personIndexPageSize();
   resetWorkPaging();
   state.people = sortPeopleForList(data.people || []);
+  codePrefixPage.invalidateIndex();
   resetPersonPaging();
 
   if (state.selectedPersonId && !state.people.some((person) => person.id === state.selectedPersonId)) {
@@ -661,7 +689,7 @@ function syncNavigationState(view = state.activeView) {
   }
   for (const button of els.viewTabs || []) {
     const activeView = view === "search" ? state.searchReturnView || "people" : view;
-    const active = button.dataset.view === activeView;
+    const active = codePrefixPage.navigationButtonActive(button, activeView) ?? button.dataset.view === activeView;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   }
@@ -674,6 +702,7 @@ function setActiveView(view, options = {}) {
     return;
   }
   if (view !== "people") peoplePage.cancelPendingSelection();
+  if (view !== "codes") codePrefixPage.cancelPendingRequests();
   if (view !== "search") searchRequests.cancel();
   if (view !== "rankings") rankingPage.cancelPendingRequests();
   if (view !== "studios") studioPage.cancelPendingRequests();
@@ -691,6 +720,11 @@ function setActiveView(view, options = {}) {
     state.searchTotal = 0;
   }
   syncNavigationState(view);
+
+  if (view === "codes") {
+    codePrefixPage.enter(options);
+    return;
+  }
 
   if (view === "favorites") {
     loadFavorites();
@@ -789,6 +823,8 @@ function updateBackToPeopleIndexButton() {
   document.body.classList.toggle("search-view", state.activeView === "search");
   document.body.classList.toggle("people-index-view", state.activeView === "people" && !state.selectedPersonId);
   document.body.classList.toggle("person-detail-view", state.activeView === "people" && Boolean(state.selectedPersonId));
+  document.body.classList.toggle("code-prefix-index-view", state.activeView === "codes" && !state.selectedCodePrefix);
+  document.body.classList.toggle("code-prefix-detail-view", state.activeView === "codes" && Boolean(state.selectedCodePrefix));
   document.body.classList.toggle("ranking-view", state.activeView === "rankings");
   document.body.classList.toggle("studio-index-view", state.activeView === "studios" && !state.selectedStudio);
   els.missingLocalToggle?.closest(".toggle-control")?.removeAttribute("hidden");
@@ -796,7 +832,10 @@ function updateBackToPeopleIndexButton() {
   els.compilationConfigButton?.removeAttribute("hidden");
   syncNavigationState();
   if (!els.backToPeopleIndex) return;
-  els.backToPeopleIndex.hidden = true;
+  const showPersonBack = state.activeView === "people" && Boolean(state.selectedPersonId);
+  const showCodePrefixBack = state.activeView === "codes" && Boolean(state.selectedCodePrefix);
+  els.backToPeopleIndex.hidden = !(showPersonBack || showCodePrefixBack);
+  els.backToPeopleIndex.textContent = showCodePrefixBack ? "返回番号索引" : "返回人物索引";
 }
 
 function returnToPeopleIndex() {
@@ -830,7 +869,8 @@ const WORK_SORT_OPTIONS = [
   ["ranking", "排行"],
   ["releaseAsc", "发行最早"],
   ["ratingDesc", "评分最高"],
-  ["ratingAsc", "评分最低"],
+  ["ratingCountDesc", "评价人数最多"],
+  ["popularityDesc", "热度最高"],
   ["progress", "最近观看"],
   ["sizeDesc", "文件大小"],
   ["durationDesc", "时长"],
@@ -912,6 +952,7 @@ function handleSortModeChange(event) {
     selectPerson(state.selectedPersonId, { resetFilter: false });
     return;
   }
+  if (codePrefixPage.reloadForActiveView()) return;
   if (state.activeView === "rankings") {
     renderRankingStats();
   }
@@ -936,6 +977,7 @@ function handleFilterModeChange() {
     selectPerson(state.selectedPersonId, { resetFilter: false });
     return;
   }
+  if (codePrefixPage.reloadForActiveView()) return;
   if (state.activeView === "rankings") {
     renderRankingStats();
   }
@@ -1274,6 +1316,7 @@ function topInfoValues(works, selectValues, limit) {
 
 function visibleWorks() {
   if (state.activeView === "people" && state.selectedPersonId) return state.works;
+  if (state.activeView === "codes" && state.selectedCodePrefix) return state.works;
   return selectVisibleWorks(state.works, {
     query: state.activeView === "search" ? "" : state.workQuery,
     filters: selectedWorkFilters(),
@@ -1399,6 +1442,7 @@ async function loadSearchResults(query, options = {}) {
 
   const enteringSearch = state.activeView !== "search";
   peoplePage.cancelPendingSelection();
+  codePrefixPage.cancelPendingRequests();
   rankingPage.cancelPendingRequests();
   studioPage.cancelPendingRequests();
   collectionPage.cancelPendingRequests();
@@ -1470,7 +1514,7 @@ async function loadMoreSearchResults(button) {
     if (!state.searchPeople.length) state.searchPeople = data.people || [];
     state.workVisibleLimit += state.workPageSize;
     renderSearchStats();
-    renderWorks(`没有搜到「${state.searchQuery}」。`);
+    appendLoadedWorkPage();
   } catch (error) {
     toastInline(button, error.message || "加载失败", originalText);
     restoreInFinally = false;
@@ -1509,7 +1553,7 @@ async function loadMorePersonWorks(button) {
     state.personWorksFacets = data.facets || state.personWorksFacets || null;
     renderPersonProfile(state.selectedPerson);
     renderPersonWorkStats();
-    appendLoadedPersonWorks();
+    appendLoadedWorkPage();
   } catch (error) {
     toastInline(button, error.message || "加载失败", originalText);
     restoreInFinally = false;
@@ -1536,6 +1580,7 @@ function toastInline(button, message, restoreText) {
 
 function renderWorks(emptyMessage = "没有匹配的作品。") {
   disconnectPeopleIndexAutoload();
+  codePrefixPage.disconnectIndexAutoload();
   disconnectWorkLoadMoreAutoload();
   cancelScheduledWorkRendering();
   resetProgressiveCoverLoading();
@@ -1543,13 +1588,8 @@ function renderWorks(emptyMessage = "没有匹配的作品。") {
   els.workGrid.innerHTML = "";
   renderSearchPeoplePanel();
 
-  const hasSearchServerMore = state.activeView === "search" && state.works.length < state.searchTotal;
-  const hasPersonServerMore = state.activeView === "people" && state.selectedPersonId && state.works.length < state.personWorksTotal;
-  const hasRankingServerMore = state.activeView === "rankings" && state.works.length < state.rankingTotal;
-  const hasCollectionServerMore = ["favorites", "history"].includes(state.activeView) && state.works.length < state.collectionTotal;
-  const hasVrServerMore = state.activeView === "vr" && state.works.length < state.vrTotal;
-  const hasStudioServerMore = state.activeView === "studios" && state.selectedStudio && state.works.length < state.studioWorksTotal;
-  const hasServerMore = hasSearchServerMore || hasPersonServerMore || hasRankingServerMore || hasCollectionServerMore || hasVrServerMore || hasStudioServerMore;
+  const serverMore = workServerMoreState(state);
+  const hasServerMore = Object.values(serverMore).some(Boolean);
   if (!works.length && !hasServerMore) {
     appendEmpty(emptyMessage);
     return;
@@ -1558,33 +1598,26 @@ function renderWorks(emptyMessage = "没有匹配的作品。") {
   const visible = works.slice(0, state.workVisibleLimit);
   workListRenderer.render(visible, () => {
     if (visible.length < works.length || hasServerMore) {
-      appendLoadMore(visible.length, works.length, { hasSearchServerMore, hasPersonServerMore, hasRankingServerMore, hasCollectionServerMore, hasVrServerMore, hasStudioServerMore });
+      appendLoadMore(visible.length, works.length, serverMore);
     }
   });
 }
 
-function appendLoadedPersonWorks() {
+function appendLoadedWorkPage() {
   const works = visibleWorks();
   const visible = works.slice(0, state.workVisibleLimit);
-  const renderedCards = [...els.workGrid.querySelectorAll(".work-card")];
-  const renderedIds = renderedCards.map((card) => String(card.dataset.workId || ""));
-  const prefixMatches = renderedIds.every((id, index) => id === String(visible[index]?.id || ""));
-
-  // Server pages use the same ordering as the current client view, so the normal
-  // path only appends the newly arrived cards. Fall back to a full render if a
-  // concurrent filter or sort change invalidated that prefix while loading.
-  if (!prefixMatches || renderedIds.length > visible.length) {
-    renderWorks();
-    return;
-  }
-
   disconnectWorkLoadMoreAutoload();
   els.workGrid.querySelector(".load-more-row")?.remove();
-  appendWorkCardBatch(visible, renderedIds.length, visible.length);
+  appendWorkCardsInPlace({
+    activateImages: activateProgressiveCoverImages,
+    container: els.workGrid,
+    createCard: createWorkCard,
+    items: visible
+  });
 
-  const hasPersonServerMore = state.works.length < state.personWorksTotal;
-  if (visible.length < works.length || hasPersonServerMore) {
-    appendLoadMore(visible.length, works.length, { hasPersonServerMore });
+  const serverMore = workServerMoreState(state);
+  if (visible.length < works.length || Object.values(serverMore).some(Boolean)) {
+    appendLoadMore(visible.length, works.length, serverMore);
   }
 }
 
@@ -1610,6 +1643,7 @@ function appendWorkCardBatch(visible, start, end, beforeNode = null) {
 function appendLoadMore(visibleCount, totalCount, options = {}) {
   const hasSearchServerMore = Boolean(options.hasSearchServerMore);
   const hasPersonServerMore = Boolean(options.hasPersonServerMore);
+  const hasCodePrefixServerMore = Boolean(options.hasCodePrefixServerMore);
   const hasRankingServerMore = Boolean(options.hasRankingServerMore);
   const hasCollectionServerMore = Boolean(options.hasCollectionServerMore);
   const hasVrServerMore = Boolean(options.hasVrServerMore);
@@ -1624,15 +1658,17 @@ function appendLoadMore(visibleCount, totalCount, options = {}) {
     ? state.searchTotal
     : hasPersonServerMore
       ? state.personWorksTotal
-      : hasRankingServerMore
-        ? state.rankingTotal
-        : hasCollectionServerMore
-          ? state.collectionTotal
-          : hasVrServerMore
-            ? state.vrTotal
-            : hasStudioServerMore
-              ? state.studioWorksTotal
-              : null;
+      : hasCodePrefixServerMore
+        ? state.codePrefixTotal
+        : hasRankingServerMore
+          ? state.rankingTotal
+          : hasCollectionServerMore
+            ? state.collectionTotal
+            : hasVrServerMore
+              ? state.vrTotal
+              : hasStudioServerMore
+                ? state.studioWorksTotal
+                : null;
   const loadedCount = serverTotal === null ? visibleCount : Math.max(state.works.length, visibleCount);
   const targetCount = serverTotal === null ? totalCount : Math.max(serverTotal, totalCount);
   if (visibleCount < totalCount) {
@@ -1646,13 +1682,15 @@ function appendLoadMore(visibleCount, totalCount, options = {}) {
   const loadNext = () => {
     if (visibleCount < totalCount) {
       state.workVisibleLimit += state.workPageSize;
-      renderWorks();
+      appendLoadedWorkPage();
       return;
     }
     if (hasSearchServerMore) {
       return loadMoreSearchResults(button);
     } else if (hasPersonServerMore) {
       return loadMorePersonWorks(button);
+    } else if (hasCodePrefixServerMore) {
+      return codePrefixPage.loadMore(button);
     } else if (hasRankingServerMore) {
       return rankingPage.loadMoreRankingWorks(button);
     } else if (hasCollectionServerMore) {
@@ -1751,6 +1789,7 @@ function emptyStateInfo(message) {
   const activeFilters = selectedWorkFilters();
   const hasFilteredWorks = state.works.length > 0;
   const isPerson = state.activeView === "people" && Boolean(state.selectedPersonId);
+  const isCodePrefix = state.activeView === "codes" && Boolean(state.selectedCodePrefix);
   const actions = [];
 
   if (isPerson) {
@@ -1769,6 +1808,20 @@ function emptyStateInfo(message) {
     return {
       title: "本地作品已清空",
       detail: `${state.selectedPerson?.name || "这个人物"}还保留在资料库中，目前没有本地视频文件。`,
+      actions
+    };
+  }
+
+  if (isCodePrefix) {
+    if (hasFilteredWorks || activeFilters.length) {
+      actions.push({ label: "清除筛选", primary: true, run: clearEmptyStateFilters });
+    } else {
+      actions.push({ label: "返回番号索引", primary: true, run: () => codePrefixPage.showIndex() });
+    }
+    if (!state.showMissingLocalWorks) actions.push({ label: "显示未下载", run: showMissingLocalFromEmptyState });
+    return {
+      title: activeFilters.length ? "当前筛选没有作品" : "这个番号暂无本地作品",
+      detail: `${state.selectedCodePrefix || "该番号"}仍可保留为资料库查询入口。`,
       actions
     };
   }
@@ -1814,6 +1867,7 @@ function showMissingLocalFromEmptyState() {
     selectPerson(state.selectedPersonId, { resetFilter: false });
     return;
   }
+  if (codePrefixPage.reloadForActiveView()) return;
   renderWorks();
 }
 
@@ -2173,7 +2227,8 @@ async function toggleWorkLocalMarker(work, marker, button) {
     });
     if (data.work) {
       updateWorkSnapshot(data.work);
-      renderStatsForWorks(state.works, state.selectedPerson);
+      if (state.activeView === "codes" && state.selectedCodePrefix) codePrefixPage.renderDetailStats();
+      else renderStatsForWorks(state.works, state.selectedPerson);
       if (state.activeView === "favorites") renderFavoriteFolderControls();
       renderWorks();
     }
@@ -2358,6 +2413,7 @@ els.missingLocalToggle?.addEventListener("change", (event) => {
     selectPerson(state.selectedPersonId, { resetFilter: false });
     return;
   }
+  if (codePrefixPage.reloadForActiveView()) return;
   renderWorks();
 });
 
@@ -2369,6 +2425,7 @@ els.collectionToggle?.addEventListener("change", (event) => {
     selectPerson(state.selectedPersonId, { resetFilter: false });
     return;
   }
+  if (codePrefixPage.reloadForActiveView()) return;
   if (state.activeView === "people" && !state.selectedPersonId) {
     renderPeopleIndexStats();
     renderPeopleIndex();
@@ -2377,7 +2434,8 @@ els.collectionToggle?.addEventListener("change", (event) => {
   renderWorks();
 });
 
-els.backToPeopleIndex?.addEventListener("click", returnToPeopleIndex);
+els.backToPeopleIndex?.addEventListener("click", () =>
+  state.activeView === "codes" ? codePrefixPage.showIndex() : returnToPeopleIndex());
 
 for (const button of els.viewTabs) {
   const prefetchCollection = () => collectionPage.prefetch(button.dataset.view);
@@ -2386,6 +2444,7 @@ for (const button of els.viewTabs) {
   button.addEventListener("focus", prefetchCollection);
   button.addEventListener("click", () => {
     clearWorkSearch();
+    if (codePrefixPage.handleNavigationButton(button)) return;
     setActiveView(button.dataset.view);
   });
 }

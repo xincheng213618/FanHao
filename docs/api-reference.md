@@ -135,6 +135,13 @@
 | GET | `/api/novels/:id/chapters/:chapter` | 公开 | 单章正文。 |
 | POST | `/api/novels/:id/progress` | 公开 | 保存阅读进度。 |
 | GET | `/api/novels/:id/download` | 公开 | 下载整本 TXT（UTF-8 附件）。 |
+| GET | `/api/novels/collection` | 本地管理员 | 采集后台快照：运行环境、适配器和任务。 |
+| GET / POST | `/api/novels/collection/adapters` | 本地管理员 | 列出或新建自定义站点适配器。 |
+| PATCH / DELETE | `/api/novels/collection/adapters/:id` | 本地管理员 | 修改或删除自定义站点适配器。 |
+| GET / POST | `/api/novels/collection/tasks` | 本地管理员 | 列出或创建网页采集任务。 |
+| GET / DELETE | `/api/novels/collection/tasks/:id` | 本地管理员 | 查看或删除采集任务记录。 |
+| POST | `/api/novels/collection/tasks/:id/run` | 本地管理员 | 执行或重新执行采集任务。 |
+| POST | `/api/novels/collection/tasks/:id/cancel` | 本地管理员 | 取消排队中或运行中的采集任务。 |
 
 ## 用户状态（User State）
 

@@ -1,6 +1,6 @@
 export function createFanhaoDependencies(deps) {
   return {
-    catalog: pick(deps, ["notFound", "rankingService", "sendJson", "studioService"]),
+    catalog: pick(deps, ["codePrefixService", "notFound", "rankingService", "sendJson", "studioService"]),
     library: pick(deps, [
       "appConfigService",
       "getLastScanError",
@@ -45,6 +45,7 @@ export function createFanhaoDependencies(deps) {
       "actorProfileRow",
       "actorMissingSearchWorks",
       "clampInteger",
+      "coreLocalWorkIdsForPeople",
       "coreMissingWorksForPerson",
       "corePersonFallbackRecord",
       "defaultWorkLimit",
@@ -68,6 +69,7 @@ export function createFanhaoDependencies(deps) {
       "mediaResponseService",
       "mediaStreamService",
       "mergedActorMovieRows",
+      "mergedPersonMembers",
       "mergedPersonRecord",
       "missingActorWorksForPerson",
       "notFound",

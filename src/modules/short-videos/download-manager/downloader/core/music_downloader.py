@@ -177,7 +177,7 @@ class MusicDownloader(BaseDownloader):
                 author_sec_uid=extract_author_sec_uid(detail),
             )
 
-        await self.metadata_handler.append_download_manifest(
+        stored_manifest_record = await self.metadata_handler.append_download_manifest(
             self.file_manager.base_path,
             {
                 "date": publish_date,
@@ -189,6 +189,8 @@ class MusicDownloader(BaseDownloader):
                 "file_paths": [self._to_manifest_path(music_path)],
             },
         )
+        if stored_manifest_record:
+            self.completed_manifest_records.append(stored_manifest_record)
         return True
 
     async def _get_music_detail(self, music_id: str) -> Optional[Dict[str, Any]]:

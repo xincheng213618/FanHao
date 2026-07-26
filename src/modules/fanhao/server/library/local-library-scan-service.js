@@ -136,8 +136,10 @@ export function createLocalLibraryScanService({
   }
 
   function registerFiles(index, files) {
+    if (!(index.fileRefCounts instanceof Map)) index.fileRefCounts = new Map();
     for (const file of files) {
       index.filesById.set(file.id, file);
+      index.fileRefCounts.set(file.id, Number(index.fileRefCounts.get(file.id) || 0) + 1);
     }
   }
 

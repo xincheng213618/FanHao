@@ -40,7 +40,7 @@
         const fanhaoStyleUrls = [
           "/css/foundation.css?v=20260710-web-css-modules-01",
           "/css/shell.css?v=20260713-search-index-02",
-          "/modules/fanhao/styles.css?v=20260717-studio-detail-01",
+          "/modules/fanhao/styles.css?v=20260724-code-prefix-catalog-01",
           "/modules/fanhao/work-cards.css?v=20260717-fanhao-viewport-render-01",
           "/modules/system/admin.css?v=20260712-module-settings-02",
           "/css/player.css?v=20260710-web-css-modules-01",
@@ -116,6 +116,8 @@
         </div>
         <nav class="view-tabs fanhao-subnav" aria-label="番号资料库视图">
           <button class="view-tab active" type="button" data-view="people" aria-pressed="true">人物</button>
+          <button class="view-tab" type="button" data-view="codes" aria-pressed="false">番号</button>
+          <button class="view-tab" type="button" data-view="codes" data-code-prefix="FC2" data-code-family="true" aria-pressed="false">FC2</button>
           <button class="view-tab" type="button" data-view="studios" aria-pressed="false">厂商</button>
           <button class="view-tab" type="button" data-view="rankings" aria-pressed="false">排行</button>
           <button class="view-tab" type="button" data-view="vr" aria-pressed="false">VR</button>
@@ -300,7 +302,7 @@
         await import("/standalone-app.js?v=20260717-photo-library-workspace-01");
       } else {
         await window.__fanhaoStylesReady;
-        await import("/fanhao-app.js?v=20260724-person-local-refresh-01");
+        await import("/fanhao-app.js?v=20260726-work-sort-01");
       }
     </script>
   </body>

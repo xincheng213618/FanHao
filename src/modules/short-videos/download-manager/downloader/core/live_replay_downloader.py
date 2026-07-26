@@ -317,7 +317,7 @@ class LiveReplayDownloader(BaseDownloader):
                     "job_id": self.job_id or "",
                 }
             )
-        await self.metadata_handler.append_download_manifest(
+        stored_manifest_record = await self.metadata_handler.append_download_manifest(
             self.file_manager.base_path,
             {
                 "date": self._started_at(episode).strftime("%Y-%m-%d_%H%M"),
@@ -335,3 +335,5 @@ class LiveReplayDownloader(BaseDownloader):
                 "metadata": metadata_json,
             },
         )
+        if stored_manifest_record:
+            self.completed_manifest_records.append(stored_manifest_record)

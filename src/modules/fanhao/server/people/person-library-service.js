@@ -41,6 +41,94 @@ function personRecordFromWorks(person, sourcePaths, works, compareNaturalTitle) 
   };
 }
 
+function workFiles(work) {
+  return [...(work?.videos || []), ...(work?.images || []), ...(work?.infos || [])];
+}
+
+export function removeLocalWorksFromLibrary(library, workIds, compareNaturalTitle) {
+  const requestedIds = new Set((workIds || []).map((workId) => String(workId || "")).filter(Boolean));
+  const removedWorks = [...requestedIds]
+    .map((workId) => library.worksById.get(workId))
+    .filter(Boolean);
+  if (!removedWorks.length) {
+    return { removedWorkIds: [], affectedPersonIds: [] };
+  }
+
+  const removedWorkIds = new Set(removedWorks.map((work) => String(work.id)));
+  const affectedPersonIds = new Set(removedWorks.map((work) => String(work.personId || "")).filter(Boolean));
+  const candidateFiles = new Map();
+  const removedFileRefs = new Map();
+  for (const work of removedWorks) {
+    for (const file of workFiles(work)) {
+      if (file?.id && !candidateFiles.has(file.id)) candidateFiles.set(file.id, file);
+      if (file?.id) removedFileRefs.set(file.id, Number(removedFileRefs.get(file.id) || 0) + 1);
+    }
+    library.worksById.delete(String(work.id));
+  }
+
+  const removedFileCounts = {
+    videos: 0,
+    playableVideos: 0,
+    images: 0,
+    infoFiles: 0
+  };
+  for (const [fileId, candidateFile] of candidateFiles) {
+    const previousRefs = Number(library.fileRefCounts?.get(fileId) || 1);
+    const remainingRefs = Math.max(0, previousRefs - Number(removedFileRefs.get(fileId) || 0));
+    if (remainingRefs > 0) {
+      library.fileRefCounts?.set(fileId, remainingRefs);
+      if (!library.filesById.has(fileId)) library.filesById.set(fileId, candidateFile);
+      continue;
+    }
+
+    library.fileRefCounts?.delete(fileId);
+    const indexedFile = library.filesById.get(fileId) || candidateFile;
+    if (!library.filesById.delete(fileId)) continue;
+    if (indexedFile.type === "video") {
+      removedFileCounts.videos += 1;
+      if (indexedFile.playable) removedFileCounts.playableVideos += 1;
+    } else if (indexedFile.type === "image") {
+      removedFileCounts.images += 1;
+    } else if (indexedFile.type === "info") {
+      removedFileCounts.infoFiles += 1;
+    }
+  }
+
+  for (const personId of affectedPersonIds) {
+    const person = library.peopleById.get(personId);
+    if (!person) continue;
+    const remainingWorks = (person.works || [])
+      .filter((workId) => !removedWorkIds.has(String(workId)))
+      .map((workId) => library.worksById.get(String(workId)))
+      .filter(Boolean);
+    const personIndex = library.people.findIndex((item) => String(item.id) === personId);
+    if (!remainingWorks.length) {
+      if (personIndex >= 0) library.people.splice(personIndex, 1);
+      library.peopleById.delete(personId);
+      continue;
+    }
+
+    const sourcePaths = person.sourcePaths?.length
+      ? [...person.sourcePaths]
+      : [person.relativePath].filter(Boolean);
+    const nextPerson = personRecordFromWorks(person, sourcePaths, remainingWorks, compareNaturalTitle);
+    if (personIndex >= 0) library.people[personIndex] = nextPerson;
+    library.peopleById.set(personId, nextPerson);
+  }
+
+  library.scannedAt = new Date().toISOString();
+  library.totals.people = library.people.length;
+  library.totals.works = library.worksById.size;
+  for (const [key, removedCount] of Object.entries(removedFileCounts)) {
+    library.totals[key] = Math.max(0, Number(library.totals[key] || 0) - removedCount);
+  }
+
+  return {
+    removedWorkIds: [...removedWorkIds],
+    affectedPersonIds: [...affectedPersonIds]
+  };
+}
+
 export function createPersonLibraryService({
   actorProfileSearchNames,
   compareNaturalTitle,
@@ -220,7 +308,17 @@ export function createPersonLibraryService({
     };
   }
 
+  function removeLocalWorks(workIds) {
+    const library = getLibrary();
+    const result = removeLocalWorksFromLibrary(library, workIds, compareNaturalTitle);
+    if (!result.removedWorkIds.length) return result;
+    libraryIndexService.saveCache(library);
+    libraryIndexService.invalidateDerivedCaches?.();
+    return result;
+  }
+
   return {
+    removeLocalWorks,
     refreshPerson,
     sourceCandidates,
     sourcePathCandidates

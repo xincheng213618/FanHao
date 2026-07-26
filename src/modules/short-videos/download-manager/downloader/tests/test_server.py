@@ -21,8 +21,15 @@ from server.jobs import JobManager
 
 @pytest.mark.asyncio
 async def test_job_manager_runs_executor(tmp_path):
-    async def fake_executor(url: str) -> Dict[str, int]:
-        return {"total": 1, "success": 1, "failed": 0, "skipped": 0}
+    async def fake_executor(url: str) -> dict:
+        return {
+            "total": 1,
+            "success": 1,
+            "failed": 0,
+            "skipped": 0,
+            "records": [{"aweme_id": "7666425128226856563", "file_paths": ["one.mp4"]}],
+            "records_truncated": 0,
+        }
 
     manager = JobManager(executor=fake_executor, max_concurrency=2)
     job = await manager.submit("https://example/one")
@@ -34,6 +41,7 @@ async def test_job_manager_runs_executor(tmp_path):
     assert fetched is not None
     assert fetched.status == "success"
     assert fetched.success == 1
+    assert fetched.to_dict()["records"][0]["aweme_id"] == "7666425128226856563"
 
 
 @pytest.mark.asyncio

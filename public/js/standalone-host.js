@@ -44,7 +44,7 @@ async function loadCurrentModule(view) {
     };
   }
   if (view === "novels") {
-    const module = await import("../modules/novels/novel-page.js?v=20260712-project-refactor-03");
+    const module = await import("../modules/novels/novel-page.js?v=20260726-collector-admin-01");
     return { createPage: module.createNovelPage, view };
   }
   if (view === "music") {

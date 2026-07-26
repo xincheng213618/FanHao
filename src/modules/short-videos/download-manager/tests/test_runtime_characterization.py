@@ -61,6 +61,10 @@ REQUIRED_TABLES = {
     "events",
     "profile_download_queue",
     "link_files",
+    "download_records",
+    "download_files",
+    "manifest_import_state",
+    "download_attempts",
     "video_quality_audit_runs",
     "video_quality_audit_items",
 }
@@ -245,6 +249,135 @@ def database_snapshot(db_path: Path) -> dict[str, Any]:
 
 
 class RuntimeCharacterizationTests(unittest.TestCase):
+    def test_manifest_is_migrated_incrementally_into_download_records(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="fanhao-download-record-migration-") as temp:
+            root = Path(temp)
+            library = root / "media" / "ShortVideos"
+            library.mkdir(parents=True)
+            media_path = library / "works" / "first.mp4"
+            media_path.parent.mkdir(parents=True)
+            media_path.write_bytes(b"test-video")
+            manifest = library / "download_manifest.jsonl"
+            first_record = {
+                "recorded_at": "2026-07-26T08:00:00",
+                "aweme_id": "7666425128226856563",
+                "desc": "旧标题",
+                "media_type": "video",
+                "file_names": ["first.mp4"],
+                "file_paths": ["works/first.mp4"],
+            }
+            latest_record = {
+                **first_record,
+                "recorded_at": "2026-07-26T08:01:00",
+                "desc": "新标题",
+            }
+            tail_record = {
+                "recorded_at": "2026-07-26T08:02:00",
+                "aweme_id": "7665317108750712678",
+                "desc": "稍后完成的尾行",
+                "media_type": "gallery",
+                "file_names": ["second.jpg"],
+                "file_paths": ["works/second.jpg"],
+            }
+            manifest.write_text(
+                "\n".join(
+                    [
+                        json.dumps(first_record, ensure_ascii=False),
+                        "{broken-json",
+                        json.dumps(latest_record, ensure_ascii=False),
+                    ]
+                )
+                + "\n"
+                + json.dumps(tail_record, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            runtime = IsolatedManager(root)
+            try:
+                runtime.start()
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    connection.row_factory = sqlite3.Row
+                    records = connection.execute(
+                        "SELECT * FROM download_records ORDER BY aweme_id"
+                    ).fetchall()
+                    self.assertEqual(len(records), 1)
+                    self.assertEqual(
+                        json.loads(records[0]["record_json"])["desc"],
+                        "新标题",
+                    )
+                    files = connection.execute(
+                        "SELECT * FROM download_files WHERE aweme_id=?",
+                        ("7666425128226856563",),
+                    ).fetchall()
+                    self.assertEqual(len(files), 1)
+                    self.assertEqual(files[0]["exists_on_disk"], 1)
+                    import_state = connection.execute(
+                        "SELECT * FROM manifest_import_state"
+                    ).fetchone()
+                    self.assertEqual(import_state["bad_lines"], 1)
+                    self.assertLess(import_state["byte_offset"], manifest.stat().st_size)
+                    db_only_record = {
+                        "aweme_id": "7664000000000000001",
+                        "desc": "仅存在于旧 links 表",
+                        "media_type": "video",
+                        "file_names": ["db-only.mp4"],
+                        "file_paths": ["works/db-only.mp4"],
+                    }
+                    connection.execute(
+                        """
+                        INSERT INTO links(
+                          profile_id, aweme_id, kind, url, desc, media_type,
+                          local_file_names, local_file_paths, metadata_json,
+                          status, discovered_at, last_seen_at, downloaded_at, output_dir
+                        )
+                        VALUES(
+                          NULL, ?, 'video', ?, ?, 'video', ?, ?, ?,
+                          'downloaded', ?, ?, ?, ?
+                        )
+                        """,
+                        (
+                            db_only_record["aweme_id"],
+                            f"https://www.douyin.com/video/{db_only_record['aweme_id']}",
+                            db_only_record["desc"],
+                            json.dumps(db_only_record["file_names"]),
+                            json.dumps(db_only_record["file_paths"]),
+                            json.dumps(db_only_record, ensure_ascii=False),
+                            "2026-07-26T08:03:00+08:00",
+                            "2026-07-26T08:03:00+08:00",
+                            "2026-07-26T08:03:00+08:00",
+                            str(library),
+                        ),
+                    )
+                    connection.commit()
+
+                runtime.quit()
+                with manifest.open("a", encoding="utf-8") as handle:
+                    handle.write("\n")
+
+                runtime = IsolatedManager(root)
+                runtime.start()
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    connection.row_factory = sqlite3.Row
+                    records = connection.execute(
+                        "SELECT aweme_id, record_json FROM download_records ORDER BY aweme_id"
+                    ).fetchall()
+                    self.assertEqual(
+                        [row["aweme_id"] for row in records],
+                        [
+                            "7664000000000000001",
+                            "7665317108750712678",
+                            "7666425128226856563",
+                        ],
+                    )
+                    tail = json.loads(records[1]["record_json"])
+                    self.assertEqual(tail["desc"], "稍后完成的尾行")
+                    import_state = connection.execute(
+                        "SELECT * FROM manifest_import_state"
+                    ).fetchone()
+                    self.assertEqual(import_state["byte_offset"], manifest.stat().st_size)
+            finally:
+                runtime.close()
+
     def test_isolated_http_contract_and_static_assets(self) -> None:
         with tempfile.TemporaryDirectory(prefix="fanhao-download-manager-http-") as temp:
             runtime = IsolatedManager(Path(temp))
@@ -267,6 +400,76 @@ class RuntimeCharacterizationTests(unittest.TestCase):
                 links = runtime.json_request("/api/links")
                 self.assertEqual(links.get("links"), [])
                 self.assertEqual(links.get("total"), 0)
+
+                now = "2026-07-26T08:00:00+08:00"
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    first_profile_id = int(
+                        connection.execute(
+                            """
+                            INSERT INTO profiles(url, sec_uid, tab, title, nickname, created_at, updated_at)
+                            VALUES(?, 'profile-one', 'like', '测试喜欢', '测试喜欢', ?, ?)
+                            """,
+                            ("https://www.douyin.com/user/profile-one?showTab=like", now, now),
+                        ).lastrowid
+                    )
+                    second_profile_id = int(
+                        connection.execute(
+                            """
+                            INSERT INTO profiles(url, sec_uid, tab, title, nickname, created_at, updated_at)
+                            VALUES(?, 'profile-two', 'post', '测试作者', '测试作者', ?, ?)
+                            """,
+                            ("https://www.douyin.com/user/profile-two", now, now),
+                        ).lastrowid
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO links(
+                          profile_id, aweme_id, kind, url, status, discovered_at, last_seen_at
+                        )
+                        VALUES(?, '7666425128226856563', 'video', ?, 'failed', ?, ?)
+                        """,
+                        (
+                            first_profile_id,
+                            "https://www.douyin.com/video/7666425128226856563",
+                            now,
+                            now,
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO links(
+                          profile_id, aweme_id, kind, url, status, discovered_at, last_seen_at
+                        )
+                        VALUES(?, '7665317108750712678', 'video', ?, 'failed', ?, ?)
+                        """,
+                        (
+                            second_profile_id,
+                            "https://www.douyin.com/video/7665317108750712678",
+                            now,
+                            now,
+                        ),
+                    )
+                    connection.commit()
+
+                global_failed = runtime.json_request("/api/links?status=failed")
+                self.assertEqual(global_failed.get("total"), 2)
+                by_aweme_id = {
+                    str(row["aweme_id"]): row for row in global_failed.get("links", [])
+                }
+                like_row = by_aweme_id["7666425128226856563"]
+                self.assertEqual(like_row.get("profile_id"), first_profile_id)
+                self.assertEqual(like_row.get("profile_nickname"), "测试喜欢")
+                self.assertEqual(like_row.get("profile_tab"), "like")
+                self.assertIn("showTab=like", like_row.get("profile_url", ""))
+
+                scoped_failed = runtime.json_request(
+                    f"/api/links?status=failed&profile_id={second_profile_id}"
+                )
+                self.assertEqual(scoped_failed.get("total"), 1)
+                self.assertEqual(
+                    scoped_failed.get("links", [])[0].get("profile_nickname"),
+                    "测试作者",
+                )
 
                 status, headers, home = runtime.request("/")
                 self.assertEqual(status, 200)

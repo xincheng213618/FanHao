@@ -174,6 +174,7 @@ def init_db() -> None:
         migrate_link_preview_columns(conn)
         migrate_link_profile_presence_columns(conn)
         migrate_link_files(conn)
+        migrate_download_records(conn)
         migrate_video_quality_audits(conn)
         migrate_self_profile_aliases(conn)
         defaults = {
@@ -424,6 +425,76 @@ def migrate_link_files(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_link_files_link ON link_files(link_id);
         CREATE INDEX IF NOT EXISTS idx_link_files_aweme ON link_files(profile_id, aweme_id);
         CREATE INDEX IF NOT EXISTS idx_link_files_role ON link_files(role);
+        """
+    )
+
+
+def migrate_download_records(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS download_records (
+          aweme_id TEXT PRIMARY KEY,
+          output_dir TEXT NOT NULL DEFAULT '',
+          media_type TEXT,
+          record_json TEXT NOT NULL,
+          recorded_at TEXT,
+          content_hash TEXT,
+          source TEXT NOT NULL DEFAULT 'manager',
+          manifest_path TEXT,
+          manifest_offset INTEGER,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_download_records_recorded
+          ON download_records(recorded_at DESC, aweme_id);
+        CREATE INDEX IF NOT EXISTS idx_download_records_output
+          ON download_records(output_dir, aweme_id);
+
+        CREATE TABLE IF NOT EXISTS download_files (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          aweme_id TEXT NOT NULL REFERENCES download_records(aweme_id) ON DELETE CASCADE,
+          role TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          file_name TEXT NOT NULL,
+          file_path TEXT NOT NULL,
+          absolute_path TEXT,
+          size_bytes INTEGER,
+          exists_on_disk INTEGER NOT NULL DEFAULT 0,
+          recorded_at TEXT NOT NULL,
+          UNIQUE(aweme_id, file_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_download_files_aweme
+          ON download_files(aweme_id, id);
+        CREATE INDEX IF NOT EXISTS idx_download_files_role
+          ON download_files(role, aweme_id);
+
+        CREATE TABLE IF NOT EXISTS manifest_import_state (
+          manifest_path TEXT PRIMARY KEY,
+          byte_offset INTEGER NOT NULL DEFAULT 0,
+          file_size INTEGER NOT NULL DEFAULT 0,
+          file_mtime_ns INTEGER NOT NULL DEFAULT 0,
+          imported_records INTEGER NOT NULL DEFAULT 0,
+          bad_lines INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS download_attempts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          aweme_id TEXT NOT NULL,
+          link_id INTEGER REFERENCES links(id) ON DELETE SET NULL,
+          profile_id INTEGER REFERENCES profiles(id) ON DELETE SET NULL,
+          job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+          sidecar_job_id TEXT,
+          status TEXT NOT NULL,
+          error TEXT,
+          started_at TEXT NOT NULL,
+          finished_at TEXT,
+          record_hash TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_download_attempts_aweme
+          ON download_attempts(aweme_id, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_download_attempts_sidecar
+          ON download_attempts(sidecar_job_id);
         """
     )
 

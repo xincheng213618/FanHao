@@ -1,4 +1,5 @@
 import { classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS } from "./work-category.js";
+import { comparePopularityMetadata, compareRatingCountMetadata } from "./work-sort-metadata.js";
 
 const LIST_PAGE_CACHE_LIMIT = 96;
 const SEARCH_PAGE_CACHE_LIMIT = 192;
@@ -12,6 +13,7 @@ export function createWorkQueryService({
   actorMovieStamp,
   actorMissingSearchWorks,
   clampInteger,
+  coreLocalWorkIdsForPeople = () => [],
   createWorkSearchMatcher,
   dedupeWorksForDisplay,
   defaultWorkLimit,
@@ -152,6 +154,8 @@ export function createWorkQueryService({
       "releaseAsc",
       "ratingAsc",
       "ratingDesc",
+      "ratingCountDesc",
+      "popularityDesc",
       "duration",
       "durationDesc",
       "durationAsc",
@@ -194,6 +198,16 @@ export function createWorkQueryService({
         if (aHas && aRating !== bRating) return sort === "ratingAsc" ? aRating - bRating : bRating - aRating;
         const countDiff = bMetadata.ratingCount - aMetadata.ratingCount;
         if (countDiff) return countDiff;
+      }
+
+      if (sort === "ratingCountDesc") {
+        const result = compareRatingCountMetadata(aMetadata, bMetadata);
+        if (result) return result;
+      }
+
+      if (sort === "popularityDesc") {
+        const result = comparePopularityMetadata(aMetadata, bMetadata);
+        if (result) return result;
       }
 
       if (sort === "size" || sort === "sizeDesc" || sort === "sizeAsc") {
@@ -705,6 +719,11 @@ export function createWorkQueryService({
       : searchPeople(rawQuery);
     const exactPersonIds = new Set(peopleSearch.matchedPersonIds || peopleSearch.exact.map((person) => person.id));
     const exactPersonSearch = !exactCodeKey && !codePrefixQuery && peopleSearch.exact.length > 0;
+    const exactPersonLocalWorkIds = exactPersonSearch
+      ? new Set(coreLocalWorkIdsForPeople([...exactPersonIds]))
+      : new Set();
+    const matchesExactPerson = (work) => exactPersonIds.has(work.personId)
+      || exactPersonLocalWorkIds.has(String(work.id || ""));
     const exactLocalWork = exactCodeKey ? findExactLocalWork(exactCodeKey) : null;
     const rankingMissingWorks = localMarkerQuery || exactLocalWork || codePrefixQuery ? [] : rankingMissingSearchWorks();
     const rankingMissingKeys = new Set(rankingMissingWorks
@@ -721,7 +740,7 @@ export function createWorkQueryService({
         : codePrefixQuery
           ? findLocalWorksByCodePrefix(codePrefix)
           : exactPersonSearch
-            ? allWorks().filter((work) => exactPersonIds.has(work.personId))
+            ? allWorks().filter(matchesExactPerson)
             : allWorks().filter((work) => exactPersonIds.has(work.personId) || matchesQuery(work));
     const fastMissingMatches = codePrefixQuery && !exactLocalWork ? fastMissingCodeSearch(rawQuery) : null;
     const rankingMissingMatches = exactPersonSearch ? [] : rankingMissingWorks.filter((work) => exactCodeKey

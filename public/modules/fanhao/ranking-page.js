@@ -7,6 +7,7 @@ export function createRankingPage(deps) {
   const {
     adminRefreshRankings,
     api,
+    appendLoadedWorkPage,
     clearPersonSelection,
     clearWorkFilter,
     els,
@@ -117,7 +118,8 @@ export function createRankingPage(deps) {
     state.rankingPageUrl = data.pageUrl || "";
     renderPanel(data);
     renderStats(data);
-    renderWorks(state.rankingLists.length ? "这个榜单没有匹配项目。" : "还没有缓存排行榜。");
+    if (options.append) appendLoadedWorkPage();
+    else renderWorks(state.rankingLists.length ? "这个榜单没有匹配项目。" : "还没有缓存排行榜。");
   }
 
   async function loadMoreRankingWorks(button) {
@@ -262,11 +264,13 @@ export function createRankingPage(deps) {
       ["ranking", "榜单顺序"],
       ["releaseDesc", "发行最新"],
       ["ratingDesc", "评分最高"],
+      ["ratingCountDesc", "评价人数最多"],
+      ["popularityDesc", "热度最高"],
       ["title", "标题"]
     ]) {
       select.append(new Option(text, value));
     }
-    select.value = ["ranking", "releaseDesc", "ratingDesc", "title"].includes(state.sortMode) ? state.sortMode : "ranking";
+    select.value = ["ranking", "releaseDesc", "ratingDesc", "ratingCountDesc", "popularityDesc", "title"].includes(state.sortMode) ? state.sortMode : "ranking";
     select.addEventListener("change", () => {
       state.sortMode = select.value;
       resetWorkPaging();

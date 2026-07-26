@@ -187,6 +187,383 @@ body.novel-reader-active .product-topbar {
   font-size: 14px;
 }
 
+.novel-collection-admin {
+  display: grid;
+  gap: 18px;
+  margin-top: 30px;
+  border-top: 1px solid rgba(22, 28, 45, 0.08);
+  padding-top: 28px;
+}
+
+.novel-collection-heading,
+.novel-collection-panel-head,
+.novel-collection-task-top,
+.novel-adapter-card > div:first-child,
+.novel-adapter-dialog-head,
+.novel-adapter-dialog-actions,
+.novel-collection-form-actions,
+.novel-collection-task-actions,
+.novel-adapter-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.novel-collection-heading {
+  align-items: flex-start;
+}
+
+.novel-collection-heading h2,
+.novel-collection-panel h3,
+.novel-collection-task h4,
+.novel-adapter-card h4,
+.novel-adapter-dialog h2 {
+  margin: 0;
+  color: #202735;
+}
+
+.novel-collection-heading p,
+.novel-collection-panel-head p,
+.novel-collection-task p,
+.novel-adapter-card p,
+.novel-adapter-help {
+  margin: 7px 0 0;
+  color: #687184;
+  line-height: 1.6;
+}
+
+.novel-collector-runtime,
+.novel-adapter-type,
+.novel-task-status {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.novel-collector-runtime.ready,
+.novel-task-status.succeeded {
+  background: #eaf7ef;
+  color: #287a47;
+}
+
+.novel-collector-runtime.unavailable,
+.novel-task-status.failed {
+  background: #fff0f0;
+  color: #b23c43;
+}
+
+.novel-task-status.queued {
+  background: #fff7df;
+  color: #966b0f;
+}
+
+.novel-task-status.running,
+.novel-task-status.cancelling {
+  background: #eaf2ff;
+  color: #2868b5;
+}
+
+.novel-task-status.cancelled {
+  background: #f0f1f3;
+  color: #687184;
+}
+
+.novel-collection-panel {
+  border: 1px solid rgba(22, 28, 45, 0.09);
+  border-radius: 8px;
+  padding: 22px;
+  background: #fafbfc;
+}
+
+.novel-collection-panel-head {
+  align-items: flex-start;
+  margin-bottom: 18px;
+}
+
+.novel-collection-task-form,
+.novel-adapter-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.novel-collection-task-form {
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr) minmax(220px, 0.8fr) auto;
+  align-items: end;
+}
+
+.novel-collection-field {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  color: #4c566b;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.novel-collection-field.wide {
+  grid-column: 1 / -1;
+}
+
+.novel-collection-field input,
+.novel-collection-field select,
+.novel-collection-field textarea {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid rgba(22, 28, 45, 0.14);
+  border-radius: 6px;
+  padding: 9px 11px;
+  background: #fff;
+  color: #202735;
+  font: inherit;
+  font-weight: 500;
+  outline: none;
+}
+
+.novel-collection-field textarea {
+  min-height: 84px;
+  resize: vertical;
+}
+
+.novel-collection-field input:focus,
+.novel-collection-field select:focus,
+.novel-collection-field textarea:focus {
+  border-color: rgba(237, 66, 89, 0.65);
+  box-shadow: 0 0 0 3px rgba(237, 66, 89, 0.1);
+}
+
+.novel-collection-button {
+  min-height: 38px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 8px 13px;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.novel-collection-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.novel-collection-button.primary {
+  background: #ed4259;
+  color: #fff;
+}
+
+.novel-collection-button.secondary {
+  border-color: rgba(22, 28, 45, 0.13);
+  background: #fff;
+  color: #354052;
+}
+
+.novel-collection-button.ghost {
+  background: #eef0f4;
+  color: #5c6678;
+}
+
+.novel-collection-button.danger {
+  border-color: rgba(178, 60, 67, 0.18);
+  background: #fff3f3;
+  color: #a9363d;
+}
+
+.novel-collection-task-list {
+  display: grid;
+  gap: 12px;
+}
+
+.novel-collection-task {
+  border: 1px solid rgba(22, 28, 45, 0.09);
+  border-left: 4px solid #c9ced8;
+  border-radius: 7px;
+  padding: 17px;
+  background: #fff;
+}
+
+.novel-collection-task.status-running,
+.novel-collection-task.status-cancelling {
+  border-left-color: #4d8bd2;
+}
+
+.novel-collection-task.status-succeeded {
+  border-left-color: #4b9c68;
+}
+
+.novel-collection-task.status-failed {
+  border-left-color: #cf5c63;
+}
+
+.novel-collection-task-top {
+  align-items: flex-start;
+}
+
+.novel-collection-task-top p {
+  font-size: 13px;
+}
+
+.novel-collection-task-url {
+  display: block;
+  overflow: hidden;
+  margin-top: 11px;
+  color: #637086;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.novel-collection-progress {
+  overflow: hidden;
+  height: 6px;
+  margin-top: 13px;
+  border-radius: 999px;
+  background: #edf0f4;
+}
+
+.novel-collection-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #ed4259, #f08d5c);
+  transition: width 180ms ease;
+}
+
+.novel-collection-task-message {
+  font-size: 13px;
+}
+
+.novel-collection-task-message.error,
+.novel-collection-alert.error {
+  color: #a9363d;
+}
+
+.novel-collection-task-facts,
+.novel-collection-task-actions,
+.novel-adapter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: 12px;
+}
+
+.novel-collection-task-facts span {
+  border-radius: 5px;
+  padding: 5px 8px;
+  background: #f3f5f8;
+  color: #687184;
+  font-size: 12px;
+}
+
+.novel-collection-preview {
+  margin-top: 12px;
+  color: #566176;
+  font-size: 13px;
+}
+
+.novel-collection-preview summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.novel-collection-preview p {
+  border-left: 3px solid #e2e5ea;
+  padding-left: 11px;
+  white-space: pre-wrap;
+}
+
+.novel-adapter-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.novel-adapter-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  border: 1px solid rgba(22, 28, 45, 0.09);
+  border-radius: 7px;
+  padding: 17px;
+  background: #fff;
+}
+
+.novel-adapter-card p {
+  flex: 1;
+  font-size: 13px;
+}
+
+.novel-adapter-card code {
+  display: block;
+  overflow: hidden;
+  margin-top: 12px;
+  color: #667085;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.novel-adapter-type.system {
+  background: #eef3ff;
+  color: #416aa0;
+}
+
+.novel-adapter-type.custom {
+  background: #fff1e8;
+  color: #9a5b2d;
+}
+
+.novel-collection-alert,
+.novel-collection-empty {
+  border-radius: 6px;
+  padding: 12px 14px;
+  background: #f4f5f7;
+  color: #667085;
+  font-size: 13px;
+}
+
+.novel-collection-alert.error {
+  background: #fff1f1;
+}
+
+.novel-adapter-dialog {
+  width: min(900px, calc(100vw - 32px));
+  max-height: min(880px, calc(100vh - 32px));
+  border: 0;
+  border-radius: 10px;
+  padding: 0;
+  color: #202735;
+  box-shadow: 0 28px 80px rgba(18, 24, 40, 0.28);
+}
+
+.novel-adapter-dialog::backdrop {
+  background: rgba(27, 33, 46, 0.58);
+  backdrop-filter: blur(2px);
+}
+
+.novel-adapter-dialog form {
+  padding: 24px;
+}
+
+.novel-adapter-dialog-head .novel-collection-button {
+  min-width: 38px;
+  padding: 0;
+  font-size: 22px;
+}
+
+.novel-adapter-help {
+  margin-bottom: 20px;
+}
+
+.novel-adapter-dialog-actions {
+  justify-content: flex-end;
+  margin-top: 22px;
+}
+
 .novel-correction-dialog {
   width: min(620px, calc(100vw - 32px));
   max-height: min(760px, calc(100vh - 32px));
@@ -1297,6 +1674,26 @@ button.novel-book-latest:focus-visible {
 
   .novel-management-actions {
     grid-template-columns: 1fr;
+  }
+
+  .novel-collection-heading,
+  .novel-collection-panel-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .novel-collection-task-form,
+  .novel-adapter-form-grid,
+  .novel-adapter-list {
+    grid-template-columns: 1fr;
+  }
+
+  .novel-collection-form-actions {
+    justify-content: flex-start;
+  }
+
+  .novel-collector-runtime {
+    align-self: flex-start;
   }
 
   .novel-section-menu {

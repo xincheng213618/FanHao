@@ -3,10 +3,46 @@ import { normalizePersonWorkYear, personWorkYearOptions, worksForPersonYear } fr
 const PERSON_DETAIL_SOURCE_CACHE_LIMIT = 128;
 const PERSON_DETAIL_PAGE_CACHE_LIMIT = 12;
 
+export function relatedLocalWorksForPerson({
+  library,
+  person,
+  relatedWorkIds = [],
+  workMatches = () => true
+}) {
+  const workIds = [...new Set([
+    ...(person?.works || []),
+    ...(relatedWorkIds || [])
+  ].map((workId) => String(workId || "")).filter(Boolean))];
+
+  return workIds
+    .map((workId) => library.worksById.get(workId))
+    .filter((work) => work && workMatches(work))
+    .map((work) => ({
+      ...work,
+      personId: String(person.id || ""),
+      personName: person.name || ""
+    }));
+}
+
+export function personRecordWithRelatedLocalWorks(person, localWorks = []) {
+  const works = [...new Map(localWorks.map((work) => [String(work.id || ""), work])).values()];
+  return {
+    ...person,
+    coverId: person.coverId || works.find((work) => work.coverId)?.coverId || null,
+    workCount: works.length,
+    videoCount: works.reduce((sum, work) => sum + Number(work.videoCount || 0), 0),
+    playableCount: works.reduce((sum, work) => sum + Number(work.playableCount || 0), 0),
+    imageCount: works.reduce((sum, work) => sum + Number(work.imageCount || 0), 0),
+    infoCount: works.reduce((sum, work) => sum + Number(work.infoCount || 0), 0),
+    works: works.map((work) => String(work.id || "")).filter(Boolean)
+  };
+}
+
 export function createPersonDetailService({
   actorProfileMergeCandidates,
   actorProfileRow,
   adminCoreMutationService,
+  coreLocalWorkIdsForPeople = () => [],
   coreMissingWorksForPerson,
   corePersonFallbackRecord,
   dedupeWorksForDisplay,
@@ -15,6 +51,7 @@ export function createPersonDetailService({
   manualCoverStateService,
   maxActorAvatarBytes,
   mergedActorMovieRows,
+  mergedPersonMembers = (personId) => [{ id: personId }],
   mergedPersonRecord,
   missingActorWorksForPerson,
   peoplePayloadStamp,
@@ -136,18 +173,27 @@ export function createPersonDetailService({
 
     const actorRows = mergedActorMovieRows(person.id);
     mark("actorRows");
-    const rawLocalWorks = person.works
-      .map((workId) => library.worksById.get(workId))
-      .filter((work) => work && peopleScopeService.workMatches(work, scope));
+    const relatedPersonIds = [
+      person.id,
+      ...mergedPersonMembers(person.id).map((member) => member.id)
+    ];
+    const relatedWorkIds = coreLocalWorkIdsForPeople(relatedPersonIds);
+    const rawLocalWorks = relatedLocalWorksForPerson({
+      library,
+      person,
+      relatedWorkIds,
+      workMatches: (work) => peopleScopeService.workMatches(work, scope)
+    });
+    const personSource = personRecordWithRelatedLocalWorks(person, rawLocalWorks);
     const localWorks = enrichLocalWorksWithActorMovieInfo(rawLocalWorks, actorRows);
     const personLocalCodeKeys = workCodeKeySetForWorks(rawLocalWorks);
     mark("localWorks");
-    const coreMissingWorks = scope === "western" ? [] : coreMissingWorksForPerson(person, personLocalCodeKeys);
+    const coreMissingWorks = scope === "western" ? [] : coreMissingWorksForPerson(personSource, personLocalCodeKeys);
     mark("coreMissing");
     const coreMissingKeys = new Set(coreMissingWorks.map((work) => storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title)).filter(Boolean));
     const missingWorks = [
       ...coreMissingWorks,
-      ...(scope === "western" ? [] : missingActorWorksForPerson(person, actorRows, personLocalCodeKeys)).filter((work) => {
+      ...(scope === "western" ? [] : missingActorWorksForPerson(personSource, actorRows, personLocalCodeKeys)).filter((work) => {
         const key = storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title);
         return !key || !coreMissingKeys.has(key);
       })
@@ -167,7 +213,7 @@ export function createPersonDetailService({
       person: null,
       personId: person.id,
       personOptions,
-      personSource: person,
+      personSource,
       years: personWorkYearOptions(allPersonWorks),
       works: allPersonWorks
     };

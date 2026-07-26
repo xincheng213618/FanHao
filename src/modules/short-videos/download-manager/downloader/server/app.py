@@ -77,7 +77,7 @@ class _ServerDeps:
         self.queue_manager = QueueManager(max_workers=int(config.get("thread", 5) or 5))
 
 
-async def _execute_download(url: str, deps: "_ServerDeps") -> Dict[str, int]:
+async def _execute_download(url: str, deps: "_ServerDeps") -> Dict[str, Any]:
     """简化版 download_url：只负责执行并返回成功/失败计数。
 
     有意不复用 cli.main.download_url —— 后者绑定了 progress_display 的 rich 状态。
@@ -134,19 +134,30 @@ async def _execute_download(url: str, deps: "_ServerDeps") -> Dict[str, int]:
                 raise RuntimeError(f"No downloader for url_type={parsed['type']}")
 
             result = await downloader.download(parsed)
+            completed_records = list(getattr(downloader, "completed_manifest_records", []))
             payload = {
                 "total": result.total,
                 "success": result.success,
                 "failed": result.failed,
                 "skipped": result.skipped,
                 "error": result.error_summary(),
+                # The manager submits one work URL per job. Keep a bounded result
+                # for standalone batch callers so the polling response cannot grow
+                # without limit.
+                "records": completed_records[-100:],
+                "records_truncated": max(0, len(completed_records) - 100),
             }
             timing_event(
                 "sidecar_execute_done",
                 url=original_url,
                 resolved_url=url,
                 elapsed_ms=elapsed_ms(started),
-                **payload,
+                total=result.total,
+                success=result.success,
+                failed=result.failed,
+                skipped=result.skipped,
+                error=result.error_summary(),
+                records=len(completed_records),
             )
             return payload
     except Exception as exc:
@@ -162,7 +173,7 @@ async def _execute_download(url: str, deps: "_ServerDeps") -> Dict[str, int]:
 def build_app(config: ConfigLoader) -> FastAPI:
     deps = _ServerDeps(config)
 
-    async def executor(url: str) -> Dict[str, int]:
+    async def executor(url: str) -> Dict[str, Any]:
         return await _execute_download(url, deps)
 
     server_cfg = config.get("server") or {}

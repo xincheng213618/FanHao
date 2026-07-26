@@ -6,11 +6,88 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { createServerConfig } from "../src/bootstrap/server-config.js";
+import {
+  collectConfirmedLikeItems,
+  hasUsableWorkMetadata,
+  isConfirmedLikeItem
+} from "../src/modules/short-videos/download-manager/like-extraction.mjs";
+import { profileNicknameFromSnapshot } from "../src/modules/short-videos/download-manager/profile-nickname.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const moduleDir = path.join(projectRoot, "src", "modules", "short-videos", "download-manager");
 const downloaderDir = path.join(moduleDir, "downloader");
 const expectedDbPath = path.join(moduleDir, "data", "douyin_downloads.sqlite");
+
+assert.equal(
+  profileNicknameFromSnapshot({
+    heading: "白昼小熊",
+    title: "白昼小熊的抖音 - 抖音",
+    text: "白昼小熊\n时尚创作者\n2026年2月精选作者\n关注 176\n粉丝 1190.6万"
+  }),
+  "白昼小熊"
+);
+
+const likeTargetSecUid = "MS4wLjABAAAA-target";
+const confirmedLike = {
+  aweme_id: "7666425128226856563",
+  user_digged: 1,
+  author: { nickname: "喜欢作品作者" }
+};
+assert.equal(isConfirmedLikeItem(confirmedLike), true);
+assert.equal(isConfirmedLikeItem({ ...confirmedLike, user_digged: 0 }), false);
+assert.deepEqual(
+  collectConfirmedLikeItems(
+    {
+      sec_uid: likeTargetSecUid,
+      aweme_list: [
+        confirmedLike,
+        { aweme_id: "7665317108750712678", user_digged: 0 }
+      ],
+      recommendation: {
+        sec_uid: "MS4wLjABAAAA-recommend",
+        aweme_list: [
+          { aweme_id: "7666285065705768314", user_digged: 1 }
+        ]
+      }
+    },
+    likeTargetSecUid
+  ).map((item) => item.aweme_id),
+  ["7666425128226856563"]
+);
+assert.deepEqual(
+  collectConfirmedLikeItems(
+    {
+      sec_uid: "MS4wLjABAAAA-other",
+      aweme_list: [confirmedLike]
+    },
+    likeTargetSecUid
+  ),
+  []
+);
+assert.equal(hasUsableWorkMetadata({ aweme_id: "7666425128226856563" }), false);
+assert.equal(
+  hasUsableWorkMetadata({
+    aweme_id: "7666425128226856563",
+    cover_url: "https://example.invalid/cover.jpg"
+  }),
+  true
+);
+assert.equal(
+  profileNicknameFromSnapshot({
+    heading: "",
+    title: "白昼小熊的抖音 - 抖音",
+    text: "白昼小熊\n时尚创作者\n2026年2月精选作者\n关注 176"
+  }),
+  "白昼小熊"
+);
+assert.equal(
+  profileNicknameFromSnapshot({
+    heading: "",
+    title: "",
+    text: "白昼小熊\n关注 176"
+  }),
+  "白昼小熊"
+);
 
 function listFilesRecursive(root, predicate) {
   if (!fs.existsSync(root)) return [];
@@ -127,6 +204,7 @@ for (const relativePath of [
   "app.py",
   "extract-links.mjs",
   "extract-following.mjs",
+  "like-extraction.mjs",
   "cookie-login.mjs",
   "fetch-comments.py",
   "downloader/__init__.py",
@@ -145,8 +223,10 @@ for (const relativePath of [
   "downloader/core/user_downloader.py",
   "downloader/core/video_downloader.py",
   "downloader/server/app.py",
+  "downloader/server/jobs.py",
   "downloader/storage/database.py",
   "downloader/storage/file_manager.py",
+  "downloader/storage/metadata_handler.py",
   "downloader/tools/cookie_fetcher.py",
   "downloader/utils/logger.py",
   "packaging/downloader_entry.py",
@@ -278,6 +358,13 @@ assert.match(appSource, /def _claim_quality_queue_batch\(self, limit: int\)/);
 assert.match(appSource, /COALESCE\(links\.digg_count, 0\) DESC/);
 assert.match(appSource, /CREATE TABLE IF NOT EXISTS video_quality_audit_runs/);
 assert.match(appSource, /CREATE TABLE IF NOT EXISTS video_quality_audit_items/);
+assert.match(appSource, /CREATE TABLE IF NOT EXISTS download_records/);
+assert.match(appSource, /CREATE TABLE IF NOT EXISTS download_files/);
+assert.match(appSource, /CREATE TABLE IF NOT EXISTS manifest_import_state/);
+assert.match(appSource, /CREATE TABLE IF NOT EXISTS download_attempts/);
+assert.match(appSource, /def sync_manifest_to_db\(/);
+assert.match(appSource, /def download_record_from_db\(/);
+assert.match(appSource, /completed_record_from_state/);
 assert.match(appSource, /redownload_status='completed'/);
 assert.match(appSource, /verification_status TEXT NOT NULL DEFAULT 'not_checked'/);
 assert.match(appSource, /def probe_actual_video_file\(/);
@@ -298,6 +385,19 @@ assert.match(appSource, /actual_frame_rate/);
 
 const extractLinksSource = fs.readFileSync(path.join(moduleDir, "extract-links.mjs"), "utf8");
 assert.match(extractLinksSource, /rawTargetSecUid\.toLowerCase\(\) === "self"/);
+assert.match(extractLinksSource, /collectConfirmedLikeItems\(data, targetSecUid\)/);
+assert.match(extractLinksSource, /hasUsableWorkMetadata\(work\)/);
+
+const managerIndexSource = fs.readFileSync(path.join(moduleDir, "static", "index.html"), "utf8");
+assert.match(managerIndexSource, /全库数据库链接/);
+assert.match(managerIndexSource, /所属主页/);
+
+const linksFeatureSource = fs.readFileSync(
+  path.join(moduleDir, "static", "features", "links.js"),
+  "utf8"
+);
+assert.match(linksFeatureSource, /profile_nickname/);
+assert.match(linksFeatureSource, /profile_tab === "like"/);
 
 const qualityAuditSource = fs.readFileSync(path.join(moduleDir, "tools", "audit_video_quality.py"), "utf8");
 assert.match(qualityAuditSource, /MAX\(COALESCE\(l\.digg_count, 0\), COALESCE\(sv\.digg_count, 0\)\)>=\?/);

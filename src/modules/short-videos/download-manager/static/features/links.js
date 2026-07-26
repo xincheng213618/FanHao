@@ -36,6 +36,9 @@ export function createLinksFeature(options) {
             const status = String(link.status || "");
             const statusClass = ["pending", "downloading", "downloaded", "failed"].includes(status) ? status : "pending";
             const href = safeUrl(link.url);
+            const profileHref = safeUrl(link.profile_url);
+            const profileName = String(link.profile_nickname || link.profile_title || `主页 #${link.profile_id || ""}`).trim();
+            const profileTab = link.profile_tab === "like" ? "我的喜欢" : "作者作品";
             return `
             <tr>
               <td>${escapeHtml(link.aweme_id || "")}</td>
@@ -56,6 +59,10 @@ export function createLinksFeature(options) {
               <td class="time-cell">${renderLinkTime(link)}</td>
               <td>${escapeHtml(link.attempts ?? 0)}</td>
               <td class="author">
+                <div><a href="${profileHref}" target="_blank" rel="noreferrer">${escapeHtml(profileName)}</a></div>
+                <div class="muted">${escapeHtml(profileTab)}</div>
+              </td>
+              <td class="author">
                 <div>${escapeHtml(link.author_nickname || "")}</div>
                 <div class="muted">${escapeHtml(link.author_sec_uid || link.author_uid || "")}</div>
               </td>
@@ -73,7 +80,7 @@ export function createLinksFeature(options) {
           `;
           }
         )
-        .join("") || '<tr><td colspan="11" class="muted">没有链接</td></tr>';
+        .join("") || '<tr><td colspan="12" class="muted">没有链接</td></tr>';
     const loaded = Math.min(rows.length, total || rows.length);
     $("linksPager").textContent = `已加载 ${loaded} / ${total || 0}`;
     $("loadMoreLinks").hidden = loaded >= total;

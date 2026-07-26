@@ -9,7 +9,7 @@ const STUDIO_INDEX_BATCH_SIZE = 64;
 const STUDIO_INDEX_BATCH_DELAY_MS = 16;
 
 export function createStudioPage(deps) {
-  const { api, appendEmpty, els, formatNumber, hidePersonProfile, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
+  const { api, appendLoadedWorkPage, appendEmpty, els, formatNumber, hidePersonProfile, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
   const studioRequests = createLatestRequestGate();
   const studioPrefetches = new Map();
   let studioIndexRenderTimer = null;
@@ -76,7 +76,8 @@ export function createStudioPage(deps) {
       setMainHeader(studio?.name || "片商", selectedSeries ? `${selectedSeries.name} · ${formatNumber(state.studioWorksTotal)} 部` : `${formatNumber(state.studioWorksTotal)} 部本地作品`);
       renderStatsForWorks(state.works);
       renderSeriesControls(studio);
-      renderWorks("这个片商暂无本地作品。");
+      if (append) appendLoadedWorkPage();
+      else renderWorks("这个片商暂无本地作品。");
     } catch (error) {
       if (!request.isCurrent() || state.activeView !== "studios") return;
       if (append) throw error;

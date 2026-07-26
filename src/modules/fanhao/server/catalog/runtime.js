@@ -6,6 +6,7 @@ export function createCatalogRuntime(deps) {
   }
 
   function start() {
+    deps.codePrefixService.prewarm();
     deps.studioService.prewarm();
     deps.rankingService.prewarm();
   }

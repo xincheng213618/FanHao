@@ -62,6 +62,7 @@ export function createGalleryRenderer(deps) {
   let galleryMoreGestureConsumed = false;
   let galleryMoreGestureReleaseTimer = 0;
   let galleryPagerCleanup = null;
+  let galleryScrollRestoreGeneration = 0;
   const expandedPhotoCategoryIds = new Set();
   let photoCategoryExpansionInitialized = false;
 
@@ -583,15 +584,43 @@ function currentImageLibraryList() {
   return key && state.gallery.list?.key === key ? state.gallery.list : null;
 }
 
-function renderGalleryResults() {
+function captureGalleryScrollPosition() {
+  const scrollingElement = document.scrollingElement || document.documentElement;
+  return {
+    top: Math.max(0, Number(window.scrollY || scrollingElement?.scrollTop || 0)),
+    left: Math.max(0, Number(window.scrollX || scrollingElement?.scrollLeft || 0))
+  };
+}
+
+function restoreGalleryScrollPosition(anchor) {
+  if (!anchor) return;
+  const generation = ++galleryScrollRestoreGeneration;
+  const restore = () => {
+    if (generation !== galleryScrollRestoreGeneration) return;
+    const scrollingElement = document.scrollingElement || document.documentElement;
+    const maxTop = Math.max(0, Number(scrollingElement?.scrollHeight || 0) - window.innerHeight);
+    window.scrollTo({
+      top: Math.min(Math.max(0, Number(anchor.top) || 0), maxTop),
+      left: Math.max(0, Number(anchor.left) || 0),
+      behavior: "auto"
+    });
+  };
+  restore();
+  window.requestAnimationFrame(() => window.requestAnimationFrame(restore));
+}
+
+function renderGalleryResults(options = {}) {
+  const scrollAnchor = options.preserveScroll ? captureGalleryScrollPosition() : null;
+  if (!scrollAnchor) galleryScrollRestoreGeneration += 1;
   resetGalleryRenderedState();
   const content = els.workGrid.querySelector(".gallery-content");
   if (!content) {
-    renderGalleryView();
+    renderGalleryView(options);
     return;
   }
   content.innerHTML = "";
   renderGalleryContent(content);
+  restoreGalleryScrollPosition(scrollAnchor);
 }
 
 function currentGalleryCategoryFacets() {
@@ -1234,7 +1263,7 @@ function renderTvSeriesShelf(container) {
     more.textContent = `显示更多作品 ${formatNumber(visible.length)} / ${formatNumber(total)}`;
     more.addEventListener("click", () => {
       state.gallery.visibleLimit += 80;
-      renderGalleryView();
+      renderGalleryView({ preserveScroll: true });
       if (getGalleryPage().imageLibraryListNeedsLoad?.() && !getGalleryPage().isImageLibraryListLoading?.()) {
         void getGalleryPage().loadImageLibraryItems?.({ renderStart: false });
       }
@@ -1339,7 +1368,7 @@ function renderWesternPersonShelf(container) {
     more.textContent = `显示更多人物 ${formatNumber(visible.length)} / ${formatNumber(total)}`;
     more.addEventListener("click", () => {
       state.gallery.visibleLimit += 80;
-      renderGalleryView();
+      renderGalleryView({ preserveScroll: true });
       if (getGalleryPage().imageLibraryListNeedsLoad?.() && !getGalleryPage().isImageLibraryListLoading?.()) {
         void getGalleryPage().loadImageLibraryItems?.({ renderStart: false });
       }
@@ -2090,7 +2119,7 @@ function appendPagedGalleryMore(container, list, label) {
   more.textContent = `显示更多${label} ${formatNumber(shown)} / ${formatNumber(total)}`;
   more.addEventListener("click", () => {
     state.gallery.visibleLimit = Math.min(total, Math.max(shown, Number(state.gallery.visibleLimit || 80)) + 80);
-    renderGalleryResults();
+    renderGalleryResults({ preserveScroll: true });
     if (getGalleryPage().imageLibraryListNeedsLoad?.() && !getGalleryPage().isImageLibraryListLoading?.()) {
       void getGalleryPage().loadImageLibraryItems?.({ renderStart: false });
     }
@@ -2304,7 +2333,7 @@ function renderMovieShelf(container) {
     more.textContent = `显示更多 ${formatNumber(visible.length)} / ${formatNumber(total)}`;
     more.addEventListener("click", () => {
       state.gallery.visibleLimit += 80;
-      renderGalleryView();
+      renderGalleryView({ preserveScroll: true });
       if (getGalleryPage().imageLibraryListNeedsLoad?.() && !getGalleryPage().isImageLibraryListLoading?.()) {
         void getGalleryPage().loadImageLibraryItems?.({ renderStart: false });
       }
@@ -2450,7 +2479,7 @@ function renderMediaShelf(container) {
     more.textContent = `显示更多 ${formatNumber(visible.length)} / ${formatNumber(total)}`;
     more.addEventListener("click", () => {
       state.gallery.visibleLimit += 80;
-      renderGalleryView();
+      renderGalleryView({ preserveScroll: true });
       if (page.imageLibraryListNeedsLoad?.() && !page.isImageLibraryListLoading?.()) {
         void page.loadImageLibraryItems?.({ renderStart: false });
       }
@@ -3619,7 +3648,9 @@ function renderMediaReader(container) {
   container.append(panel);
 }
 
-function renderGalleryView() {
+function renderGalleryView(options = {}) {
+  const scrollAnchor = options.preserveScroll ? captureGalleryScrollPosition() : null;
+  if (!scrollAnchor) galleryScrollRestoreGeneration += 1;
   const searchValueToRestore = activeGallerySearchValue();
   resetGalleryRenderedState();
 
@@ -3638,6 +3669,7 @@ function renderGalleryView() {
   shell.append(content);
   els.workGrid.append(shell);
   if (searchValueToRestore !== null) restoreGallerySearchFocus();
+  restoreGalleryScrollPosition(scrollAnchor);
 }
   return {
     mediaKindForMode: galleryMediaKindForMode,
