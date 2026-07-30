@@ -1,0 +1,442 @@
+body.music-mobile-view .music-mobile-collection-browser-head {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  margin: 0 -12px;
+  padding: 0 20px 14px;
+  background: var(--surface-soft);
+}
+
+body.music-mobile-view .music-mobile-collection-topbar-spacer {
+  display: block;
+  min-width: 44px;
+}
+
+body.music-mobile-view .music-mobile-collection-topbar {
+  min-height: 44px;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  gap: 4px;
+}
+
+body.music-mobile-view .music-mobile-collection-topbar .music-mobile-playlist-back {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
+  place-items: center;
+}
+
+body.music-mobile-view .music-mobile-collection-topbar .music-mobile-symbol {
+  width: 24px;
+  height: 24px;
+}
+
+body.music-mobile-view .music-mobile-collection-search {
+  display: flex;
+  min-width: 0;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 16px;
+  background: var(--surface-raised);
+  color: var(--muted);
+  text-align: left;
+}
+
+body.music-mobile-view .music-mobile-collection-search strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.music-mobile-view .music-mobile-collection-search small {
+  flex: 0 0 auto;
+  color: var(--quiet);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+body.music-mobile-view .music-mobile-collection-browser-toolbar {
+  display: flex;
+  min-width: 0;
+  min-height: 54px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding: 0 2px;
+}
+
+body.music-mobile-view .music-mobile-collection-mode-tabs {
+  display: flex;
+  min-width: 0;
+  align-self: stretch;
+  gap: 22px;
+}
+
+body.music-mobile-view .music-mobile-collection-mode-tabs button {
+  position: relative;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  padding: 0 2px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+body.music-mobile-view .music-mobile-collection-mode-tabs button.active {
+  color: var(--ink);
+}
+
+body.music-mobile-view .music-mobile-collection-mode-tabs button.active::after {
+  position: absolute;
+  right: 12px;
+  bottom: 0;
+  left: 12px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--music-accent);
+  content: "";
+}
+
+body.music-mobile-view .music-mobile-collection-browser-toolbar .music-mobile-sort {
+  width: auto;
+  min-width: 88px;
+  min-height: 36px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 12px;
+  background: var(--field);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+body.music-mobile-view .music-mobile-collection-browser {
+  display: grid;
+  min-width: 0;
+}
+
+body.music-mobile-view .music-mobile-collection-languages {
+  display: flex;
+  min-width: 0;
+  min-height: 48px;
+  overflow-x: auto;
+  align-items: stretch;
+  gap: 20px;
+  border-bottom: 1px solid var(--line);
+  scrollbar-width: none;
+}
+
+body.music-mobile-view .music-mobile-collection-languages::-webkit-scrollbar {
+  display: none;
+}
+
+body.music-mobile-view .music-mobile-collection-languages button {
+  position: relative;
+  flex: 0 0 auto;
+  min-width: 32px;
+  min-height: 44px;
+  border: 0;
+  padding: 0 1px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+body.music-mobile-view .music-mobile-collection-languages button.active {
+  color: var(--ink);
+}
+
+body.music-mobile-view .music-mobile-collection-languages button.active::after {
+  position: absolute;
+  right: 20%;
+  bottom: 0;
+  left: 20%;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--music-accent);
+  content: "";
+}
+
+body.music-mobile-view .music-mobile-collection-artist-list,
+body.music-mobile-view .music-mobile-collection-album-list {
+  display: grid;
+  min-width: 0;
+}
+
+body.music-mobile-view .music-mobile-collection-artist-row,
+body.music-mobile-view .music-mobile-collection-album-row {
+  display: grid;
+  min-width: 0;
+  min-height: 70px;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 2px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+body.music-mobile-view .music-mobile-collection-artist-row,
+body.music-mobile-view .music-mobile-collection-album-row.no-cover {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+body.music-mobile-view .music-mobile-collection-album-row.has-cover {
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+}
+
+body.music-mobile-view .music-mobile-collection-album-row .music-mobile-cover.tiny {
+  width: 52px;
+  height: 52px;
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+body.music-mobile-view .music-mobile-collection-artist-row > span,
+body.music-mobile-view .music-mobile-collection-album-row > span:not(.music-mobile-cover) {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+body.music-mobile-view .music-mobile-collection-artist-row strong,
+body.music-mobile-view .music-mobile-collection-album-row strong {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 850;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.music-mobile-view .music-mobile-collection-artist-row small,
+body.music-mobile-view .music-mobile-collection-album-row small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.music-mobile-view .music-mobile-collection-artist-row > em,
+body.music-mobile-view .music-mobile-collection-album-row > em {
+  color: var(--quiet);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+body.music-mobile-view .music-mobile-collection-detail {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+  margin: 0 -12px;
+  padding: 0 20px 16px;
+  background: var(--surface-soft);
+}
+
+body.music-mobile-view .music-mobile-collection-detail.no-art {
+  gap: 9px;
+  padding-bottom: 12px;
+}
+
+body.music-mobile-view .music-mobile-collection-identity {
+  display: grid;
+  min-width: 0;
+  align-items: end;
+}
+
+body.music-mobile-view .music-mobile-collection-identity.has-art {
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 14px;
+}
+
+body.music-mobile-view .music-mobile-collection-identity.no-art {
+  min-height: 64px;
+  align-items: center;
+}
+
+body.music-mobile-view .music-mobile-collection-identity .music-mobile-cover.detail {
+  width: 104px;
+  height: 104px;
+  border-radius: 12px;
+  box-shadow: 0 10px 22px rgb(15 23 42 / 10%);
+}
+
+body.music-mobile-view .music-mobile-collection-identity > span:not(.music-mobile-cover) {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+body.music-mobile-view .music-mobile-collection-identity small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+}
+
+body.music-mobile-view .music-mobile-collection-identity strong {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: clamp(22px, 7vw, 30px);
+  font-weight: 950;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+body.music-mobile-view .music-mobile-collection-identity.has-art strong {
+  font-size: clamp(20px, 6vw, 26px);
+}
+
+body.music-mobile-view .music-mobile-collection-detail.no-art .music-mobile-collection-identity strong {
+  font-size: clamp(21px, 6.4vw, 26px);
+}
+
+body.music-mobile-view .music-mobile-collection-identity em {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 750;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+}
+
+body.music-mobile-view .music-mobile-collection-actions {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+body.music-mobile-view .music-mobile-collection-actions button {
+  display: flex;
+  min-width: 0;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 12px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 900;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ink) 12%, transparent);
+}
+
+body.music-mobile-view .music-mobile-collection-actions .music-mobile-symbol {
+  width: 20px;
+  height: 20px;
+}
+
+body.music-mobile-view .music-mobile-collection-actions button:disabled {
+  background: var(--field);
+  color: var(--quiet);
+  box-shadow: none;
+}
+
+body.music-mobile-view .music-mobile-collection-detail.no-art .music-mobile-collection-actions button {
+  min-height: 40px;
+}
+
+body.music-mobile-view .music-mobile-collection-list-head {
+  display: flex;
+  min-width: 0;
+  min-height: 50px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding: 0 2px;
+}
+
+body.music-mobile-view .music-mobile-collection-list-head > span {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+body.music-mobile-view .music-mobile-collection-list-head strong {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 950;
+}
+
+body.music-mobile-view .music-mobile-collection-list-head small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+body.music-mobile-view .music-mobile-collection-list-head button {
+  min-width: 44px;
+  min-height: 36px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 12px;
+  background: var(--field);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+body.music-mobile-view .music-mobile-collection-list-head ~ .music-mobile-list .music-mobile-icon-button.track-label {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+body.music-mobile-view .music-mobile-collection-list-head ~ .music-mobile-list .music-mobile-icon-button.track-label.track-favorite.active {
+  color: #ff4f67;
+}
+
+body.music-mobile-view .music-mobile-collection-browser .music-mobile-load-more {
+  margin: 12px 0 4px;
+  background: var(--field);
+  color: var(--ink);
+}
+
+@media (max-width: 360px) {
+  body.music-mobile-view .music-mobile-collection-browser-head,
+  body.music-mobile-view .music-mobile-collection-detail {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  body.music-mobile-view .music-mobile-collection-mode-tabs {
+    gap: 14px;
+  }
+
+  body.music-mobile-view .music-mobile-collection-identity.has-art {
+    grid-template-columns: 92px minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  body.music-mobile-view .music-mobile-collection-identity .music-mobile-cover.detail {
+    width: 92px;
+    height: 92px;
+  }
+}

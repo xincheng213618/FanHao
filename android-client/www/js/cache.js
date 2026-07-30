@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=20260726-work-sort-01";
+import { CLIENT_VERSION } from "./config.js?v=20260730-music-home-ui-40";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;

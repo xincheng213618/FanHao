@@ -37,11 +37,46 @@ body.short-video-mobile-view #viewContent {
 }
 
 .short-video-chrome-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
   align-items: center;
   gap: 4px;
   width: 100%;
   min-width: 0;
+}
+
+.short-video-chrome-tabs {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+
+.short-video-chrome-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.short-video-chrome-group {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.short-video-chrome-group + .short-video-chrome-group {
+  position: relative;
+  padding-left: 9px;
+}
+
+.short-video-chrome-group + .short-video-chrome-group::before {
+  content: "";
+  position: absolute;
+  top: 9px;
+  bottom: 9px;
+  left: 0;
+  width: 1px;
+  background: var(--line);
 }
 
 .short-video-chrome-icon,
@@ -60,9 +95,30 @@ body.short-video-mobile-view #viewContent {
 .short-video-chrome-icon {
   display: grid;
   width: 40px;
-  margin-left: auto;
   place-items: center;
   padding: 0;
+}
+
+.short-video-mobile-list.is-refreshing {
+  min-height: var(--short-video-preserved-height, auto);
+}
+
+.short-video-mobile-list.is-refreshing::before {
+  content: "更新中";
+  position: sticky;
+  z-index: 12;
+  top: calc(58px + env(safe-area-inset-top));
+  justify-self: center;
+  border: 1px solid var(--mobile-accent-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  color: var(--mobile-accent);
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 900;
+  box-shadow: 0 5px 16px rgba(15, 23, 42, .1);
+  pointer-events: none;
+  backdrop-filter: blur(12px);
 }
 
 .short-video-chrome-icon > svg {
@@ -75,9 +131,9 @@ body.short-video-mobile-view #viewContent {
 }
 
 .short-video-chrome-tag.active {
-  border-color: rgba(254, 44, 85, .42);
-  background: rgba(254, 44, 85, .1);
-  color: #d71948;
+  border-color: var(--mobile-accent-border);
+  background: var(--mobile-accent-soft);
+  color: var(--mobile-accent);
 }
 
 body.short-video-mobile-view .short-video-mobile-list,
@@ -174,8 +230,8 @@ body.short-video-search-page-view .bottom-nav {
 }
 
 .short-video-search-page-field:focus-within {
-  border-color: rgba(254, 44, 85, .46);
-  box-shadow: 0 0 0 3px rgba(254, 44, 85, .08);
+  border-color: var(--mobile-accent-border);
+  box-shadow: 0 0 0 3px var(--mobile-focus-ring);
 }
 
 .short-video-search-page-field > .short-video-mobile-icon {
@@ -217,14 +273,14 @@ body.short-video-search-page-view .bottom-nav {
 .short-video-search-page-submit {
   border-radius: 10px;
   background: transparent;
-  color: #fe2c55;
+  color: var(--mobile-accent);
   padding: 0 4px;
   font-size: 14px;
   font-weight: 950;
 }
 
 .short-video-search-page-submit:active {
-  background: rgba(254, 44, 85, .1);
+  background: var(--mobile-accent-soft);
 }
 
 .short-video-search-suggestions {
@@ -406,7 +462,7 @@ body.short-video-search-page-view .bottom-nav {
   left: 38%;
   height: 3px;
   border-radius: 999px;
-  background: #fe2c55;
+  background: var(--mobile-accent);
   content: "";
 }
 
@@ -531,9 +587,9 @@ body.short-video-search-page-view .bottom-nav {
 }
 
 .short-video-sort-option.active {
-  border-color: rgba(254, 44, 85, .5);
-  background: rgba(254, 44, 85, .1);
-  color: #d71948;
+  border-color: var(--mobile-accent-border);
+  background: var(--mobile-accent-soft);
+  color: var(--mobile-accent);
 }
 
 .short-video-mobile-tabs {
@@ -576,7 +632,7 @@ body.short-video-search-page-view .bottom-nav {
   height: 3px;
   transform: translateX(-50%) scaleX(0);
   border-radius: 999px;
-  background: #fe2c55;
+  background: var(--mobile-accent);
   content: "";
   transition: transform .2s ease;
 }
@@ -672,8 +728,8 @@ body.short-video-search-page-view .bottom-nav {
   overflow: hidden;
   border: 0;
   border-radius: 999px;
-  background: rgba(254, 44, 85, .1);
-  color: #d71948;
+  background: var(--mobile-accent-soft);
+  color: var(--mobile-accent);
   padding: 0 12px;
   font-size: 12px;
   font-weight: 850;
@@ -729,9 +785,9 @@ body.short-video-search-page-view .bottom-nav {
 }
 
 .short-video-mobile-following-filter.active {
-  border-color: rgba(254, 44, 85, .48);
-  background: rgba(254, 44, 85, .1);
-  color: #d71948;
+  border-color: var(--mobile-accent-border);
+  background: var(--mobile-accent-soft);
+  color: var(--mobile-accent);
 }
 
 .short-video-mobile-author-index {

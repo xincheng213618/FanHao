@@ -31,7 +31,6 @@ export function createMusicSheets(deps) {
     downloadTrack,
     els,
     getActiveUrl,
-    iconButton,
     openTrack,
     queueTrackNext,
     rememberPlaybackQueue,
@@ -50,6 +49,7 @@ export function createMusicSheets(deps) {
     sleepTimerActive,
     sleepTimerText,
     state,
+    symbolButton,
     toggleFavorite,
     trackMeta,
     updateListParams
@@ -67,10 +67,10 @@ export function createMusicSheets(deps) {
     title.textContent = "定时关闭";
     const meta = document.createElement("small");
     meta.textContent = sleepTimerActive() ? sleepTimerText() : "未开启";
-    const close = iconButton("×", () => {
+    const close = symbolButton("close", () => {
       state.sleepSheetOpen = false;
       renderShell();
-    }, false, "ghost", "关闭定时选择");
+    }, false, "ghost music-mobile-sheet-close", "关闭定时选择");
     head.append(title, meta, close);
     attachSheetDismissSwipe(head);
 
@@ -182,56 +182,54 @@ export function createMusicSheets(deps) {
         state.trackActionId = "";
         activateSearchResultQueue(track.id);
         openTrack(track.id, { autoplay: true }).catch(() => {});
-      }));
+      }, { primary: true, icon: "play-circle" }));
       actions.append(trackActionChoice("下一首播放", "插入到当前歌曲后面。", () => {
         state.trackActionId = "";
         queueTrackNext(track);
-      }));
+      }, { primary: true, icon: "next" }));
       actions.append(trackActionChoice("加入队列", "保留当前顺序并放到队尾。", () => {
         state.trackActionId = "";
         appendTrackToQueue(track);
-      }));
+      }, { primary: true, icon: "add-to-queue" }));
       actions.append(trackActionChoice("加入歌单", "保存到已有歌单或新建歌单。", () => {
         state.trackActionId = "";
         state.playlistActionTrackId = track.id;
         renderShell();
-      }));
+      }, { primary: true, icon: "playlist-add" }));
       actions.append(trackActionChoice(track.favorite ? "取消收藏" : "收藏歌曲", track.favorite ? "从收藏列表移除。" : "以后可以从收藏快速找到。", () => {
         state.trackActionId = "";
         toggleFavorite(track.id).catch(() => {});
-      }, { active: track.favorite }));
+      }, { active: track.favorite, icon: track.favorite ? "favorite-fill" : "favorite" }));
       if (track.artistId) actions.append(trackActionChoice("查看歌手", track.artist || "打开歌手页面。", () => {
         state.trackActionId = "";
         updateListParams({ mode: "library", artistId: track.artistId, albumId: "", genre: "", query: "" }, { resetSearch: true });
-      }));
+      }, { icon: "person" }));
       if (track.albumId) actions.append(trackActionChoice("查看专辑", track.album || "打开专辑页面。", () => {
         state.trackActionId = "";
         updateListParams({ mode: "library", albumId: track.albumId, artistId: track.artistId || "", genre: "", query: "" }, { resetSearch: true });
-      }));
+      }, { icon: "album" }));
       if (track.downloadUrl) actions.append(trackActionChoice("保存原文件", formatBytes(track.sizeBytes || 0), () => {
         state.trackActionId = "";
         downloadTrack(track);
         renderShell();
-      }));
+      }, { icon: "download" }));
       if (state.mode === "playlist" && state.playlistId) actions.append(trackActionChoice("移出当前歌单", "不会删除本地音乐文件。", () => {
         state.trackActionId = "";
         removeTrackFromCurrentPlaylist(track.id).catch(() => {});
-      }, { danger: true }));
+      }, { danger: true, icon: "delete" }));
     }
     sheet.append(renderSheetHandle(), head, actions);
     return sheet;
   }
 
   function trackActionChoice(label, description, action, options = {}) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `music-mobile-track-action-choice${options.active ? " active" : ""}${options.danger ? " danger" : ""}`;
+    const kind = `music-mobile-track-action-choice${options.primary ? " primary" : ""}${options.active ? " active" : ""}${options.danger ? " danger" : ""}`;
+    const button = symbolButton(options.icon || "more", action, false, kind, label);
     const title = document.createElement("strong");
     title.textContent = label;
     const meta = document.createElement("small");
     meta.textContent = description;
     button.append(title, meta);
-    button.addEventListener("click", action);
     return button;
   }
 
@@ -320,23 +318,17 @@ export function createMusicSheets(deps) {
 
     const head = document.createElement("div");
     head.className = "music-mobile-settings-head";
-    const text = document.createElement("span");
+    const back = symbolButton("arrow-back", closeSettings, false, "music-mobile-settings-back", "返回我的音乐");
     const title = document.createElement("strong");
-    title.textContent = "播放设置";
-    const meta = document.createElement("small");
-    meta.textContent = "衔接、声音、搜索与播放现场";
-    text.append(title, meta);
-    const close = document.createElement("button");
-    close.type = "button";
-    close.textContent = "完成";
-    close.addEventListener("click", closeSettings);
-    head.append(text, close);
+    title.textContent = "音乐设置";
+    const spacer = document.createElement("span");
+    spacer.className = "music-mobile-settings-head-spacer";
+    spacer.setAttribute("aria-hidden", "true");
+    head.append(back, title, spacer);
 
-    const summary = renderSettingsTransitionSummary();
-
-    const transition = document.createElement("section");
-    transition.className = "music-mobile-settings-group";
-    transition.append(settingsGroupTitle("歌曲衔接"), renderSettingsTransitionPresets());
+    const transitionBody = document.createElement("div");
+    transitionBody.className = "music-mobile-settings-group-body";
+    transitionBody.append(renderSettingsTransitionPresets());
     const gapless = document.createElement("button");
     gapless.type = "button";
     gapless.className = `music-mobile-settings-switch${state.gapless ? " active" : ""}`;
@@ -344,7 +336,7 @@ export function createMusicSheets(deps) {
     gapless.setAttribute("aria-checked", state.gapless ? "true" : "false");
     gapless.textContent = state.gapless ? (state.shuffle ? "随机时暂停" : "已开启") : "已关闭";
     gapless.addEventListener("click", () => setGaplessPlayback(!state.gapless));
-    transition.append(settingsRow(
+    transitionBody.append(settingsRow(
       "无缝播放",
       "由预载播放器直接接管下一首，自动切歌时减少停顿；随机播放时暂停预载，少数格式可能不生效。",
       gapless
@@ -360,7 +352,7 @@ export function createMusicSheets(deps) {
     }
     crossfade.value = String(state.crossfadeSeconds);
     crossfade.addEventListener("change", () => setCrossfadeSeconds(Number(crossfade.value || 0)));
-    transition.append(settingsRow(
+    transitionBody.append(settingsRow(
       "歌曲交叉淡化",
       state.shuffle
         ? "随机播放时暂停预载；关闭随机播放后自动恢复。"
@@ -378,16 +370,21 @@ export function createMusicSheets(deps) {
     }
     fade.value = String(state.fadeSeconds);
     fade.addEventListener("change", () => setFadeSeconds(Number(fade.value || 0)));
-    transition.append(settingsRow(
+    transitionBody.append(settingsRow(
       "播放 / 暂停淡化",
       "播放和暂停时平滑调整音量，避免声音突然出现或消失。",
       fade
     ));
+    const transition = renderSettingsDisclosureGroup(
+      "transition",
+      "歌曲衔接",
+      settingsTransitionSummary(),
+      transitionBody
+    );
 
-    const playback = document.createElement("section");
-    playback.className = "music-mobile-settings-group";
-    playback.append(settingsGroupTitle("播放偏好"));
-    playback.append(settingsRow("播放音量", "只调整应用内音乐音量，系统媒体音量不变。", renderSettingsVolumeControl()));
+    const playbackBody = document.createElement("div");
+    playbackBody.className = "music-mobile-settings-group-body";
+    playbackBody.append(settingsRow("播放音量", "只调整应用内音乐音量，系统媒体音量不变。", renderSettingsVolumeControl()));
     const speed = document.createElement("select");
     speed.setAttribute("aria-label", "默认播放速度");
     for (const value of PLAYBACK_SPEED_OPTIONS) {
@@ -397,8 +394,11 @@ export function createMusicSheets(deps) {
       speed.append(option);
     }
     speed.value = String(state.playbackSpeed);
-    speed.addEventListener("change", () => setPlaybackSpeed(Number(speed.value || 1)));
-    playback.append(settingsRow("播放速度", "新打开的歌曲沿用此速度。", speed));
+    speed.addEventListener("change", () => {
+      setPlaybackSpeed(Number(speed.value || 1));
+      updateSettingsDisclosureValue("playback", settingsPlaybackSummary());
+    });
+    playbackBody.append(settingsRow("播放速度", "新打开的歌曲沿用此速度。", speed));
 
     const repeat = document.createElement("select");
     repeat.setAttribute("aria-label", "默认循环方式");
@@ -413,8 +413,9 @@ export function createMusicSheets(deps) {
       state.repeat = repeat.value;
       writeRepeatPreference(state.repeat);
       scheduleGaplessPreload();
+      updateSettingsDisclosureValue("playback", settingsPlaybackSummary());
     });
-    playback.append(settingsRow("循环方式", "自动切歌时使用的默认队列策略。", repeat));
+    playbackBody.append(settingsRow("循环方式", "自动切歌时使用的默认队列策略。", repeat));
 
     const shuffle = document.createElement("button");
     shuffle.type = "button";
@@ -428,7 +429,7 @@ export function createMusicSheets(deps) {
       scheduleGaplessPreload();
       renderShell();
     });
-    playback.append(settingsRow("随机播放", "从队列随机选择下一首；开启后会暂停无缝预载。", shuffle));
+    playbackBody.append(settingsRow("随机播放", "从队列随机选择下一首；开启后会暂停无缝预载。", shuffle));
 
     const resumeQueue = document.createElement("button");
     resumeQueue.type = "button";
@@ -443,7 +444,7 @@ export function createMusicSheets(deps) {
       else clearPlaybackQueuePreference();
       renderShell();
     });
-    playback.append(settingsRow("恢复播放现场", "下次打开时恢复当前歌曲、播放位置和整理过的队列。", resumeQueue));
+    playbackBody.append(settingsRow("恢复播放现场", "下次打开时恢复当前歌曲、播放位置和整理过的队列。", resumeQueue));
 
     const sleepTimer = document.createElement("button");
     sleepTimer.type = "button";
@@ -451,22 +452,27 @@ export function createMusicSheets(deps) {
     sleepTimer.textContent = sleepTimerActive() ? sleepTimerText() : "设置";
     sleepTimer.addEventListener("click", () => {
       state.settingsOpen = false;
+      state.settingsSection = "";
       state.fullscreen = true;
       state.sleepSheetOpen = true;
       state.queueOpen = false;
       state.playlistSheetOpen = false;
       renderShell();
     });
-    playback.append(settingsRow(
+    playbackBody.append(settingsRow(
       "睡眠定时",
       "可以按时间暂停，也可以让当前歌曲完整播完后停止，不再自动切到下一首。",
       sleepTimer
     ));
+    const playback = renderSettingsDisclosureGroup(
+      "playback",
+      "播放偏好",
+      settingsPlaybackSummary(),
+      playbackBody
+    );
 
-    const searchVersions = document.createElement("section");
-    searchVersions.className = "music-mobile-settings-group";
-    searchVersions.append(settingsGroupTitle("搜索与版本"));
-
+    const searchVersionsBody = document.createElement("div");
+    searchVersionsBody.className = "music-mobile-settings-group-body";
     const versionStrategy = document.createElement("select");
     versionStrategy.setAttribute("aria-label", "默认播放版本策略");
     for (const [value, label] of VERSION_STRATEGY_OPTIONS) {
@@ -477,7 +483,7 @@ export function createMusicSheets(deps) {
     }
     versionStrategy.value = state.versionStrategy;
     versionStrategy.addEventListener("change", () => setVersionStrategy(versionStrategy.value));
-    searchVersions.append(settingsRow(
+    searchVersionsBody.append(settingsRow(
       "默认播放版本",
       versionStrategyDescription(state.versionStrategy),
       versionStrategy
@@ -490,7 +496,7 @@ export function createMusicSheets(deps) {
     rememberVersions.setAttribute("aria-checked", state.rememberVersionChoices ? "true" : "false");
     rememberVersions.textContent = state.rememberVersionChoices ? "已开启" : "已关闭";
     rememberVersions.addEventListener("click", () => setRememberVersionChoices(!state.rememberVersionChoices));
-    searchVersions.append(settingsRow(
+    searchVersionsBody.append(settingsRow(
       "记住版本选择",
       "同一首歌有原版、Live 或 Remix 时，下次搜索会默认播放你上次选择的版本。",
       rememberVersions
@@ -503,16 +509,25 @@ export function createMusicSheets(deps) {
     clearVersions.textContent = preferenceCount ? `清除 ${formatNumber(preferenceCount)} 首` : "暂无记录";
     clearVersions.disabled = preferenceCount < 1;
     clearVersions.addEventListener("click", clearActiveVersionPreferences);
-    searchVersions.append(settingsRow(
+    searchVersionsBody.append(settingsRow(
       "版本偏好",
       preferenceCount ? `当前音乐服务已记住 ${formatNumber(preferenceCount)} 首歌，可随时恢复为全局策略。` : "选择具体版本后会显示在这里。",
       clearVersions
     ));
+    const searchVersions = renderSettingsDisclosureGroup(
+      "search",
+      "搜索与版本",
+      settingsSearchSummary(),
+      searchVersionsBody
+    );
 
     const note = document.createElement("p");
     note.className = "music-mobile-settings-note";
     note.textContent = "这些设置只保存在当前手机，不会修改电脑端音乐文件。";
-    sheet.append(renderSheetHandle(), head, summary, transition, playback, searchVersions, note);
+    const list = document.createElement("div");
+    list.className = "music-mobile-settings-list";
+    list.append(transition, playback, searchVersions);
+    sheet.append(renderSheetHandle(), head, list, note);
     return sheet;
   }
 
@@ -530,6 +545,7 @@ export function createMusicSheets(deps) {
     const select = els.viewContent?.querySelector('select[aria-label="默认播放版本策略"]');
     const description = select?.closest(".music-mobile-settings-row")?.querySelector("small");
     if (description) description.textContent = versionStrategyDescription(state.versionStrategy);
+    updateSettingsDisclosureValue("search", settingsSearchSummary());
   }
 
   function activeVersionPreferenceCount() {
@@ -547,29 +563,55 @@ export function createMusicSheets(deps) {
     renderShell();
   }
 
-  function renderSettingsTransitionSummary() {
-    const summary = document.createElement("section");
-    summary.className = "music-mobile-settings-summary";
-    const eyebrow = document.createElement("small");
-    eyebrow.textContent = "当前衔接方式";
+  function renderSettingsDisclosureGroup(id, label, summaryText, body) {
+    const group = document.createElement("section");
+    group.className = `music-mobile-settings-group${state.settingsSection === id ? " open" : ""}`;
+    group.dataset.settingsSection = id;
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className = "music-mobile-settings-group-trigger";
+    trigger.setAttribute("aria-expanded", state.settingsSection === id ? "true" : "false");
+    const copy = document.createElement("span");
+    copy.className = "music-mobile-settings-group-copy";
     const title = document.createElement("strong");
-    title.textContent = state.shuffle
-      ? "随机播放 · 衔接预载暂停"
-      : state.crossfadeSeconds > 0
-        ? `歌曲交叉淡化 · ${state.crossfadeSeconds} 秒`
-        : state.gapless
-          ? "无缝播放"
-          : "标准切歌";
-    const meta = document.createElement("span");
-    meta.textContent = state.shuffle
-      ? "关闭随机播放后，会继续使用你保存的衔接方式。"
-      : state.crossfadeSeconds > 0
-        ? "两首歌会短暂重叠，切换更柔和。"
-        : state.gapless
-          ? "提前准备下一首，优先减少歌曲间停顿。"
-          : "每首歌独立结束后再开始下一首。";
-    summary.append(eyebrow, title, meta);
-    return summary;
+    title.textContent = label;
+    const summary = document.createElement("span");
+    summary.className = "music-mobile-settings-disclosure-value";
+    summary.textContent = summaryText;
+    copy.append(title, summary);
+    const chevron = document.createElement("img");
+    chevron.className = "music-mobile-settings-chevron";
+    chevron.src = "./assets/icons/music-chevron-down.svg?v=20260730-music-home-ui-40";
+    chevron.alt = "";
+    chevron.setAttribute("aria-hidden", "true");
+    trigger.append(copy, chevron);
+    trigger.addEventListener("click", () => {
+      state.settingsSection = state.settingsSection === id ? "" : id;
+      renderShell();
+    });
+    group.append(trigger);
+    if (state.settingsSection === id) group.append(body);
+    return group;
+  }
+
+  function settingsTransitionSummary() {
+    if (state.shuffle) return "随机播放 · 衔接暂停";
+    if (state.crossfadeSeconds > 0) return `柔和 · ${state.crossfadeSeconds} 秒`;
+    return state.gapless ? "无缝播放" : "标准切歌";
+  }
+
+  function settingsPlaybackSummary() {
+    const repeat = { all: "列表循环", one: "单曲循环", none: "顺序播放" }[state.repeat] || "列表循环";
+    return `${Math.round(state.volume * 100)}% · ${playbackSpeedLabel(state.playbackSpeed)} · ${repeat}`;
+  }
+
+  function settingsSearchSummary() {
+    return `${versionStrategyLabel(state.versionStrategy)} · ${state.rememberVersionChoices ? "记忆开启" : "不记忆"}`;
+  }
+
+  function updateSettingsDisclosureValue(id, value) {
+    const target = els.viewContent?.querySelector(`[data-settings-section="${id}"] .music-mobile-settings-disclosure-value`);
+    if (target) target.textContent = value;
   }
 
   function renderSettingsTransitionPresets() {
@@ -604,13 +646,6 @@ export function createMusicSheets(deps) {
     return state.gapless ? "gapless" : "standard";
   }
 
-  function settingsGroupTitle(label) {
-    const title = document.createElement("strong");
-    title.className = "music-mobile-settings-group-title";
-    title.textContent = label;
-    return title;
-  }
-
   function renderSettingsVolumeControl() {
     const control = document.createElement("label");
     control.className = "music-mobile-settings-volume";
@@ -626,6 +661,7 @@ export function createMusicSheets(deps) {
     slider.addEventListener("input", () => {
       value.textContent = `${slider.value}%`;
       setVolume(Number(slider.value || 0) / 100);
+      updateSettingsDisclosureValue("playback", settingsPlaybackSummary());
     });
     control.append(slider, value);
     return control;

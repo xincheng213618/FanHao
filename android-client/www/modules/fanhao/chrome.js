@@ -1,12 +1,13 @@
 import { openFanhaoSheet } from "./sheet.js?v=20260721-fanhao-person-detail-02";
 
-export const FANHAO_ROOT_VIEWS = Object.freeze(["people", "works", "rankings", "categories", "studios"]);
+export const FANHAO_ROOT_VIEWS = Object.freeze(["people", "works", "rankings", "categories", "codePrefixes", "studios"]);
 
 const CHROME_TABS = Object.freeze([
   { label: "演员", view: "people" },
   { label: "作品", view: "works" },
   { label: "榜单", view: "rankings" },
   { label: "分类", view: "categories" },
+  { label: "前缀", view: "codePrefixes" },
   { label: "片商", view: "studios" }
 ]);
 
@@ -22,6 +23,8 @@ export function renderFanhaoChrome({ container, view }, host, views) {
   const row = document.createElement("nav");
   row.className = "fanhao-chrome-row";
   row.setAttribute("aria-label", "番号导航和排序");
+  const tabs = document.createElement("div");
+  tabs.className = "fanhao-chrome-tabs";
   const activeView = fanhaoTabForView(view);
   const activeSort = sortConfigForView(view, views);
 
@@ -50,7 +53,7 @@ export function renderFanhaoChrome({ container, view }, host, views) {
       host.navigation.showView(tab.view, {}, { resetStack: true });
       host.ui.scrollToTop();
     });
-    row.append(button);
+    tabs.append(button);
   }
 
   const search = document.createElement("button");
@@ -62,7 +65,7 @@ export function renderFanhaoChrome({ container, view }, host, views) {
     host.navigation.showView("search", { query: "" }, { push: true });
     host.ui.scrollToTop();
   });
-  row.append(search);
+  row.append(tabs, search);
   container.append(row);
   return true;
 }
@@ -89,6 +92,7 @@ function fanhaoTabForView(view) {
   if (view === "people" || view === "personDetail") return "people";
   if (view === "rankings") return "rankings";
   if (view === "categories") return "categories";
+  if (view === "codePrefixes" || view === "codePrefixDetail") return "codePrefixes";
   if (view === "studios" || view === "studioDetail") return "studios";
   return "works";
 }

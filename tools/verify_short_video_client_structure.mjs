@@ -22,6 +22,7 @@ const requiredParts = [
   "player/native-feed-contract.js",
   "player/native-feed.js",
   "ui/icons.js",
+  "ui/interactions.js",
   "styles/list.css"
 ];
 
@@ -138,9 +139,9 @@ assert(androidEntrySource.includes('view: "shortVideoSearch"'), "Android short-v
 assert(androidEntrySource.includes("short-video-chrome-row"), "Android short-video chrome must keep search and groups in one compact row");
 assert(!androidEntrySource.includes("short-video-chrome-sort"), "Android short-video chrome must not reserve a separate sorting tag");
 assert(androidEntrySource.includes("if (value === activeGroup)") && androidEntrySource.includes("openSortDialog(host, params)"), "tapping the active Android short-video group must open sorting");
-assert(androidEntrySource.indexOf('row.append(search)') > androidEntrySource.indexOf('for (const [value, label]'), "Android short-video search must stay at the far right of the group row");
+assert(androidEntrySource.includes("row.append(tabs, search)"), "Android short-video search must stay at the far right of the scrollable group row");
 assert(androidEntrySource.includes("short-video-sort-overlay"), "Android short-video sorting must open a compact dialog");
-assert(androidEntrySource.includes('["following", "我的关注"]') && androidEntrySource.includes("FOLLOWING_AUTHOR_SORT_OPTIONS"), "Android short-video chrome must expose My Following and its author sort choices");
+assert(androidEntrySource.includes('["recommended", "推荐"]') && androidEntrySource.includes('["history", "历史"]') && androidEntrySource.includes('["following", "关注"]') && androidEntrySource.includes("FOLLOWING_AUTHOR_SORT_OPTIONS"), "Android short-video chrome must expose recommended, history, following, and author choices");
 assert(androidListSource.includes("short-video-search-page-form"), "Android short-video search route must render its own search form");
 assert(!androidListSource.includes("renderSearchFilters"), "Android short-video search must not retain the shared shell filter renderer");
 assert(androidListSource.includes("short-video-search-result-meta") && androidListSource.includes("条相关内容"), "Android Douyin-style search must expose result context without adding counts to the normal feed chrome");
@@ -201,6 +202,7 @@ assert(androidNativePlayerSource.includes('Log.i(TAG, "reuse " + oldIndex + " ->
 assert(androidNativePlayerSource.includes("scheduleVideoPrefetch(index + 1)") && androidNativePlayerSource.includes("NEXT_VIDEO_PREFETCH_BYTES = 4L * 1024L * 1024L"), "Android short-video playback must retain bounded next-item data prefetch");
 assert(androidNativePlayerLayoutSource.includes('app:surface_type="surface_view"') && !androidNativePlayerLayoutSource.includes('app:surface_type="texture_view"'), "Android short-video playback must use the lower-power SurfaceView path");
 assert(androidListControllerSource.includes("appendListVideos(appendedVideos)") && androidListSource.includes("function appendListVideos(videos = [])") && androidListSource.includes("grid.append(renderCard(video))"), "Android list pagination must append only new cards instead of rebuilding every cover");
+assert(androidListControllerSource.includes("if (preserveShell) setListRefreshing(true)") && androidListControllerSource.includes("已保留当前内容") && androidListSource.includes('shell.setAttribute("aria-busy", "true")'), "Android feed switches must retain the mounted list and mark it busy until replacement data arrives");
 assert(androidListControllerSource.includes("const { api, getActiveUrl, listState, showView } = context"), "Android short-video search submit must receive the showView navigation dependency");
 assert(androidListSource.includes("搜索历史") && androidListSource.includes("short-video-search-suggestions"), "Android short-video search must expose history and live suggestions");
 

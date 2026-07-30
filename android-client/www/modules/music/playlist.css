@@ -1,0 +1,279 @@
+body.music-mobile-view .music-mobile-playlist-hero {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  margin: 0 -12px;
+  padding: 0 20px 16px;
+  background: var(--surface-soft);
+}
+
+body.music-mobile-view .music-mobile-playlist-topbar {
+  display: grid;
+  min-height: 44px;
+  grid-template-columns: 64px minmax(0, 1fr) 64px;
+  gap: 8px;
+  align-items: center;
+}
+
+body.music-mobile-view .music-mobile-playlist-topbar > strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 900;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.music-mobile-view .music-mobile-playlist-back,
+body.music-mobile-view .music-mobile-playlist-management > summary {
+  min-height: 40px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+body.music-mobile-view .music-mobile-playlist-back {
+  justify-self: start;
+}
+
+body.music-mobile-view .music-mobile-playlist-management {
+  position: relative;
+  justify-self: end;
+}
+
+body.music-mobile-view .music-mobile-playlist-management > summary {
+  display: grid;
+  min-width: 52px;
+  cursor: pointer;
+  list-style: none;
+  place-items: center end;
+}
+
+body.music-mobile-view .music-mobile-playlist-management > summary::-webkit-details-marker {
+  display: none;
+}
+
+body.music-mobile-view .music-mobile-playlist-management > span {
+  position: absolute;
+  z-index: 8;
+  top: 42px;
+  right: 0;
+  display: grid;
+  width: 136px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-raised);
+  box-shadow: 0 14px 34px rgba(18, 35, 30, 0.16);
+}
+
+body.music-mobile-view .music-mobile-playlist-management:not([open]) > span {
+  display: none;
+}
+
+body.music-mobile-view .music-mobile-playlist-management button {
+  min-height: 46px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 0 14px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 850;
+  text-align: left;
+}
+
+body.music-mobile-view .music-mobile-playlist-management button:last-child {
+  border-bottom: 0;
+}
+
+body.music-mobile-view .music-mobile-playlist-management button.danger {
+  color: var(--orange);
+}
+
+body.music-mobile-view .music-mobile-playlist-identity {
+  display: grid;
+  min-width: 0;
+  min-height: 84px;
+  align-items: center;
+}
+
+body.music-mobile-view .music-mobile-playlist-identity .music-mobile-cover.detail {
+  width: 132px;
+  height: 132px;
+  border-radius: 16px;
+  box-shadow: 0 14px 30px rgba(18, 35, 30, 0.14);
+}
+
+body.music-mobile-view .music-mobile-playlist-identity > span:not(.music-mobile-cover) {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+body.music-mobile-view .music-mobile-playlist-identity small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+body.music-mobile-view .music-mobile-playlist-identity strong {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: clamp(24px, 7vw, 30px);
+  font-weight: 950;
+  line-height: 1.1;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+body.music-mobile-view .music-mobile-playlist-identity em,
+body.music-mobile-view .music-mobile-playlist-identity i {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 750;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+}
+
+body.music-mobile-view .music-mobile-playlist-identity em {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+body.music-mobile-view .music-mobile-playlist-identity i {
+  white-space: nowrap;
+}
+
+body.music-mobile-view .music-mobile-playlist-primary-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+body.music-mobile-view .music-mobile-playlist-primary-actions button {
+  min-height: 44px;
+  border: 0;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+body.music-mobile-view .music-mobile-playlist-primary-actions .secondary {
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+body.music-mobile-view .music-mobile-playlist-primary-actions .primary {
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+body.music-mobile-view .music-mobile-playlist-primary-actions button:disabled {
+  background: var(--field);
+  color: var(--muted);
+  opacity: 1;
+}
+
+body.music-mobile-view .music-mobile-playlist-list-head {
+  display: flex;
+  min-width: 0;
+  min-height: 58px;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding: 4px 2px 8px;
+}
+
+body.music-mobile-view .music-mobile-playlist-list-head > span:first-child {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+body.music-mobile-view .music-mobile-playlist-list-head strong {
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 950;
+}
+
+body.music-mobile-view .music-mobile-playlist-list-head small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+body.music-mobile-view .music-mobile-playlist-list-head > span:last-child {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+body.music-mobile-view .music-mobile-playlist-list-head button {
+  min-height: 36px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 12px;
+  background: var(--field);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+body.music-mobile-view .music-mobile-playlist-list-head button:last-child {
+  color: var(--ink);
+}
+
+body.music-mobile-view .music-mobile-playlist-empty {
+  display: grid;
+  min-height: 34vh;
+  place-content: center;
+  justify-items: center;
+  gap: 9px;
+  padding: 28px 20px 44px;
+  text-align: center;
+}
+
+body.music-mobile-view .music-mobile-playlist-empty strong {
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 950;
+}
+
+body.music-mobile-view .music-mobile-playlist-empty p {
+  max-width: 260px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.5;
+}
+
+body.music-mobile-view .music-mobile-playlist-empty button {
+  min-height: 42px;
+  border: 1px solid var(--music-accent);
+  border-radius: 999px;
+  padding: 0 20px;
+  background: var(--music-accent);
+  color: var(--music-accent-ink);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+@media (max-width: 380px) {
+  body.music-mobile-view .music-mobile-playlist-hero {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+}

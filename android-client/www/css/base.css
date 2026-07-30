@@ -19,6 +19,10 @@
   --blue: #2f80ed;
   --green: #16785d;
   --orange: #e98a2c;
+  --mobile-accent: #2f80ed;
+  --mobile-accent-soft: #e7f0ff;
+  --mobile-accent-border: rgba(47, 128, 237, 0.36);
+  --mobile-focus-ring: rgba(47, 128, 237, 0.1);
   --shadow: 0 12px 28px rgba(20, 29, 40, 0.11);
   font-family:
     "Microsoft YaHei UI",
@@ -49,6 +53,10 @@
   --blue: #6aa8ff;
   --green: #54c7a0;
   --orange: #f0aa61;
+  --mobile-accent: #6aa8ff;
+  --mobile-accent-soft: #173154;
+  --mobile-accent-border: rgba(106, 168, 255, 0.48);
+  --mobile-focus-ring: rgba(106, 168, 255, 0.14);
   --shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
 }
 
@@ -74,6 +82,10 @@
     --blue: #6aa8ff;
     --green: #54c7a0;
     --orange: #f0aa61;
+    --mobile-accent: #6aa8ff;
+    --mobile-accent-soft: #173154;
+    --mobile-accent-border: rgba(106, 168, 255, 0.48);
+    --mobile-focus-ring: rgba(106, 168, 255, 0.14);
     --shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
   }
 }
@@ -327,13 +339,13 @@ body.search-expanded .search-bar {
 }
 
 .search-bar.channel-mode {
-  border-color: rgba(47, 128, 237, 0.24);
-  background: var(--button-soft);
+  border-color: var(--mobile-accent-border);
+  background: var(--mobile-accent-soft);
 }
 
 .search-bar.channel-mode span,
 .search-bar.channel-mode input::placeholder {
-  color: var(--blue);
+  color: var(--mobile-accent);
 }
 
 .search-history {
@@ -375,9 +387,9 @@ body.search-expanded .search-history {
 }
 
 .search-history button.default {
-  border-color: color-mix(in srgb, var(--green) 35%, var(--line));
-  background: var(--success-soft);
-  color: var(--green);
+  border-color: var(--mobile-accent-border);
+  background: var(--mobile-accent-soft);
+  color: var(--mobile-accent);
 }
 
 .module-chrome-tabs {
@@ -404,11 +416,11 @@ body.search-expanded .search-history {
   justify-content: stretch;
   gap: 0;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, #ed4259 20%, var(--line));
+  border: 1px solid color-mix(in srgb, var(--mobile-accent) 20%, var(--line));
   border-radius: 999px;
-  background: color-mix(in srgb, #ed4259 4%, var(--surface));
+  background: color-mix(in srgb, var(--mobile-accent) 4%, var(--surface));
   padding: 4px;
-  box-shadow: 0 8px 18px rgba(237, 66, 89, 0.08);
+  box-shadow: 0 8px 18px var(--mobile-focus-ring);
 }
 
 .module-chrome-tabs[hidden] {
@@ -457,16 +469,16 @@ body.search-expanded .search-history {
 }
 
 .photo-chrome-tabs button.active {
-  border-color: color-mix(in srgb, var(--green) 45%, var(--line));
-  background: var(--success-soft);
-  color: var(--green);
+  border-color: var(--mobile-accent-border);
+  background: var(--mobile-accent-soft);
+  color: var(--mobile-accent);
 }
 
 .novel-chrome-tabs button.active,
 .media-chrome-tabs button.active {
-  background: #ed4259;
+  background: var(--mobile-accent);
   color: #fff;
-  box-shadow: 0 6px 14px rgba(237, 66, 89, 0.18);
+  box-shadow: 0 6px 14px var(--mobile-focus-ring);
 }
 
 .module-chrome-tabs button.active {
@@ -474,7 +486,7 @@ body.search-expanded .search-history {
 }
 
 .photo-chrome-tabs button.active {
-  color: var(--green);
+  color: var(--mobile-accent);
 }
 
 .module-chrome-tabs button.active::after {

@@ -1,10 +1,11 @@
-import { createShortVideoApi } from "./api.js?v=20260713-follow-toggle-08";
-import { createShortVideoListController } from "./list/controller.js?v=20260713-follow-toggle-08";
-import { createShortVideoListView } from "./list/view.js?v=20260713-follow-toggle-08";
+import { createShortVideoApi } from "./api.js?v=20260730-mobile-sync-01";
+import { createShortVideoListController } from "./list/controller.js?v=20260730-mobile-sync-01";
+import { createShortVideoListView } from "./list/view.js?v=20260730-mobile-sync-01";
 import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260712-native-short-video-only-02";
 import { createShortVideoSearch } from "./search.js?v=20260712-douyin-search-05";
-import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=20260713-follow-toggle-08";
+import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=20260730-mobile-sync-01";
 import { createShortVideoIcons } from "./ui/icons.js?v=20260712-douyin-search-05";
+import { createShortVideoInteractions } from "./ui/interactions.js?v=20260730-mobile-sync-01";
 
 export function createShortVideoViews(deps) {
   const { els, getActiveUrl, setActiveBottom } = deps;
@@ -27,6 +28,7 @@ export function createShortVideoViews(deps) {
   const context = { ...deps, listState };
   context.api = createShortVideoApi({ getActiveUrl });
   Object.assign(context, createShortVideoIcons(context));
+  Object.assign(context, createShortVideoInteractions());
   Object.assign(context, createShortVideoListController(context));
   Object.assign(context, createShortVideoSearch(context));
   Object.assign(context, createShortVideoListView(context));
@@ -37,13 +39,14 @@ export function createShortVideoViews(deps) {
     context.installListEvents();
     setActiveBottom("shortVideos");
     listState.searchPage = false;
-    context.applyListParams(params);
+    const preserveShell = Boolean(els.viewContent.querySelector(".short-video-mobile-list"));
+    const scopeChanged = context.applyListParams(params, { preserveData: preserveShell });
     els.viewKicker.textContent = "短视频";
     els.viewTitle.textContent = "短视频";
     els.viewMeta.textContent = "";
     els.viewContent.className = "content-list short-video-mobile-content";
-    context.renderListShell();
-    await context.loadList(renderGuard);
+    if (!preserveShell || !scopeChanged) context.renderListShell();
+    await context.loadList(renderGuard, { preserveShell: preserveShell && scopeChanged });
   }
 
   async function renderSearch(params = {}, renderGuard = null) {

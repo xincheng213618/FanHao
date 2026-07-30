@@ -1,9 +1,23 @@
 .fanhao-chrome-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
   align-items: center;
   gap: 4px;
   width: 100%;
   min-width: 0;
+}
+
+.fanhao-chrome-tabs {
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+
+.fanhao-chrome-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .fanhao-chrome-icon,
@@ -45,9 +59,182 @@
 .fanhao-chrome-icon {
   display: grid;
   width: 40px;
-  margin-left: auto;
   place-items: center;
   padding: 0;
+}
+
+.code-prefix-mobile-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.code-prefix-mobile-search {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  min-width: 0;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--field);
+  padding: 0 10px;
+}
+
+.code-prefix-mobile-search > svg {
+  width: 18px;
+  color: var(--muted);
+}
+
+.code-prefix-mobile-search > input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 0 8px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.code-prefix-mobile-sort {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-soft);
+  padding: 2px;
+}
+
+.code-prefix-mobile-sort > button {
+  min-height: 36px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.code-prefix-mobile-sort > button.active {
+  background: var(--surface);
+  color: var(--blue);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, .1);
+}
+
+.code-prefix-mobile-results {
+  display: grid;
+  gap: 10px;
+}
+
+.code-prefix-mobile-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.code-prefix-mobile-summary > strong {
+  color: var(--ink);
+  font-size: 18px;
+}
+
+.code-prefix-mobile-summary > span:last-child {
+  margin-left: auto;
+}
+
+.code-prefix-mobile-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.code-prefix-mobile-card {
+  display: grid;
+  min-width: 0;
+  min-height: 94px;
+  align-content: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 12px;
+  text-align: left;
+  font: inherit;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, .04);
+}
+
+.code-prefix-mobile-card:active {
+  transform: scale(.985);
+  background: var(--surface-soft);
+}
+
+.code-prefix-mobile-card > strong {
+  overflow: hidden;
+  color: var(--blue);
+  font-size: 18px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-prefix-mobile-card > span,
+.code-prefix-mobile-card > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-prefix-mobile-card > span {
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.code-prefix-mobile-card > small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.code-prefix-mobile-more {
+  min-height: 46px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-soft);
+  color: var(--blue);
+  font: inherit;
+  font-weight: 900;
+}
+
+.code-prefix-mobile-detail-summary {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+  padding: 12px 14px;
+}
+
+.code-prefix-mobile-detail-summary > strong {
+  font-size: 14px;
+}
+
+.code-prefix-mobile-detail-summary > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 360px) {
+  .code-prefix-mobile-toolbar {
+    grid-template-columns: 1fr;
+  }
 }
 
 .fanhao-chrome-icon > svg {
@@ -340,8 +527,8 @@ body.fanhao-search-page-view .bottom-nav {
 }
 
 .fanhao-search-page-field:focus-within {
-  border-color: rgba(47, 128, 237, .46);
-  box-shadow: 0 0 0 3px rgba(47, 128, 237, .08);
+  border-color: var(--mobile-accent-border);
+  box-shadow: 0 0 0 3px var(--mobile-focus-ring);
 }
 
 .fanhao-search-page-field > svg {
@@ -387,14 +574,14 @@ body.fanhao-search-page-view .bottom-nav {
 .fanhao-search-page-submit {
   border-radius: 10px;
   background: transparent;
-  color: var(--blue);
+  color: var(--mobile-accent);
   padding: 0 4px;
   font-size: 14px;
   font-weight: 950;
 }
 
 .fanhao-search-page-submit:active {
-  background: var(--button-soft);
+  background: var(--mobile-accent-soft);
 }
 
 .fanhao-search-suggestions {

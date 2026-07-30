@@ -53,6 +53,7 @@ import { personDetailPath } from "../android-client/www/modules/fanhao/features/
 import { createProgressiveWorkListRenderer } from "../android-client/www/modules/fanhao/features/works/progressive-list-renderer.js";
 import { selectStudios, STUDIO_SORT_OPTIONS } from "../android-client/www/modules/fanhao/features/studios/index-model.js";
 import { categoryWorksPath, normalizeCategory } from "../android-client/www/modules/fanhao/features/categories/category-views.js";
+import { codePrefixDetailPath, normalizeCodePrefix } from "../android-client/www/modules/fanhao/features/code-prefixes/prefix-views.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -358,6 +359,7 @@ for (const relativePath of [
   "android-client/www/modules/fanhao/features/shared/viewport-image-loader.js",
   "android-client/www/modules/fanhao/features/rankings/ranking-views.js",
   "android-client/www/modules/fanhao/features/categories/category-views.js",
+  "android-client/www/modules/fanhao/features/code-prefixes/prefix-views.js",
   "android-client/www/modules/fanhao/features/studios/index-model.js",
   "android-client/www/modules/fanhao/features/people/detail-work-toolbar.js",
   "android-client/www/modules/fanhao/chrome.js",
@@ -391,9 +393,14 @@ const androidFanhaoSheet = read("android-client/www/modules/fanhao/sheet.js");
 const androidFanhaoSearchPage = read("android-client/www/modules/fanhao/search-page.js");
 const androidFanhaoStyles = read("android-client/www/modules/fanhao/styles.css");
 const androidStyles = read("android-client/www/styles.css");
+const androidBaseStyles = read("android-client/www/css/base.css");
+const androidNovelStyles = read("android-client/www/modules/novels/styles.css");
+const androidMusicHomeStyles = read("android-client/www/modules/music/home.css");
+const androidShortVideoListStyles = read("android-client/www/modules/short-videos/styles/list.css");
 const androidPeopleViews = read("android-client/www/modules/fanhao/people-views.js");
 const androidRankingViews = read("android-client/www/modules/fanhao/features/rankings/ranking-views.js");
 const androidCategoryViews = read("android-client/www/modules/fanhao/features/categories/category-views.js");
+const androidCodePrefixViews = read("android-client/www/modules/fanhao/features/code-prefixes/prefix-views.js");
 const androidWorkCards = read("android-client/www/modules/fanhao/features/works/cards.js");
 const androidWorkActions = read("android-client/www/modules/fanhao/features/works/actions.js");
 const androidWorkDetailToolbar = read("android-client/www/modules/fanhao/features/works/detail-toolbar.js");
@@ -431,7 +438,14 @@ assert.deepEqual(selectStudios(studioIndexFixture, { sort: "recent" }).map((stud
 assert.deepEqual(selectStudios(studioIndexFixture, { sort: "name", query: "ALP" }).map((studio) => studio.id), ["alpha"], "studio name filtering must be case insensitive and retain active ordering");
 assert(androidWorkViews.includes('input.placeholder = "筛选片商名称"') && androidWorkViews.includes("selectStudios(studios") && androidWorkViews.includes("studioActiveYears(studio)"), "Android studio browsing must combine direct filtering with useful activity metadata");
 assert(androidListStyles.includes('.content-panel[data-view="studios"] > .view-meta') && androidListStyles.includes(".studio-index-tools") && /\.studio-list\s*\{[\s\S]*?grid-template-columns: repeat\(2/.test(androidListStyles), "Android studio browsing must merge its count into a compact toolbar and use a dense two-column index");
-assert(androidFanhaoChrome.includes('{ label: "分类", view: "categories" }') && androidFanhaoModule.includes('route("categories"') && androidFanhaoChrome.includes('"rankings", "categories", "studios"'), "Android FanHao navigation must expose categories as a first-class root beside studios");
+assert(androidFanhaoChrome.includes('{ label: "分类", view: "categories" }') && androidFanhaoModule.includes('route("categories"'), "Android FanHao navigation must expose categories as a first-class root beside studios");
+assert(androidFanhaoChrome.includes('{ label: "前缀", view: "codePrefixes" }') && androidFanhaoModule.includes('route("codePrefixes"') && androidFanhaoModule.includes('route("codePrefixDetail"') && androidFanhaoStyles.includes(".code-prefix-mobile-list"), "Android FanHao navigation must expose a mobile-specific code-prefix browser and detail route");
+assert.equal(normalizeCodePrefix("fc2_ppv"), "FC2-PPV", "Android code-prefix routes must normalize pasted prefixes");
+const androidPrefixUrl = new URL(codePrefixDetailPath("fc2_ppv", { filter: "missingLocal", sort: "releaseDesc", limit: 96 }), "http://fanhao.local");
+assert.equal(androidPrefixUrl.pathname, "/api/code-prefixes/FC2-PPV", "Android code-prefix details must use the shared catalog endpoint");
+assert.equal(androidPrefixUrl.searchParams.get("includeMissingLocal"), "1", "Android missing-prefix filtering must request missing works from the server");
+assert.equal(androidPrefixUrl.searchParams.get("limit"), "96", "Android code-prefix details must preserve the active page size");
+assert(androidCodePrefixViews.includes('input.placeholder = "筛选番号或厂商"') && androidCodePrefixViews.includes('showView("codePrefixDetail"') && androidCodePrefixViews.includes("pageDataService.warm"), "Android code-prefix browsing must provide direct filtering, detail navigation, and touch prewarming");
 assert.deepEqual(WORK_CATEGORY_OPTIONS.map((option) => option.value), ["censored", "western", "fc2", "anime"], "FanHao categories must expose censored, western, FC2, and anime in the requested order");
 assert.equal(normalizeWorkCategory("FC2"), "fc2", "server category parsing must be case insensitive");
 assert.equal(normalizeWorkCategory("unknown"), "all", "unknown server categories must fall back to the complete library");
@@ -702,8 +716,9 @@ assert(androidWorkActions.includes('title: "更多操作"') && androidWorkAction
 assert(androidWorkActions.includes('variant: "danger wide"') && androidFanhaoStyles.includes(".fanhao-sort-option.danger") && androidFanhaoStyles.includes(".fanhao-sort-option.wide"), "Android destructive work actions must remain visually isolated in the sheet");
 assert(!androidWorkActions.includes("createBackButton") && androidSectionStyles.includes(".work-detail-meta-body"), "Android work details must delegate return navigation to the shared sticky detail header");
 assert(lines("android-client/www/modules/fanhao/features/works/actions.js") <= 190, "Android work actions must stay focused");
-assert(androidIndexHtml.includes("styles.css?v=20260721-fanhao-search-toolbar-23") && androidStyles.includes("css/sections.css?v=20260721-fanhao-work-actor-flow-22") && androidStyles.includes("css/lists.css?v=20260721-fanhao-person-work-grid-20") && androidStyles.includes("modules/fanhao/styles.css?v=20260721-fanhao-search-toolbar-23"), "Android search toolbar must refresh module styling while retaining actor and work-grid styles");
-assert(androidIndexHtml.includes("app.js?v=20260726-work-sort-01") && androidApp.includes("config.js?v=20260726-work-sort-01") && androidApp.includes("cache.js?v=20260726-work-sort-01") && androidCacheSource.includes("config.js?v=20260726-work-sort-01") && androidConfig.includes('CLIENT_VERSION = "20260726-work-sort-01"'), "Android work sorting must refresh the complete application cache chain");
+assert(androidIndexHtml.includes("styles.css?v=20260730-mobile-search-ui-41") && androidStyles.includes("css/base.css?v=20260730-mobile-search-ui-41") && androidStyles.includes("css/sections.css?v=20260730-mobile-search-ui-41") && androidStyles.includes("css/lists.css?v=20260730-mobile-search-ui-41") && androidStyles.includes("modules/fanhao/styles.css?v=20260730-mobile-search-ui-41") && androidStyles.includes("modules/novels/styles.css?v=20260730-mobile-search-ui-41") && androidStyles.includes("modules/music/home.css?v=20260730-mobile-search-ui-41") && androidStyles.includes("modules/short-videos/styles.css?v=20260730-mobile-search-ui-41"), "Android mobile modules must refresh the shared search and accent style chain");
+assert(androidBaseStyles.includes("--mobile-accent: #2f80ed") && androidBaseStyles.includes(".photo-chrome-tabs button.active") && androidBaseStyles.includes("background: var(--mobile-accent)") && androidFanhaoStyles.includes("border-color: var(--mobile-accent-border)") && androidShortVideoListStyles.includes(".short-video-search-page-field:focus-within") && androidShortVideoListStyles.includes("color: var(--mobile-accent)") && androidNovelStyles.includes('.novel-mobile-controls input[type="search"]:focus') && androidNovelStyles.includes("box-shadow: 0 0 0 3px var(--mobile-focus-ring)") && androidMusicHomeStyles.includes("caret-color: var(--mobile-accent)") && androidListStyles.includes(".work-cover-badge.progress") && androidListStyles.includes("background: var(--mobile-accent)"), "Android generic navigation, search focus, filters, and progress surfaces must share the blue-gray accent contract");
+assert(androidIndexHtml.includes("app.js?v=20260730-music-home-ui-40") && androidApp.includes("config.js?v=20260730-music-home-ui-40") && androidApp.includes("cache.js?v=20260730-music-home-ui-40") && androidCacheSource.includes("config.js?v=20260730-music-home-ui-40") && androidConfig.includes('CLIENT_VERSION = "20260730-music-home-ui-40"'), "Android work sorting must refresh the complete application cache chain");
 const androidGoBackStart = androidApp.indexOf("function goBack()");
 const androidGoBackStackPriority = androidApp.indexOf("if (returnToStackView()) return;", androidGoBackStart);
 const androidGoBackBrowserHistory = androidApp.indexOf("window.history.back();", androidGoBackStart);
@@ -1069,7 +1084,7 @@ assert(androidWorkViews.includes('page-data-service.js?v=20260717-fanhao-page-ra
 assert(androidFanhaoIndex.includes('work-views.js?v=20260726-work-sort-01') && androidWorkViews.includes('cache.js?v=20260721-fanhao-actor-counts-17') && androidWorkViews.includes('work-filtering.js?v=20260726-work-sort-01') && androidWorkViews.includes('search-page.js?v=20260721-fanhao-search-suggestions-19'), "Android work sorting must refresh without dropping search suggestions, actor-count caching, or dense browsing");
 assert(androidFanhaoIndex.includes('people-views.js?v=20260721-fanhao-search-suggestions-19'), "Android portrait-only search changes must use the current people module URL");
 assert(androidFanhaoModule.includes('chrome.js?v=20260721-fanhao-category-browser-13') && androidFanhaoModule.includes('index.js?v=20260726-work-sort-01'), "Android work sorting must refresh the FanHao entry chain without dropping category browsing");
-assert(androidIndexHtml.includes('app.js?v=20260726-work-sort-01'), "Android work sorting must refresh the app entry chain");
+assert(androidIndexHtml.includes('app.js?v=20260730-music-home-ui-40'), "Android work sorting must refresh the app entry chain");
 assert(androidPlayerSource.includes("mount.append(createPlayerErrorBox(error.message") && androidPlayerSource.includes("retry: () => playVideo"), "Android playback preparation failures must stay on the detail page with a retry action instead of opening a broken native player");
 assert(androidWorkViews.includes('ranking-views.js?v=20260721-fanhao-ranking-density-11'), "Android compact ranking changes must use a fresh module URL");
 assert(androidRankingViews.includes("const PAGE_SIZE = 48") && androidRankingViews.includes("const [summary, anticipatedData] = await Promise.all(["), "Android rankings must overlap requests and keep the first response phone-sized");

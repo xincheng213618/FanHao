@@ -1,10 +1,11 @@
 import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=20260706-mobile-web-sync-01";
 import { formatCompact } from "../../../js/format.js";
-import { DEFAULT_SORT, initials } from "../shared.js?v=20260713-follow-toggle-08";
-import { renderFollowingAuthorTools } from "./following-view.js?v=20260713-follow-toggle-08";
+import { DEFAULT_SORT, initials } from "../shared.js?v=20260730-mobile-sync-01";
+import { renderFollowingAuthorTools } from "./following-view.js?v=20260730-mobile-sync-01";
 export function createShortVideoListView(context = {}) {
   const { els, getActiveUrl, goBack, listState, openSettings, showView } = context;
   const appendVisibleAuthors = (...args) => context.appendVisibleAuthors(...args);
+  const bindReliableTap = (...args) => context.bindReliableTap(...args);
   const createIcon = (...args) => context.createIcon(...args);
   const clearSearchHistory = (...args) => context.clearSearchHistory(...args);
   const currentAuthorFacet = (...args) => context.currentAuthorFacet(...args);
@@ -93,6 +94,19 @@ export function createShortVideoListView(context = {}) {
     if (!loading && listState.data?.hasMore) observeListLoadMore(sentinel);
   }
 
+  function setListRefreshing(refreshing) {
+    const shell = els.viewContent.querySelector(".short-video-mobile-list");
+    if (!shell) return;
+    shell.classList.toggle("is-refreshing", Boolean(refreshing));
+    if (refreshing) {
+      shell.style.setProperty("--short-video-preserved-height", `${Math.max(shell.offsetHeight, 1)}px`);
+      shell.setAttribute("aria-busy", "true");
+    } else {
+      shell.style.removeProperty("--short-video-preserved-height");
+      shell.removeAttribute("aria-busy");
+    }
+  }
+
   function syncListLoadMoreSentinel(shell) {
     resetListLoadMoreObserver();
     shell?.querySelector(".short-video-mobile-load-more")?.remove();
@@ -124,7 +138,10 @@ export function createShortVideoListView(context = {}) {
     const input = document.createElement("input");
     input.type = "search";
     input.value = listState.query || "";
-    input.placeholder = "搜作品、作者、话题";
+    const authorScoped = ["following", "authors"].includes(listState.source);
+    input.placeholder = authorScoped
+      ? listState.source === "following" ? "搜关注作者" : "搜作者"
+      : "搜作品、作者、话题";
     input.setAttribute("aria-label", "搜索短视频");
     input.autocomplete = "off";
     input.enterKeyHint = "search";
@@ -149,7 +166,9 @@ export function createShortVideoListView(context = {}) {
 
     const renderSuggestions = (items = []) => {
       suggestions.replaceChildren();
-      const values = Array.isArray(items) ? items.filter((item) => item?.label || item?.query) : [];
+      const values = Array.isArray(items)
+        ? items.filter((item) => item?.label || item?.query).filter((item) => !authorScoped || item.kind === "author")
+        : [];
       if (!values.length) {
         suggestions.hidden = true;
         return;
@@ -175,7 +194,7 @@ export function createShortVideoListView(context = {}) {
         button.addEventListener("pointerdown", (event) => event.preventDefault());
         button.addEventListener("click", () => {
           input.value = item.query || item.label || "";
-          submitSearch(input.value, { searchTab: item.kind === "author" ? "authors" : "all" });
+          submitSearch(input.value, { searchTab: authorScoped || item.kind === "author" ? "authors" : "all" });
           input.blur();
         });
         suggestions.append(button);
@@ -276,6 +295,16 @@ export function createShortVideoListView(context = {}) {
     const tabs = document.createElement("div");
     tabs.className = "short-video-search-result-tabs";
     tabs.setAttribute("role", "tablist");
+    if (["following", "authors"].includes(listState.source)) {
+      const scoped = document.createElement("button");
+      scoped.type = "button";
+      scoped.className = "active";
+      scoped.setAttribute("role", "tab");
+      scoped.setAttribute("aria-selected", "true");
+      scoped.textContent = listState.source === "following" ? "关注作者" : "作者";
+      tabs.append(scoped);
+      return tabs;
+    }
     for (const [value, label] of [["all", "综合"], ["videos", "视频"], ["authors", "用户"]]) {
       const button = document.createElement("button");
       button.type = "button";
@@ -534,66 +563,14 @@ export function createShortVideoListView(context = {}) {
     return card;
   }
 
-  function bindReliableTap(element, action) {
-    let touchStart = null;
-    let opened = false;
-    const open = () => {
-      if (opened) return;
-      opened = true;
-      Promise.resolve(action?.()).finally(() => {
-        window.setTimeout(() => {
-          opened = false;
-        }, 420);
-      });
-    };
-    element.addEventListener("click", (event) => {
-      event.preventDefault();
-      open();
-    });
-    element.addEventListener("touchstart", (event) => {
-      if (event.touches.length !== 1) {
-        touchStart = null;
-        return;
-      }
-      const touch = event.touches[0];
-      touchStart = {
-        x: touch.clientX,
-        y: touch.clientY,
-        at: Date.now()
-      };
-    }, { passive: true });
-    element.addEventListener("touchend", (event) => {
-      if (!touchStart || event.changedTouches.length !== 1) return;
-      const touch = event.changedTouches[0];
-      const dx = Math.abs(touch.clientX - touchStart.x);
-      const dy = Math.abs(touch.clientY - touchStart.y);
-      const elapsed = Date.now() - touchStart.at;
-      touchStart = null;
-      if (dx > 14 || dy > 14 || elapsed > 850) return;
-      event.preventDefault();
-      open();
-    }, { passive: false });
-    element.addEventListener("touchcancel", () => { touchStart = null; }, { passive: true });
-  }
-
-  function shortVideoToast(message) {
-    document.querySelector(".short-video-mobile-toast")?.remove();
-    const toast = document.createElement("div");
-    toast.className = "short-video-mobile-toast";
-    toast.textContent = message;
-    document.body.append(toast);
-    window.setTimeout(() => toast.remove(), 2200);
-  }
-
   return {
     renderListShell,
     appendListVideos,
     setListLoadingMore,
+    setListRefreshing,
     renderListToolbar,
     renderAuthorIndex,
     renderAuthorIndexCard,
-    renderCard,
-    bindReliableTap,
-    shortVideoToast
+    renderCard
   };
 }

@@ -1,5 +1,5 @@
-import { createShortVideoViews } from "./index.js?v=20260713-follow-toggle-08";
-import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSort } from "./shared.js?v=20260713-follow-toggle-08";
+import { createShortVideoViews } from "./index.js?v=20260730-mobile-sync-01";
+import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "./shared.js?v=20260730-mobile-sync-01";
 
 export function createAndroidModule({ host }) {
   const shortVideoViews = createShortVideoViews({
@@ -34,32 +34,43 @@ function renderShortVideoChrome({ container, view, params }, host, shortVideoVie
   const row = document.createElement("nav");
   row.className = "short-video-chrome-row";
   row.setAttribute("aria-label", "短视频导航和排序");
+  const tabs = document.createElement("div");
+  tabs.className = "short-video-chrome-tabs";
 
   const activeGroup = shortVideoGroup(params);
-  for (const [value, label] of [["all", "全部"], ["liked", "我的喜欢"], ["following", "我的关注"], ["authors", "作者"]]) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "short-video-chrome-tag";
-    button.classList.toggle("active", value === activeGroup);
-    button.textContent = label;
-    button.addEventListener("click", () => {
-      if (value === activeGroup) {
-        openSortDialog(host, params);
-        return;
-      }
-      host.navigation.showView("shortVideos", {
-        query: "",
-        author: "all",
-        source: value,
-        sort: normalizeSort(params.sort),
-        ...(value === "following" ? {
-          authorSort: normalizeFollowingAuthorSort(params.authorSort),
-          authorFilter: normalizeFollowingAuthorFilter(params.authorFilter)
-        } : {})
-      }, { resetStack: true });
-      host.ui.scrollToTop();
-    });
-    row.append(button);
+  for (const group of [
+    { label: "内容", items: [["recommended", "推荐"], ["liked", "喜欢"], ["history", "历史"], ["all", "全部"]] },
+    { label: "作者", items: [["following", "关注"], ["authors", "作者"]] }
+  ]) {
+    const section = document.createElement("div");
+    section.className = "short-video-chrome-group";
+    section.setAttribute("aria-label", group.label);
+    for (const [value, label] of group.items) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "short-video-chrome-tag";
+      button.classList.toggle("active", value === activeGroup);
+      button.textContent = label;
+      button.addEventListener("click", () => {
+        if (value === activeGroup) {
+          openSortDialog(host, params);
+          return;
+        }
+        host.navigation.showView("shortVideos", {
+          query: "",
+          author: "all",
+          source: value,
+          sort: normalizeSortForSource(value, params.sort),
+          ...(value === "following" ? {
+            authorSort: normalizeFollowingAuthorSort(params.authorSort),
+            authorFilter: normalizeFollowingAuthorFilter(params.authorFilter)
+          } : {})
+        }, { resetStack: true });
+        host.ui.scrollToTop();
+      });
+      section.append(button);
+    }
+    tabs.append(section);
   }
 
   const search = document.createElement("button");
@@ -68,7 +79,7 @@ function renderShortVideoChrome({ container, view, params }, host, shortVideoVie
   search.setAttribute("aria-label", "搜索短视频");
   search.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
   search.addEventListener("click", () => openShortVideoSearch(host, shortVideoViews));
-  row.append(search);
+  row.append(tabs, search);
 
   container.append(row);
   return true;
@@ -76,21 +87,23 @@ function renderShortVideoChrome({ container, view, params }, host, shortVideoVie
 
 function openShortVideoSearch(host, shortVideoViews, overrides = {}) {
   const state = { ...(shortVideoViews.getSearchState?.() || {}), ...(overrides || {}) };
+  const source = shortVideoGroup(state);
+  const authorScoped = ["following", "authors"].includes(source);
   host.navigation.showView("shortVideoSearch", {
     query: "",
     author: "all",
-    source: "all",
-    tab: normalizeSearchTab(state.searchTab),
-    sort: normalizeSort(state.sort)
+    source: authorScoped ? source : "all",
+    tab: authorScoped ? "authors" : normalizeSearchTab(state.searchTab),
+    sort: normalizeSortForSource(source, state.sort)
   }, { push: true });
   host.ui.scrollToTop();
 }
 
 function shortVideoGroup(params = {}) {
   if (String(params.author || "all") !== "all" || String(params.source || "") === "authors") return "authors";
-  const source = String(params.source || "liked");
+  const source = normalizeSource(params.source || "liked");
   if (source === "following") return "following";
-  return source === "all" ? "all" : "liked";
+  return ["recommended", "history", "all"].includes(source) ? source : "liked";
 }
 
 function openSortDialog(host, params = {}) {
@@ -112,7 +125,7 @@ function openSortDialog(host, params = {}) {
   panel.append(title);
   const activeSort = following
     ? normalizeFollowingAuthorSort(params.authorSort)
-    : normalizeSort(params.sort || DEFAULT_SORT);
+    : normalizeSortForSource(params.source, params.sort || DEFAULT_SORT);
   const sortOptions = following ? FOLLOWING_AUTHOR_SORT_OPTIONS : SHORT_VIDEO_SORT_OPTIONS;
   for (const [value, label] of sortOptions) {
     const button = document.createElement("button");

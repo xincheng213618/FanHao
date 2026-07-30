@@ -29,6 +29,13 @@ export function createMusicSearchController(dependencies) {
   function closeSearch() {
     disposePendingWork();
     abortMountedSearch();
+    const searchReturn = state.searchReturn || {
+      mode: "library",
+      favorite: false,
+      artistId: "",
+      albumId: ""
+    };
+    state.searchReturn = null;
     state.searchSuggestions = [];
     state.searchSuggestionQuery = "";
     state.searchSuggestionIndex = -1;
@@ -36,11 +43,8 @@ export function createMusicSearchController(dependencies) {
     state.searchOpen = false;
     state.searchScope = "all";
     updateListParams({
-      mode: "library",
+      ...searchReturn,
       query: "",
-      favorite: false,
-      artistId: "",
-      albumId: ""
     }, { resetSearch: true });
   }
 
@@ -50,7 +54,7 @@ export function createMusicSearchController(dependencies) {
     const clear = els.viewContent?.querySelector(".music-mobile-search-clear");
     if (clear) clear.hidden = !query;
     scheduleSearchSuggestions(query);
-    searchDebounceTimer = window.setTimeout(() => commitMusicSearch(query, { preserveSuggestions: true }), SEARCH_DEBOUNCE_MS);
+    searchDebounceTimer = window.setTimeout(() => commitMusicSearch(query), SEARCH_DEBOUNCE_MS);
   }
 
   function commitMusicSearch(value, options = {}) {
@@ -58,6 +62,9 @@ export function createMusicSearchController(dependencies) {
     if (!options.preserveSuggestions) {
       window.clearTimeout(searchSuggestionTimer);
       searchSuggestionController?.abort();
+      state.searchSuggestions = [];
+      state.searchSuggestionIndex = -1;
+      state.searchSuggestionLoading = false;
     }
     const query = String(value || "").trim();
     if (options.remember && query) rememberSearchQuery(query);

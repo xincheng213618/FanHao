@@ -15,10 +15,10 @@
 .person-chip {
   flex: 0 0 auto;
   min-height: 44px;
-  border: 1px solid rgba(22, 120, 93, 0.22);
+  border: 1px solid var(--mobile-accent-border);
   border-radius: 999px;
-  background: var(--success-soft);
-  color: var(--green);
+  background: var(--mobile-accent-soft);
+  color: var(--mobile-accent);
   padding: 0 13px;
   font-size: 12px;
   font-weight: 900;
@@ -582,10 +582,10 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  border: 1px solid rgba(22, 120, 93, 0.2);
+  border: 1px solid var(--mobile-accent-border);
   border-radius: 8px;
-  background: var(--success-soft);
-  color: var(--green);
+  background: var(--mobile-accent-soft);
+  color: var(--mobile-accent);
   padding: 8px 10px;
 }
 
@@ -611,8 +611,8 @@
 }
 
 .channel-context-row button {
-  border-color: rgba(22, 120, 93, 0.24);
-  color: var(--green);
+  border-color: var(--mobile-accent-border);
+  color: var(--mobile-accent);
 }
 
 .content-panel[data-channel-mode="tv"] .channel-tv-series-row button,
@@ -1546,7 +1546,7 @@ button.work-person {
   min-height: 40px;
   margin: -10px 0 -10px -10px;
   border-radius: 999px;
-  color: var(--green);
+  color: var(--mobile-accent);
   padding: 0 10px;
   line-height: 1;
 }
@@ -1702,7 +1702,7 @@ button.work-person {
 
 .work-cover-badge.progress,
 .work-cover-badge.favorite {
-  background: rgba(22, 120, 93, 0.95);
+  background: color-mix(in srgb, var(--mobile-accent) 95%, transparent);
 }
 
 .content-panel .work-list.cover-grid .work-summary {
@@ -1802,7 +1802,7 @@ button.work-person {
 
 .work-card-grid-person {
   flex: 1 1 auto;
-  color: var(--green);
+  color: var(--mobile-accent);
   font-size: 9.5px;
   font-weight: 850;
   text-align: right;
@@ -1860,7 +1860,7 @@ button.work-person {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #2f80ed, #16785d);
+  background: var(--mobile-accent);
 }
 
 .mini-chip {
@@ -1910,9 +1910,9 @@ button.work-person {
 }
 
 .mini-chip.source {
-  border-color: rgba(22, 120, 93, 0.24);
-  background: var(--success-soft);
-  color: var(--green);
+  border-color: var(--mobile-accent-border);
+  background: var(--mobile-accent-soft);
+  color: var(--mobile-accent);
 }
 
 .mini-chip.source.collection {
@@ -2083,10 +2083,10 @@ button.work-person {
 
 .file-row button {
   min-height: 40px;
-  border: 1px solid rgba(22, 120, 93, 0.22);
+  border: 1px solid var(--mobile-accent-border);
   border-radius: 8px;
-  background: var(--success-soft);
-  color: var(--green);
+  background: var(--mobile-accent-soft);
+  color: var(--mobile-accent);
   padding: 0 12px;
   font-size: 12px;
   font-weight: 900;

@@ -1,4 +1,4 @@
-import { DEFAULT_SORT, normalizeSearchTab } from "./shared.js";
+import { DEFAULT_SORT, normalizeSearchTab, normalizeSource } from "./shared.js?v=20260730-mobile-sync-01";
 
 const SEARCH_HISTORY_KEY = "fanhao.shortVideo.searchHistory";
 const SEARCH_HISTORY_LIMIT = 8;
@@ -48,11 +48,13 @@ export function createShortVideoSearch(context = {}) {
   function submitSearch(query = "", options = {}) {
     const normalized = normalizeQuery(query);
     const searchTab = normalizeSearchTab(options.searchTab || options.tab || listState.searchTab);
+    const currentSource = normalizeSource(options.source || listState.source);
+    const authorSource = ["following", "authors"].includes(currentSource) ? currentSource : "authors";
     if (normalized && options.remember !== false) rememberSearch(normalized);
     updateListParams({
       query: normalized,
       author: "all",
-      source: searchTab === "authors" ? "authors" : "all",
+      source: searchTab === "authors" ? authorSource : "all",
       searchTab,
       sort: options.sort || listState.sort || DEFAULT_SORT
     });

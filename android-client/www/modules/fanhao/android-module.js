@@ -1,5 +1,6 @@
 import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260721-fanhao-category-browser-13";
 import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260726-work-sort-01";
+import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=20260730-mobile-sync-01";
 
 export function createAndroidModule({ host }) {
   const workViews = createWorkViews({
@@ -18,6 +19,19 @@ export function createAndroidModule({ host }) {
     isHomeView: () => host.navigation.currentView() === "home"
   });
   const search = createSearchController(host, workViews);
+  const codePrefixViews = createCodePrefixViews({
+    els: host.els,
+    getActiveUrl: host.getActiveUrl,
+    getWorksLimit: host.limits.getWorks,
+    increaseWorksLimit: host.limits.increaseWorks,
+    pageDataService: workViews.pageDataService,
+    renderCurrentViewPreservingScroll: host.ui.renderCurrentViewPreservingScroll,
+    renderMessage: workViews.renderMessage,
+    renderWorks: workViews.renderWorks,
+    setActiveBottom: host.ui.setActiveBottom,
+    showView: host.navigation.showView,
+    workListState: { getRequestState: workViews.getWorkListRequestState }
+  });
   const peopleViews = createPeopleViews({
     els: host.els,
     getActiveUrl: host.getActiveUrl,
@@ -65,6 +79,8 @@ export function createAndroidModule({ host }) {
       route("works", (_params, guard) => workViews.renderAllWorks(guard)),
       route("rankings", (_params, guard) => workViews.renderRankings(guard)),
       route("categories", (params, guard) => workViews.renderCategories(params.category, guard)),
+      route("codePrefixes", (_params, guard) => codePrefixViews.renderIndex(guard)),
+      route("codePrefixDetail", (params, guard) => codePrefixViews.renderDetail(params.prefix, params.family, guard)),
       route("studios", (_params, guard) => workViews.renderStudios(guard)),
       route("studioDetail", (params, guard) => workViews.renderStudioDetail(params.studioId, params.seriesId, guard)),
       route("history", (_params, guard) => workViews.renderHistory(guard)),
@@ -74,7 +90,7 @@ export function createAndroidModule({ host }) {
     ],
     search,
     renderChrome: (context) => renderFanhaoChrome(context, host, { peopleViews, workViews }),
-    api: { detailViews, peopleViews, workViews }
+    api: { codePrefixViews, detailViews, peopleViews, workViews }
   };
 }
 

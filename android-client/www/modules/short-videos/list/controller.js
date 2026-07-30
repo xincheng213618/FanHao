@@ -1,4 +1,4 @@
-import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSort, normalizeSource } from "../shared.js?v=20260713-follow-toggle-08";
+import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "../shared.js?v=20260730-mobile-sync-01";
 export function createShortVideoListController(context = {}) {
   const { api, getActiveUrl, listState, showView } = context;
   let listLoadMoreObserver = null;
@@ -7,17 +7,18 @@ export function createShortVideoListController(context = {}) {
   const renderListShell = (...args) => context.renderListShell(...args);
   const appendListVideos = (...args) => context.appendListVideos?.(...args);
   const setListLoadingMore = (...args) => context.setListLoadingMore?.(...args);
+  const setListRefreshing = (...args) => context.setListRefreshing?.(...args);
   const shortVideoToast = (...args) => context.shortVideoToast(...args);
 
   function shortVideoApiSource() {
     const source = normalizeSource(listState.source);
     return source === "authors" ? "liked" : source;
   }
-  function applyListParams(params = {}) {
+  function applyListParams(params = {}, options = {}) {
     const nextQuery = String(params.query || params.q || "").trim();
     let nextAuthor = String(params.author || "all").trim() || "all";
     let nextSource = normalizeSource(params.source || params.origin);
-    const nextSort = normalizeSort(params.sort);
+    const nextSort = normalizeSortForSource(nextSource, params.sort);
     const nextAuthorSort = normalizeFollowingAuthorSort(params.authorSort || listState.authorSort);
     const nextAuthorFilter = normalizeFollowingAuthorFilter(params.authorFilter || listState.authorFilter);
     const nextSearchTab = normalizeSearchTab(params.searchTab || params.tab || (nextSource === "authors" ? "authors" : listState.searchTab));
@@ -38,15 +39,19 @@ export function createShortVideoListController(context = {}) {
     listState.authorFilter = nextAuthorFilter;
     listState.searchTab = nextSearchTab;
     if (scopeChanged) {
-      listState.data = null;
-      listState.status = "";
-      listState.searchAuthors = [];
+      if (!options.preserveData) {
+        listState.data = null;
+        listState.status = "";
+        listState.searchAuthors = [];
+      }
       listState.allowLoadMore = false;
     }
+    return scopeChanged;
   }
 
   async function loadList(renderGuard = null, options = {}) {
     const append = Boolean(options.append);
+    const preserveShell = Boolean(options.preserveShell && !append);
     if (append && (listState.loading || listState.loadingMore || !listState.data?.hasMore)) return;
     const requestUrl = getActiveUrl();
     const params = new URLSearchParams();
@@ -77,7 +82,8 @@ export function createShortVideoListController(context = {}) {
       listState.allowLoadMore = false;
       listState.loading = true;
       listState.status = listState.data ? "" : "正在读取短视频";
-      renderListShell();
+      if (preserveShell) setListRefreshing(true);
+      else renderListShell();
     }
     try {
       const endpoint = authorIndex ? "/api/short-videos/authors" : "/api/short-videos";
@@ -140,9 +146,13 @@ export function createShortVideoListController(context = {}) {
       if (renderGuard && !renderGuard()) return;
       listState.loading = false;
       listState.loadingMore = false;
-      listState.status = shortVideoErrorMessage(error, "短视频读取失败，请检查服务连接");
+      const message = shortVideoErrorMessage(error, "短视频读取失败，请检查服务连接");
+      listState.status = preserveShell ? "" : message;
       if (append && !authorIndex) setListLoadingMore(false, listState.status);
-      else renderListShell();
+      else if (preserveShell) {
+        setListRefreshing(false);
+        shortVideoToast(`${message}，已保留当前内容`);
+      } else renderListShell();
     }
   }
 

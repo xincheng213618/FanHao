@@ -1,6 +1,6 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260726-work-sort-01";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260730-music-home-ui-40";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
-import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260726-work-sort-01";
+import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260730-music-home-ui-40";
 import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260712-module-chrome-03";
 import { getElements } from "./js/dom.js?v=20260712-module-chrome-03";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
@@ -12,7 +12,7 @@ import { createSearchHistory } from "./js/search-history.js";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
-const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "categories", "studios", "studioDetail", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "tools"]);
+const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "categories", "codePrefixes", "codePrefixDetail", "studios", "studioDetail", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "tools"]);
 const DEFAULT_VIEW = "works";
 const DEFAULT_PHOTO_CATEGORY = "我喜欢的";
 const PRIMARY_LABELS = {
@@ -84,7 +84,7 @@ let musicSummary = null;
 let shortVideoSummary = null;
 let androidVersionInfo = null;
 let androidUpdateInfo = null;
-const FEED_VIEWS = new Set(["works", "rankings", "categories", "studios", "studioDetail", "people", "personDetail", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail", "music", "shortVideos"]);
+const FEED_VIEWS = new Set(["works", "rankings", "categories", "codePrefixes", "codePrefixDetail", "studios", "studioDetail", "people", "personDetail", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail", "music", "shortVideos"]);
 
 function readInitialViewState() {
   const state = readViewStateFromHash() || readLastViewState();
@@ -125,6 +125,7 @@ function shouldRememberView(view, params = {}) {
   if (view === "personDetail") return Boolean(params.personId);
   if (view === "workDetail") return Boolean(params.workId);
   if (view === "studioDetail") return Boolean(params.studioId);
+  if (view === "codePrefixDetail") return Boolean(params.prefix);
   if (view === "channel") return Boolean(params.mode);
   if (view === "photoDetail") return Boolean(params.id);
   if (view === "mangaDetail") return Boolean(params.id);
@@ -144,6 +145,10 @@ function sanitizeViewParams(view, params = {}) {
     const category = String(params.category || "censored").trim().toLowerCase();
     return { category: ["censored", "western", "fc2", "anime"].includes(category) ? category : "censored" };
   }
+  if (view === "codePrefixDetail") {
+    const prefix = String(params.prefix || params.codePrefix || "").trim().replaceAll("_", "-").toUpperCase();
+    return { prefix, ...(String(params.family || "") === "1" || params.family === true ? { family: "1" } : {}) };
+  }
   if (view === "photoDetail") return { id: String(params.id || "") };
   if (view === "mangaDetail") return { id: String(params.id || "") };
   if (view === "mangaChapter") return { id: String(params.id || ""), chapterIndex: String(params.chapterIndex || params.chapter || "") };
@@ -154,6 +159,7 @@ function sanitizeViewParams(view, params = {}) {
     const smartId = String(params.smartId || params.smart || "").trim();
     const playlistId = String(params.playlistId || params.playlist || "").trim();
     const mode = playlistId ? "playlist" : smartId ? "smart" : (rawMode === "history" ? "history" : rawMode === "artists" ? "artists" : rawMode === "albums" ? "albums" : "library");
+    const dashboard = !["0", "false", "no"].includes(String(params.dashboard || "").trim().toLowerCase());
     const query = String(params.query || params.q || "").trim();
     const rawSearchScope = String(params.searchScope || params.scope || "").trim().toLowerCase();
     const searchScope = mode === "artists" ? "artists" : mode === "albums" ? "albums" : ["songs", "lyrics", "playlists", "all"].includes(rawSearchScope) ? rawSearchScope : "all";
@@ -172,6 +178,7 @@ function sanitizeViewParams(view, params = {}) {
     const trackId = String(params.trackId || params.track || "").trim();
     return {
       mode,
+      ...(!dashboard ? { dashboard: "0" } : {}),
       ...(query ? { query } : {}),
       ...(query && searchScope !== "all" ? { searchScope } : {}),
       ...(sort !== "album" ? { sort } : {}),
@@ -195,7 +202,7 @@ function sanitizeViewParams(view, params = {}) {
     const query = String(params.query || params.q || "").trim();
     const author = String(params.author || "all").trim() || "all";
     const source = normalizeShortVideoSource(params.source || params.origin);
-    const sort = normalizeShortVideoSort(params.sort);
+    const sort = normalizeShortVideoSortForSource(source, params.sort);
     const authorSort = normalizeFollowingAuthorSort(params.authorSort);
     const authorFilter = normalizeFollowingAuthorFilter(params.authorFilter);
     const searchTab = ["all", "videos", "authors"].includes(String(params.searchTab || params.tab || "").trim())
@@ -262,12 +269,20 @@ function normalizeChannelMode(value) {
 
 function normalizeShortVideoSort(value) {
   const sort = String(value || "published").trim();
-  return ["liked", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
+  return ["recommended", "watched", "liked", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
 }
 
 function normalizeShortVideoSource(value) {
   const source = String(value || "liked").trim().toLowerCase();
-  return ["liked", "following", "authors", "posts", "all", "local"].includes(source) ? source : "liked";
+  return ["recommended", "liked", "following", "history", "authors", "posts", "all", "local"].includes(source) ? source : "liked";
+}
+
+function normalizeShortVideoSortForSource(sourceValue, sortValue) {
+  const source = normalizeShortVideoSource(sourceValue);
+  const sort = normalizeShortVideoSort(sortValue);
+  if (source === "recommended") return sort === "published" ? "recommended" : sort;
+  if (source === "history") return sort === "published" ? "watched" : sort;
+  return ["recommended", "watched"].includes(sort) ? "published" : sort;
 }
 
 function normalizeFollowingAuthorSort(value) {
@@ -1001,9 +1016,18 @@ function openNativeLibraryRoute(options = {}) {
     showView("categories", { category: query.get("category") || segments[1] || "censored" }, navigation);
     return true;
   }
+  if (first === "codes" || first === "code-prefixes") {
+    const prefix = segments[1] || query.get("prefix") || query.get("codePrefix") || "";
+    showView(prefix ? "codePrefixDetail" : "codePrefixes", prefix ? {
+      prefix,
+      family: query.get("family") || ""
+    } : {}, navigation);
+    return true;
+  }
   if (first === "music") {
     showView("music", {
       mode: query.get("mode") || "library",
+      dashboard: query.get("dashboard") || "",
       query: query.get("q") || query.get("query") || "",
       searchScope: query.get("searchScope") || query.get("scope") || "",
       sort: query.get("sort") || "",
@@ -1305,6 +1329,8 @@ function showView(view, params = {}, navigation = {}) {
     return;
   }
 
+  const nextParams = sanitizeViewParams(view, params);
+  const preserveShortVideoHome = shouldPreserveShortVideoHome(view, nextParams);
   const shouldWriteHistory = !navigation.skipHistory;
   if (shouldWriteHistory) rememberCurrentScrollInHistory();
   if (navigation.resetStack) viewStack = [];
@@ -1312,14 +1338,23 @@ function showView(view, params = {}, navigation = {}) {
     viewStack.push({ view: currentView, params: currentViewParams, scrollY: currentScrollY() });
   }
   currentView = view;
-  currentViewParams = sanitizeViewParams(view, params);
+  currentViewParams = nextParams;
   searchSurfaceExpanded = view === "search" || (view === "channel" && Boolean(currentViewParams.query));
   resetViewLimitsForView(view);
   rememberViewState(currentView, currentViewParams);
   if (shouldWriteHistory) pushViewHistory(view, currentViewParams, navigation.restoreScrollY ?? 0);
   else if (navigation.replaceHistory) replaceCurrentHistory();
-  renderCurrentView();
+  renderCurrentView({
+    preserveShortVideoHome,
+    restoreScrollY: navigation.restoreScrollY ?? 0
+  });
   queueScrollRestore(navigation.restoreScrollY ?? 0);
+}
+
+function shouldPreserveShortVideoHome(nextView, nextParams) {
+  if (currentView !== "shortVideos" || nextView !== "shortVideos") return false;
+  if (!els.viewContent?.querySelector(".short-video-mobile-list")) return false;
+  return JSON.stringify(sanitizeViewParams("shortVideos", currentViewParams)) !== JSON.stringify(nextParams || {});
 }
 
 function replaceViewParams(view, params = {}, navigation = {}) {
@@ -1344,7 +1379,7 @@ function canRenderWithoutLibrary(view = "") {
 function defaultWorksLimitForView(view) {
   const fast = isFastServerUrl();
   if (view === "rankings") return 120;
-  if (view === "works" || view === "categories" || view === "studioDetail") return fast ? FAST_WORK_LIMIT : 60;
+  if (view === "works" || view === "categories" || view === "codePrefixDetail" || view === "studioDetail") return fast ? FAST_WORK_LIMIT : 60;
   if (view === "search" || view === "personDetail") return fast ? FAST_WORK_LIMIT : 48;
   if (view === "history") return fast ? FAST_WORK_LIMIT : 48;
   return fast ? FAST_WORK_LIMIT : 40;
@@ -1462,6 +1497,11 @@ function restoreFromHistoryState(historyState) {
 
 function renderCurrentView(options = {}) {
   const restoreScrollY = Number.isFinite(Number(options.restoreScrollY)) ? Math.max(0, Math.round(Number(options.restoreScrollY))) : null;
+  const preserveShortVideoHome = Boolean(
+    options.preserveShortVideoHome
+    && currentView === "shortVideos"
+    && els.viewContent?.querySelector(".short-video-mobile-list")
+  );
   const restoreAfterRender = (task) => {
     if (restoreScrollY === null) return task;
     Promise.resolve(task).finally(() => queueScrollRestore(restoreScrollY));
@@ -1483,10 +1523,12 @@ function renderCurrentView(options = {}) {
   els.contentPanel.hidden = false;
   syncContentPanelMode();
   els.viewBack.hidden = isRootNavigationView(currentView);
-  els.viewContent.innerHTML = "";
-  els.viewContent.className = "content-list";
+  if (!preserveShortVideoHome) {
+    els.viewContent.innerHTML = "";
+    els.viewContent.className = "content-list";
+  }
   syncSearchSurface();
-  renderRouteLoadingState();
+  if (!preserveShortVideoHome) renderRouteLoadingState();
   const renderGuard = beginViewRender(currentView, currentViewParams);
 
   return restoreAfterRender(androidModuleRegistry?.render(currentView, currentViewParams, renderGuard));
@@ -1541,6 +1583,8 @@ function routeLoadingCopy(view = currentView, params = currentViewParams) {
   if (view === "shortVideoSearch") return { kicker: "短视频", title: "搜索", meta: "", message: "正在打开搜索" };
   if (view === "rankings") return { kicker: "榜单", title: "排行榜", meta: "正在加载", message: "正在加载排行榜" };
   if (view === "categories") return { kicker: "分类", title: "番号分类", meta: "正在加载", message: "正在加载分类作品" };
+  if (view === "codePrefixes") return { kicker: "番号", title: "番号前缀", meta: "正在整理", message: "正在整理番号索引" };
+  if (view === "codePrefixDetail") return { kicker: "番号前缀", title: params.prefix || "番号作品", meta: "正在加载", message: "正在加载番号作品" };
   if (view === "studios") return { kicker: "片商", title: "片商索引", meta: "正在加载", message: "正在加载片商" };
   if (view === "studioDetail") return { kicker: "片商", title: "片商作品", meta: "正在加载", message: "正在加载片商作品" };
   if (view === "history") return { kicker: "继续观看", title: "观看进度", meta: "正在读取", message: "正在加载观看进度" };

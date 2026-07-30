@@ -149,19 +149,31 @@ assert.deepEqual(
   ["fanhao", "photos", "media", "short-videos", "novels", "music", "tools"],
   "short videos must stay in the center of the seven-item Android navigation"
 );
-assert(
-  fs.readFileSync(path.join(androidModulesDir, "music", "music-views.js"), "utf8").includes("music-mobile-search-pill"),
-  "music must keep search inside its own module surface"
-);
 const androidMusicEntry = fs.readFileSync(path.join(androidModulesDir, "music", "android-module.js"), "utf8");
 const androidMusicViews = fs.readFileSync(path.join(androidModulesDir, "music", "music-views.js"), "utf8");
+const androidMusicHomeView = fs.readFileSync(path.join(androidModulesDir, "music", "music-home-view.js"), "utf8");
+const androidMusicListRequest = fs.readFileSync(path.join(androidModulesDir, "music", "music-list-request.js"), "utf8");
+const androidMusicLibraryView = fs.readFileSync(path.join(androidModulesDir, "music", "music-library-view.js"), "utf8");
+const androidMusicLibrarySort = fs.readFileSync(path.join(androidModulesDir, "music", "music-library-sort.js"), "utf8");
+const androidMusicCollectionView = fs.readFileSync(path.join(androidModulesDir, "music", "music-collection-view.js"), "utf8");
 const androidMusicSearchController = fs.readFileSync(path.join(androidModulesDir, "music", "music-search-controller.js"), "utf8");
 const androidMusicSheets = fs.readFileSync(path.join(androidModulesDir, "music", "music-sheets.js"), "utf8");
+assert(androidMusicHomeView.includes("music-mobile-search-pill"), "music must keep search inside its own module surface");
 assert(androidMusicEntry.includes("deactivate: () => musicViews.deactivate()"), "music must deactivate before another module renders");
 assert(androidMusicViews.includes("if (!moduleActive || !els.viewContent) return;"), "inactive music work must not repaint another module");
 assert(androidMusicViews.includes("createMusicSheets") && androidMusicViews.includes("music-sheets.js?v="), "music must delegate settings and action sheets to a dedicated controller");
 assert(androidMusicViews.includes("createMusicSearchController") && androidMusicViews.includes("music-search-controller.js?v="), "music must delegate search requests and suggestion lifecycle to a dedicated controller");
+assert(androidMusicViews.includes("createMusicHomeView") && androidMusicViews.includes("music-home-view.js?v="), "music must delegate its mobile home hierarchy to a dedicated view");
+assert(androidMusicViews.includes("createMusicListRequestBuilder") && androidMusicViews.includes("music-list-request.js?v="), "music must delegate list request construction");
+assert(androidMusicViews.includes("createMusicLibraryView") && androidMusicViews.includes("music-library-view.js?v="), "music must delegate favorites and all-songs hierarchy");
+assert(androidMusicViews.includes("createMusicLibrarySort") && androidMusicViews.includes("music-library-sort.js?v="), "music must delegate focused-library sorting");
+assert(androidMusicViews.includes("createMusicCollectionView") && androidMusicViews.includes("music-collection-view.js?v="), "music must delegate artist and album hierarchy");
 assert(androidMusicViews.split(/\r?\n/).length <= 5200, "Android music composition root must stay below 5200 lines");
+assert(androidMusicHomeView.split(/\r?\n/).length <= 430, "Android music home view must stay focused");
+assert(androidMusicListRequest.split(/\r?\n/).length <= 100, "Android music list-request builder must stay focused");
+assert(androidMusicLibraryView.split(/\r?\n/).length <= 180, "Android music focused-library view must stay focused");
+assert(androidMusicLibrarySort.split(/\r?\n/).length <= 180, "Android music focused-library sort controller must stay focused");
+assert(androidMusicCollectionView.split(/\r?\n/).length <= 360, "Android music artist and album view must stay focused");
 assert(androidMusicSearchController.split(/\r?\n/).length <= 400, "Android music search controller must stay below 400 lines");
 assert(androidMusicSheets.split(/\r?\n/).length <= 700, "Android music sheet controller must stay below 700 lines");
 assert(
@@ -216,6 +228,7 @@ const requiredShortVideoParts = [
   "list/view.js",
   "player/native-feed.js",
   "ui/icons.js",
+  "ui/interactions.js",
   "styles/list.css"
 ];
 for (const relativePath of requiredShortVideoParts) {
