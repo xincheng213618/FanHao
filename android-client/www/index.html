@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#f6f7f9" />
     <title>资料库</title>
-    <link rel="stylesheet" href="./styles.css?v=20260730-tools-dashboard-ui-49" />
+    <link rel="stylesheet" href="./styles.css?v=20260730-auto-update-ui-50" />
   </head>
   <body>
     <main class="app-shell">
@@ -212,14 +212,13 @@
 
         <section class="settings-group" aria-labelledby="appUpdateTitle">
           <strong id="appUpdateTitle" class="settings-group-title">应用更新</strong>
-          <span id="appUpdateStatus" class="settings-meta">等待检查更新</span>
+          <span id="appUpdateStatus" class="settings-meta">正在自动检查更新</span>
           <div class="app-version-line" aria-label="应用版本">
             <span>当前 <strong id="appCurrentVersion">-</strong></span>
             <span>最新 <strong id="appLatestVersion">-</strong></span>
           </div>
-          <div class="settings-action-row">
-            <button id="checkAppUpdateButton" type="button">检查更新</button>
-            <button id="installAppUpdateButton" type="button" disabled>下载安装</button>
+          <div class="settings-action-row single-action">
+            <button id="appUpdateButton" type="button" disabled>正在检查</button>
           </div>
         </section>
 
@@ -258,7 +257,7 @@
       </nav>
     </main>
 
-    <script src="./app.js?v=20260730-tools-dashboard-ui-49" type="module"></script>
+    <script src="./app.js?v=20260730-auto-update-ui-50" type="module"></script>
   </body>
 </html>
 

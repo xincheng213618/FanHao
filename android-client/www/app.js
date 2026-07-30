@@ -1,8 +1,8 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260730-tools-dashboard-ui-49";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260730-auto-update-ui-50";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
-import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260730-tools-dashboard-ui-49";
+import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260730-auto-update-ui-50";
 import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260730-fanhao-nav-ui-44";
-import { getElements } from "./js/dom.js?v=20260712-module-chrome-03";
+import { getElements } from "./js/dom.js?v=20260730-auto-update-ui-50";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
@@ -84,6 +84,8 @@ let musicSummary = null;
 let shortVideoSummary = null;
 let androidVersionInfo = null;
 let androidUpdateInfo = null;
+let androidUpdateStatus = "checking";
+let androidUpdateError = null;
 const FEED_VIEWS = new Set(["works", "rankings", "categories", "codePrefixes", "codePrefixDetail", "studios", "studioDetail", "people", "personDetail", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail", "music", "shortVideos"]);
 
 function readInitialViewState() {
@@ -865,10 +867,14 @@ function androidVersionLabel(info = {}) {
 
 function renderAndroidUpdateState(state = {}) {
   if (!els.appUpdateStatus) return;
-  const status = state.status || "idle";
-  const update = state.update || androidUpdateInfo;
-  const version = state.version || androidVersionInfo;
-  const error = state.error || null;
+  if (Object.prototype.hasOwnProperty.call(state, "status")) androidUpdateStatus = state.status || "idle";
+  if (Object.prototype.hasOwnProperty.call(state, "update")) androidUpdateInfo = state.update || null;
+  if (Object.prototype.hasOwnProperty.call(state, "version")) androidVersionInfo = state.version || androidVersionInfo;
+  if (Object.prototype.hasOwnProperty.call(state, "error")) androidUpdateError = state.error || null;
+  const status = androidUpdateStatus;
+  const update = androidUpdateInfo;
+  const version = androidVersionInfo;
+  const error = androidUpdateError;
 
   if (els.appCurrentVersion) els.appCurrentVersion.textContent = androidVersionLabel(version);
   if (els.appLatestVersion) {
@@ -876,20 +882,27 @@ function renderAndroidUpdateState(state = {}) {
       ? `${update.versionName}${update.versionCode ? ` (${formatNumber(update.versionCode)})` : ""}`
       : "-";
   }
-  if (els.installAppUpdateButton) {
-    els.installAppUpdateButton.disabled = !update?.available || status === "checking" || status === "installing";
-    els.installAppUpdateButton.textContent = update?.available ? "下载安装" : "暂无更新";
+  if (els.appUpdateButton) {
+    const busy = status === "checking" || status === "installing";
+    els.appUpdateButton.disabled = busy || Boolean(version?.unsupported) || status === "opened";
+    if (status === "checking") els.appUpdateButton.textContent = "正在检查";
+    else if (status === "installing") els.appUpdateButton.textContent = "正在下载";
+    else if (status === "permission") els.appUpdateButton.textContent = "继续更新";
+    else if (status === "opened") els.appUpdateButton.textContent = "等待安装";
+    else if (update?.available) els.appUpdateButton.textContent = "立即更新";
+    else if (error) els.appUpdateButton.textContent = "重新检查";
+    else els.appUpdateButton.textContent = "已是最新版本";
   }
 
-  let message = "等待检查更新";
+  let message = "正在自动检查更新";
   if (version?.unsupported) message = "当前环境不支持应用内更新";
-  if (status === "checking") message = "正在检查调试版更新";
+  if (status === "checking") message = "正在自动检查调试版更新";
   if (status === "installing") message = "正在下载安装包";
-  if (status === "permission") message = "已打开安装权限设置，允许后再点下载安装";
+  if (status === "permission") message = "已打开安装权限设置，允许后点击继续更新";
   if (status === "opened") message = "安装包已打开，请按系统提示确认";
   if (status === "ready" && update?.available) message = `发现调试版 ${update.versionName || update.versionCode}`;
   if (status === "ready" && !update?.available) message = update?.message || "当前已是最新调试版";
-  if (error) message = `更新检查失败：${error.message || error}`;
+  if (error) message = `自动检查失败：${error.message || error}`;
 
   els.appUpdateStatus.textContent = message;
   els.appUpdateStatus.classList.toggle("error", Boolean(error));
@@ -897,36 +910,31 @@ function renderAndroidUpdateState(state = {}) {
 
 async function checkAndroidUpdate(options = {}) {
   if (!els.appUpdateStatus) return null;
-  renderAndroidUpdateState({ status: "checking" });
-  if (els.checkAppUpdateButton) els.checkAppUpdateButton.disabled = true;
+  renderAndroidUpdateState({ status: "checking", error: null });
   try {
     androidVersionInfo = await readAndroidVersionInfo();
     const path = `/api/android/update?channel=${encodeURIComponent(ANDROID_UPDATE_CHANNEL)}&currentVersionCode=${encodeURIComponent(androidVersionInfo.versionCode || 0)}&clientVersion=${encodeURIComponent(CLIENT_VERSION)}`;
     const update = androidVersionInfo.unsupported
       ? { available: false, channel: ANDROID_UPDATE_CHANNEL, message: "当前环境不支持应用内更新" }
       : await fetchJson(activeUrl, path, { timeoutMs: 8000 });
-    androidUpdateInfo = update?.available ? update : null;
-    renderAndroidUpdateState({ status: "ready", update, version: androidVersionInfo });
+    renderAndroidUpdateState({ status: "ready", update, version: androidVersionInfo, error: null });
     return update;
   } catch (error) {
-    if (!options.silent) renderAndroidUpdateState({ error, version: androidVersionInfo });
-    else renderAndroidUpdateState({ status: "ready", update: null, version: androidVersionInfo, error });
+    renderAndroidUpdateState({ status: "error", update: null, version: androidVersionInfo, error });
+    if (!options.silent) setStatus(`更新检查失败：${error.message || error}`, "error");
     return null;
-  } finally {
-    if (els.checkAppUpdateButton) els.checkAppUpdateButton.disabled = false;
   }
 }
 
 async function installAndroidUpdate() {
   const plugin = fanhaoUpdaterPlugin();
   if (!plugin?.downloadAndInstall) {
-    renderAndroidUpdateState({ error: new Error("当前环境不支持应用内更新") });
+    renderAndroidUpdateState({ status: "error", error: new Error("当前环境不支持应用内更新") });
     return;
   }
-  if (!androidUpdateInfo?.downloadUrl) {
+  if (!androidUpdateInfo?.available || !androidUpdateInfo?.downloadUrl) {
     const update = await checkAndroidUpdate();
     if (!update?.available) return;
-    androidUpdateInfo = update;
   }
 
   renderAndroidUpdateState({ status: "installing", update: androidUpdateInfo, version: androidVersionInfo });
@@ -942,8 +950,21 @@ async function installAndroidUpdate() {
       version: androidVersionInfo
     });
   } catch (error) {
-    renderAndroidUpdateState({ error, update: androidUpdateInfo, version: androidVersionInfo });
+    renderAndroidUpdateState({ status: "error", error, update: androidUpdateInfo, version: androidVersionInfo });
   }
+}
+
+async function handleAndroidUpdateAction() {
+  if (androidUpdateStatus === "checking" || androidUpdateStatus === "installing") return;
+  if (androidUpdateInfo?.available) {
+    await installAndroidUpdate();
+    return;
+  }
+  if (androidUpdateError || androidUpdateStatus === "idle" || !androidUpdateInfo) {
+    await checkAndroidUpdate();
+    return;
+  }
+  renderAndroidUpdateState({ status: "ready", update: androidUpdateInfo, error: null });
 }
 
 function applyTheme(value) {
@@ -1933,8 +1954,11 @@ els.connectForm.addEventListener("submit", async (event) => {
   try {
     updateServer(els.serverUrl.value);
     androidUpdateInfo = null;
+    androidUpdateStatus = "checking";
+    androidUpdateError = null;
     updateServiceHealth();
-    renderAndroidUpdateState({ version: androidVersionInfo, update: null });
+    renderAndroidUpdateState({ status: "checking", version: androidVersionInfo, update: null, error: null });
+    void checkAndroidUpdate({ silent: true });
     setStatus("服务地址已保存，打开内容时会按这个地址使用。");
   } catch {
     setStatus("地址格式不对，可以写成 192.168.31.86:29998。", "error");
@@ -1974,12 +1998,8 @@ els.clearCacheButton?.addEventListener("click", async () => {
   }
 });
 
-els.checkAppUpdateButton?.addEventListener("click", () => {
-  checkAndroidUpdate();
-});
-
-els.installAppUpdateButton?.addEventListener("click", () => {
-  installAndroidUpdate();
+els.appUpdateButton?.addEventListener("click", () => {
+  handleAndroidUpdateAction();
 });
 
 els.recentContentClear?.addEventListener("click", () => {
@@ -1992,8 +2012,11 @@ for (const button of els.quickServers) {
   button.addEventListener("click", () => {
     updateServer(button.dataset.url);
     androidUpdateInfo = null;
+    androidUpdateStatus = "idle";
+    androidUpdateError = null;
     updateServiceHealth();
-    renderAndroidUpdateState({ version: androidVersionInfo, update: null });
+    renderAndroidUpdateState({ status: "checking", version: androidVersionInfo, update: null, error: null });
+    void checkAndroidUpdate({ silent: true });
     setStatus("服务地址已切换，打开内容时会按这个地址使用。");
   });
 }
@@ -2087,6 +2110,7 @@ async function bootApp() {
   await initializeAndroidModules(modules);
   els.bottomNav = renderAndroidModuleNavigation(els.bottomNavBar, modules);
   await loadDashboard();
+  void checkAndroidUpdate({ silent: true });
   if (initialSettingsRequested && els.settingsOverlay?.hidden) showSettings({ skipHistory: true });
 }
 
