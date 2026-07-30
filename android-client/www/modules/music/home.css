@@ -1,58 +1,35 @@
 body.music-mobile-view {
-  --music-accent: #151718;
-  --music-accent-ink: #ffffff;
-  --music-accent-text: #151718;
-  --music-playing-accent: #00a968;
+  --music-accent: #08b778;
+  --music-accent-ink: #07140f;
+  --music-accent-text: #087a54;
+  --music-playing-accent: #08b778;
   --green: var(--music-accent-text);
-  --success-soft: #e7ebed;
-  --active-soft: #e7ebed;
-  --blue: var(--music-accent-text);
-  --bg: #f1f5f7;
-  --field: #e2e7ec;
-  --surface-soft: #e9eef1;
-  --stat-surface: #f7f9fa;
-  --nav-surface: rgba(255, 255, 255, 0.98);
-  --ink: #000000;
-  --muted: #6d7071;
-  --quiet: #a4a8aa;
-  --line: #e1e6e8;
+  --success-soft: #e4f5ed;
+  --active-soft: #e4f5ed;
+  --blue: var(--mobile-accent);
 }
 
 :root[data-theme="dark"] body.music-mobile-view {
-  --music-accent: #f5f7f6;
-  --music-accent-ink: #101314;
-  --music-accent-text: #f5f7f6;
+  --music-accent: #22c779;
+  --music-accent-ink: #07140f;
+  --music-accent-text: #54c7a0;
   --music-playing-accent: #22c779;
-  --success-soft: #252a2c;
-  --active-soft: #252a2c;
-  --bg: #101314;
-  --field: #252a2c;
-  --surface-soft: #1b1f21;
-  --stat-surface: #181c1e;
-  --nav-surface: rgba(16, 19, 20, 0.97);
-  --ink: #f5f7f6;
-  --muted: #9da2a1;
-  --quiet: #737a78;
-  --line: #303638;
+  --green: var(--music-accent-text);
+  --success-soft: #12382d;
+  --active-soft: #12382d;
+  --blue: var(--mobile-accent);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) body.music-mobile-view {
-    --music-accent: #f5f7f6;
-    --music-accent-ink: #101314;
-    --music-accent-text: #f5f7f6;
+    --music-accent: #22c779;
+    --music-accent-ink: #07140f;
+    --music-accent-text: #54c7a0;
     --music-playing-accent: #22c779;
-    --success-soft: #252a2c;
-    --active-soft: #252a2c;
-    --bg: #101314;
-    --field: #252a2c;
-    --surface-soft: #1b1f21;
-    --stat-surface: #181c1e;
-    --nav-surface: rgba(16, 19, 20, 0.97);
-    --ink: #f5f7f6;
-    --muted: #9da2a1;
-    --quiet: #737a78;
-    --line: #303638;
+    --green: var(--music-accent-text);
+    --success-soft: #12382d;
+    --active-soft: #12382d;
+    --blue: var(--mobile-accent);
   }
 }
 
@@ -262,9 +239,9 @@ body.music-search-open .music-mobile-content {
 }
 
 body.music-mobile-view .music-mobile-library-head.is-home .music-mobile-play-all {
-  border-color: var(--ink);
-  background: var(--ink);
-  color: var(--bg);
+  border-color: var(--music-accent);
+  background: var(--music-accent);
+  color: var(--music-accent-ink);
 }
 
 .music-mobile-quick-access {

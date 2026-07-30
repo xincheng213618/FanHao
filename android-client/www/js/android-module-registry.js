@@ -1,6 +1,6 @@
 const ENTRY_ROOT = "./modules/";
 const FALLBACK_MODULES = Object.freeze([
-  fallback("fanhao", "番号", 10, "works", "fanhao"),
+  fallback("fanhao", "番号", 10, "categories", "fanhao"),
   fallback("photos", "图库", 20, "channel", "photo", { channel: "photo" }),
   fallback("media", "影视", 30, "channel", "media", { channel: "media" }),
   fallback("novels", "小说", 40, "novels", "novels", { order: 50 }),

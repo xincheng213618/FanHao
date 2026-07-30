@@ -581,7 +581,7 @@ export function createMusicSheets(deps) {
     copy.append(title, summary);
     const chevron = document.createElement("img");
     chevron.className = "music-mobile-settings-chevron";
-    chevron.src = "./assets/icons/music-chevron-down.svg?v=20260730-music-home-ui-40";
+    chevron.src = "./assets/icons/music-chevron-down.svg?v=20260730-music-palette-ui-42";
     chevron.alt = "";
     chevron.setAttribute("aria-hidden", "true");
     trigger.append(copy, chevron);

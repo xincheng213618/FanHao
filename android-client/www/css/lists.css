@@ -1649,7 +1649,7 @@ button.work-person {
   border: 0;
   border-radius: 9px;
   object-fit: cover;
-  object-position: center;
+  object-position: right center;
 }
 
 .work-cover-frame > .work-thumb.fallback-cover {

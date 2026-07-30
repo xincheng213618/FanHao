@@ -1,5 +1,6 @@
 import { cacheAgeText } from "../../../../js/cache.js?v=20260702-novel-local-manage-74";
 import { formatNumber } from "../../../../js/format.js";
+import { createBrandModeSwitch } from "../brands/brand-switch.js?v=20260730-fanhao-nav-ui-44";
 
 const PREFIX_PAGE_SIZE = 64;
 const PREFIX_SORT_STORAGE_KEY = "fanhao.android.codePrefixSort";
@@ -42,8 +43,8 @@ export function createCodePrefixViews(context) {
 
   async function renderIndex(isActive = () => true) {
     setActiveBottom("works");
-    els.viewKicker.textContent = "番号";
-    els.viewTitle.textContent = "番号前缀";
+    els.viewKicker.textContent = "厂牌";
+    els.viewTitle.textContent = "按番号前缀";
     els.viewMeta.textContent = "正在整理";
     els.viewContent.innerHTML = `<div class="loading-row">正在整理番号与厂商对应关系</div>`;
     const path = "/api/code-prefixes?sort=count";
@@ -186,7 +187,7 @@ export function createCodePrefixViews(context) {
       visibleLimit = PREFIX_PAGE_SIZE;
       paintPrefixResults(results, prefixes, data);
     });
-    els.viewContent.replaceChildren(toolbar, results);
+    els.viewContent.replaceChildren(createBrandModeSwitch("codePrefixes", showView), toolbar, results);
     paintPrefixResults(results, prefixes, data);
   }
 

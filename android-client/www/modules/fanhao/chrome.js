@@ -4,11 +4,9 @@ export const FANHAO_ROOT_VIEWS = Object.freeze(["people", "works", "rankings", "
 
 const CHROME_TABS = Object.freeze([
   { label: "演员", view: "people" },
-  { label: "作品", view: "works" },
-  { label: "榜单", view: "rankings" },
   { label: "分类", view: "categories" },
-  { label: "前缀", view: "codePrefixes" },
-  { label: "片商", view: "studios" }
+  { label: "榜单", view: "rankings" },
+  { label: "厂牌", view: "studios" }
 ]);
 
 export function renderFanhaoChrome({ container, view }, host, views) {
@@ -91,10 +89,10 @@ function renderDetailChrome(container, view, host) {
 function fanhaoTabForView(view) {
   if (view === "people" || view === "personDetail") return "people";
   if (view === "rankings") return "rankings";
-  if (view === "categories") return "categories";
-  if (view === "codePrefixes" || view === "codePrefixDetail") return "codePrefixes";
+  if (view === "works" || view === "categories") return "categories";
+  if (view === "codePrefixes" || view === "codePrefixDetail") return "studios";
   if (view === "studios" || view === "studioDetail") return "studios";
-  return "works";
+  return "categories";
 }
 
 function sortConfigForView(view, views) {
@@ -116,7 +114,7 @@ function sortConfigForView(view, views) {
   }
   if (view === "studios") {
     return {
-      title: "片商排序",
+      title: "厂牌排序",
       options: views.workViews.getStudioSortOptions(),
       value: views.workViews.getStudioSortMode(),
       select: (value) => views.workViews.setStudioSortMode(value)

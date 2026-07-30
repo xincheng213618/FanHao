@@ -13,7 +13,8 @@ import { createProgressiveWorkListRenderer } from "./features/works/progressive-
 import { mountSearchResultToolbar } from "./features/works/search-result-toolbar.js?v=20260721-fanhao-search-toolbar-23";
 import { createFanhaoSearchPage } from "./search-page.js?v=20260721-fanhao-search-suggestions-19";
 import { normalizeStudioSort, selectStudios, STUDIO_SORT_OPTIONS } from "./features/studios/index-model.js?v=20260721-fanhao-studio-density-12";
-import { CATEGORY_OPTIONS, createCategoryViews } from "./features/categories/category-views.js?v=20260721-fanhao-category-browser-13";
+import { createBrandModeSwitch } from "./features/brands/brand-switch.js?v=20260730-fanhao-nav-ui-44";
+import { CATEGORY_OPTIONS, createCategoryViews } from "./features/categories/category-views.js?v=20260730-fanhao-nav-ui-44";
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
 const STUDIO_SORT_STORAGE_KEY = "fanhao.android.studioSort";
@@ -37,7 +38,6 @@ function workDataSignature(data = {}) {
     ])
   });
 }
-
 export function createWorkViews(context) {
   const {
     els,
@@ -270,8 +270,8 @@ export function createWorkViews(context) {
   async function renderStudios(isActive = () => true) {
     leaveRankingSort();
     setActiveBottom("works");
-    els.viewKicker.textContent = "片商";
-    els.viewTitle.textContent = "片商索引";
+    els.viewKicker.textContent = "厂牌";
+    els.viewTitle.textContent = "按片商浏览";
     els.viewMeta.textContent = "正在加载";
     els.viewContent.innerHTML = `<div class="loading-row">正在加载片商</div>`;
 
@@ -455,7 +455,7 @@ export function createWorkViews(context) {
     toolbar.append(search, summary);
     const results = document.createElement("div");
     results.className = "studio-index-results";
-    els.viewContent.replaceChildren(toolbar, results);
+    els.viewContent.replaceChildren(createBrandModeSwitch("studios", showView), toolbar, results);
 
     const paint = () => {
       const sortMode = getStudioSortMode();

@@ -2,6 +2,7 @@ import { cacheAgeText } from "../../../../js/cache.js?v=20260702-novel-local-man
 import { formatNumber } from "../../../../js/format.js";
 
 export const CATEGORY_OPTIONS = Object.freeze([
+  { value: "all", label: "全部" },
   { value: "censored", label: "有码" },
   { value: "western", label: "欧美" },
   { value: "fc2", label: "FC2" },
@@ -38,6 +39,7 @@ export function createCategoryViews(context) {
     showView,
     workListState
   } = context;
+  let categorySummaries = [];
 
   async function renderCategories(requestedCategory = "censored", isActive = () => true) {
     const category = normalizeCategory(requestedCategory);
@@ -62,8 +64,9 @@ export function createCategoryViews(context) {
     const renderData = (data, cacheEntry = null) => {
       const works = data.works || [];
       const total = Number(data.total || works.length);
+      if (Array.isArray(data.categories) && data.categories.length) categorySummaries = data.categories;
       applyHeader(data, cacheEntry);
-      els.viewContent.replaceChildren(createCategoryStrip(data.categories, category));
+      els.viewContent.replaceChildren(createCategoryStrip(categorySummaries, category, total));
       renderWorks(works, `还没有${label}作品。`, {
         compactMeta: true,
         compactSummary: true,
@@ -105,8 +108,12 @@ export function createCategoryViews(context) {
     });
   }
 
-  function createCategoryStrip(summaries = [], activeCategory) {
+  function createCategoryStrip(summaries = [], activeCategory, activeTotal = 0) {
     const counts = new Map((summaries || []).map((item) => [String(item.value || ""), Number(item.count || 0)]));
+    const categorizedTotal = CATEGORY_OPTIONS
+      .filter((option) => option.value !== "all")
+      .reduce((sum, option) => sum + Number(counts.get(option.value) || 0), 0);
+    counts.set("all", categorizedTotal || (activeCategory === "all" ? Number(activeTotal || 0) : 0));
     const strip = document.createElement("nav");
     strip.className = "fanhao-category-strip";
     strip.setAttribute("aria-label", "番号分类");

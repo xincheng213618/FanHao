@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#f6f7f9" />
     <title>资料库</title>
-    <link rel="stylesheet" href="./styles.css?v=20260730-mobile-search-ui-41" />
+    <link rel="stylesheet" href="./styles.css?v=20260730-fanhao-nav-ui-44" />
   </head>
   <body>
     <main class="app-shell">
@@ -20,7 +20,7 @@
       <div id="searchHistory" class="search-history" aria-label="搜索记录" hidden></div>
 
       <nav class="library-channel-strip" aria-label="内容频道">
-        <button type="button" data-open-view="works">
+        <button type="button" data-open-view="categories">
           <strong>番号库</strong>
           <span id="channelWorksCount">默认库</span>
         </button>
@@ -64,25 +64,17 @@
           <strong>演员</strong>
           <span id="peopleCount">0</span>
         </button>
-        <button type="button" data-open-view="works">
-          <strong>作品</strong>
-          <span id="worksCount">0</span>
-        </button>
         <button type="button" data-open-view="rankings">
           <strong>排行榜</strong>
           <span id="rankingsCount">TOP</span>
         </button>
         <button type="button" data-open-view="categories">
-          <strong>分类</strong>
-          <span>有码 / 欧美</span>
-        </button>
-        <button type="button" data-open-view="codePrefixes">
-          <strong>番号前缀</strong>
-          <span>按厂商浏览</span>
+          <strong>作品分类</strong>
+          <span><span id="worksCount">0</span> · 全部 / 有码 / 欧美</span>
         </button>
         <button type="button" data-open-view="studios">
-          <strong>片商</strong>
-          <span>系列浏览</span>
+          <strong>厂牌</strong>
+          <span>片商 / 番号前缀</span>
         </button>
         <button type="button" data-open-view="history">
           <strong>继续观看</strong>
@@ -266,7 +258,7 @@
       </nav>
     </main>
 
-    <script src="./app.js?v=20260730-music-home-ui-40" type="module"></script>
+    <script src="./app.js?v=20260730-fanhao-nav-ui-44" type="module"></script>
   </body>
 </html>
 

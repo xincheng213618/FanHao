@@ -2,16 +2,16 @@ import { deleteJson, fetchJson, postJson, putJson } from "../../js/api.js?v=2026
 import { absoluteUrl } from "../../js/image.js?v=20260706-mobile-web-sync-01";
 import { formatBytes, formatCompact, formatNumber } from "../../js/format.js";
 import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=20260713-music-search-versions-01";
-import { createMusicSearchController } from "./music-search-controller.js?v=20260730-music-home-ui-40";
-import { createMusicSheets } from "./music-sheets.js?v=20260730-music-home-ui-40";
-import { createMusicHomeView } from "./music-home-view.js?v=20260730-music-home-ui-40";
-import { createMusicPlaylistView } from "./music-playlist-view.js?v=20260730-music-home-ui-40";
-import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=20260730-music-home-ui-40";
-import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=20260730-music-home-ui-40";
-import { createMusicListRequestBuilder } from "./music-list-request.js?v=20260730-music-home-ui-40";
-import { createMusicLibraryView } from "./music-library-view.js?v=20260730-music-home-ui-40";
-import { createMusicLibrarySort } from "./music-library-sort.js?v=20260730-music-home-ui-40";
-import { createMusicCollectionView } from "./music-collection-view.js?v=20260730-music-home-ui-40";
+import { createMusicSearchController } from "./music-search-controller.js?v=20260730-music-palette-ui-42";
+import { createMusicSheets } from "./music-sheets.js?v=20260730-music-palette-ui-42";
+import { createMusicHomeView } from "./music-home-view.js?v=20260730-music-palette-ui-42";
+import { createMusicPlaylistView } from "./music-playlist-view.js?v=20260730-music-palette-ui-42";
+import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=20260730-music-palette-ui-42";
+import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=20260730-music-palette-ui-42";
+import { createMusicListRequestBuilder } from "./music-list-request.js?v=20260730-music-palette-ui-42";
+import { createMusicLibraryView } from "./music-library-view.js?v=20260730-music-palette-ui-42";
+import { createMusicLibrarySort } from "./music-library-sort.js?v=20260730-music-palette-ui-42";
+import { createMusicCollectionView } from "./music-collection-view.js?v=20260730-music-palette-ui-42";
 import {
   DEFAULT_MODE,
   DEFAULT_SORT,
@@ -76,7 +76,7 @@ export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.j
 
 const DEFAULT_LIMIT = 80;
 const AUTO_COLLECTION_LIMIT = 300;
-const DEFAULT_COVER_URL = "./assets/music/default-cover-v2-neutral.jpg?v=20260730-music-home-ui-40";
+const DEFAULT_COVER_URL = "./assets/music/default-cover-v1.jpg?v=20260730-music-palette-ui-42";
 
 export function createMusicViews(deps) {
   const {
@@ -3324,7 +3324,7 @@ export function createMusicViews(deps) {
       actions.append(queueActionButton("close", "移出队列", () => removeTrackFromQueue(track.id), active));
       const handle = document.createElement("img");
       handle.className = "music-mobile-queue-handle";
-      handle.src = "./assets/icons/music-drag-handle.svg?v=20260730-music-home-ui-40";
+      handle.src = "./assets/icons/music-drag-handle.svg?v=20260730-music-palette-ui-42";
       handle.alt = "";
       handle.setAttribute("aria-hidden", "true");
       actions.append(handle);
@@ -3540,7 +3540,7 @@ export function createMusicViews(deps) {
       symbol.setAttribute("aria-hidden", "true");
       button.append(symbol);
     }
-    symbol.src = `./assets/icons/music-${name}.svg?v=20260730-music-home-ui-40`;
+    symbol.src = `./assets/icons/music-${name}.svg?v=20260730-music-palette-ui-42`;
     button.dataset.musicSymbol = name;
   }
 

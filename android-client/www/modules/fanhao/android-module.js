@@ -1,6 +1,6 @@
-import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260721-fanhao-category-browser-13";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260726-work-sort-01";
-import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=20260730-mobile-sync-01";
+import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260730-fanhao-nav-ui-44";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260730-fanhao-nav-ui-44";
+import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=20260730-fanhao-nav-ui-44";
 
 export function createAndroidModule({ host }) {
   const workViews = createWorkViews({
@@ -116,7 +116,7 @@ function createSearchController(host, workViews) {
     close(context) {
       if (context.view !== "search") return false;
       if (host.navigation.hasBackStack()) host.navigation.goBack();
-      else host.navigation.showView("works", {}, { resetStack: true });
+      else host.navigation.showView("categories", {}, { resetStack: true });
       return true;
     }
   };

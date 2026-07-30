@@ -89,3 +89,7 @@ nul
 /lifecycle-*.png
 /search-*.png
 /fanhao_mobile_audit_*/
+
+# Local product-design captures and downloaded source bundles.
+/outputs/product-design-audit/
+/outputs/material-symbols-source/

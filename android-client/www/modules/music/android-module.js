@@ -1,4 +1,4 @@
-import { createMusicViews } from "./music-views.js?v=20260730-music-home-ui-40";
+import { createMusicViews } from "./music-views.js?v=20260730-music-palette-ui-42";
 
 export function createAndroidModule({ host }) {
   const musicViews = createMusicViews({

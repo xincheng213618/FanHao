@@ -1,7 +1,7 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260730-music-home-ui-40";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260730-fanhao-nav-ui-44";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
-import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260730-music-home-ui-40";
-import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260712-module-chrome-03";
+import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260730-fanhao-nav-ui-44";
+import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260730-fanhao-nav-ui-44";
 import { getElements } from "./js/dom.js?v=20260712-module-chrome-03";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260717-fanhao-cover-prepare-01";
@@ -13,7 +13,7 @@ import { createSearchHistory } from "./js/search-history.js";
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
 const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "categories", "codePrefixes", "codePrefixDetail", "studios", "studioDetail", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "tools"]);
-const DEFAULT_VIEW = "works";
+const DEFAULT_VIEW = "categories";
 const DEFAULT_PHOTO_CATEGORY = "我喜欢的";
 const PRIMARY_LABELS = {
   fanhao: "番号",
@@ -143,7 +143,7 @@ function sanitizeViewParams(view, params = {}) {
   if (view === "studioDetail") return { studioId: String(params.studioId || ""), seriesId: String(params.seriesId || "all") || "all" };
   if (view === "categories") {
     const category = String(params.category || "censored").trim().toLowerCase();
-    return { category: ["censored", "western", "fc2", "anime"].includes(category) ? category : "censored" };
+    return { category: ["all", "censored", "western", "fc2", "anime"].includes(category) ? category : "censored" };
   }
   if (view === "codePrefixDetail") {
     const prefix = String(params.prefix || params.codePrefix || "").trim().replaceAll("_", "-").toUpperCase();

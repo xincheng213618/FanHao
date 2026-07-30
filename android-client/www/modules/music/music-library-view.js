@@ -58,7 +58,7 @@ export function createMusicLibraryView(deps) {
     playIcon.className = "music-mobile-focused-library-play-icon";
     playIcon.setAttribute("aria-hidden", "true");
     const playGlyph = document.createElement("img");
-    playGlyph.src = "./assets/icons/play.svg?v=20260730-music-home-ui-40";
+    playGlyph.src = "./assets/icons/play.svg?v=20260730-music-palette-ui-42";
     playGlyph.alt = "";
     playIcon.append(playGlyph);
     const playLabel = document.createElement("span");
