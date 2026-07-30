@@ -486,7 +486,7 @@ export function createNovelViews(context) {
         name: String(item?.name || "").trim(),
         label: displayCategory(item?.name),
         count: Number(item?.count || 0)
-      })).filter((item) => item.name)
+      })).filter((item) => item.name && item.name !== "待分类")
     };
   }
 
@@ -1111,11 +1111,10 @@ export function createNovelViews(context) {
     const cover = createCover(book);
     const body = document.createElement("div");
     body.className = "novel-mobile-card-body";
-    const title = document.createElement("strong");
-    title.textContent = book.title || "未命名小说";
     const meta = document.createElement("span");
-    meta.textContent = [book.author || "未知作者", bookCategoryLabel(book)].filter(Boolean).join(" · ");
-    body.append(title, meta);
+    meta.textContent = book.author && book.author !== "未知作者" ? book.author : "";
+    if (meta.textContent) body.append(meta);
+    card.setAttribute("aria-label", [book.title || "未命名小说", meta.textContent].filter(Boolean).join("，"));
     card.append(cover, body);
     return card;
   }
@@ -2200,11 +2199,9 @@ export function createNovelViews(context) {
   function createCover(book = {}, size = "") {
     const cover = document.createElement("div");
     cover.className = `novel-mobile-cover ${size}`.trim();
-    const label = document.createElement("span");
-    label.textContent = bookCategoryLabel(book).slice(0, 4);
     const title = document.createElement("strong");
     title.textContent = book.title || "小说";
-    cover.append(label, title);
+    cover.append(title);
     return cover;
   }
 

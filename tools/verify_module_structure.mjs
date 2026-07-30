@@ -188,8 +188,9 @@ const androidNovelCardRender = androidNovelViews.slice(
 );
 assert(androidNovelViews.includes("novel-mobile-search-page-head") && androidNovelEntry.includes('{ view: "novelSearch"'), "novels must open search as a dedicated module page");
 assert(androidNovelEntry.includes('nav.setAttribute("aria-label", "小说分类")') && !androidNovelEntry.includes('{ label: "本地", source: "local" }'), "novel categories must occupy the top chrome without a visible local/remote switch");
+assert(androidNovelViews.includes('item.name && item.name !== "待分类"') && androidNovelViews.includes("cover.append(title)"), "novel shelf must suppress the uncategorized label and put the book title directly on the cover");
 assert(!androidNovelListRender.includes("createNovelControls") && !androidNovelListRender.includes("createRecentStrip"), "novel home must not render library/author controls or continue-reading rails");
-assert(androidNovelCardRender.includes("body.append(title, meta)") && !androidNovelCardRender.includes("summary") && !androidNovelCardRender.includes("progress") && !androidNovelCardRender.includes("actions"), "novel cards must stay limited to cover, title, author, and category");
+assert(androidNovelCardRender.includes("card.append(cover, body)") && androidNovelCardRender.includes('meta.textContent = book.author') && !androidNovelCardRender.includes("summary") && !androidNovelCardRender.includes("progress") && !androidNovelCardRender.includes("actions") && !androidNovelCardRender.includes("bookCategoryLabel"), "novel shelf cards must stay limited to a title-led book cover and optional author");
 assert(androidNovelCardRender.includes("openReader(book)") && androidNovelViews.includes("target.progress?.chapterIndex || fallbackIndex || 1"), "tapping a novel must open its last reading position directly");
 
 const webStylePaths = [

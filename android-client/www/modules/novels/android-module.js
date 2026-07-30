@@ -1,4 +1,4 @@
-import { createNovelViews } from "./novel-views.js?v=20260730-novel-simple-ui-51";
+import { createNovelViews } from "./novel-views.js?v=20260731-novel-shelf-ui-52";
 
 export function createAndroidModule({ host }) {
   const novelViews = createNovelViews({
