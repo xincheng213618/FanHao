@@ -731,10 +731,17 @@ body.novel-search-page-view .bottom-nav {
   padding: 0;
   text-align: center;
   box-shadow: none;
+  touch-action: pan-y;
+  transition: transform 120ms ease, opacity 120ms ease;
 }
 
 .novel-mobile-card:active {
   transform: translateY(1px);
+}
+
+.novel-mobile-card.pressing {
+  opacity: 0.78;
+  transform: scale(0.97);
 }
 
 .novel-mobile-card .novel-mobile-cover {

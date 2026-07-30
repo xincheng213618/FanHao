@@ -192,6 +192,9 @@ assert(androidNovelViews.includes('item.name && item.name !== "待分类"') && a
 assert(!androidNovelListRender.includes("createNovelControls") && !androidNovelListRender.includes("createRecentStrip"), "novel home must not render library/author controls or continue-reading rails");
 assert(androidNovelCardRender.includes("card.append(cover, body)") && androidNovelCardRender.includes('meta.textContent = book.author') && !androidNovelCardRender.includes("summary") && !androidNovelCardRender.includes("progress") && !androidNovelCardRender.includes("actions") && !androidNovelCardRender.includes("bookCategoryLabel"), "novel shelf cards must stay limited to a title-led book cover and optional author");
 assert(androidNovelCardRender.includes("openReader(book)") && androidNovelViews.includes("target.progress?.chapterIndex || fallbackIndex || 1"), "tapping a novel must open its last reading position directly");
+assert(androidNovelCardRender.includes("installNovelLongPress") && androidNovelCardRender.includes("consumeClick()") && androidNovelViews.includes('title: "小说操作"'), "long-pressing a novel must open management without changing the tap-to-read behavior");
+assert(androidNovelViews.includes('label: "查看详情"') && androidNovelViews.includes('label: localBook ? "从手机书架移除" : "删除小说"') && androidNovelViews.includes("deleteJson(getActiveUrl(), novelDetailPath(book.id))"), "novel long-press management must restore detail, offline, export, and deletion actions");
+assert(androidNovelViews.includes('localStorage.setItem(NOVEL_SORT_STORAGE_KEY, next)') && androidNovelViews.includes('{ value: "progress", label: "最近阅读" }') && androidNovelEntry.includes("openMobileActionSheet"), "novel sorting must persist and use the same shared sheet interaction as other modules");
 
 const webStylePaths = [
   "css/foundation.css",

@@ -1,4 +1,5 @@
-import { createNovelViews } from "./novel-views.js?v=20260731-novel-shelf-ui-52";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=20260731-mobile-action-sheet-01";
+import { createNovelViews } from "./novel-views.js?v=20260731-novel-actions-ui-53";
 
 export function createAndroidModule({ host }) {
   const novelViews = createNovelViews({
@@ -57,7 +58,8 @@ function renderNovelChrome({ container, view }, host, novelViews) {
   const sort = document.createElement("button");
   sort.type = "button";
   sort.className = "novel-chrome-action novel-chrome-sort";
-  sort.setAttribute("aria-label", "小说排序");
+  const activeSort = (novelViews.getNovelSortOptions?.() || []).find((option) => option.value === state.sort);
+  sort.setAttribute("aria-label", `小说排序，当前${activeSort?.label || "最近更新"}`);
   sort.textContent = "↕";
   sort.addEventListener("click", () => openNovelSortDialog(host, novelViews));
   const search = document.createElement("button");
@@ -74,47 +76,17 @@ function renderNovelChrome({ container, view }, host, novelViews) {
 }
 
 function openNovelSortDialog(host, novelViews) {
-  document.querySelector(".novel-sort-overlay")?.remove();
   const state = novelViews.getNovelNavigationState?.() || {};
-  const overlay = document.createElement("div");
-  overlay.className = "novel-sort-overlay";
-  const backdrop = document.createElement("button");
-  backdrop.type = "button";
-  backdrop.className = "novel-sort-backdrop";
-  backdrop.setAttribute("aria-label", "关闭排序");
-  const panel = document.createElement("section");
-  panel.className = "novel-sort-sheet";
-  panel.setAttribute("role", "dialog");
-  panel.setAttribute("aria-modal", "true");
-  panel.setAttribute("aria-label", "小说排序");
-  const title = document.createElement("strong");
-  title.textContent = "排序";
-  panel.append(title);
-  for (const [value, label] of [
-    ["updated", "最近更新"],
-    ["title", "按书名"],
-    ["chapters", "章节最多"],
-    ["chars", "篇幅最长"]
-  ]) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "novel-sort-option";
-    button.classList.toggle("active", value === (state.sort || "updated"));
-    button.textContent = label;
-    button.addEventListener("click", () => {
-      overlay.remove();
-      if (!novelViews.setNovelSort?.(value)) return;
-      host.ui.renderCurrentView();
-      host.ui.scrollToTop();
-    });
-    panel.append(button);
-  }
-  const close = () => overlay.remove();
-  backdrop.addEventListener("click", close);
-  overlay.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") close();
+  openMobileActionSheet({
+    title: "小说排序",
+    value: state.sort || "updated",
+    options: (novelViews.getNovelSortOptions?.() || []).map((option) => ({
+      ...option,
+      select: () => {
+        if (!novelViews.setNovelSort?.(option.value)) return;
+        host.ui.renderCurrentView();
+        host.ui.scrollToTop();
+      }
+    }))
   });
-  overlay.append(backdrop, panel);
-  document.body.append(overlay);
-  panel.querySelector(".active")?.focus();
 }

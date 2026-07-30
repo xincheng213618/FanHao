@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=20260731-novel-shelf-ui-52";
+import { CLIENT_VERSION } from "./config.js?v=20260731-novel-actions-ui-53";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;
@@ -120,6 +120,21 @@ export async function clearCachedData(baseUrl = "") {
 
 export async function clearCachedJson(baseUrl = "") {
   return clearCachedData(baseUrl);
+}
+
+export async function clearCachedJsonByPrefix(baseUrl, pathPrefix) {
+  const normalizedBase = normalizeBaseUrl(baseUrl);
+  const normalizedPrefix = String(pathPrefix || "").trim();
+  if (!normalizedBase || !normalizedPrefix) return;
+  const db = await openCacheDb();
+  const transaction = db.transaction(RESPONSE_STORE, "readwrite");
+  const store = transaction.objectStore(RESPONSE_STORE);
+  const entries = await requestToPromise(store.index("baseUrl").getAll(normalizedBase));
+  await Promise.all(
+    entries
+      .filter((entry) => String(entry?.path || "").startsWith(normalizedPrefix))
+      .map((entry) => requestToPromise(store.delete(entry.key)))
+  );
 }
 
 export function cacheAgeText(updatedAt) {

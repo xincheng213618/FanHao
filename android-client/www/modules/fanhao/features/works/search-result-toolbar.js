@@ -1,6 +1,6 @@
 import { formatNumber } from "../../../../js/format.js";
 import { CATEGORY_OPTIONS } from "../categories/category-views.js?v=20260721-fanhao-category-browser-13";
-import { openFanhaoSheet } from "../../sheet.js?v=20260721-fanhao-person-detail-02";
+import { openFanhaoSheet } from "../../sheet.js?v=20260731-mobile-action-sheet-01";
 
 const ALL_CATEGORY = Object.freeze({ value: "all", label: "全部" });
 

@@ -1,4 +1,4 @@
-import { openFanhaoSheet } from "./sheet.js?v=20260721-fanhao-person-detail-02";
+import { openFanhaoSheet } from "./sheet.js?v=20260731-mobile-action-sheet-01";
 
 export const FANHAO_ROOT_VIEWS = Object.freeze(["people", "works", "rankings", "categories", "codePrefixes", "studios"]);
 

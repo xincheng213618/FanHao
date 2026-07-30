@@ -1,15 +1,24 @@
-import { fetchJson, postJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260702-novel-local-manage-74";
+import { deleteJson, fetchJson, postJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
+import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260731-novel-actions-ui-53";
 import { formatBytes, formatNumber } from "../../js/format.js";
 import { deleteLocalNovelEntry, loadLocalNovelEntries, readLocalNovelEntry, saveLocalNovelEntry, saveLocalNovelProgress } from "../../js/local-novels.js?v=20260702-novel-local-manage-74";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=20260731-mobile-action-sheet-01";
 
 const NOVEL_SETTINGS_KEY = "fanhao.android.novel.settings";
+const NOVEL_SORT_STORAGE_KEY = "fanhao.android.novelSort";
 const DEVICE_TEXT_SCAN_LIMIT = 50000;
 const NOVEL_CATALOG_PAGE_SIZE = 80;
 const NOVEL_READING_CHARS_PER_MINUTE = 450;
 const NOVEL_REMOTE_PAGE_SIZE = 80;
 const NOVEL_AUTHOR_PAGE_SIZE = 60;
 const NOVEL_CHAPTER_PREFETCH_LIMIT = 6;
+const NOVEL_SORT_OPTIONS = Object.freeze([
+  { value: "updated", label: "最近更新" },
+  { value: "progress", label: "最近阅读" },
+  { value: "title", label: "书名排序" },
+  { value: "chapters", label: "章节最多" },
+  { value: "chars", label: "篇幅最长" }
+]);
 const DEFAULT_QUERY_STATE = {
   query: "",
   category: "all",
@@ -38,7 +47,7 @@ export function createNovelViews(context) {
     setStatus
   } = context;
 
-  const listState = { ...DEFAULT_QUERY_STATE, uploading: false, busyAction: "" };
+  const listState = { ...DEFAULT_QUERY_STATE, sort: readNovelSort(), uploading: false, busyAction: "" };
   const localBooks = new Map();
   const selectedLocalBookIds = new Set();
   const catalogState = {
@@ -490,6 +499,10 @@ export function createNovelViews(context) {
     };
   }
 
+  function getNovelSortOptions() {
+    return NOVEL_SORT_OPTIONS.map((option) => ({ ...option }));
+  }
+
   function setNovelCategory(category) {
     const next = String(category || "all").trim() || "all";
     if (listState.category === next) return false;
@@ -500,11 +513,27 @@ export function createNovelViews(context) {
   }
 
   function setNovelSort(sort) {
-    const next = ["updated", "title", "chapters", "chars"].includes(String(sort || "")) ? String(sort) : "updated";
+    const next = normalizeNovelSort(sort);
     if (listState.sort === next) return false;
     listState.sort = next;
+    try {
+      localStorage.setItem(NOVEL_SORT_STORAGE_KEY, next);
+    } catch {}
     resetNovelRemoteLimits();
     return true;
+  }
+
+  function readNovelSort() {
+    try {
+      return normalizeNovelSort(localStorage.getItem(NOVEL_SORT_STORAGE_KEY));
+    } catch {
+      return "updated";
+    }
+  }
+
+  function normalizeNovelSort(sort) {
+    const value = String(sort || "").trim();
+    return NOVEL_SORT_OPTIONS.some((option) => option.value === value) ? value : "updated";
   }
 
   function visibleLocalBooksForRemote(remoteBooks = [], localBooksList = []) {
@@ -1099,10 +1128,17 @@ export function createNovelViews(context) {
     card.className = "novel-mobile-card";
     card.role = "button";
     card.tabIndex = 0;
+    const longPress = installNovelLongPress(card, () => openNovelBookActions(book));
     card.addEventListener("click", () => {
+      if (longPress.consumeClick()) return;
       openReader(book);
     });
     card.addEventListener("keydown", (event) => {
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+        event.preventDefault();
+        openNovelBookActions(book);
+        return;
+      }
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       openReader(book);
@@ -1114,9 +1150,130 @@ export function createNovelViews(context) {
     const meta = document.createElement("span");
     meta.textContent = book.author && book.author !== "未知作者" ? book.author : "";
     if (meta.textContent) body.append(meta);
-    card.setAttribute("aria-label", [book.title || "未命名小说", meta.textContent].filter(Boolean).join("，"));
+    card.setAttribute("aria-label", `${[book.title || "未命名小说", meta.textContent].filter(Boolean).join("，")}，长按管理`);
     card.append(cover, body);
     return card;
+  }
+
+  function installNovelLongPress(element, activate) {
+    const LONG_PRESS_MS = 480;
+    const MOVE_TOLERANCE_PX = 12;
+    let timer = 0;
+    let startX = 0;
+    let startY = 0;
+    let suppressClickUntil = 0;
+    let lastActivatedAt = 0;
+
+    const cancel = () => {
+      if (timer) window.clearTimeout(timer);
+      timer = 0;
+      element.classList.remove("pressing");
+    };
+    const open = () => {
+      cancel();
+      suppressClickUntil = Date.now() + 800;
+      lastActivatedAt = Date.now();
+      navigator.vibrate?.(18);
+      activate();
+    };
+
+    element.addEventListener("pointerdown", (event) => {
+      if (event.button !== undefined && event.button !== 0) return;
+      startX = event.clientX;
+      startY = event.clientY;
+      cancel();
+      element.classList.add("pressing");
+      timer = window.setTimeout(open, LONG_PRESS_MS);
+    }, { passive: true });
+    element.addEventListener("pointermove", (event) => {
+      if (!timer) return;
+      if (Math.hypot(event.clientX - startX, event.clientY - startY) > MOVE_TOLERANCE_PX) cancel();
+    }, { passive: true });
+    element.addEventListener("pointerup", cancel, { passive: true });
+    element.addEventListener("pointercancel", cancel, { passive: true });
+    element.addEventListener("pointerleave", (event) => {
+      if (event.pointerType === "mouse") cancel();
+    }, { passive: true });
+    element.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      if (Date.now() - lastActivatedAt < 800) return;
+      open();
+    });
+
+    return {
+      consumeClick() {
+        return Date.now() < suppressClickUntil;
+      }
+    };
+  }
+
+  function openNovelBookActions(book = {}) {
+    const localBook = Boolean(book.local || isLocalBookId(book.id));
+    const cachedRemote = Boolean(book.cachedLocal && !localBook);
+    openMobileActionSheet({
+      title: "小说操作",
+      options: [
+        {
+          label: "查看详情",
+          hidden: !detailBookId(book),
+          select: () => showView("novelDetail", { id: detailBookId(book) }, { push: true })
+        },
+        {
+          label: localBook || cachedRemote ? "导出 TXT" : "下载 TXT",
+          select: () => downloadBook(book.cachedLocalId || book.id)
+        },
+        {
+          label: cachedRemote ? "更新离线缓存" : "缓存整本",
+          hidden: localBook,
+          disabled: Boolean(cachingBookId),
+          select: () => cacheBookFromList(book)
+        },
+        {
+          label: "移除离线缓存",
+          variant: "danger wide",
+          hidden: !cachedRemote,
+          select: () => removeCachedRemoteBook(book)
+        },
+        {
+          label: localBook ? "从手机书架移除" : "删除小说",
+          variant: "danger wide",
+          closeOnSelect: false,
+          select: (_value, button, close) => deleteNovelBook(book, button, close)
+        }
+      ]
+    });
+  }
+
+  async function deleteNovelBook(book = {}, button, close) {
+    if (!book.id) return;
+    if (book.local || isLocalBookId(book.id)) {
+      close?.();
+      await removeLocalBook(book);
+      return;
+    }
+    const title = book.title || "这本小说";
+    if (!window.confirm(`确认从书库删除《${title}》？\n\n磁盘中的原始 TXT 不会删除，这本书也不会在重新扫描后自动恢复。`)) return;
+    if (button) {
+      button.disabled = true;
+      button.textContent = "正在删除";
+    }
+    try {
+      await deleteJson(getActiveUrl(), novelDetailPath(book.id));
+      if (book.cachedLocalId) {
+        await deleteLocalNovelEntry(book.cachedLocalId).catch(() => {});
+        localBooks.delete(book.cachedLocalId);
+      }
+      await clearCachedJsonByPrefix(getActiveUrl(), "/api/novels").catch(() => {});
+      close?.();
+      setStatus?.(`已删除小说：${title}`);
+      renderCurrentViewPreservingScroll();
+    } catch (error) {
+      setStatus?.(`删除小说失败：${error.message || error}`, "error");
+      if (button) {
+        button.disabled = false;
+        button.textContent = "删除小说";
+      }
+    }
   }
 
   function secondaryBookActionLabel(book = {}) {
@@ -3319,6 +3476,7 @@ export function createNovelViews(context) {
     renderNovelDetail,
     renderNovelReader,
     getNovelNavigationState,
+    getNovelSortOptions,
     setNovelCategory,
     setNovelSort,
     getLibrarySource,

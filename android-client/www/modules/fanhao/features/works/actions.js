@@ -1,6 +1,6 @@
 import { postJson } from "../../../../js/api.js?v=20260706-mobile-web-sync-01";
 import { readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=20260705-mobile-actions-01";
-import { openFanhaoSheet } from "../../sheet.js?v=20260721-fanhao-person-detail-02";
+import { openFanhaoSheet } from "../../sheet.js?v=20260731-mobile-action-sheet-01";
 
 export function createWorkActions(deps) {
   const {
