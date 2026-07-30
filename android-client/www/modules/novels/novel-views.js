@@ -17,8 +17,11 @@ const DEFAULT_QUERY_STATE = {
   mode: "books",
   sort: "updated",
   searchOpen: false,
-  source: "local",
-  sourceTouched: false,
+  searchPage: false,
+  source: "remote",
+  sourceTouched: true,
+  facets: [],
+  total: 0,
   remoteLimit: NOVEL_REMOTE_PAGE_SIZE,
   authorLimit: NOVEL_AUTHOR_PAGE_SIZE
 };
@@ -79,16 +82,39 @@ export function createNovelViews(context) {
   installReaderLifecycle();
 
   async function renderNovelList(isActive = () => true) {
+    listState.searchPage = false;
+    listState.query = "";
+    listState.mode = "books";
+    listState.source = "remote";
+    listState.sourceTouched = true;
+    return renderNovelCollection(isActive);
+  }
+
+  async function renderNovelSearch(params = {}, isActive = () => true) {
+    listState.searchPage = true;
+    listState.query = String(params.query || "").trim();
+    listState.mode = "books";
+    listState.source = "remote";
+    listState.sourceTouched = true;
+    if (!listState.query) {
+      deactivateReader();
+      setActiveBottom("novels");
+      renderNovelSearchData({ books: [], total: 0 });
+      return;
+    }
+    return renderNovelCollection(isActive);
+  }
+
+  async function renderNovelCollection(isActive = () => true) {
     deactivateReader();
     setActiveBottom("novels");
-    const loadingTitle = listState.sourceTouched ? sourceTitle() : "书库";
-    els.viewKicker.textContent = listState.sourceTouched ? sourceKicker() : "小说";
+    const loadingTitle = listState.searchPage ? "搜索" : "小说";
+    els.viewKicker.textContent = "小说";
     els.viewTitle.textContent = loadingTitle;
     els.viewMeta.textContent = "正在读取";
     els.viewContent.innerHTML = `<div class="loading-row">正在读取${loadingTitle}</div>`;
 
-    const authorDirectory = listState.mode === "authors" && listState.source !== "local";
-    const path = authorDirectory ? novelAuthorListPath() : novelListPath();
+    const path = novelListPath();
     const activeUrl = getActiveUrl();
     let renderedCache = false;
     const localData = await loadLocalListData().catch((error) => {
@@ -98,71 +124,142 @@ export function createNovelViews(context) {
     if (!isActive()) return;
     const cached = await readCachedJson(activeUrl, path).catch(() => null);
     if (!isActive()) return;
-    if (authorDirectory && cached?.payload?.authors) {
-      renderedCache = true;
-      renderNovelAuthorListData(cached.payload, localData, cached);
-    } else if (cached?.payload?.books) {
+    if (cached?.payload?.books) {
       renderedCache = true;
       renderNovelListData(mergeNovelListData(cached.payload, localData), cached);
-    } else if (localData.total) {
-      renderNovelListData(mergeNovelListData({}, localData));
     }
 
     try {
       const data = await fetchJson(activeUrl, path, { timeoutMs: 16000, signal: isActive.signal });
       writeCachedJson(activeUrl, path, data).catch(() => {});
       if (!isActive()) return;
-      if (authorDirectory) renderNovelAuthorListData(data, localData);
-      else renderNovelListData(mergeNovelListData(data, localData));
+      renderNovelListData(mergeNovelListData(data, localData));
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
-        renderMessage("电脑端暂时连不上，当前显示的是本地缓存小说。", "quiet", false);
-      } else if (localData.total && !authorDirectory) {
-        renderNovelListData(mergeNovelListData({}, localData));
-        renderMessage("电脑端暂时连不上，当前只显示手机本地小说。", "quiet", false);
+        renderMessage("电脑端暂时连不上，当前显示的是上次内容。", "quiet", false);
       } else {
-        renderMessage(error.message || "小说书库读取失败", "error");
+        renderMessage(error.message || "小说内容读取失败", "error");
       }
     }
   }
 
   function renderNovelListData(data = {}, cacheEntry = null) {
     const books = Array.isArray(data.books) ? data.books : [];
-    const authors = aggregateNovelAuthors(books, listState.query);
-    const summary = data.summary || {};
-    const listTotals = visibleBookTotals(books);
-    const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
 
-    els.viewKicker.textContent = sourceKicker();
-    els.viewTitle.textContent = listState.mode === "authors" ? "作者" : listState.author ? `${listState.author}的作品` : sourceTitle();
-    els.viewMeta.textContent = listState.mode === "authors"
-      ? `${formatNumber(authors.length)} 位作者 · ${formatNumber(books.length)} 本${suffix}`
-      : `${formatNumber(data.total || books.length)} 本 · ${formatNumber(listTotals.chapters)} 章${suffix}`;
+    if (listState.searchPage) {
+      renderNovelSearchData(data, cacheEntry);
+      return;
+    }
+    listState.facets = Array.isArray(data.facets || data.summary?.categories) ? [...(data.facets || data.summary?.categories)] : [];
+    listState.total = Number(data.total || books.length || 0);
+
+    els.viewKicker.textContent = "小说";
+    els.viewTitle.textContent = listState.category === "all" ? "全部小说" : displayCategory(listState.category);
+    els.viewMeta.textContent = `${formatNumber(data.total || books.length)} 本`;
     els.viewContent.innerHTML = "";
+    els.viewContent.className = "content-list novel-mobile-library-content";
     notifyLibrarySourceChanged();
 
-    els.viewContent.append(createNovelControls(data));
-    const recent = listState.mode === "books" && !listState.author ? createRecentStrip(summary.recent || []) : null;
-    if (recent) els.viewContent.append(recent);
-
-    const entries = listState.mode === "authors" ? authors : books;
-    if (!entries.length) {
+    if (!books.length) {
       els.viewContent.append(createNovelEmptyState(data));
       return;
     }
 
     const list = document.createElement("div");
-    list.className = listState.mode === "authors" ? "novel-mobile-author-list" : "novel-mobile-list";
-    if (listState.source === "local") list.classList.add("manage");
-    if (isLocalSelectionMode()) list.classList.add("selecting");
-    if (listState.source === "remote") list.classList.add("bookstore");
-    for (const entry of entries) list.append(listState.mode === "authors" ? createNovelAuthorCard(entry) : createNovelCard(entry));
+    list.className = "novel-mobile-list";
+    for (const entry of books) list.append(createNovelCard(entry));
     els.viewContent.append(list);
-    if (listState.mode === "books" && listState.source !== "local") {
-      const more = createNovelLoadMore(Number(data.total || 0), books.length, "books");
-      if (more) els.viewContent.append(more);
+    const more = createNovelLoadMore(Number(data.total || 0), books.length, "books");
+    if (more) els.viewContent.append(more);
+  }
+
+  function renderNovelSearchData(data = {}) {
+    const books = Array.isArray(data.books) ? data.books : [];
+    els.viewKicker.textContent = "小说";
+    els.viewTitle.textContent = "搜索";
+    els.viewMeta.textContent = listState.query ? `${formatNumber(data.total || books.length)} 本` : "";
+    els.viewContent.innerHTML = "";
+    els.viewContent.className = "content-list novel-mobile-search-page-content";
+    els.viewContent.append(createNovelSearchHeader());
+
+    if (!listState.query) {
+      const prompt = document.createElement("div");
+      prompt.className = "novel-mobile-search-prompt";
+      prompt.textContent = "搜索书名、作者或分类";
+      els.viewContent.append(prompt);
+      return;
     }
+    if (!books.length) {
+      const empty = document.createElement("div");
+      empty.className = "novel-mobile-search-prompt";
+      empty.textContent = `没有搜到「${listState.query}」`;
+      els.viewContent.append(empty);
+      return;
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "novel-mobile-search-result-meta";
+    meta.textContent = `${formatNumber(data.total || books.length)} 本结果`;
+    const list = document.createElement("div");
+    list.className = "novel-mobile-list";
+    for (const book of books) list.append(createNovelCard(book));
+    els.viewContent.append(meta, list);
+    const more = createNovelLoadMore(Number(data.total || 0), books.length, "books");
+    if (more) els.viewContent.append(more);
+  }
+
+  function createNovelSearchHeader() {
+    const head = document.createElement("div");
+    head.className = "novel-mobile-search-page-head";
+    const form = document.createElement("form");
+    form.className = "novel-mobile-search-page-form";
+    form.setAttribute("role", "search");
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "novel-mobile-search-page-back";
+    back.setAttribute("aria-label", "返回小说");
+    back.textContent = "‹";
+    back.addEventListener("click", () => goBack());
+    const field = document.createElement("div");
+    field.className = "novel-mobile-search-page-field";
+    const icon = document.createElement("span");
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = "⌕";
+    const input = document.createElement("input");
+    input.type = "search";
+    input.value = listState.query;
+    input.placeholder = "搜书名、作者或分类";
+    input.setAttribute("aria-label", "搜索小说");
+    input.autocomplete = "off";
+    input.enterKeyHint = "search";
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "novel-mobile-search-page-clear";
+    clear.setAttribute("aria-label", "清除搜索内容");
+    clear.textContent = "×";
+    clear.hidden = !input.value;
+    clear.addEventListener("click", () => {
+      input.value = "";
+      clear.hidden = true;
+      input.focus();
+    });
+    input.addEventListener("input", () => {
+      clear.hidden = !input.value;
+    });
+    field.append(icon, input, clear);
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.className = "novel-mobile-search-page-submit";
+    submit.textContent = "搜索";
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      showView("novelSearch", { query: input.value.trim() }, { skipHistory: true, replaceHistory: true });
+    });
+    form.append(back, field, submit);
+    head.append(form);
+    window.requestAnimationFrame(() => input.focus({ preventScroll: true }));
+    return head;
   }
 
   function renderNovelAuthorListData(data = {}, localData = emptyLocalListData(), cacheEntry = null) {
@@ -347,7 +444,7 @@ export function createNovelViews(context) {
 
   function syncDefaultNovelSource() {
     if (listState.sourceTouched) return;
-    listState.source = "local";
+    listState.source = "remote";
   }
 
   function normalizeLibrarySource(source) {
@@ -378,6 +475,36 @@ export function createNovelViews(context) {
     window.dispatchEvent(new CustomEvent("fanhaoNovelSourceChanged", {
       detail: { source: getLibrarySource() }
     }));
+  }
+
+  function getNovelNavigationState() {
+    return {
+      category: listState.category || "all",
+      sort: listState.sort || "updated",
+      total: Number(listState.total || 0),
+      categories: (listState.facets || []).map((item) => ({
+        name: String(item?.name || "").trim(),
+        label: displayCategory(item?.name),
+        count: Number(item?.count || 0)
+      })).filter((item) => item.name)
+    };
+  }
+
+  function setNovelCategory(category) {
+    const next = String(category || "all").trim() || "all";
+    if (listState.category === next) return false;
+    listState.category = next;
+    listState.author = "";
+    resetNovelRemoteLimits();
+    return true;
+  }
+
+  function setNovelSort(sort) {
+    const next = ["updated", "title", "chapters", "chars"].includes(String(sort || "")) ? String(sort) : "updated";
+    if (listState.sort === next) return false;
+    listState.sort = next;
+    resetNovelRemoteLimits();
+    return true;
   }
 
   function visibleLocalBooksForRemote(remoteBooks = [], localBooksList = []) {
@@ -472,6 +599,7 @@ export function createNovelViews(context) {
           || String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
       }
       if (sort === "chapters") return Number(b.chapterCount || 0) - Number(a.chapterCount || 0);
+      if (sort === "chars") return Number(b.charCount || 0) - Number(a.charCount || 0);
       if (sort === "size") return Number(b.sizeBytes || 0) - Number(a.sizeBytes || 0);
       if (sort === "title") return String(a.title || "").localeCompare(String(b.title || ""), "zh-Hans-CN");
       return String(b.updatedAt || b.progress?.updatedAt || "").localeCompare(String(a.updatedAt || a.progress?.updatedAt || ""));
@@ -778,9 +906,8 @@ export function createNovelViews(context) {
 
   function emptyNovelListMessage() {
     if (listState.query) return `没有搜到「${listState.query}」。`;
-    if (listState.source === "local") return "手机本地书库还没有书，可以点「导入」加入 TXT。";
-    if (listState.source === "remote") return "书城还没有书，或电脑端暂时连不上。";
-    return "书城还没有书，或电脑端暂时连不上。";
+    if (listState.category !== "all") return `「${displayCategory(listState.category)}」分类暂时没有内容。`;
+    return "小说库暂时没有内容，或电脑端暂时连不上。";
   }
 
   function createNovelEmptyState(data = {}) {
@@ -788,7 +915,7 @@ export function createNovelViews(context) {
     box.className = "novel-mobile-empty";
 
     const title = document.createElement("strong");
-    title.textContent = listState.query ? "没有匹配的小说" : listState.source === "local" ? "本地书库是空的" : "书城暂时没有内容";
+    title.textContent = listState.query ? "没有匹配的小说" : "暂时没有小说";
 
     const message = document.createElement("p");
     message.textContent = emptyNovelListMessage();
@@ -807,30 +934,6 @@ export function createNovelViews(context) {
         renderCurrentView();
       });
       actions.append(clear);
-    }
-
-    if (listState.source === "local" && !listState.query) {
-      const localInput = createLocalNovelInput();
-      const localImport = document.createElement("button");
-      localImport.type = "button";
-      localImport.className = "primary";
-      localImport.textContent = busyButtonLabel("local", "导入本地");
-      localImport.disabled = listState.uploading;
-      localImport.addEventListener("click", () => localInput.click());
-      actions.append(localImport, localInput);
-
-      const remoteCount = Number(data.summary?.sourceTotals?.remoteBooks || 0);
-      if (remoteCount > 0) {
-        const bookstore = document.createElement("button");
-        bookstore.type = "button";
-        bookstore.textContent = "去书城";
-        bookstore.addEventListener("click", () => {
-          setLibrarySource("bookstore");
-          renderCurrentView();
-          window.scrollTo({ top: 0, behavior: "smooth" });
-        });
-        actions.append(bookstore);
-      }
     }
 
     box.append(title, message);
@@ -993,101 +1096,26 @@ export function createNovelViews(context) {
 
   function createNovelCard(book = {}) {
     const card = document.createElement("article");
-    card.className = `novel-mobile-card${book.cachedLocal ? " cached-local" : ""}`;
-    const selectable = isLocalSelectionMode() && book.local && isLocalBookId(book.id);
-    const selected = selectable && selectedLocalBookIds.has(book.id);
-    if (selectable) card.classList.add("selectable");
-    if (selected) card.classList.add("selected");
+    card.className = "novel-mobile-card";
     card.role = "button";
     card.tabIndex = 0;
-    const openDetail = () => {
-      const detailId = detailBookId(book);
-      if (detailId) showView("novelDetail", { id: detailId }, { push: true });
-      else openReader(book);
-    };
-    const toggleSelection = () => {
-      if (!selectable) return false;
-      if (selectedLocalBookIds.has(book.id)) selectedLocalBookIds.delete(book.id);
-      else selectedLocalBookIds.add(book.id);
-      renderCurrentViewPreservingScroll();
-      return true;
-    };
     card.addEventListener("click", () => {
-      if (toggleSelection()) return;
       openReader(book);
     });
     card.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
-      if (toggleSelection()) return;
       openReader(book);
     });
 
     const cover = createCover(book);
-    if (selectable) {
-      const check = document.createElement("span");
-      check.className = "novel-mobile-select-mark";
-      check.textContent = selected ? "✓" : "";
-      check.setAttribute("aria-hidden", "true");
-      cover.append(check);
-    }
     const body = document.createElement("div");
     body.className = "novel-mobile-card-body";
     const title = document.createElement("strong");
     title.textContent = book.title || "未命名小说";
-    const cacheBadge = document.createElement("small");
-    cacheBadge.className = "novel-mobile-cache-badge";
-    cacheBadge.textContent = "已缓存";
     const meta = document.createElement("span");
-    meta.textContent = [book.author || "未知作者", bookCategoryLabel(book), `${formatNumber(book.chapterCount)} 章`, formatBytes(book.sizeBytes)].filter(Boolean).join(" · ");
-    const summary = document.createElement("p");
-    summary.textContent = book.summary || book.latestChapterTitle || book.relativePath || "";
-    const progress = document.createElement("small");
-    progress.className = "novel-mobile-card-progress";
-    progress.textContent = readingProgressText(book);
-    const latest = document.createElement("small");
-    latest.className = "novel-mobile-card-chapter";
-    latest.textContent = book.progress
-      ? `读到第 ${book.progress.chapterIndex || 1} 章`
-      : book.cachedLocal
-        ? "已缓存整本"
-      : book.latestChapterTitle
-        ? book.latestChapterTitle
-        : "本地 TXT";
-
-    const actions = document.createElement("div");
-    actions.className = "novel-mobile-card-actions";
-    const detail = document.createElement("button");
-    detail.type = "button";
-    detail.textContent = "详情";
-    detail.addEventListener("click", (event) => {
-      event.stopPropagation();
-      openDetail();
-    });
-    const download = document.createElement("button");
-    download.type = "button";
-    download.textContent = secondaryBookActionLabel(book);
-    download.disabled = Boolean(!book.local && !book.cachedLocal && cachingBookId);
-    download.addEventListener("click", (event) => {
-      event.stopPropagation();
-      handleSecondaryBookAction(book);
-    });
-    actions.append(detail, download);
-    if (book.local) {
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "danger";
-      remove.textContent = "移除";
-      remove.addEventListener("click", (event) => {
-        event.stopPropagation();
-        removeLocalBook(book);
-      });
-      actions.append(remove);
-    }
-
-    body.append(title);
-    if (book.cachedLocal && !book.local) body.append(cacheBadge);
-    body.append(progress, latest, meta, summary, actions);
+    meta.textContent = [book.author || "未知作者", bookCategoryLabel(book)].filter(Boolean).join(" · ");
+    body.append(title, meta);
     card.append(cover, body);
     return card;
   }
@@ -3248,8 +3276,8 @@ export function createNovelViews(context) {
   function novelListPath() {
     const params = new URLSearchParams();
     if (listState.query) params.set("q", listState.query);
-    if (listState.category && listState.category !== "all") params.set("category", listState.category);
-    if (listState.author) params.set("author", listState.author);
+    if (!listState.searchPage && listState.category && listState.category !== "all") params.set("category", listState.category);
+    if (!listState.searchPage && listState.author) params.set("author", listState.author);
     if (listState.sort && listState.sort !== "updated") params.set("sort", listState.sort);
     params.set("limit", String(Math.max(NOVEL_REMOTE_PAGE_SIZE, Number(listState.remoteLimit || NOVEL_REMOTE_PAGE_SIZE))));
     return `/api/novels${params.toString() ? `?${params}` : ""}`;
@@ -3290,8 +3318,12 @@ export function createNovelViews(context) {
 
   return {
     renderNovelList,
+    renderNovelSearch,
     renderNovelDetail,
     renderNovelReader,
+    getNovelNavigationState,
+    setNovelCategory,
+    setNovelSort,
     getLibrarySource,
     setLibrarySource,
     focusLocalSource

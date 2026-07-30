@@ -176,10 +176,21 @@ assert(androidMusicLibrarySort.split(/\r?\n/).length <= 180, "Android music focu
 assert(androidMusicCollectionView.split(/\r?\n/).length <= 360, "Android music artist and album view must stay focused");
 assert(androidMusicSearchController.split(/\r?\n/).length <= 400, "Android music search controller must stay below 400 lines");
 assert(androidMusicSheets.split(/\r?\n/).length <= 700, "Android music sheet controller must stay below 700 lines");
-assert(
-  fs.readFileSync(path.join(androidModulesDir, "novels", "novel-views.js"), "utf8").includes("novel-mobile-search-pill"),
-  "novels must keep search inside its own module surface"
+const androidNovelViews = fs.readFileSync(path.join(androidModulesDir, "novels", "novel-views.js"), "utf8");
+const androidNovelEntry = fs.readFileSync(path.join(androidModulesDir, "novels", "android-module.js"), "utf8");
+const androidNovelListRender = androidNovelViews.slice(
+  androidNovelViews.indexOf("function renderNovelListData"),
+  androidNovelViews.indexOf("function renderNovelSearchData")
 );
+const androidNovelCardRender = androidNovelViews.slice(
+  androidNovelViews.indexOf("function createNovelCard"),
+  androidNovelViews.indexOf("function secondaryBookActionLabel")
+);
+assert(androidNovelViews.includes("novel-mobile-search-page-head") && androidNovelEntry.includes('{ view: "novelSearch"'), "novels must open search as a dedicated module page");
+assert(androidNovelEntry.includes('nav.setAttribute("aria-label", "小说分类")') && !androidNovelEntry.includes('{ label: "本地", source: "local" }'), "novel categories must occupy the top chrome without a visible local/remote switch");
+assert(!androidNovelListRender.includes("createNovelControls") && !androidNovelListRender.includes("createRecentStrip"), "novel home must not render library/author controls or continue-reading rails");
+assert(androidNovelCardRender.includes("body.append(title, meta)") && !androidNovelCardRender.includes("summary") && !androidNovelCardRender.includes("progress") && !androidNovelCardRender.includes("actions"), "novel cards must stay limited to cover, title, author, and category");
+assert(androidNovelCardRender.includes("openReader(book)") && androidNovelViews.includes("target.progress?.chapterIndex || fallbackIndex || 1"), "tapping a novel must open its last reading position directly");
 
 const webStylePaths = [
   "css/foundation.css",

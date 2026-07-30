@@ -1,8 +1,8 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260730-auto-update-ui-50";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260730-novel-simple-ui-51";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
-import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260730-auto-update-ui-50";
+import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260730-novel-simple-ui-51";
 import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260730-fanhao-nav-ui-44";
-import { getElements } from "./js/dom.js?v=20260730-auto-update-ui-50";
+import { getElements } from "./js/dom.js?v=20260730-novel-simple-ui-51";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
@@ -12,7 +12,7 @@ import { createSearchHistory } from "./js/search-history.js";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
-const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "categories", "codePrefixes", "codePrefixDetail", "studios", "studioDetail", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "tools"]);
+const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "categories", "codePrefixes", "codePrefixDetail", "studios", "studioDetail", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelSearch", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "tools"]);
 const DEFAULT_VIEW = "categories";
 const DEFAULT_PHOTO_CATEGORY = "我喜欢的";
 const PRIMARY_LABELS = {
@@ -86,7 +86,7 @@ let androidVersionInfo = null;
 let androidUpdateInfo = null;
 let androidUpdateStatus = "checking";
 let androidUpdateError = null;
-const FEED_VIEWS = new Set(["works", "rankings", "categories", "codePrefixes", "codePrefixDetail", "studios", "studioDetail", "people", "personDetail", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelDetail", "music", "shortVideos"]);
+const FEED_VIEWS = new Set(["works", "rankings", "categories", "codePrefixes", "codePrefixDetail", "studios", "studioDetail", "people", "personDetail", "history", "channel", "photoDetail", "workDetail", "mediaDetail", "novels", "novelSearch", "novelDetail", "music", "shortVideos"]);
 
 function readInitialViewState() {
   const state = readViewStateFromHash() || readLastViewState();
@@ -133,6 +133,7 @@ function shouldRememberView(view, params = {}) {
   if (view === "mangaDetail") return Boolean(params.id);
   if (view === "mangaChapter") return Boolean(params.id && params.chapterIndex);
   if (view === "mediaDetail") return Boolean(params.id);
+  if (view === "novelSearch") return true;
   if (view === "novelDetail") return Boolean(params.id);
   if (view === "novelReader") return Boolean(params.id && params.chapterIndex);
   return true;
@@ -154,6 +155,7 @@ function sanitizeViewParams(view, params = {}) {
   if (view === "photoDetail") return { id: String(params.id || "") };
   if (view === "mangaDetail") return { id: String(params.id || "") };
   if (view === "mangaChapter") return { id: String(params.id || ""), chapterIndex: String(params.chapterIndex || params.chapter || "") };
+  if (view === "novelSearch") return { query: String(params.query || params.q || "").trim() };
   if (view === "novelDetail") return { id: String(params.id || "") };
   if (view === "novelReader") return { id: String(params.id || ""), chapterIndex: String(params.chapterIndex || params.chapter || "1") };
   if (view === "music") {
@@ -1284,6 +1286,7 @@ function handleChannelFavoriteChange() {
 function showHome(options = {}) {
   invalidateViewRender();
   document.body.classList.remove("novel-reader-view");
+  document.body.classList.remove("novel-search-page-view");
   document.body.classList.remove("fanhao-search-page-view");
   currentView = "home";
   currentViewParams = {};
@@ -1390,6 +1393,7 @@ function canRenderWithoutLibrary(view = "") {
   return view === "home"
     || view === "tools"
     || view === "novels"
+    || view === "novelSearch"
     || view === "novelDetail"
     || view === "novelReader"
     || view === "music"
@@ -1599,6 +1603,7 @@ function routeLoadingCopy(view = currentView, params = currentViewParams) {
   if (view === "personDetail") return { kicker: "演员", title: "演员详情", meta: "正在读取", message: "正在加载演员资料" };
   if (view === "workDetail") return { kicker: "作品详情", title: "作品详情", meta: "正在读取", message: "正在加载作品详情" };
   if (view === "novelDetail") return { kicker: "小说", title: "书籍详情", meta: "正在读取", message: "正在读取书籍详情" };
+  if (view === "novelSearch") return { kicker: "小说", title: "搜索", meta: "", message: "正在打开小说搜索" };
   if (view === "novelReader") return { kicker: "小说阅读", title: "章节", meta: "正在读取", message: "正在翻开章节" };
   if (view === "music") return { kicker: "本地音乐", title: "音乐", meta: "正在读取", message: "正在读取音乐库" };
   if (view === "shortVideoSearch") return { kicker: "短视频", title: "搜索", meta: "", message: "正在打开搜索" };
@@ -1624,6 +1629,7 @@ function syncContentPanelMode() {
   els.contentPanel.dataset.channelMode = currentView === "channel" ? normalizeChannelMode(currentViewParams.mode) : "";
   document.body.classList.toggle("novel-library-view", isNovelNavigationView(currentView) && currentView !== "novelReader");
   document.body.classList.toggle("novel-reader-view", currentView === "novelReader");
+  document.body.classList.toggle("novel-search-page-view", currentView === "novelSearch");
   document.body.classList.toggle("music-mobile-view", currentView === "music");
   document.body.classList.toggle("short-video-mobile-view", currentView === "shortVideos");
   document.body.classList.toggle("short-video-search-page-view", currentView === "shortVideoSearch");
@@ -1666,7 +1672,6 @@ function toggleSettings(force) {
 }
 
 function showPrimaryView(view, navigation = {}) {
-  if (view === "novels") novelViews?.focusLocalSource?.();
   showView(view, {}, navigation);
 }
 
@@ -1682,7 +1687,7 @@ function isRootNavigationView(view = currentView) {
 }
 
 function isNovelNavigationView(view = currentView) {
-  return view === "novels" || view === "novelDetail" || view === "novelReader";
+  return view === "novels" || view === "novelSearch" || view === "novelDetail" || view === "novelReader";
 }
 
 function syncModuleChrome() {

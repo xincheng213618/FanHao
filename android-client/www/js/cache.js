@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=20260730-auto-update-ui-50";
+import { CLIENT_VERSION } from "./config.js?v=20260730-novel-simple-ui-51";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;
