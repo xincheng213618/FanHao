@@ -409,9 +409,12 @@ body.fanhao-work-detail-view .bottom-nav {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.work-detail-toolbar,
 .fanhao-search-result-toolbar {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.work-detail-toolbar {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .person-detail-work-toolbar > button,

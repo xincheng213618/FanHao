@@ -1,7 +1,7 @@
 import { createAndroidVideoSection } from "../../js/android-player.js?v=20260721-fanhao-media-relocate-16";
 import { cacheAgeText } from "../../js/cache.js?v=20260705-mobile-actions-01";
 import { createDetailSectionTitle } from "../../js/detail-ui.js";
-import { extractWorkCode, formatBytes, formatDate, formatNumber } from "../../js/format.js";
+import { extractWorkCode, formatBytes, formatNumber } from "../../js/format.js";
 import { createInfoPreviewSection } from "../../js/info-preview.js";
 import { absoluteUrl, createFallbackCover, imageUrlForPerson, imageUrlForWork, loadPreviewImage } from "../../js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-01";
@@ -9,7 +9,7 @@ import { personDetailPath } from "./features/people/detail-request.js?v=20260721
 import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260721-fanhao-person-categories-21";
 import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=20260721-fanhao-person-year-15";
 import { createWorkActions } from "./features/works/actions.js?v=20260721-fanhao-person-detail-02";
-import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=20260721-fanhao-work-detail-flow-09";
+import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=20260730-fanhao-work-detail-ui-46";
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
 
 const PLAY_OPEN_COOLDOWN_MS = 1400;
@@ -231,7 +231,6 @@ export function createDetailViews(context) {
       const previewPanel = previewMedia.render(work);
       const fallbackInfoPanel = !factPanel ? infoSection.createInlineInfoPanel(work) : null;
       const personPanel = createWorkPeoplePanel(person, work);
-      const relatedPanel = createRelatedWorksPanel(work, person, isActive);
 
       els.viewContent.append(hero);
       if (factPanel) els.viewContent.append(factPanel);
@@ -241,12 +240,10 @@ export function createDetailViews(context) {
       if (!factPanel) {
         if (fallbackInfoPanel) els.viewContent.append(fallbackInfoPanel);
       }
-      if (relatedPanel) els.viewContent.append(relatedPanel);
       els.viewContent.append(createWorkDetailToolbar({
         work,
         onPlay: playDefaultVideo,
-        factsTarget: factPanel || fallbackInfoPanel,
-        relatedTarget: relatedPanel
+        factsTarget: factPanel || fallbackInfoPanel
       }));
     };
     try {
@@ -714,147 +711,6 @@ export function createDetailViews(context) {
       .toLowerCase()
       .replace(/[\s._・·,，、|/()[\]【】「」『』"'’‘“”]+/g, "")
       .trim();
-  }
-
-  function createRelatedWorksPanel(work, person, isActive = () => true) {
-    const personId = person?.id || work.personId;
-    if (!personId) return null;
-
-    const section = document.createElement("div");
-    section.className = "detail-block related-works-block";
-    const heading = createDetailSectionTitle("同演员作品", "正在加载");
-    const meta = heading.querySelector("span");
-    const strip = document.createElement("div");
-    strip.className = "related-work-strip";
-    strip.innerHTML = `<div class="loading-row">正在加载相关作品</div>`;
-    section.append(heading, strip);
-    loadRelatedWorks(work, personId, strip, meta, isActive);
-    return section;
-  }
-
-  async function loadRelatedWorks(currentWork, personId, mount, meta, isActive = () => true) {
-    const activeUrl = getActiveUrl();
-    const path = `/api/people/${encodeURIComponent(personId)}?limit=120&offset=0`;
-    const render = (payload, cacheEntry = null) => {
-      const works = relatedWorksForDisplay(payload?.works || [], currentWork.id);
-      mount.innerHTML = "";
-      if (meta) {
-        const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-        meta.textContent = works.length ? `${formatNumber(works.length)} 部${suffix}` : suffix.trim();
-      }
-
-      if (!works.length) {
-        const empty = document.createElement("div");
-        empty.className = "message-box quiet";
-        empty.textContent = "暂时没有其他相关作品。";
-        mount.append(empty);
-        return;
-      }
-      for (const item of works.slice(0, 12)) {
-        mount.append(createRelatedWorkCard(item));
-      }
-    };
-    let renderedCache = false;
-    try {
-      const result = await pageDataService.load(activeUrl, path, {
-        signal: isActive.signal,
-        isActive,
-        onCached(data, cacheEntry) {
-          if (!data?.works) return;
-          renderedCache = true;
-          render(data, cacheEntry);
-        }
-      });
-      if (!result || !isActive()) return;
-      if (!result.unchanged) render(result.data);
-    } catch (error) {
-      if (!isActive()) return;
-      if (renderedCache) return;
-      mount.innerHTML = "";
-      const box = document.createElement("div");
-      box.className = "message-box error";
-      box.textContent = detailErrorMessage(error, "相关作品读取失败，请检查服务连接");
-      mount.append(box);
-      if (meta) meta.textContent = "";
-    }
-  }
-
-  function relatedWorksForDisplay(works, currentWorkId) {
-    return [...works]
-      .filter((item) => item && item.id !== currentWorkId)
-      .sort((a, b) => compareRelatedWork(a, b));
-  }
-
-  function compareRelatedWork(a, b) {
-    const aRating = numericRating(a.infoSummary?.rating);
-    const bRating = numericRating(b.infoSummary?.rating);
-    const aHasRating = aRating !== null;
-    const bHasRating = bRating !== null;
-    if (aHasRating !== bHasRating) return aHasRating ? -1 : 1;
-    if (aHasRating && aRating !== bRating) return bRating - aRating;
-
-    const aCount = Number(a.infoSummary?.ratingCount || 0);
-    const bCount = Number(b.infoSummary?.ratingCount || 0);
-    if (aCount !== bCount) return bCount - aCount;
-
-    const aCover = imageUrlForWork(a) ? 1 : 0;
-    const bCover = imageUrlForWork(b) ? 1 : 0;
-    if (aCover !== bCover) return bCover - aCover;
-
-    return String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || ""));
-  }
-
-  function createRelatedWorkCard(work) {
-    const card = document.createElement("button");
-    card.type = "button";
-    card.className = "related-work-card";
-    workDetailDataService.bind(card, work.id);
-    card.addEventListener("click", () => {
-      void workDetailDataService.warm(work.id);
-      showView("workDetail", { workId: work.id }, { push: true });
-    });
-
-    const thumb = document.createElement("div");
-    thumb.className = "related-work-thumb";
-    thumb.textContent = "NO COVER";
-    const imagePath = imageUrlForWork(work);
-    if (imagePath) {
-      const activeUrl = getActiveUrl();
-      loadPreviewImage(thumb, absoluteUrl(activeUrl, imagePath), { cacheBaseUrl: activeUrl });
-    }
-
-    const body = document.createElement("div");
-    body.className = "related-work-body";
-    const title = document.createElement("strong");
-    title.textContent = work.title || work.directoryName || "未命名作品";
-    const meta = document.createElement("span");
-    meta.textContent = relatedWorkMeta(work);
-    body.append(title, meta);
-
-    card.append(thumb, body);
-    return card;
-  }
-
-  function relatedWorkMeta(work) {
-    const rating = numericRating(work.infoSummary?.rating);
-    const ratingText = rating ? `★ ${rating}` : "";
-    const date = displayWorkDate(work.infoSummary?.releaseDate || work.modifiedAt);
-    const parts = [ratingText, date].filter(Boolean);
-    return parts.length ? parts.join(" · ") : "暂无评分日期";
-  }
-
-  function displayWorkDate(value) {
-    const raw = String(value || "").trim();
-    if (!raw) return "";
-    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
-    if (match) return `${match[1]}-${match[2]}-${match[3]}`;
-    return formatDate(raw);
-  }
-
-  function numericRating(value) {
-    if (value === null || value === undefined || value === "") return null;
-    const rating = Number(value);
-    return Number.isFinite(rating) ? rating : null;
   }
 
   function detailErrorMessage(error, fallback) {
