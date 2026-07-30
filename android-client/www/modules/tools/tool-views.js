@@ -2,7 +2,6 @@ import { postJson } from "../../js/api.js?v=20260702-novel-local-manage-74";
 import { formatBytes, formatNumber } from "../../js/format.js";
 import { absoluteUrl } from "../../js/image.js";
 
-const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
 const TXT_TOOL_INDENT_KEY = "fanhao.android.txtTool.indent";
 const TXT_TOOL_CLEAN_KEY = "fanhao.android.txtTool.cleanJunk";
 
@@ -15,9 +14,6 @@ export function createToolViews(context) {
 
   const state = {
     text: "",
-    fileName: "",
-    fileSize: 0,
-    fileBase64: "",
     indent: readStoredFlag(TXT_TOOL_INDENT_KEY, true),
     cleanJunk: readStoredFlag(TXT_TOOL_CLEAN_KEY, true),
     processing: false,
@@ -36,23 +32,36 @@ export function createToolViews(context) {
   }
 
   function renderMeta() {
-    const bytes = inputBytes();
-    const parts = [
-      "小游戏 2 个",
-      "TXT 工具",
-      bytes ? `输入 ${formatBytes(bytes)}` : "等待输入",
-      state.result?.size ? `输出 ${formatBytes(state.result.size)}` : "",
-      state.result ? "保留 10 分钟" : ""
-    ].filter(Boolean);
-    els.viewMeta.textContent = parts.join(" · ");
+    els.viewMeta.textContent = "";
   }
 
   function renderBody() {
-    els.viewContent.innerHTML = "";
-    const panel = document.createElement("section");
-    panel.className = "txt-native-tool";
-    panel.append(createGameLauncher(), createMetrics(), createInputPanel(), createOptions(), createActions(), createStatus(), createResult());
-    els.viewContent.append(panel);
+    const page = document.createElement("section");
+    page.className = "tools-dashboard";
+    page.append(
+      createToolSection("小游戏", "离线可用", createGameLauncher()),
+      createTextWorkspace()
+    );
+    els.viewContent.replaceChildren(page);
+  }
+
+  function createToolSection(titleText, metaText, content) {
+    const section = document.createElement("section");
+    section.className = "tools-section";
+    const head = createSectionHead(titleText, metaText);
+    section.append(head, content);
+    return section;
+  }
+
+  function createSectionHead(titleText, metaText) {
+    const head = document.createElement("div");
+    head.className = "tools-section-head";
+    const title = document.createElement("strong");
+    title.textContent = titleText;
+    const meta = document.createElement("span");
+    meta.textContent = metaText;
+    head.append(title, meta);
+    return head;
   }
 
   function createGameLauncher() {
@@ -60,19 +69,17 @@ export function createToolViews(context) {
     wrap.className = "tool-launch-grid";
     wrap.append(
       createLaunchCard({
-        title: "2048 AI Engine",
-        meta: "game-difficulty · GPL-3.0",
-        detail: "带 WASM AI，可手玩、一步建议或自动运行。",
-        action: "开始",
+        badge: "2048",
+        title: "2048 AI",
+        detail: "手玩、AI 建议或自动运行",
         onClick: () => {
           window.location.assign("./games/2048/index.html");
         }
       }),
       createLaunchCard({
+        badge: "解",
         title: "华容道",
-        meta: "jeantimex · source",
-        detail: "经典滑块关卡，带 AI 自动解，离线点按游玩。",
-        action: "开始",
+        detail: "经典滑块与 AI 自动解",
         onClick: () => {
           window.location.assign("./games/huarongdao/index.html#/game");
         }
@@ -85,7 +92,12 @@ export function createToolViews(context) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "tool-launch-card";
+    button.setAttribute("aria-label", `打开${item.title}`);
     button.addEventListener("click", item.onClick);
+
+    const badge = document.createElement("span");
+    badge.className = "tool-launch-badge";
+    badge.textContent = item.badge;
 
     const body = document.createElement("span");
     body.className = "tool-launch-body";
@@ -93,76 +105,37 @@ export function createToolViews(context) {
     const title = document.createElement("strong");
     title.textContent = item.title;
 
-    const meta = document.createElement("span");
-    meta.textContent = item.meta;
-
     const detail = document.createElement("small");
     detail.textContent = item.detail;
 
     const action = document.createElement("span");
     action.className = "tool-launch-action";
-    action.textContent = item.action;
+    action.textContent = "打开";
 
-    body.append(title, meta, detail);
-    button.append(body, action);
+    body.append(title, detail);
+    button.append(badge, body, action);
     return button;
   }
 
-  function createMetrics() {
-    const metrics = document.createElement("div");
-    metrics.className = "txt-native-metrics";
-    const input = inputBytes();
-    const output = Number(state.result?.size || 0);
-    metrics.append(
-      createMetric("输入", input ? formatBytes(input) : "待处理"),
-      createMetric("输出", output ? formatBytes(output) : "-"),
-      createMetric("章节", state.result ? formatNumber(state.result.stats?.chapters || 0) : "-")
+  function createTextWorkspace() {
+    const section = document.createElement("section");
+    section.className = "tools-section txt-native-workspace";
+    const bytes = inputBytes();
+    const summary = state.result?.size
+      ? `已生成 ${formatBytes(state.result.size)}`
+      : bytes
+        ? `已输入 ${formatBytes(bytes)}`
+        : "粘贴长文本后直接整理";
+    section.append(
+      createSectionHead("文本整理", summary),
+      createTextEditor(),
+      createOptions(),
+      createActions(),
+      createStatus()
     );
-    return metrics;
-  }
-
-  function createMetric(label, value) {
-    const node = document.createElement("div");
-    const strong = document.createElement("strong");
-    strong.textContent = value || "-";
-    const span = document.createElement("span");
-    span.textContent = label;
-    node.append(strong, span);
-    return node;
-  }
-
-  function createInputPanel() {
-    const wrap = document.createElement("div");
-    wrap.className = "txt-native-inputs";
-    wrap.append(createFilePicker(), createTextEditor());
-    return wrap;
-  }
-
-  function createFilePicker() {
-    const label = document.createElement("label");
-    label.className = "txt-native-file";
-
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = ".txt,text/plain";
-    input.hidden = true;
-    input.addEventListener("change", () => {
-      const file = input.files?.[0];
-      if (file) handleFile(file);
-    });
-
-    const title = document.createElement("strong");
-    title.textContent = state.fileName || "选择 TXT";
-
-    const meta = document.createElement("span");
-    meta.textContent = state.fileName ? `${formatBytes(state.fileSize)} · 原始文件` : "小说 / 长文本";
-
-    const action = document.createElement("span");
-    action.className = "txt-native-file-action";
-    action.textContent = "选文件";
-
-    label.append(input, title, meta, action);
-    return label;
+    const result = createResult();
+    if (result) section.append(result);
+    return section;
   }
 
   function createTextEditor() {
@@ -170,28 +143,19 @@ export function createToolViews(context) {
     label.className = "txt-native-editor";
 
     const span = document.createElement("span");
-    span.textContent = "粘贴文本";
+    span.textContent = "文本内容";
 
     const textarea = document.createElement("textarea");
-    textarea.placeholder = "粘贴 TXT 内容";
+    textarea.placeholder = "在这里粘贴需要整理的文本";
     textarea.spellcheck = false;
     textarea.value = state.text;
     textarea.addEventListener("input", () => {
       state.text = textarea.value;
       const hadResult = Boolean(state.result);
       state.result = null;
-      if (state.fileBase64 && state.text.trim()) {
-        state.fileBase64 = "";
-        state.fileName = "";
-        state.fileSize = 0;
-        state.status = "";
-        renderMeta();
-        renderBody();
-        return;
-      }
       setStatus("");
       renderMeta();
-      if (hadResult) refreshResultPanel();
+      if (hadResult) renderBody();
     });
 
     label.append(span, textarea);
@@ -250,21 +214,15 @@ export function createToolViews(context) {
     const status = document.createElement("p");
     status.className = `txt-native-status${state.status && /失败|不能|只支持|为空|请先/.test(state.status) ? " error" : ""}`;
     status.textContent = state.status || "";
+    status.hidden = !state.status;
     return status;
   }
 
   function createResult() {
     const result = state.result;
+    if (!result) return null;
     const section = document.createElement("section");
     section.className = "txt-native-result";
-
-    if (!result) {
-      const empty = document.createElement("div");
-      empty.className = "txt-native-empty";
-      empty.textContent = "格式化结果会显示在这里";
-      section.append(empty);
-      return section;
-    }
 
     const head = document.createElement("div");
     head.className = "txt-native-result-head";
@@ -314,47 +272,12 @@ export function createToolViews(context) {
     ];
   }
 
-  async function handleFile(file) {
-    if (!file.name.toLowerCase().endsWith(".txt")) {
-      setStatus("只支持 .txt 文件", true);
-      return;
-    }
-    if (file.size > TXT_TOOL_MAX_FILE_BYTES) {
-      setStatus(`TXT 文件不能超过 ${Math.round(TXT_TOOL_MAX_FILE_BYTES / 1024 / 1024)} MB`, true);
-      return;
-    }
-    setStatus("正在读取文件");
-    try {
-      state.fileBase64 = await fileToBase64(file);
-      state.fileName = file.name;
-      state.fileSize = file.size;
-      state.text = "";
-      state.result = null;
-      setStatus("文件已读取", true);
-    } catch (error) {
-      setStatus(error.message || "读取文件失败", true);
-    }
-  }
-
-  function fileToBase64(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const value = String(reader.result || "");
-        resolve(value.includes(",") ? value.slice(value.indexOf(",") + 1) : value);
-      };
-      reader.onerror = () => reject(reader.error || new Error("读取文件失败"));
-      reader.readAsDataURL(file);
-    });
-  }
-
   async function runFormatter() {
     if (state.processing) return;
     const text = state.text || "";
     const hasText = Boolean(text.trim());
-    const hasFile = Boolean(state.fileBase64);
-    if (!hasText && !hasFile) {
-      setStatus("请先选择 TXT 文件或粘贴文本", true);
+    if (!hasText) {
+      setStatus("请先粘贴需要整理的文本", true);
       return;
     }
 
@@ -363,14 +286,13 @@ export function createToolViews(context) {
     setStatus("正在格式化", true);
     try {
       const body = {
-        fileName: hasText ? "粘贴文本.txt" : state.fileName,
+        fileName: "粘贴文本.txt",
         options: {
           indent: state.indent,
           cleanJunk: state.cleanJunk
-        }
+        },
+        text
       };
-      if (hasText) body.text = text;
-      else body.contentBase64 = state.fileBase64;
 
       const result = await postJson(getActiveUrl(), "/api/tools/txt-format", body);
       state.result = result;
@@ -388,9 +310,6 @@ export function createToolViews(context) {
 
   function clearInput() {
     state.text = "";
-    state.fileName = "";
-    state.fileSize = 0;
-    state.fileBase64 = "";
     state.result = null;
     state.status = "";
     renderMeta();
@@ -405,7 +324,11 @@ export function createToolViews(context) {
       return;
     }
     const node = els.viewContent.querySelector(".txt-native-status");
-    if (node) node.textContent = state.status;
+    if (node) {
+      node.className = `txt-native-status${state.status && /失败|不能|只支持|为空|请先/.test(state.status) ? " error" : ""}`;
+      node.textContent = state.status;
+      node.hidden = !state.status;
+    }
   }
 
   async function copyResult(button) {
@@ -450,13 +373,6 @@ export function createToolViews(context) {
     textarea.remove();
   }
 
-  function refreshResultPanel() {
-    const metrics = els.viewContent.querySelector(".txt-native-metrics");
-    if (metrics) metrics.replaceWith(createMetrics());
-    const result = els.viewContent.querySelector(".txt-native-result");
-    if (result) result.replaceWith(createResult());
-  }
-
   function openDownload() {
     const url = downloadUrl();
     if (!url) return;
@@ -470,7 +386,6 @@ export function createToolViews(context) {
   }
 
   function inputBytes() {
-    if (state.fileBase64) return state.fileSize || 0;
     return new Blob([state.text || ""]).size;
   }
 

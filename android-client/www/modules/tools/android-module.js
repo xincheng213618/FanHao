@@ -1,4 +1,4 @@
-import { createToolViews } from "./tool-views.js?v=20260712-profile-settings-sheet-01";
+import { createToolViews } from "./tool-views.js?v=20260730-tools-dashboard-ui-49";
 
 export function createAndroidModule({ host }) {
   const toolViews = createToolViews({

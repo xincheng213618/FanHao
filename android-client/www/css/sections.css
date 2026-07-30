@@ -235,6 +235,7 @@ body.search-view.search-expanded .content-panel {
   min-height: 0;
   font-size: 14px;
   line-height: 1.25;
+  text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -368,6 +369,7 @@ body.search-view.search-expanded .content-panel {
   gap: 2px;
   align-content: start;
   padding: 0 3px 4px;
+  text-align: center;
 }
 
 .index-person-card strong,

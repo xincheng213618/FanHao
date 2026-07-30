@@ -1,0 +1,316 @@
+.tools-dashboard {
+  display: grid;
+  gap: 22px;
+  padding-bottom: 8px;
+}
+
+.tools-section {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.tools-section-head {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tools-section-head strong {
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 950;
+  line-height: 1.25;
+}
+
+.tools-section-head span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-launch-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.tool-launch-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  gap: 7px 9px;
+  min-width: 0;
+  min-height: 104px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  padding: 11px;
+  box-shadow: 0 5px 16px rgba(16, 24, 40, 0.06);
+  text-align: left;
+}
+
+.tool-launch-card:active {
+  background: var(--surface-soft);
+  transform: scale(0.985);
+}
+
+.tool-launch-badge {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  grid-row: 1;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--button-soft);
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.tool-launch-body {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.tool-launch-body strong {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 950;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-launch-body small {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 800;
+  line-height: 1.3;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.tool-launch-action {
+  grid-column: 1 / -1;
+  display: inline-flex;
+  width: fit-content;
+  min-width: 0;
+  min-height: 28px;
+  align-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: var(--button-soft);
+  color: var(--blue);
+  padding: 0 10px;
+  font-size: 10.5px;
+  font-weight: 950;
+}
+
+.txt-native-workspace {
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface-soft);
+  padding: 14px;
+}
+
+.txt-native-editor {
+  display: grid;
+  gap: 7px;
+}
+
+.txt-native-editor > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.txt-native-editor textarea,
+.txt-native-preview {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  padding: 12px;
+  font: 13px/1.65 Consolas, "Cascadia Mono", monospace;
+  resize: vertical;
+  outline: none;
+}
+
+.txt-native-editor textarea {
+  min-height: 156px;
+}
+
+.txt-native-editor textarea:focus,
+.txt-native-preview:focus {
+  border-color: var(--mobile-accent-border);
+  box-shadow: 0 0 0 3px var(--mobile-focus-ring);
+}
+
+.txt-native-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.txt-native-toggle {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 42px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  padding: 0 10px;
+  font-size: 11.5px;
+  font-weight: 900;
+}
+
+.txt-native-toggle input {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  accent-color: var(--blue);
+}
+
+.txt-native-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.txt-native-actions button,
+.txt-native-result-actions button {
+  min-height: 44px;
+  border-radius: 12px;
+  padding: 0 14px;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.txt-native-primary {
+  border: 1px solid var(--blue);
+  background: var(--blue);
+  color: #fff;
+}
+
+.txt-native-secondary,
+.txt-native-result-actions button {
+  border: 1px solid var(--line);
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+.txt-native-status {
+  min-height: 0;
+  margin: 0;
+  color: var(--green);
+  font-size: 11.5px;
+  font-weight: 850;
+  line-height: 1.4;
+}
+
+.txt-native-status.error {
+  color: var(--orange);
+}
+
+.txt-native-result {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.txt-native-result-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.txt-native-result-head strong,
+.txt-native-result-head span {
+  display: block;
+}
+
+.txt-native-result-head strong {
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.txt-native-result-head span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.txt-native-result-actions,
+.txt-native-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.txt-native-stats span {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--muted);
+  padding: 0 9px;
+  font-size: 10.5px;
+  font-weight: 900;
+}
+
+.txt-native-preview {
+  min-height: 220px;
+  max-height: 52vh;
+}
+
+@media (max-width: 360px) {
+  .tools-dashboard {
+    gap: 18px;
+  }
+
+  .tool-launch-card {
+    min-height: 94px;
+    padding: 9px;
+  }
+
+  .tool-launch-badge {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    font-size: 10px;
+  }
+
+  .tool-launch-body strong {
+    font-size: 14px;
+  }
+
+  .txt-native-workspace {
+    padding: 12px;
+  }
+
+  .txt-native-editor textarea {
+    min-height: 128px;
+  }
+}
