@@ -3,7 +3,7 @@ export const STORAGE_KEY = "fanhao.serverUrl";
 export const THEME_STORAGE_KEY = "fanhao.theme";
 export const SEARCH_HISTORY_STORAGE_KEY = "fanhao.android.searchHistory";
 export const LAST_VIEW_STORAGE_KEY = "fanhao.android.lastView";
-export const CLIENT_VERSION = "20260730-fanhao-nav-ui-44";
+export const CLIENT_VERSION = "20260730-fanhao-ranking-year-ui-45";
 
 
 

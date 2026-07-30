@@ -5,7 +5,7 @@ import { formatNumber } from "../../js/format.js";
 import { createWorkListState } from "../../js/work-filtering.js?v=20260726-work-sort-01";
 import { createWorkCards } from "./features/works/cards.js?v=20260721-fanhao-person-work-grid-20";
 import { workCollectionPath } from "./features/works/collection-request.js?v=20260720-fanhao-collection-filter-01";
-import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260721-fanhao-ranking-density-11";
+import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260730-fanhao-ranking-year-ui-45";
 import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-page-race-01";
 import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260721-fanhao-search-toolbar-23";
 import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-touch-intent-01";
@@ -49,6 +49,7 @@ export function createWorkViews(context) {
     replaceViewParams = () => false,
     goBack,
     setActiveBottom,
+    refreshChrome = () => {},
     renderCurrentView,
     renderCurrentViewPreservingScroll = renderCurrentView,
     isHomeView = () => false
@@ -77,6 +78,7 @@ export function createWorkViews(context) {
     renderCurrentViewPreservingScroll,
     renderMessage,
     renderWorks,
+    refreshChrome,
     setActiveBottom,
     workListState
   });
@@ -103,7 +105,6 @@ export function createWorkViews(context) {
         return;
       }
     }
-
     let renderedCache = false;
     try {
       const result = await pageDataService.load(activeUrl, path, {
@@ -386,7 +387,6 @@ export function createWorkViews(context) {
     leaveRankingSort();
     return categoryViews.renderCategories(category, isActive);
   }
-
   function studioDetailPath(studioId, seriesId = "all", limit = getWorksLimit()) {
     const params = new URLSearchParams({
       seriesId: seriesId || "all",
@@ -402,7 +402,6 @@ export function createWorkViews(context) {
     if (globalThis.navigator?.connection?.saveData) return;
     pageDataService.warm(getActiveUrl(), [studioDetailPath(studioId, seriesId)]);
   }
-
   function createStudioCard(studio) {
     const button = document.createElement("button");
     button.type = "button";
@@ -732,6 +731,7 @@ export function createWorkViews(context) {
     getSortMode: (view) => view === "rankings" ? rankingViews.getSortMode() : workListState.getSortMode(),
     getSortOptions: (view) => workListState.getSortOptions({ allowRankingSort: view === "rankings" }),
     setSortMode: (view, value) => view === "rankings" ? rankingViews.setSortMode(value) : workListState.setSortMode(value),
+    getRankingMenu: rankingViews.getYearMenu,
     getStudioSortMode,
     getStudioSortOptions: () => STUDIO_SORT_OPTIONS,
     setStudioSortMode,

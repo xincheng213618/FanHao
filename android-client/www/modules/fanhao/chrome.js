@@ -35,10 +35,14 @@ export function renderFanhaoChrome({ container, view }, host, views) {
     button.classList.toggle("active", active);
     button.classList.toggle("has-menu", opensSort);
     if (opensSort) {
-      const sortLabel = activeSort.options.find((option) => option.value === activeSort.value)?.label || "默认排序";
-      button.setAttribute("aria-label", `${tab.label}，当前${sortLabel}，点按选择排序`);
-      button.title = `${tab.label}排序 · ${sortLabel}`;
+      const selectedOption = activeSort.options.find((option) => option.value === activeSort.value);
+      const sortLabel = selectedOption?.label || "默认排序";
+      const menuLabel = activeSort.menuLabel || "排序";
+      const visibleValue = activeSort.showValue ? ` ${selectedOption?.shortLabel || sortLabel}` : "";
+      button.setAttribute("aria-label", `${tab.label}，当前${sortLabel}，点按选择${menuLabel}`);
+      button.title = `${tab.label}${menuLabel} · ${sortLabel}`;
       button.innerHTML = `<span>${tab.label}</span><svg aria-hidden="true" viewBox="0 0 12 12"><path d="m2.5 4.25 3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+      button.querySelector("span").textContent = `${tab.label}${visibleValue}`;
     } else {
       button.textContent = tab.label;
     }
@@ -104,9 +108,18 @@ function sortConfigForView(view, views) {
       select: (value) => views.peopleViews.setSortMode(value)
     };
   }
-  if (view === "works" || view === "rankings" || view === "categories") {
+  if (view === "rankings") {
+    const rankingMenu = views.workViews.getRankingMenu();
     return {
-      title: view === "rankings" ? "榜单排序" : view === "categories" ? "分类作品排序" : "作品排序",
+      title: "选择榜单年代",
+      menuLabel: "年代",
+      showValue: true,
+      ...rankingMenu
+    };
+  }
+  if (view === "works" || view === "categories") {
+    return {
+      title: view === "categories" ? "分类作品排序" : "作品排序",
       options: views.workViews.getSortOptions(view),
       value: views.workViews.getSortMode(view),
       select: (value) => views.workViews.setSortMode(view, value)

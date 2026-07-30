@@ -7,16 +7,61 @@ const STORAGE_KEY = "fanhao.android.rankingKey";
 const DEFAULT_KEY = "y2025";
 const PAGE_SIZE = 48;
 const IMAGE_CACHE_LIMIT = 48;
+const RANKING_WARM_LIMIT = 4;
 let requestedLimit = PAGE_SIZE;
 
 export function createRankingViews(deps) {
-  const { els, getActiveUrl, renderCurrentView, renderCurrentViewPreservingScroll, renderMessage, renderWorks, setActiveBottom, workListState } = deps;
+  const { els, getActiveUrl, refreshChrome = () => {}, renderCurrentView, renderCurrentViewPreservingScroll, renderMessage, renderWorks, setActiveBottom, workListState } = deps;
   let lists = [];
   let selectedKey = readStoredKey();
   let filterMode = "all";
   let sortMode = "ranking";
+  let renderSequence = 0;
+  let activeSignal;
+  const rankingDataByKey = new Map();
+
+  const renderData = (summary, data, summaryCache = null, dataCache = null, options = {}) => {
+    lists = summary?.lists || [];
+    const dataKey = chooseKey(lists, rankingDataKey(data, selectedKey));
+    const activeKey = options.displayKey === undefined ? dataKey : normalizeKey(options.displayKey);
+    if (dataKey) rankingDataByKey.set(dataKey, data);
+    if (options.persistSelection !== false) {
+      selectedKey = dataKey;
+      localStorage.setItem(STORAGE_KEY, selectedKey);
+    } else {
+      selectedKey = activeKey;
+    }
+    const works = data?.works || [];
+    const resultTotal = Number(data?.total || data?.rankingTotal || works.length);
+    const suffix = dataCache ? ` · 缓存 ${cacheAgeText(dataCache.updatedAt)}` : "";
+    els.viewTitle.textContent = data?.label || "JavDB TOP250";
+    els.viewMeta.textContent = metaText(data, works.length, suffix);
+    if (els.rankingsCount) els.rankingsCount.textContent = compactCount(data?.rankingTotal || data?.total || works.length);
+    els.viewContent.removeAttribute("aria-busy");
+    els.viewContent.innerHTML = "";
+    renderWorks(works, lists.length ? "这个榜单没有匹配项目。" : "还没有缓存排行榜。", {
+      compactMeta: true,
+      coverGrid: true,
+      showRatingMeta: true,
+      allowRankingSort: true,
+      filterMode,
+      sortMode,
+      onFilterChange: setFilterMode,
+      onSortChange: setSortMode,
+      total: resultTotal,
+      hasServerMore: works.length < resultTotal,
+      onLoadMore: () => {
+        requestedLimit = Math.min(resultTotal, requestedLimit + PAGE_SIZE);
+        return renderCurrentViewPreservingScroll();
+      }
+    });
+    refreshChrome();
+    return activeKey;
+  };
 
   async function renderRankings(isActive = () => true) {
+    const sequence = ++renderSequence;
+    activeSignal = isActive.signal;
     setActiveBottom("rankings");
     els.viewKicker.textContent = "排行榜";
     els.viewTitle.textContent = "JavDB TOP250";
@@ -24,40 +69,6 @@ export function createRankingViews(deps) {
     els.viewContent.innerHTML = `<div class="loading-row">正在加载排行榜</div>`;
     const activeUrl = getActiveUrl();
     let renderedCache = false;
-
-    const renderData = (summary, data, summaryCache = null, dataCache = null, options = {}) => {
-      lists = summary?.lists || [];
-      const dataKey = chooseKey(lists, rankingDataKey(data, selectedKey));
-      const activeKey = options.displayKey === undefined ? dataKey : normalizeKey(options.displayKey);
-      if (options.persistSelection !== false) {
-        selectedKey = dataKey;
-        localStorage.setItem(STORAGE_KEY, selectedKey);
-      }
-      const works = data?.works || [];
-      const resultTotal = Number(data?.total || data?.rankingTotal || works.length);
-      const suffix = dataCache ? ` · 缓存 ${cacheAgeText(dataCache.updatedAt)}` : "";
-      els.viewTitle.textContent = data?.label || "JavDB TOP250";
-      els.viewMeta.textContent = metaText(data, works.length, suffix);
-      if (els.rankingsCount) els.rankingsCount.textContent = compactCount(data?.rankingTotal || data?.total || works.length);
-      els.viewContent.innerHTML = "";
-      els.viewContent.append(createPanel(data, summaryCache, activeKey));
-      renderWorks(works, lists.length ? "这个榜单没有匹配项目。" : "还没有缓存排行榜。", {
-        compactMeta: true,
-        coverGrid: true,
-        showRatingMeta: true,
-        allowRankingSort: true,
-        filterMode,
-        sortMode,
-        onFilterChange: setFilterMode,
-        onSortChange: setSortMode,
-        total: resultTotal,
-        hasServerMore: works.length < resultTotal,
-        onLoadMore: () => {
-          requestedLimit = Math.min(resultTotal, requestedLimit + PAGE_SIZE);
-          return renderCurrentViewPreservingScroll();
-        }
-      });
-    };
 
     const anticipatedKey = normalizeKey(selectedKey || DEFAULT_KEY);
     const [cachedSummary, anticipatedCache] = await Promise.all([
@@ -68,18 +79,19 @@ export function createRankingViews(deps) {
     const cachedData = requestedKey === anticipatedKey
       ? anticipatedCache
       : await readCachedJson(activeUrl, topPath(requestedKey)).catch(() => null);
-    if (!isActive()) return;
+    if (!isActive() || sequence !== renderSequence) return;
     if (cachedData?.payload) {
       renderedCache = true;
       renderData(cachedSummary?.payload || { lists: [] }, cachedData.payload, cachedSummary, cachedData);
     }
     try {
       const fresh = await fetchBundle(activeUrl, requestedKey, isActive.signal);
-      if (!isActive()) return;
+      if (!isActive() || sequence !== renderSequence) return;
       renderData(fresh.summary, fresh.data);
       precacheImages(fresh.data?.works || [], activeUrl, isActive.signal).catch(() => {});
+      warmRankingYears(activeUrl, fresh.summary?.lists || [], selectedKey, isActive.signal).catch(() => {});
     } catch (error) {
-      if (!isActive()) return;
+      if (!isActive() || sequence !== renderSequence) return;
       if (renderedCache) {
         renderMessage("电脑端暂时连不上，当前显示的是本地缓存排行榜。", "quiet", false);
       } else {
@@ -110,6 +122,75 @@ export function createRankingViews(deps) {
     return { ...fresh, cachedImages, cachedLists };
   }
 
+  function selectYear(value) {
+    const key = normalizeKey(value);
+    if (!hasKey(lists, key) || key === selectedKey) return false;
+    const previousKey = selectedKey;
+    selectedKey = key;
+    requestedLimit = PAGE_SIZE;
+    localStorage.setItem(STORAGE_KEY, selectedKey);
+    refreshChrome();
+    void loadRankingYear(key, previousKey);
+    return true;
+  }
+
+  async function loadRankingYear(key, previousKey) {
+    const sequence = ++renderSequence;
+    const signal = activeSignal;
+    const activeUrl = getActiveUrl();
+    const summary = { lists };
+    let rendered = false;
+    els.viewContent.setAttribute("aria-busy", "true");
+    els.viewMeta.textContent = `正在切换至 ${rankingLabelForKey(lists, key)} 榜单`;
+
+    const remembered = rankingDataByKey.get(key);
+    if (remembered) {
+      renderData(summary, remembered);
+      rendered = true;
+    } else {
+      const cached = await readCachedJson(activeUrl, topPath(key)).catch(() => null);
+      if (signal?.aborted || sequence !== renderSequence) return;
+      if (cached?.payload) {
+        renderData(summary, cached.payload, null, cached);
+        rendered = true;
+      }
+    }
+
+    try {
+      const data = await fetchTop(activeUrl, key, signal);
+      if (signal?.aborted || sequence !== renderSequence) return;
+      renderData(summary, data);
+      precacheImages(data?.works || [], activeUrl, signal).catch(() => {});
+      warmRankingYears(activeUrl, lists, key, signal).catch(() => {});
+    } catch (error) {
+      if (signal?.aborted || sequence !== renderSequence) return;
+      if (rendered) {
+        renderMessage("网络刷新稍慢，当前先显示已缓存的年代榜单。", "quiet", false);
+      } else {
+        selectedKey = previousKey;
+        localStorage.setItem(STORAGE_KEY, selectedKey);
+        refreshChrome();
+        els.viewContent.removeAttribute("aria-busy");
+        renderMessage(error.message || "年代榜单切换失败", "error", false);
+      }
+    }
+  }
+
+  async function warmRankingYears(activeUrl, items, activeKey, signal) {
+    let warmed = 0;
+    for (const item of items || []) {
+      if (warmed >= RANKING_WARM_LIMIT) break;
+      const key = itemKey(item);
+      if (!key || key === activeKey || rankingDataByKey.has(key) || signal?.aborted) continue;
+      try {
+        const data = await fetchTop(activeUrl, key, signal, PAGE_SIZE);
+        if (signal?.aborted) return;
+        rankingDataByKey.set(key, data);
+        warmed += 1;
+      } catch {}
+    }
+  }
+
   async function fetchBundle(activeUrl, preferredKey = selectedKey, signal = undefined) {
     const anticipatedKey = normalizeKey(preferredKey || DEFAULT_KEY);
     const summaryRequest = fetchJson(activeUrl, "/api/rankings", { timeoutMs: 12000, signal })
@@ -126,8 +207,8 @@ export function createRankingViews(deps) {
     return { summary, data };
   }
 
-  async function fetchTop(activeUrl, key, signal = undefined) {
-    const path = topPath(key);
+  async function fetchTop(activeUrl, key, signal = undefined, limit = requestedLimit) {
+    const path = topPath(key, limit);
     const data = await fetchJson(activeUrl, path, { timeoutMs: 16000, signal });
     await writeCachedJson(activeUrl, path, data).catch(() => {});
     return data;
@@ -164,46 +245,6 @@ export function createRankingViews(deps) {
     return null;
   }
 
-  function createPanel(data = {}, summaryCache = null, activeKey = selectedKey) {
-    const panel = document.createElement("div");
-    panel.className = "ranking-panel";
-    panel.setAttribute("aria-label", metaText(data));
-    const chips = document.createElement("div");
-    chips.className = "ranking-chip-strip";
-    chips.setAttribute("aria-label", "选择榜单");
-    let activeButton = null;
-    if (!lists.length) {
-      const empty = document.createElement("span");
-      empty.className = "ranking-empty-note";
-      empty.textContent = summaryCache ? "缓存里暂时没有榜单摘要" : "后台刷新后会出现在这里";
-      chips.append(empty);
-    } else {
-      for (const item of lists) {
-        const button = document.createElement("button");
-        button.type = "button";
-        const key = itemKey(item);
-        button.className = key === activeKey ? "active" : "";
-        const total = Number(item.total || 0);
-        const local = Number(item.localTotal || 0);
-        button.textContent = `${compactRankingLabel(item)} · ${formatNumber(local)}/${formatNumber(total)}`;
-        button.setAttribute("aria-label", `${item.label || item.key || "榜单"}，本地已有 ${formatNumber(local)} / ${formatNumber(total)}`);
-        button.setAttribute("aria-pressed", key === activeKey ? "true" : "false");
-        button.addEventListener("click", () => {
-          if (key === selectedKey && key === activeKey) return;
-          selectedKey = key;
-          requestedLimit = PAGE_SIZE;
-          localStorage.setItem(STORAGE_KEY, selectedKey);
-          renderCurrentView();
-        });
-        if (key === activeKey) activeButton = button;
-        chips.append(button);
-      }
-    }
-    revealRankingChip(chips, activeButton);
-    panel.append(chips);
-    return panel;
-  }
-
   function setFilterMode(value) {
     if (filterMode === value) return;
     filterMode = value;
@@ -223,10 +264,23 @@ export function createRankingViews(deps) {
   }
 
   return {
+    getYearMenu: () => ({
+      value: selectedKey,
+      options: lists.map((item) => {
+        const shortLabel = compactRankingLabel(item);
+        return {
+          value: itemKey(item),
+          label: `${shortLabel} · ${formatNumber(item.localTotal || 0)}/${formatNumber(item.total || 0)}`,
+          shortLabel
+        };
+      }),
+      select: selectYear
+    }),
     getSortMode: () => sortMode,
     leaveRankingSort,
     refreshRankingCache,
     renderRankings,
+    selectYear,
     setSortMode
   };
 }
@@ -259,22 +313,15 @@ function itemKey(item = {}) { return normalizeKey(item.key); }
 function rankingDataKey(data, fallback = "") { return data && Object.hasOwn(data, "key") ? normalizeKey(data.key) : normalizeKey(fallback); }
 function normalizeKey(key) { return key === undefined || key === null ? "" : String(key); }
 function readStoredKey() { const stored = localStorage.getItem(STORAGE_KEY); return stored === null ? DEFAULT_KEY : stored; }
-function topPath(key = "") { return `/api/rankings/top?${new URLSearchParams({ key, limit: String(requestedLimit), offset: "0" })}`; }
+function topPath(key = "", limit = requestedLimit) { return `/api/rankings/top?${new URLSearchParams({ key, limit: String(limit), offset: "0" })}`; }
 function compactCount(value) { const number = Number(value || 0); return number > 0 ? formatNumber(number) : "TOP"; }
 
 function compactRankingLabel(item = {}) {
   return String(item.label || item.key || "榜单").replace(/^TOP250\s*/i, "") || "全部";
 }
 
-function revealRankingChip(strip, button) {
-  if (!button || typeof globalThis.requestAnimationFrame !== "function") return;
-  globalThis.requestAnimationFrame(() => {
-    if (!strip.isConnected || !button.isConnected) return;
-    const stripRect = strip.getBoundingClientRect();
-    const buttonRect = button.getBoundingClientRect();
-    const centerOffset = (stripRect.width - buttonRect.width) / 2;
-    strip.scrollLeft = Math.max(0, strip.scrollLeft + buttonRect.left - stripRect.left - centerOffset);
-  });
+function rankingLabelForKey(lists, key) {
+  return compactRankingLabel((lists || []).find((item) => itemKey(item) === normalizeKey(key)) || { key });
 }
 
 function metaText(data = {}, visibleCount = 0, suffix = "") {

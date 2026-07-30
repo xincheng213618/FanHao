@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=20260730-fanhao-nav-ui-44";
+import { CLIENT_VERSION } from "./config.js?v=20260730-fanhao-ranking-year-ui-45";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;
