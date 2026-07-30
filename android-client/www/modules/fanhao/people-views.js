@@ -267,10 +267,7 @@ export function createPeopleViews(context) {
     name.textContent = displayPersonName(person);
 
     if (mode === "preview") {
-      const meta = document.createElement("span");
-      const sources = person.sourceCount > 1 ? ` · ${formatNumber(person.sourceCount)} 处` : "";
-      meta.textContent = `本地 ${formatNumber(person.workCount)} 部${sources}`;
-      button.append(name, meta);
+      button.append(name);
       return button;
     }
 
@@ -286,12 +283,6 @@ export function createPeopleViews(context) {
     } else {
       body.append(name);
     }
-
-    const meta = document.createElement("span");
-    meta.className = "index-person-meta";
-    const sources = person.sourceCount > 1 ? ` · ${formatNumber(person.sourceCount)} 来源` : "";
-    meta.textContent = `本地 ${formatNumber(person.workCount)} 部${sources}`;
-    body.append(meta);
 
     button.append(body);
     return button;
