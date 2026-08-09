@@ -1,16 +1,28 @@
 import { api, post } from "../core/api.js";
 import { $, escapeHtml, safeUrl, toast } from "../core/dom.js";
-import { formatDateTime, statusLabel } from "../core/format.js";
+import { formatCompact, formatDateTime, statusLabel } from "../core/format.js";
 
-const PAGE_SIZE = 300;
+const PAGE_SIZE = 100;
 
 export function createLinksFeature(options) {
   const settings = options.settings;
   const refreshState = options.refreshState;
+  const supportsLinkRetry = options.supportsLinkRetry || (() => true);
   let currentFilter = "";
   let rows = [];
   let total = 0;
   let loading = false;
+  let searchTimer = null;
+  let summary = null;
+
+  function renderSummary() {
+    document.querySelectorAll("[data-link-count]").forEach((node) => {
+      const key = node.dataset.linkCount || "all";
+      const value = summary ? Number(summary[key] || 0) : null;
+      node.textContent = value === null ? "" : formatCompact(value) || "0";
+      node.hidden = value === null;
+    });
+  }
 
   function linkStatusTime(link) {
     const status = String(link.status || "");
@@ -29,6 +41,9 @@ export function createLinksFeature(options) {
   }
 
   function renderTable() {
+    const tableWrap = document.querySelector(".home-links-panel .table-wrap");
+    const scrollTop = tableWrap?.scrollTop || 0;
+    const scrollLeft = tableWrap?.scrollLeft || 0;
     $("linksBody").innerHTML =
       rows
         .map(
@@ -39,48 +54,83 @@ export function createLinksFeature(options) {
             const profileHref = safeUrl(link.profile_url);
             const profileName = String(link.profile_nickname || link.profile_title || `主页 #${link.profile_id || ""}`).trim();
             const profileTab = link.profile_tab === "like" ? "我的喜欢" : "作者作品";
+            const authorName = String(link.author_nickname || "").trim();
+            const rawTitle = String(link.desc || "").trim();
+            const title = !rawTitle || rawTitle === "no_title" ? "未命名作品" : rawTitle;
+            const kindLabel = link.media_type === "gallery" || link.kind === "note" ? "图集" : "视频";
+            const createDate = link.create_time ? new Date(Number(link.create_time) * 1000).toLocaleDateString() : "日期未知";
+            const issue = String(link.last_error || link.actual_probe_error || "").trim()
+              || (link.download_intent === "quality_upgrade" ? "等待最高画质重下" : "");
+            const issueIsWarning = status === "failed" || link.download_intent === "quality_upgrade";
             return `
             <tr>
-              <td>${escapeHtml(link.aweme_id || "")}</td>
-              <td class="preview-cell">${
-                link.cover_url
-                  ? `<img class="thumb" src="${safeUrl(link.cover_url)}" alt="" loading="lazy" />`
-                  : `<span class="muted">${escapeHtml(link.preview_path ? "本地" : "")}</span>`
-              }</td>
-              <td class="desc-cell">
-                <div>${escapeHtml(link.desc || "")}</div>
-                <div class="muted">${escapeHtml(link.create_time ? new Date(Number(link.create_time) * 1000).toLocaleDateString() : "")}</div>
+              <td class="work-cell">
+                <div class="link-work-summary">
+                  ${link.cover_url
+                    ? `<img class="thumb" src="${safeUrl(link.cover_url)}" alt="" loading="lazy" />`
+                    : '<div class="thumb link-thumb-placeholder" aria-hidden="true"></div>'}
+                  <div class="link-work-copy">
+                    <strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong>
+                    <div class="muted">${escapeHtml(kindLabel)} · ${escapeHtml(createDate)}</div>
+                  </div>
+                </div>
               </td>
-              <td>${escapeHtml(link.kind || "")}</td>
+              <td class="source-cell">
+                <a href="${profileHref}" target="_blank" rel="noreferrer">${escapeHtml(profileName)}</a>
+                <div class="muted">${escapeHtml(profileTab)}</div>
+                ${authorName && authorName !== profileName ? `<div class="muted">作者 ${escapeHtml(authorName)}</div>` : ""}
+              </td>
               <td>
                 <span class="badge ${statusClass}">${escapeHtml(statusLabel(status))}</span>
                 ${link.download_intent === "quality_upgrade" ? '<span class="badge quality-upgrade">高清重下</span>' : ""}
               </td>
-              <td class="time-cell">${renderLinkTime(link)}</td>
-              <td>${escapeHtml(link.attempts ?? 0)}</td>
-              <td class="author">
-                <div><a href="${profileHref}" target="_blank" rel="noreferrer">${escapeHtml(profileName)}</a></div>
-                <div class="muted">${escapeHtml(profileTab)}</div>
+              <td class="time-cell">
+                ${renderLinkTime(link)}
+                <div class="muted">尝试 ${escapeHtml(link.attempts ?? 0)} 次</div>
               </td>
-              <td class="author">
-                <div>${escapeHtml(link.author_nickname || "")}</div>
-                <div class="muted">${escapeHtml(link.author_sec_uid || link.author_uid || "")}</div>
+              <td class="issue-cell">
+                <div class="link-issue ${issueIsWarning ? "has-issue" : ""}">${escapeHtml(issue || "—")}</div>
+                <details class="link-row-details">
+                  <summary>技术详情</summary>
+                  <dl>
+                    <div><dt>作品 ID</dt><dd>${escapeHtml(link.aweme_id || "—")}</dd></div>
+                    <div><dt>作者标识</dt><dd>${escapeHtml(link.author_sec_uid || link.author_uid || "—")}</dd></div>
+                  </dl>
+                </details>
               </td>
-              <td class="url"><a href="${href}" target="_blank" rel="noreferrer">${escapeHtml(link.url || "")}</a></td>
-              <td class="error">${escapeHtml(link.last_error || "")}</td>
               <td class="link-actions-cell">
-                <button
-                  class="danger link-delete-button"
-                  data-link-delete="${escapeHtml(link.id || "")}"
-                  data-link-aweme-id="${escapeHtml(link.aweme_id)}"
-                  title="只删除这条数据库记录"
-                >删除</button>
+                <a class="link-open-button" href="${href}" target="_blank" rel="noreferrer">打开</a>
+                <details class="row-actions-menu">
+                  <summary>更多</summary>
+                  ${status === "failed" && supportsLinkRetry() ? `
+                    <button
+                      class="link-retry-button"
+                      data-link-retry="${escapeHtml(link.id || "")}"
+                      data-link-aweme-id="${escapeHtml(link.aweme_id)}"
+                    >重新加入下载队列</button>
+                  ` : ""}
+                  <button
+                    class="danger link-delete-button"
+                    data-link-delete="${escapeHtml(link.id || "")}"
+                    data-link-aweme-id="${escapeHtml(link.aweme_id)}"
+                    title="只删除这条数据库记录"
+                  >删除数据库记录</button>
+                </details>
               </td>
             </tr>
           `;
           }
         )
-        .join("") || '<tr><td colspan="12" class="muted">没有链接</td></tr>';
+        .join("") || '<tr><td colspan="6" class="muted empty-links-cell">没有符合条件的链接</td></tr>';
+    if (tableWrap) {
+      tableWrap.scrollTop = scrollTop;
+      tableWrap.scrollLeft = scrollLeft;
+    }
+    renderSummary();
+    renderPager();
+  }
+
+  function renderPager() {
     const loaded = Math.min(rows.length, total || rows.length);
     $("linksPager").textContent = `已加载 ${loaded} / ${total || 0}`;
     $("loadMoreLinks").hidden = loaded >= total;
@@ -96,6 +146,10 @@ export function createLinksFeature(options) {
     const limit = preserve ? Math.max(PAGE_SIZE, rows.length || PAGE_SIZE) : PAGE_SIZE;
     const params = new URLSearchParams();
     if (currentFilter) params.set("status", currentFilter);
+    const search = $("linksSearch")?.value.trim();
+    if (search) params.set("q", search);
+    params.set("view", "manager");
+    params.set("include_summary", "1");
     params.set("limit", String(limit));
     params.set("offset", String(offset));
     if (reset && !preserve) {
@@ -103,15 +157,16 @@ export function createLinksFeature(options) {
       total = 0;
     }
     loading = true;
-    renderTable();
+    renderPager();
     try {
       const data = await api(`/api/links?${params.toString()}`);
       total = Number(data.total || 0);
+      if (data.summary) summary = data.summary;
       rows = options.append ? [...rows, ...(data.links || [])] : data.links || [];
       renderTable();
     } finally {
       loading = false;
-      renderTable();
+      renderPager();
     }
   }
 
@@ -143,21 +198,6 @@ export function createLinksFeature(options) {
     const result = await post("/api/links/reset-failed", { scope });
     const label = scope === "all" ? "全部主页" : "当前主页";
     toast(`${label}失败已转为待下载：${result.changed || 0} 条`);
-    refreshState().catch(() => {});
-    refresh().catch(() => {});
-  }
-
-  async function backfillGalleryMusic() {
-    const preview = await post("/api/links/backfill-gallery-music", { scope: "all", dry_run: true });
-    const eligible = Number(preview.eligible || 0);
-    if (!eligible) {
-      toast("没有需要补齐背景音乐的图集");
-      return;
-    }
-    const ok = window.confirm(`检测到 ${eligible} 个已下载但缺少背景音乐的图集。确认重新加入下载队列吗？完成后会同步写入下载库和 FanHao。`);
-    if (!ok) return;
-    const result = await post("/api/links/backfill-gallery-music", { scope: "all" });
-    toast(`图集音乐补齐任务已加入队列：${result.changed || 0} 条`);
     refreshState().catch(() => {});
     refresh().catch(() => {});
   }
@@ -201,50 +241,65 @@ export function createLinksFeature(options) {
     }
   }
 
+  async function retryLink(linkId, awemeId, button) {
+    if (button) button.disabled = true;
+    try {
+      const result = await post("/api/links/retry", { id: linkId });
+      toast(`作品 ${result.aweme_id || awemeId || linkId} 已重新加入下载队列`);
+      await refresh();
+      refreshState().catch(() => {});
+    } finally {
+      if (button?.isConnected) button.disabled = false;
+    }
+  }
+
   function bind() {
     $("syncManifest").addEventListener("click", () => syncManifest().catch((err) => toast(err.message)));
     $("resetFailedCurrent").addEventListener("click", () => resetFailed("current").catch((err) => toast(err.message)));
     $("resetFailedAll").addEventListener("click", () => resetFailed("all").catch((err) => toast(err.message)));
-    $("backfillGalleryMusic").addEventListener("click", () => backfillGalleryMusic().catch((err) => toast(err.message)));
     $("deleteEmptyFailed").addEventListener("click", () => deleteEmptyFailed().catch((err) => toast(err.message)));
     $("deleteAllFailed").addEventListener("click", () => deleteAllFailed().catch((err) => toast(err.message)));
     $("loadMoreLinks").addEventListener("click", () => loadMore().catch((err) => toast(err.message)));
     $("linksBody").addEventListener("click", (event) => {
-      const button = event.target.closest("button[data-link-delete]");
+      const button = event.target.closest("button[data-link-delete], button[data-link-retry]");
       if (!button) return;
+      const retryId = Number(button.dataset.linkRetry || 0);
+      if (retryId) {
+        retryLink(retryId, button.dataset.linkAwemeId || "", button).catch((err) => toast(err.message));
+        return;
+      }
       const linkId = Number(button.dataset.linkDelete || 0);
       if (!linkId) return;
       deleteLink(linkId, button.dataset.linkAwemeId || "", button).catch((err) => toast(err.message));
     });
-    document.querySelector(".table-wrap")?.addEventListener("scroll", (event) => {
+    document.querySelector(".home-links-panel .table-wrap")?.addEventListener("scroll", (event) => {
       const node = event.currentTarget;
       if (node.scrollTop + node.clientHeight >= node.scrollHeight - 120) {
         loadMore().catch((err) => toast(err.message));
       }
     });
-    $("importLinks").addEventListener("click", () =>
-      post("/api/links/import", {
-        profile_url: $("profileUrl").value.trim() || "manual",
-        profile_tab: "auto",
-        text: $("manualLinks").value,
-      })
-        .then((data) => {
-          toast(`导入 ${data.count} 条，新 ${data.inserted} 条`);
-          $("manualLinks").value = "";
-          refresh();
-          refreshState();
-        })
-        .catch((err) => toast(err.message))
-    );
     document.querySelectorAll("[data-filter]").forEach((button) => {
+      button.setAttribute("aria-pressed", button.classList.contains("active") ? "true" : "false");
       button.addEventListener("click", () => {
-        document.querySelectorAll("[data-filter]").forEach((node) => node.classList.remove("active"));
+        document.querySelectorAll("[data-filter]").forEach((node) => {
+          node.classList.remove("active");
+          node.setAttribute("aria-pressed", "false");
+        });
         button.classList.add("active");
+        button.setAttribute("aria-pressed", "true");
         currentFilter = button.dataset.filter || "";
         rows = [];
         total = 0;
         refresh().catch((err) => toast(err.message));
       });
+    });
+    $("linksSearch").addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        rows = [];
+        total = 0;
+        refresh().catch((err) => toast(err.message));
+      }, 300);
     });
   }
 

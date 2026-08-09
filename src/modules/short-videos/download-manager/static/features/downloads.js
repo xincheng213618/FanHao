@@ -7,7 +7,9 @@ export function createDownloadsFeature(options) {
   const refreshState = options.refreshState;
   let localQueueOrder = [];
   let latestState = null;
+  let latestStatus = null;
   let lastDownloadProfileId = null;
+  let downloadActionPending = false;
 
   function renderDownloadGuard(state) {
     const guard = state.download?.failure_guard || {};
@@ -37,15 +39,19 @@ export function createDownloadsFeature(options) {
     const completed = Math.max(0, Number(cycle.completed || 0));
     const limit = Math.max(0, Number(cycle.limit || 0));
     const cooldown = Math.max(1, Number(cycle.cooldown_minutes || 30));
+    const idleRemaining = Math.max(0, Number(cycle.idle_remaining_seconds || 0));
     if (limit <= 0) {
       node.innerHTML = '<div class="muted">主动分段已关闭</div>';
       return;
     }
     const percent = Math.min(100, Math.round((completed / limit) * 100));
+    const resetHint = completed > 0 && idleRemaining > 0
+      ? `当前空闲，${formatCountdown(idleRemaining)} 后本轮计数自动清零；下载位置保持不变`
+      : `达到 ${limit} 后休息 ${cooldown} 分钟；连续空闲 ${cooldown} 分钟也会从 0 开始新一轮`;
     node.innerHTML = `
       <div class="download-cycle-head"><span>本轮实际下载</span><strong>${completed} / ${limit}</strong></div>
       <div class="download-cycle-bar"><span style="width:${percent}%"></span></div>
-      <div class="muted">达到 ${limit} 后主动休息 ${cooldown} 分钟</div>
+      <div class="muted">${resetHint}</div>
     `;
   }
 
@@ -83,7 +89,7 @@ export function createDownloadsFeature(options) {
     );
   }
 
-  function renderQueue(queue, activeProfileId) {
+  function renderQueue(queue, activeProfileId, state) {
     const node = $("downloadQueue");
     if (!node) return;
     const rows = queue || [];
@@ -131,7 +137,12 @@ export function createDownloadsFeature(options) {
             </div>
           `;
         })
-        .join("") || '<div class="muted">队列为空</div>';
+        .join("") || `
+          <div class="queue-empty">
+            <strong>当前没有排队主页</strong>
+            <span>${state.download?.active && state.download?.watch_new ? "动态监听仍在运行，新链接入库后会自动下载。" : "采集新链接或启动下载后，待处理主页会显示在这里。"}</span>
+          </div>
+        `;
   }
 
   function moveLocalQueue(profileId, direction) {
@@ -197,10 +208,30 @@ export function createDownloadsFeature(options) {
       concurrency: $("concurrency").value,
       retry_failed: retryFailed,
       limit: 0,
-      watch_new: $("watchQueue").checked,
+      watch_new: true,
     });
     const mode = result.watch_new ? "动态监听" : `本次 ${result.run_total} 条`;
     toast(`下载任务已启动：${mode}，待处理 ${result.pending} 条`);
+    refreshState().catch(() => {});
+  }
+
+  async function toggleDownload() {
+    if (downloadActionPending) return;
+    downloadActionPending = true;
+    const button = $("downloadStart");
+    button.disabled = true;
+    try {
+      if (latestStatus?.download?.active) {
+        await post("/api/download/stop");
+        toast("正在停止下载");
+      } else {
+        await startDownload(false);
+      }
+    } finally {
+      downloadActionPending = false;
+      button.disabled = false;
+      refreshState().catch(() => {});
+    }
   }
 
   async function sortQueueByPending() {
@@ -210,7 +241,7 @@ export function createDownloadsFeature(options) {
   }
 
   async function quitApplication() {
-    const busy = Boolean(latestState?.extract?.active || latestState?.download?.active);
+    const busy = Boolean(latestStatus?.extract?.active || latestStatus?.download?.active);
     if (busy && !window.confirm("采集或下载仍在进行。退出后未完成任务会在下次启动时继续，确定退出吗？")) return;
     await post("/api/app/quit");
     document.body.innerHTML = `
@@ -227,10 +258,7 @@ export function createDownloadsFeature(options) {
 
   function bind() {
     $("quitApp").addEventListener("click", () => quitApplication().catch((err) => toast(err.message)));
-    $("downloadStart").addEventListener("click", () => startDownload(false).catch((err) => toast(err.message)));
-    $("downloadStop").addEventListener("click", () =>
-      post("/api/download/stop").then(() => toast("正在停止下载")).catch((err) => toast(err.message))
-    );
+    $("downloadStart").addEventListener("click", () => toggleDownload().catch((err) => toast(err.message)));
     $("sortQueueByPending").addEventListener("click", () => sortQueueByPending().catch((err) => toast(err.message)));
     $("downloadQueue").addEventListener("click", (event) => {
       const button = event.target.closest("button");
@@ -250,40 +278,79 @@ export function createDownloadsFeature(options) {
     });
   }
 
-  function render(state) {
+  function renderHome(state) {
     latestState = state;
-    $("quitApp").hidden = !(state.app?.desktop || state.app?.frozen);
     const profiles = state.profiles || [];
     const hasServerQueue = Array.isArray(state.download_queue);
     const queue = hasServerQueue ? state.download_queue : queueFromProfiles(profiles);
     if (!localQueueOrder.length && queue.length) localQueueOrder = queue.map((item) => String(item.profile_id));
     const activeProfileId = activeDownloadProfileId(state);
-    renderQueue(queue, activeProfileId);
+    renderQueue(queue, activeProfileId, state);
     renderStats(statsFromQueue(queue));
+  }
+
+  function renderStatus(state) {
+    latestStatus = state;
+    $("quitApp").hidden = !(state.app?.desktop || state.app?.frozen);
     const guard = state.download?.failure_guard || {};
     renderDownloadGuard(state);
     renderDownloadCycle(state);
-    $("downloadStart").textContent = guard.active
-      ? guard.kind === "cycle_limit" ? "提前继续" : "更换 IP 后立即重试"
-      : "开始 / 继续";
-    if (state.download?.active) {
-      const inflight = state.download.inflight ?? state.download.processes ?? 0;
-      const watch = state.download.watch_new ? " · 动态监听" : "";
-      const port = state.download.sidecar_port ? ` · sidecar:${state.download.sidecar_port}` : "";
-      const proxy = state.download.proxy ? ` · 代理:${state.download.proxy}` : "";
-      $("downloadState").textContent = `下载中 · ${inflight} 个任务${watch}${port}${proxy}`;
+    const active = Boolean(state.download?.active);
+    const inflight = Math.max(0, Number(state.download?.inflight ?? state.download?.processes ?? 0));
+    const watching = active && Boolean(state.download?.watch_new);
+    const diagnostics = [
+      state.download?.sidecar_port ? `sidecar ${state.download.sidecar_port}` : "",
+      state.download?.proxy ? `代理 ${state.download.proxy}` : "未配置代理",
+    ].filter(Boolean).join(" · ");
+    let primaryStatus = "下载空闲";
+    let nextAction = "启动后会按队列顺序处理待下载作品";
+    let statusClass = "is-idle";
+    if (active && inflight > 0) {
+      primaryStatus = `正在下载 · ${inflight} 个任务`;
+      nextAction = watching ? "完成当前任务后继续监听新链接" : "正在处理当前下载队列";
+      statusClass = "is-active";
+    } else if (watching) {
+      primaryStatus = "监听中 · 当前空闲";
+      nextAction = "等待新链接，发现后会自动下载";
+      statusClass = "is-watching";
+    } else if (active) {
+      primaryStatus = "下载任务准备中";
+      nextAction = "正在检查待下载队列";
+      statusClass = "is-active";
     } else if (guard.active) {
-      const minutes = Math.max(1, Math.ceil(Number(guard.remaining_seconds || 0) / 60));
-      const proxy = state.download?.proxy ? ` · 代理:${state.download.proxy}` : "";
-      const pauseLabel = guard.kind === "cycle_limit" ? "主动休息" : "下载保护暂停";
-      $("downloadState").textContent = `${pauseLabel} · ${minutes} 分钟后自动重试${proxy}`;
-    } else {
-      const proxy = state.download?.proxy ? ` · 代理:${state.download.proxy}` : "";
-      $("downloadState").textContent = state.download?.sidecar_port
-        ? `下载空闲 · sidecar:${state.download.sidecar_port}${proxy}`
-        : `下载空闲${proxy}`;
+      const countdown = formatCountdown(guard.remaining_seconds);
+      if (guard.kind === "cycle_limit") {
+        primaryStatus = "主动休息中";
+        nextAction = `预计 ${countdown || "稍后"} 后自动继续`;
+        statusClass = "is-resting";
+      } else {
+        primaryStatus = "异常保护暂停";
+        nextAction = "检查代理或 Cookie 后可立即重试";
+        statusClass = "is-warning";
+      }
     }
+
+    const downloadState = $("downloadState");
+    downloadState.textContent = primaryStatus;
+    downloadState.title = diagnostics;
+    downloadState.className = statusClass;
+    $("downloadPrimaryStatus").textContent = primaryStatus;
+    $("downloadNextAction").textContent = nextAction;
+    $("downloadRuntimeDetails").textContent = diagnostics;
+
+    const downloadButton = $("downloadStart");
+    downloadButton.textContent = guard.active
+      ? guard.kind === "cycle_limit" ? "提前继续" : "检查后立即重试"
+      : active ? "停止下载" : "开始下载";
+    downloadButton.classList.toggle("danger", active && !guard.active);
+    downloadButton.classList.toggle("primary", !active || guard.active);
+    downloadButton.disabled = downloadActionPending;
   }
 
-  return { bind, render };
+  function render(state) {
+    renderHome(state);
+    renderStatus(state);
+  }
+
+  return { bind, render, renderHome, renderStatus };
 }

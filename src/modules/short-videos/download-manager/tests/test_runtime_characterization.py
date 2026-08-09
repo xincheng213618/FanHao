@@ -61,6 +61,7 @@ REQUIRED_TABLES = {
     "jobs",
     "events",
     "profile_download_queue",
+    "profile_collection_history",
     "link_files",
     "download_records",
     "download_files",
@@ -394,6 +395,12 @@ class RuntimeCharacterizationTests(unittest.TestCase):
                 self.assertFalse(state["download"]["active"])
                 self.assertEqual(Path(state["paths"]["database"]).resolve(), runtime.db_path.resolve())
                 self.assertEqual(Path(state["paths"]["logs"]).resolve(), runtime.log_dir.resolve())
+                runtime_status = runtime.json_request("/api/status")
+                self.assertEqual(set(runtime_status), {"app", "extract", "download"})
+                self.assertNotIn("profiles", runtime_status)
+                self.assertFalse(runtime_status["download"]["active"])
+                activity = runtime.json_request("/api/activity")
+                self.assertEqual(set(activity), {"jobs", "events"})
 
                 profiles = runtime.json_request("/api/profiles")
                 self.assertEqual(profiles.get("profiles"), [])
@@ -462,6 +469,41 @@ class RuntimeCharacterizationTests(unittest.TestCase):
                 self.assertEqual(like_row.get("profile_nickname"), "测试喜欢")
                 self.assertEqual(like_row.get("profile_tab"), "like")
                 self.assertIn("showTab=like", like_row.get("profile_url", ""))
+
+                manager_failed = runtime.json_request(
+                    "/api/links?status=failed&view=manager&include_summary=1&limit=100"
+                )
+                self.assertEqual(manager_failed.get("view"), "manager")
+                self.assertEqual(manager_failed.get("total"), 2)
+                self.assertEqual(
+                    manager_failed.get("summary"),
+                    {
+                        "all": 2,
+                        "pending": 0,
+                        "downloading": 0,
+                        "downloaded": 0,
+                        "failed": 2,
+                    },
+                )
+                manager_row = manager_failed.get("links", [])[0]
+                self.assertIn("aweme_id", manager_row)
+                self.assertIn("profile_nickname", manager_row)
+                self.assertNotIn("metadata_json", manager_row)
+                self.assertNotIn("local_file_paths", manager_row)
+
+                retry_result = runtime.json_request(
+                    "/api/links/retry",
+                    method="POST",
+                    payload={"id": like_row["id"]},
+                )
+                self.assertTrue(retry_result.get("ok"), retry_result)
+                self.assertEqual(retry_result.get("status"), "pending")
+                summary_after_retry = runtime.json_request(
+                    "/api/links?view=manager&include_summary=1&limit=1"
+                ).get("summary")
+                self.assertEqual(summary_after_retry.get("all"), 2)
+                self.assertEqual(summary_after_retry.get("pending"), 1)
+                self.assertEqual(summary_after_retry.get("failed"), 1)
 
                 scoped_failed = runtime.json_request(
                     f"/api/links?status=failed&profile_id={second_profile_id}"
@@ -740,12 +782,195 @@ class RuntimeCharacterizationTests(unittest.TestCase):
                 manager_html = runtime.request("/")[2].decode("utf-8")
                 profiles_js = runtime.request("/features/profiles.js")[2].decode("utf-8")
                 self.assertIn('id="profileManagerDeletedWorks"', manager_html)
-                self.assertIn("疑似删过作品", manager_html)
+                self.assertIn("待全量确认", manager_html)
+                self.assertIn("已确认主页少作品", manager_html)
                 self.assertIn("deleted_works", profiles_js)
                 self.assertIn("has_deleted_works", profiles_js)
+                self.assertIn("full_scan_required", profiles_js)
                 self.assertIn("一键智能采集", manager_html)
                 self.assertIn("data-profile-full-refresh", profiles_js)
                 self.assertIn("full_scan: fullScan", profiles_js)
+            finally:
+                runtime.close()
+
+    def test_collection_count_history_arms_and_rearms_one_full_scan(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="fanhao-download-manager-count-history-") as temp:
+            runtime = IsolatedManager(Path(temp))
+            try:
+                runtime.start()
+                now = "2026-08-01T12:00:00+08:00"
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    profile_id = int(
+                        connection.execute(
+                            """
+                            INSERT INTO profiles(
+                              url, sec_uid, tab, title, nickname, aweme_count,
+                              created_at, updated_at, last_extracted_at
+                            ) VALUES(?, 'count-history-author', 'post', '计数历史作者',
+                              '计数历史作者', 100, ?, ?, ?)
+                            """,
+                            ("https://www.douyin.com/user/count-history-author", now, now, now),
+                        ).lastrowid
+                    )
+                    for index in range(100):
+                        connection.execute(
+                            """
+                            INSERT INTO links(
+                              profile_id, aweme_id, kind, url, status, discovered_at, last_seen_at
+                            ) VALUES(?, ?, 'video', ?, 'downloaded', ?, ?)
+                            """,
+                            (profile_id, f"history-{index}", f"https://www.douyin.com/video/history-{index}", now, now),
+                        )
+                    connection.commit()
+
+                probe_script = f"""
+import json
+from manager_core.database import db
+from manager_core.profile_collection_history import record_profile_collection
+
+profile_id = {profile_id}
+results = []
+results.append(record_profile_collection(
+    profile_id, job_id=None, full_scan=False, full_scan_confirmed=False,
+    seen_count=100, inserted_count=0, existing_count=100,
+    started_at={now!r}, message="baseline"
+))
+with db() as connection:
+    connection.execute("UPDATE profiles SET aweme_count=72 WHERE id=?", (profile_id,))
+results.append(record_profile_collection(
+    profile_id, job_id=None, full_scan=False, full_scan_confirmed=False,
+    seen_count=72, inserted_count=0, existing_count=72,
+    started_at={now!r}, message="drop"
+))
+results.append(record_profile_collection(
+    profile_id, job_id=None, full_scan=True, full_scan_confirmed=True,
+    seen_count=72, inserted_count=0, existing_count=72,
+    started_at={now!r}, message="reconciled"
+))
+results.append(record_profile_collection(
+    profile_id, job_id=None, full_scan=False, full_scan_confirmed=False,
+    seen_count=72, inserted_count=0, existing_count=72,
+    started_at={now!r}, message="same count"
+))
+with db() as connection:
+    connection.execute("UPDATE profiles SET aweme_count=60 WHERE id=?", (profile_id,))
+results.append(record_profile_collection(
+    profile_id, job_id=None, full_scan=False, full_scan_confirmed=False,
+    seen_count=60, inserted_count=0, existing_count=60,
+    started_at={now!r}, message="new drop"
+))
+with db() as connection:
+    profile = dict(connection.execute(
+        "SELECT full_scan_required, full_scan_reason, last_full_scan_aweme_count FROM profiles WHERE id=?",
+        (profile_id,),
+    ).fetchone())
+    history_count = connection.execute(
+        "SELECT COUNT(*) c FROM profile_collection_history WHERE profile_id=?",
+        (profile_id,),
+    ).fetchone()["c"]
+print(json.dumps({{"results": results, "profile": profile, "history_count": history_count}}, ensure_ascii=False))
+"""
+                probe = subprocess.run(
+                    [sys.executable, "-c", probe_script],
+                    cwd=MODULE_DIR,
+                    env=runtime.environment,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=True,
+                )
+                result = json.loads(probe.stdout.strip())
+                self.assertEqual(result["results"][0]["full_scan_required"], 0)
+                self.assertEqual(result["results"][1]["previous_aweme_count"], 100)
+                self.assertEqual(result["results"][1]["count_drop"], 28)
+                self.assertEqual(result["results"][1]["full_scan_required"], 1)
+                self.assertEqual(result["results"][2]["full_scan_required"], 0)
+                self.assertEqual(result["results"][3]["full_scan_required"], 0)
+                self.assertEqual(result["results"][4]["previous_aweme_count"], 72)
+                self.assertEqual(result["results"][4]["full_scan_required"], 1)
+                self.assertEqual(result["profile"]["last_full_scan_aweme_count"], 72)
+                self.assertIn("从上次采集 72 降到 60", result["profile"]["full_scan_reason"])
+                self.assertEqual(result["history_count"], 5)
+
+                profiles = runtime.json_request("/api/profiles?scope=all&q=count-history-author")
+                self.assertEqual(profiles["profiles"][0]["full_scan_required"], 1)
+                self.assertEqual(profiles["profiles"][0]["refresh_basis"], "full_scan_required")
+                self.assertEqual(profiles["profiles"][0]["refresh_mode"], "full")
+            finally:
+                runtime.close()
+
+    def test_smart_refresh_runs_pending_reconciliation_as_full_scan(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="fanhao-download-manager-pending-full-") as temp:
+            runtime = IsolatedManager(Path(temp))
+            try:
+                runtime.start()
+                now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    profile_id = int(
+                        connection.execute(
+                            """
+                            INSERT INTO profiles(
+                              url, sec_uid, tab, title, aweme_count, full_scan_required,
+                              full_scan_reason, full_scan_required_at,
+                              created_at, updated_at, last_extracted_at
+                            ) VALUES(?, 'pending-full-author', 'post', '待全量作者', 50, 1,
+                              '测试骤降', ?, ?, ?, ?)
+                            """,
+                            ("https://www.douyin.com/user/pending-full-author", now, now, now, now),
+                        ).lastrowid
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO links(
+                          profile_id, aweme_id, kind, url, status, discovered_at, last_seen_at
+                        ) VALUES(?, 'pending-full-work', 'video',
+                          'https://www.douyin.com/video/pending-full-work', 'downloaded', ?, ?)
+                        """,
+                        (profile_id, now, now),
+                    )
+                    connection.commit()
+
+                probe_script = """
+import json
+from manager_core import extraction
+from manager_core.database import create_job, db, update_job
+
+calls = []
+def fake(job_id, url, max_items, scrolls, idle_rounds, headed, incremental_stop_existing, **kwargs):
+    calls.append({
+        "url": url,
+        "max_items": max_items,
+        "incremental_stop_existing": incremental_stop_existing,
+        "full_scan": bool(kwargs.get("full_scan")),
+    })
+    update_job(job_id, status="complete", total=1, processed=1, success=1, failed=0, message="done")
+
+extraction.run_extract_job = fake
+job_id = create_job("refresh", "pending full test")
+extraction.run_refresh_profiles_job(job_id, 0, [], 123, 10, 2, False, 12, False)
+with db() as connection:
+    row = dict(connection.execute("SELECT status, success FROM jobs WHERE id=?", (job_id,)).fetchone())
+print(json.dumps({"calls": calls, "job": row}))
+"""
+                probe = subprocess.run(
+                    [sys.executable, "-c", probe_script],
+                    cwd=MODULE_DIR,
+                    env=runtime.environment,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=True,
+                )
+                result = json.loads(probe.stdout.strip())
+                self.assertEqual(result["calls"], [{
+                    "url": "https://www.douyin.com/user/pending-full-author",
+                    "max_items": 0,
+                    "incremental_stop_existing": 0,
+                    "full_scan": True,
+                }])
+                self.assertEqual(result["job"], {"status": "complete", "success": 1})
             finally:
                 runtime.close()
 

@@ -12,7 +12,26 @@
 .profile-manager-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
+}
+
+.profile-manager-actions .attention {
+  border-color: #d97706;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.profile-manager-actions .attention:hover,
+.profile-manager-actions .attention:focus-visible {
+  border-color: #b45309;
+  background: #ffedd5;
+}
+
+.profile-manager-actions .attention:disabled {
+  border-color: var(--line);
+  background: #f8fafc;
+  color: var(--muted);
 }
 
 .profile-manager-controls {
@@ -38,8 +57,8 @@
 .profile-manager-row {
   min-width: 1120px;
   display: grid;
-  grid-template-columns: minmax(280px, 1.6fr) repeat(3, 92px) 112px 165px auto;
-  gap: 14px;
+  grid-template-columns: minmax(260px, 1.6fr) repeat(3, 88px) 108px 158px max-content;
+  gap: 10px;
   align-items: center;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
@@ -51,6 +70,11 @@
 
 .profile-manager-row:hover {
   background: #f7fbfb;
+}
+
+.profile-manager-row.is-full-scan-required {
+  box-shadow: inset 4px 0 0 #ea580c;
+  background: #fffaf5;
 }
 
 .profile-manager-identity {
@@ -92,6 +116,12 @@
   border-color: #d97706;
   background: #fff7ed;
   color: #9a3412;
+}
+
+.profile-manager-badge.is-full-scan-required {
+  border-color: #ea580c;
+  background: #fff7ed;
+  color: #c2410c;
 }
 
 .profile-manager-badge.is-refresh-due {
@@ -140,7 +170,45 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.profile-manager-row-actions > button {
+  flex: 0 0 auto;
+  padding-inline: 9px;
+  white-space: nowrap;
+}
+
+.profile-manager-page-links {
+  display: inline-flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.profile-manager-page-links .queue-link {
+  border-radius: 0;
+  padding-inline: 7px;
+  white-space: nowrap;
+}
+
+.profile-manager-page-links .queue-link:first-child {
+  border-radius: 6px 0 0 6px;
+}
+
+.profile-manager-page-links .queue-link:last-child {
+  border-radius: 0 6px 6px 0;
+}
+
+.profile-manager-page-links .queue-link + .queue-link {
+  margin-left: -1px;
+}
+
+.profile-manager-page-links .queue-link.is-local {
+  border-color: #0f9b8e;
+  background: #ecfdf5;
+  color: #0f766e;
 }
 
 .profile-manager-empty {

@@ -1,6 +1,6 @@
 import { createShortVideoSearchModule } from "./search/index.js?v=20260710-short-video-search-01";
 import { createShortVideoActionsController } from "./actions-controller.js?v=20260716-short-video-actions-01";
-import { createShortVideoAuthorPages } from "./author-pages.js?v=20260716-short-video-author-pages-01";
+import { createShortVideoAuthorPages } from "./author-pages.js?v=20260801-count-confirmation-01";
 import { createShortVideoFilterControls } from "./filter-controls.js?v=20260720-short-video-filter-controls-01";
 import { createIcon, railButton, setIconButton } from "./icons.js?v=20260716-short-video-icons-01";
 import { createShortVideoListWindow } from "./list-window.js?v=20260716-short-video-list-window-01";
@@ -1644,7 +1644,13 @@ export function createShortVideoPage(deps) {
       collect.className = "short-video-delete-tool";
       collect.append(createIcon("external"), document.createTextNode("采集管理"));
       collect.addEventListener("click", () => {
-        window.open("http://localhost:8765/#home", "_blank", "noopener,noreferrer");
+        const secUid = isShortVideoAuthorDetailPage()
+          ? String(state.shortVideo.authorPage || state.shortVideo.author || "").trim()
+          : "";
+        const managerUrl = secUid
+          ? `http://127.0.0.1:8765/?profile=${encodeURIComponent(secUid)}#profiles`
+          : "http://127.0.0.1:8765/#home";
+        window.open(managerUrl, "_blank", "noopener,noreferrer");
       });
       const start = document.createElement("button");
       start.type = "button";

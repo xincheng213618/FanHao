@@ -80,6 +80,17 @@ def profile_refresh_decision(
     latest_ts = int_or_none(profile.get("latest_work_create_time"))
     previous_ts = int_or_none(profile.get("previous_work_create_time"))
 
+    if tab == "post" and int(profile.get("full_scan_required") or 0):
+        return {
+            "refresh_due": 1,
+            "refresh_due_at": profile.get("full_scan_required_at") or None,
+            "refresh_interval_seconds": None,
+            "refresh_cadence_seconds": None,
+            "refresh_silence_seconds": None,
+            "refresh_basis": "full_scan_required",
+            "refresh_mode": "full",
+        }
+
     if tab == "like":
         return {
             "refresh_due": 1,
@@ -88,6 +99,7 @@ def profile_refresh_decision(
             "refresh_cadence_seconds": None,
             "refresh_silence_seconds": None,
             "refresh_basis": "like_activity",
+            "refresh_mode": "quick",
         }
 
     if collected_ts is None:
@@ -98,6 +110,7 @@ def profile_refresh_decision(
             "refresh_cadence_seconds": None,
             "refresh_silence_seconds": None,
             "refresh_basis": "never_collected",
+            "refresh_mode": "quick",
         }
 
     cadence_seconds: int | None = None
@@ -126,6 +139,7 @@ def profile_refresh_decision(
         "refresh_cadence_seconds": cadence_seconds,
         "refresh_silence_seconds": silence_seconds,
         "refresh_basis": basis,
+        "refresh_mode": "quick",
     }
 
 

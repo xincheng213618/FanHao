@@ -36,9 +36,22 @@ $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 $FingerprintFile = Join-Path $VenvDir ".fanhao-serve-dependencies.sha256"
 $DependencyFiles = @($ProjectFile, $RequirementsFile)
 
+function Get-Sha256Hex {
+  param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+  $stream = [System.IO.File]::OpenRead($LiteralPath)
+  $hash = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    return [System.BitConverter]::ToString($hash.ComputeHash($stream)).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $hash.Dispose()
+    $stream.Dispose()
+  }
+}
+
 $fingerprintParts = @("fanhao-douyin-downloader-serve-v4", "host-wheelhouse-plus-server-extra")
 foreach ($dependencyFile in $DependencyFiles) {
-  $dependencyHash = (Get-FileHash -LiteralPath $dependencyFile -Algorithm SHA256).Hash
+  $dependencyHash = Get-Sha256Hex -LiteralPath $dependencyFile
   $fingerprintParts += "$([System.IO.Path]::GetFileName($dependencyFile))=$dependencyHash"
 }
 $fingerprintBytes = [System.Text.Encoding]::UTF8.GetBytes(($fingerprintParts -join "`n"))
@@ -71,27 +84,59 @@ function Test-DownloaderDependencies {
   $verificationOut = Join-Path $VenvDir ".fanhao-verify-$PID.out.log"
   $verificationError = Join-Path $VenvDir ".fanhao-verify-$PID.err.log"
   Set-Content -LiteralPath $verificationFile -Value $VerificationCode -Encoding UTF8
-  $process = Start-Process -FilePath $VenvPython `
-    -ArgumentList @("`"$verificationFile`"") `
-    -WorkingDirectory $DownloaderRoot `
-    -RedirectStandardOutput $verificationOut `
-    -RedirectStandardError $verificationError `
-    -WindowStyle Hidden `
-    -PassThru
+  $previousPythonPath = [Environment]::GetEnvironmentVariable("PYTHONPATH", "Process")
+  $verificationPythonPath = if ([string]::IsNullOrWhiteSpace($previousPythonPath)) {
+    $DownloaderRoot
+  } else {
+    "$DownloaderRoot$([System.IO.Path]::PathSeparator)$previousPythonPath"
+  }
+
+  $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $startInfo.FileName = $VenvPython
+  $startInfo.Arguments = '"' + $verificationFile.Replace('"', '\"') + '"'
+  $startInfo.WorkingDirectory = $DownloaderRoot
+  $startInfo.UseShellExecute = $false
+  $startInfo.CreateNoWindow = $true
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+  $startInfo.EnvironmentVariables["PYTHONPATH"] = $verificationPythonPath
+
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo = $startInfo
+  if (-not $process.Start()) {
+    throw "Failed to start downloader dependency verification"
+  }
+  $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+  $stderrTask = $process.StandardError.ReadToEndAsync()
   if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
     $taskkill = Join-Path $env:SystemRoot "System32\taskkill.exe"
     & $taskkill /PID $process.Id /T /F *> $null
+    $process.WaitForExit()
+    $process.Dispose()
     throw "Downloader dependency verification timed out after $TimeoutSeconds seconds"
   }
-  if ($process.ExitCode -eq 0) {
+  $process.WaitForExit()
+  $stdout = $stdoutTask.GetAwaiter().GetResult()
+  $stderr = $stderrTask.GetAwaiter().GetResult()
+  $exitCode = $process.ExitCode
+  $process.Dispose()
+  if ($exitCode -eq 0) {
     return $true
   }
-  $errorText = if (Test-Path -LiteralPath $verificationError -PathType Leaf) {
-    (Get-Content -LiteralPath $verificationError -Tail 20) -join "`n"
+  if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+    Set-Content -LiteralPath $verificationOut -Value $stdout -Encoding UTF8
+  }
+  if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+    Set-Content -LiteralPath $verificationError -Value $stderr -Encoding UTF8
+  }
+  $errorText = if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+    ($stderr -split "`r?`n" | Select-Object -Last 20) -join "`n"
+  } elseif (-not [string]::IsNullOrWhiteSpace($stdout)) {
+    ($stdout -split "`r?`n" | Select-Object -Last 20) -join "`n"
   } else {
     "Dependency verification exited without an error log."
   }
-  Write-Warning "Downloader dependency verification failed: $errorText"
+  Write-Warning "Downloader dependency verification failed with exit code ${exitCode}: $errorText"
   return $false
 }
 

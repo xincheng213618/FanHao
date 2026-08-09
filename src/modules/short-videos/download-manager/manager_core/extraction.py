@@ -21,6 +21,7 @@ from .profiles_links import (
     upsert_profile,
     upsert_profile_metadata,
 )
+from .profile_collection_history import record_profile_collection
 from .profile_refresh_policy import PROFILE_LINK_STATS_SQL, profile_refresh_decision
 
 
@@ -89,6 +90,7 @@ def run_extract_job(
     add_event("info", f"开始采集：{url}")
     total_seen = inserted_total = updated_total = 0
     collection_started_at = datetime.now().astimezone()
+    collection_started_iso = collection_started_at.isoformat(timespec="seconds")
     like_sequence = 0
     offset = 0
     partial = ""
@@ -114,19 +116,36 @@ def run_extract_job(
     if not existing_aweme_ids:
         incremental_stop_existing = 0
 
-    def finish_full_scan_flag() -> str:
+    def finish_full_scan_flag() -> tuple[str, bool]:
         if not full_scan or profile_tab_for_job != "post":
-            return ""
+            return "", False
         result = update_profile_deleted_works_flag(profile_id, full_scan_seen_aweme_ids)
-        if not result or result.get("skipped") or not result["has_deleted_works"]:
-            return ""
+        if not result or result.get("skipped"):
+            return "", False
+        if not result["has_deleted_works"]:
+            return "", True
         difference = int(result["marked"] or 0)
         add_event(
             "warn",
             f"全部扫描发现：本次去重后 {len(full_scan_seen_aweme_ids)} 条，数据库保留 {result['link_total']} 条，"
             f"主页不可见 {difference} 条作品（主页计数 {result['aweme_count']}）",
         )
-        return f"；主页不可见 {difference} 条作品，已标记"
+        return f"；主页不可见 {difference} 条作品，已标记", True
+
+    def record_completion(message: str, *, full_scan_confirmed: bool = False) -> None:
+        result = record_profile_collection(
+            profile_id,
+            job_id=job_id,
+            full_scan=full_scan,
+            full_scan_confirmed=full_scan_confirmed,
+            seen_count=total_seen,
+            inserted_count=inserted_total,
+            existing_count=updated_total,
+            started_at=collection_started_iso,
+            message=message,
+        )
+        if result.get("full_scan_required") and not full_scan:
+            add_event("warn", str(result.get("full_scan_reason") or "作品数明显减少，已安排下次全量确认"))
 
     def consume_stream() -> None:
         nonlocal offset, partial, total_seen, inserted_total, updated_total, consecutive_existing, incremental_stop_triggered, incremental_stop_reason, profile_aweme_count, target_count_stop_triggered, like_sequence
@@ -293,7 +312,11 @@ def run_extract_job(
             consume_stream()
         if extract_stop_event.is_set():
             if target_count_stop_triggered:
-                deletion_suffix = finish_full_scan_flag()
+                deletion_suffix, full_scan_confirmed = finish_full_scan_flag()
+                message = (
+                    f"采集完成：已达到主页作品数 {profile_aweme_count}，"
+                    f"已入库 {total_seen} 条，新 {inserted_total}，已存在 {updated_total}{deletion_suffix}"
+                )
                 update_job(
                     job_id,
                     status="complete",
@@ -302,17 +325,19 @@ def run_extract_job(
                     success=inserted_total,
                     failed=0,
                     finished_at=now_iso(),
-                    message=(
-                        f"采集完成：已达到主页作品数 {profile_aweme_count}，"
-                        f"已入库 {total_seen} 条，新 {inserted_total}，已存在 {updated_total}{deletion_suffix}"
-                    ),
+                    message=message,
                 )
+                record_completion(message, full_scan_confirmed=full_scan_confirmed)
                 add_event(
                     "info",
                     f"采集完成：已达到主页作品数 {profile_aweme_count}，新 {inserted_total}，已存在 {updated_total}",
                 )
                 return
             if incremental_stop_triggered:
+                message = (
+                    f"增量采集完成：{incremental_stop_reason or f'连续 {consecutive_existing} 条已存在'}，"
+                    f"已入库 {total_seen} 条，新 {inserted_total}，已存在 {updated_total}"
+                )
                 update_job(
                     job_id,
                     status="complete",
@@ -321,11 +346,9 @@ def run_extract_job(
                     success=inserted_total,
                     failed=0,
                     finished_at=now_iso(),
-                    message=(
-                        f"增量采集完成：{incremental_stop_reason or f'连续 {consecutive_existing} 条已存在'}，"
-                        f"已入库 {total_seen} 条，新 {inserted_total}，已存在 {updated_total}"
-                    ),
+                    message=message,
                 )
+                record_completion(message)
                 add_event(
                     "info",
                     f"增量采集完成：{incremental_stop_reason or f'连续 {consecutive_existing} 条已存在'}，新 {inserted_total}，已存在 {updated_total}",
@@ -362,7 +385,8 @@ def run_extract_job(
             inserted_total += inserted
             updated_total += updated
             total_seen = len(works)
-        deletion_suffix = finish_full_scan_flag()
+        deletion_suffix, full_scan_confirmed = finish_full_scan_flag()
+        message = f"采集完成：{total_seen} 条，新 {inserted_total}，已存在 {updated_total}{deletion_suffix}"
         update_job(
             job_id,
             status="complete",
@@ -371,8 +395,9 @@ def run_extract_job(
             success=inserted_total,
             failed=0,
             finished_at=now_iso(),
-            message=f"采集完成：{total_seen} 条，新 {inserted_total}，已存在 {updated_total}{deletion_suffix}",
+            message=message,
         )
+        record_completion(message, full_scan_confirmed=full_scan_confirmed)
         add_event("info", f"采集完成：{total_seen} 条，新 {inserted_total}，已存在 {updated_total}")
     except Exception as exc:
         update_job(job_id, status="failed", finished_at=now_iso(), message=str(exc))
@@ -460,6 +485,9 @@ def run_refresh_profiles_job(
                       profiles.short_id,
                       profiles.updated_at,
                       profiles.last_extracted_at,
+                      profiles.full_scan_required,
+                      profiles.full_scan_reason,
+                      profiles.full_scan_required_at,
                       profiles.sec_uid,
                       q.sort_order,
                       COALESCE(stats.total, 0) link_total,
@@ -526,24 +554,26 @@ def run_refresh_profiles_job(
                 break
             extract_stop_event.clear()
             label = clean_profile_nickname(profile.get("nickname") or profile.get("title")) or f"主页 #{profile['id']}"
+            profile_full_scan = bool(full_scan or int(profile.get("full_scan_required") or 0))
+            mode_label = "全量确认" if profile_full_scan else "快速刷新"
             update_job(
                 job_id,
                 processed=index - 1,
                 success=success_profiles,
                 failed=failed_profiles,
-                message=f"刷新中：{index}/{total_profiles} {label}",
+                message=f"{mode_label}中：{index}/{total_profiles} {label}",
             )
             sub_job_id = create_job("extract", f"批量刷新 {index}/{total_profiles}: {label}", int(profile["id"]))
             run_extract_job(
                 sub_job_id,
                 str(profile["url"]),
-                max_items,
+                0 if profile_full_scan else max_items,
                 scrolls,
                 idle_rounds,
                 headed,
-                incremental_stop_existing,
+                0 if profile_full_scan else incremental_stop_existing,
                 clear_global=False,
-                full_scan=full_scan,
+                full_scan=profile_full_scan,
             )
             with db() as conn:
                 sub = conn.execute("SELECT status FROM jobs WHERE id=?", (sub_job_id,)).fetchone()

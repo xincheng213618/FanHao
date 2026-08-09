@@ -497,6 +497,7 @@ try {
       local_cover_path TEXT,
       duration_ms INTEGER,
       downloaded_at TEXT,
+      last_seen_at TEXT,
       digg_count INTEGER,
       comment_count INTEGER,
       collect_count INTEGER,
@@ -522,14 +523,16 @@ try {
   sourceDb.prepare(`
     INSERT INTO links (
       id, profile_id, aweme_id, status, kind, media_type, output_dir,
-      local_file_paths, downloaded_at, digg_count, comment_count, collect_count, share_count
-    ) VALUES (1, 1, ?, 'downloaded', 'note', 'gallery', ?, ?, '2026-07-10T19:16:44+08:00', 0, 0, 0, 0)
+      local_file_paths, downloaded_at, last_seen_at, digg_count, comment_count, collect_count, share_count
+    ) VALUES (1, 1, ?, 'downloaded', 'note', 'gallery', ?, ?,
+      '2026-07-10T19:16:44+08:00', '2026-07-10T19:16:44+08:00', 0, 0, 0, 0)
   `).run(liveId, liveDir, JSON.stringify([liveImage, liveImage2, liveVideo, liveMusic, liveData]));
   sourceDb.prepare(`
     INSERT INTO links (
       id, profile_id, aweme_id, status, kind, media_type, output_dir,
-      local_file_paths, downloaded_at, digg_count, comment_count, collect_count, share_count
-    ) VALUES (2, 2, ?, 'downloaded', 'note', 'gallery', ?, ?, '2026-07-11T10:00:00+08:00', 12840, 321, 456, 78)
+      local_file_paths, downloaded_at, last_seen_at, digg_count, comment_count, collect_count, share_count
+    ) VALUES (2, 2, ?, 'downloaded', 'note', 'gallery', ?, ?,
+      '2026-07-11T10:00:00+08:00', '2026-07-11T10:00:00+08:00', 12840, 321, 456, 78)
   `).run(liveId, liveDir, JSON.stringify([liveImage, liveImage2, liveVideo, liveMusic, liveData]));
   sourceDb.close();
 
@@ -540,6 +543,17 @@ try {
   assert.equal(live?.galleryCount, 2);
   assert.deepEqual(live?.galleryItems.map((item) => item.type), ["video", "image"]);
   assert.equal(live?.galleryItems[0]?.posterUrl, `/media/short-video-gallery/${liveId}/0`);
+  const legacyStatsDb = new DatabaseSync(targetDbPath);
+  legacyStatsDb.prepare("DELETE FROM short_video_meta WHERE key = 'download_manager_stats_seen_watermark'").run();
+  legacyStatsDb.close();
+  const legacyStatsSeed = store.importDownloadManagerDb(sourceDbPath, { incremental: true, includePosts: true });
+  assert.equal(legacyStatsSeed.statsRefreshRows, 0, "legacy databases must seed the current watermark without replaying history");
+  const seededStatsDb = new DatabaseSync(targetDbPath, { readOnly: true });
+  assert.equal(
+    seededStatsDb.prepare("SELECT value FROM short_video_meta WHERE key = 'download_manager_stats_seen_watermark'").get()?.value,
+    "2026-07-11T10:00:00+08:00"
+  );
+  seededStatsDb.close();
   assert.equal(store.galleryFile(liveId, 0)?.path, liveImage);
   assert.equal(store.galleryFile(liveId, 0)?.type, "image");
   assert.equal(store.galleryFile(liveId, 1)?.path, liveVideo);
@@ -566,7 +580,8 @@ try {
   const refreshedSourceDb = new DatabaseSync(sourceDbPath);
   refreshedSourceDb.prepare(`
     UPDATE profiles
-    SET following_count = 295,
+    SET nickname = '更新后的测试作者',
+        following_count = 295,
         follower_count = 892000,
         total_favorited = 8439000,
         aweme_count = 509,
@@ -576,18 +591,40 @@ try {
   `).run();
   refreshedSourceDb.prepare(`
     UPDATE links
-    SET is_missing_from_profile = 1,
+    SET digg_count = 13840,
+        comment_count = 421,
+        collect_count = 556,
+        share_count = 88,
+        last_seen_at = '2026-07-20T04:32:03+08:00',
+        is_missing_from_profile = 1,
         missing_from_profile_at = '2026-07-20T04:32:03+08:00'
     WHERE id = 2
   `).run();
   refreshedSourceDb.close();
   const zeroRowProfileSync = store.importDownloadManagerDb(sourceDbPath, { incremental: true, includePosts: true });
   assert.equal(zeroRowProfileSync.incrementalRows, 0, "full scans without new downloads should still synchronize profiles");
+  assert.equal(zeroRowProfileSync.statsRefreshRows, 1, "refreshed statistics must sync without changing downloaded_at");
   assert.equal(zeroRowProfileSync.profilesSynced, 1);
+  const refreshedLive = store.videoDetail(liveId)?.video;
+  assert.equal(refreshedLive?.stats?.likes, 13840, "existing works must receive refreshed likes");
+  assert.equal(refreshedLive?.stats?.comments, 421, "existing works must receive refreshed comments");
+  assert.equal(refreshedLive?.stats?.collects, 556, "existing works must receive refreshed collects");
+  assert.equal(refreshedLive?.stats?.shares, 88, "existing works must receive refreshed shares");
   const refreshedAuthor = store.resolveAuthorMention("MS4wTestAuthor");
+  assert.equal(refreshedAuthor?.name, "更新后的测试作者", "profile nickname changes must reach the local author page");
   assert.equal(refreshedAuthor?.awemeCount, 509, "official profile work totals must refresh without a new download");
   assert.equal(refreshedAuthor?.followingCount, 295);
   assert.equal(refreshedAuthor?.profileCollectedAt, "2026-07-20T04:32:03+08:00");
+  const nicknameSyncDb = new DatabaseSync(targetDbPath, { readOnly: true });
+  assert.equal(
+    nicknameSyncDb.prepare("SELECT author_name FROM short_videos WHERE id=?").get(liveId)?.author_name,
+    "更新后的测试作者",
+    "profile-only sync must also replace stale per-work author names"
+  );
+  nicknameSyncDb.close();
+  const unchangedStatsSync = store.importDownloadManagerDb(sourceDbPath, { incremental: true, includePosts: true });
+  assert.equal(unchangedStatsSync.incrementalRows, 0);
+  assert.equal(unchangedStatsSync.statsRefreshRows, 0, "statistics watermark must avoid replaying unchanged works");
   const authorAllWorks = store.listVideos({
     searchParams: new URLSearchParams("source=all&author=MS4wTestAuthor&limit=10&stats=0&facets=0")
   });
@@ -699,8 +736,8 @@ try {
 
   store.scan(root);
   const rescannedLive = store.videoDetail(liveId)?.video;
-  assert.equal(rescannedLive?.stats?.likes, 12840, "filesystem scans must not replace known statistics with zero placeholders");
-  assert.equal(rescannedLive?.stats?.comments, 321);
+  assert.equal(rescannedLive?.stats?.likes, 13840, "filesystem scans must not replace known statistics with zero placeholders");
+  assert.equal(rescannedLive?.stats?.comments, 421);
   const likesAscending = store.listVideos({
     searchParams: new URLSearchParams("source=all&sort=likesAsc&limit=10&stats=0&facets=0")
   });

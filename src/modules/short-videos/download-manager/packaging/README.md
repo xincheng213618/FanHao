@@ -10,7 +10,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\build_douyin_manager_insta
 
 ```powershell
 .\tools\build_douyin_manager_installer.ps1 `
-  -Version "0.3.1-test" `
+  -Version "0.3.2-test" `
   -OutputDirectory "$HOME\Desktop\DouyinDownloadManager-Package"
 ```
 

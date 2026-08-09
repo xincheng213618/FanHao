@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .auth import clear_cookie_auth, cookie_auth_status, import_cookie_text, open_cookie_folder, start_cookie_login
-from .common import first_text, int_or_none, normalize_int, normalize_profile_tab, normalize_proxy, now_iso, parse_profile_url, work_id_from_url
+from .common import first_int, first_text, int_or_none, normalize_int, normalize_profile_tab, normalize_proxy, now_iso, parse_profile_url, work_id_from_url
 from .config import BASE_DIR, DEFAULT_FAILURE_GUARD_THRESHOLD, DEFAULT_OUTPUT_DIR, FANHAO_PUBLIC_DIR, MAX_CONCURRENCY, STATIC_DIR, TEST_PROFILE_URL
 from .database import add_event, db, set_setting, setting
 from .domain_manifest import profile_output_dir
@@ -20,10 +20,10 @@ from .download_supervisor import download_manager
 from .downloader_client import fetch_aweme_comments
 from .extraction import start_extract, start_following_import, start_refresh_profiles, stop_extract
 from .library import list_library, open_library_folder, resolve_library_media, shared_player_detail, shared_player_list, shared_player_neighbor, shared_player_row, shared_player_summary, shared_player_video_from_row
-from .maintenance import delete_empty_failed_links, delete_failed_links, delete_link, delete_profile, queue_gallery_music_backfill, reset_failed_links
+from .maintenance import delete_empty_failed_links, delete_failed_links, delete_link, delete_profile, queue_gallery_music_backfill, reset_failed_links, retry_link
 from .profiles_links import current_profile_id, import_manifest_to_db, upsert_links, upsert_profile
 from .queue import ensure_profile_in_download_queue, move_download_queue_item, sort_download_queue_by_pending
-from .read_models import get_state, list_links, list_profiles
+from .read_models import get_activity_state, get_runtime_status, get_state, list_links, list_profiles
 from .runtime import activate_application, request_application_quit
 
 
@@ -37,6 +37,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"ok": True, "paths": {"base": str(BASE_DIR)}})
         if parsed.path == "/api/state":
             return self.send_json(get_state())
+        if parsed.path == "/api/status":
+            return self.send_json(get_runtime_status())
+        if parsed.path == "/api/activity":
+            return self.send_json(get_activity_state())
         if parsed.path == "/api/short-videos/summary":
             return self.send_json(shared_player_summary())
         if parsed.path == "/api/short-videos/suggestions":
@@ -192,6 +196,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.handle_manifest_import(payload)
             if parsed.path == "/api/links/reset-failed":
                 return self.send_json(reset_failed_links(payload))
+            if parsed.path == "/api/links/retry":
+                return self.send_json(retry_link(payload))
             if parsed.path == "/api/links/backfill-gallery-music":
                 return self.send_json(queue_gallery_music_backfill(payload))
             if parsed.path == "/api/links/delete-empty-failed":
@@ -349,10 +355,10 @@ class Handler(SimpleHTTPRequestHandler):
                         "cover_url": first_text(work.get("cover_url"), work.get("coverUrl"), work.get("thumbnail")),
                         "create_time": int_or_none(work.get("create_time") or work.get("createTime")),
                         "duration_ms": int_or_none(work.get("duration_ms") or work.get("duration") or work.get("durationMs")),
-                        "digg_count": int_or_none(work.get("digg_count") or work.get("diggCount") or work.get("like_count") or work.get("likeCount")),
-                        "comment_count": int_or_none(work.get("comment_count") or work.get("commentCount")),
-                        "share_count": int_or_none(work.get("share_count") or work.get("shareCount")),
-                        "collect_count": int_or_none(work.get("collect_count") or work.get("collectCount")),
+                        "digg_count": first_int(work.get("digg_count"), work.get("diggCount"), work.get("like_count"), work.get("likeCount")),
+                        "comment_count": first_int(work.get("comment_count"), work.get("commentCount")),
+                        "share_count": first_int(work.get("share_count"), work.get("shareCount")),
+                        "collect_count": first_int(work.get("collect_count"), work.get("collectCount")),
                         "media_type": first_text(work.get("media_type"), work.get("mediaType"), "gallery" if kind == "note" else "video"),
                     }
                 )

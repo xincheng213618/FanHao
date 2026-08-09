@@ -44,6 +44,19 @@
   margin-top: 12px;
 }
 
+.queue-empty {
+  display: grid;
+  gap: 4px;
+  min-height: 76px;
+  place-content: center;
+  text-align: center;
+  color: var(--muted);
+}
+
+.queue-empty strong {
+  color: var(--ink);
+}
+
 .scroll-queue {
   max-height: min(48vh, 520px);
   overflow-y: auto;
@@ -141,22 +154,6 @@
   color: var(--accent-strong);
 }
 
-.advanced-panel {
-  margin-top: 12px;
-}
-
-.advanced-panel summary {
-  color: var(--muted);
-  cursor: pointer;
-  font-weight: 800;
-  padding: 4px 0;
-}
-
-.advanced-panel[open] {
-  border-top: 1px solid var(--line);
-  padding-top: 10px;
-}
-
 .workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 360px;
@@ -172,19 +169,47 @@
   margin-top: 14px;
 }
 
-.compact-panel {
-  align-self: start;
+.home-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.collect-panel .panel-title {
+  margin-bottom: 10px;
+}
+
+.collect-panel .profile-url-row {
+  align-items: center;
+}
+
+.collect-panel .profile-url-row > input {
+  min-width: 0;
+}
+
+.collect-panel .extract-actions {
+  margin: 0;
+}
+
+.download-execution-panel {
   min-height: 0;
 }
 
-.stacked-actions {
-  align-items: stretch;
-  flex-direction: column;
-  margin-bottom: 14px;
+.download-execution-head {
+  align-items: flex-start;
+  margin-bottom: 12px;
 }
 
-.stacked-actions button {
-  width: 100%;
+.download-actions {
+  justify-content: flex-end;
+}
+
+.download-actions #downloadStart {
+  min-width: 112px;
+}
+
+.download-execution-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.65fr);
+  gap: 12px;
 }
 
 .download-guard {
@@ -217,11 +242,50 @@
 }
 
 .download-cycle-progress {
-  margin-bottom: 14px;
+  margin-bottom: 0;
   padding: 10px 11px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #fbfcfe;
+}
+
+.download-execution-summary {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 0;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfe;
+}
+
+.download-execution-summary > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.download-execution-summary > strong {
+  font-size: 17px;
+}
+
+.runtime-details,
+.db-path-details {
+  margin-top: 4px;
+}
+
+.runtime-details summary,
+.db-path-details summary {
+  width: fit-content;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.runtime-details > div,
+.db-path-details > div {
+  margin-top: 5px;
 }
 
 .download-cycle-head {
@@ -257,4 +321,26 @@
   background: #fff8e8;
   color: #9b5d00;
   font-weight: 800;
+}
+
+@media (max-width: 980px) {
+  .download-execution-body {
+    grid-template-columns: 1fr;
+  }
+
+  .download-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 720px) {
+  .download-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .download-actions button {
+    width: 100%;
+  }
 }

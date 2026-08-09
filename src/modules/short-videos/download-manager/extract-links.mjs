@@ -506,6 +506,13 @@ function collectJsonWorks(value, out, depth = 0) {
   }
 }
 
+const REFRESHED_WORK_FIELDS = new Set([
+  "digg_count",
+  "comment_count",
+  "share_count",
+  "collect_count",
+]);
+
 function addWork(works, pending, work, max = 0) {
   if (!work || !work.aweme_id) return false;
   if (works.has(work.aweme_id)) {
@@ -527,8 +534,13 @@ function addWork(works, pending, work, max = 0) {
       "collect_count",
       "media_type",
     ]) {
-      if (!existing[key] && work[key]) {
-        existing[key] = work[key];
+      const incoming = work[key];
+      const hasIncoming = incoming !== undefined && incoming !== null && incoming !== "";
+      if (
+        (REFRESHED_WORK_FIELDS.has(key) && hasIncoming && !Object.is(existing[key], incoming))
+        || (!REFRESHED_WORK_FIELDS.has(key) && !existing[key] && incoming)
+      ) {
+        existing[key] = incoming;
         changed = true;
       }
     }

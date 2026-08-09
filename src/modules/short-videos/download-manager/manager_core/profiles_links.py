@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .common import clean_profile_nickname, first_text, int_or_none, json_text, now_iso, parse_profile_url
+from .common import clean_profile_nickname, first_int, first_text, int_or_none, json_text, now_iso, parse_profile_url
 from .config import TEST_PROFILE_URL
 from .database import db, setting
 from .domain_manifest import author_sec_uid_from_manifest, douyin_user_url, kind_from_manifest, manifest_cover_path, manifest_music_metadata, manifest_preview_path, sync_manifest_files
@@ -501,10 +501,10 @@ def upsert_links(profile_id: int, works: list[dict[str, Any]]) -> tuple[int, int
             cover_url = first_text(work.get("cover_url"), work.get("coverUrl"), work.get("thumbnail"), work.get("preview_url"))
             create_time = int_or_none(work.get("create_time") or work.get("createTime"))
             duration_ms = int_or_none(work.get("duration_ms") or work.get("duration") or work.get("durationMs"))
-            digg_count = int_or_none(work.get("digg_count") or work.get("diggCount") or work.get("like_count") or work.get("likeCount"))
-            comment_count = int_or_none(work.get("comment_count") or work.get("commentCount"))
-            share_count = int_or_none(work.get("share_count") or work.get("shareCount"))
-            collect_count = int_or_none(work.get("collect_count") or work.get("collectCount"))
+            digg_count = first_int(work.get("digg_count"), work.get("diggCount"), work.get("like_count"), work.get("likeCount"))
+            comment_count = first_int(work.get("comment_count"), work.get("commentCount"))
+            share_count = first_int(work.get("share_count"), work.get("shareCount"))
+            collect_count = first_int(work.get("collect_count"), work.get("collectCount"))
             media_type = first_text(work.get("media_type"), work.get("mediaType"), "gallery" if kind == "note" else "video")
             local_file_names = json_text(work.get("local_file_names") or work.get("localFileNames"))
             local_file_paths = json_text(work.get("local_file_paths") or work.get("localFilePaths"))

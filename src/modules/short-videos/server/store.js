@@ -2945,9 +2945,11 @@ function summary() {
     const normalized = normalizedUpsertStatements(targetDb, coverCacheDir);
     const batchId = `download-manager:${hashText(`${sourceDbPath}:${now}`).slice(0, 24)}`;
     const profileColumns = new Set(sourceDb.prepare("PRAGMA table_info(profiles)").all().map((row) => row.name));
+    const linkColumns = new Set(sourceDb.prepare("PRAGMA table_info(links)").all().map((row) => row.name));
     const profileColumn = (column, alias = `profile_${column}`) => (
       profileColumns.has(column) ? `p.${column} AS ${alias}` : `NULL AS ${alias}`
     );
+    const sourceStatsSeenSql = linkColumns.has("last_seen_at") ? "COALESCE(l.last_seen_at, '')" : "COALESCE(l.downloaded_at, '')";
     const includePosts = Boolean(options.includePosts);
     const includeSummary = !options.skipSummary;
     const profileWhere = includePosts ? "p.tab IN ('like', 'post')" : "p.tab = 'like'";
@@ -2959,9 +2961,11 @@ function summary() {
       : 0;
     const watermarkKey = "download_manager_downloaded_watermark";
     const statsBackfillWatermarkKey = "download_manager_stats_backfilled_watermark";
+    const statsSeenWatermarkKey = "download_manager_stats_seen_watermark";
     const galleryImportVersionKey = "download_manager_gallery_import_version";
     const previousWatermark = incremental ? metaValue(targetDb, watermarkKey) : "";
     const previousStatsBackfillWatermark = incremental ? metaValue(targetDb, statsBackfillWatermarkKey) : "";
+    const previousStatsSeenWatermark = incremental ? metaValue(targetDb, statsSeenWatermarkKey) : "";
     const needsGalleryBackfill = metaValue(targetDb, galleryImportVersionKey) !== DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION;
     const sourceSelect = `
       SELECT
@@ -3013,6 +3017,7 @@ function summary() {
         CASE WHEN l.collect_count IS NOT NULL THEN 1 ELSE 0 END +
         CASE WHEN l.share_count IS NOT NULL THEN 1 ELSE 0 END
       ) DESC,
+      ${sourceStatsSeenSql} DESC,
       COALESCE(l.downloaded_at, '') DESC,
       l.id DESC
     `;
@@ -3024,6 +3029,11 @@ function summary() {
         AND l.status = 'downloaded'
     `).get();
     const sourceMaxDownloadedAt = sourceMaxRow?.maxDownloadedAt || "";
+    const sourceMaxStatsSeenAt = sourceDb.prepare(`
+      SELECT MAX(${sourceStatsSeenSql}) AS maxStatsSeenAt
+      FROM links l JOIN profiles p ON p.id = l.profile_id
+      WHERE ${profileWhere} AND l.status = 'downloaded' AND ${sourceHasStatsWhere}
+    `).get()?.maxStatsSeenAt || "";
     const sourceWhere = [profileWhere, "l.status = 'downloaded'"];
     const sourceArgs = [];
     if (incremental && previousWatermark) {
@@ -3036,6 +3046,22 @@ function summary() {
       ORDER BY ${sourceBestRowOrder}
     `).all(...sourceArgs);
     const incrementalRows = sourceRows.length;
+    let statsRefreshRows = 0; if (incremental && previousStatsSeenWatermark) {
+      const knownAwemeIds = new Set(sourceRows.map((row) => String(row.aweme_id || "").trim()).filter(Boolean));
+      const refreshedRows = sourceDb.prepare(`
+        ${sourceSelect}
+        WHERE ${profileWhere} AND l.status = 'downloaded'
+          AND ${sourceStatsSeenSql} > ? AND ${sourceHasStatsWhere}
+        ORDER BY ${sourceBestRowOrder}
+      `).all(previousStatsSeenWatermark);
+      for (const row of refreshedRows) {
+        const awemeId = String(row.aweme_id || "").trim();
+        if (!awemeId || knownAwemeIds.has(awemeId)) continue;
+        knownAwemeIds.add(awemeId);
+        sourceRows.push(row);
+        statsRefreshRows += 1;
+      }
+    }
     const galleryBackfillIds = needsGalleryBackfill
       ? sourceDb.prepare(`
           SELECT DISTINCT l.aweme_id
@@ -3111,6 +3137,7 @@ function summary() {
       if (shouldBackfillStats && sourceMaxDownloadedAt) {
         targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(statsBackfillWatermarkKey, sourceMaxDownloadedAt);
       }
+      if (sourceMaxStatsSeenAt) targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(statsSeenWatermarkKey, sourceMaxStatsSeenAt);
       targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(
         galleryImportVersionKey,
         DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION
@@ -3123,6 +3150,8 @@ function summary() {
         sourceWatermark: sourceMaxDownloadedAt,
         scanned: 0,
         incrementalRows,
+        statsRefreshRows,
+        statsSourceWatermark: sourceMaxStatsSeenAt,
         backfillAttempted: shouldBackfillStats,
         backfillCandidates,
         backfillRows,
@@ -3205,6 +3234,7 @@ function summary() {
           targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(statsBackfillWatermarkKey, sourceMaxDownloadedAt);
         }
       }
+      if (sourceMaxStatsSeenAt) targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(statsSeenWatermarkKey, sourceMaxStatsSeenAt);
       targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(
         galleryImportVersionKey,
         DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION
@@ -3228,6 +3258,8 @@ function summary() {
       sourceWatermark: sourceMaxDownloadedAt,
       scanned: sourceRows.length + galleryBackfillRows,
       incrementalRows,
+      statsRefreshRows,
+      statsSourceWatermark: sourceMaxStatsSeenAt,
       backfillAttempted: shouldBackfillStats,
       backfillCandidates,
       backfillRows,

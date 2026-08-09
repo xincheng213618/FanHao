@@ -23,11 +23,6 @@
     grid-template-columns: 1fr;
   }
 
-  .home-collect-row,
-  .import-actions {
-    grid-template-columns: 1fr;
-  }
-
   .topbar,
   .panel-head {
     align-items: flex-start;
@@ -35,7 +30,8 @@
   }
 
   .topbar-actions,
-  .library-tools {
+  .library-tools,
+  .links-tools {
     width: 100%;
     justify-content: flex-start;
   }
@@ -91,7 +87,8 @@
   }
 
   .topbar-actions,
-  .library-tools {
+  .library-tools,
+  .links-tools {
     align-items: stretch;
     flex-direction: column;
   }
@@ -125,5 +122,83 @@
 
   .queue-rank {
     text-align: left;
+  }
+
+  .home-links-panel .table-wrap {
+    max-height: 70vh;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+
+  .home-links-panel table,
+  .home-links-panel tbody {
+    display: block;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .home-links-panel thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .home-links-panel tbody {
+    display: grid;
+    gap: 10px;
+  }
+
+  .home-links-panel tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 9px 12px;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: #fff;
+  }
+
+  .home-links-panel tbody td {
+    display: block;
+    min-width: 0;
+    max-width: none;
+    padding: 0;
+    border: 0;
+  }
+
+  .home-links-panel .work-cell,
+  .home-links-panel .issue-cell,
+  .home-links-panel .link-actions-cell,
+  .home-links-panel .empty-links-cell {
+    grid-column: 1 / -1;
+  }
+
+  .home-links-panel .work-cell {
+    min-width: 0;
+  }
+
+  .home-links-panel tbody td:nth-child(3) {
+    text-align: right;
+  }
+
+  .home-links-panel .time-cell {
+    white-space: normal;
+  }
+
+  .home-links-panel .link-actions-cell {
+    position: static;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    white-space: normal;
+    box-shadow: none;
+  }
+
+  .home-links-panel .row-actions-menu {
+    margin-top: 0;
   }
 }

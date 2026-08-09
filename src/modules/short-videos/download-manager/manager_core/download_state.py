@@ -33,11 +33,18 @@ class DownloadManager:
         self.failure_guard_kind = ""
         self.failure_guard_consecutive = 0
         self.cycle_sidecar_success = 0
+        self.cycle_idle_since: float | None = None
         self.auto_resume_config: tuple[int, int, int | None, bool] | None = None
         self.auto_resume_timer: threading.Timer | None = None
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
+            cycle_cooldown_seconds = download_cycle_cooldown_seconds()
+            idle_reset_at = (
+                self.cycle_idle_since + cycle_cooldown_seconds
+                if self.cycle_idle_since is not None and self.cycle_sidecar_success > 0
+                else None
+            )
             return {
                 "active": self.active,
                 "job_id": self.job_id,
@@ -59,9 +66,44 @@ class DownloadManager:
                 "cycle": {
                     "completed": self.cycle_sidecar_success,
                     "limit": download_cycle_limit(),
-                    "cooldown_minutes": download_cycle_cooldown_seconds() // 60,
+                    "cooldown_minutes": cycle_cooldown_seconds // 60,
+                    "idle_since": iso_from_timestamp(self.cycle_idle_since),
+                    "idle_reset_at": iso_from_timestamp(idle_reset_at),
+                    "idle_remaining_seconds": max(0, int((idle_reset_at or 0) - time.time())),
                 },
             }
+
+    def _begin_cycle_idle(self, now: float | None = None) -> bool:
+        timestamp = time.time() if now is None else float(now)
+        with self.lock:
+            if self.cycle_sidecar_success <= 0 or self.cycle_idle_since is not None:
+                return False
+            self.cycle_idle_since = timestamp
+            return True
+
+    def _cancel_cycle_idle(self) -> None:
+        with self.lock:
+            self.cycle_idle_since = None
+
+    def _reset_cycle_after_idle(
+        self,
+        cooldown_seconds: int,
+        cycle_limit: int = 0,
+        now: float | None = None,
+    ) -> int:
+        timestamp = time.time() if now is None else float(now)
+        with self.lock:
+            completed = self.cycle_sidecar_success
+            idle_since = self.cycle_idle_since
+            if completed <= 0 or idle_since is None:
+                return 0
+            if cycle_limit > 0 and completed >= cycle_limit:
+                return 0
+            if timestamp - idle_since < max(0, int(cooldown_seconds)):
+                return 0
+            self.cycle_sidecar_success = 0
+            self.cycle_idle_since = None
+            return completed
 
     def _mark_downloaded(
         self,

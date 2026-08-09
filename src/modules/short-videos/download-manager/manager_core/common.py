@@ -162,6 +162,14 @@ def int_or_none(value: Any) -> int | None:
         return None
 
 
+def first_int(*values: Any) -> int | None:
+    for value in values:
+        parsed = int_or_none(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def json_text(value: Any) -> str:
     if value in ("", None):
         return ""

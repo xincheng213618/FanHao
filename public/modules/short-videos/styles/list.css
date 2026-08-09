@@ -2314,6 +2314,12 @@ body.short-video-author-page-active .main {
   align-self: center;
 }
 
+.short-video-author-page-library-meta > .short-video-author-page-pending-difference {
+  border: 1px solid rgba(251, 191, 36, .38);
+  background: rgba(245, 158, 11, .18);
+  color: #ffd487 !important;
+}
+
 .short-video-author-page-actions button {
   min-width: 108px;
   height: 46px;
@@ -2336,6 +2342,17 @@ body.short-video-author-page-active .main {
 .short-video-author-page-secondary {
   border-color: rgba(255, 255, 255, .14);
   background: rgba(255, 255, 255, .1);
+}
+
+.short-video-author-page-actions .short-video-author-confirm-action {
+  border-color: rgba(251, 191, 36, .55);
+  background: rgba(245, 158, 11, .22);
+  color: #ffe2a8;
+}
+
+.short-video-author-page-actions .short-video-author-confirm-action:hover,
+.short-video-author-page-actions .short-video-author-confirm-action:focus-visible {
+  background: rgba(245, 158, 11, .34);
 }
 
 .short-video-author-page-actions button:hover,

@@ -150,16 +150,25 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
     const current = bestBySecUid.get(secUid);
     if (!current || rank >= current.rank) bestBySecUid.set(secUid, { row, rank });
   }
+  const videoAuthorNameUpdate = targetDb.prepare(`
+    UPDATE short_videos
+    SET author_name = ?,
+        updated_at = ?
+    WHERE author_sec_uid = ?
+      AND ? <> ''
+      AND COALESCE(author_name, '') <> ?
+  `);
   targetDb.exec("BEGIN");
   try {
     for (const [secUid, candidate] of bestBySecUid) {
       const row = candidate.row;
+      const nickname = String(row.nickname || "").trim();
       userUpsert.run(
         `douyin:${secUid}`,
         "douyin",
         secUid,
         String(row.uid || ""),
-        String(row.nickname || ""),
+        nickname,
         String(row.avatar_url || ""),
         String(row.url || ""),
         String(row.signature || ""),
@@ -179,6 +188,7 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
         String(row.created_at || now),
         now
       );
+      videoAuthorNameUpdate.run(nickname, now, secUid, nickname, nickname);
     }
     targetDb.exec("COMMIT");
   } catch (error) {

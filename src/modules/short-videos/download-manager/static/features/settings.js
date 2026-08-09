@@ -77,11 +77,6 @@ export function createSettingsFeature(options = {}) {
     if (shouldSave) saveSoon();
   }
 
-  function setProfileUrl(value) {
-    $("profileUrl").value = value;
-    markClean("profileUrl");
-  }
-
   function bind() {
     [
       "profileUrl",
@@ -125,5 +120,5 @@ export function createSettingsFeature(options = {}) {
     $("concurrencyValue").textContent = $("concurrencyNumber").value || settings.concurrency || 8;
   }
 
-  return { bind, render, snapshot, persist, save, markClean, markDirty, setProfileUrl };
+  return { bind, render, snapshot, persist, save, markClean, markDirty };
 }

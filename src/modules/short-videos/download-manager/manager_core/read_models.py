@@ -21,6 +21,40 @@ from .profile_refresh_policy import (
 from .queue import link_stats, list_download_queue
 
 
+def get_runtime_status() -> dict[str, Any]:
+    """Return the small, frequently-polled runtime surface for the manager UI."""
+    return {
+        "app": {
+            "desktop": False,
+            "browser": FROZEN_BUILD,
+            "frozen": FROZEN_BUILD,
+        },
+        "extract": {
+            "active": extraction.extract_thread is not None and extraction.extract_thread.is_alive(),
+            "job_id": extraction.extract_job_id,
+        },
+        "download": download_supervisor.download_manager.snapshot(),
+    }
+
+
+def get_activity_state() -> dict[str, Any]:
+    """Return recent jobs and events without loading every profile and link count."""
+    with db() as conn:
+        jobs = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM jobs ORDER BY id DESC LIMIT 8"
+            ).fetchall()
+        ]
+        events = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM events ORDER BY id DESC LIMIT 20"
+            ).fetchall()
+        ]
+    return {"jobs": jobs, "events": events}
+
+
 def get_state() -> dict[str, Any]:
     profile_id = current_profile_id(create=False)
     with db() as conn:
@@ -49,9 +83,15 @@ def get_state() -> dict[str, Any]:
                   profiles.following_count,
                   profiles.follower_count,
                   profiles.total_favorited,
-                  profiles.aweme_count,
-                  profiles.has_deleted_works,
-                  profiles.favoriting_count,
+                   profiles.aweme_count,
+                   profiles.has_deleted_works,
+                   profiles.full_scan_required,
+                   profiles.full_scan_reason,
+                   profiles.full_scan_required_at,
+                   profiles.last_full_scan_at,
+                   profiles.last_full_scan_aweme_count,
+                   profiles.last_full_scan_link_total,
+                   profiles.favoriting_count,
                   profiles.gender,
                   profiles.age,
                   profiles.verification,
@@ -147,8 +187,10 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
         raise ValueError("主页范围只能是 collected/following/all")
     if deleted_works == "flagged":
         where.append("profiles.has_deleted_works=1")
+    elif deleted_works == "pending":
+        where.append("profiles.full_scan_required=1")
     elif deleted_works != "all":
-        raise ValueError("作品差异只能是 all/flagged")
+        raise ValueError("作品差异只能是 all/flagged/pending")
     if search:
         where.append(
             "(profiles.nickname LIKE ? OR profiles.title LIKE ? OR profiles.unique_id LIKE ? "
@@ -193,9 +235,15 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
                   profiles.following_count,
                   profiles.follower_count,
                   profiles.total_favorited,
-                  profiles.aweme_count,
-                  profiles.has_deleted_works,
-                  profiles.favoriting_count,
+                   profiles.aweme_count,
+                   profiles.has_deleted_works,
+                   profiles.full_scan_required,
+                   profiles.full_scan_reason,
+                   profiles.full_scan_required_at,
+                   profiles.last_full_scan_at,
+                   profiles.last_full_scan_aweme_count,
+                   profiles.last_full_scan_link_total,
+                   profiles.favoriting_count,
                   profiles.gender,
                   profiles.age,
                   profiles.verification,
@@ -210,8 +258,20 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
                   COALESCE(stats.downloading, 0) downloading,
                   COALESCE(stats.downloaded, 0) downloaded,
                   COALESCE(stats.failed, 0) failed,
-                  stats.latest_work_create_time,
-                  stats.previous_work_create_time
+                   stats.latest_work_create_time,
+                   stats.previous_work_create_time,
+                   (
+                     SELECT history.observed_aweme_count
+                     FROM profile_collection_history history
+                     WHERE history.profile_id=profiles.id AND history.status='complete'
+                     ORDER BY history.id DESC LIMIT 1
+                   ) last_collection_aweme_count,
+                   (
+                     SELECT history.previous_aweme_count
+                     FROM profile_collection_history history
+                     WHERE history.profile_id=profiles.id AND history.status='complete'
+                     ORDER BY history.id DESC LIMIT 1
+                   ) previous_collection_aweme_count
                 FROM profiles
                 LEFT JOIN ({stats_sql}) stats ON stats.profile_id=profiles.id
                 {where_sql}
@@ -227,9 +287,11 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
             for row in conn.execute(
                 f"""
                 SELECT
-                  profiles.tab,
-                  profiles.last_extracted_at,
-                  stats.latest_work_create_time,
+                   profiles.tab,
+                   profiles.last_extracted_at,
+                   profiles.full_scan_required,
+                   profiles.full_scan_required_at,
+                   stats.latest_work_create_time,
                   stats.previous_work_create_time
                 FROM profiles
                 LEFT JOIN ({stats_sql}) stats ON stats.profile_id=profiles.id
@@ -250,10 +312,16 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
         for profile in refresh_candidates
     )
     deferred_count = len(refresh_candidates) - eligible_count
+    full_scan_required_count = sum(
+        int(profile.get("full_scan_required") or 0)
+        for profile in refresh_candidates
+        if str(profile.get("tab") or "post") == "post"
+    )
     return {
         "total": total,
         "eligible_count": eligible_count,
         "deferred_count": deferred_count,
+        "full_scan_required_count": full_scan_required_count,
         "auto_candidate_count": len(refresh_candidates),
         "profiles": rows,
     }
@@ -263,43 +331,100 @@ def list_links(query: dict[str, list[str]]) -> dict[str, Any]:
     status = (query.get("status") or [""])[0]
     search = (query.get("q") or [""])[0]
     scope = (query.get("scope") or ["global"])[0].strip().lower()
+    view = (query.get("view") or ["full"])[0].strip().lower()
+    include_summary = str((query.get("include_summary") or [""])[0]).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if view not in {"full", "manager"}:
+        raise ValueError("链接视图只能是 full/manager")
     limit = normalize_int((query.get("limit") or ["100"])[0], 100, 1, 500)
     offset = normalize_int((query.get("offset") or ["0"])[0], 0, 0, 1000000)
     profile_id = normalize_int((query.get("profile_id") or ["0"])[0], 0, 0, 1000000)
     if profile_id <= 0 and scope in {"current", "profile"}:
         profile_id = current_profile_id(create=False) or 0
-    where = []
-    params: list[Any] = []
+    base_where = []
+    base_params: list[Any] = []
     if profile_id > 0:
-        where.append("links.profile_id=?")
-        params.append(profile_id)
-    if status:
-        where.append("links.status=?")
-        params.append(status)
+        base_where.append("links.profile_id=?")
+        base_params.append(profile_id)
     if search:
-        where.append(
+        base_where.append(
             "(links.url LIKE ? OR links.aweme_id LIKE ? OR links.last_error LIKE ? "
             "OR links.author_uid LIKE ? OR links.author_sec_uid LIKE ? OR links.author_nickname LIKE ? "
             "OR links.desc LIKE ?)"
         )
         like = f"%{search}%"
-        params.extend([like, like, like, like, like, like, like])
+        base_params.extend([like, like, like, like, like, like, like])
+    where = list(base_where)
+    params = list(base_params)
+    if status:
+        where.append("links.status=?")
+        params.append(status)
+    base_where_sql = f"WHERE {' AND '.join(base_where)}" if base_where else ""
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     with db() as conn:
         total = conn.execute(
             f"SELECT COUNT(*) c FROM links {where_sql}",
             params,
         ).fetchone()["c"]
+        summary = None
+        if include_summary:
+            summary = {
+                "all": 0,
+                "pending": 0,
+                "downloading": 0,
+                "downloaded": 0,
+                "failed": 0,
+            }
+            summary_rows = conn.execute(
+                f"SELECT links.status, COUNT(*) c FROM links {base_where_sql} GROUP BY links.status",
+                base_params,
+            ).fetchall()
+            for summary_row in summary_rows:
+                count = int(summary_row["c"] or 0)
+                summary["all"] += count
+                summary_status = str(summary_row["status"] or "")
+                if summary_status in summary:
+                    summary[summary_status] = count
         order_sql = "ORDER BY links.id DESC"
         if status == "downloaded":
             order_sql = (
                 "ORDER BY COALESCE(links.downloaded_at, links.last_started_at, "
                 "links.last_seen_at, links.discovered_at) DESC, links.id DESC"
             )
+        link_columns = "links.*"
+        if view == "manager":
+            link_columns = """
+              links.id,
+              links.profile_id,
+              links.aweme_id,
+              links.kind,
+              links.url,
+              links.author_uid,
+              links.author_sec_uid,
+              links.author_nickname,
+              links.desc,
+              links.cover_url,
+              links.create_time,
+              links.media_type,
+              links.status,
+              links.attempts,
+              links.discovered_at,
+              links.last_seen_at,
+              links.last_started_at,
+              links.downloaded_at,
+              links.failed_at,
+              links.last_error,
+              links.actual_probe_error,
+              links.download_intent
+            """
         rows = conn.execute(
             f"""
             SELECT
-              links.*,
+              {link_columns},
               profiles.url profile_url,
               profiles.nickname profile_nickname,
               profiles.title profile_title,
@@ -312,4 +437,7 @@ def list_links(query: dict[str, list[str]]) -> dict[str, Any]:
             """,
             [*params, limit, offset],
         ).fetchall()
-    return {"total": total, "links": [dict(row) for row in rows]}
+    result = {"total": total, "view": view, "links": [dict(row) for row in rows]}
+    if summary is not None:
+        result["summary"] = summary
+    return result

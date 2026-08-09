@@ -26,6 +26,16 @@
   justify-content: flex-end;
 }
 
+.links-tools {
+  display: grid;
+  gap: 8px;
+  width: min(560px, 100%);
+}
+
+.links-tools input {
+  min-width: 0;
+}
+
 .preview-cell {
   width: 72px;
 }
@@ -48,7 +58,7 @@
 .link-actions-cell {
   position: sticky;
   right: 0;
-  min-width: 72px;
+  min-width: 104px;
   white-space: nowrap;
   background: #fff;
   box-shadow: -1px 0 0 var(--line);
@@ -67,7 +77,7 @@
 table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 1240px;
+  min-width: 920px;
 }
 
 th,
@@ -93,6 +103,178 @@ td.author,
 td.time-cell {
   max-width: 420px;
   word-break: break-all;
+}
+
+.work-cell {
+  min-width: 280px;
+  max-width: 420px;
+}
+
+.link-work-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.link-work-copy {
+  min-width: 0;
+}
+
+.link-work-copy strong {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.45;
+}
+
+.link-thumb-placeholder {
+  flex: 0 0 auto;
+  background: linear-gradient(145deg, #dce5ea, #eef3f6);
+}
+
+.source-cell {
+  min-width: 150px;
+  max-width: 220px;
+}
+
+.source-cell a {
+  color: var(--ink);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.source-cell a:hover {
+  color: var(--accent-strong);
+}
+
+.issue-cell {
+  min-width: 180px;
+  max-width: 280px;
+}
+
+.link-issue {
+  overflow: hidden;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+
+.link-issue.has-issue {
+  color: #9b5d00;
+}
+
+.link-row-details {
+  margin-top: 6px;
+}
+
+.link-row-details summary,
+.row-actions-menu summary,
+.maintenance-menu summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.link-row-details dl {
+  display: grid;
+  gap: 5px;
+  margin: 7px 0 0;
+}
+
+.link-row-details dl > div {
+  min-width: 0;
+}
+
+.link-row-details dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.link-row-details dd {
+  margin: 1px 0 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.link-actions-cell {
+  vertical-align: middle;
+}
+
+.link-open-button {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: var(--ink);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.row-actions-menu {
+  margin-top: 7px;
+}
+
+.row-actions-menu[open] summary {
+  margin-bottom: 7px;
+}
+
+.row-actions-menu[open] {
+  display: grid;
+  gap: 7px;
+}
+
+.row-actions-menu button {
+  width: 100%;
+  padding: 6px 8px;
+  white-space: normal;
+}
+
+.link-retry-button {
+  border-color: rgba(15, 143, 140, 0.38);
+  background: rgba(15, 143, 140, 0.08);
+  color: var(--accent-strong);
+}
+
+.empty-links-cell {
+  height: 120px;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.maintenance-menu {
+  position: relative;
+}
+
+.maintenance-menu > summary {
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px 10px;
+  color: var(--ink);
+}
+
+.maintenance-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.maintenance-actions {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 5;
+  display: grid;
+  gap: 8px;
+  width: min(320px, calc(100vw - 32px));
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: var(--shadow);
 }
 
 td.time-cell {
@@ -142,6 +324,28 @@ td.time-cell {
   background: rgba(15, 143, 140, 0.08);
 }
 
+.filters button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.filter-count {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #eef3f6;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
+.filters button.active .filter-count {
+  background: rgba(15, 143, 140, 0.14);
+  color: var(--accent-strong);
+}
+
 .list {
   display: grid;
   gap: 8px;
@@ -169,22 +373,6 @@ td.time-cell {
 
 .import-panel {
   margin-top: 0;
-}
-
-.compact-import {
-  margin-top: 0;
-}
-
-.import-actions {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: end;
-}
-
-.import-actions textarea {
-  margin-top: 0;
-  min-height: 86px;
 }
 
 textarea {

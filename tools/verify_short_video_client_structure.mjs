@@ -351,7 +351,9 @@ function verifyWebDedicatedEntry() {
   assert(listWindowSource.split(/\r?\n/).length <= 450, "the Web short-video list-window controller must stay below 450 lines");
   assert(mediaCacheSource.split(/\r?\n/).length <= 380, "the Web short-video media-cache controller must stay below 380 lines");
   assert(authorPagesSource.split(/\r?\n/).length <= 600, "short-video author-page controller must stay below 600 lines");
-  assert(authorPagesSource.includes('showBrowserToast(error?.message || "全部扫描启动失败")'), "author full-scan startup failures must stay visible instead of silently redrawing the page");
+  assert(authorPagesSource.includes('showBrowserToast(error?.message || "数量确认启动失败")'), "author count-confirmation startup failures must stay visible instead of silently redrawing the page");
+  assert(authorPagesSource.includes('fullRefresh.textContent = "确认数量"') && authorPagesSource.includes("short-video-author-page-pending-difference"), "author pages must expose a direct, clearly named full-scan count confirmation when local and homepage counts differ");
+  assert(playerSource.includes('profile=${encodeURIComponent(secUid)}#profiles'), "author collection management links must deep-link to the current profile instead of requiring another search");
   assert(webIconsSource.split(/\r?\n/).length <= 120, "short-video icon registry must stay below 120 lines");
   assert(shortVideoStateSource.split(/\r?\n/).length <= 350, "short-video state and preference helpers must stay below 350 lines");
   assert(indexSource.includes("const shortVideoStyleUrls = [") && indexSource.includes("const shortVideoViewerStyleUrls = [") && indexSource.includes("const shortVideoDetailEntry = ") && indexSource.includes("window.__fanhaoEnsureShortVideoViewerStyles = () => loadStyleUrls(shortVideoViewerStyleUrls)") && indexSource.includes("window.__fanhaoStylesReady = loadStyleUrls(styleUrls)") && indexSource.includes("await window.__fanhaoStylesReady;"), "the dedicated short-video entry must load route-critical styles first and expose deduplicated on-demand viewer styles");

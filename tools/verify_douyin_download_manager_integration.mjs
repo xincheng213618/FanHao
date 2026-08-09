@@ -239,8 +239,11 @@ for (const relativePath of [
   "run.ps1",
   "setup-downloader.ps1",
   "manager_core/profile_refresh_policy.py",
+  "manager_core/profile_collection_history.py",
+  "tests/test_download_cycle_policy.py",
   "tests/test_profile_refresh_policy.py",
   "tests/test_runtime_characterization.py",
+  "tests/test_work_stats_refresh.py",
   "static/index.html",
   "static/app.js",
   "static/shared-player.html",
@@ -391,10 +394,20 @@ const extractLinksSource = fs.readFileSync(path.join(moduleDir, "extract-links.m
 assert.match(extractLinksSource, /rawTargetSecUid\.toLowerCase\(\) === "self"/);
 assert.match(extractLinksSource, /collectConfirmedLikeItems\(data, targetSecUid\)/);
 assert.match(extractLinksSource, /hasUsableWorkMetadata\(work\)/);
+assert.match(extractLinksSource, /REFRESHED_WORK_FIELDS/);
+assert.match(extractLinksSource, /Object\.is\(existing\[key\], incoming\)/);
 
 const managerIndexSource = fs.readFileSync(path.join(moduleDir, "static", "index.html"), "utf8");
 assert.match(managerIndexSource, /全库数据库链接/);
-assert.match(managerIndexSource, /所属主页/);
+assert.match(managerIndexSource, /主页 \/ 作者/);
+assert.match(managerIndexSource, /id="profileUrl"/);
+assert.match(managerIndexSource, /id="extractStart"/);
+assert.match(managerIndexSource, /class="panel download-execution-panel"/);
+assert.doesNotMatch(
+  managerIndexSource,
+  /id="(?:profileSelect|maxItems|manualLinks|importLinks|watchQueue|backfillGalleryMusic|downloadStop)"/
+);
+assert.match(managerIndexSource, /20260809-home-simplify-01/);
 
 const linksFeatureSource = fs.readFileSync(
   path.join(moduleDir, "static", "features", "links.js"),
@@ -402,6 +415,25 @@ const linksFeatureSource = fs.readFileSync(
 );
 assert.match(linksFeatureSource, /profile_nickname/);
 assert.match(linksFeatureSource, /profile_tab === "like"/);
+
+const managerAppSource = fs.readFileSync(path.join(moduleDir, "static", "app.js"), "utf8");
+assert.match(managerAppSource, /features\/downloads\.js\?v=20260809-home-simplify-01/);
+assert.match(managerAppSource, /features\/links\.js\?v=20260809-home-simplify-01/);
+assert.match(managerAppSource, /features\/profiles\.js\?v=20260809-home-simplify-01/);
+
+const downloadStateSource = fs.readFileSync(
+  path.join(moduleDir, "manager_core", "download_state.py"),
+  "utf8"
+);
+const downloadSupervisorSource = fs.readFileSync(
+  path.join(moduleDir, "manager_core", "download_supervisor.py"),
+  "utf8"
+);
+assert.match(downloadStateSource, /cycle_idle_since/);
+assert.match(downloadStateSource, /idle_remaining_seconds/);
+assert.match(downloadStateSource, /def _reset_cycle_after_idle\(/);
+assert.match(downloadSupervisorSource, /cycle_idle_reset/);
+assert.match(downloadSupervisorSource, /self\._begin_cycle_idle\(\)/);
 
 const qualityAuditSource = fs.readFileSync(path.join(moduleDir, "tools", "audit_video_quality.py"), "utf8");
 assert.match(qualityAuditSource, /MAX\(COALESCE\(l\.digg_count, 0\), COALESCE\(sv\.digg_count, 0\)\)>=\?/);
@@ -491,9 +523,14 @@ assert.match(managerHtml, /导入 Cookie/);
 assert.match(managerClient, /export function createAuthFeature/);
 assert.match(managerClient, /\/api\/auth\/status/);
 assert.match(managerHtml, /提取我的关注/);
-assert.match(managerHtml, /疑似删过作品/);
+assert.match(managerHtml, /待全量确认/);
+assert.match(managerHtml, /已确认主页少作品/);
 assert.match(managerHtml, /一键智能采集/);
-assert.match(managerHtml, /智能重抓会比较上次采集时间、最新作品和上一条作品/);
+assert.match(managerHtml, /id="confirmPendingProfiles"/);
+assert.match(managerHtml, /暂无待确认/);
+assert.match(managerHtml, /每次采集都会更新本次遇到作品的点赞、评论、收藏和分享/);
+assert.match(managerHtml, /快速采集刷新最近作品，全量确认刷新完整扫描范围/);
+assert.match(managerHtml, /127\.0\.0\.1:29998\/short-videos/);
 assert.doesNotMatch(managerHtml, /id="profileRefreshRecentDays"|id="profileRefreshSince"/);
 assert.match(managerHtml, /已下载作品/);
 assert.match(managerHtml, /id="quitApp"/);
@@ -501,9 +538,43 @@ assert.match(managerClient, /export function createLibraryFeature/);
 assert.match(managerClient, /\/api\/library\?/);
 assert.match(managerClient, /export function createDownloadsFeature/);
 assert.match(managerClient, /\/api\/app\/quit/);
+assert.match(managerClient, /watch_new:\s*true/);
+assert.match(managerClient, /\/api\/download\/stop/);
+assert.match(managerClient, /active \? "停止下载" : "开始下载"/);
+assert.match(managerClient, /idle_remaining_seconds/);
+assert.doesNotMatch(
+  managerClient,
+  /\$\("(?:profileSelect|maxItems|manualLinks|importLinks|watchQueue|backfillGalleryMusic|downloadStop)"\)/
+);
+assert.match(managerClient, /\/api\/status/);
+assert.match(managerClient, /\/api\/activity/);
+assert.match(managerClient, /document\.visibilityState/);
+assert.match(managerClient, /syncPagePollers/);
+assert.match(managerClient, /params\.set\("view", "manager"\)/);
+assert.match(managerClient, /params\.set\("include_summary", "1"\)/);
+assert.match(managerClient, /\/api\/links\/retry/);
+assert.match(managerClient, /supportsLinkRetry/);
 assert.match(managerClient, /deleted_works/);
+assert.match(managerClient, /full_scan_required/);
+assert.match(managerClient, /一键确认待全量/);
+assert.match(managerClient, /pending\.map\(\(profile\) => Number\(profile\.id\)\)/);
+assert.match(managerClient, /new URLSearchParams\(location\.search\)\.get\("profile"\)/);
+assert.match(managerClient, /profileManagerSearch"\)\.value = friendlyName/);
+assert.match(managerClient, /127\.0\.0\.1:29998\/short-videos\/authors\/\$\{encodeURIComponent\(secUid\)\}/);
+assert.match(managerClient, /profile-manager-page-links/);
+assert.match(managerClient, />本地<\/a>/);
+assert.match(managerClient, />抖音<\/a>/);
+assert.match(managerClient, /profileManagerList"\)\.addEventListener\("scroll", scheduleLoadMoreIfNeeded/);
+assert.match(managerClient, /remainingScroll > PROFILE_AUTO_LOAD_DISTANCE/);
+assert.match(managerClient, /const PROFILE_PAGE_SIZE = 40/);
+assert.match(managerClient, /data-profile-avatar-src/);
+assert.match(managerClient, /IntersectionObserver/);
+assert.doesNotMatch(managerClient, /rows = profiles;\s*total = profiles\.length;/);
 assert.match(managerClient, /下载管理器已退出/);
 assert.match(managerHtml, /id="linksBody"/);
+assert.match(managerHtml, /id="linksSearch"/);
+assert.match(managerHtml, /data-link-count="failed"/);
+assert.match(managerHtml, /维护操作/);
 assert.match(managerClient, /data-link-delete/);
 assert.match(managerClient, /\/api\/links\/delete/);
 assert.match(managerClient, /只会删除数据库记录，不会删除已经下载到本地的文件/);
@@ -518,7 +589,9 @@ assert.match(sharedWebPlayer, /export function createShortVideoPage/);
 assert.match(sharedWebPlayer, /点赞分布/);
 assert.match(sharedWebPlayer, /\/api\/short-videos\/like-distribution/);
 assert.match(sharedAuthorPages, /快速刷新/);
-assert.match(sharedAuthorPages, /全部扫描/);
+assert.match(sharedAuthorPages, /确认数量/);
+assert.match(sharedAuthorPages, /待确认差/);
+assert.match(sharedWebPlayer, /profile=\$\{encodeURIComponent\(secUid\)\}#profiles/);
 assert.match(sharedWebPlayer, /comments-view\.js\?v=/);
 assert.match(sharedCommentsView, /commentsEndpoint}\/sync/);
 

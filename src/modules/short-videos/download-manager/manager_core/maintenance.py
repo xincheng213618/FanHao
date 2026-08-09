@@ -49,6 +49,44 @@ def reset_failed_links(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "changed": changed, "scope": scope, "state": get_state()}
 
 
+def retry_link(payload: dict[str, Any]) -> dict[str, Any]:
+    """Move one failed link back to pending without touching sibling records."""
+    link_id = normalize_int(payload.get("id", 0), 0, 0, 1000000000)
+    if link_id <= 0:
+        return {"ok": False, "message": "缺少有效的链接记录 ID"}
+    with db() as conn:
+        row = conn.execute(
+            "SELECT id, aweme_id, profile_id, status FROM links WHERE id=?",
+            (link_id,),
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "message": "这条数据库记录已经不存在"}
+        if str(row["status"] or "") != "failed":
+            return {"ok": False, "message": "只有失败记录可以重新加入下载队列"}
+        conn.execute(
+            """
+            UPDATE links
+            SET status='pending',
+                last_error=NULL,
+                failed_at=NULL,
+                last_started_at=NULL
+            WHERE id=?
+            """,
+            (link_id,),
+        )
+        sync_download_queue(conn)
+    aweme_id = str(row["aweme_id"] or "")
+    add_event("info", f"单条失败链接已转为待下载：{aweme_id or link_id}")
+    return {
+        "ok": True,
+        "changed": 1,
+        "id": link_id,
+        "aweme_id": aweme_id,
+        "profile_id": int(row["profile_id"] or 0),
+        "status": "pending",
+    }
+
+
 def queue_gallery_music_backfill(payload: dict[str, Any]) -> dict[str, Any]:
     scope = str(payload.get("scope") or "all").strip().lower()
     params: list[Any] = []

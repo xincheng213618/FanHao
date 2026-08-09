@@ -10,7 +10,7 @@ from typing import Any
 
 from .common import iso_from_timestamp, normalize_int, now_iso, row_text
 from .config import DEFAULT_OUTPUT_DIR, DOWNLOAD_QUEUE_ORDER, MAX_CONCURRENCY, QUALITY_UPGRADE_INTENT
-from .database import add_event, create_job, db, download_cycle_limit, setting, update_job
+from .database import add_event, create_job, db, download_cycle_cooldown_seconds, download_cycle_limit, setting, update_job
 from .domain_manifest import profile_output_dir
 from .download_state import DownloadManager
 from .queue import queue_pending_count, sync_download_queue
@@ -75,6 +75,7 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
             self.profile_id = profile_id
             self.watch_new = bool(watch_new)
             self.cycle_sidecar_success = 0
+            self.cycle_idle_since = None
             self.stop_event.clear()
             self.job_id = create_job(
                 "download",
@@ -154,6 +155,7 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
         watch_new = self.watch_new
         max_active = max(1, concurrency)
         cycle_limit = download_cycle_limit()
+        cycle_cooldown_seconds = download_cycle_cooldown_seconds()
         stopped = False
         guard_triggered = False
         cycle_pause_triggered = False
@@ -163,6 +165,21 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
             wait_message_at = 0.0
             while not self.stop_event.is_set():
                 self._raise_if_sidecar_exited()
+                idle_reset_completed = self._reset_cycle_after_idle(cycle_cooldown_seconds, cycle_limit)
+                if idle_reset_completed:
+                    sidecar_success = 0
+                    cooldown_minutes = max(1, cycle_cooldown_seconds // 60)
+                    add_event(
+                        "info",
+                        f"下载队列已连续空闲 {cooldown_minutes} 分钟，本轮 {idle_reset_completed} 个实际下载已重新计数；队列位置保持不变",
+                    )
+                    download_timing(
+                        "cycle_idle_reset",
+                        job_id=job_id,
+                        profile_id=profile_id,
+                        completed=idle_reset_completed,
+                        cooldown_seconds=cycle_cooldown_seconds,
+                    )
                 if cycle_limit > 0 and sidecar_success >= cycle_limit:
                     self._enter_cycle_cooldown(
                         job_id,
@@ -189,6 +206,7 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
                 if capacity > 0:
                     links = self._claim_queue_batch(profile_id, capacity)
                     if links:
+                        self._cancel_cycle_idle()
                         first_profile_id = int(links[0]["profile_id"] or profile_id)
                         if first_profile_id != profile_id:
                             profile_id = first_profile_id
@@ -215,6 +233,8 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
                     sidecar_success += ok
                     with self.lock:
                         self.cycle_sidecar_success = sidecar_success
+                        if ok > 0:
+                            self.cycle_idle_since = None
                     update_job(job_id, processed=processed, success=success, failed=failed)
                     if self._record_failure_guard_outcome(ok, bad):
                         self._enter_failure_guard(job_id, concurrency, target_limit, profile_id, watch_new)
@@ -223,15 +243,18 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
                         break
 
                 if active:
+                    self._cancel_cycle_idle()
                     time.sleep(0.8)
                     continue
                 if target_limit > 0 and processed >= target_limit:
                     break
                 pending = self._queue_pending_count()
                 if pending > 0:
+                    self._cancel_cycle_idle()
                     continue
                 if not watch_new:
                     break
+                self._begin_cycle_idle()
                 if time.time() - wait_message_at > 5:
                     update_job(
                         job_id,

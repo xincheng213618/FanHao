@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [ValidatePattern('^[0-9A-Za-z._-]+$')]
-  [string]$Version = "0.3.1-test",
+  [string]$Version = "0.3.2-test",
   [string]$DownloaderRoot = "",
   [string]$OutputDirectory = "",
   [string]$WorkDirectory = "",

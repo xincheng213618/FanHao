@@ -4,14 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Douyin Download Manager</title>
-    <link rel="stylesheet" href="/styles/shell.css?v=20260720-deleted-works-01" />
-    <link rel="stylesheet" href="/styles/auth.css?v=20260720-deleted-works-01" />
-    <link rel="stylesheet" href="/styles/controls.css?v=20260720-deleted-works-01" />
-    <link rel="stylesheet" href="/styles/profiles.css?v=20260720-deleted-works-01" />
-    <link rel="stylesheet" href="/styles/home.css?v=20260720-deleted-works-01" />
-    <link rel="stylesheet" href="/styles/links.css?v=20260720-deleted-works-01" />
-    <link rel="stylesheet" href="/styles/library.css?v=20260720-deleted-works-01" />
-    <link rel="stylesheet" href="/styles/responsive.css?v=20260720-deleted-works-01" />
+    <link rel="stylesheet" href="/styles/shell.css?v=20260809-home-simplify-01" />
+    <link rel="stylesheet" href="/styles/auth.css?v=20260809-home-simplify-01" />
+    <link rel="stylesheet" href="/styles/controls.css?v=20260809-home-simplify-01" />
+    <link rel="stylesheet" href="/styles/profiles.css?v=20260809-home-simplify-01" />
+    <link rel="stylesheet" href="/styles/home.css?v=20260809-home-simplify-01" />
+    <link rel="stylesheet" href="/styles/links.css?v=20260809-home-simplify-01" />
+    <link rel="stylesheet" href="/styles/library.css?v=20260809-home-simplify-01" />
+    <link rel="stylesheet" href="/styles/responsive.css?v=20260809-home-simplify-01" />
   </head>
   <body>
     <main class="shell">
@@ -22,9 +22,10 @@
         </div>
         <div class="topbar-actions">
           <div class="status-line">
-            <span id="extractState">采集空闲</span>
-            <span id="downloadState">下载空闲</span>
+            <span id="extractState" role="status" aria-live="polite">采集空闲</span>
+            <span id="downloadState" role="status" aria-live="polite">下载空闲</span>
           </div>
+          <a class="ghost-link topbar-button" href="http://127.0.0.1:29998/short-videos" target="_blank" rel="noreferrer">短视频主页</a>
           <button id="openLibraryQuick" class="topbar-button">查看已下载</button>
           <button id="quitApp" class="topbar-button danger" hidden>退出程序</button>
         </div>
@@ -41,56 +42,47 @@
       <section class="page-panel active" data-page-panel="home">
         <div class="home-layout">
           <section class="panel collect-panel">
-            <div class="panel-title">采集链接</div>
+            <div class="panel-title">采集主页</div>
             <div class="profile-url-row">
-              <label class="field">
-                <span>主页链接</span>
-                <input id="profileUrl" spellcheck="false" />
-              </label>
+              <input id="profileUrl" spellcheck="false" aria-label="主页链接" placeholder="粘贴抖音主页链接" />
               <div class="extract-actions">
                 <button id="extractStart" class="primary">采集链接</button>
                 <button id="extractStop" class="danger" hidden>停止采集</button>
               </div>
             </div>
-            <div class="home-collect-row">
-              <label class="field">
-                <span>已入库主页</span>
-                <select id="profileSelect"></select>
-              </label>
-              <label class="field small-field">
-                <span>本次最多采集</span>
-                <input id="maxItems" type="number" min="0" max="100000" value="0" />
-              </label>
-            </div>
-            <details class="advanced-panel compact-import">
-              <summary>手动导入链接</summary>
-              <div class="import-actions">
-                <textarea id="manualLinks" spellcheck="false" placeholder="https://www.douyin.com/video/..."></textarea>
-                <button id="importLinks">导入</button>
-              </div>
-            </details>
           </section>
 
-          <aside class="panel compact-panel">
-            <div class="panel-title">下载执行</div>
+          <section class="panel download-execution-panel">
+            <div class="panel-head download-execution-head">
+              <div>
+                <div class="panel-title">下载执行</div>
+                <div class="muted">采集到的新作品会自动进入下载队列。</div>
+              </div>
+              <div class="actions download-actions">
+                <button id="downloadStart" class="primary">开始下载</button>
+                <button id="openLibraryHome">查看已下载</button>
+                <button id="resetFailedCurrent">当前失败转待下载</button>
+              </div>
+            </div>
             <div id="downloadGuard" class="download-guard" role="alert" hidden>
               <div id="downloadGuardTitle" class="download-guard-title">下载保护已暂停</div>
               <div id="downloadGuardReason"></div>
               <div id="downloadGuardTime" class="download-guard-time"></div>
               <div id="downloadGuardHelp" class="download-guard-help">切换代理 IP 或更新 Cookie 后，可立即重新尝试。</div>
             </div>
-            <div id="downloadCycleProgress" class="download-cycle-progress"></div>
-            <div class="actions stacked-actions">
-              <button id="downloadStart" class="primary">开始 / 继续</button>
-              <button id="downloadStop" class="danger">停止</button>
-              <button id="openLibraryHome">查看已下载</button>
-              <button id="resetFailedCurrent">当前失败转待下载</button>
+            <div class="download-execution-body">
+              <div class="download-execution-summary" aria-live="polite" aria-atomic="true">
+                <span>当前状态</span>
+                <strong id="downloadPrimaryStatus">下载空闲</strong>
+                <div id="downloadNextAction" class="muted">启动后会按队列顺序处理待下载作品</div>
+                <details class="runtime-details">
+                  <summary>诊断详情</summary>
+                  <div id="downloadRuntimeDetails" class="muted">未配置代理</div>
+                </details>
+              </div>
+              <div id="downloadCycleProgress" class="download-cycle-progress"></div>
             </div>
-            <label class="checkbox-field">
-              <input id="watchQueue" type="checkbox" checked />
-              <span>动态监听新链接</span>
-            </label>
-          </aside>
+          </section>
         </div>
 
         <section class="panel queue-panel home-queue-panel">
@@ -111,32 +103,32 @@
           <div class="panel-head">
             <div>
               <div class="panel-title">全库数据库链接</div>
-              <div class="muted">这里展示所有主页的链接；“所属主页”用于区分当前队列与其他主页。</div>
-              <div class="muted" id="dbPath"></div>
+              <div class="muted">默认显示精简信息；展开单条详情可查看作品 ID、原链接和技术信息。</div>
+              <details class="db-path-details">
+                <summary>数据库位置</summary>
+                <div class="muted" id="dbPath"></div>
+              </details>
             </div>
-            <div class="filters">
-              <button data-filter="" class="active">全部</button>
-              <button data-filter="pending">待下载</button>
-              <button data-filter="downloading">下载中</button>
-              <button data-filter="downloaded">已完成</button>
-              <button data-filter="failed">失败</button>
+            <div class="links-tools">
+              <input id="linksSearch" type="search" placeholder="搜索标题、作者、作品 ID 或错误" aria-label="搜索全库链接" />
+              <div class="filters" aria-label="链接状态筛选">
+                <button data-filter="" class="active">全部 <span class="filter-count" data-link-count="all" hidden></span></button>
+                <button data-filter="pending">待下载 <span class="filter-count" data-link-count="pending" hidden></span></button>
+                <button data-filter="downloading">下载中 <span class="filter-count" data-link-count="downloading" hidden></span></button>
+                <button data-filter="downloaded">已完成 <span class="filter-count" data-link-count="downloaded" hidden></span></button>
+                <button data-filter="failed">需处理 <span class="filter-count" data-link-count="failed" hidden></span></button>
+              </div>
             </div>
           </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>ID</th>
-                  <th>预览</th>
-                  <th>标题</th>
-                  <th>类型</th>
+                  <th>作品</th>
+                  <th>主页 / 作者</th>
                   <th>状态</th>
-                  <th>时间</th>
-                  <th>次数</th>
-                  <th>所属主页</th>
-                  <th>作者</th>
-                  <th>链接</th>
-                  <th>错误</th>
+                  <th>时间 / 尝试</th>
+                  <th>结果 / 问题</th>
                   <th class="link-actions-head">操作</th>
                 </tr>
               </thead>
@@ -146,10 +138,16 @@
           <div class="links-footer">
             <span id="linksPager" class="muted">已加载 0 / 0</span>
             <div class="links-footer-actions">
-              <button id="backfillGalleryMusic">补齐图集音乐</button>
-              <button id="resetFailedAll">全部失败转待下载</button>
-              <button id="deleteEmptyFailed" class="danger">删除空壳失败</button>
-              <button id="deleteAllFailed" class="danger">删除所有失败</button>
+              <details class="maintenance-menu">
+                <summary>维护操作</summary>
+                <div class="maintenance-actions">
+                  <strong>全库维护</strong>
+                  <span class="muted">这些操作会影响当前筛选之外的记录，执行前仍会再次确认。</span>
+                  <button id="resetFailedAll">全部失败转待下载</button>
+                  <button id="deleteEmptyFailed" class="danger">删除空壳失败</button>
+                  <button id="deleteAllFailed" class="danger">删除所有失败</button>
+                </div>
+              </details>
               <button id="loadMoreLinks">加载更多</button>
             </div>
           </div>
@@ -184,6 +182,7 @@
             </div>
             <div class="profile-manager-actions">
               <button id="importFollowing" title="从当前登录的抖音账号提取关注列表">提取我的关注</button>
+              <button id="confirmPendingProfiles" class="attention" title="只依次全量扫描标记为待确认的主页，不采集其他主页" disabled>暂无待确认</button>
               <button id="refreshProfiles" class="primary" title="根据上次采集时间和最近两条作品的发布间隔，只增量采集已经到期的主页">一键智能采集</button>
               <button id="profileRefreshStop" class="danger" hidden>停止采集</button>
             </div>
@@ -205,7 +204,8 @@
               <span>作品差异</span>
               <select id="profileManagerDeletedWorks">
                 <option value="all">全部</option>
-                <option value="flagged">疑似删过作品</option>
+                <option value="pending">待全量确认</option>
+                <option value="flagged">已确认主页少作品</option>
               </select>
             </label>
             <label class="field">
@@ -220,7 +220,7 @@
             </label>
           </div>
           <div class="profile-refresh-policy-note muted">
-            智能重抓会比较上次采集时间、最新作品和上一条作品；未到预计发布时间的主页会直接跳过。
+            每次采集都会更新本次遇到作品的点赞、评论、收藏和分享；快速采集刷新最近作品，全量确认刷新完整扫描范围。主页作品数明显减少时只安排一次全量确认。
           </div>
           <div id="profileManagerList" class="profile-manager-list"></div>
         </section>
@@ -341,6 +341,6 @@
     </main>
 
     <div id="toast" class="toast"></div>
-    <script type="module" src="/app.js?v=20260720-deleted-works-01"></script>
+    <script type="module" src="/app.js?v=20260809-home-simplify-01"></script>
   </body>
 </html>

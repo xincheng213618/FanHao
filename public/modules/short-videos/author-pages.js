@@ -99,8 +99,9 @@ export function createShortVideoAuthorPages(deps) {
     }
     const libraryMeta = document.createElement("div");
     libraryMeta.className = "short-video-author-page-library-meta";
+    const localTotal = Math.max(0, Number(author.count || data.total || 0));
     const localCount = document.createElement("b");
-    localCount.textContent = `${formatNumber(author.count || data.total || 0)} 个本地作品`;
+    localCount.textContent = `${formatNumber(localTotal)} 个本地作品`;
     libraryMeta.append(localCount);
     const homeCount = profileNumber(author.awemeCount);
     if (homeCount !== null) {
@@ -114,6 +115,12 @@ export function createShortVideoAuthorPages(deps) {
       deleted.className = "short-video-author-page-deleted";
       deleted.textContent = `主页已删除 ${formatNumber(deletedTotal)}`;
       libraryMeta.append(deleted);
+    } else if (homeCount !== null && localTotal > homeCount) {
+      const pendingDifference = document.createElement("span");
+      pendingDifference.className = "short-video-author-page-pending-difference";
+      pendingDifference.textContent = `待确认差 ${formatNumber(localTotal - homeCount)}`;
+      pendingDifference.title = "本地作品数多于主页作品数，可点击“确认数量”执行一次完整主页扫描";
+      libraryMeta.append(pendingDifference);
     }
     const collectedAt = formatDate(author.profileCollectedAt);
     if (collectedAt) {
@@ -139,11 +146,11 @@ export function createShortVideoAuthorPages(deps) {
       .catch((error) => showBrowserToast(error?.message || "快速刷新启动失败")));
     const fullRefresh = document.createElement("button");
     fullRefresh.type = "button";
-    fullRefresh.className = "short-video-author-page-secondary short-video-author-collector-action";
-    fullRefresh.textContent = "全部扫描";
-    fullRefresh.title = "完整扫描作者全部作品并更新点赞、评论等统计";
+    fullRefresh.className = "short-video-author-page-secondary short-video-author-collector-action short-video-author-confirm-action";
+    fullRefresh.textContent = "确认数量";
+    fullRefresh.title = "完整扫描当前作者主页，确认主页作品数与本地作品数的差异";
     fullRefresh.addEventListener("click", () => runAuthorCollector(author, "full", fullRefresh)
-      .catch((error) => showBrowserToast(error?.message || "全部扫描启动失败")));
+      .catch((error) => showBrowserToast(error?.message || "数量确认启动失败")));
     actions.append(follow, douyin, quickRefresh, fullRefresh);
     head.append(back, avatar, copy, actions);
     return head;
@@ -157,10 +164,10 @@ export function createShortVideoAuthorPages(deps) {
     }
     const actions = button?.closest(".short-video-author-page-actions");
     const buttons = [...(actions?.querySelectorAll(".short-video-author-collector-action") || [])];
-    const originalText = button?.textContent || (mode === "full" ? "全部扫描" : "快速刷新");
+    const originalText = button?.textContent || (mode === "full" ? "确认数量" : "快速刷新");
     buttons.forEach((item) => { item.disabled = true; });
     button?.setAttribute("aria-busy", "true");
-    if (button) button.textContent = mode === "full" ? "启动扫描" : "启动刷新";
+    if (button) button.textContent = mode === "full" ? "开始确认" : "启动刷新";
     try {
       const result = await api(`/api/short-videos/authors/${encodeURIComponent(secUid)}/collector`, {
         method: "POST",
@@ -168,11 +175,11 @@ export function createShortVideoAuthorPages(deps) {
       });
       const jobId = Number(result?.jobId || 0);
       if (!jobId) throw new Error("8765 没有返回采集任务编号");
-      showBrowserToast(mode === "full" ? `全部扫描已启动 #${jobId}` : `快速刷新已启动 #${jobId}`);
+      showBrowserToast(mode === "full" ? `数量确认已启动 #${jobId}` : `快速刷新已启动 #${jobId}`);
       const finalState = await waitForAuthorCollector(secUid, jobId, button);
       if (finalState?.job?.status === "failed") throw new Error(finalState.job.message || "作者主页采集失败");
       if (finalState?.job?.status === "stopped") throw new Error(finalState.job.message || "作者主页采集已停止");
-      showBrowserToast(finalState?.job?.message || (mode === "full" ? "全部扫描完成" : "快速刷新完成"));
+      showBrowserToast(finalState?.job?.message || (mode === "full" ? "数量确认完成" : "快速刷新完成"));
       await loadVideos({ skipRoute: true });
     } finally {
       buttons.forEach((item) => { item.disabled = false; });

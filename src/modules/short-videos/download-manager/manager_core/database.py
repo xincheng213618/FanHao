@@ -170,6 +170,7 @@ def init_db() -> None:
         migrate_links_profile_scope(conn)
         migrate_profiles_tabs(conn)
         migrate_profile_metadata_columns(conn)
+        migrate_profile_collection_history(conn)
         migrate_link_author_columns(conn)
         migrate_link_preview_columns(conn)
         migrate_link_profile_presence_columns(conn)
@@ -335,6 +336,104 @@ def migrate_profile_metadata_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE profiles ADD COLUMN {name} {definition}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_profiles_uid ON profiles(uid)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_profiles_unique_id ON profiles(unique_id)")
+
+
+def migrate_profile_collection_history(conn: sqlite3.Connection) -> None:
+    """Persist collection counts and the one-shot full-scan reconciliation state."""
+
+    profile_columns = {row["name"] for row in conn.execute("PRAGMA table_info(profiles)").fetchall()}
+    specs = {
+        "full_scan_required": "INTEGER NOT NULL DEFAULT 0",
+        "full_scan_reason": "TEXT",
+        "full_scan_required_at": "TEXT",
+        "last_full_scan_at": "TEXT",
+        "last_full_scan_aweme_count": "INTEGER",
+        "last_full_scan_link_total": "INTEGER",
+    }
+    for name, definition in specs.items():
+        if name not in profile_columns:
+            conn.execute(f"ALTER TABLE profiles ADD COLUMN {name} {definition}")
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS profile_collection_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+          job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+          mode TEXT NOT NULL,
+          status TEXT NOT NULL,
+          observed_aweme_count INTEGER,
+          previous_aweme_count INTEGER,
+          local_link_count INTEGER NOT NULL DEFAULT 0,
+          seen_count INTEGER NOT NULL DEFAULT 0,
+          inserted_count INTEGER NOT NULL DEFAULT 0,
+          existing_count INTEGER NOT NULL DEFAULT 0,
+          count_drop INTEGER NOT NULL DEFAULT 0,
+          count_drop_ratio REAL,
+          full_scan_required INTEGER NOT NULL DEFAULT 0,
+          message TEXT,
+          started_at TEXT NOT NULL,
+          finished_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_profile_collection_history_profile
+          ON profile_collection_history(profile_id, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_profile_collection_history_job
+          ON profile_collection_history(job_id);
+        CREATE INDEX IF NOT EXISTS idx_profiles_full_scan_required
+          ON profiles(full_scan_required, id);
+        """
+    )
+
+    # Existing installations have no structured history yet. Seed only clear,
+    # unconfirmed count gaps. Profiles already reconciled by a full scan keep
+    # their confirmed deleted-work flag and are not scheduled again.
+    ts = now_iso()
+    conn.execute(
+        """
+        UPDATE profiles
+        SET full_scan_required=1,
+            full_scan_reason=(
+              '主页作品数 ' || aweme_count || '，比本地入库少 ' ||
+              ((SELECT COUNT(*) FROM links WHERE links.profile_id=profiles.id) - aweme_count) ||
+              ' 条，待一次全量确认'
+            ),
+            full_scan_required_at=COALESCE(full_scan_required_at, ?)
+        WHERE tab='post'
+          AND COALESCE(full_scan_required, 0)=0
+          AND COALESCE(has_deleted_works, 0)=0
+          AND aweme_count IS NOT NULL
+          AND last_full_scan_at IS NULL
+          AND (SELECT COUNT(*) FROM links WHERE links.profile_id=profiles.id) - aweme_count >= 10
+          AND aweme_count <= (SELECT COUNT(*) FROM links WHERE links.profile_id=profiles.id) * 0.9
+        """,
+        (ts,),
+    )
+    conn.execute(
+        """
+        INSERT INTO profile_collection_history (
+          profile_id, job_id, mode, status,
+          observed_aweme_count, previous_aweme_count, local_link_count,
+          seen_count, inserted_count, existing_count,
+          count_drop, count_drop_ratio, full_scan_required,
+          message, started_at, finished_at
+        )
+        SELECT
+          profiles.id, NULL, 'baseline', 'complete',
+          profiles.aweme_count, NULL,
+          (SELECT COUNT(*) FROM links WHERE links.profile_id=profiles.id),
+          0, 0, 0, 0, NULL, COALESCE(profiles.full_scan_required, 0),
+          '启用采集计数历史时记录的初始基线',
+          COALESCE(NULLIF(profiles.profile_collected_at, ''), NULLIF(profiles.updated_at, ''), ?),
+          ?
+        FROM profiles
+        WHERE profiles.aweme_count IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM profile_collection_history history
+            WHERE history.profile_id=profiles.id
+          )
+        """,
+        (ts, ts),
+    )
 
 
 def migrate_link_author_columns(conn: sqlite3.Connection) -> None:
@@ -770,6 +869,34 @@ def merge_profile_alias(conn: sqlite3.Connection, target_id: int, source_id: int
                 source_queue["updated_at"],
             ),
         )
+    conn.execute(
+        """
+        UPDATE profiles
+        SET full_scan_required=MAX(COALESCE(full_scan_required, 0), ?),
+            full_scan_reason=COALESCE(NULLIF(full_scan_reason, ''), NULLIF(?, '')),
+            full_scan_required_at=COALESCE(full_scan_required_at, ?),
+            last_full_scan_at=CASE
+              WHEN COALESCE(last_full_scan_at, '') >= COALESCE(?, '') THEN last_full_scan_at ELSE ?
+            END,
+            last_full_scan_aweme_count=COALESCE(last_full_scan_aweme_count, ?),
+            last_full_scan_link_total=COALESCE(last_full_scan_link_total, ?)
+        WHERE id=?
+        """,
+        (
+            int(source["full_scan_required"] or 0),
+            source["full_scan_reason"],
+            source["full_scan_required_at"],
+            source["last_full_scan_at"],
+            source["last_full_scan_at"],
+            source["last_full_scan_aweme_count"],
+            source["last_full_scan_link_total"],
+            target_id,
+        ),
+    )
+    conn.execute(
+        "UPDATE profile_collection_history SET profile_id=? WHERE profile_id=?",
+        (target_id, source_id),
+    )
     conn.execute("DELETE FROM profile_download_queue WHERE profile_id=?", (source_id,))
     conn.execute("DELETE FROM profiles WHERE id=?", (source_id,))
     return {"links": moved_links, "duplicates": len(duplicates), "files": files_merged}
