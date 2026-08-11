@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
+import refresh_core_javdb_actor_movies as refresh_module
 from refresh_core_javdb_actor_movies import (
+    PersonRefreshRollbackError,
     refresh_error_message,
     rollback_person_refresh,
     save_person_refresh,
@@ -29,6 +34,7 @@ def main() -> None:
             create_schema(conn)
             verify_failed_first_person_does_not_leak_into_second(conn)
             verify_rollback_failure_keeps_original_error()
+            verify_double_rollback_failure_is_fatal()
         finally:
             conn.close()
     print("core JavDB actor per-person atomicity verification passed")
@@ -178,12 +184,79 @@ def verify_rollback_failure_keeps_original_error() -> None:
             raise sqlite3.OperationalError("connection rollback exploded")
 
     original = ValueError("original image write failure")
-    rollback_person_refresh(BrokenRollbackConnection(), original)
-    message = refresh_error_message(original)
+    try:
+        rollback_person_refresh(BrokenRollbackConnection(), original)
+    except PersonRefreshRollbackError as fatal:
+        assert fatal.original_error is original
+        assert str(fatal.savepoint_rollback_error) == "savepoint rollback exploded"
+        assert str(fatal.connection_rollback_error) == "connection rollback exploded"
+        assert fatal.errors == (original, fatal.savepoint_rollback_error, fatal.connection_rollback_error)
+        assert fatal.__cause__ is original
+        message = refresh_error_message(fatal)
+    else:
+        raise AssertionError("double rollback failure must escape as a fatal error")
     assert message.startswith("original image write failure; person savepoint rollback failed")
     assert "savepoint rollback exploded" in message
     assert "connection rollback exploded" in message
 
 
+def verify_double_rollback_failure_is_fatal() -> None:
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), "--fatal-child"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode != 0, "an unrecoverable rollback failure must make the batch exit nonzero"
+    assert "crawl:1" in output
+    assert "crawl:2" not in output, "the next person must not run after both rollback attempts fail"
+    assert "context-exit:PersonRefreshRollbackError" in output
+    assert "context-exit:normal" not in output, "the connection context must not take its normal commit path"
+    assert "original image write failure" in output
+    assert "savepoint rollback exploded" in output
+    assert "connection rollback exploded" in output
+
+
+def run_fatal_child() -> None:
+    class FatalConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, error_type, _error, _traceback):
+            print(f"context-exit:{error_type.__name__ if error_type else 'normal'}", flush=True)
+            return False
+
+        def execute(self, sql: str, _params=()):
+            statement = " ".join(str(sql).split())
+            if statement.startswith("SAVEPOINT "):
+                return self
+            if "UPDATE people" in statement:
+                raise ValueError("original image write failure")
+            if statement.startswith("ROLLBACK TO SAVEPOINT "):
+                raise sqlite3.OperationalError("savepoint rollback exploded")
+            raise AssertionError(f"unexpected SQL in fatal fixture: {statement}")
+
+        def rollback(self):
+            raise sqlite3.OperationalError("connection rollback exploded")
+
+    def fake_crawl(_client, job, _args):
+        print(f"crawl:{job['id']}", flush=True)
+        return {"profile": {}, "movies": [], "pages": 1}
+
+    refresh_module.crawl_actor = fake_crawl
+    refresh_module.write_jsonl = lambda *_args, **_kwargs: None
+    refresh_module.pause = lambda *_args, **_kwargs: None
+    jobs = [
+        {"id": 1, "name": "One", "db_name": "One", "actor_id": "one", "actor_url": "https://javdb.test/actors/one"},
+        {"id": 2, "name": "Two", "db_name": "Two", "actor_id": "two", "actor_url": "https://javdb.test/actors/two"},
+    ]
+    with FatalConnection() as conn:
+        refresh_module.run_refresh_jobs(conn, jobs, SimpleNamespace(write=True), NoDownloadClient(), Path("unused.jsonl"))
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--fatal-child":
+        run_fatal_child()
+    else:
+        main()

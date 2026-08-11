@@ -336,33 +336,44 @@ export function createActorAvatarService({
     let skippedAmbiguous = 0;
     let skippedUnmatched = 0;
 
-    for (const entry of entries) {
-      if (ambiguous.has(entry.key)) {
-        skippedAmbiguous += 1;
-        continue;
-      }
-      const person = index.get(entry.key);
-      if (!person) {
-        skippedUnmatched += 1;
-        continue;
-      }
-      matched += 1;
+    try {
+      for (const entry of entries) {
+        if (ambiguous.has(entry.key)) {
+          skippedAmbiguous += 1;
+          continue;
+        }
+        const person = index.get(entry.key);
+        if (!person) {
+          skippedUnmatched += 1;
+          continue;
+        }
+        matched += 1;
 
-      if (importedPersonIds.has(person.id) || seenAvatarKeys.has(`${person.id}:${entry.relPath}`)) {
-        skippedDuplicate += 1;
-        continue;
-      }
+        if (importedPersonIds.has(person.id) || seenAvatarKeys.has(`${person.id}:${entry.relPath}`)) {
+          skippedDuplicate += 1;
+          continue;
+        }
 
-      const existing = getProfileRow(person.id);
-      if (existing?.avatar_url && !replace) {
-        skippedExisting += 1;
-        continue;
-      }
+        const existing = getProfileRow(person.id);
+        if (existing?.avatar_url && !replace) {
+          skippedExisting += 1;
+          continue;
+        }
 
-      upsertAvatar(person, entry, existing, now);
-      importedPersonIds.add(person.id);
-      seenAvatarKeys.add(`${person.id}:${entry.relPath}`);
-      imported += 1;
+        upsertAvatar(person, entry, existing, now);
+        importedPersonIds.add(person.id);
+        seenAvatarKeys.add(`${person.id}:${entry.relPath}`);
+        imported += 1;
+      }
+    } catch (error) {
+      if (imported) {
+        try {
+          invalidateProfiles();
+        } catch (invalidationError) {
+          throw new AggregateError([error, invalidationError], "Actor avatar import failed after committed profiles could not be invalidated");
+        }
+      }
+      throw error;
     }
 
     if (imported) invalidateProfiles();

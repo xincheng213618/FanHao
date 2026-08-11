@@ -43,6 +43,23 @@ DEFAULT_COOKIE_CACHE = None
 PERSON_SAVEPOINT = "refresh_core_javdb_actor_person"
 
 
+class PersonRefreshRollbackError(RuntimeError):
+    def __init__(
+        self,
+        original_error: Exception,
+        savepoint_rollback_error: Exception,
+        connection_rollback_error: Exception,
+    ) -> None:
+        self.original_error = original_error
+        self.savepoint_rollback_error = savepoint_rollback_error
+        self.connection_rollback_error = connection_rollback_error
+        self.errors = (original_error, savepoint_rollback_error, connection_rollback_error)
+        super().__init__(
+            f"{original_error}; person savepoint rollback failed: {savepoint_rollback_error}; "
+            f"connection rollback also failed: {connection_rollback_error}"
+        )
+
+
 def main() -> None:
     configure_stdout()
     args = parse_args()
@@ -57,58 +74,69 @@ def main() -> None:
         print("当前是 dry-run：会访问 JavDB，但不会写入 core DB。", flush=True)
 
     client = JavDbClient(args)
-    stats = {"people": 0, "movies": 0, "profiles": 0, "avatars": 0, "blocked": 0, "error": 0}
     try:
         with sqlite3.connect(args.db, timeout=30) as conn:
             conn.row_factory = sqlite3.Row
             attach_core_image_store(conn, args.db)
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("PRAGMA busy_timeout = 5000")
-            for index, job in enumerate(jobs, 1):
-                try:
-                    print(f"[{index}/{len(jobs)}] {job['name']} -> {job['actor_url']}", flush=True)
-                    crawl = crawl_actor(client, job, args)
-                    if args.write:
-                        result = save_person_refresh(conn, job, crawl, client)
-                        profile_result = result["profile"]
-                        movie_count = result["movies"]
-                        stats["profiles"] += int(profile_result["profile"])
-                        stats["avatars"] += int(profile_result["avatar"])
-                        stats["movies"] += movie_count
-                    else:
-                        movie_count = len(crawl["movies"])
-                    stats["people"] += 1
-                    write_jsonl(
-                        log_path,
-                        {
-                            "status": "person_done",
-                            "personId": job["id"],
-                            "name": job["name"],
-                            "javdbUrl": job["actor_url"],
-                            "displayName": crawl["profile"].get("display_name", ""),
-                            "movies": movie_count,
-                            "pages": crawl["pages"],
-                            "write": args.write,
-                        },
-                    )
-                    print(f"  pages={crawl['pages']} movies={movie_count} display={crawl['profile'].get('display_name') or '-'}", flush=True)
-                    pause(args)
-                except AccessBlockedError as error:
-                    stats["blocked"] += 1
-                    write_jsonl(log_path, {"status": "blocked", "personId": job["id"], "name": job["name"], "error": str(error)})
-                    print(f"BLOCKED {job['name']}: {error}", flush=True)
-                    break
-                except Exception as error:
-                    error_message = refresh_error_message(error)
-                    stats["error"] += 1
-                    write_jsonl(log_path, {"status": "error", "personId": job["id"], "name": job["name"], "error": error_message})
-                    print(f"ERROR {job['name']}: {error_message}", flush=True)
+            stats = run_refresh_jobs(conn, jobs, args, client, log_path)
     finally:
         client.close()
 
     print("core actor 刷新结束: " + json.dumps(stats, ensure_ascii=False), flush=True)
     if stats["blocked"] or stats["error"]:
         raise SystemExit(1)
+
+
+def run_refresh_jobs(conn: sqlite3.Connection, jobs: list[dict], args: argparse.Namespace, client: JavDbClient, log_path: Path) -> dict:
+    stats = {"people": 0, "movies": 0, "profiles": 0, "avatars": 0, "blocked": 0, "error": 0}
+    for index, job in enumerate(jobs, 1):
+        try:
+            print(f"[{index}/{len(jobs)}] {job['name']} -> {job['actor_url']}", flush=True)
+            crawl = crawl_actor(client, job, args)
+            if args.write:
+                result = save_person_refresh(conn, job, crawl, client)
+                profile_result = result["profile"]
+                movie_count = result["movies"]
+                stats["profiles"] += int(profile_result["profile"])
+                stats["avatars"] += int(profile_result["avatar"])
+                stats["movies"] += movie_count
+            else:
+                movie_count = len(crawl["movies"])
+            stats["people"] += 1
+            write_jsonl(
+                log_path,
+                {
+                    "status": "person_done",
+                    "personId": job["id"],
+                    "name": job["name"],
+                    "javdbUrl": job["actor_url"],
+                    "displayName": crawl["profile"].get("display_name", ""),
+                    "movies": movie_count,
+                    "pages": crawl["pages"],
+                    "write": args.write,
+                },
+            )
+            print(f"  pages={crawl['pages']} movies={movie_count} display={crawl['profile'].get('display_name') or '-'}", flush=True)
+            pause(args)
+        except AccessBlockedError as error:
+            stats["blocked"] += 1
+            write_jsonl(log_path, {"status": "blocked", "personId": job["id"], "name": job["name"], "error": str(error)})
+            print(f"BLOCKED {job['name']}: {error}", flush=True)
+            break
+        except PersonRefreshRollbackError as error:
+            error_message = refresh_error_message(error)
+            stats["error"] += 1
+            write_jsonl(log_path, {"status": "fatal_error", "personId": job["id"], "name": job["name"], "error": error_message})
+            print(f"FATAL {job['name']}: {error_message}", flush=True)
+            raise
+        except Exception as error:
+            error_message = refresh_error_message(error)
+            stats["error"] += 1
+            write_jsonl(log_path, {"status": "error", "personId": job["id"], "name": job["name"], "error": error_message})
+            print(f"ERROR {job['name']}: {error_message}", flush=True)
+    return stats
 
 
 def save_person_refresh(conn: sqlite3.Connection, job: dict, crawl: dict, client: JavDbClient) -> dict:
@@ -133,6 +161,13 @@ def rollback_person_refresh(conn: sqlite3.Connection, original_error: Exception)
             conn.rollback()
         except Exception as connection_rollback_error:
             detail += f"; connection rollback also failed: {connection_rollback_error}"
+            if hasattr(original_error, "add_note"):
+                original_error.add_note(detail)
+            raise PersonRefreshRollbackError(
+                original_error,
+                rollback_error,
+                connection_rollback_error,
+            ) from original_error
         else:
             detail += "; connection rollback succeeded"
         original_error.rollback_failure = detail

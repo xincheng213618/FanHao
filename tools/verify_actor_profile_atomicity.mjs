@@ -154,29 +154,44 @@ function verifyLocalAvatarRollback(db, temporaryDir) {
   const avatarRoot = path.join(temporaryDir, "avatar-tree");
   const contentDir = path.join(avatarRoot, "Content", "group");
   fs.mkdirSync(contentDir, { recursive: true });
-  fs.writeFileSync(path.join(avatarRoot, "Filetree.json"), JSON.stringify({ Content: { group: { "Avatar Person.jpg": "avatar.jpg" } } }));
-  fs.writeFileSync(path.join(contentDir, "avatar.jpg"), Buffer.from([1, 2, 3, 4]));
+  fs.writeFileSync(path.join(avatarRoot, "Filetree.json"), JSON.stringify({
+    Content: {
+      group: {
+        "First Success.jpg": "first.jpg",
+        "Later Failure.jpg": "second.jpg"
+      }
+    }
+  }));
+  fs.writeFileSync(path.join(contentDir, "first.jpg"), Buffer.from([1, 2, 3, 4]));
+  fs.writeFileSync(path.join(contentDir, "second.jpg"), Buffer.from([5, 6, 7, 8]));
   db.exec(`
-    INSERT INTO people VALUES (2, 'Avatar Person', 'avatarperson', NULL, 'unknown', 0, 'ok', NULL, 'migration', '2026-08-10T02:00:00Z');
+    INSERT INTO people VALUES (2, 'First Success', 'firstsuccess', NULL, 'unknown', 0, 'ok', NULL, 'migration', '2026-08-10T02:00:00Z');
+    INSERT INTO people VALUES (3, 'Later Failure', 'laterfailure', NULL, 'unknown', 0, 'ok', NULL, 'migration', '2026-08-10T03:00:00Z');
     CREATE TRIGGER fanhao_images.fail_local_avatar
     BEFORE INSERT ON images
-    WHEN NEW.owner_id = 2
+    WHEN NEW.owner_id = 3
     BEGIN
       SELECT RAISE(ABORT, 'forced local avatar failure');
     END;
   `);
-  const before = rows(db, "SELECT * FROM people WHERE id = 2");
+  const beforeFailure = rows(db, "SELECT * FROM people WHERE id = 3");
   const invalidations = [];
-  const person = { id: "2", name: "Avatar Person" };
+  const people = [
+    { id: "2", name: "First Success" },
+    { id: "3", name: "Later Failure" }
+  ];
   const service = createActorAvatarService({
     avatarExts: new Set([".jpg"]),
     fileBase: (value) => path.basename(value, path.extname(value)),
     getCoreDb: () => db,
-    getPeople: () => [person],
-    getPersonById: (personId) => (personId === person.id ? person : null),
-    getProfileRow: () => ({ avatar_url: "", display_name: null }),
+    getPeople: () => people,
+    getPersonById: (personId) => people.find((person) => person.id === personId) || null,
+    getProfileRow: (personId) => ({
+      avatar_url: "",
+      display_name: db.prepare("SELECT display_name FROM people WHERE id = ?").get(Number(personId))?.display_name || null
+    }),
     getPublicProfile: () => ({ avatarUrl: "" }),
-    getSearchNames: () => [person.name],
+    getSearchNames: (person) => [person.name],
     invalidateProfiles: () => invalidations.push("profiles"),
     localAvatarSource: "local-avatar-test",
     maxBytes: 1024,
@@ -192,13 +207,17 @@ function verifyLocalAvatarRollback(db, temporaryDir) {
   });
 
   assert.throws(
-    () => service.importCandidate(avatarRoot, person.id, "Content/group/avatar.jpg"),
+    () => service.importFromFiletree(avatarRoot, { replace: true }),
     /forced local avatar failure/
   );
-  assert.deepEqual(rows(db, "SELECT * FROM people WHERE id = 2"), before, "local-avatar failure must preserve display_name and updated_at");
-  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM fanhao_images.images WHERE owner_id = 2").get().count, 0);
+  const committed = db.prepare("SELECT display_name, updated_at FROM people WHERE id = 2").get();
+  assert.equal(committed.display_name, "First Success", "the earlier successful person must remain committed");
+  assert.notEqual(committed.updated_at, "2026-08-10T02:00:00Z", "the earlier successful person's timestamp must be visible");
+  assert.deepEqual(rows(db, "SELECT * FROM people WHERE id = 3"), beforeFailure, "the later failed person must roll back display_name and updated_at");
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM fanhao_images.images WHERE owner_id = 2").get().count, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM fanhao_images.images WHERE owner_id = 3").get().count, 0);
   assert.equal(db.isTransaction, false, "a failed local avatar save must release its savepoint");
-  assert.deepEqual(invalidations, [], "a failed local avatar save must not invalidate committed profile state");
+  assert.deepEqual(invalidations, ["profiles"], "partial success must invalidate the already committed profile state before rethrowing");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
