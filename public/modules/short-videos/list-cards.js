@@ -64,6 +64,13 @@ export function createShortVideoListCards(dependencies) {
       following.textContent = "已关注";
       button.append(following);
     }
+    if (author.accountStatus === "banned") {
+      const banned = document.createElement("span");
+      banned.className = "short-video-author-index-banned";
+      banned.textContent = "已封禁";
+      banned.title = author.accountStatusReason || "抖音账号已封禁";
+      button.append(banned);
+    }
     button.addEventListener("click", () => {
       openShortVideoAuthorPage(author);
     });
@@ -107,6 +114,13 @@ export function createShortVideoListCards(dependencies) {
       following.className = "short-video-search-user-following";
       following.textContent = "已关注";
       nameRow.append(following);
+    }
+    if (author.accountStatus === "banned") {
+      const banned = document.createElement("span");
+      banned.className = "short-video-search-user-banned";
+      banned.textContent = "已封禁";
+      banned.title = author.accountStatusReason || "抖音账号已封禁";
+      nameRow.append(banned);
     }
     const handle = document.createElement("span");
     handle.className = "short-video-search-user-handle";

@@ -11,7 +11,7 @@ from .config import TEST_PROFILE_URL
 from .database import db, setting
 from .domain_manifest import author_sec_uid_from_manifest, douyin_user_url, kind_from_manifest, manifest_cover_path, manifest_music_metadata, manifest_preview_path, sync_manifest_files
 from .profile_domain import normalize_profile_metadata
-from .queue import ensure_profile_in_download_queue
+from .queue import ensure_profile_in_download_queue, notify_download_queue_changed
 
 
 def manifest_import_row(record: dict[str, Any]) -> dict[str, Any] | None:
@@ -228,9 +228,86 @@ def current_profile_id(create: bool = False) -> int | None:
     return upsert_profile(url, setting("profile_tab", "auto")) if create else None
 
 
+def mark_profile_account_banned(profile_id: int, reason: str = "") -> dict[str, Any] | None:
+    """Mark an entire profile as banned without treating its works as deleted."""
+    if not profile_id:
+        return None
+    detected_reason = first_text(reason, "抖音主页明确显示账号已封禁")
+    ts = now_iso()
+    with db() as conn:
+        profile = conn.execute(
+            "SELECT account_status FROM profiles WHERE id=?",
+            (profile_id,),
+        ).fetchone()
+        if profile is None:
+            return None
+        previous_status = str(profile["account_status"] or "active").strip().lower()
+        restored = int(
+            conn.execute(
+                """
+                UPDATE links
+                SET is_missing_from_profile=0,
+                    missing_from_profile_at=NULL
+                WHERE profile_id=?
+                  AND (COALESCE(is_missing_from_profile, 0)<>0 OR missing_from_profile_at IS NOT NULL)
+                """,
+                (profile_id,),
+            ).rowcount
+            or 0
+        )
+        conn.execute(
+            """
+            UPDATE profiles
+            SET account_status='banned',
+                account_status_reason=?,
+                account_status_detected_at=?,
+                has_deleted_works=0,
+                full_scan_required=0,
+                full_scan_reason=NULL,
+                full_scan_required_at=NULL,
+                updated_at=?
+            WHERE id=?
+            """,
+            (detected_reason, ts, ts, profile_id),
+        )
+    return {
+        "account_status": "banned",
+        "account_status_reason": detected_reason,
+        "changed": previous_status != "banned",
+        "restored": restored,
+    }
+
+
+def restore_profile_account_if_active(profile_id: int) -> bool:
+    """Clear a prior banned marker after a manual check discovers live works."""
+    if not profile_id:
+        return False
+    with db() as conn:
+        profile = conn.execute(
+            "SELECT account_status FROM profiles WHERE id=?",
+            (profile_id,),
+        ).fetchone()
+        if profile is None or str(profile["account_status"] or "active").strip().lower() != "banned":
+            return False
+        conn.execute(
+            """
+            UPDATE profiles
+            SET account_status='active',
+                account_status_reason=NULL,
+                account_status_detected_at=NULL,
+                updated_at=?
+            WHERE id=?
+            """,
+            (now_iso(), profile_id),
+        )
+    return True
+
+
 def upsert_profile_metadata(profile_id: int, profile: dict[str, Any] | None) -> None:
     if not profile_id or not profile:
         return
+    detected_banned = False
+    detected_reason = ""
     with db() as conn:
         row = conn.execute("SELECT sec_uid FROM profiles WHERE id=?", (profile_id,)).fetchone()
         fallback_sec_uid = first_text(row["sec_uid"]) if row else ""
@@ -239,6 +316,8 @@ def upsert_profile_metadata(profile_id: int, profile: dict[str, Any] | None) -> 
             return
         now = now_iso()
         meta["profile_collected_at"] = now
+        detected_banned = meta["account_status"] == "banned"
+        detected_reason = meta["account_status_reason"]
         conn.execute(
             """
             UPDATE profiles SET
@@ -289,6 +368,8 @@ def upsert_profile_metadata(profile_id: int, profile: dict[str, Any] | None) -> 
                 profile_id,
             ),
         )
+    if detected_banned:
+        mark_profile_account_banned(profile_id, detected_reason)
 
 
 def update_profile_deleted_works_flag(
@@ -304,13 +385,58 @@ def update_profile_deleted_works_flag(
             SELECT
               profiles.tab,
               profiles.aweme_count,
-              profiles.has_deleted_works
+              profiles.has_deleted_works,
+              profiles.account_status
             FROM profiles
             WHERE profiles.id=?
             """,
             (profile_id,),
         ).fetchone()
-        if profile is None or str(profile["tab"] or "post") != "post" or profile["aweme_count"] is None:
+        if profile is None or str(profile["tab"] or "post") != "post":
+            return None
+        if str(profile["account_status"] or "active").strip().lower() == "banned":
+            restored = int(
+                conn.execute(
+                    """
+                    UPDATE links
+                    SET is_missing_from_profile=0,
+                        missing_from_profile_at=NULL
+                    WHERE profile_id=?
+                      AND (COALESCE(is_missing_from_profile, 0)<>0 OR missing_from_profile_at IS NOT NULL)
+                    """,
+                    (profile_id,),
+                ).rowcount
+                or 0
+            )
+            conn.execute(
+                """
+                UPDATE profiles
+                SET has_deleted_works=0,
+                    full_scan_required=0,
+                    full_scan_reason=NULL,
+                    full_scan_required_at=NULL
+                WHERE id=?
+                """,
+                (profile_id,),
+            )
+            link_total = int(
+                conn.execute("SELECT COUNT(*) c FROM links WHERE profile_id=?", (profile_id,)).fetchone()["c"]
+                or 0
+            )
+            return {
+                "account_status": "banned",
+                "has_deleted_works": 0,
+                "previous": int(profile["has_deleted_works"] or 0),
+                "changed": bool(restored or int(profile["has_deleted_works"] or 0)),
+                "aweme_count": max(0, int(profile["aweme_count"] or 0)),
+                "link_total": link_total,
+                "difference": 0,
+                "marked": 0,
+                "unseen": 0,
+                "restored": restored,
+                "skipped": True,
+            }
+        if profile["aweme_count"] is None:
             return None
         links = conn.execute(
             """
@@ -634,4 +760,6 @@ def upsert_links(profile_id: int, works: list[dict[str, Any]]) -> tuple[int, int
                         profile_id,
                     ),
                 )
+    if inserted > 0:
+        notify_download_queue_changed()
     return inserted, updated

@@ -35,6 +35,9 @@ export function ensureShortVideoColumns(db) {
   addColumnIfMissing(db, "short_video_users", "age", "INTEGER");
   addColumnIfMissing(db, "short_video_users", "verification", "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing(db, "short_video_users", "profile_collected_at", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, "short_video_users", "account_status", "TEXT NOT NULL DEFAULT 'active'");
+  addColumnIfMissing(db, "short_video_users", "account_status_reason", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, "short_video_users", "account_status_detected_at", "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing(db, "short_video_source_memberships", "is_missing_from_profile", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "short_video_source_memberships", "missing_from_profile_at", "TEXT NOT NULL DEFAULT ''");
   db.exec(`
@@ -73,6 +76,7 @@ export function ensureShortVideoColumns(db) {
     CREATE INDEX IF NOT EXISTS idx_short_videos_actual_pixels ON short_videos(actual_pixels DESC, id);
     CREATE INDEX IF NOT EXISTS idx_short_videos_actual_long_edge ON short_videos(actual_long_edge DESC, id);
     CREATE INDEX IF NOT EXISTS idx_short_video_users_unique_id ON short_video_users(unique_id);
+    CREATE INDEX IF NOT EXISTS idx_short_video_users_account_status ON short_video_users(account_status, id);
   `);
   refreshShortVideoRelationshipFlags(db);
   refreshShortVideoAuthorFollowingFlags(db);

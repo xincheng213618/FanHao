@@ -21,8 +21,10 @@ export function ensureShortVideoState(state, options = {}) {
   state.shortVideo.authorTotal = Math.max(0, Number(state.shortVideo.authorTotal || 0));
   state.shortVideo.authorScopeTotal = Math.max(0, Number(state.shortVideo.authorScopeTotal || 0));
   state.shortVideo.authorUnlikedTotal = Math.max(0, Number(state.shortVideo.authorUnlikedTotal || 0));
+  state.shortVideo.authorBannedTotal = Math.max(0, Number(state.shortVideo.authorBannedTotal || 0));
   state.shortVideo.authorSort = normalizeShortVideoAuthorSort(state.shortVideo.authorSort);
   state.shortVideo.authorFilter = normalizeShortVideoAuthorFilter(state.shortVideo.authorFilter);
+  state.shortVideo.authorAccountStatus = normalizeShortVideoAuthorAccountStatus(state.shortVideo.authorAccountStatus);
   state.shortVideo.authorHasMore = Boolean(state.shortVideo.authorHasMore);
   state.shortVideo.authorLoadingMore = Boolean(state.shortVideo.authorLoadingMore);
   state.shortVideo.authorDetail = state.shortVideo.authorDetail && typeof state.shortVideo.authorDetail === "object" ? state.shortVideo.authorDetail : null;
@@ -202,6 +204,10 @@ export function normalizeShortVideoAuthorSort(value) {
 
 export function normalizeShortVideoAuthorFilter(value) {
   return String(value || "all").trim().toLowerCase() === "unliked" ? "unliked" : "all";
+}
+
+export function normalizeShortVideoAuthorAccountStatus(value) {
+  return String(value || "all").trim().toLowerCase() === "banned" ? "banned" : "all";
 }
 
 export function normalizeShortVideoMedia(value) {

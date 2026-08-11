@@ -27,8 +27,6 @@ export function createShortVideoAuthorPages(deps) {
     showError,
     state
   } = deps;
-  let authorMentionReturn = null;
-
   function renderAuthorDetailHome(data = {}) {
     const author = currentShortVideoAuthorDetail(data);
     const visibleAuthorVideo = (data.videos || []).find((video) => video?.ownerUserId || video?.author?.id) || null;
@@ -49,11 +47,6 @@ export function createShortVideoAuthorPages(deps) {
       hero.append(heroImage);
       head.append(hero);
     }
-    const back = document.createElement("button");
-    back.type = "button";
-    back.className = "short-video-author-page-back";
-    back.append(createIcon("chevronLeft"), document.createTextNode("返回"));
-    back.addEventListener("click", () => returnToShortVideoAuthorIndex());
     const avatar = authorAvatar(author, "short-video-author-page-avatar");
     const copy = document.createElement("div");
     copy.className = "short-video-author-page-copy";
@@ -65,6 +58,13 @@ export function createShortVideoAuthorPages(deps) {
     const name = document.createElement("strong");
     name.textContent = author.name || authorNameFromFilter(state.shortVideo.author) || "未知作者";
     nameRow.append(name);
+    if (author.accountStatus === "banned") {
+      const banned = document.createElement("span");
+      banned.className = "short-video-author-page-banned";
+      banned.textContent = "已封禁";
+      banned.title = author.accountStatusReason || "抖音账号已封禁";
+      nameRow.append(banned);
+    }
     const verification = String(author.verification || "").trim();
     if (verification) {
       const badge = document.createElement("span");
@@ -142,6 +142,7 @@ export function createShortVideoAuthorPages(deps) {
     quickRefresh.className = "short-video-author-page-secondary short-video-author-collector-action";
     quickRefresh.textContent = "快速刷新";
     quickRefresh.title = "通过 8765 增量采集最新作品，连续遇到旧作品后快速停止";
+    quickRefresh.hidden = author.accountStatus === "banned";
     quickRefresh.addEventListener("click", () => runAuthorCollector(author, "quick", quickRefresh)
       .catch((error) => showBrowserToast(error?.message || "快速刷新启动失败")));
     const fullRefresh = document.createElement("button");
@@ -149,10 +150,14 @@ export function createShortVideoAuthorPages(deps) {
     fullRefresh.className = "short-video-author-page-secondary short-video-author-collector-action short-video-author-confirm-action";
     fullRefresh.textContent = "确认数量";
     fullRefresh.title = "完整扫描当前作者主页，确认主页作品数与本地作品数的差异";
+    if (author.accountStatus === "banned") {
+      fullRefresh.textContent = "手动确认";
+      fullRefresh.title = "手动重新检查该主页；账号恢复且能读取到作品时会解除封禁状态";
+    }
     fullRefresh.addEventListener("click", () => runAuthorCollector(author, "full", fullRefresh)
       .catch((error) => showBrowserToast(error?.message || "数量确认启动失败")));
     actions.append(follow, douyin, quickRefresh, fullRefresh);
-    head.append(back, avatar, copy, actions);
+    head.append(avatar, copy, actions);
     return head;
   }
 
@@ -259,43 +264,6 @@ export function createShortVideoAuthorPages(deps) {
     return section;
   }
 
-  function returnToShortVideoAuthorIndex() {
-    if (authorMentionReturn?.targetSecUid === state.shortVideo.authorPage) {
-      const previous = authorMentionReturn;
-      authorMentionReturn = null;
-      openShortVideoAuthorPage(previous.author, previous.video, { replaceHistory: true });
-      return;
-    }
-    authorMentionReturn = null;
-    const authorIndexSource = ["authors", "following"].includes(state.shortVideo.authorIndexSource)
-      ? state.shortVideo.authorIndexSource
-      : "authors";
-    state.shortVideo.authorPage = "";
-    state.shortVideo.authorDetail = null;
-    state.shortVideo.authorVideo = null;
-    state.shortVideo.source = authorIndexSource;
-    state.shortVideo.author = "all";
-    state.shortVideo.query = "";
-    state.shortVideo.topic = "";
-    state.shortVideo.sound = "";
-    state.shortVideo.soundInfo = null;
-    state.shortVideo.media = "all";
-    state.shortVideo.quality = "all";
-    state.shortVideo.deleted = "all";
-    state.shortVideo.current = null;
-    state.shortVideo.data = null;
-    clearShortVideoDeleteSelection();
-    replaceRoute({
-      view: "shortVideos",
-      shortVideoId: "",
-      shortVideoAuthorPage: "",
-      shortVideoAuthor: "all",
-      shortVideoQuery: "",
-      shortVideoSource: authorIndexSource
-    });
-    loadVideos({ skipRoute: true }).catch(showError);
-  }
-
   function openShortVideoAuthorPage(author = {}, video = {}, options = {}) {
     const authorId = authorScopeId(video, author);
     if (!authorId) {
@@ -369,13 +337,6 @@ export function createShortVideoAuthorPages(deps) {
         showBrowserToast(`本地没有找到 @${mention}`);
         return;
       }
-      if (isShortVideoAuthorDetailPage()) {
-        authorMentionReturn = {
-          targetSecUid: author.secUid,
-          author: currentShortVideoAuthorDetail(state.shortVideo.data || {}),
-          video: state.shortVideo.authorVideo || null
-        };
-      }
       openShortVideoAuthorPage(author);
     } catch (error) {
       showBrowserToast(error?.message || `无法打开 @${mention}`);
@@ -421,7 +382,9 @@ export function createShortVideoAuthorPages(deps) {
         ? state.shortVideo.authorFilter === "unliked"
           ? "没有未点赞的关注账号"
           : "还没有已关注的作者"
-        : "还没有作者数据";
+        : state.shortVideo.authorAccountStatus === "banned"
+          ? "没有已封禁的作者"
+          : "还没有作者数据";
       wrap.append(status);
       return wrap;
     }
@@ -537,7 +500,6 @@ export function createShortVideoAuthorPages(deps) {
     renderAuthorWorkspaceToolbar,
     renderSearchUserCard,
     resolveShortVideoAuthor,
-    returnToShortVideoAuthorIndex,
     shortVideoApiSource,
     shortVideoAuthorDisplayName,
     shortVideoAuthorFilterValue,

@@ -241,6 +241,7 @@ for (const relativePath of [
   "manager_core/profile_refresh_policy.py",
   "manager_core/profile_collection_history.py",
   "tests/test_download_cycle_policy.py",
+  "tests/test_download_queue_idle.py",
   "tests/test_profile_refresh_policy.py",
   "tests/test_runtime_characterization.py",
   "tests/test_work_stats_refresh.py",
@@ -352,6 +353,9 @@ assert.match(appSource, /has_deleted_works/);
 assert.match(appSource, /def profile_refresh_decision\(/);
 assert.match(appSource, /previous_work_create_time/);
 assert.match(appSource, /def update_profile_deleted_works_flag\(/);
+assert.match(appSource, /account_status/);
+assert.match(appSource, /def mark_profile_account_banned\(/);
+assert.match(appSource, /def restore_profile_account_if_active\(/);
 assert.match(appSource, /full_scan/);
 assert.match(appSource, /\/api\/links\/delete/);
 assert.match(appSource, /def delete_link\(/);
@@ -396,12 +400,15 @@ assert.match(extractLinksSource, /collectConfirmedLikeItems\(data, targetSecUid\
 assert.match(extractLinksSource, /hasUsableWorkMetadata\(work\)/);
 assert.match(extractLinksSource, /REFRESHED_WORK_FIELDS/);
 assert.match(extractLinksSource, /Object\.is\(existing\[key\], incoming\)/);
+assert.match(extractLinksSource, /该用户\\s\*\(\?:已\\s\*\)\?被\\s\*禁言/);
+assert.match(extractLinksSource, /profile\.account_status === "banned"/);
 
 const managerIndexSource = fs.readFileSync(path.join(moduleDir, "static", "index.html"), "utf8");
 assert.match(managerIndexSource, /全库数据库链接/);
 assert.match(managerIndexSource, /主页 \/ 作者/);
 assert.match(managerIndexSource, /id="profileUrl"/);
 assert.match(managerIndexSource, /id="extractStart"/);
+assert.match(managerIndexSource, /<option value="banned">已封禁主页<\/option>/);
 assert.match(managerIndexSource, /class="panel download-execution-panel"/);
 assert.doesNotMatch(
   managerIndexSource,
@@ -419,7 +426,7 @@ assert.match(linksFeatureSource, /profile_tab === "like"/);
 const managerAppSource = fs.readFileSync(path.join(moduleDir, "static", "app.js"), "utf8");
 assert.match(managerAppSource, /features\/downloads\.js\?v=20260809-home-simplify-01/);
 assert.match(managerAppSource, /features\/links\.js\?v=20260809-home-simplify-01/);
-assert.match(managerAppSource, /features\/profiles\.js\?v=20260809-home-simplify-01/);
+assert.match(managerAppSource, /features\/profiles\.js\?v=20260810-banned-profiles-01/);
 
 const downloadStateSource = fs.readFileSync(
   path.join(moduleDir, "manager_core", "download_state.py"),
@@ -556,6 +563,9 @@ assert.match(managerClient, /\/api\/links\/retry/);
 assert.match(managerClient, /supportsLinkRetry/);
 assert.match(managerClient, /deleted_works/);
 assert.match(managerClient, /full_scan_required/);
+assert.match(managerClient, /account_status/);
+assert.match(managerClient, /scope === "banned"/);
+assert.match(managerClient, /手动确认/);
 assert.match(managerClient, /一键确认待全量/);
 assert.match(managerClient, /pending\.map\(\(profile\) => Number\(profile\.id\)\)/);
 assert.match(managerClient, /new URLSearchParams\(location\.search\)\.get\("profile"\)/);

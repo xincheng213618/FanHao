@@ -142,6 +142,7 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
     WHERE TRIM(COALESCE(sec_uid, '')) <> ''
   `).all();
   const bestBySecUid = new Map();
+  const accountStateBySecUid = new Map();
   for (const row of profileRows) {
     const secUid = String(row.sec_uid || "").trim();
     if (!secUid) continue;
@@ -149,6 +150,19 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
     const rank = `${freshness}\u0000${String(row.tab || "") === "post" ? "1" : "0"}`;
     const current = bestBySecUid.get(secUid);
     if (!current || rank >= current.rank) bestBySecUid.set(secUid, { row, rank });
+    if (profileColumns.has("account_status")) {
+      const status = String(row.account_status || "active").trim().toLowerCase() === "banned" ? "banned" : "active";
+      const statusRank = String(row.account_status_detected_at || row.updated_at || row.profile_collected_at || "");
+      const currentState = accountStateBySecUid.get(secUid);
+      if (!currentState || (status === "banned" && currentState.status !== "banned") || (status === currentState.status && statusRank >= currentState.rank)) {
+        accountStateBySecUid.set(secUid, {
+          status,
+          reason: status === "banned" ? String(row.account_status_reason || "") : "",
+          detectedAt: status === "banned" ? String(row.account_status_detected_at || "") : "",
+          rank: statusRank
+        });
+      }
+    }
   }
   const videoAuthorNameUpdate = targetDb.prepare(`
     UPDATE short_videos
@@ -158,6 +172,16 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
       AND ? <> ''
       AND COALESCE(author_name, '') <> ?
   `);
+  const accountStateUpdate = profileColumns.has("account_status")
+    ? targetDb.prepare(`
+        UPDATE short_video_users
+        SET account_status = ?,
+            account_status_reason = ?,
+            account_status_detected_at = ?,
+            updated_at = ?
+        WHERE id = ?
+      `)
+    : null;
   targetDb.exec("BEGIN");
   try {
     for (const [secUid, candidate] of bestBySecUid) {
@@ -188,6 +212,16 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
         String(row.created_at || now),
         now
       );
+      const accountState = accountStateBySecUid.get(secUid);
+      if (accountStateUpdate && accountState) {
+        accountStateUpdate.run(
+          accountState.status,
+          accountState.reason,
+          accountState.detectedAt,
+          now,
+          `douyin:${secUid}`
+        );
+      }
       videoAuthorNameUpdate.run(nickname, now, secUid, nickname, nickname);
     }
     targetDb.exec("COMMIT");

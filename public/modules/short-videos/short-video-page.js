@@ -1,7 +1,7 @@
 import { createShortVideoSearchModule } from "./search/index.js?v=20260710-short-video-search-01";
 import { createShortVideoActionsController } from "./actions-controller.js?v=20260716-short-video-actions-01";
-import { createShortVideoAuthorPages } from "./author-pages.js?v=20260801-count-confirmation-01";
-import { createShortVideoFilterControls } from "./filter-controls.js?v=20260720-short-video-filter-controls-01";
+import { createShortVideoAuthorPages } from "./author-pages.js?v=20260810-author-header-align-01";
+import { createShortVideoFilterControls } from "./filter-controls.js?v=20260810-author-account-status-01";
 import { createIcon, railButton, setIconButton } from "./icons.js?v=20260716-short-video-icons-01";
 import { createShortVideoListWindow } from "./list-window.js?v=20260716-short-video-list-window-01";
 import { createShortVideoMediaCache } from "./media-cache.js?v=20260716-short-video-media-cache-01";
@@ -22,6 +22,7 @@ import {
   formatShortVideoMetric,
   initials,
   normalizePlaybackRate,
+  normalizeShortVideoAuthorAccountStatus,
   normalizeShortVideoAuthorFilter,
   normalizeShortVideoAuthorSort,
   normalizeShortVideoDeleted,
@@ -275,6 +276,7 @@ export function createShortVideoPage(deps) {
     state
   });
   const {
+    renderAuthorAccountStatusControl,
     renderDeletedControl: renderShortVideoDeletedControl,
     renderSortControl: renderShortVideoSortControl
   } = createShortVideoFilterControls({
@@ -282,6 +284,7 @@ export function createShortVideoPage(deps) {
     formatNumber,
     isAuthorDetailPage: isShortVideoAuthorDetailPage,
     loadVideos,
+    normalizeAuthorAccountStatus: normalizeShortVideoAuthorAccountStatus,
     normalizeDeleted: normalizeShortVideoDeleted,
     normalizeSort: normalizeShortVideoSortValue,
     showError,
@@ -457,6 +460,7 @@ export function createShortVideoPage(deps) {
     state.shortVideo.media = normalizeShortVideoMedia(route.shortVideoMedia);
     state.shortVideo.quality = normalizeShortVideoQuality(route.shortVideoQuality);
     state.shortVideo.deleted = normalizeShortVideoDeleted(route.shortVideoDeleted);
+    state.shortVideo.authorAccountStatus = normalizeShortVideoAuthorAccountStatus(route.shortVideoAuthorAccountStatus);
     if (state.shortVideo.quality !== "all") state.shortVideo.media = "video";
     state.shortVideo.source = normalizeShortVideoSource(route.shortVideoSource);
     if (!state.shortVideo.authorPage && ["authors", "following"].includes(state.shortVideo.source)) {
@@ -533,6 +537,7 @@ export function createShortVideoPage(deps) {
           state.shortVideo.authorTotal = 0;
           state.shortVideo.authorScopeTotal = 0;
           state.shortVideo.authorUnlikedTotal = 0;
+          state.shortVideo.authorBannedTotal = 0;
           state.shortVideo.authorHasMore = false;
         }
       }
@@ -546,6 +551,8 @@ export function createShortVideoPage(deps) {
         params.set("scope", "following");
         params.set("sort", state.shortVideo.authorSort);
         params.set("filter", state.shortVideo.authorFilter);
+      } else {
+        params.set("filter", state.shortVideo.authorAccountStatus);
       }
       if (state.shortVideo.query) params.set("q", state.shortVideo.query);
       const data = await api(`/api/short-videos/authors?${params}`);
@@ -567,6 +574,7 @@ export function createShortVideoPage(deps) {
       state.shortVideo.authorTotal = Math.max(0, Number(data.total || 0));
       state.shortVideo.authorScopeTotal = Math.max(0, Number(data.scopeTotal || data.total || 0));
       state.shortVideo.authorUnlikedTotal = Math.max(0, Number(data.unlikedTotal || 0));
+      state.shortVideo.authorBannedTotal = Math.max(0, Number(data.bannedTotal || 0));
       state.shortVideo.authorHasMore = Boolean(data.hasMore);
       state.shortVideo.loading = false;
       state.shortVideo.authorLoadingMore = false;
@@ -743,6 +751,7 @@ export function createShortVideoPage(deps) {
         shortVideoMedia: state.shortVideo.media || "all",
         shortVideoQuality: state.shortVideo.quality || "all",
         shortVideoDeleted: state.shortVideo.deleted || "all",
+        shortVideoAuthorAccountStatus: state.shortVideo.authorAccountStatus || "all",
         shortVideoSource: state.shortVideo.source || "liked",
         shortVideoSort: state.shortVideo.sort || "published"
       });
@@ -988,7 +997,7 @@ export function createShortVideoPage(deps) {
     if (shortVideoListCards) return Promise.resolve(shortVideoListCards);
     if (shortVideoListCardsPromise) return shortVideoListCardsPromise;
     markShortVideoPerformance("list-cards-module-start");
-    const moduleUrl = "/modules/short-videos/list-cards.js?v=20260715-aggregate-search-01";
+    const moduleUrl = "/modules/short-videos/list-cards.js?v=20260810-author-account-status-01";
     shortVideoListCardsPromise = import(moduleUrl).then((module) => {
       if (typeof module.createShortVideoListCards !== "function") {
         throw new Error("短视频列表模块加载失败");
@@ -1598,7 +1607,9 @@ export function createShortVideoPage(deps) {
       ? document.createElement("div")
       : state.shortVideo.source === "following" && isShortVideoAuthorIndexPage()
         ? renderFollowingAuthorControls()
-        : renderDeleteSelectionActions(data);
+        : state.shortVideo.source === "authors" && isShortVideoAuthorIndexPage()
+          ? renderAuthorAccountStatusControl()
+          : renderDeleteSelectionActions(data);
     const total = document.createElement("div");
     total.className = "short-video-home-total";
     if (isShortVideoAuthorIndexPage()) {
@@ -1611,8 +1622,12 @@ export function createShortVideoPage(deps) {
           ? "正在读取关注账号"
           : `关注 ${formatNumber(scopeTotal)} · 未点赞 ${formatNumber(unlikedTotal)}${state.shortVideo.authorHasMore ? ` · 已显示 ${formatNumber(loadedCount)}` : ""}`;
       } else {
+        const bannedOnly = state.shortVideo.authorAccountStatus === "banned";
+        const scopeTotal = state.shortVideo.authorScopeTotal || authorTotal;
         total.textContent = state.shortVideo.loading
           ? "正在读取作者"
+          : bannedOnly
+            ? `已封禁 ${formatNumber(authorTotal)} / 全部 ${formatNumber(scopeTotal)} 位作者`
           : state.shortVideo.authorHasMore
             ? `已显示 ${formatNumber(loadedCount)} / ${formatNumber(authorTotal)} 位作者`
             : `${formatNumber(authorTotal || loadedCount)} 位作者`;

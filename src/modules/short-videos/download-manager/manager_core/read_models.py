@@ -85,6 +85,9 @@ def get_state() -> dict[str, Any]:
                   profiles.total_favorited,
                    profiles.aweme_count,
                    profiles.has_deleted_works,
+                   profiles.account_status,
+                   profiles.account_status_reason,
+                   profiles.account_status_detected_at,
                    profiles.full_scan_required,
                    profiles.full_scan_reason,
                    profiles.full_scan_required_at,
@@ -180,11 +183,13 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
     if scope == "following":
         where.append("(profiles.is_following=1 OR (profiles.sec_uid=? AND profiles.tab='like'))")
         params.append(LIBRARY_SEC_UID)
+    elif scope == "banned":
+        where.append("COALESCE(profiles.account_status, 'active')='banned'")
     elif scope == "collected":
         where.append("(COALESCE(stats.total, 0)>0 OR (profiles.sec_uid=? AND profiles.tab='like'))")
         params.append(LIBRARY_SEC_UID)
     elif scope != "all":
-        raise ValueError("主页范围只能是 collected/following/all")
+        raise ValueError("主页范围只能是 collected/following/banned/all")
     if deleted_works == "flagged":
         where.append("profiles.has_deleted_works=1")
     elif deleted_works == "pending":
@@ -237,6 +242,9 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
                   profiles.total_favorited,
                    profiles.aweme_count,
                    profiles.has_deleted_works,
+                   profiles.account_status,
+                   profiles.account_status_reason,
+                   profiles.account_status_detected_at,
                    profiles.full_scan_required,
                    profiles.full_scan_reason,
                    profiles.full_scan_required_at,
@@ -289,6 +297,7 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
                 SELECT
                    profiles.tab,
                    profiles.last_extracted_at,
+                   profiles.account_status,
                    profiles.full_scan_required,
                    profiles.full_scan_required_at,
                    stats.latest_work_create_time,
@@ -316,12 +325,18 @@ def list_profiles(query: dict[str, list[str]]) -> dict[str, Any]:
         int(profile.get("full_scan_required") or 0)
         for profile in refresh_candidates
         if str(profile.get("tab") or "post") == "post"
+        and str(profile.get("account_status") or "active").strip().lower() != "banned"
+    )
+    banned_count = sum(
+        str(profile.get("account_status") or "active").strip().lower() == "banned"
+        for profile in refresh_candidates
     )
     return {
         "total": total,
         "eligible_count": eligible_count,
         "deferred_count": deferred_count,
         "full_scan_required_count": full_scan_required_count,
+        "banned_count": banned_count,
         "auto_candidate_count": len(refresh_candidates),
         "profiles": rows,
     }

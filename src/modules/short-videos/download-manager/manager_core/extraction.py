@@ -15,6 +15,7 @@ from .common import clean_profile_nickname, first_text, int_or_none, normalize_i
 from .config import BASE_DIR, DATA_DIR, DEFAULT_COOKIE_FILE, LIBRARY_SEC_UID, LOG_DIR, NODE_EXECUTABLE, TEST_PROFILE_URL
 from .database import add_event, create_job, db, set_setting, setting, update_job
 from .profiles_links import (
+    restore_profile_account_if_active,
     update_profile_deleted_works_flag,
     upsert_following_profiles,
     upsert_links,
@@ -57,9 +58,13 @@ def run_extract_job(
     global extract_thread, extract_job_id, extract_process
     profile_id = upsert_profile(url)
     with db() as conn:
-        profile_row = conn.execute("SELECT tab, aweme_count FROM profiles WHERE id=?", (profile_id,)).fetchone()
+        profile_row = conn.execute(
+            "SELECT tab, aweme_count, account_status FROM profiles WHERE id=?",
+            (profile_id,),
+        ).fetchone()
         profile_tab_for_job = str(profile_row["tab"] or "post") if profile_row else "post"
         profile_aweme_count = int_or_none(profile_row["aweme_count"]) or 0 if profile_row else 0
+        stored_account_status = str(profile_row["account_status"] or "active").strip().lower() if profile_row else "active"
     out_path = DATA_DIR / f"extract-{uuid.uuid4().hex}.json"
     stream_path = DATA_DIR / f"extract-stream-{job_id}.jsonl"
     log_path = LOG_DIR / f"extract-job-{job_id}.log"
@@ -101,6 +106,9 @@ def run_extract_job(
     incremental_stop_reason = ""
     existing_aweme_ids: set[str] = set()
     full_scan_seen_aweme_ids: set[str] = set()
+    page_account_status = ""
+    account_status_restored = False
+    banned_event_emitted = False
     if incremental_stop_existing > 0:
         try:
             with db() as conn:
@@ -120,6 +128,14 @@ def run_extract_job(
         if not full_scan or profile_tab_for_job != "post":
             return "", False
         result = update_profile_deleted_works_flag(profile_id, full_scan_seen_aweme_ids)
+        if result and result.get("account_status") == "banned":
+            restored = int(result.get("restored") or 0)
+            add_event(
+                "warn",
+                f"主页已封禁：保留数据库中的 {result['link_total']} 条作品"
+                + (f"，并恢复 {restored} 条误标记录" if restored else ""),
+            )
+            return "；账号已封禁，已保留原有作品", True
         if not result or result.get("skipped"):
             return "", False
         if not result["has_deleted_works"]:
@@ -148,7 +164,7 @@ def run_extract_job(
             add_event("warn", str(result.get("full_scan_reason") or "作品数明显减少，已安排下次全量确认"))
 
     def consume_stream() -> None:
-        nonlocal offset, partial, total_seen, inserted_total, updated_total, consecutive_existing, incremental_stop_triggered, incremental_stop_reason, profile_aweme_count, target_count_stop_triggered, like_sequence
+        nonlocal offset, partial, total_seen, inserted_total, updated_total, consecutive_existing, incremental_stop_triggered, incremental_stop_reason, profile_aweme_count, target_count_stop_triggered, like_sequence, page_account_status, account_status_restored, banned_event_emitted
         if not stream_path.exists():
             return
         with stream_path.open("rb") as stream:
@@ -202,6 +218,10 @@ def run_extract_job(
                 inserted_total += inserted
                 updated_total += updated
                 total_seen = max(total_seen, int(row.get("count") or 0), inserted_total + updated_total)
+                if works and page_account_status == "active" and not account_status_restored:
+                    account_status_restored = restore_profile_account_if_active(profile_id)
+                    if account_status_restored:
+                        add_event("info", "手动确认已发现主页作品，已解除封禁标记")
                 update_job(
                     job_id,
                     total=total_seen,
@@ -213,6 +233,7 @@ def run_extract_job(
                 if (
                     profile_tab_for_job == "post"
                     and profile_aweme_count > 0
+                    and (stored_account_status != "banned" or page_account_status == "active")
                     and total_seen >= profile_aweme_count
                     and not target_count_stop_triggered
                     and not incremental_stop_triggered
@@ -253,6 +274,15 @@ def run_extract_job(
             elif row_type == "profile":
                 profile_payload = row.get("profile") or {}
                 upsert_profile_metadata(profile_id, profile_payload)
+                incoming_account_status = str(profile_payload.get("account_status") or "").strip().lower()
+                if str(row.get("reason") or "") == "dom" and incoming_account_status in {"active", "banned"}:
+                    page_account_status = incoming_account_status
+                if incoming_account_status == "banned" and not banned_event_emitted:
+                    banned_event_emitted = True
+                    reason = first_text(profile_payload.get("account_status_reason"), "抖音主页显示账号已封禁")
+                    add_event("warn", f"主页已标记为已封禁：{reason}；自动更新将跳过该主页")
+                elif total_seen > 0 and page_account_status == "active" and not account_status_restored:
+                    account_status_restored = restore_profile_account_if_active(profile_id)
                 fresh_aweme_count = int_or_none(
                     profile_payload.get("aweme_count")
                     if profile_payload.get("aweme_count") is not None
@@ -273,6 +303,7 @@ def run_extract_job(
                 if (
                     profile_tab_for_job == "post"
                     and profile_aweme_count > 0
+                    and (stored_account_status != "banned" or page_account_status == "active")
                     and total_seen >= profile_aweme_count
                     and not target_count_stop_triggered
                     and not incremental_stop_triggered
@@ -287,7 +318,13 @@ def run_extract_job(
                             pass
             elif row_type == "done":
                 total_seen = max(total_seen, int(row.get("count") or 0))
-                upsert_profile_metadata(profile_id, row.get("profile") or {})
+                profile_payload = row.get("profile") or {}
+                upsert_profile_metadata(profile_id, profile_payload)
+                incoming_account_status = str(profile_payload.get("account_status") or "").strip().lower()
+                if incoming_account_status in {"active", "banned"}:
+                    page_account_status = incoming_account_status
+                if total_seen > 0 and page_account_status == "active" and not account_status_restored:
+                    account_status_restored = restore_profile_account_if_active(profile_id)
 
     try:
         try:
@@ -373,7 +410,11 @@ def run_extract_job(
             return
         if total_seen == 0 and out_path.exists():
             payload = json.loads(out_path.read_text(encoding="utf-8"))
-            upsert_profile_metadata(profile_id, payload.get("profile") or {})
+            profile_payload = payload.get("profile") or {}
+            upsert_profile_metadata(profile_id, profile_payload)
+            incoming_account_status = str(profile_payload.get("account_status") or "").strip().lower()
+            if incoming_account_status in {"active", "banned"}:
+                page_account_status = incoming_account_status
             works = payload.get("works") or []
             if full_scan:
                 full_scan_seen_aweme_ids.update(
@@ -385,7 +426,11 @@ def run_extract_job(
             inserted_total += inserted
             updated_total += updated
             total_seen = len(works)
+        if total_seen > 0 and page_account_status == "active" and not account_status_restored:
+            account_status_restored = restore_profile_account_if_active(profile_id)
         deletion_suffix, full_scan_confirmed = finish_full_scan_flag()
+        if page_account_status == "banned" and not deletion_suffix:
+            deletion_suffix = "；账号已封禁，已保留原有作品"
         message = f"采集完成：{total_seen} 条，新 {inserted_total}，已存在 {updated_total}{deletion_suffix}"
         update_job(
             job_id,
@@ -485,6 +530,7 @@ def run_refresh_profiles_job(
                       profiles.short_id,
                       profiles.updated_at,
                       profiles.last_extracted_at,
+                      profiles.account_status,
                       profiles.full_scan_required,
                       profiles.full_scan_reason,
                       profiles.full_scan_required_at,

@@ -433,6 +433,7 @@ function currentRouteSnapshot(overrides = {}) {
     shortVideoAuthor: state.shortVideo.author || "all",
     shortVideoMedia: state.shortVideo.media || "all",
     shortVideoQuality: state.shortVideo.quality || "all",
+    shortVideoAuthorAccountStatus: state.shortVideo.authorAccountStatus || "all",
     shortVideoSource: state.shortVideo.source || "liked",
     shortVideoSort: state.shortVideo.sort || "published",
     ...overrides

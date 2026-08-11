@@ -77,6 +77,11 @@
   background: #fffaf5;
 }
 
+.profile-manager-row.is-account-banned {
+  box-shadow: inset 4px 0 0 #dc2626;
+  background: #fffafa;
+}
+
 .profile-manager-identity {
   min-width: 0;
   display: flex;
@@ -122,6 +127,12 @@
   border-color: #ea580c;
   background: #fff7ed;
   color: #c2410c;
+}
+
+.profile-manager-badge.is-account-banned {
+  border-color: #dc2626;
+  background: #fef2f2;
+  color: #b91c1c;
 }
 
 .profile-manager-badge.is-refresh-due {

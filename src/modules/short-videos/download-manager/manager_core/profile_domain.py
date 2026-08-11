@@ -30,6 +30,9 @@ def normalize_profile_metadata(profile: dict[str, Any] | None, fallback_sec_uid:
         if profile.get("aweme_count") is not None
         else profile.get("awemeCount")
     )
+    account_status = first_text(profile.get("account_status"), profile.get("accountStatus")).lower()
+    if account_status not in {"active", "banned"}:
+        account_status = ""
     return {
         "uid": uid,
         "sec_uid": sec_uid,
@@ -47,6 +50,11 @@ def normalize_profile_metadata(profile: dict[str, Any] | None, fallback_sec_uid:
         "gender": int_or_none(profile.get("gender")),
         "age": int_or_none(profile.get("age")),
         "verification": first_text(profile.get("verification"), profile.get("custom_verify"), profile.get("customVerify")),
+        "account_status": account_status,
+        "account_status_reason": first_text(
+            profile.get("account_status_reason"),
+            profile.get("accountStatusReason"),
+        ),
         "profile_url": profile_url,
         "profile_raw_json": raw_json if raw_json else "{}",
     }

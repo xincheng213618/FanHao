@@ -358,6 +358,8 @@ function mergeProfile(target, incoming, overwriteKeys = new Set()) {
 
 function domProfileFromSnapshot(snapshot = {}) {
   const text = String(snapshot.text || "");
+  const bannedMatch = text.match(/该用户\s*(?:已\s*)?被\s*禁言|(?:该\s*)?账号\s*(?:已\s*)?被\s*封禁/u);
+  const accountStatusReason = bannedMatch ? bannedMatch[0].replace(/\s+/g, "") : "";
   const labelNumber = (label) => {
     const match = text.match(new RegExp(`${label}\\s*([0-9.,]+\\s*[万亿wk]?)`, "i"));
     return match ? parseHumanNumber(match[1]) : null;
@@ -376,6 +378,8 @@ function domProfileFromSnapshot(snapshot = {}) {
     total_favorited: labelNumber("获赞"),
     aweme_count: labelNumber("作品"),
     age,
+    account_status: bannedMatch ? "banned" : "active",
+    account_status_reason: accountStatusReason,
   };
 }
 
@@ -679,7 +683,9 @@ async function extractWorks(opts) {
   if (targetSecUid) profile.sec_uid = targetSecUid;
   const emitProfile = async (reason, incoming) => {
     if (incoming && targetSecUid) incoming.sec_uid = targetSecUid;
-    const overwriteKeys = reason === "dom" ? new Set(["nickname", "avatar_url", "unique_id", "short_id", "ip_location"]) : new Set();
+    const overwriteKeys = reason === "dom"
+      ? new Set(["nickname", "avatar_url", "unique_id", "short_id", "ip_location", "account_status"])
+      : new Set();
     if (!mergeProfile(profile, incoming, overwriteKeys)) return;
     await writer.write({ type: "profile", reason, profile: { ...profile } });
   };
@@ -757,7 +763,9 @@ async function extractWorks(opts) {
 
     let stable = 0;
     let lastCount = 0;
-    for (let round = 0; round < opts.scrolls; round += 1) {
+    if (profile.account_status === "banned") {
+      console.error(`[extract] account is banned (${profile.account_status_reason || "page marker"}); skipping work scan`);
+    } else for (let round = 0; round < opts.scrolls; round += 1) {
       if (!filterToTargetAuthor) await collectCardLinks(page, works, pending, opts.max);
       if (round === 0 || round % 5 === 4) {
         await emitProfile("dom", domProfileFromSnapshot(await collectDomProfile(page)));

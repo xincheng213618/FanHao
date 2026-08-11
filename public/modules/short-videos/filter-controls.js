@@ -4,6 +4,7 @@ export function createShortVideoFilterControls(deps) {
     formatNumber,
     isAuthorDetailPage,
     loadVideos,
+    normalizeAuthorAccountStatus,
     normalizeDeleted,
     normalizeSort,
     showError,
@@ -70,5 +71,37 @@ export function createShortVideoFilterControls(deps) {
     return label;
   }
 
-  return Object.freeze({ renderDeletedControl, renderSortControl });
+  function renderAuthorAccountStatusControl() {
+    const wrap = document.createElement("div");
+    wrap.className = "short-video-delete-actions short-video-author-account-controls";
+    const label = document.createElement("label");
+    label.className = "short-video-sort-control";
+    const text = document.createElement("span");
+    text.textContent = "账号状态";
+    const select = document.createElement("select");
+    select.className = "short-video-sort-select";
+    select.setAttribute("aria-label", "作者账号状态筛选");
+    for (const [value, optionLabel] of [
+      ["all", "全部账号"],
+      ["banned", `已封禁 (${formatNumber(state.shortVideo.authorBannedTotal || 0)})`]
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = optionLabel;
+      select.append(option);
+    }
+    select.value = normalizeAuthorAccountStatus(state.shortVideo.authorAccountStatus);
+    select.addEventListener("change", () => {
+      const nextStatus = normalizeAuthorAccountStatus(select.value);
+      if (nextStatus === state.shortVideo.authorAccountStatus) return;
+      state.shortVideo.authorAccountStatus = nextStatus;
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      loadVideos({ replaceRoute: true }).catch(showError);
+    });
+    label.append(text, select);
+    wrap.append(label);
+    return wrap;
+  }
+
+  return Object.freeze({ renderAuthorAccountStatusControl, renderDeletedControl, renderSortControl });
 }

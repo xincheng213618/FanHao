@@ -111,6 +111,22 @@ class ProfileRefreshPolicyTests(unittest.TestCase):
         self.assertEqual(decision["refresh_basis"], "full_scan_required")
         self.assertEqual(decision["refresh_mode"], "full")
 
+    def test_banned_profile_is_never_selected_for_automatic_refresh(self) -> None:
+        decision = profile_refresh_decision(
+            {
+                "tab": "post",
+                "account_status": "banned",
+                "last_extracted_at": iso_at(1_000_000_000),
+                "full_scan_required": 1,
+                "full_scan_required_at": iso_at(1_000_000_100),
+            },
+            now_timestamp=2_000_000_000,
+        )
+
+        self.assertEqual(decision["refresh_due"], 0)
+        self.assertEqual(decision["refresh_basis"], "account_banned")
+        self.assertEqual(decision["refresh_mode"], "manual")
+
 
 if __name__ == "__main__":
     unittest.main()

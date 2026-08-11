@@ -483,7 +483,10 @@ try {
       total_favorited INTEGER,
       aweme_count INTEGER,
       profile_collected_at TEXT,
-      updated_at TEXT
+      updated_at TEXT,
+      account_status TEXT NOT NULL DEFAULT 'active',
+      account_status_reason TEXT,
+      account_status_detected_at TEXT
     );
     CREATE TABLE links (
       id INTEGER PRIMARY KEY,
@@ -521,6 +524,13 @@ try {
       '2026-07-11T00:00:00+08:00', '2026-07-11T00:00:00+08:00')
   `).run();
   sourceDb.prepare(`
+    UPDATE profiles
+    SET account_status = 'banned',
+        account_status_reason = '该用户被禁言',
+        account_status_detected_at = '2026-07-11T00:05:00+08:00'
+    WHERE id = 2
+  `).run();
+  sourceDb.prepare(`
     INSERT INTO links (
       id, profile_id, aweme_id, status, kind, media_type, output_dir,
       local_file_paths, downloaded_at, last_seen_at, digg_count, comment_count, collect_count, share_count
@@ -537,6 +547,14 @@ try {
   sourceDb.close();
 
   store.importDownloadManagerDb(sourceDbPath, { incremental: true, includePosts: true });
+  const bannedAuthorPage = store.listAuthors({
+    searchParams: new URLSearchParams("filter=banned&q=测试作者&limit=10")
+  });
+  assert.equal(bannedAuthorPage.scopeTotal, 1);
+  assert.equal(bannedAuthorPage.bannedTotal, 1, "download-manager account bans must reach the local author facet");
+  assert.equal(bannedAuthorPage.total, 1, "banned authors must be independently searchable");
+  assert.equal(bannedAuthorPage.authors[0]?.accountStatus, "banned");
+  assert.equal(bannedAuthorPage.authors[0]?.accountStatusReason, "该用户被禁言");
   const live = store.videoDetail(liveId)?.video;
   assert.equal(live?.mediaType, "gallery", "a note with an image and live MP4 should stay an ordered mixed gallery");
   assert.equal(live?.galleryPresentation, "live-photo");
@@ -586,7 +604,10 @@ try {
         total_favorited = 8439000,
         aweme_count = 509,
         profile_collected_at = '2026-07-20T04:32:03+08:00',
-        updated_at = '2026-07-20T04:32:03+08:00'
+        updated_at = '2026-07-20T04:32:03+08:00',
+        account_status = 'active',
+        account_status_reason = NULL,
+        account_status_detected_at = NULL
     WHERE id = 2
   `).run();
   refreshedSourceDb.prepare(`
@@ -615,6 +636,12 @@ try {
   assert.equal(refreshedAuthor?.awemeCount, 509, "official profile work totals must refresh without a new download");
   assert.equal(refreshedAuthor?.followingCount, 295);
   assert.equal(refreshedAuthor?.profileCollectedAt, "2026-07-20T04:32:03+08:00");
+  assert.equal(refreshedAuthor?.accountStatus, "active", "manual recovery in the manager must clear the local banned marker");
+  assert.equal(
+    store.listAuthors({ searchParams: new URLSearchParams("filter=banned&limit=10") }).total,
+    0,
+    "recovered authors must leave the banned-only author view"
+  );
   const nicknameSyncDb = new DatabaseSync(targetDbPath, { readOnly: true });
   assert.equal(
     nicknameSyncDb.prepare("SELECT author_name FROM short_videos WHERE id=?").get(liveId)?.author_name,

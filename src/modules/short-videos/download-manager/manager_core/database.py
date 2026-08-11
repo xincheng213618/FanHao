@@ -66,6 +66,9 @@ def init_db() -> None:
               total_favorited INTEGER,
               aweme_count INTEGER,
               has_deleted_works INTEGER NOT NULL DEFAULT 0,
+              account_status TEXT NOT NULL DEFAULT 'active',
+              account_status_reason TEXT,
+              account_status_detected_at TEXT,
               favoriting_count INTEGER,
               gender INTEGER,
               age INTEGER,
@@ -322,6 +325,9 @@ def migrate_profile_metadata_columns(conn: sqlite3.Connection) -> None:
         "total_favorited": "INTEGER",
         "aweme_count": "INTEGER",
         "has_deleted_works": "INTEGER NOT NULL DEFAULT 0",
+        "account_status": "TEXT NOT NULL DEFAULT 'active'",
+        "account_status_reason": "TEXT",
+        "account_status_detected_at": "TEXT",
         "favoriting_count": "INTEGER",
         "gender": "INTEGER",
         "age": "INTEGER",
@@ -336,6 +342,7 @@ def migrate_profile_metadata_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE profiles ADD COLUMN {name} {definition}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_profiles_uid ON profiles(uid)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_profiles_unique_id ON profiles(unique_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_profiles_account_status ON profiles(account_status, id)")
 
 
 def migrate_profile_collection_history(conn: sqlite3.Connection) -> None:
@@ -401,6 +408,7 @@ def migrate_profile_collection_history(conn: sqlite3.Connection) -> None:
         WHERE tab='post'
           AND COALESCE(full_scan_required, 0)=0
           AND COALESCE(has_deleted_works, 0)=0
+          AND COALESCE(account_status, 'active')<>'banned'
           AND aweme_count IS NOT NULL
           AND last_full_scan_at IS NULL
           AND (SELECT COUNT(*) FROM links WHERE links.profile_id=profiles.id) - aweme_count >= 10
@@ -897,6 +905,32 @@ def merge_profile_alias(conn: sqlite3.Connection, target_id: int, source_id: int
         "UPDATE profile_collection_history SET profile_id=? WHERE profile_id=?",
         (target_id, source_id),
     )
+    target_status = str(target["account_status"] or "active").strip().lower()
+    source_status = str(source["account_status"] or "active").strip().lower()
+    if "banned" in {target_status, source_status}:
+        banned_row = source if source_status == "banned" else target
+        conn.execute(
+            """
+            UPDATE profiles
+            SET account_status='banned',
+                account_status_reason=COALESCE(NULLIF(?, ''), account_status_reason),
+                account_status_detected_at=COALESCE(?, account_status_detected_at),
+                has_deleted_works=0,
+                full_scan_required=0,
+                full_scan_reason=NULL,
+                full_scan_required_at=NULL
+            WHERE id=?
+            """,
+            (
+                banned_row["account_status_reason"],
+                banned_row["account_status_detected_at"],
+                target_id,
+            ),
+        )
+        conn.execute(
+            "UPDATE links SET is_missing_from_profile=0, missing_from_profile_at=NULL WHERE profile_id=?",
+            (target_id,),
+        )
     conn.execute("DELETE FROM profile_download_queue WHERE profile_id=?", (source_id,))
     conn.execute("DELETE FROM profiles WHERE id=?", (source_id,))
     return {"links": moved_links, "duplicates": len(duplicates), "files": files_merged}

@@ -51,6 +51,7 @@ export function routeFromUrl(url = browserHref()) {
     shortVideoMedia: params.get("media") || params.get("type") || "all",
     shortVideoQuality: params.get("quality") || params.get("resolution") || "all",
     shortVideoDeleted: params.get("deleted") || "all",
+    shortVideoAuthorAccountStatus: params.get("account") || params.get("accountStatus") || "all",
     shortVideoSource: authorPage
       ? (requestedSource === "authors" ? "all" : requestedSource || "all")
       : requestedSource,
@@ -73,6 +74,7 @@ export function normalizeRoute(route = {}) {
     shortVideoMedia: normalizeMedia(route.shortVideoMedia || route.media),
     shortVideoQuality: normalizeQuality(route.shortVideoQuality || route.quality || route.resolution),
     shortVideoDeleted: normalizeDeleted(route.shortVideoDeleted || route.deleted),
+    shortVideoAuthorAccountStatus: normalizeAuthorAccountStatus(route.shortVideoAuthorAccountStatus || route.accountStatus || route.account),
     shortVideoSource: normalizeSource(route.shortVideoSource || route.source),
     shortVideoSort: normalizeSort(route.shortVideoSort || route.sort)
   };
@@ -100,6 +102,7 @@ export function routeUrl(route, options = {}) {
     if (next.shortVideoMedia !== "all") params.set("media", next.shortVideoMedia);
     if (next.shortVideoQuality !== "all") params.set("quality", next.shortVideoQuality);
     if (next.shortVideoDeleted === "deleted") params.set("deleted", "1");
+    if (next.shortVideoSource === "authors" && next.shortVideoAuthorAccountStatus === "banned") params.set("account", "banned");
     const defaultSource = next.shortVideoAuthorPage && !next.shortVideoId ? "all" : "liked";
     if (next.shortVideoSource !== defaultSource) params.set("source", next.shortVideoSource);
     if (next.shortVideoSort !== "published") params.set("sort", next.shortVideoSort);
@@ -131,6 +134,10 @@ function normalizeSource(value) {
 function normalizeDeleted(value) {
   const normalized = String(value || "all").trim().toLowerCase();
   return ["1", "true", "yes", "deleted"].includes(normalized) ? "deleted" : "all";
+}
+
+function normalizeAuthorAccountStatus(value) {
+  return String(value || "all").trim().toLowerCase() === "banned" ? "banned" : "all";
 }
 
 function normalizeMedia(value) {

@@ -16,6 +16,7 @@ export function createProfilesFeature(options) {
   let eligibleCount = null;
   let deferredCount = null;
   let fullScanRequiredCount = null;
+  let bannedCount = null;
   let loading = false;
   let loadMoreCheckScheduled = false;
   let avatarObserver = null;
@@ -36,6 +37,7 @@ export function createProfilesFeature(options) {
 
   function needsFullScan(profile) {
     if (String(profile.tab || "post") !== "post") return false;
+    if (String(profile.account_status || "active") === "banned") return false;
     if (Number(profile.full_scan_required || 0) === 1) return true;
     if (Number(profile.has_deleted_works || 0) === 1) return false;
     const localCount = Math.max(0, Number(profile.total || 0));
@@ -82,6 +84,7 @@ export function createProfilesFeature(options) {
     const filteredRows = allRows.filter((profile) => {
       const inScope = scope === "all"
         || (scope === "following" && (Number(profile.is_following || 0) === 1 || Number(profile.is_self || 0) === 1))
+        || (scope === "banned" && String(profile.account_status || "active") === "banned")
         || (scope === "collected" && (Number(profile.total || 0) > 0 || Number(profile.is_self || 0) === 1));
       if (!inScope) return false;
       if (deletedWorks === "flagged" && Number(profile.has_deleted_works || 0) !== 1) return false;
@@ -115,6 +118,11 @@ export function createProfilesFeature(options) {
       ? Math.max(0, localCandidates.length - localEligibleCount)
       : deferredCount;
     const currentFullScanCount = fullScanRequiredCount === null ? localFullScanCount : fullScanRequiredCount;
+    const localBannedCount = localCandidates.filter(
+      (profile) => String(profile.account_status || "active") === "banned"
+    ).length;
+    const currentBannedCount = bannedCount === null ? localBannedCount : bannedCount;
+    const currentWaitingCount = Math.max(0, currentDeferredCount - currentBannedCount);
     const confirmPendingButton = $("confirmPendingProfiles");
     if (confirmPendingButton) {
       confirmPendingButton.textContent = currentFullScanCount > 0
@@ -127,30 +135,37 @@ export function createProfilesFeature(options) {
     }
     const visibleRows = filteredRows;
     const totalRows = deletedWorks === "pending" ? filteredRows.length : Math.max(total, filteredRows.length);
-    $("profileManagerSummary").textContent = `${totalRows} 个主页 · 已加载 ${visibleRows.length} 个 · 智能判定本次采集 ${currentEligibleCount} 个（其中待全量 ${currentFullScanCount} 个），暂缓 ${currentDeferredCount} 个`;
+    $("profileManagerSummary").textContent = `${totalRows} 个主页 · 已加载 ${visibleRows.length} 个 · 智能判定本次采集 ${currentEligibleCount} 个（其中待全量 ${currentFullScanCount} 个），暂缓 ${currentWaitingCount} 个，已封禁 ${currentBannedCount} 个`;
     node.innerHTML = visibleRows.map((profile) => {
       const name = String(profile.nickname || profile.title || `主页 #${profile.id}`).trim();
       const douyinId = displayDouyinId(profile) || "-";
       const latestWork = profileWorkDate(profile);
       const lastExtracted = formatDateTime(profile.last_extracted_at);
+      const accountBanned = String(profile.account_status || "active") === "banned";
       const fullScanPending = needsFullScan(profile);
-      const refreshDue = Number(profile.refresh_due || 0) === 1 || fullScanPending;
+      const refreshDue = !accountBanned && (Number(profile.refresh_due || 0) === 1 || fullScanPending);
       const refreshAt = formatDateTime(profile.refresh_due_at);
       const refreshInterval = formatRefreshInterval(profile.refresh_interval_seconds);
       const cadence = formatRefreshInterval(profile.refresh_cadence_seconds);
       const tabLabel = profile.tab === "like" ? "我的喜欢" : "作者作品";
       const sourceLabel = Number(profile.is_self || 0) === 1 ? "本人" : Number(profile.is_following || 0) === 1 ? "已关注" : "";
-      const deletedWorksBadge = Number(profile.has_deleted_works || 0) === 1
+      const bannedReason = String(profile.account_status_reason || "抖音主页明确显示账号已封禁").trim();
+      const bannedBadge = accountBanned
+        ? ` <span class="profile-manager-badge is-account-banned" title="${escapeHtml(bannedReason)}">已封禁</span>`
+        : "";
+      const deletedWorksBadge = !accountBanned && Number(profile.has_deleted_works || 0) === 1
         ? ' <span class="profile-manager-badge is-deleted-works" title="已经过一次完整主页扫描确认">主页少作品</span>'
         : "";
       const fullScanReason = String(profile.full_scan_reason || "主页作品数明显少于本地入库，下一次智能采集将执行一次全量确认").trim();
       const fullScanBadge = fullScanPending
         ? ` <span class="profile-manager-badge is-full-scan-required" title="${escapeHtml(fullScanReason)}">待全量确认</span>`
         : "";
-      const refreshBadge = profile.tab === "like" || fullScanPending
+      const refreshBadge = profile.tab === "like" || fullScanPending || accountBanned
         ? ""
         : ` <span class="profile-manager-badge ${refreshDue ? "is-refresh-due" : "is-refresh-waiting"}">${refreshDue ? "已到期" : "暂缓"}</span>`;
-      const refreshTitle = fullScanPending
+      const refreshTitle = accountBanned
+        ? `${bannedReason}；自动更新已暂停，点击“手动确认”可重新检查`
+        : fullScanPending
         ? fullScanReason
         : profile.refresh_basis === "posting_frequency"
         ? `最近两条作品间隔 ${cadence || "未知"}；智能检查间隔 ${refreshInterval || "未知"}`
@@ -159,10 +174,13 @@ export function createProfilesFeature(options) {
           : profile.refresh_basis === "never_collected"
             ? "尚未采集，立即执行"
             : "喜欢列表在每次批量采集时检查";
-      const refreshMeta = [
-        lastExtracted ? `上次 ${lastExtracted}` : "尚未采集",
-        cadence ? `发作品约 ${cadence}` : "",
-      ].filter(Boolean).join(" · ");
+      const detectedAt = formatDateTime(profile.account_status_detected_at);
+      const refreshMeta = accountBanned
+        ? [detectedAt ? `检测 ${detectedAt}` : "已记录封禁状态", "仅手动确认"].join(" · ")
+        : [
+            lastExtracted ? `上次 ${lastExtracted}` : "尚未采集",
+            cadence ? `发作品约 ${cadence}` : "",
+          ].filter(Boolean).join(" · ");
       const observedCount = profile.aweme_count ?? profile.total ?? 0;
       const previousCount = profile.previous_collection_aweme_count;
       const countMeta = [
@@ -177,11 +195,11 @@ export function createProfilesFeature(options) {
         ? `<img class="profile-manager-avatar" data-profile-avatar-src="${safeUrl(profile.avatar_url)}" alt="" loading="lazy" decoding="async" />`
         : '<div class="profile-manager-avatar placeholder"></div>';
       return `
-        <div class="profile-manager-row${fullScanPending ? " is-full-scan-required" : ""}">
+        <div class="profile-manager-row${fullScanPending ? " is-full-scan-required" : ""}${accountBanned ? " is-account-banned" : ""}">
           <div class="profile-manager-identity">
             ${avatar}
             <div>
-              <div class="profile-manager-name">${escapeHtml(name)}${sourceLabel ? ` <span class="profile-manager-badge">${escapeHtml(sourceLabel)}</span>` : ""}${fullScanBadge}${deletedWorksBadge}${refreshBadge}</div>
+              <div class="profile-manager-name">${escapeHtml(name)}${sourceLabel ? ` <span class="profile-manager-badge">${escapeHtml(sourceLabel)}</span>` : ""}${bannedBadge}${fullScanBadge}${deletedWorksBadge}${refreshBadge}</div>
               <div class="muted">${escapeHtml(tabLabel)} · 抖音号 ${escapeHtml(douyinId)}</div>
             </div>
           </div>
@@ -189,14 +207,14 @@ export function createProfilesFeature(options) {
           <div class="profile-manager-metric"><span>粉丝</span><strong>${formatCompact(profile.follower_count || 0)}</strong></div>
           <div class="profile-manager-metric"><span>获赞</span><strong>${formatCompact(profile.total_favorited || 0)}</strong></div>
           <div class="profile-manager-date"><span>最新作品</span><strong>${escapeHtml(latestWork ? latestWork.slice(0, 10) : "暂无日期")}</strong></div>
-          <div class="profile-manager-date" title="${escapeHtml(refreshTitle)}"><span>智能重抓</span><strong>${escapeHtml(fullScanPending ? "下次全量确认" : refreshDue ? "现在可采集" : refreshAt || "等待判断")}</strong><small>${escapeHtml(refreshMeta)}</small></div>
+          <div class="profile-manager-date" title="${escapeHtml(refreshTitle)}"><span>智能重抓</span><strong>${escapeHtml(accountBanned ? "暂停自动更新" : fullScanPending ? "下次全量确认" : refreshDue ? "现在可采集" : refreshAt || "等待判断")}</strong><small>${escapeHtml(refreshMeta)}</small></div>
           <div class="profile-manager-row-actions">
             <span class="profile-manager-page-links" role="group" aria-label="${escapeHtml(name)}的主页">
               ${localAuthorUrl ? `<a class="queue-link is-local" href="${safeUrl(localAuthorUrl)}" target="_blank" rel="noreferrer" title="打开 FanHao 本地短视频作者主页">本地</a>` : ""}
               <a class="queue-link" href="${safeUrl(profile.url)}" target="_blank" rel="noreferrer" title="打开抖音主页">抖音</a>
             </span>
-            <button data-profile-refresh="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>${Number(profile.is_self || 0) === 1 ? "采集喜欢" : fullScanPending ? "按计划全量" : "快速采集"}</button>
-            ${profile.tab === "post" ? `<button data-profile-full-refresh="${escapeHtml(profile.id || "")}" title="遍历该作者当前全部主页作品，并标记主页已删除作品" ${isExtractActive ? "disabled" : ""}>立即全量</button>` : ""}
+            ${accountBanned ? "" : `<button data-profile-refresh="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>${Number(profile.is_self || 0) === 1 ? "采集喜欢" : fullScanPending ? "按计划全量" : "快速采集"}</button>`}
+            ${profile.tab === "post" ? `<button data-profile-full-refresh="${escapeHtml(profile.id || "")}" title="${escapeHtml(accountBanned ? "手动重新检查该主页；若恢复且能读取到作品，将解除封禁标记" : "遍历该作者当前全部主页作品，并标记主页已删除作品")}" ${isExtractActive ? "disabled" : ""}>${accountBanned ? "手动确认" : "立即全量"}</button>` : ""}
             <button class="danger" data-profile-delete="${escapeHtml(profile.id || "")}" ${isExtractActive ? "disabled" : ""}>删除</button>
           </div>
         </div>
@@ -234,6 +252,9 @@ export function createProfilesFeature(options) {
       deferredCount = Number(data.deferred_count || 0);
       fullScanRequiredCount = Object.prototype.hasOwnProperty.call(data, "full_scan_required_count")
         ? Number(data.full_scan_required_count || 0)
+        : null;
+      bannedCount = Object.prototype.hasOwnProperty.call(data, "banned_count")
+        ? Number(data.banned_count || 0)
         : null;
     } finally {
       loading = false;
@@ -275,6 +296,7 @@ export function createProfilesFeature(options) {
 
   async function refreshProfiles(profileIds = [], options = {}) {
     const fullScan = options.fullScan === true;
+    const manualConfirmation = options.manualConfirmation === true;
     const payload = settings.snapshot();
     await settings.persist(payload);
     const result = await post("/api/profiles/refresh", {
@@ -292,7 +314,7 @@ export function createProfilesFeature(options) {
     $("extractStop").hidden = false;
     $("profileRefreshStop").hidden = false;
     toast(profileIds.length
-      ? `${fullScan ? "主页全量采集" : "主页快速采集"}已启动 #${result.job_id}`
+      ? `${manualConfirmation ? "主页手动确认" : fullScan ? "主页全量采集" : "主页快速采集"}已启动 #${result.job_id}`
       : `一键智能采集已启动 #${result.job_id}`);
   }
 
@@ -423,7 +445,11 @@ export function createProfilesFeature(options) {
       if (fullRefreshButton) {
         const profileId = Number(fullRefreshButton.dataset.profileFullRefresh || 0);
         if (!profileId) return;
-        refreshProfiles([profileId], { fullScan: true }).catch((err) => toast(err.message));
+        const profile = rows.find((item) => Number(item.id) === profileId);
+        refreshProfiles([profileId], {
+          fullScan: true,
+          manualConfirmation: String(profile?.account_status || "active") === "banned",
+        }).catch((err) => toast(err.message));
         return;
       }
       const button = event.target.closest("button[data-profile-refresh]");

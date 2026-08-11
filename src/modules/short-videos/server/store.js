@@ -4,6 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame, extractCoverFrameAsync } from "../../../../lib/cover-frame.js";
+import { authorFacet, followingAuthorFacet } from "./author-facets.js";
 import { LOCAL_SHORT_VIDEO_USER_ID, SHORT_VIDEO_RECOMMENDATION_SCORE_SQL } from "./constants.js";
 import { createShortVideoCommentsRepository } from "./comments-repository.js";
 import { createShortVideoCoverDatabase, defaultShortVideoCoverDbPath, SHORT_VIDEO_COVER_GENERATION_VERSION, SQLITE_SHORT_VIDEO_COVER_SOURCE } from "./cover-database.js";
@@ -53,7 +54,8 @@ const DEFAULT_COVER_GENERATE_LIMIT = 0;
 const DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT = 50000;
 const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
 const DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION = "4";
-const SHORT_VIDEO_SCHEMA_VERSION = "20260720-author-deleted-9";
+const DOWNLOAD_MANAGER_SOURCE_STATE_KEY_META = "download_manager_source_state_key_v2_account_status";
+const SHORT_VIDEO_SCHEMA_VERSION = "20260810-author-account-status-10";
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LIST_VIDEO_COLUMNS = [
   "id",
@@ -571,24 +573,28 @@ export function createShortVideoStore(options = {}) {
       ? cachedFollowingAuthorFacet(database)
       : cachedAuthorFacet(database);
     const scopeTotal = scopedAuthors.length;
+    const bannedTotal = scopedAuthors.filter((author) => author.accountStatus === "banned").length;
     const unlikedTotal = scope === "following"
       ? scopedAuthors.filter((author) => Number(author.likedCount || 0) === 0).length
       : 0;
     const matchedAuthors = normalizedQuery
       ? scopedAuthors.filter((author) => author._searchText.includes(normalizedQuery))
       : [...scopedAuthors];
-    const filteredAuthors = scope === "following" && authorFilter === "unliked"
-      ? matchedAuthors.filter((author) => Number(author.likedCount || 0) === 0)
-      : matchedAuthors;
+    const filteredAuthors = authorFilter === "banned"
+      ? matchedAuthors.filter((author) => author.accountStatus === "banned")
+      : scope === "following" && authorFilter === "unliked"
+        ? matchedAuthors.filter((author) => Number(author.likedCount || 0) === 0)
+        : matchedAuthors;
     if (scope === "following") filteredAuthors.sort(authorComparator(authorSort));
     const authors = filteredAuthors.slice(offset, offset + limit);
     return {
       query,
       scope,
       sort: scope === "following" ? authorSort : "count",
-      filter: scope === "following" ? authorFilter : "all",
+      filter: authorFilter,
       scopeTotal,
       unlikedTotal,
+      bannedTotal,
       total: filteredAuthors.length,
       limit,
       offset,
@@ -623,6 +629,9 @@ export function createShortVideoStore(options = {}) {
         users.age,
         users.verification,
         users.profile_collected_at AS profileCollectedAt,
+        users.account_status AS accountStatus,
+        users.account_status_reason AS accountStatusReason,
+        users.account_status_detected_at AS accountStatusDetectedAt,
         EXISTS (
           SELECT 1
           FROM short_video_follows follows
@@ -694,6 +703,9 @@ export function createShortVideoStore(options = {}) {
       age: optionalInteger(row.age),
       verification: row.verification || "",
       profileCollectedAt: row.profileCollectedAt || "",
+      accountStatus: row.accountStatus === "banned" ? "banned" : "active",
+      accountStatusReason: row.accountStatusReason || "",
+      accountStatusDetectedAt: row.accountStatusDetectedAt || "",
       following: Boolean(row.following),
       count: Number(row.count || 0)
     };
@@ -3284,12 +3296,12 @@ function summary() {
 
   function downloadManagerSourceStateKey(value) {
     const database = databaseOrOpen();
-    if (value === undefined) return metaValue(database, "download_manager_source_state_key");
+    if (value === undefined) return metaValue(database, DOWNLOAD_MANAGER_SOURCE_STATE_KEY_META);
     const normalized = String(value || "");
     database.prepare(`
       INSERT OR REPLACE INTO short_video_meta (key, value)
-      VALUES ('download_manager_source_state_key', ?)
-    `).run(normalized);
+      VALUES (?, ?)
+    `).run(DOWNLOAD_MANAGER_SOURCE_STATE_KEY_META, normalized);
     return normalized;
   }
 
@@ -3443,6 +3455,9 @@ function ensureSchema(db, coverCacheDir = "") {
       age INTEGER,
       verification TEXT NOT NULL DEFAULT '',
       profile_collected_at TEXT NOT NULL DEFAULT '',
+      account_status TEXT NOT NULL DEFAULT 'active',
+      account_status_reason TEXT NOT NULL DEFAULT '',
+      account_status_detected_at TEXT NOT NULL DEFAULT '',
       raw_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT ''
@@ -4587,7 +4602,8 @@ function normalizeAuthorSort(value) {
 }
 
 function normalizeAuthorFilter(value) {
-  return String(value || "all").trim().toLowerCase() === "unliked" ? "unliked" : "all";
+  const filter = String(value || "all").trim().toLowerCase();
+  return ["unliked", "banned"].includes(filter) ? filter : "all";
 }
 
 function authorComparator(sort) {
@@ -4607,112 +4623,6 @@ function authorComparator(sort) {
   return (a, b) => Number(b.followedTime || 0) - Number(a.followedTime || 0)
     || Number(b.count || 0) - Number(a.count || 0)
     || byName(a, b);
-}
-
-function followingAuthorFacet(db) {
-  return db.prepare(`
-    WITH followed AS (
-      SELECT
-        users.id AS targetUserId,
-        users.sec_uid AS secUid,
-        users.nickname AS name,
-        users.avatar_url AS avatarUrl,
-        users.profile_url AS profileUrl,
-        users.unique_id AS uniqueId,
-        follows.followed_at AS followedAt,
-        COALESCE((julianday(NULLIF(follows.followed_at, '')) - 2440587.5) * 86400000, 0) AS followedTime
-      FROM short_video_follows follows
-      JOIN short_video_users users ON users.id = follows.target_user_id
-      WHERE follows.local_user_id = '${LOCAL_SHORT_VIDEO_USER_ID}'
-        AND follows.active = 1
-    ),
-    local_video_stats AS (
-      SELECT
-        videos.owner_user_id AS targetUserId,
-        COUNT(*) AS count,
-        COUNT(DISTINCT CASE
-          WHEN videos.is_liked = 1 THEN COALESCE(NULLIF(videos.aweme_id, ''), videos.id)
-          ELSE NULL
-        END) AS likedCount
-      FROM short_videos videos INDEXED BY idx_short_videos_following_stats
-      JOIN followed ON followed.targetUserId = videos.owner_user_id
-      WHERE videos.visibility = 'local_only'
-      GROUP BY videos.owner_user_id
-    )
-    SELECT
-      followed.secUid,
-      followed.name,
-      followed.avatarUrl,
-      followed.profileUrl,
-      followed.uniqueId,
-      followed.targetUserId,
-      followed.followedAt,
-      followed.followedTime,
-      COALESCE(local_video_stats.count, 0) AS count,
-      COALESCE(local_video_stats.likedCount, 0) AS likedCount,
-      '' AS coverId,
-      0 AS coverMtimeMs
-    FROM followed
-    LEFT JOIN local_video_stats ON local_video_stats.targetUserId = followed.targetUserId
-  `).all().map((row) => ({
-    secUid: row.secUid || "",
-    name: row.name || "未知作者",
-    avatarUrl: row.avatarUrl || "",
-    profileUrl: row.profileUrl || "",
-    uniqueId: row.uniqueId || "",
-    id: row.targetUserId || "",
-    following: true,
-    followedAt: row.followedAt || "",
-    followedTime: Number(row.followedTime || 0),
-    likedCount: Number(row.likedCount || 0),
-    fallbackCoverUrl: row.coverId ? `/media/short-video-cover/${encodeURIComponent(row.coverId)}?v=${encodeURIComponent(String(row.coverMtimeMs || ""))}` : "",
-    count: Number(row.count || 0)
-  }));
-}
-
-function authorFacet(db) {
-  return db.prepare(`
-    WITH grouped AS (
-      SELECT
-        COALESCE(NULLIF(v.author_sec_uid, ''), NULLIF(v.author_name, ''), 'unknown') AS authorKey,
-        MAX(NULLIF(v.author_sec_uid, '')) AS secUid,
-        COALESCE(MAX(NULLIF(v.author_name, '')), '未知作者') AS name,
-        MAX(NULLIF(v.author_avatar_url, '')) AS avatarUrl,
-        MAX(NULLIF(v.owner_user_id, '')) AS targetUserId,
-        MAX(COALESCE(v.author_following, 0)) AS following,
-        MAX(CASE WHEN v.cover_source = '${SQLITE_SHORT_VIDEO_COVER_SOURCE}' OR COALESCE(NULLIF(v.cover_path, ''), '') <> '' THEN v.id ELSE '' END) AS coverId,
-        MAX(CASE WHEN v.cover_source = '${SQLITE_SHORT_VIDEO_COVER_SOURCE}' OR COALESCE(NULLIF(v.cover_path, ''), '') <> '' THEN v.mtime_ms ELSE 0 END) AS coverMtimeMs,
-        COUNT(*) AS count
-      FROM short_videos v INDEXED BY idx_short_videos_author_facet
-      WHERE v.visibility = 'local_only'
-        AND (NULLIF(v.author_sec_uid, '') IS NOT NULL OR NULLIF(v.author_name, '') IS NOT NULL)
-      GROUP BY authorKey
-    )
-    SELECT
-      COALESCE(NULLIF(author_user.sec_uid, ''), grouped.secUid) AS secUid,
-      COALESCE(NULLIF(author_user.nickname, ''), grouped.name, '未知作者') AS name,
-      COALESCE(NULLIF(author_user.avatar_url, ''), grouped.avatarUrl) AS avatarUrl,
-      NULLIF(author_user.profile_url, '') AS profileUrl,
-      NULLIF(author_user.unique_id, '') AS uniqueId,
-      grouped.targetUserId,
-      grouped.following,
-      grouped.coverId,
-      grouped.coverMtimeMs,
-      grouped.count
-    FROM grouped
-    LEFT JOIN short_video_users author_user ON author_user.id = grouped.targetUserId
-    ORDER BY count DESC, name COLLATE NOCASE
-  `).all().map((row) => ({
-    secUid: row.secUid || "",
-    name: row.name || "未知作者",
-    avatarUrl: row.avatarUrl || "",
-    profileUrl: row.profileUrl || "",
-    uniqueId: row.uniqueId || "",
-    id: row.targetUserId || "",
-    following: Boolean(row.following),
-    fallbackCoverUrl: row.coverId ? `/media/short-video-cover/${encodeURIComponent(row.coverId)}?v=${encodeURIComponent(String(row.coverMtimeMs || ""))}` : "",
-    count: Number(row.count || 0)
-  }));
 }
 
 function videoStats(db, where = "", args = []) {

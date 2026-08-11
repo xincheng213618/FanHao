@@ -208,14 +208,7 @@
     grid-template-columns: 82px minmax(0, 1fr);
     min-height: 220px;
     gap: 14px;
-    padding: 48px 18px 22px;
-  }
-
-  .short-video-home.is-author-page .short-video-author-page-back {
-    grid-column: 1 / -1;
-    justify-self: start;
-    top: 10px;
-    left: 18px;
+    padding: 22px 18px;
   }
 
   .short-video-home.is-author-page .short-video-author-page-avatar {

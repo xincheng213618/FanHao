@@ -44,7 +44,7 @@ def record_profile_collection(
         profile = conn.execute(
             """
             SELECT
-              id, tab, aweme_count, has_deleted_works,
+              id, tab, aweme_count, has_deleted_works, account_status,
               full_scan_required, full_scan_reason, full_scan_required_at,
               last_full_scan_at, last_full_scan_aweme_count
             FROM profiles
@@ -91,6 +91,7 @@ def record_profile_collection(
         reason = str(profile["full_scan_reason"] or "").strip()
         required_at = str(profile["full_scan_required_at"] or "").strip()
         history_status = "complete"
+        account_banned = str(profile["account_status"] or "active").strip().lower() == "banned"
 
         if full_scan:
             if full_scan_confirmed:
@@ -112,7 +113,7 @@ def record_profile_collection(
                 )
             else:
                 history_status = "incomplete"
-        elif str(profile["tab"] or "post") == "post" and dropped:
+        elif str(profile["tab"] or "post") == "post" and dropped and not account_banned:
             pending = 1
             required_at = required_at or finished_at
             percentage = round((count_drop_ratio or 0) * 100)

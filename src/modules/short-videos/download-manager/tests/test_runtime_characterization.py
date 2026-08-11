@@ -793,6 +793,142 @@ class RuntimeCharacterizationTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_banned_profile_status_preserves_works_and_supports_dedicated_search(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="fanhao-download-manager-banned-profile-") as temp:
+            runtime = IsolatedManager(Path(temp))
+            try:
+                runtime.start()
+                now = "2026-08-10T00:30:00+08:00"
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    profile_columns = {
+                        row[1] for row in connection.execute("PRAGMA table_info(profiles)").fetchall()
+                    }
+                    self.assertTrue(
+                        {"account_status", "account_status_reason", "account_status_detected_at"}
+                        .issubset(profile_columns)
+                    )
+                    cursor = connection.execute(
+                        """
+                        INSERT INTO profiles(
+                          url, sec_uid, tab, title, nickname, aweme_count,
+                          has_deleted_works, full_scan_required, full_scan_reason,
+                          full_scan_required_at, created_at, updated_at
+                        )
+                        VALUES(?, 'restricted-author', 'post', '受限作者', '受限作者', 3, 1, 1, ?, ?, ?, ?)
+                        """,
+                        (
+                            "https://www.douyin.com/user/restricted-author",
+                            "主页作品数明显减少",
+                            now,
+                            now,
+                            now,
+                        ),
+                    )
+                    profile_id = int(cursor.lastrowid)
+                    for aweme_id in ["kept-a", "kept-b", "kept-c"]:
+                        connection.execute(
+                            """
+                            INSERT INTO links(
+                              profile_id, aweme_id, kind, url, status,
+                              is_missing_from_profile, missing_from_profile_at,
+                              discovered_at, last_seen_at
+                            ) VALUES(?, ?, 'video', ?, 'downloaded', 1, ?, ?, ?)
+                            """,
+                            (
+                                profile_id,
+                                aweme_id,
+                                f"https://www.douyin.com/video/{aweme_id}",
+                                now,
+                                now,
+                                now,
+                            ),
+                        )
+                    connection.commit()
+
+                probe_script = f"""
+import json
+from manager_core.profiles_links import upsert_profile_metadata, update_profile_deleted_works_flag
+upsert_profile_metadata({profile_id}, {{
+    "account_status": "banned",
+    "account_status_reason": "该用户被禁言",
+    "aweme_count": 0,
+}})
+print(json.dumps(update_profile_deleted_works_flag({profile_id}, set()), ensure_ascii=False))
+"""
+                probe = subprocess.run(
+                    [sys.executable, "-c", probe_script],
+                    cwd=MODULE_DIR,
+                    env=runtime.environment,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=True,
+                )
+                reconcile_result = json.loads(probe.stdout.strip())
+                self.assertTrue(reconcile_result["skipped"])
+                self.assertEqual(reconcile_result["account_status"], "banned")
+                self.assertEqual(reconcile_result["marked"], 0)
+
+                with closing(sqlite3.connect(runtime.db_path)) as connection:
+                    profile = connection.execute(
+                        """
+                        SELECT account_status, account_status_reason, account_status_detected_at,
+                               has_deleted_works, full_scan_required
+                        FROM profiles WHERE id=?
+                        """,
+                        (profile_id,),
+                    ).fetchone()
+                    missing_count = int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM links WHERE profile_id=? AND is_missing_from_profile=1",
+                            (profile_id,),
+                        ).fetchone()[0]
+                    )
+                self.assertEqual(profile[0], "banned")
+                self.assertEqual(profile[1], "该用户被禁言")
+                self.assertTrue(profile[2])
+                self.assertEqual(profile[3], 0)
+                self.assertEqual(profile[4], 0)
+                self.assertEqual(missing_count, 0)
+
+                result = runtime.json_request("/api/profiles?scope=banned&q=restricted-author")
+                self.assertEqual(result["total"], 1)
+                self.assertEqual(result["banned_count"], 1)
+                self.assertEqual(result["profiles"][0]["account_status"], "banned")
+                self.assertEqual(result["profiles"][0]["refresh_due"], 0)
+                self.assertEqual(result["profiles"][0]["refresh_basis"], "account_banned")
+
+                manager_html = runtime.request("/")[2].decode("utf-8")
+                profiles_js = runtime.request("/features/profiles.js")[2].decode("utf-8")
+                self.assertIn('<option value="banned">已封禁主页</option>', manager_html)
+                self.assertIn("is-account-banned", profiles_js)
+                self.assertIn("手动确认", profiles_js)
+                self.assertIn('scope === "banned"', profiles_js)
+
+                restore = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "from manager_core.profiles_links import restore_profile_account_if_active; "
+                            f"print(int(restore_profile_account_if_active({profile_id})))"
+                        ),
+                    ],
+                    cwd=MODULE_DIR,
+                    env=runtime.environment,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=True,
+                )
+                self.assertEqual(restore.stdout.strip(), "1")
+                restored_result = runtime.json_request("/api/profiles?scope=banned&q=restricted-author")
+                self.assertEqual(restored_result["total"], 0)
+            finally:
+                runtime.close()
+
     def test_collection_count_history_arms_and_rearms_one_full_scan(self) -> None:
         with tempfile.TemporaryDirectory(prefix="fanhao-download-manager-count-history-") as temp:
             runtime = IsolatedManager(Path(temp))
@@ -1078,21 +1214,24 @@ print(json.dumps({{
                 ).isoformat(timespec="seconds")
                 with closing(sqlite3.connect(runtime.db_path)) as connection:
                     profile_ids: dict[str, int] = {}
-                    for name, last_extracted_at in (
-                        ("smart-due", due_last_extracted),
-                        ("smart-waiting", waiting_last_extracted),
+                    for name, last_extracted_at, account_status in (
+                        ("smart-due", due_last_extracted, "active"),
+                        ("smart-waiting", waiting_last_extracted, "active"),
+                        ("smart-banned", due_last_extracted, "banned"),
                     ):
                         cursor = connection.execute(
                             """
                             INSERT INTO profiles(
-                              url, sec_uid, tab, title, created_at, updated_at, last_extracted_at
+                              url, sec_uid, tab, title, account_status,
+                              created_at, updated_at, last_extracted_at
                             )
-                            VALUES(?, ?, 'post', ?, ?, ?, ?)
+                            VALUES(?, ?, 'post', ?, ?, ?, ?, ?)
                             """,
                             (
                                 f"https://www.douyin.com/user/{name}",
                                 name,
                                 name,
+                                account_status,
                                 now,
                                 now,
                                 last_extracted_at,
@@ -1102,6 +1241,7 @@ print(json.dumps({{
                     work_times = {
                         "smart-due": [now_timestamp - 3 * 24 * 60 * 60, now_timestamp - 4 * 24 * 60 * 60],
                         "smart-waiting": [now_timestamp - 2 * 60 * 60, now_timestamp - 26 * 60 * 60],
+                        "smart-banned": [now_timestamp - 3 * 24 * 60 * 60, now_timestamp - 4 * 24 * 60 * 60],
                     }
                     for name, timestamps in work_times.items():
                         for index, create_time in enumerate(timestamps, start=1):
@@ -1189,7 +1329,7 @@ print(json.dumps({
                 self.assertEqual(result["total"], 1)
                 self.assertEqual(result["processed"], 1)
                 self.assertEqual(result["success"], 1)
-                self.assertIn("智能跳过 1 个", result["message"])
+                self.assertIn("智能跳过 2 个", result["message"])
             finally:
                 runtime.close()
 

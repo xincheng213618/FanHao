@@ -13,7 +13,7 @@
 @import "./css/responsive.css?v=20260712-module-settings-02";
 
 /* Standalone feature modules. */
-@import "./modules/short-videos/styles/list.css?v=20260716-personal-value-health-01";
+@import "./modules/short-videos/styles/list.css?v=20260810-author-account-status-01";
 @import "./modules/short-videos/styles/viewer.css?v=20260715-first-frame-13";
 @import "./modules/short-videos/styles/gallery-navigation.css?v=20260711-player-modal-focus-75";
 @import "./modules/short-videos/styles/panels.css?v=20260720-transcode-page-concurrency-05";

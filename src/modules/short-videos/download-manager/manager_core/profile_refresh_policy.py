@@ -80,6 +80,17 @@ def profile_refresh_decision(
     latest_ts = int_or_none(profile.get("latest_work_create_time"))
     previous_ts = int_or_none(profile.get("previous_work_create_time"))
 
+    if str(profile.get("account_status") or "active").strip().lower() == "banned":
+        return {
+            "refresh_due": 0,
+            "refresh_due_at": None,
+            "refresh_interval_seconds": None,
+            "refresh_cadence_seconds": None,
+            "refresh_silence_seconds": None,
+            "refresh_basis": "account_banned",
+            "refresh_mode": "manual",
+        }
+
     if tab == "post" and int(profile.get("full_scan_required") or 0):
         return {
             "refresh_due": 1,
