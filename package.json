@@ -38,7 +38,7 @@
     "verify:code-prefixes": "node tools/verify_code_prefix_catalog.mjs",
     "verify:fanhao": "node tools/verify_fanhao_structure.mjs",
     "verify:works-performance": "node tools/verify_works_cold_performance.mjs",
-    "verify:short-video-client": "node tools/verify_short_video_client_structure.mjs",
+    "verify:short-video-client": "node tools/verify_short_video_client_structure.mjs && node tools/verify_native_short_video_paging.mjs",
     "verify:browser-behavior": "node tools/verify_browser_behavior.mjs",
     "verify:douyin-manager": "node tools/verify_douyin_download_manager_integration.mjs",
     "verify:settings": "node tools/verify_module_settings.mjs",

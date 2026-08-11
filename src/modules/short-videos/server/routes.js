@@ -102,6 +102,17 @@ export async function routeShortVideoApi(req, res, url, deps) {
     return true;
   }
 
+  const explicitVideoDetailMatch = /^\/api\/short-videos\/videos\/([^/]+)$/.exec(url.pathname);
+  if (explicitVideoDetailMatch && req.method === "GET") {
+    const data = shortVideoStore.videoDetail(decodeShortVideoRouteId(explicitVideoDetailMatch[1]), url);
+    if (!data) {
+      notFound(res);
+      return true;
+    }
+    sendJson(res, 200, data);
+    return true;
+  }
+
   if (url.pathname === "/api/short-videos/collections" && req.method === "GET") {
     try {
       sendJson(res, 200, shortVideoStore.listCollections());

@@ -143,7 +143,8 @@ public class NativeShortVideoActivity extends Activity {
       return Math.max(1, value.getAllocationByteCount() / 1024);
     }
   };
-  private final LruCache<String, CachedFeedPage> feedPageCache = new LruCache<>(24);
+  private final NativeShortVideoFeedReader feedReader = new NativeShortVideoFeedReader(FEED_PAGE_LIMIT, FEED_CACHE_MAX_AGE_MS);
+  private final NativeShortVideoFeedPaging feedPaging = new NativeShortVideoFeedPaging();
 
   private final List<ShortVideoItem> videos = new ArrayList<>();
   private final Map<Integer, ShortVideoHolder> attachedHolders = new HashMap<>();
@@ -199,7 +200,6 @@ public class NativeShortVideoActivity extends Activity {
   private boolean loadingMoreVideos;
   private volatile int currentIndex = -1;
   private int pendingPlayIndex = -1;
-  private int pendingAutoAdvanceIndex = -1;
   private Runnable pendingPrepareRunnable;
   private Runnable progressRunnable;
   private Runnable systemInfoRunnable;
@@ -244,6 +244,7 @@ public class NativeShortVideoActivity extends Activity {
     nextFeedCursor = String.valueOf(getIntent().getStringExtra(EXTRA_NEXT_CURSOR));
     if ("null".equals(nextFeedCursor)) nextFeedCursor = "";
     hasMoreVideos = getIntent().getBooleanExtra(EXTRA_HAS_MORE, false);
+    feedPaging.replaceFeed(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
     openAuthorPanelOnStart = getIntent().getBooleanExtra(EXTRA_OPEN_AUTHOR_PANEL, false);
     readVideos();
     String requestedStartId = String.valueOf(getIntent().getStringExtra(EXTRA_START_ID));
@@ -320,7 +321,7 @@ public class NativeShortVideoActivity extends Activity {
     stopVideoPrefetch();
     releaseVideoCache();
     frameCache.evictAll();
-    feedPageCache.evictAll();
+    feedReader.clear();
     pendingFrameIds.clear();
     pendingVideoPrefetchIds.clear();
     completedVideoPrefetchIds.clear();
@@ -657,7 +658,6 @@ public class NativeShortVideoActivity extends Activity {
     releaseAllPlayers();
     attachedHolders.clear();
     loadingMoreVideos = false;
-    pendingAutoAdvanceIndex = -1;
     currentIndex = -1;
     pendingPlayIndex = -1;
     pendingFeedUrl = screen.feedUrl;
@@ -665,6 +665,7 @@ public class NativeShortVideoActivity extends Activity {
     nextFeedOffset = Math.max(0, screen.nextOffset);
     nextFeedCursor = screen.nextCursor;
     hasMoreVideos = screen.hasMore;
+    feedPaging.replaceFeed(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
     videos.clear();
     videos.addAll(screen.items);
     currentScreen = screen.copy();
@@ -1238,7 +1239,7 @@ public class NativeShortVideoActivity extends Activity {
       return;
     }
     if (hasMoreVideos && pendingFeedUrl != null && pendingFeedUrl.trim().length() > 0) {
-      pendingAutoAdvanceIndex = index;
+      feedPaging.markPendingAutoAdvance(index);
       showStatus("正在加载下一条");
       loadMoreIfNeeded(index);
       return;
@@ -2800,19 +2801,30 @@ public class NativeShortVideoActivity extends Activity {
   private void loadMoreIfNeeded(int index) {
     if (loadingMoreVideos || !hasMoreVideos || pendingFeedUrl == null || pendingFeedUrl.trim().isEmpty()) return;
     if (videos.size() - index > 4) return;
+    NativeShortVideoFeedPaging.Request request = feedPaging.beginLoadMore(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
+    if (request == null) return;
     loadingMoreVideos = true;
     String feedUrl = pagedFeedUrl(pendingFeedUrl, nextFeedOffset, nextFeedCursor, FEED_PAGE_LIMIT);
     Log.i(TAG, "load more offset=" + nextFeedOffset + " cursor=" + (nextFeedCursor.length() > 0));
     executor.execute(() -> {
-      FeedPage page = readFeedPage(feedUrl);
+      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(feedUrl);
       mainHandler.post(() -> {
-        loadingMoreVideos = false;
+        NativeShortVideoFeedPaging.Completion completion = feedPaging.complete(request, result);
+        if (completion == NativeShortVideoFeedPaging.Completion.STALE) return;
+        loadingMoreVideos = feedPaging.isLoading();
+        if (completion == NativeShortVideoFeedPaging.Completion.FAILED) {
+          showTransientStatus(result == null ? "短视频服务暂时不可用，请重试" : result.publicMessage());
+          return;
+        }
+        FeedPage page = result.value;
+        nextFeedOffset = page.nextOffset();
+        nextFeedCursor = page.nextCursor;
+        hasMoreVideos = page.hasMore;
         if (page.items.isEmpty()) {
-          hasMoreVideos = false;
-          if (pendingAutoAdvanceIndex == index) {
-            pendingAutoAdvanceIndex = -1;
+          if (feedPaging.isPendingAutoAdvance(index)) {
+            feedPaging.clearPendingAutoAdvance();
             hideStatus();
-            advanceAfterEnded(index);
+            if (!hasMoreVideos) advanceAfterEnded(index);
           }
           return;
         }
@@ -2825,16 +2837,13 @@ public class NativeShortVideoActivity extends Activity {
           videos.add(item);
           inserted++;
         }
-        nextFeedOffset = page.nextOffset();
-        nextFeedCursor = page.nextCursor;
-        hasMoreVideos = page.hasMore;
         if (inserted > 0) {
           adapter.notifyItemRangeInserted(videos.size() - inserted, inserted);
           prepareAround(currentIndex);
           preparePlayersAround(currentIndex);
           scheduleVideoPrefetch(currentIndex + 1);
-          if (pendingAutoAdvanceIndex == index && currentIndex == index && index + 1 < videos.size()) {
-            pendingAutoAdvanceIndex = -1;
+          if (feedPaging.isPendingAutoAdvance(index) && currentIndex == index && index + 1 < videos.size()) {
+            feedPaging.clearPendingAutoAdvance();
             hideStatus();
             pager.setCurrentItem(index + 1, true);
           }
@@ -2934,7 +2943,7 @@ public class NativeShortVideoActivity extends Activity {
 
     releaseAllPlayers();
     attachedHolders.clear();
-    pendingAutoAdvanceIndex = -1;
+    feedPaging.clearPendingAutoAdvance();
     loadingMoreVideos = false;
     likedVideoKeys.removeAll(ids);
     collectedVideoKeys.removeAll(ids);
@@ -3258,7 +3267,7 @@ public class NativeShortVideoActivity extends Activity {
   private void toggleAutoNext() {
     autoNext = !autoNext;
     writeControlPreference(PREF_AUTO_NEXT, autoNext);
-    pendingAutoAdvanceIndex = -1;
+    feedPaging.clearPendingAutoAdvance();
     applyPlaybackControlState();
     refreshVisibleRails();
     showTransientStatus(autoNext ? "已开启连播" : "已关闭连播");
@@ -3290,14 +3299,23 @@ public class NativeShortVideoActivity extends Activity {
 
   private void loadFeedAsync(String feedUrl, int startIndex) {
     String normalizedFeedUrl = normalizeFeedUrl(feedUrl);
+    long replacementGeneration = feedPaging.beginFeedReplacement(normalizedFeedUrl);
     executor.execute(() -> {
-      FeedPage page = readFeedPage(normalizedFeedUrl);
+      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(normalizedFeedUrl);
       mainHandler.post(() -> {
+        if (!feedPaging.finishFeedReplacement(replacementGeneration, normalizedFeedUrl)) return;
+        if (!result.succeeded()) {
+          loadingMoreVideos = false;
+          showStatus(result.publicMessage());
+          return;
+        }
+        FeedPage page = result.value;
         videos.clear();
         videos.addAll(page.items);
         nextFeedOffset = page.nextOffset();
         nextFeedCursor = page.nextCursor;
         hasMoreVideos = page.hasMore;
+        feedPaging.replaceFeed(normalizedFeedUrl, nextFeedCursor, hasMoreVideos);
         currentScreen = captureFeedScreen();
         adapter.notifyDataSetChanged();
         if (videos.isEmpty()) {
@@ -3337,58 +3355,8 @@ public class NativeShortVideoActivity extends Activity {
     return builder.build().toString();
   }
 
-  private FeedPage readFeedPage(String feedUrl) {
-    CachedFeedPage cached = feedPageCache.get(feedUrl);
-    if (cached != null && SystemClock.elapsedRealtime() - cached.cachedAtMs <= FEED_CACHE_MAX_AGE_MS) {
-      Log.i(TAG, "feed cache hit " + feedUrl);
-      return cached.page.copy();
-    }
-    FeedPage page = new FeedPage();
-    try {
-      Uri uri = Uri.parse(feedUrl);
-      page.offset = Math.max(0, Integer.parseInt(uri.getQueryParameter("offset") == null ? "0" : uri.getQueryParameter("offset")));
-      page.limit = Math.max(1, Integer.parseInt(uri.getQueryParameter("limit") == null ? String.valueOf(FEED_PAGE_LIMIT) : uri.getQueryParameter("limit")));
-    } catch (Exception ignored) {}
-    HttpURLConnection connection = null;
-    try {
-      connection = (HttpURLConnection) new URL(feedUrl).openConnection();
-      connection.setConnectTimeout(8000);
-      connection.setReadTimeout(12000);
-      connection.setRequestProperty("Accept", "application/json");
-      connection.connect();
-      StringBuilder builder = new StringBuilder();
-      try (InputStream input = connection.getInputStream()) {
-        byte[] buffer = new byte[8192];
-        int read;
-        while ((read = input.read(buffer)) >= 0) {
-          builder.append(new String(buffer, 0, read, StandardCharsets.UTF_8));
-        }
-      }
-      JSONObject data = new JSONObject(builder.toString());
-      page.offset = Math.max(0, data.optInt("offset", page.offset));
-      page.limit = Math.max(1, data.optInt("limit", page.limit));
-      page.total = Math.max(0, data.optInt("total", 0));
-      page.stats = FeedStats.fromJson(data.optJSONObject("stats"));
-      page.hasMore = data.optBoolean("hasMore", false);
-      page.nextCursor = data.optString("nextCursor", "");
-      JSONArray rows = data.optJSONArray("videos");
-      if (rows == null) return page;
-      String baseUrl = baseFromUrl(feedUrl);
-      for (int i = 0; i < rows.length(); i++) {
-        ShortVideoItem item = ShortVideoFeedContract.itemFromJson(rows.optJSONObject(i), baseUrl, String.valueOf(i));
-        if (item != null) page.items.add(item);
-      }
-      if (page.total == 0) page.total = page.items.size();
-      if (page.stats.isEmpty()) page.stats = FeedStats.fromItems(page.items);
-      if (!page.items.isEmpty()) {
-        feedPageCache.put(feedUrl, new CachedFeedPage(page.copy(), SystemClock.elapsedRealtime()));
-      }
-    } catch (Exception ignored) {
-      if (cached != null) return cached.page.copy();
-    } finally {
-      if (connection != null) connection.disconnect();
-    }
-    return page;
+  private NativeShortVideoFeedPaging.ReadResult<FeedPage> readFeedPage(String feedUrl) {
+    return feedReader.read(feedUrl);
   }
 
   private void showAuthorPanel(ShortVideoItem seed) {
@@ -3748,10 +3716,15 @@ public class NativeShortVideoActivity extends Activity {
     String authorUrl = authorFeedUrl(seed, 0, AUTHOR_PAGE_LIMIT, screen.sort);
     if (shouldLoadInitialAuthorPage && authorUrl.length() > 0) {
       executor.execute(() -> {
-        FeedPage loaded = readFeedPage(authorUrl);
-        if (loaded.items.isEmpty()) return;
+        NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(authorUrl);
         mainHandler.post(() -> {
           if (authorOverlay != overlay) return;
+          if (!result.succeeded()) {
+            showTransientStatus(result.publicMessage());
+            return;
+          }
+          FeedPage loaded = result.value;
+          if (loaded.items.isEmpty()) return;
           pageRef[0] = loaded;
           screen.page = loaded.copy();
           render[0].run();
@@ -3918,9 +3891,14 @@ public class NativeShortVideoActivity extends Activity {
     }
     showStatus("正在按" + authorSortLabel(screen.sort) + "排序");
     executor.execute(() -> {
-      FeedPage loaded = readFeedPage(url);
+      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(url);
       mainHandler.post(() -> {
         hideStatus();
+        if (!result.succeeded()) {
+          showTransientStatus(result.publicMessage());
+          return;
+        }
+        FeedPage loaded = result.value;
         if (loaded.items.isEmpty()) pageRef[0] = sortedLocalAuthorPage(screen.seed, screen.sort);
         else pageRef[0] = loaded;
         screen.page = pageRef[0].copy();
@@ -3939,9 +3917,15 @@ public class NativeShortVideoActivity extends Activity {
     Log.i(TAG, "load author more author=" + displayAuthor(screen.seed) + " offset=" + offset + " sort=" + screen.sort);
     if (render[0] != null) render[0].run();
     executor.execute(() -> {
-      FeedPage loaded = readFeedPage(url);
+      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(url);
       mainHandler.post(() -> {
         screen.loadingMore = false;
+        if (!result.succeeded()) {
+          showTransientStatus(result.publicMessage());
+          if (render[0] != null) render[0].run();
+          return;
+        }
+        FeedPage loaded = result.value;
         if (!loaded.items.isEmpty()) {
           Set<String> seen = new HashSet<>();
           for (ShortVideoItem item : current.items) seen.add(item.id);
@@ -3956,10 +3940,12 @@ public class NativeShortVideoActivity extends Activity {
           current.limit = Math.max(Math.max(current.limit, current.items.size()), loadedEnd - current.offset);
           current.total = Math.max(loaded.total, current.items.size());
           current.hasMore = loaded.hasMore;
+          current.nextCursor = loaded.nextCursor;
           current.stats = loaded.stats == null || loaded.stats.isEmpty() ? FeedStats.fromItems(current.items) : loaded.stats;
           Log.i(TAG, "author loaded more inserted=" + inserted + " nextOffset=" + current.nextOffset() + " hasMore=" + current.hasMore);
         } else {
-          current.hasMore = false;
+          current.hasMore = loaded.hasMore;
+          current.nextCursor = loaded.nextCursor;
           Log.i(TAG, "author loaded more empty offset=" + offset);
         }
         pageRef[0] = current;
@@ -5006,11 +4992,19 @@ public class NativeShortVideoActivity extends Activity {
       return;
     }
     showStatus("正在按" + authorSortLabel(normalized) + "排序");
+    long replacementGeneration = feedPaging.beginFeedReplacement(sortedUrl);
     loadingMoreVideos = true;
     executor.execute(() -> {
-      FeedPage page = readFeedPage(sortedUrl);
+      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(sortedUrl);
       mainHandler.post(() -> {
-        loadingMoreVideos = false;
+        if (!feedPaging.finishFeedReplacement(replacementGeneration, sortedUrl)) return;
+        loadingMoreVideos = feedPaging.isLoading();
+        if (!result.succeeded()) {
+          feedPaging.replaceFeed(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
+          showTransientStatus(result.publicMessage());
+          return;
+        }
+        FeedPage page = result.value;
         if (page.items.isEmpty()) {
           applyLocalFeedSort(normalized, "已按" + authorSortLabel(normalized) + "本地排序");
           return;
@@ -5042,7 +5036,6 @@ public class NativeShortVideoActivity extends Activity {
     releaseAllPlayers();
     attachedHolders.clear();
     loadingMoreVideos = false;
-    pendingAutoAdvanceIndex = -1;
     currentIndex = -1;
     pendingPlayIndex = -1;
     pendingFeedUrl = feedUrl == null ? "" : feedUrl;
@@ -5050,6 +5043,7 @@ public class NativeShortVideoActivity extends Activity {
     nextFeedOffset = page.nextOffset();
     nextFeedCursor = page.nextCursor;
     hasMoreVideos = page.hasMore;
+    feedPaging.replaceFeed(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
     videos.clear();
     videos.addAll(page.items);
     currentScreen = new FeedScreenState(videos, pendingFeedUrl, nextFeedOffset, nextFeedCursor, hasMoreVideos, startIndex);
@@ -5092,12 +5086,21 @@ public class NativeShortVideoActivity extends Activity {
     }
     ScreenState returnScreen = captureCurrentScreen();
     showStatus(normalizedQuery.length() > 0 ? "正在搜索“" + normalizedQuery + "”" : "正在恢复全部作品");
+    long replacementGeneration = feedPaging.beginFeedReplacement(searchUrl);
     loadingMoreVideos = true;
     executor.execute(() -> {
-      FeedPage page = readFeedPage(searchUrl);
+      NativeShortVideoFeedPaging.ReadResult<FeedPage> result = readFeedPage(searchUrl);
       mainHandler.post(() -> {
-        loadingMoreVideos = false;
+        if (!feedPaging.finishFeedReplacement(replacementGeneration, searchUrl)) return;
+        loadingMoreVideos = feedPaging.isLoading();
+        if (!result.succeeded()) {
+          feedPaging.replaceFeed(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
+          showTransientStatus(result.publicMessage());
+          return;
+        }
+        FeedPage page = result.value;
         if (page.items.isEmpty()) {
+          feedPaging.replaceFeed(pendingFeedUrl, nextFeedCursor, hasMoreVideos);
           showTransientStatus(normalizedQuery.length() > 0 ? "没有找到相关短视频" : "没有可播放的短视频");
           return;
         }

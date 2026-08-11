@@ -18,18 +18,25 @@ export function createShortVideoNativeFeed(context = {}) {
       .filter(({ item }) => isNativePlayableItem(item));
     const index = playableEntries.findIndex(({ item }) => item === video || item.id === video.id);
     if (index < 0) return false;
-    const start = Math.max(0, index - 20);
-    const end = Math.min(playableEntries.length, index + 31);
+    const boundary = nextCollectionCursorBoundary(videos, playableEntries, index, options.cursorBoundaries);
+    const end = boundary?.playableEnd ?? Math.min(playableEntries.length, index + 31);
+    const start = Math.max(0, index - 20, end - 51);
     const feedEntries = playableEntries.slice(start, end);
     const feedUrl = nativeShortVideoFeedUrl(options);
     const payload = stringifyNativeShortVideoFeed(feedEntries.map(({ item }) => item));
+    const cursorAtEnd = boundary
+      ? boundary.nextCursor
+      : end === playableEntries.length ? String(options.nextCursor || "") : "";
+    const hasMoreAtEnd = boundary
+      ? boundary.hasMore || end < playableEntries.length
+      : Boolean((options.hasMore ?? listState.data?.hasMore) || end < playableEntries.length);
     try {
       await plugin.playShortFeed({
         baseUrl: getActiveUrl(),
         feedUrl,
-        hasMore: Boolean((options.hasMore ?? listState.data?.hasMore) || end < playableEntries.length),
+        hasMore: hasMoreAtEnd,
         nextOffset: feedEntries.length ? feedEntries[feedEntries.length - 1].apiIndex + 1 : videos.length,
-        nextCursor: String(options.nextCursor || ""),
+        nextCursor: cursorAtEnd,
         startIndex: index - start,
         startId: video.id,
         openAuthorPanel: Boolean(options.openAuthorPanel),
@@ -39,6 +46,28 @@ export function createShortVideoNativeFeed(context = {}) {
     } catch {
       return false;
     }
+  }
+
+  function nextCollectionCursorBoundary(videos, playableEntries, selectedIndex, boundaries) {
+    if (!Array.isArray(boundaries) || !boundaries.length) return null;
+    const selectedApiIndex = playableEntries[selectedIndex]?.apiIndex;
+    if (!Number.isInteger(selectedApiIndex)) return null;
+    return boundaries
+      .map((boundary) => {
+        const endVideoId = String(boundary?.endVideoId || "").trim();
+        const apiEnd = videos.findIndex((item) => String(item?.id || "") === endVideoId);
+        if (apiEnd < selectedApiIndex) return null;
+        const playableEnd = playableEntries.filter(({ apiIndex }) => apiIndex <= apiEnd).length;
+        if (playableEnd <= selectedIndex) return null;
+        return {
+          apiEnd,
+          playableEnd,
+          hasMore: Boolean(boundary?.hasMore),
+          nextCursor: String(boundary?.nextCursor || "")
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => left.apiEnd - right.apiEnd)[0] || null;
   }
 
   function isNativePlayableItem(item) {

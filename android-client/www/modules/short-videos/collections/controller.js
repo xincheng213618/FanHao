@@ -1,3 +1,8 @@
+import {
+  appendCollectionCursorBoundary,
+  removeCollectionCursorBoundaryVideo
+} from "./cursor-boundaries.js?v=20260812-native-cursor-boundary-01";
+
 const COLLECTION_PAGE_LIMIT = 48;
 
 export function createShortVideoCollections(context = {}) {
@@ -12,19 +17,26 @@ export function createShortVideoCollections(context = {}) {
     active: null
   };
   let collectionRenderId = 0;
+  let collectionsRequest = null;
   let collectionPageRequest = null;
 
   async function loadCollections(force = false) {
     if (state.loaded && !force) return state.collections;
-    if (state.loading) return state.collections;
+    if (collectionsRequest) return collectionsRequest;
     state.loading = true;
-    try {
-      const data = await api.fetch(null, "/api/short-videos/collections");
+    const request = api.fetch(null, "/api/short-videos/collections").then((data) => {
       state.collections = Array.isArray(data?.collections) ? data.collections : [];
       state.loaded = true;
       return state.collections;
+    });
+    collectionsRequest = request;
+    try {
+      return await request;
     } finally {
-      state.loading = false;
+      if (collectionsRequest === request) {
+        collectionsRequest = null;
+        state.loading = false;
+      }
     }
   }
 
@@ -49,7 +61,9 @@ export function createShortVideoCollections(context = {}) {
       if (renderGuard && !renderGuard()) return;
       renderCollectionList(list, collections);
     } catch (error) {
-      create.status.textContent = error?.message || "清单读取失败";
+      if ((!renderGuard || renderGuard()) && create.status.isConnected) {
+        create.status.textContent = error?.message || "清单读取失败";
+      }
     }
   }
 
@@ -69,19 +83,37 @@ export function createShortVideoCollections(context = {}) {
     try {
       const data = await api.fetch(null, `/api/short-videos/collections/${encodeURIComponent(collectionId)}/videos?limit=${COLLECTION_PAGE_LIMIT}`);
       if (renderId !== collectionRenderId || (renderGuard && !renderGuard())) return;
-      state.active = { ...data, collectionId, renderId, renderGuard };
+      const videos = mergeUniqueVideos([], data.videos);
+      state.active = {
+        ...data,
+        videos,
+        cursorBoundaries: appendCollectionCursorBoundary([], data, videos),
+        collectionId,
+        renderId,
+        renderGuard
+      };
       shell.querySelector("h2").textContent = data.collection?.name || "我的清单";
       shell.querySelector("p").textContent = `${Math.max(0, Number(data.total || 0))} 条 · 按加入时间排列`;
       renderCollectionVideos(list, status, state.active);
     } catch (error) {
-      status.textContent = error?.message || "清单读取失败";
+      if (renderId === collectionRenderId && (!renderGuard || renderGuard()) && status.isConnected) {
+        status.textContent = error?.message || "清单读取失败";
+      }
     }
   }
 
   async function showCollectionPicker(video) {
     document.querySelector(".short-video-mobile-collection-picker")?.remove();
+    const trigger = document.activeElement;
     const overlay = document.createElement("div");
     overlay.className = "short-video-mobile-collection-picker";
+    let closed = false;
+    const closePicker = () => {
+      if (closed) return;
+      closed = true;
+      overlay.remove();
+      if (trigger?.isConnected && typeof trigger.focus === "function") trigger.focus();
+    };
     const sheet = document.createElement("section");
     sheet.className = "short-video-mobile-collection-sheet";
     sheet.setAttribute("role", "dialog");
@@ -93,25 +125,46 @@ export function createShortVideoCollections(context = {}) {
     const close = document.createElement("button");
     close.type = "button";
     close.textContent = "关闭";
-    close.addEventListener("click", () => overlay.remove());
+    close.addEventListener("click", closePicker);
     header.append(title, close);
     const create = createForm(async (name) => {
       const result = await api.fetch(null, "/api/short-videos/collections", { method: "POST", body: { name } });
       state.collections.push(result.collection);
       state.loaded = true;
       await addVideo(result.collection, video);
-      overlay.remove();
+      closePicker();
     }, "创建并加入");
     const list = document.createElement("div");
     list.className = "short-video-mobile-collection-picker-list";
     sheet.append(header, create.form, create.status, list);
     overlay.append(sheet);
     overlay.addEventListener("click", (event) => {
-      if (event.target === overlay) overlay.remove();
+      if (event.target === overlay) closePicker();
+    });
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePicker();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [...overlay.querySelectorAll("button:not([disabled]), input:not([disabled])")]
+        .filter((element) => element.offsetParent !== null);
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     });
     document.body.append(overlay);
     try {
       const collections = await loadCollections();
+      if (!overlay.isConnected) return;
       for (const collection of collections) {
         const button = document.createElement("button");
         button.type = "button";
@@ -125,17 +178,19 @@ export function createShortVideoCollections(context = {}) {
           button.disabled = true;
           try {
             await addVideo(collection, video);
-            overlay.remove();
+            closePicker();
           } catch (error) {
-            create.status.textContent = error?.message || "加入清单失败";
-            button.disabled = false;
+            if (overlay.isConnected) {
+              create.status.textContent = error?.message || "加入清单失败";
+              button.disabled = false;
+            }
           }
         });
         list.append(button);
       }
       create.input.focus();
     } catch (error) {
-      create.status.textContent = error?.message || "清单读取失败";
+      if (overlay.isConnected) create.status.textContent = error?.message || "清单读取失败";
     }
   }
 
@@ -192,6 +247,7 @@ export function createShortVideoCollections(context = {}) {
           videos,
           hasMore: data.hasMore,
           nextCursor: data.nextCursor,
+          cursorBoundaries: data.cursorBoundaries,
           feedUrl: new URL(feedPath, getActiveUrl()).toString()
         })
       }));
@@ -205,6 +261,7 @@ export function createShortVideoCollections(context = {}) {
         try {
           await api.fetch(null, `${feedPath}/${encodeURIComponent(video.id)}`, { method: "DELETE" });
           data.videos = data.videos.filter((item) => item.id !== video.id);
+          data.cursorBoundaries = removeCollectionCursorBoundaryVideo(data.cursorBoundaries, video.id);
           data.total = Math.max(0, Number(data.total || 0) - 1);
           const summary = state.collections.find((item) => item.id === data.collection.id);
           if (summary) summary.itemCount = data.total;
@@ -226,7 +283,7 @@ export function createShortVideoCollections(context = {}) {
       more.textContent = collectionPageRequest ? "加载中…" : "加载更多";
       more.disabled = Boolean(collectionPageRequest);
       more.addEventListener("click", () => loadMoreCollectionVideos(target, status).catch((error) => {
-        status.textContent = error?.message || "加载更多失败";
+        if (isActiveCollectionRender(data, target)) status.textContent = error?.message || "加载更多失败";
       }));
       target.append(more);
     }
@@ -250,7 +307,14 @@ export function createShortVideoCollections(context = {}) {
         || expectedRenderId !== collectionRenderId
         || (active.renderGuard && !active.renderGuard())
       ) return null;
-      active.videos = mergeUniqueVideos(active.videos, page.videos);
+      const previousVideos = active.videos;
+      active.videos = mergeUniqueVideos(previousVideos, page.videos);
+      active.cursorBoundaries = appendCollectionCursorBoundary(
+        active.cursorBoundaries,
+        page,
+        active.videos,
+        previousVideos
+      );
       active.total = Number(page.total || active.total || active.videos.length);
       active.hasMore = Boolean(page.hasMore);
       active.nextCursor = page.nextCursor || null;
@@ -260,7 +324,7 @@ export function createShortVideoCollections(context = {}) {
       return active;
     }).finally(() => {
       if (collectionPageRequest === request) collectionPageRequest = null;
-      if (state.active === active && expectedRenderId === collectionRenderId) {
+      if (isActiveCollectionRender(active, target) && expectedRenderId === collectionRenderId) {
         renderCollectionVideos(target, status, active);
       }
     });
@@ -271,6 +335,15 @@ export function createShortVideoCollections(context = {}) {
   function shellMeta(data) {
     const shell = els.viewContent.querySelector(".short-video-mobile-collection-page");
     if (shell) shell.querySelector("p").textContent = `${Math.max(0, Number(data.total || 0))} 条 · 按加入时间排列`;
+  }
+
+  function isActiveCollectionRender(data, target = null) {
+    return Boolean(
+      state.active === data
+      && data?.renderId === collectionRenderId
+      && (!data.renderGuard || data.renderGuard())
+      && (!target || target.isConnected)
+    );
   }
 
   function createForm(onCreate, label = "创建") {
@@ -295,6 +368,7 @@ export function createShortVideoCollections(context = {}) {
       try {
         await onCreate(input.value);
       } catch (error) {
+        if (!form.isConnected) return;
         status.textContent = error?.message || "清单创建失败";
         input.disabled = false;
         submit.disabled = false;

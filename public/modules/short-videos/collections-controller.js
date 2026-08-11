@@ -173,11 +173,9 @@ export function createShortVideoCollectionsController(dependencies) {
     const closePicker = () => {
       if (!overlay.isConnected) return;
       overlay.remove();
-      window.requestAnimationFrame(() => {
-        const fallback = document.querySelector(".short-video-rail-button.is-collection")
-          || document.querySelector(".short-video-collection-create");
-        (returnFocus?.isConnected ? returnFocus : fallback)?.focus?.({ preventScroll: true });
-      });
+      const fallback = document.querySelector(".short-video-rail-button.is-collection")
+        || document.querySelector(".short-video-collection-create");
+      (returnFocus?.isConnected ? returnFocus : fallback)?.focus?.({ preventScroll: true });
     };
     overlay._closeCollectionPicker = closePicker;
     overlay.addEventListener("click", (event) => {

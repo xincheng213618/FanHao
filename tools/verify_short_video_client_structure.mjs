@@ -5,12 +5,17 @@ import { fileURLToPath } from "node:url";
 import { createShortVideoViews } from "../android-client/www/modules/short-videos/index.js";
 import { createShortVideoListController } from "../android-client/www/modules/short-videos/list/controller.js";
 import {
+  appendCollectionCursorBoundary,
+  removeCollectionCursorBoundaryVideo
+} from "../android-client/www/modules/short-videos/collections/cursor-boundaries.js";
+import {
   NATIVE_SHORT_VIDEO_FEED_SCHEMA_VERSION,
   createNativeShortVideoFeedPayload,
   stringifyNativeShortVideoFeed
 } from "../android-client/www/modules/short-videos/player/native-feed-contract.js";
+import { createShortVideoNativeFeed } from "../android-client/www/modules/short-videos/player/native-feed.js";
 import { canonicalShortVideoViewParams, normalizeAuthorAccountStatus } from "../android-client/www/modules/short-videos/shared.js";
-import { normalizeRoute as normalizeWebShortVideoRoute, routeFromUrl as webShortVideoRouteFromUrl, routeUrl as webShortVideoRouteUrl } from "../public/modules/short-videos/router.js";
+import { normalizeRoute as normalizeWebShortVideoRoute, routeFromUrl as webShortVideoRouteFromUrl, routeUrl as webShortVideoRouteUrl, shortVideoDetailApiPath } from "../public/modules/short-videos/router.js";
 import {
   AUTHOR_INDEX_WINDOW_MAX_AUTHORS,
   AUTHOR_INDEX_WINDOW_TTL_MS,
@@ -36,6 +41,7 @@ const requiredParts = [
   "index.js",
   "shared.js",
   "search.js",
+  "collections/cursor-boundaries.js",
   "list/account-status-view.js",
   "list/controller.js",
   "list/view.js",
@@ -68,6 +74,7 @@ verifyWebAuthorRouteLifecycle();
 await verifyWebShortVideoLoadContract();
 await verifyWebAuthorCollectorPollLifecycle();
 verifyNativeFeedContract();
+await verifyNativeCollectionFeedBridge();
 verifyAndroidAuthorAccountRoutes();
 await verifyAndroidAuthorAccountRequests();
 
@@ -352,6 +359,102 @@ function verifyNativeFeedContract() {
   assert.deepEqual(JSON.parse(stringifyNativeShortVideoFeed([source])), payload, "native feed JSON must serialize the versioned envelope without drift");
 }
 
+async function verifyNativeCollectionFeedBridge() {
+  const universe = Array.from({ length: 192 }, (_, index) => ({
+    id: `collection-video-${String(index).padStart(3, "0")}`,
+    streamUrl: `/media/collection-video-${index}.mp4`
+  }));
+  const loaded = universe.slice(0, 144);
+  let boundaries = [];
+  for (let offset = 0; offset < loaded.length; offset += 48) {
+    const previousVideos = loaded.slice(0, offset);
+    const mergedVideos = loaded.slice(0, offset + 48);
+    boundaries = appendCollectionCursorBoundary(boundaries, {
+      videos: loaded.slice(offset, offset + 48),
+      hasMore: true,
+      nextCursor: `cursor-${offset + 48}`
+    }, mergedVideos, previousVideos);
+  }
+  assert.deepEqual(
+    boundaries.map(({ endVideoId, nextCursor }) => [endVideoId, nextCursor]),
+    [[loaded[47].id, "cursor-48"], [loaded[95].id, "cursor-96"], [loaded[143].id, "cursor-144"]],
+    "collection pages must retain the cursor that starts immediately after each loaded boundary"
+  );
+  assert.deepEqual(
+    appendCollectionCursorBoundary(boundaries, {
+      videos: [loaded[47], loaded[48]],
+      hasMore: true,
+      nextCursor: "untrusted-duplicate-page"
+    }, loaded, loaded.slice(0, 48)),
+    boundaries,
+    "a de-duplicated response must not manufacture a cursor boundary with ambiguous position"
+  );
+  assert.equal(
+    removeCollectionCursorBoundaryVideo(boundaries, loaded[95].id).some(({ endVideoId }) => endVideoId === loaded[95].id),
+    false,
+    "removing a page-boundary video must also invalidate its cursor"
+  );
+
+  const originalWindow = globalThis.window;
+  const calls = [];
+  globalThis.window = {
+    Capacitor: {
+      Plugins: {
+        FanHaoPlayer: {
+          async playShortFeed(payload) {
+            calls.push(payload);
+          }
+        }
+      }
+    }
+  };
+  const listState = { data: { videos: loaded, hasMore: true } };
+  const nativeFeed = createShortVideoNativeFeed({
+    getActiveUrl: () => "http://127.0.0.1:29998/",
+    listState,
+    shortVideoApiSource: () => "all",
+    shortVideoToast: () => {}
+  });
+  try {
+    for (const selectedIndex of [5, 70, 140]) {
+      calls.length = 0;
+      assert.equal(await nativeFeed.openNativeShortVideoFeed(loaded[selectedIndex], {
+        videos: loaded,
+        hasMore: true,
+        nextCursor: "cursor-144",
+        cursorBoundaries: boundaries,
+        feedUrl: "/api/short-videos/collections/svc_fixture/videos"
+      }), true, "the actual Android Web bridge must open a collection through the Native plugin");
+      assert.equal(calls.length, 1, "the bridge must invoke the Native plugin exactly once");
+      const call = calls[0];
+      const payloadIds = JSON.parse(call.videos).videos.map(({ id }) => id);
+      assert(payloadIds.length <= 51, "the Native bridge window must stay bounded to 51 playable entries");
+      assert.equal(payloadIds[call.startIndex], loaded[selectedIndex].id, "the selected item must retain its Native start index");
+      if (selectedIndex > 0) assert.equal(payloadIds[call.startIndex - 1], loaded[selectedIndex - 1].id, "Native previous must keep the collection predecessor");
+      if (selectedIndex + 1 < loaded.length) assert.equal(payloadIds[call.startIndex + 1], loaded[selectedIndex + 1].id, "Native next must keep the collection successor");
+      const continuationOffset = Number(String(call.nextCursor).replace("cursor-", ""));
+      const traversed = payloadIds.concat(universe.slice(continuationOffset).map(({ id }) => id));
+      const expected = universe.slice(universe.findIndex(({ id }) => id === payloadIds[0])).map(({ id }) => id);
+      assert.deepEqual(traversed, expected, `Native pagination from collection index ${selectedIndex} must have no gaps`);
+      assert.equal(new Set(traversed).size, traversed.length, `Native pagination from collection index ${selectedIndex} must have no duplicates`);
+    }
+
+    const stateBeforeOffline = listState.data;
+    globalThis.window.Capacitor.Plugins.FanHaoPlayer.playShortFeed = async () => {
+      throw new Error("offline fixture with private endpoint");
+    };
+    assert.equal(await nativeFeed.openNativeShortVideoFeed(loaded[70], {
+      videos: loaded,
+      cursorBoundaries: boundaries,
+      feedUrl: "/api/short-videos/collections/svc_fixture/videos"
+    }), false, "a rejected/offline Native plugin call must remain recoverable by the Web client");
+    assert.equal(listState.data, stateBeforeOffline, "an offline Native callback must not replace the current Web feed state");
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+}
+
 function verifyWebShortVideoRouter() {
   const stats = webShortVideoRouteFromUrl("http://127.0.0.1/short-videos/stats/likes");
   assert.equal(stats.shortVideoMode, "likes", "the dedicated web router must parse the like statistics route");
@@ -394,6 +497,20 @@ function verifyWebShortVideoRouter() {
     "/short-videos/collections/svc_fixture/videos/fixture-video-1#saved",
     "collection playback routes must preserve stable history and hash state"
   );
+  const reservedVideo = webShortVideoRouteFromUrl("http://127.0.0.1/short-videos/videos/collections");
+  assert.deepEqual(
+    { mode: reservedVideo.shortVideoMode, videoId: reservedVideo.shortVideoId, collectionId: reservedVideo.shortVideoCollectionId },
+    { mode: "feed", videoId: "collections", collectionId: "" },
+    "the explicit detail namespace must keep a video named collections distinct from the collection index"
+  );
+  assert.equal(
+    webShortVideoRouteUrl(normalizeWebShortVideoRoute({ view: "shortVideos", shortVideoId: "collections" }), { initialParams: new URLSearchParams(), hash: "" }),
+    "/short-videos/videos/collections",
+    "reserved video IDs must serialize through the explicit detail namespace"
+  );
+  assert.equal(shortVideoDetailApiPath("collections"), "/api/short-videos/videos/collections", "reserved video IDs must use the non-conflicting detail API alias");
+  assert.equal(shortVideoDetailApiPath("summary"), "/api/short-videos/videos/summary", "reserved API resource names must use the explicit video detail alias");
+  assert.equal(shortVideoDetailApiPath("fixture-video"), "/api/short-videos/fixture-video", "ordinary video IDs must preserve the legacy detail API");
 }
 
 const styles = readNormalized(path.join(moduleDir, "styles.css"));
@@ -419,12 +536,17 @@ const androidNativeCommentsSource = readNormalized(path.join(root, "android-clie
 const androidNativeFeedSearchSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedSearchController.java"));
 const androidNativeFeedContractJavaSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "ShortVideoFeedContract.java"));
 const androidNativeFeedModelsSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "ShortVideoFeedModels.java"));
+const androidNativeFeedPagingSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedPaging.java"));
+const androidNativeFeedReaderSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedReader.java"));
+const androidNativeFeedTransportSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedTransport.java"));
 const androidNativePlayerLayoutSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "res", "layout", "native_short_player_view.xml"));
 assert(androidEntrySource.includes('view: "shortVideoSearch"'), "Android short-video search must use a dedicated route");
 assert(androidEntrySource.includes('view: "shortVideoCollections"') && androidEntrySource.includes('view: "shortVideoCollection"') && androidEntrySource.includes('textContent = "清单"'), "Android short videos must expose stable collection index/detail routes and a direct chrome entry");
 assert(androidCollectionsSource.includes('method: "POST"') && androidCollectionsSource.includes('method: "PUT"') && androidCollectionsSource.includes('method: "DELETE"') && androidCollectionsSource.includes("feedUrl: new URL(feedPath"), "Android collections must create, add, remove, and open the same paged feed contract without native permissions");
-assert(androidCollectionsSource.includes('params = new URLSearchParams({ limit: String(COLLECTION_PAGE_LIMIT), cursor })') && androidCollectionsSource.includes("mergeUniqueVideos(active.videos, page.videos)"), "Android collection management must append every cursor page and defensively de-duplicate video ids");
+assert(androidCollectionsSource.includes('params = new URLSearchParams({ limit: String(COLLECTION_PAGE_LIMIT), cursor })') && androidCollectionsSource.includes("mergeUniqueVideos(previousVideos, page.videos)") && androidCollectionsSource.includes("appendCollectionCursorBoundary("), "Android collection management must append every cursor page, de-duplicate video ids, and retain trusted continuation boundaries");
 assert(androidCollectionsSource.includes("if (collectionPageRequest) return collectionPageRequest.promise") && androidCollectionsSource.includes("expectedRenderId !== collectionRenderId") && androidCollectionsSource.includes("deactivateCollections"), "Android collection pagination must reject duplicate requests and stale renders");
+assert(androidCollectionsSource.includes('event.key === "Escape"') && androidCollectionsSource.includes('event.key !== "Tab"') && androidCollectionsSource.includes("trigger?.isConnected") && androidCollectionsSource.includes("trigger.focus()"), "Android collection picker must trap Tab, close on Escape, and restore trigger focus");
+assert(androidCollectionsSource.includes("overlay.isConnected") && androidCollectionsSource.includes("isActiveCollectionRender"), "Android collection callbacks must ignore detached picker and stale detail renders");
 assert(androidCollectionCardActionSource.includes('aria-label", "加入清单"') && androidListSource.includes("appendCollectionCardAction") && androidApiSource.includes("fetchJson") && androidTransportSource.includes('"X-FanHao-Client": "android"') && androidTransportSource.includes("JSON.stringify(requestOptions.body)"), "Android list cards must use the authenticated WebView mutation transport for collection selection");
 assert(androidEntrySource.includes("short-video-chrome-row"), "Android short-video chrome must keep search and groups in one compact row");
 assert(!androidEntrySource.includes("short-video-chrome-sort"), "Android short-video chrome must not reserve a separate sorting tag");
@@ -452,8 +574,10 @@ assert(androidListSource.includes("没有已封禁的作者") && androidListSour
 assert(!androidListSource.includes("short-video-mobile-author-cleanup") && !androidListSource.includes("抖音清理"), "Android My Following cards must leave unfollowing to the author detail action");
 assert(androidListControllerSource.includes("该作者还没有本地作品，正在打开抖音主页") && androidListControllerSource.includes("authorOriginalUrl(author)"), "Android followed authors without local works must still open their Douyin profile");
 assert(androidNativeFeedSource.includes("openAuthorPanel: Boolean(options.openAuthorPanel)"), "Android native feed bridge must forward the author homepage request");
-assert(androidNativeFeedSource.includes("nextCursor: String(options.nextCursor || \"\")") && androidPlayerPluginSource.includes("EXTRA_NEXT_CURSOR") && androidNativeFeedModelsSource.includes('String nextCursor = ""'), "Android native collection playback must carry the opaque continuation cursor through WebView, plugin, and feed state");
-assert(androidNativePlayerSource.includes('appendQueryParameter("cursor", normalizedCursor)') && androidNativePlayerSource.includes('data.optString("nextCursor", "")') && androidNativePlayerSource.includes("nextFeedCursor = page.nextCursor"), "Android native collection playback must request subsequent cursor pages instead of replaying the first 48 rows");
+assert(androidNativeFeedSource.includes("nextCollectionCursorBoundary") && androidNativeFeedSource.includes("nextCursor: cursorAtEnd") && androidNativeFeedSource.includes("end - 51") && androidPlayerPluginSource.includes("EXTRA_NEXT_CURSOR") && androidNativeFeedModelsSource.includes('String nextCursor = ""'), "Android native collection playback must align its bounded WebView window with the exact opaque continuation boundary");
+assert(androidNativePlayerSource.includes('appendQueryParameter("cursor", normalizedCursor)') && androidNativeFeedReaderSource.includes('data.optString("nextCursor", "")') && androidNativePlayerSource.includes("nextFeedCursor = page.nextCursor"), "Android native collection playback must request subsequent cursor pages instead of replaying the first 48 rows");
+assert(androidNativePlayerSource.includes("feedPaging.complete(request, result)") && androidNativePlayerSource.includes("Completion.STALE") && androidNativeFeedPagingSource.includes("request.generation == generation") && androidNativeFeedPagingSource.includes("request.feedUrl.equals(feedUrl)") && androidNativeFeedPagingSource.includes("request.cursor.equals(cursor)"), "Android native continuation callbacks must be bound to feed generation, URL, cursor, and request identity");
+assert(androidNativeFeedTransportSource.includes("responseCode < 200 || responseCode >= 300") && androidNativeFeedTransportSource.includes("Failure.TIMEOUT") && androidNativeFeedTransportSource.includes("Failure.OFFLINE") && androidNativeFeedTransportSource.includes("Failure.PARSE") && androidNativeFeedReaderSource.includes("transport.read(feedUrl") && androidNativePlayerSource.includes("result.publicMessage()"), "Android native feed reads must distinguish retryable HTTP, timeout, offline, and parse failures with sanitized visible errors");
 assert(androidNativeFeedContractSource.includes("NATIVE_SHORT_VIDEO_FEED_SCHEMA_VERSION = 1") && androidNativeFeedContractSource.includes("schemaVersion: NATIVE_SHORT_VIDEO_FEED_SCHEMA_VERSION"), "Android WebView bridge must emit a versioned native feed envelope");
 assert(androidNativeFeedContractJavaSource.includes("static final int SCHEMA_VERSION = 1") && androidNativeFeedContractJavaSource.includes("unsupported short-video feed schema") && androidNativeFeedContractJavaSource.includes("normalized.charAt(0) == '['"), "Android native decoder must validate the current schema while preserving legacy array compatibility");
 assert(androidNativeFeedContractSource.includes("galleryPresentation: cleanString(item.galleryPresentation)") && androidNativeFeedContractSource.includes("posterUrl: cleanString(entry?.posterUrl)") && androidNativeFeedContractJavaSource.includes('row.optString("galleryPresentation", "")') && androidNativeFeedContractJavaSource.includes('entry.optString("posterUrl", "")'), "Android native feed must preserve the live-photo presentation and JPG poster");
@@ -468,6 +592,9 @@ assert(androidNativeCommentsSource.includes("final class NativeShortVideoComment
 assert(androidNativePlayerSource.includes("createFeedSearchController()") && androidNativePlayerSource.includes("feedSearchController.show()") && !androidNativePlayerSource.includes("void showFeedSearchDialog("), "Android Activity must delegate feed-search presentation and keyboard lifecycle");
 assert(androidNativeFeedSearchSource.includes("final class NativeShortVideoFeedSearchController") && androidNativeFeedSearchSource.includes("EditorInfo.IME_ACTION_SEARCH") && androidNativeFeedSearchSource.includes("host.pausePlayback()") && androidNativeFeedSearchSource.includes("host.applySearch(query)"), "Android feed-search controller must own the search overlay while coordinating playback and query submission through its host");
 assert(androidNativePlayerSource.split(/\r?\n/).length <= 5600, "Android native short-video Activity exceeded its refactored 5600-line budget");
+assert(androidNativeFeedPagingSource.split(/\r?\n/).length <= 180, "Android native feed paging state machine exceeded its 180-line budget");
+assert(androidNativeFeedReaderSource.split(/\r?\n/).length <= 140, "Android native feed reader exceeded its 140-line budget");
+assert(androidNativeFeedTransportSource.split(/\r?\n/).length <= 100, "Android native feed transport exceeded its 100-line budget");
 assert(androidNativePageViewSource.split(/\r?\n/).length <= 450, "Android native short-video page-view module exceeded its 450-line budget");
 assert(androidNativeCommentsSource.split(/\r?\n/).length <= 650, "Android native short-video comments controller exceeded its 650-line budget");
 assert(androidNativeFeedSearchSource.split(/\r?\n/).length <= 240, "Android native short-video feed-search controller exceeded its 240-line budget");

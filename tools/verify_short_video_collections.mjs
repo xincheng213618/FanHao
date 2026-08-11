@@ -248,12 +248,23 @@ async function verifyRouteContract(fixtures) {
     removeCollectionVideo(collectionId, videoId) {
       calls.push(["remove", collectionId, videoId]);
       return { removed: true, collectionId, videoId };
+    },
+    videoDetail(videoId) {
+      calls.push(["video-detail", videoId]);
+      return { video: { id: videoId } };
     }
   };
 
   const listed = await invokeRoute({ method: "GET", pathname: "/api/short-videos/collections", store: fixtureStore });
   assert.equal(listed.status, 200);
   assert.deepEqual(calls, ["list"]);
+  const reservedVideoDetail = await invokeRoute({
+    method: "GET",
+    pathname: "/api/short-videos/videos/collections",
+    store: fixtureStore
+  });
+  assert.equal(reservedVideoDetail.status, 200);
+  assert.deepEqual(calls.at(-1), ["video-detail", "collections"], "the explicit detail API must not collide with the collection index");
 
   let gateCalls = 0;
   const gate = () => {

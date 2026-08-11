@@ -1,3 +1,5 @@
+import { shortVideoDetailApiPath } from "./router.js";
+
 export function createShortVideoMediaCache(dependencies) {
   const {
     api,
@@ -105,7 +107,7 @@ export function createShortVideoMediaCache(dependencies) {
     detailParams.set("metadata", "0");
     const requestStartedAt = Date.now();
     markPerformance("video-detail-request-start", { videoId: id });
-    const request = api(`/api/short-videos/${encodeURIComponent(id)}?${detailParams}`).then((data) => {
+    const request = api(`${shortVideoDetailApiPath(id)}?${detailParams}`).then((data) => {
       markPerformance("video-detail-request-finish", {
         videoId: id,
         durationMs: Date.now() - requestStartedAt,

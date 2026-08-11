@@ -22,6 +22,19 @@ const SHORT_VIDEO_SOURCE_NAMES = new Set([
 ]);
 const SHORT_VIDEO_MEDIA_NAMES = new Set(["video", "gallery"]);
 const SHORT_VIDEO_QUALITY_NAMES = new Set(["4k", "1440p", "1080p", "720p", "below720p", "unknown"]);
+const SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS = new Set([
+  "authors",
+  "collections",
+  "facets",
+  "like-distribution",
+  "quality-upgrades",
+  "rescan",
+  "stats",
+  "suggestions",
+  "summary",
+  "transcoding",
+  "videos"
+]);
 
 export function routeFromUrl(url = browserHref()) {
   const parsed = new URL(url, browserHref());
@@ -33,6 +46,7 @@ export function routeFromUrl(url = browserHref()) {
   const likesStatsPage = segments[1] === "stats" && segments[2] === "likes";
   const transcodePage = segments[1] === "transcoding";
   const collectionPage = segments[1] === "collections";
+  const explicitVideoPage = segments[1] === "videos";
   const collectionId = collectionPage ? decodeSegment(segments[2] || "") : "";
   const collectionVideoId = collectionPage && segments[3] === "videos" ? decodeSegment(segments[4] || "") : "";
   const pathAuthorPage = segments[1] === "authors" ? decodeSegment(segments[2] || "") : "";
@@ -46,7 +60,9 @@ export function routeFromUrl(url = browserHref()) {
     view: "shortVideos",
     shortVideoId: collectionPage
       ? collectionVideoId
-      : pathAuthorPage || likesStatsPage || transcodePage ? "" : decodeSegment(segments[1] || ""),
+      : explicitVideoPage
+        ? decodeSegment(segments[2] || "")
+        : pathAuthorPage || likesStatsPage || transcodePage ? "" : decodeSegment(segments[1] || ""),
     shortVideoCollectionId: collectionId,
     shortVideoAuthorPage: authorPage,
     shortVideoMode: collectionPage ? "collection" : transcodePage ? "transcoding" : likesStatsPage ? "likes" : "feed",
@@ -123,13 +139,23 @@ export function routeUrl(route, options = {}) {
     : next.shortVideoMode === "transcoding"
       ? "/short-videos/transcoding"
     : next.shortVideoId
-      ? `/short-videos/${encodeURIComponent(next.shortVideoId)}`
+      ? SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS.has(next.shortVideoId.toLowerCase())
+        ? `/short-videos/videos/${encodeURIComponent(next.shortVideoId)}`
+        : `/short-videos/${encodeURIComponent(next.shortVideoId)}`
       : next.shortVideoAuthorPage
         ? `/short-videos/authors/${encodeURIComponent(next.shortVideoAuthorPage)}`
         : "/short-videos";
   const query = params.toString();
   const hash = options.hash === undefined ? browserHash() : String(options.hash || "");
   return `${pathname}${query ? `?${query}` : ""}${hash}`;
+}
+
+export function shortVideoDetailApiPath(videoId) {
+  const id = String(videoId || "").trim();
+  const prefix = SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS.has(id.toLowerCase())
+    ? "/api/short-videos/videos/"
+    : "/api/short-videos/";
+  return `${prefix}${encodeURIComponent(id)}`;
 }
 
 function normalizeSort(value) {

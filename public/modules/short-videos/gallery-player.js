@@ -1,3 +1,5 @@
+import { shortVideoDetailApiPath } from "./router.js";
+
 export function createShortVideoGalleryPlayer(dependencies) {
   const {
     api,
@@ -923,7 +925,7 @@ export function createShortVideoGalleryPlayer(dependencies) {
         metadata: "1",
         refresh: String(Date.now())
       });
-      const data = await api(`/api/short-videos/${encodeURIComponent(video.id)}?${params}`);
+      const data = await api(`${shortVideoDetailApiPath(video.id)}?${params}`);
       const sound = data?.video?.sound;
       return Boolean(sound?.localAvailable && sound.previewUrl && attachLocalBackgroundSound(sound));
     };
