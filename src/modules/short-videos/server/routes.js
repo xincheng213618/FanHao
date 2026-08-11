@@ -1,5 +1,5 @@
 export async function routeShortVideoApi(req, res, url, deps) {
-  const { notFound, onMutation, onWatch, onWatchMutation, readJsonBody, recordWatch, requireLocalAdmin, sendJson, shortVideoStore } = deps;
+  const { listVideos, notFound, onMutation, onWatch, onWatchMutation, readJsonBody, recordWatch, requireLocalAdmin, sendJson, shortVideoStore } = deps;
 
   if (url.pathname === "/api/short-videos/summary" && req.method === "GET") {
     try {
@@ -76,7 +76,8 @@ export async function routeShortVideoApi(req, res, url, deps) {
 
   if (url.pathname === "/api/short-videos" && req.method === "GET") {
     try {
-      sendJson(res, 200, shortVideoStore.listVideos(url));
+      const data = listVideos ? await listVideos(url) : shortVideoStore.listVideos(url);
+      sendJson(res, 200, data);
     } catch (error) {
       sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频列表读取失败") });
     }
@@ -384,6 +385,7 @@ function shortVideoErrorMessage(error, fallback) {
 }
 
 function isShortVideoDatabaseError(error) {
+  if (["SHORT_VIDEO_DATABASE_BUSY", "SHORT_VIDEO_DATABASE_UNAVAILABLE"].includes(String(error?.code || ""))) return true;
   const message = String(error?.message || error || "");
   return /database disk image|malformed|sqlite/i.test(message);
 }

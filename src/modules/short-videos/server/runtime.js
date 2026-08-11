@@ -1,6 +1,7 @@
 import { createShortVideoStore } from "./store.js";
 import { routeShortVideoApi } from "./routes.js";
 import { createShortVideoCatalogWorkerClient } from "./catalog-worker-client.js";
+import { createShortVideoListStatsService } from "./list-stats-service.js";
 import { createShortVideoWatchWriteService } from "./watch-write-service.js";
 import { createDownloadManagerSyncService } from "./download-manager-sync-service.js";
 import crypto from "node:crypto";
@@ -74,6 +75,7 @@ export function createShortVideosRuntime({
     ffmpegPath,
     roots
   });
+  const listStatsService = createShortVideoListStatsService({ store, catalogWorker });
   const watchWriter = createShortVideoWatchWriteService({
     dbPath,
     downloadManagerDbPath,
@@ -320,7 +322,7 @@ export function createShortVideosRuntime({
       try {
         const generation = shortVideoListCacheGeneration;
         const watchGeneration = shortVideoWatchCacheGeneration;
-        const data = await queryShortVideoList(url, { allowMainThreadFallback: true });
+        const data = await queryShortVideoListForRequest(req, url);
         writeJsonCache(cachePath, data, generation, watchGeneration);
         sendJson(res, 200, applyMobilePlaybackHints(data));
         queueStartupVideoCandidates(data.videos);
@@ -349,10 +351,14 @@ export function createShortVideosRuntime({
       requireLocalAdmin,
       sendJson,
       shortVideoStore: store,
+      listVideos: (requestUrl) => queryShortVideoListForRequest(req, requestUrl),
       recordWatch: (videoId, options) => watchWriter.record(videoId, options),
       onMutation: clearShortVideoListCache,
       onWatch: queueWatchedVideoCache,
-      onWatchMutation: recordShortVideoWatchCacheMutation
+      onWatchMutation: (...args) => {
+        recordShortVideoWatchCacheMutation(...args);
+        catalogWorker.invalidateStats();
+      }
     });
   }
 
@@ -925,12 +931,17 @@ export function createShortVideosRuntime({
   }
 
   async function queryShortVideoList(url, options = {}) {
+    return listStatsService.list(url, options);
+  }
+
+  async function queryShortVideoListForRequest(req, url) {
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    req?.once?.("aborted", onAbort);
     try {
-      return await catalogWorker.query(url);
-    } catch (error) {
-      if (!options.allowMainThreadFallback) throw error;
-      console.warn("[short-video-list-worker-fallback]", error.message || error);
-      return store.listVideos(url);
+      return await queryShortVideoList(url, { signal: controller.signal });
+    } finally {
+      req?.off?.("aborted", onAbort);
     }
   }
 
@@ -947,19 +958,11 @@ export function createShortVideosRuntime({
   }
 
   function startDownloadManagerSync() {
-    // Recommendation prewarming can take tens of seconds on a large catalog.
-    // Start it eagerly, but do not keep the whole HTTP service offline while
-    // the worker prepares its first cache. Queries are queued by the worker.
     runtimeStarted = true;
-    const catalogReady = catalogWorker.start();
+    catalogWorker.reopen();
     watchWriter.start();
-    void Promise.resolve(catalogReady).then((ready) => {
-      if (!runtimeStarted) return;
-      downloadManagerSync.start();
-      if (ready !== false) schedule4kSmoothVideoWarmup();
-    }).catch((error) => {
-      if (runtimeStarted) console.warn("[short-video-catalog-start]", error?.message || error);
-    });
+    downloadManagerSync.start();
+    schedule4kSmoothVideoWarmup();
   }
 
   async function stopDownloadManagerSync() {
@@ -1659,7 +1662,8 @@ export function createShortVideosRuntime({
     if (!probe) return { state: "skipped", reason: "无法读取源视频编码信息" };
     if (!storedProbe) {
       try {
-        store.updateActualVideoPlaybackMetadata(job.id, probe);
+        const metadataUpdate = store.updateActualVideoPlaybackMetadata(job.id, probe);
+        if (metadataUpdate?.changed) clearShortVideoListCache();
       } catch (error) {
         console.warn("[short-video-smooth-metadata]", job.id, error.message || error);
       }
@@ -2003,6 +2007,7 @@ export function createShortVideosRuntime({
   }
 
   function isShortVideoDatabaseError(error) {
+    if (["SHORT_VIDEO_DATABASE_BUSY", "SHORT_VIDEO_DATABASE_UNAVAILABLE"].includes(String(error?.code || ""))) return true;
     const message = String(error?.message || error || "");
     return /database disk image|malformed|sqlite/i.test(message);
   }

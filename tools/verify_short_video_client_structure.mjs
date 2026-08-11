@@ -929,6 +929,8 @@ function verifyWebDedicatedEntry() {
   const shortVideoCatalogWorkerClientSource = fs.statSync(shortVideoCatalogWorkerClientPath, { throwIfNoEntry: false })?.isFile()
     ? readNormalized(shortVideoCatalogWorkerClientPath)
     : "";
+  const shortVideoListStatsServiceSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "list-stats-service.js"));
+  const shortVideoStatsQuerySource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "stats-query.js"));
   const shortVideoRoutesSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "routes.js"));
   const shortVideoWatchWriterSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "watch-write-service.js"));
   const shortVideoWatchWorkerSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "watch-write-worker.js"));
@@ -1058,7 +1060,7 @@ function verifyWebDedicatedEntry() {
   assert(shortVideoRuntimeSource.includes("cachedStartupVideoFile(id, sourceFile) || sourceFile") && shortVideoRuntimeSource.includes('"source-compatible"'), "adaptive playback fallback must preserve startup-prefix and immutable compatible-source cache paths");
   assert(shortVideoRuntimeSource.includes("onWatch: queueWatchedVideoCache") && shortVideoRuntimeSource.includes("SHORT_VIDEO_CACHE_MIN_PROGRESS_MS") && shortVideoRoutesSource.includes("onWatch?.(videoId, body || {}, data)"), "only the active watched video may enter the deferred shared media cache");
   assert(shortVideoStoreSource.includes('"id, source_path, file_name, title, author_name, duration_ms, size_bytes, mtime_ms, actual_width, actual_height, actual_bit_rate, actual_codec, actual_frame_rate"') && shortVideoRuntimeSource.includes("const expectedSize = Math.max(0, Number(file.size || 0))") && !shortVideoRuntimeSource.includes("const sourceStat = safeStat(file.path)"), "shared-cache hits and transcode diagnostics must resolve from catalog metadata without waking the original video disk");
-  assert(shortVideoRuntimeSource.includes("storedSmoothVideoProbe(job.file)") && shortVideoRuntimeSource.includes("store.updateActualVideoPlaybackMetadata(job.id, probe)"), "smooth-cache decisions must reuse persisted codec and frame rate and save fallback probes");
+  assert(shortVideoRuntimeSource.includes("storedSmoothVideoProbe(job.file)") && shortVideoRuntimeSource.includes("const metadataUpdate = store.updateActualVideoPlaybackMetadata(job.id, probe)") && shortVideoRuntimeSource.includes("if (metadataUpdate?.changed) clearShortVideoListCache()"), "smooth-cache decisions must save fallback probes and invalidate list and quality stats when persisted playback metadata really changes");
   assert(playerSource.includes("createShortVideoTranscodeStatusButton") && transcodeStatusButtonSource.includes("转码管理") && transcodeStatusButtonSource.includes('window.open("/short-videos/transcoding", "_blank", "noopener,noreferrer")') && !transcodeStatusButtonSource.includes("popup=yes") && !transcodeStatusButtonSource.includes("screen?.availWidth"), "the short-video discovery toolbar must open transcode management as a normal new browser tab instead of a popup window");
   assert(shortVideoStateSource.includes('["collection", "likes", "transcoding"].includes(state.shortVideo.mode)'), "short-video state normalization must preserve collection and transcode management modes during app startup");
   assert(playerSource.includes("createShortVideoTranscodeManagementPage") && playerSource.includes('route.shortVideoMode === "transcoding"') && transcodeManagementPageSource.includes("view.mount(page)") && transcodeStatusViewSource.includes("/api/short-videos/playback-cache-status") && transcodeStatusViewSource.includes("FFmpeg 转码管理") && transcodeStatusViewSource.includes("renderCurrentJobs") && transcodeStatusViewSource.includes("renderPipeline") && transcodeStatusViewSource.includes("renderRecent"), "the dedicated transcode page must show live work, explain the pipeline, and retain recent in-memory outcomes");
@@ -1072,19 +1074,29 @@ function verifyWebDedicatedEntry() {
   assert(shortVideoRuntimeSource.includes('cacheState: "stale-refreshing"') && shortVideoRuntimeSource.includes("queueListCacheRefresh(url, cachePath)") && shortVideoRuntimeSource.includes("const listCacheRefreshJobs = new Map()"), "expired short-video lists must return stale data immediately and deduplicate background refreshes");
   const catalogWorkerRuntimeReady = shortVideoRuntimeSource.includes('"/api/short-videos/authors": "authors"')
     && shortVideoRuntimeSource.includes('"/api/short-videos/facets": "facets"')
-    && ((shortVideoRuntimeSource.includes('new Worker(new URL("./list-worker.js"')
-      && shortVideoRuntimeSource.includes("function startDownloadManagerSync() {\n    ensureListQueryWorker();")
-      && shortVideoRuntimeSource.includes('message?.type === "ready"')
-      && shortVideoRuntimeSource.includes("return listQueryWorkerReadyPromise;"))
-      || (shortVideoRuntimeSource.includes("createShortVideoCatalogWorkerClient")
-        && shortVideoRuntimeSource.includes("catalogWorker.query(url")
-        && shortVideoRuntimeSource.includes("catalogWorker.start()")
-        && shortVideoCatalogWorkerClientSource.includes('new Worker(new URL("./list-worker.js"')
-        && shortVideoCatalogWorkerClientSource.includes('message?.type === "ready"')
-        && shortVideoCatalogWorkerClientSource.includes("return readyPromise;")));
-  assert(catalogWorkerRuntimeReady && shortVideoListWorkerSource.includes('trustExplicitInvalidation: true') && shortVideoListWorkerSource.includes('["list", "authors", "facets"].includes(message?.type)') && shortVideoListWorkerSource.includes("store.listVideos(url)") && shortVideoListWorkerSource.includes("function warmStore(notifyReady = false)") && shortVideoListWorkerSource.includes("warmStore(true);") && shortVideoListWorkerSource.includes("warmStore();") && shortVideoListWorkerSource.includes('message?.type === "reset"'), "short-video catalog reads must share a reusable explicitly invalidated worker whose startup waits for recommendation and author cache warmup and whose mutations rebuild those caches off the HTTP thread");
-  assert(shortVideoRuntimeSource.includes("skipStartupMaintenance: true") && shortVideoRuntimeSource.includes("initialStateKey: () => store.downloadManagerSourceStateKey()") && !shortVideoRuntimeSource.includes("store.warm();"), "the HTTP runtime must keep the multi-gigabyte short-video database lazy while its worker owns catalog warmup");
-  assert(downloadManagerSyncSource.includes('typeof initialStateKey === "function"') && downloadManagerSyncSource.includes("await initialStateKeyProvider()"), "download-manager sync state must be read lazily after the catalog worker becomes ready");
+    && shortVideoRuntimeSource.includes("createShortVideoCatalogWorkerClient")
+    && shortVideoRuntimeSource.includes("createShortVideoListStatsService")
+    && shortVideoRuntimeSource.includes("catalogWorker.reopen()")
+    && shortVideoRuntimeSource.includes("catalogWorker.query(url")
+    && !shortVideoRuntimeSource.includes("catalogWorker.start()")
+    && shortVideoCatalogWorkerClientSource.includes('new URL("./list-worker.js"')
+    && shortVideoCatalogWorkerClientSource.includes("const statsCache = new Map()")
+    && shortVideoCatalogWorkerClientSource.includes("const statsFlights = new Map()")
+    && shortVideoCatalogWorkerClientSource.includes("shortVideoStatsFilterKey(filter)")
+    && shortVideoCatalogWorkerClientSource.includes("catalogStamp");
+  assert(catalogWorkerRuntimeReady
+    && shortVideoListStatsServiceSource.includes('params.get("stats") === "0"')
+    && shortVideoListStatsServiceSource.includes('filter.source === "recommended"')
+    && shortVideoListStatsServiceSource.includes('catalogWorker.query(workerListUrl(urlOrOptions), "list")')
+    && shortVideoListStatsServiceSource.includes('listParams.set("stats", "0")')
+    && shortVideoListStatsServiceSource.includes("data.stats = await statsPromise")
+    && shortVideoListWorkerSource.includes('message?.type === "stats"')
+    && shortVideoListWorkerSource.includes("new DatabaseSync(workerData.dbPath, { readOnly: true })")
+    && shortVideoListWorkerSource.includes("PRAGMA query_only = ON")
+    && shortVideoListWorkerSource.includes("function storeOrOpen()")
+    && shortVideoStatsQuerySource.includes("FROM short_video_catalog"), "default short-video stats must use the shared lazy worker's read-only SQLite connection; only non-recommended stats=0 lists stay worker-free while recommended lists use the catalog worker");
+  assert(shortVideoRuntimeSource.includes("skipStartupMaintenance: true") && shortVideoRuntimeSource.includes("initialStateKey: () => store.downloadManagerSourceStateKey()") && !shortVideoRuntimeSource.includes("store.warm();"), "the HTTP runtime must keep the multi-gigabyte short-video database lazy and must not prewarm the stats worker before a stats request");
+  assert(downloadManagerSyncSource.includes('typeof initialStateKey === "function"') && downloadManagerSyncSource.includes("await initialStateKeyProvider()"), "download-manager sync state must still be read lazily when synchronization starts");
   assert(shortVideoStoreSource.includes("trustExplicitInvalidation") && shortVideoStoreSource.includes("if (!explicitCatalogStamp) explicitCatalogStamp = liveStamp") && shortVideoStoreSource.includes('explicitCatalogStamp = ""'), "the list worker must keep serving its coherent warm catalog snapshot until the runtime sends an explicit reset after downloader synchronization");
   assert(shortVideoStoreSource.includes("function prepareAuthorSearchIndex") && shortVideoStoreSource.includes('enumerable: false') && shortVideoStoreSource.includes("author._searchText.includes(normalizedQuery)"), "author search must reuse a non-public normalized search index instead of rebuilding locale-aware text for every author on every request");
   assert(shortVideoStoreSource.includes('params.get("users") !== "0"') && shortVideoStoreSource.includes("users: userPage?.authors || []") && playerSource.includes('params.set("users", "0")'), "aggregate search must return matching users with the initial work page and skip repeating them during work pagination");

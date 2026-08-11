@@ -47,6 +47,7 @@ import {
   shortVideoMediaWhere,
   videoFilter
 } from "./query-contract.js";
+import { queryShortVideoStats } from "./stats-query.js";
 
 const VIDEO_EXTS = new Set([".mp4", ".m4v", ".mov", ".webm"]);
 const DEFAULT_LIMIT = 72;
@@ -1002,7 +1003,7 @@ function summary() {
       && !filter.author && filter.media === "all"
       ? shortVideoRelationshipTotal(database, filter.source)
       : null;
-    const stats = !includeStats || recommendationIds ? null : videoStats(database, where, filter.args);
+    const stats = !includeStats || recommendationIds ? null : queryShortVideoStats(database, params);
     let rows;
     if (recommendationIds) {
       const pageIds = recommendationIds.slice(offset, offset + limit);
@@ -2581,7 +2582,7 @@ function summary() {
 
   function updateActualVideoPlaybackMetadata(id, metadata = {}) {
     const database = databaseOrOpen();
-    const row = videoCatalogRowByAnyId(database, id, "id");
+    const row = videoCatalogRowByAnyId(database, id, "id, actual_width, actual_height, actual_bit_rate, actual_codec, actual_frame_rate");
     if (!row?.id) return null;
     const width = Math.max(0, Math.round(Number(metadata.width || 0)));
     const height = Math.max(0, Math.round(Number(metadata.height || 0)));
@@ -2589,6 +2590,11 @@ function summary() {
     const codec = String(metadata.codec || "").trim().toLowerCase().slice(0, 32);
     const frameRate = Math.max(0, Number(metadata.frameRate || 0));
     if (!width && !height && !bitRate && !codec && !frameRate) return null;
+    const changed = (width > 0 && width !== Number(row.actual_width || 0))
+      || (height > 0 && height !== Number(row.actual_height || 0))
+      || (bitRate > 0 && bitRate !== Number(row.actual_bit_rate || 0))
+      || (codec && codec !== String(row.actual_codec || "").trim().toLowerCase())
+      || (frameRate > 0 && frameRate !== Number(row.actual_frame_rate || 0));
     const probedAt = String(metadata.probedAt || new Date().toISOString());
     database.prepare(`
       UPDATE short_videos SET
@@ -2613,7 +2619,7 @@ function summary() {
       probedAt,
       row.id
     );
-    return { id: row.id, width, height, bitRate, codec, frameRate, probedAt };
+    return { id: row.id, width, height, bitRate, codec, frameRate, probedAt, changed };
   }
 
   function musicFile(id) {
@@ -3345,6 +3351,7 @@ function summary() {
     addCollectionVideo: collections.addCollectionVideo,
     backfillMissingCovers,
     backfillMissingCoversAsync,
+    catalogStamp,
     close,
     collectionVideoDetail: collections.collectionVideoDetail,
     createCollection: collections.createCollection,
@@ -4699,30 +4706,6 @@ function authorComparator(sort) {
   return (a, b) => Number(b.followedTime || 0) - Number(a.followedTime || 0)
     || Number(b.count || 0) - Number(a.count || 0)
     || byName(a, b);
-}
-
-function videoStats(db, where = "", args = []) {
-  const row = db.prepare(`
-    SELECT
-      COALESCE(SUM(digg_count), 0) AS likes,
-      COALESCE(SUM(comment_count), 0) AS comments,
-      COALESCE(SUM(collect_count), 0) AS collects,
-      COALESCE(SUM(share_count), 0) AS shares,
-      COALESCE(SUM(play_count), 0) AS plays,
-      COALESCE(SUM(size_bytes), 0) AS bytes,
-      COALESCE(SUM(duration_ms), 0) AS durationMs
-    FROM short_video_catalog
-    ${where}
-  `).get(...args);
-  return {
-    likes: Number(row?.likes || 0),
-    comments: Number(row?.comments || 0),
-    collects: Number(row?.collects || 0),
-    shares: Number(row?.shares || 0),
-    plays: Number(row?.plays || 0),
-    bytes: Number(row?.bytes || 0),
-    durationMs: Number(row?.durationMs || 0)
-  };
 }
 
 function downloadManagerStatsBackfillIds(db, limit) {
