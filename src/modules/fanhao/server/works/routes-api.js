@@ -185,6 +185,7 @@ export async function routeWorksApi(req, res, url, deps) {
 
   const personCoverMatch = /^\/api\/people\/([^/]+)\/cover$/.exec(url.pathname);
   if (personCoverMatch && req.method === "PUT") {
+    if (!requireLocalAdmin(req, res)) return true;
     const personId = decodeURIComponent(personCoverMatch[1]);
     const body = await readJsonBody(req, personDetailService.coverBodyLimit);
     try {
@@ -233,6 +234,7 @@ export async function routeWorksApi(req, res, url, deps) {
 
   const coverGenerateMatch = /^\/api\/works\/([^/]+)\/cover\/generate$/.exec(url.pathname);
   if (coverGenerateMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
     const workId = decodeURIComponent(coverGenerateMatch[1]);
     try {
       const payload = workMutationService.generateCover(workId);
@@ -249,6 +251,7 @@ export async function routeWorksApi(req, res, url, deps) {
 
   const workCoverMatch = /^\/api\/works\/([^/]+)\/cover$/.exec(url.pathname);
   if (workCoverMatch && req.method === "PUT") {
+    if (!requireLocalAdmin(req, res)) return true;
     const body = await readJsonBody(req);
     try {
       sendJson(res, 200, workMutationService.setManualCover(decodeURIComponent(workCoverMatch[1]), body));

@@ -6,6 +6,7 @@ import path from "node:path";
 import { createServerConfig } from "../src/bootstrap/server-config.js";
 import { createRequestHandler } from "../src/platform/server/http-app.js";
 import { createAuthServices } from "../src/platform/server/auth.js";
+import { routeWorksApi } from "../src/modules/fanhao/server/works/routes-api.js";
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-auth-policy-"));
 
@@ -205,6 +206,8 @@ try {
   }), rejectedSimpleResponse);
   assert.equal(rejectedSimpleResponse.status, 403, "disallowed simple cross-origin reads must fail before routing");
 
+  await verifyCoverMutationsRequireLocalAdmin();
+
   const blankPasswordAuth = authServices("");
   const blankLoginResponse = fakeResponse();
   await blankPasswordAuth.routeAuth(
@@ -390,4 +393,83 @@ function androidHeaders() {
     "user-agent": "Mozilla/5.0 (Linux; Android 15; wv) Version/4.0 FanHaoAndroidApp/1.0",
     "x-fanhao-client": "android"
   };
+}
+
+async function verifyCoverMutationsRequireLocalAdmin() {
+  const calls = {
+    bodyReads: 0,
+    generateCover: 0,
+    setCover: 0,
+    setManualCover: 0
+  };
+  const sent = [];
+  const deps = {
+    notFound: () => assert.fail("fixture cover routes must be handled"),
+    personDetailService: {
+      coverBodyLimit: 4096,
+      setCover(personId, body) {
+        calls.setCover += 1;
+        return { personId, body, updated: "person-cover" };
+      }
+    },
+    readJsonBody: async () => {
+      calls.bodyReads += 1;
+      return { coverUrl: "https://fixture.example/cover.jpg" };
+    },
+    requireLocalAdmin: (_req, res) => {
+      sent.push({ status: 403, payload: { error: "local admin required" }, res });
+      return false;
+    },
+    requireTrustedFileMutation: () => true,
+    sendJson: (_res, status, payload) => sent.push({ status, payload }),
+    workDetailService: {},
+    workMutationService: {
+      generateCover(workId) {
+        calls.generateCover += 1;
+        return { workId, generated: "cover" };
+      },
+      coverGenerationErrorPayload: () => assert.fail("fixture generation must not fail"),
+      setManualCover(workId, body) {
+        calls.setManualCover += 1;
+        return { workId, body, updated: "manual-cover" };
+      }
+    },
+    workQueryService: {}
+  };
+  const deniedRoutes = [
+    ["PUT", "/api/people/person-1/cover"],
+    ["POST", "/api/works/work-1/cover/generate"],
+    ["PUT", "/api/works/work-1/cover"]
+  ];
+  for (const [method, pathname] of deniedRoutes) {
+    await routeWorksApi({ method }, {}, new URL(pathname, "http://fixture"), deps);
+  }
+  assert.deepEqual(sent.map(({ status, payload }) => ({ status, payload })), [
+    { status: 403, payload: { error: "local admin required" } },
+    { status: 403, payload: { error: "local admin required" } },
+    { status: 403, payload: { error: "local admin required" } }
+  ], "every cover mutation must fail closed through the local-admin gate");
+  assert.deepEqual(calls, {
+    bodyReads: 0,
+    generateCover: 0,
+    setCover: 0,
+    setManualCover: 0
+  }, "denied cover mutations must not read bodies or invoke cover services");
+
+  sent.length = 0;
+  deps.requireLocalAdmin = () => true;
+  for (const [method, pathname] of deniedRoutes) {
+    await routeWorksApi({ method }, {}, new URL(pathname, "http://fixture"), deps);
+  }
+  assert.deepEqual(sent, [
+    { status: 200, payload: { personId: "person-1", body: { coverUrl: "https://fixture.example/cover.jpg" }, updated: "person-cover" } },
+    { status: 200, payload: { workId: "work-1", generated: "cover" } },
+    { status: 200, payload: { workId: "work-1", body: { coverUrl: "https://fixture.example/cover.jpg" }, updated: "manual-cover" } }
+  ], "authorized cover mutations must preserve their existing payloads");
+  assert.deepEqual(calls, {
+    bodyReads: 2,
+    generateCover: 1,
+    setCover: 1,
+    setManualCover: 1
+  }, "authorized cover mutations must retain their existing service calls");
 }
