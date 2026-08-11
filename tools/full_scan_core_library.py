@@ -823,6 +823,12 @@ def main() -> int:
     parser.add_argument("--write", action="store_true")
     parser.add_argument("--scope", choices=["all", "western"], default="all")
     parser.add_argument("--root", action="append", default=[], help="Override roots; can be passed multiple times.")
+    parser.add_argument(
+        "--person-dir",
+        action="append",
+        default=[],
+        help="Scan only these existing person directories; can be passed multiple times.",
+    )
     parser.add_argument("--delete-stale", action="store_true")
     parser.add_argument("--changed-only", action="store_true", help="Inventory all roots, then recursively scan only new/moved/recent person dirs.")
     parser.add_argument("--recent-hours", type=float, default=48)
@@ -842,7 +848,33 @@ def main() -> int:
     roots = selected_roots(args.scope, args.root)
     if not roots:
         raise SystemExit("no roots selected")
-    if args.changed_only:
+    if args.person_dir and args.changed_only:
+        raise SystemExit("--person-dir and --changed-only cannot be used together")
+    if args.person_dir:
+        available_roots = [root for root in roots if root.exists()]
+        person_dirs: list[Path] = []
+        seen_person_dirs: set[str] = set()
+        for value in args.person_dir:
+            person_dir = Path(value)
+            person_key = path_key(person_dir)
+            if person_key in seen_person_dirs:
+                continue
+            if not person_dir.is_dir():
+                raise SystemExit(f"person directory not found: {clean_path(person_dir)}")
+            matching_roots = [
+                root
+                for root in available_roots
+                if path_key(person_dir) != path_key(root) and is_child_or_same(person_dir, root)
+            ]
+            if not matching_roots:
+                raise SystemExit(f"person directory is outside configured library roots: {clean_path(person_dir)}")
+            seen_person_dirs.add(person_key)
+            person_dirs.append(person_dir)
+        print(f"[targeted] person dirs={len(person_dirs)}", flush=True)
+        for path in person_dirs:
+            print(f"  {clean_path(path)}", flush=True)
+        stats = scan_candidates(conn, roots, person_dirs, args.write, args.delete_stale, args.limit_people)
+    elif args.changed_only:
         candidates = candidate_person_dirs(conn, roots, args.recent_hours, modified_since)
         print(f"[inventory] candidate person dirs={len(candidates)}", flush=True)
         for path in candidates[:30]:
