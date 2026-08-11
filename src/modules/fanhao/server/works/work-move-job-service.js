@@ -56,6 +56,7 @@ export function createWorkMoveJobService({
   adminCoreMutationService,
   checkpointIntervalMs = 200,
   getCoreDb,
+  leaseDurationMs = 30_000,
   maxConcurrentJobs = 1,
   now = () => new Date().toISOString(),
   schedule = setImmediate,
@@ -63,9 +64,11 @@ export function createWorkMoveJobService({
   workerDataPatch = {},
   workerUrl = new URL("./work-move-worker.js", import.meta.url)
 }) {
+  const ownerId = `move-owner-${crypto.randomUUID()}`;
   const activeRuns = new Map();
   const activeWorkers = new Map();
   const pendingJobs = new Set();
+  const claimRetryTimers = new Map();
   let closing = false;
   ensureSchema();
   schedule(recover);
@@ -90,11 +93,38 @@ export function createWorkMoveJobService({
         error TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        finished_at TEXT NOT NULL DEFAULT ''
+        finished_at TEXT NOT NULL DEFAULT '',
+        owner_id TEXT NOT NULL DEFAULT '',
+        lease_until TEXT NOT NULL DEFAULT '',
+        version INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS idx_work_move_jobs_status_updated ON work_move_jobs(status, updated_at);
       CREATE INDEX IF NOT EXISTS idx_work_move_jobs_work ON work_move_jobs(work_id, updated_at);
     `);
+    ensureColumn("owner_id", "ALTER TABLE work_move_jobs ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''");
+    ensureColumn("lease_until", "ALTER TABLE work_move_jobs ADD COLUMN lease_until TEXT NOT NULL DEFAULT ''");
+    ensureColumn("version", "ALTER TABLE work_move_jobs ADD COLUMN version INTEGER NOT NULL DEFAULT 0");
+  }
+
+  function ensureColumn(name, statement) {
+    const hasColumn = () => getCoreDb().prepare("PRAGMA table_info(work_move_jobs)").all().some((column) => column.name === name);
+    if (hasColumn()) return;
+    try {
+      getCoreDb().exec(statement);
+    } catch (error) {
+      if (!hasColumn()) throw error;
+    }
+  }
+
+  function leaseUntil() {
+    return new Date(Date.now() + Math.max(2_000, Number(leaseDurationMs || 30_000))).toISOString();
+  }
+
+  function recoveryStatus(job) {
+    if (job?.status === "rollback_pending" || job?.phase === "rollback") return "rollback_pending";
+    if (job?.status === "cleanup_pending") return "cleanup_pending";
+    if (["main_committed", "images", "images_committed", "reconciled", "cleanup"].includes(job?.phase)) return "cleanup_pending";
+    return "queued";
   }
 
   function row(jobId) {
@@ -224,6 +254,61 @@ export function createWorkMoveJobService({
     pumpQueue();
   }
 
+  function scheduleClaimRetry(jobId) {
+    if (closing || claimRetryTimers.has(jobId)) return;
+    const timer = setTimeout(() => {
+      claimRetryTimers.delete(jobId);
+      scheduleJob(jobId);
+    }, 250);
+    timer.unref?.();
+    claimRetryTimers.set(jobId, timer);
+  }
+
+  function claimJob(jobId) {
+    const claimedAt = now();
+    const result = getCoreDb().prepare(`
+      UPDATE work_move_jobs
+      SET owner_id = ?, lease_until = ?, version = version + 1, updated_at = ?
+      WHERE id = ?
+        AND status IN ('queued', 'running', 'cleanup_pending', 'rollback_pending')
+        AND (owner_id = '' OR owner_id = ? OR lease_until = '' OR lease_until <= ?)
+    `).run(ownerId, leaseUntil(), claimedAt, jobId, ownerId, claimedAt);
+    return Number(result.changes || 0) === 1 ? row(jobId) : null;
+  }
+
+  function renewLease(jobId) {
+    const current = row(jobId);
+    if (!current || current.owner_id !== ownerId) return false;
+    const result = getCoreDb().prepare(`
+      UPDATE work_move_jobs
+      SET lease_until = ?, version = version + 1
+      WHERE id = ? AND owner_id = ? AND version = ?
+    `).run(leaseUntil(), jobId, ownerId, Number(current.version || 0));
+    return Number(result.changes || 0) === 1;
+  }
+
+  function releaseClaim(jobId) {
+    const current = row(jobId);
+    if (!current || current.owner_id !== ownerId) return;
+    getCoreDb().prepare(`
+      UPDATE work_move_jobs
+      SET owner_id = '', lease_until = '', version = version + 1
+      WHERE id = ? AND owner_id = ? AND version = ?
+    `).run(jobId, ownerId, Number(current.version || 0));
+  }
+
+  function updatePlan(jobId, plan) {
+    const current = row(jobId);
+    if (!current || current.owner_id !== ownerId) throw new Error("文件移动任务执行权已转移");
+    const result = getCoreDb().prepare(`
+      UPDATE work_move_jobs
+      SET person_id = ?, plan_json = ?, status = 'running', phase = 'prepared',
+          updated_at = ?, lease_until = ?, version = version + 1
+      WHERE id = ? AND owner_id = ? AND version = ?
+    `).run(String(plan.personId), JSON.stringify(plan), now(), leaseUntil(), jobId, ownerId, Number(current.version || 0));
+    if (Number(result.changes || 0) !== 1) throw new Error("文件移动任务执行权已转移");
+  }
+
   function pumpQueue() {
     if (closing || activeRuns.size >= Math.max(1, Number(maxConcurrentJobs || 1))) return;
     const jobId = pendingJobs.values().next().value;
@@ -242,6 +327,13 @@ export function createWorkMoveJobService({
   async function runJob(jobId) {
     let job = row(jobId);
     if (!job || job.status === "completed" || closing) return;
+    job = claimJob(jobId);
+    if (!job) {
+      if (ACTIVE_STATUSES.has(row(jobId)?.status)) scheduleClaimRetry(jobId);
+      return;
+    }
+    const heartbeat = setInterval(() => renewLease(jobId), Math.max(1_000, Math.floor(Number(leaseDurationMs || 30_000) / 3)));
+    heartbeat.unref?.();
     let plan = json(job.plan_json, null);
     const request = json(job.request_json, {});
     try {
@@ -255,11 +347,7 @@ export function createWorkMoveJobService({
           targetDirectory: request.targetDirectory || request.targetPath || "",
           createPerson: request.createPerson || null
         });
-        getCoreDb().prepare(`
-          UPDATE work_move_jobs
-          SET person_id = ?, plan_json = ?, status = 'running', phase = 'prepared', updated_at = ?
-          WHERE id = ?
-        `).run(String(plan.personId), JSON.stringify(plan), now(), jobId);
+        updatePlan(jobId, plan);
       }
 
       const databaseState = adminCoreMutationService.inspectWorkMove(plan);
@@ -291,10 +379,13 @@ export function createWorkMoveJobService({
       updateState(jobId, "completed", "completed", "", { result, finished: true, completeProgress: true });
     } catch (error) {
       if (closing) {
-        updateState(jobId, "queued", row(jobId)?.phase || "queued", "服务停止，等待自动恢复");
+        preserveForRecovery(jobId);
         return;
       }
       await handleFailure(jobId, plan, error);
+    } finally {
+      clearInterval(heartbeat);
+      releaseClaim(jobId);
     }
   }
 
@@ -313,6 +404,10 @@ export function createWorkMoveJobService({
       await runWorker(jobId, "rollback", plan);
       updateState(jobId, "rolled_back", "rolled_back", message, { finished: true });
     } catch (rollbackError) {
+      if (closing) {
+        preserveForRecovery(jobId);
+        return;
+      }
       updateState(jobId, "failed", "rollback", `${message}; 自动回滚失败：${rollbackError.message}`, { finished: true });
     }
   }
@@ -324,9 +419,11 @@ export function createWorkMoveJobService({
           ...workerDataPatch,
           jobId,
           operation,
+          allowedRoots: Array.isArray(plan.libraryRoots) ? plan.libraryRoots : [],
           sourcePath: plan.oldDir,
           targetPath: plan.newDir,
-          stagingPath: plan.stagingDir || `${plan.newDir}.fanhao-move-${jobId}`
+          stagingPath: plan.stagingDir || `${plan.newDir}.fanhao-move-${jobId}`,
+          quarantinePath: plan.quarantineDir || path.join(path.dirname(plan.oldDir), `.${path.basename(plan.oldDir)}.fanhao-quarantine-${jobId}`)
         }
       });
       activeWorkers.set(jobId, worker);
@@ -338,11 +435,14 @@ export function createWorkMoveJobService({
         if (!pendingProgress || closing) return;
         const progress = pendingProgress;
         pendingProgress = null;
+        const current = row(jobId);
+        if (!current || current.owner_id !== ownerId) return;
         getCoreDb().prepare(`
           UPDATE work_move_jobs
-          SET phase = ?, progress_files = ?, total_files = ?, progress_bytes = ?, total_bytes = ?, updated_at = ?
-          WHERE id = ?
-        `).run(progress.phase || operation, progress.completedFiles || 0, progress.totalFiles || 0, progress.completedBytes || 0, progress.totalBytes || 0, now(), jobId);
+          SET phase = ?, progress_files = ?, total_files = ?, progress_bytes = ?, total_bytes = ?,
+              updated_at = ?, lease_until = ?, version = version + 1
+          WHERE id = ? AND owner_id = ? AND version = ?
+        `).run(progress.phase || operation, progress.completedFiles || 0, progress.totalFiles || 0, progress.completedBytes || 0, progress.totalBytes || 0, now(), leaseUntil(), jobId, ownerId, Number(current.version || 0));
       };
       const finish = (callback, value) => {
         if (settled) return;
@@ -376,17 +476,24 @@ export function createWorkMoveJobService({
 
   function updateState(jobId, status, phase, error, options = {}) {
     const current = row(jobId);
-    if (!current) return;
+    if (!current || current.owner_id !== ownerId) throw new Error("文件移动任务执行权已转移");
     const resultJson = options.result === undefined ? current.result_json : JSON.stringify(options.result);
     const finishedAt = options.finished ? now() : "";
     const progressFiles = options.completeProgress ? Math.max(Number(current.progress_files || 0), Number(current.total_files || 0)) : Number(current.progress_files || 0);
     const progressBytes = options.completeProgress ? Math.max(Number(current.progress_bytes || 0), Number(current.total_bytes || 0)) : Number(current.progress_bytes || 0);
-    getCoreDb().prepare(`
+    const result = getCoreDb().prepare(`
       UPDATE work_move_jobs
       SET status = ?, phase = ?, error = ?, result_json = ?, progress_files = ?, progress_bytes = ?,
-          updated_at = ?, finished_at = ?
-      WHERE id = ?
-    `).run(status, phase, String(error || ""), resultJson, progressFiles, progressBytes, now(), finishedAt, jobId);
+          updated_at = ?, finished_at = ?, lease_until = ?, version = version + 1
+      WHERE id = ? AND owner_id = ? AND version = ?
+    `).run(status, phase, String(error || ""), resultJson, progressFiles, progressBytes, now(), finishedAt, leaseUntil(), jobId, ownerId, Number(current.version || 0));
+    if (Number(result.changes || 0) !== 1) throw new Error("文件移动任务执行权已转移");
+  }
+
+  function preserveForRecovery(jobId) {
+    const current = row(jobId);
+    if (!current || current.owner_id !== ownerId) return;
+    updateState(jobId, recoveryStatus(current), current.phase || "queued", "服务停止，等待自动恢复");
   }
 
   function recover() {
@@ -402,9 +509,11 @@ export function createWorkMoveJobService({
   async function close() {
     closing = true;
     pendingJobs.clear();
+    for (const timer of claimRetryTimers.values()) clearTimeout(timer);
+    claimRetryTimers.clear();
     const terminations = [];
     for (const [jobId, worker] of activeWorkers) {
-      updateState(jobId, "queued", row(jobId)?.phase || "queued", "服务停止，等待自动恢复");
+      preserveForRecovery(jobId);
       terminations.push(worker.terminate().catch(() => {}));
     }
     await Promise.allSettled(terminations);

@@ -2,8 +2,15 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import { parentPort, workerData } from "node:worker_threads";
+import { ensureRealPathWithinRoots } from "../library/library-path-safety.js";
 
 const RETRYABLE_CODES = new Set(["EPERM", "EBUSY", "ENOTEMPTY", "EACCES"]);
+
+function validateWorkerPaths(...paths) {
+  const roots = Array.isArray(workerData.allowedRoots) ? workerData.allowedRoots : [];
+  if (!roots.length) return;
+  for (const filePath of paths.filter(Boolean)) ensureRealPathWithinRoots(filePath, roots, "文件移动路径");
+}
 
 function delay(ms) {
   return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
@@ -85,7 +92,9 @@ function hashFile(filePath) {
 }
 
 async function matchingContent(sourcePath, targetPath, files, targetFiles) {
-  parentPort.postMessage({ type: "progress", phase: "verifying", completedFiles: 0, totalFiles: files.length, completedBytes: 0, totalBytes: files.reduce((sum, file) => sum + file.size, 0) });
+  const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+  parentPort.postMessage({ type: "progress", phase: "verifying", completedFiles: 0, totalFiles: files.length, completedBytes: 0, totalBytes });
+  await delay(Number(workerData.delayBeforeVerificationMs || 0));
   let completedBytes = 0;
   for (let index = 0; index < files.length; index += 1) {
     const file = files[index];
@@ -97,7 +106,7 @@ async function matchingContent(sourcePath, targetPath, files, targetFiles) {
     ]);
     if (sourceHash !== targetHash) return false;
     completedBytes += file.size;
-    parentPort.postMessage({ type: "progress", phase: "verifying", completedFiles: index + 1, totalFiles: files.length, completedBytes, totalBytes: files.reduce((sum, item) => sum + item.size, 0) });
+    parentPort.postMessage({ type: "progress", phase: "verifying", completedFiles: index + 1, totalFiles: files.length, completedBytes, totalBytes });
   }
   return true;
 }
@@ -147,6 +156,7 @@ async function sourceIsCoveredByTarget(sourcePath, targetPath) {
 
 async function stageMove() {
   const { sourcePath, targetPath, stagingPath } = workerData;
+  validateWorkerPaths(sourcePath, targetPath, stagingPath);
   const [sourceType, targetType] = await Promise.all([pathType(sourcePath), pathType(targetPath)]);
   if (targetType === "directory") {
     if (sourceType === "missing") return { mode: "rename-resume", sourceRemoved: true };
@@ -173,17 +183,56 @@ async function stageMove() {
 
 async function cleanupSource() {
   const { sourcePath, targetPath } = workerData;
+  const quarantinePath = workerData.quarantinePath || path.join(path.dirname(sourcePath), `.${path.basename(sourcePath)}.fanhao-quarantine-${workerData.jobId}`);
+  validateWorkerPaths(sourcePath, targetPath, quarantinePath);
   await delay(Number(workerData.delayBeforeCleanupMs || 0));
   if (await pathType(targetPath) !== "directory") throw new Error("目标作品文件夹不存在，拒绝清理源目录");
-  if (await pathType(sourcePath) === "directory") {
-    if (!(await sourceIsCoveredByTarget(sourcePath, targetPath))) throw new Error("源目录仍有目标目录未覆盖的文件，拒绝继续清理");
-    await fs.promises.rm(sourcePath, { recursive: true, force: false, maxRetries: 5, retryDelay: 100 });
+
+  const [sourceType, quarantineType] = await Promise.all([pathType(sourcePath), pathType(quarantinePath)]);
+  if (sourceType === "directory" && quarantineType === "directory") {
+    throw new Error("源目录与隔离目录同时存在，拒绝自动删除任何内容");
   }
-  return { cleaned: true };
+  if (quarantineType !== "missing" && quarantineType !== "directory") {
+    throw new Error("任务隔离路径不是目录，拒绝清理源目录");
+  }
+  if (sourceType === "directory") {
+    parentPort.postMessage({ type: "progress", phase: "isolating", completedFiles: 0, totalFiles: 0, completedBytes: 0, totalBytes: 0 });
+    await renameWithRetry(sourcePath, quarantinePath, process.platform === "win32" ? 8 : 2, 450);
+  } else if (sourceType !== "missing") {
+    throw new Error("源作品路径不是目录，拒绝清理");
+  }
+
+  if (await pathType(quarantinePath) === "directory") {
+    const restoreOrPreserve = async (reason) => {
+      if (await pathType(sourcePath) === "missing") {
+        await renameWithRetry(quarantinePath, sourcePath, process.platform === "win32" ? 8 : 2, 450);
+      }
+      throw new Error(reason);
+    };
+    if (!(await sourceIsCoveredByTarget(quarantinePath, targetPath))) {
+      await restoreOrPreserve("隔离后的源目录仍有目标目录未覆盖的文件，已拒绝删除");
+    }
+    await delay(Number(workerData.delayAfterCleanupVerificationMs || 0));
+    if (await pathType(sourcePath) !== "missing") {
+      throw new Error("清理期间源路径重新出现，隔离目录已保留且拒绝删除");
+    }
+    if (!(await sourceIsCoveredByTarget(quarantinePath, targetPath))) {
+      await restoreOrPreserve("隔离目录在校验期间发生变化，已拒绝删除");
+    }
+    await fs.promises.rm(quarantinePath, { recursive: true, force: false, maxRetries: 5, retryDelay: 100 });
+  }
+  return { cleaned: true, quarantined: quarantineType === "directory" || sourceType === "directory" };
 }
 
 async function rollbackMove() {
   const { sourcePath, targetPath, stagingPath } = workerData;
+  const quarantinePath = workerData.quarantinePath || path.join(path.dirname(sourcePath), `.${path.basename(sourcePath)}.fanhao-quarantine-${workerData.jobId}`);
+  validateWorkerPaths(sourcePath, targetPath, stagingPath, quarantinePath);
+  await delay(Number(workerData.delayBeforeRollbackMs || 0));
+  if (await pathType(quarantinePath) === "directory") {
+    if (await pathType(sourcePath) !== "missing") throw new Error("源目录与隔离目录同时存在，拒绝自动回滚");
+    await renameWithRetry(quarantinePath, sourcePath, process.platform === "win32" ? 8 : 2, 450);
+  }
   if (await pathType(stagingPath) === "directory") {
     await fs.promises.rm(stagingPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }

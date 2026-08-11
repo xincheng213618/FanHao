@@ -159,7 +159,7 @@ export async function routeWorksApi(req, res, url, deps) {
       const body = await readJsonBody(req);
       sendJson(res, 202, workMutationService.moveToPerson(decodeURIComponent(workMoveToPersonMatch[1]), body));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "迁移作品失败" });
+      sendJson(res, error.statusCode || 500, { error: error.message || "迁移作品失败", ...(error.job ? { job: error.job } : {}) });
     }
     return true;
   }

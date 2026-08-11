@@ -5,8 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
+import { createApiClient } from "../public/js/api.js";
 import { createAdminCoreMutationService } from "../src/modules/fanhao/server/admin/admin-core-mutation-service.js";
+import { ensureRealPathWithinRoots } from "../src/modules/fanhao/server/library/library-path-safety.js";
 import { createPersonLibraryService } from "../src/modules/fanhao/server/people/person-library-service.js";
+import { routeWorksApi } from "../src/modules/fanhao/server/works/routes-api.js";
 import { createWorkMoveJobService } from "../src/modules/fanhao/server/works/work-move-job-service.js";
 
 const temporaryRoots = [];
@@ -276,6 +280,18 @@ async function verifyActualAdminSqliteCommit() {
   assert.equal(fs.existsSync(missingTargetPerson), false);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM people").get().count, peopleBeforeFailure);
 
+  db.prepare("INSERT INTO works VALUES (3, '[]', '')").run();
+  db.prepare("INSERT INTO local_works VALUES (3, 3, ?, '', '')").run(fixture.source);
+  assert.throws(
+    () => admin.prepareWorkMove("1", "2", { targetDirectory: fixture.targetPerson }),
+    (error) => error?.statusCode === 409 && /同时属于多个/.test(error.message),
+    "a directory shared by another local_work must be rejected before filesystem mutation"
+  );
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM local_works WHERE id = 3").get().local_path), path.resolve(fixture.source));
+  assert.equal(fs.existsSync(fixture.source), true);
+  db.prepare("DELETE FROM local_works WHERE id = 3").run();
+  db.prepare("DELETE FROM works WHERE id = 3").run();
+
   const plan = admin.prepareWorkMove("1", "2", { targetDirectory: fixture.targetPerson });
   await fs.promises.cp(fixture.source, fixture.target, { recursive: true, errorOnExist: true, force: false });
   admin.commitWorkMove(plan);
@@ -416,6 +432,11 @@ function verifySourceStructure() {
   assert.match(routeSource, /sendJson\(res, 202, workMutationService\.moveToPerson/);
   assert.ok(routeSource.includes("work-move-jobs"));
   assert.match(clientSource, /waitForWorkMoveJob\(data\.job\)/);
+  assert.match(clientSource, /AbortController/);
+  assert.match(clientSource, /pagehide/);
+  assert.match(clientSource, /pageshow/);
+  assert.match(clientSource, /ACTIVE_MOVE_STORAGE_KEY/);
+  assert.match(clientSource, /恢复迁移/);
 }
 
 async function verifyCrashRecoveryFromPreparedCopy() {
@@ -527,6 +548,244 @@ async function verifySameSizeCorruptionBlocksDeletion() {
   db.close();
 }
 
+function runMoveWorker(workerData, onProgress = () => {}) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("../src/modules/fanhao/server/works/work-move-worker.js", import.meta.url), { workerData });
+    let settled = false;
+    worker.on("message", (message) => {
+      if (message?.type === "progress") onProgress(message);
+      else if (message?.type === "done") {
+        settled = true;
+        resolve(message.result || {});
+      } else if (message?.type === "error") {
+        settled = true;
+        reject(new Error(message.error?.message || "worker failed"));
+      }
+    });
+    worker.on("error", reject);
+    worker.on("exit", (code) => {
+      if (!settled && code !== 0) reject(new Error(`worker exited ${code}`));
+    });
+  });
+}
+
+async function verifyCleanupQuarantineClosesLateFileRace() {
+  const fixture = await createFixture("cleanup-quarantine-race", 5);
+  await fs.promises.cp(fixture.source, fixture.target, { recursive: true, errorOnExist: true, force: false });
+  const jobId = "late-file-fixture";
+  const quarantinePath = path.join(fixture.sourcePerson, `.${path.basename(fixture.source)}.fanhao-quarantine-${jobId}`);
+  let injected = false;
+  await assert.rejects(
+    runMoveWorker({
+      jobId,
+      operation: "cleanup",
+      sourcePath: fixture.source,
+      targetPath: fixture.target,
+      quarantinePath,
+      delayBeforeVerificationMs: 150
+    }, (progress) => {
+      if (progress.phase !== "verifying" || injected) return;
+      injected = true;
+      fs.mkdirSync(fixture.source, { recursive: true });
+      fs.writeFileSync(path.join(fixture.source, "late.bin"), "late data");
+    }),
+    /重新出现|拒绝删除/
+  );
+  assert.equal(injected, true, "fixture must add late.bin after the quarantined tree starts verification");
+  assert.equal(fs.existsSync(path.join(fixture.source, "late.bin")), true, "late data at the live path must be preserved");
+  assert.equal(fs.existsSync(quarantinePath), true, "the original tree must remain in job-owned quarantine for inspection/recovery");
+  assert.equal(fs.existsSync(fixture.target), true);
+}
+
+async function verifyDatabaseLeasePreventsDoubleExecution() {
+  const fixture = await createFixture("double-service-lease", 8);
+  const db1 = createDatabase(fixture.root, fixture.source);
+  const db2 = new DatabaseSync(path.join(fixture.root, "fixture.sqlite"));
+  const admin = createAdminFixture(db1, fixture);
+  const first = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db1,
+    workerDataPatch: { forceCopy: true, delayPerFileMs: 15 }
+  });
+  const second = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db2,
+    workerDataPatch: { forceCopy: true, delayPerFileMs: 15 }
+  });
+  const started = first.start("1", { personId: "target", idempotencyKey: "double-service-lease" });
+  second.recover();
+  const completed = await waitForJob(first, started.id, ["completed"]);
+  assert.equal(completed.attempts, 1);
+  assert.equal(second.get(started.id).status, "completed");
+  assert.equal(admin.imageCommits, 1, "only the SQLite lease owner may execute the attached image phase");
+  const journal = db1.prepare("SELECT owner_id, lease_until, version FROM work_move_jobs WHERE id = ?").get(started.id);
+  assert.equal(journal.owner_id, "", "the winning service must release its durable claim");
+  assert.equal(journal.lease_until, "");
+  assert.ok(Number(journal.version) > 1);
+  assert.equal(fs.existsSync(fixture.source), false);
+  assert.equal(fs.existsSync(fixture.target), true);
+  await Promise.all([first.close(), second.close()]);
+  db2.close();
+  db1.close();
+}
+
+async function verifyLeaseSchemaMigratesExistingJournal() {
+  const fixture = await createFixture("lease-schema-migration", 1);
+  const db = createDatabase(fixture.root, fixture.source);
+  db.exec(`
+    CREATE TABLE work_move_jobs (
+      id TEXT PRIMARY KEY, request_key TEXT NOT NULL UNIQUE, work_id TEXT NOT NULL,
+      person_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, phase TEXT NOT NULL,
+      request_json TEXT NOT NULL, plan_json TEXT NOT NULL DEFAULT '', result_json TEXT NOT NULL DEFAULT '',
+      progress_files INTEGER NOT NULL DEFAULT 0, total_files INTEGER NOT NULL DEFAULT 0,
+      progress_bytes INTEGER NOT NULL DEFAULT 0, total_bytes INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT ''
+    );
+  `);
+  const stamp = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO work_move_jobs (id, request_key, work_id, status, phase, request_json, created_at, updated_at)
+    VALUES ('legacy-job', 'legacy-key', '1', 'failed', 'validation', '{}', ?, ?)
+  `).run(stamp, stamp);
+  const service = createWorkMoveJobService({
+    adminCoreMutationService: createAdminFixture(db, fixture),
+    getCoreDb: () => db,
+    schedule: () => {}
+  });
+  const columns = new Set(db.prepare("PRAGMA table_info(work_move_jobs)").all().map((column) => column.name));
+  assert.equal(columns.has("owner_id"), true);
+  assert.equal(columns.has("lease_until"), true);
+  assert.equal(columns.has("version"), true);
+  const legacy = db.prepare("SELECT id, owner_id, lease_until, version FROM work_move_jobs WHERE id = 'legacy-job'").get();
+  assert.equal(legacy.id, "legacy-job");
+  assert.equal(legacy.owner_id, "");
+  assert.equal(legacy.lease_until, "");
+  assert.equal(legacy.version, 0);
+  await service.close();
+  db.close();
+}
+
+async function verifyClosePreservesRollbackCheckpoint() {
+  const fixture = await createFixture("close-rollback", 5);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture, { failCommit: true });
+  const first = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    workerDataPatch: { forceCopy: true, delayBeforeRollbackMs: 600 }
+  });
+  const started = first.start("1", { personId: "target", idempotencyKey: "close-rollback" });
+  await waitForPhase(first, started.id, "rollback");
+  await first.close();
+  const checkpoint = first.get(started.id);
+  assert.equal(checkpoint.status, "rollback_pending", "close must not overwrite an interrupted rollback with queued/failed");
+  assert.equal(checkpoint.phase, "rollback");
+
+  const recovered = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db });
+  const rolledBack = await waitForJob(recovered, started.id, ["rolled_back"]);
+  assert.equal(rolledBack.phase, "rolled_back");
+  assert.equal(fs.existsSync(fixture.source), true);
+  assert.equal(fs.existsSync(fixture.target), false);
+  await recovered.close();
+  db.close();
+}
+
+async function verifyClosePreservesCleanupCheckpoint() {
+  const fixture = await createFixture("close-cleanup", 5);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const first = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    workerDataPatch: { forceCopy: true, delayBeforeCleanupMs: 600 }
+  });
+  const started = first.start("1", { personId: "target", idempotencyKey: "close-cleanup" });
+  await waitForPhase(first, started.id, "cleanup");
+  await first.close();
+  const checkpoint = first.get(started.id);
+  assert.equal(checkpoint.status, "cleanup_pending", "close must retain the post-commit cleanup recovery lane");
+  assert.notEqual(checkpoint.status, "failed");
+  assert.equal(fs.existsSync(fixture.source), true);
+  assert.equal(fs.existsSync(fixture.target), true);
+
+  const recovered = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db });
+  await waitForJob(recovered, started.id, ["completed"]);
+  assert.equal(fs.existsSync(fixture.source), false);
+  await recovered.close();
+  db.close();
+}
+
+async function verifyJunctionEscapeIsRejected() {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "fanhao-move-junction-root-"));
+  const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), "fanhao-move-junction-outside-"));
+  temporaryRoots.push(root, outside);
+  const junction = path.join(root, "linked-outside");
+  await fs.promises.symlink(outside, junction, process.platform === "win32" ? "junction" : "dir");
+  assert.throws(
+    () => ensureRealPathWithinRoots(path.join(junction, "new-person"), [root], "目标人物文件夹"),
+    (error) => error?.statusCode === 400 && /链接|根目录/.test(error.message),
+    "an existing junction ancestor must not project a write outside the library root"
+  );
+  assert.equal(ensureRealPathWithinRoots(path.join(root, "normal-person"), [root]), path.resolve(root, "normal-person"));
+  const source = path.join(root, "source", "WORK-001");
+  const escapedTarget = path.join(junction, "WORK-001");
+  await fs.promises.mkdir(source, { recursive: true });
+  await fs.promises.writeFile(path.join(source, "fixture.bin"), "fixture");
+  await assert.rejects(runMoveWorker({
+    jobId: "junction-worker",
+    operation: "stage",
+    allowedRoots: [root],
+    sourcePath: source,
+    targetPath: escapedTarget,
+    stagingPath: `${escapedTarget}.staging`
+  }), /链接|根目录/);
+  assert.equal(fs.existsSync(source), true, "junction rejection must happen before moving the source");
+  assert.equal(fs.existsSync(path.join(outside, "WORK-001")), false, "junction rejection must not create an outside target");
+}
+
+async function verifyConflictPayloadAndClientJobPropagation() {
+  const conflictingJob = { id: "move_conflict", status: "running", phase: "copying" };
+  let response = null;
+  await routeWorksApi(
+    { method: "POST" },
+    {},
+    new URL("http://fixture/api/works/1/move-to-person"),
+    {
+      notFound() {},
+      personDetailService: {},
+      readJsonBody: async () => ({ personId: "2" }),
+      requireLocalAdmin: () => true,
+      requireTrustedFileMutation: () => true,
+      sendJson: (_res, status, payload) => { response = { status, payload }; },
+      workDetailService: {},
+      workMutationService: {
+        moveToPerson() {
+          const error = new Error("conflict");
+          error.statusCode = 409;
+          error.job = conflictingJob;
+          throw error;
+        }
+      },
+      workQueryService: {}
+    }
+  );
+  assert.equal(response.status, 409);
+  assert.deepEqual(response.payload.job, conflictingJob);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(response.payload), {
+    status: 409,
+    headers: { "content-type": "application/json" }
+  });
+  try {
+    const client = createApiClient();
+    await assert.rejects(client("/fixture"), (error) => error.statusCode === 409 && error.job?.id === conflictingJob.id);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 async function verifyHttpResponsivenessDuringCopy() {
   const fixture = await createFixture("responsive", 24);
   const db = createDatabase(fixture.root, fixture.source);
@@ -575,6 +834,7 @@ async function safeCleanup(root) {
   await fs.promises.rm(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
+let verificationError = null;
 try {
   await verifySuccessfulMoveAndIdempotency();
   await verifyActualAdminSqliteCommit();
@@ -586,9 +846,25 @@ try {
   await verifyRollbackOnDatabaseFailure();
   await verifySilentWorkerExitFails();
   await verifySameSizeCorruptionBlocksDeletion();
+  await verifyCleanupQuarantineClosesLateFileRace();
+  await verifyLeaseSchemaMigratesExistingJournal();
+  await verifyDatabaseLeasePreventsDoubleExecution();
+  await verifyClosePreservesRollbackCheckpoint();
+  await verifyClosePreservesCleanupCheckpoint();
+  await verifyJunctionEscapeIsRejected();
+  await verifyConflictPayloadAndClientJobPropagation();
   await verifyHttpResponsivenessDuringCopy();
   verifySourceStructure();
-  console.log("work-move-jobs: ok (idempotency, checkpoint recovery, rollback, responsive HTTP)");
+  console.log("work-move-jobs: ok (idempotency, quarantine, lease/CAS, checkpoint recovery, rollback, responsive HTTP)");
+} catch (error) {
+  verificationError = error;
 } finally {
-  for (const root of temporaryRoots.reverse()) await safeCleanup(root);
+  for (const root of temporaryRoots.reverse()) {
+    try {
+      await safeCleanup(root);
+    } catch (error) {
+      if (!verificationError) verificationError = error;
+    }
+  }
 }
+if (verificationError) throw verificationError;

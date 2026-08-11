@@ -52,6 +52,8 @@ let uiIdleTimer = null;
 let pointerMoveFrame = null;
 let sidebarCollapsed = false;
 let streamNeedsActivation = false;
+let pendingMoveJob = null;
+let movePollController = null;
 
 const PLYR_DIRECT_CONTROLS = ["play-large", "play", "progress", "current-time", "duration", "mute", "volume", "settings", "fullscreen"];
 const PLYR_STREAM_CONTROLS = ["play-large", "play", "mute", "volume", "fullscreen"];
@@ -59,6 +61,7 @@ const mobileStreamControlsQuery = window.matchMedia("(max-width: 640px)");
 const mobileSidebarQuery = window.matchMedia("(max-width: 900px)");
 const PLAYER_SIDEBAR_STORAGE_KEY = "fanhao.player.sidebar-collapsed";
 const LOCAL_MARKER_RELEASE_DELAY_MS = 900;
+const ACTIVE_MOVE_STORAGE_KEY = workId ? `fanhao.work-move.${workId}` : "";
 
 initializePlayerExperience();
 
@@ -87,7 +90,8 @@ els.correctActor?.addEventListener("click", () => {
 });
 
 els.moveToPerson?.addEventListener("click", () => {
-  moveCurrentWorkToPerson();
+  if (pendingMoveJob?.id) resumePendingMoveJob();
+  else moveCurrentWorkToPerson();
 });
 
 els.toggleSidebar?.addEventListener("click", () => {
@@ -154,6 +158,12 @@ els.video?.addEventListener("error", () => {
 
 window.addEventListener("beforeunload", () => {
   reportProgress();
+});
+window.addEventListener("pagehide", () => {
+  movePollController?.abort();
+});
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted) restoreMoveJobEntry();
 });
 
 mobileStreamControlsQuery.addEventListener?.("change", () => {
@@ -294,6 +304,7 @@ async function load() {
     updateDeleteLocalButton();
     updateCorrectActorButton();
     updateMoveToPersonButton();
+    await restoreMoveJobEntry();
     const video = selectInitialVideo(currentWork);
     if (!video) {
       showNotice("这个作品没有可播放的视频");
@@ -1192,8 +1203,10 @@ function updateMoveToPersonButton() {
   const available = isTrustedNetworkFeatureAvailable() && currentWork && !currentWork.missingLocal && !currentWork.galleryMedia;
   els.moveToPerson.hidden = !available;
   els.moveToPerson.disabled = !available;
-  els.moveToPerson.textContent = "迁移演员";
-  els.moveToPerson.title = available ? "移动作品文件夹，并把作品分配给指定人物" : "";
+  els.moveToPerson.textContent = pendingMoveJob?.id ? "恢复迁移" : "迁移演员";
+  els.moveToPerson.title = available
+    ? pendingMoveJob?.id ? `继续任务 ${pendingMoveJob.id}` : "移动作品文件夹，并把作品分配给指定人物"
+    : "";
 }
 
 function parsePersonIdInput(value) {
@@ -1577,29 +1590,25 @@ async function moveCurrentWorkToPerson() {
   els.moveToPerson.textContent = "迁移中";
   try {
     const idempotencyKey = globalThis.crypto?.randomUUID?.() || `move-${currentWork.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const data = await api(`/api/works/${encodeURIComponent(currentWork.id)}/move-to-person`, {
-      method: "POST",
-      body: target.mode === "create"
-        ? { createPerson: target.createPerson, idempotencyKey }
-        : { personId: target.personId, idempotencyKey }
-    });
+    let data;
+    try {
+      data = await api(`/api/works/${encodeURIComponent(currentWork.id)}/move-to-person`, {
+        method: "POST",
+        body: target.mode === "create"
+          ? { createPerson: target.createPerson, idempotencyKey }
+          : { personId: target.personId, idempotencyKey }
+      });
+    } catch (error) {
+      if (!error.job?.id) throw error;
+      data = { job: error.job };
+    }
+    rememberMoveJob(data.job);
     const completedJob = await waitForWorkMoveJob(data.job);
     const result = completedJob.result || {};
-    if (result.work) {
-      currentWork = result.work;
-      currentVideo = (currentWork.videos || []).find((video) => video.id === currentVideo?.id) || selectInitialVideo(currentWork);
-      document.title = `${currentWork.title} - FanHao`;
-      els.title.textContent = currentWork.title;
-      renderFiles(currentWork);
-      renderMeta(currentWork);
-      updateMarkerButton();
-      updateDeleteLocalButton();
-      updateCorrectActorButton();
-      updateMoveToPersonButton();
-      updateOpenFileButton();
-    }
+    applyCompletedMoveJob(completedJob);
     showNotice(`已迁移到：${result.person?.name || targetPerson?.name || target.personId || target.createPerson?.name}`);
   } catch (error) {
+    if (error?.name === "AbortError") return;
     els.moveToPerson.textContent = "迁移失败";
     els.moveToPerson.title = error.message || "迁移失败";
     showNotice(error.message || "迁移作品失败");
@@ -1612,26 +1621,130 @@ async function moveCurrentWorkToPerson() {
 }
 
 async function waitForWorkMoveJob(initialJob) {
+  movePollController?.abort();
+  const controller = new AbortController();
+  movePollController = controller;
   let job = initialJob;
   let cleanupRetryRequested = false;
   if (!job?.id) throw new Error("服务没有返回文件移动任务");
-  while (job.status !== "completed") {
-    if (["rolled_back", "failed"].includes(job.status)) {
-      throw new Error(job.error || "文件移动失败，原目录已保留");
+  rememberMoveJob(job);
+  try {
+    while (job.status !== "completed") {
+      if (["rolled_back", "failed"].includes(job.status)) {
+        throw new Error(job.error || "文件移动失败，原目录已保留");
+      }
+      if (job.status === "cleanup_pending" && job.error) {
+        if (cleanupRetryRequested) throw new Error(`${job.error}；目标目录和数据库已提交，可稍后重试清理源目录`);
+        const retryPayload = await api(`/api/work-move-jobs/${encodeURIComponent(job.id)}/retry`, { method: "POST", signal: controller.signal });
+        job = retryPayload.job;
+        rememberMoveJob(job);
+        cleanupRetryRequested = true;
+      }
+      const percent = Math.max(0, Math.min(100, Math.round(Number(job.progress || 0) * 100)));
+      els.moveToPerson.textContent = job.phase === "cleanup" ? "清理源目录" : percent > 0 ? `迁移中 ${percent}%` : "迁移中";
+      await abortableDelay(500, controller.signal);
+      const payload = await api(`/api/work-move-jobs/${encodeURIComponent(job.id)}`, { signal: controller.signal });
+      job = payload.job;
+      rememberMoveJob(job);
     }
-    if (job.status === "cleanup_pending" && job.error) {
-      if (cleanupRetryRequested) throw new Error(`${job.error}；目标目录和数据库已提交，可稍后重试清理源目录`);
-      const retryPayload = await api(`/api/work-move-jobs/${encodeURIComponent(job.id)}/retry`, { method: "POST" });
-      job = retryPayload.job;
-      cleanupRetryRequested = true;
-    }
-    const percent = Math.max(0, Math.min(100, Math.round(Number(job.progress || 0) * 100)));
-    els.moveToPerson.textContent = job.phase === "cleanup" ? "清理源目录" : percent > 0 ? `迁移中 ${percent}%` : "迁移中";
-    await delay(500);
-    const payload = await api(`/api/work-move-jobs/${encodeURIComponent(job.id)}`);
-    job = payload.job;
+    clearRememberedMoveJob();
+    return job;
+  } finally {
+    if (movePollController === controller) movePollController = null;
   }
-  return job;
+}
+
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function rememberMoveJob(job) {
+  if (!job?.id || !ACTIVE_MOVE_STORAGE_KEY) return;
+  pendingMoveJob = job;
+  try {
+    window.localStorage.setItem(ACTIVE_MOVE_STORAGE_KEY, job.id);
+  } catch {}
+  updateMoveToPersonButton();
+}
+
+function clearRememberedMoveJob() {
+  pendingMoveJob = null;
+  if (ACTIVE_MOVE_STORAGE_KEY) {
+    try {
+      window.localStorage.removeItem(ACTIVE_MOVE_STORAGE_KEY);
+    } catch {}
+  }
+  updateMoveToPersonButton();
+}
+
+async function restoreMoveJobEntry() {
+  if (!ACTIVE_MOVE_STORAGE_KEY) return;
+  let jobId = "";
+  try {
+    jobId = window.localStorage.getItem(ACTIVE_MOVE_STORAGE_KEY) || "";
+  } catch {}
+  if (!jobId) return;
+  try {
+    const payload = await api(`/api/work-move-jobs/${encodeURIComponent(jobId)}`);
+    if (payload.job?.status === "completed") {
+      applyCompletedMoveJob(payload.job);
+      clearRememberedMoveJob();
+      return;
+    }
+    rememberMoveJob(payload.job);
+  } catch (error) {
+    if (error?.statusCode === 404) clearRememberedMoveJob();
+  }
+}
+
+async function resumePendingMoveJob() {
+  if (!pendingMoveJob?.id) return;
+  els.moveToPerson.disabled = true;
+  try {
+    let job = pendingMoveJob;
+    if (["rolled_back", "failed"].includes(job.status)) {
+      const payload = await api(`/api/work-move-jobs/${encodeURIComponent(job.id)}/retry`, { method: "POST" });
+      job = payload.job;
+      rememberMoveJob(job);
+    }
+    const completed = await waitForWorkMoveJob(job);
+    applyCompletedMoveJob(completed);
+    showNotice("迁移任务已完成");
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    showNotice(error.message || "恢复迁移任务失败");
+    updateMoveToPersonButton();
+  }
+}
+
+function applyCompletedMoveJob(job) {
+  const result = job?.result || {};
+  if (!result.work) return;
+  currentWork = result.work;
+  currentVideo = (currentWork.videos || []).find((video) => video.id === currentVideo?.id) || selectInitialVideo(currentWork);
+  document.title = `${currentWork.title} - FanHao`;
+  els.title.textContent = currentWork.title;
+  renderFiles(currentWork);
+  renderMeta(currentWork);
+  updateMarkerButton();
+  updateDeleteLocalButton();
+  updateCorrectActorButton();
+  updateMoveToPersonButton();
+  updateOpenFileButton();
 }
 
 async function correctCurrentActorFromFolder() {

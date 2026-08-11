@@ -19,6 +19,7 @@ import { createCoreDbService } from "./src/modules/fanhao/server/library/core-db
 import { ACTOR_MOVIE_CACHE_TABLES, ACTOR_MOVIE_INFO_CACHE_TABLES, ACTOR_PROFILE_CACHE_TABLES, cacheDependencyTables, compositeTableStamp } from "./src/modules/fanhao/server/library/cache-contracts.js";
 import { createCoreLibraryService } from "./src/modules/fanhao/server/library/core-library-service.js";
 import { createCoreLibrarySyncService } from "./src/modules/fanhao/server/library/core-library-sync-service.js";
+import { ensureRealPathWithinRoots } from "./src/modules/fanhao/server/library/library-path-safety.js";
 import { createFanhaoDependencies } from "./src/modules/fanhao/server/composition.js";
 import { createFavoriteStateService } from "./src/modules/fanhao/server/collections/favorite-state-service.js";
 import { createLibraryPathServices } from "./src/modules/fanhao/server/library/library-paths.js";
@@ -1916,13 +1917,7 @@ function ensureLibraryDirectoryPath(dirPath, label = "文件夹") {
     error.statusCode = 400;
     throw error;
   }
-  const allowed = libraryOpenRoots().some((rootPath) => pathWithinRoot(fullPath, rootPath));
-  if (!allowed) {
-    const error = new Error(`${label}不在资料库根目录内`);
-    error.statusCode = 400;
-    throw error;
-  }
-  return fullPath;
+  return ensureRealPathWithinRoots(fullPath, libraryOpenRoots(), label);
 }
 
 function refreshLibrary() {

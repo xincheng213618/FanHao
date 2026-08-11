@@ -685,6 +685,15 @@ export function createAdminCoreMutationService({
       error.statusCode = 404;
       throw error;
     }
+    const sharedLocalWorks = db
+      .prepare("SELECT id, work_id, local_path FROM local_works WHERE local_path IS NOT NULL AND trim(local_path) <> ''")
+      .all()
+      .filter((candidate) => path.resolve(candidate.local_path).toLowerCase() === path.resolve(oldDir).toLowerCase());
+    if (sharedLocalWorks.some((candidate) => Number(candidate.id) !== Number(row.id))) {
+      const error = new Error("这个作品文件夹同时属于多个本地作品，拒绝迁移整个目录");
+      error.statusCode = 409;
+      throw error;
+    }
 
     const before = db
       .prepare(
@@ -761,6 +770,7 @@ export function createAdminCoreMutationService({
       oldDir,
       newDir,
       sourceInfoPath: row.source_info_path || "",
+      libraryRoots: libraryOpenRoots().map((rootPath) => sourcePathToAbsolute(rootPath)).filter(Boolean),
       createdPerson,
       before
     };
