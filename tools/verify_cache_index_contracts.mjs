@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ACTOR_MOVIE_CACHE_TABLES, ACTOR_PROFILE_CACHE_TABLES, cacheDependencyTables, compositeTableStamp } from "../src/modules/fanhao/server/library/cache-contracts.js";
+import { ACTOR_MOVIE_CACHE_TABLES, ACTOR_MOVIE_INFO_CACHE_TABLES, ACTOR_PROFILE_CACHE_TABLES, cacheDependencyTables, compositeTableStamp } from "../src/modules/fanhao/server/library/cache-contracts.js";
 import { createPeopleScopeService } from "../src/modules/fanhao/server/people/people-scope-service.js";
 import { createImageLibraryIndexService } from "../src/modules/content-index/server/image-library-index-service.js";
 import { CURRENT_INDEX_SCHEMA, PARSER_VERSION } from "../src/modules/content-index/server/image-library-index-contract.js";
@@ -13,6 +13,11 @@ assert.deepEqual(
   cacheDependencyTables("actor_movies"),
   ACTOR_MOVIE_CACHE_TABLES,
   "actor movie invalidation must cover every table read by its SQL"
+);
+assert.deepEqual(
+  ACTOR_MOVIE_INFO_CACHE_TABLES,
+  ["work_people", "works", "work_external_refs"],
+  "local metadata enrichment must ignore image/person presentation tables and invalidate for every selected metadata table"
 );
 const coreDbSource = fs.readFileSync(path.resolve("src/modules/fanhao/server/library/core-db-service.js"), "utf8");
 for (const table of ["person_external_refs", "work_external_refs", "person_aliases"]) {

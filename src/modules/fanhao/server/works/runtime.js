@@ -37,9 +37,14 @@ export function createWorksRuntime(deps) {
     requestDeps().workQueryService.prewarm();
   }
 
+  function prewarmLocalMetadata() {
+    requestDeps().workQueryService.prewarmLocalMetadata();
+  }
+
   return {
     routeApi,
     routeMedia,
+    prewarmLocalMetadata,
     start
   };
 }

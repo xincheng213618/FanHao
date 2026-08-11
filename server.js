@@ -16,7 +16,7 @@ import { createAdminCoreMutationService } from "./src/modules/fanhao/server/admi
 import { createAdminMaintenanceTaskService } from "./src/modules/fanhao/server/admin/admin-maintenance-task-service.js";
 import { createAdminPersonService } from "./src/modules/fanhao/server/admin/admin-person-service.js";
 import { createCoreDbService } from "./src/modules/fanhao/server/library/core-db-service.js";
-import { ACTOR_MOVIE_CACHE_TABLES, ACTOR_PROFILE_CACHE_TABLES, cacheDependencyTables, compositeTableStamp } from "./src/modules/fanhao/server/library/cache-contracts.js";
+import { ACTOR_MOVIE_CACHE_TABLES, ACTOR_MOVIE_INFO_CACHE_TABLES, ACTOR_PROFILE_CACHE_TABLES, cacheDependencyTables, compositeTableStamp } from "./src/modules/fanhao/server/library/cache-contracts.js";
 import { createCoreLibraryService } from "./src/modules/fanhao/server/library/core-library-service.js";
 import { createCoreLibrarySyncService } from "./src/modules/fanhao/server/library/core-library-sync-service.js";
 import { createFanhaoDependencies } from "./src/modules/fanhao/server/composition.js";
@@ -498,6 +498,7 @@ const actorMovieService = createActorMovieService({
   createId,
   dbBoolOrNull,
   getCoreDb,
+  getInfoStamp: actorMovieInfoStamp,
   getLibrary: () => library,
   getSearchStamp: searchSourceStamp,
   getStamp: actorMovieStamp,
@@ -904,6 +905,7 @@ const moduleRegistry = await discoverFanHaoModules({
       fanhao: createFanhaoDependencies({
         adminCoreMutationService,
         actorMovieStamp,
+        actorMovieInfoStamp,
         actorProfileMergeCandidates,
         actorProfileRow,
         actorMissingSearchWorks,
@@ -1495,6 +1497,10 @@ function workCoverStamp() {
 
 function actorMovieStamp() {
   return compositeTableStamp(tableDataStamp, ACTOR_MOVIE_CACHE_TABLES);
+}
+
+function actorMovieInfoStamp() {
+  return compositeTableStamp(tableDataStamp, ACTOR_MOVIE_INFO_CACHE_TABLES);
 }
 
 function rankingStamp() {

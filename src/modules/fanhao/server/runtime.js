@@ -20,8 +20,13 @@ export function createFanhaoRuntime(deps) {
   }
 
   function start() {
-    // These are optional response-cache warmups, not service dependencies.
-    // Large libraries can spend many seconds here, so keep normal startup lazy.
+    // This deliberately moves the one-time exact local code derivation into
+    // readiness (before listen) so it cannot monopolize the shared HTTP event
+    // loop later. It is startup latency, not free work. A transient read error
+    // is logged and retried by the first request; failed batches are not cached.
+    prewarmLocalMetadataBeforeListen(works);
+    // The remaining response-cache warmups are optional and substantially
+    // broader, so normal startup keeps them disabled.
     if (process.env.FANHAO_EAGER_PREWARM !== "1") return;
     library.start();
     catalog.start();
@@ -35,4 +40,14 @@ export function createFanhaoRuntime(deps) {
     start,
     settings
   };
+}
+
+export function prewarmLocalMetadataBeforeListen(works, warn = console.warn) {
+  try {
+    works.prewarmLocalMetadata();
+    return true;
+  } catch (error) {
+    warn("[fanhao] local metadata prewarm failed:", error.message);
+    return false;
+  }
 }

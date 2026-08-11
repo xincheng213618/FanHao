@@ -2,6 +2,7 @@ export function createActorMovieService({
   createId,
   dbBoolOrNull,
   getCoreDb,
+  getInfoStamp,
   getLibrary,
   getSearchStamp,
   getStamp,
@@ -15,12 +16,14 @@ export function createActorMovieService({
   storedWorkCodeKey,
   workCodeKeys
 }) {
-  const LOCAL_CODE_BATCH_SIZE = 200;
+  const LOCAL_CODE_BATCH_SIZE = 900;
   let actorMovieCache = null;
   let actorMovieByCodeKeyCache = null;
   let actorMissingSearchCache = null;
   let actorMoviePersonCache = null;
   let actorMoviePersonIdCache = null;
+  let actorMovieInfoByCodeKeyCache = null;
+  const currentInfoStamp = typeof getInfoStamp === "function" ? getInfoStamp : getStamp;
 
   function normalizePersonIds(personIds = []) {
     return [...new Set((personIds || [])
@@ -239,6 +242,175 @@ export function createActorMovieService({
     return result;
   }
 
+  function infoRowsForWorks(works = []) {
+    if (!works.length) return [];
+    const stamp = currentInfoStamp();
+    if (actorMovieInfoByCodeKeyCache?.stamp !== stamp) {
+      const previousRows = actorMovieInfoByCodeKeyCache?.rows;
+      actorMovieInfoByCodeKeyCache = {
+        stamp,
+        rows: new Map(),
+        staleRows: previousRows?.size ? previousRows : actorMovieInfoByCodeKeyCache?.staleRows || null
+      };
+    }
+
+    const rowsByCodeKey = actorMovieInfoByCodeKeyCache.rows;
+    const codeKeys = [...new Set(works
+      .flatMap((work) => workCodeKeys(work))
+      .map((value) => storedWorkCodeKey(value))
+      .filter(Boolean))];
+    const pending = codeKeys.filter((codeKey) => !rowsByCodeKey.has(codeKey));
+    let queryFailed = false;
+    let queryError = null;
+
+    for (let offset = 0; offset < pending.length; offset += LOCAL_CODE_BATCH_SIZE) {
+      const batch = pending.slice(offset, offset + LOCAL_CODE_BATCH_SIZE);
+      const loaded = new Map();
+      try {
+        const placeholders = batch.map(() => "?").join(", ");
+        const rows = getCoreDb()
+          .prepare(`
+            SELECT
+              CAST(wp.person_id AS TEXT) AS person_id,
+              CAST(w.id AS TEXT) AS work_id,
+              w.code,
+              w.code_search AS code_key,
+              w.title,
+              wref.url AS detail_url,
+              w.release_date,
+              w.rating,
+              w.rating_count,
+              w.has_magnet,
+              w.is_streamable,
+              w.has_subtitles,
+              w.javdb_tags_json,
+              wp.sort_order AS position_index,
+              wp.created_at AS fetched_at,
+              wp.updated_at
+            FROM works w
+            JOIN work_people wp ON wp.work_id = w.id
+            LEFT JOIN work_external_refs wref
+              ON wref.work_id = w.id
+             AND wref.provider = 'javdb-video'
+            WHERE w.code_search IN (${placeholders})
+              AND wp.source = 'actor_movies'
+            ORDER BY person_id, COALESCE(position_index, 999999), w.code
+          `)
+          .all(...batch);
+        for (const row of rows) {
+          const codeKey = storedWorkCodeKey(row.code_key) || looseWorkCodeKey(row.code);
+          if (codeKey && !loaded.has(codeKey)) loaded.set(codeKey, row);
+        }
+      } catch (error) {
+        console.warn("[core-actor-movies-local-info]", error.message);
+        queryFailed = true;
+        queryError = error;
+        break;
+      }
+      for (const codeKey of batch) rowsByCodeKey.set(codeKey, loaded.get(codeKey) || null);
+    }
+
+    if (!queryFailed && codeKeys.some((codeKey) => !rowsByCodeKey.get(codeKey))) {
+      try {
+        const looseRows = legacyLooseInfoRowsByCodeKey(actorMovieInfoByCodeKeyCache);
+        for (const codeKey of codeKeys) {
+          if (!rowsByCodeKey.get(codeKey) && looseRows.has(codeKey)) {
+            rowsByCodeKey.set(codeKey, looseRows.get(codeKey));
+          }
+        }
+      } catch (error) {
+        console.warn("[core-actor-movies-local-info-legacy-code]", error.message);
+        queryFailed = true;
+        queryError = error;
+        for (const codeKey of pending) {
+          if (rowsByCodeKey.get(codeKey) === null) rowsByCodeKey.delete(codeKey);
+        }
+      }
+    }
+
+    if (queryFailed) {
+      const staleRows = actorMovieInfoByCodeKeyCache.staleRows;
+      // Discard every row loaded during the failed refresh. This both avoids
+      // partial negative caching and preserves the last complete usable map
+      // across repeated stamp changes until a refresh succeeds.
+      actorMovieInfoByCodeKeyCache.rows = new Map();
+      if (staleRows && codeKeys.every((codeKey) => staleRows.has(codeKey))) {
+        return selectedInfoRowsForWorks(works, staleRows);
+      }
+      // An unavailable database is not proof that the requested metadata is
+      // absent. Without a complete prior value, fail explicitly and let the
+      // next request retry instead of publishing or caching an empty result.
+      throw queryError || new Error("actor movie metadata query failed");
+    }
+
+    return selectedInfoRowsForWorks(works, rowsByCodeKey);
+  }
+
+  function legacyLooseInfoRowsByCodeKey(cache) {
+    if (cache.looseRows) return cache.looseRows;
+    const rowsByCodeKey = new Map();
+    const rows = getCoreDb()
+      .prepare(`
+        SELECT
+          CAST(wp.person_id AS TEXT) AS person_id,
+          CAST(w.id AS TEXT) AS work_id,
+          w.code,
+          w.code_search AS code_key,
+          w.title,
+          wref.url AS detail_url,
+          w.release_date,
+          w.rating,
+          w.rating_count,
+          w.has_magnet,
+          w.is_streamable,
+          w.has_subtitles,
+          w.javdb_tags_json,
+          wp.sort_order AS position_index,
+          wp.created_at AS fetched_at,
+          wp.updated_at
+        FROM works w
+        JOIN work_people wp ON wp.work_id = w.id
+        LEFT JOIN work_external_refs wref
+          ON wref.work_id = w.id
+         AND wref.provider = 'javdb-video'
+        WHERE wp.source = 'actor_movies'
+          AND (
+            w.code_search IS NULL
+            OR TRIM(w.code_search) = ''
+            OR w.code_search NOT GLOB '*[A-Za-z0-9]*'
+            OR LOWER(
+              REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+                w.code, '-', ''), '_', ''), '.', ''), ' ', ''), '﹣', ''), '－', ''), '–', ''), '—', ''), '/', '')
+            ) != LOWER(w.code_search)
+          )
+        ORDER BY person_id, COALESCE(position_index, 999999), w.code
+      `)
+      .all();
+    for (const row of rows) {
+      const codeKey = storedWorkCodeKey(row.code_key) || looseWorkCodeKey(row.code);
+      if (codeKey && !rowsByCodeKey.has(codeKey)) rowsByCodeKey.set(codeKey, row);
+    }
+    cache.looseRows = rowsByCodeKey;
+    return rowsByCodeKey;
+  }
+
+  function selectedInfoRowsForWorks(works, rowsByCodeKey) {
+    const result = [];
+    const seen = new Set();
+    for (const work of works) {
+      for (const value of workCodeKeys(work)) {
+        const codeKey = storedWorkCodeKey(value);
+        if (!codeKey || seen.has(codeKey)) continue;
+        const row = rowsByCodeKey.get(codeKey);
+        if (!row) continue;
+        seen.add(codeKey);
+        result.push(row);
+        break;
+      }
+    }
+    return result;
+  }
+
   function infoSummary(row, fallbackCode = "") {
     return {
       code: normalizeWorkCode(row?.code) || fallbackCode || row?.code || "",
@@ -288,7 +460,7 @@ export function createActorMovieService({
   }
 
   function enrichLocalWorksWithIndex(localWorks) {
-    return enrichLocalWorks(localWorks, rowsForWorks(localWorks));
+    return enrichLocalWorks(localWorks, infoRowsForWorks(localWorks));
   }
 
   function missingWorkFromRow(person, row, codeKey = "") {
@@ -455,6 +627,7 @@ export function createActorMovieService({
     actorMissingSearchCache = null;
     actorMoviePersonCache = null;
     actorMoviePersonIdCache = null;
+    actorMovieInfoByCodeKeyCache = null;
   }
 
   function invalidateSearch() {
@@ -467,6 +640,7 @@ export function createActorMovieService({
     actorMissingSearchCache = null;
     actorMoviePersonCache = null;
     actorMoviePersonIdCache = null;
+    actorMovieInfoByCodeKeyCache = null;
   }
 
   return {

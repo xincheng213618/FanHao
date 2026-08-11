@@ -39,6 +39,7 @@ export function createFanhaoDependencies(deps) {
       "workQueryStamp"
     ]),
     works: pick(deps, [
+      "actorMovieInfoStamp",
       "adminCoreMutationService",
       "actorMovieStamp",
       "actorProfileMergeCandidates",

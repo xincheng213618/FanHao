@@ -10,6 +10,7 @@ const LEGACY_MOBILE_PREWARM_BATCH_SIZE = 48;
 const LEGACY_MOBILE_PREWARM_DELAY_MS = 500;
 
 export function createWorkQueryService({
+  actorMovieInfoStamp,
   actorMovieStamp,
   actorMissingSearchWorks,
   actorMissingSearchWorksForPeople = () => [],
@@ -44,6 +45,7 @@ export function createWorkQueryService({
   publicWork,
   publicWorkAvailability,
   rankingMissingSearchWorks,
+  recordPerformanceSpan = null,
   scheduleBackground = (callback, delay = 0) => setTimeout(callback, delay),
   searchPeople,
   storedWorkCodeKey,
@@ -88,6 +90,17 @@ export function createWorkQueryService({
   let dynamicFacetCache = new WeakMap();
   let sortedWorksCache = new WeakMap();
   const workCodeCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+  const currentActorMovieInfoStamp = actorMovieInfoStamp || actorMovieStamp;
+
+  function measure(label, callback) {
+    if (!recordPerformanceSpan) return callback();
+    const started = performance.now();
+    try {
+      return callback();
+    } finally {
+      recordPerformanceSpan(label, performance.now() - started);
+    }
+  }
 
   function currentStamp() {
     return `${library.scannedAt || ""}:${library.worksById.size}:${workQueryStamp()}:${workClassificationService.visibilityStamp()}`;
@@ -102,9 +115,9 @@ export function createWorkQueryService({
   }
 
   function enrichedWorks() {
-    const stamp = `${library.scannedAt || ""}:${library.worksById.size}:${actorMovieStamp()}`;
+    const stamp = `${library.scannedAt || ""}:${library.worksById.size}:${currentActorMovieInfoStamp()}`;
     if (enrichedWorksCache?.stamp === stamp) return enrichedWorksCache.works;
-    const works = enrichLocalWorksWithActorMovieIndex(allWorks());
+    const works = measure("enrich", () => enrichLocalWorksWithActorMovieIndex(allWorks()));
     enrichedWorksCache = { stamp, works };
     return works;
   }
@@ -151,6 +164,7 @@ export function createWorkQueryService({
     const cached = cachedBySort?.get(cacheKey);
     if (cached?.stamp === stamp) return cached.works;
 
+    const sortStarted = recordPerformanceSpan ? performance.now() : 0;
     const list = [...works];
     const usesMetadata = [
       "releaseDesc",
@@ -235,6 +249,7 @@ export function createWorkQueryService({
     const nextCachedBySort = cachedBySort || new Map();
     nextCachedBySort.set(cacheKey, { stamp, works: list });
     if (!cachedBySort) sortedWorksCache.set(works, nextCachedBySort);
+    if (recordPerformanceSpan) recordPerformanceSpan("sort", performance.now() - sortStarted);
     return list;
   }
 
@@ -290,6 +305,7 @@ export function createWorkQueryService({
     const cached = staticFacetCache.get(works);
     if (cached?.stamp === stamp) return cached.facets;
 
+    const facetStarted = recordPerformanceSpan ? performance.now() : 0;
     const facets = {
       all: works.length,
       playable: 0,
@@ -319,6 +335,7 @@ export function createWorkQueryService({
     }
 
     staticFacetCache.set(works, { stamp, facets });
+    if (recordPerformanceSpan) recordPerformanceSpan("facets", performance.now() - facetStarted);
     return facets;
   }
 
@@ -372,6 +389,7 @@ export function createWorkQueryService({
   }
 
   function pagedWorksPayload(works, url, extra = {}, options = {}) {
+    const pageStarted = recordPerformanceSpan ? performance.now() : 0;
     ensureListResponseCache();
     const limit = clampInteger(url.searchParams.get("limit"), defaultWorkLimit, 1, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
@@ -392,7 +410,9 @@ export function createWorkQueryService({
     }
     const page = pageSource.map((work) => preparedPublicWork(work, options));
     prewarmRemoteImagesForWorks(page);
-    return { ...extra, count: page.length, total, limit, offset, sort, works: page };
+    const payload = { ...extra, count: page.length, total, limit, offset, sort, works: page };
+    if (recordPerformanceSpan) recordPerformanceSpan("page-hydrate", performance.now() - pageStarted);
+    return payload;
   }
 
   function readPreparedWork(work, options = {}) {
@@ -547,7 +567,7 @@ export function createWorkQueryService({
         : worksForScopeAndCategory(scope, category, stamp);
       listSourceCache.set(scopedCacheKey, { stamp, works: scopedWorks });
       filtered = filters.length
-        ? scopedWorks.filter((work) => filters.every((item) => workMatchesFilter(work, item)))
+        ? measure("filter", () => scopedWorks.filter((work) => filters.every((item) => workMatchesFilter(work, item))))
         : scopedWorks;
       if (filters.every((item) => cacheableFilters.has(item))) {
         listSourceCache.set(cacheKey, { stamp: filterStamp, works: filtered });
@@ -569,10 +589,12 @@ export function createWorkQueryService({
   function categorySources(stamp = currentStamp()) {
     if (categorySourcesCache?.stamp === stamp) return categorySourcesCache.sources;
     const sources = new Map(WORK_CATEGORY_OPTIONS.map((option) => [option.value, []]));
-    for (const work of enrichedWorks()) {
-      const category = workCategory(work);
-      sources.get(category)?.push(work);
-    }
+    measure("category", () => {
+      for (const work of enrichedWorks()) {
+        const category = workCategory(work);
+        sources.get(category)?.push(work);
+      }
+    });
     categorySourcesCache = { stamp, sources };
     return sources;
   }
@@ -882,6 +904,7 @@ export function createWorkQueryService({
     listPayload,
     listFromWorksPayload,
     prewarm,
+    prewarmLocalMetadata: enrichedWorks,
     searchPayload,
     visibilityStamp: workClassificationService.visibilityStamp
   };

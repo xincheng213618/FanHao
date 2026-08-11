@@ -1537,6 +1537,7 @@ const collectionQueryServiceSource = read("src/modules/fanhao/server/user-state/
 assert(libraryRuntime.includes("prewarmLibraryPeoplePayloads(requestDeps())"), "FanHao must prepare people payloads before the first library request");
 assert(personListServiceSource.includes("const mainPeopleCache = new Map()"), "main and western people scopes must remain cached independently");
 assert(fanhaoRuntime.includes('process.env.FANHAO_EAGER_PREWARM !== "1"'), "full-library response prewarming must be opt-in so the HTTP port can open promptly");
+assert(fanhaoRuntime.includes("works.prewarmLocalMetadata();"), "bounded local metadata enrichment must finish before the shared HTTP port opens");
 assert(fanhaoRuntime.includes("library.start();"), "opt-in FanHao prewarming must retain the library response path");
 assert(fanhaoRuntime.includes("catalog.start();"), "opt-in FanHao prewarming must retain the catalog response path");
 assert(fanhaoRuntime.includes("userState.start();"), "opt-in FanHao prewarming must retain user collection response paths");
@@ -1565,6 +1566,9 @@ assert(coreDbService.includes("idx_works_status_code_search ON works(status, cod
 assert(coreDbService.includes("idx_work_people_updated_at ON work_people(updated_at)"), "actor-movie stamps must use a lightweight updated-at index");
 assert(actorMovieServiceSource.includes("function rowsForPeople(personIds = [])") && actorMovieServiceSource.includes("wp.person_id IN"), "person details must query actor movies only for the selected merged people");
 assert(actorMovieServiceSource.includes("function localCodeKeysForRows(rows = [], extraKeys = new Set())") && actorMovieServiceSource.includes("w.code_search IN"), "exact person searches must test only selected actor codes against local works");
+assert(actorMovieServiceSource.includes("function infoRowsForWorks(works = [])") && actorMovieServiceSource.includes("offset += LOCAL_CODE_BATCH_SIZE"), "local work enrichment must query only requested code keys in bounded SQLite batches");
+assert(actorMovieServiceSource.includes("function legacyLooseInfoRowsByCodeKey(cache)") && actorMovieServiceSource.includes("looseWorkCodeKey(row.code)"), "local work enrichment must preserve the legacy parsed-code fallback for empty stored keys");
+assert(actorMovieServiceSource.includes("throw queryError || new Error"), "failed local metadata batches must not be converted into negative-cache success");
 assert(coreLibraryServiceSource.includes("function localCodeKeysForRows(rows = [], extraKeys = new Set())") && coreLibraryServiceSource.includes("const localKeys = localCodeKeysForRows(rows, excludedCodeKeys)"), "person details must not build the full local-work code index to suppress duplicates");
 assert(workQueryServiceSource.includes("actorMissingSearchWorksForPeople([...exactPersonIds]"), "exact person searches must query actor movies only for matched people");
 assert(workQueryServiceSource.includes("exactPersonLocalWorks.filter(matchesExactPerson)"), "exact person searches must not enrich and scan the full local-work catalog");
@@ -1690,6 +1694,10 @@ actorMovieTestDb.close();
 assert.equal((collectionQueryServiceSource.match(/queried\.works\.slice\(offset, offset \+ limit\)/g) || []).length, 2, "favorites and history must paginate their fully queried collections before presenting work details");
 assert(userStateServiceSource.includes("stateRevision += 1"), "favorite and progress mutations must version cached search facets");
 const serviceLauncher = read("start-fanhao.ps1");
+assert(
+  /for \(\$i = 0; \$i -lt 60; \$i\+\+\)[\s\S]*Start-Sleep -Milliseconds 500/.test(serviceLauncher),
+  "FanHao launcher must retain at least a 30-second TCP readiness budget for bounded pre-listen metadata preparation"
+);
 assert(
   /if \(-not \$ready\)[\s\S]*Stop-Process -Id \$process\.Id -Force/.test(serviceLauncher),
   "FanHao launcher must stop a startup process that never opens its port"
@@ -2492,6 +2500,7 @@ assert.equal(lightweightMissingCodeWorks[0].missingCodeSearchPending, undefined,
 missingCodeSearchDb.close();
 
 let actorMovieDataStamp = "actor-v1";
+let actorMovieInfoDataStamp = "actor-info-v1";
 let enrichmentCount = 0;
 let localPrefixReadCount = 0;
 let personMergePrewarmCount = 0;
@@ -2531,6 +2540,7 @@ const queryWork = {
   infoCount: 1
 };
 const workQueryService = createWorkQueryService({
+  actorMovieInfoStamp: () => actorMovieInfoDataStamp,
   actorMovieStamp: () => actorMovieDataStamp,
   actorMissingSearchWorks: () => {
     globalActorMissingSearchCount += 1;
@@ -2741,10 +2751,14 @@ assert.equal(combinedWorkListAfterProgress.facets.all, 1, "combined work-list fa
 const combinedWorkSearchAfterProgress = workQueryService.searchPayload(combinedWorkSearchUrl);
 assert.equal(combinedWorkSearchAfterProgress.total, 1, "combined work-search caches must refresh when playback state changes");
 const workListPublicCountBeforeStaticChange = workListPublicCount;
-actorMovieDataStamp = "actor-v2";
+actorMovieDataStamp = "actor-presentation-v2";
+workQueryService.listPayload(workListUrl);
+assert.equal(enrichmentCount, 1, "image and person presentation updates must not invalidate local work metadata enrichment");
+actorMovieInfoDataStamp = "actor-info-v2";
+actorMovieDataStamp = "actor-v3";
 workQueryService.listPayload(workListUrl);
 assert.equal(enrichmentCount, 2, "actor-movie updates must invalidate the FanHao work-list enrichment cache");
-assert.equal(workListPublicCount, workListPublicCountBeforeStaticChange + 1, "static work changes must still rebuild prepared work payloads");
+assert.equal(workListPublicCount, workListPublicCountBeforeStaticChange + 2, "presentation and metadata changes must still rebuild prepared work payloads");
 const prefixReadsBeforeInvalidatedSearch = localPrefixReadCount;
 workQueryService.searchPayload(workSearchUrl);
 assert.equal(localPrefixReadCount, prefixReadsBeforeInvalidatedSearch + 1, "search data changes must invalidate matched work sources");

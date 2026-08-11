@@ -14,6 +14,12 @@ export const ACTOR_MOVIE_CACHE_TABLES = Object.freeze([
   "images"
 ]);
 
+export const ACTOR_MOVIE_INFO_CACHE_TABLES = Object.freeze([
+  "work_people",
+  "works",
+  "work_external_refs"
+]);
+
 const CACHE_TABLE_DEPENDENCIES = Object.freeze({
   actor_profiles: ACTOR_PROFILE_CACHE_TABLES,
   actor_movies: ACTOR_MOVIE_CACHE_TABLES
