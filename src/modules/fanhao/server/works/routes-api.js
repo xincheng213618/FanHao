@@ -32,6 +32,10 @@ function androidWorkMoveBody(req, body) {
   };
 }
 
+function isAndroidWorkMoveRequest(req) {
+  return String(req?.headers?.["x-fanhao-client"] || "").trim().toLowerCase() === "android";
+}
+
 export async function routeWorksApi(req, res, url, deps) {
   const {
     notFound,
@@ -191,7 +195,11 @@ export async function routeWorksApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = androidWorkMoveBody(req, await readJsonBody(req));
-      sendJson(res, 202, publicWorkMoveJobPayload(workMutationService.moveToPerson(decodeURIComponent(workMoveToPersonMatch[1]), body)));
+      sendJson(res, 202, publicWorkMoveJobPayload(workMutationService.moveToPerson(
+        decodeURIComponent(workMoveToPersonMatch[1]),
+        body,
+        { android: isAndroidWorkMoveRequest(req) }
+      )));
     } catch (error) {
       sendJson(res, error.statusCode || 500, safeWorkMoveRouteError(error, "迁移作品失败"));
     }

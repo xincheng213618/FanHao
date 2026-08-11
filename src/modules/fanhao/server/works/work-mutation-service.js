@@ -40,8 +40,12 @@ export function createWorkMutationService({
     return { ok: true, ...result };
   }
 
-  function moveToPerson(workId, body) {
-    return publicMoveJobPayload(workMoveJobService.start(workId, body));
+  function moveToPerson(workId, body, options = {}) {
+    // Android may only refer to a server-approved person.  The picker is
+    // advisory and can be stale or forged, so re-run the same selection rule
+    // at the command boundary before the journal prepares its move plan.
+    if (options.android) adminCoreMutationService.assertWorkMoveTarget(workId, body?.personId);
+    return publicMoveJobPayload(workMoveJobService.start(workId, body, { android: Boolean(options.android) }));
   }
 
   function moveTargets(workId, options = {}) {

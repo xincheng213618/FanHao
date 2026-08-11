@@ -52,6 +52,10 @@ function requestKey(workId, body) {
   const request = stableValue({
     workId: String(workId || ""),
     personId: String(body?.personId || "").trim(),
+    // An Android command has a stricter durable target policy than the
+    // desktop command.  It must never idempotently reuse a desktop journal
+    // row that was prepared with an explicit target directory.
+    ...(body?.androidCommand === true ? { androidCommand: true } : {}),
     targetDirectory: normalizedPathKey(body?.targetDirectory || body?.targetPath),
     createPerson: normalizedCreatePerson(body?.createPerson)
   });
@@ -416,19 +420,23 @@ export function createWorkMoveJobService({
     return active ? publicJob(active) : null;
   }
 
-  function start(workId, body = {}) {
+  function start(workId, body = {}, options = {}) {
+    // Persist the origin policy with the durable command.  It is deliberately
+    // not derived from a later HTTP request: recovery must keep enforcing the
+    // Android-only target rule after a restart or a different server process.
+    const requestBody = options.android ? { ...body, androidCommand: true } : body;
     const normalizedWorkId = String(workId || "").trim();
     if (!normalizedWorkId) {
       const error = new Error("作品编号无效");
       error.statusCode = 400;
       throw error;
     }
-    if (!body.personId && !body.createPerson) {
+    if (!requestBody.personId && !requestBody.createPerson) {
       const error = new Error("请选择目标人物");
       error.statusCode = 400;
       throw error;
     }
-    const key = requestKey(normalizedWorkId, body);
+    const key = requestKey(normalizedWorkId, requestBody);
     const db = getCoreDb();
     let scheduledId = "";
     let response = null;
@@ -481,7 +489,7 @@ export function createWorkMoveJobService({
             id, request_key, work_id, person_id, status, phase, request_json,
             attempts, created_at, updated_at
           ) VALUES (?, ?, ?, ?, 'queued', 'queued', ?, 1, ?, ?)
-        `).run(id, key, normalizedWorkId, String(body.personId || ""), JSON.stringify(body), createdAt, createdAt);
+        `).run(id, key, normalizedWorkId, String(requestBody.personId || ""), JSON.stringify(requestBody), createdAt, createdAt);
         scheduledId = id;
         response = publicJob(db.prepare("SELECT * FROM work_move_jobs WHERE id = ?").get(id));
       }
@@ -797,7 +805,8 @@ export function createWorkMoveJobService({
       if (!plan) {
         plan = adminCoreMutationService.prepareWorkMove(job.work_id, request.personId, {
           targetDirectory: request.targetDirectory || request.targetPath || "",
-          createPerson: request.createPerson || null
+          createPerson: request.createPerson || null,
+          androidCommand: request.androidCommand === true
         });
         try {
           plan = hydratePlanRoots(plan, jobId);

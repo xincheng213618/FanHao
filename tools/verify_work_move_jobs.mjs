@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -47,6 +48,18 @@ function createDatabase(root, source) {
   `);
   db.prepare("INSERT INTO move_records(work_id, person_id, local_path) VALUES ('1', 'source', ?)").run(source);
   return db;
+}
+
+function legacyDesktopRequestKey(workId, body) {
+  const clientKey = String(body.idempotencyKey || "").trim();
+  const request = {
+    createPerson: null,
+    personId: String(body.personId || "").trim(),
+    targetDirectory: "",
+    workId: String(workId || "")
+  };
+  const digest = crypto.createHash("sha256").update(JSON.stringify({ clientKey, request })).digest("hex");
+  return `client:${digest}`;
 }
 
 function createAdminFixture(db, fixture, {
@@ -299,6 +312,26 @@ async function verifyWorkLookupRecoversLostStartResponse() {
 
   db.prepare("UPDATE work_move_jobs SET status = 'blocked', phase = 'manual_review', error = 'fixture blocked' WHERE id = ?").run(started.id);
   assert.equal(service.findForWork("1")?.status, "blocked", "blocked work must remain discoverable instead of leaving the UI polling an unknown task");
+  await service.close();
+  db.close();
+}
+
+async function verifyLegacyDesktopIdempotencyReplay() {
+  const fixture = await createFixture("legacy-desktop-idempotency", 1);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const service = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
+  const body = { personId: "target", idempotencyKey: "legacy-desktop-replay" };
+  const stamp = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO work_move_jobs (
+      id, request_key, work_id, person_id, status, phase, request_json,
+      attempts, created_at, updated_at, finished_at
+    ) VALUES ('legacy-desktop-job', ?, '1', 'target', 'completed', 'completed', ?, 1, ?, ?, ?)
+  `).run(legacyDesktopRequestKey("1", body), JSON.stringify(body), stamp, stamp, stamp);
+  const replayed = service.start("1", body);
+  assert.equal(replayed.id, "legacy-desktop-job", "desktop replay must retain the pre-Android request fingerprint");
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM work_move_jobs").get().count, 1, "legacy desktop replay must not create another completed move job");
   await service.close();
   db.close();
 }
@@ -597,6 +630,8 @@ async function verifyActualAdminSqliteCommit() {
     return relative && (relative.startsWith("..") || path.isAbsolute(relative)) ? value : path.join(newPrefix, relative);
   };
   let reconciled = null;
+  let duplicateTargetDirectory = fixture.targetPerson;
+  let fallbackLookups = 0;
   const admin = createAdminCoreMutationService({
     actorIdFromJavdbUrl: () => "",
     actorProfileRow: () => null,
@@ -605,7 +640,10 @@ async function verifyActualAdminSqliteCommit() {
     cleanPersonNamePart: (value) => String(value || "").trim(),
     coreLocalPathPersonName: () => "",
     coreLocalPersonSourcePath: () => "",
-    corePersonFallbackRecord: (id) => ({ id: String(id), name: id === "2" ? "Target" : "Source" }),
+    corePersonFallbackRecord: (id) => {
+      fallbackLookups += 1;
+      return { id: String(id), name: id === "2" ? "Target" : "Source" };
+    },
     ensureLibraryDirectoryPath: (value) => {
       const resolved = path.resolve(value);
       if (!withinRoot(resolved)) throw new Error("fixture path escaped temporary root");
@@ -629,9 +667,16 @@ async function verifyActualAdminSqliteCommit() {
     refreshLibrary() {},
     relativeFromRoot: (value) => path.relative(fixture.root, value),
     replacePathPrefix: replacePrefix,
-    resolveLibraryPersonByPublicId: (id) => id === "2"
-      ? { id: "2", name: "Target", relativePath: fixture.targetPerson, sourcePaths: [fixture.targetPerson] }
-      : { id: "1", name: "Source", relativePath: fixture.sourcePerson, sourcePaths: [fixture.sourcePerson] },
+    resolveLibraryPersonByPublicId: (id) => ["2", "3"].includes(String(id))
+      ? {
+        id: String(id),
+        name: String(id) === "3" ? "Target Duplicate" : "Target",
+        relativePath: String(id) === "3" ? duplicateTargetDirectory : fixture.targetPerson,
+        sourcePaths: [String(id) === "3" ? duplicateTargetDirectory : fixture.targetPerson]
+      }
+      : String(id) === "1"
+        ? { id: "1", name: "Source", relativePath: fixture.sourcePerson, sourcePaths: [fixture.sourcePerson] }
+        : null,
     resolveLibraryWorkByPublicId: (id) => ({ id: String(id), title: `WORK-${id}`, missingLocal: false }),
     safeStat: (value) => { try { return fs.statSync(value); } catch { return null; } },
     sourcePathToAbsolute: (value) => path.resolve(value),
@@ -643,6 +688,111 @@ async function verifyActualAdminSqliteCommit() {
   const approvedTargets = admin.listWorkMoveTargets("1", { limit: 60 });
   assert.deepEqual(approvedTargets.candidates, [{ id: "2", name: "Target" }], "target enumeration must exclude the current directory and return only a writable server-resolved person");
   assert.equal(JSON.stringify(approvedTargets).includes(fixture.targetPerson), false, "target enumeration must never expose a filesystem path");
+
+  // Keep the in-memory Source record stale, then change its authoritative DB
+  // folder to Target.  Fresh Android validation must merge that DB path into
+  // ownership instead of trusting the old library sourcePaths snapshot.
+  db.prepare("UPDATE people SET folder_path = ? WHERE id = 1").run(fixture.targetPerson);
+  assert.throws(
+    () => admin.assertWorkMoveTarget("1", "2"),
+    (error) => error?.statusCode === 409 && error?.code === "WORK_MOVE_TARGET_UNAVAILABLE",
+    "fresh Android policy must reject a DB-updated indexed person's shared folder without a library refresh"
+  );
+  db.prepare("UPDATE people SET folder_path = NULL WHERE id = 1").run();
+
+  for (let id = 10; id < 20; id += 1) {
+    const folder = path.join(fixture.root, `db-only-person-${id}`);
+    await fs.promises.mkdir(folder, { recursive: true });
+    db.prepare("INSERT INTO people VALUES (?, ?, ?, ?, ?, 0, 'ok', NULL, 'fixture', '', '', 'unknown')")
+      .run(id, `DB Only ${id}`, `db only ${id}`, `DB Only ${id}`, folder);
+  }
+  fallbackLookups = 0;
+  const bulkTargets = admin.listWorkMoveTargets("1", { limit: 60, fresh: true });
+  assert.ok(bulkTargets.candidates.some((candidate) => candidate.id === "10"), "bulk fallback must still discover DB-only person folders");
+  assert.equal(fallbackLookups, 0, "fresh target selection must not perform one core-person fallback query per DB-only person");
+
+  // Warm the picker cache, then introduce a second person resolving to exactly
+  // the same directory.  The Android command must rebuild target ownership,
+  // reject it synchronously, and leave no durable journal row behind.
+  db.prepare("INSERT INTO people VALUES (3, 'Target Duplicate', 'target duplicate', 'Target Duplicate', NULL, 0, 'ok', NULL, 'fixture', '', '', 'unknown')").run();
+  const androidJobService = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
+  const androidMutationService = createWorkMutationService({ adminCoreMutationService: admin, workMoveJobService: androidJobService });
+  let androidResponse = null;
+  await routeWorksApi(
+    { method: "POST", headers: { "x-fanhao-client": "android" } },
+    {},
+    new URL("http://fixture/api/works/1/move-to-person"),
+    {
+      notFound() {},
+      personDetailService: {},
+      readJsonBody: async () => ({ personId: "2", idempotencyKey: "stale-shared-target" }),
+      requireLocalAdmin: () => true,
+      requireTrustedFileMutation: () => true,
+      sendJson: (_res, status, payload) => { androidResponse = { status, payload }; },
+      workDetailService: {},
+      workMutationService: androidMutationService,
+      workQueryService: {}
+    }
+  );
+  assert.equal(androidResponse.status, 409, "Android POST must not trust a warmed picker candidate after its target becomes shared");
+  assert.equal(androidResponse.payload.code, "WORK_MOVE_TARGET_UNAVAILABLE");
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM work_move_jobs").get().count, 0, "rejected Android target must not create a journal job");
+  await androidJobService.close();
+  assert.throws(
+    () => admin.prepareWorkMove("1", "2", { androidCommand: true }),
+    (error) => error?.statusCode === 409 && error?.code === "WORK_MOVE_TARGET_UNAVAILABLE",
+    "the worker prepare boundary must also reject a shared Android target without using the picker cache"
+  );
+  db.prepare("DELETE FROM people WHERE id = 3").run();
+
+  const targetAlias = path.join(fixture.root, "target-person-alias");
+  await fs.promises.symlink(fixture.targetPerson, targetAlias, process.platform === "win32" ? "junction" : "dir");
+  duplicateTargetDirectory = targetAlias;
+  db.prepare("INSERT INTO people VALUES (3, 'Target Alias', 'target alias', 'Target Alias', NULL, 0, 'ok', NULL, 'fixture', '', '', 'unknown')").run();
+  assert.equal(
+    admin.listWorkMoveTargets("1", { limit: 60, fresh: true }).candidates.some((candidate) => ["2", "3"].includes(candidate.id)),
+    false,
+    "a junction/symlink spelling of the same target directory must make every owner ambiguous"
+  );
+  assert.throws(
+    () => admin.assertWorkMoveTarget("1", "2"),
+    (error) => error?.statusCode === 409 && error?.code === "WORK_MOVE_TARGET_UNAVAILABLE",
+    "Android target validation must reject a physical-directory alias, not only lexical duplicate paths"
+  );
+  db.prepare("DELETE FROM people WHERE id = 3").run();
+  duplicateTargetDirectory = fixture.targetPerson;
+
+  // Same client idempotency key is not enough to cross the desktop/Android
+  // policy boundary: a desktop row may include an explicit path.  Android
+  // must see it as a conflicting active command, never as its own 202 replay.
+  const originJobService = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
+  const originMutationService = createWorkMutationService({ adminCoreMutationService: admin, workMoveJobService: originJobService });
+  const desktopJob = originMutationService.moveToPerson("1", {
+    personId: "2",
+    targetDirectory: fixture.targetPerson,
+    idempotencyKey: "origin-policy-boundary"
+  });
+  let originResponse = null;
+  await routeWorksApi(
+    { method: "POST", headers: { "x-fanhao-client": "android" } },
+    {},
+    new URL("http://fixture/api/works/1/move-to-person"),
+    {
+      notFound() {},
+      personDetailService: {},
+      readJsonBody: async () => ({ personId: "2", idempotencyKey: "origin-policy-boundary" }),
+      requireLocalAdmin: () => true,
+      requireTrustedFileMutation: () => true,
+      sendJson: (_res, status, payload) => { originResponse = { status, payload }; },
+      workDetailService: {},
+      workMutationService: originMutationService,
+      workQueryService: {}
+    }
+  );
+  assert.equal(originResponse.status, 409, "Android must not replay a desktop idempotency row with a path override");
+  assert.equal(originResponse.payload.job?.id, desktopJob.job.id);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM work_move_jobs").get().count, 1);
+  await originJobService.close();
 
   const ghostParent = path.join(fixture.root, "ghost-person");
   await fs.promises.mkdir(path.join(ghostParent, path.basename(fixture.source)), { recursive: true });
@@ -682,6 +832,28 @@ async function verifyActualAdminSqliteCommit() {
   assert.equal(fs.existsSync(fixture.source), true);
   db.prepare("DELETE FROM local_works WHERE id = 3").run();
   db.prepare("DELETE FROM works WHERE id = 3").run();
+
+  // Simulate the durable gap after preparation and staging.  A newly shared
+  // target directory must be rejected inside commit's BEGIN IMMEDIATE, before
+  // metadata can point the work at an ambiguous owner.
+  const androidCommitPlan = { ...admin.prepareWorkMove("1", "2", { androidCommand: true }), jobId: "fixture-android-target-fence" };
+  const androidCommitContext = {
+    ownerId: "fixture-android-owner",
+    leaseUntil: new Date(Date.now() + 60_000).toISOString(),
+    claimedAt: new Date().toISOString()
+  };
+  admin.acquireWorkMoveReservation(androidCommitPlan, androidCommitContext);
+  await fs.promises.cp(fixture.source, fixture.target, { recursive: true, errorOnExist: true, force: false });
+  db.prepare("INSERT INTO people VALUES (3, 'Target Duplicate', 'target duplicate', 'Target Duplicate', NULL, 0, 'ok', NULL, 'fixture', '', '', 'unknown')").run();
+  assert.throws(
+    () => admin.commitWorkMove(androidCommitPlan, androidCommitContext),
+    (error) => error?.statusCode === 409 && error?.code === "WORK_MOVE_TARGET_UNAVAILABLE",
+    "commit must freshly reject a target that became shared after Android prepare"
+  );
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM local_works WHERE id = 1").get().local_path), path.resolve(fixture.source));
+  db.prepare("DELETE FROM people WHERE id = 3").run();
+  admin.releaseWorkMoveReservation(androidCommitPlan.jobId, { ...androidCommitContext, terminalStatus: "failed" });
+  await fs.promises.rm(fixture.target, { recursive: true, force: true });
 
   const plan = { ...admin.prepareWorkMove("1", "2", { targetDirectory: fixture.targetPerson }), jobId: "fixture-admin-move" };
   let reservationContext = {
@@ -2362,6 +2534,7 @@ async function safeCleanup(root) {
 let verificationError = null;
 try {
   await verifySuccessfulMoveAndIdempotency();
+  await verifyLegacyDesktopIdempotencyReplay();
   await verifyWorkLookupRecoversLostStartResponse();
   await verifyOverlappingPathReservationsAreRejected();
   await verifyAllBusyStagesRequeue();
