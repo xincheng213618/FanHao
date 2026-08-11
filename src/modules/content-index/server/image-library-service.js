@@ -493,7 +493,7 @@ export function createImageLibraryService({
       let high = selected.length;
       while (low < high) {
         const middle = low + Math.floor((high - low) / 2);
-        if (comparePhotoPersonFacetValues(value, selected[middle]) > 0) low = middle + 1;
+        if (comparePhotoPersonFacetValues(value, selected[middle]) >= 0) low = middle + 1;
         else high = middle;
       }
       selected.splice(low, 0, value);

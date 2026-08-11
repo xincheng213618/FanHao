@@ -7,19 +7,25 @@ import { createImageLibraryService } from "../src/modules/content-index/server/i
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const servicePath = path.join(root, "src", "modules", "content-index", "server", "image-library-service.js");
-const serviceSource = fs.readFileSync(servicePath, "utf8");
+const serviceSource = fs.readFileSync(servicePath, "utf8").replaceAll("\r\n", "\n");
 const { createImageLibraryService: createLegacyImageLibraryService } = await import(legacyServiceModuleUrl(serviceSource));
+const { createImageLibraryService: createTestableImageLibraryService } = await import(testableServiceModuleUrl(serviceSource));
 const index = createProductionShapeIndex();
 
 assert(!serviceSource.includes("collections: photoCollectionGroups(items)"), "prepared photo catalog must not retain an unused collection list");
 assert(serviceSource.includes("function preparedPhotoCollectionCategories(catalog)"), "collection categories must remain lazy");
 assert(serviceSource.includes("const archiveDate = normalizedMode === \"photo\" ? photoArchiveDate(photoTitle) : \"\";"), "photo archive dates must be parsed once per list item");
 assert(serviceSource.includes("archiveMonth: archiveDate.slice(0, 7)"), "photo archive month must derive from the parsed date");
+assert(!serviceSource.includes("catalog.collections"), "no photo catalog consumer may read the removed collection list");
+assert(!functionSource(serviceSource, "preparedPhotoCatalog", "preparedPhotoCollectionCategories").includes("photoCollectionCategoryGroups"), "album catalog construction must not build collection categories");
+assert(functionSource(serviceSource, "preparedPhotoCollectionCategories", "preparedPhotoSortedItems").includes("photoCollectionCategoryGroups(catalog.items)"), "collection categories must build only when the collections view asks for them");
 
 const androidApp = fs.readFileSync(path.join(root, "android-client", "www", "app.js"), "utf8");
 const webGalleryPage = fs.readFileSync(path.join(root, "public", "modules", "content-index", "gallery-page.js"), "utf8");
 assert(androidApp.includes('const IMAGE_LIBRARY_SUMMARY_CACHE_PATH = "/api/image-library/summary?cache=0";'), "Android must skip an unused image-reader cache summary");
 assert(webGalleryPage.includes('const summaryEndpoint = isImageLibraryMode() ? "/api/image-library/summary" : "/api/image-library/summary?cache=0";'), "Web image-library mode must continue to request its cache summary");
+
+verifyPhotoPersonFacetBoundaries(createTestableImageLibraryService);
 
 const optimizedService = createService(createImageLibraryService, index);
 const summaryCold = measure(() => optimizedService.summaryPayload({ includeCache: false }));
@@ -56,9 +62,56 @@ console.log(
 console.log("image-library-performance: ok");
 
 function legacyServiceModuleUrl(source) {
-  const start = source.indexOf("  function photoPersonFacets(items = [], limit = Number.MAX_SAFE_INTEGER) {");
-  const end = source.indexOf("  function photoDateFacets(items = []) {");
-  assert(start >= 0 && end > start, "photo person facet implementation markers must stay discoverable");
+  let legacySource = source;
+  legacySource = replaceOnce(legacySource, "    let sourceIsSorted = false;\n", "", "remove cached-sort state");
+  legacySource = replaceOnce(legacySource, `      const defaultPhotoFilters = photoFiltersAreDefault({ category, subCategory, person, date });
+      const filteredPhotoSets = defaultPhotoFilters && !collection
+        ? catalog.items
+        : filterPhotoSetsForList(catalog.items, { category, subCategory, person, date, collection });
+`, "      const filteredPhotoSets = filterPhotoSetsForList(catalog.items, { category, subCategory, person, date, collection });\n", "restore unconditional photo filtering");
+  legacySource = replaceOnce(legacySource, `      source = photoView === "collections" && !collection
+        ? defaultPhotoFilters
+          ? preparedPhotoCollectionCategories(catalog)
+          : photoCollectionCategoryGroups(filteredPhotoSets).map(publicPhotoCollectionCategoryListItem)
+        : defaultPhotoFilters && !collection && !query
+          ? preparedPhotoSortedItems(catalog, sort)
+          : filteredPhotoSets;
+      sourceIsSorted = photoView === "albums" && defaultPhotoFilters && !collection && !query;
+`, `      source = photoView === "collections" && !collection
+        ? photoFiltersAreDefault({ category, subCategory, person, date })
+          ? catalog.collectionCategories
+          : photoCollectionCategoryGroups(filteredPhotoSets).map(publicPhotoCollectionCategoryListItem)
+        : filteredPhotoSets;
+`, "restore uncached photo source selection");
+  legacySource = replaceOnce(legacySource, "      : sourceIsSorted ? source : sortImageLibraryItems(filtered, sort);", "      : sortImageLibraryItems(filtered, sort);", "restore per-request photo sorting");
+  legacySource = replaceOnce(legacySource, "  function photoAlbumSubject(value, item = {}, collectionTitle = \"\") {", "  function photoAlbumSubject(value, item = {}) {", "restore album subject signature");
+  legacySource = replaceOnce(legacySource, `    const structuralLabels = [
+      collectionTitle || item?.collectionTitle,
+      item?.subCategory,
+      collectionTitle || item?.collectionTitle ? "" : photoCollectionDisplayName(photoCollectionDir(item))
+    ]`, `    const structuralLabels = [
+      item?.collectionTitle,
+      item?.subCategory,
+      photoCollectionDisplayName(photoCollectionDir(item))
+    ]`, "restore album subject structural labels");
+  legacySource = replaceOnce(legacySource, "  function photoAlbumNumber(value) {", `  function photoArchiveMonth(value) {
+    return photoArchiveDate(value).slice(0, 7);
+  }
+
+  function photoAlbumNumber(value) {`, "restore archive month parser");
+  legacySource = replaceOnce(legacySource, `    const archiveDate = normalizedMode === "photo" ? photoArchiveDate(photoTitle) : "";
+    const albumNumber = normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : "";
+    const albumSubject = normalizedMode === "photo" ? photoAlbumSubject(photoTitle, item, collectionTitle) : "";
+`, "", "restore inline photo list parsing");
+  legacySource = replaceOnce(legacySource, `      archiveDate,
+      archiveMonth: archiveDate.slice(0, 7),
+      albumNumber,
+      albumSubject,
+`, `      archiveDate: normalizedMode === "photo" ? photoArchiveDate(photoTitle) : "",
+      archiveMonth: normalizedMode === "photo" ? photoArchiveMonth(photoTitle) : "",
+      albumNumber: normalizedMode === "photo" ? photoAlbumNumber(photoTitle) : "",
+      albumSubject: normalizedMode === "photo" ? photoAlbumSubject(photoTitle, { ...item, collectionTitle }) : "",
+`, "restore inline photo response fields");
   const legacyFacet = `  function photoPersonFacets(items = [], limit = Number.MAX_SAFE_INTEGER) {
     const counts = new Map();
     for (const item of items) {
@@ -73,8 +126,132 @@ function legacyServiceModuleUrl(source) {
   }
 
 `;
-  const legacySource = `${source.slice(0, start)}${legacyFacet}${source.slice(end)}`;
+  legacySource = replaceSection(legacySource, "  function photoPersonFacets(items = [], limit = Number.MAX_SAFE_INTEGER) {", "  function photoDateFacets(items = []) {", legacyFacet, "restore full person facet sort");
+  legacySource = replaceOnce(legacySource, `      index,
+      items,
+      categories: facetCounts(items, "category"),
+      people: photoPersonFacets(items, 20),
+      subCategories: new Map(),
+      sortedItems: new Map()
+`, `      index,
+      items,
+      collections: photoCollectionGroups(items).map(publicPhotoCollectionListItem),
+      collectionCategories: photoCollectionCategoryGroups(items).map(publicPhotoCollectionCategoryListItem),
+      categories: facetCounts(items, "category"),
+      people: photoPersonFacets(items, 20),
+      subCategories: new Map()
+`, "restore eager catalog fields");
+  legacySource = replaceOnce(legacySource, `    return list
+      .map((item) => ({ item, updatedAt: new Date(item.updatedAt || 0).getTime() }))
+      .sort((a, b) => {
+        const timeDiff = b.updatedAt - a.updatedAt;
+        return timeDiff || a.item.title.localeCompare(b.item.title, undefined, { numeric: true, sensitivity: "base" });
+      })
+      .map(({ item }) => item);
+`, `    return list.sort((a, b) => {
+      const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
+      return timeDiff || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+    });
+`, "restore per-comparison updated sorting");
   return `data:text/javascript;base64,${Buffer.from(legacySource).toString("base64")}`;
+}
+
+function testableServiceModuleUrl(source) {
+  const testableSource = replaceOnce(source, "  return {\n    itemsPayload,", "  return {\n    __testPhotoPersonFacets: photoPersonFacets,\n    itemsPayload,", "expose photo person facets to the verifier only");
+  return `data:text/javascript;base64,${Buffer.from(testableSource).toString("base64")}`;
+}
+
+function verifyPhotoPersonFacetBoundaries(factory) {
+  const options = { numeric: true, sensitivity: "base" };
+  for (const [left, right] of [["Person Z", "Person z"], ["Person z", "Person Ž"], ["Number z01", "Number z1"], ["Number z1", "Number z001"]]) {
+    assert.equal(left.localeCompare(right, undefined, options), 0, `${left} and ${right} must exercise a collation-equal boundary`);
+  }
+
+  verifyPhotoPersonFacetBoundary(factory, {
+    name: "case-accent-limit-12",
+    limit: 12,
+    prefix: Array.from({ length: 10 }, (_, index) => `Person ${String.fromCharCode(97 + index)}`),
+    ties: ["Person Z", "Person z", "Person Ž"],
+    suffix: "Person zz"
+  });
+  verifyPhotoPersonFacetBoundary(factory, {
+    name: "numeric-limit-20",
+    limit: 20,
+    prefix: Array.from({ length: 18 }, (_, index) => `Number ${String.fromCharCode(97 + index)}`),
+    ties: ["Number z01", "Number z1", "Number z001"],
+    suffix: "Number zz"
+  });
+}
+
+function verifyPhotoPersonFacetBoundary(factory, { name, limit, prefix, ties, suffix }) {
+  const values = [...prefix, ...ties, suffix];
+  const boundaryIndex = {
+    scannedAt: "2026-08-11T00:00:00.000Z",
+    photoSets: values.map((personName, index) => ({
+      id: `${name}-${index}`,
+      title: `2026.07.01 VOL.${index + 1} 边界作品 ${index}`,
+      category: "边界",
+      subCategory: "",
+      personName,
+      relativePath: `边界/album-${index}.zip`,
+      sourceRoot: "T:\\[套图]",
+      rootLabel: "[套图]",
+      size: index + 1,
+      updatedAt: new Date(Date.UTC(2026, 6, 1, 0, 0, index)).toISOString()
+    })),
+    mediaItems: []
+  };
+  const testableService = createService(factory, boundaryIndex);
+  const expected = legacyPhotoPersonFacets(boundaryIndex.photoSets, limit);
+  assert.deepStrictEqual(testableService.__testPhotoPersonFacets(boundaryIndex.photoSets, 0), [], `${name} must preserve limit=0`);
+  assert.deepStrictEqual(testableService.__testPhotoPersonFacets(boundaryIndex.photoSets, limit), expected, `${name} must preserve the legacy Top-K order at the cutoff`);
+  assert.deepStrictEqual(testableService.__testPhotoPersonFacets(boundaryIndex.photoSets, values.length), legacyPhotoPersonFacets(boundaryIndex.photoSets, values.length), `${name} must preserve the exact all-items boundary`);
+  assert.deepStrictEqual(expected.filter((item) => ties.includes(item.value)).map((item) => item.value), ties.slice(0, 2), `${name} must retain the first two Map entries from the collation-equal cutoff group`);
+
+  const optimizedService = createService(createImageLibraryService, boundaryIndex);
+  const legacyService = createService(createLegacyImageLibraryService, boundaryIndex);
+  const optimizedResponse = limit === 12
+    ? optimizedService.summaryPayload({ includeCache: false })
+    : optimizedService.itemsPayload(request({ mode: "photo", photoView: "albums", limit: "48" }));
+  const legacyResponse = limit === 12
+    ? legacyService.summaryPayload({ includeCache: false })
+    : legacyService.itemsPayload(request({ mode: "photo", photoView: "albums", limit: "48" }));
+  assert.deepStrictEqual(optimizedResponse, legacyResponse, `${name} service response must match the restored legacy implementation`);
+  assert.equal(JSON.stringify(optimizedResponse), JSON.stringify(legacyResponse), `${name} serialized response must match the restored legacy implementation`);
+}
+
+function legacyPhotoPersonFacets(items, limit) {
+  const counts = new Map();
+  for (const item of items) {
+    const value = String(item.personName || "").trim();
+    if (!value) continue;
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value, undefined, { numeric: true, sensitivity: "base" }))
+    .slice(0, limit);
+}
+
+function functionSource(source, startName, endName) {
+  const start = source.indexOf(`  function ${startName}`);
+  const end = source.indexOf(`  function ${endName}`, start);
+  assert(start >= 0 && end > start, `${startName} function boundaries must stay discoverable`);
+  return source.slice(start, end);
+}
+
+function replaceOnce(source, expected, replacement, description) {
+  const start = source.indexOf(expected);
+  assert(start >= 0, `${description}: expected current implementation marker is missing`);
+  assert.equal(source.indexOf(expected, start + expected.length), -1, `${description}: current implementation marker must be unique`);
+  return `${source.slice(0, start)}${replacement}${source.slice(start + expected.length)}`;
+}
+
+function replaceSection(source, startMarker, endMarker, replacement, description) {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start);
+  assert(start >= 0 && end > start, `${description}: current implementation markers must stay discoverable`);
+  return `${source.slice(0, start)}${replacement}${source.slice(end)}`;
 }
 
 function createProductionShapeIndex() {
