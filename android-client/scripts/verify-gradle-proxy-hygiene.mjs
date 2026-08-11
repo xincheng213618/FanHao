@@ -8,11 +8,21 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const clientDir = path.resolve(scriptDir, "..");
 const repoDir = path.resolve(clientDir, "..");
 const androidPrefix = "android-client/android/";
+const wrapperLauncherFiles = new Set([
+  "android-client/android/gradlew",
+  "android-client/android/gradlew.bat"
+]);
 
 function isTrackedAndroidGradleConfig(filePath) {
   if (!filePath.startsWith(androidPrefix)) return false;
+  if (wrapperLauncherFiles.has(filePath)) return true;
   const fileName = path.posix.basename(filePath);
   return fileName.endsWith(".gradle") || fileName.endsWith(".gradle.kts") || fileName.endsWith(".properties");
+}
+
+function contentForScanning(filePath, text) {
+  if (!filePath.endsWith(".properties")) return text;
+  return text.replace(/\b(https?)\\:(?=\/\/)/gi, "$1:");
 }
 
 function proxyViolations(text) {
@@ -41,6 +51,25 @@ function assertFixtures() {
   assert(proxyViolations("repositories { maven { url 'http://localhost:8080/repository' } }").includes("localhost or loopback endpoint"));
   assert(proxyViolations("mavenUrl=https://user:token@proxy.example.test/repository").includes("credential-bearing URL"));
   assert(proxyViolations("mavenUrl=https://token@proxy.example.test/repository").includes("credential-bearing URL"));
+  assertTrackedFixture("android-client/android/gradlew", 'DEFAULT_JVM_OPTS="-Dhttp.proxyHost=proxy.example.test"', "proxy JVM argument");
+  assertTrackedFixture("android-client/android/gradlew.bat", 'set DEFAULT_JVM_OPTS="-Dhttps.proxyPassword=local-only-secret"', "proxy JVM argument");
+  assertTrackedFixture("android-client/android/gradle/wrapper/gradle-wrapper.properties", String.raw`distributionUrl=https\://token@proxy.example.test/gradle.zip`, "credential-bearing URL");
+  assertTrackedFixture("android-client/android/gradle/wrapper/gradle-wrapper.properties", String.raw`distributionUrl=https\://user:token@proxy.example.test/gradle.zip`, "credential-bearing URL");
+}
+
+function assertTrackedFixture(filePath, text, expectedViolation) {
+  assert.equal(legacyWouldExitZeroForFixture(filePath, text), true, `legacy scanner should have passed this fixture: ${filePath}`);
+  assert.equal(isTrackedAndroidGradleConfig(filePath), true, `fixture path must be scanned: ${filePath}`);
+  assert(proxyViolations(contentForScanning(filePath, text)).includes(expectedViolation), `fixture must reject ${expectedViolation}: ${filePath}`);
+}
+
+function legacyWouldExitZeroForFixture(filePath, text) {
+  const fileName = path.posix.basename(filePath);
+  const legacySelected = filePath.startsWith(androidPrefix) && (fileName === "gradle.properties" || fileName.endsWith(".gradle") || fileName.endsWith(".gradle.kts"));
+  if (!legacySelected) return true;
+  const legacyProxyJvmArgument = /-D(?:http|https|ftp|socks)\.proxy(?:host|port|user|password|nonproxyhosts)?=/i;
+  const legacyCredentialInUrl = /https?:\/\/[^\s/@:]+:[^\s/@]*@/i;
+  return !(legacyProxyJvmArgument.test(text) || legacyCredentialInUrl.test(text));
 }
 
 function trackedAndroidGradleConfigs() {
@@ -55,7 +84,8 @@ assert(files.includes("android-client/android/gradle/wrapper/gradle-wrapper.prop
 
 const failures = files.flatMap((filePath) => {
   const absolutePath = path.join(repoDir, ...filePath.split("/"));
-  return proxyViolations(fs.readFileSync(absolutePath, "utf8")).map((reason) => `${filePath}: ${reason}`);
+  const text = fs.readFileSync(absolutePath, "utf8");
+  return proxyViolations(contentForScanning(filePath, text)).map((reason) => `${filePath}: ${reason}`);
 });
 assert.deepEqual(failures, [], `tracked Android Gradle configuration must be machine-neutral:\n${failures.join("\n")}`);
 
