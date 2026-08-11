@@ -11,6 +11,7 @@ import { createAdminCoreMutationService } from "../src/modules/fanhao/server/adm
 import { ensureRealPathWithinRoots } from "../src/modules/fanhao/server/library/library-path-safety.js";
 import { createPersonLibraryService } from "../src/modules/fanhao/server/people/person-library-service.js";
 import { routeWorksApi } from "../src/modules/fanhao/server/works/routes-api.js";
+import { createWorkLocalMutationService } from "../src/modules/fanhao/server/works/work-local-mutation-service.js";
 import { createWorkMoveJobService } from "../src/modules/fanhao/server/works/work-move-job-service.js";
 
 const temporaryRoots = [];
@@ -55,6 +56,8 @@ function createAdminFixture(db, fixture, {
   let imageCommits = 0;
   let imagesCommitted = false;
   let sharedChecks = 0;
+  let reservation = null;
+  const releasedReservationJobs = new Set();
   const plan = {
     version: 1,
     workId: "1",
@@ -71,8 +74,45 @@ function createAdminFixture(db, fixture, {
   };
   return {
     get imageCommits() { return imageCommits; },
+    get reservation() { return reservation ? { ...reservation } : null; },
+    get releasedReservationJobs() { return new Set(releasedReservationJobs); },
     get sharedChecks() { return sharedChecks; },
     plan,
+    acquireWorkMoveReservation(currentPlan, context = {}) {
+      reservation = {
+        jobId: currentPlan.jobId,
+        ownerId: context.ownerId,
+        leaseUntil: context.leaseUntil,
+        released: false
+      };
+      return { reserved: true };
+    },
+    renewWorkMoveReservation(currentPlan, context = {}) {
+      if (!reservation || reservation.jobId !== currentPlan.jobId || reservation.ownerId !== context.ownerId || reservation.released) {
+        const error = new Error("fixture reservation owner lost");
+        error.code = "WORK_MOVE_LEASE_LOST";
+        throw error;
+      }
+      reservation.leaseUntil = context.leaseUntil;
+      return { reserved: true };
+    },
+    releaseWorkMoveReservation(jobId, context = {}) {
+      if (reservation?.jobId === jobId && reservation.ownerId === context.ownerId) {
+        reservation.released = true;
+        releasedReservationJobs.add(jobId);
+      }
+      return { released: true };
+    },
+    parkWorkMoveReservation(currentPlan, context = {}) {
+      if (reservation && reservation.jobId === currentPlan.jobId && reservation.ownerId === context.ownerId && !reservation.released) {
+        reservation.ownerId = "";
+        reservation.leaseUntil = "";
+      }
+      return { parked: true };
+    },
+    repairWorkMoveReservations() {
+      return { repaired: 0 };
+    },
     prepareWorkMove() {
       return plan;
     },
@@ -81,7 +121,12 @@ function createAdminFixture(db, fixture, {
       ensureRealPathWithinRoots(currentPlan.newDir, [fixture.root], "目标作品文件夹");
       return { ...currentPlan, libraryRoots: [fixture.root] };
     },
-    assertWorkMoveSourceUnshared() {
+    assertWorkMoveSourceUnshared(currentPlan, context = {}) {
+      if (!reservation || reservation.jobId !== currentPlan.jobId || reservation.ownerId !== context.ownerId || reservation.released) {
+        const error = new Error("fixture reservation owner lost");
+        error.code = "WORK_MOVE_LEASE_LOST";
+        throw error;
+      }
       sharedChecks += 1;
       if (sharedConflictAtCheck === sharedChecks) {
         db.prepare("INSERT OR REPLACE INTO move_records(work_id, person_id, local_path) VALUES (?, 'shared', ?)")
@@ -198,7 +243,139 @@ async function verifySuccessfulMoveAndIdempotency() {
   assert.equal(path.resolve(databaseRow.local_path), path.resolve(fixture.target));
   assert.equal(databaseRow.person_id, "target");
   assert.equal(admin.imageCommits, 1, "the attached image phase must complete before source cleanup");
+  assert.equal(admin.releasedReservationJobs.has(first.id), true, "completed jobs must release their own durable path reservation");
   await service.close();
+  db.close();
+}
+
+function waitForWorkerMessage(worker, predicate, timeoutMs = 8_000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("timed out waiting for concurrent starter worker"));
+    }, timeoutMs);
+    const onMessage = (message) => {
+      if (!predicate(message)) return;
+      cleanup();
+      resolve(message);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      worker.off("message", onMessage);
+      worker.off("error", onError);
+    };
+    worker.on("message", onMessage);
+    worker.on("error", onError);
+  });
+}
+
+async function verifyConcurrentStartsAreAtomicallyUnique() {
+  const fixture = await createFixture("concurrent-start-unique", 6);
+  const dbPath = path.join(fixture.root, "fixture.sqlite");
+  const db = createDatabase(fixture.root, fixture.source);
+  db.exec("PRAGMA busy_timeout = 5000");
+  const starterPath = path.join(fixture.root, "concurrent-starter.mjs");
+  await fs.promises.writeFile(starterPath, `
+    import { parentPort, workerData } from "node:worker_threads";
+    import { DatabaseSync } from "node:sqlite";
+    const { createWorkMoveJobService } = await import(workerData.serviceUrl);
+    const db = new DatabaseSync(workerData.dbPath);
+    db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL");
+    const service = createWorkMoveJobService({
+      adminCoreMutationService: { repairWorkMoveReservations() { return { repaired: 0 }; } },
+      getCoreDb: () => db,
+      schedule: () => {}
+    });
+    parentPort.postMessage({ type: "ready" });
+    parentPort.once("message", async (message) => {
+      if (message !== "go") return;
+      try {
+        const job = service.start("1", workerData.request);
+        parentPort.postMessage({ type: "result", ok: true, job });
+      } catch (error) {
+        parentPort.postMessage({ type: "result", ok: false, statusCode: error.statusCode || 0, job: error.job || null });
+      } finally {
+        await service.close();
+        db.close();
+      }
+    });
+  `, "utf8");
+  const serviceUrl = new URL("../src/modules/fanhao/server/works/work-move-job-service.js", import.meta.url).href;
+  const starters = [
+    new Worker(pathToFileURL(starterPath), { workerData: { dbPath, serviceUrl, request: { personId: "target-a", idempotencyKey: "concurrent-a" } } }),
+    new Worker(pathToFileURL(starterPath), { workerData: { dbPath, serviceUrl, request: { personId: "target-b", idempotencyKey: "concurrent-b" } } })
+  ];
+  const exits = starters.map((worker) => new Promise((resolve, reject) => {
+    worker.once("exit", resolve);
+    worker.once("error", reject);
+  }));
+  await Promise.all(starters.map((worker) => waitForWorkerMessage(worker, (message) => message?.type === "ready")));
+  const resultsPromise = Promise.all(starters.map((worker) => waitForWorkerMessage(worker, (message) => message?.type === "result")));
+  for (const worker of starters) worker.postMessage("go");
+  const results = await resultsPromise;
+  await Promise.all(exits);
+  assert.equal(results.filter((result) => result.ok).length, 1, "only one concurrent start may insert an active job");
+  assert.equal(results.filter((result) => !result.ok && result.statusCode === 409).length, 1, "the losing request must receive the existing job conflict");
+  const winner = results.find((result) => result.ok)?.job;
+  const loser = results.find((result) => !result.ok);
+  assert.equal(loser?.job?.id, winner?.id, "the 409 response must identify the single durable winner");
+  const activeRows = db.prepare(`
+    SELECT * FROM work_move_jobs
+    WHERE work_id = '1' AND status IN ('queued', 'running', 'cleanup_pending', 'rollback_pending', 'blocked')
+  `).all();
+  assert.equal(activeRows.length, 1, "the partial unique index must enforce one blocking job per work across connections");
+
+  let stageStarts = 0;
+  class CountingWorker extends Worker {
+    constructor(url, options) {
+      if (options?.workerData?.operation === "stage") stageStarts += 1;
+      super(url, options);
+    }
+  }
+  const admin = createAdminFixture(db, fixture);
+  const service = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, workerClass: CountingWorker, workerDataPatch: { forceCopy: true } });
+  service.recover();
+  await waitForJob(service, activeRows[0].id, ["completed"]);
+  assert.equal(stageStarts, 1, "only the single durable job may execute a staging worker");
+  await service.close();
+  db.close();
+}
+
+async function verifyLegacyDuplicateJobsMigrateFailClosed() {
+  const fixture = await createFixture("legacy-duplicate-jobs", 1);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const bootstrap = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
+  await bootstrap.close();
+  db.exec("DROP INDEX idx_work_move_jobs_one_active_work");
+  const insert = db.prepare(`
+    INSERT INTO work_move_jobs (
+      id, request_key, work_id, person_id, status, phase, request_json, plan_json,
+      attempts, created_at, updated_at
+    ) VALUES (?, ?, ?, 'target', ?, ?, '{}', ?, 1, ?, ?)
+  `);
+  insert.run("legacy-queued-a", "legacy-key-a", "legacy-queued", "queued", "queued", "", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
+  insert.run("legacy-queued-b", "legacy-key-b", "legacy-queued", "queued", "queued", "", "2026-01-02T00:00:00.000Z", "2026-01-02T00:00:00.000Z");
+  insert.run("legacy-progress-a", "legacy-key-c", "legacy-progress", "running", "copying", '{"oldDir":"a"}', "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
+  insert.run("legacy-progress-b", "legacy-key-d", "legacy-progress", "cleanup_pending", "cleanup", '{"oldDir":"b"}', "2026-01-02T00:00:00.000Z", "2026-01-02T00:00:00.000Z");
+
+  const migrated = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
+  const queuedRows = db.prepare("SELECT id, status, phase FROM work_move_jobs WHERE work_id = 'legacy-queued' ORDER BY id").all();
+  assert.equal(queuedRows.filter((row) => row.status === "queued").length, 1, "queued legacy duplicates must deterministically keep one survivor");
+  assert.equal(queuedRows.filter((row) => row.phase === "duplicate_superseded").length, 1);
+  const progressedRows = db.prepare("SELECT id, status, phase FROM work_move_jobs WHERE work_id = 'legacy-progress' ORDER BY id").all();
+  assert.equal(progressedRows.filter((row) => row.status === "blocked" && row.phase === "duplicate_conflict").length, 1, "multiple progressed legacy jobs must stop behind one durable blocking row");
+  assert.equal(progressedRows.filter((row) => row.phase === "duplicate_superseded").length, 1);
+  assert.throws(
+    () => insert.run("legacy-progress-c", "legacy-key-e", "legacy-progress", "queued", "queued", "", "2026-01-03T00:00:00.000Z", "2026-01-03T00:00:00.000Z"),
+    /UNIQUE constraint failed/,
+    "the migrated partial unique index must reject another blocking job"
+  );
+  await migrated.close();
   db.close();
 }
 
@@ -334,21 +511,116 @@ async function verifyActualAdminSqliteCommit() {
   db.prepare("DELETE FROM local_works WHERE id = 3").run();
   db.prepare("DELETE FROM works WHERE id = 3").run();
 
-  const plan = admin.prepareWorkMove("1", "2", { targetDirectory: fixture.targetPerson });
+  const plan = { ...admin.prepareWorkMove("1", "2", { targetDirectory: fixture.targetPerson }), jobId: "fixture-admin-move" };
+  let reservationContext = {
+    ownerId: "fixture-owner",
+    leaseUntil: new Date(Date.now() + 60_000).toISOString(),
+    claimedAt: new Date().toISOString()
+  };
   await fs.promises.cp(fixture.source, fixture.target, { recursive: true, errorOnExist: true, force: false });
   db.prepare("INSERT INTO works VALUES (3, '[]', '')").run();
   db.prepare("INSERT INTO local_works VALUES (3, 3, ?, '', '')").run(fixture.source);
   assert.throws(
-    () => admin.commitWorkMove(plan),
-    (error) => error?.statusCode === 409 && /其他本地作品引用/.test(error.message),
-    "commit must recheck shared local_path under BEGIN IMMEDIATE after prepare"
+    () => admin.acquireWorkMoveReservation(plan, reservationContext),
+    (error) => error?.statusCode === 409 && /其他数据库引用/.test(error.message),
+    "reservation acquisition must close the prepare-to-claim shared-reference window"
   );
   assert.equal(path.resolve(db.prepare("SELECT local_path FROM local_works WHERE id = 1").get().local_path), path.resolve(fixture.source));
   assert.equal(path.resolve(db.prepare("SELECT local_path FROM local_works WHERE id = 3").get().local_path), path.resolve(fixture.source));
   assert.equal(path.resolve(db.prepare("SELECT file_path FROM local_files WHERE id = 1").get().file_path), path.resolve(infoPath));
   db.prepare("DELETE FROM local_works WHERE id = 3").run();
   db.prepare("DELETE FROM works WHERE id = 3").run();
-  admin.commitWorkMove(plan);
+  admin.acquireWorkMoveReservation(plan, reservationContext);
+  db.prepare("UPDATE work_move_path_reservations SET lease_until = '2000-01-01T00:00:00.000Z' WHERE job_id = ?").run(plan.jobId);
+  db.prepare("UPDATE fanhao_images.work_move_path_reservations SET lease_until = '2000-01-01T00:00:00.000Z' WHERE job_id = ?").run(plan.jobId);
+  reservationContext = {
+    ownerId: "fixture-recovery-owner",
+    leaseUntil: new Date(Date.now() + 60_000).toISOString(),
+    claimedAt: new Date().toISOString(),
+    takeover: true
+  };
+  admin.acquireWorkMoveReservation(plan, reservationContext);
+  assert.equal(db.prepare("SELECT owner_id FROM work_move_path_reservations WHERE job_id = ?").get(plan.jobId).owner_id, reservationContext.ownerId);
+  assert.equal(db.prepare("SELECT owner_id FROM fanhao_images.work_move_path_reservations WHERE job_id = ?").get(plan.jobId).owner_id, reservationContext.ownerId);
+  const localMutationWork = { id: "1", missingLocal: false, directoryName: path.basename(fixture.source), videos: [], images: [], infos: [] };
+  const localMutationService = createWorkLocalMutationService({
+    ensureLibraryDirectoryPath: (value) => {
+      const resolved = path.resolve(value);
+      if (!withinRoot(resolved)) throw new Error("fixture path escaped temporary root");
+      return resolved;
+    },
+    getCoreDb: () => db,
+    getWorkById: () => localMutationWork,
+    hasCoreDb: () => true,
+    invalidateLibraryDerivedCaches() {},
+    invalidateTableStamp() {},
+    invalidateWorkCodeIndex() {},
+    libraryOpenRoots: () => [fixture.root],
+    localWorkMarkerKey: (value) => String(value || "").trim().toLowerCase(),
+    markerDirectoryName: (base) => `${base} [A]`,
+    pathWithinRoot: (candidate, root) => {
+      const relative = path.relative(path.resolve(root), path.resolve(candidate));
+      return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+    },
+    publicWork: (value) => value,
+    reconcileDeletedLocalWorks() {},
+    relativeFromRoot: (value) => path.relative(fixture.root, value),
+    replacePathPrefix: replacePrefix,
+    resolveLibraryPersonByPublicId: () => null,
+    resolveLibraryWorkByPublicId: () => localMutationWork,
+    safeStat: (value) => { try { return fs.statSync(value); } catch { return null; } },
+    sourcePathToAbsolute: (value) => path.resolve(value),
+    resetWorkSearch() {},
+    uniqueTextArray: (values) => [...new Set(values || [])],
+    workHasLocalMarker: () => false
+  });
+  assert.throws(
+    () => localMutationService.setWorkLocalMarker("1", "a", true),
+    (error) => error?.statusCode === 409 && /正在迁移/.test(error.message),
+    "the marker writer must reject the reservation before renaming the filesystem directory"
+  );
+  assert.equal(fs.existsSync(fixture.source), true);
+  assert.equal(fs.existsSync(`${fixture.source} [A]`), false);
+  assert.throws(
+    () => localMutationService.deleteWorkLocalFiles("1"),
+    (error) => error?.statusCode === 409 && /正在迁移/.test(error.message),
+    "the local delete writer must hold BEGIN IMMEDIATE and reject a reserved path before deleting files"
+  );
+  assert.equal(fs.existsSync(fixture.source), true);
+  const unexpectedPath = path.join(fixture.root, "unexpected", "WORK-001");
+  db.exec("BEGIN IMMEDIATE");
+  db.prepare("UPDATE work_move_path_reservations SET mutation_mode = 'fixture' WHERE job_id = ?").run(plan.jobId);
+  db.prepare("UPDATE local_works SET local_path = ? WHERE id = 1").run(unexpectedPath);
+  db.prepare("UPDATE work_move_path_reservations SET mutation_mode = '' WHERE job_id = ?").run(plan.jobId);
+  db.exec("COMMIT");
+  assert.throws(
+    () => admin.commitWorkMove(plan, reservationContext),
+    (error) => error?.statusCode === 409 && /其他操作修改/.test(error.message),
+    "commit must re-read oldDir/current state inside the same BEGIN IMMEDIATE transaction"
+  );
+  db.exec("BEGIN IMMEDIATE");
+  db.prepare("UPDATE work_move_path_reservations SET mutation_mode = 'fixture' WHERE job_id = ?").run(plan.jobId);
+  db.prepare("UPDATE local_works SET local_path = ? WHERE id = 1").run(fixture.source);
+  db.prepare("UPDATE work_move_path_reservations SET mutation_mode = '' WHERE job_id = ?").run(plan.jobId);
+  db.exec("COMMIT");
+  db.exec("BEGIN IMMEDIATE");
+  db.prepare("UPDATE work_move_path_reservations SET mutation_mode = 'fixture' WHERE job_id = ?").run(plan.jobId);
+  db.prepare("INSERT INTO works VALUES (3, '[]', '')").run();
+  db.prepare("INSERT INTO local_works VALUES (3, 3, ?, '', '')").run(fixture.source);
+  db.prepare("UPDATE work_move_path_reservations SET mutation_mode = '' WHERE job_id = ?").run(plan.jobId);
+  db.exec("COMMIT");
+  assert.throws(
+    () => admin.commitWorkMove(plan, reservationContext),
+    (error) => error?.statusCode === 409 && /其他本地作品引用/.test(error.message),
+    "commit must still recheck shared local_path inside its own BEGIN IMMEDIATE transaction"
+  );
+  db.exec("BEGIN IMMEDIATE");
+  db.prepare("UPDATE work_move_path_reservations SET mutation_mode = 'fixture' WHERE job_id = ?").run(plan.jobId);
+  db.prepare("DELETE FROM local_works WHERE id = 3").run();
+  db.prepare("UPDATE work_move_path_reservations SET mutation_mode = '' WHERE job_id = ?").run(plan.jobId);
+  db.prepare("DELETE FROM works WHERE id = 3").run();
+  db.exec("COMMIT");
+  admin.commitWorkMove(plan, reservationContext);
   const localWork = db.prepare("SELECT * FROM local_works WHERE id = 1").get();
   const localFile = db.prepare("SELECT * FROM local_files WHERE id = 1").get();
   const imageBeforeCompensation = db.prepare("SELECT * FROM images WHERE id = 1").get();
@@ -360,13 +632,78 @@ async function verifyActualAdminSqliteCommit() {
   assert.equal(actor.source, "manual_move");
   assert.equal(admin.inspectWorkMove(plan), "target");
   assert.equal(admin.inspectWorkMoveImages(plan), "pending");
-  admin.commitWorkMoveImages(plan);
+  const lateImagePath = path.join(fixture.source, "part-2", "fixture-2.bin");
+  db.exec("BEGIN IMMEDIATE");
+  db.prepare("UPDATE fanhao_images.work_move_path_reservations SET mutation_mode = 'fixture' WHERE job_id = ?").run(plan.jobId);
+  db.prepare("INSERT INTO fanhao_images.images VALUES (2, 'work', 1, ?, '')").run(lateImagePath);
+  db.prepare("UPDATE fanhao_images.work_move_path_reservations SET mutation_mode = '' WHERE job_id = ?").run(plan.jobId);
+  db.exec("COMMIT");
+  const imageCommit = admin.commitWorkMoveImages(plan, reservationContext);
+  assert.equal(imageCommit.updated, 2, "the image commit must build and apply its pending snapshot inside one transaction");
   const imageAfterCompensation = db.prepare("SELECT * FROM images WHERE id = 1").get();
   assert.equal(path.resolve(imageAfterCompensation.local_path), path.resolve(replacePrefix(imagePath, fixture.source, fixture.target)));
+  assert.equal(
+    path.resolve(db.prepare("SELECT local_path FROM fanhao_images.images WHERE id = 2").get().local_path),
+    path.resolve(replacePrefix(lateImagePath, fixture.source, fixture.target))
+  );
   assert.equal(admin.inspectWorkMoveImages(plan), "completed");
   const result = admin.finalizeWorkMove(plan, { mode: "copy" });
   assert.equal(result.moveMode, "copy");
   assert.equal(reconciled.workId, "1");
+  const gateDb = new DatabaseSync(path.join(fixture.root, "admin-fixture.sqlite"));
+  gateDb.prepare("ATTACH DATABASE ? AS fanhao_images").run(path.join(fixture.root, "admin-images-fixture.sqlite"));
+  assert.throws(
+    () => gateDb.prepare("INSERT INTO local_works VALUES (4, 4, ?, '', '')").run(fixture.source),
+    /work move path reserved/,
+    "scanner/import local_work inserts must be gated while the path is reserved"
+  );
+  assert.throws(
+    () => gateDb.prepare("INSERT INTO local_files VALUES (4, 999, ?, '', '')").run(path.join(fixture.source, "late.bin")),
+    /work move path reserved/,
+    "local_files writers must not add a late reference below the reserved source"
+  );
+  assert.throws(
+    () => gateDb.prepare("INSERT INTO fanhao_images.images VALUES (4, 'work', 4, ?, '')").run(path.join(fixture.source, "late.jpg")),
+    /work move path reserved/,
+    "the independently attached image database must gate late source references"
+  );
+  assert.throws(
+    () => gateDb.prepare("UPDATE local_works SET local_path = ? WHERE id = 1").run(`${fixture.target} [A]`),
+    /work move path reserved/,
+    "marker/admin updates to the reserved local_work must fail before exposing a split filesystem/database state"
+  );
+
+  const quarantinePath = path.join(fixture.sourcePerson, `.${path.basename(fixture.source)}.fanhao-quarantine-${plan.jobId}`);
+  await runMoveWorker({
+    jobId: plan.jobId,
+    operation: "isolate",
+    allowedRoots: [fixture.root],
+    sourcePath: fixture.source,
+    targetPath: fixture.target,
+    quarantinePath
+  });
+  admin.assertWorkMoveSourceUnshared(plan, reservationContext);
+  assert.throws(
+    () => gateDb.prepare("INSERT INTO local_works VALUES (5, 5, ?, '', '')").run(fixture.source),
+    /work move path reserved/,
+    "a second connection must remain blocked after the final check and before cleanup deletion"
+  );
+  await runMoveWorker({
+    jobId: plan.jobId,
+    operation: "cleanup",
+    allowedRoots: [fixture.root],
+    sourcePath: fixture.source,
+    targetPath: fixture.target,
+    quarantinePath
+  });
+  assert.equal(fs.existsSync(fixture.source), false, "cleanup may delete only after every late database writer was rejected");
+  gateDb.close();
+  admin.releaseWorkMoveReservation(plan.jobId, { ...reservationContext, terminalStatus: "completed" });
+  const releasedMain = db.prepare("SELECT released_at, terminal_status FROM work_move_path_reservations WHERE job_id = ?").get(plan.jobId);
+  const releasedImages = db.prepare("SELECT released_at, terminal_status FROM fanhao_images.work_move_path_reservations WHERE job_id = ?").get(plan.jobId);
+  assert.ok(releasedMain.released_at && releasedImages.released_at, "both durable reservation mirrors must release after the terminal state");
+  assert.equal(releasedMain.terminal_status, "completed");
+  assert.equal(releasedImages.terminal_status, "completed");
   db.close();
 }
 
@@ -480,9 +817,21 @@ async function verifyIncrementalMemoryReconciliation() {
 
 function verifySourceStructure() {
   const adminSource = fs.readFileSync(new URL("../src/modules/fanhao/server/admin/admin-core-mutation-service.js", import.meta.url), "utf8");
+  const jobSource = fs.readFileSync(new URL("../src/modules/fanhao/server/works/work-move-job-service.js", import.meta.url), "utf8");
+  const localMutationSource = fs.readFileSync(new URL("../src/modules/fanhao/server/works/work-local-mutation-service.js", import.meta.url), "utf8");
+  const reservationSource = fs.readFileSync(new URL("../src/modules/fanhao/server/works/work-move-reservation-service.js", import.meta.url), "utf8");
   const routeSource = fs.readFileSync(new URL("../src/modules/fanhao/server/works/routes-api.js", import.meta.url), "utf8");
   const clientSource = fs.readFileSync(new URL("../public/js/player-page.js", import.meta.url), "utf8");
   assert.equal(/Atomics\.wait|spawnSync|moveDirectorySync|fs\.cpSync/.test(adminSource), false, "move-to-person must not retain synchronous copy or sleep paths");
+  assert.match(jobSource, /CREATE UNIQUE INDEX IF NOT EXISTS idx_work_move_jobs_one_active_work/);
+  assert.match(jobSource, /BEGIN IMMEDIATE/);
+  assert.match(jobSource, /\[work-move-heartbeat\]/);
+  assert.match(jobSource, /scheduleClaimRetry\(jobId\)/);
+  assert.match(localMutationSource, /assertLocalPathsNotReserved/);
+  assert.match(reservationSource, /trg_work_move_reserve_local_works_insert/);
+  assert.match(reservationSource, /trg_work_move_reserve_local_files_insert/);
+  assert.match(reservationSource, /trg_work_move_reserve_images_insert/);
+  assert.match(reservationSource, /BEGIN IMMEDIATE/);
   assert.match(routeSource, /sendJson\(res, 202, workMutationService\.moveToPerson/);
   assert.ok(routeSource.includes("work-move-jobs"));
   assert.match(clientSource, /waitForWorkMoveJob\(data\.job\)/);
@@ -563,6 +912,7 @@ async function verifyRollbackOnDatabaseFailure() {
   assert.equal(fs.existsSync(fixture.source), true, "database failure must preserve the source fixture");
   assert.equal(fs.existsSync(fixture.target), false, "database failure must remove the prepared target copy");
   assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.source));
+  assert.equal(admin.reservation?.released, true, "rolled-back jobs must release their durable path reservation");
   await service.close();
   db.close();
 }
@@ -771,6 +1121,8 @@ async function verifyExpiredLeaseTakeoverFencesOldWorker() {
   const db2 = new DatabaseSync(path.join(fixture.root, "fixture.sqlite"));
   const admin = createAdminFixture(db1, fixture);
   let oldWorkerTerminations = 0;
+  let oldWorkerTerminationResolved = false;
+  let newWorkerStartedBeforeOldStop = false;
   const oldWorkerOperations = [];
   class TrackingWorker extends Worker {
     constructor(url, options) {
@@ -779,7 +1131,16 @@ async function verifyExpiredLeaseTakeoverFencesOldWorker() {
     }
     terminate() {
       oldWorkerTerminations += 1;
-      return super.terminate();
+      return super.terminate().then((code) => {
+        oldWorkerTerminationResolved = true;
+        return code;
+      });
+    }
+  }
+  class HandoffWorker extends Worker {
+    constructor(url, options) {
+      if (!oldWorkerTerminationResolved) newWorkerStartedBeforeOldStop = true;
+      super(url, options);
     }
   }
   const first = createWorkMoveJobService({
@@ -798,6 +1159,7 @@ async function verifyExpiredLeaseTakeoverFencesOldWorker() {
   const second = createWorkMoveJobService({
     adminCoreMutationService: admin,
     getCoreDb: () => db2,
+    workerClass: HandoffWorker,
     workerDataPatch: { forceCopy: true, delayPerFileMs: 5 }
   });
   second.recover();
@@ -805,6 +1167,8 @@ async function verifyExpiredLeaseTakeoverFencesOldWorker() {
   const completed = await waitForJob(second, started.id, ["completed"]);
   assert.equal(completed.phase, "completed");
   assert.ok(oldWorkerTerminations >= 1, "the stale owner must terminate its worker as soon as fencing detects takeover");
+  assert.equal(oldWorkerTerminationResolved, true, "the stale worker termination promise must resolve before handoff acknowledgement");
+  assert.equal(newWorkerStartedBeforeOldStop, false, "the new lease owner must not start a worker before the previous owner acknowledges termination");
   assert.equal(oldWorkerOperations.includes("rollback"), false, "the fenced owner must never start rollback after losing its lease");
   assert.equal(admin.imageCommits, 1, "the fenced owner must not reach image commit or rollback");
   assert.equal(fs.existsSync(fixture.source), false);
@@ -874,6 +1238,86 @@ async function verifyDatabaseLeasePreventsDoubleExecution() {
   await Promise.all([first.close(), second.close()]);
   db2.close();
   db1.close();
+}
+
+async function verifySqliteBusyClaimRetriesAndHeartbeatRecovers() {
+  const claimFixture = await createFixture("claim-busy-retry", 5);
+  const claimDb1 = createDatabase(claimFixture.root, claimFixture.source);
+  claimDb1.exec("PRAGMA busy_timeout = 20");
+  const claimDb2 = new DatabaseSync(path.join(claimFixture.root, "fixture.sqlite"));
+  claimDb2.exec("PRAGMA busy_timeout = 20");
+  const claimAdmin = createAdminFixture(claimDb1, claimFixture);
+  const scheduled = [];
+  const warnings = [];
+  let uncaught = null;
+  const onUncaught = (error) => { uncaught = error; };
+  process.on("uncaughtException", onUncaught);
+  try {
+    const claimService = createWorkMoveJobService({
+      adminCoreMutationService: claimAdmin,
+      getCoreDb: () => claimDb1,
+      schedule: (callback) => scheduled.push(callback),
+      warn: (...args) => warnings.push(args.map(String).join(" ")),
+      workerDataPatch: { forceCopy: true }
+    });
+    const started = claimService.start("1", { personId: "target", idempotencyKey: "claim-busy-retry" });
+    claimDb2.exec("BEGIN IMMEDIATE");
+    for (const callback of scheduled.splice(0)) callback();
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const queued = claimDb1.prepare("SELECT status, owner_id FROM work_move_jobs WHERE id = ?").get(started.id);
+    assert.equal(queued.status, "queued");
+    assert.equal(queued.owner_id, "", "a busy claim must remain durably queued until bounded backoff retries it");
+    assert.equal(uncaught, null, "SQLITE_BUSY during claim must never escape as an uncaught process error");
+    claimDb2.exec("COMMIT");
+    try {
+      await waitForJob(claimService, started.id, ["completed"]);
+    } catch (error) {
+      error.message += ` warnings=${JSON.stringify(warnings)}`;
+      throw error;
+    }
+    await claimService.close();
+  } finally {
+    process.off("uncaughtException", onUncaught);
+    try { claimDb2.exec("ROLLBACK"); } catch {}
+    claimDb2.close();
+    claimDb1.close();
+  }
+
+  const heartbeatFixture = await createFixture("heartbeat-busy-recovery", 12);
+  const heartbeatDb1 = createDatabase(heartbeatFixture.root, heartbeatFixture.source);
+  heartbeatDb1.exec("PRAGMA busy_timeout = 20");
+  const heartbeatDb2 = new DatabaseSync(path.join(heartbeatFixture.root, "fixture.sqlite"));
+  heartbeatDb2.exec("PRAGMA busy_timeout = 20");
+  const heartbeatAdmin = createAdminFixture(heartbeatDb1, heartbeatFixture);
+  const heartbeatWarnings = [];
+  let heartbeatUncaught = null;
+  const onHeartbeatUncaught = (error) => { heartbeatUncaught = error; };
+  process.on("uncaughtException", onHeartbeatUncaught);
+  try {
+    const heartbeatService = createWorkMoveJobService({
+      adminCoreMutationService: heartbeatAdmin,
+      checkpointIntervalMs: 1_000,
+      getCoreDb: () => heartbeatDb1,
+      leaseDurationMs: 300,
+      warn: (...args) => heartbeatWarnings.push(args.map(String).join(" ")),
+      workerDataPatch: { forceCopy: true, delayPerFileMs: 80 }
+    });
+    const started = heartbeatService.start("1", { personId: "target", idempotencyKey: "heartbeat-busy-recovery" });
+    await waitForPhase(heartbeatService, started.id, "copying");
+    heartbeatDb2.exec("BEGIN IMMEDIATE");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(heartbeatUncaught, null, "heartbeat SQLITE_BUSY must be caught at the timer boundary");
+    assert.ok(heartbeatWarnings.some((message) => message.includes("work-move-heartbeat")), "the caught heartbeat failure must be observable");
+    heartbeatDb2.exec("COMMIT");
+    const completed = await waitForJob(heartbeatService, started.id, ["completed"]);
+    assert.equal(completed.phase, "completed", "a fenced busy heartbeat must automatically resume after the lock is released");
+    await heartbeatService.close();
+  } finally {
+    process.off("uncaughtException", onHeartbeatUncaught);
+    try { heartbeatDb2.exec("ROLLBACK"); } catch {}
+    heartbeatDb2.close();
+    heartbeatDb1.close();
+  }
 }
 
 async function verifyLeaseSchemaMigratesExistingJournal() {
@@ -1125,6 +1569,8 @@ async function safeCleanup(root) {
 let verificationError = null;
 try {
   await verifySuccessfulMoveAndIdempotency();
+  await verifyConcurrentStartsAreAtomicallyUnique();
+  await verifyLegacyDuplicateJobsMigrateFailClosed();
   await verifyActualAdminSqliteCommit();
   await verifyResultBeforeSourceCleanup();
   await verifyAttachedImageStageRecovery();
@@ -1143,6 +1589,7 @@ try {
   await verifyLegacyPlanOutsideTrustedRootsFailsClosed();
   await verifyExpiredLeaseTakeoverFencesOldWorker();
   await verifyDatabaseLeasePreventsDoubleExecution();
+  await verifySqliteBusyClaimRetriesAndHeartbeatRecovers();
   await verifyClosePreservesRollbackCheckpoint();
   await verifyClosePreservesCleanupCheckpoint();
   await verifyJunctionEscapeIsRejected();
@@ -1150,7 +1597,7 @@ try {
   await verifyConflictPayloadAndClientJobPropagation();
   await verifyHttpResponsivenessDuringCopy();
   verifySourceStructure();
-  console.log("work-move-jobs: ok (idempotency, shared-path recheck, immutable quarantine, lease fencing/CAS, trusted-root recovery, rollback, responsive HTTP)");
+  console.log("work-move-jobs: ok (atomic start, durable path reservation, idempotency, immutable quarantine, lease fencing/CAS, SQLITE_BUSY recovery, trusted-root recovery, rollback, responsive HTTP)");
 } catch (error) {
   verificationError = error;
 } finally {

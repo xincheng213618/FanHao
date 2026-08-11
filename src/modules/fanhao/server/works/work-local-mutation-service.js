@@ -34,6 +34,31 @@ export function createWorkLocalMutationService({
     }
   }
 
+  function assertLocalPathsNotReserved(db, rows) {
+    const hasReservations = db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'work_move_path_reservations'")
+      .get();
+    if (!hasReservations) return;
+    const findReservation = db.prepare(`
+      SELECT job_id FROM work_move_path_reservations r
+      WHERE r.released_at = ''
+        AND (
+          r.work_id = CAST(? AS TEXT)
+          OR r.local_work_id = ?
+          OR r.old_path_key = lower(rtrim(replace(COALESCE(?, ''), char(92), '/'), '/'))
+          OR r.new_path_key = lower(rtrim(replace(COALESCE(?, ''), char(92), '/'), '/'))
+        )
+      ORDER BY created_at, job_id LIMIT 1
+    `);
+    for (const row of rows || []) {
+      const reservation = findReservation.get(row.work_id, Number(row.id), row.local_path, row.local_path);
+      if (!reservation) continue;
+      const error = new Error(`作品正在迁移，暂时不能修改本地文件：${reservation.job_id}`);
+      error.statusCode = 409;
+      throw error;
+    }
+  }
+
   function setWorkLocalMarker(workId, marker, enabled) {
     const key = localWorkMarkerKey(marker);
     if (!key) {
@@ -106,18 +131,25 @@ export function createWorkLocalMutationService({
       throw error;
     }
 
-    try {
-      fs.renameSync(oldDir, newDir);
-    } catch (error) {
-      const wrapped = new Error(`重命名文件夹失败：${error.message}`);
-      wrapped.statusCode = 500;
-      throw wrapped;
-    }
-
-    const now = new Date().toISOString();
     db.exec("BEGIN IMMEDIATE");
     try {
       const localWorkId = Number(row.id);
+      const lockedRow = db.prepare("SELECT id, work_id, local_path, source_info_path FROM local_works WHERE id = ? AND work_id = ?").get(localWorkId, Number(work.id));
+      if (!lockedRow || path.resolve(String(lockedRow.local_path || "")).toLowerCase() !== path.resolve(oldDir).toLowerCase()) {
+        const error = new Error("作品本地路径已被其他操作修改");
+        error.statusCode = 409;
+        throw error;
+      }
+      assertLocalPathsNotReserved(db, [lockedRow]);
+      try {
+        fs.renameSync(oldDir, newDir);
+      } catch (error) {
+        const wrapped = new Error(`重命名文件夹失败：${error.message}`);
+        wrapped.statusCode = 500;
+        throw wrapped;
+      }
+
+      const now = new Date().toISOString();
       const fileRows = db.prepare("SELECT id, file_path FROM local_files WHERE local_work_id = ?").all(localWorkId);
       const imageRows = db
         .prepare("SELECT id, local_path FROM fanhao_images.images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
@@ -135,7 +167,7 @@ export function createWorkLocalMutationService({
           WHERE id = ?
           `
         )
-        .run(newDir, replacePathPrefix(row.source_info_path || "", oldDir, newDir), now, localWorkId);
+        .run(newDir, replacePathPrefix(lockedRow.source_info_path || "", oldDir, newDir), now, localWorkId);
       const updateFile = db.prepare("UPDATE local_files SET file_path = ?, relative_path = ?, updated_at = ? WHERE id = ?");
       for (const fileRow of fileRows) {
         const nextPath = replacePathPrefix(fileRow.file_path, oldDir, newDir);
@@ -235,14 +267,14 @@ export function createWorkLocalMutationService({
       .all(localPath);
   }
 
-  function clearLocalDbRows(db, localWorkRows) {
+  function clearLocalDbRows(db, localWorkRows, { inTransaction = false } = {}) {
     const rows = [...new Map(localWorkRows.map((row) => [Number(row.id), row])).values()].filter((row) => Number.isFinite(Number(row.id)));
     if (!rows.length) return;
     const deleteFiles = db.prepare("DELETE FROM local_files WHERE local_work_id = ?");
     const deleteLocalWork = db.prepare("DELETE FROM local_works WHERE id = ?");
     const updateWork = db.prepare("UPDATE works SET updated_at = ? WHERE id = ?");
     const now = new Date().toISOString();
-    db.exec("BEGIN IMMEDIATE");
+    if (!inTransaction) db.exec("BEGIN IMMEDIATE");
     try {
       for (const row of rows) {
         deleteFiles.run(Number(row.id));
@@ -251,11 +283,13 @@ export function createWorkLocalMutationService({
       for (const workId of new Set(rows.map((row) => Number(row.work_id)).filter(Number.isFinite))) {
         updateWork.run(now, workId);
       }
-      db.exec("COMMIT");
+      if (!inTransaction) db.exec("COMMIT");
     } catch (error) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {}
+      if (!inTransaction) {
+        try {
+          db.exec("ROLLBACK");
+        } catch {}
+      }
       throw error;
     }
   }
@@ -363,61 +397,71 @@ export function createWorkLocalMutationService({
     const emptyRemovedPaths = [];
     const localWorkRowsToClear = [...rows];
     const localWorkPathIndex = options.localWorkPathIndex || null;
-    for (const row of rows) {
-      const dirPath = ensureLibraryDirectoryPath(row.local_path, "作品文件夹");
-      const isRoot = libraryOpenRoots().some((rootPath) => path.resolve(dirPath).toLowerCase() === path.resolve(rootPath).toLowerCase());
-      if (isRoot) {
-        const error = new Error("拒绝删除资料库根目录");
-        error.statusCode = 400;
-        throw error;
-      }
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      assertLocalPathsNotReserved(db, rows);
+      for (const row of rows) {
+        const dirPath = ensureLibraryDirectoryPath(row.local_path, "作品文件夹");
+        const isRoot = libraryOpenRoots().some((rootPath) => path.resolve(dirPath).toLowerCase() === path.resolve(rootPath).toLowerCase());
+        if (isRoot) {
+          const error = new Error("拒绝删除资料库根目录");
+          error.statusCode = 400;
+          throw error;
+        }
 
-      const stat = safeStat(dirPath);
-      const pathRows = localWorkPathIndex?.get(normalizedLocalPath(row.local_path))
-        || localWorkRowsForPath(db, row.local_path)
-        || [row];
-      const sharedByOtherWork = pathRows.some((item) => Number(item.work_id) !== coreWorkId);
-      if (stat?.isDirectory()) {
-        if (sharedByOtherWork) {
-          const result = deleteSharedDirectoryWorkFiles(db, coreWorkId, row.id, dirPath);
-          deletedPaths.push(...result.deletedPaths);
-          missingPaths.push(...result.missingPaths);
-          emptyRemovedPaths.push(...result.emptyRemovedPaths);
+        const stat = safeStat(dirPath);
+        const pathRows = localWorkPathIndex?.get(normalizedLocalPath(row.local_path))
+          || localWorkRowsForPath(db, row.local_path)
+          || [row];
+        const sharedByOtherWork = pathRows.some((item) => Number(item.work_id) !== coreWorkId);
+        if (stat?.isDirectory()) {
+          if (sharedByOtherWork) {
+            const result = deleteSharedDirectoryWorkFiles(db, coreWorkId, row.id, dirPath);
+            deletedPaths.push(...result.deletedPaths);
+            missingPaths.push(...result.missingPaths);
+            emptyRemovedPaths.push(...result.emptyRemovedPaths);
+          } else {
+            try {
+              fs.rmSync(dirPath, {
+                recursive: true,
+                force: false,
+                maxRetries: 5,
+                retryDelay: 100
+              });
+              deletedPaths.push(relativeFromRoot(dirPath));
+              emptyRemovedPaths.push(...removeEmptyLibraryParents(dirPath));
+            } catch (error) {
+              const wrapped = new Error(`删除作品文件夹失败：${error.message}`);
+              wrapped.statusCode = 500;
+              throw wrapped;
+            }
+          }
+        } else if (stat?.isFile()) {
+          if (!sharedByOtherWork) {
+            try {
+              fs.unlinkSync(dirPath);
+              deletedPaths.push(relativeFromRoot(dirPath));
+              emptyRemovedPaths.push(...removeEmptyLibraryParents(dirPath));
+            } catch (error) {
+              const wrapped = new Error(`删除作品文件失败：${error.message}`);
+              wrapped.statusCode = 500;
+              throw wrapped;
+            }
+          }
         } else {
-          try {
-            fs.rmSync(dirPath, {
-              recursive: true,
-              force: false,
-              maxRetries: 5,
-              retryDelay: 100
-            });
-            deletedPaths.push(relativeFromRoot(dirPath));
-            emptyRemovedPaths.push(...removeEmptyLibraryParents(dirPath));
-          } catch (error) {
-            const wrapped = new Error(`删除作品文件夹失败：${error.message}`);
-            wrapped.statusCode = 500;
-            throw wrapped;
-          }
+          missingPaths.push(relativeFromRoot(dirPath));
+          localWorkRowsToClear.push(...pathRows);
         }
-      } else if (stat?.isFile()) {
-        if (!sharedByOtherWork) {
-          try {
-            fs.unlinkSync(dirPath);
-            deletedPaths.push(relativeFromRoot(dirPath));
-            emptyRemovedPaths.push(...removeEmptyLibraryParents(dirPath));
-          } catch (error) {
-            const wrapped = new Error(`删除作品文件失败：${error.message}`);
-            wrapped.statusCode = 500;
-            throw wrapped;
-          }
-        }
-      } else {
-        missingPaths.push(relativeFromRoot(dirPath));
-        localWorkRowsToClear.push(...pathRows);
       }
-    }
 
-    clearLocalDbRows(db, localWorkRowsToClear);
+      clearLocalDbRows(db, localWorkRowsToClear, { inTransaction: true });
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
     removeLocalWorkRowsFromPathIndex(localWorkPathIndex, localWorkRowsToClear);
     invalidateWorkCodeIndex();
     resetWorkSearch();

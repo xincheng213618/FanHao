@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createWorkMoveReservationService } from "../works/work-move-reservation-service.js";
 
 export function createAdminCoreMutationService({
   actorIdFromJavdbUrl,
@@ -37,6 +38,8 @@ export function createAdminCoreMutationService({
   uniqueTextArray,
   uniquePersonNames
 }) {
+  const workMoveReservationService = createWorkMoveReservationService({ getCoreDb });
+
   function safeDirectoryName(value, fallback = "新人物") {
     const clean = cleanPersonNamePart(value) || fallback;
     const safe = clean
@@ -827,10 +830,11 @@ export function createAdminCoreMutationService({
     }
   }
 
-  function assertWorkMoveSourceUnshared(plan) {
+  function assertWorkMoveSourceUnshared(plan, context = {}) {
     const db = getCoreDb();
     db.exec("BEGIN IMMEDIATE");
     try {
+      workMoveReservationService.assertOwnership(plan, context);
       throwIfWorkMoveSourceShared(db, plan);
       db.exec("COMMIT");
       return { unshared: true };
@@ -842,25 +846,35 @@ export function createAdminCoreMutationService({
     }
   }
 
-  function commitWorkMove(plan) {
+  function commitWorkMove(plan, context = {}) {
     const db = getCoreDb();
     const coreWorkId = Number(plan.workId);
     const corePersonId = Number(plan.personId);
-    const currentState = inspectWorkMove(plan);
-    if (currentState === "target") return { committed: false, alreadyCommitted: true };
-    if (currentState !== "source") {
-      const error = new Error("SQLite 中的作品路径已被其他操作修改");
-      error.statusCode = 409;
-      throw error;
-    }
-
     const now = new Date().toISOString();
+    let alreadyCommitted = false;
     try {
       db.exec("BEGIN IMMEDIATE");
+      workMoveReservationService.assertOwnership(plan, context);
+      workMoveReservationService.setMutationMode(plan, { ...context, mode: "main", schema: "main" });
+      const current = db
+        .prepare("SELECT local_path FROM local_works WHERE id = ? AND work_id = ?")
+        .get(Number(plan.localWorkId), coreWorkId);
+      const currentPath = current?.local_path ? path.resolve(current.local_path).toLowerCase() : "";
+      if (currentPath === path.resolve(plan.newDir).toLowerCase()) {
+        alreadyCommitted = true;
+        workMoveReservationService.setMutationMode(plan, { ...context, mode: "", schema: "main" });
+        db.exec("COMMIT");
+        return { committed: false, alreadyCommitted: true };
+      }
+      if (currentPath !== path.resolve(plan.oldDir).toLowerCase()) {
+        const error = new Error("SQLite 中的作品路径已被其他操作修改");
+        error.statusCode = 409;
+        throw error;
+      }
       throwIfWorkMoveSourceShared(db, plan);
       const fileRows = db.prepare("SELECT id, file_path FROM local_files WHERE local_work_id = ?").all(Number(plan.localWorkId));
 
-      db
+      const localWorkUpdate = db
         .prepare(
           `
           UPDATE local_works
@@ -870,15 +884,36 @@ export function createAdminCoreMutationService({
                 ELSE source_info_path
               END,
               updated_at = ?
-          WHERE id = ?
+          WHERE id = ? AND work_id = ?
+            AND lower(replace(local_path, '/', char(92))) = lower(replace(?, '/', char(92)))
           `
         )
-        .run(plan.newDir, replacePathPrefix(plan.sourceInfoPath, plan.oldDir, plan.newDir), now, Number(plan.localWorkId));
+        .run(
+          plan.newDir,
+          replacePathPrefix(plan.sourceInfoPath, plan.oldDir, plan.newDir),
+          now,
+          Number(plan.localWorkId),
+          coreWorkId,
+          plan.oldDir
+        );
+      if (Number(localWorkUpdate.changes || 0) !== 1) {
+        const error = new Error("SQLite 中的源作品路径在提交时发生变化");
+        error.statusCode = 409;
+        throw error;
+      }
 
-      const updateFile = db.prepare("UPDATE local_files SET file_path = ?, relative_path = ?, updated_at = ? WHERE id = ?");
+      const updateFile = db.prepare(`
+        UPDATE local_files SET file_path = ?, relative_path = ?, updated_at = ?
+        WHERE id = ? AND local_work_id = ? AND file_path = ?
+      `);
       for (const fileRow of fileRows) {
         const nextPath = replacePathPrefix(fileRow.file_path, plan.oldDir, plan.newDir);
-        updateFile.run(nextPath, relativeFromRoot(nextPath), now, fileRow.id);
+        const updated = updateFile.run(nextPath, relativeFromRoot(nextPath), now, fileRow.id, Number(plan.localWorkId), fileRow.file_path);
+        if (Number(updated.changes || 0) !== 1) {
+          const error = new Error("SQLite 中的作品文件路径在提交时发生变化");
+          error.statusCode = 409;
+          throw error;
+        }
       }
 
       db.prepare("DELETE FROM work_people WHERE work_id = ? AND role = 'actor' AND person_id <> ?").run(coreWorkId, corePersonId);
@@ -899,6 +934,7 @@ export function createAdminCoreMutationService({
       const workRow = db.prepare("SELECT fields_json FROM works WHERE id = ?").get(coreWorkId);
       const fieldsJson = correctedActorFieldsJson(workRow?.fields_json, actorName);
       db.prepare("UPDATE works SET fields_json = ?, updated_at = ? WHERE id = ?").run(fieldsJson, now, coreWorkId);
+      workMoveReservationService.setMutationMode(plan, { ...context, mode: "", schema: "main" });
       db.exec("COMMIT");
     } catch (error) {
       try {
@@ -907,7 +943,7 @@ export function createAdminCoreMutationService({
       throw error;
     }
 
-    return { committed: true, alreadyCommitted: false };
+    return { committed: !alreadyCommitted, alreadyCommitted };
   }
 
   function pathUsesPrefix(value, prefix) {
@@ -922,30 +958,45 @@ export function createAdminCoreMutationService({
     return rows.some((row) => pathUsesPrefix(row.local_path, plan.oldDir)) ? "pending" : "completed";
   }
 
-  function commitWorkMoveImages(plan) {
+  function commitWorkMoveImages(plan, context = {}) {
     const db = getCoreDb();
-    const rows = db
-      .prepare("SELECT id, local_path FROM fanhao_images.images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
-      .all(Number(plan.workId));
-    const pending = rows.filter((row) => pathUsesPrefix(row.local_path, plan.oldDir));
-    if (!pending.length) return { committed: false, alreadyCommitted: true, updated: 0 };
-
     const now = new Date().toISOString();
     db.exec("BEGIN IMMEDIATE");
     try {
-      const updateImage = db.prepare("UPDATE fanhao_images.images SET local_path = ?, updated_at = ? WHERE id = ?");
+      workMoveReservationService.assertOwnership(plan, { ...context, schema: "images" });
+      workMoveReservationService.setMutationMode(plan, { ...context, mode: "images", schema: "images" });
+      const rows = db
+        .prepare("SELECT id, local_path FROM fanhao_images.images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
+        .all(Number(plan.workId));
+      const pending = rows.filter((row) => pathUsesPrefix(row.local_path, plan.oldDir));
+      const updateImage = db.prepare(`
+        UPDATE fanhao_images.images SET local_path = ?, updated_at = ?
+        WHERE id = ? AND owner_type = 'work' AND owner_id = ? AND local_path = ?
+      `);
       for (const imageRow of pending) {
-        updateImage.run(replacePathPrefix(imageRow.local_path, plan.oldDir, plan.newDir), now, imageRow.id);
+        const updated = updateImage.run(
+          replacePathPrefix(imageRow.local_path, plan.oldDir, plan.newDir),
+          now,
+          imageRow.id,
+          Number(plan.workId),
+          imageRow.local_path
+        );
+        if (Number(updated.changes || 0) !== 1) throw new Error("图片库路径在提交时发生变化");
       }
+      const remaining = db
+        .prepare("SELECT local_path FROM fanhao_images.images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
+        .all(Number(plan.workId))
+        .filter((row) => pathUsesPrefix(row.local_path, plan.oldDir));
+      if (remaining.length) throw new Error("图片库路径补偿尚未完成");
+      workMoveReservationService.setMutationMode(plan, { ...context, mode: "", schema: "images" });
       db.exec("COMMIT");
+      return { committed: pending.length > 0, alreadyCommitted: pending.length === 0, updated: pending.length };
     } catch (error) {
       try {
         db.exec("ROLLBACK");
       } catch {}
       throw error;
     }
-    if (inspectWorkMoveImages(plan) !== "completed") throw new Error("图片库路径补偿尚未完成");
-    return { committed: true, alreadyCommitted: false, updated: pending.length };
   }
 
   function finalizeWorkMove(plan, moveResult = {}) {
@@ -979,6 +1030,7 @@ export function createAdminCoreMutationService({
   }
 
   return {
+    acquireWorkMoveReservation: (...args) => workMoveReservationService.acquire(...args),
     assertWorkMoveSourceUnshared,
     correctWorkActorFromLocalFolder,
     commitWorkMoveImages,
@@ -988,7 +1040,11 @@ export function createAdminCoreMutationService({
     inspectWorkMove,
     inspectWorkMoveImages,
     mergePeopleIntoTarget,
+    parkWorkMoveReservation: (...args) => workMoveReservationService.park(...args),
     prepareWorkMove,
+    releaseWorkMoveReservation: (...args) => workMoveReservationService.release(...args),
+    renewWorkMoveReservation: (...args) => workMoveReservationService.renew(...args),
+    repairWorkMoveReservations: (...args) => workMoveReservationService.repairTerminalReservations(...args),
     upsertActorProfile
   };
 }
