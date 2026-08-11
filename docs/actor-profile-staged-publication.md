@@ -56,6 +56,8 @@
 
 publication stage 只在自己的 source 优先级内代替同来源 live 行，并不跨级压过手工头像。完成后的直接头像替换 writer 必须先在 `BEGIN IMMEDIATE` 中通过 reservation fence，再删除该人物 publication 指针，最后写 live image。删除手工头像时，仅在 publication 自身也是手工来源时清 pointer；若 publication 是较低优先级的 `actor_profiles`，保留 pointer 作为删除手工 override 后的回退。这样既不会让旧 publication 永久遮蔽后续修改，也不破坏原有来源回退顺序；下一次 PUT 可再次建立新指针。
 
+手工覆盖或删除只改变 current pointer/live 候选选择，不会擦除、撤销或使已 `completed` 的历史 `?v=<operation-id>` 失效。敏感图片删除、版本 URL revoke 和 stage GC 需要单独的管理协议；当前切片未实现这些能力。
+
 当前直接或同优先级 writer 清单：
 
 | Writer | 写入内容 | 本批约束 |
@@ -103,7 +105,7 @@ publication stage 只在自己的 source 优先级内代替同来源 live 行，
 ## 尚未覆盖的迁移清单
 
 - 将 Filetree/Python/人物合并各自迁入可靠 journal/outbox，消除它们现有的跨库 crash-atomic 风险。
-- 为已完成 stage 设计保留/压缩策略；当前 immutable versions 会持续增长。
+- 为已完成 stage 设计保留/压缩、敏感图删除和 immutable URL revoke 策略；当前 completed versions 会持续增长并保持可按原 operation URL 读取。
 - 在协议 schema 发生兼容性变化前引入显式 schema version/migration gate；本批只创建首版表，不扩展在线升级协议。
 - 单独审查并统一 `PUT /api/people/:id/cover` 等历史写路由的权限策略；本批不扩大到人物封面接口。
 - 增加多进程、真实异常断电和长时间 BUSY soak；当前 fixture 使用临时 SQLite、强制 kill 和确定性错误，不访问真实数据库或服务。
