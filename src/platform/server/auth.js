@@ -4,7 +4,10 @@ import fs from "node:fs";
 const WEB_AUTH_COOKIE = "fanhao_web_auth";
 const APP_AUTH_COOKIE = "fanhao_app_auth";
 const WEB_AUTH_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
-const APP_AUTH_MAX_AGE_SECONDS = 180 * 24 * 60 * 60;
+const LOGIN_FAILURE_LIMIT = 5;
+const LOGIN_FAILURE_WINDOW_MS = 10 * 60 * 1000;
+const LOGIN_BLOCK_MS = 15 * 60 * 1000;
+const LOGIN_BUCKET_LIMIT = 2048;
 
 export function createAuthServices({
   authSecretPath,
@@ -13,18 +16,43 @@ export function createAuthServices({
   readBodyText,
   sendJson,
   sendHtml,
-  redirect
+  redirect,
+  now = Date.now
 }) {
+  const loginFailures = new Map();
+  let authSecretCache = "";
+
   function getAuthSecret() {
+    if (authSecretCache) return authSecretCache;
     ensureDataDir();
     try {
-      const existing = fs.readFileSync(authSecretPath, "utf8").trim();
-      if (existing.length >= 32) return existing;
+      const existing = JSON.parse(fs.readFileSync(authSecretPath, "utf8"));
+      const secret = String(existing?.secret || "").trim();
+      const passwordBinding = String(existing?.webPasswordBinding || "").trim();
+      if (
+        existing?.version === 2
+        && secret.length >= 32
+        && safeEqualText(passwordBinding, webPasswordBinding(secret))
+      ) {
+        authSecretCache = secret;
+        return authSecretCache;
+      }
     } catch {}
 
     const secret = crypto.randomBytes(32).toString("base64url");
-    fs.writeFileSync(authSecretPath, secret, "utf8");
-    return secret;
+    fs.writeFileSync(authSecretPath, JSON.stringify({
+      version: 2,
+      secret,
+      webPasswordBinding: webPasswordBinding(secret)
+    }), "utf8");
+    authSecretCache = secret;
+    return authSecretCache;
+  }
+
+  function webPasswordBinding(secret) {
+    return crypto.createHmac("sha256", secret)
+      .update(`web-password-binding-v1\0${remoteWebPassword}`)
+      .digest("base64url");
   }
 
   function hmacText(value) {
@@ -66,23 +94,24 @@ export function createAuthServices({
     return serializeCookie(name, "", { maxAge: 0, expires: new Date(0) });
   }
 
-  function createAuthToken(kind) {
-    const issuedAt = Math.floor(Date.now() / 1000);
+  function createWebAuthToken() {
+    const issuedAt = Math.floor(Number(now()) / 1000);
     const nonce = crypto.randomBytes(12).toString("base64url");
-    const payload = `${kind}.${issuedAt}.${nonce}`;
-    return `${payload}.${hmacText(payload)}`;
+    const payload = `web.${issuedAt}.${nonce}`;
+    return `${payload}.${hmacText(`web-auth-v2\0${remoteWebPassword}\0${payload}`)}`;
   }
 
-  function validateAuthToken(token, kind, maxAgeSeconds) {
+  function validateWebAuthToken(token) {
+    if (!remoteWebPassword) return false;
     const parts = String(token || "").split(".");
-    if (parts.length !== 4 || parts[0] !== kind) return false;
+    if (parts.length !== 4 || parts[0] !== "web") return false;
     const issuedAt = Number(parts[1]);
     if (!Number.isFinite(issuedAt)) return false;
-    const age = Math.floor(Date.now() / 1000) - issuedAt;
-    if (age < 0 || age > maxAgeSeconds) return false;
+    const age = Math.floor(Number(now()) / 1000) - issuedAt;
+    if (age < 0 || age > WEB_AUTH_MAX_AGE_SECONDS) return false;
 
     const payload = parts.slice(0, 3).join(".");
-    const expected = hmacText(payload);
+    const expected = hmacText(`web-auth-v2\0${remoteWebPassword}\0${payload}`);
     return safeEqualText(parts[3], expected);
   }
 
@@ -207,7 +236,7 @@ export function createAuthServices({
   function isLanHost(host) {
     const value = normalizeRemoteAddress(host);
     if (value.endsWith(".local")) return true;
-    if (value.startsWith("fe80:") || (value.includes(":") && (value.startsWith("fc") || value.startsWith("fd")))) return true;
+    if (/^fe[89ab][0-9a-f]:/.test(value) || (value.includes(":") && (value.startsWith("fc") || value.startsWith("fd")))) return true;
 
     const match = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(value);
     if (!match) return false;
@@ -218,13 +247,12 @@ export function createAuthServices({
 
   function requestAccess(req) {
     const host = requestHostName(req.headers.host);
-    const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
-    const remote = normalizeRemoteAddress(forwarded || req.socket.remoteAddress || "");
+    const remote = normalizeRemoteAddress(req.socket.remoteAddress || "");
     const hostIsLocal = isLocalHostName(host);
     const hostIsLan = isLanHost(host);
     const clientIsLocal = isLocalHostName(remote);
     const clientIsLan = isLanHost(remote);
-    const mode = hostIsLocal ? "local" : hostIsLan ? "lan" : "remote";
+    const mode = clientIsLocal ? "local" : clientIsLan ? "lan" : "remote";
     return {
       mode,
       isLocal: mode === "local",
@@ -243,19 +271,103 @@ export function createAuthServices({
     };
   }
 
+  function loginClientKey(req) {
+    return normalizeRemoteAddress(req.socket.remoteAddress || "") || "unknown";
+  }
+
+  function pruneLoginFailures(currentTime) {
+    for (const [key, entry] of loginFailures) {
+      const hasRecentFailure = entry.failures.some((failedAt) => currentTime - failedAt < LOGIN_FAILURE_WINDOW_MS);
+      if (entry.blockedUntil <= currentTime && !hasRecentFailure) loginFailures.delete(key);
+    }
+    while (loginFailures.size >= LOGIN_BUCKET_LIMIT) {
+      const oldestKey = loginFailures.keys().next().value;
+      if (oldestKey === undefined) break;
+      loginFailures.delete(oldestKey);
+    }
+  }
+
+  function activeLoginBlock(req) {
+    const currentTime = Number(now());
+    pruneLoginFailures(currentTime);
+    const entry = loginFailures.get(loginClientKey(req));
+    if (!entry || entry.blockedUntil <= currentTime) return null;
+    return Math.max(1, Math.ceil((entry.blockedUntil - currentTime) / 1000));
+  }
+
+  function recordLoginFailure(req) {
+    const currentTime = Number(now());
+    pruneLoginFailures(currentTime);
+    const key = loginClientKey(req);
+    const previous = loginFailures.get(key);
+    const failures = (previous?.failures || []).filter((failedAt) => currentTime - failedAt < LOGIN_FAILURE_WINDOW_MS);
+    failures.push(currentTime);
+    const blockedUntil = failures.length >= LOGIN_FAILURE_LIMIT ? currentTime + LOGIN_BLOCK_MS : 0;
+    loginFailures.set(key, { failures, blockedUntil });
+    return blockedUntil > currentTime ? Math.ceil((blockedUntil - currentTime) / 1000) : null;
+  }
+
+  function clearLoginFailures(req) {
+    loginFailures.delete(loginClientKey(req));
+  }
+
+  function sendLoginFailure(req, res, next, retryAfterSeconds = null) {
+    const blocked = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0;
+    const status = blocked ? 429 : 401;
+    const message = blocked ? "尝试次数过多，请稍后再试" : "密码不正确";
+    if (blocked) res.setHeader("Retry-After", String(retryAfterSeconds));
+    if (String(req.headers.accept || "").includes("application/json")) {
+      sendJson(res, status, { error: message });
+    } else {
+      sendHtml(res, status, loginPageHtml({ next, error: message }));
+    }
+  }
+
   function isTrustedNetworkAccess(access) {
+    return Boolean(access?.clientIsLocal || access?.clientIsLan);
+  }
+
+  function isTrustedRequestHost(access) {
     return Boolean(access?.hostIsLocal || access?.hostIsLan);
   }
 
+  function requestCorsOrigin(req) {
+    const rawOrigin = String(req.headers.origin || "").trim();
+    if (!rawOrigin) return "";
+    try {
+      const originUrl = new URL(rawOrigin);
+      const requestHost = String(req.headers.host || "").trim().toLowerCase();
+      if (originUrl.host.toLowerCase() === requestHost) return rawOrigin;
+
+      const access = requestAccess(req);
+      if (!isTrustedNetworkAccess(access) || !isTrustedRequestHost(access)) return "";
+      const localOriginPath = originUrl.protocol === "capacitor:"
+        ? originUrl.pathname === "" || originUrl.pathname === "/"
+        : originUrl.pathname === "/";
+      const localAppOrigin = isLocalHostName(originUrl.hostname)
+        && ["http:", "https:", "capacitor:"].includes(originUrl.protocol)
+        && !originUrl.port
+        && !originUrl.username
+        && !originUrl.password
+        && localOriginPath
+        && !originUrl.search
+        && !originUrl.hash;
+      return localAppOrigin ? rawOrigin : "";
+    } catch {
+      return "";
+    }
+  }
+
   function isSameTrustedNetworkOrigin(req, access = requestAccess(req)) {
-    const origin = String(req.headers.origin || "").trim();
-    if (!origin) return true;
     if (!isTrustedNetworkAccess(access)) return false;
+    const origin = String(req.headers.origin || "").trim();
+    const trustedRequestHost = isTrustedRequestHost(access);
+    if (!origin) return trustedRequestHost;
 
     try {
       const originUrl = new URL(origin);
       const requestHost = String(req.headers.host || "").toLowerCase();
-      if (originUrl.host.toLowerCase() === requestHost) return true;
+      if (originUrl.host.toLowerCase() === requestHost) return trustedRequestHost;
       return isAppClientOrigin(req) && String(req.headers["x-fanhao-client"] || "").toLowerCase() === "android";
     } catch {
       return false;
@@ -288,24 +400,21 @@ export function createAuthServices({
   function requestAuthState(req, url) {
     const access = requestAccess(req);
     const appClient = isAndroidAppClient(req, url);
-    const required = !isTrustedNetworkAccess(access) && !appClient;
+    const trustedNetwork = isTrustedNetworkAccess(access) && isTrustedRequestHost(access);
     const cookies = parseCookies(req);
-    const webTokenValid = validateAuthToken(cookies[WEB_AUTH_COOKIE], "web", WEB_AUTH_MAX_AGE_SECONDS);
-    const appTokenValid = validateAuthToken(cookies[APP_AUTH_COOKIE], "app", APP_AUTH_MAX_AGE_SECONDS);
+    const webTokenValid = validateWebAuthToken(cookies[WEB_AUTH_COOKIE]);
 
-    if (appClient) {
+    if (trustedNetwork && appClient) {
       return {
         access,
         allowed: true,
         required: false,
-        reason: "app",
-        setAppCookie: !appTokenValid
+        reason: "app"
       };
     }
 
-    if (!required) return { access, allowed: true, required: false, reason: "trusted-network" };
+    if (trustedNetwork) return { access, allowed: true, required: false, reason: "trusted-network" };
     if (webTokenValid) return { access, allowed: true, required: true, reason: "password" };
-    if (appTokenValid) return { access, allowed: true, required: true, reason: "app-cookie" };
     return { access, allowed: false, required: true, reason: "missing-password" };
   }
 
@@ -351,19 +460,25 @@ export function createAuthServices({
     }
 
     if (url.pathname === "/auth/login" && req.method === "POST") {
-      const body = await readAuthBody(req);
-      const next = safeNextPath(body.next || url.searchParams.get("next") || "/");
-      if (!safeEqualText(body.password, remoteWebPassword)) {
-        if (String(req.headers.accept || "").includes("application/json")) {
-          sendJson(res, 401, { error: "密码不正确" });
-        } else {
-          sendHtml(res, 401, loginPageHtml({ next, error: "密码不正确" }));
-        }
+      const fallbackNext = safeNextPath(url.searchParams.get("next") || "/");
+      const activeBlockSeconds = activeLoginBlock(req);
+      if (activeBlockSeconds) {
+        sendLoginFailure(req, res, fallbackNext, activeBlockSeconds);
         return true;
       }
 
+      const body = await readAuthBody(req);
+      const next = safeNextPath(body.next || fallbackNext);
+      if (!remoteWebPassword || !safeEqualText(body.password, remoteWebPassword)) {
+        const retryAfterSeconds = remoteWebPassword ? recordLoginFailure(req) : null;
+        sendLoginFailure(req, res, next, retryAfterSeconds);
+        return true;
+      }
+
+      clearLoginFailures(req);
+
       const headers = {
-        "Set-Cookie": serializeCookie(WEB_AUTH_COOKIE, createAuthToken("web"), { maxAge: WEB_AUTH_MAX_AGE_SECONDS })
+        "Set-Cookie": serializeCookie(WEB_AUTH_COOKIE, createWebAuthToken(), { maxAge: WEB_AUTH_MAX_AGE_SECONDS })
       };
       if (String(req.headers.accept || "").includes("application/json")) {
         res.setHeader("Set-Cookie", headers["Set-Cookie"]);
@@ -384,16 +499,13 @@ export function createAuthServices({
     return false;
   }
 
-  function applyAppCookie(res, authState) {
-    if (!authState.setAppCookie) return;
-    res.setHeader("Set-Cookie", serializeCookie(APP_AUTH_COOKIE, createAuthToken("app"), { maxAge: APP_AUTH_MAX_AGE_SECONDS }));
-  }
+  getAuthSecret();
 
   return {
-    applyAppCookie,
     isSameLocalOrigin,
     isSameTrustedNetworkOrigin,
     isTrustedNetworkAccess,
+    requestCorsOrigin,
     requestAccess,
     requestAuthState,
     routeAuth,

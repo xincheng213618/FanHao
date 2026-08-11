@@ -65,7 +65,7 @@ export function createServerConfig({
     FFMPEG_PATH,
     FFPROBE_PATH: env.FFPROBE_PATH || "ffprobe",
     PYTHON_PATH: env.PYTHON || "python",
-    REMOTE_WEB_PASSWORD: env.FANHAO_WEB_PASSWORD || "xincheng",
+    REMOTE_WEB_PASSWORD: String(env.FANHAO_WEB_PASSWORD || "").trim(),
     EXCLUDED_DIRS: new Set(["$RECYCLE.BIN", "System Volume Information", "Recovery"]),
     VIDEO_EXTS: new Set([".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".ts", ".m2ts", ".webm", ".iso"]),
     PLAYABLE_VIDEO_EXTS: new Set([".mp4", ".m4v", ".mov", ".webm"]),

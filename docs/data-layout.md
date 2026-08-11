@@ -15,7 +15,7 @@ FanHao 把本地状态放在项目根下的 `data/` 目录，包含若干 SQLite
 | `music.sqlite` | SQLite | 音乐独立库：本地音频、歌手、专辑、歌词、收藏与播放进度。 |
 | `user-state.json` | JSON | 用户状态：收藏夹、收藏、播放进度、观看历史、手动封面覆盖。 |
 | `app-config.json` | JSON | App 运行期配置（如图库读取缓存上限）。 |
-| `auth-secret.txt` | 文本 | 访问鉴权 HMAC 密钥（首次启动随机生成）。 |
+| `auth-secret.txt` | JSON | 访问鉴权 HMAC 密钥与密码绑定 epoch；首次启动、旧格式迁移或密码变更时轮换。 |
 | `douban-cookie.txt` | 文本 | 豆瓣 Cookie（供电视剧 / 电影资料补全作业使用）。 |
 | `admin-tasks.json` | JSON | 后台作业历史与状态。 |
 | `library-index.json` | JSON | 旧版扫描索引缓存（核心库时代已被 `fanhao-core-v2.sqlite` 取代，但兼容读取）。 |
@@ -36,6 +36,8 @@ FanHao 把本地状态放在项目根下的 `data/` 目录，包含若干 SQLite
 - `src/modules/short-videos/download-manager/logs/`：采集、下载、sidecar 和守护日志。
 
 这些运行数据已被 Git 忽略。`data/short-videos.sqlite` 仍是 FanHao 展示层的短视频库，服务会从下载管理器数据库做增量同步；备份或迁移机器时，两份 SQLite 都应保留。
+
+`data/short-video-list-cache-generation.json` 与 `data/short-video-list-watch-overlays.json` 是短视频列表缓存的失效标记和临时观看覆盖，可由 SQLite 状态重新生成，也已被 Git 忽略；它们不是需要随源码发布的数据。
 
 ## 核心库（`fanhao-core-v2.sqlite`）
 

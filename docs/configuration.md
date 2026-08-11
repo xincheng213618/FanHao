@@ -55,13 +55,21 @@ FanHao 服务端通过**环境变量**控制资料库根目录、端口、外部
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `FANHAO_WEB_PASSWORD` | `xincheng` | 远程（非局域网）网页访问密码。本地 / 局域网访问默认免密。 |
+| `FANHAO_WEB_PASSWORD` | 无 | 远程（非局域网）网页访问密码。本地 / 局域网访问默认免密；未配置时拒绝远程登录。 |
 
-服务端按请求 Host / 客户端 IP 判定访问模式（`local` / `lan` / `remote`），见 `src/platform/server/auth.js`：
+服务端只按 TCP 连接的客户端 IP 判定访问模式（`local` / `lan` / `remote`），见 `src/platform/server/auth.js`。请求 `Host`、`X-Forwarded-For` 和 Android 客户端标记不参与可信网络判定：
 
 - **local**：`localhost` / `127.0.0.1` —— 免密，页面尺寸与预加载最宽松。
-- **lan**：私有网段（如 `192.168.*.*`、`10.*.*.*`、`.local`）—— 免密。
+- **lan**：私有 IPv4 网段、IPv4 link-local、IPv6 ULA / link-local；使用本机、私网 IP 或 `.local` Host 时免密。
 - **remote**：其余来源 —— 必须输入 `FANHAO_WEB_PASSWORD`，通过 Cookie 维持登录态。
+
+远程密码连续失败 5 次会触发基于 TCP 客户端 IP 的短期登录锁定；转发头不会切换计数来源。修改密码会轮换持久鉴权 epoch，因此旧会话立即失效；即使以后改回旧密码，也不会恢复旧 Cookie。
+
+> **在可信代理机制实现并验证前，禁止把 29998 放到 loopback / LAN 反向代理后再对公网暴露。** 服务端尚未实现可信代理清单和经过验证的客户端 IP 提取；代理若从 `127.0.0.1` 或私网地址连接后端，公网请求会被误判为 `local` / `lan` 并绕过远程登录。当前实现故意不信任 `X-Forwarded-For`，不能靠增加转发头修复。必须先实现可信代理 allowlist、严格解析代理链并完成安全测试，才可启用这类反向代理。
+
+后台管理和本地文件变更还会校验请求 `Host`/`Origin`：目标必须是本机或私网地址（Android 本地 Capacitor origin 除外），避免公网域名通过 DNS rebinding 获得局域网管理权限。
+
+浏览器跨源访问不再返回通配符 CORS：仅同源请求及来自可信本机/私网连接的打包 App localhost origin 可用。局域网 IP 页面正常同源访问不受影响，任意外部网页不能跨源读取免密资料 API。
 
 ## 运行期配置（持久化）
 

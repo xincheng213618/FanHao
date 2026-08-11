@@ -1093,9 +1093,9 @@ function emptyLibrary() {
 }
 
 const {
-  applyAppCookie,
   isSameTrustedNetworkOrigin,
   isTrustedNetworkAccess,
+  requestCorsOrigin,
   requestAccess,
   requestAuthState,
   routeAuth,
@@ -2225,9 +2225,9 @@ localLibraryIndexService.initializeLibrary();
 await moduleRegistry.start();
 
 const requestHandler = createRequestHandler({
-  applyAppCookie,
   attachAccessAnalytics: accessAnalyticsService.attach,
   attachAccessLogger,
+  requestCorsOrigin,
   requestAuthState,
   routeAuth,
   sendLoginRequired,
