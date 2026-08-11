@@ -19,8 +19,11 @@ import {
   captureAuthorIndexReturnContext,
   captureAuthorIndexWindow,
   discardAuthorIndexWindowAfterRouteChange,
+  isCurrentShortVideoLoadRequest,
   matchesAuthorIndexWindow,
-  restoreAuthorIndexWindow
+  restoreAuthorIndexWindow,
+  settleShortVideoLoad,
+  SHORT_VIDEO_LOAD_STALE
 } from "../public/modules/short-videos/author-navigation.js";
 import { createAuthorCollectorPoll } from "../public/modules/short-videos/author-collector-poll.js";
 import { shortVideoAuthorCardAccessibility } from "../public/modules/short-videos/list-cards.js";
@@ -62,6 +65,7 @@ verifySharedImports();
 verifyWebDedicatedEntry();
 verifyWebShortVideoRouter();
 verifyWebAuthorRouteLifecycle();
+await verifyWebShortVideoLoadContract();
 await verifyWebAuthorCollectorPollLifecycle();
 verifyNativeFeedContract();
 verifyAndroidAuthorAccountRoutes();
@@ -235,6 +239,16 @@ function verifyWebAuthorRouteLifecycle() {
     { label: "查看 蔓蔓 的短视频，账号已封禁", description: "封禁原因：主页不可访问" },
     "banned author cards must expose both status and reason to assistive technology"
   );
+}
+
+async function verifyWebShortVideoLoadContract() {
+  assert(isCurrentShortVideoLoadRequest(7, 7, "author-a", "author-a", true), "an active author-detail request must remain current");
+  assert(!isCurrentShortVideoLoadRequest(7, 8, "author-a", "author-a", true), "a superseded author-detail request must become stale");
+  assert(!isCurrentShortVideoLoadRequest(7, 7, "author-a", "", false), "leaving the author route must make its detail request stale");
+  const staleError = new Error("delayed stale rejection");
+  assert.equal(await settleShortVideoLoad(Promise.reject(staleError), () => false), SHORT_VIDEO_LOAD_STALE, "a stale detail rejection must resolve to the explicit stale result");
+  const currentError = new Error("current detail rejection");
+  await assert.rejects(() => settleShortVideoLoad(Promise.reject(currentError), () => true), currentError, "a current detail rejection must remain visible to its error handler");
 }
 
 async function verifyWebAuthorCollectorPollLifecycle() {

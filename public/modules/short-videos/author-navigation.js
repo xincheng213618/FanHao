@@ -1,6 +1,23 @@
 const AUTHOR_INDEX_SOURCES = new Set(["authors", "following"]);
 export const AUTHOR_INDEX_WINDOW_TTL_MS = 120_000;
 export const AUTHOR_INDEX_WINDOW_MAX_AUTHORS = 768;
+export const SHORT_VIDEO_LOAD_STALE = Object.freeze({ status: "stale" });
+
+export function isCurrentShortVideoLoadRequest(requestId, currentRequestId, requestedAuthorPage = "", currentAuthorPage = "", authorDetailPage = false) {
+  const requestedAuthor = String(requestedAuthorPage || "").trim();
+  return requestId === currentRequestId
+    && requestedAuthor === String(currentAuthorPage || "").trim()
+    && (!requestedAuthor || authorDetailPage);
+}
+
+export async function settleShortVideoLoad(request, isCurrentRequest = () => true) {
+  try {
+    return await request;
+  } catch (error) {
+    if (isCurrentRequest()) throw error;
+    return SHORT_VIDEO_LOAD_STALE;
+  }
+}
 
 export function captureAuthorIndexReturnContext(shortVideo = {}) {
   const currentSource = String(shortVideo.source || "").trim();

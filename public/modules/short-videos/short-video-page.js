@@ -45,7 +45,7 @@ import {
   writeSmartFillPreference,
   writeVolumePreference
 } from "./state.js?v=20260716-short-video-state-01";
-import { discardAuthorIndexWindowAfterRouteChange, restoreSavedAuthorIndexWindow } from "./author-navigation.js?v=20260811-author-index-window-01";
+import { discardAuthorIndexWindowAfterRouteChange, isCurrentShortVideoLoadRequest, restoreSavedAuthorIndexWindow, settleShortVideoLoad, SHORT_VIDEO_LOAD_STALE } from "./author-navigation.js?v=20260811-author-load-contract-01";
 export function createShortVideoPage(deps) {
   const {
     api,
@@ -642,7 +642,7 @@ export function createShortVideoPage(deps) {
     // Quality-filtered pages are cheap indexed reads and must not mix a cached
     // pre-probe page with newly measured append pages.
     if (state.shortVideo.quality !== "all") params.set("refresh", "1");
-    const requestedAuthorPage = String(state.shortVideo.authorPage || "").trim();
+    const requestedAuthorPage = String(state.shortVideo.authorPage || "").trim(); const currentRequest = () => isCurrentShortVideoLoadRequest(requestId, shortVideoListRequestId, requestedAuthorPage, state.shortVideo.authorPage, isShortVideoAuthorDetailPage());
     if (!append && requestedAuthorPage) {
       resolveShortVideoAuthor(requestedAuthorPage).then((author) => {
         if (requestId !== shortVideoListRequestId || state.shortVideo.authorPage !== requestedAuthorPage || !author) return;
@@ -650,7 +650,7 @@ export function createShortVideoPage(deps) {
         renderView();
       }).catch(() => {});
     }
-    const data = await api(`/api/short-videos?${params}`);
+    const data = await settleShortVideoLoad(api(`/api/short-videos?${params}`), currentRequest); if (data === SHORT_VIDEO_LOAD_STALE) return data;
     if (captureListPerformance) {
       markShortVideoPerformance("short-video-list-request-finish", {
         append,
@@ -661,7 +661,7 @@ export function createShortVideoPage(deps) {
         hasMore: Boolean(data?.hasMore)
       });
     }
-    if (requestId !== shortVideoListRequestId || requestedAuthorPage !== String(state.shortVideo.authorPage || "").trim() || (requestedAuthorPage && !isShortVideoAuthorDetailPage())) {
+    if (!currentRequest()) {
       if (captureListPerformance) {
         markShortVideoPerformance("short-video-list-request-stale", {
           append,
@@ -669,7 +669,7 @@ export function createShortVideoPage(deps) {
           currentRequestId: shortVideoListRequestId
         });
       }
-      return;
+      return SHORT_VIDEO_LOAD_STALE;
     }
     if (append && state.shortVideo.data) {
       const previousUsers = Array.isArray(state.shortVideo.data.users) ? state.shortVideo.data.users : [];

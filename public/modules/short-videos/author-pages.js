@@ -3,8 +3,9 @@ import {
   canReturnThroughShortVideoHistory,
   captureAuthorIndexReturnContext,
   captureAuthorIndexWindow,
-  restoreAuthorIndexFocus
-} from "./author-navigation.js?v=20260811-author-route-lifecycle-01";
+  restoreAuthorIndexFocus,
+  SHORT_VIDEO_LOAD_STALE
+} from "./author-navigation.js?v=20260811-author-load-contract-01";
 import { createAuthorCollectorPoll } from "./author-collector-poll.js?v=20260811-author-route-lifecycle-01";
 
 export function createShortVideoAuthorPages(deps) {
@@ -331,7 +332,10 @@ export function createShortVideoAuthorPages(deps) {
       shortVideoQuery: "",
       shortVideoSource: "all"
     });
-    loadVideos({ skipRoute: true }).catch(showError);
+    // Stale detail requests resolve to a sentinel; only current failures reach showError.
+    loadVideos({ skipRoute: true }).then((result) => {
+      if (result === SHORT_VIDEO_LOAD_STALE) return;
+    }, showError);
   }
 
   function returnToShortVideoAuthorIndex() {

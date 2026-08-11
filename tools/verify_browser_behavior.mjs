@@ -22,6 +22,7 @@ try {
     await verifyMobileGallery(browser);
     await verifyAuthorIndexReturn(browser);
     await verifyAuthorReturnDiscardsDelayedDetail(browser);
+    await verifyAuthorReturnDiscardsDelayedError(browser);
     await verifyDirectAuthorDeepLink(browser);
   } finally {
     await browser.close();
@@ -35,7 +36,11 @@ async function startFixtureServer(serverPort) {
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || "/", "http://127.0.0.1");
     if (url.pathname.startsWith("/api/")) {
-      sendJson(response, await fixtureApi(url));
+      try {
+        sendJson(response, await fixtureApi(url));
+      } catch (error) {
+        sendJson(response, { error: String(error?.message || error || "fixture request failed") }, 503);
+      }
       return;
     }
     const relative = url.pathname === "/" ? "index.html" : url.pathname.replace(/^\/+/, "");
@@ -235,6 +240,37 @@ async function verifyAuthorReturnDiscardsDelayedDetail(browser) {
   }
 }
 
+async function verifyAuthorReturnDiscardsDelayedError(browser) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    await page.goto(`${baseUrl}/short-videos?perf=1`, { waitUntil: "domcontentloaded" });
+    await page.locator(".short-video-home").waitFor({ state: "visible", timeout: 30000 });
+    await page.locator('.short-video-source-tab[data-source="authors"]').click({ force: true });
+    const authorCards = page.locator(".short-video-author-index-card-main");
+    await authorCards.first().waitFor({ state: "visible", timeout: 30000 });
+    const openedCard = authorCards.nth(40);
+    await openedCard.scrollIntoViewIfNeeded();
+    const openedAuthorId = await openedCard.getAttribute("data-short-video-author-id");
+    const delayed = deferNextAuthorDetail({ reject: true });
+    await openedCard.click();
+    await delayed.requested;
+    await page.goBack();
+    await waitFor(() => authorWindow(page), (value) => value.authors === 96 && new URL(value.href).searchParams.get("source") === "authors", 30000);
+    await waitForAuthorFocus(page, openedAuthorId, "immediate history return must restore focus before the delayed detail rejects");
+    await page.waitForTimeout(120);
+    const beforeReject = await authorIndexFingerprint(page);
+    assert(beforeReject.scrollY > 0, "the delayed rejection test must restore a meaningful non-zero scroll position");
+    const rejectedResponse = page.waitForResponse((response) => response.status() === 503 && new URL(response.url()).searchParams.has("author"));
+    delayed.release();
+    await rejectedResponse;
+    await page.waitForTimeout(250);
+    const afterReject = await authorIndexFingerprint(page);
+    assert.deepEqual(afterReject, beforeReject, "a stale detail rejection must not change author count, URL, scroll, focus, status, or DOM");
+  } finally {
+    await page.close();
+  }
+}
+
 async function verifyDirectAuthorDeepLink(browser) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const authorRequests = [];
@@ -261,6 +297,22 @@ async function authorWindow(page) {
     firstVisible: [...document.querySelectorAll("article")].findIndex((article) => article.getBoundingClientRect().bottom > 0),
     href: window.location.href
   }));
+}
+
+async function authorIndexFingerprint(page) {
+  return page.evaluate(() => {
+    const home = document.querySelector(".short-video-home");
+    return {
+      authors: document.querySelectorAll(".short-video-author-index-card-main").length,
+      href: window.location.href,
+      scrollY: window.scrollY,
+      focusedAuthorId: document.activeElement?.dataset.shortVideoAuthorId || "",
+      focusedHeading: document.activeElement?.dataset.shortVideoAuthorIndexHeading || "",
+      status: [...document.querySelectorAll(".short-video-home .short-video-status, .short-video-home .short-video-author-index-status")]
+        .map((element) => `${element.className}:${element.textContent}`),
+      dom: home?.innerHTML || ""
+    };
+  });
 }
 
 async function waitForAuthorFocus(page, authorId, message) {
@@ -310,7 +362,7 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function deferNextAuthorDetail() {
+function deferNextAuthorDetail(options = {}) {
   let requestedResolve;
   let releaseResolve;
   const deferred = {
@@ -318,6 +370,7 @@ function deferNextAuthorDetail() {
     release: () => releaseResolve()
   };
   delayedAuthorDetail = {
+    reject: Boolean(options.reject),
     requested: () => requestedResolve(),
     response: new Promise((resolve) => { releaseResolve = resolve; })
   };
@@ -349,6 +402,7 @@ async function fixtureApi(url) {
       delayedAuthorDetail = null;
       delayed.requested();
       await delayed.response;
+      if (delayed.reject) throw new Error("fixture delayed author detail rejection");
     }
     return {
       videos: [{
@@ -366,8 +420,8 @@ async function fixtureApi(url) {
   return {};
 }
 
-function sendJson(response, body) {
-  response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+function sendJson(response, body, status = 200) {
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   response.end(JSON.stringify(body));
 }
 
