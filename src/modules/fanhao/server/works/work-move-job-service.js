@@ -339,6 +339,23 @@ export function createWorkMoveJobService({
     return publicJob(job);
   }
 
+  function findForWork(workId, { idempotencyKey = "" } = {}) {
+    const normalizedWorkId = String(workId || "").trim();
+    if (!normalizedWorkId) return null;
+    const clientKey = String(idempotencyKey || "").trim().slice(0, 180);
+    const jobs = getCoreDb().prepare(`
+      SELECT * FROM work_move_jobs
+      WHERE work_id = ?
+      ORDER BY created_at DESC, id DESC
+    `).all(normalizedWorkId);
+    if (clientKey) {
+      const exact = jobs.find((job) => String(json(job.request_json, {})?.idempotencyKey || json(job.request_json, {})?.requestId || "").trim().slice(0, 180) === clientKey);
+      return exact ? publicJob(exact) : null;
+    }
+    const active = jobs.find((job) => BLOCKING_STATUSES.has(job.status));
+    return active ? publicJob(active) : null;
+  }
+
   function start(workId, body = {}) {
     const normalizedWorkId = String(workId || "").trim();
     if (!normalizedWorkId) {
@@ -455,6 +472,10 @@ export function createWorkMoveJobService({
     const delayMs = Math.min(2_000, 100 * (2 ** (attempt - 1)));
     const timer = setTimeout(() => {
       claimRetryTimers.delete(jobId);
+      if (activeRuns.has(jobId)) {
+        scheduleClaimRetry(jobId);
+        return;
+      }
       scheduleJob(jobId);
     }, delayMs);
     timer.unref?.();
@@ -719,7 +740,18 @@ export function createWorkMoveJobService({
         preserveForRecovery(jobId);
         return;
       }
-      await handleFailure(jobId, plan, error);
+      if (isSqliteBusy(error)) {
+        warn("[work-move-stage-busy]", jobId, error?.message || error);
+        scheduleClaimRetry(jobId);
+        return;
+      }
+      try {
+        await handleFailure(jobId, plan, error);
+      } catch (failureError) {
+        if (!isSqliteBusy(failureError)) throw failureError;
+        warn("[work-move-recovery-busy]", jobId, failureError?.message || failureError);
+        scheduleClaimRetry(jobId);
+      }
     } finally {
       clearInterval(heartbeat);
       if (fencedJobs.has(jobId)) await awaitFencedWorker(jobId);
@@ -737,6 +769,7 @@ export function createWorkMoveJobService({
       } catch (error) {
         canReleaseClaim = false;
         warn("[work-move-reservation]", error?.message || error);
+        if (isSqliteBusy(error)) scheduleClaimRetry(jobId);
       }
       activePlans.delete(jobId);
       if (canReleaseClaim) {
@@ -745,6 +778,7 @@ export function createWorkMoveJobService({
         } catch (error) {
           if (!isSqliteBusy(error)) throw error;
           warn("[work-move-release]", error?.message || error);
+          scheduleClaimRetry(jobId);
         }
       }
       workerTerminationPromises.delete(jobId);
@@ -934,5 +968,5 @@ export function createWorkMoveJobService({
     await Promise.allSettled([...activeRuns.values()]);
   }
 
-  return { close, get, publicJob, recover, retry, start };
+  return { close, findForWork, get, publicJob, recover, retry, start };
 }

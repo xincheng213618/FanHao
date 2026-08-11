@@ -53,6 +53,7 @@ let pointerMoveFrame = null;
 let sidebarCollapsed = false;
 let streamNeedsActivation = false;
 let pendingMoveJob = null;
+let pendingMoveRequestKey = "";
 let movePollController = null;
 
 const PLYR_DIRECT_CONTROLS = ["play-large", "play", "progress", "current-time", "duration", "mute", "volume", "settings", "fullscreen"];
@@ -62,6 +63,7 @@ const mobileSidebarQuery = window.matchMedia("(max-width: 900px)");
 const PLAYER_SIDEBAR_STORAGE_KEY = "fanhao.player.sidebar-collapsed";
 const LOCAL_MARKER_RELEASE_DELAY_MS = 900;
 const ACTIVE_MOVE_STORAGE_KEY = workId ? `fanhao.work-move.${workId}` : "";
+const ACTIVE_MOVE_REQUEST_STORAGE_KEY = workId ? `fanhao.work-move-request.${workId}` : "";
 
 initializePlayerExperience();
 
@@ -1203,9 +1205,11 @@ function updateMoveToPersonButton() {
   const available = isTrustedNetworkFeatureAvailable() && currentWork && !currentWork.missingLocal && !currentWork.galleryMedia;
   els.moveToPerson.hidden = !available;
   els.moveToPerson.disabled = !available;
-  els.moveToPerson.textContent = pendingMoveJob?.id ? "恢复迁移" : "迁移演员";
+  els.moveToPerson.textContent = pendingMoveJob?.status === "blocked" ? "迁移需处理" : pendingMoveJob?.id ? "恢复迁移" : "迁移演员";
   els.moveToPerson.title = available
-    ? pendingMoveJob?.id ? `继续任务 ${pendingMoveJob.id}` : "移动作品文件夹，并把作品分配给指定人物"
+    ? pendingMoveJob?.id
+      ? pendingMoveJob.status === "blocked" ? `任务 ${pendingMoveJob.id} 已阻断，需要人工检查` : `继续任务 ${pendingMoveJob.id}`
+      : "移动作品文件夹，并把作品分配给指定人物"
     : "";
 }
 
@@ -1590,6 +1594,7 @@ async function moveCurrentWorkToPerson() {
   els.moveToPerson.textContent = "迁移中";
   try {
     const idempotencyKey = globalThis.crypto?.randomUUID?.() || `move-${currentWork.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    rememberMoveRequestKey(idempotencyKey);
     let data;
     try {
       data = await api(`/api/works/${encodeURIComponent(currentWork.id)}/move-to-person`, {
@@ -1599,8 +1604,15 @@ async function moveCurrentWorkToPerson() {
           : { personId: target.personId, idempotencyKey }
       });
     } catch (error) {
-      if (!error.job?.id) throw error;
-      data = { job: error.job };
+      if (error.job?.id) data = { job: error.job };
+      else {
+        const recoveredJob = await findMoveJobForWork(idempotencyKey);
+        if (!recoveredJob) {
+          clearRememberedMoveRequest();
+          throw error;
+        }
+        data = { job: recoveredJob };
+      }
     }
     rememberMoveJob(data.job);
     const completedJob = await waitForWorkMoveJob(data.job);
@@ -1630,6 +1642,9 @@ async function waitForWorkMoveJob(initialJob) {
   rememberMoveJob(job);
   try {
     while (job.status !== "completed") {
+      if (job.status === "blocked") {
+        throw new Error(job.error || `迁移任务 ${job.id} 已阻断，需要人工检查后恢复`);
+      }
       if (["rolled_back", "failed"].includes(job.status)) {
         throw new Error(job.error || "文件移动失败，原目录已保留");
       }
@@ -1681,6 +1696,23 @@ function rememberMoveJob(job) {
   updateMoveToPersonButton();
 }
 
+function rememberMoveRequestKey(idempotencyKey) {
+  const value = String(idempotencyKey || "").trim();
+  if (!value || !ACTIVE_MOVE_REQUEST_STORAGE_KEY) return;
+  pendingMoveRequestKey = value;
+  try {
+    window.localStorage.setItem(ACTIVE_MOVE_REQUEST_STORAGE_KEY, value);
+  } catch {}
+}
+
+function clearRememberedMoveRequest() {
+  pendingMoveRequestKey = "";
+  if (!ACTIVE_MOVE_REQUEST_STORAGE_KEY) return;
+  try {
+    window.localStorage.removeItem(ACTIVE_MOVE_REQUEST_STORAGE_KEY);
+  } catch {}
+}
+
 function clearRememberedMoveJob() {
   pendingMoveJob = null;
   if (ACTIVE_MOVE_STORAGE_KEY) {
@@ -1688,7 +1720,14 @@ function clearRememberedMoveJob() {
       window.localStorage.removeItem(ACTIVE_MOVE_STORAGE_KEY);
     } catch {}
   }
+  clearRememberedMoveRequest();
   updateMoveToPersonButton();
+}
+
+async function findMoveJobForWork(idempotencyKey = "", signal = undefined) {
+  const suffix = idempotencyKey ? `?idempotencyKey=${encodeURIComponent(idempotencyKey)}` : "";
+  const payload = await api(`/api/works/${encodeURIComponent(workId)}/move-job${suffix}`, { signal });
+  return payload.job || null;
 }
 
 async function restoreMoveJobEntry() {
@@ -1696,16 +1735,30 @@ async function restoreMoveJobEntry() {
   let jobId = "";
   try {
     jobId = window.localStorage.getItem(ACTIVE_MOVE_STORAGE_KEY) || "";
+    pendingMoveRequestKey = window.localStorage.getItem(ACTIVE_MOVE_REQUEST_STORAGE_KEY) || "";
   } catch {}
-  if (!jobId) return;
   try {
-    const payload = await api(`/api/work-move-jobs/${encodeURIComponent(jobId)}`);
-    if (payload.job?.status === "completed") {
-      applyCompletedMoveJob(payload.job);
+    let job = null;
+    if (jobId) {
+      try {
+        const payload = await api(`/api/work-move-jobs/${encodeURIComponent(jobId)}`);
+        job = payload.job || null;
+      } catch (error) {
+        if (error?.statusCode !== 404) throw error;
+      }
+    }
+    if (!job && pendingMoveRequestKey) job = await findMoveJobForWork(pendingMoveRequestKey);
+    if (!job) job = await findMoveJobForWork();
+    if (!job) {
       clearRememberedMoveJob();
       return;
     }
-    rememberMoveJob(payload.job);
+    if (job.status === "completed") {
+      applyCompletedMoveJob(job);
+      clearRememberedMoveJob();
+      return;
+    }
+    rememberMoveJob(job);
   } catch (error) {
     if (error?.statusCode === 404) clearRememberedMoveJob();
   }
@@ -1716,6 +1769,12 @@ async function resumePendingMoveJob() {
   els.moveToPerson.disabled = true;
   try {
     let job = pendingMoveJob;
+    if (job.status === "blocked") {
+      const payload = await api(`/api/work-move-jobs/${encodeURIComponent(job.id)}`);
+      job = payload.job;
+      rememberMoveJob(job);
+      if (job.status === "blocked") throw new Error(job.error || `迁移任务 ${job.id} 已阻断，需要人工检查`);
+    }
     if (["rolled_back", "failed"].includes(job.status)) {
       const payload = await api(`/api/work-move-jobs/${encodeURIComponent(job.id)}/retry`, { method: "POST" });
       job = payload.job;

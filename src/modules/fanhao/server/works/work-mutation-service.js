@@ -46,6 +46,10 @@ export function createWorkMutationService({
     return { ok: true, job: workMoveJobService.get(jobId) };
   }
 
+  function moveJobForWork(workId, options = {}) {
+    return { ok: true, job: workMoveJobService.findForWork(workId, options) };
+  }
+
   function retryMoveJob(jobId) {
     return { ok: true, job: workMoveJobService.retry(jobId) };
   }
@@ -61,6 +65,7 @@ export function createWorkMutationService({
     deleteLocalFiles,
     generateCover,
     moveJob,
+    moveJobForWork,
     moveToPerson,
     retryMoveJob,
     setLocalMarker,

@@ -38,7 +38,11 @@ export function createAdminCoreMutationService({
   uniqueTextArray,
   uniquePersonNames
 }) {
-  const workMoveReservationService = createWorkMoveReservationService({ getCoreDb });
+  let workMoveReservationService = null;
+  function workMoveReservations() {
+    workMoveReservationService ||= createWorkMoveReservationService({ getCoreDb });
+    return workMoveReservationService;
+  }
 
   function safeDirectoryName(value, fallback = "新人物") {
     const clean = cleanPersonNamePart(value) || fallback;
@@ -834,7 +838,7 @@ export function createAdminCoreMutationService({
     const db = getCoreDb();
     db.exec("BEGIN IMMEDIATE");
     try {
-      workMoveReservationService.assertOwnership(plan, context);
+      workMoveReservations().assertOwnership(plan, context);
       throwIfWorkMoveSourceShared(db, plan);
       db.exec("COMMIT");
       return { unshared: true };
@@ -854,15 +858,15 @@ export function createAdminCoreMutationService({
     let alreadyCommitted = false;
     try {
       db.exec("BEGIN IMMEDIATE");
-      workMoveReservationService.assertOwnership(plan, context);
-      workMoveReservationService.setMutationMode(plan, { ...context, mode: "main", schema: "main" });
+      workMoveReservations().assertOwnership(plan, context);
+      workMoveReservations().setMutationMode(plan, { ...context, mode: "main", schema: "main" });
       const current = db
         .prepare("SELECT local_path FROM local_works WHERE id = ? AND work_id = ?")
         .get(Number(plan.localWorkId), coreWorkId);
       const currentPath = current?.local_path ? path.resolve(current.local_path).toLowerCase() : "";
       if (currentPath === path.resolve(plan.newDir).toLowerCase()) {
         alreadyCommitted = true;
-        workMoveReservationService.setMutationMode(plan, { ...context, mode: "", schema: "main" });
+        workMoveReservations().setMutationMode(plan, { ...context, mode: "", schema: "main" });
         db.exec("COMMIT");
         return { committed: false, alreadyCommitted: true };
       }
@@ -934,7 +938,7 @@ export function createAdminCoreMutationService({
       const workRow = db.prepare("SELECT fields_json FROM works WHERE id = ?").get(coreWorkId);
       const fieldsJson = correctedActorFieldsJson(workRow?.fields_json, actorName);
       db.prepare("UPDATE works SET fields_json = ?, updated_at = ? WHERE id = ?").run(fieldsJson, now, coreWorkId);
-      workMoveReservationService.setMutationMode(plan, { ...context, mode: "", schema: "main" });
+      workMoveReservations().setMutationMode(plan, { ...context, mode: "", schema: "main" });
       db.exec("COMMIT");
     } catch (error) {
       try {
@@ -963,8 +967,8 @@ export function createAdminCoreMutationService({
     const now = new Date().toISOString();
     db.exec("BEGIN IMMEDIATE");
     try {
-      workMoveReservationService.assertOwnership(plan, { ...context, schema: "images" });
-      workMoveReservationService.setMutationMode(plan, { ...context, mode: "images", schema: "images" });
+      workMoveReservations().assertOwnership(plan, { ...context, schema: "images" });
+      workMoveReservations().setMutationMode(plan, { ...context, mode: "images", schema: "images" });
       const rows = db
         .prepare("SELECT id, local_path FROM fanhao_images.images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
         .all(Number(plan.workId));
@@ -988,7 +992,7 @@ export function createAdminCoreMutationService({
         .all(Number(plan.workId))
         .filter((row) => pathUsesPrefix(row.local_path, plan.oldDir));
       if (remaining.length) throw new Error("图片库路径补偿尚未完成");
-      workMoveReservationService.setMutationMode(plan, { ...context, mode: "", schema: "images" });
+      workMoveReservations().setMutationMode(plan, { ...context, mode: "", schema: "images" });
       db.exec("COMMIT");
       return { committed: pending.length > 0, alreadyCommitted: pending.length === 0, updated: pending.length };
     } catch (error) {
@@ -1030,7 +1034,7 @@ export function createAdminCoreMutationService({
   }
 
   return {
-    acquireWorkMoveReservation: (...args) => workMoveReservationService.acquire(...args),
+    acquireWorkMoveReservation: (...args) => workMoveReservations().acquire(...args),
     assertWorkMoveSourceUnshared,
     correctWorkActorFromLocalFolder,
     commitWorkMoveImages,
@@ -1040,11 +1044,11 @@ export function createAdminCoreMutationService({
     inspectWorkMove,
     inspectWorkMoveImages,
     mergePeopleIntoTarget,
-    parkWorkMoveReservation: (...args) => workMoveReservationService.park(...args),
+    parkWorkMoveReservation: (...args) => workMoveReservations().park(...args),
     prepareWorkMove,
-    releaseWorkMoveReservation: (...args) => workMoveReservationService.release(...args),
-    renewWorkMoveReservation: (...args) => workMoveReservationService.renew(...args),
-    repairWorkMoveReservations: (...args) => workMoveReservationService.repairTerminalReservations(...args),
+    releaseWorkMoveReservation: (...args) => workMoveReservations().release(...args),
+    renewWorkMoveReservation: (...args) => workMoveReservations().renew(...args),
+    repairWorkMoveReservations: (...args) => workMoveReservations().repairTerminalReservations(...args),
     upsertActorProfile
   };
 }

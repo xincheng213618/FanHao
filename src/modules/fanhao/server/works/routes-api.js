@@ -164,6 +164,19 @@ export async function routeWorksApi(req, res, url, deps) {
     return true;
   }
 
+  const workMoveStatusMatch = /^\/api\/works\/([^/]+)\/move-job$/.exec(url.pathname);
+  if (workMoveStatusMatch && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, workMutationService.moveJobForWork(decodeURIComponent(workMoveStatusMatch[1]), {
+        idempotencyKey: url.searchParams.get("idempotencyKey") || ""
+      }));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "读取作品迁移任务失败" });
+    }
+    return true;
+  }
+
   const workMoveJobRetryMatch = /^\/api\/work-move-jobs\/([^/]+)\/retry$/.exec(url.pathname);
   if (workMoveJobRetryMatch && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;

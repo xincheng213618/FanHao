@@ -13,6 +13,7 @@ import { createPersonLibraryService } from "../src/modules/fanhao/server/people/
 import { routeWorksApi } from "../src/modules/fanhao/server/works/routes-api.js";
 import { createWorkLocalMutationService } from "../src/modules/fanhao/server/works/work-local-mutation-service.js";
 import { createWorkMoveJobService } from "../src/modules/fanhao/server/works/work-move-job-service.js";
+import { createWorkMoveReservationService } from "../src/modules/fanhao/server/works/work-move-reservation-service.js";
 
 const temporaryRoots = [];
 
@@ -244,6 +245,143 @@ async function verifySuccessfulMoveAndIdempotency() {
   assert.equal(databaseRow.person_id, "target");
   assert.equal(admin.imageCommits, 1, "the attached image phase must complete before source cleanup");
   assert.equal(admin.releasedReservationJobs.has(first.id), true, "completed jobs must release their own durable path reservation");
+  await service.close();
+  db.close();
+}
+
+async function verifyWorkLookupRecoversLostStartResponse() {
+  const fixture = await createFixture("lost-start-response", 2);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const service = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
+  const started = service.start("1", { personId: "target", idempotencyKey: "lost-response-key" });
+  assert.equal(service.findForWork("1", { idempotencyKey: "lost-response-key" })?.id, started.id, "the client key persisted before POST must recover the committed journal row");
+  assert.equal(service.findForWork("1")?.id, started.id, "the work-scoped fallback must recover the one blocking job");
+  assert.equal(service.findForWork("other", { idempotencyKey: "lost-response-key" }), null, "a client key must never cross work ownership");
+
+  let response = null;
+  await routeWorksApi(
+    { method: "GET" },
+    {},
+    new URL("http://fixture/api/works/1/move-job?idempotencyKey=lost-response-key"),
+    {
+      notFound() {},
+      personDetailService: {},
+      readJsonBody: async () => ({}),
+      requireLocalAdmin: () => true,
+      requireTrustedFileMutation: () => true,
+      sendJson: (_res, status, payload) => { response = { status, payload }; },
+      workDetailService: {},
+      workMutationService: {
+        moveJobForWork(workId, options) {
+          return { ok: true, job: service.findForWork(workId, options) };
+        }
+      },
+      workQueryService: {}
+    }
+  );
+  assert.equal(response?.status, 200);
+  assert.equal(response?.payload?.job?.id, started.id);
+
+  db.prepare("UPDATE work_move_jobs SET status = 'blocked', phase = 'manual_review', error = 'fixture blocked' WHERE id = ?").run(started.id);
+  assert.equal(service.findForWork("1")?.status, "blocked", "blocked work must remain discoverable instead of leaving the UI polling an unknown task");
+  await service.close();
+  db.close();
+}
+
+async function verifyOverlappingPathReservationsAreRejected() {
+  const fixture = await createFixture("overlapping-reservations", 1);
+  const imageDbPath = path.join(fixture.root, "images.sqlite");
+  const db = new DatabaseSync(path.join(fixture.root, "reservations.sqlite"));
+  db.exec(`
+    ATTACH DATABASE ${JSON.stringify(imageDbPath)} AS fanhao_images;
+    CREATE TABLE local_works (id INTEGER PRIMARY KEY, work_id INTEGER NOT NULL, local_path TEXT);
+    CREATE TABLE local_files (id INTEGER PRIMARY KEY, local_work_id INTEGER, file_path TEXT);
+    CREATE TABLE fanhao_images.images (id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, local_path TEXT);
+  `);
+  const child = path.join(fixture.source, "nested", "WORK-CHILD");
+  db.prepare("INSERT INTO local_works(id, work_id, local_path) VALUES (1, 1, ?), (2, 2, ?)").run(fixture.source, child);
+  const reservations = createWorkMoveReservationService({ getCoreDb: () => db });
+  const createdAt = new Date().toISOString();
+  const parentKey = path.resolve(fixture.source).replace(/\\/g, "/").toLowerCase();
+  const parentTarget = path.resolve(fixture.target).replace(/\\/g, "/").toLowerCase();
+  for (const table of ["work_move_path_reservations", "fanhao_images.work_move_path_reservations"]) {
+    db.prepare(`
+      INSERT INTO ${table} (
+        job_id, work_id, local_work_id, old_path, old_path_key, new_path, new_path_key,
+        owner_id, lease_until, created_at, updated_at
+      ) VALUES ('parent-job', '1', 1, ?, ?, ?, ?, 'parent-owner', '2999-01-01T00:00:00.000Z', ?, ?)
+    `).run(fixture.source, parentKey, fixture.target, parentTarget, createdAt, createdAt);
+  }
+  assert.throws(
+    () => reservations.acquire({
+      jobId: "child-job",
+      workId: "2",
+      localWorkId: 2,
+      oldDir: child,
+      newDir: path.join(fixture.targetPerson, "WORK-CHILD")
+    }, { ownerId: "child-owner", leaseUntil: "2999-01-01T00:00:00.000Z" }),
+    (error) => error?.code === "WORK_MOVE_RESERVATION_CONFLICT" && /parent-job/.test(error.message),
+    "ancestor and descendant work paths must never receive simultaneous reservations"
+  );
+  db.prepare("UPDATE work_move_path_reservations SET mutation_mode = 'fixture' WHERE job_id = 'parent-job'").run();
+  db.prepare("DELETE FROM local_works WHERE id = 2").run();
+  db.prepare("UPDATE work_move_path_reservations SET mutation_mode = '' WHERE job_id = 'parent-job'").run();
+  assert.throws(
+    () => db.prepare("INSERT INTO local_works(id, work_id, local_path) VALUES (3, 3, ?)").run(path.dirname(fixture.source)),
+    /ancestor path reserved/,
+    "reservation triggers must reject a later writer that introduces an ancestor path"
+  );
+  assert.throws(
+    () => db.prepare("INSERT INTO local_files(id, local_work_id, file_path) VALUES (3, 3, ?)").run(path.dirname(fixture.source)),
+    /ancestor path reserved/,
+    "local_files writers must not introduce an ancestor of a reserved tree"
+  );
+  assert.throws(
+    () => db.prepare("INSERT INTO fanhao_images.images(id, owner_type, owner_id, local_path) VALUES (3, 'work', 3, ?)").run(path.dirname(fixture.source)),
+    /ancestor path reserved/,
+    "image writers must not introduce an ancestor of a reserved tree"
+  );
+  db.close();
+}
+
+async function verifyAllBusyStagesRequeue() {
+  const fixture = await createFixture("all-stage-busy-requeue", 4);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const acquire = admin.acquireWorkMoveReservation.bind(admin);
+  const commit = admin.commitWorkMove.bind(admin);
+  let acquireBusy = 0;
+  let commitBusy = 0;
+  admin.acquireWorkMoveReservation = (...args) => {
+    if (acquireBusy++ === 0) {
+      const error = new Error("database is locked during reservation");
+      error.code = "SQLITE_BUSY";
+      throw error;
+    }
+    return acquire(...args);
+  };
+  admin.commitWorkMove = (...args) => {
+    if (commitBusy++ === 0) {
+      const error = new Error("database is locked during main commit");
+      error.code = "SQLITE_BUSY";
+      throw error;
+    }
+    return commit(...args);
+  };
+  const warnings = [];
+  const service = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    warn: (...args) => warnings.push(args.map(String).join(" ")),
+    workerDataPatch: { forceCopy: true }
+  });
+  const started = service.start("1", { personId: "target", idempotencyKey: "all-stage-busy-requeue" });
+  const completed = await waitForJob(service, started.id, ["completed"]);
+  assert.equal(completed.status, "completed");
+  assert.ok(acquireBusy >= 2, "reservation acquisition must be retried by a queued recovery run");
+  assert.ok(commitBusy >= 2, "main commit must be retried by a queued recovery run");
+  assert.ok(warnings.some((message) => message.includes("work-move-stage-busy")), "stage BUSY retries must remain observable");
   await service.close();
   db.close();
 }
@@ -839,6 +977,9 @@ function verifySourceStructure() {
   assert.match(clientSource, /pagehide/);
   assert.match(clientSource, /pageshow/);
   assert.match(clientSource, /ACTIVE_MOVE_STORAGE_KEY/);
+  assert.match(clientSource, /ACTIVE_MOVE_REQUEST_STORAGE_KEY/);
+  assert.match(clientSource, /findMoveJobForWork\(idempotencyKey\)/);
+  assert.match(clientSource, /job\.status === "blocked"/);
   assert.match(clientSource, /恢复迁移/);
 }
 
@@ -1569,6 +1710,9 @@ async function safeCleanup(root) {
 let verificationError = null;
 try {
   await verifySuccessfulMoveAndIdempotency();
+  await verifyWorkLookupRecoversLostStartResponse();
+  await verifyOverlappingPathReservationsAreRejected();
+  await verifyAllBusyStagesRequeue();
   await verifyConcurrentStartsAreAtomicallyUnique();
   await verifyLegacyDuplicateJobsMigrateFailClosed();
   await verifyActualAdminSqliteCommit();

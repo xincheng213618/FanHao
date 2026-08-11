@@ -9,6 +9,20 @@ function normalizedPathKey(value) {
     .toLowerCase();
 }
 
+function pathKeysOverlap(left, right) {
+  const first = String(left || "");
+  const second = String(right || "");
+  if (!first || !second) return false;
+  return first === second || first.startsWith(`${second}/`) || second.startsWith(`${first}/`);
+}
+
+function reservationPathsOverlap(row, expected) {
+  return [row?.old_path_key, row?.new_path_key]
+    .filter(Boolean)
+    .some((reservedPath) => [expected.oldPathKey, expected.newPathKey]
+      .some((candidatePath) => pathKeysOverlap(reservedPath, candidatePath)));
+}
+
 function reservationError(message, code = "WORK_MOVE_RESERVATION_CONFLICT") {
   const error = new Error(message);
   error.code = code;
@@ -241,6 +255,174 @@ export function createWorkMoveReservationService({
             )
         );
       END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_work_move_reserve_local_works_ancestor_insert
+      BEFORE INSERT ON local_works
+      BEGIN
+        SELECT RAISE(ABORT, 'work move ancestor path reserved')
+        WHERE EXISTS (
+          SELECT 1 FROM work_move_path_reservations r
+          WHERE r.released_at = '' AND r.mutation_mode = ''
+            AND lower(rtrim(replace(COALESCE(NEW.local_path, ''), char(92), '/'), '/')) <> ''
+            AND (
+              substr(r.old_path_key, 1, length(lower(rtrim(replace(NEW.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(NEW.local_path, char(92), '/'), '/')) || '/'
+              OR substr(r.new_path_key, 1, length(lower(rtrim(replace(NEW.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(NEW.local_path, char(92), '/'), '/')) || '/'
+            )
+        );
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_work_move_reserve_local_works_ancestor_update
+      BEFORE UPDATE ON local_works
+      BEGIN
+        SELECT RAISE(ABORT, 'work move ancestor path reserved')
+        WHERE EXISTS (
+          SELECT 1 FROM work_move_path_reservations r
+          WHERE r.released_at = '' AND r.mutation_mode = ''
+            AND (
+              (
+                lower(rtrim(replace(COALESCE(OLD.local_path, ''), char(92), '/'), '/')) <> ''
+                AND (
+                  substr(r.old_path_key, 1, length(lower(rtrim(replace(OLD.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(OLD.local_path, char(92), '/'), '/')) || '/'
+                  OR substr(r.new_path_key, 1, length(lower(rtrim(replace(OLD.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(OLD.local_path, char(92), '/'), '/')) || '/'
+                )
+              )
+              OR (
+                lower(rtrim(replace(COALESCE(NEW.local_path, ''), char(92), '/'), '/')) <> ''
+                AND (
+                  substr(r.old_path_key, 1, length(lower(rtrim(replace(NEW.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(NEW.local_path, char(92), '/'), '/')) || '/'
+                  OR substr(r.new_path_key, 1, length(lower(rtrim(replace(NEW.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(NEW.local_path, char(92), '/'), '/')) || '/'
+                )
+              )
+            )
+        );
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_work_move_reserve_local_works_ancestor_delete
+      BEFORE DELETE ON local_works
+      BEGIN
+        SELECT RAISE(ABORT, 'work move ancestor path reserved')
+        WHERE EXISTS (
+          SELECT 1 FROM work_move_path_reservations r
+          WHERE r.released_at = '' AND r.mutation_mode = ''
+            AND lower(rtrim(replace(COALESCE(OLD.local_path, ''), char(92), '/'), '/')) <> ''
+            AND (
+              substr(r.old_path_key, 1, length(lower(rtrim(replace(OLD.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(OLD.local_path, char(92), '/'), '/')) || '/'
+              OR substr(r.new_path_key, 1, length(lower(rtrim(replace(OLD.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(OLD.local_path, char(92), '/'), '/')) || '/'
+            )
+        );
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_work_move_reserve_local_files_ancestor_insert
+      BEFORE INSERT ON local_files
+      BEGIN
+        SELECT RAISE(ABORT, 'work move ancestor path reserved')
+        WHERE EXISTS (
+          SELECT 1 FROM work_move_path_reservations r
+          WHERE r.released_at = '' AND r.mutation_mode = ''
+            AND lower(rtrim(replace(COALESCE(NEW.file_path, ''), char(92), '/'), '/')) <> ''
+            AND (
+              substr(r.old_path_key, 1, length(lower(rtrim(replace(NEW.file_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(NEW.file_path, char(92), '/'), '/')) || '/'
+              OR substr(r.new_path_key, 1, length(lower(rtrim(replace(NEW.file_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(NEW.file_path, char(92), '/'), '/')) || '/'
+            )
+        );
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_work_move_reserve_local_files_ancestor_update
+      BEFORE UPDATE ON local_files
+      BEGIN
+        SELECT RAISE(ABORT, 'work move ancestor path reserved')
+        WHERE EXISTS (
+          SELECT 1 FROM work_move_path_reservations r
+          WHERE r.released_at = '' AND r.mutation_mode = ''
+            AND (
+              (
+                lower(rtrim(replace(COALESCE(OLD.file_path, ''), char(92), '/'), '/')) <> ''
+                AND (
+                  substr(r.old_path_key, 1, length(lower(rtrim(replace(OLD.file_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(OLD.file_path, char(92), '/'), '/')) || '/'
+                  OR substr(r.new_path_key, 1, length(lower(rtrim(replace(OLD.file_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(OLD.file_path, char(92), '/'), '/')) || '/'
+                )
+              )
+              OR (
+                lower(rtrim(replace(COALESCE(NEW.file_path, ''), char(92), '/'), '/')) <> ''
+                AND (
+                  substr(r.old_path_key, 1, length(lower(rtrim(replace(NEW.file_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(NEW.file_path, char(92), '/'), '/')) || '/'
+                  OR substr(r.new_path_key, 1, length(lower(rtrim(replace(NEW.file_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(NEW.file_path, char(92), '/'), '/')) || '/'
+                )
+              )
+            )
+        );
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_work_move_reserve_local_files_ancestor_delete
+      BEFORE DELETE ON local_files
+      BEGIN
+        SELECT RAISE(ABORT, 'work move ancestor path reserved')
+        WHERE EXISTS (
+          SELECT 1 FROM work_move_path_reservations r
+          WHERE r.released_at = '' AND r.mutation_mode = ''
+            AND lower(rtrim(replace(COALESCE(OLD.file_path, ''), char(92), '/'), '/')) <> ''
+            AND (
+              substr(r.old_path_key, 1, length(lower(rtrim(replace(OLD.file_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(OLD.file_path, char(92), '/'), '/')) || '/'
+              OR substr(r.new_path_key, 1, length(lower(rtrim(replace(OLD.file_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(OLD.file_path, char(92), '/'), '/')) || '/'
+            )
+        );
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS ${IMAGE_SCHEMA}.trg_work_move_reserve_images_ancestor_insert
+      BEFORE INSERT ON images
+      BEGIN
+        SELECT RAISE(ABORT, 'work move ancestor path reserved')
+        WHERE EXISTS (
+          SELECT 1 FROM work_move_path_reservations r
+          WHERE r.released_at = '' AND r.mutation_mode = ''
+            AND lower(rtrim(replace(COALESCE(NEW.local_path, ''), char(92), '/'), '/')) <> ''
+            AND (
+              substr(r.old_path_key, 1, length(lower(rtrim(replace(NEW.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(NEW.local_path, char(92), '/'), '/')) || '/'
+              OR substr(r.new_path_key, 1, length(lower(rtrim(replace(NEW.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(NEW.local_path, char(92), '/'), '/')) || '/'
+            )
+        );
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS ${IMAGE_SCHEMA}.trg_work_move_reserve_images_ancestor_update
+      BEFORE UPDATE ON images
+      BEGIN
+        SELECT RAISE(ABORT, 'work move ancestor path reserved')
+        WHERE EXISTS (
+          SELECT 1 FROM work_move_path_reservations r
+          WHERE r.released_at = '' AND r.mutation_mode = ''
+            AND (
+              (
+                lower(rtrim(replace(COALESCE(OLD.local_path, ''), char(92), '/'), '/')) <> ''
+                AND (
+                  substr(r.old_path_key, 1, length(lower(rtrim(replace(OLD.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(OLD.local_path, char(92), '/'), '/')) || '/'
+                  OR substr(r.new_path_key, 1, length(lower(rtrim(replace(OLD.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(OLD.local_path, char(92), '/'), '/')) || '/'
+                )
+              )
+              OR (
+                lower(rtrim(replace(COALESCE(NEW.local_path, ''), char(92), '/'), '/')) <> ''
+                AND (
+                  substr(r.old_path_key, 1, length(lower(rtrim(replace(NEW.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(NEW.local_path, char(92), '/'), '/')) || '/'
+                  OR substr(r.new_path_key, 1, length(lower(rtrim(replace(NEW.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(NEW.local_path, char(92), '/'), '/')) || '/'
+                )
+              )
+            )
+        );
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS ${IMAGE_SCHEMA}.trg_work_move_reserve_images_ancestor_delete
+      BEFORE DELETE ON images
+      BEGIN
+        SELECT RAISE(ABORT, 'work move ancestor path reserved')
+        WHERE EXISTS (
+          SELECT 1 FROM work_move_path_reservations r
+          WHERE r.released_at = '' AND r.mutation_mode = ''
+            AND lower(rtrim(replace(COALESCE(OLD.local_path, ''), char(92), '/'), '/')) <> ''
+            AND (
+              substr(r.old_path_key, 1, length(lower(rtrim(replace(OLD.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(OLD.local_path, char(92), '/'), '/')) || '/'
+              OR substr(r.new_path_key, 1, length(lower(rtrim(replace(OLD.local_path, char(92), '/'), '/'))) + 1) = lower(rtrim(replace(OLD.local_path, char(92), '/'), '/')) || '/'
+            )
+        );
+      END;
     `);
   }
 
@@ -288,12 +470,19 @@ export function createWorkMoveReservationService({
       assertIdentity(mainRow, expected, "主库");
       assertIdentity(imageRow, expected, "图片库");
 
-      const conflict = db.prepare(`
-        SELECT job_id FROM work_move_path_reservations
-        WHERE released_at = '' AND job_id <> ?
-          AND (work_id = ? OR old_path_key IN (?, ?) OR new_path_key IN (?, ?))
-        ORDER BY created_at, job_id LIMIT 1
-      `).get(expected.jobId, expected.workId, expected.oldPathKey, expected.newPathKey, expected.oldPathKey, expected.newPathKey);
+      const activeReservations = [
+        ...db.prepare(`
+          SELECT job_id, work_id, old_path_key, new_path_key, created_at
+          FROM work_move_path_reservations
+          WHERE released_at = '' AND job_id <> ?
+        `).all(expected.jobId),
+        ...db.prepare(`
+          SELECT job_id, work_id, old_path_key, new_path_key, created_at
+          FROM ${IMAGE_SCHEMA}.work_move_path_reservations
+          WHERE released_at = '' AND job_id <> ?
+        `).all(expected.jobId)
+      ].sort((left, right) => String(left.created_at || "").localeCompare(String(right.created_at || "")) || String(left.job_id).localeCompare(String(right.job_id)));
+      const conflict = activeReservations.find((row) => String(row.work_id) === expected.workId || reservationPathsOverlap(row, expected));
       if (conflict) throw reservationError(`路径已由任务 ${conflict.job_id} 保留`);
 
       const reservedLocalWork = db.prepare(`
@@ -309,29 +498,45 @@ export function createWorkMoveReservationService({
       }
 
       const sharedLocalWork = db.prepare(`
-        SELECT id FROM local_works
-        WHERE id <> ?
-          AND lower(rtrim(replace(COALESCE(local_path, ''), char(92), '/'), '/')) = ?
-        ORDER BY id LIMIT 1
-      `).get(expected.localWorkId, expected.oldPathKey);
+        WITH candidates AS (
+          SELECT id, lower(rtrim(replace(COALESCE(local_path, ''), char(92), '/'), '/')) AS path_key
+          FROM local_works
+          WHERE id <> ? AND trim(COALESCE(local_path, '')) <> ''
+        ), wanted(path_key) AS (VALUES (?), (?))
+        SELECT candidates.id
+        FROM candidates JOIN wanted
+          ON candidates.path_key = wanted.path_key
+          OR substr(candidates.path_key, 1, length(wanted.path_key) + 1) = wanted.path_key || '/'
+          OR substr(wanted.path_key, 1, length(candidates.path_key) + 1) = candidates.path_key || '/'
+        ORDER BY candidates.id LIMIT 1
+      `).get(expected.localWorkId, expected.oldPathKey, expected.newPathKey);
       const sharedLocalFile = db.prepare(`
-        SELECT id FROM local_files
-        WHERE COALESCE(local_work_id, -1) <> ?
-          AND (
-            lower(rtrim(replace(COALESCE(file_path, ''), char(92), '/'), '/')) = ?
-            OR substr(lower(rtrim(replace(COALESCE(file_path, ''), char(92), '/'), '/')), 1, length(?) + 1) = ? || '/'
-          )
-        ORDER BY id LIMIT 1
-      `).get(expected.localWorkId, expected.oldPathKey, expected.oldPathKey, expected.oldPathKey);
+        WITH candidates AS (
+          SELECT id, lower(rtrim(replace(COALESCE(file_path, ''), char(92), '/'), '/')) AS path_key
+          FROM local_files
+          WHERE COALESCE(local_work_id, -1) <> ? AND trim(COALESCE(file_path, '')) <> ''
+        ), wanted(path_key) AS (VALUES (?), (?))
+        SELECT candidates.id
+        FROM candidates JOIN wanted
+          ON candidates.path_key = wanted.path_key
+          OR substr(candidates.path_key, 1, length(wanted.path_key) + 1) = wanted.path_key || '/'
+          OR substr(wanted.path_key, 1, length(candidates.path_key) + 1) = candidates.path_key || '/'
+        ORDER BY candidates.id LIMIT 1
+      `).get(expected.localWorkId, expected.oldPathKey, expected.newPathKey);
       const sharedImage = db.prepare(`
-        SELECT id FROM ${IMAGE_SCHEMA}.images
-        WHERE NOT (owner_type = 'work' AND CAST(owner_id AS TEXT) = ?)
-          AND (
-            lower(rtrim(replace(COALESCE(local_path, ''), char(92), '/'), '/')) = ?
-            OR substr(lower(rtrim(replace(COALESCE(local_path, ''), char(92), '/'), '/')), 1, length(?) + 1) = ? || '/'
-          )
-        ORDER BY id LIMIT 1
-      `).get(expected.workId, expected.oldPathKey, expected.oldPathKey, expected.oldPathKey);
+        WITH candidates AS (
+          SELECT id, lower(rtrim(replace(COALESCE(local_path, ''), char(92), '/'), '/')) AS path_key
+          FROM ${IMAGE_SCHEMA}.images
+          WHERE NOT (owner_type = 'work' AND CAST(owner_id AS TEXT) = ?)
+            AND trim(COALESCE(local_path, '')) <> ''
+        ), wanted(path_key) AS (VALUES (?), (?))
+        SELECT candidates.id
+        FROM candidates JOIN wanted
+          ON candidates.path_key = wanted.path_key
+          OR substr(candidates.path_key, 1, length(wanted.path_key) + 1) = wanted.path_key || '/'
+          OR substr(wanted.path_key, 1, length(candidates.path_key) + 1) = candidates.path_key || '/'
+        ORDER BY candidates.id LIMIT 1
+      `).get(expected.workId, expected.oldPathKey, expected.newPathKey);
       if (sharedLocalWork || sharedLocalFile || sharedImage) {
         throw reservationError("源作品路径已新增其他数据库引用，拒绝取得 reservation");
       }
