@@ -37,8 +37,8 @@ function boundedLimit(value) {
   return Math.max(1, Math.min(100, Math.trunc(parsed)));
 }
 
-function listItem(job, publicJob) {
-  const item = publicJob(job);
+export function sanitizeWorkMoveJob(item) {
+  if (!item) return null;
   const safeError = (() => {
     if (item.errorCode === "WORK_MOVE_HANDOFF_TIMEOUT") return "旧进程仍存活但未确认交接，请人工检查后处理。";
     if (item.status === "blocked") return "任务已安全阻断，需要人工检查后处理。";
@@ -65,6 +65,24 @@ function listItem(job, publicJob) {
     finishedAt: item.finishedAt,
     recoverable: item.recoverable
   };
+}
+
+function listItem(job, publicJob) {
+  return sanitizeWorkMoveJob(publicJob(job));
+}
+
+export function safeWorkMoveRetryError(error) {
+  if (error?.code === "WORK_MOVE_MANUAL_INTERVENTION_REQUIRED") {
+    return "迁移任务需要人工处理，不能自动重试";
+  }
+  if (error?.code === "WORK_MOVE_RETRY_CONFLICT") {
+    return "迁移任务状态已变化，请刷新后重试";
+  }
+  if (error?.code === "WORK_MOVE_SQLITE_BUSY") {
+    return "迁移任务 journal 正忙，请稍后重试";
+  }
+  if (Number(error?.statusCode || 0) === 404) return "文件移动任务不存在";
+  return "恢复迁移任务失败";
 }
 
 function countStatus(db, statuses) {

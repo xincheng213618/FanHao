@@ -576,8 +576,16 @@ export function createWorkMoveJobService({
     try {
       result = getCoreDb().prepare(`
         UPDATE work_move_jobs
-        SET handoff_from = CASE WHEN owner_id <> '' AND owner_id <> ? THEN owner_id ELSE '' END,
-            handoff_ack = CASE WHEN owner_id <> '' AND owner_id <> ? THEN '' ELSE handoff_ack END,
+        SET handoff_from = CASE
+              WHEN handoff_from <> '' AND handoff_ack <> handoff_from THEN handoff_from
+              WHEN owner_id <> '' AND owner_id <> ? THEN owner_id
+              ELSE ''
+            END,
+            handoff_ack = CASE
+              WHEN handoff_from <> '' AND handoff_ack <> handoff_from THEN handoff_ack
+              WHEN owner_id <> '' AND owner_id <> ? THEN ''
+              ELSE ''
+            END,
             owner_id = ?, lease_until = ?, version = version + 1, updated_at = ?
         WHERE id = ?
           AND status IN ('queued', 'running', 'cleanup_pending', 'rollback_pending')
@@ -845,12 +853,13 @@ export function createWorkMoveJobService({
       emitLifecycle("completed", row(jobId));
       releaseReservation(jobId, "completed");
     } catch (error) {
-      if (isClaimLost(jobId, error)) {
-        await awaitFencedWorker(jobId);
-        return;
-      }
       if (closing) {
         preserveForRecovery(jobId);
+        if (fencedJobs.has(jobId)) await awaitFencedWorker(jobId);
+        return;
+      }
+      if (isClaimLost(jobId, error)) {
+        await awaitFencedWorker(jobId);
         return;
       }
       if (isSqliteBusy(error)) {

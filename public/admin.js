@@ -1,6 +1,6 @@
 import { createSettingsController } from "./modules/system/settings-controller.js?v=20260712-module-settings-02";
 import { createAccessAnalyticsController } from "./modules/system/access-analytics-controller.js?v=20260718-access-analytics-01";
-import { createWorkMoveOpsController, workMoveOpsPanelIsVisible } from "./modules/system/work-move-ops-panel.js?v=20260811-work-move-ops-02";
+import { createWorkMoveOpsController, workMoveOpsPanelIsVisible } from "./modules/system/work-move-ops-panel.js?v=20260811-work-move-ops-03";
 
 const state = {
   library: null,
@@ -22,7 +22,8 @@ const state = {
   activeView: "overview",
   pendingScriptDefaults: null,
   handledTasks: new Set(),
-  pollTimer: null
+  pollTimer: null,
+  workMovePollTimer: null
 };
 
 const els = {
@@ -1041,6 +1042,8 @@ function setView(view, options = {}) {
   for (const panel of els.views) {
     panel.classList.toggle("active", panel.dataset.adminView === state.activeView);
   }
+  if (state.activeView === "tasks") scheduleWorkMoveOpsPoll(0);
+  else clearWorkMoveOpsPoll();
   if (options.pushHash) {
     history.replaceState(null, "", `#${state.activeView}`);
   }
@@ -1137,6 +1140,10 @@ function bindEvents() {
     button.addEventListener("click", () => selectQuickScript(button.dataset.quickScript));
   }
   window.addEventListener("hashchange", () => setView(viewFromHash()));
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") clearWorkMoveOpsPoll();
+    else scheduleWorkMoveOpsPoll(0);
+  });
 }
 
 function selectQuickScript(scriptId) {
@@ -1160,8 +1167,29 @@ async function init() {
   els.scriptList?.querySelector(".admin-script-card.active")?.scrollIntoView({ block: "nearest" });
   state.pollTimer = window.setInterval(() => {
     refreshTasks();
-    if (workMoveOpsPanelIsVisible(workMoveOpsRoot)) workMoveOpsController.load({ quiet: true });
   }, 2500);
+  scheduleWorkMoveOpsPoll(2500);
+}
+
+function clearWorkMoveOpsPoll() {
+  if (!state.workMovePollTimer) return;
+  window.clearTimeout(state.workMovePollTimer);
+  state.workMovePollTimer = null;
+}
+
+function scheduleWorkMoveOpsPoll(delayMs = 2500) {
+  clearWorkMoveOpsPoll();
+  if (!workMoveOpsPanelIsVisible(workMoveOpsRoot)) return;
+  state.workMovePollTimer = window.setTimeout(async () => {
+    state.workMovePollTimer = null;
+    try {
+      if (!workMoveOpsController.state.loading) {
+        await workMoveOpsController.load({ quiet: true });
+      }
+    } finally {
+      scheduleWorkMoveOpsPoll(2500);
+    }
+  }, Math.max(0, Number(delayMs || 0)));
 }
 
 await init().catch((error) => {

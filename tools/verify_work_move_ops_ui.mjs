@@ -103,8 +103,20 @@ assert.equal(focusRestored, 1, "focus must also be restored when fallback copyin
 const statusElement = { value: "failed", addEventListener() {} };
 const workIdElement = { value: "", addEventListener() {} };
 const deferred = [];
+let inFlight = 0;
+let maxInFlight = 0;
 const controller = createWorkMoveOpsController({
-  api: (requestPath) => new Promise((resolve) => deferred.push({ requestPath, resolve })),
+  api: (requestPath) => new Promise((resolve) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    deferred.push({
+      requestPath,
+      resolve(payload) {
+        inFlight -= 1;
+        resolve(payload);
+      }
+    });
+  }),
   formatBytes: String,
   formatDateTime: String,
   root: {
@@ -115,16 +127,78 @@ const controller = createWorkMoveOpsController({
     }
   }
 });
+const slowLoad = controller.load({ quiet: true });
+assert.equal(controller.state.loading, true);
+deferred[0].resolve({ jobs: [{ id: "slow", status: "failed" }], summary: { failed: 1 } });
+await slowLoad;
+assert.deepEqual(controller.state.jobs.map((job) => job.id), ["slow"], "a slow response must render when it completes");
+
 const olderLoad = controller.load({ quiet: true });
 statusElement.value = "blocked";
 const newerLoad = controller.load({ quiet: true });
-assert.match(deferred[0].requestPath, /status=failed/);
-assert.match(deferred[1].requestPath, /status=blocked/);
-deferred[1].resolve({ jobs: [{ id: "newer", status: "blocked" }], summary: { blocked: 1 } });
-await newerLoad;
-deferred[0].resolve({ jobs: [{ id: "older", status: "failed" }], summary: { failed: 1 } });
-await olderLoad;
+assert.match(deferred[1].requestPath, /status=failed/);
+assert.equal(deferred.length, 2, "a newer load must queue instead of overlapping the active request");
+deferred[1].resolve({ jobs: [{ id: "older", status: "failed" }], summary: { failed: 1 } });
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(deferred.length, 3, "the latest queued generation must start after the active request completes");
+assert.match(deferred[2].requestPath, /status=blocked/);
+deferred[2].resolve({ jobs: [{ id: "newer", status: "blocked" }], summary: { blocked: 1 } });
+await Promise.all([olderLoad, newerLoad]);
 assert.deepEqual(controller.state.jobs.map((job) => job.id), ["newer"], "an older GET must not overwrite a newer filter generation");
+assert.equal(maxInFlight, 1, "ops loads must remain single-flight");
+assert.equal(controller.state.loading, false);
+
+const originalDocument = globalThis.document;
+const focusDocument = { activeElement: null };
+function fakeNode(tag) {
+  return {
+    tag,
+    children: [],
+    dataset: {},
+    classList: { toggle() {} },
+    append(...children) { this.children.push(...children); },
+    addEventListener() {},
+    setAttribute() {},
+    focus(options) {
+      this.focusOptions = options;
+      focusDocument.activeElement = this;
+    }
+  };
+}
+focusDocument.createElement = fakeNode;
+const focusList = {
+  children: [],
+  contains(node) { return this.children.includes(node); },
+  append(node) { this.children.push(node); },
+  querySelectorAll() { return this.children; },
+  set innerHTML(_value) { this.children = []; }
+};
+globalThis.document = focusDocument;
+try {
+  const focusController = createWorkMoveOpsController({
+    api: async () => ({ jobs: [], summary: {} }),
+    formatBytes: String,
+    formatDateTime: String,
+    root: {
+      querySelector(selector) {
+        if (selector === "[data-work-move-list]") return focusList;
+        return null;
+      }
+    }
+  });
+  focusController.state.jobs = [{ id: "focus-job", workId: "1", status: "running", phase: "copying" }];
+  focusController.state.selectedId = "focus-job";
+  focusController.render();
+  const previousCard = focusList.children[0];
+  previousCard.focus();
+  focusController.render();
+  assert.notEqual(focusDocument.activeElement, previousCard, "poll rendering must replace the old card in this fixture");
+  assert.equal(focusDocument.activeElement?.dataset?.workMoveJobId, "focus-job");
+  assert.deepEqual(focusDocument.activeElement?.focusOptions, { preventScroll: true }, "selection focus must be restored without scrolling");
+} finally {
+  if (originalDocument === undefined) delete globalThis.document;
+  else globalThis.document = originalDocument;
+}
 
 const adminHtml = read("public/admin.html");
 const adminSource = read("public/admin.js");
@@ -138,6 +212,10 @@ assert.match(adminHtml, /role="status" aria-live="polite" data-work-move-notice/
 assert.match(adminSource, /createWorkMoveOpsController/);
 assert.match(adminSource, /workMoveOpsController\.load/);
 assert.match(adminSource, /workMoveOpsPanelIsVisible/);
+assert.match(adminSource, /scheduleWorkMoveOpsPoll/);
+assert.match(adminSource, /await workMoveOpsController\.load/);
+assert.match(panelSource, /queuedLoad/);
+assert.match(panelSource, /preventScroll: true/);
 assert.match(panelSource, /WORK_MOVE|\/api\/work-move-jobs/);
 assert.match(panelSource, /复制任务 ID/);
 assert.match(panelSource, /人工处理/);
@@ -146,4 +224,4 @@ assert.doesNotMatch(panelSource, /setAttribute\("aria-hidden"/);
 assert.match(playerSource, /fetchWorkMoveJobWithBackoff/);
 assert.doesNotMatch(panelSource, /plan_json|request_json|result_json|oldDir|newDir/);
 
-console.log("work-move-ops-ui: ok (server discovery panel, blocked UX, retry visibility, finite poll backoff)");
+console.log("work-move-ops-ui: ok (sanitized retry UX, single-flight polling, focus restoration, finite player backoff)");

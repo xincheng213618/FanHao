@@ -1,3 +1,5 @@
+import { safeWorkMoveRetryError, sanitizeWorkMoveJob } from "./work-move-job-query-service.js";
+
 export async function routeWorksApi(req, res, url, deps) {
   const {
     notFound,
@@ -207,10 +209,10 @@ export async function routeWorksApi(req, res, url, deps) {
       sendJson(res, 202, workMutationService.retryMoveJob(decodeURIComponent(workMoveJobRetryMatch[1])));
     } catch (error) {
       sendJson(res, error.statusCode || 500, {
-        error: error.message || "恢复迁移任务失败",
+        error: safeWorkMoveRetryError(error),
         ...(error.code ? { code: error.code } : {}),
         ...(error.retryable ? { retryable: true } : {}),
-        ...(error.job ? { job: error.job } : {})
+        ...(error.job ? { job: sanitizeWorkMoveJob(error.job) } : {})
       });
     }
     return true;

@@ -158,7 +158,7 @@ assert(adminUrl("overview") === "/admin#overview", "admin navigation must suppor
 assert(adminUrl("scripts", { scriptId: "novel-library-rescan" }) === "/admin?script=novel-library-rescan#scripts", "admin navigation must deep-link to a selected script");
 assert(adminPageSource.includes('params.get("script")') && adminPageSource.includes("applyPendingScriptDefaults()"), "the admin page must restore script deep links and their pending defaults");
 assert(adminHtmlSource.includes('class="app-module-loading"') && adminHtmlSource.includes('html.app-module-loading body'), "the admin page must hide its incomplete shell during startup");
-assert(adminHtmlSource.includes('await import("/admin.js?v=20260727-initial-route-reveal-01")') && adminHtmlSource.includes('classList.remove("app-module-loading")'), "the admin page must release its visibility guard after startup");
+assert(adminHtmlSource.includes('await import("/admin.js?v=20260811-work-move-ops-03")') && adminHtmlSource.includes('classList.remove("app-module-loading")'), "the admin page must release its visibility guard after startup");
 assert(adminPageSource.includes("await init().catch"), "the admin page must finish its initial data load before becoming visible");
 assert(fanhaoEntry.includes('import("./app.js'), "FanHao entry must boot the Web runtime explicitly");
 assert(indexHtml.includes('/fanhao-app.js?v=20260727-admin-merge-01'), "FanHao shell changes must refresh the browser entry");
@@ -205,7 +205,7 @@ assert(workDetailServiceSource.includes("resolveVideoFileByPublicId ? resolveVid
 assert(workRoutesApiSource.includes('source: url.searchParams.get("source") || "fanhao"') && workRoutesApiSource.includes("视频文件不存在或已移动"), "play-info routing must retain its media boundary and explain missing local files");
 assert(playerPageSource.includes('mediaId ? "?source=gallery" : ""'), "the standalone gallery player must explicitly select gallery play-info lookup");
 assert(playerHtmlSource.includes('class="app-module-loading"') && playerHtmlSource.includes('html.app-module-loading body'), "the standalone player must hide its incomplete shell during startup");
-assert(playerHtmlSource.includes('await import("/js/player-page.js?v=20260727-initial-route-reveal-01")') && playerHtmlSource.includes('classList.remove("app-module-loading")'), "the standalone player must release its visibility guard after startup");
+assert(playerHtmlSource.includes('await import("/js/player-page.js?v=20260811-work-move-ops-02")') && playerHtmlSource.includes('classList.remove("app-module-loading")'), "the standalone player must release its visibility guard after startup");
 assert(playerPageSource.lastIndexOf("await load();") > playerPageSource.indexOf("async function load()"), "the standalone player must await its initial payload after all module declarations are initialized");
 assert(playerPageSource.includes("setVideoSourceAt(resumePosition, { autoPlay: options.autoPlay !== false });"), "standalone player startup must begin playback without a second user action");
 assert(playerPageSource.includes('name === "NotAllowedError" && options.allowMutedFallback'), "standalone player must keep autoplay running when the browser initially blocks sound");

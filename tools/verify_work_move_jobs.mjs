@@ -12,6 +12,7 @@ import { ensureRealPathWithinRoots } from "../src/modules/fanhao/server/library/
 import { createPersonLibraryService } from "../src/modules/fanhao/server/people/person-library-service.js";
 import { routeWorksApi } from "../src/modules/fanhao/server/works/routes-api.js";
 import { createWorkLocalMutationService } from "../src/modules/fanhao/server/works/work-local-mutation-service.js";
+import { createWorkMutationService } from "../src/modules/fanhao/server/works/work-mutation-service.js";
 import { createWorkMoveJobService } from "../src/modules/fanhao/server/works/work-move-job-service.js";
 import { createWorkMoveReservationService } from "../src/modules/fanhao/server/works/work-move-reservation-service.js";
 
@@ -1494,6 +1495,161 @@ async function verifyHandoffAckWinsTimeoutCasRace() {
   db.close();
 }
 
+async function verifyHandoffBusyRetryPreservesOutstandingFence() {
+  const fixture = await createFixture("handoff-busy-retry-fence", 2);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const originalPrepare = admin.prepareWorkMove.bind(admin);
+  let prepareCalls = 0;
+  admin.prepareWorkMove = (...args) => {
+    prepareCalls += 1;
+    return originalPrepare(...args);
+  };
+  const dormant = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    log: () => {},
+    schedule: () => {}
+  });
+  const started = dormant.start("1", { personId: "target", idempotencyKey: "handoff-busy-retry-fence" });
+  const staleOwner = `move-owner-${process.pid}-stale-busy-retry`;
+  db.prepare(`
+    UPDATE work_move_jobs
+    SET status = 'running', phase = 'prepared', plan_json = '', owner_id = ?,
+        lease_until = '2000-01-01T00:00:00.000Z', version = version + 1
+    WHERE id = ?
+  `).run(staleOwner, started.id);
+  await dormant.close();
+
+  let injectedBusy = false;
+  const wrappedDb = {
+    exec: db.exec.bind(db),
+    prepare(sql) {
+      const statement = db.prepare(sql);
+      const normalized = String(sql).replace(/\s+/g, " ");
+      if (!normalized.includes("SET lease_until = ?, version = version + 1")) return statement;
+      return {
+        run(...args) {
+          if (!injectedBusy) {
+            injectedBusy = true;
+            throw Object.assign(new Error("database is locked by handoff fixture"), { code: "SQLITE_BUSY" });
+          }
+          return statement.run(...args);
+        }
+      };
+    }
+  };
+  let workerStarts = 0;
+  class MustNotStartWorker extends Worker {
+    constructor(...args) {
+      workerStarts += 1;
+      super(...args);
+    }
+  }
+  const recovered = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => wrappedDb,
+    handoffTimeoutMs: 450,
+    leaseDurationMs: 300,
+    log: () => {},
+    warn: () => {},
+    workerClass: MustNotStartWorker
+  });
+  const blocked = await waitForJob(recovered, started.id, ["blocked"], 3_000);
+  assert.equal(injectedBusy, true, "fixture must fence and requeue the handoff waiter through heartbeat SQLITE_BUSY");
+  assert.equal(blocked.phase, "handoff_timeout");
+  assert.equal(prepareCalls, 0, "BUSY requeue must keep waiting for the live prior owner before preparing a move");
+  assert.equal(workerStarts, 0, "BUSY requeue must never start a worker without the prior-owner ACK");
+  await waitForCondition(
+    () => db.prepare("SELECT owner_id FROM work_move_jobs WHERE id = ?").get(started.id).owner_id === "",
+    "blocked BUSY handoff must release its current owner"
+  );
+  const journal = db.prepare("SELECT status, owner_id, handoff_from, handoff_ack FROM work_move_jobs WHERE id = ?").get(started.id);
+  assert.equal(journal.status, "blocked");
+  assert.equal(journal.owner_id, "");
+  assert.equal(journal.handoff_from, staleOwner, "the outstanding handoff provenance must survive fence/release/reclaim");
+  assert.equal(journal.handoff_ack, "");
+  await recovered.close();
+  db.close();
+}
+
+async function verifyCloseDuringHandoffRequeuesWithoutDroppingFence() {
+  const fixture = await createFixture("handoff-close-requeue-fence", 2);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const originalPrepare = admin.prepareWorkMove.bind(admin);
+  let prepareCalls = 0;
+  admin.prepareWorkMove = (...args) => {
+    prepareCalls += 1;
+    return originalPrepare(...args);
+  };
+  const dormant = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    log: () => {},
+    schedule: () => {}
+  });
+  const started = dormant.start("1", { personId: "target", idempotencyKey: "handoff-close-requeue-fence" });
+  const staleOwner = `move-owner-${process.pid}-stale-close-requeue`;
+  db.prepare(`
+    UPDATE work_move_jobs
+    SET status = 'running', phase = 'prepared', plan_json = '', owner_id = ?,
+        lease_until = '2000-01-01T00:00:00.000Z', version = version + 1
+    WHERE id = ?
+  `).run(staleOwner, started.id);
+  await dormant.close();
+
+  const middle = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    handoffTimeoutMs: 5_000,
+    leaseDurationMs: 6_000,
+    log: () => {}
+  });
+  await waitForOwnerChange(db, started.id, staleOwner);
+  await middle.close();
+  const parked = db.prepare("SELECT status, phase, owner_id, lease_until, handoff_from, handoff_ack FROM work_move_jobs WHERE id = ?").get(started.id);
+  assert.equal(parked.status, "queued", "close during handoff must downgrade fake-running state to its recovery status");
+  assert.equal(parked.phase, "prepared");
+  assert.equal(parked.owner_id, "");
+  assert.equal(parked.lease_until, "");
+  assert.equal(parked.handoff_from, staleOwner);
+  assert.equal(parked.handoff_ack, "");
+
+  let workerStarts = 0;
+  class MustNotStartWorker extends Worker {
+    constructor(...args) {
+      workerStarts += 1;
+      super(...args);
+    }
+  }
+  const finalOwner = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    handoffTimeoutMs: 350,
+    leaseDurationMs: 300,
+    log: () => {},
+    workerClass: MustNotStartWorker
+  });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  const waiting = db.prepare("SELECT status, owner_id, handoff_from, handoff_ack FROM work_move_jobs WHERE id = ?").get(started.id);
+  assert.ok(waiting.owner_id, "the next service must claim the safely requeued job");
+  assert.equal(waiting.handoff_from, staleOwner);
+  assert.equal(waiting.handoff_ack, "");
+  assert.equal(prepareCalls, 0, "a reclaim after close must not prepare before the live old owner ACKs");
+  assert.equal(workerStarts, 0);
+  const blocked = await waitForJob(finalOwner, started.id, ["blocked"], 3_000);
+  assert.equal(blocked.phase, "handoff_timeout");
+  assert.equal(prepareCalls, 0, "a live old PID without ACK must never reach prepare after close/reclaim");
+  assert.equal(workerStarts, 0, "a live old PID without ACK must never start a worker after close/reclaim");
+  await waitForCondition(
+    () => db.prepare("SELECT owner_id FROM work_move_jobs WHERE id = ?").get(started.id).owner_id === "",
+    "blocked close/reclaim handoff must release its current owner"
+  );
+  await finalOwner.close();
+  db.close();
+}
+
 async function verifyRetryCasBusyAndBlockedContract() {
   const fixture = await createFixture("retry-contract", 1);
   const db = createDatabase(fixture.root, fixture.source);
@@ -1675,6 +1831,41 @@ async function verifyMoveJobListApiAndRedaction() {
   assert.equal(response?.status, 500);
   assert.equal(response?.payload?.code, "WORK_MOVE_LIST_FAILED");
   assert.equal(JSON.stringify(response.payload).includes("C:\\media\\secret"), false, "list route failures must not echo internal database or media paths");
+
+  const mutationService = createWorkMutationService({
+    adminCoreMutationService: {},
+    generateWorkCover: () => null,
+    manualCoverStateService: {},
+    publicWork: (work) => work,
+    resolveLibraryWorkByPublicId: () => null,
+    workLocalMutationService: {},
+    workMoveJobService: service
+  });
+  deps.workMutationService = mutationService;
+  db.prepare("UPDATE work_move_jobs SET result_json = ?, version = version + 1 WHERE id = 'ops-completed'")
+    .run(JSON.stringify({ oldPath: absoluteSecret }));
+  await routeWorksApi({ method: "POST" }, {}, new URL("http://fixture/api/work-move-jobs/ops-completed/retry"), deps);
+  assert.equal(response?.status, 202);
+  assert.equal(response?.payload?.job?.id, "ops-completed");
+  assert.equal("result" in response.payload.job, false, "retry success payload must use the same sanitized job contract as the list API");
+  assert.equal(JSON.stringify(response.payload).includes(absoluteSecret), false, "retry success must not expose persisted result paths");
+
+  db.prepare(`
+    UPDATE work_move_jobs
+    SET status = 'blocked', phase = 'manual_review', error = ?, result_json = ?, error_code = 'FIXTURE_BLOCKED', version = version + 1
+    WHERE id = 'ops-failed'
+  `).run(`manual review at ${absoluteSecret}`, JSON.stringify({ oldPath: absoluteSecret }));
+  await routeWorksApi({ method: "POST" }, {}, new URL("http://fixture/api/work-move-jobs/ops-failed/retry"), deps);
+  assert.equal(response?.status, 409);
+  assert.equal(response?.payload?.code, "WORK_MOVE_MANUAL_INTERVENTION_REQUIRED");
+  assert.equal(response?.payload?.job?.id, "ops-failed");
+  assert.equal(JSON.stringify(response.payload).includes(absoluteSecret), false, "retry errors and embedded jobs must be sanitized together");
+
+  let unauthorizedRetryCalls = 0;
+  deps.requireLocalAdmin = () => false;
+  deps.workMutationService = { retryMoveJob: () => { unauthorizedRetryCalls += 1; } };
+  await routeWorksApi({ method: "POST" }, {}, new URL("http://fixture/api/work-move-jobs/ops-failed/retry"), deps);
+  assert.equal(unauthorizedRetryCalls, 0, "retry route must not touch the journal when local-admin authorization fails");
   await service.close();
   db.close();
 }
@@ -2094,6 +2285,8 @@ try {
   await verifyExpiredLeaseTakeoverFencesOldWorker();
   await verifyAliveOwnerHandoffTimesOutBlocked();
   await verifyHandoffAckWinsTimeoutCasRace();
+  await verifyHandoffBusyRetryPreservesOutstandingFence();
+  await verifyCloseDuringHandoffRequeuesWithoutDroppingFence();
   await verifyDatabaseLeasePreventsDoubleExecution();
   await verifySqliteBusyClaimRetriesAndHeartbeatRecovers();
   await verifyRetryCasBusyAndBlockedContract();

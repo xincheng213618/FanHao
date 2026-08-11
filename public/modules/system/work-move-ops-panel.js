@@ -48,6 +48,8 @@ export function fallbackCopyText(value, pageDocument = document) {
 
 export function createWorkMoveOpsController({ api, formatBytes, formatDateTime, root }) {
   const state = { jobs: [], summary: {}, selectedId: "", loading: false, generation: 0 };
+  let activeLoad = null;
+  let queuedLoad = null;
   const elements = {
     status: root?.querySelector("[data-work-move-status]"),
     workId: root?.querySelector("[data-work-move-work-id]"),
@@ -98,6 +100,9 @@ export function createWorkMoveOpsController({ api, formatBytes, formatDateTime, 
 
   function renderList() {
     if (!elements.list) return;
+    const focusedJobId = elements.list.contains?.(document.activeElement)
+      ? String(document.activeElement?.dataset?.workMoveJobId || "")
+      : "";
     elements.list.innerHTML = "";
     if (!state.jobs.length) {
       elements.list.append(textNode("div", "没有匹配的作品迁移任务", "admin-empty"));
@@ -106,6 +111,7 @@ export function createWorkMoveOpsController({ api, formatBytes, formatDateTime, 
     for (const job of state.jobs) {
       const card = document.createElement("button");
       card.type = "button";
+      card.dataset.workMoveJobId = String(job.id || "");
       card.className = `work-move-job-card status-${job.status}`;
       card.classList.toggle("active", job.id === state.selectedId);
       card.setAttribute("aria-pressed", String(job.id === state.selectedId));
@@ -126,6 +132,11 @@ export function createWorkMoveOpsController({ api, formatBytes, formatDateTime, 
         textNode("span", job.errorCode || job.error || "", "work-move-job-card-error")
       );
       elements.list.append(card);
+    }
+    if (focusedJobId) {
+      const focusedCard = [...elements.list.querySelectorAll("[data-work-move-job-id]")]
+        .find((card) => card.dataset.workMoveJobId === focusedJobId);
+      focusedCard?.focus({ preventScroll: true });
     }
   }
 
@@ -180,25 +191,45 @@ export function createWorkMoveOpsController({ api, formatBytes, formatDateTime, 
     renderDetail();
   }
 
-  async function load({ quiet = false } = {}) {
-    if (!root) return;
-    const generation = ++state.generation;
-    const path = queryPath();
-    state.loading = true;
-    if (!quiet) setNotice("正在读取作品迁移任务");
+  async function performLoad(request) {
+    if (!request.quiet) setNotice("正在读取作品迁移任务");
     try {
-      const payload = await api(path);
-      if (generation !== state.generation) return;
+      const payload = await api(request.path);
+      if (request.generation !== state.generation) return;
       state.jobs = payload.jobs || [];
       state.summary = payload.summary || {};
       if (!state.jobs.some((job) => job.id === state.selectedId)) state.selectedId = state.jobs[0]?.id || "";
       render();
-      if (!quiet) setNotice(`已读取 ${state.jobs.length} 条任务`);
+      if (!request.quiet) setNotice(`已读取 ${state.jobs.length} 条任务`);
     } catch (error) {
-      if (generation === state.generation) setNotice(error.message || "读取作品迁移任务失败");
-    } finally {
-      if (generation === state.generation) state.loading = false;
+      if (request.generation === state.generation) setNotice(error.message || "读取作品迁移任务失败");
     }
+  }
+
+  async function drainLoads(initialRequest) {
+    let request = initialRequest;
+    try {
+      while (request) {
+        queuedLoad = null;
+        await performLoad(request);
+        request = queuedLoad;
+      }
+    } finally {
+      state.loading = false;
+      activeLoad = null;
+    }
+  }
+
+  function load({ quiet = false } = {}) {
+    if (!root) return Promise.resolve();
+    const request = { generation: ++state.generation, path: queryPath(), quiet };
+    if (state.loading) {
+      queuedLoad = request;
+      return activeLoad;
+    }
+    state.loading = true;
+    activeLoad = drainLoads(request);
+    return activeLoad;
   }
 
   async function retryJob(job, button) {

@@ -1,3 +1,5 @@
+import { sanitizeWorkMoveJob } from "./work-move-job-query-service.js";
+
 export function createWorkMutationService({
   adminCoreMutationService,
   generateWorkCover,
@@ -55,7 +57,7 @@ export function createWorkMutationService({
   }
 
   function retryMoveJob(jobId) {
-    return { ok: true, job: workMoveJobService.retry(jobId) };
+    return { ok: true, job: sanitizeWorkMoveJob(workMoveJobService.retry(jobId)) };
   }
 
   function deleteLocalFiles(workId) {

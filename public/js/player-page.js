@@ -1651,8 +1651,7 @@ async function waitForWorkMoveJob(initialJob) {
       }
       if (job.status === "cleanup_pending" && job.error) {
         if (cleanupRetryRequested) throw new Error(`${job.error}；目标目录和数据库已提交，可稍后重试清理源目录`);
-        const retryPayload = await api(`/api/work-move-jobs/${encodeURIComponent(job.id)}/retry`, { method: "POST", signal: controller.signal });
-        job = retryPayload.job;
+        job = await retryWorkMoveJob(job.id, controller.signal);
         rememberMoveJob(job);
         cleanupRetryRequested = true;
       }
@@ -1782,8 +1781,7 @@ async function resumePendingMoveJob() {
       if (job.status === "blocked") throw new Error(job.error || `迁移任务 ${job.id} 已阻断，需要人工检查`);
     }
     if (["rolled_back", "failed"].includes(job.status)) {
-      const payload = await api(`/api/work-move-jobs/${encodeURIComponent(job.id)}/retry`, { method: "POST" });
-      job = payload.job;
+      job = await retryWorkMoveJob(job.id);
       rememberMoveJob(job);
     }
     const completed = await waitForWorkMoveJob(job);
@@ -1794,6 +1792,13 @@ async function resumePendingMoveJob() {
     showNotice(error.message || "恢复迁移任务失败");
     updateMoveToPersonButton();
   }
+}
+
+async function retryWorkMoveJob(jobId, signal = undefined) {
+  const path = `/api/work-move-jobs/${encodeURIComponent(jobId)}`;
+  await api(`${path}/retry`, { method: "POST", signal });
+  const payload = await api(path, { signal });
+  return payload.job;
 }
 
 function applyCompletedMoveJob(job) {
