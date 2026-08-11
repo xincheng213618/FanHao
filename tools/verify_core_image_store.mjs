@@ -7,6 +7,7 @@ import { createCoreDbService } from "../src/modules/fanhao/server/library/core-d
 import { readTableStampRow } from "../src/modules/fanhao/server/library/table-stamp-query.js";
 import { createManualCoverStateService } from "../src/modules/fanhao/server/works/manual-cover-state-service.js";
 import { attachCoreImageStore } from "../src/platform/server/core-image-store.js";
+import { verifyDestructiveImageMigrations } from "./verify_destructive_image_migrations.mjs";
 import { removeVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-core-images-"));
@@ -73,11 +74,57 @@ try {
   assert.equal(imageDb.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
   assert.equal(imageDb.prepare("SELECT COUNT(*) AS count FROM images").get().count, 1);
   imageDb.close();
+  verifyImageSchemaInitializationRetry(tempDir);
   verifyCoreDbInitializationRetry(tempDir);
   verifyManualAvatarRollback(tempDir);
+  verifyDestructiveImageMigrations();
   console.log("core image store verification passed");
 } finally {
   removeVerifiedTempDir(tempDir);
+}
+
+function verifyImageSchemaInitializationRetry(directory) {
+  const corePath = path.join(directory, "schema-retry-core.sqlite");
+  const imagePath = path.join(directory, "schema-retry-images.sqlite");
+  const fixture = new DatabaseSync(imagePath);
+  fixture.exec("CREATE TABLE idx_local_image_cache_status (id INTEGER PRIMARY KEY)");
+  fixture.close();
+
+  const db = new DatabaseSync(corePath);
+  try {
+    assert.throws(
+      () => attachCoreImageStore(db, { dbPath: imagePath }),
+      /idx_local_image_cache_status|already a table/i,
+      "a late image-schema index failure must surface"
+    );
+    for (const table of ["images", "local_image_cache", "remote_image_cache"]) {
+      assert.equal(db.prepare("SELECT type FROM fanhao_images.sqlite_schema WHERE name = ?").get(table), undefined, `a late image-schema failure must roll back ${table}`);
+    }
+    for (const index of [
+      "idx_images_owner",
+      "idx_images_remote_url",
+      "idx_images_local_path",
+      "idx_images_updated_at",
+      "idx_images_unique_asset",
+      "idx_remote_image_cache_hash",
+      "idx_remote_image_cache_status",
+      "idx_local_image_cache_path"
+    ]) {
+      assert.equal(db.prepare("SELECT type FROM fanhao_images.sqlite_schema WHERE name = ?").get(index), undefined, `a late image-schema failure must roll back ${index}`);
+    }
+    assert.equal(db.prepare("SELECT type FROM fanhao_images.sqlite_schema WHERE name = 'idx_local_image_cache_status'").get().type, "table", "the failure fixture must survive image-schema rollback");
+    assert.equal(db.isTransaction, false, "image-schema rollback must release its savepoint");
+
+    db.exec("DROP TABLE fanhao_images.idx_local_image_cache_status");
+    assert.equal(attachCoreImageStore(db, { dbPath: imagePath }), true, "image schema creation must be retryable after removing the conflict");
+    for (const table of ["images", "local_image_cache", "remote_image_cache"]) {
+      assert.equal(db.prepare("SELECT type FROM fanhao_images.sqlite_schema WHERE name = ?").get(table).type, "table", `a repaired retry must create ${table}`);
+    }
+    assert.equal(db.prepare("SELECT type FROM fanhao_images.sqlite_schema WHERE name = 'idx_local_image_cache_status'").get().type, "index", "a repaired retry must create the final image index");
+    assert.equal(db.isTransaction, false, "a successful image schema retry must release its savepoint");
+  } finally {
+    db.close();
+  }
 }
 
 function verifyCoreDbInitializationRetry(directory) {

@@ -9,20 +9,37 @@ const ALLOWED_REMOTE_IMAGE_HOSTS = ["jdbstatic.com", "javdb.com"];
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.db || !args.urlsFile) {
-  console.error("Usage: node tools/cache_remote_images_node.mjs --db data/actor-profiles.sqlite --urls-file urls.json");
+  console.error("Usage: node tools/cache_remote_images_node.mjs --db data/actor-profiles.sqlite [--image-db data/fanhao-core-images.sqlite] --urls-file urls.json");
   process.exit(2);
 }
+if (!fs.existsSync(args.db)) throw new Error(`database does not exist: ${path.resolve(args.db)}`);
 
 const urls = uniqueRemoteImageUrls(JSON.parse(fs.readFileSync(args.urlsFile, "utf8")));
-const db = new DatabaseSync(args.db);
-const usesCoreImageStore = path.basename(path.resolve(args.db)).toLowerCase() === "fanhao-core-v2.sqlite";
-const imageStoreSchema = usesCoreImageStore ? "fanhao_images" : "main";
-if (usesCoreImageStore) {
+const resolvedDbPath = path.resolve(args.db);
+const db = new DatabaseSync(resolvedDbPath);
+const isCanonicalCore = path.basename(resolvedDbPath).toLowerCase() === "fanhao-core-v2.sqlite";
+const imageDbContract = String(
+  args.imageDb
+  || (isCanonicalCore
+    ? process.env.FANHAO_CORE_IMAGE_DB || path.join(path.dirname(resolvedDbPath), "fanhao-core-images.sqlite")
+    : "")
+).trim();
+const imageStoreSchema = imageDbContract ? "fanhao_images" : "main";
+if (imageDbContract) {
+  const imageDbPath = path.resolve(imageDbContract);
+  if (!fs.existsSync(imageDbPath) || fs.statSync(imageDbPath).size <= 0) {
+    db.close();
+    throw new Error(`image database does not exist or is empty: ${imageDbPath}`);
+  }
   attachCoreImageStore(db, {
-    dbPath: path.resolve(args.imageDb || process.env.FANHAO_CORE_IMAGE_DB || path.join(path.dirname(path.resolve(args.db)), "fanhao-core-images.sqlite"))
+    dbPath: imageDbPath,
+    ensureSchema: false
   });
+  assertQuickCheck(db, "fanhao_images", "image database");
+  attachCoreImageStore(db, { dbPath: imageDbPath });
+} else {
+  ensureSchema(db, "main");
 }
-ensureSchema(db, imageStoreSchema);
 
 const stats = { checked: 0, cached: 0, skipped: 0, failed: 0 };
 let nextIndex = 0;
@@ -92,6 +109,21 @@ function ensureSchema(db, schema) {
     CREATE INDEX IF NOT EXISTS ${schema}.idx_remote_image_cache_hash ON remote_image_cache(url_hash);
     CREATE INDEX IF NOT EXISTS ${schema}.idx_remote_image_cache_status ON remote_image_cache(status);
   `);
+}
+
+function assertQuickCheck(db, schema, label) {
+  let rows;
+  try {
+    rows = db.prepare(`PRAGMA ${schema}.quick_check`).all();
+  } catch (error) {
+    db.close();
+    throw new Error(`${label} quick_check could not complete: ${error.message}`);
+  }
+  const results = rows.map((row) => String(row.quick_check || ""));
+  if (results.length !== 1 || results[0] !== "ok") {
+    db.close();
+    throw new Error(`${label} quick_check failed: ${JSON.stringify(results)}`);
+  }
 }
 
 function isAllowedRemoteImageUrl(value) {

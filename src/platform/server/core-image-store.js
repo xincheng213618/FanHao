@@ -43,7 +43,10 @@ export function ensureCoreImageStore(db) {
   db.exec(`
     PRAGMA ${IMAGE_STORE_SCHEMA}.journal_mode = WAL;
     PRAGMA ${IMAGE_STORE_SCHEMA}.synchronous = NORMAL;
-
+  `);
+  db.exec("SAVEPOINT fanhao_image_schema_init");
+  try {
+    db.exec(`
     CREATE TABLE IF NOT EXISTS ${IMAGE_STORE_SCHEMA}.images (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       owner_type TEXT NOT NULL CHECK(owner_type IN ('work', 'person')),
@@ -112,7 +115,16 @@ export function ensureCoreImageStore(db) {
       ON local_image_cache(file_path);
     CREATE INDEX IF NOT EXISTS ${IMAGE_STORE_SCHEMA}.idx_local_image_cache_status
       ON local_image_cache(status);
-  `);
+    `);
+    db.exec("RELEASE SAVEPOINT fanhao_image_schema_init");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK TO SAVEPOINT fanhao_image_schema_init; RELEASE SAVEPOINT fanhao_image_schema_init;");
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], `Core image schema migration failed and rollback also failed: ${error.message}`);
+    }
+    throw error;
+  }
 }
 
 export const CORE_IMAGE_STORE_SCHEMA = IMAGE_STORE_SCHEMA;

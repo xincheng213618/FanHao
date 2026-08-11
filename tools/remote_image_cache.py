@@ -153,9 +153,12 @@ def cache_remote_images_with_node(
     if not urls:
         return image_cache_stats()
 
-    db_path = main_database_path(conn)
+    db_path = database_path(conn, "main")
+    image_db_path = database_path(conn, "fanhao_images") if image_store_schema(conn) == "fanhao_images" else ""
     helper = Path(__file__).resolve().with_name("cache_remote_images_node.mjs")
     if not db_path or not helper.exists():
+        return None
+    if image_store_schema(conn) == "fanhao_images" and not image_db_path:
         return None
 
     try:
@@ -173,12 +176,16 @@ def cache_remote_images_with_node(
             json.dump(urls, handle, ensure_ascii=False)
             urls_file = Path(handle.name)
 
-        result = subprocess.run(
+        command = [
+            "node",
+            str(helper),
+            "--db",
+            db_path,
+        ]
+        if image_db_path:
+            command.extend(["--image-db", image_db_path])
+        command.extend(
             [
-                "node",
-                str(helper),
-                "--db",
-                db_path,
                 "--urls-file",
                 str(urls_file),
                 "--referer",
@@ -189,15 +196,23 @@ def cache_remote_images_with_node(
                 str(concurrency),
                 "--user-agent",
                 user_agent,
-            ],
+            ]
+        )
+        result = subprocess.run(
+            command,
             capture_output=True,
             text=True,
             timeout=max(30, int(timeout or 30) * max(1, len(urls)) + 10),
         )
         if result.returncode != 0:
+            if image_db_path:
+                detail = (result.stderr or result.stdout or "Node image cache helper failed").strip()
+                raise RuntimeError(detail)
             return None
         return json.loads(result.stdout.strip().splitlines()[-1])
     except Exception:
+        if image_db_path:
+            raise
         return None
     finally:
         if urls_file:
@@ -207,10 +222,10 @@ def cache_remote_images_with_node(
                 pass
 
 
-def main_database_path(conn: sqlite3.Connection) -> str:
+def database_path(conn: sqlite3.Connection, schema: str) -> str:
     try:
         for _, name, path in conn.execute("PRAGMA database_list").fetchall():
-            if name == "main" and path:
+            if name == schema and path:
                 return str(path)
     except sqlite3.Error:
         return ""

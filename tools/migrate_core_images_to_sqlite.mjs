@@ -19,17 +19,22 @@ const write = Boolean(args.write);
 const finalize = Boolean(args.finalize);
 const compact = Boolean(args.compact);
 const replaceCore = Boolean(args["replace-core"]);
+const busyTimeoutMs = positiveInteger(args["busy-timeout-ms"]) || 30000;
 
 if (finalize && !write) throw new Error("--finalize requires --write");
 if (compact && !finalize) throw new Error("--compact requires --finalize");
 if (replaceCore && !compact) throw new Error("--replace-core requires --compact");
 if (!fs.existsSync(coreDbPath)) throw new Error(`core database not found: ${coreDbPath}`);
+if (finalize && !fs.existsSync(imageDbPath)) throw new Error(`image database not found for --finalize: ${imageDbPath}`);
 if (finalize) assertCoreReplaceable(coreDbPath);
 fs.mkdirSync(path.dirname(imageDbPath), { recursive: true });
 
 let db = new DatabaseSync(coreDbPath);
-db.exec("PRAGMA busy_timeout = 30000; PRAGMA foreign_keys = OFF;");
+db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA foreign_keys = OFF;`);
+attachCoreImageStore(db, { dbPath: imageDbPath, ensureSchema: false, allowLegacyMainTables: true });
+assertMigrationPreflight(db, "before image schema");
 attachCoreImageStore(db, { dbPath: imageDbPath, allowLegacyMainTables: true });
+assertMigrationPreflight(db, "before copy");
 
 const mainTables = new Set(db.prepare("SELECT name FROM main.sqlite_schema WHERE type = 'table'").all().map((row) => row.name));
 const before = SPLIT_TABLES.map((table) => summarizeTable(db, "main", table, mainTables.has(table)));
@@ -61,6 +66,8 @@ try {
 const copied = SPLIT_TABLES.map((table) => summarizeTable(db, "fanhao_images", table, true));
 printSummary("image store copied", copied);
 assertMatchingSummaries(before, copied);
+assertMatchingContents(db);
+assertMigrationPreflight(db, "after copy");
 console.log("copy verification passed");
 
 if (!finalize) {
@@ -71,6 +78,10 @@ if (!finalize) {
 
 db.exec("BEGIN IMMEDIATE");
 try {
+  const finalMain = SPLIT_TABLES.map((table) => summarizeTable(db, "main", table, true));
+  const finalImage = SPLIT_TABLES.map((table) => summarizeTable(db, "fanhao_images", table, true));
+  assertMatchingSummaries(finalMain, finalImage);
+  assertMatchingContents(db);
   for (const table of [...SPLIT_TABLES].reverse()) db.exec(`DROP TABLE main.${table}`);
   db.exec("COMMIT");
 } catch (error) {
@@ -154,6 +165,87 @@ function assertMatchingSummaries(expected, actual) {
   }
 }
 
+function assertMatchingContents(database) {
+  const keyColumns = {
+    images: "id",
+    local_image_cache: "file_id",
+    remote_image_cache: "url"
+  };
+  for (const table of SPLIT_TABLES) {
+    const mainColumns = database.prepare(`PRAGMA main.table_info(${table})`).all().map((row) => String(row.name || ""));
+    const imageColumns = database.prepare(`PRAGMA fanhao_images.table_info(${table})`).all().map((row) => String(row.name || ""));
+    if (!mainColumns.length || JSON.stringify(mainColumns) !== JSON.stringify(imageColumns)) {
+      throw new Error(`column mismatch for ${table}: ${JSON.stringify({ main: mainColumns, fanhaoImages: imageColumns })}`);
+    }
+    const key = keyColumns[table];
+    if (!mainColumns.includes(key)) throw new Error(`missing comparison key ${table}.${key}`);
+    const quotedTable = quoteIdentifier(table);
+    const quotedKey = quoteIdentifier(key);
+    const changedColumns = mainColumns
+      .filter((column) => column !== key)
+      .map((column) => `source.${quoteIdentifier(column)} IS NOT target.${quoteIdentifier(column)}`)
+      .join(" OR ");
+    const mainMismatch = database.prepare(`
+      SELECT 1 AS mismatch
+      FROM main.${quotedTable} source
+      LEFT JOIN fanhao_images.${quotedTable} target
+        ON source.${quotedKey} = target.${quotedKey}
+      WHERE target.${quotedKey} IS NULL${changedColumns ? ` OR ${changedColumns}` : ""}
+      LIMIT 1
+    `).get();
+    const imageMismatch = database.prepare(`
+      SELECT 1 AS mismatch
+      FROM fanhao_images.${quotedTable} source
+      LEFT JOIN main.${quotedTable} target
+        ON source.${quotedKey} = target.${quotedKey}
+      WHERE target.${quotedKey} IS NULL${changedColumns ? ` OR ${changedColumns}` : ""}
+      LIMIT 1
+    `).get();
+    if (mainMismatch || imageMismatch) throw new Error(`content mismatch for ${table}`);
+  }
+}
+
+function assertMigrationPreflight(database, label) {
+  const mainQuickCheck = assertQuickCheck(database, "main", "core database");
+  const imageQuickCheck = assertQuickCheck(database, "fanhao_images", "image database");
+  const mainCheckpoint = assertCheckpoint(database, "main", "core database");
+  const imageCheckpoint = assertCheckpoint(database, "fanhao_images", "image database");
+  const result = { mainQuickCheck, imageQuickCheck, mainCheckpoint, imageCheckpoint };
+  console.log(`${label}: ${JSON.stringify(result)}`);
+  return result;
+}
+
+function assertQuickCheck(database, schema, label) {
+  let rows;
+  try {
+    rows = database.prepare(`PRAGMA ${schema}.quick_check`).all();
+  } catch (error) {
+    throw new Error(`${label} quick_check could not complete: ${error.message}`);
+  }
+  const results = rows.map((row) => String(row.quick_check || ""));
+  if (results.length !== 1 || results[0] !== "ok") {
+    throw new Error(`${label} quick_check failed: ${JSON.stringify(results)}`);
+  }
+  return "ok";
+}
+
+function assertCheckpoint(database, schema, label) {
+  let row;
+  try {
+    row = database.prepare(`PRAGMA ${schema}.wal_checkpoint(TRUNCATE)`).get() || null;
+  } catch (error) {
+    throw new Error(`${label} WAL checkpoint could not complete: ${error.message}`);
+  }
+  if (!row || Number(row.busy) !== 0) {
+    throw new Error(`${label} WAL checkpoint remained busy: ${JSON.stringify(row)}`);
+  }
+  return {
+    busy: Number(row.busy),
+    log: Number(row.log),
+    checkpointed: Number(row.checkpointed)
+  };
+}
+
 function printSummary(label, summaries) {
   console.log(label);
   for (const item of summaries) {
@@ -178,6 +270,11 @@ function parseArgs(values) {
   return parsed;
 }
 
+function positiveInteger(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+}
+
 function formatBytes(value) {
   return `${(Number(value || 0) / (1024 ** 3)).toFixed(2)} GiB`;
 }
@@ -198,6 +295,10 @@ function restoreSidecarFromBackup(suffix) {
 
 function sqlString(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function quoteIdentifier(value) {
+  return `"${String(value).replaceAll('"', '""')}"`;
 }
 
 function assertCoreReplaceable(filePath) {

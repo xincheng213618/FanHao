@@ -1479,6 +1479,7 @@ const imageSqlFiles = [
   "src/platform/server/media-blob-worker.js",
   "src/platform/server/media-response-service.js",
   "tools/cache_remote_images_node.mjs",
+  "tools/core_image_cache_cleanup.mjs",
   "tools/core_image_store.py",
   "tools/full_scan_core_library.py",
   "tools/migrate_core_images_to_sqlite.mjs",
@@ -1490,11 +1491,16 @@ for (const filePath of imageSqlFiles) {
   assert.equal(unqualifiedImageSql.test(read(filePath)), false, `${filePath} must qualify attached image tables with fanhao_images`);
 }
 const shortVideoCoverMigrationSource = read("tools/migrate_short_video_covers_to_sqlite.mjs");
-assert(shortVideoCoverMigrationSource.includes("PRAGMA fanhao_images.quick_check"), "core image cache cleanup must validate the attached image database");
-assert(shortVideoCoverMigrationSource.includes("PRAGMA fanhao_images.wal_checkpoint(TRUNCATE)"), "core image cache cleanup must checkpoint the attached image database");
-assert(!shortVideoCoverMigrationSource.includes('prepare("PRAGMA quick_check")') && !shortVideoCoverMigrationSource.includes('prepare("PRAGMA wal_checkpoint(TRUNCATE)")'), "core image cache cleanup must not silently validate or checkpoint main");
+const coreImageCacheCleanupSource = read("tools/core_image_cache_cleanup.mjs");
+assert(coreImageCacheCleanupSource.includes('assertQuickCheck(database, "main"') && coreImageCacheCleanupSource.includes('assertQuickCheck(database, "fanhao_images"'), "core image cache cleanup must validate main and attached before deletion");
+assert(coreImageCacheCleanupSource.includes('assertCheckpoint(database, "main"') && coreImageCacheCleanupSource.includes('assertCheckpoint(database, "fanhao_images"'), "core image cache cleanup must checkpoint main and attached before deletion");
+assert(coreImageCacheCleanupSource.indexOf('assertCheckpoint(database, "fanhao_images"') < coreImageCacheCleanupSource.indexOf('database.exec("BEGIN IMMEDIATE")'), "core image cache checks and checkpoints must precede the delete transaction");
 assert(shortVideoCoverMigrationSource.includes("deleteFiles && !cleanupCoreCache"), "legacy cover deletion must require attached cache cleanup");
 assert(shortVideoCoverMigrationSource.includes("coreCleanup.remaining !== 0"), "legacy cover deletion must reject remaining attached cache rows");
+const remoteImageCacheNodeSource = read("tools/cache_remote_images_node.mjs");
+assert(remoteImageCacheNodeSource.includes("args.imageDb") && remoteImageCacheNodeSource.includes("isCanonicalCore"), "Node remote caching must route by explicit/canonical contract");
+assert(!remoteImageCacheNodeSource.includes("const usesCoreImageStore = path.basename"), "Node remote caching must not use the old basename-only heuristic");
+assert(read("tools/remote_image_cache.py").includes('command.extend(["--image-db", image_db_path])'), "Python remote caching must pass a known attached image path to Node");
 const pythonCoreImageStoreSource = read("tools/core_image_store.py");
 assert(pythonCoreImageStoreSource.includes("COLLATE NOCASE") && pythonCoreImageStoreSource.includes("Legacy image tables in main would shadow"), "Python core-image maintenance must reject shadowed attached tables");
 assert(mediaResponseServiceSource.includes("cachedRemoteImageUrls(remoteUrls)"), "visible work pages must batch-check warmed remote images");
