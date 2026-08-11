@@ -3,6 +3,11 @@ import { refreshShortVideoRelationshipFlags } from "./schema.js";
 
 export function syncDownloadManagerSourceMemberships(targetDb, sourceDb, now = new Date().toISOString()) {
   const linkColumns = new Set(sourceDb.prepare("PRAGMA table_info(links)").all().map((row) => row.name));
+  const lastSeenSql = linkColumns.has("last_seen_at")
+    ? "MAX(NULLIF(l.last_seen_at, ''))"
+    : linkColumns.has("downloaded_at")
+      ? "MAX(NULLIF(l.downloaded_at, ''))"
+      : "NULL";
   const missingFlagSql = linkColumns.has("is_missing_from_profile")
     ? "MAX(COALESCE(l.is_missing_from_profile, 0))"
     : "0";
@@ -15,7 +20,7 @@ export function syncDownloadManagerSourceMemberships(targetDb, sourceDb, now = n
       LOWER(TRIM(COALESCE(p.tab, ''))) AS source_type,
       CAST(p.id AS TEXT) AS source_profile_id,
       ? AS first_seen_at,
-      ? AS last_seen_at,
+      COALESCE(${lastSeenSql}, '') AS last_seen_at,
       ${missingFlagSql} AS is_missing_from_profile,
       ${missingAtSql} AS missing_from_profile_at
     FROM links l
@@ -23,7 +28,7 @@ export function syncDownloadManagerSourceMemberships(targetDb, sourceDb, now = n
     WHERE p.tab IN ('like', 'post')
       AND TRIM(COALESCE(l.aweme_id, '')) <> ''
     GROUP BY l.aweme_id, p.tab, p.id
-  `).all(now, now);
+  `).all(now);
   const desiredKeys = new Set(sourceRows.map((row) => (
     `${row.aweme_id}\u0000${row.source_type}\u0000${row.source_profile_id}`
   )));
@@ -39,35 +44,50 @@ export function syncDownloadManagerSourceMemberships(targetDb, sourceDb, now = n
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(aweme_id, source_type, source_profile_id) DO UPDATE SET
       first_seen_at = COALESCE(NULLIF(short_video_source_memberships.first_seen_at, ''), excluded.first_seen_at),
-      last_seen_at = excluded.last_seen_at,
+      last_seen_at = CASE
+        WHEN excluded.last_seen_at > short_video_source_memberships.last_seen_at THEN excluded.last_seen_at
+        ELSE short_video_source_memberships.last_seen_at
+      END,
       is_missing_from_profile = excluded.is_missing_from_profile,
       missing_from_profile_at = excluded.missing_from_profile_at,
       updated_at = excluded.updated_at
+    WHERE
+      (short_video_source_memberships.first_seen_at = '' AND excluded.first_seen_at <> '')
+      OR excluded.last_seen_at > short_video_source_memberships.last_seen_at
+      OR short_video_source_memberships.is_missing_from_profile IS NOT excluded.is_missing_from_profile
+      OR short_video_source_memberships.missing_from_profile_at IS NOT excluded.missing_from_profile_at
   `);
   const remove = targetDb.prepare(`
     DELETE FROM short_video_source_memberships
     WHERE aweme_id = ? AND source_type = ? AND source_profile_id = ?
   `);
+  let membershipsChanged = 0;
+  let actionsChanged = 0;
+  let originsChanged = 0;
+  let relationshipFlagsChanged = 0;
   targetDb.exec("BEGIN");
   try {
     for (const row of sourceRows) {
-      upsert.run(
+      const isMissing = Number(row.is_missing_from_profile || 0) ? 1 : 0;
+      membershipsChanged += changedRows(upsert.run(
         row.aweme_id,
         row.source_type,
         row.source_profile_id,
         row.first_seen_at || now,
-        row.last_seen_at || now,
-        Number(row.is_missing_from_profile || 0) ? 1 : 0,
-        row.missing_from_profile_at || "",
+        row.last_seen_at || "",
+        isMissing,
+        isMissing ? row.missing_from_profile_at || "" : "",
         now
-      );
+      ));
     }
     for (const row of existingRows) {
       const key = `${row.aweme_id}\u0000${row.source_type}\u0000${row.source_profile_id}`;
-      if (!desiredKeys.has(key)) remove.run(row.aweme_id, row.source_type, row.source_profile_id);
+      if (!desiredKeys.has(key)) {
+        membershipsChanged += changedRows(remove.run(row.aweme_id, row.source_type, row.source_profile_id));
+      }
     }
 
-    targetDb.prepare(`
+    actionsChanged += changedRows(targetDb.prepare(`
       DELETE FROM short_video_user_actions
       WHERE local_user_id = ?
         AND action_type = 'like'
@@ -78,9 +98,9 @@ export function syncDownloadManagerSourceMemberships(targetDb, sourceDb, now = n
           JOIN short_video_source_memberships membership
             ON membership.aweme_id = v.aweme_id
            AND membership.source_type = 'like'
-        )
-    `).run(LOCAL_SHORT_VIDEO_USER_ID);
-    targetDb.prepare(`
+         )
+    `).run(LOCAL_SHORT_VIDEO_USER_ID));
+    actionsChanged += changedRows(targetDb.prepare(`
       INSERT INTO short_video_user_actions (
         local_user_id, video_id, action_type, active, source, acted_at, updated_at
       )
@@ -100,30 +120,45 @@ export function syncDownloadManagerSourceMemberships(targetDb, sourceDb, now = n
           ELSE 'download_manager'
         END,
         updated_at = excluded.updated_at
-    `).run(LOCAL_SHORT_VIDEO_USER_ID, now, now);
+      WHERE short_video_user_actions.active IS NOT 1
+         OR short_video_user_actions.source IS NOT CASE
+           WHEN short_video_user_actions.source = 'local_web' THEN short_video_user_actions.source
+           ELSE 'download_manager'
+         END
+    `).run(LOCAL_SHORT_VIDEO_USER_ID, now, now));
 
-    targetDb.prepare(`
+    originsChanged += changedRows(targetDb.prepare(`
+      WITH computed AS (
+        SELECT
+          short_videos.id,
+          CASE
+            WHEN EXISTS (
+              SELECT 1 FROM short_video_source_memberships membership
+              WHERE membership.aweme_id = short_videos.aweme_id AND membership.source_type = 'like'
+            ) THEN 'douyin_download_manager_like'
+            WHEN EXISTS (
+              SELECT 1 FROM short_video_source_memberships membership
+              WHERE membership.aweme_id = short_videos.aweme_id AND membership.source_type = 'post'
+            ) THEN 'douyin_download_manager_post'
+            WHEN short_videos.origin = 'douyin_like_import' THEN 'local_import'
+            ELSE short_videos.origin
+          END AS next_origin
+        FROM short_videos
+        WHERE short_videos.origin IN ('douyin_like_import', 'douyin_download_manager_like', 'douyin_download_manager_post')
+           OR EXISTS (
+             SELECT 1 FROM short_video_source_memberships membership
+             WHERE membership.aweme_id = short_videos.aweme_id
+           )
+      )
       UPDATE short_videos
-      SET origin = CASE
-        WHEN EXISTS (
-          SELECT 1 FROM short_video_source_memberships membership
-          WHERE membership.aweme_id = short_videos.aweme_id AND membership.source_type = 'like'
-        ) THEN 'douyin_download_manager_like'
-        WHEN EXISTS (
-          SELECT 1 FROM short_video_source_memberships membership
-          WHERE membership.aweme_id = short_videos.aweme_id AND membership.source_type = 'post'
-        ) THEN 'douyin_download_manager_post'
-        WHEN origin = 'douyin_like_import' THEN 'local_import'
-        ELSE origin
-      END,
-      updated_at = ?
-      WHERE origin IN ('douyin_like_import', 'douyin_download_manager_like', 'douyin_download_manager_post')
-         OR EXISTS (
-           SELECT 1 FROM short_video_source_memberships membership
-           WHERE membership.aweme_id = short_videos.aweme_id
-         )
-    `).run(now);
+      SET origin = computed.next_origin,
+          updated_at = ?
+      FROM computed
+      WHERE short_videos.id = computed.id
+        AND short_videos.origin IS NOT computed.next_origin
+    `).run(now));
     refreshShortVideoRelationshipFlags(targetDb);
+    relationshipFlagsChanged = lastStatementChanges(targetDb);
     targetDb.exec("COMMIT");
   } catch (error) {
     try {
@@ -131,11 +166,19 @@ export function syncDownloadManagerSourceMemberships(targetDb, sourceDb, now = n
     } catch {}
     throw error;
   }
+  return {
+    membershipsSeen: sourceRows.length,
+    membershipsChanged,
+    actionsChanged,
+    originsChanged,
+    relationshipFlagsChanged,
+    catalogChanges: membershipsChanged + actionsChanged + originsChanged + relationshipFlagsChanged
+  };
 }
 
 export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now = new Date().toISOString()) {
   const profileColumns = new Set(sourceDb.prepare("PRAGMA table_info(profiles)").all().map((row) => row.name));
-  if (!profileColumns.has("sec_uid")) return 0;
+  if (!profileColumns.has("sec_uid")) return emptyProfileSyncResult();
   const profileRows = sourceDb.prepare(`
     SELECT *
     FROM profiles
@@ -166,28 +209,36 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
   }
   const videoAuthorNameUpdate = targetDb.prepare(`
     UPDATE short_videos
-    SET author_name = ?,
-        updated_at = ?
-    WHERE author_sec_uid = ?
-      AND ? <> ''
-      AND COALESCE(author_name, '') <> ?
+    SET author_name = ?1,
+        updated_at = ?2
+    WHERE author_sec_uid = ?3
+      AND ?1 <> ''
+      AND COALESCE(author_name, '') IS NOT ?1
   `);
   const accountStateUpdate = profileColumns.has("account_status")
     ? targetDb.prepare(`
         UPDATE short_video_users
-        SET account_status = ?,
-            account_status_reason = ?,
-            account_status_detected_at = ?,
-            updated_at = ?
-        WHERE id = ?
+        SET account_status = ?1,
+            account_status_reason = ?2,
+            account_status_detected_at = ?3,
+            updated_at = ?4
+        WHERE id = ?5
+          AND (
+            account_status IS NOT ?1
+            OR account_status_reason IS NOT ?2
+            OR account_status_detected_at IS NOT ?3
+          )
       `)
     : null;
+  let profileUsersChanged = 0;
+  let accountStatesChanged = 0;
+  let videoAuthorsChanged = 0;
   targetDb.exec("BEGIN");
   try {
     for (const [secUid, candidate] of bestBySecUid) {
       const row = candidate.row;
       const nickname = String(row.nickname || "").trim();
-      userUpsert.run(
+      profileUsersChanged += changedRows(userUpsert.run(
         `douyin:${secUid}`,
         "douyin",
         secUid,
@@ -211,18 +262,18 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
         String(row.profile_collected_at || ""),
         String(row.created_at || now),
         now
-      );
+      ));
       const accountState = accountStateBySecUid.get(secUid);
       if (accountStateUpdate && accountState) {
-        accountStateUpdate.run(
+        accountStatesChanged += changedRows(accountStateUpdate.run(
           accountState.status,
           accountState.reason,
           accountState.detectedAt,
           now,
           `douyin:${secUid}`
-        );
+        ));
       }
-      videoAuthorNameUpdate.run(nickname, now, secUid, nickname, nickname);
+      videoAuthorsChanged += changedRows(videoAuthorNameUpdate.run(nickname, now, secUid));
     }
     targetDb.exec("COMMIT");
   } catch (error) {
@@ -231,7 +282,31 @@ export function syncDownloadManagerProfiles(targetDb, sourceDb, userUpsert, now 
     } catch {}
     throw error;
   }
-  return bestBySecUid.size;
+  return {
+    profilesSeen: bestBySecUid.size,
+    profilesChanged: profileUsersChanged + accountStatesChanged + videoAuthorsChanged,
+    profileUsersChanged,
+    accountStatesChanged,
+    videoAuthorsChanged
+  };
+}
+
+function emptyProfileSyncResult() {
+  return {
+    profilesSeen: 0,
+    profilesChanged: 0,
+    profileUsersChanged: 0,
+    accountStatesChanged: 0,
+    videoAuthorsChanged: 0
+  };
+}
+
+function changedRows(result) {
+  return Number(result?.changes || 0);
+}
+
+function lastStatementChanges(db) {
+  return Number(db.prepare("SELECT changes() AS value").get()?.value || 0);
 }
 
 function optionalInteger(value) {

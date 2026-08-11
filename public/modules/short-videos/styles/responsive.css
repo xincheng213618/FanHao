@@ -208,7 +208,13 @@
     grid-template-columns: 82px minmax(0, 1fr);
     min-height: 220px;
     gap: 14px;
-    padding: 22px 18px;
+    padding: 66px 18px 22px;
+  }
+
+  .short-video-author-page-back {
+    top: 14px;
+    left: 18px;
+    min-height: 38px;
   }
 
   .short-video-home.is-author-page .short-video-author-page-avatar {

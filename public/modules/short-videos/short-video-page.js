@@ -231,6 +231,7 @@ export function createShortVideoPage(deps) {
   const {
     appendVisibleAuthorsIfNeeded,
     authorNameFromFilter,
+    cancelAuthorCollectorPolling,
     currentShortVideoAuthorDetail,
     isShortVideoAuthorDetailPage,
     isShortVideoAuthorIndexPage,
@@ -244,7 +245,8 @@ export function createShortVideoPage(deps) {
     resolveShortVideoAuthor,
     shortVideoApiSource,
     shortVideoAuthorFilterValue,
-    shortVideoAuthorHandle
+    shortVideoAuthorHandle,
+    syncAuthorCollectorRouteLifecycle
   } = createShortVideoAuthorPages({
     AUTHOR_APPEND_LOOKAHEAD,
     api,
@@ -445,6 +447,7 @@ export function createShortVideoPage(deps) {
 
   function applyRouteState(route = {}) {
     ensureState();
+    syncAuthorCollectorRouteLifecycle(route.shortVideoMode !== "likes" && !route.shortVideoId ? route.shortVideoAuthorPage : "");
     state.shortVideo.mode = ["likes", "transcoding"].includes(route.shortVideoMode) ? route.shortVideoMode : "feed";
     const nextAuthorPage = route.shortVideoAuthorPage || "";
     if (state.shortVideo.authorPage && state.shortVideo.authorPage !== nextAuthorPage) {
@@ -513,6 +516,7 @@ export function createShortVideoPage(deps) {
 
   async function loadVideos(options = {}) {
     ensureState();
+    syncAuthorCollectorRouteLifecycle(state.shortVideo.current ? "" : state.shortVideo.authorPage);
     const append = Boolean(options.append);
     const preserveHomeDuringLoad = preserveShortVideoHomeDuringLoad(append);
     if (!append && !shortVideoListCards) {
@@ -778,6 +782,7 @@ export function createShortVideoPage(deps) {
   async function openVideo(videoId, options = {}) {
     ensureState();
     if (!videoId) return;
+    cancelAuthorCollectorPolling();
     const requestId = ++shortVideoOpenRequestId;
     const openStartedAt = Date.now();
     const viewerStylesReady = Promise.resolve(ensureShortVideoViewerStyles?.()).catch(() => false);

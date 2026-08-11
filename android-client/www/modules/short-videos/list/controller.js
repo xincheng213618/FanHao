@@ -1,4 +1,4 @@
-import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "../shared.js?v=20260730-mobile-sync-01";
+import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeAuthorAccountStatus, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "../shared.js?v=20260811-android-author-status-01";
 export function createShortVideoListController(context = {}) {
   const { api, getActiveUrl, listState, showView } = context;
   let listLoadMoreObserver = null;
@@ -21,6 +21,9 @@ export function createShortVideoListController(context = {}) {
     const nextSort = normalizeSortForSource(nextSource, params.sort);
     const nextAuthorSort = normalizeFollowingAuthorSort(params.authorSort || listState.authorSort);
     const nextAuthorFilter = normalizeFollowingAuthorFilter(params.authorFilter || listState.authorFilter);
+    const nextAuthorAccountStatus = nextSource === "authors"
+      ? normalizeAuthorAccountStatus(params.authorAccountStatus || params.account)
+      : normalizeAuthorAccountStatus(listState.authorAccountStatus);
     const nextSearchTab = normalizeSearchTab(params.searchTab || params.tab || (nextSource === "authors" ? "authors" : listState.searchTab));
     if (["authors", "following"].includes(nextSource)) nextAuthor = "all";
     if (nextAuthor === "all" && !["all", "liked", "following", "authors"].includes(nextSource)) nextSource = DEFAULT_SOURCE;
@@ -30,6 +33,7 @@ export function createShortVideoListController(context = {}) {
       || nextSort !== listState.sort
       || nextAuthorSort !== listState.authorSort
       || nextAuthorFilter !== listState.authorFilter
+      || nextAuthorAccountStatus !== listState.authorAccountStatus
       || nextSearchTab !== listState.searchTab;
     listState.query = nextQuery;
     listState.author = nextAuthor;
@@ -37,6 +41,7 @@ export function createShortVideoListController(context = {}) {
     listState.sort = nextSort;
     listState.authorSort = nextAuthorSort;
     listState.authorFilter = nextAuthorFilter;
+    listState.authorAccountStatus = nextAuthorAccountStatus;
     listState.searchTab = nextSearchTab;
     if (scopeChanged) {
       if (!options.preserveData) {
@@ -65,6 +70,8 @@ export function createShortVideoListController(context = {}) {
         params.set("scope", "following");
         params.set("sort", listState.authorSort);
         params.set("filter", listState.authorFilter);
+      } else {
+        params.set("filter", listState.authorAccountStatus);
       }
     } else {
       if (listState.author && listState.author !== "all") params.set("author", listState.author);
@@ -138,7 +145,9 @@ export function createShortVideoListController(context = {}) {
             ? "没有未点赞的关注账号。"
             : listState.source === "following"
               ? "还没有关注账号。"
-              : "还没有作者数据。"
+              : listState.authorAccountStatus === "banned"
+                ? "没有已封禁的作者。"
+                : "还没有作者数据。"
           : "还没有短视频。";
       if (append && !authorIndex) appendListVideos(appendedVideos);
       else renderListShell();
@@ -210,6 +219,7 @@ export function createShortVideoListController(context = {}) {
       sort: listState.sort,
       authorSort: listState.authorSort,
       authorFilter: listState.authorFilter,
+      authorAccountStatus: listState.authorAccountStatus,
       searchTab: listState.searchTab,
       ...patch
     };
@@ -228,6 +238,7 @@ export function createShortVideoListController(context = {}) {
       sort: listState.sort || DEFAULT_SORT,
       authorSort: listState.authorSort || "followed",
       authorFilter: listState.authorFilter || "all",
+      authorAccountStatus: listState.authorAccountStatus || "all",
       searchTab: listState.searchTab || "all",
       authors: listState.data?.authors || []
     };

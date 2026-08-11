@@ -790,6 +790,48 @@ body.short-video-search-page-view .bottom-nav {
   color: var(--mobile-accent);
 }
 
+.short-video-mobile-author-account-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 128px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 10px;
+}
+
+.short-video-mobile-author-account-summary {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.short-video-mobile-author-account-summary strong {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.short-video-mobile-author-account-summary small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.short-video-mobile-author-account-filter {
+  min-width: 0;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  padding: 0 8px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 900;
+}
+
 .short-video-mobile-author-index {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -865,6 +907,39 @@ body.short-video-search-page-view .bottom-nav {
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.short-video-mobile-author-banned {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: center;
+  min-height: 20px;
+  border: 1px solid rgb(225 64 84 / 38%);
+  border-radius: 999px;
+  background: rgb(225 64 84 / 12%);
+  color: #d92d49;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 950;
+}
+
+.short-video-mobile-author-banned-reason {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.short-video-search-author-item .short-video-mobile-author-banned,
+.short-video-search-author-item .short-video-mobile-author-banned-reason {
+  justify-self: start;
 }
 
 .short-video-mobile-author-card.is-loading {

@@ -1,6 +1,7 @@
 import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=20260706-mobile-web-sync-01";
 import { formatCompact } from "../../../js/format.js";
 import { DEFAULT_SORT, initials } from "../shared.js?v=20260730-mobile-sync-01";
+import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=20260811-android-author-status-01";
 import { renderFollowingAuthorTools } from "./following-view.js?v=20260730-mobile-sync-01";
 export function createShortVideoListView(context = {}) {
   const { els, getActiveUrl, goBack, listState, openSettings, showView } = context;
@@ -45,6 +46,8 @@ export function createShortVideoListView(context = {}) {
     if (isAuthorIndexView()) {
       if (listState.source === "following") {
         shell.append(renderFollowingAuthorTools({ listState, onChange: updateListParams }));
+      } else {
+        shell.append(renderAuthorAccountStatusTools({ listState, formatNumber: formatCompact, onChange: updateListParams }));
       }
       shell.append(renderAuthorIndex());
       els.viewContent.append(shell);
@@ -375,6 +378,7 @@ export function createShortVideoListView(context = {}) {
       count.textContent = `${formatCompact(author.count || 0)} 条作品`;
       copy.append(name, count);
       button.append(avatar, copy, createIcon("chevronRight"));
+      appendAuthorAccountStatus(button, author, copy);
       button.addEventListener("click", () => openShortVideoAuthor(author));
       list.append(button);
     }
@@ -398,7 +402,7 @@ export function createShortVideoListView(context = {}) {
       back.setAttribute("aria-label", "返回作者列表");
       back.append(createIcon("chevronLeft"));
       back.addEventListener("click", () => {
-        showView("shortVideos", { query: "", author: "all", source: "authors", sort: listState.sort }, { resetStack: true });
+        showView("shortVideos", { query: "", author: "all", source: "authors", sort: listState.sort, account: listState.authorAccountStatus }, { resetStack: true });
       });
       toolbar.append(back);
       copy.append(title);
@@ -461,12 +465,16 @@ export function createShortVideoListView(context = {}) {
       const status = document.createElement("div");
       status.className = "short-video-mobile-author-index-status";
       status.textContent = listState.query
-        ? `没有匹配“${listState.query}”的作者`
+        ? listState.source === "authors" && listState.authorAccountStatus === "banned"
+          ? `没有匹配“${listState.query}”的已封禁作者`
+          : `没有匹配“${listState.query}”的作者`
         : listState.source === "following" && listState.authorFilter === "unliked"
           ? "没有未点赞的关注账号"
           : listState.source === "following"
             ? "还没有关注账号"
-            : "还没有作者数据";
+            : listState.authorAccountStatus === "banned"
+              ? "没有已封禁的作者"
+              : "还没有作者数据";
       wrap.append(status);
       return wrap;
     }
@@ -516,6 +524,7 @@ export function createShortVideoListView(context = {}) {
       meta.textContent = `视频 ${formatCompact(author.count || 0)} · 喜欢 ${formatCompact(author.likedCount || 0)}`;
       button.append(meta);
     }
+    appendAuthorAccountStatus(button, author);
     bindReliableTap(button, () => openShortVideoAuthor(author));
     card.append(button);
     return card;

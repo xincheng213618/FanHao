@@ -1,8 +1,21 @@
+import {
+  DEFAULT_SHORT_VIDEO_SORT,
+  DEFAULT_SHORT_VIDEO_SOURCE,
+  canonicalShortVideoViewParams,
+  normalizeAuthorAccountStatus,
+  normalizeFollowingAuthorFilter,
+  normalizeFollowingAuthorSort,
+  normalizeShortVideoSearchTab,
+  normalizeShortVideoSort,
+  normalizeShortVideoSortForSource,
+  normalizeShortVideoSource
+} from "../../js/short-video-route-contract.js?v=20260811-android-author-status-01";
+
 export const DEFAULT_LIMIT = 12;
 export const AUTHOR_INITIAL_COUNT = 24;
 export const AUTHOR_APPEND_COUNT = 18;
-export const DEFAULT_SORT = "published";
-export const DEFAULT_SOURCE = "liked";
+export const DEFAULT_SORT = DEFAULT_SHORT_VIDEO_SORT;
+export const DEFAULT_SOURCE = DEFAULT_SHORT_VIDEO_SOURCE;
 export const SHORT_VIDEO_SORT_OPTIONS = [
   ["recommended", "推荐排序"],
   ["watched", "最近观看"],
@@ -21,8 +34,7 @@ export const FOLLOWING_AUTHOR_SORT_OPTIONS = [
 ];
 
 export function normalizeSort(value) {
-  const sort = String(value || DEFAULT_SORT).trim();
-  return ["recommended", "watched", "liked", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : DEFAULT_SORT;
+  return normalizeShortVideoSort(value);
 }
 
 export function shortVideoSortLabel(value) {
@@ -32,31 +44,23 @@ export function shortVideoSortLabel(value) {
 }
 
 export function normalizeSource(value) {
-  const source = String(value || DEFAULT_SOURCE).trim().toLowerCase();
-  return ["recommended", "liked", "following", "history", "authors", "posts", "all", "local"].includes(source) ? source : DEFAULT_SOURCE;
+  return normalizeShortVideoSource(value);
 }
 
 export function normalizeSortForSource(sourceValue, sortValue) {
-  const source = normalizeSource(sourceValue);
-  const sort = normalizeSort(sortValue);
-  if (source === "recommended") return sort === "published" ? "recommended" : sort;
-  if (source === "history") return sort === "published" ? "watched" : sort;
-  return ["recommended", "watched"].includes(sort) ? DEFAULT_SORT : sort;
-}
-
-export function normalizeFollowingAuthorSort(value) {
-  const sort = String(value || "followed").trim().toLowerCase();
-  return ["followed", "count", "liked"].includes(sort) ? sort : "followed";
-}
-
-export function normalizeFollowingAuthorFilter(value) {
-  return String(value || "all").trim().toLowerCase() === "unliked" ? "unliked" : "all";
+  return normalizeShortVideoSortForSource(sourceValue, sortValue);
 }
 
 export function normalizeSearchTab(value) {
-  const tab = String(value || "all").trim().toLowerCase();
-  return ["all", "videos", "authors"].includes(tab) ? tab : "all";
+  return normalizeShortVideoSearchTab(value);
 }
+
+export {
+  canonicalShortVideoViewParams,
+  normalizeAuthorAccountStatus,
+  normalizeFollowingAuthorFilter,
+  normalizeFollowingAuthorSort
+};
 
 export function selectOption(value, label) {
   const option = document.createElement("option");

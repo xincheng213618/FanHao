@@ -1,3 +1,10 @@
+import {
+  authorIndexReturnState,
+  canReturnThroughShortVideoHistory,
+  captureAuthorIndexReturnContext
+} from "./author-navigation.js?v=20260811-author-route-lifecycle-01";
+import { createAuthorCollectorPoll } from "./author-collector-poll.js?v=20260811-author-route-lifecycle-01";
+
 export function createShortVideoAuthorPages(deps) {
   const {
     AUTHOR_APPEND_LOOKAHEAD,
@@ -27,6 +34,17 @@ export function createShortVideoAuthorPages(deps) {
     showError,
     state
   } = deps;
+  let authorIndexReturnContext = captureAuthorIndexReturnContext(state.shortVideo);
+  let authorPageEnteredWithinApp = false;
+  const {
+    cancel: cancelAuthorCollectorPolling,
+    isCurrent: isCurrentAuthorPage,
+    sync: syncAuthorCollectorRouteLifecycle,
+    wait: waitForAuthorCollector
+  } = createAuthorCollectorPoll({ api, isCurrentAuthorPage: isAuthorPageActive });
+
+  window.addEventListener("pagehide", () => cancelAuthorCollectorPolling(), { passive: true });
+
   function renderAuthorDetailHome(data = {}) {
     const author = currentShortVideoAuthorDetail(data);
     const visibleAuthorVideo = (data.videos || []).find((video) => video?.ownerUserId || video?.author?.id) || null;
@@ -34,6 +52,13 @@ export function createShortVideoAuthorPages(deps) {
     const authorVideo = visibleAuthorVideo || state.shortVideo.authorVideo || null;
     const head = document.createElement("section");
     head.className = "short-video-author-page-head";
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "short-video-author-page-back";
+    back.setAttribute("aria-label", "返回作者列表");
+    back.append(createIcon("chevronLeft"), document.createTextNode("返回作者列表"));
+    back.addEventListener("click", returnToShortVideoAuthorIndex);
+    head.append(back);
     const heroCoverUrl = shortVideoCardCoverUrl(authorVideo || {});
     if (heroCoverUrl) {
       const hero = document.createElement("div");
@@ -181,11 +206,19 @@ export function createShortVideoAuthorPages(deps) {
       const jobId = Number(result?.jobId || 0);
       if (!jobId) throw new Error("8765 没有返回采集任务编号");
       showBrowserToast(mode === "full" ? `数量确认已启动 #${jobId}` : `快速刷新已启动 #${jobId}`);
-      const finalState = await waitForAuthorCollector(secUid, jobId, button);
+      if (!isCurrentAuthorPage(secUid)) return;
+      const finalState = await waitForAuthorCollector({
+        authorId: secUid,
+        jobId,
+        onProgress: ({ processed, total }) => {
+          if (button?.isConnected) button.textContent = total ? `采集中 ${processed}/${total}` : "采集中";
+        }
+      });
+      if (!finalState || !isCurrentAuthorPage(secUid)) return;
       if (finalState?.job?.status === "failed") throw new Error(finalState.job.message || "作者主页采集失败");
       if (finalState?.job?.status === "stopped") throw new Error(finalState.job.message || "作者主页采集已停止");
       showBrowserToast(finalState?.job?.message || (mode === "full" ? "数量确认完成" : "快速刷新完成"));
-      await loadVideos({ skipRoute: true });
+      if (isCurrentAuthorPage(secUid)) await loadVideos({ skipRoute: true });
     } finally {
       buttons.forEach((item) => { item.disabled = false; });
       button?.removeAttribute("aria-busy");
@@ -193,20 +226,10 @@ export function createShortVideoAuthorPages(deps) {
     }
   }
 
-  async function waitForAuthorCollector(secUid, jobId, button) {
-    for (let attempt = 0; attempt < 900; attempt += 1) {
-      const data = await api(`/api/short-videos/authors/${encodeURIComponent(secUid)}/collector?jobId=${encodeURIComponent(jobId)}`);
-      const job = data?.job;
-      if (job) {
-        const progress = data?.progress?.status === "running" ? data.progress : job;
-        const processed = Math.max(0, Number(progress.processed || 0));
-        const total = Math.max(0, Number(progress.total || 0));
-        if (button?.isConnected) button.textContent = total ? `采集中 ${processed}/${total}` : "采集中";
-        if (["complete", "failed", "stopped"].includes(job.status)) return data;
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 1500));
-    }
-    throw new Error("8765 采集任务等待超时，请到采集管理查看");
+  function isAuthorPageActive(authorId) {
+    return state.activeView === "shortVideos"
+      && !state.shortVideo?.current
+      && String(state.shortVideo?.authorPage || "").trim() === String(authorId || "").trim();
   }
 
   function renderAuthorWorkspaceToolbar(data = {}) {
@@ -273,7 +296,10 @@ export function createShortVideoAuthorPages(deps) {
     setAuthorPanelReturnFeed(null);
     if (isShortVideoAuthorIndexPage()) {
       state.shortVideo.authorIndexSource = state.shortVideo.source;
+      authorIndexReturnContext = captureAuthorIndexReturnContext(state.shortVideo);
     }
+    authorPageEnteredWithinApp = !options.replaceHistory;
+    syncAuthorCollectorRouteLifecycle(authorId);
     state.shortVideo.authorPage = authorId;
     state.shortVideo.author = authorId;
     state.shortVideo.authorDetail = { ...(video?.author || {}), ...author, secUid: authorId };
@@ -301,6 +327,47 @@ export function createShortVideoAuthorPages(deps) {
       shortVideoAuthor: authorId,
       shortVideoQuery: "",
       shortVideoSource: "all"
+    });
+    loadVideos({ skipRoute: true }).catch(showError);
+  }
+
+  function returnToShortVideoAuthorIndex() {
+    cancelAuthorCollectorPolling();
+    if (canReturnThroughShortVideoHistory({
+      enteredWithinApp: authorPageEnteredWithinApp,
+      referrer: document.referrer,
+      currentHref: window.location.href
+    }) && window.history.length > 1) {
+      window.history.back();
+      return;
+    }
+    const target = authorIndexReturnState(authorIndexReturnContext);
+    Object.assign(state.shortVideo, target, {
+      author: "all",
+      authorPage: "",
+      current: null,
+      data: null,
+      prevId: "",
+      nextId: "",
+      prevVideo: null,
+      nextVideo: null,
+      topic: "",
+      sound: "",
+      soundInfo: null,
+      media: "all",
+      quality: "all",
+      deleted: "all"
+    });
+    clearShortVideoDeleteSelection();
+    replaceRoute({
+      view: "shortVideos",
+      shortVideoId: "",
+      shortVideoAuthorPage: "",
+      shortVideoAuthor: "all",
+      shortVideoQuery: target.query,
+      shortVideoSource: target.source,
+      shortVideoSort: target.sort,
+      shortVideoAuthorAccountStatus: target.authorAccountStatus
     });
     loadVideos({ skipRoute: true }).catch(showError);
   }
@@ -492,6 +559,7 @@ export function createShortVideoAuthorPages(deps) {
     currentShortVideoAuthorDetail,
     isShortVideoAuthorDetailPage,
     isShortVideoAuthorIndexPage,
+    cancelAuthorCollectorPolling,
     openShortVideoAuthorPage,
     renderAuthorDetailHome,
     renderAuthorIndex,
@@ -503,6 +571,7 @@ export function createShortVideoAuthorPages(deps) {
     shortVideoApiSource,
     shortVideoAuthorDisplayName,
     shortVideoAuthorFilterValue,
-    shortVideoAuthorHandle
+    shortVideoAuthorHandle,
+    syncAuthorCollectorRouteLifecycle
   };
 }

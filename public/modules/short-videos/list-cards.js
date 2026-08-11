@@ -27,6 +27,7 @@ export function createShortVideoListCards(dependencies) {
     state,
     toggleShortVideoSelected
   } = dependencies;
+  let authorStatusDescriptionId = 0;
 
 
   function renderAuthorIndexCard(author = {}) {
@@ -35,7 +36,7 @@ export function createShortVideoListCards(dependencies) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "short-video-author-index-card-main";
-    button.setAttribute("aria-label", `查看 ${author.name || "未知作者"} 的短视频`);
+    button.setAttribute("aria-label", shortVideoAuthorCardAccessibility(author, "index").label);
     const media = document.createElement("span");
     media.className = "short-video-author-index-media";
     const imageUrl = author.avatarUrl || author.fallbackCoverUrl || "";
@@ -70,6 +71,7 @@ export function createShortVideoListCards(dependencies) {
       banned.textContent = "已封禁";
       banned.title = author.accountStatusReason || "抖音账号已封禁";
       button.append(banned);
+      appendAuthorStatusDescription(button, author);
     }
     button.addEventListener("click", () => {
       openShortVideoAuthorPage(author);
@@ -85,7 +87,7 @@ export function createShortVideoListCards(dependencies) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "short-video-search-user-card-main";
-    button.setAttribute("aria-label", `查看用户 ${author.name || "未知作者"}`);
+    button.setAttribute("aria-label", shortVideoAuthorCardAccessibility(author, "search").label);
 
     const avatar = document.createElement("span");
     avatar.className = "short-video-search-user-avatar";
@@ -121,6 +123,7 @@ export function createShortVideoListCards(dependencies) {
       banned.textContent = "已封禁";
       banned.title = author.accountStatusReason || "抖音账号已封禁";
       nameRow.append(banned);
+      appendAuthorStatusDescription(button, author);
     }
     const handle = document.createElement("span");
     handle.className = "short-video-search-user-handle";
@@ -139,6 +142,17 @@ export function createShortVideoListCards(dependencies) {
     button.addEventListener("click", () => openShortVideoAuthorPage(author));
     card.append(button);
     return card;
+  }
+
+  function appendAuthorStatusDescription(button, author = {}) {
+    const accessibility = shortVideoAuthorCardAccessibility(author);
+    if (!accessibility.description) return;
+    const description = document.createElement("span");
+    description.id = `short-video-author-status-${++authorStatusDescriptionId}`;
+    description.className = "short-video-visually-hidden";
+    description.textContent = accessibility.description;
+    button.setAttribute("aria-describedby", description.id);
+    button.append(description);
   }
 
 
@@ -292,4 +306,15 @@ export function createShortVideoListCards(dependencies) {
 
 
   return { renderAuthorIndexCard, renderSearchUserCard, renderVideoCard };
+}
+
+export function shortVideoAuthorCardAccessibility(author = {}, kind = "index") {
+  const name = String(author.name || "未知作者").trim() || "未知作者";
+  const prefix = kind === "search" ? `查看用户 ${name}` : `查看 ${name} 的短视频`;
+  if (author.accountStatus !== "banned") return { label: prefix, description: "" };
+  const reason = String(author.accountStatusReason || "抖音账号已封禁").trim() || "抖音账号已封禁";
+  return {
+    label: `${prefix}，账号已封禁`,
+    description: `封禁原因：${reason}`
+  };
 }

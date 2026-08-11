@@ -9,6 +9,7 @@ import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-m
 import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=20260712-module-chrome-03";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
+import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=20260811-android-author-status-01";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
@@ -203,24 +204,7 @@ function sanitizeViewParams(view, params = {}) {
     };
   }
   if (view === "shortVideos" || view === "shortVideoSearch") {
-    const query = String(params.query || params.q || "").trim();
-    const author = String(params.author || "all").trim() || "all";
-    const source = normalizeShortVideoSource(params.source || params.origin);
-    const sort = normalizeShortVideoSortForSource(source, params.sort);
-    const authorSort = normalizeFollowingAuthorSort(params.authorSort);
-    const authorFilter = normalizeFollowingAuthorFilter(params.authorFilter);
-    const searchTab = ["all", "videos", "authors"].includes(String(params.searchTab || params.tab || "").trim())
-      ? String(params.searchTab || params.tab).trim()
-      : "all";
-    return {
-      ...(query ? { query } : {}),
-      ...(author !== "all" ? { author } : {}),
-      ...(source !== "liked" ? { source } : {}),
-      ...(sort !== "published" ? { sort } : {}),
-      ...(source === "following" && authorSort !== "followed" ? { authorSort } : {}),
-      ...(source === "following" && authorFilter !== "all" ? { authorFilter } : {}),
-      ...(view === "shortVideoSearch" && searchTab !== "all" ? { tab: searchTab } : {})
-    };
+    return canonicalShortVideoViewParams(view, params);
   }
   if (view === "mediaDetail") {
     const mode = normalizeChannelMode(params.mode || params.type);
@@ -269,33 +253,6 @@ function normalizeChannelMode(value) {
   if (mode === "movies") return "movie";
   if (["video", "videos", "screen", "film", "films"].includes(mode)) return "media";
   return ["photo", "manga", "western", "media", "movie", "tv"].includes(mode) ? mode : "";
-}
-
-function normalizeShortVideoSort(value) {
-  const sort = String(value || "published").trim();
-  return ["recommended", "watched", "liked", "published", "publishedAsc", "likes", "likesAsc", "comments", "duration"].includes(sort) ? sort : "published";
-}
-
-function normalizeShortVideoSource(value) {
-  const source = String(value || "liked").trim().toLowerCase();
-  return ["recommended", "liked", "following", "history", "authors", "posts", "all", "local"].includes(source) ? source : "liked";
-}
-
-function normalizeShortVideoSortForSource(sourceValue, sortValue) {
-  const source = normalizeShortVideoSource(sourceValue);
-  const sort = normalizeShortVideoSort(sortValue);
-  if (source === "recommended") return sort === "published" ? "recommended" : sort;
-  if (source === "history") return sort === "published" ? "watched" : sort;
-  return ["recommended", "watched"].includes(sort) ? "published" : sort;
-}
-
-function normalizeFollowingAuthorSort(value) {
-  const sort = String(value || "followed").trim().toLowerCase();
-  return ["followed", "count", "liked"].includes(sort) ? sort : "followed";
-}
-
-function normalizeFollowingAuthorFilter(value) {
-  return String(value || "all").trim().toLowerCase() === "unliked" ? "unliked" : "all";
 }
 
 function normalizeMusicSort(value) {
@@ -943,6 +900,7 @@ async function installAndroidUpdate() {
   try {
     const result = await plugin.downloadAndInstall({
       url: androidUpdateInfo.downloadUrl,
+      serviceBase: activeUrl,
       fileName: androidUpdateInfo.fileName || `fanhao-${ANDROID_UPDATE_CHANNEL}.apk`,
       sha256: androidUpdateInfo.sha256 || ""
     });
@@ -1140,7 +1098,8 @@ function openNativeLibraryRoute(options = {}) {
       query: query.get("q") || query.get("search") || "",
       author: query.get("author") || "all",
       source: query.get("source") || query.get("origin") || "liked",
-      sort: query.get("sort") || "published"
+      sort: query.get("sort") || "published",
+      account: query.get("account") || "all"
     }, navigation);
     return true;
   }

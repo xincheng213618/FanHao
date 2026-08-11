@@ -1,4 +1,4 @@
-import { createShortVideoViews } from "./index.js?v=20260730-mobile-sync-01";
+import { createShortVideoViews } from "./index.js?v=20260811-android-author-status-01";
 import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "./shared.js?v=20260730-mobile-sync-01";
 
 export function createAndroidModule({ host }) {
@@ -64,7 +64,8 @@ function renderShortVideoChrome({ container, view, params }, host, shortVideoVie
           ...(value === "following" ? {
             authorSort: normalizeFollowingAuthorSort(params.authorSort),
             authorFilter: normalizeFollowingAuthorFilter(params.authorFilter)
-          } : {})
+          } : {}),
+          ...(value === "authors" ? { account: shortVideoViews.getSearchState?.().authorAccountStatus || "all" } : {})
         }, { resetStack: true });
         host.ui.scrollToTop();
       });
@@ -94,7 +95,8 @@ function openShortVideoSearch(host, shortVideoViews, overrides = {}) {
     author: "all",
     source: authorScoped ? source : "all",
     tab: authorScoped ? "authors" : normalizeSearchTab(state.searchTab),
-    sort: normalizeSortForSource(source, state.sort)
+    sort: normalizeSortForSource(source, state.sort),
+    ...(source === "authors" ? { account: state.authorAccountStatus || "all" } : {})
   }, { push: true });
   host.ui.scrollToTop();
 }

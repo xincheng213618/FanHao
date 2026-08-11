@@ -2101,6 +2101,52 @@ body.short-video-author-page-active .main {
   isolation: isolate;
 }
 
+.short-video-author-page-back {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  left: max(18px, calc((100vw - 960px) / 2));
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 36px;
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .08);
+  color: rgba(255, 255, 255, .9);
+  cursor: pointer;
+  padding: 0 12px 0 9px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.short-video-author-page-back .short-video-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.short-video-author-page-back:hover,
+.short-video-author-page-back:focus-visible {
+  outline: none;
+  border-color: rgba(255, 255, 255, .34);
+  background: rgba(255, 255, 255, .16);
+}
+
+.short-video-author-page-back:focus-visible {
+  box-shadow: 0 0 0 2px #161823, 0 0 0 4px rgba(255, 255, 255, .9);
+}
+
+.short-video-visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+}
+
 .short-video-author-page-hero {
   position: absolute;
   z-index: 0;

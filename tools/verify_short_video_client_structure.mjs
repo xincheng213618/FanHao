@@ -3,12 +3,21 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createShortVideoViews } from "../android-client/www/modules/short-videos/index.js";
+import { createShortVideoListController } from "../android-client/www/modules/short-videos/list/controller.js";
 import {
   NATIVE_SHORT_VIDEO_FEED_SCHEMA_VERSION,
   createNativeShortVideoFeedPayload,
   stringifyNativeShortVideoFeed
 } from "../android-client/www/modules/short-videos/player/native-feed-contract.js";
+import { canonicalShortVideoViewParams, normalizeAuthorAccountStatus } from "../android-client/www/modules/short-videos/shared.js";
 import { normalizeRoute as normalizeWebShortVideoRoute, routeFromUrl as webShortVideoRouteFromUrl, routeUrl as webShortVideoRouteUrl } from "../public/modules/short-videos/router.js";
+import {
+  authorIndexReturnState,
+  canReturnThroughShortVideoHistory,
+  captureAuthorIndexReturnContext
+} from "../public/modules/short-videos/author-navigation.js";
+import { createAuthorCollectorPoll } from "../public/modules/short-videos/author-collector-poll.js";
+import { shortVideoAuthorCardAccessibility } from "../public/modules/short-videos/list-cards.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const moduleDir = path.join(root, "android-client", "www", "modules", "short-videos");
@@ -17,6 +26,7 @@ const requiredParts = [
   "index.js",
   "shared.js",
   "search.js",
+  "list/account-status-view.js",
   "list/controller.js",
   "list/view.js",
   "player/native-feed-contract.js",
@@ -44,7 +54,181 @@ verifyFeatureReferences();
 verifySharedImports();
 verifyWebDedicatedEntry();
 verifyWebShortVideoRouter();
+verifyWebAuthorRouteLifecycle();
+await verifyWebAuthorCollectorPollLifecycle();
 verifyNativeFeedContract();
+verifyAndroidAuthorAccountRoutes();
+await verifyAndroidAuthorAccountRequests();
+
+function verifyAndroidAuthorAccountRoutes() {
+  assert.equal(normalizeAuthorAccountStatus("BANNED"), "banned", "Android must accept the canonical banned account state case-insensitively");
+  assert.equal(normalizeAuthorAccountStatus("unknown"), "all", "Android must collapse unknown account states to all");
+  const canonical = canonicalShortVideoViewParams("shortVideos", {
+    account: "banned",
+    authorFilter: "unliked",
+    query: "okaymm",
+    source: "authors"
+  });
+  assert.deepEqual(canonical, { query: "okaymm", source: "authors", account: "banned" }, "Android author routes must keep account status independent from the following-only filter");
+  const roundTripped = canonicalShortVideoViewParams("shortVideos", Object.fromEntries(new URLSearchParams(new URLSearchParams(canonical).toString())));
+  assert.deepEqual(roundTripped, canonical, "Android banned-author state must survive its canonical hash query round trip");
+  assert.deepEqual(
+    canonicalShortVideoViewParams("shortVideoSearch", { source: "authors", account: "banned", query: "蔓蔓", tab: "authors" }),
+    { query: "蔓蔓", source: "authors", account: "banned", tab: "authors" },
+    "Android banned-author search routes must preserve account state and author result scope"
+  );
+  assert.deepEqual(
+    canonicalShortVideoViewParams("shortVideos", { source: "following", account: "banned", authorFilter: "unliked" }),
+    { source: "following", authorFilter: "unliked" },
+    "Android following routes must never reuse the author account-status filter"
+  );
+}
+
+async function verifyAndroidAuthorAccountRequests() {
+  const requests = [];
+  const listState = {
+    data: null,
+    query: "",
+    author: "all",
+    source: "liked",
+    sort: "published",
+    authorSort: "followed",
+    authorFilter: "all",
+    authorAccountStatus: "all",
+    loading: false,
+    loadingMore: false,
+    status: "",
+    searchPage: false,
+    searchTab: "all",
+    searchAuthors: [],
+    allowLoadMore: false
+  };
+  const controller = createShortVideoListController({
+    api: {
+      fetchCached: async (_base, requestPath) => {
+        requests.push(requestPath);
+        const url = new URL(requestPath, "http://127.0.0.1:29998");
+        const offset = Number(url.searchParams.get("offset") || 0);
+        return {
+          authors: [{ secUid: `author-${offset + 1}`, name: `作者${offset + 1}`, accountStatus: "banned" }],
+          total: 2,
+          scopeTotal: 5,
+          bannedTotal: 2,
+          hasMore: offset === 0
+        };
+      }
+    },
+    getActiveUrl: () => "http://127.0.0.1:29998",
+    listState,
+    renderListShell() {},
+    showView() {},
+    shortVideoToast() {}
+  });
+  controller.applyListParams({ source: "authors", account: "banned", query: "okaymm" });
+  await controller.loadList();
+  await controller.loadList(null, { append: true });
+  const authorRequests = requests.map((value) => new URL(value, "http://127.0.0.1:29998"));
+  assert(authorRequests.every((url) => url.pathname === "/api/short-videos/authors" && url.searchParams.get("filter") === "banned"), "Android author search and pagination must send filter=banned to the author API");
+  assert.equal(authorRequests[0].searchParams.get("q"), "okaymm", "Android banned-author search must preserve its query");
+  assert.equal(authorRequests[1].searchParams.get("offset"), "1", "Android banned-author pagination must continue after the loaded filtered authors");
+  controller.applyListParams({ source: "following", authorFilter: "unliked" });
+  await controller.loadList();
+  const followingRequest = new URL(requests.at(-1), "http://127.0.0.1:29998");
+  assert.equal(followingRequest.searchParams.get("filter"), "unliked", "Android following requests must retain their own author filter");
+  assert.equal(controller.getSearchState().authorAccountStatus, "banned", "Android must preserve the independent banned state while another author source is active");
+  controller.applyListParams({ source: "authors", account: "all" });
+  assert.equal(controller.getSearchState().authorAccountStatus, "all", "Android canonical author routes without account=banned must reset the filter to all");
+}
+
+function verifyWebAuthorRouteLifecycle() {
+  const captured = captureAuthorIndexReturnContext({
+    authorAccountStatus: "banned",
+    authorFilter: "unliked",
+    authorSort: "liked",
+    query: "蔓蔓",
+    sort: "likes",
+    source: "following"
+  });
+  assert.deepEqual(
+    authorIndexReturnState(captured),
+    {
+      source: "following",
+      query: "蔓蔓",
+      sort: "likes",
+      authorSort: "liked",
+      authorFilter: "unliked",
+      authorAccountStatus: "all"
+    },
+    "author-page fallback must restore the following index query, sort, and filter context"
+  );
+  assert.equal(authorIndexReturnState({ source: "authors", accountStatus: "banned" }).authorAccountStatus, "banned", "author-page fallback must restore the banned-account index context");
+  assert.equal(authorIndexReturnState({}).source, "authors", "a direct author URL must always have an in-app author-index fallback");
+  assert(canReturnThroughShortVideoHistory({ enteredWithinApp: true }), "an author page opened inside the short-video app must use browser history");
+  assert(canReturnThroughShortVideoHistory({ referrer: "http://127.0.0.1/short-videos?source=authors", currentHref: "http://127.0.0.1/short-videos/authors/1" }), "a same-origin short-video referrer must use browser history");
+  assert(!canReturnThroughShortVideoHistory({ referrer: "", currentHref: "http://127.0.0.1/short-videos/authors/1" }), "a direct author URL without a referrer must use the in-app author-index fallback");
+  assert(!canReturnThroughShortVideoHistory({ referrer: "https://example.com/", currentHref: "http://127.0.0.1/short-videos/authors/1" }), "an external referrer must use the in-app fallback instead of leaving the site");
+  assert.deepEqual(
+    shortVideoAuthorCardAccessibility({ name: "蔓蔓", accountStatus: "banned", accountStatusReason: "主页不可访问" }),
+    { label: "查看 蔓蔓 的短视频，账号已封禁", description: "封禁原因：主页不可访问" },
+    "banned author cards must expose both status and reason to assistive technology"
+  );
+}
+
+async function verifyWebAuthorCollectorPollLifecycle() {
+  let currentAuthor = "author-a";
+  let progressReady;
+  const progressSeen = new Promise((resolve) => { progressReady = resolve; });
+  const requests = [];
+  const polling = createAuthorCollectorPoll({
+    api: async (requestPath, options) => {
+      requests.push({ requestPath, signal: options.signal });
+      return { job: { status: "running", processed: 1, total: 3 } };
+    },
+    delayMs: 60_000,
+    isCurrentAuthorPage: (authorId) => authorId === currentAuthor,
+    maxAttempts: 2
+  });
+  const waiting = polling.wait({ authorId: currentAuthor, jobId: 17, onProgress: progressReady });
+  await progressSeen;
+  currentAuthor = "";
+  polling.sync("");
+  assert.equal(await waiting, null, "leaving an author route must finish the browser-side poll without an error");
+  assert.equal(requests.length, 1, "route cancellation must clear the pending delay before another status request starts");
+  assert(requests[0].signal.aborted, "route cancellation must abort the poll signal");
+  assert.match(requests[0].requestPath, /\/collector\?jobId=17$/, "polling must only call the read-only collector status endpoint");
+
+  let routeActive = true;
+  let requestStarted;
+  let requestAborted = false;
+  const started = new Promise((resolve) => { requestStarted = resolve; });
+  const inFlightPolling = createAuthorCollectorPoll({
+    api: async (_requestPath, options) => new Promise((_resolve, reject) => {
+      requestStarted();
+      options.signal.addEventListener("abort", () => {
+        requestAborted = true;
+        reject(new Error("aborted"));
+      }, { once: true });
+    }),
+    isCurrentAuthorPage: (authorId) => routeActive && authorId === "author-b"
+  });
+  const inFlight = inFlightPolling.wait({ authorId: "author-b", jobId: 18 });
+  await started;
+  routeActive = false;
+  inFlightPolling.sync("author-b");
+  assert.equal(await inFlight, null, "the same author id must still stop polling after its detail route becomes inactive");
+  assert(requestAborted, "an in-flight status request must receive its AbortSignal when the route becomes inactive");
+
+  routeActive = true;
+  const completedPolling = createAuthorCollectorPoll({
+    api: async () => ({ job: { status: "complete", message: "done" } }),
+    isCurrentAuthorPage: (authorId) => routeActive && authorId === "author-c"
+  });
+  const completed = await completedPolling.wait({ authorId: "author-c", jobId: 19 });
+  assert.equal(completed.job.status, "complete", "a completed collector job must be returned to the author-page orchestrator");
+  assert(completedPolling.isCurrent("author-c"), "the caller may refresh only while the completed job still belongs to the active author page");
+  routeActive = false;
+  assert(!completedPolling.isCurrent("author-c"), "the completion guard must reject refresh after leaving the author page");
+}
 
 function verifyNativeFeedContract() {
   const source = {
@@ -132,6 +316,8 @@ for (const style of ["list"]) {
 const androidEntrySource = fs.readFileSync(path.join(moduleDir, "android-module.js"), "utf8");
 const androidListSource = fs.readFileSync(path.join(moduleDir, "list", "view.js"), "utf8");
 const androidListControllerSource = fs.readFileSync(path.join(moduleDir, "list", "controller.js"), "utf8");
+const androidAccountStatusViewSource = fs.readFileSync(path.join(moduleDir, "list", "account-status-view.js"), "utf8");
+const androidListStylesSource = fs.readFileSync(path.join(moduleDir, "styles", "list.css"), "utf8");
 const androidNativeFeedSource = fs.readFileSync(path.join(moduleDir, "player", "native-feed.js"), "utf8");
 const androidNativeFeedContractSource = fs.readFileSync(path.join(moduleDir, "player", "native-feed-contract.js"), "utf8");
 const androidPlayerPluginSource = fs.readFileSync(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "FanHaoPlayerPlugin.java"), "utf8");
@@ -161,6 +347,11 @@ assert(androidListSource.includes("openShortVideoAuthor(author)"), "Android auth
 assert(androidListControllerSource.includes("openAuthorPanel: true"), "Android author index must request the native author homepage");
 assert(androidListControllerSource.includes('params.set("scope", "following")') && androidListControllerSource.includes('params.set("sort", listState.authorSort)') && androidListControllerSource.includes('params.set("filter", listState.authorFilter)'), "Android My Following must use server-backed author sorting and filtering before pagination");
 assert(androidListSource.includes("renderFollowingAuthorTools") && androidListSource.includes("short-video-mobile-author-card-meta"), "Android My Following must show its totals, controls, and per-author liked counts");
+assert(androidListControllerSource.includes('params.set("filter", listState.authorAccountStatus)') && androidListControllerSource.includes("authorAccountStatus: listState.authorAccountStatus"), "Android author pagination, search, and refresh must preserve the independent server-backed account filter");
+assert(androidEntrySource.includes('source === "authors" ? { account: state.authorAccountStatus || "all" }') && androidEntrySource.includes('value === "authors" ? { account: shortVideoViews.getSearchState?.().authorAccountStatus || "all" }'), "Android author navigation and dedicated search must carry the account state into canonical history");
+assert(androidListSource.includes("renderAuthorAccountStatusTools") && androidAccountStatusViewSource.includes('aria-label", "作者账号状态筛选"') && androidAccountStatusViewSource.includes("data.bannedTotal"), "Android author indexes must expose filtered and total account counts with a dedicated banned-only control");
+assert(androidAccountStatusViewSource.includes("short-video-mobile-author-banned") && androidAccountStatusViewSource.includes("封禁原因：") && androidAccountStatusViewSource.includes('button.setAttribute("aria-describedby"') && androidListStylesSource.includes(".short-video-mobile-author-banned-reason"), "Android banned author cards must show an accessible status badge and reason");
+assert(androidListSource.includes("没有已封禁的作者") && androidListSource.includes("的已封禁作者"), "Android banned-author filters must keep distinct empty states for browsing and search");
 assert(!androidListSource.includes("short-video-mobile-author-cleanup") && !androidListSource.includes("抖音清理"), "Android My Following cards must leave unfollowing to the author detail action");
 assert(androidListControllerSource.includes("该作者还没有本地作品，正在打开抖音主页") && androidListControllerSource.includes("authorOriginalUrl(author)"), "Android followed authors without local works must still open their Douyin profile");
 assert(androidNativeFeedSource.includes("openAuthorPanel: Boolean(options.openAuthorPanel)"), "Android native feed bridge must forward the author homepage request");
@@ -225,9 +416,11 @@ assert.deepEqual(
   ["deactivate", "getSearchState", "renderList", "renderSearch", "submitSearch"],
   "short-video public contract changed"
 );
+assert.equal(views.getSearchState().authorAccountStatus, "all", "Android short-video state must initialize account status independently from following filters");
 
 const appSource = fs.readFileSync(path.join(root, "android-client", "www", "app.js"), "utf8");
 assert(!appSource.includes("shortVideoBrowser"), "Android shell must not retain the legacy WebView playback route");
+assert(appSource.includes("canonicalShortVideoViewParams(view, params)") && appSource.includes('account: query.get("account") || "all"'), "Android shell routes must parse and canonicalize account=banned links");
 assert(
   appSource.includes("shortVideoViews?.deactivate?.()")
     || appSource.includes("androidModuleRegistry?.deactivateExcept(currentView, currentViewParams)"),
@@ -293,6 +486,7 @@ function verifyWebDedicatedEntry() {
   const playerSourceLifecycleSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "player-source-lifecycle.js"), "utf8");
   const playbackRenditionPolicySource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "playback-rendition-policy.js"), "utf8");
   const authorPagesSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "author-pages.js"), "utf8");
+  const authorCollectorPollSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "author-collector-poll.js"), "utf8");
   const webIconsSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "icons.js"), "utf8");
   const shortVideoStateSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "state.js"), "utf8");
   const commentsViewSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "comments-view.js"), "utf8");
@@ -358,6 +552,7 @@ function verifyWebDedicatedEntry() {
   assert(listWindowSource.split(/\r?\n/).length <= 450, "the Web short-video list-window controller must stay below 450 lines");
   assert(mediaCacheSource.split(/\r?\n/).length <= 380, "the Web short-video media-cache controller must stay below 380 lines");
   assert(authorPagesSource.split(/\r?\n/).length <= 600, "short-video author-page controller must stay below 600 lines");
+  assert(authorCollectorPollSource.split(/\r?\n/).length <= 120, "short-video author collector polling lifecycle must stay below 120 lines");
   assert(authorPagesSource.includes('showBrowserToast(error?.message || "数量确认启动失败")'), "author count-confirmation startup failures must stay visible instead of silently redrawing the page");
   assert(authorPagesSource.includes('fullRefresh.textContent = "确认数量"') && authorPagesSource.includes("short-video-author-page-pending-difference"), "author pages must expose a direct, clearly named full-scan count confirmation when local and homepage counts differ");
   assert(playerSource.includes('profile=${encodeURIComponent(secUid)}#profiles'), "author collection management links must deep-link to the current profile instead of requiring another search");
@@ -476,7 +671,7 @@ function verifyWebDedicatedEntry() {
   assert(shortVideoRuntimeSource.includes('SHORT_VIDEO_LIST_CACHE_SCHEMA = "aggregate-search-v3-author-account-status"') && shortVideoRuntimeSource.includes("`${SHORT_VIDEO_LIST_CACHE_SCHEMA}:${url.pathname}?${normalized.toString()}`"), "short-video list response schema changes must rotate the persistent cache namespace");
   assert(shortVideoRuntimeSource.includes('profile ? "/api/profiles/refresh" : "/api/extract/start"') && shortVideoRuntimeSource.includes('profile_tab: "post"'), "author collection must register and scan authors that only exist in the local liked-video library");
   assert(downloadManagerSyncSource.includes("pendingForcedSync") && downloadManagerSyncSource.includes("stopped ? null : runSync({ force: true })"), "a collector-triggered forced sync must queue behind an active periodic sync instead of being dropped");
-  assert(downloadManagerSyncSource.includes("result.profilesSynced") && shortVideoStoreSource.includes("download_manager_source_state_key_v2_account_status"), "profile-only metadata changes must invalidate the catalog and schema upgrades must force one fresh manager sync");
+  assert(downloadManagerSyncSource.includes("result.catalogChanged || Number(result.catalogChanges || 0) > 0") && !downloadManagerSyncSource.includes("result.imported || result.updated || result.profilesSynced || options.force") && shortVideoStoreSource.includes("profilesSynced: profileSync.profilesSeen") && shortVideoStoreSource.includes("download_manager_source_state_key_v2_account_status"), "only real catalog changes, including profile-only metadata changes, may invalidate the catalog while forced no-op syncs stay reset-free and schema upgrades still force one fresh manager sync");
   assert((shortVideoRoutesSource.match(/onMutation\?\.\(\);/g) || []).length >= 6 && shortVideoRoutesSource.includes("? await recordWatch(videoId, body || {})") && shortVideoRoutesSource.includes("onWatchMutation?.(videoId, body || {}, data);\n      onWatch?.(videoId") && shortVideoRuntimeSource.includes("watchWriter.record(videoId, options)") && shortVideoWatchWriterSource.includes('new Worker(new URL("./watch-write-worker.js"') && shortVideoWatchWorkerSource.includes("store.recordWatch(message.videoId"), "catalog mutations must invalidate all list generations while high-frequency watch writes use their dedicated worker path");
   assert(shortVideoRuntimeSource.includes("watchCacheGeneration: watchGeneration") && shortVideoRuntimeSource.includes("isWatchSensitiveShortVideoList") && shortVideoRuntimeSource.includes('data?.source || "").toLowerCase() === "history"') && shortVideoRuntimeSource.includes('data?.sort || "").toLowerCase() === "watched"'), "watch writes must invalidate only history membership and recent-watch ordering");
   assert(shortVideoRuntimeSource.includes("recordShortVideoWatchCacheMutation") && shortVideoRuntimeSource.includes("applyShortVideoWatchOverlays") && shortVideoRuntimeSource.includes("short-video-list-watch-overlays.json"), "ordinary cached lists must receive persisted per-video watch overlays without a full SQLite refresh");
@@ -558,7 +753,9 @@ function verifyWebDedicatedEntry() {
   assert(authorPanelSource.includes('`评论 ${formatShortVideoMetric(video, "comments")}`'), "short-video side panels must expose the current comment count in the primary tab without presenting unknown statistics as zero");
   assert(authorPagesSource.includes("function shortVideoAuthorHandle") && authorPagesSource.includes('replace(/^(?:@\\s*)+/u, "")') && playerSource.includes("name.textContent = shortVideoAuthorHandle(video.author?.name)"), "short-video author handles must normalize imported leading @ signs instead of rendering @@ names");
   assert(authorPagesSource.includes("function renderAuthorSignature") && authorPagesSource.includes("short-video-author-mention") && authorPagesSource.includes("/api/short-videos/authors/resolve?mention=") && listSource.includes(".short-video-author-mention"), "web author signatures must turn @mentions into local author-page navigation");
-  assert(!authorPagesSource.includes("short-video-author-page-back") && !authorPagesSource.includes("returnToShortVideoAuthorIndex") && !listSource.includes(".short-video-author-page-back") && !responsiveSource.includes(".short-video-author-page-back"), "web author detail headers must not reserve code or space for a redundant return button");
+  assert(authorPagesSource.includes("short-video-author-page-back") && authorPagesSource.includes("returnToShortVideoAuthorIndex") && listSource.includes(".short-video-author-page-back") && responsiveSource.includes(".short-video-author-page-back"), "web author detail pages must expose a responsive in-app return path");
+  assert(authorPagesSource.includes("createAuthorCollectorPoll") && authorPagesSource.includes('window.addEventListener("pagehide"') && playerSource.includes("syncAuthorCollectorRouteLifecycle") && playerSource.includes("cancelAuthorCollectorPolling();"), "author pages must delegate collector polling while binding it to route, video, and page lifecycle events");
+  assert(listCardsSource.includes('button.setAttribute("aria-describedby"') && listCardsSource.includes("short-video-visually-hidden") && listSource.includes(".short-video-visually-hidden"), "banned author-card reasons must be programmatically associated with their card buttons");
   assert(playerSource.includes("resolveShortVideoAuthor(requestedAuthorPage)") && playerSource.includes("state.shortVideo.authorDetail = { ...(state.shortVideo.authorDetail || {}), ...author }"), "direct author routes must resolve profile metadata even when the author has no local videos");
   assert(playerSource.includes("syncRelatedPanelCurrentItem") && authorPanelSource.includes("replaceVideoFromAuthorPanel(resolved?.video || video, panel, neighbors)"), "related short-video cards must switch the active work without closing the side panel");
   assert(authorPanelSource.includes("short-video-related-current") && viewerSource.includes("aspect-ratio: 4 / 3"), "related short-video cards must expose the current item with Douyin-style 4:3 thumbnails");

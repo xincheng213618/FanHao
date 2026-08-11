@@ -2965,8 +2965,14 @@ function summary() {
     const includePosts = Boolean(options.includePosts);
     const includeSummary = !options.skipSummary;
     const profileWhere = includePosts ? "p.tab IN ('like', 'post')" : "p.tab = 'like'";
-    syncDownloadManagerSourceMemberships(targetDb, sourceDb, now);
-    let profilesSynced = 0;
+    const membershipSync = syncDownloadManagerSourceMemberships(targetDb, sourceDb, now);
+    let profileSync = {
+      profilesSeen: 0,
+      profilesChanged: 0,
+      profileUsersChanged: 0,
+      accountStatesChanged: 0,
+      videoAuthorsChanged: 0
+    };
     const incremental = Boolean(options.incremental);
     const backfillStatsLimit = incremental
       ? clampInt(options.backfillStatsLimit, DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT, 0, 100000)
@@ -3142,7 +3148,11 @@ function summary() {
     const importedIds = new Set();
 
     if (!sourceRows.length && !galleryBackfillIds.length) {
-      profilesSynced = syncDownloadManagerProfiles(targetDb, sourceDb, normalized.user, now);
+      profileSync = syncDownloadManagerProfiles(targetDb, sourceDb, normalized.user, now);
+      const catalogChanges = Number(membershipSync.catalogChanges || 0) + Number(profileSync.profilesChanged || 0);
+      if (catalogChanges > 0) {
+        targetDb.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('download_manager_imported_at', ?)").run(now);
+      }
       if (sourceMaxDownloadedAt && sourceMaxDownloadedAt !== previousWatermark) {
         targetDb.prepare(`INSERT OR REPLACE INTO short_video_meta (key, value) VALUES (?, ?)`).run(watermarkKey, sourceMaxDownloadedAt);
       }
@@ -3167,7 +3177,11 @@ function summary() {
         backfillAttempted: shouldBackfillStats,
         backfillCandidates,
         backfillRows,
-        profilesSynced,
+        ...membershipSync,
+        ...profileSync,
+        profilesSynced: profileSync.profilesSeen,
+        catalogChanges,
+        catalogChanged: catalogChanges > 0,
         galleryBackfill: needsGalleryBackfill,
         imported: 0,
         updated: 0,
@@ -3260,7 +3274,8 @@ function summary() {
       throw error;
     }
     coverStorage.reconcile(targetDb);
-    profilesSynced = syncDownloadManagerProfiles(targetDb, sourceDb, normalized.user, now);
+    profileSync = syncDownloadManagerProfiles(targetDb, sourceDb, normalized.user, now);
+    const catalogChanges = imported + updated + Number(membershipSync.catalogChanges || 0) + Number(profileSync.profilesChanged || 0);
 
     return {
       ok: true,
@@ -3275,7 +3290,11 @@ function summary() {
       backfillAttempted: shouldBackfillStats,
       backfillCandidates,
       backfillRows,
-      profilesSynced,
+      ...membershipSync,
+      ...profileSync,
+      profilesSynced: profileSync.profilesSeen,
+      catalogChanges,
+      catalogChanged: catalogChanges > 0,
       galleryBackfill: needsGalleryBackfill,
       galleryBackfillRows,
       imported,
@@ -4214,6 +4233,34 @@ function normalizedUpsertStatements(db, coverCacheDir = "") {
           ELSE short_video_users.profile_collected_at
         END,
         updated_at = excluded.updated_at
+      WHERE
+        short_video_users.platform IS NOT COALESCE(NULLIF(excluded.platform, ''), short_video_users.platform)
+        OR short_video_users.sec_uid IS NOT COALESCE(NULLIF(excluded.sec_uid, ''), short_video_users.sec_uid)
+        OR short_video_users.uid IS NOT COALESCE(NULLIF(excluded.uid, ''), short_video_users.uid)
+        OR short_video_users.nickname IS NOT COALESCE(NULLIF(excluded.nickname, ''), short_video_users.nickname)
+        OR short_video_users.avatar_url IS NOT COALESCE(NULLIF(excluded.avatar_url, ''), short_video_users.avatar_url)
+        OR short_video_users.profile_url IS NOT COALESCE(NULLIF(excluded.profile_url, ''), short_video_users.profile_url)
+        OR short_video_users.signature IS NOT COALESCE(NULLIF(excluded.signature, ''), short_video_users.signature)
+        OR short_video_users.follower_count IS NOT COALESCE(excluded.follower_count, short_video_users.follower_count)
+        OR short_video_users.following_count IS NOT COALESCE(excluded.following_count, short_video_users.following_count)
+        OR short_video_users.raw_json IS NOT CASE
+          WHEN excluded.raw_json <> '{}' THEN excluded.raw_json
+          ELSE short_video_users.raw_json
+        END
+        OR short_video_users.unique_id IS NOT COALESCE(NULLIF(excluded.unique_id, ''), short_video_users.unique_id)
+        OR short_video_users.short_id IS NOT COALESCE(NULLIF(excluded.short_id, ''), short_video_users.short_id)
+        OR short_video_users.ip_location IS NOT COALESCE(NULLIF(excluded.ip_location, ''), short_video_users.ip_location)
+        OR short_video_users.total_favorited IS NOT COALESCE(excluded.total_favorited, short_video_users.total_favorited)
+        OR short_video_users.aweme_count IS NOT COALESCE(excluded.aweme_count, short_video_users.aweme_count)
+        OR short_video_users.favoriting_count IS NOT COALESCE(excluded.favoriting_count, short_video_users.favoriting_count)
+        OR short_video_users.gender IS NOT COALESCE(excluded.gender, short_video_users.gender)
+        OR short_video_users.age IS NOT COALESCE(excluded.age, short_video_users.age)
+        OR short_video_users.verification IS NOT COALESCE(NULLIF(excluded.verification, ''), short_video_users.verification)
+        OR short_video_users.profile_collected_at IS NOT CASE
+          WHEN COALESCE(excluded.profile_collected_at, '') >= COALESCE(short_video_users.profile_collected_at, '')
+            THEN COALESCE(NULLIF(excluded.profile_collected_at, ''), short_video_users.profile_collected_at)
+          ELSE short_video_users.profile_collected_at
+        END
     `),
     videoCore: db.prepare(`
       UPDATE short_videos

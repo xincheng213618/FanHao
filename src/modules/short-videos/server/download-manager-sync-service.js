@@ -100,7 +100,7 @@ export function createDownloadManagerSyncService({
       if (!result || stopped) return null;
       lastSourceStateKey = sourceStateKey;
       onStateKey(sourceStateKey);
-      if (result.imported || result.updated || result.profilesSynced || options.force) onCatalogChanged(result, options);
+      if (result.catalogChanged || Number(result.catalogChanges || 0) > 0) onCatalogChanged(result, options);
       if (result.imported || result.updated) onItemsImported(result);
       return result;
     } catch (error) {

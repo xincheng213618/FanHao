@@ -625,7 +625,10 @@ try {
   const zeroRowProfileSync = store.importDownloadManagerDb(sourceDbPath, { incremental: true, includePosts: true });
   assert.equal(zeroRowProfileSync.incrementalRows, 0, "full scans without new downloads should still synchronize profiles");
   assert.equal(zeroRowProfileSync.statsRefreshRows, 1, "refreshed statistics must sync without changing downloaded_at");
-  assert.equal(zeroRowProfileSync.profilesSynced, 1);
+  assert.equal(zeroRowProfileSync.profilesSeen, 1);
+  assert.ok(zeroRowProfileSync.profilesChanged > 0, "nickname and account-state edits must report real profile changes");
+  assert.ok(zeroRowProfileSync.membershipsChanged > 0, "missing-from-profile metadata must report a membership change");
+  assert.equal(zeroRowProfileSync.catalogChanged, true);
   const refreshedLive = store.videoDetail(liveId)?.video;
   assert.equal(refreshedLive?.stats?.likes, 13840, "existing works must receive refreshed likes");
   assert.equal(refreshedLive?.stats?.comments, 421, "existing works must receive refreshed comments");
@@ -652,6 +655,14 @@ try {
   const unchangedStatsSync = store.importDownloadManagerDb(sourceDbPath, { incremental: true, includePosts: true });
   assert.equal(unchangedStatsSync.incrementalRows, 0);
   assert.equal(unchangedStatsSync.statsRefreshRows, 0, "statistics watermark must avoid replaying unchanged works");
+  assert.equal(unchangedStatsSync.profilesSeen, 1);
+  assert.equal(unchangedStatsSync.profilesChanged, 0, "identical profile rows must not rewrite users or per-video author names");
+  assert.equal(unchangedStatsSync.membershipsChanged, 0, "identical memberships must not rewrite their timestamps");
+  assert.equal(unchangedStatsSync.actionsChanged, 0, "identical imported likes must not rewrite user actions");
+  assert.equal(unchangedStatsSync.originsChanged, 0, "identical memberships must not rewrite video origins");
+  assert.equal(unchangedStatsSync.relationshipFlagsChanged, 0, "identical memberships must not rewrite relationship flags");
+  assert.equal(unchangedStatsSync.catalogChanges, 0);
+  assert.equal(unchangedStatsSync.catalogChanged, false);
   const authorAllWorks = store.listVideos({
     searchParams: new URLSearchParams("source=all&author=MS4wTestAuthor&limit=10&stats=0&facets=0")
   });
@@ -1001,7 +1012,18 @@ try {
   fs.writeFileSync(singleWriterMedia, Buffer.from("actual-video"));
   const singleWriterSource = new DatabaseSync(singleWriterSourceDbPath);
   singleWriterSource.exec(`
-    CREATE TABLE profiles (id INTEGER PRIMARY KEY, tab TEXT, sec_uid TEXT, url TEXT);
+    CREATE TABLE profiles (
+      id INTEGER PRIMARY KEY,
+      tab TEXT,
+      sec_uid TEXT,
+      url TEXT,
+      nickname TEXT,
+      profile_collected_at TEXT,
+      updated_at TEXT,
+      account_status TEXT NOT NULL DEFAULT 'active',
+      account_status_reason TEXT,
+      account_status_detected_at TEXT
+    );
     CREATE TABLE links (
       id INTEGER PRIMARY KEY,
       profile_id INTEGER,
@@ -1027,7 +1049,14 @@ try {
       share_count INTEGER
     );
   `);
-  singleWriterSource.prepare("INSERT INTO profiles (id, tab, sec_uid, url) VALUES (1, 'like', 'single-writer-author', '')").run();
+  singleWriterSource.prepare(`
+    INSERT INTO profiles (
+      id, tab, sec_uid, url, nickname, profile_collected_at, updated_at
+    ) VALUES (
+      1, 'like', 'single-writer-author', '', '单写作者',
+      '2026-07-16T12:00:00+08:00', '2026-07-16T12:00:00+08:00'
+    )
+  `).run();
   singleWriterSource.prepare(`
     INSERT INTO links (
       id, profile_id, aweme_id, status, kind, media_type, output_dir,
@@ -1074,6 +1103,83 @@ try {
       },
       "the manager-owned probe metadata must cross the single-writer import boundary intact"
     );
+
+    let catalogChangeCalls = 0;
+    let itemImportCalls = 0;
+    const observedSync = createDownloadManagerSyncService({
+      sourceDbPath: singleWriterSourceDbPath,
+      intervalMs: 60_000,
+      dbPath: singleWriterTargetDbPath,
+      ffmpegPath: "ffmpeg",
+      roots: [singleWriterRoot],
+      onCatalogChanged: () => {
+        catalogChangeCalls += 1;
+      },
+      onItemsImported: () => {
+        itemImportCalls += 1;
+      }
+    });
+    try {
+      const noOpSync = await observedSync.sync({ force: true });
+      assert.equal(noOpSync?.profilesSeen, 1);
+      assert.equal(noOpSync?.profilesChanged, 0);
+      assert.equal(noOpSync?.membershipsChanged, 0);
+      assert.equal(noOpSync?.catalogChanges, 0);
+      assert.equal(noOpSync?.catalogChanged, false);
+      assert.equal(catalogChangeCalls, 0, "a forced no-op sync must not reset the catalog worker");
+      assert.equal(itemImportCalls, 0);
+
+      const changedProfileDb = new DatabaseSync(singleWriterSourceDbPath);
+      changedProfileDb.prepare(`
+        UPDATE profiles
+        SET nickname = '刷新后的单写作者',
+            profile_collected_at = '2026-07-17T12:00:00+08:00',
+            updated_at = '2026-07-17T12:00:00+08:00',
+            account_status = 'banned',
+            account_status_reason = '测试封禁',
+            account_status_detected_at = '2026-07-17T12:05:00+08:00'
+        WHERE id = 1
+      `).run();
+      changedProfileDb.close();
+
+      const changedProfileSync = await observedSync.sync({ force: true });
+      assert.equal(changedProfileSync?.profilesSeen, 1);
+      assert.ok(changedProfileSync?.profilesChanged > 0);
+      assert.equal(changedProfileSync?.membershipsChanged, 0);
+      assert.equal(changedProfileSync?.catalogChanged, true);
+      assert.equal(catalogChangeCalls, 1, "nickname and account-state changes must reset the catalog exactly once");
+      assert.equal(itemImportCalls, 0, "profile-only changes must not be reported as imported videos");
+
+      const repeatedProfileSync = await observedSync.sync({ force: true });
+      assert.equal(repeatedProfileSync?.profilesChanged, 0);
+      assert.equal(repeatedProfileSync?.catalogChanged, false);
+      assert.equal(catalogChangeCalls, 1, "repeating the same profile state must not reset the catalog again");
+
+      const membershipOnlyDb = new DatabaseSync(singleWriterSourceDbPath);
+      membershipOnlyDb.prepare(`
+        INSERT INTO profiles (
+          id, tab, sec_uid, url, nickname, profile_collected_at, updated_at
+        ) VALUES (
+          2, 'post', 'single-writer-author', '', '刷新后的单写作者',
+          '2026-07-15T12:00:00+08:00', '2026-07-15T12:00:00+08:00'
+        )
+      `).run();
+      membershipOnlyDb.prepare(`
+        INSERT INTO links (id, profile_id, aweme_id, status, kind, media_type)
+        VALUES (2, 2, 'single-writer-video', 'pending', 'video', 'video')
+      `).run();
+      membershipOnlyDb.close();
+
+      const membershipOnlySync = await observedSync.sync({ force: true });
+      assert.equal(membershipOnlySync?.incrementalRows, 0, "a pending membership must not masquerade as a downloaded video update");
+      assert.equal(membershipOnlySync?.profilesChanged, 0);
+      assert.ok(membershipOnlySync?.membershipsChanged > 0);
+      assert.equal(membershipOnlySync?.catalogChanged, true);
+      assert.equal(catalogChangeCalls, 2, "membership-only changes must still reset the catalog exactly once");
+      assert.equal(itemImportCalls, 0);
+    } finally {
+      await observedSync.stop();
+    }
   } finally {
     singleWriterStore.close();
   }
