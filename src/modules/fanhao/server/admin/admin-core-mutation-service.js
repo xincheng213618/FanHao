@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 
 export function createAdminCoreMutationService({
   actorIdFromJavdbUrl,
@@ -26,6 +25,7 @@ export function createAdminCoreMutationService({
   publicMergedPersonById,
   publicPerson,
   publicWork,
+  reconcileMovedLocalWork,
   refreshLibrary,
   relativeFromRoot,
   replacePathPrefix,
@@ -171,84 +171,6 @@ export function createAdminCoreMutationService({
       targetDirectory: folderPath,
       created: !existing?.id
     };
-  }
-
-  function sleepSync(ms) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-  }
-
-  function isRetryableMoveError(error) {
-    return ["EPERM", "EBUSY", "ENOTEMPTY", "EACCES"].includes(String(error?.code || "").toUpperCase());
-  }
-
-  function renameDirectoryWithRetry(oldDir, newDir, options = {}) {
-    const attempts = Math.max(1, Number(options.attempts || 1));
-    const delayMs = Math.max(0, Number(options.delayMs || 0));
-    let lastError = null;
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      try {
-        fs.renameSync(oldDir, newDir);
-        return { mode: attempt > 1 ? "rename-retry" : "rename", attempts: attempt };
-      } catch (error) {
-        lastError = error;
-        if (!isRetryableMoveError(error) || attempt >= attempts) throw error;
-        sleepSync(delayMs);
-      }
-    }
-    throw lastError;
-  }
-
-  function moveDirectorySync(oldDir, newDir) {
-    try {
-      return renameDirectoryWithRetry(oldDir, newDir, { attempts: process.platform === "win32" ? 8 : 2, delayMs: 450 });
-    } catch (error) {
-      if (String(error?.code || "").toUpperCase() !== "EXDEV") throw error;
-    }
-
-    if (process.platform === "win32") {
-      const result = spawnSync("robocopy", [oldDir, newDir, "/E", "/MOVE", "/R:1", "/W:1", "/NFL", "/NDL", "/NP"], {
-        encoding: "utf8",
-        windowsHide: true,
-        timeout: 0,
-        maxBuffer: 8 * 1024 * 1024
-      });
-      const status = Number(result.status);
-      if (!result.error && Number.isFinite(status) && status < 8) {
-        return { mode: "robocopy" };
-      }
-      try {
-        if (fs.existsSync(newDir) && !fs.existsSync(oldDir)) {
-          spawnSync("robocopy", [newDir, oldDir, "/E", "/MOVE", "/R:1", "/W:1", "/NFL", "/NDL", "/NP"], {
-            encoding: "utf8",
-            windowsHide: true,
-            timeout: 0,
-            maxBuffer: 8 * 1024 * 1024
-          });
-        }
-      } catch {
-        // Preserve the original move error.
-      }
-      const detail = result.error?.message || result.stderr || result.stdout || `robocopy exit ${result.status}`;
-      throw new Error(detail.trim());
-    }
-
-    try {
-      fs.cpSync(oldDir, newDir, {
-        recursive: true,
-        errorOnExist: true,
-        force: false,
-        preserveTimestamps: true
-      });
-      fs.rmSync(oldDir, { recursive: true, force: false });
-      return { mode: "copy" };
-    } catch (error) {
-      try {
-        if (fs.existsSync(newDir)) fs.rmSync(newDir, { recursive: true, force: true });
-      } catch {
-        // Preserve the original move error.
-      }
-      throw error;
-    }
   }
 
   function targetDirectoryForPerson(person, db, options = {}) {
@@ -689,7 +611,7 @@ export function createAdminCoreMutationService({
     };
   }
 
-  function moveWorkToPerson(workId, personId, options = {}) {
+  function prepareWorkMove(workId, personId, options = {}) {
     const work = resolveLibraryWorkByPublicId(workId);
     if (!work || work.missingLocal) {
       const error = new Error("作品本地文件不存在");
@@ -785,20 +707,52 @@ export function createAdminCoreMutationService({
       )
       .all(coreWorkId);
 
-    let moveResult;
-    try {
-      moveResult = moveDirectorySync(oldDir, newDir);
-    } catch (error) {
-      const hint = isRetryableMoveError(error) ? "。请暂停播放并等待几秒，或关闭这个播放页后重试。" : "";
-      const wrapped = new Error(`移动作品文件夹失败：${error.message}${hint}`);
-      wrapped.statusCode = 500;
-      throw wrapped;
+    return {
+      version: 1,
+      workId: String(coreWorkId),
+      localWorkId: Number(row.id),
+      personId: String(corePersonId),
+      targetPerson: {
+        id: String(corePersonId),
+        name: targetPerson.name || `#${corePersonId}`,
+        relativePath: targetPerson.relativePath || relativeFromRoot(personDir),
+        sourcePaths: uniqueTextArray([...(targetPerson.sourcePaths || []), relativeFromRoot(personDir)])
+      },
+      personDir,
+      oldDir,
+      newDir,
+      sourceInfoPath: row.source_info_path || "",
+      createdPerson,
+      before
+    };
+  }
+
+  function inspectWorkMove(plan) {
+    const db = getCoreDb();
+    const row = db.prepare("SELECT local_path FROM local_works WHERE id = ? AND work_id = ?").get(Number(plan.localWorkId), Number(plan.workId));
+    if (!row?.local_path) return "missing";
+    const current = path.resolve(row.local_path).toLowerCase();
+    if (current === path.resolve(plan.oldDir).toLowerCase()) return "source";
+    if (current === path.resolve(plan.newDir).toLowerCase()) return "target";
+    return "conflict";
+  }
+
+  function commitWorkMove(plan) {
+    const db = getCoreDb();
+    const coreWorkId = Number(plan.workId);
+    const corePersonId = Number(plan.personId);
+    const currentState = inspectWorkMove(plan);
+    if (currentState === "target") return { committed: false, alreadyCommitted: true };
+    if (currentState !== "source") {
+      const error = new Error("SQLite 中的作品路径已被其他操作修改");
+      error.statusCode = 409;
+      throw error;
     }
 
     const now = new Date().toISOString();
     try {
       db.exec("BEGIN IMMEDIATE");
-      const fileRows = db.prepare("SELECT id, file_path FROM local_files WHERE local_work_id = ?").all(Number(row.id));
+      const fileRows = db.prepare("SELECT id, file_path FROM local_files WHERE local_work_id = ?").all(Number(plan.localWorkId));
       const imageRows = db
         .prepare("SELECT id, local_path FROM fanhao_images.images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
         .all(coreWorkId);
@@ -816,17 +770,17 @@ export function createAdminCoreMutationService({
           WHERE id = ?
           `
         )
-        .run(newDir, replacePathPrefix(row.source_info_path || "", oldDir, newDir), now, Number(row.id));
+        .run(plan.newDir, replacePathPrefix(plan.sourceInfoPath, plan.oldDir, plan.newDir), now, Number(plan.localWorkId));
 
       const updateFile = db.prepare("UPDATE local_files SET file_path = ?, relative_path = ?, updated_at = ? WHERE id = ?");
       for (const fileRow of fileRows) {
-        const nextPath = replacePathPrefix(fileRow.file_path, oldDir, newDir);
+        const nextPath = replacePathPrefix(fileRow.file_path, plan.oldDir, plan.newDir);
         updateFile.run(nextPath, relativeFromRoot(nextPath), now, fileRow.id);
       }
 
       const updateImage = db.prepare("UPDATE fanhao_images.images SET local_path = ?, updated_at = ? WHERE id = ?");
       for (const imageRow of imageRows) {
-        updateImage.run(replacePathPrefix(imageRow.local_path, oldDir, newDir), now, imageRow.id);
+        updateImage.run(replacePathPrefix(imageRow.local_path, plan.oldDir, plan.newDir), now, imageRow.id);
       }
 
       db.prepare("DELETE FROM work_people WHERE work_id = ? AND role = 'actor' AND person_id <> ?").run(coreWorkId, corePersonId);
@@ -843,7 +797,7 @@ export function createAdminCoreMutationService({
         )
         .run(coreWorkId, corePersonId, now, now);
 
-      const actorName = targetPerson.name || `#${corePersonId}`;
+      const actorName = plan.targetPerson.name || `#${corePersonId}`;
       const workRow = db.prepare("SELECT fields_json FROM works WHERE id = ?").get(coreWorkId);
       const fieldsJson = correctedActorFieldsJson(workRow?.fields_json, actorName);
       db.prepare("UPDATE works SET fields_json = ?, updated_at = ? WHERE id = ?").run(fieldsJson, now, coreWorkId);
@@ -852,38 +806,49 @@ export function createAdminCoreMutationService({
       try {
         db.exec("ROLLBACK");
       } catch {}
-      try {
-        if (fs.existsSync(newDir) && !fs.existsSync(oldDir)) moveDirectorySync(newDir, oldDir);
-      } catch (rollbackError) {
-        error.message = `${error.message}; 回滚文件夹移动失败：${rollbackError.message}`;
-      }
       throw error;
     }
 
+    return { committed: true, alreadyCommitted: false };
+  }
+
+  function finalizeWorkMove(plan, moveResult = {}) {
+    const coreWorkId = Number(plan.workId);
+    const corePersonId = Number(plan.personId);
     invalidateTableStamp("actor_movies", "work_info", "actor_profiles");
     invalidateActorMovies();
     invalidateActorProfiles();
     invalidatePersonMerge();
     resetWorkSearch();
-    refreshLibrary();
+    reconcileMovedLocalWork({
+      beforePersonIds: (plan.before || []).map((person) => String(person.person_id || "")),
+      newDir: plan.newDir,
+      oldDir: plan.oldDir,
+      personDir: plan.personDir,
+      targetPerson: plan.targetPerson,
+      workId: String(coreWorkId)
+    });
     const nextWork = resolveLibraryWorkByPublicId(String(coreWorkId));
     const nextPerson = resolveLibraryPersonByPublicId(String(corePersonId));
     return {
       moved: true,
       moveMode: moveResult?.mode || "",
-      oldPath: relativeFromRoot(oldDir),
-      newPath: relativeFromRoot(newDir),
-      createdPerson: createdPerson ? { id: createdPerson.id, name: createdPerson.name, created: createdPerson.created } : null,
-      before,
-      person: nextPerson ? publicPerson(nextPerson) : publicPerson(targetPerson),
+      oldPath: relativeFromRoot(plan.oldDir),
+      newPath: relativeFromRoot(plan.newDir),
+      createdPerson: plan.createdPerson ? { id: plan.createdPerson.id, name: plan.createdPerson.name, created: plan.createdPerson.created } : null,
+      before: plan.before || [],
+      person: nextPerson ? publicPerson(nextPerson) : publicPerson(plan.targetPerson),
       work: nextWork ? publicWork(nextWork, true) : null
     };
   }
 
   return {
     correctWorkActorFromLocalFolder,
+    commitWorkMove,
+    finalizeWorkMove,
+    inspectWorkMove,
     mergePeopleIntoTarget,
-    moveWorkToPerson,
+    prepareWorkMove,
     upsertActorProfile
   };
 }

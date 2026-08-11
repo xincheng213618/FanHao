@@ -157,9 +157,31 @@ export async function routeWorksApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req);
-      sendJson(res, 200, workMutationService.moveToPerson(decodeURIComponent(workMoveToPersonMatch[1]), body));
+      sendJson(res, 202, workMutationService.moveToPerson(decodeURIComponent(workMoveToPersonMatch[1]), body));
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "迁移作品失败" });
+    }
+    return true;
+  }
+
+  const workMoveJobRetryMatch = /^\/api\/work-move-jobs\/([^/]+)\/retry$/.exec(url.pathname);
+  if (workMoveJobRetryMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 202, workMutationService.retryMoveJob(decodeURIComponent(workMoveJobRetryMatch[1])));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "恢复迁移任务失败" });
+    }
+    return true;
+  }
+
+  const workMoveJobMatch = /^\/api\/work-move-jobs\/([^/]+)$/.exec(url.pathname);
+  if (workMoveJobMatch && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, workMutationService.moveJob(decodeURIComponent(workMoveJobMatch[1])));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "读取迁移任务失败" });
     }
     return true;
   }

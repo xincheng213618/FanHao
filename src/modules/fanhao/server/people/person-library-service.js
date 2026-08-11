@@ -317,7 +317,83 @@ export function createPersonLibraryService({
     return result;
   }
 
+  function moveLocalWork({ beforePersonIds = [], newDir, oldDir, personDir, targetPerson, workId }) {
+    const library = getLibrary();
+    const normalizedWorkId = String(workId || "");
+    const currentWork = library.worksById.get(normalizedWorkId);
+    if (!currentWork) return { movedWorkId: normalizedWorkId, affectedPersonIds: [] };
+
+    const relocatePath = (filePath) => {
+      const absolute = path.resolve(String(filePath || ""));
+      const relative = path.relative(path.resolve(oldDir), absolute);
+      if (!relative || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+        return path.join(newDir, relative);
+      }
+      return filePath;
+    };
+    const relocateFile = (file) => {
+      const nextPath = relocatePath(file?.path || "");
+      const nextFile = { ...file, path: nextPath, relativePath: relativeFromRoot(nextPath) };
+      if (nextFile.id) library.filesById.set(nextFile.id, nextFile);
+      return nextFile;
+    };
+    const nextWork = {
+      ...currentWork,
+      personId: String(targetPerson.id),
+      relativePath: relativeFromRoot(newDir),
+      videos: (currentWork.videos || []).map(relocateFile),
+      images: (currentWork.images || []).map(relocateFile),
+      infos: (currentWork.infos || []).map(relocateFile)
+    };
+    library.worksById.set(normalizedWorkId, nextWork);
+
+    const affectedPersonIds = new Set([
+      String(currentWork.personId || ""),
+      ...beforePersonIds.map((id) => String(id || "")),
+      String(targetPerson.id || "")
+    ].filter(Boolean));
+    for (const personId of affectedPersonIds) {
+      const isTarget = personId === String(targetPerson.id);
+      const currentPerson = library.peopleById.get(personId) || (isTarget ? {
+        id: personId,
+        name: targetPerson.name || personId,
+        relativePath: targetPerson.relativePath || relativeFromRoot(personDir),
+        sourcePaths: targetPerson.sourcePaths || [relativeFromRoot(personDir)],
+        works: []
+      } : null);
+      if (!currentPerson) continue;
+
+      const workIds = new Set((currentPerson.works || []).map(String));
+      workIds.delete(normalizedWorkId);
+      if (isTarget) workIds.add(normalizedWorkId);
+      const works = [...workIds].map((id) => library.worksById.get(id)).filter(Boolean);
+      const personIndex = library.people.findIndex((person) => String(person.id) === personId);
+      if (!works.length) {
+        if (personIndex >= 0) library.people.splice(personIndex, 1);
+        library.peopleById.delete(personId);
+        continue;
+      }
+
+      const sourcePaths = [...new Set([
+        ...(currentPerson.sourcePaths || []),
+        currentPerson.relativePath,
+        ...(isTarget ? targetPerson.sourcePaths || [] : []),
+        ...(isTarget ? [relativeFromRoot(personDir)] : [])
+      ].filter(Boolean))];
+      const nextPerson = personRecordFromWorks(currentPerson, sourcePaths, works, compareNaturalTitle);
+      if (personIndex >= 0) library.people[personIndex] = nextPerson;
+      else library.people.push(nextPerson);
+      library.peopleById.set(personId, nextPerson);
+    }
+
+    recalculateLibraryTotals(library);
+    libraryIndexService.saveCache(library);
+    libraryIndexService.invalidateDerivedCaches?.();
+    return { movedWorkId: normalizedWorkId, affectedPersonIds: [...affectedPersonIds] };
+  }
+
   return {
+    moveLocalWork,
     removeLocalWorks,
     refreshPerson,
     sourceCandidates,

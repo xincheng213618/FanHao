@@ -4,7 +4,8 @@ export function createWorkMutationService({
   manualCoverStateService,
   publicWork,
   resolveLibraryWorkByPublicId,
-  workLocalMutationService
+  workLocalMutationService,
+  workMoveJobService
 }) {
   function generateCover(workId) {
     const work = resolveLibraryWorkByPublicId(workId);
@@ -38,11 +39,15 @@ export function createWorkMutationService({
   }
 
   function moveToPerson(workId, body) {
-    const result = adminCoreMutationService.moveWorkToPerson(workId, body.personId, {
-      targetDirectory: body.targetDirectory || body.targetPath || "",
-      createPerson: body.createPerson || null
-    });
-    return { ok: true, ...result };
+    return { ok: true, job: workMoveJobService.start(workId, body) };
+  }
+
+  function moveJob(jobId) {
+    return { ok: true, job: workMoveJobService.get(jobId) };
+  }
+
+  function retryMoveJob(jobId) {
+    return { ok: true, job: workMoveJobService.retry(jobId) };
   }
 
   function deleteLocalFiles(workId) {
@@ -55,7 +60,9 @@ export function createWorkMutationService({
     coverGenerationErrorPayload,
     deleteLocalFiles,
     generateCover,
+    moveJob,
     moveToPerson,
+    retryMoveJob,
     setLocalMarker,
     setManualCover
   };

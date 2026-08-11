@@ -108,6 +108,7 @@ export function createFanhaoDependencies(deps) {
       "workInfoRow",
       "workClassificationService",
       "workLocalMutationService",
+      "workMoveJobService",
       "workQueryStamp"
     ])
   };

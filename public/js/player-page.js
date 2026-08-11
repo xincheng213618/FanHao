@@ -1576,12 +1576,17 @@ async function moveCurrentWorkToPerson() {
   await delay(1800);
   els.moveToPerson.textContent = "迁移中";
   try {
+    const idempotencyKey = globalThis.crypto?.randomUUID?.() || `move-${currentWork.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const data = await api(`/api/works/${encodeURIComponent(currentWork.id)}/move-to-person`, {
       method: "POST",
-      body: target.mode === "create" ? { createPerson: target.createPerson } : { personId: target.personId }
+      body: target.mode === "create"
+        ? { createPerson: target.createPerson, idempotencyKey }
+        : { personId: target.personId, idempotencyKey }
     });
-    if (data.work) {
-      currentWork = data.work;
+    const completedJob = await waitForWorkMoveJob(data.job);
+    const result = completedJob.result || {};
+    if (result.work) {
+      currentWork = result.work;
       currentVideo = (currentWork.videos || []).find((video) => video.id === currentVideo?.id) || selectInitialVideo(currentWork);
       document.title = `${currentWork.title} - FanHao`;
       els.title.textContent = currentWork.title;
@@ -1593,7 +1598,7 @@ async function moveCurrentWorkToPerson() {
       updateMoveToPersonButton();
       updateOpenFileButton();
     }
-    showNotice(`已迁移到：${data.person?.name || targetPerson?.name || target.personId || target.createPerson?.name}`);
+    showNotice(`已迁移到：${result.person?.name || targetPerson?.name || target.personId || target.createPerson?.name}`);
   } catch (error) {
     els.moveToPerson.textContent = "迁移失败";
     els.moveToPerson.title = error.message || "迁移失败";
@@ -1604,6 +1609,29 @@ async function moveCurrentWorkToPerson() {
       updateMoveToPersonButton();
     }, 2200);
   }
+}
+
+async function waitForWorkMoveJob(initialJob) {
+  let job = initialJob;
+  let cleanupRetryRequested = false;
+  if (!job?.id) throw new Error("服务没有返回文件移动任务");
+  while (job.status !== "completed") {
+    if (["rolled_back", "failed"].includes(job.status)) {
+      throw new Error(job.error || "文件移动失败，原目录已保留");
+    }
+    if (job.status === "cleanup_pending" && job.error) {
+      if (cleanupRetryRequested) throw new Error(`${job.error}；目标目录和数据库已提交，可稍后重试清理源目录`);
+      const retryPayload = await api(`/api/work-move-jobs/${encodeURIComponent(job.id)}/retry`, { method: "POST" });
+      job = retryPayload.job;
+      cleanupRetryRequested = true;
+    }
+    const percent = Math.max(0, Math.min(100, Math.round(Number(job.progress || 0) * 100)));
+    els.moveToPerson.textContent = job.phase === "cleanup" ? "清理源目录" : percent > 0 ? `迁移中 ${percent}%` : "迁移中";
+    await delay(500);
+    const payload = await api(`/api/work-move-jobs/${encodeURIComponent(job.id)}`);
+    job = payload.job;
+  }
+  return job;
 }
 
 async function correctCurrentActorFromFolder() {

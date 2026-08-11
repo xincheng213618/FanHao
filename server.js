@@ -43,6 +43,7 @@ import { createWorkCoverMutationService } from "./src/modules/fanhao/server/work
 import { createWorkFilterService } from "./src/modules/fanhao/server/works/work-filter-service.js";
 import { createWorkInfoService } from "./src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkLocalMutationService } from "./src/modules/fanhao/server/works/work-local-mutation-service.js";
+import { createWorkMoveJobService } from "./src/modules/fanhao/server/works/work-move-job-service.js";
 import { createWorkSearchIndexService } from "./src/modules/fanhao/server/works/work-search-index-service.js";
 import { comparePopularityMetadata, compareRatingCountMetadata } from "./src/modules/fanhao/server/works/work-sort-metadata.js";
 import { createGalleryMediaService } from "./src/modules/media/server/gallery-media-service.js";
@@ -627,6 +628,7 @@ const adminCoreMutationService = createAdminCoreMutationService({
   },
   publicPerson,
   publicWork,
+  reconcileMovedLocalWork: (...args) => personLibraryService.moveLocalWork(...args),
   refreshLibrary,
   relativeFromRoot: (...args) => relativeFromRoot(...args),
   replacePathPrefix,
@@ -844,6 +846,10 @@ const personLibraryService = createPersonLibraryService({
   scanPersonDirectory: localLibraryScanService.scanPersonDirectory,
   sourcePathToAbsolute
 });
+const workMoveJobService = createWorkMoveJobService({
+  adminCoreMutationService,
+  getCoreDb
+});
 const adminPersonService = createAdminPersonService({
   actorMovieService,
   enrichLocalWorksWithActorMovieInfo,
@@ -986,6 +992,7 @@ const moduleRegistry = await discoverFanHaoModules({
         workClassificationService,
         workFacets,
         workLocalMutationService,
+        workMoveJobService,
         workQueryStamp
       }),
       contentIndex: {
@@ -2257,6 +2264,7 @@ const serverHost = createServerHost({
   getLibraryState: () => library,
   stop: async () => {
     await accessAnalyticsService.close();
+    await workMoveJobService.close();
     await moduleRegistry.stop();
     await mediaBlobStore.close();
   }
