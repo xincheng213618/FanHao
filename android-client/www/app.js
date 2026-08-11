@@ -902,7 +902,10 @@ async function installAndroidUpdate() {
       url: androidUpdateInfo.downloadUrl,
       serviceBase: activeUrl,
       fileName: androidUpdateInfo.fileName || `fanhao-${ANDROID_UPDATE_CHANNEL}.apk`,
-      sha256: androidUpdateInfo.sha256 || ""
+      sha256: androidUpdateInfo.sha256 || "",
+      versionCode: Number(androidUpdateInfo.versionCode || 0),
+      versionName: String(androidUpdateInfo.versionName || ""),
+      size: Number(androidUpdateInfo.size || 0)
     });
     renderAndroidUpdateState({
       status: result?.needsPermission ? "permission" : "opened",

@@ -63,9 +63,15 @@ public class FanHaoUpdaterPlugin extends Plugin {
     String rawServiceBase = call.getString("serviceBase");
     URL trustedUrl;
     String expectedSha256;
+    long expectedVersionCode;
+    String expectedVersionName;
+    long expectedSize;
     try {
       trustedUrl = AndroidUpdatePolicy.requireTrustedDownloadUrl(rawUrl, rawServiceBase);
       expectedSha256 = AndroidUpdatePolicy.requireSha256(call.getString("sha256"));
+      expectedVersionCode = AndroidUpdatePolicy.requireExpectedVersionCode(call.getInt("versionCode"));
+      expectedVersionName = AndroidUpdatePolicy.requireExpectedVersionName(call.getString("versionName"));
+      expectedSize = AndroidUpdatePolicy.requireExpectedSize(call.getInt("size"));
     } catch (IllegalArgumentException error) {
       call.reject(error.getMessage(), error);
       return;
@@ -87,7 +93,14 @@ public class FanHaoUpdaterPlugin extends Plugin {
 
     executor.execute(() -> {
       try {
-        File apk = downloadApk(trustedUrl, fileName, expectedSha256);
+        File apk = downloadApk(
+          trustedUrl,
+          fileName,
+          expectedSha256,
+          expectedVersionCode,
+          expectedVersionName,
+          expectedSize
+        );
         getActivity().runOnUiThread(() -> {
           try {
             openInstaller(apk);
@@ -124,7 +137,14 @@ public class FanHaoUpdaterPlugin extends Plugin {
     getActivity().startActivity(intent);
   }
 
-  private File downloadApk(URL url, String fileName, String expectedSha256) throws Exception {
+  private File downloadApk(
+    URL url,
+    String fileName,
+    String expectedSha256,
+    long expectedVersionCode,
+    String expectedVersionName,
+    long expectedSize
+  ) throws Exception {
     File updateDir = new File(getContext().getCacheDir(), "updates");
     if (!updateDir.exists() && !updateDir.mkdirs()) {
       throw new IllegalStateException("无法创建更新缓存目录");
@@ -144,26 +164,41 @@ public class FanHaoUpdaterPlugin extends Plugin {
       if (status < 200 || status >= 300) {
         throw new IllegalStateException("APK 下载失败：" + status);
       }
+      long contentLength = connection.getContentLengthLong();
+      if (contentLength > 0 && contentLength != expectedSize) {
+        throw new IllegalStateException("APK 文件大小与更新信息不一致");
+      }
 
       MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      long downloadedSize = 0;
       try (InputStream input = connection.getInputStream(); FileOutputStream output = new FileOutputStream(apk, false)) {
         byte[] buffer = new byte[64 * 1024];
         int read;
         while ((read = input.read(buffer)) >= 0) {
           if (read == 0) continue;
+          downloadedSize += read;
+          if (downloadedSize > expectedSize) {
+            throw new IllegalStateException("APK 文件大小超过更新信息");
+          }
           digest.update(buffer, 0, read);
           output.write(buffer, 0, read);
         }
       }
 
-      if (apk.length() <= 0) {
-        throw new IllegalStateException("下载到的 APK 为空");
+      if (downloadedSize != expectedSize || apk.length() != expectedSize) {
+        throw new IllegalStateException("APK 文件大小与更新信息不一致");
       }
 
       String actualSha256 = hex(digest.digest());
       if (!actualSha256.equalsIgnoreCase(expectedSha256)) {
         throw new IllegalStateException("APK 校验失败");
       }
+      AndroidUpdatePackageVerifier.requireInstallableUpdate(
+        getContext(),
+        apk,
+        expectedVersionCode,
+        expectedVersionName
+      );
       return apk;
     } catch (Exception error) {
       if (apk.exists()) apk.delete();

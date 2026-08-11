@@ -172,6 +172,13 @@ export function createAndroidUpdateService({
   function serveApk(req, res, channel, fileName) {
     const normalizedChannel = normalizeChannel(channel);
     const safeName = sanitizeDownloadFileName(decodeURIComponent(fileName || ""), `fanhao-${normalizedChannel}.apk`);
+    const manifest = readJsonFile(manifestPath(normalizedChannel), null);
+    const manifestFileName = String(manifest?.apkFile || "");
+    const authorizedName = sanitizeDownloadFileName(manifestFileName, "");
+    if (!authorizedName || authorizedName !== manifestFileName || safeName !== authorizedName) {
+      notFound(res);
+      return;
+    }
     const apkPath = safeChildPath(channelDir(normalizedChannel), safeName);
     if (!apkPath || !fs.existsSync(apkPath) || normalizeExt(apkPath) !== ".apk") {
       notFound(res);

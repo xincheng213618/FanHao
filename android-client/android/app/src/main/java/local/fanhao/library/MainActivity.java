@@ -51,11 +51,6 @@ public class MainActivity extends BridgeActivity {
   }
 
   @Override
-  public void onBackPressed() {
-    dispatchBackToWebView();
-  }
-
-  @Override
   public void onResume() {
     super.onResume();
     showSystemBars();

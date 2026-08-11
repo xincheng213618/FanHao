@@ -19,8 +19,7 @@ android-client/
 
 - Node.js >= 24（用于 `cap sync` 与 Web 资源构建）。
 - Android SDK，且 `adb` 在 `~/AppData/Local/Android/Sdk/platform-tools/` 下（安装脚本会自动探测）。
-- JDK：脚本优先使用 `C:\Program Files\Android\openjdk\jdk-21.0.8`，依次回退到 Android Studio / PyCharm 自带的 JBR。
-  若都不存在，Gradle 会用当前 `PATH` 中的 Java。
+- JDK 21：脚本会检查 `C:\Program Files\Android\openjdk\jdk-21.0.8`、`JAVA_HOME` 和 Android Studio JBR；找不到 major version 21 时直接失败，不会回退到其他 Java 版本。
 
 ## 构建脚本：`build-debug.ps1`
 
@@ -32,6 +31,9 @@ android-client/
 | `-NoSync` | 跳过 `cap sync android`（仅当 `www/` 已是最新时使用）。 |
 | `-VersionCode <n>` | 覆盖 APK 的 versionCode（传给 Gradle `-PfanhaoVersionCode`）。 |
 | `-VersionName <string>` | 覆盖 versionName（传给 Gradle `-PfanhaoVersionName`）。 |
+| `-LocalOnly` | 仅允许 `100000000..2100000000` 的非发布构建，写入同 APK 绑定的 local-only 标记；不能与 `-Install` 同用，也不能进入发布脚本。 |
+
+普通 debug 构建只接受 `1..99999999`，保留 Android versionCode 的恢复空间；`versionName` 会先 trim，空白值在 Gradle 启动前失败。构建完成后脚本用 SDK `aapt` 与 `apksigner` 回读包名、版本和完整 signer 数量，且只接受既有 debug 更新证书。
 
 典型流程：
 
@@ -64,6 +66,12 @@ npm run run:android      # 直接跑起来
 
 `publish-debug-update.ps1` 负责把构建好的 APK 放到 `data/android-update/`（服务端从该目录读取清单与文件），
 配合 `src/modules/system/server/android-update/service.js` 对外提供更新服务。
+
+发布脚本会从 debug/release 的受验证 `latest.json`、两个通道内全部规范 APK，以及当前 `app-debug.apk` 取全局最高 versionCode；自动值和显式值都必须严格递增且不超过 `99999999`。旧清单只有在同时缺少 `packageName`/`signerSha256`、其余字段完整，并且所指 APK 的大小、SHA、版本、包名和单 signer 全部实测一致时才兼容读取；新清单始终写全身份字段。
+
+APK 与清单先写入发布目录内的临时文件并完成回读验证，新版本 APK 使用不可覆盖的版本化文件名，`latest.json` 最后原子替换。下载端只提供当前 `latest.json` 精确引用的 APK，失败或中断产生的非当前文件不能经更新接口下载。
+
+当前仓库只收口了 debug 签名发布链。release Gradle 产物没有稳定 signingConfig，因此未签名 release APK 不得发布或用于覆盖安装。
 
 ## 网络与权限要点
 

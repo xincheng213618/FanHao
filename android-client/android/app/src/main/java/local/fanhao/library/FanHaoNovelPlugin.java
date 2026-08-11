@@ -11,6 +11,7 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.os.SystemClock;
 import android.provider.OpenableColumns;
 import android.provider.MediaStore;
 import android.provider.Settings;
@@ -336,7 +337,9 @@ public class FanHaoNovelPlugin extends Plugin {
         for (Uri uri : uris) {
           try {
             try {
-              resolver.takePersistableUriPermission(uri, flags & Intent.FLAG_GRANT_READ_URI_PERMISSION);
+              if ((flags & Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0) {
+                resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+              }
             } catch (Exception ignored) {
             }
             String fileName = displayName(resolver, uri);
@@ -656,7 +659,11 @@ public class FanHaoNovelPlugin extends Plugin {
           if (file != null && isScannableTextFile(file)) found.add(ScannedTextCandidate.fromFile(file));
         }
       }
-      process.waitFor(90, TimeUnit.SECONDS);
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        process.waitFor(90, TimeUnit.SECONDS);
+      } else {
+        waitForProcess(process, TimeUnit.SECONDS.toMillis(90));
+      }
     } catch (Exception ignored) {
       found.clear();
     } finally {
@@ -665,6 +672,20 @@ public class FanHaoNovelPlugin extends Plugin {
     sortScannedFiles(found);
     Log.i(TAG, "system find txt scan found " + found.size() + " files");
     return found;
+  }
+
+  private boolean waitForProcess(Process process, long timeoutMillis) throws InterruptedException {
+    long deadline = SystemClock.elapsedRealtime() + Math.max(0L, timeoutMillis);
+    while (true) {
+      try {
+        process.exitValue();
+        return true;
+      } catch (IllegalThreadStateException ignored) {
+        long remainingMillis = deadline - SystemClock.elapsedRealtime();
+        if (remainingMillis <= 0) return false;
+        Thread.sleep(Math.min(100L, remainingMillis));
+      }
+    }
   }
 
   private void addScannedFiles(Map<String, ScannedTextCandidate> target, List<ScannedTextCandidate> files, int limit) {

@@ -16,7 +16,6 @@
         <item name="android:statusBarColor">#F6F7F9</item>
         <item name="android:navigationBarColor">#FFFFFF</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
     </style>
 
     <style name="AppTheme.ShortVideo" parent="AppTheme.NoActionBar">
@@ -37,6 +36,5 @@
         <item name="android:statusBarColor">#F6F7F9</item>
         <item name="android:navigationBarColor">#FFFFFF</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
     </style>
 </resources>

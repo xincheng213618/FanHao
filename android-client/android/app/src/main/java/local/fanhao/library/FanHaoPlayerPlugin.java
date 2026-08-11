@@ -3,12 +3,16 @@ package local.fanhao.library;
 import android.content.Intent;
 import android.util.Log;
 
+import androidx.annotation.OptIn;
+import androidx.media3.common.util.UnstableApi;
+
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+@OptIn(markerClass = UnstableApi.class)
 @CapacitorPlugin(name = "FanHaoPlayer")
 public class FanHaoPlayerPlugin extends Plugin {
   private static final String TAG = "FanHaoPlayer";

@@ -19,9 +19,12 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.OptIn;
+import androidx.media3.common.util.UnstableApi;
 import androidx.media3.ui.PlayerView;
 import androidx.recyclerview.widget.RecyclerView;
 
+@OptIn(markerClass = UnstableApi.class)
 final class NativeShortVideoPageView {
   private NativeShortVideoPageView() {}
 
