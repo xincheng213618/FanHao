@@ -64,6 +64,8 @@ npm run open             # 用 Android Studio 打开原生工程
 npm run run:android      # 直接跑起来
 ```
 
+根目录 `npm run verify` 中的 Android security lane 是自包含的：root hook 会按 lockfile（含 devDependencies）安装 `android-client` 依赖，security verifier 随后在系统临时目录复制原生工程、链接本地 lock-pinned Capacitor 依赖并执行 `cap sync android`，确认 Cordova Gradle bridge 后才运行 Gradle fixtures。clean checkout 只需先执行根目录 `npm ci`；真实工作树不依赖人工 sync，也不会被 verifier 的同步、并发或中断改写。
+
 产物位置：`android-client/android/app/build/outputs/apk/debug/app-debug.apk`。
 
 ## 自动更新通道

@@ -4,10 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { createAndroidUpdateService } from "../../src/modules/system/server/android-update/service.js";
 
 const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoDir = path.resolve(projectDir, "..");
+const require = createRequire(import.meta.url);
 const javaSourceDir = path.join(
   projectDir,
   "android",
@@ -113,6 +115,10 @@ assert(webApp.includes("size: Number(androidUpdateInfo.size || 0)"), "the WebVie
 
 const rootPackage = JSON.parse(readRepo("package.json"));
 assert(rootPackage.scripts?.["verify:android-security"], "the root verifier must expose the Android security gate");
+assert(
+  rootPackage.scripts?.["preverify:android-security"]?.includes("--include=dev"),
+  "the clean Android security gate must install its lock-pinned Capacitor CLI even when npm omits dev dependencies by default"
+);
 assert(
   rootPackage.scripts?.verify?.includes("verify:android-security"),
   "the root verification chain must run the Android security gate"
@@ -234,7 +240,6 @@ function verifyJavaPolicy() {
     removeVerifiedTempDir(tempDir);
   }
 }
-
 function verifyPowerShellPublishPolicy() {
   const script = path.join(projectDir, "scripts", "verify-debug-publish-policy.ps1");
   const shells = process.platform === "win32"
@@ -250,32 +255,80 @@ function verifyPowerShellPublishPolicy() {
 }
 
 function verifyGradleVersionPolicy() {
-  const androidDir = path.join(projectDir, "android");
+  const disposableProjectDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-android-gradle-security-"));
   const javaHome = resolveJava21Home();
   const sdkRoot = process.env.ANDROID_SDK_ROOT
     || process.env.ANDROID_HOME
     || (process.platform === "win32" && process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Android", "Sdk") : "");
   assert(sdkRoot && fs.existsSync(sdkRoot), "Android SDK is required for the Gradle version policy fixture");
-  const javaExecutable = path.join(javaHome, "bin", process.platform === "win32" ? "java.exe" : "java");
-  const wrapperJar = path.join(androidDir, "gradle", "wrapper", "gradle-wrapper.jar");
-  const result = run(
-    javaExecutable,
-    ["-classpath", wrapperJar, "org.gradle.wrapper.GradleWrapperMain", ":app:verifyFanHaoVersionPolicy", "--no-daemon"],
-    {
-      cwd: androidDir,
-      env: {
-        ...process.env,
-        JAVA_HOME: javaHome,
-        ANDROID_HOME: sdkRoot,
-        ANDROID_SDK_ROOT: sdkRoot,
-        PATH: `${path.join(javaHome, "bin")}${path.delimiter}${process.env.PATH || ""}`
+  try {
+    prepareDisposableAndroidProject(disposableProjectDir);
+    const androidDir = path.join(disposableProjectDir, "android");
+    const generatedCordovaVariablesPath = path.join(
+      androidDir,
+      "capacitor-cordova-android-plugins",
+      "cordova.variables.gradle"
+    );
+    assert(
+      fs.statSync(generatedCordovaVariablesPath, { throwIfNoEntry: false })?.isFile(),
+      "the disposable Capacitor sync must create the Cordova Gradle bridge before policy checks"
+    );
+    const javaExecutable = path.join(javaHome, "bin", process.platform === "win32" ? "java.exe" : "java");
+    const wrapperJar = path.join(androidDir, "gradle", "wrapper", "gradle-wrapper.jar");
+    const result = run(
+      javaExecutable,
+      ["-classpath", wrapperJar, "org.gradle.wrapper.GradleWrapperMain", ":app:verifyFanHaoVersionPolicy", "--no-daemon"],
+      {
+        cwd: androidDir,
+        env: {
+          ...process.env,
+          JAVA_HOME: javaHome,
+          ANDROID_HOME: sdkRoot,
+          ANDROID_SDK_ROOT: sdkRoot,
+          PATH: `${path.join(javaHome, "bin")}${path.delimiter}${process.env.PATH || ""}`
+        }
       }
+    );
+    assert(
+      `${result.stdout || ""}\n${result.stderr || ""}`.includes("fanhao-gradle-version-policy: 10 boundary, marker, and contract checks passed"),
+      "the Gradle subprocess must execute the version namespace behavior fixture"
+    );
+  } finally {
+    removeVerifiedTempDir(disposableProjectDir);
+  }
+}
+
+function prepareDisposableAndroidProject(disposableProjectDir) {
+  const sourceAndroidDir = path.join(projectDir, "android");
+  const disposableAndroidDir = path.join(disposableProjectDir, "android");
+  fs.cpSync(sourceAndroidDir, disposableAndroidDir, {
+    recursive: true,
+    filter(sourcePath) {
+      const relativePath = path.relative(sourceAndroidDir, sourcePath);
+      if (!relativePath) return true;
+      const segments = relativePath.split(path.sep);
+      if ([".gradle", "build", "capacitor-cordova-android-plugins"].includes(segments[0])) return false;
+      if (segments[0] === "app" && segments[1] === "build") return false;
+      return path.basename(sourcePath) !== "local.properties";
     }
-  );
+  });
+  for (const fileName of ["capacitor.config.json", "package.json", "package-lock.json", "version.json"]) {
+    fs.copyFileSync(path.join(projectDir, fileName), path.join(disposableProjectDir, fileName));
+  }
+  const disposableWebDir = path.join(disposableProjectDir, "www");
+  fs.mkdirSync(disposableWebDir);
+  fs.writeFileSync(path.join(disposableWebDir, "index.html"), "<!doctype html><html><head></head><body></body></html>\n");
+
+  const localNodeModules = fs.realpathSync.native(path.join(projectDir, "node_modules"));
+  fs.symlinkSync(localNodeModules, path.join(disposableProjectDir, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+  const expectedCliRoot = fs.realpathSync.native(path.join(localNodeModules, "@capacitor", "cli"));
+  const capacitorCli = fs.realpathSync.native(require.resolve("@capacitor/cli/bin/capacitor"));
+  const cliRelativePath = path.relative(expectedCliRoot, capacitorCli);
   assert(
-    `${result.stdout || ""}\n${result.stderr || ""}`.includes("fanhao-gradle-version-policy: 10 boundary, marker, and contract checks passed"),
-    "the Gradle subprocess must execute the version namespace behavior fixture"
+    cliRelativePath && !cliRelativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(cliRelativePath),
+    "the Android security sync must use android-client's lock-pinned Capacitor CLI"
   );
+  run(process.execPath, [capacitorCli, "sync", "android"], { cwd: disposableProjectDir });
 }
 
 function verifyVersionContractDoesNotDecrease(currentContract) {
