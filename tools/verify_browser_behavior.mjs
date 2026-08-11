@@ -18,6 +18,7 @@ let fixtureCollectionSequence = 0;
 const fixtureCollectionDetailRequests = [];
 const fixtureCollectionPageRequests = [];
 const fixtureFanhaoCollectionRequests = [];
+const authorCardSelector = ".short-video-author-index-card-main";
 
 try {
   await waitForHealth(baseUrl);
@@ -633,7 +634,7 @@ async function verifyAuthorIndexReturn(browser) {
       throw new Error(`author source tab did not activate (before=${tabStateBefore}): ${body.slice(0, 500)}`, { cause: error });
     });
     try {
-      await page.locator("article button").first().waitFor({ state: "visible", timeout: 30000 });
+      await page.locator(authorCardSelector).first().waitFor({ state: "visible", timeout: 30000 });
     } catch (error) {
       const body = await page.locator("body").innerText().catch(() => "");
       const fetches = await page.evaluate(() => window.__browserTestFetches || []);
@@ -648,7 +649,7 @@ async function verifyAuthorIndexReturn(browser) {
     }));
     assert(before.authors >= 384, "author test must enter a deep loaded window");
     assert(before.firstVisible >= 192, "author test must scroll beyond the first author page");
-    const authorCards = page.locator(".short-video-author-index-card-main");
+    const authorCards = page.locator(authorCardSelector);
     const openedCard = authorCards.nth(before.firstVisible + 4);
     const openedAuthorId = await openedCard.getAttribute("data-short-video-author-id");
     await openedCard.click();
@@ -1622,12 +1623,12 @@ async function verifyShortVideoCollections(browser) {
 }
 
 async function authorWindow(page) {
-  return page.evaluate(() => ({
-    authors: document.querySelectorAll("article").length,
+  return page.evaluate((selector) => ({
+    authors: document.querySelectorAll(selector).length,
     scrollY: window.scrollY,
-    firstVisible: [...document.querySelectorAll("article")].findIndex((article) => article.getBoundingClientRect().bottom > 0),
+    firstVisible: [...document.querySelectorAll(selector)].findIndex((card) => card.getBoundingClientRect().bottom > 0),
     href: window.location.href
-  }));
+  }), authorCardSelector);
 }
 
 async function authorIndexFingerprint(page) {
@@ -1658,10 +1659,13 @@ async function waitForAuthorFocus(page, authorId, message) {
 }
 
 async function loadMoreAuthorPages(page, pages) {
+  const authorCards = page.locator(authorCardSelector);
+  const initialCount = await authorCards.count();
+  assert(initialCount > 0, "author pagination must start from a rendered author index page");
   for (let index = 0; index < pages; index += 1) {
-    const before = await page.locator("article").count();
+    const expectedCount = initialCount * (index + 2);
     await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
-    await waitFor(() => page.locator("article").count(), (count) => count > before, 30000);
+    await waitFor(() => authorCards.count(), (count) => count >= expectedCount, 30000);
   }
 }
 
