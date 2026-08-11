@@ -860,6 +860,7 @@ export function createWorkMoveJobService({
         try {
           await runWorker(jobId, "restore", plan);
         } catch (restoreError) {
+          if (LOST_TARGET_IDENTITY_CODES.has(String(restoreError?.code || ""))) throw restoreError;
           error.message = `${error.message}; 隔离源目录恢复失败：${restoreError.message}`;
         }
         throw error;
@@ -931,6 +932,13 @@ export function createWorkMoveJobService({
     }
   }
 
+  function blockLostTargetIdentity(jobId, error) {
+    const message = error?.message || String(error);
+    const errorCode = String(error?.code || "WORK_MOVE_TARGET_PHYSICAL_DRIFT");
+    updateState(jobId, "blocked", "target_identity_lost", message, { errorCode });
+    emitLifecycle("blocked", row(jobId), { errorCode });
+  }
+
   async function handleFailure(jobId, plan, error) {
     const message = error?.message || String(error);
     const errorCode = String(error?.code || "");
@@ -939,8 +947,7 @@ export function createWorkMoveJobService({
       // those same paths, so either operation could mutate unrelated media.
       // Park the durable reservation and require an operator to restore and
       // inspect the frozen physical target before any explicit recovery.
-      updateState(jobId, "blocked", "target_identity_lost", message, { errorCode });
-      emitLifecycle("blocked", row(jobId), { errorCode });
+      blockLostTargetIdentity(jobId, error);
       return;
     }
     if (plan && adminCoreMutationService.inspectWorkMove(plan) === "target") {
@@ -966,6 +973,10 @@ export function createWorkMoveJobService({
       releaseReservation(jobId, "rolled_back");
     } catch (rollbackError) {
       if (isClaimLost(jobId, rollbackError)) return;
+      if (LOST_TARGET_IDENTITY_CODES.has(String(rollbackError?.code || ""))) {
+        blockLostTargetIdentity(jobId, rollbackError);
+        return;
+      }
       if (closing) {
         preserveForRecovery(jobId);
         return;
@@ -985,6 +996,15 @@ export function createWorkMoveJobService({
 
   function runWorker(jobId, operation, plan) {
     if (fencedJobs.has(jobId)) return Promise.reject(claimLostError());
+    if (plan?.androidCommand) {
+      if (typeof adminCoreMutationService.assertAndroidWorkMoveTargetIdentity !== "function") {
+        const error = new Error("Android 迁移目标物理身份校验不可用");
+        error.statusCode = 409;
+        error.code = "WORK_MOVE_TARGET_PHYSICAL_DRIFT";
+        throw error;
+      }
+      adminCoreMutationService.assertAndroidWorkMoveTargetIdentity(plan, { ownerId });
+    }
     return new Promise((resolve, reject) => {
       const worker = new workerClass(workerUrl, {
         workerData: {

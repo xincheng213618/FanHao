@@ -1332,6 +1332,13 @@ async function verifyPhysicalTargetDriftBlocksUnsafeRollback({ forceCopy }) {
   admin.plan.personDirPhysicalKey = path.resolve(fixture.targetPerson).toLowerCase();
   admin.plan.newDirPhysicalKey = path.resolve(fixture.target).toLowerCase();
   admin.assertWorkMoveTarget = () => ({ id: "target", personDir: fixture.targetPerson, targetDir: fixture.target });
+  admin.assertAndroidWorkMoveTargetIdentity = () => {
+    if (!drifted) return { valid: true };
+    const error = new Error("Android 迁移目标的物理目录已变化");
+    error.statusCode = 409;
+    error.code = "WORK_MOVE_TARGET_PHYSICAL_DRIFT";
+    throw error;
+  };
   const originalCommit = admin.commitWorkMove;
   let drifted = false;
   admin.commitWorkMove = (...args) => {
@@ -1408,6 +1415,87 @@ async function verifyPhysicalTargetDriftBlocksUnsafeRollback({ forceCopy }) {
   assert.ok(lifecycle.some((line) => line.includes('"event":"blocked"')));
   assert.equal(lifecycle.some((line) => line.includes(fixture.source)), false, "blocked lifecycle logs must not expose absolute paths");
   await service.close();
+  db.close();
+}
+
+async function verifyPhysicalDriftRecoveryBlocksBeforeWorker({ forceCopy }) {
+  const mode = forceCopy ? "copy" : "rename";
+  const fixture = await createFixture(`physical-drift-recovery-${mode}`, 5);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const jobId = `physical-drift-recovery-${mode}`;
+  const persistedPlan = {
+    ...admin.plan,
+    jobId,
+    androidCommand: true,
+    personDirPhysicalKey: path.resolve(fixture.targetPerson).toLowerCase(),
+    newDirPhysicalKey: path.resolve(fixture.target).toLowerCase()
+  };
+  if (forceCopy) await fs.promises.cp(fixture.source, fixture.target, { recursive: true, errorOnExist: true, force: false });
+  else await fs.promises.rename(fixture.source, fixture.target);
+
+  const savedTargetPerson = path.join(fixture.root, `recovery-target-person-${mode}-saved`);
+  const replacementTargetPerson = path.join(fixture.root, `recovery-target-person-${mode}-replacement`);
+  const replacementTarget = path.join(replacementTargetPerson, path.basename(fixture.target));
+  const replacementSentinel = path.join(replacementTargetPerson, "sentinel.txt");
+  await fs.promises.mkdir(replacementTargetPerson, { recursive: true });
+  await fs.promises.writeFile(replacementSentinel, `${mode}-recovery-sentinel`);
+  await fs.promises.rename(fixture.targetPerson, savedTargetPerson);
+  await fs.promises.symlink(replacementTargetPerson, fixture.targetPerson, process.platform === "win32" ? "junction" : "dir");
+  await fs.promises.cp(path.join(savedTargetPerson, path.basename(fixture.target)), replacementTarget, {
+    recursive: true,
+    errorOnExist: true,
+    force: false
+  });
+
+  admin.assertAndroidWorkMoveTargetIdentity = () => {
+    const error = new Error("Android 迁移目标的物理目录已变化");
+    error.statusCode = 409;
+    error.code = "WORK_MOVE_TARGET_PHYSICAL_DRIFT";
+    throw error;
+  };
+  const bootstrap = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
+  const createdAt = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO work_move_jobs (
+      id, request_key, work_id, person_id, status, phase, request_json, plan_json,
+      attempts, created_at, updated_at
+    ) VALUES (?, ?, '1', 'target', 'running', 'filesystem_ready', ?, ?, 1, ?, ?)
+  `).run(
+    jobId,
+    `client:${jobId}`,
+    JSON.stringify({ personId: "target", idempotencyKey: jobId, androidCommand: true }),
+    JSON.stringify(persistedPlan),
+    createdAt,
+    createdAt
+  );
+  await bootstrap.close();
+
+  let workerStarts = 0;
+  class MustNotStartWorker extends Worker {
+    constructor(url, options) {
+      workerStarts += 1;
+      super(url, options);
+    }
+  }
+  const recovered = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    workerClass: MustNotStartWorker
+  });
+  const blocked = await waitForJob(recovered, jobId, ["blocked"]);
+  assert.equal(blocked.phase, "target_identity_lost");
+  assert.equal(blocked.errorCode, "WORK_MOVE_TARGET_PHYSICAL_DRIFT");
+  assert.equal(workerStarts, 0, `${mode} filesystem_ready recovery must block before constructing any worker`);
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.source));
+  assert.equal(JSON.parse(db.prepare("SELECT plan_json FROM work_move_jobs WHERE id = ?").get(jobId).plan_json).newDirPhysicalKey, persistedPlan.newDirPhysicalKey);
+  await waitForCondition(() => admin.reservation?.ownerId === "", `${mode} recovery reservation was not parked`);
+  assert.equal(admin.reservation?.released, false);
+  assert.equal(fs.existsSync(fixture.source), forceCopy, `${mode} recovered source state must not be changed by an untrusted path`);
+  assert.equal(fs.existsSync(path.join(savedTargetPerson, path.basename(fixture.target), "part-0", "fixture-0.bin")), true);
+  assert.equal(fs.existsSync(path.join(replacementTarget, "part-0", "fixture-0.bin")), true);
+  assert.equal(await fs.promises.readFile(replacementSentinel, "utf8"), `${mode}-recovery-sentinel`);
+  await recovered.close();
   db.close();
 }
 
@@ -2691,6 +2779,8 @@ try {
   await verifyRollbackOnDatabaseFailure();
   await verifyPhysicalTargetDriftBlocksUnsafeRollback({ forceCopy: true });
   await verifyPhysicalTargetDriftBlocksUnsafeRollback({ forceCopy: false });
+  await verifyPhysicalDriftRecoveryBlocksBeforeWorker({ forceCopy: true });
+  await verifyPhysicalDriftRecoveryBlocksBeforeWorker({ forceCopy: false });
   await verifySharedOwnerAddedBeforeCommitRollsBackCopy();
   await verifySharedOwnerDuringImageStageBlocksCleanup();
   await verifySharedOwnerBeforeCleanupRetainsSource();

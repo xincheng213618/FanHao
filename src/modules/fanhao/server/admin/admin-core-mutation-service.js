@@ -444,6 +444,55 @@ export function createAdminCoreMutationService({
     throw error;
   }
 
+  function workMoveTargetPhysicalDriftError() {
+    const error = new Error("Android 迁移目标的物理目录已变化");
+    error.statusCode = 409;
+    error.code = "WORK_MOVE_TARGET_PHYSICAL_DRIFT";
+    return error;
+  }
+
+  function assertAndroidWorkMoveTargetIdentityInTransaction(plan, { requireStagedDirectory = false } = {}) {
+    if (!plan?.androidCommand) return { valid: true };
+    const personDirPhysicalKey = String(plan.personDirPhysicalKey || "").trim();
+    const newDirPhysicalKey = String(plan.newDirPhysicalKey || "").trim();
+    let stagedDirectory = null;
+    if (requireStagedDirectory) {
+      try {
+        stagedDirectory = fs.lstatSync(plan.newDir);
+      } catch {}
+    }
+    if (!personDirPhysicalKey
+      || !newDirPhysicalKey
+      || canonicalLibraryPathKey(plan.personDir) !== personDirPhysicalKey
+      || canonicalLibraryPathKey(plan.newDir) !== newDirPhysicalKey
+      || (requireStagedDirectory && (!stagedDirectory?.isDirectory() || stagedDirectory.isSymbolicLink()))) {
+      throw workMoveTargetPhysicalDriftError();
+    }
+    assertWorkMoveTarget(plan.workId, plan.personId, {
+      allowExistingDestination: true,
+      expectedPersonDirPhysicalKey: personDirPhysicalKey,
+      expectedNewDirPhysicalKey: newDirPhysicalKey
+    });
+    return { valid: true };
+  }
+
+  function assertAndroidWorkMoveTargetIdentity(plan, context = {}, options = {}) {
+    if (!plan?.androidCommand) return { valid: true };
+    const db = getCoreDb();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      workMoveReservations().assertOwnership(plan, context);
+      const result = assertAndroidWorkMoveTargetIdentityInTransaction(plan, options);
+      db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
   function correctedActorFieldsJson(fieldsJson, actorName) {
     const fields = parseJsonArray(fieldsJson);
     const cleanName = String(actorName || "").trim();
@@ -1076,27 +1125,7 @@ export function createAdminCoreMutationService({
       // is exactly this persisted plan; directory ownership and source/current
       // checks are still rebuilt without the picker cache.
       if (plan.androidCommand) {
-        const personDirPhysicalKey = String(plan.personDirPhysicalKey || "").trim();
-        const newDirPhysicalKey = String(plan.newDirPhysicalKey || "").trim();
-        let stagedDirectory = null;
-        try {
-          stagedDirectory = fs.lstatSync(plan.newDir);
-        } catch {}
-        if (!personDirPhysicalKey
-          || !newDirPhysicalKey
-          || !stagedDirectory?.isDirectory()
-          || stagedDirectory.isSymbolicLink()
-          || canonicalLibraryPathKey(plan.newDir) !== newDirPhysicalKey) {
-          const error = new Error("Android 迁移目标的物理目录已变化");
-          error.statusCode = 409;
-          error.code = "WORK_MOVE_TARGET_PHYSICAL_DRIFT";
-          throw error;
-        }
-        assertWorkMoveTarget(plan.workId, plan.personId, {
-          allowExistingDestination: true,
-          expectedPersonDirPhysicalKey: personDirPhysicalKey,
-          expectedNewDirPhysicalKey: newDirPhysicalKey
-        });
+        assertAndroidWorkMoveTargetIdentityInTransaction(plan, { requireStagedDirectory: true });
       }
       workMoveReservations().setMutationMode(plan, { ...context, mode: "main", schema: "main" });
       const current = db
@@ -1274,6 +1303,7 @@ export function createAdminCoreMutationService({
 
   return {
     acquireWorkMoveReservation: (...args) => workMoveReservations().acquire(...args),
+    assertAndroidWorkMoveTargetIdentity,
     assertWorkMoveSourceUnshared,
     assertWorkMoveTarget,
     correctWorkActorFromLocalFolder,
