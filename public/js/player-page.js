@@ -1,5 +1,6 @@
 import { createApiClient, addQueryParam } from "./api.js?v=20260701-gallery-merge-01";
 import { fetchWorkMoveJobWithBackoff } from "../modules/fanhao/work-move-polling.js?v=20260811-work-move-ops-01";
+import { createCompletedWorkMoveReloader } from "../modules/fanhao/work-move-completion.js?v=20260811-work-move-ops-01";
 
 const api = createApiClient();
 const params = new URLSearchParams(window.location.search);
@@ -56,6 +57,12 @@ let streamNeedsActivation = false;
 let pendingMoveJob = null;
 let pendingMoveRequestKey = "";
 let movePollController = null;
+const completedMoveReloader = createCompletedWorkMoveReloader({
+  api,
+  getCurrentWork: () => currentWork,
+  applyWork: applyCurrentWorkDetails,
+  showReloadFailure: () => showNotice("迁移已完成，但刷新作品资料失败。请手动刷新页面后重试。")
+});
 
 const PLYR_DIRECT_CONTROLS = ["play-large", "play", "progress", "current-time", "duration", "mute", "volume", "settings", "fullscreen"];
 const PLYR_STREAM_CONTROLS = ["play-large", "play", "mute", "volume", "fullscreen"];
@@ -298,15 +305,7 @@ async function load() {
       return;
     }
     const data = await api(`/api/works/${encodeURIComponent(workId)}`);
-    currentWork = data.work;
-    document.title = `${currentWork.title} - FanHao`;
-    els.title.textContent = currentWork.title;
-    renderFiles(currentWork);
-    renderMeta(currentWork);
-    updateMarkerButton();
-    updateDeleteLocalButton();
-    updateCorrectActorButton();
-    updateMoveToPersonButton();
+    applyCurrentWorkDetails(data.work);
     await restoreMoveJobEntry();
     const video = selectInitialVideo(currentWork);
     if (!video) {
@@ -411,6 +410,20 @@ function selectInitialVideo(work) {
     videos[0] ||
     null
   );
+}
+
+function applyCurrentWorkDetails(work) {
+  currentWork = work;
+  currentVideo = (currentWork.videos || []).find((video) => video.id === currentVideo?.id) || selectInitialVideo(currentWork);
+  document.title = `${currentWork.title} - FanHao`;
+  els.title.textContent = currentWork.title;
+  renderFiles(currentWork);
+  renderMeta(currentWork);
+  updateMarkerButton();
+  updateDeleteLocalButton();
+  updateCorrectActorButton();
+  updateMoveToPersonButton();
+  updateOpenFileButton();
 }
 
 function renderFiles(work) {
@@ -1617,9 +1630,9 @@ async function moveCurrentWorkToPerson() {
     }
     rememberMoveJob(data.job);
     const completedJob = await waitForWorkMoveJob(data.job);
-    const result = completedJob.result || {};
-    applyCompletedMoveJob(completedJob);
-    showNotice(`已迁移到：${result.person?.name || targetPerson?.name || target.personId || target.createPerson?.name}`);
+    if (await applyCompletedMoveJob(completedJob)) {
+      showNotice(`已迁移到：${targetPerson?.name || target.personId || target.createPerson?.name}`);
+    }
   } catch (error) {
     if (error?.name === "AbortError") return;
     els.moveToPerson.textContent = "迁移失败";
@@ -1759,7 +1772,7 @@ async function restoreMoveJobEntry() {
       return;
     }
     if (job.status === "completed") {
-      applyCompletedMoveJob(job);
+      await applyCompletedMoveJob(job);
       clearRememberedMoveJob();
       return;
     }
@@ -1785,8 +1798,7 @@ async function resumePendingMoveJob() {
       rememberMoveJob(job);
     }
     const completed = await waitForWorkMoveJob(job);
-    applyCompletedMoveJob(completed);
-    showNotice("迁移任务已完成");
+    if (await applyCompletedMoveJob(completed)) showNotice("迁移任务已完成");
   } catch (error) {
     if (error?.name === "AbortError") return;
     showNotice(error.message || "恢复迁移任务失败");
@@ -1801,20 +1813,8 @@ async function retryWorkMoveJob(jobId, signal = undefined) {
   return payload.job;
 }
 
-function applyCompletedMoveJob(job) {
-  const result = job?.result || {};
-  if (!result.work) return;
-  currentWork = result.work;
-  currentVideo = (currentWork.videos || []).find((video) => video.id === currentVideo?.id) || selectInitialVideo(currentWork);
-  document.title = `${currentWork.title} - FanHao`;
-  els.title.textContent = currentWork.title;
-  renderFiles(currentWork);
-  renderMeta(currentWork);
-  updateMarkerButton();
-  updateDeleteLocalButton();
-  updateCorrectActorButton();
-  updateMoveToPersonButton();
-  updateOpenFileButton();
+async function applyCompletedMoveJob(job) {
+  return completedMoveReloader.reload(job);
 }
 
 async function correctCurrentActorFromFolder() {

@@ -205,7 +205,7 @@ assert(workDetailServiceSource.includes("resolveVideoFileByPublicId ? resolveVid
 assert(workRoutesApiSource.includes('source: url.searchParams.get("source") || "fanhao"') && workRoutesApiSource.includes("视频文件不存在或已移动"), "play-info routing must retain its media boundary and explain missing local files");
 assert(playerPageSource.includes('mediaId ? "?source=gallery" : ""'), "the standalone gallery player must explicitly select gallery play-info lookup");
 assert(playerHtmlSource.includes('class="app-module-loading"') && playerHtmlSource.includes('html.app-module-loading body'), "the standalone player must hide its incomplete shell during startup");
-assert(playerHtmlSource.includes('await import("/js/player-page.js?v=20260811-work-move-ops-02")') && playerHtmlSource.includes('classList.remove("app-module-loading")'), "the standalone player must release its visibility guard after startup");
+assert(playerHtmlSource.includes('await import("/js/player-page.js?v=20260811-work-move-ops-03")') && playerHtmlSource.includes('classList.remove("app-module-loading")'), "the standalone player must release its visibility guard after startup");
 assert(playerPageSource.lastIndexOf("await load();") > playerPageSource.indexOf("async function load()"), "the standalone player must await its initial payload after all module declarations are initialized");
 assert(playerPageSource.includes("setVideoSourceAt(resumePosition, { autoPlay: options.autoPlay !== false });"), "standalone player startup must begin playback without a second user action");
 assert(playerPageSource.includes('name === "NotAllowedError" && options.allowMutedFallback'), "standalone player must keep autoplay running when the browser initially blocks sound");

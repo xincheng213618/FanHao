@@ -14,6 +14,7 @@ import {
   moveJobStatusLabel,
   workMoveOpsPanelIsVisible
 } from "../public/modules/system/work-move-ops-panel.js";
+import { createCompletedWorkMoveReloader } from "../public/modules/fanhao/work-move-completion.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
@@ -148,6 +149,85 @@ assert.deepEqual(controller.state.jobs.map((job) => job.id), ["newer"], "an olde
 assert.equal(maxInFlight, 1, "ops loads must remain single-flight");
 assert.equal(controller.state.loading, false);
 
+const playerDom = { title: "旧作品", files: ["old-video"], actions: "old-actions" };
+let fixtureWork = { id: "fixture-work", title: "旧作品", videos: [{ id: "old-video" }] };
+const completionRequests = [];
+const completionFailures = [];
+const completionReloader = createCompletedWorkMoveReloader({
+  api: async (requestPath) => {
+    completionRequests.push(requestPath);
+    return { work: { id: "fixture-work", title: "迁移后作品", videos: [{ id: "new-video" }] } };
+  },
+  getCurrentWork: () => fixtureWork,
+  applyWork(work) {
+    fixtureWork = work;
+    playerDom.title = work.title;
+    playerDom.files = work.videos.map((video) => video.id);
+    playerDom.actions = "refreshed-actions";
+  },
+  showReloadFailure: (error) => completionFailures.push(error.message)
+});
+const sanitizedCompletedJob = { id: "completed-fixture", workId: "fixture-work", status: "completed" };
+assert.equal("result" in sanitizedCompletedJob, false, "fixture must use the public sanitized completed-job payload");
+assert.equal(await completionReloader.reload(sanitizedCompletedJob), true);
+assert.deepEqual(completionRequests, ["/api/works/fixture-work"], "completed moves must reload the work through the safe detail API exactly once");
+assert.deepEqual(playerDom, { title: "迁移后作品", files: ["new-video"], actions: "refreshed-actions" }, "safe reload must update the player DOM fixture");
+assert.deepEqual(completionFailures, []);
+
+let resolveStaleNavigation;
+fixtureWork = { id: "fixture-work", title: "迁移前", videos: [{ id: "before-video" }] };
+playerDom.title = "迁移前";
+playerDom.files = ["before-video"];
+playerDom.actions = "before-actions";
+const staleNavigationReloader = createCompletedWorkMoveReloader({
+  api: () => new Promise((resolve) => { resolveStaleNavigation = resolve; }),
+  getCurrentWork: () => fixtureWork,
+  applyWork(work) {
+    fixtureWork = work;
+    playerDom.title = work.title;
+  },
+  showReloadFailure: (error) => completionFailures.push(error.message)
+});
+const staleNavigation = staleNavigationReloader.reload(sanitizedCompletedJob);
+fixtureWork = { id: "other-work", title: "已导航作品", videos: [] };
+resolveStaleNavigation({ work: { id: "fixture-work", title: "不应覆盖", videos: [] } });
+assert.equal(await staleNavigation, false, "a completed move reload must not apply after navigation to another work");
+assert.equal(playerDom.title, "迁移前", "stale navigation must leave the visible player DOM untouched");
+
+fixtureWork = { id: "fixture-work", title: "当前作品", videos: [] };
+playerDom.title = "当前作品";
+const jobResolvers = [];
+const currentJobReloader = createCompletedWorkMoveReloader({
+  api: () => new Promise((resolve) => jobResolvers.push(resolve)),
+  getCurrentWork: () => fixtureWork,
+  applyWork(work) { playerDom.title = work.title; },
+  showReloadFailure: (error) => completionFailures.push(error.message)
+});
+const olderJobReload = currentJobReloader.reload({ ...sanitizedCompletedJob, id: "older-job" });
+const newerJobReload = currentJobReloader.reload({ ...sanitizedCompletedJob, id: "newer-job" });
+jobResolvers[0]({ work: { id: "fixture-work", title: "旧任务结果", videos: [] } });
+assert.equal(await olderJobReload, false, "an older completed job must not apply after a newer job becomes current");
+assert.equal(playerDom.title, "当前作品", "an older completed job must not overwrite the player DOM fixture");
+jobResolvers[1]({ work: { id: "fixture-work", title: "最新任务结果", videos: [] } });
+assert.equal(await newerJobReload, true);
+assert.equal(playerDom.title, "最新任务结果", "the current completed job must still update the player DOM fixture");
+
+const stableWork = { id: "fixture-work", title: "稳定作品", videos: [{ id: "stable-video" }] };
+fixtureWork = stableWork;
+playerDom.title = "稳定作品";
+playerDom.files = ["stable-video"];
+playerDom.actions = "stable-actions";
+const failedReload = createCompletedWorkMoveReloader({
+  api: async () => { throw new Error("fixture work detail unavailable"); },
+  getCurrentWork: () => fixtureWork,
+  applyWork() { throw new Error("failed reload must not apply work"); },
+  showReloadFailure: () => completionFailures.push("迁移已完成，但刷新作品资料失败。请手动刷新页面后重试。")
+});
+assert.equal(await failedReload.reload(sanitizedCompletedJob), false);
+assert.equal(fixtureWork, stableWork, "a failed safe reload must retain the current work");
+assert.deepEqual(playerDom, { title: "稳定作品", files: ["stable-video"], actions: "stable-actions" }, "a failed safe reload must not damage the player DOM fixture");
+assert.deepEqual(completionFailures, ["迁移已完成，但刷新作品资料失败。请手动刷新页面后重试。"], "a failed reload must surface one manual-refresh failure without retry polling");
+
 const originalDocument = globalThis.document;
 const focusDocument = { activeElement: null };
 function fakeNode(tag) {
@@ -255,6 +335,11 @@ assert.match(panelSource, /人工处理/);
 assert.match(panelSource, /aria-pressed/);
 assert.doesNotMatch(panelSource, /setAttribute\("aria-hidden"/);
 assert.match(playerSource, /fetchWorkMoveJobWithBackoff/);
+assert.match(playerSource, /createCompletedWorkMoveReloader/);
+assert.match(playerSource, /await applyCompletedMoveJob\(completedJob\)/);
+assert.match(playerSource, /if \(await applyCompletedMoveJob\(completed\)\) showNotice\("迁移任务已完成"\)/);
+assert.match(playerSource, /showReloadFailure: \(\) => showNotice\("迁移已完成，但刷新作品资料失败。请手动刷新页面后重试。"\)/);
+assert.doesNotMatch(playerSource, /completedJob\.result|result\.work/);
 assert.doesNotMatch(panelSource, /plan_json|request_json|result_json|oldDir|newDir/);
 
 console.log("work-move-ops-ui: ok (sanitized retry UX, single-flight polling, focus restoration, finite player backoff)");
