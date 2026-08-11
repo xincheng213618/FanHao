@@ -24,10 +24,10 @@ export function workMoveOpsPanelIsVisible(root, pageDocument = document) {
 }
 
 export function fallbackCopyText(value, pageDocument = document) {
+  const previousFocus = pageDocument.activeElement;
   const input = pageDocument.createElement("textarea");
   input.value = value;
   input.readOnly = true;
-  input.setAttribute("aria-hidden", "true");
   Object.assign(input.style, {
     position: "fixed",
     left: "-10000px",
@@ -36,11 +36,14 @@ export function fallbackCopyText(value, pageDocument = document) {
     pointerEvents: "none"
   });
   pageDocument.body.append(input);
-  input.focus();
-  input.select();
-  const copied = pageDocument.execCommand("copy") === true;
-  input.remove();
-  return copied;
+  try {
+    input.focus();
+    input.select();
+    return pageDocument.execCommand("copy") === true;
+  } finally {
+    input.remove();
+    if (previousFocus && previousFocus !== input && typeof previousFocus.focus === "function") previousFocus.focus();
+  }
 }
 
 export function createWorkMoveOpsController({ api, formatBytes, formatDateTime, root }) {
@@ -105,6 +108,7 @@ export function createWorkMoveOpsController({ api, formatBytes, formatDateTime, 
       card.type = "button";
       card.className = `work-move-job-card status-${job.status}`;
       card.classList.toggle("active", job.id === state.selectedId);
+      card.setAttribute("aria-pressed", String(job.id === state.selectedId));
       card.addEventListener("click", () => {
         state.selectedId = job.id;
         render();

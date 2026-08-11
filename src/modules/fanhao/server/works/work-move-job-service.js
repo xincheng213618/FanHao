@@ -262,23 +262,45 @@ export function createWorkMoveJobService({
       if (fencedJobs.has(jobId)) throw claimLostError();
       try {
         const current = row(jobId);
-        if (!current || current.owner_id !== ownerId) failClaim(jobId);
+        if (!current || current.owner_id !== ownerId) {
+          if (ACTIVE_STATUSES.has(current?.status)) scheduleClaimRetry(jobId);
+          failClaim(jobId);
+        }
         if (String(current.handoff_ack || "") === previousOwner) return;
         if ((previousPid && !processIsAlive(previousPid)) || (!previousPid && Date.now() >= handoffDeadline)) {
           const result = getCoreDb().prepare(`
             UPDATE work_move_jobs
             SET handoff_ack = ?, updated_at = ?, version = version + 1
-            WHERE id = ? AND owner_id = ? AND handoff_from = ?
-          `).run(previousOwner, now(), jobId, ownerId, previousOwner);
-          if (Number(result.changes || 0) !== 1) failClaim(jobId);
+            WHERE id = ? AND owner_id = ? AND version = ?
+              AND status IN ('queued', 'running', 'cleanup_pending', 'rollback_pending')
+              AND handoff_from = ? AND handoff_ack <> ?
+          `).run(previousOwner, now(), jobId, ownerId, Number(current.version || 0), previousOwner, previousOwner);
+          if (Number(result.changes || 0) !== 1) {
+            const outcome = resolveHandoffCasMiss(jobId, previousOwner);
+            if (outcome === "ready") return;
+            if (outcome === "retry") continue;
+          }
           return;
         }
         if (previousPid && Date.now() >= handoffDeadline) {
           const errorCode = "WORK_MOVE_HANDOFF_TIMEOUT";
           const message = "旧迁移 owner 的进程标识仍存活，但未确认停止；为防止双重文件操作，任务已阻断等待人工处理";
-          updateState(jobId, "blocked", "handoff_timeout", message, { errorCode, finished: true });
-          emitLifecycle("blocked", row(jobId), { errorCode });
-          return false;
+          const timestamp = now();
+          const result = getCoreDb().prepare(`
+            UPDATE work_move_jobs
+            SET status = 'blocked', phase = 'handoff_timeout', error = ?, error_code = ?,
+                updated_at = ?, finished_at = ?, lease_until = ?, version = version + 1
+            WHERE id = ? AND owner_id = ? AND version = ?
+              AND status IN ('queued', 'running', 'cleanup_pending', 'rollback_pending')
+              AND handoff_from = ? AND handoff_ack <> ?
+          `).run(message, errorCode, timestamp, timestamp, leaseUntil(), jobId, ownerId, Number(current.version || 0), previousOwner, previousOwner);
+          if (Number(result.changes || 0) === 1) {
+            emitLifecycle("blocked", row(jobId), { errorCode });
+            return false;
+          }
+          const outcome = resolveHandoffCasMiss(jobId, previousOwner);
+          if (outcome === "ready") return;
+          if (outcome === "retry") continue;
         }
       } catch (error) {
         if (!isSqliteBusy(error)) throw error;
@@ -286,6 +308,15 @@ export function createWorkMoveJobService({
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     throw claimLostError();
+  }
+
+  function resolveHandoffCasMiss(jobId, previousOwner) {
+    const current = row(jobId);
+    const stillOwnedActive = current?.owner_id === ownerId && ACTIVE_STATUSES.has(current.status);
+    if (stillOwnedActive && String(current.handoff_ack || "") === previousOwner) return "ready";
+    if (stillOwnedActive && String(current.handoff_from || "") === previousOwner) return "retry";
+    if (ACTIVE_STATUSES.has(current?.status)) scheduleClaimRetry(jobId);
+    failClaim(jobId);
   }
 
   function emitLifecycle(event, job, details = {}) {

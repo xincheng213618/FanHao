@@ -1414,6 +1414,86 @@ async function verifyAliveOwnerHandoffTimesOutBlocked() {
   db.close();
 }
 
+async function verifyHandoffAckWinsTimeoutCasRace() {
+  const fixture = await createFixture("handoff-ack-timeout-race", 2);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const dormant = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    log: () => {},
+    schedule: () => {}
+  });
+  const started = dormant.start("1", { personId: "target", idempotencyKey: "handoff-ack-timeout-race" });
+  const staleOwner = `move-owner-${process.pid}-ack-race-fixture`;
+  db.prepare(`
+    UPDATE work_move_jobs
+    SET status = 'running', phase = 'prepared', plan_json = ?, owner_id = ?,
+        lease_until = '2000-01-01T00:00:00.000Z', version = version + 1
+    WHERE id = ?
+  `).run(JSON.stringify({ ...admin.plan, jobId: started.id }), staleOwner, started.id);
+  await dormant.close();
+
+  let ackInjected = false;
+  const racingDb = {
+    exec: db.exec.bind(db),
+    prepare(sql) {
+      const statement = db.prepare(sql);
+      const normalized = String(sql).replace(/\s+/g, " ");
+      const timeoutBlockStatement = normalized.includes("SET status = 'blocked', phase = 'handoff_timeout'");
+      const genericStateStatement = normalized.includes("SET status = ?, phase = ?, error = ?");
+      if (!timeoutBlockStatement && !genericStateStatement) return statement;
+      return {
+        run(...args) {
+          const attemptsTimeoutBlock = timeoutBlockStatement
+            || (genericStateStatement && args[0] === "blocked" && args[1] === "handoff_timeout");
+          if (!ackInjected && attemptsTimeoutBlock) {
+            const before = db.prepare("SELECT owner_id, handoff_from, handoff_ack FROM work_move_jobs WHERE id = ?").get(started.id);
+            assert.notEqual(before.owner_id, "");
+            assert.equal(before.handoff_from, staleOwner);
+            assert.equal(before.handoff_ack, "");
+            db.prepare(`
+              UPDATE work_move_jobs
+              SET handoff_ack = ?, updated_at = ?, version = version + 1
+              WHERE id = ? AND handoff_from = ? AND owner_id <> ?
+            `).run(staleOwner, new Date().toISOString(), started.id, staleOwner, staleOwner);
+            ackInjected = true;
+          }
+          return statement.run(...args);
+        }
+      };
+    }
+  };
+  let workerStarts = 0;
+  class AckRaceWorker extends Worker {
+    constructor(...args) {
+      workerStarts += 1;
+      super(...args);
+    }
+  }
+  const lifecycle = [];
+  const recovered = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => racingDb,
+    handoffTimeoutMs: 75,
+    leaseDurationMs: 300,
+    log: (message) => lifecycle.push(String(message)),
+    workerClass: AckRaceWorker,
+    workerDataPatch: { forceCopy: true }
+  });
+  const completed = await waitForJob(recovered, started.id, ["completed"], 5_000);
+  assert.equal(ackInjected, true, "fixture must inject the prior-owner ACK after timeout observation and before the blocked CAS");
+  assert.ok(workerStarts > 0, "the acknowledged handoff must proceed to worker execution");
+  assert.equal(completed.phase, "completed");
+  assert.equal(lifecycle.some((line) => line.includes('"event":"blocked"')), false, "a winning ACK must never be published as blocked");
+  const journal = db.prepare("SELECT status, owner_id, lease_until FROM work_move_jobs WHERE id = ?").get(started.id);
+  assert.equal(journal.status, "completed", "the timeout/ACK race must not strand an active unowned job");
+  assert.equal(journal.owner_id, "");
+  assert.equal(journal.lease_until, "");
+  await recovered.close();
+  db.close();
+}
+
 async function verifyRetryCasBusyAndBlockedContract() {
   const fixture = await createFixture("retry-contract", 1);
   const db = createDatabase(fixture.root, fixture.source);
@@ -2013,6 +2093,7 @@ try {
   await verifyLegacyPlanOutsideTrustedRootsFailsClosed();
   await verifyExpiredLeaseTakeoverFencesOldWorker();
   await verifyAliveOwnerHandoffTimesOutBlocked();
+  await verifyHandoffAckWinsTimeoutCasRace();
   await verifyDatabaseLeasePreventsDoubleExecution();
   await verifySqliteBusyClaimRetriesAndHeartbeatRecovers();
   await verifyRetryCasBusyAndBlockedContract();

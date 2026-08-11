@@ -73,7 +73,9 @@ assert.equal(workMoveOpsPanelIsVisible(visibleRoot, { visibilityState: "visible"
 let selected = false;
 let removed = false;
 let appended = null;
+let focusRestored = 0;
 const copyDocument = {
+  activeElement: { focus: () => { focusRestored += 1; } },
   body: { append: (node) => { appended = node; } },
   createElement: () => ({
     hidden: false,
@@ -89,6 +91,14 @@ assert.equal(fallbackCopyText("move_fixture", copyDocument), true);
 assert.equal(appended.hidden, false, "fallback copy textarea must remain selectable instead of using hidden=true");
 assert.equal(appended.style.left, "-10000px");
 assert.equal(removed, true);
+assert.equal(focusRestored, 1, "fallback copy must restore the previously focused control");
+
+removed = false;
+focusRestored = 0;
+copyDocument.execCommand = () => { throw new Error("copy denied"); };
+assert.throws(() => fallbackCopyText("move_fixture", copyDocument), /copy denied/);
+assert.equal(removed, true, "fallback textarea must be removed when execCommand throws");
+assert.equal(focusRestored, 1, "focus must also be restored when fallback copying fails");
 
 const statusElement = { value: "failed", addEventListener() {} };
 const workIdElement = { value: "", addEventListener() {} };
@@ -124,12 +134,15 @@ assert.match(adminHtml, /id="adminWorkMoveOps"/);
 assert.match(adminHtml, /data-work-move-status/);
 assert.match(adminHtml, /data-work-move-work-id/);
 assert.match(adminHtml, /data-work-move-detail/);
+assert.match(adminHtml, /role="status" aria-live="polite" data-work-move-notice/);
 assert.match(adminSource, /createWorkMoveOpsController/);
 assert.match(adminSource, /workMoveOpsController\.load/);
 assert.match(adminSource, /workMoveOpsPanelIsVisible/);
 assert.match(panelSource, /WORK_MOVE|\/api\/work-move-jobs/);
 assert.match(panelSource, /复制任务 ID/);
 assert.match(panelSource, /人工处理/);
+assert.match(panelSource, /aria-pressed/);
+assert.doesNotMatch(panelSource, /setAttribute\("aria-hidden"/);
 assert.match(playerSource, /fetchWorkMoveJobWithBackoff/);
 assert.doesNotMatch(panelSource, /plan_json|request_json|result_json|oldDir|newDir/);
 
