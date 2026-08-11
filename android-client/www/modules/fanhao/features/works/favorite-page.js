@@ -1,8 +1,8 @@
-import { cacheAgeText } from "../../../../js/cache.js?v=20260811-favorite-folders-01";
+import { cacheAgeText } from "../../../../js/cache.js?v=20260811-favorite-folders-02";
 import { formatNumber } from "../../../../js/format.js";
 import { createWorkListState } from "../../../../js/work-filtering.js?v=20260726-work-sort-01";
 import { workCollectionPath } from "./collection-request.js?v=20260720-fanhao-collection-filter-01";
-import { createFavoriteFolderFeature } from "./favorite-folders.js?v=20260811-favorite-folders-01";
+import { createFavoriteFolderFeature } from "./favorite-folders.js?v=20260811-favorite-folders-02";
 
 export function createFavoriteWorkViews(context) {
   const listState = createWorkListState({

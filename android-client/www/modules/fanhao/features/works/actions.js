@@ -1,7 +1,7 @@
 import { postJson } from "../../../../js/api.js?v=20260706-mobile-web-sync-01";
 import { readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=20260705-mobile-actions-01";
 import { openFanhaoSheet } from "../../sheet.js?v=20260731-mobile-action-sheet-01";
-import { syncFavoriteButton } from "./favorite-folders.js?v=20260811-favorite-folders-01";
+import { syncFavoriteButton } from "./favorite-folders.js?v=20260811-favorite-folders-02";
 export function createWorkActions(deps) {
   const {
     detailErrorMessage,
@@ -150,10 +150,10 @@ export function createWorkActions(deps) {
   }
 
   async function toggleFavorite(work, button) {
-    const previous = Boolean(work.favorite);
+    const wasFavorite = Boolean(work.favorite);
     button.disabled = true;
     button.classList.add("pending");
-    button.textContent = previous ? "取消中" : "收藏中";
+    button.textContent = wasFavorite ? "取消中" : "收藏中";
     try {
       const data = favoriteFolders
         ? await favoriteFolders.toggleFavorite(work, () => syncFavoriteButton(button, work))
@@ -167,7 +167,6 @@ export function createWorkActions(deps) {
       if (!favoriteFolders && data.user) onUserStateChange?.(data.user);
       updateCachedDetail(work).catch(() => {});
     } catch (error) {
-      work.favorite = previous;
       syncFavoriteButton(button, work);
       renderMessage(detailErrorMessage(error, "收藏状态更新失败，请稍后重试"), "error", false);
     } finally {

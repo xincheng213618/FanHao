@@ -767,6 +767,7 @@ async function verifyAndroidFavoriteFolders(browser) {
       let putAttempts = 0;
       let failNextMove = true;
       let pendingList = null;
+      let slowCreateResolve = null;
       let selectedFolderId = "";
       const calls = [];
       const work = { id: "work-1", favorite: true, favoriteFolderId: "default", favoriteFolderName: "默认收藏" };
@@ -779,9 +780,18 @@ async function verifyAndroidFavoriteFolders(browser) {
             return { folders: base.includes("fixture-b") ? [{ id: "b", name: "服务器 B", count: 0 }] : folders.map((folder) => ({ ...folder })) };
           }
           if (requestPath === "/api/favorite-folders" && method === "POST") {
+            const name = String(options.body?.name || "");
+            if (name === "慢速收藏") {
+              return new Promise((resolve) => {
+                slowCreateResolve = () => {
+                  const folder = { id: "slow-folder", name, count: 0 };
+                  folders = [...folders.filter((item) => item.id !== folder.id), folder];
+                  resolve({ folder: { ...folder }, folders: folders.map((item) => ({ ...item })) });
+                };
+              });
+            }
             postAttempts += 1;
             if (postAttempts === 1) throw Object.assign(new Error("fixture busy"), { status: 503, retryable: true });
-            const name = String(options.body?.name || "");
             let folder = folders.find((item) => item.name === name);
             if (!folder) {
               folder = { id: `folder-${folders.length}`, name, count: 0 };
@@ -822,23 +832,32 @@ async function verifyAndroidFavoriteFolders(browser) {
       window.androidFavoriteFolderFixture = {
         calls: () => [...calls],
         featureFolders: () => feature.folders(),
+        finishSlowCreate: () => slowCreateResolve?.(),
         metrics: () => ({ postAttempts, putAttempts, selectedFolderId, work: { ...work }, moveChangeCount }),
         openMove() {
           feature.openMovePicker(work, { onMoved: () => { moveChangeCount += 1; } });
         },
         async startStaleListRace() {
+          const callsBefore = calls.filter((call) => call.endsWith("GET /api/favorite-folders")).length;
           let release;
           const oldFolders = folders.map((folder) => ({ ...folder }));
           pendingList = {
-            promise: new Promise((resolve) => { release = () => resolve({ folders: oldFolders }); })
+            promise: new Promise((resolve) => {
+              release = () => {
+                pendingList = null;
+                resolve({ folders: oldFolders });
+              };
+            })
           };
           const stale = feature.loadFolders(true);
           await Promise.resolve();
           await feature.createFolder("竞态新夹");
           release();
           await stale;
-          pendingList = null;
-          return feature.folders();
+          return {
+            folders: feature.folders(),
+            getCount: calls.filter((call) => call.endsWith("GET /api/favorite-folders")).length - callsBefore
+          };
         },
         async switchServer() {
           activeUrl = "http://fixture-b.local";
@@ -878,8 +897,9 @@ async function verifyAndroidFavoriteFolders(browser) {
     assert.equal(metrics.work.favoriteFolderId, "planned", "successful Android favorite moves must reconcile the detail work state");
     assert.equal(metrics.moveChangeCount, callbacksAfterFailure + 1, "successful Android favorite moves must notify their UI exactly once");
 
-    const raceFolders = await page.evaluate(() => window.androidFavoriteFolderFixture.startStaleListRace());
-    assert(raceFolders.some((folder) => folder.name === "竞态新夹"), "an older folder GET must not overwrite a newer Android create response");
+    const staleListRace = await page.evaluate(() => window.androidFavoriteFolderFixture.startStaleListRace());
+    assert(staleListRace.folders.some((folder) => folder.name === "竞态新夹"), "an older folder GET must not overwrite a newer Android create response");
+    assert.equal(staleListRace.getCount, 2, "a mutation completed behind an initial Android folder GET must force one newer authoritative GET");
     const serverBFolders = await page.evaluate(() => window.androidFavoriteFolderFixture.switchServer());
     assert.deepEqual(serverBFolders.map((folder) => folder.id), ["b"], "Android favorite folder state must be partitioned by active server");
 
@@ -894,20 +914,51 @@ async function verifyAndroidFavoriteFolders(browser) {
     await page.locator(".favorite-folder-overlay").waitFor({ state: "detached", timeout: 5000 });
     assert.equal(await strip.locator(".favorite-folder-create").evaluate((element) => document.activeElement === element), true, "escaping Android favorite folder dialogs must restore focus to their trigger");
 
+    await strip.locator(".favorite-folder-create").click();
+    await createInput.fill("慢速收藏");
+    await page.locator(".favorite-folder-form button").click();
+    await page.waitForFunction(() => document.querySelector(".favorite-folder-sheet input")?.disabled === true, null, { timeout: 5000 });
+    assert.equal(await page.locator(".favorite-folder-sheet > header > button").evaluate((element) => document.activeElement === element), true, "pending Android favorite mutations must move focus to an enabled dialog control");
+    await page.keyboard.press("Tab");
+    assert.equal(await page.locator(".favorite-folder-sheet").evaluate((panel) => panel.contains(document.activeElement)), true, "pending Android favorite mutations must keep Tab focus inside the dialog");
+    await page.keyboard.press("Escape");
+    await page.locator(".favorite-folder-overlay").waitFor({ state: "detached", timeout: 5000 });
+    assert.equal(await strip.locator(".favorite-folder-create").evaluate((element) => document.activeElement === element), true, "pending Android favorite mutations must keep Escape and trigger restoration active");
+    await page.evaluate(() => window.androidFavoriteFolderFixture.finishSlowCreate());
+
     const mutationRace = await page.evaluate(async () => {
-      const { createFavoriteFolderFeature } = await import("/android-client/modules/fanhao/features/works/favorite-folders.js?mutation-race=1");
-      let resolveCreate;
-      let resolveToggle;
-      const createReply = new Promise((resolve) => { resolveCreate = resolve; });
-      const toggleReply = new Promise((resolve) => { resolveToggle = resolve; });
+      const [{ createFavoriteFolderFeature }, { createWorkActions }] = await Promise.all([
+        import("/android-client/modules/fanhao/features/works/favorite-folders.js?mutation-race=2"),
+        import("/android-client/modules/fanhao/features/works/actions.js?mutation-race=2")
+      ]);
+      const deferred = () => {
+        let resolve;
+        let reject;
+        const promise = new Promise((accept, decline) => {
+          resolve = accept;
+          reject = decline;
+        });
+        return { promise, reject, resolve };
+      };
+      const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+      const waitFor = async (predicate) => {
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          if (predicate()) return;
+          await tick();
+        }
+        throw new Error("favorite mutation fixture timed out");
+      };
       const defaultFolder = { id: "default", name: "默认收藏", count: 1 };
       const plannedFolder = { id: "planned", name: "待观看", count: 0 };
       const newFolder = { id: "new", name: "竞态新夹", count: 0 };
+
+      const createReply = deferred();
+      const toggleReply = deferred();
       const createFeature = createFavoriteFolderFeature({
         api: async (_base, requestPath, options = {}) => {
-          if (requestPath === "/api/favorite-folders" && options.method === "POST") return createReply;
+          if (requestPath === "/api/favorite-folders" && options.method === "POST") return createReply.promise;
           if (requestPath === "/api/favorite-folders") return { folders: [defaultFolder, plannedFolder, newFolder] };
-          if (requestPath === "/api/favorites/create-work") return toggleReply;
+          if (requestPath === "/api/favorites/create-work") return toggleReply.promise;
           throw new Error(`unexpected create race request: ${requestPath}`);
         },
         clearCachedJsonByPrefix: async () => {},
@@ -919,25 +970,22 @@ async function verifyAndroidFavoriteFolders(browser) {
       const createWork = { id: "create-work", favorite: false };
       const creating = createFeature.createFolder("竞态新夹");
       const toggling = createFeature.toggleFavorite(createWork);
-      resolveCreate({ folder: newFolder, folders: [defaultFolder, plannedFolder, newFolder] });
+      createReply.resolve({ folder: newFolder, folders: [defaultFolder, plannedFolder, newFolder] });
       await creating;
-      resolveToggle({ favorite: true, favoriteFolder: { folderId: "default", folderName: "默认收藏" }, folders: [defaultFolder, plannedFolder] });
+      toggleReply.resolve({ favorite: true, favoriteFolder: { folderId: "default", folderName: "默认收藏" }, folders: [defaultFolder, plannedFolder] });
       await toggling;
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await tick();
 
-      let resolveStaleToggle;
-      let rejectStaleToggle;
-      let resolveLatestMove;
-      const staleToggleReply = new Promise((resolve, reject) => {
-        resolveStaleToggle = resolve;
-        rejectStaleToggle = reject;
-      });
-      const latestMoveReply = new Promise((resolve) => { resolveLatestMove = resolve; });
+      const firstMoveReply = deferred();
+      const secondMoveReply = deferred();
+      let serializedMoveCalls = 0;
       const rollbackFeature = createFavoriteFolderFeature({
-        api: async (_base, requestPath) => {
-          if (requestPath === "/api/favorite-folders") return { folders: [defaultFolder, plannedFolder] };
-          if (requestPath === "/api/favorites/rollback-work") return staleToggleReply;
-          if (requestPath === "/api/favorites/rollback-work/folder") return latestMoveReply;
+        api: async (_base, requestPath, options = {}) => {
+          if (requestPath === "/api/favorite-folders") return { folders: [defaultFolder, plannedFolder, newFolder] };
+          if (requestPath === "/api/favorites/rollback-work/folder") {
+            serializedMoveCalls += 1;
+            return options.body?.folderId === "planned" ? firstMoveReply.promise : secondMoveReply.promise;
+          }
           throw new Error(`unexpected rollback race request: ${requestPath}`);
         },
         clearCachedJsonByPrefix: async () => {},
@@ -945,21 +993,166 @@ async function verifyAndroidFavoriteFolders(browser) {
         getLibrary: () => ({ works: [] }),
         pageDataService: { invalidate() {} }
       });
-      rollbackFeature.rememberFolders([defaultFolder, plannedFolder]);
+      rollbackFeature.rememberFolders([defaultFolder, plannedFolder, newFolder]);
       const rollbackWork = { id: "rollback-work", favorite: true, favoriteFolderId: "default", favoriteFolderName: "默认收藏" };
-      const staleToggle = rollbackFeature.toggleFavorite(rollbackWork).catch(() => {});
-      const latestMove = rollbackFeature.moveFavorite(rollbackWork, "planned");
-      resolveLatestMove({ favorite: { folderId: "planned", folderName: "待观看" }, folders: [defaultFolder, { ...plannedFolder, count: 1 }] });
-      await latestMove;
-      rejectStaleToggle(new Error("stale toggle failed"));
-      await staleToggle;
+      const firstMove = rollbackFeature.moveFavorite(rollbackWork, "planned").catch(() => {});
+      const secondMove = rollbackFeature.moveFavorite(rollbackWork, "new").catch(() => {});
+      await tick();
+      const callsBeforeFirstSettled = serializedMoveCalls;
+      firstMoveReply.reject(new Error("first move failed"));
+      await firstMove;
+      await waitFor(() => serializedMoveCalls === 2);
+      secondMoveReply.reject(new Error("second move failed"));
+      await secondMove;
+      await tick();
+
+      const actionToggleReply = deferred();
+      const actionMoveReply = deferred();
+      let actionMoveCalls = 0;
+      const actionWork = { id: "action-work", favorite: true, favoriteFolderId: "default", favoriteFolderName: "默认收藏" };
+      const actionFeature = createFavoriteFolderFeature({
+        api: async (_base, requestPath) => {
+          if (requestPath === "/api/favorite-folders") return { folders: [{ ...defaultFolder, count: 0 }, { ...plannedFolder, count: 1 }] };
+          if (requestPath === "/api/favorites/action-work") return actionToggleReply.promise;
+          if (requestPath === "/api/favorites/action-work/folder") {
+            actionMoveCalls += 1;
+            return actionMoveReply.promise;
+          }
+          throw new Error(`unexpected action race request: ${requestPath}`);
+        },
+        clearCachedJsonByPrefix: async () => {},
+        getActiveUrl: () => "http://action-race.local",
+        getLibrary: () => ({ works: [actionWork] }),
+        pageDataService: { invalidate() {} }
+      });
+      actionFeature.rememberFolders([defaultFolder, plannedFolder]);
+      const actionMessages = [];
+      const actions = createWorkActions({
+        detailErrorMessage: (error) => error.message,
+        extractWorkCode: () => "",
+        favoriteFolders: actionFeature,
+        formatNumber: String,
+        getActiveUrl: () => "http://action-race.local",
+        renderMessage: (message) => actionMessages.push(message),
+        renderWorkDetail() {}
+      });
+      const actionRow = actions.createActionRow(actionWork);
+      document.body.append(actionRow);
+      actionRow.querySelector(".favorite-action").click();
+      await tick();
+      const queuedMove = actionFeature.moveFavorite(actionWork, "planned");
+      await tick();
+      const actionCallsBeforeToggleFailed = actionMoveCalls;
+      actionToggleReply.reject(new Error("old toggle failed"));
+      await waitFor(() => actionMoveCalls === 1);
+      actionMoveReply.resolve({
+        favorite: { folderId: "planned", folderName: "待观看" },
+        folders: [{ ...defaultFolder, count: 0 }, { ...plannedFolder, count: 1 }]
+      });
+      await queuedMove;
+      await tick();
+      actionRow.remove();
+
+      const firstUserReply = deferred();
+      const secondUserReply = deferred();
+      const userUpdates = [];
+      const userWorks = [{ id: "user-1", favorite: false }, { id: "user-2", favorite: false }];
+      const userFeature = createFavoriteFolderFeature({
+        api: async (_base, requestPath) => {
+          if (requestPath === "/api/favorites/user-1") return firstUserReply.promise;
+          if (requestPath === "/api/favorites/user-2") return secondUserReply.promise;
+          if (requestPath === "/api/favorite-folders") return { folders: [{ ...defaultFolder, count: 1 }] };
+          throw new Error(`unexpected user race request: ${requestPath}`);
+        },
+        clearCachedJsonByPrefix: async () => {},
+        getActiveUrl: () => "http://user-race.local",
+        getLibrary: () => ({ works: userWorks }),
+        onUserStateChange: (user) => userUpdates.push({ ...user }),
+        pageDataService: { invalidate() {} }
+      });
+      userFeature.rememberFolders([{ ...defaultFolder, count: 0 }]);
+      userUpdates.length = 0;
+      const firstUserMutation = userFeature.toggleFavorite(userWorks[0]);
+      const secondUserMutation = userFeature.toggleFavorite(userWorks[1]).catch(() => {});
+      await tick();
+      secondUserReply.reject(new Error("second user mutation failed"));
+      await secondUserMutation;
+      firstUserReply.resolve({
+        favorite: true,
+        favoriteFolder: { folderId: "default", folderName: "默认收藏" },
+        folders: [{ ...defaultFolder, count: 1 }],
+        user: { favoriteCount: 1 }
+      });
+      await firstUserMutation;
+      await waitFor(() => userUpdates.some((user) => user.favoriteCount === 1));
+
+      const refreshReplies = [];
+      let refreshGetCalls = 0;
+      const refreshFeature = createFavoriteFolderFeature({
+        api: async (_base, requestPath, options = {}) => {
+          if (requestPath === "/api/favorite-folders" && options.method === "POST") {
+            const id = String(options.body?.name || "").toLowerCase();
+            const folder = { id, name: options.body.name, count: 0 };
+            return { folder, folders: [{ ...defaultFolder, count: 0 }, folder] };
+          }
+          if (requestPath === "/api/favorite-folders") {
+            refreshGetCalls += 1;
+            const reply = deferred();
+            refreshReplies.push(reply);
+            return reply.promise;
+          }
+          throw new Error(`unexpected refresh race request: ${requestPath}`);
+        },
+        clearCachedJsonByPrefix: async () => {},
+        getActiveUrl: () => "http://refresh-race.local",
+        pageDataService: { invalidate() {} }
+      });
+      refreshFeature.rememberFolders([{ ...defaultFolder, count: 0 }]);
+      await refreshFeature.createFolder("B");
+      await waitFor(() => refreshGetCalls === 1);
+      await refreshFeature.createFolder("C");
+      refreshReplies[0].resolve({ folders: [defaultFolder, { id: "b", name: "B", count: 0 }] });
+      await waitFor(() => refreshGetCalls === 2);
+      refreshReplies[1].resolve({ folders: [{ ...defaultFolder, count: 1 }, { id: "b", name: "B", count: 0 }, { id: "c", name: "C", count: 0 }] });
+      await waitFor(() => refreshFeature.folders().find((folder) => folder.id === "default")?.count === 1);
+      await tick();
+      await refreshFeature.createFolder("D");
+      await waitFor(() => refreshGetCalls === 3);
+      refreshReplies[2].reject(new Error("authoritative refresh failed"));
+      await tick();
+      await tick();
+      const refreshCallsAfterFailure = refreshGetCalls;
+      await refreshFeature.createFolder("E");
+      await waitFor(() => refreshGetCalls === 4);
+      refreshReplies[3].resolve({ folders: [{ ...defaultFolder, count: 2 }, { id: "b", name: "B", count: 0 }, { id: "c", name: "C", count: 0 }, { id: "d", name: "D", count: 0 }, { id: "e", name: "E", count: 0 }] });
+      await waitFor(() => refreshFeature.folders().find((folder) => folder.id === "default")?.count === 2);
+
       return {
         folders: createFeature.folders().map((folder) => folder.id),
-        rollbackWork: { ...rollbackWork }
+        rollbackWork: { ...rollbackWork },
+        callsBeforeFirstSettled,
+        actionCallsBeforeToggleFailed,
+        actionMessages,
+        actionWork: { ...actionWork },
+        userUpdates,
+        refreshCallsAfterFailure,
+        refreshGetCalls,
+        refreshFolders: refreshFeature.folders()
       };
     });
     assert(mutationRace.folders.includes("new"), "an older Android mutation response must merge instead of removing a concurrently created folder");
-    assert.equal(mutationRace.rollbackWork.favoriteFolderId, "planned", "a stale failed Android toggle must not roll back a later successful move");
+    assert.equal(mutationRace.folders.filter((folderId) => folderId === "new").length, 1, "Android create responses must not duplicate a folder returned in both folder and folders");
+    assert.equal(mutationRace.callsBeforeFirstSettled, 1, "same-work Android favorite mutations must serialize their requests");
+    assert.equal(mutationRace.rollbackWork.favoriteFolderId, "default", "two failed serialized Android moves must converge to the original work folder");
+    assert.equal(mutationRace.actionCallsBeforeToggleFailed, 0, "a later Android move must wait for the earlier same-work toggle");
+    assert.equal(mutationRace.actionWork.favorite, true, "an older failed Android toggle must not reapply an outer rollback after a later move succeeds");
+    assert.equal(mutationRace.actionWork.favoriteFolderId, "planned", "an older failed Android toggle must preserve the later successful folder move");
+    assert(mutationRace.actionMessages.includes("old toggle failed"), "serialized Android favorite failures must remain visible to the user");
+    assert(mutationRace.userUpdates.some((user) => user.favoriteCount === 1 && Object.keys(user).length === 1), "authoritative Android folder refreshes must publish a partial favorite count after mixed mutation outcomes");
+    assert.equal(mutationRace.refreshCallsAfterFailure, 3, "a failed Android favorite refresh must pause instead of retrying forever");
+    assert.equal(mutationRace.refreshGetCalls, 4, "Android favorite refreshes must follow stale and failed GETs with the next required authoritative request");
+    assert.equal(new Set(mutationRace.refreshFolders.map((folder) => folder.id)).size, mutationRace.refreshFolders.length, "Android authoritative favorite state must not retain duplicate folders");
+    assert.equal(mutationRace.refreshFolders.find((folder) => folder.id === "default")?.count, 2, "Android favorite counts must converge to the final authoritative refresh");
   } finally {
     await page.close();
   }

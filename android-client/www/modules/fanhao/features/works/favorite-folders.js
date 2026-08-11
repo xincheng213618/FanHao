@@ -1,5 +1,5 @@
-import { fetchJson } from "../../../../js/api.js?v=20260811-favorite-folders-01";
-import { clearCachedJsonByPrefix } from "../../../../js/cache.js?v=20260811-favorite-folders-01";
+import { fetchJson } from "../../../../js/api.js?v=20260811-favorite-folders-02";
+import { clearCachedJsonByPrefix } from "../../../../js/cache.js?v=20260811-favorite-folders-02";
 
 export const FAVORITE_FOLDER_RETRY_DELAYS_MS = Object.freeze([180]);
 
@@ -35,7 +35,11 @@ export function createFavoriteFolderFeature(context = {}) {
   let mutationRevision = 0;
   let pendingMutations = 0;
   let folderRefresh = null;
-  const workMutationRevisions = new Map();
+  let refreshRequestedRevision = 0;
+  let refreshedRevision = 0;
+  let failedRefreshRevision = -1;
+  let activeSheetClose = null;
+  const workMutationTails = new Map();
 
   function ensureScope(baseUrl = context.getActiveUrl()) {
     const normalized = String(baseUrl || "").replace(/\/+$/u, "");
@@ -46,21 +50,30 @@ export function createFavoriteFolderFeature(context = {}) {
     mutationRevision = 0;
     pendingMutations = 0;
     folderRefresh = null;
-    workMutationRevisions.clear();
+    refreshRequestedRevision = 0;
+    refreshedRevision = 0;
+    failedRefreshRevision = -1;
+    workMutationTails.clear();
     return normalized;
   }
 
   function rememberFolders(nextFolders, options = {}) {
     ensureScope();
     if (!Array.isArray(nextFolders)) return folders;
-    const next = nextFolders.map((folder) => ({
-      ...folder,
-      count: Math.max(0, Number(folder?.count || 0)),
-      id: String(folder?.id || ""),
-      name: String(folder?.name || "收藏夹")
-    })).filter((folder) => folder.id);
+    const nextById = new Map();
+    for (const folder of nextFolders) {
+      const normalized = {
+        ...folder,
+        count: Math.max(0, Number(folder?.count || 0)),
+        id: String(folder?.id || ""),
+        name: String(folder?.name || "收藏夹")
+      };
+      if (normalized.id) nextById.set(normalized.id, normalized);
+    }
+    const next = [...nextById.values()];
     if (!options.merge) {
       folders = next;
+      syncFavoriteCount();
       return folders;
     }
     const currentById = new Map(folders.map((folder) => [folder.id, folder]));
@@ -86,21 +99,37 @@ export function createFavoriteFolderFeature(context = {}) {
     return data;
   }
 
-  async function loadFolders(force = false) {
+  async function loadFolderState(force = false) {
     const requestBaseUrl = ensureScope();
-    if (folders.length && !force) return folders;
-    if (listRequest) return listRequest;
-    const requestRevision = mutationRevision;
-    const activeRequest = request("/api/favorite-folders").then((data) => {
-      if (activeBaseUrl !== requestBaseUrl || mutationRevision !== requestRevision) return folders;
-      return rememberFolders(data?.folders);
-    });
-    listRequest = activeRequest;
-    try {
-      return await activeRequest;
-    } finally {
-      if (listRequest === activeRequest) listRequest = null;
+    if (folders.length && !force) return { applied: true, folders, revision: mutationRevision };
+    while (activeBaseUrl === requestBaseUrl) {
+      if (force && pendingMutations) return { applied: false, folders, revision: mutationRevision };
+      if (listRequest) {
+        const activeRequest = listRequest;
+        const result = await activeRequest.promise;
+        if (!force || (result.applied && result.revision === mutationRevision)) return result;
+        continue;
+      }
+
+      const requestRevision = mutationRevision;
+      let activeRequest;
+      const promise = request("/api/favorite-folders").then((data) => {
+        const applied = activeBaseUrl === requestBaseUrl && mutationRevision === requestRevision;
+        if (applied) rememberFolders(data?.folders);
+        return { applied, folders, revision: requestRevision };
+      }).finally(() => {
+        if (listRequest === activeRequest) listRequest = null;
+      });
+      activeRequest = { promise, revision: requestRevision, scope: requestBaseUrl };
+      listRequest = activeRequest;
+      const result = await promise;
+      if (!force || result.applied) return result;
     }
+    return { applied: false, folders, revision: mutationRevision };
+  }
+
+  async function loadFolders(force = false) {
+    return (await loadFolderState(force)).folders;
   }
 
   async function createFolder(name) {
@@ -110,7 +139,6 @@ export function createFavoriteFolderFeature(context = {}) {
     try {
       const data = await request("/api/favorite-folders", { method: "POST", body: { name: cleanName } });
       rememberFolders([...(data?.folders || []), ...(data?.folder ? [data.folder] : [])], { merge: true });
-      if (isLatestMutation(mutation) && data?.user) context.onUserStateChange?.(data.user);
       await invalidateCollections();
       return data?.folder;
     } finally {
@@ -119,62 +147,52 @@ export function createFavoriteFolderFeature(context = {}) {
   }
 
   async function toggleFavorite(work, onOptimisticChange = () => {}) {
-    const snapshot = favoriteSnapshot(work);
     const mutation = beginMutation(work.id);
-    work.favorite = !snapshot.favorite;
-    if (!work.favorite) applyFavoriteFolder(work, null);
-    onOptimisticChange(work);
-    try {
-      const data = await request(`/api/favorites/${encodeURIComponent(work.id)}`, { method: "POST", body: {} });
-      if (isLatestWorkMutation(work.id, mutation)) {
+    return enqueueWorkMutation(mutation, async () => {
+      const snapshot = favoriteSnapshot(work);
+      work.favorite = !snapshot.favorite;
+      if (!work.favorite) applyFavoriteFolder(work, null);
+      onOptimisticChange(work);
+      try {
+        const data = await request(`/api/favorites/${encodeURIComponent(work.id)}`, { method: "POST", body: {} });
         applyFavoritePayload(work, data);
         syncLibraryWork(work);
-      }
-      rememberFolders(data?.folders, { merge: true });
-      if (isLatestMutation(mutation) && data?.user) context.onUserStateChange?.(data.user);
-      await invalidateWork(work.id);
-      return data;
-    } catch (error) {
-      if (isLatestWorkMutation(work.id, mutation)) {
+        rememberFolders(data?.folders, { merge: true });
+        await invalidateWork(work.id);
+        return data;
+      } catch (error) {
         restoreFavoriteSnapshot(work, snapshot);
         syncLibraryWork(work);
         onOptimisticChange(work);
+        throw error;
       }
-      throw error;
-    } finally {
-      finishMutation(mutation);
-    }
+    });
   }
 
   async function moveFavorite(work, folderId, onOptimisticChange = () => {}) {
-    const snapshot = favoriteSnapshot(work);
     const mutation = beginMutation(work.id);
-    const target = folders.find((folder) => folder.id === String(folderId || ""));
-    applyFavoriteFolder(work, target ? { folderId: target.id, folderName: target.name } : null);
-    onOptimisticChange(work);
-    try {
-      const data = await request(`/api/favorites/${encodeURIComponent(work.id)}/folder`, {
-        method: "PUT",
-        body: { folderId }
-      });
-      if (isLatestWorkMutation(work.id, mutation)) {
+    return enqueueWorkMutation(mutation, async () => {
+      const snapshot = favoriteSnapshot(work);
+      const target = folders.find((folder) => folder.id === String(folderId || ""));
+      applyFavoriteFolder(work, target ? { folderId: target.id, folderName: target.name } : null);
+      onOptimisticChange(work);
+      try {
+        const data = await request(`/api/favorites/${encodeURIComponent(work.id)}/folder`, {
+          method: "PUT",
+          body: { folderId }
+        });
         applyFavoritePayload(work, { favorite: true, favoriteFolder: data?.favorite });
         syncLibraryWork(work);
-      }
-      rememberFolders(data?.folders, { merge: true });
-      if (isLatestMutation(mutation) && data?.user) context.onUserStateChange?.(data.user);
-      await invalidateWork(work.id);
-      return data;
-    } catch (error) {
-      if (isLatestWorkMutation(work.id, mutation)) {
+        rememberFolders(data?.folders, { merge: true });
+        await invalidateWork(work.id);
+        return data;
+      } catch (error) {
         restoreFavoriteSnapshot(work, snapshot);
         syncLibraryWork(work);
         onOptimisticChange(work);
+        throw error;
       }
-      throw error;
-    } finally {
-      finishMutation(mutation);
-    }
+    });
   }
 
   function beginMutation(workId = "") {
@@ -182,24 +200,46 @@ export function createFavoriteFolderFeature(context = {}) {
     mutationRevision += 1;
     pendingMutations += 1;
     const mutation = { revision: mutationRevision, scope: activeBaseUrl, workId: String(workId || "") };
-    if (mutation.workId) workMutationRevisions.set(mutation.workId, mutation.revision);
     return mutation;
   }
 
-  function isLatestMutation(mutation) {
-    return mutation.scope === activeBaseUrl && mutation.revision === mutationRevision;
-  }
-
-  function isLatestWorkMutation(workId, mutation) {
-    return mutation.scope === activeBaseUrl && workMutationRevisions.get(String(workId || "")) === mutation.revision;
+  function enqueueWorkMutation(mutation, operation) {
+    const key = `${mutation.scope}\n${mutation.workId}`;
+    const previous = workMutationTails.get(key) || Promise.resolve();
+    const result = previous.then(() => {
+      if (mutation.scope !== activeBaseUrl) throw new Error("服务器已切换，请重新操作");
+      return operation();
+    }).finally(() => finishMutation(mutation));
+    let tail;
+    tail = result.catch(() => {}).finally(() => {
+      if (workMutationTails.get(key) === tail) workMutationTails.delete(key);
+    });
+    workMutationTails.set(key, tail);
+    return result;
   }
 
   function finishMutation(mutation) {
     if (mutation.scope !== activeBaseUrl) return;
     pendingMutations = Math.max(0, pendingMutations - 1);
+    refreshRequestedRevision = Math.max(refreshRequestedRevision, mutation.revision);
+    scheduleFolderRefresh();
+  }
+
+  function scheduleFolderRefresh() {
     if (pendingMutations || folderRefresh) return;
-    const refresh = loadFolders(true).catch(() => folders).finally(() => {
+    if (refreshRequestedRevision <= refreshedRevision || refreshRequestedRevision <= failedRefreshRevision) return;
+    const refreshScope = activeBaseUrl;
+    const requestedRevision = refreshRequestedRevision;
+    let refresh;
+    refresh = loadFolderState(true).then((result) => {
+      if (refreshScope !== activeBaseUrl || !result.applied) return;
+      refreshedRevision = Math.max(refreshedRevision, result.revision);
+      failedRefreshRevision = -1;
+    }).catch(() => {
+      if (refreshScope === activeBaseUrl) failedRefreshRevision = Math.max(failedRefreshRevision, requestedRevision);
+    }).finally(() => {
       if (folderRefresh === refresh) folderRefresh = null;
+      if (refreshScope === activeBaseUrl) scheduleFolderRefresh();
     });
     folderRefresh = refresh;
   }
@@ -245,7 +285,7 @@ export function createFavoriteFolderFeature(context = {}) {
   }
 
   function openFolderSheet(options = {}) {
-    document.querySelector(".favorite-folder-overlay")?.remove();
+    activeSheetClose?.();
     const trigger = options.trigger;
     const overlay = document.createElement("div");
     overlay.className = "favorite-folder-overlay";
@@ -288,13 +328,18 @@ export function createFavoriteFolderFeature(context = {}) {
     const close = () => {
       if (closed) return;
       closed = true;
+      document.removeEventListener("keydown", handleDocumentKeydown, true);
       overlay.remove();
+      if (activeSheetClose === close) activeSheetClose = null;
       if (trigger?.isConnected) trigger.focus({ preventScroll: true });
     };
     const setPending = (pending) => {
+      const moveFocus = pending && panel.contains(document.activeElement) && document.activeElement !== closeButton;
       input.disabled = pending;
       submit.disabled = pending;
       for (const button of list.querySelectorAll("button")) button.disabled = pending;
+      panel.setAttribute("aria-busy", pending ? "true" : "false");
+      if (moveFocus || (pending && !panel.contains(document.activeElement))) closeButton.focus({ preventScroll: true });
     };
     const renderOptions = () => {
       list.innerHTML = "";
@@ -317,9 +362,11 @@ export function createFavoriteFolderFeature(context = {}) {
       status.textContent = "正在移动";
       try {
         await moveFavorite(options.work, folderId, options.onMoved);
+        if (closed) return;
         status.textContent = "已移动";
         close();
       } catch (error) {
+        if (closed) return;
         status.textContent = error?.message || "移动收藏失败";
         setPending(false);
         focusTarget?.focus();
@@ -328,14 +375,15 @@ export function createFavoriteFolderFeature(context = {}) {
 
     closeButton.addEventListener("click", close);
     backdrop.addEventListener("click", close);
-    overlay.addEventListener("keydown", (event) => {
+    const handleDocumentKeydown = (event) => {
+      if (!overlay.isConnected) return;
       if (event.key === "Escape") {
         event.preventDefault();
         close();
         return;
       }
       trapFocus(event, panel);
-    });
+    };
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       status.textContent = "";
@@ -348,6 +396,7 @@ export function createFavoriteFolderFeature(context = {}) {
       setPending(true);
       try {
         const folder = await createFolder(name);
+        if (closed) return;
         if (options.work) {
           renderOptions();
           await performMove(folder.id);
@@ -356,12 +405,15 @@ export function createFavoriteFolderFeature(context = {}) {
         options.onCreated?.(folder.id);
         close();
       } catch (error) {
+        if (closed) return;
         status.textContent = error?.message || "创建收藏夹失败";
         setPending(false);
         input.focus();
       }
     });
+    document.addEventListener("keydown", handleDocumentKeydown, true);
     document.body.append(overlay);
+    activeSheetClose = close;
     input.focus({ preventScroll: true });
     status.textContent = "正在读取收藏夹";
     loadFolders().then(() => {
@@ -394,6 +446,11 @@ export function createFavoriteFolderFeature(context = {}) {
   function syncLibraryWork(work) {
     const libraryWork = context.getLibrary?.()?.works?.find((item) => item.id === work.id);
     if (libraryWork && libraryWork !== work) Object.assign(libraryWork, favoriteSnapshot(work));
+  }
+
+  function syncFavoriteCount() {
+    const favoriteCount = folders.reduce((sum, folder) => sum + Math.max(0, Number(folder.count || 0)), 0);
+    context.onUserStateChange?.({ favoriteCount });
   }
 
   return {
@@ -437,7 +494,10 @@ function trapFocus(event, panel) {
   if (!focusable.length) return;
   const first = focusable[0];
   const last = focusable.at(-1);
-  if (event.shiftKey && document.activeElement === first) {
+  if (!panel.contains(document.activeElement)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  } else if (event.shiftKey && document.activeElement === first) {
     event.preventDefault();
     last.focus();
   } else if (!event.shiftKey && document.activeElement === last) {

@@ -8,7 +8,7 @@ import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-
 import { personDetailPath } from "./features/people/detail-request.js?v=20260721-fanhao-person-year-15";
 import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260721-fanhao-person-categories-21";
 import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=20260721-fanhao-person-year-15";
-import { createWorkActions } from "./features/works/actions.js?v=20260811-favorite-folders-01";
+import { createWorkActions } from "./features/works/actions.js?v=20260811-favorite-folders-02";
 import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=20260730-fanhao-work-detail-ui-46";
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
 

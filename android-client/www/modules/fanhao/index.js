@@ -1,3 +1,3 @@
-export { createDetailViews } from "./detail-views.js?v=20260811-favorite-folders-01";
+export { createDetailViews } from "./detail-views.js?v=20260811-favorite-folders-02";
 export { createPeopleViews } from "./people-views.js?v=20260730-fanhao-people-card-ui-47";
-export { createWorkViews } from "./work-views.js?v=20260811-favorite-folders-01";
+export { createWorkViews } from "./work-views.js?v=20260811-favorite-folders-02";

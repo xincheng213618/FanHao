@@ -1,5 +1,5 @@
-import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260811-favorite-folders-01";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260811-favorite-folders-01";
+import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260811-favorite-folders-02";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260811-favorite-folders-02";
 import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=20260730-fanhao-nav-ui-44";
 
 export function createAndroidModule({ host }) {
