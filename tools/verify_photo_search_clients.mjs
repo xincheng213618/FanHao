@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { photoCatalogCollections } from "../public/modules/content-index/photo-catalog.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), "utf8");
@@ -15,6 +16,8 @@ assert(webPage.includes("renderGalleryView({ preserveScroll: true })"), "Async W
 
 const router = read("public", "js", "router.js");
 assert(router.includes("photoSearch ? \"all\""), "A direct Web photo search must default to the full library");
+assert(router.includes('galleryPhotoView === "collections" && !photoSearch ? "count" : "updated"'), "The photo collection catalog must default to count order");
+assert(router.includes("next.gallerySort !== defaultGallerySort"), "The default photo collection order must keep the clean catalog URL");
 
 const webRenderer = read("public", "modules", "content-index", "gallery-renderer.js");
 assert(!webRenderer.includes('createGalleryFilterField("文件夹"'), "Web photo controls must not render the folder dropdown");
@@ -24,6 +27,9 @@ for (const marker of [
   "gallerySearchMatchText",
   "多个词可同时匹配",
   "startingPhotoSearch",
+  "photoSearchActive",
+  '[["updated", "相关性排序"]]',
+  'state.gallery.sort = "updated"',
   "search.value = nextQuery",
   "controls.append(searchRow, hierarchy)",
   "按相关性排序",
@@ -47,6 +53,23 @@ for (const marker of [
 const webStyles = read("public", "modules", "content-index", "styles.css");
 assert(webStyles.includes("grid-template-columns: repeat(4, minmax(0, 1fr));"), "Desktop media lists must render four items per row");
 assert(webStyles.includes("@media (max-width: 1100px)"), "The four-column media list must retain a responsive tablet fallback");
+
+const photoStyles = read("public", "modules", "photos", "styles.css");
+assert(photoStyles.includes("grid-template-columns: repeat(6, minmax(0, 1fr));"), "Desktop photo catalogs must render six items per row");
+assert(photoStyles.includes(".gallery-photo-catalog-card .gallery-card-badges span"), "Photo catalog cards must expose their issue-count badge styling");
+
+const catalogItems = photoCatalogCollections([
+  {
+    category: "分类甲",
+    rootLabel: "根目录",
+    collections: [
+      { id: "new", title: "最近", albumCount: 2, size: 20, updatedAt: "2026-08-10T00:00:00.000Z" },
+      { id: "large", title: "最多", albumCount: 20, size: 200, updatedAt: "2026-01-01T00:00:00.000Z" }
+    ]
+  }
+], "updated");
+assert.deepEqual(catalogItems.map((item) => item.id), ["new", "large"], "Photo catalog sorting must follow the selected order");
+assert.equal(catalogItems[0].catalogCategory, "分类甲", "Flattened photo collections must keep their category context");
 
 const androidViews = read("android-client", "www", "platform", "content-index", "channel-views.js");
 for (const marker of [

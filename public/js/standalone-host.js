@@ -294,7 +294,7 @@ function createStandaloneState(view) {
       subCategory: "all",
       person: "all",
       photoDate: "all",
-      sort: "updated",
+      sort: view === "gallery" ? "count" : "updated",
       visibleLimit: 80,
       loading: false,
       data: null,

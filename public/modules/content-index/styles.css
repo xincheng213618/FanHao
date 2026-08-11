@@ -1,3 +1,5 @@
+@import "../photos/styles.css?v=20260810-photo-catalog-01";
+
 .gallery-shell {
   --gallery-surface: #f5f2ec;
   --gallery-panel: #fffdfa;

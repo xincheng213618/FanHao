@@ -212,7 +212,13 @@ export function routeUrl(route, options = {}) {
       params.set(["tv", "media"].includes(next.galleryMode) ? "series" : "person", next.galleryPerson);
     }
     if (next.galleryMode === "photo" && next.galleryPhotoDate && next.galleryPhotoDate !== "all") params.set("date", next.galleryPhotoDate);
-    if (next.gallerySort && next.gallerySort !== "updated") params.set("sort", next.gallerySort);
+    const defaultGallerySort = next.galleryMode === "photo"
+      && next.galleryPhotoView === "collections"
+      && !next.galleryPhotoCollection
+      && !next.galleryQuery
+      ? "count"
+      : "updated";
+    if (next.gallerySort && next.gallerySort !== defaultGallerySort) params.set("sort", next.gallerySort);
   } else if (next.view === "novels") {
     if (next.novelQuery) params.set("q", next.novelQuery);
     if (next.novelCategory && next.novelCategory !== "all") params.set("category", next.novelCategory);
@@ -330,7 +336,7 @@ function shouldWriteGalleryCategory(route = {}) {
 
 function normalizeGallerySort(value) {
   const sort = String(value || "updated").trim();
-  return ["updated", "rating", "year", "size", "title"].includes(sort) ? sort : "updated";
+  return ["updated", "count", "rating", "year", "size", "title"].includes(sort) ? sort : "updated";
 }
 
 function normalizeNovelSort(value) {
@@ -416,11 +422,12 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
   if (!galleryMode) return null;
   const galleryQuery = params.get("q") || params.get("search") || "";
   const photoSearch = galleryMode === "photo" && Boolean(String(galleryQuery).trim());
+  const galleryPhotoView = galleryMode === "photo" && (params.get("photoView") === "albums" || (photoSearch && !params.has("photoView"))) ? "albums" : "collections";
 
   const route = {
     view: "gallery",
     galleryMode,
-    galleryPhotoView: galleryMode === "photo" && (params.get("photoView") === "albums" || (photoSearch && !params.has("photoView"))) ? "albums" : "collections",
+    galleryPhotoView,
     galleryPhotoCollection: params.get("collection") || "",
     galleryAlbumId: "",
     galleryComicId: "",
@@ -432,7 +439,7 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     gallerySubCategory: params.get("subCategory") || params.get("folder") || "all",
     galleryPerson: ["tv", "media"].includes(galleryMode) ? params.get("series") || params.get("person") || "all" : params.get("person") || "all",
     galleryPhotoDate: galleryMode === "photo" ? params.get("date") || "all" : "all",
-    gallerySort: normalizeGallerySort(params.get("sort")),
+    gallerySort: normalizeGallerySort(params.get("sort") || (galleryMode === "photo" && galleryPhotoView === "collections" && !photoSearch ? "count" : "updated")),
     personId: "",
     q: "",
     workId: "",

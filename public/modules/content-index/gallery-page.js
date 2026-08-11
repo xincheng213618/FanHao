@@ -145,7 +145,7 @@ export function createGalleryPage(deps) {
       person: ["photo", "western", "media", "tv"].includes(state.gallery.mode) ? state.gallery.person || "all" : "",
       date: state.gallery.mode === "photo" ? state.gallery.photoDate || "all" : "",
       query: state.gallery.query || "",
-      sort: ["media", "movie"].includes(state.gallery.mode) ? state.gallery.sort || "updated" : ""
+      sort: ["photo", "media", "movie"].includes(state.gallery.mode) ? state.gallery.sort || "updated" : ""
     });
   }
 
@@ -157,7 +157,7 @@ export function createGalleryPage(deps) {
       mode: state.gallery.mode,
       limit: String(Math.max(1, Number(options.limit || state.gallery.visibleLimit || 80))),
       offset: String(Math.max(0, Number(options.offset || 0))),
-      sort: query ? "relevance" : collectionIndex ? "count" : selectedSeries ? "title" : state.gallery.sort || "updated"
+      sort: query ? "relevance" : selectedSeries ? "title" : state.gallery.sort || "updated"
     });
     if (query) params.set("q", query);
     if (state.gallery.mode === "photo") {
