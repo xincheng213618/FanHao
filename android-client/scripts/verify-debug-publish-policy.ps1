@@ -255,6 +255,22 @@ try {
     Assert-Throws { Get-Plan -Root (Join-Path $case "publish") -Target (Join-Path $case "missing.apk") -HasCode $true -Code 26081191 -Name " `t " } "non-empty after trimming" "blank publish versionName"
   }
 
+  Invoke-PolicyTest "ADB device parser accepts authorized rows and rejects every other state" {
+    $null = . $BuildScript -IdentityOnly
+    Assert-True (Test-FanHaoAuthorizedAdbDeviceLine "CYL123       device product:example model:phone transport_id:1") "space-separated authorized ADB row"
+    Assert-True (Test-FanHaoAuthorizedAdbDeviceLine "R58M123`tdevice usb:1-1") "tab-separated authorized ADB row"
+    foreach ($line in @(
+      "CYL123       offline product:example",
+      "CYL123       unauthorized usb:1-1",
+      "????????????  no permissions; see [https://developer.android.com/studio/command-line/adb#Enabling]",
+      "List of devices attached",
+      "",
+      "CYL123       deviceX product:example"
+    )) {
+      Assert-True (-not (Test-FanHaoAuthorizedAdbDeviceLine $line)) "non-authorized ADB row must not be accepted: $line"
+    }
+  }
+
   Invoke-PolicyTest "entry scripts reject bad inputs before build mutation" {
     $beforeBuildApk = Get-FileFingerprint $RealBuildApk
     $savedEnvironmentCode = $env:FANHAO_VERSION_CODE

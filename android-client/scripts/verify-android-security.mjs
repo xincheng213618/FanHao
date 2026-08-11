@@ -134,6 +134,8 @@ assert(buildDebug.includes("$VersionContract.CurrentVersionCode"), "no-argument 
 assert(buildDebug.includes("$VersionContract.DefaultVersionName"), "no-argument Android builds must use the tracked default versionName");
 assert(buildDebug.includes("Assert-FanHaoInstallIdentity"), "the build entry must apply the shared tracked-identity install gate");
 assert(buildDebug.includes("$Install -and $IdentityOnly"), "identity-only probing must never silently replace an install request");
+assert(buildDebug.includes("function Test-FanHaoAuthorizedAdbDeviceLine"), "the build entry must use a dedicated authorized-ADB device parser");
+assert(buildDebug.includes("'^\\S+\\s+device(?:\\s|$)'"), "the ADB parser must accept only a non-empty serial followed by the exact device state");
 assert(buildDebug.includes('"-PfanhaoLocalOnly=true"'), "the validated local-only build path must explicitly authorize Gradle's reserved namespace");
 assert(buildDebug.includes("Assert-FanHaoDebugApkIdentity"), "the Android build must verify actual APK package, version, and signer identity");
 assert(buildDebug.includes("$Install -and $LocalOnly"), "local-only high version builds must never enter the install path");

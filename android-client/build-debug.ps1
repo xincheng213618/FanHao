@@ -64,6 +64,12 @@ function Get-AdbPath {
   return "adb"
 }
 
+function Test-FanHaoAuthorizedAdbDeviceLine {
+  param([AllowNull()][AllowEmptyString()][string]$Line)
+
+  return $Line -match '^\S+\s+device(?:\s|$)'
+}
+
 function Invoke-CapturedNative {
   param(
     [string]$Command,
@@ -184,7 +190,7 @@ if ($LocalOnly) {
 if ($Install) {
   $adb = Get-AdbPath
   $deviceOutput = Invoke-CapturedNative $adb @("devices", "-l") "ADB device query failed"
-  $devices = $deviceOutput | Select-String -Pattern "`tdevice(?:\s|$)"
+  $devices = @($deviceOutput | Where-Object { Test-FanHaoAuthorizedAdbDeviceLine $_ })
   if (-not $devices) {
     throw "No authorized Android device found. Enable USB debugging and accept the authorization prompt."
   }
