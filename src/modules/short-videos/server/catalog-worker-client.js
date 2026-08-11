@@ -6,6 +6,7 @@ import {
 
 const DEFAULT_STATS_CACHE_LIMIT = 32;
 const DEFAULT_STATS_RETRY_LIMIT = 1;
+const DEFAULT_LIKE_DISTRIBUTION_TIMEOUT_MS = 30000;
 
 export function createShortVideoCatalogWorkerClient({
   dbPath,
@@ -14,6 +15,7 @@ export function createShortVideoCatalogWorkerClient({
   roots,
   statsCacheLimit = DEFAULT_STATS_CACHE_LIMIT,
   statsRetryLimit = DEFAULT_STATS_RETRY_LIMIT,
+  likeDistributionTimeoutMs = DEFAULT_LIKE_DISTRIBUTION_TIMEOUT_MS,
   workerFactory = (url, options) => new Worker(url, options),
   workerUrl = new URL("./list-worker.js", import.meta.url),
   extraWorkerData = {}
@@ -21,8 +23,11 @@ export function createShortVideoCatalogWorkerClient({
   const requests = new Map();
   const statsCache = new Map();
   const statsFlights = new Map();
+  const likeDistributionCache = new Map();
+  const likeDistributionFlights = new Map();
   const cacheLimit = clampInteger(statsCacheLimit, DEFAULT_STATS_CACHE_LIMIT, 1, 256);
   const retryLimit = clampInteger(statsRetryLimit, DEFAULT_STATS_RETRY_LIMIT, 0, 3);
+  const distributionTimeoutMs = clampInteger(likeDistributionTimeoutMs, DEFAULT_LIKE_DISTRIBUTION_TIMEOUT_MS, 100, 120000);
   let worker = null;
   let readyPromise = null;
   let readyResolve = null;
@@ -32,6 +37,8 @@ export function createShortVideoCatalogWorkerClient({
   let workerStarts = 0;
   let statsDispatches = 0;
   let statsRetries = 0;
+  let likeDistributionDispatches = 0;
+  let likeDistributionRetries = 0;
 
   function start() {
     reopen();
@@ -68,6 +75,48 @@ export function createShortVideoCatalogWorkerClient({
     return abortable(flight, options.signal);
   }
 
+  function queryLikeDistribution(options = {}) {
+    if (options.signal?.aborted) return Promise.reject(abortError());
+    const cacheKey = String(options.catalogStamp || "default");
+    const cached = cacheGetFrom(likeDistributionCache, cacheKey);
+    if (cached) return abortable(Promise.resolve(cached), options.signal);
+    const existing = likeDistributionFlights.get(cacheKey);
+    if (existing) return attachLikeDistributionWaiter(existing, options.signal);
+
+    const flightGeneration = generation;
+    const flight = { promise: null, settled: false, waiters: 0 };
+    flight.promise = executeLikeDistribution(cacheKey).then((result) => {
+      if (closed) throw stoppedError();
+      if (generation !== flightGeneration) throw staleLikeDistributionError();
+      cacheSetIn(likeDistributionCache, cacheKey, result);
+      return result;
+    }).finally(() => {
+      flight.settled = true;
+      if (likeDistributionFlights.get(cacheKey) === flight) likeDistributionFlights.delete(cacheKey);
+    });
+    likeDistributionFlights.set(cacheKey, flight);
+    return attachLikeDistributionWaiter(flight, options.signal);
+  }
+
+  async function executeLikeDistribution(catalogStamp) {
+    let lastError = null;
+    const deadline = Date.now() + distributionTimeoutMs;
+    for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
+      try {
+        const remainingMs = Math.max(0, deadline - Date.now());
+        if (!remainingMs) throw workerTimeoutError("likeDistribution");
+        return await request("likeDistribution", { catalogStamp }, { timeoutMs: remainingMs });
+      } catch (error) {
+        lastError = error;
+        if (error?.retryable !== true || attempt >= retryLimit || closed || Date.now() >= deadline) {
+          throw publicLikeDistributionError(error);
+        }
+        likeDistributionRetries += 1;
+      }
+    }
+    throw publicLikeDistributionError(lastError);
+  }
+
   async function executeStats(filter) {
     let lastError = null;
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
@@ -83,7 +132,7 @@ export function createShortVideoCatalogWorkerClient({
     throw lastError || shortVideoStatsWorkerError();
   }
 
-  function request(operation, payload = {}) {
+  function request(operation, payload = {}, options = {}) {
     return new Promise((resolve, reject) => {
       let activeWorker;
       try {
@@ -93,12 +142,25 @@ export function createShortVideoCatalogWorkerClient({
         return;
       }
       const id = ++requestId;
-      requests.set(id, { operation, resolve, reject });
+      const requestEntry = { operation, resolve, reject, timer: null };
+      requests.set(id, requestEntry);
       if (operation === "stats") statsDispatches += 1;
+      if (operation === "likeDistribution") likeDistributionDispatches += 1;
+      const timeoutMs = Math.max(0, Number(options.timeoutMs || 0));
+      if (timeoutMs) {
+        requestEntry.timer = setTimeout(() => {
+          if (!requests.has(id)) return;
+          const error = workerTimeoutError(operation);
+          failWorker(activeWorker, error);
+          activeWorker.terminate().catch(() => undefined);
+        }, timeoutMs);
+        requestEntry.timer.unref?.();
+      }
       try {
         activeWorker.postMessage({ type: operation, id, ...payload });
       } catch (error) {
         requests.delete(id);
+        cleanupRequestEntry(requestEntry);
         reject(error);
       }
     });
@@ -115,8 +177,11 @@ export function createShortVideoCatalogWorkerClient({
     generation += 1;
     statsCache.clear();
     statsFlights.clear();
+    likeDistributionCache.clear();
+    likeDistributionFlights.clear();
     try {
       worker?.postMessage({ type: "resetStats" });
+      worker?.postMessage({ type: "resetLikeDistribution" });
     } catch {}
   }
 
@@ -125,6 +190,8 @@ export function createShortVideoCatalogWorkerClient({
     generation += 1;
     statsCache.clear();
     statsFlights.clear();
+    likeDistributionCache.clear();
+    likeDistributionFlights.clear();
     const activeWorker = worker;
     worker = null;
     readyResolve?.(false);
@@ -140,8 +207,12 @@ export function createShortVideoCatalogWorkerClient({
       workerStarts,
       statsDispatches,
       statsRetries,
+      likeDistributionDispatches,
+      likeDistributionRetries,
       cacheEntries: statsCache.size,
       singleFlights: statsFlights.size,
+      likeDistributionCacheEntries: likeDistributionCache.size,
+      likeDistributionSingleFlights: likeDistributionFlights.size,
       pendingRequests: requests.size,
       closed
     };
@@ -174,6 +245,7 @@ export function createShortVideoCatalogWorkerClient({
       const requestEntry = requests.get(id);
       if (!requestEntry) return;
       requests.delete(id);
+      cleanupRequestEntry(requestEntry);
       if (message?.ok) requestEntry.resolve(message.data);
       else requestEntry.reject(workerMessageError(message, requestEntry.operation));
     });
@@ -195,30 +267,75 @@ export function createShortVideoCatalogWorkerClient({
   }
 
   function rejectRequests(error) {
-    for (const requestEntry of requests.values()) requestEntry.reject(error);
+    for (const requestEntry of requests.values()) {
+      cleanupRequestEntry(requestEntry);
+      requestEntry.reject(error);
+    }
     requests.clear();
   }
 
   function cacheGet(key) {
-    if (!statsCache.has(key)) return null;
-    const value = statsCache.get(key);
-    statsCache.delete(key);
-    statsCache.set(key, value);
-    return value;
+    return cacheGetFrom(statsCache, key);
   }
 
   function cacheSet(key, value) {
-    statsCache.delete(key);
-    statsCache.set(key, value);
-    while (statsCache.size > cacheLimit) {
-      statsCache.delete(statsCache.keys().next().value);
-    }
+    cacheSetIn(statsCache, key, value);
+  }
+
+  function cacheGetFrom(cache, key) {
+    if (!cache.has(key)) return null;
+    const value = cache.get(key);
+    cache.delete(key);
+    cache.set(key, value);
+    return value;
+  }
+
+  function cacheSetIn(cache, key, value) {
+    cache.delete(key);
+    cache.set(key, value);
+    while (cache.size > cacheLimit) cache.delete(cache.keys().next().value);
+  }
+
+  function cleanupRequestEntry(requestEntry) {
+    if (requestEntry.timer) clearTimeout(requestEntry.timer);
+  }
+
+  function attachLikeDistributionWaiter(flight, signal) {
+    if (signal?.aborted) return Promise.reject(abortError());
+    flight.waiters += 1;
+    return new Promise((resolve, reject) => {
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        flight.waiters = Math.max(0, flight.waiters - 1);
+        signal?.removeEventListener?.("abort", onAbort);
+      };
+      const onAbort = () => {
+        release();
+        reject(abortError());
+      };
+      signal?.addEventListener?.("abort", onAbort, { once: true });
+      flight.promise.then(
+        (value) => {
+          if (released) return;
+          release();
+          resolve(value);
+        },
+        (error) => {
+          if (released) return;
+          release();
+          reject(error);
+        }
+      );
+    });
   }
 
   return {
     diagnostics,
     invalidateStats,
     query,
+    queryLikeDistribution,
     queryStats,
     reopen,
     reset,
@@ -228,16 +345,26 @@ export function createShortVideoCatalogWorkerClient({
 }
 
 function workerMessageError(message, operation) {
-  if (operation === "stats") {
+  if (operation === "stats" || operation === "likeDistribution") {
     const error = new Error(publicStatsErrorMessage(message?.errorCode));
     error.code = String(message?.errorCode || "SHORT_VIDEO_STATS_WORKER_FAILED");
     error.retryable = message?.retryable === true;
     error.statusCode = 503;
     return error;
   }
+
   const error = new Error(message?.error || "短视频列表后台查询失败");
   if (message?.stack) error.stack = message.stack;
   return error;
+}
+
+function publicLikeDistributionError(error) {
+  if (error?.code === "SHORT_VIDEO_LIKE_DISTRIBUTION_STALE") return error;
+  const result = new Error("短视频统计后台线程暂时不可用");
+  result.code = "SHORT_VIDEO_LIKE_DISTRIBUTION_UNAVAILABLE";
+  result.retryable = true;
+  result.statusCode = 503;
+  return result;
 }
 
 function shortVideoStatsWorkerError(error) {
@@ -260,6 +387,16 @@ function workerExitError(code) {
   const error = new Error(`短视频列表后台线程退出 (${Number(code || 0)})`);
   error.code = "SHORT_VIDEO_STATS_WORKER_EXIT";
   error.retryable = true;
+  error.statusCode = 503;
+  return error;
+}
+
+function workerTimeoutError(operation) {
+  const error = new Error("短视频后台线程响应超时");
+  error.code = operation === "likeDistribution"
+    ? "SHORT_VIDEO_LIKE_DISTRIBUTION_TIMEOUT"
+    : "SHORT_VIDEO_WORKER_TIMEOUT";
+  error.retryable = true;
   return error;
 }
 
@@ -275,6 +412,14 @@ function staleStatsError() {
   const error = new Error("短视频列表正在更新，请稍后重试");
   error.code = "SHORT_VIDEO_STATS_STALE";
   error.retryable = false;
+  error.statusCode = 503;
+  return error;
+}
+
+function staleLikeDistributionError() {
+  const error = new Error("短视频统计数据正在更新，请稍后重试");
+  error.code = "SHORT_VIDEO_LIKE_DISTRIBUTION_STALE";
+  error.retryable = true;
   error.statusCode = 503;
   return error;
 }

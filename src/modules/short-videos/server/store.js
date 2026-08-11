@@ -182,6 +182,8 @@ export function createShortVideoStore(options = {}) {
   const dbPath = options.dbPath;
   const skipStartupMaintenance = Boolean(options.skipStartupMaintenance);
   const trustExplicitInvalidation = Boolean(options.trustExplicitInvalidation);
+  const readOnly = Boolean(options.readOnly);
+  const busyTimeoutMs = clampInt(options.busyTimeoutMs, 10000, 1, 60000);
   const downloadManagerDbPath = String(options.downloadManagerDbPath || "").trim();
   const roots = normalizeRoots(options.roots || []);
   const ffmpegPath = options.ffmpegPath || "ffmpeg";
@@ -218,24 +220,28 @@ export function createShortVideoStore(options = {}) {
 
   function database() {
     if (!db) {
-      fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-      const opened = new DatabaseSync(dbPath);
+      if (!readOnly) fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+      const opened = new DatabaseSync(dbPath, { readOnly });
       try {
         opened.exec(`
-          PRAGMA busy_timeout = 10000;
+          PRAGMA busy_timeout = ${busyTimeoutMs};
           PRAGMA foreign_keys = ON;
           PRAGMA mmap_size = 268435456;
           PRAGMA cache_size = -65536;
           PRAGMA temp_store = MEMORY;
+          ${readOnly ? "PRAGMA query_only = ON;" : ""}
         `);
-        if (!isCurrentShortVideoSchema(opened)) {
+        const currentSchema = isCurrentShortVideoSchema(opened);
+        if (readOnly && !currentSchema) {
+          throw new Error("short video database schema is unavailable");
+        } else if (!currentSchema) {
           ensureSchema(opened, coverCacheDir);
           opened.prepare("INSERT OR REPLACE INTO short_video_meta (key, value) VALUES ('schema_version', ?)")
             .run(SHORT_VIDEO_SCHEMA_VERSION);
         } else if (!skipStartupMaintenance) {
           recreateShortVideoCatalogView(opened);
         }
-        opened.exec(`
+        if (!readOnly) opened.exec(`
           CREATE INDEX IF NOT EXISTS idx_short_videos_owner_visibility
             ON short_videos(owner_user_id, visibility);
           CREATE INDEX IF NOT EXISTS idx_short_videos_author_facet
@@ -401,7 +407,7 @@ export function createShortVideoStore(options = {}) {
     if (!explicitCatalogStamp) explicitCatalogStamp = liveStamp;
     return explicitCatalogStamp;
   }
-  function likeDistributionStamp(database) {
+  function likeDistributionStamp(database, catalogKey = catalogStamp()) {
     const latestAction = database.prepare(`
       SELECT MAX(updated_at) AS value
       FROM short_video_user_actions
@@ -419,7 +425,7 @@ export function createShortVideoStore(options = {}) {
       const stat = downloadManagerDbPath ? fs.statSync(downloadManagerDbPath) : null;
       managerStamp = stat ? `${stat.size}:${stat.mtimeMs}` : "";
     } catch {}
-    return `${catalogStamp()}::${latestAction}::${latestWatch}::${managerStamp}`;
+    return `${catalogKey}::${latestAction}::${latestWatch}::${managerStamp}`;
   }
   function cachedSummary() {
     const key = catalogStamp();
@@ -1235,10 +1241,11 @@ function summary() {
     return true;
   }
 
-  function likeDistribution() {
+  function likeDistribution(options = {}) {
     const database = databaseOrOpen();
-    ensureCatalogCacheKey(catalogStamp());
-    const key = likeDistributionStamp(database);
+    const catalogKey = String(options.catalogStamp || catalogStamp());
+    ensureCatalogCacheKey(catalogKey);
+    const key = likeDistributionStamp(database, catalogKey);
     if (catalogCache.likeDistributionKey === key && catalogCache.likeDistribution) return catalogCache.likeDistribution;
     const rows = database.prepare(`
       WITH distribution AS (

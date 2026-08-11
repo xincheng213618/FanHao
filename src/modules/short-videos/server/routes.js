@@ -1,5 +1,7 @@
+import { decodeShortVideoDetailSegment, SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS } from "./reserved-routes.js";
+
 export async function routeShortVideoApi(req, res, url, deps) {
-  const { listVideos, notFound, onMutation, onWatch, onWatchMutation, readJsonBody, recordWatch, requireLocalAdmin, sendJson, shortVideoStore } = deps;
+  const { listVideos, notFound, onMutation, onWatch, onWatchMutation, readJsonBody, recordWatch, requestSignal, requireLocalAdmin, sendJson, shortVideoStore } = deps;
 
   if (url.pathname === "/api/short-videos/summary" && req.method === "GET") {
     try {
@@ -21,7 +23,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
 
   if (url.pathname === "/api/short-videos/like-distribution" && req.method === "GET") {
     try {
-      sendJson(res, 200, shortVideoStore.likeDistribution());
+      sendJson(res, 200, await shortVideoStore.likeDistribution({ signal: requestSignal }));
     } catch (error) {
       sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频点赞分布读取失败") });
     }
@@ -339,6 +341,18 @@ export async function routeShortVideoApi(req, res, url, deps) {
   }
 
   const detailMatch = /^\/api\/short-videos\/([^/]+)$/.exec(url.pathname);
+  const detailSegment = detailMatch ? decodeShortVideoDetailSegment(detailMatch[1]) : null;
+  if (detailMatch && !detailSegment?.ok) {
+    sendJson(res, 400, { error: "请求 ID 无效" });
+    return true;
+  }
+  if (
+    detailMatch
+    && SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS.has(detailSegment.value.toLowerCase())
+  ) {
+    notFound(res);
+    return true;
+  }
   if (detailMatch && req.method === "DELETE") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
@@ -348,8 +362,8 @@ export async function routeShortVideoApi(req, res, url, deps) {
       };
       const scope = String(body?.scope || url.searchParams.get("scope") || "").trim().toLowerCase();
       const result = scope === "group" || scope === "folder"
-        ? shortVideoStore.deleteVideoGroup(decodeURIComponent(detailMatch[1]), options)
-        : shortVideoStore.deleteVideo(decodeURIComponent(detailMatch[1]), options);
+        ? shortVideoStore.deleteVideoGroup(detailSegment.value, options)
+        : shortVideoStore.deleteVideo(detailSegment.value, options);
       onMutation?.();
       sendJson(res, 200, result);
     } catch (error) {
@@ -362,7 +376,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
   }
 
   if (detailMatch && req.method === "GET") {
-    const data = shortVideoStore.videoDetail(decodeURIComponent(detailMatch[1]), url);
+    const data = shortVideoStore.videoDetail(detailSegment.value, url);
     if (!data) {
       notFound(res);
       return true;
@@ -375,11 +389,13 @@ export async function routeShortVideoApi(req, res, url, deps) {
 }
 
 function shortVideoErrorStatus(error) {
+  if (error?.name === "AbortError") return 499;
   if (isShortVideoDatabaseError(error)) return 503;
   return error.statusCode || 500;
 }
 
 function shortVideoErrorMessage(error, fallback) {
+  if (error?.name === "AbortError") return "短视频请求已取消";
   if (isShortVideoDatabaseError(error)) return "短视频数据库正在恢复，请稍后重试";
   return error.message || fallback;
 }

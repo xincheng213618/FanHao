@@ -932,6 +932,7 @@ function verifyWebDedicatedEntry() {
   const shortVideoListStatsServiceSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "list-stats-service.js"));
   const shortVideoStatsQuerySource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "stats-query.js"));
   const shortVideoRoutesSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "routes.js"));
+  const shortVideoReservedRoutesSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "reserved-routes.js"));
   const shortVideoWatchWriterSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "watch-write-service.js"));
   const shortVideoWatchWorkerSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "watch-write-worker.js"));
   const downloadManagerSyncSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "download-manager-sync-service.js"));
@@ -1095,6 +1096,28 @@ function verifyWebDedicatedEntry() {
     && shortVideoListWorkerSource.includes("PRAGMA query_only = ON")
     && shortVideoListWorkerSource.includes("function storeOrOpen()")
     && shortVideoStatsQuerySource.includes("FROM short_video_catalog"), "default short-video stats must use the shared lazy worker's read-only SQLite connection; only non-recommended stats=0 lists stay worker-free while recommended lists use the catalog worker");
+  const serverReservedDetailSegments = [...shortVideoReservedRoutesSource.matchAll(/^\s*"([^"]+)",?$/gm)].map((match) => match[1]).sort();
+  const publicReservedBlock = routerSource.match(/const SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS = new Set\(\[([\s\S]*?)\]\);/)?.[1] || "";
+  const publicReservedDetailSegments = [...publicReservedBlock.matchAll(/"([^"]+)"/g)].map((match) => match[1]).sort();
+  assert.equal(serverReservedDetailSegments.length, 11, "the server reserved detail catalog must keep the public 11-name contract explicit");
+  assert.deepEqual(serverReservedDetailSegments, publicReservedDetailSegments, "server singleton guards and the public reserved-video router must use the same names");
+  assert(shortVideoRuntimeSource.includes("const routeStore = new Proxy(store")
+    && shortVideoRuntimeSource.includes("catalogWorker.queryLikeDistribution")
+    && shortVideoRuntimeSource.includes("catalogStamp: await likeDistributionRuntimeStamp()")
+    && shortVideoRuntimeSource.includes("await fs.promises.stat(downloadManagerDbPath)")
+    && shortVideoRuntimeSource.includes("requestSignal: routeController.signal")
+    && shortVideoRuntimeSource.includes("decodeShortVideoDetailSegment(detailPlaybackMatch[1])")
+    && shortVideoRuntimeSource.includes("!SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS.has(detailPlaybackSegment.value.toLowerCase())")
+    && !shortVideoRuntimeSource.includes("catalogStamp: store.catalogStamp()")
+    && shortVideoRoutesSource.includes("await shortVideoStore.likeDistribution({ signal: requestSignal })")
+    && shortVideoRoutesSource.includes("SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS.has(detailSegment.value.toLowerCase())")
+    && shortVideoRoutesSource.includes('sendJson(res, 400, { error: "请求 ID 无效" })')
+    && shortVideoCatalogWorkerClientSource.includes("const likeDistributionFlights = new Map()")
+    && shortVideoCatalogWorkerClientSource.includes('request("likeDistribution"')
+    && shortVideoCatalogWorkerClientSource.includes("generation !== flightGeneration")
+    && shortVideoListWorkerSource.includes('message?.type === "likeDistribution"')
+    && shortVideoListWorkerSource.includes("storeOrOpen().likeDistribution({")
+    && shortVideoStoreSource.includes("const readOnly = Boolean(options.readOnly)"), "like-distribution must stay on the shared catalog worker with an async manager stamp, request cancellation fence, coherent invalidation, and no main-thread aggregate fallback");
   assert(shortVideoRuntimeSource.includes("skipStartupMaintenance: true") && shortVideoRuntimeSource.includes("initialStateKey: () => store.downloadManagerSourceStateKey()") && !shortVideoRuntimeSource.includes("store.warm();"), "the HTTP runtime must keep the multi-gigabyte short-video database lazy and must not prewarm the stats worker before a stats request");
   assert(downloadManagerSyncSource.includes('typeof initialStateKey === "function"') && downloadManagerSyncSource.includes("await initialStateKeyProvider()"), "download-manager sync state must still be read lazily when synchronization starts");
   assert(shortVideoStoreSource.includes("trustExplicitInvalidation") && shortVideoStoreSource.includes("if (!explicitCatalogStamp) explicitCatalogStamp = liveStamp") && shortVideoStoreSource.includes('explicitCatalogStamp = ""'), "the list worker must keep serving its coherent warm catalog snapshot until the runtime sends an explicit reset after downloader synchronization");

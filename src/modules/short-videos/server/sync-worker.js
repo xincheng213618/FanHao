@@ -8,19 +8,23 @@ const store = createShortVideoStore({
   skipStartupMaintenance: true
 });
 
+let message;
 try {
   const result = store.importDownloadManagerDb(workerData.sourceDbPath, {
     incremental: true,
     includePosts: true,
     skipSummary: true
   });
-  parentPort?.postMessage({ ok: true, result });
+  message = { ok: true, result };
 } catch (error) {
-  parentPort?.postMessage({
+  message = {
     ok: false,
     error: String(error?.message || error),
     stack: String(error?.stack || "")
-  });
+  };
 } finally {
   store.close();
 }
+
+parentPort?.postMessage(message);
+parentPort?.close();

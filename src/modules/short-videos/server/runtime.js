@@ -4,6 +4,7 @@ import { createShortVideoCatalogWorkerClient } from "./catalog-worker-client.js"
 import { createShortVideoListStatsService } from "./list-stats-service.js";
 import { createShortVideoWatchWriteService } from "./watch-write-service.js";
 import { createDownloadManagerSyncService } from "./download-manager-sync-service.js";
+import { decodeShortVideoDetailSegment, SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS } from "./reserved-routes.js";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -57,6 +58,7 @@ export function createShortVideosRuntime({
   requireLocalAdmin,
   sendJson,
   sharedCache,
+  catalogWorkerOptions = {},
   getTranscodeConcurrency = () => SHORT_VIDEO_SMOOTH_CONCURRENCY,
   setTranscodeConcurrency = null
 }) {
@@ -70,10 +72,22 @@ export function createShortVideosRuntime({
     skipStartupMaintenance: true
   });
   const catalogWorker = createShortVideoCatalogWorkerClient({
+    ...catalogWorkerOptions,
     dbPath,
     downloadManagerDbPath,
     ffmpegPath,
     roots
+  });
+  const routeStore = new Proxy(store, {
+    get(target, property, receiver) {
+      if (property === "likeDistribution") {
+        return async (options = {}) => catalogWorker.queryLikeDistribution({
+          catalogStamp: await likeDistributionRuntimeStamp(),
+          signal: options.signal
+        });
+      }
+      return Reflect.get(target, property, receiver);
+    }
   });
   const listStatsService = createShortVideoListStatsService({ store, catalogWorker });
   const watchWriter = createShortVideoWatchWriteService({
@@ -340,26 +354,41 @@ export function createShortVideosRuntime({
     }
 
     const detailPlaybackMatch = /^\/api\/short-videos\/([^/]+)$/.exec(url.pathname);
-    if (detailPlaybackMatch && req.method === "GET") {
-      const id = decodeURIComponent(detailPlaybackMatch[1]);
-      tryQueueStartupVideoCache(id, { delayMs: 0 });
+    const detailPlaybackSegment = detailPlaybackMatch
+      ? decodeShortVideoDetailSegment(detailPlaybackMatch[1])
+      : null;
+    if (
+      detailPlaybackMatch
+      && req.method === "GET"
+      && detailPlaybackSegment?.ok
+      && !SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS.has(detailPlaybackSegment.value.toLowerCase())
+    ) {
+      tryQueueStartupVideoCache(detailPlaybackSegment.value, { delayMs: 0 });
     }
 
-    return routeShortVideoApi(req, res, url, {
-      notFound,
-      readJsonBody,
-      requireLocalAdmin,
-      sendJson,
-      shortVideoStore: store,
-      listVideos: (requestUrl) => queryShortVideoListForRequest(req, requestUrl),
-      recordWatch: (videoId, options) => watchWriter.record(videoId, options),
-      onMutation: clearShortVideoListCache,
-      onWatch: queueWatchedVideoCache,
-      onWatchMutation: (...args) => {
-        recordShortVideoWatchCacheMutation(...args);
-        catalogWorker.invalidateStats();
-      }
-    });
+    const routeController = new AbortController();
+    const onRouteAbort = () => routeController.abort();
+    req?.once?.("aborted", onRouteAbort);
+    try {
+      return await routeShortVideoApi(req, res, url, {
+        notFound,
+        readJsonBody,
+        requestSignal: routeController.signal,
+        requireLocalAdmin,
+        sendJson,
+        shortVideoStore: routeStore,
+        listVideos: (requestUrl) => queryShortVideoListForRequest(req, requestUrl),
+        recordWatch: (videoId, options) => watchWriter.record(videoId, options),
+        onMutation: clearShortVideoListCache,
+        onWatch: queueWatchedVideoCache,
+        onWatchMutation: (...args) => {
+          recordShortVideoWatchCacheMutation(...args);
+          catalogWorker.invalidateStats();
+        }
+      });
+    } finally {
+      req?.off?.("aborted", onRouteAbort);
+    }
   }
 
   async function routeMedia(req, res, url) {
@@ -1065,6 +1094,15 @@ export function createShortVideosRuntime({
     } catch (error) {
       console.warn("[short-video-list-invalidate]", error.message || error);
     }
+  }
+
+  async function likeDistributionRuntimeStamp() {
+    let managerStamp = "";
+    try {
+      const managerStat = downloadManagerDbPath ? await fs.promises.stat(downloadManagerDbPath) : null;
+      if (managerStat) managerStamp = `${managerStat.size}:${managerStat.mtimeMs}`;
+    } catch {}
+    return `${shortVideoListCacheGeneration}:${managerStamp}`;
   }
 
   function videoFileWithCache(id) {
@@ -2013,12 +2051,14 @@ export function createShortVideosRuntime({
   }
 
   return {
+    catalogWorkerDiagnostics: catalogWorker.diagnostics,
     clearListCache: clearShortVideoListCache,
     routeApi,
     routeMedia,
     start: startDownloadManagerSync,
     stop: stopDownloadManagerSync,
-    store
+    store,
+    syncCatalog: (options = {}) => downloadManagerSync.sync(options)
   };
 }
 

@@ -19,6 +19,10 @@ parentPort?.on("message", (message) => {
     closeStatsDatabase();
     return;
   }
+  if (message?.type === "resetLikeDistribution") {
+    closeStore();
+    return;
+  }
   if (message?.type === "close") {
     closeResources();
     parentPort?.close();
@@ -26,6 +30,10 @@ parentPort?.on("message", (message) => {
   }
   if (message?.type === "stats") {
     handleStats(message);
+    return;
+  }
+  if (message?.type === "likeDistribution") {
+    handleLikeDistribution(message);
     return;
   }
   if (!["list", "authors", "facets"].includes(message?.type)) return;
@@ -65,6 +73,28 @@ function handleStats(message) {
   }
 }
 
+function handleLikeDistribution(message) {
+  try {
+    const delayMs = Math.max(0, Number(workerData.likeDistributionDelayMs || 0));
+    if (delayMs) Atomics.wait(busyWaitState, 0, 0, delayMs);
+    const data = runStatsBusyRetry(() => storeOrOpen().likeDistribution({
+      catalogStamp: String(message?.catalogStamp || "")
+    }));
+    parentPort?.postMessage({ ok: true, id: message.id, data });
+  } catch (error) {
+    const details = publicStatsError(error);
+    parentPort?.postMessage({
+      ok: false,
+      id: message.id,
+      error: details.message,
+      errorCode: details.code,
+      // SQLITE_BUSY has already exhausted the bounded worker-local retry loop.
+      // Keep the public 503 retryable without repeating the whole loop here.
+      retryable: details.code === "SHORT_VIDEO_DATABASE_BUSY" ? false : details.retryable
+    });
+  }
+}
+
 function storeOrOpen() {
   if (!store) {
     store = createShortVideoStore({
@@ -73,7 +103,9 @@ function storeOrOpen() {
       ffmpegPath: workerData.ffmpegPath,
       roots: workerData.roots,
       skipStartupMaintenance: true,
-      trustExplicitInvalidation: true
+      trustExplicitInvalidation: true,
+      readOnly: true,
+      busyTimeoutMs: 250
     });
   }
   return store;
@@ -145,6 +177,10 @@ function closeStatsDatabase() {
 
 function closeResources() {
   closeStatsDatabase();
+  closeStore();
+}
+
+function closeStore() {
   try { store?.close(); } catch {}
   store = null;
 }
