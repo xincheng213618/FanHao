@@ -63,11 +63,26 @@ export function assertActorProfileMutationAllowed(db, personIds, { actorKeys = [
   }
 }
 
-export function clearActorProfilePublication(db, personIds) {
+export function clearActorProfilePublication(db, personIds, { sources = null } = {}) {
   const table = db.prepare("SELECT 1 FROM main.sqlite_schema WHERE type = 'table' AND name = 'actor_profile_publications'").get();
   if (!table) return;
-  const remove = db.prepare("DELETE FROM main.actor_profile_publications WHERE person_id = ?");
+  const sourceList = Array.isArray(sources) ? [...new Set(sources.map(String).filter(Boolean))] : null;
+  if (sourceList) {
+    const staging = db.prepare("SELECT 1 FROM fanhao_images.sqlite_schema WHERE type = 'table' AND name = 'actor_profile_image_staging'").get();
+    if (!staging || !sourceList.length) return;
+  }
+  const placeholders = sourceList?.map(() => "?").join(", ");
+  const remove = sourceList
+    ? db.prepare(`
+        DELETE FROM main.actor_profile_publications
+        WHERE person_id = ?
+          AND operation_id IN (
+            SELECT operation_id FROM fanhao_images.actor_profile_image_staging
+            WHERE person_id = ? AND source IN (${placeholders})
+          )
+      `)
+    : db.prepare("DELETE FROM main.actor_profile_publications WHERE person_id = ?");
   for (const personId of [...new Set((Array.isArray(personIds) ? personIds : [personIds]).map(Number).filter(Number.isFinite))]) {
-    remove.run(personId);
+    remove.run(personId, ...(sourceList ? [personId, ...sourceList] : []));
   }
 }

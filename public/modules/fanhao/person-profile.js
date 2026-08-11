@@ -51,7 +51,10 @@ export async function saveActorProfileRequest({
     try {
       return await api(path, { method: "PUT", body });
     } catch (error) {
-      const transient = [408, 429, 503].includes(Number(error.status || error.statusCode));
+      const status = Number(error.status || error.statusCode || 0);
+      const transient = [408, 429, 503].includes(status)
+        || (error?.name === "TypeError" && !status)
+        || String(error?.code || "").toUpperCase() === "NETWORK_ERROR";
       if (!transient || attempt + 1 >= maxAttempts) throw error;
       await sleep(250 * (2 ** attempt));
     }
@@ -215,7 +218,7 @@ async function saveActorProfileMapping(person, options) {
         operation: data.operation,
         personId: person.id
       });
-      data = { profile: refreshed.profile, mergeCandidates: [] };
+      data = refreshed;
     }
     updatePersonActorProfile(person.id, data.profile);
     const merged = options.mergePrompt === false ? null : await maybeMergeActorCandidates(person.id, data.mergeCandidates || [], options.status);

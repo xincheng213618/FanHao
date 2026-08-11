@@ -44,10 +44,10 @@
 | GET | `/api/works/:id` | 公开 | 单个作品详情（含播放信息入口、info 元数据、本地可用性）。 |
 | GET | `/api/playinfo/:id` | 公开 | 作品播放信息：视频文件、推荐播放模式、转码 / 直连决策。 |
 | GET | `/api/info/:id` | 公开 | 返回作品 sidecar 元数据文件（info/nfo/txt）原始内容。 |
-| GET | `/api/actor-profiles/:id` | 公开 | 演员资料页（别名、JavDB 映射、作品列表）。 |
-| PUT | `/api/actor-profiles/:id` | 公开 | 更新单个人物资料与可选头像。完成后返回 200；仅当 body 显式设置 `acceptAsyncOperation: true` 时，恢复中的操作返回 202，否则返回 retryable 503。 |
+| GET | `/api/actor-profiles/:id` | 公开 | 演员资料页完成态 payload（`profile` 与 `mergeCandidates`），与 completed PUT 的 200 语义一致。 |
+| PUT | `/api/actor-profiles/:id` | 本地管理员 | 更新单个人物资料与可选头像。门禁在读取 body 前执行；完成后返回 200；仅当 body 显式设置 `acceptAsyncOperation: true` 时，`prepared/applying/retry_wait` 返回 202，否则返回 retryable 503；`blocked/cancelled` 始终返回 409。 |
 | GET | `/api/actor-profile-operations/:operationId` | 公开 | 查询单人物资料更新的可恢复 operation 状态。 |
-| POST | `/api/actor-profile-operations/:operationId/retry` | 本地管理员 | 显式重试被阻断或等待恢复的人物资料 operation。 |
+| POST | `/api/actor-profile-operations/:operationId/retry` | 本地管理员 | 显式重试被阻断的人物资料 operation；`retry_wait` 由协调器自动恢复。 |
 | GET | `/api/people/:id` | 公开 | 人物详情（作品、缺失作品、合并候选、封面）。 |
 | POST | `/api/people/:id/merge` | 本地管理员 | 将某人物合并到目标人物。 |
 | PUT | `/api/people/:id/cover` | 公开 | 设置人物封面（头像）。 |

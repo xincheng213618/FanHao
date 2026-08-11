@@ -37,14 +37,14 @@
 
 1. 在主库 `BEGIN IMMEDIATE` 中规范化请求并创建 intent。幂等键与完整 request digest 绑定；相同键不同内容返回 409。
 2. 同一事务稳定排序并实际占用这些 key：目标 `person-avatar:<id>`、每个输入 `javdb-actor:<key>`、每个 key 的当前 owner `person-avatar:<owner>`。只检查不落 reservation 不满足协议。
-3. 在图片库 FULL 事务中写不可变 stage 和 image receipt。无头像 payload 仍写 receipt，但不创建 stage。
+3. 在图片库 FULL 事务中写不可变 stage 和 image receipt。事务外 receipt 查询只作为快路径；取得 `BEGIN IMMEDIATE` 后必须再次校验 receipt/digest，避免旧 lease owner 刚提交时新 owner 因 UNIQUE 被误判 blocked。无头像 payload 仍写 receipt，但不创建 stage。
 4. 重新校验 image receipt/stage digest。
 5. 在主库一个 FULL 事务内重新检查 lease/reservation，写 profile/refs/aliases，按需切换 publication 指针，写 main receipt，将状态改为 `completed`，释放 reservation 并删除恢复 blob，然后提交。
 6. 提交后才通知内存 cache 失效。公开 cache stamp 依赖 `actor_profile_publications`，不依赖不可见的 staging 表。
 
 资料页和头像必须来自同一个 `actorProfileRow` SQL snapshot。Presenter 只消费 `publicActorProfileSnapshot(row)`，不能在 profile cache row 后再次调用 avatar reader。所有 publication reader 同时校验 `state=completed`、main receipt digest、publication digest 和 stage digest。
 
-带 blob 的发布头像 URL 使用不可变版本：`/media/actor/:id/avatar?v=<operation-id>`。媒体 worker 不把 `v` 仅当缓存键，而是要求它等于该人物当前 publication operation，并再次校验 completed main receipt；旧、错误或未完成 token 不返回字节。
+带 blob 的发布头像 URL 使用不可变版本：`/media/actor/:id/avatar?v=<operation-id>`。媒体 worker 不把 `v` 仅当缓存键，而是校验它属于 `actor_profile_upsert`、operation 已 `completed`、main/image receipt digest 均匹配，并且 stage 属于请求人物。资料页只生成当前 publication 的 URL；已经完成的历史版本仍可按 immutable URL 回读并被浏览器/进程缓存，未知或未完成 token 不返回字节。无 token 的兼容路径表示“当前头像”，每次重新读取且返回 `no-store`，不会在 publication 切换或手工覆盖后复活进程/浏览器缓存中的旧 stage。
 
 ## 头像优先级与后续 writer
 
@@ -54,7 +54,7 @@
 2. `actor_profiles`
 3. 其他来源（包括 local-avatar 来源）
 
-publication stage 只在自己的 source 优先级内代替同来源 live 行，并不跨级压过手工头像。完成后任何直接头像 writer 都必须先在 `BEGIN IMMEDIATE` 中通过 reservation fence，再删除该人物 publication 指针，最后写 live image。这样旧 publication 不会永久遮蔽后续修改；下一次 PUT 可再次建立新指针。
+publication stage 只在自己的 source 优先级内代替同来源 live 行，并不跨级压过手工头像。完成后的直接头像替换 writer 必须先在 `BEGIN IMMEDIATE` 中通过 reservation fence，再删除该人物 publication 指针，最后写 live image。删除手工头像时，仅在 publication 自身也是手工来源时清 pointer；若 publication 是较低优先级的 `actor_profiles`，保留 pointer 作为删除手工 override 后的回退。这样既不会让旧 publication 永久遮蔽后续修改，也不破坏原有来源回退顺序；下一次 PUT 可再次建立新指针。
 
 当前直接或同优先级 writer 清单：
 
@@ -62,7 +62,7 @@ publication stage 只在自己的 source 优先级内代替同来源 live 行，
 | --- | --- | --- |
 | 单人物 PUT outbox | profile/refs/aliases + staged avatar | 本协议完整覆盖 |
 | `legacyUpsertActorProfile` 测试/兼容路径 | `images`，来源通常为 `manual` | `BEGIN IMMEDIATE`、person/actor/owner fence、清 pointer |
-| 手工人物头像/人物作品封面 | `manual_upload` / `manual_person_cover` | `BEGIN IMMEDIATE`、person fence、清 pointer |
+| 手工人物头像/人物作品封面 | `manual_upload` / `manual_person_cover` | `BEGIN IMMEDIATE`、person fence；替换时清 pointer，删除时仅清同属手工来源的 pointer |
 | Filetree 人物头像导入 | local-avatar 配置来源 | `BEGIN IMMEDIATE`、person fence、清 pointer |
 | `refresh_core_javdb_actor_movies.py` | `source=actor_profiles` | `BEGIN IMMEDIATE`、person/actor/owner fence、清 pointer |
 | 人物合并 | 改写 person image owner | target/source fence、清两侧 pointer |
@@ -89,7 +89,11 @@ publication stage 只在自己的 source 优先级内代替同来源 live 行，
 - 只有 operation 已 `completed` 才返回原有 200 payload。
 - 新客户端在 body 显式传 `acceptAsyncOperation: true` 时，暂态可返回 202 和净化后的 operation 状态，并通过 GET 查询。
 - 未 opt-in 的旧客户端遇到暂态返回 retryable 503，防止把 pending 当成功。
+- `blocked` / `cancelled` 是终态：首次确定性失败和相同幂等键重放都返回稳定 409；不会把 blocked 包装为 202，也不会把它标成可自动恢复的 503。
 - `retry_wait` 由后台协调器自动恢复；本地管理员可显式重试 `blocked` operation。
+- completed PUT 与随后 `GET /api/actor-profiles/:id` 共用同一 payload helper，均返回 `ok`、`profile` 和 `mergeCandidates`；因此 202 路径不会跳过人物合并候选。
+- 明确的网络 `TypeError` / `NETWORK_ERROR` 使用同一个 request body 和 idempotency key 做有限重试。服务端只公开白名单错误 code、稳定文案和净化 operation，不回传 SQLite 错误或本机路径。
+- PUT 只允许本地管理员，并在读取可能含头像的大 body 之前完成门禁；GET 保持原有读取权限。
 
 接口：
 
@@ -100,4 +104,6 @@ publication stage 只在自己的 source 优先级内代替同来源 live 行，
 
 - 将 Filetree/Python/人物合并各自迁入可靠 journal/outbox，消除它们现有的跨库 crash-atomic 风险。
 - 为已完成 stage 设计保留/压缩策略；当前 immutable versions 会持续增长。
+- 在协议 schema 发生兼容性变化前引入显式 schema version/migration gate；本批只创建首版表，不扩展在线升级协议。
+- 单独审查并统一 `PUT /api/people/:id/cover` 等历史写路由的权限策略；本批不扩大到人物封面接口。
 - 增加多进程、真实异常断电和长时间 BUSY soak；当前 fixture 使用临时 SQLite、强制 kill 和确定性错误，不访问真实数据库或服务。

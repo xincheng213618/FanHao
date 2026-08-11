@@ -12,7 +12,10 @@ import { createPersonDetailService } from "../src/modules/fanhao/server/people/p
 import { createManualCoverStateService } from "../src/modules/fanhao/server/works/manual-cover-state-service.js";
 import { createWorkImageService } from "../src/modules/fanhao/server/works/image-service.js";
 import { createWorkPresenterService } from "../src/modules/fanhao/server/works/presenter-service.js";
+import { routeWorksApi } from "../src/modules/fanhao/server/works/routes-api.js";
 import { attachCoreImageStore } from "../src/platform/server/core-image-store.js";
+import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
+import { saveActorProfileRequest } from "../public/modules/fanhao/person-profile.js";
 import { createVerifiedTempDir, removeVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 const CHILD = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "cross_store_staging_fault_child.mjs");
@@ -397,7 +400,32 @@ async function verifyRealActorProtocol({ cleanup = true, announce = false } = {}
 
     const mediaProbe = await runMediaProbe(fixture, idempotentId);
     assert.equal(mediaProbe.bytes, "idempotent-avatar", "media worker must serve the immutable version named by the completed publication");
-    assert.equal(mediaProbe.wrong, null, "media worker must reject an uncommitted or stale version token");
+    assert.equal(mediaProbe.wrong, null, "media worker must reject an unknown or uncompleted version token");
+    const historicalMediaProbe = await runMediaProbe(fixture, blockedId);
+    assert.equal(historicalMediaProbe.bytes, "blocked-avatar", "a completed immutable media version must remain readable after a later publication becomes current");
+    const inlineHistorical = await readInlineActorAvatar(fixture, blockedId);
+    assert.equal(inlineHistorical.statusCode, 200);
+    assert.equal(inlineHistorical.bytes, "blocked-avatar", "the inline media reader and a fresh worker must agree on historical completed versions");
+
+    runtime.manualCover.replaceManualPersonAvatar(2, {
+      sourceType: "local", localPath: "", remoteUrl: "", mime: "image/manual",
+      blob: Buffer.from("manual-before-publication"), byteSize: Buffer.byteLength("manual-before-publication"),
+      source: "manual_upload", legacyKey: "manual-before-publication", now: new Date().toISOString()
+    });
+    const fallback = runtime.admin.upsertActorProfile(runtime.people.get("2"), {
+      avatarBase64: Buffer.from("published-actor-profile-fallback").toString("base64"),
+      avatarMime: "image/fallback",
+      displayName: "Actor Two Published Fallback",
+      idempotencyKey: "actor-two-fallback",
+      source: "actor_profiles"
+    });
+    assert.equal(fallback.completed, true);
+    const fallbackPublication = fixture.db.prepare("SELECT operation_id FROM actor_profile_publications WHERE person_id = 2").get().operation_id;
+    assert.ok(runtime.snapshot(2).avatarBytes.equals(Buffer.from("manual-before-publication")), "a live manual avatar must retain precedence over a completed actor_profiles publication");
+    runtime.manualCover.replaceManualPersonAvatar(2, null);
+    assert.equal(fixture.db.prepare("SELECT operation_id FROM actor_profile_publications WHERE person_id = 2").get().operation_id, fallbackPublication,
+      "deleting a manual override must retain a lower-priority actor_profiles publication for fallback");
+    assert.ok(runtime.snapshot(2).avatarBytes.equals(Buffer.from("published-actor-profile-fallback")), "manual deletion must reveal the published actor_profiles fallback");
 
     const asyncHolder = new DatabaseSync(fixture.imageDbPath);
     asyncHolder.exec("PRAGMA busy_timeout = 0; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; BEGIN IMMEDIATE;");
@@ -428,6 +456,11 @@ async function verifyRealActorProtocol({ cleanup = true, announce = false } = {}
     runtime.outbox.reconcilePending();
 
     verifyPresenterUsesOneSnapshot();
+    verifyCompletedPayloadEquivalence();
+    verifyTerminalActorProfileContract();
+    await verifyActorAvatarCacheContract();
+    verifyLeaseTakeoverReceiptRecheck();
+    await verifyActorProfileRouteAndNetworkContract();
   } finally {
     if (holder) {
       try { holder.exec("ROLLBACK"); } catch {}
@@ -460,6 +493,96 @@ function runMediaProbe(fixture, operationId) {
   });
 }
 
+async function readInlineActorAvatar(fixture, operationId) {
+  const service = createMediaResponseService({
+    coreImageRow: () => null,
+    corePersonAvatarRow: () => null,
+    getCoreDb: () => fixture.db,
+    isAllowedRemoteImageUrl: () => false,
+    maxRemoteImageBytes: 1,
+    mimeTypes: {},
+    normalizeExt: () => "",
+    notFound(res) {
+      res.writeHead(404, { "Cache-Control": "no-store" });
+      res.end();
+    },
+    proxiedRemoteImageUrl: () => "",
+    publicRemoteUrl: () => "",
+    safeStat: () => null,
+    sendText: (res, statusCode) => {
+      res.writeHead(statusCode, {});
+      res.end();
+    },
+    workCoverRow: () => null
+  });
+  let statusCode = 0;
+  let bytes = Buffer.alloc(0);
+  const response = {
+    writeHead(status) { statusCode = Number(status); },
+    end(body) { bytes = Buffer.from(body || []); }
+  };
+  await service.serveActorAvatar(response, 1, { version: operationId });
+  return { bytes: bytes.toString(), statusCode };
+}
+
+async function verifyActorAvatarCacheContract() {
+  let currentBytes = "published-stage";
+  let currentReads = 0;
+  let immutableBytes = "historical-stage";
+  let immutableReads = 0;
+  const service = createMediaResponseService({
+    coreImageRow: () => null,
+    corePersonAvatarRow: () => null,
+    getCoreDb: () => null,
+    isAllowedRemoteImageUrl: () => false,
+    maxRemoteImageBytes: 1,
+    mediaBlobStore: {
+      async actorAvatar(_personId, version) {
+        if (version) {
+          immutableReads += 1;
+          return { image_blob: Buffer.from(immutableBytes), mime: "image/test" };
+        }
+        currentReads += 1;
+        return { image_blob: Buffer.from(currentBytes), mime: "image/test" };
+      }
+    },
+    mimeTypes: {},
+    normalizeExt: () => "",
+    notFound: () => { throw new Error("unexpected not found"); },
+    proxiedRemoteImageUrl: () => "",
+    publicRemoteUrl: () => "",
+    safeStat: () => null,
+    sendText: () => { throw new Error("unexpected text response"); },
+    workCoverRow: () => null
+  });
+  const read = async (version = "") => {
+    let statusCode = 0;
+    let headers = {};
+    let bytes = Buffer.alloc(0);
+    await service.serveActorAvatar({
+      writeHead(status, nextHeaders) { statusCode = Number(status); headers = nextHeaders; },
+      end(body) { bytes = Buffer.from(body || []); }
+    }, 1, { version });
+    return { bytes: bytes.toString(), cacheControl: headers["Cache-Control"], statusCode };
+  };
+
+  const publishedCurrent = await read();
+  currentBytes = "manual-live";
+  const manualCurrent = await read();
+  assert.equal(publishedCurrent.bytes, "published-stage");
+  assert.equal(manualCurrent.bytes, "manual-live", "the same media service must re-read an unversioned current avatar after a manual override");
+  assert.equal(currentReads, 2, "unversioned current avatars must not enter the process media cache");
+  assert.equal(manualCurrent.cacheControl, "no-store", "unversioned current avatar responses must not be pinned by a browser cache");
+
+  const historical = await read("completed-op");
+  immutableBytes = "must-not-replace-cached-history";
+  const historicalAgain = await read("completed-op");
+  assert.equal(historical.bytes, "historical-stage");
+  assert.equal(historicalAgain.bytes, "historical-stage", "the completed immutable version may remain cached by its operation token");
+  assert.equal(immutableReads, 1);
+  assert.equal(historical.cacheControl, "public, max-age=31536000, immutable");
+}
+
 function verifyPresenterUsesOneSnapshot() {
   let separateAvatarReads = 0;
   const presenter = createWorkPresenterService({
@@ -485,6 +608,316 @@ function verifyPresenterUsesOneSnapshot() {
   assert.equal(result.actorProfile.displayName, "old");
   assert.equal(result.avatarUrl, "/media/actor/1/avatar?v=old");
   assert.equal(separateAvatarReads, 0, "presenter must not re-read the avatar after taking the actor-profile snapshot");
+}
+
+function verifyCompletedPayloadEquivalence() {
+  const person = { id: "1", name: "Actor One" };
+  const completedProfile = {
+    personId: "1",
+    displayName: "Shared Input",
+    aliases: ["Shared Alias"]
+  };
+  let mode = "direct";
+  const detail = createPersonDetailService({
+    actorProfileMergeCandidates: (personId, names) => [{ id: "merge-1", personId, matchedNames: [...names] }],
+    actorProfileRow: () => completedProfile,
+    adminCoreMutationService: {
+      upsertActorProfile() {
+        return mode === "direct"
+          ? { completed: true, profile: completedProfile }
+          : { completed: false, operation: { id: "pending-equivalence", status: "retry_wait" } };
+      }
+    },
+    maxActorAvatarBytes: 1024,
+    publicActorProfile: (row) => row,
+    resolveLibraryPersonByPublicId: () => person
+  });
+  const body = {
+    acceptAsyncOperation: true,
+    aliases: ["Shared Alias"],
+    displayName: "Shared Input",
+    idempotencyKey: "same-logical-input"
+  };
+  const direct = detail.updateActorProfile("1", body);
+  assert.equal(direct.statusCode, 200);
+  mode = "async";
+  const accepted = detail.updateActorProfile("1", body);
+  assert.equal(accepted.statusCode, 202);
+  const asyncCompleted = detail.actorProfilePayload("1");
+  assert.deepEqual(asyncCompleted, direct.payload, "direct 200 and 202 -> completed GET must return identical profile and merge candidates for the same input");
+}
+
+function verifyTerminalActorProfileContract() {
+  const person = { id: "1", name: "Actor One" };
+  const blocked = {
+    id: "blocked-contract", kind: "actor_profile_upsert", status: "blocked",
+    sequence: 1, attempts: 1, createdAt: "created", updatedAt: "updated"
+  };
+  let mode = "first-failure";
+  const detail = createPersonDetailService({
+    actorProfileMergeCandidates: () => [],
+    actorProfileRow: () => null,
+    adminCoreMutationService: {
+      upsertActorProfile() {
+        if (mode === "first-failure") {
+          const error = new Error("C:\\private\\deterministic.sqlite");
+          error.operation = blocked;
+          throw error;
+        }
+        if (mode === "blocked-replay") return { completed: false, operation: blocked };
+        return { completed: false, operation: { ...blocked, id: "cancelled-contract", status: "cancelled" } };
+      }
+    },
+    maxActorAvatarBytes: 1024,
+    publicActorProfile: (row) => row,
+    resolveLibraryPersonByPublicId: () => person
+  });
+  const assertBlocked = (error) => error.code === "ACTOR_PROFILE_BLOCKED"
+    && error.statusCode === 409
+    && error.operation === blocked
+    && error.retryable !== true;
+  assert.throws(() => detail.updateActorProfile("1", { acceptAsyncOperation: true }), assertBlocked,
+    "a first deterministic failure must be normalized to the same stable blocked 409 contract");
+  mode = "blocked-replay";
+  assert.throws(() => detail.updateActorProfile("1", { acceptAsyncOperation: true }), assertBlocked,
+    "an async opt-in replay of a blocked operation must not return 202");
+  assert.throws(() => detail.updateActorProfile("1", { acceptAsyncOperation: false }), assertBlocked,
+    "a legacy replay of a blocked operation must not advertise retryable 503");
+  mode = "cancelled-replay";
+  assert.throws(() => detail.updateActorProfile("1", { acceptAsyncOperation: true }),
+    (error) => error.code === "ACTOR_PROFILE_CANCELLED" && error.statusCode === 409 && error.retryable !== true,
+    "cancelled operations are terminal and must not use the pending transport contract");
+}
+
+async function verifyActorProfileRouteAndNetworkContract() {
+  const completedPayload = {
+    ok: true,
+    profile: { personId: "1", displayName: "Completed", aliases: ["Alias"] },
+    mergeCandidates: [{ id: "merge-1", matchedNames: ["Alias"] }]
+  };
+  const sent = [];
+  const deps = {
+    notFound: () => { throw new Error("unexpected not found"); },
+    personDetailService: {
+      actorProfilePayload: () => completedPayload,
+      coverBodyLimit: 2048,
+      updateActorProfile: () => ({ statusCode: 200, payload: completedPayload })
+    },
+    readJsonBody: async () => ({ displayName: "Completed" }),
+    requireLocalAdmin: () => true,
+    requireTrustedFileMutation: () => true,
+    sendJson: (_res, statusCode, payload) => sent.push({ statusCode, payload })
+  };
+  await routeWorksApi({ method: "GET" }, {}, new URL("http://fixture/api/actor-profiles/person-1"), deps);
+  await routeWorksApi({ method: "PUT" }, {}, new URL("http://fixture/api/actor-profiles/person-1"), deps);
+  assert.deepEqual(sent, [
+    { statusCode: 200, payload: completedPayload },
+    { statusCode: 200, payload: completedPayload }
+  ], "actor-profile GET and completed PUT routes must expose the same completed payload contract");
+
+  let unauthorizedBodyReads = 0;
+  let unauthorizedWrites = 0;
+  deps.requireLocalAdmin = (_req, res) => {
+    deps.sendJson(res, 403, { error: "local admin required" });
+    return false;
+  };
+  deps.readJsonBody = async () => {
+    unauthorizedBodyReads += 1;
+    return {};
+  };
+  deps.personDetailService.updateActorProfile = () => {
+    unauthorizedWrites += 1;
+    return { statusCode: 200, payload: completedPayload };
+  };
+  sent.length = 0;
+  await routeWorksApi({ method: "PUT" }, {}, new URL("http://fixture/api/actor-profiles/person-1"), deps);
+  assert.deepEqual(sent, [{ statusCode: 403, payload: { error: "local admin required" } }]);
+  assert.equal(unauthorizedBodyReads, 0, "actor-profile PUT must reject remote callers before reading a potentially large avatar body");
+  assert.equal(unauthorizedWrites, 0, "actor-profile PUT must not call the mutation service after a failed local-admin gate");
+  deps.requireLocalAdmin = () => true;
+  deps.readJsonBody = async () => ({ displayName: "Completed" });
+
+  const privateFailure = new Error("SQLITE_BUSY C:\\private\\fanhao.sqlite");
+  privateFailure.code = "SQLITE_BUSY";
+  privateFailure.statusCode = 503;
+  privateFailure.retryable = true;
+  privateFailure.operation = {
+    id: "op-safe", kind: "actor_profile_upsert", status: "retry_wait", aggregateKey: "person-avatar:1",
+    attempts: 1, createdAt: "created", updatedAt: "updated", privatePath: "C:\\private\\fanhao.sqlite"
+  };
+  deps.personDetailService.actorProfilePayload = () => { throw privateFailure; };
+  sent.length = 0;
+  await routeWorksApi({ method: "GET" }, {}, new URL("http://fixture/api/actor-profiles/person-1"), deps);
+  assert.equal(sent[0].statusCode, 503);
+  assert.equal(JSON.stringify(sent[0].payload).includes("private"), false, "GET actor-profile errors must not leak SQLite paths");
+
+  deps.personDetailService.updateActorProfile = () => { throw privateFailure; };
+  sent.length = 0;
+  await routeWorksApi({ method: "PUT" }, {}, new URL("http://fixture/api/actor-profiles/person-1"), deps);
+  assert.equal(sent[0].statusCode, 503);
+  assert.equal(sent[0].payload.error, "人物资料服务暂时不可用，请使用同一请求键重试");
+  assert.equal(Object.hasOwn(sent[0].payload, "code"), false, "unapproved SQLite codes must not leave the route");
+  assert.equal(JSON.stringify(sent[0].payload).includes("private"), false, "SQLite paths and private operation fields must not leave the route");
+  assert.deepEqual(Object.keys(sent[0].payload.operation).sort(), [
+    "attempts", "completedAt", "createdAt", "id", "kind", "recoverable", "requiresManualRetry", "sequence", "status", "updatedAt"
+  ]);
+
+  const pendingFailure = new Error("C:\\private\\must-not-leak.sqlite");
+  pendingFailure.code = "ACTOR_PROFILE_PENDING";
+  pendingFailure.statusCode = 503;
+  pendingFailure.retryable = true;
+  deps.personDetailService.updateActorProfile = () => { throw pendingFailure; };
+  sent.length = 0;
+  await routeWorksApi({ method: "PUT" }, {}, new URL("http://fixture/api/actor-profiles/person-1"), deps);
+  assert.deepEqual(sent[0], {
+    statusCode: 503,
+    payload: {
+      error: "人物资料任务仍在恢复中，请使用同一请求键重试",
+      code: "ACTOR_PROFILE_PENDING",
+      retryable: true
+    }
+  });
+
+  const blockedFailure = new Error("C:\\private\\blocked.sqlite");
+  blockedFailure.code = "ACTOR_PROFILE_BLOCKED";
+  blockedFailure.statusCode = 409;
+  blockedFailure.operation = {
+    id: "blocked-safe", kind: "actor_profile_upsert", status: "blocked",
+    sequence: 2, attempts: 3, createdAt: "created", updatedAt: "updated", lastError: "C:\\private\\blocked.sqlite"
+  };
+  deps.personDetailService.updateActorProfile = () => { throw blockedFailure; };
+  sent.length = 0;
+  await routeWorksApi({ method: "PUT" }, {}, new URL("http://fixture/api/actor-profiles/person-1"), deps);
+  assert.equal(sent[0].statusCode, 409);
+  assert.equal(sent[0].payload.error, "人物资料任务已被阻断，请修复原因后手动重试");
+  assert.equal(sent[0].payload.code, "ACTOR_PROFILE_BLOCKED");
+  assert.equal(sent[0].payload.retryable, undefined);
+  assert.equal(sent[0].payload.operation.status, "blocked");
+  assert.equal(sent[0].payload.operation.requiresManualRetry, true);
+  assert.equal(JSON.stringify(sent[0].payload).includes("private"), false, "blocked route responses must not expose the deterministic failure detail");
+
+  const body = Object.freeze({ acceptAsyncOperation: true, displayName: "Network Retry", idempotencyKey: "network-idempotency" });
+  const bodies = [];
+  let attempts = 0;
+  const response = await saveActorProfileRequest({
+    api: async (_path, options) => {
+      bodies.push(options.body);
+      attempts += 1;
+      if (attempts === 1) throw new TypeError("fetch failed");
+      if (attempts === 2) {
+        const error = new Error("offline");
+        error.code = "NETWORK_ERROR";
+        throw error;
+      }
+      return completedPayload;
+    },
+    body,
+    path: "/api/actor-profiles/person-1",
+    sleep: async () => {}
+  });
+  assert.equal(response, completedPayload);
+  assert.equal(attempts, 3);
+  assert.ok(bodies.every((item) => item === body), "network retries must reuse the exact body and idempotency key");
+}
+
+function verifyLeaseTakeoverReceiptRecheck() {
+  const fixture = createCrashFixture("lease-takeover");
+  let clock = Date.parse("2026-08-11T00:00:00.000Z");
+  let staleReceiptReads = 1;
+  let serviceB = null;
+  const handler = {
+    stageImage(db, payload, blobs, context) {
+      db.prepare(`
+        INSERT INTO actor_profile_image_staging(
+          operation_id, person_id, intent_sha256, source_type, remote_url, mime,
+          image_blob, byte_size, status, source, legacy_key, created_at, updated_at
+        ) VALUES (?, ?, ?, 'unknown', '', 'application/octet-stream', ?, ?, 'ok', 'actor_profiles', ?, ?, ?)
+      `).run(context.operationId, payload.personId, context.intentSha256, blobs.avatar, blobs.avatar.length, String(payload.personId), context.createdAt, context.createdAt);
+      return { staged: true };
+    },
+    verifyImageStage(db, payload, blobs, context) {
+      const row = db.prepare("SELECT intent_sha256, image_blob FROM actor_profile_image_staging WHERE operation_id = ?").get(context.operationId);
+      return row?.intent_sha256 === context.intentSha256 && Buffer.from(row.image_blob || []).equals(blobs.avatar);
+    },
+    applyMain(db, payload, context) {
+      db.prepare("UPDATE people SET value = ?, updated_at = ? WHERE id = ?").run(payload.value, context.createdAt, payload.personId);
+      db.prepare(`
+        INSERT INTO actor_profile_publications(person_id, operation_id, intent_sha256, published_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(payload.personId, context.operationId, context.intentSha256, context.publishedAt, context.publishedAt);
+      return { published: true };
+    },
+    verifyMain(db, payload, context) {
+      return db.prepare("SELECT value FROM people WHERE id = ?").get(payload.personId)?.value === payload.value
+        && db.prepare("SELECT operation_id FROM actor_profile_publications WHERE person_id = ?").get(payload.personId)?.operation_id === context.operationId;
+    }
+  };
+  const common = {
+    autoReconcile: false,
+    busyTimeoutMs: 25,
+    handlers: { fixture_upsert: handler },
+    imageDbPath: fixture.imageDbPath,
+    leaseMs: 10,
+    mainDbPath: fixture.mainDbPath,
+    now: () => clock,
+    retryDelayMs: 0,
+    warn: () => {}
+  };
+  const serviceA = createCrossStoreOutboxService({
+    ...common,
+    boundaryHook(name) {
+      if (name !== "image_staged") return;
+      clock += 11;
+      const recovered = serviceB.reconcilePending();
+      assert.equal(recovered[0]?.status, "completed", "the new lease owner must complete after observing the prior image commit");
+    }
+  });
+  serviceB = createCrossStoreOutboxService({
+    ...common,
+    createDatabase(filePath) {
+      const real = new DatabaseSync(filePath);
+      if (path.resolve(filePath) !== path.resolve(fixture.imageDbPath)) return real;
+      return {
+        close: (...args) => real.close(...args),
+        exec: (...args) => real.exec(...args),
+        prepare(sql) {
+          const statement = real.prepare(sql);
+          if (staleReceiptReads > 0 && /SELECT intent_sha256 FROM cross_store_receipts/.test(String(sql))) {
+            return {
+              get() {
+                staleReceiptReads -= 1;
+                return undefined;
+              }
+            };
+          }
+          return statement;
+        }
+      };
+    }
+  });
+  try {
+    serviceA.start();
+    serviceB.start();
+    const operation = serviceA.submit({
+      aggregateKey: "person-avatar:1",
+      blobs: { avatar: Buffer.from("lease-image") },
+      idempotencyKey: "lease-takeover",
+      kind: "fixture_upsert",
+      payload: { personId: 1, value: "lease-new" }
+    });
+    assert.equal(operation.status, "completed");
+    assert.equal(staleReceiptReads, 0, "the fixture must inject one stale transaction-external receipt read");
+    const snapshot = crashSnapshot(fixture);
+    assert.equal(snapshot.state, "completed");
+    assert.equal(snapshot.person, "lease-new");
+    assert.equal(snapshot.staged, 1);
+    assert.equal(snapshot.imageReceipts, 1);
+    assert.equal(snapshot.mainReceipts, 1);
+  } finally {
+    serviceB.close();
+    serviceA.close();
+    fixture.cleanup();
+  }
 }
 
 function createCrashFixture(name) {

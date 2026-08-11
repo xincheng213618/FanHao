@@ -381,6 +381,15 @@ export function createCrossStoreOutboxService({
     }
     imageDb.exec("BEGIN IMMEDIATE");
     try {
+      // The preflight read is only a fast path. Another lease owner may commit
+      // while this connection waits for the image write lock, so receipt
+      // existence must be decided again inside the serialized transaction.
+      const committedReceipt = imageDb.prepare("SELECT intent_sha256 FROM cross_store_receipts WHERE op_id = ? AND step = 'image_stage'").get(intent.op_id);
+      if (committedReceipt) {
+        if (committedReceipt.intent_sha256 !== intent.intent_sha256) throw new Error("Cross-store image receipt digest mismatch");
+        imageDb.exec("COMMIT");
+        return;
+      }
       const result = handler.stageImage(imageDb, intent.payload, intent.blobs, {
         operationId: intent.op_id,
         intentSha256: intent.intent_sha256,
@@ -628,6 +637,7 @@ export function createCrossStoreOutboxService({
       }
       if (row.status !== "blocked") {
         const error = new Error("只有已阻断的人物资料任务可以重试");
+        error.code = "ACTOR_PROFILE_RETRY_NOT_BLOCKED";
         error.statusCode = 409;
         throw error;
       }
@@ -639,7 +649,12 @@ export function createCrossStoreOutboxService({
         WHERE intent.op_id = ? AND active.op_id IS NULL
         LIMIT 1
       `).get(String(operationId));
-      if (missingReservation) throw new Error("已阻断任务的 reservation 丢失，拒绝重试");
+      if (missingReservation) {
+        const error = new Error("已阻断任务的 reservation 丢失，拒绝重试");
+        error.code = "ACTOR_PROFILE_RESERVATION_LOST";
+        error.statusCode = 409;
+        throw error;
+      }
       const changed = mainDb.prepare(`
         UPDATE cross_store_operation_state
         SET status = 'retry_wait', lease_owner = NULL, lease_until = NULL,

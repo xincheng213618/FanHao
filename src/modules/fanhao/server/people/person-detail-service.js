@@ -2,6 +2,21 @@ import { normalizePersonWorkYear, personWorkYearOptions, worksForPersonYear } fr
 
 const PERSON_DETAIL_SOURCE_CACHE_LIMIT = 128;
 const PERSON_DETAIL_PAGE_CACHE_LIMIT = 12;
+const PENDING_ACTOR_PROFILE_STATUSES = new Set(["prepared", "applying", "retry_wait"]);
+
+function actorProfileTerminalError(operation, cause = null) {
+  const status = String(operation?.status || "");
+  if (!["blocked", "cancelled"].includes(status)) return null;
+  const blocked = status === "blocked";
+  const error = new Error(blocked
+    ? "人物资料任务已被阻断，请修复原因后手动重试"
+    : "人物资料任务已取消");
+  error.code = blocked ? "ACTOR_PROFILE_BLOCKED" : "ACTOR_PROFILE_CANCELLED";
+  error.statusCode = 409;
+  error.operation = operation;
+  if (cause) error.cause = cause;
+  return error;
+}
 
 export function relatedLocalWorksForPerson({
   library,
@@ -70,18 +85,41 @@ export function createPersonDetailService({
   const detailSourceCache = new Map();
   let detailSourceCacheStamp = "";
 
+  function completedActorProfilePayload(person, profile = publicActorProfile(actorProfileRow(person.id))) {
+    const mergeCandidates = actorProfileMergeCandidates(person.id, [
+      profile?.displayName,
+      ...(profile?.aliases || [])
+    ]);
+    return { ok: true, profile, mergeCandidates };
+  }
+
   function actorProfilePayload(personId) {
     const person = resolveLibraryPersonByPublicId(personId);
     if (!person) return null;
-    return { profile: publicActorProfile(actorProfileRow(person.id)) };
+    return completedActorProfilePayload(person);
   }
 
   function updateActorProfile(personId, body) {
     const person = resolveLibraryPersonByPublicId(personId);
     if (!person) return null;
 
-    const result = adminCoreMutationService.upsertActorProfile(person, body);
+    let result = null;
+    try {
+      result = adminCoreMutationService.upsertActorProfile(person, body);
+    } catch (error) {
+      throw actorProfileTerminalError(error?.operation, error) || error;
+    }
     if (result?.completed === false) {
+      const terminal = actorProfileTerminalError(result.operation);
+      if (terminal) throw terminal;
+      if (!PENDING_ACTOR_PROFILE_STATUSES.has(String(result.operation?.status || ""))) {
+        const error = new Error("人物资料任务状态暂时不可确认，请使用同一请求键重试");
+        error.code = "ACTOR_PROFILE_PENDING";
+        error.statusCode = 503;
+        error.retryable = true;
+        error.operation = result.operation;
+        throw error;
+      }
       if (body?.acceptAsyncOperation === true) {
         return { statusCode: 202, payload: { ok: true, operation: result.operation } };
       }
@@ -93,11 +131,7 @@ export function createPersonDetailService({
       throw error;
     }
     const profile = result?.completed === true ? result.profile : result;
-    const mergeCandidates = actorProfileMergeCandidates(person.id, [
-      profile?.displayName,
-      ...(profile?.aliases || [])
-    ]);
-    return { statusCode: 200, payload: { ok: true, profile, mergeCandidates } };
+    return { statusCode: 200, payload: completedActorProfilePayload(person, profile) };
   }
 
   function actorProfileOperation(operationId) {

@@ -36,6 +36,62 @@ function isAndroidWorkMoveRequest(req) {
   return String(req?.headers?.["x-fanhao-client"] || "").trim().toLowerCase() === "android";
 }
 
+const ACTOR_PROFILE_PUBLIC_ERROR_MESSAGES = Object.freeze({
+  ACTOR_PROFILE_BLOCKED: "人物资料任务已被阻断，请修复原因后手动重试",
+  ACTOR_PROFILE_CANCELLED: "人物资料任务已取消",
+  ACTOR_PROFILE_PENDING: "人物资料任务仍在恢复中，请使用同一请求键重试",
+  ACTOR_PROFILE_RESERVED: "人物头像或 JavDB 身份正在更新，请稍后重试",
+  ACTOR_PROFILE_RESERVATION_LOST: "人物资料任务状态需要人工检查，暂时无法重试",
+  ACTOR_PROFILE_RETRY_NOT_BLOCKED: "只有已阻断的人物资料任务可以重试",
+  CROSS_STORE_FAILURE_RECORD_BUSY: "人物资料任务已经持久化，请使用同一请求键重试",
+  CROSS_STORE_NOT_READY: "人物资料恢复队列尚未就绪",
+  IDEMPOTENCY_CONFLICT: "幂等键已经用于不同的人物资料请求",
+  INVALID_JAVDB_ACTOR_URL: "请输入有效的 JavDB actor 页面链接"
+});
+
+export function sanitizeActorProfileOperation(operation) {
+  if (!operation?.id) return null;
+  const status = ["prepared", "applying", "retry_wait", "completed", "blocked", "cancelled"].includes(String(operation.status || ""))
+    ? String(operation.status)
+    : "retry_wait";
+  const sequence = Number(operation.sequence || 0);
+  const attempts = Number(operation.attempts || 0);
+  return {
+    id: String(operation.id),
+    kind: operation.kind === "actor_profile_upsert" ? operation.kind : "actor_profile_upsert",
+    sequence: Number.isFinite(sequence) ? sequence : 0,
+    status,
+    attempts: Number.isFinite(attempts) ? attempts : 0,
+    createdAt: String(operation.createdAt || ""),
+    updatedAt: String(operation.updatedAt || ""),
+    completedAt: operation.completedAt ? String(operation.completedAt) : null,
+    recoverable: !["completed", "cancelled"].includes(status),
+    requiresManualRetry: status === "blocked"
+  };
+}
+
+export function actorProfileRouteErrorStatus(error) {
+  const status = Number(error?.statusCode || error?.status || 0);
+  return [400, 409, 413, 429, 503].includes(status) ? status : 500;
+}
+
+export function safeActorProfileRouteError(error, fallback = "人物资料操作失败") {
+  const code = String(error?.code || "");
+  const status = actorProfileRouteErrorStatus(error);
+  const publicMessage = ACTOR_PROFILE_PUBLIC_ERROR_MESSAGES[code]
+    || (status === 413 ? "人物资料请求过大"
+      : status === 503 ? "人物资料服务暂时不可用，请使用同一请求键重试"
+        : status === 400 ? "人物资料请求无效"
+          : fallback);
+  const operation = sanitizeActorProfileOperation(error?.operation);
+  return {
+    error: publicMessage,
+    ...(Object.hasOwn(ACTOR_PROFILE_PUBLIC_ERROR_MESSAGES, code) ? { code } : {}),
+    ...(error?.retryable || status === 503 ? { retryable: true } : {}),
+    ...(operation ? { operation } : {})
+  };
+}
+
 export async function routeWorksApi(req, res, url, deps) {
   const {
     notFound,
@@ -66,20 +122,24 @@ export async function routeWorksApi(req, res, url, deps) {
 
   const actorProfileMatch = /^\/api\/actor-profiles\/([^/]+)$/.exec(url.pathname);
   if (actorProfileMatch && req.method === "GET") {
-    const payload = personDetailService.actorProfilePayload(decodeURIComponent(actorProfileMatch[1]));
-    if (!payload) {
-      notFound(res);
-      return true;
+    try {
+      const payload = personDetailService.actorProfilePayload(decodeURIComponent(actorProfileMatch[1]));
+      if (!payload) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, payload);
+    } catch (error) {
+      sendJson(res, actorProfileRouteErrorStatus(error), safeActorProfileRouteError(error, "读取人物资料失败"));
     }
-
-    sendJson(res, 200, payload);
     return true;
   }
 
   if (actorProfileMatch && req.method === "PUT") {
-    const personId = decodeURIComponent(actorProfileMatch[1]);
-    const body = await readJsonBody(req, personDetailService.coverBodyLimit);
+    if (!requireLocalAdmin(req, res)) return true;
     try {
+      const personId = decodeURIComponent(actorProfileMatch[1]);
+      const body = await readJsonBody(req, personDetailService.coverBodyLimit);
       const result = personDetailService.updateActorProfile(personId, body);
       if (!result) {
         notFound(res);
@@ -87,24 +147,23 @@ export async function routeWorksApi(req, res, url, deps) {
       }
       sendJson(res, result.statusCode, result.payload);
     } catch (error) {
-      sendJson(res, error.statusCode || 400, {
-        error: error.message || "资料页配置失败",
-        ...(error.code ? { code: error.code } : {}),
-        ...(error.retryable ? { retryable: true } : {}),
-        ...(error.operation ? { operation: error.operation } : {})
-      });
+      sendJson(res, actorProfileRouteErrorStatus(error), safeActorProfileRouteError(error, "资料页配置失败"));
     }
     return true;
   }
 
   const actorProfileOperationMatch = /^\/api\/actor-profile-operations\/([^/]+)$/.exec(url.pathname);
   if (actorProfileOperationMatch && req.method === "GET") {
-    const operation = personDetailService.actorProfileOperation(decodeURIComponent(actorProfileOperationMatch[1]));
-    if (!operation) {
-      notFound(res);
-      return true;
+    try {
+      const operation = personDetailService.actorProfileOperation(decodeURIComponent(actorProfileOperationMatch[1]));
+      if (!operation) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, { ok: true, operation: sanitizeActorProfileOperation(operation) });
+    } catch (error) {
+      sendJson(res, actorProfileRouteErrorStatus(error), safeActorProfileRouteError(error, "读取人物资料任务失败"));
     }
-    sendJson(res, 200, { ok: true, operation });
     return true;
   }
 
@@ -117,9 +176,9 @@ export async function routeWorksApi(req, res, url, deps) {
         notFound(res);
         return true;
       }
-      sendJson(res, 200, { ok: true, operation });
+      sendJson(res, 200, { ok: true, operation: sanitizeActorProfileOperation(operation) });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "重试人物资料任务失败" });
+      sendJson(res, actorProfileRouteErrorStatus(error), safeActorProfileRouteError(error, "重试人物资料任务失败"));
     }
     return true;
   }

@@ -69,10 +69,13 @@ export function createMediaResponseService({
   }
 
   async function serveActorAvatar(res, personId, options = {}) {
-    const row = await cachedMediaBlobRow(`actor:${personId}:${options.version || ""}`, () => blobStore.actorAvatar(personId, options.version || ""));
+    const version = String(options.version || "");
+    const row = version
+      ? await cachedMediaBlobRow(`actor:${personId}:${version}`, () => blobStore.actorAvatar(personId, version))
+      : await blobStore.actorAvatar(personId, "");
     if (!serveBlobRow(res, row, {
       defaultMime: "image/jpeg",
-      cacheControl: options.version ? "public, max-age=31536000, immutable" : "public, max-age=86400"
+      cacheControl: version ? "public, max-age=31536000, immutable" : "no-store"
     })) {
       notFound(res);
     }
@@ -625,22 +628,29 @@ function createInlineMediaBlobStore({ coreImageRow, corePersonAvatarRow, getCore
       if (version) {
         const db = getCoreDb();
         if (!hasSqliteTables(db, "main", [
-          "actor_profile_publications", "cross_store_operation_state", "cross_store_main_receipts"
+          "actor_profile_publications", "cross_store_intents", "cross_store_operation_state", "cross_store_main_receipts"
         ]) || !hasSqliteTables(db, "fanhao_images", ["actor_profile_image_staging", "cross_store_receipts"])) return null;
         return db.prepare(`
           SELECT stage.image_blob, stage.mime
-          FROM actor_profile_publications publication
+          FROM cross_store_intents intent
           JOIN cross_store_operation_state state
-            ON state.op_id = publication.operation_id AND state.status = 'completed'
+            ON state.op_id = intent.op_id AND state.status = 'completed'
           JOIN cross_store_main_receipts receipt
-            ON receipt.op_id = publication.operation_id
+            ON receipt.op_id = intent.op_id
            AND receipt.step = 'visibility_switch'
-           AND receipt.intent_sha256 = publication.intent_sha256
+           AND receipt.intent_sha256 = intent.intent_sha256
+          JOIN fanhao_images.cross_store_receipts image_receipt
+            ON image_receipt.op_id = intent.op_id
+           AND image_receipt.step = 'image_stage'
+           AND image_receipt.kind = intent.kind
+           AND image_receipt.aggregate_key = intent.aggregate_key
+           AND image_receipt.intent_sha256 = intent.intent_sha256
           JOIN fanhao_images.actor_profile_image_staging stage
-            ON stage.operation_id = publication.operation_id
-           AND stage.person_id = publication.person_id
-           AND stage.intent_sha256 = publication.intent_sha256
-          WHERE publication.person_id = ? AND publication.operation_id = ?
+            ON stage.operation_id = intent.op_id
+           AND stage.intent_sha256 = receipt.intent_sha256
+          WHERE intent.kind = 'actor_profile_upsert'
+            AND stage.person_id = ?
+            AND stage.operation_id = ?
         `).get(Number(personId), String(version)) || null;
       }
       return corePersonAvatarRow(personId);

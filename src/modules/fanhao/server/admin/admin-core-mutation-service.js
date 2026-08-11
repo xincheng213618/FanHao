@@ -582,6 +582,7 @@ export function createAdminCoreMutationService({
     const inputActorText = Array.isArray(rawActorUrls) ? rawActorUrls.join("\n") : String(rawActorUrls || "").trim();
     if (inputActorText && !javdbUrls.length) {
       const error = new Error("请输入 JavDB actor 页面链接，例如 https://javdb.com/actors/BzpA");
+      error.code = "INVALID_JAVDB_ACTOR_URL";
       error.statusCode = 400;
       throw error;
     }
@@ -742,6 +743,7 @@ export function createAdminCoreMutationService({
     const inputActorText = Array.isArray(rawActorUrls) ? rawActorUrls.join("\n") : String(rawActorUrls || "").trim();
     if (inputActorText && !javdbUrls.length) {
       const error = new Error("请输入 JavDB actor 页面链接，例如 https://javdb.com/actors/BzpA");
+      error.code = "INVALID_JAVDB_ACTOR_URL";
       error.statusCode = 400;
       throw error;
     }

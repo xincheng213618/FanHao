@@ -207,7 +207,9 @@ export function createManualCoverStateService({
     db.exec("BEGIN IMMEDIATE");
     try {
       assertActorProfileMutationAllowed(db, corePersonId);
-      clearActorProfilePublication(db, corePersonId);
+      clearActorProfilePublication(db, corePersonId, payload ? {} : {
+        sources: ["manual_upload", "manual_person_cover", "manual"]
+      });
       db.prepare("DELETE FROM fanhao_images.images WHERE owner_type = 'person' AND owner_id = ? AND kind = 'avatar' AND source IN ('manual_person_cover', 'manual_upload')").run(corePersonId);
       if (payload) {
         db.prepare(

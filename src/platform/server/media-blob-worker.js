@@ -5,7 +5,7 @@ import { hasSqliteTables } from "./sqlite-schema.js";
 
 function hasActorProfilePublicationReadModel(db) {
   return hasSqliteTables(db, "main", [
-    "actor_profile_publications", "cross_store_operation_state", "cross_store_main_receipts"
+    "actor_profile_publications", "cross_store_intents", "cross_store_operation_state", "cross_store_main_receipts"
   ]) && hasSqliteTables(db, "fanhao_images", ["actor_profile_image_staging", "cross_store_receipts"]);
 }
 
@@ -15,20 +15,27 @@ attachCoreImageStore(db, { dbPath: workerData.imageDbPath });
 
 const coreImageQuery = db.prepare("SELECT image_blob, mime FROM fanhao_images.images WHERE id = ?");
 const hasPublishedActorAvatars = hasActorProfilePublicationReadModel(db);
-const publishedActorAvatarQuery = hasPublishedActorAvatars ? db.prepare(`
+const completedActorAvatarVersionQuery = hasPublishedActorAvatars ? db.prepare(`
   SELECT stage.image_blob, stage.mime
-  FROM actor_profile_publications publication
+  FROM cross_store_intents intent
   JOIN cross_store_operation_state state
-    ON state.op_id = publication.operation_id AND state.status = 'completed'
+    ON state.op_id = intent.op_id AND state.status = 'completed'
   JOIN cross_store_main_receipts receipt
-    ON receipt.op_id = publication.operation_id
+    ON receipt.op_id = intent.op_id
    AND receipt.step = 'visibility_switch'
-   AND receipt.intent_sha256 = publication.intent_sha256
+   AND receipt.intent_sha256 = intent.intent_sha256
+  JOIN fanhao_images.cross_store_receipts image_receipt
+    ON image_receipt.op_id = intent.op_id
+   AND image_receipt.step = 'image_stage'
+   AND image_receipt.kind = intent.kind
+   AND image_receipt.aggregate_key = intent.aggregate_key
+   AND image_receipt.intent_sha256 = intent.intent_sha256
   JOIN fanhao_images.actor_profile_image_staging stage
-    ON stage.operation_id = publication.operation_id
-   AND stage.person_id = publication.person_id
-   AND stage.intent_sha256 = publication.intent_sha256
-  WHERE publication.person_id = ? AND publication.operation_id = ?
+    ON stage.operation_id = intent.op_id
+   AND stage.intent_sha256 = receipt.intent_sha256
+  WHERE intent.kind = 'actor_profile_upsert'
+    AND stage.person_id = ?
+    AND stage.operation_id = ?
 `) : null;
 const currentActorAvatarQuery = hasPublishedActorAvatars ? db.prepare(`
   WITH avatar_candidates AS (
@@ -129,7 +136,7 @@ function runAction(action, message) {
   if (action === "actorAvatar") {
     const personId = Number(message.personId);
     const version = String(message.version || "");
-    if (version) return publishedActorAvatarQuery?.get(personId, version) || null;
+    if (version) return completedActorAvatarVersionQuery?.get(personId, version) || null;
     return hasPublishedActorAvatars
       ? currentActorAvatarQuery.get(personId, personId) || null
       : currentActorAvatarQuery.get(personId) || null;
