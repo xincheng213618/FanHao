@@ -12,6 +12,20 @@ import { createShortVideoStore } from "../src/modules/short-videos/server/store.
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-video-collections-"));
 const dbPath = path.join(tempRoot, "short-videos.sqlite");
 let pageCountHook = null;
+const collectionSummarySelect = `
+  SELECT
+    collection.id,
+    collection.name,
+    collection.sort_order,
+    collection.created_at,
+    collection.updated_at,
+    COUNT(video.id) AS item_count,
+    COALESCE(MAX(CASE WHEN video.id IS NOT NULL THEN item.added_at ELSE '' END), '') AS latest_added_at
+  FROM short_video_collections collection
+  LEFT JOIN short_video_collection_items item ON item.collection_id = collection.id
+`;
+const legacyCollectionSummaryJoin = "LEFT JOIN short_video_catalog video ON video.id = item.video_id";
+const optimizedCollectionSummaryJoin = "LEFT JOIN short_videos video ON video.id = item.video_id";
 const store = createShortVideoStore({
   dbPath,
   coverDbPath: path.join(tempRoot, "short-video-covers.sqlite"),
@@ -47,6 +61,7 @@ function verifyStoreContract() {
   } finally {
     db.close();
   }
+  verifyCollectionSummaryQueryEquivalence();
 
   assert.throws(() => store.createCollection({ name: "  " }), statusError(400));
   assert.throws(() => store.createCollection({ name: "x".repeat(41) }), statusError(400));
@@ -101,6 +116,102 @@ function verifyStoreContract() {
   assert.throws(() => store.listCollectionVideos(watchLater.id), statusError(404));
   assert.throws(() => store.deleteCollection(watchLater.id), statusError(404));
   return { busyCollection: favorites, outsiderId: "fixture-outsider" };
+}
+
+function verifyCollectionSummaryQueryEquivalence() {
+  const empty = store.createCollection({ name: "摘要空清单" }).collection;
+  const first = store.createCollection({ name: "摘要第一清单" }).collection;
+  const second = store.createCollection({ name: "摘要第二清单" }).collection;
+  assertCollectionSummaryQueriesEquivalent("empty and multiple collections");
+
+  store.addCollectionVideo(first.id, "fixture-video-a");
+  store.addCollectionVideo(first.id, "fixture-video-b");
+  store.addCollectionVideo(second.id, "fixture-video-c");
+  setCollectionItemAddedAt(first.id, "fixture-video-a", "2026-02-01T00:00:00.000Z");
+  setCollectionItemAddedAt(first.id, "fixture-video-b", "2026-02-02T00:00:00.000Z");
+  assertCollectionSummaryQueriesEquivalent("normal memberships");
+
+  insertOrphanCollectionItem(first.id, "fixture-orphan-video", "2099-01-01T00:00:00.000Z");
+  assertCollectionSummaryQueriesEquivalent("orphan membership");
+
+  const db = openFixtureDatabase(dbPath);
+  try {
+    db.prepare("UPDATE short_video_collections SET sort_order = ? WHERE id = ?").run(20, empty.id);
+    db.prepare("UPDATE short_video_collections SET sort_order = ? WHERE id = ?").run(-10, second.id);
+  } finally {
+    db.close();
+  }
+  const sorted = assertCollectionSummaryQueriesEquivalent("sort order");
+  assert.deepEqual(sorted.map((row) => row.id), [second.id, first.id, empty.id]);
+
+  store.removeCollectionVideo(first.id, "fixture-video-b");
+  assertCollectionSummaryQueriesEquivalent("remove membership");
+  store.deleteCollection(first.id);
+  assertCollectionSummaryQueriesEquivalent("delete collection");
+}
+
+function assertCollectionSummaryQueriesEquivalent(stage) {
+  const db = openFixtureDatabase(dbPath);
+  try {
+    const legacy = db.prepare(`
+      ${collectionSummarySelect}
+      ${legacyCollectionSummaryJoin}
+      WHERE collection.local_user_id = ?
+      GROUP BY collection.id
+      ORDER BY collection.sort_order ASC, collection.created_at ASC, collection.id ASC
+    `).all("local:self");
+    const optimized = db.prepare(`
+      ${collectionSummarySelect}
+      ${optimizedCollectionSummaryJoin}
+      WHERE collection.local_user_id = ?
+      GROUP BY collection.id
+      ORDER BY collection.sort_order ASC, collection.created_at ASC, collection.id ASC
+    `).all("local:self");
+    assert.deepEqual(optimized, legacy, `${stage}: optimized list summary must match the catalog query`);
+    for (const collection of legacy) {
+      const legacyById = db.prepare(`
+        ${collectionSummarySelect}
+        ${legacyCollectionSummaryJoin}
+        WHERE collection.id = ? AND collection.local_user_id = ?
+        GROUP BY collection.id
+      `).get(collection.id, "local:self");
+      const optimizedById = db.prepare(`
+        ${collectionSummarySelect}
+        ${optimizedCollectionSummaryJoin}
+        WHERE collection.id = ? AND collection.local_user_id = ?
+        GROUP BY collection.id
+      `).get(collection.id, "local:self");
+      assert.deepEqual(optimizedById, legacyById, `${stage}: optimized require summary must match the catalog query`);
+    }
+    return optimized;
+  } finally {
+    db.close();
+  }
+}
+
+function setCollectionItemAddedAt(collectionId, videoId, addedAt) {
+  const db = openFixtureDatabase(dbPath);
+  try {
+    db.prepare(`
+      UPDATE short_video_collection_items SET added_at = ?
+      WHERE collection_id = ? AND video_id = ?
+    `).run(addedAt, collectionId, videoId);
+  } finally {
+    db.close();
+  }
+}
+
+function insertOrphanCollectionItem(collectionId, videoId, addedAt) {
+  const db = openFixtureDatabase(dbPath);
+  try {
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.prepare(`
+      INSERT INTO short_video_collection_items (collection_id, video_id, added_at)
+      VALUES (?, ?, ?)
+    `).run(collectionId, videoId, addedAt);
+  } finally {
+    db.close();
+  }
 }
 
 function verifyCursorSnapshot(collection) {
@@ -250,6 +361,7 @@ function verifyDatabaseConstraints(collection) {
 
 async function verifyRouteContract(fixtures) {
   const calls = [];
+  const mutationEvents = [];
   const fixtureStore = {
     listCollections() {
       calls.push("list");
@@ -295,7 +407,8 @@ async function verifyRouteContract(fixtures) {
     }
   };
 
-  const listed = await invokeRoute({ method: "GET", pathname: "/api/short-videos/collections", store: fixtureStore });
+  const routeOptions = { onMutation: () => mutationEvents.push("mutation") };
+  const listed = await invokeRoute({ method: "GET", pathname: "/api/short-videos/collections", store: fixtureStore, ...routeOptions });
   assert.equal(listed.status, 200);
   assert.deepEqual(calls, ["list"]);
   const reservedVideoDetail = await invokeRoute({
@@ -316,19 +429,22 @@ async function verifyRouteContract(fixtures) {
     pathname: "/api/short-videos/collections",
     body: { name: "API fixture" },
     store: fixtureStore,
-    requireLocalAdmin: gate
+    requireLocalAdmin: gate,
+    ...routeOptions
   })).status, 201);
   assert.equal((await invokeRoute({
     method: "PATCH",
     pathname: "/api/short-videos/collections/svc_fixture",
     body: { name: "Renamed" },
     store: fixtureStore,
-    requireLocalAdmin: gate
+    requireLocalAdmin: gate,
+    ...routeOptions
   })).status, 200);
   const videos = await invokeRoute({
     method: "GET",
     pathname: "/api/short-videos/collections/svc_fixture/videos?cursor=fixture-cursor&offset=36&limit=48",
-    store: fixtureStore
+    store: fixtureStore,
+    ...routeOptions
   });
   assert.equal(videos.status, 200);
   assert.deepEqual(
@@ -339,7 +455,8 @@ async function verifyRouteContract(fixtures) {
   const detail = await invokeRoute({
     method: "GET",
     pathname: "/api/short-videos/collections/svc_fixture/videos/fixture-video-b",
-    store: fixtureStore
+    store: fixtureStore,
+    ...routeOptions
   });
   assert.equal(detail.status, 200);
   assert.deepEqual(calls.at(-1), ["detail", "svc_fixture", "fixture-video-b"]);
@@ -347,21 +464,25 @@ async function verifyRouteContract(fixtures) {
     method: "PUT",
     pathname: "/api/short-videos/collections/svc_fixture/videos/fixture-video-b",
     store: fixtureStore,
-    requireLocalAdmin: gate
+    requireLocalAdmin: gate,
+    ...routeOptions
   })).status, 200);
   assert.equal((await invokeRoute({
     method: "DELETE",
     pathname: "/api/short-videos/collections/svc_fixture/videos/fixture-video-b",
     store: fixtureStore,
-    requireLocalAdmin: gate
+    requireLocalAdmin: gate,
+    ...routeOptions
   })).status, 200);
   assert.equal((await invokeRoute({
     method: "DELETE",
     pathname: "/api/short-videos/collections/svc_fixture",
     store: fixtureStore,
-    requireLocalAdmin: gate
+    requireLocalAdmin: gate,
+    ...routeOptions
   })).status, 200);
   assert.equal(gateCalls, 5, "every collection mutation must pass through the trusted same-origin gate");
+  assert.equal(mutationEvents.length, 5, "only successful collection mutations must retain one mutation event each");
 
   const outsider = await invokeRoute({
     method: "GET",
@@ -606,7 +727,7 @@ function insertFixtureVideo(db, id, awemeId, title) {
   `).run(id, awemeId, title, `${id}.mp4`, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
 }
 
-async function invokeRoute({ method, pathname, body = {}, store: fixtureStore, requireLocalAdmin = () => true }) {
+async function invokeRoute({ method, pathname, body = {}, store: fixtureStore, requireLocalAdmin = () => true, onMutation = () => {} }) {
   const response = {};
   let sent = null;
   const handled = await routeShortVideoApi(
@@ -615,7 +736,7 @@ async function invokeRoute({ method, pathname, body = {}, store: fixtureStore, r
     new URL(pathname, "http://fixture"),
     {
       notFound() {},
-      onMutation() {},
+      onMutation,
       readJsonBody: async () => body,
       requireLocalAdmin,
       sendJson(_response, status, payload) {

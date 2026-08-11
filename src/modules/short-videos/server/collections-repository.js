@@ -31,7 +31,7 @@ export function createShortVideoCollectionsRepository({
           COALESCE(MAX(CASE WHEN video.id IS NOT NULL THEN item.added_at ELSE '' END), '') AS latest_added_at
         FROM short_video_collections collection
         LEFT JOIN short_video_collection_items item ON item.collection_id = collection.id
-        LEFT JOIN short_video_catalog video ON video.id = item.video_id
+        LEFT JOIN short_videos video ON video.id = item.video_id
         WHERE collection.local_user_id = ?
         GROUP BY collection.id
         ORDER BY collection.sort_order ASC, collection.created_at ASC, collection.id ASC
@@ -346,7 +346,7 @@ function requireCollection(db, id) {
       COALESCE(MAX(CASE WHEN video.id IS NOT NULL THEN item.added_at ELSE '' END), '') AS latest_added_at
     FROM short_video_collections collection
     LEFT JOIN short_video_collection_items item ON item.collection_id = collection.id
-    LEFT JOIN short_video_catalog video ON video.id = item.video_id
+    LEFT JOIN short_videos video ON video.id = item.video_id
     WHERE collection.id = ? AND collection.local_user_id = ?
     GROUP BY collection.id
   `).get(id, LOCAL_SHORT_VIDEO_USER_ID);
