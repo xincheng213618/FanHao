@@ -235,6 +235,14 @@ function assertQuarantineParent(quarantine, ownership, fsOps) {
 }
 
 function removeQuarantinedPayload(quarantine, ownership, fsOps) {
+  try {
+    return removePendingQuarantinedPayload(quarantine, ownership, fsOps);
+  } catch (error) {
+    throw withQuarantineDetails(error, quarantine, false);
+  }
+}
+
+function removePendingQuarantinedPayload(quarantine, ownership, fsOps) {
   if (!lstatIfPresent(quarantine.parentPath, fsOps)) {
     return finalizeQuarantineParent(quarantine, ownership, fsOps);
   }
@@ -346,12 +354,29 @@ function removeEmptyQuarantineParent(quarantine, ownership, fsOps) {
 }
 
 function withQuarantineDetails(error, quarantine, ownedDirectoryPreserved) {
-  const failure = error instanceof Error ? error : new Error(String(error || "Temporary directory cleanup failed"));
+  const failure = error instanceof Error
+    ? error
+    : Object.assign(
+      new Error(String(error?.message || error || "Temporary directory cleanup failed"), { cause: error }),
+      error?.code === undefined ? {} : { code: error.code }
+    );
+  const preserved = typeof failure.ownedDirectoryPreserved === "boolean"
+    ? failure.ownedDirectoryPreserved
+    : ownedDirectoryPreserved;
   try {
     failure.quarantinePath = quarantine.payloadPath;
-    failure.ownedDirectoryPreserved = ownedDirectoryPreserved;
+    failure.ownedDirectoryPreserved = preserved;
+    if (failure.quarantinePath === quarantine.payloadPath
+      && typeof failure.ownedDirectoryPreserved === "boolean") {
+      return failure;
+    }
   } catch {}
-  return failure;
+
+  const wrapped = new Error(failure.message, { cause: failure });
+  if (failure.code !== undefined) wrapped.code = failure.code;
+  wrapped.quarantinePath = quarantine.payloadPath;
+  wrapped.ownedDirectoryPreserved = preserved;
+  return wrapped;
 }
 
 function rememberPendingQuarantine(ownership, quarantine) {

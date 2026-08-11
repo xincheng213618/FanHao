@@ -87,6 +87,7 @@ function verifyTempCleanupSafety() {
   verifyRenameFailureSemantics();
   verifyDeleteFailureRetry();
   verifyPostDeleteThrowConvergence();
+  verifyPendingProbeFailureRecovery();
   verifyParentFinalizeRetry();
   verifyMissingParentFinalize();
   verifyParentReplacementDuringFinalize();
@@ -483,6 +484,101 @@ function verifyPostDeleteThrowConvergence() {
       cleanupPlainTempDirectory(fixture.tempDir);
       cleanupPlainTempDirectory(parentPath);
     }
+  }
+}
+
+function verifyPendingProbeFailureRecovery() {
+  for (const probe of ["parent", "payload"]) {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `fanhao-short-video-cleanup-${probe}-probe-`));
+    fs.writeFileSync(path.join(tempDir, "owned-sentinel.txt"), "owned");
+    const injectedCause = new Error(`injected ${probe} probe cause`);
+    const injectedError = Object.assign(
+      new Error(`injected post-rename ${probe} lstat failure`, { cause: injectedCause }),
+      { code: probe === "parent" ? "EACCES" : "EIO" }
+    );
+    let quarantinePath = "";
+    let quarantineParent = "";
+    let renamed = false;
+    let replacementSentinel = "";
+    try {
+      const error = expectFailure(() => removeVerifiedTempDir(tempDir, null, {
+        fsOps: {
+          renameSync(source, target) {
+            const result = fs.renameSync(source, target);
+            quarantinePath = target;
+            quarantineParent = path.dirname(target);
+            renamed = true;
+            return result;
+          },
+          lstatSync(target, options) {
+            const failingPath = probe === "parent" ? quarantineParent : quarantinePath;
+            if (renamed && failingPath && samePath(target, failingPath)) throw injectedError;
+            return fs.lstatSync(target, options);
+          }
+        }
+      }));
+      assert.equal(error, injectedError, "pending probe failures must rethrow the original Error object");
+      assert.equal(error.code, probe === "parent" ? "EACCES" : "EIO");
+      assert.equal(error.cause, injectedCause);
+      assert.equal(error.quarantinePath, quarantinePath);
+      assert.equal(typeof error.ownedDirectoryPreserved, "boolean");
+      assert.equal(fs.existsSync(tempDir), false, "post-rename probe failure must not restore the legacy path");
+      assert.equal(fs.existsSync(path.join(quarantinePath, "owned-sentinel.txt")), true, "pending payload must survive a probe error");
+
+      fs.mkdirSync(tempDir);
+      replacementSentinel = path.join(tempDir, "replacement-sentinel.txt");
+      fs.writeFileSync(replacementSentinel, "must survive qpath recovery");
+      assert.equal(removeVerifiedTempDir(error.quarantinePath), true, "legacy qpath must retry the remembered pending cleanup");
+      assert.equal(fs.existsSync(quarantineParent), false, "successful qpath recovery must remove the quarantine parent");
+      assert.equal(fs.existsSync(replacementSentinel), true, "qpath recovery must not touch an original-path replacement");
+    } finally {
+      cleanupPlainTempDirectory(tempDir);
+      cleanupPlainTempDirectory(quarantineParent);
+    }
+  }
+
+  const fixture = createVerifiedTempDir("fanhao-short-video-cleanup-handle-probe-");
+  fs.writeFileSync(path.join(fixture.tempDir, "owned-sentinel.txt"), "owned");
+  const handleCause = new Error("injected handle probe cause");
+  const handleError = Object.assign(
+    new Error("injected handle payload lstat failure", { cause: handleCause }),
+    { code: "EIO" }
+  );
+  let quarantinePath = "";
+  let quarantineParent = "";
+  let renamed = false;
+  let replacementSentinel = "";
+  try {
+    const error = expectFailure(() => fixture.cleanup({
+      fsOps: {
+        renameSync(source, target) {
+          const result = fs.renameSync(source, target);
+          quarantinePath = target;
+          quarantineParent = path.dirname(target);
+          renamed = true;
+          return result;
+        },
+        lstatSync(target, options) {
+          if (renamed && samePath(target, quarantinePath)) throw handleError;
+          return fs.lstatSync(target, options);
+        }
+      }
+    }));
+    assert.equal(error, handleError);
+    assert.equal(error.code, "EIO");
+    assert.equal(error.cause, handleCause);
+    assert.equal(error.quarantinePath, quarantinePath);
+    assert.equal(typeof error.ownedDirectoryPreserved, "boolean");
+
+    fs.mkdirSync(fixture.tempDir);
+    replacementSentinel = path.join(fixture.tempDir, "replacement-sentinel.txt");
+    fs.writeFileSync(replacementSentinel, "must survive handle retry");
+    assert.equal(fixture.cleanup(), true, "the explicit handle must retry its remembered pending cleanup");
+    assert.equal(fs.existsSync(quarantineParent), false);
+    assert.equal(fs.existsSync(replacementSentinel), true, "handle retry must never return to the original path");
+  } finally {
+    cleanupPlainTempDirectory(fixture.tempDir);
+    cleanupPlainTempDirectory(quarantineParent);
   }
 }
 
