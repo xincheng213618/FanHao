@@ -97,7 +97,8 @@ function verifyCoreDbInitializationRetry(directory) {
     CREATE TABLE person_external_refs (id INTEGER PRIMARY KEY);
     CREATE TABLE work_external_refs (id INTEGER PRIMARY KEY);
     CREATE TABLE person_aliases (id INTEGER PRIMARY KEY);
-    CREATE VIEW people AS SELECT 1 AS id, '' AS updated_at;
+    CREATE TABLE people (id INTEGER PRIMARY KEY, updated_at TEXT);
+    CREATE TABLE idx_local_files_path (id INTEGER PRIMARY KEY);
   `);
   fixture.close();
 
@@ -127,25 +128,47 @@ function verifyCoreDbInitializationRetry(directory) {
     warn() {}
   });
 
-  assert.throws(() => service.tableDataStamp("actor_profiles"), /people|view/i);
+  assert.throws(() => service.tableDataStamp("actor_profiles"), /idx_local_files_path|already a table/i);
   assert.equal(opened, 1);
   assert.equal(closed, 1, "a failed schema migration must close its connection");
 
-  const repair = new DatabaseSync(corePath);
-  repair.exec(`
-    DROP VIEW people;
-    CREATE TABLE people (
-      id INTEGER PRIMARY KEY,
-      updated_at TEXT
-    );
-  `);
-  repair.close();
+  const rolledBack = new DatabaseSync(corePath);
+  const columnNames = (table) => rolledBack.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
+  assert.equal(columnNames("people").includes("gender"), false, "a late DDL failure must roll back earlier people migrations");
+  for (const column of ["has_magnet", "is_streamable", "has_subtitles", "javdb_tags_json"]) {
+    assert.equal(columnNames("works").includes(column), false, `a late DDL failure must roll back works.${column}`);
+  }
+  for (const table of ["person_external_refs", "work_external_refs", "person_aliases"]) {
+    assert.equal(columnNames(table).includes("updated_at"), false, `a late DDL failure must roll back ${table}.updated_at`);
+  }
+  assert.equal(rolledBack.prepare("SELECT type FROM sqlite_schema WHERE name = 'local_files'").get(), undefined, "a late DDL failure must roll back local_files creation");
+  for (const index of [
+    "idx_works_updated_at",
+    "idx_works_status_code_search",
+    "idx_work_people_updated_at",
+    "idx_people_updated_at",
+    "idx_person_external_refs_updated_at",
+    "idx_work_external_refs_updated_at",
+    "idx_person_aliases_updated_at",
+    "idx_collection_items_updated_at",
+    "idx_local_files_work",
+    "idx_local_files_local_work"
+  ]) {
+    assert.equal(rolledBack.prepare("SELECT type FROM sqlite_schema WHERE type = 'index' AND name = ?").get(index), undefined, `a late DDL failure must roll back ${index}`);
+  }
+  assert.equal(rolledBack.prepare("SELECT type FROM sqlite_schema WHERE name = 'idx_local_files_path'").get().type, "table", "the pre-existing failure fixture must survive rollback");
+  assert.equal(rolledBack.prepare("PRAGMA integrity_check").get().integrity_check, "ok", "a rolled-back schema migration must leave the core database healthy");
+  rolledBack.exec("DROP TABLE idx_local_files_path");
+  rolledBack.close();
 
   const stamp = service.tableDataStamp("actor_profiles");
   assert.equal(stamp.includes("unavailable"), false, "a retry must not reuse a failed stamp fallback");
   assert.equal(opened, 2, "a failed initialization must be retried with a new connection");
   const retried = service.getDb();
   assert.equal(service.getDb(), retried, "only a fully initialized connection may be cached");
+  assert.equal(retried.isTransaction, false, "schema initialization must release its savepoint before publishing the connection");
+  assert.equal(retried.prepare("SELECT type FROM sqlite_schema WHERE name = 'local_files'").get().type, "table", "a repaired retry must create local_files");
+  assert.equal(retried.prepare("SELECT type FROM sqlite_schema WHERE name = 'idx_local_files_path'").get().type, "index", "a repaired retry must complete the final core index");
   retried.close();
   assert.equal(closed, 2);
 }

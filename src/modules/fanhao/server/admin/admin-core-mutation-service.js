@@ -454,7 +454,7 @@ export function createAdminCoreMutationService({
     if (avatarBlob || avatarUrl) {
       db.prepare(
         `
-        INSERT INTO images (
+        INSERT INTO fanhao_images.images (
           owner_type, owner_id, kind, source_type, remote_url, mime, image_blob, byte_size,
           sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
         )
@@ -565,7 +565,7 @@ export function createAdminCoreMutationService({
           }
         }
 
-        db.prepare("UPDATE images SET owner_id = ?, updated_at = ? WHERE owner_type = 'person' AND owner_id = ?").run(targetId, now, source.id);
+        db.prepare("UPDATE fanhao_images.images SET owner_id = ?, updated_at = ? WHERE owner_type = 'person' AND owner_id = ?").run(targetId, now, source.id);
         db.prepare("DELETE FROM person_aliases WHERE person_id = ?").run(source.id);
         db.prepare("DELETE FROM people WHERE id = ?").run(source.id);
       }
@@ -800,7 +800,7 @@ export function createAdminCoreMutationService({
       db.exec("BEGIN IMMEDIATE");
       const fileRows = db.prepare("SELECT id, file_path FROM local_files WHERE local_work_id = ?").all(Number(row.id));
       const imageRows = db
-        .prepare("SELECT id, local_path FROM images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
+        .prepare("SELECT id, local_path FROM fanhao_images.images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
         .all(coreWorkId);
 
       db
@@ -824,7 +824,7 @@ export function createAdminCoreMutationService({
         updateFile.run(nextPath, relativeFromRoot(nextPath), now, fileRow.id);
       }
 
-      const updateImage = db.prepare("UPDATE images SET local_path = ?, updated_at = ? WHERE id = ?");
+      const updateImage = db.prepare("UPDATE fanhao_images.images SET local_path = ?, updated_at = ? WHERE id = ?");
       for (const imageRow of imageRows) {
         updateImage.run(replacePathPrefix(imageRow.local_path, oldDir, newDir), now, imageRow.id);
       }

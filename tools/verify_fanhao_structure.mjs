@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -22,6 +23,8 @@ import { createPersonMergeService } from "../src/modules/fanhao/server/people/pe
 import { createPlaybackProgressService } from "../src/modules/fanhao/server/playback/playback-progress-service.js";
 import { createRankingService } from "../src/modules/fanhao/server/catalog/ranking-service.js";
 import { createStudioService } from "../src/modules/fanhao/server/catalog/studio-service.js";
+import { createAdminCoreMutationService } from "../src/modules/fanhao/server/admin/admin-core-mutation-service.js";
+import { createShortVideoStore } from "../src/modules/short-videos/server/store.js";
 import { createCollectionQueryService, prepareCollectionWorkPage } from "../src/modules/fanhao/server/user-state/collection-query-service.js";
 import { createWorkInfoService } from "../src/modules/fanhao/server/works/work-info-service.js";
 import { createWorkImageService } from "../src/modules/fanhao/server/works/image-service.js";
@@ -35,6 +38,7 @@ import { createWorkFilterService } from "../src/modules/fanhao/server/works/work
 import { createWorkSearchIndexService } from "../src/modules/fanhao/server/works/work-search-index-service.js";
 import { comparePopularityMetadata, compareRatingCountMetadata } from "../src/modules/fanhao/server/works/work-sort-metadata.js";
 import { createMediaResponseService } from "../src/platform/server/media-response-service.js";
+import { attachCoreImageStore } from "../src/platform/server/core-image-store.js";
 import { sendJson } from "../src/platform/server/responses.js";
 import { createVideoProbeCacheService } from "../src/platform/server/video-probe-cache-service.js";
 import { createVideoProbeService, DEFAULT_VIDEO_PROBE_WAIT_MS } from "../src/platform/server/video-probe-service.js";
@@ -1460,13 +1464,18 @@ assert(workImageServiceSource.includes("workCoverMetadataCache = { stamp, rows: 
 const mediaResponseServiceSource = read("src/platform/server/media-response-service.js");
 const mediaBlobWorkerClientSource = read("src/platform/server/media-blob-worker-client.js");
 const mediaBlobWorkerSource = read("src/platform/server/media-blob-worker.js");
-const deferredImageSqlFiles = new Set([
-  "src/modules/fanhao/server/admin/admin-core-mutation-service.js",
-  "src/modules/fanhao/server/works/work-local-mutation-service.js"
-]);
-const unqualifiedImageSql = /\b(?:FROM|JOIN|INTO|UPDATE|DELETE\s+FROM)\s+(?:images|local_image_cache|remote_image_cache)\b/i;
+const unqualifiedImageSql = /\b(?:FROM|JOIN|(?:INSERT|REPLACE)\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+(?:(?:images|local_image_cache|remote_image_cache)|"(?:images|local_image_cache|remote_image_cache)"|`(?:images|local_image_cache|remote_image_cache)`|\[(?:images|local_image_cache|remote_image_cache)\])(?![\w.])/i;
+for (const unsafeSql of [
+  "SELECT * FROM images",
+  'INSERT INTO "local_image_cache" DEFAULT VALUES',
+  "REPLACE INTO `remote_image_cache` DEFAULT VALUES",
+  "UPDATE OR REPLACE [images] SET status = 'ok'",
+  "DELETE FROM images"
+]) {
+  assert(unqualifiedImageSql.test(unsafeSql), `attached image SQL guard must reject: ${unsafeSql}`);
+}
 const imageSqlFiles = [
-  ...sourceFilesUnder("src/modules/fanhao/server").filter((filePath) => filePath.endsWith(".js") && !deferredImageSqlFiles.has(filePath)),
+  ...sourceFilesUnder("src/modules/fanhao/server").filter((filePath) => filePath.endsWith(".js")),
   "src/platform/server/media-blob-worker.js",
   "src/platform/server/media-response-service.js",
   "tools/cache_remote_images_node.mjs",
@@ -1480,6 +1489,12 @@ const imageSqlFiles = [
 for (const filePath of imageSqlFiles) {
   assert.equal(unqualifiedImageSql.test(read(filePath)), false, `${filePath} must qualify attached image tables with fanhao_images`);
 }
+const shortVideoCoverMigrationSource = read("tools/migrate_short_video_covers_to_sqlite.mjs");
+assert(shortVideoCoverMigrationSource.includes("PRAGMA fanhao_images.quick_check"), "core image cache cleanup must validate the attached image database");
+assert(shortVideoCoverMigrationSource.includes("PRAGMA fanhao_images.wal_checkpoint(TRUNCATE)"), "core image cache cleanup must checkpoint the attached image database");
+assert(!shortVideoCoverMigrationSource.includes('prepare("PRAGMA quick_check")') && !shortVideoCoverMigrationSource.includes('prepare("PRAGMA wal_checkpoint(TRUNCATE)")'), "core image cache cleanup must not silently validate or checkpoint main");
+assert(shortVideoCoverMigrationSource.includes("deleteFiles && !cleanupCoreCache"), "legacy cover deletion must require attached cache cleanup");
+assert(shortVideoCoverMigrationSource.includes("coreCleanup.remaining !== 0"), "legacy cover deletion must reject remaining attached cache rows");
 const pythonCoreImageStoreSource = read("tools/core_image_store.py");
 assert(pythonCoreImageStoreSource.includes("COLLATE NOCASE") && pythonCoreImageStoreSource.includes("Legacy image tables in main would shadow"), "Python core-image maintenance must reject shadowed attached tables");
 assert(mediaResponseServiceSource.includes("cachedRemoteImageUrls(remoteUrls)"), "visible work pages must batch-check warmed remote images");
@@ -3338,6 +3353,206 @@ assert.equal(incrementalLibrary.peopleById.has("10"), false, "incremental deleti
 assert.equal(incrementalLibrary.people.length, 0, "incremental deletion must keep people arrays and maps aligned");
 assert.equal(incrementalLibrary.totals.people, 0, "incremental deletion must update the people total");
 assert.equal(incrementalLibrary.totals.videos, 0, "incremental deletion must clear the final file totals");
+
+const coverMigrationRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-cover-migration-"));
+try {
+  const shortVideoDbPath = path.join(coverMigrationRoot, "short-videos.sqlite");
+  const coreDbPath = path.join(coverMigrationRoot, "core.sqlite");
+  const imageDbPath = path.join(coverMigrationRoot, "core-images.sqlite");
+  const coverStore = createShortVideoStore({ dbPath: shortVideoDbPath, roots: [], skipStartupMaintenance: true });
+  const legacyCoverDir = coverStore.coverStorageStatus({ quickCheck: false }).legacyCoverDir;
+  coverStore.close();
+  fs.mkdirSync(legacyCoverDir, { recursive: true });
+  const legacyCoverPath = path.join(legacyCoverDir, "cached-cover.jpg");
+  fs.writeFileSync(legacyCoverPath, "fixture");
+
+  const migrationCoreDb = new DatabaseSync(coreDbPath);
+  attachCoreImageStore(migrationCoreDb, { dbPath: imageDbPath });
+  migrationCoreDb.prepare(`
+    INSERT INTO fanhao_images.local_image_cache (file_id, file_path, updated_at)
+    VALUES ('legacy-cover', ?, '2026-08-11T00:00:00Z')
+  `).run(legacyCoverPath);
+  migrationCoreDb.close();
+
+  const migrationResult = spawnSync(process.execPath, [
+    path.join(root, "tools/migrate_short_video_covers_to_sqlite.mjs"),
+    "--db", shortVideoDbPath,
+    "--core-db", coreDbPath,
+    "--core-image-db", imageDbPath,
+    "--write",
+    "--cleanup-core-cache"
+  ], { cwd: root, encoding: "utf8", windowsHide: true });
+  assert.equal(migrationResult.status, 0, `core image cache cleanup fixture failed: ${migrationResult.stderr || migrationResult.stdout}`);
+  assert(migrationResult.stdout.includes('"coreQuickCheck":"ok"') && migrationResult.stdout.includes('"imageQuickCheck":"ok"'), "core image cache cleanup must report main and attached checks separately");
+  assert(migrationResult.stdout.includes('"remaining":0') && migrationResult.stdout.includes('"busy":0'), "core image cache cleanup must prove no legacy rows remain and checkpoint the attached WAL");
+  const verifiedImageDb = new DatabaseSync(imageDbPath, { readOnly: true });
+  assert.equal(verifiedImageDb.prepare("SELECT COUNT(*) AS count FROM local_image_cache WHERE file_id = 'legacy-cover'").get().count, 0, "core image cache cleanup must delete from the attached image database");
+  verifiedImageDb.close();
+  assert.equal(fs.existsSync(legacyCoverPath), true, "cache cleanup without --delete-files must preserve the legacy cover file");
+
+  const refusedDelete = spawnSync(process.execPath, [
+    path.join(root, "tools/migrate_short_video_covers_to_sqlite.mjs"),
+    "--db", shortVideoDbPath,
+    "--core-db", coreDbPath,
+    "--core-image-db", imageDbPath,
+    "--write",
+    "--delete-files"
+  ], { cwd: root, encoding: "utf8", windowsHide: true });
+  assert.notEqual(refusedDelete.status, 0, "legacy cover deletion must fail without attached cache cleanup");
+  assert.match(refusedDelete.stderr, /--delete-files requires --cleanup-core-cache/, "legacy cover deletion must explain its attached-cache prerequisite");
+  assert.equal(fs.existsSync(legacyCoverPath), true, "a rejected legacy cover deletion must not touch files");
+
+  const missingImageDbPath = path.join(coverMigrationRoot, "missing-core-images.sqlite");
+  const refusedMissingImageStore = spawnSync(process.execPath, [
+    path.join(root, "tools/migrate_short_video_covers_to_sqlite.mjs"),
+    "--db", shortVideoDbPath,
+    "--core-db", coreDbPath,
+    "--core-image-db", missingImageDbPath,
+    "--write",
+    "--cleanup-core-cache",
+    "--delete-files"
+  ], { cwd: root, encoding: "utf8", windowsHide: true });
+  assert.notEqual(refusedMissingImageStore.status, 0, "legacy cover deletion must fail when the attached image database is missing");
+  assert.match(refusedMissingImageStore.stderr, /core image database does not exist/, "missing attached image databases must fail closed before cleanup");
+  assert.equal(fs.existsSync(missingImageDbPath), false, "a missing attached image database must not be silently created");
+  assert.equal(fs.existsSync(legacyCoverPath), true, "a missing attached image database must block legacy cover deletion");
+} finally {
+  assert.equal(path.dirname(path.resolve(coverMigrationRoot)).toLowerCase(), path.resolve(os.tmpdir()).toLowerCase(), "cover migration cleanup must stay in the system temp directory");
+  fs.rmSync(coverMigrationRoot, { recursive: true, force: true });
+}
+
+const personMergeDb = new DatabaseSync(":memory:");
+try {
+  personMergeDb.exec(`
+    ATTACH DATABASE ':memory:' AS fanhao_images;
+    CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, display_name TEXT, updated_at TEXT);
+    CREATE TABLE person_aliases (id INTEGER PRIMARY KEY, person_id INTEGER, alias TEXT, alias_search TEXT, source TEXT);
+    CREATE TABLE work_people (
+      work_id INTEGER,
+      person_id INTEGER,
+      role TEXT,
+      sort_order INTEGER,
+      source TEXT,
+      created_at TEXT,
+      updated_at TEXT,
+      UNIQUE(work_id, person_id, role)
+    );
+    CREATE TABLE person_external_refs (
+      id INTEGER PRIMARY KEY,
+      person_id INTEGER,
+      provider TEXT,
+      external_key TEXT,
+      url TEXT,
+      source TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+    CREATE TABLE main.images (id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, updated_at TEXT);
+    CREATE TABLE fanhao_images.images (id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, updated_at TEXT);
+    INSERT INTO people VALUES (1, 'Target', 'Target', ''), (2, 'Source', 'Source', '');
+    INSERT INTO person_aliases VALUES (1, 2, 'Source Alias', 'sourcealias', 'fixture');
+    INSERT INTO work_people VALUES (10, 2, 'actor', 0, 'fixture', '', '');
+    INSERT INTO main.images VALUES (99, 'person', 2, 'main-sentinel');
+    INSERT INTO fanhao_images.images VALUES (7, 'person', 2, 'attached-avatar');
+  `);
+  const adminMutationService = createAdminCoreMutationService({
+    getCoreDb: () => personMergeDb,
+    hasCoreDb: () => true,
+    invalidateActorMovies() {},
+    invalidateActorProfiles() {},
+    invalidatePersonMerge() {},
+    invalidateTableStamp() {},
+    normalizePersonSearchValue: (value) => String(value || "").trim().toLowerCase().replaceAll(" ", ""),
+    publicMergedPersonById: (personId) => ({ id: String(personId) }),
+    refreshLibrary() {},
+    resetWorkSearch() {},
+    uniquePersonNames: (values) => [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))],
+    uniqueTextArray: (values) => [...new Set(values.map(String))]
+  });
+  adminMutationService.mergePeopleIntoTarget(1, [2]);
+  assert.equal(personMergeDb.prepare("SELECT owner_id FROM fanhao_images.images WHERE id = 7").get().owner_id, 1, "person merges must reparent attached avatars");
+  assert.equal(personMergeDb.prepare("SELECT owner_id FROM main.images WHERE id = 99").get().owner_id, 2, "person merges must not mutate a shadowing main.images table");
+  assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM people WHERE id = 2").get().count, 0, "person merges must delete the source person");
+  assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM work_people WHERE work_id = 10 AND person_id = 1").get().count, 1, "person merges must retain source work membership on the target");
+  assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM work_people WHERE person_id = 2").get().count, 0, "person merges must clear source work membership");
+  assert.equal(personMergeDb.prepare("SELECT COUNT(*) AS count FROM person_aliases WHERE person_id = 1 AND alias_search = 'sourcealias'").get().count, 1, "person merges must retain source aliases on the target");
+} finally {
+  personMergeDb.close();
+}
+
+const markerMutationRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-local-marker-"));
+const markerMutationDb = new DatabaseSync(":memory:");
+try {
+  const oldMarkerDir = path.join(markerMutationRoot, "marker-work");
+  const newMarkerDir = path.join(markerMutationRoot, "[A] marker-work");
+  const oldVideoPath = path.join(oldMarkerDir, "movie.mp4");
+  const oldImagePath = path.join(oldMarkerDir, "cover.jpg");
+  fs.mkdirSync(oldMarkerDir, { recursive: true });
+  fs.writeFileSync(oldVideoPath, "video");
+  fs.writeFileSync(oldImagePath, "cover");
+  markerMutationDb.exec(`
+    ATTACH DATABASE ':memory:' AS fanhao_images;
+    CREATE TABLE local_works (id INTEGER PRIMARY KEY, work_id INTEGER, local_path TEXT, source_info_path TEXT, updated_at TEXT);
+    CREATE TABLE local_files (id INTEGER PRIMARY KEY, local_work_id INTEGER, file_path TEXT, relative_path TEXT, updated_at TEXT);
+    CREATE TABLE main.images (id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, local_path TEXT, updated_at TEXT);
+    CREATE TABLE fanhao_images.images (id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, local_path TEXT, updated_at TEXT);
+  `);
+  markerMutationDb.prepare("INSERT INTO local_works VALUES (?, ?, ?, ?, '')").run(5, 5, oldMarkerDir, path.join(oldMarkerDir, "info.json"));
+  markerMutationDb.prepare("INSERT INTO local_files VALUES (?, ?, ?, ?, '')").run(50, 5, oldVideoPath, "marker-work/movie.mp4");
+  markerMutationDb.prepare("INSERT INTO main.images VALUES (?, 'work', ?, ?, '')").run(99, 5, oldImagePath);
+  markerMutationDb.prepare("INSERT INTO fanhao_images.images VALUES (?, 'work', ?, ?, '')").run(51, 5, oldImagePath);
+
+  const markerWork = {
+    id: "5",
+    directoryName: "marker-work",
+    relativePath: "marker-work",
+    missingLocal: false,
+    videos: [{ path: oldVideoPath, relativePath: "marker-work/movie.mp4" }],
+    images: [{ path: oldImagePath, relativePath: "marker-work/cover.jpg" }],
+    infos: []
+  };
+  const pathWithinMarkerRoot = (targetPath, rootPath) => {
+    const relative = path.relative(path.resolve(rootPath), path.resolve(targetPath));
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  };
+  const replaceMarkerPathPrefix = (value, oldPrefix, newPrefix) => {
+    const raw = String(value || "");
+    if (!raw) return raw;
+    return path.join(newPrefix, path.relative(oldPrefix, raw));
+  };
+  const markerMutationService = createWorkLocalMutationService({
+    getCoreDb: () => markerMutationDb,
+    hasCoreDb: () => true,
+    invalidateLibraryDerivedCaches() {},
+    libraryOpenRoots: () => [markerMutationRoot],
+    localWorkMarkerKey: (marker) => String(marker || "").toUpperCase() === "A" ? "A" : "",
+    markerDirectoryName: (_value, marker, enabled) => enabled ? `[${marker}] marker-work` : "marker-work",
+    pathWithinRoot: pathWithinMarkerRoot,
+    publicWork: (work) => work,
+    relativeFromRoot: (value) => path.relative(markerMutationRoot, value).replaceAll(path.sep, "/"),
+    replacePathPrefix: replaceMarkerPathPrefix,
+    resolveLibraryWorkByPublicId: (workId) => String(workId) === "5" ? markerWork : null,
+    safeStat: (value) => fs.statSync(value, { throwIfNoEntry: false }),
+    sourcePathToAbsolute: (value) => path.resolve(value),
+    workHasLocalMarker: (work, marker) => String(work.directoryName || "").startsWith(`[${marker}]`)
+  });
+  const marked = markerMutationService.setWorkLocalMarker("5", "A", true);
+  assert.equal(marked.changed, true, "local marker changes must report their directory rename");
+  assert.equal(marked.enabled, true, "local marker changes must report their resulting marker state");
+  assert.equal(fs.existsSync(oldMarkerDir), false, "local marker changes must move the old directory");
+  assert.equal(fs.existsSync(newMarkerDir), true, "local marker changes must create the marked directory");
+  assert.equal(markerMutationDb.prepare("SELECT local_path FROM local_works WHERE id = 5").get().local_path, newMarkerDir, "local marker changes must update local_works");
+  assert.equal(markerMutationDb.prepare("SELECT file_path FROM local_files WHERE id = 50").get().file_path, path.join(newMarkerDir, "movie.mp4"), "local marker changes must update local_files");
+  assert.equal(markerMutationDb.prepare("SELECT source_info_path FROM local_works WHERE id = 5").get().source_info_path, path.join(newMarkerDir, "info.json"), "local marker changes must update local work info paths");
+  assert.equal(markerMutationDb.prepare("SELECT relative_path FROM local_files WHERE id = 50").get().relative_path, "[A] marker-work/movie.mp4", "local marker changes must update relative file paths");
+  assert.equal(markerMutationDb.prepare("SELECT local_path FROM fanhao_images.images WHERE id = 51").get().local_path, path.join(newMarkerDir, "cover.jpg"), "local marker changes must update attached image paths");
+  assert.equal(markerMutationDb.prepare("SELECT local_path FROM main.images WHERE id = 99").get().local_path, oldImagePath, "local marker changes must not mutate a shadowing main.images table");
+  assert.equal(markerWork.directoryName, "[A] marker-work", "local marker changes must keep the in-memory work path aligned");
+} finally {
+  markerMutationDb.close();
+  assert.equal(path.dirname(path.resolve(markerMutationRoot)).toLowerCase(), path.resolve(os.tmpdir()).toLowerCase(), "marker cleanup must stay in the system temp directory");
+  fs.rmSync(markerMutationRoot, { recursive: true, force: true });
+}
 
 const localMutationRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-local-delete-"));
 const localMutationDb = new DatabaseSync(":memory:");

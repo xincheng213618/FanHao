@@ -120,7 +120,7 @@ export function createWorkLocalMutationService({
       const localWorkId = Number(row.id);
       const fileRows = db.prepare("SELECT id, file_path FROM local_files WHERE local_work_id = ?").all(localWorkId);
       const imageRows = db
-        .prepare("SELECT id, local_path FROM images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
+        .prepare("SELECT id, local_path FROM fanhao_images.images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
         .all(Number(work.id));
       db
         .prepare(
@@ -141,7 +141,7 @@ export function createWorkLocalMutationService({
         const nextPath = replacePathPrefix(fileRow.file_path, oldDir, newDir);
         updateFile.run(nextPath, relativeFromRoot(nextPath), now, fileRow.id);
       }
-      const updateImage = db.prepare("UPDATE images SET local_path = ?, updated_at = ? WHERE id = ?");
+      const updateImage = db.prepare("UPDATE fanhao_images.images SET local_path = ?, updated_at = ? WHERE id = ?");
       for (const imageRow of imageRows) {
         updateImage.run(replacePathPrefix(imageRow.local_path, oldDir, newDir), now, imageRow.id);
       }

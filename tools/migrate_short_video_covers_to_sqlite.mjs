@@ -26,6 +26,9 @@ const batchSize = positiveInteger(args["batch-size"]) || 250;
 if ((deleteFiles || cleanupCoreCache) && !write) {
   throw new Error("--delete-files and --cleanup-core-cache require --write");
 }
+if (deleteFiles && !cleanupCoreCache) {
+  throw new Error("--delete-files requires --cleanup-core-cache so attached image cache rows are cleared and verified first");
+}
 
 const store = createShortVideoStore({
   dbPath,
@@ -64,8 +67,17 @@ try {
     if (cleanupCoreCache) {
       coreCleanup = cleanupCoreLocalImageCache(coreDbPath, reconciled.legacyCoverDir);
       console.log(`core-cache-cleanup: ${JSON.stringify(coreCleanup)}`);
-      if (coreCleanup.quickCheck !== "ok") {
-        throw new Error(`core database quick_check failed after cache cleanup: ${coreCleanup.quickCheck || "unknown"}`);
+      if (coreCleanup.coreQuickCheck !== "ok") {
+        throw new Error(`core database quick_check failed after cache cleanup: ${coreCleanup.coreQuickCheck || "unknown"}`);
+      }
+      if (coreCleanup.imageQuickCheck !== "ok") {
+        throw new Error(`core image database quick_check failed after cache cleanup: ${coreCleanup.imageQuickCheck || "unknown"}`);
+      }
+      if (!coreCleanup.imageCheckpoint || Number(coreCleanup.imageCheckpoint.busy) !== 0) {
+        throw new Error("core image database WAL checkpoint remained busy after cache cleanup");
+      }
+      if (coreCleanup.remaining !== 0) {
+        throw new Error(`core image cache still has ${coreCleanup.remaining} rows under the legacy cover directory`);
       }
     }
 
@@ -112,20 +124,23 @@ function assertStorageReady(status, options = {}) {
 }
 
 function cleanupCoreLocalImageCache(coreDbPath, legacyCoverDir) {
-  if (!fs.existsSync(coreDbPath)) return { dbPath: coreDbPath, removed: 0, bytes: 0, quickCheck: "missing" };
+  if (!fs.existsSync(coreDbPath)) {
+    throw new Error(`core database does not exist: ${coreDbPath}`);
+  }
+  if (!fs.existsSync(coreImageDbPath)) {
+    throw new Error(`core image database does not exist: ${coreImageDbPath}`);
+  }
   const database = new DatabaseSync(coreDbPath);
   try {
     database.exec("PRAGMA busy_timeout = 10000;");
     attachCoreImageStore(database, { dbPath: coreImageDbPath });
     const resolvedRoot = path.resolve(legacyCoverDir);
-    const rows = database.prepare(`
+    const cacheRows = () => database.prepare(`
       SELECT file_id, file_path, byte_length
       FROM fanhao_images.local_image_cache
       WHERE COALESCE(TRIM(file_path), '') <> ''
-    `).all().filter((row) => {
-      const resolved = path.resolve(String(row.file_path || ""));
-      return resolved.startsWith(`${resolvedRoot}${path.sep}`);
-    });
+    `).all().filter((row) => pathWithinDirectory(row.file_path, resolvedRoot));
+    const rows = cacheRows();
     let removed = 0;
     let bytes = 0;
     database.exec("BEGIN IMMEDIATE");
@@ -142,12 +157,19 @@ function cleanupCoreLocalImageCache(coreDbPath, legacyCoverDir) {
       } catch {}
       throw error;
     }
-    const quickCheck = String(database.prepare("PRAGMA quick_check").get()?.quick_check || "");
-    const checkpoint = database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() || null;
-    return { dbPath: coreDbPath, removed, bytes, quickCheck, checkpoint };
+    const coreQuickCheck = String(database.prepare("PRAGMA main.quick_check").get()?.quick_check || "");
+    const imageQuickCheck = String(database.prepare("PRAGMA fanhao_images.quick_check").get()?.quick_check || "");
+    const imageCheckpoint = database.prepare("PRAGMA fanhao_images.wal_checkpoint(TRUNCATE)").get() || null;
+    const remaining = cacheRows().length;
+    return { dbPath: coreDbPath, imageDbPath: coreImageDbPath, removed, bytes, remaining, coreQuickCheck, imageQuickCheck, imageCheckpoint };
   } finally {
     database.close();
   }
+}
+
+function pathWithinDirectory(value, directory) {
+  const relative = path.relative(path.resolve(directory), path.resolve(String(value || "")));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function deleteLegacyCoverDirectory(legacyCoverDir, shortVideoDbPath) {

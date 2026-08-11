@@ -47,6 +47,29 @@ function ensureCoreTables(db) {
   `);
 }
 
+function ensureCoreSchema(db) {
+  db.exec("SAVEPOINT fanhao_core_schema_init");
+  try {
+    ensureColumn(db, "people", "gender", "TEXT NOT NULL DEFAULT 'unknown'");
+    ensureColumn(db, "works", "has_magnet", "INTEGER");
+    ensureColumn(db, "works", "is_streamable", "INTEGER");
+    ensureColumn(db, "works", "has_subtitles", "INTEGER");
+    ensureColumn(db, "works", "javdb_tags_json", "TEXT");
+    ensureColumn(db, "person_external_refs", "updated_at", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(db, "work_external_refs", "updated_at", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(db, "person_aliases", "updated_at", "TEXT NOT NULL DEFAULT ''");
+    ensureCoreTables(db);
+    db.exec("RELEASE SAVEPOINT fanhao_core_schema_init");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK TO SAVEPOINT fanhao_core_schema_init; RELEASE SAVEPOINT fanhao_core_schema_init;");
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], `Core schema migration failed and rollback also failed: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
 export function createCoreDbService({
   createDatabase = (filePath) => new DatabaseSync(filePath),
   dbPath,
@@ -73,15 +96,7 @@ export function createCoreDbService({
         candidate = createDatabase(dbPath);
         candidate.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
         attachCoreImageStore(candidate, { dbPath: imageDbPath });
-        ensureColumn(candidate, "people", "gender", "TEXT NOT NULL DEFAULT 'unknown'");
-        ensureColumn(candidate, "works", "has_magnet", "INTEGER");
-        ensureColumn(candidate, "works", "is_streamable", "INTEGER");
-        ensureColumn(candidate, "works", "has_subtitles", "INTEGER");
-        ensureColumn(candidate, "works", "javdb_tags_json", "TEXT");
-        ensureColumn(candidate, "person_external_refs", "updated_at", "TEXT NOT NULL DEFAULT ''");
-        ensureColumn(candidate, "work_external_refs", "updated_at", "TEXT NOT NULL DEFAULT ''");
-        ensureColumn(candidate, "person_aliases", "updated_at", "TEXT NOT NULL DEFAULT ''");
-        ensureCoreTables(candidate);
+        ensureCoreSchema(candidate);
         db = candidate;
       } catch (error) {
         if (candidate) {
