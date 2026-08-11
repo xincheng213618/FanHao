@@ -1019,6 +1019,17 @@ async function verifyActualAdminSqliteCommit() {
   db.prepare("DELETE FROM works WHERE id = 3").run();
   db.exec("COMMIT");
   admin.commitWorkMove(plan, reservationContext);
+  const committedAndroidIdentity = {
+    ...plan,
+    androidCommand: true,
+    personDirPhysicalKey: path.resolve(plan.personDir).toLowerCase(),
+    newDirPhysicalKey: path.resolve(plan.newDir).toLowerCase()
+  };
+  assert.deepEqual(
+    admin.assertAndroidWorkMoveTargetIdentity(committedAndroidIdentity, reservationContext, { allowCurrentDestination: true }),
+    { valid: true },
+    "post-main Android identity validation must accept the frozen target as the work's current directory"
+  );
   const localWork = db.prepare("SELECT * FROM local_works WHERE id = 1").get();
   const localFile = db.prepare("SELECT * FROM local_files WHERE id = 1").get();
   const imageBeforeCompensation = db.prepare("SELECT * FROM images WHERE id = 1").get();
@@ -1319,6 +1330,61 @@ async function verifyRollbackOnDatabaseFailure() {
   assert.equal(admin.reservation?.released, true, "rolled-back jobs must release their durable path reservation");
   assert.ok(lifecycle.some((line) => line.includes('"event":"rolled_back"')));
   assert.equal(lifecycle.some((line) => line.includes(fixture.source)), false, "rolled-back lifecycle logs must not expose absolute paths");
+  await service.close();
+  db.close();
+}
+
+async function verifyAndroidMoveCompletesAcrossPostCommitWorkers({ forceCopy }) {
+  const mode = forceCopy ? "copy" : "rename";
+  const fixture = await createFixture(`android-complete-${mode}`, 5);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  admin.plan.androidCommand = true;
+  admin.plan.personDirPhysicalKey = path.resolve(fixture.targetPerson).toLowerCase();
+  admin.plan.newDirPhysicalKey = path.resolve(fixture.target).toLowerCase();
+  admin.assertWorkMoveTarget = () => ({ id: "target", personDir: fixture.targetPerson, targetDir: fixture.target });
+  const preflights = [];
+  admin.assertAndroidWorkMoveTargetIdentity = (plan, _context, options = {}) => {
+    const databaseState = admin.inspectWorkMove(plan);
+    preflights.push({ databaseState, allowCurrentDestination: Boolean(options.allowCurrentDestination) });
+    if (databaseState === "target" && !options.allowCurrentDestination) {
+      const error = new Error("fixture post-commit target was rejected as current");
+      error.statusCode = 409;
+      error.code = "WORK_MOVE_TARGET_UNAVAILABLE";
+      throw error;
+    }
+    return { valid: true };
+  };
+  const workerOperations = [];
+  class TrackingAndroidWorker extends Worker {
+    constructor(url, options) {
+      workerOperations.push(options?.workerData?.operation || "");
+      super(url, options);
+    }
+  }
+  const service = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    workerClass: TrackingAndroidWorker,
+    workerDataPatch: { forceCopy }
+  });
+  const started = service.start("1", { personId: "target", idempotencyKey: `android-complete-${mode}` }, { android: true });
+  const completed = await waitForJob(service, started.id, ["completed"]);
+  assert.equal(completed.phase, "completed");
+  assert.equal(completed.errorCode, "");
+  assert.deepEqual(workerOperations, ["stage", "isolate", "cleanup"], `${mode} Android lifecycle must run every required worker exactly once`);
+  assert.equal(preflights.some((entry) => entry.databaseState === "source" && !entry.allowCurrentDestination), true, "stage must keep pre-commit current-directory exclusion");
+  assert.equal(preflights.filter((entry) => entry.databaseState === "target").every((entry) => entry.allowCurrentDestination), true, "post-main workers must use current-destination identity semantics");
+  assert.equal(admin.imageCommits, 1);
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.target));
+  assert.equal(fs.existsSync(fixture.source), false);
+  assert.equal(fs.existsSync(fixture.target), true);
+  const quarantine = path.join(fixture.sourcePerson, `.${path.basename(fixture.source)}.fanhao-quarantine-${started.id}`);
+  assert.equal(fs.existsSync(quarantine), false, "successful Android cleanup must converge without a quarantine directory");
+  assert.equal(admin.reservation?.released, true, "completed Android move must release its durable reservation");
+  const durable = db.prepare("SELECT request_json, plan_json FROM work_move_jobs WHERE id = ?").get(started.id);
+  assert.equal(JSON.parse(durable.request_json).androidCommand, true);
+  assert.equal(JSON.parse(durable.plan_json).newDirPhysicalKey, admin.plan.newDirPhysicalKey);
   await service.close();
   db.close();
 }
@@ -2777,6 +2843,8 @@ try {
   await verifyCrashRecoveryFromPreparedCopy();
   await verifyPartialCleanupRecovery();
   await verifyRollbackOnDatabaseFailure();
+  await verifyAndroidMoveCompletesAcrossPostCommitWorkers({ forceCopy: true });
+  await verifyAndroidMoveCompletesAcrossPostCommitWorkers({ forceCopy: false });
   await verifyPhysicalTargetDriftBlocksUnsafeRollback({ forceCopy: true });
   await verifyPhysicalTargetDriftBlocksUnsafeRollback({ forceCopy: false });
   await verifyPhysicalDriftRecoveryBlocksBeforeWorker({ forceCopy: true });

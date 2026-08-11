@@ -838,6 +838,7 @@ export function createWorkMoveJobService({
         throw new Error("SQLite 中的作品路径已被其他操作修改，拒绝继续移动");
       }
 
+      assertAndroidTargetIdentity(plan, { allowCurrentDestination: true });
       assertSourceUnshared(plan);
       if (adminCoreMutationService.inspectWorkMoveImages(plan) !== "completed") {
         updateState(jobId, "running", "images", "", { result: { move: moveResult } });
@@ -994,8 +995,7 @@ export function createWorkMoveJobService({
     }
   }
 
-  function runWorker(jobId, operation, plan) {
-    if (fencedJobs.has(jobId)) return Promise.reject(claimLostError());
+  function assertAndroidTargetIdentity(plan, options = {}) {
     if (plan?.androidCommand) {
       if (typeof adminCoreMutationService.assertAndroidWorkMoveTargetIdentity !== "function") {
         const error = new Error("Android 迁移目标物理身份校验不可用");
@@ -1003,8 +1003,19 @@ export function createWorkMoveJobService({
         error.code = "WORK_MOVE_TARGET_PHYSICAL_DRIFT";
         throw error;
       }
-      adminCoreMutationService.assertAndroidWorkMoveTargetIdentity(plan, { ownerId });
+      adminCoreMutationService.assertAndroidWorkMoveTargetIdentity(
+        plan,
+        { ownerId },
+        options
+      );
     }
+  }
+
+  function runWorker(jobId, operation, plan) {
+    if (fencedJobs.has(jobId)) return Promise.reject(claimLostError());
+    assertAndroidTargetIdentity(plan, {
+      allowCurrentDestination: ["isolate", "cleanup", "restore"].includes(operation)
+    });
     return new Promise((resolve, reject) => {
       const worker = new workerClass(workerUrl, {
         workerData: {

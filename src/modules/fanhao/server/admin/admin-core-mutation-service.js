@@ -401,7 +401,7 @@ export function createAdminCoreMutationService({
       if (requestedPersonId && person.id !== requestedPersonId) continue;
       if (queryKey && !person.search.includes(queryKey)) continue;
       const targetDir = ensureLibraryDirectoryPath(path.join(person.personDir, path.basename(oldDir)), "目标作品文件夹");
-      if (canonicalLibraryPathKey(targetDir) === canonicalLibraryPathKey(oldDir)) continue;
+      if (canonicalLibraryPathKey(targetDir) === canonicalLibraryPathKey(oldDir) && !options.allowCurrentDestination) continue;
       if (fs.existsSync(targetDir) && !options.allowExistingDestination) continue;
       candidates.push({ ...person, targetDir });
       if (candidates.length >= limit) break;
@@ -431,7 +431,8 @@ export function createAdminCoreMutationService({
       personId: targetId,
       limit: 1,
       fresh: true,
-      allowExistingDestination: Boolean(options.allowExistingDestination)
+      allowExistingDestination: Boolean(options.allowExistingDestination),
+      allowCurrentDestination: Boolean(options.allowCurrentDestination)
     }).candidates[0];
     if (target?.id === targetId
       && (!expectedPersonDirPhysicalKey || canonicalLibraryPathKey(target.personDir) === expectedPersonDirPhysicalKey)
@@ -451,7 +452,10 @@ export function createAdminCoreMutationService({
     return error;
   }
 
-  function assertAndroidWorkMoveTargetIdentityInTransaction(plan, { requireStagedDirectory = false } = {}) {
+  function assertAndroidWorkMoveTargetIdentityInTransaction(plan, {
+    allowCurrentDestination = false,
+    requireStagedDirectory = false
+  } = {}) {
     if (!plan?.androidCommand) return { valid: true };
     const personDirPhysicalKey = String(plan.personDirPhysicalKey || "").trim();
     const newDirPhysicalKey = String(plan.newDirPhysicalKey || "").trim();
@@ -470,6 +474,7 @@ export function createAdminCoreMutationService({
     }
     assertWorkMoveTarget(plan.workId, plan.personId, {
       allowExistingDestination: true,
+      allowCurrentDestination: Boolean(allowCurrentDestination),
       expectedPersonDirPhysicalKey: personDirPhysicalKey,
       expectedNewDirPhysicalKey: newDirPhysicalKey
     });
