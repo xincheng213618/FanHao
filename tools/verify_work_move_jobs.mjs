@@ -871,6 +871,44 @@ async function verifyActualAdminSqliteCommit() {
   admin.releaseWorkMoveReservation(androidCommitPlan.jobId, { ...androidCommitContext, terminalStatus: "failed" });
   await fs.promises.rm(fixture.target, { recursive: true, force: true });
 
+  const physicalPlan = { ...admin.prepareWorkMove("1", "2", { androidCommand: true }), jobId: "fixture-android-physical-fence" };
+  assert.ok(physicalPlan.personDirPhysicalKey && physicalPlan.newDirPhysicalKey, "Android prepare must persist immutable physical target identities");
+  const physicalContext = {
+    ownerId: "fixture-android-physical-owner",
+    leaseUntil: new Date(Date.now() + 60_000).toISOString(),
+    claimedAt: new Date().toISOString()
+  };
+  admin.acquireWorkMoveReservation(physicalPlan, physicalContext);
+  await fs.promises.cp(fixture.source, fixture.target, { recursive: true, errorOnExist: true, force: false });
+  const savedTargetPerson = path.join(fixture.root, "target-person-saved");
+  const replacementTargetPerson = path.join(fixture.root, "target-person-replacement");
+  const replacementSentinel = path.join(replacementTargetPerson, "sentinel.txt");
+  await fs.promises.mkdir(replacementTargetPerson, { recursive: true });
+  await fs.promises.writeFile(replacementSentinel, "must remain untouched");
+  await fs.promises.rename(fixture.targetPerson, savedTargetPerson);
+  await fs.promises.symlink(replacementTargetPerson, fixture.targetPerson, process.platform === "win32" ? "junction" : "dir");
+  assert.equal(fs.existsSync(physicalPlan.newDir), false, "the lexical destination must no longer point at the staged directory after parent replacement");
+  assert.throws(
+    () => admin.commitWorkMove(physicalPlan, physicalContext),
+    (error) => error?.statusCode === 409 && error?.code === "WORK_MOVE_TARGET_PHYSICAL_DRIFT",
+    "commit must require the staged destination to exist at its frozen physical identity"
+  );
+  await fs.promises.mkdir(physicalPlan.newDir, { recursive: true });
+  await fs.promises.writeFile(path.join(physicalPlan.newDir, "decoy.txt"), "must not become the work");
+  assert.throws(
+    () => admin.commitWorkMove(physicalPlan, physicalContext),
+    (error) => error?.statusCode === 409 && error?.code === "WORK_MOVE_TARGET_PHYSICAL_DRIFT",
+    "an in-root junction replacement must not redefine the frozen Android target at commit"
+  );
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM local_works WHERE id = 1").get().local_path), path.resolve(fixture.source));
+  assert.equal(path.resolve(db.prepare("SELECT file_path FROM local_files WHERE id = 1").get().file_path), path.resolve(infoPath));
+  assert.equal(await fs.promises.readFile(replacementSentinel, "utf8"), "must remain untouched");
+  assert.equal(fs.existsSync(path.join(savedTargetPerson, path.basename(fixture.source), "part-0", "fixture-0.bin")), true, "the staged copy must remain inspectable at its original physical parent");
+  await fs.promises.unlink(fixture.targetPerson);
+  await fs.promises.rename(savedTargetPerson, fixture.targetPerson);
+  admin.releaseWorkMoveReservation(physicalPlan.jobId, { ...physicalContext, terminalStatus: "failed" });
+  await fs.promises.rm(fixture.target, { recursive: true, force: true });
+
   const plan = { ...admin.prepareWorkMove("1", "2", { targetDirectory: fixture.targetPerson }), jobId: "fixture-admin-move" };
   let reservationContext = {
     ownerId: "fixture-owner",

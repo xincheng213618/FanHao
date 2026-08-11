@@ -425,6 +425,8 @@ export function createAdminCoreMutationService({
 
   function assertWorkMoveTarget(workId, personId, options = {}) {
     const targetId = String(personId || "").trim();
+    const expectedPersonDirPhysicalKey = String(options.expectedPersonDirPhysicalKey || "").trim();
+    const expectedNewDirPhysicalKey = String(options.expectedNewDirPhysicalKey || "").trim();
     const target = workMoveTargetSelection(workId, {
       personId: targetId,
       limit: 1,
@@ -432,8 +434,8 @@ export function createAdminCoreMutationService({
       allowExistingDestination: Boolean(options.allowExistingDestination)
     }).candidates[0];
     if (target?.id === targetId
-      && (!options.expectedPersonDir || canonicalLibraryPathKey(target.personDir) === canonicalLibraryPathKey(options.expectedPersonDir))
-      && (!options.expectedNewDir || canonicalLibraryPathKey(target.targetDir) === canonicalLibraryPathKey(options.expectedNewDir))) {
+      && (!expectedPersonDirPhysicalKey || canonicalLibraryPathKey(target.personDir) === expectedPersonDirPhysicalKey)
+      && (!expectedNewDirPhysicalKey || canonicalLibraryPathKey(target.targetDir) === expectedNewDirPhysicalKey)) {
       return target;
     }
     const error = new Error("目标人物当前不可用于迁移");
@@ -964,6 +966,12 @@ export function createAdminCoreMutationService({
         };
     }
 
+    const androidPhysicalIdentity = options.androidCommand
+      ? {
+        personDirPhysicalKey: canonicalLibraryPathKey(personDir),
+        newDirPhysicalKey: canonicalLibraryPathKey(newDir)
+      }
+      : {};
     return {
       version: 1,
       workId: String(coreWorkId),
@@ -979,6 +987,7 @@ export function createAdminCoreMutationService({
       personDir,
       oldDir,
       newDir,
+      ...androidPhysicalIdentity,
       sourceInfoPath: row.source_info_path || "",
       libraryRoots: libraryOpenRoots().map((rootPath) => sourcePathToAbsolute(rootPath)).filter(Boolean),
       createdPerson,
@@ -1067,10 +1076,26 @@ export function createAdminCoreMutationService({
       // is exactly this persisted plan; directory ownership and source/current
       // checks are still rebuilt without the picker cache.
       if (plan.androidCommand) {
+        const personDirPhysicalKey = String(plan.personDirPhysicalKey || "").trim();
+        const newDirPhysicalKey = String(plan.newDirPhysicalKey || "").trim();
+        let stagedDirectory = null;
+        try {
+          stagedDirectory = fs.lstatSync(plan.newDir);
+        } catch {}
+        if (!personDirPhysicalKey
+          || !newDirPhysicalKey
+          || !stagedDirectory?.isDirectory()
+          || stagedDirectory.isSymbolicLink()
+          || canonicalLibraryPathKey(plan.newDir) !== newDirPhysicalKey) {
+          const error = new Error("Android 迁移目标的物理目录已变化");
+          error.statusCode = 409;
+          error.code = "WORK_MOVE_TARGET_PHYSICAL_DRIFT";
+          throw error;
+        }
         assertWorkMoveTarget(plan.workId, plan.personId, {
           allowExistingDestination: true,
-          expectedPersonDir: plan.personDir,
-          expectedNewDir: plan.newDir
+          expectedPersonDirPhysicalKey: personDirPhysicalKey,
+          expectedNewDirPhysicalKey: newDirPhysicalKey
         });
       }
       workMoveReservations().setMutationMode(plan, { ...context, mode: "main", schema: "main" });
