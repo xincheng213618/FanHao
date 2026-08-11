@@ -44,6 +44,10 @@ export function createWorkMutationService({
     return publicMoveJobPayload(workMoveJobService.start(workId, body));
   }
 
+  function moveTargets(workId, options = {}) {
+    return adminCoreMutationService.listWorkMoveTargets(workId, options);
+  }
+
   function moveJob(jobId) {
     return publicMoveJobPayload(workMoveJobService.get(jobId));
   }
@@ -78,6 +82,7 @@ export function createWorkMutationService({
     deleteLocalFiles,
     generateCover,
     listMoveJobs,
+    moveTargets,
     moveJob,
     moveJobForWork,
     moveToPerson,

@@ -54,6 +54,7 @@
 | PUT | `/api/works/:id/cover` | 公开 | 手动设置 / 覆盖作品封面。 |
 | POST | `/api/works/:id/local-marker` | 本地管理员 | 切换作品本地标记（如 `[A]` 特殊分类）。 |
 | POST | `/api/works/:id/correct-actor-from-folder` | 本地管理员 | 按文件夹名订正作品归属演员。 |
+| GET | `/api/works/:id/move-targets` | 本地管理员 | 返回服务端已验证可用的目标人物 `id` / `name`；不返回文件系统路径，可用 `query` 与 `limit` 筛选。 |
 | POST | `/api/works/:id/move-to-person` | 本地管理员 | 创建或复用一个持久化后台迁移任务，返回 HTTP 202 与 `job`。 |
 | GET | `/api/works/:id/move-job` | 本地管理员 | 查找该作品的活动/阻断迁移；可用 `idempotencyKey` 找回 POST 响应丢失后已经落库的任务。 |
 | GET | `/api/work-move-jobs/:jobId` | 本地管理员 | 读取迁移阶段、进度、错误和结果。 |

@@ -10,8 +10,7 @@ export function createWorkActions(deps) {
     formatNumber,
     getActiveUrl,
     onUserStateChange,
-    renderMessage,
-    renderWorkDetail
+    renderMessage, renderWorkDetail, workMove
   } = deps;
 
   function createActionRow(work) {
@@ -31,6 +30,7 @@ export function createWorkActions(deps) {
     openFanhaoSheet({
       title: "更多操作",
       options: [
+        { label: "迁移作品 / 查看状态", hidden: !work?.id || work.missingLocal, select: () => workMove?.openForWork?.(work) },
         {
           label: work.favoriteFolderName ? `移动收藏 · 当前 ${work.favoriteFolderName}` : "移动到收藏夹",
           hidden: !work.favorite,

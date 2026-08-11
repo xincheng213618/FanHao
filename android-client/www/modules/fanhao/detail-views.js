@@ -8,8 +8,9 @@ import { getWorkSource } from "../../js/work-source.js?v=20260710-western-merge-
 import { personDetailPath } from "./features/people/detail-request.js?v=20260721-fanhao-person-year-15";
 import { createPersonDetailHero } from "./features/people/detail-hero.js?v=20260721-fanhao-person-categories-21";
 import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=20260721-fanhao-person-year-15";
-import { createWorkActions } from "./features/works/actions.js?v=20260811-favorite-folders-02";
+import { createWorkActions } from "./features/works/actions.js?v=20260812-android-work-move-01";
 import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=20260730-fanhao-work-detail-ui-46";
+import { createAndroidWorkMoveController } from "./features/works/work-move.js?v=20260812-android-work-move-01";
 import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=20260712-fanhao-refactor-01";
 
 const PLAY_OPEN_COOLDOWN_MS = 1400;
@@ -42,6 +43,11 @@ export function createDetailViews(context) {
   } = context;
   const videoSection = createAndroidVideoSection({ getActiveUrl, openInLibrary });
   const infoSection = createInfoPreviewSection({ getActiveUrl });
+  const workMove = createAndroidWorkMoveController({
+    getActiveUrl,
+    renderMessage,
+    renderWorkDetail
+  });
   const workActions = createWorkActions({
     detailErrorMessage,
     extractWorkCode,
@@ -50,7 +56,8 @@ export function createDetailViews(context) {
     getActiveUrl,
     onUserStateChange,
     renderMessage,
-    renderWorkDetail
+    renderWorkDetail,
+    workMove
   });
   const previewMedia = createWorkPreviewMedia({
     detailErrorMessage,
@@ -205,6 +212,7 @@ export function createDetailViews(context) {
   }
 
   async function renderWorkDetail(workId, isActive = () => true) {
+    workMove.detach();
     setActiveBottom("works");
     els.viewKicker.textContent = "作品详情";
     els.viewTitle.textContent = "正在加载";
@@ -247,6 +255,7 @@ export function createDetailViews(context) {
         onPlay: playDefaultVideo,
         factsTarget: factPanel || fallbackInfoPanel
       }));
+      void workMove.attach(work, { isActive });
     };
     try {
       const result = await workDetailDataService.load(workId, {

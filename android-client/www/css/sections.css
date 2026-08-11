@@ -891,6 +891,47 @@ button.work-detail-author {
   color: var(--muted);
 }
 
+.detail-action-row .work-move-action {
+  border-color: rgba(22, 119, 116, 0.28);
+  background: rgba(22, 119, 116, 0.09);
+  color: #126b68;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.work-move-target-sheet,
+.work-move-status-sheet {
+  gap: 10px;
+}
+
+.work-move-target-help,
+.work-move-status-detail {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.work-move-target-sheet input {
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 11px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.work-move-target-list {
+  display: grid;
+  max-height: min(48vh, 420px);
+  overflow: auto;
+  gap: 7px;
+}
+
+.work-move-target-option {
+  text-align: left;
+}
+
 .detail-action-row button:disabled {
   opacity: 0.65;
 }

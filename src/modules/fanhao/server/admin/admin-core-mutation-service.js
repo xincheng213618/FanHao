@@ -256,6 +256,68 @@ export function createAdminCoreMutationService({
     throw error;
   }
 
+  // The mobile client must never be asked to construct a library path.  Keep
+  // the authoritative directory resolution here, and expose only the people
+  // for which that resolution succeeds.  `prepareWorkMove` repeats the same
+  // resolution when the command is accepted, so a stale picker response is
+  // still safe.
+  function listWorkMoveTargets(workId, options = {}) {
+    const work = resolveLibraryWorkByPublicId(String(workId || "").trim());
+    if (!work || work.missingLocal) {
+      const error = new Error("作品本地文件不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    if (!hasCoreDb()) {
+      const error = new Error("core DB 不可用");
+      error.statusCode = 500;
+      throw error;
+    }
+
+    const query = String(options.query || "").trim().slice(0, 80);
+    const requestedLimit = Number(options.limit || 36);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.max(1, Math.min(60, Math.trunc(requestedLimit)))
+      : 36;
+    const db = getCoreDb();
+    const escaped = query.replace(/[\\%_]/g, "\\$&");
+    const rows = query
+      ? db.prepare(`
+          SELECT id, name, display_name
+          FROM people
+          WHERE name LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\'
+          ORDER BY COALESCE(NULLIF(display_name, ''), name), id
+          LIMIT ?
+        `).all(`%${escaped}%`, `%${escaped}%`, Math.min(limit * 5, 300))
+      : db.prepare(`
+          SELECT id, name, display_name
+          FROM people
+          ORDER BY COALESCE(NULLIF(display_name, ''), name), id
+          LIMIT ?
+        `).all(Math.min(limit * 5, 300));
+
+    const candidates = [];
+    for (const row of rows) {
+      const id = String(row.id || "");
+      const person = resolveLibraryPersonByPublicId(id) || corePersonFallbackRecord(id) || {
+        id,
+        name: String(row.display_name || row.name || "").trim()
+      };
+      try {
+        targetDirectoryForPerson(person, db);
+      } catch (error) {
+        if (Number(error?.statusCode || 0) === 404) continue;
+        throw error;
+      }
+      candidates.push({
+        id,
+        name: String(person.displayName || person.name || row.display_name || row.name || `#${id}`).trim()
+      });
+      if (candidates.length >= limit) break;
+    }
+    return { workId: String(work.id), query, candidates };
+  }
+
   function correctedActorFieldsJson(fieldsJson, actorName) {
     const fields = parseJsonArray(fieldsJson);
     const cleanName = String(actorName || "").trim();
@@ -1054,6 +1116,7 @@ export function createAdminCoreMutationService({
     hydrateWorkMovePlanRoots,
     inspectWorkMove,
     inspectWorkMoveImages,
+    listWorkMoveTargets,
     mergePeopleIntoTarget,
     parkWorkMoveReservation: (...args) => workMoveReservations().park(...args),
     prepareWorkMove,

@@ -182,6 +182,23 @@ export async function routeWorksApi(req, res, url, deps) {
     return true;
   }
 
+  const workMoveTargetsMatch = /^\/api\/works\/([^/]+)\/move-targets$/.exec(url.pathname);
+  if (workMoveTargetsMatch && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, {
+        ok: true,
+        ...workMutationService.moveTargets(decodeURIComponent(workMoveTargetsMatch[1]), {
+          query: url.searchParams.get("query") || "",
+          limit: url.searchParams.get("limit") || ""
+        })
+      });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.statusCode === 404 ? "作品本地文件不存在" : "读取可迁移目标失败" });
+    }
+    return true;
+  }
+
   const workMoveStatusMatch = /^\/api\/works\/([^/]+)\/move-job$/.exec(url.pathname);
   if (workMoveStatusMatch && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
