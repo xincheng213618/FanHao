@@ -1000,7 +1000,8 @@ function verifySourceStructure() {
   assert.match(reservationSource, /trg_work_move_reserve_local_files_insert/);
   assert.match(reservationSource, /trg_work_move_reserve_images_insert/);
   assert.match(reservationSource, /BEGIN IMMEDIATE/);
-  assert.match(routeSource, /sendJson\(res, 202, workMutationService\.moveToPerson/);
+  assert.match(routeSource, /publicWorkMoveJobPayload/);
+  assert.match(routeSource, /sanitizeWorkMoveJob\(payload\?\.job\)/);
   assert.ok(routeSource.includes("work-move-jobs"));
   assert.match(clientSource, /waitForWorkMoveJob\(data\.job\)/);
   assert.match(clientSource, /AbortController/);
@@ -1861,6 +1862,49 @@ async function verifyMoveJobListApiAndRedaction() {
   assert.equal(response?.payload?.job?.id, "ops-failed");
   assert.equal(JSON.stringify(response.payload).includes(absoluteSecret), false, "retry errors and embedded jobs must be sanitized together");
 
+  const safeJobFields = [
+    "id", "workId", "personId", "status", "phase", "progress", "progressFiles", "totalFiles",
+    "progressBytes", "totalBytes", "attempts", "errorCode", "error", "createdAt", "updatedAt",
+    "finishedAt", "recoverable"
+  ].sort();
+  const assertSafeNestedJobResponse = (payload, label) => {
+    assert.equal(payload?.ok, true, `${label} must keep the normal success envelope`);
+    assert.deepEqual(Object.keys(payload.job || {}).sort(), safeJobFields, `${label} must use the exact public job serializer`);
+    assert.equal(JSON.stringify(payload).includes(absoluteSecret), false, `${label} must not expose persisted paths or raw request data`);
+    assert.equal("result" in payload.job, false, `${label} must not expose worker result details`);
+  };
+
+  // These are the three nested job routes. Use the real mutation service so a
+  // future publicJob field cannot silently cross an HTTP boundary.
+  db.prepare("UPDATE work_move_jobs SET result_json = ?, version = version + 1 WHERE id = 'ops-running'")
+    .run(JSON.stringify({ oldPath: absoluteSecret, work: { sourcePath: absoluteSecret } }));
+  deps.requireLocalAdmin = () => true;
+  deps.readJsonBody = async () => ({ personId: "target", sourcePath: absoluteSecret });
+  deps.workMutationService = mutationService;
+  await routeWorksApi({ method: "POST" }, {}, new URL("http://fixture/api/works/nested%2Fwork/move-to-person"), deps);
+  assert.equal(response?.status, 202);
+  assertSafeNestedJobResponse(response.payload, "move-to-person response");
+  await routeWorksApi({ method: "GET" }, {}, new URL("http://fixture/api/work-move-jobs/ops-failed"), deps);
+  assert.equal(response?.status, 200);
+  assertSafeNestedJobResponse(response.payload, "single job response");
+  await routeWorksApi({ method: "GET" }, {}, new URL("http://fixture/api/works/1/move-job"), deps);
+  assert.equal(response?.status, 200);
+  assertSafeNestedJobResponse(response.payload, "current work job response");
+
+  deps.workMutationService = {
+    moveJob() {
+      const error = Object.assign(new Error(`raw journal error at ${absoluteSecret}`), {
+        statusCode: 500,
+        job: service.get("ops-failed")
+      });
+      throw error;
+    }
+  };
+  await routeWorksApi({ method: "GET" }, {}, new URL("http://fixture/api/work-move-jobs/ops-failed"), deps);
+  assert.equal(response?.status, 500);
+  assert.equal(response?.payload?.error, "读取迁移任务失败");
+  assert.equal(JSON.stringify(response.payload).includes(absoluteSecret), false, "nested job route errors must not echo raw errors or embedded job paths");
+
   let unauthorizedRetryCalls = 0;
   deps.requireLocalAdmin = () => false;
   deps.workMutationService = { retryMoveJob: () => { unauthorizedRetryCalls += 1; } };
@@ -2195,7 +2239,10 @@ async function verifyConflictPayloadAndClientJobPropagation() {
     }
   );
   assert.equal(response.status, 409);
-  assert.deepEqual(response.payload.job, conflictingJob);
+  assert.equal(response.payload.job?.id, conflictingJob.id);
+  assert.equal(response.payload.job?.status, conflictingJob.status);
+  assert.equal(response.payload.job?.phase, conflictingJob.phase);
+  assert.equal("result" in response.payload.job, false, "conflict jobs must cross the same public serializer boundary");
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify(response.payload), {

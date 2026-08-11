@@ -100,9 +100,6 @@ export function createWorkMoveOpsController({ api, formatBytes, formatDateTime, 
 
   function renderList() {
     if (!elements.list) return;
-    const focusedJobId = elements.list.contains?.(document.activeElement)
-      ? String(document.activeElement?.dataset?.workMoveJobId || "")
-      : "";
     elements.list.innerHTML = "";
     if (!state.jobs.length) {
       elements.list.append(textNode("div", "没有匹配的作品迁移任务", "admin-empty"));
@@ -112,6 +109,7 @@ export function createWorkMoveOpsController({ api, formatBytes, formatDateTime, 
       const card = document.createElement("button");
       card.type = "button";
       card.dataset.workMoveJobId = String(job.id || "");
+      card.dataset.workMoveAction = "card";
       card.className = `work-move-job-card status-${job.status}`;
       card.classList.toggle("active", job.id === state.selectedId);
       card.setAttribute("aria-pressed", String(job.id === state.selectedId));
@@ -132,11 +130,6 @@ export function createWorkMoveOpsController({ api, formatBytes, formatDateTime, 
         textNode("span", job.errorCode || job.error || "", "work-move-job-card-error")
       );
       elements.list.append(card);
-    }
-    if (focusedJobId) {
-      const focusedCard = [...elements.list.querySelectorAll("[data-work-move-job-id]")]
-        .find((card) => card.dataset.workMoveJobId === focusedJobId);
-      focusedCard?.focus({ preventScroll: true });
     }
   }
 
@@ -172,6 +165,8 @@ export function createWorkMoveOpsController({ api, formatBytes, formatDateTime, 
     if (moveJobCanRetry(job)) {
       const retry = textNode("button", "重试", "folder-button compact");
       retry.type = "button";
+      retry.dataset.workMoveJobId = String(job.id || "");
+      retry.dataset.workMoveAction = "retry";
       retry.addEventListener("click", () => retryJob(job, retry));
       actions.append(retry);
     }
@@ -179,6 +174,8 @@ export function createWorkMoveOpsController({ api, formatBytes, formatDateTime, 
       elements.detail.append(textNode("p", "任务为防止双重文件操作而阻断。请核对旧服务/路径状态后人工处理，不会自动重试。", "work-move-manual-note"));
       const copy = textNode("button", "复制任务 ID", "folder-button compact subtle");
       copy.type = "button";
+      copy.dataset.workMoveJobId = String(job.id || "");
+      copy.dataset.workMoveAction = "copy";
       copy.addEventListener("click", () => copyJobId(job.id));
       actions.append(copy);
     }
@@ -186,9 +183,35 @@ export function createWorkMoveOpsController({ api, formatBytes, formatDateTime, 
   }
 
   function render() {
+    const focus = captureJobActionFocus();
     renderSummary();
     renderList();
     renderDetail();
+    restoreJobActionFocus(focus);
+  }
+
+  function captureJobActionFocus() {
+    const active = document.activeElement;
+    const inPanel = elements.list?.contains?.(active) || elements.detail?.contains?.(active);
+    const jobId = String(active?.dataset?.workMoveJobId || "");
+    if (!inPanel || !jobId) return null;
+    return { jobId, action: String(active.dataset?.workMoveAction || "card") };
+  }
+
+  function jobsIn(container) {
+    return [...(container?.querySelectorAll?.("[data-work-move-job-id]") || [])];
+  }
+
+  function restoreJobActionFocus(focus) {
+    if (!focus) return;
+    const matching = (container, action) => jobsIn(container).find((node) => (
+      String(node.dataset?.workMoveJobId || "") === focus.jobId
+      && String(node.dataset?.workMoveAction || "") === action
+    ));
+    const target = matching(elements.detail, focus.action)
+      || matching(elements.list, focus.action)
+      || matching(elements.list, "card");
+    target?.focus?.({ preventScroll: true });
   }
 
   async function performLoad(request) {

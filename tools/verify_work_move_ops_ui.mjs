@@ -151,12 +151,17 @@ assert.equal(controller.state.loading, false);
 const originalDocument = globalThis.document;
 const focusDocument = { activeElement: null };
 function fakeNode(tag) {
-  return {
+  const node = {
     tag,
     children: [],
     dataset: {},
     classList: { toggle() {} },
-    append(...children) { this.children.push(...children); },
+    append(...children) {
+      for (const child of children) {
+        child.parentNode = this;
+        this.children.push(child);
+      }
+    },
     addEventListener() {},
     setAttribute() {},
     focus(options) {
@@ -164,15 +169,21 @@ function fakeNode(tag) {
       focusDocument.activeElement = this;
     }
   };
+  node.contains = (target) => target === node || node.children.some((child) => child.contains?.(target));
+  node.querySelectorAll = (selector) => {
+    const all = node.children.flatMap((child) => [child, ...child.querySelectorAll?.(selector) || []]);
+    return selector === "[data-work-move-job-id]"
+      ? all.filter((child) => child.dataset?.workMoveJobId)
+      : [];
+  };
+  Object.defineProperty(node, "innerHTML", {
+    set() { node.children = []; }
+  });
+  return node;
 }
 focusDocument.createElement = fakeNode;
-const focusList = {
-  children: [],
-  contains(node) { return this.children.includes(node); },
-  append(node) { this.children.push(node); },
-  querySelectorAll() { return this.children; },
-  set innerHTML(_value) { this.children = []; }
-};
+const focusList = fakeNode("list");
+const focusDetail = fakeNode("detail");
 globalThis.document = focusDocument;
 try {
   const focusController = createWorkMoveOpsController({
@@ -182,11 +193,12 @@ try {
     root: {
       querySelector(selector) {
         if (selector === "[data-work-move-list]") return focusList;
+        if (selector === "[data-work-move-detail]") return focusDetail;
         return null;
       }
     }
   });
-  focusController.state.jobs = [{ id: "focus-job", workId: "1", status: "running", phase: "copying" }];
+  focusController.state.jobs = [{ id: "focus-job", workId: "1", status: "failed", phase: "copying", recoverable: true }];
   focusController.state.selectedId = "focus-job";
   focusController.render();
   const previousCard = focusList.children[0];
@@ -195,6 +207,27 @@ try {
   assert.notEqual(focusDocument.activeElement, previousCard, "poll rendering must replace the old card in this fixture");
   assert.equal(focusDocument.activeElement?.dataset?.workMoveJobId, "focus-job");
   assert.deepEqual(focusDocument.activeElement?.focusOptions, { preventScroll: true }, "selection focus must be restored without scrolling");
+
+  const previousRetry = focusDetail.querySelectorAll("[data-work-move-job-id]")
+    .find((node) => node.dataset.workMoveAction === "retry");
+  previousRetry.focus();
+  focusController.render();
+  assert.notEqual(focusDocument.activeElement, previousRetry, "poll rendering must replace the old action control in this fixture");
+  assert.equal(focusDocument.activeElement?.dataset?.workMoveAction, "retry", "retry focus must survive a DOM rebuild for the same job");
+  assert.equal(focusDocument.activeElement?.dataset?.workMoveJobId, "focus-job");
+  assert.deepEqual(focusDocument.activeElement?.focusOptions, { preventScroll: true });
+
+  const disappearedRetry = focusDocument.activeElement;
+  focusController.state.jobs[0].status = "blocked";
+  focusController.render();
+  assert.notEqual(focusDocument.activeElement, disappearedRetry);
+  assert.equal(focusDocument.activeElement?.dataset?.workMoveAction, "card", "a disappeared action must fall back to its job card");
+  assert.equal(focusDocument.activeElement?.dataset?.workMoveJobId, "focus-job");
+
+  const outsideFocus = fakeNode("outside");
+  outsideFocus.focus();
+  focusController.render();
+  assert.equal(focusDocument.activeElement, outsideFocus, "rendering must not steal focus from controls outside the ops panel");
 } finally {
   if (originalDocument === undefined) delete globalThis.document;
   else globalThis.document = originalDocument;

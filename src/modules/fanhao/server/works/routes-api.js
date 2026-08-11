@@ -1,5 +1,21 @@
 import { safeWorkMoveRetryError, sanitizeWorkMoveJob } from "./work-move-job-query-service.js";
 
+function safeWorkMoveRouteError(error, fallback, { retry = false } = {}) {
+  return {
+    error: retry ? safeWorkMoveRetryError(error) : fallback,
+    ...(error?.code ? { code: error.code } : {}),
+    ...(error?.retryable ? { retryable: true } : {}),
+    ...(error?.job ? { job: sanitizeWorkMoveJob(error.job) } : {})
+  };
+}
+
+function publicWorkMoveJobPayload(payload) {
+  return {
+    ok: payload?.ok === true,
+    job: sanitizeWorkMoveJob(payload?.job)
+  };
+}
+
 export async function routeWorksApi(req, res, url, deps) {
   const {
     notFound,
@@ -159,9 +175,9 @@ export async function routeWorksApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req);
-      sendJson(res, 202, workMutationService.moveToPerson(decodeURIComponent(workMoveToPersonMatch[1]), body));
+      sendJson(res, 202, publicWorkMoveJobPayload(workMutationService.moveToPerson(decodeURIComponent(workMoveToPersonMatch[1]), body)));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "迁移作品失败", ...(error.job ? { job: error.job } : {}) });
+      sendJson(res, error.statusCode || 500, safeWorkMoveRouteError(error, "迁移作品失败"));
     }
     return true;
   }
@@ -170,11 +186,11 @@ export async function routeWorksApi(req, res, url, deps) {
   if (workMoveStatusMatch && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      sendJson(res, 200, workMutationService.moveJobForWork(decodeURIComponent(workMoveStatusMatch[1]), {
+      sendJson(res, 200, publicWorkMoveJobPayload(workMutationService.moveJobForWork(decodeURIComponent(workMoveStatusMatch[1]), {
         idempotencyKey: url.searchParams.get("idempotencyKey") || ""
-      }));
+      })));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "读取作品迁移任务失败" });
+      sendJson(res, error.statusCode || 500, safeWorkMoveRouteError(error, "读取作品迁移任务失败"));
     }
     return true;
   }
@@ -206,14 +222,9 @@ export async function routeWorksApi(req, res, url, deps) {
   if (workMoveJobRetryMatch && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      sendJson(res, 202, workMutationService.retryMoveJob(decodeURIComponent(workMoveJobRetryMatch[1])));
+      sendJson(res, 202, publicWorkMoveJobPayload(workMutationService.retryMoveJob(decodeURIComponent(workMoveJobRetryMatch[1]))));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, {
-        error: safeWorkMoveRetryError(error),
-        ...(error.code ? { code: error.code } : {}),
-        ...(error.retryable ? { retryable: true } : {}),
-        ...(error.job ? { job: sanitizeWorkMoveJob(error.job) } : {})
-      });
+      sendJson(res, error.statusCode || 500, safeWorkMoveRouteError(error, "恢复迁移任务失败", { retry: true }));
     }
     return true;
   }
@@ -222,9 +233,9 @@ export async function routeWorksApi(req, res, url, deps) {
   if (workMoveJobMatch && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      sendJson(res, 200, workMutationService.moveJob(decodeURIComponent(workMoveJobMatch[1])));
+      sendJson(res, 200, publicWorkMoveJobPayload(workMutationService.moveJob(decodeURIComponent(workMoveJobMatch[1]))));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "读取迁移任务失败" });
+      sendJson(res, error.statusCode || 500, safeWorkMoveRouteError(error, "读取迁移任务失败"));
     }
     return true;
   }

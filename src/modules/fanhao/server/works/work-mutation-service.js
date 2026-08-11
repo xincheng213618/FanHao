@@ -41,15 +41,15 @@ export function createWorkMutationService({
   }
 
   function moveToPerson(workId, body) {
-    return { ok: true, job: workMoveJobService.start(workId, body) };
+    return publicMoveJobPayload(workMoveJobService.start(workId, body));
   }
 
   function moveJob(jobId) {
-    return { ok: true, job: workMoveJobService.get(jobId) };
+    return publicMoveJobPayload(workMoveJobService.get(jobId));
   }
 
   function moveJobForWork(workId, options = {}) {
-    return { ok: true, job: workMoveJobService.findForWork(workId, options) };
+    return publicMoveJobPayload(workMoveJobService.findForWork(workId, options));
   }
 
   function listMoveJobs(options = {}) {
@@ -57,7 +57,14 @@ export function createWorkMutationService({
   }
 
   function retryMoveJob(jobId) {
-    return { ok: true, job: sanitizeWorkMoveJob(workMoveJobService.retry(jobId)) };
+    return publicMoveJobPayload(workMoveJobService.retry(jobId));
+  }
+
+  // This is the one public boundary for every individual work-move response.
+  // The journal service deliberately retains diagnostic data for workers and
+  // recovery, so never return its job object directly from an HTTP mutation.
+  function publicMoveJobPayload(job) {
+    return { ok: true, job: sanitizeWorkMoveJob(job) };
   }
 
   function deleteLocalFiles(workId) {
