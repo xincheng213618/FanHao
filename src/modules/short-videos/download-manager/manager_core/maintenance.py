@@ -8,7 +8,7 @@ from .common import normalize_int
 from .config import GALLERY_MUSIC_INTENT
 from .database import add_event, db
 from .profiles_links import current_profile_id
-from .queue import sync_download_queue
+from .queue import notify_download_queue_changed, sync_download_queue
 from .read_models import get_state
 
 
@@ -45,6 +45,8 @@ def reset_failed_links(payload: dict[str, Any]) -> dict[str, Any]:
         )
         sync_download_queue(conn)
         changed = cur.rowcount if cur.rowcount is not None else 0
+    if changed > 0:
+        notify_download_queue_changed()
     add_event("info", f"{scope_label}失败链接已转为待下载：{changed} 条")
     return {"ok": True, "changed": changed, "scope": scope, "state": get_state()}
 
@@ -75,6 +77,7 @@ def retry_link(payload: dict[str, Any]) -> dict[str, Any]:
             (link_id,),
         )
         sync_download_queue(conn)
+    notify_download_queue_changed()
     aweme_id = str(row["aweme_id"] or "")
     add_event("info", f"单条失败链接已转为待下载：{aweme_id or link_id}")
     return {
@@ -145,6 +148,8 @@ def queue_gallery_music_backfill(payload: dict[str, Any]) -> dict[str, Any]:
     changed = 0 if dry_run else len(ids)
     if dry_run:
         return {"ok": True, "eligible": len(ids), "changed": 0, "scope": scope}
+    if changed > 0:
+        notify_download_queue_changed()
     add_event("info", f"{scope_label}图集音乐补齐任务已加入队列：{changed} 条")
     return {"ok": True, "eligible": len(ids), "changed": changed, "scope": scope, "state": get_state()}
 

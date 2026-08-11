@@ -13,7 +13,13 @@ from .config import DEFAULT_OUTPUT_DIR, DOWNLOAD_QUEUE_ORDER, MAX_CONCURRENCY, Q
 from .database import add_event, create_job, db, download_cycle_cooldown_seconds, download_cycle_limit, setting, update_job
 from .domain_manifest import profile_output_dir
 from .download_state import DownloadManager
-from .queue import queue_pending_count, sync_download_queue
+from .queue import (
+    clear_download_queue_changed,
+    notify_download_queue_changed,
+    queue_pending_count,
+    sync_download_queue,
+    wait_for_download_queue_changed,
+)
 from .runtime import download_timing
 from .download_guard import DownloadGuardMixin
 from .sidecar_runtime import SidecarRuntimeMixin
@@ -64,6 +70,9 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
                     "SELECT COUNT(*) c FROM links WHERE status='pending' AND profile_id=?",
                     (profile_id,),
                 ).fetchone()["c"]
+                # Repair legacy/missing queue rows once when a watcher starts.
+                # Runtime writers maintain the queue incrementally after this.
+                sync_download_queue(conn)
                 queue_pending = queue_pending_count(conn)
             if pending <= 0 and queue_pending > 0:
                 pending = queue_pending
@@ -114,6 +123,7 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
             if had_pause:
                 self._clear_failure_guard_locked()
             self.stop_event.set()
+            notify_download_queue_changed()
             proc = self.sidecar_proc
             self.sidecar_proc = None
             self.sidecar_port = None
@@ -204,6 +214,10 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
 
                 capacity = min(max_active - len(active), claim_allowed)
                 if capacity > 0:
+                    if not active:
+                        # Clear before checking SQLite so a concurrent committed
+                        # insert cannot be lost between the query and the wait.
+                        clear_download_queue_changed()
                     links = self._claim_queue_batch(profile_id, capacity)
                     if links:
                         self._cancel_cycle_idle()
@@ -248,10 +262,6 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
                     continue
                 if target_limit > 0 and processed >= target_limit:
                     break
-                pending = self._queue_pending_count()
-                if pending > 0:
-                    self._cancel_cycle_idle()
-                    continue
                 if not watch_new:
                     break
                 self._begin_cycle_idle()
@@ -261,7 +271,19 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
                         message=f"等待新链接：已处理 {processed} 条，sidecar 端口 {port}",
                     )
                     wait_message_at = time.time()
-                time.sleep(1.0)
+                while not self.stop_event.is_set():
+                    wait_timeout = 60.0
+                    cycle_reset_due = False
+                    with self.lock:
+                        if self.cycle_sidecar_success > 0 and self.cycle_idle_since is not None:
+                            reset_remaining = self.cycle_idle_since + cycle_cooldown_seconds - time.time()
+                            cycle_reset_due = reset_remaining <= wait_timeout
+                            wait_timeout = min(wait_timeout, max(0.05, reset_remaining))
+                    if wait_for_download_queue_changed(wait_timeout) or cycle_reset_due:
+                        break
+                    # A timeout is only a sidecar liveness check. Do not query
+                    # SQLite again until a producer signals an actual change.
+                    self._raise_if_sidecar_exited()
         except Exception as exc:
             download_timing("supervisor_error", job_id=job_id, profile_id=profile_id, error=str(exc)[:1000])
             add_event("error", f"sidecar 下载任务异常：{exc}")
@@ -377,7 +399,6 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
         if limit <= 0:
             return []
         with db() as conn:
-            sync_download_queue(conn)
             rows = conn.execute(
                 """
                 SELECT links.*
@@ -430,7 +451,6 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
             return []
         profile_ids: list[int] = []
         with db() as conn:
-            sync_download_queue(conn)
             rows = conn.execute(
                 """
                 SELECT q.profile_id
@@ -483,10 +503,5 @@ class SidecarDownloadManager(DownloadGuardMixin, SidecarRuntimeMixin, DownloadMa
                     (profile_id,),
                 ).fetchone()["c"]
             )
-
-    def _queue_pending_count(self) -> int:
-        with db() as conn:
-            return queue_pending_count(conn)
-
 
 download_manager = SidecarDownloadManager()

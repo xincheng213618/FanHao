@@ -22,7 +22,12 @@ from .extraction import start_extract, start_following_import, start_refresh_pro
 from .library import list_library, open_library_folder, resolve_library_media, shared_player_detail, shared_player_list, shared_player_neighbor, shared_player_row, shared_player_summary, shared_player_video_from_row
 from .maintenance import delete_empty_failed_links, delete_failed_links, delete_link, delete_profile, queue_gallery_music_backfill, reset_failed_links, retry_link
 from .profiles_links import current_profile_id, import_manifest_to_db, upsert_links, upsert_profile
-from .queue import ensure_profile_in_download_queue, move_download_queue_item, sort_download_queue_by_pending
+from .queue import (
+    ensure_profile_in_download_queue,
+    move_download_queue_item,
+    notify_download_queue_changed,
+    sort_download_queue_by_pending,
+)
 from .read_models import get_activity_state, get_runtime_status, get_state, list_links, list_profiles
 from .runtime import activate_application, request_application_quit
 
@@ -170,6 +175,7 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.send_json({"ok": False, "message": "当前主页还没有入库"})
                 with db() as conn:
                     ensure_profile_in_download_queue(conn, profile_id)
+                notify_download_queue_changed()
                 return self.send_json({"ok": True, "state": get_state()})
             if parsed.path == "/api/download-queue/remove":
                 profile_id = normalize_int(payload.get("profile_id", 0), 0, 0, 1000000)
@@ -178,6 +184,7 @@ class Handler(SimpleHTTPRequestHandler):
                         "UPDATE profile_download_queue SET enabled=0, updated_at=? WHERE profile_id=?",
                         (now_iso(), profile_id),
                     )
+                notify_download_queue_changed()
                 return self.send_json({"ok": True, "state": get_state()})
             if parsed.path == "/api/download-queue/move":
                 profile_id = normalize_int(payload.get("profile_id", 0), 0, 0, 1000000)
@@ -185,12 +192,16 @@ class Handler(SimpleHTTPRequestHandler):
                 if direction not in {"up", "down", "top"}:
                     return self.send_json({"ok": False, "message": "方向只能是 up/down/top"})
                 changed = move_download_queue_item(profile_id, direction)
+                if changed:
+                    notify_download_queue_changed()
                 return self.send_json({"ok": True, "changed": changed, "state": get_state()})
             if parsed.path == "/api/download-queue/sort":
                 mode = str(payload.get("mode") or "pending_asc").strip()
                 if mode != "pending_asc":
                     return self.send_json({"ok": False, "message": "目前只支持 pending_asc"})
                 changed = sort_download_queue_by_pending()
+                if changed:
+                    notify_download_queue_changed()
                 return self.send_json({"ok": True, "changed": changed, "state": get_state()})
             if parsed.path == "/api/manifest/import":
                 return self.handle_manifest_import(payload)

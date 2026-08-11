@@ -3,10 +3,27 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from typing import Any
 
 from .common import now_iso
 from .database import db
+
+
+_download_queue_changed = threading.Event()
+
+
+def notify_download_queue_changed() -> None:
+    """Wake the active watcher after a committed queue-producing change."""
+    _download_queue_changed.set()
+
+
+def clear_download_queue_changed() -> None:
+    _download_queue_changed.clear()
+
+
+def wait_for_download_queue_changed(timeout: float | None = None) -> bool:
+    return _download_queue_changed.wait(timeout)
 
 
 def link_stats(conn: sqlite3.Connection, profile_id: int | None = None) -> dict[str, int]:
@@ -73,7 +90,6 @@ def sync_download_queue(conn: sqlite3.Connection) -> None:
 
 
 def queue_pending_count(conn: sqlite3.Connection) -> int:
-    sync_download_queue(conn)
     row = conn.execute(
         """
         SELECT COUNT(*) c
@@ -86,7 +102,6 @@ def queue_pending_count(conn: sqlite3.Connection) -> int:
 
 
 def list_download_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    sync_download_queue(conn)
     rows = conn.execute(
         """
         SELECT
