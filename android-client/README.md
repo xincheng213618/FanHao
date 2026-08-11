@@ -32,6 +32,20 @@ npm run run:android
 android\app\build\outputs\apk\debug\app-debug.apk
 ```
 
+## Gradle 网络代理
+
+仓库中的 `android\gradle.properties` 必须保持为无代理的默认配置，不能写入 `localhost`、固定代理地址、端口或代理凭据。这样干净构建不会隐式依赖某一台开发机。
+
+需要代理的开发者只能将自己的配置放到用户级 `%USERPROFILE%\.gradle\gradle.properties`，例如仅在本机添加 `systemProp.http.proxyHost`、`systemProp.http.proxyPort` 及对应 HTTPS 项。也可以在一次命令中临时传入不含凭据的 JVM 属性，例如：
+
+```powershell
+.\android\gradlew.bat --no-daemon help -Dhttp.proxyHost=proxy.example.test -Dhttp.proxyPort=8080 -Dhttps.proxyHost=proxy.example.test -Dhttps.proxyPort=8080
+```
+
+不要把代理配置复制到仓库、脚本、提交信息或可共享的终端历史中；尤其不得提交 `proxyUser`、`proxyPassword`，或把用户名/密码嵌入代理 URL。需要认证代理时，请使用受本机保护的用户级配置或组织规定的凭据管理方式。
+
+运行 `npm run verify:android-gradle-config` 会检查所有受版本控制的 Android Gradle 配置，阻止本机地址、固定 HTTP/HTTPS 代理以及代理凭据重新进入仓库。
+
 当前壳应用只支持连接本机、局域网或可信私网中的服务，局域网 HTTP 明文能力仅用于这些受信网络。Android 客户端目前没有可用的远程登录或配对通道；不要通过手工复制 Web Cookie 的方式把远程访问当作受支持能力。后续若要开放远程访问，必须在客户端和服务端共同实现 HTTPS 与配对 / bearer token 认证。
 
 ## 模块加载结构
