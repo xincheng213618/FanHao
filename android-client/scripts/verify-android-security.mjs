@@ -68,6 +68,23 @@ assert(
   updater.includes("AndroidUpdatePackageVerifier.requireInstallableUpdate"),
   "updater must verify APK identity before opening the installer"
 );
+
+const versionContract = JSON.parse(read("version.json"));
+assert.equal(versionContract.schemaVersion, 1, "the Android version contract schema must be explicit");
+assert.equal(versionContract.packageName, "local.fanhao.library", "the version contract must bind the application package");
+assert.equal(versionContract.channel, "debug", "the version contract must bind the supported publish lane");
+assert(Number.isSafeInteger(versionContract.currentVersionCode), "the tracked default versionCode must be an integer");
+assert(Number.isSafeInteger(versionContract.highWaterVersionCode), "the tracked publish floor must be an integer");
+assert(versionContract.highWaterVersionCode >= 26081190, "the tracked publish floor must include the reviewed 26081190 baseline");
+assert.equal(typeof versionContract.defaultVersionName, "string", "the tracked default versionName must be a string");
+assert.equal(versionContract.defaultVersionName, versionContract.defaultVersionName.trim(), "the tracked default versionName must be canonical");
+assert(versionContract.defaultVersionName.length > 0, "the tracked default versionName must not be empty");
+assert.equal(
+  versionContract.currentVersionCode,
+  versionContract.highWaterVersionCode,
+  "the tracked default version and publish floor must advance together"
+);
+verifyVersionContractDoesNotDecrease(versionContract);
 const downloadMethodStart = updater.indexOf("private File downloadApk(");
 const packageVerificationIndex = updater.indexOf("AndroidUpdatePackageVerifier.requireInstallableUpdate", downloadMethodStart);
 const verifiedReturnIndex = updater.indexOf("return apk;", packageVerificationIndex);
@@ -106,13 +123,38 @@ assert(buildDebug.includes("JDK 21 is required"), "the Android build must fail c
 assert(buildDebug.includes("Remove-Item -LiteralPath $resolvedApkPath -Force"), "the Android build must remove stale APK output before running Gradle");
 assert(buildDebug.includes("Assert-NativeSucceeded \"Gradle assembleDebug failed\""), "the Android build must reject a non-zero Gradle exit");
 assert(buildDebug.includes("Resolve-FanHaoBuildIdentity"), "the Android build must apply the shared version policy before Gradle");
+assert(buildDebug.includes("Read-FanHaoVersionContract"), "no-argument Android builds must read the tracked version contract");
+assert(buildDebug.includes("$VersionContract.CurrentVersionCode"), "no-argument Android builds must use the tracked current versionCode");
+assert(buildDebug.includes("$VersionContract.DefaultVersionName"), "no-argument Android builds must use the tracked default versionName");
+assert(buildDebug.includes("Assert-FanHaoInstallIdentity"), "the build entry must apply the shared tracked-identity install gate");
+assert(buildDebug.includes("$Install -and $IdentityOnly"), "identity-only probing must never silently replace an install request");
+assert(buildDebug.includes('"-PfanhaoLocalOnly=true"'), "the validated local-only build path must explicitly authorize Gradle's reserved namespace");
 assert(buildDebug.includes("Assert-FanHaoDebugApkIdentity"), "the Android build must verify actual APK package, version, and signer identity");
 assert(buildDebug.includes("$Install -and $LocalOnly"), "local-only high version builds must never enter the install path");
+
+const appGradle = read("android/app/build.gradle");
+assert(appGradle.includes('file("../../version.json")'), "direct Gradle and Android Studio builds must read the tracked version contract");
+assert(appGradle.includes("versionContract.currentVersionCode"), "Gradle must use the contract current version as its default code");
+assert(appGradle.includes("versionContract.defaultVersionName"), "Gradle must use the contract default versionName");
+assert(!appGradle.includes('?: "1"'), "Gradle must not retain the legacy versionCode 1 fallback");
+assert(!appGradle.includes('?: "1.0"'), "Gradle must not retain the legacy versionName 1.0 fallback");
+assert(appGradle.includes("fanhaoVersionCode above 99999999 requires the explicit fanhaoLocalOnly=true build path"), "direct Gradle builds must reject unmarked high version codes");
+assert(appGradle.includes("fanhao-debug-local-only-pending"), "an explicitly local-only Gradle build must leave a sidecar before it can finish");
 
 const publishDebug = read("publish-debug-update.ps1");
 assert(publishDebug.includes("Get-FanHaoDebugPublishPlan"), "publishing must resolve a validated global high-water mark before building");
 assert(publishDebug.includes("Publish-FanHaoDebugArtifact"), "publishing must use the verified atomic artifact commit");
 assert(publishDebug.includes("FileShare]::None"), "publishing must serialize competing writers for one publish root");
+assert(publishDebug.includes("does not install a newly selected identity"), "publishing must not bypass the reviewed install identity contract");
+assert(publishDebug.includes("Assert-AuthorizedPublishDevice"), "a real publish must fail closed when no authorized ADB device is visible");
+const planOnlyExitIndex = publishDebug.indexOf('if ($PlanOnly)');
+const firstAdbPreflightIndex = publishDebug.indexOf("Assert-AuthorizedPublishDevice", planOnlyExitIndex);
+const buildInvocationIndex = publishDebug.indexOf("& $BuildScript @buildArgs");
+const secondAdbPreflightIndex = publishDebug.indexOf("Assert-AuthorizedPublishDevice", firstAdbPreflightIndex + 1);
+const publishCommitIndex = publishDebug.indexOf("Publish-FanHaoDebugArtifact");
+assert(firstAdbPreflightIndex > planOnlyExitIndex && firstAdbPreflightIndex < buildInvocationIndex, "ADB visibility must be checked before the publish build starts");
+assert(secondAdbPreflightIndex > buildInvocationIndex && secondAdbPreflightIndex < publishCommitIndex, "the same ADB device set must be rechecked after the build and before atomic publish");
+assert(publishDebug.includes('if ($CurrentStage -eq "BeforeManifestCommit")'), "ADB visibility must be checked again at the module's exact manifest commit boundary");
 
 const publishPolicy = read("scripts/FanHaoAndroidPublish.psm1");
 assert(publishPolicy.includes("99999999L"), "the project publish namespace must reserve Android versionCode headroom");
@@ -120,6 +162,9 @@ assert(publishPolicy.includes("2100000000L"), "local-only builds must still enfo
 assert(publishPolicy.includes('"--verbose", "--print-certs"'), "APK identity checks must parse the complete signer set");
 assert(publishPolicy.includes("Number of signers"), "APK identity checks must require an explicit signer count");
 assert(publishPolicy.includes("[IO.File]::Replace"), "latest.json replacement must be atomic on an existing publish lane");
+assert(publishPolicy.includes("Read-FanHaoVersionContract"), "publish planning must include the tracked version floor");
+assert(publishPolicy.includes("ignored-build-output"), "scratch build output must not define durable publish history");
+assert(publishPolicy.includes("-Install requires the tracked Android version contract identity"), "the shared install policy must reject identities above the reviewed contract");
 
 const androidIndex = read("www/index.html");
 assert(
@@ -158,6 +203,7 @@ assert(
 );
 
 verifyJavaPolicy();
+verifyGradleVersionPolicy();
 verifyPowerShellPublishPolicy();
 verifyAndroidUpdateServing();
 console.log("android-security: origin compatibility, trusted-network boundary, native bridge, and update policy verified");
@@ -190,11 +236,93 @@ function verifyJavaPolicy() {
 }
 
 function verifyPowerShellPublishPolicy() {
-  const shell = process.platform === "win32" ? "powershell.exe" : "pwsh";
-  const args = process.platform === "win32"
-    ? ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(projectDir, "scripts", "verify-debug-publish-policy.ps1")]
-    : ["-NoProfile", "-File", path.join(projectDir, "scripts", "verify-debug-publish-policy.ps1")];
-  run(shell, args);
+  const script = path.join(projectDir, "scripts", "verify-debug-publish-policy.ps1");
+  const shells = process.platform === "win32"
+    ? [
+        { command: "powershell.exe", args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script] },
+        { command: "pwsh.exe", args: ["-NoProfile", "-File", script] }
+      ]
+    : [{ command: "pwsh", args: ["-NoProfile", "-File", script] }];
+  for (const shell of shells) {
+    console.log(`android-security: running publish policy fixtures with ${shell.command}`);
+    run(shell.command, shell.args);
+  }
+}
+
+function verifyGradleVersionPolicy() {
+  const androidDir = path.join(projectDir, "android");
+  const javaHome = resolveJava21Home();
+  const sdkRoot = process.env.ANDROID_SDK_ROOT
+    || process.env.ANDROID_HOME
+    || (process.platform === "win32" && process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Android", "Sdk") : "");
+  assert(sdkRoot && fs.existsSync(sdkRoot), "Android SDK is required for the Gradle version policy fixture");
+  const javaExecutable = path.join(javaHome, "bin", process.platform === "win32" ? "java.exe" : "java");
+  const wrapperJar = path.join(androidDir, "gradle", "wrapper", "gradle-wrapper.jar");
+  const result = run(
+    javaExecutable,
+    ["-classpath", wrapperJar, "org.gradle.wrapper.GradleWrapperMain", ":app:verifyFanHaoVersionPolicy", "--no-daemon"],
+    {
+      cwd: androidDir,
+      env: {
+        ...process.env,
+        JAVA_HOME: javaHome,
+        ANDROID_HOME: sdkRoot,
+        ANDROID_SDK_ROOT: sdkRoot,
+        PATH: `${path.join(javaHome, "bin")}${path.delimiter}${process.env.PATH || ""}`
+      }
+    }
+  );
+  assert(
+    `${result.stdout || ""}\n${result.stderr || ""}`.includes("fanhao-gradle-version-policy: 10 boundary, marker, and contract checks passed"),
+    "the Gradle subprocess must execute the version namespace behavior fixture"
+  );
+}
+
+function verifyVersionContractDoesNotDecrease(currentContract) {
+  const shallowResult = spawnSync("git", ["rev-parse", "--is-shallow-repository"], { cwd: repoDir, encoding: "utf8" });
+  assert.equal(shallowResult.status, 0, "the Android version verifier requires Git repository metadata");
+  const isShallow = shallowResult.stdout.trim() === "true";
+
+  const logResult = spawnSync(
+    "git",
+    ["log", "--all", "--format=%H", "--", "android-client/version.json"],
+    { cwd: repoDir, encoding: "utf8" }
+  );
+  assert.equal(logResult.status, 0, "the Android version verifier could not read version contract history");
+  const commits = logResult.stdout.split(/\r?\n/).filter(Boolean);
+  const historicalFloors = commits.map((commit) => {
+    const result = spawnSync(
+      "git",
+      ["show", `${commit}:android-client/version.json`],
+      { cwd: repoDir, encoding: "utf8" }
+    );
+    assert.equal(result.status, 0, `the Android version verifier could not read ${commit}`);
+    const historical = JSON.parse(result.stdout);
+    assert(Number.isSafeInteger(historical.highWaterVersionCode), `historical Android version floor is invalid in ${commit}`);
+    return historical.highWaterVersionCode;
+  });
+
+  assertVersionFloorHistory(currentContract.highWaterVersionCode, historicalFloors, isShallow);
+  assert.throws(
+    () => assertVersionFloorHistory(26081189, [26081190, 26081191], false),
+    /must not decrease/,
+    "a decrease hidden behind multiple commits must fail closed"
+  );
+  assert.throws(
+    () => assertVersionFloorHistory(26081190, [], true),
+    /full Git history/,
+    "a shallow checkout with unavailable baseline history must fail closed"
+  );
+}
+
+function assertVersionFloorHistory(currentFloor, historicalFloors, isShallow) {
+  assert.equal(isShallow, false, "the Android version verifier requires full Git history; shallow history cannot prove the floor");
+  if (historicalFloors.length === 0) {
+    assert.equal(currentFloor, 26081190, "the initial tracked Android version floor must be the reviewed 26081190 baseline");
+    return;
+  }
+  const historicalMaximum = Math.max(...historicalFloors);
+  assert(currentFloor >= historicalMaximum, `the tracked Android version floor must not decrease below reachable history (${historicalMaximum})`);
 }
 
 function verifyAndroidUpdateServing() {
@@ -285,18 +413,31 @@ function removeVerifiedTempDir(tempDir) {
 
 function javaTool(name) {
   const executable = process.platform === "win32" ? `${name}.exe` : name;
-  const candidates = [
-    process.env.JAVA_HOME ? path.join(process.env.JAVA_HOME, "bin", executable) : "",
-    process.platform === "win32" ? path.join("C:\\Program Files\\Android\\openjdk\\jdk-21.0.8", "bin", executable) : "",
-    executable
-  ].filter(Boolean);
-  return candidates.find((candidate) => !path.isAbsolute(candidate) || fs.existsSync(candidate)) || executable;
+  return path.join(resolveJava21Home(), "bin", executable);
 }
 
-function run(command, args) {
-  const result = spawnSync(command, args, { cwd: projectDir, encoding: "utf8" });
+function resolveJava21Home() {
+  const candidates = [
+    process.platform === "win32" ? "C:\\Program Files\\Android\\openjdk\\jdk-21.0.8" : "",
+    process.env.JAVA_HOME || ""
+  ].filter(Boolean);
+  for (const candidate of [...new Set(candidates)]) {
+    const java = path.join(candidate, "bin", process.platform === "win32" ? "java.exe" : "java");
+    if (!fs.existsSync(java)) continue;
+    const result = spawnSync(java, ["-version"], { encoding: "utf8" });
+    const versionOutput = `${result.stdout || ""}\n${result.stderr || ""}`;
+    if (result.status === 0 && /version\s+"21(?:\.|\")/.test(versionOutput)) {
+      return candidate;
+    }
+  }
+  assert.fail("JDK 21 is required for Android security verification");
+}
+
+function run(command, args, options = {}) {
+  const result = spawnSync(command, args, { cwd: options.cwd || projectDir, env: options.env || process.env, encoding: "utf8" });
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
   if (result.error) throw result.error;
   assert.equal(result.status, 0, `${command} failed with exit code ${result.status}`);
+  return result;
 }

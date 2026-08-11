@@ -3,7 +3,8 @@ param(
   [switch]$NoSync,
   $VersionCode = $null,
   [AllowEmptyString()][string]$VersionName = "",
-  [switch]$LocalOnly
+  [switch]$LocalOnly,
+  [switch]$IdentityOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,7 +13,9 @@ $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AndroidDir = Join-Path $ProjectDir "android"
 $ApkPath = Join-Path $AndroidDir "app\build\outputs\apk\debug\app-debug.apk"
 $LocalOnlyMarkerPath = "$ApkPath.local-only.json"
+$LocalOnlyGuardPath = Join-Path $AndroidDir "app\build\outputs\apk\app-debug.local-only.guard.json"
 $PublishModule = Join-Path $ProjectDir "scripts\FanHaoAndroidPublish.psm1"
+$VersionContractPath = Join-Path $ProjectDir "version.json"
 $VersionCodeWasSpecified = $PSBoundParameters.ContainsKey("VersionCode")
 $VersionNameWasSpecified = $PSBoundParameters.ContainsKey("VersionName")
 Import-Module -Name $PublishModule -Force
@@ -20,7 +23,9 @@ Import-Module -Name $PublishModule -Force
 if ($Install -and $LocalOnly) {
   throw "-LocalOnly is restricted to non-installing local builds and cannot be combined with -Install."
 }
-
+if ($Install -and $IdentityOnly) {
+  throw "-IdentityOnly is a non-installing policy probe and cannot be combined with -Install."
+}
 $Jdk21Candidates = @(
   "C:\Program Files\Android\openjdk\jdk-21.0.8",
   $env:JAVA_HOME,
@@ -91,13 +96,25 @@ function Resolve-VersionCode {
   if ($env:FANHAO_VERSION_CODE) {
     return $env:FANHAO_VERSION_CODE
   }
-  return 1
+  return $VersionContract.CurrentVersionCode
 }
 
 function Resolve-VersionName {
   if ($VersionNameWasSpecified) { return $VersionName }
   if ($null -ne $env:FANHAO_VERSION_NAME) { return $env:FANHAO_VERSION_NAME }
-  return "1.0"
+  if (-not $VersionCodeWasSpecified -and [string]::IsNullOrWhiteSpace($env:FANHAO_VERSION_CODE)) {
+    return $VersionContract.DefaultVersionName
+  }
+  return "0.1.$(Resolve-VersionCode)-debug"
+}
+
+$VersionContract = Read-FanHaoVersionContract -Path $VersionContractPath
+$BuildIdentity = Resolve-FanHaoBuildIdentity -VersionCode (Resolve-VersionCode) -VersionName (Resolve-VersionName) -LocalOnly:$LocalOnly
+$ResolvedVersionCode = $BuildIdentity.VersionCode
+$ResolvedVersionName = $BuildIdentity.VersionName
+if ($Install) { $null = Assert-FanHaoInstallIdentity -Identity $BuildIdentity -VersionContract $VersionContract }
+if ($IdentityOnly) {
+  return $BuildIdentity
 }
 
 Use-Java21
@@ -105,9 +122,6 @@ $AndroidSdkRoot = Get-FanHaoAndroidSdkRoot
 $env:ANDROID_HOME = $AndroidSdkRoot
 $env:ANDROID_SDK_ROOT = $AndroidSdkRoot
 Write-Host "Using Android SDK: $AndroidSdkRoot"
-$BuildIdentity = Resolve-FanHaoBuildIdentity -VersionCode (Resolve-VersionCode) -VersionName (Resolve-VersionName) -LocalOnly:$LocalOnly
-$ResolvedVersionCode = $BuildIdentity.VersionCode
-$ResolvedVersionName = $BuildIdentity.VersionName
 
 $resolvedAndroidDir = [IO.Path]::GetFullPath($AndroidDir).TrimEnd('\') + '\'
 $resolvedApkPath = [IO.Path]::GetFullPath($ApkPath)
@@ -119,10 +133,11 @@ if (Test-Path -LiteralPath $resolvedApkPath) {
 }
 $resolvedMarkerPath = [IO.Path]::GetFullPath($LocalOnlyMarkerPath)
 if (-not $resolvedMarkerPath.StartsWith($resolvedAndroidDir, [StringComparison]::OrdinalIgnoreCase)) {
-  throw "Refusing to remove a marker outside the Android build directory: $resolvedMarkerPath"
+  throw "Refusing to use a marker outside the Android build directory: $resolvedMarkerPath"
 }
-if (Test-Path -LiteralPath $resolvedMarkerPath) {
-  Remove-Item -LiteralPath $resolvedMarkerPath -Force
+$resolvedGuardPath = [IO.Path]::GetFullPath($LocalOnlyGuardPath)
+if (-not $resolvedGuardPath.StartsWith($resolvedAndroidDir, [StringComparison]::OrdinalIgnoreCase)) {
+  throw "Refusing to use a local-only guard outside the Android build directory: $resolvedGuardPath"
 }
 
 if (-not $NoSync) {
@@ -143,6 +158,7 @@ try {
     "-PfanhaoVersionCode=$ResolvedVersionCode",
     "-PfanhaoVersionName=$ResolvedVersionName"
   )
+  if ($LocalOnly) { $gradleArgs += "-PfanhaoLocalOnly=true" }
   .\gradlew.bat @gradleArgs
   Assert-NativeSucceeded "Gradle assembleDebug failed"
 } finally {
@@ -159,7 +175,10 @@ Write-Host "APK identity verified: $($ActualIdentity.PackageName) $($ActualIdent
 
 if ($LocalOnly) {
   $markerPath = Write-FanHaoLocalOnlyMarker -ApkPath $ApkPath -Identity $ActualIdentity
+  if (Test-Path -LiteralPath $LocalOnlyGuardPath) { Remove-Item -LiteralPath $LocalOnlyGuardPath -Force }
   Write-Warning "Local-only APK marker written: $markerPath. This artifact cannot be published."
+} elseif ((Test-Path -LiteralPath $LocalOnlyMarkerPath) -or (Test-Path -LiteralPath $LocalOnlyGuardPath)) {
+  throw "Publishable APK retained a local-only marker or guard after Gradle verification."
 }
 
 if ($Install) {

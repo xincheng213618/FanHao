@@ -13,13 +13,55 @@ $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoDir = Split-Path -Parent $ProjectDir
 $BuildScript = Join-Path $ProjectDir "build-debug.ps1"
 $PublishModule = Join-Path $ProjectDir "scripts\FanHaoAndroidPublish.psm1"
+$VersionContractPath = Join-Path $ProjectDir "version.json"
 $ApkPath = Join-Path $ProjectDir "android\app\build\outputs\apk\debug\app-debug.apk"
 $LocalOnlyMarkerPath = "$ApkPath.local-only.json"
+$LocalOnlyGuardPath = Join-Path $ProjectDir "android\app\build\outputs\apk\app-debug.local-only.guard.json"
 $VersionCodeWasSpecified = $PSBoundParameters.ContainsKey("VersionCode")
 $VersionNameWasSpecified = $PSBoundParameters.ContainsKey("VersionName")
 
 Import-Module -Name $PublishModule -Force
 
+function Get-PublishAdbPath {
+  $sdkAdb = Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe"
+  if (Test-Path -LiteralPath $sdkAdb) { return $sdkAdb }
+  return "adb"
+}
+
+function Assert-AuthorizedPublishDevice {
+  param([string[]]$ExpectedSerials = @())
+
+  $adb = Get-PublishAdbPath
+  $savedErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $deviceOutput = @(& $adb devices -l 2>&1)
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedErrorActionPreference
+  }
+  if ($exitCode -ne 0) {
+    throw "ADB device query failed; refusing to publish (exit $exitCode)."
+  }
+  $authorizedSerials = @($deviceOutput | ForEach-Object {
+    if ($_.ToString() -match '^(?<serial>\S+)\s+device(?:\s|$)') { $Matches.serial }
+  } | Sort-Object -Unique)
+  if ($authorizedSerials.Count -eq 0) {
+    throw "No authorized Android device is visible; refusing to publish."
+  }
+  if ($ExpectedSerials.Count -gt 0) {
+    $expected = @($ExpectedSerials | Sort-Object -Unique)
+    if (($expected -join "`n") -cne ($authorizedSerials -join "`n")) {
+      throw "The authorized ADB device set changed during the publish build; refusing to commit."
+    }
+  }
+  Write-Host "ADB publish preflight: $($authorizedSerials.Count) authorized device(s) visible; no APK will be installed by the publish command."
+  return $authorizedSerials
+}
+
+if ($Install) {
+  throw "publish-debug-update.ps1 does not install a newly selected identity. Publish first, then raise version.json in a reviewed commit before using install:debug."
+}
 if ($VersionNameWasSpecified -and [string]::IsNullOrWhiteSpace($VersionName)) {
   throw "Explicit versionName must be non-empty after trimming."
 }
@@ -52,18 +94,19 @@ try {
     -TargetApkPath $ApkPath `
     -HasRequestedVersionCode $VersionCodeWasSpecified `
     -RequestedVersionCode $requestedCode `
-    -RequestedVersionName $requestedName
+    -RequestedVersionName $requestedName `
+    -VersionContractPath $VersionContractPath
 
   Write-Host "Android debug publish high-water mark: $($plan.HistoryMaximum)"
   Write-Host "Selected publish identity: $($plan.VersionCode) / $($plan.VersionName)"
   if ($PlanOnly) { return $plan }
 
+  $authorizedDeviceSerials = @(Assert-AuthorizedPublishDevice)
+
   $buildArgs = @{
     VersionCode = $plan.VersionCode
     VersionName = $plan.VersionName
   }
-  if ($Install) { $buildArgs.Install = $true }
-
   & $BuildScript @buildArgs
   if ($LASTEXITCODE -ne 0) {
     throw "Android debug build failed (exit $LASTEXITCODE)"
@@ -71,8 +114,8 @@ try {
   if (-not (Test-Path -LiteralPath $ApkPath)) {
     throw "APK was not produced: $ApkPath"
   }
-  if (Test-Path -LiteralPath $LocalOnlyMarkerPath) {
-    throw "The built APK is marked local-only and cannot be published: $LocalOnlyMarkerPath"
+  if ((Test-Path -LiteralPath $LocalOnlyMarkerPath) -or (Test-Path -LiteralPath $LocalOnlyGuardPath)) {
+    throw "The built APK is marked or guarded local-only and cannot be published."
   }
 
   $historyOnlyTarget = "$ApkPath.publish-history-excluded-$([Guid]::NewGuid().ToString('N'))"
@@ -81,18 +124,27 @@ try {
     -TargetApkPath $historyOnlyTarget `
     -HasRequestedVersionCode $true `
     -RequestedVersionCode $plan.VersionCode `
-    -RequestedVersionName $plan.VersionName
+    -RequestedVersionName $plan.VersionName `
+    -VersionContractPath $VersionContractPath
   if ($preCommitPlan.VersionCode -ne $plan.VersionCode -or $preCommitPlan.VersionName -cne $plan.VersionName) {
     throw "Android publish identity changed during the build; refusing to commit."
   }
+  $null = Assert-AuthorizedPublishDevice -ExpectedSerials $authorizedDeviceSerials
 
   $noteList = if ($Notes) { @($Notes) } else { @() }
+  $commitDeviceGate = {
+    param($CurrentStage)
+    if ($CurrentStage -eq "BeforeManifestCommit") {
+      $null = Assert-AuthorizedPublishDevice -ExpectedSerials $authorizedDeviceSerials
+    }
+  }.GetNewClosure()
   $published = Publish-FanHaoDebugArtifact `
     -SourceApkPath $ApkPath `
     -UpdateDir $UpdateDir `
     -VersionCode $plan.VersionCode `
     -VersionName $plan.VersionName `
-    -Notes $noteList
+    -Notes $noteList `
+    -CommitHook $commitDeviceGate
 
   Write-Host "Debug update published atomically:"
   Write-Host "  APK: $($published.ApkPath)"

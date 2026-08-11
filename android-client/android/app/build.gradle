@@ -1,7 +1,100 @@
+import groovy.json.JsonSlurper
+import groovy.json.JsonSlurperClassic
+import groovy.json.JsonOutput
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+
 apply plugin: 'com.android.application'
 
-def fanhaoVersionCode = (project.findProperty("fanhaoVersionCode") ?: System.getenv("FANHAO_VERSION_CODE") ?: "1") as Integer
-def fanhaoVersionName = (project.findProperty("fanhaoVersionName") ?: System.getenv("FANHAO_VERSION_NAME") ?: "1.0").toString()
+def versionContractFile = file("../../version.json")
+def isJsonInteger = { value -> value instanceof Integer || value instanceof Long || value instanceof BigInteger }
+def requireExactContractInteger = { value, label, maximum ->
+    if (!isJsonInteger(value)) {
+        throw new GradleException("${label} must be a JSON integer")
+    }
+    def exact = new BigInteger(value.toString())
+    def exactMaximum = new BigInteger(maximum.toString())
+    if (exact < BigInteger.ONE || exact > exactMaximum) {
+        throw new GradleException("${label} must be between 1 and ${exactMaximum}")
+    }
+    return exact.longValueExact()
+}
+def readVersionContract = { contractFileValue ->
+    File contractFile = contractFileValue as File
+    if (!contractFile.isFile()) {
+        throw new GradleException("Android version contract is missing: ${contractFile}")
+    }
+    def parsed = new JsonSlurperClassic().parse(contractFile)
+    def schemaVersion = requireExactContractInteger(parsed.schemaVersion, "Android version contract schemaVersion", 1)
+    if (schemaVersion != 1L || parsed.packageName != "local.fanhao.library" || parsed.channel != "debug") {
+        throw new GradleException("Android version contract schema/package/channel is invalid: ${contractFile}")
+    }
+    def currentVersionCode = requireExactContractInteger(parsed.currentVersionCode, "Android version contract currentVersionCode", 99999999)
+    def highWaterVersionCode = requireExactContractInteger(parsed.highWaterVersionCode, "Android version contract highWaterVersionCode", 99999999)
+    if (currentVersionCode != highWaterVersionCode) {
+        throw new GradleException("Android version contract current/high-water values must advance together: ${contractFile}")
+    }
+    if (!(parsed.defaultVersionName instanceof String) || parsed.defaultVersionName.trim().isEmpty() || parsed.defaultVersionName != parsed.defaultVersionName.trim()) {
+        throw new GradleException("Android version contract default versionName is invalid: ${contractFile}")
+    }
+    return [
+        currentVersionCode: currentVersionCode,
+        highWaterVersionCode: highWaterVersionCode,
+        defaultVersionName: parsed.defaultVersionName
+    ]
+}
+def versionContract = readVersionContract(versionContractFile)
+def contractVersionCode = versionContract.currentVersionCode
+def contractHighWater = versionContract.highWaterVersionCode
+
+def parseVersionCode = { rawValue, label ->
+    def text = rawValue.toString()
+    if (!(text ==~ /[0-9]+/)) {
+        throw new GradleException("${label} must be a positive integer")
+    }
+    long parsed
+    try {
+        parsed = Long.parseLong(text)
+    } catch (NumberFormatException error) {
+        throw new GradleException("${label} is outside the supported integer range", error)
+    }
+    if (parsed < 1L || parsed > 2100000000L) {
+        throw new GradleException("${label} must be between 1 and 2100000000")
+    }
+    return parsed.intValue()
+}
+
+def propertyVersionCode = project.findProperty("fanhaoVersionCode")
+def environmentVersionCode = System.getenv("FANHAO_VERSION_CODE")
+def rawVersionCode = propertyVersionCode != null ? propertyVersionCode : (environmentVersionCode != null ? environmentVersionCode : contractVersionCode)
+def fanhaoVersionCode = parseVersionCode(rawVersionCode, "fanhaoVersionCode")
+
+def localOnlyProperty = project.findProperty("fanhaoLocalOnly")
+if (localOnlyProperty != null && localOnlyProperty.toString() != "true" && localOnlyProperty.toString() != "false") {
+    throw new GradleException("fanhaoLocalOnly must be exactly true or false")
+}
+def fanhaoLocalOnly = localOnlyProperty != null && localOnlyProperty.toString() == "true"
+def validateVersionNamespace = { codeValue, localOnlyValue ->
+    def code = codeValue.toString().toLong()
+    def localOnly = localOnlyValue == true
+    if (localOnly && (code < 100000000 || code > 2100000000)) {
+        throw new GradleException("local-only fanhaoVersionCode must be between 100000000 and 2100000000")
+    }
+    if (!localOnly && code > 99999999) {
+        throw new GradleException("fanhaoVersionCode above 99999999 requires the explicit fanhaoLocalOnly=true build path")
+    }
+    return code
+}
+validateVersionNamespace(fanhaoVersionCode, fanhaoLocalOnly)
+
+def propertyVersionName = project.findProperty("fanhaoVersionName")
+def environmentVersionName = System.getenv("FANHAO_VERSION_NAME")
+def rawVersionName = propertyVersionName != null ? propertyVersionName : (environmentVersionName != null ? environmentVersionName : versionContract.defaultVersionName)
+def fanhaoVersionName = rawVersionName.toString().trim()
+if (fanhaoVersionName.isEmpty()) {
+    throw new GradleException("fanhaoVersionName must be non-empty after trimming")
+}
 
 android {
     namespace = "local.fanhao.library"
@@ -23,6 +116,140 @@ android {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
+    }
+}
+
+def localOnlyMarker = file("${buildDir}/outputs/apk/debug/app-debug.apk.local-only.json")
+def localOnlyGuard = file("${buildDir}/outputs/apk/app-debug.local-only.guard.json")
+def updatePendingLocalOnlyMarker = { markerValue, enabledValue, codeValue, nameValue, simulateFailureValue ->
+    File marker = markerValue as File
+    def enabled = enabledValue == true
+    def simulateFailure = simulateFailureValue == true
+    if (!enabled) {
+        if (marker.exists() && !marker.delete()) {
+            throw new GradleException("Could not clear stale local-only APK marker: ${marker}")
+        }
+        return
+    }
+
+    marker.parentFile.mkdirs()
+    def temporaryMarker = new File(marker.parentFile, ".${marker.name}.${UUID.randomUUID()}.tmp")
+    try {
+        temporaryMarker.setText(JsonOutput.toJson([
+            kind: "fanhao-debug-local-only-pending",
+            versionCode: codeValue,
+            versionName: nameValue
+        ]) + System.lineSeparator(), "UTF-8")
+        if (simulateFailure) throw new GradleException("simulated pending marker failure")
+        try {
+            Files.move(temporaryMarker.toPath(), marker.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } catch (AtomicMoveNotSupportedException ignored) {
+            Files.move(temporaryMarker.toPath(), marker.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
+    } finally {
+        if (temporaryMarker.exists()) temporaryMarker.delete()
+    }
+}
+
+tasks.configureEach { candidate ->
+    if (candidate.name == "packageDebug") {
+        candidate.outputs.upToDateWhen { !fanhaoLocalOnly }
+        candidate.doFirst {
+            if (fanhaoLocalOnly) {
+                updatePendingLocalOnlyMarker(localOnlyGuard, true, fanhaoVersionCode, fanhaoVersionName, false)
+            }
+        }
+        candidate.doLast {
+            if (fanhaoLocalOnly) {
+                updatePendingLocalOnlyMarker(localOnlyMarker, true, fanhaoVersionCode, fanhaoVersionName, false)
+            } else {
+                updatePendingLocalOnlyMarker(localOnlyMarker, false, fanhaoVersionCode, fanhaoVersionName, false)
+                updatePendingLocalOnlyMarker(localOnlyGuard, false, fanhaoVersionCode, fanhaoVersionName, false)
+            }
+        }
+    }
+    if (candidate.name == "assembleDebug") {
+        candidate.outputs.upToDateWhen { false }
+        candidate.doLast {
+            if (fanhaoLocalOnly && (!localOnlyMarker.isFile() || !localOnlyGuard.isFile())) {
+                throw new GradleException("Local-only assembleDebug completed without its pending marker/guard: ${localOnlyMarker}")
+            }
+            if (!fanhaoLocalOnly) {
+                updatePendingLocalOnlyMarker(localOnlyMarker, false, fanhaoVersionCode, fanhaoVersionName, false)
+                updatePendingLocalOnlyMarker(localOnlyGuard, false, fanhaoVersionCode, fanhaoVersionName, false)
+            }
+        }
+    }
+}
+
+tasks.register("verifyFanHaoVersionPolicy") {
+    group = "verification"
+    description = "Exercises the Android publishable/local-only version namespace boundary."
+    doLast {
+        validateVersionNamespace(99999999, false)
+        validateVersionNamespace(100000000, true)
+        validateVersionNamespace(2100000000, true)
+
+        def expectRejected = { Closure action, String label ->
+            boolean rejected = false
+            try {
+                action.call()
+            } catch (GradleException ignored) {
+                rejected = true
+            }
+            if (!rejected) throw new GradleException("version policy fixture did not reject ${label}")
+        }
+        expectRejected({ validateVersionNamespace(100000000, false) }, "unmarked high versionCode")
+        expectRejected({ validateVersionNamespace(99999999, true) }, "local-only code below its namespace")
+        expectRejected({ validateVersionNamespace(2100000001L, true) }, "local-only code above Android's ceiling")
+
+        def fixtureDir = file("${buildDir}/tmp/fanhao-version-policy-fixture")
+        fixtureDir.mkdirs()
+        def fixtureMarker = new File(fixtureDir, "app-debug.apk.local-only.json")
+        try {
+            updatePendingLocalOnlyMarker(fixtureMarker, true, 100000000, "local-fixture", false)
+            if (!fixtureMarker.isFile()) throw new GradleException("local-only marker fixture was not generated")
+            def pending = new JsonSlurper().parse(fixtureMarker)
+            if (pending.kind != "fanhao-debug-local-only-pending" || pending.versionCode != 100000000) {
+                throw new GradleException("local-only marker fixture identity is invalid")
+            }
+
+            def markerBeforeFailure = fixtureMarker.text
+            boolean simulatedFailureObserved = false
+            try {
+                updatePendingLocalOnlyMarker(fixtureMarker, true, 100000000, "failure-fixture", true)
+            } catch (GradleException expected) {
+                simulatedFailureObserved = expected.message == "simulated pending marker failure"
+            }
+            if (!simulatedFailureObserved || !fixtureMarker.isFile() || fixtureMarker.text != markerBeforeFailure || fixtureDir.listFiles().any { it.name.endsWith(".tmp") }) {
+                throw new GradleException("failed local-only marker replacement did not preserve the prior fail-closed marker")
+            }
+
+            updatePendingLocalOnlyMarker(fixtureMarker, false, 99999999, "publishable-fixture", false)
+            if (fixtureMarker.exists()) throw new GradleException("publishable marker fixture was not cleared after success")
+
+            def hugeContract = new File(fixtureDir, "huge-version.json")
+            hugeContract.setText('''{
+  "schemaVersion": 18446744073709551617,
+  "packageName": "local.fanhao.library",
+  "channel": "debug",
+  "currentVersionCode": 18446744073735632806,
+  "highWaterVersionCode": 18446744073735632806,
+  "defaultVersionName": "0.1.26081190-debug"
+}
+''', "UTF-8")
+            boolean hugeContractRejected = false
+            try {
+                readVersionContract(hugeContract)
+            } catch (GradleException expected) {
+                hugeContractRejected = true
+            }
+            if (!hugeContractRejected) throw new GradleException("huge JSON integers bypassed the exact contract bounds")
+        } finally {
+            fixtureDir.listFiles()?.each { it.delete() }
+            fixtureDir.delete()
+        }
+        logger.lifecycle("fanhao-gradle-version-policy: 10 boundary, marker, and contract checks passed")
     }
 }
 

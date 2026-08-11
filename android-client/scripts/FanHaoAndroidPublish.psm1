@@ -5,11 +5,47 @@ $script:FanHaoDebugSignerSha256 = "73ad0fa9e2d96b33e0cfc7fb1e69d3e4a6fb73cb8fe58
 $script:FanHaoAndroidVersionCodeMaximum = 2100000000L
 $script:FanHaoPublishVersionCodeMaximum = 99999999L
 $script:FanHaoMaximumApkBytes = 536870912L
+$script:FanHaoDefaultVersionContractPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\version.json"))
 
 function Get-FanHaoAndroidVersionLimits {
   [pscustomobject]@{
     AndroidMaximum = $script:FanHaoAndroidVersionCodeMaximum
     PublishMaximum = $script:FanHaoPublishVersionCodeMaximum
+  }
+}
+
+function Read-FanHaoVersionContract {
+  param([string]$Path = $script:FanHaoDefaultVersionContractPath)
+
+  $resolvedPath = [IO.Path]::GetFullPath($Path)
+  $contract = Read-FanHaoJsonObject -Path $resolvedPath -Label "Android version contract"
+  $schemaVersion = ConvertTo-FanHaoStrictInteger -Value (Get-FanHaoRequiredProperty -Object $contract -Name "schemaVersion" -Label "Android version contract") -Label "Android version contract schemaVersion" -Maximum 1
+  if ($schemaVersion -ne 1) {
+    throw "Android version contract schemaVersion must be 1: $resolvedPath"
+  }
+  $packageName = Get-FanHaoRequiredProperty -Object $contract -Name "packageName" -Label "Android version contract"
+  if ($packageName -isnot [string] -or $packageName -cne $script:FanHaoPackageName) {
+    throw "Android version contract packageName must be '$script:FanHaoPackageName': $resolvedPath"
+  }
+  $channel = Get-FanHaoRequiredProperty -Object $contract -Name "channel" -Label "Android version contract"
+  if ($channel -isnot [string] -or $channel -cne "debug") {
+    throw "Android version contract channel must be 'debug': $resolvedPath"
+  }
+  $currentVersionCode = ConvertTo-FanHaoStrictInteger -Value (Get-FanHaoRequiredProperty -Object $contract -Name "currentVersionCode" -Label "Android version contract") -Label "Android version contract currentVersionCode" -Maximum $script:FanHaoPublishVersionCodeMaximum
+  $highWaterVersionCode = ConvertTo-FanHaoStrictInteger -Value (Get-FanHaoRequiredProperty -Object $contract -Name "highWaterVersionCode" -Label "Android version contract") -Label "Android version contract highWaterVersionCode" -Maximum $script:FanHaoPublishVersionCodeMaximum
+  if ($currentVersionCode -ne $highWaterVersionCode) {
+    throw "Android version contract currentVersionCode and highWaterVersionCode must advance together: $resolvedPath"
+  }
+  $defaultVersionName = ConvertTo-FanHaoVersionName -Value (Get-FanHaoRequiredProperty -Object $contract -Name "defaultVersionName" -Label "Android version contract") -Label "Android version contract defaultVersionName" -RequireCanonical
+
+  [pscustomobject]@{
+    Path = $resolvedPath
+    SchemaVersion = $schemaVersion
+    PackageName = $packageName
+    Channel = $channel
+    CurrentVersionCode = $currentVersionCode
+    HighWaterVersionCode = $highWaterVersionCode
+    DefaultVersionName = $defaultVersionName
   }
 }
 
@@ -137,6 +173,22 @@ function Resolve-FanHaoBuildIdentity {
   }
 }
 
+function Assert-FanHaoInstallIdentity {
+  param(
+    [Parameter(Mandatory = $true)]$Identity,
+    [Parameter(Mandatory = $true)]$VersionContract
+  )
+
+  $versionCode = ConvertTo-FanHaoStrictInteger -Value (Get-FanHaoRequiredProperty -Object $Identity -Name "VersionCode" -Label "install identity") -Label "install versionCode" -Maximum $script:FanHaoPublishVersionCodeMaximum
+  $versionName = ConvertTo-FanHaoVersionName -Value (Get-FanHaoRequiredProperty -Object $Identity -Name "VersionName" -Label "install identity") -Label "install versionName" -RequireCanonical
+  $contractCode = ConvertTo-FanHaoStrictInteger -Value (Get-FanHaoRequiredProperty -Object $VersionContract -Name "CurrentVersionCode" -Label "Android version contract") -Label "Android version contract currentVersionCode" -Maximum $script:FanHaoPublishVersionCodeMaximum
+  $contractName = ConvertTo-FanHaoVersionName -Value (Get-FanHaoRequiredProperty -Object $VersionContract -Name "DefaultVersionName" -Label "Android version contract") -Label "Android version contract defaultVersionName" -RequireCanonical
+  if ($versionCode -ne $contractCode -or $versionName -cne $contractName) {
+    throw "-Install requires the tracked Android version contract identity $contractCode / $contractName. Update version.json in a reviewed commit before installing a newer identity."
+  }
+  return $Identity
+}
+
 function Assert-FanHaoDebugApkIdentity {
   param(
     [Parameter(Mandatory = $true)]$Identity,
@@ -194,7 +246,8 @@ function Get-FanHaoDebugPublishPlan {
     $RequestedVersionCode = 0,
     [AllowNull()][string]$RequestedVersionName = $null,
     [long]$DateBase = [long](Get-Date -Format "yyMMdd00"),
-    [scriptblock]$ApkInspector = $null
+    [scriptblock]$ApkInspector = $null,
+    [string]$VersionContractPath = $script:FanHaoDefaultVersionContractPath
   )
 
   if ($HasRequestedVersionCode) {
@@ -208,6 +261,11 @@ function Get-FanHaoDebugPublishPlan {
   }
 
   $history = New-Object System.Collections.Generic.List[object]
+  $versionContract = Read-FanHaoVersionContract -Path $VersionContractPath
+  $history.Add([pscustomobject]@{
+    Source = $versionContract.Path
+    VersionCode = $versionContract.HighWaterVersionCode
+  })
   $resolvedPublishRoot = [IO.Path]::GetFullPath($PublishRoot)
   if (Test-Path -LiteralPath $resolvedPublishRoot) {
     Assert-FanHaoDirectory -Path $resolvedPublishRoot -Label "publish root"
@@ -245,20 +303,15 @@ function Get-FanHaoDebugPublishPlan {
     }
   }
 
-  $localOnlyMarkerPath = "$TargetApkPath.local-only.json"
-  if (Test-Path -LiteralPath $localOnlyMarkerPath) {
-    if (-not (Test-Path -LiteralPath $TargetApkPath)) {
-      throw "Local-only APK marker is stale because the target APK is missing: $localOnlyMarkerPath"
-    }
-    Assert-FanHaoLocalOnlyMarker -MarkerPath $localOnlyMarkerPath -ApkPath $TargetApkPath -ApkInspector $ApkInspector
-    throw "Target APK is explicitly marked local-only and cannot enter the publish chain. Rebuild it without -LocalOnly."
-  }
-  if (Test-Path -LiteralPath $TargetApkPath) {
-    $targetIdentity = Assert-FanHaoDebugApkIdentity -Identity (& $ApkInspector $TargetApkPath)
-    if ($targetIdentity.VersionCode -gt $script:FanHaoPublishVersionCodeMaximum) {
-      throw "Target APK versionCode exceeds the project publish ceiling: $($targetIdentity.VersionCode)"
-    }
-    $history.Add([pscustomobject]@{ Source = [IO.Path]::GetFullPath($TargetApkPath); VersionCode = $targetIdentity.VersionCode })
+  # app-debug.apk is scratch output. It may be absent, stale, malformed, or marked
+  # local-only, so it is deliberately excluded from the durable publish history.
+  # The freshly built APK is verified against the selected identity before commit.
+  $targetState = if (Test-Path -LiteralPath "$TargetApkPath.local-only.json") {
+    "ignored-local-only-output"
+  } elseif (Test-Path -LiteralPath $TargetApkPath) {
+    "ignored-build-output"
+  } else {
+    "missing-build-output"
   }
 
   $historyMaximum = 0L
@@ -293,6 +346,8 @@ function Get-FanHaoDebugPublishPlan {
     HistoryMaximum = $historyMaximum
     History = $history.ToArray()
     PublishMaximum = $script:FanHaoPublishVersionCodeMaximum
+    VersionContract = $versionContract
+    TargetState = $targetState
   }
 }
 
@@ -472,6 +527,7 @@ function Write-FanHaoLocalOnlyMarker {
   }
   $markerPath = "$ApkPath.local-only.json"
   $temporaryPath = "$markerPath.$([Guid]::NewGuid().ToString('N')).tmp"
+  $backupPath = "$markerPath.$([Guid]::NewGuid().ToString('N')).bak"
   $utf8NoBom = New-Object Text.UTF8Encoding($false)
   try {
     [IO.File]::WriteAllText($temporaryPath, "$(($marker | ConvertTo-Json -Depth 4))`n", $utf8NoBom)
@@ -479,10 +535,14 @@ function Write-FanHaoLocalOnlyMarker {
     if ((Get-FanHaoRequiredProperty -Object $roundTrip -Name "kind" -Label "local-only marker") -ne "fanhao-debug-local-only") {
       throw "Local-only marker round-trip validation failed."
     }
-    if (Test-Path -LiteralPath $markerPath) { Remove-Item -LiteralPath $markerPath -Force }
-    [IO.File]::Move($temporaryPath, $markerPath)
+    if (Test-Path -LiteralPath $markerPath) {
+      [IO.File]::Replace($temporaryPath, $markerPath, $backupPath, $true)
+    } else {
+      [IO.File]::Move($temporaryPath, $markerPath)
+    }
   } finally {
     if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force }
+    if (Test-Path -LiteralPath $backupPath) { Remove-Item -LiteralPath $backupPath -Force }
   }
   return $markerPath
 }
@@ -712,9 +772,11 @@ function Assert-FanHaoDirectory {
 
 Export-ModuleMember -Function @(
   "Get-FanHaoAndroidVersionLimits",
+  "Read-FanHaoVersionContract",
   "Get-FanHaoAndroidSdkRoot",
   "Get-FanHaoApkIdentity",
   "Resolve-FanHaoBuildIdentity",
+  "Assert-FanHaoInstallIdentity",
   "Assert-FanHaoDebugApkIdentity",
   "Get-FanHaoDebugPublishPlan",
   "Publish-FanHaoDebugArtifact",

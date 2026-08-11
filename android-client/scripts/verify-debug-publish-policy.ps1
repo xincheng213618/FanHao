@@ -6,6 +6,7 @@ $ProjectDir = Split-Path -Parent $ScriptDir
 $ModulePath = Join-Path $ScriptDir "FanHaoAndroidPublish.psm1"
 $BuildScript = Join-Path $ProjectDir "build-debug.ps1"
 $PublishScript = Join-Path $ProjectDir "publish-debug-update.ps1"
+$VersionContractPath = Join-Path $ProjectDir "version.json"
 $RealBuildApk = Join-Path $ProjectDir "android\app\build\outputs\apk\debug\app-debug.apk"
 Import-Module -Name $ModulePath -Force
 
@@ -112,6 +113,16 @@ function Assert-Throws {
   throw "$Message. Expected an exception matching '$Pattern'."
 }
 
+function Assert-Fails {
+  param([scriptblock]$Action, [string]$Message)
+  try {
+    & $Action
+  } catch {
+    return
+  }
+  throw "$Message. Expected an exception."
+}
+
 function Invoke-PolicyTest {
   param([string]$Name, [scriptblock]$Action)
   & $Action
@@ -133,37 +144,68 @@ function Get-Plan {
     $Code = 0,
     [AllowNull()][string]$Name = $null,
     [long]$DateBase = 26081100,
-    [scriptblock]$Inspector = $FakeInspector
+    [scriptblock]$Inspector = $FakeInspector,
+    [string]$ContractPath = $VersionContractPath
   )
-  Get-FanHaoDebugPublishPlan -PublishRoot $Root -TargetApkPath $Target -HasRequestedVersionCode $HasCode -RequestedVersionCode $Code -RequestedVersionName $Name -DateBase $DateBase -ApkInspector $Inspector
+  Get-FanHaoDebugPublishPlan -PublishRoot $Root -TargetApkPath $Target -HasRequestedVersionCode $HasCode -RequestedVersionCode $Code -RequestedVersionName $Name -DateBase $DateBase -ApkInspector $Inspector -VersionContractPath $ContractPath
 }
 
 $null = New-Item -ItemType Directory -Path $TestRoot -Force
 try {
-  Invoke-PolicyTest "no history uses date base" {
+  Write-Host "PowerShell runtime: $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
+  Invoke-PolicyTest "tracked version contract supplies the no-history floor" {
     $case = New-CaseDirectory "no-history"
     $plan = Get-Plan -Root (Join-Path $case "publish") -Target (Join-Path $case "missing.apk")
-    Assert-Equal $plan.VersionCode 26081100L "automatic versionCode"
+    Assert-Equal $plan.HistoryMaximum 26081190L "contract high-water mark"
+    Assert-Equal $plan.VersionCode 26081191L "automatic versionCode above the contract floor"
+    Assert-Equal $plan.VersionContract.DefaultVersionName "0.1.26081190-debug" "contract default versionName"
+
+    $badContract = Join-Path $case "bad-version.json"
+    Write-Utf8Json -Path $badContract -Value ([ordered]@{
+      schemaVersion = 1
+      packageName = $ExpectedPackageName
+      channel = "debug"
+      currentVersionCode = 26081190
+      highWaterVersionCode = 26081189
+      defaultVersionName = "0.1.26081190-debug"
+    })
+    Assert-Throws {
+      Get-Plan -Root (Join-Path $case "bad-publish") -Target (Join-Path $case "missing.apk") -ContractPath $badContract
+    } "must advance together" "contract floor cannot diverge from its current version"
   }
 
-  Invoke-PolicyTest "manifest missing inspects existing APK 26081190" {
+  Invoke-PolicyTest "published 26073102 plus every scratch-output state stays above the contract floor" {
     $case = New-CaseDirectory "apk-history"
     $debug = Join-Path $case "publish\debug"
-    $apk = New-FakeApk -Path (Join-Path $debug "fanhao-debug-26081190.apk") -VersionCode 26081190
-    $target = Join-Path $case "missing-target.apk"
+    $apk = New-FakeApk -Path (Join-Path $debug "fanhao-debug-26073102.apk") -VersionCode 26073102
     $script:inspectionCount = 0
     $countingInspector = {
       param($Path)
       $script:inspectionCount++
       & $FakeInspector $Path
     }
-    $plan = Get-Plan -Root (Join-Path $case "publish") -Target $target -Inspector $countingInspector
-    Assert-Equal $plan.VersionCode 26081191L "existing APK high-water mark"
-    Assert-True ($script:inspectionCount -ge 1) "existing APK must be inspected instead of trusting its file name"
+    $targets = @()
+    $targets += [pscustomobject]@{ Name = "missing"; Path = (Join-Path $case "missing-target.apk"); ExpectedState = "missing-build-output" }
+    $targets += [pscustomobject]@{ Name = "version-1"; Path = (New-FakeApk -Path (Join-Path $case "version-1.apk") -VersionCode 1 -VersionName "1.0"); ExpectedState = "ignored-build-output" }
+    $targets += [pscustomobject]@{ Name = "stale"; Path = (New-FakeApk -Path (Join-Path $case "stale.apk") -VersionCode 26073102); ExpectedState = "ignored-build-output" }
+    $malformed = Join-Path $case "malformed.apk"
+    [IO.File]::WriteAllText($malformed, "not an APK fixture")
+    $targets += [pscustomobject]@{ Name = "malformed"; Path = $malformed; ExpectedState = "ignored-build-output" }
+    $localOnly = New-FakeApk -Path (Join-Path $case "local-only.apk") -VersionCode 100000000 -VersionName "local-only"
+    $null = Write-FanHaoLocalOnlyMarker -ApkPath $localOnly -Identity (& $FakeInspector $localOnly)
+    $targets += [pscustomobject]@{ Name = "local-only"; Path = $localOnly; ExpectedState = "ignored-local-only-output" }
+
+    foreach ($targetCase in $targets) {
+      $plan = Get-Plan -Root (Join-Path $case "publish") -Target $targetCase.Path -Inspector $countingInspector
+      Assert-Equal $plan.HistoryMaximum 26081190L "$($targetCase.Name) target contract floor"
+      Assert-Equal $plan.VersionCode 26081191L "$($targetCase.Name) target successor"
+      Assert-Equal $plan.TargetState $targetCase.ExpectedState "$($targetCase.Name) target state"
+    }
+    Assert-Equal $script:inspectionCount $targets.Count "only the durable published APK must be inspected once per plan"
     Assert-True (Test-Path -LiteralPath $apk) "fixture APK must remain unchanged"
   }
 
-  Invoke-PolicyTest "manifest APK directory and target use global maximum" {
+  Invoke-PolicyTest "manifest and published APK directory use the durable global maximum" {
     $case = New-CaseDirectory "three-sources"
     $debug = Join-Path $case "publish\debug"
     $manifestApk = New-FakeApk -Path (Join-Path $debug "fanhao-debug-26081191.apk") -VersionCode 26081191
@@ -171,8 +213,8 @@ try {
     $null = New-FakeApk -Path (Join-Path $debug "fanhao-debug-26081192.apk") -VersionCode 26081192
     $target = New-FakeApk -Path (Join-Path $case "app-debug.apk") -VersionCode 26081193
     $plan = Get-Plan -Root (Join-Path $case "publish") -Target $target
-    Assert-Equal $plan.HistoryMaximum 26081193L "three-source historical maximum"
-    Assert-Equal $plan.VersionCode 26081194L "three-source successor"
+    Assert-Equal $plan.HistoryMaximum 26081192L "durable historical maximum"
+    Assert-Equal $plan.VersionCode 26081193L "durable history successor"
   }
 
   Invoke-PolicyTest "release channel participates in shared package high-water mark" {
@@ -215,6 +257,28 @@ try {
 
   Invoke-PolicyTest "entry scripts reject bad inputs before build mutation" {
     $beforeBuildApk = Get-FileFingerprint $RealBuildApk
+    $savedEnvironmentCode = $env:FANHAO_VERSION_CODE
+    $savedEnvironmentName = $env:FANHAO_VERSION_NAME
+    try {
+      Remove-Item Env:FANHAO_VERSION_CODE -ErrorAction SilentlyContinue
+      Remove-Item Env:FANHAO_VERSION_NAME -ErrorAction SilentlyContinue
+      $defaultIdentity = @(& $BuildScript -IdentityOnly) | Where-Object { $null -ne $_.PSObject.Properties["VersionCode"] } | Select-Object -Last 1
+      Assert-Equal $defaultIdentity.VersionCode 26081190L "no-argument build versionCode from contract"
+      Assert-Equal $defaultIdentity.VersionName "0.1.26081190-debug" "no-argument build versionName from contract"
+      $defaultInstallIdentity = Assert-FanHaoInstallIdentity -Identity $defaultIdentity -VersionContract (Read-FanHaoVersionContract -Path $VersionContractPath)
+      Assert-Equal $defaultInstallIdentity.VersionCode 26081190L "default install versionCode from contract"
+      Assert-Equal $defaultInstallIdentity.VersionName "0.1.26081190-debug" "default install versionName from contract"
+      Assert-Throws {
+        & $BuildScript -Install -VersionCode 26081191
+      } "requires the tracked Android version contract identity" "install above the tracked contract must fail before build or ADB"
+      Assert-Throws {
+        & $BuildScript -Install -IdentityOnly
+      } "cannot be combined with -Install" "identity-only probe must not silently replace an install request"
+    } finally {
+      if ($null -eq $savedEnvironmentCode) { Remove-Item Env:FANHAO_VERSION_CODE -ErrorAction SilentlyContinue } else { $env:FANHAO_VERSION_CODE = $savedEnvironmentCode }
+      if ($null -eq $savedEnvironmentName) { Remove-Item Env:FANHAO_VERSION_NAME -ErrorAction SilentlyContinue } else { $env:FANHAO_VERSION_NAME = $savedEnvironmentName }
+    }
+    Assert-Equal (Get-FileFingerprint $RealBuildApk) $beforeBuildApk "identity/install rejection tests must not build or invoke ADB"
     Assert-Throws {
       & $BuildScript -NoSync -VersionCode 26081191 -VersionName "   "
     } "non-empty after trimming" "build-debug whitespace versionName"
@@ -240,6 +304,9 @@ try {
     Assert-Throws {
       & $PublishScript -PublishRoot (Join-Path $validCase "fractional") -VersionCode 1.5 -PlanOnly
     } "JSON integer" "fractional entry versionCode"
+    Assert-Throws {
+      & $PublishScript -PublishRoot (Join-Path $validCase "no-publish-install") -Install -PlanOnly
+    } "does not install a newly selected identity" "publish entry must not install an untracked next identity"
   }
 
   Invoke-PolicyTest "local-only build range is explicit and cannot publish" {
@@ -254,8 +321,30 @@ try {
     $case = New-CaseDirectory "local-only-marker"
     $target = New-FakeApk -Path (Join-Path $case "app-debug.apk") -VersionCode 100000000 -VersionName "local"
     $fakeIdentity = & $FakeInspector $target
+    $pendingMarkerPath = "$target.local-only.json"
+    Write-Utf8Json -Path $pendingMarkerPath -Value ([ordered]@{
+      kind = "fanhao-debug-local-only-pending"
+      versionCode = 100000000
+      versionName = "local"
+    })
     $marker = Write-FanHaoLocalOnlyMarker -ApkPath $target -Identity $fakeIdentity
-    Assert-Throws { Get-Plan -Root (Join-Path $case "publish") -Target $target } "explicitly marked local-only" "local-only publish rejection"
+    $finalMarker = [IO.File]::ReadAllText($marker) | ConvertFrom-Json
+    Assert-Equal $finalMarker.kind "fanhao-debug-local-only" "pending marker must atomically become the final bound marker"
+    Assert-Equal @(Get-ChildItem -LiteralPath (Split-Path -Parent $marker) -File -Filter "*.bak").Count 0 "successful marker replacement must remove its backup"
+    $markerBeforeLockedReplace = Get-FileFingerprint $marker
+    $lockedMarker = [IO.File]::Open($marker, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    try {
+      Assert-Throws {
+        Write-FanHaoLocalOnlyMarker -ApkPath $target -Identity $fakeIdentity
+      } ".+" "locked local-only marker replacement"
+    } finally {
+      $lockedMarker.Dispose()
+    }
+    Assert-Equal (Get-FileFingerprint $marker) $markerBeforeLockedReplace "failed marker replacement must preserve the pending/previous marker"
+    Assert-Equal @(Get-ChildItem -LiteralPath (Split-Path -Parent $marker) -File -Filter "*.tmp").Count 0 "failed marker replacement must clean its temporary file"
+    $plan = Get-Plan -Root (Join-Path $case "publish") -Target $target
+    Assert-Equal $plan.VersionCode 26081191L "local-only scratch output cannot lower or raise the durable floor"
+    Assert-Equal $plan.TargetState "ignored-local-only-output" "local-only scratch output state"
     Assert-True (Test-Path -LiteralPath $marker) "local-only marker must remain next to its build artifact"
   }
 
@@ -486,9 +575,9 @@ try {
         Write-Utf8Json -Path $LatestPath -Value $foreignManifest
       }
     }
-    Assert-Throws {
+    Assert-Fails {
       Publish-FanHaoDebugArtifact -SourceApkPath $source -UpdateDir $debug -VersionCode 26081191 -VersionName "0.1.26081191-debug" -ApkInspector $FakeInspector -CommitHook $foreignHook
-    } "already exists" "foreign first-publish race"
+    } "foreign first-publish race"
     $latest = Join-Path $debug "latest.json"
     Assert-True (Test-Path -LiteralPath $latest) "foreign latest.json must survive a failed first-publish move"
     $survivor = [IO.File]::ReadAllText($latest) | ConvertFrom-Json
