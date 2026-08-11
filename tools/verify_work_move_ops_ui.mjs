@@ -3,8 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  createWorkMoveCleanupRetryGuard,
   fetchWorkMoveJobWithBackoff,
   isTransientWorkMovePollError,
+  workMoveCleanupRetryRequired,
   workMovePollRetryDelay
 } from "../public/modules/fanhao/work-move-polling.js";
 import {
@@ -58,8 +60,32 @@ await assert.rejects(
 );
 assert.equal(finiteAttempts, 3, "polling must stop after the configured retry budget");
 
+assert.equal(workMoveCleanupRetryRequired({ status: "cleanup_pending", retryRequired: true }), true);
+assert.equal(workMoveCleanupRetryRequired({ status: "cleanup_pending", errorCode: "WORK_MOVE_CLEANUP_PENDING" }), true, "older sanitized servers may signal cleanup failure through their safe error code");
+assert.equal(workMoveCleanupRetryRequired({ status: "cleanup_pending", retryRequired: false, errorCode: "" }), false, "normal cleanup_pending work must continue polling");
+assert.equal(workMoveCleanupRetryRequired({ status: "cleanup_pending", retryRequired: "false", errorCode: "" }), false, "only the boolean retryRequired contract may trigger recovery");
+assert.equal(workMoveCleanupRetryRequired({ status: "running", retryRequired: true }), false);
+for (const entry of ["new move", "restored move", "resumed move"]) {
+  let retryCalls = 0;
+  const retryCleanupIfRequired = createWorkMoveCleanupRetryGuard(async (jobId) => {
+    retryCalls += 1;
+    assert.equal(jobId, `${entry}-job`);
+    return { id: jobId, status: "cleanup_pending", retryRequired: false, errorCode: "" };
+  });
+  const recovered = await retryCleanupIfRequired({ id: `${entry}-job`, status: "cleanup_pending", retryRequired: true, error: "安全清理提示" });
+  assert.equal(recovered.retryRequired, false);
+  assert.equal(await retryCleanupIfRequired(recovered), recovered, `${entry} must keep polling normal cleanup without another retry`);
+  await assert.rejects(
+    retryCleanupIfRequired({ id: `${entry}-job`, status: "cleanup_pending", retryRequired: true, error: "安全清理提示" }),
+    /目标目录和数据库已提交/
+  );
+  assert.equal(retryCalls, 1, `${entry} must request cleanup retry at most once`);
+}
+
 assert.equal(moveJobCanRetry({ status: "failed", recoverable: true }), true);
 assert.equal(moveJobCanRetry({ status: "rolled_back", recoverable: true }), true);
+assert.equal(moveJobCanRetry({ status: "cleanup_pending", recoverable: true, retryRequired: true }), true);
+assert.equal(moveJobCanRetry({ status: "cleanup_pending", recoverable: true, retryRequired: false, errorCode: "" }), false);
 assert.equal(moveJobCanRetry({ status: "blocked", recoverable: true }), false);
 assert.equal(moveJobCanRetry({ status: "running", recoverable: true }), false);
 assert.equal(moveJobStatusLabel("blocked"), "需人工处理");
@@ -235,6 +261,7 @@ function fakeNode(tag) {
     tag,
     children: [],
     dataset: {},
+    listeners: {},
     classList: { toggle() {} },
     append(...children) {
       for (const child of children) {
@@ -242,7 +269,7 @@ function fakeNode(tag) {
         this.children.push(child);
       }
     },
-    addEventListener() {},
+    addEventListener(type, listener) { this.listeners[type] = listener; },
     setAttribute() {},
     focus(options) {
       this.focusOptions = options;
@@ -308,6 +335,50 @@ try {
   outsideFocus.focus();
   focusController.render();
   assert.equal(focusDocument.activeElement, outsideFocus, "rendering must not steal focus from controls outside the ops panel");
+
+  const cleanupList = fakeNode("list");
+  const cleanupDetail = fakeNode("detail");
+  const cleanupNotice = fakeNode("notice");
+  const cleanupRequests = [];
+  const cleanupController = createWorkMoveOpsController({
+    api: async (requestPath, options = {}) => {
+      cleanupRequests.push({ requestPath, method: options.method || "GET" });
+      if (options.method === "POST") return { job: { id: "cleanup-retry-job", status: "cleanup_pending", retryRequired: false } };
+      return { jobs: [], summary: {} };
+    },
+    formatBytes: String,
+    formatDateTime: String,
+    root: {
+      querySelector(selector) {
+        if (selector === "[data-work-move-list]") return cleanupList;
+        if (selector === "[data-work-move-detail]") return cleanupDetail;
+        if (selector === "[data-work-move-notice]") return cleanupNotice;
+        return null;
+      }
+    }
+  });
+  cleanupController.state.jobs = [{
+    id: "cleanup-retry-job",
+    workId: "1",
+    status: "cleanup_pending",
+    phase: "cleanup",
+    recoverable: true,
+    retryRequired: true,
+    errorCode: "WORK_MOVE_CLEANUP_PENDING"
+  }];
+  cleanupController.state.selectedId = "cleanup-retry-job";
+  cleanupController.render();
+  const cleanupRetry = cleanupDetail.querySelectorAll("[data-work-move-job-id]")
+    .find((node) => node.dataset.workMoveAction === "retry");
+  assert.ok(cleanupRetry, "retryRequired cleanup_pending jobs must expose the controlled ops retry action");
+  cleanupRetry.listeners.click();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    cleanupRequests.filter((request) => request.method === "POST"),
+    [{ requestPath: "/api/work-move-jobs/cleanup-retry-job/retry", method: "POST" }],
+    "the ops retry control must submit exactly one server-arbitrated retry"
+  );
 } finally {
   if (originalDocument === undefined) delete globalThis.document;
   else globalThis.document = originalDocument;
@@ -317,6 +388,8 @@ const adminHtml = read("public/admin.html");
 const adminSource = read("public/admin.js");
 const panelSource = read("public/modules/system/work-move-ops-panel.js");
 const playerSource = read("public/js/player-page.js");
+const restoreMoveSource = playerSource.slice(playerSource.indexOf("async function restoreMoveJobEntry()"), playerSource.indexOf("async function resumePendingMoveJob()"));
+const resumeMoveSource = playerSource.slice(playerSource.indexOf("async function resumePendingMoveJob()"), playerSource.indexOf("async function retryWorkMoveJob("));
 assert.match(adminHtml, /id="adminWorkMoveOps"/);
 assert.match(adminHtml, /data-work-move-status/);
 assert.match(adminHtml, /data-work-move-work-id/);
@@ -335,6 +408,10 @@ assert.match(panelSource, /人工处理/);
 assert.match(panelSource, /aria-pressed/);
 assert.doesNotMatch(panelSource, /setAttribute\("aria-hidden"/);
 assert.match(playerSource, /fetchWorkMoveJobWithBackoff/);
+assert.match(playerSource, /createWorkMoveCleanupRetryGuard/);
+assert.match(playerSource, /const completedJob = await waitForWorkMoveJob\(data\.job\)/, "new moves must use the bounded cleanup recovery waiter");
+assert.match(restoreMoveSource, /if \(workMoveCleanupRetryRequired\(job\)\) \{[\s\S]*?const completed = await waitForWorkMoveJob\(job\);[\s\S]*?迁移任务已恢复并完成/, "restored moves must use the bounded cleanup recovery waiter");
+assert.match(resumeMoveSource, /const completed = await waitForWorkMoveJob\(job\)/, "resumed moves must use the bounded cleanup recovery waiter");
 assert.match(playerSource, /createCompletedWorkMoveReloader/);
 assert.match(playerSource, /await applyCompletedMoveJob\(completedJob\)/);
 assert.match(playerSource, /if \(await applyCompletedMoveJob\(completed\)\) showNotice\("迁移任务已完成"\)/);

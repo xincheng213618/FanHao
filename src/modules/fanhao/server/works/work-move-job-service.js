@@ -513,17 +513,19 @@ export function createWorkMoveJobService({
         throw error;
       }
       if (job.status === "completed") return publicJob(job);
-      if (ACTIVE_STATUSES.has(job.status)) {
+      const cleanupRetryRequired = job.status === "cleanup_pending" && Boolean(String(job.error_code || "").trim());
+      if (ACTIVE_STATUSES.has(job.status) && !cleanupRetryRequired) {
         schedule(() => scheduleJob(job.id));
         return publicJob(job);
       }
       const result = getCoreDb().prepare(`
         UPDATE work_move_jobs
-        SET status = CASE WHEN phase = 'cleanup' THEN 'cleanup_pending' WHEN phase = 'rollback' THEN 'rollback_pending' ELSE 'queued' END,
-            phase = CASE WHEN phase IN ('cleanup', 'rollback') THEN phase ELSE 'queued' END,
+        SET status = CASE WHEN status = 'cleanup_pending' THEN 'cleanup_pending' WHEN phase = 'cleanup' THEN 'cleanup_pending' WHEN phase = 'rollback' THEN 'rollback_pending' ELSE 'queued' END,
+            phase = CASE WHEN status = 'cleanup_pending' THEN phase WHEN phase IN ('cleanup', 'rollback') THEN phase ELSE 'queued' END,
             error = '', error_code = '', finished_at = '', attempts = attempts + 1,
             updated_at = ?, version = version + 1
         WHERE id = ? AND status = ? AND version = ?
+          AND (status <> 'cleanup_pending' OR error_code <> '')
       `).run(now(), job.id, job.status, Number(job.version || 0));
       if (Number(result.changes || 0) !== 1) {
         const error = new Error("迁移任务状态已变化，请刷新后重试");
@@ -534,7 +536,8 @@ export function createWorkMoveJobService({
       }
       const queued = row(job.id);
       emitLifecycle("retry_queued", queued);
-      scheduleJob(job.id);
+      if (cleanupRetryRequired) schedule(() => scheduleJob(job.id));
+      else scheduleJob(job.id);
       return publicJob(queued);
     } catch (error) {
       if (isSqliteBusy(error)) {

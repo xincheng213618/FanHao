@@ -1,7 +1,8 @@
 const ACTIVE_STATUSES = new Set(["queued", "running", "cleanup_pending", "rollback_pending"]);
 
 export function moveJobCanRetry(job) {
-  return Boolean(job?.recoverable && job.status !== "blocked" && ["failed", "rolled_back"].includes(job.status));
+  const cleanupRetryRequired = job?.status === "cleanup_pending" && (job.retryRequired === true || Boolean(String(job.errorCode || "").trim()));
+  return Boolean(job?.recoverable && job.status !== "blocked" && (cleanupRetryRequired || ["failed", "rolled_back"].includes(job.status)));
 }
 
 export function moveJobStatusLabel(status) {

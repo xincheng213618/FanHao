@@ -11,6 +11,22 @@ export function workMovePollRetryDelay(attempt) {
   return RETRY_DELAYS_MS[Math.min(Math.max(0, Number(attempt || 0)), RETRY_DELAYS_MS.length - 1)];
 }
 
+export function workMoveCleanupRetryRequired(job) {
+  return job?.status === "cleanup_pending" && (job.retryRequired === true || Boolean(String(job.errorCode || "").trim()));
+}
+
+export function createWorkMoveCleanupRetryGuard(retry) {
+  let retryAttempted = false;
+  return async function retryCleanupIfRequired(job) {
+    if (!workMoveCleanupRetryRequired(job)) return job;
+    if (retryAttempted) {
+      throw new Error(`${job.error || "源目录清理重试后仍未完成"}；目标目录和数据库已提交，可稍后重试清理源目录`);
+    }
+    retryAttempted = true;
+    return retry(job.id);
+  };
+}
+
 export async function fetchWorkMoveJobWithBackoff({
   api,
   jobId,

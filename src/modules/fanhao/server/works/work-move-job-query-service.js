@@ -39,8 +39,10 @@ function boundedLimit(value) {
 
 export function sanitizeWorkMoveJob(item) {
   if (!item) return null;
+  const retryRequired = item.status === "cleanup_pending" && Boolean(String(item.errorCode || "").trim());
   const safeError = (() => {
     if (item.errorCode === "WORK_MOVE_HANDOFF_TIMEOUT") return "旧进程仍存活但未确认交接，请人工检查后处理。";
+    if (retryRequired) return "目标目录和数据库已提交，源目录清理需要重试。";
     if (item.status === "blocked") return "任务已安全阻断，需要人工检查后处理。";
     if (item.status === "rolled_back") return "迁移未完成，文件操作已回滚。";
     if (item.status === "failed") return "迁移未完成，请根据错误代码检查服务端日志。";
@@ -63,7 +65,8 @@ export function sanitizeWorkMoveJob(item) {
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
     finishedAt: item.finishedAt,
-    recoverable: item.recoverable
+    recoverable: item.recoverable,
+    retryRequired
   };
 }
 

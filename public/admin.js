@@ -1,6 +1,6 @@
 import { createSettingsController } from "./modules/system/settings-controller.js?v=20260712-module-settings-02";
 import { createAccessAnalyticsController } from "./modules/system/access-analytics-controller.js?v=20260718-access-analytics-01";
-import { createWorkMoveOpsController, workMoveOpsPanelIsVisible } from "./modules/system/work-move-ops-panel.js?v=20260811-work-move-ops-04";
+import { createWorkMoveOpsController, workMoveOpsPanelIsVisible } from "./modules/system/work-move-ops-panel.js?v=20260811-work-move-ops-05";
 
 const state = {
   library: null,

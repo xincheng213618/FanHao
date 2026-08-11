@@ -1671,6 +1671,26 @@ async function verifyRetryCasBusyAndBlockedContract() {
   assert.equal(after.version, before.version + 1, "retry must advance the CAS version");
   assert.equal(after.attempts, before.attempts + 1);
 
+  db.prepare(`
+    UPDATE work_move_jobs
+    SET status = 'cleanup_pending', phase = 'cleanup', error = 'private cleanup failure',
+        error_code = 'WORK_MOVE_CLEANUP_PENDING', version = version + 1
+    WHERE id = ?
+  `).run(started.id);
+  const beforeCleanupRetry = db.prepare("SELECT version, attempts FROM work_move_jobs WHERE id = ?").get(started.id);
+  const cleanupRetried = service.retry(started.id);
+  const afterCleanupRetry = db.prepare("SELECT version, attempts, error, error_code FROM work_move_jobs WHERE id = ?").get(started.id);
+  assert.equal(cleanupRetried.status, "cleanup_pending", "cleanup recovery must retain its durable recovery phase");
+  assert.equal(cleanupRetried.errorCode, "");
+  assert.equal(afterCleanupRetry.version, beforeCleanupRetry.version + 1, "cleanup retry must use the same CAS fence as terminal retry");
+  assert.equal(afterCleanupRetry.attempts, beforeCleanupRetry.attempts + 1);
+  assert.equal(afterCleanupRetry.error, "");
+  assert.equal(afterCleanupRetry.error_code, "", "an accepted cleanup retry must consume its durable failure signal");
+  service.retry(started.id);
+  const afterDuplicateCleanupRetry = db.prepare("SELECT version, attempts FROM work_move_jobs WHERE id = ?").get(started.id);
+  assert.equal(afterDuplicateCleanupRetry.version, afterCleanupRetry.version, "an error-free active cleanup must not advance the retry CAS");
+  assert.equal(afterDuplicateCleanupRetry.attempts, afterCleanupRetry.attempts, "an error-free active cleanup must not consume a second retry attempt");
+
   db.prepare("UPDATE work_move_jobs SET status = 'failed', phase = 'validation', version = version + 1 WHERE id = ?").run(started.id);
   const competingDb = new DatabaseSync(path.join(fixture.root, "fixture.sqlite"));
   competingDb.exec("PRAGMA busy_timeout = 20; BEGIN IMMEDIATE");
@@ -1710,6 +1730,19 @@ async function verifyRetryCasBusyAndBlockedContract() {
     "retry must fail closed when status/version changes before its CAS update"
   );
   assert.equal(db.prepare("SELECT status FROM work_move_jobs WHERE id = ?").get(started.id).status, "failed");
+  db.prepare(`
+    UPDATE work_move_jobs
+    SET status = 'cleanup_pending', phase = 'cleanup', error = 'cleanup failed again',
+        error_code = 'WORK_MOVE_CLEANUP_PENDING', version = version + 1
+    WHERE id = ?
+  `).run(started.id);
+  assert.throws(
+    () => casService.retry(started.id),
+    (error) => error?.statusCode === 409
+      && error?.code === "WORK_MOVE_RETRY_CONFLICT"
+      && error?.job?.status === "cleanup_pending",
+    "cleanup retry must fail closed when its active status/version changes before the CAS update"
+  );
   await casService.close();
 
   db.prepare("UPDATE work_move_jobs SET status = 'blocked', phase = 'manual_review', error = 'fixture manual review', error_code = 'FIXTURE_BLOCKED', version = version + 1 WHERE id = ?").run(started.id);
@@ -1782,6 +1815,8 @@ async function verifyMoveJobListApiAndRedaction() {
   `);
   const absoluteSecret = path.join(fixture.root, "private", "WORK-SECRET");
   insert.run("ops-running", "ops-running-key", "1", "running", "copying", "{}", JSON.stringify({ oldDir: absoluteSecret }), "{}", "", "", "2026-08-11T11:40:00.000Z", "2026-08-11T11:45:00.000Z", "");
+  insert.run("ops-cleanup-active", "ops-cleanup-active-key", "5", "cleanup_pending", "cleanup", "{}", JSON.stringify({ oldDir: absoluteSecret }), "{}", "服务停止，等待下次自动恢复", "", "2026-08-11T11:45:00.000Z", "2026-08-11T11:50:00.000Z", "");
+  insert.run("ops-cleanup-retry", "ops-cleanup-retry-key", "6", "cleanup_pending", "cleanup", "{}", JSON.stringify({ oldDir: absoluteSecret }), JSON.stringify({ oldPath: absoluteSecret }), `cleanup failed at ${absoluteSecret}`, "WORK_MOVE_CLEANUP_PENDING", "2026-08-11T11:50:00.000Z", "2026-08-11T11:55:00.000Z", "");
   insert.run("ops-failed", "ops-failed-key", "2", "failed", "validation", JSON.stringify({ targetDirectory: absoluteSecret }), "", JSON.stringify({ oldPath: absoluteSecret }), `failed at C:\\media\\secret\\WORK-001 and ${absoluteSecret}`, "FIXTURE_FAILED", "2026-08-11T11:00:00.000Z", "2026-08-11T11:10:00.000Z", "2026-08-11T11:10:00.000Z");
   insert.run("ops-completed", "ops-completed-key", "3", "completed", "completed", "{}", "", "{}", "", "", "2026-08-11T11:20:00.000Z", "2026-08-11T11:30:00.000Z", "2026-08-11T11:30:00.000Z");
   insert.run("ops-rolled-back", "ops-rolled-back-key", "4", "rolled_back", "rolled_back", "{}", "", "{}", "old terminal", "FIXTURE_ROLLED_BACK", "2026-08-11T08:00:00.000Z", "2026-08-11T09:00:00.000Z", "2026-08-11T09:00:00.000Z");
@@ -1790,7 +1825,7 @@ async function verifyMoveJobListApiAndRedaction() {
 
   const listed = service.list({ status: "failed", workId: "2", limit: "10" });
   assert.deepEqual(listed.jobs.map((job) => job.id), ["ops-failed"]);
-  assert.equal(listed.summary.active, 1);
+  assert.equal(listed.summary.active, 3);
   assert.equal(listed.summary.failed, 1);
   assert.equal(listed.summary.rolledBack, 1);
   assert.equal(listed.summary.activeReservations, 1, "dual-schema reservation rows must count as one active job");
@@ -1799,6 +1834,14 @@ async function verifyMoveJobListApiAndRedaction() {
   assert.equal(JSON.stringify(listed).includes("C:\\media\\secret"), false, "list API must replace stored errors with a safe message");
   assert.equal(JSON.stringify(listed).includes(absoluteSecret), false, "list payload must not expose request, plan, result, or absolute paths");
   assert.throws(() => service.list({ status: "not-a-status" }), (error) => error?.statusCode === 400 && error?.code === "WORK_MOVE_STATUS_INVALID");
+  const cleanupJobs = service.list({ status: "cleanup_pending" }).jobs;
+  const activeCleanup = cleanupJobs.find((job) => job.id === "ops-cleanup-active");
+  const retryCleanup = cleanupJobs.find((job) => job.id === "ops-cleanup-retry");
+  assert.equal(activeCleanup?.retryRequired, false, "normal/restart cleanup_pending work without an error code must keep polling without a retry signal");
+  assert.equal(activeCleanup?.error, "");
+  assert.equal(retryCleanup?.retryRequired, true, "a durable cleanup failure must expose an explicit safe retry signal");
+  assert.equal(retryCleanup?.error, "目标目录和数据库已提交，源目录清理需要重试。");
+  assert.equal(JSON.stringify(cleanupJobs).includes(absoluteSecret), false, "cleanup retry payloads must not expose persisted paths or raw errors");
 
   let deniedCalls = 0;
   let response = null;
@@ -1851,6 +1894,13 @@ async function verifyMoveJobListApiAndRedaction() {
   assert.equal("result" in response.payload.job, false, "retry success payload must use the same sanitized job contract as the list API");
   assert.equal(JSON.stringify(response.payload).includes(absoluteSecret), false, "retry success must not expose persisted result paths");
 
+  await routeWorksApi({ method: "POST" }, {}, new URL("http://fixture/api/work-move-jobs/ops-cleanup-retry/retry"), deps);
+  assert.equal(response?.status, 202);
+  assert.equal(response?.payload?.job?.status, "cleanup_pending");
+  assert.equal(response?.payload?.job?.retryRequired, false, "accepted cleanup retry must consume the public retry signal");
+  assert.equal(response?.payload?.job?.errorCode, "");
+  assert.equal(JSON.stringify(response.payload).includes(absoluteSecret), false, "cleanup retry success must retain the sanitized route contract");
+
   db.prepare(`
     UPDATE work_move_jobs
     SET status = 'blocked', phase = 'manual_review', error = ?, result_json = ?, error_code = 'FIXTURE_BLOCKED', version = version + 1
@@ -1865,7 +1915,7 @@ async function verifyMoveJobListApiAndRedaction() {
   const safeJobFields = [
     "id", "workId", "personId", "status", "phase", "progress", "progressFiles", "totalFiles",
     "progressBytes", "totalBytes", "attempts", "errorCode", "error", "createdAt", "updatedAt",
-    "finishedAt", "recoverable"
+    "finishedAt", "recoverable", "retryRequired"
   ].sort();
   const assertSafeNestedJobResponse = (payload, label) => {
     assert.equal(payload?.ok, true, `${label} must keep the normal success envelope`);

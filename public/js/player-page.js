@@ -1,5 +1,9 @@
 import { createApiClient, addQueryParam } from "./api.js?v=20260701-gallery-merge-01";
-import { fetchWorkMoveJobWithBackoff } from "../modules/fanhao/work-move-polling.js?v=20260811-work-move-ops-01";
+import {
+  createWorkMoveCleanupRetryGuard,
+  fetchWorkMoveJobWithBackoff,
+  workMoveCleanupRetryRequired
+} from "../modules/fanhao/work-move-polling.js?v=20260811-work-move-ops-02";
 import { createCompletedWorkMoveReloader } from "../modules/fanhao/work-move-completion.js?v=20260811-work-move-ops-01";
 
 const api = createApiClient();
@@ -1651,7 +1655,7 @@ async function waitForWorkMoveJob(initialJob) {
   const controller = new AbortController();
   movePollController = controller;
   let job = initialJob;
-  let cleanupRetryRequested = false;
+  const retryCleanupIfRequired = createWorkMoveCleanupRetryGuard((jobId) => retryWorkMoveJob(jobId, controller.signal));
   if (!job?.id) throw new Error("服务没有返回文件移动任务");
   rememberMoveJob(job);
   try {
@@ -1662,11 +1666,9 @@ async function waitForWorkMoveJob(initialJob) {
       if (["rolled_back", "failed"].includes(job.status)) {
         throw new Error(job.error || "文件移动失败，原目录已保留");
       }
-      if (job.status === "cleanup_pending" && job.error) {
-        if (cleanupRetryRequested) throw new Error(`${job.error}；目标目录和数据库已提交，可稍后重试清理源目录`);
-        job = await retryWorkMoveJob(job.id, controller.signal);
+      if (workMoveCleanupRetryRequired(job)) {
+        job = await retryCleanupIfRequired(job);
         rememberMoveJob(job);
-        cleanupRetryRequested = true;
       }
       const percent = Math.max(0, Math.min(100, Math.round(Number(job.progress || 0) * 100)));
       els.moveToPerson.textContent = job.phase === "cleanup" ? "清理源目录" : percent > 0 ? `迁移中 ${percent}%` : "迁移中";
@@ -1776,9 +1778,19 @@ async function restoreMoveJobEntry() {
       clearRememberedMoveJob();
       return;
     }
+    if (workMoveCleanupRetryRequired(job)) {
+      rememberMoveJob(job);
+      const completed = await waitForWorkMoveJob(job);
+      if (await applyCompletedMoveJob(completed)) showNotice("迁移任务已恢复并完成");
+      return;
+    }
     rememberMoveJob(job);
   } catch (error) {
     if (error?.statusCode === 404) clearRememberedMoveJob();
+    else {
+      showNotice(error.message || "恢复迁移任务失败");
+      updateMoveToPersonButton();
+    }
   }
 }
 
@@ -1808,9 +1820,9 @@ async function resumePendingMoveJob() {
 
 async function retryWorkMoveJob(jobId, signal = undefined) {
   const path = `/api/work-move-jobs/${encodeURIComponent(jobId)}`;
-  await api(`${path}/retry`, { method: "POST", signal });
-  const payload = await api(path, { signal });
-  return payload.job;
+  const payload = await api(`${path}/retry`, { method: "POST", signal });
+  if (payload?.job) return payload.job;
+  return (await api(path, { signal })).job;
 }
 
 async function applyCompletedMoveJob(job) {
