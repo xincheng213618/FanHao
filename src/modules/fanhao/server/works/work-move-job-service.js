@@ -5,6 +5,7 @@ import { listWorkMoveJobs } from "./work-move-job-query-service.js";
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "cleanup_pending", "rollback_pending"]);
 const BLOCKING_STATUSES = new Set([...ACTIVE_STATUSES, "blocked"]);
+const LOST_TARGET_IDENTITY_CODES = new Set(["WORK_MOVE_TARGET_PHYSICAL_DRIFT"]);
 function json(value, fallback = null) {
   try {
     return JSON.parse(String(value || ""));
@@ -932,6 +933,16 @@ export function createWorkMoveJobService({
 
   async function handleFailure(jobId, plan, error) {
     const message = error?.message || String(error);
+    const errorCode = String(error?.code || "");
+    if (plan && LOST_TARGET_IDENTITY_CODES.has(errorCode)) {
+      // The lexical target can no longer be trusted.  Rollback and cleanup use
+      // those same paths, so either operation could mutate unrelated media.
+      // Park the durable reservation and require an operator to restore and
+      // inspect the frozen physical target before any explicit recovery.
+      updateState(jobId, "blocked", "target_identity_lost", message, { errorCode });
+      emitLifecycle("blocked", row(jobId), { errorCode });
+      return;
+    }
     if (plan && adminCoreMutationService.inspectWorkMove(plan) === "target") {
       updateState(jobId, "cleanup_pending", row(jobId)?.phase || "main_committed", message, {
         errorCode: error?.code || "WORK_MOVE_CLEANUP_PENDING"

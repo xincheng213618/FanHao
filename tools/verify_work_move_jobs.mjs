@@ -1323,6 +1323,94 @@ async function verifyRollbackOnDatabaseFailure() {
   db.close();
 }
 
+async function verifyPhysicalTargetDriftBlocksUnsafeRollback({ forceCopy }) {
+  const mode = forceCopy ? "copy" : "rename";
+  const fixture = await createFixture(`physical-drift-${mode}`, 5);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  admin.plan.androidCommand = true;
+  admin.plan.personDirPhysicalKey = path.resolve(fixture.targetPerson).toLowerCase();
+  admin.plan.newDirPhysicalKey = path.resolve(fixture.target).toLowerCase();
+  admin.assertWorkMoveTarget = () => ({ id: "target", personDir: fixture.targetPerson, targetDir: fixture.target });
+  const originalCommit = admin.commitWorkMove;
+  let drifted = false;
+  admin.commitWorkMove = (...args) => {
+    if (drifted) {
+      const error = new Error("Android 迁移目标的物理目录已变化");
+      error.statusCode = 409;
+      error.code = "WORK_MOVE_TARGET_PHYSICAL_DRIFT";
+      throw error;
+    }
+    return originalCommit(...args);
+  };
+
+  const savedTargetPerson = path.join(fixture.root, `target-person-${mode}-saved`);
+  const replacementTargetPerson = path.join(fixture.root, `target-person-${mode}-replacement`);
+  const replacementTarget = path.join(replacementTargetPerson, path.basename(fixture.target));
+  const replacementSentinel = path.join(replacementTargetPerson, "sentinel.txt");
+  await fs.promises.mkdir(replacementTargetPerson, { recursive: true });
+  await fs.promises.writeFile(replacementSentinel, `${mode}-sentinel`);
+
+  let rollbackStarts = 0;
+  let cleanupStarts = 0;
+  class PhysicalDriftWorker extends Worker {
+    constructor(url, options) {
+      super(url, options);
+      this.fixtureOperation = options?.workerData?.operation || "";
+      if (this.fixtureOperation === "rollback") rollbackStarts += 1;
+      if (["isolate", "cleanup", "restore"].includes(this.fixtureOperation)) cleanupStarts += 1;
+    }
+
+    on(eventName, listener) {
+      if (eventName !== "message" || this.fixtureOperation !== "stage") return super.on(eventName, listener);
+      return super.on(eventName, (message) => {
+        if (!drifted && message?.type === "done") {
+          fs.renameSync(fixture.targetPerson, savedTargetPerson);
+          fs.symlinkSync(replacementTargetPerson, fixture.targetPerson, process.platform === "win32" ? "junction" : "dir");
+          fs.cpSync(path.join(savedTargetPerson, path.basename(fixture.target)), replacementTarget, {
+            recursive: true,
+            errorOnExist: true,
+            force: false
+          });
+          drifted = true;
+        }
+        listener(message);
+      });
+    }
+  }
+
+  const lifecycle = [];
+  const service = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    log: (line) => lifecycle.push(String(line)),
+    workerClass: PhysicalDriftWorker,
+    workerDataPatch: { forceCopy }
+  });
+  const started = service.start("1", { personId: "target", idempotencyKey: `physical-drift-${mode}` }, { android: true });
+  const blocked = await waitForJob(service, started.id, ["blocked"]);
+  assert.equal(blocked.phase, "target_identity_lost");
+  assert.equal(blocked.errorCode, "WORK_MOVE_TARGET_PHYSICAL_DRIFT");
+  assert.equal(rollbackStarts, 0, `${mode} physical drift must never start a rollback worker with an untrusted lexical path`);
+  assert.equal(cleanupStarts, 0, `${mode} physical drift must never start cleanup or restoration workers with an untrusted lexical path`);
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.source));
+  const durableBlocked = db.prepare("SELECT status, phase, plan_json, error_code FROM work_move_jobs WHERE id = ?").get(started.id);
+  assert.equal(durableBlocked.status, "blocked");
+  assert.equal(durableBlocked.phase, "target_identity_lost");
+  assert.equal(durableBlocked.error_code, "WORK_MOVE_TARGET_PHYSICAL_DRIFT");
+  assert.equal(JSON.parse(durableBlocked.plan_json).newDir, fixture.target, "blocked recovery must retain the immutable plan for operator inspection");
+  await waitForCondition(() => admin.reservation?.ownerId === "", "blocked physical drift reservation was not durably parked");
+  assert.equal(admin.reservation?.released, false, "blocked physical drift must retain and park its durable reservation");
+  assert.equal(await fs.promises.readFile(replacementSentinel, "utf8"), `${mode}-sentinel`);
+  assert.equal(fs.existsSync(path.join(savedTargetPerson, path.basename(fixture.target), "part-0", "fixture-0.bin")), true, "the original staged tree must remain for controlled inspection");
+  assert.equal(fs.existsSync(path.join(replacementTarget, "part-0", "fixture-0.bin")), true, "same-content replacement media must not be deleted or renamed by rollback");
+  assert.equal(fs.existsSync(fixture.source), forceCopy, `${mode} staging source state must remain unchanged after blocking`);
+  assert.ok(lifecycle.some((line) => line.includes('"event":"blocked"')));
+  assert.equal(lifecycle.some((line) => line.includes(fixture.source)), false, "blocked lifecycle logs must not expose absolute paths");
+  await service.close();
+  db.close();
+}
+
 async function verifySharedOwnerAddedBeforeCommitRollsBackCopy() {
   const fixture = await createFixture("shared-before-commit", 5);
   const db = createDatabase(fixture.root, fixture.source);
@@ -2601,6 +2689,8 @@ try {
   await verifyCrashRecoveryFromPreparedCopy();
   await verifyPartialCleanupRecovery();
   await verifyRollbackOnDatabaseFailure();
+  await verifyPhysicalTargetDriftBlocksUnsafeRollback({ forceCopy: true });
+  await verifyPhysicalTargetDriftBlocksUnsafeRollback({ forceCopy: false });
   await verifySharedOwnerAddedBeforeCommitRollsBackCopy();
   await verifySharedOwnerDuringImageStageBlocksCleanup();
   await verifySharedOwnerBeforeCleanupRetainsSource();
