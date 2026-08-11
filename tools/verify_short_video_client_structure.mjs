@@ -14,10 +14,19 @@ import { normalizeRoute as normalizeWebShortVideoRoute, routeFromUrl as webShort
 import {
   authorIndexReturnState,
   canReturnThroughShortVideoHistory,
-  captureAuthorIndexReturnContext
+  captureAuthorIndexReturnContext,
+  captureAuthorIndexWindow,
+  matchesAuthorIndexWindow,
+  restoreAuthorIndexWindow
 } from "../public/modules/short-videos/author-navigation.js";
 import { createAuthorCollectorPoll } from "../public/modules/short-videos/author-collector-poll.js";
 import { shortVideoAuthorCardAccessibility } from "../public/modules/short-videos/list-cards.js";
+
+const nativeReadFileSync = fs.readFileSync.bind(fs);
+fs.readFileSync = (filePath, options) => {
+  const contents = nativeReadFileSync(filePath, options);
+  return typeof contents === "string" ? contents.replace(/\r\n/g, "\n") : contents;
+};
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const moduleDir = path.join(root, "android-client", "www", "modules", "short-videos");
@@ -167,6 +176,20 @@ function verifyWebAuthorRouteLifecycle() {
   assert(canReturnThroughShortVideoHistory({ referrer: "http://127.0.0.1/short-videos?source=authors", currentHref: "http://127.0.0.1/short-videos/authors/1" }), "a same-origin short-video referrer must use browser history");
   assert(!canReturnThroughShortVideoHistory({ referrer: "", currentHref: "http://127.0.0.1/short-videos/authors/1" }), "a direct author URL without a referrer must use the in-app author-index fallback");
   assert(!canReturnThroughShortVideoHistory({ referrer: "https://example.com/", currentHref: "http://127.0.0.1/short-videos/authors/1" }), "an external referrer must use the in-app fallback instead of leaving the site");
+  const windowSnapshot = captureAuthorIndexWindow({
+    source: "authors",
+    authors: [{ secUid: "a" }, { secUid: "b" }],
+    authorTotal: 12,
+    authorScopeTotal: 12,
+    authorBannedTotal: 1,
+    authorHasMore: true
+  }, 4200);
+  const restoredWindow = { source: "authors", authors: [] };
+  assert(!matchesAuthorIndexWindow(undefined, restoredWindow), "a missing author snapshot must never suppress the initial author request");
+  assert(matchesAuthorIndexWindow(windowSnapshot, restoredWindow), "a matching author route must accept its saved loaded window");
+  assert.equal(restoreAuthorIndexWindow(restoredWindow, windowSnapshot), 4200, "author window restore must retain the saved scroll position");
+  assert.deepEqual(restoredWindow.authors, [{ secUid: "a" }, { secUid: "b" }], "author window restore must retain all loaded author pages");
+  assert(!matchesAuthorIndexWindow(windowSnapshot, { source: "following" }), "a different author scope must not restore a stale author window");
   assert.deepEqual(
     shortVideoAuthorCardAccessibility({ name: "蔓蔓", accountStatus: "banned", accountStatusReason: "主页不可访问" }),
     { label: "查看 蔓蔓 的短视频，账号已封禁", description: "封禁原因：主页不可访问" },
@@ -479,7 +502,7 @@ function verifyWebDedicatedEntry() {
   const entrySource = fs.readFileSync(entryPath, "utf8");
   const performanceObserverSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "performance-observers.js"), "utf8");
   const routerSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "router.js"), "utf8");
-  const playerSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "short-video-page.js"), "utf8");
+  const playerSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "short-video-page.js"), "utf8").replace(/\r\n/g, "\n");
   const actionsControllerSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "actions-controller.js"), "utf8");
   const listWindowSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "list-window.js"), "utf8");
   const mediaCacheSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "media-cache.js"), "utf8");
@@ -507,17 +530,17 @@ function verifyWebDedicatedEntry() {
   const responsiveSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "styles", "responsive.css"), "utf8");
   const staticServerSource = fs.readFileSync(path.join(root, "src", "platform", "server", "static-files.js"), "utf8");
   const serverConfigSource = fs.readFileSync(path.join(root, "src", "bootstrap", "server-config.js"), "utf8");
-  const shortVideoRuntimeSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "runtime.js"), "utf8");
+  const shortVideoRuntimeSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "runtime.js"), "utf8").replace(/\r\n/g, "\n");
   const shortVideoListWorkerSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "list-worker.js"), "utf8");
   const shortVideoCatalogWorkerClientPath = path.join(root, "src", "modules", "short-videos", "server", "catalog-worker-client.js");
   const shortVideoCatalogWorkerClientSource = fs.statSync(shortVideoCatalogWorkerClientPath, { throwIfNoEntry: false })?.isFile()
     ? fs.readFileSync(shortVideoCatalogWorkerClientPath, "utf8")
     : "";
-  const shortVideoRoutesSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "routes.js"), "utf8");
+  const shortVideoRoutesSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "routes.js"), "utf8").replace(/\r\n/g, "\n");
   const shortVideoWatchWriterSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "watch-write-service.js"), "utf8");
   const shortVideoWatchWorkerSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "watch-write-worker.js"), "utf8");
   const downloadManagerSyncSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "download-manager-sync-service.js"), "utf8");
-  const shortVideoStoreSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "store.js"), "utf8");
+  const shortVideoStoreSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "store.js"), "utf8").replace(/\r\n/g, "\n");
   const shortVideoListPageQueriesSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "list-page-queries.js"), "utf8");
   const launcherSource = fs.readFileSync(path.join(root, "start-fanhao.ps1"), "utf8");
   const shortVideoBuildSource = fs.readFileSync(path.join(root, "tools", "build_short_video_web.mjs"), "utf8");
@@ -672,7 +695,7 @@ function verifyWebDedicatedEntry() {
   assert(shortVideoRuntimeSource.includes('profile ? "/api/profiles/refresh" : "/api/extract/start"') && shortVideoRuntimeSource.includes('profile_tab: "post"'), "author collection must register and scan authors that only exist in the local liked-video library");
   assert(downloadManagerSyncSource.includes("pendingForcedSync") && downloadManagerSyncSource.includes("stopped ? null : runSync({ force: true })"), "a collector-triggered forced sync must queue behind an active periodic sync instead of being dropped");
   assert(downloadManagerSyncSource.includes("result.catalogChanged || Number(result.catalogChanges || 0) > 0") && !downloadManagerSyncSource.includes("result.imported || result.updated || result.profilesSynced || options.force") && shortVideoStoreSource.includes("profilesSynced: profileSync.profilesSeen") && shortVideoStoreSource.includes("download_manager_source_state_key_v2_account_status"), "only real catalog changes, including profile-only metadata changes, may invalidate the catalog while forced no-op syncs stay reset-free and schema upgrades still force one fresh manager sync");
-  assert((shortVideoRoutesSource.match(/onMutation\?\.\(\);/g) || []).length >= 6 && shortVideoRoutesSource.includes("? await recordWatch(videoId, body || {})") && shortVideoRoutesSource.includes("onWatchMutation?.(videoId, body || {}, data);\n      onWatch?.(videoId") && shortVideoRuntimeSource.includes("watchWriter.record(videoId, options)") && shortVideoWatchWriterSource.includes('new Worker(new URL("./watch-write-worker.js"') && shortVideoWatchWorkerSource.includes("store.recordWatch(message.videoId"), "catalog mutations must invalidate all list generations while high-frequency watch writes use their dedicated worker path");
+  assert((shortVideoRoutesSource.match(/onMutation\?\.\(\);/g) || []).length >= 6 && shortVideoRoutesSource.includes("? await recordWatch(videoId, body || {})") && /onWatchMutation\?\.\(videoId, body \|\| \{\}, data\);\r?\n      onWatch\?\.\(videoId/.test(shortVideoRoutesSource) && shortVideoRuntimeSource.includes("watchWriter.record(videoId, options)") && shortVideoWatchWriterSource.includes('new Worker(new URL("./watch-write-worker.js"') && shortVideoWatchWorkerSource.includes("store.recordWatch(message.videoId"), "catalog mutations must invalidate all list generations while high-frequency watch writes use their dedicated worker path");
   assert(shortVideoRuntimeSource.includes("watchCacheGeneration: watchGeneration") && shortVideoRuntimeSource.includes("isWatchSensitiveShortVideoList") && shortVideoRuntimeSource.includes('data?.source || "").toLowerCase() === "history"') && shortVideoRuntimeSource.includes('data?.sort || "").toLowerCase() === "watched"'), "watch writes must invalidate only history membership and recent-watch ordering");
   assert(shortVideoRuntimeSource.includes("recordShortVideoWatchCacheMutation") && shortVideoRuntimeSource.includes("applyShortVideoWatchOverlays") && shortVideoRuntimeSource.includes("short-video-list-watch-overlays.json"), "ordinary cached lists must receive persisted per-video watch overlays without a full SQLite refresh");
   assert(playerSource.includes("let shortVideoListRequestId = 0;") && playerSource.includes("const requestId = ++shortVideoListRequestId;") && playerSource.includes("if (requestId !== shortVideoListRequestId) return;"), "short-video list responses must ignore stale source and sort requests");

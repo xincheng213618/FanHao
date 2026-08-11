@@ -1,7 +1,8 @@
 import {
   authorIndexReturnState,
   canReturnThroughShortVideoHistory,
-  captureAuthorIndexReturnContext
+  captureAuthorIndexReturnContext,
+  captureAuthorIndexWindow
 } from "./author-navigation.js?v=20260811-author-route-lifecycle-01";
 import { createAuthorCollectorPoll } from "./author-collector-poll.js?v=20260811-author-route-lifecycle-01";
 
@@ -297,6 +298,7 @@ export function createShortVideoAuthorPages(deps) {
     if (isShortVideoAuthorIndexPage()) {
       state.shortVideo.authorIndexSource = state.shortVideo.source;
       authorIndexReturnContext = captureAuthorIndexReturnContext(state.shortVideo);
+      state.shortVideo.authorIndexWindow = captureAuthorIndexWindow(state.shortVideo, window.scrollY);
     }
     authorPageEnteredWithinApp = !options.replaceHistory;
     syncAuthorCollectorRouteLifecycle(authorId);

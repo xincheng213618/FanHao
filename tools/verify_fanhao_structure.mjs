@@ -57,7 +57,9 @@ import { CATEGORY_OPTIONS, categoryWorksPath, normalizeCategory } from "../andro
 import { codePrefixDetailPath, normalizeCodePrefix } from "../android-client/www/modules/fanhao/features/code-prefixes/prefix-views.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
+// Structural checks describe source semantics, not the checkout's text-mode policy.
+// Keep CRLF checkouts equivalent to the LF blob used in CI.
+const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8").replace(/\r\n/g, "\n");
 const lines = (relativePath) => read(relativePath).split(/\r?\n/).length;
 
 function captureJsonResponse(payload, acceptEncoding = "") {
@@ -1195,7 +1197,7 @@ assert(loadMoreCodePrefixIndexSource.includes("body.append(fragment)") && loadMo
 assert(!loadMoreCodePrefixIndexSource.includes("els.workGrid.innerHTML"), "code-prefix index pagination must not clear the full grid");
 assert(loadMoreCodePrefixDetailSource.includes("appendLoadedWorkPage();") && !loadMoreCodePrefixDetailSource.includes("renderWorks("), "code-prefix detail pagination must append the next server page without replacing the work grid");
 const appendLoadMoreSource = /function appendLoadMore\([\s\S]*?\n\}/.exec(webApp)?.[0] || "";
-assert(appendLoadMoreSource.includes("state.workVisibleLimit += state.workPageSize;\n      appendLoadedWorkPage();"), "client-side work pagination must append the next visible page without replacing the work grid");
+assert(/state\.workVisibleLimit\s*\+=\s*state\.workPageSize\s*;\s*appendLoadedWorkPage\(\)\s*;/.test(appendLoadMoreSource), "client-side work pagination must advance the visible window, then append the next page without replacing the work grid");
 assert((webApp.match(/appendLoadedWorkPage\(\);/g) || []).length >= 2, "search and person pagination must append the next server page without resetting scroll position");
 assert(webApp.includes("function appendLoadedWorkPage()") && webApp.includes("appendWorkCardsInPlace({"), "shared work pagination must reconcile each next page without clearing the grid");
 assert(workPageAppenderSource.includes("container.insertBefore(card, reference)") && workPageAppenderSource.includes("restoreScrollAnchor(anchor, anchorTop, viewport)"), "reordered work pages must reuse cards and preserve the visible scroll anchor");

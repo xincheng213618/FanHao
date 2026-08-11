@@ -45,7 +45,7 @@ import {
   writeSmartFillPreference,
   writeVolumePreference
 } from "./state.js?v=20260716-short-video-state-01";
-
+import { restoreSavedAuthorIndexWindow } from "./author-navigation.js?v=20260811-author-index-window-01";
 export function createShortVideoPage(deps) {
   const {
     api,
@@ -64,7 +64,6 @@ export function createShortVideoPage(deps) {
     syncRouteAfterNavigation,
     takeDirectShortVideoPlaybackPrewarm
   } = deps;
-
   let likeDistributionViewPromise = null;
   let likeDistributionRenderToken = 0;
   let shortVideoCommentsViewPromise = null;
@@ -524,6 +523,7 @@ export function createShortVideoPage(deps) {
     }
     if (isShortVideoAuthorIndexPage()) {
       if (append && (state.shortVideo.loading || state.shortVideo.authorLoadingMore || !state.shortVideo.authorHasMore)) return;
+      if (restoreSavedAuthorIndexWindow(state.shortVideo, append, () => { renderStats(); renderView(); })) return;
       const requestId = ++shortVideoListRequestId;
       state.shortVideo.current = null;
       state.shortVideo.prevVideo = null;

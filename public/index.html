@@ -20,7 +20,7 @@
       (() => {
         document.documentElement.classList.add("app-styles-loading");
         const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
-        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-be1893d29de0";
+        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-c07ab190f64b";
         if (shortVideoEntry) {
           const modulePreload = document.createElement("link");
           modulePreload.rel = "modulepreload";
@@ -51,6 +51,29 @@
           "/css/player.css?v=20260710-web-css-modules-01",
           "/css/responsive.css?v=20260712-module-settings-02"
         ];
+        const galleryStyleUrls = [
+          "/css/foundation.css?v=20260710-web-css-modules-01",
+          "/css/shell.css?v=20260713-search-index-02",
+          "/modules/content-index/styles.css?v=20260717-photo-album-parser-02"
+        ];
+        const novelStyleUrls = [
+          "/css/foundation.css?v=20260710-web-css-modules-01",
+          "/modules/novels/styles.css?v=20260727-novel-manage-04",
+          "/css/shell.css?v=20260713-search-index-02"
+        ];
+        const musicStyleUrls = [
+          "/css/foundation.css?v=20260710-web-css-modules-01",
+          "/css/shell.css?v=20260713-search-index-02",
+          "/modules/music/styles/foundation.css?v=20260711-music-compact-sidebar-10",
+          "/modules/music/styles/library.css?v=20260711-music-content-visibility-43",
+          "/modules/music/styles/player.css?v=20260711-music-content-visibility-43",
+          "/modules/music/styles/responsive.css?v=20260711-music-compact-sidebar-10"
+        ];
+        const toolsStyleUrls = [
+          "/css/foundation.css?v=20260710-web-css-modules-01",
+          "/css/shell.css?v=20260713-search-index-02",
+          "/modules/tools/styles.css?v=20260727-game-library-redesign-01"
+        ];
         const shortVideoDetailEntry = /^\/(?:short-videos|short-video|douyin)\/(?!(?:stats|authors|transcoding)(?:\/|$))[^/]+\/?$/.test(window.location.pathname);
         const standaloneStyleEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(window.location.pathname) || /^\/western\/.+/.test(window.location.pathname);
         document.documentElement.classList.add("app-module-loading");
@@ -59,7 +82,13 @@
             ? shortVideoStyleUrls
             : shortVideoStyleUrls.filter((href) => !shortVideoViewerStyleUrls.includes(href)))
           : standaloneStyleEntry
-            ? ["/styles.css?v=20260727-hidden-overlays-01"]
+            ? (/^\/(?:novel|novels)(?:\/|$)/.test(window.location.pathname)
+              ? novelStyleUrls
+              : /^\/(?:music|musics|songs)(?:\/|$)/.test(window.location.pathname)
+                ? musicStyleUrls
+                : /^\/tools(?:\/|$)/.test(window.location.pathname)
+                  ? toolsStyleUrls
+                  : galleryStyleUrls)
             : fanhaoStyleUrls;
         const stylePromises = new Map();
         const loadStyle = (href) => {
@@ -193,7 +222,7 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-be1893d29de0");
+        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-c07ab190f64b");
         await window.__fanhaoStylesReady;
         try {
           await shortVideoModulePromise;
