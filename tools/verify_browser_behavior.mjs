@@ -1127,6 +1127,71 @@ async function verifyAndroidFavoriteFolders(browser) {
       refreshReplies[3].resolve({ folders: [{ ...defaultFolder, count: 2 }, { id: "b", name: "B", count: 0 }, { id: "c", name: "C", count: 0 }, { id: "d", name: "D", count: 0 }, { id: "e", name: "E", count: 0 }] });
       await waitFor(() => refreshFeature.folders().find((folder) => folder.id === "default")?.count === 2);
 
+      let activeScope = "http://scope-a.local";
+      const scopeAFolder = { id: "a-default", name: "A 默认", count: 1 };
+      const scopeAPlannedFolder = { id: "a-planned", name: "A 待观看", count: 0 };
+      const createScopeFeature = (replies, libraries) => createFavoriteFolderFeature({
+        api: async (_base, requestPath) => {
+          if (requestPath === "/api/favorite-folders") return { folders: [scopeAFolder, scopeAPlannedFolder] };
+          const reply = replies.get(requestPath);
+          if (reply) return reply.promise;
+          throw new Error(`unexpected scope race request: ${requestPath}`);
+        },
+        clearCachedJsonByPrefix: async () => {},
+        getActiveUrl: () => activeScope,
+        getLibrary: () => libraries.get(activeScope),
+        pageDataService: { invalidate() {} }
+      });
+      const scopeAToggleReply = deferred();
+      const scopeToggleCallbacks = [];
+      const scopeToggleAWork = { id: "shared-work", favorite: false, favoriteFolderId: "", favoriteFolderName: "" };
+      const scopeToggleBWork = { id: "shared-work", favorite: true, favoriteFolderId: "b-only", favoriteFolderName: "B 专属" };
+      const scopeToggleLibraries = new Map([
+        ["http://scope-a.local", { works: [scopeToggleAWork] }],
+        ["http://scope-b.local", { works: [scopeToggleBWork] }]
+      ]);
+      const scopeToggleFeature = createScopeFeature(new Map([["/api/favorites/shared-work", scopeAToggleReply]]), scopeToggleLibraries);
+      const scopeToggle = scopeToggleFeature.toggleFavorite(scopeToggleAWork, () => scopeToggleCallbacks.push(activeScope)).catch((error) => error.message);
+      await tick();
+      activeScope = "http://scope-b.local";
+      scopeAToggleReply.resolve({ favorite: true, favoriteFolder: { folderId: "a-default", folderName: "A 默认" } });
+      const scopeToggleError = await scopeToggle;
+
+      activeScope = "http://scope-a.local";
+      const scopeAMoveReply = deferred();
+      const scopeMoveCallbacks = [];
+      const scopeMoveAWork = { id: "shared-work", favorite: true, favoriteFolderId: "a-default", favoriteFolderName: "A 默认" };
+      const scopeMoveBWork = { id: "shared-work", favorite: true, favoriteFolderId: "b-only", favoriteFolderName: "B 专属" };
+      const scopeMoveLibraries = new Map([
+        ["http://scope-a.local", { works: [scopeMoveAWork] }],
+        ["http://scope-b.local", { works: [scopeMoveBWork] }]
+      ]);
+      const scopeMoveFeature = createScopeFeature(new Map([["/api/favorites/shared-work/folder", scopeAMoveReply]]), scopeMoveLibraries);
+      scopeMoveFeature.rememberFolders([scopeAFolder, scopeAPlannedFolder]);
+      const scopeMove = scopeMoveFeature.moveFavorite(scopeMoveAWork, "a-planned", () => scopeMoveCallbacks.push(activeScope)).catch((error) => error.message);
+      await tick();
+      activeScope = "http://scope-b.local";
+      scopeAMoveReply.reject(new Error("A move failed"));
+      const scopeMoveError = await scopeMove;
+
+      activeScope = "http://scope-a.local";
+      const queuedFirstReply = deferred();
+      const queuedCallbacks = [];
+      const queuedAWork = { id: "shared-work", favorite: true, favoriteFolderId: "a-default", favoriteFolderName: "A 默认" };
+      const queuedBWork = { id: "shared-work", favorite: true, favoriteFolderId: "b-only", favoriteFolderName: "B 专属" };
+      const queuedLibraries = new Map([
+        ["http://scope-a.local", { works: [queuedAWork] }],
+        ["http://scope-b.local", { works: [queuedBWork] }]
+      ]);
+      const queuedFeature = createScopeFeature(new Map([["/api/favorites/shared-work/folder", queuedFirstReply]]), queuedLibraries);
+      queuedFeature.rememberFolders([scopeAFolder, scopeAPlannedFolder]);
+      const queuedFirstMove = queuedFeature.moveFavorite(queuedAWork, "a-planned", () => queuedCallbacks.push(activeScope)).catch((error) => error.message);
+      const queuedSecondMove = queuedFeature.moveFavorite(queuedAWork, "a-default", () => queuedCallbacks.push(activeScope)).catch((error) => error.message);
+      await tick();
+      activeScope = "http://scope-b.local";
+      queuedFirstReply.reject(new Error("A first move failed"));
+      const [queuedFirstError, queuedSecondError] = await Promise.all([queuedFirstMove, queuedSecondMove]);
+
       return {
         folders: createFeature.folders().map((folder) => folder.id),
         rollbackWork: { ...rollbackWork },
@@ -1137,7 +1202,20 @@ async function verifyAndroidFavoriteFolders(browser) {
         userUpdates,
         refreshCallsAfterFailure,
         refreshGetCalls,
-        refreshFolders: refreshFeature.folders()
+        refreshFolders: refreshFeature.folders(),
+        scopeMoveAWork: { ...scopeMoveAWork },
+        scopeMoveBWork: { ...scopeMoveBWork },
+        scopeMoveCallbacks,
+        scopeMoveError,
+        scopeToggleAWork: { ...scopeToggleAWork },
+        scopeToggleBWork: { ...scopeToggleBWork },
+        scopeToggleCallbacks,
+        scopeToggleError,
+        queuedAWork: { ...queuedAWork },
+        queuedBWork: { ...queuedBWork },
+        queuedCallbacks,
+        queuedFirstError,
+        queuedSecondError
       };
     });
     assert(mutationRace.folders.includes("new"), "an older Android mutation response must merge instead of removing a concurrently created folder");
@@ -1153,6 +1231,19 @@ async function verifyAndroidFavoriteFolders(browser) {
     assert.equal(mutationRace.refreshGetCalls, 4, "Android favorite refreshes must follow stale and failed GETs with the next required authoritative request");
     assert.equal(new Set(mutationRace.refreshFolders.map((folder) => folder.id)).size, mutationRace.refreshFolders.length, "Android authoritative favorite state must not retain duplicate folders");
     assert.equal(mutationRace.refreshFolders.find((folder) => folder.id === "default")?.count, 2, "Android favorite counts must converge to the final authoritative refresh");
+    assert.equal(mutationRace.scopeToggleError, "服务器已切换，请重新操作", "a successful old-server toggle response must become a scope-switch failure");
+    assert.deepEqual(mutationRace.scopeToggleAWork, { id: "shared-work", favorite: false, favoriteFolderId: "", favoriteFolderName: "" }, "an old-server toggle must restore its passed work object after a scope switch");
+    assert.deepEqual(mutationRace.scopeToggleBWork, { id: "shared-work", favorite: true, favoriteFolderId: "b-only", favoriteFolderName: "B 专属" }, "an old-server toggle must not sync a same-ID work in the current server library");
+    assert.deepEqual(mutationRace.scopeToggleCallbacks, ["http://scope-a.local"], "an old-server toggle must not call a UI callback after scope switch");
+    assert.equal(mutationRace.scopeMoveError, "A move failed", "a failed old-server move must preserve its request failure after a scope switch");
+    assert.deepEqual(mutationRace.scopeMoveAWork, { id: "shared-work", favorite: true, favoriteFolderId: "a-default", favoriteFolderName: "A 默认" }, "an old-server move must restore its passed work object after a scope switch");
+    assert.deepEqual(mutationRace.scopeMoveBWork, { id: "shared-work", favorite: true, favoriteFolderId: "b-only", favoriteFolderName: "B 专属" }, "an old-server move must not sync a same-ID work in the current server library");
+    assert.deepEqual(mutationRace.scopeMoveCallbacks, ["http://scope-a.local"], "an old-server move must not call a UI callback after scope switch");
+    assert.equal(mutationRace.queuedFirstError, "A first move failed", "an in-flight old-server move must preserve its request failure after the server changes");
+    assert.equal(mutationRace.queuedSecondError, "服务器已切换，请重新操作", "a queued old-server move must reject before applying optimistic state after the server changes");
+    assert.deepEqual(mutationRace.queuedAWork, { id: "shared-work", favorite: true, favoriteFolderId: "a-default", favoriteFolderName: "A 默认" }, "a queued old-server move must leave the passed work restored instead of optimistic");
+    assert.deepEqual(mutationRace.queuedBWork, { id: "shared-work", favorite: true, favoriteFolderId: "b-only", favoriteFolderName: "B 专属" }, "queued old-server moves must not mutate the current server library");
+    assert.deepEqual(mutationRace.queuedCallbacks, ["http://scope-a.local"], "queued old-server moves must not call a current-server UI callback");
   } finally {
     await page.close();
   }

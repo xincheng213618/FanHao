@@ -152,18 +152,18 @@ export function createFavoriteFolderFeature(context = {}) {
       const snapshot = favoriteSnapshot(work);
       work.favorite = !snapshot.favorite;
       if (!work.favorite) applyFavoriteFolder(work, null);
-      onOptimisticChange(work);
+      notifyWorkChange(mutation, work, onOptimisticChange);
       try {
         const data = await request(`/api/favorites/${encodeURIComponent(work.id)}`, { method: "POST", body: {} });
         applyFavoritePayload(work, data);
-        syncLibraryWork(work);
+        syncLibraryWork(mutation, work);
         rememberFolders(data?.folders, { merge: true });
         await invalidateWork(work.id);
         return data;
       } catch (error) {
         restoreFavoriteSnapshot(work, snapshot);
-        syncLibraryWork(work);
-        onOptimisticChange(work);
+        syncLibraryWork(mutation, work);
+        notifyWorkChange(mutation, work, onOptimisticChange);
         throw error;
       }
     });
@@ -175,21 +175,21 @@ export function createFavoriteFolderFeature(context = {}) {
       const snapshot = favoriteSnapshot(work);
       const target = folders.find((folder) => folder.id === String(folderId || ""));
       applyFavoriteFolder(work, target ? { folderId: target.id, folderName: target.name } : null);
-      onOptimisticChange(work);
+      notifyWorkChange(mutation, work, onOptimisticChange);
       try {
         const data = await request(`/api/favorites/${encodeURIComponent(work.id)}/folder`, {
           method: "PUT",
           body: { folderId }
         });
         applyFavoritePayload(work, { favorite: true, favoriteFolder: data?.favorite });
-        syncLibraryWork(work);
+        syncLibraryWork(mutation, work);
         rememberFolders(data?.folders, { merge: true });
         await invalidateWork(work.id);
         return data;
       } catch (error) {
         restoreFavoriteSnapshot(work, snapshot);
-        syncLibraryWork(work);
-        onOptimisticChange(work);
+        syncLibraryWork(mutation, work);
+        notifyWorkChange(mutation, work, onOptimisticChange);
         throw error;
       }
     });
@@ -443,9 +443,18 @@ export function createFavoriteFolderFeature(context = {}) {
     }
   }
 
-  function syncLibraryWork(work) {
+  function notifyWorkChange(mutation, work, onOptimisticChange) {
+    if (isMutationInActiveScope(mutation)) onOptimisticChange(work);
+  }
+
+  function syncLibraryWork(mutation, work) {
+    if (!isMutationInActiveScope(mutation)) return;
     const libraryWork = context.getLibrary?.()?.works?.find((item) => item.id === work.id);
     if (libraryWork && libraryWork !== work) Object.assign(libraryWork, favoriteSnapshot(work));
+  }
+
+  function isMutationInActiveScope(mutation) {
+    return mutation.scope === ensureScope();
   }
 
   function syncFavoriteCount() {
