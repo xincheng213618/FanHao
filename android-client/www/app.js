@@ -9,7 +9,7 @@ import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-m
 import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=20260712-module-chrome-03";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
-import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=20260811-custom-collections-01";
+import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=20260812-collection-review-02";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);

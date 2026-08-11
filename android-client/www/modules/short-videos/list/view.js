@@ -3,7 +3,7 @@ import { formatCompact } from "../../../js/format.js";
 import { DEFAULT_SORT, initials } from "../shared.js?v=20260730-mobile-sync-01";
 import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=20260811-android-author-status-01";
 import { renderFollowingAuthorTools } from "./following-view.js?v=20260730-mobile-sync-01";
-import { appendCollectionCardAction } from "../collections/card-action.js?v=20260811-custom-collections-01";
+import { appendCollectionCardAction } from "../collections/card-action.js?v=20260812-collection-review-02";
 export function createShortVideoListView(context = {}) {
   const { els, getActiveUrl, goBack, listState, openSettings, showView } = context;
   const appendVisibleAuthors = (...args) => context.appendVisibleAuthors(...args);
