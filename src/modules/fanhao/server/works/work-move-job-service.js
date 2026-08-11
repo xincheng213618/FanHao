@@ -470,6 +470,10 @@ export function createWorkMoveJobService({
         scheduledId = existing.id;
         response = publicJob(db.prepare("SELECT * FROM work_move_jobs WHERE id = ?").get(existing.id));
       } else {
+        // Check a forged/stale Android target only after the exact durable
+        // idempotency lookup.  A replay must return its original job even if
+        // staging has already made the destination directory exist.
+        if (requestBody.androidCommand) adminCoreMutationService.assertWorkMoveTarget(normalizedWorkId, requestBody.personId);
         const conflicting = db.prepare(`
           SELECT * FROM work_move_jobs
           WHERE work_id = ? AND status IN ('queued', 'running', 'cleanup_pending', 'rollback_pending', 'blocked')

@@ -41,10 +41,9 @@ export function createWorkMutationService({
   }
 
   function moveToPerson(workId, body, options = {}) {
-    // Android may only refer to a server-approved person.  The picker is
-    // advisory and can be stale or forged, so re-run the same selection rule
-    // at the command boundary before the journal prepares its move plan.
-    if (options.android) adminCoreMutationService.assertWorkMoveTarget(workId, body?.personId);
+    // The job service applies the Android target policy only while creating a
+    // new journal row.  Existing idempotency rows must replay unchanged even
+    // after their own worker has staged the destination directory.
     return publicMoveJobPayload(workMoveJobService.start(workId, body, { android: Boolean(options.android) }));
   }
 

@@ -711,6 +711,22 @@ async function verifyActualAdminSqliteCommit() {
   assert.ok(bulkTargets.candidates.some((candidate) => candidate.id === "10"), "bulk fallback must still discover DB-only person folders");
   assert.equal(fallbackLookups, 0, "fresh target selection must not perform one core-person fallback query per DB-only person");
 
+  const androidReplayJobService = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
+  const androidReplayMutationService = createWorkMutationService({ adminCoreMutationService: admin, workMoveJobService: androidReplayJobService });
+  const replayBody = { personId: "2", idempotencyKey: "android-staged-replay" };
+  const firstAndroidJob = androidReplayMutationService.moveToPerson("1", replayBody, { android: true });
+  await fs.promises.mkdir(fixture.target, { recursive: true });
+  const replayedAndroidJob = androidReplayMutationService.moveToPerson("1", replayBody, { android: true });
+  assert.equal(replayedAndroidJob.job.id, firstAndroidJob.job.id, "Android replay must return its exact durable job after staging created the destination");
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM work_move_jobs").get().count, 1, "Android replay after staging must not create a second journal row");
+  db.prepare("UPDATE work_move_jobs SET status = 'failed', phase = 'validation' WHERE id = ?").run(firstAndroidJob.job.id);
+  const requeuedAndroidJob = androidReplayMutationService.moveToPerson("1", replayBody, { android: true });
+  assert.equal(requeuedAndroidJob.job.id, firstAndroidJob.job.id, "a failed Android journal must requeue its exact durable command instead of creating a new one");
+  assert.equal(requeuedAndroidJob.job.status, "queued");
+  await androidReplayJobService.close();
+  db.prepare("DELETE FROM work_move_jobs").run();
+  await fs.promises.rm(fixture.target, { recursive: true, force: true });
+
   // Warm the picker cache, then introduce a second person resolving to exactly
   // the same directory.  The Android command must rebuild target ownership,
   // reject it synchronously, and leave no durable journal row behind.
