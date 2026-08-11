@@ -310,12 +310,14 @@ export function createActorMovieService({
       for (const codeKey of batch) rowsByCodeKey.set(codeKey, loaded.get(codeKey) || null);
     }
 
-    if (!queryFailed && codeKeys.some((codeKey) => !rowsByCodeKey.get(codeKey))) {
+    if (!queryFailed && pending.length) {
       try {
         const looseRows = legacyLooseInfoRowsByCodeKey(actorMovieInfoByCodeKeyCache);
         for (const codeKey of codeKeys) {
-          if (!rowsByCodeKey.get(codeKey) && looseRows.has(codeKey)) {
-            rowsByCodeKey.set(codeKey, looseRows.get(codeKey));
+          const directRow = rowsByCodeKey.get(codeKey);
+          const legacyRow = looseRows.get(codeKey);
+          if (legacyRow && (!directRow || compareActorMovieInfoRowOrder(legacyRow, directRow) < 0)) {
+            rowsByCodeKey.set(codeKey, legacyRow);
           }
         }
       } catch (error) {
@@ -344,6 +346,19 @@ export function createActorMovieService({
     }
 
     return selectedInfoRowsForWorks(works, rowsByCodeKey);
+  }
+
+  function compareActorMovieInfoRowOrder(left, right) {
+    const personResult = compareSqliteBinaryText(left?.person_id, right?.person_id);
+    if (personResult) return personResult;
+    const leftPosition = left?.position_index == null ? 999999 : Number(left.position_index);
+    const rightPosition = right?.position_index == null ? 999999 : Number(right.position_index);
+    if (leftPosition !== rightPosition) return leftPosition - rightPosition;
+    return compareSqliteBinaryText(left?.code, right?.code);
+  }
+
+  function compareSqliteBinaryText(left, right) {
+    return Buffer.compare(Buffer.from(String(left ?? ""), "utf8"), Buffer.from(String(right ?? ""), "utf8"));
   }
 
   function legacyLooseInfoRowsByCodeKey(cache) {

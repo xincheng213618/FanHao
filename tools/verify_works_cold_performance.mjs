@@ -175,6 +175,7 @@ function verifySemanticEquivalence() {
     insertActorRow(db, { id: 1, personId: 2, code: "ABC-001", title: "person 2 / position 0", position: 0 });
     insertActorRow(db, { id: 2, personId: 10, code: "abc-001", title: "person 10 / position 5", position: 5 });
     insertActorRow(db, { id: 3, personId: 10, code: "ABC_001", title: "person 10 / position 1", position: 1 });
+    insertActorRow(db, { id: 17, personId: 10, code: "ABC-001", title: "person 10 / position 1 / code first", position: 1 });
     db.prepare("INSERT INTO people (id, name) VALUES (11, 'Person 11')").run();
     db.prepare(`
       INSERT INTO work_people (work_id, person_id, role, sort_order, source, created_at, updated_at)
@@ -189,6 +190,10 @@ function verifySemanticEquivalence() {
     insertActorRow(db, { id: 10, personId: 9, code: "PLS+002", codeSearch: "pls+002", title: "legacy plus code_search" });
     insertActorRow(db, { id: 11, personId: 10, code: "COL:003", codeSearch: "col:003", title: "legacy colon code_search" });
     insertActorRow(db, { id: 12, personId: 11, code: "BRK[004]", codeSearch: "brk[004]", title: "legacy bracketed code_search" });
+    insertActorRow(db, { id: 13, personId: 1, code: "DUP-001", codeSearch: "", title: "legacy empty first", position: 5 });
+    insertActorRow(db, { id: 14, personId: 2, code: "DUP-001", codeSearch: "dup001", title: "canonical second", position: 0 });
+    insertActorRow(db, { id: 15, personId: 1, code: "UPC-001", codeSearch: "UPC001", title: "legacy uppercase first", position: 5 });
+    insertActorRow(db, { id: 16, personId: 2, code: "UPC-001", codeSearch: "upc001", title: "uppercase canonical second", position: 0 });
 
     db.exec("BEGIN");
     for (let index = 0; index < 1_205; index += 1) {
@@ -208,6 +213,8 @@ function verifySemanticEquivalence() {
       { id: "local-plus", title: "PLS-002", infoSummary: null },
       { id: "local-colon", title: "COL-003", infoSummary: null },
       { id: "local-bracketed", title: "BRK-004", infoSummary: null },
+      { id: "local-empty-first-duplicate", title: "DUP-001", infoSummary: null },
+      { id: "local-uppercase-first-duplicate", title: "UPC-001", infoSummary: null },
       { id: "local-empty", title: "", infoSummary: null },
       { id: "local-invalid", title: "1080p", infoSummary: null },
       ...Array.from({ length: 1_205 }, (_, index) => ({
@@ -229,7 +236,7 @@ function verifySemanticEquivalence() {
     assert.deepEqual(optimizedResult, legacyResult, "narrow enrichment must preserve the old response bytes");
 
     const parsed = JSON.parse(optimizedResult);
-    assert.equal(parsed[0].infoSummary.title, "person 10 / position 1", "person text order and then position must select the same first row as rowsByCodeKey");
+    assert.equal(parsed[0].infoSummary.title, "person 10 / position 1 / code first", "person text order, position, and binary w.code order must select the same first row as rowsByCodeKey");
     assert.equal(parsed[1].infoSummary.title, "legacy empty code_search", "empty legacy code_search must still use the parsed w.code fallback");
     assert.equal(parsed[2].infoSummary.title, "legacy uppercase code_search", "uppercase stored code_search must preserve old normalization semantics");
     assert.equal(parsed[3].infoSummary.title, "legacy mixed-case code_search", "mixed-case stored code_search must preserve old normalization semantics");
@@ -239,8 +246,16 @@ function verifySemanticEquivalence() {
     assert.equal(parsed[7].infoSummary.title, "legacy plus code_search", "plus-delimited stored code_search must preserve old normalization semantics");
     assert.equal(parsed[8].infoSummary.title, "legacy colon code_search", "colon-delimited stored code_search must preserve old normalization semantics");
     assert.equal(parsed[9].infoSummary.title, "legacy bracketed code_search", "bracketed stored code_search must preserve old normalization semantics");
-    assert.equal(parsed[10].infoSummary, null, "empty local codes must remain unenriched");
-    assert.equal(parsed[11].infoSummary, null, "invalid local codes must remain unenriched");
+    assert.equal(parsed[10].infoSummary.title, "legacy empty first", "legacy empty-key candidates must compete with direct canonical rows using old person ordering");
+    assert.equal(parsed[10].infoSummary.javdbUrl, "https://example.test/works/13");
+    assert.equal(parsed[10].infoSummary.ratingCount, 13);
+    assert.equal(parsed[10].infoSummary.releaseDate, "2025-01-14");
+    assert.equal(parsed[11].infoSummary.title, "legacy uppercase first", "legacy uppercase candidates must compete with direct canonical rows using old person ordering");
+    assert.equal(parsed[11].infoSummary.javdbUrl, "https://example.test/works/15");
+    assert.equal(parsed[11].infoSummary.ratingCount, 15);
+    assert.equal(parsed[11].infoSummary.releaseDate, "2025-01-16");
+    assert.equal(parsed[12].infoSummary, null, "empty local codes must remain unenriched");
+    assert.equal(parsed[13].infoSummary, null, "invalid local codes must remain unenriched");
     assert.equal(parsed.at(-1).infoSummary, null, "duplicate local code keys must enrich only the old first local work");
 
     const batchQueries = queryLog.filter((sql) => sql.includes("WHERE w.code_search IN"));
@@ -280,6 +295,52 @@ function verifySemanticEquivalence() {
     assert(recoveryLog.filter((sql) => sql.includes("WHERE w.code_search IN")).length >= 2, "a failed batch must not become a negative-cache hit");
   } finally {
     db.close();
+  }
+}
+
+function verifyDirectAndLegacyCandidateCompetition() {
+  for (const scenario of [
+    { name: "empty-first", code: "DUP-001", legacyCodeSearch: "", directCodeSearch: "dup001", legacyTitle: "legacy empty first" },
+    { name: "uppercase-first", code: "UPC-001", legacyCodeSearch: "UPC001", directCodeSearch: "upc001", legacyTitle: "legacy uppercase first" }
+  ]) {
+    const db = createFixtureDb();
+    try {
+      insertActorRow(db, {
+        id: 1,
+        personId: 1,
+        code: scenario.code,
+        codeSearch: scenario.legacyCodeSearch,
+        title: scenario.legacyTitle,
+        position: 5
+      });
+      insertActorRow(db, {
+        id: 2,
+        personId: 2,
+        code: scenario.code,
+        codeSearch: scenario.directCodeSearch,
+        title: "canonical second",
+        position: 0
+      });
+      const works = [{ id: `local-${scenario.name}`, title: scenario.code, infoSummary: null }];
+      const legacy = createActorService(db);
+      const queryLog = [];
+      const optimized = createActorService(db, { queryLog });
+      const legacyResult = enrichedBytes(legacy, works, false);
+      const optimizedResult = enrichedBytes(optimized, works, true);
+      assert.deepEqual(optimizedResult, legacyResult, `${scenario.name} direct and legacy candidates must preserve old response bytes`);
+      const info = JSON.parse(optimizedResult)[0].infoSummary;
+      assert.equal(info.title, scenario.legacyTitle);
+      assert.equal(info.javdbUrl, "https://example.test/works/1");
+      assert.equal(info.ratingCount, 1);
+      assert.equal(info.releaseDate, "2025-01-02");
+      assert.equal(
+        queryLog.filter((sql) => sql.includes("w.code_search GLOB '*[^A-Za-z0-9]*'")).length,
+        1,
+        `${scenario.name} must execute compatibility competition even when the indexed direct lookup hits`
+      );
+    } finally {
+      db.close();
+    }
   }
 }
 
@@ -740,6 +801,7 @@ if (realDbArgIndex >= 0) {
   });
 } else {
   verifySemanticEquivalence();
+  verifyDirectAndLegacyCandidateCompetition();
   verifyInvalidationAndStaleFallback();
   await verifyProductionShapeAndHttpGate();
   console.log("works cold-path performance verification passed");
