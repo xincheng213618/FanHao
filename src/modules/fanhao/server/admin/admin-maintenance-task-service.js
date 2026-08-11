@@ -131,9 +131,9 @@ export function createAdminMaintenanceTaskService({
     return { ok: true, task: adminTaskService.publicTask(task) };
   }
 
-  function coverCacheStatusPayload(limitValue) {
+  async function coverCacheStatusPayload(limitValue) {
     const sampleLimit = clampInteger(limitValue, 8, 0, 50);
-    return coverGenerationStatus(sampleLimit);
+    return await coverGenerationStatus(sampleLimit);
   }
 
   return {

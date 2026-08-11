@@ -226,7 +226,11 @@ export async function routeAdminApi(req, res, url, deps) {
 
   if (url.pathname === "/api/admin/cover-cache-status" && req.method === "GET") {
     if (!requireLocalAdmin(req, res)) return true;
-    sendJson(res, 200, adminMaintenanceTaskService.coverCacheStatusPayload(url.searchParams.get("limit")));
+    try {
+      sendJson(res, 200, await adminMaintenanceTaskService.coverCacheStatusPayload(url.searchParams.get("limit")));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "读取封面缓存状态失败" });
+    }
     return true;
   }
 

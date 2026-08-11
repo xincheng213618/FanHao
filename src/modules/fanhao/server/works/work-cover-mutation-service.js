@@ -1,4 +1,7 @@
+import fs from "node:fs";
 import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame } from "../../../../../lib/cover-frame.js";
+
+export const COVER_STATUS_STAT_CONCURRENCY = 32;
 
 export function createWorkCoverMutationService({
   ffmpegPath,
@@ -11,6 +14,7 @@ export function createWorkCoverMutationService({
   publicWorkCover,
   resetWorkSearch,
   safeStat,
+  stat = fs.promises.stat,
   videoProbeService,
   workCoverRow,
   workInfoService
@@ -40,7 +44,36 @@ export function createWorkCoverMutationService({
     return (work.videos || []).find((video) => safeStat(video.path)) || null;
   }
 
-  function generationStatus(sampleLimit = 8) {
+  async function chooseCoverVideoForStatus(work) {
+    for (const video of work.videos || []) {
+      try {
+        await stat(video.path);
+        return video;
+      } catch {
+        // Match safeStat: any unreadable or missing path is not a usable video.
+      }
+    }
+    return null;
+  }
+
+  async function mapWithConcurrency(items, mapper) {
+    const results = new Array(items.length);
+    let nextIndex = 0;
+    const workerCount = Math.min(COVER_STATUS_STAT_CONCURRENCY, items.length);
+
+    async function worker() {
+      while (nextIndex < items.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await mapper(items[index]);
+      }
+    }
+
+    await Promise.all(Array.from({ length: workerCount }, worker));
+    return results;
+  }
+
+  async function generationStatus(sampleLimit = 8) {
     const cachedCoverIds = cachedWorkCoverIds();
     const candidates = getWorks()
       .filter((work) => !work.missingLocal)
@@ -49,11 +82,12 @@ export function createWorkCoverMutationService({
       .filter((work) => (work.videos || []).length > 0)
       .sort((a, b) => String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || "")));
 
+    const candidateVideos = await mapWithConcurrency(candidates, chooseCoverVideoForStatus);
     const sample = [];
     let ready = 0;
     let missingVideo = 0;
-    for (const work of candidates) {
-      const video = chooseCoverVideo(work);
+    for (const [index, work] of candidates.entries()) {
+      const video = candidateVideos[index];
       if (video) {
         ready += 1;
         if (sample.length < sampleLimit) {
