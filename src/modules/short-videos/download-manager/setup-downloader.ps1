@@ -49,7 +49,7 @@ function Get-Sha256Hex {
   }
 }
 
-$fingerprintParts = @("fanhao-douyin-downloader-serve-v4", "host-wheelhouse-plus-server-extra")
+$fingerprintParts = @("fanhao-douyin-downloader-serve-v5", "host-wheelhouse-plus-server-extra")
 foreach ($dependencyFile in $DependencyFiles) {
   $dependencyHash = Get-Sha256Hex -LiteralPath $dependencyFile
   $fingerprintParts += "$([System.IO.Path]::GetFileName($dependencyFile))=$dependencyHash"
@@ -179,8 +179,10 @@ if ($NeedsInstall) {
 
   $WheelhouseDir = Join-Path $VenvDir ".fanhao-wheelhouse"
   New-Item -ItemType Directory -Force -Path $WheelhouseDir | Out-Null
-  $ServerDependencies = @("fastapi>=0.100", "uvicorn>=0.23", "pydantic>=2.0")
-  $BuildDependencies = @("setuptools>=68", "wheel")
+  $ServerDependencies = @(
+    "fastapi>=0.133.0", "starlette>=1.3.1", "uvicorn>=0.23", "pydantic>=2.7.0"
+  )
+  $BuildDependencies = @("pip>=26.1.2", "setuptools>=83.0.0", "wheel>=0.46.2")
   $DownloadArguments = @(
     "-m", "pip", "download", "--disable-pip-version-check", "--no-input",
     "--timeout", "30", "--retries", "3", "--dest", $WheelhouseDir,
