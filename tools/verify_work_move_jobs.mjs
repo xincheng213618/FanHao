@@ -219,9 +219,11 @@ async function verifySuccessfulMoveAndIdempotency() {
   const fixture = await createFixture("success", 12);
   const db = createDatabase(fixture.root, fixture.source);
   const admin = createAdminFixture(db, fixture);
+  const lifecycle = [];
   const service = createWorkMoveJobService({
     adminCoreMutationService: admin,
     getCoreDb: () => db,
+    log: (line) => lifecycle.push(String(line)),
     workerDataPatch: { forceCopy: true, delayPerFileMs: 8 }
   });
   const first = service.start("1", { personId: "target", idempotencyKey: "success-fixture" });
@@ -245,6 +247,8 @@ async function verifySuccessfulMoveAndIdempotency() {
   assert.equal(databaseRow.person_id, "target");
   assert.equal(admin.imageCommits, 1, "the attached image phase must complete before source cleanup");
   assert.equal(admin.releasedReservationJobs.has(first.id), true, "completed jobs must release their own durable path reservation");
+  assert.ok(lifecycle.some((line) => line.includes('"event":"completed"')));
+  assert.equal(lifecycle.some((line) => line.includes(fixture.source)), false, "completed lifecycle logs must not expose absolute paths");
   await service.close();
   db.close();
 }
@@ -1066,9 +1070,11 @@ async function verifyRollbackOnDatabaseFailure() {
   const fixture = await createFixture("rollback", 5);
   const db = createDatabase(fixture.root, fixture.source);
   const admin = createAdminFixture(db, fixture, { failCommit: true });
+  const lifecycle = [];
   const service = createWorkMoveJobService({
     adminCoreMutationService: admin,
     getCoreDb: () => db,
+    log: (line) => lifecycle.push(String(line)),
     workerDataPatch: { forceCopy: true }
   });
   const job = service.start("1", { personId: "target", idempotencyKey: "rollback-fixture" });
@@ -1079,6 +1085,8 @@ async function verifyRollbackOnDatabaseFailure() {
   assert.equal(fs.existsSync(fixture.target), false, "database failure must remove the prepared target copy");
   assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.source));
   assert.equal(admin.reservation?.released, true, "rolled-back jobs must release their durable path reservation");
+  assert.ok(lifecycle.some((line) => line.includes('"event":"rolled_back"')));
+  assert.equal(lifecycle.some((line) => line.includes(fixture.source)), false, "rolled-back lifecycle logs must not expose absolute paths");
   await service.close();
   db.close();
 }
@@ -1156,9 +1164,11 @@ async function verifySilentWorkerExitFails() {
   await fs.promises.writeFile(silentWorkerPath, "process.exit(0);\n", "utf8");
   const db = createDatabase(fixture.root, fixture.source);
   const admin = createAdminFixture(db, fixture);
+  const lifecycle = [];
   const service = createWorkMoveJobService({
     adminCoreMutationService: admin,
     getCoreDb: () => db,
+    log: (line) => lifecycle.push(String(line)),
     workerUrl: pathToFileURL(silentWorkerPath)
   });
   const started = service.start("1", { personId: "target", idempotencyKey: "silent-worker" });
@@ -1166,6 +1176,8 @@ async function verifySilentWorkerExitFails() {
   assert.match(failed.error, /没有返回完成消息/);
   assert.equal(fs.existsSync(fixture.source), true);
   assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.source));
+  assert.ok(lifecycle.some((line) => line.includes('"event":"failed"')));
+  assert.equal(lifecycle.some((line) => line.includes(fixture.source)), false, "failed lifecycle logs must not expose absolute paths");
   await service.close();
   db.close();
 }
@@ -1342,6 +1354,249 @@ async function verifyExpiredLeaseTakeoverFencesOldWorker() {
   await Promise.all([first.close(), second.close()]);
   db2.close();
   db1.close();
+}
+
+async function verifyAliveOwnerHandoffTimesOutBlocked() {
+  const fixture = await createFixture("alive-owner-timeout", 2);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const dormant = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    log: () => {},
+    schedule: () => {}
+  });
+  const started = dormant.start("1", { personId: "target", idempotencyKey: "alive-owner-timeout" });
+  const staleOwner = `move-owner-${process.pid}-stale-fixture`;
+  const plan = { ...admin.plan, jobId: started.id };
+  db.prepare(`
+    UPDATE work_move_jobs
+    SET status = 'running', phase = 'prepared', plan_json = ?, owner_id = ?,
+        lease_until = '2000-01-01T00:00:00.000Z', version = version + 1
+    WHERE id = ?
+  `).run(JSON.stringify(plan), staleOwner, started.id);
+  await dormant.close();
+
+  let workerStarts = 0;
+  const lifecycle = [];
+  class MustNotStartWorker extends Worker {
+    constructor(...args) {
+      workerStarts += 1;
+      super(...args);
+    }
+  }
+  const recovered = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    handoffTimeoutMs: 90,
+    leaseDurationMs: 300,
+    log: (message) => lifecycle.push(String(message)),
+    workerClass: MustNotStartWorker
+  });
+  const blocked = await waitForJob(recovered, started.id, ["blocked"], 2_000);
+  assert.equal(blocked.phase, "handoff_timeout");
+  assert.equal(blocked.errorCode, "WORK_MOVE_HANDOFF_TIMEOUT");
+  assert.match(blocked.error, /双重文件操作|人工处理/);
+  assert.equal(workerStarts, 0, "an alive PID without owner acknowledgement must never start a new worker");
+  await waitForCondition(
+    () => db.prepare("SELECT owner_id, lease_until FROM work_move_jobs WHERE id = ?").get(started.id).owner_id === "",
+    "blocked handoff must release the journal lease"
+  );
+  const parked = db.prepare("SELECT owner_id, lease_until, version FROM work_move_jobs WHERE id = ?").get(started.id);
+  await new Promise((resolve) => setTimeout(resolve, 360));
+  const afterHeartbeatWindow = db.prepare("SELECT owner_id, lease_until, version FROM work_move_jobs WHERE id = ?").get(started.id);
+  assert.equal(afterHeartbeatWindow.owner_id, "");
+  assert.equal(afterHeartbeatWindow.lease_until, "");
+  assert.equal(afterHeartbeatWindow.version, parked.version, "blocked handoff must stop renewing its lease");
+  assert.ok(lifecycle.some((line) => line.includes('"event":"blocked"') && line.includes("WORK_MOVE_HANDOFF_TIMEOUT")));
+  assert.equal(lifecycle.some((line) => line.includes(fixture.source)), false, "structured lifecycle logs must not expose absolute media paths");
+  await recovered.close();
+  db.close();
+}
+
+async function verifyRetryCasBusyAndBlockedContract() {
+  const fixture = await createFixture("retry-contract", 1);
+  const db = createDatabase(fixture.root, fixture.source);
+  db.exec("PRAGMA busy_timeout = 20");
+  const admin = createAdminFixture(db, fixture);
+  const service = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    log: () => {},
+    schedule: () => {}
+  });
+  const started = service.start("1", { personId: "target", idempotencyKey: "retry-contract" });
+  db.prepare("UPDATE work_move_jobs SET status = 'failed', phase = 'validation', error = 'fixture failed', version = version + 1 WHERE id = ?").run(started.id);
+  const before = db.prepare("SELECT version, attempts FROM work_move_jobs WHERE id = ?").get(started.id);
+  const retried = service.retry(started.id);
+  const after = db.prepare("SELECT version, attempts FROM work_move_jobs WHERE id = ?").get(started.id);
+  assert.equal(retried.status, "queued");
+  assert.equal(after.version, before.version + 1, "retry must advance the CAS version");
+  assert.equal(after.attempts, before.attempts + 1);
+
+  db.prepare("UPDATE work_move_jobs SET status = 'failed', phase = 'validation', version = version + 1 WHERE id = ?").run(started.id);
+  const competingDb = new DatabaseSync(path.join(fixture.root, "fixture.sqlite"));
+  competingDb.exec("PRAGMA busy_timeout = 20; BEGIN IMMEDIATE");
+  assert.throws(
+    () => service.retry(started.id),
+    (error) => error?.statusCode === 503 && error?.code === "WORK_MOVE_SQLITE_BUSY" && error?.retryable === true,
+    "retry SQLITE_BUSY must become a stable retryable 503"
+  );
+  competingDb.exec("ROLLBACK");
+  competingDb.close();
+
+  const casDb = {
+    exec: db.exec.bind(db),
+    prepare(sql) {
+      const statement = db.prepare(sql);
+      if (!String(sql).includes("WHERE id = ? AND status = ? AND version = ?")) return statement;
+      return {
+        run(...args) {
+          db.prepare("UPDATE work_move_jobs SET version = version + 1 WHERE id = ?").run(args[1]);
+          return statement.run(...args);
+        }
+      };
+    }
+  };
+  const casService = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => casDb,
+    log: () => {},
+    schedule: () => {}
+  });
+  assert.throws(
+    () => casService.retry(started.id),
+    (error) => error?.statusCode === 409
+      && error?.code === "WORK_MOVE_RETRY_CONFLICT"
+      && error?.job?.id === started.id
+      && error?.job?.status === "failed",
+    "retry must fail closed when status/version changes before its CAS update"
+  );
+  assert.equal(db.prepare("SELECT status FROM work_move_jobs WHERE id = ?").get(started.id).status, "failed");
+  await casService.close();
+
+  db.prepare("UPDATE work_move_jobs SET status = 'blocked', phase = 'manual_review', error = 'fixture manual review', error_code = 'FIXTURE_BLOCKED', version = version + 1 WHERE id = ?").run(started.id);
+  assert.throws(
+    () => service.retry(started.id),
+    (error) => error?.statusCode === 409
+      && error?.code === "WORK_MOVE_MANUAL_INTERVENTION_REQUIRED"
+      && error?.job?.id === started.id
+      && error?.job?.status === "blocked",
+    "blocked retry must return an explicit manual-intervention conflict with the job"
+  );
+
+  let response = null;
+  await routeWorksApi(
+    { method: "POST" },
+    {},
+    new URL(`http://fixture/api/work-move-jobs/${started.id}/retry`),
+    {
+      notFound() {},
+      personDetailService: {},
+      readJsonBody: async () => ({}),
+      requireLocalAdmin: () => true,
+      requireTrustedFileMutation: () => true,
+      sendJson: (_res, status, payload) => { response = { status, payload }; },
+      workDetailService: {},
+      workMutationService: {
+        retryMoveJob(jobId) {
+          return { ok: true, job: service.retry(jobId) };
+        }
+      },
+      workQueryService: {}
+    }
+  );
+  assert.equal(response?.status, 409);
+  assert.equal(response?.payload?.code, "WORK_MOVE_MANUAL_INTERVENTION_REQUIRED");
+  assert.equal(response?.payload?.job?.id, started.id);
+  assert.equal(response?.payload?.job?.status, "blocked");
+
+  db.prepare("UPDATE work_move_jobs SET status = 'failed', phase = 'validation', error = 'old failure', error_code = 'OLD_FAILURE', version = version + 1 WHERE id = ?").run(started.id);
+  const restarted = service.start("1", { personId: "target", idempotencyKey: "retry-contract" });
+  assert.equal(restarted.id, started.id);
+  assert.equal(restarted.status, "queued");
+  assert.equal(restarted.error, "");
+  assert.equal(restarted.errorCode, "", "idempotent start revival must clear the previous terminal error code");
+  await service.close();
+  db.close();
+}
+
+async function verifyMoveJobListApiAndRedaction() {
+  const fixture = await createFixture("ops-list", 1);
+  const db = createDatabase(fixture.root, fixture.source);
+  const imageDbPath = path.join(fixture.root, "ops-images.sqlite");
+  db.exec(`
+    ATTACH DATABASE ${JSON.stringify(imageDbPath)} AS fanhao_images;
+    CREATE TABLE work_move_path_reservations (job_id TEXT PRIMARY KEY, released_at TEXT NOT NULL DEFAULT '');
+    CREATE TABLE fanhao_images.work_move_path_reservations (job_id TEXT PRIMARY KEY, released_at TEXT NOT NULL DEFAULT '');
+  `);
+  const service = createWorkMoveJobService({
+    adminCoreMutationService: createAdminFixture(db, fixture),
+    getCoreDb: () => db,
+    log: () => {},
+    now: () => "2026-08-11T12:00:00.000Z",
+    schedule: () => {}
+  });
+  const insert = db.prepare(`
+    INSERT INTO work_move_jobs (
+      id, request_key, work_id, person_id, status, phase, request_json, plan_json,
+      result_json, attempts, error, error_code, created_at, updated_at, finished_at
+    ) VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+  `);
+  const absoluteSecret = path.join(fixture.root, "private", "WORK-SECRET");
+  insert.run("ops-running", "ops-running-key", "1", "running", "copying", "{}", JSON.stringify({ oldDir: absoluteSecret }), "{}", "", "", "2026-08-11T11:40:00.000Z", "2026-08-11T11:45:00.000Z", "");
+  insert.run("ops-failed", "ops-failed-key", "2", "failed", "validation", JSON.stringify({ targetDirectory: absoluteSecret }), "", JSON.stringify({ oldPath: absoluteSecret }), `failed at C:\\media\\secret\\WORK-001 and ${absoluteSecret}`, "FIXTURE_FAILED", "2026-08-11T11:00:00.000Z", "2026-08-11T11:10:00.000Z", "2026-08-11T11:10:00.000Z");
+  insert.run("ops-completed", "ops-completed-key", "3", "completed", "completed", "{}", "", "{}", "", "", "2026-08-11T11:20:00.000Z", "2026-08-11T11:30:00.000Z", "2026-08-11T11:30:00.000Z");
+  insert.run("ops-rolled-back", "ops-rolled-back-key", "4", "rolled_back", "rolled_back", "{}", "", "{}", "old terminal", "FIXTURE_ROLLED_BACK", "2026-08-11T08:00:00.000Z", "2026-08-11T09:00:00.000Z", "2026-08-11T09:00:00.000Z");
+  db.prepare("INSERT INTO work_move_path_reservations(job_id) VALUES ('ops-running')").run();
+  db.prepare("INSERT INTO fanhao_images.work_move_path_reservations(job_id) VALUES ('ops-running')").run();
+
+  const listed = service.list({ status: "failed", workId: "2", limit: "10" });
+  assert.deepEqual(listed.jobs.map((job) => job.id), ["ops-failed"]);
+  assert.equal(listed.summary.active, 1);
+  assert.equal(listed.summary.failed, 1);
+  assert.equal(listed.summary.rolledBack, 1);
+  assert.equal(listed.summary.activeReservations, 1, "dual-schema reservation rows must count as one active job");
+  assert.equal(listed.summary.oldestOutstandingAgeMs, 50 * 60 * 1000, "terminal rolled_back jobs must not make outstanding age grow forever");
+  assert.equal(listed.jobs[0].error, "迁移未完成，请根据错误代码检查服务端日志。");
+  assert.equal(JSON.stringify(listed).includes("C:\\media\\secret"), false, "list API must replace stored errors with a safe message");
+  assert.equal(JSON.stringify(listed).includes(absoluteSecret), false, "list payload must not expose request, plan, result, or absolute paths");
+  assert.throws(() => service.list({ status: "not-a-status" }), (error) => error?.statusCode === 400 && error?.code === "WORK_MOVE_STATUS_INVALID");
+
+  let deniedCalls = 0;
+  let response = null;
+  const deps = {
+    notFound() {},
+    personDetailService: {},
+    readJsonBody: async () => ({}),
+    requireLocalAdmin: () => false,
+    requireTrustedFileMutation: () => true,
+    sendJson: (_res, status, payload) => { response = { status, payload }; },
+    workDetailService: {},
+    workMutationService: {
+      listMoveJobs(options) {
+        deniedCalls += 1;
+        return { ok: true, ...service.list(options) };
+      }
+    },
+    workQueryService: {}
+  };
+  await routeWorksApi({ method: "GET" }, {}, new URL("http://fixture/api/work-move-jobs?status=failed&workId=2&limit=10"), deps);
+  assert.equal(deniedCalls, 0, "list route must not query the journal when local-admin authorization fails");
+  deps.requireLocalAdmin = () => true;
+  await routeWorksApi({ method: "GET" }, {}, new URL("http://fixture/api/work-move-jobs?status=failed&workId=2&limit=10"), deps);
+  assert.equal(response?.status, 200);
+  assert.deepEqual(response?.payload?.jobs?.map((job) => job.id), ["ops-failed"]);
+  assert.equal(JSON.stringify(response.payload).includes(absoluteSecret), false);
+  deps.workMutationService.listMoveJobs = () => {
+    throw Object.assign(new Error("cannot open C:\\media\\secret\\journal.sqlite"), { statusCode: 500 });
+  };
+  await routeWorksApi({ method: "GET" }, {}, new URL("http://fixture/api/work-move-jobs"), deps);
+  assert.equal(response?.status, 500);
+  assert.equal(response?.payload?.code, "WORK_MOVE_LIST_FAILED");
+  assert.equal(JSON.stringify(response.payload).includes("C:\\media\\secret"), false, "list route failures must not echo internal database or media paths");
+  await service.close();
+  db.close();
 }
 
 async function verifyTargetParentJunctionSwapBlocksPublish() {
@@ -1757,8 +2012,11 @@ try {
   await verifyLeaseSchemaMigratesExistingJournal();
   await verifyLegacyPlanOutsideTrustedRootsFailsClosed();
   await verifyExpiredLeaseTakeoverFencesOldWorker();
+  await verifyAliveOwnerHandoffTimesOutBlocked();
   await verifyDatabaseLeasePreventsDoubleExecution();
   await verifySqliteBusyClaimRetriesAndHeartbeatRecovers();
+  await verifyRetryCasBusyAndBlockedContract();
+  await verifyMoveJobListApiAndRedaction();
   await verifyClosePreservesRollbackCheckpoint();
   await verifyClosePreservesCleanupCheckpoint();
   await verifyJunctionEscapeIsRejected();

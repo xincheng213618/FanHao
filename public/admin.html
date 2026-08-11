@@ -9,6 +9,7 @@
     <link rel="icon" href="/app-icon.svg?v=20260629-douban-cookie-01" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css?v=20260718-access-analytics-01" />
     <link rel="stylesheet" href="/modules/system/access-analytics.css?v=20260718-access-analytics-01" />
+    <link rel="stylesheet" href="/modules/system/work-move-ops-panel.css?v=20260811-work-move-ops-01" />
   </head>
   <body class="admin-page">
     <div class="admin-shell">
@@ -357,6 +358,37 @@
               <div class="admin-task-list board" id="adminTaskList"></div>
               <aside class="admin-task-detail" id="adminTaskDetail"></aside>
             </div>
+          </section>
+          <section class="admin-panel work-move-ops-panel" id="adminWorkMoveOps">
+            <div class="admin-panel-head">
+              <div>
+                <h2>作品迁移任务</h2>
+                <small>持久 journal、路径保留与人工阻断状态</small>
+              </div>
+              <button class="folder-button compact" type="button" data-work-move-refresh>刷新迁移任务</button>
+            </div>
+            <div class="work-move-ops-toolbar">
+              <label class="admin-field compact">
+                <span>状态</span>
+                <select data-work-move-status>
+                  <option value="">全部</option>
+                  <option value="queued,running,cleanup_pending,rollback_pending">活动</option>
+                  <option value="blocked">需人工处理</option>
+                  <option value="failed,rolled_back">失败 / 已回滚</option>
+                  <option value="completed">已完成</option>
+                </select>
+              </label>
+              <label class="admin-field compact">
+                <span>作品 ID</span>
+                <input type="search" data-work-move-work-id placeholder="精确筛选" autocomplete="off" />
+              </label>
+            </div>
+            <div class="work-move-summary" data-work-move-summary></div>
+            <div class="work-move-monitor">
+              <div class="work-move-job-list" data-work-move-list></div>
+              <aside class="work-move-job-detail" data-work-move-detail></aside>
+            </div>
+            <p class="admin-status" data-work-move-notice></p>
           </section>
         </section>
 

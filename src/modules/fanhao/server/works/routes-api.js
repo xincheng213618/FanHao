@@ -177,13 +177,41 @@ export async function routeWorksApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/work-move-jobs" && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      sendJson(res, 200, workMutationService.listMoveJobs({
+        status: url.searchParams.get("status") || "",
+        workId: url.searchParams.get("workId") || "",
+        limit: url.searchParams.get("limit") || ""
+      }));
+    } catch (error) {
+      const code = error.code || "WORK_MOVE_LIST_FAILED";
+      const safeMessage = code === "WORK_MOVE_STATUS_INVALID"
+        ? "迁移任务状态筛选无效"
+        : code === "WORK_MOVE_LIMIT_INVALID"
+          ? "迁移任务数量筛选无效"
+          : "读取作品迁移任务列表失败";
+      sendJson(res, error.statusCode || 500, {
+        error: safeMessage,
+        code
+      });
+    }
+    return true;
+  }
+
   const workMoveJobRetryMatch = /^\/api\/work-move-jobs\/([^/]+)\/retry$/.exec(url.pathname);
   if (workMoveJobRetryMatch && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       sendJson(res, 202, workMutationService.retryMoveJob(decodeURIComponent(workMoveJobRetryMatch[1])));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "恢复迁移任务失败" });
+      sendJson(res, error.statusCode || 500, {
+        error: error.message || "恢复迁移任务失败",
+        ...(error.code ? { code: error.code } : {}),
+        ...(error.retryable ? { retryable: true } : {}),
+        ...(error.job ? { job: error.job } : {})
+      });
     }
     return true;
   }

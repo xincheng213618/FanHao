@@ -1,0 +1,25 @@
+.work-move-ops-panel { margin-top: 16px; }
+.work-move-ops-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+.work-move-ops-toolbar .admin-field { min-width: 150px; }
+.work-move-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.work-move-summary > span { display: grid; gap: 2px; min-width: 90px; border: 1px solid #dbe3ea; border-radius: 8px; padding: 8px 10px; background: #f8fafc; }
+.work-move-summary small { color: #64748b; font-weight: 800; }
+.work-move-summary strong { color: #0f172a; font-size: 18px; }
+.work-move-monitor { display: grid; grid-template-columns: minmax(320px, .9fr) minmax(380px, 1.1fr); gap: 14px; align-items: start; }
+.work-move-job-list { display: grid; gap: 8px; max-height: 520px; overflow: auto; }
+.work-move-job-card { display: grid; gap: 6px; width: 100%; border: 1px solid #d7dde5; border-radius: 8px; padding: 11px; background: #fff; color: #172033; text-align: left; cursor: pointer; }
+.work-move-job-card.active { border-color: #0f766e; box-shadow: inset 3px 0 0 #0f766e; }
+.work-move-job-card-head,.work-move-detail-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.work-move-job-card-meta { color: #64748b; font-size: 12px; }
+.work-move-job-card-error { color: #b42318; font-size: 12px; overflow-wrap: anywhere; }
+.work-move-status { border-radius: 999px; padding: 3px 8px; background: #e2e8f0; color: #334155; font-size: 11px; white-space: nowrap; }
+.work-move-status.status-running,.work-move-status.status-queued { background: #dbeafe; color: #1d4ed8; }
+.work-move-status.status-completed { background: #dcfce7; color: #166534; }
+.work-move-status.status-blocked,.work-move-status.status-failed { background: #fee2e2; color: #991b1b; }
+.work-move-job-detail { position: sticky; top: 88px; display: grid; gap: 12px; border: 1px solid #d7dde5; border-radius: 8px; padding: 14px; background: #fff; }
+.work-move-job-detail dl { display: grid; grid-template-columns: 92px minmax(0,1fr); gap: 6px 10px; margin: 0; }
+.work-move-job-detail dt { color: #64748b; font-size: 12px; font-weight: 900; }
+.work-move-job-detail dd { margin: 0; overflow-wrap: anywhere; }
+.work-move-detail-error,.work-move-manual-note { margin: 0; border-radius: 8px; padding: 10px; background: #f8fafc; color: #475569; line-height: 1.55; }
+.work-move-manual-note { background: #fff1f2; color: #9f1239; }
+@media (max-width: 900px) { .work-move-monitor { grid-template-columns: 1fr; } .work-move-job-detail { position: static; } }

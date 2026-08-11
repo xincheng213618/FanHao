@@ -849,7 +849,8 @@ const personLibraryService = createPersonLibraryService({
 });
 const workMoveJobService = createWorkMoveJobService({
   adminCoreMutationService,
-  getCoreDb
+  getCoreDb,
+  log: (message) => console.info(message)
 });
 const adminPersonService = createAdminPersonService({
   actorMovieService,

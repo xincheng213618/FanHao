@@ -1,4 +1,5 @@
 import { createApiClient, addQueryParam } from "./api.js?v=20260701-gallery-merge-01";
+import { fetchWorkMoveJobWithBackoff } from "../modules/fanhao/work-move-polling.js?v=20260811-work-move-ops-01";
 
 const api = createApiClient();
 const params = new URLSearchParams(window.location.search);
@@ -1658,7 +1659,12 @@ async function waitForWorkMoveJob(initialJob) {
       const percent = Math.max(0, Math.min(100, Math.round(Number(job.progress || 0) * 100)));
       els.moveToPerson.textContent = job.phase === "cleanup" ? "清理源目录" : percent > 0 ? `迁移中 ${percent}%` : "迁移中";
       await abortableDelay(500, controller.signal);
-      const payload = await api(`/api/work-move-jobs/${encodeURIComponent(job.id)}`, { signal: controller.signal });
+      const payload = await fetchWorkMoveJobWithBackoff({
+        api,
+        jobId: job.id,
+        signal: controller.signal,
+        wait: abortableDelay
+      });
       job = payload.job;
       rememberMoveJob(job);
     }

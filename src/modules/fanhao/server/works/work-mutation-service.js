@@ -50,6 +50,10 @@ export function createWorkMutationService({
     return { ok: true, job: workMoveJobService.findForWork(workId, options) };
   }
 
+  function listMoveJobs(options = {}) {
+    return { ok: true, ...workMoveJobService.list(options) };
+  }
+
   function retryMoveJob(jobId) {
     return { ok: true, job: workMoveJobService.retry(jobId) };
   }
@@ -64,6 +68,7 @@ export function createWorkMutationService({
     coverGenerationErrorPayload,
     deleteLocalFiles,
     generateCover,
+    listMoveJobs,
     moveJob,
     moveJobForWork,
     moveToPerson,

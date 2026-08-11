@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
+import { listWorkMoveJobs } from "./work-move-job-query-service.js";
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "cleanup_pending", "rollback_pending"]);
 const BLOCKING_STATUSES = new Set([...ACTIVE_STATUSES, "blocked"]);
@@ -65,6 +66,8 @@ export function createWorkMoveJobService({
   checkpointIntervalMs = 200,
   getCoreDb,
   leaseDurationMs = 30_000,
+  handoffTimeoutMs = leaseDurationMs,
+  log = null,
   maxConcurrentJobs = 1,
   now = () => new Date().toISOString(),
   schedule = setImmediate,
@@ -105,6 +108,7 @@ export function createWorkMoveJobService({
         total_bytes INTEGER NOT NULL DEFAULT 0,
         attempts INTEGER NOT NULL DEFAULT 0,
         error TEXT NOT NULL DEFAULT '',
+        error_code TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         finished_at TEXT NOT NULL DEFAULT '',
@@ -122,6 +126,7 @@ export function createWorkMoveJobService({
     ensureColumn("version", "ALTER TABLE work_move_jobs ADD COLUMN version INTEGER NOT NULL DEFAULT 0");
     ensureColumn("handoff_from", "ALTER TABLE work_move_jobs ADD COLUMN handoff_from TEXT NOT NULL DEFAULT ''");
     ensureColumn("handoff_ack", "ALTER TABLE work_move_jobs ADD COLUMN handoff_ack TEXT NOT NULL DEFAULT ''");
+    ensureColumn("error_code", "ALTER TABLE work_move_jobs ADD COLUMN error_code TEXT NOT NULL DEFAULT ''");
     migrateActiveJobUniqueness();
   }
 
@@ -252,14 +257,14 @@ export function createWorkMoveJobService({
     const previousOwner = String(claimedJob?.handoff_from || "");
     if (!previousOwner || previousOwner === ownerId) return;
     const previousPid = ownerProcessId(previousOwner);
-    const legacyDeadline = Date.now() + Math.max(2_000, Number(leaseDurationMs || 30_000));
+    const handoffDeadline = Date.now() + Math.max(50, Number(handoffTimeoutMs || leaseDurationMs || 30_000));
     while (!closing) {
       if (fencedJobs.has(jobId)) throw claimLostError();
       try {
         const current = row(jobId);
         if (!current || current.owner_id !== ownerId) failClaim(jobId);
         if (String(current.handoff_ack || "") === previousOwner) return;
-        if ((previousPid && !processIsAlive(previousPid)) || (!previousPid && Date.now() >= legacyDeadline)) {
+        if ((previousPid && !processIsAlive(previousPid)) || (!previousPid && Date.now() >= handoffDeadline)) {
           const result = getCoreDb().prepare(`
             UPDATE work_move_jobs
             SET handoff_ack = ?, updated_at = ?, version = version + 1
@@ -268,12 +273,35 @@ export function createWorkMoveJobService({
           if (Number(result.changes || 0) !== 1) failClaim(jobId);
           return;
         }
+        if (previousPid && Date.now() >= handoffDeadline) {
+          const errorCode = "WORK_MOVE_HANDOFF_TIMEOUT";
+          const message = "旧迁移 owner 的进程标识仍存活，但未确认停止；为防止双重文件操作，任务已阻断等待人工处理";
+          updateState(jobId, "blocked", "handoff_timeout", message, { errorCode, finished: true });
+          emitLifecycle("blocked", row(jobId), { errorCode });
+          return false;
+        }
       } catch (error) {
         if (!isSqliteBusy(error)) throw error;
       }
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     throw claimLostError();
+  }
+
+  function emitLifecycle(event, job, details = {}) {
+    if (typeof log !== "function") return;
+    const payload = {
+      event,
+      jobId: String(job?.id || ""),
+      workId: String(job?.work_id || job?.workId || ""),
+      status: String(job?.status || ""),
+      phase: String(job?.phase || ""),
+      attempts: Number(job?.attempts || 0),
+      ownerId: String(job?.owner_id || ""),
+      errorCode: String(details.errorCode || job?.error_code || ""),
+      at: now()
+    };
+    log(`[work-move] ${JSON.stringify(payload)}`);
   }
 
   function failClaim(jobId) {
@@ -321,6 +349,7 @@ export function createWorkMoveJobService({
       totalBytes,
       attempts: Number(job.attempts || 0),
       error: job.error || "",
+      errorCode: job.error_code || "",
       createdAt: job.created_at,
       updatedAt: job.updated_at,
       finishedAt: job.finished_at || "",
@@ -396,7 +425,7 @@ export function createWorkMoveJobService({
           UPDATE work_move_jobs
           SET status = CASE WHEN phase IN ('cleanup', 'isolating', 'verifying') THEN 'cleanup_pending' WHEN phase = 'rollback' THEN 'rollback_pending' ELSE 'queued' END,
               phase = CASE WHEN phase IN ('cleanup', 'isolating', 'verifying', 'rollback') THEN phase ELSE 'queued' END,
-              error = '', finished_at = '', attempts = attempts + 1, updated_at = ?
+              error = '', error_code = '', finished_at = '', attempts = attempts + 1, updated_at = ?
           WHERE id = ?
         `).run(updatedAt, existing.id);
         scheduledId = existing.id;
@@ -437,26 +466,54 @@ export function createWorkMoveJobService({
       throw error;
     }
     if (scheduledId) schedule(() => scheduleJob(scheduledId));
+    if (scheduledId) emitLifecycle("queued", row(scheduledId));
     return response;
   }
 
   function retry(jobId) {
-    const job = row(jobId);
-    if (!job) return get(jobId);
-    if (job.status === "blocked") return publicJob(job);
-    if (job.status === "completed" || ACTIVE_STATUSES.has(job.status)) {
-      schedule(() => scheduleJob(job.id));
-      return publicJob(job);
+    try {
+      const job = row(jobId);
+      if (!job) return get(jobId);
+      if (job.status === "blocked") {
+        const error = new Error(job.error || "迁移任务需要人工处理，不能自动重试");
+        error.statusCode = 409;
+        error.code = "WORK_MOVE_MANUAL_INTERVENTION_REQUIRED";
+        error.job = publicJob(job);
+        throw error;
+      }
+      if (job.status === "completed") return publicJob(job);
+      if (ACTIVE_STATUSES.has(job.status)) {
+        schedule(() => scheduleJob(job.id));
+        return publicJob(job);
+      }
+      const result = getCoreDb().prepare(`
+        UPDATE work_move_jobs
+        SET status = CASE WHEN phase = 'cleanup' THEN 'cleanup_pending' WHEN phase = 'rollback' THEN 'rollback_pending' ELSE 'queued' END,
+            phase = CASE WHEN phase IN ('cleanup', 'rollback') THEN phase ELSE 'queued' END,
+            error = '', error_code = '', finished_at = '', attempts = attempts + 1,
+            updated_at = ?, version = version + 1
+        WHERE id = ? AND status = ? AND version = ?
+      `).run(now(), job.id, job.status, Number(job.version || 0));
+      if (Number(result.changes || 0) !== 1) {
+        const error = new Error("迁移任务状态已变化，请刷新后重试");
+        error.statusCode = 409;
+        error.code = "WORK_MOVE_RETRY_CONFLICT";
+        error.job = publicJob(row(job.id));
+        throw error;
+      }
+      const queued = row(job.id);
+      emitLifecycle("retry_queued", queued);
+      scheduleJob(job.id);
+      return publicJob(queued);
+    } catch (error) {
+      if (isSqliteBusy(error)) {
+        error.statusCode = 503;
+        error.code = "WORK_MOVE_SQLITE_BUSY";
+        error.retryable = true;
+        error.message = "迁移任务 journal 正忙，请稍后重试";
+      }
+      throw error;
     }
-    getCoreDb().prepare(`
-      UPDATE work_move_jobs
-      SET status = CASE WHEN phase = 'cleanup' THEN 'cleanup_pending' WHEN phase = 'rollback' THEN 'rollback_pending' ELSE 'queued' END,
-          phase = CASE WHEN phase IN ('cleanup', 'rollback') THEN phase ELSE 'queued' END,
-          error = '', finished_at = '', attempts = attempts + 1, updated_at = ?
-      WHERE id = ?
-    `).run(now(), job.id);
-    scheduleJob(job.id);
-    return publicJob(row(job.id));
   }
 
   function scheduleJob(jobId) {
@@ -509,7 +566,9 @@ export function createWorkMoveJobService({
     }
     claimRetryAttempts.delete(jobId);
     fencedJobs.delete(jobId);
-    return row(jobId);
+    const claimed = row(jobId);
+    emitLifecycle("claimed", claimed);
+    return claimed;
   }
 
   function renewLease(jobId) {
@@ -664,9 +723,12 @@ export function createWorkMoveJobService({
     let plan = json(job.plan_json, null);
     const request = json(job.request_json, {});
     try {
-      await awaitSafeHandoff(jobId, job);
+      const handoffReady = await awaitSafeHandoff(jobId, job);
+      if (handoffReady === false) return;
       if (job.status === "rollback_pending" && !plan) {
-        updateState(jobId, "failed", "validation", "回滚任务缺少持久化路径计划，拒绝执行", { finished: true });
+        const errorCode = "WORK_MOVE_ROLLBACK_PLAN_MISSING";
+        updateState(jobId, "failed", "validation", "回滚任务缺少持久化路径计划，拒绝执行", { errorCode, finished: true });
+        emitLifecycle("failed", row(jobId), { errorCode });
         return;
       }
       if (plan) {
@@ -675,14 +737,18 @@ export function createWorkMoveJobService({
           if (JSON.stringify(hydratedPlan) !== JSON.stringify(plan)) updatePlanCheckpoint(jobId, hydratedPlan);
           plan = hydratedPlan;
         } catch (error) {
-          updateState(jobId, "failed", "validation", error.message || String(error), { finished: true });
+          const errorCode = error?.code || "WORK_MOVE_PLAN_INVALID";
+          updateState(jobId, "failed", "validation", error.message || String(error), { errorCode, finished: true });
+          emitLifecycle("failed", row(jobId), { errorCode });
           return;
         }
       }
       if (plan) acquireReservation(plan);
       if (job.status === "rollback_pending" && plan) {
         await runWorker(jobId, "rollback", plan);
-        updateState(jobId, "rolled_back", "rolled_back", job.error || "上次操作已回滚", { finished: true });
+        const errorCode = job.error_code || "WORK_MOVE_RECOVERED_ROLLBACK";
+        updateState(jobId, "rolled_back", "rolled_back", job.error || "上次操作已回滚", { errorCode, finished: true });
+        emitLifecycle("rolled_back", row(jobId), { errorCode });
         releaseReservation(jobId, "rolled_back");
         return;
       }
@@ -694,7 +760,9 @@ export function createWorkMoveJobService({
         try {
           plan = hydratePlanRoots(plan, jobId);
         } catch (error) {
-          updateState(jobId, "failed", "validation", error.message || String(error), { finished: true });
+          const errorCode = error?.code || "WORK_MOVE_PLAN_INVALID";
+          updateState(jobId, "failed", "validation", error.message || String(error), { errorCode, finished: true });
+          emitLifecycle("failed", row(jobId), { errorCode });
           return;
         }
         updatePlan(jobId, plan);
@@ -743,6 +811,7 @@ export function createWorkMoveJobService({
       if (typeof beforeCleanup === "function") await beforeCleanup({ jobId, plan, ownerId });
       await runWorker(jobId, "cleanup", plan);
       updateState(jobId, "completed", "completed", "", { result, finished: true, completeProgress: true });
+      emitLifecycle("completed", row(jobId));
       releaseReservation(jobId, "completed");
     } catch (error) {
       if (isClaimLost(jobId, error)) {
@@ -778,7 +847,7 @@ export function createWorkMoveJobService({
       let canReleaseClaim = true;
       try {
         const current = row(jobId);
-        if (plan && current?.owner_id === ownerId && !["completed", "rolled_back"].includes(current.status)) {
+        if (activePlans.has(jobId) && plan && current?.owner_id === ownerId && !["completed", "rolled_back"].includes(current.status)) {
           if (typeof adminCoreMutationService.parkWorkMoveReservation !== "function") {
             canReleaseClaim = false;
             warn("[work-move-reservation] durable reservation 无法安全停放");
@@ -808,17 +877,25 @@ export function createWorkMoveJobService({
   async function handleFailure(jobId, plan, error) {
     const message = error?.message || String(error);
     if (plan && adminCoreMutationService.inspectWorkMove(plan) === "target") {
-      updateState(jobId, "cleanup_pending", row(jobId)?.phase || "main_committed", message);
+      updateState(jobId, "cleanup_pending", row(jobId)?.phase || "main_committed", message, {
+        errorCode: error?.code || "WORK_MOVE_CLEANUP_PENDING"
+      });
+      emitLifecycle("cleanup_pending", row(jobId), { errorCode: error?.code || "WORK_MOVE_CLEANUP_PENDING" });
       return;
     }
     if (!plan) {
-      updateState(jobId, "failed", "validation", message, { finished: true });
+      updateState(jobId, "failed", "validation", message, {
+        errorCode: error?.code || "WORK_MOVE_VALIDATION_FAILED",
+        finished: true
+      });
+      emitLifecycle("failed", row(jobId), { errorCode: error?.code || "WORK_MOVE_VALIDATION_FAILED" });
       return;
     }
-    updateState(jobId, "rollback_pending", "rollback", message);
+    updateState(jobId, "rollback_pending", "rollback", message, { errorCode: error?.code || "WORK_MOVE_FAILED" });
     try {
       await runWorker(jobId, "rollback", plan);
       updateState(jobId, "rolled_back", "rolled_back", message, { finished: true });
+      emitLifecycle("rolled_back", row(jobId), { errorCode: error?.code || "WORK_MOVE_FAILED" });
       releaseReservation(jobId, "rolled_back");
     } catch (rollbackError) {
       if (isClaimLost(jobId, rollbackError)) return;
@@ -831,7 +908,11 @@ export function createWorkMoveJobService({
         scheduleClaimRetry(jobId);
         return;
       }
-      updateState(jobId, "failed", "rollback", `${message}; 自动回滚失败：${rollbackError.message}`, { finished: true });
+      updateState(jobId, "failed", "rollback", `${message}; 自动回滚失败：${rollbackError.message}`, {
+        errorCode: rollbackError?.code || error?.code || "WORK_MOVE_ROLLBACK_FAILED",
+        finished: true
+      });
+      emitLifecycle("failed", row(jobId), { errorCode: rollbackError?.code || error?.code || "WORK_MOVE_ROLLBACK_FAILED" });
     }
   }
 
@@ -943,12 +1024,15 @@ export function createWorkMoveJobService({
     const finishedAt = options.finished ? now() : "";
     const progressFiles = options.completeProgress ? Math.max(Number(current.progress_files || 0), Number(current.total_files || 0)) : Number(current.progress_files || 0);
     const progressBytes = options.completeProgress ? Math.max(Number(current.progress_bytes || 0), Number(current.total_bytes || 0)) : Number(current.progress_bytes || 0);
+    const errorCode = options.errorCode === undefined
+      ? error ? String(current.error_code || "") : ""
+      : String(options.errorCode || "");
     const result = getCoreDb().prepare(`
       UPDATE work_move_jobs
-      SET status = ?, phase = ?, error = ?, result_json = ?, progress_files = ?, progress_bytes = ?,
+      SET status = ?, phase = ?, error = ?, error_code = ?, result_json = ?, progress_files = ?, progress_bytes = ?,
           updated_at = ?, finished_at = ?, lease_until = ?, version = version + 1
       WHERE id = ? AND owner_id = ? AND version = ?
-    `).run(status, phase, String(error || ""), resultJson, progressFiles, progressBytes, now(), finishedAt, leaseUntil(), jobId, ownerId, Number(current.version || 0));
+    `).run(status, phase, String(error || ""), errorCode, resultJson, progressFiles, progressBytes, now(), finishedAt, leaseUntil(), jobId, ownerId, Number(current.version || 0));
     if (Number(result.changes || 0) !== 1) failClaim(jobId);
   }
 
@@ -993,5 +1077,9 @@ export function createWorkMoveJobService({
     await Promise.allSettled([...activeRuns.values()]);
   }
 
-  return { close, findForWork, get, publicJob, recover, retry, start };
+  function list(options = {}) {
+    return listWorkMoveJobs({ getCoreDb, now, publicJob }, options);
+  }
+
+  return { close, findForWork, get, list, publicJob, recover, retry, start };
 }

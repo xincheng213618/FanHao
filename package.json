@@ -27,7 +27,7 @@
     "verify:music-scale": "node tools/verify_music_scale.mjs",
     "verify:video-playback": "node tools/verify_video_playback.mjs",
     "verify:person-work-associations": "node tools/verify_person_work_associations.mjs",
-    "verify:work-move-jobs": "node tools/verify_work_move_jobs.mjs",
+    "verify:work-move-jobs": "node tools/verify_work_move_jobs.mjs && node tools/verify_work_move_ops_ui.mjs",
     "verify:access-log": "node tools/verify_access_log.mjs",
     "verify:access-analytics": "node tools/verify_access_analytics.mjs",
     "verify:novels": "node tools/verify_novel_storage.mjs && node tools/verify_novel_collection.mjs",

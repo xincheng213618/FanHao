@@ -1,5 +1,6 @@
 import { createSettingsController } from "./modules/system/settings-controller.js?v=20260712-module-settings-02";
 import { createAccessAnalyticsController } from "./modules/system/access-analytics-controller.js?v=20260718-access-analytics-01";
+import { createWorkMoveOpsController, workMoveOpsPanelIsVisible } from "./modules/system/work-move-ops-panel.js?v=20260811-work-move-ops-02";
 
 const state = {
   library: null,
@@ -192,7 +193,12 @@ async function api(path, options = {}) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401 && payload.loginUrl) window.location.assign(payload.loginUrl);
-    throw new Error(payload.error || `请求失败：${response.status}`);
+    const error = new Error(payload.error || `请求失败：${response.status}`);
+    error.statusCode = response.status;
+    error.code = payload.code || "";
+    error.retryable = payload.retryable === true;
+    error.job = payload.job || null;
+    throw error;
   }
   return payload;
 }
@@ -208,6 +214,13 @@ const accessAnalyticsController = createAccessAnalyticsController({
   api,
   root: document.querySelector("#adminViewVisitors")
 });
+const workMoveOpsController = createWorkMoveOpsController({
+  api,
+  formatBytes,
+  formatDateTime,
+  root: document.querySelector("#adminWorkMoveOps")
+});
+const workMoveOpsRoot = document.querySelector("#adminWorkMoveOps");
 
 function setBusy(button, busy, text = "处理中") {
   if (!button) return;
@@ -274,6 +287,7 @@ async function refreshAll() {
       loadLibrary(),
       loadScripts(),
       refreshTasks(),
+      workMoveOpsController.load({ quiet: true }),
       loadImageReaderCache({ quiet: true }),
       settingsController.load({ quiet: true }),
       accessAnalyticsController.load({ quiet: true })
@@ -1144,7 +1158,10 @@ async function init() {
   await refreshAll();
   applyPendingScriptDefaults();
   els.scriptList?.querySelector(".admin-script-card.active")?.scrollIntoView({ block: "nearest" });
-  state.pollTimer = window.setInterval(refreshTasks, 2500);
+  state.pollTimer = window.setInterval(() => {
+    refreshTasks();
+    if (workMoveOpsPanelIsVisible(workMoveOpsRoot)) workMoveOpsController.load({ quiet: true });
+  }, 2500);
 }
 
 await init().catch((error) => {
