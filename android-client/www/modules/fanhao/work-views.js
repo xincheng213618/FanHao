@@ -5,8 +5,10 @@ import { formatNumber } from "../../js/format.js";
 import { createWorkListState } from "../../js/work-filtering.js?v=20260726-work-sort-01";
 import { createWorkCards } from "./features/works/cards.js?v=20260721-fanhao-person-work-grid-20";
 import { workCollectionPath } from "./features/works/collection-request.js?v=20260720-fanhao-collection-filter-01";
+import { createFavoriteWorkViews } from "./features/works/favorite-page.js?v=20260811-favorite-folders-01";
+import { workDataSignature } from "./features/works/work-data-signature.js?v=20260811-favorite-folders-01";
 import { createRankingViews } from "./features/rankings/ranking-views.js?v=20260730-fanhao-ranking-year-ui-45";
-import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260717-fanhao-page-race-01";
+import { createWorkPageDataService } from "./features/works/page-data-service.js?v=20260811-favorite-folders-01";
 import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=20260721-fanhao-search-toolbar-23";
 import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=20260717-fanhao-touch-intent-01";
 import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=20260717-fanhao-work-first-paint-01";
@@ -18,33 +20,16 @@ import { CATEGORY_OPTIONS, createCategoryViews } from "./features/categories/cat
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
 const STUDIO_SORT_STORAGE_KEY = "fanhao.android.studioSort";
-function workDataSignature(data = {}) {
-  const works = Array.isArray(data.works) ? data.works : [];
-  return JSON.stringify({
-    total: Number(data.total || works.length),
-    facets: data.facets || null,
-    works: works.map((work) => [
-      work.id || "",
-      work.title || "",
-      work.directoryName || "",
-      work.modifiedAt || "",
-      work.favorite ? 1 : 0,
-      work.progress || 0,
-      work.missingLocal ? 1 : 0,
-      work.infoSummary?.rating || "",
-      work.infoSummary?.ratingCount || 0,
-      work.infoSummary?.releaseDate || "",
-      work.ranking?.rankNo || ""
-    ])
-  });
-}
 export function createWorkViews(context) {
   const {
     els,
     getActiveUrl,
     getLibrary = () => null,
+    getCurrentParams = () => ({}),
+    getCurrentView = () => "",
     getWorksLimit,
     increaseWorksLimit,
+    onUserStateChange,
     showView,
     replaceViewParams = () => false,
     goBack,
@@ -57,6 +42,9 @@ export function createWorkViews(context) {
   const workListState = createWorkListState({ renderCurrentView });
   const searchListState = createWorkListState({ renderCurrentView, persist: false, initialFilterMode: "all", initialSortMode: "updated" });
   const pageDataService = createWorkPageDataService({ fetchJson, readCachedJson, writeCachedJson });
+  const favoriteViews = createFavoriteWorkViews({ ...context, getLibrary, pageDataService, renderCurrentView,
+    renderMessage, renderWorks, serverContinuationOptions, workDataSignature,
+    initialSortMode: workListState.getSortMode() });
   const workDetailDataService = createWorkDetailDataService({ getActiveUrl, pageDataService });
   const workCards = createWorkCards({ getActiveUrl, roots: [els.viewContent, els.continuePreview], showView, workDetailDataService });
   const progressiveWorkListRenderer = createProgressiveWorkListRenderer();
@@ -206,7 +194,11 @@ export function createWorkViews(context) {
     });
   }
 
-  async function renderAllWorks(isActive = () => true) {
+  async function renderAllWorks(params = {}, isActive = () => true) {
+    if (String(params.favorite || "") === "1") {
+      leaveRankingSort();
+      return favoriteViews.render(params, isActive);
+    }
     leaveRankingSort();
     setActiveBottom("works");
     els.viewKicker.textContent = "作品";
@@ -691,6 +683,11 @@ export function createWorkViews(context) {
     }
     progressiveWorkListRenderer.render(grid, visible, (work) => workCards.createWorkCard(work, renderOptions), () => loadMore && container.append(loadMore));
   }
+  function activeWorkListState() {
+    return getCurrentView() === "works" && String(getCurrentParams()?.favorite || "") === "1"
+      ? favoriteViews.listState
+      : workListState;
+  }
 
   function createLoadMoreButton(text, handler) {
     const wrap = document.createElement("div");
@@ -727,18 +724,19 @@ export function createWorkViews(context) {
     renderSearchResults,
     warmSearch: searchDataService.warm,
     pageDataService,
+    favoriteFolders: favoriteViews.folders,
     workDetailDataService,
-    getSortMode: (view) => view === "rankings" ? rankingViews.getSortMode() : workListState.getSortMode(),
-    getSortOptions: (view) => workListState.getSortOptions({ allowRankingSort: view === "rankings" }),
-    setSortMode: (view, value) => view === "rankings" ? rankingViews.setSortMode(value) : workListState.setSortMode(value),
+    getSortMode: (view) => view === "rankings" ? rankingViews.getSortMode() : activeWorkListState().getSortMode(),
+    getSortOptions: (view) => activeWorkListState().getSortOptions({ allowRankingSort: view === "rankings" }),
+    setSortMode: (view, value) => view === "rankings" ? rankingViews.setSortMode(value) : activeWorkListState().setSortMode(value),
     getRankingMenu: rankingViews.getYearMenu,
     getStudioSortMode,
     getStudioSortOptions: () => STUDIO_SORT_OPTIONS,
     setStudioSortMode,
-    getWorkFilterMode: () => workListState.getFilterMode(),
-    getWorkFilterOptions: (works, facets) => workListState.getFilterOptions(works, facets),
-    setWorkFilterMode: (value, options = {}) => workListState.setFilterMode(value, options),
-    getWorkListRequestState: () => ({ filter: workListState.getServerFilterMode(), sort: workListState.getServerSortMode() }),
+    getWorkFilterMode: () => activeWorkListState().getFilterMode(),
+    getWorkFilterOptions: (works, facets) => activeWorkListState().getFilterOptions(works, facets),
+    setWorkFilterMode: (value, options = {}) => activeWorkListState().setFilterMode(value, options),
+    getWorkListRequestState: () => ({ filter: activeWorkListState().getServerFilterMode(), sort: activeWorkListState().getServerSortMode() }),
     refreshRankingCache,
     renderWorks,
     createChip: workCards.createChip,

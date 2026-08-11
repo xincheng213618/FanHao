@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=20260731-novel-actions-ui-53";
+import { CLIENT_VERSION } from "./config.js?v=20260811-favorite-folders-01";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;

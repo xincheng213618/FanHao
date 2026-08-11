@@ -17,6 +17,7 @@ const fixtureCollections = new Map();
 let fixtureCollectionSequence = 0;
 const fixtureCollectionDetailRequests = [];
 const fixtureCollectionPageRequests = [];
+const fixtureFanhaoCollectionRequests = [];
 
 try {
   await waitForHealth(baseUrl);
@@ -32,6 +33,8 @@ try {
     await verifyAndroidCollectionRefresh(browser);
     await verifyAndroidCollectionManagement(browser);
     await verifyAndroidCollectionStackReturn(browser);
+    await verifyAndroidFavoriteFolders(browser);
+    await verifyAndroidFavoriteRoute(browser);
     await verifyShortVideoCollections(browser);
   } finally {
     await browser.close();
@@ -748,6 +751,181 @@ async function verifyDirectAuthorDeepLink(browser) {
   }
 }
 
+async function verifyAndroidFavoriteFolders(browser) {
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  try {
+    await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
+    await page.evaluate(async () => {
+      const { createFavoriteFolderFeature } = await import("/android-client/modules/fanhao/features/works/favorite-folders.js?browser-fixture=1");
+      let activeUrl = "http://fixture-a.local";
+      let folders = [
+        { id: "default", name: "默认收藏", count: 1 },
+        { id: "planned", name: "待观看", count: 0 }
+      ];
+      let postAttempts = 0;
+      let putAttempts = 0;
+      let failNextMove = true;
+      let pendingList = null;
+      let selectedFolderId = "";
+      const calls = [];
+      const work = { id: "work-1", favorite: true, favoriteFolderId: "default", favoriteFolderName: "默认收藏" };
+      const feature = createFavoriteFolderFeature({
+        api: async (base, requestPath, options = {}) => {
+          const method = String(options.method || "GET").toUpperCase();
+          calls.push(`${base} ${method} ${requestPath}`);
+          if (requestPath === "/api/favorite-folders" && method === "GET") {
+            if (pendingList) return pendingList.promise;
+            return { folders: base.includes("fixture-b") ? [{ id: "b", name: "服务器 B", count: 0 }] : folders.map((folder) => ({ ...folder })) };
+          }
+          if (requestPath === "/api/favorite-folders" && method === "POST") {
+            postAttempts += 1;
+            if (postAttempts === 1) throw Object.assign(new Error("fixture busy"), { status: 503, retryable: true });
+            const name = String(options.body?.name || "");
+            let folder = folders.find((item) => item.name === name);
+            if (!folder) {
+              folder = { id: `folder-${folders.length}`, name, count: 0 };
+              folders = [...folders, folder];
+            }
+            return { folder: { ...folder }, folders: folders.map((item) => ({ ...item })), user: { favoriteCount: 1 } };
+          }
+          if (requestPath === "/api/favorites/work-1/folder" && method === "PUT") {
+            putAttempts += 1;
+            if (failNextMove) {
+              failNextMove = false;
+              throw new Error("fixture move failed");
+            }
+            const target = folders.find((folder) => folder.id === options.body?.folderId);
+            folders = folders.map((folder) => ({
+              ...folder,
+              count: folder.id === "default" ? 0 : folder.id === target.id ? 1 : folder.count
+            }));
+            return {
+              favorite: { folderId: target.id, folderName: target.name },
+              folders: folders.map((folder) => ({ ...folder })),
+              user: { favoriteCount: 1 }
+            };
+          }
+          throw new Error(`unexpected favorite folder fixture request: ${method} ${requestPath}`);
+        },
+        clearCachedJsonByPrefix: async () => {},
+        getActiveUrl: () => activeUrl,
+        getLibrary: () => ({ works: [work] }),
+        pageDataService: { invalidate() {} }
+      });
+      feature.rememberFolders(folders);
+      const strip = feature.createFolderStrip("default", {
+        onSelect(folderId) { selectedFolderId = folderId; }
+      });
+      document.getElementById("fixture").append(strip);
+      let moveChangeCount = 0;
+      window.androidFavoriteFolderFixture = {
+        calls: () => [...calls],
+        featureFolders: () => feature.folders(),
+        metrics: () => ({ postAttempts, putAttempts, selectedFolderId, work: { ...work }, moveChangeCount }),
+        openMove() {
+          feature.openMovePicker(work, { onMoved: () => { moveChangeCount += 1; } });
+        },
+        async startStaleListRace() {
+          let release;
+          const oldFolders = folders.map((folder) => ({ ...folder }));
+          pendingList = {
+            promise: new Promise((resolve) => { release = () => resolve({ folders: oldFolders }); })
+          };
+          const stale = feature.loadFolders(true);
+          await Promise.resolve();
+          await feature.createFolder("竞态新夹");
+          release();
+          await stale;
+          pendingList = null;
+          return feature.folders();
+        },
+        async switchServer() {
+          activeUrl = "http://fixture-b.local";
+          await feature.loadFolders(true);
+          return feature.folders();
+        }
+      };
+    });
+
+    const strip = page.locator(".favorite-folder-strip");
+    await strip.waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await strip.getAttribute("aria-label"), "收藏夹筛选", "Android favorite folders must expose a labelled navigation strip");
+    assert.equal(await strip.locator("button.active").getAttribute("aria-pressed"), "true", "Android favorite folder selection must be announced");
+    await strip.locator(".favorite-folder-create").click();
+    const createInput = page.locator(".favorite-folder-sheet input");
+    await createInput.waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await createInput.evaluate((element) => document.activeElement === element), true, "Android favorite folder dialogs must move focus inside immediately");
+    assert.equal(await page.locator(".favorite-folder-sheet").getAttribute("role"), "dialog", "Android favorite folder forms must use dialog semantics");
+    await createInput.fill("旅行收藏");
+    await page.locator(".favorite-folder-form button").click();
+    await page.locator(".favorite-folder-overlay").waitFor({ state: "detached", timeout: 5000 });
+    let metrics = await page.evaluate(() => window.androidFavoriteFolderFixture.metrics());
+    assert.equal(metrics.postAttempts, 2, "Android favorite folder creation must retry one explicitly retryable 503 and then stop");
+    assert.equal(metrics.selectedFolderId, "folder-2", "new Android favorite folders must become the selected works-filter folder");
+
+    await page.evaluate(() => window.androidFavoriteFolderFixture.openMove());
+    await page.locator(".favorite-folder-options button", { hasText: "待观看" }).click();
+    await page.locator(".favorite-folder-status", { hasText: "fixture move failed" }).waitFor({ state: "visible", timeout: 5000 });
+    metrics = await page.evaluate(() => window.androidFavoriteFolderFixture.metrics());
+    assert.equal(metrics.work.favoriteFolderId, "default", "failed Android favorite moves must roll the work back to its original folder");
+    const callbacksAfterFailure = metrics.moveChangeCount;
+    await page.locator(".favorite-folder-options button", { hasText: "待观看" }).click();
+    await page.locator(".favorite-folder-overlay").waitFor({ state: "detached", timeout: 5000 });
+    metrics = await page.evaluate(() => window.androidFavoriteFolderFixture.metrics());
+    assert.equal(metrics.work.favoriteFolderId, "planned", "successful Android favorite moves must reconcile the detail work state");
+    assert.equal(metrics.moveChangeCount, callbacksAfterFailure + 1, "successful Android favorite moves must notify their UI exactly once");
+
+    const raceFolders = await page.evaluate(() => window.androidFavoriteFolderFixture.startStaleListRace());
+    assert(raceFolders.some((folder) => folder.name === "竞态新夹"), "an older folder GET must not overwrite a newer Android create response");
+    const serverBFolders = await page.evaluate(() => window.androidFavoriteFolderFixture.switchServer());
+    assert.deepEqual(serverBFolders.map((folder) => folder.id), ["b"], "Android favorite folder state must be partitioned by active server");
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyAndroidFavoriteRoute(browser) {
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error?.message || String(error)));
+  try {
+    await page.addInitScript(() => {
+      localStorage.clear();
+      localStorage.setItem("fanhao.serverUrl", location.origin);
+      localStorage.setItem("fanhao.android.workFilter", "favorite");
+    });
+    await page.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+    const entry = page.locator(".fanhao-chrome-tag", { hasText: "收藏" });
+    await entry.waitFor({ state: "visible", timeout: 10000 }).catch(async () => {
+      assert.fail(`Android favorite route fixture did not boot: ${pageErrors.join(" | ")} / ${await page.locator("#statusText").textContent()}`);
+    });
+    const settings = page.locator("#settingsOverlay");
+    if (await settings.isVisible()) {
+      await page.locator("#settingsCloseButton").click();
+      await settings.waitFor({ state: "hidden", timeout: 5000 });
+    }
+    assert.equal(await entry.textContent(), "收藏", "Android FanHao chrome must make favorite folders discoverable without an external deep link");
+    assert.equal(await page.locator("#favoriteCount").textContent(), "0", "Android home shortcut must render the empty favorite count from user state");
+    fixtureFanhaoCollectionRequests.length = 0;
+    await entry.click();
+    await page.waitForFunction(() => location.hash === "#works?favorite=1", null, { timeout: 10000 });
+    await page.locator(".favorite-folder-strip").waitFor({ state: "visible", timeout: 10000 });
+    await page.locator(".message-box", { hasText: "还没有收藏作品" }).waitFor({ state: "visible", timeout: 5000 });
+    const firstRequest = fixtureFanhaoCollectionRequests.find((requestPath) => requestPath.startsWith("/api/favorites?"));
+    assert(firstRequest, "Android favorite entry must request the favorite collection endpoint");
+    assert.equal(new URL(firstRequest, baseUrl).searchParams.get("filter"), "all", "a legacy persisted favorite filter must not leak into the folder collection state");
+    assert.equal(fixtureFanhaoCollectionRequests.some((requestPath) => requestPath.startsWith("/api/works?")), false, "Android favorite folders must not start a competing works request");
+
+    await page.locator('.favorite-folder-strip button[aria-label^="默认收藏"]').click();
+    await page.waitForFunction(() => location.hash === "#works?favorite=1&folder=default", null, { timeout: 5000 });
+    await page.goBack({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => location.hash === "#works?favorite=1", null, { timeout: 5000 });
+    assert.equal(await page.locator('.favorite-folder-strip button[aria-label^="全部"]').getAttribute("aria-pressed"), "true", "Android back navigation must restore the prior favorite folder selection");
+  } finally {
+    await page.close();
+  }
+}
+
 async function verifyShortVideoCollections(browser) {
   fixtureCollections.clear();
   fixtureCollectionSequence = 0;
@@ -965,6 +1143,33 @@ function deferNextAuthorDetail(options = {}) {
 }
 
 async function fixtureApi(url, request = {}) {
+  if (url.pathname === "/api/library") {
+    return {
+      access: { mode: "loopback" },
+      availableRoots: [],
+      people: [],
+      totals: { infoFiles: 0, people: 0, videos: 0, works: 0 },
+      user: { favoriteCount: 0, historyCount: 0 },
+      works: []
+    };
+  }
+  if (url.pathname === "/api/favorites") {
+    fixtureFanhaoCollectionRequests.push(`${url.pathname}${url.search}`);
+    return {
+      count: 0,
+      facets: { all: 0 },
+      folders: [{ id: "default", name: "默认收藏", count: 0, createdAt: "" }],
+      limit: Number(url.searchParams.get("limit") || 0),
+      offset: Number(url.searchParams.get("offset") || 0),
+      selectedFolderId: url.searchParams.get("folder") || "all",
+      total: 0,
+      works: []
+    };
+  }
+  if (url.pathname === "/api/works") {
+    fixtureFanhaoCollectionRequests.push(`${url.pathname}${url.search}`);
+    return { count: 0, facets: { all: 0 }, total: 0, works: [] };
+  }
   if (url.pathname === "/api/health") return { ok: true };
   if (url.pathname === "/api/short-videos/collections") {
     if (request.method === "POST") {

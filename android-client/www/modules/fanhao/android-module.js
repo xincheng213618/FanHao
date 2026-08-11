@@ -1,5 +1,5 @@
-import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260730-fanhao-ranking-year-ui-45";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260730-fanhao-people-card-ui-47";
+import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260811-favorite-folders-01";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260811-favorite-folders-01";
 import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=20260730-fanhao-nav-ui-44";
 
 export function createAndroidModule({ host }) {
@@ -7,6 +7,8 @@ export function createAndroidModule({ host }) {
     els: host.els,
     getActiveUrl: host.getActiveUrl,
     getLibrary: host.getLibrary,
+    getCurrentParams: host.navigation.currentParams,
+    getCurrentView: host.navigation.currentView,
     getWorksLimit: host.limits.getWorks,
     increaseWorksLimit: host.limits.increaseWorks,
     showView: host.navigation.showView,
@@ -17,7 +19,8 @@ export function createAndroidModule({ host }) {
     refreshChrome: host.ui.refreshChrome,
     renderCurrentView: host.ui.renderCurrentView,
     renderCurrentViewPreservingScroll: host.ui.renderCurrentViewPreservingScroll,
-    isHomeView: () => host.navigation.currentView() === "home"
+    isHomeView: () => host.navigation.currentView() === "home",
+    onUserStateChange: host.favorites.onUserStateChange
   });
   const search = createSearchController(host, workViews);
   const codePrefixViews = createCodePrefixViews({
@@ -67,6 +70,7 @@ export function createAndroidModule({ host }) {
     renderCurrentViewPreservingScroll: host.ui.renderCurrentViewPreservingScroll,
     mediaViewer: host.mediaViewer,
     goBack: host.navigation.goBack,
+    favoriteFolders: workViews.favoriteFolders,
     onUserStateChange: host.favorites.onUserStateChange,
     pageDataService: workViews.pageDataService,
     workDetailDataService: workViews.workDetailDataService
@@ -77,7 +81,7 @@ export function createAndroidModule({ host }) {
     rootViews: FANHAO_ROOT_VIEWS,
     routes: [
       route("people", (_params, guard) => peopleViews.renderPeopleIndex(guard)),
-      route("works", (_params, guard) => workViews.renderAllWorks(guard)),
+      route("works", (params, guard) => workViews.renderAllWorks(params, guard)),
       route("rankings", (_params, guard) => workViews.renderRankings(guard)),
       route("categories", (params, guard) => workViews.renderCategories(params.category, guard)),
       route("codePrefixes", (_params, guard) => codePrefixViews.renderIndex(guard)),

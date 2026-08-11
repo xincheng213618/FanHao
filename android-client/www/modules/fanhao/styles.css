@@ -891,6 +891,179 @@ body.fanhao-search-page-view .bottom-nav {
   font-weight: 850;
 }
 
+.favorite-folder-strip {
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  padding: 2px 2px 4px;
+  scrollbar-width: none;
+}
+
+.favorite-folder-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.favorite-folder-strip > button {
+  flex: 0 0 auto;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--muted);
+  padding: 8px 13px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 900;
+  touch-action: manipulation;
+}
+
+.favorite-folder-strip > button.active {
+  border-color: rgba(47, 128, 237, .5);
+  background: var(--button-soft);
+  color: var(--blue);
+}
+
+.favorite-folder-strip > .favorite-folder-create {
+  border-style: dashed;
+  color: var(--blue);
+}
+
+.favorite-folder-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  align-items: end;
+}
+
+.favorite-folder-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  border: 0;
+  background: rgba(7, 12, 24, .46);
+}
+
+.favorite-folder-sheet {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 12px;
+  width: min(100%, 560px);
+  max-height: min(78vh, 680px);
+  margin: 0 auto;
+  overflow-y: auto;
+  border-radius: 20px 20px 0 0;
+  background: var(--nav-surface);
+  padding: 16px 14px calc(16px + env(safe-area-inset-bottom));
+  box-shadow: 0 -20px 60px rgba(7, 12, 24, .25);
+}
+
+.favorite-folder-sheet > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.favorite-folder-sheet > header > strong {
+  color: var(--ink);
+  font-size: 17px;
+}
+
+.favorite-folder-sheet button,
+.favorite-folder-sheet input {
+  min-height: 44px;
+  font: inherit;
+}
+
+.favorite-folder-sheet > header > button {
+  border: 0;
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  padding: 0 14px;
+  font-weight: 900;
+}
+
+.favorite-folder-status {
+  min-height: 20px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.favorite-folder-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.favorite-folder-options > button {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  padding: 9px 11px;
+  text-align: left;
+}
+
+.favorite-folder-options > button.active {
+  border-color: rgba(47, 128, 237, .5);
+  background: var(--button-soft);
+}
+
+.favorite-folder-options span,
+.favorite-folder-options small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.favorite-folder-options span {
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.favorite-folder-options small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.favorite-folder-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.favorite-folder-form input {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--field);
+  color: var(--ink);
+  padding: 0 12px;
+}
+
+.favorite-folder-form button {
+  border: 0;
+  border-radius: 12px;
+  background: var(--blue);
+  color: white;
+  padding: 0 14px;
+  font-weight: 950;
+}
+
+.favorite-folder-sheet button:disabled,
+.favorite-folder-sheet input:disabled,
+.favorite-action.pending {
+  opacity: .55;
+}
+
 .fanhao-search-prompt {
   display: grid;
   justify-items: center;

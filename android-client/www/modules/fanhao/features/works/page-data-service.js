@@ -5,9 +5,11 @@ export function createWorkPageDataService({ fetchJson, readCachedJson = async ()
   const inflight = new Map();
   const warmed = new Set();
   const warmedResults = new Map();
+  const generations = new Map();
 
   function fetch(activeUrl, path, options = {}) {
     const key = requestKey(activeUrl, path);
+    const generation = generations.get(key) || 0;
     if (options.reuseWarmed) {
       const warmedResult = warmedResults.get(key);
       if (warmedResult?.expiresAt > Date.now()) {
@@ -26,10 +28,12 @@ export function createWorkPageDataService({ fetchJson, readCachedJson = async ()
     }
     const promise = fetchJson(activeUrl, path, { timeoutMs: 12000, signal: options.signal })
       .then((data) => {
-        writeCachedJson(activeUrl, path, data).catch(() => {});
+        if ((generations.get(key) || 0) === generation) writeCachedJson(activeUrl, path, data).catch(() => {});
         return data;
       })
-      .finally(() => inflight.delete(key));
+      .finally(() => {
+        if (inflight.get(key) === promise) inflight.delete(key);
+      });
     inflight.set(key, promise);
     return promise;
   }
@@ -82,5 +86,16 @@ export function createWorkPageDataService({ fetchJson, readCachedJson = async ()
     return `${activeUrl}:${path}`;
   }
 
-  return { fetch, load, warm };
+  function invalidate(activeUrl, pathPrefix) {
+    const prefix = requestKey(activeUrl, pathPrefix);
+    for (const key of new Set([...inflight.keys(), ...warmed, ...warmedResults.keys(), ...generations.keys()])) {
+      if (!key.startsWith(prefix)) continue;
+      generations.set(key, (generations.get(key) || 0) + 1);
+      inflight.delete(key);
+      warmed.delete(key);
+      warmedResults.delete(key);
+    }
+  }
+
+  return { fetch, invalidate, load, warm };
 }

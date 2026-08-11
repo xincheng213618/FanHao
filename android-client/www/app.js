@@ -1,8 +1,8 @@
-import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260731-novel-actions-ui-53";
+import { CLIENT_VERSION, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=20260811-favorite-folders-01";
 import { fetchJson } from "./js/api.js?v=20260706-mobile-web-sync-01";
-import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260731-novel-actions-ui-53";
+import { cacheAgeText, clearCachedData, getCacheStats, readCachedJson, writeCachedJson } from "./js/cache.js?v=20260811-favorite-folders-01";
 import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog } from "./js/android-module-registry.js?v=20260730-fanhao-nav-ui-44";
-import { getElements } from "./js/dom.js?v=20260731-novel-actions-ui-53";
+import { getElements } from "./js/dom.js?v=20260811-favorite-folders-01";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
 import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=20260717-fanhao-cover-prepare-01";
 import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-manage-74";
@@ -141,6 +141,14 @@ function shouldRememberView(view, params = {}) {
 }
 
 function sanitizeViewParams(view, params = {}) {
+  if (view === "works") {
+    const favorite = ["1", "true", "yes"].includes(String(params.favorite || "").trim().toLowerCase());
+    const folder = favorite ? String(params.folder || "").trim().slice(0, 96) : "";
+    return {
+      ...(favorite ? { favorite: "1" } : {}),
+      ...(folder && folder !== "all" ? { folder } : {})
+    };
+  }
   if (view === "search") return { query: String(params.query || "").trim() };
   if (view === "personDetail") return { personId: String(params.personId || "") };
   if (view === "workDetail") return { workId: String(params.workId || "") };
@@ -983,8 +991,15 @@ function openNativeLibraryRoute(options = {}) {
     showView(DEFAULT_VIEW, {}, navigation);
     return true;
   }
-  if (first === "favorites" || first === "vr") {
-    workViews?.setWorkFilterMode(first === "vr" ? "vr" : "favorite", { replace: true, rerender: false });
+  if (first === "favorites") {
+    showView("works", {
+      favorite: "1",
+      ...(query.get("folder") ? { folder: query.get("folder") } : {})
+    }, navigation);
+    return true;
+  }
+  if (first === "vr") {
+    workViews?.setWorkFilterMode("vr", { replace: true, rerender: false });
     showView("works", {}, navigation);
     return true;
   }
@@ -1193,6 +1208,7 @@ function renderDashboard(data) {
 
 function renderUserState(user = {}) {
   els.historyCount.textContent = formatNumber(user.historyCount || user.history || 0);
+  if (els.favoriteCount) els.favoriteCount.textContent = formatNumber(user.favoriteCount || (Array.isArray(user.favorites) ? user.favorites.length : 0));
 }
 
 function renderRecentContentPreview() {

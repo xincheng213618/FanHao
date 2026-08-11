@@ -5,11 +5,12 @@ export const FANHAO_ROOT_VIEWS = Object.freeze(["people", "works", "rankings", "
 const CHROME_TABS = Object.freeze([
   { label: "演员", view: "people" },
   { label: "分类", view: "categories" },
+  { key: "favorites", label: "收藏", view: "works", params: { favorite: "1" } },
   { label: "榜单", view: "rankings" },
   { label: "厂牌", view: "studios" }
 ]);
 
-export function renderFanhaoChrome({ container, view }, host, views) {
+export function renderFanhaoChrome({ container, params, view }, host, views) {
   if (view === "search") return false;
   container.dataset.module = "fanhao";
   delete container.dataset.detailView;
@@ -23,14 +24,15 @@ export function renderFanhaoChrome({ container, view }, host, views) {
   row.setAttribute("aria-label", "番号导航和排序");
   const tabs = document.createElement("div");
   tabs.className = "fanhao-chrome-tabs";
-  const activeView = fanhaoTabForView(view);
+  const activeView = fanhaoTabForView(view, params);
   const activeSort = sortConfigForView(view, views);
 
   for (const tab of CHROME_TABS) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "fanhao-chrome-tag";
-    const active = tab.view === activeView;
+    const tabKey = tab.key || tab.view;
+    const active = tabKey === activeView;
     const opensSort = tab.view === view && Boolean(activeSort?.options.length);
     button.classList.toggle("active", active);
     button.classList.toggle("has-menu", opensSort);
@@ -47,12 +49,12 @@ export function renderFanhaoChrome({ container, view }, host, views) {
       button.textContent = tab.label;
     }
     button.addEventListener("click", () => {
-      if (view === tab.view) {
+      if (active) {
         if (activeSort?.options.length) openSortDialog(host, activeSort);
         else host.ui.scrollToTop();
         return;
       }
-      host.navigation.showView(tab.view, {}, { resetStack: true });
+      host.navigation.showView(tab.view, tab.params || {}, { resetStack: true });
       host.ui.scrollToTop();
     });
     tabs.append(button);
@@ -90,9 +92,10 @@ function renderDetailChrome(container, view, host) {
   container.append(row);
 }
 
-function fanhaoTabForView(view) {
+function fanhaoTabForView(view, params = {}) {
   if (view === "people" || view === "personDetail") return "people";
   if (view === "rankings") return "rankings";
+  if (view === "works" && String(params.favorite || "") === "1") return "favorites";
   if (view === "works" || view === "categories") return "categories";
   if (view === "codePrefixes" || view === "codePrefixDetail") return "studios";
   if (view === "studios" || view === "studioDetail") return "studios";

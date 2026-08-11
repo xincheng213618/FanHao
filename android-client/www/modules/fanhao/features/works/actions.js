@@ -1,11 +1,12 @@
 import { postJson } from "../../../../js/api.js?v=20260706-mobile-web-sync-01";
 import { readCachedJson, writeCachedJson } from "../../../../js/cache.js?v=20260705-mobile-actions-01";
 import { openFanhaoSheet } from "../../sheet.js?v=20260731-mobile-action-sheet-01";
-
+import { syncFavoriteButton } from "./favorite-folders.js?v=20260811-favorite-folders-01";
 export function createWorkActions(deps) {
   const {
     detailErrorMessage,
     extractWorkCode,
+    favoriteFolders,
     formatNumber,
     getActiveUrl,
     onUserStateChange,
@@ -19,17 +20,29 @@ export function createWorkActions(deps) {
     const markerButton = actionButton("local-marker-action", "", () => toggleLocalMarker(work, "A", markerButton));
     syncMarkerButton(markerButton, work, "A");
     const favoriteButton = actionButton("favorite-action", "", () => toggleFavorite(work, favoriteButton));
-    syncFavoriteButton(favoriteButton, work.favorite);
-    const moreButton = actionButton("work-more-action", "更多", () => openMoreActions(work));
+    syncFavoriteButton(favoriteButton, work);
+    const moreButton = actionButton("work-more-action", "更多", () => openMoreActions(work, favoriteButton, moreButton));
     actions.append(markerButton, favoriteButton, moreButton);
     return actions;
   }
 
-  function openMoreActions(work) {
+  function openMoreActions(work, favoriteButton, trigger) {
     const code = extractWorkCode(work);
     openFanhaoSheet({
       title: "更多操作",
       options: [
+        {
+          label: work.favoriteFolderName ? `移动收藏 · 当前 ${work.favoriteFolderName}` : "移动到收藏夹",
+          hidden: !work.favorite,
+          closeOnSelect: false,
+          select: (_value, _button, close) => {
+            close();
+            favoriteFolders?.openMovePicker(work, {
+              trigger,
+              onMoved: () => syncFavoriteButton(favoriteButton, work)
+            });
+          }
+        },
         {
           label: "复制番号",
           hidden: !code,
@@ -67,11 +80,6 @@ export function createWorkActions(deps) {
     button.textContent = text;
     button.addEventListener("click", onClick);
     return button;
-  }
-
-  function syncFavoriteButton(button, favorite) {
-    button.textContent = favorite ? "已收藏" : "收藏";
-    button.classList.toggle("active", Boolean(favorite));
   }
 
   function syncMarkerButton(button, work, marker = "A") {
@@ -144,17 +152,28 @@ export function createWorkActions(deps) {
   async function toggleFavorite(work, button) {
     const previous = Boolean(work.favorite);
     button.disabled = true;
+    button.classList.add("pending");
     button.textContent = previous ? "取消中" : "收藏中";
     try {
-      const data = await postJson(getActiveUrl(), `/api/favorites/${encodeURIComponent(work.id)}`);
-      work.favorite = Boolean(data.favorite);
-      syncFavoriteButton(button, work.favorite);
-      if (data.user) onUserStateChange?.(data.user);
+      const data = favoriteFolders
+        ? await favoriteFolders.toggleFavorite(work, () => syncFavoriteButton(button, work))
+        : await postJson(getActiveUrl(), `/api/favorites/${encodeURIComponent(work.id)}`);
+      if (!favoriteFolders) {
+        work.favorite = Boolean(data.favorite);
+        work.favoriteFolderId = String(data.favoriteFolder?.folderId || "");
+        work.favoriteFolderName = String(data.favoriteFolder?.folderName || "");
+      }
+      syncFavoriteButton(button, work);
+      if (!favoriteFolders && data.user) onUserStateChange?.(data.user);
+      updateCachedDetail(work).catch(() => {});
     } catch (error) {
-      syncFavoriteButton(button, previous);
+      work.favorite = previous;
+      syncFavoriteButton(button, work);
       renderMessage(detailErrorMessage(error, "收藏状态更新失败，请稍后重试"), "error", false);
     } finally {
       button.disabled = false;
+      button.classList.remove("pending");
+      syncFavoriteButton(button, work);
     }
   }
 
