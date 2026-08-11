@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createImageGalleryDbService } from "../src/modules/content-index/server/image-gallery-db-service.js";
+import { removeVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-gallery-db-"));
 const dbPath = path.join(tempDir, "image-gallery.sqlite");
@@ -44,5 +45,5 @@ try {
   console.log("image-gallery-db: ok");
 } finally {
   service.close();
-  fs.rmSync(tempDir, { recursive: true, force: true });
+  removeVerifiedTempDir(tempDir);
 }

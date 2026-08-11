@@ -5,9 +5,11 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { CURRENT_INDEX_SCHEMA, PARSER_VERSION } from "../src/modules/content-index/server/image-library-index-contract.js";
+import { removeVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-rescan-fixture-"));
+assert.throws(() => removeVerifiedTempDir(os.tmpdir()), /Refusing to recursively delete/, "temporary-root cleanup must fail closed");
 try {
   const photoRoot = path.join(tempDir, "photos");
   const movieRoot = path.join(tempDir, "movies");
@@ -43,5 +45,5 @@ try {
   assert.deepEqual(second.photoSets.map((item) => item.title), ["fixture"], "rescan must reject an incompatible persisted index");
   console.log("rescan-image-library: ok");
 } finally {
-  fs.rmSync(tempDir, { recursive: true, force: true });
+  removeVerifiedTempDir(tempDir);
 }

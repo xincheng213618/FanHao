@@ -7,6 +7,7 @@ import { createPeopleScopeService } from "../src/modules/fanhao/server/people/pe
 import { createImageLibraryIndexService } from "../src/modules/content-index/server/image-library-index-service.js";
 import { CURRENT_INDEX_SCHEMA, PARSER_VERSION } from "../src/modules/content-index/server/image-library-index-contract.js";
 import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
+import { removeVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 assert.deepEqual(
   cacheDependencyTables("actor_movies"),
@@ -123,5 +124,5 @@ try {
   assert.equal(serviceFor([rootA]).getIndex().photoSets[0].title, "a", "a parser version bump must re-list the index");
   console.log("cache-index-contracts: ok");
 } finally {
-  fs.rmSync(tempDir, { recursive: true, force: true });
+  removeVerifiedTempDir(tempDir);
 }

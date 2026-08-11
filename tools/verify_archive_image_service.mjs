@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ARCHIVE_IMAGE_INDEXER_VERSION, createArchiveImageService } from "../src/platform/server/archive-image-service.js";
+import { removeVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = path.join(root, "tools", "fixtures", "archive_image_helper_fixture.mjs");
@@ -105,7 +106,7 @@ try {
 
   console.log("archive-image-service: ok");
 } finally {
-  fs.rmSync(tempDir, { recursive: true, force: true });
+  removeVerifiedTempDir(tempDir);
 }
 
 function countInvocations(filePath) {
