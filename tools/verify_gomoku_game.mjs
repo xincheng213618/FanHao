@@ -32,7 +32,7 @@ for (const relativePath of requiredFiles) {
 
 for (const [relativePath, expectedHash] of expectedHashes) {
   const bytes = fs.readFileSync(path.join(gameDir, ...relativePath.split("/")));
-  const actualHash = crypto.createHash("sha256").update(bytes).digest("hex").toUpperCase();
+  const actualHash = crypto.createHash("sha256").update(hashableAssetBytes(relativePath, bytes)).digest("hex").toUpperCase();
   if (actualHash !== expectedHash) {
     throw new Error(`gomoku: hash mismatch for ${relativePath}: ${actualHash}`);
   }
@@ -66,6 +66,12 @@ console.log(`gomoku: ok (${requiredFiles.length} files, Rapfi assets verified, A
 
 function read(relativePath) {
   return fs.readFileSync(path.join(root, ...relativePath.split("/")), "utf8");
+}
+
+function hashableAssetBytes(relativePath, bytes) {
+  if (!relativePath.endsWith(".js")) return bytes;
+  // Git may check this text asset out as CRLF on Windows; its engine bytes are otherwise unchanged.
+  return Buffer.from(bytes.toString("utf8").replace(/\r\n?/g, "\n"), "utf8");
 }
 
 function assertIncludes(text, expected, label) {

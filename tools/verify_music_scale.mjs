@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { createMusicStore } from "../src/modules/music/server/store.js";
+import { ensureSchema } from "../src/modules/music/server/schema.js";
+import { writeScanRecords } from "../src/modules/music/server/scan.js";
 import {
   buildArtistLanguageConsensus,
   explicitMusicLanguageForArtist,
@@ -24,9 +27,10 @@ const { routeFromUrl, routeUrl } = await import("../public/js/router.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
+const fixture = createMusicScaleFixture();
 const store = createMusicStore({
-  dbPath: path.join(root, "data", "music.sqlite"),
-  roots: ["D:\\Music"]
+  dbPath: fixture.dbPath,
+  roots: [fixture.musicRoot]
 });
 
 try {
@@ -97,8 +101,14 @@ try {
   assert.equal(musicLanguageForArtist("Various Artists", "韩文", languageConsensus), "韩文", "mixed compilations should keep their path language");
 
   const summary = store.summary();
-  assert.ok(Number(summary.totals?.tracks || 0) > 0, "music summary should include tracks");
-  assert.ok((summary.languages || []).some((item) => item.name === "中文"), "language facets should include Chinese");
+  assert.equal(summary.totals?.tracks, fixture.trackCount, "music summary should count every fixture track");
+  assert.equal(summary.totals?.artists, fixture.artistCount, "music summary should count every fixture artist");
+  assert.equal(summary.totals?.albums, fixture.albumCount, "music summary should count every fixture album");
+  assert.deepEqual(
+    Object.fromEntries(summary.languages.map((item) => [item.name, item.trackCount])),
+    fixture.languageTrackCounts,
+    "music summary language counts should come only from the controlled fixture"
+  );
 
   store.facets();
   const startedAt = performance.now();
@@ -255,7 +265,7 @@ try {
   const broadSingleSearchMs = performance.now() - broadSingleStartedAt;
   assert.ok(broadSingleSearch.total > 10000, "the high-cardinality one-character fixture should exercise the broad search path");
   assert.ok(broadSingleSearchMs < 100, `broad one-character search should finish under 100 ms (actual ${broadSingleSearchMs.toFixed(1)} ms)`);
-  const verificationDb = new DatabaseSync(path.join(root, "data", "music.sqlite"), { readOnly: true });
+  const verificationDb = new DatabaseSync(fixture.dbPath, { readOnly: true });
   try {
     const indexedTracks = Number(verificationDb.prepare("SELECT COUNT(*) AS count FROM music_search_short").get()?.count || 0);
     assert.equal(indexedTracks, Number(summary.totals.tracks || 0), "the short search index should cover every active track");
@@ -760,6 +770,181 @@ try {
   }, null, 2));
 } finally {
   store.invalidate();
+  fixture.cleanup();
+}
+
+function createMusicScaleFixture() {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-music-scale-"));
+  const musicRoot = path.join(fixtureDir, "library");
+  const dbPath = path.join(fixtureDir, "music.sqlite");
+  const scannedAt = "2026-08-11T00:00:00.000Z";
+  fs.mkdirSync(musicRoot, { recursive: true });
+
+  const records = { artists: [], albums: [], tracks: [], lyrics: [] };
+  const artists = new Map();
+  const albums = new Map();
+  const states = [];
+  const rangePath = path.join(musicRoot, "fixture-range.flac");
+  fs.writeFileSync(rangePath, Buffer.alloc(2 * 1024 * 1024 + 1, 7));
+
+  function addTrack({ artist, title, album, language, genre = "流行", ext = ".mp3", codec = "mp3", sizeBytes = 640_000, durationMs = 210_000, bitDepth = 16, sampleRate = 44_100, hasLyrics = false, sourcePath = "" }) {
+    let artistRecord = artists.get(artist);
+    if (!artistRecord) {
+      artistRecord = { id: `artist-${artists.size + 1}`, name: artist, language, tracks: [] };
+      artists.set(artist, artistRecord);
+    }
+    const albumKey = `${artistRecord.id}\u0000${album}`;
+    let albumRecord = albums.get(albumKey);
+    if (!albumRecord) {
+      albumRecord = { id: `album-${albums.size + 1}`, artist: artistRecord, title: album, tracks: [] };
+      albums.set(albumKey, albumRecord);
+    }
+    const trackNumber = records.tracks.length + 1;
+    const fileName = `${trackNumber}${ext}`;
+    const track = {
+      id: `track-${trackNumber}`,
+      artistId: artistRecord.id,
+      albumId: albumRecord.id,
+      title,
+      sortTitle: title,
+      displayArtist: artist,
+      albumTitle: album,
+      trackNo: albumRecord.tracks.length + 1,
+      discNo: 1,
+      genre,
+      language,
+      sourceRoot: musicRoot,
+      sourcePath: sourcePath || path.join(musicRoot, "virtual", fileName),
+      relativePath: fileName,
+      fileName,
+      ext,
+      sizeBytes,
+      mtimeMs: 1_755_000_000_000,
+      durationMs,
+      codec,
+      sampleRate,
+      bitDepth,
+      channels: 2,
+      lrcPath: hasLyrics ? path.join(musicRoot, `${trackNumber}.lrc`) : "",
+      hasLrc: hasLyrics ? 1 : 0,
+      status: "ok",
+      error: "",
+      updatedAt: scannedAt
+    };
+    records.tracks.push(track);
+    artistRecord.tracks.push(track);
+    albumRecord.tracks.push(track);
+    return track;
+  }
+
+  const rangeTrack = addTrack({
+    artist: "Fixture Range",
+    title: "Fixture Range Track",
+    album: "00 Fixture Range",
+    language: "英文",
+    ext: ".flac",
+    codec: "flac",
+    sizeBytes: fs.statSync(rangePath).size,
+    bitDepth: 24,
+    sampleRate: 96_000,
+    sourcePath: rangePath
+  });
+  const blueLotus = addTrack({ artist: "许巍", title: "蓝莲花", album: "中文精选", language: "中文", hasLyrics: true });
+  addTrack({ artist: "周杰伦", title: "青花瓷", album: "青花瓷", language: "中文" });
+  addTrack({ artist: "周杰伦", title: "周杰伦 Fixture One", album: "青花瓷", language: "中文" });
+  addTrack({ artist: "周杰伦", title: "周杰伦 Fixture Two", album: "青花瓷", language: "中文" });
+  addTrack({ artist: "王菲", title: "红豆", album: "中文精选", language: "中文" });
+  addTrack({ artist: "刘若英", title: "后来", album: "中文精选", language: "中文" });
+  addTrack({ artist: "林俊杰", title: "江南", album: "中文精选", language: "中文" });
+  addTrack({ artist: "Hillsong Young & Free", title: "Wake (Live)", album: "Live", language: "英文" });
+  addTrack({ artist: "Taylor Swift", title: "Love Story", album: "Fearless", language: "英文" });
+  addTrack({ artist: "坂本龍一", title: "Merry Christmas Mr. Lawrence", album: "Japanese Classics", language: "日文" });
+  for (const artist of ["BLACKPINK", "BIGBANG", "IU", "EXO"]) addTrack({ artist, title: `${artist} Fixture Song`, album: "Korean Hits", language: "韩文" });
+  for (let index = 0; index < 300; index += 1) addTrack({ artist: "S.H.E", title: `SHE Fixture ${index + 1}`, album: "SHE Collection", language: "中文" });
+  for (let index = 0; index < 90; index += 1) addTrack({ artist: `中文歌手${index + 1}`, title: `中文歌曲${index + 1}`, album: `中文专辑${index + 1}`, language: "中文" });
+  for (let index = 0; index < 10_010; index += 1) addTrack({ artist: "Scale Artist", title: `a scale fixture ${index + 1}`, album: "Scale Data", language: "英文" });
+
+  records.lyrics.push({
+    trackId: blueLotus.id,
+    lrcPath: blueLotus.lrcPath,
+    rawText: "[00:01.000]没有什么能够阻挡\n[00:02.000]我对爱的向往\n[00:03.000]爱你",
+    parsedJson: JSON.stringify([
+      { timeMs: 1000, text: "没有什么能够阻挡" },
+      { timeMs: 2000, text: "我对爱的向往" },
+      { timeMs: 3000, text: "爱你" }
+    ]),
+    updatedAt: scannedAt
+  });
+  states.push({ trackId: blueLotus.id, favorite: 1, rating: 5, playCount: 3 });
+  states.push({ trackId: rangeTrack.id, favorite: 0, rating: 4, playCount: 1 });
+
+  for (const artist of artists.values()) {
+    const artistAlbums = [...albums.values()].filter((album) => album.artist === artist);
+    artist.tracks.forEach((track) => { track.artistId = artist.id; });
+    records.artists.push({
+      id: artist.id,
+      name: artist.name,
+      sortName: artist.name,
+      language: artist.language,
+      sourceRoot: musicRoot,
+      sourcePath: path.join(musicRoot, artist.id),
+      relativePath: artist.id,
+      albumCount: artistAlbums.length,
+      trackCount: artist.tracks.length,
+      durationMs: artist.tracks.reduce((total, track) => total + track.durationMs, 0),
+      sizeBytes: artist.tracks.reduce((total, track) => total + track.sizeBytes, 0),
+      updatedAt: scannedAt
+    });
+  }
+  for (const album of albums.values()) {
+    records.albums.push({
+      id: album.id,
+      artistId: album.artist.id,
+      title: album.title,
+      sortTitle: album.title,
+      year: "2026",
+      coverPath: "",
+      introPath: "",
+      introText: "",
+      sourceRoot: musicRoot,
+      sourcePath: path.join(musicRoot, album.id),
+      relativePath: album.id,
+      trackCount: album.tracks.length,
+      durationMs: album.tracks.reduce((total, track) => total + track.durationMs, 0),
+      sizeBytes: album.tracks.reduce((total, track) => total + track.sizeBytes, 0),
+      updatedAt: scannedAt
+    });
+  }
+
+  const database = new DatabaseSync(dbPath);
+  try {
+    ensureSchema(database);
+    writeScanRecords(database, records, [musicRoot], scannedAt);
+    const insertState = database.prepare(`
+      INSERT INTO music_track_state (track_id, favorite, rating, position_ms, duration_ms, play_count, last_played_at, updated_at)
+      VALUES (?, ?, ?, 0, 0, ?, ?, ?)
+    `);
+    for (const state of states) insertState.run(state.trackId, state.favorite, state.rating, state.playCount, scannedAt, scannedAt);
+  } finally {
+    database.close();
+  }
+
+  const languageTrackCounts = Object.fromEntries(
+    [...new Set(records.tracks.map((track) => track.language))]
+      .sort()
+      .map((language) => [language, records.tracks.filter((track) => track.language === language).length])
+  );
+  return {
+    dbPath,
+    musicRoot,
+    trackCount: records.tracks.length,
+    artistCount: records.artists.length,
+    albumCount: records.albums.length,
+    languageTrackCounts,
+    cleanup() {
+      fs.rmSync(fixtureDir, { recursive: true, force: true });
+    }
+  };
 }
 
 function assertNoRelativeImportCycles(directory) {
