@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import fs from "node:fs";
 import { createServer } from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { spawn } from "node:child_process";
@@ -76,6 +77,21 @@ try {
 }
 
 function verifyTempCleanupSafety() {
+  verifyCreationFailureCleanup();
+  verifyMovedAndReplacedCleanup();
+  verifyJunctionCleanupRefusal();
+  verifyOriginalSwapDuringRename();
+  verifyOriginalReplacementAfterQuarantine();
+  verifyQuarantinePayloadConflict();
+  verifyRenameFailureSemantics();
+  verifyDeleteFailureRetry();
+  verifyQuarantineSiblingPreservation();
+  verifyLegacyNoTokenCleanup();
+  verifyMappedTempRootCleanup();
+  verifyZeroIdentityRefusal();
+}
+
+function verifyCreationFailureCleanup() {
   let failedPath = "";
   assert.throws(
     () => createVerifiedTempDir("fanhao-short-video-cleanup-failure-", {
@@ -89,7 +105,9 @@ function verifyTempCleanupSafety() {
   );
   assert.ok(failedPath, "failure injection must create an owned directory");
   assert.equal(fs.existsSync(failedPath), false, "a failed fixture creation must remove only its owned directory");
+}
 
+function verifyMovedAndReplacedCleanup() {
   const moved = createVerifiedTempDir("fanhao-short-video-cleanup-moved-");
   const movedPath = `${moved.tempDir}-relocated`;
   fs.renameSync(moved.tempDir, movedPath);
@@ -108,14 +126,16 @@ function verifyTempCleanupSafety() {
   const replacementSentinel = path.join(replaced.tempDir, "replacement-sentinel.txt");
   fs.writeFileSync(replacementSentinel, "must survive refused cleanup");
   try {
-    assert.throws(() => replaced.cleanup(), /replacement temporary directory/);
+    assert.throws(() => replaced.cleanup(), /different owner identity|moved or replaced/);
     assert.equal(fs.existsSync(replacementSentinel), true, "a same-name replacement must not be removed");
   } finally {
     removeVerifiedTempDir(replaced.tempDir, captureVerifiedTempDirOwnership(replaced.tempDir));
     fs.renameSync(replacedMovedPath, replaced.tempDir);
     replaced.cleanup();
   }
+}
 
+function verifyJunctionCleanupRefusal() {
   const linked = createVerifiedTempDir("fanhao-short-video-cleanup-junction-");
   const linkedMovedPath = `${linked.tempDir}-relocated`;
   const outside = createVerifiedTempDir("fanhao-short-video-cleanup-outside-");
@@ -124,7 +144,7 @@ function verifyTempCleanupSafety() {
   fs.writeFileSync(outsideSentinel, "must survive refused junction cleanup");
   fs.symlinkSync(outside.tempDir, linked.tempDir, process.platform === "win32" ? "junction" : "dir");
   try {
-    assert.throws(() => linked.cleanup(), /moved or replaced temporary directory|outside the temporary directory/);
+    assert.throws(() => linked.cleanup(), /moved or replaced|outside the temporary directory|link, junction, reparse point/);
     assert.equal(fs.existsSync(outsideSentinel), true, "a replacement junction must never reach another fixture");
   } finally {
     const linkStat = fs.lstatSync(linked.tempDir, { throwIfNoEntry: false });
@@ -133,6 +153,289 @@ function verifyTempCleanupSafety() {
     linked.cleanup();
     outside.cleanup();
   }
+}
+
+function verifyOriginalSwapDuringRename() {
+  const fixture = createVerifiedTempDir("fanhao-short-video-cleanup-race-");
+  const movedPath = `${fixture.tempDir}-owned-moved`;
+  const ownedSentinel = path.join(fixture.tempDir, "owned-sentinel.txt");
+  fs.writeFileSync(ownedSentinel, "original token must survive the injected swap");
+  let payloadPath = "";
+  let swapped = false;
+  let error = null;
+  try {
+    error = expectFailure(() => fixture.cleanup({
+      fsOps: {
+        renameSync(source, target) {
+          if (!swapped && samePath(source, fixture.tempDir)) {
+            swapped = true;
+            fs.renameSync(source, movedPath);
+            fs.mkdirSync(source);
+            fs.writeFileSync(path.join(source, "replacement-sentinel.txt"), "must not be deleted");
+            payloadPath = target;
+          }
+          return fs.renameSync(source, target);
+        },
+        rmSync() {
+          assert.fail("identity mismatch must fail before any recursive removal");
+        }
+      }
+    }));
+    assert.match(error.message, /different owner identity/);
+    assert.equal(error.quarantinePath, payloadPath, "a post-precheck swap must expose its preserved quarantine path");
+    assert.equal(fs.existsSync(path.join(payloadPath, "replacement-sentinel.txt")), true, "the raced replacement must be preserved in quarantine");
+    assert.equal(fs.existsSync(path.join(movedPath, "owned-sentinel.txt")), true, "the true token directory must survive at its injected moved path");
+    assert.equal(fs.existsSync(fixture.tempDir), false, "cleanup must never fall back to deleting the original pathname");
+  } finally {
+    const quarantinePath = error?.quarantinePath || payloadPath;
+    cleanupPlainTempDirectory(quarantinePath ? path.dirname(quarantinePath) : "");
+    cleanupPlainTempDirectory(fixture.tempDir);
+    cleanupPlainTempDirectory(movedPath);
+  }
+}
+
+function verifyOriginalReplacementAfterQuarantine() {
+  const fixture = createVerifiedTempDir("fanhao-short-video-cleanup-recreated-");
+  fs.writeFileSync(path.join(fixture.tempDir, "owned-sentinel.txt"), "owned");
+  let replacementSentinel = "";
+  try {
+    assert.equal(fixture.cleanup({
+      fsOps: {
+        rmSync(target, options) {
+          assert.equal(path.basename(target), "payload", "recursive removal must target only the quarantined payload");
+          assert.equal(fs.existsSync(fixture.tempDir), false, "the original path must be free after quarantine rename");
+          fs.mkdirSync(fixture.tempDir);
+          replacementSentinel = path.join(fixture.tempDir, "replacement-sentinel.txt");
+          fs.writeFileSync(replacementSentinel, "must survive payload deletion");
+          return fs.rmSync(target, options);
+        }
+      }
+    }), true);
+    assert.equal(fs.existsSync(replacementSentinel), true, "an original-path replacement created at rm time must survive");
+  } finally {
+    cleanupPlainTempDirectory(fixture.tempDir);
+  }
+}
+
+function verifyQuarantinePayloadConflict() {
+  const fixture = createVerifiedTempDir("fanhao-short-video-cleanup-conflict-");
+  const ownedSentinel = path.join(fixture.tempDir, "owned-sentinel.txt");
+  fs.writeFileSync(ownedSentinel, "owned");
+  let conflictPath = "";
+  let error = null;
+  try {
+    error = expectFailure(() => fixture.cleanup({
+      fsOps: {
+        renameSync(source, target) {
+          conflictPath = target;
+          fs.mkdirSync(target);
+          fs.writeFileSync(path.join(target, "foreign-sentinel.txt"), "must survive rename failure");
+          return fs.renameSync(source, target);
+        },
+        rmSync() {
+          assert.fail("payload conflict must not fall back to recursive removal");
+        }
+      }
+    }));
+    assert.ok(["EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error.code || "").toUpperCase()));
+    assert.equal(error.quarantinePath, conflictPath);
+    assert.equal(fs.existsSync(ownedSentinel), true, "payload collision must leave the original owner untouched");
+    assert.equal(fs.existsSync(path.join(conflictPath, "foreign-sentinel.txt")), true, "payload collision must not delete the conflicting entry");
+    assert.equal(fixture.cleanup(), true, "the owner must remain cleanable after the conflict is isolated");
+  } finally {
+    const quarantinePath = error?.quarantinePath || conflictPath;
+    cleanupPlainTempDirectory(quarantinePath ? path.dirname(quarantinePath) : "");
+    cleanupPlainTempDirectory(fixture.tempDir);
+  }
+}
+
+function verifyRenameFailureSemantics() {
+  for (const code of ["EPERM", "EBUSY", "EACCES"]) {
+    const fixture = createVerifiedTempDir(`fanhao-short-video-cleanup-${code.toLowerCase()}-`);
+    const sentinel = path.join(fixture.tempDir, "owned-sentinel.txt");
+    fs.writeFileSync(sentinel, "owned");
+    try {
+      const error = expectFailure(() => fixture.cleanup({
+        fsOps: {
+          renameSync() {
+            throw Object.assign(new Error(`injected ${code}`), { code });
+          },
+          rmSync() {
+            assert.fail(`${code} must not fall back to recursive removal`);
+          }
+        }
+      }));
+      assert.equal(error.code, code);
+      assert.equal(fs.existsSync(sentinel), true, `${code} must leave the original owner untouched`);
+      assert.equal(fs.existsSync(error.quarantinePath), false, `${code} must not fabricate a quarantined payload`);
+      assert.equal(fixture.cleanup(), true, `${code} must remain retryable from the original path`);
+    } finally {
+      cleanupPlainTempDirectory(fixture.tempDir);
+    }
+  }
+
+  const missing = createVerifiedTempDir("fanhao-short-video-cleanup-enoent-");
+  const movedPath = `${missing.tempDir}-moved-during-rename`;
+  let injected = false;
+  try {
+    assert.equal(missing.cleanup({
+      fsOps: {
+        renameSync(source) {
+          if (!injected) {
+            injected = true;
+            fs.renameSync(source, movedPath);
+          }
+          throw Object.assign(new Error("injected ENOENT"), { code: "ENOENT" });
+        },
+        rmSync() {
+          assert.fail("ENOENT must not fall back to recursive removal");
+        }
+      }
+    }), false, "ENOENT after precheck must report a moved owner without deleting it");
+    assert.equal(fs.existsSync(movedPath), true);
+  } finally {
+    if (fs.existsSync(movedPath) && !fs.existsSync(missing.tempDir)) fs.renameSync(movedPath, missing.tempDir);
+    missing.cleanup();
+  }
+}
+
+function verifyDeleteFailureRetry() {
+  const fixture = createVerifiedTempDir("fanhao-short-video-cleanup-delete-failure-");
+  fs.writeFileSync(path.join(fixture.tempDir, "owned-sentinel.txt"), "owned");
+  let firstFailure = null;
+  let replacementSentinel = "";
+  try {
+    firstFailure = expectFailure(() => fixture.cleanup({
+      fsOps: {
+        rmSync() {
+          throw Object.assign(new Error("injected payload delete failure"), { code: "EBUSY" });
+        }
+      }
+    }));
+    assert.equal(firstFailure.code, "EBUSY");
+    assert.equal(firstFailure.ownedDirectoryPreserved, true);
+    assert.equal(fs.existsSync(path.join(firstFailure.quarantinePath, "owned-sentinel.txt")), true, "rm failure must preserve the owned payload in quarantine");
+    assert.equal(fs.existsSync(fixture.tempDir), false);
+
+    fs.mkdirSync(fixture.tempDir);
+    replacementSentinel = path.join(fixture.tempDir, "replacement-sentinel.txt");
+    fs.writeFileSync(replacementSentinel, "must survive cleanup retry");
+    assert.equal(fixture.cleanup(), true, "a second cleanup call must retry the remembered owned payload");
+    assert.equal(fs.existsSync(firstFailure.quarantinePath), false);
+    assert.equal(fs.existsSync(replacementSentinel), true, "retry must never fall back to the recreated original path");
+  } finally {
+    cleanupPlainTempDirectory(fixture.tempDir);
+    cleanupPlainTempDirectory(firstFailure?.quarantinePath ? path.dirname(firstFailure.quarantinePath) : "");
+  }
+}
+
+function verifyQuarantineSiblingPreservation() {
+  const fixture = createVerifiedTempDir("fanhao-short-video-cleanup-sibling-");
+  let siblingPath = "";
+  try {
+    assert.equal(fixture.cleanup({
+      fsOps: {
+        rmSync(target, options) {
+          siblingPath = path.join(path.dirname(target), "foreign-sibling.txt");
+          fs.writeFileSync(siblingPath, "must survive non-recursive parent cleanup");
+          return fs.rmSync(target, options);
+        }
+      }
+    }), true);
+    assert.equal(fs.existsSync(siblingPath), true, "quarantine parent cleanup must never recursively remove an injected sibling");
+  } finally {
+    cleanupPlainTempDirectory(siblingPath ? path.dirname(siblingPath) : "");
+  }
+}
+
+function verifyLegacyNoTokenCleanup() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-video-cleanup-legacy-"));
+  let recursiveTarget = "";
+  try {
+    assert.equal(removeVerifiedTempDir(tempDir, null, {
+      fsOps: {
+        rmSync(target, options) {
+          recursiveTarget = target;
+          return fs.rmSync(target, options);
+        }
+      }
+    }), true);
+    assert.notEqual(samePath(recursiveTarget, tempDir), true, "legacy no-token cleanup must never recursively remove the original path");
+    assert.equal(path.basename(recursiveTarget), "payload");
+    assert.equal(fs.existsSync(tempDir), false);
+  } finally {
+    cleanupPlainTempDirectory(tempDir);
+  }
+}
+
+function verifyMappedTempRootCleanup() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-video-cleanup-root-map-"));
+  fs.writeFileSync(path.join(tempDir, "owned-sentinel.txt"), "owned");
+  const lexicalRoot = path.resolve(os.tmpdir());
+  const fakeCanonicalRoot = path.join(path.parse(lexicalRoot).root, "fanhao-canonical-temp-root");
+  const mappedRealpath = (value) => {
+    const lexical = path.resolve(value);
+    const relative = path.relative(lexicalRoot, lexical);
+    assert.equal(path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`), false);
+    return relative ? path.join(fakeCanonicalRoot, relative) : fakeCanonicalRoot;
+  };
+  try {
+    assert.equal(removeVerifiedTempDir(tempDir, null, {
+      fsOps: { realpathSyncNative: mappedRealpath }
+    }), true, "a lexical temp root that canonicalizes elsewhere must remain cleanable");
+  } finally {
+    cleanupPlainTempDirectory(tempDir);
+  }
+}
+
+function verifyZeroIdentityRefusal() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-short-video-cleanup-zero-id-"));
+  const sentinel = path.join(tempDir, "owned-sentinel.txt");
+  fs.writeFileSync(sentinel, "must survive missing identity");
+  try {
+    assert.throws(() => removeVerifiedTempDir(tempDir, null, {
+      fsOps: {
+        lstatSync(target, options) {
+          const entry = fs.lstatSync(target, options);
+          if (!entry || !samePath(target, tempDir)) return entry;
+          return new Proxy(entry, {
+            get(object, property) {
+              if (property === "dev" || property === "ino") return 0;
+              const value = Reflect.get(object, property);
+              return typeof value === "function" ? value.bind(object) : value;
+            }
+          });
+        }
+      }
+    }), /stable dev\/ino/);
+    assert.equal(fs.existsSync(sentinel), true, "zero dev/ino must fail closed without deleting the directory");
+  } finally {
+    cleanupPlainTempDirectory(tempDir);
+  }
+}
+
+function expectFailure(work) {
+  let failure = null;
+  try {
+    work();
+  } catch (error) {
+    failure = error;
+  }
+  assert.ok(failure, "the injected cleanup phase must fail");
+  return failure;
+}
+
+function cleanupPlainTempDirectory(targetPath) {
+  if (!targetPath || !fs.lstatSync(targetPath, { throwIfNoEntry: false })) return false;
+  return removeVerifiedTempDir(targetPath);
+}
+
+function samePath(left, right) {
+  const normalize = (value) => {
+    const resolved = path.resolve(value);
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  return normalize(left) === normalize(right);
 }
 
 async function verifyApiErrorMetadata() {
