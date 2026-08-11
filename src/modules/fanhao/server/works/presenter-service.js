@@ -169,7 +169,7 @@ export function createWorkPresenterService({
     if (work.missingLocal) {
       // Missing-local works have no filesystem fallback. Their cached SQL cover is
       // list-critical data, even when the rest of the person page stays lightweight.
-      const coreCover = publicCoreWorkCover(work.id);
+      const coreCover = work.cachedCover?.coverUrl ? work.cachedCover : publicCoreWorkCover(work.id);
       const person = options.lightweightInfo
         ? getLibrary().peopleById.get(String(work.personId || "")) || null
         : displayPersonForWork(work.personId);

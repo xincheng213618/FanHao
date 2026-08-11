@@ -12,6 +12,7 @@ const LEGACY_MOBILE_PREWARM_DELAY_MS = 500;
 export function createWorkQueryService({
   actorMovieStamp,
   actorMissingSearchWorks,
+  actorMissingSearchWorksForPeople = () => [],
   clampInteger,
   coreLocalWorkIdsForPeople = () => [],
   createWorkSearchMatcher,
@@ -19,6 +20,7 @@ export function createWorkQueryService({
   defaultWorkLimit,
   displayWorkTitle = (value) => String(value || ""),
   enrichLocalWorksWithActorMovieIndex,
+  enrichLocalWorksWithActorMovieInfo = (works) => works,
   fastMissingCodeSearch,
   favoriteStateService,
   hydrateMissingSearchWorks = () => {},
@@ -27,6 +29,7 @@ export function createWorkQueryService({
   localSearchWorkByCodeKey,
   localWorksByCodePrefix,
   maxWorkLimit,
+  mergedActorMovieRows = () => [],
   peoplePayloadStamp = () => "",
   peopleScopeService,
   playbackProgressService,
@@ -379,7 +382,7 @@ export function createWorkQueryService({
     const missing = pageSource.filter((work) => !preparedWorkEntry(work, options));
     if (missing.length) {
       const coverBatch = options.lightweightInfo
-        ? missing.filter((work) => work.missingLocal)
+        ? missing.filter((work) => work.missingLocal && !work.cachedCover?.coverUrl)
         : missing;
       if (coverBatch.length) prewarmCoreWorkCovers(coverBatch);
       if (!options.lightweightInfo) {
@@ -488,7 +491,8 @@ export function createWorkQueryService({
 
   function categorySummaryForWorks(works = []) {
     return summarizeWorkCategories(works, {
-      isWestern: (work) => peopleScopeService.workMatches(work, "western")
+      isWestern: (work) => peopleScopeService.workMatchesDirect?.(work, "western")
+        ?? peopleScopeService.workMatches(work, "western")
     });
   }
 
@@ -644,6 +648,11 @@ export function createWorkQueryService({
   }
 
   function searchPayload(url) {
+    const startedAt = performance.now();
+    const timings = {};
+    const mark = (name) => {
+      timings[name] = Math.round(performance.now() - startedAt);
+    };
     const rawQuery = (url.searchParams.get("q") || "").trim();
     const category = normalizeWorkCategory(url.searchParams.get("category"));
     const filter = url.searchParams.get("filter") || "all";
@@ -652,12 +661,21 @@ export function createWorkQueryService({
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const pageCacheKey = JSON.stringify([rawQuery, category, filter, sort, limit, offset]);
     const cachedPage = readSearchPage(pageCacheKey);
-    if (cachedPage) return cachedPage;
-    const source = cachedSearchSource(rawQuery);
+    mark("pageCache");
+    if (cachedPage) {
+      timings.pageCacheHit = true;
+      return searchPayloadWithTimings(cachedPage, url, rawQuery, timings, mark);
+    }
+    const source = cachedSearchSource(rawQuery, timings, mark);
+    mark("source");
     const categoryWorks = cachedSearchCategory(source, category);
+    mark("category");
     const facets = cachedSearchFacets(source, category, categoryWorks);
+    mark("facets");
     const filteredWorks = cachedSearchFilter(source, category, categoryWorks, filter);
+    mark("filter");
     const works = sortWorkList(filteredWorks, sort, { lightweightInfo: true });
+    mark("sort");
     const payload = pagedWorksPayload(works, url, {
       category,
       categories: categorySummaryForWorks(source.works),
@@ -666,7 +684,17 @@ export function createWorkQueryService({
       facets,
       people: source.people
     }, { hydrateMissingSearchResults: true, lightweightInfo: true });
-    return cacheSearchPage(pageCacheKey, payload);
+    mark("payload");
+    cacheSearchPage(pageCacheKey, payload);
+    return searchPayloadWithTimings(payload, url, rawQuery, timings, mark);
+  }
+
+  function searchPayloadWithTimings(payload, url, rawQuery, timings, mark) {
+    mark("total");
+    if (timings.total >= 500) {
+      console.warn("[fanhao-search-slow]", JSON.stringify({ query: rawQuery, count: payload?.total || 0, ...timings }));
+    }
+    return url.searchParams.get("timing") === "1" ? { ...payload, timings } : payload;
   }
 
   function readSearchPage(cacheKey) {
@@ -694,8 +722,9 @@ export function createWorkQueryService({
     searchPageCache = new Map();
   }
 
-  function cachedSearchSource(rawQuery) {
+  function cachedSearchSource(rawQuery, timings = {}, mark = () => {}) {
     const stamp = `${currentStamp()}:${peoplePayloadStamp()}`;
+    mark("sourceStamp");
     if (searchSourceCacheStamp !== stamp) {
       searchSourceCacheStamp = stamp;
       searchSourceCache.clear();
@@ -706,6 +735,7 @@ export function createWorkQueryService({
       const cached = searchSourceCache.get(cacheKey);
       searchSourceCache.delete(cacheKey);
       searchSourceCache.set(cacheKey, cached);
+      timings.sourceCacheHit = true;
       return cached;
     }
 
@@ -717,19 +747,39 @@ export function createWorkQueryService({
     const peopleSearch = localMarkerQuery || exactCodeKey || codePrefixQuery
       ? { exact: [], matchedPersonIds: [], people: [] }
       : searchPeople(rawQuery);
+    mark("peopleSearch");
     const exactPersonIds = new Set(peopleSearch.matchedPersonIds || peopleSearch.exact.map((person) => person.id));
     const exactPersonSearch = !exactCodeKey && !codePrefixQuery && peopleSearch.exact.length > 0;
     const exactPersonLocalWorkIds = exactPersonSearch
       ? new Set(coreLocalWorkIdsForPeople([...exactPersonIds]))
       : new Set();
+    if (exactPersonSearch) {
+      for (const personId of exactPersonIds) {
+        const person = library.peopleById?.get(String(personId));
+        for (const workId of person?.works || []) exactPersonLocalWorkIds.add(String(workId));
+      }
+    }
+    mark("localRelations");
+    const exactPersonLocalWorks = exactPersonSearch
+      ? enrichLocalWorksWithActorMovieInfo(
+          [...exactPersonLocalWorkIds].map((workId) => library.worksById.get(String(workId))).filter(Boolean),
+          peopleSearch.exact.flatMap((person) => mergedActorMovieRows(person.id))
+        )
+      : [];
+    mark("actorEnrich");
     const matchesExactPerson = (work) => exactPersonIds.has(work.personId)
       || exactPersonLocalWorkIds.has(String(work.id || ""));
     const exactLocalWork = exactCodeKey ? findExactLocalWork(exactCodeKey) : null;
-    const rankingMissingWorks = localMarkerQuery || exactLocalWork || codePrefixQuery ? [] : rankingMissingSearchWorks();
+    const rankingMissingWorks = localMarkerQuery || exactLocalWork || codePrefixQuery || exactPersonSearch ? [] : rankingMissingSearchWorks();
     const rankingMissingKeys = new Set(rankingMissingWorks
       .map((work) => storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title))
       .filter(Boolean));
-    const actorMissingWorks = localMarkerQuery || exactLocalWork || codePrefixQuery ? [] : actorMissingSearchWorks(rankingMissingKeys);
+    const actorMissingWorks = localMarkerQuery || exactLocalWork || codePrefixQuery
+      ? []
+      : exactPersonSearch
+        ? actorMissingSearchWorksForPeople([...exactPersonIds], rankingMissingKeys)
+        : actorMissingSearchWorks(rankingMissingKeys);
+    mark("missingWorks");
     const usesTextMatcher = !localMarkerQuery && !exactCodeKey && !codePrefixQuery && !exactPersonSearch;
     if (usesTextMatcher) prewarmWorkSearch([...rankingMissingWorks, ...actorMissingWorks]);
     const matchesQuery = usesTextMatcher ? createWorkSearchMatcher(query) : null;
@@ -740,7 +790,7 @@ export function createWorkQueryService({
         : codePrefixQuery
           ? findLocalWorksByCodePrefix(codePrefix)
           : exactPersonSearch
-            ? allWorks().filter(matchesExactPerson)
+            ? exactPersonLocalWorks.filter(matchesExactPerson)
             : allWorks().filter((work) => exactPersonIds.has(work.personId) || matchesQuery(work));
     const fastMissingMatches = codePrefixQuery && !exactLocalWork ? fastMissingCodeSearch(rawQuery) : null;
     const rankingMissingMatches = exactPersonSearch ? [] : rankingMissingWorks.filter((work) => exactCodeKey
@@ -753,12 +803,14 @@ export function createWorkQueryService({
         : exactCodeKey
           ? storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title) === exactCodeKey
           : matchesQuery(work));
+    mark("workMatches");
     const matchedWorks = dedupeWorksForDisplay([
       ...localMatches,
       ...(fastMissingMatches || []),
       ...rankingMissingMatches,
       ...actorMissingMatches
     ]);
+    mark("dedupe");
     const source = {
       categoryWorks: new Map(),
       facetsByCategory: new Map(),
@@ -771,6 +823,7 @@ export function createWorkQueryService({
       people: peopleSearch.people.map((person) => publicPerson(person, { skipFallbackAvatar: true })),
       works: matchedWorks
     };
+    mark("publicPeople");
     searchSourceCache.set(cacheKey, source);
     while (searchSourceCache.size > 48) searchSourceCache.delete(searchSourceCache.keys().next().value);
     return source;

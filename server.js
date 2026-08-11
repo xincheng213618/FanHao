@@ -904,6 +904,7 @@ const moduleRegistry = await discoverFanHaoModules({
         actorProfileMergeCandidates,
         actorProfileRow,
         actorMissingSearchWorks,
+        actorMissingSearchWorksForPeople,
         appConfigService,
         clampInteger,
         codePrefixService,
@@ -1657,6 +1658,10 @@ function enrichLocalWorksWithActorMovieInfo(localWorks, actorRows = []) {
 
 function actorMissingSearchWorks(excludedCodeKeys = new Set()) {
   return actorMovieService.missingSearchWorks(excludedCodeKeys);
+}
+
+function actorMissingSearchWorksForPeople(personIds = [], excludedCodeKeys = new Set()) {
+  return actorMovieService.missingSearchWorksForPeople(personIds, excludedCodeKeys);
 }
 
 function missingActorWorksForPerson(person, rows = actorMovieRows(person.id), excludedCodeKeys = new Set()) {

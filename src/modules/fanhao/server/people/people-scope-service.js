@@ -122,6 +122,10 @@ export function createPeopleScopeService({
     return workInRoots(work, westernRoots);
   }
 
+  function workMatchesDirect(work, scope) {
+    return normalize(scope) === "main" || workInRoots(work, westernRoots);
+  }
+
   function invalidate() {
     peopleScopeIndexCache = null;
   }
@@ -137,6 +141,7 @@ export function createPeopleScopeService({
     sourcePathInWesternRoots,
     sourcePathWithinAnyRoot,
     workInRoots,
-    workMatches
+    workMatches,
+    workMatchesDirect
   };
 }

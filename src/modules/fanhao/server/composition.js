@@ -44,6 +44,7 @@ export function createFanhaoDependencies(deps) {
       "actorProfileMergeCandidates",
       "actorProfileRow",
       "actorMissingSearchWorks",
+      "actorMissingSearchWorksForPeople",
       "clampInteger",
       "coreLocalWorkIdsForPeople",
       "coreMissingWorksForPerson",

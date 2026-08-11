@@ -15,30 +15,41 @@ export function createActorMovieService({
   storedWorkCodeKey,
   workCodeKeys
 }) {
+  const LOCAL_CODE_BATCH_SIZE = 200;
   let actorMovieCache = null;
   let actorMovieByCodeKeyCache = null;
   let actorMissingSearchCache = null;
+  let actorMoviePersonCache = null;
+  let actorMoviePersonIdCache = null;
 
-  function rowsByPerson() {
-    const stamp = getStamp();
-    if (actorMovieCache?.stamp === stamp) return actorMovieCache.rows;
+  function normalizePersonIds(personIds = []) {
+    return [...new Set((personIds || [])
+      .map((personId) => Number(personId))
+      .filter((personId) => Number.isSafeInteger(personId) && personId > 0))]
+      .map(String);
+  }
 
-    const rowsByPersonMap = new Map();
-    try {
-      const db = getCoreDb();
-      const rows = db
-        .prepare(
-          `
+  function actorMovieRowsSql(personCount = 0) {
+    const personFilter = personCount > 0
+      ? `AND wp.person_id IN (${Array.from({ length: personCount }, () => "?").join(", ")})`
+      : "";
+    return `
           SELECT
             CAST(p.id AS TEXT) AS person_id,
             p.name AS person_name,
             pref.external_key AS javdb_actor_id,
             pref.url AS actor_url,
+            CAST(w.id AS TEXT) AS work_id,
             w.code,
             w.code_search AS code_key,
             w.title,
             wref.url AS detail_url,
+            cover.id AS cover_image_id,
             cover.remote_url AS image_url,
+            cover.local_path AS cover_local_path,
+            cover.source AS cover_source,
+            cover.updated_at AS cover_updated_at,
+            cover.image_blob IS NOT NULL AS cover_has_image_blob,
             w.release_date,
             w.rating,
             w.rating_count,
@@ -72,37 +83,85 @@ export function createActorMovieService({
               WHERE i.owner_type = 'work'
                 AND i.owner_id = w.id
                 AND i.kind = 'cover'
-              ORDER BY CASE WHEN i.source = 'actor_movies' THEN 0 ELSE 1 END, i.id ASC
+              ORDER BY CASE WHEN i.image_blob IS NOT NULL THEN 0 ELSE 1 END, i.sort_order ASC, i.id ASC
               LIMIT 1
             )
           WHERE wp.source = 'actor_movies'
+            ${personFilter}
           ORDER BY person_id, COALESCE(position_index, 999999), code
-          `
-        )
-        .all();
-      for (const row of rows) {
-        const personId = String(row.person_id || "");
-        if (!rowsByPersonMap.has(personId)) rowsByPersonMap.set(personId, []);
-        rowsByPersonMap.get(personId).push({ ...row, person_id: personId });
-      }
+          `;
+  }
+
+  function groupRowsByPerson(rows = []) {
+    const rowsByPersonMap = new Map();
+    for (const row of rows) {
+      const personId = String(row.person_id || "");
+      if (!rowsByPersonMap.has(personId)) rowsByPersonMap.set(personId, []);
+      rowsByPersonMap.get(personId).push({ ...row, person_id: personId });
+    }
+    return rowsByPersonMap;
+  }
+
+  function rowsByPerson() {
+    const stamp = getStamp();
+    if (actorMovieCache?.stamp === stamp) return actorMovieCache.rows;
+
+    let rowsByPersonMap = new Map();
+    try {
+      const db = getCoreDb();
+      rowsByPersonMap = groupRowsByPerson(db.prepare(actorMovieRowsSql()).all());
     } catch (error) {
       console.warn("[core-actor-movies]", error.message);
       if (actorMovieCache?.rows) return actorMovieCache.rows;
     }
 
     actorMovieCache = { stamp, rows: rowsByPersonMap };
+    actorMoviePersonCache = { stamp, rows: new Map(rowsByPersonMap) };
+    actorMoviePersonIdCache = { stamp, ids: new Set(rowsByPersonMap.keys()) };
     return rowsByPersonMap;
   }
 
+  function rowsForPeople(personIds = []) {
+    const ids = normalizePersonIds(personIds);
+    if (!ids.length) return new Map();
+    const stamp = getStamp();
+    if (actorMovieCache?.stamp === stamp) {
+      return new Map(ids.map((personId) => [personId, actorMovieCache.rows.get(personId) || []]));
+    }
+    if (actorMoviePersonCache?.stamp !== stamp) {
+      actorMoviePersonCache = { stamp, rows: new Map() };
+    }
+
+    const missingIds = ids.filter((personId) => !actorMoviePersonCache.rows.has(personId));
+    if (missingIds.length) {
+      try {
+        const loaded = groupRowsByPerson(
+          getCoreDb()
+            .prepare(actorMovieRowsSql(missingIds.length))
+            .all(...missingIds.map(Number))
+        );
+        for (const personId of missingIds) {
+          actorMoviePersonCache.rows.set(personId, loaded.get(personId) || []);
+        }
+      } catch (error) {
+        console.warn("[core-actor-movies-person]", error.message);
+      }
+    }
+    return new Map(ids.map((personId) => [personId, actorMoviePersonCache.rows.get(personId) || []]));
+  }
+
   function rows(personId) {
-    return rowsByPerson().get(personId) || [];
+    const id = normalizePersonIds([personId])[0];
+    return id ? rowsForPeople([id]).get(id) || [] : [];
   }
 
   function mergedRows(personId) {
     const result = [];
     const seen = new Set();
-    for (const person of mergedPersonMembers(personId)) {
-      for (const row of rows(person.id)) {
+    const members = mergedPersonMembers(personId);
+    const memberRows = rowsForPeople(members.map((person) => person?.id));
+    for (const person of members) {
+      for (const row of memberRows.get(String(person.id || "")) || []) {
         const key = storedWorkCodeKey(row.code_key) || looseWorkCodeKey(row.code) || row.detail_url || `${row.person_id}:${row.code}:${row.title}`;
         if (key && seen.has(key)) continue;
         if (key) seen.add(key);
@@ -110,6 +169,38 @@ export function createActorMovieService({
       }
     }
     return result;
+  }
+
+  function actorMoviePersonIds() {
+    const stamp = getStamp();
+    if (actorMoviePersonIdCache?.stamp === stamp) return actorMoviePersonIdCache.ids;
+    if (actorMovieCache?.stamp === stamp) {
+      actorMoviePersonIdCache = { stamp, ids: new Set(actorMovieCache.rows.keys()) };
+      return actorMoviePersonIdCache.ids;
+    }
+
+    let ids = new Set();
+    try {
+      ids = new Set(getCoreDb()
+        .prepare(`
+          SELECT DISTINCT CAST(person_id AS TEXT) AS person_id
+          FROM work_people
+          WHERE source = 'actor_movies'
+        `)
+        .all()
+        .map((row) => String(row.person_id || ""))
+        .filter(Boolean));
+    } catch (error) {
+      console.warn("[core-actor-movie-people]", error.message);
+      if (actorMoviePersonIdCache?.ids) return actorMoviePersonIdCache.ids;
+    }
+    actorMoviePersonIdCache = { stamp, ids };
+    return ids;
+  }
+
+  function hasMergedRows(personId) {
+    const ids = actorMoviePersonIds();
+    return mergedPersonMembers(personId).some((person) => ids.has(String(person?.id || "")));
   }
 
   function rowsByCodeKey() {
@@ -203,6 +294,18 @@ export function createActorMovieService({
   function missingWorkFromRow(person, row, codeKey = "") {
     const code = normalizeWorkCode(row.code) || row.code || "";
     const title = row.title && row.title !== row.code ? row.title : code || row.title || "未下载作品";
+    const coverImageId = Number(row.cover_image_id);
+    const sourceCoverUrl = row.image_url || row.cover_local_path || "";
+    const cachedCoverUrl = Number.isSafeInteger(coverImageId) && coverImageId > 0 && Boolean(row.cover_has_image_blob)
+      ? `/media/core-image/${encodeURIComponent(String(coverImageId))}?v=${encodeURIComponent(row.cover_updated_at || "")}`
+      : proxiedRemoteImageUrl(row.image_url) || row.cover_local_path || "";
+    const cachedCover = cachedCoverUrl ? {
+      workId: String(row.work_id || ""),
+      coverUrl: cachedCoverUrl,
+      sourceCoverUrl,
+      source: row.cover_source || "",
+      updatedAt: row.cover_updated_at || ""
+    } : null;
     return {
       id: createId("m", `${person.id}|${row.detail_url || codeKey}`),
       personId: person.id,
@@ -211,7 +314,8 @@ export function createActorMovieService({
       directoryName: code,
       relativePath: "",
       coverId: null,
-      remoteCoverUrl: proxiedRemoteImageUrl(row.image_url),
+      cachedCover,
+      remoteCoverUrl: cachedCoverUrl || proxiedRemoteImageUrl(row.image_url),
       videoCount: 0,
       playableCount: 0,
       imageCount: 0,
@@ -232,6 +336,40 @@ export function createActorMovieService({
     for (const key of extraKeys || []) {
       const codeKey = storedWorkCodeKey(key);
       if (codeKey) keys.add(codeKey);
+    }
+    return keys;
+  }
+
+  function localCodeKeysForRows(rows = [], extraKeys = new Set()) {
+    const candidates = [...new Set(rows
+      .map((row) => storedWorkCodeKey(row?.code_key) || looseWorkCodeKey(row?.code))
+      .filter(Boolean))];
+    const keys = new Set([...extraKeys]
+      .map((value) => storedWorkCodeKey(value))
+      .filter(Boolean));
+    for (let offset = 0; offset < candidates.length; offset += LOCAL_CODE_BATCH_SIZE) {
+      const batch = candidates.slice(offset, offset + LOCAL_CODE_BATCH_SIZE);
+      try {
+        const placeholders = batch.map(() => "?").join(", ");
+        for (const row of getCoreDb()
+          .prepare(`
+            SELECT DISTINCT w.code_search AS code_key
+            FROM works w
+            WHERE w.code_search IN (${placeholders})
+              AND EXISTS (
+                SELECT 1
+                FROM local_works lw
+                WHERE lw.work_id = w.id
+              )
+          `)
+          .all(...batch)) {
+          const codeKey = storedWorkCodeKey(row.code_key);
+          if (codeKey) keys.add(codeKey);
+        }
+      } catch (error) {
+        console.warn("[core-actor-movies-local-codes]", error.message);
+        return combinedLocalCodeKeys(extraKeys);
+      }
     }
     return keys;
   }
@@ -270,8 +408,34 @@ export function createActorMovieService({
     return filterExcludedMissingWorks(works, excludedCodeKeys);
   }
 
+  function missingSearchWorksForPeople(personIds = [], excludedCodeKeys = new Set()) {
+    const ids = normalizePersonIds(personIds);
+    if (!ids.length) return [];
+    const library = getLibrary();
+    const byPerson = rowsForPeople(ids);
+    const personRows = ids.flatMap((personId) => byPerson.get(personId) || []);
+    // Exact-person searches only need to test the selected filmography's codes.
+    // Query those codes through the compact works/local_works indexes instead of
+    // synchronously building the full filesystem-derived code index.
+    const localKeys = localCodeKeysForRows(personRows);
+    const seen = new Set();
+    const works = [];
+
+    for (const personId of ids) {
+      const person = library.peopleById?.get(personId);
+      if (!person) continue;
+      for (const row of byPerson.get(personId) || []) {
+        const codeKey = storedWorkCodeKey(row.code_key) || looseWorkCodeKey(row.code);
+        if (!codeKey || seen.has(codeKey) || localKeys.has(codeKey)) continue;
+        seen.add(codeKey);
+        works.push(missingWorkFromRow(person, row, codeKey));
+      }
+    }
+    return filterExcludedMissingWorks(works, excludedCodeKeys);
+  }
+
   function missingWorksForPerson(person, personRows = rows(person.id), excludedCodeKeys = new Set()) {
-    const localKeys = combinedLocalCodeKeys(excludedCodeKeys);
+    const localKeys = localCodeKeysForRows(personRows, excludedCodeKeys);
     const seen = new Set();
     const missing = [];
 
@@ -289,6 +453,8 @@ export function createActorMovieService({
     actorMovieCache = null;
     actorMovieByCodeKeyCache = null;
     actorMissingSearchCache = null;
+    actorMoviePersonCache = null;
+    actorMoviePersonIdCache = null;
   }
 
   function invalidateSearch() {
@@ -299,6 +465,8 @@ export function createActorMovieService({
     actorMovieCache = value;
     actorMovieByCodeKeyCache = null;
     actorMissingSearchCache = null;
+    actorMoviePersonCache = null;
+    actorMoviePersonIdCache = null;
   }
 
   return {
@@ -308,12 +476,15 @@ export function createActorMovieService({
     invalidate,
     invalidateSearch,
     missingSearchWorks,
+    missingSearchWorksForPeople,
     missingWorkFromRow,
     missingWorksForPerson,
     mergedRows,
+    hasMergedRows,
     rows,
     rowsByCodeKey,
     rowsByPerson,
+    rowsForPeople,
     rowsForWorks,
     setRowsCache
   };

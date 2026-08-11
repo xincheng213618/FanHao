@@ -12,7 +12,7 @@ export function createPersonListService({
     if (!person) return false;
     if (Number(person.workCount || 0) > 0) return true;
     if (actorProfileRow(person.id)) return true;
-    return actorMovieService.mergedRows(person.id).length > 0;
+    return actorMovieService.hasMergedRows(person.id);
   }
 
   function mainLibraryPeople(scope = "main") {

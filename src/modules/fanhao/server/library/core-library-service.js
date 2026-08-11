@@ -51,6 +51,42 @@ export function createCoreLibraryService({
   uniquePersonNames,
   uniqueTextArray
 }) {
+  const LOCAL_CODE_BATCH_SIZE = 200;
+
+  function localCodeKeysForRows(rows = [], extraKeys = new Set()) {
+    const candidates = [...new Set(rows
+      .map((row) => storedWorkCodeKey(row?.code_key) || looseWorkCodeKey(row?.code))
+      .filter(Boolean))];
+    const keys = new Set([...extraKeys]
+      .map((value) => storedWorkCodeKey(value))
+      .filter(Boolean));
+    for (let offset = 0; offset < candidates.length; offset += LOCAL_CODE_BATCH_SIZE) {
+      const batch = candidates.slice(offset, offset + LOCAL_CODE_BATCH_SIZE);
+      try {
+        const placeholders = batch.map(() => "?").join(", ");
+        for (const row of getCoreDb()
+          .prepare(`
+            SELECT DISTINCT w.code_search AS code_key
+            FROM works w
+            WHERE w.code_search IN (${placeholders})
+              AND EXISTS (
+                SELECT 1
+                FROM local_works lw
+                WHERE lw.work_id = w.id
+              )
+          `)
+          .all(...batch)) {
+          const codeKey = storedWorkCodeKey(row.code_key);
+          if (codeKey) keys.add(codeKey);
+        }
+      } catch (error) {
+        console.warn("[core-missing-local-codes]", error.message);
+        return combinedLocalWorkCodeKeys(extraKeys);
+      }
+    }
+    return keys;
+  }
+
   function personRow(personId) {
     const coreId = Number(personId);
     if (!Number.isFinite(coreId) || !hasCoreDb()) return null;
@@ -461,7 +497,7 @@ export function createCoreLibraryService({
           `
         )
         .all(corePersonId);
-      const localKeys = combinedLocalWorkCodeKeys(excludedCodeKeys);
+      const localKeys = localCodeKeysForRows(rows, excludedCodeKeys);
       return rows
         .filter((row) => {
           const codeKey = storedWorkCodeKey(row.code_key) || looseWorkCodeKey(row.code);

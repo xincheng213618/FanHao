@@ -13,6 +13,7 @@ import { createPlaybackPrefetch } from "../public/modules/fanhao/playback-prefet
 import { createSearchRequestService } from "../public/modules/fanhao/search-request-service.js";
 import { createLazyPersonProfile } from "../public/modules/fanhao/lazy-person-profile.js";
 import { adminUrl } from "../public/js/admin-navigation.js";
+import { createActorMovieService } from "../src/modules/fanhao/server/people/actor-movie-service.js";
 import { publicPersonListItem } from "../src/modules/fanhao/server/people/person-list-presenter.js";
 import { createPersonDetailService } from "../src/modules/fanhao/server/people/person-detail-service.js";
 import { removeLocalWorksFromLibrary } from "../src/modules/fanhao/server/people/person-library-service.js";
@@ -107,6 +108,9 @@ const missingCodeSearchServiceSource = read("src/modules/fanhao/server/works/mis
 const workRoutesApiSource = read("src/modules/fanhao/server/works/routes-api.js");
 const workPresenterServiceSource = read("src/modules/fanhao/server/works/presenter-service.js");
 const playbackProgressServiceSource = read("src/modules/fanhao/server/playback/playback-progress-service.js");
+const actorMovieServiceSource = read("src/modules/fanhao/server/people/actor-movie-service.js");
+const coreLibraryServiceSource = read("src/modules/fanhao/server/library/core-library-service.js");
+const peopleScopeServiceSource = read("src/modules/fanhao/server/people/people-scope-service.js");
 const personDetailServiceSource = read("src/modules/fanhao/server/people/person-detail-service.js");
 const personMergeServiceSource = read("src/modules/fanhao/server/people/person-merge-service.js");
 const personLibraryServiceSource = read("src/modules/fanhao/server/people/person-library-service.js");
@@ -1320,6 +1324,7 @@ assert(workQueryServiceSource.includes('normalizeWorkCategory(url.searchParams.g
 assert(workQueryServiceSource.includes("categorySummaryForWorks") && workQueryServiceSource.includes("summarizeWorkCategories(works"), "actor filmographies must reuse the authoritative work category classifier");
 assert(workQueryServiceSource.includes('const pageCacheKey = `${scope}:${category}:${filter}:${sort}:${limit}:${offset}`') && workQueryServiceSource.includes("categorySourcesCache?.stamp === stamp"), "category work pages and source partitions must use versioned bounded caches");
 assert(workQueryServiceSource.includes("classifyWorkCategory(work, { isWestern: peopleScopeService.workMatches(work, \"western\") })"), "western-root membership must feed the shared work category classifier");
+assert(workQueryServiceSource.includes("peopleScopeService.workMatchesDirect?.(work, \"western\")") && peopleScopeServiceSource.includes("function workMatchesDirect(work, scope)"), "small result category summaries must avoid building the full scope index");
 assert(personDetailServiceSource.includes("{ lightweightInfo: true }") && workQueryServiceSource.includes("lightweightFacets: lightweightWorkFacets"), "person first pages must reuse the lightweight work-list path");
 assert(peoplePageSource.includes('includeMissingLocal: state.showMissingLocalWorks ? "1" : "0"') && peoplePageSource.includes('includeCompilation: state.showCompilationWorks ? "1" : "0"'), "person requests must send server-side missing-local and compilation visibility");
 assert(workQueryServiceSource.includes("workClassificationService.filterForRequest(sourceWorks, url, filter)") && workQueryServiceSource.indexOf("filterForRequest(sourceWorks, url, filter)") < workQueryServiceSource.indexOf("sortWorkList(matchedWorks"), "person visibility must be filtered on the server before sorting and pagination");
@@ -1334,8 +1339,8 @@ assert(webApp.includes("state.workVisibleLimit = Math.max(state.workVisibleLimit
 const workAutoloadSource = /function setupWorkLoadMoreAutoload\([\s\S]*?\r?\n}\r?\n\r?\nfunction renderEmpty/.exec(webApp)?.[0] || "";
 assert(workAutoloadSource.includes("new IntersectionObserver"), "work continuation must use viewport observation for automatic loading");
 assert(!workAutoloadSource.includes('window.addEventListener("wheel"') && !workAutoloadSource.includes("userScrollIntentUntil"), "work continuation must not depend on short-lived wheel intent timing");
-assert(workQueryServiceSource.includes("missing.filter((work) => work.missingLocal)"), "lightweight person pages must batch-hydrate SQL covers for missing-local works");
-assert(workPresenterServiceSource.includes("if (work.missingLocal) {\n      // Missing-local works") && workPresenterServiceSource.includes("const coreCover = publicCoreWorkCover(work.id);"), "missing-local work cards must expose their cached SQL cover in lightweight pages");
+assert(workQueryServiceSource.includes("missing.filter((work) => work.missingLocal && !work.cachedCover?.coverUrl)"), "lightweight person pages must batch-hydrate only missing SQL covers");
+assert(workPresenterServiceSource.includes("if (work.missingLocal) {\n      // Missing-local works") && workPresenterServiceSource.includes("work.cachedCover?.coverUrl ? work.cachedCover : publicCoreWorkCover(work.id)"), "missing-local work cards must reuse selected cover metadata before querying SQL again");
 assert(workQueryServiceSource.includes("prewarmWorkInfoDetails(missing)"), "work lists must batch-hydrate only unprepared detail rows before presentation");
 assert(workQueryServiceSource.includes("prewarmVideoProbesForWorks(missing)"), "visible work pages must prepare playback probes only for unprepared works");
 assert(workQueryServiceSource.includes("const LIST_PAGE_CACHE_LIMIT = 96") && workQueryServiceSource.includes("const WORK_PAYLOAD_CACHE_LIMIT = 4096"), "work lists must retain complete pages and prepared work payloads in bounded caches");
@@ -1500,11 +1505,129 @@ assert(coreDbService.includes("const DEFAULT_TABLE_STAMP_CACHE_MS = 5000"), "Fan
 assert(coreDbService.includes("idx_works_updated_at ON works(updated_at)"), "work-info stamps must use a lightweight updated-at index");
 assert(coreDbService.includes("idx_works_status_code_search ON works(status, code_search, id)"), "code-prefix searches must use a status-aware covering index");
 assert(coreDbService.includes("idx_work_people_updated_at ON work_people(updated_at)"), "actor-movie stamps must use a lightweight updated-at index");
+assert(actorMovieServiceSource.includes("function rowsForPeople(personIds = [])") && actorMovieServiceSource.includes("wp.person_id IN"), "person details must query actor movies only for the selected merged people");
+assert(actorMovieServiceSource.includes("function localCodeKeysForRows(rows = [], extraKeys = new Set())") && actorMovieServiceSource.includes("w.code_search IN"), "exact person searches must test only selected actor codes against local works");
+assert(coreLibraryServiceSource.includes("function localCodeKeysForRows(rows = [], extraKeys = new Set())") && coreLibraryServiceSource.includes("const localKeys = localCodeKeysForRows(rows, excludedCodeKeys)"), "person details must not build the full local-work code index to suppress duplicates");
+assert(workQueryServiceSource.includes("actorMissingSearchWorksForPeople([...exactPersonIds]"), "exact person searches must query actor movies only for matched people");
+assert(workQueryServiceSource.includes("exactPersonLocalWorks.filter(matchesExactPerson)"), "exact person searches must not enrich and scan the full local-work catalog");
+assert(personListServiceSource.includes("actorMovieService.hasMergedRows(person.id)"), "person indexes must use the compact actor-movie person-id cache instead of loading every movie row");
 assert(coreImageStoreSource.includes("idx_images_updated_at") && coreImageStoreSource.includes("ON images(updated_at)"), "cover stamps must use a lightweight table-specific update index");
 assert(coreDbService.includes("attachCoreImageStore(db, { dbPath: imageDbPath })"), "core queries must attach the separated image database");
 assert(mediaBlobWorkerSource.includes("attachCoreImageStore(db, { dbPath: workerData.imageDbPath })"), "media workers must read and write the separated image database");
 assert(tableStampQuerySource.includes("MAX(updated_at)"), "table stamps must track changes in their own target table");
 assert(!tableStampQuerySource.includes("PRAGMA data_version"), "unrelated SQLite writes must not invalidate every FanHao cache");
+
+const actorMovieTestDb = new DatabaseSync(":memory:");
+actorMovieTestDb.exec(`
+  CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);
+  CREATE TABLE works (
+    id INTEGER PRIMARY KEY,
+    code TEXT,
+    code_search TEXT,
+    title TEXT,
+    release_date TEXT,
+    rating REAL,
+    rating_count INTEGER,
+    has_magnet INTEGER,
+    is_streamable INTEGER,
+    has_subtitles INTEGER,
+    javdb_tags_json TEXT
+  );
+  CREATE TABLE work_people (
+    work_id INTEGER,
+    person_id INTEGER,
+    role TEXT,
+    sort_order INTEGER,
+    source TEXT,
+    created_at TEXT,
+    updated_at TEXT
+  );
+  CREATE TABLE person_external_refs (id INTEGER PRIMARY KEY, person_id INTEGER, provider TEXT, external_key TEXT, url TEXT);
+  CREATE TABLE work_external_refs (id INTEGER PRIMARY KEY, work_id INTEGER, provider TEXT, url TEXT);
+  CREATE TABLE images (
+    id INTEGER PRIMARY KEY,
+    owner_type TEXT,
+    owner_id INTEGER,
+    kind TEXT,
+    source TEXT,
+    remote_url TEXT,
+    local_path TEXT,
+    updated_at TEXT,
+    image_blob BLOB,
+    sort_order INTEGER
+  );
+  CREATE TABLE local_works (work_id INTEGER);
+  INSERT INTO people VALUES (1, 'One'), (2, 'Two'), (3, 'Three');
+  INSERT INTO works VALUES
+    (11, 'ONE-001', 'one001', 'One Work', '2025-01-01', 4.0, 10, 1, 0, 0, '[]'),
+    (22, 'TWO-002', 'two002', 'Two Work', '2025-02-01', 4.5, 20, 1, 1, 0, '[]'),
+    (33, 'THREE-003', 'three003', 'Unrelated Work', '2025-03-01', 3.5, 5, 0, 0, 0, '[]');
+  INSERT INTO work_people VALUES
+    (11, 1, 'actor', 0, 'actor_movies', '2025-01-01', '2025-01-01'),
+    (22, 2, 'actor', 0, 'actor_movies', '2025-01-01', '2025-01-01'),
+    (33, 3, 'actor', 0, 'other', '2025-01-01', '2025-01-01');
+  INSERT INTO person_external_refs VALUES (1, 1, 'javdb-actor', 'one', 'https://example.test/actors/one');
+  INSERT INTO work_external_refs VALUES (1, 11, 'javdb-video', 'https://example.test/v/one');
+  INSERT INTO images VALUES (1, 'work', 11, 'cover', 'actor_movies', 'https://example.test/one.jpg', NULL, '2025-01-02', X'01', 0);
+`);
+const actorMovieSqlLog = [];
+let actorMovieGlobalLocalKeyReads = 0;
+let actorMovieTestStamp = "actor-test-v1";
+const actorMovieTestLibrary = {
+  people: [{ id: "1", name: "One" }, { id: "2", name: "Two" }, { id: "3", name: "Three" }],
+  peopleById: new Map([
+    ["1", { id: "1", name: "One" }],
+    ["2", { id: "2", name: "Two" }],
+    ["3", { id: "3", name: "Three" }]
+  ])
+};
+const actorMovieTestService = createActorMovieService({
+  createId: (prefix, value) => `${prefix}:${value}`,
+  dbBoolOrNull: (value) => value == null ? null : Boolean(value),
+  getCoreDb: () => ({
+    prepare(sql) {
+      actorMovieSqlLog.push(sql);
+      return actorMovieTestDb.prepare(sql);
+    }
+  }),
+  getLibrary: () => actorMovieTestLibrary,
+  getSearchStamp: () => actorMovieTestStamp,
+  getStamp: () => actorMovieTestStamp,
+  localWorkCodeKeys: () => {
+    actorMovieGlobalLocalKeyReads += 1;
+    return new Set();
+  },
+  looseWorkCodeKey: (value) => String(value || "").replace(/[^a-z0-9]/gi, "").toLowerCase(),
+  mergedPersonMembers: (personId) => String(personId) === "1" ? [{ id: "1" }, { id: "2" }] : [{ id: String(personId) }],
+  normalizeWorkCode: (value) => String(value || ""),
+  parseJsonTextArray: () => [],
+  proxiedRemoteImageUrl: (value) => value || "",
+  publicRemoteUrl: (value) => value || "",
+  storedWorkCodeKey: (value) => String(value || "").replace(/[^a-z0-9]/gi, "").toLowerCase(),
+  workCodeKeys: (work) => [String(work?.code || "").toLowerCase()].filter(Boolean)
+});
+const mergedActorMovieRows = actorMovieTestService.mergedRows("1");
+assert.deepEqual(mergedActorMovieRows.map((row) => row.code), ["ONE-001", "TWO-002"], "merged person details must retain every member's actor movies");
+const targetedActorMovieQueries = actorMovieSqlLog.filter((sql) => sql.includes("FROM work_people wp"));
+assert.equal(targetedActorMovieQueries.length, 1, "one merged person request must issue one actor-movie query");
+assert(targetedActorMovieQueries[0].includes("wp.person_id IN (?, ?)"), "merged person actor movies must be selected by person id");
+actorMovieTestService.mergedRows("1");
+assert.equal(actorMovieSqlLog.filter((sql) => sql.includes("FROM work_people wp")).length, 1, "repeated person details must reuse the targeted actor-movie cache");
+assert.equal(actorMovieTestService.hasMergedRows("1"), true, "merged people must report actor-movie membership");
+assert.equal(actorMovieTestService.hasMergedRows("3"), false, "people without actor-movie rows must stay excluded");
+const actorMovieMembershipQueries = actorMovieSqlLog.filter((sql) => sql.includes("SELECT DISTINCT CAST(person_id AS TEXT)"));
+assert.equal(actorMovieMembershipQueries.length, 1, "person indexes must build one compact actor-movie membership cache");
+const targetedMissingActorWorks = actorMovieTestService.missingSearchWorksForPeople(["1"]);
+assert.deepEqual(targetedMissingActorWorks.map((work) => work.directoryName), ["ONE-001"], "exact person searches must build missing-local rows only for matched people");
+assert.equal(targetedMissingActorWorks[0].cachedCover?.coverUrl, "/media/core-image/1?v=2025-01-02", "actor search results must reuse cover metadata already selected with the filmography");
+actorMovieTestDb.exec("INSERT INTO local_works VALUES (11)");
+assert.deepEqual(actorMovieTestService.missingSearchWorksForPeople(["1"]), [], "exact person searches must suppress locally available actor works through the targeted code query");
+assert.equal(actorMovieGlobalLocalKeyReads, 0, "exact person searches must not build the full local-work code index");
+actorMovieTestStamp = "actor-test-v2";
+actorMovieTestService.rows("1");
+assert.equal(actorMovieSqlLog.filter((sql) => sql.includes("FROM work_people wp")).length, 2, "actor-movie stamp changes must invalidate targeted person rows");
+actorMovieTestDb.close();
+
 assert.equal((collectionQueryServiceSource.match(/queried\.works\.slice\(offset, offset \+ limit\)/g) || []).length, 2, "favorites and history must paginate their fully queried collections before presenting work details");
 assert(userStateServiceSource.includes("stateRevision += 1"), "favorite and progress mutations must version cached search facets");
 const serviceLauncher = read("start-fanhao.ps1");
@@ -2321,13 +2444,18 @@ let workListPublicCount = 0;
 let workInfoReadCount = 0;
 let workInfoFacetReadCount = 0;
 let searchPersonOptions = null;
+let globalActorMissingSearchCount = 0;
+let targetedActorMissingSearchCount = 0;
+let targetedActorMovieEnrichmentCount = 0;
+let targetedActorMovieRowCount = 0;
 let preparedWorkCoverIds = [];
 let preparedWorkInfoIds = [];
 let preparedWorkVideoIds = [];
 const searchPerson = {
   id: "person-1",
   name: "Exact Person",
-  workCount: 1
+  workCount: 1,
+  works: ["work-1"]
 };
 const queryWork = {
   id: "work-1",
@@ -2344,13 +2472,24 @@ const queryWork = {
 };
 const workQueryService = createWorkQueryService({
   actorMovieStamp: () => actorMovieDataStamp,
-  actorMissingSearchWorks: () => [],
+  actorMissingSearchWorks: () => {
+    globalActorMissingSearchCount += 1;
+    return [];
+  },
+  actorMissingSearchWorksForPeople: () => {
+    targetedActorMissingSearchCount += 1;
+    return [];
+  },
   clampInteger: (value, fallback, min, max) => Math.max(min, Math.min(max, Number(value ?? fallback))),
   createWorkSearchMatcher: () => () => false,
   dedupeWorksForDisplay: (items) => items,
   defaultWorkLimit: 24,
   enrichLocalWorksWithActorMovieIndex(items) {
     enrichmentCount += 1;
+    return items;
+  },
+  enrichLocalWorksWithActorMovieInfo(items) {
+    targetedActorMovieEnrichmentCount += 1;
     return items;
   },
   fastMissingCodeSearch: () => [],
@@ -2362,13 +2501,21 @@ const workQueryService = createWorkQueryService({
     publicFavoriteForWork: () => searchFavoriteState ? { folderId: "folder-1", folderName: "测试收藏" } : null
   },
   isVrWork: (work) => work.id === queryWork.id,
-  library: { scannedAt: "library-v1", worksById: new Map([[queryWork.id, queryWork]]) },
+  library: {
+    scannedAt: "library-v1",
+    peopleById: new Map([[searchPerson.id, searchPerson]]),
+    worksById: new Map([[queryWork.id, queryWork]])
+  },
   localSearchWorkByCodeKey: () => new Map([["abc001", queryWork]]),
   localWorksByCodePrefix: () => {
     localPrefixReadCount += 1;
     return [queryWork];
   },
   maxWorkLimit: 1000,
+  mergedActorMovieRows: () => {
+    targetedActorMovieRowCount += 1;
+    return [];
+  },
   peoplePayloadStamp: () => actorMovieDataStamp,
   peopleScopeService: { normalize: () => "main", workMatches: (_work, scope) => scope === "main" },
   playbackProgressService: {
@@ -2490,9 +2637,18 @@ const cachedSearchSecond = workQueryService.searchPayload(workSearchUrl);
 assert.equal(cachedSearchSecond, cachedSearchFirst, "identical search requests must reuse the complete response object");
 assert.equal(localPrefixReadCount, 1, "repeated search paging must reuse the matched work source");
 assert.equal(searchFavoriteFacetReadCount, favoriteFacetReadsAfterSearch, "repeated search paging must reuse unchanged user facets");
+const globalActorMissingBeforeExactPerson = globalActorMissingSearchCount;
+const targetedActorMissingBeforeExactPerson = targetedActorMissingSearchCount;
+const targetedActorMovieEnrichmentBeforeExactPerson = targetedActorMovieEnrichmentCount;
+const targetedActorMovieRowsBeforeExactPerson = targetedActorMovieRowCount;
 const exactPersonSearch = workQueryService.searchPayload(new URL("http://127.0.0.1/api/search?q=Exact%20Person&limit=24&sort=releaseDesc"));
 assert.equal(exactPersonSearch.people[0]?.id, searchPerson.id, "exact person searches must retain compact person results");
+assert.equal(exactPersonSearch.total, 1, "exact person searches must retain linked local works without scanning the full catalog");
 assert.deepEqual(searchPersonOptions, { skipFallbackAvatar: true }, "search person chips must not scan works for unused fallback avatars");
+assert.equal(globalActorMissingSearchCount, globalActorMissingBeforeExactPerson, "exact person searches must not build the full actor-movie missing-work catalog");
+assert.equal(targetedActorMissingSearchCount, targetedActorMissingBeforeExactPerson + 1, "exact person searches must query missing works only for matched people");
+assert.equal(targetedActorMovieEnrichmentCount, targetedActorMovieEnrichmentBeforeExactPerson + 1, "exact person searches must enrich only linked local works");
+assert.equal(targetedActorMovieRowCount, targetedActorMovieRowsBeforeExactPerson + 1, "exact person searches must load actor metadata only for the matched merged person");
 const localMarkerSearch = workQueryService.searchPayload(new URL("http://127.0.0.1/api/search?q=%5BA%5D&limit=24&sort=releaseDesc"));
 assert.equal(localMarkerSearch.total, 1, "exact [A] searches must use the local marker category instead of text or person matching");
 const singleLetterCodeSearchUrl = new URL("http://127.0.0.1/api/search?q=A&limit=24&sort=releaseDesc");
