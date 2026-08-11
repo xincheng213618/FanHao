@@ -11,6 +11,8 @@ export function createShortVideoCollections(context = {}) {
     loading: false,
     active: null
   };
+  let collectionRenderId = 0;
+  let collectionPageRequest = null;
 
   async function loadCollections(force = false) {
     if (state.loaded && !force) return state.collections;
@@ -53,6 +55,9 @@ export function createShortVideoCollections(context = {}) {
 
   async function renderCollection(params = {}, renderGuard = null) {
     const collectionId = String(params.collectionId || "").trim();
+    const renderId = ++collectionRenderId;
+    collectionPageRequest = null;
+    state.active = null;
     configurePage("清单内容");
     const shell = collectionShell("正在读取清单…", "按加入时间排列");
     const list = document.createElement("div");
@@ -62,12 +67,12 @@ export function createShortVideoCollections(context = {}) {
     shell.append(status, list);
     els.viewContent.append(shell);
     try {
-      const data = await api.fetch(null, `/api/short-videos/collections/${encodeURIComponent(collectionId)}/videos?limit=${COLLECTION_PAGE_LIMIT}&offset=0`);
-      if (renderGuard && !renderGuard()) return;
-      state.active = data;
+      const data = await api.fetch(null, `/api/short-videos/collections/${encodeURIComponent(collectionId)}/videos?limit=${COLLECTION_PAGE_LIMIT}`);
+      if (renderId !== collectionRenderId || (renderGuard && !renderGuard())) return;
+      state.active = { ...data, collectionId, renderId, renderGuard };
       shell.querySelector("h2").textContent = data.collection?.name || "我的清单";
       shell.querySelector("p").textContent = `${Math.max(0, Number(data.total || 0))} 条 · 按加入时间排列`;
-      renderCollectionVideos(list, status, data);
+      renderCollectionVideos(list, status, state.active);
     } catch (error) {
       status.textContent = error?.message || "清单读取失败";
     }
@@ -186,6 +191,7 @@ export function createShortVideoCollections(context = {}) {
         onOpen: () => openNativeShortVideoFeed(video, {
           videos,
           hasMore: data.hasMore,
+          nextCursor: data.nextCursor,
           feedUrl: new URL(feedPath, getActiveUrl()).toString()
         })
       }));
@@ -213,6 +219,53 @@ export function createShortVideoCollections(context = {}) {
       wrap.append(remove);
       target.append(wrap);
     }
+    if (data.hasMore && data.nextCursor) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "short-video-mobile-collection-more";
+      more.textContent = collectionPageRequest ? "加载中…" : "加载更多";
+      more.disabled = Boolean(collectionPageRequest);
+      more.addEventListener("click", () => loadMoreCollectionVideos(target, status).catch((error) => {
+        status.textContent = error?.message || "加载更多失败";
+      }));
+      target.append(more);
+    }
+  }
+
+  function loadMoreCollectionVideos(target, status) {
+    if (collectionPageRequest) return collectionPageRequest.promise;
+    const active = state.active;
+    const cursor = String(active?.nextCursor || "").trim();
+    if (!active?.collectionId || !active.hasMore || !cursor) return Promise.resolve(active);
+    const expectedRenderId = active.renderId;
+    const params = new URLSearchParams({ limit: String(COLLECTION_PAGE_LIMIT), cursor });
+    const request = { promise: null, renderId: expectedRenderId };
+    collectionPageRequest = request;
+    request.promise = api.fetch(
+      null,
+      `/api/short-videos/collections/${encodeURIComponent(active.collectionId)}/videos?${params}`
+    ).then((page) => {
+      if (
+        state.active !== active
+        || expectedRenderId !== collectionRenderId
+        || (active.renderGuard && !active.renderGuard())
+      ) return null;
+      active.videos = mergeUniqueVideos(active.videos, page.videos);
+      active.total = Number(page.total || active.total || active.videos.length);
+      active.hasMore = Boolean(page.hasMore);
+      active.nextCursor = page.nextCursor || null;
+      active.collection = page.collection || active.collection;
+      renderCollectionVideos(target, status, active);
+      shellMeta(active);
+      return active;
+    }).finally(() => {
+      if (collectionPageRequest === request) collectionPageRequest = null;
+      if (state.active === active && expectedRenderId === collectionRenderId) {
+        renderCollectionVideos(target, status, active);
+      }
+    });
+    renderCollectionVideos(target, status, active);
+    return request.promise;
   }
 
   function shellMeta(data) {
@@ -274,9 +327,28 @@ export function createShortVideoCollections(context = {}) {
     els.viewContent.className = "content-list short-video-mobile-content";
   }
 
+  function deactivateCollections() {
+    collectionRenderId += 1;
+    collectionPageRequest = null;
+    state.active = null;
+  }
+
   return Object.freeze({
+    deactivateCollections,
     renderCollection,
     renderCollections,
     showCollectionPicker
   });
+}
+
+function mergeUniqueVideos(previous = [], incoming = []) {
+  const videos = [];
+  const seen = new Set();
+  for (const video of [...(previous || []), ...(incoming || [])]) {
+    const id = String(video?.id || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    videos.push(video);
+  }
+  return videos;
 }

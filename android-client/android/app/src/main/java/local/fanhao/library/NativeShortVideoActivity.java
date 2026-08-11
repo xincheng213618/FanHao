@@ -103,6 +103,7 @@ public class NativeShortVideoActivity extends Activity {
   public static final String EXTRA_BASE_URL = "baseUrl";
   public static final String EXTRA_FEED_URL = "feedUrl";
   public static final String EXTRA_NEXT_OFFSET = "nextOffset";
+  public static final String EXTRA_NEXT_CURSOR = "nextCursor";
   public static final String EXTRA_HAS_MORE = "hasMore";
   public static final String EXTRA_OPEN_AUTHOR_PANEL = "openAuthorPanel";
   private static final String PREFS_NAME = "fanhao.shortVideo.native";
@@ -193,6 +194,7 @@ public class NativeShortVideoActivity extends Activity {
   private String pendingFeedUrl;
   private int pendingStartIndex;
   private int nextFeedOffset;
+  private String nextFeedCursor = "";
   private boolean hasMoreVideos;
   private boolean loadingMoreVideos;
   private volatile int currentIndex = -1;
@@ -239,6 +241,8 @@ public class NativeShortVideoActivity extends Activity {
     pendingFeedUrl = getIntent().getStringExtra(EXTRA_FEED_URL);
     pendingStartIndex = Math.max(0, getIntent().getIntExtra(EXTRA_START_INDEX, 0));
     nextFeedOffset = Math.max(0, getIntent().getIntExtra(EXTRA_NEXT_OFFSET, 0));
+    nextFeedCursor = String.valueOf(getIntent().getStringExtra(EXTRA_NEXT_CURSOR));
+    if ("null".equals(nextFeedCursor)) nextFeedCursor = "";
     hasMoreVideos = getIntent().getBooleanExtra(EXTRA_HAS_MORE, false);
     openAuthorPanelOnStart = getIntent().getBooleanExtra(EXTRA_OPEN_AUTHOR_PANEL, false);
     readVideos();
@@ -633,7 +637,7 @@ public class NativeShortVideoActivity extends Activity {
 
   private FeedScreenState captureFeedScreen() {
     int index = currentIndex >= 0 ? currentIndex : (pager == null ? 0 : pager.getCurrentItem());
-    return new FeedScreenState(videos, pendingFeedUrl, nextFeedOffset, hasMoreVideos, index);
+    return new FeedScreenState(videos, pendingFeedUrl, nextFeedOffset, nextFeedCursor, hasMoreVideos, index);
   }
 
   private void renderScreen(ScreenState screen) {
@@ -659,6 +663,7 @@ public class NativeShortVideoActivity extends Activity {
     pendingFeedUrl = screen.feedUrl;
     updateTopSearchButton();
     nextFeedOffset = Math.max(0, screen.nextOffset);
+    nextFeedCursor = screen.nextCursor;
     hasMoreVideos = screen.hasMore;
     videos.clear();
     videos.addAll(screen.items);
@@ -2796,8 +2801,8 @@ public class NativeShortVideoActivity extends Activity {
     if (loadingMoreVideos || !hasMoreVideos || pendingFeedUrl == null || pendingFeedUrl.trim().isEmpty()) return;
     if (videos.size() - index > 4) return;
     loadingMoreVideos = true;
-    String feedUrl = pagedFeedUrl(pendingFeedUrl, nextFeedOffset, FEED_PAGE_LIMIT);
-    Log.i(TAG, "load more offset=" + nextFeedOffset);
+    String feedUrl = pagedFeedUrl(pendingFeedUrl, nextFeedOffset, nextFeedCursor, FEED_PAGE_LIMIT);
+    Log.i(TAG, "load more offset=" + nextFeedOffset + " cursor=" + (nextFeedCursor.length() > 0));
     executor.execute(() -> {
       FeedPage page = readFeedPage(feedUrl);
       mainHandler.post(() -> {
@@ -2821,6 +2826,7 @@ public class NativeShortVideoActivity extends Activity {
           inserted++;
         }
         nextFeedOffset = page.nextOffset();
+        nextFeedCursor = page.nextCursor;
         hasMoreVideos = page.hasMore;
         if (inserted > 0) {
           adapter.notifyItemRangeInserted(videos.size() - inserted, inserted);
@@ -2833,7 +2839,7 @@ public class NativeShortVideoActivity extends Activity {
             pager.setCurrentItem(index + 1, true);
           }
         }
-        Log.i(TAG, "loaded more inserted=" + inserted + " nextOffset=" + nextFeedOffset + " hasMore=" + hasMoreVideos);
+        Log.i(TAG, "loaded more inserted=" + inserted + " nextOffset=" + nextFeedOffset + " nextCursor=" + (nextFeedCursor.length() > 0) + " hasMore=" + hasMoreVideos);
       });
     });
   }
@@ -2951,9 +2957,8 @@ public class NativeShortVideoActivity extends Activity {
       currentIndex = -1;
       currentScreen = captureFeedScreen();
       if (hasMoreVideos && pendingFeedUrl != null && pendingFeedUrl.trim().length() > 0) {
-        nextFeedOffset = 0;
         showStatus("正在读取下一批短视频");
-        loadFeedAsync(pendingFeedUrl, 0);
+        loadFeedAsync(pagedFeedUrl(pendingFeedUrl, nextFeedOffset, nextFeedCursor, FEED_PAGE_LIMIT), 0);
       } else {
         showTransientStatus(message);
       }
@@ -3291,6 +3296,7 @@ public class NativeShortVideoActivity extends Activity {
         videos.clear();
         videos.addAll(page.items);
         nextFeedOffset = page.nextOffset();
+        nextFeedCursor = page.nextCursor;
         hasMoreVideos = page.hasMore;
         currentScreen = captureFeedScreen();
         adapter.notifyDataSetChanged();
@@ -3313,18 +3319,20 @@ public class NativeShortVideoActivity extends Activity {
     return normalized;
   }
 
-  private String pagedFeedUrl(String feedUrl, int offset, int limit) {
+  private String pagedFeedUrl(String feedUrl, int offset, String cursor, int limit) {
     Uri uri = Uri.parse(normalizeFeedUrl(feedUrl));
     Uri.Builder builder = uri.buildUpon().clearQuery();
     try {
       for (String name : uri.getQueryParameterNames()) {
-        if ("offset".equals(name) || "limit".equals(name)) continue;
+        if ("offset".equals(name) || "cursor".equals(name) || "limit".equals(name)) continue;
         List<String> values = uri.getQueryParameters(name);
         if (values.isEmpty()) builder.appendQueryParameter(name, "");
         else for (String value : values) builder.appendQueryParameter(name, value);
       }
     } catch (Exception ignored) {}
-    builder.appendQueryParameter("offset", String.valueOf(Math.max(0, offset)));
+    String normalizedCursor = cursor == null ? "" : cursor.trim();
+    if (normalizedCursor.length() > 0) builder.appendQueryParameter("cursor", normalizedCursor);
+    else builder.appendQueryParameter("offset", String.valueOf(Math.max(0, offset)));
     builder.appendQueryParameter("limit", String.valueOf(Math.max(1, limit)));
     return builder.build().toString();
   }
@@ -3362,6 +3370,7 @@ public class NativeShortVideoActivity extends Activity {
       page.total = Math.max(0, data.optInt("total", 0));
       page.stats = FeedStats.fromJson(data.optJSONObject("stats"));
       page.hasMore = data.optBoolean("hasMore", false);
+      page.nextCursor = data.optString("nextCursor", "");
       JSONArray rows = data.optJSONArray("videos");
       if (rows == null) return page;
       String baseUrl = baseFromUrl(feedUrl);
@@ -4404,7 +4413,7 @@ public class NativeShortVideoActivity extends Activity {
       feed.items.add(item);
       target = feed.items.size() - 1;
     }
-    renderFeedScreen(new FeedScreenState(feed.items, url, feed.nextOffset(), feed.hasMore, target));
+    renderFeedScreen(new FeedScreenState(feed.items, url, feed.nextOffset(), feed.nextCursor, feed.hasMore, target));
   }
 
   private int findVideoIndex(List<ShortVideoItem> source, String id) {
@@ -4434,7 +4443,7 @@ public class NativeShortVideoActivity extends Activity {
       feed.items.add(target);
       startIndex = feed.items.size() - 1;
     }
-    renderFeedScreen(new FeedScreenState(feed.items, url, feed.nextOffset(), feed.hasMore, Math.max(0, startIndex)));
+    renderFeedScreen(new FeedScreenState(feed.items, url, feed.nextOffset(), feed.nextCursor, feed.hasMore, Math.max(0, startIndex)));
   }
 
   private String authorFeedUrl(ShortVideoItem seed, int offset, int limit, String sort) {
@@ -5039,10 +5048,11 @@ public class NativeShortVideoActivity extends Activity {
     pendingFeedUrl = feedUrl == null ? "" : feedUrl;
     updateTopSearchButton();
     nextFeedOffset = page.nextOffset();
+    nextFeedCursor = page.nextCursor;
     hasMoreVideos = page.hasMore;
     videos.clear();
     videos.addAll(page.items);
-    currentScreen = new FeedScreenState(videos, pendingFeedUrl, nextFeedOffset, hasMoreVideos, startIndex);
+    currentScreen = new FeedScreenState(videos, pendingFeedUrl, nextFeedOffset, nextFeedCursor, hasMoreVideos, startIndex);
     adapter.notifyDataSetChanged();
     if (videos.isEmpty()) {
       showStatus("没有可播放的短视频");
@@ -5529,19 +5539,21 @@ public class NativeShortVideoActivity extends Activity {
     final List<ShortVideoItem> items = new ArrayList<>();
     final String feedUrl;
     final int nextOffset;
+    final String nextCursor;
     final boolean hasMore;
     final int currentIndex;
 
-    FeedScreenState(List<ShortVideoItem> items, String feedUrl, int nextOffset, boolean hasMore, int currentIndex) {
+    FeedScreenState(List<ShortVideoItem> items, String feedUrl, int nextOffset, String nextCursor, boolean hasMore, int currentIndex) {
       if (items != null) this.items.addAll(items);
       this.feedUrl = feedUrl == null ? "" : feedUrl;
       this.nextOffset = Math.max(0, nextOffset);
+      this.nextCursor = nextCursor == null ? "" : nextCursor;
       this.hasMore = hasMore;
       this.currentIndex = Math.max(0, currentIndex);
     }
 
     FeedScreenState copy() {
-      return new FeedScreenState(items, feedUrl, nextOffset, hasMore, currentIndex);
+      return new FeedScreenState(items, feedUrl, nextOffset, nextCursor, hasMore, currentIndex);
     }
   }
 

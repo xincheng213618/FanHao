@@ -1,3 +1,11 @@
+import {
+  captureCollectionFeedWindow,
+  captureCollectionWindow,
+  restoreCollectionFeedWindow,
+  restoreCollectionPosition,
+  restoreCollectionWindow
+} from "./collection-navigation.js?v=20260812-collection-review-02";
+
 const COLLECTION_PAGE_SIZE = 48;
 
 export function createShortVideoCollectionsController(dependencies) {
@@ -10,6 +18,7 @@ export function createShortVideoCollectionsController(dependencies) {
     onOpenVideo,
     loadFeed,
     pushRoute,
+    replaceRoute,
     render,
     setMainHeader,
     showToast,
@@ -17,6 +26,10 @@ export function createShortVideoCollectionsController(dependencies) {
   } = dependencies;
   let collectionsRequest = null;
   let collectionRequestId = 0;
+  let collectionVideoEnteredWithinApp = false;
+  let collectionVideoReturnWindow = null;
+  let collectionPageEnteredWithinApp = false;
+  let collectionFeedReturnWindow = null;
 
   function ensureState() {
     const shortVideo = state.shortVideo;
@@ -54,26 +67,26 @@ export function createShortVideoCollectionsController(dependencies) {
     const id = String(collectionId || "").trim();
     if (!id) throw new Error("缺少清单 ID");
     const append = Boolean(options.append);
-    const offset = append ? Number(state.shortVideo.collectionData?.videos?.length || 0) : 0;
+    const cursor = append ? String(state.shortVideo.collectionData?.nextCursor || "") : "";
     const requestId = ++collectionRequestId;
     state.shortVideo.collectionId = id;
     state.shortVideo.collectionLoading = true;
     state.shortVideo.collectionError = "";
     try {
-      const data = await api(`/api/short-videos/collections/${encodeURIComponent(id)}/videos?limit=${COLLECTION_PAGE_SIZE}&offset=${offset}`);
+      const params = new URLSearchParams({ limit: String(COLLECTION_PAGE_SIZE) });
+      if (cursor) params.set("cursor", cursor);
+      const data = await api(`/api/short-videos/collections/${encodeURIComponent(id)}/videos?${params}`);
       if (requestId !== collectionRequestId || state.shortVideo.collectionId !== id) return null;
       const previous = append && state.shortVideo.collectionData?.collection?.id === id
         ? state.shortVideo.collectionData
         : null;
-      const videos = previous
-        ? [...(previous.videos || []), ...(data.videos || [])]
-        : [...(data.videos || [])];
+      const videos = mergeUniqueVideos(previous?.videos, data.videos);
       state.shortVideo.collectionData = { ...data, videos };
       state.shortVideo.data = {
         videos,
         total: Number(data.total || videos.length),
         hasMore: Boolean(data.hasMore),
-        nextOffset: data.nextOffset
+        nextCursor: data.nextCursor || null
       };
       syncCollectionSummary(data.collection);
       return state.shortVideo.collectionData;
@@ -128,6 +141,9 @@ export function createShortVideoCollectionsController(dependencies) {
       button.type = "button";
       button.className = "short-video-collection-sidebar-item";
       button.classList.toggle("active", state.shortVideo.mode === "collection" && state.shortVideo.collectionId === collection.id);
+      if (state.shortVideo.mode === "collection" && state.shortVideo.collectionId === collection.id) {
+        button.setAttribute("aria-current", "page");
+      }
       button.dataset.collectionId = collection.id;
       const name = document.createElement("span");
       name.textContent = collection.name;
@@ -142,17 +158,55 @@ export function createShortVideoCollectionsController(dependencies) {
   }
 
   async function showPicker(video = null, options = {}) {
-    document.querySelector(".short-video-collection-picker")?.remove();
+    const existing = document.querySelector(".short-video-collection-picker");
+    if (existing?._closeCollectionPicker) existing._closeCollectionPicker();
+    else existing?.remove();
+    const returnFocus = document.activeElement;
     const overlay = document.createElement("div");
     overlay.className = "short-video-collection-picker";
-    overlay.addEventListener("click", (event) => {
-      if (event.target === overlay) overlay.remove();
-    });
     const dialog = document.createElement("section");
     dialog.className = "short-video-collection-picker-dialog";
     dialog.setAttribute("role", "dialog");
     dialog.setAttribute("aria-modal", "true");
     dialog.setAttribute("aria-label", video ? "加入清单" : "新建清单");
+    dialog.tabIndex = -1;
+    const closePicker = () => {
+      if (!overlay.isConnected) return;
+      overlay.remove();
+      window.requestAnimationFrame(() => {
+        const fallback = document.querySelector(".short-video-rail-button.is-collection")
+          || document.querySelector(".short-video-collection-create");
+        (returnFocus?.isConnected ? returnFocus : fallback)?.focus?.({ preventScroll: true });
+      });
+    };
+    overlay._closeCollectionPicker = closePicker;
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) closePicker();
+    });
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePicker();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [...dialog.querySelectorAll("button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex='-1'])")]
+        .filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus({ preventScroll: true });
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus({ preventScroll: true });
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus({ preventScroll: true });
+      }
+    });
     const header = document.createElement("header");
     const title = document.createElement("strong");
     title.textContent = video ? "加入清单" : "我的清单";
@@ -161,7 +215,7 @@ export function createShortVideoCollectionsController(dependencies) {
     close.className = "short-video-collection-picker-close";
     close.setAttribute("aria-label", "关闭");
     close.append(createIcon("close"));
-    close.addEventListener("click", () => overlay.remove());
+    close.addEventListener("click", closePicker);
     header.append(title, close);
 
     const form = document.createElement("form");
@@ -211,7 +265,7 @@ export function createShortVideoCollectionsController(dependencies) {
         state.shortVideo.collections.push(collection);
         state.shortVideo.collectionsLoaded = true;
         if (video) await addToCollection(collection);
-        overlay.remove();
+        closePicker();
         render();
         if (!video) openCollection(collection.id).catch((error) => showToast(error?.message || "清单读取失败"));
       } catch (error) {
@@ -225,6 +279,7 @@ export function createShortVideoCollectionsController(dependencies) {
       status.textContent = "正在读取清单…";
       try {
         const collections = await loadCollections();
+        if (!overlay.isConnected) return;
         status.textContent = collections.length ? "选择一个清单" : "先快速创建一个清单";
         for (const collection of collections) {
           const button = document.createElement("button");
@@ -238,7 +293,7 @@ export function createShortVideoCollectionsController(dependencies) {
             button.disabled = true;
             try {
               await addToCollection(collection);
-              overlay.remove();
+              closePicker();
               render();
             } catch (error) {
               status.textContent = error?.message || "加入清单失败";
@@ -251,7 +306,7 @@ export function createShortVideoCollectionsController(dependencies) {
         status.textContent = error?.message || "清单读取失败";
       }
     }
-    input.focus();
+    input.focus({ preventScroll: true });
   }
 
   function renderCollectionPage() {
@@ -331,6 +386,7 @@ export function createShortVideoCollectionsController(dependencies) {
     videos.forEach((video, index) => {
       const card = getListCards()?.renderVideoCard(video, index);
       if (!card) return;
+      card.dataset.collectionVideoId = video.id;
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "short-video-collection-remove";
@@ -341,7 +397,7 @@ export function createShortVideoCollectionsController(dependencies) {
       card.querySelector(".short-video-thumb-open")?.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopImmediatePropagation();
-        onOpenVideo(video);
+        openCollectionVideo(video).catch((error) => showToast(error?.message || "清单视频读取失败"));
       }, { capture: true });
       grid.append(card);
     });
@@ -421,6 +477,29 @@ export function createShortVideoCollectionsController(dependencies) {
     }
   }
 
+  function loadCollectionVideoDetail(videoId) {
+    const collectionId = String(state.shortVideo.collectionId || "").trim();
+    const id = String(videoId || "").trim();
+    if (!collectionId || !id) return Promise.reject(new Error("缺少清单视频 ID"));
+    return api(`/api/short-videos/collections/${encodeURIComponent(collectionId)}/videos/${encodeURIComponent(id)}`);
+  }
+
+  async function openCollectionVideo(video, options = {}) {
+    const videoId = String(video?.id || video || "").trim();
+    if (!videoId) return false;
+    if (!options.deepLink) {
+      collectionVideoEnteredWithinApp = true;
+      collectionVideoReturnWindow = captureCollectionWindow(
+        state.shortVideo,
+        window.scrollY,
+        videoId,
+        document.activeElement
+      );
+    }
+    const detail = options.detail || await loadCollectionVideoDetail(videoId);
+    return onOpenVideo(detail.video, { ...options, detailData: detail, deepLink: undefined });
+  }
+
   function collectionNavigation(videoId) {
     if (state.shortVideo.mode !== "collection") return null;
     const videos = state.shortVideo.collectionData?.videos || [];
@@ -452,6 +531,10 @@ export function createShortVideoCollectionsController(dependencies) {
   async function openCollection(collectionId, options = {}) {
     const id = String(collectionId || "").trim();
     if (!id) return;
+    if (!options.skipRoute && state.shortVideo.mode !== "collection") {
+      collectionPageEnteredWithinApp = true;
+      collectionFeedReturnWindow = captureCollectionFeedWindow(state.shortVideo, window.scrollY, document.activeElement);
+    }
     if (state.shortVideo.collectionData?.collection?.id !== id) state.shortVideo.collectionData = null;
     state.shortVideo.mode = "collection";
     state.shortVideo.collectionId = id;
@@ -470,17 +553,62 @@ export function createShortVideoCollectionsController(dependencies) {
         shortVideoCollectionId: id
       });
     }
+    if (!options.videoId && options.skipRoute && restoreCollectionWindow(
+      state.shortVideo,
+      collectionVideoReturnWindow,
+      render
+    )) {
+      collectionVideoReturnWindow = null;
+      collectionVideoEnteredWithinApp = false;
+      loadCollections().catch(() => []);
+      return;
+    }
     render();
     await Promise.all([loadCollections().catch(() => []), loadCollection(id)]);
     if (options.videoId) {
-      const video = state.shortVideo.collectionData?.videos?.find((item) => item.id === options.videoId);
-      await onOpenVideo(video || { id: options.videoId }, { skipRoute: true });
+      collectionVideoEnteredWithinApp = false;
+      collectionVideoReturnWindow = captureCollectionWindow(state.shortVideo, 0, options.videoId);
+      await openCollectionVideo(options.videoId, { deepLink: true, skipRoute: true });
       return;
     }
     render();
   }
 
+  function returnFromCollectionVideo() {
+    if (state.shortVideo.mode !== "collection" || !state.shortVideo.collectionId) return false;
+    if (collectionVideoEnteredWithinApp && window.history.length > 1) {
+      window.history.back();
+      return true;
+    }
+    state.shortVideo.current = null;
+    state.shortVideo.prevVideo = null;
+    state.shortVideo.nextVideo = null;
+    state.shortVideo.prevId = "";
+    state.shortVideo.nextId = "";
+    state.shortVideo.slideDirection = 0;
+    state.shortVideo.loading = false;
+    state.shortVideo.status = "";
+    replaceRoute({
+      view: "shortVideos",
+      shortVideoId: "",
+      shortVideoMode: "collection",
+      shortVideoCollectionId: state.shortVideo.collectionId
+    });
+    const restored = restoreCollectionWindow(state.shortVideo, collectionVideoReturnWindow, render);
+    if (!restored) {
+      render();
+      restoreCollectionPosition({ scrollY: 0, focusVideoId: "" });
+    }
+    collectionVideoReturnWindow = null;
+    collectionVideoEnteredWithinApp = false;
+    return true;
+  }
+
   function returnToFeed() {
+    if (collectionPageEnteredWithinApp && window.history.length > 1) {
+      window.history.back();
+      return;
+    }
     state.shortVideo.mode = "feed";
     state.shortVideo.collectionId = "";
     state.shortVideo.current = null;
@@ -489,9 +617,27 @@ export function createShortVideoCollectionsController(dependencies) {
     state.shortVideo.prevId = "";
     state.shortVideo.nextId = "";
     state.shortVideo.data = null;
-    pushRoute({ view: "shortVideos", shortVideoId: "", shortVideoMode: "feed", shortVideoCollectionId: "" });
-    render();
-    loadFeed();
+    replaceRoute({ view: "shortVideos", shortVideoId: "", shortVideoMode: "feed", shortVideoCollectionId: "" });
+    if (!restoreCollectionFeedWindow(state.shortVideo, collectionFeedReturnWindow, render)) {
+      render();
+      loadFeed();
+    }
+    collectionFeedReturnWindow = null;
+    collectionPageEnteredWithinApp = false;
+  }
+
+  function restoreFeedAfterRoute(route = {}) {
+    if (!collectionFeedReturnWindow) return false;
+    const restored = restoreCollectionFeedWindow(state.shortVideo, collectionFeedReturnWindow, render, route);
+    if (!restored) {
+      collectionFeedReturnWindow = null;
+      collectionPageEnteredWithinApp = false;
+      return false;
+    }
+    collectionFeedReturnWindow = null;
+    collectionPageEnteredWithinApp = false;
+    setMainHeader("短视频", "抖音点赞本地库");
+    return true;
   }
 
   function syncCollectionSummary(collection) {
@@ -504,12 +650,27 @@ export function createShortVideoCollectionsController(dependencies) {
   return Object.freeze({
     collectionNavigation,
     loadCollection,
+    loadCollectionVideoDetail,
     loadCollections,
     openCollection,
     prepareCollectionNavigation,
     renderCollectionPage,
     renderSidebar,
+    restoreFeedAfterRoute,
+    returnFromCollectionVideo,
     returnToFeed,
     showPicker
   });
+}
+
+function mergeUniqueVideos(previous = [], incoming = []) {
+  const videos = [];
+  const seen = new Set();
+  for (const video of [...(previous || []), ...(incoming || [])]) {
+    const id = String(video?.id || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    videos.push(video);
+  }
+  return videos;
 }

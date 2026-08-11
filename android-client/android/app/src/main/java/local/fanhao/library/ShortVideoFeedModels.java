@@ -17,6 +17,7 @@ final class FeedPage {
   int limit = ShortVideoFeedContract.DEFAULT_PAGE_LIMIT;
   int total = 0;
   boolean hasMore = false;
+  String nextCursor = "";
   FeedStats stats = new FeedStats();
 
   int nextOffset() {
@@ -30,6 +31,7 @@ final class FeedPage {
     copy.limit = limit;
     copy.total = total;
     copy.hasMore = hasMore;
+    copy.nextCursor = nextCursor == null ? "" : nextCursor;
     copy.stats = stats == null ? new FeedStats() : stats.copy();
     return copy;
   }

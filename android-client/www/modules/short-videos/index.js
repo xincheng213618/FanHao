@@ -1,5 +1,5 @@
 import { createShortVideoApi } from "./api.js?v=20260811-custom-collections-01";
-import { createShortVideoCollections } from "./collections/controller.js?v=20260811-custom-collections-01";
+import { createShortVideoCollections } from "./collections/controller.js?v=20260812-collection-review-02";
 import { createShortVideoListController } from "./list/controller.js?v=20260811-android-author-status-01";
 import { createShortVideoListView } from "./list/view.js?v=20260811-android-author-status-01";
 import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260712-native-short-video-only-02";
@@ -82,6 +82,7 @@ export function createShortVideoViews(deps) {
   }
 
   function deactivateTransientUi() {
+    context.deactivateCollections?.();
     document.querySelector(".short-video-sort-overlay")?.remove();
     context.resetListLoadMoreObserver();
   }

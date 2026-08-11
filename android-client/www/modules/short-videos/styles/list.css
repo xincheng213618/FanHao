@@ -1202,6 +1202,16 @@ body.short-video-search-page-view .bottom-nav {
   font-weight: 900;
 }
 
+.short-video-mobile-collection-more {
+  grid-column: 1 / -1;
+  min-height: 44px;
+  border: 1px solid var(--border-color, #dfe3e8);
+  border-radius: 12px;
+  background: var(--surface, #fff);
+  color: inherit;
+  font-weight: 700;
+}
+
 .short-video-mobile-collection-remove {
   top: auto;
   bottom: 6px;

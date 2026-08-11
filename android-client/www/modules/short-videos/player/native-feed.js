@@ -29,6 +29,7 @@ export function createShortVideoNativeFeed(context = {}) {
         feedUrl,
         hasMore: Boolean((options.hasMore ?? listState.data?.hasMore) || end < playableEntries.length),
         nextOffset: feedEntries.length ? feedEntries[feedEntries.length - 1].apiIndex + 1 : videos.length,
+        nextCursor: String(options.nextCursor || ""),
         startIndex: index - start,
         startId: video.id,
         openAuthorPanel: Boolean(options.openAuthorPanel),

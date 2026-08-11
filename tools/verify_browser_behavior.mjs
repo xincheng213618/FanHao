@@ -15,6 +15,8 @@ const baseUrl = suppliedBaseUrl || `http://127.0.0.1:${fixturePort}`;
 let delayedAuthorDetail = null;
 const fixtureCollections = new Map();
 let fixtureCollectionSequence = 0;
+const fixtureCollectionDetailRequests = [];
+const fixtureCollectionPageRequests = [];
 
 try {
   await waitForHealth(baseUrl);
@@ -45,7 +47,11 @@ async function startFixtureServer(serverPort) {
           body: await readFixtureJson(request)
         }));
       } catch (error) {
-        sendJson(response, { error: String(error?.message || error || "fixture request failed") }, 503);
+        sendJson(
+          response,
+          { error: String(error?.message || error || "fixture request failed") },
+          Math.max(400, Math.min(599, Number(error?.statusCode || 503)))
+        );
       }
       return;
     }
@@ -299,6 +305,8 @@ async function verifyDirectAuthorDeepLink(browser) {
 async function verifyShortVideoCollections(browser) {
   fixtureCollections.clear();
   fixtureCollectionSequence = 0;
+  fixtureCollectionDetailRequests.length = 0;
+  fixtureCollectionPageRequests.length = 0;
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   try {
     await page.goto(`${baseUrl}/short-videos`, { waitUntil: "domcontentloaded" });
@@ -308,8 +316,19 @@ async function verifyShortVideoCollections(browser) {
     const addToCollection = page.locator(".short-video-rail-button.is-collection");
     await addToCollection.waitFor({ state: "visible", timeout: 30000 });
     await addToCollection.click();
-    const picker = page.locator(".short-video-collection-picker");
+    let picker = page.locator(".short-video-collection-picker");
     await picker.waitFor({ state: "visible", timeout: 5000 });
+    await page.keyboard.press("Escape");
+    await picker.waitFor({ state: "detached", timeout: 5000 });
+    assert.equal(await addToCollection.evaluate((element) => document.activeElement === element), true, "Escape must close the picker and restore its trigger focus");
+
+    await addToCollection.click();
+    picker = page.locator(".short-video-collection-picker");
+    await picker.waitFor({ state: "visible", timeout: 5000 });
+    const closePicker = picker.locator(".short-video-collection-picker-close");
+    await closePicker.focus();
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(await picker.evaluate((element) => element.contains(document.activeElement)), true, "picker focus must wrap inside the modal");
     await picker.locator('input[name="collectionName"]').fill("E2E 稍后看");
     await picker.locator('button[type="submit"]').click();
     await picker.waitFor({ state: "detached", timeout: 5000 });
@@ -318,13 +337,95 @@ async function verifyShortVideoCollections(browser) {
     await page.locator(".short-video-collection-sidebar").waitFor({ state: "visible", timeout: 30000 });
     const collection = page.locator(".short-video-collection-sidebar-item", { hasText: "E2E 稍后看" });
     await collection.waitFor({ state: "visible", timeout: 5000 });
-    await collection.click();
+    const feedBeforeCollection = await page.evaluate((collectionId) => {
+      const button = document.querySelector(`.short-video-collection-sidebar-item[data-collection-id="${CSS.escape(collectionId)}"]`);
+      button?.focus({ preventScroll: true });
+      window.scrollTo(0, 420);
+      return {
+        cardCount: document.querySelectorAll(".short-video-grid .short-video-card").length,
+        scrollY: window.scrollY,
+        collectionId: button?.dataset.collectionId || ""
+      };
+    }, "svc_fixture_1");
+    await collection.evaluate((element) => element.click());
+    await page.waitForURL(/\/short-videos\/collections\/svc_fixture_1$/u, { timeout: 5000 });
+    assert.equal(await collection.getAttribute("aria-current"), "page", "the active collection must be exposed through aria-current");
+    await page.locator(".short-video-collection-back").click();
+    await page.waitForURL((url) => url.pathname === "/short-videos" && !url.searchParams.has("source"), { timeout: 5000 });
+    const restoredFeed = await waitFor(
+      () => page.evaluate(() => ({
+        cardCount: document.querySelectorAll(".short-video-grid .short-video-card").length,
+        scrollY: window.scrollY,
+        focusedCollectionId: document.activeElement?.dataset.collectionId || ""
+      })),
+      (value) => value.focusedCollectionId === "svc_fixture_1",
+      5000
+    );
+    assert.equal(restoredFeed.cardCount, feedBeforeCollection.cardCount, "collection back must restore the captured feed data/DOM window");
+    assert.ok(Math.abs(restoredFeed.scrollY - feedBeforeCollection.scrollY) <= 2, "collection back must restore feed scroll");
+
+    await collection.evaluate((element) => element.click());
+    await page.waitForURL(/\/short-videos\/collections\/svc_fixture_1$/u, { timeout: 5000 });
+    await page.evaluate(() => {
+      history.pushState({}, "", "/short-videos?source=authors");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await page.locator(".short-video-author-index-card-main").first().waitFor({ state: "visible", timeout: 30000 });
+    assert.equal(new URL(page.url()).searchParams.get("source"), "authors");
+    assert.equal(await page.locator('.short-video-source-tab[data-source="authors"]').getAttribute("aria-pressed"), "true", "collection-to-authors navigation must not be overwritten by an old feed snapshot");
+
+    await page.goto(`${baseUrl}/short-videos`, { waitUntil: "domcontentloaded" });
+    await page.locator(".short-video-collection-sidebar").waitFor({ state: "visible", timeout: 30000 });
+    await page.locator(".short-video-collection-sidebar-item", { hasText: "E2E 稍后看" }).click();
     await page.waitForURL(/\/short-videos\/collections\/svc_fixture_1$/u, { timeout: 5000 });
     const remove = page.locator('.short-video-collection-remove[data-video-id="fixture-video-fixture-author-1"]');
-    await remove.waitFor({ state: "visible", timeout: 5000 });
-    await remove.click();
+    const actualRemove = remove.or(page.locator(".short-video-collection-remove").first());
+    await actualRemove.waitFor({ state: "visible", timeout: 5000 });
+    await actualRemove.click();
     await page.locator(".short-video-empty", { hasText: "这个清单还没有视频" }).waitFor({ state: "visible", timeout: 5000 });
     assert.equal(fixtureCollections.get("svc_fixture_1")?.videoIds.size, 0, "Chromium remove must persist through the collection API fixture");
+
+    seedDeepCollection();
+    await page.goto(`${baseUrl}/short-videos/collections/svc_deep`, { waitUntil: "domcontentloaded" });
+    await page.locator(".short-video-collection-load-more").waitFor({ state: "visible", timeout: 30000 });
+    await page.locator(".short-video-collection-load-more").click();
+    await waitFor(() => page.locator("[data-collection-video-id]").count(), (count) => count === 60, 10000);
+    assert.ok(fixtureCollectionPageRequests.some((requestUrl) => new URL(requestUrl).searchParams.has("cursor")), "Web collection pagination must advance with nextCursor");
+    const returnCard = page.locator('[data-collection-video-id="fixture-deep-55"] .short-video-thumb-open');
+    await returnCard.focus();
+    await page.evaluate(() => window.scrollTo(0, Math.max(500, document.documentElement.scrollHeight - window.innerHeight - 160)));
+    const collectionScroll = await page.evaluate(() => window.scrollY);
+    await returnCard.click();
+    await page.locator('.short-video-reel-panel.is-current[data-video-id="fixture-deep-55"]').waitFor({ state: "visible", timeout: 10000 });
+    await page.locator(".short-video-close").click();
+    await page.waitForURL(/\/short-videos\/collections\/svc_deep$/u, { timeout: 5000 });
+    const restoredCollection = await waitFor(
+      () => page.evaluate(() => ({
+        count: document.querySelectorAll("[data-collection-video-id]").length,
+        scrollY: window.scrollY,
+        focusVideoId: document.activeElement?.closest?.("[data-collection-video-id]")?.dataset.collectionVideoId || ""
+      })),
+      (value) => value.focusVideoId === "fixture-deep-55",
+      5000
+    );
+    assert.equal(restoredCollection.count, 60, "collection video back must restore all cursor-appended rows");
+    assert.ok(Math.abs(restoredCollection.scrollY - collectionScroll) <= 2, "collection video back must restore collection scroll");
+
+    await page.goto(`${baseUrl}/short-videos/collections/svc_deep/videos/fixture-deep-58`, { waitUntil: "domcontentloaded" });
+    await page.locator('.short-video-reel-panel.is-current[data-video-id="fixture-deep-58"]').waitFor({ state: "visible", timeout: 30000 });
+    assert.ok(fixtureCollectionDetailRequests.includes("svc_deep:fixture-deep-58"), "deep members beyond the first 48 rows must use the membership detail API");
+    const directHistoryLength = await page.evaluate(() => history.length);
+    await page.locator(".short-video-close").click();
+    await page.waitForURL(/\/short-videos\/collections\/svc_deep$/u, { timeout: 5000 });
+    assert.equal(await page.evaluate(() => history.length), directHistoryLength, "direct collection deep-link return must replace instead of pushing history");
+
+    await page.goto(`${baseUrl}/short-videos/collections/svc_deep/videos/fixture-outsider`, { waitUntil: "domcontentloaded" });
+    await waitFor(
+      () => page.locator("#workGrid").innerText().catch(() => ""),
+      (text) => text.includes("outside this collection"),
+      30000
+    );
+    assert.equal(await page.locator(".short-video-reel-panel.is-current").count(), 0, "an outsider must never render from a global detail stub");
   } finally {
     await page.close();
   }
@@ -431,27 +532,51 @@ async function fixtureApi(url, request = {}) {
   const collectionVideos = /^\/api\/short-videos\/collections\/([^/]+)\/videos$/.exec(url.pathname);
   if (collectionVideos) {
     const entry = fixtureCollections.get(decodeURIComponent(collectionVideos[1]));
-    if (!entry) throw new Error("fixture collection not found");
-    const videos = [...entry.videoIds].map((id) => fixtureVideo(id));
+    if (!entry) throw fixtureHttpError(404, "fixture collection not found");
+    fixtureCollectionPageRequests.push(url.toString());
+    const cursor = String(url.searchParams.get("cursor") || "");
+    const start = cursor ? Number(/^cursor-(\d+)$/.exec(cursor)?.[1] || -1) : 0;
+    if (start < 0) throw fixtureHttpError(400, "fixture collection cursor invalid");
+    const limit = Math.max(1, Math.min(120, Number(url.searchParams.get("limit") || 48)));
+    const allVideoIds = [...entry.videoIds];
+    const pageVideoIds = allVideoIds.slice(start, start + limit);
+    const videos = pageVideoIds.map((id) => fixtureVideo(id));
+    const hasMore = start + videos.length < allVideoIds.length;
     return {
-      collection: { ...entry.collection, itemCount: videos.length },
+      collection: { ...entry.collection, itemCount: allVideoIds.length },
       videos,
       count: videos.length,
-      total: videos.length,
-      limit: 48,
-      offset: 0,
-      hasMore: false,
-      nextOffset: null
+      total: allVideoIds.length,
+      limit,
+      cursor: cursor || null,
+      hasMore,
+      nextCursor: hasMore ? `cursor-${start + videos.length}` : null
     };
   }
   const collectionVideo = /^\/api\/short-videos\/collections\/([^/]+)\/videos\/([^/]+)$/.exec(url.pathname);
   if (collectionVideo) {
     const entry = fixtureCollections.get(decodeURIComponent(collectionVideo[1]));
-    if (!entry) throw new Error("fixture collection not found");
+    if (!entry) throw fixtureHttpError(404, "fixture collection not found");
     const videoId = decodeURIComponent(collectionVideo[2]);
     if (request.method === "DELETE") {
       const removed = entry.videoIds.delete(videoId);
       return { removed, collectionId: entry.collection.id, videoId };
+    }
+    if (request.method === "GET") {
+      fixtureCollectionDetailRequests.push(`${entry.collection.id}:${videoId}`);
+      const videoIds = [...entry.videoIds];
+      const index = videoIds.indexOf(videoId);
+      if (index < 0) throw fixtureHttpError(404, "fixture video is outside this collection");
+      const previous = index > 0 ? fixtureVideo(videoIds[index - 1]) : null;
+      const next = index + 1 < videoIds.length ? fixtureVideo(videoIds[index + 1]) : null;
+      return {
+        collection: { ...entry.collection, itemCount: videoIds.length },
+        video: fixtureVideo(videoId),
+        prevId: previous?.id || "",
+        nextId: next?.id || "",
+        prevVideo: previous,
+        nextVideo: next
+      };
     }
     const before = entry.videoIds.size;
     entry.videoIds.add(videoId);
@@ -482,11 +607,10 @@ async function fixtureApi(url, request = {}) {
       await delayed.response;
       if (delayed.reject) throw new Error("fixture delayed author detail rejection");
     }
-    return {
-      videos: [fixtureVideo(`fixture-video-${author}`, author)],
-      total: 1,
-      hasMore: false
-    };
+    const videos = author !== "all"
+      ? [fixtureVideo(`fixture-video-${author}`, author)]
+      : Array.from({ length: 60 }, (_, index) => fixtureVideo(`fixture-feed-${String(index + 1).padStart(2, "0")}`));
+    return { videos, total: videos.length, hasMore: false };
   }
   const detail = /^\/api\/short-videos\/([^/]+)$/.exec(url.pathname);
   if (detail) {
@@ -494,6 +618,25 @@ async function fixtureApi(url, request = {}) {
     return { video, prevId: "", nextId: "", neighbors: { previous: [], next: [] } };
   }
   return {};
+}
+
+function seedDeepCollection() {
+  fixtureCollections.set("svc_deep", {
+    collection: {
+      id: "svc_deep",
+      name: "深链清单",
+      itemCount: 60,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-02T00:00:00.000Z"
+    },
+    videoIds: new Set(Array.from({ length: 60 }, (_, index) => `fixture-deep-${String(index).padStart(2, "0")}`))
+  });
+}
+
+function fixtureHttpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
 }
 
 function fixtureVideo(id, author = "fixture-author-1") {

@@ -1,7 +1,7 @@
 import { createShortVideoSearchModule } from "./search/index.js?v=20260710-short-video-search-01";
 import { createShortVideoActionsController } from "./actions-controller.js?v=20260716-short-video-actions-01";
 import { createShortVideoAuthorPages } from "./author-pages.js?v=20260810-author-header-align-01";
-import { createShortVideoCollectionsController } from "./collections-controller.js?v=20260811-custom-collections-01";
+import { createShortVideoCollectionsController } from "./collections-controller.js?v=20260812-collection-review-02";
 import { captionTitleWithTags, createShortVideoCaptionText } from "./caption-text.js?v=20260811-custom-collections-01";
 import { createShortVideoFilterControls } from "./filter-controls.js?v=20260810-author-account-status-01";
 import { createIcon, railButton, setIconButton } from "./icons.js?v=20260716-short-video-icons-01";
@@ -235,6 +235,7 @@ export function createShortVideoPage(deps) {
       ...(Object.keys(video || {}).length > 1 ? { video } : {})
     }).catch(showError),
     pushRoute,
+    replaceRoute,
     render: renderView,
     setMainHeader,
     showToast: showBrowserToast,
@@ -360,6 +361,11 @@ export function createShortVideoPage(deps) {
     waitForVideoFirstFrame
   });
 
+  function contextualShortVideoDetail(videoId) {
+    return state.shortVideo.mode === "collection"
+      ? collectionsController.loadCollectionVideoDetail(videoId)
+      : fetchShortVideoDetail(videoId);
+  }
   function markShortVideoPerformance(name, details = {}) {
     const now = Date.now();
     const trace = window.__fanhaoShortVideoPerf && typeof window.__fanhaoShortVideoPerf === "object"
@@ -522,6 +528,7 @@ export function createShortVideoPage(deps) {
       if (!state.shortVideo.likeDistribution) await loadLikeDistribution();
       return;
     }
+    if (!route.shortVideoId && collectionsController.restoreFeedAfterRoute(route)) return;
     if (route.shortVideoId) {
       await openVideo(route.shortVideoId, { skipRoute: true });
       return;
@@ -829,9 +836,9 @@ export function createShortVideoPage(deps) {
     shortVideoOpenError = "";
     const feedVideos = Array.isArray(state.shortVideo.data?.videos) ? state.shortVideo.data.videos : [];
     const feedIndex = feedVideos.findIndex((video) => String(video?.id || "") === String(videoId));
-    const openingVideo = options.video
-      || cachedShortVideo(videoId)
-      || (feedIndex >= 0 ? feedVideos[feedIndex] : null);
+    const openingVideo = state.shortVideo.mode === "collection"
+      ? null
+      : options.video || cachedShortVideo(videoId) || (feedIndex >= 0 ? feedVideos[feedIndex] : null);
     if (openingVideo?.id) {
       markShortVideoPerformance("video-open-fast-path", {
         videoId: String(openingVideo.id),
@@ -876,7 +883,9 @@ export function createShortVideoPage(deps) {
     }
     state.shortVideo.loading = true;
     state.shortVideo.status = "正在打开视频";
-    const detailPromise = fetchShortVideoDetail(videoId);
+    const detailPromise = options.detailData
+      ? Promise.resolve(options.detailData)
+      : contextualShortVideoDetail(videoId);
     try {
       if (options.renderLoading !== false) {
         await viewerStylesReady;
@@ -899,8 +908,8 @@ export function createShortVideoPage(deps) {
       state.shortVideo.prevId = collectionNavigation?.prevId || data.prevId || "";
       state.shortVideo.nextId = collectionNavigation?.nextId || data.nextId || "";
       state.shortVideo.slideDirection = Number(options.slideDirection || 0);
-      state.shortVideo.prevVideo = collectionNavigation?.prevVideo || null;
-      state.shortVideo.nextVideo = collectionNavigation?.nextVideo || null;
+      state.shortVideo.prevVideo = collectionNavigation?.prevVideo || data.prevVideo || null;
+      state.shortVideo.nextVideo = collectionNavigation?.nextVideo || data.nextVideo || null;
       state.shortVideo.loading = false;
       state.shortVideo.status = "";
       shortVideoOpeningId = "";
@@ -1298,7 +1307,6 @@ export function createShortVideoPage(deps) {
       });
     }
   }
-
 
   function leaveLikeDistributionPage() {
     state.shortVideo.mode = "feed";
@@ -4266,7 +4274,7 @@ export function createShortVideoPage(deps) {
   function promoteAdjacentMedia(video, direction, options = {}) {
     const previousCurrent = state.shortVideo.current;
     const collectionNavigation = collectionsController.collectionNavigation(video.id);
-    const navigation = collectionNavigation || cachedShortVideoNavigation(video.id);
+    const navigation = collectionNavigation || (state.shortVideo.mode === "collection" ? null : cachedShortVideoNavigation(video.id));
     const fallbackPrevId = direction > 0 ? previousCurrent?.id || "" : "";
     const fallbackNextId = direction < 0 ? previousCurrent?.id || "" : "";
     state.shortVideo.current = video;
@@ -4294,15 +4302,15 @@ export function createShortVideoPage(deps) {
 
   async function hydratePromotedShortVideo(video) {
     try {
-      const data = await fetchShortVideoDetail(video.id);
+      const data = await contextualShortVideoDetail(video.id);
       if (state.shortVideo.current?.id !== video.id) return;
       state.shortVideo.current = data.video || video;
       cacheAuthorPanelVideo(state.shortVideo.current);
       const collectionNavigation = collectionsController.collectionNavigation(video.id);
       state.shortVideo.prevId = collectionNavigation?.prevId || data.prevId || "";
       state.shortVideo.nextId = collectionNavigation?.nextId || data.nextId || "";
-      state.shortVideo.prevVideo = collectionNavigation?.prevVideo || cachedShortVideo(state.shortVideo.prevId);
-      state.shortVideo.nextVideo = collectionNavigation?.nextVideo || cachedShortVideo(state.shortVideo.nextId);
+      state.shortVideo.prevVideo = collectionNavigation?.prevVideo || data.prevVideo || cachedShortVideo(state.shortVideo.prevId);
+      state.shortVideo.nextVideo = collectionNavigation?.nextVideo || data.nextVideo || cachedShortVideo(state.shortVideo.nextId);
       await loadAdjacentVideos(video.id);
       if (state.shortVideo.current?.id === video.id) {
         refreshAdjacentPanelsDom();
@@ -4860,6 +4868,7 @@ export function createShortVideoPage(deps) {
     shortVideoOpeningId = "";
     shortVideoOpenError = "";
     flushActiveShortVideoWatch();
+    if (collectionsController.returnFromCollectionVideo()) return;
     if (authorPanelReturnFeed) {
       applyShortVideoFeedSnapshot(authorPanelReturnFeed);
       authorPanelReturnFeed = null;
@@ -4875,15 +4884,6 @@ export function createShortVideoPage(deps) {
     setBodyClass();
     renderStats();
     renderView();
-    if (state.shortVideo.mode === "collection" && state.shortVideo.collectionId) {
-      pushRoute({
-        view: "shortVideos",
-        shortVideoId: "",
-        shortVideoMode: "collection",
-        shortVideoCollectionId: state.shortVideo.collectionId
-      });
-      return;
-    }
     if (!state.shortVideo.data && !state.shortVideo.loading) {
       loadVideos({ replaceRoute: true }).catch(showError);
       return;
