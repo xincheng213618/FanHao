@@ -4,7 +4,8 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const forbiddenTrackedPath = /^(?:artifacts|tmp|logs|tmp-apk-labels)(?:\/|$)/i;
+const forbiddenTrackedPath = /^(?:artifacts|tmp|logs|tmp-apk-labels|outputs)(?:\/|$)/i;
+const runtimeStatePath = /^data\/short-video-list-(?:cache-generation|watch-overlays)\.json$/i;
 const rootServedDump = /^[^/]+-served\.[^/]+$/i;
 const sourceExtensions = new Set([
   ".bat",
@@ -70,7 +71,7 @@ const trackedFiles = execFileSync("git", ["ls-files", "-z"], {
   .map((filePath) => filePath.replaceAll("\\", "/"));
 
 const forbiddenFiles = trackedFiles.filter((filePath) => (
-  forbiddenTrackedPath.test(filePath) || rootServedDump.test(filePath)
+  forbiddenTrackedPath.test(filePath) || runtimeStatePath.test(filePath) || rootServedDump.test(filePath)
 ));
 const nulSourceFiles = [];
 

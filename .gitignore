@@ -52,6 +52,8 @@ data/novel-credentials/
 data/debug-screenshots/
 data/android-update/
 data/user-state.json
+data/short-video-list-cache-generation.json
+data/short-video-list-watch-overlays.json
 data/remote-image-cache/
 data/actor-profile-batch-*.jsonl
 data/*.sqlite
@@ -90,6 +92,5 @@ nul
 /search-*.png
 /fanhao_mobile_audit_*/
 
-# Local product-design captures and downloaded source bundles.
-/outputs/product-design-audit/
-/outputs/material-symbols-source/
+# Local screenshots, design audits, and other generated evidence.
+/outputs/
