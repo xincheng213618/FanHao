@@ -3,6 +3,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 
+export const ARCHIVE_IMAGE_INDEXER_VERSION = 2;
+
 export function createArchiveImageService(options) {
   const listCache = new Map();
   const listInflight = new Map();
@@ -80,7 +82,8 @@ export function createArchiveImageService(options) {
       row && signature &&
       path.resolve(row.archive_path || "") === signature.archivePath &&
       Number(row.archive_size || 0) === signature.archiveSize &&
-      Number(row.archive_mtime_ms || 0) === signature.archiveMtimeMs
+      Number(row.archive_mtime_ms || 0) === signature.archiveMtimeMs &&
+      Number(row.indexer_version || 0) === ARCHIVE_IMAGE_INDEXER_VERSION
     );
   }
 
@@ -111,17 +114,18 @@ export function createArchiveImageService(options) {
         .prepare(`
           INSERT INTO photo_set_image_indexes (
             archive_path, archive_size, archive_mtime_ms, image_count,
-            images_json, indexed_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            images_json, indexer_version, indexed_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(archive_path) DO UPDATE SET
             archive_size = excluded.archive_size,
             archive_mtime_ms = excluded.archive_mtime_ms,
             image_count = excluded.image_count,
             images_json = excluded.images_json,
+            indexer_version = excluded.indexer_version,
             indexed_at = excluded.indexed_at,
             updated_at = excluded.updated_at
         `)
-        .run(signature.archivePath, signature.archiveSize, signature.archiveMtimeMs, imageCount, JSON.stringify(images), now, now);
+        .run(signature.archivePath, signature.archiveSize, signature.archiveMtimeMs, imageCount, JSON.stringify(images), ARCHIVE_IMAGE_INDEXER_VERSION, now, now);
     } catch (error) {
       options.warn("[archive-image-index-cache]", error.message || error);
     }

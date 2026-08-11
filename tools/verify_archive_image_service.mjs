@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createArchiveImageService } from "../src/platform/server/archive-image-service.js";
+import { ARCHIVE_IMAGE_INDEXER_VERSION, createArchiveImageService } from "../src/platform/server/archive-image-service.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = path.join(root, "tools", "fixtures", "archive_image_helper_fixture.mjs");
@@ -19,13 +19,32 @@ try {
     touch() {}
   };
   let archiveStatCount = 0;
+  let persistedIndex = {
+    archive_path: archivePath,
+    archive_size: fs.statSync(archivePath).size,
+    archive_mtime_ms: Math.floor(fs.statSync(archivePath).mtimeMs),
+    image_count: 1,
+    images_json: JSON.stringify([{ path: "stale.jpg" }]),
+    indexer_version: ARCHIVE_IMAGE_INDEXER_VERSION - 1
+  };
   const service = createArchiveImageService({
     archiveImageExts: new Set([".jpg"]),
     coverBoxSize: 480,
     coverMaxBytes: 1024 * 1024,
     ffmpegPath: process.execPath,
     getImageGalleryDb: () => ({
-      prepare: () => ({ get: () => null, run: () => ({ changes: 1 }) })
+      prepare: (sql) => ({
+        get: () => sql.startsWith("SELECT") ? persistedIndex : null,
+        run: (...args) => {
+          if (sql.includes("INSERT INTO photo_set_image_indexes")) {
+            persistedIndex = {
+              archive_path: args[0], archive_size: args[1], archive_mtime_ms: args[2], image_count: args[3],
+              images_json: args[4], indexer_version: args[5]
+            };
+          }
+          return { changes: 1 };
+        }
+      })
     }),
     helperPath: fixture,
     imageReaderCacheService,
@@ -62,6 +81,7 @@ try {
   assert(eventLoopReleased, "archive helper execution must not block the Node event loop");
   assert.deepEqual(left, right);
   assert.equal(left.images[0]?.path, "cover.jpg");
+  assert.equal(persistedIndex.indexer_version, ARCHIVE_IMAGE_INDEXER_VERSION, "an older archive indexer version must re-list and replace its persisted row");
   assert.equal(countInvocations(`${archivePath}.list.count`), 1, "concurrent archive lists must share one subprocess");
 
   await service.archiveImagesPayload(archivePath);

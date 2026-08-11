@@ -21,6 +21,7 @@ const TABLE_COLUMNS = {
     ["archive_mtime_ms", "INTEGER"],
     ["image_count", "INTEGER"],
     ["images_json", "TEXT"],
+    ["indexer_version", "INTEGER NOT NULL DEFAULT 1"],
     ["indexed_at", "TEXT"],
     ["updated_at", "TEXT"]
   ],
@@ -155,6 +156,7 @@ function ensureSchema(db) {
       archive_mtime_ms INTEGER,
       image_count INTEGER,
       images_json TEXT NOT NULL,
+      indexer_version INTEGER NOT NULL DEFAULT 1,
       indexed_at TEXT,
       updated_at TEXT NOT NULL
     );

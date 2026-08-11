@@ -16,6 +16,7 @@ import { createAdminCoreMutationService } from "./src/modules/fanhao/server/admi
 import { createAdminMaintenanceTaskService } from "./src/modules/fanhao/server/admin/admin-maintenance-task-service.js";
 import { createAdminPersonService } from "./src/modules/fanhao/server/admin/admin-person-service.js";
 import { createCoreDbService } from "./src/modules/fanhao/server/library/core-db-service.js";
+import { ACTOR_MOVIE_CACHE_TABLES, ACTOR_PROFILE_CACHE_TABLES, cacheDependencyTables, compositeTableStamp } from "./src/modules/fanhao/server/library/cache-contracts.js";
 import { createCoreLibraryService } from "./src/modules/fanhao/server/library/core-library-service.js";
 import { createCoreLibrarySyncService } from "./src/modules/fanhao/server/library/core-library-sync-service.js";
 import { createFanhaoDependencies } from "./src/modules/fanhao/server/composition.js";
@@ -545,6 +546,7 @@ const personMergeService = createPersonMergeService({
 });
 const peopleScopeService = createPeopleScopeService({
   getLibrary: () => library,
+  getRevision: () => personMergeStamp(),
   mergedPersonRecord,
   pathWithinRoot: (...args) => pathWithinRoot(...args),
   sourcePathToAbsolute: (...args) => sourcePathToAbsolute(...args),
@@ -1467,8 +1469,9 @@ function publicWorkCover(row) {
 }
 
 function invalidateTableStamp(...tables) {
-  coreDbService.invalidateTableStamp(...tables);
-  if (!tables.length || tables.some((table) => ["actor_profiles", "actor_movies", "work_info", "work_covers", "images"].includes(table))) {
+  const dependencies = cacheDependencyTables(...tables);
+  coreDbService.invalidateTableStamp(...dependencies);
+  if (!tables.length || dependencies.some((table) => ["people", "work_people", "works", "images", "person_external_refs", "person_aliases", "work_external_refs"].includes(table))) {
     libraryPeopleCacheVersion += 1;
   }
 }
@@ -1478,7 +1481,7 @@ function tableDataStamp(table) {
 }
 
 function actorProfileStamp() {
-  return tableDataStamp("actor_profiles");
+  return compositeTableStamp(tableDataStamp, ACTOR_PROFILE_CACHE_TABLES);
 }
 
 function workInfoStamp() {
@@ -1490,7 +1493,7 @@ function workCoverStamp() {
 }
 
 function actorMovieStamp() {
-  return tableDataStamp("actor_movies");
+  return compositeTableStamp(tableDataStamp, ACTOR_MOVIE_CACHE_TABLES);
 }
 
 function rankingStamp() {

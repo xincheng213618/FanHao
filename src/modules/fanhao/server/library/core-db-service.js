@@ -19,6 +19,9 @@ function ensureCoreTables(db) {
     CREATE INDEX IF NOT EXISTS idx_works_status_code_search ON works(status, code_search, id);
     CREATE INDEX IF NOT EXISTS idx_work_people_updated_at ON work_people(updated_at);
     CREATE INDEX IF NOT EXISTS idx_people_updated_at ON people(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_person_external_refs_updated_at ON person_external_refs(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_work_external_refs_updated_at ON work_external_refs(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_person_aliases_updated_at ON person_aliases(updated_at);
     CREATE INDEX IF NOT EXISTS idx_collection_items_updated_at ON collection_items(updated_at);
     CREATE TABLE IF NOT EXISTS local_files (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,6 +77,9 @@ export function createCoreDbService({
         ensureColumn(db, "works", "is_streamable", "INTEGER");
         ensureColumn(db, "works", "has_subtitles", "INTEGER");
         ensureColumn(db, "works", "javdb_tags_json", "TEXT");
+        ensureColumn(db, "person_external_refs", "updated_at", "TEXT NOT NULL DEFAULT ''");
+        ensureColumn(db, "work_external_refs", "updated_at", "TEXT NOT NULL DEFAULT ''");
+        ensureColumn(db, "person_aliases", "updated_at", "TEXT NOT NULL DEFAULT ''");
         ensureCoreTables(db);
       } catch (error) {
         warn("[core-db]", error.message);

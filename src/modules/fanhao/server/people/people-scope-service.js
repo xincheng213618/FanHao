@@ -1,11 +1,13 @@
 export function createPeopleScopeService({
   getLibrary,
+  getRevision = () => "",
   mergedPersonRecord,
   pathWithinRoot,
   sourcePathToAbsolute,
   westernRoots
 }) {
   let peopleScopeIndexCache = null;
+  let revision = 0;
 
   function normalize(value) {
     return String(value || "").trim().toLowerCase() === "western" ? "western" : "main";
@@ -56,7 +58,9 @@ export function createPeopleScopeService({
       library.totals?.videos || 0,
       library.totals?.images || 0,
       library.totals?.infoFiles || 0,
-      westernRoots.join("|")
+      westernRoots.join("|"),
+      getRevision(),
+      revision
     ].join("::");
   }
 
@@ -128,6 +132,7 @@ export function createPeopleScopeService({
 
   function invalidate() {
     peopleScopeIndexCache = null;
+    revision += 1;
   }
 
   return {

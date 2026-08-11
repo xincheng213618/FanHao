@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity, imageLibraryIndexMatches } from "./image-library-index-contract.js";
 
 export function createImageLibraryIndexService({
   archiveExts,
@@ -17,6 +18,7 @@ export function createImageLibraryIndexService({
   safeStat
 }) {
   let cache = null;
+  const cacheIdentity = imageLibraryCacheIdentity({ galleryMediaSources, photoSetRoots });
 
   function isArchiveFile(fileName) {
     return archiveExts.has(normalizeExt(fileName));
@@ -340,7 +342,9 @@ export function createImageLibraryIndexService({
     const photo = scanPhotoSetLibrary();
     const media = scanGalleryMediaLibrary();
     return {
-      schemaVersion: 2,
+      schemaVersion: CURRENT_INDEX_SCHEMA,
+      parserVersion: PARSER_VERSION,
+      cacheIdentity,
       scannedAt: new Date().toISOString(),
       roots: photo.roots,
       photoSets: photo.photoSets,
@@ -352,7 +356,7 @@ export function createImageLibraryIndexService({
   function loadCache() {
     if (cache) return cache;
     const cached = readJsonFile(imageLibraryIndexPath, null);
-    if (cached && Array.isArray(cached.photoSets)) {
+    if (imageLibraryIndexMatches(cached, cacheIdentity)) {
       cache = cached;
       return cache;
     }
@@ -367,19 +371,7 @@ export function createImageLibraryIndexService({
   function getIndex(options = {}) {
     if (!options.refresh) {
       const cached = loadCache();
-      if (cached && Array.isArray(cached.mediaItems)) return cached;
-      if (cached) {
-        const media = scanGalleryMediaLibrary();
-        cache = {
-          ...cached,
-          schemaVersion: 2,
-          scannedAt: new Date().toISOString(),
-          mediaRoots: media.mediaRoots,
-          mediaItems: media.mediaItems
-        };
-        saveCache(cache);
-        return cache;
-      }
+      if (cached) return cached;
     }
     cache = scanImageLibrary();
     saveCache(cache);

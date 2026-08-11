@@ -2,6 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { galleryMediaSources, parsePhotoSetRoots } from "../src/platform/server/root-config.js";
+import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity, imageLibraryIndexMatches } from "../src/modules/content-index/server/image-library-index-contract.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,25 +40,6 @@ function readJsonFile(filePath, fallback = null) {
   } catch {
     return fallback;
   }
-}
-
-function parseRootList(rawValue, fallback) {
-  const raw = rawValue || fallback;
-  const seen = new Set();
-  return raw
-    .split(/[;,|]/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .map((item) => {
-      const parsed = path.parse(item);
-      return parsed.root && parsed.root.toLowerCase() === item.toLowerCase() ? parsed.root : path.resolve(item);
-    })
-    .filter((item) => {
-      const key = item.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
 }
 
 function parseArgs(argv) {
@@ -404,12 +387,11 @@ function writeIndex(index) {
 }
 
 function buildIndex(options) {
-  const existing = readJsonFile(IMAGE_LIBRARY_INDEX_PATH, {});
-  const photoRoots = parseRootList(process.env.FANHAO_PHOTO_SET_ROOTS, "T:\\;T:\\[套图1]");
-  const mediaSources = [
-    { kind: "movie", label: "电影", roots: parseRootList(process.env.FANHAO_MOVIE_ROOTS, "Z:\\") },
-    { kind: "tv", label: "电视剧", roots: parseRootList(process.env.FANHAO_TV_ROOTS, "Y:\\") }
-  ];
+  const photoRoots = parsePhotoSetRoots(process.env);
+  const mediaSources = galleryMediaSources(process.env);
+  const cacheIdentity = imageLibraryCacheIdentity({ galleryMediaSources: mediaSources, photoSetRoots });
+  const cached = readJsonFile(IMAGE_LIBRARY_INDEX_PATH, null);
+  const existing = imageLibraryIndexMatches(cached, cacheIdentity) ? cached : {};
 
   const scanPhoto = options.scope === "all" || options.scope === "photo";
   const scanMedia = options.scope === "all" || options.scope === "media" || ["movie", "tv"].includes(options.scope);
@@ -442,7 +424,9 @@ function buildIndex(options) {
   }
 
   return {
-    schemaVersion: 2,
+    schemaVersion: CURRENT_INDEX_SCHEMA,
+    parserVersion: PARSER_VERSION,
+    cacheIdentity,
     scannedAt: new Date().toISOString(),
     roots: photo.roots,
     photoSets: photo.photoSets,
