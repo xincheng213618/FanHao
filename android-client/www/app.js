@@ -73,7 +73,7 @@ let searchSurfaceExpanded = initialViewState.view === "search" || (initialViewSt
 let searchPrepareTimer = 0;
 const HISTORY_MARKER = "fanhao-android";
 const LIBRARY_CACHE_PATH = "/api/library";
-const IMAGE_LIBRARY_SUMMARY_CACHE_PATH = "/api/image-library/summary";
+const IMAGE_LIBRARY_SUMMARY_CACHE_PATH = "/api/image-library/summary?cache=0";
 const NOVEL_SUMMARY_CACHE_PATH = "/api/novels/summary";
 const MUSIC_SUMMARY_CACHE_PATH = "/api/music/summary";
 const SHORT_VIDEO_SUMMARY_CACHE_PATH = "/api/short-videos/summary";
