@@ -106,7 +106,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
     try {
       sendJson(res, 200, shortVideoStore.listCollections());
     } catch (error) {
-      sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频清单读取失败") });
+      sendShortVideoCollectionError(res, sendJson, error, "短视频清单读取失败");
     }
     return true;
   }
@@ -119,7 +119,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
       onMutation?.();
       sendJson(res, 201, result);
     } catch (error) {
-      sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频清单创建失败") });
+      sendShortVideoCollectionError(res, sendJson, error, "短视频清单创建失败");
     }
     return true;
   }
@@ -133,7 +133,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
       onMutation?.();
       sendJson(res, 200, result);
     } catch (error) {
-      sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频清单重命名失败") });
+      sendShortVideoCollectionError(res, sendJson, error, "短视频清单重命名失败");
     }
     return true;
   }
@@ -145,7 +145,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
       onMutation?.();
       sendJson(res, 200, result);
     } catch (error) {
-      sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频清单删除失败") });
+      sendShortVideoCollectionError(res, sendJson, error, "短视频清单删除失败");
     }
     return true;
   }
@@ -158,12 +158,24 @@ export async function routeShortVideoApi(req, res, url, deps) {
         url
       ));
     } catch (error) {
-      sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频清单内容读取失败") });
+      sendShortVideoCollectionError(res, sendJson, error, "短视频清单内容读取失败");
     }
     return true;
   }
 
   const collectionVideoMatch = /^\/api\/short-videos\/collections\/([^/]+)\/videos\/([^/]+)$/.exec(url.pathname);
+  if (collectionVideoMatch && req.method === "GET") {
+    try {
+      sendJson(res, 200, shortVideoStore.collectionVideoDetail(
+        decodeShortVideoRouteId(collectionVideoMatch[1]),
+        decodeShortVideoRouteId(collectionVideoMatch[2])
+      ));
+    } catch (error) {
+      sendShortVideoCollectionError(res, sendJson, error, "短视频清单详情读取失败");
+    }
+    return true;
+  }
+
   if (collectionVideoMatch && (req.method === "PUT" || req.method === "DELETE")) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
@@ -175,7 +187,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
       onMutation?.();
       sendJson(res, 200, result);
     } catch (error) {
-      sendJson(res, shortVideoErrorStatus(error), { error: shortVideoErrorMessage(error, "短视频清单内容保存失败") });
+      sendShortVideoCollectionError(res, sendJson, error, "短视频清单内容保存失败");
     }
     return true;
   }
@@ -363,6 +375,14 @@ function shortVideoErrorMessage(error, fallback) {
 function isShortVideoDatabaseError(error) {
   const message = String(error?.message || error || "");
   return /database disk image|malformed|sqlite/i.test(message);
+}
+
+function sendShortVideoCollectionError(res, sendJson, error, fallback) {
+  const status = shortVideoErrorStatus(error);
+  sendJson(res, status, {
+    error: shortVideoErrorMessage(error, fallback),
+    ...(status === 503 ? { retryable: true } : {})
+  });
 }
 
 function decodeShortVideoRouteId(value) {

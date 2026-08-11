@@ -31,6 +31,7 @@ import {
 } from "./public-video-mapper.js";
 import {
   ensureShortVideoColumns,
+  ensureShortVideoCollectionSchema,
   ensureShortVideoSearchIndex,
   recreateShortVideoCatalogView,
   refreshShortVideoAuthorFollowingFlags,
@@ -56,7 +57,7 @@ const DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT = 50000;
 const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
 const DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION = "4";
 const DOWNLOAD_MANAGER_SOURCE_STATE_KEY_META = "download_manager_source_state_key_v2_account_status";
-const SHORT_VIDEO_SCHEMA_VERSION = "20260810-author-account-status-10";
+const SHORT_VIDEO_SCHEMA_VERSION = "20260812-short-video-collections-11";
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LIST_VIDEO_COLUMNS = [
   "id",
@@ -209,7 +210,9 @@ export function createShortVideoStore(options = {}) {
   const collections = createShortVideoCollectionsRepository({
     database: databaseOrOpen,
     publicVideo,
-    resolveVideo: videoCatalogRowByAnyId
+    resolveVideo: videoCatalogRowByAnyId,
+    runBusyRetry: runSqliteBusyRetry,
+    testHooks: options.collectionTestHooks
   });
 
   function database() {
@@ -219,6 +222,7 @@ export function createShortVideoStore(options = {}) {
       try {
         opened.exec(`
           PRAGMA busy_timeout = 10000;
+          PRAGMA foreign_keys = ON;
           PRAGMA mmap_size = 268435456;
           PRAGMA cache_size = -65536;
           PRAGMA temp_store = MEMORY;
@@ -274,6 +278,8 @@ export function createShortVideoStore(options = {}) {
             ON short_video_collections(local_user_id, sort_order, created_at, id);
           CREATE INDEX IF NOT EXISTS idx_short_video_collection_items_page
             ON short_video_collection_items(collection_id, added_at DESC, video_id DESC);
+          CREATE INDEX IF NOT EXISTS idx_short_video_collection_items_video
+            ON short_video_collection_items(video_id);
           CREATE TABLE IF NOT EXISTS short_video_playback_issues (
             video_id TEXT PRIMARY KEY,
             reason TEXT NOT NULL DEFAULT '',
@@ -3340,6 +3346,7 @@ function summary() {
     backfillMissingCovers,
     backfillMissingCoversAsync,
     close,
+    collectionVideoDetail: collections.collectionVideoDetail,
     createCollection: collections.createCollection,
     coverBackfillStatus,
     coverDbPath,
@@ -3559,15 +3566,19 @@ function ensureSchema(db, coverCacheDir = "") {
       id TEXT PRIMARY KEY,
       local_user_id TEXT NOT NULL,
       name TEXT NOT NULL,
+      normalized_name TEXT NOT NULL,
       sort_order INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT '',
-      updated_at TEXT NOT NULL DEFAULT ''
+      updated_at TEXT NOT NULL DEFAULT '',
+      UNIQUE(local_user_id, normalized_name)
     );
     CREATE TABLE IF NOT EXISTS short_video_collection_items (
       collection_id TEXT NOT NULL,
       video_id TEXT NOT NULL,
       added_at TEXT NOT NULL DEFAULT '',
-      PRIMARY KEY(collection_id, video_id)
+      PRIMARY KEY(collection_id, video_id),
+      FOREIGN KEY(collection_id) REFERENCES short_video_collections(id) ON UPDATE CASCADE ON DELETE CASCADE,
+      FOREIGN KEY(video_id) REFERENCES short_videos(id) ON UPDATE CASCADE ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_short_video_collection_items_video ON short_video_collection_items(video_id);
     CREATE TABLE IF NOT EXISTS short_video_follows (
@@ -3631,6 +3642,7 @@ function ensureSchema(db, coverCacheDir = "") {
       PRIMARY KEY(batch_id, video_id)
     );
   `);
+  ensureShortVideoCollectionSchema(db);
   ensureShortVideoColumns(db);
   ensureShortVideoSearchIndex(db);
   recreateShortVideoCatalogView(db);
@@ -4843,7 +4855,10 @@ function runSqliteBusyRetry(fn, attempts = 8) {
 }
 
 function isSqliteBusy(error) {
-  return error?.errcode === 5 || /database is locked|SQLITE_BUSY/i.test(String(error?.message || error));
+  return Number(error?.errcode) === 5
+    || Number(error?.errno) === 5
+    || String(error?.code || "").toUpperCase() === "SQLITE_BUSY"
+    || /database is locked|database table is locked|SQLITE_BUSY/i.test(String(error?.message || error));
 }
 
 function sleepSync(ms) {

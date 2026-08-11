@@ -86,6 +86,135 @@ export function ensureShortVideoColumns(db) {
   ensureShortVideoSounds(db);
 }
 
+export function ensureShortVideoCollectionSchema(db, testHooks = {}) {
+  const collectionColumns = new Set(db.prepare("PRAGMA table_info(short_video_collections)").all().map((row) => row.name));
+  const foreignKeys = db.prepare("PRAGMA foreign_key_list(short_video_collection_items)").all();
+  const cascadeTargets = new Set(foreignKeys
+    .filter((row) => String(row.on_delete || "").toUpperCase() === "CASCADE")
+    .map((row) => `${row.from}:${row.table}:${row.to}`));
+  const hasUniqueName = db.prepare("PRAGMA index_list(short_video_collections)").all().some((index) => {
+    if (!Number(index.unique || 0)) return false;
+    const columns = db.prepare(`PRAGMA index_info(${quotedSqlIdentifier(index.name)})`).all().map((row) => row.name);
+    return columns.length === 2 && columns[0] === "local_user_id" && columns[1] === "normalized_name";
+  });
+  if (
+    collectionColumns.has("normalized_name")
+    && hasUniqueName
+    && cascadeTargets.has("collection_id:short_video_collections:id")
+    && cascadeTargets.has("video_id:short_videos:id")
+  ) return;
+
+  const collections = db.prepare(`
+    SELECT id, local_user_id, name, sort_order, created_at, updated_at
+    FROM short_video_collections
+    ORDER BY local_user_id, sort_order, created_at, id
+  `).all();
+  const migrated = normalizedCollectionRows(collections);
+  const originalForeignKeys = Number(db.prepare("PRAGMA foreign_keys").get()?.foreign_keys || 0) === 1;
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    db.exec(`
+      DROP TABLE IF EXISTS short_video_collection_items_next;
+      DROP TABLE IF EXISTS short_video_collections_next;
+      CREATE TABLE short_video_collections_next (
+        id TEXT PRIMARY KEY,
+        local_user_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        normalized_name TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT '',
+        UNIQUE(local_user_id, normalized_name)
+      );
+      CREATE TABLE short_video_collection_items_next (
+        collection_id TEXT NOT NULL,
+        video_id TEXT NOT NULL,
+        added_at TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY(collection_id, video_id),
+        FOREIGN KEY(collection_id) REFERENCES short_video_collections_next(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        FOREIGN KEY(video_id) REFERENCES short_videos(id) ON UPDATE CASCADE ON DELETE CASCADE
+      );
+    `);
+    testHooks.afterCreateNextTables?.({ db });
+    const insertCollection = db.prepare(`
+      INSERT INTO short_video_collections_next (
+        id, local_user_id, name, normalized_name, sort_order, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const row of migrated) {
+      insertCollection.run(
+        row.id,
+        row.local_user_id,
+        row.name,
+        row.normalized_name,
+        row.sort_order,
+        row.created_at,
+        row.updated_at
+      );
+    }
+    db.exec(`
+      INSERT OR IGNORE INTO short_video_collection_items_next (collection_id, video_id, added_at)
+      SELECT item.collection_id, item.video_id, item.added_at
+      FROM short_video_collection_items item
+      JOIN short_video_collections_next collection ON collection.id = item.collection_id
+      JOIN short_videos video ON video.id = item.video_id;
+      DROP TABLE short_video_collection_items;
+      DROP TABLE short_video_collections;
+      ALTER TABLE short_video_collections_next RENAME TO short_video_collections;
+      ALTER TABLE short_video_collection_items_next RENAME TO short_video_collection_items;
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
+  } finally {
+    db.exec(`PRAGMA foreign_keys = ${originalForeignKeys ? "ON" : "OFF"}`);
+  }
+  const violations = db.prepare("PRAGMA foreign_key_check(short_video_collection_items)").all();
+  if (violations.length) throw new Error("short-video collection foreign-key migration failed");
+}
+
+function normalizedCollectionRows(rows = []) {
+  const used = new Set();
+  return rows.map((row, index) => {
+    const localUserId = String(row.local_user_id || LOCAL_SHORT_VIDEO_USER_ID);
+    const original = normalizedCollectionDisplayName(row.name) || `清单 ${index + 1}`;
+    let name = truncateUnicode(original, 40);
+    let normalizedName = normalizedCollectionNameKey(name);
+    let suffix = 2;
+    while (used.has(`${localUserId}\u0000${normalizedName}`)) {
+      const marker = ` (${suffix})`;
+      name = `${truncateUnicode(original, Math.max(1, 40 - Array.from(marker).length))}${marker}`;
+      normalizedName = normalizedCollectionNameKey(name);
+      suffix += 1;
+    }
+    used.add(`${localUserId}\u0000${normalizedName}`);
+    return {
+      ...row,
+      local_user_id: localUserId,
+      name,
+      normalized_name: normalizedName
+    };
+  });
+}
+
+function normalizedCollectionDisplayName(value) {
+  return String(value ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
+}
+
+function normalizedCollectionNameKey(value) {
+  return normalizedCollectionDisplayName(value).toLowerCase();
+}
+
+function truncateUnicode(value, maxLength) {
+  return Array.from(String(value || "")).slice(0, Math.max(0, Number(maxLength || 0))).join("");
+}
+
+function quotedSqlIdentifier(value) {
+  return `'${String(value || "").replaceAll("'", "''")}'`;
+}
+
 function ensureShortVideoTopics(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS short_video_topics (
