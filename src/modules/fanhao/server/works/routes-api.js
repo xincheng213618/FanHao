@@ -16,6 +16,22 @@ function publicWorkMoveJobPayload(payload) {
   };
 }
 
+function androidWorkMoveBody(req, body) {
+  const client = String(req?.headers?.["x-fanhao-client"] || "").trim().toLowerCase();
+  if (client !== "android") return body;
+  const forbidden = ["targetDirectory", "targetPath", "rootPath", "root", "createPerson"].find((key) => Object.hasOwn(body || {}, key));
+  if (forbidden) {
+    const error = new Error("Android 迁移只允许选择服务器确认的人物");
+    error.statusCode = 400;
+    error.code = "WORK_MOVE_ANDROID_TARGET_FORBIDDEN";
+    throw error;
+  }
+  return {
+    personId: String(body?.personId || "").trim(),
+    idempotencyKey: String(body?.idempotencyKey || "").trim().slice(0, 180)
+  };
+}
+
 export async function routeWorksApi(req, res, url, deps) {
   const {
     notFound,
@@ -174,7 +190,7 @@ export async function routeWorksApi(req, res, url, deps) {
   if (workMoveToPersonMatch && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      const body = await readJsonBody(req);
+      const body = androidWorkMoveBody(req, await readJsonBody(req));
       sendJson(res, 202, publicWorkMoveJobPayload(workMutationService.moveToPerson(decodeURIComponent(workMoveToPersonMatch[1]), body)));
     } catch (error) {
       sendJson(res, error.statusCode || 500, safeWorkMoveRouteError(error, "迁移作品失败"));

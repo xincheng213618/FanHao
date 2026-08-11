@@ -904,6 +904,17 @@ button.work-detail-author {
   gap: 10px;
 }
 
+.work-move-dialog-close {
+  align-self: end;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-weight: 800;
+}
+
 .work-move-target-help,
 .work-move-status-detail {
   margin: 0;

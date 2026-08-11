@@ -2,7 +2,6 @@ import { fetchJson } from "../../../../js/api.js?v=20260706-mobile-web-sync-01";
 import { clearCachedJsonByPrefix } from "../../../../js/cache.js?v=20260812-android-integrated-01";
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "cleanup_pending", "rollback_pending"]);
-const TERMINAL_STATUSES = new Set(["blocked", "failed", "rolled_back", "completed"]);
 
 export function workMoveStatusLabel(status) {
   return ({
@@ -22,7 +21,7 @@ export function workMoveNeedsCleanupRetry(job) {
 }
 
 export function workMoveCanManualRetry(job) {
-  return job?.status !== "blocked" && (job?.status === "failed" || job?.status === "rolled_back");
+  return job?.status !== "blocked" && (job?.status === "failed" || job?.status === "rolled_back" || workMoveNeedsCleanupRetry(job));
 }
 
 export function workMoveRequestStorageKey(baseUrl, workId) {
@@ -47,18 +46,42 @@ export function createAndroidWorkMoveController({
   let generation = 0;
   let pollController = null;
   const buttons = new Set();
+  const overlayClosers = new Set();
+
+  function trackOverlay(close) {
+    overlayClosers.add(close);
+    return () => overlayClosers.delete(close);
+  }
 
   function baseUrl() {
     return String(getActiveUrl?.() || "").replace(/\/+$/u, "");
   }
 
-  function storageKey(workId) {
-    return workMoveRequestStorageKey(baseUrl(), workId);
+  function captureScope(work) {
+    return {
+      baseUrl: attached?.baseUrl || baseUrl(),
+      generation,
+      workId: String(work?.id || "").trim()
+    };
   }
 
-  function readStored(workId) {
+  function isCurrent(scope) {
+    return Boolean(scope?.workId)
+      && scope.generation === generation
+      && attached?.baseUrl === scope.baseUrl
+      && String(attached?.work?.id || "") === scope.workId
+      && attached?.controller?.signal?.aborted !== true
+      && attached?.isActive?.() !== false
+      && baseUrl() === scope.baseUrl;
+  }
+
+  function storageKey(scope) {
+    return workMoveRequestStorageKey(scope?.baseUrl || "", scope?.workId || "");
+  }
+
+  function readStored(scope) {
     try {
-      const raw = window.localStorage?.getItem(storageKey(workId));
+      const raw = window.localStorage?.getItem(storageKey(scope));
       const parsed = raw ? JSON.parse(raw) : null;
       return parsed?.jobId || parsed?.idempotencyKey ? parsed : null;
     } catch {
@@ -66,38 +89,38 @@ export function createAndroidWorkMoveController({
     }
   }
 
-  function writeStored(workId, value) {
+  function writeStored(scope, value) {
     try {
-      window.localStorage?.setItem(storageKey(workId), JSON.stringify(value));
+      window.localStorage?.setItem(storageKey(scope), JSON.stringify(value));
     } catch {}
   }
 
-  function clearStored(workId) {
+  function clearStored(scope) {
     try {
-      window.localStorage?.removeItem(storageKey(workId));
+      window.localStorage?.removeItem(storageKey(scope));
     } catch {}
   }
 
-  function cleanupRetryKey(jobId) {
-    return `${storageKey(attached?.work?.id || "")}.cleanup.${encodeURIComponent(String(jobId || ""))}`;
+  function cleanupRetryKey(scope, jobId) {
+    return `${storageKey(scope)}.cleanup.${encodeURIComponent(String(jobId || ""))}`;
   }
 
-  function cleanupAlreadyRetried(jobId) {
+  function cleanupAlreadyRetried(scope, jobId) {
     try {
-      return window.localStorage?.getItem(cleanupRetryKey(jobId)) === "1";
+      return window.localStorage?.getItem(cleanupRetryKey(scope, jobId)) === "1";
     } catch {
       return false;
     }
   }
 
-  function markCleanupRetried(jobId) {
+  function markCleanupRetried(scope, jobId) {
     try {
-      window.localStorage?.setItem(cleanupRetryKey(jobId), "1");
+      window.localStorage?.setItem(cleanupRetryKey(scope, jobId), "1");
     } catch {}
   }
 
-  function isCurrent(token) {
-    return token === generation && attached?.baseUrl === baseUrl();
+  function jobMatchesScope(job, scope) {
+    return !job || String(job.workId || "") === String(scope?.workId || "");
   }
 
   function createActionButton(work) {
@@ -146,15 +169,17 @@ export function createAndroidWorkMoveController({
     const controller = new AbortController();
     const unlinkActive = linkAbort(isActive.signal, controller);
     attached = { work: normalizedWork, job: null, baseUrl: baseUrl(), controller, isActive, unlinkActive };
+    const scope = { baseUrl: attached.baseUrl, generation: token, workId: String(normalizedWork.id) };
     syncButtons();
     try {
-      const job = await restoreJob(normalizedWork, controller.signal);
-      if (!isCurrent(token) || !isActive()) return;
-      applyJob(job);
-      if (job && ACTIVE_STATUSES.has(job.status)) void pollJob(token, controller.signal);
-      if (job?.status === "completed") await completeJob(token, job);
+      const job = await restoreJob(scope, controller.signal);
+      if (!isCurrent(scope) || !isActive()) return;
+      applyJob(scope, job);
+      if (job && ACTIVE_STATUSES.has(job.status)) void pollJob(scope, controller.signal);
+      if (job?.status === "completed") await completeJob(scope, job);
     } catch (error) {
-      if (!isAbort(error) && isCurrent(token) && isActive()) {
+      if (!isAbort(error) && isCurrent(scope) && isActive()) {
+        attached.unresolvedRecovery = true;
         renderMessage(`迁移状态暂时无法读取：${safeError(error, "请稍后重试")}`, "quiet", false);
       }
     }
@@ -162,6 +187,7 @@ export function createAndroidWorkMoveController({
 
   function detach() {
     generation += 1;
+    for (const close of [...overlayClosers]) close();
     pollController?.abort();
     pollController = null;
     attached?.unlinkActive?.();
@@ -170,56 +196,67 @@ export function createAndroidWorkMoveController({
     syncButtons();
   }
 
-  async function restoreJob(work, signal) {
-    const stored = readStored(work.id);
+  function handleBack() {
+    const close = [...overlayClosers].at(-1);
+    if (!close) return false;
+    close();
+    return true;
+  }
+
+  async function restoreJob(scope, signal) {
+    const stored = readStored(scope);
     let job = null;
     if (stored?.jobId) {
       try {
-        job = (await request(baseUrl(), `/api/work-move-jobs/${encodeURIComponent(stored.jobId)}`, { signal })).job || null;
+        job = (await request(scope.baseUrl, `/api/work-move-jobs/${encodeURIComponent(stored.jobId)}`, { signal })).job || null;
+        if (!jobMatchesScope(job, scope)) job = null;
       } catch (error) {
         if (Number(error?.status || 0) !== 404) throw error;
       }
     }
     if (!job) {
       const query = stored?.idempotencyKey ? `?idempotencyKey=${encodeURIComponent(stored.idempotencyKey)}` : "";
-      job = (await request(baseUrl(), `/api/works/${encodeURIComponent(work.id)}/move-job${query}`, { signal })).job || null;
+      job = (await request(scope.baseUrl, `/api/works/${encodeURIComponent(scope.workId)}/move-job${query}`, { signal })).job || null;
+      if (!jobMatchesScope(job, scope)) job = null;
     }
-    if (!job && stored) clearStored(work.id);
+    if (!job && stored && isCurrent(scope)) clearStored(scope);
     return job;
   }
 
-  function applyJob(job) {
-    if (!attached) return;
+  function applyJob(scope, job) {
+    if (!isCurrent(scope) || !jobMatchesScope(job, scope)) return false;
     attached.job = job || null;
     if (job?.id) {
-      const previous = readStored(attached.work.id) || {};
-      writeStored(attached.work.id, { ...previous, jobId: job.id });
+      const previous = readStored(scope) || {};
+      writeStored(scope, { ...previous, jobId: job.id });
     }
     syncButtons();
+    return true;
   }
 
-  async function pollJob(token, signal) {
+  async function pollJob(scope, signal) {
     pollController?.abort();
     const controller = new AbortController();
     pollController = controller;
     const unlink = linkAbort(signal, controller);
     try {
-      while (isCurrent(token) && attached?.isActive?.() && ACTIVE_STATUSES.has(attached?.job?.status)) {
+      while (isCurrent(scope) && attached?.isActive?.() && ACTIVE_STATUSES.has(attached?.job?.status)) {
         let job = attached.job;
-        if (workMoveNeedsCleanupRetry(job) && !cleanupAlreadyRetried(job.id)) {
-          markCleanupRetried(job.id);
-          job = (await request(baseUrl(), `/api/work-move-jobs/${encodeURIComponent(job.id)}/retry`, { method: "POST", signal: controller.signal })).job || job;
-          if (!isCurrent(token)) return;
-          applyJob(job);
+        if (!jobMatchesScope(job, scope)) return;
+        if (workMoveNeedsCleanupRetry(job) && !cleanupAlreadyRetried(scope, job.id)) {
+          job = (await request(scope.baseUrl, `/api/work-move-jobs/${encodeURIComponent(job.id)}/retry`, { method: "POST", signal: controller.signal })).job || job;
+          if (!isCurrent(scope) || !jobMatchesScope(job, scope)) return;
+          markCleanupRetried(scope, job.id);
+          applyJob(scope, job);
         }
         await delay(850, controller.signal);
-        const payload = await request(baseUrl(), `/api/work-move-jobs/${encodeURIComponent(job.id)}`, { signal: controller.signal });
-        if (!isCurrent(token)) return;
-        applyJob(payload.job || null);
-        if (attached?.job?.status === "completed") await completeJob(token, attached.job);
+        const payload = await request(scope.baseUrl, `/api/work-move-jobs/${encodeURIComponent(job.id)}`, { signal: controller.signal });
+        if (!isCurrent(scope) || !jobMatchesScope(payload.job, scope)) return;
+        applyJob(scope, payload.job || null);
+        if (attached?.job?.status === "completed") await completeJob(scope, attached.job);
       }
     } catch (error) {
-      if (!isAbort(error) && isCurrent(token)) {
+      if (!isAbort(error) && isCurrent(scope)) {
         renderMessage(`迁移状态暂时无法刷新：${safeError(error, "请稍后重试")}`, "quiet", false);
       }
     } finally {
@@ -228,23 +265,28 @@ export function createAndroidWorkMoveController({
     }
   }
 
-  async function completeJob(token, job) {
-    if (!isCurrent(token) || !attached || job?.status !== "completed") return;
-    clearStored(attached.work.id);
+  async function completeJob(scope, job) {
+    if (!isCurrent(scope) || !attached || !jobMatchesScope(job, scope) || job?.status !== "completed") return;
+    clearStored(scope);
     try {
-      await clearDetailCache(baseUrl(), `/api/works/${encodeURIComponent(attached.work.id)}`);
+      await clearDetailCache(scope.baseUrl, `/api/works/${encodeURIComponent(scope.workId)}`);
     } catch {}
-    if (!isCurrent(token) || !attached?.isActive?.()) return;
+    if (!isCurrent(scope) || !attached?.isActive?.()) return;
     renderMessage("迁移已完成，正在刷新作品资料。", "quiet", false);
-    renderWorkDetail(attached.work.id);
+    renderWorkDetail(scope.workId);
   }
 
   async function openAction() {
     const work = attached?.work;
     const job = attached?.job;
-    if (!work) return;
+    const scope = captureScope(work);
+    if (!work || !isCurrent(scope)) return;
+    if (!job && attached?.unresolvedRecovery) {
+      renderMessage("迁移状态尚未确认，已保留恢复标识；请先恢复连接后再操作。", "quiet", false);
+      return;
+    }
     if (!job) return openMoveTargetPicker(work);
-    openMoveStatusSheet(work, job);
+    openMoveStatusSheet(work, job, scope);
   }
 
   async function openForWork(work) {
@@ -254,6 +296,9 @@ export function createAndroidWorkMoveController({
 
   async function openMoveTargetPicker(work) {
     if (!work?.id || work.missingLocal) return;
+    const scope = captureScope(work);
+    if (!isCurrent(scope)) return;
+    for (const close of [...overlayClosers]) close();
     const trigger = document.activeElement;
     const overlay = document.createElement("div");
     overlay.className = "fanhao-sort-overlay work-move-target-overlay";
@@ -266,6 +311,11 @@ export function createAndroidWorkMoveController({
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "true");
     panel.setAttribute("aria-labelledby", "workMoveTargetTitle");
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "work-move-dialog-close";
+    closeButton.textContent = "关闭";
+    closeButton.setAttribute("aria-label", "关闭迁移目标选择");
     const title = document.createElement("strong");
     title.id = "workMoveTargetTitle";
     title.textContent = "选择迁移目标人物";
@@ -280,38 +330,49 @@ export function createAndroidWorkMoveController({
     const result = document.createElement("div");
     result.className = "work-move-target-list";
     result.setAttribute("aria-live", "polite");
-    panel.append(title, help, search, result);
+    panel.append(closeButton, title, help, search, result);
     overlay.append(backdrop, panel);
     let requestController = null;
+    let unlinkRequest = () => {};
+    let searchTimer = 0;
+    let releaseFocus = () => {};
+    let untrack = () => {};
+    let unlinkScopeClose = () => {};
+    let closed = false;
     const close = () => {
+      if (closed) return;
+      closed = true;
       requestController?.abort();
+      unlinkRequest();
+      unlinkScopeClose();
+      window.clearTimeout(searchTimer);
+      releaseFocus();
+      untrack();
       overlay.remove();
       trigger?.focus?.();
     };
+    untrack = trackOverlay(close);
+    unlinkScopeClose = listenAbort(attached?.controller?.signal, close);
+    closeButton.addEventListener("click", close);
     backdrop.addEventListener("click", close);
-    overlay.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        close();
-      }
-    });
     document.body.append(overlay);
-    search.focus();
+    releaseFocus = installModalFocusTrap({ close, initialFocus: search, panel, trigger });
 
-    let searchTimer = 0;
     const load = async () => {
       requestController?.abort();
+      unlinkRequest();
       requestController = new AbortController();
+      unlinkRequest = linkAbort(attached?.controller?.signal, requestController);
       result.textContent = "正在读取允许的目标人物…";
       try {
-        const query = search.value.trim();
-        const payload = await request(baseUrl(), `/api/works/${encodeURIComponent(work.id)}/move-targets?query=${encodeURIComponent(query)}&limit=36`, {
-          signal: requestController.signal
-        });
-        if (!overlay.isConnected) return;
-        renderTargetCandidates(result, payload?.candidates, async (candidate) => {
+        const candidates = await loadMoveTargets(work, scope, search.value.trim(), requestController.signal);
+        if (!overlay.isConnected || !isCurrent(scope)) {
+          if (overlay.isConnected) close();
+          return;
+        }
+        renderTargetCandidates(result, candidates, async (candidate) => {
           close();
-          await startMove(work, candidate);
+          await startMove(work, candidate, scope);
         });
       } catch (error) {
         if (isAbort(error) || !overlay.isConnected) return;
@@ -325,7 +386,15 @@ export function createAndroidWorkMoveController({
     await load();
   }
 
-  function openMoveStatusSheet(work, job) {
+  async function loadMoveTargets(work, scope = captureScope(work), query = "", signal = undefined) {
+    if (!isCurrent(scope)) return null;
+    const payload = await request(scope.baseUrl, `/api/works/${encodeURIComponent(scope.workId)}/move-targets?query=${encodeURIComponent(String(query || "").trim())}&limit=36`, { signal });
+    return isCurrent(scope) ? payload?.candidates || [] : null;
+  }
+
+  function openMoveStatusSheet(work, job, scope = captureScope(work)) {
+    if (!isCurrent(scope) || !jobMatchesScope(job, scope)) return;
+    for (const close of [...overlayClosers]) close();
     const trigger = document.activeElement;
     const overlay = document.createElement("div");
     overlay.className = "fanhao-sort-overlay work-move-status-overlay";
@@ -337,16 +406,35 @@ export function createAndroidWorkMoveController({
     panel.className = "fanhao-sort-sheet work-move-status-sheet";
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "true");
+    panel.setAttribute("aria-labelledby", "workMoveStatusTitle");
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "work-move-dialog-close";
+    closeButton.textContent = "关闭";
+    closeButton.setAttribute("aria-label", "关闭迁移状态");
     const title = document.createElement("strong");
+    title.id = "workMoveStatusTitle";
     title.textContent = `迁移状态：${workMoveStatusLabel(job.status)}`;
     const detail = document.createElement("p");
     detail.className = "work-move-status-detail";
     detail.textContent = job.error || "任务记录保存在服务端；返回或重启后会继续显示。";
-    panel.append(title, detail);
+    panel.append(closeButton, title, detail);
+    let releaseFocus = () => {};
+    let untrack = () => {};
+    let unlinkScopeClose = () => {};
+    let closed = false;
     const close = () => {
+      if (closed) return;
+      closed = true;
+      releaseFocus();
+      untrack();
+      unlinkScopeClose();
       overlay.remove();
       trigger?.focus?.();
     };
+    untrack = trackOverlay(close);
+    unlinkScopeClose = listenAbort(attached?.controller?.signal, close);
+    closeButton.addEventListener("click", close);
     if (workMoveCanManualRetry(job)) {
       const retry = document.createElement("button");
       retry.type = "button";
@@ -355,11 +443,13 @@ export function createAndroidWorkMoveController({
       retry.addEventListener("click", async () => {
         retry.disabled = true;
         try {
-          const payload = await request(baseUrl(), `/api/work-move-jobs/${encodeURIComponent(job.id)}/retry`, { method: "POST" });
-          applyJob(payload.job || job);
+          const payload = await request(scope.baseUrl, `/api/work-move-jobs/${encodeURIComponent(job.id)}/retry`, { method: "POST", signal: attached?.controller?.signal });
+          if (!isCurrent(scope) || !jobMatchesScope(payload.job, scope)) return;
+          applyJob(scope, payload.job || job);
           close();
-          void pollJob(generation, attached?.controller?.signal);
+          void pollJob(scope, attached?.controller?.signal);
         } catch (error) {
+          if (!isCurrent(scope)) return close();
           retry.disabled = false;
           detail.textContent = `恢复失败：${safeError(error, "请稍后重试")}`;
         }
@@ -368,47 +458,65 @@ export function createAndroidWorkMoveController({
     }
     overlay.append(backdrop, panel);
     backdrop.addEventListener("click", close);
-    overlay.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") close();
-    });
     document.body.append(overlay);
-    panel.querySelector("button:not(:disabled)")?.focus();
+    releaseFocus = installModalFocusTrap({ close, initialFocus: closeButton, panel, trigger });
   }
 
-  async function startMove(work, candidate) {
+  async function startMove(work, candidate, scope = captureScope(work)) {
     const target = normalizeMoveTargetCandidate(candidate);
-    if (!target || !work?.id) return;
+    if (!target || !work?.id || !isCurrent(scope)) return;
+    if (attached?.unresolvedRecovery) {
+      renderMessage("迁移状态尚未确认，不能创建新任务。", "quiet", false);
+      return;
+    }
     const title = work.title || work.directoryName || work.id;
     if (!window.confirm(`确认将「${title}」迁移到「${target.name}」？\n\n服务端会先写入可恢复任务，再处理文件；此操作可能需要一段时间。`)) return;
-    const previous = readStored(work.id);
+    const previous = readStored(scope);
+    if (previous?.idempotencyKey && previous?.targetId && previous.targetId !== target.id) {
+      renderMessage("存在尚未确认的迁移请求，不能改选目标人物。", "quiet", false);
+      return;
+    }
     const idempotencyKey = previous?.idempotencyKey || createIdempotencyKey();
-    writeStored(work.id, { idempotencyKey, targetId: target.id });
+    writeStored(scope, { idempotencyKey, targetId: target.id });
+    const signal = attached?.controller?.signal;
     try {
-      const payload = await request(baseUrl(), `/api/works/${encodeURIComponent(work.id)}/move-to-person`, {
+      const payload = await request(scope.baseUrl, `/api/works/${encodeURIComponent(scope.workId)}/move-to-person`, {
         method: "POST",
-        body: { personId: target.id, idempotencyKey }
+        body: { personId: target.id, idempotencyKey },
+        signal
       });
       const job = payload?.job || null;
       if (!job?.id) throw new Error("服务没有返回迁移任务");
-      applyJob(job);
+      if (!isCurrent(scope) || !jobMatchesScope(job, scope)) return;
+      applyJob(scope, job);
       renderMessage(`已创建迁移任务：${target.name}。`, "quiet", false);
-      void pollJob(generation, attached?.controller?.signal);
+      void pollJob(scope, attached?.controller?.signal);
     } catch (error) {
+      if (!isCurrent(scope)) return;
+      let confirmedNoJob = false;
       try {
-        const recovered = await request(baseUrl(), `/api/works/${encodeURIComponent(work.id)}/move-job?idempotencyKey=${encodeURIComponent(idempotencyKey)}`);
-        if (recovered?.job) {
-          applyJob(recovered.job);
+        const recovered = await request(scope.baseUrl, `/api/works/${encodeURIComponent(scope.workId)}/move-job?idempotencyKey=${encodeURIComponent(idempotencyKey)}`, { signal });
+        if (recovered?.job && isCurrent(scope) && jobMatchesScope(recovered.job, scope)) {
+          applyJob(scope, recovered.job);
           renderMessage("已恢复服务端迁移任务。", "quiet", false);
-          void pollJob(generation, attached?.controller?.signal);
+          void pollJob(scope, attached?.controller?.signal);
           return;
         }
-      } catch {}
-      clearStored(work.id);
+        confirmedNoJob = recovered?.job === null;
+      } catch {
+        if (isCurrent(scope)) {
+          attached.unresolvedRecovery = true;
+          renderMessage("迁移请求状态暂时无法确认，已保留恢复标识。", "quiet", false);
+        }
+        return;
+      }
+      if (!isCurrent(scope)) return;
+      if (confirmedNoJob) clearStored(scope);
       renderMessage(`迁移任务未创建：${safeError(error, "请稍后重试")}`, "error", false);
     }
   }
 
-  return { attach, createActionButton, detach, openForWork, openMoveTargetPicker, startMove };
+  return { attach, createActionButton, detach, handleBack, loadMoveTargets, openForWork, openMoveTargetPicker, startMove };
 }
 
 function renderTargetCandidates(container, source, select) {
@@ -429,6 +537,50 @@ function renderTargetCandidates(container, source, select) {
   }
 }
 
+export function installModalFocusTrap({
+  close,
+  documentRef = document,
+  initialFocus = null,
+  panel,
+  trigger = null
+} = {}) {
+  const focusable = () => [...(panel?.querySelectorAll?.("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])") || [])]
+    .filter((element) => element.offsetParent !== null || element === initialFocus);
+  const focusInitial = () => (initialFocus || focusable()[0] || panel)?.focus?.();
+  const keydown = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close?.();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const targets = focusable();
+    if (!targets.length) {
+      event.preventDefault();
+      panel?.focus?.();
+      return;
+    }
+    const current = documentRef.activeElement;
+    const index = targets.indexOf(current);
+    const next = event.shiftKey
+      ? targets[(index <= 0 ? targets.length : index) - 1]
+      : targets[(index + 1) % targets.length];
+    event.preventDefault();
+    next?.focus?.();
+  };
+  const focusin = (event) => {
+    if (!panel?.contains?.(event.target)) focusInitial();
+  };
+  documentRef.addEventListener("keydown", keydown, true);
+  documentRef.addEventListener("focusin", focusin, true);
+  focusInitial();
+  return () => {
+    documentRef.removeEventListener("keydown", keydown, true);
+    documentRef.removeEventListener("focusin", focusin, true);
+    trigger?.focus?.();
+  };
+}
+
 function createIdempotencyKey() {
   if (globalThis.crypto?.randomUUID) return `android:${globalThis.crypto.randomUUID()}`;
   return `android:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
@@ -439,6 +591,17 @@ function linkAbort(signal, controller) {
   const abort = () => controller.abort();
   if (signal.aborted) abort();
   else signal.addEventListener("abort", abort, { once: true });
+  return () => signal.removeEventListener("abort", abort);
+}
+
+export function listenAbort(signal, callback) {
+  if (!signal) return () => {};
+  if (signal.aborted) {
+    callback?.();
+    return () => {};
+  }
+  const abort = () => callback?.();
+  signal.addEventListener("abort", abort, { once: true });
   return () => signal.removeEventListener("abort", abort);
 }
 

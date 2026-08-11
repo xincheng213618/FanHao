@@ -39,6 +39,7 @@ export function createAdminCoreMutationService({
   uniquePersonNames
 }) {
   let workMoveReservationService = null;
+  let workMoveTargetDirectoryIndexCache = null;
   function workMoveReservations() {
     workMoveReservationService ||= createWorkMoveReservationService({ getCoreDb });
     return workMoveReservationService;
@@ -256,6 +257,68 @@ export function createAdminCoreMutationService({
     throw error;
   }
 
+  function workMoveTargetDirectoryIndex(db) {
+    const nowMs = Date.now();
+    if (workMoveTargetDirectoryIndexCache?.expiresAt > nowMs) return workMoveTargetDirectoryIndexCache.entries;
+    const localDirectoriesByPerson = new Map();
+    for (const row of db.prepare(`
+      SELECT wp.person_id, lw.local_path
+      FROM work_people wp
+      JOIN local_works lw ON lw.work_id = wp.work_id
+      WHERE wp.role = 'actor' AND lw.local_path IS NOT NULL AND trim(lw.local_path) <> ''
+      ORDER BY wp.person_id, lw.local_path
+    `).all()) {
+      const id = String(row.person_id || "");
+      if (!id || localDirectoriesByPerson.has(id)) continue;
+      try {
+        const directory = ensureLibraryDirectoryPath(coreLocalPersonSourcePath(row.local_path), "目标人物文件夹");
+        if (safeStat(directory)?.isDirectory()) localDirectoriesByPerson.set(id, directory);
+      } catch {}
+    }
+    const byDirectory = new Map();
+    for (const row of db.prepare("SELECT id, name, display_name FROM people ORDER BY COALESCE(NULLIF(display_name, ''), name), id").all()) {
+      const id = String(row.id || "");
+      const person = resolveLibraryPersonByPublicId(id) || corePersonFallbackRecord(id) || { id, name: String(row.display_name || row.name || "").trim() };
+      const paths = [];
+      for (const sourcePath of uniqueTextArray([person?.relativePath, ...(person?.sourcePaths || [])])) {
+        try {
+          const directory = ensureLibraryDirectoryPath(sourcePath, "目标人物文件夹");
+          if (safeStat(directory)?.isDirectory()) paths.push(directory);
+        } catch {}
+      }
+      if (localDirectoriesByPerson.has(id)) paths.push(localDirectoriesByPerson.get(id));
+      const personName = String(person?.name || row.display_name || row.name || "").trim();
+      for (const rootPath of libraryOpenRoots()) {
+        if (!personName) break;
+        try {
+          const directory = path.join(rootPath, personName);
+          if (safeStat(directory)?.isDirectory()) paths.push(ensureLibraryDirectoryPath(directory, "目标人物文件夹"));
+        } catch {}
+      }
+      const personDir = paths.find(Boolean);
+      if (!personDir) continue;
+      const canonical = path.resolve(personDir).toLowerCase();
+      const records = byDirectory.get(canonical) || [];
+      records.push({
+        id,
+        name: String(person.displayName || person.name || row.display_name || row.name || `#${id}`).trim(),
+        personDir,
+        search: normalizePersonSearchValue([
+          person.displayName, person.name, row.display_name, row.name,
+          ...(Array.isArray(person.aliases) ? person.aliases : [])
+        ].filter(Boolean).join(" "))
+      });
+      byDirectory.set(canonical, records);
+    }
+    // A shared resolved directory has no unambiguous metadata owner.  Never
+    // silently choose the first person from sorted rows.
+    const entries = [...byDirectory.values()].filter((records) => records.length === 1).map(([record]) => ({
+      ...record
+    }));
+    workMoveTargetDirectoryIndexCache = { entries, expiresAt: nowMs + 2_000 };
+    return entries;
+  }
+
   // The mobile client must never be asked to construct a library path.  Keep
   // the authoritative directory resolution here, and expose only the people
   // for which that resolution succeeds.  `prepareWorkMove` repeats the same
@@ -280,39 +343,30 @@ export function createAdminCoreMutationService({
       ? Math.max(1, Math.min(60, Math.trunc(requestedLimit)))
       : 36;
     const db = getCoreDb();
-    const escaped = query.replace(/[\\%_]/g, "\\$&");
-    const rows = query
-      ? db.prepare(`
-          SELECT id, name, display_name
-          FROM people
-          WHERE name LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\'
-          ORDER BY COALESCE(NULLIF(display_name, ''), name), id
-          LIMIT ?
-        `).all(`%${escaped}%`, `%${escaped}%`, Math.min(limit * 5, 300))
-      : db.prepare(`
-          SELECT id, name, display_name
-          FROM people
-          ORDER BY COALESCE(NULLIF(display_name, ''), name), id
-          LIMIT ?
-        `).all(Math.min(limit * 5, 300));
-
+    const coreWorkId = Number(work.id);
+    const localWork = db.prepare(`
+      SELECT local_path FROM local_works
+      WHERE work_id = ? AND local_path IS NOT NULL AND trim(local_path) <> ''
+      ORDER BY id LIMIT 1
+    `).get(coreWorkId);
+    if (!localWork?.local_path) {
+      const error = new Error("这个作品没有本地文件夹");
+      error.statusCode = 404;
+      throw error;
+    }
+    const oldDir = ensureLibraryDirectoryPath(localWork.local_path, "作品文件夹");
+    if (!safeStat(oldDir)?.isDirectory()) {
+      const error = new Error("本地作品文件夹不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    const queryKey = normalizePersonSearchValue(query);
     const candidates = [];
-    for (const row of rows) {
-      const id = String(row.id || "");
-      const person = resolveLibraryPersonByPublicId(id) || corePersonFallbackRecord(id) || {
-        id,
-        name: String(row.display_name || row.name || "").trim()
-      };
-      try {
-        targetDirectoryForPerson(person, db);
-      } catch (error) {
-        if (Number(error?.statusCode || 0) === 404) continue;
-        throw error;
-      }
-      candidates.push({
-        id,
-        name: String(person.displayName || person.name || row.display_name || row.name || `#${id}`).trim()
-      });
+    for (const person of workMoveTargetDirectoryIndex(db)) {
+      if (queryKey && !person.search.includes(queryKey)) continue;
+      const targetDir = ensureLibraryDirectoryPath(path.join(person.personDir, path.basename(oldDir)), "目标作品文件夹");
+      if (path.resolve(targetDir).toLowerCase() === path.resolve(oldDir).toLowerCase() || fs.existsSync(targetDir)) continue;
+      candidates.push({ id: person.id, name: person.name });
       if (candidates.length >= limit) break;
     }
     return { workId: String(work.id), query, candidates };

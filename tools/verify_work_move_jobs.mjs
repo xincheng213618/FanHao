@@ -640,6 +640,10 @@ async function verifyActualAdminSqliteCommit() {
     uniquePersonNames: (values) => [...new Set((values || []).filter(Boolean))]
   });
 
+  const approvedTargets = admin.listWorkMoveTargets("1", { limit: 60 });
+  assert.deepEqual(approvedTargets.candidates, [{ id: "2", name: "Target" }], "target enumeration must exclude the current directory and return only a writable server-resolved person");
+  assert.equal(JSON.stringify(approvedTargets).includes(fixture.targetPerson), false, "target enumeration must never expose a filesystem path");
+
   const ghostParent = path.join(fixture.root, "ghost-person");
   await fs.promises.mkdir(path.join(ghostParent, path.basename(fixture.source)), { recursive: true });
   const peopleBeforeFailure = db.prepare("SELECT COUNT(*) AS count FROM people").get().count;

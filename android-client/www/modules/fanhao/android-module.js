@@ -1,5 +1,5 @@
-import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260812-android-work-move-01";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260812-android-work-move-01";
+import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=20260812-android-work-move-02";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=20260812-android-work-move-02";
 import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=20260730-fanhao-nav-ui-44";
 
 export function createAndroidModule({ host }) {
@@ -93,6 +93,7 @@ export function createAndroidModule({ host }) {
       route("personDetail", (params, guard) => detailViews.renderPersonDetail(params.personId, guard)),
       route("workDetail", (params, guard) => detailViews.renderWorkDetail(params.workId, guard))
     ],
+    handleBack: () => detailViews.handleBack?.() === true,
     search,
     renderChrome: (context) => renderFanhaoChrome(context, host, { peopleViews, workViews }),
     api: { codePrefixViews, detailViews, peopleViews, workViews }
