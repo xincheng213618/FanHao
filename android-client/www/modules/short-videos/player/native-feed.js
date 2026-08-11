@@ -20,13 +20,11 @@ export function createShortVideoNativeFeed(context = {}) {
     if (index < 0) return false;
     const boundary = nextCollectionCursorBoundary(videos, playableEntries, index, options.cursorBoundaries);
     const end = boundary?.playableEnd ?? Math.min(playableEntries.length, index + 31);
-    const start = Math.max(0, index - 20, end - 51);
+    const start = Math.max(0, index - 20);
     const feedEntries = playableEntries.slice(start, end);
     const feedUrl = nativeShortVideoFeedUrl(options);
     const payload = stringifyNativeShortVideoFeed(feedEntries.map(({ item }) => item));
-    const cursorAtEnd = boundary
-      ? boundary.nextCursor
-      : end === playableEntries.length ? String(options.nextCursor || "") : "";
+    const cursorAtEnd = boundary?.nextCursor || "";
     const hasMoreAtEnd = boundary
       ? boundary.hasMore || end < playableEntries.length
       : Boolean((options.hasMore ?? listState.data?.hasMore) || end < playableEntries.length);
@@ -59,11 +57,15 @@ export function createShortVideoNativeFeed(context = {}) {
         if (apiEnd < selectedApiIndex) return null;
         const playableEnd = playableEntries.filter(({ apiIndex }) => apiIndex <= apiEnd).length;
         if (playableEnd <= selectedIndex) return null;
+        const windowStart = Math.max(0, selectedIndex - 20);
+        if (playableEnd - selectedIndex > 31 || playableEnd - windowStart > 51) return null;
+        const nextCursor = String(boundary?.nextCursor || "").trim();
+        if (!nextCursor) return null;
         return {
           apiEnd,
           playableEnd,
           hasMore: Boolean(boundary?.hasMore),
-          nextCursor: String(boundary?.nextCursor || "")
+          nextCursor
         };
       })
       .filter(Boolean)

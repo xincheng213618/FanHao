@@ -5,6 +5,7 @@ import { LOCAL_SHORT_VIDEO_USER_ID } from "./constants.js";
 const COLLECTION_NAME_MAX_LENGTH = 40;
 const COLLECTION_PAGE_DEFAULT_LIMIT = 48;
 const COLLECTION_PAGE_MAX_LIMIT = 120;
+const COLLECTION_OFFSET_FALLBACK_MAX = 1_000_000;
 const COLLECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,79}$/;
 const COLLECTION_RESERVED_IDS = new Set(["collections"]);
 const COLLECTION_BUSY_TIMEOUT_MS = 40;
@@ -96,6 +97,14 @@ export function createShortVideoCollectionsRepository({
     const params = urlOrOptions?.searchParams || new URLSearchParams();
     const limit = clampInteger(params.get("limit"), COLLECTION_PAGE_DEFAULT_LIMIT, 1, COLLECTION_PAGE_MAX_LIMIT);
     const cursor = decodeCollectionCursor(params.get("cursor"));
+    // Offset is a bounded, one-request recovery path for a Native window that
+    // cannot end on a retained cursor boundary. It is evaluated against this
+    // request's read snapshot; a refresh restarts at offset zero. A valid
+    // cursor always wins, and an offset page emits a keyset cursor for later
+    // requests.
+    const offset = cursor
+      ? 0
+      : clampInteger(params.get("offset"), 0, 0, COLLECTION_OFFSET_FALLBACK_MAX);
     return withDatabaseAccess((db) => readTransaction(db, () => {
       const collection = requireCollection(db, id);
       const total = Number(db.prepare(`
@@ -117,7 +126,8 @@ export function createShortVideoCollectionsRepository({
           ${cursorSql}
         ORDER BY item.added_at DESC, item.video_id DESC
         LIMIT ?
-      `).all(id, ...cursorParams, limit + 1);
+        OFFSET ?
+      `).all(id, ...cursorParams, limit + 1, offset);
       const hasMore = rows.length > limit;
       const pageRows = hasMore ? rows.slice(0, limit) : rows;
       const videos = pageRows.map(publicCollectionVideo);
@@ -128,6 +138,7 @@ export function createShortVideoCollectionsRepository({
         count: videos.length,
         total,
         limit,
+        offset,
         cursor: cursor ? encodeCollectionCursor(cursor) : null,
         hasMore,
         nextCursor: hasMore && lastRow

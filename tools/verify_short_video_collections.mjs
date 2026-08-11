@@ -30,7 +30,7 @@ try {
   await verifyBusyContract(fixtures);
   await verifyInjectedBusyPhases();
   verifyLegacyMigration();
-  console.log("short-video-collections: ok (cursor, detail, constraints, concurrency, busy)");
+  console.log("short-video-collections: ok (cursor, native offset fallback, detail, constraints, concurrency, busy)");
 } finally {
   store.close();
   fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -136,8 +136,10 @@ function verifyCursorSnapshot(collection) {
 
     const secondUrl = new URL("http://fixture/api/short-videos/collections/list/videos?limit=1");
     secondUrl.searchParams.set("cursor", firstPage.nextCursor);
+    secondUrl.searchParams.set("offset", "999999");
     const secondPage = store.listCollectionVideos(collection.id, secondUrl);
     assert.equal(secondPage.videos[0].id, "fixture-video-a");
+    assert.equal(secondPage.offset, 0, "a valid keyset cursor must take precedence over fallback offset");
     assert.equal(secondPage.hasMore, false);
     assert.equal(new Set([...firstPage.videos, ...secondPage.videos].map((video) => video.id)).size, 2);
     assert.equal(store.listCollectionVideos(collection.id).videos[0].id, "fixture-video-c", "refresh must reveal the concurrent insert");
@@ -176,6 +178,38 @@ function verifyCollectionDetail(collection) {
   const firstPage = store.listCollectionVideos(many.id);
   assert.equal(firstPage.videos.length, 48);
   assert.equal(firstPage.videos.some((video) => video.id === "many-video-01"), false);
+  const nativeFallback = store.listCollectionVideos(
+    many.id,
+    new URL("http://fixture/api/short-videos/collections/list/videos?offset=36&limit=10")
+  );
+  assert.equal(nativeFallback.offset, 36, "Native no-cursor recovery must echo its bounded offset");
+  assert.deepEqual(
+    nativeFallback.videos.map((video) => video.id),
+    Array.from({ length: 10 }, (_, index) => `many-video-${String(15 - index).padStart(2, "0")}`),
+    "Native no-cursor recovery must continue from the emitted WebView slice boundary"
+  );
+  assert.ok(nativeFallback.nextCursor, "a non-final offset fallback page must convert subsequent requests back to keyset pagination");
+  const boundedFallback = store.listCollectionVideos(
+    many.id,
+    new URL("http://fixture/api/short-videos/collections/list/videos?offset=-10&limit=999")
+  );
+  assert.equal(boundedFallback.offset, 0, "fallback offset must be clamped to the collection start");
+  assert.equal(boundedFallback.limit, 120, "fallback requests must retain the collection API page-size ceiling");
+  const maximumFallback = store.listCollectionVideos(
+    many.id,
+    new URL("http://fixture/api/short-videos/collections/list/videos?offset=1000001&limit=1")
+  );
+  assert.equal(maximumFallback.offset, 1_000_000, "fallback offset must have a finite scan budget");
+  assert.equal(maximumFallback.videos.length, 0);
+  const afterNativeFallbackUrl = new URL("http://fixture/api/short-videos/collections/list/videos?offset=1&limit=10");
+  afterNativeFallbackUrl.searchParams.set("cursor", nativeFallback.nextCursor);
+  const afterNativeFallback = store.listCollectionVideos(many.id, afterNativeFallbackUrl);
+  assert.equal(afterNativeFallback.offset, 0, "cursor continuation after fallback must ignore any stale offset");
+  assert.deepEqual(
+    afterNativeFallback.videos.map((video) => video.id),
+    ["many-video-05", "many-video-04", "many-video-03", "many-video-02", "many-video-01", "many-video-00"],
+    "cursor continuation after fallback must have no gap or duplicate"
+  );
   const deepMember = store.collectionVideoDetail(many.id, "many-video-01");
   assert.equal(deepMember.video.id, "many-video-01", "detail must resolve a member beyond the first page");
   assert.equal(deepMember.prevId, "many-video-02");
@@ -234,8 +268,14 @@ async function verifyRouteContract(fixtures) {
       return { ok: true, id: collectionId };
     },
     listCollectionVideos(collectionId, url) {
-      calls.push(["videos", collectionId, url.searchParams.get("cursor")]);
-      return { collection: { id: collectionId }, videos: [], total: 0 };
+      calls.push([
+        "videos",
+        collectionId,
+        url.searchParams.get("cursor"),
+        url.searchParams.get("offset"),
+        url.searchParams.get("limit")
+      ]);
+      return { collection: { id: collectionId }, videos: [], total: 0, offset: 0 };
     },
     collectionVideoDetail(collectionId, videoId) {
       calls.push(["detail", collectionId, videoId]);
@@ -287,11 +327,15 @@ async function verifyRouteContract(fixtures) {
   })).status, 200);
   const videos = await invokeRoute({
     method: "GET",
-    pathname: "/api/short-videos/collections/svc_fixture/videos?cursor=fixture-cursor",
+    pathname: "/api/short-videos/collections/svc_fixture/videos?cursor=fixture-cursor&offset=36&limit=48",
     store: fixtureStore
   });
   assert.equal(videos.status, 200);
-  assert.deepEqual(calls.at(-1), ["videos", "svc_fixture", "fixture-cursor"]);
+  assert.deepEqual(
+    calls.at(-1),
+    ["videos", "svc_fixture", "fixture-cursor", "36", "48"],
+    "the collection route must preserve cursor, bounded offset fallback, and limit for repository precedence"
+  );
   const detail = await invokeRoute({
     method: "GET",
     pathname: "/api/short-videos/collections/svc_fixture/videos/fixture-video-b",

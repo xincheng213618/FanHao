@@ -23,6 +23,7 @@ const java = javaHome
 try {
   const sources = [
     path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedPaging.java"),
+    path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedAutoAdvance.java"),
     path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedTransport.java"),
     path.join(root, "tools", "fixtures", "NativeShortVideoFeedPagingHarness.java")
   ];

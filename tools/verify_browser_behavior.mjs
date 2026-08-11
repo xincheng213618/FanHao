@@ -28,6 +28,7 @@ try {
     await verifyAuthorReturnDiscardsDelayedDetail(browser);
     await verifyAuthorReturnDiscardsDelayedError(browser);
     await verifyDirectAuthorDeepLink(browser);
+    await verifyAndroidCollectionPicker(browser);
     await verifyShortVideoCollections(browser);
   } finally {
     await browser.close();
@@ -55,11 +56,19 @@ async function startFixtureServer(serverPort) {
       }
       return;
     }
-    const relative = url.pathname === "/" ? "index.html" : url.pathname.replace(/^\/+/, "");
-    const filePath = path.resolve(root, "public", relative);
-    const publicRoot = path.resolve(root, "public");
-    const safeFile = filePath.startsWith(`${publicRoot}${path.sep}`) || filePath === publicRoot ? filePath : "";
-    const fallback = path.join(publicRoot, "index.html");
+    if (url.pathname === "/android-picker-fixture") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      response.end("<!doctype html><html><body><main id=fixture></main></body></html>");
+      return;
+    }
+    const androidAsset = url.pathname.startsWith("/android-client/");
+    const staticRoot = path.resolve(root, androidAsset ? "android-client/www" : "public");
+    const relative = androidAsset
+      ? url.pathname.slice("/android-client/".length)
+      : url.pathname === "/" ? "index.html" : url.pathname.replace(/^\/+/, "");
+    const filePath = path.resolve(staticRoot, relative);
+    const safeFile = filePath.startsWith(`${staticRoot}${path.sep}`) || filePath === staticRoot ? filePath : "";
+    const fallback = path.join(root, "public", "index.html");
     const target = safeFile && fs.statSync(safeFile, { throwIfNoEntry: false })?.isFile() ? safeFile : fallback;
     response.writeHead(200, { "content-type": contentType(target), "cache-control": "no-store" });
     fs.createReadStream(target).pipe(response);
@@ -69,6 +78,79 @@ async function startFixtureServer(serverPort) {
     server.listen(serverPort, "127.0.0.1", resolve);
   });
   return server;
+}
+
+async function verifyAndroidCollectionPicker(browser) {
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  async function openPicker() {
+    await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
+    await page.evaluate(async () => {
+      const { createShortVideoCollections } = await import("/android-client/modules/short-videos/collections/controller.js?picker-fixture=1");
+      let resolveCollections;
+      let rejectCollections;
+      const pendingCollections = new Promise((resolve, reject) => {
+        resolveCollections = resolve;
+        rejectCollections = reject;
+      });
+      window.finishAndroidCollectionPickerRequest = (outcome) => {
+        if (outcome === "reject") rejectCollections(new Error("fixture collection request failed"));
+        else resolveCollections({ collections: [], total: 0 });
+      };
+      const trigger = document.createElement("button");
+      trigger.id = "android-picker-trigger";
+      trigger.textContent = "加入清单";
+      document.body.append(trigger);
+      trigger.focus();
+      const controller = createShortVideoCollections({
+        api: { fetch: () => pendingCollections },
+        els: {
+          viewContent: document.getElementById("fixture"),
+          viewKicker: document.createElement("div"),
+          viewMeta: document.createElement("div"),
+          viewTitle: document.createElement("div")
+        },
+        getActiveUrl: () => location.origin,
+        openNativeShortVideoFeed: () => false,
+        renderCard: () => document.createElement("div"),
+        setActiveBottom() {},
+        shortVideoToast() {},
+        showView() {}
+      });
+      window.androidCollectionPickerPromise = controller.showCollectionPicker({
+        id: "fixture-video",
+        streamUrl: "/media/fixture-video.mp4"
+      });
+    });
+  }
+
+  try {
+    await openPicker();
+    const picker = page.locator(".short-video-mobile-collection-picker");
+    const input = picker.locator("input[aria-label='新清单名称']");
+    await picker.waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await input.evaluate((element) => document.activeElement === element), true, "Android picker must focus inside the modal before the collections request settles");
+    await picker.locator("header button").focus();
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(await picker.evaluate((element) => element.contains(document.activeElement)), true, "Android picker Tab trap must work while the collections request is pending");
+    await page.keyboard.press("Escape");
+    await picker.waitFor({ state: "detached", timeout: 5000 });
+    assert.equal(await page.locator("#android-picker-trigger").evaluate((element) => document.activeElement === element), true, "Android picker Escape must close and restore trigger focus during a slow request");
+    await page.evaluate(() => window.finishAndroidCollectionPickerRequest("resolve"));
+
+    await openPicker();
+    const failedPicker = page.locator(".short-video-mobile-collection-picker");
+    await failedPicker.waitFor({ state: "visible", timeout: 5000 });
+    await page.evaluate(() => window.finishAndroidCollectionPickerRequest("reject"));
+    await failedPicker.locator(".short-video-mobile-collection-status", { hasText: "fixture collection request failed" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await failedPicker.evaluate((element) => element.contains(document.activeElement)), true, "Android picker must retain modal focus after a failed request");
+    await page.keyboard.press("Tab");
+    assert.equal(await failedPicker.evaluate((element) => element.contains(document.activeElement)), true, "Android picker Tab trap must remain active after a failed request");
+    await page.keyboard.press("Escape");
+    await failedPicker.waitFor({ state: "detached", timeout: 5000 });
+    assert.equal(await page.locator("#android-picker-trigger").evaluate((element) => document.activeElement === element), true, "Android picker must restore trigger focus when closing after a failed request");
+  } finally {
+    await page.close();
+  }
 }
 
 async function stopServer(server) {

@@ -415,29 +415,193 @@ async function verifyNativeCollectionFeedBridge() {
     shortVideoApiSource: () => "all",
     shortVideoToast: () => {}
   });
+  const isPlayable = (video) => Boolean(String(video?.streamUrl || "").trim())
+    || (String(video?.mediaType || "").toLowerCase() === "gallery"
+      && (video.galleryItems || video.galleryImages || []).some((entry) => String(entry?.url || "").trim()));
+  const cursorOffset = (cursor) => {
+    const match = /^cursor-(\d+)$/.exec(String(cursor || ""));
+    return match ? Number(match[1]) : null;
+  };
+  const mergeVideosById = (previous, incoming) => {
+    const merged = [...previous];
+    const ids = new Set(previous.map(({ id }) => id));
+    for (const video of incoming) {
+      if (ids.has(video.id)) continue;
+      ids.add(video.id);
+      merged.push(video);
+    }
+    return merged;
+  };
+
+  async function verifyNativeWindow({
+    label,
+    videos,
+    selectedId,
+    cursorBoundaries,
+    fullUniverse = universe,
+    nextCursor = "cursor-advanced-without-a-trusted-boundary",
+    expectedCursor = ""
+  }) {
+    calls.length = 0;
+    const selected = videos.find((item) => item.id === selectedId);
+    assert(selected, `${label}: selected fixture video must exist`);
+    assert.equal(await nativeFeed.openNativeShortVideoFeed(selected, {
+      videos,
+      hasMore: true,
+      nextCursor,
+      cursorBoundaries,
+      feedUrl: "/api/short-videos/collections/svc_fixture/videos"
+    }), true, `${label}: the actual Android Web bridge must open the collection through the Native plugin`);
+    assert.equal(calls.length, 1, `${label}: the bridge must invoke the Native plugin exactly once`);
+    const call = calls[0];
+    const payload = JSON.parse(call.videos).videos;
+    const payloadIds = payload.map(({ id }) => id);
+    assert(payloadIds.length > 0 && payloadIds.length <= 51, `${label}: the Native bridge window must contain at most 51 playable entries`);
+    assert(payloadIds.includes(selectedId), `${label}: the Native payload must contain startId`);
+    assert(call.startIndex >= 0 && call.startIndex < payloadIds.length, `${label}: startIndex must stay inside the Native payload`);
+    assert.equal(payloadIds[call.startIndex], selectedId, `${label}: startIndex must resolve to startId`);
+    assert.equal(call.nextCursor, expectedCursor, `${label}: only a cursor matching the emitted slice boundary may be forwarded`);
+
+    const continuationOffset = cursorOffset(expectedCursor) ?? call.nextOffset;
+    assert(Number.isInteger(continuationOffset) && continuationOffset >= 0, `${label}: fallback offset must match a concrete emitted slice boundary`);
+    const continuationIds = fullUniverse.slice(continuationOffset).filter(isPlayable).map(({ id }) => id);
+    const traversed = payloadIds.concat(continuationIds);
+    const expectedStart = fullUniverse.findIndex(({ id }) => id === payloadIds[0]);
+    assert(expectedStart >= 0, `${label}: emitted payload must belong to the collection universe`);
+    const expected = fullUniverse.slice(expectedStart).filter(isPlayable).map(({ id }) => id);
+    assert.deepEqual(traversed, expected, `${label}: Native next traversal must have no gaps`);
+    assert.equal(new Set(traversed).size, traversed.length, `${label}: Native next traversal must have no duplicates`);
+    return { call, payloadIds };
+  }
+
   try {
     for (const selectedIndex of [5, 70, 140]) {
-      calls.length = 0;
-      assert.equal(await nativeFeed.openNativeShortVideoFeed(loaded[selectedIndex], {
+      const { payloadIds, call } = await verifyNativeWindow({
+        label: `trusted boundary at collection index ${selectedIndex}`,
         videos: loaded,
-        hasMore: true,
-        nextCursor: "cursor-144",
+        selectedId: loaded[selectedIndex].id,
         cursorBoundaries: boundaries,
-        feedUrl: "/api/short-videos/collections/svc_fixture/videos"
-      }), true, "the actual Android Web bridge must open a collection through the Native plugin");
-      assert.equal(calls.length, 1, "the bridge must invoke the Native plugin exactly once");
-      const call = calls[0];
-      const payloadIds = JSON.parse(call.videos).videos.map(({ id }) => id);
-      assert(payloadIds.length <= 51, "the Native bridge window must stay bounded to 51 playable entries");
-      assert.equal(payloadIds[call.startIndex], loaded[selectedIndex].id, "the selected item must retain its Native start index");
+        nextCursor: "cursor-144",
+        expectedCursor: selectedIndex === 5 ? "" : selectedIndex < 96 ? "cursor-96" : "cursor-144"
+      });
       if (selectedIndex > 0) assert.equal(payloadIds[call.startIndex - 1], loaded[selectedIndex - 1].id, "Native previous must keep the collection predecessor");
       if (selectedIndex + 1 < loaded.length) assert.equal(payloadIds[call.startIndex + 1], loaded[selectedIndex + 1].id, "Native next must keep the collection successor");
-      const continuationOffset = Number(String(call.nextCursor).replace("cursor-", ""));
-      const traversed = payloadIds.concat(universe.slice(continuationOffset).map(({ id }) => id));
-      const expected = universe.slice(universe.findIndex(({ id }) => id === payloadIds[0])).map(({ id }) => id);
-      assert.deepEqual(traversed, expected, `Native pagination from collection index ${selectedIndex} must have no gaps`);
-      assert.equal(new Set(traversed).size, traversed.length, `Native pagination from collection index ${selectedIndex} must have no duplicates`);
     }
+
+    const withoutFirstBoundaryUniverse = universe.filter(({ id }) => id !== loaded[47].id);
+    const withoutFirstBoundary = loaded.filter(({ id }) => id !== loaded[47].id);
+    await verifyNativeWindow({
+      label: "deleted current boundary with a distant next boundary",
+      videos: withoutFirstBoundary,
+      selectedId: loaded[20].id,
+      cursorBoundaries: removeCollectionCursorBoundaryVideo(boundaries, loaded[47].id),
+      fullUniverse: withoutFirstBoundaryUniverse
+    });
+
+    const withoutPreviousAndCurrentIds = new Set([loaded[47].id, loaded[95].id]);
+    const withoutPreviousAndCurrentUniverse = universe.filter(({ id }) => !withoutPreviousAndCurrentIds.has(id));
+    const withoutPreviousAndCurrent = loaded.filter(({ id }) => !withoutPreviousAndCurrentIds.has(id));
+    await verifyNativeWindow({
+      label: "deleted previous and current boundaries",
+      videos: withoutPreviousAndCurrent,
+      selectedId: loaded[70].id,
+      cursorBoundaries: [...withoutPreviousAndCurrentIds].reduce(removeCollectionCursorBoundaryVideo, boundaries),
+      fullUniverse: withoutPreviousAndCurrentUniverse
+    });
+
+    const withoutNextBoundaryUniverse = universe.filter(({ id }) => id !== loaded[143].id);
+    const withoutNextBoundary = loaded.filter(({ id }) => id !== loaded[143].id);
+    await verifyNativeWindow({
+      label: "deleted next boundary at the loaded tail",
+      videos: withoutNextBoundary,
+      selectedId: loaded[138].id,
+      cursorBoundaries: removeCollectionCursorBoundaryVideo(boundaries, loaded[143].id),
+      fullUniverse: withoutNextBoundaryUniverse,
+      nextCursor: "cursor-144"
+    });
+
+    await verifyNativeWindow({
+      label: "next trusted boundary more than 30 playable items ahead",
+      videos: loaded,
+      selectedId: loaded[60].id,
+      cursorBoundaries: boundaries.filter(({ endVideoId }) => endVideoId === loaded[95].id),
+      nextCursor: "cursor-144"
+    });
+
+    const partialDuplicatePage = [loaded[47], ...loaded.slice(48, 95)];
+    const partialDuplicateVideos = mergeVideosById(loaded.slice(0, 48), partialDuplicatePage);
+    const partialDuplicateBoundaries = appendCollectionCursorBoundary(boundaries.slice(0, 1), {
+      videos: partialDuplicatePage,
+      hasMore: true,
+      nextCursor: "cursor-95"
+    }, partialDuplicateVideos, loaded.slice(0, 48));
+    assert.equal(partialDuplicateBoundaries.length, 1, "a partially duplicate page must not create an ambiguous trusted boundary");
+    await verifyNativeWindow({
+      label: "partially duplicate page with controller cursor advanced",
+      videos: partialDuplicateVideos,
+      selectedId: loaded[80].id,
+      cursorBoundaries: partialDuplicateBoundaries,
+      nextCursor: "cursor-95"
+    });
+
+    const fullyDuplicateVideos = loaded.slice(0, 48);
+    const fullyDuplicateBoundaries = appendCollectionCursorBoundary(boundaries.slice(0, 1), {
+      videos: fullyDuplicateVideos,
+      hasMore: true,
+      nextCursor: "cursor-duplicate-page"
+    }, fullyDuplicateVideos, fullyDuplicateVideos);
+    assert.equal(fullyDuplicateBoundaries.length, 1, "a fully duplicate page must not advance the trusted boundary");
+    await verifyNativeWindow({
+      label: "fully duplicate page with controller cursor advanced",
+      videos: fullyDuplicateVideos,
+      selectedId: loaded[40].id,
+      cursorBoundaries: fullyDuplicateBoundaries,
+      nextCursor: "cursor-duplicate-page",
+      expectedCursor: "cursor-48"
+    });
+
+    const readdedUniverse = [loaded[47], ...universe.filter(({ id }) => id !== loaded[47].id)];
+    const readdedFirstPage = readdedUniverse.slice(0, 48);
+    const readdedDuplicatePage = [readdedFirstPage[0], ...readdedUniverse.slice(48, 95)];
+    const readdedVideos = mergeVideosById(readdedFirstPage, readdedDuplicatePage);
+    let readdedBoundaries = appendCollectionCursorBoundary([], {
+      videos: readdedFirstPage,
+      hasMore: true,
+      nextCursor: "cursor-48"
+    }, readdedFirstPage, []);
+    readdedBoundaries = appendCollectionCursorBoundary(readdedBoundaries, {
+      videos: readdedDuplicatePage,
+      hasMore: true,
+      nextCursor: "cursor-95-after-readd"
+    }, readdedVideos, readdedFirstPage);
+    await verifyNativeWindow({
+      label: "concurrent remove and re-add with a duplicate page",
+      videos: readdedVideos,
+      selectedId: readdedUniverse[80].id,
+      cursorBoundaries: readdedBoundaries,
+      fullUniverse: readdedUniverse,
+      nextCursor: "cursor-95-after-readd"
+    });
+
+    const mixedUniverse = universe.map((item, index) => index % 7 === 0 ? { ...item, streamUrl: "" } : item);
+    const mixedLoaded = mixedUniverse.slice(0, 144);
+    let mixedBoundaries = [];
+    for (let offset = 0; offset < mixedLoaded.length; offset += 48) {
+      mixedBoundaries = appendCollectionCursorBoundary(mixedBoundaries, {
+        videos: mixedLoaded.slice(offset, offset + 48),
+        hasMore: true,
+        nextCursor: `cursor-${offset + 48}`
+      }, mixedLoaded.slice(0, offset + 48), mixedLoaded.slice(0, offset));
+    }
+    const mixedWithoutBoundaryUniverse = mixedUniverse.filter(({ id }) => id !== mixedLoaded[47].id);
+    const mixedWithoutBoundary = mixedLoaded.filter(({ id }) => id !== mixedLoaded[47].id);
+    await verifyNativeWindow({
+      label: "deleted boundary with unplayable entries mixed into pages",
+      videos: mixedWithoutBoundary,
+      selectedId: mixedLoaded[20].id,
+      cursorBoundaries: removeCollectionCursorBoundaryVideo(mixedBoundaries, mixedLoaded[47].id),
+      fullUniverse: mixedWithoutBoundaryUniverse
+    });
 
     const stateBeforeOffline = listState.data;
     globalThis.window.Capacitor.Plugins.FanHaoPlayer.playShortFeed = async () => {
@@ -537,6 +701,7 @@ const androidNativeFeedSearchSource = readNormalized(path.join(root, "android-cl
 const androidNativeFeedContractJavaSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "ShortVideoFeedContract.java"));
 const androidNativeFeedModelsSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "ShortVideoFeedModels.java"));
 const androidNativeFeedPagingSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedPaging.java"));
+const androidNativeFeedAutoAdvanceSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedAutoAdvance.java"));
 const androidNativeFeedReaderSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedReader.java"));
 const androidNativeFeedTransportSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedTransport.java"));
 const androidNativePlayerLayoutSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "res", "layout", "native_short_player_view.xml"));
@@ -546,6 +711,7 @@ assert(androidCollectionsSource.includes('method: "POST"') && androidCollections
 assert(androidCollectionsSource.includes('params = new URLSearchParams({ limit: String(COLLECTION_PAGE_LIMIT), cursor })') && androidCollectionsSource.includes("mergeUniqueVideos(previousVideos, page.videos)") && androidCollectionsSource.includes("appendCollectionCursorBoundary("), "Android collection management must append every cursor page, de-duplicate video ids, and retain trusted continuation boundaries");
 assert(androidCollectionsSource.includes("if (collectionPageRequest) return collectionPageRequest.promise") && androidCollectionsSource.includes("expectedRenderId !== collectionRenderId") && androidCollectionsSource.includes("deactivateCollections"), "Android collection pagination must reject duplicate requests and stale renders");
 assert(androidCollectionsSource.includes('event.key === "Escape"') && androidCollectionsSource.includes('event.key !== "Tab"') && androidCollectionsSource.includes("trigger?.isConnected") && androidCollectionsSource.includes("trigger.focus()"), "Android collection picker must trap Tab, close on Escape, and restore trigger focus");
+assert(androidCollectionsSource.includes("document.body.append(overlay);\n    create.input.focus();\n    try"), "Android collection picker must enter the modal before awaiting a slow or failed collection request");
 assert(androidCollectionsSource.includes("overlay.isConnected") && androidCollectionsSource.includes("isActiveCollectionRender"), "Android collection callbacks must ignore detached picker and stale detail renders");
 assert(androidCollectionCardActionSource.includes('aria-label", "加入清单"') && androidListSource.includes("appendCollectionCardAction") && androidApiSource.includes("fetchJson") && androidTransportSource.includes('"X-FanHao-Client": "android"') && androidTransportSource.includes("JSON.stringify(requestOptions.body)"), "Android list cards must use the authenticated WebView mutation transport for collection selection");
 assert(androidEntrySource.includes("short-video-chrome-row"), "Android short-video chrome must keep search and groups in one compact row");
@@ -574,10 +740,13 @@ assert(androidListSource.includes("没有已封禁的作者") && androidListSour
 assert(!androidListSource.includes("short-video-mobile-author-cleanup") && !androidListSource.includes("抖音清理"), "Android My Following cards must leave unfollowing to the author detail action");
 assert(androidListControllerSource.includes("该作者还没有本地作品，正在打开抖音主页") && androidListControllerSource.includes("authorOriginalUrl(author)"), "Android followed authors without local works must still open their Douyin profile");
 assert(androidNativeFeedSource.includes("openAuthorPanel: Boolean(options.openAuthorPanel)"), "Android native feed bridge must forward the author homepage request");
-assert(androidNativeFeedSource.includes("nextCollectionCursorBoundary") && androidNativeFeedSource.includes("nextCursor: cursorAtEnd") && androidNativeFeedSource.includes("end - 51") && androidPlayerPluginSource.includes("EXTRA_NEXT_CURSOR") && androidNativeFeedModelsSource.includes('String nextCursor = ""'), "Android native collection playback must align its bounded WebView window with the exact opaque continuation boundary");
+assert(androidNativeFeedSource.includes("nextCollectionCursorBoundary") && androidNativeFeedSource.includes("nextCursor: cursorAtEnd") && androidNativeFeedSource.includes('const cursorAtEnd = boundary?.nextCursor || ""') && androidNativeFeedSource.includes("playableEnd - selectedIndex > 31") && androidPlayerPluginSource.includes("EXTRA_NEXT_CURSOR") && androidNativeFeedModelsSource.includes('String nextCursor = ""'), "Android native collection playback must align its bounded WebView window with the exact opaque continuation boundary or its emitted offset fallback");
 assert(androidNativePlayerSource.includes('appendQueryParameter("cursor", normalizedCursor)') && androidNativeFeedReaderSource.includes('data.optString("nextCursor", "")') && androidNativePlayerSource.includes("nextFeedCursor = page.nextCursor"), "Android native collection playback must request subsequent cursor pages instead of replaying the first 48 rows");
 assert(androidNativePlayerSource.includes("feedPaging.complete(request, result)") && androidNativePlayerSource.includes("Completion.STALE") && androidNativeFeedPagingSource.includes("request.generation == generation") && androidNativeFeedPagingSource.includes("request.feedUrl.equals(feedUrl)") && androidNativeFeedPagingSource.includes("request.cursor.equals(cursor)"), "Android native continuation callbacks must be bound to feed generation, URL, cursor, and request identity");
 assert(androidNativeFeedTransportSource.includes("responseCode < 200 || responseCode >= 300") && androidNativeFeedTransportSource.includes("Failure.TIMEOUT") && androidNativeFeedTransportSource.includes("Failure.OFFLINE") && androidNativeFeedTransportSource.includes("Failure.PARSE") && androidNativeFeedReaderSource.includes("transport.read(feedUrl") && androidNativePlayerSource.includes("result.publicMessage()"), "Android native feed reads must distinguish retryable HTTP, timeout, offline, and parse failures with sanitized visible errors");
+assert(androidNativeFeedTransportSource.includes("new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8)") && !androidNativeFeedTransportSource.includes("new String(buffer"), "Android native feed transport must preserve UTF-8 characters split across network chunks");
+assert(androidNativePlayerSource.includes("NativeShortVideoFeedAutoAdvance.resolve(") && androidNativePlayerSource.includes("Action.LOAD_MORE") && androidNativePlayerSource.includes("Action.END") && androidNativePlayerSource.includes('showStatus("暂无短视频")') && !androidNativePlayerSource.includes('showStatus("短视频读取失败")'), "Android native paging must retry duplicate pages, finish duplicate final pages, and keep a successful empty feed distinct from failure");
+assert(androidNativeFeedAutoAdvanceSource.includes("paging.clearPendingAutoAdvance()") && androidNativeFeedAutoAdvanceSource.includes("return Action.LOAD_MORE") && androidNativeFeedAutoAdvanceSource.includes("return Action.END"), "Android duplicate-page auto-advance state must have one testable owner");
 assert(androidNativeFeedContractSource.includes("NATIVE_SHORT_VIDEO_FEED_SCHEMA_VERSION = 1") && androidNativeFeedContractSource.includes("schemaVersion: NATIVE_SHORT_VIDEO_FEED_SCHEMA_VERSION"), "Android WebView bridge must emit a versioned native feed envelope");
 assert(androidNativeFeedContractJavaSource.includes("static final int SCHEMA_VERSION = 1") && androidNativeFeedContractJavaSource.includes("unsupported short-video feed schema") && androidNativeFeedContractJavaSource.includes("normalized.charAt(0) == '['"), "Android native decoder must validate the current schema while preserving legacy array compatibility");
 assert(androidNativeFeedContractSource.includes("galleryPresentation: cleanString(item.galleryPresentation)") && androidNativeFeedContractSource.includes("posterUrl: cleanString(entry?.posterUrl)") && androidNativeFeedContractJavaSource.includes('row.optString("galleryPresentation", "")') && androidNativeFeedContractJavaSource.includes('entry.optString("posterUrl", "")'), "Android native feed must preserve the live-photo presentation and JPG poster");
@@ -593,6 +762,7 @@ assert(androidNativePlayerSource.includes("createFeedSearchController()") && and
 assert(androidNativeFeedSearchSource.includes("final class NativeShortVideoFeedSearchController") && androidNativeFeedSearchSource.includes("EditorInfo.IME_ACTION_SEARCH") && androidNativeFeedSearchSource.includes("host.pausePlayback()") && androidNativeFeedSearchSource.includes("host.applySearch(query)"), "Android feed-search controller must own the search overlay while coordinating playback and query submission through its host");
 assert(androidNativePlayerSource.split(/\r?\n/).length <= 5600, "Android native short-video Activity exceeded its refactored 5600-line budget");
 assert(androidNativeFeedPagingSource.split(/\r?\n/).length <= 180, "Android native feed paging state machine exceeded its 180-line budget");
+assert(androidNativeFeedAutoAdvanceSource.split(/\r?\n/).length <= 80, "Android native duplicate-page auto-advance helper exceeded its 80-line budget");
 assert(androidNativeFeedReaderSource.split(/\r?\n/).length <= 140, "Android native feed reader exceeded its 140-line budget");
 assert(androidNativeFeedTransportSource.split(/\r?\n/).length <= 100, "Android native feed transport exceeded its 100-line budget");
 assert(androidNativePageViewSource.split(/\r?\n/).length <= 450, "Android native short-video page-view module exceeded its 450-line budget");

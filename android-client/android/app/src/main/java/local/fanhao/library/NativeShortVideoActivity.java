@@ -2820,14 +2820,6 @@ public class NativeShortVideoActivity extends Activity {
         nextFeedOffset = page.nextOffset();
         nextFeedCursor = page.nextCursor;
         hasMoreVideos = page.hasMore;
-        if (page.items.isEmpty()) {
-          if (feedPaging.isPendingAutoAdvance(index)) {
-            feedPaging.clearPendingAutoAdvance();
-            hideStatus();
-            if (!hasMoreVideos) advanceAfterEnded(index);
-          }
-          return;
-        }
         Set<String> seen = new HashSet<>();
         for (ShortVideoItem video : videos) seen.add(video.id);
         int inserted = 0;
@@ -2842,11 +2834,22 @@ public class NativeShortVideoActivity extends Activity {
           prepareAround(currentIndex);
           preparePlayersAround(currentIndex);
           scheduleVideoPrefetch(currentIndex + 1);
-          if (feedPaging.isPendingAutoAdvance(index) && currentIndex == index && index + 1 < videos.size()) {
-            feedPaging.clearPendingAutoAdvance();
-            hideStatus();
-            pager.setCurrentItem(index + 1, true);
-          }
+        }
+        NativeShortVideoFeedAutoAdvance.Action autoAdvance = NativeShortVideoFeedAutoAdvance.resolve(
+          feedPaging,
+          index,
+          currentIndex,
+          videos.size()
+        );
+        if (autoAdvance == NativeShortVideoFeedAutoAdvance.Action.ADVANCE) {
+          hideStatus();
+          pager.setCurrentItem(index + 1, true);
+        } else if (autoAdvance == NativeShortVideoFeedAutoAdvance.Action.END) {
+          hideStatus();
+          advanceAfterEnded(index);
+        } else if (autoAdvance == NativeShortVideoFeedAutoAdvance.Action.LOAD_MORE) {
+          showStatus("正在加载下一条");
+          loadMoreIfNeeded(index);
         }
         Log.i(TAG, "loaded more inserted=" + inserted + " nextOffset=" + nextFeedOffset + " nextCursor=" + (nextFeedCursor.length() > 0) + " hasMore=" + hasMoreVideos);
       });
@@ -3319,7 +3322,7 @@ public class NativeShortVideoActivity extends Activity {
         currentScreen = captureFeedScreen();
         adapter.notifyDataSetChanged();
         if (videos.isEmpty()) {
-          showStatus("短视频读取失败");
+          showStatus("暂无短视频");
         } else {
           int safeIndex = Math.max(0, Math.min(startIndex, videos.size() - 1));
           if (openAuthorPanelOnStart) openInitialAuthorScreen(safeIndex);

@@ -1,6 +1,6 @@
 package local.fanhao.library;
 
-import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -41,10 +41,10 @@ final class NativeShortVideoFeedTransport {
       int responseCode = connection.getResponseCode();
       if (responseCode < 200 || responseCode >= 300) return failure(NativeShortVideoFeedPaging.Failure.HTTP);
       StringBuilder builder = new StringBuilder();
-      try (InputStream input = connection.getInputStream()) {
-        byte[] buffer = new byte[8192];
+      try (InputStreamReader input = new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8)) {
+        char[] buffer = new char[4096];
         int read;
-        while ((read = input.read(buffer)) >= 0) builder.append(new String(buffer, 0, read, StandardCharsets.UTF_8));
+        while ((read = input.read(buffer)) >= 0) builder.append(buffer, 0, read);
       }
       Parsed<T> parsed = parser.parse(builder.toString());
       if (parsed == null || parsed.value == null) return failure(NativeShortVideoFeedPaging.Failure.PARSE);

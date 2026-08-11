@@ -162,6 +162,7 @@ export function createShortVideoCollections(context = {}) {
       }
     });
     document.body.append(overlay);
+    create.input.focus();
     try {
       const collections = await loadCollections();
       if (!overlay.isConnected) return;
@@ -188,7 +189,6 @@ export function createShortVideoCollections(context = {}) {
         });
         list.append(button);
       }
-      create.input.focus();
     } catch (error) {
       if (overlay.isConnected) create.status.textContent = error?.message || "清单读取失败";
     }
