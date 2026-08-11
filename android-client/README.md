@@ -34,7 +34,7 @@ android\app\build\outputs\apk\debug\app-debug.apk
 
 ## Gradle 网络代理
 
-仓库中的 `android\gradle.properties` 必须保持为无代理的默认配置，不能写入 `localhost`、固定代理地址、端口或代理凭据。这样干净构建不会隐式依赖某一台开发机。
+仓库中的 `android\gradle.properties` 必须保持为无代理的默认配置，不能写入 `localhost`、固定代理地址、端口或代理凭据；包括 bare 或带前缀的 `proxyHost`、`proxyPort`、`proxyUser`、`proxyPassword`、`proxyUrl`。这样干净构建不会隐式依赖某一台开发机。
 
 需要代理的开发者只能将自己的配置放到用户级 `%USERPROFILE%\.gradle\gradle.properties`，例如仅在本机添加 `systemProp.http.proxyHost`、`systemProp.http.proxyPort` 及对应 HTTPS 项。也可以在一次命令中临时传入不含凭据的 JVM 属性，例如：
 

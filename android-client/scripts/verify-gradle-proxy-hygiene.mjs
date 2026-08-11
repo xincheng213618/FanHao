@@ -29,7 +29,7 @@ function proxyViolations(text) {
   const violations = [];
   const propertySeparator = String.raw`(?:[ \t\f]*[=:][ \t\f]*|[ \t\f]+)`;
   const proxyProperty = new RegExp(String.raw`(?:^|[\r\n])[ \t\f]*(?:systemProp\.)?(?:http|https|ftp|socks)\.proxy(?:host|port|user|password|nonproxyhosts)?${propertySeparator}`, "i");
-  const namedProxySetting = new RegExp(String.raw`(?:^|[\r\n])[ \t\f]*[A-Za-z][\w.-]*proxy(?:url|host|port|user|password)?${propertySeparator}`, "i");
+  const namedProxySetting = new RegExp(String.raw`(?:^|[\r\n])[ \t\f]*(?:[A-Za-z][\w.-]*)?proxy(?:url|host|port|user|password)?${propertySeparator}`, "i");
   const proxyJvmArgument = /-D(?:http|https|ftp|socks)\.proxy(?:host|port|user|password|nonproxyhosts)?=/i;
   const localEndpoint = /(?:https?:\/\/)?(?:localhost|127\.0\.0\.1)(?::\d+)?/i;
   const credentialInUrl = /https?:\/\/[^\s/@]+@/i;
@@ -51,10 +51,16 @@ function assertFixtures() {
   assert(proxyViolations("repositories { maven { url 'http://localhost:8080/repository' } }").includes("localhost or loopback endpoint"));
   assert(proxyViolations("mavenUrl=https://user:token@proxy.example.test/repository").includes("credential-bearing URL"));
   assert(proxyViolations("mavenUrl=https://token@proxy.example.test/repository").includes("credential-bearing URL"));
+  assert(proxyViolations("serviceProxyUser:fixture-user").includes("proxy setting"));
+  assert(proxyViolations("customProxyPort 8080").includes("proxy setting"));
+  assert.deepEqual(proxyViolations("ordinary proxy password text\n# proxyPassword=comment only\nnotProxyHelper=enabled\n"), []);
   assertTrackedFixture("android-client/android/gradlew", 'DEFAULT_JVM_OPTS="-Dhttp.proxyHost=proxy.example.test"', "proxy JVM argument");
   assertTrackedFixture("android-client/android/gradlew.bat", 'set DEFAULT_JVM_OPTS="-Dhttps.proxyPassword=local-only-secret"', "proxy JVM argument");
   assertTrackedFixture("android-client/android/gradle/wrapper/gradle-wrapper.properties", String.raw`distributionUrl=https\://token@proxy.example.test/gradle.zip`, "credential-bearing URL");
   assertTrackedFixture("android-client/android/gradle/wrapper/gradle-wrapper.properties", String.raw`distributionUrl=https\://user:token@proxy.example.test/gradle.zip`, "credential-bearing URL");
+  assertTrackedFixture("android-client/android/gradle.properties", "proxyPassword=fixture-secret", "proxy setting");
+  assertTrackedFixture("android-client/android/gradle.properties", "PROXYHOST:proxy.example.test", "proxy setting");
+  assertTrackedFixture("android-client/android/gradle.properties", "proxyUrl https://proxy.example.test/repository", "proxy setting");
 }
 
 function assertTrackedFixture(filePath, text, expectedViolation) {
