@@ -40,6 +40,7 @@ DEFAULT_CORE_DB = PROJECT_ROOT / "data" / "fanhao-core-v2.sqlite"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "data"
 SOURCE = "actor_movies"
 DEFAULT_COOKIE_CACHE = None
+PERSON_SAVEPOINT = "refresh_core_javdb_actor_person"
 
 
 def main() -> None:
@@ -68,9 +69,9 @@ def main() -> None:
                     print(f"[{index}/{len(jobs)}] {job['name']} -> {job['actor_url']}", flush=True)
                     crawl = crawl_actor(client, job, args)
                     if args.write:
-                        profile_result = save_profile(conn, job, crawl["profile"], client)
-                        movie_count = save_movies(conn, job, crawl["movies"])
-                        conn.commit()
+                        result = save_person_refresh(conn, job, crawl, client)
+                        profile_result = result["profile"]
+                        movie_count = result["movies"]
                         stats["profiles"] += int(profile_result["profile"])
                         stats["avatars"] += int(profile_result["avatar"])
                         stats["movies"] += movie_count
@@ -98,15 +99,50 @@ def main() -> None:
                     print(f"BLOCKED {job['name']}: {error}", flush=True)
                     break
                 except Exception as error:
+                    error_message = refresh_error_message(error)
                     stats["error"] += 1
-                    write_jsonl(log_path, {"status": "error", "personId": job["id"], "name": job["name"], "error": str(error)})
-                    print(f"ERROR {job['name']}: {error}", flush=True)
+                    write_jsonl(log_path, {"status": "error", "personId": job["id"], "name": job["name"], "error": error_message})
+                    print(f"ERROR {job['name']}: {error_message}", flush=True)
     finally:
         client.close()
 
     print("core actor 刷新结束: " + json.dumps(stats, ensure_ascii=False), flush=True)
     if stats["blocked"] or stats["error"]:
         raise SystemExit(1)
+
+
+def save_person_refresh(conn: sqlite3.Connection, job: dict, crawl: dict, client: JavDbClient) -> dict:
+    conn.execute(f"SAVEPOINT {PERSON_SAVEPOINT}")
+    try:
+        profile_result = save_profile(conn, job, crawl["profile"], client)
+        movie_count = save_movies(conn, job, crawl["movies"])
+        conn.execute(f"RELEASE SAVEPOINT {PERSON_SAVEPOINT}")
+    except Exception as error:
+        rollback_person_refresh(conn, error)
+        raise
+    return {"profile": profile_result, "movies": movie_count}
+
+
+def rollback_person_refresh(conn: sqlite3.Connection, original_error: Exception) -> None:
+    try:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {PERSON_SAVEPOINT}")
+        conn.execute(f"RELEASE SAVEPOINT {PERSON_SAVEPOINT}")
+    except Exception as rollback_error:
+        detail = f"person savepoint rollback failed: {rollback_error}"
+        try:
+            conn.rollback()
+        except Exception as connection_rollback_error:
+            detail += f"; connection rollback also failed: {connection_rollback_error}"
+        else:
+            detail += "; connection rollback succeeded"
+        original_error.rollback_failure = detail
+        if hasattr(original_error, "add_note"):
+            original_error.add_note(detail)
+
+
+def refresh_error_message(error: Exception) -> str:
+    rollback_failure = clean_text(getattr(error, "rollback_failure", ""))
+    return f"{error}; {rollback_failure}" if rollback_failure else str(error)
 
 
 def parse_args() -> argparse.Namespace:

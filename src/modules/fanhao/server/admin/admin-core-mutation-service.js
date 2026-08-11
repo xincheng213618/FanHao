@@ -348,97 +348,108 @@ export function createAdminCoreMutationService({
 
     const corePersonId = Number(person.id);
     const db = getCoreDb();
-    db
-      .prepare(
-        `
-        UPDATE people
-        SET
-          name = COALESCE(NULLIF(?, ''), name),
-          name_search = COALESCE(NULLIF(?, ''), name_search),
-          display_name = COALESCE(NULLIF(?, ''), display_name),
-          gender = ?,
-          movie_count = ?,
-          source = COALESCE(NULLIF(?, ''), source),
-          status = ?,
-          error = ?,
-          updated_at = ?
-        WHERE id = ?
-        `
-      )
-      .run(person.name, normalizePersonSearchValue(person.name), displayName, gender, movieCount, payload.source || existing?.source || "manual", payload.status || "ok", payload.error || null, now, corePersonId);
+    db.exec("SAVEPOINT upsert_actor_profile");
+    try {
+      db
+        .prepare(
+          `
+          UPDATE people
+          SET
+            name = COALESCE(NULLIF(?, ''), name),
+            name_search = COALESCE(NULLIF(?, ''), name_search),
+            display_name = COALESCE(NULLIF(?, ''), display_name),
+            gender = ?,
+            movie_count = ?,
+            source = COALESCE(NULLIF(?, ''), source),
+            status = ?,
+            error = ?,
+            updated_at = ?
+          WHERE id = ?
+          `
+        )
+        .run(person.name, normalizePersonSearchValue(person.name), displayName, gender, movieCount, payload.source || existing?.source || "manual", payload.status || "ok", payload.error || null, now, corePersonId);
 
-    if (hasActorUrlInput) {
-      db.prepare("DELETE FROM person_external_refs WHERE person_id = ? AND provider = 'javdb-actor'").run(corePersonId);
-      const insertRef = db.prepare(
-        `
-        INSERT INTO person_external_refs(person_id, provider, external_key, url, source, created_at, updated_at)
-        VALUES (?, 'javdb-actor', ?, ?, ?, ?, ?)
-        ON CONFLICT(provider, external_key) DO UPDATE SET
-          person_id = excluded.person_id,
-          url = excluded.url,
-          source = excluded.source,
-          updated_at = excluded.updated_at
-        `
-      );
-      for (const url of javdbUrls) {
-        insertRef.run(corePersonId, actorIdFromJavdbUrl(url), url, payload.source || "manual", now, now);
-      }
-    } else if (payload.javdbActorId || existing?.javdb_actor_id) {
-      const actorKey = payload.javdbActorId || existing?.javdb_actor_id || "";
-      const finalJavdbUrl = existing?.javdb_url || (actorKey ? `https://javdb.com/actors/${actorKey}` : "");
-      if (actorKey) {
-        db.prepare(
+      if (hasActorUrlInput) {
+        db.prepare("DELETE FROM person_external_refs WHERE person_id = ? AND provider = 'javdb-actor'").run(corePersonId);
+        const insertRef = db.prepare(
           `
           INSERT INTO person_external_refs(person_id, provider, external_key, url, source, created_at, updated_at)
           VALUES (?, 'javdb-actor', ?, ?, ?, ?, ?)
           ON CONFLICT(provider, external_key) DO UPDATE SET
             person_id = excluded.person_id,
-            url = COALESCE(NULLIF(excluded.url, ''), person_external_refs.url),
+            url = excluded.url,
+            source = excluded.source,
             updated_at = excluded.updated_at
           `
-        ).run(corePersonId, actorKey, finalJavdbUrl, payload.source || "manual", now, now);
+        );
+        for (const url of javdbUrls) {
+          insertRef.run(corePersonId, actorIdFromJavdbUrl(url), url, payload.source || "manual", now, now);
+        }
+      } else if (payload.javdbActorId || existing?.javdb_actor_id) {
+        const actorKey = payload.javdbActorId || existing?.javdb_actor_id || "";
+        const finalJavdbUrl = existing?.javdb_url || (actorKey ? `https://javdb.com/actors/${actorKey}` : "");
+        if (actorKey) {
+          db.prepare(
+            `
+            INSERT INTO person_external_refs(person_id, provider, external_key, url, source, created_at, updated_at)
+            VALUES (?, 'javdb-actor', ?, ?, ?, ?, ?)
+            ON CONFLICT(provider, external_key) DO UPDATE SET
+              person_id = excluded.person_id,
+              url = COALESCE(NULLIF(excluded.url, ''), person_external_refs.url),
+              updated_at = excluded.updated_at
+            `
+          ).run(corePersonId, actorKey, finalJavdbUrl, payload.source || "manual", now, now);
+        }
       }
-    }
 
-    if (hasAliasesInput) {
-      const aliasSource = payload.source || "manual";
-      db.prepare("DELETE FROM person_aliases WHERE person_id = ? AND source = ?").run(corePersonId, aliasSource);
-      const insertAlias = db.prepare("INSERT OR IGNORE INTO person_aliases(person_id, alias, alias_search, source) VALUES (?, ?, ?, ?)");
-      for (const alias of aliases) insertAlias.run(corePersonId, alias, normalizePersonSearchValue(alias), aliasSource);
-    }
+      if (hasAliasesInput) {
+        const aliasSource = payload.source || "manual";
+        db.prepare("DELETE FROM person_aliases WHERE person_id = ? AND source = ?").run(corePersonId, aliasSource);
+        const insertAlias = db.prepare("INSERT OR IGNORE INTO person_aliases(person_id, alias, alias_search, source) VALUES (?, ?, ?, ?)");
+        for (const alias of aliases) insertAlias.run(corePersonId, alias, normalizePersonSearchValue(alias), aliasSource);
+      }
 
-    const avatarUrl = payload.sourceAvatarUrl || payload.avatarUrl || existing?.avatar_url || "";
-    if (avatarBlob || avatarUrl) {
-      db.prepare(
-        `
-        INSERT INTO fanhao_images.images (
-          owner_type, owner_id, kind, source_type, remote_url, mime, image_blob, byte_size,
-          sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
-        )
-        VALUES ('person', ?, 'avatar', ?, ?, ?, ?, ?, 0, 'ok', ?, 'manual', ?, ?, ?)
-        ON CONFLICT DO UPDATE SET
-          remote_url = excluded.remote_url,
-          mime = COALESCE(excluded.mime, images.mime),
-          image_blob = COALESCE(excluded.image_blob, images.image_blob),
-          byte_size = COALESCE(excluded.byte_size, images.byte_size),
-          status = excluded.status,
-          source = excluded.source,
-          legacy_table = excluded.legacy_table,
-          legacy_key = excluded.legacy_key,
-          updated_at = excluded.updated_at
-        `
-      ).run(
-        corePersonId,
-        avatarUrl.startsWith("http://") || avatarUrl.startsWith("https://") ? "remote" : avatarUrl ? "local" : "unknown",
-        avatarUrl,
-        avatarMime || "image/jpeg",
-        avatarBlob,
-        avatarBlob?.length || null,
-        payload.source || "manual",
-        person.id,
-        now,
-        now
-      );
+      const avatarUrl = payload.sourceAvatarUrl || payload.avatarUrl || existing?.avatar_url || "";
+      if (avatarBlob || avatarUrl) {
+        db.prepare(
+          `
+          INSERT INTO fanhao_images.images (
+            owner_type, owner_id, kind, source_type, remote_url, mime, image_blob, byte_size,
+            sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
+          )
+          VALUES ('person', ?, 'avatar', ?, ?, ?, ?, ?, 0, 'ok', ?, 'manual', ?, ?, ?)
+          ON CONFLICT DO UPDATE SET
+            remote_url = excluded.remote_url,
+            mime = COALESCE(excluded.mime, images.mime),
+            image_blob = COALESCE(excluded.image_blob, images.image_blob),
+            byte_size = COALESCE(excluded.byte_size, images.byte_size),
+            status = excluded.status,
+            source = excluded.source,
+            legacy_table = excluded.legacy_table,
+            legacy_key = excluded.legacy_key,
+            updated_at = excluded.updated_at
+          `
+        ).run(
+          corePersonId,
+          avatarUrl.startsWith("http://") || avatarUrl.startsWith("https://") ? "remote" : avatarUrl ? "local" : "unknown",
+          avatarUrl,
+          avatarMime || "image/jpeg",
+          avatarBlob,
+          avatarBlob?.length || null,
+          payload.source || "manual",
+          person.id,
+          now,
+          now
+        );
+      }
+      db.exec("RELEASE SAVEPOINT upsert_actor_profile");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK TO SAVEPOINT upsert_actor_profile; RELEASE SAVEPOINT upsert_actor_profile;");
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], "Actor profile update failed and its transaction could not be rolled back");
+      }
+      throw error;
     }
 
     if (hasActorUrlInput) {

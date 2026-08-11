@@ -241,32 +241,43 @@ export function createActorAvatarService({
     const buffer = fs.readFileSync(entry.fullPath);
     const corePersonId = Number(person.id);
     const db = getCoreDb();
-    db.prepare(
-      `
-      UPDATE people
-      SET display_name = COALESCE(display_name, ?),
-          updated_at = ?
-      WHERE id = ?
-      `
-    ).run(existing?.display_name || person.name, now, corePersonId);
-    db.prepare(
-      `
-      INSERT INTO fanhao_images.images (
-        owner_type, owner_id, kind, source_type, local_path, mime, image_blob, byte_size,
-        sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
-      )
-      VALUES ('person', ?, 'avatar', 'local', ?, ?, ?, ?, 0, 'ok', ?, 'local-avatar', ?, ?, ?)
-      ON CONFLICT DO UPDATE SET
-        mime = excluded.mime,
-        image_blob = excluded.image_blob,
-        byte_size = excluded.byte_size,
-        status = excluded.status,
-        source = excluded.source,
-        legacy_table = excluded.legacy_table,
-        legacy_key = excluded.legacy_key,
-        updated_at = excluded.updated_at
-      `
-    ).run(corePersonId, entry.fullPath, entry.mime, buffer, buffer.length, localAvatarSource, person.id, now, now);
+    db.exec("SAVEPOINT upsert_actor_avatar");
+    try {
+      db.prepare(
+        `
+        UPDATE people
+        SET display_name = COALESCE(display_name, ?),
+            updated_at = ?
+        WHERE id = ?
+        `
+      ).run(existing?.display_name || person.name, now, corePersonId);
+      db.prepare(
+        `
+        INSERT INTO fanhao_images.images (
+          owner_type, owner_id, kind, source_type, local_path, mime, image_blob, byte_size,
+          sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
+        )
+        VALUES ('person', ?, 'avatar', 'local', ?, ?, ?, ?, 0, 'ok', ?, 'local-avatar', ?, ?, ?)
+        ON CONFLICT DO UPDATE SET
+          mime = excluded.mime,
+          image_blob = excluded.image_blob,
+          byte_size = excluded.byte_size,
+          status = excluded.status,
+          source = excluded.source,
+          legacy_table = excluded.legacy_table,
+          legacy_key = excluded.legacy_key,
+          updated_at = excluded.updated_at
+        `
+      ).run(corePersonId, entry.fullPath, entry.mime, buffer, buffer.length, localAvatarSource, person.id, now, now);
+      db.exec("RELEASE SAVEPOINT upsert_actor_avatar");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK TO SAVEPOINT upsert_actor_avatar; RELEASE SAVEPOINT upsert_actor_avatar;");
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], "Actor avatar update failed and its transaction could not be rolled back");
+      }
+      throw error;
+    }
   }
 
   function importCandidate(rootPath, personId, relPath, options = {}) {

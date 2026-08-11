@@ -7,6 +7,7 @@ import { createCoreDbService } from "../src/modules/fanhao/server/library/core-d
 import { readTableStampRow } from "../src/modules/fanhao/server/library/table-stamp-query.js";
 import { createManualCoverStateService } from "../src/modules/fanhao/server/works/manual-cover-state-service.js";
 import { attachCoreImageStore } from "../src/platform/server/core-image-store.js";
+import { verifyActorProfileAtomicity } from "./verify_actor_profile_atomicity.mjs";
 import { verifyDestructiveImageMigrations } from "./verify_destructive_image_migrations.mjs";
 import { removeVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
@@ -77,6 +78,7 @@ try {
   verifyImageSchemaInitializationRetry(tempDir);
   verifyCoreDbInitializationRetry(tempDir);
   verifyManualAvatarRollback(tempDir);
+  verifyActorProfileAtomicity();
   verifyDestructiveImageMigrations();
   console.log("core image store verification passed");
 } finally {

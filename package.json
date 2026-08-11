@@ -18,7 +18,7 @@
     "verify:metadata": "node tools/verify_metadata_parsers.mjs",
     "verify:javdb-card-facts": "python tools/verify_javdb_card_facts.py",
     "verify:library-merge": "node tools/verify_library_merge.mjs",
-    "verify:core-images": "node tools/verify_core_image_store.mjs",
+    "verify:core-images": "node tools/verify_core_image_store.mjs && python tools/verify_refresh_core_javdb_actor_movies_atomicity.py",
     "verify:gallery-db": "node tools/verify_image_gallery_db.mjs",
     "verify:image-library": "node tools/verify_image_library_service.mjs && node tools/verify_image_library_performance.mjs && node tools/verify_cache_index_contracts.mjs && node tools/verify_rescan_image_library.mjs",
     "verify:photo-reader": "node tools/verify_photo_reader_clients.mjs",
