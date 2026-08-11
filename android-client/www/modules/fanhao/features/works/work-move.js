@@ -1,5 +1,5 @@
 import { fetchJson } from "../../../../js/api.js?v=20260706-mobile-web-sync-01";
-import { clearCachedJsonByPrefix } from "../../../../js/cache.js?v=20260812-android-integrated-01";
+import { clearCachedJsonByPrefix } from "../../../../js/cache.js?v=20260812-android-work-move-02";
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "cleanup_pending", "rollback_pending"]);
 

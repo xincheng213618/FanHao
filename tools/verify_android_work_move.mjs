@@ -45,6 +45,7 @@ assert.match(source, /trackOverlay\(close\)/, "navigation detach must close all 
 assert.match(source, /listenAbort\(attached\?\.controller\?\.signal, close\)/, "move dialogs must close when their route guard aborts");
 assert.match(source, /installModalFocusTrap/, "Android move dialogs must trap focus at document scope");
 assert.doesNotMatch(source, /targetDirectory|targetPath|rootPath/, "Android must never construct or submit a filesystem path");
+assert.match(source, /cache\.js\?v=20260812-android-work-move-02/, "Android move cache invalidation must share the integrated application module version");
 assert.match(read("android-client/www/modules/fanhao/features/works/actions.js"), /迁移作品 \/ 查看状态/, "work detail must expose the durable move action from its More menu");
 assert.match(read("android-client/www/modules/fanhao/android-module.js"), /handleBack: \(\) => detailViews\.handleBack/, "native Android back must close a work-move dialog before leaving its detail route");
 assert.match(read("src/modules/fanhao/server/works/routes-api.js"), /move-targets[\s\S]{0,500}requireLocalAdmin/, "server target list must keep the local-admin boundary");
