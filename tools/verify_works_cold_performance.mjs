@@ -185,6 +185,10 @@ function verifySemanticEquivalence() {
     insertActorRow(db, { id: 6, personId: 5, code: "MIX-002", codeSearch: "MiX002", title: "legacy mixed-case code_search" });
     insertActorRow(db, { id: 7, personId: 6, code: "HYP-003", codeSearch: "HYP-003", title: "legacy hyphenated code_search" });
     insertActorRow(db, { id: 8, personId: 7, code: "SPC-004", codeSearch: " SPC004 ", title: "legacy spaced code_search" });
+    insertActorRow(db, { id: 9, personId: 8, code: "PAR(001)", codeSearch: "par(001)", title: "legacy parenthesized code_search" });
+    insertActorRow(db, { id: 10, personId: 9, code: "PLS+002", codeSearch: "pls+002", title: "legacy plus code_search" });
+    insertActorRow(db, { id: 11, personId: 10, code: "COL:003", codeSearch: "col:003", title: "legacy colon code_search" });
+    insertActorRow(db, { id: 12, personId: 11, code: "BRK[004]", codeSearch: "brk[004]", title: "legacy bracketed code_search" });
 
     db.exec("BEGIN");
     for (let index = 0; index < 1_205; index += 1) {
@@ -200,6 +204,10 @@ function verifySemanticEquivalence() {
       { id: "local-mixed-case", title: "MIX-002", infoSummary: null },
       { id: "local-hyphenated", title: "hyp-003", infoSummary: null },
       { id: "local-spaced", title: "SPC-004", infoSummary: null },
+      { id: "local-parenthesized", title: "PAR-001", infoSummary: null },
+      { id: "local-plus", title: "PLS-002", infoSummary: null },
+      { id: "local-colon", title: "COL-003", infoSummary: null },
+      { id: "local-bracketed", title: "BRK-004", infoSummary: null },
       { id: "local-empty", title: "", infoSummary: null },
       { id: "local-invalid", title: "1080p", infoSummary: null },
       ...Array.from({ length: 1_205 }, (_, index) => ({
@@ -227,8 +235,12 @@ function verifySemanticEquivalence() {
     assert.equal(parsed[3].infoSummary.title, "legacy mixed-case code_search", "mixed-case stored code_search must preserve old normalization semantics");
     assert.equal(parsed[4].infoSummary.title, "legacy hyphenated code_search", "hyphenated stored code_search must preserve old normalization semantics");
     assert.equal(parsed[5].infoSummary.title, "legacy spaced code_search", "spaced stored code_search must preserve old normalization semantics");
-    assert.equal(parsed[6].infoSummary, null, "empty local codes must remain unenriched");
-    assert.equal(parsed[7].infoSummary, null, "invalid local codes must remain unenriched");
+    assert.equal(parsed[6].infoSummary.title, "legacy parenthesized code_search", "parenthesized stored code_search must preserve old normalization semantics");
+    assert.equal(parsed[7].infoSummary.title, "legacy plus code_search", "plus-delimited stored code_search must preserve old normalization semantics");
+    assert.equal(parsed[8].infoSummary.title, "legacy colon code_search", "colon-delimited stored code_search must preserve old normalization semantics");
+    assert.equal(parsed[9].infoSummary.title, "legacy bracketed code_search", "bracketed stored code_search must preserve old normalization semantics");
+    assert.equal(parsed[10].infoSummary, null, "empty local codes must remain unenriched");
+    assert.equal(parsed[11].infoSummary, null, "invalid local codes must remain unenriched");
     assert.equal(parsed.at(-1).infoSummary, null, "duplicate local code keys must enrich only the old first local work");
 
     const batchQueries = queryLog.filter((sql) => sql.includes("WHERE w.code_search IN"));
@@ -236,6 +248,7 @@ function verifySemanticEquivalence() {
     assert(batchQueries.every((sql) => (sql.match(/\?/g) || []).length <= 900), "each SQLite parameter batch must stay below the configured bound");
     assert(batchQueries.every((sql) => !sql.includes("LOWER(w.code_search) IN")), "the primary narrow lookup must retain the BINARY code_search index predicate");
     assert(queryLog.some((sql) => sql.includes("w.code_search <> LOWER(w.code_search)")), "the compatibility query must select uppercase and mixed-case stored keys for old normalization semantics");
+    assert(queryLog.some((sql) => sql.includes("w.code_search GLOB '*[^A-Za-z0-9]*'")), "the compatibility query must select every stored key containing non-canonical punctuation");
 
     let failNextNarrow = true;
     const recoveryLog = [];
