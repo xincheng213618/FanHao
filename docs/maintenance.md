@@ -41,6 +41,8 @@ Windows 下推荐使用自带脚本：
 | `batch-import-actors` | 批量导入演员资料 | JavDB | 按本地人物搜索并缓存 JavDB 头像、别名、映射。 |
 | `ranking-cache` | 排行榜缓存 | 缓存 | 抓取 JavDB 排行榜写入本地缓存。 |
 | `image-library-rescan` | 刷新图库索引 | 图库 | 重建套图 / 电影 / 电视剧索引（只更新 `image-library-index.json`）；欧美由核心番号库扫描。 |
+| `tuimzz-photo-sync` | 检查微密圈套图更新 | 图库 | 对照 tuimzz 与 `T:\微密圈`，生成需要更新、本地缺失和百度云链接报告；不下载、不解压。 |
+| `tuimzz-photo-import` | 导入微密圈下载 | 图库 | 预检并把明确编号的 7z 下载转换成无密码 RAR；默认 dry-run，保留全部下载原件。 |
 | `core-local-scan` | 核心本地扫描 | 本地 | 把本地根目录按人物 / 作品写入核心 SQLite。 |
 | `douban-tv-metadata` | 补全电视剧豆瓣资料 | 图库 | 从豆瓣补电视剧封面 / 评分 / 简介 / 演员。 |
 | `douban-movie-metadata` | 补全电影豆瓣资料 | 图库 | 用可视 Chrome 从豆瓣补电影资料。 |
@@ -97,3 +99,41 @@ python tools/full_scan_core_library.py --scope western --write --changed-only
 ```
 
 具体参数以 `lib/admin-script-registry.js` 中各脚本的 `fields` 定义为准（每个字段都映射到命令行 flag）。
+
+### 微密圈套图更新检查
+
+固定目录格式为 `T:\微密圈\[人物名]\套图名称.rar`。历史目录不会被自动重命名；同步脚本会兼容方括号、常见来源后缀和旧 `artfilepath.csv` 映射。运行结果写到 `T:\微密圈\_catalog`：
+
+```powershell
+python tools\sync_tuimzz_photo_sets.py
+```
+
+解析“立即下载”后的百度云链接需要已登录 Cookie。Cookie 只从 `TUIMZZ_COOKIE` 环境变量或本机文件读取，不要把 Cookie 直接写进命令行参数。默认文件位置是：
+
+```text
+T:\微密圈\_catalog\tuimzz-cookie.txt
+```
+
+保存好 Cookie 后运行：
+
+```powershell
+python tools\sync_tuimzz_photo_sets.py --resolve-links
+```
+
+脚本只生成 `latest.html`、`latest.csv`、`latest.json` 和时间戳快照，不会访问网盘文件列表、下载、解压或改动现有 RAR。若 `latest.csv` 正被 Excel 占用，JSON/HTML 仍会更新，新 CSV 暂存为 `latest.pending.csv`；关闭 Excel 后再运行一次即可恢复覆盖正式文件。下载后的整理与图库索引刷新必须作为单独作业执行。
+
+### 微密圈下载安全导入
+
+下载目录名使用网盘根目录编号（如 `285`、`389A`），可以位于 `D:\`；staging 与执行清单分别写到 `D:\Taotu\.staging` 和 `D:\Taotu\manifests`。先运行预览：
+
+```powershell
+python tools\import_tuimzz_downloads.py --roots 285 389A
+```
+
+确认映射、重复包和待导入数量后再执行：
+
+```powershell
+python tools\import_tuimzz_downloads.py --roots 285 389A --workers 2 --execute
+```
+
+导入器只处理 T 盘缺少的序号；同序号重复 7z 必须逐字节哈希一致才会跳过。同名 RAR 内容不同会保留在 staging 并标记冲突，绝不会覆盖旧文件。每个新 RAR 都经过 UnRAR 完整测试、图片或视频成员检查和跨盘 SHA-256 校验；纯视频包允许图片数为 0。源 7z 始终保留，导入完成后另行运行“刷新图库索引”（范围选“只扫套图”）。密码优先读取 `TAOTU_ARCHIVE_PASSWORD`，否则只读解析旧 `Tool\unzip.py` 的 `DEFAULT_PASSWORD`；密码不会进入新源码、命令输出或 manifest。
