@@ -39,8 +39,10 @@ android\app\build\outputs\apk\debug\app-debug.apk
 需要代理的开发者只能将自己的配置放到用户级 `%USERPROFILE%\.gradle\gradle.properties`，例如仅在本机添加 `systemProp.http.proxyHost`、`systemProp.http.proxyPort` 及对应 HTTPS 项。也可以在一次命令中临时传入不含凭据的 JVM 属性，例如：
 
 ```powershell
-.\android\gradlew.bat --no-daemon help -Dhttp.proxyHost=proxy.example.test -Dhttp.proxyPort=8080 -Dhttps.proxyHost=proxy.example.test -Dhttps.proxyPort=8080
+.\android\gradlew.bat --% -p .\android --no-daemon -Dhttp.proxyHost=proxy.example.test -Dhttp.proxyPort=8080 -Dhttps.proxyHost=proxy.example.test -Dhttps.proxyPort=8080 help
 ```
+
+`--%` 是 PowerShell 的停止解析记号，避免 `-Dhttp.proxyHost` 被 PowerShell 截断；该命令从 `android-client` 目录运行，`-p .\android` 显式指定 Gradle 项目目录。
 
 不要把代理配置复制到仓库、脚本、提交信息或可共享的终端历史中；尤其不得提交 `proxyUser`、`proxyPassword`，或把用户名/密码嵌入代理 URL。需要认证代理时，请使用受本机保护的用户级配置或组织规定的凭据管理方式。
 
