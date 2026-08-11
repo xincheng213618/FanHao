@@ -1012,10 +1012,17 @@ export function createWorkMoveJobService({
   }
 
   function runWorker(jobId, operation, plan) {
-    if (fencedJobs.has(jobId)) return Promise.reject(claimLostError());
+    if (closing || fencedJobs.has(jobId)) throw claimLostError();
     assertAndroidTargetIdentity(plan, {
       allowCurrentDestination: ["isolate", "cleanup", "restore"].includes(operation)
     });
+    // The fresh DB/filesystem preflight above is synchronous but another
+    // process may take over the durable lease while it runs.  Renew with the
+    // current owner+version CAS immediately before constructing the worker;
+    // heartbeat callbacks cannot interleave this synchronous boundary.
+    if (closing || fencedJobs.has(jobId) || renewLease(jobId) !== true || closing || fencedJobs.has(jobId)) {
+      throw claimLostError();
+    }
     return new Promise((resolve, reject) => {
       const worker = new workerClass(workerUrl, {
         workerData: {

@@ -1389,6 +1389,94 @@ async function verifyAndroidMoveCompletesAcrossPostCommitWorkers({ forceCopy }) 
   db.close();
 }
 
+async function verifyWorkerStartFenceBoundary(kind) {
+  const fixture = await createFixture(`worker-start-fence-${kind}`, 2);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  admin.plan.androidCommand = true;
+  admin.plan.personDirPhysicalKey = path.resolve(fixture.targetPerson).toLowerCase();
+  admin.plan.newDirPhysicalKey = path.resolve(fixture.target).toLowerCase();
+  admin.assertWorkMoveTarget = () => ({ id: "target", personDir: fixture.targetPerson, targetDir: fixture.target });
+  let failRenew = false;
+  const jobDb = kind === "busy"
+    ? {
+      exec: db.exec.bind(db),
+      prepare(sql) {
+        const statement = db.prepare(sql);
+        if (!String(sql).includes("SET lease_until = ?, version = version + 1")) return statement;
+        return {
+          run(...args) {
+            if (failRenew) {
+              failRenew = false;
+              const error = new Error("fixture worker-start renew busy");
+              error.code = "SQLITE_BUSY";
+              throw error;
+            }
+            return statement.run(...args);
+          }
+        };
+      }
+    }
+    : db;
+  let service = null;
+  let closePromise = null;
+  let preflightReached = false;
+  admin.assertAndroidWorkMoveTargetIdentity = (plan) => {
+    preflightReached = true;
+    if (kind === "takeover") {
+      db.prepare(`
+        UPDATE work_move_jobs
+        SET owner_id = 'move-owner-999999-fixture-takeover',
+            lease_until = '2999-01-01T00:00:00.000Z', version = version + 1
+        WHERE id = ?
+      `).run(plan.jobId);
+    } else if (kind === "busy") {
+      failRenew = true;
+    } else if (kind === "close") {
+      closePromise ||= service.close();
+    }
+    return { valid: true };
+  };
+  let workerStarts = 0;
+  class MustNotStartWorker extends Worker {
+    constructor(url, options) {
+      workerStarts += 1;
+      super(url, options);
+    }
+  }
+  let busyWarning = false;
+  service = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => jobDb,
+    warn: (label) => {
+      if (kind === "busy" && label === "[work-move-stage-busy]") {
+        busyWarning = true;
+        closePromise ||= service.close();
+      }
+    },
+    workerClass: MustNotStartWorker
+  });
+  const started = service.start("1", { personId: "target", idempotencyKey: `worker-start-fence-${kind}` }, { android: true });
+  await waitForCondition(
+    () => kind === "takeover"
+      ? db.prepare("SELECT owner_id FROM work_move_jobs WHERE id = ?").get(started.id)?.owner_id === "move-owner-999999-fixture-takeover"
+      : kind === "busy" ? busyWarning : preflightReached && Boolean(closePromise),
+    `${kind} worker-start fence did not reach its deterministic boundary`
+  );
+  if (kind === "takeover") await service.close();
+  else await closePromise;
+  assert.equal(workerStarts, 0, `${kind} worker-start fence must fail before constructing a Worker`);
+  assert.equal(fs.existsSync(fixture.source), true);
+  assert.equal(fs.existsSync(fixture.target), false);
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.source));
+  const durable = db.prepare("SELECT status, phase, owner_id, plan_json FROM work_move_jobs WHERE id = ?").get(started.id);
+  assert.ok(["running", "queued"].includes(durable.status), `${kind} must retain a recoverable durable job`);
+  assert.notEqual(durable.plan_json, "");
+  if (kind === "takeover") assert.equal(durable.owner_id, "move-owner-999999-fixture-takeover", "the old service must not overwrite the new owner");
+  else assert.equal(durable.owner_id, "", `${kind} must leave the job claim available for recovery`);
+  db.close();
+}
+
 async function verifyPhysicalTargetDriftBlocksUnsafeRollback({ forceCopy }) {
   const mode = forceCopy ? "copy" : "rename";
   const fixture = await createFixture(`physical-drift-${mode}`, 5);
@@ -2845,6 +2933,9 @@ try {
   await verifyRollbackOnDatabaseFailure();
   await verifyAndroidMoveCompletesAcrossPostCommitWorkers({ forceCopy: true });
   await verifyAndroidMoveCompletesAcrossPostCommitWorkers({ forceCopy: false });
+  await verifyWorkerStartFenceBoundary("takeover");
+  await verifyWorkerStartFenceBoundary("busy");
+  await verifyWorkerStartFenceBoundary("close");
   await verifyPhysicalTargetDriftBlocksUnsafeRollback({ forceCopy: true });
   await verifyPhysicalTargetDriftBlocksUnsafeRollback({ forceCopy: false });
   await verifyPhysicalDriftRecoveryBlocksBeforeWorker({ forceCopy: true });
