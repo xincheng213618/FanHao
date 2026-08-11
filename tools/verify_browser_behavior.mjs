@@ -29,6 +29,7 @@ try {
     await verifyAuthorReturnDiscardsDelayedError(browser);
     await verifyDirectAuthorDeepLink(browser);
     await verifyAndroidCollectionPicker(browser);
+    await verifyAndroidCollectionRefresh(browser);
     await verifyShortVideoCollections(browser);
   } finally {
     await browser.close();
@@ -148,6 +149,144 @@ async function verifyAndroidCollectionPicker(browser) {
     await page.keyboard.press("Escape");
     await failedPicker.waitFor({ state: "detached", timeout: 5000 });
     assert.equal(await page.locator("#android-picker-trigger").evaluate((element) => document.activeElement === element), true, "Android picker must restore trigger focus when closing after a failed request");
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyAndroidCollectionRefresh(browser) {
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  try {
+    await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
+    const result = await page.evaluate(async () => {
+      const { createShortVideoCollections } = await import("/android-client/modules/short-videos/collections/controller.js?refresh-fixture=1");
+      let serviceCollections = [{ id: "stale", name: "已删除清单", itemCount: 0 }];
+      let requestCount = 0;
+      let nextRequestGate = null;
+      let resolveCreatedCollection;
+      const createdCollectionNavigation = new Promise((resolve) => {
+        resolveCreatedCollection = resolve;
+      });
+      const controller = createShortVideoCollections({
+        api: {
+          fetch: (_base, requestPath, options = {}) => {
+            if (requestPath !== "/api/short-videos/collections") {
+              throw new Error(`unexpected Android collection fixture request: ${requestPath}`);
+            }
+            const method = String(options?.method || "GET").toUpperCase();
+            if (method === "POST") {
+              const collection = {
+                id: "created-during-refresh",
+                name: String(options?.body?.name || ""),
+                itemCount: 0
+              };
+              serviceCollections = [...serviceCollections, collection];
+              return Promise.resolve({ collection: { ...collection } });
+            }
+            if (method !== "GET") throw new Error(`unexpected Android collection fixture method: ${method}`);
+            requestCount += 1;
+            const payload = {
+              collections: serviceCollections.map((collection) => ({ ...collection })),
+              total: serviceCollections.length
+            };
+            const gate = nextRequestGate;
+            nextRequestGate = null;
+            return gate ? gate.then(() => payload) : Promise.resolve(payload);
+          }
+        },
+        els: {
+          viewContent: document.getElementById("fixture"),
+          viewKicker: document.createElement("div"),
+          viewMeta: document.createElement("div"),
+          viewTitle: document.createElement("div")
+        },
+        getActiveUrl: () => location.origin,
+        openNativeShortVideoFeed: () => false,
+        renderCard: () => document.createElement("div"),
+        setActiveBottom() {},
+        shortVideoToast() {},
+        showView(view, params) {
+          if (view === "shortVideoCollection") resolveCreatedCollection(params?.collectionId || "");
+        }
+      });
+
+      await controller.renderCollections();
+      const initiallyLoadedIds = [...document.querySelectorAll(".short-video-mobile-collection-row")]
+        .map((element) => element.dataset.collectionId);
+
+      serviceCollections = [];
+      await controller.renderCollections();
+      const refreshedPageIds = [...document.querySelectorAll(".short-video-mobile-collection-row")]
+        .map((element) => element.dataset.collectionId);
+      const refreshedPageEmpty = document.querySelector(".short-video-mobile-empty")?.textContent || "";
+
+      serviceCollections = [{ id: "picker-fresh", name: "服务端新清单", itemCount: 2 }];
+      await controller.showCollectionPicker({ id: "fixture-video", streamUrl: "/media/fixture-video.mp4" });
+      const refreshedPickerIds = [...document.querySelectorAll(".short-video-mobile-collection-picker-list button")]
+        .map((element) => element.dataset.collectionId);
+
+      serviceCollections = [{ id: "shared-refresh", name: "并发刷新清单", itemCount: 3 }];
+      let releaseRequest;
+      nextRequestGate = new Promise((resolve) => {
+        releaseRequest = resolve;
+      });
+      const beforeConcurrentRefresh = requestCount;
+      const pageRefresh = controller.renderCollections();
+      const pickerRefresh = controller.showCollectionPicker({ id: "fixture-video", streamUrl: "/media/fixture-video.mp4" });
+      const concurrentRequestCount = requestCount - beforeConcurrentRefresh;
+      releaseRequest();
+      await Promise.all([pageRefresh, pickerRefresh]);
+      const concurrentPageIds = [...document.querySelectorAll(".short-video-mobile-collection-row")]
+        .map((element) => element.dataset.collectionId);
+      const concurrentPickerIds = [...document.querySelectorAll(".short-video-mobile-collection-picker-list button")]
+        .map((element) => element.dataset.collectionId);
+
+      serviceCollections = [];
+      let releaseMutationRace;
+      nextRequestGate = new Promise((resolve) => {
+        releaseMutationRace = resolve;
+      });
+      const mutationRacePage = controller.renderCollections();
+      const createInput = document.querySelector("#fixture .short-video-mobile-collection-create input");
+      createInput.value = "刷新中创建";
+      createInput.form.requestSubmit();
+      const createdCollectionId = await createdCollectionNavigation;
+      serviceCollections = [];
+      releaseMutationRace();
+      await mutationRacePage;
+      const mutationRaceIds = [...document.querySelectorAll(".short-video-mobile-collection-row")]
+        .map((element) => element.dataset.collectionId);
+
+      await controller.renderCollections();
+      const afterMutationDeleteIds = [...document.querySelectorAll(".short-video-mobile-collection-row")]
+        .map((element) => element.dataset.collectionId);
+
+      return {
+        afterMutationDeleteIds,
+        concurrentPageIds,
+        concurrentPickerIds,
+        concurrentRequestCount,
+        createdCollectionId,
+        initiallyLoadedIds,
+        mutationRaceIds,
+        refreshedPageEmpty,
+        refreshedPageIds,
+        refreshedPickerIds,
+        requestCount
+      };
+    });
+
+    assert.deepEqual(result.initiallyLoadedIds, ["stale"], "Android collection fixture must first enter the loaded cache state");
+    assert.deepEqual(result.refreshedPageIds, [], "re-entering the Android collection index must discard a collection deleted by another client");
+    assert.equal(result.refreshedPageEmpty, "还没有清单", "the refreshed Android collection index must render the server's empty list");
+    assert.deepEqual(result.refreshedPickerIds, ["picker-fresh"], "opening the Android picker must refresh collections after the server list changes");
+    assert.equal(result.concurrentRequestCount, 1, "concurrent Android index and picker refreshes must share one in-flight request");
+    assert.deepEqual(result.concurrentPageIds, ["shared-refresh"], "the Android collection index must render the shared refresh result");
+    assert.deepEqual(result.concurrentPickerIds, ["shared-refresh"], "the Android picker must render the shared refresh result");
+    assert.equal(result.createdCollectionId, "created-during-refresh", "the Android collection form must complete while the preceding refresh is pending");
+    assert.deepEqual(result.mutationRaceIds, ["created-during-refresh"], "a stale pending refresh must merge a collection created after that request started");
+    assert.deepEqual(result.afterMutationDeleteIds, [], "a later refresh must trust a server deletion after the local creation revision is covered");
+    assert.equal(result.requestCount, 6, "each separate Android collection entry must refresh while only concurrent entries stay de-duplicated");
   } finally {
     await page.close();
   }

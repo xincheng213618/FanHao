@@ -684,6 +684,7 @@ for (const style of ["list"]) {
 }
 
 const androidEntrySource = readNormalized(path.join(moduleDir, "android-module.js"));
+const androidIndexSource = readNormalized(path.join(moduleDir, "index.js"));
 const androidApiSource = readNormalized(path.join(moduleDir, "api.js"));
 const androidTransportSource = readNormalized(path.join(root, "android-client", "www", "js", "api.js"));
 const androidCollectionsSource = readNormalized(path.join(moduleDir, "collections", "controller.js"));
@@ -711,6 +712,9 @@ assert(androidEntrySource.includes('view: "shortVideoSearch"'), "Android short-v
 assert(androidEntrySource.includes('view: "shortVideoCollections"') && androidEntrySource.includes('view: "shortVideoCollection"') && androidEntrySource.includes('textContent = "清单"'), "Android short videos must expose stable collection index/detail routes and a direct chrome entry");
 assert(androidCollectionsSource.includes('method: "POST"') && androidCollectionsSource.includes('method: "PUT"') && androidCollectionsSource.includes('method: "DELETE"') && androidCollectionsSource.includes("feedUrl: new URL(feedPath"), "Android collections must create, add, remove, and open the same paged feed contract without native permissions");
 assert(androidCollectionsSource.includes("retryShortVideoCollectionRequest") && androidCollectionsSource.includes("const collectionApi ="), "Android collection requests must use the bounded BUSY retry helper");
+assert.equal(androidCollectionsSource.match(/await loadCollections\(true\)/g)?.length, 2, "Android collection index entry and picker opening must bypass the loaded snapshot while sharing the in-flight request");
+assert(androidCollectionsSource.includes("collectionMutationRevision") && androidCollectionsSource.includes("mergeCollectionRefresh(data?.collections, requestRevision)") && androidCollectionsSource.includes("mutation.revision <= requestRevision") && androidCollectionsSource.includes("rememberCollectionMutation(result.collection)"), "Android collection refreshes must merge local creations made after a pending server snapshot without retaining them past a later refresh");
+assert(androidEntrySource.includes("./index.js?v=20260812-collection-refresh-01") && androidIndexSource.includes("./collections/controller.js?v=20260812-collection-refresh-01"), "Android collection refresh changes must propagate through the module cache-version chain");
 assert(androidCollectionRequestSource.includes("Number(error?.status) === 503") && androidCollectionRequestSource.includes("error?.retryable === true") && androidCollectionRequestSource.includes("3100"), "Android collection retries must be finite and limited to explicitly retryable 503 responses");
 assert(androidTransportSource.includes("error.status = response.status") && androidTransportSource.includes("payload.retryable === true"), "Android transport errors must retain sanitized collection retry metadata");
 assert(androidCollectionsSource.includes('params = new URLSearchParams({ limit: String(COLLECTION_PAGE_LIMIT), cursor })') && androidCollectionsSource.includes("mergeUniqueVideos(previousVideos, page.videos)") && androidCollectionsSource.includes("appendCollectionCursorBoundary("), "Android collection management must append every cursor page, de-duplicate video ids, and retain trusted continuation boundaries");

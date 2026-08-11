@@ -20,14 +20,17 @@ export function createShortVideoCollections(context = {}) {
   let collectionRenderId = 0;
   let collectionsRequest = null;
   let collectionPageRequest = null;
+  let collectionMutationRevision = 0;
+  const pendingCollectionMutations = new Map();
   const collectionApi = (...args) => retryShortVideoCollectionRequest(() => api.fetch(...args));
 
   async function loadCollections(force = false) {
     if (state.loaded && !force) return state.collections;
     if (collectionsRequest) return collectionsRequest;
     state.loading = true;
+    const requestRevision = collectionMutationRevision;
     const request = collectionApi(null, "/api/short-videos/collections").then((data) => {
-      state.collections = Array.isArray(data?.collections) ? data.collections : [];
+      state.collections = mergeCollectionRefresh(data?.collections, requestRevision);
       state.loaded = true;
       return state.collections;
     });
@@ -50,16 +53,15 @@ export function createShortVideoCollections(context = {}) {
         method: "POST",
         body: { name }
       });
-      state.collections.push(result.collection);
-      state.loaded = true;
-      showView("shortVideoCollection", { collectionId: result.collection.id }, { push: true });
+      const collection = rememberCollectionMutation(result.collection);
+      showView("shortVideoCollection", { collectionId: collection.id }, { push: true });
     });
     const list = document.createElement("div");
     list.className = "short-video-mobile-collections-list";
     shell.append(create.form, create.status, list);
     els.viewContent.append(shell);
     try {
-      const collections = await loadCollections();
+      const collections = await loadCollections(true);
       if (renderGuard && !renderGuard()) return;
       renderCollectionList(list, collections);
     } catch (error) {
@@ -131,9 +133,8 @@ export function createShortVideoCollections(context = {}) {
     header.append(title, close);
     const create = createForm(async (name) => {
       const result = await collectionApi(null, "/api/short-videos/collections", { method: "POST", body: { name } });
-      state.collections.push(result.collection);
-      state.loaded = true;
-      await addVideo(result.collection, video);
+      const collection = rememberCollectionMutation(result.collection);
+      await addVideo(collection, video);
       closePicker();
     }, "创建并加入");
     const list = document.createElement("div");
@@ -166,7 +167,7 @@ export function createShortVideoCollections(context = {}) {
     document.body.append(overlay);
     create.input.focus();
     try {
-      const collections = await loadCollections();
+      const collections = await loadCollections(true);
       if (!overlay.isConnected) return;
       for (const collection of collections) {
         const button = document.createElement("button");
@@ -200,8 +201,45 @@ export function createShortVideoCollections(context = {}) {
     const result = await collectionApi(null, `/api/short-videos/collections/${encodeURIComponent(collection.id)}/videos/${encodeURIComponent(video.id)}`, {
       method: "PUT"
     });
-    if (result.added) collection.itemCount = Math.max(0, Number(collection.itemCount || 0)) + 1;
+    if (result.added) {
+      collection.itemCount = Math.max(0, Number(collection.itemCount || 0)) + 1;
+      rememberCollectionMutation(collection);
+    }
     shortVideoToast(result.added ? `已加入“${collection.name}”` : `已经在“${collection.name}”中`);
+  }
+
+  function rememberCollectionMutation(collection) {
+    const snapshot = { ...collection };
+    const collectionId = String(snapshot.id || "").trim();
+    collectionMutationRevision += 1;
+    pendingCollectionMutations.set(collectionId, {
+      collection: snapshot,
+      revision: collectionMutationRevision
+    });
+    const index = state.collections.findIndex((item) => String(item?.id || "").trim() === collectionId);
+    if (index >= 0) state.collections[index] = snapshot;
+    else state.collections.push(snapshot);
+    state.loaded = true;
+    return snapshot;
+  }
+
+  function mergeCollectionRefresh(incoming, requestRevision) {
+    const collections = Array.isArray(incoming) ? incoming.slice() : [];
+    const indexes = new Map(collections.map((collection, index) => [String(collection?.id || "").trim(), index]));
+    for (const [collectionId, mutation] of pendingCollectionMutations) {
+      if (mutation.revision <= requestRevision) {
+        pendingCollectionMutations.delete(collectionId);
+        continue;
+      }
+      const index = indexes.get(collectionId);
+      if (index === undefined) {
+        indexes.set(collectionId, collections.length);
+        collections.push(mutation.collection);
+      } else {
+        collections[index] = mutation.collection;
+      }
+    }
+    return collections;
   }
 
   function renderCollectionList(target, collections) {
@@ -266,7 +304,10 @@ export function createShortVideoCollections(context = {}) {
           data.cursorBoundaries = removeCollectionCursorBoundaryVideo(data.cursorBoundaries, video.id);
           data.total = Math.max(0, Number(data.total || 0) - 1);
           const summary = state.collections.find((item) => item.id === data.collection.id);
-          if (summary) summary.itemCount = data.total;
+          if (summary) {
+            summary.itemCount = data.total;
+            rememberCollectionMutation(summary);
+          }
           renderCollectionVideos(target, status, data);
           shellMeta(data);
           shortVideoToast("已移出清单");
