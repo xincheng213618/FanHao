@@ -66,3 +66,18 @@ export function createShortVideoPlayerSourceLifecycle({ markPerformance, playbac
     warmAdjacentVideoPlayer: warm
   };
 }
+
+export function disposeShortVideoMedia(root, options = {}) {
+  const release = options.release !== false;
+  root?.querySelectorAll?.("video, audio")?.forEach?.((player) => {
+    try {
+      player.muted = true;
+      player.onended = null;
+      player.pause?.();
+      if (release) {
+        player.removeAttribute?.("src");
+        player.load?.();
+      }
+    } catch {}
+  });
+}

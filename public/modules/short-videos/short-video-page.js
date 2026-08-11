@@ -1,12 +1,14 @@
 import { createShortVideoSearchModule } from "./search/index.js?v=20260710-short-video-search-01";
 import { createShortVideoActionsController } from "./actions-controller.js?v=20260716-short-video-actions-01";
 import { createShortVideoAuthorPages } from "./author-pages.js?v=20260810-author-header-align-01";
+import { createShortVideoCollectionsController } from "./collections-controller.js?v=20260811-custom-collections-01";
+import { captionTitleWithTags, createShortVideoCaptionText } from "./caption-text.js?v=20260811-custom-collections-01";
 import { createShortVideoFilterControls } from "./filter-controls.js?v=20260810-author-account-status-01";
 import { createIcon, railButton, setIconButton } from "./icons.js?v=20260716-short-video-icons-01";
 import { createShortVideoListWindow } from "./list-window.js?v=20260716-short-video-list-window-01";
 import { createShortVideoMediaCache } from "./media-cache.js?v=20260716-short-video-media-cache-01";
 import { createShortVideoPlaybackRenditionPolicy } from "./playback-rendition-policy.js?v=20260720-observed-playback-issues-01";
-import { createShortVideoPlayerSourceLifecycle } from "./player-source-lifecycle.js?v=20260717-short-video-source-lifecycle-01";
+import { createShortVideoPlayerSourceLifecycle, disposeShortVideoMedia } from "./player-source-lifecycle.js?v=20260811-custom-collections-01";
 import { createShortVideoTranscodeManagementPage } from "./transcode-management-page.js?v=20260720-transcode-continuous-08";
 import { createShortVideoTranscodeStatusButton } from "./transcode-status-button.js?v=20260720-transcode-popup-09";
 import {
@@ -220,6 +222,27 @@ export function createShortVideoPage(deps) {
     shortVideoAuthorHandle: (author) => shortVideoAuthorHandle(author),
     showToast: showBrowserToast,
     state
+  });
+  const collectionsController = createShortVideoCollectionsController({
+    api,
+    createIcon,
+    ensureListCards: ensureShortVideoListCards,
+    getListCards: () => shortVideoListCards,
+    loadFeed: () => loadVideos({ skipRoute: true }).catch(showError),
+    onNavigationChange: () => { syncCurrentNavigationDom(); syncActivePlaybackMode(); },
+    onOpenVideo: (video, options = {}) => openVideo(video.id, {
+      ...options,
+      ...(Object.keys(video || {}).length > 1 ? { video } : {})
+    }).catch(showError),
+    pushRoute,
+    render: renderView,
+    setMainHeader,
+    showToast: showBrowserToast,
+    state
+  });
+  const appendCaptionText = createShortVideoCaptionText({
+    normalizeTopic: normalizeShortVideoTopic,
+    openTopic: (video, topic) => showAuthorPanel(video, { initialTab: "topic", topic, switchAuthorFeed: false }).catch(showError)
   });
   const shortVideoSearch = createShortVideoSearchModule({
     api,
@@ -448,7 +471,8 @@ export function createShortVideoPage(deps) {
     ensureState();
     const previousAuthorPage = state.shortVideo.authorPage;
     syncAuthorCollectorRouteLifecycle(route.shortVideoMode !== "likes" && !route.shortVideoId ? route.shortVideoAuthorPage : "");
-    state.shortVideo.mode = ["likes", "transcoding"].includes(route.shortVideoMode) ? route.shortVideoMode : "feed";
+    state.shortVideo.mode = ["collection", "likes", "transcoding"].includes(route.shortVideoMode) ? route.shortVideoMode : "feed";
+    state.shortVideo.collectionId = state.shortVideo.mode === "collection" ? String(route.shortVideoCollectionId || "") : "";
     const nextAuthorPage = route.shortVideoAuthorPage || "";
     if (state.shortVideo.authorPage && state.shortVideo.authorPage !== nextAuthorPage) {
       state.shortVideo.authorDetail = null;
@@ -478,6 +502,10 @@ export function createShortVideoPage(deps) {
 
   async function openRouteTarget(route = {}) {
     ensureState();
+    if (route.shortVideoMode === "collection") {
+      await collectionsController.openCollection(route.shortVideoCollectionId, { skipRoute: true, videoId: route.shortVideoId });
+      return;
+    }
     if (route.shortVideoMode === "transcoding") {
       transcodeManagementPage.activate();
       renderView();
@@ -814,7 +842,8 @@ export function createShortVideoPage(deps) {
       prewarmShortVideoPlayback(openingVideo).catch(() => {});
       await viewerStylesReady;
       if (requestId !== shortVideoOpenRequestId) return false;
-      const navigation = cachedShortVideoNavigation(openingVideo.id);
+      const collectionNavigation = collectionsController.collectionNavigation(openingVideo.id);
+      const navigation = collectionNavigation || cachedShortVideoNavigation(openingVideo.id);
       const feedPrevious = feedIndex > 0 ? feedVideos[feedIndex - 1] : null;
       const feedNext = feedIndex >= 0 && feedIndex < feedVideos.length - 1 ? feedVideos[feedIndex + 1] : null;
       const previousId = navigation?.prevId || String(feedPrevious?.id || "");
@@ -822,8 +851,8 @@ export function createShortVideoPage(deps) {
       state.shortVideo.current = openingVideo;
       state.shortVideo.prevId = previousId;
       state.shortVideo.nextId = nextId;
-      state.shortVideo.prevVideo = cachedShortVideo(previousId) || feedPrevious || null;
-      state.shortVideo.nextVideo = cachedShortVideo(nextId) || feedNext || null;
+      state.shortVideo.prevVideo = collectionNavigation?.prevVideo || cachedShortVideo(previousId) || feedPrevious || null;
+      state.shortVideo.nextVideo = collectionNavigation?.nextVideo || cachedShortVideo(nextId) || feedNext || null;
       rememberShortVideo(state.shortVideo.prevVideo);
       rememberShortVideo(state.shortVideo.nextVideo);
       state.shortVideo.slideDirection = Number(options.slideDirection || 0);
@@ -866,11 +895,12 @@ export function createShortVideoPage(deps) {
       });
       state.shortVideo.current = data.video;
       if (state.shortVideo.sound && data.video?.sound?.key === state.shortVideo.sound) state.shortVideo.soundInfo = data.video.sound;
-      state.shortVideo.prevId = data.prevId || "";
-      state.shortVideo.nextId = data.nextId || "";
+      const collectionNavigation = collectionsController.collectionNavigation(data.video.id);
+      state.shortVideo.prevId = collectionNavigation?.prevId || data.prevId || "";
+      state.shortVideo.nextId = collectionNavigation?.nextId || data.nextId || "";
       state.shortVideo.slideDirection = Number(options.slideDirection || 0);
-      state.shortVideo.prevVideo = null;
-      state.shortVideo.nextVideo = null;
+      state.shortVideo.prevVideo = collectionNavigation?.prevVideo || null;
+      state.shortVideo.nextVideo = collectionNavigation?.nextVideo || null;
       state.shortVideo.loading = false;
       state.shortVideo.status = "";
       shortVideoOpeningId = "";
@@ -939,20 +969,6 @@ export function createShortVideoPage(deps) {
     }
   }
 
-  function disposeShortVideoMedia(root, options = {}) {
-    const release = options.release !== false;
-    root?.querySelectorAll?.("video, audio")?.forEach?.((player) => {
-      try {
-        player.muted = true;
-        player.onended = null;
-        player.pause?.();
-        if (release) {
-          player.removeAttribute?.("src");
-          player.load?.();
-        }
-      } catch {}
-    });
-  }
   function preserveShortVideoHomeDuringLoad(append) {
     if (append) return false;
     const home = els.workGrid?.querySelector?.(".short-video-home");
@@ -992,6 +1008,10 @@ export function createShortVideoPage(deps) {
     }
     if (shortVideoOpeningId) {
       renderBrowserLoading();
+      return;
+    }
+    if (state.shortVideo.mode === "collection") {
+      els.workGrid.append(collectionsController.renderCollectionPage());
       return;
     }
     renderHome();
@@ -1068,28 +1088,34 @@ export function createShortVideoPage(deps) {
     const shell = document.createElement("section");
     shell.className = "short-video-home";
     shell.classList.toggle("is-author-page", isShortVideoAuthorDetailPage());
+    const layout = document.createElement("div");
+    layout.className = "short-video-home-layout";
+    const content = document.createElement("main");
+    content.className = "short-video-home-main";
+    layout.append(collectionsController.renderSidebar(), content);
+    shell.append(layout);
     if (!isShortVideoAuthorDetailPage()) {
-      shell.append(isShortVideoAuthorIndexPage()
+      content.append(isShortVideoAuthorIndexPage()
         ? renderShortVideoAuthorIndexSearch()
         : renderShortVideoDiscovery());
     }
-    shell.append(renderHomeToolbar(data));
+    content.append(renderHomeToolbar(data));
     if (isShortVideoAuthorIndexPage()) {
-      shell.append(renderAuthorIndex());
+      content.append(renderAuthorIndex());
       els.workGrid.append(shell);
       return;
     }
     if (isShortVideoAuthorDetailPage()) {
-      shell.append(renderAuthorDetailHome(data), renderAuthorWorkspaceToolbar(data));
+      content.append(renderAuthorDetailHome(data), renderAuthorWorkspaceToolbar(data));
     }
     if (state.shortVideo.query && !isShortVideoAuthorDetailPage()) {
-      shell.append(renderAggregateSearchResults(data));
+      content.append(renderAggregateSearchResults(data));
     }
     if (state.shortVideo.status && !(data.videos || []).length) {
       const status = document.createElement("div");
       status.className = "short-video-status";
       status.textContent = state.shortVideo.status;
-      shell.append(status);
+      content.append(status);
     }
     const grid = document.createElement("div");
     let inner = null;
@@ -1103,7 +1129,7 @@ export function createShortVideoPage(deps) {
       inner.className = "short-video-window";
       grid.append(inner);
     }
-    shell.append(grid);
+    content.append(grid);
     els.workGrid.append(shell);
     attachShortVideoWindow(grid, inner);
     renderShortVideoWindow(true);
@@ -2164,6 +2190,11 @@ export function createShortVideoPage(deps) {
     collectButton.addEventListener("click", () => toggleShortVideoAction(video, "collect", collectButton));
     applyRailActionButtonState(collectButton, "collect", Boolean(video.actions?.collected), video.stats?.collects);
     rail.append(collectButton);
+    rail.append(railButton("清单", createIcon("plusBadge"), "collection", "加入清单", (event) => {
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      collectionsController.showPicker(video).catch((error) => showBrowserToast(error?.message || "清单读取失败"));
+    }));
     rail.append(railMetric("share", video.stats?.shares, "share", "分享", (event) => {
       event?.preventDefault?.();
       event?.stopPropagation?.();
@@ -4234,7 +4265,8 @@ export function createShortVideoPage(deps) {
 
   function promoteAdjacentMedia(video, direction, options = {}) {
     const previousCurrent = state.shortVideo.current;
-    const navigation = cachedShortVideoNavigation(video.id);
+    const collectionNavigation = collectionsController.collectionNavigation(video.id);
+    const navigation = collectionNavigation || cachedShortVideoNavigation(video.id);
     const fallbackPrevId = direction > 0 ? previousCurrent?.id || "" : "";
     const fallbackNextId = direction < 0 ? previousCurrent?.id || "" : "";
     state.shortVideo.current = video;
@@ -4243,9 +4275,9 @@ export function createShortVideoPage(deps) {
     state.shortVideo.status = "";
     state.shortVideo.prevId = navigation?.prevId || fallbackPrevId;
     state.shortVideo.nextId = navigation?.nextId || fallbackNextId;
-    state.shortVideo.prevVideo = cachedShortVideo(state.shortVideo.prevId)
+    state.shortVideo.prevVideo = collectionNavigation?.prevVideo || cachedShortVideo(state.shortVideo.prevId)
       || (previousCurrent?.id === state.shortVideo.prevId ? previousCurrent : null);
-    state.shortVideo.nextVideo = cachedShortVideo(state.shortVideo.nextId)
+    state.shortVideo.nextVideo = collectionNavigation?.nextVideo || cachedShortVideo(state.shortVideo.nextId)
       || (previousCurrent?.id === state.shortVideo.nextId ? previousCurrent : null);
     replaceRoute({ view: "shortVideos", shortVideoId: video.id });
     syncActiveControlBar();
@@ -4266,10 +4298,11 @@ export function createShortVideoPage(deps) {
       if (state.shortVideo.current?.id !== video.id) return;
       state.shortVideo.current = data.video || video;
       cacheAuthorPanelVideo(state.shortVideo.current);
-      state.shortVideo.prevId = data.prevId || "";
-      state.shortVideo.nextId = data.nextId || "";
-      state.shortVideo.prevVideo = cachedShortVideo(state.shortVideo.prevId);
-      state.shortVideo.nextVideo = cachedShortVideo(state.shortVideo.nextId);
+      const collectionNavigation = collectionsController.collectionNavigation(video.id);
+      state.shortVideo.prevId = collectionNavigation?.prevId || data.prevId || "";
+      state.shortVideo.nextId = collectionNavigation?.nextId || data.nextId || "";
+      state.shortVideo.prevVideo = collectionNavigation?.prevVideo || cachedShortVideo(state.shortVideo.prevId);
+      state.shortVideo.nextVideo = collectionNavigation?.nextVideo || cachedShortVideo(state.shortVideo.nextId);
       await loadAdjacentVideos(video.id);
       if (state.shortVideo.current?.id === video.id) {
         refreshAdjacentPanelsDom();
@@ -4842,13 +4875,21 @@ export function createShortVideoPage(deps) {
     setBodyClass();
     renderStats();
     renderView();
+    if (state.shortVideo.mode === "collection" && state.shortVideo.collectionId) {
+      pushRoute({
+        view: "shortVideos",
+        shortVideoId: "",
+        shortVideoMode: "collection",
+        shortVideoCollectionId: state.shortVideo.collectionId
+      });
+      return;
+    }
     if (!state.shortVideo.data && !state.shortVideo.loading) {
       loadVideos({ replaceRoute: true }).catch(showError);
       return;
     }
     pushRoute({ view: "shortVideos", shortVideoId: "" });
   }
-
   function showShortVideoSearchOverlay(trigger = null) {
     const browser = els.workGrid?.querySelector?.(".short-video-browser");
     if (!browser) return;
@@ -5533,6 +5574,7 @@ export function createShortVideoPage(deps) {
   }
 
   function scheduleAdjacentNavigationPrefetch() {
+    if (state.shortVideo.mode === "collection") return;
     window.clearTimeout(shortVideoNavigationPrefetchTimer);
     const params = shortVideoFeedParams();
     const forward = { direction: 1, video: state.shortVideo?.nextVideo };
@@ -5591,15 +5633,18 @@ export function createShortVideoPage(deps) {
 
   async function loadAdjacentVideos(videoId) {
     const requestId = ++shortVideoAdjacentRequestId;
+    if (state.shortVideo.mode === "collection") await collectionsController.prepareCollectionNavigation(videoId).catch(() => {});
+    if (requestId !== shortVideoAdjacentRequestId || state.shortVideo.current?.id !== videoId) return false;
     const prevId = state.shortVideo.prevId;
     const nextId = state.shortVideo.nextId;
     const params = shortVideoFeedParams();
-    const knownPrev = String(state.shortVideo.prevVideo?.id || "") === String(prevId || "")
+    const collectionNavigation = collectionsController.collectionNavigation(videoId);
+    const knownPrev = collectionNavigation?.prevVideo || (String(state.shortVideo.prevVideo?.id || "") === String(prevId || "")
       ? state.shortVideo.prevVideo
-      : cachedShortVideo(prevId);
-    const knownNext = String(state.shortVideo.nextVideo?.id || "") === String(nextId || "")
+      : cachedShortVideo(prevId));
+    const knownNext = collectionNavigation?.nextVideo || (String(state.shortVideo.nextVideo?.id || "") === String(nextId || "")
       ? state.shortVideo.nextVideo
-      : cachedShortVideo(nextId);
+      : cachedShortVideo(nextId));
     const loadAdjacent = (id, known, direction) => {
       if (!id) return Promise.resolve(null);
       if (known) return Promise.resolve({ video: known });
@@ -6444,51 +6489,6 @@ export function createShortVideoPage(deps) {
     const follow = createAuthorFollowButton(video, video.author, "rail");
     wrap.append(profile, follow);
     return wrap;
-  }
-
-  function appendCaptionText(target, text, video = null) {
-    const value = String(text || "");
-    const knownTags = (Array.isArray(video?.tags) ? video.tags : [])
-      .map((tag) => normalizeShortVideoTopic(tag))
-      .filter(Boolean)
-      .sort((a, b) => b.length - a.length);
-    const pattern = /#([^\s#]+)/g;
-    let cursor = 0;
-    let match;
-    while ((match = pattern.exec(value))) {
-      if (match.index > cursor) target.append(document.createTextNode(value.slice(cursor, match.index)));
-      const token = String(match[1] || "");
-      const recognized = knownTags.find((tag) => token === tag || token.startsWith(tag));
-      const topic = normalizeShortVideoTopic(recognized || token.split(/[@＠,，。.!！?？:：;；、()（）\[\]【】{}]/)[0]);
-      if (topic) {
-        const tag = document.createElement("button");
-        tag.type = "button";
-        tag.className = "short-video-caption-tag";
-        tag.textContent = `#${topic}`;
-        tag.title = `查看话题 ${topic}`;
-        tag.addEventListener("click", (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          if (!video) return;
-          showAuthorPanel(video, { initialTab: "topic", topic, switchAuthorFeed: false }).catch(showError);
-        });
-        target.append(tag);
-        const remainder = token.slice(topic.length);
-        if (remainder) target.append(document.createTextNode(remainder));
-      } else {
-        target.append(document.createTextNode(match[0]));
-      }
-      cursor = pattern.lastIndex;
-    }
-    if (cursor < value.length) target.append(document.createTextNode(value.slice(cursor)));
-  }
-
-  function captionTitleWithTags(video) {
-    const text = String(video?.title || "").trim();
-    if (text.includes("#")) return text;
-    const tags = Array.isArray(video?.tags) ? video.tags.filter(Boolean).slice(0, 4) : [];
-    if (!tags.length) return text;
-    return [text, tags.map((tag) => `#${String(tag).replace(/^#/, "")}`).join(" ")].filter(Boolean).join(" ");
   }
 
   function setBodyClass() {

@@ -357,6 +357,7 @@ const state = {
   personWorksFacets: null,
   shortVideo: {
     mode: "feed",
+    collectionId: "",
     query: "",
     author: "all",
     authorPage: "",
@@ -425,6 +426,7 @@ function currentRouteSnapshot(overrides = {}) {
   return normalizeRoute({
     view: "shortVideos",
     shortVideoId: state.shortVideo.current?.id || "",
+    shortVideoCollectionId: state.shortVideo.collectionId || "",
     shortVideoAuthorPage: state.shortVideo.authorPage || "",
     shortVideoMode: state.shortVideo.mode || "feed",
     shortVideoQuery: state.shortVideo.query || "",

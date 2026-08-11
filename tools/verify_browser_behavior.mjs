@@ -13,6 +13,8 @@ const ownedServer = suppliedBaseUrl ? null : await startFixtureServer(port);
 const fixturePort = Number(ownedServer?.address()?.port || 0);
 const baseUrl = suppliedBaseUrl || `http://127.0.0.1:${fixturePort}`;
 let delayedAuthorDetail = null;
+const fixtureCollections = new Map();
+let fixtureCollectionSequence = 0;
 
 try {
   await waitForHealth(baseUrl);
@@ -24,6 +26,7 @@ try {
     await verifyAuthorReturnDiscardsDelayedDetail(browser);
     await verifyAuthorReturnDiscardsDelayedError(browser);
     await verifyDirectAuthorDeepLink(browser);
+    await verifyShortVideoCollections(browser);
   } finally {
     await browser.close();
   }
@@ -37,7 +40,10 @@ async function startFixtureServer(serverPort) {
     const url = new URL(request.url || "/", "http://127.0.0.1");
     if (url.pathname.startsWith("/api/")) {
       try {
-        sendJson(response, await fixtureApi(url));
+        sendJson(response, await fixtureApi(url, {
+          method: request.method || "GET",
+          body: await readFixtureJson(request)
+        }));
       } catch (error) {
         sendJson(response, { error: String(error?.message || error || "fixture request failed") }, 503);
       }
@@ -290,6 +296,40 @@ async function verifyDirectAuthorDeepLink(browser) {
   }
 }
 
+async function verifyShortVideoCollections(browser) {
+  fixtureCollections.clear();
+  fixtureCollectionSequence = 0;
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    await page.goto(`${baseUrl}/short-videos`, { waitUntil: "domcontentloaded" });
+    const firstCard = page.locator(".short-video-card .short-video-thumb-open").first();
+    await firstCard.waitFor({ state: "visible", timeout: 30000 });
+    await firstCard.click();
+    const addToCollection = page.locator(".short-video-rail-button.is-collection");
+    await addToCollection.waitFor({ state: "visible", timeout: 30000 });
+    await addToCollection.click();
+    const picker = page.locator(".short-video-collection-picker");
+    await picker.waitFor({ state: "visible", timeout: 5000 });
+    await picker.locator('input[name="collectionName"]').fill("E2E 稍后看");
+    await picker.locator('button[type="submit"]').click();
+    await picker.waitFor({ state: "detached", timeout: 5000 });
+
+    await page.goBack();
+    await page.locator(".short-video-collection-sidebar").waitFor({ state: "visible", timeout: 30000 });
+    const collection = page.locator(".short-video-collection-sidebar-item", { hasText: "E2E 稍后看" });
+    await collection.waitFor({ state: "visible", timeout: 5000 });
+    await collection.click();
+    await page.waitForURL(/\/short-videos\/collections\/svc_fixture_1$/u, { timeout: 5000 });
+    const remove = page.locator('.short-video-collection-remove[data-video-id="fixture-video-fixture-author-1"]');
+    await remove.waitFor({ state: "visible", timeout: 5000 });
+    await remove.click();
+    await page.locator(".short-video-empty", { hasText: "这个清单还没有视频" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(fixtureCollections.get("svc_fixture_1")?.videoIds.size, 0, "Chromium remove must persist through the collection API fixture");
+  } finally {
+    await page.close();
+  }
+}
+
 async function authorWindow(page) {
   return page.evaluate(() => ({
     authors: document.querySelectorAll("article").length,
@@ -377,8 +417,46 @@ function deferNextAuthorDetail(options = {}) {
   return deferred;
 }
 
-async function fixtureApi(url) {
+async function fixtureApi(url, request = {}) {
   if (url.pathname === "/api/health") return { ok: true };
+  if (url.pathname === "/api/short-videos/collections") {
+    if (request.method === "POST") {
+      const id = `svc_fixture_${++fixtureCollectionSequence}`;
+      const collection = { id, name: String(request.body?.name || ""), itemCount: 0, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" };
+      fixtureCollections.set(id, { collection, videoIds: new Set() });
+      return { collection };
+    }
+    return { collections: [...fixtureCollections.values()].map((entry) => ({ ...entry.collection, itemCount: entry.videoIds.size })), total: fixtureCollections.size };
+  }
+  const collectionVideos = /^\/api\/short-videos\/collections\/([^/]+)\/videos$/.exec(url.pathname);
+  if (collectionVideos) {
+    const entry = fixtureCollections.get(decodeURIComponent(collectionVideos[1]));
+    if (!entry) throw new Error("fixture collection not found");
+    const videos = [...entry.videoIds].map((id) => fixtureVideo(id));
+    return {
+      collection: { ...entry.collection, itemCount: videos.length },
+      videos,
+      count: videos.length,
+      total: videos.length,
+      limit: 48,
+      offset: 0,
+      hasMore: false,
+      nextOffset: null
+    };
+  }
+  const collectionVideo = /^\/api\/short-videos\/collections\/([^/]+)\/videos\/([^/]+)$/.exec(url.pathname);
+  if (collectionVideo) {
+    const entry = fixtureCollections.get(decodeURIComponent(collectionVideo[1]));
+    if (!entry) throw new Error("fixture collection not found");
+    const videoId = decodeURIComponent(collectionVideo[2]);
+    if (request.method === "DELETE") {
+      const removed = entry.videoIds.delete(videoId);
+      return { removed, collectionId: entry.collection.id, videoId };
+    }
+    const before = entry.videoIds.size;
+    entry.videoIds.add(videoId);
+    return { added: entry.videoIds.size > before, collectionId: entry.collection.id, videoId, addedAt: "2026-01-02T00:00:00.000Z" };
+  }
   if (url.pathname === "/api/short-videos/authors") {
     const offset = Math.max(0, Number(url.searchParams.get("offset") || 0));
     const limit = Math.max(1, Number(url.searchParams.get("limit") || 96));
@@ -405,19 +483,43 @@ async function fixtureApi(url) {
       if (delayed.reject) throw new Error("fixture delayed author detail rejection");
     }
     return {
-      videos: [{
-        id: `fixture-video-${author}`,
-        author: { secUid: author, name: author.replace("fixture-author-", "作者 "), count: 1 },
-        title: "浏览器行为测试视频",
-        media: "video",
-        publishedAt: "2026-01-01T00:00:00.000Z",
-        stats: {}
-      }],
+      videos: [fixtureVideo(`fixture-video-${author}`, author)],
       total: 1,
       hasMore: false
     };
   }
+  const detail = /^\/api\/short-videos\/([^/]+)$/.exec(url.pathname);
+  if (detail) {
+    const video = fixtureVideo(decodeURIComponent(detail[1]));
+    return { video, prevId: "", nextId: "", neighbors: { previous: [], next: [] } };
+  }
   return {};
+}
+
+function fixtureVideo(id, author = "fixture-author-1") {
+  return {
+    id,
+    author: { secUid: author, name: author.replace("fixture-author-", "作者 "), count: 1 },
+    title: "浏览器行为测试视频",
+    media: "video",
+    mediaType: "video",
+    coverUrl: "/fixture-cover.svg",
+    streamUrl: `/media/short-video/${encodeURIComponent(id)}`,
+    publishedAt: "2026-01-01T00:00:00.000Z",
+    actions: {},
+    stats: {}
+  };
+}
+
+async function readFixtureJson(request) {
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method || "")) return {};
+  let text = "";
+  for await (const chunk of request) text += chunk;
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return {};
+  }
 }
 
 function sendJson(response, body, status = 200) {

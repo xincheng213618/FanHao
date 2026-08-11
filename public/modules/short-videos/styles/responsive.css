@@ -1038,3 +1038,40 @@
     animation: none !important;
   }
 }
+@media (max-width: 980px) {
+  .short-video-home-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .short-video-collection-sidebar {
+    position: static;
+    max-height: none;
+  }
+
+  .short-video-collection-sidebar-list {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+  }
+
+  .short-video-collection-sidebar-item {
+    flex: 0 0 auto;
+    width: auto;
+    max-width: 220px;
+  }
+}
+
+@media (max-width: 680px) {
+  .short-video-collection-page-header {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .short-video-collection-page-actions {
+    justify-self: start;
+  }
+
+  .short-video-collection-quick-create {
+    grid-template-columns: 1fr;
+  }
+}

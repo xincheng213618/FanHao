@@ -32,6 +32,9 @@ export function routeFromUrl(url = browserHref()) {
   const params = parsed.searchParams;
   const likesStatsPage = segments[1] === "stats" && segments[2] === "likes";
   const transcodePage = segments[1] === "transcoding";
+  const collectionPage = segments[1] === "collections";
+  const collectionId = collectionPage ? decodeSegment(segments[2] || "") : "";
+  const collectionVideoId = collectionPage && segments[3] === "videos" ? decodeSegment(segments[4] || "") : "";
   const pathAuthorPage = segments[1] === "authors" ? decodeSegment(segments[2] || "") : "";
   const requestedAuthor = params.get("author") || "all";
   const requestedSource = params.get("source") || params.get("origin") || "";
@@ -41,9 +44,12 @@ export function routeFromUrl(url = browserHref()) {
   const authorPage = pathAuthorPage || legacyAuthorPage;
   return normalizeRoute({
     view: "shortVideos",
-    shortVideoId: pathAuthorPage || likesStatsPage || transcodePage ? "" : decodeSegment(segments[1] || ""),
+    shortVideoId: collectionPage
+      ? collectionVideoId
+      : pathAuthorPage || likesStatsPage || transcodePage ? "" : decodeSegment(segments[1] || ""),
+    shortVideoCollectionId: collectionId,
     shortVideoAuthorPage: authorPage,
-    shortVideoMode: transcodePage ? "transcoding" : likesStatsPage ? "likes" : "feed",
+    shortVideoMode: collectionPage ? "collection" : transcodePage ? "transcoding" : likesStatsPage ? "likes" : "feed",
     shortVideoQuery: params.get("q") || params.get("search") || "",
     shortVideoTopic: params.get("topic") || params.get("tag") || "",
     shortVideoSound: params.get("sound") || params.get("music") || "",
@@ -65,8 +71,9 @@ export function normalizeRoute(route = {}) {
   return {
     view: "shortVideos",
     shortVideoId: String(route.shortVideoId || "").trim(),
+    shortVideoCollectionId: String(route.shortVideoCollectionId || "").trim(),
     shortVideoAuthorPage: authorPage,
-    shortVideoMode: ["likes", "transcoding"].includes(route.shortVideoMode) ? route.shortVideoMode : "feed",
+    shortVideoMode: ["collection", "likes", "transcoding"].includes(route.shortVideoMode) ? route.shortVideoMode : "feed",
     shortVideoQuery: String(route.shortVideoQuery || route.q || "").trim(),
     shortVideoTopic: normalizeTopic(route.shortVideoTopic || route.topic || route.tag),
     shortVideoSound: normalizeSound(route.shortVideoSound || route.sound || route.music),
@@ -89,7 +96,7 @@ export function routeUrl(route, options = {}) {
     const value = initialParams.get(key);
     if (value) params.set(key, value);
   }
-  if (!["likes", "transcoding"].includes(next.shortVideoMode)) {
+  if (!["collection", "likes", "transcoding"].includes(next.shortVideoMode)) {
     if (next.shortVideoQuery) params.set("q", next.shortVideoQuery);
     if (next.shortVideoTopic) params.set("topic", next.shortVideoTopic);
     if (next.shortVideoSound) params.set("sound", next.shortVideoSound);
@@ -107,7 +114,11 @@ export function routeUrl(route, options = {}) {
     if (next.shortVideoSource !== defaultSource) params.set("source", next.shortVideoSource);
     if (next.shortVideoSort !== "published") params.set("sort", next.shortVideoSort);
   }
-  const pathname = next.shortVideoMode === "likes"
+  const pathname = next.shortVideoMode === "collection" && next.shortVideoCollectionId
+    ? next.shortVideoId
+      ? `/short-videos/collections/${encodeURIComponent(next.shortVideoCollectionId)}/videos/${encodeURIComponent(next.shortVideoId)}`
+      : `/short-videos/collections/${encodeURIComponent(next.shortVideoCollectionId)}`
+    : next.shortVideoMode === "likes"
     ? "/short-videos/stats/likes"
     : next.shortVideoMode === "transcoding"
       ? "/short-videos/transcoding"

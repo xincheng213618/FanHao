@@ -20,7 +20,7 @@
       (() => {
         document.documentElement.classList.add("app-styles-loading");
         const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
-        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-02bb6ef2c683";
+        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-aa1c09565a9d";
         if (shortVideoEntry) {
           const modulePreload = document.createElement("link");
           modulePreload.rel = "modulepreload";
@@ -32,11 +32,11 @@
         const shortVideoStyleUrls = [
           "/css/foundation.css?v=20260710-web-css-modules-01",
           "/css/shell.css?v=20260713-search-index-02",
-          "/modules/short-videos/styles/list.css?v=20260810-author-header-align-01",
+          "/modules/short-videos/styles/list.css?v=20260811-custom-collections-01",
           "/modules/short-videos/styles/viewer.css?v=20260715-first-frame-13",
           "/modules/short-videos/styles/gallery-navigation.css?v=20260711-player-modal-focus-75",
           "/modules/short-videos/styles/panels.css?v=20260720-transcode-page-concurrency-05",
-          "/modules/short-videos/styles/responsive.css?v=20260810-author-header-align-01"
+          "/modules/short-videos/styles/responsive.css?v=20260811-custom-collections-01"
         ];
         const shortVideoViewerStyleUrls = [
           "/modules/short-videos/styles/viewer.css?v=20260715-first-frame-13",
@@ -222,7 +222,7 @@
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
       const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-02bb6ef2c683");
+        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-aa1c09565a9d");
         await window.__fanhaoStylesReady;
         try {
           await shortVideoModulePromise;

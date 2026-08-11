@@ -30,9 +30,18 @@ export function ensureShortVideoState(state, options = {}) {
   state.shortVideo.authorDetail = state.shortVideo.authorDetail && typeof state.shortVideo.authorDetail === "object" ? state.shortVideo.authorDetail : null;
   state.shortVideo.authorVideo = state.shortVideo.authorVideo && typeof state.shortVideo.authorVideo === "object" ? state.shortVideo.authorVideo : null;
   state.shortVideo.summaryLoading = Boolean(state.shortVideo.summaryLoading);
-  state.shortVideo.mode = ["likes", "transcoding"].includes(state.shortVideo.mode)
+  state.shortVideo.mode = ["collection", "likes", "transcoding"].includes(state.shortVideo.mode)
     ? state.shortVideo.mode
     : "feed";
+  state.shortVideo.collectionId = String(state.shortVideo.collectionId || "");
+  state.shortVideo.collections = Array.isArray(state.shortVideo.collections) ? state.shortVideo.collections : [];
+  state.shortVideo.collectionsLoaded = Boolean(state.shortVideo.collectionsLoaded);
+  state.shortVideo.collectionsLoading = Boolean(state.shortVideo.collectionsLoading);
+  state.shortVideo.collectionData = state.shortVideo.collectionData && typeof state.shortVideo.collectionData === "object"
+    ? state.shortVideo.collectionData
+    : null;
+  state.shortVideo.collectionLoading = Boolean(state.shortVideo.collectionLoading);
+  state.shortVideo.collectionError = String(state.shortVideo.collectionError || "");
   state.shortVideo.likeDistributionLoading = Boolean(state.shortVideo.likeDistributionLoading);
   state.shortVideo.likeDistribution = state.shortVideo.likeDistribution && typeof state.shortVideo.likeDistribution === "object" ? state.shortVideo.likeDistribution : null;
   state.shortVideo.likeDistributionError = String(state.shortVideo.likeDistributionError || "");
