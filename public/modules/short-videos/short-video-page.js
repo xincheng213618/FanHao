@@ -45,7 +45,7 @@ import {
   writeSmartFillPreference,
   writeVolumePreference
 } from "./state.js?v=20260716-short-video-state-01";
-import { restoreSavedAuthorIndexWindow } from "./author-navigation.js?v=20260811-author-index-window-01";
+import { discardAuthorIndexWindowAfterRouteChange, restoreSavedAuthorIndexWindow } from "./author-navigation.js?v=20260811-author-index-window-01";
 export function createShortVideoPage(deps) {
   const {
     api,
@@ -446,6 +446,7 @@ export function createShortVideoPage(deps) {
 
   function applyRouteState(route = {}) {
     ensureState();
+    const previousAuthorPage = state.shortVideo.authorPage;
     syncAuthorCollectorRouteLifecycle(route.shortVideoMode !== "likes" && !route.shortVideoId ? route.shortVideoAuthorPage : "");
     state.shortVideo.mode = ["likes", "transcoding"].includes(route.shortVideoMode) ? route.shortVideoMode : "feed";
     const nextAuthorPage = route.shortVideoAuthorPage || "";
@@ -465,15 +466,14 @@ export function createShortVideoPage(deps) {
     state.shortVideo.authorAccountStatus = normalizeShortVideoAuthorAccountStatus(route.shortVideoAuthorAccountStatus);
     if (state.shortVideo.quality !== "all") state.shortVideo.media = "video";
     state.shortVideo.source = normalizeShortVideoSource(route.shortVideoSource);
-    if (!state.shortVideo.authorPage && ["authors", "following"].includes(state.shortVideo.source)) {
-      state.shortVideo.authorIndexSource = state.shortVideo.source;
-    }
+    if (!state.shortVideo.authorPage && ["authors", "following"].includes(state.shortVideo.source)) state.shortVideo.authorIndexSource = state.shortVideo.source;
     state.shortVideo.sort = normalizeShortVideoSortValue(route.shortVideoSort);
     if (state.shortVideo.source === "recommended" && state.shortVideo.sort === "published") {
       state.shortVideo.sort = "recommended";
     } else if (state.shortVideo.source === "history" && state.shortVideo.sort === "published") {
       state.shortVideo.sort = "watched";
     }
+    discardAuthorIndexWindowAfterRouteChange(state.shortVideo, previousAuthorPage);
   }
 
   async function openRouteTarget(route = {}) {
@@ -953,7 +953,6 @@ export function createShortVideoPage(deps) {
       } catch {}
     });
   }
-
   function preserveShortVideoHomeDuringLoad(append) {
     if (append) return false;
     const home = els.workGrid?.querySelector?.(".short-video-home");
@@ -1571,6 +1570,7 @@ export function createShortVideoPage(deps) {
         button.textContent = item[1];
         button.addEventListener("click", () => {
           if (activeSource === item[0] && !isShortVideoAuthorDetailPage()) return;
+          if (isShortVideoAuthorDetailPage()) state.shortVideo.authorIndexWindow = null;
           state.shortVideo.authorPage = "";
           state.shortVideo.source = item[0];
           state.shortVideo.topic = "";

@@ -2,7 +2,8 @@ import {
   authorIndexReturnState,
   canReturnThroughShortVideoHistory,
   captureAuthorIndexReturnContext,
-  captureAuthorIndexWindow
+  captureAuthorIndexWindow,
+  restoreAuthorIndexFocus
 } from "./author-navigation.js?v=20260811-author-route-lifecycle-01";
 import { createAuthorCollectorPoll } from "./author-collector-poll.js?v=20260811-author-route-lifecycle-01";
 
@@ -298,7 +299,7 @@ export function createShortVideoAuthorPages(deps) {
     if (isShortVideoAuthorIndexPage()) {
       state.shortVideo.authorIndexSource = state.shortVideo.source;
       authorIndexReturnContext = captureAuthorIndexReturnContext(state.shortVideo);
-      state.shortVideo.authorIndexWindow = captureAuthorIndexWindow(state.shortVideo, window.scrollY);
+      state.shortVideo.authorIndexWindow = captureAuthorIndexWindow(state.shortVideo, window.scrollY, authorId);
     }
     authorPageEnteredWithinApp = !options.replaceHistory;
     syncAuthorCollectorRouteLifecycle(authorId);
@@ -371,7 +372,9 @@ export function createShortVideoAuthorPages(deps) {
       shortVideoSort: target.sort,
       shortVideoAuthorAccountStatus: target.authorAccountStatus
     });
-    loadVideos({ skipRoute: true }).catch(showError);
+    loadVideos({ skipRoute: true })
+      .then(() => restoreAuthorIndexFocus())
+      .catch(showError);
   }
 
   function renderAuthorSignature(target, value, fallback = "") {
@@ -437,6 +440,12 @@ export function createShortVideoAuthorPages(deps) {
     const authors = sortedShortVideoAuthors();
     const wrap = document.createElement("div");
     wrap.className = "short-video-author-index";
+    const heading = document.createElement("h1");
+    heading.className = "short-video-visually-hidden";
+    heading.dataset.shortVideoAuthorIndexHeading = "1";
+    heading.tabIndex = -1;
+    heading.textContent = state.shortVideo.source === "following" ? "我的关注作者" : "作者列表";
+    wrap.append(heading);
     if (state.shortVideo.loading && !authors.length) {
       const status = document.createElement("div");
       status.className = "short-video-author-index-status";

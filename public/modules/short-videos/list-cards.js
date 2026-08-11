@@ -36,6 +36,8 @@ export function createShortVideoListCards(dependencies) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "short-video-author-index-card-main";
+    const stableAuthorId = authorScopeId({}, author);
+    if (stableAuthorId) button.dataset.shortVideoAuthorId = stableAuthorId;
     button.setAttribute("aria-label", shortVideoAuthorCardAccessibility(author, "index").label);
     const media = document.createElement("span");
     media.className = "short-video-author-index-media";

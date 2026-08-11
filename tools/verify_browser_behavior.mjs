@@ -7,10 +7,11 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const port = Number(process.env.FANHAO_BROWSER_TEST_PORT || 29999);
+const port = Number(process.env.FANHAO_BROWSER_TEST_PORT || 0);
 const suppliedBaseUrl = String(process.env.FANHAO_BROWSER_TEST_BASE_URL || "").trim();
 const ownedServer = suppliedBaseUrl ? null : await startFixtureServer(port);
-const baseUrl = suppliedBaseUrl || `http://127.0.0.1:${port}`;
+const fixturePort = Number(ownedServer?.address()?.port || 0);
+const baseUrl = suppliedBaseUrl || `http://127.0.0.1:${fixturePort}`;
 
 try {
   await waitForHealth(baseUrl);
@@ -19,6 +20,7 @@ try {
     await verifyStandaloneStyles(browser);
     await verifyMobileGallery(browser);
     await verifyAuthorIndexReturn(browser);
+    await verifyDirectAuthorDeepLink(browser);
   } finally {
     await browser.close();
   }
@@ -177,26 +179,70 @@ async function verifyAuthorIndexReturn(browser) {
     }));
     assert(before.authors >= 384, "author test must enter a deep loaded window");
     assert(before.firstVisible >= 192, "author test must scroll beyond the first author page");
-    await page.locator("article button").nth(before.firstVisible + 4).click();
+    const authorCards = page.locator(".short-video-author-index-card-main");
+    const openedCard = authorCards.nth(before.firstVisible + 4);
+    const openedAuthorId = await openedCard.getAttribute("data-short-video-author-id");
+    await openedCard.click();
     await page.locator(".short-video-author-page-back").waitFor({ state: "visible", timeout: 30000 });
-    await page.locator(".short-video-author-page-back").click();
-    const restored = await waitFor(() => page.evaluate(() => ({
-      authors: document.querySelectorAll("article").length,
-      scrollY: window.scrollY,
-      firstVisible: [...document.querySelectorAll("article")].findIndex((article) => article.getBoundingClientRect().bottom > 0)
-    })), (value) => value.authors >= before.authors && value.firstVisible >= before.firstVisible - 1, 30000).catch(async (error) => {
-      const current = await page.evaluate(() => ({
-        authors: document.querySelectorAll("article").length,
-        scrollY: window.scrollY,
-        firstVisible: [...document.querySelectorAll("article")].findIndex((article) => article.getBoundingClientRect().bottom > 0),
-        href: window.location.href
-      }));
+    await page.locator(".short-video-author-page-back").focus();
+    await page.keyboard.press("Enter");
+    const restored = await waitFor(() => authorWindow(page), (value) => value.authors >= before.authors && value.firstVisible >= before.firstVisible - 1, 30000).catch(async (error) => {
+      const current = await authorWindow(page);
       throw new Error(`author return did not restore the loaded window: before=${JSON.stringify(before)} current=${JSON.stringify(current)} requests=${apiRequests.join(" | ")}`, { cause: error });
     });
     assert(Math.abs(restored.firstVisible - before.firstVisible) <= 1, "returning from an author detail must restore the same deep scroll anchor");
+    await waitForAuthorFocus(page, openedAuthorId, "keyboard return must restore focus to its triggering author card");
+
+    const historyCard = authorCards.nth(before.firstVisible + 8);
+    const historyAuthorId = await historyCard.getAttribute("data-short-video-author-id");
+    await historyCard.click();
+    await page.locator(".short-video-author-page-back").waitFor({ state: "visible", timeout: 30000 });
+    await page.goBack();
+    const historyRestored = await waitFor(() => authorWindow(page), (value) => value.authors >= before.authors && value.firstVisible >= before.firstVisible - 1, 30000);
+    assert(Math.abs(historyRestored.firstVisible - before.firstVisible) <= 1, "browser history return must restore the same deep scroll anchor");
+    await waitForAuthorFocus(page, historyAuthorId, "browser history return must restore focus to its triggering author card");
   } finally {
     await page.close();
   }
+}
+
+async function verifyDirectAuthorDeepLink(browser) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const authorRequests = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/short-videos/authors?")) authorRequests.push(request.url());
+  });
+  try {
+    await page.goto(`${baseUrl}/short-videos/authors/fixture-author-7?perf=1`, { waitUntil: "domcontentloaded" });
+    await page.locator(".short-video-author-page-back").waitFor({ state: "visible", timeout: 30000 });
+    assert.equal(authorRequests.length, 0, "a direct author deep link must not have an author-index snapshot");
+    await page.locator(".short-video-author-page-back").click();
+    await page.locator(".short-video-author-index-card-main").first().waitFor({ state: "visible", timeout: 30000 });
+    assert.equal(authorRequests.length, 1, "a direct author deep link must load a fresh author index instead of restoring a snapshot");
+    await waitForAuthorFocus(page, "", "direct author return must focus the author-list heading when no triggering card exists");
+  } finally {
+    await page.close();
+  }
+}
+
+async function authorWindow(page) {
+  return page.evaluate(() => ({
+    authors: document.querySelectorAll("article").length,
+    scrollY: window.scrollY,
+    firstVisible: [...document.querySelectorAll("article")].findIndex((article) => article.getBoundingClientRect().bottom > 0),
+    href: window.location.href
+  }));
+}
+
+async function waitForAuthorFocus(page, authorId, message) {
+  const attribute = authorId ? "shortVideoAuthorId" : "shortVideoAuthorIndexHeading";
+  const expected = authorId || "1";
+  const actual = await waitFor(
+    () => page.evaluate((key) => document.activeElement?.dataset[key] || "", attribute),
+    (value) => value === expected,
+    5000
+  );
+  assert.equal(actual, expected, message);
 }
 
 async function loadMoreAuthorPages(page, pages) {

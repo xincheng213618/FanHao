@@ -12,23 +12,21 @@ import {
 import { canonicalShortVideoViewParams, normalizeAuthorAccountStatus } from "../android-client/www/modules/short-videos/shared.js";
 import { normalizeRoute as normalizeWebShortVideoRoute, routeFromUrl as webShortVideoRouteFromUrl, routeUrl as webShortVideoRouteUrl } from "../public/modules/short-videos/router.js";
 import {
+  AUTHOR_INDEX_WINDOW_MAX_AUTHORS,
+  AUTHOR_INDEX_WINDOW_TTL_MS,
   authorIndexReturnState,
   canReturnThroughShortVideoHistory,
   captureAuthorIndexReturnContext,
   captureAuthorIndexWindow,
+  discardAuthorIndexWindowAfterRouteChange,
   matchesAuthorIndexWindow,
   restoreAuthorIndexWindow
 } from "../public/modules/short-videos/author-navigation.js";
 import { createAuthorCollectorPoll } from "../public/modules/short-videos/author-collector-poll.js";
 import { shortVideoAuthorCardAccessibility } from "../public/modules/short-videos/list-cards.js";
 
-const nativeReadFileSync = fs.readFileSync.bind(fs);
-fs.readFileSync = (filePath, options) => {
-  const contents = nativeReadFileSync(filePath, options);
-  return typeof contents === "string" ? contents.replace(/\r\n/g, "\n") : contents;
-};
-
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const readNormalized = (filePath) => fs.readFileSync(filePath, "utf8").replace(/\r\n/g, "\n");
 const moduleDir = path.join(root, "android-client", "www", "modules", "short-videos");
 const requiredParts = [
   "api.js",
@@ -53,10 +51,10 @@ for (const relativePath of obsoletePlayerParts) {
   assert(!fs.statSync(path.join(moduleDir, relativePath), { throwIfNoEntry: false }), `legacy Android WebView player must stay removed: ${relativePath}`);
 }
 
-const facade = fs.readFileSync(path.join(moduleDir, "short-video-views.js"), "utf8").trim();
+const facade = readNormalized(path.join(moduleDir, "short-video-views.js")).trim();
 assert(/^export \{ createShortVideoViews \} from /.test(facade), "short-video-views.js must stay a compatibility facade");
 for (const filePath of sourceFiles(moduleDir)) {
-  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/).length;
+  const lines = readNormalized(filePath).split("\n").length;
   assert(lines <= 600, `short-video JS file exceeds 600 lines: ${relative(filePath)} (${lines})`);
 }
 verifyFeatureReferences();
@@ -176,6 +174,7 @@ function verifyWebAuthorRouteLifecycle() {
   assert(canReturnThroughShortVideoHistory({ referrer: "http://127.0.0.1/short-videos?source=authors", currentHref: "http://127.0.0.1/short-videos/authors/1" }), "a same-origin short-video referrer must use browser history");
   assert(!canReturnThroughShortVideoHistory({ referrer: "", currentHref: "http://127.0.0.1/short-videos/authors/1" }), "a direct author URL without a referrer must use the in-app author-index fallback");
   assert(!canReturnThroughShortVideoHistory({ referrer: "https://example.com/", currentHref: "http://127.0.0.1/short-videos/authors/1" }), "an external referrer must use the in-app fallback instead of leaving the site");
+  const snapshotNow = Date.now();
   const windowSnapshot = captureAuthorIndexWindow({
     source: "authors",
     authors: [{ secUid: "a" }, { secUid: "b" }],
@@ -183,13 +182,51 @@ function verifyWebAuthorRouteLifecycle() {
     authorScopeTotal: 12,
     authorBannedTotal: 1,
     authorHasMore: true
-  }, 4200);
+  }, 4200, "author-a", snapshotNow);
   const restoredWindow = { source: "authors", authors: [] };
   assert(!matchesAuthorIndexWindow(undefined, restoredWindow), "a missing author snapshot must never suppress the initial author request");
-  assert(matchesAuthorIndexWindow(windowSnapshot, restoredWindow), "a matching author route must accept its saved loaded window");
+  assert(matchesAuthorIndexWindow(windowSnapshot, restoredWindow, snapshotNow), "a matching author route must accept its saved loaded window");
   assert.equal(restoreAuthorIndexWindow(restoredWindow, windowSnapshot), 4200, "author window restore must retain the saved scroll position");
   assert.deepEqual(restoredWindow.authors, [{ secUid: "a" }, { secUid: "b" }], "author window restore must retain all loaded author pages");
-  assert(!matchesAuthorIndexWindow(windowSnapshot, { source: "following" }), "a different author scope must not restore a stale author window");
+  const contextCases = [
+    ["source", { source: "following" }],
+    ["query", { query: "different" }],
+    ["sort", { sort: "likes" }],
+    ["author account", { authorAccountStatus: "banned" }]
+  ];
+  for (const [label, changes] of contextCases) {
+    assert(!matchesAuthorIndexWindow(windowSnapshot, { ...restoredWindow, ...changes }, snapshotNow), `${label} changes must not restore a stale author window`);
+  }
+  const followingSnapshot = captureAuthorIndexWindow({
+    source: "following",
+    query: "蔓蔓",
+    sort: "likes",
+    authorSort: "liked",
+    authorFilter: "unliked",
+    authors: [{ secUid: "a" }]
+  }, 4200, "author-a", snapshotNow);
+  assert(matchesAuthorIndexWindow(followingSnapshot, {
+    source: "following",
+    query: "蔓蔓",
+    sort: "likes",
+    authorSort: "liked",
+    authorFilter: "unliked"
+  }, snapshotNow), "the matching following context must restore its saved window");
+  assert(!matchesAuthorIndexWindow(followingSnapshot, {
+    source: "following",
+    query: "蔓蔓",
+    sort: "likes",
+    authorSort: "liked",
+    authorFilter: "all"
+  }, snapshotNow), "following filter changes must not restore a stale author window");
+  assert(!matchesAuthorIndexWindow(windowSnapshot, restoredWindow, snapshotNow + AUTHOR_INDEX_WINDOW_TTL_MS + 1), "expired author windows must fall back to the network");
+  assert.equal(captureAuthorIndexWindow({ source: "authors", authors: Array.from({ length: AUTHOR_INDEX_WINDOW_MAX_AUTHORS + 1 }) }, 0, "author-a", snapshotNow), null, "oversized author windows must fall back to the network");
+  const staleRouteState = { ...restoredWindow, authorIndexWindow: windowSnapshot };
+  assert(!discardAuthorIndexWindowAfterRouteChange(staleRouteState, "different-author"), "a route that did not return from the captured detail must discard its snapshot");
+  assert.equal(staleRouteState.authorIndexWindow, null, "discarded snapshots must not revive after a later context match");
+  const mismatchedRouteState = { ...restoredWindow, query: "different", authorIndexWindow: windowSnapshot };
+  assert(!discardAuthorIndexWindowAfterRouteChange(mismatchedRouteState, "author-a"), "a context mismatch must discard its snapshot immediately");
+  assert.equal(mismatchedRouteState.authorIndexWindow, null, "context-mismatched snapshots must not revive after a later route change");
   assert.deepEqual(
     shortVideoAuthorCardAccessibility({ name: "蔓蔓", accountStatus: "banned", accountStatusReason: "主页不可访问" }),
     { label: "查看 蔓蔓 的短视频，账号已封禁", description: "封禁原因：主页不可访问" },
@@ -331,26 +368,26 @@ function verifyWebShortVideoRouter() {
   );
 }
 
-const styles = fs.readFileSync(path.join(moduleDir, "styles.css"), "utf8");
+const styles = readNormalized(path.join(moduleDir, "styles.css"));
 for (const style of ["list"]) {
   assert(styles.includes(`./styles/${style}.css`), `missing short-video CSS import: ${style}`);
 }
 
-const androidEntrySource = fs.readFileSync(path.join(moduleDir, "android-module.js"), "utf8");
-const androidListSource = fs.readFileSync(path.join(moduleDir, "list", "view.js"), "utf8");
-const androidListControllerSource = fs.readFileSync(path.join(moduleDir, "list", "controller.js"), "utf8");
-const androidAccountStatusViewSource = fs.readFileSync(path.join(moduleDir, "list", "account-status-view.js"), "utf8");
-const androidListStylesSource = fs.readFileSync(path.join(moduleDir, "styles", "list.css"), "utf8");
-const androidNativeFeedSource = fs.readFileSync(path.join(moduleDir, "player", "native-feed.js"), "utf8");
-const androidNativeFeedContractSource = fs.readFileSync(path.join(moduleDir, "player", "native-feed-contract.js"), "utf8");
-const androidPlayerPluginSource = fs.readFileSync(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "FanHaoPlayerPlugin.java"), "utf8");
-const androidNativePlayerSource = fs.readFileSync(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoActivity.java"), "utf8");
-const androidNativePageViewSource = fs.readFileSync(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoPageView.java"), "utf8");
-const androidNativeCommentsSource = fs.readFileSync(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoCommentsController.java"), "utf8");
-const androidNativeFeedSearchSource = fs.readFileSync(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedSearchController.java"), "utf8");
-const androidNativeFeedContractJavaSource = fs.readFileSync(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "ShortVideoFeedContract.java"), "utf8");
-const androidNativeFeedModelsSource = fs.readFileSync(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "ShortVideoFeedModels.java"), "utf8");
-const androidNativePlayerLayoutSource = fs.readFileSync(path.join(root, "android-client", "android", "app", "src", "main", "res", "layout", "native_short_player_view.xml"), "utf8");
+const androidEntrySource = readNormalized(path.join(moduleDir, "android-module.js"));
+const androidListSource = readNormalized(path.join(moduleDir, "list", "view.js"));
+const androidListControllerSource = readNormalized(path.join(moduleDir, "list", "controller.js"));
+const androidAccountStatusViewSource = readNormalized(path.join(moduleDir, "list", "account-status-view.js"));
+const androidListStylesSource = readNormalized(path.join(moduleDir, "styles", "list.css"));
+const androidNativeFeedSource = readNormalized(path.join(moduleDir, "player", "native-feed.js"));
+const androidNativeFeedContractSource = readNormalized(path.join(moduleDir, "player", "native-feed-contract.js"));
+const androidPlayerPluginSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "FanHaoPlayerPlugin.java"));
+const androidNativePlayerSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoActivity.java"));
+const androidNativePageViewSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoPageView.java"));
+const androidNativeCommentsSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoCommentsController.java"));
+const androidNativeFeedSearchSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoFeedSearchController.java"));
+const androidNativeFeedContractJavaSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "ShortVideoFeedContract.java"));
+const androidNativeFeedModelsSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "ShortVideoFeedModels.java"));
+const androidNativePlayerLayoutSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "res", "layout", "native_short_player_view.xml"));
 assert(androidEntrySource.includes('view: "shortVideoSearch"'), "Android short-video search must use a dedicated route");
 assert(androidEntrySource.includes("short-video-chrome-row"), "Android short-video chrome must keep search and groups in one compact row");
 assert(!androidEntrySource.includes("short-video-chrome-sort"), "Android short-video chrome must not reserve a separate sorting tag");
@@ -441,7 +478,7 @@ assert.deepEqual(
 );
 assert.equal(views.getSearchState().authorAccountStatus, "all", "Android short-video state must initialize account status independently from following filters");
 
-const appSource = fs.readFileSync(path.join(root, "android-client", "www", "app.js"), "utf8");
+const appSource = readNormalized(path.join(root, "android-client", "www", "app.js"));
 assert(!appSource.includes("shortVideoBrowser"), "Android shell must not retain the legacy WebView playback route");
 assert(appSource.includes("canonicalShortVideoViewParams(view, params)") && appSource.includes('account: query.get("account") || "all"'), "Android shell routes must parse and canonicalize account=banned links");
 assert(
@@ -460,7 +497,7 @@ function sourceFiles(dir) {
 
 function verifyFeatureReferences() {
   const files = sourceFiles(moduleDir).filter((filePath) => !/[\\/](?:index|android-module)\.js$/.test(filePath));
-  const sources = new Map(files.map((filePath) => [filePath, fs.readFileSync(filePath, "utf8")]));
+  const sources = new Map(files.map((filePath) => [filePath, readNormalized(filePath)]));
   const methodNames = new Set();
   const ownMethods = new Map();
   for (const [filePath, source] of sources) {
@@ -482,11 +519,11 @@ function verifyFeatureReferences() {
 
 function verifySharedImports() {
   const sharedPath = path.join(moduleDir, "shared.js");
-  const sharedSource = fs.readFileSync(sharedPath, "utf8");
+  const sharedSource = readNormalized(sharedPath);
   const exported = [...sharedSource.matchAll(/^export (?:const|function) ([A-Za-z_$][\w$]*)/gm)].map((match) => match[1]);
   for (const filePath of sourceFiles(moduleDir)) {
     if (filePath === sharedPath) continue;
-    const source = fs.readFileSync(filePath, "utf8");
+    const source = readNormalized(filePath);
     const imported = new Set();
     for (const match of source.matchAll(/import \{([^}]+)\} from ["'][^"']*shared\.js[^"']*["']/g)) {
       for (const item of match[1].split(",")) imported.add(item.trim().split(/\s+as\s+/)[0]);
@@ -497,53 +534,53 @@ function verifySharedImports() {
 }
 
 function verifyWebDedicatedEntry() {
-  const indexSource = fs.readFileSync(path.join(root, "public", "index.html"), "utf8");
+  const indexSource = readNormalized(path.join(root, "public", "index.html"));
   const entryPath = path.join(root, "public", "short-video-app.js");
-  const entrySource = fs.readFileSync(entryPath, "utf8");
-  const performanceObserverSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "performance-observers.js"), "utf8");
-  const routerSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "router.js"), "utf8");
-  const playerSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "short-video-page.js"), "utf8").replace(/\r\n/g, "\n");
-  const actionsControllerSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "actions-controller.js"), "utf8");
-  const listWindowSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "list-window.js"), "utf8");
-  const mediaCacheSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "media-cache.js"), "utf8");
-  const playerSourceLifecycleSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "player-source-lifecycle.js"), "utf8");
-  const playbackRenditionPolicySource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "playback-rendition-policy.js"), "utf8");
-  const authorPagesSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "author-pages.js"), "utf8");
-  const authorCollectorPollSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "author-collector-poll.js"), "utf8");
-  const webIconsSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "icons.js"), "utf8");
-  const shortVideoStateSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "state.js"), "utf8");
-  const commentsViewSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "comments-view.js"), "utf8");
-  const sharePanelSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "share-panel.js"), "utf8");
-  const playbackSettingsSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "playback-settings.js"), "utf8");
-  const authorPanelSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "author-panel.js"), "utf8");
-  const galleryPlayerSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "gallery-player.js"), "utf8");
-  const listCardsSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "list-cards.js"), "utf8");
-  const filterControlsSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "filter-controls.js"), "utf8");
-  const likeDistributionSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "like-distribution-view.js"), "utf8");
-  const transcodeStatusButtonSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "transcode-status-button.js"), "utf8");
-  const transcodeManagementPageSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "transcode-management-page.js"), "utf8");
-  const transcodeStatusViewSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "transcode-status-view.js"), "utf8");
-  const viewerSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "styles", "viewer.css"), "utf8");
-  const galleryNavigationSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "styles", "gallery-navigation.css"), "utf8");
-  const listSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "styles", "list.css"), "utf8");
-  const panelSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "styles", "panels.css"), "utf8");
-  const responsiveSource = fs.readFileSync(path.join(root, "public", "modules", "short-videos", "styles", "responsive.css"), "utf8");
-  const staticServerSource = fs.readFileSync(path.join(root, "src", "platform", "server", "static-files.js"), "utf8");
-  const serverConfigSource = fs.readFileSync(path.join(root, "src", "bootstrap", "server-config.js"), "utf8");
-  const shortVideoRuntimeSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "runtime.js"), "utf8").replace(/\r\n/g, "\n");
-  const shortVideoListWorkerSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "list-worker.js"), "utf8");
+  const entrySource = readNormalized(entryPath);
+  const performanceObserverSource = readNormalized(path.join(root, "public", "modules", "short-videos", "performance-observers.js"));
+  const routerSource = readNormalized(path.join(root, "public", "modules", "short-videos", "router.js"));
+  const playerSource = readNormalized(path.join(root, "public", "modules", "short-videos", "short-video-page.js"));
+  const actionsControllerSource = readNormalized(path.join(root, "public", "modules", "short-videos", "actions-controller.js"));
+  const listWindowSource = readNormalized(path.join(root, "public", "modules", "short-videos", "list-window.js"));
+  const mediaCacheSource = readNormalized(path.join(root, "public", "modules", "short-videos", "media-cache.js"));
+  const playerSourceLifecycleSource = readNormalized(path.join(root, "public", "modules", "short-videos", "player-source-lifecycle.js"));
+  const playbackRenditionPolicySource = readNormalized(path.join(root, "public", "modules", "short-videos", "playback-rendition-policy.js"));
+  const authorPagesSource = readNormalized(path.join(root, "public", "modules", "short-videos", "author-pages.js"));
+  const authorCollectorPollSource = readNormalized(path.join(root, "public", "modules", "short-videos", "author-collector-poll.js"));
+  const webIconsSource = readNormalized(path.join(root, "public", "modules", "short-videos", "icons.js"));
+  const shortVideoStateSource = readNormalized(path.join(root, "public", "modules", "short-videos", "state.js"));
+  const commentsViewSource = readNormalized(path.join(root, "public", "modules", "short-videos", "comments-view.js"));
+  const sharePanelSource = readNormalized(path.join(root, "public", "modules", "short-videos", "share-panel.js"));
+  const playbackSettingsSource = readNormalized(path.join(root, "public", "modules", "short-videos", "playback-settings.js"));
+  const authorPanelSource = readNormalized(path.join(root, "public", "modules", "short-videos", "author-panel.js"));
+  const galleryPlayerSource = readNormalized(path.join(root, "public", "modules", "short-videos", "gallery-player.js"));
+  const listCardsSource = readNormalized(path.join(root, "public", "modules", "short-videos", "list-cards.js"));
+  const filterControlsSource = readNormalized(path.join(root, "public", "modules", "short-videos", "filter-controls.js"));
+  const likeDistributionSource = readNormalized(path.join(root, "public", "modules", "short-videos", "like-distribution-view.js"));
+  const transcodeStatusButtonSource = readNormalized(path.join(root, "public", "modules", "short-videos", "transcode-status-button.js"));
+  const transcodeManagementPageSource = readNormalized(path.join(root, "public", "modules", "short-videos", "transcode-management-page.js"));
+  const transcodeStatusViewSource = readNormalized(path.join(root, "public", "modules", "short-videos", "transcode-status-view.js"));
+  const viewerSource = readNormalized(path.join(root, "public", "modules", "short-videos", "styles", "viewer.css"));
+  const galleryNavigationSource = readNormalized(path.join(root, "public", "modules", "short-videos", "styles", "gallery-navigation.css"));
+  const listSource = readNormalized(path.join(root, "public", "modules", "short-videos", "styles", "list.css"));
+  const panelSource = readNormalized(path.join(root, "public", "modules", "short-videos", "styles", "panels.css"));
+  const responsiveSource = readNormalized(path.join(root, "public", "modules", "short-videos", "styles", "responsive.css"));
+  const staticServerSource = readNormalized(path.join(root, "src", "platform", "server", "static-files.js"));
+  const serverConfigSource = readNormalized(path.join(root, "src", "bootstrap", "server-config.js"));
+  const shortVideoRuntimeSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "runtime.js"));
+  const shortVideoListWorkerSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "list-worker.js"));
   const shortVideoCatalogWorkerClientPath = path.join(root, "src", "modules", "short-videos", "server", "catalog-worker-client.js");
   const shortVideoCatalogWorkerClientSource = fs.statSync(shortVideoCatalogWorkerClientPath, { throwIfNoEntry: false })?.isFile()
-    ? fs.readFileSync(shortVideoCatalogWorkerClientPath, "utf8")
+    ? readNormalized(shortVideoCatalogWorkerClientPath)
     : "";
-  const shortVideoRoutesSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "routes.js"), "utf8").replace(/\r\n/g, "\n");
-  const shortVideoWatchWriterSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "watch-write-service.js"), "utf8");
-  const shortVideoWatchWorkerSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "watch-write-worker.js"), "utf8");
-  const downloadManagerSyncSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "download-manager-sync-service.js"), "utf8");
-  const shortVideoStoreSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "store.js"), "utf8").replace(/\r\n/g, "\n");
-  const shortVideoListPageQueriesSource = fs.readFileSync(path.join(root, "src", "modules", "short-videos", "server", "list-page-queries.js"), "utf8");
-  const launcherSource = fs.readFileSync(path.join(root, "start-fanhao.ps1"), "utf8");
-  const shortVideoBuildSource = fs.readFileSync(path.join(root, "tools", "build_short_video_web.mjs"), "utf8");
+  const shortVideoRoutesSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "routes.js"));
+  const shortVideoWatchWriterSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "watch-write-service.js"));
+  const shortVideoWatchWorkerSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "watch-write-worker.js"));
+  const downloadManagerSyncSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "download-manager-sync-service.js"));
+  const shortVideoStoreSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "store.js"));
+  const shortVideoListPageQueriesSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "list-page-queries.js"));
+  const launcherSource = readNormalized(path.join(root, "start-fanhao.ps1"));
+  const shortVideoBuildSource = readNormalized(path.join(root, "tools", "build_short_video_web.mjs"));
 
   assert(
     indexSource.includes("const shortVideoEntry =") && indexSource.includes('import("/short-video-app.min.js?v='),
