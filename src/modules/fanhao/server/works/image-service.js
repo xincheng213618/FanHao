@@ -28,7 +28,7 @@ export function createWorkImageService({
           `
           SELECT id, owner_id, remote_url, local_path, source, updated_at, legacy_key,
                  image_blob IS NOT NULL AS has_image_blob
-          FROM images
+          FROM fanhao_images.images
           WHERE owner_type = 'person'
             AND owner_id = ?
             AND kind = 'avatar'
@@ -62,7 +62,7 @@ export function createWorkImageService({
         .prepare(
           `
           SELECT *
-          FROM images
+          FROM fanhao_images.images
           WHERE owner_type = 'person'
             AND owner_id = ?
             AND kind = 'avatar'
@@ -136,7 +136,7 @@ export function createWorkImageService({
               `
               SELECT id, CAST(owner_id AS TEXT) AS work_id, owner_id, remote_url, local_path, source, updated_at,
                      image_blob IS NOT NULL AS has_image_blob
-              FROM images
+              FROM fanhao_images.images
               WHERE owner_type = 'work'
                 AND owner_id IN (${placeholders})
                 AND kind = 'cover'
@@ -171,7 +171,7 @@ export function createWorkImageService({
         .prepare(
           `
           SELECT *
-          FROM images
+          FROM fanhao_images.images
           WHERE owner_type = 'work'
             AND owner_id = ?
             AND kind = 'cover'
@@ -212,7 +212,7 @@ export function createWorkImageService({
               CAST(lw.work_id AS TEXT) AS work_id,
               EXISTS (
                 SELECT 1
-                FROM images i
+                FROM fanhao_images.images i
                 WHERE i.owner_type = 'work'
                   AND i.owner_id = lw.work_id
                   AND i.kind = 'cover'
@@ -244,7 +244,7 @@ export function createWorkImageService({
   function coreImageRow(imageId) {
     if (!hasCoreDb()) return null;
     try {
-      return getCoreDb().prepare("SELECT * FROM images WHERE id = ?").get(Number(imageId)) || null;
+      return getCoreDb().prepare("SELECT * FROM fanhao_images.images WHERE id = ?").get(Number(imageId)) || null;
     } catch (error) {
       console.warn("[core-image]", error.message);
       return null;

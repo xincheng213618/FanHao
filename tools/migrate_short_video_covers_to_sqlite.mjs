@@ -120,7 +120,7 @@ function cleanupCoreLocalImageCache(coreDbPath, legacyCoverDir) {
     const resolvedRoot = path.resolve(legacyCoverDir);
     const rows = database.prepare(`
       SELECT file_id, file_path, byte_length
-      FROM local_image_cache
+      FROM fanhao_images.local_image_cache
       WHERE COALESCE(TRIM(file_path), '') <> ''
     `).all().filter((row) => {
       const resolved = path.resolve(String(row.file_path || ""));
@@ -130,7 +130,7 @@ function cleanupCoreLocalImageCache(coreDbPath, legacyCoverDir) {
     let bytes = 0;
     database.exec("BEGIN IMMEDIATE");
     try {
-      const statement = database.prepare("DELETE FROM local_image_cache WHERE file_id = ?");
+      const statement = database.prepare("DELETE FROM fanhao_images.local_image_cache WHERE file_id = ?");
       for (const row of rows) {
         removed += Number(statement.run(row.file_id)?.changes || 0);
         bytes += Number(row.byte_length || 0);

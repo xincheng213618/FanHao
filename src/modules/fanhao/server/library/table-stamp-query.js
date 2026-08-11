@@ -1,16 +1,17 @@
 const TABLE_MAP = Object.freeze({
   actor_profiles: "people",
   actor_movies: "work_people",
+  images: "fanhao_images.images",
   work_info: "works",
-  work_covers: "images",
+  work_covers: "fanhao_images.images",
   javdb_rankings: "collection_items",
-  local_image_cache: "local_image_cache",
-  remote_image_cache: "remote_image_cache"
+  local_image_cache: "fanhao_images.local_image_cache",
+  remote_image_cache: "fanhao_images.remote_image_cache"
 });
 
 export function readTableStampRow(db, table) {
   const safeTable = TABLE_MAP[table] || table;
-  if (!/^[A-Za-z0-9_]+$/.test(safeTable)) throw new Error(`Invalid table: ${table}`);
+  if (!/^(?:[A-Za-z0-9_]+\.)?[A-Za-z0-9_]+$/.test(safeTable)) throw new Error(`Invalid table: ${table}`);
   const row = db.prepare(`
     SELECT
       (SELECT COUNT(*) FROM ${safeTable}) AS row_count,

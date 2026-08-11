@@ -21,7 +21,7 @@ export function createWorkCoverMutationService({
         .prepare(
           `
           SELECT CAST(i.owner_id AS TEXT) AS work_id
-          FROM images i
+          FROM fanhao_images.images i
           WHERE i.owner_type = 'work'
             AND i.kind = 'cover'
             AND i.image_blob IS NOT NULL
@@ -110,7 +110,7 @@ export function createWorkCoverMutationService({
     getCoreDb()
       .prepare(
         `
-        INSERT INTO images (
+        INSERT INTO fanhao_images.images (
           owner_type, owner_id, kind, source_type, local_path, mime, image_blob,
           byte_size, sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
         ) VALUES ('work', ?, 'cover', 'generated', ?, ?, ?, ?, 0, 'ok', ?, 'generated', ?, ?, ?)

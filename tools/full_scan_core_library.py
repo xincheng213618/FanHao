@@ -441,7 +441,7 @@ def create_or_update_local_work(
         )
         if old_path and path_key(old_path) != path_key(local_path):
             conn.execute(
-                "UPDATE images SET local_path = ?, updated_at = ? WHERE owner_type = 'work' AND owner_id = ? AND local_path = ?",
+                "UPDATE fanhao_images.images SET local_path = ?, updated_at = ? WHERE owner_type = 'work' AND owner_id = ? AND local_path = ?",
                 (local_path, now, work_id, old_path),
             )
         return local_work_id

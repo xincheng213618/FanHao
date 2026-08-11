@@ -29,7 +29,7 @@ fs.mkdirSync(path.dirname(imageDbPath), { recursive: true });
 
 let db = new DatabaseSync(coreDbPath);
 db.exec("PRAGMA busy_timeout = 30000; PRAGMA foreign_keys = OFF;");
-attachCoreImageStore(db, { dbPath: imageDbPath });
+attachCoreImageStore(db, { dbPath: imageDbPath, allowLegacyMainTables: true });
 
 const mainTables = new Set(db.prepare("SELECT name FROM main.sqlite_schema WHERE type = 'table'").all().map((row) => row.name));
 const before = SPLIT_TABLES.map((table) => summarizeTable(db, "main", table, mainTables.has(table)));

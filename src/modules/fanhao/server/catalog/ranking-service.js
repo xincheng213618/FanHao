@@ -188,7 +188,7 @@ export function createRankingService({
           .prepare(
             `
             SELECT CAST(owner_id AS TEXT) AS work_id, remote_url
-            FROM images
+            FROM fanhao_images.images
             WHERE owner_type = 'work'
               AND owner_id IN (${placeholders})
               AND kind = 'cover'

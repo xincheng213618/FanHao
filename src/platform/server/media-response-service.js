@@ -125,7 +125,7 @@ export function createMediaResponseService({
           .prepare(
             `
             SELECT *
-            FROM local_image_cache
+            FROM fanhao_images.local_image_cache
             WHERE file_id = ?
               AND image_blob IS NOT NULL
               AND length(image_blob) > 0
@@ -156,7 +156,7 @@ export function createMediaResponseService({
     getCoreDb()
       .prepare(
         `
-        INSERT INTO local_image_cache (
+        INSERT INTO fanhao_images.local_image_cache (
           file_id, file_path, relative_path, content_type, image_blob, byte_length,
           source_size, source_mtime, status, error, cached_at, updated_at
         )
@@ -200,7 +200,7 @@ export function createMediaResponseService({
       getCoreDb()
         .prepare(
           `
-          INSERT INTO local_image_cache (
+          INSERT INTO fanhao_images.local_image_cache (
             file_id, file_path, relative_path, content_type, image_blob, byte_length,
             source_size, source_mtime, status, error, cached_at, updated_at
           )
@@ -627,7 +627,7 @@ function createInlineMediaBlobStore({ coreImageRow, corePersonAvatarRow, getCore
         if (!batch.length) continue;
         const placeholders = batch.map(() => "?").join(", ");
         const rows = getCoreDb()
-          .prepare(`SELECT url FROM remote_image_cache WHERE url IN (${placeholders})`)
+          .prepare(`SELECT url FROM fanhao_images.remote_image_cache WHERE url IN (${placeholders})`)
           .all(...batch);
         for (const row of rows) cached.push(row.url);
       }
@@ -637,12 +637,12 @@ function createInlineMediaBlobStore({ coreImageRow, corePersonAvatarRow, getCore
       return coreImageRow(imageId);
     },
     async remoteImage(remoteUrl) {
-      return getCoreDb().prepare("SELECT content_type, image_blob, byte_length, updated_at FROM remote_image_cache WHERE url = ?").get(remoteUrl) || null;
+      return getCoreDb().prepare("SELECT content_type, image_blob, byte_length, updated_at FROM fanhao_images.remote_image_cache WHERE url = ?").get(remoteUrl) || null;
     },
     async upsertRemote(record) {
       getCoreDb()
         .prepare(`
-          INSERT INTO remote_image_cache (
+          INSERT INTO fanhao_images.remote_image_cache (
             url, url_hash, content_type, image_blob, byte_length, status, error, fetched_at, updated_at
           )
           VALUES (?, ?, ?, ?, ?, 'ok', '', ?, ?)

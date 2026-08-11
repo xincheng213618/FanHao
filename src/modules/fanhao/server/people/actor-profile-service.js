@@ -64,10 +64,10 @@ export function createActorProfileService({
               WHERE pa.person_id = p.id
             ) AS aliases_json
           FROM people p
-          LEFT JOIN images avatar
+          LEFT JOIN fanhao_images.images avatar
             ON avatar.id = (
               SELECT i.id
-              FROM images i
+              FROM fanhao_images.images i
               WHERE i.owner_type = 'person'
                 AND i.owner_id = p.id
                 AND i.kind = 'avatar'

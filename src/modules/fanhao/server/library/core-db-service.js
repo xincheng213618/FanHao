@@ -67,22 +67,34 @@ export function createCoreDbService({
 
   function getDb() {
     if (!db) {
-      ensureDataDir();
-      db = createDatabase(dbPath);
-      db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
-      attachCoreImageStore(db, { dbPath: imageDbPath });
+      let candidate = null;
       try {
-        ensureColumn(db, "people", "gender", "TEXT NOT NULL DEFAULT 'unknown'");
-        ensureColumn(db, "works", "has_magnet", "INTEGER");
-        ensureColumn(db, "works", "is_streamable", "INTEGER");
-        ensureColumn(db, "works", "has_subtitles", "INTEGER");
-        ensureColumn(db, "works", "javdb_tags_json", "TEXT");
-        ensureColumn(db, "person_external_refs", "updated_at", "TEXT NOT NULL DEFAULT ''");
-        ensureColumn(db, "work_external_refs", "updated_at", "TEXT NOT NULL DEFAULT ''");
-        ensureColumn(db, "person_aliases", "updated_at", "TEXT NOT NULL DEFAULT ''");
-        ensureCoreTables(db);
+        ensureDataDir();
+        candidate = createDatabase(dbPath);
+        candidate.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+        attachCoreImageStore(candidate, { dbPath: imageDbPath });
+        ensureColumn(candidate, "people", "gender", "TEXT NOT NULL DEFAULT 'unknown'");
+        ensureColumn(candidate, "works", "has_magnet", "INTEGER");
+        ensureColumn(candidate, "works", "is_streamable", "INTEGER");
+        ensureColumn(candidate, "works", "has_subtitles", "INTEGER");
+        ensureColumn(candidate, "works", "javdb_tags_json", "TEXT");
+        ensureColumn(candidate, "person_external_refs", "updated_at", "TEXT NOT NULL DEFAULT ''");
+        ensureColumn(candidate, "work_external_refs", "updated_at", "TEXT NOT NULL DEFAULT ''");
+        ensureColumn(candidate, "person_aliases", "updated_at", "TEXT NOT NULL DEFAULT ''");
+        ensureCoreTables(candidate);
+        db = candidate;
       } catch (error) {
+        if (candidate) {
+          try {
+            candidate.close();
+          } catch (closeError) {
+            warn("[core-db-close]", closeError?.message || closeError);
+          }
+        }
+        db = null;
+        tableStampCache.clear();
         warn("[core-db]", error.message);
+        throw error;
       }
     }
     return db;
@@ -130,9 +142,10 @@ export function createCoreDbService({
       return cached.stamp;
     }
 
+    const coreDb = getDb();
     try {
       const version = stampVersion(table);
-      const row = readTableStampRow(getDb(), table);
+      const row = readTableStampRow(coreDb, table);
       const stamp = tableStampValue(table, version, row);
       tableStampCache.set(table, { checkedAt, row, stamp });
       return stamp;

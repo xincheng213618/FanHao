@@ -62,6 +62,19 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8").replace(/\r\n/g, "\n");
 const lines = (relativePath) => read(relativePath).split(/\r?\n/).length;
 
+function sourceFilesUnder(relativeDirectory) {
+  const files = [];
+  const visit = (relativePath) => {
+    for (const entry of fs.readdirSync(path.join(root, relativePath), { withFileTypes: true })) {
+      const childPath = path.posix.join(relativePath.replaceAll("\\", "/"), entry.name);
+      if (entry.isDirectory()) visit(childPath);
+      else if (entry.isFile()) files.push(childPath);
+    }
+  };
+  visit(relativeDirectory);
+  return files;
+}
+
 function captureJsonResponse(payload, acceptEncoding = "") {
   return new Promise((resolve) => {
     const response = {
@@ -1300,7 +1313,7 @@ assert(catalogRuntimeSource.includes("deps.studioService.prewarm()"), "studio ag
 assert(!studioService.includes("enrichLocalWorksWithActorMovieIndex(linkRows"), "studio details must not rerun actor-movie code matching for core library works");
 assert(rankingServiceSource.includes("prewarmWorkInfoDetails(pageSource)"), "ranking pages must batch-hydrate visible local work metadata");
 assert(rankingServiceSource.includes("hydrateRankingCoverUrls(rankingRows)"), "ranking pages must batch-hydrate cover URLs after the fast list query");
-assert(!rankingServiceSource.includes("LEFT JOIN images cover"), "ranking list queries must not run one correlated image lookup per row");
+assert(!rankingServiceSource.includes("LEFT JOIN images cover") && !rankingServiceSource.includes("LEFT JOIN fanhao_images.images cover"), "ranking list queries must not run one correlated image lookup per row");
 assert(rankingServiceSource.includes("rankingSummariesCache?.stamp === stamp"), "ranking summaries must reuse versioned results");
 assert(rankingServiceSource.includes("function uniqueRankingRows(items = [])") && rankingServiceSource.includes("const rankingRows = uniqueRankingRows(getCoreDb()") && rankingServiceSource.includes("COUNT(DISTINCT ci.work_id)"), "ranking summaries and pages must ignore duplicate collection memberships");
 assert(rankingServiceSource.includes("const RANKING_PREWARM_PAGE_SIZE = 64"), "ranking startup must prepare the desktop first page");
@@ -1375,7 +1388,7 @@ assert(lines("src/modules/fanhao/server/works/work-search-index-service.js") <= 
 assert(missingCodeSearchServiceSource.includes("missingCodeSearchPending: true"), "broad code-prefix searches must defer non-page detail hydration");
 assert(missingCodeSearchServiceSource.includes("WHERE w.id IN (${placeholders})"), "visible missing-code results must batch-hydrate one page of details");
 assert(missingCodeSearchServiceSource.includes("coverWorkIdsCache?.stamp === stamp"), "broad code-prefix searches must reuse the in-memory cover membership index");
-assert(!missingCodeSearchServiceSource.includes("EXISTS (\n            SELECT 1\n            FROM images image"), "broad code-prefix result scans must not probe the cover index once per candidate");
+assert(!missingCodeSearchServiceSource.includes("EXISTS (\n            SELECT 1\n            FROM images image") && !missingCodeSearchServiceSource.includes("EXISTS (\n            SELECT 1\n            FROM fanhao_images.images image"), "broad code-prefix result scans must not probe the cover index once per candidate");
 assert(!missingCodeSearchServiceSource.includes("LIMIT 5000"), "code-prefix search must not truncate broad missing-work results");
 assert(read("server.js").includes("missingCodeSearchService.prewarm();"), "FanHao startup must prepare broad-search cover membership before the first request");
 assert(read("server.js").includes("hydrateMissingSearchWorks: missingCodeSearchService.hydrate"), "FanHao search composition must use page-level missing-result hydration");
@@ -1447,6 +1460,28 @@ assert(workImageServiceSource.includes("workCoverMetadataCache = { stamp, rows: 
 const mediaResponseServiceSource = read("src/platform/server/media-response-service.js");
 const mediaBlobWorkerClientSource = read("src/platform/server/media-blob-worker-client.js");
 const mediaBlobWorkerSource = read("src/platform/server/media-blob-worker.js");
+const deferredImageSqlFiles = new Set([
+  "src/modules/fanhao/server/admin/admin-core-mutation-service.js",
+  "src/modules/fanhao/server/works/work-local-mutation-service.js"
+]);
+const unqualifiedImageSql = /\b(?:FROM|JOIN|INTO|UPDATE|DELETE\s+FROM)\s+(?:images|local_image_cache|remote_image_cache)\b/i;
+const imageSqlFiles = [
+  ...sourceFilesUnder("src/modules/fanhao/server").filter((filePath) => filePath.endsWith(".js") && !deferredImageSqlFiles.has(filePath)),
+  "src/platform/server/media-blob-worker.js",
+  "src/platform/server/media-response-service.js",
+  "tools/cache_remote_images_node.mjs",
+  "tools/core_image_store.py",
+  "tools/full_scan_core_library.py",
+  "tools/migrate_core_images_to_sqlite.mjs",
+  "tools/migrate_short_video_covers_to_sqlite.mjs",
+  "tools/refresh_core_javdb_actor_movies.py",
+  "tools/remote_image_cache.py"
+];
+for (const filePath of imageSqlFiles) {
+  assert.equal(unqualifiedImageSql.test(read(filePath)), false, `${filePath} must qualify attached image tables with fanhao_images`);
+}
+const pythonCoreImageStoreSource = read("tools/core_image_store.py");
+assert(pythonCoreImageStoreSource.includes("COLLATE NOCASE") && pythonCoreImageStoreSource.includes("Legacy image tables in main would shadow"), "Python core-image maintenance must reject shadowed attached tables");
 assert(mediaResponseServiceSource.includes("cachedRemoteImageUrls(remoteUrls)"), "visible work pages must batch-check warmed remote images");
 assert(mediaResponseServiceSource.includes("work.cachedCover?.coverUrl, work.remoteCoverUrl"), "SQL cover metadata must still prewarm remote image blobs that are not cached yet");
 assert(mediaResponseServiceSource.includes("await cachedMediaBlobRow"), "database-backed images must leave synchronous request handling");
@@ -1456,8 +1491,8 @@ assert(mediaResponseServiceSource.includes("for (const remoteUrl of remoteImageW
 assert(!mediaResponseServiceSource.includes("remoteImageCacheRow(remoteUrl)?.image_blob || remoteImageWarmQueued"), "remote-image warming must not read cached blobs on the response path");
 assert(!mediaResponseServiceSource.includes("WHERE image_blob IS NOT NULL AND url IN"), "remote-image warming must use the URL covering index instead of opening cached blobs");
 assert(mediaBlobWorkerClientSource.includes("new WorkerCtor"), "database-backed image reads must run outside the server main thread");
-assert(mediaBlobWorkerSource.includes("SELECT image_blob, mime FROM images WHERE id = ?"), "the media worker must own core-image blob reads");
-assert(mediaBlobWorkerSource.includes("INSERT INTO remote_image_cache"), "the media worker must own remote-image blob writes");
+assert(mediaBlobWorkerSource.includes("SELECT image_blob, mime FROM fanhao_images.images WHERE id = ?"), "the media worker must own core-image blob reads");
+assert(mediaBlobWorkerSource.includes("INSERT INTO fanhao_images.remote_image_cache"), "the media worker must own remote-image blob writes");
 
 const server = read("server.js");
 assert(server.includes("createFanhaoDependencies({"), "server composition must delegate FanHao dependency grouping");
@@ -1514,13 +1549,14 @@ assert(workQueryServiceSource.includes("actorMissingSearchWorksForPeople([...exa
 assert(workQueryServiceSource.includes("exactPersonLocalWorks.filter(matchesExactPerson)"), "exact person searches must not enrich and scan the full local-work catalog");
 assert(personListServiceSource.includes("actorMovieService.hasMergedRows(person.id)"), "person indexes must use the compact actor-movie person-id cache instead of loading every movie row");
 assert(coreImageStoreSource.includes("idx_images_updated_at") && coreImageStoreSource.includes("ON images(updated_at)"), "cover stamps must use a lightweight table-specific update index");
-assert(coreDbService.includes("attachCoreImageStore(db, { dbPath: imageDbPath })"), "core queries must attach the separated image database");
+assert(coreDbService.includes("attachCoreImageStore(candidate, { dbPath: imageDbPath })"), "core queries must attach the separated image database before publishing the connection");
 assert(mediaBlobWorkerSource.includes("attachCoreImageStore(db, { dbPath: workerData.imageDbPath })"), "media workers must read and write the separated image database");
 assert(tableStampQuerySource.includes("MAX(updated_at)"), "table stamps must track changes in their own target table");
 assert(!tableStampQuerySource.includes("PRAGMA data_version"), "unrelated SQLite writes must not invalidate every FanHao cache");
 
 const actorMovieTestDb = new DatabaseSync(":memory:");
 actorMovieTestDb.exec(`
+  ATTACH DATABASE ':memory:' AS fanhao_images;
   CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);
   CREATE TABLE works (
     id INTEGER PRIMARY KEY,
@@ -1546,7 +1582,7 @@ actorMovieTestDb.exec(`
   );
   CREATE TABLE person_external_refs (id INTEGER PRIMARY KEY, person_id INTEGER, provider TEXT, external_key TEXT, url TEXT);
   CREATE TABLE work_external_refs (id INTEGER PRIMARY KEY, work_id INTEGER, provider TEXT, url TEXT);
-  CREATE TABLE images (
+  CREATE TABLE fanhao_images.images (
     id INTEGER PRIMARY KEY,
     owner_type TEXT,
     owner_id INTEGER,
@@ -1570,7 +1606,7 @@ actorMovieTestDb.exec(`
     (33, 3, 'actor', 0, 'other', '2025-01-01', '2025-01-01');
   INSERT INTO person_external_refs VALUES (1, 1, 'javdb-actor', 'one', 'https://example.test/actors/one');
   INSERT INTO work_external_refs VALUES (1, 11, 'javdb-video', 'https://example.test/v/one');
-  INSERT INTO images VALUES (1, 'work', 11, 'cover', 'actor_movies', 'https://example.test/one.jpg', NULL, '2025-01-02', X'01', 0);
+  INSERT INTO fanhao_images.images VALUES (1, 'work', 11, 'cover', 'actor_movies', 'https://example.test/one.jpg', NULL, '2025-01-02', X'01', 0);
 `);
 const actorMovieSqlLog = [];
 let actorMovieGlobalLocalKeyReads = 0;
@@ -2169,7 +2205,7 @@ const cachedRankingService = createRankingService({
               { work_id: 102, code: "DEF-002", code_key: "def002" }
             ];
           }
-          if (sql.includes("FROM images")) {
+          if (sql.includes("FROM fanhao_images.images")) {
             rankingCoverReadCount += 1;
             assert.deepEqual(args, [101, 102], "ranking cover batches must bind only listed core work IDs");
             return [
@@ -2359,6 +2395,7 @@ assert.equal(batchedWorkInfoService.detailRow("1")?.title, "Work 1", "single-wor
 
 const missingCodeSearchDb = new DatabaseSync(":memory:");
 missingCodeSearchDb.exec(`
+  ATTACH DATABASE ':memory:' AS fanhao_images;
   CREATE TABLE works (
     id INTEGER PRIMARY KEY,
     code TEXT,
@@ -2379,7 +2416,7 @@ missingCodeSearchDb.exec(`
   CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);
   CREATE TABLE work_people (work_id INTEGER, person_id INTEGER, role TEXT, sort_order INTEGER);
   CREATE TABLE work_external_refs (work_id INTEGER, provider TEXT, url TEXT);
-  CREATE TABLE images (id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, kind TEXT, remote_url TEXT);
+  CREATE TABLE fanhao_images.images (id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, kind TEXT, remote_url TEXT);
   INSERT INTO works VALUES
     (1, 'M-001', 'm001', 'Local M', '2026-01-01', 60, 4.0, 10, 0, 0, 0, '[]', '2026-01-01', 'ok'),
     (2, 'M-002', 'm002', 'Missing M', '2026-01-02', 90, 4.5, 20, 1, 1, 1, '["tag"]', '2026-01-02', 'ok'),
@@ -2388,7 +2425,7 @@ missingCodeSearchDb.exec(`
   INSERT INTO people VALUES (9, 'Actor M');
   INSERT INTO work_people VALUES (2, 9, 'actor', 0);
   INSERT INTO work_external_refs VALUES (2, 'javdb-video', 'https://example.com/m002');
-  INSERT INTO images VALUES (20, 'work', 2, 'cover', 'https://example.com/m002.jpg');
+  INSERT INTO fanhao_images.images VALUES (20, 'work', 2, 'cover', 'https://example.com/m002.jpg');
 `);
 let missingCodeCoverStamp = "cover-v1";
 let missingCodeCoverIndexReads = 0;

@@ -200,32 +200,41 @@ export function createManualCoverStateService({
       throw error;
     }
     const db = getCoreDb();
-    db.prepare("DELETE FROM images WHERE owner_type = 'person' AND owner_id = ? AND kind = 'avatar' AND source IN ('manual_person_cover', 'manual_upload')").run(corePersonId);
-    if (!payload) {
-      invalidateActorProfiles();
-      return;
+    db.exec("SAVEPOINT replace_manual_person_avatar");
+    try {
+      db.prepare("DELETE FROM fanhao_images.images WHERE owner_type = 'person' AND owner_id = ? AND kind = 'avatar' AND source IN ('manual_person_cover', 'manual_upload')").run(corePersonId);
+      if (payload) {
+        db.prepare(
+          `
+          INSERT INTO fanhao_images.images (
+            owner_type, owner_id, kind, source_type, local_path, remote_url, mime, image_blob, byte_size,
+            sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
+          )
+          VALUES ('person', ?, 'avatar', ?, ?, ?, ?, ?, ?, 0, 'ok', ?, 'manual_person_avatar', ?, ?, ?)
+          `
+        ).run(
+          corePersonId,
+          payload.sourceType || "unknown",
+          payload.localPath || "",
+          payload.remoteUrl || "",
+          payload.mime || "image/jpeg",
+          payload.blob || null,
+          payload.byteSize || null,
+          payload.source || "manual",
+          payload.legacyKey || String(personId),
+          payload.now,
+          payload.now
+        );
+      }
+      db.exec("RELEASE replace_manual_person_avatar");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK TO replace_manual_person_avatar; RELEASE replace_manual_person_avatar;");
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], "Avatar replacement failed and its image transaction could not be rolled back");
+      }
+      throw error;
     }
-    db.prepare(
-      `
-      INSERT INTO images (
-        owner_type, owner_id, kind, source_type, local_path, remote_url, mime, image_blob, byte_size,
-        sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
-      )
-      VALUES ('person', ?, 'avatar', ?, ?, ?, ?, ?, ?, 0, 'ok', ?, 'manual_person_avatar', ?, ?, ?)
-      `
-    ).run(
-      corePersonId,
-      payload.sourceType || "unknown",
-      payload.localPath || "",
-      payload.remoteUrl || "",
-      payload.mime || "image/jpeg",
-      payload.blob || null,
-      payload.byteSize || null,
-      payload.source || "manual",
-      payload.legacyKey || String(personId),
-      payload.now,
-      payload.now
-    );
     invalidateActorProfiles();
   }
 

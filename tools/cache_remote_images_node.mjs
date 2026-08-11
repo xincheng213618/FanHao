@@ -16,12 +16,13 @@ if (!args.db || !args.urlsFile) {
 const urls = uniqueRemoteImageUrls(JSON.parse(fs.readFileSync(args.urlsFile, "utf8")));
 const db = new DatabaseSync(args.db);
 const usesCoreImageStore = path.basename(path.resolve(args.db)).toLowerCase() === "fanhao-core-v2.sqlite";
+const imageStoreSchema = usesCoreImageStore ? "fanhao_images" : "main";
 if (usesCoreImageStore) {
   attachCoreImageStore(db, {
     dbPath: path.resolve(args.imageDb || process.env.FANHAO_CORE_IMAGE_DB || path.join(path.dirname(path.resolve(args.db)), "fanhao-core-images.sqlite"))
   });
 }
-ensureSchema(db, usesCoreImageStore ? "fanhao_images" : "main");
+ensureSchema(db, imageStoreSchema);
 
 const stats = { checked: 0, cached: 0, skipped: 0, failed: 0 };
 let nextIndex = 0;
@@ -118,7 +119,7 @@ function uniqueRemoteImageUrls(values) {
 
 function isCached(db, url) {
   const row = db
-    .prepare("SELECT 1 FROM remote_image_cache WHERE url = ? AND image_blob IS NOT NULL AND length(image_blob) > 0")
+    .prepare(`SELECT 1 FROM ${imageStoreSchema}.remote_image_cache WHERE url = ? AND image_blob IS NOT NULL AND length(image_blob) > 0`)
     .get(url);
   return Boolean(row);
 }
@@ -159,7 +160,7 @@ function upsertRemoteImage(db, url, buffer, contentType) {
   const now = new Date().toISOString();
   db.prepare(
     `
-    INSERT INTO remote_image_cache (
+    INSERT INTO ${imageStoreSchema}.remote_image_cache (
       url, url_hash, content_type, image_blob, byte_length, status, error, fetched_at, updated_at
     )
     VALUES (?, ?, ?, ?, ?, 'ok', '', ?, ?)
@@ -180,7 +181,7 @@ function upsertRemoteImageError(db, url, error) {
   const now = new Date().toISOString();
   db.prepare(
     `
-    INSERT INTO remote_image_cache (
+    INSERT INTO ${imageStoreSchema}.remote_image_cache (
       url, url_hash, content_type, image_blob, byte_length, status, error, fetched_at, updated_at
     )
     VALUES (?, ?, '', NULL, 0, 'error', ?, NULL, ?)

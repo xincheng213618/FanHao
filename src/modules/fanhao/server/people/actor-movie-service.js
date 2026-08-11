@@ -76,10 +76,10 @@ export function createActorMovieService({
           LEFT JOIN work_external_refs wref
             ON wref.work_id = w.id
            AND wref.provider = 'javdb-video'
-          LEFT JOIN images cover
+          LEFT JOIN fanhao_images.images cover
             ON cover.id = (
               SELECT i.id
-              FROM images i
+              FROM fanhao_images.images i
               WHERE i.owner_type = 'work'
                 AND i.owner_id = w.id
                 AND i.kind = 'cover'

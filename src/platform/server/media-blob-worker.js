@@ -6,10 +6,10 @@ const db = new DatabaseSync(workerData.dbPath);
 db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
 attachCoreImageStore(db, { dbPath: workerData.imageDbPath });
 
-const coreImageQuery = db.prepare("SELECT image_blob, mime FROM images WHERE id = ?");
+const coreImageQuery = db.prepare("SELECT image_blob, mime FROM fanhao_images.images WHERE id = ?");
 const actorAvatarQuery = db.prepare(`
   SELECT image_blob, mime
-  FROM images
+  FROM fanhao_images.images
   WHERE owner_type = 'person'
     AND owner_id = ?
     AND kind = 'avatar'
@@ -26,16 +26,16 @@ const actorAvatarQuery = db.prepare(`
 `);
 const workCoverQuery = db.prepare(`
   SELECT image_blob AS cover_blob, mime AS cover_mime
-  FROM images
+  FROM fanhao_images.images
   WHERE owner_type = 'work'
     AND owner_id = ?
     AND kind = 'cover'
   ORDER BY CASE WHEN image_blob IS NOT NULL THEN 0 ELSE 1 END, sort_order ASC, id ASC
   LIMIT 1
 `);
-const remoteImageQuery = db.prepare("SELECT content_type, image_blob, byte_length, updated_at FROM remote_image_cache WHERE url = ?");
+const remoteImageQuery = db.prepare("SELECT content_type, image_blob, byte_length, updated_at FROM fanhao_images.remote_image_cache WHERE url = ?");
 const upsertRemoteImage = db.prepare(`
-  INSERT INTO remote_image_cache (
+  INSERT INTO fanhao_images.remote_image_cache (
     url, url_hash, content_type, image_blob, byte_length, status, error, fetched_at, updated_at
   )
   VALUES (?, ?, ?, ?, ?, 'ok', '', ?, ?)
@@ -85,7 +85,7 @@ function cachedRemoteUrls(values) {
   for (let offset = 0; offset < urls.length; offset += batchSize) {
     const batch = urls.slice(offset, offset + batchSize);
     const placeholders = batch.map(() => "?").join(", ");
-    const rows = db.prepare(`SELECT url FROM remote_image_cache WHERE url IN (${placeholders})`).all(...batch);
+    const rows = db.prepare(`SELECT url FROM fanhao_images.remote_image_cache WHERE url IN (${placeholders})`).all(...batch);
     for (const row of rows) cached.push(row.url);
   }
   return cached;

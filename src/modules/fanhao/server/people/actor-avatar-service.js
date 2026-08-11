@@ -251,7 +251,7 @@ export function createActorAvatarService({
     ).run(existing?.display_name || person.name, now, corePersonId);
     db.prepare(
       `
-      INSERT INTO images (
+      INSERT INTO fanhao_images.images (
         owner_type, owner_id, kind, source_type, local_path, mime, image_blob, byte_size,
         sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
       )

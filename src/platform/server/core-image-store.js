@@ -1,8 +1,10 @@
 const IMAGE_STORE_SCHEMA = "fanhao_images";
+const IMAGE_STORE_TABLES = Object.freeze(["images", "local_image_cache", "remote_image_cache"]);
 
 export function attachCoreImageStore(db, {
   dbPath,
-  ensureSchema = true
+  ensureSchema = true,
+  allowLegacyMainTables = false
 } = {}) {
   if (!dbPath) return false;
 
@@ -14,6 +16,26 @@ export function attachCoreImageStore(db, {
     db.prepare(`ATTACH DATABASE ? AS ${IMAGE_STORE_SCHEMA}`).run(dbPath);
   }
   if (ensureSchema) ensureCoreImageStore(db);
+  const shadowedTables = db
+    .prepare(`
+      SELECT lower(legacy.name) AS name
+      FROM main.sqlite_schema legacy
+      INNER JOIN ${IMAGE_STORE_SCHEMA}.sqlite_schema image_store
+        ON image_store.type = 'table'
+       AND image_store.name = legacy.name COLLATE NOCASE
+      WHERE legacy.type = 'table'
+        AND lower(legacy.name) IN ('images', 'local_image_cache', 'remote_image_cache')
+      ORDER BY lower(legacy.name)
+    `)
+    .all()
+    .map((row) => String(row.name || ""))
+    .filter((name) => IMAGE_STORE_TABLES.includes(name));
+  if (shadowedTables.length && !allowLegacyMainTables) {
+    throw new Error(
+      `Legacy image tables in main would shadow ${IMAGE_STORE_SCHEMA}: ${shadowedTables.join(", ")}. `
+      + "Run the core image migration tool before starting FanHao."
+    );
+  }
   return true;
 }
 

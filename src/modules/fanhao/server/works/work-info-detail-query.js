@@ -25,7 +25,7 @@ export function workInfoDetailQuery(parameterCount = 1) {
       cover.remote_url AS image_url,
       (
         SELECT json_group_array(i.remote_url)
-        FROM images i
+        FROM fanhao_images.images i
         WHERE i.owner_type = 'work'
           AND i.owner_id = w.id
           AND i.kind = 'preview'
@@ -66,10 +66,10 @@ export function workInfoDetailQuery(parameterCount = 1) {
     LEFT JOIN work_people wp ON wp.work_id = w.id AND wp.role = 'actor'
     LEFT JOIN people p ON p.id = wp.person_id
     LEFT JOIN work_external_refs vref ON vref.work_id = w.id AND vref.provider = 'javdb-video'
-    LEFT JOIN images cover
+    LEFT JOIN fanhao_images.images cover
       ON cover.id = (
         SELECT i.id
-        FROM images i
+        FROM fanhao_images.images i
         WHERE i.owner_type = 'work'
           AND i.owner_id = w.id
           AND i.kind = 'cover'

@@ -274,7 +274,7 @@ def save_profile(conn: sqlite3.Connection, job: dict, profile: dict, client: Jav
                 print(f"  avatar skip: {error}", flush=True)
         conn.execute(
             """
-            INSERT INTO images (
+            INSERT INTO fanhao_images.images (
               owner_type, owner_id, kind, source_type, remote_url, mime, image_blob, byte_size,
               sort_order, status, source, legacy_table, legacy_key, created_at, updated_at
             )
@@ -392,7 +392,7 @@ def save_movies(conn: sqlite3.Connection, job: dict, movies: list) -> int:
         if movie.image_url:
             conn.execute(
                 """
-                INSERT INTO images (
+                INSERT INTO fanhao_images.images (
                   owner_type, owner_id, kind, source_type, remote_url, mime, sort_order,
                   status, source, legacy_table, legacy_key, created_at, updated_at
                 )

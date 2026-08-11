@@ -20,7 +20,7 @@ export function createMissingCodeSearchService({
     try {
       const rows = getCoreDb().prepare(`
         SELECT image.owner_id
-        FROM images image
+        FROM fanhao_images.images image
         WHERE image.owner_type = 'work'
           AND image.kind = 'cover'
         GROUP BY image.owner_id
@@ -140,7 +140,7 @@ export function createMissingCodeSearchService({
           ) AS detail_url,
           (
             SELECT image.remote_url
-            FROM images image
+            FROM fanhao_images.images image
             WHERE image.owner_type = 'work'
               AND image.owner_id = w.id
               AND image.kind = 'cover'

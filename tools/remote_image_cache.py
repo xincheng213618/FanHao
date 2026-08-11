@@ -77,6 +77,7 @@ def cached_remote_image_urls(conn: sqlite3.Connection, urls: list[str]) -> set[s
         return set()
 
     ensure_remote_image_schema(conn)
+    schema = image_store_schema(conn)
     cached = set()
     for index in range(0, len(normalized), 500):
         chunk = normalized[index : index + 500]
@@ -84,7 +85,7 @@ def cached_remote_image_urls(conn: sqlite3.Connection, urls: list[str]) -> set[s
         rows = conn.execute(
             f"""
             SELECT url
-            FROM remote_image_cache
+            FROM {schema}.remote_image_cache
             WHERE image_blob IS NOT NULL AND length(image_blob) > 0 AND url IN ({placeholders})
             """,
             chunk,
@@ -220,11 +221,12 @@ def upsert_remote_image(conn: sqlite3.Connection, url: str, blob: bytes, content
     if not url or not blob or not is_allowed_remote_image_url(url):
         return False
     ensure_remote_image_schema(conn)
+    schema = image_store_schema(conn)
     now = iso_now()
     content_type = normalize_image_mime(content_type, url)
     conn.execute(
-        """
-        INSERT INTO remote_image_cache (
+        f"""
+        INSERT INTO {schema}.remote_image_cache (
           url, url_hash, content_type, image_blob, byte_length, status, error, fetched_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, 'ok', '', ?, ?)
@@ -247,10 +249,11 @@ def upsert_remote_image_error(conn: sqlite3.Connection, url: str, error: Excepti
     if not url or not is_allowed_remote_image_url(url):
         return
     ensure_remote_image_schema(conn)
+    schema = image_store_schema(conn)
     now = iso_now()
     conn.execute(
-        """
-        INSERT INTO remote_image_cache (
+        f"""
+        INSERT INTO {schema}.remote_image_cache (
           url, url_hash, content_type, image_blob, byte_length, status, error, fetched_at, updated_at
         )
         VALUES (?, ?, '', NULL, 0, 'error', ?, NULL, ?)
