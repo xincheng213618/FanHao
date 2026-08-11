@@ -69,6 +69,7 @@ export function createWorkMoveJobService({
   const activeWorkers = new Map();
   const pendingJobs = new Set();
   const claimRetryTimers = new Map();
+  const fencedJobs = new Set();
   let closing = false;
   ensureSchema();
   schedule(recover);
@@ -118,6 +119,27 @@ export function createWorkMoveJobService({
 
   function leaseUntil() {
     return new Date(Date.now() + Math.max(2_000, Number(leaseDurationMs || 30_000))).toISOString();
+  }
+
+  function claimLostError() {
+    const error = new Error("文件移动任务 lease 已被其他实例接管");
+    error.code = "WORK_MOVE_LEASE_LOST";
+    return error;
+  }
+
+  function fenceJob(jobId) {
+    if (fencedJobs.has(jobId)) return;
+    fencedJobs.add(jobId);
+    activeWorkers.get(jobId)?.terminate().catch(() => {});
+  }
+
+  function failClaim(jobId) {
+    fenceJob(jobId);
+    throw claimLostError();
+  }
+
+  function isClaimLost(jobId, error) {
+    return fencedJobs.has(jobId) || error?.code === "WORK_MOVE_LEASE_LOST";
   }
 
   function recoveryStatus(job) {
@@ -273,40 +295,83 @@ export function createWorkMoveJobService({
         AND status IN ('queued', 'running', 'cleanup_pending', 'rollback_pending')
         AND (owner_id = '' OR owner_id = ? OR lease_until = '' OR lease_until <= ?)
     `).run(ownerId, leaseUntil(), claimedAt, jobId, ownerId, claimedAt);
-    return Number(result.changes || 0) === 1 ? row(jobId) : null;
+    if (Number(result.changes || 0) !== 1) return null;
+    fencedJobs.delete(jobId);
+    return row(jobId);
   }
 
   function renewLease(jobId) {
     const current = row(jobId);
-    if (!current || current.owner_id !== ownerId) return false;
+    if (!current || current.owner_id !== ownerId) {
+      fenceJob(jobId);
+      return false;
+    }
     const result = getCoreDb().prepare(`
       UPDATE work_move_jobs
       SET lease_until = ?, version = version + 1
       WHERE id = ? AND owner_id = ? AND version = ?
     `).run(leaseUntil(), jobId, ownerId, Number(current.version || 0));
-    return Number(result.changes || 0) === 1;
+    if (Number(result.changes || 0) !== 1) {
+      fenceJob(jobId);
+      return false;
+    }
+    return true;
   }
 
   function releaseClaim(jobId) {
     const current = row(jobId);
-    if (!current || current.owner_id !== ownerId) return;
-    getCoreDb().prepare(`
+    if (!current) return;
+    if (current.owner_id !== ownerId) {
+      fenceJob(jobId);
+      return;
+    }
+    const result = getCoreDb().prepare(`
       UPDATE work_move_jobs
       SET owner_id = '', lease_until = '', version = version + 1
       WHERE id = ? AND owner_id = ? AND version = ?
     `).run(jobId, ownerId, Number(current.version || 0));
+    if (Number(result.changes || 0) !== 1) fenceJob(jobId);
   }
 
   function updatePlan(jobId, plan) {
     const current = row(jobId);
-    if (!current || current.owner_id !== ownerId) throw new Error("文件移动任务执行权已转移");
+    if (!current || current.owner_id !== ownerId) failClaim(jobId);
     const result = getCoreDb().prepare(`
       UPDATE work_move_jobs
       SET person_id = ?, plan_json = ?, status = 'running', phase = 'prepared',
           updated_at = ?, lease_until = ?, version = version + 1
       WHERE id = ? AND owner_id = ? AND version = ?
     `).run(String(plan.personId), JSON.stringify(plan), now(), leaseUntil(), jobId, ownerId, Number(current.version || 0));
-    if (Number(result.changes || 0) !== 1) throw new Error("文件移动任务执行权已转移");
+    if (Number(result.changes || 0) !== 1) failClaim(jobId);
+  }
+
+  function updatePlanCheckpoint(jobId, plan) {
+    const current = row(jobId);
+    if (!current || current.owner_id !== ownerId) failClaim(jobId);
+    const result = getCoreDb().prepare(`
+      UPDATE work_move_jobs
+      SET plan_json = ?, updated_at = ?, lease_until = ?, version = version + 1
+      WHERE id = ? AND owner_id = ? AND version = ?
+    `).run(JSON.stringify(plan), now(), leaseUntil(), jobId, ownerId, Number(current.version || 0));
+    if (Number(result.changes || 0) !== 1) failClaim(jobId);
+  }
+
+  function hydratePlanRoots(plan) {
+    if (typeof adminCoreMutationService.hydrateWorkMovePlanRoots !== "function") {
+      throw new Error("服务未提供可信资料库根目录校验，拒绝恢复文件移动任务");
+    }
+    const hydrated = adminCoreMutationService.hydrateWorkMovePlanRoots(plan);
+    if (!Array.isArray(hydrated?.libraryRoots) || !hydrated.libraryRoots.length) {
+      throw new Error("文件移动计划缺少可信资料库根目录，拒绝执行");
+    }
+    return hydrated;
+  }
+
+  function assertSourceUnshared(plan) {
+    if (typeof adminCoreMutationService.assertWorkMoveSourceUnshared !== "function") {
+      throw new Error("服务未提供共享源目录复检，拒绝继续文件移动任务");
+    }
+    return adminCoreMutationService.assertWorkMoveSourceUnshared(plan);
   }
 
   function pumpQueue() {
@@ -332,11 +397,25 @@ export function createWorkMoveJobService({
       if (ACTIVE_STATUSES.has(row(jobId)?.status)) scheduleClaimRetry(jobId);
       return;
     }
-    const heartbeat = setInterval(() => renewLease(jobId), Math.max(1_000, Math.floor(Number(leaseDurationMs || 30_000) / 3)));
+    const heartbeat = setInterval(() => renewLease(jobId), Math.max(250, Math.floor(Number(leaseDurationMs || 30_000) / 3)));
     heartbeat.unref?.();
     let plan = json(job.plan_json, null);
     const request = json(job.request_json, {});
     try {
+      if (job.status === "rollback_pending" && !plan) {
+        updateState(jobId, "failed", "validation", "回滚任务缺少持久化路径计划，拒绝执行", { finished: true });
+        return;
+      }
+      if (plan) {
+        try {
+          const hydratedPlan = hydratePlanRoots(plan);
+          if (JSON.stringify(hydratedPlan) !== JSON.stringify(plan)) updatePlanCheckpoint(jobId, hydratedPlan);
+          plan = hydratedPlan;
+        } catch (error) {
+          updateState(jobId, "failed", "validation", error.message || String(error), { finished: true });
+          return;
+        }
+      }
       if (job.status === "rollback_pending" && plan) {
         await runWorker(jobId, "rollback", plan);
         updateState(jobId, "rolled_back", "rolled_back", job.error || "上次操作已回滚", { finished: true });
@@ -347,6 +426,12 @@ export function createWorkMoveJobService({
           targetDirectory: request.targetDirectory || request.targetPath || "",
           createPerson: request.createPerson || null
         });
+        try {
+          plan = hydratePlanRoots(plan);
+        } catch (error) {
+          updateState(jobId, "failed", "validation", error.message || String(error), { finished: true });
+          return;
+        }
         updatePlan(jobId, plan);
       }
 
@@ -363,6 +448,7 @@ export function createWorkMoveJobService({
         throw new Error("SQLite 中的作品路径已被其他操作修改，拒绝继续移动");
       }
 
+      assertSourceUnshared(plan);
       if (adminCoreMutationService.inspectWorkMoveImages(plan) !== "completed") {
         updateState(jobId, "running", "images", "", { result: { move: moveResult } });
         adminCoreMutationService.commitWorkMoveImages(plan);
@@ -371,13 +457,27 @@ export function createWorkMoveJobService({
         throw new Error("图片库路径补偿尚未完成，拒绝清理源目录");
       }
       updateState(jobId, "running", "images_committed", "", { result: { move: moveResult } });
+      assertSourceUnshared(plan);
 
       const result = adminCoreMutationService.finalizeWorkMove(plan, moveResult || {});
       updateState(jobId, "cleanup_pending", "reconciled", "", { result });
       updateState(jobId, "cleanup_pending", "cleanup", "", { result });
+      assertSourceUnshared(plan);
+      await runWorker(jobId, "isolate", plan);
+      try {
+        assertSourceUnshared(plan);
+      } catch (error) {
+        try {
+          await runWorker(jobId, "restore", plan);
+        } catch (restoreError) {
+          error.message = `${error.message}; 隔离源目录恢复失败：${restoreError.message}`;
+        }
+        throw error;
+      }
       await runWorker(jobId, "cleanup", plan);
       updateState(jobId, "completed", "completed", "", { result, finished: true, completeProgress: true });
     } catch (error) {
+      if (isClaimLost(jobId, error)) return;
       if (closing) {
         preserveForRecovery(jobId);
         return;
@@ -404,6 +504,7 @@ export function createWorkMoveJobService({
       await runWorker(jobId, "rollback", plan);
       updateState(jobId, "rolled_back", "rolled_back", message, { finished: true });
     } catch (rollbackError) {
+      if (isClaimLost(jobId, rollbackError)) return;
       if (closing) {
         preserveForRecovery(jobId);
         return;
@@ -432,30 +533,49 @@ export function createWorkMoveJobService({
       let progressTimer = null;
       const flushProgress = () => {
         progressTimer = null;
-        if (!pendingProgress || closing) return;
+        if (!pendingProgress || closing) return null;
         const progress = pendingProgress;
         pendingProgress = null;
         const current = row(jobId);
-        if (!current || current.owner_id !== ownerId) return;
-        getCoreDb().prepare(`
+        if (!current || current.owner_id !== ownerId) {
+          fenceJob(jobId);
+          return claimLostError();
+        }
+        const result = getCoreDb().prepare(`
           UPDATE work_move_jobs
           SET phase = ?, progress_files = ?, total_files = ?, progress_bytes = ?, total_bytes = ?,
               updated_at = ?, lease_until = ?, version = version + 1
           WHERE id = ? AND owner_id = ? AND version = ?
         `).run(progress.phase || operation, progress.completedFiles || 0, progress.totalFiles || 0, progress.completedBytes || 0, progress.totalBytes || 0, now(), leaseUntil(), jobId, ownerId, Number(current.version || 0));
+        if (Number(result.changes || 0) !== 1) {
+          fenceJob(jobId);
+          return claimLostError();
+        }
+        return null;
       };
-      const finish = (callback, value) => {
+      const finish = (callback, value, skipFlush = false) => {
         if (settled) return;
         settled = true;
         if (progressTimer) clearTimeout(progressTimer);
-        flushProgress();
+        const flushError = skipFlush ? null : flushProgress();
         activeWorkers.delete(jobId);
-        callback(value);
+        if (flushError) reject(flushError);
+        else callback(value);
       };
       worker.on("message", (message) => {
+        if (fencedJobs.has(jobId) || row(jobId)?.owner_id !== ownerId) {
+          fenceJob(jobId);
+          finish(reject, claimLostError(), true);
+          return;
+        }
         if (message?.type === "progress") {
           pendingProgress = message;
-          if (!progressTimer) progressTimer = setTimeout(flushProgress, checkpointIntervalMs);
+          if (!progressTimer) {
+            progressTimer = setTimeout(() => {
+              const flushError = flushProgress();
+              if (flushError) finish(reject, flushError, true);
+            }, checkpointIntervalMs);
+          }
         } else if (message?.type === "done") {
           finish(resolve, message.result || {});
         } else if (message?.type === "error") {
@@ -476,7 +596,7 @@ export function createWorkMoveJobService({
 
   function updateState(jobId, status, phase, error, options = {}) {
     const current = row(jobId);
-    if (!current || current.owner_id !== ownerId) throw new Error("文件移动任务执行权已转移");
+    if (!current || current.owner_id !== ownerId) failClaim(jobId);
     const resultJson = options.result === undefined ? current.result_json : JSON.stringify(options.result);
     const finishedAt = options.finished ? now() : "";
     const progressFiles = options.completeProgress ? Math.max(Number(current.progress_files || 0), Number(current.total_files || 0)) : Number(current.progress_files || 0);
@@ -487,13 +607,20 @@ export function createWorkMoveJobService({
           updated_at = ?, finished_at = ?, lease_until = ?, version = version + 1
       WHERE id = ? AND owner_id = ? AND version = ?
     `).run(status, phase, String(error || ""), resultJson, progressFiles, progressBytes, now(), finishedAt, leaseUntil(), jobId, ownerId, Number(current.version || 0));
-    if (Number(result.changes || 0) !== 1) throw new Error("文件移动任务执行权已转移");
+    if (Number(result.changes || 0) !== 1) failClaim(jobId);
   }
 
   function preserveForRecovery(jobId) {
     const current = row(jobId);
-    if (!current || current.owner_id !== ownerId) return;
-    updateState(jobId, recoveryStatus(current), current.phase || "queued", "服务停止，等待自动恢复");
+    if (!current || current.owner_id !== ownerId) {
+      fenceJob(jobId);
+      return;
+    }
+    try {
+      updateState(jobId, recoveryStatus(current), current.phase || "queued", "服务停止，等待自动恢复");
+    } catch (error) {
+      if (!isClaimLost(jobId, error)) throw error;
+    }
   }
 
   function recover() {

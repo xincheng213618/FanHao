@@ -46,9 +46,15 @@ function createDatabase(root, source) {
   return db;
 }
 
-function createAdminFixture(db, fixture, { failCommit = false, failImageCommitOnce = false } = {}) {
+function createAdminFixture(db, fixture, {
+  failCommit = false,
+  failImageCommitOnce = false,
+  sharedConflictAtCheck = 0,
+  sharedConflictAtCommit = false
+} = {}) {
   let imageCommits = 0;
   let imagesCommitted = false;
+  let sharedChecks = 0;
   const plan = {
     version: 1,
     workId: "1",
@@ -59,14 +65,32 @@ function createAdminFixture(db, fixture, { failCommit = false, failImageCommitOn
     oldDir: fixture.source,
     newDir: fixture.target,
     sourceInfoPath: "",
+    libraryRoots: [fixture.root],
     createdPerson: null,
     before: [{ person_id: "source", name: "Source" }]
   };
   return {
     get imageCommits() { return imageCommits; },
+    get sharedChecks() { return sharedChecks; },
     plan,
     prepareWorkMove() {
       return plan;
+    },
+    hydrateWorkMovePlanRoots(currentPlan) {
+      ensureRealPathWithinRoots(currentPlan.oldDir, [fixture.root], "源作品文件夹");
+      ensureRealPathWithinRoots(currentPlan.newDir, [fixture.root], "目标作品文件夹");
+      return { ...currentPlan, libraryRoots: [fixture.root] };
+    },
+    assertWorkMoveSourceUnshared() {
+      sharedChecks += 1;
+      if (sharedConflictAtCheck === sharedChecks) {
+        db.prepare("INSERT OR REPLACE INTO move_records(work_id, person_id, local_path) VALUES (?, 'shared', ?)")
+          .run(`shared-${sharedChecks}`, fixture.source);
+        const error = new Error("fixture source gained another local_work owner");
+        error.statusCode = 409;
+        throw error;
+      }
+      return { unshared: true };
     },
     inspectWorkMove(currentPlan) {
       const row = db.prepare("SELECT local_path FROM move_records WHERE work_id = ?").get(currentPlan.workId);
@@ -76,6 +100,13 @@ function createAdminFixture(db, fixture, { failCommit = false, failImageCommitOn
     },
     commitWorkMove(currentPlan) {
       if (failCommit) throw new Error("fixture database commit failed");
+      if (sharedConflictAtCommit) {
+        db.prepare("INSERT OR REPLACE INTO move_records(work_id, person_id, local_path) VALUES ('shared-commit', 'shared', ?)")
+          .run(fixture.source);
+        const error = new Error("fixture source gained another local_work owner before commit");
+        error.statusCode = 409;
+        throw error;
+      }
       db.exec("BEGIN IMMEDIATE");
       try {
         db.prepare("UPDATE move_records SET person_id = ?, local_path = ? WHERE work_id = ?")
@@ -125,6 +156,17 @@ async function waitForPhase(service, jobId, phase, timeoutMs = 12_000) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`timed out waiting for ${jobId} phase ${phase}`);
+}
+
+async function waitForJobMatching(service, jobId, predicate, timeoutMs = 12_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const job = service.get(jobId);
+    if (predicate(job)) return job;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const job = service.get(jobId);
+  throw new Error(`timed out waiting for ${jobId}: ${job.status}/${job.phase}`);
 }
 
 async function verifySuccessfulMoveAndIdempotency() {
@@ -294,6 +336,18 @@ async function verifyActualAdminSqliteCommit() {
 
   const plan = admin.prepareWorkMove("1", "2", { targetDirectory: fixture.targetPerson });
   await fs.promises.cp(fixture.source, fixture.target, { recursive: true, errorOnExist: true, force: false });
+  db.prepare("INSERT INTO works VALUES (3, '[]', '')").run();
+  db.prepare("INSERT INTO local_works VALUES (3, 3, ?, '', '')").run(fixture.source);
+  assert.throws(
+    () => admin.commitWorkMove(plan),
+    (error) => error?.statusCode === 409 && /其他本地作品引用/.test(error.message),
+    "commit must recheck shared local_path under BEGIN IMMEDIATE after prepare"
+  );
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM local_works WHERE id = 1").get().local_path), path.resolve(fixture.source));
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM local_works WHERE id = 3").get().local_path), path.resolve(fixture.source));
+  assert.equal(path.resolve(db.prepare("SELECT file_path FROM local_files WHERE id = 1").get().file_path), path.resolve(infoPath));
+  db.prepare("DELETE FROM local_works WHERE id = 3").run();
+  db.prepare("DELETE FROM works WHERE id = 3").run();
   admin.commitWorkMove(plan);
   const localWork = db.prepare("SELECT * FROM local_works WHERE id = 1").get();
   const localFile = db.prepare("SELECT * FROM local_files WHERE id = 1").get();
@@ -444,6 +498,8 @@ async function verifyCrashRecoveryFromPreparedCopy() {
   await fs.promises.cp(fixture.source, fixture.target, { recursive: true, errorOnExist: true, force: false });
   const db = createDatabase(fixture.root, fixture.source);
   const admin = createAdminFixture(db, fixture);
+  const legacyPlan = { ...admin.plan };
+  delete legacyPlan.libraryRoots;
   const dormant = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
   const createdAt = new Date().toISOString();
   db.prepare(`
@@ -451,7 +507,7 @@ async function verifyCrashRecoveryFromPreparedCopy() {
       id, request_key, work_id, person_id, status, phase, request_json, plan_json,
       attempts, created_at, updated_at
     ) VALUES ('crash-fixture', 'client:crash-fixture', '1', 'target', 'running', 'filesystem_ready', ?, ?, 1, ?, ?)
-  `).run(JSON.stringify({ personId: "target" }), JSON.stringify(admin.plan), createdAt, createdAt);
+  `).run(JSON.stringify({ personId: "target" }), JSON.stringify(legacyPlan), createdAt, createdAt);
   await dormant.close();
 
   const recovered = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, workerDataPatch: { forceCopy: true } });
@@ -460,6 +516,8 @@ async function verifyCrashRecoveryFromPreparedCopy() {
   assert.equal(fs.existsSync(fixture.source), false);
   assert.equal(fs.existsSync(fixture.target), true);
   assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.target));
+  const hydratedPlan = JSON.parse(db.prepare("SELECT plan_json FROM work_move_jobs WHERE id = 'crash-fixture'").get().plan_json);
+  assert.deepEqual(hydratedPlan.libraryRoots, [fixture.root], "a legitimate legacy plan must be hydrated only from current trusted roots");
   await recovered.close();
   db.close();
 }
@@ -505,6 +563,73 @@ async function verifyRollbackOnDatabaseFailure() {
   assert.equal(fs.existsSync(fixture.source), true, "database failure must preserve the source fixture");
   assert.equal(fs.existsSync(fixture.target), false, "database failure must remove the prepared target copy");
   assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.source));
+  await service.close();
+  db.close();
+}
+
+async function verifySharedOwnerAddedBeforeCommitRollsBackCopy() {
+  const fixture = await createFixture("shared-before-commit", 5);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture, { sharedConflictAtCommit: true });
+  const service = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    workerDataPatch: { forceCopy: true }
+  });
+  const started = service.start("1", { personId: "target", idempotencyKey: "shared-before-commit" });
+  const rolledBack = await waitForJob(service, started.id, ["rolled_back"]);
+  assert.match(rolledBack.error, /another local_work owner/);
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.source));
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = 'shared-commit'").get().local_path), path.resolve(fixture.source));
+  assert.equal(fs.existsSync(fixture.source), true, "commit-time shared owner conflict must preserve the source");
+  assert.equal(fs.existsSync(fixture.target), false, "the uncommitted target copy must be rolled back safely");
+  await service.close();
+  db.close();
+}
+
+async function verifySharedOwnerDuringImageStageBlocksCleanup() {
+  const fixture = await createFixture("shared-during-images", 5);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture, { sharedConflictAtCheck: 1 });
+  const service = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, workerDataPatch: { forceCopy: true } });
+  const started = service.start("1", { personId: "target", idempotencyKey: "shared-during-images" });
+  const pending = await waitForJobMatching(
+    service,
+    started.id,
+    (job) => job.status === "cleanup_pending" && /another local_work owner/.test(job.error || "")
+  );
+  assert.equal(pending.phase, "main_committed");
+  assert.match(pending.error, /another local_work owner/);
+  assert.equal(admin.imageCommits, 0, "image compensation must not start after the shared-source recheck fails");
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.target));
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = 'shared-1'").get().local_path), path.resolve(fixture.source));
+  assert.equal(fs.existsSync(fixture.source), true);
+  assert.equal(fs.existsSync(fixture.target), true);
+  await service.close();
+  db.close();
+}
+
+async function verifySharedOwnerBeforeCleanupRetainsSource() {
+  const fixture = await createFixture("shared-before-cleanup", 5);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture, { sharedConflictAtCheck: 4 });
+  const service = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, workerDataPatch: { forceCopy: true } });
+  const started = service.start("1", { personId: "target", idempotencyKey: "shared-before-cleanup" });
+  const pending = await waitForJobMatching(
+    service,
+    started.id,
+    (job) => job.status === "cleanup_pending" && /another local_work owner/.test(job.error || "")
+  );
+  assert.equal(pending.phase, "isolating", "the durable isolation checkpoint must remain recoverable after the source is restored");
+  assert.match(pending.error, /another local_work owner/);
+  assert.equal(admin.imageCommits, 1);
+  assert.equal(pending.result?.moved, true, "durable moved result stays available while cleanup is blocked");
+  assert.equal(admin.sharedChecks, 4, "the source must be checked again under a write lock after atomic isolation");
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = 'shared-4'").get().local_path), path.resolve(fixture.source));
+  assert.equal(fs.existsSync(fixture.source), true, "a late shared owner must restore and retain the original source directory");
+  assert.equal(fs.existsSync(fixture.target), true);
+  const quarantine = path.join(fixture.sourcePerson, `.${path.basename(fixture.source)}.fanhao-quarantine-${started.id}`);
+  assert.equal(fs.existsSync(quarantine), false, "shared-owner failure after isolation must restore the quarantine to the source path");
   await service.close();
   db.close();
 }
@@ -579,6 +704,7 @@ async function verifyCleanupQuarantineClosesLateFileRace() {
     runMoveWorker({
       jobId,
       operation: "cleanup",
+      allowedRoots: [fixture.root],
       sourcePath: fixture.source,
       targetPath: fixture.target,
       quarantinePath,
@@ -586,6 +712,7 @@ async function verifyCleanupQuarantineClosesLateFileRace() {
     }, (progress) => {
       if (progress.phase !== "verifying" || injected) return;
       injected = true;
+      fs.rmSync(fixture.source, { force: true });
       fs.mkdirSync(fixture.source, { recursive: true });
       fs.writeFileSync(path.join(fixture.source, "late.bin"), "late data");
     }),
@@ -595,6 +722,126 @@ async function verifyCleanupQuarantineClosesLateFileRace() {
   assert.equal(fs.existsSync(path.join(fixture.source, "late.bin")), true, "late data at the live path must be preserved");
   assert.equal(fs.existsSync(quarantinePath), true, "the original tree must remain in job-owned quarantine for inspection/recovery");
   assert.equal(fs.existsSync(fixture.target), true);
+}
+
+async function verifySecondVerificationSourceRebuildFailsClosed() {
+  const fixture = await createFixture("second-verify-source-race", 6);
+  await fs.promises.cp(fixture.source, fixture.target, { recursive: true, errorOnExist: true, force: false });
+  const jobId = "second-verify-fixture";
+  const quarantinePath = path.join(fixture.sourcePerson, `.${path.basename(fixture.source)}.fanhao-quarantine-${jobId}`);
+  let verificationCount = 0;
+  await assert.rejects(
+    runMoveWorker({
+      jobId,
+      operation: "cleanup",
+      allowedRoots: [fixture.root],
+      sourcePath: fixture.source,
+      targetPath: fixture.target,
+      quarantinePath,
+      delayBeforeVerificationMs: 120
+    }, (progress) => {
+      if (progress.phase !== "verifying") return;
+      verificationCount += 1;
+      if (verificationCount !== 2) return;
+      fs.rmSync(fixture.source, { force: true });
+      fs.mkdirSync(fixture.source, { recursive: true });
+      fs.writeFileSync(path.join(fixture.source, "late.bin"), "late after second verification started");
+    }),
+    /重建|替换|保护标记|拒绝/
+  );
+  assert.equal(verificationCount >= 2, true, "fixture must race after the second verification starts");
+  assert.equal(fs.existsSync(path.join(fixture.source, "late.bin")), true);
+  assert.equal(fs.existsSync(quarantinePath), true, "immutable snapshot must be retained when the source guard is replaced");
+  assert.equal(fs.existsSync(fixture.target), true);
+}
+
+async function waitForOwnerChange(db, jobId, previousOwner, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const row = db.prepare("SELECT owner_id FROM work_move_jobs WHERE id = ?").get(jobId);
+    if (row?.owner_id && row.owner_id !== previousOwner) return row.owner_id;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for a new lease owner for ${jobId}`);
+}
+
+async function verifyExpiredLeaseTakeoverFencesOldWorker() {
+  const fixture = await createFixture("lease-takeover-fencing", 18);
+  const db1 = createDatabase(fixture.root, fixture.source);
+  const db2 = new DatabaseSync(path.join(fixture.root, "fixture.sqlite"));
+  const admin = createAdminFixture(db1, fixture);
+  let oldWorkerTerminations = 0;
+  const oldWorkerOperations = [];
+  class TrackingWorker extends Worker {
+    constructor(url, options) {
+      super(url, options);
+      oldWorkerOperations.push(options?.workerData?.operation || "");
+    }
+    terminate() {
+      oldWorkerTerminations += 1;
+      return super.terminate();
+    }
+  }
+  const first = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    checkpointIntervalMs: 5_000,
+    getCoreDb: () => db1,
+    workerClass: TrackingWorker,
+    workerDataPatch: { forceCopy: true, delayPerFileMs: 80 }
+  });
+  const started = first.start("1", { personId: "target", idempotencyKey: "lease-takeover-fencing" });
+  await waitForPhase(first, started.id, "copying");
+  const oldOwner = db1.prepare("SELECT owner_id FROM work_move_jobs WHERE id = ?").get(started.id).owner_id;
+  assert.ok(oldOwner);
+  db1.prepare("UPDATE work_move_jobs SET lease_until = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(started.id);
+
+  const second = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db2,
+    workerDataPatch: { forceCopy: true, delayPerFileMs: 5 }
+  });
+  second.recover();
+  await waitForOwnerChange(db1, started.id, oldOwner);
+  const completed = await waitForJob(second, started.id, ["completed"]);
+  assert.equal(completed.phase, "completed");
+  assert.ok(oldWorkerTerminations >= 1, "the stale owner must terminate its worker as soon as fencing detects takeover");
+  assert.equal(oldWorkerOperations.includes("rollback"), false, "the fenced owner must never start rollback after losing its lease");
+  assert.equal(admin.imageCommits, 1, "the fenced owner must not reach image commit or rollback");
+  assert.equal(fs.existsSync(fixture.source), false);
+  assert.equal(fs.existsSync(fixture.target), true);
+  await Promise.all([first.close(), second.close()]);
+  db2.close();
+  db1.close();
+}
+
+async function verifyTargetParentJunctionSwapBlocksPublish() {
+  const fixture = await createFixture("target-junction-swap", 8);
+  const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), "fanhao-move-target-junction-outside-"));
+  temporaryRoots.push(outside);
+  const movedParent = path.join(fixture.root, "target-person-before-junction");
+  let swapped = false;
+  await assert.rejects(
+    runMoveWorker({
+      jobId: "target-junction-swap",
+      operation: "stage",
+      allowedRoots: [fixture.root],
+      sourcePath: fixture.source,
+      targetPath: fixture.target,
+      stagingPath: `${fixture.target}.fanhao-move-target-junction-swap`,
+      forceCopy: true,
+      delayBeforePublishMs: 150
+    }, (progress) => {
+      if (progress.phase !== "publishing" || swapped) return;
+      swapped = true;
+      fs.renameSync(fixture.targetPerson, movedParent);
+      fs.symlinkSync(outside, fixture.targetPerson, process.platform === "win32" ? "junction" : "dir");
+    }),
+    /链接|根目录/
+  );
+  assert.equal(swapped, true, "fixture must replace the target parent after verification and before publish");
+  assert.equal(fs.existsSync(fixture.source), true, "publish rejection must preserve the source");
+  assert.equal(fs.existsSync(path.join(outside, path.basename(fixture.target))), false, "no target may be published through the junction");
+  assert.equal(fs.existsSync(`${path.join(movedParent, path.basename(fixture.target))}.fanhao-move-target-junction-swap`), true, "verified staging data stays inside the allowed root for recovery");
 }
 
 async function verifyDatabaseLeasePreventsDoubleExecution() {
@@ -663,6 +910,47 @@ async function verifyLeaseSchemaMigratesExistingJournal() {
   assert.equal(legacy.lease_until, "");
   assert.equal(legacy.version, 0);
   await service.close();
+  db.close();
+}
+
+async function verifyLegacyPlanOutsideTrustedRootsFailsClosed() {
+  const fixture = await createFixture("legacy-plan-fail-closed", 3);
+  const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), "fanhao-move-legacy-outside-"));
+  temporaryRoots.push(outside);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const legacyPlan = { ...admin.plan, newDir: path.join(outside, "WORK-001") };
+  delete legacyPlan.libraryRoots;
+  const dormant = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
+  const stamp = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO work_move_jobs (
+      id, request_key, work_id, person_id, status, phase, request_json, plan_json,
+      attempts, created_at, updated_at
+    ) VALUES ('legacy-outside', 'legacy-outside-key', '1', 'target', 'running', 'filesystem_ready', ?, ?, 1, ?, ?)
+  `).run(JSON.stringify({ personId: "target" }), JSON.stringify(legacyPlan), stamp, stamp);
+  await dormant.close();
+
+  let workerStarts = 0;
+  class MustNotStartWorker extends Worker {
+    constructor(...args) {
+      workerStarts += 1;
+      super(...args);
+    }
+  }
+  const recovered = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    workerClass: MustNotStartWorker
+  });
+  const failed = await waitForJob(recovered, "legacy-outside", ["failed"]);
+  assert.equal(failed.phase, "validation");
+  assert.match(failed.error, /根目录|可信/);
+  assert.equal(workerStarts, 0, "an untrusted legacy plan must be rejected before any worker starts");
+  assert.equal(fs.existsSync(fixture.source), true);
+  assert.equal(fs.existsSync(legacyPlan.newDir), false);
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.source));
+  await recovered.close();
   db.close();
 }
 
@@ -844,18 +1132,25 @@ try {
   await verifyCrashRecoveryFromPreparedCopy();
   await verifyPartialCleanupRecovery();
   await verifyRollbackOnDatabaseFailure();
+  await verifySharedOwnerAddedBeforeCommitRollsBackCopy();
+  await verifySharedOwnerDuringImageStageBlocksCleanup();
+  await verifySharedOwnerBeforeCleanupRetainsSource();
   await verifySilentWorkerExitFails();
   await verifySameSizeCorruptionBlocksDeletion();
   await verifyCleanupQuarantineClosesLateFileRace();
+  await verifySecondVerificationSourceRebuildFailsClosed();
   await verifyLeaseSchemaMigratesExistingJournal();
+  await verifyLegacyPlanOutsideTrustedRootsFailsClosed();
+  await verifyExpiredLeaseTakeoverFencesOldWorker();
   await verifyDatabaseLeasePreventsDoubleExecution();
   await verifyClosePreservesRollbackCheckpoint();
   await verifyClosePreservesCleanupCheckpoint();
   await verifyJunctionEscapeIsRejected();
+  await verifyTargetParentJunctionSwapBlocksPublish();
   await verifyConflictPayloadAndClientJobPropagation();
   await verifyHttpResponsivenessDuringCopy();
   verifySourceStructure();
-  console.log("work-move-jobs: ok (idempotency, quarantine, lease/CAS, checkpoint recovery, rollback, responsive HTTP)");
+  console.log("work-move-jobs: ok (idempotency, shared-path recheck, immutable quarantine, lease fencing/CAS, trusted-root recovery, rollback, responsive HTTP)");
 } catch (error) {
   verificationError = error;
 } finally {

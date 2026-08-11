@@ -786,6 +786,62 @@ export function createAdminCoreMutationService({
     return "conflict";
   }
 
+  function hydrateWorkMovePlanRoots(plan) {
+    if (!plan?.oldDir || !plan?.newDir) {
+      const error = new Error("文件移动 journal 缺少路径计划");
+      error.statusCode = 409;
+      throw error;
+    }
+    const roots = libraryOpenRoots().map((rootPath) => sourcePathToAbsolute(rootPath)).filter(Boolean);
+    if (!roots.length) {
+      const error = new Error("当前没有可信资料库根目录，拒绝恢复文件移动任务");
+      error.statusCode = 409;
+      throw error;
+    }
+    const oldDir = ensureLibraryDirectoryPath(plan.oldDir, "源作品文件夹");
+    const newDir = ensureLibraryDirectoryPath(plan.newDir, "目标作品文件夹");
+    const stagingDir = plan.stagingDir ? ensureLibraryDirectoryPath(plan.stagingDir, "文件移动暂存路径") : "";
+    const quarantineDir = plan.quarantineDir ? ensureLibraryDirectoryPath(plan.quarantineDir, "文件移动隔离路径") : "";
+    ensureLibraryDirectoryPath(stagingDir || `${newDir}.fanhao-move-checkpoint`, "文件移动暂存路径");
+    return {
+      ...plan,
+      oldDir,
+      newDir,
+      ...(stagingDir ? { stagingDir } : {}),
+      ...(quarantineDir ? { quarantineDir } : {}),
+      libraryRoots: roots
+    };
+  }
+
+  function throwIfWorkMoveSourceShared(db, plan) {
+    const shared = db
+      .prepare("SELECT id, work_id, local_path FROM local_works WHERE local_path IS NOT NULL AND trim(local_path) <> ''")
+      .all()
+      .filter((candidate) => Number(candidate.id) !== Number(plan.localWorkId))
+      .filter((candidate) => path.resolve(candidate.local_path).toLowerCase() === path.resolve(plan.oldDir).toLowerCase());
+    if (shared.length) {
+      const error = new Error("源作品文件夹新增了其他本地作品引用，拒绝提交或清理目录");
+      error.statusCode = 409;
+      error.sharedLocalWorks = shared.map((candidate) => ({ id: Number(candidate.id), workId: String(candidate.work_id) }));
+      throw error;
+    }
+  }
+
+  function assertWorkMoveSourceUnshared(plan) {
+    const db = getCoreDb();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      throwIfWorkMoveSourceShared(db, plan);
+      db.exec("COMMIT");
+      return { unshared: true };
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
   function commitWorkMove(plan) {
     const db = getCoreDb();
     const coreWorkId = Number(plan.workId);
@@ -801,6 +857,7 @@ export function createAdminCoreMutationService({
     const now = new Date().toISOString();
     try {
       db.exec("BEGIN IMMEDIATE");
+      throwIfWorkMoveSourceShared(db, plan);
       const fileRows = db.prepare("SELECT id, file_path FROM local_files WHERE local_work_id = ?").all(Number(plan.localWorkId));
 
       db
@@ -922,10 +979,12 @@ export function createAdminCoreMutationService({
   }
 
   return {
+    assertWorkMoveSourceUnshared,
     correctWorkActorFromLocalFolder,
     commitWorkMoveImages,
     commitWorkMove,
     finalizeWorkMove,
+    hydrateWorkMovePlanRoots,
     inspectWorkMove,
     inspectWorkMoveImages,
     mergePeopleIntoTarget,
