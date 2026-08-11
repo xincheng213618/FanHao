@@ -378,6 +378,7 @@ export function createActorMovieService({
             w.code_search IS NULL
             OR TRIM(w.code_search) = ''
             OR w.code_search NOT GLOB '*[A-Za-z0-9]*'
+            OR w.code_search <> LOWER(w.code_search)
             OR LOWER(
               REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
                 w.code, '-', ''), '_', ''), '.', ''), ' ', ''), '﹣', ''), '－', ''), '–', ''), '—', ''), '/', '')

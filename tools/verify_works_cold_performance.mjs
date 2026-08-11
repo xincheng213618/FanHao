@@ -181,6 +181,10 @@ function verifySemanticEquivalence() {
       VALUES (3, 11, 'actor', 0, 'actor_movies', '2025-01-01', '2025-01-01')
     `).run();
     insertActorRow(db, { id: 4, personId: 3, code: "LEG-002", codeSearch: "", title: "legacy empty code_search" });
+    insertActorRow(db, { id: 5, personId: 4, code: "CASE-001", codeSearch: "CASE001", title: "legacy uppercase code_search" });
+    insertActorRow(db, { id: 6, personId: 5, code: "MIX-002", codeSearch: "MiX002", title: "legacy mixed-case code_search" });
+    insertActorRow(db, { id: 7, personId: 6, code: "HYP-003", codeSearch: "HYP-003", title: "legacy hyphenated code_search" });
+    insertActorRow(db, { id: 8, personId: 7, code: "SPC-004", codeSearch: " SPC004 ", title: "legacy spaced code_search" });
 
     db.exec("BEGIN");
     for (let index = 0; index < 1_205; index += 1) {
@@ -192,6 +196,10 @@ function verifySemanticEquivalence() {
     const localWorks = [
       { id: "local-abc", title: "Folder AbC-001", infoSummary: null },
       { id: "local-legacy", title: "LEG-002", infoSummary: null },
+      { id: "local-uppercase", title: "case-001", infoSummary: null },
+      { id: "local-mixed-case", title: "MIX-002", infoSummary: null },
+      { id: "local-hyphenated", title: "hyp-003", infoSummary: null },
+      { id: "local-spaced", title: "SPC-004", infoSummary: null },
       { id: "local-empty", title: "", infoSummary: null },
       { id: "local-invalid", title: "1080p", infoSummary: null },
       ...Array.from({ length: 1_205 }, (_, index) => ({
@@ -215,13 +223,19 @@ function verifySemanticEquivalence() {
     const parsed = JSON.parse(optimizedResult);
     assert.equal(parsed[0].infoSummary.title, "person 10 / position 1", "person text order and then position must select the same first row as rowsByCodeKey");
     assert.equal(parsed[1].infoSummary.title, "legacy empty code_search", "empty legacy code_search must still use the parsed w.code fallback");
-    assert.equal(parsed[2].infoSummary, null, "empty local codes must remain unenriched");
-    assert.equal(parsed[3].infoSummary, null, "invalid local codes must remain unenriched");
+    assert.equal(parsed[2].infoSummary.title, "legacy uppercase code_search", "uppercase stored code_search must preserve old normalization semantics");
+    assert.equal(parsed[3].infoSummary.title, "legacy mixed-case code_search", "mixed-case stored code_search must preserve old normalization semantics");
+    assert.equal(parsed[4].infoSummary.title, "legacy hyphenated code_search", "hyphenated stored code_search must preserve old normalization semantics");
+    assert.equal(parsed[5].infoSummary.title, "legacy spaced code_search", "spaced stored code_search must preserve old normalization semantics");
+    assert.equal(parsed[6].infoSummary, null, "empty local codes must remain unenriched");
+    assert.equal(parsed[7].infoSummary, null, "invalid local codes must remain unenriched");
     assert.equal(parsed.at(-1).infoSummary, null, "duplicate local code keys must enrich only the old first local work");
 
     const batchQueries = queryLog.filter((sql) => sql.includes("WHERE w.code_search IN"));
     assert(batchQueries.length >= 2, "more than 999 keys must be queried in bounded batches");
     assert(batchQueries.every((sql) => (sql.match(/\?/g) || []).length <= 900), "each SQLite parameter batch must stay below the configured bound");
+    assert(batchQueries.every((sql) => !sql.includes("LOWER(w.code_search) IN")), "the primary narrow lookup must retain the BINARY code_search index predicate");
+    assert(queryLog.some((sql) => sql.includes("w.code_search <> LOWER(w.code_search)")), "the compatibility query must select uppercase and mixed-case stored keys for old normalization semantics");
 
     let failNextNarrow = true;
     const recoveryLog = [];
