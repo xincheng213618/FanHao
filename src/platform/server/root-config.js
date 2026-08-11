@@ -45,7 +45,7 @@ export function parseShortVideoRoots(env = process.env) {
 }
 
 export function parseMusicRoots(env = process.env) {
-  const fallback = "D:\\Media\\Music";
+  const fallback = "E:\\Music";
   return parseRootList(env.FANHAO_MUSIC_ROOTS || env.FANHAO_MUSIC_ROOT || fallback, fallback);
 }
 

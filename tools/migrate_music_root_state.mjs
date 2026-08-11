@@ -31,11 +31,16 @@ for (const row of catalogDb?.prepare(`
 }
 const tracks = sourceDb.prepare("SELECT id, source_path, size_bytes FROM music_tracks").all();
 const mappings = [];
+const missingSources = [];
 const missingTargets = [];
 
 for (const track of tracks) {
   const relativePath = path.relative(fromRoot, track.source_path);
   if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) continue;
+  if (!fs.existsSync(track.source_path)) {
+    missingSources.push(track.source_path);
+    continue;
+  }
   const catalogTarget = catalogTargets.get(relativePath.toLowerCase())
     || catalogTargets.get(path.win32.join("新增合集", relativePath).toLowerCase());
   const targetPath = catalogTarget
@@ -136,6 +141,7 @@ console.log(JSON.stringify({
   toRoot,
   catalogPath,
   mappedTracks: mappings.length,
+  skippedMissingSources: missingSources.length,
   migratedStates,
   migratedPlaylistItems,
   prunedOrphanStates
