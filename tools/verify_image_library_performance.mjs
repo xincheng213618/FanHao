@@ -26,6 +26,7 @@ assert(androidApp.includes('const IMAGE_LIBRARY_SUMMARY_CACHE_PATH = "/api/image
 assert(webGalleryPage.includes('const summaryEndpoint = isImageLibraryMode() ? "/api/image-library/summary" : "/api/image-library/summary?cache=0";'), "Web image-library mode must continue to request its cache summary");
 
 verifyPhotoPersonFacetBoundaries(createTestableImageLibraryService);
+verifyPreparedPhotoSortCache(createTestableImageLibraryService);
 
 const optimizedService = createService(createImageLibraryService, index);
 const summaryCold = measure(() => optimizedService.summaryPayload({ includeCache: false }));
@@ -57,7 +58,7 @@ for (const [name, run] of matrix) {
 }
 
 console.log(
-  `image-library-performance: 50k-photo/18k-media, summary cold=${summaryCold.elapsedMs.toFixed(1)}ms warm=${summaryWarm.elapsedMs.toFixed(1)}ms, albums cold=${albumsCold.elapsedMs.toFixed(1)}ms warm=${albumsWarm.elapsedMs.toFixed(1)}ms (guidance: summary <150/<5ms; albums <500/<50ms; equivalence is the hard gate)`
+  `image-library-performance: 50k-photo/18k-media diagnostic sample, summary cold=${summaryCold.elapsedMs.toFixed(1)}ms warm=${summaryWarm.elapsedMs.toFixed(1)}ms, albums cold=${albumsCold.elapsedMs.toFixed(1)}ms warm=${albumsWarm.elapsedMs.toFixed(1)}ms (non-hard guidance: summary <150/<5ms; albums <500/<50ms; response equivalence is the hard gate)`
 );
 console.log("image-library-performance: ok");
 
@@ -157,7 +158,10 @@ function legacyServiceModuleUrl(source) {
 }
 
 function testableServiceModuleUrl(source) {
-  const testableSource = replaceOnce(source, "  return {\n    itemsPayload,", "  return {\n    __testPhotoPersonFacets: photoPersonFacets,\n    itemsPayload,", "expose photo person facets to the verifier only");
+  const testableSource = replaceOnce(source, "  return {\n    itemsPayload,", `  return {
+    __testPhotoCatalogState: () => ({ index: cachedPhotoCatalog?.index || null, sortedKeys: [...(cachedPhotoCatalog?.sortedItems?.keys() || [])] }),
+    __testPhotoPersonFacets: photoPersonFacets,
+    itemsPayload,`, "expose photo catalog state to the verifier only");
   return `data:text/javascript;base64,${Buffer.from(testableSource).toString("base64")}`;
 }
 
@@ -218,6 +222,74 @@ function verifyPhotoPersonFacetBoundary(factory, { name, limit, prefix, ties, su
     : legacyService.itemsPayload(request({ mode: "photo", photoView: "albums", limit: "48" }));
   assert.deepStrictEqual(optimizedResponse, legacyResponse, `${name} service response must match the restored legacy implementation`);
   assert.equal(JSON.stringify(optimizedResponse), JSON.stringify(legacyResponse), `${name} serialized response must match the restored legacy implementation`);
+}
+
+function verifyPreparedPhotoSortCache(factory) {
+  let currentIndex = createSortCacheIndex("first");
+  const service = createService(factory, () => currentIndex);
+  const legacyService = createService(createLegacyImageLibraryService, () => currentIndex);
+  const legacyUpdated = legacyService.itemsPayload(request({ mode: "photo", photoView: "albums", sort: "updated", limit: "24" }));
+
+  for (let index = 0; index < 1000; index += 1) {
+    const rawSort = `unknown-sort-${index}`;
+    const actual = service.itemsPayload(request({ mode: "photo", photoView: "albums", sort: rawSort, limit: "24" }));
+    const expected = { ...legacyUpdated, sort: rawSort };
+    assert.deepStrictEqual(actual, expected, `unknown sort ${index} must preserve legacy updated behavior and its raw payload value`);
+    assert.equal(JSON.stringify(actual), JSON.stringify(expected), `unknown sort ${index} must preserve legacy updated response bytes`);
+    if (index === 99) {
+      assert.deepStrictEqual(service.__testPhotoCatalogState().sortedKeys, ["updated"], "100 unknown sorts must share one canonical updated cache entry");
+    }
+  }
+  assert.deepStrictEqual(service.__testPhotoCatalogState().sortedKeys, ["updated"], "1000 unknown sorts must share one canonical updated cache entry");
+
+  const branchSorts = ["count", "title", "size", "rating", "year"];
+  for (const sort of branchSorts) {
+    const actual = service.itemsPayload(request({ mode: "photo", photoView: "albums", sort, limit: "24" }));
+    const expected = legacyService.itemsPayload(request({ mode: "photo", photoView: "albums", sort, limit: "24" }));
+    assert.deepStrictEqual(actual, expected, `${sort} must preserve the legacy sort branch`);
+    service.itemsPayload(request({ mode: "photo", photoView: "albums", sort: ` ${sort} `, limit: "24" }));
+  }
+  assert.deepStrictEqual(service.__testPhotoCatalogState().sortedKeys, ["updated", ...branchSorts], "every concrete sort branch must occupy exactly one cache entry");
+
+  const relevanceWithoutQuery = service.itemsPayload(request({ mode: "photo", photoView: "albums", sort: "relevance", limit: "24" }));
+  assert.deepStrictEqual(relevanceWithoutQuery, { ...legacyUpdated, sort: "relevance" }, "relevance without search terms must preserve legacy updated ordering and raw sort payload");
+  const keysBeforeSearch = service.__testPhotoCatalogState().sortedKeys;
+  const relevanceWithQuery = service.itemsPayload(request({ mode: "photo", photoView: "albums", sort: "count", q: "缓存作品", limit: "24" }));
+  const legacyRelevanceWithQuery = legacyService.itemsPayload(request({ mode: "photo", photoView: "albums", sort: "count", q: "缓存作品", limit: "24" }));
+  assert.deepStrictEqual(relevanceWithQuery, legacyRelevanceWithQuery, "search relevance must stay outside the prepared sort cache and preserve legacy results");
+  assert.deepStrictEqual(service.__testPhotoCatalogState().sortedKeys, keysBeforeSearch, "search relevance must not add a prepared sort cache entry");
+
+  const firstIndex = currentIndex;
+  assert.strictEqual(service.__testPhotoCatalogState().index, firstIndex, "prepared catalog must retain the current index identity");
+  currentIndex = createSortCacheIndex("second");
+  const switchedResponse = service.itemsPayload(request({ mode: "photo", photoView: "albums", sort: "updated", limit: "24" }));
+  const legacySwitchedResponse = legacyService.itemsPayload(request({ mode: "photo", photoView: "albums", sort: "updated", limit: "24" }));
+  const switchedState = service.__testPhotoCatalogState();
+  assert.strictEqual(switchedState.index, currentIndex, "a new index identity must replace the prepared catalog");
+  assert.notStrictEqual(switchedState.index, firstIndex, "the old prepared catalog identity must be discarded");
+  assert.deepStrictEqual(switchedState.sortedKeys, ["updated"], "a new index identity must start with a fresh sort cache");
+  assert.deepStrictEqual(switchedResponse, legacySwitchedResponse, "index identity switching must preserve the legacy response");
+}
+
+function createSortCacheIndex(label) {
+  return {
+    scannedAt: `2026-08-11T00:00:0${label === "first" ? 1 : 2}.000Z`,
+    photoSets: Array.from({ length: 64 }, (_, index) => ({
+      id: `${label}-sort-${index}`,
+      title: `2026.07.01 VOL.${index + 1} 缓存作品 ${String(63 - index).padStart(2, "0")}`,
+      category: `分类 ${index % 4}`,
+      subCategory: `文件夹 ${index % 8}`,
+      personName: `人物 ${index % 16}`,
+      relativePath: `合集 ${index % 6}/album-${index}.zip`,
+      sourceRoot: "T:\\[套图]",
+      rootLabel: "[套图]",
+      size: (index + 1) * 100,
+      rating: index % 5,
+      year: String(2000 + index % 20),
+      updatedAt: new Date(Date.UTC(2026, 6, 1, 0, 0, label === "first" ? index : index + 1000)).toISOString()
+    })),
+    mediaItems: []
+  };
 }
 
 function legacyPhotoPersonFacets(items, limit) {
@@ -289,13 +361,14 @@ function createProductionShapeIndex() {
 }
 
 function createService(factory, index) {
+  const getIndex = typeof index === "function" ? index : () => index;
   return factory({
     clampInteger(value, fallback, min, max) {
       const parsed = Number.parseInt(String(value ?? ""), 10);
       return Math.min(max, Math.max(min, Number.isFinite(parsed) ? parsed : fallback));
     },
     galleryMediaRootStatuses: () => [],
-    getImageLibraryIndex: () => index,
+    getImageLibraryIndex: getIndex,
     imageReaderCacheStatus: () => ({ root: "", exists: true, maxBytes: 0, currentBytes: 0, overBytes: 0, fileCount: 0, cleanupIntervalMs: 0 }),
     mangaService: {
       cacheDirs: () => [],

@@ -775,11 +775,17 @@ export function createImageLibraryService({
     return catalog.collectionCategories;
   }
 
+  function canonicalPhotoSortKey(sort) {
+    if (["count", "title", "size", "rating", "year"].includes(sort)) return sort;
+    return "updated";
+  }
+
   function preparedPhotoSortedItems(catalog, sort) {
-    let items = catalog.sortedItems.get(sort);
+    const cacheKey = canonicalPhotoSortKey(sort);
+    let items = catalog.sortedItems.get(cacheKey);
     if (!items) {
-      items = sortImageLibraryItems(catalog.items, sort);
-      catalog.sortedItems.set(sort, items);
+      items = sortImageLibraryItems(catalog.items, cacheKey);
+      catalog.sortedItems.set(cacheKey, items);
     }
     return items;
   }
