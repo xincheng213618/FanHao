@@ -7,6 +7,7 @@ import { DEFAULT_MAX_COVER_BYTES, extractCoverFrame, extractCoverFrameAsync } fr
 import { authorFacet, followingAuthorFacet } from "./author-facets.js";
 import { LOCAL_SHORT_VIDEO_USER_ID, SHORT_VIDEO_RECOMMENDATION_SCORE_SQL } from "./constants.js";
 import { createShortVideoCommentsRepository } from "./comments-repository.js";
+import { createShortVideoCollectionsRepository } from "./collections-repository.js";
 import { createShortVideoCoverDatabase, defaultShortVideoCoverDbPath, SHORT_VIDEO_COVER_GENERATION_VERSION, SQLITE_SHORT_VIDEO_COVER_SOURCE } from "./cover-database.js";
 import { createShortVideoCoverStorageService } from "./cover-storage-service.js";
 import {
@@ -205,6 +206,11 @@ export function createShortVideoStore(options = {}) {
     database: databaseOrOpen,
     resolveVideo: (database, id) => videoCatalogRowByAnyId(database, id, "id")
   });
+  const collections = createShortVideoCollectionsRepository({
+    database: databaseOrOpen,
+    publicVideo,
+    resolveVideo: videoCatalogRowByAnyId
+  });
 
   function database() {
     if (!db) {
@@ -264,6 +270,10 @@ export function createShortVideoStore(options = {}) {
             ON short_video_follows(local_user_id, active, followed_at DESC, target_user_id);
           CREATE INDEX IF NOT EXISTS idx_short_video_watch_history_recent_video
             ON short_video_watch_history(local_user_id, last_watched_at DESC, video_id);
+          CREATE INDEX IF NOT EXISTS idx_short_video_collections_user_order
+            ON short_video_collections(local_user_id, sort_order, created_at, id);
+          CREATE INDEX IF NOT EXISTS idx_short_video_collection_items_page
+            ON short_video_collection_items(collection_id, added_at DESC, video_id DESC);
           CREATE TABLE IF NOT EXISTS short_video_playback_issues (
             video_id TEXT PRIMARY KEY,
             reason TEXT NOT NULL DEFAULT '',
@@ -3326,15 +3336,18 @@ function summary() {
 
   return {
     adjacentVideo,
+    addCollectionVideo: collections.addCollectionVideo,
     backfillMissingCovers,
     backfillMissingCoversAsync,
     close,
+    createCollection: collections.createCollection,
     coverBackfillStatus,
     coverDbPath,
     coverFile,
     coverStorageStatus,
     dbPath,
     deleteVideo,
+    deleteCollection: collections.deleteCollection,
     deleteVideoGroup,
     deleteVideos,
     downloadManagerSourceStateKey,
@@ -3343,6 +3356,8 @@ function summary() {
     importDownloadManagerDb,
     importRemoteComments,
     listAuthors,
+    listCollections: collections.listCollections,
+    listCollectionVideos: collections.listCollectionVideos,
     likeDistribution,
     listVideos,
     localComments,
@@ -3352,6 +3367,8 @@ function summary() {
     musicFile,
     queueQualityUpgrades,
     relatedVideos,
+    removeCollectionVideo: collections.removeCollectionVideo,
+    renameCollection: collections.renameCollection,
     recordWatch,
     resolveAuthorMention,
     roots,
