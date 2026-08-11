@@ -523,7 +523,7 @@ export function createShortVideoPage(deps) {
     }
     if (isShortVideoAuthorIndexPage()) {
       if (append && (state.shortVideo.loading || state.shortVideo.authorLoadingMore || !state.shortVideo.authorHasMore)) return;
-      if (restoreSavedAuthorIndexWindow(state.shortVideo, append, () => { renderStats(); renderView(); })) return;
+      if (restoreSavedAuthorIndexWindow(state.shortVideo, append, () => { renderStats(); renderView(); }, () => { shortVideoListRequestId += 1; shortVideoOpenRequestId += 1; })) return;
       const requestId = ++shortVideoListRequestId;
       state.shortVideo.current = null;
       state.shortVideo.prevVideo = null;
@@ -661,7 +661,7 @@ export function createShortVideoPage(deps) {
         hasMore: Boolean(data?.hasMore)
       });
     }
-    if (requestId !== shortVideoListRequestId) {
+    if (requestId !== shortVideoListRequestId || requestedAuthorPage !== String(state.shortVideo.authorPage || "").trim() || (requestedAuthorPage && !isShortVideoAuthorDetailPage())) {
       if (captureListPerformance) {
         markShortVideoPerformance("short-video-list-request-stale", {
           append,

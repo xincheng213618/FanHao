@@ -185,6 +185,7 @@ function verifyWebAuthorRouteLifecycle() {
   }, 4200, "author-a", snapshotNow);
   const restoredWindow = { source: "authors", authors: [] };
   assert(!matchesAuthorIndexWindow(undefined, restoredWindow), "a missing author snapshot must never suppress the initial author request");
+  assert(!matchesAuthorIndexWindow({}, restoredWindow), "an empty author snapshot must never suppress the initial author request");
   assert(matchesAuthorIndexWindow(windowSnapshot, restoredWindow, snapshotNow), "a matching author route must accept its saved loaded window");
   assert.equal(restoreAuthorIndexWindow(restoredWindow, windowSnapshot), 4200, "author window restore must retain the saved scroll position");
   assert.deepEqual(restoredWindow.authors, [{ secUid: "a" }, { secUid: "b" }], "author window restore must retain all loaded author pages");
@@ -219,8 +220,10 @@ function verifyWebAuthorRouteLifecycle() {
     authorSort: "liked",
     authorFilter: "all"
   }, snapshotNow), "following filter changes must not restore a stale author window");
-  assert(!matchesAuthorIndexWindow(windowSnapshot, restoredWindow, snapshotNow + AUTHOR_INDEX_WINDOW_TTL_MS + 1), "expired author windows must fall back to the network");
-  assert.equal(captureAuthorIndexWindow({ source: "authors", authors: Array.from({ length: AUTHOR_INDEX_WINDOW_MAX_AUTHORS + 1 }) }, 0, "author-a", snapshotNow), null, "oversized author windows must fall back to the network");
+  assert(matchesAuthorIndexWindow(windowSnapshot, restoredWindow, snapshotNow + AUTHOR_INDEX_WINDOW_TTL_MS), "a snapshot must remain usable at its exact TTL boundary");
+  assert(!matchesAuthorIndexWindow(windowSnapshot, restoredWindow, snapshotNow + AUTHOR_INDEX_WINDOW_TTL_MS + 1), "a snapshot must expire immediately after its TTL boundary");
+  assert(captureAuthorIndexWindow({ source: "authors", authors: Array.from({ length: AUTHOR_INDEX_WINDOW_MAX_AUTHORS }) }, 0, "author-a", snapshotNow), "a 768-author window must remain eligible for restore");
+  assert.equal(captureAuthorIndexWindow({ source: "authors", authors: Array.from({ length: AUTHOR_INDEX_WINDOW_MAX_AUTHORS + 1 }) }, 0, "author-a", snapshotNow), null, "a 769-author window must fall back to the network");
   const staleRouteState = { ...restoredWindow, authorIndexWindow: windowSnapshot };
   assert(!discardAuthorIndexWindowAfterRouteChange(staleRouteState, "different-author"), "a route that did not return from the captured detail must discard its snapshot");
   assert.equal(staleRouteState.authorIndexWindow, null, "discarded snapshots must not revive after a later context match");

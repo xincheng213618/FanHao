@@ -12,6 +12,7 @@ const suppliedBaseUrl = String(process.env.FANHAO_BROWSER_TEST_BASE_URL || "").t
 const ownedServer = suppliedBaseUrl ? null : await startFixtureServer(port);
 const fixturePort = Number(ownedServer?.address()?.port || 0);
 const baseUrl = suppliedBaseUrl || `http://127.0.0.1:${fixturePort}`;
+let delayedAuthorDetail = null;
 
 try {
   await waitForHealth(baseUrl);
@@ -20,6 +21,7 @@ try {
     await verifyStandaloneStyles(browser);
     await verifyMobileGallery(browser);
     await verifyAuthorIndexReturn(browser);
+    await verifyAuthorReturnDiscardsDelayedDetail(browser);
     await verifyDirectAuthorDeepLink(browser);
   } finally {
     await browser.close();
@@ -30,10 +32,10 @@ try {
 }
 
 async function startFixtureServer(serverPort) {
-  const server = createServer((request, response) => {
+  const server = createServer(async (request, response) => {
     const url = new URL(request.url || "/", "http://127.0.0.1");
     if (url.pathname.startsWith("/api/")) {
-      sendJson(response, fixtureApi(url));
+      sendJson(response, await fixtureApi(url));
       return;
     }
     const relative = url.pathname === "/" ? "index.html" : url.pathname.replace(/^\/+/, "");
@@ -206,6 +208,33 @@ async function verifyAuthorIndexReturn(browser) {
   }
 }
 
+async function verifyAuthorReturnDiscardsDelayedDetail(browser) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    await page.goto(`${baseUrl}/short-videos?perf=1`, { waitUntil: "domcontentloaded" });
+    await page.locator(".short-video-home").waitFor({ state: "visible", timeout: 30000 });
+    await page.locator('.short-video-source-tab[data-source="authors"]').click({ force: true });
+    const authorCards = page.locator(".short-video-author-index-card-main");
+    await authorCards.first().waitFor({ state: "visible", timeout: 30000 });
+    const openedCard = authorCards.nth(7);
+    const openedAuthorId = await openedCard.getAttribute("data-short-video-author-id");
+    const delayed = deferNextAuthorDetail();
+    await openedCard.click();
+    await delayed.requested;
+    await page.goBack();
+    const restored = await waitFor(() => authorWindow(page), (value) => value.authors === 96 && new URL(value.href).searchParams.get("source") === "authors", 30000);
+    await waitForAuthorFocus(page, openedAuthorId, "immediate history return must restore focus before the delayed detail resolves");
+    delayed.release();
+    await page.waitForTimeout(250);
+    const afterDelayedDetail = await authorWindow(page);
+    assert.equal(afterDelayedDetail.authors, restored.authors, "a stale detail response must not replace the restored author index");
+    assert.equal(new URL(afterDelayedDetail.href).searchParams.get("source"), "authors", "a stale detail response must not change the restored author-index URL");
+    await waitForAuthorFocus(page, openedAuthorId, "a stale detail response must not steal restored author-card focus");
+  } finally {
+    await page.close();
+  }
+}
+
 async function verifyDirectAuthorDeepLink(browser) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const authorRequests = [];
@@ -281,7 +310,21 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function fixtureApi(url) {
+function deferNextAuthorDetail() {
+  let requestedResolve;
+  let releaseResolve;
+  const deferred = {
+    requested: new Promise((resolve) => { requestedResolve = resolve; }),
+    release: () => releaseResolve()
+  };
+  delayedAuthorDetail = {
+    requested: () => requestedResolve(),
+    response: new Promise((resolve) => { releaseResolve = resolve; })
+  };
+  return deferred;
+}
+
+async function fixtureApi(url) {
   if (url.pathname === "/api/health") return { ok: true };
   if (url.pathname === "/api/short-videos/authors") {
     const offset = Math.max(0, Number(url.searchParams.get("offset") || 0));
@@ -301,6 +344,12 @@ function fixtureApi(url) {
   }
   if (url.pathname === "/api/short-videos") {
     const author = url.searchParams.get("author") || "fixture-author-1";
+    if (url.searchParams.get("author") && delayedAuthorDetail) {
+      const delayed = delayedAuthorDetail;
+      delayedAuthorDetail = null;
+      delayed.requested();
+      await delayed.response;
+    }
     return {
       videos: [{
         id: `fixture-video-${author}`,

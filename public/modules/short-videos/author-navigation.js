@@ -108,9 +108,10 @@ export function restoreAuthorIndexFocus(snapshot = {}) {
   });
 }
 
-export function restoreSavedAuthorIndexWindow(shortVideo = {}, append = false, render = () => {}) {
+export function restoreSavedAuthorIndexWindow(shortVideo = {}, append = false, render = () => {}, beforeRestore = () => {}) {
   if (append || !matchesAuthorIndexWindow(shortVideo.authorIndexWindow, shortVideo)) return false;
   const snapshot = shortVideo.authorIndexWindow;
+  beforeRestore();
   shortVideo.authorIndexWindow = null;
   const scrollY = restoreAuthorIndexWindow(shortVideo, snapshot);
   render();
