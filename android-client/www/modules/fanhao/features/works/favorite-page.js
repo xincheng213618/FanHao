@@ -33,6 +33,8 @@ export function createFavoriteWorkViews(context) {
       sort: listState.getServerSortMode()
     });
     const activeUrl = context.getActiveUrl();
+    const pageIsActive = () => isActive() && context.getActiveUrl() === activeUrl;
+    pageIsActive.signal = isActive.signal;
     let renderedCache = false;
 
     const applyHeader = (data, cacheEntry = null) => {
@@ -76,19 +78,19 @@ export function createFavoriteWorkViews(context) {
 
     try {
       const result = await context.pageDataService.load(activeUrl, path, {
-        signal: isActive.signal,
-        isActive,
+        signal: pageIsActive.signal,
+        isActive: pageIsActive,
         signature: context.workDataSignature,
         onCached(data, cacheEntry) {
           renderedCache = true;
           renderData(data, cacheEntry);
         }
       });
-      if (!result || !isActive()) return;
+      if (!result || !pageIsActive()) return;
       if (result.unchanged) applyHeader(result.data);
       else renderData(result.data);
     } catch (error) {
-      if (!isActive()) return;
+      if (!pageIsActive()) return;
       if (renderedCache) context.renderMessage("电脑端暂时连不上，当前显示的是本地缓存收藏。", "quiet", false);
       else context.renderMessage(error?.message || "收藏读取失败", "error");
     }

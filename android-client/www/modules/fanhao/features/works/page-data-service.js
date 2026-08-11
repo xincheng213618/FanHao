@@ -43,13 +43,17 @@ export function createWorkPageDataService({ fetchJson, readCachedJson = async ()
     for (const path of paths) {
       const key = requestKey(activeUrl, path);
       if (warmed.has(key)) continue;
+      const generation = generations.get(key) || 0;
       warmed.add(key);
       const request = fetch(activeUrl, path).then((data) => {
+        if ((generations.get(key) || 0) !== generation) return;
         warmedResults.set(key, { data, expiresAt: Date.now() + WARMED_RESULT_TTL_MS });
         while (warmedResults.size > WARMED_RESULT_LIMIT) {
           warmedResults.delete(warmedResults.keys().next().value);
         }
-      }).catch(() => warmed.delete(key));
+      }).catch(() => {
+        if ((generations.get(key) || 0) === generation) warmed.delete(key);
+      });
       requests.push(request);
     }
     return Promise.all(requests);
@@ -58,6 +62,9 @@ export function createWorkPageDataService({ fetchJson, readCachedJson = async ()
   async function load(activeUrl, path, options = {}) {
     const isActive = options.isActive || (() => true);
     const signature = options.signature || JSON.stringify;
+    const key = requestKey(activeUrl, path);
+    const generation = generations.get(key) || 0;
+    const isCurrent = () => (generations.get(key) || 0) === generation;
     const freshRequest = fetch(activeUrl, path, options).then(
       (data) => ({ source: "fresh", data }),
       (error) => ({ source: "fresh", error })
@@ -67,14 +74,15 @@ export function createWorkPageDataService({ fetchJson, readCachedJson = async ()
       () => ({ source: "cache", cache: null })
     );
     const first = await Promise.race([freshRequest, cacheRequest]);
-    if (!isActive()) return null;
+    if (!isActive() || !isCurrent()) return null;
     if (first.source === "fresh" && !first.error) return { data: first.data, unchanged: false };
 
     const cached = first.source === "cache" ? first.cache : (await cacheRequest).cache;
     const cachedPayload = cached?.payload || null;
     const cachedSignature = cachedPayload ? signature(cachedPayload) : "";
-    if (cachedPayload) options.onCached?.(cachedPayload, cached);
+    if (cachedPayload && isActive() && isCurrent()) options.onCached?.(cachedPayload, cached);
     const fresh = first.source === "fresh" ? first : await freshRequest;
+    if (!isActive() || !isCurrent()) return null;
     if (fresh.error) throw fresh.error;
     return {
       data: fresh.data,

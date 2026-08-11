@@ -952,6 +952,7 @@ function applyTheme(value) {
 }
 
 function updateServer(url) {
+  const previousUrl = activeUrl;
   activeUrl = normalizeUrl(url);
   localStorage.setItem(STORAGE_KEY, activeUrl);
   els.serverUrl.value = activeUrl;
@@ -965,6 +966,10 @@ function updateServer(url) {
 
   for (const button of els.quickServers) {
     button.classList.toggle("active", normalizeUrl(button.dataset.url) === activeUrl);
+  }
+  if (previousUrl !== activeUrl && workViews?.pageDataService) {
+    workViews.pageDataService.invalidate(previousUrl, "/");
+    renderCurrentView();
   }
 }
 

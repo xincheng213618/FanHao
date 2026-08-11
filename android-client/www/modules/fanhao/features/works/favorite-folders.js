@@ -33,6 +33,9 @@ export function createFavoriteFolderFeature(context = {}) {
   let listRequest = null;
   let activeBaseUrl = "";
   let mutationRevision = 0;
+  let pendingMutations = 0;
+  let folderRefresh = null;
+  const workMutationRevisions = new Map();
 
   function ensureScope(baseUrl = context.getActiveUrl()) {
     const normalized = String(baseUrl || "").replace(/\/+$/u, "");
@@ -41,18 +44,31 @@ export function createFavoriteFolderFeature(context = {}) {
     folders = [];
     listRequest = null;
     mutationRevision = 0;
+    pendingMutations = 0;
+    folderRefresh = null;
+    workMutationRevisions.clear();
     return normalized;
   }
 
-  function rememberFolders(nextFolders) {
+  function rememberFolders(nextFolders, options = {}) {
     ensureScope();
     if (!Array.isArray(nextFolders)) return folders;
-    folders = nextFolders.map((folder) => ({
+    const next = nextFolders.map((folder) => ({
       ...folder,
       count: Math.max(0, Number(folder?.count || 0)),
       id: String(folder?.id || ""),
       name: String(folder?.name || "收藏夹")
     })).filter((folder) => folder.id);
+    if (!options.merge) {
+      folders = next;
+      return folders;
+    }
+    const currentById = new Map(folders.map((folder) => [folder.id, folder]));
+    const nextIds = new Set(next.map((folder) => folder.id));
+    folders = [
+      ...next.map((folder) => ({ ...currentById.get(folder.id), ...folder })),
+      ...folders.filter((folder) => !nextIds.has(folder.id))
+    ];
     return folders;
   }
 
@@ -90,38 +106,49 @@ export function createFavoriteFolderFeature(context = {}) {
   async function createFolder(name) {
     const cleanName = String(name || "").replace(/\s+/gu, " ").trim().slice(0, 32);
     if (!cleanName) throw new Error("请输入收藏夹名称");
-    const data = await request("/api/favorite-folders", { method: "POST", body: { name: cleanName } });
-    mutationRevision += 1;
-    rememberFolders(data?.folders);
-    if (data?.user) context.onUserStateChange?.(data.user);
-    await invalidateCollections();
-    return data?.folder;
+    const mutation = beginMutation();
+    try {
+      const data = await request("/api/favorite-folders", { method: "POST", body: { name: cleanName } });
+      rememberFolders([...(data?.folders || []), ...(data?.folder ? [data.folder] : [])], { merge: true });
+      if (isLatestMutation(mutation) && data?.user) context.onUserStateChange?.(data.user);
+      await invalidateCollections();
+      return data?.folder;
+    } finally {
+      finishMutation(mutation);
+    }
   }
 
   async function toggleFavorite(work, onOptimisticChange = () => {}) {
     const snapshot = favoriteSnapshot(work);
+    const mutation = beginMutation(work.id);
     work.favorite = !snapshot.favorite;
     if (!work.favorite) applyFavoriteFolder(work, null);
     onOptimisticChange(work);
     try {
       const data = await request(`/api/favorites/${encodeURIComponent(work.id)}`, { method: "POST", body: {} });
-      mutationRevision += 1;
-      applyFavoritePayload(work, data);
-      rememberFolders(data?.folders);
-      if (data?.user) context.onUserStateChange?.(data.user);
-      syncLibraryWork(work);
+      if (isLatestWorkMutation(work.id, mutation)) {
+        applyFavoritePayload(work, data);
+        syncLibraryWork(work);
+      }
+      rememberFolders(data?.folders, { merge: true });
+      if (isLatestMutation(mutation) && data?.user) context.onUserStateChange?.(data.user);
       await invalidateWork(work.id);
       return data;
     } catch (error) {
-      restoreFavoriteSnapshot(work, snapshot);
-      syncLibraryWork(work);
-      onOptimisticChange(work);
+      if (isLatestWorkMutation(work.id, mutation)) {
+        restoreFavoriteSnapshot(work, snapshot);
+        syncLibraryWork(work);
+        onOptimisticChange(work);
+      }
       throw error;
+    } finally {
+      finishMutation(mutation);
     }
   }
 
   async function moveFavorite(work, folderId, onOptimisticChange = () => {}) {
     const snapshot = favoriteSnapshot(work);
+    const mutation = beginMutation(work.id);
     const target = folders.find((folder) => folder.id === String(folderId || ""));
     applyFavoriteFolder(work, target ? { folderId: target.id, folderName: target.name } : null);
     onOptimisticChange(work);
@@ -130,19 +157,51 @@ export function createFavoriteFolderFeature(context = {}) {
         method: "PUT",
         body: { folderId }
       });
-      mutationRevision += 1;
-      applyFavoritePayload(work, { favorite: true, favoriteFolder: data?.favorite });
-      rememberFolders(data?.folders);
-      if (data?.user) context.onUserStateChange?.(data.user);
-      syncLibraryWork(work);
+      if (isLatestWorkMutation(work.id, mutation)) {
+        applyFavoritePayload(work, { favorite: true, favoriteFolder: data?.favorite });
+        syncLibraryWork(work);
+      }
+      rememberFolders(data?.folders, { merge: true });
+      if (isLatestMutation(mutation) && data?.user) context.onUserStateChange?.(data.user);
       await invalidateWork(work.id);
       return data;
     } catch (error) {
-      restoreFavoriteSnapshot(work, snapshot);
-      syncLibraryWork(work);
-      onOptimisticChange(work);
+      if (isLatestWorkMutation(work.id, mutation)) {
+        restoreFavoriteSnapshot(work, snapshot);
+        syncLibraryWork(work);
+        onOptimisticChange(work);
+      }
       throw error;
+    } finally {
+      finishMutation(mutation);
     }
+  }
+
+  function beginMutation(workId = "") {
+    ensureScope();
+    mutationRevision += 1;
+    pendingMutations += 1;
+    const mutation = { revision: mutationRevision, scope: activeBaseUrl, workId: String(workId || "") };
+    if (mutation.workId) workMutationRevisions.set(mutation.workId, mutation.revision);
+    return mutation;
+  }
+
+  function isLatestMutation(mutation) {
+    return mutation.scope === activeBaseUrl && mutation.revision === mutationRevision;
+  }
+
+  function isLatestWorkMutation(workId, mutation) {
+    return mutation.scope === activeBaseUrl && workMutationRevisions.get(String(workId || "")) === mutation.revision;
+  }
+
+  function finishMutation(mutation) {
+    if (mutation.scope !== activeBaseUrl) return;
+    pendingMutations = Math.max(0, pendingMutations - 1);
+    if (pendingMutations || folderRefresh) return;
+    const refresh = loadFolders(true).catch(() => folders).finally(() => {
+      if (folderRefresh === refresh) folderRefresh = null;
+    });
+    folderRefresh = refresh;
   }
 
   function createFolderStrip(selectedFolderId = "all", handlers = {}) {

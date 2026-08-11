@@ -35,6 +35,7 @@ try {
     await verifyAndroidCollectionStackReturn(browser);
     await verifyAndroidFavoriteFolders(browser);
     await verifyAndroidFavoriteRoute(browser);
+    await verifyAndroidFavoriteServerSwitch(browser);
     await verifyShortVideoCollections(browser);
   } finally {
     await browser.close();
@@ -851,6 +852,7 @@ async function verifyAndroidFavoriteFolders(browser) {
     await strip.waitFor({ state: "visible", timeout: 5000 });
     assert.equal(await strip.getAttribute("aria-label"), "收藏夹筛选", "Android favorite folders must expose a labelled navigation strip");
     assert.equal(await strip.locator("button.active").getAttribute("aria-pressed"), "true", "Android favorite folder selection must be announced");
+    assert.equal(await strip.locator('button[aria-label^="默认收藏"]').getAttribute("aria-label"), "默认收藏，1 个作品", "Android favorite folders must render non-empty authoritative folder counts");
     await strip.locator(".favorite-folder-create").click();
     const createInput = page.locator(".favorite-folder-sheet input");
     await createInput.waitFor({ state: "visible", timeout: 5000 });
@@ -859,6 +861,7 @@ async function verifyAndroidFavoriteFolders(browser) {
     await createInput.fill("旅行收藏");
     await page.locator(".favorite-folder-form button").click();
     await page.locator(".favorite-folder-overlay").waitFor({ state: "detached", timeout: 5000 });
+    assert.equal(await strip.locator(".favorite-folder-create").evaluate((element) => document.activeElement === element), true, "closing Android favorite folder creation must restore focus to its trigger");
     let metrics = await page.evaluate(() => window.androidFavoriteFolderFixture.metrics());
     assert.equal(metrics.postAttempts, 2, "Android favorite folder creation must retry one explicitly retryable 503 and then stop");
     assert.equal(metrics.selectedFolderId, "folder-2", "new Android favorite folders must become the selected works-filter folder");
@@ -879,6 +882,84 @@ async function verifyAndroidFavoriteFolders(browser) {
     assert(raceFolders.some((folder) => folder.name === "竞态新夹"), "an older folder GET must not overwrite a newer Android create response");
     const serverBFolders = await page.evaluate(() => window.androidFavoriteFolderFixture.switchServer());
     assert.deepEqual(serverBFolders.map((folder) => folder.id), ["b"], "Android favorite folder state must be partitioned by active server");
+
+    await strip.locator(".favorite-folder-create").click();
+    await createInput.waitFor({ state: "visible", timeout: 5000 });
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(await page.locator(".favorite-folder-form button").evaluate((element) => document.activeElement === element), true, "Android favorite folder dialogs must wrap reverse Tab focus inside the modal");
+    await page.keyboard.press("Tab");
+    assert.equal(await page.locator(".favorite-folder-sheet > header > button").evaluate((element) => document.activeElement === element), true, "Android favorite folder dialogs must wrap forward Tab focus inside the modal");
+    await page.keyboard.press("Escape");
+    await page.locator(".favorite-folder-overlay").waitFor({ state: "detached", timeout: 5000 });
+    assert.equal(await strip.locator(".favorite-folder-create").evaluate((element) => document.activeElement === element), true, "escaping Android favorite folder dialogs must restore focus to their trigger");
+
+    const mutationRace = await page.evaluate(async () => {
+      const { createFavoriteFolderFeature } = await import("/android-client/modules/fanhao/features/works/favorite-folders.js?mutation-race=1");
+      let resolveCreate;
+      let resolveToggle;
+      const createReply = new Promise((resolve) => { resolveCreate = resolve; });
+      const toggleReply = new Promise((resolve) => { resolveToggle = resolve; });
+      const defaultFolder = { id: "default", name: "默认收藏", count: 1 };
+      const plannedFolder = { id: "planned", name: "待观看", count: 0 };
+      const newFolder = { id: "new", name: "竞态新夹", count: 0 };
+      const createFeature = createFavoriteFolderFeature({
+        api: async (_base, requestPath, options = {}) => {
+          if (requestPath === "/api/favorite-folders" && options.method === "POST") return createReply;
+          if (requestPath === "/api/favorite-folders") return { folders: [defaultFolder, plannedFolder, newFolder] };
+          if (requestPath === "/api/favorites/create-work") return toggleReply;
+          throw new Error(`unexpected create race request: ${requestPath}`);
+        },
+        clearCachedJsonByPrefix: async () => {},
+        getActiveUrl: () => "http://create-race.local",
+        getLibrary: () => ({ works: [] }),
+        pageDataService: { invalidate() {} }
+      });
+      createFeature.rememberFolders([defaultFolder, plannedFolder]);
+      const createWork = { id: "create-work", favorite: false };
+      const creating = createFeature.createFolder("竞态新夹");
+      const toggling = createFeature.toggleFavorite(createWork);
+      resolveCreate({ folder: newFolder, folders: [defaultFolder, plannedFolder, newFolder] });
+      await creating;
+      resolveToggle({ favorite: true, favoriteFolder: { folderId: "default", folderName: "默认收藏" }, folders: [defaultFolder, plannedFolder] });
+      await toggling;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      let resolveStaleToggle;
+      let rejectStaleToggle;
+      let resolveLatestMove;
+      const staleToggleReply = new Promise((resolve, reject) => {
+        resolveStaleToggle = resolve;
+        rejectStaleToggle = reject;
+      });
+      const latestMoveReply = new Promise((resolve) => { resolveLatestMove = resolve; });
+      const rollbackFeature = createFavoriteFolderFeature({
+        api: async (_base, requestPath) => {
+          if (requestPath === "/api/favorite-folders") return { folders: [defaultFolder, plannedFolder] };
+          if (requestPath === "/api/favorites/rollback-work") return staleToggleReply;
+          if (requestPath === "/api/favorites/rollback-work/folder") return latestMoveReply;
+          throw new Error(`unexpected rollback race request: ${requestPath}`);
+        },
+        clearCachedJsonByPrefix: async () => {},
+        getActiveUrl: () => "http://rollback-race.local",
+        getLibrary: () => ({ works: [] }),
+        pageDataService: { invalidate() {} }
+      });
+      rollbackFeature.rememberFolders([defaultFolder, plannedFolder]);
+      const rollbackWork = { id: "rollback-work", favorite: true, favoriteFolderId: "default", favoriteFolderName: "默认收藏" };
+      const staleToggle = rollbackFeature.toggleFavorite(rollbackWork).catch(() => {});
+      const latestMove = rollbackFeature.moveFavorite(rollbackWork, "planned");
+      resolveLatestMove({ favorite: { folderId: "planned", folderName: "待观看" }, folders: [defaultFolder, { ...plannedFolder, count: 1 }] });
+      await latestMove;
+      rejectStaleToggle(new Error("stale toggle failed"));
+      await staleToggle;
+      return {
+        folders: createFeature.folders().map((folder) => folder.id),
+        rollbackWork: { ...rollbackWork }
+      };
+    });
+    assert(mutationRace.folders.includes("new"), "an older Android mutation response must merge instead of removing a concurrently created folder");
+    assert.equal(mutationRace.rollbackWork.favoriteFolderId, "planned", "a stale failed Android toggle must not roll back a later successful move");
   } finally {
     await page.close();
   }
@@ -922,6 +1003,71 @@ async function verifyAndroidFavoriteRoute(browser) {
     await page.waitForFunction(() => location.hash === "#works?favorite=1", null, { timeout: 5000 });
     assert.equal(await page.locator('.favorite-folder-strip button[aria-label^="全部"]').getAttribute("aria-pressed"), "true", "Android back navigation must restore the prior favorite folder selection");
   } finally {
+    await page.close();
+  }
+}
+
+async function verifyAndroidFavoriteServerSwitch(browser) {
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  let releaseOldFavorite;
+  let oldFavoriteStarted;
+  const serverBRequests = [];
+  const oldFavoriteReply = new Promise((resolve) => { releaseOldFavorite = resolve; });
+  const oldFavoriteRequest = new Promise((resolve) => { oldFavoriteStarted = resolve; });
+  const response = (payload) => ({
+    status: 200,
+    contentType: "application/json",
+    headers: { "access-control-allow-origin": "*" },
+    body: JSON.stringify(payload)
+  });
+  try {
+    await page.route((url) => url.origin === new URL(baseUrl).origin && url.pathname === "/api/favorites", async (route) => {
+      oldFavoriteStarted();
+      await oldFavoriteReply;
+      await route.fulfill(response({
+        count: 0,
+        facets: { all: 0 },
+        folders: [{ id: "old", name: "旧服务器", count: 0 }],
+        selectedFolderId: "all",
+        total: 0,
+        works: []
+      })).catch(() => {});
+    });
+    await page.route((url) => url.origin === "http://favorite-server-b.local:29998", (route) => {
+      serverBRequests.push(route.request().url());
+      if (new URL(route.request().url()).pathname !== "/api/favorites") return route.fulfill(response({ ok: true }));
+      return route.fulfill(response({
+        count: 0,
+        facets: { all: 0 },
+        folders: [{ id: "new", name: "新服务器", count: 0 }],
+        selectedFolderId: "all",
+        total: 0,
+        works: []
+      }));
+    });
+    await page.addInitScript(() => {
+      localStorage.clear();
+      localStorage.setItem("fanhao.serverUrl", location.origin);
+    });
+    await page.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+    const entry = page.locator(".fanhao-chrome-tag", { hasText: "收藏" });
+    await entry.waitFor({ state: "visible", timeout: 10000 });
+    const settings = page.locator("#settingsOverlay");
+    if (await settings.isVisible()) await page.locator("#settingsCloseButton").click();
+    await entry.click();
+    await oldFavoriteRequest;
+    await page.evaluate(() => document.querySelector("#profileSettingsButton")?.click());
+    await settings.waitFor({ state: "visible", timeout: 5000 });
+    await page.locator("#serverUrl").fill("http://favorite-server-b.local:29998");
+    await page.locator("#connectForm button[type='submit']").click();
+    await page.locator('.favorite-folder-strip button[aria-label^="新服务器"]').waitFor({ state: "visible", timeout: 10000 }).catch(() => {
+      assert.fail(`switching Android servers must request and render the new favorite collection: ${serverBRequests.join(" | ")}`);
+    });
+    releaseOldFavorite();
+    await page.waitForTimeout(120);
+    assert.equal(await page.locator('.favorite-folder-strip button[aria-label^="旧服务器"]').count(), 0, "switching Android servers must prevent an older favorite GET from rendering over the new server state");
+  } finally {
+    releaseOldFavorite?.();
     await page.close();
   }
 }

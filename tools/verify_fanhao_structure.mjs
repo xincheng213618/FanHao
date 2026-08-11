@@ -975,6 +975,41 @@ await workPageDataService.fetch("http://fanhao.local", completedWarmPath, { reus
 assert.equal(workPageFetchCount, 3, "Android touch navigation must consume a just-completed warmup without a second request");
 await workPageDataService.fetch("http://fanhao.local", completedWarmPath);
 assert.equal(workPageFetchCount, 4, "ordinary Android navigation must still revalidate a completed cached page");
+let resolveInvalidatedFetch;
+let invalidatedFetchCount = 0;
+let invalidatedCacheWrites = 0;
+const invalidatedFetch = new Promise((resolve) => { resolveInvalidatedFetch = resolve; });
+const invalidationPath = "/api/favorites?limit=48&offset=0&filter=all&sort=updated";
+const invalidationPageDataService = createWorkPageDataService({
+  fetchJson: async () => {
+    invalidatedFetchCount += 1;
+    if (invalidatedFetchCount === 1) return invalidatedFetch;
+    return { works: [{ id: `fresh-${invalidatedFetchCount}` }] };
+  },
+  writeCachedJson: async () => { invalidatedCacheWrites += 1; }
+});
+const staleLoad = invalidationPageDataService.load("http://fanhao.local", invalidationPath);
+invalidationPageDataService.invalidate("http://fanhao.local", "/api/favorites");
+resolveInvalidatedFetch({ works: [{ id: "stale" }] });
+assert.equal(await staleLoad, null, "invalidating an in-flight Android collection must prevent its old load caller from rendering stale data");
+assert.equal(invalidatedCacheWrites, 0, "invalidating an in-flight Android collection must fence its old cache write");
+let resolveInvalidatedWarm;
+const invalidatedWarm = new Promise((resolve) => { resolveInvalidatedWarm = resolve; });
+const warmInvalidationPath = "/api/favorites?limit=48&offset=48&filter=all&sort=updated";
+const warmInvalidationService = createWorkPageDataService({
+  fetchJson: async () => {
+    invalidatedFetchCount += 1;
+    if (invalidatedFetchCount === 2) return invalidatedWarm;
+    return { works: [{ id: `fresh-${invalidatedFetchCount}` }] };
+  },
+  writeCachedJson: async () => {}
+});
+const staleWarm = warmInvalidationService.warm("http://fanhao.local", [warmInvalidationPath]);
+warmInvalidationService.invalidate("http://fanhao.local", "/api/favorites");
+resolveInvalidatedWarm({ works: [{ id: "stale-warm" }] });
+await staleWarm;
+const freshAfterInvalidatedWarm = await warmInvalidationService.fetch("http://fanhao.local", warmInvalidationPath, { reuseWarmed: true });
+assert.equal(freshAfterInvalidatedWarm.works[0].id, `fresh-${invalidatedFetchCount}`, "an invalidated Android warmup must not revive into reuseWarmed");
 let resolveWorkDetailFetch;
 let resolveWorkDetailCache;
 const workDetailLoadOrder = [];
