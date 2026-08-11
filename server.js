@@ -1089,6 +1089,7 @@ const moduleRegistry = await discoverFanHaoModules({
         maxFileBytes: TXT_TOOL_MAX_FILE_BYTES,
         previewBytes: TXT_TOOL_PREVIEW_BYTES,
         readJsonBody,
+        requireLocalAdmin,
         sendJson,
         toolDownloadDir: TOOL_DOWNLOAD_DIR,
         ttlMs: TOOL_DOWNLOAD_TTL_MS

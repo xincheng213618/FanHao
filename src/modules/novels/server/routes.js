@@ -176,6 +176,7 @@ export async function routeNovelApi(req, res, url, deps) {
   }
 
   if (url.pathname === "/api/novels/upload" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req, novelUploadMaxBodyBytes);
       const data = novelStore.uploadBook(body || {});
@@ -281,6 +282,7 @@ export async function routeNovelApi(req, res, url, deps) {
 
   const bookMatch = /^\/api\/novels\/([^/]+)$/.exec(url.pathname);
   if (bookMatch && req.method === "DELETE") {
+    if (!requireLocalAdmin(req, res)) return true;
     try {
       const deleted = novelStore.deleteBook(decodeURIComponent(bookMatch[1]));
       if (!deleted) {
@@ -294,6 +296,7 @@ export async function routeNovelApi(req, res, url, deps) {
     return true;
   }
   if (bookMatch && req.method === "PATCH") {
+    if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req);
       const book = novelStore.updateBookMetadata(decodeURIComponent(bookMatch[1]), body || {});

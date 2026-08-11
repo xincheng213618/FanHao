@@ -1,11 +1,13 @@
 export async function routeToolsApi(req, res, url, deps) {
   const {
     readJsonBody,
+    requireLocalAdmin = () => true,
     sendJson,
     txtFormatToolService
   } = deps;
 
   if (url.pathname === "/api/tools/txt-format" && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req, txtFormatToolService.maxBodyBytes);
       const result = await txtFormatToolService.createDownload(body);

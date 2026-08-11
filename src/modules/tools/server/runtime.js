@@ -7,6 +7,7 @@ export function createToolsRuntime({
   maxFileBytes,
   previewBytes,
   readJsonBody,
+  requireLocalAdmin = () => true,
   sendJson,
   toolDownloadDir,
   ttlMs
@@ -20,7 +21,7 @@ export function createToolsRuntime({
     toolDownloadDir,
     ttlMs
   });
-  const deps = { readJsonBody, sendJson, txtFormatToolService };
+  const deps = { readJsonBody, requireLocalAdmin, sendJson, txtFormatToolService };
 
   async function routeApi(req, res, url) {
     return routeToolsApi(req, res, url, deps);
