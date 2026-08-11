@@ -62,6 +62,19 @@ function legacyDesktopRequestKey(workId, body) {
   return `client:${digest}`;
 }
 
+function androidDurableRequestKey(workId, body) {
+  const clientKey = String(body.idempotencyKey || "").trim().slice(0, 180);
+  const request = {
+    androidCommand: true,
+    createPerson: null,
+    personId: String(body.personId || "").trim(),
+    targetDirectory: "",
+    workId: String(workId || "")
+  };
+  const digest = crypto.createHash("sha256").update(JSON.stringify({ clientKey, request })).digest("hex");
+  return `client:${digest}`;
+}
+
 function createAdminFixture(db, fixture, {
   failCommit = false,
   failImageCommitOnce = false,
@@ -799,6 +812,136 @@ async function verifyActualAdminSqliteCommit() {
 
   const externalDb = new DatabaseSync(path.join(fixture.root, "admin-fixture.sqlite"));
   const originalTargetPreflight = admin.preflightWorkMoveTarget;
+  const insertExternalJob = ({ id, body, status, phase = status, key = androidDurableRequestKey("1", body) }) => {
+    const stamp = new Date().toISOString();
+    externalDb.prepare(`
+      INSERT INTO work_move_jobs (
+        id, request_key, work_id, person_id, status, phase, request_json,
+        attempts, created_at, updated_at, finished_at
+      ) VALUES (?, ?, '1', ?, ?, ?, ?, 1, ?, ?, ?)
+    `).run(
+      id,
+      key,
+      String(body.personId),
+      status,
+      phase,
+      JSON.stringify({ ...body, androidCommand: true }),
+      stamp,
+      stamp,
+      status === "completed" ? stamp : ""
+    );
+  };
+  const preflightError = (code) => {
+    const error = new Error(code === "WORK_MOVE_TARGET_STALE" ? "fixture stale target proof" : "fixture unavailable target");
+    error.statusCode = 409;
+    error.code = code;
+    return error;
+  };
+
+  const activeRaceBody = { personId: "2", idempotencyKey: "external-active-race" };
+  let activeRaceSchedules = 0;
+  admin.preflightWorkMoveTarget = (...args) => {
+    originalTargetPreflight(...args);
+    fs.mkdirSync(fixture.target, { recursive: true });
+    insertExternalJob({ id: "external-active-job", body: activeRaceBody, status: "queued" });
+    throw preflightError("WORK_MOVE_TARGET_STALE");
+  };
+  const activeRaceService = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    schedule: () => { activeRaceSchedules += 1; }
+  });
+  activeRaceSchedules = 0;
+  const activeRaceReplay = activeRaceService.start("1", activeRaceBody, { android: true });
+  assert.equal(activeRaceReplay.id, "external-active-job", "a same-key active row inserted during preflight must win exact replay");
+  assert.equal(activeRaceSchedules, 1, "an active exact replay must keep the normal scheduling contract");
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM work_move_jobs").get().count, 1, "the active race must retain exactly one durable row");
+  await activeRaceService.close();
+  externalDb.prepare("DELETE FROM work_move_jobs").run();
+  await fs.promises.rm(fixture.target, { recursive: true, force: true });
+
+  const completedRaceBody = { personId: "2", idempotencyKey: "external-completed-race" };
+  let completedRaceSchedules = 0;
+  admin.preflightWorkMoveTarget = (...args) => {
+    originalTargetPreflight(...args);
+    insertExternalJob({ id: "external-completed-job", body: completedRaceBody, status: "completed" });
+    throw preflightError("WORK_MOVE_TARGET_STALE");
+  };
+  const completedRaceService = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    schedule: () => { completedRaceSchedules += 1; }
+  });
+  completedRaceSchedules = 0;
+  const completedRaceReplay = completedRaceService.start("1", completedRaceBody, { android: true });
+  assert.equal(completedRaceReplay.id, "external-completed-job", "a same-key completed row inserted during preflight must replay unchanged");
+  assert.equal(completedRaceReplay.status, "completed");
+  assert.equal(completedRaceSchedules, 0, "a completed exact replay must not be scheduled again");
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM work_move_jobs").get().count, 1);
+  await completedRaceService.close();
+  externalDb.prepare("DELETE FROM work_move_jobs").run();
+
+  const terminalRaceBody = { personId: "2", idempotencyKey: "external-terminal-race" };
+  let terminalRaceSchedules = 0;
+  admin.preflightWorkMoveTarget = (...args) => {
+    originalTargetPreflight(...args);
+    insertExternalJob({ id: "external-terminal-job", body: terminalRaceBody, status: "failed", phase: "validation" });
+    throw preflightError("WORK_MOVE_TARGET_STALE");
+  };
+  const terminalRaceService = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    schedule: () => { terminalRaceSchedules += 1; }
+  });
+  terminalRaceSchedules = 0;
+  const terminalRaceReplay = terminalRaceService.start("1", terminalRaceBody, { android: true });
+  assert.equal(terminalRaceReplay.id, "external-terminal-job", "a same-key terminal row must keep normal retry identity");
+  assert.equal(terminalRaceReplay.status, "queued", "a same-key failed row must follow the normal terminal requeue matrix");
+  assert.equal(terminalRaceReplay.attempts, 2);
+  assert.equal(terminalRaceSchedules, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM work_move_jobs").get().count, 1);
+  await terminalRaceService.close();
+  externalDb.prepare("DELETE FROM work_move_jobs").run();
+
+  const differentKeyBody = { personId: "2", idempotencyKey: "external-different-key-race" };
+  admin.preflightWorkMoveTarget = (...args) => {
+    originalTargetPreflight(...args);
+    insertExternalJob({
+      id: "external-unrelated-job",
+      body: { personId: "2", idempotencyKey: "external-unrelated-key" },
+      status: "completed"
+    });
+    throw preflightError("WORK_MOVE_TARGET_STALE");
+  };
+  const differentKeyService = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
+  assert.throws(
+    () => differentKeyService.start("1", differentKeyBody, { android: true }),
+    (error) => error?.statusCode === 409 && error?.code === "WORK_MOVE_TARGET_STALE",
+    "a different request key must not consume another command's stale preflight error"
+  );
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM work_move_jobs").get().count, 1);
+  await differentKeyService.close();
+  externalDb.prepare("DELETE FROM work_move_jobs").run();
+
+  const unavailableBody = { personId: "2", idempotencyKey: "external-unavailable-race" };
+  admin.preflightWorkMoveTarget = (...args) => {
+    originalTargetPreflight(...args);
+    insertExternalJob({
+      id: "external-unavailable-unrelated-job",
+      body: { personId: "2", idempotencyKey: "external-unavailable-unrelated" },
+      status: "completed"
+    });
+    throw preflightError("WORK_MOVE_TARGET_UNAVAILABLE");
+  };
+  const unavailableRaceService = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
+  assert.throws(
+    () => unavailableRaceService.start("1", unavailableBody, { android: true }),
+    (error) => error?.statusCode === 409 && error?.code === "WORK_MOVE_TARGET_UNAVAILABLE",
+    "an unrelated durable row must not swallow a non-stale target-policy error"
+  );
+  await unavailableRaceService.close();
+  externalDb.prepare("DELETE FROM work_move_jobs").run();
+
   admin.preflightWorkMoveTarget = (...args) => {
     const proof = originalTargetPreflight(...args);
     externalDb.prepare("UPDATE people SET updated_at = 'proof-race' WHERE id = 2").run();

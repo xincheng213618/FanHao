@@ -440,22 +440,31 @@ export function createWorkMoveJobService({
     const key = requestKey(normalizedWorkId, requestBody);
     const db = getCoreDb();
     let androidTargetProof = null;
+    let androidTargetPreflightError = null;
     let scheduledId = "";
     let response = null;
     try {
       const replayBeforePreflight = db.prepare("SELECT id FROM work_move_jobs WHERE request_key = ?").get(key);
       if (requestBody.androidCommand && !replayBeforePreflight) {
-        if (typeof adminCoreMutationService.preflightWorkMoveTarget !== "function"
-          || typeof adminCoreMutationService.assertWorkMoveTargetProof !== "function") {
-          const error = new Error("Android 迁移目标安全预检不可用");
-          error.statusCode = 409;
-          error.code = "WORK_MOVE_TARGET_UNAVAILABLE";
-          throw error;
+        try {
+          if (typeof adminCoreMutationService.preflightWorkMoveTarget !== "function"
+            || typeof adminCoreMutationService.assertWorkMoveTargetProof !== "function") {
+            const error = new Error("Android 迁移目标安全预检不可用");
+            error.statusCode = 409;
+            error.code = "WORK_MOVE_TARGET_UNAVAILABLE";
+            throw error;
+          }
+          // The full DB/filesystem ownership snapshot can touch network roots,
+          // so it must complete before BEGIN IMMEDIATE. The transaction repeats
+          // the exact idempotency lookup and accepts only the unchanged proof.
+          androidTargetProof = adminCoreMutationService.preflightWorkMoveTarget(normalizedWorkId, requestBody.personId);
+        } catch (error) {
+          // A concurrent process may have durably inserted this exact request
+          // while the scan was running, which itself invalidates data_version.
+          // Defer the error only until the short transaction repeats the exact
+          // request-key lookup; an unrelated row can never consume it.
+          androidTargetPreflightError = error;
         }
-        // The full DB/filesystem ownership snapshot can touch network roots,
-        // so it must complete before BEGIN IMMEDIATE. The transaction repeats
-        // the exact idempotency lookup and accepts only the unchanged proof.
-        androidTargetProof = adminCoreMutationService.preflightWorkMoveTarget(normalizedWorkId, requestBody.personId);
       }
       db.exec("BEGIN IMMEDIATE");
       const existing = db.prepare("SELECT * FROM work_move_jobs WHERE request_key = ?").get(key);
@@ -490,6 +499,7 @@ export function createWorkMoveJobService({
         // returns its original job even if staging already made the target
         // directory exist; only a genuinely new command consumes the proof.
         if (requestBody.androidCommand) {
+          if (androidTargetPreflightError) throw androidTargetPreflightError;
           if (!androidTargetProof) {
             const error = new Error("Android 迁移目标预检已失效，请重试");
             error.statusCode = 409;
