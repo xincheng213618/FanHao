@@ -5,6 +5,7 @@ import {
   restoreCollectionPosition,
   restoreCollectionWindow
 } from "./collection-navigation.js?v=20260812-collection-review-02";
+import { retryShortVideoCollectionRequest } from "./collection-request.js?v=20260812-collection-busy-01";
 
 const COLLECTION_PAGE_SIZE = 48;
 
@@ -30,6 +31,7 @@ export function createShortVideoCollectionsController(dependencies) {
   let collectionVideoReturnWindow = null;
   let collectionPageEnteredWithinApp = false;
   let collectionFeedReturnWindow = null;
+  const collectionApi = (path, options) => retryShortVideoCollectionRequest(() => api(path, options));
 
   function ensureState() {
     const shortVideo = state.shortVideo;
@@ -49,7 +51,7 @@ export function createShortVideoCollectionsController(dependencies) {
     if (state.shortVideo.collectionsLoaded && !options.force) return state.shortVideo.collections;
     if (collectionsRequest && !options.force) return collectionsRequest;
     state.shortVideo.collectionsLoading = true;
-    collectionsRequest = api("/api/short-videos/collections")
+    collectionsRequest = collectionApi("/api/short-videos/collections")
       .then((data) => {
         state.shortVideo.collections = Array.isArray(data?.collections) ? data.collections : [];
         state.shortVideo.collectionsLoaded = true;
@@ -75,7 +77,7 @@ export function createShortVideoCollectionsController(dependencies) {
     try {
       const params = new URLSearchParams({ limit: String(COLLECTION_PAGE_SIZE) });
       if (cursor) params.set("cursor", cursor);
-      const data = await api(`/api/short-videos/collections/${encodeURIComponent(id)}/videos?${params}`);
+      const data = await collectionApi(`/api/short-videos/collections/${encodeURIComponent(id)}/videos?${params}`);
       if (requestId !== collectionRequestId || state.shortVideo.collectionId !== id) return null;
       const previous = append && state.shortVideo.collectionData?.collection?.id === id
         ? state.shortVideo.collectionData
@@ -244,7 +246,7 @@ export function createShortVideoCollectionsController(dependencies) {
     };
     const addToCollection = async (collection) => {
       if (!video?.id) return;
-      const result = await api(`/api/short-videos/collections/${encodeURIComponent(collection.id)}/videos/${encodeURIComponent(video.id)}`, {
+      const result = await collectionApi(`/api/short-videos/collections/${encodeURIComponent(collection.id)}/videos/${encodeURIComponent(video.id)}`, {
         method: "PUT"
       });
       if (result.added) collection.itemCount = Math.max(0, Number(collection.itemCount || 0)) + 1;
@@ -255,7 +257,7 @@ export function createShortVideoCollectionsController(dependencies) {
       busy(true);
       status.textContent = "";
       try {
-        const result = await api("/api/short-videos/collections", {
+        const result = await collectionApi("/api/short-videos/collections", {
           method: "POST",
           body: { name: input.value }
         });
@@ -424,7 +426,7 @@ export function createShortVideoCollectionsController(dependencies) {
     const collectionId = state.shortVideo.collectionId;
     button.disabled = true;
     try {
-      await api(`/api/short-videos/collections/${encodeURIComponent(collectionId)}/videos/${encodeURIComponent(video.id)}`, {
+      await collectionApi(`/api/short-videos/collections/${encodeURIComponent(collectionId)}/videos/${encodeURIComponent(video.id)}`, {
         method: "DELETE"
       });
       const data = state.shortVideo.collectionData;
@@ -447,7 +449,7 @@ export function createShortVideoCollectionsController(dependencies) {
     const name = window.prompt("清单名称", data.collection.name);
     if (name == null) return;
     try {
-      const result = await api(`/api/short-videos/collections/${encodeURIComponent(data.collection.id)}`, {
+      const result = await collectionApi(`/api/short-videos/collections/${encodeURIComponent(data.collection.id)}`, {
         method: "PATCH",
         body: { name }
       });
@@ -464,7 +466,7 @@ export function createShortVideoCollectionsController(dependencies) {
     const collection = state.shortVideo.collectionData?.collection;
     if (!collection?.id || !window.confirm(`删除清单“${collection.name}”？视频文件不会被删除。`)) return;
     try {
-      await api(`/api/short-videos/collections/${encodeURIComponent(collection.id)}`, { method: "DELETE" });
+      await collectionApi(`/api/short-videos/collections/${encodeURIComponent(collection.id)}`, { method: "DELETE" });
       state.shortVideo.collections = state.shortVideo.collections.filter((item) => item.id !== collection.id);
       state.shortVideo.collectionData = null;
       state.shortVideo.collectionId = "";
@@ -479,7 +481,7 @@ export function createShortVideoCollectionsController(dependencies) {
     const collectionId = String(state.shortVideo.collectionId || "").trim();
     const id = String(videoId || "").trim();
     if (!collectionId || !id) return Promise.reject(new Error("缺少清单视频 ID"));
-    return api(`/api/short-videos/collections/${encodeURIComponent(collectionId)}/videos/${encodeURIComponent(id)}`);
+    return collectionApi(`/api/short-videos/collections/${encodeURIComponent(collectionId)}/videos/${encodeURIComponent(id)}`);
   }
 
   async function openCollectionVideo(video, options = {}) {

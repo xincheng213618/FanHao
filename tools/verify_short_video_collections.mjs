@@ -389,6 +389,37 @@ async function verifyRouteContract(fixtures) {
   assert.equal(blocked.response.blocked, true);
   assert.equal(blocked.status, null);
   assert.equal(calls.length, blockedCallsBefore);
+
+  const busyError = Object.assign(new Error("短视频数据库正忙，请稍后重试"), {
+    statusCode: 503,
+    retryable: true
+  });
+  const busyResponse = await invokeRoute({
+    method: "GET",
+    pathname: "/api/short-videos/collections",
+    store: { listCollections() { throw busyError; } }
+  });
+  assert.equal(busyResponse.status, 503);
+  assert.deepEqual(
+    busyResponse.payload,
+    { error: "短视频数据库正忙，请稍后重试", retryable: true },
+    "only a sanitized BUSY wrapper may advertise retryability"
+  );
+
+  for (const fixture of [
+    { error: new Error("database disk image is malformed"), status: 503 },
+    { error: Object.assign(new Error("permanent service failure"), { statusCode: 503 }), status: 503 },
+    { error: Object.assign(new Error("server failure"), { statusCode: 500 }), status: 500 },
+    { error: Object.assign(new Error("name conflict"), { statusCode: 409 }), status: 409 }
+  ]) {
+    const response = await invokeRoute({
+      method: "GET",
+      pathname: "/api/short-videos/collections",
+      store: { listCollections() { throw fixture.error; } }
+    });
+    assert.equal(response.status, fixture.status);
+    assert.equal(Object.hasOwn(response.payload || {}, "retryable"), false, `HTTP ${fixture.status} must not invent retryability`);
+  }
 }
 
 async function verifyBusyContract({ busyCollection }) {
@@ -406,7 +437,7 @@ async function verifyBusyContract({ busyCollection }) {
     assert.equal(response.status, 503);
     assert.equal(response.payload.retryable, true);
     assert.equal(response.payload.error, "短视频数据库正忙，请稍后重试");
-    assert.ok(performance.now() - startedAt < 2000, "a locked collection mutation must fail quickly instead of blocking for 10 seconds");
+    assert.ok(performance.now() - startedAt < 250, "one locked collection mutation must keep a sub-250ms server budget");
   } finally {
     locker.exec("ROLLBACK");
     locker.close();

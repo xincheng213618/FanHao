@@ -2,6 +2,7 @@ import {
   appendCollectionCursorBoundary,
   removeCollectionCursorBoundaryVideo
 } from "./cursor-boundaries.js?v=20260812-native-cursor-boundary-01";
+import { retryShortVideoCollectionRequest } from "./request.js?v=20260812-collection-busy-01";
 
 const COLLECTION_PAGE_LIMIT = 48;
 
@@ -19,12 +20,13 @@ export function createShortVideoCollections(context = {}) {
   let collectionRenderId = 0;
   let collectionsRequest = null;
   let collectionPageRequest = null;
+  const collectionApi = (...args) => retryShortVideoCollectionRequest(() => api.fetch(...args));
 
   async function loadCollections(force = false) {
     if (state.loaded && !force) return state.collections;
     if (collectionsRequest) return collectionsRequest;
     state.loading = true;
-    const request = api.fetch(null, "/api/short-videos/collections").then((data) => {
+    const request = collectionApi(null, "/api/short-videos/collections").then((data) => {
       state.collections = Array.isArray(data?.collections) ? data.collections : [];
       state.loaded = true;
       return state.collections;
@@ -44,7 +46,7 @@ export function createShortVideoCollections(context = {}) {
     configurePage("我的清单");
     const shell = collectionShell("我的清单", "创建清单后，可从任意短视频封面加入。");
     const create = createForm(async (name) => {
-      const result = await api.fetch(null, "/api/short-videos/collections", {
+      const result = await collectionApi(null, "/api/short-videos/collections", {
         method: "POST",
         body: { name }
       });
@@ -81,7 +83,7 @@ export function createShortVideoCollections(context = {}) {
     shell.append(status, list);
     els.viewContent.append(shell);
     try {
-      const data = await api.fetch(null, `/api/short-videos/collections/${encodeURIComponent(collectionId)}/videos?limit=${COLLECTION_PAGE_LIMIT}`);
+      const data = await collectionApi(null, `/api/short-videos/collections/${encodeURIComponent(collectionId)}/videos?limit=${COLLECTION_PAGE_LIMIT}`);
       if (renderId !== collectionRenderId || (renderGuard && !renderGuard())) return;
       const videos = mergeUniqueVideos([], data.videos);
       state.active = {
@@ -128,7 +130,7 @@ export function createShortVideoCollections(context = {}) {
     close.addEventListener("click", closePicker);
     header.append(title, close);
     const create = createForm(async (name) => {
-      const result = await api.fetch(null, "/api/short-videos/collections", { method: "POST", body: { name } });
+      const result = await collectionApi(null, "/api/short-videos/collections", { method: "POST", body: { name } });
       state.collections.push(result.collection);
       state.loaded = true;
       await addVideo(result.collection, video);
@@ -195,7 +197,7 @@ export function createShortVideoCollections(context = {}) {
   }
 
   async function addVideo(collection, video) {
-    const result = await api.fetch(null, `/api/short-videos/collections/${encodeURIComponent(collection.id)}/videos/${encodeURIComponent(video.id)}`, {
+    const result = await collectionApi(null, `/api/short-videos/collections/${encodeURIComponent(collection.id)}/videos/${encodeURIComponent(video.id)}`, {
       method: "PUT"
     });
     if (result.added) collection.itemCount = Math.max(0, Number(collection.itemCount || 0)) + 1;
@@ -259,7 +261,7 @@ export function createShortVideoCollections(context = {}) {
       remove.addEventListener("click", async () => {
         remove.disabled = true;
         try {
-          await api.fetch(null, `${feedPath}/${encodeURIComponent(video.id)}`, { method: "DELETE" });
+          await collectionApi(null, `${feedPath}/${encodeURIComponent(video.id)}`, { method: "DELETE" });
           data.videos = data.videos.filter((item) => item.id !== video.id);
           data.cursorBoundaries = removeCollectionCursorBoundaryVideo(data.cursorBoundaries, video.id);
           data.total = Math.max(0, Number(data.total || 0) - 1);
@@ -298,7 +300,7 @@ export function createShortVideoCollections(context = {}) {
     const params = new URLSearchParams({ limit: String(COLLECTION_PAGE_LIMIT), cursor });
     const request = { promise: null, renderId: expectedRenderId };
     collectionPageRequest = request;
-    request.promise = api.fetch(
+    request.promise = collectionApi(
       null,
       `/api/short-videos/collections/${encodeURIComponent(active.collectionId)}/videos?${params}`
     ).then((page) => {

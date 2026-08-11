@@ -31,7 +31,7 @@
     "verify:access-analytics": "node tools/verify_access_analytics.mjs",
     "verify:novels": "node tools/verify_novel_storage.mjs && node tools/verify_novel_collection.mjs",
     "verify:short-video-store": "node tools/verify_short_video_store.mjs",
-    "verify:short-video-collections": "node tools/verify_short_video_collections.mjs",
+    "verify:short-video-collections": "node tools/verify_short_video_collections.mjs && node tools/verify_short_video_collection_busy.mjs",
     "verify:short-video-runtime": "node tools/verify_short_video_runtime_queue.mjs",
     "verify:short-video-build": "node tools/build_short_video_web.mjs --check",
     "verify:modules": "node tools/verify_module_structure.mjs",

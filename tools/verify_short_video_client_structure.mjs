@@ -41,6 +41,7 @@ const requiredParts = [
   "index.js",
   "shared.js",
   "search.js",
+  "collections/request.js",
   "collections/cursor-boundaries.js",
   "list/account-status-view.js",
   "list/controller.js",
@@ -686,6 +687,7 @@ const androidEntrySource = readNormalized(path.join(moduleDir, "android-module.j
 const androidApiSource = readNormalized(path.join(moduleDir, "api.js"));
 const androidTransportSource = readNormalized(path.join(root, "android-client", "www", "js", "api.js"));
 const androidCollectionsSource = readNormalized(path.join(moduleDir, "collections", "controller.js"));
+const androidCollectionRequestSource = readNormalized(path.join(moduleDir, "collections", "request.js"));
 const androidCollectionCardActionSource = readNormalized(path.join(moduleDir, "collections", "card-action.js"));
 const androidListSource = readNormalized(path.join(moduleDir, "list", "view.js"));
 const androidListControllerSource = readNormalized(path.join(moduleDir, "list", "controller.js"));
@@ -708,6 +710,9 @@ const androidNativePlayerLayoutSource = readNormalized(path.join(root, "android-
 assert(androidEntrySource.includes('view: "shortVideoSearch"'), "Android short-video search must use a dedicated route");
 assert(androidEntrySource.includes('view: "shortVideoCollections"') && androidEntrySource.includes('view: "shortVideoCollection"') && androidEntrySource.includes('textContent = "清单"'), "Android short videos must expose stable collection index/detail routes and a direct chrome entry");
 assert(androidCollectionsSource.includes('method: "POST"') && androidCollectionsSource.includes('method: "PUT"') && androidCollectionsSource.includes('method: "DELETE"') && androidCollectionsSource.includes("feedUrl: new URL(feedPath"), "Android collections must create, add, remove, and open the same paged feed contract without native permissions");
+assert(androidCollectionsSource.includes("retryShortVideoCollectionRequest") && androidCollectionsSource.includes("const collectionApi ="), "Android collection requests must use the bounded BUSY retry helper");
+assert(androidCollectionRequestSource.includes("Number(error?.status) === 503") && androidCollectionRequestSource.includes("error?.retryable === true") && androidCollectionRequestSource.includes("3100"), "Android collection retries must be finite and limited to explicitly retryable 503 responses");
+assert(androidTransportSource.includes("error.status = response.status") && androidTransportSource.includes("payload.retryable === true"), "Android transport errors must retain sanitized collection retry metadata");
 assert(androidCollectionsSource.includes('params = new URLSearchParams({ limit: String(COLLECTION_PAGE_LIMIT), cursor })') && androidCollectionsSource.includes("mergeUniqueVideos(previousVideos, page.videos)") && androidCollectionsSource.includes("appendCollectionCursorBoundary("), "Android collection management must append every cursor page, de-duplicate video ids, and retain trusted continuation boundaries");
 assert(androidCollectionsSource.includes("if (collectionPageRequest) return collectionPageRequest.promise") && androidCollectionsSource.includes("expectedRenderId !== collectionRenderId") && androidCollectionsSource.includes("deactivateCollections"), "Android collection pagination must reject duplicate requests and stale renders");
 assert(androidCollectionsSource.includes('event.key === "Escape"') && androidCollectionsSource.includes('event.key !== "Tab"') && androidCollectionsSource.includes("trigger?.isConnected") && androidCollectionsSource.includes("trigger.focus()"), "Android collection picker must trap Tab, close on Escape, and restore trigger focus");
@@ -881,6 +886,8 @@ function verifyWebDedicatedEntry() {
   const mediaCacheSource = readNormalized(path.join(root, "public", "modules", "short-videos", "media-cache.js"));
   const playerSourceLifecycleSource = readNormalized(path.join(root, "public", "modules", "short-videos", "player-source-lifecycle.js"));
   const collectionsControllerSource = readNormalized(path.join(root, "public", "modules", "short-videos", "collections-controller.js"));
+  const collectionRequestSource = readNormalized(path.join(root, "public", "modules", "short-videos", "collection-request.js"));
+  const webApiSource = readNormalized(path.join(root, "public", "js", "api.js"));
   const collectionNavigationSource = readNormalized(path.join(root, "public", "modules", "short-videos", "collection-navigation.js"));
   const playbackRenditionPolicySource = readNormalized(path.join(root, "public", "modules", "short-videos", "playback-rendition-policy.js"));
   const authorPagesSource = readNormalized(path.join(root, "public", "modules", "short-videos", "author-pages.js"));
@@ -928,6 +935,9 @@ function verifyWebDedicatedEntry() {
   assert(entrySource.includes("await bootShortVideoApp().catch"), "short-video startup must keep its initial route hidden until the route is ready");
   assert(playerSource.includes('from "./state.js?v=') && playerSource.includes("ensureShortVideoState(state"), "the Web short-video composition root must delegate state normalization and persistence helpers");
   assert(playerSource.includes("createShortVideoCollectionsController") && playerSource.includes('railButton("清单"') && collectionsControllerSource.includes('className = "short-video-collection-sidebar"') && collectionsControllerSource.includes('method: "PATCH"') && collectionsControllerSource.includes('method: "DELETE"'), "Web collections must stay in a dedicated controller while exposing sidebar, picker, rename, and removal behavior");
+  assert(collectionsControllerSource.includes("retryShortVideoCollectionRequest") && collectionsControllerSource.includes("const collectionApi ="), "Web collection requests must use the bounded BUSY retry helper");
+  assert(collectionRequestSource.includes("Number(error?.status) === 503") && collectionRequestSource.includes("error?.retryable === true") && collectionRequestSource.includes("3100"), "Web collection retries must be finite and limited to explicitly retryable 503 responses");
+  assert(webApiSource.includes("error.status = response.status") && webApiSource.includes("payload.retryable === true"), "Web API errors must retain sanitized collection retry metadata");
   assert(collectionsControllerSource.includes("loadCollectionVideoDetail") && collectionsControllerSource.includes("detailData: detail") && playerSource.includes("options.detailData"), "Web collection deep links must resolve membership-scoped detail instead of global video stubs");
   assert(collectionsControllerSource.includes("mergeUniqueVideos(previous?.videos, data.videos)") && collectionsControllerSource.includes('params.set("cursor", cursor)'), "Web collection pagination must follow nextCursor and de-duplicate video ids");
   assert(collectionNavigationSource.includes("collectionFeedRouteSignature") && collectionsControllerSource.includes("restoreCollectionFeedWindow(state.shortVideo, collectionFeedReturnWindow, render, route)"), "Web feed restoration must be bound to the captured canonical route instead of consuming stale collection snapshots on another source");

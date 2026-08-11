@@ -37,7 +37,12 @@ export async function fetchJson(baseUrl, path, options = {}) {
   }
 
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `请求失败：${response.status}`);
+  if (!response.ok) {
+    const error = new Error(payload.error || `请求失败：${response.status}`);
+    error.status = response.status;
+    error.retryable = response.status === 503 && payload.retryable === true;
+    throw error;
+  }
   return payload;
 }
 

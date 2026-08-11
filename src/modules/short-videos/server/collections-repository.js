@@ -8,8 +8,8 @@ const COLLECTION_PAGE_MAX_LIMIT = 120;
 const COLLECTION_OFFSET_FALLBACK_MAX = 1_000_000;
 const COLLECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,79}$/;
 const COLLECTION_RESERVED_IDS = new Set(["collections"]);
-const COLLECTION_BUSY_TIMEOUT_MS = 40;
-const COLLECTION_BUSY_RETRY_ATTEMPTS = 3;
+const COLLECTION_BUSY_TIMEOUT_MS = 25;
+const COLLECTION_BUSY_RETRY_ATTEMPTS = 1;
 
 export function createShortVideoCollectionsRepository({
   database,

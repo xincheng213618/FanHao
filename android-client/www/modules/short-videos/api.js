@@ -1,4 +1,4 @@
-import { fetchJson } from "../../js/api.js?v=20260706-mobile-web-sync-01";
+import { fetchJson } from "../../js/api.js?v=20260812-collection-busy-01";
 import { readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260711-short-video-cache-08";
 
 const DEFAULT_CACHE_MAX_AGE_MS = 5 * 60 * 1000;

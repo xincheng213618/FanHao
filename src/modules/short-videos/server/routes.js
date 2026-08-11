@@ -392,7 +392,7 @@ function sendShortVideoCollectionError(res, sendJson, error, fallback) {
   const status = shortVideoErrorStatus(error);
   sendJson(res, status, {
     error: shortVideoErrorMessage(error, fallback),
-    ...(status === 503 ? { retryable: true } : {})
+    ...(status === 503 && error?.retryable === true ? { retryable: true } : {})
   });
 }
 

@@ -1,7 +1,7 @@
 import { createShortVideoSearchModule } from "./search/index.js?v=20260710-short-video-search-01";
 import { createShortVideoActionsController } from "./actions-controller.js?v=20260716-short-video-actions-01";
 import { createShortVideoAuthorPages } from "./author-pages.js?v=20260810-author-header-align-01";
-import { createShortVideoCollectionsController } from "./collections-controller.js?v=20260812-collection-review-02";
+import { createShortVideoCollectionsController } from "./collections-controller.js?v=20260812-collection-busy-01";
 import { captionTitleWithTags, createShortVideoCaptionText } from "./caption-text.js?v=20260811-custom-collections-01";
 import { createShortVideoFilterControls } from "./filter-controls.js?v=20260810-author-account-status-01";
 import { createIcon, railButton, setIconButton } from "./icons.js?v=20260716-short-video-icons-01";

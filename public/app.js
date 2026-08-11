@@ -1,4 +1,4 @@
-import { createApiClient } from "./js/api.js?v=20260701-gallery-merge-01";
+import { createApiClient } from "./js/api.js?v=20260812-collection-busy-01";
 import { installAndroidClientReturn, isTrustedNetworkFeatureAvailable, prepareClientShell } from "./js/client-shell.js?v=20260712-project-refactor-03";
 import { loadModuleCatalog, renderWebModuleNavigation } from "./js/module-navigation.js?v=20260710-module-windows-01";
 import {

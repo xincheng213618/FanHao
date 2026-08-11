@@ -17,7 +17,10 @@ export function createApiClient(options = {}) {
       if (response.status === 401 && payload.loginUrl) {
         window.location.assign(payload.loginUrl);
       }
-      throw new Error(payload.error || `请求失败：${response.status}`);
+      const error = new Error(payload.error || `请求失败：${response.status}`);
+      error.status = response.status;
+      error.retryable = response.status === 503 && payload.retryable === true;
+      throw error;
     }
     return payload;
   };
