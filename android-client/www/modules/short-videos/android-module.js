@@ -1,10 +1,11 @@
-import { createShortVideoViews } from "./index.js?v=20260812-collection-refresh-01";
+import { createShortVideoViews } from "./index.js?v=20260812-collection-management-03";
 import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "./shared.js?v=20260812-collection-review-02";
 
 export function createAndroidModule({ host }) {
   const shortVideoViews = createShortVideoViews({
     els: host.els,
     getActiveUrl: host.getActiveUrl,
+    discardPushedView: host.navigation.discardPushedView,
     goBack: host.navigation.goBack,
     openSettings: host.ui.openSettings,
     setActiveBottom: host.ui.setActiveBottom,

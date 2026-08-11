@@ -98,6 +98,7 @@ export function createShortVideoCollections(context = {}) {
       };
       shell.querySelector("h2").textContent = data.collection?.name || "我的清单";
       shell.querySelector("p").textContent = `${Math.max(0, Number(data.total || 0))} 条 · 按加入时间排列`;
+      renderCollectionActions(shell, status, state.active);
       renderCollectionVideos(list, status, state.active);
     } catch (error) {
       if (renderId === collectionRenderId && (!renderGuard || renderGuard()) && status.isConnected) {
@@ -196,7 +197,6 @@ export function createShortVideoCollections(context = {}) {
       if (overlay.isConnected) create.status.textContent = error?.message || "清单读取失败";
     }
   }
-
   async function addVideo(collection, video) {
     const result = await collectionApi(null, `/api/short-videos/collections/${encodeURIComponent(collection.id)}/videos/${encodeURIComponent(video.id)}`, {
       method: "PUT"
@@ -207,7 +207,6 @@ export function createShortVideoCollections(context = {}) {
     }
     shortVideoToast(result.added ? `已加入“${collection.name}”` : `已经在“${collection.name}”中`);
   }
-
   function rememberCollectionMutation(collection) {
     const snapshot = { ...collection };
     const collectionId = String(snapshot.id || "").trim();
@@ -222,13 +221,27 @@ export function createShortVideoCollections(context = {}) {
     state.loaded = true;
     return snapshot;
   }
-
+  function rememberCollectionDeletion(collectionId) {
+    const id = String(collectionId || "").trim();
+    collectionMutationRevision += 1;
+    pendingCollectionMutations.set(id, {
+      deleted: true,
+      revision: collectionMutationRevision
+    });
+    state.collections = state.collections.filter((collection) => String(collection?.id || "").trim() !== id);
+    state.loaded = true;
+  }
   function mergeCollectionRefresh(incoming, requestRevision) {
     const collections = Array.isArray(incoming) ? incoming.slice() : [];
     const indexes = new Map(collections.map((collection, index) => [String(collection?.id || "").trim(), index]));
+    const deletedIds = new Set();
     for (const [collectionId, mutation] of pendingCollectionMutations) {
       if (mutation.revision <= requestRevision) {
         pendingCollectionMutations.delete(collectionId);
+        continue;
+      }
+      if (mutation.deleted) {
+        deletedIds.add(collectionId);
         continue;
       }
       const index = indexes.get(collectionId);
@@ -239,7 +252,121 @@ export function createShortVideoCollections(context = {}) {
         collections[index] = mutation.collection;
       }
     }
-    return collections;
+    return deletedIds.size
+      ? collections.filter((collection) => !deletedIds.has(String(collection?.id || "").trim()))
+      : collections;
+  }
+  function renderCollectionActions(shell, status, data) {
+    const header = shell.querySelector(".short-video-mobile-collection-header");
+    const actions = document.createElement("div");
+    actions.className = "short-video-mobile-collection-actions";
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.textContent = "重命名";
+    const removeCollection = document.createElement("button");
+    removeCollection.type = "button";
+    removeCollection.className = "is-danger";
+    removeCollection.textContent = "删除清单";
+    actions.append(rename, removeCollection);
+    header.append(actions);
+    rename.addEventListener("click", () => {
+      const existing = header.querySelector(".short-video-mobile-collection-rename input");
+      if (existing) {
+        existing.focus();
+        return;
+      }
+      const form = document.createElement("form");
+      form.className = "short-video-mobile-collection-rename";
+      const input = document.createElement("input");
+      input.maxLength = 40;
+      input.value = String(data.collection?.name || "");
+      input.setAttribute("aria-label", "清单名称");
+      const save = document.createElement("button");
+      save.type = "submit";
+      save.textContent = "保存";
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = "取消";
+      const close = () => {
+        form.remove();
+        if (rename.isConnected) rename.focus();
+      };
+      cancel.addEventListener("click", close);
+      form.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape" || cancel.disabled) return;
+        event.preventDefault();
+        close();
+      });
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const name = input.value.trim();
+        status.textContent = "";
+        if (!name) {
+          status.textContent = "请输入清单名称";
+          input.focus();
+          return;
+        }
+        input.disabled = true;
+        save.disabled = true;
+        cancel.disabled = true;
+        rename.disabled = true;
+        removeCollection.disabled = true;
+        try {
+          const result = await collectionApi(null, `/api/short-videos/collections/${encodeURIComponent(data.collection.id)}`, {
+            method: "PATCH",
+            body: { name }
+          });
+          const collection = rememberCollectionMutation(result.collection);
+          data.collection = collection;
+          if (isActiveCollectionRender(data)) shell.querySelector("h2").textContent = collection.name;
+          shortVideoToast("清单已重命名");
+          rename.disabled = false;
+          removeCollection.disabled = false;
+          close();
+        } catch (error) {
+          if (!isActiveCollectionRender(data)) return;
+          rename.disabled = false;
+          removeCollection.disabled = false;
+          if (!form.isConnected) return;
+          status.textContent = error?.message || "重命名失败";
+          input.disabled = false;
+          save.disabled = false;
+          cancel.disabled = false;
+          input.focus();
+        }
+      });
+      form.append(input, save, cancel);
+      header.append(form);
+      input.focus();
+      input.select();
+    });
+    removeCollection.addEventListener("click", async () => {
+      const collection = data.collection;
+      if (!collection?.id || !window.confirm(`删除清单“${collection.name}”？视频文件不会被删除。`)) {
+        removeCollection.focus();
+        return;
+      }
+      rename.disabled = true;
+      removeCollection.disabled = true;
+      status.textContent = "";
+      try {
+        await collectionApi(null, `/api/short-videos/collections/${encodeURIComponent(collection.id)}`, { method: "DELETE" });
+        rememberCollectionDeletion(collection.id);
+        if (state.active === data) {
+          collectionRenderId += 1;
+          collectionPageRequest = null;
+          state.active = null;
+        }
+        shortVideoToast("清单已删除");
+        if (!context.discardPushedView?.()) showView("shortVideoCollections", {}, { skipHistory: true, replaceHistory: true });
+      } catch (error) {
+        if (!isActiveCollectionRender(data)) return;
+        status.textContent = error?.message || "删除清单失败";
+        rename.disabled = false;
+        removeCollection.disabled = false;
+        removeCollection.focus();
+      }
+    });
   }
 
   function renderCollectionList(target, collections) {

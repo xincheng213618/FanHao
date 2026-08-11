@@ -30,6 +30,8 @@ try {
     await verifyDirectAuthorDeepLink(browser);
     await verifyAndroidCollectionPicker(browser);
     await verifyAndroidCollectionRefresh(browser);
+    await verifyAndroidCollectionManagement(browser);
+    await verifyAndroidCollectionStackReturn(browser);
     await verifyShortVideoCollections(browser);
   } finally {
     await browser.close();
@@ -287,6 +289,229 @@ async function verifyAndroidCollectionRefresh(browser) {
     assert.deepEqual(result.mutationRaceIds, ["created-during-refresh"], "a stale pending refresh must merge a collection created after that request started");
     assert.deepEqual(result.afterMutationDeleteIds, [], "a later refresh must trust a server deletion after the local creation revision is covered");
     assert.equal(result.requestCount, 6, "each separate Android collection entry must refresh while only concurrent entries stay de-duplicated");
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyAndroidCollectionManagement(browser) {
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  try {
+    await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
+    await page.evaluate(async () => {
+      const { createShortVideoCollections } = await import("/android-client/modules/short-videos/collections/controller.js?management-fixture=1");
+      let collection = { id: "manage", name: "原清单", itemCount: 0 };
+      let confirmDelete = false;
+      let deleteAttempts = 0;
+      let listRequests = 0;
+      let nextListGate = null;
+      let patchAttempts = 0;
+      let pickerPromise = null;
+      let releaseList = null;
+      let route = null;
+      const confirmations = [];
+      const toasts = [];
+      window.confirm = (message) => {
+        confirmations.push(String(message || ""));
+        return confirmDelete;
+      };
+      const controller = createShortVideoCollections({
+        api: {
+          fetch: (_base, requestPath, options = {}) => {
+            const url = new URL(requestPath, location.origin);
+            const method = String(options?.method || "GET").toUpperCase();
+            if (url.pathname === "/api/short-videos/collections/manage/videos" && method === "GET") {
+              return Promise.resolve({
+                collection: { ...collection },
+                hasMore: false,
+                nextCursor: null,
+                total: 0,
+                videos: []
+              });
+            }
+            if (url.pathname === "/api/short-videos/collections" && method === "GET") {
+              listRequests += 1;
+              const payload = { collections: collection ? [{ ...collection }] : [], total: collection ? 1 : 0 };
+              const gate = nextListGate;
+              nextListGate = null;
+              return gate ? gate.then(() => payload) : Promise.resolve(payload);
+            }
+            if (url.pathname === "/api/short-videos/collections/manage" && method === "PATCH") {
+              patchAttempts += 1;
+              if (patchAttempts === 1) {
+                throw Object.assign(new Error("fixture rename busy"), { retryable: true, status: 503 });
+              }
+              collection = { ...collection, name: String(options?.body?.name || "") };
+              return Promise.resolve({ collection: { ...collection } });
+            }
+            if (url.pathname === "/api/short-videos/collections/manage" && method === "DELETE") {
+              deleteAttempts += 1;
+              if (deleteAttempts === 1) {
+                throw Object.assign(new Error("fixture delete busy"), { retryable: true, status: 503 });
+              }
+              collection = null;
+              return Promise.resolve({ id: "manage", name: "新清单", ok: true, removedItems: 0 });
+            }
+            throw new Error(`unexpected Android collection management fixture request: ${method} ${url.pathname}`);
+          }
+        },
+        els: {
+          viewContent: document.getElementById("fixture"),
+          viewKicker: document.createElement("div"),
+          viewMeta: document.createElement("div"),
+          viewTitle: document.createElement("div")
+        },
+        getActiveUrl: () => location.origin,
+        openNativeShortVideoFeed: () => false,
+        renderCard: () => document.createElement("div"),
+        setActiveBottom() {},
+        shortVideoToast(message) {
+          toasts.push(message);
+        },
+        showView(view, params, navigation) {
+          route = { navigation, params, view };
+        }
+      });
+      window.androidCollectionManagementFixture = {
+        allowDelete(value) {
+          confirmDelete = Boolean(value);
+        },
+        metrics() {
+          return { confirmations: [...confirmations], deleteAttempts, listRequests, patchAttempts, route, toasts: [...toasts] };
+        },
+        releasePendingList() {
+          releaseList?.();
+        },
+        renderIndex() {
+          return controller.renderCollections();
+        },
+        startPendingPicker() {
+          nextListGate = new Promise((resolve) => {
+            releaseList = resolve;
+          });
+          pickerPromise = controller.showCollectionPicker({ id: "fixture-video", streamUrl: "/media/fixture-video.mp4" });
+        },
+        waitForPicker() {
+          return pickerPromise;
+        }
+      };
+      await controller.renderCollection({ collectionId: "manage" }, () => true);
+    });
+
+    const empty = page.locator("#fixture .short-video-mobile-empty");
+    await empty.waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await empty.textContent(), "这个清单还没有视频", "Android collection management must remain available on an empty detail page");
+    const rename = page.locator(".short-video-mobile-collection-actions button", { hasText: "重命名" });
+    const removeCollection = page.locator(".short-video-mobile-collection-actions button", { hasText: "删除清单" });
+    await rename.click();
+    const renameInput = page.locator(".short-video-mobile-collection-rename input");
+    assert.equal(await renameInput.evaluate((element) => document.activeElement === element), true, "Android collection rename must focus its input");
+    await renameInput.fill("");
+    await page.locator(".short-video-mobile-collection-rename button", { hasText: "保存" }).click();
+    await page.locator(".short-video-mobile-collection-status", { hasText: "请输入清单名称" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await renameInput.evaluate((element) => document.activeElement === element), true, "an empty Android collection name must keep focus without sending a request");
+    assert.equal((await page.evaluate(() => window.androidCollectionManagementFixture.metrics())).patchAttempts, 0, "an empty Android collection name must not reach the API");
+
+    await renameInput.fill("新清单");
+    await page.locator(".short-video-mobile-collection-rename button", { hasText: "保存" }).click();
+    await page.locator("#fixture h2", { hasText: "新清单" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.equal((await page.evaluate(() => window.androidCollectionManagementFixture.metrics())).patchAttempts, 2, "Android collection rename must retry an explicitly retryable 503 exactly once before success");
+    assert.equal(await rename.evaluate((element) => document.activeElement === element), true, "successful Android collection rename must restore focus to its trigger");
+
+    await removeCollection.click();
+    let metrics = await page.evaluate(() => window.androidCollectionManagementFixture.metrics());
+    assert.equal(metrics.deleteAttempts, 0, "canceling Android collection deletion must not call the API");
+    assert.match(metrics.confirmations.at(-1), /视频文件不会被删除/u, "Android collection deletion must confirm that video files are preserved");
+    assert.equal(await removeCollection.evaluate((element) => document.activeElement === element), true, "canceling Android collection deletion must restore trigger focus");
+
+    await page.evaluate(() => window.androidCollectionManagementFixture.startPendingPicker());
+    await page.locator(".short-video-mobile-collection-picker").waitFor({ state: "visible", timeout: 5000 });
+    await page.evaluate(() => {
+      window.androidCollectionManagementFixture.allowDelete(true);
+      document.querySelector(".short-video-mobile-collection-actions .is-danger").click();
+    });
+    await page.waitForFunction(() => window.androidCollectionManagementFixture.metrics().route?.view === "shortVideoCollections", null, { timeout: 5000 });
+    await page.evaluate(() => window.androidCollectionManagementFixture.releasePendingList());
+    await page.evaluate(() => window.androidCollectionManagementFixture.waitForPicker());
+    assert.equal(await page.locator(".short-video-mobile-collection-picker-list button").count(), 0, "a stale in-flight Android list response must not resurrect a deleted collection");
+    metrics = await page.evaluate(() => window.androidCollectionManagementFixture.metrics());
+    assert.equal(metrics.deleteAttempts, 2, "Android collection deletion must retry an explicitly retryable 503 exactly once before success");
+    assert.deepEqual(metrics.route, {
+      navigation: { replaceHistory: true, skipHistory: true },
+      params: {},
+      view: "shortVideoCollections"
+    }, "Android collection deletion must replace the deleted detail route with the collection index");
+    assert.deepEqual(metrics.toasts, ["清单已重命名", "清单已删除"], "Android collection management must report both successful mutations");
+
+    await page.evaluate(() => window.androidCollectionManagementFixture.renderIndex());
+    await page.locator("#fixture .short-video-mobile-empty", { hasText: "还没有清单" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.equal((await page.evaluate(() => window.androidCollectionManagementFixture.metrics())).listRequests, 2, "a later Android refresh must trust the server deletion after covering the tombstone revision");
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyAndroidCollectionStackReturn(browser) {
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  try {
+    await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
+    await page.evaluate(async () => {
+      const { createShortVideoCollections } = await import("/android-client/modules/short-videos/collections/controller.js?stack-return-fixture=1");
+      let discardCalls = 0;
+      let showCalls = 0;
+      window.confirm = () => true;
+      const controller = createShortVideoCollections({
+        api: {
+          fetch: (_base, requestPath, options = {}) => {
+            const url = new URL(requestPath, location.origin);
+            const method = String(options?.method || "GET").toUpperCase();
+            if (url.pathname === "/api/short-videos/collections/stacked/videos" && method === "GET") {
+              return Promise.resolve({
+                collection: { id: "stacked", itemCount: 0, name: "栈内清单" },
+                hasMore: false,
+                nextCursor: null,
+                total: 0,
+                videos: []
+              });
+            }
+            if (url.pathname === "/api/short-videos/collections/stacked" && method === "DELETE") {
+              return Promise.resolve({ id: "stacked", name: "栈内清单", ok: true, removedItems: 0 });
+            }
+            throw new Error(`unexpected Android collection stack fixture request: ${method} ${url.pathname}`);
+          }
+        },
+        els: {
+          viewContent: document.getElementById("fixture"),
+          viewKicker: document.createElement("div"),
+          viewMeta: document.createElement("div"),
+          viewTitle: document.createElement("div")
+        },
+        getActiveUrl: () => location.origin,
+        discardPushedView() {
+          discardCalls += 1;
+          return true;
+        },
+        openNativeShortVideoFeed: () => false,
+        renderCard: () => document.createElement("div"),
+        setActiveBottom() {},
+        shortVideoToast() {},
+        showView() {
+          showCalls += 1;
+        }
+      });
+      window.androidCollectionStackFixture = {
+        metrics: () => ({ discardCalls, showCalls })
+      };
+      await controller.renderCollection({ collectionId: "stacked" }, () => true);
+    });
+
+    await page.locator(".short-video-mobile-collection-actions .is-danger").click();
+    await page.waitForFunction(() => window.androidCollectionStackFixture.metrics().discardCalls === 1, null, { timeout: 5000 });
+    assert.deepEqual(
+      await page.evaluate(() => window.androidCollectionStackFixture.metrics()),
+      { discardCalls: 1, showCalls: 0 },
+      "deleting an Android collection opened with push must discard its stack and browser-history entry instead of rendering a duplicate index"
+    );
   } finally {
     await page.close();
   }

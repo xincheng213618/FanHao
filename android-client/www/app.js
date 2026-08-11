@@ -1405,15 +1405,23 @@ function goBack() {
   applyBackState();
 }
 
-function returnToStackView() {
+function returnToStackView(options = {}) {
   const previous = viewStack.pop();
   if (!previous) return false;
+  if (options.discardHistoryEntry && window.history.state?.marker === HISTORY_MARKER && window.history.length > 1) {
+    window.history.back();
+    return true;
+  }
   if (previous.view === "home") {
     showView(DEFAULT_VIEW, {}, { skipHistory: true, replaceHistory: true, restoreScrollY: previous.scrollY ?? 0 });
     return true;
   }
   showView(previous.view, previous.params, { skipHistory: true, replaceHistory: true, restoreScrollY: previous.scrollY ?? 0 });
   return true;
+}
+
+function discardPushedView() {
+  return returnToStackView({ discardHistoryEntry: true });
 }
 
 function applyBackState() {
@@ -1761,6 +1769,7 @@ function createAndroidModuleHost() {
       currentView: () => currentView,
       currentParams: () => currentViewParams,
       hasBackStack: () => viewStack.length > 0,
+      discardPushedView,
       showView,
       replaceViewParams,
       goBack,

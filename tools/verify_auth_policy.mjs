@@ -141,7 +141,11 @@ try {
     remoteAddress: "192.168.1.50",
     host: "192.168.1.20:29998",
     method: "OPTIONS",
-    headers: { origin: "http://localhost", "access-control-request-headers": "x-fanhao-client" }
+    headers: {
+      origin: "http://localhost",
+      "access-control-request-headers": "content-type,x-fanhao-client",
+      "access-control-request-method": "PATCH"
+    }
   });
   assert.equal(auth.requestCorsOrigin(capacitorCorsRequest), "http://localhost", "the packaged Android origin must retain LAN API access");
   assert.equal(auth.requestCorsOrigin(fakeRequest({
@@ -182,6 +186,7 @@ try {
   await corsHandler(capacitorCorsRequest, allowedPreflightResponse);
   assert.equal(allowedPreflightResponse.status, 204);
   assert.equal(allowedPreflightResponse.headers.get("access-control-allow-origin"), "http://localhost");
+  assert.match(allowedPreflightResponse.headers.get("access-control-allow-methods"), /(?:^|,)PATCH(?:,|$)/, "Android collection rename preflights must allow PATCH");
   assert.equal(allowedPreflightResponse.headers.get("vary"), "Origin");
   const rejectedPreflightResponse = fakeResponse();
   await corsHandler(fakeRequest({
