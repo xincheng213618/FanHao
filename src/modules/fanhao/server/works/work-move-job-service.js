@@ -613,6 +613,7 @@ export function createWorkMoveJobService({
       adminCoreMutationService.releaseWorkMoveReservation(jobId, { ownerId, terminalStatus });
     } catch (error) {
       warn("[work-move-reservation]", error?.message || error);
+      if (isSqliteBusy(error)) throw error;
     }
   }
 
@@ -633,7 +634,19 @@ export function createWorkMoveJobService({
 
   async function runJob(jobId) {
     let job = row(jobId);
-    if (!job || !ACTIVE_STATUSES.has(job.status) || closing) return;
+    if (!job || closing) return;
+    if (["completed", "rolled_back"].includes(job.status)) {
+      try {
+        releaseReservation(jobId, job.status);
+        claimRetryAttempts.delete(jobId);
+      } catch (error) {
+        if (!isSqliteBusy(error)) throw error;
+        warn("[work-move-terminal-release-busy]", jobId, error?.message || error);
+        scheduleClaimRetry(jobId);
+      }
+      return;
+    }
+    if (!ACTIVE_STATUSES.has(job.status)) return;
     job = claimJob(jobId);
     if (!job) {
       if (ACTIVE_STATUSES.has(row(jobId)?.status)) scheduleClaimRetry(jobId);
@@ -741,7 +754,14 @@ export function createWorkMoveJobService({
         return;
       }
       if (isSqliteBusy(error)) {
-        warn("[work-move-stage-busy]", jobId, error?.message || error);
+        const currentStatus = row(jobId)?.status;
+        warn(
+          ["completed", "rolled_back"].includes(currentStatus)
+            ? "[work-move-terminal-release-busy]"
+            : "[work-move-stage-busy]",
+          jobId,
+          error?.message || error
+        );
         scheduleClaimRetry(jobId);
         return;
       }
@@ -804,6 +824,11 @@ export function createWorkMoveJobService({
       if (isClaimLost(jobId, rollbackError)) return;
       if (closing) {
         preserveForRecovery(jobId);
+        return;
+      }
+      if (isSqliteBusy(rollbackError)) {
+        warn("[work-move-terminal-release-busy]", jobId, rollbackError?.message || rollbackError);
+        scheduleClaimRetry(jobId);
         return;
       }
       updateState(jobId, "failed", "rollback", `${message}; 自动回滚失败：${rollbackError.message}`, { finished: true });

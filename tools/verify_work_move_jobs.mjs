@@ -249,6 +249,15 @@ async function verifySuccessfulMoveAndIdempotency() {
   db.close();
 }
 
+async function waitForCondition(predicate, message, timeoutMs = 12_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(message);
+}
+
 async function verifyWorkLookupRecoversLostStartResponse() {
   const fixture = await createFixture("lost-start-response", 2);
   const db = createDatabase(fixture.root, fixture.source);
@@ -351,8 +360,10 @@ async function verifyAllBusyStagesRequeue() {
   const admin = createAdminFixture(db, fixture);
   const acquire = admin.acquireWorkMoveReservation.bind(admin);
   const commit = admin.commitWorkMove.bind(admin);
+  const release = admin.releaseWorkMoveReservation.bind(admin);
   let acquireBusy = 0;
   let commitBusy = 0;
+  let releaseBusy = 0;
   admin.acquireWorkMoveReservation = (...args) => {
     if (acquireBusy++ === 0) {
       const error = new Error("database is locked during reservation");
@@ -369,6 +380,14 @@ async function verifyAllBusyStagesRequeue() {
     }
     return commit(...args);
   };
+  admin.releaseWorkMoveReservation = (...args) => {
+    if (releaseBusy++ === 0) {
+      const error = new Error("database is locked during terminal reservation release");
+      error.code = "SQLITE_BUSY";
+      throw error;
+    }
+    return release(...args);
+  };
   const warnings = [];
   const service = createWorkMoveJobService({
     adminCoreMutationService: admin,
@@ -379,9 +398,15 @@ async function verifyAllBusyStagesRequeue() {
   const started = service.start("1", { personId: "target", idempotencyKey: "all-stage-busy-requeue" });
   const completed = await waitForJob(service, started.id, ["completed"]);
   assert.equal(completed.status, "completed");
+  await waitForCondition(
+    () => admin.releasedReservationJobs.has(started.id),
+    "a terminal reservation release blocked by SQLITE_BUSY must be retried without restarting the service"
+  );
   assert.ok(acquireBusy >= 2, "reservation acquisition must be retried by a queued recovery run");
   assert.ok(commitBusy >= 2, "main commit must be retried by a queued recovery run");
+  assert.ok(releaseBusy >= 2, "terminal reservation release must be retried by a queued recovery run");
   assert.ok(warnings.some((message) => message.includes("work-move-stage-busy")), "stage BUSY retries must remain observable");
+  assert.ok(warnings.some((message) => message.includes("work-move-terminal-release-busy")), "terminal release BUSY retries must remain observable");
   await service.close();
   db.close();
 }
