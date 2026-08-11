@@ -32,7 +32,7 @@ npm run run:android
 android\app\build\outputs\apk\debug\app-debug.apk
 ```
 
-当前壳应用允许局域网 HTTP 明文连接。它适合个人局域网使用；后续如果要外网访问，应改成 HTTPS 或配对 token。
+当前壳应用只支持连接本机、局域网或可信私网中的服务，局域网 HTTP 明文能力仅用于这些受信网络。Android 客户端目前没有可用的远程登录或配对通道；不要通过手工复制 Web Cookie 的方式把远程访问当作受支持能力。后续若要开放远程访问，必须在客户端和服务端共同实现 HTTPS 与配对 / bearer token 认证。
 
 ## 模块加载结构
 

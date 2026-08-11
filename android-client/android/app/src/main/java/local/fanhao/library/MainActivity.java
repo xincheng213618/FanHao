@@ -115,6 +115,10 @@ public class MainActivity extends BridgeActivity {
       }
 
       Uri uri = Uri.parse(url);
+      if (!isSupportedWebDownloadUri(uri)) {
+        Toast.makeText(this, "已阻止不受支持的下载地址", Toast.LENGTH_SHORT).show();
+        return;
+      }
       String fileName = resolveDownloadFileName(uri, contentDisposition, mimeType);
       DownloadManager.Request request = new DownloadManager.Request(uri);
       if (userAgentValue != null && !userAgentValue.isEmpty()) {
@@ -128,6 +132,17 @@ public class MainActivity extends BridgeActivity {
       downloadManager.enqueue(request);
       Toast.makeText(this, "已加入下载队列", Toast.LENGTH_SHORT).show();
     });
+  }
+
+  private boolean isSupportedWebDownloadUri(Uri uri) {
+    if (uri == null) return false;
+    String scheme = uri.getScheme();
+    String host = uri.getHost();
+    boolean supportedScheme = "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
+    return supportedScheme
+      && host != null
+      && !host.trim().isEmpty()
+      && uri.getUserInfo() == null;
   }
 
   private String resolveDownloadFileName(Uri uri, String contentDisposition, String mimeType) {

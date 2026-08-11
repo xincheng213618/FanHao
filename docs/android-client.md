@@ -1,17 +1,17 @@
 # 安卓客户端
 
-`android-client/` 是一个基于 **Capacitor 8** 的工程，把 `public/` 的 Web 资源打包成安卓 App。
+`android-client/` 是一个基于 **Capacitor 8** 的工程，把独立维护的 `android-client/www/` Web 壳资源打包成安卓 App。
 包名：`local.fanhao.library`，应用名：`个人视频资料库`。
 
 ## 目录结构
 
 ```
 android-client/
-├── capacitor.config.json   # Capacitor 配置（包名、允许导航的主机、混合内容）
+├── capacitor.config.json   # Capacitor 配置（包名、本地 origin、混合内容）
 ├── package.json
 ├── build-debug.ps1         # 构建 debug APK（可选连真机安装）
 ├── publish-debug-update.ps1# 构建并把 APK 发布到更新通道目录
-├── www/                    # 由 cap sync 同步进来的 Web 资源（来源于 public/）
+├── www/                    # Android 专用 Web 壳；仅 games/ 从根目录 public/games 同步
 └── android/                # 原生安卓工程（Gradle）
 ```
 
@@ -69,16 +69,17 @@ npm run run:android      # 直接跑起来
 
 `capacitor.config.json` 关键配置：
 
-- `server.androidScheme: "http"` + `cleartext: true`：允许访问局域网的明文 HTTP 服务（`http://<电脑IP>:29998`）。
-- `server.allowNavigation`：预置了若干局域网网段 / DDNS 主机（如 `192.168.*.*`、`172.*.*.*`、`10.*.*.*`、`xc213618.ddns.me`），
-  客户端通过这些地址访问服务端时不会被 WebView 拦截。新增访问地址需在此补充。
-- `android.allowMixedContent: true`：允许 WebView 中混合加载 HTTP / HTTPS 资源。
+- `server.androidScheme: "http"`：保留已发布版本使用的 `http://localhost` WebView origin。不要在没有数据迁移方案时改成 `https`，否则 Web Storage / IndexedDB 会切换 origin，已有本地小说和设置会表现为不可见。
+- `server.cleartext: true` 与 `android.allowMixedContent: true`：仅为访问本机、局域网或可信私网内的 HTTP API / 媒体保留。
+- 未配置 `server.allowNavigation`：远程页面不能在应用 WebView 内导航，因而不能获得 Capacitor 原生桥权限；外部页面应交给系统浏览器处理。
 - `android.captureInput: true`：放开输入框捕获（避免某些 WebView 输入问题）。
 
-> 调整 `allowNavigation` 后需重新 `cap sync android` 并重新构建，配置才会进原生层。
+当前 Android 客户端仅支持本机、局域网或可信私网服务，没有可用的远程登录或配对通道。不要通过手工复制浏览器 / App Cookie 的方式证明远程访问可用；未来远程能力必须同时提供 HTTPS 与正式的配对 / bearer token 流程。
+
+> 调整 `capacitor.config.json` 后需重新 `cap sync android` 并重新构建，配置才会进原生层。
 
 ## 调试建议
 
 - 真机调试：USB 调试授权后 `build-debug.ps1 -Install`，日志用 `adb logcat`。
-- 改了 `public/` 的 Web 代码后，必须 `cap sync android`（即 `npm run sync`）再构建，原生层才会拿到新 `www/`。
+- 改了 `android-client/www/` 的 Web 代码后，必须 `cap sync android`（即 `npm run sync`）再构建，原生层才会拿到新资源；小游戏源文件只修改根目录 `public/games/`，同步脚本会将其复制到 `android-client/www/games/`。
 - 改了 `android/` 原生代码（如权限、插件）则直接走 Android Studio 打开 `android/` 工程。

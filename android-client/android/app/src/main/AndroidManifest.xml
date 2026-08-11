@@ -63,7 +63,7 @@
         <activity
             android:name=".NativeShortVideoActivity"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|uiMode|navigation|density"
-            android:exported="true"
+            android:exported="false"
             android:screenOrientation="portrait"
             android:theme="@style/AppTheme.ShortVideo" />
 

@@ -4,18 +4,7 @@
   "webDir": "www",
   "server": {
     "androidScheme": "http",
-    "cleartext": true,
-    "allowNavigation": [
-      "192.168.31.86",
-      "192.168.192.50",
-      "172.21.96.1",
-      "xc213618.ddns.me",
-      "192.168.*.*",
-      "172.*.*.*",
-      "10.*.*.*",
-      "127.0.0.1",
-      "localhost"
-    ]
+    "cleartext": true
   },
   "android": {
     "allowMixedContent": true,

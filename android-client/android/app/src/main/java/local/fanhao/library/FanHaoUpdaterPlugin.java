@@ -60,8 +60,14 @@ public class FanHaoUpdaterPlugin extends Plugin {
   @PluginMethod
   public void downloadAndInstall(PluginCall call) {
     String rawUrl = call.getString("url");
-    if (rawUrl == null || rawUrl.trim().isEmpty()) {
-      call.reject("缺少 APK 下载地址");
+    String rawServiceBase = call.getString("serviceBase");
+    URL trustedUrl;
+    String expectedSha256;
+    try {
+      trustedUrl = AndroidUpdatePolicy.requireTrustedDownloadUrl(rawUrl, rawServiceBase);
+      expectedSha256 = AndroidUpdatePolicy.requireSha256(call.getString("sha256"));
+    } catch (IllegalArgumentException error) {
+      call.reject(error.getMessage(), error);
       return;
     }
 
@@ -78,11 +84,10 @@ public class FanHaoUpdaterPlugin extends Plugin {
     }
 
     String fileName = sanitizeApkFileName(call.getString("fileName"));
-    String expectedSha256 = normalizeSha256(call.getString("sha256"));
 
     executor.execute(() -> {
       try {
-        File apk = downloadApk(rawUrl.trim(), fileName, expectedSha256);
+        File apk = downloadApk(trustedUrl, fileName, expectedSha256);
         getActivity().runOnUiThread(() -> {
           try {
             openInstaller(apk);
@@ -119,13 +124,7 @@ public class FanHaoUpdaterPlugin extends Plugin {
     getActivity().startActivity(intent);
   }
 
-  private File downloadApk(String rawUrl, String fileName, String expectedSha256) throws Exception {
-    URL url = new URL(rawUrl);
-    String protocol = url.getProtocol() == null ? "" : url.getProtocol().toLowerCase(Locale.ROOT);
-    if (!"http".equals(protocol) && !"https".equals(protocol)) {
-      throw new IllegalArgumentException("只支持 HTTP/HTTPS 下载地址");
-    }
-
+  private File downloadApk(URL url, String fileName, String expectedSha256) throws Exception {
     File updateDir = new File(getContext().getCacheDir(), "updates");
     if (!updateDir.exists() && !updateDir.mkdirs()) {
       throw new IllegalStateException("无法创建更新缓存目录");
@@ -135,38 +134,43 @@ public class FanHaoUpdaterPlugin extends Plugin {
     HttpURLConnection connection = (HttpURLConnection) url.openConnection();
     connection.setConnectTimeout(30000);
     connection.setReadTimeout(120000);
+    connection.setInstanceFollowRedirects(false);
     connection.setRequestProperty("User-Agent", "FanHaoAndroidApp/Updater");
     connection.setRequestProperty("X-FanHao-Client", "android");
     connection.setRequestProperty("Accept", APK_MIME);
 
-    int status = connection.getResponseCode();
-    if (status < 200 || status >= 300) {
-      throw new IllegalStateException("APK 下载失败：" + status);
-    }
-
-    MessageDigest digest = MessageDigest.getInstance("SHA-256");
-    try (InputStream input = connection.getInputStream(); FileOutputStream output = new FileOutputStream(apk, false)) {
-      byte[] buffer = new byte[64 * 1024];
-      int read;
-      while ((read = input.read(buffer)) >= 0) {
-        if (read == 0) continue;
-        digest.update(buffer, 0, read);
-        output.write(buffer, 0, read);
+    try {
+      int status = connection.getResponseCode();
+      if (status < 200 || status >= 300) {
+        throw new IllegalStateException("APK 下载失败：" + status);
       }
+
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      try (InputStream input = connection.getInputStream(); FileOutputStream output = new FileOutputStream(apk, false)) {
+        byte[] buffer = new byte[64 * 1024];
+        int read;
+        while ((read = input.read(buffer)) >= 0) {
+          if (read == 0) continue;
+          digest.update(buffer, 0, read);
+          output.write(buffer, 0, read);
+        }
+      }
+
+      if (apk.length() <= 0) {
+        throw new IllegalStateException("下载到的 APK 为空");
+      }
+
+      String actualSha256 = hex(digest.digest());
+      if (!actualSha256.equalsIgnoreCase(expectedSha256)) {
+        throw new IllegalStateException("APK 校验失败");
+      }
+      return apk;
+    } catch (Exception error) {
+      if (apk.exists()) apk.delete();
+      throw error;
     } finally {
       connection.disconnect();
     }
-
-    if (apk.length() <= 0) {
-      throw new IllegalStateException("下载到的 APK 为空");
-    }
-
-    String actualSha256 = hex(digest.digest());
-    if (!expectedSha256.isEmpty() && !actualSha256.equalsIgnoreCase(expectedSha256)) {
-      apk.delete();
-      throw new IllegalStateException("APK 校验失败");
-    }
-    return apk;
   }
 
   private void openInstaller(File apk) {
@@ -186,11 +190,6 @@ public class FanHaoUpdaterPlugin extends Plugin {
     String clean = value == null ? "" : value.replaceAll("[\\\\/:*?\"<>|\\r\\n]+", "_").trim();
     if (!clean.toLowerCase(Locale.ROOT).endsWith(".apk")) clean = clean + ".apk";
     return clean.isEmpty() || ".apk".equals(clean) ? "fanhao-update.apk" : clean;
-  }
-
-  private String normalizeSha256(String value) {
-    String clean = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
-    return clean.matches("[0-9a-f]{64}") ? clean : "";
   }
 
   private String hex(byte[] bytes) {
