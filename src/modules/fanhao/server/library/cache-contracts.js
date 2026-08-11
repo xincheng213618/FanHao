@@ -2,7 +2,8 @@ export const ACTOR_PROFILE_CACHE_TABLES = Object.freeze([
   "people",
   "person_external_refs",
   "person_aliases",
-  "images"
+  "images",
+  "actor_profile_publications"
 ]);
 
 export const ACTOR_MOVIE_CACHE_TABLES = Object.freeze([

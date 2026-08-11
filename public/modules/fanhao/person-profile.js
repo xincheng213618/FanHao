@@ -1,3 +1,64 @@
+export async function waitForActorProfileOperation({
+  api,
+  isRouteCurrent = () => true,
+  maxAttempts = 40,
+  operation,
+  personId,
+  pollDelayMs = 250,
+  sleep = (delay) => new Promise((resolve) => globalThis.setTimeout(resolve, delay))
+}) {
+  let current = operation;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (!isRouteCurrent()) {
+      const error = new Error("人物页面已经切换，已停止等待保存结果");
+      error.name = "AbortError";
+      throw error;
+    }
+    if (current?.status === "completed") {
+      try {
+        return await api(`/api/actor-profiles/${encodeURIComponent(personId)}`);
+      } catch (error) {
+        if (![408, 429, 503].includes(Number(error.status || error.statusCode))) throw error;
+      }
+    }
+    if (["blocked", "cancelled"].includes(current?.status)) {
+      throw new Error(current.status === "blocked" ? `保存任务被阻断（任务 ${current.id}），可从任务接口重试` : "保存任务已取消");
+    }
+    await sleep(Math.min(4000, pollDelayMs * (2 ** Math.min(attempt, 4))));
+    if (!isRouteCurrent()) {
+      const error = new Error("人物页面已经切换，已停止等待保存结果");
+      error.name = "AbortError";
+      throw error;
+    }
+    try {
+      const payload = await api(`/api/actor-profile-operations/${encodeURIComponent(current.id)}`);
+      current = payload.operation;
+    } catch (error) {
+      if (![408, 429, 503].includes(Number(error.status || error.statusCode))) throw error;
+    }
+  }
+  throw new Error("保存仍在恢复中，请稍后重新打开人物资料确认结果");
+}
+
+export async function saveActorProfileRequest({
+  api,
+  body,
+  maxAttempts = 3,
+  path,
+  sleep = (delay) => new Promise((resolve) => globalThis.setTimeout(resolve, delay))
+}) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      return await api(path, { method: "PUT", body });
+    } catch (error) {
+      const transient = [408, 429, 503].includes(Number(error.status || error.statusCode));
+      if (!transient || attempt + 1 >= maxAttempts) throw error;
+      await sleep(250 * (2 ** attempt));
+    }
+  }
+  throw new Error("保存请求重试次数已用完");
+}
+
 export function createPersonProfile(deps) {
   const {
     api,
@@ -127,23 +188,46 @@ async function saveActorProfileMapping(person, options) {
   if (options.status) options.status.textContent = "";
 
   try {
-    const data = await api(`/api/actor-profiles/${encodeURIComponent(person.id)}`, {
-      method: "PUT",
-      body: {
+    const idempotencyKey = globalThis.crypto?.randomUUID?.()
+      || `actor-profile-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const requestBody = {
+        acceptAsyncOperation: true,
         javdbUrl: options.javdbUrl,
         displayName: options.displayName || person.name,
         gender: options.gender || person.actorProfile?.gender || "unknown",
         aliases: options.aliases || [],
+        idempotencyKey,
         source: "manual",
         status: "ok"
-      }
+    };
+    let data = await saveActorProfileRequest({
+      api,
+      body: requestBody,
+      path: `/api/actor-profiles/${encodeURIComponent(person.id)}`
     });
+    if (data.operation) {
+      if (options.status) options.status.textContent = "保存已接收，正在恢复";
+      const routePersonId = String(state.selectedPersonId || "");
+      const refreshed = await waitForActorProfileOperation({
+        api,
+        isRouteCurrent: () => state.activeView === "people"
+          && (!routePersonId || String(state.selectedPersonId || "") === routePersonId),
+        operation: data.operation,
+        personId: person.id
+      });
+      data = { profile: refreshed.profile, mergeCandidates: [] };
+    }
     updatePersonActorProfile(person.id, data.profile);
     const merged = options.mergePrompt === false ? null : await maybeMergeActorCandidates(person.id, data.mergeCandidates || [], options.status);
     if (options.status) options.status.textContent = merged ? "已保存并合并人物" : "已保存";
     await selectPerson(merged?.person?.id || person.id, { resetFilter: false });
   } catch (error) {
-    if (options.status) options.status.textContent = error.message || "保存失败";
+    if (options.status && error.name !== "AbortError") {
+      const operationId = error.payload?.operation?.id || "";
+      options.status.textContent = operationId
+        ? `${error.message || "保存失败"}（任务 ${operationId}，可从任务接口重试）`
+        : error.message || "保存失败";
+    }
     if (options.throwOnError) throw error;
   } finally {
     if (options.button) {

@@ -1,4 +1,8 @@
 import fs from "node:fs";
+import {
+  assertActorProfileMutationAllowed,
+  clearActorProfilePublication
+} from "../people/actor-profile-mutation-guard.js";
 
 export function createManualCoverStateService({
   corePersonFallbackRecord,
@@ -200,8 +204,10 @@ export function createManualCoverStateService({
       throw error;
     }
     const db = getCoreDb();
-    db.exec("SAVEPOINT replace_manual_person_avatar");
+    db.exec("BEGIN IMMEDIATE");
     try {
+      assertActorProfileMutationAllowed(db, corePersonId);
+      clearActorProfilePublication(db, corePersonId);
       db.prepare("DELETE FROM fanhao_images.images WHERE owner_type = 'person' AND owner_id = ? AND kind = 'avatar' AND source IN ('manual_person_cover', 'manual_upload')").run(corePersonId);
       if (payload) {
         db.prepare(
@@ -226,10 +232,10 @@ export function createManualCoverStateService({
           payload.now
         );
       }
-      db.exec("RELEASE replace_manual_person_avatar");
+      db.exec("COMMIT");
     } catch (error) {
       try {
-        db.exec("ROLLBACK TO replace_manual_person_avatar; RELEASE replace_manual_person_avatar;");
+        db.exec("ROLLBACK");
       } catch (rollbackError) {
         throw new AggregateError([error, rollbackError], "Avatar replacement failed and its image transaction could not be rolled back");
       }

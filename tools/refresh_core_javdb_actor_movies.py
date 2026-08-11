@@ -41,6 +41,8 @@ DEFAULT_LOG_DIR = PROJECT_ROOT / "data"
 SOURCE = "actor_movies"
 DEFAULT_COOKIE_CACHE = None
 PERSON_SAVEPOINT = "refresh_core_javdb_actor_person"
+ACTOR_PROFILE_RESERVATION_PREFIX = "person-avatar:"
+JAVDB_ACTOR_RESERVATION_PREFIX = "javdb-actor:"
 
 
 class PersonRefreshRollbackError(RuntimeError):
@@ -140,15 +142,56 @@ def run_refresh_jobs(conn: sqlite3.Connection, jobs: list[dict], args: argparse.
 
 
 def save_person_refresh(conn: sqlite3.Connection, job: dict, crawl: dict, client: JavDbClient) -> dict:
-    conn.execute(f"SAVEPOINT {PERSON_SAVEPOINT}")
+    conn.execute("BEGIN IMMEDIATE")
+    savepoint_started = False
     try:
+        assert_actor_profile_mutation_allowed(conn, job["id"], job.get("actor_id"))
+        conn.execute(f"SAVEPOINT {PERSON_SAVEPOINT}")
+        savepoint_started = True
         profile_result = save_profile(conn, job, crawl["profile"], client)
         movie_count = save_movies(conn, job, crawl["movies"])
         conn.execute(f"RELEASE SAVEPOINT {PERSON_SAVEPOINT}")
+        savepoint_started = False
+        conn.commit()
     except Exception as error:
-        rollback_person_refresh(conn, error)
+        if savepoint_started:
+            rollback_person_refresh(conn, error)
+        conn.rollback()
         raise
     return {"profile": profile_result, "movies": movie_count}
+
+
+def assert_actor_profile_mutation_allowed(conn: sqlite3.Connection, person_id: int, actor_key: str | None = None) -> None:
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'cross_store_aggregate_reservations'"
+    ).fetchone()
+    if not table:
+        return
+    reservation_keys = {f"{ACTOR_PROFILE_RESERVATION_PREFIX}{int(person_id)}"}
+    clean_actor_key = clean_text(actor_key)
+    if clean_actor_key:
+        reservation_keys.add(f"{JAVDB_ACTOR_RESERVATION_PREFIX}{clean_actor_key}")
+        owner = conn.execute(
+            "SELECT person_id FROM person_external_refs WHERE provider = 'javdb-actor' AND external_key = ?",
+            (clean_actor_key,),
+        ).fetchone()
+        if owner:
+            reservation_keys.add(f"{ACTOR_PROFILE_RESERVATION_PREFIX}{int(owner[0])}")
+    for reservation_key in sorted(reservation_keys):
+        reservation = conn.execute(
+            "SELECT op_id FROM cross_store_aggregate_reservations WHERE aggregate_key = ?",
+            (reservation_key,),
+        ).fetchone()
+        if reservation:
+            raise RuntimeError("人物头像或 JavDB 身份正在由可恢复任务更新，请稍后重试")
+
+
+def clear_actor_profile_publication(conn: sqlite3.Connection, person_id: int) -> None:
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'actor_profile_publications'"
+    ).fetchone()
+    if table:
+        conn.execute("DELETE FROM actor_profile_publications WHERE person_id = ?", (int(person_id),))
 
 
 def rollback_person_refresh(conn: sqlite3.Connection, original_error: Exception) -> None:
@@ -336,6 +379,7 @@ def save_profile(conn: sqlite3.Connection, job: dict, profile: dict, client: Jav
     avatar_written = False
     avatar_url = clean_text(profile.get("avatar_url"))
     if avatar_url:
+        clear_actor_profile_publication(conn, job["id"])
         avatar_blob = b""
         avatar_mime = mimetypes.guess_type(urlparse(avatar_url).path)[0] or "image/jpeg"
         if profile_looks_ready(profile):

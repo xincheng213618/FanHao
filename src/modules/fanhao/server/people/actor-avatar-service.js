@@ -1,5 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
+import {
+  assertActorProfileMutationAllowed,
+  clearActorProfilePublication
+} from "./actor-profile-mutation-guard.js";
 
 function normalizeNameKey(value) {
   return String(value || "")
@@ -241,8 +245,10 @@ export function createActorAvatarService({
     const buffer = fs.readFileSync(entry.fullPath);
     const corePersonId = Number(person.id);
     const db = getCoreDb();
-    db.exec("SAVEPOINT upsert_actor_avatar");
+    db.exec("BEGIN IMMEDIATE");
     try {
+      assertActorProfileMutationAllowed(db, corePersonId);
+      clearActorProfilePublication(db, corePersonId);
       db.prepare(
         `
         UPDATE people
@@ -269,10 +275,10 @@ export function createActorAvatarService({
           updated_at = excluded.updated_at
         `
       ).run(corePersonId, entry.fullPath, entry.mime, buffer, buffer.length, localAvatarSource, person.id, now, now);
-      db.exec("RELEASE SAVEPOINT upsert_actor_avatar");
+      db.exec("COMMIT");
     } catch (error) {
       try {
-        db.exec("ROLLBACK TO SAVEPOINT upsert_actor_avatar; RELEASE SAVEPOINT upsert_actor_avatar;");
+        db.exec("ROLLBACK");
       } catch (rollbackError) {
         throw new AggregateError([error, rollbackError], "Actor avatar update failed and its transaction could not be rolled back");
       }

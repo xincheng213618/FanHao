@@ -1,5 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
+import {
+  stageActorProfileImage,
+  verifyActorProfileImageStage,
+  verifyActorProfileMainProjection
+} from "../people/actor-profile-outbox-handler.js";
+import {
+  actorProfileMutationReservationKeys,
+  assertActorProfileMutationAllowed,
+  clearActorProfilePublication,
+  personAvatarAggregateKey
+} from "../people/actor-profile-mutation-guard.js";
 import { createWorkMoveReservationService } from "../works/work-move-reservation-service.js";
 
 export function createAdminCoreMutationService({
@@ -13,6 +24,7 @@ export function createAdminCoreMutationService({
   corePersonFallbackRecord,
   ensureLibraryDirectoryPath,
   getCoreDb,
+  getActorProfileOutboxService,
   invalidateActorMovies,
   invalidateActorProfiles,
   invalidatePersonMerge,
@@ -137,6 +149,8 @@ export function createAdminCoreMutationService({
         )
         .get(nameSearch, name, displayName || name, name, displayName || name);
 
+      assertActorProfileMutationAllowed(db, existing?.id ? Number(existing.id) : [], { actorKeys: actorKey ? [actorKey] : [] });
+
       if (existing?.id) {
         personId = Number(existing.id);
         db
@@ -164,6 +178,8 @@ export function createAdminCoreMutationService({
           .run(name, nameSearch, displayName || name, folderPath, now, now, normalizePersonGender(payload.gender || "unknown"));
         personId = Number(result.lastInsertRowid);
       }
+
+      assertActorProfileMutationAllowed(db, personId, { actorKeys: actorKey ? [actorKey] : [] });
 
       if (actorKey) {
         db.prepare(
@@ -555,7 +571,166 @@ export function createAdminCoreMutationService({
     return db.prepare("SELECT * FROM people WHERE id = ?").get(Number(result.lastInsertRowid));
   }
 
-  function upsertActorProfile(person, payload) {
+  function prepareActorProfileMutation(person, payload) {
+    const hasActorUrlInput = Object.hasOwn(payload, "javdbUrl") || Object.hasOwn(payload, "javdbUrls") || Object.hasOwn(payload, "actorUrls");
+    const rawActorUrls = Object.hasOwn(payload, "javdbUrls")
+      ? payload.javdbUrls
+      : Object.hasOwn(payload, "actorUrls")
+        ? payload.actorUrls
+        : payload.javdbUrl;
+    const javdbUrls = hasActorUrlInput ? canonicalJavdbActorUrls(rawActorUrls) : [];
+    const inputActorText = Array.isArray(rawActorUrls) ? rawActorUrls.join("\n") : String(rawActorUrls || "").trim();
+    if (inputActorText && !javdbUrls.length) {
+      const error = new Error("请输入 JavDB actor 页面链接，例如 https://javdb.com/actors/BzpA");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const avatarBase64 = typeof payload.avatarBase64 === "string" ? payload.avatarBase64 : "";
+    const avatarBlob = avatarBase64 ? Buffer.from(avatarBase64, "base64") : null;
+    const explicitAvatarUrl = String(payload.sourceAvatarUrl || payload.avatarUrl || "").trim();
+    const hasAvatarMutation = Boolean(avatarBlob || explicitAvatarUrl);
+    const movieCount = Number.isFinite(Number(payload.movieCount)) ? Number(payload.movieCount) : null;
+    const existing = actorProfileRow(person.id);
+    const displayName = cleanPersonNamePart(payload.displayName) || existing?.display_name || person.name;
+    const gender = normalizePersonGender(payload.gender || existing?.gender || person.gender || "unknown");
+    const hasAliasesInput = Array.isArray(payload.aliases) || typeof payload.aliases === "string";
+    const inputAliases = Array.isArray(payload.aliases)
+      ? payload.aliases
+      : typeof payload.aliases === "string"
+        ? [payload.aliases]
+        : [];
+    const displayNameKey = normalizePersonSearchValue(displayName);
+    const aliases = uniquePersonNames(inputAliases).filter((alias) => normalizePersonSearchValue(alias) !== displayNameKey);
+    const avatarMime = payload.avatarMime || (avatarBlob ? "image/jpeg" : existing?.avatar_mime || "image/jpeg");
+    const fallbackActorKey = hasActorUrlInput ? "" : payload.javdbActorId || existing?.javdb_actor_id || "";
+    const source = payload.source || existing?.source || "manual";
+
+    return {
+      blobs: avatarBlob ? { avatar: avatarBlob } : {},
+      idempotencyKey: payload.idempotencyKey || payload.operationId || payload.requestId || "",
+      requestPayload: Object.fromEntries(Object.entries(payload).filter(([key]) => ![
+        "acceptAsyncOperation",
+        "avatarBase64",
+        "idempotencyKey",
+        "operationId",
+        "requestId"
+      ].includes(key))),
+      plan: {
+        aliases,
+        aliasSource: payload.source || "manual",
+        avatarMime,
+        avatarUrl: explicitAvatarUrl,
+        displayName,
+        error: payload.error || null,
+        fallbackActorKey,
+        fallbackJavdbUrl: existing?.javdb_url || (fallbackActorKey ? `https://javdb.com/actors/${fallbackActorKey}` : ""),
+        gender,
+        hasActorUrlInput,
+        hasAliasesInput,
+        hasAvatarBlob: Boolean(avatarBlob),
+        hasAvatarMutation,
+        javdbUrls,
+        movieCount,
+        personId: Number(person.id),
+        personName: person.name,
+        personNameSearch: normalizePersonSearchValue(person.name),
+        source,
+        status: payload.status || "ok"
+      }
+    };
+  }
+
+  function actorKeysForPlan(plan) {
+    return plan.hasActorUrlInput ? plan.javdbUrls.map(actorIdFromJavdbUrl).filter(Boolean) : [plan.fallbackActorKey].filter(Boolean);
+  }
+
+  function actorProfileReservationKeys(db, plan) {
+    return actorProfileMutationReservationKeys(db, plan.personId, { actorKeys: actorKeysForPlan(plan) });
+  }
+
+  function assertActorProfileMutationPreparation(db, plan, context = {}) {
+    assertActorProfileMutationAllowed(db, plan.personId, {
+      actorKeys: actorKeysForPlan(plan),
+      operationId: context.operationId
+    });
+  }
+
+  function applyActorProfileMain(db, plan, context) {
+    assertActorProfileMutationPreparation(db, plan, { operationId: context.operationId });
+    const now = context.createdAt;
+    const updated = db.prepare(`
+      UPDATE people
+      SET name = COALESCE(NULLIF(?, ''), name),
+          name_search = COALESCE(NULLIF(?, ''), name_search),
+          display_name = COALESCE(NULLIF(?, ''), display_name),
+          gender = ?, movie_count = ?, source = COALESCE(NULLIF(?, ''), source),
+          status = ?, error = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      plan.personName,
+      plan.personNameSearch,
+      plan.displayName,
+      plan.gender,
+      plan.movieCount,
+      plan.source,
+      plan.status,
+      plan.error,
+      now,
+      plan.personId
+    );
+    if (Number(updated.changes) !== 1) throw new Error("人物不存在，无法应用可恢复资料任务");
+
+    if (plan.hasActorUrlInput) {
+      db.prepare("DELETE FROM person_external_refs WHERE person_id = ? AND provider = 'javdb-actor'").run(plan.personId);
+      const insertRef = db.prepare(`
+        INSERT INTO person_external_refs(person_id, provider, external_key, url, source, created_at, updated_at)
+        VALUES (?, 'javdb-actor', ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, external_key) DO UPDATE SET
+          person_id = excluded.person_id, url = excluded.url,
+          source = excluded.source, updated_at = excluded.updated_at
+      `);
+      for (const url of plan.javdbUrls) insertRef.run(plan.personId, actorIdFromJavdbUrl(url), url, plan.aliasSource, now, now);
+    } else if (plan.fallbackActorKey) {
+      db.prepare(`
+        INSERT INTO person_external_refs(person_id, provider, external_key, url, source, created_at, updated_at)
+        VALUES (?, 'javdb-actor', ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, external_key) DO UPDATE SET
+          person_id = excluded.person_id,
+          url = COALESCE(NULLIF(excluded.url, ''), person_external_refs.url),
+          updated_at = excluded.updated_at
+      `).run(plan.personId, plan.fallbackActorKey, plan.fallbackJavdbUrl, plan.aliasSource, now, now);
+    }
+
+    if (plan.hasAliasesInput) {
+      db.prepare("DELETE FROM person_aliases WHERE person_id = ? AND source = ?").run(plan.personId, plan.aliasSource);
+      const insertAlias = db.prepare("INSERT OR IGNORE INTO person_aliases(person_id, alias, alias_search, source) VALUES (?, ?, ?, ?)");
+      for (const alias of plan.aliases) insertAlias.run(plan.personId, alias, normalizePersonSearchValue(alias), plan.aliasSource);
+    }
+
+    if (plan.hasAvatarMutation) {
+      db.prepare(`
+        INSERT INTO actor_profile_publications(person_id, operation_id, intent_sha256, published_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(person_id) DO UPDATE SET
+          operation_id = excluded.operation_id,
+          intent_sha256 = excluded.intent_sha256,
+          published_at = excluded.published_at,
+          updated_at = excluded.updated_at
+      `).run(plan.personId, context.operationId, context.intentSha256, context.publishedAt, context.publishedAt);
+    }
+    return { personId: String(plan.personId), avatarPublished: plan.hasAvatarMutation };
+  }
+
+  function publishActorProfileMutation(plan) {
+    if (plan.hasActorUrlInput) invalidateActorMovies();
+    invalidateTableStamp("actor_profiles", "actor_movies");
+    invalidateActorProfiles();
+    invalidateActorMovies();
+    invalidatePersonMerge();
+  }
+
+  function legacyUpsertActorProfile(person, payload) {
     const now = new Date().toISOString();
     const hasActorUrlInput = Object.hasOwn(payload, "javdbUrl") || Object.hasOwn(payload, "javdbUrls") || Object.hasOwn(payload, "actorUrls");
     const rawActorUrls = Object.hasOwn(payload, "javdbUrls")
@@ -590,8 +765,11 @@ export function createAdminCoreMutationService({
 
     const corePersonId = Number(person.id);
     const db = getCoreDb();
-    db.exec("SAVEPOINT upsert_actor_profile");
+    db.exec("BEGIN IMMEDIATE");
     try {
+      assertActorProfileMutationAllowed(db, corePersonId, {
+        actorKeys: hasActorUrlInput ? javdbUrls.map(actorIdFromJavdbUrl) : [payload.javdbActorId || existing?.javdb_actor_id || ""]
+      });
       db
         .prepare(
           `
@@ -653,6 +831,7 @@ export function createAdminCoreMutationService({
 
       const avatarUrl = payload.sourceAvatarUrl || payload.avatarUrl || existing?.avatar_url || "";
       if (avatarBlob || avatarUrl) {
+        clearActorProfilePublication(db, corePersonId);
         db.prepare(
           `
           INSERT INTO fanhao_images.images (
@@ -684,10 +863,10 @@ export function createAdminCoreMutationService({
           now
         );
       }
-      db.exec("RELEASE SAVEPOINT upsert_actor_profile");
+      db.exec("COMMIT");
     } catch (error) {
       try {
-        db.exec("ROLLBACK TO SAVEPOINT upsert_actor_profile; RELEASE SAVEPOINT upsert_actor_profile;");
+        db.exec("ROLLBACK");
       } catch (rollbackError) {
         throw new AggregateError([error, rollbackError], "Actor profile update failed and its transaction could not be rolled back");
       }
@@ -703,6 +882,42 @@ export function createAdminCoreMutationService({
     invalidatePersonMerge();
 
     return publicActorProfile(actorProfileRow(person.id));
+  }
+
+  function upsertActorProfile(person, payload) {
+    if (typeof getActorProfileOutboxService !== "function") return legacyUpsertActorProfile(person, payload);
+    const outbox = getActorProfileOutboxService();
+    if (!outbox?.isReady()) {
+      const error = new Error("人物资料恢复队列尚未就绪");
+      error.statusCode = 503;
+      error.retryable = true;
+      throw error;
+    }
+    const mutation = prepareActorProfileMutation(person, payload);
+    const operation = outbox.submit({
+      aggregateKey: personAvatarAggregateKey(person.id),
+      blobs: mutation.blobs,
+      idempotencyKey: mutation.idempotencyKey,
+      kind: "actor_profile_upsert",
+      payload: mutation.plan,
+      requestPayload: mutation.requestPayload
+    });
+    if (operation.status !== "completed") return { completed: false, operation };
+    // Completion callbacks are best-effort because the durable transaction is
+    // already committed. Re-run invalidation on the synchronous 200 path so a
+    // cache callback failure can never turn a completed write into an old payload.
+    publishActorProfileMutation(mutation.plan);
+    return { completed: true, profile: publicActorProfile(actorProfileRow(person.id)) };
+  }
+
+  function actorProfileOperation(operationId) {
+    if (typeof getActorProfileOutboxService !== "function") return null;
+    return getActorProfileOutboxService()?.getOperation(operationId) || null;
+  }
+
+  function retryActorProfileOperation(operationId) {
+    if (typeof getActorProfileOutboxService !== "function") return null;
+    return getActorProfileOutboxService()?.retryOperation(operationId) || null;
   }
 
   function mergePeopleIntoTarget(targetPersonId, sourcePersonIds = []) {
@@ -752,6 +967,8 @@ export function createAdminCoreMutationService({
 
     db.exec("BEGIN IMMEDIATE");
     try {
+      assertActorProfileMutationAllowed(db, [targetId, ...sources.map((source) => source.id)]);
+      clearActorProfilePublication(db, [targetId, ...sources.map((source) => source.id)]);
       for (const source of sources) {
         for (const alias of uniquePersonNames([source.name, source.display_name, ...sourceAliases.all(source.id).map((row) => row.alias)])) {
           const key = normalizePersonSearchValue(alias);
@@ -1307,6 +1524,10 @@ export function createAdminCoreMutationService({
   }
 
   return {
+    actorProfileOperation,
+    actorProfileReservationKeys,
+    applyActorProfileMain,
+    assertActorProfileMutationPreparation,
     acquireWorkMoveReservation: (...args) => workMoveReservations().acquire(...args),
     assertAndroidWorkMoveTargetIdentity,
     assertWorkMoveSourceUnshared,
@@ -1320,11 +1541,16 @@ export function createAdminCoreMutationService({
     inspectWorkMoveImages,
     listWorkMoveTargets,
     mergePeopleIntoTarget,
+    publishActorProfileMutation,
+    retryActorProfileOperation,
     parkWorkMoveReservation: (...args) => workMoveReservations().park(...args),
     prepareWorkMove,
     releaseWorkMoveReservation: (...args) => workMoveReservations().release(...args),
     renewWorkMoveReservation: (...args) => workMoveReservations().renew(...args),
     repairWorkMoveReservations: (...args) => workMoveReservations().repairTerminalReservations(...args),
-    upsertActorProfile
+    stageActorProfileImage,
+    upsertActorProfile,
+    verifyActorProfileImageStage,
+    verifyActorProfileMainProjection
   };
 }

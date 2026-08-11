@@ -19,8 +19,8 @@ export function createWorkPresenterService({
   preferredPersonDisplayName,
   proxiedRemoteImageUrl,
   publicActorProfile,
+  publicActorProfileSnapshot,
   publicCoreWorkCover,
-  publicPersonAvatar,
   publicWorkInfoMetadata,
   publicWorkInfoSummary,
   uniqueTextArray,
@@ -110,8 +110,10 @@ export function createWorkPresenterService({
   }
 
   function publicPerson(person, options = {}) {
-    const actorProfile = publicActorProfile(actorProfileRow(person.id));
-    const avatar = publicPersonAvatar(person.id);
+    const profileRow = actorProfileRow(person.id);
+    const snapshot = publicActorProfileSnapshot(profileRow);
+    const actorProfile = snapshot.profile;
+    const avatar = snapshot.avatar;
     const fallbackAvatar = avatar?.avatarUrl || actorProfile?.avatarUrl || options.skipFallbackAvatar ? null : publicPersonFallbackAvatar(person);
     const isGSource = isGPerson(person);
     return {

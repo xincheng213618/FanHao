@@ -1,18 +1,75 @@
 import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 import { attachCoreImageStore } from "./core-image-store.js";
+import { hasSqliteTables } from "./sqlite-schema.js";
+
+function hasActorProfilePublicationReadModel(db) {
+  return hasSqliteTables(db, "main", [
+    "actor_profile_publications", "cross_store_operation_state", "cross_store_main_receipts"
+  ]) && hasSqliteTables(db, "fanhao_images", ["actor_profile_image_staging", "cross_store_receipts"]);
+}
 
 const db = new DatabaseSync(workerData.dbPath);
 db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
 attachCoreImageStore(db, { dbPath: workerData.imageDbPath });
 
 const coreImageQuery = db.prepare("SELECT image_blob, mime FROM fanhao_images.images WHERE id = ?");
-const actorAvatarQuery = db.prepare(`
+const hasPublishedActorAvatars = hasActorProfilePublicationReadModel(db);
+const publishedActorAvatarQuery = hasPublishedActorAvatars ? db.prepare(`
+  SELECT stage.image_blob, stage.mime
+  FROM actor_profile_publications publication
+  JOIN cross_store_operation_state state
+    ON state.op_id = publication.operation_id AND state.status = 'completed'
+  JOIN cross_store_main_receipts receipt
+    ON receipt.op_id = publication.operation_id
+   AND receipt.step = 'visibility_switch'
+   AND receipt.intent_sha256 = publication.intent_sha256
+  JOIN fanhao_images.actor_profile_image_staging stage
+    ON stage.operation_id = publication.operation_id
+   AND stage.person_id = publication.person_id
+   AND stage.intent_sha256 = publication.intent_sha256
+  WHERE publication.person_id = ? AND publication.operation_id = ?
+`) : null;
+const currentActorAvatarQuery = hasPublishedActorAvatars ? db.prepare(`
+  WITH avatar_candidates AS (
+    SELECT image.image_blob, image.mime, image.source, image.updated_at,
+           image.id AS live_image_id, CAST(image.id AS TEXT) AS stable_id, 1 AS publication_rank
+    FROM fanhao_images.images image
+    WHERE image.owner_type = 'person' AND image.owner_id = ? AND image.kind = 'avatar'
+    UNION ALL
+    SELECT stage.image_blob, stage.mime, stage.source, stage.updated_at,
+           NULL AS live_image_id, stage.operation_id AS stable_id, 0 AS publication_rank
+    FROM actor_profile_publications publication
+    JOIN cross_store_operation_state state
+      ON state.op_id = publication.operation_id AND state.status = 'completed'
+    JOIN cross_store_main_receipts receipt
+      ON receipt.op_id = publication.operation_id
+     AND receipt.step = 'visibility_switch'
+     AND receipt.intent_sha256 = publication.intent_sha256
+    JOIN fanhao_images.actor_profile_image_staging stage
+      ON stage.operation_id = publication.operation_id
+     AND stage.person_id = publication.person_id
+     AND stage.intent_sha256 = publication.intent_sha256
+    WHERE publication.person_id = ?
+  )
+  SELECT image_blob, mime
+  FROM avatar_candidates
+  ORDER BY
+    CASE
+      WHEN source IN ('manual_upload', 'manual_person_cover', 'manual') THEN 0
+      WHEN source = 'actor_profiles' THEN 1
+      ELSE 2
+    END,
+    publication_rank ASC,
+    CASE WHEN image_blob IS NOT NULL THEN 0 ELSE 1 END,
+    updated_at DESC,
+    live_image_id ASC,
+    stable_id ASC
+  LIMIT 1
+`) : db.prepare(`
   SELECT image_blob, mime
   FROM fanhao_images.images
-  WHERE owner_type = 'person'
-    AND owner_id = ?
-    AND kind = 'avatar'
+  WHERE owner_type = 'person' AND owner_id = ? AND kind = 'avatar'
   ORDER BY
     CASE
       WHEN source IN ('manual_upload', 'manual_person_cover', 'manual') THEN 0
@@ -69,7 +126,14 @@ parentPort?.on("message", (message) => {
 
 function runAction(action, message) {
   if (action === "coreImage") return coreImageQuery.get(Number(message.imageId)) || null;
-  if (action === "actorAvatar") return actorAvatarQuery.get(Number(message.personId)) || null;
+  if (action === "actorAvatar") {
+    const personId = Number(message.personId);
+    const version = String(message.version || "");
+    if (version) return publishedActorAvatarQuery?.get(personId, version) || null;
+    return hasPublishedActorAvatars
+      ? currentActorAvatarQuery.get(personId, personId) || null
+      : currentActorAvatarQuery.get(personId) || null;
+  }
   if (action === "workCover") return workCoverQuery.get(Number(message.workId)) || null;
   if (action === "remoteImage") return remoteImageQuery.get(String(message.url || "")) || null;
   if (action === "cachedRemoteUrls") return cachedRemoteUrls(message.urls);

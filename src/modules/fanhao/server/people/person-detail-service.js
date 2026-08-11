@@ -80,12 +80,32 @@ export function createPersonDetailService({
     const person = resolveLibraryPersonByPublicId(personId);
     if (!person) return null;
 
-    const profile = adminCoreMutationService.upsertActorProfile(person, body);
+    const result = adminCoreMutationService.upsertActorProfile(person, body);
+    if (result?.completed === false) {
+      if (body?.acceptAsyncOperation === true) {
+        return { statusCode: 202, payload: { ok: true, operation: result.operation } };
+      }
+      const error = new Error("人物资料任务仍在恢复中，请使用同一请求键重试");
+      error.code = "ACTOR_PROFILE_PENDING";
+      error.statusCode = 503;
+      error.retryable = true;
+      error.operation = result.operation;
+      throw error;
+    }
+    const profile = result?.completed === true ? result.profile : result;
     const mergeCandidates = actorProfileMergeCandidates(person.id, [
       profile?.displayName,
       ...(profile?.aliases || [])
     ]);
-    return { ok: true, profile, mergeCandidates };
+    return { statusCode: 200, payload: { ok: true, profile, mergeCandidates } };
+  }
+
+  function actorProfileOperation(operationId) {
+    return adminCoreMutationService.actorProfileOperation(operationId);
+  }
+
+  function retryActorProfileOperation(operationId) {
+    return adminCoreMutationService.retryActorProfileOperation(operationId);
   }
 
   function setCover(personId, body) {
@@ -269,11 +289,13 @@ export function createPersonDetailService({
   }
 
   return {
+    actorProfileOperation,
     actorProfilePayload,
     coverBodyLimit,
     deleteLocalFiles,
     detailPayload,
     mergeIntoTarget,
+    retryActorProfileOperation,
     setCover,
     updateActorProfile
   };

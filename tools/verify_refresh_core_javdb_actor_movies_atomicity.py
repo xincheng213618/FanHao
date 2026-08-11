@@ -33,6 +33,7 @@ def main() -> None:
             assert conn.execute("PRAGMA fanhao_images.journal_mode").fetchone()[0] == "wal"
             create_schema(conn)
             verify_failed_first_person_does_not_leak_into_second(conn)
+            verify_reservation_and_publication_guards(conn)
             verify_rollback_failure_keeps_original_error()
             verify_double_rollback_failure_is_fatal()
         finally:
@@ -175,6 +176,86 @@ def verify_failed_first_person_does_not_leak_into_second(conn: sqlite3.Connectio
     }
 
 
+def verify_reservation_and_publication_guards(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE cross_store_aggregate_reservations(
+          aggregate_key TEXT PRIMARY KEY,
+          op_id TEXT NOT NULL,
+          aggregate_seq INTEGER NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE actor_profile_publications(
+          person_id INTEGER PRIMARY KEY,
+          operation_id TEXT NOT NULL UNIQUE,
+          intent_sha256 TEXT NOT NULL,
+          published_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO actor_profile_publications VALUES (2, 'published-two', 'digest', 'now', 'now');
+        """
+    )
+    conn.commit()
+    before_person = record(conn, "SELECT * FROM people WHERE id = 2")
+    before_images = records(conn, "SELECT * FROM fanhao_images.images WHERE owner_id = 2")
+    job = {
+        "id": 2,
+        "name": "Reserved Two",
+        "db_name": "Old Two",
+        "actor_id": "actor-two",
+        "actor_url": "https://javdb.test/actors/actor-two",
+    }
+    crawl = {
+        "profile": {"aliases": ["Reserved Alias"], "avatar_url": "https://images.test/reserved.jpg", "movie_count": 99},
+        "movies": [],
+    }
+    for aggregate_key in ("person-avatar:2", "javdb-actor:actor-two"):
+        conn.execute(
+            "INSERT INTO cross_store_aggregate_reservations VALUES (?, ?, 1, 'now')",
+            (aggregate_key, f"pending-{aggregate_key}"),
+        )
+        conn.commit()
+        try:
+            save_person_refresh(conn, job, crawl, NoDownloadClient())
+        except RuntimeError as error:
+            assert "可恢复任务" in str(error)
+        else:
+            raise AssertionError(f"Python refresh must honor {aggregate_key}")
+        assert not conn.in_transaction
+        assert record(conn, "SELECT * FROM people WHERE id = 2") == before_person
+        assert records(conn, "SELECT * FROM fanhao_images.images WHERE owner_id = 2") == before_images
+        assert record(conn, "SELECT operation_id FROM actor_profile_publications WHERE person_id = 2") == {"operation_id": "published-two"}
+        conn.execute("DELETE FROM cross_store_aggregate_reservations")
+        conn.commit()
+
+    conn.execute(
+        "INSERT INTO cross_store_aggregate_reservations VALUES ('person-avatar:2', 'pending-current-owner', 2, 'now')"
+    )
+    conn.commit()
+    stealing_job = {
+        "id": 1,
+        "name": "Must Not Steal Actor Ref",
+        "db_name": "Old One",
+        "actor_id": "actor-two",
+        "actor_url": "https://javdb.test/actors/actor-two",
+    }
+    try:
+        save_person_refresh(conn, stealing_job, crawl, NoDownloadClient())
+    except RuntimeError as error:
+        assert "可恢复任务" in str(error)
+    else:
+        raise AssertionError("Python refresh must guard the JavDB key's current owner")
+    assert record(conn, "SELECT person_id FROM person_external_refs WHERE external_key = 'actor-two'") == {"person_id": 2}
+    conn.execute("DELETE FROM cross_store_aggregate_reservations")
+    conn.commit()
+
+    result = save_person_refresh(conn, job, crawl, NoDownloadClient())
+    assert result["profile"]["avatar"] is True
+    assert record(conn, "SELECT operation_id FROM actor_profile_publications WHERE person_id = 2") is None, (
+        "a later Python source=actor_profiles write must retire the completed publication"
+    )
+
+
 def verify_rollback_failure_keeps_original_error() -> None:
     class BrokenRollbackConnection:
         def execute(self, _sql: str):
@@ -229,6 +310,10 @@ def run_fatal_child() -> None:
 
         def execute(self, sql: str, _params=()):
             statement = " ".join(str(sql).split())
+            if statement == "BEGIN IMMEDIATE":
+                return self
+            if "FROM sqlite_schema" in statement:
+                return self
             if statement.startswith("SAVEPOINT "):
                 return self
             if "UPDATE people" in statement:
@@ -236,6 +321,9 @@ def run_fatal_child() -> None:
             if statement.startswith("ROLLBACK TO SAVEPOINT "):
                 raise sqlite3.OperationalError("savepoint rollback exploded")
             raise AssertionError(f"unexpected SQL in fatal fixture: {statement}")
+
+        def fetchone(self):
+            return None
 
         def rollback(self):
             raise sqlite3.OperationalError("connection rollback exploded")

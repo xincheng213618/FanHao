@@ -45,7 +45,9 @@
 | GET | `/api/playinfo/:id` | 公开 | 作品播放信息：视频文件、推荐播放模式、转码 / 直连决策。 |
 | GET | `/api/info/:id` | 公开 | 返回作品 sidecar 元数据文件（info/nfo/txt）原始内容。 |
 | GET | `/api/actor-profiles/:id` | 公开 | 演员资料页（别名、JavDB 映射、作品列表）。 |
-| PUT | `/api/actor-profiles/:id` | 公开 | 更新演员资料页配置（显示名、别名等）。 |
+| PUT | `/api/actor-profiles/:id` | 公开 | 更新单个人物资料与可选头像。完成后返回 200；仅当 body 显式设置 `acceptAsyncOperation: true` 时，恢复中的操作返回 202，否则返回 retryable 503。 |
+| GET | `/api/actor-profile-operations/:operationId` | 公开 | 查询单人物资料更新的可恢复 operation 状态。 |
+| POST | `/api/actor-profile-operations/:operationId/retry` | 本地管理员 | 显式重试被阻断或等待恢复的人物资料 operation。 |
 | GET | `/api/people/:id` | 公开 | 人物详情（作品、缺失作品、合并候选、封面）。 |
 | POST | `/api/people/:id/merge` | 本地管理员 | 将某人物合并到目标人物。 |
 | PUT | `/api/people/:id/cover` | 公开 | 设置人物封面（头像）。 |
@@ -67,7 +69,7 @@
 
 | 方法 | 路径 | 权限 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/media/actor/:id/avatar` | 公开 | 演员头像（本地 / 远端 / 生成）。 |
+| GET | `/media/actor/:id/avatar` | 公开 | 演员头像（本地 / 远端 / 生成）；暂存发布头像使用不可变 `?v=<operation-id>`，服务端校验 completed main receipt。 |
 | GET | `/media/work/:id/cover` | 公开 | 作品封面。 |
 | GET | `/media/core-image/:id` | 公开 | 核心库图片（按 `images` 表 id）。 |
 | GET | `/media/image/:id` | 公开 | 本地图片文件。 |

@@ -78,16 +78,48 @@ export async function routeWorksApi(req, res, url, deps) {
 
   if (actorProfileMatch && req.method === "PUT") {
     const personId = decodeURIComponent(actorProfileMatch[1]);
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, personDetailService.coverBodyLimit);
     try {
-      const payload = personDetailService.updateActorProfile(personId, body);
-      if (!payload) {
+      const result = personDetailService.updateActorProfile(personId, body);
+      if (!result) {
         notFound(res);
         return true;
       }
-      sendJson(res, 200, payload);
+      sendJson(res, result.statusCode, result.payload);
     } catch (error) {
-      sendJson(res, error.statusCode || 400, { error: error.message || "资料页配置失败" });
+      sendJson(res, error.statusCode || 400, {
+        error: error.message || "资料页配置失败",
+        ...(error.code ? { code: error.code } : {}),
+        ...(error.retryable ? { retryable: true } : {}),
+        ...(error.operation ? { operation: error.operation } : {})
+      });
+    }
+    return true;
+  }
+
+  const actorProfileOperationMatch = /^\/api\/actor-profile-operations\/([^/]+)$/.exec(url.pathname);
+  if (actorProfileOperationMatch && req.method === "GET") {
+    const operation = personDetailService.actorProfileOperation(decodeURIComponent(actorProfileOperationMatch[1]));
+    if (!operation) {
+      notFound(res);
+      return true;
+    }
+    sendJson(res, 200, { ok: true, operation });
+    return true;
+  }
+
+  const actorProfileOperationRetryMatch = /^\/api\/actor-profile-operations\/([^/]+)\/retry$/.exec(url.pathname);
+  if (actorProfileOperationRetryMatch && req.method === "POST") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      const operation = personDetailService.retryActorProfileOperation(decodeURIComponent(actorProfileOperationRetryMatch[1]));
+      if (!operation) {
+        notFound(res);
+        return true;
+      }
+      sendJson(res, 200, { ok: true, operation });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "重试人物资料任务失败" });
     }
     return true;
   }

@@ -64,7 +64,7 @@ export function createMediaBlobWorkerClient({ dbPath, imageDbPath, WorkerCtor = 
   }
 
   return {
-    actorAvatar: (personId) => request("actorAvatar", { personId }),
+    actorAvatar: (personId, version = "") => request("actorAvatar", { personId, version }),
     cachedRemoteUrls: (urls) => request("cachedRemoteUrls", { urls }),
     close,
     coreImage: (imageId) => request("coreImage", { imageId }),

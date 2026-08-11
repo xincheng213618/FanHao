@@ -16,6 +16,7 @@ import { createAdminCoreMutationService } from "./src/modules/fanhao/server/admi
 import { createAdminMaintenanceTaskService } from "./src/modules/fanhao/server/admin/admin-maintenance-task-service.js";
 import { createAdminPersonService } from "./src/modules/fanhao/server/admin/admin-person-service.js";
 import { createCoreDbService } from "./src/modules/fanhao/server/library/core-db-service.js";
+import { createCrossStoreOutboxService } from "./src/modules/fanhao/server/library/cross-store-outbox-service.js";
 import { ACTOR_MOVIE_CACHE_TABLES, ACTOR_MOVIE_INFO_CACHE_TABLES, ACTOR_PROFILE_CACHE_TABLES, cacheDependencyTables, compositeTableStamp } from "./src/modules/fanhao/server/library/cache-contracts.js";
 import { createCoreLibraryService } from "./src/modules/fanhao/server/library/core-library-service.js";
 import { createCoreLibrarySyncService } from "./src/modules/fanhao/server/library/core-library-sync-service.js";
@@ -248,6 +249,7 @@ const coreDbService = createCoreDbService({
   ensureDataDir,
   imageDbPath: CORE_IMAGE_DB_PATH
 });
+let actorProfileOutboxService = null;
 let library = emptyLibrary();
 let lastScanError = null;
 let localLibraryIndexService = null;
@@ -378,12 +380,12 @@ const galleryMediaService = createGalleryMediaService({
 const actorProfileService = createActorProfileService({
   actorProfileAliases,
   actorProfileJavdbRefs,
+  coreImageUrl,
   getCoreDb,
   getStamp: actorProfileStamp,
   mergedPersonAliasNames,
   normalizePersonGender,
   preferredPersonDisplayName,
-  publicPersonAvatar,
   uniquePersonNames
 });
 const workInfoService = createWorkInfoService({
@@ -613,6 +615,7 @@ const adminCoreMutationService = createAdminCoreMutationService({
   corePersonFallbackRecord: coreLibraryService.personFallbackRecord,
   ensureLibraryDirectoryPath,
   getCoreDb,
+  getActorProfileOutboxService: () => actorProfileOutboxService,
   hasCoreDb,
   invalidateActorMovies: () => actorMovieService.invalidate(),
   invalidateActorProfiles: () => actorProfileService.invalidate(),
@@ -640,6 +643,21 @@ const adminCoreMutationService = createAdminCoreMutationService({
   resetWorkSearch: workSearchIndexService.invalidate,
   uniqueTextArray,
   uniquePersonNames
+});
+actorProfileOutboxService = createCrossStoreOutboxService({
+  handlers: {
+    actor_profile_upsert: {
+      applyMain: adminCoreMutationService.applyActorProfileMain,
+      assertCanPrepare: adminCoreMutationService.assertActorProfileMutationPreparation,
+      onCompleted: adminCoreMutationService.publishActorProfileMutation,
+      reservationKeys: adminCoreMutationService.actorProfileReservationKeys,
+      stageImage: adminCoreMutationService.stageActorProfileImage,
+      verifyImageStage: adminCoreMutationService.verifyActorProfileImageStage,
+      verifyMain: adminCoreMutationService.verifyActorProfileMainProjection
+    }
+  },
+  imageDbPath: CORE_IMAGE_DB_PATH,
+  mainDbPath: CORE_DB_PATH
 });
 const workLocalMutationService = createWorkLocalMutationService({
   ensureLibraryDirectoryPath: (...args) => ensureLibraryDirectoryPath(...args),
@@ -698,8 +716,8 @@ const workPresenterService = createWorkPresenterService({
   preferredPersonDisplayName,
   proxiedRemoteImageUrl,
   publicActorProfile,
+  publicActorProfileSnapshot,
   publicCoreWorkCover,
-  publicPersonAvatar,
   publicWorkInfoMetadata,
   publicWorkInfoSummary,
   uniqueTextArray,
@@ -1437,6 +1455,10 @@ function publicActorProfile(row) {
   return actorProfileService.publicProfile(row);
 }
 
+function publicActorProfileSnapshot(row) {
+  return actorProfileService.publicSnapshot(row);
+}
+
 function normalizeSourcePath(value) {
   let normalized = String(value || "").trim().replaceAll("\\", "/").toLowerCase();
   normalized = normalized.replace(/\/+$/, "");
@@ -1526,7 +1548,7 @@ function manualCoversStamp() {
 }
 
 function libraryPeopleStamp() {
-  return `${library.scannedAt || ""}:${libraryPeopleCacheVersion}:${manualCoversStamp()}`;
+  return `${library.scannedAt || ""}:${libraryPeopleCacheVersion}:${actorProfileStamp()}:${manualCoversStamp()}`;
 }
 
 function personFallbackAvatarStamp() {
@@ -2234,6 +2256,7 @@ async function routeMedia(req, res, url) {
 userStateService.load();
 appConfigService.load();
 imageReaderCacheService.startCleanupTimer();
+actorProfileOutboxService.start();
 localLibraryIndexService.initializeLibrary();
 await moduleRegistry.start();
 
@@ -2261,6 +2284,7 @@ const serverHost = createServerHost({
   stop: async () => {
     await accessAnalyticsService.close();
     await workMoveJobService.close();
+    actorProfileOutboxService.close();
     await moduleRegistry.stop();
     await mediaBlobStore.close();
   }

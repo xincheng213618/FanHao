@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { hasSqliteTables } from "./sqlite-schema.js";
 
 const REMOTE_IMAGE_LOOKUP_BATCH_SIZE = 200;
 
@@ -68,8 +69,11 @@ export function createMediaResponseService({
   }
 
   async function serveActorAvatar(res, personId, options = {}) {
-    const row = await cachedMediaBlobRow(`actor:${personId}:${options.version || ""}`, () => blobStore.actorAvatar(personId));
-    if (!serveBlobRow(res, row, { defaultMime: "image/jpeg" })) {
+    const row = await cachedMediaBlobRow(`actor:${personId}:${options.version || ""}`, () => blobStore.actorAvatar(personId, options.version || ""));
+    if (!serveBlobRow(res, row, {
+      defaultMime: "image/jpeg",
+      cacheControl: options.version ? "public, max-age=31536000, immutable" : "public, max-age=86400"
+    })) {
       notFound(res);
     }
   }
@@ -617,7 +621,28 @@ export function createMediaResponseService({
 
 function createInlineMediaBlobStore({ coreImageRow, corePersonAvatarRow, getCoreDb, workCoverRow }) {
   return {
-    async actorAvatar(personId) {
+    async actorAvatar(personId, version = "") {
+      if (version) {
+        const db = getCoreDb();
+        if (!hasSqliteTables(db, "main", [
+          "actor_profile_publications", "cross_store_operation_state", "cross_store_main_receipts"
+        ]) || !hasSqliteTables(db, "fanhao_images", ["actor_profile_image_staging", "cross_store_receipts"])) return null;
+        return db.prepare(`
+          SELECT stage.image_blob, stage.mime
+          FROM actor_profile_publications publication
+          JOIN cross_store_operation_state state
+            ON state.op_id = publication.operation_id AND state.status = 'completed'
+          JOIN cross_store_main_receipts receipt
+            ON receipt.op_id = publication.operation_id
+           AND receipt.step = 'visibility_switch'
+           AND receipt.intent_sha256 = publication.intent_sha256
+          JOIN fanhao_images.actor_profile_image_staging stage
+            ON stage.operation_id = publication.operation_id
+           AND stage.person_id = publication.person_id
+           AND stage.intent_sha256 = publication.intent_sha256
+          WHERE publication.person_id = ? AND publication.operation_id = ?
+        `).get(Number(personId), String(version)) || null;
+      }
       return corePersonAvatarRow(personId);
     },
     async cachedRemoteUrls(remoteUrls) {
