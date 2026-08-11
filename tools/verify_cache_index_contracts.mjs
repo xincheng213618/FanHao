@@ -103,13 +103,13 @@ try {
   fs.writeFileSync(path.join(rootA, "a.zip"), "a");
   fs.writeFileSync(path.join(rootB, "b.zip"), "b");
   const indexPath = path.join(tempDir, "index.json");
-  const serviceFor = (photoSetRoots) => createImageLibraryIndexService({
-    archiveExts: new Set([".zip"]), createId: (prefix, value) => `${prefix}:${value}`,
+  const serviceFor = (photoSetRoots, archiveExts = new Set([".zip"])) => createImageLibraryIndexService({
+    archiveExts, createId: (prefix, value) => `${prefix}:${value}`,
     directVideoExts: new Set([".mp4"]), ensureDataDir() {}, galleryMediaSources: [], imageLibraryIndexPath: indexPath,
     isExcludedDirName: () => false, isVideo: () => false, normalizeExt: (value) => path.extname(value).toLowerCase(),
     photoSetCoverUrl: () => "", photoSetRoots, readJsonFile: (filePath, fallback) => {
       try { return JSON.parse(fs.readFileSync(filePath, "utf8")); } catch { return fallback; }
-    }, safeStat: (value) => { try { return fs.statSync(value); } catch { return null; } }
+    }, safeStat: (value) => { try { return fs.statSync(value); } catch { return null; } }, videoExts: new Set([".mp4"])
   });
   const first = serviceFor([rootA]).getIndex();
   assert.equal(first.schemaVersion, CURRENT_INDEX_SCHEMA);
@@ -118,6 +118,7 @@ try {
   fs.writeFileSync(indexPath, JSON.stringify({ ...first, schemaVersion: CURRENT_INDEX_SCHEMA - 1, photoSets: [{ title: "stale" }] }));
   assert.equal(serviceFor([rootA]).getIndex().photoSets[0].title, "a", "old schemas must be rejected instead of being partially reused");
   assert.equal(serviceFor([rootB]).getIndex().photoSets[0].title, "b", "different configured roots must reject the persisted index");
+  assert.equal(serviceFor([rootA], new Set([".cbz"])).getIndex().photoSets.length, 0, "archive extension changes must reject cached parser output");
   fs.writeFileSync(indexPath, JSON.stringify({ ...first, parserVersion: PARSER_VERSION - 1, photoSets: [{ title: "stale" }] }));
   assert.equal(serviceFor([rootA]).getIndex().photoSets[0].title, "a", "a parser version bump must re-list the index");
   console.log("cache-index-contracts: ok");

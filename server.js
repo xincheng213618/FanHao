@@ -194,7 +194,8 @@ const imageLibraryIndexService = createImageLibraryIndexService({
   photoSetCoverUrl,
   photoSetRoots: PHOTO_SET_ROOTS,
   readJsonFile,
-  safeStat
+  safeStat,
+  videoExts: VIDEO_EXTS
 });
 const imageGalleryDbService = createImageGalleryDbService({
   dbPath: IMAGE_GALLERY_DB_PATH,

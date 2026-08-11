@@ -17,7 +17,7 @@
     "verify:library-merge": "node tools/verify_library_merge.mjs",
     "verify:core-images": "node tools/verify_core_image_store.mjs",
     "verify:gallery-db": "node tools/verify_image_gallery_db.mjs",
-    "verify:image-library": "node tools/verify_image_library_service.mjs && node tools/verify_cache_index_contracts.mjs",
+    "verify:image-library": "node tools/verify_image_library_service.mjs && node tools/verify_cache_index_contracts.mjs && node tools/verify_rescan_image_library.mjs",
     "verify:photo-reader": "node tools/verify_photo_reader_clients.mjs",
     "verify:archive-images": "node tools/verify_archive_image_service.mjs",
     "verify:photo-search": "node tools/verify_photo_search_clients.mjs",

@@ -7,9 +7,22 @@ function normalizedPath(value) {
   return path.resolve(String(value || "")).replace(/\\/g, "/").toLowerCase();
 }
 
-export function imageLibraryCacheIdentity({ galleryMediaSources = [], photoSetRoots = [] } = {}) {
+function sortedExtensions(values) {
+  return [...new Set([...(values || [])].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))].sort();
+}
+
+export function imageLibraryCacheIdentity({
+  archiveExts = [],
+  directVideoExts = [],
+  galleryMediaSources = [],
+  photoSetRoots = [],
+  videoExts = []
+} = {}) {
   return JSON.stringify({
     parserVersion: PARSER_VERSION,
+    archiveExts: sortedExtensions(archiveExts),
+    directVideoExts: sortedExtensions(directVideoExts),
+    videoExts: sortedExtensions(videoExts),
     photoSetRoots: photoSetRoots.map(normalizedPath),
     galleryMediaSources: galleryMediaSources.map((source) => ({
       kind: String(source?.kind || ""),

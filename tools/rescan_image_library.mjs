@@ -8,7 +8,7 @@ import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity, imageL
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, "..");
-const DATA_DIR = path.join(REPO_ROOT, "data");
+const DATA_DIR = path.resolve(process.env.FANHAO_DATA_DIR || path.join(REPO_ROOT, "data"));
 const IMAGE_LIBRARY_INDEX_PATH = path.join(DATA_DIR, "image-library-index.json");
 
 const EXCLUDED_DIRS = new Set(["$RECYCLE.BIN", "System Volume Information", "Recovery"]);
@@ -389,7 +389,13 @@ function writeIndex(index) {
 function buildIndex(options) {
   const photoRoots = parsePhotoSetRoots(process.env);
   const mediaSources = galleryMediaSources(process.env);
-  const cacheIdentity = imageLibraryCacheIdentity({ galleryMediaSources: mediaSources, photoSetRoots });
+  const cacheIdentity = imageLibraryCacheIdentity({
+    archiveExts: ARCHIVE_EXTS,
+    directVideoExts: DIRECT_VIDEO_EXTS,
+    galleryMediaSources: mediaSources,
+    photoSetRoots: photoRoots,
+    videoExts: VIDEO_EXTS
+  });
   const cached = readJsonFile(IMAGE_LIBRARY_INDEX_PATH, null);
   const existing = imageLibraryIndexMatches(cached, cacheIdentity) ? cached : {};
 

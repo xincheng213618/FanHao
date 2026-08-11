@@ -15,10 +15,11 @@ export function createImageLibraryIndexService({
   photoSetCoverUrl,
   photoSetRoots,
   readJsonFile,
-  safeStat
+  safeStat,
+  videoExts = []
 }) {
   let cache = null;
-  const cacheIdentity = imageLibraryCacheIdentity({ galleryMediaSources, photoSetRoots });
+  const cacheIdentity = imageLibraryCacheIdentity({ archiveExts, directVideoExts, galleryMediaSources, photoSetRoots, videoExts });
 
   function isArchiveFile(fileName) {
     return archiveExts.has(normalizeExt(fileName));
