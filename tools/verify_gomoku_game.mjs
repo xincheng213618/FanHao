@@ -38,6 +38,12 @@ for (const [relativePath, expectedHash] of expectedHashes) {
   }
 }
 
+const lfFixture = hashableAssetBytes("engine/fixture.js", Buffer.from("line one\nline two\n", "utf8"));
+const crlfFixture = hashableAssetBytes("engine/fixture.js", Buffer.from("line one\r\nline two\r\n", "utf8"));
+const bareCrFixture = hashableAssetBytes("engine/fixture.js", Buffer.from("line one\rline two\n", "utf8"));
+assertBytesEqual(crlfFixture, lfFixture, "CRLF text fixture should normalize to LF");
+assertBytesNotEqual(bareCrFixture, lfFixture, "bare CR text fixture must remain hash-significant");
+
 const indexHtml = read("public/games/gomoku/index.html");
 const gameScript = read("public/games/gomoku/gomoku.js");
 const workerScript = read("public/games/gomoku/engine-worker.js");
@@ -71,7 +77,15 @@ function read(relativePath) {
 function hashableAssetBytes(relativePath, bytes) {
   if (!relativePath.endsWith(".js")) return bytes;
   // Git may check this text asset out as CRLF on Windows; its engine bytes are otherwise unchanged.
-  return Buffer.from(bytes.toString("utf8").replace(/\r\n?/g, "\n"), "utf8");
+  return Buffer.from(bytes.toString("utf8").replace(/\r\n/g, "\n"), "utf8");
+}
+
+function assertBytesEqual(actual, expected, label) {
+  if (!actual.equals(expected)) throw new Error(`gomoku: ${label}`);
+}
+
+function assertBytesNotEqual(actual, expected, label) {
+  if (actual.equals(expected)) throw new Error(`gomoku: ${label}`);
 }
 
 function assertIncludes(text, expected, label) {

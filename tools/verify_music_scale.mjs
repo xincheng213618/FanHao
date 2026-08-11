@@ -27,13 +27,16 @@ const { routeFromUrl, routeUrl } = await import("../public/js/router.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
-const fixture = createMusicScaleFixture();
-const store = createMusicStore({
-  dbPath: fixture.dbPath,
-  roots: [fixture.musicRoot]
-});
+verifyMusicScaleFixtureCleanupSafety();
+let fixture = null;
+let store = null;
 
 try {
+  fixture = createMusicScaleFixture();
+  store = createMusicStore({
+    dbPath: fixture.dbPath,
+    roots: [fixture.musicRoot]
+  });
   const versionStrategyTracks = [
     { id: "original", title: "Belief", artist: "S.H.E", fileName: "Belief.mp3", sizeBytes: 8_000_000, bitDepth: 0, sampleRate: 44_100 },
     { id: "live", title: "Belief (Live)", artist: "S.H.E", fileName: "Belief (Live).flac", sizeBytes: 32_000_000, bitDepth: 24, sampleRate: 96_000 },
@@ -769,25 +772,29 @@ try {
     languages: summary.languages.map((item) => ({ name: item.name, tracks: item.trackCount }))
   }, null, 2));
 } finally {
-  store.invalidate();
-  fixture.cleanup();
+  store?.invalidate();
+  fixture?.cleanup();
 }
 
-function createMusicScaleFixture() {
-  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-music-scale-"));
+function createMusicScaleFixture(options = {}) {
+  const ownedDirectory = createOwnedMusicFixtureDirectory(options);
+  const fixtureDir = ownedDirectory.fixtureDir;
   const musicRoot = path.join(fixtureDir, "library");
   const dbPath = path.join(fixtureDir, "music.sqlite");
   const scannedAt = "2026-08-11T00:00:00.000Z";
-  fs.mkdirSync(musicRoot, { recursive: true });
+  let completed = false;
+  try {
+    fs.mkdirSync(musicRoot, { recursive: true });
 
-  const records = { artists: [], albums: [], tracks: [], lyrics: [] };
-  const artists = new Map();
-  const albums = new Map();
-  const states = [];
-  const rangePath = path.join(musicRoot, "fixture-range.flac");
-  fs.writeFileSync(rangePath, Buffer.alloc(2 * 1024 * 1024 + 1, 7));
+    const records = { artists: [], albums: [], tracks: [], lyrics: [] };
+    const artists = new Map();
+    const albums = new Map();
+    const states = [];
+    const rangePath = path.join(musicRoot, "fixture-range.flac");
+    fs.writeFileSync(rangePath, Buffer.alloc(2 * 1024 * 1024 + 1, 7));
+    if (options.failAt === "after-range-file") throw new Error("music scale fixture failure injection");
 
-  function addTrack({ artist, title, album, language, genre = "流行", ext = ".mp3", codec = "mp3", sizeBytes = 640_000, durationMs = 210_000, bitDepth = 16, sampleRate = 44_100, hasLyrics = false, sourcePath = "" }) {
+    function addTrack({ artist, title, album, language, genre = "流行", ext = ".mp3", codec = "mp3", sizeBytes = 640_000, durationMs = 210_000, bitDepth = 16, sampleRate = 44_100, hasLyrics = false, sourcePath = "" }) {
     let artistRecord = artists.get(artist);
     if (!artistRecord) {
       artistRecord = { id: `artist-${artists.size + 1}`, name: artist, language, tracks: [] };
@@ -837,7 +844,7 @@ function createMusicScaleFixture() {
     return track;
   }
 
-  const rangeTrack = addTrack({
+    const rangeTrack = addTrack({
     artist: "Fixture Range",
     title: "Fixture Range Track",
     album: "00 Fixture Range",
@@ -849,7 +856,7 @@ function createMusicScaleFixture() {
     sampleRate: 96_000,
     sourcePath: rangePath
   });
-  const blueLotus = addTrack({ artist: "许巍", title: "蓝莲花", album: "中文精选", language: "中文", hasLyrics: true });
+    const blueLotus = addTrack({ artist: "许巍", title: "蓝莲花", album: "中文精选", language: "中文", hasLyrics: true });
   addTrack({ artist: "周杰伦", title: "青花瓷", album: "青花瓷", language: "中文" });
   addTrack({ artist: "周杰伦", title: "周杰伦 Fixture One", album: "青花瓷", language: "中文" });
   addTrack({ artist: "周杰伦", title: "周杰伦 Fixture Two", album: "青花瓷", language: "中文" });
@@ -929,22 +936,137 @@ function createMusicScaleFixture() {
     database.close();
   }
 
-  const languageTrackCounts = Object.fromEntries(
+    const languageTrackCounts = Object.fromEntries(
     [...new Set(records.tracks.map((track) => track.language))]
       .sort()
       .map((language) => [language, records.tracks.filter((track) => track.language === language).length])
   );
-  return {
+    completed = true;
+    return {
     dbPath,
     musicRoot,
     trackCount: records.tracks.length,
     artistCount: records.artists.length,
     albumCount: records.albums.length,
     languageTrackCounts,
+      cleanup: ownedDirectory.cleanup
+    };
+  } finally {
+    if (!completed) ownedDirectory.cleanup();
+  }
+}
+
+function createOwnedMusicFixtureDirectory(options = {}) {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-music-scale-"));
+  let ownership = null;
+  let handedOff = false;
+  try {
+    ownership = captureMusicFixtureOwnership(fixtureDir);
+    options.onFixtureDirectory?.(fixtureDir);
+    handedOff = true;
+    return createMusicFixtureOwner(fixtureDir, ownership);
+  } finally {
+    if (!handedOff && ownership) cleanupMusicFixtureDirectory(fixtureDir, ownership);
+  }
+}
+
+function createMusicFixtureOwner(fixtureDir, ownership = captureMusicFixtureOwnership(fixtureDir)) {
+  let cleaned = false;
+  return {
+    fixtureDir,
     cleanup() {
-      fs.rmSync(fixtureDir, { recursive: true, force: true });
+      if (cleaned) return;
+      cleanupMusicFixtureDirectory(fixtureDir, ownership);
+      cleaned = true;
     }
   };
+}
+
+function captureMusicFixtureOwnership(fixtureDir) {
+  const tempRootPath = path.dirname(fixtureDir);
+  const targetStat = fs.statSync(fixtureDir);
+  return {
+    fixtureDir,
+    tempRootPath,
+    tempRoot: canonicalMusicFixturePath(tempRootPath),
+    target: canonicalMusicFixturePath(fixtureDir),
+    device: String(targetStat.dev),
+    inode: String(targetStat.ino)
+  };
+}
+
+function cleanupMusicFixtureDirectory(fixtureDir, ownership) {
+  const tempRoot = canonicalMusicFixturePath(ownership.tempRootPath);
+  const target = canonicalMusicFixturePath(fixtureDir);
+  const separator = path.sep;
+  if (target === tempRoot) throw new Error("music scale fixture cleanup refused to remove its temp root");
+  if (!path.basename(target).startsWith("fanhao-music-scale-")) throw new Error("music scale fixture cleanup refused an unexpected target name");
+  if (!target.startsWith(`${tempRoot}${separator}`)) throw new Error("music scale fixture cleanup refused a target outside its temp root");
+  if (tempRoot !== ownership.tempRoot || target !== ownership.target) throw new Error("music scale fixture cleanup refused a replaced path");
+  const targetStat = fs.statSync(fixtureDir);
+  if (String(targetStat.dev) !== ownership.device || String(targetStat.ino) !== ownership.inode) {
+    throw new Error("music scale fixture cleanup refused a replacement target");
+  }
+  fs.rmSync(fixtureDir, { recursive: true, force: false });
+}
+
+function canonicalMusicFixturePath(value) {
+  const resolved = path.normalize(fs.realpathSync.native(value)).replace(/[\\/]+$/u, "");
+  return process.platform === "win32" ? resolved.toLocaleLowerCase("en-US") : resolved;
+}
+
+function verifyMusicScaleFixtureCleanupSafety() {
+  const normal = createOwnedMusicFixtureDirectory();
+  normal.cleanup();
+  assert.equal(fs.existsSync(normal.fixtureDir), false, "a normally owned music fixture must be removed");
+
+  let failedFixtureDir = "";
+  assert.throws(
+    () => createMusicScaleFixture({
+      failAt: "after-range-file",
+      onFixtureDirectory: (fixtureDir) => { failedFixtureDir = fixtureDir; }
+    }),
+    /music scale fixture failure injection/
+  );
+  assert.ok(failedFixtureDir, "the failure injection must create a fixture directory first");
+  assert.equal(fs.existsSync(failedFixtureDir), false, "a mid-creation failure must clean its owned fixture");
+
+  const replaced = createOwnedMusicFixtureDirectory();
+  const movedPath = `${replaced.fixtureDir}-moved`;
+  try {
+    fs.renameSync(replaced.fixtureDir, movedPath);
+    fs.mkdirSync(replaced.fixtureDir);
+    const replacementSentinel = path.join(replaced.fixtureDir, "replacement-sentinel.txt");
+    fs.writeFileSync(replacementSentinel, "must survive refused cleanup");
+    assert.throws(() => replaced.cleanup(), /music scale fixture cleanup refused/);
+    assert.equal(fs.existsSync(replacementSentinel), true, "a replacement directory must not be removed");
+  } finally {
+    cleanupExistingMusicFixtureDirectory(replaced.fixtureDir);
+    cleanupExistingMusicFixtureDirectory(movedPath);
+  }
+
+  const linked = createOwnedMusicFixtureDirectory();
+  const linkedMovedPath = `${linked.fixtureDir}-moved`;
+  const outside = createOwnedMusicFixtureDirectory();
+  try {
+    const outsideSentinel = path.join(outside.fixtureDir, "outside-sentinel.txt");
+    fs.writeFileSync(outsideSentinel, "must survive replaced-link cleanup");
+    fs.renameSync(linked.fixtureDir, linkedMovedPath);
+    fs.symlinkSync(outside.fixtureDir, linked.fixtureDir, process.platform === "win32" ? "junction" : "dir");
+    assert.throws(() => linked.cleanup(), /music scale fixture cleanup refused/);
+    assert.equal(fs.existsSync(outsideSentinel), true, "a replaced link must not reach outside its original fixture");
+  } finally {
+    const linkStat = fs.lstatSync(linked.fixtureDir, { throwIfNoEntry: false });
+    if (linkStat?.isSymbolicLink()) fs.unlinkSync(linked.fixtureDir);
+    cleanupExistingMusicFixtureDirectory(linked.fixtureDir);
+    cleanupExistingMusicFixtureDirectory(linkedMovedPath);
+    outside.cleanup();
+  }
+}
+
+function cleanupExistingMusicFixtureDirectory(fixtureDir) {
+  if (!fs.statSync(fixtureDir, { throwIfNoEntry: false })) return;
+  createMusicFixtureOwner(fixtureDir).cleanup();
 }
 
 function assertNoRelativeImportCycles(directory) {
