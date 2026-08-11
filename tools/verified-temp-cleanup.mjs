@@ -5,6 +5,7 @@ import path from "node:path";
 const QUARANTINE_PREFIX = ".fanhao-cleanup-quarantine-";
 const QUARANTINE_PAYLOAD = "payload";
 const pendingQuarantines = new WeakMap();
+const pendingQuarantinesByPath = new Map();
 
 function callFs(fsOps, name, ...args) {
   const operation = fsOps?.[name] || fs[name];
@@ -112,8 +113,18 @@ export function createVerifiedTempDir(prefix, options = {}) {
   }
 }
 
+// Once a directory has entered quarantine, failures expose error.quarantinePath.
+// A createVerifiedTempDir handle remembers that identity for cleanup retries.
+// Legacy no-token callers must recover through quarantinePath; retrying the
+// original path is deliberately unsupported because it may now be a replacement.
 export function removeVerifiedTempDir(tempDir, ownership = null, options = {}) {
   const fsOps = options.fsOps || null;
+  if (!ownership) {
+    const pendingByPath = pendingQuarantinesByPath.get(normalizedResolvedPath(tempDir));
+    if (pendingByPath) {
+      return removeQuarantinedPayload(pendingByPath.quarantine, pendingByPath.ownership, fsOps);
+    }
+  }
   const token = ownership || captureCurrentOwnership(tempDir, fsOps);
   if (!token) return false;
   const pending = pendingQuarantines.get(token);
@@ -148,11 +159,11 @@ export function removeVerifiedTempDir(tempDir, ownership = null, options = {}) {
     const originalEntry = lstatIfPresent(tempDir, fsOps);
     if (!payloadEntry) removeEmptyQuarantineParent(quarantine, token, fsOps);
     if (!payloadEntry && !originalEntry && isMissingPathError(error)) return false;
-    if (payloadEntry && !originalEntry) pendingQuarantines.set(token, quarantine);
+    if (payloadEntry && !originalEntry) rememberPendingQuarantine(token, quarantine);
     throw withQuarantineDetails(error, quarantine, false);
   }
 
-  pendingQuarantines.set(token, quarantine);
+  rememberPendingQuarantine(token, quarantine);
   return removeQuarantinedPayload(quarantine, token, fsOps);
 }
 
@@ -226,6 +237,20 @@ function assertQuarantineParent(quarantine, ownership, fsOps) {
 function removeQuarantinedPayload(quarantine, ownership, fsOps) {
   try {
     assertQuarantineParent(quarantine, ownership, fsOps);
+  } catch (error) {
+    throw withQuarantineDetails(error, quarantine, false);
+  }
+
+  if (!lstatIfPresent(quarantine.payloadPath, fsOps)) {
+    // rmSync can finish deleting the payload and then report an I/O error.
+    // Only a still-owned parent plus a missing payload is a safe completed
+    // state. An injected sibling is preserved because parent cleanup is rmdir.
+    forgetPendingQuarantine(ownership, quarantine);
+    removeEmptyQuarantineParent(quarantine, ownership, fsOps);
+    return true;
+  }
+
+  try {
     assertPlainDirectory(quarantine.payloadPath, {
       device: ownership.device,
       fsOps,
@@ -247,7 +272,7 @@ function removeQuarantinedPayload(quarantine, ownership, fsOps) {
     );
   }
 
-  pendingQuarantines.delete(ownership);
+  forgetPendingQuarantine(ownership, quarantine);
   removeEmptyQuarantineParent(quarantine, ownership, fsOps);
   return true;
 }
@@ -289,6 +314,21 @@ function withQuarantineDetails(error, quarantine, ownedDirectoryPreserved) {
     failure.ownedDirectoryPreserved = ownedDirectoryPreserved;
   } catch {}
   return failure;
+}
+
+function rememberPendingQuarantine(ownership, quarantine) {
+  const record = Object.freeze({ ownership, quarantine });
+  pendingQuarantines.set(ownership, quarantine);
+  pendingQuarantinesByPath.set(normalizedResolvedPath(quarantine.payloadPath), record);
+}
+
+function forgetPendingQuarantine(ownership, quarantine) {
+  pendingQuarantines.delete(ownership);
+  const key = normalizedResolvedPath(quarantine.payloadPath);
+  const record = pendingQuarantinesByPath.get(key);
+  if (record?.ownership === ownership && record?.quarantine === quarantine) {
+    pendingQuarantinesByPath.delete(key);
+  }
 }
 
 function isMissingPathError(error) {
