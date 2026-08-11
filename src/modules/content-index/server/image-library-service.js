@@ -11,6 +11,7 @@ export function createImageLibraryService({
   photoSetService
 }) {
   let cachedPhotoCatalog = null;
+  let cachedSummaryStatic = null;
   let imageSearchDocumentCache = new WeakMap();
 
   function facetCounts(items, fieldName) {
@@ -119,17 +120,12 @@ export function createImageLibraryService({
 
   function summaryPayload(options = {}) {
     const index = getImageLibraryIndex(options);
-    const photoSets = Array.isArray(index.photoSets) ? index.photoSets : [];
-    const mediaItems = Array.isArray(index.mediaItems) ? index.mediaItems : [];
-    const westernItems = mediaItemsByKind(mediaItems, "western");
-    const movieItems = mediaItemsByKind(mediaItems, "movie");
-    const tvItems = mediaItemsByKind(mediaItems, "tv");
-    const screenItems = mediaItemsByKinds(mediaItems, ["movie", "tv"]);
+    const summary = preparedSummaryStatic(index);
     const mangaCount = mangaService.cacheDirs().length;
     const cache = options.includeCache === false ? null : imageReaderCacheStatus();
     return {
       schemaVersion: 1,
-      scannedAt: index.scannedAt || "",
+      scannedAt: summary.scannedAt,
       mangaRoot: mangaService.rootStatus(),
       photoRoots: index.roots || photoSetRootStatuses(),
       mediaRoots: index.mediaRoots || galleryMediaRootStatuses(),
@@ -144,6 +140,23 @@ export function createImageLibraryService({
       } : null,
       totals: {
         manga: mangaCount,
+        ...summary.totals
+      },
+      facets: summary.facets
+    };
+  }
+
+  function preparedSummaryStatic(index) {
+    if (cachedSummaryStatic?.index === index) return cachedSummaryStatic.value;
+    const photoSets = Array.isArray(index.photoSets) ? index.photoSets : [];
+    const mediaItems = Array.isArray(index.mediaItems) ? index.mediaItems : [];
+    const westernItems = mediaItemsByKind(mediaItems, "western");
+    const movieItems = mediaItemsByKind(mediaItems, "movie");
+    const tvItems = mediaItemsByKind(mediaItems, "tv");
+    const screenItems = mediaItemsByKinds(mediaItems, ["movie", "tv"]);
+    const value = {
+      scannedAt: index.scannedAt || "",
+      totals: {
         photoSets: photoSets.length,
         western: westernItems.length,
         movies: movieItems.length,
@@ -161,6 +174,8 @@ export function createImageLibraryService({
         media: mediaFacets(screenItems)
       }
     };
+    cachedSummaryStatic = { index, value };
+    return value;
   }
 
   function itemsPayload(url, options = {}) {

@@ -17,7 +17,9 @@ photoSets[4].title = "[YITUYU艺图语]2023.04.18 午后玫瑰 柳柳杨柳柳_[
 photoSets[5].title = "[YITUYU艺图语]2023.04.19 只有作品_[22P／100MB]";
 let coverUrlCalls = 0;
 let cacheStatusCalls = 0;
-const imageIndex = { scannedAt: "2026-07-11T00:00:00.000Z", roots: [], mediaRoots: [], photoSets, mediaItems: [] };
+let mangaCount = 0;
+let photoRootStatus = "ready";
+let imageIndex = { scannedAt: "2026-07-11T00:00:00.000Z", photoSets, mediaItems: [] };
 
 const service = createImageLibraryService({
   clampInteger(value, fallback, min, max) {
@@ -31,7 +33,7 @@ const service = createImageLibraryService({
     return { root: "", exists: true, maxBytes: 0, currentBytes: 0, overBytes: 0, fileCount: 0, cleanupIntervalMs: 0 };
   },
   mangaService: {
-    cacheDirs: () => [],
+    cacheDirs: () => Array.from({ length: mangaCount }, (_, index) => `manga-${index}`),
     publicSummary: (value) => value,
     rootStatus: () => ({ root: "", exists: false })
   },
@@ -46,7 +48,7 @@ const service = createImageLibraryService({
     tvSeriesRowsMap: () => new Map()
   },
   photoCollectionRootValue: "__fanhao_photo_collection_root__",
-  photoSetRootStatuses: () => [],
+  photoSetRootStatuses: () => [{ root: "T:\\photos", status: photoRootStatus }],
   photoSetService: {
     coverUrl: (id) => {
       coverUrlCalls += 1;
@@ -61,6 +63,21 @@ assert.equal("photoSets" in summary, false, "summary payload must not include th
 const mediaSummary = service.summaryPayload({ includeCache: false });
 assert.equal(mediaSummary.cache, null, "media summary should skip the image reader cache scan");
 assert.equal(cacheStatusCalls, 1, "cache-free summary should not collect image reader cache entries");
+mangaCount = 2;
+photoRootStatus = "changed";
+photoSets.push(photo("cached", "缓存分类", "", "缓存人物", "缓存/001.zip", 700, "2026-07-05T00:00:00.000Z"));
+const cachedSummary = service.summaryPayload();
+assert.equal(cachedSummary.totals.photoSets, 6, "the same index identity should reuse static summary totals");
+assert.equal(cachedSummary.totals.manga, 2, "manga totals should remain dynamic");
+assert.equal(cachedSummary.photoRoots[0].status, "changed", "root statuses should remain dynamic");
+assert.equal(cacheStatusCalls, 2, "cache status should still refresh for a cached summary");
+imageIndex = { ...imageIndex, scannedAt: "2026-07-12T00:00:00.000Z", photoSets: [...photoSets] };
+const refreshedSummary = service.summaryPayload({ includeCache: false });
+assert.equal(refreshedSummary.totals.photoSets, 7, "a new index identity should rebuild static summary totals");
+assert.equal(refreshedSummary.scannedAt, "2026-07-12T00:00:00.000Z");
+assert.equal(cacheStatusCalls, 2, "cache-free refreshed summaries should still skip cache status work");
+photoSets.pop();
+imageIndex = { ...imageIndex, photoSets };
 
 const collectionList = service.itemsPayload(url({ mode: "photo", photoView: "collections", sort: "count", limit: "20" }));
 assert.equal(collectionList.total, 3);
@@ -162,13 +179,13 @@ assert.deepEqual(punctuationSearch.searchTerms, ["no108"]);
 service.itemsPayload(url({ mode: "photo", photoView: "albums", q: "a1", limit: "20" }));
 assert.equal(coverUrlCalls, photoSets.length, "prepared photo items should be reused across list and search requests");
 
-imageIndex.mediaItems = [
+imageIndex = { ...imageIndex, mediaItems: [
   media("movie-1", "movie", "电影", "电影一"),
   media("tv-1", "tv", "华语剧", "剧集一", "第 1 集"),
   media("tv-2", "tv", "华语剧", "剧集一", "第 2 集"),
   media("western-1", "western", "欧美", "人物甲", "视频一"),
   media("western-2", "western", "欧美", "人物甲", "视频二")
-];
+] };
 
 const mediaWorks = service.itemsPayload(url({ mode: "media", limit: "20" }));
 assert.equal(mediaWorks.total, 2, "media list should return one movie plus one grouped TV work");
