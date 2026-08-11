@@ -235,6 +235,9 @@ function assertQuarantineParent(quarantine, ownership, fsOps) {
 }
 
 function removeQuarantinedPayload(quarantine, ownership, fsOps) {
+  if (!lstatIfPresent(quarantine.parentPath, fsOps)) {
+    return finalizeQuarantineParent(quarantine, ownership, fsOps);
+  }
   try {
     assertQuarantineParent(quarantine, ownership, fsOps);
   } catch (error) {
@@ -244,10 +247,8 @@ function removeQuarantinedPayload(quarantine, ownership, fsOps) {
   if (!lstatIfPresent(quarantine.payloadPath, fsOps)) {
     // rmSync can finish deleting the payload and then report an I/O error.
     // Only a still-owned parent plus a missing payload is a safe completed
-    // state. An injected sibling is preserved because parent cleanup is rmdir.
-    forgetPendingQuarantine(ownership, quarantine);
-    removeEmptyQuarantineParent(quarantine, ownership, fsOps);
-    return true;
+    // state. Parent finalization remains retryable until its outcome is known.
+    return finalizeQuarantineParent(quarantine, ownership, fsOps);
   }
 
   try {
@@ -272,8 +273,45 @@ function removeQuarantinedPayload(quarantine, ownership, fsOps) {
     );
   }
 
+  return finalizeQuarantineParent(quarantine, ownership, fsOps);
+}
+
+function finalizeQuarantineParent(quarantine, ownership, fsOps) {
+  if (lstatIfPresent(quarantine.payloadPath, fsOps)) {
+    throw withQuarantineDetails(
+      new Error(`Quarantined temporary directory still exists: ${quarantine.payloadPath}`),
+      quarantine,
+      false
+    );
+  }
+  if (!lstatIfPresent(quarantine.parentPath, fsOps)) {
+    forgetPendingQuarantine(ownership, quarantine);
+    return true;
+  }
+
+  try {
+    assertQuarantineParent(quarantine, ownership, fsOps);
+    // Never recursively remove the parent. ENOTEMPTY/EEXIST means a foreign
+    // sibling won the race and is deliberately retained with the parent.
+    callFs(fsOps, "rmdirSync", quarantine.parentPath);
+  } catch (error) {
+    if (isMissingPathError(error) && !lstatIfPresent(quarantine.parentPath, fsOps)) {
+      forgetPendingQuarantine(ownership, quarantine);
+      return true;
+    }
+    if (isNonEmptyDirectoryError(error)) {
+      try {
+        assertQuarantineParent(quarantine, ownership, fsOps);
+      } catch (identityError) {
+        throw withQuarantineDetails(identityError, quarantine, false);
+      }
+      forgetPendingQuarantine(ownership, quarantine);
+      return true;
+    }
+    throw withQuarantineDetails(error, quarantine, false);
+  }
+
   forgetPendingQuarantine(ownership, quarantine);
-  removeEmptyQuarantineParent(quarantine, ownership, fsOps);
   return true;
 }
 
@@ -333,6 +371,10 @@ function forgetPendingQuarantine(ownership, quarantine) {
 
 function isMissingPathError(error) {
   return ["ENOENT", "ENOTDIR"].includes(String(error?.code || "").toUpperCase());
+}
+
+function isNonEmptyDirectoryError(error) {
+  return ["ENOTEMPTY", "EEXIST"].includes(String(error?.code || "").toUpperCase());
 }
 
 function assertUsableIdentity(entry, label) {
