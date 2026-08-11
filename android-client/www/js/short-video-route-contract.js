@@ -42,6 +42,11 @@ export function normalizeShortVideoSearchTab(value) {
 }
 
 export function canonicalShortVideoViewParams(view, params = {}) {
+  if (view === "shortVideoCollections") return {};
+  if (view === "shortVideoCollection") {
+    const collectionId = String(params.collectionId || params.id || "").trim();
+    return collectionId ? { collectionId } : {};
+  }
   const query = String(params.query || params.q || "").trim();
   const author = String(params.author || "all").trim() || "all";
   const source = normalizeShortVideoSource(params.source || params.origin);

@@ -1,4 +1,5 @@
-import { createShortVideoApi } from "./api.js?v=20260730-mobile-sync-01";
+import { createShortVideoApi } from "./api.js?v=20260811-custom-collections-01";
+import { createShortVideoCollections } from "./collections/controller.js?v=20260811-custom-collections-01";
 import { createShortVideoListController } from "./list/controller.js?v=20260811-android-author-status-01";
 import { createShortVideoListView } from "./list/view.js?v=20260811-android-author-status-01";
 import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260712-native-short-video-only-02";
@@ -34,6 +35,7 @@ export function createShortVideoViews(deps) {
   Object.assign(context, createShortVideoSearch(context));
   Object.assign(context, createShortVideoListView(context));
   Object.assign(context, createShortVideoNativeFeed(context));
+  Object.assign(context, createShortVideoCollections(context));
 
   async function renderList(params = {}, renderGuard = null) {
     deactivateTransientUi();
@@ -69,6 +71,16 @@ export function createShortVideoViews(deps) {
     if (listState.query) await context.loadList(renderGuard);
   }
 
+  async function renderCollections(params = {}, renderGuard = null) {
+    deactivateTransientUi();
+    await context.renderCollections(params, renderGuard);
+  }
+
+  async function renderCollection(params = {}, renderGuard = null) {
+    deactivateTransientUi();
+    await context.renderCollection(params, renderGuard);
+  }
+
   function deactivateTransientUi() {
     document.querySelector(".short-video-sort-overlay")?.remove();
     context.resetListLoadMoreObserver();
@@ -78,6 +90,8 @@ export function createShortVideoViews(deps) {
     deactivate: deactivateTransientUi,
     getSearchState: context.getSearchState,
     renderList,
+    renderCollection,
+    renderCollections,
     renderSearch,
     submitSearch: context.submitSearch
   });

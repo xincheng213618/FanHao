@@ -9,11 +9,11 @@ import { createMediaViewer } from "./js/media-viewer.js?v=20260702-novel-local-m
 import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=20260712-module-chrome-03";
 import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=20260702-novel-local-manage-74";
 import { createSearchHistory } from "./js/search-history.js";
-import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=20260811-android-author-status-01";
+import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=20260811-custom-collections-01";
 
 const els = getElements();
 let activeUrl = normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_URL);
-const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "categories", "codePrefixes", "codePrefixDetail", "studios", "studioDetail", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelSearch", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "tools"]);
+const RESTORABLE_VIEWS = new Set(["home", "people", "works", "rankings", "categories", "codePrefixes", "codePrefixDetail", "studios", "studioDetail", "history", "search", "personDetail", "workDetail", "channel", "photoDetail", "mangaDetail", "mangaChapter", "mediaDetail", "novels", "novelSearch", "novelDetail", "novelReader", "music", "shortVideos", "shortVideoSearch", "shortVideoCollections", "shortVideoCollection", "tools"]);
 const DEFAULT_VIEW = "categories";
 const DEFAULT_PHOTO_CATEGORY = "我喜欢的";
 const PRIMARY_LABELS = {
@@ -203,7 +203,7 @@ function sanitizeViewParams(view, params = {}) {
       ...(trackId ? { trackId } : {})
     };
   }
-  if (view === "shortVideos" || view === "shortVideoSearch") {
+  if (["shortVideos", "shortVideoSearch", "shortVideoCollections", "shortVideoCollection"].includes(view)) {
     return canonicalShortVideoViewParams(view, params);
   }
   if (view === "mediaDetail") {

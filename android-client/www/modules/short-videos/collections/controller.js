@@ -1,0 +1,282 @@
+const COLLECTION_PAGE_LIMIT = 48;
+
+export function createShortVideoCollections(context = {}) {
+  const { api, els, getActiveUrl, showView } = context;
+  const openNativeShortVideoFeed = (...args) => context.openNativeShortVideoFeed(...args);
+  const renderCard = (...args) => context.renderCard(...args);
+  const shortVideoToast = (...args) => context.shortVideoToast(...args);
+  const state = {
+    collections: [],
+    loaded: false,
+    loading: false,
+    active: null
+  };
+
+  async function loadCollections(force = false) {
+    if (state.loaded && !force) return state.collections;
+    if (state.loading) return state.collections;
+    state.loading = true;
+    try {
+      const data = await api.fetch(null, "/api/short-videos/collections");
+      state.collections = Array.isArray(data?.collections) ? data.collections : [];
+      state.loaded = true;
+      return state.collections;
+    } finally {
+      state.loading = false;
+    }
+  }
+
+  async function renderCollections(_params = {}, renderGuard = null) {
+    configurePage("我的清单");
+    const shell = collectionShell("我的清单", "创建清单后，可从任意短视频封面加入。");
+    const create = createForm(async (name) => {
+      const result = await api.fetch(null, "/api/short-videos/collections", {
+        method: "POST",
+        body: { name }
+      });
+      state.collections.push(result.collection);
+      state.loaded = true;
+      showView("shortVideoCollection", { collectionId: result.collection.id }, { push: true });
+    });
+    const list = document.createElement("div");
+    list.className = "short-video-mobile-collections-list";
+    shell.append(create.form, create.status, list);
+    els.viewContent.append(shell);
+    try {
+      const collections = await loadCollections();
+      if (renderGuard && !renderGuard()) return;
+      renderCollectionList(list, collections);
+    } catch (error) {
+      create.status.textContent = error?.message || "清单读取失败";
+    }
+  }
+
+  async function renderCollection(params = {}, renderGuard = null) {
+    const collectionId = String(params.collectionId || "").trim();
+    configurePage("清单内容");
+    const shell = collectionShell("正在读取清单…", "按加入时间排列");
+    const list = document.createElement("div");
+    list.className = "short-video-mobile-grid short-video-mobile-collection-grid";
+    const status = document.createElement("div");
+    status.className = "short-video-mobile-collection-status";
+    shell.append(status, list);
+    els.viewContent.append(shell);
+    try {
+      const data = await api.fetch(null, `/api/short-videos/collections/${encodeURIComponent(collectionId)}/videos?limit=${COLLECTION_PAGE_LIMIT}&offset=0`);
+      if (renderGuard && !renderGuard()) return;
+      state.active = data;
+      shell.querySelector("h2").textContent = data.collection?.name || "我的清单";
+      shell.querySelector("p").textContent = `${Math.max(0, Number(data.total || 0))} 条 · 按加入时间排列`;
+      renderCollectionVideos(list, status, data);
+    } catch (error) {
+      status.textContent = error?.message || "清单读取失败";
+    }
+  }
+
+  async function showCollectionPicker(video) {
+    document.querySelector(".short-video-mobile-collection-picker")?.remove();
+    const overlay = document.createElement("div");
+    overlay.className = "short-video-mobile-collection-picker";
+    const sheet = document.createElement("section");
+    sheet.className = "short-video-mobile-collection-sheet";
+    sheet.setAttribute("role", "dialog");
+    sheet.setAttribute("aria-modal", "true");
+    sheet.setAttribute("aria-label", "加入清单");
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    title.textContent = "加入清单";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "关闭";
+    close.addEventListener("click", () => overlay.remove());
+    header.append(title, close);
+    const create = createForm(async (name) => {
+      const result = await api.fetch(null, "/api/short-videos/collections", { method: "POST", body: { name } });
+      state.collections.push(result.collection);
+      state.loaded = true;
+      await addVideo(result.collection, video);
+      overlay.remove();
+    }, "创建并加入");
+    const list = document.createElement("div");
+    list.className = "short-video-mobile-collection-picker-list";
+    sheet.append(header, create.form, create.status, list);
+    overlay.append(sheet);
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) overlay.remove();
+    });
+    document.body.append(overlay);
+    try {
+      const collections = await loadCollections();
+      for (const collection of collections) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.collectionId = collection.id;
+        const name = document.createElement("span");
+        name.textContent = collection.name;
+        const count = document.createElement("small");
+        count.textContent = `${Math.max(0, Number(collection.itemCount || 0))} 条`;
+        button.append(name, count);
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          try {
+            await addVideo(collection, video);
+            overlay.remove();
+          } catch (error) {
+            create.status.textContent = error?.message || "加入清单失败";
+            button.disabled = false;
+          }
+        });
+        list.append(button);
+      }
+      create.input.focus();
+    } catch (error) {
+      create.status.textContent = error?.message || "清单读取失败";
+    }
+  }
+
+  async function addVideo(collection, video) {
+    const result = await api.fetch(null, `/api/short-videos/collections/${encodeURIComponent(collection.id)}/videos/${encodeURIComponent(video.id)}`, {
+      method: "PUT"
+    });
+    if (result.added) collection.itemCount = Math.max(0, Number(collection.itemCount || 0)) + 1;
+    shortVideoToast(result.added ? `已加入“${collection.name}”` : `已经在“${collection.name}”中`);
+  }
+
+  function renderCollectionList(target, collections) {
+    target.innerHTML = "";
+    if (!collections.length) {
+      const empty = document.createElement("div");
+      empty.className = "short-video-mobile-empty";
+      empty.textContent = "还没有清单";
+      target.append(empty);
+      return;
+    }
+    for (const collection of collections) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "short-video-mobile-collection-row";
+      button.dataset.collectionId = collection.id;
+      const name = document.createElement("strong");
+      name.textContent = collection.name;
+      const count = document.createElement("span");
+      count.textContent = `${Math.max(0, Number(collection.itemCount || 0))} 条`;
+      button.append(name, count);
+      button.addEventListener("click", () => showView("shortVideoCollection", { collectionId: collection.id }, { push: true }));
+      target.append(button);
+    }
+  }
+
+  function renderCollectionVideos(target, status, data) {
+    target.innerHTML = "";
+    status.textContent = "";
+    const videos = Array.isArray(data.videos) ? data.videos : [];
+    if (!videos.length) {
+      const empty = document.createElement("div");
+      empty.className = "short-video-mobile-empty";
+      empty.textContent = "这个清单还没有视频";
+      target.append(empty);
+      return;
+    }
+    const feedPath = `/api/short-videos/collections/${encodeURIComponent(data.collection.id)}/videos`;
+    for (const video of videos) {
+      const wrap = document.createElement("div");
+      wrap.className = "short-video-mobile-collection-card";
+      wrap.append(renderCard(video, {
+        allowCollections: false,
+        onOpen: () => openNativeShortVideoFeed(video, {
+          videos,
+          hasMore: data.hasMore,
+          feedUrl: new URL(feedPath, getActiveUrl()).toString()
+        })
+      }));
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "short-video-mobile-collection-remove";
+      remove.dataset.videoId = video.id;
+      remove.textContent = "移除";
+      remove.addEventListener("click", async () => {
+        remove.disabled = true;
+        try {
+          await api.fetch(null, `${feedPath}/${encodeURIComponent(video.id)}`, { method: "DELETE" });
+          data.videos = data.videos.filter((item) => item.id !== video.id);
+          data.total = Math.max(0, Number(data.total || 0) - 1);
+          const summary = state.collections.find((item) => item.id === data.collection.id);
+          if (summary) summary.itemCount = data.total;
+          renderCollectionVideos(target, status, data);
+          shellMeta(data);
+          shortVideoToast("已移出清单");
+        } catch (error) {
+          status.textContent = error?.message || "移出清单失败";
+          remove.disabled = false;
+        }
+      });
+      wrap.append(remove);
+      target.append(wrap);
+    }
+  }
+
+  function shellMeta(data) {
+    const shell = els.viewContent.querySelector(".short-video-mobile-collection-page");
+    if (shell) shell.querySelector("p").textContent = `${Math.max(0, Number(data.total || 0))} 条 · 按加入时间排列`;
+  }
+
+  function createForm(onCreate, label = "创建") {
+    const form = document.createElement("form");
+    form.className = "short-video-mobile-collection-create";
+    const input = document.createElement("input");
+    input.maxLength = 40;
+    input.placeholder = "新清单名称";
+    input.setAttribute("aria-label", "新清单名称");
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.textContent = label;
+    const status = document.createElement("div");
+    status.className = "short-video-mobile-collection-status";
+    status.setAttribute("role", "status");
+    form.append(input, submit);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      input.disabled = true;
+      submit.disabled = true;
+      status.textContent = "";
+      try {
+        await onCreate(input.value);
+      } catch (error) {
+        status.textContent = error?.message || "清单创建失败";
+        input.disabled = false;
+        submit.disabled = false;
+        input.focus();
+      }
+    });
+    return { form, input, status };
+  }
+
+  function collectionShell(titleText, description) {
+    els.viewContent.innerHTML = "";
+    const shell = document.createElement("section");
+    shell.className = "short-video-mobile-list short-video-mobile-collection-page";
+    const header = document.createElement("header");
+    header.className = "short-video-mobile-collection-header";
+    const title = document.createElement("h2");
+    title.textContent = titleText;
+    const copy = document.createElement("p");
+    copy.textContent = description;
+    header.append(title, copy);
+    shell.append(header);
+    return shell;
+  }
+
+  function configurePage(title) {
+    context.setActiveBottom("shortVideos");
+    els.viewKicker.textContent = "短视频";
+    els.viewTitle.textContent = title;
+    els.viewMeta.textContent = "";
+    els.viewContent.className = "content-list short-video-mobile-content";
+  }
+
+  return Object.freeze({
+    renderCollection,
+    renderCollections,
+    showCollectionPicker
+  });
+}

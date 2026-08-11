@@ -383,6 +383,17 @@ function verifyWebShortVideoRouter() {
     "/short-videos?q=okaymm&account=banned&source=authors",
     "the banned-account author search must keep a stable shareable URL"
   );
+  const collection = webShortVideoRouteFromUrl("http://127.0.0.1/short-videos/collections/svc_fixture/videos/fixture-video-1#saved");
+  assert.deepEqual(
+    { mode: collection.shortVideoMode, collectionId: collection.shortVideoCollectionId, videoId: collection.shortVideoId },
+    { mode: "collection", collectionId: "svc_fixture", videoId: "fixture-video-1" },
+    "the dedicated web router must parse nested collection playback routes"
+  );
+  assert.equal(
+    webShortVideoRouteUrl(collection, { initialParams: new URLSearchParams(), hash: "#saved" }),
+    "/short-videos/collections/svc_fixture/videos/fixture-video-1#saved",
+    "collection playback routes must preserve stable history and hash state"
+  );
 }
 
 const styles = readNormalized(path.join(moduleDir, "styles.css"));
@@ -391,6 +402,10 @@ for (const style of ["list"]) {
 }
 
 const androidEntrySource = readNormalized(path.join(moduleDir, "android-module.js"));
+const androidApiSource = readNormalized(path.join(moduleDir, "api.js"));
+const androidTransportSource = readNormalized(path.join(root, "android-client", "www", "js", "api.js"));
+const androidCollectionsSource = readNormalized(path.join(moduleDir, "collections", "controller.js"));
+const androidCollectionCardActionSource = readNormalized(path.join(moduleDir, "collections", "card-action.js"));
 const androidListSource = readNormalized(path.join(moduleDir, "list", "view.js"));
 const androidListControllerSource = readNormalized(path.join(moduleDir, "list", "controller.js"));
 const androidAccountStatusViewSource = readNormalized(path.join(moduleDir, "list", "account-status-view.js"));
@@ -406,10 +421,13 @@ const androidNativeFeedContractJavaSource = readNormalized(path.join(root, "andr
 const androidNativeFeedModelsSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "ShortVideoFeedModels.java"));
 const androidNativePlayerLayoutSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "res", "layout", "native_short_player_view.xml"));
 assert(androidEntrySource.includes('view: "shortVideoSearch"'), "Android short-video search must use a dedicated route");
+assert(androidEntrySource.includes('view: "shortVideoCollections"') && androidEntrySource.includes('view: "shortVideoCollection"') && androidEntrySource.includes('textContent = "清单"'), "Android short videos must expose stable collection index/detail routes and a direct chrome entry");
+assert(androidCollectionsSource.includes('method: "POST"') && androidCollectionsSource.includes('method: "PUT"') && androidCollectionsSource.includes('method: "DELETE"') && androidCollectionsSource.includes("feedUrl: new URL(feedPath"), "Android collections must create, add, remove, and open the same paged feed contract without native permissions");
+assert(androidCollectionCardActionSource.includes('aria-label", "加入清单"') && androidListSource.includes("appendCollectionCardAction") && androidApiSource.includes("fetchJson") && androidTransportSource.includes('"X-FanHao-Client": "android"') && androidTransportSource.includes("JSON.stringify(requestOptions.body)"), "Android list cards must use the authenticated WebView mutation transport for collection selection");
 assert(androidEntrySource.includes("short-video-chrome-row"), "Android short-video chrome must keep search and groups in one compact row");
 assert(!androidEntrySource.includes("short-video-chrome-sort"), "Android short-video chrome must not reserve a separate sorting tag");
 assert(androidEntrySource.includes("if (value === activeGroup)") && androidEntrySource.includes("openSortDialog(host, params)"), "tapping the active Android short-video group must open sorting");
-assert(androidEntrySource.includes("row.append(tabs, search)"), "Android short-video search must stay at the far right of the scrollable group row");
+assert(androidEntrySource.includes("row.append(tabs, collections, search)"), "Android short-video search must stay at the far right of the scrollable group row while collections remain directly accessible");
 assert(androidEntrySource.includes("short-video-sort-overlay"), "Android short-video sorting must open a compact dialog");
 assert(androidEntrySource.includes('["recommended", "推荐"]') && androidEntrySource.includes('["history", "历史"]') && androidEntrySource.includes('["following", "关注"]') && androidEntrySource.includes("FOLLOWING_AUTHOR_SORT_OPTIONS"), "Android short-video chrome must expose recommended, history, following, and author choices");
 assert(androidListSource.includes("short-video-search-page-form"), "Android short-video search route must render its own search form");
@@ -490,7 +508,7 @@ const views = createShortVideoViews({
 });
 assert.deepEqual(
   Object.keys(views).sort(),
-  ["deactivate", "getSearchState", "renderList", "renderSearch", "submitSearch"],
+  ["deactivate", "getSearchState", "renderCollection", "renderCollections", "renderList", "renderSearch", "submitSearch"],
   "short-video public contract changed"
 );
 assert.equal(views.getSearchState().authorAccountStatus, "all", "Android short-video state must initialize account status independently from following filters");
@@ -561,6 +579,7 @@ function verifyWebDedicatedEntry() {
   const listWindowSource = readNormalized(path.join(root, "public", "modules", "short-videos", "list-window.js"));
   const mediaCacheSource = readNormalized(path.join(root, "public", "modules", "short-videos", "media-cache.js"));
   const playerSourceLifecycleSource = readNormalized(path.join(root, "public", "modules", "short-videos", "player-source-lifecycle.js"));
+  const collectionsControllerSource = readNormalized(path.join(root, "public", "modules", "short-videos", "collections-controller.js"));
   const playbackRenditionPolicySource = readNormalized(path.join(root, "public", "modules", "short-videos", "playback-rendition-policy.js"));
   const authorPagesSource = readNormalized(path.join(root, "public", "modules", "short-videos", "author-pages.js"));
   const authorCollectorPollSource = readNormalized(path.join(root, "public", "modules", "short-videos", "author-collector-poll.js"));
@@ -606,6 +625,7 @@ function verifyWebDedicatedEntry() {
   assert(indexSource.includes('document.documentElement.classList.add("app-module-loading")') && !indexSource.includes('if (!shortVideoEntry) document.documentElement.classList.add("app-module-loading")'), "short-video routes must share the initial visibility guard");
   assert(entrySource.includes("await bootShortVideoApp().catch"), "short-video startup must keep its initial route hidden until the route is ready");
   assert(playerSource.includes('from "./state.js?v=') && playerSource.includes("ensureShortVideoState(state"), "the Web short-video composition root must delegate state normalization and persistence helpers");
+  assert(playerSource.includes("createShortVideoCollectionsController") && playerSource.includes('railButton("清单"') && collectionsControllerSource.includes('className = "short-video-collection-sidebar"') && collectionsControllerSource.includes('method: "PATCH"') && collectionsControllerSource.includes('method: "DELETE"'), "Web collections must stay in a dedicated controller while exposing sidebar, picker, rename, and removal behavior");
   assert(playerSource.includes("createShortVideoAuthorPages") && playerSource.includes("author-pages.js?v="), "the Web short-video composition root must delegate author routes, collection, and profile rendering");
   assert(playerSource.includes('from "./icons.js?v=') && !playerSource.includes("function iconMarkup("), "the Web short-video composition root must delegate its SVG registry and icon controls");
   assert(playerSource.includes("createShortVideoListWindow") && playerSource.includes("list-window.js?v="), "the Web short-video composition root must delegate virtual-list and cover-loading lifecycle");
@@ -713,7 +733,7 @@ function verifyWebDedicatedEntry() {
   assert(shortVideoStoreSource.includes('"id, source_path, file_name, title, author_name, duration_ms, size_bytes, mtime_ms, actual_width, actual_height, actual_bit_rate, actual_codec, actual_frame_rate"') && shortVideoRuntimeSource.includes("const expectedSize = Math.max(0, Number(file.size || 0))") && !shortVideoRuntimeSource.includes("const sourceStat = safeStat(file.path)"), "shared-cache hits and transcode diagnostics must resolve from catalog metadata without waking the original video disk");
   assert(shortVideoRuntimeSource.includes("storedSmoothVideoProbe(job.file)") && shortVideoRuntimeSource.includes("store.updateActualVideoPlaybackMetadata(job.id, probe)"), "smooth-cache decisions must reuse persisted codec and frame rate and save fallback probes");
   assert(playerSource.includes("createShortVideoTranscodeStatusButton") && transcodeStatusButtonSource.includes("转码管理") && transcodeStatusButtonSource.includes('window.open("/short-videos/transcoding", "_blank", "noopener,noreferrer")') && !transcodeStatusButtonSource.includes("popup=yes") && !transcodeStatusButtonSource.includes("screen?.availWidth"), "the short-video discovery toolbar must open transcode management as a normal new browser tab instead of a popup window");
-  assert(shortVideoStateSource.includes('["likes", "transcoding"].includes(state.shortVideo.mode)'), "short-video state normalization must preserve the dedicated transcode management mode during app startup");
+  assert(shortVideoStateSource.includes('["collection", "likes", "transcoding"].includes(state.shortVideo.mode)'), "short-video state normalization must preserve collection and transcode management modes during app startup");
   assert(playerSource.includes("createShortVideoTranscodeManagementPage") && playerSource.includes('route.shortVideoMode === "transcoding"') && transcodeManagementPageSource.includes("view.mount(page)") && transcodeStatusViewSource.includes("/api/short-videos/playback-cache-status") && transcodeStatusViewSource.includes("FFmpeg 转码管理") && transcodeStatusViewSource.includes("renderCurrentJobs") && transcodeStatusViewSource.includes("renderPipeline") && transcodeStatusViewSource.includes("renderRecent"), "the dedicated transcode page must show live work, explain the pipeline, and retain recent in-memory outcomes");
   assert(transcodeStatusViewSource.includes("autoRefreshEnabled") && transcodeStatusViewSource.includes('content?.querySelector("details[open]")') && transcodeStatusViewSource.includes("hasDialogSelection") && transcodeStatusViewSource.includes("copyText(valueText)"), "the transcode status window must pause DOM replacement during selection or expanded paths and provide one-click path copying");
   assert(transcodeStatusViewSource.includes("hasMountedStatusRegions") && transcodeStatusViewSource.includes("replaceStatusRegion") && transcodeStatusViewSource.includes("regionSignatures[name] === signature") && transcodeStatusViewSource.includes("renderError(error, !latestData)") && transcodeStatusViewSource.includes("const showBusy = Boolean(options.force)"), "one-second transcode polling must preserve unchanged page regions and the manual refresh label instead of flashing the entire management page");
@@ -862,7 +882,7 @@ function verifyWebDedicatedEntry() {
   assert(likeDistributionSource.includes("function renderLikeDistributionDetailTable") && likeDistributionSource.includes('pending.textContent = "展开后生成研究图表…"') && likeDistributionSource.includes('legacy.addEventListener("toggle", scheduleLegacyBuild)') && likeDistributionSource.includes("legacyBody.replaceChildren(renderLikeDistributionLogChart(bins))") && likeDistributionSource.includes("window.requestAnimationFrame"), "the collapsed research-only distribution chart and table must be built lazily across animation frames instead of inflating the initial statistics DOM");
   assert(playerSource.includes('railButton("识别"') && playerSource.includes('railButton(video.sound ? "原声" : "听抖音"'), "AI and sound actions must remain available from the side rail after caption cleanup");
   assert(authorPanelSource.includes('sort.className = "short-video-author-sort-select"') && authorPanelSource.includes('sort.setAttribute("aria-label", "作者作品排序")') && authorPanelSource.includes('params.set("sort", nextSort)') && authorPanelSource.includes("switchToAuthorWorksFeed(video, author, panel, authorWorksSort)") && viewerSource.includes(".short-video-author-sort-select"), "author side-panel works must expose server-backed sorting and preserve that order when entering the author feed");
-  assert(playerSource.includes("disposeShortVideoMedia") && playerSource.includes('querySelectorAll?.("video, audio")'), "short-video work switches must explicitly stop both video and gallery background audio");
+  assert(playerSource.includes("disposeShortVideoMedia") && playerSourceLifecycleSource.includes('querySelectorAll?.("video, audio")'), "short-video work switches must explicitly stop both video and gallery background audio");
   const activePlayerSource = playerSource.slice(playerSource.indexOf("function activePlayer()"), playerSource.indexOf("function closeTransientPlayerControls()"));
   assert(!activePlayerSource.includes("short-video-gallery-image"), "gallery live-photo clips must not become the global sound player");
   const promoteAdjacentSource = playerSource.slice(playerSource.indexOf("function promoteAdjacentPanelDom"), playerSource.indexOf("function promoteAdjacentMedia"));

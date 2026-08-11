@@ -1,5 +1,5 @@
 export async function fetchJson(baseUrl, path, options = {}) {
-  const { timeoutMs = 20000, signal = null } = options;
+  const { timeoutMs = 20000, signal = null, ...requestOptions } = options;
   const effectiveTimeoutMs = requestTimeout(baseUrl, timeoutMs);
   const controller = new AbortController();
   const abortFromExternal = () => controller.abort();
@@ -11,11 +11,21 @@ export async function fetchJson(baseUrl, path, options = {}) {
 
   let response;
   try {
+    const headers = {
+      Accept: "application/json",
+      ...(requestOptions.headers || {}),
+      "X-FanHao-Client": "android"
+    };
+    const body = requestOptions.body && typeof requestOptions.body !== "string"
+      ? JSON.stringify(requestOptions.body)
+      : requestOptions.body;
+    if (body) headers["Content-Type"] = headers["Content-Type"] || "application/json";
     response = await fetch(`${baseUrl}${path}`, {
+      ...requestOptions,
       headers: {
-        Accept: "application/json",
-        "X-FanHao-Client": "android"
+        ...headers
       },
+      ...(body ? { body } : {}),
       signal: controller.signal
     });
   } catch (error) {

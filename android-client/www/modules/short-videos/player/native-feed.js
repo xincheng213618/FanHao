@@ -54,6 +54,7 @@ export function createShortVideoNativeFeed(context = {}) {
   }
 
   function nativeShortVideoFeedUrl(options = {}) {
+    if (options.feedUrl) return new URL(options.feedUrl, getActiveUrl()).toString();
     const url = new URL("/api/short-videos", getActiveUrl());
     const query = options.query ?? listState.query;
     const author = options.author ?? listState.author;
