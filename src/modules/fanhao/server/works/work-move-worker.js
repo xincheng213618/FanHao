@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import { parentPort, workerData } from "node:worker_threads";
 
@@ -73,6 +74,34 @@ async function sameFile(targetPath, sourceFile) {
   }
 }
 
+function hashFile(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+async function matchingContent(sourcePath, targetPath, files, targetFiles) {
+  parentPort.postMessage({ type: "progress", phase: "verifying", completedFiles: 0, totalFiles: files.length, completedBytes: 0, totalBytes: files.reduce((sum, file) => sum + file.size, 0) });
+  let completedBytes = 0;
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    const target = targetFiles.get(file.relativePath.toLowerCase());
+    if (!target || target.size !== file.size) return false;
+    const [sourceHash, targetHash] = await Promise.all([
+      hashFile(path.join(sourcePath, file.relativePath)),
+      hashFile(path.join(targetPath, target.relativePath))
+    ]);
+    if (sourceHash !== targetHash) return false;
+    completedBytes += file.size;
+    parentPort.postMessage({ type: "progress", phase: "verifying", completedFiles: index + 1, totalFiles: files.length, completedBytes, totalBytes: files.reduce((sum, item) => sum + item.size, 0) });
+  }
+  return true;
+}
+
 async function copyTree(sourcePath, stagingPath) {
   const tree = await collectTree(sourcePath);
   let completedFiles = 0;
@@ -106,14 +135,14 @@ async function copyTree(sourcePath, stagingPath) {
 async function verifyTrees(sourcePath, targetPath) {
   const [source, target] = await Promise.all([collectTree(sourcePath), collectTree(targetPath)]);
   if (source.files.length !== target.files.length || source.totalBytes !== target.totalBytes) return false;
-  const targetFiles = new Map(target.files.map((file) => [file.relativePath.toLowerCase(), file.size]));
-  return source.files.every((file) => targetFiles.get(file.relativePath.toLowerCase()) === file.size);
+  const targetFiles = new Map(target.files.map((file) => [file.relativePath.toLowerCase(), file]));
+  return matchingContent(sourcePath, targetPath, source.files, targetFiles);
 }
 
 async function sourceIsCoveredByTarget(sourcePath, targetPath) {
   const [source, target] = await Promise.all([collectTree(sourcePath), collectTree(targetPath)]);
-  const targetFiles = new Map(target.files.map((file) => [file.relativePath.toLowerCase(), file.size]));
-  return source.files.every((file) => targetFiles.get(file.relativePath.toLowerCase()) === file.size);
+  const targetFiles = new Map(target.files.map((file) => [file.relativePath.toLowerCase(), file]));
+  return matchingContent(sourcePath, targetPath, source.files, targetFiles);
 }
 
 async function stageMove() {
@@ -144,6 +173,7 @@ async function stageMove() {
 
 async function cleanupSource() {
   const { sourcePath, targetPath } = workerData;
+  await delay(Number(workerData.delayBeforeCleanupMs || 0));
   if (await pathType(targetPath) !== "directory") throw new Error("目标作品文件夹不存在，拒绝清理源目录");
   if (await pathType(sourcePath) === "directory") {
     if (!(await sourceIsCoveredByTarget(sourcePath, targetPath))) throw new Error("源目录仍有目标目录未覆盖的文件，拒绝继续清理");

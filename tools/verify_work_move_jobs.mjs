@@ -4,6 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
 import { createAdminCoreMutationService } from "../src/modules/fanhao/server/admin/admin-core-mutation-service.js";
 import { createPersonLibraryService } from "../src/modules/fanhao/server/people/person-library-service.js";
 import { createWorkMoveJobService } from "../src/modules/fanhao/server/works/work-move-job-service.js";
@@ -41,7 +42,9 @@ function createDatabase(root, source) {
   return db;
 }
 
-function createAdminFixture(db, fixture, { failCommit = false } = {}) {
+function createAdminFixture(db, fixture, { failCommit = false, failImageCommitOnce = false } = {}) {
+  let imageCommits = 0;
+  let imagesCommitted = false;
   const plan = {
     version: 1,
     workId: "1",
@@ -56,6 +59,7 @@ function createAdminFixture(db, fixture, { failCommit = false } = {}) {
     before: [{ person_id: "source", name: "Source" }]
   };
   return {
+    get imageCommits() { return imageCommits; },
     plan,
     prepareWorkMove() {
       return plan;
@@ -77,6 +81,15 @@ function createAdminFixture(db, fixture, { failCommit = false } = {}) {
         db.exec("ROLLBACK");
         throw error;
       }
+    },
+    inspectWorkMoveImages() {
+      return imagesCommitted ? "completed" : "pending";
+    },
+    commitWorkMoveImages() {
+      imageCommits += 1;
+      if (failImageCommitOnce && imageCommits === 1) throw new Error("fixture attached image commit failed");
+      imagesCommitted = true;
+      return { committed: true, updated: 1 };
     },
     finalizeWorkMove(currentPlan, move) {
       return {
@@ -100,6 +113,16 @@ async function waitForJob(service, jobId, statuses, timeoutMs = 12_000) {
   throw new Error(`timed out waiting for ${jobId}: ${service.get(jobId).status}/${service.get(jobId).phase}`);
 }
 
+async function waitForPhase(service, jobId, phase, timeoutMs = 12_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const job = service.get(jobId);
+    if (job.phase === phase) return job;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${jobId} phase ${phase}`);
+}
+
 async function verifySuccessfulMoveAndIdempotency() {
   const fixture = await createFixture("success", 12);
   const db = createDatabase(fixture.root, fixture.source);
@@ -110,13 +133,15 @@ async function verifySuccessfulMoveAndIdempotency() {
     workerDataPatch: { forceCopy: true, delayPerFileMs: 8 }
   });
   const first = service.start("1", { personId: "target", idempotencyKey: "success-fixture" });
-  const duplicate = service.start("1", { personId: "target", idempotencyKey: "success-fixture" });
+  const duplicate = service.start("1", { personId: "target ", idempotencyKey: "success-fixture" });
   assert.equal(duplicate.id, first.id, "same idempotency key must reuse one durable job");
   assert.equal(duplicate.attempts, 1, "duplicate enqueue must not increment attempts");
+  const crossWork = service.start("2", { personId: "target", idempotencyKey: "success-fixture" });
+  assert.notEqual(crossWork.id, first.id, "the same client key on another work must not return an unrelated job");
   assert.throws(
-    () => service.start("1", { personId: "other-target", idempotencyKey: "conflicting-fixture" }),
+    () => service.start("1", { personId: "other-target", idempotencyKey: "success-fixture" }),
     (error) => error?.statusCode === 409 && String(error.message).includes(first.id),
-    "one work must not run two conflicting file moves concurrently"
+    "the request fingerprint must distinguish a different target before enforcing one active move per work"
   );
   const completed = await waitForJob(service, first.id, ["completed"]);
   assert.equal(completed.progress, 1);
@@ -126,6 +151,7 @@ async function verifySuccessfulMoveAndIdempotency() {
   const databaseRow = db.prepare("SELECT * FROM move_records WHERE work_id = '1'").get();
   assert.equal(path.resolve(databaseRow.local_path), path.resolve(fixture.target));
   assert.equal(databaseRow.person_id, "target");
+  assert.equal(admin.imageCommits, 1, "the attached image phase must complete before source cleanup");
   await service.close();
   db.close();
 }
@@ -133,8 +159,20 @@ async function verifySuccessfulMoveAndIdempotency() {
 async function verifyActualAdminSqliteCommit() {
   const fixture = await createFixture("admin-commit", 3);
   const db = new DatabaseSync(path.join(fixture.root, "admin-fixture.sqlite"));
+  db.prepare("ATTACH DATABASE ? AS fanhao_images").run(path.join(fixture.root, "admin-images-fixture.sqlite"));
   db.exec(`
-    CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, display_name TEXT, folder_path TEXT);
+    CREATE TABLE people (
+      id INTEGER PRIMARY KEY, name TEXT, name_search TEXT, display_name TEXT, folder_path TEXT,
+      movie_count INTEGER, status TEXT, error TEXT, source TEXT, created_at TEXT, updated_at TEXT, gender TEXT
+    );
+    CREATE TABLE person_external_refs (
+      id INTEGER PRIMARY KEY, person_id INTEGER, provider TEXT, external_key TEXT, url TEXT,
+      source TEXT, created_at TEXT, updated_at TEXT, UNIQUE(provider, external_key)
+    );
+    CREATE TABLE person_aliases (
+      id INTEGER PRIMARY KEY, person_id INTEGER, alias TEXT, alias_search TEXT, source TEXT,
+      UNIQUE(person_id, alias_search)
+    );
     CREATE TABLE works (id INTEGER PRIMARY KEY, fields_json TEXT, updated_at TEXT);
     CREATE TABLE work_people (
       work_id INTEGER, person_id INTEGER, role TEXT, sort_order INTEGER, source TEXT,
@@ -146,8 +184,10 @@ async function verifyActualAdminSqliteCommit() {
     CREATE TABLE local_files (
       id INTEGER PRIMARY KEY, local_work_id INTEGER, file_path TEXT, relative_path TEXT, updated_at TEXT
     );
-    CREATE TABLE images (id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, local_path TEXT, updated_at TEXT);
-    INSERT INTO people VALUES (1, 'Source', 'Source', NULL), (2, 'Target', 'Target', NULL);
+    CREATE TABLE fanhao_images.images (id INTEGER PRIMARY KEY, owner_type TEXT, owner_id INTEGER, local_path TEXT, updated_at TEXT);
+    INSERT INTO people VALUES
+      (1, 'Source', 'source', 'Source', NULL, 0, 'ok', NULL, 'fixture', '', '', 'unknown'),
+      (2, 'Target', 'target', 'Target', NULL, 0, 'ok', NULL, 'fixture', '', '', 'unknown');
     INSERT INTO works VALUES (1, '[{"label":"演员","value":"Source"}]', '');
     INSERT INTO work_people VALUES (1, 1, 'actor', 0, 'fixture', '', '');
   `);
@@ -201,7 +241,7 @@ async function verifyActualAdminSqliteCommit() {
     resolveLibraryPersonByPublicId: (id) => id === "2"
       ? { id: "2", name: "Target", relativePath: fixture.targetPerson, sourcePaths: [fixture.targetPerson] }
       : { id: "1", name: "Source", relativePath: fixture.sourcePerson, sourcePaths: [fixture.sourcePerson] },
-    resolveLibraryWorkByPublicId: () => ({ id: "1", title: "WORK-001", missingLocal: false }),
+    resolveLibraryWorkByPublicId: (id) => ({ id: String(id), title: `WORK-${id}`, missingLocal: false }),
     safeStat: (value) => { try { return fs.statSync(value); } catch { return null; } },
     sourcePathToAbsolute: (value) => path.resolve(value),
     resetWorkSearch() {},
@@ -209,22 +249,104 @@ async function verifyActualAdminSqliteCommit() {
     uniquePersonNames: (values) => [...new Set((values || []).filter(Boolean))]
   });
 
+  const ghostParent = path.join(fixture.root, "ghost-person");
+  await fs.promises.mkdir(path.join(ghostParent, path.basename(fixture.source)), { recursive: true });
+  const peopleBeforeFailure = db.prepare("SELECT COUNT(*) AS count FROM people").get().count;
+  assert.throws(
+    () => admin.prepareWorkMove("1", "", {
+      createPerson: { name: "Ghost Person", folderName: "ghost-person", rootPath: fixture.root, aliases: ["Ghost Alias"] }
+    }),
+    (error) => error?.statusCode === 409,
+    "target collision must fail before creating a person"
+  );
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM people").get().count, peopleBeforeFailure);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM person_aliases").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM person_external_refs").get().count, 0);
+
+  db.prepare("INSERT INTO works VALUES (2, '[]', '')").run();
+  db.prepare("INSERT INTO local_works VALUES (2, 2, ?, '', '')").run(path.join(fixture.root, "missing-source", "WORK-002"));
+  const missingTargetPerson = path.join(fixture.root, "must-not-exist-person");
+  assert.throws(
+    () => admin.prepareWorkMove("2", "", {
+      createPerson: { name: "Must Not Exist", folderName: path.basename(missingTargetPerson), rootPath: fixture.root }
+    }),
+    (error) => error?.statusCode === 404,
+    "missing source must fail before mkdir or person writes"
+  );
+  assert.equal(fs.existsSync(missingTargetPerson), false);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM people").get().count, peopleBeforeFailure);
+
   const plan = admin.prepareWorkMove("1", "2", { targetDirectory: fixture.targetPerson });
   await fs.promises.cp(fixture.source, fixture.target, { recursive: true, errorOnExist: true, force: false });
   admin.commitWorkMove(plan);
   const localWork = db.prepare("SELECT * FROM local_works WHERE id = 1").get();
   const localFile = db.prepare("SELECT * FROM local_files WHERE id = 1").get();
-  const image = db.prepare("SELECT * FROM images WHERE id = 1").get();
+  const imageBeforeCompensation = db.prepare("SELECT * FROM images WHERE id = 1").get();
   const actor = db.prepare("SELECT person_id, source FROM work_people WHERE work_id = 1 AND role = 'actor'").get();
   assert.equal(path.resolve(localWork.local_path), path.resolve(fixture.target));
   assert.equal(path.resolve(localFile.file_path), path.resolve(replacePrefix(infoPath, fixture.source, fixture.target)));
-  assert.equal(path.resolve(image.local_path), path.resolve(replacePrefix(imagePath, fixture.source, fixture.target)));
+  assert.equal(path.resolve(imageBeforeCompensation.local_path), path.resolve(imagePath), "main commit must not pretend the attached image database is atomic");
   assert.equal(actor.person_id, 2);
   assert.equal(actor.source, "manual_move");
   assert.equal(admin.inspectWorkMove(plan), "target");
+  assert.equal(admin.inspectWorkMoveImages(plan), "pending");
+  admin.commitWorkMoveImages(plan);
+  const imageAfterCompensation = db.prepare("SELECT * FROM images WHERE id = 1").get();
+  assert.equal(path.resolve(imageAfterCompensation.local_path), path.resolve(replacePrefix(imagePath, fixture.source, fixture.target)));
+  assert.equal(admin.inspectWorkMoveImages(plan), "completed");
   const result = admin.finalizeWorkMove(plan, { mode: "copy" });
   assert.equal(result.moveMode, "copy");
   assert.equal(reconciled.workId, "1");
+  db.close();
+}
+
+async function verifyResultBeforeSourceCleanup() {
+  const fixture = await createFixture("result-before-cleanup", 4);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const service = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    workerDataPatch: { forceCopy: true, delayBeforeCleanupMs: 250 }
+  });
+  const started = service.start("1", { personId: "target", idempotencyKey: "result-before-cleanup" });
+  const cleanupPending = await waitForPhase(service, started.id, "cleanup");
+  assert.equal(cleanupPending.status, "cleanup_pending");
+  assert.equal(cleanupPending.result?.moved, true, "durable result must exist before source cleanup starts");
+  assert.equal(cleanupPending.result?.work?.relativePath, fixture.target);
+  assert.equal(fs.existsSync(fixture.source), true, "fixture source must still exist while the cleanup worker is delayed");
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.target));
+  assert.equal(admin.imageCommits, 1);
+  await waitForJob(service, started.id, ["completed"]);
+  await service.close();
+  db.close();
+}
+
+async function verifyAttachedImageStageRecovery() {
+  const fixture = await createFixture("image-stage-recovery", 4);
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture, { failImageCommitOnce: true });
+  const firstService = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    workerDataPatch: { forceCopy: true }
+  });
+  const started = firstService.start("1", { personId: "target", idempotencyKey: "image-stage-recovery" });
+  const pending = await waitForJob(firstService, started.id, ["cleanup_pending"]);
+  assert.equal(pending.status, "cleanup_pending");
+  assert.equal(pending.phase, "images");
+  assert.match(pending.error, /attached image commit failed/);
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.target));
+  assert.equal(fs.existsSync(fixture.source), true, "source cleanup must not start before the image phase commits");
+  assert.equal(fs.existsSync(fixture.target), true);
+  await firstService.close();
+
+  const recoveredService = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db });
+  const completed = await waitForJob(recoveredService, started.id, ["completed"]);
+  assert.equal(completed.result?.moved, true);
+  assert.equal(admin.imageCommits, 2, "restart recovery must replay the attached image phase idempotently");
+  assert.equal(fs.existsSync(fixture.source), false);
+  await recoveredService.close();
   db.close();
 }
 
@@ -366,6 +488,45 @@ async function verifyRollbackOnDatabaseFailure() {
   db.close();
 }
 
+async function verifySilentWorkerExitFails() {
+  const fixture = await createFixture("silent-worker", 2);
+  const silentWorkerPath = path.join(fixture.root, "silent-worker.mjs");
+  await fs.promises.writeFile(silentWorkerPath, "process.exit(0);\n", "utf8");
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const service = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    workerUrl: pathToFileURL(silentWorkerPath)
+  });
+  const started = service.start("1", { personId: "target", idempotencyKey: "silent-worker" });
+  const failed = await waitForJob(service, started.id, ["failed"], 3_000);
+  assert.match(failed.error, /没有返回完成消息/);
+  assert.equal(fs.existsSync(fixture.source), true);
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.source));
+  await service.close();
+  db.close();
+}
+
+async function verifySameSizeCorruptionBlocksDeletion() {
+  const fixture = await createFixture("same-size-corruption", 3);
+  await fs.promises.cp(fixture.source, fixture.target, { recursive: true, errorOnExist: true, force: false });
+  const corruptPath = path.join(fixture.target, "part-0", "fixture-0.bin");
+  const originalSize = (await fs.promises.stat(corruptPath)).size;
+  await fs.promises.writeFile(corruptPath, Buffer.alloc(originalSize, 0xff));
+  const db = createDatabase(fixture.root, fixture.source);
+  const admin = createAdminFixture(db, fixture);
+  const service = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db });
+  const started = service.start("1", { personId: "target", idempotencyKey: "same-size-corruption" });
+  const failed = await waitForJob(service, started.id, ["failed"]);
+  assert.match(failed.error, /不一致|拒绝自动删除/);
+  assert.equal(fs.existsSync(fixture.source), true, "same-size content mismatch must preserve the source");
+  assert.equal(fs.existsSync(fixture.target), true, "an unproven target must be preserved for explicit inspection");
+  assert.equal(path.resolve(db.prepare("SELECT local_path FROM move_records WHERE work_id = '1'").get().local_path), path.resolve(fixture.source));
+  await service.close();
+  db.close();
+}
+
 async function verifyHttpResponsivenessDuringCopy() {
   const fixture = await createFixture("responsive", 24);
   const db = createDatabase(fixture.root, fixture.source);
@@ -417,10 +578,14 @@ async function safeCleanup(root) {
 try {
   await verifySuccessfulMoveAndIdempotency();
   await verifyActualAdminSqliteCommit();
+  await verifyResultBeforeSourceCleanup();
+  await verifyAttachedImageStageRecovery();
   await verifyIncrementalMemoryReconciliation();
   await verifyCrashRecoveryFromPreparedCopy();
   await verifyPartialCleanupRecovery();
   await verifyRollbackOnDatabaseFailure();
+  await verifySilentWorkerExitFails();
+  await verifySameSizeCorruptionBlocksDeletion();
   await verifyHttpResponsivenessDuringCopy();
   verifySourceStructure();
   console.log("work-move-jobs: ok (idempotency, checkpoint recovery, rollback, responsive HTTP)");

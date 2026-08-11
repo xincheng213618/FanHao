@@ -17,16 +17,39 @@ function stableValue(value) {
   return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
 }
 
+function normalizedPathKey(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const normalized = path.normalize(text).replace(/\\/g, "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function normalizedCreatePerson(value) {
+  if (!value || typeof value !== "object") return null;
+  return {
+    name: String(value.name || "").trim(),
+    displayName: String(value.displayName || "").trim(),
+    folderName: String(value.folderName || "").trim(),
+    rootPath: normalizedPathKey(value.rootPath || value.root),
+    actorUrl: String(value.javdbUrl || value.actorUrl || "").trim(),
+    gender: String(value.gender || "").trim().toLowerCase(),
+    aliases: [...new Set((Array.isArray(value.aliases) ? value.aliases : [])
+      .map((alias) => String(alias || "").trim())
+      .filter(Boolean))].sort((left, right) => left.localeCompare(right))
+  };
+}
+
 function requestKey(workId, body) {
   const explicit = String(body?.idempotencyKey || body?.requestId || "").trim();
-  if (explicit) return `client:${explicit.slice(0, 180)}`;
-  const identity = stableValue({
+  const request = stableValue({
     workId: String(workId || ""),
-    personId: String(body?.personId || ""),
-    targetDirectory: String(body?.targetDirectory || body?.targetPath || ""),
-    createPerson: body?.createPerson || null
+    personId: String(body?.personId || "").trim(),
+    targetDirectory: normalizedPathKey(body?.targetDirectory || body?.targetPath),
+    createPerson: normalizedCreatePerson(body?.createPerson)
   });
-  return `derived:${crypto.createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
+  const identity = explicit ? { clientKey: explicit.slice(0, 180), request } : { request };
+  const digest = crypto.createHash("sha256").update(JSON.stringify(stableValue(identity))).digest("hex");
+  return `${explicit ? "client" : "derived"}:${digest}`;
 }
 
 export function createWorkMoveJobService({
@@ -240,19 +263,31 @@ export function createWorkMoveJobService({
       }
 
       const databaseState = adminCoreMutationService.inspectWorkMove(plan);
-      let moveResult = json(job.result_json, null)?.move || null;
+      const persistedResult = json(job.result_json, null);
+      let moveResult = persistedResult?.move || (persistedResult?.moveMode ? { mode: persistedResult.moveMode } : null);
       if (databaseState === "source") {
         updateState(jobId, "running", "copying", "");
         moveResult = await runWorker(jobId, "stage", plan);
         updateState(jobId, "running", "filesystem_ready", "", { result: { move: moveResult } });
         adminCoreMutationService.commitWorkMove(plan);
+        updateState(jobId, "running", "main_committed", "", { result: { move: moveResult } });
       } else if (databaseState !== "target") {
         throw new Error("SQLite 中的作品路径已被其他操作修改，拒绝继续移动");
       }
 
-      updateState(jobId, "cleanup_pending", "cleanup", "", { result: { move: moveResult } });
-      await runWorker(jobId, "cleanup", plan);
+      if (adminCoreMutationService.inspectWorkMoveImages(plan) !== "completed") {
+        updateState(jobId, "running", "images", "", { result: { move: moveResult } });
+        adminCoreMutationService.commitWorkMoveImages(plan);
+      }
+      if (adminCoreMutationService.inspectWorkMoveImages(plan) !== "completed") {
+        throw new Error("图片库路径补偿尚未完成，拒绝清理源目录");
+      }
+      updateState(jobId, "running", "images_committed", "", { result: { move: moveResult } });
+
       const result = adminCoreMutationService.finalizeWorkMove(plan, moveResult || {});
+      updateState(jobId, "cleanup_pending", "reconciled", "", { result });
+      updateState(jobId, "cleanup_pending", "cleanup", "", { result });
+      await runWorker(jobId, "cleanup", plan);
       updateState(jobId, "completed", "completed", "", { result, finished: true, completeProgress: true });
     } catch (error) {
       if (closing) {
@@ -266,7 +301,7 @@ export function createWorkMoveJobService({
   async function handleFailure(jobId, plan, error) {
     const message = error?.message || String(error);
     if (plan && adminCoreMutationService.inspectWorkMove(plan) === "target") {
-      updateState(jobId, "cleanup_pending", "cleanup", message);
+      updateState(jobId, "cleanup_pending", row(jobId)?.phase || "main_committed", message);
       return;
     }
     if (!plan) {
@@ -331,7 +366,10 @@ export function createWorkMoveJobService({
       });
       worker.on("error", (error) => finish(reject, error));
       worker.on("exit", (code) => {
-        if (!settled && code !== 0) finish(reject, new Error(`后台文件操作异常退出：${code}`));
+        if (!settled) {
+          const detail = code === 0 ? "后台文件操作已退出但没有返回完成消息" : `后台文件操作异常退出：${code}`;
+          finish(reject, new Error(detail));
+        }
       });
     });
   }

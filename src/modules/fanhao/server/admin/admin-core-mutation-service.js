@@ -68,7 +68,7 @@ export function createAdminCoreMutationService({
     return matchedRoot;
   }
 
-  function createOrUpdateMoveTargetPerson(db, payload = {}) {
+  function previewMoveTargetPerson(payload = {}) {
     const displayName = cleanPersonNamePart(payload.displayName || payload.name);
     const name = cleanPersonNamePart(payload.name || displayName);
     const nameSearch = normalizePersonSearchValue(name);
@@ -90,76 +90,104 @@ export function createAdminCoreMutationService({
     const root = libraryRootForNewPerson(payload.rootPath || payload.root);
     const folderName = safeDirectoryName(payload.folderName || displayName || name, name);
     const folderPath = ensureLibraryDirectoryPath(path.join(root, folderName), "目标人物文件夹");
+    return { actorKey, displayName, folderPath, javdbUrl, name, nameSearch };
+  }
+
+  function removeDirectoryIfNewAndEmpty(folderPath, existedBefore) {
+    if (existedBefore) return;
+    try {
+      if (safeStat(folderPath)?.isDirectory() && fs.readdirSync(folderPath).length === 0) fs.rmdirSync(folderPath);
+    } catch {
+      // Preserve the database error; an empty validated directory is safe to inspect later.
+    }
+  }
+
+  function createOrUpdateMoveTargetPerson(db, payload = {}) {
+    const candidate = previewMoveTargetPerson(payload);
+    const { actorKey, displayName, folderPath, javdbUrl, name, nameSearch } = candidate;
+    const directoryExisted = Boolean(safeStat(folderPath)?.isDirectory());
     fs.mkdirSync(folderPath, { recursive: true });
 
     const now = new Date().toISOString();
-    const existing = db
-      .prepare(
-        `
-        SELECT *
-        FROM people
-        WHERE name_search = ?
-           OR lower(trim(name)) = lower(trim(?))
-           OR lower(trim(COALESCE(display_name, ''))) = lower(trim(?))
-        ORDER BY
-          CASE WHEN name = ? OR display_name = ? THEN 0 ELSE 1 END,
-          id ASC
-        LIMIT 1
-        `
-      )
-      .get(nameSearch, name, displayName || name, name, displayName || name);
-
-    let personId;
-    if (existing?.id) {
-      personId = Number(existing.id);
-      db
+    let existing = null;
+    let personId = null;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      existing = db
         .prepare(
           `
-          UPDATE people
-          SET
-            display_name = COALESCE(NULLIF(?, ''), display_name),
-            folder_path = COALESCE(NULLIF(?, ''), folder_path),
-            gender = COALESCE(NULLIF(?, ''), gender),
-            source = CASE WHEN source IS NULL OR source = '' THEN 'manual_move' ELSE source END,
-            updated_at = ?
-          WHERE id = ?
+          SELECT *
+          FROM people
+          WHERE name_search = ?
+             OR lower(trim(name)) = lower(trim(?))
+             OR lower(trim(COALESCE(display_name, ''))) = lower(trim(?))
+          ORDER BY
+            CASE WHEN name = ? OR display_name = ? THEN 0 ELSE 1 END,
+            id ASC
+          LIMIT 1
           `
         )
-        .run(displayName || name, folderPath, normalizePersonGender(payload.gender || existing.gender || "unknown"), now, personId);
-    } else {
-      const result = db
-        .prepare(
-          `
-          INSERT INTO people (name, name_search, display_name, folder_path, movie_count, status, error, source, created_at, updated_at, gender)
-          VALUES (?, ?, ?, ?, 0, 'ok', NULL, 'manual_move', ?, ?, ?)
-          `
-        )
-        .run(name, nameSearch, displayName || name, folderPath, now, now, normalizePersonGender(payload.gender || "unknown"));
-      personId = Number(result.lastInsertRowid);
-    }
+        .get(nameSearch, name, displayName || name, name, displayName || name);
 
-    if (actorKey) {
-      db.prepare(
-        `
-        INSERT INTO person_external_refs(person_id, provider, external_key, url, source, created_at, updated_at)
-        VALUES (?, 'javdb-actor', ?, ?, 'manual_move', ?, ?)
-        ON CONFLICT(provider, external_key) DO UPDATE SET
-          person_id = excluded.person_id,
-          url = excluded.url,
-          source = excluded.source,
-          updated_at = excluded.updated_at
-        `
-      ).run(personId, actorKey, javdbUrl, now, now);
-    }
-
-    const aliases = uniquePersonNames(Array.isArray(payload.aliases) ? payload.aliases : []);
-    if (aliases.length) {
-      const insertAlias = db.prepare("INSERT OR IGNORE INTO person_aliases(person_id, alias, alias_search, source) VALUES (?, ?, ?, 'manual_move')");
-      const primaryKey = normalizePersonSearchValue(displayName || name);
-      for (const alias of aliases) {
-        const key = normalizePersonSearchValue(alias);
-        if (key && key !== primaryKey) insertAlias.run(personId, alias, key);
+      if (existing?.id) {
+        personId = Number(existing.id);
+        db
+          .prepare(
+            `
+            UPDATE people
+            SET
+              display_name = COALESCE(NULLIF(?, ''), display_name),
+              folder_path = COALESCE(NULLIF(?, ''), folder_path),
+              gender = COALESCE(NULLIF(?, ''), gender),
+              source = CASE WHEN source IS NULL OR source = '' THEN 'manual_move' ELSE source END,
+              updated_at = ?
+            WHERE id = ?
+            `
+          )
+          .run(displayName || name, folderPath, normalizePersonGender(payload.gender || existing.gender || "unknown"), now, personId);
+      } else {
+        const result = db
+          .prepare(
+            `
+            INSERT INTO people (name, name_search, display_name, folder_path, movie_count, status, error, source, created_at, updated_at, gender)
+            VALUES (?, ?, ?, ?, 0, 'ok', NULL, 'manual_move', ?, ?, ?)
+            `
+          )
+          .run(name, nameSearch, displayName || name, folderPath, now, now, normalizePersonGender(payload.gender || "unknown"));
+        personId = Number(result.lastInsertRowid);
       }
+
+      if (actorKey) {
+        db.prepare(
+          `
+          INSERT INTO person_external_refs(person_id, provider, external_key, url, source, created_at, updated_at)
+          VALUES (?, 'javdb-actor', ?, ?, 'manual_move', ?, ?)
+          ON CONFLICT(provider, external_key) DO UPDATE SET
+            person_id = excluded.person_id,
+            url = excluded.url,
+            source = excluded.source,
+            updated_at = excluded.updated_at
+          `
+        ).run(personId, actorKey, javdbUrl, now, now);
+      }
+
+      const aliases = uniquePersonNames(Array.isArray(payload.aliases) ? payload.aliases : []);
+      if (aliases.length) {
+        const insertAlias = db.prepare("INSERT OR IGNORE INTO person_aliases(person_id, alias, alias_search, source) VALUES (?, ?, ?, 'manual_move')");
+        const primaryKey = normalizePersonSearchValue(displayName || name);
+        for (const alias of aliases) {
+          const key = normalizePersonSearchValue(alias);
+          if (key && key !== primaryKey) insertAlias.run(personId, alias, key);
+        }
+      }
+
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {}
+      removeDirectoryIfNewAndEmpty(folderPath, directoryExisted);
+      throw error;
     }
 
     invalidateTableStamp("actor_profiles", "actor_movies");
@@ -632,30 +660,6 @@ export function createAdminCoreMutationService({
       throw error;
     }
 
-    let createdPerson = null;
-    if (!personId && options.createPerson) {
-      createdPerson = createOrUpdateMoveTargetPerson(db, options.createPerson);
-      personId = createdPerson.id;
-      options = {
-        ...options,
-        targetDirectory: options.targetDirectory || createdPerson.targetDirectory
-      };
-    }
-
-    const corePersonId = Number(personId);
-    if (!Number.isFinite(corePersonId)) {
-      const error = new Error("人物编号无效");
-      error.statusCode = 400;
-      throw error;
-    }
-
-    const targetPerson = resolveLibraryPersonByPublicId(String(corePersonId)) || corePersonFallbackRecord(String(corePersonId));
-    if (!targetPerson?.id) {
-      const error = new Error("目标人物不存在");
-      error.statusCode = 404;
-      throw error;
-    }
-
     const row = db
       .prepare(
         `
@@ -681,18 +685,6 @@ export function createAdminCoreMutationService({
       error.statusCode = 404;
       throw error;
     }
-    const personDir = targetDirectoryForPerson(targetPerson, db, options);
-    const newDir = ensureLibraryDirectoryPath(path.join(personDir, path.basename(oldDir)), "目标作品文件夹");
-    if (path.resolve(oldDir).toLowerCase() === path.resolve(newDir).toLowerCase()) {
-      const error = new Error("作品已经在目标人物文件夹中");
-      error.statusCode = 409;
-      throw error;
-    }
-    if (fs.existsSync(newDir)) {
-      const error = new Error(`目标文件夹已存在：${relativeFromRoot(newDir)}`);
-      error.statusCode = 409;
-      throw error;
-    }
 
     const before = db
       .prepare(
@@ -706,6 +698,53 @@ export function createAdminCoreMutationService({
         `
       )
       .all(coreWorkId);
+
+    let createdPerson = null;
+    let corePersonId = Number(personId);
+    let targetPerson = null;
+    let personDir = "";
+    if (!personId && options.createPerson) {
+      const candidate = previewMoveTargetPerson(options.createPerson);
+      personDir = candidate.folderPath;
+    } else {
+      if (!Number.isFinite(corePersonId)) {
+        const error = new Error("人物编号无效");
+        error.statusCode = 400;
+        throw error;
+      }
+      targetPerson = resolveLibraryPersonByPublicId(String(corePersonId)) || corePersonFallbackRecord(String(corePersonId));
+      if (!targetPerson?.id) {
+        const error = new Error("目标人物不存在");
+        error.statusCode = 404;
+        throw error;
+      }
+      personDir = targetDirectoryForPerson(targetPerson, db, options);
+    }
+
+    const newDir = ensureLibraryDirectoryPath(path.join(personDir, path.basename(oldDir)), "目标作品文件夹");
+    if (path.resolve(oldDir).toLowerCase() === path.resolve(newDir).toLowerCase()) {
+      const error = new Error("作品已经在目标人物文件夹中");
+      error.statusCode = 409;
+      throw error;
+    }
+    if (fs.existsSync(newDir)) {
+      const error = new Error(`目标文件夹已存在：${relativeFromRoot(newDir)}`);
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (!personId && options.createPerson) {
+      createdPerson = createOrUpdateMoveTargetPerson(db, options.createPerson);
+      corePersonId = Number(createdPerson.id);
+      targetPerson = resolveLibraryPersonByPublicId(String(corePersonId))
+        || corePersonFallbackRecord(String(corePersonId))
+        || {
+          id: String(corePersonId),
+          name: createdPerson.name,
+          relativePath: relativeFromRoot(personDir),
+          sourcePaths: [relativeFromRoot(personDir)]
+        };
+    }
 
     return {
       version: 1,
@@ -753,9 +792,6 @@ export function createAdminCoreMutationService({
     try {
       db.exec("BEGIN IMMEDIATE");
       const fileRows = db.prepare("SELECT id, file_path FROM local_files WHERE local_work_id = ?").all(Number(plan.localWorkId));
-      const imageRows = db
-        .prepare("SELECT id, local_path FROM fanhao_images.images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
-        .all(coreWorkId);
 
       db
         .prepare(
@@ -776,11 +812,6 @@ export function createAdminCoreMutationService({
       for (const fileRow of fileRows) {
         const nextPath = replacePathPrefix(fileRow.file_path, plan.oldDir, plan.newDir);
         updateFile.run(nextPath, relativeFromRoot(nextPath), now, fileRow.id);
-      }
-
-      const updateImage = db.prepare("UPDATE fanhao_images.images SET local_path = ?, updated_at = ? WHERE id = ?");
-      for (const imageRow of imageRows) {
-        updateImage.run(replacePathPrefix(imageRow.local_path, plan.oldDir, plan.newDir), now, imageRow.id);
       }
 
       db.prepare("DELETE FROM work_people WHERE work_id = ? AND role = 'actor' AND person_id <> ?").run(coreWorkId, corePersonId);
@@ -810,6 +841,44 @@ export function createAdminCoreMutationService({
     }
 
     return { committed: true, alreadyCommitted: false };
+  }
+
+  function pathUsesPrefix(value, prefix) {
+    const relative = path.relative(path.resolve(prefix), path.resolve(String(value || "")));
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  }
+
+  function inspectWorkMoveImages(plan) {
+    const rows = getCoreDb()
+      .prepare("SELECT local_path FROM fanhao_images.images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
+      .all(Number(plan.workId));
+    return rows.some((row) => pathUsesPrefix(row.local_path, plan.oldDir)) ? "pending" : "completed";
+  }
+
+  function commitWorkMoveImages(plan) {
+    const db = getCoreDb();
+    const rows = db
+      .prepare("SELECT id, local_path FROM fanhao_images.images WHERE owner_type = 'work' AND owner_id = ? AND local_path IS NOT NULL AND local_path <> ''")
+      .all(Number(plan.workId));
+    const pending = rows.filter((row) => pathUsesPrefix(row.local_path, plan.oldDir));
+    if (!pending.length) return { committed: false, alreadyCommitted: true, updated: 0 };
+
+    const now = new Date().toISOString();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const updateImage = db.prepare("UPDATE fanhao_images.images SET local_path = ?, updated_at = ? WHERE id = ?");
+      for (const imageRow of pending) {
+        updateImage.run(replacePathPrefix(imageRow.local_path, plan.oldDir, plan.newDir), now, imageRow.id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+    if (inspectWorkMoveImages(plan) !== "completed") throw new Error("图片库路径补偿尚未完成");
+    return { committed: true, alreadyCommitted: false, updated: pending.length };
   }
 
   function finalizeWorkMove(plan, moveResult = {}) {
@@ -844,9 +913,11 @@ export function createAdminCoreMutationService({
 
   return {
     correctWorkActorFromLocalFolder,
+    commitWorkMoveImages,
     commitWorkMove,
     finalizeWorkMove,
     inspectWorkMove,
+    inspectWorkMoveImages,
     mergePeopleIntoTarget,
     prepareWorkMove,
     upsertActorProfile
