@@ -1244,6 +1244,142 @@ async function verifyAndroidFavoriteFolders(browser) {
     assert.deepEqual(mutationRace.queuedAWork, { id: "shared-work", favorite: true, favoriteFolderId: "a-default", favoriteFolderName: "A 默认" }, "a queued old-server move must leave the passed work restored instead of optimistic");
     assert.deepEqual(mutationRace.queuedBWork, { id: "shared-work", favorite: true, favoriteFolderId: "b-only", favoriteFolderName: "B 专属" }, "queued old-server moves must not mutate the current server library");
     assert.deepEqual(mutationRace.queuedCallbacks, ["http://scope-a.local"], "queued old-server moves must not call a current-server UI callback");
+
+    const cacheScopeRace = await page.evaluate(async () => {
+      const [{ createFavoriteFolderFeature }, { createWorkActions }, cache] = await Promise.all([
+        import("/android-client/modules/fanhao/features/works/favorite-folders.js?cache-scope-race=3"),
+        import("/android-client/modules/fanhao/features/works/actions.js?cache-scope-race=3"),
+        import("/android-client/js/cache.js?v=20260705-mobile-actions-01")
+      ]);
+      const deferred = () => {
+        let resolve;
+        let reject;
+        const promise = new Promise((accept, decline) => {
+          resolve = accept;
+          reject = decline;
+        });
+        return { promise, reject, resolve };
+      };
+      const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+      const waitForAsync = async (predicate) => {
+        for (let attempt = 0; attempt < 80; attempt += 1) {
+          const value = await predicate();
+          if (value) return value;
+          await tick();
+        }
+        throw new Error("favorite cache scope fixture timed out");
+      };
+      const scopeA = "http://cache-scope-a.local";
+      const scopeB = "http://cache-scope-b.local";
+      const cachePath = "/api/works/cache-shared-work";
+      const scopeBSentinel = {
+        sentinel: "scope-b",
+        work: { id: "cache-shared-work", favorite: false, favoriteFolderId: "b-only", favoriteFolderName: "B 专属", title: "B sentinel" }
+      };
+      let activeUrl = `${scopeA}/`;
+      const invalidationEntered = deferred();
+      const invalidationRelease = deferred();
+      let heldInvalidation = false;
+      const scopeAWork = { id: "cache-shared-work", favorite: false, favoriteFolderId: "", favoriteFolderName: "", title: "A work" };
+      const cacheFeature = createFavoriteFolderFeature({
+        api: async (_base, requestPath) => {
+          if (requestPath === "/api/favorites/cache-shared-work") {
+            return { favorite: true, favoriteFolder: { folderId: "a-default", folderName: "A 默认" }, folders: [] };
+          }
+          if (requestPath === "/api/favorite-folders") return { folders: [] };
+          throw new Error(`unexpected cache scope request: ${requestPath}`);
+        },
+        clearCachedJsonByPrefix: async (baseUrl, prefix) => {
+          if (!heldInvalidation) {
+            heldInvalidation = true;
+            invalidationEntered.resolve({ baseUrl, prefix });
+            await invalidationRelease.promise;
+          }
+          return cache.clearCachedJsonByPrefix(baseUrl, prefix);
+        },
+        getActiveUrl: () => activeUrl,
+        getLibrary: () => ({ works: [scopeAWork] }),
+        pageDataService: { invalidate() {} }
+      });
+      const cacheActions = createWorkActions({
+        detailErrorMessage: (error) => error.message,
+        extractWorkCode: () => "",
+        favoriteFolders: cacheFeature,
+        formatNumber: String,
+        getActiveUrl: () => activeUrl,
+        renderMessage() {},
+        renderWorkDetail() {}
+      });
+      const cacheRow = cacheActions.createActionRow(scopeAWork);
+      document.body.append(cacheRow);
+      cacheRow.querySelector(".favorite-action").click();
+      const enteredInvalidation = await invalidationEntered.promise;
+      activeUrl = `${scopeB}/`;
+      await cache.writeCachedJson(scopeB, cachePath, scopeBSentinel);
+      invalidationRelease.resolve();
+      await waitForAsync(() => !cacheRow.querySelector(".favorite-action").classList.contains("pending"));
+      const scopeACache = await waitForAsync(async () => {
+        const entry = await cache.readCachedJson(scopeA, cachePath);
+        return entry?.payload?.work?.favorite === true ? entry : null;
+      });
+      const scopeBCache = await cache.readCachedJson(scopeB, cachePath);
+      cacheRow.remove();
+
+      const rejectScope = "http://cache-reject.local";
+      const rejectPath = "/api/works/cache-reject-work";
+      const rejectSentinel = {
+        sentinel: "reject-unchanged",
+        work: { id: "cache-reject-work", favorite: false, title: "reject sentinel" }
+      };
+      activeUrl = `${rejectScope}/`;
+      await cache.writeCachedJson(rejectScope, rejectPath, rejectSentinel);
+      let rejectInvalidations = 0;
+      const rejectWork = { id: "cache-reject-work", favorite: false, favoriteFolderId: "", favoriteFolderName: "" };
+      const rejectFeature = createFavoriteFolderFeature({
+        api: async (_base, requestPath) => {
+          if (requestPath === "/api/favorites/cache-reject-work") throw new Error("favorite feature rejected");
+          throw new Error(`unexpected reject cache request: ${requestPath}`);
+        },
+        clearCachedJsonByPrefix: async () => {
+          rejectInvalidations += 1;
+        },
+        getActiveUrl: () => activeUrl,
+        getLibrary: () => ({ works: [rejectWork] }),
+        pageDataService: { invalidate() {} }
+      });
+      const rejectMessages = [];
+      const rejectActions = createWorkActions({
+        detailErrorMessage: (error) => error.message,
+        extractWorkCode: () => "",
+        favoriteFolders: rejectFeature,
+        formatNumber: String,
+        getActiveUrl: () => activeUrl,
+        renderMessage: (message) => rejectMessages.push(message),
+        renderWorkDetail() {}
+      });
+      const rejectRow = rejectActions.createActionRow(rejectWork);
+      document.body.append(rejectRow);
+      rejectRow.querySelector(".favorite-action").click();
+      await waitForAsync(() => rejectMessages.includes("favorite feature rejected"));
+      await tick();
+      const rejectCache = await cache.readCachedJson(rejectScope, rejectPath);
+      rejectRow.remove();
+
+      return {
+        enteredInvalidation,
+        rejectCache: rejectCache?.payload,
+        rejectInvalidations,
+        scopeACache: scopeACache?.payload,
+        scopeBCache: scopeBCache?.payload,
+        scopeBSentinel
+      };
+    });
+    assert.deepEqual(cacheScopeRace.enteredInvalidation, { baseUrl: "http://cache-scope-a.local/", prefix: "/api/favorites" }, "the cache race fixture must switch servers only after the successful A response reaches cache invalidation");
+    assert.equal(cacheScopeRace.scopeACache.work.favorite, true, "a successful A favorite action may update its captured A detail cache after switching to B");
+    assert.equal(cacheScopeRace.scopeACache.work.favoriteFolderId, "a-default", "the captured A detail cache must receive the successful A favorite folder");
+    assert.deepEqual(cacheScopeRace.scopeBCache, cacheScopeRace.scopeBSentinel, "a completed A favorite action must leave the same-ID B detail cache completely unchanged");
+    assert.deepEqual(cacheScopeRace.rejectCache, { sentinel: "reject-unchanged", work: { id: "cache-reject-work", favorite: false, title: "reject sentinel" } }, "a rejected favorite feature must not write the cached work detail");
+    assert.equal(cacheScopeRace.rejectInvalidations, 0, "a rejected favorite feature must not start cache invalidation");
   } finally {
     await page.close();
   }

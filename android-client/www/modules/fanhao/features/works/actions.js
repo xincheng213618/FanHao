@@ -150,6 +150,7 @@ export function createWorkActions(deps) {
   }
 
   async function toggleFavorite(work, button) {
+    const activeBaseUrl = String(getActiveUrl() || "").replace(/\/+$/u, "");
     const wasFavorite = Boolean(work.favorite);
     button.disabled = true;
     button.classList.add("pending");
@@ -157,7 +158,7 @@ export function createWorkActions(deps) {
     try {
       const data = favoriteFolders
         ? await favoriteFolders.toggleFavorite(work, () => syncFavoriteButton(button, work))
-        : await postJson(getActiveUrl(), `/api/favorites/${encodeURIComponent(work.id)}`);
+        : await postJson(activeBaseUrl, `/api/favorites/${encodeURIComponent(work.id)}`);
       if (!favoriteFolders) {
         work.favorite = Boolean(data.favorite);
         work.favoriteFolderId = String(data.favoriteFolder?.folderId || "");
@@ -165,7 +166,7 @@ export function createWorkActions(deps) {
       }
       syncFavoriteButton(button, work);
       if (!favoriteFolders && data.user) onUserStateChange?.(data.user);
-      updateCachedDetail(work).catch(() => {});
+      if (activeBaseUrl) updateCachedDetail(work, activeBaseUrl).catch(() => {});
     } catch (error) {
       syncFavoriteButton(button, work);
       renderMessage(detailErrorMessage(error, "收藏状态更新失败，请稍后重试"), "error", false);
@@ -176,12 +177,11 @@ export function createWorkActions(deps) {
     }
   }
 
-  async function updateCachedDetail(work) {
+  async function updateCachedDetail(work, baseUrl = getActiveUrl()) {
     if (!work?.id) return null;
-    const activeUrl = getActiveUrl();
     const path = `/api/works/${encodeURIComponent(work.id)}`;
-    const cached = await readCachedJson(activeUrl, path).catch(() => null);
-    return writeCachedJson(activeUrl, path, { ...(cached?.payload || {}), work });
+    const cached = await readCachedJson(baseUrl, path).catch(() => null);
+    return writeCachedJson(baseUrl, path, { ...(cached?.payload || {}), work });
   }
 
   return { createActionRow };
