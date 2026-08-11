@@ -48,10 +48,13 @@ export function createAdminCoreMutationService({
   sourcePathToAbsolute,
   resetWorkSearch,
   uniqueTextArray,
-  uniquePersonNames
+  uniquePersonNames,
+  workMoveTargetFileSystem = fs
 }) {
   let workMoveReservationService = null;
   let workMoveTargetDirectoryIndexCache = null;
+  const workMoveTargetPickerCacheMs = 30_000;
+  const workMoveTargetProofToken = Symbol("workMoveTargetProof");
   function workMoveReservations() {
     workMoveReservationService ||= createWorkMoveReservationService({ getCoreDb });
     return workMoveReservationService;
@@ -273,10 +276,16 @@ export function createAdminCoreMutationService({
     throw error;
   }
 
-  function canonicalLibraryPathKey(value) {
+  function lexicalLibraryPathKey(value) {
+    return path.resolve(String(value || "")).toLowerCase();
+  }
+
+  function canonicalLibraryPathKey(value, memo = null) {
+    const lexicalKey = lexicalLibraryPathKey(value);
+    if (memo?.has(lexicalKey)) return memo.get(lexicalKey);
     let existing = path.resolve(String(value || ""));
     const missing = [];
-    while (!fs.existsSync(existing)) {
+    while (!workMoveTargetFileSystem.existsSync(existing)) {
       const parent = path.dirname(existing);
       if (parent === existing) break;
       missing.unshift(path.basename(existing));
@@ -286,39 +295,26 @@ export function createAdminCoreMutationService({
       // `resolve` retains a junction/symlink spelling.  Resolve the nearest
       // existing ancestor before appending a prospective work folder so the
       // target selector cannot assign one physical directory to two people.
-      existing = fs.realpathSync.native(existing);
+      existing = workMoveTargetFileSystem.realpathSync.native(existing);
     } catch {}
-    return path.resolve(existing, ...missing).toLowerCase();
+    const physicalKey = path.resolve(existing, ...missing).toLowerCase();
+    memo?.set(lexicalKey, physicalKey);
+    return physicalKey;
   }
 
   function workMoveTargetDirectoryIndex(db, { fresh = false } = {}) {
     const nowMs = Date.now();
     if (!fresh && workMoveTargetDirectoryIndexCache?.expiresAt > nowMs) return workMoveTargetDirectoryIndexCache.entries;
-    const localDirectoriesByPerson = new Map();
-    for (const row of db.prepare(`
-      SELECT wp.person_id, lw.local_path
-      FROM work_people wp
-      JOIN local_works lw ON lw.work_id = wp.work_id
-      WHERE wp.role = 'actor' AND lw.local_path IS NOT NULL AND trim(lw.local_path) <> ''
-      ORDER BY wp.person_id, lw.local_path
-    `).all()) {
-      const id = String(row.person_id || "");
-      if (!id || localDirectoriesByPerson.has(id)) continue;
-      try {
-        const directory = ensureLibraryDirectoryPath(coreLocalPersonSourcePath(row.local_path), "目标人物文件夹");
-        if (safeStat(directory)?.isDirectory()) localDirectoriesByPerson.set(id, directory);
-      } catch {}
-    }
-    const records = [];
-    for (const row of db.prepare(`
+    const peopleRows = db.prepare(`
       SELECT id, name, display_name, folder_path, created_at, updated_at
       FROM people
       ORDER BY COALESCE(NULLIF(display_name, ''), name), id
-    `).all()) {
+    `).all();
+    const people = peopleRows.map((row) => {
       const id = String(row.id || "");
       // This bulk row is sufficient when the in-memory library has not yet
-      // loaded a person.  Calling corePersonFallbackRecord here would issue
-      // one `SELECT * FROM people` per row during every fresh policy check.
+      // loaded a person. Calling corePersonFallbackRecord here would issue
+      // one SELECT per row during every fresh policy check.
       const databasePerson = {
         id,
         name: String(row.display_name || row.name || id).trim(),
@@ -328,34 +324,152 @@ export function createAdminCoreMutationService({
         modifiedAt: row.updated_at || row.created_at || null
       };
       const person = resolveLibraryPersonByPublicId(id) || databasePerson;
-      const paths = [];
-      const addDirectory = (sourcePath) => {
-        try {
-          const directory = ensureLibraryDirectoryPath(sourcePath, "目标人物文件夹");
-          if (safeStat(directory)?.isDirectory()) paths.push(directory);
-        } catch {}
-      };
-      // `folder_path` is the current metadata authority even if the library
-      // snapshot still contains an older sourcePaths value.
-      for (const sourcePath of uniqueTextArray([row.folder_path, person?.relativePath, ...(person?.sourcePaths || [])])) addDirectory(sourcePath);
-      if (localDirectoriesByPerson.has(id)) paths.push(localDirectoriesByPerson.get(id));
-      const personName = String(person?.name || row.display_name || row.name || "").trim();
-      for (const rootPath of libraryOpenRoots()) {
-        if (!personName) break;
-        addDirectory(path.join(rootPath, personName));
-      }
-      const directories = [...new Map(paths.filter(Boolean).map((directory) => [canonicalLibraryPathKey(directory), directory])).entries()];
-      const personDir = directories[0]?.[1];
-      if (!personDir) continue;
-      records.push({
+      return {
         id,
+        row,
+        person,
         name: String(person.displayName || person.name || row.display_name || row.name || `#${id}`).trim(),
-        personDir,
+        personName: String(person?.name || row.display_name || row.name || "").trim(),
         search: normalizePersonSearchValue([
           person.displayName, person.name, row.display_name, row.name,
           ...(Array.isArray(person.aliases) ? person.aliases : [])
         ].filter(Boolean).join(" ")),
-        canonicalDirectories: directories.map(([canonical]) => canonical)
+        sourcePaths: uniqueTextArray([row.folder_path, person?.relativePath, ...(person?.sourcePaths || [])])
+      };
+    });
+    const localRows = db.prepare(`
+      SELECT wp.person_id, lw.local_path
+      FROM work_people wp
+      JOIN local_works lw ON lw.work_id = wp.work_id
+      WHERE wp.role = 'actor' AND lw.local_path IS NOT NULL AND trim(lw.local_path) <> ''
+      ORDER BY wp.person_id, lw.local_path
+    `).all();
+    const localPathsByPerson = new Map();
+    for (const row of localRows) {
+      const id = String(row.person_id || "");
+      if (!id) continue;
+      const directory = sourcePathToAbsolute(coreLocalPersonSourcePath(row.local_path));
+      if (!directory) continue;
+      if (!localPathsByPerson.has(id)) localPathsByPerson.set(id, []);
+      const paths = localPathsByPerson.get(id);
+      const key = lexicalLibraryPathKey(directory);
+      if (!paths.some((candidate) => candidate.key === key)) paths.push({ key, path: directory });
+    }
+
+    const rootPaths = [...new Map(libraryOpenRoots()
+      .map((rootPath) => sourcePathToAbsolute(rootPath))
+      .filter(Boolean)
+      .map((rootPath) => [lexicalLibraryPathKey(rootPath), rootPath])).values()];
+    const wantedEntryNames = new Set();
+    const entryNameKey = (value) => process.platform === "win32"
+      ? String(value || "").toLowerCase()
+      : String(value || "");
+    for (const record of people) {
+      if (record.personName) wantedEntryNames.add(entryNameKey(record.personName));
+      for (const sourcePath of record.sourcePaths) wantedEntryNames.add(entryNameKey(path.basename(sourcePathToAbsolute(sourcePath))));
+      for (const candidate of localPathsByPerson.get(record.id) || []) wantedEntryNames.add(entryNameKey(path.basename(candidate.path)));
+    }
+
+    const physicalKeyMemo = new Map();
+    const directoryMemo = new Map();
+    const slowDirectory = (sourcePath) => {
+      const lexicalKey = lexicalLibraryPathKey(sourcePath);
+      if (directoryMemo.has(lexicalKey)) return directoryMemo.get(lexicalKey);
+      let descriptor = null;
+      try {
+        const directory = ensureLibraryDirectoryPath(sourcePath, "目标人物文件夹");
+        if (safeStat(directory)?.isDirectory()) {
+          descriptor = {
+            path: directory,
+            physicalKey: canonicalLibraryPathKey(directory, physicalKeyMemo)
+          };
+        }
+      } catch {}
+      directoryMemo.set(lexicalKey, descriptor);
+      return descriptor;
+    };
+    const rootCatalogs = [];
+    for (const rootPath of rootPaths) {
+      try {
+        const realRoot = workMoveTargetFileSystem.realpathSync.native(rootPath);
+        const entriesByName = new Map();
+        for (const entry of workMoveTargetFileSystem.readdirSync(rootPath, { withFileTypes: true })) {
+          const nameKey = entryNameKey(entry.name);
+          if (!wantedEntryNames.has(nameKey) || (!entry.isDirectory() && !entry.isSymbolicLink())) continue;
+          const directory = path.resolve(rootPath, entry.name);
+          let descriptor = null;
+          if (entry.isDirectory() && !entry.isSymbolicLink()) {
+            descriptor = {
+              path: directory,
+              // A regular direct child cannot redirect independently of its
+              // already-resolved root. Projecting from the real root avoids a
+              // network realpath for every person while retaining the same
+              // physical identity used to detect shared ownership.
+              physicalKey: path.resolve(realRoot, entry.name).toLowerCase()
+            };
+            directoryMemo.set(lexicalLibraryPathKey(directory), descriptor);
+            physicalKeyMemo.set(lexicalLibraryPathKey(directory), descriptor.physicalKey);
+          } else {
+            // Junctions/symlinks must still contribute their resolved target
+            // to the ownership set. Dropping them would make the other owner
+            // look unique and would weaken the Android target policy.
+            descriptor = slowDirectory(directory);
+          }
+          if (descriptor && !entriesByName.has(nameKey)) entriesByName.set(nameKey, descriptor);
+        }
+        rootCatalogs.push({ entriesByName, rootPath });
+      } catch {
+        // Match the old fail-closed behavior for an inaccessible root: none
+        // of its speculative root/name candidates are selectable.
+      }
+    }
+
+    const descriptorForPath = (sourcePath) => {
+      if (!sourcePath) return null;
+      const fullPath = sourcePathToAbsolute(sourcePath);
+      const lexicalKey = lexicalLibraryPathKey(fullPath);
+      return directoryMemo.has(lexicalKey) ? directoryMemo.get(lexicalKey) : slowDirectory(fullPath);
+    };
+    const localDirectoriesByPerson = new Map();
+    for (const [id, candidates] of localPathsByPerson.entries()) {
+      const directories = [];
+      for (const candidate of candidates) {
+        const descriptor = descriptorForPath(candidate.path);
+        if (!descriptor) continue;
+        if (!directories.some((directory) => directory.physicalKey === descriptor.physicalKey)) directories.push(descriptor);
+      }
+      if (directories.length) localDirectoriesByPerson.set(id, directories);
+    }
+
+    const records = [];
+    for (const record of people) {
+      const directories = [];
+      const addDirectory = (descriptor) => {
+        if (!descriptor || directories.some((candidate) => candidate.physicalKey === descriptor.physicalKey)) return;
+        directories.push(descriptor);
+      };
+      for (const sourcePath of record.sourcePaths) addDirectory(descriptorForPath(sourcePath));
+      // The first valid local directory retains personDir priority, but every
+      // valid secondary local-work parent participates in physical ownership.
+      // Otherwise a legacy/junction path could alias another person's primary
+      // folder without making either owner ambiguous.
+      for (const directory of localDirectoriesByPerson.get(record.id) || []) addDirectory(directory);
+      const nameKey = entryNameKey(record.personName);
+      if (nameKey) {
+        // Preserve every root/name secondary path. A secondary junction may
+        // alias another person's primary folder, so ownership must not stop
+        // after finding one authoritative directory.
+        for (const root of rootCatalogs) addDirectory(root.entriesByName.get(nameKey));
+      }
+      const personDir = directories[0];
+      if (!personDir) continue;
+      records.push({
+        id: record.id,
+        name: record.name,
+        personDir: personDir.path,
+        personDirPhysicalKey: personDir.physicalKey,
+        search: record.search,
+        canonicalDirectories: directories.map((directory) => directory.physicalKey)
       });
     }
     const ownersByDirectory = new Map();
@@ -366,11 +480,15 @@ export function createAdminCoreMutationService({
         ownersByDirectory.set(canonical, owners);
       }
     }
-    // A shared resolved directory has no unambiguous metadata owner.  Include
+    // A shared resolved directory has no unambiguous metadata owner. Include
     // every valid path in the ownership set: a secondary/legacy path must not
     // be hidden merely because a different path sorted first for that person.
-    const entries = records.filter((record) => ownersByDirectory.get(canonicalLibraryPathKey(record.personDir))?.size === 1);
-    if (!fresh) workMoveTargetDirectoryIndexCache = { entries, expiresAt: nowMs + 2_000 };
+    const entries = records.filter((record) => record.canonicalDirectories
+      .every((physicalKey) => ownersByDirectory.get(physicalKey)?.size === 1));
+    // This cache only serves picker hints. Every command, prepare, worker and
+    // commit boundary still requests a fresh fail-closed ownership snapshot,
+    // so a longer picker TTL improves search UX without becoming authority.
+    if (!fresh) workMoveTargetDirectoryIndexCache = { entries, expiresAt: Date.now() + workMoveTargetPickerCacheMs };
     return entries;
   }
 
@@ -413,16 +531,19 @@ export function createAdminCoreMutationService({
     const queryKey = normalizePersonSearchValue(query);
     const requestedPersonId = String(options.personId || "").trim();
     const candidates = [];
+    const physicalPathMemo = new Map();
+    const oldDirPhysicalKey = canonicalLibraryPathKey(oldDir, physicalPathMemo);
     for (const person of workMoveTargetDirectoryIndex(db, { fresh: Boolean(options.fresh) })) {
       if (requestedPersonId && person.id !== requestedPersonId) continue;
       if (queryKey && !person.search.includes(queryKey)) continue;
       const targetDir = ensureLibraryDirectoryPath(path.join(person.personDir, path.basename(oldDir)), "目标作品文件夹");
-      if (canonicalLibraryPathKey(targetDir) === canonicalLibraryPathKey(oldDir) && !options.allowCurrentDestination) continue;
-      if (fs.existsSync(targetDir) && !options.allowExistingDestination) continue;
-      candidates.push({ ...person, targetDir });
+      const targetDirPhysicalKey = canonicalLibraryPathKey(targetDir, physicalPathMemo);
+      if (targetDirPhysicalKey === oldDirPhysicalKey && !options.allowCurrentDestination) continue;
+      if (workMoveTargetFileSystem.existsSync(targetDir) && !options.allowExistingDestination) continue;
+      candidates.push({ ...person, targetDir, targetDirPhysicalKey });
       if (candidates.length >= limit) break;
     }
-    return { work, oldDir, query, candidates };
+    return { work, oldDir, oldDirPhysicalKey, query, candidates };
   }
 
   // The mobile client must never be asked to construct a library path.  Keep
@@ -451,14 +572,72 @@ export function createAdminCoreMutationService({
       allowCurrentDestination: Boolean(options.allowCurrentDestination)
     }).candidates[0];
     if (target?.id === targetId
-      && (!expectedPersonDirPhysicalKey || canonicalLibraryPathKey(target.personDir) === expectedPersonDirPhysicalKey)
-      && (!expectedNewDirPhysicalKey || canonicalLibraryPathKey(target.targetDir) === expectedNewDirPhysicalKey)) {
+      && (!expectedPersonDirPhysicalKey || target.personDirPhysicalKey === expectedPersonDirPhysicalKey)
+      && (!expectedNewDirPhysicalKey || target.targetDirPhysicalKey === expectedNewDirPhysicalKey)) {
       return target;
     }
     const error = new Error("目标人物当前不可用于迁移");
     error.statusCode = 409;
     error.code = "WORK_MOVE_TARGET_UNAVAILABLE";
     throw error;
+  }
+
+  function coreDataVersion(db = getCoreDb()) {
+    return Number(db.prepare("PRAGMA data_version").get()?.data_version || 0);
+  }
+
+  function staleWorkMoveTargetProofError() {
+    const error = new Error("目标人物目录在命令确认前发生变化，请重新选择");
+    error.statusCode = 409;
+    error.code = "WORK_MOVE_TARGET_STALE";
+    return error;
+  }
+
+  function preflightWorkMoveTarget(workId, personId, options = {}) {
+    const db = getCoreDb();
+    // The filesystem scan is intentionally outside every write transaction.
+    // If another connection changes metadata while it runs, fail closed and
+    // let the client retry instead of accepting a mixed ownership snapshot.
+    const beforeDataVersion = coreDataVersion(db);
+    const target = assertWorkMoveTarget(workId, personId, options);
+    const afterDataVersion = coreDataVersion(db);
+    if (beforeDataVersion !== afterDataVersion) throw staleWorkMoveTargetProofError();
+    return Object.freeze({
+      [workMoveTargetProofToken]: true,
+      version: 1,
+      dataVersion: afterDataVersion,
+      workId: String(workId || "").trim(),
+      personId: String(personId || "").trim(),
+      personDir: target.personDir,
+      personDirPhysicalKey: target.personDirPhysicalKey,
+      targetDir: target.targetDir,
+      targetDirPhysicalKey: target.targetDirPhysicalKey
+    });
+  }
+
+  function assertWorkMoveTargetProof(proof, options = {}) {
+    if (!proof?.[workMoveTargetProofToken]
+      || !proof.workId
+      || !proof.personId
+      || !proof.personDirPhysicalKey
+      || !proof.targetDirPhysicalKey
+      || coreDataVersion() !== Number(proof.dataVersion)) {
+      throw staleWorkMoveTargetProofError();
+    }
+    const personDirStat = (() => {
+      try {
+        return workMoveTargetFileSystem.statSync(proof.personDir);
+      } catch {
+        return null;
+      }
+    })();
+    if (!personDirStat?.isDirectory()
+      || canonicalLibraryPathKey(proof.personDir) !== proof.personDirPhysicalKey
+      || canonicalLibraryPathKey(proof.targetDir) !== proof.targetDirPhysicalKey
+      || (!options.allowExistingDestination && workMoveTargetFileSystem.existsSync(proof.targetDir))) {
+      throw staleWorkMoveTargetProofError();
+    }
+    return { valid: true };
   }
 
   function workMoveTargetPhysicalDriftError() {
@@ -468,7 +647,7 @@ export function createAdminCoreMutationService({
     return error;
   }
 
-  function assertAndroidWorkMoveTargetIdentityInTransaction(plan, {
+  function assertAndroidWorkMoveTargetIdentityInTransaction(plan, proof, {
     allowCurrentDestination = false,
     requireStagedDirectory = false
   } = {}) {
@@ -483,27 +662,50 @@ export function createAdminCoreMutationService({
     }
     if (!personDirPhysicalKey
       || !newDirPhysicalKey
+      || String(proof?.workId || "") !== String(plan.workId || "")
+      || String(proof?.personId || "") !== String(plan.personId || "")
       || canonicalLibraryPathKey(plan.personDir) !== personDirPhysicalKey
       || canonicalLibraryPathKey(plan.newDir) !== newDirPhysicalKey
       || (requireStagedDirectory && (!stagedDirectory?.isDirectory() || stagedDirectory.isSymbolicLink()))) {
       throw workMoveTargetPhysicalDriftError();
     }
-    assertWorkMoveTarget(plan.workId, plan.personId, {
+    assertWorkMoveTargetProof(proof, {
       allowExistingDestination: true,
-      allowCurrentDestination: Boolean(allowCurrentDestination),
-      expectedPersonDirPhysicalKey: personDirPhysicalKey,
-      expectedNewDirPhysicalKey: newDirPhysicalKey
+      allowCurrentDestination: Boolean(allowCurrentDestination)
     });
     return { valid: true };
+  }
+
+  function preflightAndroidWorkMoveTargetIdentity(plan, options = {}) {
+    if (!plan?.androidCommand) return null;
+    const personDirPhysicalKey = String(plan.personDirPhysicalKey || "");
+    const newDirPhysicalKey = String(plan.newDirPhysicalKey || "");
+    try {
+      return preflightWorkMoveTarget(plan.workId, plan.personId, {
+        allowExistingDestination: true,
+        allowCurrentDestination: Boolean(options.allowCurrentDestination),
+        expectedPersonDirPhysicalKey: personDirPhysicalKey,
+        expectedNewDirPhysicalKey: newDirPhysicalKey
+      });
+    } catch (error) {
+      if (!personDirPhysicalKey
+        || !newDirPhysicalKey
+        || canonicalLibraryPathKey(plan.personDir) !== personDirPhysicalKey
+        || canonicalLibraryPathKey(plan.newDir) !== newDirPhysicalKey) {
+        throw workMoveTargetPhysicalDriftError();
+      }
+      throw error;
+    }
   }
 
   function assertAndroidWorkMoveTargetIdentity(plan, context = {}, options = {}) {
     if (!plan?.androidCommand) return { valid: true };
     const db = getCoreDb();
+    const proof = preflightAndroidWorkMoveTargetIdentity(plan, options);
     db.exec("BEGIN IMMEDIATE");
     try {
       workMoveReservations().assertOwnership(plan, context);
-      const result = assertAndroidWorkMoveTargetIdentityInTransaction(plan, options);
+      const result = assertAndroidWorkMoveTargetIdentityInTransaction(plan, proof, options);
       db.exec("COMMIT");
       return result;
     } catch (error) {
@@ -1340,16 +1542,18 @@ export function createAdminCoreMutationService({
     const coreWorkId = Number(plan.workId);
     const corePersonId = Number(plan.personId);
     const now = new Date().toISOString();
+    const targetProof = plan.androidCommand
+      ? preflightAndroidWorkMoveTargetIdentity(plan, { requireStagedDirectory: true })
+      : null;
     let alreadyCommitted = false;
     try {
       db.exec("BEGIN IMMEDIATE");
       workMoveReservations().assertOwnership(plan, context);
-      // Recheck Android ownership while holding the metadata transaction.
-      // The destination exists after staging, so it is accepted only when it
-      // is exactly this persisted plan; directory ownership and source/current
-      // checks are still rebuilt without the picker cache.
+      // The full Android ownership snapshot was built immediately before the
+      // transaction. While holding the metadata lock, accept only its opaque
+      // DB-version proof plus the persisted plan's targeted physical identity.
       if (plan.androidCommand) {
-        assertAndroidWorkMoveTargetIdentityInTransaction(plan, { requireStagedDirectory: true });
+        assertAndroidWorkMoveTargetIdentityInTransaction(plan, targetProof, { requireStagedDirectory: true });
       }
       workMoveReservations().setMutationMode(plan, { ...context, mode: "main", schema: "main" });
       const current = db
@@ -1534,6 +1738,7 @@ export function createAdminCoreMutationService({
     assertAndroidWorkMoveTargetIdentity,
     assertWorkMoveSourceUnshared,
     assertWorkMoveTarget,
+    assertWorkMoveTargetProof,
     correctWorkActorFromLocalFolder,
     commitWorkMoveImages,
     commitWorkMove,
@@ -1546,6 +1751,7 @@ export function createAdminCoreMutationService({
     publishActorProfileMutation,
     retryActorProfileOperation,
     parkWorkMoveReservation: (...args) => workMoveReservations().park(...args),
+    preflightWorkMoveTarget,
     prepareWorkMove,
     releaseWorkMoveReservation: (...args) => workMoveReservations().release(...args),
     renewWorkMoveReservation: (...args) => workMoveReservations().renew(...args),

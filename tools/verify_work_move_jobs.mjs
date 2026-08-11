@@ -128,6 +128,13 @@ function createAdminFixture(db, fixture, {
     repairWorkMoveReservations() {
       return { repaired: 0 };
     },
+    preflightWorkMoveTarget(workId, personId) {
+      return { fixtureProof: true, workId: String(workId), personId: String(personId) };
+    },
+    assertWorkMoveTargetProof(proof) {
+      if (!proof?.fixtureProof) throw new Error("fixture Android target proof missing");
+      return { valid: true };
+    },
     prepareWorkMove() {
       return plan;
     },
@@ -632,6 +639,60 @@ async function verifyActualAdminSqliteCommit() {
   let reconciled = null;
   let duplicateTargetDirectory = fixture.targetPerson;
   let fallbackLookups = 0;
+  const additionalLibraryPeople = new Map();
+  let syntheticClockAdvanceMs = 0;
+  let syntheticRootDelayMs = 0;
+  const targetFsCalls = {
+    existsSync: 0,
+    lstatSync: 0,
+    readdirSync: 0,
+    realpathSync: 0,
+    statSync: 0,
+    transaction: { existsSync: 0, lstatSync: 0, readdirSync: 0, realpathSync: 0, statSync: 0 }
+  };
+  const recordTargetFsCall = (name) => {
+    targetFsCalls[name] += 1;
+    if (db.isTransaction) targetFsCalls.transaction[name] += 1;
+  };
+  const resetTargetFsCalls = () => {
+    for (const name of ["existsSync", "lstatSync", "readdirSync", "realpathSync", "statSync"]) {
+      targetFsCalls[name] = 0;
+      targetFsCalls.transaction[name] = 0;
+    }
+  };
+  const workMoveTargetFileSystem = {
+    existsSync(value) {
+      recordTargetFsCall("existsSync");
+      return fs.existsSync(value);
+    },
+    lstatSync(value) {
+      recordTargetFsCall("lstatSync");
+      return fs.lstatSync(value);
+    },
+    readdirSync(value, options) {
+      recordTargetFsCall("readdirSync");
+      if (syntheticClockAdvanceMs) {
+        syntheticNow += syntheticClockAdvanceMs;
+        syntheticClockAdvanceMs = 0;
+      }
+      if (syntheticRootDelayMs) {
+        const deadline = performance.now() + syntheticRootDelayMs;
+        while (performance.now() < deadline) {}
+      }
+      return fs.readdirSync(value, options);
+    },
+    realpathSync: {
+      native(value) {
+        recordTargetFsCall("realpathSync");
+        return fs.realpathSync.native(value);
+      }
+    },
+    statSync(value) {
+      recordTargetFsCall("statSync");
+      return fs.statSync(value);
+    }
+  };
+  let syntheticNow = Date.now();
   const admin = createAdminCoreMutationService({
     actorIdFromJavdbUrl: () => "",
     actorProfileRow: () => null,
@@ -639,7 +700,7 @@ async function verifyActualAdminSqliteCommit() {
     canonicalJavdbActorUrls: () => [],
     cleanPersonNamePart: (value) => String(value || "").trim(),
     coreLocalPathPersonName: () => "",
-    coreLocalPersonSourcePath: () => "",
+    coreLocalPersonSourcePath: (value) => path.dirname(path.resolve(value)),
     corePersonFallbackRecord: (id) => {
       fallbackLookups += 1;
       return { id: String(id), name: id === "2" ? "Target" : "Source" };
@@ -667,7 +728,7 @@ async function verifyActualAdminSqliteCommit() {
     refreshLibrary() {},
     relativeFromRoot: (value) => path.relative(fixture.root, value),
     replacePathPrefix: replacePrefix,
-    resolveLibraryPersonByPublicId: (id) => ["2", "3"].includes(String(id))
+    resolveLibraryPersonByPublicId: (id) => additionalLibraryPeople.get(String(id)) || (["2", "3"].includes(String(id))
       ? {
         id: String(id),
         name: String(id) === "3" ? "Target Duplicate" : "Target",
@@ -676,13 +737,14 @@ async function verifyActualAdminSqliteCommit() {
       }
       : String(id) === "1"
         ? { id: "1", name: "Source", relativePath: fixture.sourcePerson, sourcePaths: [fixture.sourcePerson] }
-        : null,
+        : null),
     resolveLibraryWorkByPublicId: (id) => ({ id: String(id), title: `WORK-${id}`, missingLocal: false }),
-    safeStat: (value) => { try { return fs.statSync(value); } catch { return null; } },
+    safeStat: (value) => { try { return workMoveTargetFileSystem.statSync(value); } catch { return null; } },
     sourcePathToAbsolute: (value) => path.resolve(value),
     resetWorkSearch() {},
     uniqueTextArray: (values) => [...new Set((values || []).filter(Boolean))],
-    uniquePersonNames: (values) => [...new Set((values || []).filter(Boolean))]
+    uniquePersonNames: (values) => [...new Set((values || []).filter(Boolean))],
+    workMoveTargetFileSystem
   });
 
   const approvedTargets = admin.listWorkMoveTargets("1", { limit: 60 });
@@ -714,7 +776,15 @@ async function verifyActualAdminSqliteCommit() {
   const androidReplayJobService = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
   const androidReplayMutationService = createWorkMutationService({ adminCoreMutationService: admin, workMoveJobService: androidReplayJobService });
   const replayBody = { personId: "2", idempotencyKey: "android-staged-replay" };
+  resetTargetFsCalls();
   const firstAndroidJob = androidReplayMutationService.moveToPerson("1", replayBody, { android: true });
+  assert.ok(targetFsCalls.readdirSync >= 1, "a new Android command must build one fresh ownership catalog before its journal transaction");
+  assert.equal(targetFsCalls.transaction.readdirSync, 0, "BEGIN IMMEDIATE must never contain the full root directory scan");
+  const transactionPhysicalChecks = targetFsCalls.transaction.existsSync
+    + targetFsCalls.transaction.lstatSync
+    + targetFsCalls.transaction.realpathSync
+    + targetFsCalls.transaction.statSync;
+  assert.ok(transactionPhysicalChecks <= 8, `transaction proof must stay a bounded target-only check, received ${transactionPhysicalChecks} filesystem calls`);
   await fs.promises.mkdir(fixture.target, { recursive: true });
   const replayedAndroidJob = androidReplayMutationService.moveToPerson("1", replayBody, { android: true });
   assert.equal(replayedAndroidJob.job.id, firstAndroidJob.job.id, "Android replay must return its exact durable job after staging created the destination");
@@ -726,6 +796,25 @@ async function verifyActualAdminSqliteCommit() {
   await androidReplayJobService.close();
   db.prepare("DELETE FROM work_move_jobs").run();
   await fs.promises.rm(fixture.target, { recursive: true, force: true });
+
+  const externalDb = new DatabaseSync(path.join(fixture.root, "admin-fixture.sqlite"));
+  const originalTargetPreflight = admin.preflightWorkMoveTarget;
+  admin.preflightWorkMoveTarget = (...args) => {
+    const proof = originalTargetPreflight(...args);
+    externalDb.prepare("UPDATE people SET updated_at = 'proof-race' WHERE id = 2").run();
+    return proof;
+  };
+  const staleProofService = createWorkMoveJobService({ adminCoreMutationService: admin, getCoreDb: () => db, schedule: () => {} });
+  assert.throws(
+    () => staleProofService.start("1", { personId: "2", idempotencyKey: "external-proof-race" }, { android: true }),
+    (error) => error?.statusCode === 409 && error?.code === "WORK_MOVE_TARGET_STALE",
+    "an external metadata commit between preflight and BEGIN must invalidate the opaque target proof"
+  );
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM work_move_jobs").get().count, 0, "a stale preflight proof must not create a journal row");
+  await staleProofService.close();
+  admin.preflightWorkMoveTarget = originalTargetPreflight;
+  externalDb.close();
+  db.prepare("UPDATE people SET updated_at = '' WHERE id = 2").run();
 
   // Warm the picker cache, then introduce a second person resolving to exactly
   // the same directory.  The Android command must rebuild target ownership,
@@ -777,6 +866,136 @@ async function verifyActualAdminSqliteCommit() {
   );
   db.prepare("DELETE FROM people WHERE id = 3").run();
   duplicateTargetDirectory = fixture.targetPerson;
+
+  // A person can have a valid primary folder and a secondary local-work path.
+  // If that secondary path is a junction alias of another person's primary,
+  // neither person is an unambiguous target.
+  const secondaryPersonDir = path.join(fixture.root, "secondary-local-person");
+  const secondaryPrimaryWork = path.join(secondaryPersonDir, "WORK-PRIMARY");
+  await fs.promises.mkdir(secondaryPrimaryWork, { recursive: true });
+  additionalLibraryPeople.set("4", {
+    id: "4",
+    name: "Secondary Local Owner",
+    relativePath: secondaryPersonDir,
+    sourcePaths: [secondaryPersonDir]
+  });
+  db.prepare("INSERT INTO people VALUES (4, 'Secondary Local Owner', 'secondary local owner', 'Secondary Local Owner', NULL, 0, 'ok', NULL, 'fixture', '', '', 'unknown')").run();
+  db.prepare("INSERT INTO works VALUES (4, '[]', ''), (5, '[]', '')").run();
+  db.prepare("INSERT INTO work_people VALUES (4, 4, 'actor', 0, 'fixture', '', ''), (5, 4, 'actor', 0, 'fixture', '', '')").run();
+  db.prepare("INSERT INTO local_works VALUES (4, 4, ?, '', ''), (5, 5, ?, '', '')")
+    .run(secondaryPrimaryWork, path.join(targetAlias, "WORK-SECONDARY"));
+  const secondaryOwnershipTargets = admin.listWorkMoveTargets("1", { limit: 60, fresh: true }).candidates;
+  assert.equal(
+    secondaryOwnershipTargets.some((candidate) => ["2", "4"].includes(candidate.id)),
+    false,
+    "a secondary local-work junction shared with another primary must exclude both owners"
+  );
+  db.prepare("DELETE FROM local_works WHERE id IN (4, 5)").run();
+  db.prepare("DELETE FROM work_people WHERE work_id IN (4, 5)").run();
+  db.prepare("DELETE FROM works WHERE id IN (4, 5)").run();
+  db.prepare("DELETE FROM people WHERE id = 4").run();
+  additionalLibraryPeople.delete("4");
+
+  // Real-shape complexity fixture: thousands of people with no matching root
+  // entry must add zero per-person filesystem probes. Cache lifetime begins
+  // after the cold catalog finishes, not before it starts.
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const insertScalePerson = db.prepare("INSERT INTO people VALUES (?, ?, ?, ?, NULL, 0, 'ok', NULL, 'scale', '', '', 'unknown')");
+    for (let id = 1_000; id < 3_000; id += 1) {
+      insertScalePerson.run(id, `Absent Person ${id}`, `absent person ${id}`, `Absent Person ${id}`);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  const originalDateNow = Date.now;
+  syntheticNow = originalDateNow() + 60_000;
+  syntheticClockAdvanceMs = 3_000;
+  Date.now = () => syntheticNow;
+  resetTargetFsCalls();
+  let coldTargetMs = 0;
+  let warmTargetMs = 0;
+  try {
+    const coldStartedAt = performance.now();
+    admin.listWorkMoveTargets("1", { query: "no-such-target", limit: 60 });
+    coldTargetMs = performance.now() - coldStartedAt;
+    const coldCalls = { ...targetFsCalls };
+    syntheticNow += 5_000;
+    const warmStartedAt = performance.now();
+    admin.listWorkMoveTargets("1", { query: "no-such-target", limit: 60 });
+    warmTargetMs = performance.now() - warmStartedAt;
+    assert.equal(targetFsCalls.readdirSync, coldCalls.readdirSync, "a picker pause beyond the old 2s TTL must not enumerate roots again");
+    admin.listWorkMoveTargets("1", { query: "no-such-target", limit: 60, fresh: true });
+    assert.equal(targetFsCalls.readdirSync, coldCalls.readdirSync + 1, "fresh command policy must always rebuild ownership despite a warm picker cache");
+  } finally {
+    Date.now = originalDateNow;
+    syntheticClockAdvanceMs = 0;
+  }
+  assert.equal(targetFsCalls.readdirSync, 2, "cold picker and explicit fresh policy must each enumerate the configured root exactly once");
+  assert.ok(
+    targetFsCalls.existsSync + targetFsCalls.lstatSync + targetFsCalls.realpathSync + targetFsCalls.statSync < 80,
+    "filesystem calls must scale with roots and matched unique directories, not people multiplied by roots"
+  );
+  assert.ok(coldTargetMs < 1_000, `2,000-person cold target fixture exceeded 1s: ${coldTargetMs.toFixed(1)}ms`);
+  assert.ok(warmTargetMs < 100, `warm target fixture exceeded 100ms: ${warmTargetMs.toFixed(1)}ms`);
+
+  const healthGate = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  const targetServer = http.createServer((req, res) => {
+    if (req.url === "/targets") {
+      Atomics.store(healthGate, 0, 1);
+      Atomics.notify(healthGate, 0);
+      admin.listWorkMoveTargets("1", { query: "no-such-target", limit: 60, fresh: true });
+      res.writeHead(200).end("targets");
+      return;
+    }
+    res.writeHead(200).end("health");
+  });
+  await new Promise((resolve) => targetServer.listen(0, "127.0.0.1", resolve));
+  const targetAddress = targetServer.address();
+  const healthWorker = new Worker(`
+    const { parentPort, workerData } = require("node:worker_threads");
+    const http = require("node:http");
+    const gate = new Int32Array(workerData.gate);
+    Atomics.wait(gate, 0, 0);
+    setTimeout(() => {
+      const startedAt = performance.now();
+      http.get(workerData.url, (response) => {
+        response.resume();
+        response.on("end", () => parentPort.postMessage({ elapsedMs: performance.now() - startedAt, status: response.statusCode }));
+      }).on("error", (error) => parentPort.postMessage({ error: error.message }));
+    }, 10);
+  `, {
+    eval: true,
+    workerData: {
+      gate: healthGate.buffer,
+      url: `http://127.0.0.1:${targetAddress.port}/health`
+    }
+  });
+  const healthResultPromise = new Promise((resolve, reject) => {
+    healthWorker.once("message", resolve);
+    healthWorker.once("error", reject);
+  });
+  syntheticRootDelayMs = 200;
+  const targetStartedAt = performance.now();
+  const targetRequest = new Promise((resolve, reject) => {
+    http.get(`http://127.0.0.1:${targetAddress.port}/targets`, (response) => {
+      response.resume();
+      response.on("end", () => resolve({ elapsedMs: performance.now() - targetStartedAt, status: response.statusCode }));
+    }).on("error", reject);
+  });
+  const [targetResult, healthResult] = await Promise.all([targetRequest, healthResultPromise]);
+  syntheticRootDelayMs = 0;
+  await healthWorker.terminate();
+  await new Promise((resolve, reject) => targetServer.close((error) => error ? reject(error) : resolve()));
+  assert.equal(targetResult.status, 200);
+  assert.equal(healthResult.status, 200, healthResult.error || "health request failed");
+  assert.ok(targetResult.elapsedMs >= 180, "fixture must overlap health with the deliberately slow cold target catalog");
+  assert.ok(healthResult.elapsedMs >= 100, "health fixture did not overlap the target request as intended");
+  assert.ok(healthResult.elapsedMs < 500, `concurrent health exceeded the 500ms gate: ${healthResult.elapsedMs.toFixed(1)}ms`);
+  console.log(`work-move-target-index: cold=${coldTargetMs.toFixed(1)}ms warm=${warmTargetMs.toFixed(1)}ms concurrent-health=${healthResult.elapsedMs.toFixed(1)}ms roots=${targetFsCalls.readdirSync}`);
+  db.prepare("DELETE FROM people WHERE id >= 1000 AND id < 3000").run();
 
   // Same client idempotency key is not enough to cross the desktop/Android
   // policy boundary: a desktop row may include an explicit path.  Android

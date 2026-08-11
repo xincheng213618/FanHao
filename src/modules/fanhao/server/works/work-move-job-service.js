@@ -439,9 +439,24 @@ export function createWorkMoveJobService({
     }
     const key = requestKey(normalizedWorkId, requestBody);
     const db = getCoreDb();
+    let androidTargetProof = null;
     let scheduledId = "";
     let response = null;
     try {
+      const replayBeforePreflight = db.prepare("SELECT id FROM work_move_jobs WHERE request_key = ?").get(key);
+      if (requestBody.androidCommand && !replayBeforePreflight) {
+        if (typeof adminCoreMutationService.preflightWorkMoveTarget !== "function"
+          || typeof adminCoreMutationService.assertWorkMoveTargetProof !== "function") {
+          const error = new Error("Android 迁移目标安全预检不可用");
+          error.statusCode = 409;
+          error.code = "WORK_MOVE_TARGET_UNAVAILABLE";
+          throw error;
+        }
+        // The full DB/filesystem ownership snapshot can touch network roots,
+        // so it must complete before BEGIN IMMEDIATE. The transaction repeats
+        // the exact idempotency lookup and accepts only the unchanged proof.
+        androidTargetProof = adminCoreMutationService.preflightWorkMoveTarget(normalizedWorkId, requestBody.personId);
+      }
       db.exec("BEGIN IMMEDIATE");
       const existing = db.prepare("SELECT * FROM work_move_jobs WHERE request_key = ?").get(key);
       if (existing && (BLOCKING_STATUSES.has(existing.status) || existing.status === "completed")) {
@@ -471,10 +486,18 @@ export function createWorkMoveJobService({
         scheduledId = existing.id;
         response = publicJob(db.prepare("SELECT * FROM work_move_jobs WHERE id = ?").get(existing.id));
       } else {
-        // Check a forged/stale Android target only after the exact durable
-        // idempotency lookup.  A replay must return its original job even if
-        // staging has already made the destination directory exist.
-        if (requestBody.androidCommand) adminCoreMutationService.assertWorkMoveTarget(normalizedWorkId, requestBody.personId);
+        // The exact lookup is repeated under the write transaction. A replay
+        // returns its original job even if staging already made the target
+        // directory exist; only a genuinely new command consumes the proof.
+        if (requestBody.androidCommand) {
+          if (!androidTargetProof) {
+            const error = new Error("Android 迁移目标预检已失效，请重试");
+            error.statusCode = 409;
+            error.code = "WORK_MOVE_TARGET_STALE";
+            throw error;
+          }
+          adminCoreMutationService.assertWorkMoveTargetProof(androidTargetProof);
+        }
         const conflicting = db.prepare(`
           SELECT * FROM work_move_jobs
           WHERE work_id = ? AND status IN ('queued', 'running', 'cleanup_pending', 'rollback_pending', 'blocked')
