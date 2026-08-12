@@ -2345,9 +2345,11 @@ function summary() {
     }
     const placeholders = canonicalIds.map(() => "?").join(", ");
     const rows = database.prepare(`SELECT * FROM short_videos WHERE id IN (${placeholders})`).all(...canonicalIds);
-    if (!rows.length) {
-      const error = new Error("没有找到可删除的短视频记录");
-      error.statusCode = 404;
+    if (rows.length !== canonicalIds.length) {
+      const error = new Error("部分短视频记录已失效，请刷新后重试");
+      error.statusCode = 409;
+      error.code = "SHORT_VIDEO_DELETE_BATCH_INCOMPLETE";
+      error.expose = true;
       throw error;
     }
     return deleteShortVideos(database, rows, { ...options, scope: "batch" });

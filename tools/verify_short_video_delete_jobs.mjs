@@ -35,6 +35,7 @@ const SUCCESS_KEYS = [
 ];
 
 await verifySuccessfulCompatibilityAndReservations();
+await verifyBatchMissingIdsFailAtomically();
 await verifyProtocolMigrationAndTombstones();
 await verifyCanonicalScannerTombstoneConsumption();
 await verifyAssetTransferSnapshotCas();
@@ -493,6 +494,56 @@ async function verifySuccessfulCompatibilityAndReservations() {
     assertNoQuarantine(fixture.root);
   } finally {
     closeFixture(fixture);
+  }
+}
+
+async function verifyBatchMissingIdsFailAtomically() {
+  for (const testCase of [
+    { ids: ["stale-video", "valid-video"], deleteFiles: true, label: "missing-first" },
+    { ids: ["valid-video", "stale-video"], deleteFiles: false, label: "valid-first-logical-only" }
+  ]) {
+    const fixture = createFixture();
+    try {
+      const source = writeMedia(fixture.root, `${testCase.label}/valid.mp4`, `${testCase.label}-bytes`);
+      seedVideo(fixture.dbPath, { id: "valid-video", sourcePath: source, title: "Valid Video" });
+      const covers = createShortVideoCoverDatabase({ dbPath: fixture.coverDbPath });
+      covers.put("valid-video", Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+      covers.close();
+
+      await assert.rejects(
+        () => fixture.store.deleteVideos(testCase.ids, { deleteFiles: testCase.deleteFiles }),
+        (error) => error?.statusCode === 409
+          && error?.code === "SHORT_VIDEO_DELETE_BATCH_INCOMPLETE"
+          && /失效/.test(String(error?.message || ""))
+      );
+
+      assert.equal(videoExists(fixture.dbPath, "valid-video"), true, `${testCase.label}: valid DB row must remain`);
+      assert.equal(fixture.store.videoDetail("valid-video")?.video?.id, "valid-video", `${testCase.label}: valid public model must remain`);
+      assert.equal(fs.readFileSync(source, "utf8"), `${testCase.label}-bytes`, `${testCase.label}: valid file must remain byte-exact`);
+      const db = openDb(fixture.dbPath);
+      try {
+        for (const table of [
+          "short_video_delete_jobs",
+          "short_video_delete_reservations",
+          "short_video_path_tombstones",
+          "short_video_delete_video_tombstones"
+        ]) {
+          assert.equal(
+            Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count || 0),
+            0,
+            `${testCase.label}: incomplete batch must not create ${table} side effects`
+          );
+        }
+      } finally {
+        db.close();
+      }
+      const coverCheck = createShortVideoCoverDatabase({ dbPath: fixture.coverDbPath });
+      assert.equal(coverCheck.has("valid-video"), true, `${testCase.label}: valid stored cover must remain`);
+      coverCheck.close();
+      assertNoQuarantine(fixture.root);
+    } finally {
+      closeFixture(fixture);
+    }
   }
 }
 
