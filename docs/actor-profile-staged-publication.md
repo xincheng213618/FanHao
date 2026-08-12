@@ -44,7 +44,7 @@
 
 资料页和头像必须来自同一个 `actorProfileRow` SQL snapshot。Presenter 只消费 `publicActorProfileSnapshot(row)`，不能在 profile cache row 后再次调用 avatar reader。所有 publication reader 同时校验 `state=completed`、main receipt digest、publication digest 和 stage digest。
 
-带 blob 的发布头像 URL 使用不可变版本：`/media/actor/:id/avatar?v=<operation-id>`。媒体 worker 不把 `v` 仅当缓存键，而是校验它属于 `actor_profile_upsert`、operation 已 `completed`、main/image receipt digest 均匹配，并且 stage 属于请求人物。资料页只生成当前 publication 的 URL；已经完成的历史版本仍可按 immutable URL 回读并被浏览器/进程缓存，未知或未完成 token 不返回字节。无 token 的兼容路径表示“当前头像”，每次重新读取且返回 `no-store`，不会在 publication 切换或手工覆盖后复活进程/浏览器缓存中的旧 stage。
+带 blob 的发布头像 URL 使用版本标识：`/media/actor/:id/avatar?v=<operation-id>`。媒体 worker 不把 `v` 仅当缓存键，而是校验它属于 `actor_profile_upsert`、operation 已 `completed`、main/image receipt digest 均匹配，并且 stage 属于请求人物；每次版本请求都先检查 durable tombstone authority，已撤销版本返回 410。资料页只生成当前 publication 的 URL；未撤销且已完成的历史版本仍可按版本 URL 回读，但版本响应统一使用 `Cache-Control: private, no-store`，未知或未完成 token 不返回字节。无 token 的兼容路径表示“当前头像”，同样每次重新读取并返回 `no-store`。这些策略阻止服务端进程缓存继续提供已撤销 stage，也阻止新响应建立长期浏览器缓存，但撤销前已被旧浏览器缓存的字节不保证能够召回。
 
 ## 头像优先级与后续 writer
 

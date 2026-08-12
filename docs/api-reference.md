@@ -71,7 +71,7 @@
 
 | 方法 | 路径 | 权限 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/media/actor/:id/avatar` | 公开 | 演员头像（本地 / 远端 / 生成）；暂存发布头像使用不可变 `?v=<operation-id>`，服务端校验 completed main receipt。 |
+| GET | `/media/actor/:id/avatar` | 公开 | 演员头像（本地 / 远端 / 生成）；`?v=<operation-id>` 版本请求要求 operation 已 completed，且 main receipt 与 image receipt 均匹配。每次请求都检查 revoke tombstone；已撤销版本返回 410，版本响应使用 `Cache-Control: private, no-store`。 |
 | GET | `/media/work/:id/cover` | 公开 | 作品封面。 |
 | GET | `/media/core-image/:id` | 公开 | 核心库图片（按 `images` 表 id）。 |
 | GET | `/media/image/:id` | 公开 | 本地图片文件。 |
