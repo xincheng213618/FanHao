@@ -1,9 +1,7 @@
 package local.fanhao.library;
 
-import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
 
 final class NativeShortVideoFeedTransport {
   interface Parser<T> {
@@ -40,17 +38,13 @@ final class NativeShortVideoFeedTransport {
       connection.connect();
       int responseCode = connection.getResponseCode();
       if (responseCode < 200 || responseCode >= 300) return failure(NativeShortVideoFeedPaging.Failure.HTTP);
-      StringBuilder builder = new StringBuilder();
-      try (InputStreamReader input = new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8)) {
-        char[] buffer = new char[4096];
-        int read;
-        while ((read = input.read(buffer)) >= 0) builder.append(buffer, 0, read);
-      }
-      Parsed<T> parsed = parser.parse(builder.toString());
+      Parsed<T> parsed = parser.parse(NativeShortVideoHttpResponse.readUtf8(connection, true));
       if (parsed == null || parsed.value == null) return failure(NativeShortVideoFeedPaging.Failure.PARSE);
       return NativeShortVideoFeedPaging.ReadResult.success(parsed.value, parsed.hasMore, parsed.nextCursor);
     } catch (java.net.SocketTimeoutException error) {
       return failure(NativeShortVideoFeedPaging.Failure.TIMEOUT);
+    } catch (NativeShortVideoHttpResponse.BodyTooLargeException error) {
+      return failure(NativeShortVideoFeedPaging.Failure.PARSE);
     } catch (java.io.IOException error) {
       return failure(NativeShortVideoFeedPaging.Failure.OFFLINE);
     } catch (Exception error) {

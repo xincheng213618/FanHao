@@ -73,9 +73,7 @@ import androidx.viewpager2.widget.ViewPager2;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -2530,7 +2528,7 @@ public class NativeShortVideoActivity extends Activity {
         connection.getOutputStream().write(bytes);
       }
       int status = connection.getResponseCode();
-      String body = readConnectionBody(connection, status >= 200 && status < 300);
+      String body = NativeShortVideoHttpResponse.readUtf8(connection, status >= 200 && status < 300);
       JSONObject data = body.length() > 0 ? new JSONObject(body) : new JSONObject();
       if (status < 200 || status >= 300) {
         String message = data.optString("error", "");
@@ -2905,7 +2903,7 @@ public class NativeShortVideoActivity extends Activity {
       connection.setRequestProperty("Accept", "application/json");
       connection.connect();
       int status = connection.getResponseCode();
-      String body = readConnectionBody(connection, status >= 200 && status < 300);
+      String body = NativeShortVideoHttpResponse.readUtf8(connection, status >= 200 && status < 300);
       JSONObject data = body.length() > 0 ? new JSONObject(body) : new JSONObject();
       if (status < 200 || status >= 300) {
         String message = data.optString("error", "");
@@ -2914,21 +2912,6 @@ public class NativeShortVideoActivity extends Activity {
       return DeleteResult.fromJson(data, item);
     } finally {
       if (connection != null) connection.disconnect();
-    }
-  }
-
-  private String readConnectionBody(HttpURLConnection connection, boolean success) {
-    try (InputStream input = success ? connection.getInputStream() : connection.getErrorStream()) {
-      if (input == null) return "";
-      StringBuilder builder = new StringBuilder();
-      byte[] buffer = new byte[8192];
-      int read;
-      while ((read = input.read(buffer)) >= 0) {
-        builder.append(new String(buffer, 0, read, StandardCharsets.UTF_8));
-      }
-      return builder.toString();
-    } catch (Exception ignored) {
-      return "";
     }
   }
 
@@ -3151,24 +3134,19 @@ public class NativeShortVideoActivity extends Activity {
       connection = (HttpURLConnection) new URL(url).openConnection();
       connection.setConnectTimeout(5000);
       connection.setReadTimeout(8000);
+      connection.setRequestProperty("Accept", "image/*");
       connection.connect();
-      try (InputStream input = connection.getInputStream()) {
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        byte[] buffer = new byte[16 * 1024];
-        int read;
-        while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
-        byte[] bytes = output.toByteArray();
-        BitmapFactory.Options bounds = new BitmapFactory.Options();
-        bounds.inJustDecodeBounds = true;
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
-        BitmapFactory.Options options = new BitmapFactory.Options();
-        options.inSampleSize = bitmapSampleSize(bounds.outWidth, bounds.outHeight, maxWidth, maxHeight);
-        return scaleBitmapToFit(
-          BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options),
-          maxWidth,
-          maxHeight
-        );
-      }
+      byte[] bytes = NativeShortVideoImageLoader.read(connection);
+      BitmapFactory.Options bounds = new BitmapFactory.Options();
+      bounds.inJustDecodeBounds = true;
+      BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+      BitmapFactory.Options options = new BitmapFactory.Options();
+      options.inSampleSize = bitmapSampleSize(bounds.outWidth, bounds.outHeight, maxWidth, maxHeight);
+      return scaleBitmapToFit(
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options),
+        maxWidth,
+        maxHeight
+      );
     } catch (Exception ignored) {
       return null;
     } finally {
