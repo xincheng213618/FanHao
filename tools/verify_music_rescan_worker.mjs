@@ -4,14 +4,20 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
+import { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
 import { createMusicRuntime } from "../src/modules/music/server/runtime.js";
+import { createMusicProgressWriter } from "../android-client/www/modules/music/music-progress-writer.js";
 import { scanMusicRoots, scanSummary, writeScanRecords } from "../src/modules/music/server/scan.js";
 import { createMusicScanWorkerClient } from "../src/modules/music/server/scan-worker-client.js";
 import { ensureSchema } from "../src/modules/music/server/schema.js";
 import { createMusicStore } from "../src/modules/music/server/store.js";
 
 const failureWorkerUrl = new URL("./fixtures/music_scan_worker_failure.mjs", import.meta.url);
+const productionWorkerUrl = new URL("../src/modules/music/server/scan-worker.js", import.meta.url);
+const shutdownFixtureUrl = new URL("./fixtures/server_host_shutdown_rescan.mjs", import.meta.url);
 const owned = createOwnedFixtureDirectory();
 let metrics = null;
 
@@ -19,8 +25,13 @@ try {
   const fixture = createMusicFixture(owned.fixtureDir);
   await verifyLegacyPersistenceEquivalence(fixture);
   await verifyAtomicFailures(fixture);
+  await verifyCommittedCrashInvalidatesReaders(fixture);
+  await verifyCheckpointDoesNotDelaySuccess(fixture);
   await verifySingleFlightAndStop(fixture);
+  await verifyAllMainThreadWritesFailFast(fixture);
+  await verifyClientWriteRecovery();
   const responsiveness = await verifyHttpResponsivenessAndSnapshots(fixture);
+  await verifyServerHostShutdown();
   const timing = await verifyWorkerTiming(fixture);
   metrics = { ...timing, ...responsiveness };
   verifySourceBoundary();
@@ -132,6 +143,62 @@ async function verifyWorkerCrashKeepsOldSnapshot(fixture) {
   }
 }
 
+async function verifyCommittedCrashInvalidatesReaders(fixture) {
+  const dbPath = path.join(fixture.baseDir, "committed-worker-crash.sqlite");
+  seedOldSnapshot(dbPath, "old-track");
+  const store = createMusicStore({
+    dbPath,
+    roots: fixture.roots,
+    scanWorkerUrl: failureWorkerUrl,
+    scanWorkerData: { mode: "commit-exit", exitCode: 27 }
+  });
+  let oldReader = null;
+  try {
+    await store.start();
+    assert.equal(store.summary().totals.tracks, 1);
+    assert.equal(store.facets().artists[0].name, "Old Artist", "fixture must warm the old facet cache before the uncertain result");
+    oldReader = new DatabaseSync(dbPath, { readOnly: true });
+    oldReader.exec("BEGIN");
+    assert.equal(oldReader.prepare("SELECT title FROM music_tracks WHERE id = 'old-track'").get().title, "Old Track");
+    await assert.rejects(
+      store.scan({ roots: fixture.roots }),
+      (error) => error.code === "MUSIC_SCAN_WORKER_EXIT" && error.statusCode === 503
+    );
+    assert.equal(store.trackDetail("old-track").track.title, "New Track", "a dispatched worker failure must reopen the main connection after a possible commit");
+    assert.equal(store.facets().artists[0].name, "New Artist", "a dispatched worker failure must invalidate cached facets after a possible commit");
+  } finally {
+    try { oldReader?.exec("ROLLBACK"); } catch {}
+    try { oldReader?.close(); } catch {}
+    await store.stop();
+  }
+}
+
+async function verifyCheckpointDoesNotDelaySuccess(fixture) {
+  const dbPath = path.join(fixture.baseDir, "checkpoint-after-result.sqlite");
+  seedOldSnapshot(dbPath, "future-track");
+  const worker = new Worker(productionWorkerUrl, {
+    workerData: {
+      dbPath,
+      ...fixture.probeOptions,
+      checkpointDelayMs: 1200
+    }
+  });
+  try {
+    await waitForWorkerMessage(worker, (message) => message?.type === "ready");
+    const requestId = 401;
+    const result = waitForWorkerMessage(worker, (message) => message?.type === "result" && message.id === requestId);
+    worker.postMessage({ type: "scan", id: requestId, request: { roots: fixture.slowRoots, limit: 1, dryRun: false } });
+    const publishedAt = await waitForWorkerMessage(worker, (message) => message?.type === "phase" && message.id === requestId && message.phase === "publishing")
+      .then(() => performance.now());
+    const message = await result;
+    const resultAfterPublishMs = performance.now() - publishedAt;
+    assert.equal(message.ok, true);
+    assert.ok(resultAfterPublishMs < 500, `success acknowledgement waited ${resultAfterPublishMs.toFixed(2)} ms for a best-effort checkpoint`);
+  } finally {
+    await worker.terminate();
+  }
+}
+
 async function verifySqlFailureRollsBack(fixture) {
   const dbPath = path.join(fixture.baseDir, "sql-failure.sqlite");
   seedOldSnapshot(dbPath, "future-track");
@@ -224,16 +291,115 @@ async function verifySingleFlightAndStop(fixture) {
   await assert.rejects(client.scan({ roots: fixture.roots }), (error) => error.code === "MUSIC_SCAN_WORKER_STOPPED");
 }
 
+async function verifyAllMainThreadWritesFailFast(fixture) {
+  const dbPath = path.join(fixture.baseDir, "all-writes-fail-fast.sqlite");
+  seedOldSnapshot(dbPath, "old-track");
+  const store = createMusicStore({ dbPath, roots: fixture.roots });
+  store.summary();
+  const lock = new DatabaseSync(dbPath);
+  lock.exec("BEGIN IMMEDIATE");
+  const before = dumpCatalogWithDatabase(lock);
+  const oldPath = path.join(path.dirname(dbPath), "old.mp3");
+  const mutations = [
+    ["saveProgress", () => store.saveProgress("old-track", { positionMs: 50, played: true })],
+    ["toggleFavorite", () => store.toggleFavorite("old-track", { favorite: false })],
+    ["setRating", () => store.setRating("old-track", { rating: 1 })],
+    ["clearHistory", () => store.clearHistory()],
+    ["createPlaylist", () => store.createPlaylist({ name: "Busy fixture" })],
+    ["updatePlaylist", () => store.updatePlaylist("playlist-1", { name: "Busy fixture" })],
+    ["importM3uPlaylist", () => store.importM3uPlaylist({ name: "Busy import", content: `#EXTM3U\n${oldPath}` })],
+    ["deletePlaylist", () => store.deletePlaylist("playlist-1")],
+    ["addToPlaylist", () => store.addToPlaylist("playlist-1", "old-track")],
+    ["removeFromPlaylist", () => store.removeFromPlaylist("playlist-1", "old-track")],
+    ["reorderPlaylist", () => store.reorderPlaylist("playlist-1", { trackIds: ["old-track"] })]
+  ];
+  try {
+    const startedAt = performance.now();
+    for (const [name, mutate] of mutations) {
+      const mutationStartedAt = performance.now();
+      assert.throws(mutate, (error) => error.code === "MUSIC_WRITE_BUSY" && error.statusCode === 503 && error.retryable === true, `${name} must use the shared fail-fast write boundary`);
+      assert.ok(performance.now() - mutationStartedAt < 75, `${name} waited on SQLite instead of failing fast`);
+    }
+    assert.ok(performance.now() - startedAt < 250, "the complete music mutation surface waited on SQLite locks");
+    assert.deepEqual(dumpCatalogWithDatabase(lock), before, "no fail-fast mutation may partially change a table");
+  } finally {
+    lock.exec("ROLLBACK");
+    lock.close();
+    await store.stop();
+  }
+}
+
+async function verifyClientWriteRecovery() {
+  let timerId = 0;
+  const timers = new Map();
+  const attempts = new Map();
+  const successfulPlayed = [];
+  const progressWrites = [];
+  const writer = createMusicProgressWriter({
+    setTimeoutFn(callback, delayMs) {
+      const id = ++timerId;
+      timers.set(id, { callback, delayMs });
+      return id;
+    },
+    clearTimeoutFn(id) { timers.delete(id); },
+    async send(record, played) {
+      if (!played) {
+        progressWrites.push(record);
+        return;
+      }
+      const count = (attempts.get(record.reportKey) || 0) + 1;
+      attempts.set(record.reportKey, count);
+      if (record.reportKey === "busy" && count === 1) {
+        throw Object.assign(new Error("busy"), { status: 503, code: "MUSIC_WRITE_BUSY", retryable: true });
+      }
+      if (record.reportKey === "unknown") throw new Error("response lost");
+    },
+    onPlayed(record) { successfulPlayed.push(record.reportKey); }
+  });
+
+  const record = { activeUrl: "http://fixture", trackId: "track-1", positionMs: 10, durationMs: 100 };
+  writer.reportPlayed({ ...record, reportKey: "busy", session: 1 });
+  await runNextFixtureTimer(timers, 0);
+  writer.reportPlayed({ ...record, reportKey: "busy", session: 1 });
+  assert.equal(timers.size, 1, "external playback events must not duplicate an internally queued busy retry");
+  await runNextFixtureTimer(timers, 1000);
+  assert.deepEqual(successfulPlayed, ["busy"], "played completion must be marked only after the retry succeeds");
+  writer.reportPlayed({ ...record, reportKey: "busy", session: 1 });
+  assert.equal(attempts.get("busy"), 2, "a completed played report must not be sent twice");
+
+  writer.reportPlayed({ ...record, reportKey: "unknown", session: 2 });
+  await runNextFixtureTimer(timers, 0);
+  writer.reportPlayed({ ...record, reportKey: "unknown", session: 2 });
+  assert.equal(attempts.get("unknown"), 1, "an unknown-result failure must not be replayed and double play_count");
+  assert.equal(timers.size, 0);
+
+  writer.save({ ...record, positionMs: 20 }, { delayMs: 800 });
+  writer.save({ ...record, positionMs: 30 }, { delayMs: 800 });
+  await runNextFixtureTimer(timers, 800);
+  assert.equal(progressWrites.at(-1).positionMs, 30, "ordinary progress must coalesce to the latest captured position");
+}
+
+async function runNextFixtureTimer(timers, expectedDelayMs) {
+  const entry = timers.entries().next().value;
+  assert.ok(entry, `expected a ${expectedDelayMs} ms fixture timer`);
+  const [id, timer] = entry;
+  timers.delete(id);
+  assert.equal(timer.delayMs, expectedDelayMs);
+  timer.callback();
+  await delay(0);
+}
+
 async function verifyHttpResponsivenessAndSnapshots(fixture) {
   const dbPath = path.join(fixture.baseDir, "http.sqlite");
-  seedOldSnapshot(dbPath, "future-track");
+  const futureTrackId = scanMusicRoots(fixture.slowRoots, { ...fixture.probeOptions, limit: 1 }).tracks[0].id;
+  seedOldSnapshot(dbPath, futureTrackId, futureTrackId, { withPlaylistItem: false });
   const runtime = createMusicRuntime({
     dbPath,
     ffprobePath: process.execPath,
     roots: fixture.slowRoots,
     scanWorkerOptions: {
       ...fixture.probeOptions,
-      scanWorkerData: { publishDelayMs: 200 }
+      scanWorkerData: { publishDelayMs: 1200 }
     },
     mediaResponseService: { serveImage() {} },
     mediaStreamService: { serveVideo() {} },
@@ -259,6 +425,9 @@ async function verifyHttpResponsivenessAndSnapshots(fixture) {
   try {
     const initialSummary = await fetchJson(`${baseUrl}/api/music/summary`);
     assert.equal(initialSummary.totals.tracks, 1);
+    const initialTrack = await fetchJson(`${baseUrl}/api/music/tracks/${encodeURIComponent(futureTrackId)}`);
+    assert.equal(initialTrack.track.title, "Old Track");
+    const beforeWrites = dumpMutableState(dbPath);
     const startedAt = performance.now();
     const rescan = fetch(`${baseUrl}/api/music/rescan`, {
       method: "POST",
@@ -267,8 +436,39 @@ async function verifyHttpResponsivenessAndSnapshots(fixture) {
     });
     await waitFor(() => runtime.store.scanDiagnostics().activePhase === "publishing");
 
-    const oldSummary = await fetchJson(`${baseUrl}/api/music/summary`);
-    assert.equal(oldSummary.totals.tracks, 1, "readers must keep seeing the old committed snapshot during the worker write transaction");
+    const oldTrack = await fetchJson(`${baseUrl}/api/music/tracks/${encodeURIComponent(futureTrackId)}`);
+    assert.equal(oldTrack.track.title, "Old Track", "readers must keep seeing the old committed snapshot during the worker write transaction");
+
+    const heartbeatBeforeWrites = heartbeat.snapshot().ticks;
+    const writesStartedAt = performance.now();
+    const [progressBusy, favoriteBusy, playlistBusy, healthDuringWrites] = await Promise.all([
+      fetchResponse(`${baseUrl}/api/music/tracks/${encodeURIComponent(futureTrackId)}/progress`, {
+        method: "POST", body: { positionMs: 321, durationMs: 123456, played: true }
+      }),
+      fetchResponse(`${baseUrl}/api/music/tracks/${encodeURIComponent(futureTrackId)}/favorite`, {
+        method: "POST", body: { favorite: false }
+      }),
+      fetchResponse(`${baseUrl}/api/music/playlists/playlist-1/tracks`, {
+        method: "POST", body: { trackId: futureTrackId }
+      }),
+      fetchResponse(`${baseUrl}/api/health`)
+    ]);
+    const publishingWriteBatchMs = performance.now() - writesStartedAt;
+    for (const response of [progressBusy, favoriteBusy, playlistBusy]) {
+      assert.equal(response.status, 503);
+      assert.deepEqual(response.body, {
+        error: "音乐数据正在更新，请稍后重试",
+        code: "MUSIC_WRITE_BUSY",
+        retryable: true
+      });
+      assert.doesNotMatch(JSON.stringify(response.body), /sqlite|database is locked|\\|\/tmp\//i, "busy responses must not leak SQLite or filesystem details");
+    }
+    assert.equal(healthDuringWrites.status, 200);
+    assert.equal(healthDuringWrites.body.ok, true);
+    assert.ok(publishingWriteBatchMs < 250, `publishing writes blocked the event loop for ${publishingWriteBatchMs.toFixed(2)} ms`);
+    await delay(40);
+    assert.ok(heartbeat.snapshot().ticks > heartbeatBeforeWrites, "10 ms heartbeat must continue through publishing write conflicts");
+    assert.deepEqual(dumpMutableState(dbPath), beforeWrites, "failed publishing writes must not partially change progress, favorite, or playlist rows");
 
     const healthLatencies = [];
     for (let index = 0; index < 6; index += 1) {
@@ -288,6 +488,26 @@ async function verifyHttpResponsivenessAndSnapshots(fixture) {
     const newSummary = await fetchJson(`${baseUrl}/api/music/summary`);
     assert.equal(newSummary.totals.tracks, fixture.slowTrackCount, "the next read after commit must see the complete new snapshot");
 
+    const progressRetry = await fetchResponse(`${baseUrl}/api/music/tracks/${encodeURIComponent(futureTrackId)}/progress`, {
+      method: "POST", body: { positionMs: 321, durationMs: 123456, played: true }
+    });
+    const favoriteRetry = await fetchResponse(`${baseUrl}/api/music/tracks/${encodeURIComponent(futureTrackId)}/favorite`, {
+      method: "POST", body: { favorite: false }
+    });
+    const playlistRetry = await fetchResponse(`${baseUrl}/api/music/playlists/playlist-1/tracks`, {
+      method: "POST", body: { trackId: futureTrackId }
+    });
+    assert.deepEqual([progressRetry.status, favoriteRetry.status, playlistRetry.status], [200, 200, 200]);
+    const afterRetries = dumpMutableState(dbPath);
+    const trackState = afterRetries.music_track_state.find((row) => row.track_id === futureTrackId);
+    assert.equal(trackState.play_count, 3, "the retried played mutation must increment play_count exactly once");
+    assert.equal(trackState.favorite, 0, "the explicit favorite target must be applied exactly once");
+    assert.deepEqual(
+      afterRetries.music_playlist_items.filter((row) => row.playlist_id === "playlist-1" && row.track_id === futureTrackId).map((row) => row.track_id),
+      [futureTrackId],
+      "the retried playlist add must create exactly one item"
+    );
+
     const heartbeatResult = heartbeat.stop();
     const maxHealthMs = Math.max(...healthLatencies);
     assert.ok(heartbeatResult.ticks >= 5, `expected heartbeat progress during rescan, got ${heartbeatResult.ticks}`);
@@ -297,7 +517,8 @@ async function verifyHttpResponsivenessAndSnapshots(fixture) {
       snapshotScanMs: Number(snapshotScanMs.toFixed(2)),
       heartbeatTicks: heartbeatResult.ticks,
       maxHeartbeatDelayMs: Number(heartbeatResult.maxDelayMs.toFixed(2)),
-      maxHealthMs: Number(maxHealthMs.toFixed(2))
+      maxHealthMs: Number(maxHealthMs.toFixed(2)),
+      publishingWriteBatchMs: Number(publishingWriteBatchMs.toFixed(2))
     };
   } finally {
     heartbeat.stop();
@@ -447,7 +668,7 @@ function createManagedCatalog(root, mediaPath, lyricPath) {
   }
 }
 
-function seedOldSnapshot(dbPath, retainedTrackId) {
+function seedOldSnapshot(dbPath, retainedTrackId, catalogTrackId = "old-track", options = {}) {
   const now = "2026-08-12T00:00:00.000Z";
   const sourceRoot = path.dirname(dbPath);
   const oldPath = path.join(sourceRoot, "old.mp3");
@@ -463,7 +684,7 @@ function seedOldSnapshot(dbPath, retainedTrackId) {
       relativePath: "", trackCount: 1, durationMs: 1000, sizeBytes: 1, updatedAt: now
     }],
     tracks: [{
-      id: "old-track", artistId: "old-artist", albumId: "old-album", title: "Old Track", sortTitle: "Old Track",
+      id: catalogTrackId, artistId: "old-artist", albumId: "old-album", title: "Old Track", sortTitle: "Old Track",
       displayArtist: "Old Artist", albumTitle: "Old Album", trackNo: 1, discNo: 1, genre: "Pop", language: "英文",
       sourceRoot, sourcePath: oldPath, relativePath: "old.mp3", fileName: "old.mp3", ext: ".mp3", sizeBytes: 1,
       mtimeMs: 1, durationMs: 1000, codec: "MP3", sampleRate: 44100, bitDepth: 16, channels: 2,
@@ -480,7 +701,21 @@ function seedOldSnapshot(dbPath, retainedTrackId) {
       VALUES (?,1,5,10,100,2,?,?)
     `).run(retainedTrackId, now, now);
     database.prepare("INSERT INTO music_playlists (id,name,description,created_at,updated_at) VALUES ('playlist-1','Fixture','','2026','2026')").run();
-    database.prepare("INSERT INTO music_playlist_items (playlist_id,track_id,sort_order,added_at) VALUES ('playlist-1',?,1,'2026')").run(retainedTrackId);
+    if (options.withPlaylistItem !== false) {
+      database.prepare("INSERT INTO music_playlist_items (playlist_id,track_id,sort_order,added_at) VALUES ('playlist-1',?,1,'2026')").run(retainedTrackId);
+    }
+  } finally {
+    database.close();
+  }
+}
+
+function dumpMutableState(dbPath) {
+  const database = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return Object.fromEntries(["music_track_state", "music_playlists", "music_playlist_items"].map((table) => [
+      table,
+      database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()
+    ]));
   } finally {
     database.close();
   }
@@ -546,6 +781,16 @@ async function fetchJson(url) {
   return response.json();
 }
 
+async function fetchResponse(url, options = {}) {
+  const init = { ...options };
+  if (Object.hasOwn(init, "body") && init.body !== undefined) {
+    init.headers = { "content-type": "application/json", ...(init.headers || {}) };
+    init.body = JSON.stringify(init.body);
+  }
+  const response = await fetch(url, init);
+  return { status: response.status, body: await response.json() };
+}
+
 function startHeartbeat(intervalMs) {
   let last = performance.now();
   let ticks = 0;
@@ -558,12 +803,77 @@ function startHeartbeat(intervalMs) {
     ticks += 1;
   }, intervalMs);
   return {
+    snapshot() {
+      return { ticks, maxDelayMs };
+    },
     stop() {
       if (!stopped) clearInterval(timer);
       stopped = true;
       return { ticks, maxDelayMs };
     }
   };
+}
+
+function waitForWorkerMessage(worker, predicate, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => finish(new Error("timed out waiting for worker message")), timeoutMs);
+    const onMessage = (message) => {
+      if (predicate(message)) finish(null, message);
+    };
+    const onError = (error) => finish(error);
+    const onExit = (code) => finish(new Error(`worker exited before expected message (${code})`));
+    function finish(error, value) {
+      clearTimeout(timer);
+      worker.off("message", onMessage);
+      worker.off("error", onError);
+      worker.off("exit", onExit);
+      if (error) reject(error);
+      else resolve(value);
+    }
+    worker.on("message", onMessage);
+    worker.on("error", onError);
+    worker.on("exit", onExit);
+  });
+}
+
+async function verifyServerHostShutdown() {
+  const result = await spawnNodeFixture(shutdownFixtureUrl, 5000);
+  assert.equal(result.code, 0, `SIGTERM rescan fixture failed:\n${result.stderr || result.stdout}`);
+  const markers = [
+    "FIXTURE_RESCAN_ACTIVE",
+    "FIXTURE_BEGIN_STOP",
+    "FIXTURE_RESCAN_CANCELLED",
+    "FIXTURE_STOP"
+  ];
+  let lastIndex = -1;
+  for (const marker of markers) {
+    const index = result.stdout.indexOf(marker);
+    assert.ok(index > lastIndex, `missing or out-of-order shutdown marker ${marker}:\n${result.stdout}`);
+    lastIndex = index;
+  }
+  assert.doesNotMatch(result.stdout, /FIXTURE_FORCE_EXIT/);
+}
+
+function spawnNodeFixture(fileUrl, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [fileURLToPath(fileUrl)], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`fixture timed out:\n${stdout}\n${stderr}`));
+    }, timeoutMs);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal, stdout, stderr });
+    });
+  });
 }
 
 async function waitFor(predicate, timeoutMs = 5000) {
