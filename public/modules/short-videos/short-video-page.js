@@ -11,6 +11,8 @@ import { createShortVideoPlaybackRenditionPolicy } from "./playback-rendition-po
 import { createShortVideoPlayerSourceLifecycle, disposeShortVideoMedia } from "./player-source-lifecycle.js?v=20260811-custom-collections-01";
 import { createShortVideoTranscodeManagementPage } from "./transcode-management-page.js?v=20260720-transcode-continuous-08";
 import { createShortVideoTranscodeStatusButton } from "./transcode-status-button.js?v=20260720-transcode-popup-09";
+import { requestShortVideoDelete, shortVideoDeleteCompletedMessage, shortVideoDeletePendingMessage, shortVideoDeleteRecoveryMessage } from "./delete-contract.js?v=20260813-delete-recovery-01";
+import { shortVideoDeleteApiPath } from "./router.js?v=20260813-delete-recovery-01";
 import {
   applyShortVideoLikeBadgeState,
   clampNumber,
@@ -6149,18 +6151,16 @@ export function createShortVideoPage(deps) {
     const deletingCurrent = state.shortVideo?.current?.id === video.id;
     const nextId = deletingCurrent ? state.shortVideo.nextId || "" : "";
     const prevId = deletingCurrent ? state.shortVideo.prevId || "" : "";
-    const endpoint = `/api/short-videos/${encodeURIComponent(video.id)}${scope === "group" ? "?scope=group" : ""}`;
-    const data = await api(endpoint, { method: "DELETE" });
-    const deletedIds = new Set((Array.isArray(data.ids) && data.ids.length ? data.ids : [video.id]).map(String));
+    const data = await requestShortVideoDelete(api, `${shortVideoDeleteApiPath(video.id)}${scope === "group" ? "?scope=group" : ""}`, { method: "DELETE" }, { expectedIds: [video.id] });
+    if (!data.committed) return showBrowserToast(shortVideoDeleteRecoveryMessage(data));
+    const deletedIds = new Set(data.ids);
     for (const id of deletedIds) loadedCoverIds.delete(id);
     if (state.shortVideo.data?.videos) {
       state.shortVideo.data.videos = state.shortVideo.data.videos.filter((item) => !deletedIds.has(String(item.id || "")));
       state.shortVideo.data.total = Math.max(0, Number(state.shortVideo.data.total || 0) - deletedIds.size);
     }
     decrementCurrentAuthorCount(deletedIds.size);
-    const message = scope === "group"
-      ? `已删除 ${data.count || deletedIds.size} 条${data.deletedFiles?.length ? `，${data.deletedFiles.length} 个文件` : ""}`
-      : `已删除${data.deletedFiles?.length ? ` ${data.deletedFiles.length} 个文件` : ""}`;
+    const message = data.pending ? shortVideoDeletePendingMessage(data) : shortVideoDeleteCompletedMessage(data, { scope });
     if (deletingCurrent) {
       showBrowserToast(message);
       const fallbackId = [nextId, prevId].find((id) => id && !deletedIds.has(String(id)));
@@ -6183,11 +6183,12 @@ export function createShortVideoPage(deps) {
     if (!ids.length) return;
     const ok = window.confirm(`确定删除选中的 ${ids.length} 条短视频吗？\n\n会删除资料库记录以及这些记录引用且未被其他记录引用的本地文件。`);
     if (!ok) return;
-    const data = await api("/api/short-videos", {
+    const data = await requestShortVideoDelete(api, "/api/short-videos", {
       method: "DELETE",
       body: { ids }
-    });
-    const deletedIds = new Set((Array.isArray(data.ids) && data.ids.length ? data.ids : ids).map(String));
+    }, { expectedIds: ids });
+    if (!data.committed) return showBrowserToast(shortVideoDeleteRecoveryMessage(data));
+    const deletedIds = new Set(data.ids);
     for (const id of deletedIds) loadedCoverIds.delete(id);
     if (state.shortVideo.data?.videos) {
       state.shortVideo.data.videos = state.shortVideo.data.videos.filter((item) => !deletedIds.has(String(item.id || "")));
@@ -6197,7 +6198,7 @@ export function createShortVideoPage(deps) {
     clearShortVideoDeleteSelection();
     state.shortVideo.data = null;
     await loadVideos({ replaceRoute: true });
-    showBrowserToast(`已删除 ${data.count || deletedIds.size} 条${data.deletedFiles?.length ? `，${data.deletedFiles.length} 个文件` : ""}`);
+    showBrowserToast(data.pending ? shortVideoDeletePendingMessage(data) : shortVideoDeleteCompletedMessage(data));
   }
 
   function decrementCurrentAuthorCount(value) {

@@ -16,7 +16,7 @@ import {
 } from "../android-client/www/modules/short-videos/player/native-feed-contract.js";
 import { createShortVideoNativeFeed } from "../android-client/www/modules/short-videos/player/native-feed.js";
 import { canonicalShortVideoViewParams, normalizeAuthorAccountStatus } from "../android-client/www/modules/short-videos/shared.js";
-import { normalizeRoute as normalizeWebShortVideoRoute, routeFromUrl as webShortVideoRouteFromUrl, routeUrl as webShortVideoRouteUrl, shortVideoDetailApiPath } from "../public/modules/short-videos/router.js";
+import { normalizeRoute as normalizeWebShortVideoRoute, routeFromUrl as webShortVideoRouteFromUrl, routeUrl as webShortVideoRouteUrl, shortVideoDeleteApiPath, shortVideoDetailApiPath } from "../public/modules/short-videos/router.js";
 import {
   AUTHOR_INDEX_WINDOW_MAX_AUTHORS,
   AUTHOR_INDEX_WINDOW_TTL_MS,
@@ -824,6 +824,8 @@ function verifyWebShortVideoRouter() {
   assert.equal(shortVideoDetailApiPath("collections"), "/api/short-videos/videos/collections", "reserved video IDs must use the non-conflicting detail API alias");
   assert.equal(shortVideoDetailApiPath("summary"), "/api/short-videos/videos/summary", "reserved API resource names must use the explicit video detail alias");
   assert.equal(shortVideoDetailApiPath("fixture-video"), "/api/short-videos/fixture-video", "ordinary video IDs must preserve the legacy detail API");
+  assert.equal(shortVideoDeleteApiPath("fixture-video"), "/api/short-videos/videos/fixture-video", "deletion must always use the explicit video detail alias");
+  assert.equal(shortVideoDeleteApiPath("collections"), "/api/short-videos/videos/collections", "reserved deletion IDs must remain unambiguous");
 }
 
 const styles = readNormalized(path.join(moduleDir, "styles.css"));
@@ -1283,7 +1285,8 @@ function verifyWebDedicatedEntry() {
   const serverReservedDetailSegments = [...shortVideoReservedRoutesSource.matchAll(/^\s*"([^"]+)",?$/gm)].map((match) => match[1]).sort();
   const publicReservedBlock = routerSource.match(/const SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS = new Set\(\[([\s\S]*?)\]\);/)?.[1] || "";
   const publicReservedDetailSegments = [...publicReservedBlock.matchAll(/"([^"]+)"/g)].map((match) => match[1]).sort();
-  assert.equal(serverReservedDetailSegments.length, 11, "the server reserved detail catalog must keep the public 11-name contract explicit");
+  assert.equal(serverReservedDetailSegments.length, 12, "the server reserved detail catalog must keep the public 12-name contract explicit");
+  assert(serverReservedDetailSegments.includes("delete-jobs") && publicReservedDetailSegments.includes("delete-jobs"), "delete-jobs must stay reserved on both server and Web detail routers");
   assert.deepEqual(serverReservedDetailSegments, publicReservedDetailSegments, "server singleton guards and the public reserved-video router must use the same names");
   assert(shortVideoRuntimeSource.includes("const routeStore = new Proxy(store")
     && shortVideoRuntimeSource.includes("catalogWorker.queryLikeDistribution")
@@ -1543,3 +1546,5 @@ function verifyWebDedicatedEntry() {
 function relative(filePath) {
   return path.relative(root, filePath).replaceAll(path.sep, "/");
 }
+
+await import("./verify_short_video_delete_clients.mjs");

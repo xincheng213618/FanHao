@@ -2966,7 +2966,6 @@ public class NativeShortVideoActivity extends Activity {
       }
     });
   }
-
   private DeleteResult requestDeleteVideo(String url, ShortVideoItem item) throws Exception {
     HttpURLConnection connection = null;
     try {
@@ -2979,19 +2978,17 @@ public class NativeShortVideoActivity extends Activity {
       int status = connection.getResponseCode();
       String body = NativeShortVideoHttpResponse.readUtf8(connection, status >= 200 && status < 300);
       JSONObject data = body.length() > 0 ? new JSONObject(body) : new JSONObject();
-      if (status < 200 || status >= 300) {
-        String message = data.optString("error", "");
-        throw new Exception(message.length() > 0 ? message : "短视频删除失败");
-      }
-      return DeleteResult.fromJson(data, item);
+      return ShortVideoDeleteJson.parse(status, data, item == null ? "" : item.id);
     } finally {
       if (connection != null) connection.disconnect();
     }
   }
-
   private void applyDeleteResult(ShortVideoItem seed, DeleteResult result, boolean group) {
+    if (!result.committed()) {
+      showTransientStatus(result.recoveryMessage());
+      return;
+    }
     Set<String> ids = result.ids;
-    if (ids.isEmpty() && seed.id.length() > 0) ids.add(seed.id);
     if (ids.isEmpty()) {
       showTransientStatus("删除完成");
       return;
@@ -3015,10 +3012,12 @@ public class NativeShortVideoActivity extends Activity {
     adapter.notifyDataSetChanged();
 
     int deletedCount = Math.max(result.count, before.size() - videos.size());
-    String message = group
-      ? "已删除 " + Math.max(1, deletedCount) + " 条"
-      : "已删除";
-    if (result.deletedFiles > 0) message += "，" + result.deletedFiles + " 个文件";
+    String message = result.cleanupPending()
+      ? result.cleanupMessage()
+      : group
+        ? "已删除 " + Math.max(1, deletedCount) + " 条"
+        : "已删除";
+    if (!result.cleanupPending() && result.deletedFiles > 0) message += "，" + result.deletedFiles + " 个文件";
 
     if (videos.isEmpty()) {
       currentIndex = -1;
@@ -3081,6 +3080,7 @@ public class NativeShortVideoActivity extends Activity {
     Uri.Builder builder = Uri.parse(base).buildUpon()
       .appendPath("api")
       .appendPath("short-videos")
+      .appendPath("videos")
       .appendPath(item.id);
     if (group) builder.appendQueryParameter("scope", "group");
     return builder.build().toString();

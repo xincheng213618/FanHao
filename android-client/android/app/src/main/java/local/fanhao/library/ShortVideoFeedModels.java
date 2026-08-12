@@ -7,9 +7,7 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 final class FeedPage {
   final List<ShortVideoItem> items = new ArrayList<>();
@@ -96,28 +94,6 @@ final class FeedStats {
     copy.bytes = bytes;
     copy.durationMs = durationMs;
     return copy;
-  }
-}
-
-final class DeleteResult {
-  final Set<String> ids = new HashSet<>();
-  int count;
-  int deletedFiles;
-
-  static DeleteResult fromJson(JSONObject row, ShortVideoItem fallback) {
-    DeleteResult result = new DeleteResult();
-    JSONArray ids = row == null ? null : row.optJSONArray("ids");
-    if (ids != null) {
-      for (int index = 0; index < ids.length(); index++) {
-        String id = ids.optString(index, "").trim();
-        if (id.length() > 0) result.ids.add(id);
-      }
-    }
-    if (result.ids.isEmpty() && fallback != null && fallback.id.length() > 0) result.ids.add(fallback.id);
-    result.count = row == null ? result.ids.size() : Math.max(result.ids.size(), row.optInt("count", result.ids.size()));
-    JSONArray files = row == null ? null : row.optJSONArray("deletedFiles");
-    result.deletedFiles = files == null ? 0 : files.length();
-    return result;
   }
 }
 

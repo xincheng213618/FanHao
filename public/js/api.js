@@ -3,6 +3,8 @@ export function createApiClient(options = {}) {
 
   return async function api(path, requestOptions = {}) {
     const init = { ...requestOptions };
+    const returnResponse = init.returnResponse === true;
+    delete init.returnResponse;
     const headers = { ...(init.headers || {}) };
     if (isAndroidClient) headers["X-FanHao-Client"] = "android";
     if (init.body && typeof init.body !== "string") {
@@ -26,7 +28,7 @@ export function createApiClient(options = {}) {
       error.job = payload.job || null;
       throw error;
     }
-    return payload;
+    return returnResponse ? { status: response.status, payload } : payload;
   };
 }
 

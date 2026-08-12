@@ -25,6 +25,7 @@ const SHORT_VIDEO_QUALITY_NAMES = new Set(["4k", "1440p", "1080p", "720p", "belo
 const SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS = new Set([
   "authors",
   "collections",
+  "delete-jobs",
   "facets",
   "like-distribution",
   "quality-upgrades",
@@ -156,6 +157,11 @@ export function shortVideoDetailApiPath(videoId) {
     ? "/api/short-videos/videos/"
     : "/api/short-videos/";
   return `${prefix}${encodeURIComponent(id)}`;
+}
+
+export function shortVideoDeleteApiPath(videoId) {
+  const id = String(videoId || "").trim();
+  return `/api/short-videos/videos/${encodeURIComponent(id)}`;
 }
 
 function normalizeSort(value) {
