@@ -513,6 +513,56 @@ try {
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $debug "fanhao-debug-26081191.apk"))) "failed first publish must remove its APK"
   }
 
+  Invoke-PolicyTest "authorized-device closure survives the module commit boundary" {
+    $case = New-CaseDirectory "device-gate-closure"
+    $debug = Join-Path $case "publish\debug"
+    $oldApk = New-FakeApk -Path (Join-Path $debug "fanhao-debug-26081190.apk") -VersionCode 26081190
+    $latest = Join-Path $debug "latest.json"
+    Write-ValidManifest -Path $latest -Channel "debug" -ApkPath $oldApk -VersionCode 26081190
+    $source = New-FakeApk -Path (Join-Path $case "app-debug.apk") -VersionCode 26081191
+    $deviceState = [pscustomobject]@{ ExitCode = 0; Lines = @("fixture-device device product:fixture") }
+    $deviceQuery = {
+      [pscustomobject]@{ ExitCode = $deviceState.ExitCode; Lines = @($deviceState.Lines) }
+    }.GetNewClosure()
+    $deviceCheck = New-FanHaoAuthorizedDeviceCheck -DeviceQuery $deviceQuery
+    $expectedSerials = @(& $deviceCheck)
+    $commitGate = {
+      param($CurrentStage)
+      if ($CurrentStage -eq "BeforeManifestCommit") {
+        $null = & $deviceCheck -ExpectedSerials $expectedSerials
+      }
+    }.GetNewClosure()
+    $published = Publish-FanHaoDebugArtifact -SourceApkPath $source -UpdateDir $debug -VersionCode 26081191 -VersionName "0.1.26081191-debug" -ApkInspector $FakeInspector -CommitHook $commitGate
+    Assert-Equal $published.VersionCode 26081191L "scope-safe device gate publish version"
+    Assert-Equal ([IO.File]::ReadAllText($latest) | ConvertFrom-Json).versionCode 26081191 "scope-safe device gate manifest"
+
+    $changedCase = New-CaseDirectory "device-gate-changed-set"
+    $changedDebug = Join-Path $changedCase "publish\debug"
+    $changedOldApk = New-FakeApk -Path (Join-Path $changedDebug "fanhao-debug-26081190.apk") -VersionCode 26081190
+    $changedLatest = Join-Path $changedDebug "latest.json"
+    Write-ValidManifest -Path $changedLatest -Channel "debug" -ApkPath $changedOldApk -VersionCode 26081190
+    $changedSource = New-FakeApk -Path (Join-Path $changedCase "app-debug.apk") -VersionCode 26081191
+    $changedState = [pscustomobject]@{ ExitCode = 0; Lines = @("first-device device product:fixture") }
+    $changedQuery = {
+      [pscustomobject]@{ ExitCode = $changedState.ExitCode; Lines = @($changedState.Lines) }
+    }.GetNewClosure()
+    $changedCheck = New-FanHaoAuthorizedDeviceCheck -DeviceQuery $changedQuery
+    $changedExpected = @(& $changedCheck)
+    $changedState.Lines = @("second-device device product:fixture")
+    $changedGate = {
+      param($CurrentStage)
+      if ($CurrentStage -eq "BeforeManifestCommit") {
+        $null = & $changedCheck -ExpectedSerials $changedExpected
+      }
+    }.GetNewClosure()
+    $oldManifestHash = Get-FileFingerprint $changedLatest
+    Assert-Throws {
+      Publish-FanHaoDebugArtifact -SourceApkPath $changedSource -UpdateDir $changedDebug -VersionCode 26081191 -VersionName "0.1.26081191-debug" -ApkInspector $FakeInspector -CommitHook $changedGate
+    } "device set changed" "changed device set at commit boundary"
+    Assert-Equal (Get-FileFingerprint $changedLatest) $oldManifestHash "changed device set must preserve the old manifest"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $changedDebug "fanhao-debug-26081191.apk"))) "changed device set must remove the uncommitted APK"
+  }
+
   Invoke-PolicyTest "rollback failure preserves an explicit recovery manifest" {
     $case = New-CaseDirectory "rollback-recovery"
     $debug = Join-Path $case "publish\debug"

@@ -154,15 +154,16 @@ assert(publishDebug.includes("Get-FanHaoDebugPublishPlan"), "publishing must res
 assert(publishDebug.includes("Publish-FanHaoDebugArtifact"), "publishing must use the verified atomic artifact commit");
 assert(publishDebug.includes("FileShare]::None"), "publishing must serialize competing writers for one publish root");
 assert(publishDebug.includes("does not install a newly selected identity"), "publishing must not bypass the reviewed install identity contract");
-assert(publishDebug.includes("Assert-AuthorizedPublishDevice"), "a real publish must fail closed when no authorized ADB device is visible");
+assert(publishDebug.includes("New-FanHaoAuthorizedDeviceCheck"), "a real publish must create a scope-safe authorized ADB device checker");
 const planOnlyExitIndex = publishDebug.indexOf('if ($PlanOnly)');
-const firstAdbPreflightIndex = publishDebug.indexOf("Assert-AuthorizedPublishDevice", planOnlyExitIndex);
 const buildInvocationIndex = publishDebug.indexOf("& $BuildScript @buildArgs");
-const secondAdbPreflightIndex = publishDebug.indexOf("Assert-AuthorizedPublishDevice", firstAdbPreflightIndex + 1);
 const publishCommitIndex = publishDebug.indexOf("Publish-FanHaoDebugArtifact");
+const deviceCheckInvocationIndexes = [...publishDebug.matchAll(/& \$authorizedDeviceCheck\b/g)].map((match) => match.index);
+assert.equal(deviceCheckInvocationIndexes.length, 3, "publishing must invoke the same scope-safe device checker exactly three times");
+const [firstAdbPreflightIndex, secondAdbPreflightIndex, commitBoundaryAdbIndex] = deviceCheckInvocationIndexes;
 assert(firstAdbPreflightIndex > planOnlyExitIndex && firstAdbPreflightIndex < buildInvocationIndex, "ADB visibility must be checked before the publish build starts");
 assert(secondAdbPreflightIndex > buildInvocationIndex && secondAdbPreflightIndex < publishCommitIndex, "the same ADB device set must be rechecked after the build and before atomic publish");
-assert(publishDebug.includes('if ($CurrentStage -eq "BeforeManifestCommit")'), "ADB visibility must be checked again at the module's exact manifest commit boundary");
+assert(commitBoundaryAdbIndex > secondAdbPreflightIndex && commitBoundaryAdbIndex < publishCommitIndex && publishDebug.includes('if ($CurrentStage -eq "BeforeManifestCommit")'), "the captured ADB checker must run again at the module's exact manifest commit boundary");
 
 const publishPolicy = read("scripts/FanHaoAndroidPublish.psm1");
 assert(publishPolicy.includes("99999999L"), "the project publish namespace must reserve Android versionCode headroom");

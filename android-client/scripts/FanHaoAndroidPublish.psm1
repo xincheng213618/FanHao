@@ -14,6 +14,63 @@ function Get-FanHaoAndroidVersionLimits {
   }
 }
 
+function New-FanHaoAuthorizedDeviceCheck {
+  param(
+    [string]$AdbPath = "adb",
+    [scriptblock]$DeviceQuery = $null
+  )
+
+  if ($null -eq $DeviceQuery) {
+    if ([string]::IsNullOrWhiteSpace($AdbPath)) {
+      throw "ADB path must be non-empty."
+    }
+    $resolvedAdbPath = $AdbPath
+    $DeviceQuery = {
+      $savedErrorActionPreference = $ErrorActionPreference
+      try {
+        $ErrorActionPreference = "Continue"
+        $lines = @(& $resolvedAdbPath devices -l 2>&1)
+        $exitCode = $LASTEXITCODE
+      } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+      }
+      [pscustomobject]@{
+        ExitCode = $exitCode
+        Lines = @($lines | ForEach-Object { $_.ToString() })
+      }
+    }.GetNewClosure()
+  }
+
+  $query = $DeviceQuery
+  return {
+    param([string[]]$ExpectedSerials = @())
+
+    $queryResults = @(& $query)
+    if ($queryResults.Count -ne 1 -or $null -eq $queryResults[0]) {
+      throw "ADB device query returned an invalid result; refusing to publish."
+    }
+    $queryResult = $queryResults[0]
+    $exitCode = [int]$queryResult.ExitCode
+    if ($exitCode -ne 0) {
+      throw "ADB device query failed; refusing to publish (exit $exitCode)."
+    }
+    $authorizedSerials = @($queryResult.Lines | ForEach-Object {
+      if ($_.ToString() -match '^(?<serial>\S+)\s+device(?:\s|$)') { $Matches.serial }
+    } | Sort-Object -Unique)
+    if ($authorizedSerials.Count -eq 0) {
+      throw "No authorized Android device is visible; refusing to publish."
+    }
+    if ($ExpectedSerials.Count -gt 0) {
+      $expected = @($ExpectedSerials | Sort-Object -Unique)
+      if (($expected -join "`n") -cne ($authorizedSerials -join "`n")) {
+        throw "The authorized ADB device set changed during the publish build; refusing to commit."
+      }
+    }
+    Write-Host "ADB publish preflight: $($authorizedSerials.Count) authorized device(s) visible; no APK will be installed by the publish command."
+    return $authorizedSerials
+  }.GetNewClosure()
+}
+
 function Read-FanHaoVersionContract {
   param([string]$Path = $script:FanHaoDefaultVersionContractPath)
 
@@ -772,6 +829,7 @@ function Assert-FanHaoDirectory {
 
 Export-ModuleMember -Function @(
   "Get-FanHaoAndroidVersionLimits",
+  "New-FanHaoAuthorizedDeviceCheck",
   "Read-FanHaoVersionContract",
   "Get-FanHaoAndroidSdkRoot",
   "Get-FanHaoApkIdentity",

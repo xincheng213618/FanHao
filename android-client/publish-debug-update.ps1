@@ -28,37 +28,6 @@ function Get-PublishAdbPath {
   return "adb"
 }
 
-function Assert-AuthorizedPublishDevice {
-  param([string[]]$ExpectedSerials = @())
-
-  $adb = Get-PublishAdbPath
-  $savedErrorActionPreference = $ErrorActionPreference
-  try {
-    $ErrorActionPreference = "Continue"
-    $deviceOutput = @(& $adb devices -l 2>&1)
-    $exitCode = $LASTEXITCODE
-  } finally {
-    $ErrorActionPreference = $savedErrorActionPreference
-  }
-  if ($exitCode -ne 0) {
-    throw "ADB device query failed; refusing to publish (exit $exitCode)."
-  }
-  $authorizedSerials = @($deviceOutput | ForEach-Object {
-    if ($_.ToString() -match '^(?<serial>\S+)\s+device(?:\s|$)') { $Matches.serial }
-  } | Sort-Object -Unique)
-  if ($authorizedSerials.Count -eq 0) {
-    throw "No authorized Android device is visible; refusing to publish."
-  }
-  if ($ExpectedSerials.Count -gt 0) {
-    $expected = @($ExpectedSerials | Sort-Object -Unique)
-    if (($expected -join "`n") -cne ($authorizedSerials -join "`n")) {
-      throw "The authorized ADB device set changed during the publish build; refusing to commit."
-    }
-  }
-  Write-Host "ADB publish preflight: $($authorizedSerials.Count) authorized device(s) visible; no APK will be installed by the publish command."
-  return $authorizedSerials
-}
-
 if ($Install) {
   throw "publish-debug-update.ps1 does not install a newly selected identity. Publish first, then raise version.json in a reviewed commit before using install:debug."
 }
@@ -101,7 +70,8 @@ try {
   Write-Host "Selected publish identity: $($plan.VersionCode) / $($plan.VersionName)"
   if ($PlanOnly) { return $plan }
 
-  $authorizedDeviceSerials = @(Assert-AuthorizedPublishDevice)
+  $authorizedDeviceCheck = New-FanHaoAuthorizedDeviceCheck -AdbPath (Get-PublishAdbPath)
+  $authorizedDeviceSerials = @(& $authorizedDeviceCheck)
 
   $buildArgs = @{
     VersionCode = $plan.VersionCode
@@ -129,13 +99,13 @@ try {
   if ($preCommitPlan.VersionCode -ne $plan.VersionCode -or $preCommitPlan.VersionName -cne $plan.VersionName) {
     throw "Android publish identity changed during the build; refusing to commit."
   }
-  $null = Assert-AuthorizedPublishDevice -ExpectedSerials $authorizedDeviceSerials
+  $null = & $authorizedDeviceCheck -ExpectedSerials $authorizedDeviceSerials
 
   $noteList = if ($Notes) { @($Notes) } else { @() }
   $commitDeviceGate = {
     param($CurrentStage)
     if ($CurrentStage -eq "BeforeManifestCommit") {
-      $null = Assert-AuthorizedPublishDevice -ExpectedSerials $authorizedDeviceSerials
+      $null = & $authorizedDeviceCheck -ExpectedSerials $authorizedDeviceSerials
     }
   }.GetNewClosure()
   $published = Publish-FanHaoDebugArtifact `
