@@ -1333,6 +1333,7 @@ export function createNovelPage(deps) {
     actions.className = "novel-book-actions";
     const detail = document.createElement("button");
     detail.type = "button";
+    detail.className = "novel-book-detail";
     detail.textContent = "书籍详情";
     detail.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -1352,13 +1353,6 @@ export function createNovelPage(deps) {
     download.addEventListener("click", (event) => downloadBook(book, event));
     actions.append(read, detail, download);
     row.append(body, actions);
-    row.tabIndex = 0;
-    row.addEventListener("click", () => openBook(book.id));
-    row.addEventListener("keydown", (event) => {
-      if (event.target !== row || !["Enter", " "].includes(event.key)) return;
-      event.preventDefault();
-      openBook(book.id);
-    });
     return row;
   }
 

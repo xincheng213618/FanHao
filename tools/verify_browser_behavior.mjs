@@ -26,6 +26,8 @@ try {
   const browser = await chromium.launch({ executablePath: chromePath(), headless: true });
   try {
     await verifyStandaloneStyles(browser);
+    await verifyNovelLibraryIntent(browser);
+    await verifyNovelCardAccessibility(browser);
     await verifyMobileGallery(browser);
     await verifyAuthorIndexReturn(browser);
     await verifyAuthorReturnDiscardsDelayedDetail(browser);
@@ -87,6 +89,89 @@ async function startFixtureServer(serverPort) {
     server.listen(serverPort, "127.0.0.1", resolve);
   });
   return server;
+}
+
+async function verifyNovelLibraryIntent(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const search = page.locator("input[aria-label='搜索小说']");
+  const bookTitle = () => page.locator(".novel-book-row h3");
+  async function submitSearch(value) {
+    await search.fill(value);
+    await search.press("Enter");
+  }
+  try {
+    await page.goto(`${baseUrl}/novels`, { waitUntil: "domcontentloaded" });
+    await bookTitle().waitFor({ state: "visible", timeout: 5000 });
+
+    const staleSuccess = deferNextNovelRequest();
+    await submitSearch("旧成功");
+    await staleSuccess.requested;
+    await submitSearch("最新成功");
+    await bookTitle().filter({ hasText: "最新成功" }).waitFor({ state: "visible", timeout: 5000 });
+    staleSuccess.release();
+    await page.waitForTimeout(50);
+    assert.equal(await bookTitle().textContent(), "最新成功", "a stale successful novel response must not replace the latest search");
+    assert.match(page.url(), /\?q=%E6%9C%80%E6%96%B0%E6%88%90%E5%8A%9F/, "the URL must retain the latest successful search");
+
+    const staleFailure = deferNextNovelRequest({ reject: true });
+    await submitSearch("旧失败");
+    await staleFailure.requested;
+    await submitSearch("最新失败后搜索");
+    await bookTitle().filter({ hasText: "最新失败后搜索" }).waitFor({ state: "visible", timeout: 5000 });
+    staleFailure.release();
+    await page.waitForTimeout(50);
+    assert.equal(await bookTitle().textContent(), "最新失败后搜索", "a stale failed novel response must not replace the latest search status or result");
+    assert.equal(await page.locator(".novel-empty-card", { hasText: "fixture stale novel request failed" }).count(), 0, "a stale error must not render an error state");
+
+    const staleFinally = deferNextNovelRequest();
+    await submitSearch("旧 finally");
+    await staleFinally.requested;
+    const latestPending = deferNextNovelRequest();
+    await submitSearch("最新仍在读取");
+    await latestPending.requested;
+    staleFinally.release();
+    await page.locator(".novel-home-loading", { hasText: "正在读取小说书库" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.match(page.url(), /\?q=%E6%9C%80%E6%96%B0%E4%BB%8D%E5%9C%A8%E8%AF%BB%E5%8F%96/, "a stale completion must not rewrite the pending latest route");
+    latestPending.release();
+    await bookTitle().filter({ hasText: "最新仍在读取" }).waitFor({ state: "visible", timeout: 5000 });
+
+    await page.getByRole("button", { name: "测试作者" }).click();
+    await page.locator(".novel-author-profile-head").waitFor({ state: "visible", timeout: 5000 });
+    assert.match(page.url(), /\/novels\/authors\//, "author navigation must write an author route");
+    await page.getByRole("button", { name: "书库" }).click();
+    await page.getByRole("button", { name: /科幻/ }).click();
+    await bookTitle().filter({ hasText: "科幻" }).waitFor({ state: "visible", timeout: 5000 });
+    assert.match(page.url(), /category=%E7%A7%91%E5%B9%BB/, "category navigation must write its route");
+
+    await submitSearch("前进后退一");
+    await bookTitle().filter({ hasText: "前进后退一" }).waitFor({ state: "visible", timeout: 5000 });
+    await submitSearch("前进后退二");
+    await bookTitle().filter({ hasText: "前进后退二" }).waitFor({ state: "visible", timeout: 5000 });
+    await page.goBack();
+    await bookTitle().filter({ hasText: "前进后退一" }).waitFor({ state: "visible", timeout: 5000 });
+    await page.goForward();
+    await bookTitle().filter({ hasText: "前进后退二" }).waitFor({ state: "visible", timeout: 5000 });
+
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyNovelCardAccessibility(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  try {
+    await page.goto(`${baseUrl}/novels`, { waitUntil: "domcontentloaded" });
+    const card = page.locator("article.novel-book-row").first();
+    await card.waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await card.getAttribute("tabindex"), null, "novel cards must not add a non-semantic tab stop");
+    const detail = card.getByRole("button", { name: "书籍详情" });
+    await detail.focus();
+    assert.equal(await detail.evaluate((element) => document.activeElement === element), true, "the named book-detail control must be keyboard focusable");
+    await page.keyboard.press("Enter");
+    await page.locator(".novel-detail").waitFor({ state: "visible", timeout: 5000 });
+  } finally {
+    await page.close();
+  }
 }
 
 async function verifyAndroidCollectionPicker(browser) {
@@ -1713,6 +1798,51 @@ function deferNextAuthorDetail(options = {}) {
   return deferred;
 }
 
+function deferNextNovelRequest(options = {}) {
+  let requestedResolve;
+  let releaseResolve;
+  const response = new Promise((resolve) => { releaseResolve = resolve; });
+  const deferred = {
+    requested: new Promise((resolve) => { requestedResolve = resolve; }),
+    release: () => releaseResolve()
+  };
+  delayedNovelRequests.push({
+    reject: Boolean(options.reject),
+    requested: () => requestedResolve(),
+    response
+  });
+  return deferred;
+}
+
+function fixtureNovels(url, options = {}) {
+  const query = String(url.searchParams.get("q") || "").trim();
+  const category = String(url.searchParams.get("category") || "").trim();
+  const author = String(options.author || url.searchParams.get("author") || "测试作者").trim();
+  const title = query || category || author || "测试小说";
+  const book = {
+    id: `fixture-novel-${encodeURIComponent(title)}`,
+    author,
+    category: category || "科幻",
+    chapterCount: 3,
+    charCount: 12000,
+    latestChapterTitle: "第三章 测试章节",
+    relativePath: `${title}.txt`,
+    sizeBytes: 12000,
+    summary: "浏览器行为验证小说",
+    title,
+    updatedAt: "2026-01-01T00:00:00.000Z"
+  };
+  return {
+    author: options.authorMode ? { name: author, bookCount: 1, chapterCount: 3, charCount: 12000, sizeBytes: 12000 } : null,
+    books: [book],
+    facets: [{ name: "科幻", count: 1 }],
+    limit: Number(url.searchParams.get("limit") || 48),
+    offset: Number(url.searchParams.get("offset") || 0),
+    summary: { categories: [{ name: "科幻", count: 1 }], totals: { authors: 1, books: 1, bytes: 12000, chapters: 3 } },
+    total: 1
+  };
+}
+
 async function fixtureApi(url, request = {}) {
   if (url.pathname === "/api/library") {
     return {
@@ -1742,6 +1872,25 @@ async function fixtureApi(url, request = {}) {
     return { count: 0, facets: { all: 0 }, total: 0, works: [] };
   }
   if (url.pathname === "/api/health") return { ok: true };
+  if (url.pathname === "/api/novels") {
+    const delayed = delayedNovelRequests.shift();
+    if (delayed) {
+      delayed.requested();
+      await delayed.response;
+      if (delayed.reject) throw new Error("fixture stale novel request failed");
+    }
+    return fixtureNovels(url);
+  }
+  const novelDetail = /^\/api\/novels\/([^/]+)$/.exec(url.pathname);
+  if (novelDetail) {
+    const title = decodeURIComponent(novelDetail[1]).replace(/^fixture-novel-/, "") || "测试小说";
+    return { book: fixtureNovels(new URL(`/api/novels?q=${encodeURIComponent(title)}`, url)).books[0], chapterTotal: 3 };
+  }
+  const novelAuthor = /^\/api\/novels\/authors\/([^/]+)$/.exec(url.pathname);
+  if (novelAuthor) {
+    const author = decodeURIComponent(novelAuthor[1]);
+    return fixtureNovels(url, { author, authorMode: true });
+  }
   if (url.pathname === "/api/short-videos/collections") {
     if (request.method === "POST") {
       const id = `svc_fixture_${++fixtureCollectionSequence}`;
