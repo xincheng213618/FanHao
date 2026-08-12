@@ -150,7 +150,7 @@ export function createShortVideosRuntime({
     if (url.pathname === "/api/short-videos/playback-cache-control" && req.method === "POST") {
       if (!requireLocalAdmin(req, res)) return true;
       try {
-        const body = await readJsonBody(req).catch(() => ({}));
+        const body = await readJsonBody(req);
         const action = String(body?.action || "").trim().toLowerCase();
         if (!['pause', 'resume', 'set-concurrency'].includes(action)) {
           sendJson(res, 400, { error: "转码控制操作必须是 pause、resume 或 set-concurrency" });
@@ -166,14 +166,14 @@ export function createShortVideosRuntime({
         }
         sendJson(res, 200, { ok: true, action, status: shortVideoPlaybackCacheStatus() });
       } catch (error) {
-        sendJson(res, 500, { error: error?.message || "转码控制失败" });
+        sendJson(res, error?.statusCode || 500, { error: error?.message || "转码控制失败" });
       }
       return true;
     }
     if (url.pathname === "/api/short-videos/playback-issues" && req.method === "POST") {
       if (!requireLocalAdmin(req, res)) return true;
       try {
-        const body = await readJsonBody(req).catch(() => ({}));
+        const body = await readJsonBody(req);
         const id = String(body?.id || "").trim();
         const reason = String(body?.reason || "playback-stalled").trim().slice(0, 80);
         if (!id || !store.reportSmoothPlaybackIssue(id, reason)) {
@@ -184,7 +184,7 @@ export function createShortVideosRuntime({
         const queued = tryQueueSmoothVideoCache(id, { delayMs: 0, kind: "current" });
         sendJson(res, 200, { ok: true, id, reason, queued, status: shortVideoPlaybackCacheStatus() });
       } catch (error) {
-        sendJson(res, 500, { error: error?.message || "播放问题记录失败" });
+        sendJson(res, error?.statusCode || 500, { error: error?.message || "播放问题记录失败" });
       }
       return true;
     }
@@ -239,7 +239,7 @@ export function createShortVideosRuntime({
       if (!requireLocalAdmin(req, res)) return true;
       try {
         const secUid = decodeURIComponent(collectorMatch[1]);
-        const body = await readJsonBody(req).catch(() => ({}));
+        const body = await readJsonBody(req);
         const mode = String(body?.mode || "quick").trim().toLowerCase() === "full" ? "full" : "quick";
         const state = await downloadManagerRequest("/api/state");
         const profile = collectorProfile(state, secUid);
@@ -290,7 +290,7 @@ export function createShortVideosRuntime({
           error.statusCode = 404;
           throw error;
         }
-        const body = await readJsonBody(req).catch(() => ({}));
+        const body = await readJsonBody(req);
         const result = await downloadManagerRequest("/api/comments/fetch", {
           method: "POST",
           body: {

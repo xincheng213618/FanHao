@@ -1,18 +1,33 @@
 import fs from "node:fs";
 import path from "node:path";
 
+export class RequestBodyError extends Error {
+  constructor(message, { code, statusCode }) {
+    super(message);
+    this.name = "RequestBodyError";
+    this.code = code;
+    this.statusCode = statusCode;
+    this.expose = true;
+  }
+}
+
 export function readBodyText(req, maxBytes = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let body = "";
+    let bodyBytes = 0;
     let done = false;
     req.setEncoding("utf8");
     req.on("data", (chunk) => {
       if (done) return;
       body += chunk;
-      if (body.length > maxBytes) {
+      bodyBytes += Buffer.byteLength(chunk, "utf8");
+      if (bodyBytes > maxBytes) {
         done = true;
-        reject(new Error("请求体太大"));
-        req.destroy();
+        body = "";
+        reject(new RequestBodyError("请求体太大", {
+          code: "REQUEST_BODY_TOO_LARGE",
+          statusCode: 413
+        }));
       }
     });
     req.on("end", () => {
@@ -34,7 +49,10 @@ export async function readJsonBody(req, maxBytes = 1024 * 1024) {
   try {
     return JSON.parse(body);
   } catch {
-    throw new Error("JSON 格式无效");
+    throw new RequestBodyError("JSON 格式无效", {
+      code: "INVALID_JSON_BODY",
+      statusCode: 400
+    });
   }
 }
 

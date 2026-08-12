@@ -11,7 +11,8 @@ export function createRequestHandler({
   serveStatic,
   sendHtml,
   sendJson,
-  sendText
+  sendText,
+  logError = console.error
 }) {
   return async function requestHandler(req, res) {
     const startedAt = Date.now();
@@ -65,10 +66,23 @@ export function createRequestHandler({
 
       serveStatic(req, res, url.pathname);
     } catch (error) {
-      console.error("[request]", error);
-      sendJson(res, 500, { error: error.message || "Internal server error" });
+      logError("[request]", error);
+      if (res.headersSent || res.writableEnded || res.destroyed) return;
+      const statusCode = publicErrorStatus(error);
+      sendJson(res, statusCode, {
+        error: statusCode < 500 && error?.message
+          ? error.message
+          : "Internal server error"
+      });
     }
   };
+}
+
+function publicErrorStatus(error) {
+  const statusCode = Number(error?.statusCode);
+  return Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500
+    ? statusCode
+    : 500;
 }
 
 function appendVaryHeader(res, value) {

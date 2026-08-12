@@ -33,7 +33,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
   if (url.pathname === "/api/short-videos/quality-upgrades" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      const body = await readJsonBody(req).catch(() => ({}));
+      const body = await readJsonBody(req);
       const result = shortVideoStore.queueQualityUpgrades(Array.isArray(body?.ids) ? body.ids : []);
       onMutation?.();
       sendJson(res, 200, result);
@@ -89,7 +89,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
   if (url.pathname === "/api/short-videos" && req.method === "DELETE") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      const body = await readJsonBody(req).catch(() => ({}));
+      const body = await readJsonBody(req);
       const ids = Array.isArray(body?.ids) ? body.ids : [];
       const result = shortVideoStore.deleteVideos(ids, {
         deleteFiles: body?.deleteFiles !== false
@@ -128,7 +128,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
   if (url.pathname === "/api/short-videos/collections" && req.method === "POST") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      const body = await readJsonBody(req).catch(() => ({}));
+      const body = await readJsonBody(req);
       const result = shortVideoStore.createCollection(body || {});
       onMutation?.();
       sendJson(res, 201, result);
@@ -142,7 +142,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
   if (collectionMatch && req.method === "PATCH") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      const body = await readJsonBody(req).catch(() => ({}));
+      const body = await readJsonBody(req);
       const result = shortVideoStore.renameCollection(decodeShortVideoRouteId(collectionMatch[1]), body || {});
       onMutation?.();
       sendJson(res, 200, result);
@@ -222,7 +222,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
   const actionMatch = /^\/api\/short-videos\/([^/]+)\/actions\/(like|collect|dislike)$/.exec(url.pathname);
   if (actionMatch && (req.method === "PUT" || req.method === "POST")) {
     try {
-      const body = await readJsonBody(req).catch(() => ({}));
+      const body = await readJsonBody(req);
       const data = shortVideoStore.setUserAction(
         decodeURIComponent(actionMatch[1]),
         actionMatch[2],
@@ -239,7 +239,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
   const followMatch = /^\/api\/short-videos\/([^/]+)\/author-follow$/.exec(url.pathname);
   if (followMatch && (req.method === "PUT" || req.method === "POST")) {
     try {
-      const body = await readJsonBody(req).catch(() => ({}));
+      const body = await readJsonBody(req);
       const data = shortVideoStore.setAuthorFollow(decodeURIComponent(followMatch[1]), body || {});
       onMutation?.();
       sendJson(res, 200, data);
@@ -252,7 +252,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
   const authorFollowMatch = /^\/api\/short-videos\/authors\/([^/]+)\/follow$/.exec(url.pathname);
   if (authorFollowMatch && (req.method === "PUT" || req.method === "POST")) {
     try {
-      const body = await readJsonBody(req).catch(() => ({}));
+      const body = await readJsonBody(req);
       const data = shortVideoStore.setAuthorFollowByUser(decodeURIComponent(authorFollowMatch[1]), body || {});
       onMutation?.();
       sendJson(res, 200, data);
@@ -266,7 +266,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
   if (watchMatch && (req.method === "PUT" || req.method === "POST")) {
     try {
       const videoId = decodeURIComponent(watchMatch[1]);
-      const body = await readJsonBody(req).catch(() => ({}));
+      const body = await readJsonBody(req);
       const data = recordWatch
         ? await recordWatch(videoId, body || {})
         : shortVideoStore.recordWatch(videoId, body || {});
@@ -296,7 +296,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
 
   if (commentsMatch && req.method === "POST") {
     try {
-      const body = await readJsonBody(req).catch(() => ({}));
+      const body = await readJsonBody(req);
       sendJson(res, 201, shortVideoStore.createLocalComment(decodeURIComponent(commentsMatch[1]), body || {}));
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "本地评论保存失败" });
@@ -356,7 +356,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
   if (detailMatch && req.method === "DELETE") {
     if (!requireLocalAdmin(req, res)) return true;
     try {
-      const body = await readJsonBody(req).catch(() => ({}));
+      const body = await readJsonBody(req);
       const options = {
         deleteFiles: body?.deleteFiles !== false
       };
