@@ -14,6 +14,7 @@ $ExpectedPackageName = "local.fanhao.library"
 $ExpectedSigner = "73ad0fa9e2d96b33e0cfc7fb1e69d3e4a6fb73cb8fe5832df2464756185fa2f0"
 $OtherSigner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 $TestRoot = Join-Path ([IO.Path]::GetTempPath()) "fanhao-android-publish-$([Guid]::NewGuid().ToString('N'))"
+$FixtureVersionContractPath = Join-Path $TestRoot "version.json"
 $script:Passed = 0
 
 function Write-Utf8Json {
@@ -145,20 +146,29 @@ function Get-Plan {
     [AllowNull()][string]$Name = $null,
     [long]$DateBase = 26081100,
     [scriptblock]$Inspector = $FakeInspector,
-    [string]$ContractPath = $VersionContractPath
+    [string]$ContractPath = $FixtureVersionContractPath
   )
   Get-FanHaoDebugPublishPlan -PublishRoot $Root -TargetApkPath $Target -HasRequestedVersionCode $HasCode -RequestedVersionCode $Code -RequestedVersionName $Name -DateBase $DateBase -ApkInspector $Inspector -VersionContractPath $ContractPath
 }
 
 $null = New-Item -ItemType Directory -Path $TestRoot -Force
+Write-Utf8Json -Path $FixtureVersionContractPath -Value ([ordered]@{
+  schemaVersion = 1
+  packageName = $ExpectedPackageName
+  channel = "debug"
+  currentVersionCode = 26081190
+  highWaterVersionCode = 26081190
+  defaultVersionName = "0.1.26081190-debug"
+})
 try {
   Write-Host "PowerShell runtime: $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
   Invoke-PolicyTest "tracked version contract supplies the no-history floor" {
     $case = New-CaseDirectory "no-history"
-    $plan = Get-Plan -Root (Join-Path $case "publish") -Target (Join-Path $case "missing.apk")
-    Assert-Equal $plan.HistoryMaximum 26081190L "contract high-water mark"
-    Assert-Equal $plan.VersionCode 26081191L "automatic versionCode above the contract floor"
-    Assert-Equal $plan.VersionContract.DefaultVersionName "0.1.26081190-debug" "contract default versionName"
+    $trackedContract = Read-FanHaoVersionContract -Path $VersionContractPath
+    $plan = Get-Plan -Root (Join-Path $case "publish") -Target (Join-Path $case "missing.apk") -ContractPath $VersionContractPath
+    Assert-Equal $plan.HistoryMaximum $trackedContract.HighWaterVersionCode "contract high-water mark"
+    Assert-Equal $plan.VersionCode ($trackedContract.HighWaterVersionCode + 1L) "automatic versionCode above the contract floor"
+    Assert-Equal $plan.VersionContract.DefaultVersionName $trackedContract.DefaultVersionName "contract default versionName"
 
     $badContract = Join-Path $case "bad-version.json"
     Write-Utf8Json -Path $badContract -Value ([ordered]@{
@@ -279,13 +289,14 @@ try {
       Remove-Item Env:FANHAO_VERSION_CODE -ErrorAction SilentlyContinue
       Remove-Item Env:FANHAO_VERSION_NAME -ErrorAction SilentlyContinue
       $defaultIdentity = @(& $BuildScript -IdentityOnly) | Where-Object { $null -ne $_.PSObject.Properties["VersionCode"] } | Select-Object -Last 1
-      Assert-Equal $defaultIdentity.VersionCode 26081190L "no-argument build versionCode from contract"
-      Assert-Equal $defaultIdentity.VersionName "0.1.26081190-debug" "no-argument build versionName from contract"
-      $defaultInstallIdentity = Assert-FanHaoInstallIdentity -Identity $defaultIdentity -VersionContract (Read-FanHaoVersionContract -Path $VersionContractPath)
-      Assert-Equal $defaultInstallIdentity.VersionCode 26081190L "default install versionCode from contract"
-      Assert-Equal $defaultInstallIdentity.VersionName "0.1.26081190-debug" "default install versionName from contract"
+      $trackedContract = Read-FanHaoVersionContract -Path $VersionContractPath
+      Assert-Equal $defaultIdentity.VersionCode $trackedContract.CurrentVersionCode "no-argument build versionCode from contract"
+      Assert-Equal $defaultIdentity.VersionName $trackedContract.DefaultVersionName "no-argument build versionName from contract"
+      $defaultInstallIdentity = Assert-FanHaoInstallIdentity -Identity $defaultIdentity -VersionContract $trackedContract
+      Assert-Equal $defaultInstallIdentity.VersionCode $trackedContract.CurrentVersionCode "default install versionCode from contract"
+      Assert-Equal $defaultInstallIdentity.VersionName $trackedContract.DefaultVersionName "default install versionName from contract"
       Assert-Throws {
-        & $BuildScript -Install -VersionCode 26081191
+        & $BuildScript -Install -VersionCode ($trackedContract.CurrentVersionCode + 1L)
       } "requires the tracked Android version contract identity" "install above the tracked contract must fail before build or ADB"
       Assert-Throws {
         & $BuildScript -Install -IdentityOnly
