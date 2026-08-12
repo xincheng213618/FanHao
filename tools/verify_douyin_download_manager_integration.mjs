@@ -416,6 +416,7 @@ assert.doesNotMatch(
   /id="(?:profileSelect|maxItems|manualLinks|importLinks|watchQueue|backfillGalleryMusic|downloadStop)"/
 );
 assert.match(managerIndexSource, /20260809-home-simplify-01/);
+assert.match(managerIndexSource, /app\.js\?v=20260812-latest-request-01/);
 
 const linksFeatureSource = fs.readFileSync(
   path.join(moduleDir, "static", "features", "links.js"),
@@ -426,8 +427,9 @@ assert.match(linksFeatureSource, /profile_tab === "like"/);
 
 const managerAppSource = fs.readFileSync(path.join(moduleDir, "static", "app.js"), "utf8");
 assert.match(managerAppSource, /features\/downloads\.js\?v=20260809-home-simplify-01/);
-assert.match(managerAppSource, /features\/links\.js\?v=20260809-home-simplify-01/);
-assert.match(managerAppSource, /features\/profiles\.js\?v=20260810-banned-profiles-01/);
+assert.match(managerAppSource, /features\/library\.js\?v=20260812-latest-request-01/);
+assert.match(managerAppSource, /features\/links\.js\?v=20260812-latest-request-01/);
+assert.match(managerAppSource, /features\/profiles\.js\?v=20260812-latest-request-01/);
 
 const downloadStateSource = fs.readFileSync(
   path.join(moduleDir, "manager_core", "download_state.py"),

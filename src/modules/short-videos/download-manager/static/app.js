@@ -4,9 +4,9 @@ import { createSingleFlightPoller } from "./core/poller.js";
 import { createActivityFeature } from "./features/activity.js";
 import { createAuthFeature } from "./features/auth.js";
 import { createDownloadsFeature } from "./features/downloads.js?v=20260809-home-simplify-01";
-import { createLibraryFeature } from "./features/library.js";
-import { createLinksFeature } from "./features/links.js?v=20260809-home-simplify-01";
-import { createProfilesFeature } from "./features/profiles.js?v=20260810-banned-profiles-01";
+import { createLibraryFeature } from "./features/library.js?v=20260812-latest-request-01";
+import { createLinksFeature } from "./features/links.js?v=20260812-latest-request-01";
+import { createProfilesFeature } from "./features/profiles.js?v=20260812-latest-request-01";
 import { createSettingsFeature } from "./features/settings.js";
 
 let statePoller = null;
