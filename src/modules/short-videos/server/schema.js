@@ -523,6 +523,12 @@ export function recreateShortVideoCatalogView(db) {
       v.visibility,
       v.media_type,
       v.is_liked,
+      CASE WHEN EXISTS (
+        SELECT 1
+        FROM short_video_source_memberships liked_membership
+        WHERE liked_membership.aweme_id = v.aweme_id
+          AND liked_membership.source_type = 'like'
+      ) THEN 1 ELSE 0 END AS library_liked,
       COALESCE(NULLIF(u.sec_uid, ''), v.author_sec_uid) AS author_sec_uid,
       COALESCE(NULLIF(u.uid, ''), v.author_uid) AS author_uid,
       COALESCE(NULLIF(u.nickname, ''), v.author_name, '未知作者') AS author_name,

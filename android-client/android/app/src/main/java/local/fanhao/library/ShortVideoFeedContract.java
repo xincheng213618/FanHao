@@ -119,7 +119,9 @@ final class ShortVideoFeedContract {
       stats == null ? 0 : stats.optLong("collects", 0),
       stats == null ? 0 : stats.optLong("shares", 0),
       stats == null ? 0 : stats.optLong("plays", 0),
+      row.optBoolean("libraryLiked", false),
       actions != null && actions.optBoolean("liked", false),
+      actions != null && actions.optBoolean("collected", false),
       row.optString("shareUrl", ""),
       row.optString("originalUrl", "")
     );

@@ -58,6 +58,7 @@ export function createShortVideoPublicVideoMapper(dependencies = {}) {
       origin: row.origin || "",
       status: row.status || "normal",
       visibility: row.visibility || "local_only",
+      libraryLiked: Boolean(row.library_liked),
       deletedFromAuthor: Boolean(row.author_deleted),
       mediaType: media.type,
       galleryPresentation: livePhotoItems ? "live-photo" : (media.type === "gallery" ? "carousel" : ""),

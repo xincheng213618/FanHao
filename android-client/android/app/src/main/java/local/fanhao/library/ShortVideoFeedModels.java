@@ -155,16 +155,18 @@ final class ShortVideoItem {
   final long durationMs;
   final int width;
   final int height;
-  final long likes;
+  long likes;
   final long comments;
-  final long collects;
+  long collects;
   final long shares;
   final long plays;
   final boolean libraryLiked;
+  boolean userLiked;
+  boolean userCollected;
   final String shareUrl;
   final String originalUrl;
 
-  ShortVideoItem(String id, String awemeId, String mediaType, String streamUrl, String coverUrl, String galleryPresentation, List<GalleryMedia> galleryItems, ShortVideoSound sound, String title, String authorId, String author, String authorSecUid, String authorUid, String authorAvatarUrl, String authorProfileUrl, String authorUniqueId, String authorShortId, String authorSignature, String authorIpLocation, long authorFollowerCount, long authorFollowingCount, long authorTotalFavorited, long authorAwemeCount, long authorFavoritingCount, int authorGender, int authorAge, String authorVerification, String authorProfileCollectedAt, boolean authorFollowing, String publishedAt, long durationMs, int width, int height, long likes, long comments, long collects, long shares, long plays, boolean libraryLiked, String shareUrl, String originalUrl) {
+  ShortVideoItem(String id, String awemeId, String mediaType, String streamUrl, String coverUrl, String galleryPresentation, List<GalleryMedia> galleryItems, ShortVideoSound sound, String title, String authorId, String author, String authorSecUid, String authorUid, String authorAvatarUrl, String authorProfileUrl, String authorUniqueId, String authorShortId, String authorSignature, String authorIpLocation, long authorFollowerCount, long authorFollowingCount, long authorTotalFavorited, long authorAwemeCount, long authorFavoritingCount, int authorGender, int authorAge, String authorVerification, String authorProfileCollectedAt, boolean authorFollowing, String publishedAt, long durationMs, int width, int height, long likes, long comments, long collects, long shares, long plays, boolean libraryLiked, boolean userLiked, boolean userCollected, String shareUrl, String originalUrl) {
     this.id = id == null ? "" : id;
     this.awemeId = awemeId == null ? "" : awemeId;
     this.mediaType = mediaType == null ? "video" : mediaType;
@@ -204,6 +206,8 @@ final class ShortVideoItem {
     this.shares = shares;
     this.plays = plays;
     this.libraryLiked = libraryLiked;
+    this.userLiked = userLiked;
+    this.userCollected = userCollected;
     this.shareUrl = shareUrl == null ? "" : shareUrl;
     this.originalUrl = originalUrl == null ? "" : originalUrl;
   }

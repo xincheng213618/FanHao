@@ -45,7 +45,7 @@
     "verify:fanhao": "node tools/verify_fanhao_structure.mjs",
     "verify:works-performance": "node tools/verify_works_cold_performance.mjs",
     "verify:cover-cache-status": "node tools/verify_cover_cache_status_performance.mjs",
-    "verify:short-video-client": "node tools/verify_short_video_client_structure.mjs && node tools/verify_native_short_video_paging.mjs && node tools/verify_native_short_video_http.mjs",
+    "verify:short-video-client": "node tools/verify_short_video_client_structure.mjs && node tools/verify_native_short_video_paging.mjs && node tools/verify_native_short_video_http.mjs && node tools/verify_native_short_video_actions.mjs",
     "verify:browser-behavior": "node tools/verify_browser_behavior.mjs",
     "verify:douyin-manager": "node tools/verify_douyin_download_manager_integration.mjs && node tools/verify_douyin_manager_latest_requests.mjs",
     "verify:settings": "node tools/verify_module_settings.mjs",

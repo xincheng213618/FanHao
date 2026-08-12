@@ -68,8 +68,10 @@ export function serializeShortVideoForNative(item = {}) {
       shares: finiteNumber(item.stats?.shares),
       plays: finiteNumber(item.stats?.plays)
     },
+    libraryLiked: Boolean(item.libraryLiked),
     actions: {
-      liked: Boolean(item.actions?.liked)
+      liked: Boolean(item.actions?.liked),
+      collected: Boolean(item.actions?.collected)
     }
   };
 }
