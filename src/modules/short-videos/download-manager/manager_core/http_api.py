@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import re
+from email.utils import formatdate, parsedate_to_datetime
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
@@ -30,6 +32,59 @@ from .queue import (
 )
 from .read_models import get_activity_state, get_runtime_status, get_state, list_links, list_profiles
 from .runtime import activate_application, request_application_quit
+
+
+def media_validators(stat_result: os.stat_result) -> tuple[str, str]:
+    size = max(0, int(stat_result.st_size))
+    mtime_ns = max(
+        0,
+        int(getattr(stat_result, "st_mtime_ns", round(stat_result.st_mtime * 1_000_000_000))),
+    )
+    # Local metadata is not a content digest, so it must not pose as a strong tag.
+    etag = f'W/"{size:x}-{mtime_ns:x}"'
+    last_modified = formatdate(max(0, int(stat_result.st_mtime)), usegmt=True)
+    return etag, last_modified
+
+
+def if_range_matches(value: str, etag: str, modified_at: float) -> bool:
+    candidate = str(value or "").strip()
+    if not candidate or candidate.lower().startswith("w/"):
+        return not candidate
+    if candidate.startswith('"'):
+        return candidate == etag
+    if not re.fullmatch(
+        r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} "
+        r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+        r"\d{4} \d{2}:\d{2}:\d{2} GMT",
+        candidate,
+    ):
+        return False
+    try:
+        candidate_date = parsedate_to_datetime(candidate)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if candidate_date is None or candidate_date.tzinfo is None:
+        return False
+    return int(modified_at) <= int(candidate_date.timestamp())
+
+
+def parse_byte_range(value: str, size: int) -> tuple[int, int] | None:
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", str(value or "").strip(), re.IGNORECASE)
+    if not match or size <= 0:
+        return None
+    raw_start, raw_end = match.groups()
+    if not raw_start and not raw_end:
+        return None
+    if raw_start:
+        start = int(raw_start)
+        end = int(raw_end) if raw_end else size - 1
+        if start >= size or end < start:
+            return None
+        return start, min(end, size - 1)
+    suffix = int(raw_end)
+    if suffix <= 0:
+        return None
+    return max(0, size - min(size, suffix)), size - 1
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -115,6 +170,19 @@ class Handler(SimpleHTTPRequestHandler):
         static_path = (STATIC_DIR / parsed.path.lstrip("/")).resolve()
         if str(static_path).startswith(str(STATIC_DIR.resolve())) and static_path.exists():
             return self.serve_file(static_path)
+        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def do_HEAD(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/library/media":
+            query = parse_qs(parsed.query)
+            link_id = normalize_int((query.get("id") or ["0"])[0], 0, 0, 1000000000)
+            index = normalize_int((query.get("index") or ["0"])[0], 0, 0, 100000)
+            role = (query.get("role") or [""])[0].strip().lower()
+            path = resolve_library_media(link_id, role, index)
+            if path is None:
+                return self.send_error(HTTPStatus.NOT_FOUND, "Local media not found")
+            return self.serve_media(path)
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_POST(self) -> None:
@@ -431,47 +499,51 @@ class Handler(SimpleHTTPRequestHandler):
     def serve_media(self, path: Path) -> None:
         try:
             resolved = path.resolve()
-            size = resolved.stat().st_size
+            handle = resolved.open("rb")
         except OSError:
             self.send_error(HTTPStatus.NOT_FOUND, "Local media not found")
             return
-        start = 0
-        end = max(0, size - 1)
-        status = HTTPStatus.OK
-        range_header = self.headers.get("Range", "").strip()
-        if range_header:
-            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
-            if not match:
-                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                self.send_header("Content-Range", f"bytes */{size}")
-                self.end_headers()
+        with handle:
+            try:
+                stat_result = os.fstat(handle.fileno())
+            except OSError:
+                self.send_error(HTTPStatus.NOT_FOUND, "Local media not found")
                 return
-            raw_start, raw_end = match.groups()
-            if raw_start:
-                start = int(raw_start)
-                end = int(raw_end) if raw_end else end
-            elif raw_end:
-                suffix = min(size, int(raw_end))
-                start = max(0, size - suffix)
-            if start >= size or end < start:
-                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                self.send_header("Content-Range", f"bytes */{size}")
-                self.end_headers()
+            size = max(0, int(stat_result.st_size))
+            etag, last_modified = media_validators(stat_result)
+            start = 0
+            end = size - 1
+            status = HTTPStatus.OK
+            range_header = self.headers.get("Range", "").strip()
+            if_range = self.headers.get("If-Range", "").strip()
+            if range_header and (not if_range or if_range_matches(if_range, etag, stat_result.st_mtime)):
+                parsed_range = parse_byte_range(range_header, size)
+                if parsed_range is None:
+                    self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.send_header("ETag", etag)
+                    self.send_header("Last-Modified", last_modified)
+                    self.end_headers()
+                    return
+                start, end = parsed_range
+                status = HTTPStatus.PARTIAL_CONTENT
+            content_length = max(0, end - start + 1)
+            content_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("Content-Length", str(content_length))
+            self.send_header("ETag", etag)
+            self.send_header("Last-Modified", last_modified)
+            if status == HTTPStatus.PARTIAL_CONTENT:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            if self.command == "HEAD" or content_length == 0:
                 return
-            end = min(end, size - 1)
-            status = HTTPStatus.PARTIAL_CONTENT
-        content_length = max(0, end - start + 1)
-        content_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Cache-Control", "private, max-age=3600")
-        self.send_header("Content-Length", str(content_length))
-        if status == HTTPStatus.PARTIAL_CONTENT:
-            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-        self.end_headers()
-        try:
-            with resolved.open("rb") as handle:
+            try:
                 handle.seek(start)
                 remaining = content_length
                 while remaining > 0:
@@ -480,5 +552,5 @@ class Handler(SimpleHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
                     remaining -= len(chunk)
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass

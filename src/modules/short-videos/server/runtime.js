@@ -443,7 +443,7 @@ export function createShortVideosRuntime({
       } else if (!smoothFile && !sourceCompatible && initialPlaybackRange) {
         playbackPrepare = "source-no-wait";
       }
-      const fallbackFile = !androidPlayback && !sourceFile.cached && req.method === "GET" && isInitialVideoRange(req.headers.range)
+      const fallbackFile = !androidPlayback && !sourceFile.cached && !hasIfRange(req) && req.method === "GET" && isInitialVideoRange(req.headers.range)
         ? cachedStartupVideoFile(id, sourceFile) || sourceFile
         : sourceFile;
       const file = smoothFile || fallbackFile;
@@ -554,7 +554,7 @@ export function createShortVideosRuntime({
       }
       const mediaCacheRequest = String(req.headers["x-fanhao-media-cache"] || "").trim() === "1"
         || String(url.searchParams.get("fhcache") || "").trim() === "1";
-      const file = !sourceFile.cached && !mediaCacheRequest && req.method === "GET" && isInitialVideoRange(req.headers.range)
+      const file = !sourceFile.cached && !mediaCacheRequest && !hasIfRange(req) && req.method === "GET" && isInitialVideoRange(req.headers.range)
         ? cachedStartupVideoFile(id, sourceFile) || sourceFile
         : sourceFile;
       const requestedVersion = String(url.searchParams.get("v") || "").trim();
@@ -1226,6 +1226,15 @@ export function createShortVideosRuntime({
     const cachedSmoothLegacy = cachePath === descriptor.legacyCachePath;
     if (!cachedSmoothLegacy) rememberSmoothVideoResolved(id, descriptor, true);
     sharedCache.touch(cachePath);
+    const servedSourceStat = safeStat(servedSourceFile.path);
+    const sourceEntityMtimeMs = Math.max(
+      0,
+      Number(servedSourceFile.entityMtimeMs || servedSourceStat?.mtimeMs || servedSourceFile.cacheVersion || 0)
+    );
+    const renditionEntityMtimeMs = Math.max(
+      Number(cachedStat.mtimeMs || 0),
+      Math.floor(sourceEntityMtimeMs / 1000) * 1000 + 1000
+    );
     return {
       ...servedSourceFile,
       path: cachePath,
@@ -1233,6 +1242,7 @@ export function createShortVideosRuntime({
       size: cachedStat.size,
       type: "video",
       cacheVersion: originalFile.cacheVersion,
+      entityMtimeMs: renditionEntityMtimeMs,
       cachedSmooth: true,
       cachedSmoothLegacy
     };
@@ -2037,6 +2047,10 @@ export function createShortVideosRuntime({
 
   function isInitialVideoRange(rangeHeader) {
     return /^bytes=0-(?:\d*)$/i.test(String(rangeHeader || "").trim());
+  }
+
+  function hasIfRange(req) {
+    return Boolean(String(req?.headers?.["if-range"] || "").trim());
   }
 
   function safeStat(filePath) {

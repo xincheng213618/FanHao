@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { EventEmitter, once } from "node:events";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { parseRange } from "../src/platform/server/file-server.js";
+import { createFileServer, entityValidators, ifRangeMatches, parseRange } from "../src/platform/server/file-server.js";
 import { createMediaFileRelocationService } from "../src/modules/fanhao/server/works/media-file-relocation-service.js";
 import { createVideoProbeService } from "../src/platform/server/video-probe-service.js";
 
@@ -59,6 +62,8 @@ assert(serverConfigSource.includes("DEFAULT_VIDEO_CHUNK_BYTES: 4 * 1024 * 1024")
 assert(routeSource.includes('cacheControl: "private, max-age=0, must-revalidate"'), "native video ranges should be reusable with validators");
 assert(fileServerSource.includes("const entitySize = Math.max(stat.size") && fileServerSource.includes('"Content-Range": `bytes ${responseRange.start}-${responseRange.end}/${entitySize}`'), "partial startup files must preserve the original media entity size in HTTP ranges");
 assert(fileServerSource.includes("...responseHeaders"), "media range responses must expose module diagnostics without changing the shared file server contract");
+assert(shortVideoRuntimeSource.includes("!hasIfRange(req)") && shortVideoRuntimeSource.includes('req?.headers?.["if-range"]'), "conditional ranges must bypass physical startup-prefix files so stale validators can receive a complete 200 entity");
+assert(shortVideoRuntimeSource.includes("entityMtimeMs: renditionEntityMtimeMs") && shortVideoRuntimeSource.includes("sourceEntityMtimeMs / 1000"), "smooth renditions must expose a representation revision distinct from the source served at the same URL");
 assert(shortVideoRuntimeSource.includes("short-video-smooth") && shortVideoRuntimeSource.includes('"no-store"'), "uncached adaptive short-video responses must not pin the original stream under the rendition URL");
 assert(shortVideoRuntimeSource.includes('url.searchParams.get("wait")') && shortVideoRuntimeSource.includes('playbackPrepare = "source-no-wait"'), "mobile smooth playback must reuse a ready rendition without blocking first play on a background transcode");
 assert(shortVideoRuntimeSource.includes("applyMobilePlaybackHints") && shortVideoRuntimeSource.includes('req.headers?.["x-fanhao-client"]'), "native playback must receive a stable rendition URL and an untruncated Media3 byte stream");
@@ -90,7 +95,237 @@ for (const option of ['"-fflags", "+genpts"', '"-avoid_negative_ts", "make_zero"
   assert(streamSource.includes(option), `missing compatibility option: ${option}`);
 }
 
-console.log("video-playback: ok (range, native MP4, MKV remux, WMV/MKV transcode)");
+async function verifyFileServerRangeContract() {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-file-range-contract-"));
+  const fixturePath = path.join(fixtureRoot, "fixture.mp4");
+  const emptyPath = path.join(fixtureRoot, "empty.mp4");
+  const rewritePath = path.join(fixtureRoot, "rewrite.mp4");
+  try {
+    fs.writeFileSync(fixturePath, Buffer.from("0123456789"));
+    fs.writeFileSync(emptyPath, Buffer.alloc(0));
+    const stat = fs.statSync(fixturePath);
+    const derivedValidators = entityValidators({}, stat, stat.size);
+    assert.match(derivedValidators.ETag, /^W\/"[0-9a-f]+-[0-9a-f]+"$/);
+    assert.equal(ifRangeMatches(derivedValidators.ETag, derivedValidators), false, "metadata-derived weak ETags must never authorize a range append");
+    assert.equal(ifRangeMatches(derivedValidators["Last-Modified"], derivedValidators), true);
+    const file = { path: fixturePath, ext: ".mp4", entityTag: '"fixture-content-v1"' };
+    const validators = entityValidators(file, stat, stat.size);
+    assert.equal(validators.ETag, '"fixture-content-v1"');
+    assert.equal(ifRangeMatches(validators.ETag, validators), true);
+    assert.equal(ifRangeMatches(`W/${validators.ETag}`, validators), false);
+    assert.equal(ifRangeMatches(validators["Last-Modified"], validators), true);
+    const sourceAtSameUrl = entityValidators({}, { size: 10, mtimeMs: 1_725_000_000_000 }, 10);
+    const renditionAtSameUrl = entityValidators(
+      { entityMtimeMs: 1_725_000_001_000 },
+      { size: 10, mtimeMs: 1_725_000_000_000 },
+      10
+    );
+    assert.notEqual(
+      renditionAtSameUrl["Last-Modified"],
+      sourceAtSameUrl["Last-Modified"],
+      "source-to-rendition transitions at one URL must invalidate Last-Modified checkpoints"
+    );
+
+    const fileServer = createFileServer({
+      defaultChunkBytes: 4,
+      mimeTypes: { ".mp4": "video/mp4" },
+      normalizeExt: (filePath) => path.extname(filePath).toLowerCase(),
+      notFound: () => assert.fail("controlled file fixture should exist"),
+      safeStat: (filePath) => fs.statSync(filePath, { throwIfNoEntry: false })
+    });
+
+    const full = await captureFileResponse(fileServer, "serveRangedFile", "GET", {}, file);
+    assert.equal(full.status, 200);
+    assert.equal(full.body.toString(), "0123456789");
+    assert.equal(full.headers["Content-Length"], 10);
+    assert.equal(full.headers.ETag, validators.ETag);
+    assert.ok(full.headers["Last-Modified"]);
+    const limitedFull = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "GET",
+      {},
+      { ...file, maxRangeBytes: 2 }
+    );
+    assert.equal(limitedFull.status, 200);
+    assert.equal(limitedFull.body.toString(), "0123456789", "range chunk limits must not truncate an ordinary 200 response");
+    const fullHead = await captureFileResponse(fileServer, "serveRangedFile", "HEAD", {}, file);
+    assert.equal(fullHead.status, full.status);
+    assert.deepEqual(fullHead.headers, full.headers);
+    assert.equal(fullHead.body.length, 0);
+
+    const partial = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "GET",
+      { range: "bytes=3-5", "if-range": validators.ETag },
+      { ...file, responseHeaders: { etag: '"caller-must-not-override"', "Content-Range": "invalid", "X-Fixture": "kept" } }
+    );
+    assert.equal(partial.status, 206);
+    assert.equal(partial.body.toString(), "345");
+    assert.equal(partial.headers["Content-Range"], "bytes 3-5/10");
+    assert.equal(partial.headers.ETag, validators.ETag);
+    assert.equal(partial.headers.etag, undefined);
+    assert.equal(partial.headers["X-Fixture"], "kept");
+
+    const stale = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "GET",
+      { range: "bytes=3-", "if-range": '"stale"' },
+      file
+    );
+    assert.equal(stale.status, 200);
+    assert.equal(stale.body.toString(), "0123456789");
+    assert.equal(stale.headers["Content-Range"], undefined);
+
+    const staleUnsatisfied = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "GET",
+      { range: "bytes=99-", "if-range": '"stale"' },
+      file
+    );
+    assert.equal(staleUnsatisfied.status, 200, "a stale If-Range must be ignored before range satisfiability is evaluated");
+    assert.equal(staleUnsatisfied.body.toString(), "0123456789");
+
+    const weak = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "GET",
+      { range: "bytes=3-", "if-range": `W/${validators.ETag}` },
+      file
+    );
+    assert.equal(weak.status, 200);
+    assert.equal(weak.body.toString(), "0123456789");
+
+    const byDate = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "HEAD",
+      { range: "bytes=2-4", "if-range": validators["Last-Modified"] },
+      file
+    );
+    assert.equal(byDate.status, 206);
+    assert.equal(byDate.headers["Content-Range"], "bytes 2-4/10");
+    assert.equal(byDate.body.length, 0);
+
+    const unsatisfied = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "GET",
+      { range: "bytes=10-" },
+      file
+    );
+    assert.equal(unsatisfied.status, 416);
+    assert.equal(unsatisfied.headers["Content-Range"], "bytes */10");
+    assert.equal(unsatisfied.headers.ETag, validators.ETag);
+    assert.equal(unsatisfied.body.length, 0);
+    const unsatisfiedHead = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "HEAD",
+      { range: "bytes=10-" },
+      file
+    );
+    assert.equal(unsatisfiedHead.status, unsatisfied.status);
+    assert.deepEqual(unsatisfiedHead.headers, unsatisfied.headers);
+    assert.equal(unsatisfiedHead.body.length, 0);
+
+    const emptyFull = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "GET",
+      {},
+      { path: emptyPath, ext: ".mp4" }
+    );
+    assert.equal(emptyFull.status, 200);
+    assert.equal(emptyFull.headers["Content-Length"], 0);
+    assert.equal(emptyFull.body.length, 0);
+    const emptyRange = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "GET",
+      { range: "bytes=0-" },
+      { path: emptyPath, ext: ".mp4" }
+    );
+    assert.equal(emptyRange.status, 416);
+    assert.equal(emptyRange.headers["Content-Range"], "bytes */0");
+
+    const download = await captureFileResponse(fileServer, "serveDownloadFile", "HEAD", { range: "bytes=3-" }, file);
+    assert.equal(download.status, 200);
+    assert.equal(download.headers["Accept-Ranges"], undefined);
+    assert.equal(download.body.length, 0);
+
+    fs.writeFileSync(rewritePath, Buffer.from("v1-data"));
+    fs.utimesSync(rewritePath, 1_725_000_000, 1_725_000_000);
+    const beforeRewrite = entityValidators({}, fs.statSync(rewritePath));
+    fs.writeFileSync(rewritePath, Buffer.from("v2-data"));
+    fs.utimesSync(rewritePath, 1_725_000_002, 1_725_000_002);
+    const afterRewrite = entityValidators({}, fs.statSync(rewritePath));
+    assert.notEqual(afterRewrite.ETag, beforeRewrite.ETag, "same-length rewrites with a new revision timestamp must change the weak metadata tag");
+    assert.notEqual(afterRewrite["Last-Modified"], beforeRewrite["Last-Modified"]);
+
+    const prefixPath = path.join(fixtureRoot, "fixture.mp4.start");
+    fs.writeFileSync(prefixPath, Buffer.from("0123"));
+    const impossibleFull = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "GET",
+      {},
+      { path: prefixPath, ext: ".mp4", totalSize: 10, entityMtimeMs: stat.mtimeMs }
+    );
+    assert.equal(impossibleFull.status, 503, "a physical startup prefix must never pose as a complete 200 entity");
+    const impossibleHead = await captureFileResponse(
+      fileServer,
+      "serveRangedFile",
+      "HEAD",
+      {},
+      { path: prefixPath, ext: ".mp4", totalSize: 10, entityMtimeMs: stat.mtimeMs }
+    );
+    assert.equal(impossibleHead.status, impossibleFull.status, "HEAD must expose the same unsatisfied representation status as GET");
+  } finally {
+    const resolvedRoot = path.resolve(fixtureRoot);
+    assert.ok(path.basename(resolvedRoot).startsWith("fanhao-file-range-contract-"));
+    fs.rmSync(resolvedRoot, { recursive: true, force: true });
+  }
+}
+
+async function captureFileResponse(fileServer, methodName, method, headers, file) {
+  const req = new EventEmitter();
+  req.method = method;
+  req.headers = headers;
+  const res = new CaptureResponse();
+  fileServer[methodName](req, res, file, "fixture.mp4");
+  if (!res.writableFinished) await once(res, "finish");
+  return {
+    status: res.status,
+    headers: res.responseHeaders,
+    body: Buffer.concat(res.chunks)
+  };
+}
+
+class CaptureResponse extends Writable {
+  constructor() {
+    super();
+    this.status = 0;
+    this.responseHeaders = {};
+    this.headersSent = false;
+    this.chunks = [];
+  }
+
+  writeHead(status, headers = {}) {
+    this.status = status;
+    this.responseHeaders = { ...headers };
+    this.headersSent = true;
+    return this;
+  }
+
+  _write(chunk, _encoding, callback) {
+    this.chunks.push(Buffer.from(chunk));
+    callback();
+  }
+}
 
 function assertPlaybackMode({ ext, videoCodec, audioCodec, expected }) {
   const service = createVideoProbeService({
@@ -114,3 +349,6 @@ function assertPlaybackMode({ ext, videoCodec, audioCodec, expected }) {
   assert.equal(info.width, 1920);
   assert.equal(info.height, 1080);
 }
+
+await verifyFileServerRangeContract();
+console.log("video-playback: ok (range contract, native MP4, MKV remux, WMV/MKV transcode)");
