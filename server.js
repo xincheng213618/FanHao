@@ -2282,6 +2282,7 @@ const serverHost = createServerHost({
   port: PORT,
   host: HOST,
   getLibraryState: () => library,
+  beginStop: () => moduleRegistry.beginStop(),
   stop: async () => {
     await accessAnalyticsService.close();
     await workMoveJobService.close();

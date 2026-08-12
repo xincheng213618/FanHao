@@ -6,6 +6,7 @@ export function createServerHost({
   port,
   host,
   getLibraryState,
+  beginStop = async () => {},
   stop,
   logger = console,
   processRef = process,
@@ -17,6 +18,7 @@ export function createServerHost({
 }) {
   const server = createServer(requestHandler);
   let shuttingDown = false;
+  let shutdownPromise = null;
   let signalsInstalled = false;
 
   const onSigint = () => shutdown("SIGINT");
@@ -42,21 +44,42 @@ export function createServerHost({
   }
 
   function shutdown(signal) {
-    if (shuttingDown) return;
+    if (shuttingDown) return shutdownPromise;
     shuttingDown = true;
     logger.log(`[shutdown] ${signal}`);
     const forceTimer = setTimeoutFn(() => processRef.exit(1), shutdownTimeoutMs);
     forceTimer.unref?.();
-    server.close(async () => {
+
+    // close() synchronously stops accepting new connections. The pre-close
+    // hook can then cancel long-running work so existing requests are able to
+    // drain before the full module shutdown runs.
+    const serverClosed = new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+    shutdownPromise = (async () => {
+      let shutdownError = null;
+      try {
+        await beginStop();
+      } catch (error) {
+        shutdownError = error;
+        logger.error("[shutdown:begin]", error);
+      }
+      try {
+        await serverClosed;
+      } catch (error) {
+        shutdownError ||= error;
+        logger.error("[shutdown:drain]", error);
+      }
       try {
         await stop();
-        clearTimeoutFn(forceTimer);
-        processRef.exit(0);
       } catch (error) {
-        logger.error("[shutdown]", error);
-        processRef.exit(1);
+        shutdownError ||= error;
+        logger.error("[shutdown:stop]", error);
       }
-    });
+      clearTimeoutFn(forceTimer);
+      processRef.exit(shutdownError ? 1 : 0);
+    })();
+    return shutdownPromise;
   }
 
   function listen() {

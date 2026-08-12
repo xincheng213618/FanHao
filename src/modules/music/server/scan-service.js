@@ -21,9 +21,14 @@ export function createMusicScanService(options = {}) {
     const limit = clampInt(input.limit, 0, 0, Number.MAX_SAFE_INTEGER);
     const dryRun = Boolean(input.dryRun || input.dry_run);
     if (!roots.length) throw httpError(400, "没有配置音乐目录");
-    const result = await worker.scan({ roots, limit, dryRun });
-    if (!dryRun) options.onPublished?.();
-    return result;
+    try {
+      const result = await worker.scan({ roots, limit, dryRun });
+      if (!dryRun) options.onPublished?.();
+      return result;
+    } catch (error) {
+      if (error?.scanDispatched === true) options.onPublished?.();
+      throw error;
+    }
   }
 
   async function stop() {

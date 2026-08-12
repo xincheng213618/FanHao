@@ -39,6 +39,7 @@ import { listLyricMatches } from "./lyrics-search.js";
 import { normalizeRoots, rootStatus, safeStoredFile } from "./scan.js";
 import { createMusicScanService } from "./scan-service.js";
 import { ensureSchema } from "./schema.js";
+import { runMusicWriteTransaction } from "./write-transaction.js";
 import { artistNameForSort, buildLetterCondition, clampInt, escapeLike, hashText, httpError, metaValue, normalizeAlbumSort, normalizeTrackSort, trackOrderSql } from "./helpers.js";
 
 export function createMusicStore(options = {}) {
@@ -69,7 +70,7 @@ export function createMusicStore(options = {}) {
     if (!db) {
       fs.mkdirSync(path.dirname(dbPath), { recursive: true });
       db = new DatabaseSync(dbPath);
-      ensureSchema(db);
+      ensureSchema(db, { busyTimeoutMs: 0 });
     }
     return db;
   }
@@ -82,6 +83,13 @@ export function createMusicStore(options = {}) {
     db = null;
     summaryCache = null;
     summaryCachedAt = 0;
+  }
+
+  function mutate(operation) {
+    const result = runMusicWriteTransaction(dbOrOpen(), operation);
+    summaryCache = null;
+    summaryCachedAt = 0;
+    return result;
   }
 
   function summary() {
@@ -676,70 +684,73 @@ export function createMusicStore(options = {}) {
   }
 
   function saveProgress(trackId, body = {}) {
-    const database = dbOrOpen();
-    const row = database.prepare("SELECT id, duration_ms FROM music_tracks WHERE id = ? AND status = 'ok'").get(trackId);
-    if (!row) return null;
-    const positionMs = clampInt(body.positionMs ?? body.position_ms, 0, 0, Number.MAX_SAFE_INTEGER);
-    const durationMs = clampInt(body.durationMs ?? body.duration_ms, Number(row.duration_ms || 0), 0, Number.MAX_SAFE_INTEGER);
-    const played = Boolean(body.played);
-    const now = new Date().toISOString();
-    const current = database.prepare("SELECT play_count FROM music_track_state WHERE track_id = ?").get(row.id);
-    database
-      .prepare(
+    return mutate((database) => {
+      const row = database.prepare("SELECT id, duration_ms FROM music_tracks WHERE id = ? AND status = 'ok'").get(trackId);
+      if (!row) return null;
+      const positionMs = clampInt(body.positionMs ?? body.position_ms, 0, 0, Number.MAX_SAFE_INTEGER);
+      const durationMs = clampInt(body.durationMs ?? body.duration_ms, Number(row.duration_ms || 0), 0, Number.MAX_SAFE_INTEGER);
+      const played = Boolean(body.played);
+      const now = new Date().toISOString();
+      const current = database.prepare("SELECT play_count FROM music_track_state WHERE track_id = ?").get(row.id);
+      database
+        .prepare(
+          `
+          INSERT INTO music_track_state (track_id, favorite, position_ms, duration_ms, play_count, last_played_at, updated_at)
+          VALUES (?, 0, ?, ?, ?, ?, ?)
+          ON CONFLICT(track_id) DO UPDATE SET
+            position_ms = excluded.position_ms,
+            duration_ms = excluded.duration_ms,
+            play_count = CASE WHEN ? THEN COALESCE(music_track_state.play_count, 0) + 1 ELSE COALESCE(music_track_state.play_count, 0) END,
+            last_played_at = CASE WHEN ? THEN excluded.last_played_at ELSE COALESCE(music_track_state.last_played_at, '') END,
+            updated_at = excluded.updated_at
         `
-        INSERT INTO music_track_state (track_id, favorite, position_ms, duration_ms, play_count, last_played_at, updated_at)
-        VALUES (?, 0, ?, ?, ?, ?, ?)
-        ON CONFLICT(track_id) DO UPDATE SET
-          position_ms = excluded.position_ms,
-          duration_ms = excluded.duration_ms,
-          play_count = CASE WHEN ? THEN COALESCE(music_track_state.play_count, 0) + 1 ELSE COALESCE(music_track_state.play_count, 0) END,
-          last_played_at = CASE WHEN ? THEN excluded.last_played_at ELSE COALESCE(music_track_state.last_played_at, '') END,
-          updated_at = excluded.updated_at
-      `
-      )
-      .run(row.id, positionMs, durationMs, played ? Number(current?.play_count || 0) + 1 : Number(current?.play_count || 0), played ? now : "", now, played ? 1 : 0, played ? 1 : 0);
-    return publicTrack(trackRow(database, row.id), { detail: true });
+        )
+        .run(row.id, positionMs, durationMs, played ? Number(current?.play_count || 0) + 1 : Number(current?.play_count || 0), played ? now : "", now, played ? 1 : 0, played ? 1 : 0);
+      return publicTrack(trackRow(database, row.id), { detail: true });
+    });
   }
 
   function toggleFavorite(trackId, body = {}) {
-    const database = dbOrOpen();
-    const row = database.prepare("SELECT id, duration_ms FROM music_tracks WHERE id = ? AND status = 'ok'").get(trackId);
-    if (!row) return null;
-    const current = database.prepare("SELECT favorite FROM music_track_state WHERE track_id = ?").get(row.id);
-    const favorite = Object.prototype.hasOwnProperty.call(body, "favorite") ? Boolean(body.favorite) : !Boolean(current?.favorite);
-    const now = new Date().toISOString();
-    database
-      .prepare(
+    return mutate((database) => {
+      const row = database.prepare("SELECT id, duration_ms FROM music_tracks WHERE id = ? AND status = 'ok'").get(trackId);
+      if (!row) return null;
+      const current = database.prepare("SELECT favorite FROM music_track_state WHERE track_id = ?").get(row.id);
+      const favorite = Object.prototype.hasOwnProperty.call(body, "favorite") ? Boolean(body.favorite) : !Boolean(current?.favorite);
+      const now = new Date().toISOString();
+      database
+        .prepare(
+          `
+          INSERT INTO music_track_state (track_id, favorite, position_ms, duration_ms, play_count, last_played_at, updated_at)
+          VALUES (?, ?, 0, ?, 0, '', ?)
+          ON CONFLICT(track_id) DO UPDATE SET
+            favorite = excluded.favorite,
+            updated_at = excluded.updated_at
         `
-        INSERT INTO music_track_state (track_id, favorite, position_ms, duration_ms, play_count, last_played_at, updated_at)
-        VALUES (?, ?, 0, ?, 0, '', ?)
-        ON CONFLICT(track_id) DO UPDATE SET
-          favorite = excluded.favorite,
-          updated_at = excluded.updated_at
-      `
-      )
-      .run(row.id, favorite ? 1 : 0, Number(row.duration_ms || 0), now);
-    return publicTrack(trackRow(database, row.id), { detail: true });
+        )
+        .run(row.id, favorite ? 1 : 0, Number(row.duration_ms || 0), now);
+      return publicTrack(trackRow(database, row.id), { detail: true });
+    });
   }
 
   function setRating(trackId, body = {}) {
-    const database = dbOrOpen();
-    const row = database.prepare("SELECT id, duration_ms FROM music_tracks WHERE id = ? AND status = 'ok'").get(trackId);
-    if (!row) return null;
-    const rating = clampInt(body.rating ?? body.stars ?? body.value, 0, 0, 5);
-    const now = new Date().toISOString();
-    database
-      .prepare(
+    return mutate((database) => {
+      const row = database.prepare("SELECT id, duration_ms FROM music_tracks WHERE id = ? AND status = 'ok'").get(trackId);
+      if (!row) return null;
+      const rating = clampInt(body.rating ?? body.stars ?? body.value, 0, 0, 5);
+      const now = new Date().toISOString();
+      database
+        .prepare(
+          `
+          INSERT INTO music_track_state (track_id, favorite, rating, position_ms, duration_ms, play_count, last_played_at, updated_at)
+          VALUES (?, 0, ?, 0, ?, 0, '', ?)
+          ON CONFLICT(track_id) DO UPDATE SET
+            rating = excluded.rating,
+            updated_at = excluded.updated_at
         `
-        INSERT INTO music_track_state (track_id, favorite, rating, position_ms, duration_ms, play_count, last_played_at, updated_at)
-        VALUES (?, 0, ?, 0, ?, 0, '', ?)
-        ON CONFLICT(track_id) DO UPDATE SET
-          rating = excluded.rating,
-          updated_at = excluded.updated_at
-      `
-      )
-      .run(row.id, rating, Number(row.duration_ms || 0), now);
-    return publicTrack(trackRow(database, row.id), { detail: true });
+        )
+        .run(row.id, rating, Number(row.duration_ms || 0), now);
+      return publicTrack(trackRow(database, row.id), { detail: true });
+    });
   }
 
   function listHistory(urlOrOptions = {}) {
@@ -774,15 +785,14 @@ export function createMusicStore(options = {}) {
   }
 
   function clearHistory() {
-    dbOrOpen()
-      .prepare(
+    mutate((database) => database.prepare(
         `
         UPDATE music_track_state
         SET last_played_at = '', play_count = 0, updated_at = ?
         WHERE COALESCE(last_played_at, '') <> '' OR COALESCE(play_count, 0) > 0
       `
       )
-      .run(new Date().toISOString());
+      .run(new Date().toISOString()));
     return { ok: true };
   }
 
@@ -858,13 +868,11 @@ export function createMusicStore(options = {}) {
     const trackIds = playlistTrackIdsFromInput(input);
     const now = new Date().toISOString();
     const id = hashText(`playlist:${now}:${name}:${crypto.randomBytes(8).toString("hex")}`).slice(0, 20);
-    const database = dbOrOpen();
-    const insertPlaylist = database.prepare("INSERT INTO music_playlists (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)");
-    const insertItem = database.prepare("INSERT OR IGNORE INTO music_playlist_items (playlist_id, track_id, sort_order, added_at) VALUES (?, ?, ?, ?)");
-    const findTrack = database.prepare("SELECT id FROM music_tracks WHERE id = ? AND status = 'ok'");
-    let addedTracks = 0;
-    database.exec("BEGIN IMMEDIATE");
-    try {
+    return mutate((database) => {
+      const insertPlaylist = database.prepare("INSERT INTO music_playlists (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)");
+      const insertItem = database.prepare("INSERT OR IGNORE INTO music_playlist_items (playlist_id, track_id, sort_order, added_at) VALUES (?, ?, ?, ?)");
+      const findTrack = database.prepare("SELECT id FROM music_tracks WHERE id = ? AND status = 'ok'");
+      let addedTracks = 0;
       insertPlaylist.run(id, name, String(input.description || "").trim().slice(0, 300), now, now);
       for (const trackId of trackIds) {
         const track = findTrack.get(trackId);
@@ -873,76 +881,63 @@ export function createMusicStore(options = {}) {
         insertItem.run(id, track.id, addedTracks, now);
       }
       if (trackIds.length && !addedTracks) throw httpError(400, "没有可加入歌单的歌曲");
-      database.exec("COMMIT");
-    } catch (error) {
-      try {
-        database.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
-    return playlistDetail(id);
+      return playlistDetail(id);
+    });
   }
 
   function updatePlaylist(playlistId, input = {}) {
-    const database = dbOrOpen();
-    const row = database.prepare("SELECT * FROM music_playlists WHERE id = ?").get(playlistId);
-    if (!row) return null;
-    const name = String(input.name ?? row.name ?? "").trim().slice(0, 80);
-    if (!name) throw httpError(400, "歌单名称不能为空");
-    const description = String(input.description ?? row.description ?? "").trim().slice(0, 300);
-    database
-      .prepare("UPDATE music_playlists SET name = ?, description = ?, updated_at = ? WHERE id = ?")
-      .run(name, description, new Date().toISOString(), playlistId);
-    return playlistDetail(playlistId);
+    const updated = mutate((database) => {
+      const row = database.prepare("SELECT * FROM music_playlists WHERE id = ?").get(playlistId);
+      if (!row) return false;
+      const name = String(input.name ?? row.name ?? "").trim().slice(0, 80);
+      if (!name) throw httpError(400, "歌单名称不能为空");
+      const description = String(input.description ?? row.description ?? "").trim().slice(0, 300);
+      database
+        .prepare("UPDATE music_playlists SET name = ?, description = ?, updated_at = ? WHERE id = ?")
+        .run(name, description, new Date().toISOString(), playlistId);
+      return playlistDetail(playlistId);
+    });
+    return updated || null;
   }
 
   function importM3uPlaylist(input = {}) {
     const source = readM3uInput(input);
     const parsed = parseM3u(source.content);
     if (!parsed.entries.length) throw httpError(400, "M3U 文件里没有可导入的歌曲路径");
-    const database = dbOrOpen();
-    const matcher = createM3uTrackMatcher(database);
-    const matched = [];
-    const missing = [];
-    const seenTrackIds = new Set();
-    for (const entry of parsed.entries) {
-      const match = matcher.match(entry, source.baseDir);
-      if (match?.id && !seenTrackIds.has(match.id)) {
-        seenTrackIds.add(match.id);
-        matched.push(match.id);
-      } else {
-        missing.push(entry);
-      }
-    }
-    if (!matched.length) throw httpError(400, "没有匹配到音乐库里的歌曲");
-
     const now = new Date().toISOString();
     const requestedName = String(input.name || "").trim();
     const name = (requestedName || parsed.name || source.name || "导入歌单").slice(0, 80);
     const id = hashText(`playlist:${now}:${name}:${crypto.randomBytes(8).toString("hex")}`).slice(0, 20);
-    const insertPlaylist = database.prepare("INSERT INTO music_playlists (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)");
-    const insertItem = database.prepare("INSERT OR IGNORE INTO music_playlist_items (playlist_id, track_id, sort_order, added_at) VALUES (?, ?, ?, ?)");
-    database.exec("BEGIN IMMEDIATE");
-    try {
+    const importResult = mutate((database) => {
+      const matcher = createM3uTrackMatcher(database);
+      const matched = [];
+      const missing = [];
+      const seenTrackIds = new Set();
+      for (const entry of parsed.entries) {
+        const match = matcher.match(entry, source.baseDir);
+        if (match?.id && !seenTrackIds.has(match.id)) {
+          seenTrackIds.add(match.id);
+          matched.push(match.id);
+        } else {
+          missing.push(entry);
+        }
+      }
+      if (!matched.length) throw httpError(400, "没有匹配到音乐库里的歌曲");
+      const insertPlaylist = database.prepare("INSERT INTO music_playlists (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)");
+      const insertItem = database.prepare("INSERT OR IGNORE INTO music_playlist_items (playlist_id, track_id, sort_order, added_at) VALUES (?, ?, ?, ?)");
       insertPlaylist.run(id, name, String(input.description || "M3U 导入").trim().slice(0, 300), now, now);
       matched.forEach((trackId, index) => insertItem.run(id, trackId, index + 1, now));
-      database.exec("COMMIT");
-    } catch (error) {
-      try {
-        database.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+      return { detail: playlistDetail(id), matched, missing };
+    });
 
-    const detail = playlistDetail(id);
     return {
-      ...detail,
+      ...importResult.detail,
       importSummary: {
         source: source.source,
-        matched: matched.length,
-        missing: missing.length,
+        matched: importResult.matched.length,
+        missing: importResult.missing.length,
         total: parsed.entries.length,
-        missingEntries: missing.slice(0, 20)
+        missingEntries: importResult.missing.slice(0, 20)
       }
     };
   }
@@ -1006,74 +1001,73 @@ export function createMusicStore(options = {}) {
   }
 
   function deletePlaylist(playlistId) {
-    const database = dbOrOpen();
-    const row = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
-    if (!row) return null;
-    database.prepare("DELETE FROM music_playlist_items WHERE playlist_id = ?").run(playlistId);
-    database.prepare("DELETE FROM music_playlists WHERE id = ?").run(playlistId);
-    return { ok: true };
+    const deleted = mutate((database) => {
+      const row = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
+      if (!row) return false;
+      database.prepare("DELETE FROM music_playlist_items WHERE playlist_id = ?").run(playlistId);
+      database.prepare("DELETE FROM music_playlists WHERE id = ?").run(playlistId);
+      return true;
+    });
+    return deleted ? { ok: true } : null;
   }
 
   function addToPlaylist(playlistId, trackId) {
-    const database = dbOrOpen();
-    const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
-    if (!playlist) return null;
-    const track = database.prepare("SELECT id FROM music_tracks WHERE id = ? AND status = 'ok'").get(trackId);
-    if (!track) throw httpError(404, "歌曲不存在");
-    const now = new Date().toISOString();
-    const nextOrder = Number(database.prepare("SELECT COALESCE(MAX(sort_order), 0) + 1 AS value FROM music_playlist_items WHERE playlist_id = ?").get(playlistId)?.value || 1);
-    database
-      .prepare("INSERT OR IGNORE INTO music_playlist_items (playlist_id, track_id, sort_order, added_at) VALUES (?, ?, ?, ?)")
-      .run(playlistId, track.id, nextOrder, now);
-    database.prepare("UPDATE music_playlists SET updated_at = ? WHERE id = ?").run(now, playlistId);
-    return playlistDetail(playlistId);
+    const added = mutate((database) => {
+      const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
+      if (!playlist) return false;
+      const track = database.prepare("SELECT id FROM music_tracks WHERE id = ? AND status = 'ok'").get(trackId);
+      if (!track) throw httpError(404, "歌曲不存在");
+      const now = new Date().toISOString();
+      const nextOrder = Number(database.prepare("SELECT COALESCE(MAX(sort_order), 0) + 1 AS value FROM music_playlist_items WHERE playlist_id = ?").get(playlistId)?.value || 1);
+      database
+        .prepare("INSERT OR IGNORE INTO music_playlist_items (playlist_id, track_id, sort_order, added_at) VALUES (?, ?, ?, ?)")
+        .run(playlistId, track.id, nextOrder, now);
+      database.prepare("UPDATE music_playlists SET updated_at = ? WHERE id = ?").run(now, playlistId);
+      return playlistDetail(playlistId);
+    });
+    return added || null;
   }
 
   function removeFromPlaylist(playlistId, trackId) {
-    const database = dbOrOpen();
-    const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
-    if (!playlist) return null;
-    database.prepare("DELETE FROM music_playlist_items WHERE playlist_id = ? AND track_id = ?").run(playlistId, trackId);
-    database.prepare("UPDATE music_playlists SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), playlistId);
-    return playlistDetail(playlistId);
+    const removed = mutate((database) => {
+      const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
+      if (!playlist) return false;
+      database.prepare("DELETE FROM music_playlist_items WHERE playlist_id = ? AND track_id = ?").run(playlistId, trackId);
+      database.prepare("UPDATE music_playlists SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), playlistId);
+      return playlistDetail(playlistId);
+    });
+    return removed || null;
   }
 
   function reorderPlaylist(playlistId, input = {}) {
-    const database = dbOrOpen();
-    const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
-    if (!playlist) return null;
-    const requested = playlistTrackIdsFromInput(input);
-    if (!requested.length) throw httpError(400, "缺少歌曲排序");
-    const existing = database
-      .prepare(
+    const reordered = mutate((database) => {
+      const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
+      if (!playlist) return false;
+      const requested = playlistTrackIdsFromInput(input);
+      if (!requested.length) throw httpError(400, "缺少歌曲排序");
+      const existing = database
+        .prepare(
+          `
+          SELECT track_id
+          FROM music_playlist_items
+          WHERE playlist_id = ?
+          ORDER BY sort_order ASC, added_at ASC
         `
-        SELECT track_id
-        FROM music_playlist_items
-        WHERE playlist_id = ?
-        ORDER BY sort_order ASC, added_at ASC
-      `
-      )
-      .all(playlistId)
-      .map((row) => row.track_id);
-    const existingSet = new Set(existing);
-    const ordered = requested.filter((trackId) => existingSet.has(trackId));
-    if (!ordered.length) throw httpError(400, "没有可排序的歌曲");
-    const orderedSet = new Set(ordered);
-    const nextOrder = [...ordered, ...existing.filter((trackId) => !orderedSet.has(trackId))];
-    const now = new Date().toISOString();
-    const updateItem = database.prepare("UPDATE music_playlist_items SET sort_order = ? WHERE playlist_id = ? AND track_id = ?");
-    database.exec("BEGIN IMMEDIATE");
-    try {
+        )
+        .all(playlistId)
+        .map((row) => row.track_id);
+      const existingSet = new Set(existing);
+      const ordered = requested.filter((trackId) => existingSet.has(trackId));
+      if (!ordered.length) throw httpError(400, "没有可排序的歌曲");
+      const orderedSet = new Set(ordered);
+      const nextOrder = [...ordered, ...existing.filter((trackId) => !orderedSet.has(trackId))];
+      const now = new Date().toISOString();
+      const updateItem = database.prepare("UPDATE music_playlist_items SET sort_order = ? WHERE playlist_id = ? AND track_id = ?");
       nextOrder.forEach((trackId, index) => updateItem.run(index + 1, playlistId, trackId));
       database.prepare("UPDATE music_playlists SET updated_at = ? WHERE id = ?").run(now, playlistId);
-      database.exec("COMMIT");
-    } catch (error) {
-      try {
-        database.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
-    return playlistDetail(playlistId);
+      return playlistDetail(playlistId);
+    });
+    return reordered || null;
   }
 
   function trackFile(trackId) {
@@ -1090,6 +1084,16 @@ export function createMusicStore(options = {}) {
 
   function dbOrOpen() {
     return database();
+  }
+
+  async function start() {
+    database();
+    await scanService.start();
+  }
+
+  async function stop() {
+    await scanService.stop();
+    invalidate();
   }
 
   return {
@@ -1119,8 +1123,8 @@ export function createMusicStore(options = {}) {
     scan: scanService.scan,
     scanDiagnostics: scanService.diagnostics,
     smartPlaylistDetail,
-    start: scanService.start,
-    stop: scanService.stop,
+    start,
+    stop,
     setRating,
     summary,
     toggleFavorite,

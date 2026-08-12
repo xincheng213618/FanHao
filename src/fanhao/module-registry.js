@@ -87,7 +87,7 @@ function normalizeClientSurface(value) {
 
 function normalizeRuntime(value, id) {
   const runtime = value && typeof value === "object" ? value : {};
-  for (const method of ["routeApi", "routeMedia", "start", "stop", "invalidate"]) {
+  for (const method of ["routeApi", "routeMedia", "start", "beginStop", "stop", "invalidate"]) {
     if (runtime[method] !== undefined && typeof runtime[method] !== "function") {
       throw new Error(`FanHao module '${id}' has invalid ${method}`);
     }
@@ -217,6 +217,10 @@ function createModuleRegistry({ modules, sendJson }) {
     for (const entry of modules) await entry.runtime.start?.();
   }
 
+  async function beginStop() {
+    for (const entry of [...modules].reverse()) await entry.runtime.beginStop?.();
+  }
+
   async function stop() {
     for (const entry of [...modules].reverse()) await entry.runtime.stop?.();
   }
@@ -281,6 +285,7 @@ function createModuleRegistry({ modules, sendJson }) {
   }
 
   return Object.freeze({
+    beginStop,
     definitions: Object.freeze(modules.map((entry) => entry.definition)),
     get,
     publicManifest,

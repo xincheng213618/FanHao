@@ -16,7 +16,11 @@ parentPort?.on("message", (message) => {
   runScan(message);
 });
 
+let scanActive = false;
+
 function runScan(message) {
+  if (scanActive) return;
+  scanActive = true;
   try {
     const request = message.request || {};
     const roots = Array.isArray(request.roots) ? request.roots.map(String) : [];
@@ -30,6 +34,7 @@ function runScan(message) {
     const result = scanSummary(records, roots, dryRun);
     if (!dryRun) publishScan(message.id, records, roots, result.scannedAt);
     parentPort?.postMessage({ type: "result", id: message.id, ok: true, data: result });
+    if (!dryRun) scheduleBestEffortCheckpoint();
   } catch (error) {
     const details = publicScanError(error);
     parentPort?.postMessage({
@@ -40,6 +45,8 @@ function runScan(message) {
       errorCode: details.code,
       statusCode: details.statusCode
     });
+  } finally {
+    scanActive = false;
   }
 }
 
@@ -59,7 +66,6 @@ function publishScan(requestId, records, roots, scannedAt) {
     writeScanRecords(database, records, roots, scannedAt, { manageTransaction: false });
     database.exec("COMMIT");
     transactionActive = false;
-    database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   } catch (error) {
     if (transactionActive) {
       try { database.exec("ROLLBACK"); } catch {}
@@ -68,6 +74,22 @@ function publishScan(requestId, records, roots, scannedAt) {
   } finally {
     database.close();
   }
+}
+
+function scheduleBestEffortCheckpoint() {
+  setImmediate(() => {
+    let database;
+    try {
+      const delayMs = Math.min(5_000, Math.max(0, Math.trunc(Number(workerData.checkpointDelayMs || 0))));
+      if (delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+      database = new DatabaseSync(String(workerData.dbPath || ""));
+      database.exec("PRAGMA busy_timeout = 0; PRAGMA wal_checkpoint(PASSIVE);");
+    } catch {
+      // SQLite will checkpoint automatically later; publication is already committed.
+    } finally {
+      try { database?.close(); } catch {}
+    }
+  });
 }
 
 function publicScanError(error) {

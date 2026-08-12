@@ -17,6 +17,7 @@ export function createMusicRuntime({
   scanWorkerOptions = {}
 }) {
   const store = createMusicStore({ dbPath, ffprobePath, roots, ...scanWorkerOptions });
+  let stopping = null;
 
   async function routeApi(req, res, url) {
     return routeMusicApi(req, res, url, {
@@ -75,11 +76,27 @@ export function createMusicRuntime({
     return store.start();
   }
 
+  function stopMusic() {
+    if (!stopping) {
+      stopping = Promise.resolve()
+        .then(() => store.stop())
+        .finally(() => {
+          stopping = null;
+        });
+    }
+    return stopping;
+  }
+
+  function beginStop() {
+    return stopMusic();
+  }
+
   function stop() {
-    return store.stop();
+    return stopMusic();
   }
 
   return {
+    beginStop,
     invalidate,
     routeApi,
     routeMedia,

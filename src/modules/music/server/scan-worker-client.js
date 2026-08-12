@@ -64,6 +64,7 @@ export function createMusicScanWorkerClient({
       if (closed || activeFlight !== flight || worker !== activeWorker) throw stoppedError();
       scanDispatches += 1;
       activeWorker.postMessage({ type: "scan", id: flight.id, request: payload });
+      flight.dispatched = true;
     } catch (error) {
       settleFlight(flight, false, error);
     }
@@ -162,7 +163,11 @@ export function createMusicScanWorkerClient({
     flight.settled = true;
     activeFlight = null;
     if (ok) flight.resolve(value);
-    else flight.reject(value);
+    else {
+      const error = value instanceof Error ? value : new Error(String(value || "音乐目录扫描失败"));
+      if (flight.dispatched) error.scanDispatched = true;
+      flight.reject(error);
+    }
   }
 
   return {
@@ -182,6 +187,7 @@ function createFlight(id, key) {
     promise: deferred.promise,
     resolve: deferred.resolve,
     reject: deferred.reject,
+    dispatched: false,
     phase: "starting",
     settled: false
   };

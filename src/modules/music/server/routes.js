@@ -1,3 +1,5 @@
+import { sendMusicPublicError } from "./public-errors.js";
+
 export async function routeMusicApi(req, res, url, deps) {
   const { musicStore, notFound, readJsonBody, requireLocalAdmin, sendJson } = deps;
 
@@ -5,7 +7,7 @@ export async function routeMusicApi(req, res, url, deps) {
     try {
       sendJson(res, 200, musicStore.summary());
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "音乐概览读取失败" });
+      sendMusicPublicError(res, sendJson, error, "音乐概览读取失败");
     }
     return true;
   }
@@ -14,7 +16,7 @@ export async function routeMusicApi(req, res, url, deps) {
     try {
       sendJson(res, 200, musicStore.facets());
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "音乐筛选信息读取失败" });
+      sendMusicPublicError(res, sendJson, error, "音乐筛选信息读取失败");
     }
     return true;
   }
@@ -23,7 +25,7 @@ export async function routeMusicApi(req, res, url, deps) {
     try {
       sendJson(res, 200, musicStore.report());
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "听歌报告读取失败" });
+      sendMusicPublicError(res, sendJson, error, "听歌报告读取失败");
     }
     return true;
   }
@@ -32,7 +34,7 @@ export async function routeMusicApi(req, res, url, deps) {
     try {
       sendJson(res, 200, musicStore.suggest(url));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "搜索联想读取失败" });
+      sendMusicPublicError(res, sendJson, error, "搜索联想读取失败");
     }
     return true;
   }
@@ -41,7 +43,7 @@ export async function routeMusicApi(req, res, url, deps) {
     try {
       sendJson(res, 200, musicStore.searchLyrics(url));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "歌词搜索失败" });
+      sendMusicPublicError(res, sendJson, error, "歌词搜索失败");
     }
     return true;
   }
@@ -50,7 +52,7 @@ export async function routeMusicApi(req, res, url, deps) {
     try {
       sendJson(res, 200, musicStore.listArtists(url));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "歌手列表读取失败" });
+      sendMusicPublicError(res, sendJson, error, "歌手列表读取失败");
     }
     return true;
   }
@@ -59,7 +61,7 @@ export async function routeMusicApi(req, res, url, deps) {
     try {
       sendJson(res, 200, musicStore.listAlbums(url));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "专辑列表读取失败" });
+      sendMusicPublicError(res, sendJson, error, "专辑列表读取失败");
     }
     return true;
   }
@@ -68,7 +70,7 @@ export async function routeMusicApi(req, res, url, deps) {
     try {
       sendJson(res, 200, musicStore.listTracks(url));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "歌曲列表读取失败" });
+      sendMusicPublicError(res, sendJson, error, "歌曲列表读取失败");
     }
     return true;
   }
@@ -77,7 +79,7 @@ export async function routeMusicApi(req, res, url, deps) {
     try {
       sendJson(res, 200, musicStore.listHistory(url));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "最近播放读取失败" });
+      sendMusicPublicError(res, sendJson, error, "最近播放读取失败");
     }
     return true;
   }
@@ -86,7 +88,7 @@ export async function routeMusicApi(req, res, url, deps) {
     try {
       sendJson(res, 200, musicStore.clearHistory());
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "清空最近播放失败" });
+      sendMusicPublicError(res, sendJson, error, "清空最近播放失败");
     }
     return true;
   }
@@ -95,7 +97,7 @@ export async function routeMusicApi(req, res, url, deps) {
     try {
       sendJson(res, 200, musicStore.listPlaylists());
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "歌单列表读取失败" });
+      sendMusicPublicError(res, sendJson, error, "歌单列表读取失败");
     }
     return true;
   }
@@ -104,7 +106,7 @@ export async function routeMusicApi(req, res, url, deps) {
     try {
       sendJson(res, 200, musicStore.listSmartPlaylists());
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "智能歌单列表读取失败" });
+      sendMusicPublicError(res, sendJson, error, "智能歌单列表读取失败");
     }
     return true;
   }
@@ -119,7 +121,7 @@ export async function routeMusicApi(req, res, url, deps) {
       }
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "智能歌单详情读取失败" });
+      sendMusicPublicError(res, sendJson, error, "智能歌单详情读取失败");
     }
     return true;
   }
@@ -129,7 +131,7 @@ export async function routeMusicApi(req, res, url, deps) {
       const body = await readJsonBody(req);
       sendJson(res, 200, musicStore.createPlaylist(body || {}));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "创建歌单失败" });
+      sendMusicPublicError(res, sendJson, error, "创建歌单失败");
     }
     return true;
   }
@@ -140,7 +142,7 @@ export async function routeMusicApi(req, res, url, deps) {
       const body = await readJsonBody(req);
       sendJson(res, 200, musicStore.importM3uPlaylist(body || {}));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "导入 M3U 歌单失败" });
+      sendMusicPublicError(res, sendJson, error, "导入 M3U 歌单失败");
     }
     return true;
   }
@@ -151,7 +153,7 @@ export async function routeMusicApi(req, res, url, deps) {
       const body = await readJsonBody(req);
       sendJson(res, 200, await musicStore.scan(body || {}));
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "音乐目录扫描失败" });
+      sendMusicPublicError(res, sendJson, error, "音乐目录扫描失败");
     }
     return true;
   }
@@ -167,7 +169,7 @@ export async function routeMusicApi(req, res, url, deps) {
       }
       sendJson(res, 200, { ok: true, track });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "播放进度保存失败" });
+      sendMusicPublicError(res, sendJson, error, "播放进度保存失败");
     }
     return true;
   }
@@ -183,7 +185,7 @@ export async function routeMusicApi(req, res, url, deps) {
       }
       sendJson(res, 200, { ok: true, track });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "收藏歌曲失败" });
+      sendMusicPublicError(res, sendJson, error, "收藏歌曲失败");
     }
     return true;
   }
@@ -199,7 +201,7 @@ export async function routeMusicApi(req, res, url, deps) {
       }
       sendJson(res, 200, { ok: true, track });
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "评分保存失败" });
+      sendMusicPublicError(res, sendJson, error, "评分保存失败");
     }
     return true;
   }
@@ -220,7 +222,7 @@ export async function routeMusicApi(req, res, url, deps) {
       }
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "加入歌单失败" });
+      sendMusicPublicError(res, sendJson, error, "加入歌单失败");
     }
     return true;
   }
@@ -236,7 +238,7 @@ export async function routeMusicApi(req, res, url, deps) {
       }
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "歌单排序保存失败" });
+      sendMusicPublicError(res, sendJson, error, "歌单排序保存失败");
     }
     return true;
   }
@@ -251,7 +253,7 @@ export async function routeMusicApi(req, res, url, deps) {
       }
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "移出歌单失败" });
+      sendMusicPublicError(res, sendJson, error, "移出歌单失败");
     }
     return true;
   }
@@ -276,7 +278,7 @@ export async function routeMusicApi(req, res, url, deps) {
       if (req.method === "HEAD") res.end();
       else res.end(body, "utf8");
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "歌单导出失败" });
+      sendMusicPublicError(res, sendJson, error, "歌单导出失败");
     }
     return true;
   }
@@ -291,7 +293,7 @@ export async function routeMusicApi(req, res, url, deps) {
       }
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "歌单读取失败" });
+      sendMusicPublicError(res, sendJson, error, "歌单读取失败");
     }
     return true;
   }
@@ -305,7 +307,7 @@ export async function routeMusicApi(req, res, url, deps) {
       }
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "删除歌单失败" });
+      sendMusicPublicError(res, sendJson, error, "删除歌单失败");
     }
     return true;
   }
@@ -320,7 +322,7 @@ export async function routeMusicApi(req, res, url, deps) {
       }
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "更新歌单失败" });
+      sendMusicPublicError(res, sendJson, error, "更新歌单失败");
     }
     return true;
   }
@@ -335,7 +337,7 @@ export async function routeMusicApi(req, res, url, deps) {
       }
       sendJson(res, 200, data);
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message || "歌曲详情读取失败" });
+      sendMusicPublicError(res, sendJson, error, "歌曲详情读取失败");
     }
     return true;
   }
