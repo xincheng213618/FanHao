@@ -233,7 +233,7 @@ export function createNovelPage(deps) {
         state.novel.page = clampedPage;
         state.novel.loading = false;
         state.novel.loadingMore = false;
-        return loadNovels({ ...options, pageClamped: true });
+        return loadNovels({ ...options, pageClamped: true, replaceRoute: true });
       }
     }
     if (append) {

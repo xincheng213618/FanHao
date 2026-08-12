@@ -14,6 +14,8 @@ const fixturePort = Number(ownedServer?.address()?.port || 0);
 const baseUrl = suppliedBaseUrl || `http://127.0.0.1:${fixturePort}`;
 let delayedAuthorDetail = null;
 const delayedNovelRequests = [];
+let delayedNovelCollection = null;
+let fixtureNovelCollectionRequests = 0;
 const fixtureCollections = new Map();
 let fixtureCollectionSequence = 0;
 const fixtureCollectionDetailRequests = [];
@@ -28,6 +30,8 @@ try {
     await verifyStandaloneStyles(browser);
     await verifyNovelLibraryIntent(browser);
     await verifyNovelCardAccessibility(browser);
+    await verifyNovelRankingClampHistory(browser);
+    await verifyNovelManageExitStopsPolling(browser);
     await verifyMobileGallery(browser);
     await verifyAuthorIndexReturn(browser);
     await verifyAuthorReturnDiscardsDelayedDetail(browser);
@@ -170,6 +174,66 @@ async function verifyNovelCardAccessibility(browser) {
     await page.keyboard.press("Enter");
     await page.locator(".novel-detail").waitFor({ state: "visible", timeout: 5000 });
   } finally {
+    await page.close();
+  }
+}
+
+async function verifyNovelRankingClampHistory(browser) {
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
+    const result = await page.evaluate(async () => {
+      const { createNovelPage } = await import("/modules/novels/novel-page.js?ranking-clamp-history=1");
+      const state = { activeView: "novels", novel: { mode: "rankings", page: 99 } };
+      const routeUrl = (route) => `/novels/rankings${route.novelPage > 0 ? `?page=${route.novelPage + 1}` : ""}`;
+      const writeRoute = (route, mode) => history[mode === "replace" ? "replaceState" : "pushState"]({ route }, "", routeUrl(route));
+      const pageController = createNovelPage({
+        api: async () => ({ books: [], total: 1, limit: 48, offset: 4752, summary: { totals: {} } }),
+        cancelScheduledWorkRendering() {},
+        disconnectPeopleIndexAutoload() {},
+        els: { workGrid: document.getElementById("fixture"), statsRow: document.createElement("div") },
+        formatBytes: () => "0 B",
+        formatDateTime: () => "",
+        formatNumber: (value) => String(value || 0),
+        hidePersonProfile() {},
+        openAdminScript() {},
+        pushRoute: (route) => writeRoute(route, "push"),
+        replaceRoute: (route) => writeRoute(route, "replace"),
+        resetProgressiveCoverLoading() {},
+        setMainHeader() {},
+        state,
+        syncRouteAfterNavigation() {}
+      });
+      const historyLengthBefore = history.length;
+      await pageController.loadNovels();
+      return { historyLengthBefore, historyLengthAfter: history.length, path: `${location.pathname}${location.search}` };
+    });
+    assert.equal(result.historyLengthAfter, result.historyLengthBefore + 1, "an out-of-range ranking page must replace its provisional route instead of adding another history entry");
+    assert.equal(result.path, "/novels/rankings", "the clamped ranking route must point to the first valid page");
+    await page.goBack();
+    assert.match(page.url(), /android-picker-fixture$/, "Back must return before the provisional out-of-range ranking request");
+    await page.goForward();
+    assert.match(page.url(), /\/novels\/rankings$/, "Forward must visit only the clamped ranking route");
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyNovelManageExitStopsPolling(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  try {
+    fixtureNovelCollectionRequests = 0;
+    const delayed = deferNovelCollection();
+    await page.goto(`${baseUrl}/novels`, { waitUntil: "domcontentloaded" });
+    await page.getByRole("button", { name: "管理" }).click();
+    await delayed.requested;
+    await page.getByRole("button", { name: "书库" }).click();
+    await page.locator(".novel-book-row").waitFor({ state: "visible", timeout: 5000 });
+    delayed.release();
+    await page.waitForTimeout(1800);
+    assert.equal(fixtureNovelCollectionRequests, 1, "a completed stale manage load must not schedule a collection poll after leaving management");
+  } finally {
+    delayedNovelCollection = null;
     await page.close();
   }
 }
@@ -1814,6 +1878,18 @@ function deferNextNovelRequest(options = {}) {
   return deferred;
 }
 
+function deferNovelCollection() {
+  let requestedResolve;
+  let releaseResolve;
+  delayedNovelCollection = {
+    requested: new Promise((resolve) => { requestedResolve = resolve; }),
+    release: () => releaseResolve(),
+    response: new Promise((resolve) => { releaseResolve = resolve; })
+  };
+  delayedNovelCollection.requestedResolve = requestedResolve;
+  return delayedNovelCollection;
+}
+
 function fixtureNovels(url, options = {}) {
   const query = String(url.searchParams.get("q") || "").trim();
   const category = String(url.searchParams.get("category") || "").trim();
@@ -1880,6 +1956,23 @@ async function fixtureApi(url, request = {}) {
       if (delayed.reject) throw new Error("fixture stale novel request failed");
     }
     return fixtureNovels(url);
+  }
+  if (url.pathname === "/api/novels/summary") return fixtureNovels(url).summary;
+  if (url.pathname === "/api/novels/collection") {
+    fixtureNovelCollectionRequests += 1;
+    if (delayedNovelCollection) {
+      const delayed = delayedNovelCollection;
+      delayedNovelCollection = null;
+      delayed.requestedResolve();
+      await delayed.response;
+    }
+    return {
+      adapters: [],
+      credentials: {},
+      runtime: {},
+      summary: {},
+      tasks: [{ id: "fixture-active-collection", status: "running" }]
+    };
   }
   const novelDetail = /^\/api\/novels\/([^/]+)$/.exec(url.pathname);
   if (novelDetail) {
