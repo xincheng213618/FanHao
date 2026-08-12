@@ -10,8 +10,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .common import first_text, flatten_strings, int_or_none, json_text, now_iso, row_int, row_text, safe_path_segment
-from .config import LIBRARY_SEC_UID
+from .common import first_text, flatten_strings, int_or_none, json_text, now_iso, row_int, row_text
 from .database import db, setting
 
 
@@ -27,7 +26,11 @@ def profile_output_dir(base_output_dir: str, profile_id: int) -> str:
         return str(Path(custom).expanduser())
     base = Path(base_output_dir)
     # 文件只存一份；“我的喜欢 / 作者作品”是数据库关系，不再靠目录区分。
-    return str(base / "likes" / safe_path_segment(LIBRARY_SEC_UID))
+    # 未显式配置时也回到文档和历史数据使用的统一 ShortVideos 库，避免
+    # 因当前主页或固定账号 UID 推导出另一个并不存在的保存目录。
+    if base.name.casefold() == "shortvideos":
+        return str(base)
+    return str(base / "ShortVideos")
 
 
 def manifest_has(output_dir: str, aweme_id: str) -> bool:

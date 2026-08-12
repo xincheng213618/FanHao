@@ -51,4 +51,6 @@ FanHao 的 `data/short-videos.sqlite`。FanHao 主服务通过 Node `sync-worker
 
 媒体文件与程序数据分开保存：视频、图集、封面和下载清单统一放在 `ShortVideos`；SQLite、日志和有容量上限的播放缓存继续留在 FanHao 工作区。可通过 `FANHAO_SHORT_VIDEO_STORAGE_ROOT` 整体覆盖存储根目录，通过 `FANHAO_SHORT_VIDEO_ROOTS` 只覆盖 FanHao 的扫描目录。
 
+新下载按“作者 / 日期与标题及作品 ID / 作品 ID 文件名”组织。作品目录保留可读标题，文件名不再重复长标题；旧文件无需搬迁，仍由 manifest 中记录的相对路径读取。
+
 数据库和 Cookie 配置从旧版外置管理器迁移后，旧目录不再作为运行依赖。

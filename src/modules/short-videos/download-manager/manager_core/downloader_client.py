@@ -90,7 +90,9 @@ def write_sidecar_config(output_dir: str, concurrency: int) -> Path:
             "json: true",
             "download_pinned: false",
             "folderstyle: true",
-            'filename_template: "{date}_{title}_{id}"',
+            # 作品目录已包含日期、标题和 ID，文件名只保留稳定 ID，避免在
+            # Windows 路径中重复一遍长标题。
+            'filename_template: "{id}"',
             'folder_template: "{date}_{title}_{id}"',
             'author_dir: "nickname_uid"',
             "mode:",
@@ -225,7 +227,7 @@ def write_config(link: sqlite3.Row, output_dir: str, worker_id: int) -> Path:
             "video_quality: highest_resolution",
             "download_pinned: false",
             "folderstyle: true",
-            'filename_template: "{date}_{title}_{id}"',
+            'filename_template: "{id}"',
             'folder_template: "{date}_{title}_{id}"',
             'author_dir: "nickname_uid"',
             "mode:",
