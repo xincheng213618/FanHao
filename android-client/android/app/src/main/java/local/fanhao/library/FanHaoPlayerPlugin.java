@@ -97,11 +97,8 @@ public class FanHaoPlayerPlugin extends Plugin {
       : "";
     JSONArray snapshots = new JSONArray();
     if (completed && expectedBase.length() > 0 && expectedBase.equals(returnedBase)) {
-      try {
-        snapshots = new JSONArray(data.getStringExtra(NativeShortVideoActionResult.EXTRA_SNAPSHOTS_JSON));
-      } catch (Exception error) {
-        Log.w(TAG, "Ignored malformed native short-video action result", error);
-      }
+      snapshots = NativeShortVideoActionResultDecoder.decode(
+        data.getStringExtra(NativeShortVideoActionResult.EXTRA_SNAPSHOTS_JSON));
     }
     JSObject result = new JSObject();
     result.put("opened", true);

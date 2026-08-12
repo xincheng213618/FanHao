@@ -4,11 +4,13 @@ import { DEFAULT_SORT, initials } from "../shared.js?v=20260730-mobile-sync-01";
 import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=20260811-android-author-status-01";
 import { renderFollowingAuthorTools } from "./following-view.js?v=20260730-mobile-sync-01";
 import { appendCollectionCardAction } from "../collections/card-action.js?v=20260812-collection-review-02";
+import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=20260812-native-action-ui-01";
 export function createShortVideoListView(context = {}) {
   const { els, getActiveUrl, goBack, listState, openSettings, showView } = context;
   const appendVisibleAuthors = (...args) => context.appendVisibleAuthors(...args);
   const bindReliableTap = (...args) => context.bindReliableTap(...args);
   const createIcon = (...args) => context.createIcon(...args);
+  const refreshVideoCards = (video) => refreshRenderedVideoCards(els.viewContent, video, createIcon, formatCompact);
   const clearSearchHistory = (...args) => context.clearSearchHistory(...args);
   const currentAuthorFacet = (...args) => context.currentAuthorFacet(...args);
   const fetchSearchSuggestions = (...args) => context.fetchSearchSuggestions(...args);
@@ -535,6 +537,7 @@ export function createShortVideoListView(context = {}) {
   function renderCard(video, options = {}) {
     const wrap = document.createElement("div");
     wrap.className = "short-video-mobile-card-wrap";
+    wrap.dataset.videoId = String(video?.id || "");
     const card = document.createElement("button");
     card.type = "button";
     card.className = "short-video-mobile-card";
@@ -558,9 +561,6 @@ export function createShortVideoListView(context = {}) {
     }
     const metric = document.createElement("span");
     metric.className = "short-video-mobile-thumb-metric";
-    const liked = Boolean(video.actions?.liked);
-    metric.classList.toggle("is-liked", liked);
-    metric.append(createIcon(liked ? "heart" : "heartOutline"), document.createTextNode(formatCompact(video.stats?.likes || 0)));
     thumb.append(metric);
     const galleryCount = String(video.mediaType || "").toLowerCase() === "gallery"
       ? Number(video.galleryCount || video.galleryImages?.length || 0)
@@ -571,7 +571,8 @@ export function createShortVideoListView(context = {}) {
       badge.textContent = `图文 · ${galleryCount}`;
       thumb.append(badge);
     }
-    card.setAttribute("aria-label", video.title || (galleryCount > 0 ? "打开图文作品" : "打开短视频"));
+    card.dataset.openLabel = video.title || (galleryCount > 0 ? "打开图文作品" : "打开短视频");
+    syncRenderedVideoCardMetric(card, metric, video, createIcon, formatCompact);
     card.append(thumb);
     wrap.append(card);
     if (options.allowCollections !== false) {
@@ -588,6 +589,7 @@ export function createShortVideoListView(context = {}) {
     renderListToolbar,
     renderAuthorIndex,
     renderAuthorIndexCard,
+    refreshVideoCards,
     renderCard
   };
 }

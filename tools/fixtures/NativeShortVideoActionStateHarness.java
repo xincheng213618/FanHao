@@ -21,6 +21,7 @@ public final class NativeShortVideoActionStateHarness {
     verifyCanonicalSnapshotsReachEveryInstance();
     verifyCanonicalSnapshotsMergeMissingFields();
     verifyAcknowledgedResultSerialization();
+    verifyBoundedActivityResultDecoding();
     verifyCanonicalSnapshotsAreBounded();
     verifyFeedRevisionOrdering();
     verifyRejectedStaleResponseCannotOverwriteRestoredScreen();
@@ -478,6 +479,35 @@ public final class NativeShortVideoActionStateHarness {
     if (stale.accepted) acknowledged.accept("result-video", snapshot(true, false, false, false, true, 100, false, 0));
     check(!stale.accepted && acknowledged.toJson().optJSONObject(0).optBoolean("liked"),
       "a rejected stale completion must not overwrite the acknowledged Activity result");
+  }
+
+  private static void verifyBoundedActivityResultDecoding() {
+    JSONArray valid = NativeShortVideoActionResultDecoder.decode(
+      "[{\"videoId\":\" bounded-video \",\"liked\":false,\"likes\":12}]"
+    );
+    JSONObject row = valid.optJSONObject(0);
+    check(valid.length() == 1 && row != null && "bounded-video".equals(row.optString("videoId"))
+        && row.has("liked") && !row.optBoolean("liked") && row.optLong("likes") == 12,
+      "the Activity bridge decoder must preserve acknowledged false values and counts");
+
+    String longId = "x".repeat(513);
+    check(NativeShortVideoActionResultDecoder.decode(
+      "[{\"videoId\":\"" + longId + "\",\"liked\":true}]"
+    ).length() == 0, "a video id beyond the 512-character contract must fail closed");
+    check(NativeShortVideoActionResultDecoder.decode(
+      "[{\"videoId\":\"bounded-video\",\"liked\":\"true\"}]"
+    ).length() == 0, "a malformed action field must fail the whole Activity result closed");
+
+    StringBuilder oversized = new StringBuilder("[");
+    for (int index = 0; index <= 512; index += 1) {
+      if (index > 0) oversized.append(',');
+      oversized.append("{\"videoId\":\"video-").append(index).append("\",\"liked\":true}");
+    }
+    oversized.append(']');
+    check(NativeShortVideoActionResultDecoder.decode(oversized.toString()).length() == 0,
+      "more than 512 Activity result snapshots must fail closed instead of truncating or patching");
+    check(NativeShortVideoActionResultDecoder.decode("[not-json").length() == 0,
+      "malformed Activity result JSON must return an empty snapshot array");
   }
 
   private static void verifyCanonicalSnapshotsAreBounded() {

@@ -42,6 +42,7 @@ try {
     await verifyAndroidCollectionRefresh(browser);
     await verifyAndroidCollectionManagement(browser);
     await verifyAndroidCollectionStackReturn(browser);
+    await verifyAndroidNativeActionCardRefresh(browser);
     await verifyAndroidFavoriteFolders(browser);
     await verifyAndroidFavoriteRoute(browser);
     await verifyAndroidFavoriteServerSwitch(browser);
@@ -664,6 +665,150 @@ async function verifyAndroidCollectionStackReturn(browser) {
       { discardCalls: 1, showCalls: 0 },
       "deleting an Android collection opened with push must discard its stack and browser-history entry instead of rendering a duplicate index"
     );
+  } finally {
+    await page.close();
+  }
+}
+
+async function verifyAndroidNativeActionCardRefresh(browser) {
+  const page = await browser.newPage({ viewport: { width: 412, height: 820 } });
+  try {
+    await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
+    await page.evaluate(async () => {
+      const [{ createShortVideoListView }, { createShortVideoNativeFeed }] = await Promise.all([
+        import("/android-client/modules/short-videos/list/view.js?action-card-fixture=1"),
+        import("/android-client/modules/short-videos/player/native-feed.js?action-card-fixture=1")
+      ]);
+      const root = document.getElementById("fixture");
+      root.style.height = "120px";
+      root.style.overflow = "auto";
+      const before = document.createElement("div");
+      before.style.height = "360px";
+      const after = document.createElement("div");
+      after.style.height = "360px";
+      const listHost = document.createElement("section");
+      listHost.className = "fixture-list-cards";
+      const collectionHost = document.createElement("section");
+      collectionHost.className = "fixture-collection-cards";
+      const listVideo = {
+        id: "action-card-video",
+        streamUrl: "/media/action-card-video.mp4",
+        title: "列表作品",
+        actions: { liked: false, collected: false },
+        stats: { likes: 10, collects: 2 }
+      };
+      const collectionVideo = {
+        ...listVideo,
+        title: "清单作品",
+        actions: { ...listVideo.actions },
+        stats: { ...listVideo.stats }
+      };
+      const listState = { data: { videos: [listVideo], hasMore: false } };
+      const els = { viewContent: root };
+      const listView = createShortVideoListView({
+        bindReliableTap(element, handler) { element.addEventListener("click", handler); },
+        createIcon(name) {
+          const icon = document.createElement("span");
+          icon.className = `short-video-mobile-icon short-video-mobile-icon-${name}`;
+          return icon;
+        },
+        els,
+        getActiveUrl: () => location.origin,
+        listState,
+        openShortVideoFromList() {},
+        showCollectionPicker() {}
+      });
+      const listCard = listView.renderCard(listVideo, { allowCollections: false });
+      const collectionCard = listView.renderCard(collectionVideo, { allowCollections: false });
+      listHost.append(listCard);
+      collectionHost.append(collectionCard);
+      root.append(before, listHost, collectionHost, after);
+      root.scrollTop = 240;
+      const initialScrollTop = root.scrollTop;
+      const calls = [];
+      const invalidations = [];
+      let nextResult = { serverBase: location.origin, snapshots: [] };
+      window.Capacitor = { Plugins: { FanHaoPlayer: {
+        async playShortFeed(payload) {
+          calls.push(payload);
+          return nextResult;
+        }
+      } } };
+      const nativeFeed = createShortVideoNativeFeed({
+        getActiveUrl: () => location.origin,
+        invalidateShortVideoCache: async (...args) => invalidations.push(args),
+        listState,
+        refreshVideoCards: listView.refreshVideoCards,
+        shortVideoApiSource: () => "all",
+        shortVideoToast() {}
+      });
+      window.androidNativeActionCardFixture = {
+        async run(result) {
+          nextResult = result;
+          return nativeFeed.openNativeShortVideoFeed(collectionVideo, { videos: [collectionVideo] });
+        },
+        metrics() {
+          const read = (host) => {
+            const metric = host.querySelector(".short-video-mobile-thumb-metric");
+            const card = host.querySelector(".short-video-mobile-card");
+            return {
+              aria: card?.getAttribute("aria-label") || "",
+              count: metric?.textContent || "",
+              icon: metric?.querySelector(".short-video-mobile-icon")?.className || "",
+              liked: Boolean(metric?.classList.contains("is-liked"))
+            };
+          };
+          return {
+            calls: calls.map((payload) => JSON.parse(payload.videos).videos[0]),
+            collection: read(collectionHost),
+            collectionStable: collectionHost.firstElementChild === collectionCard,
+            initialScrollTop,
+            invalidations: [...invalidations],
+            list: read(listHost),
+            listStable: listHost.firstElementChild === listCard,
+            scrollTop: root.scrollTop
+          };
+        }
+      };
+    });
+
+    const fixture = "window.androidNativeActionCardFixture";
+    assert.equal(await page.evaluate(`${fixture}.run({ serverBase: location.origin, snapshots: [{ videoId: "action-card-video", liked: true, likes: 11 }] })`), true);
+    let metrics = await page.evaluate(`${fixture}.metrics()`);
+    for (const card of [metrics.list, metrics.collection]) {
+      assert.equal(card.liked, true, "Native ACK must refresh both list and collection cards to liked");
+      assert.equal(card.count, "11", "Native ACK must refresh both rendered like counts");
+      assert.match(card.icon, /short-video-mobile-icon-heart(?:\s|$)/u, "Native ACK must replace the outline icon with the liked heart");
+      assert.match(card.aria, /已点赞，11 个赞/u, "Native ACK must refresh the rendered card accessibility label");
+    }
+    assert.equal(metrics.listStable && metrics.collectionStable, true, "targeted Native ACK refresh must retain both card DOM nodes");
+    assert.equal(metrics.scrollTop, metrics.initialScrollTop, "targeted Native ACK refresh must preserve the list scroll position");
+    assert.deepEqual(metrics.invalidations, [[baseUrl, "/api/short-videos"]]);
+
+    await page.evaluate(`${fixture}.run({ serverBase: location.origin, snapshots: [{ videoId: "action-card-video", liked: false, likes: 10 }] })`);
+    metrics = await page.evaluate(`${fixture}.metrics()`);
+    assert.equal(metrics.calls[1].actions.liked, true, "immediate reopen must serialize the first acknowledged liked state before accepting the next result");
+    for (const card of [metrics.list, metrics.collection]) {
+      assert.equal(card.liked, false, "a later Native ACK must refresh both cards back to unliked");
+      assert.equal(card.count, "10");
+      assert.match(card.icon, /short-video-mobile-icon-heartOutline(?:\s|$)/u);
+      assert.match(card.aria, /未点赞，10 个赞/u);
+    }
+    assert.equal(metrics.listStable && metrics.collectionStable, true);
+    assert.equal(metrics.scrollTop, metrics.initialScrollTop);
+
+    const unchangedInvalidations = metrics.invalidations.length;
+    const oversized = Array.from({ length: 513 }, (_, index) => ({ videoId: `oversized-${index}`, liked: true }));
+    await page.evaluate(({ snapshots }) => window.androidNativeActionCardFixture.run({ serverBase: location.origin, snapshots }), { snapshots: oversized });
+    await page.evaluate(`${fixture}.run({ serverBase: location.origin, snapshots: [{ videoId: "x".repeat(513), liked: true }] })`);
+    await page.evaluate(`${fixture}.run({ serverBase: location.origin, snapshots: [{ videoId: "action-card-video", liked: "true" }] })`);
+    await page.evaluate(`${fixture}.run({ serverBase: "", snapshots: [{ videoId: "action-card-video", liked: true, likes: 99 }] })`);
+    metrics = await page.evaluate(`${fixture}.metrics()`);
+    assert.equal(metrics.list.liked, false, "oversized, malformed, long-id, and invalid-base results must not patch rendered cards");
+    assert.equal(metrics.list.count, "10");
+    assert.equal(metrics.invalidations.length, unchangedInvalidations, "rejected result payloads must not invalidate persistent caches");
+    assert.equal(metrics.listStable && metrics.collectionStable, true);
+    assert.equal(metrics.scrollTop, metrics.initialScrollTop);
   } finally {
     await page.close();
   }

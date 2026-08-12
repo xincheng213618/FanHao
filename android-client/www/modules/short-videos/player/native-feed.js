@@ -2,9 +2,13 @@ import { DEFAULT_SORT } from "../shared.js";
 import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=20260711-short-video-cache-08";
 import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js";
 
+const MAX_ACTION_RESULT_SNAPSHOTS = 512;
+const MAX_ACTION_RESULT_VIDEO_ID_CHARS = 512;
+
 export function createShortVideoNativeFeed(context = {}) {
   const { getActiveUrl, listState } = context;
   const invalidateShortVideoCache = context.invalidateShortVideoCache || clearCachedJsonByPrefix;
+  const refreshVideoCards = (...args) => context.refreshVideoCards?.(...args);
   const shortVideoApiSource = (...args) => context.shortVideoApiSource(...args);
   const shortVideoToast = (...args) => context.shortVideoToast(...args);
   async function openNativeShortVideoFeed(video, options = {}) {
@@ -47,8 +51,10 @@ export function createShortVideoNativeFeed(context = {}) {
       const snapshots = normalizeActionSnapshots(result?.snapshots);
       if (launchServerBase && resultServerBase === launchServerBase && snapshots.length) {
         if (normalizeServerBase(getActiveUrl()) === launchServerBase) {
-          mergeActionSnapshots(listState.data?.videos, snapshots);
-          mergeActionSnapshots(options.videos, snapshots);
+          const changedVideos = new Map();
+          mergeActionSnapshots(listState.data?.videos, snapshots, changedVideos);
+          mergeActionSnapshots(options.videos, snapshots, changedVideos);
+          for (const changed of changedVideos.values()) refreshVideoCards(changed);
         }
         await invalidateShortVideoCache(launchServerBase, "/api/short-videos").catch(() => {});
       }
@@ -123,20 +129,33 @@ export function createShortVideoNativeFeed(context = {}) {
 }
 
 function normalizeActionSnapshots(value) {
-  if (!Array.isArray(value)) return [];
-  return value.map((entry) => {
+  if (!Array.isArray(value) || value.length > MAX_ACTION_RESULT_SNAPSHOTS) return [];
+  const snapshots = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
     const videoId = String(entry?.videoId || "").trim();
-    if (!videoId) return null;
+    if (!videoId || videoId.length > MAX_ACTION_RESULT_VIDEO_ID_CHARS) return [];
     const snapshot = { videoId };
-    if (typeof entry.liked === "boolean") snapshot.liked = entry.liked;
-    if (typeof entry.collected === "boolean") snapshot.collected = entry.collected;
-    if (Object.hasOwn(entry, "likes") && Number.isFinite(Number(entry.likes))) snapshot.likes = Math.max(0, Number(entry.likes));
-    if (Object.hasOwn(entry, "collects") && Number.isFinite(Number(entry.collects))) snapshot.collects = Math.max(0, Number(entry.collects));
-    return Object.keys(snapshot).length > 1 ? snapshot : null;
-  }).filter(Boolean);
+    if (Object.hasOwn(entry, "liked")) {
+      if (typeof entry.liked !== "boolean") return [];
+      snapshot.liked = entry.liked;
+    }
+    if (Object.hasOwn(entry, "collected")) {
+      if (typeof entry.collected !== "boolean") return [];
+      snapshot.collected = entry.collected;
+    }
+    for (const key of ["likes", "collects"]) {
+      if (!Object.hasOwn(entry, key)) continue;
+      if (!Number.isSafeInteger(entry[key]) || entry[key] < 0) return [];
+      snapshot[key] = entry[key];
+    }
+    if (Object.keys(snapshot).length === 1) return [];
+    snapshots.push(snapshot);
+  }
+  return snapshots;
 }
 
-function mergeActionSnapshots(videos, snapshots) {
+function mergeActionSnapshots(videos, snapshots, changedVideos) {
   if (!Array.isArray(videos)) return;
   const byId = new Map(snapshots.map((snapshot) => [snapshot.videoId, snapshot]));
   for (const video of videos) {
@@ -148,6 +167,7 @@ function mergeActionSnapshots(videos, snapshots) {
     if ("likes" in snapshot || "collects" in snapshot) video.stats ||= {};
     if ("likes" in snapshot) video.stats.likes = snapshot.likes;
     if ("collects" in snapshot) video.stats.collects = snapshot.collects;
+    changedVideos?.set(snapshot.videoId, video);
   }
 }
 

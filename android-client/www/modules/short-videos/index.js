@@ -1,8 +1,8 @@
 import { createShortVideoApi } from "./api.js?v=20260812-collection-busy-01";
 import { createShortVideoCollections } from "./collections/controller.js?v=20260812-collection-management-03";
 import { createShortVideoListController } from "./list/controller.js?v=20260811-android-author-status-01";
-import { createShortVideoListView } from "./list/view.js?v=20260812-collection-review-02";
-import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260812-native-action-result-01";
+import { createShortVideoListView } from "./list/view.js?v=20260812-native-action-ui-01";
+import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260812-native-action-ui-01";
 import { createShortVideoSearch } from "./search.js?v=20260712-douyin-search-05";
 import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=20260812-collection-review-02";
 import { createShortVideoIcons } from "./ui/icons.js?v=20260712-douyin-search-05";

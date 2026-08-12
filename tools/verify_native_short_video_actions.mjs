@@ -57,6 +57,7 @@ try {
   const source = path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoActionState.java");
   const snapshots = path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoActionSnapshots.java");
   const activityResult = path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoActionResult.java");
+  const activityResultDecoder = path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoActionResultDecoder.java");
   const preferences = path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoActionPreferences.java");
   const stateHarness = path.join(root, "tools", "fixtures", "NativeShortVideoActionStateHarness.java");
   const preferencesHarness = path.join(root, "tools", "fixtures", "NativeShortVideoActionPreferencesHarness.java");
@@ -72,6 +73,7 @@ try {
     source,
     snapshots,
     activityResult,
+    activityResultDecoder,
     preferences,
     stateHarness,
     preferencesHarness
