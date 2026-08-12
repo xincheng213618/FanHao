@@ -3,7 +3,7 @@ import { captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, write
 
 const DEFAULT_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
 
-export function createShortVideoApi({ getActiveUrl }) {
+export function createShortVideoApi({ getActiveUrl, writeResponseCache = writeCachedJson }) {
   const refreshes = new Map();
   const refresh = (baseUrl, routePath, fetchOptions) => {
     const fence = captureCachedJsonFence(baseUrl);
@@ -20,7 +20,9 @@ export function createShortVideoApi({ getActiveUrl }) {
   const refreshOnce = async (baseUrl, routePath, fetchOptions, fence) => {
     const data = await fetchJson(baseUrl, routePath, fetchOptions);
     if (!isCachedJsonFenceCurrent(fence)) throw new Error("缓存已失效，请重新读取");
-    await writeCachedJson(baseUrl, routePath, data, { fence });
+    try {
+      await writeResponseCache(baseUrl, routePath, data, { fence });
+    } catch {}
     if (!isCachedJsonFenceCurrent(fence)) throw new Error("缓存已失效，请重新读取");
     return data;
   };

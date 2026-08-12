@@ -25,7 +25,12 @@ const responseInvalidationState = globalThis.__fanhaoResponseCacheInvalidationSt
 export async function readCachedJson(baseUrl, path) {
   const fence = captureCachedJsonFence(baseUrl);
   const db = await openCacheDb();
-  const entry = await requestToPromise(db.transaction(RESPONSE_STORE, "readonly").objectStore(RESPONSE_STORE).get(cacheKey(baseUrl, path)));
+  const entry = await runCacheTransaction(
+    db,
+    RESPONSE_STORE,
+    "readonly",
+    (store) => requestToPromise(store.get(cacheKey(baseUrl, path)))
+  );
   if (!isCachedJsonFenceCurrent(fence) || !entry || !entry.payload || !isCurrentResponseCache(entry)) return null;
   touchCachedResponse(entry, fence).catch(() => {});
   return entry;
@@ -47,7 +52,7 @@ export async function writeCachedJson(baseUrl, path, payload, options = {}) {
   entry.bytes = estimateEntrySize(entry);
   if (entry.bytes > MAX_CACHED_RESPONSE_BYTES) return null;
 
-  await requestToPromise(db.transaction(RESPONSE_STORE, "readwrite").objectStore(RESPONSE_STORE).put(entry));
+  await runCacheTransaction(db, RESPONSE_STORE, "readwrite", (store) => requestToPromise(store.put(entry)));
   scheduleResponseCacheTrim().catch(() => {});
   return entry;
 }
@@ -115,9 +120,9 @@ export async function clearCachedData(baseUrl = "") {
   invalidateCachedJsonWrites(normalizedBase);
   const db = await openCacheDb();
   if (!normalizedBase) {
-    await requestToPromise(db.transaction(RESPONSE_STORE, "readwrite").objectStore(RESPONSE_STORE).clear());
+    await runCacheTransaction(db, RESPONSE_STORE, "readwrite", (store) => requestToPromise(store.clear()));
     if (db.objectStoreNames.contains(IMAGE_STORE)) {
-      await requestToPromise(db.transaction(IMAGE_STORE, "readwrite").objectStore(IMAGE_STORE).clear());
+      await runCacheTransaction(db, IMAGE_STORE, "readwrite", (store) => requestToPromise(store.clear()));
     }
     return;
   }
@@ -136,14 +141,14 @@ export async function clearCachedJsonByPrefix(baseUrl, pathPrefix) {
   if (!normalizedBase || !normalizedPrefix) return;
   invalidateCachedJsonWrites(normalizedBase);
   const db = await openCacheDb();
-  const transaction = db.transaction(RESPONSE_STORE, "readwrite");
-  const store = transaction.objectStore(RESPONSE_STORE);
-  const entries = await requestToPromise(store.index("baseUrl").getAll(normalizedBase));
-  await Promise.all(
-    entries
-      .filter((entry) => String(entry?.path || "").startsWith(normalizedPrefix))
-      .map((entry) => requestToPromise(store.delete(entry.key)))
-  );
+  await runCacheTransaction(db, RESPONSE_STORE, "readwrite", async (store) => {
+    const entries = await requestToPromise(store.index("baseUrl").getAll(normalizedBase));
+    await Promise.all(
+      entries
+        .filter((entry) => String(entry?.path || "").startsWith(normalizedPrefix))
+        .map((entry) => requestToPromise(store.delete(entry.key)))
+    );
+  });
 }
 
 export function cacheAgeText(updatedAt) {
@@ -271,25 +276,26 @@ function imageBaseUrl(url) {
 }
 
 async function deleteByBaseUrl(db, storeName, normalizedBase) {
-  const transaction = db.transaction(storeName, "readwrite");
-  const store = transaction.objectStore(storeName);
-  const entries = await requestToPromise(store.index("baseUrl").getAllKeys(normalizedBase));
-  await Promise.all(entries.map((key) => requestToPromise(store.delete(key))));
+  await runCacheTransaction(db, storeName, "readwrite", async (store) => {
+    const entries = await requestToPromise(store.index("baseUrl").getAllKeys(normalizedBase));
+    await Promise.all(entries.map((key) => requestToPromise(store.delete(key))));
+  });
 }
 
 async function touchCachedResponse(entry, fence) {
   if (!entry?.key) return;
   const db = await openCacheDb();
   if (!isCachedJsonFenceCurrent(fence)) return;
-  const store = db.transaction(RESPONSE_STORE, "readwrite").objectStore(RESPONSE_STORE);
-  const current = await requestToPromise(store.get(entry.key));
-  if (!current || !isCachedJsonFenceCurrent(fence)) return;
-  await requestToPromise(store.put({
-    ...current,
-    accessedAt: new Date().toISOString(),
-    version: RESPONSE_CACHE_VERSION,
-    bytes: responseEntryBytes(current)
-  }));
+  await runCacheTransaction(db, RESPONSE_STORE, "readwrite", async (store) => {
+    const current = await requestToPromise(store.get(entry.key));
+    if (!current || !isCachedJsonFenceCurrent(fence)) return;
+    await requestToPromise(store.put({
+      ...current,
+      accessedAt: new Date().toISOString(),
+      version: RESPONSE_CACHE_VERSION,
+      bytes: responseEntryBytes(current)
+    }));
+  });
 }
 
 function scheduleStaleResponsePrune(db) {
@@ -408,6 +414,36 @@ function requestToPromise(request) {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error("本地缓存读写失败"));
   });
+}
+
+export function transactionToPromise(transaction) {
+  return new Promise((resolve, reject) => {
+    const failure = (fallback) => {
+      let error = null;
+      try {
+        error = transaction?.error || null;
+      } catch {}
+      reject(error || fallback);
+    };
+    transaction.addEventListener("complete", () => resolve(), { once: true });
+    transaction.addEventListener("abort", () => failure(new Error("本地缓存事务已中止")), { once: true });
+    transaction.addEventListener("error", () => failure(new Error("本地缓存事务失败")), { once: true });
+  });
+}
+
+async function runCacheTransaction(db, storeName, mode, operation) {
+  const transaction = db.transaction(storeName, mode);
+  const completion = transactionToPromise(transaction);
+  let operationResult;
+  try {
+    operationResult = operation(transaction.objectStore(storeName), transaction);
+  } catch (error) {
+    try { transaction.abort(); } catch {}
+    await completion.catch(() => {});
+    throw error;
+  }
+  const [result] = await Promise.all([operationResult, completion]);
+  return result;
 }
 
 function estimateEntrySize(entry) {

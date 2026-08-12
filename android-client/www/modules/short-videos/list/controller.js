@@ -4,6 +4,8 @@ export function createShortVideoListController(context = {}) {
   let listLoadMoreObserver = null;
   let listEventsInstalled = false;
   let listRequestGeneration = 0;
+  let listAppendRequestId = 0;
+  let listAppendRevision = 0;
   const openNativeShortVideoFeed = (...args) => context.openNativeShortVideoFeed(...args);
   const renderListShell = (...args) => context.renderListShell(...args);
   const appendListVideos = (...args) => context.appendListVideos?.(...args);
@@ -60,7 +62,8 @@ export function createShortVideoListController(context = {}) {
     const append = Boolean(options.append);
     const preserveShell = Boolean(options.preserveShell && !append);
     if (append && (listState.loading || listState.loadingMore || !listState.data?.hasMore)) return;
-    const requestGeneration = ++listRequestGeneration;
+    const requestGeneration = append ? listRequestGeneration : ++listRequestGeneration;
+    const appendRequestId = append ? ++listAppendRequestId : 0;
     const requestUrl = getActiveUrl();
     const params = new URLSearchParams();
     const authorIndex = isAuthorIndexView();
@@ -99,6 +102,7 @@ export function createShortVideoListController(context = {}) {
     const requestPath = `${endpoint}?${params}`;
     const requestScope = listScopeKey(requestUrl);
     const isCurrentRequest = () => requestGeneration === listRequestGeneration
+      && (!append || appendRequestId === listAppendRequestId)
       && requestScope === listScopeKey(getActiveUrl())
       && (!renderGuard || renderGuard());
     try {
@@ -124,15 +128,19 @@ export function createShortVideoListController(context = {}) {
             revalidation: null
           };
       const data = primaryResult.data;
-      if (!isCurrentRequest()) return;
-      applyLoadedListData(data, { append, authorIndex, appendedVideos });
+      const revalidationContext = primaryResult.revalidation
+        ? captureListRevalidationContext(data, authorIndex)
+        : null;
       if (primaryResult.revalidation) {
         primaryResult.revalidation.then((freshData) => {
           if (!isCurrentRequest()) return;
-          const renderMode = applyRevalidatedListData(freshData, authorIndex);
+          const renderMode = applyRevalidatedListData(freshData, authorIndex, revalidationContext);
           if (renderMode === "full") renderListShell();
         }).catch(() => {});
       }
+      if (!isCurrentRequest()) return;
+      applyLoadedListData(data, { append, authorIndex, appendedVideos });
+      if (append) listAppendRevision += 1;
       relatedAuthorsRequest.then((relatedAuthors) => {
         if (!relatedAuthors || !isCurrentRequest()) return;
         const authors = Array.isArray(relatedAuthors.authors) ? relatedAuthors.authors : [];
@@ -156,21 +164,24 @@ export function createShortVideoListController(context = {}) {
     }
   }
 
-  function applyRevalidatedListData(data, authorIndex) {
+  function applyRevalidatedListData(data, authorIndex, context = {}) {
+    if (authorIndex) {
+      replaceWithRevalidatedList(data, true, context);
+      return "full";
+    }
     const previousVideos = listState.data?.videos;
     const nextVideos = data?.videos;
-    if (authorIndex || !Array.isArray(previousVideos) || !Array.isArray(nextVideos)
-      || previousVideos.length !== nextVideos.length) {
-      applyLoadedListData(data, { append: false, authorIndex, appendedVideos: [] });
+    if (!Array.isArray(previousVideos) || !Array.isArray(nextVideos)
+      || listEnvelopeSignature(data, false) !== context.envelope
+      || JSON.stringify(nextVideos.map(revalidationVideoId)) !== context.ids
+      || JSON.stringify(nextVideos.map(videoContent)) !== context.content) {
+      replaceWithRevalidatedList(data, false, context);
       return "full";
     }
-    const nextById = new Map(nextVideos.map((video) => [String(video?.id || ""), video]));
-    if (previousVideos.some((video) => !sameVideoContent(video, nextById.get(String(video?.id || ""))))) {
-      applyLoadedListData(data, { append: false, authorIndex, appendedVideos: [] });
-      return "full";
-    }
-    for (const video of previousVideos) {
-      const fresh = nextById.get(String(video?.id || ""));
+    const currentById = new Map(previousVideos.map((video) => [revalidationVideoId(video), video]));
+    for (const fresh of nextVideos) {
+      const video = currentById.get(revalidationVideoId(fresh));
+      if (!video) continue;
       const actionsChanged = JSON.stringify(video.actions || {}) !== JSON.stringify(fresh.actions || {});
       const statsChanged = JSON.stringify(video.stats || {}) !== JSON.stringify(fresh.stats || {});
       if (!actionsChanged && !statsChanged) continue;
@@ -178,18 +189,78 @@ export function createShortVideoListController(context = {}) {
       video.stats = fresh.stats && typeof fresh.stats === "object" ? { ...fresh.stats } : {};
       refreshVideoCards(video);
     }
-    Object.assign(listState.data, data, { videos: previousVideos });
-    listState.loading = false;
-    listState.loadingMore = false;
-    listState.status = data.total ? "" : "还没有短视频。";
     return "targeted";
   }
 
-  function sameVideoContent(previous, next) {
-    if (!previous || !next || String(previous.id || "") !== String(next.id || "")) return false;
-    const { actions: _previousActions, stats: _previousStats, ...previousContent } = previous;
-    const { actions: _nextActions, stats: _nextStats, ...nextContent } = next;
-    return JSON.stringify(previousContent) === JSON.stringify(nextContent);
+  function captureListRevalidationContext(data, authorIndex) {
+    const entries = authorIndex ? data?.authors : data?.videos;
+    return {
+      appendRevision: listAppendRevision,
+      baseCount: Array.isArray(entries) ? entries.length : 0,
+      envelope: listEnvelopeSignature(data, authorIndex),
+      ids: authorIndex ? "[]" : JSON.stringify((entries || []).map(revalidationVideoId)),
+      content: authorIndex ? "[]" : JSON.stringify((entries || []).map(videoContent))
+    };
+  }
+
+  function replaceWithRevalidatedList(data, authorIndex, context = {}) {
+    const appendAdvanced = listAppendRevision !== context.appendRevision;
+    const currentData = listState.data && typeof listState.data === "object" ? listState.data : {};
+    let nextData = data;
+    if (appendAdvanced && authorIndex) {
+      const tail = (currentData.authors || []).slice(Math.max(0, Number(context.baseCount || 0)));
+      const merged = mergeUniqueEntries(data?.authors, tail, shortVideoAuthorFilterValue);
+      nextData = { ...data, ...currentData, authors: merged, offset: 0 };
+    } else if (appendAdvanced) {
+      const tail = (currentData.videos || []).slice(Math.max(0, Number(context.baseCount || 0)));
+      const merged = mergeUniqueEntries(data?.videos, tail, revalidationVideoId);
+      nextData = { ...data, ...currentData, videos: merged, offset: 0, limit: merged.length };
+    }
+    listState.data = nextData;
+    if (!authorIndex) listState.source = normalizeSource(nextData.source || listState.source);
+    listState.loading = false;
+    const finalEntries = authorIndex ? nextData?.authors : nextData?.videos;
+    const hasResults = Number(nextData?.total || 0) > 0 || Boolean(finalEntries?.length);
+    listState.status = hasResults ? "" : authorIndex
+      ? listState.source === "following" && listState.authorFilter === "unliked"
+        ? "没有未点赞的关注账号。"
+        : listState.source === "following"
+          ? "还没有关注账号。"
+          : listState.authorAccountStatus === "banned"
+            ? "没有已封禁的作者。"
+            : "还没有作者数据。"
+      : "还没有短视频。";
+  }
+
+  function mergeUniqueEntries(primary = [], tail = [], keyOf = () => "") {
+    const merged = [];
+    const seen = new Set();
+    for (const entry of [...(primary || []), ...(tail || [])]) {
+      const key = keyOf(entry);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(entry);
+    }
+    return merged;
+  }
+
+  function listEnvelopeSignature(data, authorIndex) {
+    if (!data || typeof data !== "object") return "null";
+    if (authorIndex) {
+      const { authors: _authors, ...envelope } = data;
+      return JSON.stringify(envelope);
+    }
+    const { videos: _videos, ...envelope } = data;
+    return JSON.stringify(envelope);
+  }
+
+  function revalidationVideoId(video) {
+    return String(video?.id || "");
+  }
+
+  function videoContent(video = {}) {
+    const { actions: _actions, stats: _stats, ...content } = video;
+    return content;
   }
 
   function applyLoadedListData(data, { append, authorIndex, appendedVideos }) {

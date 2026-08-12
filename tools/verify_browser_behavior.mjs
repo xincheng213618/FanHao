@@ -820,10 +820,11 @@ async function verifyAndroidRestartActionConvergence(browser) {
   try {
     await page.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
     await page.evaluate(async () => {
-      const [{ createShortVideoViews }, cache, { createShortVideoApi }] = await Promise.all([
+      const [{ createShortVideoViews }, cache, { createShortVideoApi }, { createShortVideoListController }] = await Promise.all([
         import("/android-client/modules/short-videos/index.js?restart-action-fixture=1"),
         import("/android-client/js/cache.js?v=20260812-action-restart-sync-01"),
-        import("/android-client/modules/short-videos/api.js?restart-action-fixture=1")
+        import("/android-client/modules/short-videos/api.js?restart-action-fixture=2"),
+        import("/android-client/modules/short-videos/list/controller.js?restart-action-fixture=2")
       ]);
       await cache.clearCachedData();
       const host = document.getElementById("fixture");
@@ -920,6 +921,186 @@ async function verifyAndroidRestartActionConvergence(browser) {
         }
       };
 
+      const deferred = () => {
+        let resolve;
+        let reject;
+        const promise = new Promise((promiseResolve, promiseReject) => {
+          resolve = promiseResolve;
+          reject = promiseReject;
+        });
+        return { promise, reject, resolve };
+      };
+      const createControllerState = () => ({
+        allowLoadMore: false,
+        author: "all",
+        authorAccountStatus: "all",
+        authorFilter: "all",
+        authorSort: "followed",
+        data: null,
+        loading: false,
+        loadingMore: false,
+        query: "",
+        searchAuthors: [],
+        searchPage: false,
+        searchTab: "all",
+        sort: "published",
+        source: "all",
+        status: ""
+      });
+      const createControllerFixture = (api, state, observations = {}) => createShortVideoListController({
+        api,
+        appendListVideos(videos) {
+          observations.appended = [...(observations.appended || []), ...videos.map((item) => item.id)];
+        },
+        getActiveUrl: () => active.value,
+        listState: state,
+        openNativeShortVideoFeed: async () => false,
+        refreshVideoCards(item) {
+          observations.refreshed = [...(observations.refreshed || []), item.id];
+        },
+        renderListShell() {
+          observations.renders = Number(observations.renders || 0) + 1;
+        },
+        setListLoadingMore() {},
+        setListRefreshing() {},
+        shortVideoToast() {},
+        showView() {}
+      });
+      const controllerFeed = (videos, overrides = {}) => ({
+        authors: [],
+        hasMore: false,
+        limit: 12,
+        offset: 0,
+        source: "all",
+        sort: "published",
+        total: videos.length,
+        videos,
+        ...overrides
+      });
+
+      const appendFresh = deferred();
+      const appendPage = deferred();
+      const appendState = createControllerState();
+      const appendObservations = {};
+      const appendController = createControllerFixture({
+        async fetchCached(_base, requestPath) {
+          const offset = new URL(requestPath, location.href).searchParams.get("offset");
+          if (offset !== "2") throw new Error(`unexpected append fixture path: ${requestPath}`);
+          return appendPage.promise;
+        },
+        async fetchCachedRevalidated() {
+          return {
+            data: controllerFeed([
+              video("append-a", false, false),
+              video("append-b", false, false)
+            ], { hasMore: true, total: 3 }),
+            revalidation: appendFresh.promise
+          };
+        }
+      }, appendState, appendObservations);
+      await appendController.loadList();
+      const appendRequest = appendController.loadList(null, { append: true });
+      appendPage.resolve(controllerFeed([video("append-c", false, false)], {
+        hasMore: false,
+        offset: 2,
+        total: 3
+      }));
+      await appendRequest;
+      const appendRenderBeforeFresh = appendObservations.renders;
+      appendFresh.resolve(controllerFeed([
+        video("append-b", false, false),
+        video("append-a", true, true)
+      ], { hasMore: true, total: 0 }));
+      await waitFor(
+        () => appendState.data?.videos?.find((item) => item.id === "append-a")?.actions?.liked,
+        "initial cached revalidation did not converge after append"
+      );
+      const appendConvergence = {
+        freshRendered: appendObservations.renders > appendRenderBeforeFresh,
+        hasMore: appendState.data?.hasMore,
+        ids: (appendState.data?.videos || []).map((item) => item.id),
+        liked: appendState.data?.videos?.find((item) => item.id === "append-a")?.actions?.liked,
+        loadingMore: appendState.loadingMore,
+        status: appendState.status,
+        total: appendState.data?.total
+      };
+
+      const envelopeFresh = deferred();
+      const envelopeState = createControllerState();
+      const envelopeObservations = {};
+      const envelopeController = createControllerFixture({
+        async fetchCached() {
+          throw new Error("envelope fixture must not append");
+        },
+        async fetchCachedRevalidated() {
+          return {
+            data: controllerFeed([video("envelope-a", false, false)], { hasMore: false, total: 1 }),
+            revalidation: envelopeFresh.promise
+          };
+        }
+      }, envelopeState, envelopeObservations);
+      await envelopeController.loadList();
+      const envelopeRenderBeforeFresh = envelopeObservations.renders;
+      envelopeFresh.resolve(controllerFeed([video("envelope-a", false, false)], { hasMore: true, total: 2 }));
+      await waitFor(() => envelopeState.data?.total === 2, "fresh pagination envelope did not replace the cached list state");
+      const envelopeConvergence = {
+        freshRendered: envelopeObservations.renders > envelopeRenderBeforeFresh,
+        hasMore: envelopeState.data?.hasMore,
+        total: envelopeState.data?.total
+      };
+
+      const staleFresh = deferred();
+      const staleState = createControllerState();
+      const staleObservations = {};
+      const staleController = createControllerFixture({
+        async fetchCachedRevalidated() {
+          return {
+            data: controllerFeed([video("stale-guard", false, false)]),
+            revalidation: staleFresh.promise
+          };
+        }
+      }, staleState, staleObservations);
+      const staleUnhandled = [];
+      const onStaleUnhandled = (event) => {
+        staleUnhandled.push(String(event.reason?.message || event.reason || "unknown"));
+        event.preventDefault();
+      };
+      window.addEventListener("unhandledrejection", onStaleUnhandled);
+      await staleController.loadList(() => false);
+      staleFresh.reject(new Error("stale guard fixture rejection"));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      window.removeEventListener("unhandledrejection", onStaleUnhandled);
+
+      const observeTransaction = async (eventName, error = null) => {
+        const transaction = new EventTarget();
+        Object.defineProperty(transaction, "error", { get: () => error });
+        const outcome = cache.transactionToPromise(transaction).then(
+          () => ({ resolved: true }),
+          (reason) => ({ name: String(reason?.name || "Error"), resolved: false })
+        );
+        transaction.dispatchEvent(new Event(eventName));
+        return outcome;
+      };
+      const transactionCompletion = await observeTransaction("complete");
+      const transactionAbort = await observeTransaction("abort", new DOMException("fixture abort", "AbortError"));
+      const transactionError = await observeTransaction("error", new DOMException("fixture error", "UnknownError"));
+
+      const quotaQuery = "quota-write";
+      const quotaPath = pathFor(quotaQuery);
+      payloads.set(`${active.value}${quotaPath}`, feed(video("quota-video", true, true)));
+      networkMode = "immediate";
+      const quotaApi = createShortVideoApi({
+        getActiveUrl: () => active.value,
+        async writeResponseCache() {
+          throw new DOMException("fixture quota", "QuotaExceededError");
+        }
+      });
+      const quotaResult = await quotaApi.fetchCachedRevalidated(active.value, quotaPath, { timeoutMs: 16000 });
+      const quotaNetworkData = {
+        fromCache: quotaResult.fromCache,
+        liked: quotaResult.data?.videos?.[0]?.actions?.liked
+      };
+
       const restartQuery = "restart-action";
       const restartPath = pathFor(restartQuery);
       const cachedRestart = feed(video("restart-video", false, false));
@@ -1001,8 +1182,10 @@ async function verifyAndroidRestartActionConvergence(browser) {
       const afterFence = await directApi.fetchCachedRevalidated(active.value, latePath, { timeoutMs: 16000 });
 
       window.androidRestartActionFixture = {
+        appendConvergence,
         cachedState,
         afterRelatedAuthorsState,
+        envelopeConvergence,
         emptyAfterClear: emptyAfterClear === null,
         emptyAfterLateWrite: emptyAfterLateWrite === null,
         exactSearch: exact.pathname + exact.search,
@@ -1012,7 +1195,12 @@ async function verifyAndroidRestartActionConvergence(browser) {
         offlineCachedState,
         offlineRetriedState,
         originState,
+        quotaNetworkData,
         requestCount: requests.length,
+        staleUnhandled,
+        transactionAbort,
+        transactionCompletion,
+        transactionError,
         targetedStable
       };
     });
@@ -1037,6 +1225,28 @@ async function verifyAndroidRestartActionConvergence(browser) {
     assert.equal(metrics.emptyAfterClear, true, "cache invalidation must remove the matching persisted response before returning");
     assert.equal(metrics.emptyAfterLateWrite, true, "a pre-invalidation refresh/touch must not resurrect its response after clear completes");
     assert.equal(metrics.freshWriteAfterFence, true, "a post-invalidation request must use a new generation instead of deduplicating onto the rejected old refresh");
+    assert.deepEqual(metrics.appendConvergence, {
+      freshRendered: true,
+      hasMore: false,
+      ids: ["append-b", "append-a", "append-c"],
+      liked: true,
+      loadingMore: false,
+      status: "",
+      total: 3
+    }, "initial revalidation must converge fresh actions/order without dropping a successful append or regressing its pagination envelope");
+    assert.deepEqual(metrics.envelopeConvergence, {
+      freshRendered: true,
+      hasMore: true,
+      total: 2
+    }, "fresh pagination fields must replace the cached envelope and trigger a full render even when IDs are unchanged");
+    assert.deepEqual(metrics.quotaNetworkData, {
+      fromCache: false,
+      liked: true
+    }, "best-effort IndexedDB write failures must not reject successful server data");
+    assert.deepEqual(metrics.staleUnhandled, [], "stale render guards must still install a rejection handler on live revalidation");
+    assert.deepEqual(metrics.transactionCompletion, { resolved: true }, "cache transactions must resolve only from their completion event");
+    assert.deepEqual(metrics.transactionAbort, { name: "AbortError", resolved: false }, "cache transaction aborts must reject with their transaction error");
+    assert.deepEqual(metrics.transactionError, { name: "UnknownError", resolved: false }, "cache transaction errors must reject with their transaction error");
   } finally {
     await page.close();
   }
