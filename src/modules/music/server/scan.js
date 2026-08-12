@@ -79,6 +79,10 @@ export function loadManagedMusicCatalogs(scanRoots = []) {
 
 export function scanMusicRoots(scanRoots, options = {}) {
   const ffprobePath = options.ffprobePath || "ffprobe";
+  const ffprobeTimeoutMs = Number.isFinite(Number(options.ffprobeTimeoutMs))
+    ? Math.max(1, Math.trunc(Number(options.ffprobeTimeoutMs)))
+    : 12000;
+  const ffprobeArgsPrefix = Array.isArray(options.ffprobeArgsPrefix) ? options.ffprobeArgsPrefix.map(String) : [];
   const limit = Number(options.limit || 0);
   const catalogMetadata = loadManagedMusicCatalogs(scanRoots);
   const files = [];
@@ -123,7 +127,7 @@ export function scanMusicRoots(scanRoots, options = {}) {
     const albumFolder = parts.length > 2 ? parts[parts.length - 2] : "单曲";
     const albumDir = path.dirname(filePath);
     const managed = catalogMetadata.get(normalizedPathKey(filePath));
-    const probe = managed?.probe || probeAudio(filePath, ffprobePath);
+    const probe = managed?.probe || probeAudio(filePath, ffprobePath, ffprobeTimeoutMs, ffprobeArgsPrefix);
     const fileStem = path.basename(filePath, path.extname(filePath));
     const parsedName = parseTrackName(fileStem);
     const identity = resolveMusicTrackIdentity({
@@ -262,8 +266,9 @@ export function scanMusicRoots(scanRoots, options = {}) {
 }
 
 
-export function writeScanRecords(db, records, scanRoots, scannedAt) {
-  db.exec("BEGIN IMMEDIATE");
+export function writeScanRecords(db, records, scanRoots, scannedAt, options = {}) {
+  const manageTransaction = options.manageTransaction !== false;
+  if (manageTransaction) db.exec("BEGIN IMMEDIATE");
   try {
     db.prepare("DELETE FROM music_search").run();
     db.prepare("DELETE FROM music_search_short").run();
@@ -399,13 +404,17 @@ export function writeScanRecords(db, records, scanRoots, scannedAt) {
       longform: records.tracks.filter((track) => Number(track.durationMs || 0) >= 300000).length
     }));
     db.prepare("DELETE FROM music_playlist_items WHERE track_id NOT IN (SELECT id FROM music_tracks)").run();
-    db.exec("COMMIT");
-    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    if (manageTransaction) {
+      db.exec("COMMIT");
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    }
     MUSIC_FACET_CACHE.delete(db);
   } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
+    if (manageTransaction) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {}
+    }
     throw error;
   }
 }
@@ -430,7 +439,7 @@ export function scanSummary(records, scanRoots, dryRun) {
 }
 
 
-export function probeAudio(filePath, ffprobePath) {
+export function probeAudio(filePath, ffprobePath, timeoutMs = 12000, argsPrefix = []) {
   const result = {
     title: "",
     artist: "",
@@ -450,6 +459,7 @@ export function probeAudio(filePath, ffprobePath) {
     const probe = spawnSync(
       ffprobePath,
       [
+        ...(Array.isArray(argsPrefix) ? argsPrefix.map(String) : []),
         "-v",
         "error",
         "-show_entries",
@@ -460,7 +470,7 @@ export function probeAudio(filePath, ffprobePath) {
         "json",
         filePath
       ],
-      { encoding: "utf8", windowsHide: true, timeout: 12000, maxBuffer: 1024 * 1024 }
+      { encoding: "utf8", windowsHide: true, timeout: Math.max(1, Number(timeoutMs) || 12000), maxBuffer: 1024 * 1024 }
     );
     if (probe.error) {
       result.error = probe.error.message || String(probe.error);

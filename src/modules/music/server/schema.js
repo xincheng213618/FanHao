@@ -6,10 +6,9 @@ import {
   MUSIC_PHONETIC_INDEX_VERSION
 } from "./search.js";
 
-export function ensureSchema(db) {
+export function ensureSchema(db, options = {}) {
+  if (options.configureConnection !== false) configureMusicDatabase(db, options);
   db.exec(`
-    PRAGMA busy_timeout = 5000;
-    PRAGMA journal_mode = WAL;
     CREATE TABLE IF NOT EXISTS music_meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -169,6 +168,20 @@ export function ensureSchema(db) {
   backfillMusicLanguages(db);
   ensureMusicShortSearchIndex(db);
   ensureMusicPhoneticSearchIndex(db);
+}
+
+export function configureMusicDatabase(db, options = {}) {
+  const busyTimeoutMs = clampBusyTimeout(options.busyTimeoutMs);
+  db.exec(`
+    PRAGMA busy_timeout = ${busyTimeoutMs};
+    PRAGMA journal_mode = WAL;
+  `);
+}
+
+function clampBusyTimeout(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 5000;
+  return Math.min(120_000, Math.max(0, Math.trunc(number)));
 }
 
 

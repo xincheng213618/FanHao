@@ -13,9 +13,10 @@ export function createMusicRuntime({
   readJsonBody,
   requireLocalAdmin,
   roots,
-  sendJson
+  sendJson,
+  scanWorkerOptions = {}
 }) {
-  const store = createMusicStore({ dbPath, ffprobePath, roots });
+  const store = createMusicStore({ dbPath, ffprobePath, roots, ...scanWorkerOptions });
 
   async function routeApi(req, res, url) {
     return routeMusicApi(req, res, url, {
@@ -70,10 +71,20 @@ export function createMusicRuntime({
     store.invalidate();
   }
 
+  function start() {
+    return store.start();
+  }
+
+  function stop() {
+    return store.stop();
+  }
+
   return {
     invalidate,
     routeApi,
     routeMedia,
+    start,
+    stop,
     store
   };
 }

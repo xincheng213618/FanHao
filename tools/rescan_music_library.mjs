@@ -43,7 +43,7 @@ Scans local audio files into FanHao's standalone music.sqlite database.
 Audio sidecars supported: album images, album intro .txt, same-name .lrc lyrics.`);
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     printHelp();
@@ -56,12 +56,12 @@ function main() {
     roots
   });
   try {
-    const result = store.scan({ roots, limit: args.limit, dryRun: args.dryRun });
+    const result = await store.scan({ roots, limit: args.limit, dryRun: args.dryRun });
     console.log(JSON.stringify(result, null, 2));
     return 0;
   } finally {
-    store.invalidate();
+    await store.stop();
   }
 }
 
-process.exitCode = main();
+process.exitCode = await main();

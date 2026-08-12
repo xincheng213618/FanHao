@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import {
   MUSIC_LANGUAGES,
@@ -37,7 +36,8 @@ import { adjacentTracks, lyricsForTrack, publicAlbum, publicArtist, publicPlayli
 import { albumFacet, artistFacet, cachedMusicFacet, genreFacet, languageFacet, smartMixCount } from "./facets.js";
 import { catalogFilter } from "./query.js";
 import { listLyricMatches } from "./lyrics-search.js";
-import { normalizeRoots, rootStatus, safeStoredFile, scanMusicRoots, scanSummary, writeScanRecords } from "./scan.js";
+import { normalizeRoots, rootStatus, safeStoredFile } from "./scan.js";
+import { createMusicScanService } from "./scan-service.js";
 import { ensureSchema } from "./schema.js";
 import { artistNameForSort, buildLetterCondition, clampInt, escapeLike, hashText, httpError, metaValue, normalizeAlbumSort, normalizeTrackSort, trackOrderSql } from "./helpers.js";
 
@@ -46,6 +46,20 @@ export function createMusicStore(options = {}) {
   const roots = normalizeRoots(options.roots || []);
   const ffprobePath = options.ffprobePath || "ffprobe";
   if (!dbPath) throw new Error("music dbPath is required");
+  const scanService = createMusicScanService({
+    dbPath,
+    roots,
+    ffprobePath,
+    ffprobeTimeoutMs: options.ffprobeTimeoutMs,
+    ffprobeArgsPrefix: options.ffprobeArgsPrefix,
+    busyTimeoutMs: options.busyTimeoutMs,
+    scanWorker: options.scanWorker,
+    scanWorkerFactory: options.scanWorkerFactory,
+    scanWorkerUrl: options.scanWorkerUrl,
+    scanWorkerReadyTimeoutMs: options.scanWorkerReadyTimeoutMs,
+    scanWorkerData: options.scanWorkerData,
+    onPublished: invalidate
+  });
 
   let db = null;
   let summaryCache = null;
@@ -1074,21 +1088,6 @@ export function createMusicStore(options = {}) {
     return safeStoredFile(row.cover_path, "image", row.id);
   }
 
-  function scan(input = {}) {
-    const scanRoots = normalizeRoots(input.root ? [input.root] : input.roots?.length ? input.roots : roots);
-    const limit = clampInt(input.limit, 0, 0, Number.MAX_SAFE_INTEGER);
-    const dryRun = Boolean(input.dryRun || input.dry_run);
-    if (!scanRoots.length) throw httpError(400, "没有配置音乐目录");
-    const records = scanMusicRoots(scanRoots, { ffprobePath, limit });
-    const result = scanSummary(records, scanRoots, dryRun);
-    if (!dryRun) {
-      writeScanRecords(dbOrOpen(), records, scanRoots, result.scannedAt);
-      summaryCache = null;
-      summaryCachedAt = 0;
-    }
-    return result;
-  }
-
   function dbOrOpen() {
     return database();
   }
@@ -1117,8 +1116,11 @@ export function createMusicStore(options = {}) {
     reorderPlaylist,
     removeFromPlaylist,
     saveProgress,
-    scan,
+    scan: scanService.scan,
+    scanDiagnostics: scanService.diagnostics,
     smartPlaylistDetail,
+    start: scanService.start,
+    stop: scanService.stop,
     setRating,
     summary,
     toggleFavorite,

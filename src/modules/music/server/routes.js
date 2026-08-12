@@ -149,7 +149,7 @@ export async function routeMusicApi(req, res, url, deps) {
     if (!requireLocalAdmin(req, res)) return true;
     try {
       const body = await readJsonBody(req);
-      sendJson(res, 200, musicStore.scan(body || {}));
+      sendJson(res, 200, await musicStore.scan(body || {}));
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "音乐目录扫描失败" });
     }
