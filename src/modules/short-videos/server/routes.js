@@ -118,7 +118,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
     try {
       sendJson(res, 200, shortVideoStore.listCollections());
     } catch (error) {
-      sendShortVideoPublicError(res, sendJson, error, "短视频清单读取失败");
+      sendShortVideoPublicError(res, sendJson, error, "短视频清单读取失败", { includeRetryable: true });
     }
     return true;
   }
@@ -131,7 +131,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
       onMutation?.();
       sendJson(res, 201, result);
     } catch (error) {
-      sendShortVideoPublicError(res, sendJson, error, "短视频清单创建失败");
+      sendShortVideoPublicError(res, sendJson, error, "短视频清单创建失败", { includeRetryable: true });
     }
     return true;
   }
@@ -145,7 +145,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
       onMutation?.();
       sendJson(res, 200, result);
     } catch (error) {
-      sendShortVideoPublicError(res, sendJson, error, "短视频清单重命名失败");
+      sendShortVideoPublicError(res, sendJson, error, "短视频清单重命名失败", { includeRetryable: true });
     }
     return true;
   }
@@ -157,7 +157,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
       onMutation?.();
       sendJson(res, 200, result);
     } catch (error) {
-      sendShortVideoPublicError(res, sendJson, error, "短视频清单删除失败");
+      sendShortVideoPublicError(res, sendJson, error, "短视频清单删除失败", { includeRetryable: true });
     }
     return true;
   }
@@ -170,7 +170,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
         url
       ));
     } catch (error) {
-      sendShortVideoPublicError(res, sendJson, error, "短视频清单内容读取失败");
+      sendShortVideoPublicError(res, sendJson, error, "短视频清单内容读取失败", { includeRetryable: true });
     }
     return true;
   }
@@ -183,7 +183,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
         decodeShortVideoRouteId(collectionVideoMatch[2])
       ));
     } catch (error) {
-      sendShortVideoPublicError(res, sendJson, error, "短视频清单详情读取失败");
+      sendShortVideoPublicError(res, sendJson, error, "短视频清单详情读取失败", { includeRetryable: true });
     }
     return true;
   }
@@ -199,7 +199,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
       onMutation?.();
       sendJson(res, 200, result);
     } catch (error) {
-      sendShortVideoPublicError(res, sendJson, error, "短视频清单内容保存失败");
+      sendShortVideoPublicError(res, sendJson, error, "短视频清单内容保存失败", { includeRetryable: true });
     }
     return true;
   }

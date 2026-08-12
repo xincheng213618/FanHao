@@ -55,6 +55,7 @@ function recommendedWorkerError(cause) {
   error.code = "SHORT_VIDEO_CATALOG_UNAVAILABLE";
   error.statusCode = 503;
   error.retryable = true;
+  error.expose = true;
   error.cause = cause;
   return error;
 }

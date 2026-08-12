@@ -29,7 +29,7 @@ export function sendShortVideoPublicError(res, sendJson, error, fallback, option
   const exposeDetails = result.status < 500 || error?.expose === true;
   sendJson(res, result.status, {
     error: result.message,
-    ...(result.status === 503 && error?.retryable === true ? { retryable: true } : {}),
+    ...(options.includeRetryable && result.status === 503 && error?.retryable === true ? { retryable: true } : {}),
     ...(options.includeDetails && exposeDetails && error?.details ? { details: error.details } : {})
   });
 }
