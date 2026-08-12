@@ -90,6 +90,7 @@ assert.ok(clientSource.includes('overview.className = "novel-management-overview
 assert.ok(clientStyles.includes(".novel-collection-task-list-section.active .novel-collection-task-list-rows"), "active task queues must stay height-bounded");
 assert.ok(clientSource.includes('shell.className = "novel-management-console"'), "novel management must use a dedicated console shell");
 assert.ok(clientSource.includes("shell.append(sidebar, main)"), "management navigation must stay left of the independently scrolling content pane");
+assert.ok(!clientSource.includes('document.createElement("main")'), "novel views must not nest a main landmark inside the shared application main");
 assert.ok(clientSource.includes('nav.setAttribute("aria-label", "小说管理功能")'), "novel management must expose accessible primary navigation");
 assert.ok(clientSource.includes('["upload", "01", "书库上传"') && clientSource.includes('["collect", "02", "采集任务"') && clientSource.includes('["config", "03", "站点配置"'), "management navigation must separate upload, collection, and configuration");
 assert.ok(clientStyles.includes("grid-template-columns: 238px minmax(0, 1fr)"), "desktop management must keep fixed navigation left and flexible content right");

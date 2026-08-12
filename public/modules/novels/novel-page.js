@@ -847,7 +847,7 @@ export function createNovelPage(deps) {
     sidebarStatus.append(sidebarStatusLabel, sidebarStatusValue, sidebarStatusTime);
     sidebar.append(brand, nav, sidebarStatus);
 
-    const main = document.createElement("main");
+    const main = document.createElement("section");
     main.className = "novel-management-main";
     if (state.novel.manageSection === "upload") {
       const header = document.createElement("header");

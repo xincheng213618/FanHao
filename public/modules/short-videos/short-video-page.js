@@ -1099,7 +1099,7 @@ export function createShortVideoPage(deps) {
     shell.classList.toggle("is-author-page", isShortVideoAuthorDetailPage());
     const layout = document.createElement("div");
     layout.className = "short-video-home-layout";
-    const content = document.createElement("main");
+    const content = document.createElement("section");
     content.className = "short-video-home-main";
     layout.append(collectionsController.renderSidebar(), content);
     shell.append(layout);
@@ -1573,7 +1573,6 @@ export function createShortVideoPage(deps) {
     toolbar.className = "short-video-home-toolbar";
     const tabs = document.createElement("div");
     tabs.className = "short-video-source-tabs";
-    tabs.setAttribute("role", "tablist");
     const activeSource = isShortVideoAuthorDetailPage()
       ? state.shortVideo.authorIndexSource
       : (state.shortVideo.source || "liked");

@@ -315,7 +315,7 @@ export function createShortVideoCollectionsController(dependencies) {
     shell.className = "short-video-home short-video-collection-page";
     const layout = document.createElement("div");
     layout.className = "short-video-home-layout";
-    const main = document.createElement("main");
+    const main = document.createElement("section");
     main.className = "short-video-home-main";
     layout.append(renderSidebar(), main);
     shell.append(layout);
