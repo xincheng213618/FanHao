@@ -2,18 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import {
-  MUSIC_LANGUAGES,
-  buildArtistLanguageConsensus,
-  musicLanguageForArtist,
-  musicLanguageFromPath,
-  normalizeMusicLanguage
-} from "./language.js";
-import {
-  buildMusicIdentityKnowledge,
-  isUnknownMusicArtist,
-  resolveMusicTrackIdentity
-} from "./identity.js";
+import { MUSIC_LANGUAGES, buildArtistLanguageConsensus, musicLanguageForArtist, musicLanguageFromPath, normalizeMusicLanguage } from "./language.js";
+import { buildMusicIdentityKnowledge, isUnknownMusicArtist, resolveMusicTrackIdentity } from "./identity.js";
 
 import { DEFAULT_LIMIT, MAX_LIMIT, MAX_PAGE_LIMIT } from "./constants.js";
 import { SMART_MIXES, findSmartMix, smartMixCondition } from "./smart-mix.js";
@@ -39,7 +29,7 @@ import { listLyricMatches } from "./lyrics-search.js";
 import { normalizeRoots, rootStatus, safeStoredFile } from "./scan.js";
 import { createMusicScanService } from "./scan-service.js";
 import { ensureSchema } from "./schema.js";
-import { runMusicWriteTransaction } from "./write-transaction.js";
+import { isMusicDatabaseBusyError, musicSchemaBusyError, runMusicWriteTransaction } from "./write-transaction.js";
 import { artistNameForSort, buildLetterCondition, clampInt, escapeLike, hashText, httpError, metaValue, normalizeAlbumSort, normalizeTrackSort, trackOrderSql } from "./helpers.js";
 
 export function createMusicStore(options = {}) {
@@ -63,14 +53,26 @@ export function createMusicStore(options = {}) {
   });
 
   let db = null;
+  let schemaReady = false;
   let summaryCache = null;
   let summaryCachedAt = 0;
 
   function database() {
     if (!db) {
       fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-      db = new DatabaseSync(dbPath);
-      ensureSchema(db, { busyTimeoutMs: 0 });
+      const nextDb = new DatabaseSync(dbPath);
+      try {
+        if (!schemaReady) {
+          ensureSchema(nextDb, { busyTimeoutMs: options.schemaBusyTimeoutMs ?? 5000 });
+          schemaReady = true;
+        }
+        nextDb.exec("PRAGMA busy_timeout = 0");
+        db = nextDb;
+      } catch (error) {
+        try { nextDb.close(); } catch {}
+        if (isMusicDatabaseBusyError(error)) throw musicSchemaBusyError(error);
+        throw error;
+      }
     }
     return db;
   }

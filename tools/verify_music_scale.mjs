@@ -365,6 +365,7 @@ try {
     "music-page.js",
     "actions.js",
     "api.js",
+    "music-progress-writer.js",
     "constants.js",
     "format.js",
     "player/engine.js",
@@ -414,6 +415,7 @@ try {
     .join("\n");
   const webPageSource = musicClientSources["music-page.js"];
   const webActionsSource = musicClientSources["actions.js"];
+  const webProgressWriterSource = musicClientSources["music-progress-writer.js"];
   const webPlayerSource = musicClientSources["player/engine.js"];
   const webConstantsSource = musicClientSources["constants.js"];
   const webFormatSource = musicClientSources["format.js"];
@@ -431,8 +433,8 @@ try {
   assert.match(webActionsSource, /const generation = \+\+trackOpenGeneration;\s*trackOpenController\?\.abort\(\);/, "a newer track request should cancel the previous request");
   assert.match(webActionsSource, /api\.getTrack\(trackId, musicListParams\(\), controller\.signal\)/, "track detail requests should be abortable");
   assert.match(webActionsSource, /controller\.signal\.aborted \|\| generation !== trackOpenGeneration/, "stale track responses must not replace the latest selection");
-  assert.match(webActionsSource, /pendingProgressRecords\.set\(record\.trackId, record\)[\s\S]*?if \(progressTimer\) return;/, "time updates should coalesce one pending progress snapshot per track");
-  assert.match(webActionsSource, /api\.setProgress\(record\.trackId[\s\S]*?played: true[\s\S]*?isRetryableMusicWriteError/, "played progress must stay bound to the captured track and only retry explicit write-busy responses");
+  assert.match(webActionsSource, /const progressWriter = createMusicProgressWriter\(\{[\s\S]*?api\.setProgress\(record\.trackId[\s\S]*?progressWriter\.reportPlayed\([\s\S]*?progressWriter\.save\(record/, "Web progress and played writes must use the shared per-track writer");
+  assert.match(webProgressWriterSource, /playedQueue\.push\([\s\S]*?pendingProgressVersion[\s\S]*?function nextAction\([\s\S]*?isRetryableWriteBusy\(error\)/, "Web progress writer must serialize ordered played tokens with coalesced progress");
   assert.match(webActionsSource, /view\.appendArtistPage\([\s\S]*?view\.appendAlbumPage\([\s\S]*?view\.appendLibraryTrackPage\(/, "pagination must delegate bounded DOM appends to the view");
   assert.match(webActionsSource, /!appendedInPlace && !view\.refreshMusicLibraryContent\(\)/, "completed searches must prefer a local library refresh");
   assert.match(webPageSource, /function refreshMusicLibraryContent\([\s\S]*?currentPanel\.replaceWith\(nextPanel\);\s*refreshLibrarySidebars\(\)/, "search results should replace only the central panel and sidebar facets");
@@ -692,9 +694,9 @@ try {
   assert.match(androidClient, /function restorePlaybackQueue\(renderGuard = null\)[\s\S]*?readPlaybackQueuePreference\(\)[\s\S]*?state\.queue = queue[\s\S]*?openTrack\(trackId, \{ autoplay: false, renderGuard \}\)/, "Android music should restore the saved queue and selected track without autoplay");
   assert.match(androidClient, /function restorePlaybackQueue\(renderGuard = null\) \{\s*if \(!state\.resumeQueue \|\| state\.current \|\| state\.loading\) return false;/, "Android queue restoration should work from any restored music browse or search route");
   assert.match(androidClient, /function rememberPlaybackQueue\(\)[\s\S]*?writePlaybackQueuePreference\(\{[\s\S]*?currentTrackId:[\s\S]*?queue:/, "Android music should persist the current track and a bounded playback queue");
-  assert.match(androidMusicViewSource, /createMusicProgressWriter\([\s\S]*?encodeURIComponent\(record\.trackId\)[\s\S]*?progressWriter\.save\(record, \{ delayMs: 800 \}\)/, "Android playback progress should delegate captured-track writes to its bounded writer");
-  assert.match(androidMusicProgressWriterSource, /pendingProgress\.set\(record\.trackId, record\)[\s\S]*?async function flushProgress\(\)[\s\S]*?isRetryableWriteBusy\(error\)[\s\S]*?error\?\.code === "MUSIC_WRITE_BUSY"/, "Android progress writes should coalesce by track and only retry explicit write-busy responses");
-  assert.match(androidMusicProgressWriterSource, /attemptedPlayed\.has\(reportKey\)[\s\S]*?await send\(record, true\)[\s\S]*?onPlayed\?\.\(record\)/, "Android played writes must suppress unknown-result replays and mark completion only after success");
+  assert.match(androidMusicViewSource, /const progressWriter = createMusicProgressWriter\(\{[\s\S]*?encodeURIComponent\(record\.trackId\)[\s\S]*?progressWriter\.save\(record, \{ delayMs: 800 \}\)/, "Android playback progress must call its shared per-track writer");
+  assert.match(androidMusicProgressWriterSource, /playedQueue\.push\([\s\S]*?pendingProgressVersion[\s\S]*?function nextAction\([\s\S]*?isRetryableWriteBusy\(error\)/, "Android progress writer must serialize ordered played tokens with coalesced progress");
+  assert.equal(androidMusicProgressWriterSource, webProgressWriterSource, "Web and Android progress ordering/retry semantics must remain identical");
   assert.match(androidClient, /function renderSettingsVolumeControl\(\)[\s\S]*?type = "range"[\s\S]*?setVolume/, "Android music settings should provide a persistent in-app volume control");
   assert.match(androidClient, /shuffle\.addEventListener\("click"[\s\S]*?writeShufflePreference[\s\S]*?scheduleGaplessPreload[\s\S]*?playbackBody\.append\(settingsRow\("随机播放"/, "Android music settings should expose shuffle and reconcile gapless preloading");
   assert.match(androidClient, /function fadeAudioVolume\(target, toVolume, durationMs\)[\s\S]*?requestAnimationFrame\(step\)/, "Android music fade should ramp volume instead of delaying playback with a timer");

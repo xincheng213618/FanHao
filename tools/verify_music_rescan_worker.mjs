@@ -9,13 +9,16 @@ import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { createMusicRuntime } from "../src/modules/music/server/runtime.js";
-import { createMusicProgressWriter } from "../android-client/www/modules/music/music-progress-writer.js";
+import { musicPublicError } from "../src/modules/music/server/public-errors.js";
+import { createMusicProgressWriter as createAndroidMusicProgressWriter } from "../android-client/www/modules/music/music-progress-writer.js";
+import { createMusicProgressWriter as createWebMusicProgressWriter } from "../public/modules/music/music-progress-writer.js";
 import { scanMusicRoots, scanSummary, writeScanRecords } from "../src/modules/music/server/scan.js";
 import { createMusicScanWorkerClient } from "../src/modules/music/server/scan-worker-client.js";
 import { ensureSchema } from "../src/modules/music/server/schema.js";
 import { createMusicStore } from "../src/modules/music/server/store.js";
 
 const failureWorkerUrl = new URL("./fixtures/music_scan_worker_failure.mjs", import.meta.url);
+const databaseLockWorkerUrl = new URL("./fixtures/music_database_lock.mjs", import.meta.url);
 const productionWorkerUrl = new URL("../src/modules/music/server/scan-worker.js", import.meta.url);
 const shutdownFixtureUrl = new URL("./fixtures/server_host_shutdown_rescan.mjs", import.meta.url);
 const owned = createOwnedFixtureDirectory();
@@ -27,9 +30,11 @@ try {
   await verifyAtomicFailures(fixture);
   await verifyCommittedCrashInvalidatesReaders(fixture);
   await verifyCheckpointDoesNotDelaySuccess(fixture);
+  await verifyLockedSchemaStartup(fixture);
   await verifySingleFlightAndStop(fixture);
   await verifyAllMainThreadWritesFailFast(fixture);
-  await verifyClientWriteRecovery();
+  await verifyClientWriteRecovery("Web", createWebMusicProgressWriter);
+  await verifyClientWriteRecovery("Android", createAndroidMusicProgressWriter);
   const responsiveness = await verifyHttpResponsivenessAndSnapshots(fixture);
   await verifyServerHostShutdown();
   const timing = await verifyWorkerTiming(fixture);
@@ -199,6 +204,76 @@ async function verifyCheckpointDoesNotDelaySuccess(fixture) {
   }
 }
 
+async function verifyLockedSchemaStartup(fixture) {
+  const dbPath = path.join(fixture.baseDir, "locked-incomplete-schema.sqlite");
+  seedIncompleteSchema(dbPath);
+  const lockWorker = new Worker(databaseLockWorkerUrl, { workerData: { dbPath, holdMs: 1250 } });
+  const released = waitForWorkerMessage(lockWorker, (message) => message?.type === "released");
+  const store = createMusicStore({ dbPath, roots: fixture.roots });
+  try {
+    await waitForWorkerMessage(lockWorker, (message) => message?.type === "locked");
+    const startedAt = performance.now();
+    await store.start();
+    const startupMs = performance.now() - startedAt;
+    assert.ok(startupMs >= 1000 && startupMs < 5000, `schema initialization did not use its bounded startup wait (${startupMs.toFixed(2)} ms)`);
+    await released;
+    const database = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const tables = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view')").all().map((row) => row.name));
+      for (const table of ["music_tracks", "music_track_state", "music_playlists", "music_search_phonetic"]) {
+        assert.ok(tables.has(table), `locked incomplete-schema startup did not finish ${table}`);
+      }
+    } finally {
+      database.close();
+    }
+
+    store.invalidate();
+    const runtimeLock = new DatabaseSync(dbPath);
+    runtimeLock.exec("BEGIN IMMEDIATE");
+    try {
+      const readStartedAt = performance.now();
+      assert.equal(store.summary().totals.tracks, 0);
+      assert.ok(performance.now() - readStartedAt < 75, "post-initialization connection reopen repeated the schema lock wait");
+      const mutationStartedAt = performance.now();
+      assert.throws(store.clearHistory, (error) => error.code === "MUSIC_WRITE_BUSY" && error.statusCode === 503);
+      assert.ok(performance.now() - mutationStartedAt < 75, "main connection did not return to busy_timeout=0 after schema initialization");
+    } finally {
+      runtimeLock.exec("ROLLBACK");
+      runtimeLock.close();
+    }
+  } finally {
+    await lockWorker.terminate().catch(() => undefined);
+    await store.stop();
+  }
+
+  const failureDbPath = path.join(fixture.baseDir, "locked-schema-timeout.sqlite");
+  seedIncompleteSchema(failureDbPath);
+  const failureLock = new Worker(databaseLockWorkerUrl, { workerData: { dbPath: failureDbPath, holdMs: 140 } });
+  const failureReleased = waitForWorkerMessage(failureLock, (message) => message?.type === "released");
+  const retryStore = createMusicStore({ dbPath: failureDbPath, roots: fixture.roots, schemaBusyTimeoutMs: 30 });
+  try {
+    await waitForWorkerMessage(failureLock, (message) => message?.type === "locked");
+    await assert.rejects(retryStore.start(), (error) => {
+      assert.equal(error.code, "MUSIC_SCHEMA_DATABASE_BUSY");
+      assert.equal(error.statusCode, 503);
+      assert.equal(error.retryable, true);
+      assert.doesNotMatch(error.message, /sqlite|database is locked|[A-Z]:\\/i);
+      assert.deepEqual(musicPublicError(error, "音乐数据库初始化失败"), {
+        status: 503,
+        payload: { error: error.message, code: "MUSIC_SCHEMA_DATABASE_BUSY", retryable: true },
+        log: false
+      });
+      return true;
+    });
+    await failureReleased;
+    await retryStore.start();
+    assert.equal(retryStore.summary().totals.tracks, 0, "a bounded schema lock failure must leave initialization safely retryable");
+  } finally {
+    await failureLock.terminate().catch(() => undefined);
+    await retryStore.stop();
+  }
+}
+
 async function verifySqlFailureRollsBack(fixture) {
   const dbPath = path.join(fixture.baseDir, "sql-failure.sqlite");
   seedOldSnapshot(dbPath, "future-track");
@@ -329,13 +404,60 @@ async function verifyAllMainThreadWritesFailFast(fixture) {
   }
 }
 
-async function verifyClientWriteRecovery() {
+async function verifyClientWriteRecovery(clientName, createWriter) {
+  const interleaved = createProgressWriterFixture(createWriter, ["busy", "busy", "busy", "success", "success"]);
+  const record = { activeUrl: "http://fixture", trackId: "track-1", positionMs: 10, durationMs: 100 };
+  interleaved.writer.reportPlayed({ ...record, reportKey: "busy", session: 1 });
+  await runNextFixtureTimer(interleaved.timers, 0);
+  interleaved.writer.save({ ...record, positionMs: 30 }, { delayMs: 800 });
+  interleaved.writer.reportPlayed({ ...record, reportKey: "busy", session: 1 });
+  await runNextFixtureTimer(interleaved.timers, 800);
+  await runNextFixtureTimer(interleaved.timers, 1000);
+  await runNextFixtureTimer(interleaved.timers, 1000);
+  await runNextFixtureTimer(interleaved.timers, 0);
+  assert.deepEqual(interleaved.sends.map(({ positionMs, played }) => ({ positionMs, played })), [
+    { positionMs: 10, played: true },
+    { positionMs: 30, played: false },
+    { positionMs: 30, played: true },
+    { positionMs: 30, played: false },
+    { positionMs: 30, played: true }
+  ], `${clientName} must serialize and merge interleaved played/progress busy retries`);
+  assert.deepEqual(interleaved.persisted, { positionMs: 30, playCount: 1 });
+  assert.deepEqual(interleaved.successfulPlayed, ["busy"]);
+  assert.equal(interleaved.timers.size, 0);
+
+  const unknown = createProgressWriterFixture(createWriter, ["unknown-committed"]);
+  unknown.writer.reportPlayed({ ...record, reportKey: "unknown", session: 2 });
+  await runNextFixtureTimer(unknown.timers, 0);
+  unknown.writer.reportPlayed({ ...record, reportKey: "unknown", session: 2 });
+  assert.equal(unknown.sends.length, 1, `${clientName} must not replay an unknown-result played write`);
+  assert.deepEqual(unknown.persisted, { positionMs: 10, playCount: 1 });
+  assert.deepEqual(unknown.successfulPlayed, []);
+  assert.equal(unknown.timers.size, 0);
+
+  const sessions = createProgressWriterFixture(createWriter, ["busy", "success", "success"]);
+  sessions.writer.reportPlayed({ ...record, reportKey: "session-1", session: 1 });
+  await runNextFixtureTimer(sessions.timers, 0);
+  sessions.writer.reportPlayed({ ...record, positionMs: 30, reportKey: "session-2", session: 2 });
+  await runNextFixtureTimer(sessions.timers, 0);
+  await runNextFixtureTimer(sessions.timers, 0);
+  assert.deepEqual(sessions.sends.map(({ reportKey, positionMs }) => ({ reportKey, positionMs })), [
+    { reportKey: "session-1", positionMs: 10 },
+    { reportKey: "session-1", positionMs: 30 },
+    { reportKey: "session-2", positionMs: 30 }
+  ], `${clientName} must preserve every same-track played token while merging the latest position`);
+  assert.deepEqual(sessions.persisted, { positionMs: 30, playCount: 2 });
+  assert.deepEqual(sessions.successfulPlayed, ["session-1", "session-2"]);
+  assert.equal(sessions.timers.size, 0);
+}
+
+function createProgressWriterFixture(createWriter, outcomes) {
   let timerId = 0;
   const timers = new Map();
-  const attempts = new Map();
+  const sends = [];
   const successfulPlayed = [];
-  const progressWrites = [];
-  const writer = createMusicProgressWriter({
+  const persisted = { positionMs: 0, playCount: 0 };
+  const writer = createWriter({
     setTimeoutFn(callback, delayMs) {
       const id = ++timerId;
       timers.set(id, { callback, delayMs });
@@ -343,40 +465,18 @@ async function verifyClientWriteRecovery() {
     },
     clearTimeoutFn(id) { timers.delete(id); },
     async send(record, played) {
-      if (!played) {
-        progressWrites.push(record);
-        return;
-      }
-      const count = (attempts.get(record.reportKey) || 0) + 1;
-      attempts.set(record.reportKey, count);
-      if (record.reportKey === "busy" && count === 1) {
+      sends.push({ reportKey: record.reportKey || "", positionMs: record.positionMs, durationMs: record.durationMs, played });
+      const outcome = outcomes.shift() || "success";
+      if (outcome === "busy") {
         throw Object.assign(new Error("busy"), { status: 503, code: "MUSIC_WRITE_BUSY", retryable: true });
       }
-      if (record.reportKey === "unknown") throw new Error("response lost");
+      persisted.positionMs = record.positionMs;
+      if (played) persisted.playCount += 1;
+      if (outcome === "unknown-committed") throw new Error("response lost after commit");
     },
     onPlayed(record) { successfulPlayed.push(record.reportKey); }
   });
-
-  const record = { activeUrl: "http://fixture", trackId: "track-1", positionMs: 10, durationMs: 100 };
-  writer.reportPlayed({ ...record, reportKey: "busy", session: 1 });
-  await runNextFixtureTimer(timers, 0);
-  writer.reportPlayed({ ...record, reportKey: "busy", session: 1 });
-  assert.equal(timers.size, 1, "external playback events must not duplicate an internally queued busy retry");
-  await runNextFixtureTimer(timers, 1000);
-  assert.deepEqual(successfulPlayed, ["busy"], "played completion must be marked only after the retry succeeds");
-  writer.reportPlayed({ ...record, reportKey: "busy", session: 1 });
-  assert.equal(attempts.get("busy"), 2, "a completed played report must not be sent twice");
-
-  writer.reportPlayed({ ...record, reportKey: "unknown", session: 2 });
-  await runNextFixtureTimer(timers, 0);
-  writer.reportPlayed({ ...record, reportKey: "unknown", session: 2 });
-  assert.equal(attempts.get("unknown"), 1, "an unknown-result failure must not be replayed and double play_count");
-  assert.equal(timers.size, 0);
-
-  writer.save({ ...record, positionMs: 20 }, { delayMs: 800 });
-  writer.save({ ...record, positionMs: 30 }, { delayMs: 800 });
-  await runNextFixtureTimer(timers, 800);
-  assert.equal(progressWrites.at(-1).positionMs, 30, "ordinary progress must coalesce to the latest captured position");
+  return { writer, timers, sends, successfulPlayed, persisted };
 }
 
 async function runNextFixtureTimer(timers, expectedDelayMs) {
@@ -704,6 +804,21 @@ function seedOldSnapshot(dbPath, retainedTrackId, catalogTrackId = "old-track", 
     if (options.withPlaylistItem !== false) {
       database.prepare("INSERT INTO music_playlist_items (playlist_id,track_id,sort_order,added_at) VALUES ('playlist-1',?,1,'2026')").run(retainedTrackId);
     }
+  } finally {
+    database.close();
+  }
+}
+
+function seedIncompleteSchema(dbPath) {
+  const database = new DatabaseSync(dbPath);
+  try {
+    database.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE music_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
   } finally {
     database.close();
   }

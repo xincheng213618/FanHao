@@ -33,4 +33,13 @@ export function musicWriteBusyError(cause) {
   return error;
 }
 
+export function musicSchemaBusyError(cause) {
+  const error = new Error("音乐数据库初始化暂时被占用，请稍后重试", { cause });
+  error.code = "MUSIC_SCHEMA_DATABASE_BUSY";
+  error.statusCode = 503;
+  error.retryable = true;
+  error.expose = true;
+  return error;
+}
+
 export { MUSIC_WRITE_BUSY_MESSAGE };
