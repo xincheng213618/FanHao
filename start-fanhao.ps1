@@ -29,24 +29,38 @@ function Test-FanhaoHealth {
 
   $request = $null
   $response = $null
+  $reader = $null
+  $responseWaitHandle = $null
+  $healthTimer = [System.Diagnostics.Stopwatch]::StartNew()
   try {
     $request = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$HealthPort/api/health")
     $request.Method = "GET"
     $request.Timeout = $TimeoutMilliseconds
     $request.ReadWriteTimeout = $TimeoutMilliseconds
-    $response = $request.GetResponse()
-    $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
-    try {
-      $health = ConvertFrom-Json $reader.ReadToEnd()
-    } finally {
-      $reader.Dispose()
+    $responseAsync = $request.BeginGetResponse($null, $null)
+    $responseWaitHandle = $responseAsync.AsyncWaitHandle
+    $remainingMilliseconds = $TimeoutMilliseconds - $healthTimer.Elapsed.TotalMilliseconds
+    if ($remainingMilliseconds -le 0 -or -not $responseWaitHandle.WaitOne([Math]::Max(1, [int][Math]::Floor($remainingMilliseconds)))) {
+      return $false
     }
+
+    $response = $request.EndGetResponse($responseAsync)
+    $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+    $readTask = $reader.ReadToEndAsync()
+    $remainingMilliseconds = $TimeoutMilliseconds - $healthTimer.Elapsed.TotalMilliseconds
+    if ($remainingMilliseconds -le 0 -or -not $readTask.Wait([Math]::Max(1, [int][Math]::Floor($remainingMilliseconds)))) {
+      return $false
+    }
+    $health = ConvertFrom-Json $readTask.GetAwaiter().GetResult()
     return [bool]$health.ok
   } catch {
     return $false
   } finally {
-    if ($null -ne $response) { $response.Dispose() }
     if ($null -ne $request) { $request.Abort() }
+    if ($null -ne $reader) { $reader.Dispose() }
+    if ($null -ne $response) { $response.Dispose() }
+    if ($null -ne $responseWaitHandle) { $responseWaitHandle.Close() }
+    $healthTimer.Stop()
   }
 }
 

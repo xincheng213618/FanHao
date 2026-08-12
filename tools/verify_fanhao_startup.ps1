@@ -194,6 +194,16 @@ if (mode === "exit") {
   const server = http.createServer((request, response) => {
     if (request.url === "/api/health") {
       response.writeHead(200, { "content-type": "application/json" });
+      if (mode === "drip") {
+        response.write('{"ok":');
+        const dripTimer = setInterval(() => response.write(" "), 100);
+        const endTimer = setTimeout(() => response.end("true}"), 8000);
+        response.on("close", () => {
+          clearInterval(dripTimer);
+          clearTimeout(endTimer);
+        });
+        return;
+      }
       response.end(JSON.stringify({ ok: mode === "healthy" }));
       if (mode === "healthy") {
         fs.writeFileSync(new URL("./health-hit.json", import.meta.url), JSON.stringify({ ok: true, pid: process.pid }));
@@ -232,6 +242,14 @@ server.listen(Number(process.env.FANHAO_STARTUP_SENTINEL_PORT), "127.0.0.1");
   $unhealthyProcessId = Get-StartedProcessId -Output $unhealthy.Output
   Assert-True -Condition (Wait-ProcessExit -ProcessId $unhealthyProcessId) -Message "unhealthy startup must stop the process created by the launcher"
   Assert-True -Condition ($unhealthy.ElapsedMilliseconds -lt 7500) -Message "health probing must not overrun the five-second startup budget"
+
+  $dripPort = Get-DynamicPort
+  $drip = Invoke-StartupFixture -Mode "drip" -Port $dripPort -TimeoutSeconds 5
+  Assert-True -Condition ($drip.ExitCode -eq 2) -Message "a drip-fed health response must not bypass the startup deadline: $($drip.Output)"
+  Assert-Match -Value $drip.Output -Pattern 'health endpoint did not become healthy' -Message "drip-fed health timeout must report the failed health contract"
+  $dripProcessId = Get-StartedProcessId -Output $drip.Output
+  Assert-True -Condition (Wait-ProcessExit -ProcessId $dripProcessId) -Message "drip-fed health timeout must stop the process created by the launcher"
+  Assert-True -Condition ($drip.ElapsedMilliseconds -ge 4500 -and $drip.ElapsedMilliseconds -lt 6500) -Message "drip-fed health must honor the five-second hard startup deadline (elapsed $($drip.ElapsedMilliseconds) ms)"
 
   $exitPort = Get-DynamicPort
   $earlyExit = Invoke-StartupFixture -Mode "exit" -Port $exitPort -TimeoutSeconds 5

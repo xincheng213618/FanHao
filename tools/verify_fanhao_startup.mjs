@@ -10,6 +10,7 @@ assert.equal(fs.existsSync(verifier), true, "missing isolated FanHao startup ver
 const source = fs.readFileSync(verifier, "utf8").replaceAll("\r\n", "\n");
 assert.match(source, /Get-DynamicPort/);
 assert.match(source, /FANHAO_STARTUP_FIXTURE_MODE/);
+assert.match(source, /Mode "drip"[\s\S]*ElapsedMilliseconds -ge 4500[\s\S]*ElapsedMilliseconds -lt 6500/);
 assert.match(source, /Remove-Item -LiteralPath \$resolvedFixtureRoot -Recurse -Force/);
 assert.doesNotMatch(source, /29998|8765/);
 console.log("fanhao-startup-gate-structure: ok");
@@ -20,6 +21,7 @@ const candidates = process.platform === "win32"
 
 async function runPowerShell(executable) {
   return await new Promise((resolve, reject) => {
+    let settled = false;
     const child = spawn(executable, [
       "-NoProfile",
       "-ExecutionPolicy", "Bypass",
@@ -31,19 +33,30 @@ async function runPowerShell(executable) {
       windowsHide: true
     });
     child.once("error", (error) => {
-      if (error.code === "ENOENT") resolve(false);
-      else reject(error);
+      if (settled) return;
+      settled = true;
+      reject(new Error(`required PowerShell runtime ${executable} could not start: ${error.message}`, { cause: error }));
     });
     child.once("exit", (code, signal) => {
-      if (code === 0) resolve(true);
+      if (settled) return;
+      settled = true;
+      if (code === 0) resolve();
       else reject(new Error(`${executable} startup verifier failed with ${signal ? `signal ${signal}` : `exit code ${code}`}`));
     });
   });
 }
 
+if (process.platform === "win32") {
+  await assert.rejects(
+    runPowerShell("fanhao-required-powershell-runtime-missing.exe"),
+    /required PowerShell runtime .* could not start/
+  );
+}
+
 let runtimes = 0;
 for (const executable of candidates) {
-  if (await runPowerShell(executable)) runtimes += 1;
+  await runPowerShell(executable);
+  runtimes += 1;
 }
-assert.ok(runtimes > 0, "no supported PowerShell runtime was found");
+assert.equal(runtimes, process.platform === "win32" ? 2 : 1, "every required PowerShell runtime must execute the startup behavior gate");
 console.log(`fanhao-startup-runtimes: ${runtimes} passed`);

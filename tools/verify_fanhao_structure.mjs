@@ -1763,6 +1763,12 @@ assert(
   "FanHao launcher must require both its target PID listener and a healthy API within the remaining startup budget"
 );
 assert(
+  /\$healthTimer = \[System\.Diagnostics\.Stopwatch\]::StartNew\(\)/.test(serviceLauncher) &&
+    /BeginGetResponse\(\$null, \$null\)[\s\S]*WaitOne\([\s\S]*ReadToEndAsync\(\)[\s\S]*\.Wait\(/.test(serviceLauncher) &&
+    /\$request\.Abort\(\)/.test(serviceLauncher),
+  "FanHao health probes must bind response acquisition and full-body reads to one abortable deadline"
+);
+assert(
   /if \(-not \$ready\)[\s\S]*Stop-FanhaoStartupProcess -Process \$process/.test(serviceLauncher) &&
     /\$Process\.Kill\(\)/.test(serviceLauncher),
   "FanHao launcher must stop only the process created by a startup that misses its deadline"
