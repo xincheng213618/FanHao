@@ -332,7 +332,14 @@ class FileManager:
             # deliberately a fresh request without Range, so an outer retry or
             # mirror switch can never append bytes from a rejected entity.
             for request_index in range(2):
+                original_url_hash = self._url_sha256(url)
                 checkpoint = self._load_checkpoint(save_path) if can_resume else None
+                if (
+                    checkpoint
+                    and checkpoint["original_url_sha256"] != original_url_hash
+                ):
+                    self._discard_partial(save_path)
+                    checkpoint = None
                 resume_offset = int(checkpoint["written_length"]) if checkpoint else 0
                 request_headers = {
                     key: value
@@ -353,7 +360,6 @@ class FileManager:
                     proxy=proxy or None,
                 ) as response:
                     final_url_hash = self._url_sha256(self._response_url(response, url))
-                    original_url_hash = self._url_sha256(url)
 
                     if response.status == 200:
                         response_validator = self._response_validator(response.headers)
@@ -717,6 +723,8 @@ class FileManager:
         *,
         check_content_type: bool = True,
     ) -> bool:
+        if checkpoint["original_url_sha256"] != original_url_sha256:
+            return False
         validator_key, validator_value = cls._checkpoint_validator_pair(checkpoint)
         if validator_key == "etag":
             if cls._strong_etag(cls._header(response_headers, "ETag")) != validator_value:
@@ -728,11 +736,8 @@ class FileManager:
             if response_date != validator_value:
                 return False
             # Dates are only a fallback validator.  They cannot establish
-            # identity after a redirect target or mirror changes.
-            if (
-                checkpoint["original_url_sha256"] != original_url_sha256
-                or checkpoint["final_url_sha256"] != final_url_sha256
-            ):
+            # identity after a redirect target changes.
+            if checkpoint["final_url_sha256"] != final_url_sha256:
                 return False
         if check_content_type and checkpoint.get("content_type"):
             if cls._content_type(response_headers) != checkpoint["content_type"]:

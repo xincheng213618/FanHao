@@ -650,39 +650,51 @@ class DownloadResumeContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("range", _headers(final_calls[0]))
         self.assertNotIn("range", _headers(final_calls[-1]))
 
-    async def test_cross_mirror_resume_is_allowed_only_with_same_strong_etag(self) -> None:
+    async def test_cross_original_url_never_reuses_partial_even_with_same_strong_etag(
+        self,
+    ) -> None:
         old_url = self.loopback.url("/cross-mirror-old")
 
         strong_target = self.target("cross-mirror-strong.mp4")
         strong_url = self.loopback.url("/cross-mirror-strong")
         _write_checkpoint(
             strong_target,
-            V1[:3],
+            V1[:5],
             original_url=old_url,
             final_url=old_url,
             expected_length=len(V1),
         )
 
         def strong_route(handler: BaseHTTPRequestHandler, call: dict[str, object]) -> None:
-            start = _range_start(call)
-            _send(
-                handler,
-                206,
-                V1[start:],
-                headers={
-                    "Content-Type": "video/mp4",
-                    "Content-Range": f"bytes {start}-{len(V1) - 1}/{len(V1)}",
-                    "ETag": STRONG_V1,
-                },
-            )
+            if _headers(call).get("range"):
+                start = _range_start(call)
+                _send(
+                    handler,
+                    206,
+                    V2[start:],
+                    headers={
+                        "Content-Type": "video/mp4",
+                        "Content-Range": f"bytes {start}-{len(V2) - 1}/{len(V2)}",
+                        # Deliberately collide across two unrelated URLs.
+                        "ETag": STRONG_V1,
+                    },
+                )
+            else:
+                _send(
+                    handler,
+                    200,
+                    V2,
+                    headers={"Content-Type": "video/mp4", "ETag": STRONG_V1},
+                )
 
         self.loopback.configure({"/cross-mirror-strong": strong_route})
         self.assertTrue(await FileManager(str(self.root)).download_file(strong_url, strong_target))
-        self.assertEqual(strong_target.read_bytes(), V1)
-        self.assertEqual(
-            _headers(self.loopback.calls_for("/cross-mirror-strong")[0]).get("if-range"),
-            STRONG_V1,
-        )
+        self.assertEqual(strong_target.read_bytes(), V2)
+        self.assertNotEqual(strong_target.read_bytes(), V1[:5] + V2[5:])
+        strong_calls = self.loopback.calls_for("/cross-mirror-strong")
+        self.assertEqual(len(strong_calls), 1)
+        self.assertNotIn("range", _headers(strong_calls[0]))
+        self.assertNotIn("if-range", _headers(strong_calls[0]))
 
         lm_target = self.target("cross-mirror-last-modified.mp4")
         lm_url = self.loopback.url("/cross-mirror-last-modified")
@@ -725,10 +737,9 @@ class DownloadResumeContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await FileManager(str(self.root)).download_file(lm_url, lm_target))
         self.assertEqual(lm_target.read_bytes(), V2)
         lm_calls = self.loopback.calls_for("/cross-mirror-last-modified")
-        self.assertEqual(len(lm_calls), 2)
-        self.assertEqual(_headers(lm_calls[0]).get("if-range"), LAST_MODIFIED_V1)
-        self.assertNotIn("range", _headers(lm_calls[1]))
-        self.assertNotIn("if-range", _headers(lm_calls[1]))
+        self.assertEqual(len(lm_calls), 1)
+        self.assertNotIn("range", _headers(lm_calls[0]))
+        self.assertNotIn("if-range", _headers(lm_calls[0]))
 
     async def test_416_promotes_only_matching_validator_and_length(self) -> None:
         matching_target = self.target("matching-416.mp4")
