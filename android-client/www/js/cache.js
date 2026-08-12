@@ -1,4 +1,4 @@
-import { CLIENT_VERSION } from "./config.js?v=20260812-android-work-move-02";
+import { CLIENT_VERSION } from "./config.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867";
 
 const DB_NAME = "fanhao-android-cache";
 const DB_VERSION = 2;

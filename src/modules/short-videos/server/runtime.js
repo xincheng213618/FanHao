@@ -38,6 +38,7 @@ const SHORT_VIDEO_SMOOTH_RENDITION_VERSION = 2;
 const SHORT_VIDEO_SMOOTH_MIN_LONG_EDGE = 2160;
 const SHORT_VIDEO_LIST_CACHE_FRESH_MS = 2 * 60 * 1000;
 const SHORT_VIDEO_LIST_CACHE_SCHEMA = "aggregate-search-v5-action-baselines";
+const SHORT_VIDEO_LIST_STABLE_QUERY_ATTEMPTS = 3;
 const SHORT_VIDEO_CACHE_WATCH_DELAY_MS = 4000;
 const SHORT_VIDEO_CACHE_COMPLETED_DELAY_MS = 750;
 const SHORT_VIDEO_CACHE_MIN_PROGRESS_MS = 500;
@@ -60,6 +61,7 @@ export function createShortVideosRuntime({
   sendJson,
   sharedCache,
   catalogWorkerOptions = {},
+  listQuery = null,
   schemaBusyTimeoutMs = 10000,
   getTranscodeConcurrency = () => SHORT_VIDEO_SMOOTH_CONCURRENCY,
   setTranscodeConcurrency = null
@@ -349,7 +351,7 @@ export function createShortVideosRuntime({
           queueSmoothVideoCandidates(data.videos);
           return true;
         }
-        if (cached?.data) {
+        if (cached?.data && cached.generationCurrent) {
           const data = applyShortVideoWatchOverlays(cached.data);
           sendJson(res, 200, applyMobilePlaybackHints({ ...data, cached: true, stale: true, cacheState: "stale-refreshing" }));
           queueStartupVideoCandidates(data.videos);
@@ -359,9 +361,7 @@ export function createShortVideosRuntime({
         }
       }
       try {
-        const generation = shortVideoListCacheGeneration;
-        const watchGeneration = shortVideoWatchCacheGeneration;
-        const data = await queryShortVideoListForRequest(req, url);
+        const { data, generation, watchGeneration } = await queryStableShortVideoListForRequest(req, url);
         writeJsonCache(cachePath, data, generation, watchGeneration);
         sendJson(res, 200, applyMobilePlaybackHints(data));
         queueStartupVideoCandidates(data.videos);
@@ -372,7 +372,7 @@ export function createShortVideosRuntime({
           const data = applyShortVideoWatchOverlays(cached.data);
           sendJson(res, 200, applyMobilePlaybackHints({ ...data, cached: true, stale: true, offline: true, cacheState: "offline" }));
         } else {
-          sendShortVideoPublicError(res, sendJson, error, "短视频列表读取失败");
+          sendShortVideoPublicError(res, sendJson, error, "短视频列表读取失败", { includeRetryable: true });
         }
       }
       return true;
@@ -630,6 +630,8 @@ export function createShortVideosRuntime({
       sharedCache.touch(filePath);
       return {
         data,
+        generationCurrent: generation === shortVideoListCacheGeneration
+          && (!isWatchSensitiveShortVideoList(data) || watchGeneration === shortVideoWatchCacheGeneration),
         fresh: generation === shortVideoListCacheGeneration
           && (!isWatchSensitiveShortVideoList(data) || watchGeneration === shortVideoWatchCacheGeneration)
           && Number.isFinite(cachedAtMs)
@@ -985,7 +987,16 @@ export function createShortVideosRuntime({
   }
 
   async function queryShortVideoList(url, options = {}) {
+    if (typeof listQuery === "function") {
+      return listQuery(url, options, (nextUrl = url, nextOptions = options) => listStatsService.list(nextUrl, nextOptions));
+    }
     return listStatsService.list(url, options);
+  }
+
+  function isWatchSensitiveShortVideoRequest(url, data = {}) {
+    return isWatchSensitiveShortVideoList(data)
+      || String(url?.searchParams?.get("source") || "").toLowerCase() === "history"
+      || String(url?.searchParams?.get("sort") || "").toLowerCase() === "watched";
   }
 
   async function queryShortVideoListForRequest(req, url) {
@@ -997,6 +1008,24 @@ export function createShortVideosRuntime({
     } finally {
       req?.off?.("aborted", onAbort);
     }
+  }
+
+  async function queryStableShortVideoListForRequest(req, url) {
+    for (let attempt = 0; attempt < SHORT_VIDEO_LIST_STABLE_QUERY_ATTEMPTS; attempt += 1) {
+      const generation = shortVideoListCacheGeneration;
+      const watchGeneration = shortVideoWatchCacheGeneration;
+      const data = await queryShortVideoListForRequest(req, url);
+      const generationStable = generation === shortVideoListCacheGeneration;
+      const watchGenerationStable = !isWatchSensitiveShortVideoRequest(url, data)
+        || watchGeneration === shortVideoWatchCacheGeneration;
+      if (generationStable && watchGenerationStable) return { data, generation, watchGeneration };
+    }
+    const error = new Error("短视频列表正在更新，请稍后重试");
+    error.code = "SHORT_VIDEO_LIST_UNSTABLE";
+    error.statusCode = 503;
+    error.retryable = true;
+    error.expose = true;
+    throw error;
   }
 
   async function stopListServices() {
@@ -1108,9 +1137,13 @@ export function createShortVideosRuntime({
   }
 
   function clearShortVideoListCache() {
+    shortVideoListCacheGeneration = Math.max(Date.now(), shortVideoListCacheGeneration + 1);
     try {
-      shortVideoListCacheGeneration = Math.max(Date.now(), shortVideoListCacheGeneration + 1);
       persistShortVideoListCacheGeneration();
+    } catch (error) {
+      console.warn("[short-video-list-invalidate-persist]", error.message || error);
+    }
+    try {
       catalogWorker.reset();
     } catch (error) {
       console.warn("[short-video-list-invalidate]", error.message || error);

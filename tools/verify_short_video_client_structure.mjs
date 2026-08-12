@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,6 +58,7 @@ const requiredParts = [
 for (const relativePath of requiredParts) {
   assert(fs.statSync(path.join(moduleDir, relativePath), { throwIfNoEntry: false })?.isFile(), `missing short-video part: ${relativePath}`);
 }
+verifyAndroidShortVideoCacheIdentity();
 const obsoletePlayerParts = ["panels/author-panel.js", "panels/playback-panels.js", "platform/native-player.js", "player/interactions.js", "player/media-cache.js", "player/reel-controller.js", "styles/author-panel.css", "styles/reel.css", "styles/playback-panels.css"];
 for (const relativePath of obsoletePlayerParts) {
   assert(!fs.statSync(path.join(moduleDir, relativePath), { throwIfNoEntry: false }), `legacy Android WebView player must stay removed: ${relativePath}`);
@@ -79,6 +81,59 @@ verifyNativeFeedContract();
 await verifyNativeCollectionFeedBridge();
 verifyAndroidAuthorAccountRoutes();
 await verifyAndroidAuthorAccountRequests();
+
+function verifyAndroidShortVideoCacheIdentity() {
+  const wwwDir = path.join(root, "android-client", "www");
+  const configSource = readNormalized(path.join(wwwDir, "js", "config.js"));
+  const versionMatch = /export const CLIENT_VERSION = "([^"]+)";/u.exec(configSource);
+  assert(versionMatch, "Android config must expose a literal CLIENT_VERSION for cache identity checks");
+  const clientVersion = versionMatch[1];
+  const identityFiles = [
+    "app.js",
+    "js/android-module-registry.js",
+    "js/cache.js",
+    "modules/short-videos/android-module.js",
+    "modules/short-videos/api.js",
+    "modules/short-videos/index.js",
+    "modules/short-videos/list/controller.js",
+    "modules/short-videos/list/view.js",
+    "modules/short-videos/player/native-feed.js",
+    "modules/short-videos/player/native-feed-contract.js"
+  ];
+  const behaviorDigest = createHash("sha256");
+  for (const relativePath of identityFiles) {
+    const source = readNormalized(path.join(wwwDir, ...relativePath.split("/")))
+      .replaceAll(clientVersion, "<CLIENT_VERSION>");
+    behaviorDigest.update(`${relativePath}\0${source}\0`);
+  }
+  const digestSuffix = behaviorDigest.digest("hex").slice(0, 12);
+  assert(
+    clientVersion.endsWith(`-${digestSuffix}`),
+    `Android short-video behavior changed without a new derived CLIENT_VERSION; expected suffix -${digestSuffix}`
+  );
+
+  const indexSource = readNormalized(path.join(wwwDir, "index.html"));
+  const appSource = readNormalized(path.join(wwwDir, "app.js"));
+  const registrySource = readNormalized(path.join(wwwDir, "js", "android-module-registry.js"));
+  const shortVideoEntrySource = readNormalized(path.join(moduleDir, "android-module.js"));
+  const shortVideoIndexSource = readNormalized(path.join(moduleDir, "index.js"));
+  const shortVideoApiSource = readNormalized(path.join(moduleDir, "api.js"));
+  const cacheSource = readNormalized(path.join(wwwDir, "js", "cache.js"));
+  const nativeFeedSource = readNormalized(path.join(moduleDir, "player", "native-feed.js"));
+  assert(indexSource.includes(`src="./app.js?v=${clientVersion}"`), "Android index must cache-bust app.js with CLIENT_VERSION");
+  assert(appSource.includes(`./js/config.js?v=${clientVersion}`), "Android app.js must load the matching CLIENT_VERSION config module");
+  assert(appSource.includes(`./js/cache.js?v=${clientVersion}`), "Android app.js must load the matching response-cache implementation");
+  assert(appSource.includes(`./js/android-module-registry.js?v=${clientVersion}`), "Android app.js must load the matching module registry identity");
+  assert(cacheSource.includes(`./config.js?v=${clientVersion}`), "Android response cache must load the matching CLIENT_VERSION config module");
+  assert(registrySource.includes('url.searchParams.set("client", String(clientVersion))'), "Android dynamic module entries must include CLIENT_VERSION in their URL identity");
+  assert(shortVideoEntrySource.includes(`./index.js?v=${clientVersion}`), "Android short-video entry must propagate CLIENT_VERSION to its facade");
+  for (const relativeImport of ["./api.js", "./list/controller.js", "./list/view.js", "./player/native-feed.js"]) {
+    assert(shortVideoIndexSource.includes(`${relativeImport}?v=${clientVersion}`), `Android short-video facade must cache-bust ${relativeImport} with CLIENT_VERSION`);
+  }
+  assert(shortVideoApiSource.includes(`../../js/cache.js?v=${clientVersion}`), "Android short-video API must share the current cache implementation identity");
+  assert(nativeFeedSource.includes(`../../../js/cache.js?v=${clientVersion}`), "Android Native return path must share the current cache implementation identity");
+  assert(nativeFeedSource.includes(`./native-feed-contract.js?v=${clientVersion}`), "Android Native return path must cache-bust its payload contract with CLIENT_VERSION");
+}
 
 function verifyAndroidAuthorAccountRoutes() {
   assert.equal(normalizeAuthorAccountStatus("BANNED"), "banned", "Android must accept the canonical banned account state case-insensitively");
@@ -821,7 +876,7 @@ assert.equal(androidCollectionsSource.match(/await loadCollections\(true\)/g)?.l
 assert(androidCollectionsSource.includes("collectionMutationRevision") && androidCollectionsSource.includes("mergeCollectionRefresh(data?.collections, requestRevision)") && androidCollectionsSource.includes("mutation.revision <= requestRevision") && androidCollectionsSource.includes("rememberCollectionMutation(result.collection)"), "Android collection refreshes must merge local creations made after a pending server snapshot without retaining them past a later refresh");
 assert(androidCollectionsSource.includes("rememberCollectionDeletion") && androidCollectionsSource.includes("mutation.deleted") && androidCollectionsSource.includes("window.confirm") && androidCollectionsSource.includes("context.discardPushedView?.()") && androidCollectionsSource.includes('showView("shortVideoCollections", {}, { skipHistory: true, replaceHistory: true })'), "Android collection deletion must confirm, fence stale list snapshots, discard a pushed detail history entry, and replace a direct detail route");
 assert(androidCollectionsSource.includes('setAttribute("aria-label", "清单名称")') && androidCollectionsSource.includes('status.textContent = "请输入清单名称"') && androidCollectionsSource.includes("input.focus()") && androidCollectionsSource.includes("rename.focus()"), "Android collection rename must expose an accessible focused input and retain focus across empty, failed, canceled, and successful edits");
-assert(androidEntrySource.includes("./index.js?v=20260812-action-restart-sync-01") && androidEntrySource.includes("discardPushedView: host.navigation.discardPushedView") && androidIndexSource.includes("./collections/controller.js?v=20260812-collection-management-03"), "Android collection management, native action UI, and restart convergence changes must propagate through the JavaScript module cache-version chain");
+assert(androidEntrySource.includes("discardPushedView: host.navigation.discardPushedView") && androidIndexSource.includes("./collections/controller.js?v=20260812-collection-management-03"), "Android collection management and native action UI changes must propagate through the JavaScript module cache-version chain");
 assert(androidIndexHtmlSource.includes("./styles.css?v=20260812-android-work-move-02") && androidRootStylesSource.includes("./modules/short-videos/styles.css?v=20260812-collection-management-01") && androidShortVideoStylesSource.includes("./styles/list.css?v=20260812-collection-management-01"), "Android collection management styles must propagate through the integrated stylesheet cache-version chain");
 assert(androidCollectionRequestSource.includes("Number(error?.status) === 503") && androidCollectionRequestSource.includes("error?.retryable === true") && androidCollectionRequestSource.includes("3100"), "Android collection retries must be finite and limited to explicitly retryable 503 responses");
 assert(androidTransportSource.includes("error.status = response.status") && androidTransportSource.includes("payload.retryable === true"), "Android transport errors must retain sanitized collection retry metadata");
@@ -881,7 +936,7 @@ assert(androidNativeActionResultSource.includes('put("videoId", entry.getKey())'
 assert(androidNativeFeedSource.includes("mergeActionSnapshots(listState.data?.videos, snapshots, changedVideos)") && androidNativeFeedSource.includes("mergeActionSnapshots(options.videos, snapshots, changedVideos)") && androidNativeFeedSource.includes("refreshVideoCards(changed)") && androidNativeFeedSource.includes('invalidateShortVideoCache(launchServerBase, "/api/short-videos")'), "the WebView must merge acknowledged actions into both canonical model arrays, refresh their mounted cards, and invalidate the matching persisted feed cache");
 assert(androidListSource.includes("wrap.dataset.videoId") && androidListSource.includes("refreshVideoCards") && androidCardActionMetricSource.includes("querySelectorAll(\".short-video-mobile-card-wrap[data-video-id]\")") && androidCardActionMetricSource.includes('metric.classList.toggle("is-liked", liked)') && androidCardActionMetricSource.includes("metric.replaceChildren") && androidCardActionMetricSource.includes('metric.setAttribute("aria-label", stateLabel)'), "mounted list and collection cards must expose a video-keyed targeted action metric refresh for both liked states, icon, count, and accessibility text");
 assert(androidNativeFeedSource.includes("MAX_ACTION_RESULT_SNAPSHOTS = 512") && androidNativeFeedSource.includes("MAX_ACTION_RESULT_VIDEO_ID_CHARS = 512") && androidNativeFeedSource.includes("value.length > MAX_ACTION_RESULT_SNAPSHOTS") && androidNativeFeedSource.includes("videoId.length > MAX_ACTION_RESULT_VIDEO_ID_CHARS") && androidNativeFeedSource.includes('typeof entry.liked !== "boolean"') && androidNativeFeedSource.includes("!Number.isSafeInteger(entry[key])"), "the JavaScript bridge must fail the whole native action result closed before patching on oversized or malformed snapshots");
-assert(androidNativeFeedSource.includes("launchServerBase && resultServerBase === launchServerBase") && androidNativeFeedSource.includes("normalizeServerBase(getActiveUrl()) === launchServerBase") && androidIndexSource.includes("./player/native-feed.js?v=20260812-action-restart-sync-01") && androidIndexSource.includes("./list/view.js?v=20260812-native-action-ui-01"), "native action return merges must stay on a valid server scope and propagate through the Android module cache-version chain");
+assert(androidNativeFeedSource.includes("launchServerBase && resultServerBase === launchServerBase") && androidNativeFeedSource.includes("normalizeServerBase(getActiveUrl()) === launchServerBase"), "native action return merges must stay on a valid server scope");
 assert(androidApiSource.includes("fetchCachedRevalidated") && androidApiSource.includes("const refreshes = new Map()") && androidApiSource.includes("await writeResponseCache") && androidApiSource.includes("} catch {}"), "Android short-video reads must deduplicate live revalidation and keep successful server data when best-effort response caching fails");
 assert(androidCacheSource.includes("export function transactionToPromise(transaction)") && androidCacheSource.includes('transaction.addEventListener("complete"') && androidCacheSource.includes('transaction.addEventListener("abort"') && androidCacheSource.includes('transaction.addEventListener("error"') && androidCacheSource.includes("const completion = transactionToPromise(transaction)"), "Android response cache operations must settle on IndexedDB transaction completion and reject abort/error events");
 assert(androidListControllerSource.includes("const requestGeneration = append ? listRequestGeneration : ++listRequestGeneration") && androidListControllerSource.includes("listAppendRevision") && androidListControllerSource.includes("appendAdvanced") && androidListControllerSource.includes("mergeUniqueEntries") && androidListControllerSource.includes("const hasResults = Number(nextData?.total || 0) > 0 || Boolean(finalEntries?.length)"), "Android append requests must not cancel initial revalidation, and a late fresh head must retain successfully appended rows, pagination progress, and its final non-empty state");
@@ -959,7 +1014,7 @@ assert.equal(views.getSearchState().authorAccountStatus, "all", "Android short-v
 const appSource = readNormalized(path.join(root, "android-client", "www", "app.js"));
 assert(!appSource.includes("shortVideoBrowser"), "Android shell must not retain the legacy WebView playback route");
 assert(appSource.includes("canonicalShortVideoViewParams(view, params)") && appSource.includes('account: query.get("account") || "all"'), "Android shell routes must parse and canonicalize account=banned links");
-assert(appSource.includes("function discardPushedView()") && appSource.includes("returnToStackView({ discardHistoryEntry: true })") && appSource.includes("options.discardHistoryEntry") && appSource.includes("window.history.back()") && androidIndexHtmlSource.includes("./app.js?v=20260812-android-work-move-02"), "Android collection deletion must discard both the in-memory stack entry and its browser-history entry, with the integrated app cache version advanced");
+assert(appSource.includes("function discardPushedView()") && appSource.includes("returnToStackView({ discardHistoryEntry: true })") && appSource.includes("options.discardHistoryEntry") && appSource.includes("window.history.back()"), "Android collection deletion must discard both the in-memory stack entry and its browser-history entry");
 assert(
   appSource.includes("shortVideoViews?.deactivate?.()")
     || appSource.includes("androidModuleRegistry?.deactivateExcept(currentView, currentViewParams)"),

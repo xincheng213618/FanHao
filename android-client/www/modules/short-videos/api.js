@@ -1,7 +1,9 @@
 import { fetchJson } from "../../js/api.js?v=20260812-collection-busy-01";
-import { captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260812-action-restart-sync-01";
+import { captureCachedJsonFence, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "../../js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867";
 
 const DEFAULT_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
+const AUTHORITATIVE_REFRESH_ATTEMPTS = 3;
+const AUTHORITATIVE_REFRESH_RETRY_MS = [80, 180];
 
 export function createShortVideoApi({ getActiveUrl, writeResponseCache = writeCachedJson }) {
   const refreshes = new Map();
@@ -18,13 +20,38 @@ export function createShortVideoApi({ getActiveUrl, writeResponseCache = writeCa
   };
 
   const refreshOnce = async (baseUrl, routePath, fetchOptions, fence) => {
-    const data = await fetchJson(baseUrl, routePath, fetchOptions);
-    if (!isCachedJsonFenceCurrent(fence)) throw new Error("缓存已失效，请重新读取");
-    try {
-      await writeResponseCache(baseUrl, routePath, data, { fence });
-    } catch {}
-    if (!isCachedJsonFenceCurrent(fence)) throw new Error("缓存已失效，请重新读取");
-    return data;
+    const networkPath = authoritativeRefreshPath(routePath);
+    const attempts = networkPath === routePath ? 1 : AUTHORITATIVE_REFRESH_ATTEMPTS;
+    let staleError = null;
+    let fallbackData = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      let data;
+      try {
+        data = await fetchJson(baseUrl, networkPath, fetchOptions);
+      } catch (error) {
+        if (fallbackData) error.fallbackData = fallbackData;
+        throw error;
+      }
+      assertRefreshFence(fence);
+      if (isStaleResponseEnvelope(data)) {
+        fallbackData ||= data;
+        staleError = staleResponseError(data);
+        if (attempt + 1 < attempts) {
+          await waitForAuthoritativeRetry(AUTHORITATIVE_REFRESH_RETRY_MS[attempt] || 180, fence, fetchOptions?.signal);
+          continue;
+        }
+        staleError.fallbackData = fallbackData;
+        throw staleError;
+      }
+      try {
+        // Cache under the canonical route, never under the transport-only
+        // refresh=1 URL used to obtain an authoritative server snapshot.
+        await writeResponseCache(baseUrl, routePath, data, { fence });
+      } catch {}
+      assertRefreshFence(fence);
+      return data;
+    }
+    throw staleError || new Error("短视频列表暂未完成刷新");
   };
 
   return Object.freeze({
@@ -41,6 +68,7 @@ export function createShortVideoApi({ getActiveUrl, writeResponseCache = writeCa
       const cached = await readCachedJson(requestBaseUrl, routePath).catch(() => null);
       const updatedAt = cached?.updatedAt ? new Date(cached.updatedAt).getTime() : 0;
       const fresh = Boolean(cached?.payload)
+        && !isStaleResponseEnvelope(cached.payload)
         && updatedAt > 0
         && Date.now() - updatedAt <= Math.max(0, Number(cacheMaxAgeMs || 0));
       if (fresh) return cached.payload;
@@ -56,6 +84,7 @@ export function createShortVideoApi({ getActiveUrl, writeResponseCache = writeCa
         return await refreshRequest();
       } catch (error) {
         if (cached?.payload) return cached.payload;
+        if (error?.fallbackData) return error.fallbackData;
         throw error;
       }
     },
@@ -70,15 +99,70 @@ export function createShortVideoApi({ getActiveUrl, writeResponseCache = writeCa
           revalidation: refresh(requestBaseUrl, routePath, fetchOptions)
         };
       }
-      return {
-        data: await refresh(requestBaseUrl, routePath, fetchOptions),
-        fromCache: false,
-        revalidation: null
-      };
+      try {
+        return {
+          data: await refresh(requestBaseUrl, routePath, fetchOptions),
+          fromCache: false,
+          nonAuthoritative: false,
+          revalidation: null
+        };
+      } catch (error) {
+        if (!error?.fallbackData) throw error;
+        return {
+          data: error.fallbackData,
+          fromCache: false,
+          nonAuthoritative: true,
+          revalidation: null
+        };
+      }
     }
   });
 }
 
 function normalizeBaseUrl(value) {
   return String(value || "").replace(/\/+$/, "");
+}
+
+function authoritativeRefreshPath(routePath) {
+  const url = new URL(String(routePath || ""), "http://fanhao.local");
+  if (url.pathname !== "/api/short-videos") return routePath;
+  url.searchParams.set("refresh", "1");
+  return `${url.pathname}${url.search}`;
+}
+
+function isStaleResponseEnvelope(data) {
+  const cacheState = String(data?.cacheState || "").trim().toLowerCase();
+  return data?.stale === true
+    || data?.offline === true
+    || cacheState === "stale-refreshing"
+    || cacheState === "offline";
+}
+
+function staleResponseError(data) {
+  const error = new Error(data?.offline === true || String(data?.cacheState || "").toLowerCase() === "offline"
+    ? "电脑端暂时离线，已保留本地缓存"
+    : "电脑端列表仍在刷新，已保留本地缓存");
+  error.code = "SHORT_VIDEO_REVALIDATION_STALE";
+  error.retryable = true;
+  return error;
+}
+
+function assertRefreshFence(fence) {
+  if (!isCachedJsonFenceCurrent(fence)) throw new Error("缓存已失效，请重新读取");
+}
+
+async function waitForAuthoritativeRetry(delayMs, fence, signal) {
+  if (signal?.aborted) throw new Error("请求已取消");
+  await new Promise((resolve, reject) => {
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(new Error("请求已取消"));
+    };
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve();
+    }, Math.max(0, Number(delayMs || 0)));
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
+  assertRefreshFence(fence);
 }

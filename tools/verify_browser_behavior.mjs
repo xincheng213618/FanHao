@@ -44,6 +44,7 @@ try {
     await verifyAndroidCollectionStackReturn(browser);
     await verifyAndroidNativeActionCardRefresh(browser);
     await verifyAndroidRestartActionConvergence(browser);
+    await verifyAndroidColdRestartBootstrapConvergence(browser);
     await verifyAndroidFavoriteFolders(browser);
     await verifyAndroidFavoriteRoute(browser);
     await verifyAndroidFavoriteServerSwitch(browser);
@@ -822,7 +823,7 @@ async function verifyAndroidRestartActionConvergence(browser) {
     await page.evaluate(async () => {
       const [{ createShortVideoViews }, cache, { createShortVideoApi }, { createShortVideoListController }] = await Promise.all([
         import("/android-client/modules/short-videos/index.js?restart-action-fixture=1"),
-        import("/android-client/js/cache.js?v=20260812-action-restart-sync-01"),
+        import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867"),
         import("/android-client/modules/short-videos/api.js?restart-action-fixture=2"),
         import("/android-client/modules/short-videos/list/controller.js?restart-action-fixture=2")
       ]);
@@ -843,8 +844,14 @@ async function verifyAndroidRestartActionConvergence(browser) {
         }
       } } };
       const nativeFetch = window.fetch.bind(window);
+      const canonicalResponseUrl = (url) => {
+        const normalized = new URL(url.href);
+        normalized.searchParams.delete("refresh");
+        return normalized;
+      };
       const responseFor = (url) => {
-        const payload = payloads.get(`${url.origin}${url.pathname}${url.search}`)
+        const canonicalUrl = canonicalResponseUrl(url);
+        const payload = payloads.get(`${canonicalUrl.origin}${canonicalUrl.pathname}${canonicalUrl.search}`)
           || payloads.get(`${url.origin}${url.pathname}`);
         return new Response(JSON.stringify(payload || {}), {
           status: 200,
@@ -1122,6 +1129,8 @@ async function verifyAndroidRestartActionConvergence(browser) {
       pending.splice(0).forEach((release) => release());
       await waitFor(() => cardState().liked, "fresh restart action state did not reach the mounted card");
       const freshState = cardState();
+      const canonicalRestartCache = await cache.readCachedJson(active.value, restartPath);
+      const transportRestartCache = await cache.readCachedJson(active.value, `${restartPath}&refresh=1`);
       const targetedStable = cachedCard === host.querySelector("[data-video-id='restart-video']");
       host.querySelector("[data-video-id='restart-video'] .short-video-mobile-card").click();
       await waitFor(() => nativePayloads.length === 1, "fresh restart model was not available to the Native bridge");
@@ -1189,6 +1198,8 @@ async function verifyAndroidRestartActionConvergence(browser) {
         emptyAfterClear: emptyAfterClear === null,
         emptyAfterLateWrite: emptyAfterLateWrite === null,
         exactSearch: exact.pathname + exact.search,
+        canonicalRestartCacheActions: canonicalRestartCache?.payload?.videos?.[0]?.actions || null,
+        transportRestartCacheMissing: transportRestartCache === null,
         freshState,
         freshModelActions,
         freshWriteAfterFence: Boolean(afterFence.data?.videos?.[0]?.actions?.liked),
@@ -1212,8 +1223,12 @@ async function verifyAndroidRestartActionConvergence(browser) {
     assert.match(metrics.freshState.aria, /已点赞，11 个赞/u);
     assert.equal(metrics.targetedStable, true, "action-only convergence must retain the mounted card instead of rebuilding the list");
     assert.equal(metrics.afterRelatedAuthorsState.liked, true, "a delayed related-author response must render from the current fresh video state instead of restoring the stale cached video object");
-    assert.match(metrics.exactSearch, /^\/api\/short-videos\?q=restart-action&source=all&sort=published&limit=12&facets=0&stats=0$/u,
-      "restart convergence must revalidate the exact active search endpoint");
+    assert.match(metrics.exactSearch, /^\/api\/short-videos\?q=restart-action&source=all&sort=published&limit=12&facets=0&stats=0&refresh=1$/u,
+      "restart convergence transport must force-refresh the exact active search endpoint");
+    assert.deepEqual(metrics.canonicalRestartCacheActions, { collected: true, liked: true },
+      "authoritative transport data must still be stored under the canonical exact-list key");
+    assert.equal(metrics.transportRestartCacheMissing, true,
+      "the transport-only refresh=1 URL must never become a second IndexedDB key");
     assert.equal(metrics.offlineCachedState.liked, false, "offline restart must retain the persisted list");
     assert.equal(metrics.offlineRetriedState.liked, true, "an offline cached restart must retry and converge when the server returns");
     assert.deepEqual(metrics.originState, {
@@ -1249,6 +1264,286 @@ async function verifyAndroidRestartActionConvergence(browser) {
     assert.deepEqual(metrics.transactionError, { name: "UnknownError", resolved: false }, "cache transaction errors must reject with their transaction error");
   } finally {
     await page.close();
+  }
+}
+
+async function verifyAndroidColdRestartBootstrapConvergence(browser) {
+  const context = await browser.newContext({ viewport: { width: 412, height: 820 } });
+  const query = "cold-restart-action";
+  const videoId = "cold-restart-video";
+  const expectedPath = `/api/short-videos?${new URLSearchParams({
+    q: query,
+    source: "all",
+    sort: "published",
+    limit: "12",
+    facets: "0",
+    stats: "0"
+  })}`;
+  const transportRequests = [];
+  let serverActions = { liked: false, collected: false };
+  const staleActions = { liked: false, collected: false };
+  let coldRequestStartedResolve;
+  let releaseColdRequestResolve;
+  const coldRequestStarted = new Promise((resolve) => { coldRequestStartedResolve = resolve; });
+  const releaseColdRequest = new Promise((resolve) => { releaseColdRequestResolve = resolve; });
+  let holdColdRequest = false;
+  let refreshMode = "fresh";
+  const feed = (actions = serverActions, envelope = {}) => ({
+    videos: [{
+      id: videoId,
+      title: "冷启动缓存收敛",
+      mediaType: "video",
+      streamUrl: `/media/short-video/${videoId}`,
+      actions: { ...actions },
+      stats: {
+        likes: actions.liked ? 11 : 10,
+        collects: actions.collected ? 4 : 3
+      }
+    }],
+    total: 1,
+    hasMore: false,
+    limit: 12,
+    offset: 0,
+    source: "all",
+    sort: "published",
+    ...envelope
+  });
+
+  await context.route((url) => url.pathname === "/api/short-videos" && url.searchParams.get("q") === query, async (route) => {
+    const requestUrl = new URL(route.request().url());
+    transportRequests.push(`${requestUrl.pathname}${requestUrl.search}`);
+    if (holdColdRequest) {
+      coldRequestStartedResolve();
+      await releaseColdRequest;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "cache-control": "no-store" },
+      body: JSON.stringify(requestUrl.searchParams.get("refresh") === "1"
+        ? refreshMode === "fresh"
+          ? feed(serverActions)
+          : feed(staleActions, refreshMode === "offline"
+            ? { cached: true, stale: true, offline: true, cacheState: "offline" }
+            : { cached: true, stale: true, cacheState: "stale-refreshing" })
+        : feed(staleActions, { cached: true, stale: true, cacheState: "stale-refreshing" }))
+    });
+  });
+  await context.addInitScript(({ initialQuery }) => {
+    localStorage.setItem("fanhao.serverUrl", location.origin);
+    localStorage.setItem("fanhao.android.lastView", JSON.stringify({
+      view: "shortVideoSearch",
+      params: { query: initialQuery, source: "all", sort: "published", tab: "all" },
+      updatedAt: new Date().toISOString()
+    }));
+    globalThis.__coldRestartNativePayloads = [];
+    globalThis.Capacitor = { Plugins: { FanHaoPlayer: {
+      async playShortFeed(payload) {
+        globalThis.__coldRestartNativePayloads.push(JSON.parse(payload.videos));
+        return { serverBase: new URL(payload.baseUrl).origin, snapshots: [] };
+      }
+    } } };
+    globalThis.__coldRestartUnhandled = [];
+    window.addEventListener("unhandledrejection", (event) => {
+      globalThis.__coldRestartUnhandled.push(String(event.reason?.message || event.reason || "unknown"));
+    });
+    globalThis.__coldRestartSamples = [];
+    const sample = () => {
+      const card = document.querySelector("[data-video-id='cold-restart-video'] .short-video-mobile-card");
+      const like = document.querySelector("[data-video-id='cold-restart-video'] .short-video-mobile-thumb-metric");
+      if (!card || !like) return;
+      const value = {
+        aria: card.getAttribute("aria-label") || "",
+        liked: like.classList.contains("is-liked"),
+        text: like.textContent || ""
+      };
+      const previous = globalThis.__coldRestartSamples.at(-1);
+      if (!previous || JSON.stringify(previous) !== JSON.stringify(value)) globalThis.__coldRestartSamples.push(value);
+    };
+    window.addEventListener("DOMContentLoaded", () => {
+      new MutationObserver(sample).observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["aria-label", "class"],
+        childList: true,
+        subtree: true
+      });
+      sample();
+    }, { once: true });
+  }, { initialQuery: query });
+
+  const firstPage = await context.newPage();
+  const firstErrors = [];
+  firstPage.on("pageerror", (error) => firstErrors.push(error?.message || String(error)));
+  try {
+    await firstPage.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+    const firstCard = firstPage.locator(`[data-video-id='${videoId}']`);
+    await firstCard.waitFor({ state: "visible", timeout: 10000 }).catch(async () => {
+      assert.fail(`initial Android bootstrap did not render the cache seed: ${firstErrors.join(" | ")} / ${await firstPage.locator("#statusText").textContent()}`);
+    });
+    assert.equal(await firstPage.locator(`[data-video-id='${videoId}'] .short-video-mobile-thumb-metric`).evaluate((node) => node.classList.contains("is-liked")), false);
+    await waitFor(
+      () => firstPage.evaluate(async ({ requestPath }) => {
+        const cache = await import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867");
+        const entry = await cache.readCachedJson(location.origin, requestPath);
+        return entry?.payload?.videos?.[0]?.actions?.liked;
+      }, { requestPath: expectedPath }),
+      (liked) => liked === false,
+      5000
+    );
+  } finally {
+    await firstPage.close();
+  }
+
+  // The authoritative mutation occurs only after the first renderer is gone,
+  // matching a Native PUT followed by force-stop before Activity result delivery.
+  serverActions = { liked: true, collected: true };
+  holdColdRequest = true;
+  const coldPage = await context.newPage();
+  const coldErrors = [];
+  coldPage.on("pageerror", (error) => coldErrors.push(error?.message || String(error)));
+  try {
+    await coldPage.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+    await coldRequestStarted;
+    const coldCard = coldPage.locator(`[data-video-id='${videoId}']`);
+    await coldCard.waitFor({ state: "visible", timeout: 10000 }).catch(async () => {
+      assert.fail(`cold Android bootstrap did not render persisted data before revalidation: ${coldErrors.join(" | ")} / ${await coldPage.locator("#statusText").textContent()}`);
+    });
+    await coldCard.evaluate((node) => { node.dataset.coldRestartMount = "persisted"; });
+    assert.equal(await coldPage.locator(`[data-video-id='${videoId}'] .short-video-mobile-thumb-metric`).evaluate((node) => node.classList.contains("is-liked")), false,
+      "cold bootstrap must expose the persisted pre-Native action while its authoritative GET is pending");
+    releaseColdRequestResolve();
+    await coldPage.waitForFunction((id) => document.querySelector(`[data-video-id='${id}'] .short-video-mobile-thumb-metric`)?.classList.contains("is-liked"), videoId, { timeout: 5000 });
+    const targetedStable = await coldCard.evaluate((node) => node.dataset.coldRestartMount === "persisted");
+    await coldPage.locator(`[data-video-id='${videoId}'] .short-video-mobile-card`).click();
+    await coldPage.waitForFunction(() => globalThis.__coldRestartNativePayloads.length > 0, null, { timeout: 5000 });
+    const observed = await coldPage.evaluate(async ({ requestPath }) => {
+      const cache = await import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867");
+      const entry = await cache.readCachedJson(location.origin, requestPath);
+      const transportEntry = await cache.readCachedJson(location.origin, `${requestPath}&refresh=1`);
+      return {
+        cacheActions: entry?.payload?.videos?.[0]?.actions || null,
+        nativeActions: globalThis.__coldRestartNativePayloads.at(-1)?.videos?.[0]?.actions || null,
+        samples: globalThis.__coldRestartSamples,
+        transportCacheMissing: transportEntry === null
+      };
+    }, { requestPath: expectedPath });
+    assert.deepEqual(observed.cacheActions, { liked: true, collected: true }, "cold authoritative GET must replace the persisted action cache");
+    assert.deepEqual(observed.nativeActions, { liked: true, collected: true }, "the actual bootstrap list model passed to Native must contain authoritative actions");
+    assert(observed.samples.some((sample) => sample.liked === false), "cold bootstrap observability must capture the persisted false state");
+    assert(observed.samples.some((sample) => sample.liked === true), "cold bootstrap observability must capture the authoritative apply");
+    assert.equal(observed.transportCacheMissing, true, "cold authoritative data must not be persisted under its refresh=1 transport URL");
+    assert.equal(targetedStable, true, "action-only cold convergence must patch the mounted card instead of rebuilding it");
+    const authoritativePath = `${expectedPath}&refresh=1`;
+    const authoritativeRequests = transportRequests.filter((requestPath) => requestPath === authoritativePath);
+    assert.equal(authoritativeRequests.length, 2, "warm seed plus cold double-render must issue one authoritative exact-list GET per process");
+    assert.equal(transportRequests.some((requestPath) => requestPath === expectedPath), false, "Android revalidation transport must bypass stale list cache with refresh=1");
+    assert.deepEqual(coldErrors, [], "real Android bootstrap convergence must not raise page errors");
+
+    // A server that can only return a stale/offline envelope is not authority.
+    // Reboot the same real app route for both envelope variants and prove they
+    // preserve the canonical model without leaking a background rejection.
+    await coldPage.close();
+    holdColdRequest = false;
+    serverActions = { liked: true, collected: true };
+    for (const rejectedMode of ["stale", "offline"]) {
+      refreshMode = rejectedMode;
+      const stalePage = await context.newPage();
+      const staleErrors = [];
+      stalePage.on("pageerror", (error) => staleErrors.push(error?.message || String(error)));
+      try {
+        await stalePage.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+        const staleCard = stalePage.locator(`[data-video-id='${videoId}']`);
+        await staleCard.waitFor({ state: "visible", timeout: 10000 });
+        await stalePage.waitForTimeout(900);
+        assert.equal(await stalePage.locator(`[data-video-id='${videoId}'] .short-video-mobile-thumb-metric`).evaluate((node) => node.classList.contains("is-liked")), true,
+          `${rejectedMode} authoritative retries must retain the last canonical true state instead of applying their stale false envelope`);
+        await stalePage.locator(`[data-video-id='${videoId}'] .short-video-mobile-card`).click();
+        await stalePage.waitForFunction(() => globalThis.__coldRestartNativePayloads.length > 0, null, { timeout: 5000 });
+        const retained = await stalePage.evaluate(async ({ requestPath }) => {
+          const cache = await import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867");
+          const entry = await cache.readCachedJson(location.origin, requestPath);
+          const transportEntry = await cache.readCachedJson(location.origin, `${requestPath}&refresh=1`);
+          return {
+            cacheActions: entry?.payload?.videos?.[0]?.actions || null,
+            nativeActions: globalThis.__coldRestartNativePayloads.at(-1)?.videos?.[0]?.actions || null,
+            transportCacheMissing: transportEntry === null,
+            unhandled: globalThis.__coldRestartUnhandled
+          };
+        }, { requestPath: expectedPath });
+        assert.deepEqual(retained.cacheActions, { liked: true, collected: true }, `${rejectedMode} envelopes must not overwrite the canonical IndexedDB key`);
+        assert.deepEqual(retained.nativeActions, { liked: true, collected: true }, `${rejectedMode} envelopes must not overwrite the model passed to Native`);
+        assert.equal(retained.transportCacheMissing, true, `${rejectedMode} envelopes must not create a refresh=1 IndexedDB key`);
+        assert.deepEqual(staleErrors, [], `${rejectedMode} retries must not raise page errors`);
+        assert.deepEqual(retained.unhandled, [], `${rejectedMode} retries must keep their background rejection handled`);
+      } finally {
+        await stalePage.close();
+      }
+    }
+
+    // Without any local response, the explicit server stale/offline payload is
+    // still useful for temporary offline rendering. It must remain
+    // non-authoritative: neither canonical nor transport cache keys may exist.
+    const cacheClearingPage = await context.newPage();
+    await cacheClearingPage.goto(`${baseUrl}/android-picker-fixture`, { waitUntil: "domcontentloaded" });
+    await cacheClearingPage.evaluate(async () => {
+      const cache = await import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867");
+      await cache.clearCachedData();
+    });
+    await cacheClearingPage.close();
+    refreshMode = "offline";
+    const noLocalPage = await context.newPage();
+    const noLocalErrors = [];
+    noLocalPage.on("pageerror", (error) => noLocalErrors.push(error?.message || String(error)));
+    try {
+      await noLocalPage.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+      const noLocalCard = noLocalPage.locator(`[data-video-id='${videoId}']`);
+      await noLocalCard.waitFor({ state: "visible", timeout: 10000 });
+      assert.equal(await noLocalPage.locator(`[data-video-id='${videoId}'] .short-video-mobile-thumb-metric`).evaluate((node) => node.classList.contains("is-liked")), false,
+        "no-local offline bootstrap may render the explicit non-authoritative server fallback instead of a blank screen");
+      await noLocalPage.locator(`[data-video-id='${videoId}'] .short-video-mobile-card`).click();
+      await noLocalPage.waitForFunction(() => globalThis.__coldRestartNativePayloads.length > 0, null, { timeout: 5000 });
+      const noLocal = await noLocalPage.evaluate(async ({ requestPath }) => {
+        const cache = await import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867");
+        return {
+          canonical: await cache.readCachedJson(location.origin, requestPath),
+          nativeActions: globalThis.__coldRestartNativePayloads.at(-1)?.videos?.[0]?.actions || null,
+          transport: await cache.readCachedJson(location.origin, `${requestPath}&refresh=1`),
+          unhandled: globalThis.__coldRestartUnhandled
+        };
+      }, { requestPath: expectedPath });
+      assert.equal(noLocal.canonical, null, "a no-local offline fallback must not become the canonical IndexedDB response");
+      assert.equal(noLocal.transport, null, "a no-local offline fallback must not create a refresh=1 IndexedDB response");
+      assert.deepEqual(noLocal.nativeActions, { liked: false, collected: false }, "Native may receive the same temporary non-authoritative fallback shown by Web");
+      assert.deepEqual(noLocalErrors, [], "no-local offline fallback must not raise page errors");
+      assert.deepEqual(noLocal.unhandled, [], "no-local offline fallback must not leak an unhandled rejection");
+    } finally {
+      await noLocalPage.close();
+    }
+
+    refreshMode = "fresh";
+    const recoveredPage = await context.newPage();
+    try {
+      await recoveredPage.goto(`${baseUrl}/android-client/index.html`, { waitUntil: "domcontentloaded" });
+      await recoveredPage.locator(`[data-video-id='${videoId}']`).waitFor({ state: "visible", timeout: 10000 });
+      await recoveredPage.waitForFunction((id) => document.querySelector(`[data-video-id='${id}'] .short-video-mobile-thumb-metric`)?.classList.contains("is-liked"), videoId, { timeout: 5000 });
+      const recovered = await recoveredPage.evaluate(async ({ requestPath }) => {
+        const cache = await import("/android-client/js/cache.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867");
+        const canonical = await cache.readCachedJson(location.origin, requestPath);
+        const transport = await cache.readCachedJson(location.origin, `${requestPath}&refresh=1`);
+        return {
+          canonicalActions: canonical?.payload?.videos?.[0]?.actions || null,
+          transport
+        };
+      }, { requestPath: expectedPath });
+      assert.deepEqual(recovered.canonicalActions, { liked: true, collected: true }, "the next connected cold bootstrap must converge and persist authority");
+      assert.equal(recovered.transport, null, "connected recovery must still preserve the single canonical IndexedDB key");
+    } finally {
+      await recoveredPage.close();
+    }
+  } finally {
+    releaseColdRequestResolve?.();
+    if (!coldPage.isClosed()) await coldPage.close();
+    await context.close();
   }
 }
 

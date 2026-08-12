@@ -25,6 +25,8 @@ const dbPath = path.join(fixtureRoot, "short-videos.sqlite");
 const managerDbPath = path.join(fixtureRoot, "download-manager.sqlite");
 const cacheRoot = path.join(fixtureRoot, "cache");
 let runtime = null;
+let listQueryHook = null;
+const touchedListCachePaths = [];
 
 try {
   createLegacyFixture();
@@ -52,6 +54,7 @@ try {
   await verifyLegacyFalseOwnershipMigration();
   await verifyPublicReadSurfaces();
   await verifyActionStatistics();
+  await verifyListCacheAuthorityContract();
   await verifyMetadataSyncPreservesExplicitFalse();
   await verifyDownloadImportPreservesExplicitFalse();
   await verifyRecommendedRecoversAfterLockedPreflight();
@@ -354,9 +357,156 @@ function createFixtureRuntime() {
     sharedCache: {
       rootDir: cacheRoot,
       scheduleCleanup() {},
-      touch() {}
+      touch(filePath) {
+        if (String(filePath).includes(`${path.sep}short-videos${path.sep}lists${path.sep}`)) {
+          touchedListCachePaths.push(filePath);
+        }
+      }
+    },
+    listQuery(url, options, fallback) {
+      return typeof listQueryHook === "function"
+        ? listQueryHook(url, options, fallback)
+        : fallback();
     }
   });
+}
+
+async function verifyListCacheAuthorityContract() {
+  const requestPath = "/api/short-videos?q=%E5%8A%A8%E4%BD%9C%E5%A5%91%E7%BA%A6%E7%9B%AE%E6%A0%87&source=all&sort=published&limit=7&facets=0&stats=0";
+  await assertPutAction(TARGET_ID, "like", false, "liked", "likes", 99);
+  touchedListCachePaths.length = 0;
+  const seeded = await request("GET", `${requestPath}&refresh=1`);
+  assert.equal(findVideo(seeded.data?.videos, TARGET_ID)?.actions?.liked, false, "authority fixture must seed the old cached action");
+  const cachePath = touchedListCachePaths.at(-1);
+  assert(cachePath && fs.existsSync(cachePath), "authority fixture must exercise the real disk list cache");
+
+  await assertPutAction(TARGET_ID, "like", true, "liked", "likes", 100);
+  const afterInvalidation = await request("GET", requestPath);
+  assert.equal(afterInvalidation.status, 200);
+  assert.equal(afterInvalidation.data?.stale, undefined, "generation-invalidated cache must not be exposed as TTL-stale data");
+  assert.equal(findVideo(afterInvalidation.data?.videos, TARGET_ID)?.actions?.liked, true,
+    "an ordinary GET after action invalidation must synchronously return the authoritative action");
+
+  const ageOnlyCache = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+  ageOnlyCache.cachedAt = "2000-01-01T00:00:00.000Z";
+  fs.writeFileSync(cachePath, JSON.stringify(ageOnlyCache));
+  const ageOnlyStale = await request("GET", requestPath);
+  assert.equal(ageOnlyStale.status, 200);
+  assert.equal(ageOnlyStale.data?.stale, true, "same-generation age expiry may retain the fast stale-while-revalidate path");
+  assert.equal(ageOnlyStale.data?.cacheState, "stale-refreshing");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+
+  await assertPutAction(TARGET_ID, "like", false, "liked", "likes", 99);
+  touchedListCachePaths.length = 0;
+  await request("GET", `${requestPath}&refresh=1`);
+  let firstQueryRelease;
+  let firstQueryStartedResolve;
+  const firstQueryStarted = new Promise((resolve) => { firstQueryStartedResolve = resolve; });
+  const firstQueryReleasePromise = new Promise((resolve) => { firstQueryRelease = resolve; });
+  let raceQueries = 0;
+  const oldSnapshot = seeded.data;
+  listQueryHook = async (_url, _options, fallback) => {
+    raceQueries += 1;
+    if (raceQueries === 1) {
+      firstQueryStartedResolve();
+      await firstQueryReleasePromise;
+      return oldSnapshot;
+    }
+    return fallback();
+  };
+  const racingGet = request("GET", `${requestPath}&refresh=1`);
+  await firstQueryStarted;
+  await assertPutAction(TARGET_ID, "like", true, "liked", "likes", 100);
+  firstQueryRelease();
+  const raced = await racingGet;
+  listQueryHook = null;
+  assert.equal(raceQueries, 2, "a mutation during a foreground query must force one stable retry");
+  assert.equal(raced.status, 200);
+  assert.equal(raced.data?.stale, undefined, "the pre-mutation query snapshot must never be sent as authority");
+  assert.equal(findVideo(raced.data?.videos, TARGET_ID)?.actions?.liked, true,
+    "the route must send only the post-mutation stable snapshot");
+  const racedCache = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+  assert.equal(findVideo(racedCache.videos, TARGET_ID)?.actions?.liked, true,
+    "the pre-mutation snapshot must not be written under the current cache generation");
+
+  const exhaustedPath = "/api/short-videos?q=authority-fence-exhausted&source=all&sort=published&limit=9&facets=0&stats=0&refresh=1";
+  const cacheFilesBeforeExhaustion = new Set(listCacheFiles());
+  let exhaustedQueries = 0;
+  listQueryHook = async () => {
+    exhaustedQueries += 1;
+    runtime.clearListCache();
+    return oldSnapshot;
+  };
+  const exhausted = await request("GET", exhaustedPath);
+  listQueryHook = null;
+  assert.equal(exhaustedQueries, 3, "foreground authority fence must remain bounded under continuous mutation");
+  assert.equal(exhausted.status, 503, "an unstable list must fail retryably instead of returning false authority");
+  assert.equal(exhausted.data?.retryable, true);
+  assert.deepEqual(new Set(listCacheFiles()), cacheFilesBeforeExhaustion,
+    "exhausted unstable snapshots must not create an authoritative cache entry");
+
+  listQueryHook = async () => { throw new Error("fixture query offline"); };
+  runtime.clearListCache();
+  const offlineFallback = await request("GET", requestPath);
+  listQueryHook = null;
+  assert.equal(offlineFallback.status, 200, "generation-invalidated disk data must remain available as an explicit offline fallback");
+  assert.equal(offlineFallback.data?.stale, true);
+  assert.equal(offlineFallback.data?.offline, true);
+  assert.equal(offlineFallback.data?.cacheState, "offline");
+
+  await verifyWatchGenerationAuthorityFence();
+  await assertPutAction(TARGET_ID, "like", false, "liked", "likes", 99);
+}
+
+async function verifyWatchGenerationAuthorityFence() {
+  const requestPath = "/api/short-videos?source=history&sort=watched&limit=6&facets=0&stats=0&refresh=1";
+  const oldData = {
+    videos: [{ id: TARGET_ID, actions: { liked: false, collected: false }, watch: { progressMs: 0 } }],
+    total: 1,
+    hasMore: false,
+    source: "history",
+    sort: "watched"
+  };
+  const newData = {
+    ...oldData,
+    videos: [{ ...oldData.videos[0], watch: { progressMs: 1200, lastWatchedAt: "2026-08-12T13:00:00.000Z" } }]
+  };
+  let releaseFirst;
+  let firstStartedResolve;
+  const firstStarted = new Promise((resolve) => { firstStartedResolve = resolve; });
+  const releaseFirstPromise = new Promise((resolve) => { releaseFirst = resolve; });
+  let queries = 0;
+  listQueryHook = async () => {
+    queries += 1;
+    if (queries === 1) {
+      firstStartedResolve();
+      await releaseFirstPromise;
+      return oldData;
+    }
+    return newData;
+  };
+  const listRequest = request("GET", requestPath);
+  await firstStarted;
+  const watch = await request("PUT", `/api/short-videos/${encodeURIComponent(TARGET_ID)}/watch`, {
+    progressMs: 1200,
+    lastWatchedAt: "2026-08-12T13:00:00.000Z"
+  });
+  assert.equal(watch.status, 200);
+  releaseFirst();
+  const response = await listRequest;
+  listQueryHook = null;
+  assert.equal(queries, 2, "watch-sensitive foreground queries must retry after a watch generation change");
+  assert.equal(response.data?.videos?.[0]?.watch?.progressMs, 1200,
+    "watch-sensitive routes must send the post-watch stable snapshot");
+}
+
+function listCacheFiles() {
+  const directory = path.join(cacheRoot, "short-videos", "lists");
+  try {
+    return fs.readdirSync(directory).filter((name) => name.endsWith(".json")).sort();
+  } catch {
+    return [];
+  }
 }
 
 async function verifyPublicReadSurfaces() {

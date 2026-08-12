@@ -1,8 +1,8 @@
-import { createShortVideoApi } from "./api.js?v=20260812-action-restart-sync-01";
+import { createShortVideoApi } from "./api.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867";
 import { createShortVideoCollections } from "./collections/controller.js?v=20260812-collection-management-03";
-import { createShortVideoListController } from "./list/controller.js?v=20260812-action-restart-sync-01";
-import { createShortVideoListView } from "./list/view.js?v=20260812-native-action-ui-01";
-import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260812-action-restart-sync-01";
+import { createShortVideoListController } from "./list/controller.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867";
+import { createShortVideoListView } from "./list/view.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867";
+import { createShortVideoNativeFeed } from "./player/native-feed.js?v=20260812-action-cold-revalidate-v2-5c293a6f8867";
 import { createShortVideoSearch } from "./search.js?v=20260712-douyin-search-05";
 import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=20260812-collection-review-02";
 import { createShortVideoIcons } from "./ui/icons.js?v=20260712-douyin-search-05";
