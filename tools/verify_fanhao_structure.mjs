@@ -1754,12 +1754,18 @@ assert.equal((collectionQueryServiceSource.match(/queried\.works\.slice\(offset,
 assert(userStateServiceSource.includes("stateRevision += 1"), "favorite and progress mutations must version cached search facets");
 const serviceLauncher = read("start-fanhao.ps1");
 assert(
-  /for \(\$i = 0; \$i -lt 60; \$i\+\+\)[\s\S]*Start-Sleep -Milliseconds 500/.test(serviceLauncher),
-  "FanHao launcher must retain at least a 30-second TCP readiness budget for bounded pre-listen metadata preparation"
+  /\[ValidateRange\(5, 600\)\][\s\S]*\[int\]\$StartupTimeoutSeconds = 120/.test(serviceLauncher) &&
+    /\[System\.Diagnostics\.Stopwatch\]::StartNew\(\)/.test(serviceLauncher),
+  "FanHao launcher must use a bounded, configurable startup deadline that accommodates cold metadata preparation"
 );
 assert(
-  /if \(-not \$ready\)[\s\S]*Stop-Process -Id \$process\.Id -Force/.test(serviceLauncher),
-  "FanHao launcher must stop a startup process that never opens its port"
+  /\$readyProcessId -eq \$process\.Id[\s\S]*Test-FanhaoHealth -HealthPort \$Port -TimeoutMilliseconds \$healthTimeoutMilliseconds/.test(serviceLauncher),
+  "FanHao launcher must require both its target PID listener and a healthy API within the remaining startup budget"
+);
+assert(
+  /if \(-not \$ready\)[\s\S]*Stop-FanhaoStartupProcess -Process \$process/.test(serviceLauncher) &&
+    /\$Process\.Kill\(\)/.test(serviceLauncher),
+  "FanHao launcher must stop only the process created by a startup that misses its deadline"
 );
 const serverRootFiles = fs.readdirSync(path.join(root, "src/modules/fanhao/server"), { withFileTypes: true })
   .filter((entry) => entry.isFile() && entry.name.endsWith(".js"))

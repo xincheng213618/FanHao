@@ -5,7 +5,9 @@ param(
   [switch]$Restart,
   [switch]$RestartDownloadManager,
   [switch]$SkipDownloadManager,
-  [switch]$Foreground
+  [switch]$Foreground,
+  [ValidateRange(5, 600)]
+  [int]$StartupTimeoutSeconds = 120
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,13 +21,60 @@ $OutLog = Join-Path $LogDir "fanhao.out.log"
 $ErrLog = Join-Path $LogDir "fanhao.err.log"
 
 function Test-FanhaoHealth {
-  param([int]$HealthPort)
+  param(
+    [int]$HealthPort,
+    [ValidateRange(1, 30000)]
+    [int]$TimeoutMilliseconds = 5000
+  )
 
+  $request = $null
+  $response = $null
   try {
-    $health = Invoke-RestMethod -Uri "http://127.0.0.1:$HealthPort/api/health" -TimeoutSec 5
+    $request = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$HealthPort/api/health")
+    $request.Method = "GET"
+    $request.Timeout = $TimeoutMilliseconds
+    $request.ReadWriteTimeout = $TimeoutMilliseconds
+    $response = $request.GetResponse()
+    $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+    try {
+      $health = ConvertFrom-Json $reader.ReadToEnd()
+    } finally {
+      $reader.Dispose()
+    }
     return [bool]$health.ok
   } catch {
     return $false
+  } finally {
+    if ($null -ne $response) { $response.Dispose() }
+    if ($null -ne $request) { $request.Abort() }
+  }
+}
+
+function Write-FanhaoLogTail {
+  param([int]$Tail = 40)
+
+  foreach ($log in @(
+    @{ Label = "stdout"; Path = $OutLog },
+    @{ Label = "stderr"; Path = $ErrLog }
+  )) {
+    Write-Host ""
+    Write-Host "Last $($log.Label) log lines ($($log.Path)):"
+    if (Test-Path -LiteralPath $log.Path -PathType Leaf) {
+      Get-Content -LiteralPath $log.Path -Tail $Tail
+    } else {
+      Write-Host "  <log file not created>"
+    }
+  }
+}
+
+function Stop-FanhaoStartupProcess {
+  param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+
+  if (-not $Process.HasExited) {
+    try {
+      $Process.Kill()
+      $Process.WaitForExit(5000) | Out-Null
+    } catch {}
   }
 }
 
@@ -185,36 +234,48 @@ $process = Start-Process -FilePath "node" `
 Write-Host "Starting FanHao on port $Port (PID $($process.Id))..."
 
 if ($process.HasExited) {
-  Write-Host "FanHao failed to start. Exit code: $($process.ExitCode)"
-  if (Test-Path -LiteralPath $ErrLog) {
-    Write-Host ""
-    Write-Host "Last error log lines:"
-    Get-Content -LiteralPath $ErrLog -Tail 40
-  }
+  Write-Host "FanHao failed to start before opening its port (PID $($process.Id))."
+  Write-FanhaoLogTail
   exit 1
 }
 
 $ready = $false
-for ($i = 0; $i -lt 60; $i++) {
-  Start-Sleep -Milliseconds 500
-  if ($process.HasExited) { break }
+$listenerObserved = $false
+$startupTimer = [System.Diagnostics.Stopwatch]::StartNew()
+$startupBudgetMilliseconds = [double]$StartupTimeoutSeconds * 1000
+while ($startupTimer.Elapsed.TotalMilliseconds -lt $startupBudgetMilliseconds) {
+  if ($process.HasExited) {
+    Write-Host "FanHao failed to start before opening its port (PID $($process.Id))."
+    Write-FanhaoLogTail
+    exit 1
+  }
 
   $readyProcessId = Get-ListeningProcessId -LocalPort $Port
   if ($readyProcessId -eq $process.Id) {
-    $ready = $true
-    break
+    $listenerObserved = $true
+    $remainingMilliseconds = $startupBudgetMilliseconds - $startupTimer.Elapsed.TotalMilliseconds
+    if ($remainingMilliseconds -gt 0) {
+      $healthTimeoutMilliseconds = [Math]::Max(1, [Math]::Min(1000, [int][Math]::Floor($remainingMilliseconds)))
+      if (Test-FanhaoHealth -HealthPort $Port -TimeoutMilliseconds $healthTimeoutMilliseconds) {
+        $ready = $true
+        break
+      }
+    }
   }
+
+  $remainingMilliseconds = $startupBudgetMilliseconds - $startupTimer.Elapsed.TotalMilliseconds
+  if ($remainingMilliseconds -le 0) { break }
+  $sleepMilliseconds = [Math]::Max(1, [Math]::Min(250, [int][Math]::Floor($remainingMilliseconds)))
+  Start-Sleep -Milliseconds $sleepMilliseconds
 }
+$startupTimer.Stop()
 
 if (-not $ready) {
-  if (-not $process.HasExited) {
-    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-  }
-  Write-Host "FanHao process started (PID $($process.Id)), but port $Port is not listening yet."
-  Write-Host "The stalled startup process has been stopped."
-  Write-Host "Logs:"
-  Write-Host "  $OutLog"
-  Write-Host "  $ErrLog"
+  Stop-FanhaoStartupProcess -Process $process
+  $readiness = if ($listenerObserved) { "its /api/health endpoint did not become healthy" } else { "it did not listen on port $Port" }
+  Write-Host "FanHao startup timed out after $StartupTimeoutSeconds seconds: $readiness (PID $($process.Id))."
+  Write-Host "Only the startup process created by this invocation was stopped."
+  Write-FanhaoLogTail
   exit 2
 }
 
