@@ -712,6 +712,9 @@ assert.match(runtimeVerifierSource, /setup-downloader\.ps1/);
 assert.match(runtimeVerifierSource, /-DownloaderRoot\s+\$DownloaderDir\s+-PythonExecutable\s+\$Python/);
 assert.match(runtimeVerifierSource, /DownloaderPython\s*=\s*Join-Path\s+\$DownloaderDir\s+["']\.venv\\Scripts\\python\.exe["']/);
 assert.match(runtimeVerifierSource, /DownloaderRun\s*=\s*Join-Path\s+\$DownloaderDir\s+["']run\.py["']/);
+assert.match(runtimeVerifierSource, /test_download_resume_contract\.py/);
+assert.match(runtimeVerifierSource, /test_http_range_contract\.py/);
+assert.match(runtimeVerifierSource, /&\s+\$DownloaderPython\s+-m\s+unittest\s+discover/);
 assert.match(runtimeVerifierSource, /\/api\/v1\/health/);
 assert.match(runtimeVerifierSource, /\/api\/v1\/jobs/);
 assert.match(runtimeVerifierSource, /PYTHONUTF8/);
@@ -726,7 +729,7 @@ const runtimeResult = spawnSync(
   {
     cwd: projectRoot,
     encoding: "utf8",
-    timeout: 120_000,
+    timeout: 240_000,
     env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" }
   }
 );

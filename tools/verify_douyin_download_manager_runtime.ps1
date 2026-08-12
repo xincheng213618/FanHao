@@ -12,6 +12,8 @@ $SetupDownloader = Join-Path $ModuleDir "setup-downloader.ps1"
 $DownloaderDir = Join-Path $ModuleDir "downloader"
 $DownloaderPython = Join-Path $DownloaderDir ".venv\Scripts\python.exe"
 $DownloaderRun = Join-Path $DownloaderDir "run.py"
+$ResumeContractTest = Join-Path $DownloaderDir "tests\test_download_resume_contract.py"
+$HttpRangeContractTest = Join-Path $TestsDir "test_http_range_contract.py"
 
 if ([string]::IsNullOrWhiteSpace($Python)) {
   $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
@@ -23,6 +25,12 @@ if (-not (Test-Path -LiteralPath $TestsDir)) {
 }
 if (-not (Test-Path -LiteralPath $SetupDownloader -PathType Leaf)) {
   throw "Downloader setup script was not found: $SetupDownloader"
+}
+if (-not (Test-Path -LiteralPath $ResumeContractTest -PathType Leaf)) {
+  throw "Embedded downloader resume contract test was not found: $ResumeContractTest"
+}
+if (-not (Test-Path -LiteralPath $HttpRangeContractTest -PathType Leaf)) {
+  throw "Download-manager HTTP range contract test was not found: $HttpRangeContractTest"
 }
 
 function Get-LogTail {
@@ -127,6 +135,15 @@ try {
   $env:PYTHONIOENCODING = "utf-8:replace"
   $env:PYTHONLEGACYWINDOWSSTDIO = "0"
   & $SetupDownloader -DownloaderRoot $DownloaderDir -PythonExecutable $Python
+  Push-Location $DownloaderDir
+  try {
+    & $DownloaderPython -m unittest discover -s tests -p "test_download_resume_contract.py" -v
+    if ($LASTEXITCODE -ne 0) {
+      throw "Embedded downloader resume contract failed with exit code $LASTEXITCODE"
+    }
+  } finally {
+    Pop-Location
+  }
   & $Python -m unittest discover -s $TestsDir -p "test_*.py" -v
   if ($LASTEXITCODE -ne 0) {
     throw "Download-manager runtime characterization failed with exit code $LASTEXITCODE"
