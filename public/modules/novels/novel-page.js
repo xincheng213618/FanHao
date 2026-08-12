@@ -29,6 +29,8 @@ export function createNovelPage(deps) {
   let progressRevision = 0;
   let navigationId = 0;
   let navigationController = null;
+  let libraryRequestId = 0;
+  let libraryRequestController = null;
   let readerStatusTimer = null;
   let scrollListenerInstalled = false;
   let progressLifecycleInstalled = false;
@@ -160,9 +162,18 @@ export function createNovelPage(deps) {
     ensureState();
     if (state.novel.mode === "mine") state.novel.sort = "progress";
     if (state.novel.mode === "rankings" && !["chars", "updated"].includes(state.novel.sort)) state.novel.sort = "chars";
-    const paged = state.novel.mode === "rankings";
+    const query = Object.freeze({
+      author: String(state.novel.author || ""),
+      category: String(state.novel.category || "all"),
+      mode: String(state.novel.mode || "books"),
+      page: Math.max(0, Number(state.novel.page || 0)),
+      query: String(state.novel.query || ""),
+      sort: String(state.novel.sort || "updated")
+    });
+    const paged = query.mode === "rankings";
     const append = Boolean(!paged && options.append && state.novel.data && !state.novel.loading && !state.novel.loadingMore);
     if (options.append && !append) return;
+    const request = beginLibraryRequest();
     if (append) state.novel.loadingMore = true;
     else state.novel.loading = true;
     if (!append) state.novel.status = "正在读取小说书库";
@@ -171,28 +182,54 @@ export function createNovelPage(deps) {
     setReaderBodyClass();
     renderView();
     const params = new URLSearchParams();
-    if (state.novel.query) params.set("q", state.novel.query);
-    if (state.novel.mode === "mine") params.set("reading", "1");
-    if (["books", "author"].includes(state.novel.mode) && state.novel.category && state.novel.category !== "all") params.set("category", state.novel.category);
-    if (state.novel.mode === "books" && state.novel.author) params.set("author", state.novel.author);
-    if (state.novel.sort && state.novel.sort !== "updated") params.set("sort", state.novel.sort);
+    if (query.query) params.set("q", query.query);
+    if (query.mode === "mine") params.set("reading", "1");
+    if (["books", "author"].includes(query.mode) && query.category !== "all") params.set("category", query.category);
+    if (query.mode === "books" && query.author) params.set("author", query.author);
+    if (query.sort !== "updated") params.set("sort", query.sort);
     const pageSize = paged ? NOVEL_RANKING_PAGE_SIZE : NOVEL_BOOK_PAGE_SIZE;
     params.set("limit", String(pageSize));
     const existingEntries = state.novel.data?.books || [];
-    params.set("offset", String(paged ? state.novel.page * pageSize : append ? existingEntries.length : 0));
-    const endpoint = state.novel.mode === "author" && state.novel.author
-      ? `/api/novels/authors/${encodeURIComponent(state.novel.author)}`
-      : state.novel.mode === "manage"
+    params.set("offset", String(paged ? query.page * pageSize : append ? existingEntries.length : 0));
+    const endpoint = query.mode === "author" && query.author
+      ? `/api/novels/authors/${encodeURIComponent(query.author)}`
+      : query.mode === "manage"
         ? "/api/novels/summary"
         : "/api/novels";
-    const response = await api(`${endpoint}${state.novel.mode !== "manage" && params.toString() ? `?${params}` : ""}`);
-    const data = state.novel.mode === "manage"
+    if (!options.skipRoute) {
+      const writer = options.replaceRoute ? replaceRoute : pushRoute;
+      writer({
+        view: "novels",
+        novelBookId: "",
+        novelChapterIndex: "",
+        novelQuery: query.query,
+        novelCategory: query.category,
+        novelSort: query.sort,
+        novelMode: query.mode,
+        novelAuthor: query.author,
+        novelPage: query.page
+      });
+    }
+    let response;
+    try {
+      response = await api(`${endpoint}${query.mode !== "manage" && params.toString() ? `?${params}` : ""}`, {
+        signal: request.controller.signal
+      });
+    } catch (error) {
+      if (!isCurrentLibraryRequest(request)) return false;
+      finishLibraryRequest(request);
+      state.novel.loading = false;
+      state.novel.loadingMore = false;
+      throw error;
+    }
+    if (!isCurrentLibraryRequest(request)) return false;
+    const data = query.mode === "manage"
       ? { summary: response, books: [], total: 0, limit: pageSize, offset: 0 }
       : response;
     if (paged && Number(data.total || 0) > 0) {
       const pageCount = Math.max(1, Math.ceil(Number(data.total || 0) / pageSize));
-      const clampedPage = Math.min(pageCount - 1, state.novel.page);
-      if (clampedPage !== state.novel.page && !options.pageClamped) {
+      const clampedPage = Math.min(pageCount - 1, query.page);
+      if (clampedPage !== query.page && !options.pageClamped) {
         state.novel.page = clampedPage;
         state.novel.loading = false;
         state.novel.loadingMore = false;
@@ -204,46 +241,34 @@ export function createNovelPage(deps) {
     } else {
       state.novel.data = data;
     }
-    if (state.novel.mode === "manage") {
+    if (query.mode === "manage") {
       await collectionAdmin.load({ silent: true });
     } else {
       collectionAdmin.stopPolling();
     }
+    if (!isCurrentLibraryRequest(request)) return false;
+    finishLibraryRequest(request);
     state.novel.summary = data.summary || state.novel.summary;
     state.novel.loading = false;
     state.novel.loadingMore = false;
     const loadedEntries = state.novel.data?.books || [];
-    state.novel.hasMore = !paged && state.novel.mode !== "manage" && loadedEntries.length < Number(data.total || 0);
+    state.novel.hasMore = !paged && query.mode !== "manage" && loadedEntries.length < Number(data.total || 0);
     if (!paged) state.novel.page = 0;
-    state.novel.status = state.novel.mode === "manage"
+    state.novel.status = query.mode === "manage"
       ? ""
       : data.total
         ? ""
-        : state.novel.mode === "author"
+        : query.mode === "author"
           ? "这位作者还没有作品。"
-          : state.novel.mode === "mine"
+          : query.mode === "mine"
             ? "还没有阅读记录。"
-            : state.novel.mode === "rankings"
+            : query.mode === "rankings"
               ? "排行榜暂时没有小说。"
-              : state.novel.query
+              : query.query
                 ? "没有找到匹配的小说。"
                 : "这里还没有小说，请到“管理”页面刷新书库。";
     renderStats();
     renderView();
-    if (!options.skipRoute) {
-      const writer = options.replaceRoute ? replaceRoute : pushRoute;
-      writer({
-        view: "novels",
-        novelBookId: "",
-        novelChapterIndex: "",
-        novelQuery: state.novel.query,
-        novelCategory: state.novel.category,
-        novelSort: state.novel.sort,
-        novelMode: state.novel.mode,
-        novelAuthor: state.novel.author,
-        novelPage: state.novel.page
-      });
-    }
   }
 
   async function openBook(bookId, options = {}) {
@@ -364,6 +389,7 @@ export function createNovelPage(deps) {
   }
 
   function beginNavigation() {
+    invalidateLibraryRequest();
     navigationId += 1;
     navigationController?.abort();
     navigationController = new AbortController();
@@ -386,6 +412,29 @@ export function createNovelPage(deps) {
     navigationController?.abort();
     navigationController = null;
     clearReaderNavigationStatus();
+  }
+
+  function beginLibraryRequest() {
+    libraryRequestId += 1;
+    libraryRequestController?.abort();
+    libraryRequestController = new AbortController();
+    return { id: libraryRequestId, controller: libraryRequestController };
+  }
+
+  function isCurrentLibraryRequest(request) {
+    return request?.id === libraryRequestId
+      && request?.controller === libraryRequestController
+      && !request.controller.signal.aborted;
+  }
+
+  function finishLibraryRequest(request) {
+    if (request?.controller === libraryRequestController) libraryRequestController = null;
+  }
+
+  function invalidateLibraryRequest() {
+    libraryRequestId += 1;
+    libraryRequestController?.abort();
+    libraryRequestController = null;
   }
 
   function setReaderNavigationStatus(message, tone = "loading") {

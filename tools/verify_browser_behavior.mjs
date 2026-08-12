@@ -13,6 +13,7 @@ const ownedServer = suppliedBaseUrl ? null : await startFixtureServer(port);
 const fixturePort = Number(ownedServer?.address()?.port || 0);
 const baseUrl = suppliedBaseUrl || `http://127.0.0.1:${fixturePort}`;
 let delayedAuthorDetail = null;
+const delayedNovelRequests = [];
 const fixtureCollections = new Map();
 let fixtureCollectionSequence = 0;
 const fixtureCollectionDetailRequests = [];
