@@ -1,5 +1,4 @@
 package local.fanhao.library;
-
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -94,6 +93,7 @@ final class NativeShortVideoActionSnapshots {
   void remove(String videoId) {
     byVideoId.remove(cleanId(videoId));
   }
+  Map<String, Snapshot> snapshotMap() { return new LinkedHashMap<>(byVideoId); }
 
   private static String cleanId(String value) {
     String clean = String.valueOf(value == null ? "" : value).trim();

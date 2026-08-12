@@ -398,12 +398,15 @@ async function verifyNativeCollectionFeedBridge() {
 
   const originalWindow = globalThis.window;
   const calls = [];
+  const cacheInvalidations = [];
+  let activeUrl = "http://127.0.0.1:29998/";
   globalThis.window = {
     Capacitor: {
       Plugins: {
         FanHaoPlayer: {
           async playShortFeed(payload) {
             calls.push(payload);
+            return { serverBase: new URL(payload.baseUrl).origin, snapshots: [] };
           }
         }
       }
@@ -411,7 +414,10 @@ async function verifyNativeCollectionFeedBridge() {
   };
   const listState = { data: { videos: loaded, hasMore: true } };
   const nativeFeed = createShortVideoNativeFeed({
-    getActiveUrl: () => "http://127.0.0.1:29998/",
+    getActiveUrl: () => activeUrl,
+    invalidateShortVideoCache: async (baseUrl, prefix) => {
+      cacheInvalidations.push([baseUrl, prefix]);
+    },
     listState,
     shortVideoApiSource: () => "all",
     shortVideoToast: () => {}
@@ -560,6 +566,92 @@ async function verifyNativeCollectionFeedBridge() {
       nextCursor: "cursor-duplicate-page",
       expectedCursor: "cursor-48"
     });
+
+    const actionId = loaded[70].id;
+    const listVideo = {
+      ...loaded[70],
+      actions: { liked: false, collected: false },
+      stats: { likes: 10, collects: 3, comments: 2 }
+    };
+    const explicitVideo = {
+      ...loaded[70],
+      actions: { liked: false, collected: false },
+      stats: { likes: 10, collects: 3, comments: 2 }
+    };
+    const listVideos = loaded.map((item) => item.id === actionId ? listVideo : item);
+    const explicitVideos = loaded.map((item) => item.id === actionId ? explicitVideo : item);
+    listState.data = { videos: listVideos, hasMore: true };
+    const canonicalListData = listState.data;
+    cacheInvalidations.length = 0;
+    globalThis.window.Capacitor.Plugins.FanHaoPlayer.playShortFeed = async (payload) => {
+      calls.push(payload);
+      return {
+        serverBase: "http://127.0.0.1:29998",
+        snapshots: [{ videoId: actionId, liked: true, collected: true, likes: 11, collects: 4 }]
+      };
+    };
+    assert.equal(await nativeFeed.openNativeShortVideoFeed(explicitVideo, { videos: explicitVideos }), true,
+      "an acknowledged Native result must return through the existing bridge Promise");
+    assert.equal(listState.data, canonicalListData, "Native results must merge into listState without replacing its canonical data object");
+    assert.equal(listState.data.videos.find(({ id }) => id === actionId), listVideo,
+      "Native results must update the existing listState video model in place");
+    assert.deepEqual(listVideo.actions, { liked: true, collected: true });
+    assert.deepEqual(listVideo.stats, { likes: 11, collects: 4, comments: 2 });
+    assert.deepEqual(explicitVideo.actions, { liked: true, collected: true },
+      "Native results must also update an explicit feed array that is not listState.data.videos");
+    assert.deepEqual(explicitVideo.stats, { likes: 11, collects: 4, comments: 2 });
+    assert.deepEqual(cacheInvalidations, [["http://127.0.0.1:29998", "/api/short-videos"]],
+      "an acknowledged Native result must invalidate only the matching server's persisted short-video API cache");
+
+    globalThis.window.Capacitor.Plugins.FanHaoPlayer.playShortFeed = async (payload) => {
+      calls.push(payload);
+      return { serverBase: "http://127.0.0.1:29998", snapshots: [] };
+    };
+    await nativeFeed.openNativeShortVideoFeed(explicitVideo, { videos: explicitVideos });
+    const reopened = JSON.parse(calls.at(-1).videos).videos.find(({ id }) => id === actionId);
+    assert.deepEqual(reopened.actions, { liked: true, collected: true },
+      "immediately reopening the same video must serialize the acknowledged action state");
+    assert.equal(reopened.stats.likes, 11);
+    assert.equal(reopened.stats.collects, 4);
+
+    const otherServerVideo = {
+      ...loaded[70],
+      actions: { liked: false, collected: false },
+      stats: { likes: 20, collects: 6 }
+    };
+    activeUrl = "http://127.0.0.1:39999/library";
+    listState.data = { videos: [otherServerVideo], hasMore: false };
+    cacheInvalidations.length = 0;
+    globalThis.window.Capacitor.Plugins.FanHaoPlayer.playShortFeed = async (payload) => {
+      calls.push(payload);
+      activeUrl = "http://127.0.0.1:40000/";
+      listState.data = { videos: [otherServerVideo], hasMore: false };
+      return {
+        serverBase: "http://127.0.0.1:39999",
+        snapshots: [{ videoId: actionId, liked: true, likes: 21 }]
+      };
+    };
+    await nativeFeed.openNativeShortVideoFeed(otherServerVideo, { videos: [otherServerVideo] });
+    assert.deepEqual(otherServerVideo.actions, { liked: false, collected: false },
+      "returning after the active server changes must not merge the old server snapshot into current models");
+    assert.deepEqual(otherServerVideo.stats, { likes: 20, collects: 6 });
+    assert.deepEqual(cacheInvalidations, [["http://127.0.0.1:39999", "/api/short-videos"]],
+      "a server switch may invalidate the launch server cache but must never touch the new server cache");
+
+    activeUrl = "http://127.0.0.1:40000/";
+    cacheInvalidations.length = 0;
+    globalThis.window.Capacitor.Plugins.FanHaoPlayer.playShortFeed = async (payload) => {
+      calls.push(payload);
+      return { serverBase: "http://127.0.0.1:49999", snapshots: [{ videoId: actionId, liked: true }] };
+    };
+    await nativeFeed.openNativeShortVideoFeed(otherServerVideo, { videos: [otherServerVideo] });
+    assert.equal(otherServerVideo.actions.liked, false, "a result tagged for a different server must be ignored");
+    assert.deepEqual(cacheInvalidations, [], "a mismatched result must not invalidate either server's persisted cache");
+    activeUrl = "http://127.0.0.1:29998/";
+    globalThis.window.Capacitor.Plugins.FanHaoPlayer.playShortFeed = async (payload) => {
+      calls.push(payload);
+      return { serverBase: new URL(payload.baseUrl).origin, snapshots: [] };
+    };
 
     const readdedUniverse = [loaded[47], ...universe.filter(({ id }) => id !== loaded[47].id)];
     const readdedFirstPage = readdedUniverse.slice(0, 48);
@@ -714,6 +806,7 @@ const androidNativeHttpResponseSource = readNormalized(path.join(root, "android-
 const androidNativeActionStateSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoActionState.java"));
 const androidNativeActionPreferencesSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoActionPreferences.java"));
 const androidNativeActionSnapshotsSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoActionSnapshots.java"));
+const androidNativeActionResultSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoActionResult.java"));
 const androidNativeImageLoaderSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "java", "local", "fanhao", "library", "NativeShortVideoImageLoader.java"));
 const androidNativePlayerLayoutSource = readNormalized(path.join(root, "android-client", "android", "app", "src", "main", "res", "layout", "native_short_player_view.xml"));
 assert(androidEntrySource.includes('view: "shortVideoSearch"'), "Android short-video search must use a dedicated route");
@@ -775,6 +868,13 @@ assert(androidNativeFeedContractSource.includes("galleryPresentation: cleanStrin
 assert(androidNativeFeedModelsSource.includes("boolean isSingleLivePhoto()") && androidNativePlayerSource.includes("!item.isSingleLivePhoto() ? View.VISIBLE : View.GONE") && androidNativePlayerSource.includes("gallery && !singleLivePhoto && !controlsHidden"), "Android single live photos must hide the redundant 1/1 counter and gallery progress controls");
 assert(androidNativePlayerSource.includes("player.setRepeatMode(item.isSingleLivePhoto() ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);") && androidNativePlayerSource.includes("galleryItem != null && galleryItem.isSingleLivePhoto() ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF"), "Android single live-photo clips must keep looping without changing multi-item gallery advancement");
 assert(androidPlayerPluginSource.includes("ShortVideoFeedContract.decode") && androidPlayerPluginSource.includes("短视频列表格式不受支持"), "Android player plugin must reject malformed native feeds before opening an Activity");
+assert(androidPlayerPluginSource.includes('startActivityForResult(call, intent, "playShortFeedResult")') && androidPlayerPluginSource.includes("@ActivityCallback") && androidPlayerPluginSource.includes("activityResult.getResultCode() == Activity.RESULT_OK"), "Android short-video bridge must keep its Plugin Promise pending until the native Activity returns");
+assert(androidPlayerPluginSource.includes("expectedBase.length() > 0 && expectedBase.equals(returnedBase)") && androidPlayerPluginSource.includes('result.put("snapshots", snapshots)') && androidPlayerPluginSource.includes('result.put("canceled", !completed)'), "Android short-video results must fail closed to an empty snapshot array for canceled, missing, malformed, invalid-base, or cross-server Activity results");
+assert(androidNativePlayerSource.match(/acknowledgedActionResult\.accept\(/g)?.length === 1 && androidNativePlayerSource.includes("if (!completion.accepted) return;\n    applyServerActionSnapshot") && !androidNativePlayerSource.includes("acknowledgedActionResult.accept(videoId, item.currentActionSnapshot"), "only a completion accepted by the server action state machine may enter the Activity result");
+assert(androidNativePlayerSource.includes("finishWithActionResult()") && androidNativePlayerSource.includes("setResult(RESULT_OK, acknowledgedActionResult.intent("), "normal native-feed exits must return an empty or acknowledged action result without reloading the WebView");
+assert(androidNativeActionResultSource.includes('put("videoId", entry.getKey())') && androidNativeActionResultSource.includes("if (snapshot.hasLiked)") && androidNativeActionResultSource.includes("if (snapshot.hasCollected)") && androidNativeActionResultSource.includes("if (snapshot.hasLikes)") && androidNativeActionResultSource.includes("if (snapshot.hasCollects)"), "native action results must preserve false values while omitting server fields that were not acknowledged");
+assert(androidNativeFeedSource.includes("mergeActionSnapshots(listState.data?.videos, snapshots)") && androidNativeFeedSource.includes("mergeActionSnapshots(options.videos, snapshots)") && androidNativeFeedSource.includes('invalidateShortVideoCache(launchServerBase, "/api/short-videos")'), "the WebView must merge acknowledged actions into both canonical model arrays and invalidate the matching persisted feed cache");
+assert(androidNativeFeedSource.includes("launchServerBase && resultServerBase === launchServerBase") && androidNativeFeedSource.includes("normalizeServerBase(getActiveUrl()) === launchServerBase") && androidIndexSource.includes("./player/native-feed.js?v=20260812-native-action-result-01"), "native action return merges must stay on a valid server scope and propagate through the Android module cache-version chain");
 assert(androidNativePlayerSource.includes("videos.addAll(ShortVideoFeedContract.decode") && androidNativePlayerSource.includes("Unable to decode initial short-video feed") && !androidNativePlayerSource.includes("catch (Exception ignored) {}\n  }\n\n  private ShortVideoItem itemFromJson"), "Android Activity must delegate initial feed decoding and report failures instead of swallowing them");
 assert(androidNativeFeedModelsSource.includes("final class ShortVideoItem") && androidNativeFeedModelsSource.includes("final class FeedPage") && !androidNativePlayerSource.includes("private static final class ShortVideoItem"), "Android feed data models must stay outside the oversized Activity");
 assert(androidNativePlayerSource.includes("NativeShortVideoPageView.create(") && !androidNativePlayerSource.includes("class ShortVideoHolder"), "Android Activity must delegate page construction and holder state to the dedicated page-view module");
@@ -787,6 +887,7 @@ assert(androidNativePlayerSource.split(/\r?\n/).length <= 5600, "Android native 
 assert(androidNativeActionStateSource.includes("final class NativeShortVideoActionState") && androidNativeActionStateSource.split(/\r?\n/).length <= 300, "Android action race handling must remain in its bounded, independently testable state owner");
 assert(androidNativeActionPreferencesSource.includes("final class NativeShortVideoActionPreferences") && androidNativeActionPreferencesSource.split(/\r?\n/).length <= 196, "Android server-scoped action persistence and legacy migration exceeded its exact extraction budget");
 assert(androidNativeActionSnapshotsSource.includes("final class NativeShortVideoActionSnapshots") && androidNativeActionSnapshotsSource.split(/\r?\n/).length <= 103, "Android canonical action snapshots exceeded their exact bounded model-consistency budget");
+assert(androidNativeActionResultSource.split(/\r?\n/).length <= 60, "Android acknowledged action result transport exceeded its 60-line boundary");
 assert(androidNativeFeedPagingSource.split(/\r?\n/).length <= 180, "Android native feed paging state machine exceeded its 180-line budget");
 assert(androidNativeFeedAutoAdvanceSource.split(/\r?\n/).length <= 80, "Android native duplicate-page auto-advance helper exceeded its 80-line budget");
 assert(androidNativeFeedReaderSource.split(/\r?\n/).length <= 140, "Android native feed reader exceeded its 140-line budget");

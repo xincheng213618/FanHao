@@ -1,5 +1,8 @@
 package local.fanhao.library;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.util.Arrays;
 import java.util.List;
 
@@ -17,6 +20,7 @@ public final class NativeShortVideoActionStateHarness {
     verifyCapacityRejectionIsExplicit();
     verifyCanonicalSnapshotsReachEveryInstance();
     verifyCanonicalSnapshotsMergeMissingFields();
+    verifyAcknowledgedResultSerialization();
     verifyCanonicalSnapshotsAreBounded();
     verifyFeedRevisionOrdering();
     verifyRejectedStaleResponseCannotOverwriteRestoredScreen();
@@ -436,6 +440,44 @@ public final class NativeShortVideoActionStateHarness {
     FakeTarget future = new FakeTarget("partial-video");
     canonical.apply(future);
     assertTarget(future, false, true, 88, 12, "future instance after explicit false");
+  }
+
+  private static void verifyAcknowledgedResultSerialization() {
+    NativeShortVideoActionState state = new NativeShortVideoActionState(null);
+    NativeShortVideoActionResult acknowledged = new NativeShortVideoActionResult();
+    check(acknowledged.toJson().length() == 0, "an untouched Activity result must return an empty snapshot array");
+
+    NativeShortVideoActionState.Mutation failed = state.request(
+      "result-video", NativeShortVideoActionState.Type.LIKE, false, true
+    ).mutation;
+    NativeShortVideoActionState.Completion failure = state.completeFailure(failed);
+    check(failure.accepted && acknowledged.toJson().length() == 0,
+      "a failed optimistic action must not enter the acknowledged Activity result");
+
+    NativeShortVideoActionState.Mutation liked = state.request(
+      "result-video", NativeShortVideoActionState.Type.LIKE, false, true
+    ).mutation;
+    NativeShortVideoActionState.Completion likeSuccess = state.completeSuccess(liked, true);
+    if (likeSuccess.accepted) {
+      acknowledged.accept("result-video", snapshot(true, true, false, false, true, 101, false, 0));
+    }
+    JSONArray likeRows = acknowledged.toJson();
+    JSONObject likeRow = likeRows.optJSONObject(0);
+    check(likeRows.length() == 1 && likeRow != null && likeRow.optBoolean("liked") && likeRow.optLong("likes") == 101,
+      "an accepted server like must serialize its authoritative state and count");
+    check(!likeRow.has("collected") && !likeRow.has("collects"),
+      "an acknowledged result must not invent fields omitted by the server snapshot");
+
+    acknowledged.accept("result-video", snapshot(false, false, true, true, false, 0, true, 8));
+    JSONObject merged = acknowledged.toJson().optJSONObject(0);
+    check(merged != null && merged.optBoolean("liked") && merged.optBoolean("collected")
+        && merged.optLong("likes") == 101 && merged.optLong("collects") == 8,
+      "successive accepted actions for one video must merge into one reopen snapshot");
+
+    NativeShortVideoActionState.Completion stale = state.completeSuccess(liked, false);
+    if (stale.accepted) acknowledged.accept("result-video", snapshot(true, false, false, false, true, 100, false, 0));
+    check(!stale.accepted && acknowledged.toJson().optJSONObject(0).optBoolean("liked"),
+      "a rejected stale completion must not overwrite the acknowledged Activity result");
   }
 
   private static void verifyCanonicalSnapshotsAreBounded() {

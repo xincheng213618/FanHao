@@ -1,8 +1,10 @@
 import { DEFAULT_SORT } from "../shared.js";
+import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=20260711-short-video-cache-08";
 import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js";
 
 export function createShortVideoNativeFeed(context = {}) {
   const { getActiveUrl, listState } = context;
+  const invalidateShortVideoCache = context.invalidateShortVideoCache || clearCachedJsonByPrefix;
   const shortVideoApiSource = (...args) => context.shortVideoApiSource(...args);
   const shortVideoToast = (...args) => context.shortVideoToast(...args);
   async function openNativeShortVideoFeed(video, options = {}) {
@@ -28,9 +30,10 @@ export function createShortVideoNativeFeed(context = {}) {
     const hasMoreAtEnd = boundary
       ? boundary.hasMore || end < playableEntries.length
       : Boolean((options.hasMore ?? listState.data?.hasMore) || end < playableEntries.length);
+    const launchServerBase = normalizeServerBase(getActiveUrl());
     try {
-      await plugin.playShortFeed({
-        baseUrl: getActiveUrl(),
+      const result = await plugin.playShortFeed({
+        baseUrl: launchServerBase,
         feedUrl,
         hasMore: hasMoreAtEnd,
         nextOffset: feedEntries.length ? feedEntries[feedEntries.length - 1].apiIndex + 1 : videos.length,
@@ -40,6 +43,15 @@ export function createShortVideoNativeFeed(context = {}) {
         openAuthorPanel: Boolean(options.openAuthorPanel),
         videos: payload
       });
+      const resultServerBase = normalizeServerBase(result?.serverBase);
+      const snapshots = normalizeActionSnapshots(result?.snapshots);
+      if (launchServerBase && resultServerBase === launchServerBase && snapshots.length) {
+        if (normalizeServerBase(getActiveUrl()) === launchServerBase) {
+          mergeActionSnapshots(listState.data?.videos, snapshots);
+          mergeActionSnapshots(options.videos, snapshots);
+        }
+        await invalidateShortVideoCache(launchServerBase, "/api/short-videos").catch(() => {});
+      }
       return true;
     } catch {
       return false;
@@ -103,11 +115,47 @@ export function createShortVideoNativeFeed(context = {}) {
   function nativePlayerPlugin() {
     return window.Capacitor?.Plugins?.FanHaoPlayer || null;
   }
-
-
   return {
     openNativeShortVideoFeed,
     nativeShortVideoFeedUrl,
     nativeShortVideoStreamUrl
   };
+}
+
+function normalizeActionSnapshots(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => {
+    const videoId = String(entry?.videoId || "").trim();
+    if (!videoId) return null;
+    const snapshot = { videoId };
+    if (typeof entry.liked === "boolean") snapshot.liked = entry.liked;
+    if (typeof entry.collected === "boolean") snapshot.collected = entry.collected;
+    if (Object.hasOwn(entry, "likes") && Number.isFinite(Number(entry.likes))) snapshot.likes = Math.max(0, Number(entry.likes));
+    if (Object.hasOwn(entry, "collects") && Number.isFinite(Number(entry.collects))) snapshot.collects = Math.max(0, Number(entry.collects));
+    return Object.keys(snapshot).length > 1 ? snapshot : null;
+  }).filter(Boolean);
+}
+
+function mergeActionSnapshots(videos, snapshots) {
+  if (!Array.isArray(videos)) return;
+  const byId = new Map(snapshots.map((snapshot) => [snapshot.videoId, snapshot]));
+  for (const video of videos) {
+    const snapshot = byId.get(String(video?.id || "").trim());
+    if (!snapshot || !video) continue;
+    if ("liked" in snapshot || "collected" in snapshot) video.actions ||= {};
+    if ("liked" in snapshot) video.actions.liked = snapshot.liked;
+    if ("collected" in snapshot) video.actions.collected = snapshot.collected;
+    if ("likes" in snapshot || "collects" in snapshot) video.stats ||= {};
+    if ("likes" in snapshot) video.stats.likes = snapshot.likes;
+    if ("collects" in snapshot) video.stats.collects = snapshot.collects;
+  }
+}
+
+function normalizeServerBase(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    return ["http:", "https:"].includes(url.protocol) ? url.origin : "";
+  } catch {
+    return "";
+  }
 }

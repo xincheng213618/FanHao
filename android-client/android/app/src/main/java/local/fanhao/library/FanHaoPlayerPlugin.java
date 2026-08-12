@@ -1,16 +1,21 @@
 package local.fanhao.library;
 
+import android.app.Activity;
 import android.content.Intent;
 import android.util.Log;
 
 import androidx.annotation.OptIn;
+import androidx.activity.result.ActivityResult;
 import androidx.media3.common.util.UnstableApi;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
+
+import org.json.JSONArray;
 
 @OptIn(markerClass = UnstableApi.class)
 @CapacitorPlugin(name = "FanHaoPlayer")
@@ -73,11 +78,36 @@ public class FanHaoPlayerPlugin extends Plugin {
     intent.putExtra(NativeShortVideoActivity.EXTRA_HAS_MORE, call.getBoolean("hasMore", false));
     intent.putExtra(NativeShortVideoActivity.EXTRA_OPEN_AUTHOR_PANEL, call.getBoolean("openAuthorPanel", false));
     Log.i(TAG, "Opening native short video feed");
-    getActivity().startActivity(intent);
-    getActivity().overridePendingTransition(0, 0);
+    try {
+      startActivityForResult(call, intent, "playShortFeedResult");
+      getActivity().overridePendingTransition(0, 0);
+    } catch (Exception error) {
+      call.reject("无法打开原生短视频", error);
+    }
+  }
 
+  @ActivityCallback
+  private void playShortFeedResult(PluginCall call, ActivityResult activityResult) {
+    if (call == null) return;
+    String expectedBase = NativeShortVideoActionState.serverScope(call.getString("baseUrl"));
+    Intent data = activityResult == null ? null : activityResult.getData();
+    boolean completed = activityResult != null && activityResult.getResultCode() == Activity.RESULT_OK && data != null;
+    String returnedBase = completed
+      ? NativeShortVideoActionState.serverScope(data.getStringExtra(NativeShortVideoActionResult.EXTRA_SERVER_BASE))
+      : "";
+    JSONArray snapshots = new JSONArray();
+    if (completed && expectedBase.length() > 0 && expectedBase.equals(returnedBase)) {
+      try {
+        snapshots = new JSONArray(data.getStringExtra(NativeShortVideoActionResult.EXTRA_SNAPSHOTS_JSON));
+      } catch (Exception error) {
+        Log.w(TAG, "Ignored malformed native short-video action result", error);
+      }
+    }
     JSObject result = new JSObject();
     result.put("opened", true);
+    result.put("canceled", !completed);
+    result.put("serverBase", expectedBase);
+    result.put("snapshots", snapshots);
     call.resolve(result);
   }
 }

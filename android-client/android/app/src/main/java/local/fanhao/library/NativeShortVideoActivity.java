@@ -119,7 +119,6 @@ public class NativeShortVideoActivity extends Activity {
   private static final int PLAYER_COVER_MAX_WIDTH = 720;
   private static final int PLAYER_COVER_MAX_HEIGHT = 1280;
   private static final int THUMBNAIL_MAX_SIZE = 512;
-
   private final Handler mainHandler = new Handler(Looper.getMainLooper());
   private final ExecutorService executor = Executors.newFixedThreadPool(4);
   private final ExecutorService videoPrefetchExecutor = Executors.newSingleThreadExecutor();
@@ -135,7 +134,6 @@ public class NativeShortVideoActivity extends Activity {
   };
   private final NativeShortVideoFeedReader feedReader = new NativeShortVideoFeedReader(FEED_PAGE_LIMIT, FEED_CACHE_MAX_AGE_MS);
   private final NativeShortVideoFeedPaging feedPaging = new NativeShortVideoFeedPaging();
-
   private final List<ShortVideoItem> videos = new ArrayList<>();
   private final Map<Integer, ShortVideoHolder> attachedHolders = new HashMap<>();
   private final Map<Integer, ExoPlayer> playerCache = new HashMap<>();
@@ -182,6 +180,7 @@ public class NativeShortVideoActivity extends Activity {
   private String apiBaseUrl;
   private NativeShortVideoActionPreferences actionPreferences;
   private final NativeShortVideoActionSnapshots actionSnapshots = new NativeShortVideoActionSnapshots();
+  private final NativeShortVideoActionResult acknowledgedActionResult = new NativeShortVideoActionResult();
   private String pendingFeedUrl;
   private int pendingStartIndex;
   private int nextFeedOffset;
@@ -217,7 +216,6 @@ public class NativeShortVideoActivity extends Activity {
   private boolean activityResumed;
   private boolean pausedForLifecycle;
   private boolean resumePlaybackAfterPause;
-
   @Override
   protected void onCreate(@Nullable Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
@@ -260,7 +258,6 @@ public class NativeShortVideoActivity extends Activity {
       showStatus("没有可播放的短视频");
     }
   }
-
   @Override
   protected void onResume() {
     super.onResume();
@@ -287,7 +284,6 @@ public class NativeShortVideoActivity extends Activity {
     pausedForLifecycle = false;
     resumePlaybackAfterPause = false;
   }
-
   @Override
   protected void onPause() {
     resumePlaybackAfterPause = authorOverlay == null
@@ -306,7 +302,6 @@ public class NativeShortVideoActivity extends Activity {
     if (gallerySoundPlayer != null) gallerySoundPlayer.pause();
     super.onPause();
   }
-
   @Override
   protected void onDestroy() {
     Log.i(TAG, "destroy");
@@ -598,7 +593,7 @@ public class NativeShortVideoActivity extends Activity {
   private void navigateBack() {
     dismissPlaybackToolbar();
     if (navigationStack.isEmpty()) {
-      finish();
+      finishWithActionResult();
       return;
     }
     ScreenState previous = navigationStack.remove(navigationStack.size() - 1);
@@ -648,9 +643,13 @@ public class NativeShortVideoActivity extends Activity {
       renderFeedScreen(((FeedScreenState) screen).copy());
       return;
     }
+    finishWithActionResult();
+  }
+  private void finishWithActionResult() {
+    setResult(RESULT_OK, acknowledgedActionResult.intent(
+      actionPreferences == null ? "" : actionPreferences.serverScope()));
     finish();
   }
-
   private void renderFeedScreen(FeedScreenState screen) {
     applyCanonicalActionSnapshots(screen);
     removeAuthorOverlay();
@@ -2477,6 +2476,7 @@ public class NativeShortVideoActivity extends Activity {
       videoId, NativeShortVideoActionResponse.snapshot(updated, type, fallbackActive)
     );
     if (snapshot == null) return;
+    acknowledgedActionResult.accept(videoId, NativeShortVideoActionResponse.snapshot(updated, type, fallbackActive));
     feedReader.clear();
     applyCanonicalActionSnapshots();
   }
